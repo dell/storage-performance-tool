@@ -4,6 +4,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshotImpl;
 import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
+import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
 import com.dell.spt.base.metrics.type.ConcurrencyMeterImpl;
@@ -17,6 +18,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.IntSupplier;
+import java.util.function.Supplier;
 
 import static com.dell.spt.base.metrics.MetricsConstants.METADATA_COMMENT;
 import static com.dell.spt.base.metrics.MetricsConstants.METADATA_ITEM_DATA_SIZE;
@@ -183,6 +185,15 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 	}
 
 	@Override
+	public final void markFail(final long duration, final long latency) {
+		throughputFail.update(1);
+		updateTimings(latency, duration, 0);
+		if (thresholdMetricsCtx != null) {
+			thresholdMetricsCtx.markFail(duration, latency);
+		}
+	}
+
+	@Override
 	public final void markFail(final long count) {
 		throughputFail.update(count);
 		if (thresholdMetricsCtx != null) {
@@ -239,8 +250,19 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 						throughputCorrupt.snapshot(),
 						throughputSuccess.snapshot(),
 						reqBytes.snapshot(),
-						elapsedTimeMillis());
+						elapsedTimeMillis(),
+						deleteMetricsSnapshot());
 		super.refreshLastSnapshot(force);
+	}
+
+	@SuppressWarnings("unchecked")
+	private DeleteMetricsSnapshot deleteMetricsSnapshot() {
+		final Object value = metadata.get(MetricsConstants.METADATA_DELETE_METRICS);
+		if (value instanceof Supplier<?> supplier) {
+			final Object snapshot = supplier.get();
+			return snapshot instanceof DeleteMetricsSnapshot deleteSnapshot ? deleteSnapshot : null;
+		}
+		return value instanceof DeleteMetricsSnapshot deleteSnapshot ? deleteSnapshot : null;
 	}
 
 	private void updateTimingSnapshots() {

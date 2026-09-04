@@ -2,13 +2,18 @@ package com.dell.spt.storage.driver.coop.netty.http.s3.tables;
 
 import static com.dell.spt.base.Constants.APP_NAME;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.mock;
 
+import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.io.RemainingItemCountInput;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig;
 import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.commons.collection.TreeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -277,6 +282,10 @@ public class S3TablesStorageDriverTest {
 
 		assertEquals(true, submitted, "submit should return true for provision opMode");
 		assertEquals(Operation.Status.SUCC, op.status(), "op status should be SUCC after submit");
+		assertEquals(
+						com.dell.spt.base.load.lifecycle.OperationLifecycleState.TERMINAL,
+						op.lifecycle().state(),
+						"synchronous control-plane work must cross dispatch before completing");
 	}
 
 	@Test
@@ -582,6 +591,29 @@ public class S3TablesStorageDriverTest {
 		final S3TablesStorageDriverExtension<Item, Operation<Item>, S3TablesStorageDriver<Item, Operation<Item>>> ext = new S3TablesStorageDriverExtension<>();
 		assertNotNull(ext.schemaProvider(), "schemaProvider must not be null");
 		assertEquals(APP_NAME, ext.schemaProvider().id(), "schemaProvider id must match APP_NAME");
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void standaloneDeleteInitializationRejectsConcreteS3TablesDriver() throws Exception {
+		final Config cfg = baseConfig("provision", "127.0.0.1");
+		cfg.val("load-op-delete-standalone", true);
+		cfg.val("load-op-delete-batchSize", 100);
+		cfg.val("load-op-delete-duration", false);
+		cfg.val("load-step-limit-time", "0s");
+		cfg.val("item-output-file", "");
+		final StandaloneDeleteConfig standalone = StandaloneDeleteConfig.from(cfg.configVal("load"));
+		final RemainingItemCountInput<Item> input = mock(RemainingItemCountInput.class);
+		final TestDriver driver = new TestDriver(cfg);
+
+		try {
+			assertThrows(
+							IllegalConfigurationException.class,
+							() -> standalone.validateTopology(cfg.configVal("item"), input, driver));
+			assertFalse(driver.supportsStandaloneDeleteRequests());
+		} finally {
+			driver.close();
+		}
 	}
 
 	@Test

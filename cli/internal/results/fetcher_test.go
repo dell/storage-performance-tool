@@ -135,6 +135,60 @@ func TestFetcher_HappyPath_AllArtifacts(t *testing.T) {
 	}
 }
 
+func TestDefaultArtifactsRegisterCompleteDeleteEvidence(t *testing.T) {
+	want := map[string]string{
+		"delete.metrics.total.csv":   "DeleteMetricsTotal",
+		"delete.requests.csv":        "DeleteRequests",
+		"delete.objects.csv":         "DeleteObjects",
+		"delete.verification.csv":    "DeleteVerification",
+		"items.csv":                  "DeleteResidual",
+		"verify-input.csv":           "DeleteSelection",
+		"verify-input.complete.json": "DeleteSelectionCompletion",
+		"delete.complete.json":       "DeleteCompletion",
+	}
+	for suffix, logger := range want {
+		found := false
+		for _, spec := range DefaultArtifacts {
+			if spec.Suffix != suffix {
+				continue
+			}
+			for _, candidate := range spec.Loggers {
+				found = found || candidate == logger
+			}
+		}
+		if !found {
+			t.Errorf("DELETE artifact %q is not registered with logger %q", suffix, logger)
+		}
+	}
+}
+
+func TestSuccessfulDeleteTotalsDoesNotSubstituteForRequiredGenericTotals(t *testing.T) {
+	sm := StepManifest{StepID: "mt-001-delete", Files: []FileStatus{
+		{Name: "mt-001-delete.delete.metrics.total.csv", Status: fileStatusOK},
+		{Name: "mt-001-delete.metrics.total.csv", Status: fileStatusMissing},
+	}}
+	if hasSuccessfulGenericTotals(sm) {
+		t.Fatal("DELETE totals v1 must not satisfy the required generic totals gate")
+	}
+	sm.Files[1].Status = fileStatusOK
+	if !hasSuccessfulGenericTotals(sm) {
+		t.Fatal("exact step-scoped generic totals should satisfy the gate")
+	}
+}
+
+func TestDeleteNodeSourcesAreDiscoveredAsRecoveryEvidence(t *testing.T) {
+	for _, name := range []string{
+		"delete.metrics.total.node-000.csv",
+		"delete.requests.node-001.csv",
+		"delete.objects.node-002.csv",
+		"items.node-003.csv",
+	} {
+		if !integrityNodeSourcePattern.MatchString(name) {
+			t.Fatalf("DELETE node source %q was not dynamically discoverable", name)
+		}
+	}
+}
+
 func TestFetcher_DownloadsLargeArtifactsWithRanges(t *testing.T) {
 	step := "mt-001-20250101.000000.000-create"
 	const pageSize = 1024 * 1024

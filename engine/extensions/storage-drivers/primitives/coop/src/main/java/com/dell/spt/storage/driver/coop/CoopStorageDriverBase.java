@@ -2,6 +2,8 @@ package com.dell.spt.storage.driver.coop;
 
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
+import static com.dell.spt.base.Constants.LIFECYCLE_POLL_INTERVAL_MILLIS;
+import static com.dell.spt.base.Constants.TASK_STOP_WAIT_SECONDS;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.data.DataInput;
@@ -12,6 +14,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.partial.PartialOperation;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.StorageDriverBase;
@@ -19,15 +22,18 @@ import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.exceptions.InvalidValuePathException;
 import java.io.EOFException;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.NoSuchElementException;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
-import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.logging.log4j.CloseableThreadContext;
 
@@ -47,8 +53,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	private final LongAdder scheduledOpCount = new LongAdder();
 	private final LongAdder completedOpCount = new LongAdder();
 	private final ReentrantLock dispatchLock = new ReentrantLock();
-	private final Condition dispatchReady = dispatchLock.newCondition();
-	private final OperationDispatchTask opDispatchTask;
+	// Admission and dispatch intentionally share one lock to preserve their shutdown boundary.
+	private final ReentrantLock admissionLock = dispatchLock;
+	private final OperationDispatchTask<I, O> opDispatchTask;
 	private final Object mpuSchedulingLock = new Object();
 	private final int configuredMpuObjectLimit;
 	private final int configuredMpuPartLimit;
@@ -60,6 +67,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	@Deprecated
 	protected volatile int fastRecycleConcurrencyThreshold = 0;
 	private volatile boolean fastRecycleWarningLogged;
+	private volatile boolean admissionOpen = true;
 
 	protected CoopStorageDriverBase(
 					final String testStepId,
@@ -69,6 +77,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 					final int batchSize)
 					throws IllegalConfigurationException {
 		super(testStepId, dataInput, storageConfig, verifyFlag);
+		enableOperationLifecycle();
 		final var inQueueLimit = storageConfig.intVal("driver-limit-queue-input");
 		this.childOpQueue = new ArrayBlockingQueue<>(inQueueLimit);
 		this.inOpQueue = new ArrayBlockingQueue<>(inQueueLimit);
@@ -94,41 +103,66 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 
 		this.opDispatchTask = new OperationDispatchTask<>(
 						ServiceTaskExecutor.TASK_EXECUTOR, this, inOpQueue, childOpQueue, stepId, batchSize,
-						dispatchLock, dispatchReady, inQueueLimit);
+						dispatchLock, dispatchLock.newCondition(), inQueueLimit);
 	}
 
 	@Override
 	protected void doStart() throws IllegalStateException {
-		opDispatchTask.start();
+		admissionOpen = true;
+		if (opDispatchTask.isStopped()) {
+			opDispatchTask.restart();
+		} else {
+			opDispatchTask.start();
+		}
 	}
 
 	@Override
 	public final boolean put(final O op) {
-		if (!isStarted()) {
+		if (!isStarted() || !admissionOpen) {
 			throwUnchecked(new EOFException());
 		}
-		if (prepare(op) && inOpQueue.offer(op)) {
-			scheduledOpCount.increment();
-			signalDispatch();
-			return true;
-		} else {
+		if (inOpQueue.remainingCapacity() == 0 || !prepare(op)) {
 			return false;
+		}
+		admissionLock.lock();
+		try {
+			if (!admissionOpen) {
+				throwUnchecked(new EOFException());
+			}
+			if (offerIncomingOperation(op)) {
+				scheduledOpCount.increment();
+				signalDispatch();
+				return true;
+			}
+			return false;
+		} finally {
+			admissionLock.unlock();
 		}
 	}
 
 	@Override
 	public final int put(final List<O> ops, final int from, final int to) {
-		if (!isStarted()) {
+		if (!isStarted() || !admissionOpen) {
 			throwUnchecked(new EOFException());
 		}
 		var i = from;
-		O nextOp;
 		while (i < to && isStarted()) {
-			nextOp = ops.get(i);
-			if (prepare(nextOp) && inOpQueue.offer(ops.get(i))) {
-				i++;
-			} else {
+			if (inOpQueue.remainingCapacity() == 0) {
 				break;
+			}
+			final O nextOp = ops.get(i);
+			if (!prepare(nextOp)) {
+				break;
+			}
+			admissionLock.lock();
+			try {
+				if (admissionOpen && offerIncomingOperation(nextOp)) {
+					i++;
+				} else {
+					break;
+				}
+			} finally {
+				admissionLock.unlock();
 			}
 		}
 		final var n = i - from;
@@ -141,19 +175,23 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 
 	@Override
 	public final int put(final List<O> ops) {
-		if (!isStarted()) {
+		if (!isStarted() || !admissionOpen) {
 			throwUnchecked(new EOFException());
 		}
 		var n = 0;
 		for (final var nextOp : ops) {
-			if (isStarted()) {
-				if (prepare(nextOp) && inOpQueue.offer(nextOp)) {
+			if (!isStarted() || inOpQueue.remainingCapacity() == 0 || !prepare(nextOp)) {
+				break;
+			}
+			admissionLock.lock();
+			try {
+				if (admissionOpen && offerIncomingOperation(nextOp)) {
 					n++;
 				} else {
 					break;
 				}
-			} else {
-				break;
+			} finally {
+				admissionLock.unlock();
 			}
 		}
 		scheduledOpCount.add(n);
@@ -161,6 +199,22 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			signalDispatch();
 		}
 		return n;
+	}
+
+	private boolean offerIncomingOperation(final O op) {
+		dispatchLock.lock();
+		try {
+			if (!inOpQueue.offer(op)) {
+				return false;
+			}
+			if (operationLifecycle().driverQueued(op)) {
+				return true;
+			}
+			inOpQueue.removeIf(queuedOp -> queuedOp == op);
+			return false;
+		} finally {
+			dispatchLock.unlock();
+		}
 	}
 
 	@Override
@@ -198,11 +252,91 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return concurrencyThrottle.availablePermits() > 0;
 	}
 
+	/**
+	 * Bounds one submission call to the operations which may acquire transport capacity now.
+	 * The dispatch task uses the same bound for its shutdown-recovery snapshot, avoiding work
+	 * proportional to a much larger queued batch on every small permit release.
+	 */
+	int dispatchAttemptLimit(final int bufferedOperationCount) {
+		return Math.max(
+						0,
+						Math.min(bufferedOperationCount, concurrencyThrottle.availablePermits()));
+	}
+
+	/** Returns whether new transport dispatch may begin. */
+	protected final boolean isAdmissionOpen() {
+		// Constructor-bypassing test doubles predate the gate and have no admission lock.
+		return admissionLock == null || admissionOpen;
+	}
+
+	/** Atomically crosses the actual dispatch boundary while admission remains open. */
+	protected final boolean beginDispatch(final O op) {
+		if (admissionLock == null) {
+			return markDispatchOwnership(op);
+		}
+		admissionLock.lock();
+		try {
+			return admissionOpen && markDispatchOwnership(op);
+		} finally {
+			admissionLock.unlock();
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private boolean markDispatchOwnership(final O op) {
+		final var lifecycle = operationLifecycle();
+		final var state = lifecycle.stateOf(op);
+		if (op instanceof CompositeOperation && state == OperationLifecycleState.DISPATCHED) {
+			// A composite remains the authoritative in-flight owner while its children run.
+			// Its finalization request is continuation of that attempt, not a second attempt.
+			return true;
+		}
+		if (op instanceof PartialOperation<?> partialOp) {
+			final O parent = (O) partialOp.parent();
+			final var parentState = lifecycle.stateOf(parent);
+			if (parentState == OperationLifecycleState.DRIVER_QUEUED) {
+				if (!lifecycle.dispatched(parent)) {
+					return false;
+				}
+			} else if (parentState != OperationLifecycleState.DISPATCHED
+							&& parentState != OperationLifecycleState.NEW) {
+				return false;
+			}
+		}
+		return markOperationDispatched(op);
+	}
+
+	/**
+	 * Returns whether a successful {@link #submit(Operation)} return proves that the submitted
+	 * operation itself started transport. The compatibility default also treats a submit call
+	 * which outlives dispatcher shutdown as indeterminate unless another member of that call
+	 * crossed the explicit {@link #beginDispatch(Operation)} boundary. Drivers whose successful
+	 * submission does not itself start transport return {@code false}.
+	 */
+	protected boolean successfulSubmitStartsTransport(final O op) {
+		return true;
+	}
+
 	protected abstract boolean submit(final O op) throws IllegalStateException;
 
+	/**
+	 * Submits a contiguous prefix of the operations in the half-open range
+	 * {@code [from, to)}. Implementations process the range in encounter order and stop before
+	 * the first operation they cannot accept.
+	 *
+	 * @return the number {@code n} of accepted operations, where
+	 *         {@code 0 <= n <= to - from}; the accepted operations must be exactly
+	 *         {@code [from, from + n)}, and the remaining suffix stays caller-owned
+	 */
 	protected abstract int submit(final List<O> ops, final int from, final int to)
 					throws IllegalStateException;
 
+	/**
+	 * Submits a contiguous prefix of {@code ops} under the same ordering and ownership contract
+	 * as {@link #submit(List, int, int)}.
+	 *
+	 * @return the number of operations accepted from the start of the list
+	 */
 	protected abstract int submit(final List<O> ops)
 					throws IllegalStateException;
 
@@ -326,33 +460,245 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	}
 
 	private boolean enqueueChildOp(final O childOp, final O permitOwner, final String failureContext) {
-		if (childOpQueue.offer(childOp)) {
-			signalDispatch();
+		if (admissionLock == null) {
+			if (!claimCompositeParentOwnership(childOp, permitOwner)
+							|| !claimChildQueueOwnership(childOp)) {
+				return false;
+			}
+			return tryEnqueueChildOp(childOp)
+							|| scheduleChildOpEnqueue(childOp, permitOwner, failureContext);
+		}
+		admissionLock.lock();
+		try {
+			if (!claimCompositeParentOwnership(childOp, permitOwner)) {
+				return false;
+			}
+			if (!admissionOpen) {
+				claimChildQueueOwnership(childOp);
+				operationLifecycle().unattempted(childOp);
+				recoverQueuedCompositeParent(childOp, permitOwner);
+				safeReleaseMpuObjectPermit(permitOwner);
+				return false;
+			}
+			if (!claimChildQueueOwnership(childOp)) {
+				return false;
+			}
+			if (tryEnqueueChildOp(childOp)) {
+				return true;
+			}
+		} finally {
+			admissionLock.unlock();
+		}
+		return scheduleChildOpEnqueue(childOp, permitOwner, failureContext);
+	}
+
+	/**
+	 * Enqueues extension-created composite work through the lifecycle-aware admission gate.
+	 * Existing subclasses which create child operations should use this seam instead of writing
+	 * {@link #childOpQueue} directly so shutdown can always recover undispatched ownership.
+	 */
+	protected final boolean enqueueChildOperation(
+					final O childOp, final O permitOwner, final String failureContext) {
+		return enqueueChildOp(childOp, permitOwner, failureContext);
+	}
+
+	/**
+	 * Atomically claims lifecycle ownership for a composite expansion before any child can cross
+	 * dispatch. Queue pressure may defer individual enqueue operations, but no executor task is
+	 * ever the sole owner of a child identity.
+	 */
+	protected final boolean enqueueChildOperations(
+					final List<O> childOps, final O permitOwner, final String failureContext) {
+		if (childOps.isEmpty()) {
 			return true;
 		}
+		if (admissionLock == null) {
+			return claimAndEnqueueChildOperations(childOps, permitOwner, failureContext);
+		}
+		admissionLock.lock();
 		try {
-			ServiceTaskExecutor.VT_EXECUTOR.submit(() -> enqueueChildOpWithTimeout(childOp, permitOwner, failureContext));
+			if (!claimCompositeParentOwnership(childOps.get(0), permitOwner)) {
+				return false;
+			}
+			if (!admissionOpen) {
+				for (final O childOp : childOps) {
+					claimChildQueueOwnership(childOp);
+					operationLifecycle().unattempted(childOp);
+				}
+				recoverQueuedCompositeParent(childOps.get(0), permitOwner);
+				safeReleaseMpuObjectPermit(permitOwner);
+				return false;
+			}
+			return claimAndEnqueueChildOperations(childOps, permitOwner, failureContext);
+		} finally {
+			admissionLock.unlock();
+		}
+	}
+
+	private boolean claimAndEnqueueChildOperations(
+					final List<O> childOps, final O permitOwner, final String failureContext) {
+		if (!claimCompositeParentOwnership(childOps.get(0), permitOwner)) {
+			return false;
+		}
+		final var claimed = new ArrayList<O>(childOps.size());
+		var allClaimed = true;
+		for (final O childOp : childOps) {
+			if (claimChildQueueOwnership(childOp)) {
+				claimed.add(childOp);
+			} else {
+				allClaimed = false;
+			}
+		}
+		if (!allClaimed) {
+			for (final O claimedChild : claimed) {
+				operationLifecycle().unattempted(claimedChild);
+			}
+			safeReleaseMpuObjectPermit(permitOwner);
+			return false;
+		}
+		for (var i = 0; i < claimed.size(); i++) {
+			if (!tryEnqueueChildOp(claimed.get(i))) {
+				return scheduleChildOpsEnqueue(
+								List.copyOf(claimed.subList(i, claimed.size())), permitOwner, failureContext);
+			}
+		}
+		return true;
+	}
+
+	private boolean scheduleChildOpEnqueue(
+					final O childOp, final O permitOwner, final String failureContext) {
+		return scheduleChildOpsEnqueue(List.of(childOp), permitOwner, failureContext);
+	}
+
+	private boolean scheduleChildOpsEnqueue(
+					final List<O> childOps, final O permitOwner, final String failureContext) {
+		try {
+			executeChildEnqueue(() -> {
+				for (var i = 0; i < childOps.size(); i++) {
+					if (!enqueueChildOpWithTimeout(childOps.get(i), permitOwner, failureContext)) {
+						for (var j = i + 1; j < childOps.size(); j++) {
+							operationLifecycle().unattempted(childOps.get(j));
+						}
+						return;
+					}
+				}
+			});
 			return true;
 		} catch (final RejectedExecutionException e) {
 			Loggers.ERR.error(
 							"{}: Failed to schedule MPU {} enqueue; failing affected MPU",
 							toString(), failureContext, e);
-			childOp.status(Operation.Status.FAIL_TIMEOUT);
+			for (final O childOp : childOps) {
+				childOp.status(Operation.Status.FAIL_TIMEOUT);
+				operationLifecycle().unattempted(childOp);
+			}
 			safeReleaseMpuObjectPermit(permitOwner);
 			return false;
 		}
 	}
 
-	private void enqueueChildOpWithTimeout(final O childOp, final O permitOwner, final String failureContext) {
-		try {
-			if (childOpQueue.offer(childOp, childOpEnqueueTimeoutMillis(), TimeUnit.MILLISECONDS)) {
-				signalDispatch();
-				return;
+	/** Scheduling seam for testing executor rejection without replacing the shared executor. */
+	protected void executeChildEnqueue(final Runnable task) {
+		ServiceTaskExecutor.VT_EXECUTOR.submit(task);
+	}
+
+	private boolean tryEnqueueChildOp(final O childOp) {
+		if (!childOpQueue.offer(childOp)) {
+			return false;
+		}
+		signalDispatch();
+		return true;
+	}
+
+	private boolean claimChildQueueOwnership(final O childOp) {
+		final var lifecycle = operationLifecycle();
+		return !lifecycle.isEnabled()
+						|| lifecycle.stateOf(childOp) == OperationLifecycleState.DRIVER_QUEUED
+						|| childOp instanceof CompositeOperation
+										&& lifecycle.stateOf(childOp) == OperationLifecycleState.DISPATCHED
+						|| lifecycle.driverQueued(childOp);
+	}
+
+	@SuppressWarnings("unchecked")
+	private O compositeParent(final O childOp, final O permitOwner) {
+		final CompositeOperation<?> parent;
+		if (childOp instanceof PartialOperation<?> partialOp) {
+			parent = partialOp.parent();
+		} else if (permitOwner instanceof PartialOperation<?> partialOwner) {
+			parent = partialOwner.parent();
+		} else if (permitOwner instanceof CompositeOperation<?> compositeOwner) {
+			parent = compositeOwner;
+		} else {
+			return null;
+		}
+		return (O) parent;
+	}
+
+	private boolean claimCompositeParentOwnership(final O childOp, final O permitOwner) {
+		final O parentOp = compositeParent(childOp, permitOwner);
+		if (parentOp == null) {
+			return true;
+		}
+		final var lifecycle = operationLifecycle();
+		final var state = lifecycle.stateOf(parentOp);
+		return !lifecycle.isEnabled()
+						|| state == OperationLifecycleState.DRIVER_QUEUED
+						|| state == OperationLifecycleState.DISPATCHED
+						|| lifecycle.driverQueued(parentOp);
+	}
+
+	private void recoverQueuedCompositeParent(final O childOp, final O permitOwner) {
+		final O parentOp = compositeParent(childOp, permitOwner);
+		if (parentOp != null
+						&& operationLifecycle().stateOf(parentOp) == OperationLifecycleState.DRIVER_QUEUED) {
+			operationLifecycle().unattempted(parentOp);
+		}
+	}
+
+	private boolean enqueueChildOpWithTimeout(final O childOp, final O permitOwner, final String failureContext) {
+		if (admissionLock == null) {
+			try {
+				if (childOpQueue.offer(childOp, childOpEnqueueTimeoutMillis(), TimeUnit.MILLISECONDS)) {
+					operationLifecycle().driverQueued(childOp);
+					signalDispatch();
+					return true;
+				}
+			} catch (final InterruptedException e) {
+				operationLifecycle().unattempted(childOp);
+				safeReleaseMpuObjectPermit(permitOwner);
+				throwUnchecked(e);
+				return false;
 			}
-		} catch (final InterruptedException e) {
-			Thread.currentThread().interrupt();
+			failChildOpEnqueue(childOp, permitOwner, failureContext);
+			return false;
+		}
+		final long deadline = System.nanoTime()
+						+ TimeUnit.MILLISECONDS.toNanos(childOpEnqueueTimeoutMillis());
+		while (System.nanoTime() < deadline) {
+			admissionLock.lock();
+			try {
+				if (!admissionOpen) {
+					operationLifecycle().unattempted(childOp);
+					safeReleaseMpuObjectPermit(permitOwner);
+					return false;
+				}
+				if (tryEnqueueChildOp(childOp)) {
+					return true;
+				}
+			} finally {
+				admissionLock.unlock();
+			}
+			try {
+				TimeUnit.MILLISECONDS.sleep(LIFECYCLE_POLL_INTERVAL_MILLIS);
+			} catch (final InterruptedException e) {
+				operationLifecycle().unattempted(childOp);
+				safeReleaseMpuObjectPermit(permitOwner);
+				throwUnchecked(e);
+				return false;
+			}
 		}
 		failChildOpEnqueue(childOp, permitOwner, failureContext);
+		return false;
 	}
 
 	private void failChildOpEnqueue(final O childOp, final O permitOwner, final String failureContext) {
@@ -360,6 +706,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 						"{}: Timed out enqueueing MPU {} after {} ms; failing affected MPU",
 						toString(), failureContext, childOpEnqueueTimeoutMillis());
 		childOp.status(Operation.Status.FAIL_TIMEOUT);
+		operationLifecycle().unattempted(childOp);
 		safeReleaseMpuObjectPermit(permitOwner);
 	}
 
@@ -383,11 +730,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			if (!parentOp.allSubOperationsDone()) {
 				if (op.status() == Operation.Status.SUCC) {
 					final List<O> subOps = (List<O>) parentOp.nextSubOperations(mpuMaxParts > 0 ? mpuMaxParts : Integer.MAX_VALUE);
-					for (final O nextSubOp : subOps) {
-						if (!enqueueChildOp(nextSubOp, op, "part operation")) {
-							return false;
-						}
-					}
+					enqueueChildOperations(subOps, op, "part operation");
 				} else {
 					safeReleaseMpuObjectPermit(op);
 				}
@@ -428,18 +771,12 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				}
 				enqueueFinalization = shouldEnqueueFinalization(parentOp);
 			}
-			for (final O nextChildOp : nextChildOps) {
-				if (!enqueueChildOp(nextChildOp, op, childFailureContext)) {
-					return false;
-				}
-			}
+			enqueueChildOperations(nextChildOps, op, childFailureContext);
 			if (enqueueFinalization) {
 				// Execute once again to finalize the composite operation, for example
 				// completing the multipart upload. The finalization gate prevents
 				// concurrent part completions from enqueueing the same parent twice.
-				if (!enqueueChildOp((O) parentOp, op, "completion operation")) {
-					return false;
-				}
+				enqueueChildOp((O) parentOp, op, "completion operation");
 			}
 		}
 		signalDispatch();
@@ -474,17 +811,21 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 
 	/**
 	 * Wake the dispatch task. Called when new ops are available (put) or when
-	 * a completion frees capacity (handleCompleted). Uses lock() instead of
-	 * tryLock() to guarantee delivery — the dispatch task only holds the lock
-	 * for nanoseconds (double-check before await), so contention is negligible.
+	 * a completion frees capacity (handleCompleted). Lock-free so transport
+	 * event loops never contend on {@code dispatchLock}: the task re-checks its
+	 * wait condition before parking and an unpark permit is sticky, so delivery
+	 * is guaranteed without holding a lock across the signal.
 	 */
 	private void signalDispatch() {
-		dispatchLock.lock();
-		try {
-			dispatchReady.signal();
-		} finally {
-			dispatchLock.unlock();
+		final var task = this.opDispatchTask;
+		if (task != null) {
+			task.unpark();
 		}
+	}
+
+	/** Wakes dispatch after a subclass recovery path returns concurrency capacity. */
+	protected final void signalDispatchCapacityAvailable() {
+		signalDispatch();
 	}
 
 	/** @deprecated always returns {@code false}; direct fast recycle was removed */
@@ -531,8 +872,73 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 
 	@Override
 	protected void doShutdown() {
-		opDispatchTask.stop();
+		closeAdmission();
+		recoverQueuedOperations();
 		Loggers.MSG.debug("{}: shut down", toString());
+	}
+
+	@Override
+	public final void closeAdmission() {
+		final boolean taskWasRunning = opDispatchTask.isStarted();
+		final boolean taskWasAlreadyStopped = opDispatchTask.isStopped();
+		admissionLock.lock();
+		try {
+			admissionOpen = false;
+		} finally {
+			admissionLock.unlock();
+		}
+		opDispatchTask.stop();
+		signalDispatch();
+		if (taskWasRunning || taskWasAlreadyStopped) {
+			try {
+				if (!opDispatchTask.await(TASK_STOP_WAIT_SECONDS, TimeUnit.SECONDS)) {
+					Loggers.MSG.warn(
+									"{}: dispatch task did not stop within {} second(s); "
+													+ "queued lifecycle ownership will be recovered without touching task buffers",
+									toString(), TASK_STOP_WAIT_SECONDS);
+				}
+			} catch (final InterruptedException e) {
+				throwUnchecked(e);
+			}
+		}
+	}
+
+	@Override
+	public final List<O> recoverQueuedOperations() {
+		final Set<O> indeterminateSubmissions = Collections.newSetFromMap(new IdentityHashMap<>());
+		final var submittingOperations = opDispatchTask.submittingOperations();
+		final boolean explicitDispatchObserved = submittingOperations.stream()
+						.map(OperationDispatchTask.SubmittingOperation::dispatchToken)
+						.anyMatch(operationLifecycle()::hasExplicitDispatchBoundary);
+		for (final var submittingOperation : submittingOperations) {
+			final O op = submittingOperation.operation();
+			if (!explicitDispatchObserved
+							&& successfulSubmitStartsTransport(op)
+							&& operationLifecycle().unresolvedSubmission(submittingOperation.dispatchToken())) {
+				indeterminateSubmissions.add(op);
+			}
+		}
+		final Set<O> recovered = Collections.newSetFromMap(new IdentityHashMap<>());
+		// The lifecycle registry is the authoritative handoff. It includes operations in
+		// dispatcher-owned local buffers without racing those non-thread-safe buffers when a
+		// custom submit implementation ignores interruption beyond the bounded stop wait.
+		recovered.addAll(operationLifecycle().driverQueuedOperations());
+		childOpQueue.drainTo(recovered);
+		inOpQueue.drainTo(recovered);
+		recovered.addAll(recoverAdditionalQueuedOperations());
+		recovered.removeAll(indeterminateSubmissions);
+		final var unattempted = new ArrayList<O>(recovered.size());
+		for (final O op : recovered) {
+			if (operationLifecycle().unattempted(op)) {
+				unattempted.add(op);
+			}
+		}
+		return List.copyOf(unattempted);
+	}
+
+	/** Extension hook for cooperative drivers with an additional pre-dispatch queue. */
+	protected List<O> recoverAdditionalQueuedOperations() {
+		return List.of();
 	}
 
 	@Override
@@ -545,9 +951,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		try (final var logCtx = CloseableThreadContext.put(KEY_STEP_ID, stepId)
 						.put(KEY_CLASS_NAME, StorageDriverBase.class.getSimpleName())) {
 			super.doClose();
+			closeAdmission();
+			recoverQueuedOperations();
 			opDispatchTask.close();
-			childOpQueue.clear();
-			inOpQueue.clear();
 		}
 	}
 }

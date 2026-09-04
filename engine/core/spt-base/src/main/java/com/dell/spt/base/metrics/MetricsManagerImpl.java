@@ -22,6 +22,7 @@ import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
+import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.dell.spt.base.metrics.util.PrometheusMetricsExporter;
@@ -242,15 +243,17 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 
 						if (snapshot instanceof DistributedAllMetricsSnapshot aggregSnapshot) {
 							if (hasProgress(snapshot)) {
-								final var nodesPresent = distributedMetricsCtx.nodeAddrs();
+								final var nodesPresent = distributedMetricsCtx.nodesPresent();
+								final var contributorsPresent = distributedMetricsCtx.contributorsPresent();
 								final int nodeCount = distributedMetricsCtx.nodeCount();
-								final boolean partial = nodesPresent != null && !nodesPresent.isEmpty() && nodeCount > nodesPresent.size();
+								final boolean partial = distributedMetricsCtx.partial();
 								terminalEntry = buildEntryFromSnapshot(
 												metricsCtx,
 												aggregSnapshot,
 												true,
 												nodeCount,
 												nodesPresent,
+												contributorsPresent,
 												partial);
 							}
 							// file output
@@ -326,14 +329,19 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 											false,
 											0,
 											List.of(),
+											List.of(),
 											false);
 							terminalByStepId.put(progressKey, terminalEntry);
 						}
 					}
 					if (terminalEntry == null) {
-						final TerminalStepEntry lastProgressEntry = lastProgressByStepId.get(progressKey);
-						if (lastProgressEntry != null) {
-							terminalByStepId.put(progressKey, lastProgressEntry);
+						final boolean failedDistributedRefresh = distributedEntry
+										&& ((DistributedMetricsContext<?>) metricsCtx).partial();
+						if (!failedDistributedRefresh) {
+							final TerminalStepEntry lastProgressEntry = lastProgressByStepId.get(progressKey);
+							if (lastProgressEntry != null) {
+								terminalByStepId.put(progressKey, lastProgressEntry);
+							}
 						}
 					}
 					lastProgressByStepId.remove(progressKey);
@@ -426,6 +434,16 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	}
 
 	@Override
+	public void updateTerminalDeleteFailureOutcome(final String stepId, final String outcome) {
+		if (stepId == null || outcome == null) {
+			return;
+		}
+		terminalByStepId.computeIfPresent(
+						ProgressKey.of(stepId, true),
+						(key, entry) -> entry.withDeleteFailureOutcome(outcome));
+	}
+
+	@Override
 	public void setTerminalRetentionMillis(final long millis) {
 		this.terminalRetentionMillis = Math.max(0L, millis);
 	}
@@ -477,7 +495,8 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		final long failCount = snapshot.failsSnapshot().count();
 		final long corruptCount = corruptCount(snapshot);
 		final long bytesTotal = snapshot.byteSnapshot().count();
-		if (successCount <= 0 && failCount <= 0 && bytesTotal <= 0) {
+		final long deleteProgress = deleteProgress(snapshot);
+		if (successCount <= 0 && failCount <= 0 && bytesTotal <= 0 && deleteProgress <= 0) {
 			return;
 		}
 
@@ -488,21 +507,23 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 						&& existing.successCount >= successCount
 						&& existing.failedCount >= failCount
 						&& existing.corruptCount >= corruptCount
-						&& existing.bytesTotal >= bytesTotal) {
+						&& existing.bytesTotal >= bytesTotal
+						&& deleteProgress(existing.deleteMetrics) >= deleteProgress) {
 			return;
 		}
 
 		final TerminalStepEntry entry;
 		if (distributedEntry) {
 			final var distributedMetricsCtx = (DistributedMetricsContext<?>) metricsCtx;
-			final var nodesPresent = distributedMetricsCtx.nodeAddrs();
+			final var nodesPresent = distributedMetricsCtx.nodesPresent();
+			final var contributorsPresent = distributedMetricsCtx.contributorsPresent();
 			final int nodeCount = distributedMetricsCtx.nodeCount();
-			final boolean partial = nodesPresent != null && !nodesPresent.isEmpty() && nodeCount > nodesPresent.size();
+			final boolean partial = distributedMetricsCtx.partial();
 			entry = buildEntryFromSnapshot(
-							metricsCtx, snapshot, true, nodeCount, nodesPresent, partial);
+							metricsCtx, snapshot, true, nodeCount, nodesPresent, contributorsPresent, partial);
 		} else {
 			entry = buildEntryFromSnapshot(
-							metricsCtx, snapshot, false, 0, List.of(), false);
+							metricsCtx, snapshot, false, 0, List.of(), List.of(), false);
 		}
 
 		lastProgressByStepId.put(progressKey, entry);
@@ -524,6 +545,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 					final boolean distributed,
 					final int nodeCount,
 					final List<String> nodesPresent,
+					final List<String> contributorsPresent,
 					final boolean partial) {
 		final long countLimit = extractLongMetadata(
 						metricsCtx.metadata(), com.dell.spt.base.metrics.MetricsConstants.METADATA_LIMIT_OP_COUNT);
@@ -552,7 +574,11 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 						distributed,
 						nodeCount,
 						nodesPresent,
-						partial);
+						contributorsPresent,
+						partial,
+						snapshot.deleteMetrics(),
+						metricsCtx.metadata() != null
+										&& metricsCtx.metadata().containsKey(MetricsConstants.METADATA_DELETE_METRICS));
 	}
 
 	private long extractLongMetadata(final Map metadata, final String key) {
@@ -635,10 +661,22 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		try {
 			return (snapshot.successSnapshot() != null && snapshot.successSnapshot().count() > 0)
 							|| (snapshot.failsSnapshot() != null && snapshot.failsSnapshot().count() > 0)
-							|| (snapshot.byteSnapshot() != null && snapshot.byteSnapshot().count() > 0);
+							|| (snapshot.byteSnapshot() != null && snapshot.byteSnapshot().count() > 0)
+							|| deleteProgress(snapshot) > 0;
 		} catch (final RuntimeException e) {
 			Loggers.MSG.debug("Unable to determine snapshot progress due to {}", e.toString());
 			return false;
 		}
+	}
+
+	private static long deleteProgress(final AllMetricsSnapshot snapshot) {
+		return snapshot == null ? 0 : deleteProgress(snapshot.deleteMetrics());
+	}
+
+	private static long deleteProgress(final DeleteMetricsSnapshot snapshot) {
+		if (snapshot == null) {
+			return 0;
+		}
+		return Math.max(snapshot.requestAttempted(), snapshot.objectSelected());
 	}
 }

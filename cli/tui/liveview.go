@@ -128,11 +128,11 @@ func (l *LiveViewRenderer) formatEmptyHeader() string {
 // formatMultiNodeTable generates the performance metrics table with multi-node support
 func (l *LiveViewRenderer) formatMultiNodeTable(metrics *MetricsCollector, aggregatedMetric *PerformanceMetric, width int) string {
 	// Calculate derived values for aggregated total
-	progressValue := l.calculateDoneMiB(aggregatedMetric.SuccessCount)
-	rateValue := aggregatedMetric.MiBPerSec
+	progressValue, rateValue := l.transferCells(aggregatedMetric)
 	colSixValue := aggregatedMetric.SuccessCount
 	if l.isListWorkload() {
-		rateValue = aggregatedMetric.OpsPerSec
+		progressValue = fmt.Sprintf("%d", l.calculateDoneMiB(aggregatedMetric.SuccessCount))
+		rateValue = fmt.Sprintf("%d", aggregatedMetric.OpsPerSec)
 		colSixValue = aggregatedMetric.ConcurrencyCurrent
 	}
 
@@ -140,7 +140,7 @@ func (l *LiveViewRenderer) formatMultiNodeTable(metrics *MetricsCollector, aggre
 	var dataRows []string
 
 	// Total row (aggregated metrics); Host column blank
-	totalPrefix := fmt.Sprintf("%5s %3s %9d %8d %6d %7d %8d",
+	totalPrefix := fmt.Sprintf("%5s %3s %9s %8s %6d %7d %8d",
 		"Total", l.formatPercentCell(aggregatedMetric), progressValue, rateValue, aggregatedMetric.OpsPerSec, colSixValue, aggregatedMetric.FailedCount)
 	dataRows = append(dataRows, l.appendHostColumn(totalPrefix, "", NodeConnectionStatus{}, width))
 
@@ -176,16 +176,16 @@ func (l *LiveViewRenderer) formatMultiNodeTable(metrics *MetricsCollector, aggre
 		if len(nodeSamples) > 0 {
 			// Use the latest sample for this node
 			latestNodeSample := nodeSamples[len(nodeSamples)-1]
-			nodeProgress := l.calculateDoneMiB(latestNodeSample.SuccessCount)
-			rate := latestNodeSample.MiBPerSec
+			nodeProgress, rate := l.transferCells(&latestNodeSample)
 			colSix := latestNodeSample.SuccessCount
 			if l.isListWorkload() {
-				rate = latestNodeSample.OpsPerSec
+				nodeProgress = fmt.Sprintf("%d", l.calculateDoneMiB(latestNodeSample.SuccessCount))
+				rate = fmt.Sprintf("%d", latestNodeSample.OpsPerSec)
 				colSix = latestNodeSample.ConcurrencyCurrent
 			}
 
 			// Percentage cell uses latest node sample percent or ∞/—
-			prefix := fmt.Sprintf("%5d %3s %9d %8d %6d %7d %8d",
+			prefix := fmt.Sprintf("%5d %3s %9s %8s %6d %7d %8d",
 				i, l.formatPercentCell(&latestNodeSample), nodeProgress, rate, latestNodeSample.OpsPerSec, colSix, latestNodeSample.FailedCount)
 			dataRows = append(dataRows, l.appendHostColumn(prefix, nodeID, status, width))
 		} else {
@@ -197,6 +197,19 @@ func (l *LiveViewRenderer) formatMultiNodeTable(metrics *MetricsCollector, aggre
 	}
 	header := l.renderTableHeader(width, dataRows)
 	return header + "\n" + strings.Join(dataRows, "\n")
+}
+
+func (l *LiveViewRenderer) transferCells(metric *PerformanceMetric) (string, string) {
+	if metric != nil && metric.Delete != nil &&
+		strings.EqualFold(metric.Delete.Performance.DataMoved, "not_applicable") &&
+		strings.EqualFold(metric.Delete.Performance.Bandwidth, "not_applicable") {
+		return notAvailableValue, notAvailableValue
+	}
+	if metric == nil {
+		return "0", "0"
+	}
+	return fmt.Sprintf("%d", l.calculateDoneMiB(metric.SuccessCount)),
+		fmt.Sprintf("%d", metric.MiBPerSec)
 }
 
 func (l *LiveViewRenderer) aggregateForDisplay(metrics *MetricsCollector, fallback *PerformanceMetric) *PerformanceMetric {

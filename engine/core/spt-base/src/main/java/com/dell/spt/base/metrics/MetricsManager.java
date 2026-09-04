@@ -44,4 +44,10 @@ public interface MetricsManager extends Task {
 	default Optional<TerminalStepEntry> getLastProgressSnapshot(final String stepId, final boolean distributed) {
 		return Optional.empty();
 	}
+
+	/**
+	 * Replaces the controller-owned failure-budget outcome in a retained fleet DELETE row.
+	 * Node contributor rows deliberately retain their non-authoritative live outcome.
+	 */
+	default void updateTerminalDeleteFailureOutcome(final String stepId, final String outcome) {}
 }

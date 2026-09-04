@@ -28,16 +28,29 @@ public final class IntegrityOperationManifestOutput<O extends Operation<? extend
 	private final Path manifestPath;
 	private final String configuredBucket;
 	private final OpType opType;
+	private final String requestedListPrefix;
 	private final CSVPrinter printer;
 	private long emittedRecordCount;
 	private long excludedDeleteMarkerCount;
+	private boolean failed;
 	private boolean closed;
 
 	public IntegrityOperationManifestOutput(
 					final Path manifestPath, final String configuredPath, final OpType opType) throws IOException {
+		this(manifestPath, configuredPath, opType, null);
+	}
+
+	public IntegrityOperationManifestOutput(
+					final Path manifestPath,
+					final String configuredPath,
+					final OpType opType,
+					final String requestedListPrefix) throws IOException {
 		this.manifestPath = manifestPath;
 		this.configuredBucket = bucketFromPath(configuredPath);
 		this.opType = opType;
+		this.requestedListPrefix = requestedListPrefix == null
+						? null
+						: canonicalListPrefix(requestedListPrefix);
 		final Path parent = manifestPath.toAbsolutePath().getParent();
 		if (parent != null) {
 			Files.createDirectories(parent);
@@ -61,6 +74,12 @@ public final class IntegrityOperationManifestOutput<O extends Operation<? extend
 		}
 		try {
 			if (result instanceof ListOperation<?> listOperation) {
+				final String requestedPrefix = requestedListPrefix == null
+								? listPrefix(listOperation)
+								: requestedListPrefix;
+				for (final var listedObject : listOperation.listedObjects()) {
+					requireWithinListPrefix(listedObject.key(), requestedPrefix);
+				}
 				for (final var listedObject : listOperation.listedObjects()) {
 					printer.printRecord(configuredBucket, listedObject.key(), listedObject.size(),
 									listedObject.versionId() == null ? "" : listedObject.versionId());
@@ -88,6 +107,7 @@ public final class IntegrityOperationManifestOutput<O extends Operation<? extend
 			printer.printRecord(bucket, key, dataItem.size(), version == null ? "" : version);
 			return true;
 		} catch (final IOException e) {
+			failed = true;
 			throwUnchecked(e);
 			return false;
 		}
@@ -120,6 +140,12 @@ public final class IntegrityOperationManifestOutput<O extends Operation<? extend
 		closed = true;
 		try {
 			printer.close(true);
+			if (failed) {
+				Files.deleteIfExists(IntegrityManifestCompletion.emissionCountPath(manifestPath));
+				Files.deleteIfExists(IntegrityManifestCompletion.deleteMarkerCountPath(manifestPath));
+				Files.deleteIfExists(manifestPath);
+				return;
+			}
 			CrashDurableFilePublisher.syncExisting(manifestPath);
 			if (OpType.LIST.equals(opType)) {
 				publishCount(IntegrityManifestCompletion.emissionCountPath(manifestPath),
@@ -180,5 +206,32 @@ public final class IntegrityOperationManifestOutput<O extends Operation<? extend
 			throw new IOException("integrity manifest bucket and key must not be empty");
 		}
 		return key;
+	}
+
+	private static String listPrefix(final ListOperation<?> listOperation) throws IOException {
+		if (listOperation.item() == null) {
+			throw new IOException("integrity LIST result is missing its requested prefix item");
+		}
+		final String prefix = listOperation.item().name();
+		return canonicalListPrefix(prefix);
+	}
+
+	private static String canonicalListPrefix(final String prefix) {
+		if (prefix == null || prefix.isEmpty() || "/".equals(prefix)) {
+			return "";
+		}
+		return prefix.startsWith("/") ? prefix.substring(1) : prefix;
+	}
+
+	private static void requireWithinListPrefix(final String key, final String requestedPrefix)
+					throws IOException {
+		if (key == null || key.isEmpty()) {
+			throw new IOException("integrity LIST response contains an empty object key");
+		}
+		if (!key.startsWith(requestedPrefix)) {
+			throw new IOException(
+							"integrity LIST response key is outside requested prefix \""
+											+ requestedPrefix + "\": " + key);
+		}
 	}
 }

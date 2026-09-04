@@ -1,0 +1,4 @@
+bucket,key,size,version_id
+bucket,"comma,key",7,version-comma
+bucket,alpha,9,
+bucket,"comma,key",7,version-comma

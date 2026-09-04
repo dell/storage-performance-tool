@@ -7,6 +7,8 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
+import com.dell.spt.base.item.op.deletion.DeleteTransportResult;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.logging.LogUtil;
@@ -20,6 +22,8 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
+import io.netty.handler.codec.http.HttpResponseStatus;
+import io.netty.handler.codec.http.HttpStatusClass;
 import io.netty.util.Attribute;
 import io.netty.util.AttributeKey;
 
@@ -31,8 +35,11 @@ import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import javax.xml.parsers.ParserConfigurationException;
+import org.xml.sax.SAXException;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 /**
@@ -43,15 +50,58 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 
 	private static final AttributeKey<ByteBuf> CONTENT_ATTR_KEY = AttributeKey.newInstance(
 					"content");
+	private static final AttributeKey<DeleteResponseBuffer> DELETE_RESPONSE_ATTR_KEY = AttributeKey.newInstance("spt-delete-response");
 	private static final AttributeKey<ListResponseSpool> LIST_CONTENT_ATTR_KEY = AttributeKey.newInstance(
 					"spt-list-content");
 	private static final AttributeKey<IntegrityResponseObserver> INTEGRITY_OBSERVER_ATTR_KEY = AttributeKey.newInstance("spt-integrity-observer");
 	private static final AttributeKey<Boolean> OUT_OF_BAND_READ_ATTR_KEY = AttributeKey.newInstance("spt-integrity-out-of-band-read");
 	private static final int MIN_CONTENT_SIZE = 0x100;
 	private static final int MAX_CONTENT_SIZE = 0x400;
+	private static final int DELETE_RESPONSE_INITIAL_BUFFER_BYTES = 4 * 1024;
+	private static final int MAX_DELETE_RESPONSE_BYTES = 16 * 1024 * 1024;
+	private static final AtomicIntegerArray DELETE_RESPONSE_DIAGNOSTICS = new AtomicIntegerArray(DeleteResponseDiagnosticClass.values().length);
 	private static final AtomicInteger ACTIVE_LIST_SPOOLS = new AtomicInteger();
 	private static final Pattern PATTERN_UPLOAD_ID = Pattern.compile(
 					"<UploadId>([^<]+)</UploadId>", Pattern.MULTILINE);
+
+	private enum DeleteResponseDiagnosticClass {
+		BODY_LIMIT, EMPTY_BODY, ENTRY_LIMIT, INPUT_IO, INVALID_ENTRY, INVALID_STRUCTURE, MALFORMED_XML, PARSER_CONFIGURATION
+	}
+
+	private enum DeleteResponseStructuralContext {
+		DOCUMENT, RESPONSE_BUFFER, RESPONSE_STREAM, XML_PARSER
+	}
+
+	private static final class DeleteResponseBuffer implements AutoCloseable {
+		private ByteBuf content;
+		private boolean overflow;
+
+		private void append(final Channel channel, final ByteBuf chunk) {
+			if (overflow) {
+				return;
+			}
+			if (content == null) {
+				content = channel.alloc().buffer(
+								Math.min(chunk.readableBytes(), DELETE_RESPONSE_INITIAL_BUFFER_BYTES),
+								MAX_DELETE_RESPONSE_BYTES);
+			}
+			if ((long) content.readableBytes() + chunk.readableBytes() > MAX_DELETE_RESPONSE_BYTES) {
+				overflow = true;
+				content.release();
+				content = null;
+				return;
+			}
+			content.writeBytes(chunk, chunk.readerIndex(), chunk.readableBytes());
+		}
+
+		@Override
+		public void close() {
+			if (content != null) {
+				content.release();
+				content = null;
+			}
+		}
+	}
 
 	private static final class ListResponseSpool implements AutoCloseable {
 		private final Path path;
@@ -127,6 +177,12 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		return ACTIVE_LIST_SPOOLS.get();
 	}
 
+	static void resetDeleteResponseDiagnosticsForTest() {
+		for (int index = 0; index < DELETE_RESPONSE_DIAGNOSTICS.length(); index++) {
+			DELETE_RESPONSE_DIAGNOSTICS.set(index, 0);
+		}
+	}
+
 	private final S3StorageDriver<I, O> s3Driver;
 	private final boolean versioningEnabled;
 	private final String checksumHeader; // e.g. "x-amz-checksum-crc32c", or null if disabled
@@ -137,6 +193,21 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		this.s3Driver = driver;
 		this.versioningEnabled = versioningEnabled;
 		this.checksumHeader = checksumHeader;
+	}
+
+	@Override
+	protected boolean handleResponseStatus(
+					final O op,
+					final HttpStatusClass statusClass,
+					final HttpResponseStatus responseStatus) {
+		if (!(op instanceof DeleteRequestOperation)) {
+			return super.handleResponseStatus(op, statusClass, responseStatus);
+		}
+		// Dedicated DELETE artifacts carry the actionable result. Avoid the inherited per-request
+		// warning here: it would repeat under load and serialize the representative first key.
+		final Operation.Status status = responseOperationStatus(statusClass, responseStatus);
+		op.status(status);
+		return Operation.Status.SUCC.equals(status);
 	}
 
 	@Override
@@ -169,7 +240,10 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 			op.responseRequestId(requestId);
 		}
 		final boolean integrityEnabled = s3Driver != null && s3Driver.integrityMetadataEnabledForResponse();
-		if (versioningEnabled && !integrityEnabled && versionId != null) {
+		if (versioningEnabled
+						&& !integrityEnabled
+						&& versionId != null
+						&& !(op instanceof DeleteRequestOperation)) {
 			op.item().name(op.item().name() + "~" + versionId);
 		}
 		if (integrityEnabled
@@ -200,7 +274,9 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 				}
 			}
 		}
-		if (op instanceof CompositeDataOperation) {
+		if (op instanceof DeleteRequestOperation deleteOperation) {
+			bufferDeleteResponse(channel, deleteOperation, contentChunk);
+		} else if (op instanceof CompositeDataOperation) {
 			handleInitMultipartUploadResponseContentChunk(channel, contentChunk);
 		} else if (op instanceof ListOperation) {
 			final ListOperation<?> listOp = (ListOperation<?>) op;
@@ -213,6 +289,24 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		} else {
 			super.handleResponseContentChunk(channel, op, contentChunk);
 		}
+	}
+
+	private static void bufferDeleteResponse(
+					final Channel channel,
+					final DeleteRequestOperation operation,
+					final ByteBuf contentChunk) {
+		if (operation.deleteRequest().targets().size() == 1
+						|| operation.status() != Operation.Status.SUCC
+						|| !contentChunk.isReadable()) {
+			return;
+		}
+		final Attribute<DeleteResponseBuffer> responseAttr = channel.attr(DELETE_RESPONSE_ATTR_KEY);
+		DeleteResponseBuffer response = responseAttr.get();
+		if (response == null) {
+			response = new DeleteResponseBuffer();
+			responseAttr.set(response);
+		}
+		response.append(channel, contentChunk);
 	}
 
 	static IntegrityVerificationResult finishOutOfBandIntegrityRead(
@@ -320,7 +414,9 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 				op.status(Operation.Status.RESP_FAIL_CORRUPT);
 			}
 		}
-		if (op instanceof ListOperation) {
+		if (op instanceof DeleteRequestOperation deleteOperation) {
+			finishDeleteResponse(channel, deleteOperation);
+		} else if (op instanceof ListOperation) {
 			if (integrityListDiscovery()) {
 				finishListResponse(channel, (ListOperation<?>) op);
 			} else {
@@ -346,6 +442,96 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 			}
 		}
 		super.handleResponseContentFinish(channel, op);
+	}
+
+	private static void finishDeleteResponse(
+					final Channel channel, final DeleteRequestOperation operation) {
+		if (operation.status() != Operation.Status.SUCC) {
+			discardDeleteResponse(channel);
+			operation.completeDelete(DeleteTransportResult.failure(
+							operation.status(), S3StorageDriver.DELETE_FAILURE_MESSAGE));
+			return;
+		}
+		if (operation.deleteRequest().targets().size() == 1) {
+			discardDeleteResponse(channel);
+			operation.completeDelete(DeleteTransportResult.success(operation.deleteRequest().targets()));
+			return;
+		}
+		final DeleteResponseBuffer state = channel.attr(DELETE_RESPONSE_ATTR_KEY).getAndSet(null);
+		if (state == null || state.overflow || state.content == null || !state.content.isReadable()) {
+			logDeleteResponseDiagnostic(
+							state != null && state.overflow
+											? DeleteResponseDiagnosticClass.BODY_LIMIT
+											: DeleteResponseDiagnosticClass.EMPTY_BODY,
+							DeleteResponseStructuralContext.RESPONSE_BUFFER);
+			if (state != null) {
+				state.close();
+			}
+			operation.completeDelete(null);
+			return;
+		}
+		final DeleteTransportResult result;
+		try {
+			result = parseDeleteResponse(new ByteBufInputStream(state.content.duplicate()));
+		} finally {
+			state.close();
+		}
+		operation.completeDelete(result);
+	}
+
+	private static DeleteTransportResult parseDeleteResponse(final InputStream input) {
+		final var xmlHandler = new DeleteObjectsXmlHandler();
+		try (input) {
+			S3XmlParser.parse(input, xmlHandler);
+			return new DeleteTransportResult(xmlHandler.results(), null, null);
+		} catch (final DeleteObjectsXmlHandler.ParseFailure failure) {
+			logDeleteResponseDiagnostic(
+							DeleteResponseDiagnosticClass.valueOf(failure.failureClass().name()),
+							failure.structuralContext());
+			return null;
+		} catch (final SAXException ignored) {
+			logDeleteResponseDiagnostic(
+							DeleteResponseDiagnosticClass.MALFORMED_XML,
+							DeleteResponseStructuralContext.DOCUMENT);
+			return null;
+		} catch (final ParserConfigurationException ignored) {
+			logDeleteResponseDiagnostic(
+							DeleteResponseDiagnosticClass.PARSER_CONFIGURATION,
+							DeleteResponseStructuralContext.XML_PARSER);
+			return null;
+		} catch (final IOException ignored) {
+			logDeleteResponseDiagnostic(
+							DeleteResponseDiagnosticClass.INPUT_IO,
+							DeleteResponseStructuralContext.RESPONSE_STREAM);
+			// The shared reconciler turns an absent neutral result into one conservative protocol failure.
+			return null;
+		}
+	}
+
+	/**
+	 * Response parsing is a request-frequency path. Emit at most one DEBUG diagnostic for each
+	 * fixed failure class during the process lifetime, and log only enum-backed structural context.
+	 */
+	private static void logDeleteResponseDiagnostic(
+					final DeleteResponseDiagnosticClass failureClass,
+					final Enum<?> structuralContext) {
+		if (Loggers.MSG.isDebugEnabled()
+						&& DELETE_RESPONSE_DIAGNOSTICS.compareAndSet(failureClass.ordinal(), 0, 1)) {
+			Loggers.MSG.debug(
+							"S3 multi-delete response rejected: failure_class={}, structural_context={}, emission_policy=once-per-process-per-failure-class",
+							failureClass,
+							structuralContext);
+		}
+	}
+
+	static void discardDeleteResponse(final Channel channel) {
+		if (channel == null) {
+			return;
+		}
+		final DeleteResponseBuffer state = channel.attr(DELETE_RESPONSE_ATTR_KEY).getAndSet(null);
+		if (state != null) {
+			state.close();
+		}
 	}
 
 	private void finishListResponse(final Channel channel, final ListOperation<?> op) {

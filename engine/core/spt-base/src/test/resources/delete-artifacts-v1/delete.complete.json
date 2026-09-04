@@ -1,0 +1,20 @@
+{
+  "version" : 1,
+  "status" : "complete",
+  "schema_version" : "1",
+  "mode" : "batch",
+  "configured_batch_size" : 2,
+  "selection_order" : "canonical",
+  "contributors" : [ "local" ],
+  "request_rows" : 1,
+  "target_rows" : 2,
+  "residual_rows" : 0,
+  "sha256" : {
+    "delete.metrics.total.csv" : "08bdcc9560a44c628431539b9358f0f06fe5be85495b9a3b5a45ef90bab90f9a",
+    "delete.requests.csv" : "50c4a8d7d9632a7c8506324478b1bd2be381033e934c3c70fd4e3e661ff835e4",
+    "delete.objects.csv" : "a58bebc2ea302ae4fc6b1fcc0e40d1ae77a5c1056a7c7c6e4fd7e396942e9991",
+    "items.csv" : "d14234715ea87d75875beb7aed1ddd1ad20d1d85ce83e91904060dfe760ed39c",
+    "verify-input.csv" : "088b04fe666fc012df083ea10c64399bc889db5140d427baf23d8eea37ec1d9b",
+    "verify-input.complete.json" : "7b79ab59563f75facb0cfd93eff224fd447fe220e493e83ba9959b6f9e16a525"
+  }
+}

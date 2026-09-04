@@ -19,7 +19,6 @@ import java.util.List;
 
 public class CoopStorageDriverMock<I extends Item, O extends Operation<I>>
 				extends CoopStorageDriverBase<I, O> {
-
 	private final Random rnd = new Random();
 
 	public CoopStorageDriverMock(
@@ -31,6 +30,9 @@ public class CoopStorageDriverMock<I extends Item, O extends Operation<I>>
 	@Override
 	protected boolean submit(final O op)
 					throws IllegalStateException {
+		if (!beginDispatch(op)) {
+			return false;
+		}
 		op.startRequest();
 		op.finishRequest();
 		op.startResponse();
@@ -73,19 +75,17 @@ public class CoopStorageDriverMock<I extends Item, O extends Operation<I>>
 	@Override
 	protected int submit(final List<O> ops, final int from, final int to)
 					throws IllegalStateException {
-		for (int i = from; i < to; i++) {
-			submit(ops.get(i));
+		var i = from;
+		while (i < to && submit(ops.get(i))) {
+			i++;
 		}
-		return to - from;
+		return i - from;
 	}
 
 	@Override
 	protected int submit(final List<O> ops)
 					throws IllegalStateException {
-		for (final O op : ops) {
-			submit(op);
-		}
-		return ops.size();
+		return submit(ops, 0, ops.size());
 	}
 
 	@Override

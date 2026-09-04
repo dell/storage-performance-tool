@@ -82,10 +82,147 @@ for later campaigns, then use `read-verify` for later checks. These are
 correctness workloads, not ordinary benchmarks; corruption returns exit code
 `20` and leaves a resumable `verify-remaining.csv`. See [S3 Persisted-Data Integrity](docs/S3_INTEGRITY.md).
 
+For an operator-focused DELETE walkthrough, including destructive selection modes,
+verification, artifacts, and recovery, see [S3 DELETE](docs/S3_DELETE.md).
+
+Standalone DELETE is a supported destructive workload. Its safe default source owns what it deletes: with
+neither `--items-file` nor `--delete-existing`, a count run creates exactly
+`--object-count` objects under a
+run-unique `spt-delete-<run-id>/` namespace, freezes the successful PUT identities,
+then times DELETE against only that canonical manifest. `--prefix` changes the
+owned namespace root by itself; it never discovers or selects existing objects. A
+duration run instead seeds `--seed-objects`, default 2,500. Omitting both count and
+duration also selects 2,500 objects. Omitting `--object-size` selects 1 KiB rather than
+the shared 1 MiB write default. PUT-returned versions are preserved for exact-version
+DELETE; objects without a returned version use current-key semantics.
+
+The separate destructive existing-prefix source requires `--delete-existing`, an exact
+`--bucket`, and an explicitly supplied, normally nonempty `--prefix`. An empty prefix selects
+the whole bucket and therefore requires the additional `--allow-empty-prefix` opt-in; no
+interactive confirmation substitutes for either flag. A destructive prefix must not start with
+`/`, because the S3 drivers remove that path separator before LIST. SPT lists current keys, freezes and
+canonicalizes the complete selection, applies `--object-count` (`0` means all), and refuses an
+empty result before any DELETE request. Discovery counts, the selected count, SHA-256, and LIST
+provenance are committed with the manifest. Any delimiter-derived shard or returned identity outside
+the immutable requested prefix is fatal and removes incomplete artifacts before DELETE. Distributed
+discovery also requires one immutable engine identity across all workers. Discovery is an untimed setup step; only
+the later standalone DELETE step contributes DELETE request measurements. Keep the namespace quiescent:
+a concurrent writer can replace a frozen current-key identity before it is deleted. Existing-prefix
+mode does not select versions or delete markers and rejects `--versions=all`.
+
+Seed and DELETE are separate engine steps, so setup time and PUT metrics do not enter
+DELETE request latency, duration, or throughput. Any seed failure or incomplete
+frozen inventory stops before timed DELETE. Count and duration are mutually exclusive.
+Manifest and existing-prefix duration runs use their frozen selections without recycling;
+seeded duration runs use their finite seed inventory. Duration is valid only when live-object
+requests remain schedulable through the requested deadline. Exhausting the inventory early
+invalidates the run and, for seeded mode, requires increasing `--seed-objects`.
+`--auto-terminate-seconds`, engine retry, and recycle remain incompatible with standalone
+DELETE. If the inventory is smaller than
+`threads * delete-batch-size`, the CLI warns once and reports the maximum complete
+request waves; it does not auto-calibrate or reject the finite run solely for
+concurrency underfill.
+
+Seeded mode alone accepts the optional `--cleanup` flag because only that source is
+owned by SPT. Explicit-manifest and existing-prefix modes reject it before orchestration.
+After the timed DELETE has drained, the engine first completes any requested
+post-verification and freezes the measured step's canonical residual `items.csv`.
+Cleanup then runs as a separate ordinary DELETE step over exactly that residual: failed,
+unattempted, unresolved, still-present, or verification-inconclusive identities as
+applicable. Current-key and exact-version identities are preserved, and retrying an
+already-absent target is safe. Cleanup still runs after an operational failure-budget
+stop. Its duration, metrics, and errors remain separate from seed and measured DELETE;
+partial cleanup is logged once at finalization and never changes the measured verdict or
+exit code. Neither the seed inventory nor the pre-cleanup residual is rewritten, so both
+remain durable evidence independent of the cleanup outcome.
+
+At the deadline the controller closes request and driver admission across every local or
+distributed input slice before permitting recovery on any slice. Identities
+still in generator or driver queues are unattempted; identities that reached actual driver
+dispatch are attempted and may drain for `load.op.wait.limit` (30 seconds by default).
+Their terminal outcomes and latencies remain part of the DELETE measurement. Any dispatched
+identity still lacking a terminal result after the bound is unresolved and invalidates the run.
+All slices then drain through a bounded coordinator against one step-wide remaining-time budget,
+so the wait bound is not multiplied by the input count. The coordinator retains at most one
+lifecycle call per frozen input, offers every input each phase, and never duplicates a still-running
+call on cleanup retry. Inventory exhaustion is timestamped at its source and invalidates only when
+it occurs strictly before the scheduled deadline. Each worker makes that comparison on its own
+monotonic clock and retains a semantic verdict; after admission closes, the controller requires a
+reached-deadline verdict from every slice, so delayed, missing, or failed evidence cannot validate a
+run. The scheduled interval and subsequent drain interval are reported separately. `--threads`
+bounds concurrent logical DELETE requests, so a request may contain as many as
+`--delete-batch-size` object targets.
+
+Standalone DELETE uses a controller-owned failed-object budget. The default is a new
+object-unit policy permitting 100,000 operationally failed DELETE targets; it is not the legacy
+failed-operation limit. `--max-failed-objects N` permits exactly N failures and stops only after
+the global count becomes greater than N. Alternatively, `--max-failure-percent P` uses cumulative
+accepted-plus-operationally-failed object outcomes (0 through 100 inclusive). Zero is enforced
+immediately; a positive percentage is evaluated after `--failure-budget-grace` (30 seconds by
+default) and always again at completion. The flags are mutually exclusive, and an explicit grace
+is accepted only with a positive percentage and must be a whole number of seconds.
+
+Workers publish counters; the controller alone aggregates all local and distributed slices and
+makes the stop decision. A breach closes admission, recovers undispatched objects, and drains
+already-dispatched requests, so the final failed count may exceed the trigger—the budget is not a
+hard cap. Protocol/correctness failures, unresolved targets, setup/discovery/manifest failures,
+and verification failures remain fatal outside this operational budget. Cleanup failures are
+reported separately and never change the standalone DELETE benchmark verdict or exit code. Missing
+terminal counters also fail closed. Successful runs report either completed cleanly or completed
+within budget and exit 0; a breach or invalid terminal result reports the policy, threshold, failed
+objects, observed percentage, and exits nonzero. Even a 100% budget cannot validate a run with no
+fully successful request or no accepted object.
+
+Schema-v4 `failure_policy.outcome` is controller-owned. Live rows use `running`; a reconciled
+terminal row uses `completed_cleanly`, `completed_within_failure_budget`, or `failed`. Human output
+renders the same terminal distinction. Worker rows do not independently infer the fleet verdict.
+
+Standalone DELETE metrics use explicit units. The existing operation rate and success/failure
+counts remain logical API requests: one full-success request succeeds, while a partial or failed
+request fails once regardless of batch size. Schema-v4 detail separately reports request outcomes;
+selected, attempted, accepted, failed, unattempted, and unresolved object identities; configured
+and actual batch counts; current-key versus exact-version targets; and request/object completion.
+Multi-bucket counts are bounded to 100 named buckets plus `__other__`; bucket latency is not
+created. Result identity records single versus batch mode, configured batch size, and canonical
+selection order, and unlike identities are not merged.
+
+DELETE latency remains first request byte sent through first response byte received. Duration is
+request formulation through the last response byte. Netty records the request marker when the first
+nonempty encoded (or TLS-encrypted) outbound buffer reaches the channel transport and the response
+marker on the first nonempty inbound transport buffer, before HTTP headers have been decoded. On
+AWS, SPT records CRT's native HTTP-stream `send-start` and
+`receive-start` timestamps directly,
+including header-only single DELETE, rather than substituting SDK request handoff, publisher
+subscription, or body delivery. The wrapper separately records the first received response headers
+and the response publisher's actual completion for duration. Transparent retries retain the logical
+request's first native send timestamp but replace earlier response timing, so a final failure without
+a received response contributes neither stale latency nor fabricated duration. Available
+request distributions expose p50, p90, p99, and p99.9. There is no
+per-object latency for a batch. Object size, data moved, bandwidth, and TTFB display as N/A. Phase
+output distinguishes seed, discovery, pre-validation, scheduled DELETE, drain, post-verification,
+cleanup, and total wall time, leaving phases that are not yet applicable unset. Live schema-v4 JSON
+uses `null` for a phase until its interval has actually been measured; `0` means an applicable
+interval was measured as zero. With verification
+disabled, `accepted` always means a logical DELETE API outcome—not confirmed removal—and human and
+machine output carry an explicit warning. The existing TUI continues to chart logical request
+rate/count while tolerating the additive detail; headless and engine-only output expose it. The
+top-level `delete_detail_expected` marker opts standalone rows into strict detail validation;
+generic or cleanup DELETE rows without that marker remain compatible even when the engine reports
+schema v4.
+
+Fleet schema v4 preserves the existing `nodes_present` remote-address representation and adds
+`contributors_present` for the fresh identity set used by completeness checks (`local` plus fresh
+remote contributors). Headless DELETE output exposes both fields; stale, duplicate, or incomplete
+contributor sets remain partial. A local run is normalized to exactly one `local` contributor before
+fleet comparison. After terminal status, the CLI makes three bounded attempts to capture and splice
+the controller-authoritative detailed DELETE row before reporting a presentation failure; it does
+not report a stale `running` outcome as completed. A 404 with no previously observed standalone
+DELETE detail retains compatibility with engines that do not expose the detailed endpoint.
+
 ## Features
 
 - **Intuitive CLI**: Docker-style command structure (`spt run`, `spt replay`, `spt results`)
-- **Multiple Workload Types**: Support for write, read, write-verify, read-verify, list, mixed, and mock operations today; delete benchmarking remains on the roadmap
+- **Multiple Workload Types**: Support for write, read, write-verify, read-verify, delete, list, mixed, and mock operations
 - **Dual Execution Modes**:
   - **Interactive TUI**: Built-in terminal interface for monitoring benchmark progress
   - **Headless Mode**: Non-interactive mode for CI/CD, scripting, and automated environments
@@ -386,7 +523,7 @@ Executes a benchmark test with the specified workload type.
 - `write-verify`: Write objects with v1 SHA-256 metadata, then verify every successful write now or defer readback
 - `read-verify`: Verify v1 metadata objects selected by LIST or `--items-file`
 - `mixed`: Concurrent GET/PUT/DELETE/STAT with weighted distribution
-- `delete`: Test to measure object deletion performance (coming soon)
+- `delete`: Measure single-object or batched object deletion performance against a frozen inventory
 - `mock`: Run tests with dummy-mock driver (no S3 endpoint required)
 
 **Required Flags (for S3 workloads, optional for mock):**
@@ -410,16 +547,22 @@ Executes a benchmark test with the specified workload type.
 - `--checksum`: Enable S3 checksum validation with the specified algorithm: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`. When used with `--part-size`, checksums are applied per part. (env: `SPT_CHECKSUM`)
 - `--object-data-compressibility`: Target compressibility percentage for generated object data, 0-100 (default: 0 = fully random). Each 4KB chunk is split into random and zero-filled portions according to the percentage. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`)
 - `--object-data-dedupable`: Whether generated data remains dedupe-friendly (default: true). Set `false` to stamp every 4KB with a unique object-id + offset header that defeats inline deduplication. Incompatible with `--items-file` / file-based data input. (env: `SPT_OBJECT_DATA_DEDUPABLE`)
-- `--seed-objects`: Objects to pre-create for `read` benchmarks (default: 2500)
-- `--items-file`: Path to a saved `items.csv` for `read`, or a canonical manifest for `read-verify` (skips seed/discovery)
+- `--seed-objects`: Objects to pre-create for `read` benchmarks and duration-based standalone DELETE (default: 2500)
+- `--items-file`: Path to a saved `items.csv` for `read`, or a canonical manifest for `read-verify` and explicit-manifest DELETE. Mutually exclusive with `--delete-existing`
+- `--delete-batch-size`: Standalone DELETE request size, from 1 through 1000 canonical identities (default 100). Multi-bucket manifests require 1
+- `--delete-existing`: Destructive DELETE opt-in that discovers and freezes current keys beneath the exact bucket/prefix before timing
+- `--allow-empty-prefix`: Second destructive opt-in required with `--delete-existing --prefix=''` for intentional whole-bucket selection
+- `--max-failed-objects`: Operational DELETE object failures permitted before the controller stops scheduling (default 100,000; zero is strict; mutually exclusive with `--max-failure-percent`)
+- `--max-failure-percent`: Cumulative operational DELETE object failure percentage from 0 through 100; zero is strict and positive values use the grace period
+- `--failure-budget-grace`: Delay before evaluating a positive percentage budget (default 30s; whole seconds only; accepted only with a positive `--max-failure-percent`)
 - `--allow-empty-selection`: Permit a clean empty `read-verify` selection to succeed
 - `--defer-verification`: `write-verify` only. Stop after durable, nonempty CREATE evidence and preserve `written.csv` for later `read-verify` campaigns. Incompatible with `--cleanup`. (env: `SPT_DEFER_VERIFICATION`)
 - `--versions`: `read-verify` bucket/prefix discovery only: `current` (default) or `all`. All-version discovery preserves exact version IDs, excludes and reports delete markers, requires list-version permission, and must not be combined with `--items-file`.
 - `--integrity-max-console-failures`: Maximum corruption samples printed to the console (default 20; 0 suppresses samples)
-- `--integrity-runtime-identity-tier`: Distributed verification runtime proof: `image` (default) or the stronger `payload` tier required for controlled comparisons and release evidence
+- `--integrity-runtime-identity-tier`: Distributed verification or guarded existing-prefix DELETE runtime proof: `image` (default) or the stronger `payload` tier required for controlled comparisons and release evidence
 - `--shuffle`: `read` only. Shuffle items within each fetched read batch before issuing reads.
 - `--shuffle-batch-size`: `read` only. Override the read-phase shuffle window used with `--shuffle` (bounded to 1,000,000).
-- `--cleanup`: Delete created objects after test completion. For `write-verify`, delete only successfully verified objects; unsupported for `read-verify` and deferred verification
+- `--cleanup`: Best-effort deletion of SPT-created objects after test completion. Seeded DELETE retries its immutable measured residual in a separate phase; explicit-manifest and existing-prefix DELETE reject it. For `write-verify`, delete only successfully verified objects; unsupported for `read-verify` and deferred verification
 - `--create-prefix`: Ensure target prefix exists before testing
 - `--output-dir, -O`: Directory to save detailed Spt reports
 - `--generate-only`: Generate scenario file without executing Docker
@@ -428,6 +571,28 @@ Executes a benchmark test with the specified workload type.
 - `--spt-image`: Override the engine image ref. By default, release builds use an image tag matching the CLI version (for example, `...:v5.10.3`) and local/dev builds use `...:spt_dev`.
 - `--skip-image-pull`: Use the locally cached Spt image instead of pulling before each run. Dev images such as `spt_dev` automatically skip pulls because they are local-only.
 - `--keep-scenario`: Keep the generated JavaScript scenario file after test completes (useful for debugging)
+
+The public `delete` command's explicit-manifest mode requires the exact CSV header
+`bucket,key,size,version_id`, performs strict
+CSV validation and identity conflict checks before orchestration, de-duplicates identical rows,
+and rejects an empty selection. An optional `--bucket` value asserts every source row; omitting it
+allows multiple buckets when `--delete-batch-size=1`. `--object-count` caps objects only after the
+manifest is globally canonicalized, and SPT records source/unique/selected counts and the staged
+SHA-256. Canonical selection order is deterministic but can differ from another tool's input order.
+Duration mode uses the complete frozen selection without recycling and rejects early inventory
+exhaustion. This slice rejects `--prefix` and `--cleanup`; failed staging is removed.
+
+Existing-prefix mode is mutually exclusive with `--items-file`. It requires
+`--delete-existing --bucket <exact-bucket> --prefix <exact-prefix>`; the prefix must be nonempty
+unless the command also supplies `--allow-empty-prefix`. A whole-bucket scope is never inferred,
+and neither opt-in is replaced by a prompt. The LIST setup phase selects current keys only,
+canonicalizes the complete result, applies the global object cap, and publishes source, unique,
+selected, SHA-256, and LIST-step provenance evidence before the DELETE step can start. An empty
+selection is fatal even if an empty-selection override is requested. LIST setup has its own step
+metrics and is excluded from DELETE timing. Operators must keep the namespace quiescent because
+current-key deletion cannot protect against a concurrent writer replacing a frozen identity.
+All-version and delete-marker selection and cleanup are unavailable in this slice. Duration mode
+uses the complete frozen current-key selection without recycling and is invalid if it exhausts early.
 
 Multi-endpoint options:
 - `--endpoints`: Comma-separated list (or repeat the flag) to target multiple S3 endpoints.
@@ -438,7 +603,7 @@ Multi-endpoint options:
 - `--headless`: Force headless (non-interactive) mode even with TTY
 - `--trace-file`: Save all output to specified trace file
 - `--trace-append`: Append to existing trace file (default: overwrite)
-- `--verbose`: Show detailed Docker API calls and debug information
+- `--verbose`: Show detailed Docker API calls, debug information, and textual live metrics in headless output or the TUI messages window
 
 #### `spt replay`
 
@@ -668,11 +833,11 @@ When no TTY is available (CI/CD environments, Docker containers, etc.), spt auto
 
 - **Auto-Detection**: Automatically detects when TTY is not available
 - **Structured Output**: Timestamped, categorized console output
-- **Real-time Metrics**: Parsed performance data displayed in human-readable format
+- **Real-time Metrics**: Parsed performance data is always collected; textual updates are shown with `--verbose`
 - **Trace Files**: Complete output capture for post-analysis
 - **Signal Handling**: Graceful shutdown on interruption (Ctrl+C)
 
-**Output Format:**
+**Verbose Output Format:**
 
 ```
 [2025-08-06 14:23:45] [INIT] Starting spt in headless mode
@@ -718,7 +883,7 @@ When `--auto-results` is enabled and `--trace-file` is not set, spt now auto-cre
 
 **Headless Mode Debugging:**
 - **Trace Files**: Complete execution capture with `--trace-file`
-- **Verbose Mode**: Docker API details with `--verbose`
+- **Verbose Mode**: Docker API details and textual live metrics with `--verbose`
 - **Structured Output**: Categorized real-time output
 
 **Examples:**

@@ -1885,6 +1885,41 @@ func TestDistributedIntegrityImageMismatchStopsBeforeContainerStart(t *testing.T
 	}
 }
 
+func TestDistributedExistingPrefixImageMismatchStopsBeforeContainerStart(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{
+		{Host: "entry", Original: "entry"},
+		{Host: "worker", Original: "worker"},
+	}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	entryDM, workerDM := NewMockDockerManager(), NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = entryDM
+	orchestrator.hosts[1].DockerManager = workerDM
+	for _, host := range orchestrator.hosts {
+		host.SetStatus(HostStatusReady)
+	}
+	orchestrator.preflight = identityPreflight{identities: map[string]preflight.ImageIdentity{
+		"entry":  {ID: "sha256:" + strings.Repeat("a", 64)},
+		"worker": {ID: "sha256:" + strings.Repeat("b", 64)},
+	}}
+
+	err := orchestrator.StartDistributedTestWithContent(
+		context.Background(),
+		"repo/spt:test",
+		scenario.ScenarioParams{
+			WorkloadType:   scenario.WorkloadTypeDelete,
+			DeleteExisting: true,
+		},
+		[]byte(`Load.run({})`),
+	)
+	if err == nil || !strings.Contains(err.Error(), "image identity mismatch") ||
+		!strings.Contains(err.Error(), "entry") || !strings.Contains(err.Error(), "worker") {
+		t.Fatalf("StartDistributedTestWithContent() error = %v", err)
+	}
+	if len(entryDM.GetEntryNodeCalls()) != 0 || len(workerDM.GetWorkerNodeCalls()) != 0 {
+		t.Fatal("mixed image fleet started destructive discovery containers before the identity gate")
+	}
+}
+
 func TestDistributedIntegrityRejectsAttachedWorkersBeforeContainerStart(t *testing.T) {
 	hostInfos := []*hostparse.HostInfo{{Host: "entry", Original: "entry"}, {Host: "worker", Original: "worker"}}
 	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
@@ -1954,6 +1989,127 @@ func TestMultiHostIntegrityCapabilityFailureStopsBeforeRunAndCleansUp(t *testing
 	if orchestrator.hosts[0].IsManaged() {
 		t.Fatal("failed capability gate left the host marked managed")
 	}
+}
+
+func TestSingleRemoteExistingPrefixDeleteCapabilityFailureStopsBeforeRun(t *testing.T) {
+	var runPosts atomic.Int64
+	srv := newExistingDeleteCapabilityAPIServer(t, &runPosts)
+	defer srv.Close()
+	host, port := splitServerHostPort(t, srv.URL)
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Host: host, IsLocal: false, Original: "qa-client-01"}}, 1)
+	orchestrator.SetAPIPort(port)
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	orchestrator.preflight = identityPreflight{identities: map[string]preflight.ImageIdentity{
+		"qa-client-01": {ID: "sha256:" + strings.Repeat("a", 64)},
+	}}
+	mockDocker := NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = mockDocker
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	wrapper.SetCallbacks(func(*TestStatus) {}, func(*MultiNodeMetricsUpdate) {}, func(string) {}, func(string) {})
+
+	err := wrapper.StartTestWithContent(
+		context.Background(),
+		"test-image",
+		scenario.ScenarioParams{
+			WorkloadType:   scenario.WorkloadTypeDelete,
+			DeleteExisting: true,
+		},
+		[]byte(`Load.run({})`),
+		nil,
+	)
+	if !errors.Is(err, ErrEngineIncompatible) {
+		t.Fatalf("StartTestWithContent() error = %v, want ErrEngineIncompatible", err)
+	}
+	if got := runPosts.Load(); got != 0 {
+		t.Fatalf("/run POST count = %d, want 0", got)
+	}
+	if got := mockDocker.GetCleanupCallCount(); got != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", got)
+	}
+	if orchestrator.hosts[0].IsManaged() {
+		t.Fatal("failed existing-prefix capability gate left the remote host managed")
+	}
+}
+
+func TestDistributedExistingPrefixDeleteCapabilityFailureStopsBeforeRun(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:"+constants.RMIRegistryPort)
+	if err != nil {
+		t.Skipf("unable to bind local RMI port for test: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	var runPosts atomic.Int64
+	srv := newExistingDeleteCapabilityAPIServer(t, &runPosts)
+	defer srv.Close()
+	host, port := splitServerHostPort(t, srv.URL)
+	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{
+		{Host: host, IsLocal: true, Original: "entry"},
+		{Host: "localhost", IsLocal: true, Original: "worker1"},
+	}, 2)
+	orchestrator.SetAPIPort(port)
+	orchestrator.detectAdvIP = func(_ context.Context, _ *hostparse.HostInfo) (string, error) {
+		return "127.0.0.1", nil
+	}
+	commonImageID := "sha256:" + strings.Repeat("a", 64)
+	orchestrator.preflight = identityPreflight{identities: map[string]preflight.ImageIdentity{
+		"entry":   {ID: commonImageID},
+		"worker1": {ID: commonImageID},
+	}}
+	entryDocker, workerDocker := NewMockDockerManager(), NewMockDockerManager()
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	orchestrator.hosts[0].DockerManager = entryDocker
+	orchestrator.hosts[1].SetStatus(HostStatusReady)
+	orchestrator.hosts[1].DockerManager = workerDocker
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	wrapper.SetCallbacks(func(*TestStatus) {}, func(*MultiNodeMetricsUpdate) {}, func(string) {}, func(string) {})
+
+	err = wrapper.StartTestWithContent(
+		context.Background(),
+		"test-image",
+		scenario.ScenarioParams{
+			WorkloadType:   scenario.WorkloadTypeDelete,
+			DeleteExisting: true,
+		},
+		[]byte(`Load.run({})`),
+		nil,
+	)
+	if !errors.Is(err, ErrEngineIncompatible) {
+		t.Fatalf("StartTestWithContent() error = %v, want ErrEngineIncompatible", err)
+	}
+	if got := runPosts.Load(); got != 0 {
+		t.Fatalf("/run POST count = %d, want 0", got)
+	}
+	for i, hostState := range orchestrator.hosts {
+		if hostState.IsManaged() {
+			t.Fatalf("failed capability gate left host %d managed", i)
+		}
+	}
+}
+
+func newExistingDeleteCapabilityAPIServer(
+	t *testing.T, runPosts *atomic.Int64,
+) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready", "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready","scope":"node","role":"entry","node_id":"n0"}`))
+		case constants.SptConfigSchemaEndpoint:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"storage":{"integrity":{"mode":"string","algorithm":"string",` +
+				`"input":{"provenance":"string","expectedProducerId":"string"},` +
+				`"selection":{"maxCount":"long"}}}}`))
+		case "/run":
+			if r.Method == http.MethodPost {
+				runPosts.Add(1)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
 }
 
 func TestMultiHostTestOrchestrator_StartTestWithContent_MultiHostStartsDistributedAndPostsProvidedArtifacts(t *testing.T) {
@@ -2078,7 +2234,7 @@ func newSingleHostReplayAPIServer(t *testing.T, postedScenario, postedDefaults *
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"storage":{"integrity":{"mode":"string","algorithm":"string",` +
 				`"input":{"provenance":"string","expectedProducerId":"string"},` +
-				`"selection":{"maxCount":"long"}}}}`))
+				`"selection":{"maxCount":"long","requireNonEmpty":"boolean"}}}}`))
 		case "/run":
 			if r.Method == http.MethodHead {
 				w.WriteHeader(http.StatusNoContent)
@@ -2312,6 +2468,14 @@ func TestMultiHostOrchestrator_StartDistributedTest_AttachWorkers(t *testing.T) 
 	err = orchestrator.StartDistributedTest(context.Background(), "test-image", params)
 	if err != nil {
 		t.Fatalf("StartDistributedTest returned error: %v", err)
+	}
+	contributors, err := orchestrator.MetricContributorIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contributors) != 2 || contributors[0] != constants.MetricsLocalContributorID ||
+		contributors[1] != "127.0.0.1:"+constants.RMIRegistryPort {
+		t.Fatalf("runtime metric contributors = %v", contributors)
 	}
 
 	worker := orchestrator.hosts[1]

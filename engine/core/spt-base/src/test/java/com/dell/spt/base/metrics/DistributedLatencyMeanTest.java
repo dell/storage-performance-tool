@@ -1,12 +1,16 @@
 package com.dell.spt.base.metrics;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.context.DistributedMetricsContextImpl;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
+import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.github.akurilov.commons.system.SizeInBytes;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -14,6 +18,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Reproducer for the latency mean bug: distributed context reports cumulative sum
@@ -92,6 +97,171 @@ public class DistributedLatencyMeanTest {
 		final DistributedAllMetricsSnapshot snapshot = (DistributedAllMetricsSnapshot) entryCtx.lastSnapshot();
 		assertEquals(3, snapshot.failsSnapshot().count());
 		assertEquals(2, snapshot.corruptSnapshot().count());
+	}
+
+	@Test
+	void distributedContextPublishesOnlyFreshContributorIdentities() {
+		workerCtx.markSucc(ITEM_BYTES, KNOWN_DURATION_US, KNOWN_LATENCY_US);
+		workerCtx.refreshLastSnapshot();
+		final AllMetricsSnapshot deleteSnapshot = withDeleteMetrics(workerCtx.lastSnapshot());
+		final AtomicReference<List<AllMetricsSnapshot>> snapshots = new AtomicReference<>(
+						Arrays.asList(deleteSnapshot, null, deleteSnapshot));
+		final DistributedMetricsContextImpl<?> partial = (DistributedMetricsContextImpl<?>) DistributedMetricsContextImpl.builder()
+						.loadStepId("partial-fleet")
+						.opType(OpType.DELETE)
+						.nodeCountSupplier(() -> 3)
+						.concurrencyLimit(1)
+						.concurrencyThreshold(0)
+						.itemDataSize(new SizeInBytes(ITEM_BYTES))
+						.outputPeriodSec(0)
+						.stdOutColorFlag(false)
+						.avgPersistFlag(false)
+						.sumPersistFlag(false)
+						.timingPersistFlag(false)
+						.snapshotsSupplier(snapshots::get)
+						.quantileValues(List.of(0.5))
+						.nodeAddrs(List.of("node-a", "node-b"))
+						.contributorIds(List.of("local", "node-a", "node-b"))
+						.deleteDetailsExpected(true)
+						.comment("entry")
+						.runId(1)
+						.build();
+		partial.start();
+		try {
+			partial.refreshLastSnapshot();
+			assertEquals(List.of("node-a", "node-b"), partial.nodeAddrs(),
+							"public remote node addresses must not be repurposed as contributor IDs");
+			assertEquals(List.of("node-a", "node-b"), partial.nodesPresent(),
+							"the existing public field must retain remote node-address presentation");
+			assertEquals(List.of("local", "node-b"), partial.contributorsPresent(),
+							"fresh contributor identities must use a separate additive surface");
+			assertNull(partial.lastSnapshot().deleteMetrics(),
+							"partial DELETE fleets must not publish an authoritative DELETE block");
+		} finally {
+			partial.close();
+		}
+	}
+
+	@Test
+	void distributedDeleteRejectsDuplicateContributorIdentities() {
+		workerCtx.refreshLastSnapshot();
+		final AllMetricsSnapshot deleteSnapshot = withDeleteMetrics(workerCtx.lastSnapshot());
+		final DistributedMetricsContextImpl<?> duplicate = (DistributedMetricsContextImpl<?>) DistributedMetricsContextImpl.builder()
+						.loadStepId("duplicate-fleet")
+						.opType(OpType.DELETE)
+						.nodeCountSupplier(() -> 2)
+						.concurrencyLimit(1)
+						.concurrencyThreshold(0)
+						.itemDataSize(new SizeInBytes(ITEM_BYTES))
+						.outputPeriodSec(0)
+						.stdOutColorFlag(false)
+						.avgPersistFlag(false)
+						.sumPersistFlag(false)
+						.timingPersistFlag(false)
+						.snapshotsSupplier(() -> List.of(deleteSnapshot, deleteSnapshot))
+						.quantileValues(List.of(0.5))
+						.nodeAddrs(List.of("node-a"))
+						.contributorIds(List.of("node-a", "node-a"))
+						.deleteDetailsExpected(true)
+						.comment("entry")
+						.runId(1)
+						.build();
+		duplicate.start();
+		try {
+			duplicate.refreshLastSnapshot();
+			assertEquals(List.of("node-a"), duplicate.nodesPresent());
+			assertEquals(List.of("node-a", "node-a"), duplicate.contributorsPresent());
+			assertNull(duplicate.lastSnapshot().deleteMetrics());
+		} finally {
+			duplicate.close();
+		}
+	}
+
+	@Test
+	void completeContributorSetWithMissingDeleteDetailIsPartial() {
+		workerCtx.refreshLastSnapshot();
+		final AllMetricsSnapshot deleteSnapshot = withDeleteMetrics(workerCtx.lastSnapshot());
+		final DistributedMetricsContextImpl<?> mixed = (DistributedMetricsContextImpl<?>) DistributedMetricsContextImpl.builder()
+						.loadStepId("mixed-detail-fleet")
+						.opType(OpType.DELETE)
+						.nodeCountSupplier(() -> 2)
+						.concurrencyLimit(1)
+						.concurrencyThreshold(0)
+						.itemDataSize(new SizeInBytes(ITEM_BYTES))
+						.outputPeriodSec(0)
+						.stdOutColorFlag(false)
+						.avgPersistFlag(false)
+						.sumPersistFlag(false)
+						.timingPersistFlag(false)
+						.snapshotsSupplier(() -> List.of(deleteSnapshot, workerCtx.lastSnapshot()))
+						.quantileValues(List.of(0.5))
+						.nodeAddrs(List.of("node-a", "node-b"))
+						.contributorIds(List.of("local", "node-a"))
+						.deleteDetailsExpected(true)
+						.comment("entry")
+						.runId(1)
+						.build();
+		mixed.start();
+		try {
+			mixed.refreshLastSnapshot();
+			assertEquals(List.of("node-a", "node-b"), mixed.nodesPresent());
+			assertEquals(List.of("local", "node-a"), mixed.contributorsPresent());
+			assertNull(mixed.lastSnapshot().deleteMetrics());
+			assertTrue(mixed.partial(),
+							"a complete contributor list must still be partial when one DELETE detail block is absent");
+		} finally {
+			mixed.close();
+		}
+	}
+
+	@Test
+	void legacyContextWithoutContributorIdentityDoesNotBecomePartial() {
+		workerCtx.refreshLastSnapshot();
+		final DistributedMetricsContextImpl<?> legacy = (DistributedMetricsContextImpl<?>) DistributedMetricsContextImpl.builder()
+						.loadStepId("legacy-fleet")
+						.opType(OpType.DELETE)
+						.nodeCountSupplier(() -> 1)
+						.concurrencyLimit(1)
+						.concurrencyThreshold(0)
+						.itemDataSize(new SizeInBytes(ITEM_BYTES))
+						.outputPeriodSec(0)
+						.stdOutColorFlag(false)
+						.avgPersistFlag(false)
+						.sumPersistFlag(false)
+						.timingPersistFlag(false)
+						.snapshotsSupplier(() -> List.of(workerCtx.lastSnapshot()))
+						.quantileValues(List.of(0.5))
+						.nodeAddrs(List.of("remote-node"))
+						.comment("entry")
+						.runId(1)
+						.build();
+		legacy.start();
+		try {
+			legacy.refreshLastSnapshot();
+			assertFalse(legacy.partial());
+			assertEquals(List.of("remote-node"), legacy.nodesPresent(),
+							"legacy contexts must preserve public node-list presentation without treating it as identity evidence");
+			assertEquals(List.of(), legacy.contributorsPresent(),
+							"legacy contexts without identity evidence must not fabricate contributors");
+			assertNull(legacy.lastSnapshot().deleteMetrics());
+		} finally {
+			legacy.close();
+		}
+	}
+
+	private static AllMetricsSnapshot withDeleteMetrics(final AllMetricsSnapshot delegate) {
+		final AllMetricsSnapshot snapshot = mock(AllMetricsSnapshot.class);
+		when(snapshot.durationSnapshot()).thenReturn(delegate.durationSnapshot());
+		when(snapshot.latencySnapshot()).thenReturn(delegate.latencySnapshot());
+		when(snapshot.ttfbSnapshot()).thenReturn(delegate.ttfbSnapshot());
+		when(snapshot.concurrencySnapshot()).thenReturn(delegate.concurrencySnapshot());
+		when(snapshot.failsSnapshot()).thenReturn(delegate.failsSnapshot());
+		when(snapshot.corruptSnapshot()).thenReturn(delegate.corruptSnapshot());
+		when(snapshot.successSnapshot()).thenReturn(delegate.successSnapshot());
+		when(snapshot.byteSnapshot()).thenReturn(delegate.byteSnapshot());
+		when(snapshot.elapsedTimeMillis()).thenReturn(delegate.elapsedTimeMillis());
+		when(snapshot.deleteMetrics()).thenReturn(mock(DeleteMetricsSnapshot.class));
+		return snapshot;
 	}
 
 	@Test

@@ -2,9 +2,13 @@ package com.dell.spt.base.load.step.local.context;
 
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
+import static com.dell.spt.base.Constants.LIFECYCLE_POLL_INTERVAL_MILLIS;
+import static com.dell.spt.base.Constants.TASK_STOP_WAIT_SECONDS;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.dell.spt.base.concurrent.AsyncRunnable.State.SHUTDOWN;
 import static com.dell.spt.base.concurrent.AsyncRunnable.State.STARTED;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_IDENTITY_MODE_BATCH;
+import static com.dell.spt.base.metrics.MetricsConstants.DELETE_IDENTITY_MODE_SINGLE;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 
@@ -17,24 +21,42 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.Operation.Status;
+import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.composite.CompositeOperation;
+import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.deletion.DeleteArtifactRecorder;
+import com.dell.spt.base.item.op.deletion.DeleteInventoryVerifier;
+import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
+import com.dell.spt.base.item.op.deletion.DeleteOperationalOutcomeLedger;
+import com.dell.spt.base.item.op.deletion.DeletePhaseTimingSnapshot;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
+import com.dell.spt.base.item.op.deletion.DeleteTargetOutcome;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationPhase;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationReport;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationSummary;
+import com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.item.op.list.shard.ListShard;
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder;
-import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
-import com.dell.spt.base.item.op.composite.CompositeOperation;
-import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.item.op.path.PathOperation;
-import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.load.failure.ObjectFailureBudgetConfig;
 import com.dell.spt.base.load.generator.LoadGenerator;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleSnapshot;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
+import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.logging.OperationTraceCsvBatchLogMessage;
 import com.dell.spt.base.logging.OperationTraceCsvLogMessage;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
+import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.base.storage.driver.StorageDriver;
+import com.dell.spt.base.storage.driver.StandaloneDeletePreparable;
 import com.dell.spt.base.util.BinarySizeFormat;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.reflection.TypeUtil;
@@ -42,21 +64,29 @@ import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import java.io.EOFException;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.rmi.RemoteException;
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.OptionalLong;
+import java.util.SplittableRandom;
+import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
-import java.util.SplittableRandom;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BooleanSupplier;
 import org.apache.logging.log4j.CloseableThreadContext;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
@@ -88,6 +118,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final boolean outputDuplicates;
 	private final boolean updateContents;
 	private final ListShardMetricsRecorder listShardMetricsRecorder;
+	private final String immutableListRootPrefix;
 	// delimiter-first runtime split state (per-shard prefix)
 	private final java.util.concurrent.ConcurrentMap<String, Window> splitWindows = new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -115,15 +146,43 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	// pendingRetries) but haven't yet finished deciding retry() vs markOpFailed(). See
 	// awaitRetryTasksSettled()'s javadoc for the shutdown-ordering race this closes.
 	private final AtomicInteger activeRetryTasks = new AtomicInteger();
-	// Set as the very first thing doShutdown() does, before anything else (including
-	// cancelPendingRetries()): an authoritative, immediately-visible "the step has begun
-	// shutting down" signal that a scheduled retry task checks before calling generator.
-	// retry() - so it terminal-fails instead of enqueueing into a generator that's about
-	// to be stopped, possibly before that generator gets a chance to drain the enqueue
-	// (awaitRetryTasksSettled() only proves the task's own body finished, not that the
-	// generator's work loop got to run again afterward - see its own javadoc).
+	// Set before admission closes so a scheduled retry cannot enter generator circulation
+	// behind the recovery snapshot.
 	private final AtomicBoolean stepShuttingDown = new AtomicBoolean(false);
 	private final AtomicBoolean retryTrackingWarningLogged = new AtomicBoolean(false);
+	private final AtomicBoolean operationAdmissionClosed = new AtomicBoolean(false);
+	private final ReentrantLock operationAdmissionCloseLock = new ReentrantLock();
+	private final AtomicBoolean generatorQueueRecovered = new AtomicBoolean(false);
+	private final AtomicBoolean driverQueueRecovered = new AtomicBoolean(false);
+	private List<O> generatorRecoveryPending;
+	private List<O> driverRecoveryPending;
+	private final AtomicBoolean operationDrainComplete = new AtomicBoolean(false);
+	private final AtomicBoolean startedOnce = new AtomicBoolean(false);
+	private final AtomicBoolean durationIntervalStarted = new AtomicBoolean(false);
+	private final AtomicBoolean objectFailureBudgetAdmissionHeld = new AtomicBoolean(false);
+	private final AtomicBoolean objectFailureBudgetAdmissionReleased = new AtomicBoolean(false);
+	private final OperationLifecycleTracker<O> operationLifecycle;
+	private final boolean standaloneDeleteEnabled;
+	private final boolean standaloneDeleteDurationMode;
+	private final StandaloneDeleteConfig standaloneDeleteConfig;
+	private final ObjectFailureBudgetConfig deleteFailurePolicy;
+	private final AtomicLong deleteScheduledStartedNanos = new AtomicLong();
+	private final AtomicLong deleteScheduledDeadlineNanos = new AtomicLong();
+	private final AtomicLong deleteAdmissionClosedNanos = new AtomicLong();
+	private final AtomicLong deleteDrainCompletedNanos = new AtomicLong();
+	private final AtomicLong deleteWorkflowStartedEpochNanos = new AtomicLong();
+	private final AtomicLong deleteWorkflowCompletedEpochNanos = new AtomicLong();
+	private final AtomicBoolean deleteDrainTimestampRecorded = new AtomicBoolean();
+	private final DeleteObjectLifecycleCounters deleteObjectLifecycleCounters;
+	private final DeleteArtifactRecorder deleteArtifactRecorder;
+	private final Path deleteSelectionManifest;
+	private final DeleteOperationalOutcomeLedger deleteTargetOutcomes;
+	private final AtomicReference<DeleteVerificationReport> deletePreValidationReport = new AtomicReference<>();
+	private final AtomicReference<DeleteVerificationReport> deletePostVerificationReport = new AtomicReference<>();
+	private final AtomicReference<DeleteVerificationSummary> deleteFinalVerificationSummary = new AtomicReference<>();
+	private final AtomicBoolean deletePostVerificationStarted = new AtomicBoolean();
+	private final AtomicBoolean deletePostVerificationSkipped = new AtomicBoolean();
+	private final Object deletePostVerificationPhaseLock = new Object();
 
 	/**
 	 * Per-scheduled-retry state, guaranteeing that exactly one of {the scheduled task's
@@ -160,6 +219,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	@FunctionalInterface
 	interface RetryScheduler {
 		Future<?> schedule(long delayMillis, Runnable task);
+	}
+
+	@FunctionalInterface
+	interface DeleteArtifactRecorderFactory {
+		DeleteArtifactRecorder create(String stepId, Path selectionManifest, long selectedCount);
 	}
 
 	// Not final: package-private test seam (see setRetryScheduler) swaps this for a
@@ -199,7 +263,21 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					final boolean tracePersistFlag,
 					final ListShardMetricsRecorder shardMetricsRecorder) {
 		this(
-						id, generator, driver, metricsCtx, null, loadConfig, tracePersistFlag, shardMetricsRecorder);
+						id, generator, driver, metricsCtx, null, loadConfig, tracePersistFlag, shardMetricsRecorder, null);
+	}
+
+	public LoadStepContextImpl(
+					final String id,
+					final LoadGenerator<I, O> generator,
+					final StorageDriver<I, O> driver,
+					final MetricsContext metricsCtx,
+					final Config loadConfig,
+					final boolean tracePersistFlag,
+					final ListShardMetricsRecorder shardMetricsRecorder,
+					final String immutableListRootPrefix) {
+		this(
+						id, generator, driver, metricsCtx, null, loadConfig, tracePersistFlag,
+						shardMetricsRecorder, immutableListRootPrefix, null);
 	}
 
 	/**
@@ -217,16 +295,71 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					final Config loadConfig,
 					final boolean tracePersistFlag,
 					final ListShardMetricsRecorder shardMetricsRecorder) {
+		this(
+						id, generator, driver, metricsCtx, metricsCtxByOpType, loadConfig, tracePersistFlag,
+						shardMetricsRecorder, null);
+	}
+
+	public LoadStepContextImpl(
+					final String id,
+					final LoadGenerator<I, O> generator,
+					final StorageDriver<I, O> driver,
+					final MetricsContext metricsCtx,
+					final Map<OpType, MetricsContext> metricsCtxByOpType,
+					final Config loadConfig,
+					final boolean tracePersistFlag,
+					final ListShardMetricsRecorder shardMetricsRecorder,
+					final String immutableListRootPrefix) {
+		this(
+						id, generator, driver, metricsCtx, metricsCtxByOpType, loadConfig, tracePersistFlag,
+						shardMetricsRecorder, immutableListRootPrefix, null);
+	}
+
+	public LoadStepContextImpl(
+					final String id,
+					final LoadGenerator<I, O> generator,
+					final StorageDriver<I, O> driver,
+					final MetricsContext metricsCtx,
+					final Map<OpType, MetricsContext> metricsCtxByOpType,
+					final Config loadConfig,
+					final boolean tracePersistFlag,
+					final ListShardMetricsRecorder shardMetricsRecorder,
+					final String immutableListRootPrefix,
+					final Config explicitItemConfig) {
+		this(
+						id, generator, driver, metricsCtx, metricsCtxByOpType, loadConfig, tracePersistFlag,
+						shardMetricsRecorder, immutableListRootPrefix, explicitItemConfig,
+						DeleteArtifactRecorder::new);
+	}
+
+	LoadStepContextImpl(
+					final String id,
+					final LoadGenerator<I, O> generator,
+					final StorageDriver<I, O> driver,
+					final MetricsContext metricsCtx,
+					final Map<OpType, MetricsContext> metricsCtxByOpType,
+					final Config loadConfig,
+					final boolean tracePersistFlag,
+					final ListShardMetricsRecorder shardMetricsRecorder,
+					final String immutableListRootPrefix,
+					final Config explicitItemConfig,
+					final DeleteArtifactRecorderFactory deleteArtifactRecorderFactory) {
 		this.id = id;
 		this.generator = generator;
 		this.driver = driver;
-		this.driver.operationResultOutput(this);
+		final var driverLifecycle = driver.operationLifecycle();
+		this.operationLifecycle = driverLifecycle == null
+						? OperationLifecycleTracker.disabled()
+						: driverLifecycle;
 		this.metricsCtx = metricsCtx;
 		this.metricsCtxByOpType = metricsCtxByOpType;
 		this.tracePersistFlag = tracePersistFlag;
 		this.listShardMetricsRecorder = shardMetricsRecorder == null ? ListShardMetricsRecorder.NO_OP : shardMetricsRecorder;
+		this.immutableListRootPrefix = canonicalListPrefix(immutableListRootPrefix);
 		final Config opConfig = loadConfig.configVal("op");
-		final Config itemConfig = loadConfig.configVal("item");
+		final Config itemConfig = explicitItemConfig != null
+						? explicitItemConfig
+						: loadConfig.configVal("item");
 		final Config recycleConfig = opConfig.configVal("recycle");
 		final var itemTypeStr = itemConfig != null ? itemConfig.stringVal("type") : null;
 		final ItemType itemType = itemTypeStr != null ? ItemType.valueOf(itemTypeStr.toUpperCase(Locale.ROOT)) : null;
@@ -238,6 +371,50 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		this.updateContents = recycleConfig.boolVal("content-update");
 		this.retryFlag = opConfig.boolVal("retry");
 		this.retryLimit = opConfig.intVal("retryLimit");
+		final var standaloneDelete = StandaloneDeleteConfig.from(loadConfig);
+		this.standaloneDeleteConfig = standaloneDelete;
+		this.deleteObjectLifecycleCounters = new DeleteObjectLifecycleCounters(
+						standaloneDelete.selectedBuckets().keySet());
+		this.deleteFailurePolicy = standaloneDelete.enabled()
+						? ObjectFailureBudgetConfig.from(loadConfig)
+						: null;
+		this.standaloneDeleteEnabled = standaloneDelete.enabled();
+		this.standaloneDeleteDurationMode = standaloneDelete.durationMode();
+		final String deleteSelectionManifestValue;
+		if (standaloneDelete.enabled() && itemConfig != null && standaloneDelete.selected() >= 0) {
+			final Config inputConfig = itemConfig.configVal("input");
+			deleteSelectionManifestValue = inputConfig == null ? null : inputConfig.stringVal("file");
+		} else {
+			deleteSelectionManifestValue = null;
+		}
+		this.deleteSelectionManifest = deleteSelectionManifestValue == null
+						|| deleteSelectionManifestValue.isBlank()
+										? null
+										: Path.of(deleteSelectionManifestValue).toAbsolutePath().normalize();
+		if ((standaloneDelete.preValidation() || standaloneDelete.postVerification())
+						&& (standaloneDelete.selected() < 0
+										|| this.deleteSelectionManifest == null)) {
+			throw new IllegalConfigurationException(
+							"Standalone DELETE verification requires a frozen manifest and exact count");
+		}
+		standaloneDelete.validateSettings(opType, itemType, this.recycleFlag, this.retryFlag);
+		if (standaloneDelete.enabled() && !operationLifecycle.isEnabled()) {
+			throw new IllegalConfigurationException(
+							"Standalone DELETE requires a driver with operation lifecycle accounting");
+		}
+		if (standaloneDelete.enabled() && tracePersistFlag) {
+			throw new IllegalConfigurationException(
+							"Standalone DELETE cannot use generic single-item operation tracing");
+		}
+		if (standaloneDelete.enabled() && !driver.supportsStandaloneDeleteRequests()) {
+			throw new IllegalConfigurationException(
+							"Configured storage driver does not support standalone DELETE requests");
+		}
+		if ((standaloneDelete.preValidation() || standaloneDelete.postVerification())
+						&& !(driver instanceof DeleteVerificationProbe)) {
+			throw new IllegalConfigurationException(
+							"Configured storage driver does not support standalone DELETE verification");
+		}
 		if (this.retryFlag) {
 			if (this.retryLimit < 0) {
 				throw new IllegalConfigurationException(
@@ -271,15 +448,51 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		this.sizeLimit = configSizeLimit.get() > 0 ? configSizeLimit.get() : Long.MAX_VALUE;
 		final Config failConfig = opLimitConfig.configVal("fail");
 		final long configFailCount = failConfig.longVal("count");
-		this.failCountLimit = configFailCount > 0 ? configFailCount : Long.MAX_VALUE;
-		this.failRateLimitFlag = failConfig.boolVal("rate");
+		this.failCountLimit = standaloneDelete.enabled()
+						? Long.MAX_VALUE
+						: configFailCount > 0 ? configFailCount : Long.MAX_VALUE;
+		this.failRateLimitFlag = !standaloneDelete.enabled() && failConfig.boolVal("rate");
 		this.waitOpFinishBeforeStop = opConfig.boolVal("wait-finish");
 		this.waitOpFinishLimit = opConfig.intVal("wait-limit");
 		this.outputDuplicates = opConfig.boolVal("output-duplicates");
-		if (this.listShardMetricsRecorder != ListShardMetricsRecorder.NO_OP) {
-			this.metricsCtx.metadata().put(
-							com.dell.spt.base.metrics.MetricsConstants.METADATA_LIST_SHARD_METRICS,
-							this.listShardMetricsRecorder);
+		this.deleteArtifactRecorder = this.deleteSelectionManifest == null
+						? null
+						: deleteArtifactRecorderFactory.create(
+										id, this.deleteSelectionManifest, standaloneDelete.selected());
+		try {
+			this.deleteTargetOutcomes = standaloneDelete.postVerification()
+							? DeleteOperationalOutcomeLedger.create(standaloneDelete.selected())
+							: null;
+		} catch (final IOException failure) {
+			if (deleteArtifactRecorder != null) {
+				deleteArtifactRecorder.close();
+			}
+			throw new IllegalConfigurationException(
+							"Unable to allocate bounded DELETE operational outcome storage", failure);
+		}
+		try {
+			if (this.listShardMetricsRecorder != ListShardMetricsRecorder.NO_OP) {
+				this.metricsCtx.metadata().put(
+								com.dell.spt.base.metrics.MetricsConstants.METADATA_LIST_SHARD_METRICS,
+								this.listShardMetricsRecorder);
+			}
+			if (this.generator != null) {
+				this.generator.operationLifecycle(this.operationLifecycle);
+			}
+			if (standaloneDelete.enabled()) {
+				this.metricsCtx.metadata().put(
+								com.dell.spt.base.metrics.MetricsConstants.METADATA_DELETE_METRICS,
+								(java.util.function.Supplier<DeleteMetricsSnapshot>) this::deleteMetricsSnapshot);
+				operationLifecycle.dispatchObserver(this::recordStandaloneDeleteDispatch);
+				operationLifecycle.terminalObserver(this::recordStandaloneDeleteTerminal);
+			}
+			this.driver.operationResultOutput(this);
+		} catch (final RuntimeException | Error failure) {
+			if (deleteArtifactRecorder != null) {
+				deleteArtifactRecorder.close();
+			}
+			closeDeleteVerificationStorage();
+			throw failure;
 		}
 	}
 
@@ -324,6 +537,12 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			Loggers.MSG.debug("{}: done after exhausting LIST namespace", id);
 			return true;
 		}
+		if (standaloneDeleteDurationMode && generator.isStopped()) {
+			Loggers.MSG.debug(
+							"{}: done because the standalone DELETE inventory can no longer schedule requests",
+							id);
+			return true;
+		}
 		if (!recycleFlag && allOperationsCompleted()) {
 			Loggers.MSG.debug(
 							"{}: done due to all {} load operations have been completed",
@@ -361,6 +580,16 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			return true;
 		}
 		return false;
+	}
+
+	@Override
+	public long schedulingExhaustedAtNanos() {
+		return generator.schedulingExhaustedAtNanos();
+	}
+
+	@Override
+	public OptionalLong schedulingExhaustionNanos() {
+		return generator.schedulingExhaustionNanos();
 	}
 
 	private boolean isDoneCountLimit() {
@@ -475,11 +704,19 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	public final void operationsResultsOutput(final Output<O> opsResultsOutput) {
+		if (standaloneDeleteEnabled && opsResultsOutput != null) {
+			throw new IllegalConfigurationException(
+							"Standalone DELETE cannot use ordinary successful-item output");
+		}
 		this.opsResultsOutput = opsResultsOutput;
 	}
 
 	@Override
 	public final void operationsMetricsOutput(final Output<O> opsMetricsOutput) {
+		if (standaloneDeleteEnabled && opsMetricsOutput != null) {
+			throw new IllegalConfigurationException(
+							"Standalone DELETE cannot use generic single-item timing output");
+		}
 		this.opsMetricsOutput = opsMetricsOutput;
 	}
 
@@ -491,6 +728,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	@Override
 	public final boolean put(final O opResult) {
 		ThreadContext.put(KEY_STEP_ID, id);
+		if (standaloneDeleteEnabled) {
+			return acceptStandaloneDeleteResult(opResult);
+		}
 		// I/O trace logging
 		if (tracePersistFlag) {
 			Loggers.OP_TRACES.info(new OperationTraceCsvLogMessage<>(opResult));
@@ -594,6 +834,12 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	@Override
 	public final int put(final List<O> opResults, final int from, final int to) {
 		ThreadContext.put(KEY_STEP_ID, id);
+		if (standaloneDeleteEnabled) {
+			for (var i = from; i < to; i++) {
+				acceptStandaloneDeleteResult(opResults.get(i));
+			}
+			return to - from;
+		}
 		// I/O trace logging
 		if (tracePersistFlag) {
 			Loggers.OP_TRACES.info(new OperationTraceCsvBatchLogMessage<>(opResults, from, to));
@@ -617,14 +863,14 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			reqDuration = opResult.duration();
 			respLatency = opResult.latency();
 			timeToFirstByte = timeToFirstByte(opResult);
+			countBytesDone = 0;
+			listOpResult = null;
 			if (opResult instanceof DataOperation) {
 				countBytesDone = ((DataOperation) opResult).countBytesDone();
-				listOpResult = null;
 			} else if (opResult instanceof ListOperation) {
 				listOpResult = (ListOperation<?>) opResult;
 				countBytesDone = listOpResult.bytesListed();
 			} else if (opResult instanceof PathOperation) {
-				listOpResult = null;
 				countBytesDone = ((PathOperation) opResult).countBytesDone();
 			}
 			final boolean recycleEligible;
@@ -937,27 +1183,18 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	/**
-	 * Waits (briefly, boundedly) for any load-op-retry task that's already past
-	 * cancellation (i.e. had already removed itself from {@link #pendingRetries} - and so
-	 * committed to either failing the operation or calling {@link LoadGenerator#retry} -
-	 * before {@link #cancelPendingRetries()} could intercept it) to actually finish. Called
-	 * from {@link #doShutdown()}, before it explicitly stops the generator.
-	 *
-	 * <p>This alone is still not sufficient to guarantee nothing is abandoned: it only
-	 * proves the task's own body - up to and including a {@link LoadGenerator#retry} call
-	 * actually <em>returning</em> - has finished, not that the generator's own work loop
-	 * has since had a chance to run again and drain what that call just enqueued.
-	 * {@link #awaitRetryQueueDrained()}, called right after this, closes that remaining
-	 * window.
+	 * Waits briefly for a retry task which claimed its operation before cancellation to
+	 * observe the closed admission gate and choose its terminal or unattempted outcome.
 	 */
 	private void awaitRetryTasksSettled() {
 		// These tasks run near-instantaneously once started (a single generator.isStopped()
 		// check plus either markOpFailed() or an enqueue) - this closes a narrow scheduling
 		// race, it is not a real drain wait, so a short bound is enough.
-		final long deadline = System.currentTimeMillis() + 1000L;
+		final long deadline = System.currentTimeMillis()
+						+ TimeUnit.SECONDS.toMillis(TASK_STOP_WAIT_SECONDS);
 		while (activeRetryTasks.get() > 0 && System.currentTimeMillis() < deadline) {
 			try {
-				Thread.sleep(1);
+				Thread.sleep(LIFECYCLE_POLL_INTERVAL_MILLIS);
 			} catch (final InterruptedException e) {
 				Thread.currentThread().interrupt();
 				return;
@@ -972,45 +1209,17 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	/**
-	 * Waits (briefly, boundedly) for {@link LoadGenerator#isNothingPendingRetry} to become
-	 * true. Called from {@link #doShutdown()}, after {@link #cancelPendingRetries()} and
-	 * {@link #awaitRetryTasksSettled()} (in that order: by the time this runs, nothing new
-	 * can still be enqueued - every not-yet-started retry has been cancelled, and every
-	 * already-started one has finished calling either {@code markOpFailed} or {@link
-	 * LoadGenerator#retry}), but immediately before the generator is actually stopped.
-	 *
-	 * <p>{@link LoadGenerator#retry} only enqueues - it does not wait for the generator's
-	 * own work loop to hand the operation off to the storage driver. Stopping the
-	 * generator while an already-enqueued retry is still sitting there would abandon it
-	 * forever (it isn't in the recycle queue or anywhere else anything would ever look for
-	 * it again). Once this returns true, though, the operation has been handed to {@code
-	 * opOutput.put()} and is the storage driver's concern from here - exactly like any
-	 * other in-flight operation at the moment a step stops, which {@link #doStop}'s own
-	 * {@code waitOpFinishBeforeStop} logic (a separate, pre-existing concern) already
-	 * covers if configured to.
-	 *
-	 * <p>If the bounded wait times out (the generator is stuck, output is backpressured, a
-	 * throttle keeps denying permits, or the driver simply cannot accept the redispatch),
-	 * waiting longer isn't guaranteed to be productive, but simply giving up and stopping
-	 * the generator anyway would silently strand whatever is still queued - {@link
-	 * #doClose} eventually clears that queue with no terminal outcome ever recorded for it
-	 * (neither retried, nor redispatch attempted, nor counted as failed). So on timeout,
-	 * this drains whatever remains via {@link LoadGenerator#drainPendingRetries} and
-	 * terminal-fails each directly instead, preserving the "exactly one terminal outcome
-	 * per operation" invariant the rest of the retry machinery maintains.
+	 * Compatibility fallback for custom generators whose admission/recovery methods do not
+	 * expose their legacy retry queue. The built-in generator is already empty after
+	 * admission closure and recovery; legacy implementations retain the former bounded
+	 * drain and terminal-failure behavior rather than silently dropping retry work.
 	 */
 	private void awaitRetryQueueDrained() {
-		// The generator's work loop drains its retry queue on every doWork() iteration
-		// (LoadGeneratorImpl#drainRetryQueue), which run continuously and fast - this is
-		// not a real drain-to-completion wait (nothing here waits for the driver to finish
-		// processing it), just long enough for that loop to actually pick it up. A
-		// generator that's already stopped itself for some unrelated reason (e.g. output
-		// EOF) while something was still enqueued will never drain it either, so this is
-		// bounded rather than indefinite.
-		final long deadline = System.currentTimeMillis() + 1000L;
+		final long deadline = System.currentTimeMillis()
+						+ TimeUnit.SECONDS.toMillis(TASK_STOP_WAIT_SECONDS);
 		while (!generator.isNothingPendingRetry() && System.currentTimeMillis() < deadline) {
 			try {
-				Thread.sleep(1);
+				Thread.sleep(LIFECYCLE_POLL_INTERVAL_MILLIS);
 			} catch (final InterruptedException e) {
 				Thread.currentThread().interrupt();
 				return;
@@ -1047,6 +1256,52 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	protected void doStart() throws IllegalStateException {
+		final boolean standaloneDeletePreparationRequired = standaloneDeleteEnabled && driver instanceof StandaloneDeletePreparable;
+		if (!startedOnce.compareAndSet(false, true)) {
+			throw new IllegalStateException(
+							id + ": load-step context instances cannot be restarted; create a new context");
+		}
+		stepShuttingDown.set(false);
+		operationAdmissionClosed.set(false);
+		generatorQueueRecovered.set(false);
+		driverQueueRecovered.set(false);
+		generatorRecoveryPending = null;
+		driverRecoveryPending = null;
+		operationDrainComplete.set(false);
+		durationIntervalStarted.set(false);
+		objectFailureBudgetAdmissionReleased.set(false);
+		deletePreValidationReport.set(null);
+		deletePostVerificationReport.set(null);
+		deletePostVerificationStarted.set(false);
+		deletePostVerificationSkipped.set(false);
+		operationLifecycle.reset();
+		if (standaloneDeleteEnabled) {
+			final long deleteStepStartedEpochNanos = DurationTime.monotonicEpochNanos();
+			final long configuredWorkflowStartedEpochNanos = standaloneDeleteConfig.workflowStartedEpochNanos();
+			deleteWorkflowStartedEpochNanos.set(
+							configuredWorkflowStartedEpochNanos != -1
+											&& configuredWorkflowStartedEpochNanos <= deleteStepStartedEpochNanos
+															? configuredWorkflowStartedEpochNanos
+															: deleteStepStartedEpochNanos);
+			deleteScheduledStartedNanos.set(
+							standaloneDeleteDurationMode
+											|| objectFailureBudgetAdmissionHeld.get()
+											|| standaloneDeletePreparationRequired
+															? 0
+															: System.nanoTime());
+			deleteScheduledDeadlineNanos.set(0);
+			deleteAdmissionClosedNanos.set(0);
+			deleteDrainCompletedNanos.set(0);
+			deleteWorkflowCompletedEpochNanos.set(0);
+			deleteDrainTimestampRecorded.set(false);
+		}
+		if (standaloneDeleteDurationMode
+						|| objectFailureBudgetAdmissionHeld.get()
+						|| standaloneDeletePreparationRequired) {
+			generator.holdAdmission();
+		} else {
+			generator.openAdmission();
+		}
 		try {
 			driver.start();
 		} catch (final RemoteException e) {
@@ -1056,11 +1311,230 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		} catch (final IllegalStateException e) {
 			LogUtil.exception(Level.WARN, e, "{}: failed to start the storage driver \"{}\"", id, driver);
 		}
+		prepareStandaloneDelete();
+		if (!standaloneDeleteDurationMode && !objectFailureBudgetAdmissionHeld.get()) {
+			try {
+				if (standaloneDeletePreparationRequired) {
+					deleteScheduledStartedNanos.set(System.nanoTime());
+					generator.openAdmission();
+				}
+				generator.start();
+			} catch (final IllegalStateException e) {
+				LogUtil.exception(
+								Level.WARN, e, "{}: failed to start the load generator \"{}\"", id, generator);
+			}
+		}
+	}
+
+	private void prepareStandaloneDelete() {
+		if (!standaloneDeleteEnabled || !(driver instanceof StandaloneDeletePreparable preparable)) {
+			return;
+		}
 		try {
+			preparable.prepareStandaloneDelete();
+		} catch (final Throwable preparationFailure) {
+			throwUncheckedIfInterrupted(preparationFailure);
+			try {
+				driver.close();
+			} catch (final Throwable closeFailure) {
+				throwUncheckedIfInterrupted(closeFailure);
+				if (closeFailure != preparationFailure) {
+					preparationFailure.addSuppressed(closeFailure);
+				}
+			}
+			throwUnchecked(preparationFailure);
+		}
+	}
+
+	@Override
+	public final void holdObjectFailureBudgetAdmission() {
+		if (!standaloneDeleteEnabled || standaloneDeleteDurationMode) {
+			return;
+		}
+		if (startedOnce.get()) {
+			throw new IllegalStateException(id + ": object failure-budget admission must be held before start");
+		}
+		objectFailureBudgetAdmissionHeld.set(true);
+	}
+
+	@Override
+	public final void validateDeleteInventoryBeforeAdmission() {
+		if (!standaloneDeleteConfig.preValidation()) {
+			return;
+		}
+		final DeleteVerificationReport report;
+		try {
+			report = DeleteInventoryVerifier.verify(
+							deleteSelectionManifest,
+							standaloneDeleteConfig.selected(),
+							DeleteVerificationPhase.PRE_DELETE,
+							Duration.ofMillis(standaloneDeleteConfig.verificationTimeoutMillis()),
+							(DeleteVerificationProbe) driver);
+		} catch (final Exception failure) {
+			throwUncheckedIfInterrupted(failure);
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.INPUT,
+							id,
+							"Standalone DELETE pre-validation could not complete its full inventory pass",
+							failure);
+		}
+		deletePreValidationReport.set(report);
+		if (!report.successful()) {
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.INPUT,
+							id,
+							"Standalone DELETE strict pre-validation failed for "
+											+ report.failureCount() + " selected identity/identities before timing",
+							null);
+		}
+	}
+
+	@Override
+	public final void verifyDeleteInventoryAfterDrain() {
+		final DeleteVerificationReport preValidation = deletePreValidationReport.get();
+		if (!claimDeletePostVerification(preValidation)) {
+			return;
+		}
+		final DeleteVerificationReport report;
+		try {
+			report = DeleteInventoryVerifier.verify(
+							deleteSelectionManifest,
+							standaloneDeleteConfig.selected(),
+							DeleteVerificationPhase.POST_DELETE,
+							Duration.ofMillis(standaloneDeleteConfig.verificationTimeoutMillis()),
+							(DeleteVerificationProbe) driver);
+		} catch (final Exception failure) {
+			throwUncheckedIfInterrupted(failure);
+			deletePostVerificationStarted.set(false);
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.EXECUTION,
+							id,
+							"Standalone DELETE post-verification could not complete its full inventory pass",
+							failure);
+		}
+		deletePostVerificationReport.set(report);
+		deleteWorkflowCompletedEpochNanos.set(DurationTime.monotonicEpochNanos());
+	}
+
+	private boolean claimDeletePostVerification(final DeleteVerificationReport preValidation) {
+		synchronized (deletePostVerificationPhaseLock) {
+			return standaloneDeleteConfig.postVerification()
+							&& !deletePostVerificationSkipped.get()
+							&& (!standaloneDeleteConfig.preValidation()
+											|| (preValidation != null && preValidation.successful()))
+							&& deletePostVerificationReport.get() == null
+							&& deletePostVerificationStarted.compareAndSet(false, true);
+		}
+	}
+
+	@Override
+	public final void skipDeleteInventoryPostVerificationAfterStrictPreValidationFailure() {
+		if (!standaloneDeleteConfig.preValidation() || !standaloneDeleteConfig.postVerification()) {
+			return;
+		}
+		synchronized (deletePostVerificationPhaseLock) {
+			if (deletePostVerificationStarted.get() || deletePostVerificationReport.get() != null
+							|| deleteFinalVerificationSummary.get() != null) {
+				throw new IllegalStateException(
+								id + ": distributed strict pre-validation abort arrived after post-verification started");
+			}
+			deletePostVerificationSkipped.set(true);
+		}
+	}
+
+	private DeleteVerificationSummary deleteVerificationSummary() {
+		final var finalSummary = deleteFinalVerificationSummary.get();
+		if (finalSummary != null) {
+			return finalSummary;
+		}
+		if (!standaloneDeleteConfig.preValidation() && !standaloneDeleteConfig.postVerification()) {
+			return DeleteVerificationSummary.disabled();
+		}
+		final var summary = DeleteVerificationSummary.classify(
+						standaloneDeleteConfig.preValidation(),
+						standaloneDeleteConfig.postVerification(),
+						standaloneDeleteConfig.verificationTimeoutMillis(),
+						deletePreValidationReport.get(),
+						deletePostVerificationReport.get(),
+						standaloneDeleteConfig.selected(),
+						deleteTargetOutcomes);
+		return deletePostVerificationSkipped.get()
+						? summary.withPostVerificationSkipped()
+						: summary;
+	}
+
+	private DeleteVerificationSummary finalizeDeleteVerificationSummary() {
+		synchronized (deleteFinalVerificationSummary) {
+			var finalSummary = deleteFinalVerificationSummary.get();
+			if (finalSummary == null) {
+				finalSummary = deleteVerificationSummary();
+				deleteFinalVerificationSummary.set(finalSummary);
+			}
+			return finalSummary;
+		}
+	}
+
+	@Override
+	public final void releaseObjectFailureBudgetAdmission() {
+		if (!standaloneDeleteEnabled || standaloneDeleteDurationMode) {
+			return;
+		}
+		operationAdmissionCloseLock.lock();
+		try {
+			if (!objectFailureBudgetAdmissionHeld.get()) {
+				return;
+			}
+			if (objectFailureBudgetAdmissionReleased.get()) {
+				return;
+			}
+			if (!startedOnce.get() || stepShuttingDown.get() || operationAdmissionClosed.get()) {
+				throw new IllegalStateException(
+								id + ": object failure-budget admission closed before the controller release");
+			}
+			final long releasedNanos = System.nanoTime();
+			deleteScheduledStartedNanos.set(releasedNanos);
+			generator.openAdmission();
 			generator.start();
-		} catch (final IllegalStateException e) {
-			LogUtil.exception(
-							Level.WARN, e, "{}: failed to start the load generator \"{}\"", id, generator);
+			objectFailureBudgetAdmissionReleased.set(true);
+		} finally {
+			operationAdmissionCloseLock.unlock();
+		}
+	}
+
+	@Override
+	public final void startDurationInterval(
+					final long startNanos, final long deadlineNanos) {
+		if (!DurationTime.isPositiveRange(startNanos, deadlineNanos)) {
+			throw new IllegalArgumentException("duration interval requires a positive monotonic range");
+		}
+		operationAdmissionCloseLock.lock();
+		try {
+			if (!standaloneDeleteDurationMode || durationIntervalStarted.get()) {
+				return;
+			}
+			final long releasedNanos = System.nanoTime();
+			if (stepShuttingDown.get()
+							|| operationAdmissionClosed.get()
+							|| DurationTime.deadlineReached(deadlineNanos, releasedNanos)) {
+				throw new IllegalStateException(
+								id + ": duration scheduling release missed its absolute worker deadline");
+			}
+			deleteScheduledStartedNanos.set(releasedNanos);
+			deleteScheduledDeadlineNanos.set(deadlineNanos);
+			operationLifecycle.enforceDispatchDeadline(deadlineNanos);
+			enforceDispatchedOperationsDeadlineForStepStop(DurationTime.deadlineAfter(
+							deadlineNanos,
+							TimeUnit.SECONDS.toNanos(Math.max(0, waitOpFinishLimit))));
+			generator.openAdmissionUntil(deadlineNanos);
+			if (DurationTime.deadlineReached(deadlineNanos, System.nanoTime())) {
+				generator.closeAdmission();
+				throw new IllegalStateException(
+								id + ": duration scheduling release crossed its absolute worker deadline");
+			}
+			generator.start();
+			durationIntervalStarted.set(true);
+		} finally {
+			operationAdmissionCloseLock.unlock();
 		}
 	}
 
@@ -1121,38 +1595,595 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	@Override
-	protected final void doShutdown() {
-		// Set before anything else runs here (including cancelPendingRetries()): the
-		// earliest, most authoritative signal available that a scheduled retry task can
-		// check to terminal-fail instead of calling generator.retry() - see that flag's
-		// own field comment and scheduleRetry()'s javadoc. Cheaper and more direct than
-		// relying solely on generator.isStopped(), which only becomes true a few lines
-		// below and doesn't by itself prove the generator will get to drain a
-		// just-enqueued retry (see awaitRetryTasksSettled()'s javadoc).
+	public final OperationLifecycleSnapshot<O> operationLifecycle() {
+		return operationLifecycle.snapshot();
+	}
+
+	@Override
+	public final DeleteObjectLifecycleSnapshot deleteObjectLifecycle() {
+		if (!standaloneDeleteEnabled) {
+			return DeleteObjectLifecycleSnapshot.empty();
+		}
+		final var operationSnapshot = operationLifecycle.snapshot();
+		final var selected = Math.addExact(
+						generator.consumedItemCount(), generator.aggregateUnattemptedItemCount());
+		final var terminalCounters = deleteObjectLifecycleCounters.snapshot();
+		final var accepted = terminalCounters.accepted();
+		final var failed = terminalCounters.failed();
+		final var unattempted = Math.addExact(
+						deleteTargetCount(operationSnapshot.unattemptedOperations()),
+						generator.aggregateUnattemptedItemCount());
+		final var unresolved = deleteTargetCount(operationSnapshot.unresolvedOperations());
+		final var attempted = accepted + failed + unresolved;
+		final var reconciled = selected == accepted + failed + unattempted + unresolved
+						&& attempted == accepted + failed + unresolved;
+		final var verification = deleteVerificationSummary();
+		return new DeleteObjectLifecycleSnapshot(
+						selected,
+						attempted,
+						accepted,
+						failed,
+						unattempted,
+						unresolved,
+						terminalCounters.protocolFailed(),
+						terminalCounters.fullSuccessfulRequests(),
+						verification.preValidationFailures(),
+						verification.correctnessFailures(),
+						verification.inconclusiveFailures(),
+						reconciled);
+	}
+
+	@Override
+	public final DeletePhaseTimingSnapshot deletePhaseTiming() {
+		if (!standaloneDeleteEnabled) {
+			return DeletePhaseTimingSnapshot.empty();
+		}
+		final long started = deleteScheduledStartedNanos.get();
+		final long admissionClosed = deleteAdmissionClosedNanos.get();
+		final long drainCompleted = deleteDrainCompletedNanos.get();
+		final boolean schedulingStarted = standaloneDeleteDurationMode
+						? durationIntervalStarted.get()
+						: startedOnce.get();
+		if (!schedulingStarted || !operationAdmissionClosed.get()) {
+			return DeletePhaseTimingSnapshot.empty();
+		}
+		final long scheduledBoundary = scheduledDeleteBoundaryNanos(started, admissionClosed);
+		final long drainBoundary = deleteDrainTimestampRecorded.get()
+						? drainCompleted
+						: scheduledBoundary;
+		return new DeletePhaseTimingSnapshot(
+						DurationTime.elapsedNanos(started, scheduledBoundary),
+						DurationTime.elapsedNanos(scheduledBoundary, drainBoundary));
+	}
+
+	private long currentScheduledDeleteNanos() {
+		return currentScheduledDeleteNanos(System.nanoTime());
+	}
+
+	long currentScheduledDeleteNanos(final long currentNanos) {
+		final long started = deleteScheduledStartedNanos.get();
+		final boolean schedulingStarted = standaloneDeleteDurationMode
+						? durationIntervalStarted.get()
+						: startedOnce.get();
+		if (!schedulingStarted) {
+			return 0;
+		}
+		final long admissionClosed = deleteAdmissionClosedNanos.get();
+		final long observedBoundary;
+		if (operationAdmissionClosed.get()) {
+			observedBoundary = admissionClosed;
+		} else {
+			observedBoundary = currentNanos;
+		}
+		final long scheduledBoundary = scheduledDeleteBoundaryNanos(started, observedBoundary);
+		return DurationTime.elapsedNanos(started, scheduledBoundary);
+	}
+
+	private long scheduledDeleteBoundaryNanos(
+					final long started, final long observedBoundary) {
+		if (standaloneDeleteDurationMode) {
+			final long scheduledDeadline = deleteScheduledDeadlineNanos.get();
+			return DurationTime.deadlineReached(scheduledDeadline, observedBoundary)
+							? scheduledDeadline
+							: observedBoundary;
+		}
+		final var schedulingExhaustion = generator.schedulingExhaustionNanos();
+		if (schedulingExhaustion.isPresent()) {
+			final long exhaustedAt = schedulingExhaustion.getAsLong();
+			if (DurationTime.deadlineReached(started, exhaustedAt)
+							&& DurationTime.deadlineReached(exhaustedAt, observedBoundary)) {
+				return exhaustedAt;
+			}
+		}
+		return observedBoundary;
+	}
+
+	@Override
+	public final void validateTerminalState() {
+		if (!standaloneDeleteEnabled) {
+			return;
+		}
+		final var verification = deleteVerificationSummary();
+		if (standaloneDeleteConfig.preValidation()
+						&& !verification.preValidationComplete()) {
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.EXECUTION,
+							id,
+							"Standalone DELETE pre-validation evidence is incomplete",
+							null);
+		}
+		if (standaloneDeleteConfig.postVerification()
+						&& !verification.postVerificationSkipped()
+						&& (!standaloneDeleteConfig.preValidation()
+										|| verification.preValidationFailures() == 0)
+						&& !verification.postVerificationComplete()) {
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.EXECUTION,
+							id,
+							"Standalone DELETE post-verification evidence is incomplete",
+							null);
+		}
+		if (verification.requiresFailedTerminalOutcome()) {
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.EXECUTION,
+							id,
+							"Standalone DELETE post-verification reported correctness or inconclusive failures",
+							null);
+		}
+		final var objects = deleteObjectLifecycle();
+		if (objects.unresolved() > 0) {
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.EXECUTION,
+							id,
+							"Standalone DELETE has " + objects.unresolved()
+											+ " unresolved object identity/identities after the configured "
+											+ waitOpFinishLimit + "-second drain bound",
+							null);
+		}
+		if (!objects.reconciled()) {
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.EXECUTION,
+							id,
+							"Standalone DELETE terminal object lifecycle does not reconcile",
+							null);
+		}
+	}
+
+	private boolean acceptStandaloneDeleteResult(final O operation) {
+		if (!(operation instanceof DeleteRequestOperation)) {
+			throw new IllegalStateException(
+							"Standalone DELETE result output received a non-DELETE-request operation");
+		}
+		return true;
+	}
+
+	private void recordStandaloneDeleteTerminal(final O operation) {
+		if (!(operation instanceof DeleteRequestOperation deleteOperation)) {
+			throw new IllegalStateException(
+							"Standalone DELETE terminal lifecycle received a non-DELETE-request operation");
+		}
+		if (deleteOperation.deleteResult() == null) {
+			deleteOperation.completeDelete(null);
+		}
+		final var result = deleteOperation.deleteResult();
+		deleteObjectLifecycleCounters.recordTerminal(result);
+		if (deleteTargetOutcomes != null) {
+			for (final var targetResult : result.targetResults()) {
+				final long selectionIndex = targetResult.target().selectionIndex();
+				if (selectionIndex >= 0 && selectionIndex < standaloneDeleteConfig.selected()) {
+					deleteTargetOutcomes.markTerminal(
+									selectionIndex,
+									targetResult.outcome() == DeleteTargetOutcome.ACCEPTED);
+				}
+			}
+		}
+		final var metrics = resolveMetrics(operation.type());
+		final long requestDuration = standaloneDeleteRequestDuration(deleteOperation);
+		final long requestLatency = standaloneDeleteRequestLatency(deleteOperation);
+		if (Status.SUCC.equals(result.operationStatus())) {
+			metrics.markSucc(
+							0,
+							requestDuration,
+							requestLatency,
+							timeToFirstByte(operation));
+		} else {
+			metrics.markFail(requestDuration, requestLatency);
+		}
+		counterResults.increment();
+		if (deleteArtifactRecorder != null) {
+			deleteArtifactRecorder.recordTerminal(deleteOperation);
+		}
+	}
+
+	private static long standaloneDeleteRequestLatency(final DeleteRequestOperation operation) {
+		final long requestLatency = operation.transportRequestLatency();
+		if (requestLatency <= 0) {
+			return 0;
+		}
+		return standaloneDeleteRequestDuration(operation) >= requestLatency
+						? requestLatency
+						: 0;
+	}
+
+	private static long standaloneDeleteRequestDuration(final DeleteRequestOperation operation) {
+		final long requestStart = operation.reqTimeStart();
+		final long responseDone = operation.respTimeDone();
+		return requestStart > 0 && responseDone > requestStart ? responseDone - requestStart : 0;
+	}
+
+	private void recordStandaloneDeleteDispatch(final O operation) {
+		if (!(operation instanceof DeleteRequestOperation deleteOperation)) {
+			throw new IllegalStateException(
+							"Standalone DELETE dispatch lifecycle received a non-DELETE-request operation");
+		}
+		deleteObjectLifecycleCounters.recordDispatch(
+						deleteOperation.deleteRequest(), standaloneDeleteConfig.batchSize());
+		if (deleteTargetOutcomes != null) {
+			for (final var target : deleteOperation.deleteRequest().targets()) {
+				final long selectionIndex = target.selectionIndex();
+				if (selectionIndex >= 0 && selectionIndex < standaloneDeleteConfig.selected()) {
+					deleteTargetOutcomes.markDispatched(selectionIndex);
+				}
+			}
+		}
+	}
+
+	private DeleteMetricsSnapshot deleteMetricsSnapshot() {
+		if (!standaloneDeleteEnabled) {
+			return null;
+		}
+		final var objects = deleteObjectLifecycle();
+		final var requests = operationLifecycle.snapshot();
+		final var counters = deleteObjectLifecycleCounters.snapshot();
+		final boolean frozenSelection = standaloneDeleteConfig.frozenSelectionAvailable();
+		if (!frozenSelection && counters.attemptedObjects() != objects.selected()) {
+			// Dispatch counters cannot classify the version or bucket identity of an unread
+			// manifest suffix. Omit detail until every selected identity is represented instead
+			// of fabricating current/exact-version or overflow counts.
+			return null;
+		}
+		final var phaseTiming = deletePhaseTiming();
+		final long selectedObjects = standaloneDeleteConfig.selected() >= 0
+						? standaloneDeleteConfig.selected()
+						: objects.selected();
+		final double elapsedSeconds = currentScheduledDeleteNanos()
+						/ (double) TimeUnit.SECONDS.toNanos(1);
+		final double requestsPerSecond = elapsedSeconds > 0
+						? counters.attemptedRequests() / elapsedSeconds
+						: 0.0;
+		final double objectsPerSecond = elapsedSeconds > 0
+						? counters.attemptedObjects() / elapsedSeconds
+						: 0.0;
+		final long operationalFailedObjects = Math.subtractExact(
+						objects.failed(), objects.protocolFailed());
+		final var verification = deleteVerificationSummary();
+		final var preReport = deletePreValidationReport.get();
+		final var postReport = deletePostVerificationReport.get();
+		final long preValidationNanos = preReport == null ? -1 : preReport.elapsedNanos();
+		final long postVerificationNanos = postReport == null ? -1 : postReport.elapsedNanos();
+		final long seedNanos = optionalPhaseNanos(standaloneDeleteConfig.seedMillis());
+		final long discoveryNanos = optionalPhaseNanos(standaloneDeleteConfig.discoveryMillis());
+		final long totalWallNanos = currentDeleteWorkflowNanos();
+		final boolean scheduledPhaseMeasured = operationAdmissionClosed.get();
+		final boolean drainAndTotalMeasured = deleteDrainTimestampRecorded.get();
+		final var builder = DeleteMetricsSnapshot.builder(standaloneDeleteConfig.batchSize())
+						.identity(
+										standaloneDeleteConfig.batchSize() == 1
+														? DELETE_IDENTITY_MODE_SINGLE
+														: DELETE_IDENTITY_MODE_BATCH,
+										standaloneDeleteConfig.selectionOrder())
+						.requests(
+										counters.attemptedRequests(),
+										counters.fullSuccessfulRequests(),
+										counters.partialRequests(),
+										counters.failedRequests(),
+										requests.unresolved(),
+										requestsPerSecond)
+						.objects(
+										selectedObjects,
+										counters.attemptedObjects(),
+										objects.accepted(),
+										objects.failed(),
+										objects.unattempted(),
+										objects.unresolved(),
+										objectsPerSecond)
+						.batches(
+										counters.attemptedRequests(),
+										counters.attemptedObjects(),
+										counters.fullBatchRequests(),
+										counters.partialBatchRequests())
+						.versions(
+										frozenSelection
+														? standaloneDeleteConfig.selectedCurrentKey()
+														: counters.currentKeyTargets(),
+										frozenSelection
+														? standaloneDeleteConfig.selectedExactVersion()
+														: counters.exactVersionTargets())
+						.phases(
+										seedNanos,
+										discoveryNanos,
+										preValidationNanos,
+										scheduledPhaseMeasured ? phaseTiming.scheduledNanos() : -1,
+										drainAndTotalMeasured ? phaseTiming.drainNanos() : -1,
+										postVerificationNanos,
+										-1,
+										drainAndTotalMeasured ? totalWallNanos : -1)
+						.failurePolicy(
+										deleteFailurePolicy.mode().wireValue(),
+										deleteFailurePolicy.maxFailedObjects(),
+										deleteFailurePolicy.maxFailurePercent(),
+										deleteFailurePolicy.grace().toSeconds(),
+										operationalFailedObjects,
+										objects.protocolFailed())
+						.verification(verification)
+						.reconciled(objects.reconciled());
+
+		final var bucketMetrics = new TreeMap<String, long[]>();
+		standaloneDeleteConfig.selectedBuckets().forEach(
+						(name, selected) -> bucketMetrics.put(name, new long[]{selected, 0, 0, 0
+						}));
+		counters.buckets().forEach((name, counts) -> {
+			final long[] values = bucketMetrics.computeIfAbsent(
+							name, ignored -> new long[]{
+									standaloneDeleteConfig.selectedBuckets().isEmpty() ? counts.attempted() : 0,
+									0, 0, 0
+			});
+			values[1] = counts.attempted();
+			values[2] = counts.accepted();
+			values[3] = counts.failed();
+		});
+		long selectedByBucket = bucketMetrics.values().stream().mapToLong(values -> values[0]).sum();
+		if (selectedByBucket < selectedObjects) {
+			final long[] overflow = bucketMetrics.computeIfAbsent(
+							DeleteMetricsSnapshot.OVERFLOW_BUCKET, ignored -> new long[4]);
+			overflow[0] = Math.addExact(overflow[0], selectedObjects - selectedByBucket);
+		}
+		bucketMetrics.forEach((name, values) -> builder.bucket(
+						name, values[0], values[1], values[2], values[3]));
+		return builder.build();
+	}
+
+	private static long optionalPhaseNanos(final long millis) {
+		return millis < 0 ? -1 : TimeUnit.MILLISECONDS.toNanos(millis);
+	}
+
+	private long currentDeleteWorkflowNanos() {
+		if (!startedOnce.get()) {
+			return 0;
+		}
+		final long boundary = deleteDrainTimestampRecorded.get()
+						? deleteWorkflowCompletedEpochNanos.get()
+						: DurationTime.monotonicEpochNanos();
+		return DurationTime.elapsedNanos(deleteWorkflowStartedEpochNanos.get(), boundary);
+	}
+
+	private static long deleteTargetCount(final List<? extends Operation<?>> operations) {
+		return operations.stream()
+						.filter(DeleteRequestOperation.class::isInstance)
+						.map(DeleteRequestOperation.class::cast)
+						.mapToLong(operation -> operation.deleteRequest().targets().size())
+						.sum();
+	}
+
+	/** Closes both admission gates without recovering or draining queued work. */
+	private void closeOperationAdmission() {
+		operationAdmissionCloseLock.lock();
+		try {
+			if (operationAdmissionClosed.get()) {
+				return;
+			}
+			try {
+				// Close the downstream gate first. A generator handoff which already started
+				// may be blocked in an extension's Output implementation; closing the driver's
+				// atomic gate first prevents that handoff from crossing dispatch while allowing
+				// generator admission closure and recovery to remain bounded.
+				driver.closeAdmission();
+			} finally {
+				try {
+					generator.closeAdmission();
+				} finally {
+					// Compatibility backstop for generators whose closeAdmission() predates the
+					// default implementation or is supplied by a mocking/proxy framework.
+					generator.stop();
+				}
+			}
+			if (standaloneDeleteEnabled) {
+				deleteAdmissionClosedNanos.set(System.nanoTime());
+			}
+			operationAdmissionClosed.set(true);
+		} finally {
+			operationAdmissionCloseLock.unlock();
+		}
+	}
+
+	/** Recovers work which remained before the actual driver-dispatch boundary. */
+	private synchronized void recoverQueuedOperations() {
+		RuntimeException recoveryFailure = null;
+		if (!generatorQueueRecovered.get()) {
+			try {
+				if (generatorRecoveryPending == null) {
+					generatorRecoveryPending = recoveryBatch(generator.recoverBufferedOperations());
+				}
+				recoveryFailure = markPendingUnattempted(generatorRecoveryPending);
+				if (generatorRecoveryPending.isEmpty()) {
+					generatorRecoveryPending = null;
+					generatorQueueRecovered.set(true);
+				}
+			} catch (final RuntimeException failure) {
+				recoveryFailure = appendRecoveryFailure(recoveryFailure, failure);
+			}
+		}
+		if (!driverQueueRecovered.get()) {
+			try {
+				if (driverRecoveryPending == null) {
+					driverRecoveryPending = recoveryBatch(driver.recoverQueuedOperations());
+				}
+				recoveryFailure = appendRecoveryFailure(
+								recoveryFailure, markPendingUnattempted(driverRecoveryPending));
+				if (driverRecoveryPending.isEmpty()) {
+					driverRecoveryPending = null;
+					driverQueueRecovered.set(true);
+				}
+			} catch (final RuntimeException failure) {
+				recoveryFailure = appendRecoveryFailure(recoveryFailure, failure);
+			}
+		}
+		if (recoveryFailure != null) {
+			throw recoveryFailure;
+		}
+	}
+
+	private void prepareOperationDrain() {
 		stepShuttingDown.set(true);
-		// Order matters, and all three of these must run *before* generator.stop() below,
-		// not in doStop(): the public stop() lifecycle is stop() -> shutdown() (->
-		// doShutdown(), which is what stops the generator) -> doStop(), i.e. doShutdown()
-		// runs first. A retry task that fires right around here can already have removed
-		// itself from pendingRetries and be about to call generator.retry() -
-		// cancelPendingRetries() alone (a doStop()-only fix in an earlier version of this
-		// code) runs too late to catch that: it would find nothing left to cancel, and the
-		// generator would already be stopped by the time doStop() got a chance to look,
-		// silently abandoning the redispatch in LoadGeneratorImpl's retryQueue forever.
-		// Doing this here, before generator.stop(), ensures any such in-flight task is
-		// either intercepted before it starts (cancelPendingRetries()), or given the
-		// chance to finish calling generator.retry() (awaitRetryTasksSettled()), or - since
-		// that alone only proves the *call* returned, not that the generator's own work
-		// loop has since drained what it just enqueued - given the chance to actually do
-		// that draining too (awaitRetryQueueDrained()).
+		closeOperationAdmission();
 		cancelPendingRetries();
 		awaitRetryTasksSettled();
+		recoverQueuedOperations();
 		awaitRetryQueueDrained();
-		try (final Instance ctx = CloseableThreadContext.put(KEY_STEP_ID, id)
-						.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
-			generator.stop();
-			Loggers.MSG.debug("{}: load generator \"{}\" stopped", id, generator.toString());
+	}
+
+	@Override
+	public final void closeOperationAdmissionForStepStop() {
+		stepShuttingDown.set(true);
+		closeOperationAdmission();
+	}
+
+	@Override
+	public final void recoverQueuedOperationsForStepStop() {
+		prepareOperationDrain();
+	}
+
+	@Override
+	public final void enforceDispatchedOperationsDeadlineForStepStop(
+					final long deadlineNanos) {
+		operationLifecycle.enforceTerminalDeadline(deadlineNanos);
+	}
+
+	@Override
+	public final void expireDispatchedOperationsDeadlineForStepStop() {
+		operationLifecycle.expireTerminalDeadline();
+	}
+
+	@Override
+	public final void drainDispatchedOperationsForStepStop(final long deadlineNanos) {
+		prepareOperationDrain();
+		drainDispatchedOperations(deadlineNanos);
+	}
+
+	private void drainDispatchedOperations() {
+		final long startedAt = System.nanoTime();
+		final long waitNanos = TimeUnit.SECONDS.toNanos(Math.max(0, waitOpFinishLimit));
+		drainDispatchedOperations(DurationTime.deadlineAfter(startedAt, waitNanos));
+	}
+
+	private synchronized void drainDispatchedOperations(final long deadlineNanos) {
+		if (operationDrainComplete.get()) {
+			return;
 		}
+		final long startedAt = System.nanoTime();
+		try {
+			if (operationLifecycle.isEnabled()) {
+				try {
+					if (waitOpFinishBeforeStop) {
+						awaitOutstanding(() -> operationLifecycle.inFlightCount() > 0, deadlineNanos);
+					}
+				} finally {
+					operationLifecycle.resolveOutstandingAsUnresolved();
+				}
+			} else if (waitOpFinishBeforeStop) {
+				// Third-party drivers which do not expose lifecycle information retain the
+				// historical active-concurrency wait behavior.
+				awaitOutstanding(() -> activeOpCount() != 0, deadlineNanos);
+			}
+			operationDrainComplete.set(true);
+		} finally {
+			if (standaloneDeleteEnabled && !deleteDrainTimestampRecorded.get()) {
+				deleteDrainCompletedNanos.set(System.nanoTime());
+				deleteWorkflowCompletedEpochNanos.set(DurationTime.monotonicEpochNanos());
+				deleteDrainTimestampRecorded.set(true);
+			}
+			final var snapshot = operationLifecycle.snapshot();
+			Loggers.MSG.debug(
+							"{}: lifecycle stop complete after {} ms: unattempted={}, terminal={}, unresolved={}",
+							id,
+							TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt),
+							snapshot.unattempted(),
+							snapshot.terminal(),
+							snapshot.unresolved());
+			if (standaloneDeleteDurationMode) {
+				final var phaseTiming = deletePhaseTiming();
+				Loggers.MSG.info(
+								"{}: standalone DELETE phase timing: scheduled={} ms, drain={} ms",
+								id,
+								TimeUnit.NANOSECONDS.toMillis(phaseTiming.scheduledNanos()),
+								TimeUnit.NANOSECONDS.toMillis(phaseTiming.drainNanos()));
+			}
+		}
+	}
+
+	private void awaitOutstanding(final BooleanSupplier outstanding, final long deadlineNanos) {
+		while (outstanding.getAsBoolean()
+						&& !DurationTime.deadlineReached(deadlineNanos, System.nanoTime())) {
+			try {
+				Thread.sleep(LIFECYCLE_POLL_INTERVAL_MILLIS);
+			} catch (final InterruptedException e) {
+				throwUnchecked(e);
+			}
+		}
+	}
+
+	private List<O> recoveryBatch(final List<O> recovered) {
+		return recovered == null ? new ArrayList<>() : new ArrayList<>(recovered);
+	}
+
+	private RuntimeException markPendingUnattempted(final List<O> pending) {
+		RuntimeException recoveryFailure = null;
+		int retainedCount = 0;
+		// Compact failures into the prefix, then clear the processed tail once. Removing
+		// each successful ArrayList element while scanning would make large queue recovery quadratic.
+		for (int readIndex = 0; readIndex < pending.size(); readIndex++) {
+			final O operation = pending.get(readIndex);
+			try {
+				operationLifecycle.unattempted(operation);
+			} catch (final RuntimeException failure) {
+				pending.set(retainedCount++, operation);
+				recoveryFailure = appendRecoveryFailure(recoveryFailure, failure);
+			}
+		}
+		pending.subList(retainedCount, pending.size()).clear();
+		return recoveryFailure;
+	}
+
+	private RuntimeException appendRecoveryFailure(
+					final RuntimeException currentFailure, final RuntimeException nextFailure) {
+		if (nextFailure == null) {
+			return currentFailure;
+		}
+		if (currentFailure == null) {
+			return nextFailure;
+		}
+		if (currentFailure != nextFailure) {
+			currentFailure.addSuppressed(nextFailure);
+		}
+		return currentFailure;
+	}
+
+	private void verifyDeleteInventoryForDirectLifecycle() {
+		// Pre-validation is a distributed barrier. Its post phase is therefore started
+		// only by the controller after every slice has passed; a worker-local shutdown
+		// must not race a global strict-pre abort into issuing HEAD requests.
+		if (!standaloneDeleteConfig.preValidation()) {
+			verifyDeleteInventoryAfterDrain();
+		}
+	}
+
+	@Override
+	protected final void doShutdown() {
+		// Close both admission gates before retry settlement or recovery. Only operations
+		// already past actual driver dispatch remain drain-eligible.
+		prepareOperationDrain();
+		drainDispatchedOperations();
+		verifyDeleteInventoryForDirectLifecycle();
 		try (final Instance ctx = CloseableThreadContext.put(KEY_STEP_ID, id)
 						.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			driver.shutdown();
@@ -1164,30 +2195,30 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	protected final void doStop() throws IllegalStateException {
-		// Defensive backstop, not the primary fix: doShutdown() above already does this
-		// before generator.stop(), which is the ordering that actually matters for the
-		// public stop() lifecycle (stop() -> shutdown() -> doStop(), so doShutdown() runs
-		// *first*). Kept here too in case something calls doStop() directly without a
-		// preceding doShutdown() (as some unit tests do, exercising doStop()'s own
-		// behavior in isolation) - harmless to call twice, since both are no-ops once
-		// pendingRetries/activeRetryTasks/the generator's retry queue are already empty.
-		cancelPendingRetries();
-		awaitRetryTasksSettled();
-		awaitRetryQueueDrained();
-		if (waitOpFinishBeforeStop) {
-			var i = 0;
-			var sleep = 1000;
-			for (; ((activeOpCount() != 0) && !Thread.currentThread().isInterrupted()) && ((i * sleep) / 1000D < waitOpFinishLimit); i++) {
-				try {
-					Thread.sleep(sleep);
-				} catch (InterruptedException e) {
-					Loggers.MSG.debug("couldn't put context thread {} to sleep or was interrupted", this);
-				}
+		// Defensive backstop for direct doStop() lifecycles which bypass doShutdown().
+		prepareOperationDrain();
+		drainDispatchedOperations();
+		verifyDeleteInventoryForDirectLifecycle();
+		finalizeDeleteVerificationSummary();
+
+		RuntimeException artifactFailure = null;
+		if (deleteArtifactRecorder != null) {
+			try {
+				deleteArtifactRecorder.finish(
+								operationLifecycle.snapshot(),
+								deleteMetricsSnapshot(),
+								deletePreValidationReport.get(),
+								deletePostVerificationReport.get());
+			} catch (final RuntimeException failure) {
+				artifactFailure = failure;
 			}
-			Loggers.MSG.info("{}: waited {}s for ops to finish (active count = {})", id, i, activeOpCount());
 		}
+		artifactFailure = appendRecoveryFailure(artifactFailure, closeDeleteVerificationStorage());
 
 		driver.stop();
+		if (artifactFailure != null) {
+			throw artifactFailure;
+		}
 
 		if (latestSuccOpResultByItem != null && opsResultsOutput != null) {
 			try {
@@ -1261,6 +2292,34 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		}
 
 		Loggers.MSG.debug("{}: interrupted the load step context", id);
+	}
+
+	private RuntimeException closeDeleteVerificationStorage() {
+		RuntimeException failure = null;
+		for (final DeleteVerificationReport report : new DeleteVerificationReport[]{
+				deletePreValidationReport.get(), deletePostVerificationReport.get()
+		}) {
+			if (report == null) {
+				continue;
+			}
+			try {
+				report.close();
+			} catch (final IOException closeFailure) {
+				failure = appendRecoveryFailure(
+								failure,
+								new IllegalStateException("Failed to release DELETE verification evidence", closeFailure));
+			}
+		}
+		if (deleteTargetOutcomes != null) {
+			try {
+				deleteTargetOutcomes.close();
+			} catch (final IOException closeFailure) {
+				failure = appendRecoveryFailure(
+								failure,
+								new IllegalStateException("Failed to release DELETE operational outcome storage", closeFailure));
+			}
+		}
+		return failure;
 	}
 
 	private void markListSuccess(
@@ -1350,6 +2409,12 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		if (options != null && options.includeVersions()) {
 			return false;
 		}
+		// Integrity discovery is a destructive-operation safety boundary. Keep its verified
+		// startup partition immutable instead of issuing blocking adaptive probes from this
+		// completion callback or accepting a later server-provided namespace partition.
+		if (immutableListRootPrefix != null) {
+			return false;
+		}
 		// Only consider ENUMERATE shards for splitting
 		final ListShard.Kind kind = shard.kind();
 		if (kind != null && kind != ListShard.Kind.ENUMERATE) {
@@ -1384,7 +2449,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			splitWindows.remove(prefix);
 			return false;
 		}
-
 		// Idle/backlog gate: only attempt a split probe when we appear to need more work.
 		// Heuristic: if current concurrency is at the configured limit, workers are saturated;
 		// skip probing to avoid stealing cycles from productive listing.
@@ -1500,6 +2564,16 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		return true;
 	}
 
+	private static String canonicalListPrefix(final String prefix) {
+		if (prefix == null) {
+			return null;
+		}
+		if (prefix.isEmpty() || "/".equals(prefix)) {
+			return "";
+		}
+		return prefix.startsWith("/") ? prefix.substring(1) : prefix;
+	}
+
 	private static String longestCommonPrefix(final String a, final String b) {
 		if (a == null || b == null) {
 			return "";
@@ -1520,6 +2594,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				listShardMetricsRecorder.emitSummary(id);
 			}
 			generator.close();
+			if (deleteArtifactRecorder != null) {
+				deleteArtifactRecorder.close();
+			}
 			try {
 				driver.close();
 			} catch (final IOException e) {

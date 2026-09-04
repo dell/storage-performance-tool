@@ -6,6 +6,7 @@ import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.ItemType;
+import com.dell.spt.base.item.op.deletion.StandaloneDeleteSelection;
 import com.dell.spt.base.integrity.IntegrityConfig;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.io.IntegrityOperationManifestOutput;
@@ -81,6 +82,7 @@ public class LinearLoadStepLocal
 		initMetrics(originIndex, opType, concurrencyLimit, metricsConfig, itemDataSize, outputColorFlag);
 
 		final Config itemConfig = config.configVal("item");
+		StandaloneDeleteSelection.ensureFrozen(loadConfig, itemConfig);
 		final Config dataConfig = itemConfig.configVal("data");
 		final Config dataInputConfig = dataConfig.configVal("input");
 		final Config dataLayerConfig = dataInputConfig.configVal("layer");
@@ -129,14 +131,21 @@ public class LinearLoadStepLocal
 					}
 					final LoadGenerator generator = generatorBuilder.build();
 					final var shardMetrics = generatorBuilder.listShardMetricsRecorder();
+					final boolean metadataMode = IntegrityConfig.fromStorage(storageConfig).enabled();
+					final String immutableListRootPrefix = metadataMode && OpType.LIST.equals(opType)
+									? itemConfig.configVal("naming").stringVal("prefix")
+									: null;
 					final LoadStepContext stepCtx = new LoadStepContextImpl<>(
 									testStepId,
 									generator,
 									driver,
 									metricsContexts.get(0),
+									null,
 									loadConfig,
 									outputConfig.boolVal("metrics-trace-persist"),
-									shardMetrics);
+									shardMetrics,
+									immutableListRootPrefix,
+									itemConfig);
 					stepContexts.add(stepCtx);
 
 					final String itemOutputFile = itemConfig.stringVal("output-file");
@@ -145,14 +154,17 @@ public class LinearLoadStepLocal
 						if (Files.exists(itemOutputPath)) {
 							Loggers.ERR.warn("Items output file \"{}\" already exists", itemOutputPath);
 						}
-						final boolean metadataMode = IntegrityConfig.fromStorage(storageConfig).enabled();
 						try {
 							final Output itemOutput;
 							if (metadataMode) {
 								final String bucketPath = OpType.CREATE.equals(opType)
 												? itemConfig.configVal("output").stringVal("path")
 												: itemConfig.configVal("input").stringVal("path");
-								itemOutput = new IntegrityOperationManifestOutput<>(itemOutputPath, bucketPath, opType);
+								final String requestedListPrefix = OpType.LIST.equals(opType)
+												? itemConfig.configVal("naming").stringVal("prefix")
+												: null;
+								itemOutput = new IntegrityOperationManifestOutput<>(
+												itemOutputPath, bucketPath, opType, requestedListPrefix);
 							} else {
 								itemOutput = new ItemInfoFileOutput<>(itemOutputPath);
 							}

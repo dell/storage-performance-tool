@@ -65,6 +65,22 @@ func ValidateCompletion(manifestPath, completionPath string, runID int64, produc
 	)
 }
 
+// ValidateFetchedCompletion validates a completion record after result fetching has added a
+// step-scoped filename prefix. The producer identity remains bound by the hash-bound record itself.
+func ValidateFetchedCompletion(manifestPath, completionPath, artifact string) (Completion, error) {
+	marker, err := readCompletionRecord(completionPath)
+	if err != nil {
+		return marker, err
+	}
+	if marker.ProducerID == "" || (marker.ProducerKind != "engine_step" && marker.ProducerKind != "cli_stager") {
+		return marker, fmt.Errorf("completion producer identity is unsupported")
+	}
+	err = validateCompletionRecord(
+		manifestPath, marker, marker.RunID, marker.ProducerKind, marker.ProducerID, artifact, false,
+	)
+	return marker, err
+}
+
 func validateCompletionForPromotion(
 	manifestPath, completionPath string,
 	runID int64,

@@ -16,6 +16,15 @@ const (
 	flagDeferVerification            = "defer-verification"
 	flagIntegrityRuntimeIdentityTier = "integrity-runtime-identity-tier"
 	flagVersions                     = "versions"
+	flagDeleteBatchSize              = "delete-batch-size"
+	flagDeleteExisting               = "delete-existing"
+	flagAllowEmptyPrefix             = "allow-empty-prefix"
+	flagMaxFailedObjects             = "max-failed-objects"
+	flagMaxFailurePercent            = "max-failure-percent"
+	flagFailureBudgetGrace           = "failure-budget-grace"
+	flagValidateInventory            = "validate-inventory"
+	flagVerifyDelete                 = "verify"
+	flagVerificationTimeout          = "verification-timeout"
 )
 
 // Workload type constants

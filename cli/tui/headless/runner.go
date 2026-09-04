@@ -9,11 +9,13 @@ package headless
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -24,6 +26,8 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/tui"
 )
+
+const notAvailableDisplay = "N/A"
 
 // HeadlessRunner manages headless execution of spt benchmarks
 //
@@ -156,6 +160,8 @@ type MultiHostHeadlessRunner struct {
 	orchestrator           *tui.MultiHostOrchestrator
 	traceFile              *os.File
 	verbose                bool
+	jsonMode               bool
+	metricsOnly            bool
 	delegateNormalShutdown bool
 	expectedStepIDs        []string
 	launchHooks            tui.LaunchHooks
@@ -166,6 +172,8 @@ func NewMultiHostHeadlessRunner(orchestrator *tui.MultiHostOrchestrator, options
 	runner := &MultiHostHeadlessRunner{
 		orchestrator:           orchestrator,
 		verbose:                options.Verbose,
+		jsonMode:               options.JSONMode,
+		metricsOnly:            options.MetricsOnly,
 		delegateNormalShutdown: options.DelegateNormalShutdown,
 		expectedStepIDs:        append([]string(nil), options.ExpectedStepIDs...),
 		launchHooks:            options.LaunchHooks,
@@ -222,14 +230,34 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 		return fmt.Errorf("register session resource finalizer: %w", err)
 	}
 	testOrchestrator.SetExpectedStepIDs(r.expectedStepIDs)
+	testOrchestrator.SetCallbacks(
+		func(status *tui.TestStatus) {
+			if status != nil && !r.metricsOnly {
+				r.output("STATUS", fmt.Sprintf("Test %s - %s", status.State, status.Message))
+			}
+		},
+		r.outputMetricsUpdate,
+		func(line string) {
+			if !r.metricsOnly {
+				r.output("SPT", line)
+			}
+		},
+		func(message string) {
+			r.output("ERROR", message)
+		},
+	)
 	// Standardize progress output in headless mode as well
 	r.orchestrator.SetNotifier(func(msg string) {
-		r.output("spt", msg)
+		if !r.metricsOnly {
+			r.output("spt", msg)
+		}
 	})
 	// In headless mode, ensure entry-node relay and progress messages are echoed.
 	// Route message sink lines (entry logs and [spt] messages) to stdout/trace.
 	testOrchestrator.SetMessageSink(func(msg string) {
-		r.output("spt", msg)
+		if !r.metricsOnly {
+			r.output("spt", msg)
+		}
 	})
 	var err error
 	if scenarioContent != nil {
@@ -270,6 +298,7 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 
 	// Wait for completion or interruption
 	err = <-done
+	completionErr := testOrchestrator.CompletionError()
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			r.output("SHUTDOWN", "Auto-terminate deadline reached")
@@ -282,11 +311,14 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 		if stopErr := testOrchestrator.StopTest(); stopErr != nil {
 			return fmt.Errorf("stop multi-host presentation monitoring: %w", stopErr)
 		}
+		if completionErr != nil {
+			return completionErr
+		}
 		r.output("SHUTDOWN", "Normal completion detected; RunSession owns evidence and resource finalization")
 		return nil
 	} else if r.delegateNormalShutdown {
 		r.output("SHUTDOWN", "Normal completion detected; auto-results will fetch artifacts and stop containers")
-		return nil
+		return completionErr
 	}
 
 	if r.launchHooks.SessionManaged() {
@@ -305,7 +337,7 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 		r.output("SHUTDOWN", "All containers stopped successfully")
 	}
 
-	return multiHostShutdownResult(err, stopErr)
+	return multiHostShutdownResult(errors.Join(err, completionErr), stopErr)
 }
 
 func multiHostShutdownResult(runErr, stopErr error) error {
@@ -350,6 +382,72 @@ func (r *MultiHostHeadlessRunner) output(category, message string) {
 		// Best-effort logging; ignore write/sync errors
 		_, _ = r.traceFile.WriteString(output + "\n") //nolint:errcheck
 		_ = r.traceFile.Sync()                        //nolint:errcheck
+	}
+}
+
+func (r *MultiHostHeadlessRunner) outputMetricsUpdate(update *tui.MultiNodeMetricsUpdate) {
+	if update == nil || !metricsOutputEnabled(r.verbose, r.jsonMode, r.metricsOnly) {
+		return
+	}
+	if update.Aggregated != nil {
+		r.outputMetricView("aggregate", "", update.Aggregated)
+	}
+	if len(update.PerOpType) > 1 {
+		operations := make([]string, 0, len(update.PerOpType))
+		for operation := range update.PerOpType {
+			operations = append(operations, operation)
+		}
+		sort.Strings(operations)
+		for _, operation := range operations {
+			r.outputMetricView("operation", operation, update.PerOpType[operation])
+		}
+	}
+	contributors := make([]string, 0, len(update.PerNode))
+	for contributor := range update.PerNode {
+		contributors = append(contributors, contributor)
+	}
+	sort.Strings(contributors)
+	for _, contributor := range contributors {
+		r.outputMetricView("node", contributor, update.PerNode[contributor])
+	}
+}
+
+func metricsOutputEnabled(verbose, jsonMode, metricsOnly bool) bool {
+	return verbose || jsonMode || metricsOnly
+}
+
+func (r *MultiHostHeadlessRunner) outputMetricView(
+	view, contributor string, metric *tui.PerformanceMetric,
+) {
+	if metric == nil {
+		return
+	}
+	if r.jsonMode {
+		encoded, err := marshalMetricsJSON(*metric, view, contributor)
+		if err != nil {
+			r.output("METRICS", fmt.Sprintf("failed to encode metrics JSON: %v", err))
+			return
+		}
+		r.outputJSONLine(encoded)
+		return
+	}
+	label := "view=" + view
+	if contributor != "" {
+		if view == "operation" {
+			label += " operation=" + contributor
+		} else {
+			label += " contributor=" + contributor
+		}
+	}
+	r.output("METRICS", label+" "+formatMetricsMessage(*metric))
+}
+
+func (r *MultiHostHeadlessRunner) outputJSONLine(encoded []byte) {
+	line := string(encoded)
+	fmt.Println(line)
+	if r.traceFile != nil {
+		_, _ = r.traceFile.WriteString(line + "\n") //nolint:errcheck
+		_ = r.traceFile.Sync()                      //nolint:errcheck
 	}
 }
 
@@ -525,33 +623,7 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 			}
 		},
 		// Metrics updates from API
-		func(update *tui.MultiNodeMetricsUpdate) {
-			if update != nil && update.Aggregated != nil {
-				metric := update.Aggregated
-				if r.jsonMode {
-					r.outputMetricsJSON(*metric)
-				} else {
-					r.outputMetrics(*metric)
-				}
-
-				// Show per-op breakdown when multiple op types are present
-				if len(update.PerOpType) > 1 {
-					for _, opMetric := range update.PerOpType {
-						if r.jsonMode {
-							r.outputMetricsJSON(*opMetric)
-						} else {
-							r.outputMetrics(*opMetric)
-						}
-					}
-				}
-
-				// Log successful parsing
-				logging.LogMetricsParsing("received API metrics in headless mode",
-					"success", true,
-					"ops_per_sec", metric.OpsPerSec,
-					"source", "multi-node-api")
-			}
-		},
+		r.outputMetricsUpdate,
 		// Container output (display only; metrics are sourced from JSON endpoint)
 		func(line string) {
 			if !r.metricsOnly {
@@ -589,8 +661,12 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 	case <-r.orchestrator.CompletionCh():
 	case <-r.launchHooks.WorkloadTerminal():
 	}
+	completionErr := r.orchestrator.CompletionError()
 	if r.launchHooks.SessionManaged() {
 		r.output("COMPLETE", "Presentation completed; RunSession owns evidence and resource finalization")
+		if completionErr != nil {
+			return completionErr
+		}
 		return ctx.Err()
 	}
 
@@ -613,8 +689,41 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 		r.output("INFO", "Keeping input scenario file: %s", scenarioPath)
 	}
 
+	if completionErr != nil {
+		r.output("ERROR", "Benchmark failed: %v", completionErr)
+		return completionErr
+	}
 	r.output("COMPLETE", "Benchmark completed")
 	return nil
+}
+
+func (r *HeadlessRunner) outputMetricsUpdate(update *tui.MultiNodeMetricsUpdate) {
+	if update == nil || update.Aggregated == nil ||
+		!metricsOutputEnabled(r.verbose, r.jsonMode, r.metricsOnly) {
+		return
+	}
+	metric := update.Aggregated
+	if r.jsonMode {
+		r.outputMetricsJSON(*metric)
+	} else {
+		r.outputMetrics(*metric)
+	}
+
+	// Show per-op breakdown when multiple op types are present.
+	if len(update.PerOpType) > 1 {
+		for _, opMetric := range update.PerOpType {
+			if r.jsonMode {
+				r.outputMetricsJSON(*opMetric)
+			} else {
+				r.outputMetrics(*opMetric)
+			}
+		}
+	}
+
+	logging.LogMetricsParsing("received API metrics in headless mode",
+		"success", true,
+		"ops_per_sec", metric.OpsPerSec,
+		"source", "multi-node-api")
 }
 
 func stopLocalAfterLaunchError(orchestrator *tui.TestOrchestrator, hooks tui.LaunchHooks) error {
@@ -644,40 +753,103 @@ func (r *HeadlessRunner) output(category, format string, args ...interface{}) {
 
 // outputMetrics outputs parsed metrics in human-readable format
 func (r *HeadlessRunner) outputMetrics(metric tui.PerformanceMetric) {
+	r.output("METRICS", "%s", formatMetricsMessage(metric))
+}
+
+func formatMetricsMessage(metric tui.PerformanceMetric) string {
+	if metric.Delete != nil {
+		latency := formatOptionalMicros(deleteTimingMicros(metric.Delete.Timing.Latency))
+		return fmt.Sprintf("ops/sec=%d latency=%s type=%s success=%d failed=%d",
+			metric.OpsPerSec, latency, metric.OpType, metric.SuccessCount, metric.FailedCount)
+	}
 	format := "ops/sec=%d latency=%dµs type=%s success=%d concurrency=%.1f"
 	args := []interface{}{metric.OpsPerSec, metric.MeanLatency, metric.OpType, metric.SuccessCount, metric.ConcurrencyMean}
 	if metric.HasTTFB {
 		format = "ops/sec=%d latency=%dµs ttfb=%dµs type=%s success=%d concurrency=%.1f"
 		args = []interface{}{metric.OpsPerSec, metric.MeanLatency, metric.MeanTTFB, metric.OpType, metric.SuccessCount, metric.ConcurrencyMean}
 	}
-	r.output("METRICS", format, args...)
+	return fmt.Sprintf(format, args...)
+}
+
+func deleteTimingMicros(stat *tui.JSONTimingStat) *int64 {
+	if stat == nil || stat.Count <= 0 {
+		return nil
+	}
+	value := stat.P50Us
+	return &value
+}
+
+func formatOptionalMicros(value *int64) string {
+	if value == nil {
+		return notAvailableDisplay
+	}
+	return fmt.Sprintf("%dµs", *value)
 }
 
 // outputMetricsJSON outputs parsed metrics in JSON format
 func (r *HeadlessRunner) outputMetricsJSON(metric tui.PerformanceMetric) {
-	timestamp := time.Now().Format("2006-01-02T15:04:05.000Z")
-	jsonLine := fmt.Sprintf(`{"timestamp":"%s","type":"metrics","data":{"ops_per_sec":%d,"latency_us":%d,"operation_type":"%s","success_count":%d,"failed_count":%d,"concurrency":%.1f}}`,
-		timestamp,
-		metric.OpsPerSec,
-		metric.MeanLatency,
-		metric.OpType,
-		metric.SuccessCount,
-		metric.FailedCount,
-		metric.ConcurrencyMean,
-	)
-	if metric.HasTTFB {
-		jsonLine = fmt.Sprintf(`{"timestamp":"%s","type":"metrics","data":{"ops_per_sec":%d,"latency_us":%d,"ttfb_us":%d,"operation_type":"%s","success_count":%d,"failed_count":%d,"concurrency":%.1f}}`,
-			timestamp,
-			metric.OpsPerSec,
-			metric.MeanLatency,
-			metric.MeanTTFB,
-			metric.OpType,
-			metric.SuccessCount,
-			metric.FailedCount,
-			metric.ConcurrencyMean,
-		)
+	encoded, err := marshalMetricsJSON(metric, "", "")
+	if err != nil {
+		r.output("METRICS", "failed to encode metrics JSON: %v", err)
+		return
 	}
+	r.outputJSONLine(encoded)
+}
 
+func marshalMetricsJSON(metric tui.PerformanceMetric, view, contributor string) ([]byte, error) {
+	timestamp := time.Now().Format("2006-01-02T15:04:05.000Z")
+	var ttfb *int64
+	if metric.HasTTFB {
+		value := metric.MeanTTFB
+		ttfb = &value
+	}
+	payload := struct {
+		Timestamp   string `json:"timestamp"`
+		Type        string `json:"type"`
+		View        string `json:"view,omitempty"`
+		Contributor string `json:"contributor,omitempty"`
+		Operation   string `json:"operation,omitempty"`
+		Data        struct {
+			OpsPerSec           int64              `json:"ops_per_sec"`
+			LatencyUS           *int64             `json:"latency_us"`
+			TTFBUS              *int64             `json:"ttfb_us,omitempty"`
+			Operation           string             `json:"operation_type"`
+			SuccessCount        int64              `json:"success_count"`
+			FailedCount         int64              `json:"failed_count"`
+			Concurrency         float64            `json:"concurrency"`
+			Partial             bool               `json:"partial"`
+			NodesCount          int                `json:"nodes_count"`
+			NodesPresent        []string           `json:"nodes_present"`
+			ContributorsPresent []string           `json:"contributors_present"`
+			Delete              *tui.DeleteMetrics `json:"delete,omitempty"`
+		} `json:"data"`
+	}{Timestamp: timestamp, Type: "metrics", View: view}
+	if view == "operation" {
+		payload.Operation = contributor
+	} else {
+		payload.Contributor = contributor
+	}
+	payload.Data.OpsPerSec = metric.OpsPerSec
+	latency := metric.MeanLatency
+	payload.Data.LatencyUS = &latency
+	if metric.Delete != nil {
+		payload.Data.LatencyUS = deleteTimingMicros(metric.Delete.Timing.Latency)
+	}
+	payload.Data.TTFBUS = ttfb
+	payload.Data.Operation = metric.OpType
+	payload.Data.SuccessCount = metric.SuccessCount
+	payload.Data.FailedCount = metric.FailedCount
+	payload.Data.Concurrency = metric.ConcurrencyMean
+	payload.Data.Partial = metric.Partial
+	payload.Data.NodesCount = metric.NodesCount
+	payload.Data.NodesPresent = append([]string(nil), metric.NodesPresent...)
+	payload.Data.ContributorsPresent = append([]string(nil), metric.ContributorsPresent...)
+	payload.Data.Delete = metric.Delete
+	return json.Marshal(payload)
+}
+
+func (r *HeadlessRunner) outputJSONLine(encoded []byte) {
+	jsonLine := string(encoded)
 	fmt.Println(jsonLine)
 
 	if r.traceFile != nil {

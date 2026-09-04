@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/config"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/integrityplan"
@@ -49,11 +51,16 @@ const (
 	flagPrefixShards          = "prefix-shards"
 	itemNamingShardsPath      = "item.naming.shards"
 	prefixShardsAuto          = -1
+	deleteAllDiscoveredLabel  = "all discovered identities (unbounded)"
 )
 
 // resolvePortConflictFunc is a test seam for port conflict resolution.
 // In production it points to portcheck.ResolvePortConflict; tests can override.
 var resolvePortConflictFunc = portcheck.ResolvePortConflict
+
+// validateRunWorkloadTypeFunc keeps command-path tests behind the same workload gate as
+// production while allowing prerelease workload slices to exercise later safety seams.
+var validateRunWorkloadTypeFunc = ValidateWorkloadType
 
 type autoResultsRunTracker interface {
 	WaitForCompletion(context.Context, []string) (*portcheck.RunResult, error)
@@ -88,6 +95,8 @@ type autoResultsOutcome struct {
 	Tracker              *portcheck.RunResult
 	TrackerErr           error
 	ArtifactErr          error
+	DeleteMetricsErr     error
+	DeleteTerminalErr    error
 	Finalization         *integrity.FinalizeOutcome
 	FinalizationErr      error
 	ObservedCorruptCount *int64
@@ -192,6 +201,160 @@ func recordTrackedStepLifecycles(metadata *runMetadata, result *portcheck.RunRes
 	}
 }
 
+func captureStoredDeleteMetrics(
+	ctx context.Context,
+	baseURL string,
+	expectedRunID int64,
+	runtimeStepIDs []string,
+	metadata *runMetadata,
+) (captureErr error) {
+	if metadata == nil || metadata.WorkloadType != WorkloadTypeDelete {
+		return nil
+	}
+	defer func() {
+		if captureErr != nil {
+			metadata.DeleteMetrics = nil
+			metadata.DeleteMetricsError = captureErr.Error()
+		} else {
+			metadata.DeleteMetricsError = ""
+		}
+	}()
+	expectedDeleteSteps, err := bindRuntimeDeleteSteps(metadata.ExpectedStepIDs, runtimeStepIDs)
+	if err != nil {
+		return fmt.Errorf("capture terminal DELETE metrics: %w", err)
+	}
+	metadata.DeleteArtifactStepIDs = append([]string(nil), expectedDeleteSteps...)
+	expectedContributorIDs, err := expectedDeleteContributorIDs(metadata)
+	if err != nil {
+		return fmt.Errorf("capture terminal DELETE metrics: %w", err)
+	}
+	captured, err := captureDeleteMetricsFunc(
+		ctx, baseURL, expectedRunID, expectedDeleteSteps, expectedContributorIDs,
+		len(expectedContributorIDs) == 1)
+	if err != nil {
+		return fmt.Errorf("capture terminal DELETE metrics: %w", err)
+	}
+	if len(captured) != len(expectedDeleteSteps) {
+		return fmt.Errorf(
+			"capture terminal DELETE metrics: captured %d of %d expected steps",
+			len(captured), len(expectedDeleteSteps))
+	}
+	for _, stepID := range expectedDeleteSteps {
+		if captured[stepID] == nil {
+			return fmt.Errorf("capture terminal DELETE metrics: expected step %q is missing", stepID)
+		}
+	}
+	metadata.DeleteMetrics = captured
+	return nil
+}
+
+func terminalDeleteOutcomeError(metrics map[string]*deletemetrics.Metrics) error {
+	failedSteps := make([]string, 0)
+	verificationFailedSteps := make([]string, 0)
+	for stepID, metric := range metrics {
+		if metric != nil && metric.FailurePolicy.Outcome == deletemetrics.OutcomeFailed {
+			if deletemetrics.HasVerificationFailure(metric.Verification) {
+				verificationFailedSteps = append(verificationFailedSteps, stepID)
+			} else {
+				failedSteps = append(failedSteps, stepID)
+			}
+		}
+	}
+	if len(failedSteps) == 0 && len(verificationFailedSteps) == 0 {
+		return nil
+	}
+	sort.Strings(failedSteps)
+	sort.Strings(verificationFailedSteps)
+	parts := make([]string, 0, 2)
+	if len(verificationFailedSteps) > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"DELETE verification failed for step(s): %s",
+			strings.Join(verificationFailedSteps, ", ")))
+	}
+	if len(failedSteps) > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"DELETE failure policy rejected terminal outcome for step(s): %s",
+			strings.Join(failedSteps, ", ")))
+	}
+	return errors.New(strings.Join(parts, "; "))
+}
+
+func expectedDeleteContributorIDs(metadata *runMetadata) ([]string, error) {
+	if metadata == nil {
+		return nil, fmt.Errorf("expected DELETE contributor identity is unavailable")
+	}
+	if metadata.deleteContributors != nil {
+		contributorIDs, err := metadata.deleteContributors()
+		if err != nil {
+			return nil, fmt.Errorf("resolve DELETE contributor identity: %w", err)
+		}
+		if len(contributorIDs) == 0 {
+			return nil, fmt.Errorf("expected DELETE contributor identity is unavailable")
+		}
+		return append([]string(nil), contributorIDs...), nil
+	}
+	if len(metadata.Hosts) == 1 {
+		return []string{constants.MetricsLocalContributorID}, nil
+	}
+	return nil, fmt.Errorf("expected DELETE contributor identity is unavailable for fleet capture")
+}
+
+// bindRuntimeDeleteSteps binds the planned DELETE role to runtime identity by
+// stable scenario ordinal. Runtime timestamps may differ from the generated
+// plan, so planned IDs must never be used when discovery evidence is present.
+func bindRuntimeDeleteSteps(plannedStepIDs, runtimeStepIDs []string) ([]string, error) {
+	plannedDeleteNumbers := make([]int, 0, 1)
+	plannedDeletes := make([]string, 0, 1)
+	for _, stepID := range plannedStepIDs {
+		stepID = strings.TrimSpace(stepID)
+		if !strings.HasSuffix(strings.ToLower(stepID), "-delete") {
+			continue
+		}
+		number, ok := integrityplan.RuntimeStepNumber(stepID)
+		if !ok {
+			return nil, fmt.Errorf("planned DELETE step identity %q has no stable ordinal", stepID)
+		}
+		plannedDeleteNumbers = append(plannedDeleteNumbers, number)
+		plannedDeletes = append(plannedDeletes, stepID)
+	}
+	if len(plannedDeletes) == 0 {
+		return nil, fmt.Errorf("expected DELETE step identity is unavailable")
+	}
+	if len(runtimeStepIDs) == 0 {
+		return plannedDeletes, nil
+	}
+	byNumber := make(map[int]string, len(runtimeStepIDs))
+	seen := make(map[string]struct{}, len(runtimeStepIDs))
+	for _, stepID := range runtimeStepIDs {
+		stepID = strings.TrimSpace(stepID)
+		if stepID == "" {
+			return nil, fmt.Errorf("runtime step identity is empty")
+		}
+		if _, duplicate := seen[stepID]; duplicate {
+			return nil, fmt.Errorf("runtime step identity %q is duplicated", stepID)
+		}
+		seen[stepID] = struct{}{}
+		number, ok := integrityplan.RuntimeStepNumber(stepID)
+		if !ok {
+			continue
+		}
+		if existing, conflict := byNumber[number]; conflict {
+			return nil, fmt.Errorf(
+				"runtime step identities %q and %q conflict for ordinal %d", existing, stepID, number)
+		}
+		byNumber[number] = stepID
+	}
+	bound := make([]string, 0, len(plannedDeletes))
+	for i, number := range plannedDeleteNumbers {
+		stepID := byNumber[number]
+		if stepID == "" {
+			return nil, fmt.Errorf("runtime evidence is missing planned DELETE step %q", plannedDeletes[i])
+		}
+		bound = append(bound, stepID)
+	}
+	return bound, nil
+}
+
 // markDiscoveredStoppedStepsStarted reconciles runtime discovery with a
 // STOPPED status carrier. The engine's top-level status may not name the
 // scenario step, while metrics discovery only reports steps which actually
@@ -289,6 +452,7 @@ var (
 	startAutoResultsFunc          = startAutoResultsMonitor
 	discoverStepIDsFunc           = results.DiscoverStepIDsForRunContext
 	discoverFleetStepIDsFunc      = results.DiscoverFleetStepIDsForRunContext
+	captureDeleteMetricsFunc      = results.CaptureTerminalDeleteMetricsForRunContext
 	newResultsFetcherFunc         = func(baseURL, outputDir string) autoResultsFetcher {
 		return &fetcherAdapter{results.NewFetcher(baseURL, outputDir)}
 	}
@@ -303,7 +467,9 @@ var integrityRuntimeGOOS = runtime.GOOS
 const integritySupportedGOOS = "linux"
 
 func prepareExternalItemFilesForRun(params scenario.Params) (scenario.Params, error) {
-	if scenario.IsIntegrityWorkload(params) && integrityRuntimeGOOS != integritySupportedGOOS {
+	if (scenario.IsIntegrityWorkload(params) ||
+		(params.WorkloadType == WorkloadTypeDelete && params.ItemsFile != "")) &&
+		integrityRuntimeGOOS != integritySupportedGOOS {
 		return params, fmt.Errorf(
 			"%s is unsupported on %s: crash-durable verification evidence requires "+
 				"a parent-directory synchronization primitive; use the Linux CLI",
@@ -679,6 +845,14 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			if metadata != nil {
 				metadata.ActualStepIDs = append([]string(nil), stepIDs...)
 				metadata.DiscoveredStepIDs = uniqueStepIDs(metadata.DiscoveredStepIDs, runtimeStepIDs)
+				if captureErr := captureStoredDeleteMetrics(
+					artifactCtx, baseURL, expectedRunID, runtimeStepIDs, metadata,
+				); captureErr != nil {
+					outcome.DeleteMetricsErr = captureErr
+					outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, captureErr)
+				} else {
+					outcome.DeleteTerminalErr = terminalDeleteOutcomeError(metadata.DeleteMetrics)
+				}
 				if err := writeRunMetadata(metadata, root); err != nil {
 					logging.LogError("auto-results", "write run metadata", err, "dest", root)
 				}
@@ -994,6 +1168,61 @@ func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, recei
 		}
 	}
 	return nil
+}
+
+func resolveRunCompletionError(
+	runErr error, outcome autoResultsOutcome, received bool, params scenario.Params,
+) error {
+	if params.WorkloadType == scenario.WorkloadTypeDelete {
+		var reasons []string
+		var causes []error
+		if outcome.DeleteMetricsErr != nil {
+			reasons = append(reasons, "terminal DELETE metrics are incomplete: "+outcome.DeleteMetricsErr.Error())
+			causes = append(causes, outcome.DeleteMetricsErr)
+		}
+		if outcome.DeleteTerminalErr != nil {
+			reasons = append(reasons, outcome.DeleteTerminalErr.Error())
+			causes = append(causes, outcome.DeleteTerminalErr)
+		}
+		if outcome.TrackerErr != nil {
+			reasons = append(reasons, "completion tracking: "+outcome.TrackerErr.Error())
+			causes = append(causes, outcome.TrackerErr)
+		}
+		cleanupOnlyFailure := outcome.Tracker != nil &&
+			params.Cleanup &&
+			outcome.Tracker.FinalState == constants.StateFailed &&
+			scenario.IsSeededDeleteCleanupStepID(outcome.Tracker.FailureStepID)
+		if outcome.Tracker != nil && outcome.Tracker.FinalState != constants.StateCompleted && !cleanupOnlyFailure {
+			if outcome.Tracker.FinalState == constants.StateFailed {
+				reasons = append(reasons, fmt.Sprintf(
+					"step %s failed (%s): %s",
+					outcome.Tracker.FailureStepID,
+					outcome.Tracker.FailureCategory,
+					outcome.Tracker.FailureMessage))
+			} else {
+				reasons = append(reasons, fmt.Sprintf(
+					"engine terminal state is %s", outcome.Tracker.FinalState))
+			}
+		} else if received && outcome.Tracker == nil {
+			reasons = append(reasons, "terminal engine status was not captured")
+		}
+		if len(reasons) == 0 {
+			if cleanupOnlyFailure &&
+				(runErr == nil || runcontrol.IsOnlyOwnedEngineTerminalFailure(runErr)) {
+				return nil
+			}
+			return runErr
+		}
+		if runErr != nil {
+			reasons = append(reasons, "run also failed: "+runErr.Error())
+			causes = append(causes, runErr)
+		}
+		return &ExitCodeError{
+			Code: constants.ExitCodeWorkloadFailure, Msg: strings.Join(reasons, "; "),
+			Cause: errors.Join(causes...),
+		}
+	}
+	return resolveVerificationRunError(runErr, outcome, received, params)
 }
 
 // uniqueStepIDs merges ordered slices of step IDs, removing duplicates and empty entries.
@@ -1392,7 +1621,7 @@ func joinFallbackPreparedCleanup(
 var runCmd = &cobra.Command{
 	Use:   "run <type>",
 	Short: "Executes a benchmark test with a specified workload type.",
-	Long: `The 'run' command executes a benchmark test. The <type> argument specifies the workload.
+	Long: fmt.Sprintf(`The 'run' command executes a benchmark test. The <type> argument specifies the workload.
 
 Available workload types:
   write: Perform a write-only test, creating new objects.
@@ -1401,9 +1630,17 @@ Available workload types:
   write-verify: Write and verify every successful object, or defer readback for later campaigns.
   read-verify: Verify self-verifying objects from discovery or --items-file.
   mixed: Perform a test with a specified mix of read and write operations.
-  delete: Perform a test to measure object deletion performance.
+  delete: Measure DeleteObject or DeleteObjects performance against a frozen inventory.
   mock: Run a mock test using the dummy-mock driver (no S3 endpoint required).
-  tables: Benchmark S3 Tables (Iceberg) operations: TPS, compaction, or catalog discovery.`,
+  tables: Benchmark S3 Tables (Iceberg) operations: TPS, compaction, or catalog discovery.
+
+DELETE is destructive. With no source flag it safely seeds a run-owned namespace, then deletes
+that frozen inventory. --items-file selects an explicit canonical manifest. Existing data is
+eligible only with --delete-existing plus an exact --bucket and explicitly supplied --prefix;
+whole-bucket selection additionally requires --allow-empty-prefix. DELETE defaults to %d
+seeded %s objects, batches %d targets per logical request, and does not verify removal unless
+--verify or --validate-inventory enables verification.`, constants.DefaultSeedObjectCount,
+		scenario.DefaultDeleteObjectSize, scenario.DefaultDeleteBatchSize),
 	Args:         cobra.ExactArgs(1), // Enforce that exactly one argument (workload type) is provided
 	SilenceUsage: true,               // Suppress usage on runtime errors; validation will re-enable
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
@@ -1420,7 +1657,7 @@ Available workload types:
 		workloadType := args[0]
 
 		// Validate workload type
-		if err := ValidateWorkloadType(workloadType); err != nil {
+		if err := validateRunWorkloadTypeFunc(workloadType); err != nil {
 			return err
 		}
 
@@ -1430,9 +1667,14 @@ Available workload types:
 			return err
 		}
 
-		if workloadType == WorkloadTypeWriteVerify || workloadType == WorkloadTypeReadVerify {
+		// Every public run emits schema-v4 metrics, whose distributed identity contract
+		// requires a run and cluster ID. Preserve an identity supplied by a replay or
+		// imported caller and allocate only when this command created fresh parameters.
+		if params.RunID <= 0 {
 			params.RunID = time.Now().UnixMilli()
 		}
+		writeDeleteSeedConcurrencyWarning(cmd.ErrOrStderr(), params)
+		writeDeleteExistingSafetyWarning(cmd.ErrOrStderr(), params)
 
 		// Seed size warning for read workloads
 		if workloadType == WorkloadTypeRead {
@@ -1459,6 +1701,9 @@ Available workload types:
 		scenarioContent := string(prepared.ScenarioJS())
 		expectedStepIDs := prepared.ExpectedStepIDs()
 		verificationRun := scenario.IsIntegrityWorkload(params)
+		if params.WorkloadType == WorkloadTypeDelete && params.SelectionOrder == scenario.SelectionOrderCanonical {
+			fmt.Println("DELETE selection order: canonical. Cross-tool comparisons may be affected by input ordering.")
+		}
 		for _, notice := range integrityCostNotices(params) {
 			fmt.Println(notice)
 		}
@@ -1655,6 +1900,7 @@ Available workload types:
 				metadata.RuntimeIdentity = &evidence
 			})
 			multiHostOrchestrator.SetIntegrityRuntimeIdentityTier(integrityIdentityTier)
+			metadata.deleteContributors = multiHostOrchestrator.MetricContributorIDs
 		}
 		var runSession *runcontrol.Session
 		if resultsOpts.AutoResults {
@@ -1766,7 +2012,7 @@ Available workload types:
 			if err != nil {
 				return fmt.Errorf("failed to connect to required hosts: %w", err)
 			}
-			if verificationRun {
+			if scenario.RequiresIntegrityRuntimeIdentity(params) {
 				if _, err := prepareDistributedIntegrityRuntimeIdentityFunc(ctx, orchestrator, sptImage); err != nil {
 					return err
 				}
@@ -1796,20 +2042,22 @@ Available workload types:
 				if autoTerminated {
 					waitForAutoResults()
 					finalizeTraceArtifact()
-					return resolveVerificationRunError(normalizedErr, autoOutcome, autoOutcomeReceived, params)
+					return resolveRunCompletionError(normalizedErr, autoOutcome, autoOutcomeReceived, params)
 				}
 				waitForAutoResults()
 				finalizeTraceArtifact()
-				return resolveVerificationRunError(normalizedErr, autoOutcome, autoOutcomeReceived, params)
+				return resolveRunCompletionError(normalizedErr, autoOutcome, autoOutcomeReceived, params)
 			}
 
 			fmt.Printf("Starting multi-host TUI...\n\n")
 			if autoTerminate > 0 {
 				fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
 			}
+			verbose, _ := cmd.Flags().GetBool("verbose")
 			err = startMultiHostTUIRunFunc(
 				orchestrator, sptImage, scenarioPath, params, tui.RunOptions{
 					Context:              runContext,
+					Verbose:              verbose,
 					AutoTerminateSeconds: autoTerminate,
 					SetSummarySink:       setSummarySink,
 					TracePath:            traceOpts.Path,
@@ -1823,7 +2071,7 @@ Available workload types:
 			}
 			waitForAutoResults()
 			finalizeTraceArtifact()
-			return resolveVerificationRunError(err, autoOutcome, autoOutcomeReceived, params)
+			return resolveRunCompletionError(err, autoOutcome, autoOutcomeReceived, params)
 		}
 
 		// Single host mode (existing logic)
@@ -1850,7 +2098,7 @@ Available workload types:
 			}
 			waitForAutoResults()
 			finalizeTraceArtifact()
-			return resolveVerificationRunError(err, autoOutcome, autoOutcomeReceived, params)
+			return resolveRunCompletionError(err, autoOutcome, autoOutcomeReceived, params)
 		}
 
 		fmt.Printf("Starting TUI...\n\n")
@@ -1858,9 +2106,11 @@ Available workload types:
 		if autoTerminate > 0 {
 			fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
 		}
+		verbose, _ := cmd.Flags().GetBool("verbose")
 		err = startLocalTUIRunFunc(
 			sptImage, scenarioPath, params, tui.RunOptions{
 				Context:              runContext,
+				Verbose:              verbose,
 				APIPort:              apiPort,
 				NetworkMode:          networkMode,
 				ResultsRoot:          plannedResultsRoot,
@@ -1877,7 +2127,7 @@ Available workload types:
 		}
 		waitForAutoResults()
 		finalizeTraceArtifact()
-		return resolveVerificationRunError(err, autoOutcome, autoOutcomeReceived, params)
+		return resolveRunCompletionError(err, autoOutcome, autoOutcomeReceived, params)
 	},
 }
 
@@ -1891,16 +2141,25 @@ func init() {
 	runCmd.Flags().Bool("slice-endpoints", false, "Partition endpoints across nodes in distributed runs")
 	runCmd.Flags().StringP("access-key", "a", "", "The S3 access key credential")
 	runCmd.Flags().StringP("secret-key", "s", "", "The S3 secret key credential")
-	runCmd.Flags().StringP("bucket", "b", "", "The target bucket to use for the test")
-	runCmd.Flags().String("prefix", "", "Write-verify: generated-key namespace; list/read-verify: listing constraint")
+	runCmd.Flags().StringP("bucket", "b", "", "Target bucket; for DELETE --items-file it is an optional assertion applied to every manifest row")
+	runCmd.Flags().String("prefix", "", "Write-verify: generated-key namespace; seeded DELETE: owned namespace root; guarded existing DELETE: exact S3 prefix without a leading slash; list/read-verify: listing constraint")
 	runCmd.Flags().Int("auth-version", 4, "S3 authentication signature version (2 or 4; default 4)")
 
 	// Workload Definition Options
 	runCmd.Flags().IntP("threads", "t", 1, "Number of parallel client threads to run (e.g., 16)")
-	runCmd.Flags().StringP("object-size", "o", "", "The size of each object using human-readable units (e.g., 1MiB, 256KiB, 4GiB; legacy MB/KB/GB also accepted)")
+	runCmd.Flags().StringP("object-size", "o", "", fmt.Sprintf("Object size (e.g., 1MiB, 256KiB, 4GiB); seeded DELETE defaults to %s", scenario.DefaultDeleteObjectSize))
 	runCmd.Flags().Float64("object-data-compressibility", 0.0, "Compressibility percentage of object payloads (0.0 to 100.0, default 0.0)")
 	runCmd.Flags().Bool("object-data-dedupable", true, "Allow object payloads to be deduplicated by the storage array (default true)")
-	runCmd.Flags().IntP("object-count", "n", 0, "Fixed object count; read-verify --versions=all caps version identities")
+	runCmd.Flags().IntP("object-count", "n", 0, "Fixed object count; seeded DELETE creates this many identities, while manifest/existing-prefix DELETE caps the canonical selection")
+	runCmd.Flags().Int(flagDeleteBatchSize, scenario.DefaultDeleteBatchSize, fmt.Sprintf("Standalone DELETE logical request size (the minimum %d uses DeleteObject; larger values up to %d use DeleteObjects)", scenario.MinDeleteBatchSize, scenario.MaxDeleteBatchSize))
+	runCmd.Flags().Bool(flagDeleteExisting, false, "Destructive DELETE opt-in: discover and freeze current keys under the exact --bucket/--prefix before timing")
+	runCmd.Flags().Bool(flagAllowEmptyPrefix, false, "Second destructive DELETE opt-in required with --delete-existing --prefix='' to select an entire bucket")
+	runCmd.Flags().Int64(flagMaxFailedObjects, scenario.DefaultMaxFailedObjects, "Maximum operational DELETE object failures permitted; the budget trips only above this object count")
+	runCmd.Flags().Float64(flagMaxFailurePercent, 0, "Maximum cumulative operational DELETE object failure percentage (0-100); mutually exclusive with --max-failed-objects")
+	runCmd.Flags().Duration(flagFailureBudgetGrace, scenario.DefaultFailureBudgetGrace, "Measured-phase grace before evaluating a positive DELETE failure percentage")
+	runCmd.Flags().Bool(flagValidateInventory, false, "Strictly require every selected DELETE identity to exist before the timed phase; enables post-verification unless --verify is explicitly false")
+	runCmd.Flags().Bool(flagVerifyDelete, false, "Verify the full applicable DELETE inventory after timing (default false)")
+	runCmd.Flags().Duration(flagVerificationTimeout, scenario.DefaultDeleteVerificationTimeout, "Independent timeout for each enabled DELETE pre-validation or post-verification phase")
 	runCmd.Flags().StringP("duration", "d", "", "Defines the workload by a fixed time duration (e.g., 5m, 1h)")
 	runCmd.Flags().Int(flagPrefixShards, prefixShardsAuto, "Generated-key prefix directories (-1 = auto from configured aggregate concurrency, 0 = disabled)")
 
@@ -1910,8 +2169,8 @@ func init() {
 	runCmd.Flags().Int("mpu-concurrent-parts", 0, "Max concurrent parts in flight per multipart object (0 = unlimited)")
 
 	// Test Behavior Options
-	runCmd.Flags().Int("seed-objects", 2500, "Number of objects to pre-create for read benchmarks (default: 2500)")
-	runCmd.Flags().Bool("cleanup", false, "A boolean flag to automatically delete all created objects after the test completes")
+	runCmd.Flags().Int("seed-objects", constants.DefaultSeedObjectCount, "Number of objects to pre-create for read benchmarks and duration-based standalone DELETE")
+	runCmd.Flags().Bool("cleanup", false, "Best-effort deletion of SPT-created objects after the benchmark; DELETE permits this only for seeded mode")
 	runCmd.Flags().Bool(flagDeferVerification, false, "Write-verify only: stop after durable nonempty CREATE evidence and defer readback (env: SPT_DEFER_VERIFICATION)")
 	runCmd.Flags().String(flagVersions, scenario.VersionsCurrent, "Read-verify prefix discovery: current or all object versions")
 	runCmd.Flags().Bool("create-prefix", false, "A boolean flag to ensure the target prefix (directory) is created if it doesn't exist")
@@ -1921,10 +2180,10 @@ func init() {
 	runCmd.Flags().Int("auto-terminate-seconds", 0, "Automatically terminate headless runs after N seconds (0 = unlimited)")
 	runCmd.Flags().Bool("keep-scenario", false, "Keep the scenario file after the test completes (default: delete on success)")
 	runCmd.Flags().Bool("save-items", false, "Save items.csv to the results directory (write workloads only; can be large for high-throughput runs)")
-	runCmd.Flags().String("items-file", "", "Path to a local items.csv to use for read/read-verify workload")
+	runCmd.Flags().String("items-file", "", "Path to a local items.csv for read/read-verify or explicit-manifest DELETE; mutually exclusive with --delete-existing")
 	runCmd.Flags().Bool("allow-empty-selection", false, "Allow a clean empty read-verify selection to succeed")
 	runCmd.Flags().Int("integrity-max-console-failures", 20, "Maximum integrity failures sampled on the console (0 suppresses samples; env: SPT_INTEGRITY_MAX_CONSOLE_FAILURES)")
-	runCmd.Flags().String(flagIntegrityRuntimeIdentityTier, constants.IntegrityRuntimeIdentityTierImage, "Distributed verification identity tier: image or payload (env: SPT_INTEGRITY_RUNTIME_IDENTITY_TIER)")
+	runCmd.Flags().String(flagIntegrityRuntimeIdentityTier, constants.IntegrityRuntimeIdentityTierImage, "Distributed verification or guarded-prefix DELETE identity tier: image or payload (env: SPT_INTEGRITY_RUNTIME_IDENTITY_TIER)")
 	runCmd.Flags().Bool(flagReadShuffle, false, "Read workload: shuffle items within each fetched batch before issuing reads (widens randomness, increases engine buffer usage, and does not guarantee storage-cache avoidance)")
 	runCmd.Flags().Int(flagReadShuffleBatchSize, 0, fmt.Sprintf("Read workload: batch size to use with --shuffle (0 = use the bounded default, max %d)", constants.ReadShuffleMaxBatchSize))
 	runCmd.Flags().Int(flagReadPhasePauseSeconds, scenario.DefaultReadPhasePauseSeconds, "Read workload: seconds to settle between seed, read, and cleanup phases")
@@ -1985,7 +2244,7 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 	runCmd.Flags().String("s3-driver", "default",
 		`S3 storage driver backend: "default" (Netty), "aws" (AWS SDK), "rdma" (RDMA-accelerated).
 Shorthand: --use-rdma is equivalent to --s3-driver rdma. (env: SPT_S3_DRIVER)`)
-	runCmd.Flags().Bool("use-rdma", false, "Use RDMA-accelerated S3 driver (requires RDMA hardware and device passthrough)")
+	runCmd.Flags().Bool("use-rdma", false, "Use S3-RDMA; DELETE requests use HTTP, but driver startup still requires RDMA or --rdma-fallback")
 	runCmd.Flags().String("rdma-local-ip", "", "Local RDMA interface IP address (env: RDMA_LOCAL_IP)")
 	runCmd.Flags().String("rdma-threshold", "1MB", "Minimum object size for RDMA transfer, e.g. 0, 256KB, 1MB (env: RDMA_THRESHOLD_BYTES)")
 	runCmd.Flags().Bool("rdma-fallback", false, "Fall back to HTTP if RDMA initialization fails (env: RDMA_FALLBACK_ENABLED)")
@@ -2022,7 +2281,7 @@ Omit to disable checksums. (env: SPT_CHECKSUM)`)
 	runCmd.Flags().Bool("headless", false, "Force headless (non-interactive) mode")
 	runCmd.Flags().String("trace-file", "", "Save all output to specified trace file")
 	runCmd.Flags().Bool("trace-append", false, "Append to existing trace file (default: overwrite)")
-	runCmd.Flags().Bool("verbose", false, "Show detailed Docker API calls and debug information")
+	runCmd.Flags().Bool("verbose", false, "Show detailed Docker API calls, debug information, and textual live metrics")
 }
 
 // buildScenarioParams builds scenario parameters from command flags
@@ -2113,6 +2372,7 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 
 	objectCount, _ := cmd.Flags().GetInt("object-count")
 	params.ObjectCount = objectCount
+	params.DeleteBatchSize, _ = cmd.Flags().GetInt(flagDeleteBatchSize)
 
 	duration, _ := cmd.Flags().GetString("duration")
 	params.Duration = duration
@@ -2134,6 +2394,39 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 
 	itemsFile, _ := cmd.Flags().GetString("items-file")
 	params.ItemsFile = itemsFile
+	params.DeleteExisting, _ = cmd.Flags().GetBool(flagDeleteExisting)
+	params.AllowEmptyPrefix, _ = cmd.Flags().GetBool(flagAllowEmptyPrefix)
+	if workloadType == WorkloadTypeDelete {
+		params.FailureBudgetMode = scenario.FailureBudgetModeFixed
+		params.MaxFailedObjects = scenario.DefaultMaxFailedObjects
+		params.FailureBudgetGrace = scenario.DefaultFailureBudgetGrace
+		if cmd.Flags().Lookup(flagMaxFailedObjects) != nil {
+			params.MaxFailedObjects, _ = cmd.Flags().GetInt64(flagMaxFailedObjects)
+		}
+		if flag := cmd.Flags().Lookup(flagMaxFailurePercent); flag != nil {
+			params.MaxFailurePercent, _ = cmd.Flags().GetFloat64(flagMaxFailurePercent)
+			if flag.Changed {
+				params.FailureBudgetMode = scenario.FailureBudgetModePercentage
+			}
+		}
+		if cmd.Flags().Lookup(flagFailureBudgetGrace) != nil {
+			params.FailureBudgetGrace, _ = cmd.Flags().GetDuration(flagFailureBudgetGrace)
+		}
+		if flag := cmd.Flags().Lookup(flagValidateInventory); flag != nil {
+			params.ValidateDeleteInventory, _ = cmd.Flags().GetBool(flagValidateInventory)
+		}
+		if flag := cmd.Flags().Lookup(flagVerifyDelete); flag != nil {
+			params.VerifyDelete, _ = cmd.Flags().GetBool(flagVerifyDelete)
+			params.VerifyDeleteExplicit = flag.Changed
+		}
+		if params.ValidateDeleteInventory && !params.VerifyDeleteExplicit {
+			params.VerifyDelete = true
+		}
+		params.VerificationTimeout = scenario.DefaultDeleteVerificationTimeout
+		if cmd.Flags().Lookup(flagVerificationTimeout) != nil {
+			params.VerificationTimeout, _ = cmd.Flags().GetDuration(flagVerificationTimeout)
+		}
+	}
 	params.AllowEmptySelection, _ = cmd.Flags().GetBool("allow-empty-selection")
 	params.IntegrityMaxConsoleFailures, _ = cmd.Flags().GetInt("integrity-max-console-failures")
 
@@ -2280,9 +2573,22 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	minimalTUI, _ := cmd.Flags().GetBool("minimal")
 	params.MinimalTUI = minimalTUI
 
-	// Set defaults (tables workload has no object size concept)
-	if params.ObjectSize == "" && params.WorkloadType != WorkloadTypeList &&
-		params.WorkloadType != WorkloadTypeReadVerify && params.WorkloadType != WorkloadTypeTables {
+	// Resolve source-specific defaults only after both selection and duration flags are known.
+	deleteWorkload := params.WorkloadType == WorkloadTypeDelete
+	if deleteWorkload {
+		params.SelectionOrder = scenario.SelectionOrderCanonical
+	}
+	seededDelete := deleteWorkload && strings.TrimSpace(params.ItemsFile) == "" && !params.DeleteExisting
+	if seededDelete {
+		if params.ObjectSize == "" {
+			params.ObjectSize = scenario.DefaultDeleteObjectSize
+		}
+		if params.ObjectCount == 0 && strings.TrimSpace(params.Duration) == "" {
+			params.ObjectCount = constants.DefaultSeedObjectCount
+		}
+	} else if params.ObjectSize == "" && params.WorkloadType != WorkloadTypeDelete &&
+		params.WorkloadType != WorkloadTypeList && params.WorkloadType != WorkloadTypeReadVerify &&
+		params.WorkloadType != WorkloadTypeTables {
 		params.ObjectSize = "1MB"
 	}
 
@@ -2466,7 +2772,9 @@ func formatScenarioParams(params scenario.Params) string {
 	if params.PrefixShards > 0 {
 		lines = append(lines, fmt.Sprintf("Prefix Shards: %d", params.PrefixShards))
 	}
-	if params.WorkloadType == WorkloadTypeList || params.WorkloadType == WorkloadTypeReadVerify {
+	if (params.WorkloadType == WorkloadTypeDelete &&
+		(strings.TrimSpace(params.ItemsFile) != "" || params.DeleteExisting)) ||
+		params.WorkloadType == WorkloadTypeList || params.WorkloadType == WorkloadTypeReadVerify {
 		lines = append(lines, "Object Size: (not applicable)")
 	} else {
 		lines = append(lines, fmt.Sprintf("Object Size: %s", params.ObjectSize))
@@ -2477,8 +2785,10 @@ func formatScenarioParams(params scenario.Params) string {
 		lines = append(lines, fmt.Sprintf("Part Size: %s (multipart upload)", params.PartSize))
 	}
 
-	// Always show object count (0 means not set)
-	if params.ObjectCount > 0 {
+	// Existing-prefix DELETE interprets an omitted cap as the full discovered selection.
+	if params.WorkloadType == WorkloadTypeDelete && params.DeleteExisting && params.ObjectCount <= 0 {
+		lines = append(lines, "Object Count: "+deleteAllDiscoveredLabel)
+	} else if params.ObjectCount > 0 {
 		lines = append(lines, fmt.Sprintf("Object Count: %d", params.ObjectCount))
 	} else {
 		lines = append(lines, "Object Count: (not set)")
@@ -2495,14 +2805,26 @@ func formatScenarioParams(params scenario.Params) string {
 	if params.WorkloadType == WorkloadTypeRead {
 		seedCount := params.SeedCount
 		if seedCount <= 0 {
-			seedCount = 2500
+			seedCount = constants.DefaultSeedObjectCount
+		}
+		lines = append(lines, fmt.Sprintf("Seed Objects: %d", seedCount))
+	}
+	if params.WorkloadType == WorkloadTypeDelete && params.Duration != "" &&
+		!params.DeleteExisting && strings.TrimSpace(params.ItemsFile) == "" {
+		seedCount := params.SeedCount
+		if seedCount <= 0 {
+			seedCount = constants.DefaultSeedObjectCount
 		}
 		lines = append(lines, fmt.Sprintf("Seed Objects: %d", seedCount))
 	}
 
 	// Always show cleanup status
 	if params.Cleanup {
-		lines = append(lines, "Cleanup: Yes (delete objects after test)")
+		if params.WorkloadType == WorkloadTypeDelete {
+			lines = append(lines, "Cleanup: Yes (best-effort seeded residual after measurement)")
+		} else {
+			lines = append(lines, "Cleanup: Yes (delete objects after test)")
+		}
 	} else {
 		lines = append(lines, "Cleanup: No")
 	}
@@ -2513,6 +2835,43 @@ func formatScenarioParams(params scenario.Params) string {
 		}
 		lines = append(lines, "Verification Readback: "+readback)
 	}
+	if params.WorkloadType == WorkloadTypeDelete {
+		lines = append(lines, fmt.Sprintf("DELETE Batch Size: %d", params.DeleteBatchSize))
+		if params.DeleteExisting {
+			prefix := params.Prefix
+			if prefix == "" {
+				prefix = "(empty; entire bucket)"
+			}
+			danger := "DANGER: deletes the frozen current-key selection from an existing namespace."
+			if params.ObjectCount <= 0 {
+				danger = "DANGER: deletes all discovered current-key identities from an existing namespace (unbounded)."
+			}
+			lines = append(lines,
+				"DELETE Source: existing current-key prefix",
+				fmt.Sprintf("DELETE Scope: bucket=%s prefix=%s", params.Bucket, prefix),
+				danger,
+				"Quiescence required: concurrent writers can replace a frozen identity before deletion.",
+				"Discovery Phase: setup only; excluded from DELETE request timing.",
+			)
+		} else if strings.TrimSpace(params.ItemsFile) == "" {
+			lines = append(lines, "DELETE Source: seeded owned inventory")
+		} else {
+			lines = append(lines, "DELETE Source: explicit canonical manifest")
+		}
+		if params.SelectionOrder != "" {
+			lines = append(lines, "Selection Order: "+params.SelectionOrder)
+			if params.SelectionSHA256 != "" {
+				lines = append(lines, fmt.Sprintf(
+					"Selection Records: source=%d unique=%d selected=%d sha256=%s",
+					params.SelectionSourceCount,
+					params.SelectionUniqueCount,
+					params.SelectionSelectedCount,
+					params.SelectionSHA256,
+				))
+			}
+			lines = append(lines, "Warning: canonical key order can affect cross-tool DELETE comparisons.")
+		}
+	}
 	if params.KeepScenario {
 		lines = append(lines, "Keep Scenario: Yes")
 	} else {
@@ -2520,6 +2879,51 @@ func formatScenarioParams(params scenario.Params) string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+func writeDeleteSeedConcurrencyWarning(output io.Writer, params scenario.Params) {
+	if output == nil || params.WorkloadType != WorkloadTypeDelete ||
+		params.DeleteExisting || strings.TrimSpace(params.ItemsFile) != "" ||
+		params.Threads <= 0 || params.DeleteBatchSize <= 0 {
+		return
+	}
+	inventoryCount := params.ObjectCount
+	if strings.TrimSpace(params.Duration) != "" {
+		inventoryCount = params.SeedCount
+	}
+	if inventoryCount <= 0 {
+		return
+	}
+	capacity := int64(params.Threads) * int64(params.DeleteBatchSize)
+	if int64(inventoryCount) >= capacity {
+		return
+	}
+	fullWaves := int64(inventoryCount) / capacity
+	_, _ = fmt.Fprintf(
+		output,
+		"Warning: seeded DELETE inventory (%d objects) is smaller than --threads * --delete-batch-size (%d * %d = %d); maximum full request waves: %d. The run continues without automatic inventory calibration.\n",
+		inventoryCount, params.Threads, params.DeleteBatchSize, capacity, fullWaves,
+	)
+}
+
+func writeDeleteExistingSafetyWarning(output io.Writer, params scenario.Params) {
+	if output == nil || params.WorkloadType != WorkloadTypeDelete || !params.DeleteExisting {
+		return
+	}
+	prefix := params.Prefix
+	if prefix == "" {
+		prefix = "(empty; entire bucket)"
+	}
+	selection := "the frozen current-key selection"
+	if params.ObjectCount <= 0 {
+		selection = deleteAllDiscoveredLabel
+	}
+	_, _ = fmt.Fprintf(
+		output,
+		"DANGER: --delete-existing will delete %s under bucket %q prefix %q. Keep the namespace quiescent; concurrent writers can replace a frozen identity before deletion. Discovery is setup and is excluded from DELETE request timing.\n",
+		selection,
+		params.Bucket, prefix,
+	)
 }
 
 // seedSizeWarnBytes is 50 GB — warn if the total seed footprint exceeds this.
@@ -2536,7 +2940,7 @@ func warnSeedSize(params scenario.Params) {
 	}
 	seedCount := params.SeedCount
 	if seedCount <= 0 {
-		seedCount = 2500
+		seedCount = constants.DefaultSeedObjectCount
 	}
 	totalBytes := objBytes * int64(seedCount)
 	if totalBytes > seedSizeWarnBytes {

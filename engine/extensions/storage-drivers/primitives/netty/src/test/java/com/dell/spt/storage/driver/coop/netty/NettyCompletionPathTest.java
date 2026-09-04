@@ -6,15 +6,24 @@ import static org.mockito.Mockito.*;
 
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemImpl;
+import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
+import com.dell.spt.base.item.op.deletion.DeleteRequest;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperationImpl;
+import com.dell.spt.base.item.op.deletion.DeleteTarget;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
+import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.StorageDriverBase;
 import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.netty.connection.pool.NonBlockingConnPool;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.PrematureChannelClosureException;
 import io.netty.handler.timeout.IdleStateEvent;
 import io.netty.handler.timeout.IdleStateHandler;
 import java.util.ArrayList;
@@ -79,14 +88,10 @@ class NettyCompletionPathTest {
 		childQueueField.setAccessible(true);
 		childQueueField.set(driver, new ArrayBlockingQueue<>(100));
 
-		// dispatch lock and condition
+		// dispatch lock
 		final var lockField = CoopStorageDriverBase.class.getDeclaredField("dispatchLock");
 		lockField.setAccessible(true);
-		final var lock = new ReentrantLock();
-		lockField.set(driver, lock);
-		final var condField = CoopStorageDriverBase.class.getDeclaredField("dispatchReady");
-		condField.setAccessible(true);
-		condField.set(driver, lock.newCondition());
+		lockField.set(driver, new ReentrantLock());
 
 		// opResultOut — mock that accepts anything
 		opResultOut = mock(Output.class);
@@ -338,6 +343,45 @@ class NettyCompletionPathTest {
 	}
 
 	@Test
+	void prematureDeleteCloseAfterHeadersDoesNotCreateAResponseDuration() throws Exception {
+		when(driver.isStarted()).thenReturn(true);
+		when(driver.isStopped()).thenReturn(false);
+		final var warnedField = NettyStorageDriverBase.class.getDeclaredField("channelFailureWarned");
+		warnedField.setAccessible(true);
+		warnedField.set(driver, new java.util.concurrent.atomic.AtomicBoolean(true));
+		final var handler = new ResponseHandlerBase<Object, Item, Operation<Item>>(driver, false) {
+			@Override
+			protected void handle(
+						final io.netty.channel.Channel channel,
+						final Operation<Item> op,
+						final Object msg) {}
+		};
+		final var channel = new EmbeddedChannel(handler);
+		channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.FALSE);
+		final var item = new IntegrityManifestDataItem("bucket", "key", 0, null);
+		final DeleteRequestOperation operation = new DeleteRequestOperationImpl(
+						0,
+						new DeleteRequest(
+									"bucket",
+									Credential.getInstance("access", "secret"),
+									List.of(new DeleteTarget(item))));
+		operation.startRequest();
+		operation.finishRequest();
+		operation.markResponseFirstByteReceived();
+		channel.attr(NettyStorageDriver.ATTR_KEY_OPERATION)
+						.set((Operation<Item>) (Operation<?>) operation);
+
+		channel.pipeline().fireExceptionCaught(
+						new PrematureChannelClosureException("closed after response headers"));
+
+		assertEquals(Operation.Status.FAIL_IO, operation.status());
+		assertEquals(0, operation.respTimeStart());
+		assertEquals(0, operation.respTimeDone(),
+						"generic completion must not manufacture a DELETE last-byte marker");
+		channel.finishAndReleaseAll();
+	}
+
+	@Test
 	void complete_resultCopyCarriesTimingFromRealOp() throws Exception {
 		// Verify the result copy (sent to opResultOut) carries accurate timing
 		// from a real OperationImpl, not zeros.
@@ -477,6 +521,35 @@ class NettyCompletionPathTest {
 	}
 
 	@Test
+	void connectionLeaseFailureCompletesOneTerminalAttemptInsteadOfRemainingRetryable() throws Exception {
+		final var sem = new Semaphore(1, true);
+		final var semField = CoopStorageDriverBase.class.getDeclaredField("concurrencyThrottle");
+		semField.setAccessible(true);
+		semField.set(driver, sem);
+		when(driver.isStarted()).thenReturn(true);
+
+		final var lifecycle = new OperationLifecycleTracker<Operation<Item>>();
+		final var lifecycleField = StorageDriverBase.class.getDeclaredField("operationLifecycle");
+		lifecycleField.setAccessible(true);
+		lifecycleField.set(driver, lifecycle);
+		final Operation<Item> op = new OperationImpl<>(
+						0, OpType.CREATE, new ItemImpl("lease-failure"), null, "/bucket", null);
+		assertTrue(lifecycle.driverQueued(op));
+		when(connPool.lease()).thenThrow(new java.net.ConnectException("no connections"));
+
+		assertFalse(driver.submit(op));
+
+		assertEquals(Operation.Status.FAIL_IO, op.status());
+		assertEquals(OperationLifecycleState.TERMINAL, op.lifecycle().state(),
+						"the dispatcher must be able to remove the failed operation instead of hot-retrying it");
+		assertEquals(1, lifecycle.snapshot().dispatched());
+		assertEquals(1, lifecycle.snapshot().terminal());
+		assertEquals(0, lifecycle.snapshot().inFlight());
+		assertEquals(1, sem.availablePermits());
+		verify(connPool, times(1)).lease();
+	}
+
+	@Test
 	void batchSubmit_releasesExcessPermits() throws Exception {
 		// When drainPermits() grabs more permits than needed, excess are returned.
 		final var sem = new Semaphore(8, true);
@@ -556,11 +629,10 @@ class NettyCompletionPathTest {
 
 		final int submitted = driver.submit(ops, 0, 3);
 
-		// drainPermits=8, excess returned=5 (8-3), permits=3
-		// First op: lease throws, conn==null → explicit release (1)
-		// complete(null, op) → handleCompleted only (no channel release)
-		// Catch: releases permits-n-1 = 2
-		// Total returned: 5 (excess) + 1 (explicit) + 2 (remaining) = 8
+		// The failed lease is one terminal attempted operation, so the dispatcher removes it
+		// instead of retrying it. Its permit is returned explicitly and the other two drained
+		// permits are unused and returned below the loop.
+		assertEquals(1, submitted);
 		assertEquals(8, sem.availablePermits(),
 						"all permits must be returned after connection failure");
 	}

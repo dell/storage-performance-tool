@@ -1,17 +1,27 @@
 package com.dell.spt.base.load.generator;
 
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
+import static com.dell.spt.base.Constants.TASK_STOP_WAIT_SECONDS;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
+import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.concurrent.TaskBase;
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.io.RemainingItemCountInput;
 import com.dell.spt.base.item.io.TerminalItemInputException;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.OperationAssembler;
+import com.dell.spt.base.item.op.OperationAssemblyResult;
+import com.dell.spt.base.item.op.OperationAssemblyStopReason;
 import com.dell.spt.base.item.op.OperationsBuilder;
+import com.dell.spt.base.item.op.OperationsBuilderAssembler;
+import com.dell.spt.base.item.op.deletion.DeleteRequestAssembler;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
+import com.dell.spt.base.load.step.DurationTime;
 import com.github.akurilov.commons.collection.CircularArrayBuffer;
 import com.github.akurilov.commons.collection.CircularBuffer;
 import com.github.akurilov.commons.concurrent.throttle.IndexThrottle;
@@ -23,15 +33,23 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.ConcurrentModificationException;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Queue;
 import java.util.Random;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
@@ -42,13 +60,35 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 	private static final String CLS_NAME = LoadGeneratorImpl.class.getSimpleName();
 
+	private static final class IdentityKey<T> {
+		private final T value;
+		private final int hashCode;
+
+		private IdentityKey(final T value) {
+			this.value = value;
+			this.hashCode = System.identityHashCode(value);
+		}
+
+		@Override
+		public boolean equals(final Object obj) {
+			return obj instanceof IdentityKey<?> other && value == other.value;
+		}
+
+		@Override
+		public int hashCode() {
+			return hashCode;
+		}
+	}
+
+	private record SchedulingExhaustion(long observedAtNanos) {}
+
 	private volatile boolean recycleQueueFullState = false;
 	private volatile boolean itemInputFinishFlag = false;
 	private volatile boolean opInputFinishFlag = false;
 	private volatile boolean outputFinishFlag = false;
 
 	private final Input<I> itemInput;
-	private final OperationsBuilder<I, O> opsBuilder;
+	private final OperationAssembler<I, O> opAssembler;
 	private final int originIndex;
 	private final Object[] throttles;
 	private final Output<O> opOutput;
@@ -71,10 +111,24 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private final Random rnd;
 	private final String name;
 	private final ThreadLocal<CircularBuffer<O>> threadLocalOpBuff;
+	private final ThreadLocal<List<O>> threadLocalAssemblyBuff;
+	private final LongAdder consumedItemsCounter = new LongAdder();
+	private final LongAdder aggregateUnattemptedItemsCounter = new LongAdder();
 	private final LongAdder builtTasksCounter = new LongAdder();
 	private final LongAdder recycledOpCounter = new LongAdder();
 	private final LongAdder outputOpCounter = new LongAdder();
 	private final AtomicReference<IntegrityTerminalException> terminalFailure = new AtomicReference<>();
+	private final AtomicReference<SchedulingExhaustion> schedulingExhaustion = new AtomicReference<>();
+	private final AtomicBoolean admissionOpen = new AtomicBoolean(true);
+	private final OutputBackoff outputBackoff = new OutputBackoff();
+	private volatile long admissionDeadlineNanos;
+	private volatile boolean admissionDeadlineSet;
+	private final AtomicBoolean assemblerFinished = new AtomicBoolean(false);
+	private final Lock assemblyLock = new ReentrantLock();
+	private final Lock admissionLock = new ReentrantLock();
+	private final long standaloneDeleteInputIdentityCount;
+	private final Set<IdentityKey<O>> bufferedOperations = ConcurrentHashMap.newKeySet();
+	private volatile OperationLifecycleTracker<O> operationLifecycle = OperationLifecycleTracker.disabled();
 	private final Lock tempBufferLock = new ReentrantLock();
 	private List<I> items;
 
@@ -90,6 +144,24 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					final boolean recycleFlag,
 					final boolean shuffleFlag) {
 		this(itemInput, opsBuilder, throttles, opOutput, batchSize, countLimit, recycleQueueSize, recycleFlag, shuffleFlag, false);
+	}
+
+	/**
+	 * Creates a generator using a cardinality-neutral operation assembler.
+	 *
+	 * @param opAssembler assembler that owns its retained operation-building resources
+	 */
+	public LoadGeneratorImpl(
+					final Input<I> itemInput,
+					final OperationAssembler<I, O> opAssembler,
+					final List<Object> throttles,
+					final Output<O> opOutput,
+					final int batchSize,
+					final long countLimit,
+					final int recycleQueueSize,
+					final boolean recycleFlag,
+					final boolean shuffleFlag) {
+		this(itemInput, opAssembler, throttles, opOutput, batchSize, countLimit, recycleQueueSize, recycleFlag, shuffleFlag, false);
 	}
 
 	/**
@@ -114,10 +186,55 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					final boolean recycleFlag,
 					final boolean shuffleFlag,
 					final boolean retryFlag) {
+		this(
+						itemInput,
+						new OperationsBuilderAssembler<>(opsBuilder),
+						throttles,
+						opOutput,
+						batchSize,
+						countLimit,
+						recycleQueueSize,
+						recycleFlag,
+						shuffleFlag,
+						retryFlag);
+	}
+
+	/**
+	 * Creates a generator using a cardinality-neutral operation assembler.
+	 *
+	 * @param opAssembler assembler that owns its retained operation-building resources
+	 * @param retryFlag whether {@code load-op-retry} is enabled; see the compatibility
+	 *                  constructor for its lifecycle semantics
+	 */
+	@SuppressWarnings("unchecked")
+	public LoadGeneratorImpl(
+					final Input<I> itemInput,
+					final OperationAssembler<I, O> opAssembler,
+					final List<Object> throttles,
+					final Output<O> opOutput,
+					final int batchSize,
+					final long countLimit,
+					final int recycleQueueSize,
+					final boolean recycleFlag,
+					final boolean shuffleFlag,
+					final boolean retryFlag) {
 		super(ServiceTaskExecutor.TASK_EXECUTOR);
 		this.itemInput = itemInput;
-		this.opsBuilder = opsBuilder;
-		this.originIndex = opsBuilder.originIndex();
+		this.opAssembler = opAssembler;
+		if (opAssembler instanceof DeleteRequestAssembler) {
+			if (!(itemInput instanceof RemainingItemCountInput<?> countInput)) {
+				throw new IllegalArgumentException(
+								"Standalone DELETE requires an input with an exact remaining-item count");
+			}
+			this.standaloneDeleteInputIdentityCount = countInput.remainingItemCount();
+			if (standaloneDeleteInputIdentityCount < 0) {
+				throw new IllegalArgumentException(
+								"Standalone DELETE input reported a negative remaining-item count");
+			}
+		} else {
+			this.standaloneDeleteInputIdentityCount = -1;
+		}
+		this.originIndex = opAssembler.originIndex();
 		this.throttles = throttles.toArray(new Object[]{});
 		this.opOutput = opOutput;
 		this.batchSize = batchSize;
@@ -128,12 +245,13 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		this.retryFlag = retryFlag;
 		this.shuffleFlag = shuffleFlag;
 		this.rnd = shuffleFlag ? new Random() : null;
-		final var ioStr = opsBuilder.opType().toString();
+		final var ioStr = opAssembler.opType().toString();
 		name = Character.toUpperCase(ioStr.charAt(0))
 						+ ioStr.substring(1).toLowerCase(Locale.ROOT)
 						+ (countLimit > 0 && countLimit < Long.MAX_VALUE ? Long.toString(countLimit) : "")
 						+ itemInput.toString();
 		threadLocalOpBuff = ThreadLocal.withInitial(() -> new CircularArrayBuffer<>(batchSize));
+		threadLocalAssemblyBuff = ThreadLocal.withInitial(() -> new ArrayList<>(batchSize));
 		this.items = new ArrayList<>(batchSize); // prepare the items buffer
 	}
 
@@ -152,7 +270,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 		drainRetryQueue();
 
-		final var opBuff = threadLocalOpBuff.get();
+		final var opBuff = operationBuffer();
 		var pendingOpCount = opBuff.size();
 		var n = batchSize - pendingOpCount;
 
@@ -161,7 +279,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			if (n > 0) { // the tasks buffer has free space for the new tasks
 				if (itemInputFinishFlag) { // items input was exhausted
 					if (!recycleFlag) { // never recycled -> recycling is not enabled
-						opInputFinishFlag = true; // allow shutdown
+						pendingOpCount += finishAssemblerNormally(opBuff);
+						opInputFinishFlag = assemblerFinished.get();
 					} else { // recycle the tasks if any
 						n = 0;
 						O recycledOp;
@@ -189,8 +308,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 							pendingOpCount += n;
 							recycledOpCounter.add(n);
 						} else {
-							// Yield so in-flight operations can complete and return through
-							// recycleQueue without imposing a timed parking syscall.
+							// Back off briefly so in-flight operations can complete and return
+							// through recycleQueue instead of spinning against an empty queue.
 							yieldThread();
 						}
 					}
@@ -218,6 +337,10 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 							if (items == null) {
 								itemInputFinishFlag = true;
+								pendingOpCount += finishAssemblerNormally(opBuff);
+								if (!recycleFlag) {
+									opInputFinishFlag = true;
+								}
 								Loggers.MSG.debug(
 												"End of items input \"{}\", generated op count: {}",
 												itemInput.toString(),
@@ -229,8 +352,13 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 									if (n > 0) {
 										final long newlyBuilt = buildOps(items, opBuff, n);
 										pendingOpCount = (int) (pendingOpCount + newlyBuilt);
+										pendingOpCount += finishKnownStandaloneInput(opBuff);
 									} else {
 										itemInputFinishFlag = true;
+										pendingOpCount += finishAssemblerNormally(opBuff);
+										if (!recycleFlag) {
+											opInputFinishFlag = true;
+										}
 									}
 								} catch (final ConcurrentModificationException cme) {
 									Loggers.MSG.debug(
@@ -249,37 +377,43 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				}
 			}
 
-			if (outputOpCounter.sum() < countLimit) {
+			if (admissionOpen.get() && outputOpCounter.sum() < countLimit) {
 
 				if (pendingOpCount > 0) {
 
-					n = pendingOpCount;
+					var permittedCount = pendingOpCount;
 
 					// acquire the permit for all the throttles
 					for (final Object throttle : throttles) {
 						if (throttle instanceof Throttle) {
-							n = ((Throttle) throttle).tryAcquire(n);
+							permittedCount = ((Throttle) throttle).tryAcquire(permittedCount);
 						} else if (throttle instanceof IndexThrottle) {
-							n = ((IndexThrottle) throttle).tryAcquire(originIndex, n);
+							permittedCount = ((IndexThrottle) throttle).tryAcquire(originIndex, permittedCount);
 						} else {
 							throw new AssertionError("Unexpected throttle type: " + throttle.getClass());
 						}
+						// RateThrottle reports an exhausted quota as a negative count (the schedule
+						// deficit) rather than zero. That is a refusal, not a contract violation.
+						permittedCount = Math.max(0, permittedCount);
 					}
+					assertOutputRange("Throttle permit", permittedCount, pendingOpCount, opBuff.size());
 
 					// try to output
-					var outputProgress = false;
-					if (n > 0) {
-						if (n == 1) { // single mode branch
+					var acceptedCount = 0;
+					if (permittedCount > 0 && isAdmissionOpen()) {
+						if (permittedCount == 1) { // single mode branch
 							try {
 								final var op = opBuff.get(0);
 								if (opOutput.put(op)) {
 									outputOpCounter.increment();
+									onFinalOperationHandoff();
+									bufferedOperations.remove(identityKey(op));
 									if (pendingOpCount == 1) {
 										opBuff.clear();
 									} else {
 										opBuff.remove(0);
 									}
-									outputProgress = true;
+									acceptedCount = 1;
 								}
 							} catch (final Exception e) {
 								throwUncheckedIfInterrupted(e);
@@ -296,13 +430,16 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 							}
 						} else { // batch mode branch
 							try {
-								n = opOutput.put(opBuff, 0, n);
-								outputOpCounter.add(n);
-								if (n > 0) {
-									outputProgress = true;
+								final var writtenCount = opOutput.put(opBuff, 0, permittedCount);
+								assertOutputRange("Operation output", writtenCount, permittedCount, opBuff.size());
+								outputOpCounter.add(writtenCount);
+								onFinalOperationHandoff();
+								for (var i = 0; i < writtenCount; i++) {
+									bufferedOperations.remove(identityKey(opBuff.get(i)));
 								}
-								if (n < pendingOpCount) {
-									opBuff.removeFirst(n);
+								acceptedCount = writtenCount;
+								if (writtenCount < pendingOpCount) {
+									opBuff.removeFirst(writtenCount);
 								} else {
 									opBuff.clear();
 								}
@@ -321,11 +458,15 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 							}
 						}
 					}
-					// Backpressure relief: if we had ops to send but made no output progress
-					// (either throttle denied permits or output queue was full), briefly
-					// yield the task thread to avoid a CPU-burning spin loop.
-					if (!outputProgress) {
-						yieldThread();
+					// Backpressure relief: if we had ops to send but made no output progress,
+					// park the task thread instead of spinning. A throttle refusal waits a
+					// fixed short interval (permits return on the rate period); a full output
+					// queue grows the wait so it is not polled at tens of kHz, and only a
+					// fully accepted output (not the one-slot trickle a full queue yields per
+					// completion) shortens it again.
+					final var parkNanos = outputBackoff.parkNanosAfterOutput(permittedCount, acceptedCount);
+					if (parkNanos > 0) {
+						LockSupport.parkNanos(parkNanos);
 					}
 				} else if (retryFlag) {
 					// Nothing pending to dispatch (e.g. item input just exhausted). With
@@ -366,6 +507,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			LogUtil.trace(Loggers.ERR, Level.ERROR, t, "{}: unexpected failure", name);
 		} finally {
 			if (isFinished()) {
+				if (finiteSchedulingExhausted()) {
+					recordSchedulingExhaustion();
+				}
 				try {
 					stop();
 				} catch (final IllegalStateException e) {
@@ -373,6 +517,72 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				}
 			}
 		}
+	}
+
+	@Override
+	public final long schedulingExhaustedAtNanos() {
+		final SchedulingExhaustion exhaustion = schedulingExhaustion.get();
+		return exhaustion == null ? Long.MAX_VALUE : exhaustion.observedAtNanos();
+	}
+
+	@Override
+	public final OptionalLong schedulingExhaustionNanos() {
+		final SchedulingExhaustion exhaustion = schedulingExhaustion.get();
+		return exhaustion == null
+						? OptionalLong.empty()
+						: OptionalLong.of(exhaustion.observedAtNanos());
+	}
+
+	private boolean finiteSchedulingExhausted() {
+		return !recycleFlag
+						&& itemInputFinishFlag
+						&& opInputFinishFlag
+						&& generatedOpCount() == outputOpCounter.sum();
+	}
+
+	private void onFinalOperationHandoff() {
+		if (finiteSchedulingExhausted()) {
+			recordSchedulingExhaustion();
+			afterFinalOperationHandoff();
+		}
+	}
+
+	private void recordSchedulingExhaustion() {
+		if (schedulingExhaustion.get() == null) {
+			schedulingExhaustion.compareAndSet(
+							null, new SchedulingExhaustion(schedulingExhaustionTimeNanos()));
+		}
+	}
+
+	/** Package-local deterministic clock seam, read only for a finite scheduling transition. */
+	long schedulingExhaustionTimeNanos() {
+		return System.nanoTime();
+	}
+
+	/** Package-local deterministic scheduling seam, invoked only for the final finite handoff. */
+	void afterFinalOperationHandoff() {}
+
+	private int finishKnownStandaloneInput(final CircularBuffer<O> opBuff) throws IOException {
+		if (standaloneDeleteInputIdentityCount < 0) {
+			return 0;
+		}
+		final long consumedIdentityCount = consumedItemsCounter.sum();
+		if (consumedIdentityCount < standaloneDeleteInputIdentityCount) {
+			return 0;
+		}
+		if (consumedIdentityCount > standaloneDeleteInputIdentityCount) {
+			throw contractFailure(
+							"Standalone DELETE consumed "
+											+ consumedIdentityCount
+											+ " identities from an input that reported "
+											+ standaloneDeleteInputIdentityCount);
+		}
+		itemInputFinishFlag = true;
+		final int finishedOperationCount = finishAssemblerNormally(opBuff);
+		if (!recycleFlag) {
+			opInputFinishFlag = assemblerFinished.get();
+		}
+		return finishedOperationCount;
 	}
 
 	private List<I> getItems(final Input<I> itemInput, final int n) {
@@ -392,15 +602,64 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				throw new IntegrityTerminalException(
 								IntegrityTerminalException.Category.INPUT, e.getMessage(), e);
 			}
+			if (opAssembler instanceof DeleteRequestAssembler) {
+				throw new IntegrityTerminalException(
+								IntegrityTerminalException.Category.INPUT,
+								"Standalone DELETE input failed before its frozen selection was consumed",
+								e);
+			}
 			LogUtil.exception(Level.WARN, e, "Failed to read the next load-generator items");
 			return null;
 		}
 		return items;
 	}
 
-	@SuppressWarnings("ThreadPriorityCheck") // intentional cooperative scheduler hint
+	private CircularBuffer<O> operationBuffer() {
+		return threadLocalOpBuff.get();
+	}
+
+	private boolean isAdmissionOpen() {
+		admissionLock.lock();
+		try {
+			return admissionAllowedLocked();
+		} finally {
+			admissionLock.unlock();
+		}
+	}
+
+	private boolean admissionAllowedLocked() {
+		if (!admissionOpen.get()) {
+			return false;
+		}
+		if (admissionDeadlineSet
+						&& DurationTime.deadlineReached(admissionDeadlineNanos, System.nanoTime())) {
+			admissionOpen.set(false);
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Short fixed wait for states that resolve at request-latency cadence (recycled operations
+	 * returning, in-flight retries settling). A timed park rather than {@code Thread.yield()}
+	 * frees the core instead of spinning. The full-output wait uses {@link OutputBackoff}.
+	 */
 	private static void yieldThread() {
-		Thread.yield();
+		LockSupport.parkNanos(OutputBackoff.INITIAL_NANOS);
+	}
+
+	private void assertOutputRange(
+					final String source, final int count, final int requestedCount, final int bufferSize) {
+		if (count < 0 || count > requestedCount || count > bufferSize) {
+			throw contractFailure(
+							source
+											+ " count "
+											+ count
+											+ " is outside [0, "
+											+ requestedCount
+											+ "] for an operation buffer of size "
+											+ bufferSize);
+		}
 	}
 
 	// build new tasks for the corresponding items
@@ -409,14 +668,193 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		if (shuffleFlag) {
 			Collections.shuffle(items, rnd);
 		}
+		assemblyLock.lock();
 		try {
-			opsBuilder.buildOps(items, opBuff);
-			builtTasksCounter.add(n);
-			return n;
-		} catch (final IllegalArgumentException e) {
-			LogUtil.exception(Level.ERROR, e, "Failed to generate the load operation");
+			if (!isAdmissionOpen() || assemblerFinished.get()) {
+				return 0;
+			}
+			final var assemblyBuffer = threadLocalAssemblyBuff.get();
+			try {
+				assemblyBuffer.clear();
+				final var assemblyResult = opAssembler.assemble(items, assemblyBuffer);
+				if (assemblyResult.consumedIdentityCount() != n) {
+					throw contractFailure(
+									"Operation assembler consumed "
+													+ assemblyResult.consumedIdentityCount()
+													+ " identities from an input batch of "
+													+ n);
+				}
+				final var emittedOperationCount = assemblyResult.emittedOperationCount();
+				if (emittedOperationCount != assemblyBuffer.size()) {
+					throw contractFailure(
+									"Operation assembler reported "
+													+ emittedOperationCount
+													+ " emitted operations but appended "
+													+ assemblyBuffer.size());
+				}
+				final var availableOperationSlots = batchSize - opBuff.size();
+				if (emittedOperationCount > availableOperationSlots) {
+					throw contractFailure(
+									"Operation assembler emitted "
+													+ emittedOperationCount
+													+ " operations with only "
+													+ availableOperationSlots
+													+ " buffer slots available");
+				}
+				final var bufferedCount = admitAssembledOperations(opBuff, assemblyBuffer);
+				consumedItemsCounter.add(assemblyResult.consumedIdentityCount());
+				builtTasksCounter.add(emittedOperationCount);
+				return bufferedCount;
+			} catch (final RuntimeException e) {
+				if (!(opAssembler instanceof OperationsBuilderAssembler<?, ?>)) {
+					throw abortAssembly(e, n);
+				}
+				if (e instanceof IllegalArgumentException) {
+					LogUtil.exception(Level.ERROR, e, "Failed to generate the load operation");
+				} else {
+					throw e;
+				}
+			} catch (final IOException e) {
+				if (!(opAssembler instanceof OperationsBuilderAssembler<?, ?>)) {
+					throw abortAssembly(e, n);
+				}
+				throw e;
+			} finally {
+				assemblyBuffer.clear();
+			}
+			return 0;
+		} finally {
+			assemblyLock.unlock();
 		}
-		return 0;
+	}
+
+	private int admitAssembledOperations(
+					final CircularBuffer<O> opBuff, final List<O> assemblyBuffer) {
+		admissionLock.lock();
+		try {
+			if (admissionAllowedLocked()) {
+				opBuff.addAll(assemblyBuffer);
+				for (final O op : assemblyBuffer) {
+					operationLifecycle.generatorBuffered(op);
+					bufferedOperations.add(identityKey(op));
+				}
+				return assemblyBuffer.size();
+			}
+			for (final O op : assemblyBuffer) {
+				operationLifecycle.generatorBuffered(op);
+				operationLifecycle.unattempted(op);
+			}
+			return 0;
+		} finally {
+			admissionLock.unlock();
+		}
+	}
+
+	private IntegrityTerminalException abortAssembly(
+					final Exception assemblyFailure, final int failedInputIdentityCount) {
+		outputFinishFlag = true;
+		final int unrecoverableIdentityCount = opAssembler instanceof DeleteRequestAssembler deleteAssembler
+						? deleteAssembler.unrecoverableIdentityCount()
+						: 0;
+		consumedItemsCounter.add(failedInputIdentityCount - unrecoverableIdentityCount);
+		if (assemblerFinished.compareAndSet(false, true)) {
+			final var assemblyBuffer = new ArrayList<O>(1);
+			try {
+				finishAssembler(OperationAssemblyStopReason.ABORTED, assemblyBuffer);
+				for (final var operation : assemblyBuffer) {
+					operationLifecycle.generatorBuffered(operation);
+					operationLifecycle.unattempted(operation);
+				}
+			} catch (final IOException abortFailure) {
+				assemblyFailure.addSuppressed(abortFailure);
+			} finally {
+				aggregateUnattemptedItemsCounter.add(unrecoverableIdentityCount);
+			}
+		}
+		return new IntegrityTerminalException(
+						IntegrityTerminalException.Category.EXECUTION,
+						"Operation assembly failed after recovering retained work",
+						assemblyFailure);
+	}
+
+	private AssertionError contractFailure(final String message) {
+		outputFinishFlag = true;
+		return new AssertionError(message);
+	}
+
+	private int finishAssemblerNormally(final CircularBuffer<O> opBuff) throws IOException {
+		assemblyLock.lock();
+		try {
+			// finish() may consume one retained tail. Defer that irreversible call until
+			// the dispatch buffer has the slot promised by OperationAssembler.
+			if (opBuff.size() >= batchSize) {
+				return 0;
+			}
+			if (!assemblerFinished.compareAndSet(false, true)) {
+				return 0;
+			}
+			final var assemblyBuffer = threadLocalAssemblyBuff.get();
+			assemblyBuffer.clear();
+			try {
+				final var result = finishAssembler(
+								OperationAssemblyStopReason.NORMAL_COMPLETION, assemblyBuffer);
+				final var availableOperationSlots = batchSize - opBuff.size();
+				if (result.emittedOperationCount() > availableOperationSlots) {
+					throw contractFailure(
+									"Operation assembler finished with "
+													+ result.emittedOperationCount()
+													+ " operations but only "
+													+ availableOperationSlots
+													+ " buffer slots are available");
+				}
+				return admitAssembledOperations(opBuff, assemblyBuffer);
+			} finally {
+				assemblyBuffer.clear();
+			}
+		} finally {
+			assemblyLock.unlock();
+		}
+	}
+
+	private void finishAssemblerForRecovery(final Map<IdentityKey<O>, O> recovered) {
+		if (!assemblerFinished.compareAndSet(false, true)) {
+			return;
+		}
+		final var assemblyBuffer = new ArrayList<O>(1);
+		try {
+			finishAssembler(OperationAssemblyStopReason.ADMISSION_CLOSED, assemblyBuffer);
+			for (final O op : assemblyBuffer) {
+				operationLifecycle.generatorBuffered(op);
+				recovered.put(identityKey(op), op);
+			}
+		} catch (final IOException e) {
+			throw new IllegalStateException("Failed to recover retained operation-assembler work", e);
+		}
+	}
+
+	private OperationAssemblyResult finishAssembler(
+					final OperationAssemblyStopReason reason, final List<O> assemblyBuffer)
+					throws IOException {
+		final var result = opAssembler.finish(reason, assemblyBuffer);
+		validateFinishedAssembly(result, assemblyBuffer);
+		builtTasksCounter.add(result.emittedOperationCount());
+		return result;
+	}
+
+	private void validateFinishedAssembly(
+					final OperationAssemblyResult result, final List<O> assemblyBuffer) {
+		if (result.consumedIdentityCount() != 0) {
+			throw contractFailure(
+							"Operation assembler consumed identities while finishing: "
+											+ result.consumedIdentityCount());
+		}
+		if (result.emittedOperationCount() != assemblyBuffer.size()) {
+			throw contractFailure(
+							"Operation assembler reported "
+											+ result.emittedOperationCount()
+											+ " finished operations but appended "
+											+ assemblyBuffer.size());
+		}
 	}
 
 	@Override
@@ -430,18 +868,168 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	}
 
 	@Override
+	public final long consumedItemCount() {
+		return consumedItemsCounter.sum();
+	}
+
+	@Override
+	public final long aggregateUnattemptedItemCount() {
+		return aggregateUnattemptedItemsCounter.sum();
+	}
+
+	@Override
 	public final void recycle(final O op) {
-		recycleQueue.add(op);
-		final var size = recycleQueueSize.incrementAndGet();
-		if (!recycleQueueFullState && size > recycleQueueCapacity) {
-			recycleQueueFullState = true;
-			Loggers.ERR.warn("{}: recycle queue exceeded configured capacity ({})", name, recycleQueueCapacity);
+		admissionLock.lock();
+		try {
+			if (!admissionAllowedLocked()) {
+				operationLifecycle.unattempted(op);
+				return;
+			}
+			operationLifecycle.generatorBuffered(op);
+			bufferedOperations.add(identityKey(op));
+			recycleQueue.add(op);
+			final var size = recycleQueueSize.incrementAndGet();
+			if (!recycleQueueFullState && size > recycleQueueCapacity) {
+				recycleQueueFullState = true;
+				Loggers.ERR.warn("{}: recycle queue exceeded configured capacity ({})", name, recycleQueueCapacity);
+			}
+		} finally {
+			admissionLock.unlock();
 		}
 	}
 
 	@Override
 	public final void retry(final O op) {
-		retryQueue.add(op);
+		admissionLock.lock();
+		try {
+			if (!admissionAllowedLocked()) {
+				operationLifecycle.unattempted(op);
+				return;
+			}
+			operationLifecycle.generatorBuffered(op);
+			bufferedOperations.add(identityKey(op));
+			retryQueue.add(op);
+		} finally {
+			admissionLock.unlock();
+		}
+	}
+
+	@Override
+	public final void operationLifecycle(final OperationLifecycleTracker<O> lifecycle) {
+		this.operationLifecycle = lifecycle == null ? OperationLifecycleTracker.disabled() : lifecycle;
+	}
+
+	@Override
+	public final void openAdmission() {
+		admissionLock.lock();
+		try {
+			admissionDeadlineSet = false;
+			admissionOpen.set(true);
+		} finally {
+			admissionLock.unlock();
+		}
+	}
+
+	@Override
+	public final void openAdmissionUntil(final long deadlineNanos) {
+		admissionLock.lock();
+		try {
+			admissionDeadlineNanos = deadlineNanos;
+			admissionDeadlineSet = true;
+			admissionOpen.set(!DurationTime.deadlineReached(deadlineNanos, System.nanoTime()));
+		} finally {
+			admissionLock.unlock();
+		}
+	}
+
+	@Override
+	public final void holdAdmission() {
+		admissionLock.lock();
+		try {
+			admissionDeadlineSet = false;
+			admissionOpen.set(false);
+		} finally {
+			admissionLock.unlock();
+		}
+	}
+
+	@Override
+	public final void closeAdmission() {
+		admissionLock.lock();
+		try {
+			admissionOpen.set(false);
+		} finally {
+			admissionLock.unlock();
+		}
+		final boolean taskWasRunning = isStarted();
+		final boolean taskWasAlreadyStopped = isStopped();
+		stop();
+		if (taskWasRunning || taskWasAlreadyStopped) {
+			try {
+				if (!await(TASK_STOP_WAIT_SECONDS, TimeUnit.SECONDS)) {
+					Loggers.ERR.warn(
+									"{}: generator task did not stop within {} second(s); recovering without waiting for its input read",
+									name,
+									TASK_STOP_WAIT_SECONDS);
+				}
+			} catch (final InterruptedException e) {
+				throwUnchecked(e);
+			}
+		}
+	}
+
+	@Override
+	public final List<O> recoverBufferedOperations() {
+		assemblyLock.lock();
+		try {
+			admissionLock.lock();
+			try {
+				final var recovered = new LinkedHashMap<IdentityKey<O>, O>();
+				recoverUnconsumedStandaloneDeleteItems();
+				finishAssemblerForRecovery(recovered);
+				for (final var operationKey : bufferedOperations) {
+					recovered.put(operationKey, operationKey.value);
+				}
+				bufferedOperations.clear();
+				O op;
+				while ((op = retryQueue.poll()) != null) {
+					recovered.put(identityKey(op), op);
+				}
+				while ((op = recycleQueue.poll()) != null) {
+					recovered.put(identityKey(op), op);
+				}
+				recycleQueueSize.set(0);
+				final var unattempted = new ArrayList<O>(recovered.size());
+				for (final O buffered : recovered.values()) {
+					if (operationLifecycle.unattempted(buffered)) {
+						unattempted.add(buffered);
+					}
+				}
+				return List.copyOf(unattempted);
+			} finally {
+				admissionLock.unlock();
+			}
+		} finally {
+			assemblyLock.unlock();
+		}
+	}
+
+	private void recoverUnconsumedStandaloneDeleteItems() {
+		if (!(opAssembler instanceof DeleteRequestAssembler) || itemInputFinishFlag) {
+			return;
+		}
+		final long unreadIdentityCount = Math.subtractExact(
+						Math.subtractExact(
+										standaloneDeleteInputIdentityCount, consumedItemsCounter.sum()),
+						aggregateUnattemptedItemsCounter.sum());
+		if (unreadIdentityCount < 0) {
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.EXECUTION,
+							"Standalone DELETE consumed more identities than its frozen input count",
+							null);
+		}
+		aggregateUnattemptedItemsCounter.add(unreadIdentityCount);
+		itemInputFinishFlag = true;
 	}
 
 	/**
@@ -461,31 +1049,44 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	 */
 	private void drainRetryQueue() {
 		var remaining = retryQueue.size();
-		O retryOp;
-		while (remaining-- > 0 && (retryOp = retryQueue.poll()) != null) {
-			var permitted = 1;
-			for (final Object throttle : throttles) {
-				if (throttle instanceof Throttle) {
-					permitted = ((Throttle) throttle).tryAcquire(permitted);
-				} else if (throttle instanceof IndexThrottle) {
-					permitted = ((IndexThrottle) throttle).tryAcquire(originIndex, permitted);
-				} else {
-					throw new AssertionError("Unexpected throttle type: " + throttle.getClass());
-				}
-			}
-			if (permitted <= 0) {
-				// Throttled - preserve it for a later iteration rather than dropping it or
-				// busy-spinning retrying the same op immediately.
-				retryQueue.add(retryOp);
-				break;
-			}
+		while (remaining-- > 0) {
+			O retryOp = null;
+			admissionLock.lock();
 			try {
-				if (!opOutput.put(retryOp)) {
-					// Driver backpressure - preserve it for the next iteration rather than
-					// dropping it, same as the normal dispatch path does for its own buffer.
-					retryQueue.add(retryOp);
+				if (!admissionAllowedLocked()) {
 					break;
 				}
+				retryOp = retryQueue.poll();
+				if (retryOp == null) {
+					break;
+				}
+			} finally {
+				admissionLock.unlock();
+			}
+			try {
+				var permitted = 1;
+				for (final Object throttle : throttles) {
+					if (throttle instanceof Throttle) {
+						permitted = ((Throttle) throttle).tryAcquire(permitted);
+					} else if (throttle instanceof IndexThrottle) {
+						permitted = ((IndexThrottle) throttle).tryAcquire(originIndex, permitted);
+					} else {
+						throw new AssertionError("Unexpected throttle type: " + throttle.getClass());
+					}
+				}
+				if (permitted <= 0) {
+					// Throttled - preserve it for a later iteration rather than dropping it or
+					// busy-spinning retrying the same op immediately.
+					requeueRetry(retryOp);
+					break;
+				}
+				if (!isAdmissionOpen() || !opOutput.put(retryOp)) {
+					// Driver backpressure - preserve it for the next iteration rather than
+					// dropping it, same as the normal dispatch path does for its own buffer.
+					requeueRetry(retryOp);
+					break;
+				}
+				bufferedOperations.remove(identityKey(retryOp));
 			} catch (final Exception e) {
 				throwUncheckedIfInterrupted(e);
 				final var terminal = IntegrityTerminalException.find(e);
@@ -502,10 +1103,26 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					break;
 				} else {
 					LogUtil.exception(Level.ERROR, e, "{}: retry redispatch failure, will retry next iteration", name);
-					retryQueue.add(retryOp);
+					if (retryOp != null) {
+						requeueRetry(retryOp);
+					}
 					break;
 				}
 			}
+		}
+	}
+
+	private void requeueRetry(final O retryOp) {
+		admissionLock.lock();
+		try {
+			if (admissionAllowedLocked()) {
+				retryQueue.add(retryOp);
+			} else {
+				operationLifecycle.unattempted(retryOp);
+				bufferedOperations.remove(identityKey(retryOp));
+			}
+		} finally {
+			admissionLock.unlock();
 		}
 	}
 
@@ -575,8 +1192,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 	@Override
 	protected final void doClose() {
-		recycleQueue.clear();
-		retryQueue.clear();
+		closeAdmission();
+		recoverBufferedOperations();
 		// the item input may be instantiated by the load generator builder which has no reference to it
 		// so the load
 		// generator builder should close it
@@ -590,13 +1207,16 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				inputLock.unlock();
 			}
 		}
-		// ops builder is instantiated by the load generator builder which forgets it so the load
-		// generator should close it
-		opsBuilder.close();
+		// The assembler owns the operation-building resources supplied to the generator.
+		opAssembler.close();
 	}
 
 	@Override
 	public final String toString() {
 		return name;
+	}
+
+	private static <T> IdentityKey<T> identityKey(final T value) {
+		return new IdentityKey<>(value);
 	}
 }

@@ -6,6 +6,8 @@ import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.logging.LogUtil;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
@@ -16,6 +18,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.Queue;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.LockSupport;
 
 import com.github.akurilov.commons.collection.CircularArrayBuffer;
 import com.github.akurilov.commons.collection.CircularBuffer;
@@ -28,6 +31,25 @@ import org.apache.logging.log4j.ThreadContext;
  */
 public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 				extends TaskBase {
+	static final class SubmittingOperation<O extends Operation<? extends Item>> {
+		private final O operation;
+		private final OperationLifecycleTracker.DispatchToken<O> dispatchToken;
+
+		private SubmittingOperation(
+						final O operation,
+						final OperationLifecycleTracker.DispatchToken<O> dispatchToken) {
+			this.operation = operation;
+			this.dispatchToken = dispatchToken;
+		}
+
+		O operation() {
+			return operation;
+		}
+
+		OperationLifecycleTracker.DispatchToken<O> dispatchToken() {
+			return dispatchToken;
+		}
+	}
 
 	private static final String CLS_NAME = OperationDispatchTask.class.getSimpleName();
 
@@ -39,11 +61,17 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 	private final CircularBuffer<O> buff;
 	private final List<O> tempInOps;
 	private final Lock dispatchLock;
-	private final Condition dispatchReady;
 	private final int deferredQueueCapacity;
 
 	private final Queue<O> deferredMpuQueue;
+	private volatile List<SubmittingOperation<O>> submittingOperations = List.of();
+	private volatile Thread dispatchThread;
 
+	/**
+	 * The {@code dispatchReady} condition is retained in the descriptor for existing extensions
+	 * but is no longer the wake-up mechanism: the task parks its own thread and producers
+	 * {@link #unpark()} it without acquiring {@code dispatchLock}.
+	 */
 	public OperationDispatchTask(
 					final ThreadTaskExecutor executor, final CoopStorageDriverBase<I, O> storageDriver,
 					final BlockingQueue<O> inOpQueue, final BlockingQueue<O> childOpQueue, final String stepId,
@@ -57,7 +85,6 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 		this.stepId = stepId;
 		this.batchSize = batchSize;
 		this.dispatchLock = dispatchLock;
-		this.dispatchReady = dispatchReady;
 		this.deferredQueueCapacity = deferredQueueCapacity;
 		this.deferredMpuQueue = new java.util.ArrayDeque<>(deferredQueueCapacity);
 	}
@@ -77,8 +104,37 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 		ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
 	}
 
+	/**
+	 * Wakes the dispatch thread if it is parked in {@link #awaitDispatchSignal()}. Lock-free:
+	 * an unpark permit is sticky, so a producer that changes state and then calls this after
+	 * the task checked that state (but before it parked) still wakes the task. Safe to call
+	 * from any thread, including transport event loops.
+	 */
+	void unpark() {
+		final var thread = this.dispatchThread;
+		if (thread != null) {
+			LockSupport.unpark(thread);
+		}
+	}
+
+	/**
+	 * Parks the dispatch thread until a producer calls {@link #unpark()}. Callers re-check
+	 * their wait condition immediately before calling this; a stale permit only causes one
+	 * spurious iteration. Mirrors {@code Condition.await()} by throwing when interrupted so
+	 * {@link #stop()} still terminates the work loop promptly.
+	 */
+	private void awaitDispatchSignal() throws InterruptedException {
+		LockSupport.park(this);
+		if (Thread.currentThread().isInterrupted()) {
+			throw new InterruptedException();
+		}
+	}
+
 	@Override
 	protected final void doWork() throws Exception {
+		// Recorded per iteration rather than in doInit() so a caller invoking doWork() directly
+		// on its own thread is also the thread that unpark() targets.
+		dispatchThread = Thread.currentThread();
 		try {
 			while (buff.size() < batchSize && !deferredMpuQueue.isEmpty()
 							&& storageDriver.tryAcquireMpuObjectPermit(deferredMpuQueue.peek())) {
@@ -87,20 +143,15 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 
 			// Drain child ops first (partial/composite completions have priority)
 			if (buff.size() < batchSize) {
-				childOpQueue.drainTo(buff, batchSize - buff.size());
+				drainChildOperations(batchSize - buff.size());
 			}
 
 			// Then drain incoming ops
 			if (buff.size() == 0) {
-				inOpQueue.drainTo(tempInOps, Math.max(0, Math.min(batchSize, deferredQueueCapacity - deferredMpuQueue.size())));
+				drainIncomingOperations(Math.max(0, Math.min(batchSize, deferredQueueCapacity - deferredMpuQueue.size())));
 				if (tempInOps.isEmpty() && deferredMpuQueue.isEmpty()) {
-					dispatchLock.lock();
-					try {
-						if (childOpQueue.isEmpty() && inOpQueue.isEmpty()) {
-							dispatchReady.await();
-						}
-					} finally {
-						dispatchLock.unlock();
+					if (childOpQueue.isEmpty() && inOpQueue.isEmpty()) {
+						awaitDispatchSignal();
 					}
 					// Drain again after waking
 					while (buff.size() < batchSize && !deferredMpuQueue.isEmpty()
@@ -108,41 +159,36 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 						buff.add(deferredMpuQueue.poll());
 					}
 					if (buff.size() < batchSize) {
-						childOpQueue.drainTo(buff, batchSize - buff.size());
+						drainChildOperations(batchSize - buff.size());
 					}
 					if (buff.size() < batchSize) {
-						inOpQueue.drainTo(tempInOps, Math.max(0, Math.min(batchSize - buff.size(), deferredQueueCapacity - deferredMpuQueue.size())));
+						drainIncomingOperations(Math.max(0, Math.min(batchSize - buff.size(), deferredQueueCapacity - deferredMpuQueue.size())));
 					}
 				} else if (tempInOps.isEmpty() && !deferredMpuQueue.isEmpty()) {
 					// We might have no actionable work (MPU permits are exhausted, or deferred queue is full and inOpQueue is blocked).
-					dispatchLock.lock();
-					try {
-						boolean childEmpty = childOpQueue.isEmpty();
-						boolean inEmpty = inOpQueue.isEmpty();
-						boolean canDrainIn = deferredMpuQueue.size() < deferredQueueCapacity;
+					boolean childEmpty = childOpQueue.isEmpty();
+					boolean inEmpty = inOpQueue.isEmpty();
+					boolean canDrainIn = deferredMpuQueue.size() < deferredQueueCapacity;
 
-						if (childEmpty && (inEmpty || !canDrainIn)) {
-							if (!storageDriver.tryAcquireMpuObjectPermit(deferredMpuQueue.peek())) {
-								dispatchReady.await();
-							} else {
-								// We acquired a permit just now, we can process a deferred op
-								if (buff.size() < batchSize && !deferredMpuQueue.isEmpty()) {
-									buff.add(deferredMpuQueue.poll());
-								}
+					if (childEmpty && (inEmpty || !canDrainIn)) {
+						if (!storageDriver.tryAcquireMpuObjectPermit(deferredMpuQueue.peek())) {
+							awaitDispatchSignal();
+						} else {
+							// We acquired a permit just now, we can process a deferred op
+							if (buff.size() < batchSize && !deferredMpuQueue.isEmpty()) {
+								buff.add(deferredMpuQueue.poll());
 							}
 						}
-					} finally {
-						dispatchLock.unlock();
 					}
 					if (buff.size() < batchSize) {
-						childOpQueue.drainTo(buff, batchSize - buff.size());
+						drainChildOperations(batchSize - buff.size());
 					}
 					if (buff.size() < batchSize) {
-						inOpQueue.drainTo(tempInOps, Math.max(0, Math.min(batchSize - buff.size(), deferredQueueCapacity - deferredMpuQueue.size())));
+						drainIncomingOperations(Math.max(0, Math.min(batchSize - buff.size(), deferredQueueCapacity - deferredMpuQueue.size())));
 					}
 				}
 			} else if (buff.size() < batchSize) {
-				inOpQueue.drainTo(tempInOps, Math.max(0, Math.min(batchSize - buff.size(), deferredQueueCapacity - deferredMpuQueue.size())));
+				drainIncomingOperations(Math.max(0, Math.min(batchSize - buff.size(), deferredQueueCapacity - deferredMpuQueue.size())));
 			}
 
 			// Process new incoming ops to respect MPU object limits
@@ -162,36 +208,43 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 			// submit all buffered ops (including retries from prior iterations)
 			final int buffSize = buff.size();
 			if (buffSize > 0) {
+				final int dispatchAttemptCount = storageDriver.dispatchAttemptLimit(buffSize);
+				final var dispatchTokens = captureQueuedDispatchTokens(dispatchAttemptCount);
+				submittingOperations = submittingOperationsSnapshot(dispatchAttemptCount, dispatchTokens);
 				boolean submitted;
-				if (buffSize == 1) { // non-batch mode
-					submitted = storageDriver.submit(buff.get(0));
-					if (submitted) {
-						buff.clear();
+				try {
+					if (dispatchAttemptCount == 0) {
+						submitted = removeResolvedPrefix() > 0;
+					} else if (buffSize == 1) { // non-batch mode
+						submitted = storageDriver.submit(buff.get(0));
+						if (submitted) {
+							markLegacyDispatchFallback(1, dispatchTokens);
+							buff.clear();
+						} else {
+							submitted = removeResolvedPrefix() > 0;
+						}
+					} else { // batch mode
+						final int m = storageDriver.submit(buff, 0, dispatchAttemptCount);
+						submitted = m > 0;
+						if (submitted) {
+							markLegacyDispatchFallback(m, dispatchTokens);
+							buff.removeFirst(m);
+						} else {
+							submitted = removeResolvedPrefix() > 0;
+						}
 					}
-				} else { // batch mode
-					final int m = storageDriver.submit(buff, 0, buffSize);
-					submitted = m > 0;
-					if (submitted) {
-						buff.removeFirst(m);
-					}
+				} finally {
+					submittingOperations = List.of();
 				}
 				// Backpressure: submit made no progress (no permits available).
 				// Wait for a completion to free capacity.  The double-check
-				// inside the lock prevents a lost-signal race: a completion may
-				// release a permit AND call signalDispatch() between submit()
-				// returning false and this lock acquisition — the signal is lost
-				// because nobody is in await() yet.  Checking availablePermits
-				// under the lock detects that case (the permit release happened-
-				// before the lock acquisition), so we skip the await and retry.
-				if (!submitted) {
-					dispatchLock.lock();
-					try {
-						if (!storageDriver.hasAvailableDispatchCapacity()) {
-							dispatchReady.await();
-						}
-					} finally {
-						dispatchLock.unlock();
-					}
+				// prevents a lost-signal race: a completion may release a permit
+				// AND call signalDispatch() between submit() returning false and
+				// this point.  Either the permit is already visible here (skip the
+				// wait and retry) or the unpark permit is already set (park returns
+				// immediately), so the wake-up cannot be lost.
+				if (!submitted && !storageDriver.hasAvailableDispatchCapacity()) {
+					awaitDispatchSignal();
 				}
 			}
 		} catch (final IllegalStateException e) {
@@ -204,13 +257,128 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 		}
 	}
 
+	private void drainIncomingOperations(final int maxCount) {
+		if (maxCount <= 0) {
+			return;
+		}
+		dispatchLock.lock();
+		try {
+			inOpQueue.drainTo(tempInOps, maxCount);
+		} finally {
+			dispatchLock.unlock();
+		}
+	}
+
+	private void drainChildOperations(final int maxCount) {
+		if (maxCount <= 0) {
+			return;
+		}
+		final int firstDrainedIndex = buff.size();
+		childOpQueue.drainTo(buff, maxCount);
+		final var tracker = storageDriver.operationLifecycle();
+		if (tracker == null) {
+			return;
+		}
+		for (var i = buff.size() - 1; i >= firstDrainedIndex; i--) {
+			final O op = buff.get(i);
+			final var state = tracker.stateOf(op);
+			if (state == OperationLifecycleState.NEW
+							|| state == OperationLifecycleState.GENERATOR_BUFFERED) {
+				// Existing extensions may still write the protected child queue directly.
+				// Claim their compatibility ownership before the task-local buffer is the
+				// only place retaining the identity.
+				if (!tracker.driverQueued(op)) {
+					tracker.unattempted(op);
+					buff.remove(i);
+				}
+			}
+		}
+	}
+
+	private List<OperationLifecycleTracker.DispatchToken<O>> captureQueuedDispatchTokens(
+					final int operationCount) {
+		final var tracker = storageDriver.operationLifecycle();
+		final var tokens = new ArrayList<OperationLifecycleTracker.DispatchToken<O>>(operationCount);
+		for (var i = 0; i < operationCount; i++) {
+			tokens.add(tracker == null ? null : tracker.queuedDispatchToken(buff.get(i)));
+		}
+		return tokens;
+	}
+
+	private List<SubmittingOperation<O>> submittingOperationsSnapshot(
+					final int operationCount,
+					final List<OperationLifecycleTracker.DispatchToken<O>> dispatchTokens) {
+		final var operations = new ArrayList<SubmittingOperation<O>>(operationCount);
+		for (var i = 0; i < operationCount; i++) {
+			operations.add(new SubmittingOperation<>(buff.get(i), dispatchTokens.get(i)));
+		}
+		return List.copyOf(operations);
+	}
+
+	List<SubmittingOperation<O>> submittingOperations() {
+		return submittingOperations;
+	}
+
+	private void markLegacyDispatchFallback(
+					final int submittedCount,
+					final List<OperationLifecycleTracker.DispatchToken<O>> dispatchTokens) {
+		final var tracker = storageDriver.operationLifecycle();
+		if (tracker == null) {
+			return;
+		}
+		// Existing cooperative extensions predate beginDispatch(). A successful submit return
+		// is their compatibility boundary. Only operations still owned by the driver queue are
+		// eligible: built-in drivers already transitioned at the exact transport handoff. The
+		// token prevents a synchronous legacy completion and recycle from making a later
+		// circulation appear eligible for this earlier submit return.
+		for (var i = 0; i < submittedCount; i++) {
+			final var op = buff.get(i);
+			if (storageDriver.successfulSubmitStartsTransport(op)) {
+				final var token = dispatchTokens.get(i);
+				if (!tracker.dispatched(token)) {
+					tracker.unresolvedSubmission(token);
+				}
+			}
+		}
+	}
+
+	private int removeResolvedPrefix() {
+		var removed = 0;
+		while (!buff.isEmpty()) {
+			final var op = buff.get(0);
+			final var tracker = storageDriver.operationLifecycle();
+			final OperationLifecycleState state;
+			if (tracker == null) {
+				final var lifecycle = op.lifecycle();
+				if (lifecycle == null) {
+					break;
+				}
+				state = lifecycle.state();
+			} else {
+				state = tracker.stateOf(op);
+			}
+			if (state != OperationLifecycleState.TERMINAL
+							&& state != OperationLifecycleState.UNATTEMPTED
+							&& state != OperationLifecycleState.UNRESOLVED) {
+				break;
+			}
+			buff.remove(0);
+			removed++;
+		}
+		return removed;
+	}
+
 	@Override
-	protected final void doClose() {
-		// Design decision: any operations remaining in the buffer are dropped on shutdown.
-		// For a benchmarking tool this is acceptable — metrics have already captured the
-		// completed operations, and attempting a draining flush here risks hangs if the
-		// downstream driver is in a failed or saturated state.
-		buff.clear();
+	protected final void doStop() {
+		// Only the task thread owns these non-thread-safe collections. Queue recovery uses the
+		// lifecycle registry, so cleanup never needs to race a submit implementation which did
+		// not return before the driver's bounded stop wait.
+		while (!buff.isEmpty()) {
+			buff.remove(0);
+		}
 		tempInOps.clear();
+		while (!deferredMpuQueue.isEmpty()) {
+			deferredMpuQueue.poll();
+		}
 	}
 }

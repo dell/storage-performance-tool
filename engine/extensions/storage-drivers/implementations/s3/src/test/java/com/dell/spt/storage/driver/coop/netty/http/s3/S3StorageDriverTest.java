@@ -16,6 +16,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.item.op.list.ListOperationImpl;
 import com.dell.spt.base.item.op.list.ListedObject;
@@ -103,6 +104,30 @@ public class S3StorageDriverTest {
 	private S3StorageDriver<Item, Operation<Item>> newDriverMock() {
 		// Create a mock that calls real methods; constructor is not invoked
 		return Mockito.mock(S3StorageDriver.class, Mockito.withSettings().lenient().defaultAnswer(CALLS_REAL_METHODS));
+	}
+
+	@Test
+	void verificationPresenceForwardsHttpInterruption() throws Exception {
+		final InterruptedException expected = new InterruptedException("external verification interrupt");
+		final Config cfg = baseConfig(false, 2, false, null, "127.0.0.1");
+		final TestS3Driver driver = new TestS3Driver(cfg) {
+			@Override
+			protected FullHttpResponse executeHttpRequest(
+							final FullHttpRequest request, final boolean warnOnTimeout)
+							throws InterruptedException {
+				throw expected;
+			}
+		};
+		try {
+			final InterruptedException actual = assertThrows(
+							InterruptedException.class,
+							() -> driver.presence(new DeleteTarget(
+											new IntegrityManifestDataItem("bucket", "key", 1, null), 0)));
+			assertSame(expected, actual);
+			assertTrue(Thread.currentThread().isInterrupted());
+		} finally {
+			Thread.interrupted();
+		}
 	}
 
 	@Test
@@ -1024,6 +1049,21 @@ public class S3StorageDriverTest {
 		assertEquals("/bucketV/key", req.uri());
 		assertEquals("VER123", req.headers().get("x-amz-version-id"));
 		// Authorization added
+		assertTrue(req.headers().contains(HttpHeaderNames.AUTHORIZATION));
+	}
+
+	@Test
+	void legacyVersionDeleteUsesQuerySelectorInsteadOfResponseHeader() throws Exception {
+		Config cfg = baseConfig(true, 2, false, null, "127.0.0.1");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		Item item = new ItemImpl("/bucketV/key~VER+1=");
+		Operation<Item> op = new OperationImpl<>(123, OpType.DELETE, item, null, "/bucketV", TEST_CRED);
+
+		HttpRequest req = (HttpRequest) drv.httpRequest(op, "127.0.0.1");
+
+		assertEquals(HttpMethod.DELETE, req.method());
+		assertEquals("/bucketV/key?versionId=VER%2B1%3D", req.uri());
+		assertNull(req.headers().get("x-amz-version-id"));
 		assertTrue(req.headers().contains(HttpHeaderNames.AUTHORIZATION));
 	}
 
@@ -2192,6 +2232,29 @@ public class S3StorageDriverTest {
 						"/bucket/prefix/key~literal?versionId=version%2Fwith%2Bchars", request.uri());
 		assertEquals("prefix/key~literal", item.name());
 		assertNull(request.headers().get("x-amz-version-id"));
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void exactVersionCompositeDeletePrecedesCompositeAndTaggingDispatch() throws Exception {
+		final Config config = baseConfig(false, 2, false, null, "127.0.0.1");
+		config.val("storage-object-tagging-enabled", true);
+		try (final var driver = new TestS3Driver(config)) {
+			final var item = new IntegrityManifestDataItem(
+							"bucket", "prefix/key~literal", 4_096, "version/with+chars");
+			final var composite = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<DataItem>(
+							0, OpType.DELETE, item, null, null, TEST_CRED, null, 0, 1_024);
+
+			final HttpRequest request = driver.httpRequest(
+							(Operation<Item>) (Operation<?>) composite,
+							"s3.us-east-1.amazonaws.com:443");
+
+			assertEquals(HttpMethod.DELETE, request.method());
+			assertEquals(
+							"/bucket/prefix/key~literal?versionId=version%2Fwith%2Bchars", request.uri());
+			assertFalse(request.uri().contains("tagging"));
+			assertEquals("prefix/key~literal", item.name());
+		}
 	}
 
 	@Test

@@ -7,11 +7,13 @@ import com.dell.spt.base.concurrent.TaskBase;
 import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
+import static com.dell.spt.base.Constants.TASK_STOP_WAIT_SECONDS;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.dell.spt.base.item.op.Operation.Status.ACTIVE;
 import static com.dell.spt.base.item.op.Operation.Status.INTERRUPTED;
@@ -34,6 +36,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
@@ -58,6 +61,7 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 	private final Condition[] opAvailableConditions;
 	private final int[] opBuffReserved;
 	private final AtomicLong rrc = new AtomicLong(0);
+	private final AtomicBoolean operationFailureReported = new AtomicBoolean(false);
 
 	@SuppressWarnings("unchecked")
 	public NioStorageDriverBase(
@@ -143,41 +147,62 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 				opBuffLock.unlock();
 			}
 
+			var processedCount = 0;
 			try {
 				final var opLocalBuffSize = opLocalBuff.size();
-				for (var i = 0; i < opLocalBuffSize; i++) {
-					final var op = opLocalBuff.get(i);
-					// check if the op is invoked 1st time
-					if (PENDING.equals(op.status())) {
-						if (!isStarted()) {
-							// Permit already acquired in submit() — release it
-							concurrencyThrottle.release();
-							op.status(INTERRUPTED);
-							handleCompleted(op);
-							continue;
+				for (; processedCount < opLocalBuffSize;) {
+					final var op = opLocalBuff.get(processedCount);
+					try {
+						// check if the op is invoked 1st time
+						if (PENDING.equals(op.status())) {
+							if (!isStarted() || !beginDispatch(op)) {
+								// Permit already acquired in submit() — release it
+								concurrencyThrottle.release();
+								operationLifecycle().unattempted(op);
+								processedCount++;
+								continue;
+							}
+							// Permit already acquired in submit() — mark active
+							op.startRequest();
+							op.finishRequest();
 						}
-						// Permit already acquired in submit() — mark active
-						op.startRequest();
-						op.finishRequest();
+						// Perform non-blocking I/O for the op. A faulty extension must not strand
+						// this permit or discard the remaining worker-local batch.
+						invokeNio(op);
+					} catch (final Throwable cause) {
+						throwUncheckedIfInterrupted(cause);
+						logOperationFailure(cause, "I/O operation invocation failure");
+						op.status(Operation.Status.FAIL_UNKNOWN);
+						concurrencyThrottle.release();
+						processedCount++;
+						handleCompletedSafely(op);
+						continue;
 					}
-					// perform non blocking I/O for the op
-					invokeNio(op);
 					// remove the op from the buffer if it is not active more
 					if (!ACTIVE.equals(op.status())) {
 						concurrencyThrottle.release();
-						handleCompleted(op);
+						// Advance ownership before external result publication. If output throws,
+						// shutdown recovery must not revisit and release this permit again.
+						processedCount++;
+						handleCompletedSafely(op);
 					} else {
 						// the op remains in the buffer for the next iteration
 						opActiveBuff.add(op);
+						processedCount++;
 					}
 				}
 			} catch (final Throwable cause) {
 				throwUncheckedIfInterrupted(cause);
-				LogUtil.exception(Level.ERROR, cause, "I/O worker failure");
+				logOperationFailure(cause, "I/O worker failure");
 			} finally {
-				opLocalBuff.clear();
+				var recoveredCapacity = false;
 				opBuffLock.lock();
 				try {
+					// A worker-level failure may leave a suffix in this local buffer even while
+					// admission remains open. Transfer or recover every owner before clearing it.
+					for (var i = processedCount; i < opLocalBuff.size(); i++) {
+						recoveredCapacity |= recoverUnprocessedLocalOperation(opLocalBuff.get(i));
+					}
 					final var activeSize = opActiveBuff.size();
 					if (activeSize > 0) {
 						for (var i = 0; i < activeSize; i++) {
@@ -185,7 +210,7 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 								final var op = opActiveBuff.get(i);
 								op.status(INTERRUPTED);
 								concurrencyThrottle.release();
-								handleCompleted(op);
+								handleCompletedSafely(op);
 							}
 						}
 						opActiveBuff.clear();
@@ -193,7 +218,86 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 					opBuffReserved[workerIdx] = 0;
 				} finally {
 					opBuffLock.unlock();
+					opLocalBuff.clear();
 				}
+				if (recoveredCapacity && isAdmissionOpen()) {
+					signalDispatchCapacityAvailable();
+				}
+			}
+		}
+
+		private boolean recoverUnprocessedLocalOperation(final O op) {
+			final var lifecycle = operationLifecycle();
+			final var lifecycleState = lifecycle.stateOf(op);
+			switch (lifecycleState) {
+			case NEW, GENERATOR_BUFFERED, DRIVER_QUEUED:
+				concurrencyThrottle.release();
+				lifecycle.unattempted(op);
+				return true;
+			case DISPATCHED:
+				return recoverDispatchedLocalOperation(op);
+			case COMPLETING:
+				concurrencyThrottle.release();
+				lifecycle.unresolved(op);
+				return true;
+			case TERMINAL, UNATTEMPTED, UNRESOLVED:
+				// A concurrent lifecycle decision already retained the evidence, but this
+				// worker-local owner still holds the permit acquired by submit().
+				concurrencyThrottle.release();
+				return true;
+			}
+			throw new AssertionError("Unhandled operation lifecycle state: " + lifecycleState);
+		}
+
+		private boolean recoverDispatchedLocalOperation(final O op) {
+			final Operation.Status status;
+			try {
+				status = op.status();
+			} catch (final Throwable cause) {
+				concurrencyThrottle.release();
+				operationLifecycle().unresolved(op);
+				logOperationFailure(cause, "I/O operation state recovery failure");
+				return true;
+			}
+			if (ACTIVE.equals(status)) {
+				// Transport work from an earlier invocation remains eligible for bounded drain.
+				opActiveBuff.add(op);
+				return false;
+			}
+			concurrencyThrottle.release();
+			if (PENDING.equals(status)) {
+				// Dispatch ownership was published, but worker failure prevented a trustworthy
+				// transport/result outcome. It cannot be reclassified as unattempted.
+				operationLifecycle().unresolved(op);
+				return true;
+			}
+			handleCompletedSafely(op);
+			final var recoveredState = operationLifecycle().stateOf(op);
+			if (recoveredState == OperationLifecycleState.DISPATCHED
+							|| recoveredState == OperationLifecycleState.COMPLETING) {
+				operationLifecycle().unresolved(op);
+			}
+			return true;
+		}
+
+		private void resolveStoppedLocalOperation(final O op) {
+			concurrencyThrottle.release();
+			if (PENDING.equals(op.status())) {
+				operationLifecycle().unattempted(op);
+			} else {
+				if (ACTIVE.equals(op.status())) {
+					op.status(INTERRUPTED);
+				}
+				handleCompletedSafely(op);
+			}
+		}
+
+		private void handleCompletedSafely(final O op) {
+			try {
+				handleCompleted(op);
+			} catch (final Throwable cause) {
+				throwUncheckedIfInterrupted(cause);
+				logOperationFailure(cause, "I/O operation completion failure");
 			}
 		}
 
@@ -204,13 +308,9 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 				final var opBuffSize = opBuff.size();
 				Loggers.MSG.debug("Finish {} remaining active load operations finally", opBuffSize);
 				for (var i = 0; i < opBuffSize; i++) {
-					final var op = opBuff.get(i);
-					if (ACTIVE.equals(op.status()) || PENDING.equals(op.status())) {
-						op.status(INTERRUPTED);
-						concurrencyThrottle.release();
-						handleCompleted(op);
-					}
+					resolveStoppedLocalOperation(opBuff.get(i));
 				}
+				opBuff.clear();
 				Loggers.MSG.debug("Finish the remaining active load operations done");
 			} finally {
 				opBuffLock.unlock();
@@ -228,6 +328,16 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 		}
 	}
 
+	private void logOperationFailure(final Throwable cause, final String message) {
+		if (operationFailureReported.compareAndSet(false, true)) {
+			LogUtil.exception(
+							Level.ERROR, cause,
+							message + "; further I/O failures are logged at DEBUG");
+		} else {
+			LogUtil.exception(Level.DEBUG, cause, message);
+		}
+	}
+
 	/**
 	Reentrant method which decorates the actual non-blocking create/read/etc I/O operation.
 	May change the task status or not change if the I/O operation is not completed during this
@@ -241,7 +351,11 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 					throws IllegalStateException {
 		super.doStart();
 		for (final var ioWorker : ioWorkers) {
-			ioWorker.start();
+			if (ioWorker.isStopped() && ioWorker instanceof TaskBase task) {
+				task.restart();
+			} else {
+				ioWorker.start();
+			}
 		}
 	}
 
@@ -249,18 +363,39 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 	protected final void doShutdown()
 					throws IllegalStateException {
 		super.doShutdown();
-		for (final var ioWorker : ioWorkers) {
-			ioWorker.stop();
-		}
+		stopIoWorkers();
 	}
 
 	@Override
 	protected final void doStop()
 					throws IllegalStateException {
 		super.doStop();
+		stopIoWorkers();
+	}
+
+	private void stopIoWorkers() {
 		for (final var ioWorker : ioWorkers) {
 			ioWorker.stop();
 		}
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TASK_STOP_WAIT_SECONDS);
+		for (final var ioWorker : ioWorkers) {
+			final long remaining = deadline - System.nanoTime();
+			if (remaining <= 0) {
+				throw new IllegalStateException("Timed out waiting for NIO worker termination");
+			}
+			try {
+				if (!ioWorker.await(remaining, TimeUnit.NANOSECONDS)) {
+					throw new IllegalStateException("Timed out waiting for NIO worker termination");
+				}
+			} catch (final InterruptedException e) {
+				throwUnchecked(e);
+			}
+		}
+	}
+
+	@Override
+	protected final boolean successfulSubmitStartsTransport(final O op) {
+		return false;
 	}
 
 	@Override
@@ -355,6 +490,34 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 		return submit(ops, 0, ops.size());
 	}
 
+	@Override
+	protected final List<O> recoverAdditionalQueuedOperations() {
+		final var recovered = new ArrayList<O>();
+		for (var i = 0; i < ioWorkerCount; i++) {
+			final var opBuffLock = opBuffLocks[i];
+			opBuffLock.lock();
+			try {
+				if (opBuffs[i] == null) {
+					continue;
+				}
+				final var retainedActive = new ArrayList<O>(opBuffs[i].size());
+				while (!opBuffs[i].isEmpty()) {
+					final O op = opBuffs[i].remove(0);
+					if (PENDING.equals(op.status())) {
+						recovered.add(op);
+						concurrencyThrottle.release();
+					} else {
+						retainedActive.add(op);
+					}
+				}
+				opBuffs[i].addAll(retainedActive);
+			} finally {
+				opBuffLock.unlock();
+			}
+		}
+		return recovered;
+	}
+
 	protected final void finishOperation(final O op) {
 		try {
 			op.startResponse();
@@ -370,6 +533,8 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 	@Override
 	protected void doClose()
 					throws IOException {
+		closeAdmission();
+		recoverQueuedOperations();
 
 		ioWorkers.forEach(
 						worker -> {

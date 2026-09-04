@@ -2,6 +2,9 @@ package com.dell.spt.base.item.io;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.item.DataItemImpl;
@@ -13,6 +16,7 @@ import com.dell.spt.base.item.op.list.ListOperationImpl;
 import com.dell.spt.base.item.op.list.ListedObject;
 import java.util.List;
 import com.dell.spt.base.storage.Credential;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import org.apache.commons.csv.CSVFormat;
@@ -77,6 +81,40 @@ class IntegrityOperationManifestOutputTest {
 		assertEquals("null", records.get(1).get(3));
 		assertEquals("prefix/b", records.get(2).get(1));
 		assertEquals("v2", records.get(2).get(3));
+	}
+
+	@Test
+	void listRejectsOutOfPrefixResponseBeforePublishingManifest() throws Exception {
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		final var op = new ListOperationImpl<PathItemImpl>(
+						0, OpType.LIST, new PathItemImpl("seed"), Credential.NONE);
+		op.item().name("guarded/");
+		op.listedObjects(List.of(
+						new ListedObject("guarded/inside", 7, null),
+						new ListedObject("outside/untrusted", 8, null)));
+		try (final var output = new IntegrityOperationManifestOutput<>(
+						manifest, "/bucket", OpType.LIST)) {
+			final IOException failure = assertThrows(IOException.class, () -> output.put(op));
+			assertTrue(failure.getMessage().contains("outside requested prefix"));
+		}
+		assertFalse(Files.exists(manifest));
+		assertFalse(Files.exists(IntegrityManifestCompletion.emissionCountPath(manifest)));
+		assertFalse(Files.exists(IntegrityManifestCompletion.deleteMarkerCountPath(manifest)));
+	}
+
+	@Test
+	void listKeepsImmutableRootWhenShardPrefixChanges() throws Exception {
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		final var op = new ListOperationImpl<PathItemImpl>(
+						0, OpType.LIST, new PathItemImpl("outside/shard/"), Credential.NONE);
+		op.listedObjects(List.of(new ListedObject("outside/shard/untrusted", 8, null)));
+		try (final var output = new IntegrityOperationManifestOutput<>(
+						manifest, "/bucket", OpType.LIST, "guarded/")) {
+			final IOException failure = assertThrows(IOException.class, () -> output.put(op));
+			assertTrue(failure.getMessage().contains("outside requested prefix"));
+		}
+		assertFalse(Files.exists(manifest));
+		assertFalse(Files.exists(IntegrityManifestCompletion.emissionCountPath(manifest)));
 	}
 
 	@Test

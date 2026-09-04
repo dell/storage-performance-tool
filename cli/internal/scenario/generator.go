@@ -21,17 +21,18 @@ var scenarioGenerators = map[string]scenarioGenerator{
 	workload.Read:        GenerateReadScenario,
 	workload.WriteVerify: GenerateWriteVerifyScenario,
 	workload.ReadVerify:  GenerateReadVerifyScenario,
+	workload.Delete:      GenerateDeleteScenario,
 	workload.Mixed:       GenerateMixedScenario,
 	workload.List:        GenerateListScenario,
 	workload.Mock:        GenerateMockScenario,
 	workload.Tables:      GenerateTablesScenario,
 }
 
-// GenerateScenario creates a JavaScript scenario from parameters. The workload registry controls
-// which public workload names are implemented; the generator map is checked against it by tests.
+// GenerateScenario creates a JavaScript scenario from parameters. The workload registry is the
+// public support gate; every supported workload must have a registered scenario generator.
 func GenerateScenario(params Params) (string, error) {
 	spec, ok := workload.Lookup(params.WorkloadType)
-	if !ok || !spec.Implemented {
+	if !ok {
 		return "", fmt.Errorf("unsupported workload type: %s", params.WorkloadType)
 	}
 	generator, ok := scenarioGenerators[spec.Name]
@@ -121,7 +122,7 @@ func GenerateReadScenario(params Params) (string, error) {
 
 	seedCount := params.SeedCount
 	if seedCount <= 0 {
-		seedCount = 2500
+		seedCount = constants.DefaultSeedObjectCount
 	}
 
 	readShuffleBatchSize := 0

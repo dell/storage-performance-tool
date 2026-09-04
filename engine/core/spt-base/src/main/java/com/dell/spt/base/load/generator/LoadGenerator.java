@@ -4,16 +4,86 @@ import com.dell.spt.base.concurrent.Task;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import java.util.List;
+import java.util.OptionalLong;
 
 /** Created on 11.07.16. */
 public interface LoadGenerator<I extends Item, O extends Operation<I>> extends Task, AutoCloseable {
 
+	/** Installs the lifecycle shared with the storage driver. */
+	default void operationLifecycle(final OperationLifecycleTracker<O> lifecycle) {}
+
+	/** Opens operation admission before a start or restart. */
+	default void openAdmission() {}
+
+	/** Opens operation admission until the supplied absolute monotonic deadline. */
+	default void openAdmissionUntil(final long deadlineNanos) {
+		openAdmission();
+	}
+
+	/** Holds admission before the first start without transitioning the task lifecycle. */
+	default void holdAdmission() {}
+
+	/** Atomically closes admission before shutdown recovery begins. */
+	default void closeAdmission() {
+		stop();
+	}
+
+	/** Returns operations retained by generator buffers without dispatching them. */
+	default List<O> recoverBufferedOperations() {
+		return List.of();
+	}
+
 	/** Returns true when the item input has been fully consumed. */
 	boolean isItemInputFinished();
 
+	/**
+	 * Returns the monotonic time when this finite generator lost the ability to schedule another
+	 * fresh operation, or {@link Long#MAX_VALUE} while it remains schedulable. Use {@link
+	 * #schedulingExhaustionNanos()} when explicit presence is required because {@code Long.MAX_VALUE}
+	 * is also a valid monotonic timestamp.
+	 */
+	default long schedulingExhaustedAtNanos() {
+		return Long.MAX_VALUE;
+	}
+
+	/**
+	 * Returns the scheduling-exhaustion transition with explicit presence.
+	 *
+	 * <p>The compatibility default adapts the historical {@link Long#MAX_VALUE} sentinel. Built-in
+	 * generators override this method so that {@code Long.MAX_VALUE} remains a valid monotonic
+	 * timestamp.
+	 */
+	default OptionalLong schedulingExhaustionNanos() {
+		final long exhaustedAtNanos = schedulingExhaustedAtNanos();
+		return exhaustedAtNanos == Long.MAX_VALUE
+						? OptionalLong.empty()
+						: OptionalLong.of(exhaustedAtNanos);
+	}
+
 	/** Returns the number of operations generated including recycled ones. */
 	long generatedOpCount();
+
+	/**
+	 * Returns the number of input identities consumed while generating fresh operations.
+	 *
+	 * <p>The compatibility default preserves the historical one-item/one-operation contract
+	 * for third-party generator implementations.
+	 */
+	default long consumedItemCount() {
+		return generatedOpCount();
+	}
+
+	/**
+	 * Returns input identities classified as unattempted in aggregate, without materializing one
+	 * recovery operation per unread identity.
+	 *
+	 * <p>The compatibility default preserves generators which recover only concrete operations.
+	 */
+	default long aggregateUnattemptedItemCount() {
+		return 0;
+	}
 
 	/**
 	 * Enqueues the task for further recycling.

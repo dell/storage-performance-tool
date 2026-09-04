@@ -45,6 +45,7 @@ var (
 	startReplayLocalHeadless        = headless.StartHeadlessModeWithScenarioContentAndParams
 	startReplayLocalTUI             = tui.StartTUIWithScenarioRunOptions
 	startReplayAutoResultsMonitor   = startAutoResultsMonitor
+	newReplayRunID                  = func() int64 { return time.Now().UnixMilli() }
 	confirmReplayLaunchCommand      = func(out io.Writer) error { return confirmReplayLaunch(out, os.OpenFile) }
 	shouldReplayRunHeadless         = shouldRunHeadless
 	connectReplayOrchestrator       = func(ctx context.Context, orchestrator *tui.MultiHostOrchestrator) error {
@@ -73,6 +74,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 
 	generated, err := replay.Generate(cmd.Context(), replay.Options{
 		SourceURL:   sourceURL,
+		RunID:       newReplayRunID(),
 		Endpoints:   endpoints,
 		AccessKey:   accessKey,
 		SecretKey:   secretKey,
@@ -342,9 +344,11 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		if autoTerminate > 0 {
 			_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
 		}
+		verbose, _ := cmd.Flags().GetBool("verbose")
 		err = startReplayRemoteTUI(
 			replayOrchestrator, sptImage, paths.Scenario, params, tui.RunOptions{
 				Context:              replayContext,
+				Verbose:              verbose,
 				AutoTerminateSeconds: autoTerminate,
 				TracePath:            traceOpts.Path,
 				TraceAppend:          traceOpts.Append,
@@ -378,9 +382,11 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	if autoTerminate > 0 {
 		_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
 	}
+	verbose, _ := cmd.Flags().GetBool("verbose")
 	err = startReplayLocalTUI(
 		sptImage, paths.Scenario, params, tui.RunOptions{
 			Context:              replayContext,
+			Verbose:              verbose,
 			APIPort:              apiPort,
 			NetworkMode:          networkMode,
 			ResultsRoot:          plannedResultsRoot,
@@ -533,7 +539,7 @@ func init() {
 	replayCmd.Flags().String(flagSptImage, "", "Override the engine image ref (env: SPT_IMAGE)")
 	replayCmd.Flags().String("trace-file", "", "Save all output to specified trace file")
 	replayCmd.Flags().Bool("trace-append", false, "Append to existing trace file (default: overwrite)")
-	replayCmd.Flags().Bool("verbose", false, "Show detailed Docker API calls and debug information")
+	replayCmd.Flags().Bool("verbose", false, "Show detailed Docker API calls, debug information, and textual live metrics")
 	replayCmd.Flags().Bool("auto-results", true, "Automatically retrieve results artifacts at end of replay")
 	replayCmd.Flags().String("results-dir", "./results", "Directory to write retrieved replay results artifacts")
 	replayCmd.Flags().Bool("auto-results-debug", false, "Enable verbose debug logs for replay auto-results completion detection")

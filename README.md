@@ -106,9 +106,12 @@ Start with a local mock workload, which requires no S3 endpoint:
 ./spt run mock --duration 30s --threads 4
 ```
 
-> **Data safety:** S3 write and mixed workloads mutate the target, and mixed
-> workloads include DELETE operations. Use a dedicated benchmark bucket or an
-> isolated prefix; never point them at production data.
+> **Data safety:** S3 write and mixed workloads mutate the target (mixed
+> workloads include DELETE), and standalone `delete` can remove selected objects.
+> Use a dedicated benchmark bucket or isolated prefix; never use production data.
+> Seeded DELETE owns a unique run namespace; `--items-file` and
+> `--delete-existing` target scopes you select. Review the [S3 DELETE safety
+> guide](cli/docs/S3_DELETE.md) before deleting existing data.
 
 After configuring `.env`, run an S3 write workload in an isolated prefix:
 
@@ -137,7 +140,7 @@ Headless mode activates automatically when no TTY is available; use
 
 ## Core Capabilities
 
-- **Workload coverage**: run write, read, write-verify, read-verify, list,
+- **Workload coverage**: run write, read, write-verify, read-verify, delete, list,
   mixed, mock, and S3 Tables workloads.
 - **Pluggable S3 drivers**: select the Netty, AWS SDK v2, or optional RDMA
   backend with `--s3-driver`.
@@ -192,6 +195,8 @@ read data paths; see the [S3-RDMA guide](cli/docs/S3_RDMA.md).
   examples.
 - [S3 integrity testing](cli/docs/S3_INTEGRITY.md) - persisted-object write/read
   verification, artifacts, and automation contracts.
+- [S3 DELETE](cli/docs/S3_DELETE.md) - destructive selection safety, batching,
+  verification, results, and recovery.
 - [Archived workload replay](cli/docs/REPLAY.md) - import and replay SPT or
   legacy Mongoose workloads.
 - [S3-RDMA](cli/docs/S3_RDMA.md) - setup, tuning, architecture, and

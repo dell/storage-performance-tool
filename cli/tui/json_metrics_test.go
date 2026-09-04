@@ -899,6 +899,43 @@ func TestParseJSONMetricsMarksNullCountTTFBUnavailable(t *testing.T) {
 	}
 }
 
+func TestParseJSONMetricsMarksStructuredZeroCountLatencyAndDurationUnavailable(t *testing.T) {
+	step := newTestStep()
+	step.MetricsSchema = 4
+	step.OpType = "DELETE"
+	step.Timing.LatencyMeanUs = 9_999
+	step.Timing.DurationMeanUs = 8_888
+	step.Timing.Latency = &JSONTimingStat{Count: 0, MeanUs: 777, P50Us: 666}
+	step.Timing.Duration = &JSONTimingStat{Count: 0, MeanUs: 555, P50Us: 444}
+
+	metrics, err := NewSptAPIClient("").ParseJSONMetrics(
+		marshalSteps(t, []JSONMetricsStep{step}))
+	if err != nil {
+		t.Fatalf("ParseJSONMetrics failed: %v", err)
+	}
+	if len(metrics) != 1 {
+		t.Fatalf("expected 1 metric, got %d", len(metrics))
+	}
+	metric := metrics[0]
+	if metric.HasLatency || metric.MeanLatency != 0 {
+		t.Fatalf("zero-count structured latency became measured: %+v", metric)
+	}
+	if metric.HasDuration || metric.MeanDuration != 0 {
+		t.Fatalf("zero-count structured duration became measured: %+v", metric)
+	}
+	if got := FormatLatencyValue(ExtractDisplayDuration(*metric)); got != "N/A" {
+		t.Fatalf("zero-count structured duration rendered as %q, want N/A", got)
+	}
+
+	collector := NewMetricsCollector()
+	collector.AddSample(*metric)
+	chart := NewGenericChartRenderer(
+		"Latency P50", "", ExtractDisplayLatency, FormatLatencyValue)
+	if rendered := chart.RenderChart(collector, 48); !strings.Contains(rendered, "N/A") {
+		t.Fatalf("zero-count structured latency chart omitted N/A:\n%s", rendered)
+	}
+}
+
 func TestParseJSONMetricsPrefersLatestSample(t *testing.T) {
 	older := newTestStep()
 	older.StepID = "create-step"
@@ -1057,11 +1094,11 @@ func TestAggregateByOpType_FourOps(t *testing.T) {
 
 func TestAggregateByOpTypeAggregatesSameOpTTFB(t *testing.T) {
 	metrics := []*PerformanceMetric{
-		{OpType: "READ", OpsPerSec: 100, MeanLatency: 1000, MeanDuration: 1200, MeanTTFB: 200, HasTTFB: true},
-		{OpType: "READ", OpsPerSec: 300, MeanLatency: 2000, MeanDuration: 2200, MeanTTFB: 400, HasTTFB: true},
+		{MetricsSchema: 4, Scope: "node", NodeID: "node-a", OpType: "READ", OpsPerSec: 100, SuccessCount: 5, MeanLatency: 1000, MeanDuration: 1200, MeanTTFB: 200, HasTTFB: true},
+		{MetricsSchema: 4, Scope: "node", NodeID: "node-b", OpType: "READ", OpsPerSec: 300, SuccessCount: 7, MeanLatency: 2000, MeanDuration: 2200, MeanTTFB: 400, HasTTFB: true},
 	}
 
-	combined, _ := AggregateByOpType(metrics)
+	combined, perOp := AggregateByOpType(metrics)
 	if combined == nil {
 		t.Fatal("combined aggregate must not be nil")
 	}
@@ -1070,6 +1107,186 @@ func TestAggregateByOpTypeAggregatesSameOpTTFB(t *testing.T) {
 	}
 	if combined.MeanTTFB != 350 {
 		t.Fatalf("expected ops-weighted TTFB 350, got %d", combined.MeanTTFB)
+	}
+	if perOp["READ"].SuccessCount != 12 {
+		t.Fatalf("expected READ totals from both nodes, got %d", perOp["READ"].SuccessCount)
+	}
+	if perOp["READ"].NodesCount != 2 || len(perOp["READ"].NodesPresent) != 2 {
+		t.Fatalf("expected both READ contributors, got count=%d present=%v",
+			perOp["READ"].NodesCount, perOp["READ"].NodesPresent)
+	}
+}
+
+func TestAggregateByOpTypeRejectsDuplicateContributorForSameOperation(t *testing.T) {
+	metrics := []*PerformanceMetric{
+		{MetricsSchema: 4, Scope: "node", ClusterID: "cluster-a", RunID: "run-a", StepID: "step-a", NodeID: "node-a", OpType: "DELETE", SuccessCount: 5},
+		{MetricsSchema: 4, Scope: "node", ClusterID: "cluster-a", RunID: "run-a", StepID: "step-a", NodeID: "node-a", OpType: "DELETE", SuccessCount: 7},
+	}
+
+	combined, perOp := AggregateByOpType(metrics)
+	if combined != nil || perOp != nil {
+		t.Fatalf("duplicate contributor rows must fail closed, combined=%+v perOp=%+v", combined, perOp)
+	}
+}
+
+func TestSelectCurrentMetricSetRejectsStaleAndDuplicateRows(t *testing.T) {
+	base := PerformanceMetric{
+		MetricsSchema: 4,
+		Scope:         "node",
+		ClusterID:     "cluster-a",
+		RunID:         "run-new",
+		StepID:        "delete-step",
+		NodeID:        "node-a",
+		OpType:        "DELETE",
+	}
+	staleRun := base
+	staleRun.RunID = "run-old"
+	staleRun.SampleTimestamp = time.Unix(1, 0)
+	current := base
+	current.SampleTimestamp = time.Unix(2, 0)
+
+	selected, err := selectCurrentMetricSetForRun(
+		[]*PerformanceMetric{&current, &staleRun}, []string{"seed-step", "delete-step"}, "")
+	if err != nil {
+		t.Fatalf("select current metric set: %v", err)
+	}
+	if len(selected) != 1 || selected[0].RunID != "run-new" {
+		t.Fatalf("stale run was not excluded: %+v", selected)
+	}
+
+	duplicate := current
+	duplicate.SampleTimestamp = time.Unix(3, 0)
+	if _, err := selectCurrentMetricSetForRun(
+		[]*PerformanceMetric{&duplicate, &current}, []string{"delete-step"}, ""); err == nil {
+		t.Fatal("duplicate current run/step/op contributor row must be rejected")
+	}
+	missingExpected := staleRun
+	missingExpected.StepID = "seed-step"
+	if _, err := selectCurrentMetricSetForRun(
+		[]*PerformanceMetric{&missingExpected}, []string{"delete-step"}, ""); err == nil {
+		t.Fatal("missing expected step must not fall back to a retained stale row")
+	}
+}
+
+func TestSelectCurrentMetricSetRejectsRowsFromAnotherOwnedRun(t *testing.T) {
+	stale := &PerformanceMetric{
+		MetricsSchema: 4, StepID: "delete-step", OpType: "DELETE",
+		RunID: "run-old", SampleTimestamp: time.Unix(2, 0),
+	}
+	if _, err := selectCurrentMetricSetForRun(
+		[]*PerformanceMetric{stale}, nil, "run-current"); err == nil {
+		t.Fatal("newest retained row from another owned run must fail closed")
+	}
+	unattributed := *stale
+	unattributed.RunID = ""
+	if _, err := selectCurrentMetricSetForRun(
+		[]*PerformanceMetric{&unattributed}, nil, "run-current"); err == nil {
+		t.Fatal("schema-v4 row without run identity must fail closed for an owned run")
+	}
+	current := *stale
+	current.RunID = "run-current"
+	current.SampleTimestamp = time.Unix(2, 0)
+	legacyRetained := PerformanceMetric{
+		MetricsSchema: 3, StepID: "delete-step", OpType: "CREATE",
+		SampleTimestamp: time.Unix(3, 0),
+	}
+	selected, err := selectCurrentMetricSetForRun(
+		[]*PerformanceMetric{&legacyRetained, &current}, nil, "run-current")
+	if err != nil {
+		t.Fatalf("select exact owned run ahead of retained legacy row: %v", err)
+	}
+	if len(selected) != 1 || selected[0].RunID != "run-current" {
+		t.Fatalf("retained unattributed legacy row displaced owned run: %+v", selected)
+	}
+	legacy := &PerformanceMetric{
+		MetricsSchema: 3, StepID: "delete-step", OpType: "DELETE",
+		SampleTimestamp: time.Unix(1, 0),
+	}
+	if _, err := selectCurrentMetricSetForRun(
+		[]*PerformanceMetric{legacy}, nil, "run-current"); err != nil {
+		t.Fatalf("legacy row without run identity must remain compatible: %v", err)
+	}
+}
+
+func TestMetricsByContributorRejectsCrossNodeIdentityMismatch(t *testing.T) {
+	current := &PerformanceMetric{StepID: "delete-step", RunID: "run-current", ClusterID: "cluster-a"}
+	stale := &PerformanceMetric{StepID: "seed-step", RunID: "run-old", ClusterID: "cluster-a"}
+	results := PollResults{
+		Metrics:        map[string]*PerformanceMetric{"a": current, "b": stale},
+		ContributorIDs: map[string]string{"a": "local", "b": "worker:1099"},
+	}
+	if _, valid := metricsByContributor(results); valid {
+		t.Fatal("cross-node step/run mismatch must fail closed before primary aggregation")
+	}
+
+	unattributedRun := &PerformanceMetric{
+		MetricsSchema: 4, StepID: "delete-step", ClusterID: "cluster-a", Delete: &DeleteMetrics{},
+	}
+	results = PollResults{
+		Metrics:        map[string]*PerformanceMetric{"a": current, "b": unattributedRun},
+		ContributorIDs: map[string]string{"a": "local", "b": "worker:1099"},
+	}
+	if _, valid := metricsByContributor(results); valid {
+		t.Fatal("schema-v4 DELETE contributor missing run identity must fail closed")
+	}
+	unattributedCluster := &PerformanceMetric{
+		MetricsSchema: 4, StepID: "delete-step", RunID: "run-current", Delete: &DeleteMetrics{},
+	}
+	results.Metrics["b"] = unattributedCluster
+	if _, valid := metricsByContributor(results); valid {
+		t.Fatal("schema-v4 DELETE contributor missing cluster identity must fail closed")
+	}
+
+	for name, metric := range map[string]*PerformanceMetric{
+		"run": {
+			MetricsSchema: 4, StepID: "delete-step", ClusterID: "cluster-a", Delete: &DeleteMetrics{},
+		},
+		"cluster": {
+			MetricsSchema: 4, StepID: "delete-step", RunID: "run-current", Delete: &DeleteMetrics{},
+		},
+		"step": {
+			MetricsSchema: 4, RunID: "run-current", ClusterID: "cluster-a", Delete: &DeleteMetrics{},
+		},
+	} {
+		t.Run("single contributor missing "+name, func(t *testing.T) {
+			single := PollResults{
+				Metrics:        map[string]*PerformanceMetric{"only": metric},
+				ContributorIDs: map[string]string{"only": "local"},
+			}
+			if _, valid := metricsByContributor(single); valid {
+				t.Fatalf("schema-v4 single contributor missing %s identity must fail closed", name)
+			}
+		})
+	}
+}
+
+func TestBuildLocalMetricsUpdateSelectsOnlyNewestStep(t *testing.T) {
+	old := &PerformanceMetric{StepID: "seed-step", OpType: "CREATE", Timestamp: time.Unix(1, 0)}
+	current := &PerformanceMetric{StepID: "delete-step", OpType: "DELETE", Timestamp: time.Unix(2, 0)}
+
+	update, err := buildLocalMetricsUpdateForRun([]*PerformanceMetric{old, current}, "")
+	if err != nil {
+		t.Fatalf("build local metrics update: %v", err)
+	}
+	if update == nil || update.Aggregated == nil || update.Aggregated.StepID != "delete-step" {
+		t.Fatalf("local update did not select current step: %+v", update)
+	}
+}
+
+func TestSelectCurrentMetricSetPreservesLegacyMixedOperationRows(t *testing.T) {
+	currentTimestamp := time.Unix(2, 0)
+	metrics := []*PerformanceMetric{
+		{MetricsSchema: 2, StepID: "mixed-step", OpType: "READ", SampleTimestamp: currentTimestamp},
+		{MetricsSchema: 3, StepID: "mixed-step", OpType: "DELETE", SampleTimestamp: currentTimestamp},
+		{MetricsSchema: 2, StepID: "old-step", OpType: "CREATE", SampleTimestamp: time.Unix(1, 0)},
+	}
+
+	selected, err := selectCurrentMetricSetForRun(metrics, []string{"old-step", "mixed-step"}, "")
+	if err != nil {
+		t.Fatalf("select legacy current metric set: %v", err)
+	}
+	if len(selected) != 2 || selected[0].OpType != "READ" || selected[1].OpType != "DELETE" {
+		t.Fatalf("legacy mixed-operation rows were not preserved: %+v", selected)
 	}
 }
 

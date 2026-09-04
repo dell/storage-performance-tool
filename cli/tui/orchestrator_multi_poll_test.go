@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 )
 
@@ -168,6 +169,153 @@ func TestPollerSetsIsConnectedFlag(t *testing.T) {
 	// Ensure we actually parsed metrics for the good host
 	if m := results.Metrics["goodHost"]; m == nil || m.OpsPerSec == 0 {
 		t.Errorf("expected parsed metrics for goodHost, got %+v", m)
+	} else if m.NodeID != fleetLocalContributorID {
+		t.Fatalf("entry metric contributor = %q, want %q", m.NodeID, fleetLocalContributorID)
+	}
+
+	update := wrapper.collectAllMetrics(context.Background())
+	if update == nil || update.Aggregated == nil {
+		t.Fatal("expected a fail-closed aggregate from the successful contributor")
+	}
+	if update.Aggregated.NodesCount != 2 || len(update.Aggregated.NodesPresent) != 1 {
+		t.Fatalf("expected one of two contributors, got count=%d present=%v",
+			update.Aggregated.NodesCount, update.Aggregated.NodesPresent)
+	}
+	if update.Aggregated.NodesPresent[0] != fleetLocalContributorID {
+		t.Fatalf("successful contributor = %q, want %q",
+			update.Aggregated.NodesPresent[0], fleetLocalContributorID)
+	}
+	if !update.Aggregated.Partial {
+		t.Fatal("a failed contributor poll must make the aggregate partial")
+	}
+}
+
+func TestPerOperationCompletenessUsesExpectedFleetNotObservedContributors(t *testing.T) {
+	metric := &PerformanceMetric{
+		MetricsSchema: 4,
+		Scope:         "node",
+		ClusterID:     "cluster-a",
+		RunID:         "run-a",
+		StepID:        "delete-step",
+		NodeID:        fleetLocalContributorID,
+		OpType:        "DELETE",
+		Delete:        &DeleteMetrics{},
+	}
+	present, unique := contributorsForOp([]*PerformanceMetric{metric}, "DELETE")
+	got := withPollCompleteness(metric, 2, present, !unique || len(present) != 2)
+	if got.NodesCount != 2 || len(got.NodesPresent) != 1 || !got.Partial {
+		t.Fatalf("N-1 operation must be partial against expected fleet: %+v", got)
+	}
+}
+
+func TestSchemaV4OrdinaryContributorsAggregateAndSignalCompletion(t *testing.T) {
+	for _, opType := range []string{"READ", "CREATE", "LIST", "MIXED", "NOOP", "TABLE"} {
+		t.Run(opType, func(t *testing.T) {
+			results := PollResults{
+				Metrics: map[string]*PerformanceMetric{
+					"entry": {
+						MetricsSchema: 4, Scope: "node", ClusterID: "spt-run-77", RunID: "77",
+						StepID: "step-final", NodeID: "local", OpType: opType,
+						TestState: constants.TestStateCompleted, CompletionPercent: 100,
+					},
+					"worker": {
+						MetricsSchema: 4, Scope: "node", ClusterID: "spt-run-77", RunID: "77",
+						StepID: "step-final", NodeID: "worker:1099", OpType: opType,
+						TestState: constants.TestStateCompleted, CompletionPercent: 100,
+					},
+				},
+				ContributorIDs: map[string]string{"entry": "local", "worker": "worker:1099"},
+			}
+			contributors, valid := metricsByContributor(results)
+			if !valid {
+				t.Fatal("schema-v4 contributors with public run identity were rejected")
+			}
+			aggregated := NewMetricsAggregator().Aggregate(contributors)
+			if aggregated == nil || !shouldSignalCompletionForExpectedSteps(
+				aggregated, []string{"step-final"}) {
+				t.Fatalf("ordinary schema-v4 completion did not aggregate or signal: %+v", aggregated)
+			}
+		})
+	}
+}
+
+func TestReplayIdentityAggregatesDistributedSchemaV4CompletionAndRetainsLegacyCompatibility(t *testing.T) {
+	const replayStepID = "replay-001-20260824.171700.000-create"
+	results := PollResults{
+		Metrics: map[string]*PerformanceMetric{
+			"entry": {
+				MetricsSchema: 4, Scope: "node", ClusterID: "spt-run-1717", RunID: "1717",
+				StepID: replayStepID, NodeID: "local", OpType: "CREATE",
+				TestState: constants.TestStateCompleted, CompletionPercent: 100,
+			},
+			"worker": {
+				MetricsSchema: 4, Scope: "node", ClusterID: "spt-run-1717", RunID: "1717",
+				StepID: replayStepID, NodeID: "worker:1099", OpType: "CREATE",
+				TestState: constants.TestStateCompleted, CompletionPercent: 100,
+			},
+		},
+		ContributorIDs: map[string]string{"entry": "local", "worker": "worker:1099"},
+	}
+	contributors, valid := metricsByContributor(results)
+	if !valid {
+		t.Fatal("schema-v4 replay contributors with generated run identity were rejected")
+	}
+	aggregated := NewMetricsAggregator().Aggregate(contributors)
+	if aggregated == nil || aggregated.RunID != "1717" || aggregated.ClusterID != "spt-run-1717" ||
+		aggregated.StepID != replayStepID ||
+		!shouldSignalCompletionForExpectedSteps(aggregated, []string{replayStepID}) {
+		t.Fatalf("schema-v4 replay did not aggregate and complete with one identity: %+v", aggregated)
+	}
+
+	for _, metric := range results.Metrics {
+		metric.MetricsSchema = 3
+		metric.RunID = ""
+		metric.ClusterID = ""
+	}
+	legacyContributors, legacyValid := metricsByContributor(results)
+	legacyAggregate := NewMetricsAggregator().Aggregate(legacyContributors)
+	if !legacyValid || legacyAggregate == nil ||
+		!shouldSignalCompletionForExpectedSteps(legacyAggregate, []string{replayStepID}) {
+		t.Fatalf("legacy replay contributors without run identity lost compatibility: valid=%t aggregate=%+v",
+			legacyValid, legacyAggregate)
+	}
+}
+
+func TestFleetContributorIDsMatchEngineContract(t *testing.T) {
+	hostInfos := []*hostparse.HostInfo{
+		{Original: "entry.example", Host: "entry.example"},
+		{Original: "worker.example", Host: "worker.example"},
+	}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
+	orchestrator.hosts[1].AdvertisedIP = "192.0.2.25"
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+
+	if got := wrapper.fleetContributorID(orchestrator.hosts[0]); got != "local" {
+		t.Fatalf("entry contributor = %q, want local", got)
+	}
+	if got := wrapper.fleetContributorID(orchestrator.hosts[1]); got != "192.0.2.25:1099" {
+		t.Fatalf("worker contributor = %q, want 192.0.2.25:1099", got)
+	}
+	orchestrator.executionContributorIDs = []string{"local", "192.0.2.25:1099"}
+	got, err := orchestrator.MetricContributorIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "local" || got[1] != "192.0.2.25:1099" {
+		t.Fatalf("execution contributor IDs = %v", got)
+	}
+	got[0] = "mutated"
+	again, err := orchestrator.MetricContributorIDs()
+	if err != nil || again[0] != "local" {
+		t.Fatalf("execution contributor IDs were not copied: ids=%v err=%v", again, err)
+	}
+}
+
+func TestMetricContributorIDsRejectUnavailableExecutionTopology(t *testing.T) {
+	orchestrator := NewMultiHostOrchestrator(
+		[]*hostparse.HostInfo{{Original: "entry.example", Host: "entry.example"}}, 1)
+	if _, err := orchestrator.MetricContributorIDs(); err == nil {
+		t.Fatal("unavailable execution contributor topology was accepted")
 	}
 }
 

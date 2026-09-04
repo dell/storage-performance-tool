@@ -11,12 +11,14 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
@@ -71,6 +73,7 @@ const (
 
 	entryLogRelayModeStream = "stream"
 	entryLogRelayModePoll   = "poll"
+	fleetLocalContributorID = constants.MetricsLocalContributorID
 )
 
 // MultiHostOrchestrator manages tests across multiple Docker hosts
@@ -117,6 +120,7 @@ type MultiHostOrchestrator struct {
 	runtimeIdentityReference string
 	runtimeIdentityEvidence  *DistributedRuntimeIdentityEvidence
 	executionParticipantKeys []string
+	executionContributorIDs  []string
 }
 
 type cleanupAttempt struct {
@@ -1187,6 +1191,17 @@ func (o *MultiHostOrchestrator) GetRunningHostCount() int {
 	return count
 }
 
+// MetricContributorIDs returns the immutable contributor topology supplied to the entry engine
+// for the active execution. It is unavailable until the entry and its active workers have started.
+func (o *MultiHostOrchestrator) MetricContributorIDs() ([]string, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if len(o.executionContributorIDs) == 0 {
+		return nil, fmt.Errorf("metric contributor identity is unavailable before execution starts")
+	}
+	return append([]string(nil), o.executionContributorIDs...), nil
+}
+
 // GetHostsInfo returns a summary of all hosts and their status
 func (o *MultiHostOrchestrator) GetHostsInfo() []map[string]interface{} {
 	info := make([]map[string]interface{}, len(o.hosts))
@@ -1220,6 +1235,8 @@ type MultiHostTestOrchestrator struct {
 
 	completionCh   chan struct{}
 	completionOnce sync.Once
+	completionMu   sync.Mutex
+	completionErr  error
 
 	// New fields for multi-node metrics
 	aggregator    *MetricsAggregator
@@ -1243,7 +1260,8 @@ type MultiHostTestOrchestrator struct {
 
 	expectedStepIDs []string
 
-	compatOnce sync.Once
+	compatOnce         sync.Once
+	duplicateFleetOnce sync.Once
 }
 
 // APIMetricsPoller implements MetricsPoller using SptAPIClient
@@ -1458,6 +1476,9 @@ func (m *MultiHostTestOrchestrator) metricsPollingLoop(ctx context.Context) {
 				m.onMetrics(update)
 			}
 			if update != nil && shouldSignalCompletionForExpectedSteps(update.Aggregated, m.expectedStepIDs) {
+				if failure := terminalDeletePolicyFailure(update); failure != nil {
+					m.recordCompletionFailure(failure)
+				}
 				m.signalCompletion()
 			}
 		case <-ctx.Done():
@@ -1480,7 +1501,19 @@ func (m *MultiHostTestOrchestrator) metricsPollingLoop(ctx context.Context) {
 // Op-count and unbounded runs are guarded by the engine-side fix and keep the
 // prior trust-the-state behavior here.
 func shouldSignalCompletion(agg *PerformanceMetric) bool {
-	if agg == nil || agg.TestState < constants.TestStateCompleted {
+	if agg == nil || agg.Partial || agg.TestState < constants.TestStateCompleted {
+		return false
+	}
+	if agg.MetricsSchema >= deletemetrics.SchemaVersion && agg.DeleteDetailExpected &&
+		strings.EqualFold(agg.OpType, "DELETE") {
+		if err := deletemetrics.ValidateTerminal(agg.Delete); err != nil {
+			return false
+		}
+	}
+	if agg.Delete != nil && (!agg.Delete.TerminalReconciled ||
+		!agg.Delete.Completion.TerminalReconciled ||
+		agg.Delete.Completion.RequestPercent < 100 ||
+		agg.Delete.Completion.ObjectPercent < 100) {
 		return false
 	}
 	if agg.HasLimit && agg.LimitType == constants.LimitTypeTime && agg.LimitTimeSec > 0 {
@@ -1520,8 +1553,14 @@ func (m *MultiHostTestOrchestrator) collectAllMetrics(ctx context.Context) *Mult
 	// Poll all nodes concurrently
 	results := m.pollNodesConcurrently(ctx, readyHosts)
 
-	// Aggregate the per-node primary metrics (existing behavior)
-	aggregated := m.aggregator.Aggregate(results.Metrics)
+	// Aggregate the per-node primary metrics using the same contributor
+	// identifiers that the engine publishes in its fleet metrics.
+	contributorMetrics, contributorMapValid := metricsByContributor(results)
+	aggregated := m.aggregator.Aggregate(contributorMetrics)
+	presentContributors, contributorsUnique := successfulContributorIDs(results)
+	pollPartial := len(results.Metrics) != len(readyHosts) ||
+		!contributorsUnique || !contributorMapValid
+	aggregated = withPollCompleteness(aggregated, len(readyHosts), presentContributors, pollPartial)
 
 	// Aggregate per-op-type across all nodes: collect every metric from every node
 	// into a single slice so AggregateByOpType can group by OpType.
@@ -1532,12 +1571,27 @@ func (m *MultiHostTestOrchestrator) collectAllMetrics(ctx context.Context) *Mult
 	var perOpType map[string]*PerformanceMetric
 	if len(allMetrics) > 0 {
 		combined, perOp := AggregateByOpType(allMetrics)
-		perOpType = perOp
+		perOpType = make(map[string]*PerformanceMetric, len(perOp))
+		for opType, metric := range perOp {
+			opContributors, opContributorsUnique := contributorsForOp(allMetrics, opType)
+			perOpType[opType] = withPollCompleteness(
+				metric, len(readyHosts), opContributors,
+				metric.Partial || pollPartial || !opContributorsUnique ||
+					len(opContributors) != len(readyHosts))
+		}
 		// If AggregateByOpType produced a combined metric (MIXED), use it as the
 		// aggregated metric instead so the headline numbers reflect all op types.
 		if combined != nil && len(perOp) > 1 {
-			aggregated = combined
+			aggregated = withPollCompleteness(
+				combined, len(readyHosts), presentContributors, pollPartial)
 		}
+	}
+	if fleetDelete := m.authoritativeFleetDelete(aggregated, perOpType); fleetDelete != nil {
+		aggregated = applyAuthoritativeFleetDelete(aggregated, perOpType, fleetDelete)
+	}
+	aggregated = requireAuthoritativeDeleteTiming(aggregated)
+	if perOpType != nil {
+		perOpType["DELETE"] = requireAuthoritativeDeleteTiming(perOpType["DELETE"])
 	}
 
 	return &MultiNodeMetricsUpdate{
@@ -1549,19 +1603,429 @@ func (m *MultiHostTestOrchestrator) collectAllMetrics(ctx context.Context) *Mult
 	}
 }
 
+func requireAuthoritativeDeleteTiming(metric *PerformanceMetric) *PerformanceMetric {
+	if metric == nil || metric.MetricsSchema < deletemetrics.SchemaVersion || metric.Delete == nil ||
+		metric.NodesCount <= 1 ||
+		(metric.Delete.Timing.Latency != nil && metric.Delete.Timing.Duration != nil) {
+		return metric
+	}
+	result := *metric
+	result.Partial = true
+	return &result
+}
+
+func metricsByContributor(results PollResults) (map[string]*PerformanceMetric, bool) {
+	metrics := make(map[string]*PerformanceMetric, len(results.Metrics))
+	var identity *PerformanceMetric
+	for nodeID, metric := range results.Metrics {
+		if metric == nil {
+			return nil, false
+		}
+		if !validContributorMetricIdentity(metric) {
+			return nil, false
+		}
+		if identity == nil {
+			identity = metric
+		} else if metric.StepID != identity.StepID || !compatibleContributorIdentity(identity, metric) {
+			return nil, false
+		}
+		contributorID := strings.TrimSpace(results.ContributorIDs[nodeID])
+		if contributorID == "" {
+			return nil, false
+		}
+		if _, duplicate := metrics[contributorID]; duplicate {
+			return nil, false
+		}
+		metrics[contributorID] = metric
+	}
+	return metrics, true
+}
+
+func validContributorMetricIdentity(metric *PerformanceMetric) bool {
+	if metric == nil || metric.MetricsSchema < deletemetrics.SchemaVersion {
+		return metric != nil
+	}
+	return strings.TrimSpace(metric.RunID) != "" &&
+		strings.TrimSpace(metric.ClusterID) != "" &&
+		strings.TrimSpace(metric.StepID) != ""
+}
+
+func compatibleContributorIdentity(first, next *PerformanceMetric) bool {
+	if first.MetricsSchema >= deletemetrics.SchemaVersion ||
+		next.MetricsSchema >= deletemetrics.SchemaVersion {
+		return first.RunID != "" && first.RunID == next.RunID &&
+			first.ClusterID != "" && first.ClusterID == next.ClusterID
+	}
+	return (first.RunID == "" || next.RunID == "" || first.RunID == next.RunID) &&
+		(first.ClusterID == "" || next.ClusterID == "" || first.ClusterID == next.ClusterID)
+}
+
+func successfulContributorIDs(results PollResults) ([]string, bool) {
+	present := make([]string, 0, len(results.Metrics))
+	seen := make(map[string]struct{}, len(results.Metrics))
+	unique := true
+	for nodeID := range results.Metrics {
+		contributorID := strings.TrimSpace(results.ContributorIDs[nodeID])
+		if contributorID == "" {
+			unique = false
+			continue
+		}
+		if _, duplicate := seen[contributorID]; duplicate {
+			unique = false
+		}
+		seen[contributorID] = struct{}{}
+		present = append(present, contributorID)
+	}
+	sort.Strings(present)
+	return present, unique
+}
+
+// selectCurrentMetricSetForRun reduces a node payload to exactly one current
+// run/cluster/step sample per operation type. The engine retains terminal rows,
+// so aggregating the raw response would otherwise mix stale runs or count the
+// same contributor twice.
+func selectCurrentMetricSetForRun(
+	metrics []*PerformanceMetric, expectedStepIDs []string, ownedRunID string,
+) ([]*PerformanceMetric, error) {
+	expectedSteps := make(map[string]struct{}, len(expectedStepIDs))
+	for _, stepID := range expectedStepIDs {
+		if stepID != "" {
+			expectedSteps[stepID] = struct{}{}
+		}
+	}
+	var newest *PerformanceMetric
+	hasOwnedRows := false
+	if ownedRunID != "" {
+		for _, metric := range metrics {
+			if metric != nil && metric.RunID == ownedRunID {
+				hasOwnedRows = true
+				break
+			}
+		}
+	}
+	eligible := func(metric *PerformanceMetric) bool {
+		if metric == nil || ownedRunID == "" {
+			return metric != nil
+		}
+		if hasOwnedRows {
+			return metric.RunID == ownedRunID
+		}
+		return metric.RunID == "" && metric.MetricsSchema < deletemetrics.SchemaVersion
+	}
+	consider := func(metric *PerformanceMetric) {
+		if eligible(metric) && (newest == nil || metric.Timestamp.After(newest.Timestamp) ||
+			(metric.Timestamp.Equal(newest.Timestamp) &&
+				metric.SampleTimestamp.After(newest.SampleTimestamp))) {
+			newest = metric
+		}
+	}
+	for _, metric := range metrics {
+		if !eligible(metric) {
+			continue
+		}
+		if len(expectedSteps) > 0 {
+			if _, expected := expectedSteps[metric.StepID]; !expected {
+				continue
+			}
+		}
+		consider(metric)
+	}
+	if newest == nil {
+		return nil, fmt.Errorf("%w: no current metrics rows", ErrMetricsIncompatible)
+	}
+
+	sameRun := func(metric *PerformanceMetric) bool {
+		if metric.RunID != newest.RunID {
+			return false
+		}
+		if metric.ClusterID != newest.ClusterID {
+			return false
+		}
+		return true
+	}
+	selectedStepID := newest.StepID
+
+	selected := make([]*PerformanceMetric, 0, len(metrics))
+	seenOperations := make(map[string]struct{}, len(metrics))
+	for _, metric := range metrics {
+		if !eligible(metric) || !sameRun(metric) || metric.StepID != selectedStepID {
+			continue
+		}
+		opType := strings.ToUpper(strings.TrimSpace(metric.OpType))
+		if opType == "" {
+			return nil, fmt.Errorf("%w: current metrics operation type missing", ErrMetricsIncompatible)
+		}
+		if _, duplicate := seenOperations[opType]; duplicate {
+			return nil, fmt.Errorf(
+				"%w: duplicate current contributor row for step=%q op=%q",
+				ErrMetricsIncompatible, selectedStepID, opType)
+		}
+		seenOperations[opType] = struct{}{}
+		selected = append(selected, metric)
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("%w: no current metrics rows", ErrMetricsIncompatible)
+	}
+	return selected, nil
+}
+
+func contributorsForOp(metrics []*PerformanceMetric, opType string) ([]string, bool) {
+	present := make([]string, 0, len(metrics))
+	seen := make(map[string]struct{}, len(metrics))
+	unique := true
+	for _, metric := range metrics {
+		if metric == nil || !strings.EqualFold(metric.OpType, opType) {
+			continue
+		}
+		contributorID := strings.TrimSpace(metric.NodeID)
+		if contributorID == "" {
+			unique = false
+			continue
+		}
+		if _, duplicate := seen[contributorID]; duplicate {
+			unique = false
+			continue
+		}
+		seen[contributorID] = struct{}{}
+		present = append(present, contributorID)
+	}
+	sort.Strings(present)
+	return present, unique
+}
+
+func withPollCompleteness(
+	metric *PerformanceMetric,
+	expectedCount int,
+	present []string,
+	partial bool,
+) *PerformanceMetric {
+	if metric == nil {
+		return nil
+	}
+	result := *metric
+	result.NodesCount = expectedCount
+	result.NodesPresent = append([]string(nil), present...)
+	result.ContributorsPresent = append([]string(nil), present...)
+	result.Partial = partial
+	return &result
+}
+
+func (m *MultiHostTestOrchestrator) fleetContributorID(host *HostConnection) string {
+	var entry *HostConnection
+	if len(m.multiHost.hosts) > 0 {
+		entry = m.multiHost.hosts[0]
+	}
+	return fleetContributorIDForHost(host, entry)
+}
+
+func fleetContributorIDForHost(host, entry *HostConnection) string {
+	if host == nil {
+		return ""
+	}
+	if host == entry {
+		return fleetLocalContributorID
+	}
+	hostOrIP := strings.TrimSpace(host.AdvertisedIP)
+	if hostOrIP == "" && host.Info != nil {
+		hostOrIP = strings.TrimSpace(host.Info.Host)
+	}
+	if hostOrIP == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s:%s", hostOrIP, constants.RMIRegistryPort)
+}
+
+func (m *MultiHostTestOrchestrator) authoritativeFleetDelete(
+	aggregated *PerformanceMetric,
+	perOpType map[string]*PerformanceMetric,
+) *PerformanceMetric {
+	if len(m.multiHost.hosts) == 0 {
+		return nil
+	}
+	entry := m.multiHost.hosts[0]
+	if entry == nil || entry.APIClient == nil || entry.GetStatus() != HostStatusRunning {
+		return nil
+	}
+	return fetchAuthoritativeFleetDelete(
+		entry.APIClient, aggregated, perOpType, &m.duplicateFleetOnce)
+}
+
+func fetchAuthoritativeFleetDelete(
+	client *SptAPIClient,
+	aggregated *PerformanceMetric,
+	perOpType map[string]*PerformanceMetric,
+	duplicateWarning *sync.Once,
+) *PerformanceMetric {
+	var expected *PerformanceMetric
+	if aggregated != nil && strings.EqualFold(aggregated.OpType, "DELETE") && aggregated.Delete != nil {
+		expected = aggregated
+	} else if perOpType != nil {
+		expected = perOpType["DELETE"]
+	}
+	if expected == nil || client == nil {
+		return nil
+	}
+	payload, err := client.GetFleetJSONMetrics()
+	if err != nil {
+		logging.LogDebug("metrics-poll", "authoritative fleet metrics unavailable", "error", err.Error())
+		return nil
+	}
+	metrics, err := client.ParseFleetJSONMetrics(payload)
+	if err != nil {
+		logging.LogDebug("metrics-poll", "authoritative fleet metrics incompatible", "error", err.Error())
+		return nil
+	}
+	var authority *PerformanceMetric
+	for _, candidate := range metrics {
+		if compatibleAuthoritativeDelete(expected, candidate) {
+			if authority != nil {
+				duplicateWarning.Do(func() {
+					logging.LogWarn(
+						"metrics-poll",
+						"duplicate authoritative fleet DELETE metrics rejected",
+						"step_id", expected.StepID,
+						"run_id", expected.RunID)
+				})
+				return nil
+			}
+			authority = candidate
+		}
+	}
+	if authority == nil {
+		return nil
+	}
+	return withAuthoritativeDeleteTerminal(expected, authority)
+}
+
+func applyAuthoritativeFleetDelete(
+	aggregated *PerformanceMetric,
+	perOpType map[string]*PerformanceMetric,
+	fleetDelete *PerformanceMetric,
+) *PerformanceMetric {
+	if fleetDelete == nil {
+		return aggregated
+	}
+	if perOpType != nil {
+		perOpType["DELETE"] = fleetDelete
+	}
+	if aggregated == nil {
+		return nil
+	}
+	if strings.EqualFold(aggregated.OpType, "DELETE") {
+		return fleetDelete
+	}
+	result := *aggregated
+	result.Delete = fleetDelete.Delete
+	return &result
+}
+
+func compatibleAuthoritativeDelete(expected, candidate *PerformanceMetric) bool {
+	if expected == nil || expected.Delete == nil || candidate == nil || candidate.Delete == nil {
+		return false
+	}
+	if !strings.EqualFold(candidate.Scope, "fleet") ||
+		!strings.EqualFold(candidate.Role, aggregateLabel) ||
+		!strings.EqualFold(candidate.OpType, "DELETE") || candidate.StepID != expected.StepID ||
+		expected.Partial || candidate.Partial {
+		return false
+	}
+	if expected.MetricsSchema >= deletemetrics.SchemaVersion ||
+		candidate.MetricsSchema >= deletemetrics.SchemaVersion {
+		if !validContributorMetricIdentity(expected) || !validContributorMetricIdentity(candidate) ||
+			candidate.RunID != expected.RunID || candidate.ClusterID != expected.ClusterID {
+			return false
+		}
+	} else if expected.RunID != "" && candidate.RunID != "" && candidate.RunID != expected.RunID {
+		return false
+	}
+	if expected.NodesCount > 0 && (candidate.NodesCount != expected.NodesCount ||
+		!sameStringSet(candidate.ContributorsPresent, expected.ContributorsPresent)) {
+		return false
+	}
+	return expected.Delete.Identity == candidate.Delete.Identity &&
+		expected.Delete.Units == candidate.Delete.Units &&
+		compatibleDeleteFailurePolicy(expected.Delete.FailurePolicy, candidate.Delete.FailurePolicy) &&
+		compatibleAuthoritativeDeleteCounters(expected.Delete, candidate.Delete) &&
+		compatibleAuthoritativeDeleteTiming(expected.Delete, candidate.Delete)
+}
+
+func compatibleAuthoritativeDeleteCounters(expected, candidate *DeleteMetrics) bool {
+	return expected.Requests.Attempted == candidate.Requests.Attempted &&
+		expected.Requests.FullSuccess == candidate.Requests.FullSuccess &&
+		expected.Requests.Partial == candidate.Requests.Partial &&
+		expected.Requests.Failed == candidate.Requests.Failed &&
+		expected.Requests.Unresolved == candidate.Requests.Unresolved &&
+		expected.Objects.Selected == candidate.Objects.Selected &&
+		expected.Objects.Attempted == candidate.Objects.Attempted &&
+		expected.Objects.Accepted == candidate.Objects.Accepted &&
+		expected.Objects.Failed == candidate.Objects.Failed &&
+		expected.Objects.Unattempted == candidate.Objects.Unattempted &&
+		expected.Objects.Unresolved == candidate.Objects.Unresolved &&
+		expected.Batches.ConfiguredSize == candidate.Batches.ConfiguredSize &&
+		expected.Batches.ActualRequestCount == candidate.Batches.ActualRequestCount &&
+		expected.Batches.ActualObjectCount == candidate.Batches.ActualObjectCount &&
+		expected.Batches.FullBatchCount == candidate.Batches.FullBatchCount &&
+		expected.Batches.PartialBatchCount == candidate.Batches.PartialBatchCount &&
+		expected.Versions == candidate.Versions &&
+		expected.FailurePolicy.OperationalFailedObjects == candidate.FailurePolicy.OperationalFailedObjects &&
+		expected.FailurePolicy.ExcludedFailedObjects == candidate.FailurePolicy.ExcludedFailedObjects &&
+		expected.TerminalReconciled == candidate.TerminalReconciled
+}
+
+func compatibleAuthoritativeDeleteTiming(expected, candidate *DeleteMetrics) bool {
+	if expected.Timing.LatencyDefinition != candidate.Timing.LatencyDefinition ||
+		expected.Timing.DurationDefinition != candidate.Timing.DurationDefinition ||
+		candidate.Timing.Latency == nil || candidate.Timing.Duration == nil {
+		return false
+	}
+	terminalRequests := expected.Requests.FullSuccess + expected.Requests.Partial + expected.Requests.Failed
+	return candidate.Timing.Latency.Count >= 0 &&
+		candidate.Timing.Duration.Count >= candidate.Timing.Latency.Count &&
+		candidate.Timing.Duration.Count <= terminalRequests
+}
+
+func sameStringSet(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	values := make(map[string]int, len(left))
+	for _, value := range left {
+		values[value]++
+	}
+	for _, value := range right {
+		values[value]--
+		if values[value] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func withAuthoritativeDeleteTerminal(expected, candidate *PerformanceMetric) *PerformanceMetric {
+	result := *expected
+	deleteMetrics := *expected.Delete
+	deleteMetrics.Timing = candidate.Delete.Timing
+	deleteMetrics.FailurePolicy = candidate.Delete.FailurePolicy
+	result.Delete = &deleteMetrics
+	result.Partial = false
+	return &result
+}
+
 // PollResults holds the results of concurrent node polling
 type PollResults struct {
-	Metrics    map[string]*PerformanceMetric
-	AllMetrics map[string][]*PerformanceMetric // All op-type metrics per node
-	Status     map[string]NodeConnectionStatus
+	Metrics        map[string]*PerformanceMetric
+	AllMetrics     map[string][]*PerformanceMetric // All op-type metrics per node
+	Status         map[string]NodeConnectionStatus
+	ContributorIDs map[string]string // Host display identifier to fleet contributor identifier.
 }
 
 // pollNodesConcurrently polls metrics from all hosts in parallel
 func (m *MultiHostTestOrchestrator) pollNodesConcurrently(ctx context.Context, hosts []*HostConnection) PollResults {
 	results := PollResults{
-		Metrics:    make(map[string]*PerformanceMetric),
-		AllMetrics: make(map[string][]*PerformanceMetric),
-		Status:     make(map[string]NodeConnectionStatus),
+		Metrics:        make(map[string]*PerformanceMetric),
+		AllMetrics:     make(map[string][]*PerformanceMetric),
+		Status:         make(map[string]NodeConnectionStatus),
+		ContributorIDs: make(map[string]string),
 	}
 
 	if len(hosts) == 0 {
@@ -1572,34 +2036,37 @@ func (m *MultiHostTestOrchestrator) pollNodesConcurrently(ctx context.Context, h
 	defer cancel()
 
 	type nodeResult struct {
-		nodeID       string
-		metrics      *PerformanceMetric
-		allMetrics   []*PerformanceMetric
-		err          error
-		skipped      bool
-		apiReachable bool
-		phase        NodePhase
+		nodeID        string
+		contributorID string
+		metrics       *PerformanceMetric
+		allMetrics    []*PerformanceMetric
+		err           error
+		skipped       bool
+		apiReachable  bool
+		phase         NodePhase
 	}
 
 	resultsChan := make(chan nodeResult, len(hosts))
 
 	for _, host := range hosts {
 		nodeID := host.Info.Original
+		contributorID := m.fleetContributorID(host)
 		state := m.getPollState(nodeID)
 		now := time.Now()
 		if !state.shouldPoll(now) {
 			logging.LogDebug("metrics-poll", "skipping node poll due to backoff", "node", nodeID)
 			resultsChan <- nodeResult{
-				nodeID:  nodeID,
-				metrics: nil,
-				err:     state.lastErrorSnapshot(),
-				skipped: true,
-				phase:   host.GetPhase(),
+				nodeID:        nodeID,
+				contributorID: contributorID,
+				metrics:       nil,
+				err:           state.lastErrorSnapshot(),
+				skipped:       true,
+				phase:         host.GetPhase(),
 			}
 			continue
 		}
 
-		go func(h *HostConnection, st *nodePollState, nodeID string) {
+		go func(h *HostConnection, st *nodePollState, nodeID, contributorID string) {
 			var (
 				metrics      *PerformanceMetric
 				allMetrics   []*PerformanceMetric
@@ -1622,6 +2089,10 @@ func (m *MultiHostTestOrchestrator) pollNodesConcurrently(ctx context.Context, h
 				} else {
 					apiReachable = true
 					allMetrics, err = h.APIClient.ParseJSONMetrics(jsonData)
+					if err == nil {
+						allMetrics, err = selectCurrentMetricSetForRun(
+							allMetrics, m.expectedStepIDs, h.APIClient.getRunID())
+					}
 					if err != nil {
 						kind = classifyPollError(err)
 						if m.logJSONBodies {
@@ -1636,6 +2107,11 @@ func (m *MultiHostTestOrchestrator) pollNodesConcurrently(ctx context.Context, h
 							}
 						}
 					} else if len(allMetrics) > 0 {
+						for _, metric := range allMetrics {
+							if metric != nil {
+								metric.NodeID = contributorID
+							}
+						}
 						// Use the first (latest) metric for the existing per-node pipeline.
 						metrics = allMetrics[0]
 					}
@@ -1675,15 +2151,16 @@ func (m *MultiHostTestOrchestrator) pollNodesConcurrently(ctx context.Context, h
 			}
 
 			resultsChan <- nodeResult{
-				nodeID:       nodeID,
-				metrics:      metrics,
-				allMetrics:   allMetrics,
-				err:          err,
-				skipped:      false,
-				apiReachable: apiReachable,
-				phase:        phase,
+				nodeID:        nodeID,
+				contributorID: contributorID,
+				metrics:       metrics,
+				allMetrics:    allMetrics,
+				err:           err,
+				skipped:       false,
+				apiReachable:  apiReachable,
+				phase:         phase,
 			}
-		}(host, state, nodeID)
+		}(host, state, nodeID, contributorID)
 	}
 
 collectLoop:
@@ -1691,6 +2168,7 @@ collectLoop:
 		select {
 		case result := <-resultsChan:
 			now := time.Now()
+			results.ContributorIDs[result.nodeID] = result.contributorID
 
 			if result.skipped {
 				phase := result.phase
@@ -2087,7 +2565,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 		return fmt.Errorf("host %s has no Docker manager configured", host.Info.Original)
 	}
 	runtimeImage := image
-	if scenario.IsIntegrityWorkload(params) {
+	if scenario.RequiresIntegrityRuntimeIdentity(params) {
 		evidence, identityErr := m.multiHost.PrepareDistributedIntegrityRuntimeIdentity(ctx, image)
 		if identityErr != nil {
 			return identityErr
@@ -2134,11 +2612,13 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 	if err := ctx.Err(); err != nil {
 		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 	}
-	if scenario.IsIntegrityWorkload(params) {
+	if scenario.RequiresIntegrityRuntimeIdentity(params) {
 		if err := m.multiHost.VerifyRunningIntegrityRuntimeIdentity(ctx); err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
-		if err := host.APIClient.VerifyIntegrityCapabilityContext(ctx, image); err != nil {
+	}
+	if scenario.RequiresIntegrityCapability(params) {
+		if err := host.APIClient.VerifyScenarioIntegrityCapabilityContext(ctx, image, params); err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
 	}
@@ -2216,11 +2696,13 @@ func (m *MultiHostTestOrchestrator) startEntryAPIRun(
 	if err := ctx.Err(); err != nil {
 		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 	}
-	if scenario.IsIntegrityWorkload(params) {
+	if scenario.RequiresIntegrityRuntimeIdentity(params) {
 		if err := m.multiHost.VerifyRunningIntegrityRuntimeIdentity(ctx); err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
-		if err := m.multiHost.hosts[0].APIClient.VerifyIntegrityCapabilityContext(ctx, image); err != nil {
+	}
+	if scenario.RequiresIntegrityCapability(params) {
+		if err := m.multiHost.hosts[0].APIClient.VerifyScenarioIntegrityCapabilityContext(ctx, image, params); err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
 	}
@@ -2335,6 +2817,28 @@ func (m *MultiHostTestOrchestrator) signalCompletion() {
 	m.completionOnce.Do(func() {
 		close(m.completionCh)
 	})
+}
+
+func (m *MultiHostTestOrchestrator) recordCompletionFailure(cause error) {
+	m.completionMu.Lock()
+	recorded := m.completionErr == nil
+	if m.completionErr == nil {
+		m.completionErr = cause
+	}
+	m.completionMu.Unlock()
+	if !recorded {
+		return
+	}
+	if m.onError != nil {
+		m.onError(fmt.Sprintf("Test FAILED: %v", cause))
+	}
+}
+
+// CompletionError returns a terminal distributed presentation failure, if one was observed.
+func (m *MultiHostTestOrchestrator) CompletionError() error {
+	m.completionMu.Lock()
+	defer m.completionMu.Unlock()
+	return m.completionErr
 }
 
 // CompletionCh returns a channel that closes when orchestration is complete.
@@ -2891,12 +3395,13 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(ctx context.Cont
 	}
 	o.mu.Lock()
 	o.executionParticipantKeys = nil
+	o.executionContributorIDs = nil
 	o.mu.Unlock()
 	if len(scenarioContent) == 0 {
 		return fmt.Errorf("scenario content is empty")
 	}
 	runtimeImage := image
-	if scenario.IsIntegrityWorkload(params) {
+	if scenario.RequiresIntegrityRuntimeIdentity(params) {
 		evidence, identityErr := o.PrepareDistributedIntegrityRuntimeIdentity(ctx, image)
 		if identityErr != nil {
 			return identityErr
@@ -3040,10 +3545,18 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(ctx context.Cont
 	}
 	executionParticipants := make([]string, 0, 1+len(activeWorkers))
 	executionParticipants = append(executionParticipants, runtimeIdentityHostKey(entryNode.Info))
+	executionContributors := make([]string, 0, 1+len(activeWorkers))
+	executionContributors = append(executionContributors, fleetLocalContributorID)
 	for _, worker := range activeWorkers {
 		executionParticipants = append(executionParticipants, runtimeIdentityHostKey(worker.Info))
+		contributorID := fleetContributorIDForHost(worker, entryNode)
+		if contributorID == "" {
+			return fmt.Errorf("active worker %s has no metric contributor identity", worker.Info.Original)
+		}
+		executionContributors = append(executionContributors, contributorID)
 	}
 	o.executionParticipantKeys = executionParticipants
+	o.executionContributorIDs = executionContributors
 
 	logging.LogInfo("orchestrator", "distributed test started successfully",
 		"entry_node", entryNode.Info.Host,

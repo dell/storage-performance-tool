@@ -11,8 +11,9 @@
 2.3. [Detailed](#detailed)<br/>
 2.3.1. [Scenario Step Slicing](#scenario-step-slicing)<br/>
 2.3.2. [Items Input](#items-input)<br/>
-2.3.3. [Item Naming Scheme](#item-naming-scheme)<br/>
-2.3.4. [Configuration](#configuration)<br/>
+2.3.3. [Standalone DELETE](#standalone-delete)<br/>
+2.3.4. [Item Naming Scheme](#item-naming-scheme)<br/>
+2.3.5. [Configuration](#configuration)<br/>
 
 # Introduction
 
@@ -100,6 +101,31 @@ The configuration parameters which are the subject of slicing in the scenario:
 
 The items input is being read locally if configured. The items from the input are distributed to the files located on
 the remote side. Then these files are used as items input files by the remote side.
+
+#### Standalone DELETE
+
+Standalone DELETE is a terminal manifest-pipeline step. The entry node freezes the canonical
+`bucket,key,size,version_id` inventory before starting the timed phase, then scatters it with a
+persistent round-robin cursor. The cursor is not reset at input read boundaries: every nonempty
+identity is assigned to exactly one local or remote slice without duplication, omission, or
+batch-boundary skew.
+
+Each slice forms request batches locally, so partial tails are valid on more than one node. The
+entry aggregates actual request and object counters instead of estimating request count from the
+global selection and configured batch size. Every slice must publish reconciled terminal counters.
+Missing or conflicting evidence invalidates the step rather than being treated as zero.
+
+Failure budgets are controller-owned and use aggregated object outcomes. On a deadline or budget
+breach, the controller closes admission on all slices before recovering queued work as unattempted,
+then drains only dispatched requests within one shared bound. A worker cannot make an independent
+percentage decision. Terminal validation runs before services and containers stop, preserving late
+outcomes and marking requests which outlive the drain as unresolved.
+
+The entry keeps contributor identity on request traces, target reconciliation, metrics totals,
+selection evidence, and residual inventory. It validates every source before publishing the
+canonical files once and writes `delete.complete.json` last. An absent completion record means the
+available files are recovery evidence, not a complete result. Optional seeded cleanup begins only
+after this evidence is frozen and cannot rewrite it.
 
 #### Item Naming Scheme
 

@@ -5,15 +5,19 @@ import static org.mockito.Mockito.*;
 
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepFactory;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.svc.Service;
 import com.dell.spt.base.svc.ServiceUtil;
 import com.github.akurilov.confuse.Config;
+import java.io.IOException;
+import java.net.ServerSocket;
 import java.rmi.RemoteException;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -146,5 +150,172 @@ public class LoadStepServiceImplTest {
 			final LoadStepServiceImpl svc = newServiceWith(local);
 			assertThrows(IllegalStateException.class, svc::doStop);
 		}
+	}
+
+	@Test
+	@DisplayName("Delegates distributed duration stop phases to the local load step")
+	void delegatesDurationStopPhases() throws Exception {
+		final LoadStep local = mock(LoadStep.class);
+		when(local.loadStepId()).thenReturn("svc-duration");
+		when(local.durationAwaitStatus()).thenReturn(DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE);
+
+		try (MockedStatic<ServiceUtil> util = mockStatic(ServiceUtil.class)) {
+			util.when(() -> ServiceUtil.create(any(Service.class), anyInt())).thenReturn("rmi://localhost/test");
+			util.when(() -> ServiceUtil.close(any(Service.class))).thenReturn("rmi://localhost/test");
+
+			final LoadStepServiceImpl svc = newServiceWith(local);
+			svc.releaseObjectFailureBudgetAdmission();
+			svc.prepareDurationInterval(456L);
+			svc.startDurationInterval(456L);
+			assertEquals(DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE, svc.durationAwaitStatus());
+			svc.closeOperationAdmissionForStepStop();
+			svc.enforceDispatchedOperationsDeadlineForStepStop(123L);
+			svc.recoverQueuedOperationsForStepStop();
+			svc.drainDispatchedOperationsForStepStop(123L);
+			svc.validateTerminalStateForStepStop();
+			svc.shutdown();
+
+			verify(local).closeOperationAdmissionForStepStop();
+			verify(local).enforceDispatchedOperationsDeadlineForStepStop(123L);
+			verify(local).releaseObjectFailureBudgetAdmission();
+			verify(local).prepareDurationInterval(456L);
+			verify(local).startDurationInterval(456L);
+			verify(local).durationAwaitStatus();
+			verify(local).recoverQueuedOperationsForStepStop();
+			verify(local).drainDispatchedOperationsForStepStop(123L);
+			verify(local).validateTerminalStateForStepStop();
+			verify(local).shutdown();
+		}
+	}
+
+	@Test
+	@DisplayName("A failed local close leaves the real RMI endpoint available for retry")
+	void failedLocalCloseKeepsRealRmiEndpointAvailableForRetry() throws Exception {
+		final LoadStep local = mock(LoadStep.class);
+		when(local.loadStepId()).thenReturn("svc-close-retry");
+		when(local.durationAwaitStatus()).thenReturn(DurationAwaitStatus.RUNNING);
+		doThrow(new IOException("transient local cleanup failure"))
+						.doNothing()
+						.when(local)
+						.close();
+
+		final String originalHost = System.getProperty("java.rmi.server.hostname");
+		System.setProperty("java.rmi.server.hostname", "127.0.0.1");
+		try {
+			final int port;
+			try (ServerSocket socket = new ServerSocket(0)) {
+				socket.setReuseAddress(true);
+				port = socket.getLocalPort();
+			}
+			final LoadStepServiceImpl service = newServiceWith(local, port);
+			final LoadStepService remote = ServiceUtil.resolve(
+							"127.0.0.1", port, service.name(), LoadStepService.class);
+
+			assertEquals(DurationAwaitStatus.RUNNING, remote.durationAwaitStatus());
+			assertThrows(IOException.class, service::doClose);
+			assertEquals(DurationAwaitStatus.RUNNING, remote.durationAwaitStatus());
+
+			assertDoesNotThrow(service::doClose);
+			assertThrows(RemoteException.class, remote::durationAwaitStatus);
+			verify(local, times(2)).close();
+		} finally {
+			ServiceUtil.shutdown();
+			if (originalHost == null) {
+				System.clearProperty("java.rmi.server.hostname");
+			} else {
+				System.setProperty("java.rmi.server.hostname", originalHost);
+			}
+		}
+	}
+
+	@Test
+	@DisplayName("A real RMI drain remains responsive beyond the shipped response timeout")
+	void realRmiLongDrainUsesOneBackgroundAttemptAndCannotShutdownEarly() throws Exception {
+		final LoadStep local = mock(LoadStep.class);
+		when(local.loadStepId()).thenReturn("svc-long-drain");
+		final CountDownLatch drainEntered = new CountDownLatch(1);
+		final CountDownLatch releaseDrain = new CountDownLatch(1);
+		doAnswer(invocation -> {
+			drainEntered.countDown();
+			assertTrue(releaseDrain.await(15, TimeUnit.SECONDS));
+			return null;
+		}).when(local).drainDispatchedOperationsForStepStop(anyLong());
+
+		final String originalHost = System.getProperty("java.rmi.server.hostname");
+		System.setProperty("java.rmi.server.hostname", "127.0.0.1");
+		LoadStepServiceImpl service = null;
+		try {
+			final int port;
+			try (ServerSocket socket = new ServerSocket(0)) {
+				socket.setReuseAddress(true);
+				port = socket.getLocalPort();
+			}
+			service = newServiceWith(local, port);
+			final LoadStepService remote = ServiceUtil.resolve(
+							"127.0.0.1", port, service.name(), LoadStepService.class);
+
+			remote.startDispatchedOperationsDrainForStepStop(TimeUnit.SECONDS.toNanos(30));
+			assertTrue(drainEntered.await(1, TimeUnit.SECONDS));
+			remote.startDispatchedOperationsDrainForStepStop(TimeUnit.SECONDS.toNanos(30));
+			assertFalse(remote.isDispatchedOperationsDrainCompleteForStepStop());
+
+			Thread.sleep(TimeUnit.SECONDS.toMillis(10) + 100);
+			assertFalse(remote.isDispatchedOperationsDrainCompleteForStepStop());
+			verify(local, never()).shutdown();
+			releaseDrain.countDown();
+			final long completionDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+			while (!remote.isDispatchedOperationsDrainCompleteForStepStop()
+							&& System.nanoTime() < completionDeadline) {
+				Thread.sleep(10);
+			}
+			assertTrue(remote.isDispatchedOperationsDrainCompleteForStepStop());
+			assertNoLiveThread("spt-delete-service-drain-svc-long-drain");
+			remote.shutdown();
+			verify(local).drainDispatchedOperationsForStepStop(anyLong());
+			verify(local).shutdown();
+		} finally {
+			releaseDrain.countDown();
+			if (service != null) {
+				assertDoesNotThrow(service::doClose);
+			}
+			ServiceUtil.shutdown();
+			if (originalHost == null) {
+				System.clearProperty("java.rmi.server.hostname");
+			} else {
+				System.setProperty("java.rmi.server.hostname", originalHost);
+			}
+		}
+	}
+
+	private static void assertNoLiveThread(final String exactName) throws InterruptedException {
+		final long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+		boolean live;
+		do {
+			live = Thread.getAllStackTraces().keySet().stream()
+							.anyMatch(thread -> thread.isAlive() && exactName.equals(thread.getName()));
+			if (!live) {
+				return;
+			}
+			Thread.sleep(10);
+		} while (System.nanoTime() < deadlineNanos);
+		fail("lifecycle thread remains live: " + exactName);
+	}
+
+	private static LoadStepServiceImpl newServiceWith(final LoadStep loadStep, final int port) {
+		final Config baseConfig = TestConfigBuilder.config();
+		baseConfig.val("load-step-id", "svc-test-real-rmi");
+
+		@SuppressWarnings("unchecked")
+		final LoadStepFactory<LoadStep, ?> factory = mock(LoadStepFactory.class);
+		when(factory.id()).thenReturn(STEP_TYPE);
+		when(factory.createLocal(any(), anyList(), anyList(), any())).thenReturn(loadStep);
+
+		return new LoadStepServiceImpl(
+						port,
+						List.of(factory),
+						STEP_TYPE,
+						baseConfig,
+						Collections.emptyList(),
+						mock(MetricsManager.class));
 	}
 }

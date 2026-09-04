@@ -92,6 +92,67 @@ Configuration:
         DirectWriteRolloverStrategy: {}
         PatternLayout:
           pattern: "%m"
+      - name: deleteMetricsTotalFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}delete.metrics.total.csv"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          header: "schema_version,request_unit,object_unit,batch_unit,mode,configured_batch_size,selection_order,requests_attempted,requests_full_success,requests_partial,requests_failed,requests_unresolved,objects_selected,objects_attempted,objects_accepted,objects_failed,objects_unattempted,objects_unresolved,batch_actual_requests,batch_actual_objects,batch_full_count,batch_partial_count,terminal_reconciled\n"
+          pattern: "%m%n"
+      - name: deleteRequestsFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}delete.requests.csv"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          header: "schema_version,request_id,batch_id,target_count,outcome,node,start_us,duration_us,latency_us\n"
+          pattern: "%m%n"
+      - name: deleteObjectsFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}delete.objects.csv"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          header: "schema_version,request_id,target_id,target_index,bucket,key,size,version_id,outcome,error_classification,error\n"
+          pattern: "%m%n"
+      - name: deleteResidualFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}items.csv"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          header: "bucket,key,size,version_id\n"
+          pattern: "%m%n"
+      - name: deleteVerificationFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}delete.verification.csv"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          header: "schema_version,target_id,target_index,bucket,key,size,version_id,operational_outcome,pre_enabled,pre_presence,post_enabled,post_presence,correctness_failure,inconclusive,residual\n"
+          pattern: "%m%n"
+      - name: deleteSelectionFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}verify-input.csv"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          pattern: "%m"
+      - name: deleteSelectionCompletionFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}verify-input.complete.json"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          pattern: "%m"
+      - name: deleteCompletionFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}delete.complete.json"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          pattern: "%m"
       - name: cliFile
         append: "false"
         filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}cli.args.log"
@@ -199,6 +260,46 @@ Configuration:
         level: INFO
         AppenderRef:
           ref: opTraceFile
+        additivity: false
+      - name: com.dell.spt.base.logging.DeleteMetricsTotal
+        level: INFO
+        AppenderRef:
+          ref: deleteMetricsTotalFile
+        additivity: false
+      - name: com.dell.spt.base.logging.DeleteRequests
+        level: INFO
+        AppenderRef:
+          ref: deleteRequestsFile
+        additivity: false
+      - name: com.dell.spt.base.logging.DeleteObjects
+        level: INFO
+        AppenderRef:
+          ref: deleteObjectsFile
+        additivity: false
+      - name: com.dell.spt.base.logging.DeleteResidual
+        level: INFO
+        AppenderRef:
+          ref: deleteResidualFile
+        additivity: false
+      - name: com.dell.spt.base.logging.DeleteVerification
+        level: INFO
+        AppenderRef:
+          ref: deleteVerificationFile
+        additivity: false
+      - name: com.dell.spt.base.logging.DeleteSelection
+        level: INFO
+        AppenderRef:
+          ref: deleteSelectionFile
+        additivity: false
+      - name: com.dell.spt.base.logging.DeleteSelectionCompletion
+        level: INFO
+        AppenderRef:
+          ref: deleteSelectionCompletionFile
+        additivity: false
+      - name: com.dell.spt.base.logging.DeleteCompletion
+        level: INFO
+        AppenderRef:
+          ref: deleteCompletionFile
         additivity: false
       - name: com.dell.spt.base.logging.metrics.File
         level: INFO

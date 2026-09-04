@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/textutil"
 )
 
@@ -32,6 +33,8 @@ const (
 	headerLatencyP50      = "Latency P50"
 	headerTTFBP50         = "TTFB P50"
 	headerBandwidthAvg    = "Bandwidth Avg"
+	successObjectsLabel   = "object identities"
+	successRequestsLabel  = "logical API requests"
 )
 
 // NewRenderer builds a Renderer using the provided options.
@@ -60,12 +63,95 @@ func (r *Renderer) FullReport(summary *RunSummary) string {
 	r.renderEnvironment(b, summary)
 	r.renderWorkload(b, summary)
 	r.renderPerformance(b, summary)
+	r.renderDeleteDetails(b, summary)
 	r.renderIntegrity(b, summary)
 	r.renderMixedBreakdowns(b, summary)
 	r.renderTotals(b, summary)
 	r.renderArtifactsAndWarnings(b, summary)
 
 	return strings.TrimRight(b.String(), "\n") + "\n"
+}
+
+func (r *Renderer) renderDeleteDetails(b *strings.Builder, summary *RunSummary) {
+	for _, step := range summary.Steps {
+		d := step.Delete
+		if d == nil {
+			continue
+		}
+		fmt.Fprintf(b, "DELETE Results — %s\n", step.PhaseLabel)
+		r.writeBullet(b, "Units", fmt.Sprintf("requests=%s, objects=%s, batches=%s", d.Units.Requests, d.Units.Objects, d.Units.Batches))
+		r.writeBullet(b, "Requests", fmt.Sprintf("attempted %d, full success %d, partial %d, failed %d, unresolved %d, %.3f requests/s", d.Requests.Attempted, d.Requests.FullSuccess, d.Requests.Partial, d.Requests.Failed, d.Requests.Unresolved, d.Requests.PerSecond))
+		r.writeBullet(b, "Objects", fmt.Sprintf("selected %d, attempted %d, accepted %d, failed %d, unattempted %d, unresolved %d, %.3f objects/s", d.Objects.Selected, d.Objects.Attempted, d.Objects.Accepted, d.Objects.Failed, d.Objects.Unattempted, d.Objects.Unresolved, d.Objects.PerSecond))
+		r.writeBullet(b, "Batches", fmt.Sprintf("configured %d, actual requests %d, actual objects %d, mean %.3f objects/request, full %d, partial %d, full %.3f%%", d.Batches.ConfiguredSize, d.Batches.ActualRequestCount, d.Batches.ActualObjectCount, d.Batches.MeanObjectsPerRequest, d.Batches.FullBatchCount, d.Batches.PartialBatchCount, d.Batches.FullBatchPercent))
+		r.writeBullet(b, "Versions", fmt.Sprintf("current key %d, exact version %d", d.Versions.CurrentKey, d.Versions.ExactVersion))
+		r.writeBullet(b, "Completion", fmt.Sprintf("requests %.3f%%, objects %.3f%%, reconciled %t", d.Completion.RequestPercent, d.Completion.ObjectPercent, d.TerminalReconciled))
+		r.writeBullet(b, "Identity", fmt.Sprintf("mode %s, configured batch %d, selection %s", d.Identity.Mode, d.Identity.ConfiguredBatchSize, d.Identity.SelectionOrder))
+		r.writeBullet(b, "Outcome", strings.ReplaceAll(d.FailurePolicy.Outcome, "_", " "))
+		r.writeBullet(b, "Failure policy", fmt.Sprintf("mode %s, max objects %d, max percent %.3f, grace %ds, operational %d, excluded %d, observed %.3f%%", d.FailurePolicy.Mode, d.FailurePolicy.MaxFailedObjects, d.FailurePolicy.MaxFailurePercent, d.FailurePolicy.GraceSeconds, d.FailurePolicy.OperationalFailedObjects, d.FailurePolicy.ExcludedFailedObjects, d.FailurePolicy.ObservedFailurePercent))
+		r.writeBullet(b, "Phases", formatDeletePhases(d.Phases))
+		r.writeBullet(b, "Request latency", formatDeleteTiming(d.Timing.LatencyDefinition, d.Timing.Latency))
+		r.writeBullet(b, "Request duration", formatDeleteTiming(d.Timing.DurationDefinition, d.Timing.Duration))
+		r.writeBullet(b, "Not applicable", "object size, data moved, bandwidth, TTFB, object latency")
+		r.writeBullet(b, "Outcome terminology", d.OutcomeTerminology)
+		r.writeBullet(b, "Verification", fmt.Sprintf(
+			"pre-validation %t (complete %t), post-verification %t (complete %t, skipped %t), timeout %.3fs; verified absent %d, still present %d, unresolved %d, correctness failures %d, inconclusive %d, residual %d; %s",
+			d.Verification.PreValidationEnabled, d.Verification.PreValidationComplete,
+			d.Verification.PostVerificationEnabled, d.Verification.PostVerificationComplete,
+			d.Verification.PostVerificationSkipped,
+			d.Verification.TimeoutSeconds, d.Verification.VerifiedAbsent,
+			d.Verification.StillPresent, d.Verification.Unresolved,
+			d.Verification.CorrectnessFailures, d.Verification.InconclusiveFailures,
+			d.Verification.Residual, d.Verification.Notice))
+		if evidence := step.DeleteEvidence; evidence != nil {
+			r.writeBullet(b, "Recovery inventory", fmt.Sprintf(
+				"%d residual of %d frozen targets (pre-cleanup, conservative, idempotent)",
+				evidence.ResidualRows, evidence.SelectionRows))
+			r.writeBullet(b, "Artifact evidence", fmt.Sprintf(
+				"%d requests, %d targets, %d contributors; selection %s/%s sha256 %s",
+				evidence.RequestRows, evidence.TargetRows, len(evidence.Contributors),
+				evidence.SelectionProducer, evidence.SelectionProducerID, evidence.SelectionSHA256))
+		}
+		if len(d.Buckets) > 0 {
+			for _, bucket := range d.Buckets {
+				r.writeBullet(b, "Bucket "+bucket.Bucket, fmt.Sprintf("selected %d, attempted %d, accepted %d, failed %d", bucket.Selected, bucket.Attempted, bucket.Accepted, bucket.Failed))
+			}
+		}
+		b.WriteByte('\n')
+	}
+}
+
+func formatDeleteTiming(definition string, stat *deletemetrics.TimingStat) string {
+	if stat == nil || stat.Count <= 0 {
+		return definition + "; N/A"
+	}
+	return fmt.Sprintf(
+		"%s; count %d, mean %.3f us, p50 %d us, p90 %d us, p99 %d us, p99.9 %d us",
+		definition, stat.Count, stat.MeanUs, stat.P50Us, stat.P90Us, stat.P99Us, stat.P999Us)
+}
+
+func formatDeletePhases(phases deletemetrics.Phases) string {
+	values := []struct {
+		name  string
+		value *float64
+	}{
+		{"seed", phases.SeedSeconds},
+		{"discovery", phases.DiscoverySeconds},
+		{"pre-validation", phases.PreValidationSeconds},
+		{"scheduled DELETE", phases.ScheduledDeleteSeconds},
+		{"drain", phases.DrainSeconds},
+		{"post-verification", phases.PostVerificationSeconds},
+		{"cleanup", phases.CleanupSeconds},
+		{"total wall", phases.TotalWallSeconds},
+	}
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		formatted := "N/A"
+		if value.value != nil {
+			formatted = fmt.Sprintf("%.6fs", *value.value)
+		}
+		parts = append(parts, value.name+" "+formatted)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // ConsoleSnippet renders a shorter report suitable for console messages.
@@ -268,13 +354,16 @@ func (r *Renderer) performanceTable(summary *RunSummary) string {
 			sizeCell, dataCell, bandwidthCell = notApplicableCell, notApplicableCell, notApplicableCell
 			rateCell = formatNumber(m.ThroughputAvgOps, "objects/s")
 		}
+		if strings.EqualFold(step.Operation, "DELETE") {
+			sizeCell, dataCell, bandwidthCell = notApplicableCell, notApplicableCell, notApplicableCell
+		}
 		if strings.TrimSpace(sizeCell) == "" {
 			sizeCell = notApplicableCell
 		}
 		row := []string{
 			step.PhaseLabel,
 			sizeCell,
-			formatInt(m.SuccessCount),
+			formatSuccessCount(m.SuccessCount, step.SuccessUnit),
 			dataCell,
 			rateCell,
 			mixedLatencyCell(step, m),
@@ -287,6 +376,18 @@ func (r *Renderer) performanceTable(summary *RunSummary) string {
 		rows = append(rows, []string{notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell})
 	}
 	return renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight})
+}
+
+func formatSuccessCount(count int64, unit string) string {
+	formatted := formatInt(count)
+	switch unit {
+	case deletemetrics.ObjectUnit:
+		return formatted + " " + successObjectsLabel
+	case deletemetrics.RequestUnit:
+		return formatted + " " + successRequestsLabel
+	default:
+		return formatted
+	}
 }
 
 func hasListStep(summary *RunSummary) bool {
@@ -524,12 +625,25 @@ func mixedLatencyCell(step StepSummary, metrics *PhaseMetrics) string {
 	if step.IsMixed {
 		return "see ops"
 	}
-	return formatNumber(metrics.LatencyHeadlineMs, "ms")
+	if strings.EqualFold(step.Operation, "DELETE") && step.Delete != nil {
+		if step.Delete.Timing.Latency == nil || step.Delete.Timing.Latency.Count <= 0 {
+			return notApplicableCell
+		}
+		return formatNumber(float64(step.Delete.Timing.Latency.P50Us)/1000.0, "ms")
+	}
+	latency := metrics.LatencyHeadlineMs
+	if strings.EqualFold(step.Operation, "DELETE") && latency <= 0 {
+		latency = metrics.LatencyMedianMs
+	}
+	return formatNumber(latency, "ms")
 }
 
 func mixedTTFBCell(step StepSummary, metrics *PhaseMetrics) string {
 	if step.IsMixed {
 		return "see ops"
+	}
+	if strings.EqualFold(step.Operation, "DELETE") {
+		return notApplicableCell
 	}
 	return formatTTFBNumber(metrics.TTFBMedianMs)
 }

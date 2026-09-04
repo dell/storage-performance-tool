@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
@@ -368,6 +369,53 @@ func TestOrchestratorIntegrityCapabilityFailureStopsBeforeRunAndCleansUp(t *test
 		context.Background(),
 		"test-image",
 		scenario.ScenarioParams{WorkloadType: scenario.WorkloadTypeWriteVerify},
+		[]byte(`Load.run({})`),
+		nil,
+	)
+	if !errors.Is(err, ErrEngineIncompatible) {
+		t.Fatalf("StartTestWithContent() error = %v, want ErrEngineIncompatible", err)
+	}
+	if got := runPosts.Load(); got != 0 {
+		t.Fatalf("/run POST count = %d, want 0", got)
+	}
+	if got := mockDM.GetCleanupCallCount(); got != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", got)
+	}
+}
+
+func TestOrchestratorExistingPrefixDeleteCapabilityFailureStopsBeforeRunAndCleansUp(t *testing.T) {
+	var runPosts atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready", "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ready"}`))
+		case constants.SptConfigSchemaEndpoint:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"storage":{"integrity":{"mode":"string","algorithm":"string",` +
+				`"input":{"provenance":"string","expectedProducerId":"string"},` +
+				`"selection":{"maxCount":"long"}}}}`))
+		case "/run":
+			if r.Method == http.MethodPost {
+				runPosts.Add(1)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	mockDM := NewMockDockerManager()
+	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
+	orchestrator.apiClient = NewSptAPIClient(server.URL)
+	err := orchestrator.StartTestWithContent(
+		context.Background(),
+		"test-image",
+		scenario.ScenarioParams{
+			WorkloadType:   scenario.WorkloadTypeDelete,
+			DeleteExisting: true,
+		},
 		[]byte(`Load.run({})`),
 		nil,
 	)
@@ -1002,6 +1050,232 @@ func TestOrchestratorMetricsParsing(t *testing.T) {
 	}
 }
 
+func TestTerminalStatusPublishesAuthoritativeTerminalDeleteOutcomeBeforeCompletion(t *testing.T) {
+	node := newTestStep()
+	node.MetricsSchema = deletemetrics.SchemaVersion
+	node.Scope = "node"
+	node.Role = "worker"
+	node.StepID = "delete-terminal"
+	node.OpType = "DELETE"
+	node.TestState = constants.TestStateCompleted
+	node.DeleteDetailExpected = true
+	node.Operations.SuccessCount = 1
+	node.Operations.FailedCount = 0
+	node.Delete = testDeleteMetrics("single", 1, 1, 1)
+	node.Delete.FailurePolicy.Outcome = deletemetrics.OutcomeRunning
+	node.Delete.Buckets = []DeleteBucketMetrics{{
+		Bucket: "bucket-a", Selected: 1, Attempted: 1, Accepted: 1,
+	}}
+	node.Delete.Timing.Latency = testTimingStat(1, 7)
+	node.Delete.Timing.Duration = testTimingStat(1, 11)
+
+	fleet := node
+	fleet.Scope = "fleet"
+	fleet.Role = "aggregate"
+	fleet.NodesCount = 1
+	fleet.NodesPresent = []string{constants.MetricsLocalContributorID}
+	fleet.ContributorsPresent = []string{constants.MetricsLocalContributorID}
+	fleet.Delete = testDeleteMetrics("single", 1, 1, 1)
+	fleet.Delete.FailurePolicy.Outcome = deletemetrics.OutcomeCompletedCleanly
+	fleet.Delete.Buckets = []DeleteBucketMetrics{{
+		Bucket: "bucket-a", Selected: 1, Attempted: 1, Accepted: 1,
+	}}
+	fleet.Delete.Timing.Latency = testTimingStat(1, 7)
+	fleet.Delete.Timing.Duration = testTimingStat(1, 11)
+	var fleetRequests atomic.Int32
+	var nodeRequests atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/status":
+			_, _ = w.Write([]byte(`{"state":"COMPLETED"}`))
+		case constants.SptMetricsEndpoint:
+			if nodeRequests.Add(1) == 1 {
+				http.Error(w, "terminal node metrics are still settling", http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = w.Write([]byte(marshalSteps(t, []JSONMetricsStep{node})))
+		case constants.SptFleetMetricsEndpoint:
+			if fleetRequests.Add(1) == 1 {
+				http.Error(w, "fleet result is still being retained", http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = w.Write([]byte(marshalSteps(t, []JSONMetricsStep{fleet})))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	orchestrator := NewTestOrchestrator(nil, constants.SptAPIPort, "")
+	orchestrator.apiClient = NewSptAPIClient(server.URL)
+	orchestrator.statusInterval = 10 * time.Millisecond
+	received := make(chan *PerformanceMetric, 1)
+	orchestrator.SetCallbacks(nil, func(update *MultiNodeMetricsUpdate) {
+		select {
+		case received <- update.Aggregated:
+		default:
+		}
+	}, nil, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go orchestrator.monitorStatus(ctx)
+
+	select {
+	case got := <-received:
+		if got == nil || got.Delete == nil {
+			t.Fatalf("terminal DELETE detail unavailable: %+v", got)
+		}
+		if got.Partial || got.Delete.FailurePolicy.Outcome != deletemetrics.OutcomeCompletedCleanly {
+			t.Fatalf("controller terminal outcome was not adopted: %+v", got)
+		}
+		if got.Delete.Timing.Latency == nil || got.Delete.Timing.Duration == nil {
+			t.Fatalf("controller timing was not adopted: %+v", got.Delete.Timing)
+		}
+		select {
+		case <-orchestrator.CompletionCh():
+		case <-ctx.Done():
+			t.Fatal("terminal metrics arrived but completion was not signaled")
+		}
+	case <-orchestrator.CompletionCh():
+		t.Fatal("completion was signaled before authoritative terminal DELETE metrics")
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for authoritative terminal DELETE metrics")
+	}
+}
+
+func TestTerminalStatusFailsAfterBoundedPersistentMetricsCaptureErrors(t *testing.T) {
+	var metricsRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/status":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"state":"COMPLETED"}`))
+		case constants.SptMetricsEndpoint:
+			metricsRequests.Add(1)
+			http.Error(w, "terminal metrics unavailable", http.StatusServiceUnavailable)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	orchestrator := NewTestOrchestrator(nil, constants.SptAPIPort, "")
+	orchestrator.apiClient = NewSptAPIClient(server.URL)
+	orchestrator.statusInterval = 5 * time.Millisecond
+	errors := make(chan string, 1)
+	outputs := make(chan string, 1)
+	orchestrator.SetCallbacks(nil, nil, func(output string) {
+		select {
+		case outputs <- output:
+		default:
+		}
+	}, func(message string) {
+		select {
+		case errors <- message:
+		default:
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	go orchestrator.monitorStatus(ctx)
+
+	select {
+	case message := <-errors:
+		if !strings.Contains(message, "terminal DELETE metrics") {
+			t.Fatalf("terminal capture failure was not surfaced: %q", message)
+		}
+	case <-ctx.Done():
+		t.Fatal("persistent terminal metrics failure was not surfaced within the bound")
+	}
+	select {
+	case <-orchestrator.CompletionCh():
+	case <-ctx.Done():
+		t.Fatal("failed terminal capture did not finish orchestration")
+	}
+	if orchestrator.CompletionError() == nil {
+		t.Fatal("persistent terminal capture failure was not retained as the run completion error")
+	}
+	if got := metricsRequests.Load(); got != int32(constants.TerminalMetricsCaptureAttempts) {
+		t.Fatalf("terminal metrics attempts = %d, want %d", got, constants.TerminalMetricsCaptureAttempts)
+	}
+	select {
+	case output := <-outputs:
+		if strings.Contains(output, "Test COMPLETED") {
+			t.Fatalf("persistent terminal capture failure reported success: %q", output)
+		}
+	default:
+	}
+}
+
+func TestTerminalStatusRetainsOwnedEngineFailureAsCompletionError(t *testing.T) {
+	node := newTestStep()
+	node.MetricsSchema = deletemetrics.SchemaVersion
+	node.Scope = "node"
+	node.Role = "worker"
+	node.StepID = "delete-terminal-failed"
+	node.OpType = "DELETE"
+	node.DeleteDetailExpected = true
+	node.TestState = constants.TestStateCompleted
+	node.Operations.SuccessCount = 1
+	node.Operations.FailedCount = 0
+	node.Delete = testDeleteMetrics("single", 1, 1, 1)
+	node.Delete.FailurePolicy.Outcome = deletemetrics.OutcomeRunning
+	node.Delete.Buckets = []DeleteBucketMetrics{{
+		Bucket: "bucket-a", Selected: 1, Attempted: 1, Accepted: 1,
+	}}
+	node.Delete.Timing.Latency = testTimingStat(1, 7)
+	node.Delete.Timing.Duration = testTimingStat(1, 11)
+	fleet := node
+	fleet.Scope = "fleet"
+	fleet.Role = aggregateLabel
+	fleet.NodesCount = 1
+	fleet.NodesPresent = []string{constants.MetricsLocalContributorID}
+	fleet.ContributorsPresent = []string{constants.MetricsLocalContributorID}
+	fleet.Delete = testDeleteMetrics("single", 1, 1, 1)
+	fleet.Delete.Buckets = []DeleteBucketMetrics{{
+		Bucket: "bucket-a", Selected: 1, Attempted: 1, Accepted: 1,
+	}}
+	fleet.Delete.Timing.Latency = testTimingStat(1, 7)
+	fleet.Delete.Timing.Duration = testTimingStat(1, 11)
+	fleet.Delete.FailurePolicy.Outcome = deletemetrics.OutcomeFailed
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/status":
+			_, _ = w.Write([]byte(`{"state":"FAILED","message":"failure budget exceeded"}`))
+		case constants.SptMetricsEndpoint:
+			_, _ = w.Write([]byte(marshalSteps(t, []JSONMetricsStep{node})))
+		case constants.SptFleetMetricsEndpoint:
+			_, _ = w.Write([]byte(marshalSteps(t, []JSONMetricsStep{fleet})))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	orchestrator := NewTestOrchestrator(nil, constants.SptAPIPort, "")
+	orchestrator.apiClient = NewSptAPIClient(server.URL)
+	orchestrator.statusInterval = 5 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	go orchestrator.monitorStatus(ctx)
+
+	select {
+	case <-orchestrator.CompletionCh():
+	case <-ctx.Done():
+		t.Fatal("owned failed run did not finish orchestration")
+	}
+	if err := orchestrator.CompletionError(); err == nil ||
+		!strings.Contains(err.Error(), "failure budget exceeded") {
+		t.Fatalf("owned terminal failure = %v, want retained completion error", err)
+	}
+}
+
 func TestOrchestratorMetricsCompatibilityWarning(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/metrics/json" {
@@ -1148,7 +1422,9 @@ func TestOrchestratorTestCompletion(t *testing.T) {
 				if r.URL.Path == "/status" {
 					w.WriteHeader(http.StatusOK)
 					fmt.Fprintf(w, `{"state": "%s", "message": "Test finished"}`, tt.finalState)
+					return
 				}
+				http.NotFound(w, r)
 			}))
 			defer server.Close()
 

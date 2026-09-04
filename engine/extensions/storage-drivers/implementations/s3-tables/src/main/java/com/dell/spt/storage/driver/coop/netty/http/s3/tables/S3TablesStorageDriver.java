@@ -128,6 +128,12 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 		this.requestNewPathFunc = null;
 	}
 
+	/** S3 Tables uses its own control/data-plane modes, not first-class DELETE requests. */
+	@Override
+	public boolean supportsStandaloneDeleteRequests() {
+		return false;
+	}
+
 	@Override
 	protected String requestNewPath(final String path) {
 		return path;
@@ -156,6 +162,13 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 
 	@Override
 	protected boolean submit(final O op) throws IllegalStateException {
+		// This implementation bypasses NettyStorageDriverBase.submit() for synchronous
+		// control-plane modes, so it must cross the same atomic dispatch gate before the first
+		// control-plane request. Completion-time fallback is too late to distinguish this work
+		// from queue recovery during concurrent admission closure.
+		if (!beginDispatch(op)) {
+			return false;
+		}
 		switch (opMode) {
 		case OP_MODE_PROVISION:
 			try {

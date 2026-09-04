@@ -7,6 +7,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
+	"gopkg.in/yaml.v3"
 )
 
 func TestGeneratedIntegrityPlansResolveSharedStepRoles(t *testing.T) {
@@ -347,6 +348,23 @@ func TestGenerateDefaultsIncludesVerificationRunID(t *testing.T) {
 	if !strings.Contains(string(got), "run:\n    id: 123") && !strings.Contains(string(got), "run:\n  id: 123") {
 		t.Fatalf("defaults missing run id:\n%s", got)
 	}
+	var defaults struct {
+		Run struct {
+			ID      int64 `yaml:"id"`
+			Cluster struct {
+				ID string `yaml:"id"`
+			} `yaml:"cluster"`
+		} `yaml:"run"`
+	}
+	if err := yaml.Unmarshal(got, &defaults); err != nil {
+		t.Fatal(err)
+	}
+	if defaults.Run.Cluster.ID == "" {
+		t.Fatalf("defaults missing nonempty cluster identity: %+v", defaults.Run)
+	}
+	if want := "spt-run-123"; defaults.Run.Cluster.ID != want {
+		t.Fatalf("cluster identity = %q, want %q", defaults.Run.Cluster.ID, want)
+	}
 }
 
 func parseGeneratedScenarioConfigs(t *testing.T, scenarioText string) []map[string]any {
@@ -400,8 +418,21 @@ func parseGeneratedScenarioConfigs(t *testing.T, scenarioText string) []map[stri
 			t.Fatalf("unterminated generated config object at offset %d", objectStart)
 		}
 		rawConfig := scenarioText[objectStart:objectEnd]
-		for _, variable := range []string{"writtenFile", "verifiedFile", "verifyInputFile"} {
+		for _, variable := range []string{"writtenFile", "verifiedFile", "verifyInputFile", "residualFile"} {
 			rawConfig = strings.ReplaceAll(rawConfig, variable, quoteJS(variable))
+		}
+		for _, variable := range []string{
+			"seedDurationMillis", "discoveryDurationMillis", "setupStartedNanos",
+		} {
+			rawConfig = strings.ReplaceAll(rawConfig, variable, "0")
+		}
+		rawConfig = strings.ReplaceAll(rawConfig, "deleteSelection.selectedBuckets()", "[]")
+		for _, expression := range []string{
+			"deleteSelection.selected()",
+			"deleteSelection.selectedCurrentKey()",
+			"deleteSelection.selectedExactVersion()",
+		} {
+			rawConfig = strings.ReplaceAll(rawConfig, expression, "0")
 		}
 		var config map[string]any
 		if err := json.Unmarshal([]byte(rawConfig), &config); err != nil {

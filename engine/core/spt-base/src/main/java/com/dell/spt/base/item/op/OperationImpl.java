@@ -7,6 +7,7 @@ import com.dell.spt.base.integrity.IntegrityVerificationResult;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.VersionedItem;
+import com.dell.spt.base.load.lifecycle.OperationLifecycle;
 import com.dell.spt.base.storage.Credential;
 
 /** Created by kurila on 20.10.15. */
@@ -37,8 +38,11 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 	protected volatile String responseRequestId;
 	protected volatile IntegrityMetadata integrityMetadata;
 	protected volatile IntegrityVerificationResult integrityVerificationResult;
+	private volatile OperationLifecycle lifecycle;
 
-	public OperationImpl() {}
+	public OperationImpl() {
+		this.lifecycle = new OperationLifecycle();
+	}
 
 	public OperationImpl(
 					final int originIndex,
@@ -47,6 +51,7 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 					final String srcPath,
 					final String dstPath,
 					final Credential credential) {
+		this.lifecycle = new OperationLifecycle();
 		this.originIndex = originIndex;
 		this.opType = opType;
 		this.item = item;
@@ -88,6 +93,7 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 	}
 
 	protected OperationImpl(final OperationImpl<I> other) {
+		this.lifecycle = other.lifecycle;
 		this.originIndex = other.originIndex;
 		this.opType = other.opType;
 		this.item = other.item;
@@ -115,6 +121,23 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 	public OperationImpl<I> result() {
 		buildItemPath(item, dstPath == null ? srcPath : dstPath);
 		return new OperationImpl<>(this);
+	}
+
+	@Override
+	public OperationLifecycle lifecycle() {
+		return lifecycle;
+	}
+
+	@Override
+	public synchronized OperationLifecycle startNextLifecycle() {
+		final var current = lifecycle;
+		final var state = current.state();
+		if (state == com.dell.spt.base.load.lifecycle.OperationLifecycleState.COMPLETING
+						|| state == com.dell.spt.base.load.lifecycle.OperationLifecycleState.TERMINAL
+						|| state == com.dell.spt.base.load.lifecycle.OperationLifecycleState.UNATTEMPTED) {
+			lifecycle = new OperationLifecycle();
+		}
+		return lifecycle;
 	}
 
 	@Override

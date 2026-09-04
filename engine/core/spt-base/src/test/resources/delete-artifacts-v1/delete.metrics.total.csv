@@ -1,0 +1,2 @@
+schema_version,request_unit,object_unit,batch_unit,mode,configured_batch_size,selection_order,requests_attempted,requests_full_success,requests_partial,requests_failed,requests_unresolved,objects_selected,objects_attempted,objects_accepted,objects_failed,objects_unattempted,objects_unresolved,batch_actual_requests,batch_actual_objects,batch_full_count,batch_partial_count,terminal_reconciled
+1,logical_api_requests,object_identities,logical_api_requests,batch,2,canonical,1,1,0,0,0,2,2,2,0,0,0,1,2,1,0,true

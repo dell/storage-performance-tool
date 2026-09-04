@@ -49,8 +49,10 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 	private final Path manifestPath;
 	private final List<FileManager> fileManagers;
 	private final List<String> sourceNames;
-	private final long selectionLimit;
+	private final long recordLimit;
 	private final OpType artifactOpType;
+	private final boolean requireExactOutputCount;
+	private final boolean requireNonEmptySelection;
 
 	public CsvArtifactAggregator(
 					final String loadStepId,
@@ -58,14 +60,14 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 					final List<Config> configSlices,
 					final String itemOutputFile,
 					final long runId,
-					final long selectionLimit) {
+					final long recordLimit) {
 		this(
 						loadStepId,
 						fileManagers,
 						configSlices,
 						itemOutputFile,
 						runId,
-						selectionLimit,
+						recordLimit,
 						legacyArtifactOpType(itemOutputFile));
 	}
 
@@ -75,14 +77,59 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 					final List<Config> configSlices,
 					final String itemOutputFile,
 					final long runId,
-					final long selectionLimit,
+					final long recordLimit,
 					final OpType artifactOpType) {
+		this(
+						loadStepId,
+						fileManagers,
+						configSlices,
+						itemOutputFile,
+						runId,
+						recordLimit,
+						artifactOpType,
+						false,
+						false);
+	}
+
+	public CsvArtifactAggregator(
+					final String loadStepId,
+					final List<FileManager> fileManagers,
+					final List<Config> configSlices,
+					final String itemOutputFile,
+					final long runId,
+					final long recordLimit,
+					final OpType artifactOpType,
+					final boolean requireExactOutputCount) {
+		this(
+						loadStepId,
+						fileManagers,
+						configSlices,
+						itemOutputFile,
+						runId,
+						recordLimit,
+						artifactOpType,
+						requireExactOutputCount,
+						false);
+	}
+
+	public CsvArtifactAggregator(
+					final String loadStepId,
+					final List<FileManager> fileManagers,
+					final List<Config> configSlices,
+					final String itemOutputFile,
+					final long runId,
+					final long recordLimit,
+					final OpType artifactOpType,
+					final boolean requireExactOutputCount,
+					final boolean requireNonEmptySelection) {
 		this.loadStepId = loadStepId;
 		this.runId = runId;
 		this.manifestPath = Path.of(itemOutputFile);
 		this.fileManagers = List.copyOf(fileManagers);
-		this.selectionLimit = Math.max(0, selectionLimit);
+		this.recordLimit = Math.max(0, recordLimit);
 		this.artifactOpType = artifactOpType;
+		this.requireExactOutputCount = requireExactOutputCount;
+		this.requireNonEmptySelection = requireNonEmptySelection;
 		this.sourceNames = new ArrayList<>(fileManagers.size());
 		for (int i = 0; i < fileManagers.size(); i++) {
 			final FileManager fileManager = fileManagers.get(i);
@@ -139,6 +186,7 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 
 	private void collectAndPublish(final long failedOperationCount) throws IOException {
 		final boolean discovery = OpType.LIST.equals(artifactOpType);
+		final boolean seededCreate = requireExactOutputCount && OpType.CREATE.equals(artifactOpType);
 		if (discovery && failedOperationCount < 0) {
 			throw terminal(
 							Category.EXECUTION,
@@ -153,6 +201,20 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 											+ "; refusing to publish a partial manifest",
 							null);
 		}
+		if (seededCreate && failedOperationCount < 0) {
+			throw terminal(
+							Category.EXECUTION,
+							"terminal CREATE seed failure count is unavailable; refusing to publish seed inventory",
+							null);
+		}
+		if (seededCreate && failedOperationCount > 0) {
+			throw terminal(
+							Category.EXECUTION,
+							"CREATE seed recorded " + failedOperationCount
+											+ (failedOperationCount == 1 ? " failed operation" : " failed operations")
+											+ "; refusing to publish incomplete seed inventory",
+							null);
+		}
 		final Path parent = manifestPath.toAbsolutePath().getParent();
 		Files.createDirectories(parent);
 		final Path marker = IntegrityManifestCompletion.completionPath(manifestPath);
@@ -163,108 +225,133 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 		final List<Path> nodeSources = new ArrayList<>(sourceNames.size());
 		final List<Path> emissionCounts = new ArrayList<>(sourceNames.size());
 		final List<Path> deleteMarkerCounts = new ArrayList<>(sourceNames.size());
-		for (int i = 0; i < sourceNames.size(); i++) {
-			final Path nodePath = nodeSourcePath(manifestPath, i);
-			if (Files.exists(nodePath)) {
-				throw terminal(Category.PUBLICATION, "stale node source exists: " + nodePath, null);
-			}
-			if (i == 0) {
-				if (!Files.isRegularFile(manifestPath)) {
-					throw terminal(Category.AGGREGATION, "entry-node manifest source is missing", null);
-				}
-				IntegrityManifestCompletion.atomicMove(manifestPath, nodePath);
-			} else {
-				copyRemoteSource(fileManagers.get(i), sourceNames.get(i), nodePath);
-			}
-			nodeSources.add(nodePath);
-			if (discovery) {
-				final Path nodeCount = IntegrityManifestCompletion.emissionCountPath(nodePath);
-				if (Files.exists(nodeCount)) {
-					throw terminal(Category.PUBLICATION, "stale node emission count exists: " + nodeCount, null);
-				}
-				if (i == 0) {
-					final Path sourceCount = IntegrityManifestCompletion.emissionCountPath(manifestPath);
-					if (!Files.isRegularFile(sourceCount)) {
-						throw terminal(Category.AGGREGATION, "entry-node LIST emission count is missing", null);
-					}
-					IntegrityManifestCompletion.atomicMove(sourceCount, nodeCount);
-				} else {
-					final String remoteCount = IntegrityManifestCompletion.emissionCountPath(
-									Path.of(sourceNames.get(i))).toString();
-					copyRemoteSource(fileManagers.get(i), remoteCount, nodeCount);
-				}
-				emissionCounts.add(nodeCount);
-				final Path nodeDeleteMarkerCount = IntegrityManifestCompletion.deleteMarkerCountPath(nodePath);
-				if (Files.exists(nodeDeleteMarkerCount)) {
-					throw terminal(Category.PUBLICATION,
-									"stale node delete-marker count exists: " + nodeDeleteMarkerCount, null);
-				}
-				if (i == 0) {
-					final Path sourceDeleteMarkerCount = IntegrityManifestCompletion.deleteMarkerCountPath(manifestPath);
-					if (!Files.isRegularFile(sourceDeleteMarkerCount)) {
-						throw terminal(Category.AGGREGATION,
-										"entry-node LIST delete-marker count is missing", null);
-					}
-					IntegrityManifestCompletion.atomicMove(sourceDeleteMarkerCount, nodeDeleteMarkerCount);
-				} else {
-					final String remoteDeleteMarkerCount = IntegrityManifestCompletion.deleteMarkerCountPath(
-									Path.of(sourceNames.get(i))).toString();
-					copyRemoteSource(fileManagers.get(i), remoteDeleteMarkerCount, nodeDeleteMarkerCount);
-				}
-				deleteMarkerCounts.add(nodeDeleteMarkerCount);
-			}
-
-		}
-
-		final Path staging = Files.createTempFile(parent, "." + manifestPath.getFileName(), ".staging");
-		final AggregationCounts counts;
+		final List<Path> createdNodeArtifacts = new ArrayList<>(sourceNames.size() * 3);
 		try {
-			counts = aggregateBounded(nodeSources, staging, discovery ? selectionLimit : 0);
-		} catch (final IOException | RuntimeException e) {
-			try {
-				Files.deleteIfExists(staging);
-			} catch (final IOException cleanupFailure) {
-				e.addSuppressed(cleanupFailure);
+			for (int i = 0; i < sourceNames.size(); i++) {
+				final Path nodePath = nodeSourcePath(manifestPath, i);
+				if (Files.exists(nodePath)) {
+					throw terminal(Category.PUBLICATION, "stale node source exists: " + nodePath, null);
+				}
+				if (i == 0) {
+					if (!Files.isRegularFile(manifestPath)) {
+						throw terminal(Category.AGGREGATION, "entry-node manifest source is missing", null);
+					}
+					createdNodeArtifacts.add(nodePath);
+					IntegrityManifestCompletion.atomicMove(manifestPath, nodePath);
+				} else {
+					createdNodeArtifacts.add(nodePath);
+					copyRemoteSource(fileManagers.get(i), sourceNames.get(i), nodePath);
+				}
+				nodeSources.add(nodePath);
+				if (discovery) {
+					final Path nodeCount = IntegrityManifestCompletion.emissionCountPath(nodePath);
+					if (Files.exists(nodeCount)) {
+						throw terminal(Category.PUBLICATION, "stale node emission count exists: " + nodeCount, null);
+					}
+					if (i == 0) {
+						final Path sourceCount = IntegrityManifestCompletion.emissionCountPath(manifestPath);
+						if (!Files.isRegularFile(sourceCount)) {
+							throw terminal(Category.AGGREGATION, "entry-node LIST emission count is missing", null);
+						}
+						createdNodeArtifacts.add(nodeCount);
+						IntegrityManifestCompletion.atomicMove(sourceCount, nodeCount);
+					} else {
+						final String remoteCount = IntegrityManifestCompletion.emissionCountPath(
+										Path.of(sourceNames.get(i))).toString();
+						createdNodeArtifacts.add(nodeCount);
+						copyRemoteSource(fileManagers.get(i), remoteCount, nodeCount);
+					}
+					emissionCounts.add(nodeCount);
+					final Path nodeDeleteMarkerCount = IntegrityManifestCompletion.deleteMarkerCountPath(nodePath);
+					if (Files.exists(nodeDeleteMarkerCount)) {
+						throw terminal(Category.PUBLICATION,
+										"stale node delete-marker count exists: " + nodeDeleteMarkerCount, null);
+					}
+					if (i == 0) {
+						final Path sourceDeleteMarkerCount = IntegrityManifestCompletion.deleteMarkerCountPath(manifestPath);
+						if (!Files.isRegularFile(sourceDeleteMarkerCount)) {
+							throw terminal(Category.AGGREGATION,
+											"entry-node LIST delete-marker count is missing", null);
+						}
+						createdNodeArtifacts.add(nodeDeleteMarkerCount);
+						IntegrityManifestCompletion.atomicMove(sourceDeleteMarkerCount, nodeDeleteMarkerCount);
+					} else {
+						final String remoteDeleteMarkerCount = IntegrityManifestCompletion.deleteMarkerCountPath(
+										Path.of(sourceNames.get(i))).toString();
+						createdNodeArtifacts.add(nodeDeleteMarkerCount);
+						copyRemoteSource(fileManagers.get(i), remoteDeleteMarkerCount, nodeDeleteMarkerCount);
+					}
+					deleteMarkerCounts.add(nodeDeleteMarkerCount);
+				}
 			}
+		} catch (final IOException | RuntimeException e) {
+			cleanupCreatedNodeArtifacts(createdNodeArtifacts, e);
 			throw e;
 		}
-		long emittedCount = counts.source();
-		long excludedDeleteMarkerCount = 0;
-		if (discovery) {
-			emittedCount = 0;
-			for (final Path countPath : emissionCounts) {
-				emittedCount = Math.addExact(emittedCount, readEmissionCount(countPath));
-			}
-			for (final Path countPath : deleteMarkerCounts) {
-				excludedDeleteMarkerCount = Math.addExact(
-								excludedDeleteMarkerCount, readEmissionCount(countPath));
-			}
-			if (emittedCount != counts.source()) {
-				final IntegrityTerminalException failure = terminal(
-								Category.AGGREGATION,
-								"LIST emitted " + emittedCount + " records but parsed "
-												+ counts.source() + " manifest rows",
-								null);
-				throw preserveEmissionCountFailure(failure, () -> Files.deleteIfExists(staging));
-			}
-		}
-		IntegrityManifestCompletion.atomicMove(staging, manifestPath);
-		final IntegrityManifestCompletion completion = IntegrityManifestCompletion.create(
-						manifestPath,
-						runId,
-						IntegrityManifestCompletion.PRODUCER_ENGINE_STEP,
-						loadStepId,
-						counts.source(),
-						counts.unique(),
-						counts.selected(),
-						excludedDeleteMarkerCount);
+
+		Path staging = null;
 		try {
-			completion.publish(manifestPath);
-		} catch (final IOException e) {
-			throw terminal(Category.PUBLICATION, "failed to publish completion record for " + manifestPath, e);
-		}
-		if (OpType.CREATE.equals(artifactOpType) && counts.selected() == 0) {
-			throw terminal(Category.EXECUTION, "write verification produced zero successful objects", null);
+			staging = Files.createTempFile(parent, "." + manifestPath.getFileName(), ".staging");
+			final AggregationCounts counts = aggregateBounded(
+							nodeSources, staging, discovery ? recordLimit : 0);
+			long emittedCount = counts.source();
+			long excludedDeleteMarkerCount = 0;
+			if (discovery) {
+				emittedCount = 0;
+				for (final Path countPath : emissionCounts) {
+					emittedCount = Math.addExact(emittedCount, readEmissionCount(countPath));
+				}
+				for (final Path countPath : deleteMarkerCounts) {
+					excludedDeleteMarkerCount = Math.addExact(
+									excludedDeleteMarkerCount, readEmissionCount(countPath));
+				}
+				if (emittedCount != counts.source()) {
+					throw terminal(
+									Category.AGGREGATION,
+									"LIST emitted " + emittedCount + " records but parsed "
+													+ counts.source() + " manifest rows",
+									null);
+				}
+			}
+			if (discovery && requireNonEmptySelection && counts.selected() == 0) {
+				throw terminal(
+								Category.EXECUTION,
+								"LIST discovery froze zero object identities; refusing to start destructive DELETE",
+								null);
+			}
+			IntegrityManifestCompletion.atomicMove(staging, manifestPath);
+			if (seededCreate && recordLimit > 0 && counts.selected() != recordLimit) {
+				throw terminal(
+								Category.EXECUTION,
+								"CREATE seed expected " + recordLimit + " successful objects but froze "
+												+ counts.selected(),
+								null);
+			}
+			final IntegrityManifestCompletion completion = IntegrityManifestCompletion.create(
+							manifestPath,
+							runId,
+							IntegrityManifestCompletion.PRODUCER_ENGINE_STEP,
+							loadStepId,
+							counts.source(),
+							counts.unique(),
+							counts.selected(),
+							excludedDeleteMarkerCount);
+			try {
+				completion.publish(manifestPath);
+			} catch (final IOException e) {
+				throw terminal(Category.PUBLICATION, "failed to publish completion record for " + manifestPath, e);
+			}
+			if (OpType.CREATE.equals(artifactOpType) && counts.selected() == 0) {
+				throw terminal(Category.EXECUTION, "write verification produced zero successful objects", null);
+			}
+		} catch (final IOException | RuntimeException e) {
+			if (staging != null) {
+				cleanupCreatedNodeArtifacts(List.of(staging), e);
+			}
+			if (discovery) {
+				cleanupCreatedNodeArtifacts(createdNodeArtifacts, e);
+			}
+			throw e;
 		}
 	}
 
@@ -311,6 +398,17 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 		}
 		if (!sawData && !Files.exists(target)) {
 			throw new IOException("remote manifest source was empty or missing: " + remoteName);
+		}
+	}
+
+	private static void cleanupCreatedNodeArtifacts(
+					final List<Path> createdArtifacts, final Throwable primaryFailure) {
+		for (int i = createdArtifacts.size() - 1; i >= 0; i--) {
+			try {
+				Files.deleteIfExists(createdArtifacts.get(i));
+			} catch (final IOException cleanupFailure) {
+				primaryFailure.addSuppressed(cleanupFailure);
+			}
 		}
 	}
 

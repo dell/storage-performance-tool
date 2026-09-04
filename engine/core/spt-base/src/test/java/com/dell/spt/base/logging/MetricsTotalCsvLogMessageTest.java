@@ -1,6 +1,7 @@
 package com.dell.spt.base.logging;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.item.op.OpType;
@@ -53,6 +54,7 @@ class MetricsTotalCsvLogMessageTest {
 		final String values = formatted.substring(lineSeparatorIndex + lineSeparator.length());
 		assertEquals(-1, values.indexOf(lineSeparator));
 		assertTrue(header.endsWith("TtfbMax[us]"));
+		assertFalse(header.contains("DeleteMetricsJSON"));
 		assertTrue(values.endsWith(",20,,,,,,,"), formatted);
 		assertEquals(columnCount(header), columnCount(values), formatted);
 	}

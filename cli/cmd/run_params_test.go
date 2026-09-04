@@ -265,6 +265,61 @@ func TestFormatScenarioParams(t *testing.T) {
 			},
 		},
 		{
+			name: "Delete workload reports canonical selection evidence",
+			params: scenario.ScenarioParams{
+				WorkloadType:           WorkloadTypeDelete,
+				ItemsFile:              "manifest.csv",
+				Threads:                4,
+				DeleteBatchSize:        100,
+				SelectionSourceCount:   12,
+				SelectionUniqueCount:   10,
+				SelectionSelectedCount: 7,
+				SelectionSHA256:        "abc123",
+				SelectionOrder:         scenario.SelectionOrderCanonical,
+			},
+			expected: []string{
+				"Object Size: (not applicable)",
+				"DELETE Batch Size: 100",
+				"Selection Order: canonical",
+				"Selection Records: source=12 unique=10 selected=7 sha256=abc123",
+				"Warning: canonical key order can affect cross-tool DELETE comparisons.",
+			},
+		},
+		{
+			name: "Seeded delete reports verdict-neutral residual cleanup",
+			params: scenario.ScenarioParams{
+				WorkloadType:    WorkloadTypeDelete,
+				Bucket:          "owned",
+				Threads:         2,
+				DeleteBatchSize: 100,
+				Cleanup:         true,
+			},
+			expected: []string{
+				"Cleanup: Yes (best-effort seeded residual after measurement)",
+			},
+		},
+		{
+			name: "Existing-prefix delete reports destructive current-key scope",
+			params: scenario.ScenarioParams{
+				WorkloadType:    WorkloadTypeDelete,
+				Bucket:          "existing",
+				Prefix:          "guarded/root/",
+				DeleteExisting:  true,
+				Threads:         2,
+				DeleteBatchSize: 2,
+				SelectionOrder:  scenario.SelectionOrderCanonical,
+			},
+			expected: []string{
+				"Object Size: (not applicable)",
+				"Object Count: all discovered identities (unbounded)",
+				"DELETE Source: existing current-key prefix",
+				"DELETE Scope: bucket=existing prefix=guarded/root/",
+				"DANGER: deletes all discovered current-key identities from an existing namespace (unbounded).",
+				"Quiescence required: concurrent writers can replace a frozen identity before deletion.",
+				"Discovery Phase: setup only; excluded from DELETE request timing.",
+			},
+		},
+		{
 			name: "Write with part-size shows multipart info",
 			params: scenario.ScenarioParams{
 				WorkloadType: "write",

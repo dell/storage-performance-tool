@@ -5,7 +5,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.PrematureChannelClosureException;
@@ -60,6 +62,32 @@ class ResponseHandlerBaseTest {
 		verify(op).status(Operation.Status.FAIL_IO);
 		verify(driver).shouldLogChannelFailureWarning();
 		verify(driver).complete(eq(ch), eq(op));
+		ch.finishAndReleaseAll();
+	}
+
+	@Test
+	void exceptionCaught_deleteAfterHeadersClearsIncompleteTransportTimingBeforeCompletion() {
+		final NettyStorageDriverBase<IntegrityManifestDataItem, DeleteRequestOperation> driver = mock(NettyStorageDriverBase.class);
+		when(driver.isStarted()).thenReturn(true);
+		when(driver.isStopped()).thenReturn(false);
+		when(driver.shouldLogChannelFailureWarning()).thenReturn(false);
+		final ResponseHandlerBase<Object, IntegrityManifestDataItem, DeleteRequestOperation> handler = new ResponseHandlerBase<>(driver, false) {
+			@Override
+			protected void handle(
+							final io.netty.channel.Channel channel,
+							final DeleteRequestOperation op,
+							final Object msg) {}
+		};
+		final DeleteRequestOperation op = mock(DeleteRequestOperation.class);
+		final var ch = new EmbeddedChannel(handler);
+		ch.attr(NettyStorageDriver.ATTR_KEY_OPERATION).set(op);
+
+		ch.pipeline().fireExceptionCaught(new PrematureChannelClosureException("closed after headers"));
+
+		final var ordered = inOrder(op, driver);
+		ordered.verify(op).status(Operation.Status.FAIL_IO);
+		ordered.verify(op).failTransportAttempt();
+		ordered.verify(driver).complete(ch, op);
 		ch.finishAndReleaseAll();
 	}
 

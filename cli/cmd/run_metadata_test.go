@@ -86,6 +86,30 @@ func TestBuildRunMetadata_CommandIsSanitized(t *testing.T) {
 	}
 }
 
+func TestBuildRunMetadataVersionsDeleteArtifactExpectationOnlyForDelete(t *testing.T) {
+	deleteMetadata := buildRunMetadata(runMetadataInput{
+		WorkloadType: scenario.WorkloadTypeDelete,
+		ExpectedStepIDs: []string{
+			"mt-001-seed",
+			"mt-002-delete",
+		},
+	})
+	if deleteMetadata.DeleteArtifactsVersion != constants.ResultsDeleteArtifactsVersion {
+		t.Fatalf("DELETE artifact version = %d, want %d",
+			deleteMetadata.DeleteArtifactsVersion, constants.ResultsDeleteArtifactsVersion)
+	}
+	if len(deleteMetadata.DeleteArtifactStepIDs) != 1 || deleteMetadata.DeleteArtifactStepIDs[0] != "mt-002-delete" {
+		t.Fatalf("DELETE artifact steps = %v, want [mt-002-delete]", deleteMetadata.DeleteArtifactStepIDs)
+	}
+	ordinary := buildRunMetadata(runMetadataInput{WorkloadType: scenario.WorkloadTypeRead})
+	if ordinary.DeleteArtifactsVersion != 0 {
+		t.Fatalf("ordinary result unexpectedly requires DELETE artifacts: %d", ordinary.DeleteArtifactsVersion)
+	}
+	if len(ordinary.DeleteArtifactStepIDs) != 0 {
+		t.Fatalf("ordinary result unexpectedly names DELETE artifact steps: %v", ordinary.DeleteArtifactStepIDs)
+	}
+}
+
 func TestCaptureChangedFlagsMasksSensitiveValues(t *testing.T) {
 	cmd := &cobra.Command{Use: "test"}
 	cmd.Flags().String("secret-key", "", "")

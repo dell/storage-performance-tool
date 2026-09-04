@@ -1,9 +1,12 @@
 package com.dell.spt.base.config;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 import com.dell.spt.base.Constants;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationSummary;
+import com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.SchemaProvider;
 import java.net.URL;
@@ -22,5 +25,17 @@ class ConfigDefaultsTest {
 		assertNotNull(defaultsUrl, "defaults.yaml should be on the classpath");
 		final Config config = ConfigUtil.loadConfig(Path.of(defaultsUrl.toURI()).toFile(), schema);
 		assertEquals("info", config.stringVal("log-level"), "default log level should be info");
+		assertFalse(
+						config.boolVal("load-op-delete-standalone"),
+						"shipped configuration must preserve legacy DELETE by default");
+		assertEquals(100, config.intVal("load-op-delete-batchSize"));
+		assertFalse(config.boolVal("load-op-delete-preValidation"));
+		assertFalse(config.boolVal("load-op-delete-postVerification"));
+		assertEquals(
+						StandaloneDeleteConfig.DEFAULT_VERIFICATION_TIMEOUT_MILLIS,
+						config.longVal("load-op-delete-verificationTimeoutMillis"));
+		assertEquals(
+						StandaloneDeleteConfig.DEFAULT_VERIFICATION_TIMEOUT_MILLIS,
+						DeleteVerificationSummary.disabled().timeoutMillis());
 	}
 }

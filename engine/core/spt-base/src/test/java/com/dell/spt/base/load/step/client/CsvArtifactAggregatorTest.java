@@ -14,6 +14,7 @@ import static org.mockito.Mockito.when;
 import com.dell.spt.base.integrity.IntegrityInputProvenance;
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.load.step.service.file.FileManagerService;
 import com.github.akurilov.confuse.Config;
@@ -88,6 +89,91 @@ class CsvArtifactAggregatorTest {
 	}
 
 	@Test
+	void seededCreateFailureStopsBeforePublishingFrozenInventory() throws Exception {
+		final Path manifest = tempDir.resolve("seed.csv");
+		Files.writeString(
+						manifest,
+						"bucket,key,size,version_id\r\n"
+										+ "b,successful,1024,returned-version\r\n");
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> new CsvArtifactAggregator(
+										"seed-step",
+										List.of(FileManager.INSTANCE),
+										List.of(),
+										manifest.toString(),
+										102,
+										2,
+										OpType.CREATE,
+										true)
+										.close(1));
+
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertTrue(failure.getMessage().contains("seed recorded 1 failed operation"));
+		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
+	}
+
+	@Test
+	void seededCreateRequiresExactFrozenInventoryCount() throws Exception {
+		final Path manifest = tempDir.resolve("seed.csv");
+		Files.writeString(
+						manifest,
+						"bucket,key,size,version_id\r\n"
+										+ "b,only-one,1024,returned-version\r\n");
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> new CsvArtifactAggregator(
+										"seed-step",
+										List.of(FileManager.INSTANCE),
+										List.of(),
+										manifest.toString(),
+										103,
+										2,
+										OpType.CREATE,
+										true)
+										.close(0));
+
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertTrue(failure.getMessage().contains("expected 2 successful objects but froze 1"));
+		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
+	}
+
+	@Test
+	void writeVerifyFixedCountPreservesSuccessfulCreatesWhenOtherCreatesFail() throws Exception {
+		assertPartialWriteVerifyCreatePublishes(2);
+	}
+
+	@Test
+	void writeVerifyDurationPreservesSuccessfulCreatesWhenOtherCreatesFail() throws Exception {
+		assertPartialWriteVerifyCreatePublishes(0);
+	}
+
+	private void assertPartialWriteVerifyCreatePublishes(final long configuredCount) throws Exception {
+		final Path manifest = tempDir.resolve("write-verify-" + configuredCount + ".csv");
+		final long runId = 104 + configuredCount;
+		Files.writeString(
+						manifest,
+						"bucket,key,size,version_id\r\n"
+										+ "b,successful,1024,returned-version\r\n");
+
+		new CsvArtifactAggregator(
+						"write-step",
+						List.of(FileManager.INSTANCE),
+						List.of(),
+						manifest.toString(),
+						runId,
+						configuredCount,
+						OpType.CREATE)
+						.close(1);
+
+		final var completion = IntegrityManifestCompletion.validate(
+						manifest, runId, IntegrityInputProvenance.ENGINE_STEP, "write-step");
+		assertEquals(1, completion.selectedRecordCount());
+	}
+
+	@Test
 	void discoverySortsDeduplicatesAndCaps() throws Exception {
 		final Path manifest = tempDir.resolve("verify-input.csv");
 		Files.writeString(
@@ -121,6 +207,41 @@ class CsvArtifactAggregatorTest {
 	}
 
 	@Test
+	void guardedDiscoveryRejectsEmptySelectionBeforePublishingCompletion() throws Exception {
+		final Path manifest = tempDir.resolve("guarded-empty.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\r\n");
+		Files.writeString(IntegrityManifestCompletion.emissionCountPath(manifest), "0\n");
+		Files.writeString(IntegrityManifestCompletion.deleteMarkerCountPath(manifest), "0\n");
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> new CsvArtifactAggregator(
+										"existing-prefix-list", List.of(FileManager.INSTANCE), List.of(),
+										manifest.toString(), 110, 0, OpType.LIST, false, true).close(0));
+
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertTrue(failure.getMessage().contains("zero object identities"));
+		assertDiscoveryNodeArtifactsAbsent(manifest, 1);
+		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
+	}
+
+	@Test
+	void ordinaryDiscoveryRetainsDefaultEmptySelectionBehavior() throws Exception {
+		final Path manifest = tempDir.resolve("ordinary-empty.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\r\n");
+		Files.writeString(IntegrityManifestCompletion.emissionCountPath(manifest), "0\n");
+		Files.writeString(IntegrityManifestCompletion.deleteMarkerCountPath(manifest), "0\n");
+
+		new CsvArtifactAggregator(
+						"ordinary-list", List.of(FileManager.INSTANCE), List.of(),
+						manifest.toString(), 111, 0, OpType.LIST).close(0);
+
+		final var completion = IntegrityManifestCompletion.validate(
+						manifest, 111, IntegrityInputProvenance.ENGINE_STEP, "ordinary-list");
+		assertEquals(0, completion.selectedRecordCount());
+	}
+
+	@Test
 	void distributedDiscoverySumsDeleteMarkersAcrossNodes() throws Exception {
 		final Path manifest = tempDir.resolve("verify-input.csv");
 		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,a,1,v1\r\n");
@@ -144,6 +265,33 @@ class CsvArtifactAggregatorTest {
 		assertTrue(Files.isRegularFile(CsvArtifactAggregator.nodeSourcePath(manifest, 1)));
 		assertEquals("3", Files.readString(IntegrityManifestCompletion.deleteMarkerCountPath(
 						CsvArtifactAggregator.nodeSourcePath(manifest, 1))).trim());
+	}
+
+	@Test
+	void distributedCollectionFailureRemovesPartialNodeArtifacts() throws Exception {
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,a,1,v1\r\n");
+		Files.writeString(IntegrityManifestCompletion.emissionCountPath(manifest), "1\n");
+		Files.writeString(IntegrityManifestCompletion.deleteMarkerCountPath(manifest), "0\n");
+		final String remoteManifest = "/remote/verify-input.csv";
+		final FileManagerService remote = remoteFileManager(remoteManifest, Map.of(
+						remoteManifest, "bucket,key,size,version_id\r\nb,b,2,v2\r\n"));
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> new CsvArtifactAggregator(
+										"list-step", List.of(FileManager.INSTANCE, remote),
+										List.of(mock(Config.class), mock(Config.class)),
+										manifest.toString(), 112, 0, OpType.LIST).close(0));
+
+		assertEquals(IntegrityTerminalException.Category.AGGREGATION, failure.category());
+		for (int i = 0; i < 2; i++) {
+			final Path nodeSource = CsvArtifactAggregator.nodeSourcePath(manifest, i);
+			assertFalse(Files.exists(nodeSource));
+			assertFalse(Files.exists(IntegrityManifestCompletion.emissionCountPath(nodeSource)));
+			assertFalse(Files.exists(IntegrityManifestCompletion.deleteMarkerCountPath(nodeSource)));
+		}
+		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
 	}
 
 	@Test
@@ -199,7 +347,18 @@ class CsvArtifactAggregatorTest {
 										manifest.toString(), 102, 0, com.dell.spt.base.item.op.OpType.LIST).close(0));
 
 		assertEquals(IntegrityTerminalException.Category.AGGREGATION, failure.category());
+		assertDiscoveryNodeArtifactsAbsent(manifest, 1);
 		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
+	}
+
+	private static void assertDiscoveryNodeArtifactsAbsent(
+					final Path manifest, final int nodeCount) {
+		for (int i = 0; i < nodeCount; i++) {
+			final Path nodeSource = CsvArtifactAggregator.nodeSourcePath(manifest, i);
+			assertFalse(Files.exists(nodeSource));
+			assertFalse(Files.exists(IntegrityManifestCompletion.emissionCountPath(nodeSource)));
+			assertFalse(Files.exists(IntegrityManifestCompletion.deleteMarkerCountPath(nodeSource)));
+		}
 	}
 
 	@Test

@@ -17,11 +17,13 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/tui"
 	"github.com/dell/storage-performance-tool/cli/tui/headless"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 func TestReplayCommandWiresMultiHostOrchestratorFlags(t *testing.T) {
@@ -196,6 +198,101 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	}
 	if !strings.Contains(out.String(), "Replay host: qa-client-01") {
 		t.Fatalf("output missing single-host summary:\n%s", out.String())
+	}
+}
+
+func TestReplayCommandSharesPositiveRunIdentityWithLaunchAndCompletionMonitor(t *testing.T) {
+	server := newReplayArchiveServer(t)
+	defer server.Close()
+
+	origPort := resolvePortConflictFunc
+	origStartLocalHeadless := startReplayLocalHeadless
+	origStartAutoResults := startReplayAutoResultsMonitor
+	origShouldHeadless := shouldReplayRunHeadless
+	origNewRunID := newReplayRunID
+	t.Cleanup(func() {
+		resolvePortConflictFunc = origPort
+		startReplayLocalHeadless = origStartLocalHeadless
+		startReplayAutoResultsMonitor = origStartAutoResults
+		shouldReplayRunHeadless = origShouldHeadless
+		newReplayRunID = origNewRunID
+	})
+	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+		return &portcheck.ResolutionResult{Success: true}, nil
+	}
+	shouldReplayRunHeadless = func(*cobra.Command) bool { return true }
+	const replayRunID = int64(1717)
+	newReplayRunID = func() int64 { return replayRunID }
+
+	var launchedParams scenario.Params
+	var launchedDefaults []byte
+	startReplayLocalHeadless = func(
+		_ string, _ string, params scenario.Params, options headless.HeadlessOptions,
+		_ []byte, defaults []byte,
+	) error {
+		launchedParams = params
+		launchedDefaults = append([]byte(nil), defaults...)
+		options.LaunchHooks.NotifySubmitted()
+		return nil
+	}
+
+	var monitoredRunID int64
+	var monitoredStepIDs []string
+	var monitoredMetadata *runMetadata
+	startReplayAutoResultsMonitor = func(
+		_ context.Context, _, _, _ string, expectedStepIDs []string, expectedRunID int64,
+		_ bool, _ []*hostparse.HostInfo, _ string, _ bool, _ int, _ string,
+		metadata *runMetadata, _, _ io.Writer, _ string, _ func(context.Context),
+		_ ...*integrity.FinalizeOptions,
+	) *autoResultsMonitor {
+		monitoredRunID = expectedRunID
+		monitoredStepIDs = append([]string(nil), expectedStepIDs...)
+		monitoredMetadata = metadata
+		done := make(chan autoResultsOutcome, 1)
+		done <- autoResultsOutcome{}
+		return &autoResultsMonitor{done: done, armed: make(chan struct{})}
+	}
+
+	cmd := newReplayCommandForTest(t)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{
+		"--from", server.URL,
+		"--endpoints", "http://s3.example",
+		"--headless",
+		"--results-dir", t.TempDir(),
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if launchedParams.RunID != replayRunID {
+		t.Fatalf("launched replay run ID = %d, want generated %d", launchedParams.RunID, replayRunID)
+	}
+	if monitoredRunID != launchedParams.RunID {
+		t.Fatalf("completion monitor run ID = %d, want launched %d", monitoredRunID, launchedParams.RunID)
+	}
+	if monitoredMetadata == nil || monitoredMetadata.ScenarioParams.RunID != launchedParams.RunID {
+		t.Fatalf("run metadata identity = %+v, want %d", monitoredMetadata, launchedParams.RunID)
+	}
+	if len(monitoredStepIDs) != 1 || !strings.HasPrefix(monitoredStepIDs[0], "replay-001-") ||
+		len(monitoredMetadata.ExpectedStepIDs) != 1 || monitoredStepIDs[0] != monitoredMetadata.ExpectedStepIDs[0] {
+		t.Fatalf("completion step identities = %v metadata=%v", monitoredStepIDs, monitoredMetadata.ExpectedStepIDs)
+	}
+	var defaults struct {
+		Run struct {
+			ID      int64 `yaml:"id"`
+			Cluster struct {
+				ID string `yaml:"id"`
+			} `yaml:"cluster"`
+		} `yaml:"run"`
+	}
+	if err := yaml.Unmarshal(launchedDefaults, &defaults); err != nil {
+		t.Fatalf("parse launched defaults: %v", err)
+	}
+	wantClusterID := fmt.Sprintf("spt-run-%d", launchedParams.RunID)
+	if defaults.Run.ID != launchedParams.RunID || defaults.Run.Cluster.ID != wantClusterID {
+		t.Fatalf("launched defaults identity = run %d cluster %q, want run %d cluster %q",
+			defaults.Run.ID, defaults.Run.Cluster.ID, launchedParams.RunID, wantClusterID)
 	}
 }
 
@@ -744,6 +841,9 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 			) error {
 				if test.wantPath == "remote-headless" {
 					pathCalls.Add(1)
+					if !options.Verbose {
+						t.Fatal("--verbose did not reach remote headless options")
+					}
 					if options.LaunchHooks.SessionManaged() {
 						sessionManagedCalls.Add(1)
 					}
@@ -755,6 +855,9 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 			) error {
 				if test.wantPath == "remote-tui" {
 					pathCalls.Add(1)
+					if !options.Verbose {
+						t.Fatal("--verbose did not reach remote TUI options")
+					}
 					if options.LaunchHooks.SessionManaged() {
 						sessionManagedCalls.Add(1)
 					}
@@ -766,6 +869,9 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 			) error {
 				if test.wantPath == "local-headless" {
 					pathCalls.Add(1)
+					if !options.Verbose {
+						t.Fatal("--verbose did not reach local headless options")
+					}
 					if options.LaunchHooks.SessionManaged() {
 						sessionManagedCalls.Add(1)
 					}
@@ -775,6 +881,9 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 			startReplayLocalTUI = func(_ string, _ string, _ scenario.Params, options tui.RunOptions) error {
 				if test.wantPath == "local-tui" {
 					pathCalls.Add(1)
+					if !options.Verbose {
+						t.Fatal("--verbose did not reach local TUI options")
+					}
 					if options.LaunchHooks.SessionManaged() {
 						sessionManagedCalls.Add(1)
 					}
@@ -787,7 +896,7 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 			cmd.SetErr(io.Discard)
 			args := []string{
 				"--from", server.URL, "--endpoints", "http://s3.example",
-				"--test-hosts", test.hosts, "--results-dir", t.TempDir(),
+				"--test-hosts", test.hosts, "--results-dir", t.TempDir(), "--verbose",
 			}
 			if test.headless {
 				args = append(args, "--headless")

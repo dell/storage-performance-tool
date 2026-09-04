@@ -27,7 +27,7 @@ const (
 	fileStatusOK      = "ok"
 )
 
-var integrityNodeSourcePattern = regexp.MustCompile(`^(written|verify-input|verified|integrity\.failures|integrity\.performance|multipart\.lifecycle)\.node-[0-9]{3}\.csv$`)
+var integrityNodeSourcePattern = regexp.MustCompile(`^(written|verify-input|verified|integrity\.failures|integrity\.performance|multipart\.lifecycle|delete\.metrics\.total|delete\.requests|delete\.objects|delete\.verification|items)\.node-[0-9]{3}\.csv$`)
 
 // ArtifactSpec defines a log endpoint and its output filename suffix.
 type ArtifactSpec struct {
@@ -48,10 +48,15 @@ var DefaultArtifacts = []ArtifactSpec{
 	{Loggers: []string{"Scenario"}, Suffix: constants.ResultsArtifactSuffixScenario, Required: false},
 	{Loggers: []string{"metrics.threshold.FileTotal"}, Suffix: constants.ResultsArtifactSuffixMetricsThreshold, Required: false},
 	{Loggers: []string{"OpTraces"}, Suffix: constants.ResultsArtifactSuffixOpTrace, Required: false},
+	{Loggers: []string{"DeleteMetricsTotal"}, Suffix: constants.ResultsArtifactSuffixDeleteMetricsTotal, Required: false},
+	{Loggers: []string{"DeleteRequests"}, Suffix: constants.ResultsArtifactSuffixDeleteRequests, Required: false},
+	{Loggers: []string{"DeleteObjects"}, Suffix: constants.ResultsArtifactSuffixDeleteObjects, Required: false},
+	{Loggers: []string{"DeleteVerification"}, Suffix: constants.ResultsArtifactSuffixDeleteVerification, Required: false},
+	{Loggers: []string{"DeleteCompletion"}, Suffix: constants.ResultsArtifactSuffixDeleteCompletion, Required: false},
 	{Loggers: []string{"written.csv"}, Suffix: constants.ResultsArtifactSuffixWritten, Required: false},
 	{Loggers: []string{"written.complete.json"}, Suffix: constants.ResultsArtifactSuffixWrittenCompletion, Required: false},
-	{Loggers: []string{"verify-input.csv"}, Suffix: constants.ResultsArtifactSuffixVerifyInput, Required: false},
-	{Loggers: []string{"verify-input.complete.json"}, Suffix: constants.ResultsArtifactSuffixVerifyInputCompletion, Required: false},
+	{Loggers: []string{"DeleteSelection", "verify-input.csv"}, Suffix: constants.ResultsArtifactSuffixVerifyInput, Required: false},
+	{Loggers: []string{"DeleteSelectionCompletion", "verify-input.complete.json"}, Suffix: constants.ResultsArtifactSuffixVerifyInputCompletion, Required: false},
 	{Loggers: []string{"verified.csv"}, Suffix: constants.ResultsArtifactSuffixVerified, Required: false},
 	{Loggers: []string{"verified.complete.json"}, Suffix: constants.ResultsArtifactSuffixVerifiedCompletion, Required: false},
 	{Loggers: []string{"IntegrityFailures"}, Suffix: constants.ResultsArtifactSuffixIntegrityFailures, Required: false},
@@ -61,8 +66,8 @@ var DefaultArtifacts = []ArtifactSpec{
 	{Loggers: []string{"PartsUpload", "Parts.Upload", "parts.upload.csv"}, Suffix: constants.ResultsArtifactSuffixMultipart, Required: false},
 	// S3 Tables metrics (only present on s3-tables runs)
 	{Loggers: []string{"TablesMetrics"}, Suffix: constants.ResultsArtifactSuffixTablesMetrics, Required: false},
-	// Items CSV (only present when --save-items is used on write workloads)
-	{Loggers: []string{"items.csv"}, Suffix: constants.ResultsArtifactSuffixItems, Required: false},
+	// Created-object inventory for writes, or the conservative residual for standalone DELETE.
+	{Loggers: []string{"DeleteResidual", "items.csv"}, Suffix: constants.ResultsArtifactSuffixItems, Required: false},
 	// PUT-created CSV (only present on mixed workloads; exact remaining-set generation is deferred)
 	{Loggers: []string{"put-remaining.csv"}, Suffix: constants.ResultsArtifactSuffixPutRemaining, Required: false},
 	// Ext results XML (Mongoose 3.6 compatible result.xml)
@@ -179,13 +184,7 @@ func (f *Fetcher) FetchArtifactsForSteps(ctx context.Context, stepIDs []string) 
 	for _, stepID := range stepIDs {
 		sm := f.fetchStep(ctx, stepID)
 		man.Steps = append(man.Steps, sm)
-		// Consider success if required metrics.total.csv present
-		for _, fs := range sm.Files {
-			if strings.HasSuffix(fs.Name, ".metrics.total.csv") && fs.Status == "ok" {
-				haveAnyTotals = true
-				break
-			}
-		}
+		haveAnyTotals = haveAnyTotals || hasSuccessfulGenericTotals(sm)
 	}
 
 	// Write manifest to disk
@@ -197,6 +196,16 @@ func (f *Fetcher) FetchArtifactsForSteps(ctx context.Context, stepIDs []string) 
 		return man, fmt.Errorf("failed to retrieve required metrics.total.csv for all steps")
 	}
 	return man, nil
+}
+
+func hasSuccessfulGenericTotals(sm StepManifest) bool {
+	expected := sm.StepID + "." + constants.ResultsArtifactSuffixMetricsTotal
+	for _, file := range sm.Files {
+		if file.Name == expected && file.Status == fileStatusOK {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *Fetcher) writeManifest(m *Manifest) error {

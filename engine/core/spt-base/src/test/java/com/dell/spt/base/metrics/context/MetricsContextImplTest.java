@@ -4,13 +4,18 @@ import com.github.akurilov.commons.system.SizeInBytes;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshotImpl;
+import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.List;
 
 import static com.dell.spt.base.metrics.MetricsConstants.*;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class MetricsContextImplTest {
 
@@ -200,6 +205,42 @@ class MetricsContextImplTest {
 		assertEquals(3, ctx.lastSnapshot().durationSnapshot().count());
 		assertEquals(3, ctx.lastSnapshot().latencySnapshot().count());
 		assertEquals(2, ctx.lastSnapshot().ttfbSnapshot().count());
+	}
+
+	@Test
+	void distributedSnapshotAppliesControllerOwnedFailureBudgetOutcome() {
+		final AllMetricsSnapshot node = mock(AllMetricsSnapshot.class);
+		when(node.deleteMetrics()).thenReturn(DeleteMetricsSnapshot.builder(1)
+						.failureOutcome(DELETE_FAILURE_OUTCOME_RUNNING)
+						.build());
+		final DistributedMetricsContext<?> distributed = DistributedMetricsContextImpl.builder()
+						.loadStepId("delete-outcome")
+						.runId(1L)
+						.opType(OpType.DELETE)
+						.nodeCountSupplier(() -> 1)
+						.concurrencyLimit(1)
+						.concurrencyThreshold(0)
+						.itemDataSize(new SizeInBytes(0))
+						.outputPeriodSec(1)
+						.stdOutColorFlag(false)
+						.avgPersistFlag(false)
+						.sumPersistFlag(false)
+						.timingPersistFlag(false)
+						.snapshotsSupplier(() -> List.of(node))
+						.quantileValues(List.of(0.5))
+						.nodeAddrs(List.of())
+						.contributorIds(List.of("local"))
+						.deleteDetailsExpected(true)
+						.build();
+		distributed.metadata().put(
+						METADATA_DELETE_FAILURE_OUTCOME, DELETE_FAILURE_OUTCOME_COMPLETED_WITHIN_BUDGET);
+		distributed.start();
+
+		distributed.refreshLastSnapshot(true);
+
+		assertEquals(
+						DELETE_FAILURE_OUTCOME_COMPLETED_WITHIN_BUDGET,
+						distributed.lastSnapshot().deleteMetrics().failureOutcome());
 	}
 
 	/**

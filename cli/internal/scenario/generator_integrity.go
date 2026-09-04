@@ -3,6 +3,7 @@ package scenario
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 )
@@ -128,6 +129,247 @@ func GenerateReadVerifyScenario(params Params) (string, error) {
 		ItemsFile:       params.ItemsFile,
 		IncludeVersions: versions == VersionsAll,
 	})
+}
+
+// GenerateDeleteScenario renders the public count- and duration-based DELETE workload.
+func GenerateDeleteScenario(params Params) (string, error) {
+	if params.RunID <= 0 {
+		return "", fmt.Errorf("delete requires a positive run id")
+	}
+	if params.DeleteBatchSize < MinDeleteBatchSize || params.DeleteBatchSize > MaxDeleteBatchSize {
+		return "", fmt.Errorf("delete batch size must be between %d and %d",
+			MinDeleteBatchSize, MaxDeleteBatchSize)
+	}
+	if params.Threads <= 0 {
+		return "", fmt.Errorf("delete threads must be positive")
+	}
+	failureBudget, err := resolveDeleteFailureBudget(params)
+	if err != nil {
+		return "", err
+	}
+	verification, err := resolveDeleteVerification(params)
+	if err != nil {
+		return "", err
+	}
+	duration := strings.TrimSpace(params.Duration)
+	if duration != "" && params.ObjectCount != 0 {
+		return "", fmt.Errorf("delete object count and duration are mutually exclusive")
+	}
+	selectionOrder := params.SelectionOrder
+	if selectionOrder == "" {
+		selectionOrder = SelectionOrderCanonical
+	}
+	if selectionOrder != SelectionOrderCanonical {
+		return "", fmt.Errorf("delete selection order must be %q", SelectionOrderCanonical)
+	}
+	if params.DeleteExisting && strings.TrimSpace(params.ItemsFile) != "" {
+		return "", fmt.Errorf("delete existing-prefix and explicit-manifest sources are mutually exclusive")
+	}
+	if params.DeleteExisting {
+		return generateExistingPrefixDeleteScenario(params, selectionOrder, failureBudget, verification)
+	}
+	if strings.TrimSpace(params.ItemsFile) == "" {
+		return generateSeededDeleteScenario(params, selectionOrder, failureBudget, verification)
+	}
+	if params.Cleanup {
+		return "", fmt.Errorf("delete explicit-manifest mode cannot use cleanup because SPT did not create the selected objects")
+	}
+	return executeIntegrityScenario("delete-manifest", deleteManifestScenarioData{
+		DeleteStep: formatStepID(1, resolveTimestamp(params), stepOpDelete),
+		DeleteStorage: integrityStorageTemplateData{
+			Driver:      resolveStorageDriverType(params.S3Driver),
+			Concurrency: params.Threads,
+			Integrity: integrityTemplateData{
+				Provenance:         constants.IntegrityProvenanceCLIStager,
+				ExpectedProducerID: constants.IntegrityCLIStagerProducerID,
+			},
+		},
+		ItemsFile:      params.ItemsFile,
+		BatchSize:      params.DeleteBatchSize,
+		SelectionOrder: selectionOrder,
+		Duration:       duration,
+		FailureBudget:  failureBudget,
+		Verification:   verification,
+	})
+}
+
+func generateExistingPrefixDeleteScenario(
+	params Params,
+	selectionOrder string,
+	failureBudget deleteFailureBudgetTemplateData,
+	verification deleteVerificationTemplateData,
+) (string, error) {
+	if params.Cleanup {
+		return "", fmt.Errorf("delete existing-prefix mode cannot use cleanup because SPT did not create the selected objects")
+	}
+	bucket := strings.TrimSpace(params.Bucket)
+	if bucket == "" {
+		return "", fmt.Errorf("delete existing-prefix mode requires a bucket")
+	}
+	if params.Prefix == "" && !params.AllowEmptyPrefix {
+		return "", fmt.Errorf("delete existing-prefix mode requires a nonempty prefix unless allow-empty-prefix is explicitly enabled")
+	}
+	if strings.HasPrefix(params.Prefix, "/") {
+		return "", fmt.Errorf("delete existing-prefix prefix must not start with '/' because S3 LIST removes that slash")
+	}
+	versions := params.Versions
+	if versions == "" {
+		versions = VersionsCurrent
+	}
+	if versions != VersionsCurrent {
+		return "", fmt.Errorf("delete existing-prefix mode supports current-key discovery only")
+	}
+	if params.ObjectCount < 0 {
+		return "", fmt.Errorf("delete object count must be non-negative")
+	}
+
+	ts := resolveTimestamp(params)
+	listStep := formatStepID(1, ts, stepOpList)
+	driver := resolveStorageDriverType(params.S3Driver)
+	selectionMaxCount := params.ObjectCount
+	return executeIntegrityScenario("delete-existing", deleteExistingScenarioData{
+		ListStep:   listStep,
+		DeleteStep: formatStepID(2, ts, stepOpDelete),
+		ListStorage: integrityStorageTemplateData{
+			Driver: driver, Concurrency: params.Threads,
+			Integrity: integrityTemplateData{
+				Provenance:      constants.IntegrityProvenanceNone,
+				MaxCount:        &selectionMaxCount,
+				RequireNonEmpty: true,
+			},
+		},
+		DeleteStorage: integrityStorageTemplateData{
+			Driver: driver, Concurrency: params.Threads,
+			Integrity: integrityTemplateData{
+				Provenance:         constants.IntegrityProvenanceEngineStep,
+				ExpectedProducerID: listStep,
+			},
+		},
+		BucketPath:     "/" + strings.TrimPrefix(bucket, "/"),
+		Prefix:         params.Prefix,
+		ListBatchSize:  defaultListBatchSize,
+		BatchSize:      params.DeleteBatchSize,
+		SelectionOrder: selectionOrder,
+		Duration:       strings.TrimSpace(params.Duration),
+		FailureBudget:  failureBudget,
+		Verification:   verification,
+	})
+}
+
+func generateSeededDeleteScenario(
+	params Params,
+	selectionOrder string,
+	failureBudget deleteFailureBudgetTemplateData,
+	verification deleteVerificationTemplateData,
+) (string, error) {
+	if strings.TrimSpace(params.Bucket) == "" {
+		return "", fmt.Errorf("delete seeded mode requires a bucket")
+	}
+	if params.ObjectCount < 0 {
+		return "", fmt.Errorf("delete object count must be non-negative")
+	}
+	duration := strings.TrimSpace(params.Duration)
+	seedCount := params.ObjectCount
+	if duration != "" {
+		seedCount = params.SeedCount
+		if seedCount < 0 {
+			return "", fmt.Errorf("delete seed object count must be positive for duration mode")
+		}
+	}
+	if seedCount == 0 {
+		seedCount = constants.DefaultSeedObjectCount
+	}
+	objectSize := strings.TrimSpace(params.ObjectSize)
+	if objectSize == "" {
+		objectSize = DefaultDeleteObjectSize
+	}
+	ts := resolveTimestamp(params)
+	seedStep := formatStepID(1, ts, stepOpSeed)
+	deleteStep := formatStepID(2, ts, stepOpDelete)
+	driver := resolveStorageDriverType(params.S3Driver)
+	return executeIntegrityScenario("delete-seeded", deleteSeededScenarioData{
+		SeedStep:    seedStep,
+		DeleteStep:  deleteStep,
+		CleanupStep: formatStepID(3, ts, stepOpCleanup),
+		SeedStorage: integrityStorageTemplateData{
+			Driver: driver, Concurrency: params.Threads,
+			Integrity: integrityTemplateData{
+				Provenance:              constants.IntegrityProvenanceNone,
+				RequireExactOutputCount: true,
+			},
+		},
+		DeleteStorage: integrityStorageTemplateData{
+			Driver: driver, Concurrency: params.Threads,
+			Integrity: integrityTemplateData{
+				Provenance:         constants.IntegrityProvenanceEngineStep,
+				ExpectedProducerID: seedStep,
+			},
+		},
+		CleanupStorage: deleteCleanupStorageTemplateData{
+			Driver: driver, Concurrency: params.Threads,
+		},
+		BucketPath:     "/" + strings.TrimPrefix(strings.TrimSpace(params.Bucket), "/"),
+		ObjectSize:     objectSize,
+		Namespace:      deleteSeedNamespace(params.Prefix, params.RunID),
+		SeedCount:      seedCount,
+		BatchSize:      params.DeleteBatchSize,
+		SelectionOrder: selectionOrder,
+		Duration:       duration,
+		FailureBudget:  failureBudget,
+		Verification:   verification,
+		Cleanup:        params.Cleanup,
+	})
+}
+
+func resolveDeleteVerification(params Params) (deleteVerificationTemplateData, error) {
+	timeout := params.VerificationTimeout
+	if timeout == 0 {
+		timeout = DefaultDeleteVerificationTimeout
+	}
+	if timeout <= 0 || timeout%time.Millisecond != 0 {
+		return deleteVerificationTemplateData{}, fmt.Errorf("delete verification timeout must be a positive whole number of milliseconds")
+	}
+	postVerification := params.VerifyDelete
+	if params.ValidateDeleteInventory && !params.VerifyDeleteExplicit {
+		postVerification = true
+	}
+	return deleteVerificationTemplateData{
+		PreValidation:             params.ValidateDeleteInventory,
+		PostVerification:          postVerification,
+		VerificationTimeoutMillis: timeout.Milliseconds(),
+	}, nil
+}
+
+func resolveDeleteFailureBudget(params Params) (deleteFailureBudgetTemplateData, error) {
+	mode := params.FailureBudgetMode
+	maxFailedObjects := params.MaxFailedObjects
+	grace := params.FailureBudgetGrace
+	if grace < 0 {
+		return deleteFailureBudgetTemplateData{}, fmt.Errorf("delete failure-budget grace must be non-negative")
+	}
+	if grace%time.Second != 0 {
+		return deleteFailureBudgetTemplateData{}, fmt.Errorf("delete failure-budget grace must use whole seconds")
+	}
+	if mode == "" {
+		mode = FailureBudgetModeFixed
+		maxFailedObjects = DefaultMaxFailedObjects
+		grace = DefaultFailureBudgetGrace
+	}
+	return deleteFailureBudgetTemplateData{
+		Mode:              mode,
+		MaxFailedObjects:  maxFailedObjects,
+		MaxFailurePercent: params.MaxFailurePercent,
+		GraceSeconds:      int64(grace / time.Second),
+	}, nil
+}
+
+func deleteSeedNamespace(root string, runID int64) string {
+	root = strings.Trim(strings.TrimSpace(root), "/")
+	namespace := fmt.Sprintf("spt-delete-%d/", runID)
+	if root == "" {
+		return namespace
+	}
+	return root + "/" + namespace
 }
 
 func quoteJS(value string) string {

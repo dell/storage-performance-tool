@@ -43,10 +43,13 @@ dependencies {
 	testImplementation libs.junit.jupiter.api
 	testImplementation libs.junit.jupiter.params
 	testRuntimeOnly libs.junit.jupiter.engine
+	testImplementation libs.log4j.api
 	testImplementation libs.mockito.core
 	// Add primitives for test compilation
 	testImplementation project(':extensions:storage-drivers:primitives:coop')
 	testImplementation project(':extensions:storage-drivers:primitives:nio')
+	// The bundle merges this shared network schema for s3-aws endpoint configuration.
+	testImplementation project(':extensions:storage-drivers:primitives:netty')
 	testImplementation project(':core:spt-base')
 }
 

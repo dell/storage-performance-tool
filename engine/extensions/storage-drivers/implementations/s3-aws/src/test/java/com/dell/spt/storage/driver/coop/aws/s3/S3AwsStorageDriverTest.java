@@ -17,6 +17,8 @@ import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
+import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.item.op.list.ListedObject;
@@ -52,6 +54,8 @@ import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.core.interceptor.Context;
 import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
 import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
+import software.amazon.awssdk.core.interceptor.SdkInternalExecutionAttribute;
+import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -68,9 +72,11 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -119,9 +125,21 @@ public class S3AwsStorageDriverTest {
 		Field clientField = S3AwsStorageDriver.class.getDeclaredField("s3AsyncClient");
 		clientField.setAccessible(true);
 		clientField.set(driver, s3Client);
+		setExactVersionS3Client(driver, s3Client);
+	}
+
+	private void setExactVersionS3Client(
+					S3AwsStorageDriver<Item, Operation<Item>> driver, S3AsyncClient s3Client) throws Exception {
 		Field exactClientField = S3AwsStorageDriver.class.getDeclaredField("exactVersionS3Client");
 		exactClientField.setAccessible(true);
 		exactClientField.set(driver, s3Client);
+	}
+
+	private void setVersioningEnabled(
+					S3AwsStorageDriver<Item, Operation<Item>> driver, boolean enabled) throws Exception {
+		Field versioningField = S3AwsStorageDriver.class.getDeclaredField("versioningEnabled");
+		versioningField.setAccessible(true);
+		versioningField.setBoolean(driver, enabled);
 	}
 
 	private void setChecksumFields(
@@ -161,6 +179,58 @@ public class S3AwsStorageDriverTest {
 		mockS3Client = mock(S3AsyncClient.class);
 		setS3Client(drv, mockS3Client);
 		setBucketName(drv, "test-bucket");
+	}
+
+	@Test
+	void verificationPresenceForwardsWaitingThreadInterruption() throws Exception {
+		final CountDownLatch requestStarted = new CountDownLatch(1);
+		final CompletableFuture<HeadObjectResponse> pending = new CompletableFuture<>();
+		when(mockS3Client.headObject(any(HeadObjectRequest.class))).thenAnswer(ignored -> {
+			requestStarted.countDown();
+			return pending;
+		});
+		final AtomicReference<Throwable> failure = new AtomicReference<>();
+		final AtomicBoolean interruptedStatus = new AtomicBoolean();
+		final Thread worker = Thread.ofPlatform().start(() -> {
+			try {
+				drv.presence(new DeleteTarget(
+								new IntegrityManifestDataItem("bucket", "key", 1, null), 0));
+			} catch (final Throwable thrown) {
+				failure.set(thrown);
+				interruptedStatus.set(Thread.currentThread().isInterrupted());
+			}
+		});
+		try {
+			assertTrue(requestStarted.await(5, TimeUnit.SECONDS), "verification HEAD never started");
+			worker.interrupt();
+			worker.join(TimeUnit.SECONDS.toMillis(5));
+			assertFalse(worker.isAlive(), "interrupted verification HEAD did not terminate");
+			assertTrue(failure.get() instanceof InterruptedException,
+							() -> "expected interruption, got " + failure.get());
+			assertTrue(interruptedStatus.get(), "verification HEAD cleared the interrupt status");
+		} finally {
+			pending.complete(HeadObjectResponse.builder().build());
+			worker.interrupt();
+			worker.join(TimeUnit.SECONDS.toMillis(5));
+		}
+	}
+
+	@Test
+	void verificationPresenceForwardsAsyncInterruption() {
+		final InterruptedException expected = new InterruptedException("external verification interrupt");
+		final CompletableFuture<HeadObjectResponse> interrupted = new CompletableFuture<>();
+		interrupted.completeExceptionally(expected);
+		when(mockS3Client.headObject(any(HeadObjectRequest.class))).thenReturn(interrupted);
+		try {
+			final InterruptedException actual = assertThrows(
+							InterruptedException.class,
+							() -> drv.presence(new DeleteTarget(
+											new IntegrityManifestDataItem("bucket", "key", 1, null), 0)));
+			assertSame(expected, actual);
+			assertTrue(Thread.currentThread().isInterrupted());
+		} finally {
+			Thread.interrupted();
+		}
 	}
 
 	@Nested
@@ -263,6 +333,54 @@ public class S3AwsStorageDriverTest {
 			assertNotNull(op.integrityVerificationResult());
 			assertTrue(op.integrityVerificationResult().verified());
 			assertEquals(Operation.Status.SUCC, op.status());
+		}
+
+		@Test
+		@SuppressWarnings("unchecked")
+		void deleteUsesStructuredKeyAndRequestedVersionWithoutParsingLiteralTilde() throws Exception {
+			enableIntegrityMetadata(drv);
+			final S3AsyncClient exactVersionS3Client = mock(S3AsyncClient.class);
+			setExactVersionS3Client(drv, exactVersionS3Client);
+			when(exactVersionS3Client.deleteObject(any(DeleteObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(DeleteObjectResponse.builder().build()));
+
+			final IntegrityManifestDataItem item = new IntegrityManifestDataItem(
+							"bucket", "folder/key~literal", 0, "requested-version");
+			final DataOperationImpl<IntegrityManifestDataItem> op = new DataOperationImpl<>(
+							0, OpType.DELETE, item, null, "/bucket", TEST_CRED, null, 0);
+
+			drv.execute((Operation<Item>) (Operation<?>) op).join();
+
+			final ArgumentCaptor<DeleteObjectRequest> request = ArgumentCaptor.forClass(DeleteObjectRequest.class);
+			verify(exactVersionS3Client).deleteObject(request.capture());
+			verify(mockS3Client, never()).deleteObject(any(DeleteObjectRequest.class));
+			assertEquals("folder/key~literal", request.getValue().key());
+			assertEquals("requested-version", request.getValue().versionId());
+		}
+
+		@Test
+		@SuppressWarnings("unchecked")
+		void headUsesStructuredKeyAndRequestedVersionWithoutParsingLiteralTilde() throws Exception {
+			enableIntegrityMetadata(drv);
+			final S3AsyncClient exactVersionS3Client = mock(S3AsyncClient.class);
+			setExactVersionS3Client(drv, exactVersionS3Client);
+			when(mockS3Client.headObject(any(HeadObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(HeadObjectResponse.builder().build()));
+			when(exactVersionS3Client.headObject(any(HeadObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(HeadObjectResponse.builder().build()));
+
+			final IntegrityManifestDataItem item = new IntegrityManifestDataItem(
+							"bucket", "folder/key~literal", 0, "requested-version");
+			final DataOperationImpl<IntegrityManifestDataItem> op = new DataOperationImpl<>(
+							0, OpType.STAT, item, null, "/bucket", TEST_CRED, null, 0);
+
+			drv.execute((Operation<Item>) (Operation<?>) op).join();
+
+			final ArgumentCaptor<HeadObjectRequest> request = ArgumentCaptor.forClass(HeadObjectRequest.class);
+			verify(exactVersionS3Client).headObject(request.capture());
+			verify(mockS3Client, never()).headObject(any(HeadObjectRequest.class));
+			assertEquals("folder/key~literal", request.getValue().key());
+			assertEquals("requested-version", request.getValue().versionId());
 		}
 
 		@Test
@@ -980,6 +1098,30 @@ public class S3AwsStorageDriverTest {
 			assertEquals("mybucket", cap.getValue().bucket());
 			assertEquals("mykey.dat", cap.getValue().key());
 		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void legacyItemsCarrierTargetsExactVersionInsteadOfMissingLiteralKey() throws Exception {
+			setVersioningEnabled(drv, true);
+			final S3AsyncClient exactVersionS3Client = mock(S3AsyncClient.class);
+			setExactVersionS3Client(drv, exactVersionS3Client);
+			when(mockS3Client.deleteObject(any(DeleteObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(DeleteObjectResponse.builder().build()));
+			when(exactVersionS3Client.deleteObject(any(DeleteObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(DeleteObjectResponse.builder().build()));
+			final DataItem item = new DataItemImpl("cross-driver-key~version-42", 0, 0);
+			final DataOperationImpl<DataItem> op = new DataOperationImpl<>(
+							0, OpType.DELETE, item, null, "/items-bucket", TEST_CRED, null, 0);
+
+			drv.execute((Operation<Item>) (Operation<?>) op).join();
+
+			final ArgumentCaptor<DeleteObjectRequest> request = ArgumentCaptor.forClass(DeleteObjectRequest.class);
+			verify(exactVersionS3Client).deleteObject(request.capture());
+			verify(mockS3Client, never()).deleteObject(any(DeleteObjectRequest.class));
+			assertEquals("items-bucket", request.getValue().bucket());
+			assertEquals("cross-driver-key", request.getValue().key());
+			assertEquals("version-42", request.getValue().versionId());
+		}
 	}
 
 	// -----------------------------------------------------------------------
@@ -1044,6 +1186,30 @@ public class S3AwsStorageDriverTest {
 			assertEquals("bucket", cap.getValue().bucket());
 			assertEquals("prefix/mykey", cap.getValue().key());
 		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void legacyItemsCarrierTargetsTheSameExactVersionAsDelete() throws Exception {
+			setVersioningEnabled(drv, true);
+			final S3AsyncClient exactVersionS3Client = mock(S3AsyncClient.class);
+			setExactVersionS3Client(drv, exactVersionS3Client);
+			when(mockS3Client.headObject(any(HeadObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(HeadObjectResponse.builder().build()));
+			when(exactVersionS3Client.headObject(any(HeadObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(HeadObjectResponse.builder().build()));
+			final DataItem item = new DataItemImpl("cross-driver-key~version-42", 0, 0);
+			final DataOperationImpl<DataItem> op = new DataOperationImpl<>(
+							0, OpType.STAT, item, null, "/items-bucket", TEST_CRED, null, 0);
+
+			drv.execute((Operation<Item>) (Operation<?>) op).join();
+
+			final ArgumentCaptor<HeadObjectRequest> request = ArgumentCaptor.forClass(HeadObjectRequest.class);
+			verify(exactVersionS3Client).headObject(request.capture());
+			verify(mockS3Client, never()).headObject(any(HeadObjectRequest.class));
+			assertEquals("items-bucket", request.getValue().bucket());
+			assertEquals("cross-driver-key", request.getValue().key());
+			assertEquals("version-42", request.getValue().versionId());
+		}
 	}
 
 	// -----------------------------------------------------------------------
@@ -1062,6 +1228,29 @@ public class S3AwsStorageDriverTest {
 			drv.execute(op).join();
 
 			verifyNoInteractions(mockS3Client);
+		}
+	}
+
+	@Nested
+	class DeleteTimingInterceptorTest {
+
+		@Test
+		void interceptorCarriesDeleteOperationToHttpTransportWithoutMarkingTiming() {
+			final DeleteRequestOperation op = S3AwsDeleteRequestTestFixture.operation(
+							S3AwsDeleteRequestTestFixture.target("key", null));
+			op.startRequest();
+			op.finishRequest();
+			final ExecutionAttributes attrs = new ExecutionAttributes()
+							.putAttribute(S3AwsStorageDriver.DELETE_TIMING_OPERATION_ATTRIBUTE, op);
+			final var interceptor = new S3AwsStorageDriver.DeleteTimingExecutionInterceptor();
+
+			interceptor.beforeTransmission(mock(Context.BeforeTransmission.class), attrs);
+			assertEquals(0, op.requestFirstByteTime());
+			assertEquals(0, op.responseFirstByteTime());
+			assertSame(
+							op,
+							attrs.getAttribute(SdkInternalExecutionAttribute.SDK_HTTP_EXECUTION_ATTRIBUTES)
+											.getAttribute(DeleteTimingAsyncHttpClient.DELETE_OPERATION));
 		}
 	}
 
@@ -2695,10 +2884,136 @@ public class S3AwsStorageDriverTest {
 			assertEquals("my-key", request.key());
 		}
 
-		private void setVersioningEnabled(S3AwsStorageDriver<Item, Operation<Item>> driver, boolean enabled) throws Exception {
-			Field versioningField = S3AwsStorageDriver.class.getDeclaredField("versioningEnabled");
-			versioningField.setAccessible(true);
-			versioningField.setBoolean(driver, enabled);
+		@SuppressWarnings("unchecked")
+		@Test
+		void currentKeyDeleteAndHeadRemainUnversionedWhenVersioningIsEnabled() throws Exception {
+			setVersioningEnabled(drv, true);
+			final S3AsyncClient exactVersionS3Client = mock(S3AsyncClient.class);
+			setExactVersionS3Client(drv, exactVersionS3Client);
+			when(mockS3Client.deleteObject(any(DeleteObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(DeleteObjectResponse.builder().build()));
+			when(mockS3Client.headObject(any(HeadObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(HeadObjectResponse.builder().build()));
+			final DataItem deleteItem = new DataItemImpl("current-delete-key", 0, 0);
+			final DataItem headItem = new DataItemImpl("current-head-key", 0, 0);
+
+			drv.execute((Operation<Item>) (Operation<?>) new DataOperationImpl<>(
+							0, OpType.DELETE, deleteItem, null, "/bucket", TEST_CRED, null, 0)).join();
+			drv.execute((Operation<Item>) (Operation<?>) new DataOperationImpl<>(
+							0, OpType.STAT, headItem, null, "/bucket", TEST_CRED, null, 0)).join();
+
+			final ArgumentCaptor<DeleteObjectRequest> deleteRequest = ArgumentCaptor.forClass(DeleteObjectRequest.class);
+			final ArgumentCaptor<HeadObjectRequest> headRequest = ArgumentCaptor.forClass(HeadObjectRequest.class);
+			verify(mockS3Client).deleteObject(deleteRequest.capture());
+			verify(mockS3Client).headObject(headRequest.capture());
+			verifyNoInteractions(exactVersionS3Client);
+			assertEquals("current-delete-key", deleteRequest.getValue().key());
+			assertNull(deleteRequest.getValue().versionId());
+			assertEquals("current-head-key", headRequest.getValue().key());
+			assertNull(headRequest.getValue().versionId());
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void literalTildeKeysRemainLiteralWhenVersioningIsDisabled() throws Exception {
+			setVersioningEnabled(drv, false);
+			when(mockS3Client.deleteObject(any(DeleteObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(DeleteObjectResponse.builder().build()));
+			when(mockS3Client.headObject(any(HeadObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(HeadObjectResponse.builder().build()));
+			final DataItem deleteItem = new DataItemImpl("literal-delete~suffix", 0, 0);
+			final DataItem headItem = new DataItemImpl("literal-head~suffix", 0, 0);
+
+			drv.execute((Operation<Item>) (Operation<?>) new DataOperationImpl<>(
+							0, OpType.DELETE, deleteItem, null, "/bucket", TEST_CRED, null, 0)).join();
+			drv.execute((Operation<Item>) (Operation<?>) new DataOperationImpl<>(
+							0, OpType.STAT, headItem, null, "/bucket", TEST_CRED, null, 0)).join();
+
+			final ArgumentCaptor<DeleteObjectRequest> deleteRequest = ArgumentCaptor.forClass(DeleteObjectRequest.class);
+			final ArgumentCaptor<HeadObjectRequest> headRequest = ArgumentCaptor.forClass(HeadObjectRequest.class);
+			verify(mockS3Client).deleteObject(deleteRequest.capture());
+			verify(mockS3Client).headObject(headRequest.capture());
+			assertEquals("literal-delete~suffix", deleteRequest.getValue().key());
+			assertNull(deleteRequest.getValue().versionId());
+			assertEquals("literal-head~suffix", headRequest.getValue().key());
+			assertNull(headRequest.getValue().versionId());
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void structuredCurrentKeyWithTildeRemainsLiteralWhenVersioningIsEnabled() throws Exception {
+			setVersioningEnabled(drv, true);
+			final S3AsyncClient exactVersionS3Client = mock(S3AsyncClient.class);
+			setExactVersionS3Client(drv, exactVersionS3Client);
+			when(mockS3Client.deleteObject(any(DeleteObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(DeleteObjectResponse.builder().build()));
+			when(mockS3Client.headObject(any(HeadObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(HeadObjectResponse.builder().build()));
+			final IntegrityManifestDataItem deleteItem = new IntegrityManifestDataItem(
+							"bucket", "literal-delete~suffix", 0, null);
+			final IntegrityManifestDataItem headItem = new IntegrityManifestDataItem(
+							"bucket", "literal-head~suffix", 0, null);
+
+			drv.execute((Operation<Item>) (Operation<?>) new DataOperationImpl<>(
+							0, OpType.DELETE, deleteItem, null, "/bucket", TEST_CRED, null, 0)).join();
+			drv.execute((Operation<Item>) (Operation<?>) new DataOperationImpl<>(
+							0, OpType.STAT, headItem, null, "/bucket", TEST_CRED, null, 0)).join();
+
+			final ArgumentCaptor<DeleteObjectRequest> deleteRequest = ArgumentCaptor.forClass(DeleteObjectRequest.class);
+			final ArgumentCaptor<HeadObjectRequest> headRequest = ArgumentCaptor.forClass(HeadObjectRequest.class);
+			verify(mockS3Client).deleteObject(deleteRequest.capture());
+			verify(mockS3Client).headObject(headRequest.capture());
+			verifyNoInteractions(exactVersionS3Client);
+			assertEquals("literal-delete~suffix", deleteRequest.getValue().key());
+			assertNull(deleteRequest.getValue().versionId());
+			assertEquals("literal-head~suffix", headRequest.getValue().key());
+			assertNull(headRequest.getValue().versionId());
+		}
+
+		@Test
+		void emptyRequestedVersionsKeepExtensionOperationsOnCurrentKeys() throws Exception {
+			setVersioningEnabled(drv, true);
+			final S3AsyncClient exactVersionS3Client = mock(S3AsyncClient.class);
+			setExactVersionS3Client(drv, exactVersionS3Client);
+			when(mockS3Client.getObject(
+							any(GetObjectRequest.class), any(AsyncResponseTransformer.class)))
+							.thenReturn(CompletableFuture.completedFuture(new ResponseInputStream<>(
+											GetObjectResponse.builder().build(), new ByteArrayInputStream(new byte[0]))));
+			when(mockS3Client.deleteObject(any(DeleteObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(DeleteObjectResponse.builder().build()));
+			when(mockS3Client.headObject(any(HeadObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(HeadObjectResponse.builder().build()));
+			final Operation<Item> read = extensionOperation(OpType.READ, "current-read", "");
+			final Operation<Item> delete = extensionOperation(OpType.DELETE, "current-delete", "");
+			final Operation<Item> head = extensionOperation(OpType.STAT, "current-head", "");
+
+			drv.execute(read).join();
+			drv.execute(delete).join();
+			drv.execute(head).join();
+
+			final ArgumentCaptor<GetObjectRequest> readRequest = ArgumentCaptor.forClass(GetObjectRequest.class);
+			final ArgumentCaptor<DeleteObjectRequest> deleteRequest = ArgumentCaptor.forClass(DeleteObjectRequest.class);
+			final ArgumentCaptor<HeadObjectRequest> headRequest = ArgumentCaptor.forClass(HeadObjectRequest.class);
+			verify(mockS3Client).getObject(readRequest.capture(), any(AsyncResponseTransformer.class));
+			verify(mockS3Client).deleteObject(deleteRequest.capture());
+			verify(mockS3Client).headObject(headRequest.capture());
+			verifyNoInteractions(exactVersionS3Client);
+			assertNull(readRequest.getValue().versionId());
+			assertNull(deleteRequest.getValue().versionId());
+			assertNull(headRequest.getValue().versionId());
+		}
+
+		@SuppressWarnings("unchecked")
+		private Operation<Item> extensionOperation(
+						final OpType opType, final String key, final String requestedVersionId) {
+			final Operation<Item> operation = mock(Operation.class);
+			final Item item = mock(Item.class);
+			when(operation.type()).thenReturn(opType);
+			when(operation.dstPath()).thenReturn("/bucket");
+			when(operation.item()).thenReturn(item);
+			when(operation.requestedVersionId()).thenReturn(requestedVersionId);
+			when(item.name()).thenReturn(key);
+			return operation;
 		}
 	}
 
@@ -3108,6 +3423,89 @@ public class S3AwsStorageDriverTest {
 
 			verify(primaryClient).close();
 			verifyNoInteractions(exactVersionClientSupplier);
+		}
+
+		@Test
+		void exactVersionClientCreatedWhileCloseRunsIsStillClosed() throws Exception {
+			final S3AsyncClient primaryClient = mock(S3AsyncClient.class);
+			final S3AsyncClient exactVersionClient = mock(S3AsyncClient.class);
+			final S3AsyncClient standaloneDeleteClient = mock(S3AsyncClient.class);
+			final SdkAsyncHttpClient standaloneDeleteHttpClient = mock(SdkAsyncHttpClient.class);
+			when(exactVersionClient.headObject(any(HeadObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(
+											HeadObjectResponse.builder().build()));
+
+			final var supplierEntered = new CountDownLatch(1);
+			final var releaseSupplier = new CountDownLatch(1);
+			final var primaryClientClosed = new CountDownLatch(1);
+			final var closeAdvancedPastExactVersionClient = new CountDownLatch(1);
+			final var releaseStandaloneDeleteClose = new CountDownLatch(1);
+			final Supplier<S3AsyncClient> exactVersionClientSupplier = () -> {
+				supplierEntered.countDown();
+				try {
+					assertTrue(releaseSupplier.await(5, TimeUnit.SECONDS));
+				} catch (final InterruptedException e) {
+					Thread.currentThread().interrupt();
+					throw new AssertionError(e);
+				}
+				return exactVersionClient;
+			};
+			doAnswer(ignored -> {
+				primaryClientClosed.countDown();
+				return null;
+			}).when(primaryClient).close();
+			doAnswer(ignored -> {
+				closeAdvancedPastExactVersionClient.countDown();
+				assertTrue(releaseStandaloneDeleteClose.await(5, TimeUnit.SECONDS));
+				return null;
+			}).when(standaloneDeleteClient).close();
+
+			final var driver = new S3AwsStorageDriver<Item, Operation<Item>>(
+							"exact-version-close-race", mock(DataInput.class), mockDriverConfig(),
+							false, 1, primaryClient, exactVersionClientSupplier,
+							standaloneDeleteClient, standaloneDeleteHttpClient,
+							100 * 1024L, 8 * 1024 * 1024L);
+			final var useFailure = new AtomicReference<Throwable>();
+			final var closeFailure = new AtomicReference<Throwable>();
+			final Thread clientUse = Thread.ofVirtual().start(() -> {
+				try {
+					driver.presence(new DeleteTarget(
+									new IntegrityManifestDataItem("bucket", "key", 1, "version-1")));
+				} catch (final Throwable thrown) {
+					useFailure.set(thrown);
+				}
+			});
+			assertTrue(supplierEntered.await(5, TimeUnit.SECONDS));
+			final Thread close = Thread.ofVirtual().start(() -> {
+				try {
+					driver.close();
+				} catch (final Throwable thrown) {
+					closeFailure.set(thrown);
+				}
+			});
+
+			try {
+				assertTrue(primaryClientClosed.await(5, TimeUnit.SECONDS));
+				// The vulnerable implementation advances to the next resource while construction
+				// is blocked; the hardened implementation waits for construction to finish.
+				final boolean closeAdvanced = closeAdvancedPastExactVersionClient.await(
+								250, TimeUnit.MILLISECONDS);
+				releaseSupplier.countDown();
+				if (!closeAdvanced) {
+					assertTrue(closeAdvancedPastExactVersionClient.await(5, TimeUnit.SECONDS));
+				}
+			} finally {
+				releaseSupplier.countDown();
+				releaseStandaloneDeleteClose.countDown();
+			}
+			clientUse.join(TimeUnit.SECONDS.toMillis(5));
+			close.join(TimeUnit.SECONDS.toMillis(5));
+
+			assertFalse(clientUse.isAlive());
+			assertFalse(close.isAlive());
+			assertNull(useFailure.get());
+			assertNull(closeFailure.get());
+			verify(exactVersionClient).close();
 		}
 
 		@Test

@@ -1,10 +1,14 @@
 package com.dell.spt.storage.driver.coop.nio;
 
 import com.dell.spt.base.data.DataInput;
+import com.dell.spt.base.concurrent.Task;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
+import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
 import com.dell.spt.storage.driver.coop.nio.mock.NioStorageDriverMock;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
@@ -15,8 +19,11 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.util.HashMap;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -25,6 +32,12 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -65,6 +78,24 @@ public class NioStorageDriverBaseTest {
 
 	private BlockingInvokeDriver newBlockingDriver(Config config) throws Exception {
 		var drv = new BlockingInvokeDriver("test-nio-blocking", dataInput, config, false, 16);
+		drv.operationResultOutput(results);
+		return drv;
+	}
+
+	private RetainedActiveDriver newRetainedActiveDriver(final Config config) throws Exception {
+		final var drv = new RetainedActiveDriver("test-nio-active", dataInput, config, false, 16);
+		drv.operationResultOutput(results);
+		return drv;
+	}
+
+	private ThrowOnceInvokeDriver newThrowOnceInvokeDriver(final Config config) throws Exception {
+		final var drv = new ThrowOnceInvokeDriver("test-nio-throw", dataInput, config, false, 16);
+		drv.operationResultOutput(results);
+		return drv;
+	}
+
+	private AlwaysThrowInvokeDriver newAlwaysThrowInvokeDriver(final Config config) throws Exception {
+		final var drv = new AlwaysThrowInvokeDriver("test-nio-always-throw", dataInput, config, false, 16);
 		drv.operationResultOutput(results);
 		return drv;
 	}
@@ -156,6 +187,287 @@ public class NioStorageDriverBaseTest {
 			drv.stop();
 		}
 		// If we get here without hanging, the test passed
+	}
+
+	@Test
+	void testDriverRestartsAfterBoundedStopWithoutRetainingQueuedWork() throws Exception {
+		try (var drv = newDriver()) {
+			drv.start();
+			assertTrue(drv.put(newCreateOp("before-restart", 256)));
+			assertNotNull(results.await(2_000));
+
+			final long stopStarted = System.nanoTime();
+			drv.stop();
+			final long stopMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - stopStarted);
+			assertTrue(stopMillis < 2_000, "stop should remain bounded but took " + stopMillis + " ms");
+			assertEquals(0, drv.operationLifecycle().snapshot().generatorBuffered());
+			assertEquals(0, drv.operationLifecycle().snapshot().driverQueued());
+			assertEquals(0, drv.operationLifecycle().snapshot().inFlight());
+
+			drv.start();
+			assertTrue(drv.put(newCreateOp("after-restart", 256)));
+			assertNotNull(results.await(2_000), "workers and dispatcher should restart cleanly");
+			assertEquals(0, drv.activeOpCount());
+			drv.stop();
+		}
+	}
+
+	@Test
+	void repeatedRestartCyclesTerminateEveryWorkerAndBoundOutstandingState() throws Exception {
+		final var config = buildStorageConfig(8, 2);
+		try (var drv = newDriver(config)) {
+			for (var cycle = 0; cycle < 5; cycle++) {
+				drv.start();
+				for (var i = 0; i < 8; i++) {
+					assertTrue(drv.put(newCreateOp("cycle-" + cycle + "-" + i, 256)));
+				}
+				for (var i = 0; i < 8; i++) {
+					assertNotNull(results.await(2_000));
+				}
+				drv.stop();
+				assertWorkerTasksTerminated(drv);
+				assertEquals(0, drv.activeOpCount());
+				assertEquals(0, drv.operationLifecycle().snapshot().generatorBuffered());
+				assertEquals(0, drv.operationLifecycle().snapshot().driverQueued());
+				assertEquals(0, drv.operationLifecycle().snapshot().inFlight());
+			}
+		}
+	}
+
+	@Test
+	void outputFailureDuringAdmissionClosureReleasesPermitOnceAndPreservesRestartBound() throws Exception {
+		final var outputEntered = new CountDownLatch(1);
+		final var releaseOutput = new CountDownLatch(1);
+		final var drv = newDriver(buildStorageConfig(1, 1));
+		drv.operationResultOutput(new Output<>() {
+			@Override
+			public boolean put(final Operation<DataItemImpl> val) {
+				outputEntered.countDown();
+				while (releaseOutput.getCount() > 0) {
+					try {
+						releaseOutput.await();
+					} catch (final InterruptedException ignored) {
+						// Keep output blocked until admission has closed.
+					}
+				}
+				throw new IllegalStateException("output failed");
+			}
+
+			@Override
+			public int put(
+							final List<Operation<DataItemImpl>> vals, final int from, final int to) {
+				return 0;
+			}
+
+			@Override
+			public int put(final List<Operation<DataItemImpl>> vals) {
+				return 0;
+			}
+
+			@Override
+			public Input<Operation<DataItemImpl>> getInput() {
+				return null;
+			}
+
+			@Override
+			public void close() {}
+		});
+		final var failed = newCreateOp("output-failure", 256);
+		try {
+			drv.start();
+			assertTrue(drv.put(failed));
+			assertTrue(outputEntered.await(2, TimeUnit.SECONDS));
+
+			drv.closeAdmission();
+			releaseOutput.countDown();
+			awaitLifecycle(
+							drv,
+							() -> failed.lifecycle().state() == OperationLifecycleState.UNRESOLVED,
+							"output failure should retain a lifecycle outcome");
+			awaitNioReservationsCleared(drv);
+			assertEquals(0, drv.activeOpCount(), "one accepted operation must release exactly one permit");
+
+			drv.stop();
+			drv.operationResultOutput(results);
+			drv.start();
+			assertTrue(drv.put(newCreateOp("after-output-failure", 256)));
+			assertNotNull(results.await(2_000));
+			assertEquals(0, drv.activeOpCount());
+		} finally {
+			releaseOutput.countDown();
+			if (drv.isStarted()) {
+				drv.stop();
+			}
+			drv.close();
+		}
+	}
+
+	@Test
+	void invokeFailureSettlesCurrentOperationAndPreservesTrailingBatchAndRestartCapacity() throws Exception {
+		final var drv = newThrowOnceInvokeDriver(buildStorageConfig(3, 1));
+		final var failed = newCreateOp("invoke-failure", 256);
+		final var trailingOne = newCreateOp("trailing-one", 256);
+		final var trailingTwo = newCreateOp("trailing-two", 256);
+		try {
+			drv.start();
+			assertEquals(3, drv.put(List.of(failed, trailingOne, trailingTwo)));
+
+			final var completed = new ArrayList<Operation<DataItemImpl>>(3);
+			completed.add(results.await(2_000));
+			completed.add(results.await(2_000));
+			completed.add(results.await(2_000));
+			assertTrue(completed.stream().allMatch(java.util.Objects::nonNull),
+							"the failing invocation and every trailing local operation must retain an owner");
+			assertEquals(1, completed.stream()
+							.filter(op -> op.status() == Operation.Status.FAIL_UNKNOWN)
+							.count());
+			assertEquals(2, completed.stream()
+							.filter(op -> op.status() == Operation.Status.SUCC)
+							.count());
+			awaitNioReservationsCleared(drv);
+			assertEquals(0, drv.activeOpCount(), "the accepted batch must release exactly three permits");
+			assertEquals(0, drv.operationLifecycle().snapshot().inFlight());
+			assertEquals(3, drv.operationLifecycle().snapshot().terminal());
+
+			drv.stop();
+			drv.start();
+			assertTrue(drv.put(newCreateOp("after-invoke-failure", 256)));
+			assertNotNull(results.await(2_000), "the restarted driver must retain full admission capacity");
+			assertEquals(0, drv.activeOpCount());
+		} finally {
+			if (drv.isStarted()) {
+				drv.stop();
+			}
+			drv.close();
+		}
+	}
+
+	@Test
+	void repeatedInvokeFailuresRetainOutcomesAndUseOneShotHighSeverityGuard() throws Exception {
+		final var drv = newAlwaysThrowInvokeDriver(buildStorageConfig(3, 1));
+		try {
+			drv.start();
+			assertEquals(3, drv.put(List.of(
+							newCreateOp("repeated-invoke-failure-1", 256),
+							newCreateOp("repeated-invoke-failure-2", 256),
+							newCreateOp("repeated-invoke-failure-3", 256))));
+			for (var i = 0; i < 3; i++) {
+				assertEquals(Operation.Status.FAIL_UNKNOWN, results.await(2_000).status());
+			}
+			final var logGuardField = NioStorageDriverBase.class.getDeclaredField("operationFailureReported");
+			logGuardField.setAccessible(true);
+			assertTrue(((AtomicBoolean) logGuardField.get(drv)).get());
+			awaitLifecycle(
+							drv,
+							() -> drv.operationLifecycle().snapshot().terminal() == 3,
+							"result publication should finish all lifecycle terminal transitions");
+			assertEquals(0, drv.activeOpCount());
+			assertEquals(3, drv.operationLifecycle().snapshot().terminal());
+		} finally {
+			if (drv.isStarted()) {
+				drv.stop();
+			}
+			drv.close();
+		}
+	}
+
+	@Test
+	void unexpectedWorkerFailureWithOpenAdmissionRecoversExactUnprocessedSuffix() throws Exception {
+		assertUnexpectedWorkerFailureRecovery(false, false);
+	}
+
+	@Test
+	void unexpectedWorkerFailureAfterAdmissionClosureDoesNotDoubleResolveProcessedPrefix() throws Exception {
+		assertUnexpectedWorkerFailureRecovery(true, false);
+	}
+
+	@Test
+	void unexpectedWorkerFailureAfterDispatchResolvesFaultAndRecoversTrailingSuffix() throws Exception {
+		assertUnexpectedWorkerFailureRecovery(false, true);
+	}
+
+	@Test
+	void openAdmissionRecoveryWakesCapacityBlockedDispatcher() throws Exception {
+		final var drv = newDriver(buildStorageConfig(1, 1));
+		final var failureEntered = new CountDownLatch(1);
+		final var releaseFailure = new CountDownLatch(1);
+		final var fault = newWorkerFailureOperation(
+						newCreateOp("capacity-signal-fault", 256), failureEntered, releaseFailure, false);
+		final var trailingOne = newCreateOp("capacity-signal-trailing-one", 256);
+		final var trailingTwo = newCreateOp("capacity-signal-trailing-two", 256);
+		try {
+			drv.start();
+			assertEquals(3, drv.put(List.of(fault, trailingOne, trailingTwo)));
+			assertTrue(failureEntered.await(2, TimeUnit.SECONDS));
+			awaitDispatchCapacityWaiter(drv);
+
+			releaseFailure.countDown();
+			final var resumedFirst = results.await(2_000);
+			assertNotNull(resumedFirst,
+							"returning the failed permit should wake already-queued work without another put; lifecycle="
+											+ drv.operationLifecycle().snapshot() + ", active=" + drv.activeOpCount());
+			assertEquals(trailingOne.item().name(), resumedFirst.item().name());
+			final var resumedSecond = results.await(2_000);
+			assertNotNull(resumedSecond);
+			assertEquals(trailingTwo.item().name(), resumedSecond.item().name());
+			awaitLifecycle(
+							drv,
+							() -> drv.operationLifecycle().snapshot().inFlight() == 0,
+							"the resumed upstream suffix should reconcile");
+			final var lifecycle = drv.operationLifecycle().snapshot();
+			assertEquals(3, drv.scheduledOpCount());
+			assertEquals(2, drv.completedOpCount());
+			assertEquals(2, lifecycle.dispatched());
+			assertEquals(2, lifecycle.terminal());
+			assertEquals(1, lifecycle.unattempted());
+			assertSame(fault, lifecycle.unattemptedOperations().get(0));
+			assertEquals(0, lifecycle.driverQueued());
+			assertEquals(0, drv.activeOpCount());
+		} finally {
+			releaseFailure.countDown();
+			if (drv.isStarted()) {
+				drv.stop();
+			}
+			drv.close();
+		}
+	}
+
+	@Test
+	void repeatedWorkerFailuresClaimHighSeverityLoggingOnlyOnce() throws Exception {
+		final var appender = new CapturingAppender();
+		appender.start();
+		final var logger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.ERR.getName());
+		final var previousLevel = logger.getLevel();
+		logger.addAppender(appender);
+		logger.setLevel(Level.DEBUG);
+		try (var drv = newDriver(buildStorageConfig(1, 1))) {
+			drv.start();
+			for (var i = 0; i < 2; i++) {
+				final var failureEntered = new CountDownLatch(1);
+				final var releaseFailure = new CountDownLatch(0);
+				final var fault = newWorkerFailureOperation(
+								newCreateOp("repeated-worker-failure-" + i, 256),
+								failureEntered, releaseFailure, false);
+				assertTrue(drv.put(fault));
+				assertTrue(failureEntered.await(2, TimeUnit.SECONDS));
+				final long expectedRecovered = i + 1L;
+				awaitLifecycle(
+								drv,
+								() -> drv.operationLifecycle().snapshot().unattempted() == expectedRecovered,
+								"each failed worker batch should recover its operation");
+			}
+			final var failureEvents = appender.awaitNioFailureEvents(4, 2_000);
+			assertEquals(4, failureEvents.size());
+			assertEquals(1, failureEvents.stream().filter(event -> event.getLevel() == Level.ERROR).count(),
+							"only the first recurring I/O failure should emit at ERROR");
+			assertEquals(3, failureEvents.stream().filter(event -> event.getLevel() == Level.DEBUG).count(),
+							"later per-operation and worker failures should emit at DEBUG");
+			assertEquals(0, drv.activeOpCount());
+		} finally {
+			logger.removeAppender(appender);
+			logger.setLevel(previousLevel);
+			appender.stop();
+		}
 	}
 
 	/**
@@ -298,6 +610,81 @@ public class NioStorageDriverBaseTest {
 	}
 
 	@Test
+	void closeAdmissionRecoversWorkerQueuedWorkButDrainsActualDispatch() throws Exception {
+		final var config = buildStorageConfig(2, 1);
+		final var drv = newBlockingDriver(config);
+		final var dispatched = newCreateOp("dispatched", 256);
+		final var queued = newCreateOp("worker-queued", 256);
+		try {
+			drv.start();
+			assertTrue(drv.put(dispatched));
+			assertTrue(drv.awaitInvokeEntered(2_000), "first operation should reach actual invocation");
+			assertTrue(drv.put(queued));
+			awaitLifecycle(
+							drv,
+							() -> drv.operationLifecycle().snapshot().dispatched() == 1
+											&& drv.operationLifecycle().snapshot().driverQueued() == 1,
+							"one operation should be dispatched and one retained in the worker queue");
+
+			drv.closeAdmission();
+			final var recovered = drv.recoverQueuedOperations();
+
+			assertEquals(List.of(queued), recovered);
+			assertEquals(OperationLifecycleState.UNATTEMPTED, queued.lifecycle().state());
+			assertEquals(OperationLifecycleState.DISPATCHED, dispatched.lifecycle().state());
+			assertEquals(1, drv.operationLifecycle().snapshot().inFlight());
+
+			drv.releaseInvokes();
+			assertNotNull(results.await(2_000), "already-dispatched operation should finish during drain");
+			awaitLifecycle(
+							drv,
+							() -> drv.operationLifecycle().snapshot().inFlight() == 0,
+							"dispatched operation should become terminal");
+			assertEquals(OperationLifecycleState.TERMINAL, dispatched.lifecycle().state());
+		} finally {
+			drv.releaseInvokes();
+			if (drv.isStarted()) {
+				drv.stop();
+			}
+			drv.close();
+		}
+	}
+
+	@Test
+	void closeAdmissionRetainsActiveNioWorkForTheBoundedDrain() throws Exception {
+		final var drv = newRetainedActiveDriver(buildStorageConfig(1, 1));
+		final var dispatched = newCreateOp("retained-active", 256);
+		try {
+			drv.start();
+			assertTrue(drv.put(dispatched));
+			assertTrue(drv.awaitInvocation(2_000));
+			awaitLifecycle(
+							drv,
+							() -> dispatched.lifecycle().state() == OperationLifecycleState.DISPATCHED,
+							"operation should cross the actual dispatch boundary");
+
+			drv.closeAdmission();
+			assertTrue(drv.recoverQueuedOperations().isEmpty());
+			assertNull(results.await(100), "active work must not be terminalized by admission closure");
+			assertEquals(OperationLifecycleState.DISPATCHED, dispatched.lifecycle().state());
+			assertEquals(1, drv.operationLifecycle().snapshot().inFlight());
+
+			drv.allowCompletion();
+			assertNotNull(results.await(2_000));
+			awaitLifecycle(
+							drv,
+							() -> dispatched.lifecycle().state() == OperationLifecycleState.TERMINAL,
+							"active work should remain runnable during the drain");
+		} finally {
+			drv.allowCompletion();
+			if (drv.isStarted()) {
+				drv.stop();
+			}
+			drv.close();
+		}
+	}
+
+	@Test
 	void testBatchSubmitDistributesAcrossMultipleWorkers() throws Exception {
 		final int workerCount = 4;
 		final int opCount = 8;
@@ -411,6 +798,212 @@ public class NioStorageDriverBaseTest {
 		return new BasicConfig("-", schema, values);
 	}
 
+	private static void awaitLifecycle(
+					final NioStorageDriverBase<?, ?> driver,
+					final java.util.function.BooleanSupplier condition,
+					final String message) throws InterruptedException {
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+		while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
+			Thread.sleep(1);
+		}
+		assertTrue(condition.getAsBoolean(), message + "; lifecycle=" + driver.operationLifecycle().snapshot());
+	}
+
+	private static void awaitNioReservationsCleared(final NioStorageDriverBase<?, ?> driver) throws Exception {
+		final var field = NioStorageDriverBase.class.getDeclaredField("opBuffReserved");
+		field.setAccessible(true);
+		final var reserved = (int[]) field.get(driver);
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+		while (java.util.Arrays.stream(reserved).anyMatch(value -> value != 0)
+						&& System.nanoTime() < deadline) {
+			Thread.sleep(1);
+		}
+		assertTrue(java.util.Arrays.stream(reserved).allMatch(value -> value == 0),
+						"NIO worker reservations should be cleared");
+	}
+
+	private static void awaitDispatchCapacityWaiter(final CoopStorageDriverBase<?, ?> driver) throws Exception {
+		// The dispatch task parks its own thread (blocker = the task) while it waits for capacity.
+		final var taskField = CoopStorageDriverBase.class.getDeclaredField("opDispatchTask");
+		taskField.setAccessible(true);
+		final var task = taskField.get(driver);
+		final var threadField = task.getClass().getDeclaredField("dispatchThread");
+		threadField.setAccessible(true);
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+		var parked = false;
+		do {
+			final var thread = (Thread) threadField.get(task);
+			parked = thread != null
+							&& thread.getState() == Thread.State.WAITING
+							&& java.util.concurrent.locks.LockSupport.getBlocker(thread) == task;
+			if (!parked) {
+				Thread.sleep(1);
+			}
+		} while (!parked && System.nanoTime() < deadline);
+		assertTrue(parked, "dispatch task should be waiting for the failed batch to return capacity");
+	}
+
+	private void assertUnexpectedWorkerFailureRecovery(
+					final boolean closeAdmissionBeforeFailure, final boolean failAfterDispatch) throws Exception {
+		final var drv = newBlockingDriver(buildStorageConfig(5, 1));
+		final var gate = newCreateOp("worker-failure-gate", 256);
+		final var processedPrefix = newCreateOp("processed-prefix", 256);
+		final var failureEntered = new CountDownLatch(1);
+		final var releaseFailure = new CountDownLatch(1);
+		final var fault = newWorkerFailureOperation(
+						newCreateOp("fault-boundary", 256), failureEntered, releaseFailure, failAfterDispatch);
+		final var recoveredOne = newCreateOp("recovered-one", 256);
+		final var recoveredTwo = newCreateOp("recovered-two", 256);
+		var closed = false;
+		try {
+			drv.start();
+			assertTrue(drv.put(gate));
+			assertTrue(drv.awaitInvokeEntered(2_000), "gate operation should hold the only NIO worker");
+			assertEquals(4, drv.put(List.of(processedPrefix, fault, recoveredOne, recoveredTwo)));
+			awaitLifecycle(
+							drv,
+							() -> drv.activeOpCount() == 5,
+							"the complete worker-failure batch should hold permits before the gate opens");
+
+			drv.releaseInvokes();
+			assertTrue(failureEntered.await(2, TimeUnit.SECONDS),
+							"failure should be injected after the processed prefix completes");
+			if (closeAdmissionBeforeFailure) {
+				drv.closeAdmission();
+			}
+			releaseFailure.countDown();
+
+			final long expectedUnattempted = failAfterDispatch ? 2 : 3;
+			final long expectedUnresolved = failAfterDispatch ? 1 : 0;
+			awaitLifecycle(
+							drv,
+							() -> {
+								final var snapshot = drv.operationLifecycle().snapshot();
+								return snapshot.unattempted() == expectedUnattempted
+												&& snapshot.unresolved() == expectedUnresolved;
+							},
+							"the exact unprocessed suffix should be recovered");
+			awaitNioReservationsCleared(drv);
+			final var lifecycle = drv.operationLifecycle().snapshot();
+			assertEquals(failAfterDispatch ? 3 : 2, lifecycle.dispatched(),
+							"dispatch count must distinguish the fault boundary");
+			assertEquals(2, lifecycle.terminal(), "the processed prefix must remain terminal exactly once");
+			assertEquals(expectedUnattempted, lifecycle.unattempted());
+			assertEquals(expectedUnresolved, lifecycle.unresolved());
+			assertEquals(0, lifecycle.driverQueued());
+			assertEquals(0, lifecycle.inFlight());
+			assertEquals(OperationLifecycleState.TERMINAL, gate.lifecycle().state());
+			assertEquals(OperationLifecycleState.TERMINAL, processedPrefix.lifecycle().state());
+			assertEquals(
+							failAfterDispatch ? OperationLifecycleState.UNRESOLVED : OperationLifecycleState.UNATTEMPTED,
+							fault.lifecycle().state());
+			assertEquals(OperationLifecycleState.UNATTEMPTED, recoveredOne.lifecycle().state());
+			assertEquals(OperationLifecycleState.UNATTEMPTED, recoveredTwo.lifecycle().state());
+			assertEquals(expectedUnattempted, lifecycle.unattemptedOperations().size());
+			final var recoveredOffset = failAfterDispatch ? 0 : 1;
+			if (failAfterDispatch) {
+				assertEquals(1, lifecycle.unresolvedOperations().size());
+				assertSame(fault, lifecycle.unresolvedOperations().get(0));
+			} else {
+				assertSame(fault, lifecycle.unattemptedOperations().get(0));
+			}
+			assertSame(recoveredOne, lifecycle.unattemptedOperations().get(recoveredOffset));
+			assertSame(recoveredTwo, lifecycle.unattemptedOperations().get(recoveredOffset + 1));
+			assertEquals(5, drv.scheduledOpCount());
+			assertEquals(2, drv.completedOpCount());
+			assertEquals(0, drv.activeOpCount(), "all five acquired permits should reconcile");
+			assertNioBuffersEmpty(drv);
+			assertOperationFailureLogGuardClaimed(drv);
+			assertNotNull(results.await(2_000), "gate operation should retain its terminal result");
+			assertNotNull(results.await(2_000), "processed prefix should retain its terminal result");
+			assertNull(results.await(50), "recovered suffix must not publish terminal results");
+
+			final long stopStarted = System.nanoTime();
+			drv.stop();
+			assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - stopStarted) < 2_000,
+							"stop after worker failure should remain bounded");
+			assertWorkerTasksTerminated(drv);
+
+			drv.operationResultOutput(results);
+			drv.start();
+			assertTrue(drv.put(newCreateOp("after-worker-failure", 256)));
+			assertNotNull(results.await(2_000), "the restarted driver should retain full capacity");
+			assertEquals(0, drv.activeOpCount());
+			drv.stop();
+			assertWorkerTasksTerminated(drv);
+
+			final long closeStarted = System.nanoTime();
+			drv.close();
+			closed = true;
+			assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - closeStarted) < 2_000,
+							"close after worker failure should remain bounded");
+			assertWorkerTaskRegistryCleared(drv);
+		} finally {
+			drv.releaseInvokes();
+			releaseFailure.countDown();
+			if (!closed) {
+				if (drv.isStarted()) {
+					drv.stop();
+				}
+				drv.close();
+			}
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Operation<DataItemImpl> newWorkerFailureOperation(
+					final Operation<DataItemImpl> delegate,
+					final CountDownLatch failureEntered,
+					final CountDownLatch releaseFailure,
+					final boolean failAfterDispatch) {
+		final var failStatusRead = new AtomicBoolean(true);
+		final var failRequestStart = new AtomicBoolean(true);
+		final var failFailureStatusWrite = new AtomicBoolean(true);
+		return (Operation<DataItemImpl>) Proxy.newProxyInstance(
+						Operation.class.getClassLoader(),
+						new Class<?>[]{Operation.class
+						},
+						(proxy, method, args) -> {
+							if ("status".equals(method.getName())) {
+								if ((args == null || args.length == 0) && failStatusRead.compareAndSet(true, false)) {
+									if (!failAfterDispatch) {
+										awaitFailureInjection(failureEntered, releaseFailure);
+										throw new AssertionError("injected pre-dispatch NIO worker failure");
+									}
+								}
+								if (args != null && args.length == 1
+												&& args[0] == Operation.Status.FAIL_UNKNOWN
+												&& failFailureStatusWrite.compareAndSet(true, false)) {
+									throw new AssertionError("escape per-operation failure handling");
+								}
+							}
+							if (failAfterDispatch && "startRequest".equals(method.getName())
+											&& failRequestStart.compareAndSet(true, false)) {
+								awaitFailureInjection(failureEntered, releaseFailure);
+								throw new AssertionError("injected post-dispatch NIO worker failure");
+							}
+							try {
+								return method.invoke(delegate, args);
+							} catch (final InvocationTargetException e) {
+								throw e.getCause();
+							}
+						});
+	}
+
+	private static void awaitFailureInjection(
+					final CountDownLatch failureEntered, final CountDownLatch releaseFailure) throws InterruptedException {
+		failureEntered.countDown();
+		if (!releaseFailure.await(2, TimeUnit.SECONDS)) {
+			throw new AssertionError("timed out waiting to inject NIO worker failure");
+		}
+	}
+
+	private static void assertOperationFailureLogGuardClaimed(final NioStorageDriverBase<?, ?> driver) throws Exception {
+		final var field = NioStorageDriverBase.class.getDeclaredField("operationFailureReported");
+		field.setAccessible(true);
+		assertTrue(((AtomicBoolean) field.get(driver)).get(), "worker failure should claim the bounded log guard");
+	}
+
 	/** Collects completed operations for test assertions. */
 	static class OpResultCollector implements Output<Operation<DataItemImpl>> {
 		private final LinkedBlockingQueue<Operation<DataItemImpl>> queue = new LinkedBlockingQueue<>();
@@ -449,6 +1042,148 @@ public class NioStorageDriverBaseTest {
 
 		Operation<DataItemImpl> await(long timeoutMs) throws InterruptedException {
 			return queue.poll(timeoutMs, TimeUnit.MILLISECONDS);
+		}
+	}
+
+	private static final class CapturingAppender extends AbstractAppender {
+		private final List<LogEvent> events = Collections.synchronizedList(new ArrayList<>());
+
+		private CapturingAppender() {
+			super("nio-worker-failure-capture", null, null, true, Property.EMPTY_ARRAY);
+		}
+
+		@Override
+		public void append(final LogEvent event) {
+			events.add(event.toImmutable());
+		}
+
+		private List<LogEvent> awaitNioFailureEvents(final int expected, final long timeoutMs)
+						throws InterruptedException {
+			final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+			List<LogEvent> matching;
+			do {
+				matching = matchingNioFailureEvents();
+				if (matching.size() >= expected) {
+					return matching;
+				}
+				Thread.sleep(1);
+			} while (System.nanoTime() < deadline);
+			return matchingNioFailureEvents();
+		}
+
+		private List<LogEvent> matchingNioFailureEvents() {
+			synchronized (events) {
+				return events.stream()
+								.filter(event -> {
+									final var message = event.getMessage().getFormattedMessage();
+									return message.contains("I/O operation invocation failure")
+													|| message.contains("I/O worker failure");
+								})
+								.toList();
+			}
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private static void assertWorkerTasksTerminated(final NioStorageDriverBase<?, ?> driver) throws Exception {
+		final var field = NioStorageDriverBase.class.getDeclaredField("ioWorkers");
+		field.setAccessible(true);
+		final var workers = (List<Task>) field.get(driver);
+		assertFalse(workers.isEmpty());
+		for (final var worker : workers) {
+			assertTrue(worker.await(10, TimeUnit.MILLISECONDS), "worker task thread should be terminated");
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private static void assertWorkerTaskRegistryCleared(final NioStorageDriverBase<?, ?> driver) throws Exception {
+		final var field = NioStorageDriverBase.class.getDeclaredField("ioWorkers");
+		field.setAccessible(true);
+		assertTrue(((List<Task>) field.get(driver)).isEmpty(), "closed driver should retain no worker tasks");
+	}
+
+	private static void assertNioBuffersEmpty(final NioStorageDriverBase<?, ?> driver) throws Exception {
+		final var field = NioStorageDriverBase.class.getDeclaredField("opBuffs");
+		field.setAccessible(true);
+		final var buffers = (Object[]) field.get(driver);
+		for (final var buffer : buffers) {
+			assertTrue(((com.github.akurilov.commons.collection.CircularBuffer<?>) buffer).isEmpty(),
+							"worker queue should be empty after suffix recovery");
+		}
+	}
+
+	static class RetainedActiveDriver extends NioStorageDriverMock<DataItemImpl, Operation<DataItemImpl>> {
+		private final AtomicInteger invocations = new AtomicInteger();
+		private final AtomicBoolean completionAllowed = new AtomicBoolean();
+
+		RetainedActiveDriver(
+						final String testStepName,
+						final DataInput dataInput,
+						final Config storageConfig,
+						final boolean verifyFlag,
+						final int batchSize) throws Exception {
+			super(testStepName, dataInput, storageConfig, verifyFlag, batchSize);
+		}
+
+		@Override
+		protected void invokeNio(final Operation<DataItemImpl> op) {
+			invocations.incrementAndGet();
+			if (completionAllowed.get()) {
+				super.invokeNio(op);
+			} else {
+				op.status(Operation.Status.ACTIVE);
+				Thread.yield();
+			}
+		}
+
+		boolean awaitInvocation(final long timeoutMs) throws InterruptedException {
+			final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+			while (invocations.get() == 0 && System.nanoTime() < deadline) {
+				Thread.sleep(1);
+			}
+			return invocations.get() > 0;
+		}
+
+		void allowCompletion() {
+			completionAllowed.set(true);
+		}
+	}
+
+	static class ThrowOnceInvokeDriver extends NioStorageDriverMock<DataItemImpl, Operation<DataItemImpl>> {
+		private final AtomicBoolean shouldThrow = new AtomicBoolean(true);
+
+		ThrowOnceInvokeDriver(
+						final String testStepName,
+						final DataInput dataInput,
+						final Config storageConfig,
+						final boolean verifyFlag,
+						final int batchSize) throws Exception {
+			super(testStepName, dataInput, storageConfig, verifyFlag, batchSize);
+		}
+
+		@Override
+		protected void invokeNio(final Operation<DataItemImpl> op) {
+			if (shouldThrow.compareAndSet(true, false)) {
+				throw new IllegalStateException("invoke failed");
+			}
+			super.invokeNio(op);
+		}
+	}
+
+	static class AlwaysThrowInvokeDriver extends NioStorageDriverMock<DataItemImpl, Operation<DataItemImpl>> {
+
+		AlwaysThrowInvokeDriver(
+						final String testStepName,
+						final DataInput dataInput,
+						final Config storageConfig,
+						final boolean verifyFlag,
+						final int batchSize) throws Exception {
+			super(testStepName, dataInput, storageConfig, verifyFlag, batchSize);
+		}
+
+		@Override
+		protected void invokeNio(final Operation<DataItemImpl> op) {
+			throw new IllegalStateException("invoke always fails");
 		}
 	}
 

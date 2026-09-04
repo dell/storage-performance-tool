@@ -1,6 +1,9 @@
 package scenario
 
 import (
+	"strings"
+	"time"
+
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/workload"
 )
@@ -11,6 +14,7 @@ const (
 	workloadTypeWriteVerify = workload.WriteVerify
 	workloadTypeReadVerify  = workload.ReadVerify
 	workloadTypeMixed       = workload.Mixed
+	workloadTypeDelete      = workload.Delete
 	workloadTypeMock        = workload.Mock
 	workloadTypeList        = workload.List
 	workloadTypeTables      = workload.Tables
@@ -100,12 +104,45 @@ const (
 	templateKeyReadShuffleBatchSize = "ReadShuffleBatchSize"
 	templateKeyReadPhasePause       = "ReadPhasePauseSeconds"
 
-	stepOpCreate = "create"
-	stepOpRead   = "read"
-	stepOpSeed   = "seed"
-	stepOpDelete = "delete"
-	stepOpMixed  = "mixed"
+	stepOpCreate  = "create"
+	stepOpRead    = "read"
+	stepOpSeed    = "seed"
+	stepOpDelete  = "delete"
+	stepOpCleanup = "cleanup"
+	stepOpList    = "list"
+	stepOpMixed   = "mixed"
 )
+
+const (
+	// MinDeleteBatchSize is the smallest valid standalone DELETE request size.
+	MinDeleteBatchSize = 1
+	// DefaultDeleteObjectSize is the explicit payload size for seeded DELETE inventories.
+	DefaultDeleteObjectSize = "1KiB"
+	// DefaultDeleteBatchSize is the default standalone DELETE request size.
+	DefaultDeleteBatchSize = 100
+	// MaxDeleteBatchSize is the S3 DeleteObjects request limit.
+	MaxDeleteBatchSize = 1000
+	// DefaultMaxFailedObjects is the standalone DELETE object-unit failure budget.
+	DefaultMaxFailedObjects int64 = 100000
+	// FailureBudgetModeFixed selects a fixed failed-object threshold.
+	FailureBudgetModeFixed = constants.DeleteFailurePolicyModeFixed
+	// FailureBudgetModePercentage selects a cumulative attempted-object percentage.
+	FailureBudgetModePercentage = constants.DeleteFailurePolicyModePercentage
+	// SelectionOrderCanonical names the deterministic global DELETE selection order.
+	SelectionOrderCanonical = constants.DeleteSelectionOrderCanonical
+)
+
+// IsSeededDeleteCleanupStepID reports whether stepID identifies the cleanup phase of a
+// seeded DELETE scenario.
+func IsSeededDeleteCleanupStepID(stepID string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(stepID)), "-"+stepOpCleanup)
+}
+
+// DefaultFailureBudgetGrace delays positive percentage evaluation during the measured phase.
+const DefaultFailureBudgetGrace = 30 * time.Second
+
+// DefaultDeleteVerificationTimeout bounds each enabled DELETE verification phase independently.
+const DefaultDeleteVerificationTimeout = 30 * time.Second
 
 // DefaultReadPhasePauseSeconds preserves the historical pause between read
 // scenario phases while allowing qualification runs to request a longer settle.
@@ -160,6 +197,7 @@ const (
 	WorkloadTypeReadVerify  = workloadTypeReadVerify
 	WorkloadTypeTables      = workloadTypeTables
 	WorkloadTypeMixed       = workloadTypeMixed
+	WorkloadTypeDelete      = workloadTypeDelete
 )
 
 // Mixed workload template keys

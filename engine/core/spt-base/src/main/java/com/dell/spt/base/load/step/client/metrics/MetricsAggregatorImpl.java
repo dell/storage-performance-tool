@@ -37,16 +37,13 @@ public final class MetricsAggregatorImpl extends AsyncRunnableBase implements Me
 		AllMetricsSnapshot snapshot;
 		final List<AllMetricsSnapshot> snapshotsByIndex = new ArrayList<>(count);
 		for (var i = 0; i < count; i++) {
+			snapshot = null;
 			supplyTask = snapshotSuppliers[i];
 			snapshots = supplyTask.get();
-			if (null != snapshots) {
-				if (originIndex < snapshots.size()) {
-					snapshot = snapshots.get(originIndex);
-					if (null != snapshot) {
-						snapshotsByIndex.add(snapshot);
-					}
-				}
+			if (null != snapshots && originIndex < snapshots.size()) {
+				snapshot = snapshots.get(originIndex);
 			}
+			snapshotsByIndex.add(snapshot);
 		}
 		return snapshotsByIndex;
 	}

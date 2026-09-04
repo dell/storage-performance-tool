@@ -1,5 +1,7 @@
 package scenario
 
+import "time"
+
 // Params holds all parameters needed to generate a Spt scenario.
 type Params struct {
 	WorkloadType string
@@ -28,11 +30,29 @@ type Params struct {
 	SliceEndpoints bool // Partition endpoint list across nodes in distributed runs
 
 	// Read workload
-	SeedCount             int    // Number of seed objects for read benchmark (default: 2500)
+	SeedCount             int    // Number of seed objects; zero resolves to the public seed default.
 	ItemsFile             string // Path to a local items.csv for read workload (skips seed phase)
 	ReadShuffle           bool   // Enable batch-local item shuffling for the read phase
 	ReadShuffleBatchSize  int    // Read-phase batch size override used when ReadShuffle is enabled
 	ReadPhasePauseSeconds int    // Seconds to settle between read scenario phases
+
+	// Standalone DELETE workload.
+	DeleteBatchSize         int
+	DeleteExisting          bool
+	AllowEmptyPrefix        bool
+	SelectionSourceCount    int
+	SelectionUniqueCount    int
+	SelectionSelectedCount  int
+	SelectionSHA256         string
+	SelectionOrder          string
+	FailureBudgetMode       string
+	MaxFailedObjects        int64
+	MaxFailurePercent       float64
+	FailureBudgetGrace      time.Duration
+	ValidateDeleteInventory bool
+	VerifyDelete            bool
+	VerifyDeleteExplicit    bool
+	VerificationTimeout     time.Duration
 
 	// External item files bind-mounted into the engine container.
 	ItemFileMounts  []FileMount
@@ -60,7 +80,7 @@ type Params struct {
 	// functions use this value instead of calling time.Now(), ensuring that
 	// repeated generation from the same Params produces identical step IDs.
 	BaseTimestamp string
-	RunID         int64 // Positive run identity shared by every verification step and staged input marker
+	RunID         int64 // Positive public-run identity shared by generated steps, defaults, and staged input markers
 
 	// TUI layout
 	MinimalTUI                  bool

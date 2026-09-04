@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 )
 
@@ -90,6 +91,89 @@ func TestRendererFullReportIncludesSections(t *testing.T) {
 	}
 	if !headerFound {
 		t.Fatalf("table header not found in report:\n%s", report)
+	}
+}
+
+func TestRendererStandaloneDeleteShowsNoFabricatedTransferMetrics(t *testing.T) {
+	summary := &RunSummary{
+		Workload: WorkloadSummary{Type: "delete", ObjectSizeHuman: "1.00 KiB"},
+		Steps: []StepSummary{{
+			PhaseLabel: "Delete",
+			Operation:  "DELETE",
+			Metrics: &PhaseMetrics{
+				SuccessCount: 3, FailureCount: 1, DataBytes: 1024,
+				ThroughputAvgOps: 4, LatencyMedianMs: 2.5, TTFBMedianMs: 1.2,
+				BandwidthAvgMiBps: 99, ObjectSizeHuman: "1.00 KiB",
+			},
+		}},
+	}
+
+	table := NewRenderer(RenderOptions{}).performanceTable(summary)
+	line := ""
+	for _, candidate := range strings.Split(table, "\n") {
+		if strings.Contains(candidate, "Delete") {
+			line = candidate
+			break
+		}
+	}
+	if line == "" {
+		t.Fatalf("DELETE row missing:\n%s", table)
+	}
+	if strings.Count(line, notApplicableCell) < 4 {
+		t.Fatalf("DELETE size/data/TTFB/bandwidth must be N/A:\n%s", line)
+	}
+	if !strings.Contains(line, "4.00 ops/s") || !strings.Contains(line, "2.50 ms") {
+		t.Fatalf("DELETE request rate/latency missing:\n%s", line)
+	}
+}
+
+func TestFormatSuccessCountUsesExplicitRowUnit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		unit string
+		want string
+	}{
+		{name: "legacy row", want: "200"},
+		{name: "LIST objects", unit: deletemetrics.ObjectUnit, want: "200 object identities"},
+		{name: "DELETE requests", unit: deletemetrics.RequestUnit, want: "200 logical API requests"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := formatSuccessCount(200, tc.unit); got != tc.want {
+				t.Fatalf("formatSuccessCount() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRendererStandaloneDeleteZeroTimingPopulationIsUnavailable(t *testing.T) {
+	summary := &RunSummary{
+		Workload: WorkloadSummary{Type: "delete"},
+		Steps: []StepSummary{{
+			PhaseLabel: "Delete",
+			Operation:  "DELETE",
+			Delete: &deletemetrics.Metrics{
+				Timing: deletemetrics.Timing{
+					LatencyDefinition: deletemetrics.LatencyDefinition,
+					Latency:           &deletemetrics.TimingStat{},
+				},
+			},
+			Metrics: &PhaseMetrics{LatencyHeadlineMs: 9.9, LatencyMedianMs: 8.8},
+		}},
+	}
+
+	report := NewRenderer(RenderOptions{}).FullReport(summary)
+	if !strings.Contains(report, deletemetrics.LatencyDefinition+"; N/A") {
+		t.Fatalf("zero-sample DELETE detail was rendered as measured timing:\n%s", report)
+	}
+	table := NewRenderer(RenderOptions{}).performanceTable(summary)
+	for _, line := range strings.Split(table, "\n") {
+		if strings.Contains(line, "Delete") && strings.Contains(line, "9.90 ms") {
+			t.Fatalf("stored DELETE table fabricated generic latency:\n%s", table)
+		}
 	}
 }
 

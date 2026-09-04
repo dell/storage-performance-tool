@@ -225,6 +225,17 @@ public class TestConfigBuilder {
 		op.put("retryLimit", 10);
 		op.put("shuffle", false);
 		op.put("type", "create");
+		Map<String, Object> opDelete = new HashMap<>();
+		opDelete.put("standalone", false);
+		opDelete.put("batchSize", 100);
+		opDelete.put("duration", false);
+		op.put("delete", opDelete);
+		Map<String, Object> failureBudget = new HashMap<>();
+		failureBudget.put("mode", "fixed");
+		failureBudget.put("maxFailedObjects", 100000L);
+		failureBudget.put("maxFailurePercent", 0.0);
+		failureBudget.put("graceSeconds", 30L);
+		op.put("failureBudget", failureBudget);
 
 		Map<String, Object> opWait = new HashMap<>();
 		opWait.put("finish", false);
@@ -263,6 +274,7 @@ public class TestConfigBuilder {
 		integrity.put("input", integrityInput);
 		Map<String, Object> integritySelection = new HashMap<>();
 		integritySelection.put("maxCount", 0L);
+		integritySelection.put("requireNonEmpty", false);
 		integrity.put("selection", integritySelection);
 		storage.put("integrity", integrity);
 

@@ -7,12 +7,18 @@ package constants
 
 // Results manifest and metadata filenames.
 const (
-	ResultsManifestFileName         = "index.json"
-	ResultsMetadataFileName         = "spt_run_params.json"
+	ResultsManifestFileName = "index.json"
+	ResultsMetadataFileName = "spt_run_params.json"
+	// ResultsDeleteArtifactsVersionV1 preserves Ticket 13 operational evidence compatibility.
+	ResultsDeleteArtifactsVersionV1 = 1
+	// ResultsDeleteArtifactsVersion adds selection-indexed verification evidence.
+	ResultsDeleteArtifactsVersion   = 2
 	ResultsPreparedDefaultsFileName = "defaults.yaml"
 	ResultsSummaryFilePrefix        = "spt_"
 	ResultsSummaryFileSuffix        = "_results_summary.txt"
 	ResultsSummaryFilePattern       = ResultsSummaryFilePrefix + "%s" + ResultsSummaryFileSuffix
+	// MetricsLocalContributorID is the engine's canonical identity for the entry JVM slice.
+	MetricsLocalContributorID = "local"
 )
 
 // Results artifact suffixes.
@@ -26,6 +32,11 @@ const (
 	ResultsArtifactSuffixScenario              = "scenario.txt"
 	ResultsArtifactSuffixMetricsThreshold      = "metrics.threshold.total.csv"
 	ResultsArtifactSuffixOpTrace               = "op.trace.csv"
+	ResultsArtifactSuffixDeleteMetricsTotal    = "delete.metrics.total.csv"
+	ResultsArtifactSuffixDeleteRequests        = "delete.requests.csv"
+	ResultsArtifactSuffixDeleteObjects         = "delete.objects.csv"
+	ResultsArtifactSuffixDeleteVerification    = "delete.verification.csv"
+	ResultsArtifactSuffixDeleteCompletion      = "delete.complete.json"
 	ResultsArtifactSuffixWritten               = "written.csv"
 	ResultsArtifactSuffixWrittenCompletion     = "written.complete.json"
 	ResultsArtifactSuffixVerifyInput           = "verify-input.csv"

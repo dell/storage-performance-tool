@@ -16,6 +16,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.logging.LogContextThreadFactory;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
@@ -101,6 +102,8 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	private final AtomicBoolean namedGroupsWarned = new AtomicBoolean(false);
 	private final AtomicBoolean tlsHandshakeLogged = new AtomicBoolean(false);
 	private final AtomicBoolean channelFailureWarned = new AtomicBoolean(false);
+	private final AtomicBoolean connectionLeaseFailureWarned = new AtomicBoolean(false);
+	private final AtomicBoolean submissionFailureWarned = new AtomicBoolean(false);
 	protected final ChannelFutureListener reqSentCallback = this::sendFullRequestComplete;
 
 	@SuppressWarnings("unchecked")
@@ -384,16 +387,27 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			throw new IllegalStateException();
 		}
 		if (concurrencyThrottle.tryAcquire()) {
+			var dispatched = false;
 			try {
 				if (OpType.NOOP.equals(op.type())) {
+					if (!beginDispatch(op)) {
+						concurrencyThrottle.release();
+						return false;
+					}
+					dispatched = true;
 					op.startRequest();
 					sendRequest(null, op);
 					op.finishRequest();
 					concurrencyThrottle.release();
 					op.status(SUCC);
 					op.startResponse();
-					complete(null, op);
+					completeAfterSubmissionSafely(null, op);
 				} else {
+					if (!beginDispatch(op)) {
+						concurrencyThrottle.release();
+						return false;
+					}
+					dispatched = true;
 					conn = leaseActiveConnection();
 					conn.attr(ATTR_KEY_OPERATION).set(op);
 					op.nodeAddr(conn.attr(ATTR_KEY_NODE).get());
@@ -401,21 +415,35 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 					sendRequest(conn, op);
 				}
 			} catch (final ConnectException e) {
-				LogUtil.exception(Level.WARN, e, "Failed to lease the connection for the load operation");
+				logConnectionLeaseFailure(e);
+				if (!dispatched) {
+					concurrencyThrottle.release();
+					op.status(Operation.Status.FAIL_IO);
+					completeAfterSubmissionSafely(null, op);
+					return false;
+				}
 				op.status(Operation.Status.FAIL_IO);
 				if (conn == null) {
 					concurrencyThrottle.release();
 				}
-				complete(conn, op);
+				completeAfterSubmissionSafely(conn, op);
 				return false;
 			} catch (final Throwable thrown) {
 				throwUncheckedIfInterrupted(thrown);
-				LogUtil.exception(Level.WARN, thrown, "Failed to submit the load operation");
+				logSubmissionFailure(thrown);
+				if (!dispatched) {
+					if (conn == null) {
+						concurrencyThrottle.release();
+					} else {
+						releaseUndispatchedConnection(conn, true);
+					}
+					return false;
+				}
 				op.status(Operation.Status.FAIL_UNKNOWN);
 				if (conn == null) {
 					concurrencyThrottle.release();
 				}
-				complete(conn, op);
+				completeAfterSubmissionSafely(conn, op);
 				return false;
 			}
 			return true;
@@ -451,19 +479,28 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		Channel conn = null;
 		O nextOp = null;
 		var n = 0;
-		try {
-			while (n < permits && isStarted()) {
-				conn = null; // reset so a stale channel from a prior iteration is never used
-				nextOp = ops.get(from + n);
+		while (n < permits && isStarted() && isAdmissionOpen()) {
+			conn = null; // reset so a stale channel from a prior iteration is never used
+			nextOp = ops.get(from + n);
+			var dispatched = false;
+			try {
 				if (OpType.NOOP.equals(nextOp.type())) {
+					if (!beginDispatch(nextOp)) {
+						break;
+					}
+					dispatched = true;
 					nextOp.startRequest();
 					sendRequest(null, nextOp);
 					nextOp.finishRequest();
 					concurrencyThrottle.release();
 					nextOp.status(SUCC);
 					nextOp.startResponse();
-					complete(null, nextOp);
+					completeAfterSubmissionSafely(null, nextOp);
 				} else {
+					if (!beginDispatch(nextOp)) {
+						break;
+					}
+					dispatched = true;
 					conn = leaseActiveConnection();
 					conn.attr(ATTR_KEY_OPERATION).set(nextOp);
 					nextOp.nodeAddr(conn.attr(ATTR_KEY_NODE).get());
@@ -471,36 +508,95 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 					sendRequest(conn, nextOp);
 				}
 				n++;
-			}
-			// shutdown may race after drainPermits() but before every leased permit
-			// becomes an in-flight request. Return only the permits that were never
-			// dispatched; completed NOOPs and asynchronous requests own their own permit.
-			if (n < permits) {
-				concurrencyThrottle.release(permits - n);
-			}
-		} catch (final ConnectException e) {
-			LogUtil.exception(Level.WARN, e, "Failed to lease the connection for the load operation");
-			nextOp.status(Operation.Status.FAIL_IO);
-			if (conn == null) {
-				concurrencyThrottle.release();
-			}
-			complete(conn, nextOp);
-			if (permits - n > 1) {
-				concurrencyThrottle.release(permits - n - 1);
-			}
-		} catch (final Throwable thrown) {
-			throwUncheckedIfInterrupted(thrown);
-			LogUtil.exception(Level.WARN, thrown, "Failed to submit the load operations");
-			nextOp.status(Operation.Status.FAIL_UNKNOWN);
-			if (conn == null) {
-				concurrencyThrottle.release();
-			}
-			complete(conn, nextOp);
-			if (permits - n > 1) {
-				concurrencyThrottle.release(permits - n - 1);
+			} catch (final ConnectException e) {
+				logConnectionLeaseFailure(e);
+				if (!dispatched) {
+					concurrencyThrottle.release();
+					nextOp.status(Operation.Status.FAIL_IO);
+					completeAfterSubmissionSafely(null, nextOp);
+					n++;
+					break;
+				}
+				nextOp.status(Operation.Status.FAIL_IO);
+				if (conn == null) {
+					concurrencyThrottle.release();
+				}
+				completeAfterSubmissionSafely(conn, nextOp);
+				n++;
+				break;
+			} catch (final Throwable thrown) {
+				throwUncheckedIfInterrupted(thrown);
+				logSubmissionFailure(thrown);
+				if (!dispatched) {
+					if (conn != null) {
+						releaseUndispatchedConnection(conn, false);
+					}
+					break;
+				}
+				nextOp.status(Operation.Status.FAIL_UNKNOWN);
+				if (conn == null) {
+					concurrencyThrottle.release();
+				}
+				completeAfterSubmissionSafely(conn, nextOp);
+				n++;
 			}
 		}
+		// Shutdown or connection acquisition may stop the batch before every drained permit
+		// becomes an in-flight request. Completed and asynchronous requests released or own
+		// their permits; return only permits which never crossed dispatch.
+		if (n < permits) {
+			concurrencyThrottle.release(permits - n);
+		}
 		return n;
+	}
+
+	private void completeAfterSubmissionSafely(final Channel conn, final O op) {
+		try {
+			complete(conn, op);
+		} catch (final Throwable cause) {
+			throwUncheckedIfInterrupted(cause);
+			// Result publication is extension-facing and may fail per operation. Completion has
+			// already released transport ownership, so keep the submit loop bounded and let the
+			// lifecycle deadline retain the unresolved outcome without retrying the release.
+			LogUtil.exception(Level.DEBUG, cause, "Load operation result publication failure");
+		}
+	}
+
+	private void logConnectionLeaseFailure(final ConnectException failure) {
+		// Constructor-bypassing compatibility tests leave final fields null. Production instances
+		// emit one actionable warning per driver and demote repetitive failures to DEBUG.
+		if (connectionLeaseFailureWarned == null
+						|| connectionLeaseFailureWarned.compareAndSet(false, true)) {
+			LogUtil.exception(
+							Level.WARN, failure,
+							"Failed to lease the connection for a load operation; further failures are logged at DEBUG");
+		} else {
+			LogUtil.exception(Level.DEBUG, failure, "Failed to lease the connection for a load operation");
+		}
+	}
+
+	private void logSubmissionFailure(final Throwable failure) {
+		// The submission loop may encounter the same underlying failure for every operation in a
+		// batch. Preserve one actionable warning per driver and retain later diagnostics at DEBUG.
+		if (submissionFailureWarned == null
+						|| submissionFailureWarned.compareAndSet(false, true)) {
+			LogUtil.exception(
+							Level.WARN, failure,
+							"Failed to submit the load operations; further failures are logged at DEBUG");
+		} else {
+			LogUtil.exception(Level.DEBUG, failure, "Failed to submit the load operations");
+		}
+	}
+
+	private void releaseUndispatchedConnection(final Channel conn, final boolean releasePermit) {
+		if (conn.hasAttr(ATTR_KEY_OPERATION)) {
+			conn.attr(ATTR_KEY_OPERATION).set(null);
+		}
+		conn.attr(ATTR_KEY_RELEASED).set(Boolean.TRUE);
+		connPool.release(conn);
+		if (releasePermit) {
+			concurrencyThrottle.release();
+		}
 	}
 
 	@Override
@@ -668,7 +764,11 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		ThreadContext.put(KEY_STEP_ID, stepId);
 
 		try {
-			op.finishResponse();
+			if (op instanceof DeleteRequestOperation deleteOperation) {
+				deleteOperation.markResponseLastByteReceived();
+			} else {
+				op.finishResponse();
+			}
 		} catch (final IllegalStateException e) {
 			LogUtil.exception(Level.DEBUG, e, "{}: invalid load operation state", op.toString());
 		}
@@ -688,6 +788,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		if (channel != null && !channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE)) {
 			concurrencyThrottle.release();
 			connPool.release(channel);
+			signalDispatchCapacityAvailable();
 		}
 		handleCompleted(op);
 	}

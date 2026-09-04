@@ -191,7 +191,12 @@ func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
 		{name: "local verification", workload: WorkloadTypeWriteVerify, hosts: "127.0.0.1", minHosts: "1", shutdown: "false", wantLocal: 1, wantPort: 1, wantAuto: 1},
 		{name: "one remote verification", workload: WorkloadTypeWriteVerify, hosts: "entry.example", minHosts: "1", shutdown: "false", wantMulti: 1, wantConnect: 1, wantPrepare: 1, wantAuto: 1},
 		{name: "distributed verification", workload: WorkloadTypeWriteVerify, hosts: "entry.example,worker.example", minHosts: "2", shutdown: "false", wantMulti: 1, wantConnect: 1, wantPrepare: 1, wantAuto: 1},
-		{name: "ordinary remote delegated shutdown", workload: WorkloadTypeWrite, hosts: "entry.example", minHosts: "1", shutdown: "true", wantMulti: 1, wantConnect: 1, wantAuto: 1},
+		{name: "ordinary remote write", workload: WorkloadTypeWrite, hosts: "entry.example", minHosts: "1", shutdown: "true", wantMulti: 1, wantConnect: 1, wantAuto: 1},
+		{name: "ordinary remote read", workload: WorkloadTypeRead, hosts: "entry.example", minHosts: "1", shutdown: "true", wantMulti: 1, wantConnect: 1, wantAuto: 1},
+		{name: "ordinary remote list", workload: WorkloadTypeList, hosts: "entry.example", minHosts: "1", shutdown: "true", wantMulti: 1, wantConnect: 1, wantAuto: 1},
+		{name: "ordinary remote mixed", workload: WorkloadTypeMixed, hosts: "entry.example", minHosts: "1", shutdown: "true", wantMulti: 1, wantConnect: 1, wantAuto: 1},
+		{name: "ordinary remote mock", workload: WorkloadTypeMock, hosts: "entry.example", minHosts: "1", shutdown: "true", wantMulti: 1, wantConnect: 1, wantAuto: 1},
+		{name: "ordinary remote tables", workload: WorkloadTypeTables, hosts: "entry.example", minHosts: "1", shutdown: "true", wantMulti: 1, wantConnect: 1, wantAuto: 1},
 		{name: "entry connection failure stops verification launch", workload: WorkloadTypeWriteVerify, hosts: "entry.example,worker.example", minHosts: "1", shutdown: "false", wantConnect: 1, connectErr: errors.New("designated entry unavailable")},
 	}
 	for _, test := range tests {
@@ -227,6 +232,7 @@ func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
 			})
 
 			var portCalls, connectCalls, prepareCalls, localCalls, multiCalls, autoResultsCalls int
+			var launchedParams scenario.Params
 			var autoResultsContext context.Context
 			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
 				portCalls++
@@ -242,15 +248,17 @@ func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
 				prepareCalls++
 				return tui.DistributedRuntimeIdentityEvidence{ImageID: "sha256:test"}, nil
 			}
-			startLocalHeadlessRunFunc = func(_ string, _ string, _ scenario.Params, options headless.HeadlessOptions) error {
+			startLocalHeadlessRunFunc = func(_ string, _ string, params scenario.Params, options headless.HeadlessOptions) error {
 				localCalls++
+				launchedParams = params
 				options.LaunchHooks.NotifySubmitted()
 				return nil
 			}
 			startMultiHostHeadlessRunFunc = func(
-				_ *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params, options headless.HeadlessOptions,
+				_ *tui.MultiHostOrchestrator, _ string, _ string, params scenario.Params, options headless.HeadlessOptions,
 			) error {
 				multiCalls++
+				launchedParams = params
 				options.LaunchHooks.NotifySubmitted()
 				return nil
 			}
@@ -295,8 +303,96 @@ func TestRunCmdWorkloadRoutesEveryHostTopology(t *testing.T) {
 			if test.wantAuto > 0 && (autoResultsContext == nil || autoResultsContext.Value(routeContextKey{}) != test.name) {
 				t.Fatalf("auto-results context = %#v, want command context marker %q", autoResultsContext, test.name)
 			}
+			if test.connectErr == nil && launchedParams.RunID <= 0 {
+				t.Fatalf("public %s run launched without a metrics run identity: %+v", test.workload, launchedParams)
+			}
 			if scenarioFiles, globErr := filepath.Glob("spt-scenario-*.js"); globErr != nil || len(scenarioFiles) != 0 {
 				t.Fatalf("scenario cleanup files = %v, glob error = %v", scenarioFiles, globErr)
+			}
+		})
+	}
+}
+
+func TestRunCmdDeleteFailedTrackerReturnsWorkloadFailureEveryTopology(t *testing.T) {
+	previousValidate := validateRunWorkloadTypeFunc
+	previousPort := resolvePortConflictFunc
+	previousConnect := connectMultiHostOrchestratorFunc
+	previousLocal := startLocalHeadlessRunFunc
+	previousMulti := startMultiHostHeadlessRunFunc
+	previousAutoResults := startAutoResultsFunc
+	t.Cleanup(func() {
+		validateRunWorkloadTypeFunc = previousValidate
+		resolvePortConflictFunc = previousPort
+		connectMultiHostOrchestratorFunc = previousConnect
+		startLocalHeadlessRunFunc = previousLocal
+		startMultiHostHeadlessRunFunc = previousMulti
+		startAutoResultsFunc = previousAutoResults
+	})
+	validateRunWorkloadTypeFunc = func(string) error { return nil }
+	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+		return &portcheck.ResolutionResult{Success: true}, nil
+	}
+	connectMultiHostOrchestratorFunc = func(context.Context, *tui.MultiHostOrchestrator) error {
+		return nil
+	}
+	startLocalHeadlessRunFunc = func(
+		_ string, _ string, _ scenario.Params, options headless.HeadlessOptions,
+	) error {
+		options.LaunchHooks.NotifySubmitted()
+		return nil
+	}
+	startMultiHostHeadlessRunFunc = func(
+		_ *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params,
+		options headless.HeadlessOptions,
+	) error {
+		options.LaunchHooks.NotifySubmitted()
+		return nil
+	}
+	const failureMessage = "DELETE failure budget exceeded"
+	startAutoResultsFunc = func(
+		_ context.Context, _ string, _ string, _ string, _ []string, _ int64, _ bool,
+		_ []*hostparse.HostInfo, _ string, _ bool, _ int, _ string, metadata *runMetadata,
+		_ io.Writer, _ io.Writer, _ string, _ func(context.Context),
+		_ ...*integrity.FinalizeOptions,
+	) *autoResultsMonitor {
+		monitor := &autoResultsMonitor{
+			done: make(chan autoResultsOutcome, 1), armed: make(chan struct{}),
+		}
+		go func() {
+			<-monitor.armed
+			outcome := autoResultsOutcome{Tracker: &portcheck.RunResult{
+				FinalState: constants.StateFailed, FailureStepID: "mt-002-delete",
+				FailureCategory: "execution", FailureMessage: failureMessage,
+			}}
+			outcome.Lifecycle.PreparedInputs = cleanupPreparedForMonitorTest(metadata)
+			monitor.done <- outcome
+		}()
+		return monitor
+	}
+
+	for _, topology := range []struct {
+		name, hosts, minHosts string
+	}{
+		{name: "local", hosts: "127.0.0.1", minHosts: "1"},
+		{name: "distributed", hosts: "entry.example,worker.example", minHosts: "2"},
+	} {
+		t.Run(topology.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			for name, value := range map[string]string{
+				"test-hosts": topology.hosts, "min-hosts": topology.minHosts,
+				"endpoints": "http://s3.example", "access-key": "access", "secret-key": "secret",
+				"bucket": "qualification", "object-count": "1", "duration": "", "threads": "1",
+				"headless": "true", "auto-results": "true", "shutdown-on-complete": "false",
+				"generate-only": "false", "items-file": "", "delete-batch-size": "1",
+			} {
+				setGlobalRunFlagForTest(t, name, value)
+			}
+
+			err := runCmd.RunE(runCmd, []string{WorkloadTypeDelete})
+			var exitErr *ExitCodeError
+			if !errors.As(err, &exitErr) || exitErr.Code != constants.ExitCodeWorkloadFailure ||
+				!strings.Contains(err.Error(), failureMessage) {
+				t.Fatalf("RunE() error = %#v, want workload failure preserving %q", err, failureMessage)
 			}
 		})
 	}
@@ -496,7 +592,7 @@ func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
 						"bucket": "qualification", "object-size": "1KiB", "object-count": "1",
 						"duration": "", "threads": "1", "headless": fmt.Sprint(headlessMode),
 						"auto-results": "true", "shutdown-on-complete": "false", "generate-only": "false",
-						"items-file": "",
+						"items-file": "", "verbose": "true",
 					} {
 						setGlobalRunFlagForTest(t, flag, value)
 					}
@@ -577,6 +673,9 @@ func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
 					}
 					startLocalTUIRunFunc = func(_ string, path string, _ scenario.Params, options tui.RunOptions) error {
 						assertPreparedContent(path, options.ScenarioContent, options.DefaultsContent)
+						if !options.Verbose {
+							t.Fatal("--verbose did not reach local TUI options")
+						}
 						if !options.LaunchHooks.SessionManaged() {
 							t.Fatal("auto-results route is not session managed")
 						}
@@ -584,6 +683,9 @@ func TestRunCmdLaunchErrorsRespectSubmissionState(t *testing.T) {
 					}
 					startMultiHostTUIRunFunc = func(_ *tui.MultiHostOrchestrator, _ string, path string, _ scenario.Params, options tui.RunOptions) error {
 						assertPreparedContent(path, options.ScenarioContent, options.DefaultsContent)
+						if !options.Verbose {
+							t.Fatal("--verbose did not reach distributed TUI options")
+						}
 						if !options.LaunchHooks.SessionManaged() {
 							t.Fatal("auto-results route is not session managed")
 						}

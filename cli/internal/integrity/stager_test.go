@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -62,6 +63,113 @@ func TestStageInputManifestCanonicalizesAndCommits(t *testing.T) {
 	}
 	if got.RunID != 123 || got.ProducerID != CLIStagerProducerID || got.SourceRecordCount != 6 || got.SelectedRecordCount != 5 {
 		t.Fatalf("unexpected completion: %+v", got)
+	}
+}
+
+func TestStageDeleteInputManifestCapsCanonicalSelectionAndRetainsEvidence(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "delete-input.csv")
+	content := "bucket,key,size,version_id\r\n" +
+		"b,z,3,version-z\r\n" +
+		"b,\"comma,key\",4,version-comma\r\n" +
+		"b,z,3,version-z\r\n" +
+		"b,alpha,5,\r\n"
+	if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	staged, err := StageDeleteInputManifest(source, 321, 2, "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(staged.StagingDir) }()
+
+	file, err := os.Open(staged.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := csv.NewReader(file).ReadAll()
+	_ = file.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{
+		{"bucket", "key", "size", "version_id"},
+		{"b", "alpha", "5", ""},
+		{"b", "comma,key", "4", "version-comma"},
+	}
+	if !reflect.DeepEqual(records, want) {
+		t.Fatalf("selected records = %#v, want %#v", records, want)
+	}
+	if staged.Completion.SourceRecordCount != 4 ||
+		staged.Completion.UniqueRecordCount != 3 ||
+		staged.Completion.SelectedRecordCount != 2 {
+		t.Fatalf("unexpected completion counts: %+v", staged.Completion)
+	}
+	if staged.MultipleBuckets {
+		t.Fatal("single-bucket selection reported multiple buckets")
+	}
+	if _, err = ValidateCompletion(
+		staged.ManifestPath,
+		staged.CompletionPath,
+		321,
+		constants.IntegrityProvenanceCLIStager,
+		CLIStagerProducerID,
+		VerifyInputName,
+	); err != nil {
+		t.Fatalf("delete completion evidence rejected: %v", err)
+	}
+}
+
+func TestStageDeleteInputManifestRejectsUnsafeSelections(t *testing.T) {
+	tests := []struct {
+		name           string
+		content        string
+		expectedBucket string
+		wantDetail     string
+	}{
+		{
+			name:       "empty",
+			content:    "bucket,key,size,version_id\n",
+			wantDetail: "must contain at least one object identity",
+		},
+		{
+			name: "bucket assertion checks every row before capping",
+			content: "bucket,key,size,version_id\n" +
+				"allowed,a,1,\n" +
+				"other,z,1,\n",
+			expectedBucket: "allowed",
+			wantDetail:     "does not match --bucket",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := filepath.Join(t.TempDir(), "delete-input.csv")
+			if err := os.WriteFile(source, []byte(test.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := StageDeleteInputManifest(source, 322, 1, test.expectedBucket)
+			if err == nil || !strings.Contains(err.Error(), test.wantDetail) {
+				t.Fatalf("StageDeleteInputManifest() error = %v, want %q", err, test.wantDetail)
+			}
+		})
+	}
+}
+
+func TestStageDeleteInputManifestDetectsMultipleBuckets(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "delete-input.csv")
+	if err := os.WriteFile(source, []byte(
+		"bucket,key,size,version_id\n"+
+			"b-one,key-a,1,\n"+
+			"b-two,key-b,1,version-b\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staged, err := StageDeleteInputManifest(source, 323, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(staged.StagingDir) }()
+	if !staged.MultipleBuckets {
+		t.Fatal("multi-bucket manifest was not detected")
 	}
 }
 

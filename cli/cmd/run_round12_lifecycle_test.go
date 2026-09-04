@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
@@ -105,6 +106,107 @@ func TestAutoResultsSetupFailureIsArtifactOutcome(t *testing.T) {
 				t.Fatalf("verification result = %v, want setup failure", runErr)
 			}
 		})
+	}
+}
+
+func TestResolveRunCompletionErrorFailsDeleteOnMissingTerminalMetrics(t *testing.T) {
+	failure := errors.New("authoritative DELETE detail is missing")
+	outcome := autoResultsOutcome{DeleteMetricsErr: failure}
+	err := resolveRunCompletionError(
+		nil, outcome, true, scenario.Params{WorkloadType: scenario.WorkloadTypeDelete})
+	if !errors.Is(err, failure) || !strings.Contains(err.Error(), "terminal DELETE metrics") {
+		t.Fatalf("DELETE completion error = %v, want terminal metrics failure", err)
+	}
+
+	nonDelete := resolveRunCompletionError(
+		nil, outcome, true, scenario.Params{WorkloadType: scenario.WorkloadTypeRead})
+	if nonDelete != nil {
+		t.Fatalf("non-DELETE result inherited DELETE metrics failure: %v", nonDelete)
+	}
+}
+
+func TestResolveRunCompletionErrorFailsDeleteOnRejectedTerminalOutcome(t *testing.T) {
+	failure := terminalDeleteOutcomeError(map[string]*deletemetrics.Metrics{
+		"mt-002-delete": {
+			FailurePolicy: deletemetrics.FailurePolicy{Outcome: deletemetrics.OutcomeFailed},
+		},
+	})
+	outcome := autoResultsOutcome{
+		Tracker:           &portcheck.RunResult{FinalState: constants.StateCompleted},
+		DeleteTerminalErr: failure,
+	}
+	err := resolveRunCompletionError(
+		nil, outcome, true, scenario.Params{WorkloadType: scenario.WorkloadTypeDelete})
+	if !errors.Is(err, failure) || !strings.Contains(err.Error(), "mt-002-delete") {
+		t.Fatalf("DELETE rejected outcome error = %v, want terminal policy failure", err)
+	}
+}
+
+func TestResolveRunCompletionErrorReportsVerificationFailureAsTerminalVerdict(t *testing.T) {
+	metrics := &deletemetrics.Metrics{
+		FailurePolicy: deletemetrics.FailurePolicy{Outcome: deletemetrics.OutcomeFailed},
+		Verification: deletemetrics.Verification{
+			AcceptedPresent: 1, CorrectnessFailures: 1,
+		},
+	}
+	failure := terminalDeleteOutcomeError(map[string]*deletemetrics.Metrics{
+		"mt-002-delete": metrics,
+	})
+	if failure == nil || !strings.Contains(strings.ToLower(failure.Error()), "verification") ||
+		strings.Contains(strings.ToLower(failure.Error()), "incomplete") {
+		t.Fatalf("DELETE verification terminal error = %v, want classified verification verdict", failure)
+	}
+}
+
+func TestResolveRunCompletionErrorPreservesPresenterFailureWithoutAutoResults(t *testing.T) {
+	presenterFailure := errors.New("owned DELETE presentation failed")
+	got := resolveRunCompletionError(
+		presenterFailure, autoResultsOutcome{}, false,
+		scenario.Params{WorkloadType: scenario.WorkloadTypeDelete})
+	if got != presenterFailure {
+		t.Fatalf("DELETE presenter error = %v, want original %v", got, presenterFailure)
+	}
+}
+
+func TestResolveRunCompletionErrorKeepsSeededCleanupFailureOutOfDeleteVerdict(t *testing.T) {
+	presenterFailure := &runcontrol.OwnedEngineTerminalFailure{Detail: "cleanup partially failed"}
+	cleanupFailure := autoResultsOutcome{Tracker: &portcheck.RunResult{
+		FinalState:      constants.StateFailed,
+		FailureStepID:   "mt-003-20260824.140000.000-cleanup",
+		FailureCategory: "execution",
+		FailureMessage:  "cleanup partially failed",
+	}}
+	params := scenario.Params{WorkloadType: scenario.WorkloadTypeDelete, Cleanup: true}
+	if got := resolveRunCompletionError(nil, cleanupFailure, true, params); got != nil {
+		t.Fatalf("cleanup-only failure changed measured DELETE verdict: %v", got)
+	}
+	if got := resolveRunCompletionError(presenterFailure, cleanupFailure, true, params); got != nil {
+		t.Fatalf("cleanup-only presenter failure changed measured DELETE exit status: %v", got)
+	}
+	independentFailure := errors.New("orchestrator cleanup failed")
+	if got := resolveRunCompletionError(independentFailure, cleanupFailure, true, params); !errors.Is(got, independentFailure) {
+		t.Fatalf("independent run failure was hidden by cleanup neutrality: %v", got)
+	}
+	if got := resolveRunCompletionError(
+		errors.Join(presenterFailure, independentFailure), cleanupFailure, true, params,
+	); !errors.Is(got, independentFailure) {
+		t.Fatalf("joined independent run failure was hidden by cleanup neutrality: %v", got)
+	}
+
+	measuredFailure := cleanupFailure
+	measuredFailure.Tracker = &portcheck.RunResult{
+		FinalState:      constants.StateFailed,
+		FailureStepID:   "mt-002-20260824.140000.000-delete",
+		FailureCategory: "execution",
+		FailureMessage:  "failure budget exceeded",
+	}
+	if got := resolveRunCompletionError(nil, measuredFailure, true, params); got == nil {
+		t.Fatal("measured DELETE failure was hidden by cleanup mode")
+	}
+
+	params.Cleanup = false
+	if got := resolveRunCompletionError(nil, cleanupFailure, true, params); got == nil {
+		t.Fatal("ordinary DELETE failure with cleanup-shaped step ID was ignored")
 	}
 }
 

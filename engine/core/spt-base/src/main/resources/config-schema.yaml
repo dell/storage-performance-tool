@@ -65,6 +65,26 @@ load:
     retryLimit: int
     shuffle: boolean
     type: string
+    delete:
+      standalone: boolean
+      batchSize: int
+      duration: boolean
+      selectionOrder: string
+      selected: long
+      selectedCurrentKey: long
+      selectedExactVersion: long
+      selectedBuckets: list
+      seedMillis: long
+      discoveryMillis: long
+      workflowStartedEpochNanos: long
+      preValidation: boolean
+      postVerification: boolean
+      verificationTimeoutMillis: long
+    failureBudget:
+      mode: string
+      maxFailedObjects: long
+      maxFailurePercent: double
+      graceSeconds: long
     list:
       delimiter: string
       fetch_metadata: boolean
@@ -109,6 +129,8 @@ output:
     quantiles: list
 run:
   id: long
+  cluster:
+    id: string
   comment: string
   node: boolean
   port: int
@@ -144,8 +166,11 @@ storage:
       expectedProducerId: string
       provenance: string
     mode: string
+    output:
+      requireExactCount: boolean
     selection:
       maxCount: long
+      requireNonEmpty: boolean
   namespace: string
   net:
     node:

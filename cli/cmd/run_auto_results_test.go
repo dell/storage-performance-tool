@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/integrityplan"
@@ -143,6 +144,144 @@ func TestSelectResultStepIDsSeparatesRuntimeFactsFromPlannedAliases(t *testing.T
 			}
 			assertManifestStepIDs("persisted manifest", persisted)
 		})
+	}
+}
+
+func TestCaptureStoredDeleteMetricsAssignsTerminalModelWithoutRawArtifact(t *testing.T) {
+	originalCapture := captureDeleteMetricsFunc
+	t.Cleanup(func() { captureDeleteMetricsFunc = originalCapture })
+	stored := &deletemetrics.Metrics{
+		Objects:            deletemetrics.Objects{Selected: 2, Attempted: 2, Accepted: 2},
+		TerminalReconciled: true,
+	}
+	captureDeleteMetricsFunc = func(
+		_ context.Context, baseURL string, runID int64, stepIDs, contributorIDs []string,
+		allowNodeFallback bool,
+	) (map[string]*deletemetrics.Metrics, error) {
+		if baseURL != "http://engine" || runID != 77 ||
+			len(stepIDs) != 1 || stepIDs[0] != "mt-002-20260823.100000.001-delete" ||
+			len(contributorIDs) != 1 || contributorIDs[0] != "local" || !allowNodeFallback {
+			t.Fatalf("capture identity = %q/%d steps=%v contributors=%v fallback=%t",
+				baseURL, runID, stepIDs, contributorIDs, allowNodeFallback)
+		}
+		return map[string]*deletemetrics.Metrics{"mt-002-20260823.100000.001-delete": stored}, nil
+	}
+	metadata := &runMetadata{
+		WorkloadType: WorkloadTypeDelete,
+		ExpectedStepIDs: []string{
+			"mt-001-20260823.100000.000-seed",
+			"mt-002-20260823.100000.000-delete",
+		},
+		Hosts: []runHostMetadata{{Host: "local", IsLocal: true}},
+	}
+	if err := captureStoredDeleteMetrics(
+		context.Background(), "http://engine", 77,
+		[]string{
+			"mt-001-20260823.100000.001-seed",
+			"mt-002-20260823.100000.001-delete",
+		}, metadata,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata.DeleteMetrics) != 1 ||
+		metadata.DeleteMetrics["mt-002-20260823.100000.001-delete"] != stored {
+		t.Fatalf("stored DELETE model = %+v", metadata.DeleteMetrics)
+	}
+	if len(metadata.DeleteArtifactStepIDs) != 1 ||
+		metadata.DeleteArtifactStepIDs[0] != "mt-002-20260823.100000.001-delete" {
+		t.Fatalf("runtime DELETE artifact steps = %v", metadata.DeleteArtifactStepIDs)
+	}
+}
+
+func TestCaptureStoredDeleteMetricsBindsFleetRuntimeDeleteIdentity(t *testing.T) {
+	originalCapture := captureDeleteMetricsFunc
+	t.Cleanup(func() { captureDeleteMetricsFunc = originalCapture })
+	captureDeleteMetricsFunc = func(
+		_ context.Context, _ string, _ int64, stepIDs, contributorIDs []string,
+		allowNodeFallback bool,
+	) (map[string]*deletemetrics.Metrics, error) {
+		if allowNodeFallback || len(stepIDs) != 1 || stepIDs[0] != "mt-001-20260823.100000.001-delete" ||
+			len(contributorIDs) != 2 || contributorIDs[0] != "local" ||
+			contributorIDs[1] != "192.0.2.25:1099" {
+			t.Fatalf("runtime fleet binding = steps %v contributors %v fallback %t",
+				stepIDs, contributorIDs, allowNodeFallback)
+		}
+		return map[string]*deletemetrics.Metrics{"mt-001-20260823.100000.001-delete": {}}, nil
+	}
+	metadata := &runMetadata{
+		WorkloadType:    WorkloadTypeDelete,
+		ExpectedStepIDs: []string{"mt-001-20260823.100000.000-delete"},
+		Hosts:           []runHostMetadata{{Host: "worker-a"}, {Host: "worker-b"}},
+		deleteContributors: func() ([]string, error) {
+			return []string{"local", "192.0.2.25:1099"}, nil
+		},
+	}
+	if err := captureStoredDeleteMetrics(
+		context.Background(), "http://engine", 77,
+		[]string{"mt-001-20260823.100000.001-delete"}, metadata,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBindRuntimeDeleteStepsRejectsContradictoryRuntimeEvidence(t *testing.T) {
+	planned := []string{"mt-002-20260823.100000.000-delete"}
+	tests := map[string][]string{
+		"missing planned ordinal": {"mt-001-20260823.100000.001-seed"},
+		"conflicting ordinal": {
+			"mt-002-20260823.100000.001-delete",
+			"mt-002-20260823.100000.002-delete",
+		},
+		"duplicate identity": {
+			"mt-002-20260823.100000.001-delete",
+			"mt-002-20260823.100000.001-delete",
+		},
+	}
+	for name, runtime := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := bindRuntimeDeleteSteps(planned, runtime); err == nil {
+				t.Fatal("contradictory runtime DELETE identity was accepted")
+			}
+		})
+	}
+}
+
+func TestCaptureStoredDeleteMetricsRejectsEmptyTerminalModel(t *testing.T) {
+	originalCapture := captureDeleteMetricsFunc
+	t.Cleanup(func() { captureDeleteMetricsFunc = originalCapture })
+	captureDeleteMetricsFunc = func(
+		context.Context, string, int64, []string, []string, bool,
+	) (map[string]*deletemetrics.Metrics, error) {
+		return nil, nil
+	}
+	metadata := &runMetadata{
+		WorkloadType:    WorkloadTypeDelete,
+		ExpectedStepIDs: []string{"mt-001-20260823.100000.000-delete"},
+		Hosts:           []runHostMetadata{{Host: "local", IsLocal: true}},
+	}
+	if err := captureStoredDeleteMetrics(
+		context.Background(), "http://engine", 77,
+		[]string{"mt-001-20260823.100000.000-delete"}, metadata,
+	); err == nil {
+		t.Fatal("empty terminal DELETE model was accepted")
+	}
+	if metadata.DeleteMetricsError == "" || metadata.DeleteMetrics != nil {
+		t.Fatalf("incomplete stored DELETE model = metrics %+v error %q",
+			metadata.DeleteMetrics, metadata.DeleteMetricsError)
+	}
+}
+
+func TestCaptureStoredDeleteMetricsRejectsFleetWithoutRuntimeContributorIdentity(t *testing.T) {
+	metadata := &runMetadata{
+		WorkloadType:    WorkloadTypeDelete,
+		ExpectedStepIDs: []string{"mt-001-20260823.100000.000-delete"},
+		Hosts:           []runHostMetadata{{Host: "worker-a"}, {Host: "worker-b"}},
+	}
+	if err := captureStoredDeleteMetrics(
+		context.Background(), "http://engine", 77,
+		[]string{"mt-001-20260823.100000.001-delete"}, metadata,
+	); err == nil || !strings.Contains(err.Error(), "contributor identity") {
+		t.Fatalf("missing runtime contributor identity error = %v", err)
 	}
 }
 

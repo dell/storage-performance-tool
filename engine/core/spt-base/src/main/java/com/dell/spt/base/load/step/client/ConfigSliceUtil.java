@@ -53,6 +53,19 @@ public interface ConfigSliceUtil {
 		}
 	}
 
+	static void sliceLongValueBalanced(
+					final long configVal, final List<Config> configSlices, final String configPath) {
+		final var sliceCount = configSlices.size();
+		final var configValPerSlice = configVal / sliceCount;
+		final var remainder = configVal % sliceCount;
+		for (var i = 0; i < sliceCount; i++) {
+			final var configSlice = configSlices.get(i);
+			final var sliceVal = configValPerSlice + (i < remainder ? 1 : 0);
+			Loggers.MSG.debug("Config slice #{}: {} = {}", i, configPath, sliceVal);
+			configSlice.val(configPath, sliceVal);
+		}
+	}
+
 	static void sliceDoubleValue(
 					final double configVal, final List<Config> configSlices, final String configPath) {
 		final var sliceCount = configSlices.size();

@@ -8,7 +8,9 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
@@ -16,6 +18,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/sizeparse"
 	"github.com/dell/storage-performance-tool/cli/internal/workload"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // ValidateWorkloadType checks if the provided workload type is valid
@@ -51,7 +54,12 @@ func ValidateS3Flags(cmd *cobra.Command, workloadType string) error {
 	}
 
 	// Tables workload uses --table-bucket instead of --bucket
-	if workloadType != WorkloadTypeTables {
+	itemsFile := ""
+	if flag := cmd.Flags().Lookup("items-file"); flag != nil {
+		itemsFile, _ = cmd.Flags().GetString("items-file")
+	}
+	if workloadType != WorkloadTypeTables &&
+		(workloadType != WorkloadTypeDelete || strings.TrimSpace(itemsFile) == "") {
 		bucket, _ := cmd.Flags().GetString("bucket")
 		if bucket == "" {
 			return fmt.Errorf(ErrMissingBucket, workloadType)
@@ -69,7 +77,7 @@ func ValidateDurationOrCount(cmd *cobra.Command) error {
 		return errors.New("--object-count must be >= 0")
 	}
 
-	// Only error if BOTH are specified - it's OK if neither is specified (will default to 100 objects)
+	// Workload-specific preparation resolves the omitted count or duration after validation.
 	if objectCount != 0 && duration != "" {
 		return errors.New("cannot specify both --object-count and --duration")
 	}
@@ -182,6 +190,12 @@ func validateReadPhasePauseFlag(cmd *cobra.Command, workloadType string) error {
 
 func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) error {
 	verification := workloadType == WorkloadTypeWriteVerify || workloadType == WorkloadTypeReadVerify
+	deleteExisting := false
+	if flag := cmd.Flags().Lookup(flagDeleteExisting); flag != nil {
+		deleteExisting, _ = cmd.Flags().GetBool(flagDeleteExisting)
+	}
+	requiresRuntimeIdentity := verification ||
+		(workloadType == WorkloadTypeDelete && deleteExisting)
 	changed := func(name string) bool {
 		flag := cmd.Flags().Lookup(name)
 		if flag == nil || !flag.Changed {
@@ -209,10 +223,12 @@ func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) err
 		if changed("integrity-max-console-failures") {
 			return fmt.Errorf(ErrFlagNotSupported, "--integrity-max-console-failures", workloadType)
 		}
-		if changed(flagIntegrityRuntimeIdentityTier) {
+		if changed(flagIntegrityRuntimeIdentityTier) && !requiresRuntimeIdentity {
 			return fmt.Errorf(ErrFlagNotSupported, "--"+flagIntegrityRuntimeIdentityTier, workloadType)
 		}
-		return nil
+		if !requiresRuntimeIdentity {
+			return nil
+		}
 	}
 	identityTier, _ := cmd.Flags().GetString(flagIntegrityRuntimeIdentityTier)
 	switch identityTier {
@@ -220,6 +236,9 @@ func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) err
 	default:
 		return fmt.Errorf("--%s must be %q or %q", flagIntegrityRuntimeIdentityTier,
 			constants.IntegrityRuntimeIdentityTierImage, constants.IntegrityRuntimeIdentityTierPayload)
+	}
+	if !verification {
+		return nil
 	}
 	if flag := cmd.Flags().Lookup("auto-results"); flag != nil {
 		enabled, _ := cmd.Flags().GetBool("auto-results")
@@ -244,7 +263,7 @@ func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) err
 	}
 	for _, override := range mustStringArrayFlag(cmd, flagEngineOverride) {
 		path, value, _ := strings.Cut(override, "=")
-		normalized := strings.ReplaceAll(strings.TrimSpace(path), "-", ".")
+		normalized := normalizeEngineOverridePath(path)
 		if _, excluded := integrityExcludedEngineOverridePaths[normalized]; excluded {
 			return fmt.Errorf(
 				"engine override %q is excluded from verification workloads",
@@ -290,6 +309,26 @@ var integrityExcludedEngineOverridePaths = map[string]struct{}{
 	"load.op.type":                   {},
 }
 
+var standaloneDeleteExcludedEngineOverridePaths = map[string]struct{}{
+	"load.op.shuffle": {},
+}
+
+func normalizeEngineOverridePath(path string) string {
+	return strings.ReplaceAll(strings.TrimSpace(path), "-", ".")
+}
+
+func validateStandaloneDeleteEngineOverrides(cmd *cobra.Command) error {
+	for _, override := range mustStringArrayFlag(cmd, flagEngineOverride) {
+		path, value, _ := strings.Cut(override, "=")
+		if _, excluded := standaloneDeleteExcludedEngineOverridePaths[normalizeEngineOverridePath(path)]; excluded {
+			return fmt.Errorf(
+				"engine override %q is excluded from standalone DELETE",
+				secretmask.EngineOverride(path+"="+value))
+		}
+	}
+	return nil
+}
+
 func mustStringArrayFlag(cmd *cobra.Command, name string) []string {
 	if cmd.Flags().Lookup(name) == nil {
 		return nil
@@ -327,6 +366,10 @@ func ValidateRunCommand(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+	if err := validateDeleteManifestFlags(cmd, workloadType); err != nil {
+		cmd.SilenceUsage = false
+		return err
+	}
 
 	if err := validateReadShuffleFlags(cmd, workloadType); err != nil {
 		cmd.SilenceUsage = false
@@ -358,6 +401,147 @@ func ValidateRunCommand(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	return nil
+}
+
+func validateDeleteManifestFlags(cmd *cobra.Command, workloadType string) error {
+	batchFlag := cmd.Flags().Lookup(flagDeleteBatchSize)
+	deleteExistingFlag := cmd.Flags().Lookup(flagDeleteExisting)
+	allowEmptyPrefixFlag := cmd.Flags().Lookup(flagAllowEmptyPrefix)
+	maxFailedObjectsFlag := cmd.Flags().Lookup(flagMaxFailedObjects)
+	maxFailurePercentFlag := cmd.Flags().Lookup(flagMaxFailurePercent)
+	failureBudgetGraceFlag := cmd.Flags().Lookup(flagFailureBudgetGrace)
+	validateInventoryFlag := cmd.Flags().Lookup(flagValidateInventory)
+	verifyDeleteFlag := cmd.Flags().Lookup(flagVerifyDelete)
+	verificationTimeoutFlag := cmd.Flags().Lookup(flagVerificationTimeout)
+	if workloadType != WorkloadTypeDelete {
+		if batchFlag != nil && batchFlag.Changed {
+			return fmt.Errorf(ErrFlagNotSupported, "--"+flagDeleteBatchSize, workloadType)
+		}
+		if deleteExistingFlag != nil && deleteExistingFlag.Changed {
+			return fmt.Errorf(ErrFlagNotSupported, "--"+flagDeleteExisting, workloadType)
+		}
+		if allowEmptyPrefixFlag != nil && allowEmptyPrefixFlag.Changed {
+			return fmt.Errorf(ErrFlagNotSupported, "--"+flagAllowEmptyPrefix, workloadType)
+		}
+		for _, flag := range []*pflag.Flag{
+			maxFailedObjectsFlag, maxFailurePercentFlag, failureBudgetGraceFlag,
+			validateInventoryFlag, verifyDeleteFlag, verificationTimeoutFlag,
+		} {
+			if flag != nil && flag.Changed {
+				return fmt.Errorf(ErrFlagNotSupported, "--"+flag.Name, workloadType)
+			}
+		}
+		return nil
+	}
+	if err := validateStandaloneDeleteEngineOverrides(cmd); err != nil {
+		return err
+	}
+	if maxFailedObjectsFlag != nil && maxFailurePercentFlag != nil &&
+		maxFailedObjectsFlag.Changed && maxFailurePercentFlag.Changed {
+		return errors.New("--max-failed-objects and --max-failure-percent are mutually exclusive")
+	}
+	if maxFailedObjectsFlag != nil {
+		maxFailedObjects, _ := cmd.Flags().GetInt64(flagMaxFailedObjects)
+		if maxFailedObjects < 0 {
+			return errors.New("--max-failed-objects must be greater than or equal to zero")
+		}
+	}
+	maxFailurePercent := 0.0
+	if maxFailurePercentFlag != nil {
+		maxFailurePercent, _ = cmd.Flags().GetFloat64(flagMaxFailurePercent)
+		if math.IsNaN(maxFailurePercent) || math.IsInf(maxFailurePercent, 0) ||
+			maxFailurePercent < 0 || maxFailurePercent > 100 {
+			return errors.New("--max-failure-percent must be between 0 and 100 inclusive")
+		}
+	}
+	if failureBudgetGraceFlag != nil {
+		failureBudgetGrace, _ := cmd.Flags().GetDuration(flagFailureBudgetGrace)
+		if failureBudgetGrace < 0 {
+			return errors.New("--failure-budget-grace must be greater than or equal to zero")
+		}
+		if failureBudgetGrace%time.Second != 0 {
+			return errors.New("--failure-budget-grace must be a whole number of seconds")
+		}
+		if failureBudgetGraceFlag.Changed &&
+			(maxFailurePercentFlag == nil || !maxFailurePercentFlag.Changed || maxFailurePercent <= 0) {
+			return errors.New("--failure-budget-grace requires a positive --max-failure-percent")
+		}
+	}
+	if verificationTimeoutFlag != nil {
+		verificationTimeout, _ := cmd.Flags().GetDuration(flagVerificationTimeout)
+		if verificationTimeout <= 0 {
+			return errors.New("--verification-timeout must be greater than zero")
+		}
+		if verificationTimeout%time.Millisecond != 0 {
+			return errors.New("--verification-timeout must use whole milliseconds")
+		}
+	}
+	if autoTerminate, _ := cmd.Flags().GetInt("auto-terminate-seconds"); autoTerminate > 0 {
+		return errors.New("standalone DELETE does not support --auto-terminate-seconds; use --duration and provide enough live inventory for the full interval")
+	}
+	batchSize := scenario.DefaultDeleteBatchSize
+	if batchFlag != nil {
+		batchSize, _ = cmd.Flags().GetInt(flagDeleteBatchSize)
+	}
+	if batchSize < scenario.MinDeleteBatchSize || batchSize > scenario.MaxDeleteBatchSize {
+		return fmt.Errorf("--%s must be between %d and %d", flagDeleteBatchSize,
+			scenario.MinDeleteBatchSize, scenario.MaxDeleteBatchSize)
+	}
+	itemsFile := ""
+	if flag := cmd.Flags().Lookup("items-file"); flag != nil {
+		itemsFile, _ = cmd.Flags().GetString("items-file")
+	}
+	deleteExisting := false
+	if deleteExistingFlag != nil {
+		deleteExisting, _ = cmd.Flags().GetBool(flagDeleteExisting)
+	}
+	allowEmptyPrefix := false
+	if allowEmptyPrefixFlag != nil {
+		allowEmptyPrefix, _ = cmd.Flags().GetBool(flagAllowEmptyPrefix)
+	}
+	if strings.TrimSpace(itemsFile) != "" && deleteExisting {
+		return errors.New("DELETE --items-file and --delete-existing are mutually exclusive source modes")
+	}
+	if allowEmptyPrefix && !deleteExisting {
+		return errors.New("DELETE --allow-empty-prefix requires --delete-existing")
+	}
+	if deleteExisting {
+		cleanup, _ := cmd.Flags().GetBool("cleanup")
+		if cleanup {
+			return errors.New("DELETE --delete-existing cannot be used with --cleanup because SPT did not create those objects")
+		}
+		prefixFlag := cmd.Flags().Lookup("prefix")
+		if prefixFlag == nil || !prefixFlag.Changed {
+			return errors.New("DELETE --delete-existing requires an explicit --prefix; use --prefix='' with --allow-empty-prefix only for intentional whole-bucket selection")
+		}
+		prefix, _ := cmd.Flags().GetString("prefix")
+		if prefix == "" && !allowEmptyPrefix {
+			return errors.New("DELETE whole-bucket selection requires both --prefix='' and --allow-empty-prefix")
+		}
+		if strings.HasPrefix(prefix, "/") {
+			return errors.New("DELETE existing-prefix --prefix must not start with '/' because S3 LIST removes that slash")
+		}
+		return nil
+	}
+	if strings.TrimSpace(itemsFile) == "" {
+		duration, _ := cmd.Flags().GetString("duration")
+		if strings.TrimSpace(duration) != "" {
+			seedObjects, _ := cmd.Flags().GetInt("seed-objects")
+			if seedObjects <= 0 {
+				return errors.New("DELETE duration mode requires --seed-objects to be greater than zero")
+			}
+		}
+		return nil
+	}
+	prefix, _ := cmd.Flags().GetString("prefix")
+	if strings.TrimSpace(prefix) != "" {
+		return errors.New("DELETE --items-file cannot be combined with --prefix")
+	}
+	cleanup, _ := cmd.Flags().GetBool("cleanup")
+	if cleanup {
+		return errors.New("DELETE --items-file cannot be used with --cleanup because SPT did not create those objects")
+	}
 	return nil
 }
 

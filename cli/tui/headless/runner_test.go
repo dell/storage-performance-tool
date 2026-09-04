@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,11 +17,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
+	resultsummary "github.com/dell/storage-performance-tool/cli/internal/results/summary"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/tui"
@@ -401,6 +405,227 @@ func TestHeadlessRunner_MetricsJSONOmitsUnavailableTTFB(t *testing.T) {
 	}
 }
 
+func TestHeadlessRunnerDeleteMetricsKeepLiveOutputCompactAndStructuredOutputComplete(t *testing.T) {
+	mockDocker := &tui.MockDockerManager{}
+	traceFile := filepath.Join(t.TempDir(), "delete-metrics.log")
+	runner, err := NewHeadlessRunner(mockDocker, HeadlessOptions{TraceFile: traceFile})
+	if err != nil {
+		t.Fatalf("create runner: %v", err)
+	}
+	defer runner.Close()
+
+	metric := tui.PerformanceMetric{
+		OpType: "DELETE", OpsPerSec: 3, SuccessCount: 1, FailedCount: 2,
+		Partial: true, NodesCount: 2, NodesPresent: []string{"remote-node:1099"},
+		ContributorsPresent: []string{"local"},
+		Delete: &tui.DeleteMetrics{
+			Units:      tui.DeleteMetricUnits{Requests: "logical_api_requests", Objects: "object_identities", Batches: "logical_api_requests"},
+			Requests:   tui.DeleteRequestMetrics{Attempted: 3, FullSuccess: 1, Partial: 1, Failed: 1, PerSecond: 3},
+			Objects:    tui.DeleteObjectMetrics{Selected: 175, Attempted: 175, Accepted: 170, Failed: 5, PerSecond: 175},
+			Batches:    tui.DeleteBatchMetrics{ConfiguredSize: 100, ActualRequestCount: 3, ActualObjectCount: 175, MeanObjectsPerRequest: 58.333, FullBatchCount: 1, PartialBatchCount: 2, FullBatchPercent: 33.333},
+			Completion: tui.DeleteCompletionMetrics{RequestPercent: 100, ObjectPercent: 100, TerminalReconciled: true},
+			Versions:   tui.DeleteVersionMetrics{CurrentKey: 150, ExactVersion: 25},
+			Buckets:    []tui.DeleteBucketMetrics{{Bucket: "bucket-a", Selected: 175, Attempted: 175, Accepted: 170, Failed: 5}},
+			Identity:   tui.DeleteResultIdentity{Mode: "batch", ConfiguredBatchSize: 100, SelectionOrder: "canonical"},
+			FailurePolicy: tui.DeleteFailurePolicy{
+				Mode: "fixed", MaxFailedObjects: 100000,
+				Outcome:                  deletemetrics.OutcomeCompletedWithinFailureBudget,
+				OperationalFailedObjects: 3, ExcludedFailedObjects: 2,
+			},
+			Timing: tui.DeleteTimingMetrics{
+				LatencyDefinition:  "first_request_byte_sent_to_first_response_byte_received",
+				DurationDefinition: "request_formulation_to_last_response_byte_received",
+				Latency:            &tui.JSONTimingStat{Count: 3, P50Us: 10, P90Us: 20, P99Us: 30, P999Us: 40},
+				Duration:           &tui.JSONTimingStat{Count: 3, P50Us: 50, P90Us: 60, P99Us: 70, P999Us: 80},
+			},
+			Performance: tui.DeletePerformanceApplicability{
+				ObjectSize: "not_applicable", DataMoved: "not_applicable",
+				Bandwidth: "not_applicable", TTFB: "not_applicable",
+			},
+			OutcomeTerminology: "accepted",
+			TerminalReconciled: true,
+			Verification: tui.DeleteVerificationMetrics{
+				Enabled: false,
+				Notice:  "Verification disabled; results describe logical DELETE API outcomes, not confirmed object removal.",
+			},
+		},
+	}
+	human := formatMetricsMessage(metric)
+	const wantHuman = "ops/sec=3 latency=10µs type=DELETE success=1 failed=2"
+	if human != wantHuman {
+		t.Fatalf("DELETE live metrics = %q, want %q", human, wantHuman)
+	}
+	for _, unwanted := range []string{
+		"units=", "selected=", "buckets=", "latency_stats=", "verification=",
+	} {
+		if strings.Contains(human, unwanted) {
+			t.Fatalf("DELETE live metrics contain detailed field %q: %s", unwanted, human)
+		}
+	}
+	runner.outputMetrics(metric)
+	runner.outputMetricsJSON(metric)
+
+	content, err := os.ReadFile(traceFile)
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	got := string(content)
+	if !strings.Contains(got, "[METRICS] "+wantHuman) {
+		t.Fatalf("DELETE live metrics missing compact summary:\n%s", got)
+	}
+	for _, want := range []string{
+		`"delete":`, `"outcome_terminology":"accepted"`,
+		`"object_size":"not_applicable"`, `"removal_confirmed":false`,
+		`"partial":true`, `"nodes_count":2`, `"nodes_present":["remote-node:1099"]`,
+		`"contributors_present":["local"]`,
+		`"accepted":170`, `"failed":5`, `"mode":"fixed"`,
+		`"outcome":"completed_within_failure_budget"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("DELETE headless JSON output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestDeleteMetricsCrossViewFixtureKeepsEngineAPIHeadlessStoredAggregatePerNodeAndTUIConsistent(t *testing.T) {
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate cross-view test source")
+	}
+	fixturePath := filepath.Clean(filepath.Join(
+		filepath.Dir(sourceFile),
+		"../../../engine/core/spt-base/src/test/resources/delete-metrics-v4-cross-view.json"))
+	payload, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("read engine/API cross-view fixture: %v", err)
+	}
+	api := tui.NewSptAPIClient("")
+	fleet, err := api.ParseFleetJSONMetrics(string(payload))
+	if err != nil || len(fleet) != 1 {
+		t.Fatalf("parse authoritative engine API view: metrics=%+v err=%v", fleet, err)
+	}
+	nodes, err := api.ParseJSONMetrics(string(payload))
+	if err != nil || len(nodes) != 2 {
+		t.Fatalf("parse per-node engine API views: metrics=%+v err=%v", nodes, err)
+	}
+	byNode := make(map[string]*tui.PerformanceMetric, len(nodes))
+	for _, node := range nodes {
+		byNode[node.NodeID] = node
+	}
+	aggregate := tui.NewMetricsAggregator().Aggregate(byNode)
+	if aggregate == nil || aggregate.Delete == nil {
+		t.Fatal("aggregate view lost DELETE detail")
+	}
+	want := fleet[0].Delete
+	if want.FailurePolicy.Outcome != deletemetrics.OutcomeCompletedWithinFailureBudget {
+		t.Fatalf("engine fleet view lost controller outcome: %+v", want.FailurePolicy)
+	}
+	if aggregate.Delete.Units != want.Units ||
+		aggregate.Delete.Requests != want.Requests ||
+		aggregate.Delete.Objects != want.Objects ||
+		aggregate.Delete.Batches != want.Batches {
+		t.Fatalf("aggregate units/counters differ from engine fleet view:\naggregate=%+v\nfleet=%+v",
+			aggregate.Delete, want)
+	}
+	if err := deletemetrics.ValidateTerminal(want); err != nil {
+		t.Fatalf("shared engine terminal model is invalid: %v", err)
+	}
+	for _, metric := range append(nodes, fleet[0]) {
+		human := formatMetricsMessage(*metric)
+		expected := fmt.Sprintf("ops/sec=%d latency=%s type=%s success=%d failed=%d",
+			metric.OpsPerSec, formatOptionalMicros(deleteTimingMicros(metric.Delete.Timing.Latency)),
+			metric.OpType, metric.SuccessCount, metric.FailedCount)
+		if human != expected {
+			t.Fatalf("headless per-node/aggregate summary = %q, want %q", human, expected)
+		}
+	}
+	if fleet[0].OpsPerSec != 3 || fleet[0].SuccessCount != 2 || fleet[0].FailedCount != 1 {
+		t.Fatalf("unchanged TUI generic request view changed units: %+v", fleet[0])
+	}
+	report := resultsummary.NewRenderer(resultsummary.RenderOptions{}).FullReport(
+		&resultsummary.RunSummary{
+			RunID: "cross-view",
+			Steps: []resultsummary.StepSummary{{
+				PhaseLabel: "Delete", Operation: "DELETE", Delete: want,
+			}},
+		})
+	for _, expected := range []string{
+		"requests=logical_api_requests, objects=object_identities, batches=logical_api_requests",
+		"attempted 3, full success 2, partial 1, failed 0",
+		"selected 175, attempted 175, accepted 170, failed 5",
+		"completed within failure budget",
+	} {
+		if !strings.Contains(report, expected) {
+			t.Fatalf("stored view omitted shared value %q:\n%s", expected, report)
+		}
+	}
+}
+
+func TestStrictPreValidationAbortFixtureReachesGoHeadlessAndStoredViews(t *testing.T) {
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate strict pre-validation fixture source")
+	}
+	fixturePath := filepath.Clean(filepath.Join(
+		filepath.Dir(sourceFile),
+		"../../../engine/core/spt-base/src/test/resources/delete-metrics-v4-strict-pre-abort.json"))
+	payload, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("read strict pre-validation fixture: %v", err)
+	}
+	fleet, err := tui.NewSptAPIClient("").ParseFleetJSONMetrics(string(payload))
+	if err != nil || len(fleet) != 1 || fleet[0].Delete == nil {
+		t.Fatalf("parse strict pre-validation fixture: metrics=%+v err=%v", fleet, err)
+	}
+	metric := fleet[0]
+	if metric.Partial {
+		t.Fatalf("valid strict pre-validation abort was marked partial: %+v", metric.Delete)
+	}
+	if err := deletemetrics.ValidateTerminal(metric.Delete); err != nil {
+		t.Fatalf("strict pre-validation abort failed shared validation: %v", err)
+	}
+	if !metric.Delete.Verification.PreValidationComplete ||
+		metric.Delete.Verification.PostVerificationComplete ||
+		!metric.Delete.Verification.PostVerificationSkipped ||
+		metric.Delete.Phases.PostVerificationSeconds != nil {
+		t.Fatalf("strict pre-validation abort phase state = %+v", metric.Delete)
+	}
+	human := formatMetricsMessage(*metric)
+	if !strings.Contains(human, "type=DELETE") || strings.Contains(human, "pre_validation=") {
+		t.Fatalf("strict-abort live metrics are not compact: %s", human)
+	}
+	encoded, err := marshalMetricsJSON(*metric, "aggregate", "")
+	if err != nil {
+		t.Fatalf("encode strict-abort headless JSON: %v", err)
+	}
+	structured := string(encoded)
+	for _, expected := range []string{
+		`"pre_validation_enabled":true`, `"pre_validation_complete":true`,
+		`"post_verification_enabled":true`, `"post_verification_complete":false`,
+		`"post_verification_skipped":true`, deletemetrics.PostVerificationSkippedNotice,
+	} {
+		if !strings.Contains(structured, expected) {
+			t.Fatalf("structured headless strict-abort view omitted %q: %s", expected, structured)
+		}
+	}
+	report := resultsummary.NewRenderer(resultsummary.RenderOptions{}).FullReport(
+		&resultsummary.RunSummary{
+			RunID: "strict-pre-abort",
+			Steps: []resultsummary.StepSummary{{
+				PhaseLabel: "Delete", Operation: "DELETE", Delete: metric.Delete,
+			}},
+		})
+	for _, expected := range []string{
+		"pre-validation true (complete true)",
+		"post-verification true (complete false, skipped true)",
+		deletemetrics.PostVerificationSkippedNotice,
+	} {
+		if !strings.Contains(report, expected) {
+			t.Fatalf("stored strict-abort view omitted %q:\n%s", expected, report)
+		}
+	}
+}
+
 func TestHeadlessRunner_MetricsOutputIncludesAvailableTTFB(t *testing.T) {
 	mockDocker := &tui.MockDockerManager{}
 	tmpDir := t.TempDir()
@@ -607,6 +832,216 @@ func TestHeadlessRunner_SingleOpNoPerOpLines(t *testing.T) {
 	count := strings.Count(trace, "[METRICS]")
 	if count != 1 {
 		t.Errorf("expected exactly 1 METRICS line for single-op workload, got %d", count)
+	}
+}
+
+func TestMultiHostHeadlessRunnerEmitsAggregateAndPerNodeDeleteMetrics(t *testing.T) {
+	tmpDir := t.TempDir()
+	traceFile := filepath.Join(tmpDir, "multi-delete-metrics.log")
+	runner, err := NewMultiHostHeadlessRunner(
+		tui.NewMultiHostOrchestrator(nil, 1),
+		HeadlessOptions{TraceFile: traceFile, Verbose: true})
+	if err != nil {
+		t.Fatalf("new multi-host runner: %v", err)
+	}
+	defer runner.Close()
+
+	deleteMetric := &tui.PerformanceMetric{
+		MetricsSchema: 4,
+		Scope:         "fleet",
+		Role:          "aggregate",
+		OpType:        "DELETE",
+		NodeID:        "local",
+		Delete: &tui.DeleteMetrics{
+			Requests: tui.DeleteRequestMetrics{Attempted: 1, FullSuccess: 1},
+			Objects:  tui.DeleteObjectMetrics{Selected: 1, Attempted: 1, Accepted: 1},
+			Performance: tui.DeletePerformanceApplicability{
+				ObjectSize: "not_applicable", DataMoved: "not_applicable",
+				Bandwidth: "not_applicable", TTFB: "not_applicable",
+			},
+		},
+	}
+	runner.outputMetricsUpdate(&tui.MultiNodeMetricsUpdate{
+		Aggregated: deleteMetric,
+		PerNode:    map[string]*tui.PerformanceMetric{"entry": deleteMetric},
+		PerOpType:  map[string]*tui.PerformanceMetric{"DELETE": deleteMetric},
+	})
+
+	content, err := os.ReadFile(traceFile)
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	trace := string(content)
+	if !strings.Contains(trace, "view=aggregate") ||
+		!strings.Contains(trace, "view=node contributor=entry") ||
+		!strings.Contains(trace, "type=DELETE success=0 failed=0") ||
+		strings.Contains(trace, "object_size=") {
+		t.Fatalf("multi-host DELETE views missing: %q", trace)
+	}
+}
+
+func TestHeadlessRunnersGateHumanMetricsByVerbose(t *testing.T) {
+	metric := &tui.PerformanceMetric{
+		MetricsSchema: 2,
+		OpType:        "CREATE",
+		OpsPerSec:     42,
+		SuccessCount:  100,
+	}
+
+	for _, test := range []struct {
+		name    string
+		verbose bool
+		want    bool
+	}{
+		{name: "default output is quiet", verbose: false, want: false},
+		{name: "verbose output includes metrics", verbose: true, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Run("single host", func(t *testing.T) {
+				traceFile := filepath.Join(t.TempDir(), "single.log")
+				runner, err := NewHeadlessRunner(
+					&tui.MockDockerManager{},
+					HeadlessOptions{TraceFile: traceFile, Verbose: test.verbose},
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer runner.Close()
+
+				runner.outputMetricsUpdate(&tui.MultiNodeMetricsUpdate{Aggregated: metric})
+				content, err := os.ReadFile(traceFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := strings.Contains(string(content), "[METRICS]"); got != test.want {
+					t.Fatalf("metrics visible = %t, want %t; trace=%q", got, test.want, content)
+				}
+			})
+
+			t.Run("multi host", func(t *testing.T) {
+				traceFile := filepath.Join(t.TempDir(), "multi.log")
+				runner, err := NewMultiHostHeadlessRunner(
+					tui.NewMultiHostOrchestrator(nil, 1),
+					HeadlessOptions{TraceFile: traceFile, Verbose: test.verbose},
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer runner.Close()
+
+				runner.outputMetricsUpdate(&tui.MultiNodeMetricsUpdate{
+					Aggregated: metric,
+					PerNode:    map[string]*tui.PerformanceMetric{"worker": metric},
+				})
+				content, err := os.ReadFile(traceFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := strings.Contains(string(content), "[METRICS]"); got != test.want {
+					t.Fatalf("metrics visible = %t, want %t; trace=%q", got, test.want, content)
+				}
+			})
+		})
+	}
+}
+
+func TestHeadlessMetricsOnlyModeKeepsMetricsWithoutVerbose(t *testing.T) {
+	traceFile := filepath.Join(t.TempDir(), "metrics-only.log")
+	runner, err := NewMultiHostHeadlessRunner(
+		tui.NewMultiHostOrchestrator(nil, 1),
+		HeadlessOptions{TraceFile: traceFile, MetricsOnly: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.Close()
+
+	runner.outputMetricsUpdate(&tui.MultiNodeMetricsUpdate{
+		Aggregated: &tui.PerformanceMetric{OpType: "CREATE", OpsPerSec: 42},
+	})
+	content, err := os.ReadFile(traceFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "[METRICS]") {
+		t.Fatalf("metrics-only output omitted metrics: %q", content)
+	}
+}
+
+func TestMultiHostHeadlessRunnerJSONLabelsDeleteMetricViews(t *testing.T) {
+	traceFile := filepath.Join(t.TempDir(), "multi-delete-metrics.jsonl")
+	runner, err := NewMultiHostHeadlessRunner(
+		tui.NewMultiHostOrchestrator(nil, 1),
+		HeadlessOptions{TraceFile: traceFile, JSONMode: true})
+	if err != nil {
+		t.Fatalf("new multi-host runner: %v", err)
+	}
+	defer runner.Close()
+
+	metric := &tui.PerformanceMetric{
+		MetricsSchema: 4,
+		OpType:        "DELETE",
+		Delete:        &tui.DeleteMetrics{},
+	}
+	runner.outputMetricsUpdate(&tui.MultiNodeMetricsUpdate{
+		Aggregated: metric,
+		PerNode:    map[string]*tui.PerformanceMetric{"entry": metric},
+	})
+
+	content, err := os.ReadFile(traceFile)
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	trace := string(content)
+	if !strings.Contains(trace, `"view":"aggregate"`) ||
+		!strings.Contains(trace, `"view":"node","contributor":"entry"`) {
+		t.Fatalf("multi-host JSON DELETE views missing: %q", trace)
+	}
+}
+
+func TestSchema4DeleteUsesRealTimingDistributionAndRendersEmptyPopulationUnavailable(t *testing.T) {
+	metric := tui.PerformanceMetric{
+		MetricsSchema: 4,
+		OpType:        "DELETE",
+		MeanLatency:   999,
+		Delete: &tui.DeleteMetrics{
+			Timing: tui.DeleteTimingMetrics{
+				Latency: &tui.JSONTimingStat{},
+			},
+		},
+	}
+	if text := formatMetricsMessage(metric); !strings.Contains(text, "latency=N/A") || strings.Contains(text, "latency=999") {
+		t.Fatalf("zero-sample DELETE latency was fabricated: %q", text)
+	}
+	encoded, err := marshalMetricsJSON(metric, "aggregate", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Data struct {
+			LatencyUS *int64 `json:"latency_us"`
+		} `json:"data"`
+	}
+	if err = json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Data.LatencyUS != nil {
+		t.Fatalf("zero-sample DELETE JSON latency = %d, want null: %s", *payload.Data.LatencyUS, encoded)
+	}
+
+	metric.Delete.Timing.Latency = &tui.JSONTimingStat{Count: 1, MeanUs: 5, P50Us: 7}
+	if text := formatMetricsMessage(metric); !strings.Contains(text, "latency=7µs") {
+		t.Fatalf("DELETE headline did not use its real timing distribution: %q", text)
+	}
+	encoded, err = marshalMetricsJSON(metric, "aggregate", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Data.LatencyUS == nil || *payload.Data.LatencyUS != 7 {
+		t.Fatalf("DELETE JSON latency = %v, want 7: %s", payload.Data.LatencyUS, encoded)
 	}
 }
 

@@ -20,6 +20,7 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.commons.concurrent.ThreadUtil;
 import com.github.akurilov.commons.io.Input;
@@ -50,6 +51,7 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 	private final StreamingSha256 integrityHasher;
 	private final AtomicReference<String> integrityPhase = new AtomicReference<>();
 	private final AtomicReference<IntegrityTerminalException> terminalFailure = new AtomicReference<>();
+	private OperationLifecycleTracker<O> operationLifecycle = OperationLifecycleTracker.disabled();
 
 	protected final ConcurrentMap<String, Credential> pathToCredMap = new ConcurrentHashMap<>(1);
 
@@ -266,6 +268,23 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 	}
 
 	@Override
+	public final OperationLifecycleTracker<O> operationLifecycle() {
+		return operationLifecycle == null ? OperationLifecycleTracker.disabled() : operationLifecycle;
+	}
+
+	/** Activates lifecycle-only draining for a driver base which publishes every ownership edge. */
+	protected final void enableOperationLifecycle() {
+		if (operationLifecycle == null || !operationLifecycle.isEnabled()) {
+			operationLifecycle = new OperationLifecycleTracker<>();
+		}
+	}
+
+	/** Records the exact boundary at which transport execution begins. */
+	protected final boolean markOperationDispatched(final O op) {
+		return operationLifecycle().explicitlyDispatched(op);
+	}
+
+	@Override
 	public final String driverType() {
 		return driverType;
 	}
@@ -292,30 +311,54 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 	}
 
 	protected boolean handleCompleted(final O op) {
-		if (isStopped()) {
+		// Synchronous/custom drivers may complete inside submit(). If they did not use the
+		// explicit dispatch hook, completion itself proves transport execution began.
+		final var lifecycle = operationLifecycle();
+		lifecycle.dispatched(op);
+		if (isStopped() || !lifecycle.completionStarted(op)) {
 			return false;
-		} else {
+		}
+		var compatibilityTerminalCommitted = false;
+		try {
 			if (Loggers.MSG.isTraceEnabled()) {
 				Loggers.MSG.trace("{}: Load operation completed", op);
 			}
 			@SuppressWarnings("unchecked")
 			final O opResult = (O) op.result();
-			try {
-				if (opResultOut.put(opResult)) {
-					return true;
-				} else {
-					Loggers.ERR.error(
-									"{}: Load operations results queue overflow, dropping the result", toString());
+			if (!lifecycle.isOperationLifecycleTracked(op)) {
+				// Legacy operation implementations may return and synchronously recycle the
+				// same instance. Commit that compatibility circulation before output so its
+				// weak sidecar can advance independently; tracked operations retain the
+				// stronger output-before-terminal ordering below.
+				compatibilityTerminalCommitted = lifecycle.terminal(op);
+				if (!compatibilityTerminalCommitted) {
 					return false;
 				}
-			} catch (final RuntimeException e) {
-				final var terminal = IntegrityTerminalException.find(e);
-				if (terminal != null) {
-					recordTerminalFailure(terminal);
-					throw terminal;
-				}
-				throw e;
 			}
+			if (opResultOut.put(opResult)) {
+				// Output acceptance linearizes before the terminal transition. The operation
+				// remains in flight while arbitrary output code runs, so a bounded-drain
+				// deadline may still classify it unresolved; a late output return then cannot
+				// mutate either that outcome or a reset run's counters.
+				return compatibilityTerminalCommitted || lifecycle.terminal(op);
+			}
+			Loggers.ERR.debug(
+							"{}: Load operations results output rejected a terminal snapshot",
+							toString());
+			if (!compatibilityTerminalCommitted) {
+				lifecycle.unresolved(op);
+			}
+			return false;
+		} catch (final RuntimeException e) {
+			if (!compatibilityTerminalCommitted) {
+				lifecycle.unresolved(op);
+			}
+			final var terminal = IntegrityTerminalException.find(e);
+			if (terminal != null) {
+				recordTerminalFailure(terminal);
+				throw terminal;
+			}
+			throw e;
 		}
 	}
 

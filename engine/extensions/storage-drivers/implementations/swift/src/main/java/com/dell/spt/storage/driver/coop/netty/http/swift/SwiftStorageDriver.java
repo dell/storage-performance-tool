@@ -281,6 +281,11 @@ public class SwiftStorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	@Override
+	protected final boolean successfulSubmitStartsTransport(final O op) {
+		return false;
+	}
+
+	@Override
 	@SuppressWarnings("unchecked")
 	protected final boolean submit(final O op) throws IllegalStateException {
 		if (!isStarted()) {
@@ -291,12 +296,12 @@ public class SwiftStorageDriver<I extends Item, O extends Operation<I>>
 			if (compositeOp.allSubOperationsDone()) {
 				return super.submit(op);
 			} else {
-				final List<O> subOps = compositeOp.subOperations();
-				final var n = subOps.size();
-				for (var i = 0; i < n; i += super.submit(subOps, i, n)) {
-					Thread.yield();
+				final List<O> subOps = compositeOp.nextSubOperations(Integer.MAX_VALUE);
+				if (subOps.isEmpty()) {
+					return compositeOp.allSubOperationsDone() && super.submit(op);
 				}
-				return true;
+				return enqueueChildOperations(
+								subOps, (O) compositeOp, "Swift DLO child operations");
 			}
 		} else {
 			return super.submit(op);
@@ -320,27 +325,15 @@ public class SwiftStorageDriver<I extends Item, O extends Operation<I>>
 						return i - from;
 					}
 				} else {
-					final var subOps = (List<O>) compositeOp.subOperations();
+					final var subOps = (List<O>) compositeOp.nextSubOperations(Integer.MAX_VALUE);
 					final var n = subOps.size();
 					if (n > 0) {
-						// NOTE: blocking sub-ops submission
-						while (!super.submit(subOps.get(0))) {
-							Thread.yield();
+						if (!enqueueChildOperations(
+										subOps, (O) compositeOp, "Swift DLO child operations")) {
+							return i - from;
 						}
-						try {
-							for (var j = 1; j < n; j++) {
-								childOpQueue.put(subOps.get(j));
-							}
-						} catch (final InterruptedException e) {
-							LogUtil.exception(
-											Level.DEBUG,
-											e,
-											"{}: interrupted while enqueueing the child sub-operations",
-											toString());
-							throwUnchecked(e);
-						}
-					} else {
-						throw new AssertionError("Composite load operation yields 0 sub-operations");
+					} else if (!compositeOp.allSubOperationsDone() || !super.submit(nextOp)) {
+						return i - from;
 					}
 				}
 			} else {

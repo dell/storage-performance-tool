@@ -29,6 +29,8 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationsBuilder;
 import com.dell.spt.base.item.op.data.DataOperationsBuilder;
 import com.dell.spt.base.item.op.data.DataOperationsBuilderImpl;
+import com.dell.spt.base.item.op.deletion.DeleteRequestAssembler;
+import com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig;
 import com.dell.spt.base.item.op.list.shard.ListShard;
 import com.dell.spt.base.item.op.list.shard.ListShardingConfig;
 import com.dell.spt.base.item.op.list.shard.ListShardingContext;
@@ -413,6 +415,9 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 		final var recycleConfig = opConfig.configVal("recycle");
 		final var recycleFlag = listPathWorkload || recycleConfig.boolVal("mode");
 		final var retryFlag = opConfig.boolVal("retry");
+		final var standaloneDelete = StandaloneDeleteConfig.from(loadConfig);
+		standaloneDelete.validateSettings(opType, itemType, recycleFlag, retryFlag);
+		standaloneDelete.validateTopology(itemConfig, itemInput, opOutput);
 		final var recycleLimit = opConfig.intVal("limit-recycle");
 		if (recycleLimit < 1) {
 			throw new IllegalConfigurationException("Recycle limit should be > 0");
@@ -426,6 +431,19 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 		// still passed through separately, though: see LoadGeneratorImpl's own retryFlag
 		// constructor javadoc for the different (countLimit-self-stop-related) reason it
 		// still needs to know.
+		if (standaloneDelete.enabled()) {
+			return (T) new LoadGeneratorImpl(
+							(Input) itemInput,
+							new DeleteRequestAssembler((OperationsBuilder) opsBuilder, standaloneDelete.batchSize()),
+							throttles,
+							(Output) opOutput,
+							batchSize,
+							countLimit,
+							recycleLimit,
+							false,
+							shuffleFlag,
+							false);
+		}
 		return (T) new LoadGeneratorImpl<>(
 						itemInput,
 						opsBuilder,
@@ -498,6 +516,9 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 				final String d = String.valueOf(delimiters.charAt(i));
 				try {
 					final var result = probe.probeCommonPrefixes(bucketPath, seedPrefix == null ? "" : seedPrefix, d, 1000);
+					if (integrityDiscovery) {
+						requireCommonPrefixesWithinRoot(result.commonPrefixes(), seedPrefix);
+					}
 					final int count = result.commonPrefixes().size();
 					final boolean completePartition = !result.hasContents() && !result.truncated();
 					if ((!integrityDiscovery || completePartition) && count > bestCount) {
@@ -534,6 +555,26 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 							effectiveCfg.radix());
 		}
 		return seeds;
+	}
+
+	private static void requireCommonPrefixesWithinRoot(
+					final List<String> prefixes, final String seedPrefix)
+					throws IllegalConfigurationException {
+		final String requestedPrefix = canonicalListPrefix(seedPrefix);
+		for (final String prefix : prefixes) {
+			if (prefix == null || prefix.isEmpty() || !prefix.startsWith(requestedPrefix)) {
+				throw new IllegalConfigurationException(
+								"LIST delimiter response prefix is outside requested prefix \""
+												+ requestedPrefix + "\": " + prefix);
+			}
+		}
+	}
+
+	private static String canonicalListPrefix(final String prefix) {
+		if (prefix == null || prefix.isEmpty() || "/".equals(prefix)) {
+			return "";
+		}
+		return prefix.startsWith("/") ? prefix.substring(1) : prefix;
 	}
 
 	private static long estimateTransferSize(

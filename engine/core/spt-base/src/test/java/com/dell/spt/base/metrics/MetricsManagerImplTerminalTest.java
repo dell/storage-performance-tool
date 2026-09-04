@@ -4,6 +4,7 @@ import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
+import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
@@ -18,6 +19,37 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 class MetricsManagerImplTerminalTest {
+
+	@Test
+	void cachesDeleteOnlyUnresolvedProgressAtUnregister() {
+		final var mgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+		mgr.setTerminalRetentionMillis(30_000);
+		final AllMetricsSnapshot snapshot = mock(AllMetricsSnapshot.class, RETURNS_DEEP_STUBS);
+		when(snapshot.successSnapshot().count()).thenReturn(0L);
+		when(snapshot.failsSnapshot().count()).thenReturn(0L);
+		when(snapshot.byteSnapshot().count()).thenReturn(0L);
+		when(snapshot.deleteMetrics()).thenReturn(DeleteMetricsSnapshot.builder(100)
+						.requests(1, 0, 0, 0, 1, 0)
+						.objects(3, 3, 0, 0, 0, 3, 0)
+						.build());
+
+		final MetricsContext ctx = mock(MetricsContext.class);
+		when(ctx.loadStepId()).thenReturn("delete-unresolved-only");
+		when(ctx.opType()).thenReturn(OpType.DELETE);
+		when(ctx.lastSnapshot()).thenReturn(snapshot);
+		when(ctx.metadata()).thenReturn(Map.of());
+		when(ctx.itemDataSize()).thenReturn(new com.github.akurilov.commons.system.SizeInBytes(0));
+		when(ctx.sumPersistEnabled()).thenReturn(false);
+		when(ctx.timingPersistEnabled()).thenReturn(false);
+
+		mgr.register(ctx);
+		mgr.unregister(ctx);
+
+		final var entries = mgr.getTerminalSteps();
+		assertEquals(1, entries.size());
+		assertEquals(1, entries.get(0).deleteMetrics.requestUnresolved());
+		assertEquals(3, entries.get(0).deleteMetrics.objectUnresolved());
+	}
 
 	@Test
 	void cachesTerminalEntryOnUnregisterAndHonorsRetention() {
@@ -94,6 +126,111 @@ class MetricsManagerImplTerminalTest {
 			fail("Interrupted while waiting for terminal retention eviction", ie);
 		}
 		assertTrue(mgr.getTerminalSteps().isEmpty());
+	}
+
+	@Test
+	void terminalFleetPreservesDistributedDetailPartialState() {
+		final MetricsManagerImpl mgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+		mgr.setTerminalRetentionMillis(30_000);
+		final DistributedAllMetricsSnapshot snapshot = mock(DistributedAllMetricsSnapshot.class);
+		final RateMetricSnapshot success = mock(RateMetricSnapshot.class);
+		final RateMetricSnapshot fails = mock(RateMetricSnapshot.class);
+		final RateMetricSnapshot bytes = mock(RateMetricSnapshot.class);
+		final TimingMetricSnapshot latency = mock(TimingMetricSnapshot.class);
+		final TimingMetricSnapshot duration = mock(TimingMetricSnapshot.class);
+		final TimingMetricSnapshot ttfb = mock(TimingMetricSnapshot.class);
+		final ConcurrencyMetricSnapshot concurrency = mock(ConcurrencyMetricSnapshot.class);
+		when(success.count()).thenReturn(1L);
+		when(snapshot.successSnapshot()).thenReturn(success);
+		when(snapshot.failsSnapshot()).thenReturn(fails);
+		when(snapshot.byteSnapshot()).thenReturn(bytes);
+		when(snapshot.latencySnapshot()).thenReturn(latency);
+		when(snapshot.durationSnapshot()).thenReturn(duration);
+		when(snapshot.ttfbSnapshot()).thenReturn(ttfb);
+		when(snapshot.concurrencySnapshot()).thenReturn(concurrency);
+		when(snapshot.elapsedTimeMillis()).thenReturn(1_000L);
+
+		final DistributedMetricsContext ctx = mock(DistributedMetricsContext.class);
+		when(ctx.loadStepId()).thenReturn("delete-detail-partial");
+		when(ctx.opType()).thenReturn(OpType.DELETE);
+		when(ctx.lastSnapshot()).thenReturn(snapshot);
+		when(ctx.metadata()).thenReturn(Map.of());
+		when(ctx.quantileValues()).thenReturn(List.of());
+		when(ctx.nodeCount()).thenReturn(2);
+		when(ctx.nodeAddrs()).thenReturn(List.of("node-a"));
+		when(ctx.nodesPresent()).thenReturn(List.of("node-a"));
+		when(ctx.contributorsPresent()).thenReturn(List.of("local", "node-a"));
+		when(ctx.partial()).thenReturn(true);
+		when(ctx.itemDataSize()).thenReturn(new com.github.akurilov.commons.system.SizeInBytes(0));
+		when(ctx.concurrencyLimit()).thenReturn(1);
+		when(ctx.comment()).thenReturn("");
+		when(ctx.sumPersistEnabled()).thenReturn(false);
+		when(ctx.timingPersistEnabled()).thenReturn(false);
+
+		mgr.register(ctx);
+		mgr.unregister(ctx);
+
+		assertEquals(1, mgr.getTerminalSteps().size());
+		final TerminalStepEntry terminal = mgr.getTerminalSteps().get(0);
+		assertEquals(List.of("node-a"), terminal.nodesPresent);
+		assertEquals(List.of("local", "node-a"), terminal.contributorsPresent);
+		assertTrue(terminal.partial,
+						"terminal fleet metadata must retain missing DELETE-detail completeness");
+	}
+
+	@Test
+	void failedFinalFleetRefreshCannotRepublishEarlierAuthoritativeDeleteProgress()
+					throws Exception {
+		final MetricsManagerImpl mgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+		mgr.setTerminalRetentionMillis(30_000);
+		final DistributedAllMetricsSnapshot snapshot = mock(DistributedAllMetricsSnapshot.class);
+		final RateMetricSnapshot success = mock(RateMetricSnapshot.class);
+		final RateMetricSnapshot fails = mock(RateMetricSnapshot.class);
+		final RateMetricSnapshot bytes = mock(RateMetricSnapshot.class);
+		final TimingMetricSnapshot latency = mock(TimingMetricSnapshot.class);
+		final TimingMetricSnapshot duration = mock(TimingMetricSnapshot.class);
+		final TimingMetricSnapshot ttfb = mock(TimingMetricSnapshot.class);
+		final ConcurrencyMetricSnapshot concurrency = mock(ConcurrencyMetricSnapshot.class);
+		when(success.count()).thenReturn(1L);
+		when(snapshot.successSnapshot()).thenReturn(success);
+		when(snapshot.failsSnapshot()).thenReturn(fails);
+		when(snapshot.byteSnapshot()).thenReturn(bytes);
+		when(snapshot.latencySnapshot()).thenReturn(latency);
+		when(snapshot.durationSnapshot()).thenReturn(duration);
+		when(snapshot.ttfbSnapshot()).thenReturn(ttfb);
+		when(snapshot.concurrencySnapshot()).thenReturn(concurrency);
+		when(snapshot.elapsedTimeMillis()).thenReturn(1_000L);
+		when(snapshot.deleteMetrics()).thenReturn(DeleteMetricsSnapshot.builder(1)
+						.requests(1, 1, 0, 0, 0, 1)
+						.objects(1, 1, 1, 0, 0, 0, 0)
+						.build());
+
+		final DistributedMetricsContext ctx = mock(DistributedMetricsContext.class);
+		when(ctx.loadStepId()).thenReturn("delete-final-refresh-failed");
+		when(ctx.opType()).thenReturn(OpType.DELETE);
+		when(ctx.lastSnapshot()).thenReturn(null);
+		when(ctx.metadata()).thenReturn(Map.of(MetricsConstants.METADATA_DELETE_METRICS, true));
+		when(ctx.quantileValues()).thenReturn(List.of());
+		when(ctx.nodeCount()).thenReturn(2);
+		when(ctx.nodeAddrs()).thenReturn(List.of("node-a"));
+		when(ctx.nodesPresent()).thenReturn(List.of("node-a"));
+		when(ctx.contributorsPresent()).thenReturn(List.of());
+		when(ctx.partial()).thenReturn(false, true);
+		when(ctx.itemDataSize()).thenReturn(new com.github.akurilov.commons.system.SizeInBytes(0));
+		when(ctx.concurrencyLimit()).thenReturn(1);
+		when(ctx.comment()).thenReturn("");
+		when(ctx.sumPersistEnabled()).thenReturn(false);
+		when(ctx.timingPersistEnabled()).thenReturn(false);
+
+		mgr.register(ctx);
+		final var recordProgress = MetricsManagerImpl.class.getDeclaredMethod(
+						"recordProgressSnapshot", MetricsContext.class, AllMetricsSnapshot.class);
+		recordProgress.setAccessible(true);
+		recordProgress.invoke(mgr, ctx, snapshot);
+		mgr.unregister(ctx);
+
+		assertTrue(mgr.getTerminalSteps().isEmpty(),
+						"a failed final fleet refresh must not republish stale authoritative DELETE detail");
 	}
 
 	@Test

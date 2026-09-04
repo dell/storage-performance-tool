@@ -24,6 +24,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.Operation.Status;
 import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.Credential;
@@ -31,10 +32,13 @@ import com.dell.spt.storage.driver.coop.netty.NettyStorageDriverBase;
 import com.github.akurilov.commons.collection.Range;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.confuse.Config;
+import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.handler.codec.http.DefaultHttpRequest;
@@ -63,6 +67,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.apache.logging.log4j.Level;
@@ -76,11 +81,13 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 				extends NettyStorageDriverBase<I, O> implements HttpStorageDriver<I, O> {
 
 	private static final String CLS_NAME = HttpStorageDriverBase.class.getSimpleName();
+	private static final String DELETE_REQUEST_TIMING_HANDLER = "deleteRequestTiming";
 	private static final Function<String, Input<String>> EXPR_INPUT_FUNC = expr -> CompositeExpressionInputBuilder.newInstance()
 					.expression(expr)
 					.build();
 	private final Map<String, Input<String>> headerNameInputs = new ConcurrentHashMap<>();
 	private final Map<String, Input<String>> headerValueInputs = new ConcurrentHashMap<>();
+	private final AtomicBoolean requestBuildFailureLogged = new AtomicBoolean(false);
 	protected final HttpHeaders sharedHeaders = new DefaultHttpHeaders();
 	protected final Map<String, String> dynamicHeaders = new HashMap<>();
 	private final Input<String> uriQueryInput;
@@ -130,6 +137,13 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 
 	protected FullHttpResponse executeHttpRequest(final FullHttpRequest request)
 					throws InterruptedException, ConnectException {
+		return executeHttpRequest(request, true);
+	}
+
+	/** Executes a synchronous control request with caller-selected timeout log severity. */
+	protected FullHttpResponse executeHttpRequest(
+					final FullHttpRequest request, final boolean warnOnTimeout)
+					throws InterruptedException, ConnectException {
 		ThreadContext.put(KEY_STEP_ID, stepId);
 		ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
 		final FullHttpResponse resp;
@@ -156,7 +170,11 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 							});
 			channel.writeAndFlush(request).sync();
 			if (null == (resp = fullRespSync.poll(netTimeoutMilliSec, TimeUnit.MILLISECONDS))) {
-				Loggers.MSG.warn("{}: Response timeout: {}", stepId, timeoutRequestDescription(request));
+				if (warnOnTimeout) {
+					Loggers.MSG.warn("{}: Response timeout: {}", stepId, timeoutRequestDescription(request));
+				} else {
+					Loggers.MSG.debug("{}: Response timeout: {}", stepId, timeoutRequestDescription(request));
+				}
 			}
 		} catch (final NoSuchElementException e) {
 			throw new ConnectException("Channel pipeline is empty: connectivity related failure");
@@ -184,8 +202,37 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		super.appendHandlers(channel);
 		channel
 						.pipeline()
+						.addFirst(DELETE_REQUEST_TIMING_HANDLER, new DeleteRequestTimingHandler())
 						.addLast(new HttpClientCodec(REQ_LINE_LEN, HEADERS_LEN, maxChunkSize, true))
 						.addLast(new ChunkedWriteHandler());
+	}
+
+	private static final class DeleteRequestTimingHandler extends ChannelDuplexHandler {
+		@Override
+		public void channelRead(
+						final ChannelHandlerContext ctx, final Object msg) throws Exception {
+			if (msg instanceof ByteBuf buffer && buffer.isReadable()) {
+				final Operation<?> op = ctx.channel().attr(ATTR_KEY_OPERATION).get();
+				if (op instanceof DeleteRequestOperation deleteOperation) {
+					deleteOperation.markResponseFirstByteReceived();
+				}
+			}
+			ctx.fireChannelRead(msg);
+		}
+
+		@Override
+		public void write(
+						final ChannelHandlerContext ctx,
+						final Object msg,
+						final ChannelPromise promise) throws Exception {
+			if (msg instanceof ByteBuf buffer && buffer.isReadable()) {
+				final Operation<?> op = ctx.channel().attr(ATTR_KEY_OPERATION).get();
+				if (op instanceof DeleteRequestOperation deleteOperation) {
+					deleteOperation.markRequestFirstByteSent();
+				}
+			}
+			ctx.write(msg, promise);
+		}
 	}
 
 	protected HttpRequest httpRequest(final O op, final String nodeAddr) throws URISyntaxException {
@@ -449,12 +496,51 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			LogUtil.exception(Level.WARN, e, "Failed to build the request URI");
 		} catch (final Throwable e) {
 			throwUncheckedIfInterrupted(e);
-			if (!isStopped() && !isClosed()) {
-				LogUtil.trace(Loggers.ERR, Level.ERROR, e, "Send HTTP request failure");
+			if (completeReconciledDeleteAfterRequestBuildFailure(channel, op, e)) {
+				return;
 			}
+			logRequestBuildFailure(e);
 		}
 		channel.write(LastHttpContent.EMPTY_LAST_CONTENT).addListener(reqSentCallback);
 		channel.flush();
+	}
+
+	private boolean completeReconciledDeleteAfterRequestBuildFailure(
+					final Channel channel, final O op, final Throwable requestFailure) {
+		if (!(op instanceof DeleteRequestOperation deleteOperation)
+						|| deleteOperation.deleteResult() == null) {
+			return false;
+		}
+		logRequestBuildFailure(requestFailure);
+		try {
+			op.finishRequest();
+		} catch (final IllegalStateException e) {
+			LogUtil.exception(Level.DEBUG, e, "{}: invalid load operation request state", op.toString());
+		}
+		try {
+			complete(channel, op);
+		} catch (final Throwable completionFailure) {
+			throwUncheckedIfInterrupted(completionFailure);
+			// Driver completion releases transport ownership before result publication. Keep the
+			// reconciled protocol status if an extension-facing output rejects the terminal result.
+			LogUtil.exception(
+							Level.DEBUG, completionFailure, "Load operation result publication failure");
+		}
+		return true;
+	}
+
+	private void logRequestBuildFailure(final Throwable failure) {
+		if (isStopped() || isClosed()) {
+			return;
+		}
+		// A malformed standalone batch can fail once per logical operation. Keep the first
+		// diagnostic actionable without flooding the error log during a sustained failure.
+		if (requestBuildFailureLogged == null
+						|| requestBuildFailureLogged.compareAndSet(false, true)) {
+			LogUtil.trace(Loggers.ERR, Level.ERROR, failure, "Send HTTP request failure");
+		} else {
+			LogUtil.trace(Loggers.ERR, Level.DEBUG, failure, "Send HTTP request failure");
+		}
 	}
 
 	void sendHttpRequestComplete(final ChannelFuture future) {

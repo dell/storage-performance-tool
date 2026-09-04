@@ -1,6 +1,10 @@
 package com.dell.spt.base.integrity;
 
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.config.TimeUtil;
+import com.dell.spt.base.util.BinarySizeFormat;
+import com.github.akurilov.commons.reflection.TypeUtil;
+import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import java.util.List;
 import java.util.Locale;
@@ -62,6 +66,22 @@ public record IntegrityConfig(
 		return mode == IntegrityMode.METADATA;
 	}
 
+	/** Returns whether this step requires its output manifest to match the configured operation count. */
+	public static boolean requiresExactOutputCount(final Config storageConfig) {
+		final Config integrityOutput = storageConfig
+					.configVal("integrity")
+					.configVal("output");
+		return integrityOutput != null && integrityOutput.boolVal("requireExactCount");
+	}
+
+	/** Returns whether LIST discovery must freeze at least one selected identity. */
+	public static boolean requiresNonEmptySelection(final Config storageConfig) {
+		final Config integritySelection = storageConfig
+					.configVal("integrity")
+					.configVal("selection");
+		return integritySelection != null && integritySelection.boolVal("requireNonEmpty");
+	}
+
 	public static boolean isSupportedDriver(final String driverType) {
 		return driverType != null
 				&& SUPPORTED_DRIVER_TYPES.contains(driverType.trim().toLowerCase(Locale.ROOT));
@@ -80,7 +100,19 @@ public record IntegrityConfig(
 			throw new IllegalConfigurationException("load step configuration is missing");
 		}
 		final IntegrityConfig integrity = fromStorage(stepConfig.configVal("storage"));
+		final boolean requireExactOutputCount =
+					requiresExactOutputCount(stepConfig.configVal("storage"));
+		final boolean requireNonEmptySelection =
+					requiresNonEmptySelection(stepConfig.configVal("storage"));
 		if (!integrity.enabled()) {
+			if (requireExactOutputCount) {
+				throw excluded(
+							"storage.integrity.output.requireExactCount requires metadata integrity mode");
+			}
+			if (requireNonEmptySelection) {
+				throw excluded(
+							"storage.integrity.selection.requireNonEmpty requires metadata integrity mode");
+			}
 			return integrity;
 		}
 		final long selectionMaxCount = stepConfig
@@ -98,6 +130,42 @@ public record IntegrityConfig(
 		}
 		if (!Set.of("create", "read", "list", "delete").contains(opType)) {
 			throw excluded("operation type " + opType + " is outside integrity metadata v1");
+		}
+		if (requireNonEmptySelection && !"list".equals(opType)) {
+			throw excluded("storage.integrity.selection.requireNonEmpty is valid only for LIST");
+		}
+		if (requireNonEmptySelection) {
+			if (stepConfig.boolVal("load-op-list-include_versions")) {
+				throw excluded(
+						"guarded LIST discovery is current-key only and requires load.op.list.include_versions=false");
+			}
+			final String outputFile = stepConfig.stringVal("item-output-file");
+			if (outputFile == null || outputFile.isBlank()) {
+				throw excluded("storage.integrity.selection.requireNonEmpty requires item.output.file");
+			}
+			requireEmpty(stepConfig.stringVal("item-input-file"),
+						"guarded LIST discovery requires exact-prefix input rather than item.input.file");
+			if (stepConfig.longVal("load-op-limit-count") != 0) {
+				throw excluded("guarded LIST discovery requires load.op.limit.count=0");
+			}
+			if (timeLimitSeconds(stepConfig.val("load-step-limit-time")) != 0) {
+				throw excluded("guarded LIST discovery requires load.step.limit.time=0");
+			}
+			if (!isZeroSizeLimit(stepConfig.val("load-step-limit-size"))) {
+				throw excluded("guarded LIST discovery requires load.step.limit.size=0");
+			}
+		}
+		if (requireExactOutputCount) {
+			if (!"create".equals(opType)) {
+				throw excluded("storage.integrity.output.requireExactCount is valid only for CREATE");
+			}
+			if (stepConfig.longVal("load-op-limit-count") <= 0) {
+				throw excluded("storage.integrity.output.requireExactCount requires a positive load.op.limit.count");
+			}
+			final String outputFile = stepConfig.stringVal("item-output-file");
+			if (outputFile == null || outputFile.isBlank()) {
+				throw excluded("storage.integrity.output.requireExactCount requires item.output.file");
+			}
 		}
 		if ("create".equals(opType)) {
 			requireEmpty(stepConfig.stringVal("item-data-input-file"),
@@ -129,6 +197,19 @@ public record IntegrityConfig(
 		if (value != null && !value.isBlank()) {
 			throw excluded(message);
 		}
+	}
+
+	private static long timeLimitSeconds(final Object rawValue) {
+		return rawValue instanceof String
+					? TimeUtil.getTimeInSeconds((String) rawValue)
+					: TypeUtil.typeConvert(rawValue, long.class);
+	}
+
+	private static boolean isZeroSizeLimit(final Object rawValue) {
+		final SizeInBytes size = rawValue instanceof String
+					? BinarySizeFormat.parseSize((String) rawValue)
+					: new SizeInBytes(TypeUtil.typeConvert(rawValue, long.class));
+		return size.getMin() == 0 && size.getMax() == 0;
 	}
 
 	private static IllegalConfigurationException excluded(final String message) {

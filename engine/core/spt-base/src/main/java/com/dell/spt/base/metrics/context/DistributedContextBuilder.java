@@ -14,6 +14,14 @@ public interface DistributedContextBuilder
 
 	DistributedContextBuilder nodeAddrs(final List<String> nodeAddrs);
 
+	default DistributedContextBuilder contributorIds(final List<String> contributorIds) {
+		return this;
+	}
+
+	default DistributedContextBuilder deleteDetailsExpected(final boolean expected) {
+		return this;
+	}
+
 	DistributedContextBuilder nodeCountSupplier(final IntSupplier nodeCountSupplier);
 
 	DistributedContextBuilder snapshotsSupplier(
