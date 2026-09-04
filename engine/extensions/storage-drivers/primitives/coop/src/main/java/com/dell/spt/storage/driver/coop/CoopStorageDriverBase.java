@@ -770,8 +770,17 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return Long.getLong(CHILD_OP_ENQUEUE_TIMEOUT_MILLIS_PROPERTY, DEFAULT_CHILD_OP_ENQUEUE_TIMEOUT_MILLIS);
 	}
 
-	@SuppressWarnings("unchecked")
 	protected final boolean handleCompleted(final O op) {
+		return handleCompleted(op, true);
+	}
+
+	/**
+	 * Completes {@code op}; {@code wakeDispatcher} is {@code false} only when the caller still owns
+	 * the completed operation's permit and will either hand it to the next operation directly or
+	 * release it and wake the dispatcher itself, so the per-completion unpark is not paid twice.
+	 */
+	@SuppressWarnings("unchecked")
+	protected final boolean handleCompleted(final O op, final boolean wakeDispatcher) {
 		final boolean accepted = super.handleCompleted(op);
 		if (!accepted) {
 			if (op instanceof CompositeOperation || op instanceof PartialOperation) {
@@ -835,7 +844,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				enqueueChildOp((O) parentOp, op, "completion operation");
 			}
 		}
-		signalDispatch();
+		if (wakeDispatcher) {
+			signalDispatch();
+		}
 		return true;
 	}
 

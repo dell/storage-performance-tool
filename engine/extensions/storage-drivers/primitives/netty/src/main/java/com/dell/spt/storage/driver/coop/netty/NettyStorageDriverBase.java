@@ -793,7 +793,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			// start on this event-loop thread without a dispatcher hand-off or a pool round trip.
 			var transferred = false;
 			try {
-				handleCompleted(op);
+				handleCompleted(op, false);
 				transferred = tryDirectDispatch(channel);
 			} finally {
 				if (!transferred) {
