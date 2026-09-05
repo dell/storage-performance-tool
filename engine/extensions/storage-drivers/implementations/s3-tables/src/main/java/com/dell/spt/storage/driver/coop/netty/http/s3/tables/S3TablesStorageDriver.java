@@ -160,6 +160,12 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 		}
 	}
 
+	/** Every mode below is driven from {@link #submit}; nothing here may be sent by completion. */
+	@Override
+	protected boolean supportsDirectDispatch() {
+		return false;
+	}
+
 	@Override
 	protected boolean submit(final O op) throws IllegalStateException {
 		// This implementation bypasses NettyStorageDriverBase.submit() for synchronous
