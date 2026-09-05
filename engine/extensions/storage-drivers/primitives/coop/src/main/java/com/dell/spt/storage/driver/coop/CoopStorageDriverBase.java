@@ -61,7 +61,10 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	private final Object mpuSchedulingLock = new Object();
 	private final int configuredMpuObjectLimit;
 	private final int configuredMpuPartLimit;
-	private final boolean directDispatchEnabled = Boolean.getBoolean(DIRECT_DISPATCH_PROPERTY);
+	// Evaluated once so the per-operation path reads one final field. supportsDirectDispatch()
+	// must therefore be a constant for the subclass, which is all the capability declaration is.
+	private final boolean directDispatchEnabled = Boolean.getBoolean(DIRECT_DISPATCH_PROPERTY)
+					&& supportsDirectDispatch();
 	private volatile boolean mpuSchedulingInitialized = false;
 	/**
 	 * @deprecated retained for binary compatibility only; SPT never reads this field and writes
@@ -267,11 +270,23 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	}
 
 	/**
-	 * Returns whether completion-driven direct dispatch is enabled for this driver. Read once from
-	 * {@value #DIRECT_DISPATCH_PROPERTY}; off by default so the dispatcher path is unchanged.
+	 * Returns whether completion-driven direct dispatch is enabled for this driver: the JVM-wide
+	 * {@value #DIRECT_DISPATCH_PROPERTY} is set and the driver declares the capability through
+	 * {@link #supportsDirectDispatch()}. Off by default so the dispatcher path is unchanged; drivers
+	 * without a direct completion path keep the unchanged dispatcher scheduling even when the
+	 * property is set.
 	 */
 	protected final boolean directDispatchEnabled() {
 		return directDispatchEnabled;
+	}
+
+	/**
+	 * Declares that this driver's completion path calls {@link #pollForDirectDispatch()} and can
+	 * transfer its permit and transport to the returned operation. Must return a constant: it is
+	 * read once during {@code CoopStorageDriverBase} construction, before subclass fields exist.
+	 */
+	protected boolean supportsDirectDispatch() {
+		return false;
 	}
 
 	/** Operations the dispatch task has drained but not yet submitted. */
@@ -770,6 +785,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return Long.getLong(CHILD_OP_ENQUEUE_TIMEOUT_MILLIS_PROPERTY, DEFAULT_CHILD_OP_ENQUEUE_TIMEOUT_MILLIS);
 	}
 
+	@Override
 	protected final boolean handleCompleted(final O op) {
 		return handleCompleted(op, true);
 	}

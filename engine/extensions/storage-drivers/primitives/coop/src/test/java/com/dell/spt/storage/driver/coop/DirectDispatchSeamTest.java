@@ -38,6 +38,11 @@ class DirectDispatchSeamTest {
 		}
 
 		@Override
+		protected boolean supportsDirectDispatch() {
+			return true;
+		}
+
+		@Override
 		protected boolean submit(final Operation<DataItem> op) {
 			return false;
 		}
@@ -63,6 +68,11 @@ class DirectDispatchSeamTest {
 		}
 
 		@Override
+		protected boolean supportsDirectDispatch() {
+			return true;
+		}
+
+		@Override
 		protected boolean submit(final Operation<DataItem> op) {
 			if (!stolen) {
 				stolen = true;
@@ -83,15 +93,20 @@ class DirectDispatchSeamTest {
 	}
 
 	private CoopStorageDriverBase<DataItem, Operation<DataItem>> driver;
+	private String priorPropertyValue;
 
 	@BeforeEach
 	void enableDirectDispatch() {
-		System.setProperty(CoopStorageDriverBase.DIRECT_DISPATCH_PROPERTY, "true");
+		priorPropertyValue = System.setProperty(CoopStorageDriverBase.DIRECT_DISPATCH_PROPERTY, "true");
 	}
 
 	@AfterEach
 	void closeDriver() throws Exception {
-		System.clearProperty(CoopStorageDriverBase.DIRECT_DISPATCH_PROPERTY);
+		if (priorPropertyValue == null) {
+			System.clearProperty(CoopStorageDriverBase.DIRECT_DISPATCH_PROPERTY);
+		} else {
+			System.setProperty(CoopStorageDriverBase.DIRECT_DISPATCH_PROPERTY, priorPropertyValue);
+		}
 		if (driver != null) {
 			driver.close();
 		}
@@ -160,6 +175,18 @@ class DirectDispatchSeamTest {
 		assertTrue(started.concurrencyThrottle.tryAcquire());
 		driver = started;
 		return started;
+	}
+
+	@Test
+	void propertyAloneDoesNotEnableDirectDispatchForDriversWithoutTheCapability() throws Exception {
+		final var plainMock = new CoopStorageDriverMock<DataItem, Operation<DataItem>>(
+						"no-capability-step", dataInput(), storageConfig(1), false, 4);
+		driver = plainMock;
+
+		assertFalse(plainMock.directDispatchEnabled(), "NIO and extension drivers keep dispatcher scheduling");
+		try (final var capable = new RefusingDriver(storageConfig(1))) {
+			assertTrue(capable.directDispatchEnabled());
+		}
 	}
 
 	@Test

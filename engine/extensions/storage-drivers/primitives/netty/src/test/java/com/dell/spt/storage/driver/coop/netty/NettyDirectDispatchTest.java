@@ -176,6 +176,70 @@ class NettyDirectDispatchTest {
 	}
 
 	@Test
+	void noopHeadStaysForTheDispatcher() {
+		final var channel = heldChannel();
+		final var done = completedOp(Operation.Status.SUCC);
+		final Operation<Item> noop = nextOp();
+		when(noop.type()).thenReturn(OpType.NOOP);
+		inOpQueue.add(noop);
+
+		driver.complete(channel, done);
+
+		assertEquals(1, inOpQueue.size(), "NOOP completes synchronously inside submit and must not chain here");
+		verify(driver, never()).sendRequest(any(), any());
+		assertEquals(1, concurrencyThrottle.availablePermits());
+		verify(connPool).release(channel);
+		channel.close();
+	}
+
+	@Test
+	void inactiveChannelIsReleasedNotReused() {
+		final var channel = heldChannel();
+		channel.close();
+		final var done = completedOp(Operation.Status.SUCC);
+		inOpQueue.add(nextOp());
+
+		driver.complete(channel, done);
+
+		assertEquals(1, inOpQueue.size());
+		verify(driver, never()).sendRequest(any(), any());
+		assertEquals(1, concurrencyThrottle.availablePermits());
+		verify(connPool).release(channel);
+	}
+
+	@Test
+	void stoppedDriverDoesNotPoll() {
+		doReturn(false).when(driver).isStarted();
+		final var channel = heldChannel();
+		final var done = completedOp(Operation.Status.SUCC);
+		inOpQueue.add(nextOp());
+
+		driver.complete(channel, done);
+
+		assertEquals(1, inOpQueue.size(), "shutdown recovery owns queued work once the driver stops");
+		verify(driver, never()).sendRequest(any(), any());
+		assertEquals(1, concurrencyThrottle.availablePermits());
+		verify(connPool).release(channel);
+		channel.close();
+	}
+
+	@Test
+	void alreadyReleasedChannelNeverTransfers() {
+		final var channel = heldChannel();
+		channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.TRUE);
+		final var done = completedOp(Operation.Status.SUCC);
+		inOpQueue.add(nextOp());
+
+		driver.complete(channel, done);
+
+		assertEquals(1, inOpQueue.size());
+		verify(driver, never()).sendRequest(any(), any());
+		assertEquals(0, concurrencyThrottle.availablePermits(), "a released channel owns no permit to give back");
+		verify(connPool, never()).release(channel);
+		channel.close();
+	}
+
+	@Test
 	void sendFailureCompletesNextOperationAsFailedAndReleasesTransport() {
 		final var channel = heldChannel();
 		final var done = completedOp(Operation.Status.SUCC);

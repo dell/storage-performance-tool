@@ -810,6 +810,11 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		handleCompleted(op);
 	}
 
+	@Override
+	protected final boolean supportsDirectDispatch() {
+		return true;
+	}
+
 	private void releaseTransport(final Channel channel) {
 		concurrencyThrottle.release();
 		connPool.release(channel);
