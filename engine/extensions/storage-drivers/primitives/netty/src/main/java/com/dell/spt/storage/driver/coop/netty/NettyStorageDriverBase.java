@@ -810,8 +810,14 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		handleCompleted(op);
 	}
 
+	/**
+	 * Netty drivers can transfer a completed operation's permit and channel to the next queued
+	 * operation. Subclasses whose {@link #submit(Operation)} does per-operation preparation that
+	 * {@link #sendRequest} alone does not perform must override this to return {@code false}, or
+	 * directly dispatched operations would skip that preparation.
+	 */
 	@Override
-	protected final boolean supportsDirectDispatch() {
+	protected boolean supportsDirectDispatch() {
 		return true;
 	}
 
