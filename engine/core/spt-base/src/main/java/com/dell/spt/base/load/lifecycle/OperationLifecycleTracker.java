@@ -108,6 +108,9 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 	private final Set<IdentityKey<O>> outstanding = ConcurrentHashMap.newKeySet();
 	private final ReferenceQueue<O> compatibilityReferences = new ReferenceQueue<>();
 	private final Map<WeakIdentityKey<O>, CompatibilityState> compatibilityStates = new HashMap<>();
+	private final LongAdder selected = new LongAdder();
+	private final LongAdder accepted = new LongAdder();
+	private final LongAdder failed = new LongAdder();
 	private final LongAdder dispatched = new LongAdder();
 	private final AtomicLong inFlight = new AtomicLong();
 	private final LongAdder terminal = new LongAdder();
@@ -177,6 +180,9 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		outstanding.clear();
 		// Keep weak compatibility states across restarts. Otherwise a late callback for an
 		// untracked prior-run operation becomes NEW and contaminates the next run's counters.
+		selected.reset();
+		accepted.reset();
+		failed.reset();
 		dispatched.reset();
 		inFlight.set(0);
 		terminal.reset();
@@ -352,9 +358,13 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		}
 		final boolean transitioned;
 		if (lifecycle.isTracked()) {
+			final boolean first = lifecycle.state() == OperationLifecycleState.NEW;
 			transitioned = explicit
 							? lifecycle.explicitlyDispatched()
 							: lifecycle.dispatched();
+			if (transitioned && first) {
+				selected.increment();
+			}
 		} else {
 			transitioned = transition(op, lifecycle, OperationLifecycleState.DISPATCHED);
 			if (transitioned && explicit) {
@@ -454,6 +464,11 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 
 	/** Records one successfully published terminal result and releases outstanding ownership. */
 	public boolean terminal(final O op) {
+		return terminal(op, enabled ? op.status() : null);
+	}
+
+	/** Commits the status captured before result output can recycle the operation. */
+	public boolean terminal(final O op, final Operation.Status terminalStatus) {
 		if (!enabled) {
 			return true;
 		}
@@ -469,7 +484,7 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 					return false;
 				}
 				if (!deadlineWon) {
-					observeTerminal(op);
+					observeTerminal(op, terminalStatus);
 				}
 			}
 		} else {
@@ -484,7 +499,7 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 								? OperationLifecycleState.UNRESOLVED
 								: OperationLifecycleState.TERMINAL;
 				if (!deadlineWon) {
-					observeTerminal(op);
+					observeTerminal(op, terminalStatus);
 				}
 			}
 		}
@@ -498,7 +513,12 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		return true;
 	}
 
-	private void observeTerminal(final O op) {
+	private void observeTerminal(final O op, final Operation.Status terminalStatus) {
+		if (terminalStatus == Operation.Status.SUCC) {
+			accepted.increment();
+		} else {
+			failed.increment();
+		}
 		final var observer = terminalObserver;
 		if (observer != null) {
 			observer.accept(op);
@@ -669,6 +689,21 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 						unresolvedCopy);
 	}
 
+	/** Counter-only evidence; reconciliation is meaningful only after owners have stopped. */
+	public OperationLifecycleCounters counters() {
+		long buffered = 0;
+		long queued = 0;
+		for (final var key : outstanding) {
+			final var state = stateOf(key.value);
+			if (state == OperationLifecycleState.GENERATOR_BUFFERED)
+				buffered++;
+			if (state == OperationLifecycleState.DRIVER_QUEUED)
+				queued++;
+		}
+		return new OperationLifecycleCounters(enabled, selected.sum(), accepted.sum(), failed.sum(),
+						terminal.sum(), unattempted.sum(), unresolved.sum(), buffered, queued, inFlight.get());
+	}
+
 	/**
 	 * Returns the number of dispatched operations still awaiting a retained terminal result.
 	 * This counter-only query is suitable for bounded drain polling and does not materialize
@@ -703,7 +738,8 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 				if (next == OperationLifecycleState.DRIVER_QUEUED && dispatchDeadlineReached()) {
 					return false;
 				}
-				return switch (next) {
+				final boolean first = lifecycle.state() == OperationLifecycleState.NEW;
+				final boolean changed = switch (next) {
 				case GENERATOR_BUFFERED -> lifecycle.generatorBuffered();
 				case DRIVER_QUEUED -> lifecycle.driverQueued();
 				case DISPATCHED -> lifecycle.dispatched();
@@ -713,6 +749,10 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 				case UNRESOLVED -> lifecycle.unresolved();
 				case NEW -> false;
 				};
+				if (changed && first) {
+					selected.increment();
+				}
+				return changed;
 			}
 		}
 		synchronized (compatibilityStates) {
@@ -730,6 +770,7 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 				// lifecycle-aware implementations retain per-attempt stale-callback protection.
 				compatibilityState.state = next;
 				compatibilityState.circulation++;
+				selected.increment();
 				return true;
 			}
 			if (!current.canTransitionTo(next)) {
@@ -741,6 +782,9 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 								new WeakIdentityKey<>(op, compatibilityReferences), compatibilityState);
 			}
 			compatibilityState.state = next;
+			if (current == OperationLifecycleState.NEW) {
+				selected.increment();
+			}
 			return true;
 		}
 	}

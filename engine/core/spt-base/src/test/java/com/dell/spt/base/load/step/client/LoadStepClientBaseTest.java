@@ -2860,7 +2860,9 @@ class LoadStepClientBaseTest {
 			assertEquals(0, timingMetricsAggregatorCount(client));
 			assertDoesNotThrow(client::doStop);
 			assertDoesNotThrow(client::doShutdown);
-			assertDoesNotThrow(client::doClose);
+			// This fixture has no real worker; terminal evidence must fail closed at collection.
+			final var failure = assertThrows(IntegrityTerminalException.class, client::doClose);
+			assertTrue(failure.getMessage().contains("operation.lifecycle.csv"));
 		}
 
 		@Test

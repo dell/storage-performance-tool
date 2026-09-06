@@ -287,3 +287,47 @@ nonzero. A 100% policy cannot validate zero fully successful requests or zero ac
 # 3. Bundles and Extenstions
 
 This directory (`spt-base`) contains the core functionality. All extensions and additional spt tools are located in the [extensions](../../extensions) directory of this repository. Each component has its own documentation.
+
+## Terminal operation lifecycle evidence
+
+CREATE and READ steps publish `operation.lifecycle.csv` after all originally
+expected local contexts have stopped. The controller preserves each contributor
+as `operation.lifecycle.node-NNN.csv` and combines the rows in contributor order.
+The logs API exposes the combined artifact as `OperationLifecycle`; the CLI fetches
+it and the node sources with the actual step ID prefixed to their filenames.
+Older engines without this artifact remain readable by the CLI; qualification
+consumers must explicitly require it. CREATE seeding and measured READ use separate
+step artifacts.
+
+Schema version 1 contains `engine_run_id`, `step_id`, `worker_id`, `contexts`,
+`terminal`, `selected`, `accepted`, `failed`, `unattempted`, `unresolved`,
+`terminal_results`, `generator_buffered`, `driver_queued`, and `in_flight`.
+`worker_id` is a fresh UUID for this local worker step, not a hostname; source
+indices follow the controller's participating slice order. Build/topology identity
+remains in the existing run provenance.
+
+The unit is a tracked operation circulation, including a new circulation on
+recycling/retry. These are not DELETE object counts or necessarily logical object
+counts for compound operations. `selected` increments independently when a
+circulation first enters tracking. `accepted` counts committed successful terminal
+results; `failed` counts committed non-success results. A late completion that
+loses terminal ownership cannot change either count. Result status is captured
+before output can recycle the operation.
+
+`terminal=true` requires all originally expected contexts, supported accounting,
+a completed stop, and these terminal-only identities:
+
+```
+selected = accepted + failed + unattempted + unresolved
+terminal_results = accepted + failed
+generator_buffered = driver_queued = in_flight = 0
+```
+
+Timed stopping can leave nonzero unattempted or unresolved classifications.
+Consumers decide their acceptance policy separately from evidence reconciliation.
+Unsupported contexts or incomplete ownership produce `terminal=false`; they must
+never be interpreted as successful zero-count evidence. Collection failures retain
+node sources and fail aggregation. Repeated stop publishes once; a stale existing
+artifact is rejected. Publication uses an atomic file move after stop, independent
+of asynchronous logger queues, and adds no per-operation logging or completed-work
+identity retention.

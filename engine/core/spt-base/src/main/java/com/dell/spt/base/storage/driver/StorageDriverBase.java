@@ -323,6 +323,7 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 			if (Loggers.MSG.isTraceEnabled()) {
 				Loggers.MSG.trace("{}: Load operation completed", op);
 			}
+			final var terminalStatus = op.status();
 			@SuppressWarnings("unchecked")
 			final O opResult = (O) op.result();
 			if (!lifecycle.isOperationLifecycleTracked(op)) {
@@ -330,7 +331,7 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 				// same instance. Commit that compatibility circulation before output so its
 				// weak sidecar can advance independently; tracked operations retain the
 				// stronger output-before-terminal ordering below.
-				compatibilityTerminalCommitted = lifecycle.terminal(op);
+				compatibilityTerminalCommitted = lifecycle.terminal(op, terminalStatus);
 				if (!compatibilityTerminalCommitted) {
 					return false;
 				}
@@ -340,7 +341,7 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 				// remains in flight while arbitrary output code runs, so a bounded-drain
 				// deadline may still classify it unresolved; a late output return then cannot
 				// mutate either that outcome or a reset run's counters.
-				return compatibilityTerminalCommitted || lifecycle.terminal(op);
+				return compatibilityTerminalCommitted || lifecycle.terminal(op, terminalStatus);
 			}
 			Loggers.ERR.debug(
 							"{}: Load operations results output rejected a terminal snapshot",

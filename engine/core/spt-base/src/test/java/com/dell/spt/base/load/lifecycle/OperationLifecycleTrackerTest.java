@@ -28,6 +28,67 @@ import org.mockito.Answers;
 final class OperationLifecycleTrackerTest {
 
 	@Test
+	void terminalEvidenceCountsSelectionIndependentlyAndClassifiesExactlyOnce() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final var success = operation("success");
+		assertTrue(tracker.generatorBuffered(success));
+		assertEquals(1, tracker.counters().selected());
+		assertFalse(tracker.counters().reconciled());
+		assertFalse(tracker.generatorBuffered(success));
+		assertTrue(tracker.driverQueued(success));
+		assertTrue(tracker.explicitlyDispatched(success));
+		assertTrue(tracker.completionStarted(success));
+		success.status(Operation.Status.SUCC);
+		assertTrue(tracker.terminal(success));
+		success.status(Operation.Status.FAIL_IO);
+		assertFalse(tracker.terminal(success));
+		final var failure = operation("failure");
+		assertTrue(tracker.dispatched(failure));
+		assertTrue(tracker.completionStarted(failure));
+		failure.status(Operation.Status.FAIL_IO);
+		assertTrue(tracker.terminal(failure));
+		final var queued = operation("queued");
+		assertTrue(tracker.driverQueued(queued));
+		assertTrue(tracker.unattempted(queued));
+		final var inflight = operation("inflight");
+		assertTrue(tracker.dispatched(inflight));
+		assertTrue(tracker.completionStarted(inflight));
+		tracker.expireTerminalDeadline();
+		inflight.status(Operation.Status.SUCC);
+		assertFalse(tracker.terminal(inflight));
+		final var c = tracker.counters();
+		assertEquals(4, c.selected());
+		assertEquals(1, c.accepted());
+		assertEquals(1, c.failed());
+		assertEquals(1, c.unattempted());
+		assertEquals(1, c.unresolved());
+		assertTrue(c.reconciled());
+		tracker.reset();
+		assertEquals(0, tracker.counters().selected());
+		assertEquals(0, tracker.counters().accepted());
+		assertEquals(0, tracker.counters().failed());
+		assertTrue(tracker.counters().reconciled());
+		assertFalse(OperationLifecycleTracker.disabled().counters().reconciled());
+	}
+
+	@Test
+	void recycledCirculationsAndDirectUnattemptedSelectionAreCounted() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final var op = operation("recycle");
+		for (int i = 0; i < 3; i++) {
+			assertTrue(tracker.generatorBuffered(op));
+			assertTrue(tracker.dispatched(op));
+			assertTrue(tracker.completionStarted(op));
+			op.status(Operation.Status.SUCC);
+			assertTrue(tracker.terminal(op));
+		}
+		assertTrue(tracker.unattempted(operation("never-queued")));
+		assertEquals(4, tracker.counters().selected());
+		assertEquals(3, tracker.counters().accepted());
+		assertTrue(tracker.counters().reconciled());
+	}
+
+	@Test
 	void outstandingIsTheOnlyStrongIdentityRegistry() throws NoSuchFieldException {
 		assertEquals(Set.class,
 						OperationLifecycleTracker.class.getDeclaredField("outstanding").getType());
@@ -667,6 +728,7 @@ final class OperationLifecycleTrackerTest {
 		public Object invoke(final Object proxy, final Method method, final Object[] args) {
 			return switch (method.getName()) {
 			case "lifecycle", "startNextLifecycle" -> OperationLifecycle.untracked();
+			case "status" -> Operation.Status.SUCC;
 			case "hashCode" -> hashCodeValue;
 			case "equals" -> args != null
 							&& args.length == 1

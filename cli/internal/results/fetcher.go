@@ -27,7 +27,7 @@ const (
 	fileStatusOK      = "ok"
 )
 
-var integrityNodeSourcePattern = regexp.MustCompile(`^(written|verify-input|verified|integrity\.failures|integrity\.performance|multipart\.lifecycle|delete\.metrics\.total|delete\.requests|delete\.objects|delete\.verification|items)\.node-[0-9]{3}\.csv$`)
+var integrityNodeSourcePattern = regexp.MustCompile(`^(written|verify-input|verified|integrity\.failures|integrity\.performance|multipart\.lifecycle|operation\.lifecycle|delete\.metrics\.total|delete\.requests|delete\.objects|delete\.verification|items)\.node-[0-9]{3}\.csv$`)
 
 // ArtifactSpec defines a log endpoint and its output filename suffix.
 type ArtifactSpec struct {
@@ -38,6 +38,7 @@ type ArtifactSpec struct {
 
 // DefaultArtifacts is the initial list we fetch per step.
 var DefaultArtifacts = []ArtifactSpec{
+	{Loggers: []string{"OperationLifecycle"}, Suffix: constants.ResultsArtifactSuffixOperationLifecycle, Required: false},
 	{Loggers: []string{"metrics.FileTotal"}, Suffix: constants.ResultsArtifactSuffixMetricsTotal, Required: true},
 	{Loggers: []string{"Config"}, Suffix: constants.ResultsArtifactSuffixConfig, Required: true},
 	{Loggers: []string{"Cli"}, Suffix: constants.ResultsArtifactSuffixCLIArgs, Required: false},
