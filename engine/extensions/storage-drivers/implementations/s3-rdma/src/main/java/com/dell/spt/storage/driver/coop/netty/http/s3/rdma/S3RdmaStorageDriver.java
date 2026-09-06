@@ -185,6 +185,17 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		}
 	}
 
+	/**
+	 * RDMA buffer registration and token creation happen in {@link #submit(Operation)}, and
+	 * {@link #httpRequest} only adds the RDMA header when that context exists. Completion-driven
+	 * direct dispatch sends through {@code sendRequest} without calling {@code submit}, so an
+	 * operation dispatched that way would silently fall back to HTTP. Keep the dispatcher path.
+	 */
+	@Override
+	protected boolean supportsDirectDispatch() {
+		return false;
+	}
+
 	@Override
 	protected boolean submit(final O op) throws IllegalStateException {
 		if (shouldUseRdma(op)) {

@@ -43,6 +43,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	static final int MAX_PART_RETRIES = 3;
 	static final String CHILD_OP_ENQUEUE_TIMEOUT_MILLIS_PROPERTY = "spt.mpu.child.enqueue.timeout.millis";
 	static final long DEFAULT_CHILD_OP_ENQUEUE_TIMEOUT_MILLIS = 30_000L;
+	/** Experimental: completion-driven direct dispatch for built-in transport drivers. */
+	static final String DIRECT_DISPATCH_PROPERTY = "spt.dispatch.direct";
 	private static final String KEY_FINALIZATION_ENQUEUED = "sptFinalizationEnqueued";
 
 	protected final Semaphore concurrencyThrottle;
@@ -59,6 +61,10 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	private final Object mpuSchedulingLock = new Object();
 	private final int configuredMpuObjectLimit;
 	private final int configuredMpuPartLimit;
+	// Evaluated once so the per-operation path reads one final field. supportsDirectDispatch()
+	// must therefore be a constant for the subclass, which is all the capability declaration is.
+	private final boolean directDispatchEnabled = Boolean.getBoolean(DIRECT_DISPATCH_PROPERTY)
+					&& supportsDirectDispatch();
 	private volatile boolean mpuSchedulingInitialized = false;
 	/**
 	 * @deprecated retained for binary compatibility only; SPT never reads this field and writes
@@ -261,6 +267,71 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return Math.max(
 						0,
 						Math.min(bufferedOperationCount, concurrencyThrottle.availablePermits()));
+	}
+
+	/**
+	 * Returns whether completion-driven direct dispatch is enabled for this driver: the JVM-wide
+	 * {@value #DIRECT_DISPATCH_PROPERTY} is set and the driver declares the capability through
+	 * {@link #supportsDirectDispatch()}. Off by default so the dispatcher path is unchanged; drivers
+	 * without a direct completion path keep the unchanged dispatcher scheduling even when the
+	 * property is set.
+	 */
+	protected final boolean directDispatchEnabled() {
+		return directDispatchEnabled;
+	}
+
+	/**
+	 * Declares that this driver's completion path calls {@link #pollForDirectDispatch()} and can
+	 * transfer its permit and transport to the returned operation. Must return a constant: it is
+	 * read once during {@code CoopStorageDriverBase} construction, before subclass fields exist.
+	 */
+	protected boolean supportsDirectDispatch() {
+		return false;
+	}
+
+	/** Operations the dispatch task has drained but not yet submitted. */
+	protected final int dispatcherBacklog() {
+		final var task = this.opDispatchTask;
+		return task == null ? 0 : task.backlog();
+	}
+
+	/**
+	 * Takes the next plain operation for a caller which already holds a concurrency permit and a
+	 * transport channel, crossing the dispatch boundary under the admission lock. Returns
+	 * {@code null} when the caller must instead release its permit and wake the dispatcher: the
+	 * queue is empty, the head is composite, partial or NOOP work, child operations are pending,
+	 * the dispatcher retains a backlog, or admission has closed. A returned operation is already
+	 * {@code DISPATCHED}; the caller owns starting its transport or completing it as failed.
+	 */
+	protected final O pollForDirectDispatch() {
+		if (admissionLock == null || !isStarted() || dispatcherBacklog() > 0) {
+			return null;
+		}
+		admissionLock.lock();
+		try {
+			if (!admissionOpen || !childOpQueue.isEmpty()) {
+				return null;
+			}
+			final O head = inOpQueue.peek();
+			if (head == null || !isDirectDispatchEligible(head)) {
+				return null;
+			}
+			inOpQueue.poll();
+			if (markDispatchOwnership(head)) {
+				return head;
+			}
+			operationLifecycle().unattempted(head);
+			return null;
+		} finally {
+			admissionLock.unlock();
+		}
+	}
+
+	/** Plain operations only: composite and partial work keeps the dispatcher's MPU accounting. */
+	protected static boolean isDirectDispatchEligible(final Operation<?> op) {
+		return !(op instanceof CompositeOperation)
+						&& !(op instanceof PartialOperation)
+						&& !OpType.NOOP.equals(op.type());
 	}
 
 	/** Returns whether new transport dispatch may begin. */
@@ -714,8 +785,18 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return Long.getLong(CHILD_OP_ENQUEUE_TIMEOUT_MILLIS_PROPERTY, DEFAULT_CHILD_OP_ENQUEUE_TIMEOUT_MILLIS);
 	}
 
-	@SuppressWarnings("unchecked")
+	@Override
 	protected final boolean handleCompleted(final O op) {
+		return handleCompleted(op, true);
+	}
+
+	/**
+	 * Completes {@code op}; {@code wakeDispatcher} is {@code false} only when the caller still owns
+	 * the completed operation's permit and will either hand it to the next operation directly or
+	 * release it and wake the dispatcher itself, so the per-completion unpark is not paid twice.
+	 */
+	@SuppressWarnings("unchecked")
+	protected final boolean handleCompleted(final O op, final boolean wakeDispatcher) {
 		final boolean accepted = super.handleCompleted(op);
 		if (!accepted) {
 			if (op instanceof CompositeOperation || op instanceof PartialOperation) {
@@ -779,7 +860,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				enqueueChildOp((O) parentOp, op, "completion operation");
 			}
 		}
-		signalDispatch();
+		if (wakeDispatcher) {
+			signalDispatch();
+		}
 		return true;
 	}
 

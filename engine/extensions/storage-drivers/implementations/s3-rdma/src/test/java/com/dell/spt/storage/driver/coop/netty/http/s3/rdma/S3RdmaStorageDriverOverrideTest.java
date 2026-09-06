@@ -8,6 +8,7 @@ import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.integrity.IntegrityMetadataCodec;
 import com.dell.spt.base.integrity.IntegrityResponseObserver;
 import com.dell.spt.base.storage.Credential;
+import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
 import com.dell.spt.storage.driver.coop.netty.NettyStorageDriver;
 import com.dell.spt.storage.driver.coop.netty.http.s3.S3ResponseHandler;
 import com.github.akurilov.commons.io.Output;
@@ -121,6 +122,24 @@ public class S3RdmaStorageDriverOverrideTest {
 		assertTrue(found);
 		assertFalse(rdmaOps.containsKey(op));
 		Mockito.verify(transport).deregisterBuffer(buf, mrHandle);
+	}
+
+	@Test
+	void directDispatchStaysOffBecauseRdmaPreparationLivesInSubmit() throws Exception {
+		final var prior = System.setProperty("spt.dispatch.direct", "true");
+		try {
+			final var driver = newDriver(enabledConfig(), availableTransport());
+			final Method enabled = CoopStorageDriverBase.class.getDeclaredMethod("directDispatchEnabled");
+			enabled.setAccessible(true);
+			assertFalse((Boolean) enabled.invoke(driver),
+							"a directly dispatched op would bypass submitRdma() and fall back to HTTP");
+		} finally {
+			if (prior == null) {
+				System.clearProperty("spt.dispatch.direct");
+			} else {
+				System.setProperty("spt.dispatch.direct", prior);
+			}
+		}
 	}
 
 	@Test

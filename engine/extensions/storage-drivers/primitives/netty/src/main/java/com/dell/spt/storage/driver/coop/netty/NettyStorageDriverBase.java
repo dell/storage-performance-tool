@@ -783,14 +783,74 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			channel.close();
 		}
 
+		final boolean transportHeld = channel != null
+						&& !channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE);
+		if (transportHeld && directDispatchEnabled()
+						&& op.status() == Operation.Status.SUCC
+						&& channel.isActive()
+						&& isDirectDispatchEligible(op)) {
+			// Keep the permit and the channel across completion so the next queued operation can
+			// start on this event-loop thread without a dispatcher hand-off or a pool round trip.
+			var transferred = false;
+			try {
+				handleCompleted(op, false);
+				transferred = tryDirectDispatch(channel);
+			} finally {
+				if (!transferred) {
+					releaseTransport(channel);
+				}
+			}
+			return;
+		}
 		// Release the permit and channel before reporting completion. Recycled
 		// operations return through the shared LoadGenerator queue for redispatch.
-		if (channel != null && !channel.attr(ATTR_KEY_RELEASED).getAndSet(Boolean.TRUE)) {
-			concurrencyThrottle.release();
-			connPool.release(channel);
-			signalDispatchCapacityAvailable();
+		if (transportHeld) {
+			releaseTransport(channel);
 		}
 		handleCompleted(op);
+	}
+
+	/**
+	 * Netty drivers can transfer a completed operation's permit and channel to the next queued
+	 * operation. Subclasses whose {@link #submit(Operation)} does per-operation preparation that
+	 * {@link #sendRequest} alone does not perform must override this to return {@code false}, or
+	 * directly dispatched operations would skip that preparation.
+	 */
+	@Override
+	protected boolean supportsDirectDispatch() {
+		return true;
+	}
+
+	private void releaseTransport(final Channel channel) {
+		concurrencyThrottle.release();
+		connPool.release(channel);
+		signalDispatchCapacityAvailable();
+	}
+
+	/**
+	 * Sends the next plain queued operation on {@code conn}, which the caller still owns together
+	 * with one concurrency permit. Returns {@code false} when no operation was taken and the caller
+	 * must release both; {@code true} when ownership passed to the next operation, including a send
+	 * failure which completes that operation and releases through the normal path.
+	 */
+	private boolean tryDirectDispatch(final Channel conn) {
+		final O nextOp = pollForDirectDispatch();
+		if (nextOp == null) {
+			return false;
+		}
+		conn.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
+		try {
+			conn.attr(ATTR_KEY_OPERATION).set(nextOp);
+			nextOp.nodeAddr(conn.attr(ATTR_KEY_NODE).get());
+			nextOp.startRequest();
+			sendRequest(conn, nextOp);
+		} catch (final Throwable thrown) {
+			throwUncheckedIfInterrupted(thrown);
+			logSubmissionFailure(thrown);
+			nextOp.status(Operation.Status.FAIL_UNKNOWN);
+			completeAfterSubmissionSafely(conn, nextOp);
+		}
+		return true;
 	}
 
 	@Override
