@@ -1,5 +1,6 @@
 package com.dell.spt.base.load.step.local.context;
 
+import com.dell.spt.base.load.lifecycle.OperationLifecycleCounters;
 import com.dell.spt.base.concurrent.Daemon;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
@@ -24,6 +25,11 @@ public interface LoadStepContext<I extends Item, O extends Operation<I>> extends
 	/** Returns lifecycle counts and recoverable terminal identities for this step. */
 	default OperationLifecycleSnapshot<O> operationLifecycle() {
 		return new OperationLifecycleSnapshot<>(0, 0, 0, 0, 0, 0, 0, java.util.List.of(), java.util.List.of());
+	}
+
+	/** Returns counters only after this context's stop completed, or null when unsupported. */
+	default OperationLifecycleCounters terminalOperationCounters() {
+		return null;
 	}
 
 	/** Returns object-level identity accounting, or {@code null} when the context cannot supply it. */

@@ -13,6 +13,7 @@ class DeleteArtifactLoggerRegistrationTest {
 	@Test
 	void everyDeleteArtifactHasAReflectionVisibleStepScopedAppender() throws Exception {
 		final Map<String, String> expected = Map.of(
+						Loggers.OPERATION_LIFECYCLE.getName(), "operation.lifecycle.csv",
 						Loggers.DELETE_METRICS_TOTAL.getName(), "delete.metrics.total.csv",
 						Loggers.DELETE_REQUESTS.getName(), "delete.requests.csv",
 						Loggers.DELETE_OBJECTS.getName(), "delete.objects.csv",

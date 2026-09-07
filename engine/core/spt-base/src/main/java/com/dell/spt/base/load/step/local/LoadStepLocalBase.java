@@ -6,10 +6,12 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
 
+import com.dell.spt.base.load.lifecycle.OperationLifecycleCounters;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
 import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.LoadStepBase;
@@ -21,6 +23,7 @@ import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
+import java.util.UUID;
 import java.io.IOException;
 import java.rmi.RemoteException;
 import java.util.NoSuchElementException;
@@ -44,6 +47,9 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	protected final List<LoadStepContext> stepContexts = new ArrayList<>();
 	private volatile List<LoadStepContext> expectedDeleteObjectLifecycleContexts;
+	private List<LoadStepContext> expectedOperationLifecycleContexts = List.of();
+	private String operationLifecycleWorkerId;
+	private boolean operationLifecyclePublished;
 	private volatile IntegrityTerminalException durationStopFailure;
 	private volatile IntegrityTerminalException durationValidityFailure;
 	private volatile boolean durationAdmissionBarrierSatisfied;
@@ -140,6 +146,9 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	@Override
 	protected void doStartWrapped() {
 		resetDurationLifecycleForStart();
+		expectedOperationLifecycleContexts = List.copyOf(stepContexts);
+		operationLifecycleWorkerId = UUID.randomUUID().toString();
+		operationLifecyclePublished = false;
 		if (standaloneDeleteEnabled()) {
 			expectedDeleteObjectLifecycleContexts = List.copyOf(stepContexts);
 		}
@@ -633,7 +642,24 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		} else {
 			stepContexts.forEach(LoadStepContext::stop);
 		}
+		publishOperationLifecycle();
 		super.doStop();
+	}
+
+	private void publishOperationLifecycle() {
+		final String operation = config.stringVal("load-op-type");
+		if (operationLifecyclePublished || !("create".equalsIgnoreCase(operation) || "read".equalsIgnoreCase(operation))) {
+			return;
+		}
+		final var counters = new ArrayList<OperationLifecycleCounters>();
+		for (final var context : expectedOperationLifecycleContexts) {
+			counters.add(context.terminalOperationCounters());
+		}
+		try (final var logContext = put(KEY_STEP_ID, loadStepId())) {
+			OperationLifecycleArtifact.publish(runId(), loadStepId(),
+							operationLifecycleWorkerId, counters, expectedOperationLifecycleContexts.equals(stepContexts));
+		}
+		operationLifecyclePublished = true;
 	}
 
 	private void prepareDurationStop() {

@@ -12,6 +12,7 @@ import static com.dell.spt.base.metrics.MetricsConstants.DELETE_IDENTITY_MODE_SI
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 
+import com.dell.spt.base.load.lifecycle.OperationLifecycleCounters;
 import com.dell.spt.base.concurrent.DaemonBase;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
@@ -1597,6 +1598,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	@Override
 	public final OperationLifecycleSnapshot<O> operationLifecycle() {
 		return operationLifecycle.snapshot();
+	}
+
+	@Override
+	public final OperationLifecycleCounters terminalOperationCounters() {
+		return isStopped() && operationDrainComplete.get() ? operationLifecycle.counters() : null;
 	}
 
 	@Override

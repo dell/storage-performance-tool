@@ -1429,3 +1429,13 @@ current=5.10.4 latest=5.11.0 available=true
 | Post-quantum TLS (`pqcMode`: `off`/`prefer`/`require`) | Implemented |
 | `delete` workload | Implemented |
 | `results` command | Planned (stub exists) |
+
+### Disable direct dispatch
+
+Supported engine drivers use completion-driven direct dispatch by default.
+Set `SPT_JAVA_OPTS=-Dspt.dispatch.direct=false` in the environment of the SPT CLI
+to use dispatcher scheduling. Preserve any other required JVM options in that
+variable. The setting applies when the engine driver is constructed, so restart
+the workload to change it. Drivers without direct-dispatch support continue to
+use dispatcher scheduling regardless of this setting. See the
+[engine documentation](../../engine/README.md#direct-dispatch).

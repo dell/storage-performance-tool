@@ -185,6 +185,14 @@ Configuration:
         DirectWriteRolloverStrategy: {}
         PatternLayout:
           pattern: "%m%n"
+      - name: operationLifecycleFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}operation.lifecycle.csv"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          header: "schema_version,engine_run_id,step_id,worker_id,contexts,terminal,selected,accepted,failed,unattempted,unresolved,terminal_results,generator_buffered,driver_queued,in_flight\n"
+          pattern: "%m%n"
       - name: multipartLifecycleFile
         filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}multipart.lifecycle.csv"
         Policies:
@@ -356,6 +364,11 @@ Configuration:
         level: DEBUG
         AppenderRef:
           ref: partsUploadFile
+        additivity: false
+      - name: com.dell.spt.base.logging.OperationLifecycle
+        level: INFO
+        AppenderRef:
+          ref: operationLifecycleFile
         additivity: false
       - name: com.dell.spt.base.logging.MultipartLifecycle
         level: INFO

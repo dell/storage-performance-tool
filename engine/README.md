@@ -491,3 +491,19 @@ See the [LICENSE](core/spt-base/LICENSE) file for license rights and limitations
 ## Support
 
 - [Documentation](core/spt-base/doc/README.md) - Comprehensive documentation
+
+### Direct dispatch
+
+Completion-driven direct dispatch is enabled by default for drivers that declare
+support for it. Drivers without that capability retain dispatcher scheduling.
+To disable it when launching an engine container or the SPT CLI, set:
+
+```bash
+export SPT_JAVA_OPTS="${SPT_JAVA_OPTS:+$SPT_JAVA_OPTS }-Dspt.dispatch.direct=false"
+```
+
+For a direct Java launch, place `-Dspt.dispatch.direct=false` before `-jar`.
+The JVM system property is read when each driver is constructed; restart the
+engine to change it. An absent property enables direct dispatch; explicit
+`true` enables it and `false` disables it. This is a JVM setting, not a scenario
+configuration flag. Avoid duplicate definitions in other JVM option sources.

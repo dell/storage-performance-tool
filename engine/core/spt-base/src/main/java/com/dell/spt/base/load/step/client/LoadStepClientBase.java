@@ -7,6 +7,7 @@ import static com.dell.spt.base.config.ConfigUtil.flatten;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
 
+import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
 import com.dell.spt.base.config.AliasingUtil;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
@@ -105,6 +106,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private final List<AutoCloseable> itemDataInputFileSlicers = new ArrayList<>();
 	private final List<AutoCloseable> itemInputFileSlicers = new ArrayList<>();
 	private final List<AutoCloseable> itemOutputFileAggregators = new ArrayList<>();
+	private final List<AutoCloseable> operationLifecycleAggregators = new ArrayList<>();
 	private final List<AutoCloseable> integrityLogFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> itemTimingMetricsOutputFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> opTraceLogFileAggregators = new ArrayList<>();
@@ -417,6 +419,16 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 
 		initIntegrityLogFileAggregators(integrityConfig, opType, itemConfig);
+		if ((opType == OpType.CREATE || opType == OpType.READ) && operationLifecycleAggregators.isEmpty()) {
+			try {
+				operationLifecycleAggregators.add(new CsvLoggerArtifactAggregator(loadStepId(), fileMgrs,
+								Loggers.OPERATION_LIFECYCLE.getName(),
+								OperationLifecycleArtifact.FILE_NAME,
+								OperationLifecycleArtifact.HEADER));
+			} catch (final IOException e) {
+				throw new IllegalStateException("failed to initialize operation lifecycle aggregation", e);
+			}
+		}
 		final var itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
 		final boolean skipScatter = ItemType.PATH.equals(itemType) && OpType.LIST.equals(opType);
 		if (skipScatter) {
@@ -2205,6 +2217,17 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			deleteArtifactAggregators.clear();
 			deleteArtifactAggregators.addAll(failedDeleteArtifactAggregators);
+			for (final var aggregator : operationLifecycleAggregators) {
+				try {
+					aggregator.close();
+				} catch (final Exception e) {
+					throwUncheckedIfInterrupted(e);
+					terminalCause = appendTerminalFailure(terminalCause,
+									IntegrityTerminalException.Category.AGGREGATION,
+									"failed to collect operation lifecycle evidence", e);
+				}
+			}
+			operationLifecycleAggregators.clear();
 			for (final var integrityLogFileAggregator : integrityLogFileAggregators) {
 				try {
 					integrityLogFileAggregator.close();

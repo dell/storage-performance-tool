@@ -43,7 +43,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	static final int MAX_PART_RETRIES = 3;
 	static final String CHILD_OP_ENQUEUE_TIMEOUT_MILLIS_PROPERTY = "spt.mpu.child.enqueue.timeout.millis";
 	static final long DEFAULT_CHILD_OP_ENQUEUE_TIMEOUT_MILLIS = 30_000L;
-	/** Experimental: completion-driven direct dispatch for built-in transport drivers. */
+	/** Completion-driven direct dispatch; set to false to use dispatcher scheduling. */
 	static final String DIRECT_DISPATCH_PROPERTY = "spt.dispatch.direct";
 	private static final String KEY_FINALIZATION_ENQUEUED = "sptFinalizationEnqueued";
 
@@ -63,7 +63,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	private final int configuredMpuPartLimit;
 	// Evaluated once so the per-operation path reads one final field. supportsDirectDispatch()
 	// must therefore be a constant for the subclass, which is all the capability declaration is.
-	private final boolean directDispatchEnabled = Boolean.getBoolean(DIRECT_DISPATCH_PROPERTY)
+	private final boolean directDispatchEnabled = Boolean.parseBoolean(System.getProperty(DIRECT_DISPATCH_PROPERTY, "true"))
 					&& supportsDirectDispatch();
 	private volatile boolean mpuSchedulingInitialized = false;
 	/**
@@ -271,10 +271,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 
 	/**
 	 * Returns whether completion-driven direct dispatch is enabled for this driver: the JVM-wide
-	 * {@value #DIRECT_DISPATCH_PROPERTY} is set and the driver declares the capability through
-	 * {@link #supportsDirectDispatch()}. Off by default so the dispatcher path is unchanged; drivers
-	 * without a direct completion path keep the unchanged dispatcher scheduling even when the
-	 * property is set.
+	 * {@value #DIRECT_DISPATCH_PROPERTY} defaults to true and the driver declares the capability
+	 * through {@link #supportsDirectDispatch()}. Set the property to false before constructing the
+	 * driver to retain dispatcher scheduling. Drivers without the capability always use the dispatcher.
 	 */
 	protected final boolean directDispatchEnabled() {
 		return directDispatchEnabled;

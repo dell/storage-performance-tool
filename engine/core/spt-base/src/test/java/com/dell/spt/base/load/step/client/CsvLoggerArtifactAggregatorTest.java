@@ -19,6 +19,48 @@ import org.junit.jupiter.api.Test;
 class CsvLoggerArtifactAggregatorTest {
 
 	@Test
+	void collectsTerminalOperationEvidenceFromEveryContributor() throws Exception {
+		final Path dir = Files.createTempDirectory("operation-lifecycle-aggregation-");
+		final var artifact = com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact.FILE_NAME;
+		final var header = com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact.HEADER;
+		final var counters = new com.dell.spt.base.load.lifecycle.OperationLifecycleCounters(true, 4, 1, 1, 2, 1, 1, 0, 0, 0);
+		final Path canonical = dir.resolve(artifact);
+		final var managers = new java.util.ArrayList<FileManager>();
+		try {
+			for (int i = 0; i < 3; i++) {
+				final var manager = mock(FileManager.class);
+				managers.add(manager);
+				final String source = i == 0 ? canonical.toString() : "/worker-" + i + "/" + artifact;
+				when(manager.logFileName("OperationLifecycle", "step")).thenReturn(source);
+				final String body = header + "\n" + com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact.row(
+								123, "step", "worker-" + i, List.of(counters), true) + "\n";
+				if (i == 0) {
+					Files.writeString(canonical, body);
+				} else {
+					final byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+					when(manager.readFromFile(source, 0)).thenReturn(bytes);
+					when(manager.readFromFile(source, bytes.length)).thenThrow(new EOFException());
+				}
+			}
+			new CsvLoggerArtifactAggregator("step", managers, "OperationLifecycle", artifact, header).close();
+			try (final var parser = CSVFormat.RFC4180.builder().setHeader().get().parse(Files.newBufferedReader(canonical))) {
+				final var rows = parser.getRecords();
+				assertEquals(3, rows.size());
+				for (int i = 0; i < 3; i++) {
+					assertEquals("worker-" + i, rows.get(i).get("worker_id"));
+					org.junit.jupiter.api.Assertions.assertTrue(Files.exists(CsvLoggerArtifactAggregator.nodeSourcePath(canonical, i)));
+				}
+			}
+		} finally {
+			try (final var files = Files.list(dir)) {
+				for (final var file : files.toList())
+					Files.deleteIfExists(file);
+			}
+			Files.deleteIfExists(dir);
+		}
+	}
+
+	@Test
 	void preservesNodeSourcesAndMergesCompleteCsvRecords() throws Exception {
 		final Path dir = Files.createTempDirectory("integrity-logger-aggregation-");
 		final Path canonical = dir.resolve(IntegrityCsvArtifacts.PERFORMANCE_FILE_NAME);
