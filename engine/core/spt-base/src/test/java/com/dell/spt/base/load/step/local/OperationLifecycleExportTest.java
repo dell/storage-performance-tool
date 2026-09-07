@@ -113,10 +113,12 @@ class OperationLifecycleExportTest {
 			stepContexts.add(context);
 		}
 
+		@Override
 		public String getTypeName() {
 			return "lifecycle-test";
 		}
 
+		@Override
 		protected void init() {}
 
 		void startContexts() {
