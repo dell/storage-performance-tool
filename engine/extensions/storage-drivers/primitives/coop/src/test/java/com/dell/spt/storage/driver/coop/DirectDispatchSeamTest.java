@@ -178,6 +178,34 @@ class DirectDispatchSeamTest {
 	}
 
 	@Test
+	void defaultAndExplicitPropertyControlCapableDrivers() throws Exception {
+		for (final String property : new String[]{null, "true", "TRUE", "false", "FALSE", "", "invalid"
+		}) {
+			if (property == null) {
+				System.clearProperty(CoopStorageDriverBase.DIRECT_DISPATCH_PROPERTY);
+			} else {
+				System.setProperty(CoopStorageDriverBase.DIRECT_DISPATCH_PROPERTY, property);
+			}
+			driver = new RefusingDriver(storageConfig(1));
+			final boolean expected = property == null || Boolean.parseBoolean(property);
+			assertEquals(expected, driver.directDispatchEnabled());
+			// Each driver snapshots the setting once; changing a JVM property is not a live toggle.
+			System.setProperty(CoopStorageDriverBase.DIRECT_DISPATCH_PROPERTY, Boolean.toString(!expected));
+			assertEquals(expected, driver.directDispatchEnabled());
+			driver.close();
+			driver = null;
+		}
+	}
+
+	@Test
+	void defaultDoesNotEnableDriversWithoutTheCapability() throws Exception {
+		System.clearProperty(CoopStorageDriverBase.DIRECT_DISPATCH_PROPERTY);
+		driver = new CoopStorageDriverMock<DataItem, Operation<DataItem>>(
+						"default-no-capability", dataInput(), storageConfig(1), false, 4);
+		assertFalse(driver.directDispatchEnabled());
+	}
+
+	@Test
 	void propertyAloneDoesNotEnableDirectDispatchForDriversWithoutTheCapability() throws Exception {
 		final var plainMock = new CoopStorageDriverMock<DataItem, Operation<DataItem>>(
 						"no-capability-step", dataInput(), storageConfig(1), false, 4);
