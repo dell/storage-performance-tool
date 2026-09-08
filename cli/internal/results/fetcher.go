@@ -222,11 +222,6 @@ func (f *Fetcher) preserveIndependentManifestFields(man *Manifest) error {
 			"file", constants.ResultsManifestFileName, "error", err)
 		return nil
 	}
-	if err := json.Unmarshal(data, &existing.independentFields); err != nil {
-		logging.LogWarn("results", "replacing corrupt results index",
-			"file", constants.ResultsManifestFileName, "error", err)
-		return nil
-	}
 	existing.BaseURL = man.BaseURL
 	existing.OutputDir = man.OutputDir
 	existing.GeneratedAt = man.GeneratedAt
@@ -246,7 +241,7 @@ func hasSuccessfulGenericTotals(sm StepManifest) bool {
 }
 
 func (f *Fetcher) writeManifest(m *Manifest) error {
-	data, err := marshalManifestWithIndependentFields(m)
+	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal manifest: %w", err)
 	}
@@ -270,26 +265,6 @@ func (f *Fetcher) writeManifest(m *Manifest) error {
 		return fmt.Errorf("rename manifest: %w", err)
 	}
 	return nil
-}
-
-func marshalManifestWithIndependentFields(manifest *Manifest) ([]byte, error) {
-	typedData, err := json.Marshal(manifest)
-	if err != nil {
-		return nil, err
-	}
-	if len(manifest.independentFields) == 0 {
-		return json.MarshalIndent(manifest, "", "  ")
-	}
-	var merged map[string]json.RawMessage
-	if err := json.Unmarshal(typedData, &merged); err != nil {
-		return nil, err
-	}
-	for name, value := range manifest.independentFields {
-		if _, owned := merged[name]; !owned {
-			merged[name] = value
-		}
-	}
-	return json.MarshalIndent(merged, "", "  ")
 }
 
 func (f *Fetcher) fetchStep(ctx context.Context, stepID string) StepManifest {

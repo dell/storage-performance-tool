@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -140,6 +141,33 @@ func TestPublishedIdentitySurvivesRealArtifactFetchAndImmediateSummaryLoad(t *te
 	defer server.Close()
 
 	root := filepath.Join(t.TempDir(), "managed-run")
+	if err := os.MkdirAll(root, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	const independent = `{"status":"verified","samples":9007199254740993}`
+	if err := os.WriteFile(filepath.Join(root, constants.ResultsManifestFileName),
+		[]byte(`{"steps":[],"qualification":`+independent+`}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertIndependent := func() {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(root, constants.ResultsManifestFileName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			t.Fatal(err)
+		}
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, fields["qualification"]); err != nil {
+			t.Fatalf("independent field missing: %s", data)
+		}
+		if compact.String() != independent {
+			t.Fatalf("independent field changed: %s", data)
+		}
+	}
+
 	dirty := false
 	metadata := buildRunMetadata(runMetadataInput{
 		WorkloadType:    scenario.WorkloadTypeRead,
@@ -179,6 +207,12 @@ func TestPublishedIdentitySurvivesRealArtifactFetchAndImmediateSummaryLoad(t *te
 	if _, err := fetcher.FetchArtifactsForSteps(context.Background(), []string{stepID}); err != nil {
 		t.Fatal(err)
 	}
+
+	assertIndependent()
+	if err := writeRunMetadata(metadata, root); err != nil {
+		t.Fatal(err)
+	}
+	assertIndependent()
 
 	// A fresh loader represents a process that stopped immediately after artifact fetching;
 	// no later writeRunMetadata pass repairs or republishes the on-disk bundle.
