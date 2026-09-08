@@ -96,11 +96,11 @@ public final class Main {
 			}
 		}
 
+		final var initialStepId = "none-" + LogUtil.getDateTimeStamp();
+		// Build identity and its fallback warning may initialize logging.
+		LogUtil.init(resolveLogPath(), initialStepId);
 		final var coreResources = new CoreResourcesToInstall();
 		final var appHomePath = coreResources.appHomePath();
-		final var initialStepId = "none-" + LogUtil.getDateTimeStamp();
-
-		LogUtil.init(resolveLogPath(), initialStepId);
 		Loggers.MSG.info(EngineBuildInfoRenderer.startupLine(EngineBuildInfoProvider.global().snapshot()));
 		try {
 			// install the core resources

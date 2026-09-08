@@ -1,6 +1,9 @@
 package com.dell.spt.base.buildinfo;
 
+import static com.dell.spt.base.Constants.KEY_HOME_DIR;
+
 import com.dell.spt.base.logging.Loggers;
+import org.apache.logging.log4j.ThreadContext;
 import com.github.akurilov.confuse.Config;
 import java.io.IOException;
 import java.io.InputStream;
@@ -129,10 +132,19 @@ public final class EngineBuildInfoProvider {
 		return new EngineBuildInfo(SCHEMA_VERSION, PRODUCT, version, UNKNOWN, UNKNOWN, true, null);
 	}
 
+	static void warn(final String message) {
+		if (ThreadContext.get(KEY_HOME_DIR) == null) {
+			// --version can report degraded identity before normal logging starts.
+			System.err.println(message);
+		} else {
+			Loggers.ERR.warn(message);
+		}
+	}
+
 	private static final class GlobalHolder {
 
 		private static final EngineBuildInfoProvider INSTANCE = new EngineBuildInfoProvider(
-						new ClasspathSource(), Loggers.ERR::warn);
+						new ClasspathSource(), EngineBuildInfoProvider::warn);
 	}
 
 	private static final class ClasspathSource implements EngineBuildInfoSource {

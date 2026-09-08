@@ -21,6 +21,23 @@ import org.junit.jupiter.api.Test;
 
 class EngineBuildInfoProviderTest {
 
+	@Test
+	void earlyFallbackWarningUsesStderrBeforeLogContextExists() {
+		final String previousHome = org.apache.logging.log4j.ThreadContext.get("home_dir");
+		final var originalErr = System.err;
+		final var captured = new java.io.ByteArrayOutputStream();
+		try {
+			org.apache.logging.log4j.ThreadContext.remove("home_dir");
+			System.setErr(new java.io.PrintStream(captured, true, StandardCharsets.UTF_8));
+			EngineBuildInfoProvider.warn("development fallback");
+			assertEquals("development fallback" + System.lineSeparator(), captured.toString(StandardCharsets.UTF_8));
+		} finally {
+			System.setErr(originalErr);
+			if (previousHome != null)
+				org.apache.logging.log4j.ThreadContext.put("home_dir", previousHome);
+		}
+	}
+
 	private static final String COMPLETE_RESOURCE = """
 					schema_version=1
 					product=spt-engine

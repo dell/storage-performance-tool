@@ -458,6 +458,12 @@ tasks.register('verifyEngineBuildInfoCanary') {
 				"Direct scenario did not produce initialization and workload Engine Build Records under ${logRoot}")
 		}
 
+		['config.yaml', 'metrics.total.csv'].each { name ->
+			if (!new File(stepArtifact.parentFile, name).isFile()) {
+				throw new GradleException("Packaged workload ${name} is not colocated with engine.build.json")
+			}
+		}
+
 		def expectedJson = [
 			schema_version: expectedResource.schema_version as Integer,
 			product: expectedResource.product,
@@ -504,7 +510,11 @@ tasks.register('verifyEngineBuildInfoCanary') {
 			"--run-port=${nodePort}",
 			"--load-step-node-port=${nodeServicePort}",
 			'--api-linger-sec=0',
-			'--storage-driver-type=netty-mock')
+			'--storage-driver-type=netty-mock',
+			'--storage-driver-limit-concurrency=1',
+			'--item-data-size=1KiB',
+			'--load-op-limit-count=1',
+			'--load-step-id=engine-build-info-node-canary')
 		nodeBuilder.directory(file(distDir))
 		nodeBuilder.environment().put('SPT_HOME', nodeHome.absolutePath)
 		nodeBuilder.environment().put('SPT_LOG_DIR', nodeLog.absolutePath)
@@ -531,6 +541,43 @@ tasks.register('verifyEngineBuildInfoCanary') {
 				throw new GradleException(
 					"Packaged node /version differs from generated metadata:\n"
 						+ nodeStdout.getText('UTF-8') + nodeStderr.getText('UTF-8'))
+			}
+
+			def request = { String path, String method ->
+				def connection = (java.net.HttpURLConnection) new URL("http://127.0.0.1:${nodePort}${path}").openConnection()
+				connection.requestMethod = method
+				connection.connectTimeout = 1000
+				connection.readTimeout = 2000
+				try {
+					def status = connection.responseCode
+					return [status: status, body: status == 200 ? connection.inputStream.getText('UTF-8') : '']
+				} finally {
+					connection.disconnect()
+				}
+			}
+			if (request('/run', 'POST').status != 202) {
+				throw new GradleException('Packaged node workload was not accepted')
+			}
+			deadline = System.nanoTime() + java.time.Duration.ofSeconds(20).toNanos()
+			def completed = false
+			while (!completed && nodeProcess.isAlive() && System.nanoTime() < deadline) {
+				completed = parser.parseText(request('/status', 'GET').body).state == 'COMPLETED'
+				if (!completed) Thread.sleep(100)
+			}
+			if (!completed) throw new GradleException('Packaged node workload did not complete')
+			def logsPath = '/logs/engine-build-info-node-canary/'
+			def buildResponse = request(logsPath + 'engine.build.json', 'GET')
+			if (buildResponse.status != 200 || parser.parseText(buildResponse.body) != expectedJson) {
+				throw new GradleException('Packaged node logs cannot serve the identical Engine Build Record')
+			}
+			def indexResponse = request(logsPath + 'index.json', 'GET')
+			if (indexResponse.status != 200 || !parser.parseText(indexResponse.body).items.any { it.logger == 'engine.build.json' }) {
+				throw new GradleException('Packaged node logs index omits Engine Build Record')
+			}
+			['config.yaml', 'metrics.total.csv', 'engine.build.json'].each { name ->
+				if (!new File(nodeLog, "log/engine-build-info-node-canary/${name}").isFile()) {
+					throw new GradleException("Packaged node ${name} is not under the configured log root")
+				}
 			}
 
 			def shutdownConnection = (java.net.HttpURLConnection) new URL(
