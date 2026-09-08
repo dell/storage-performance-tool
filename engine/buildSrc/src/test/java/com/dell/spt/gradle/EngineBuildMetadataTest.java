@@ -224,6 +224,29 @@ class EngineBuildMetadataTest {
 		}
 	}
 
+	@Test
+	void explicitEvidenceDoesNotInvokeGitDiscovery() {
+		final var unavailableGit = new EngineBuildMetadata.GitProbe() {
+			@Override
+			public String revision() { throw new AssertionError("Unexpected revision probe"); }
+			@Override
+			public Boolean dirty() { throw new AssertionError("Unexpected dirty probe"); }
+		};
+		final var metadata = EngineBuildMetadata.resolve("5.14.2", Map.of(
+				"sptBuildRevision", "unknown", "sptBuildSourceDirty", "unknown"), Map.of(), unavailableGit, CLOCK);
+		assertEquals("unknown", metadata.revision());
+		assertNull(metadata.sourceDirty());
+	}
+
+	@Test
+	void automaticTimestampIsOnlyTheDevelopmentFallback() {
+		assertTrue(EngineBuildMetadata.usesCurrentTime(Map.of(), Map.of()));
+		assertFalse(EngineBuildMetadata.usesCurrentTime(Map.of("sptBuildTime", "unknown"), Map.of()));
+		assertFalse(EngineBuildMetadata.usesCurrentTime(Map.of(), Map.of("SPT_BUILD_TIME", "2026-01-01T00:00:00Z")));
+		assertFalse(EngineBuildMetadata.usesCurrentTime(Map.of(), Map.of("SOURCE_DATE_EPOCH", "1767225600")));
+		assertFalse(EngineBuildMetadata.usesCurrentTime(Map.of("sptBuildRelease", "true"), Map.of()));
+	}
+
 	private static List<SemanticVersionFixture> semanticVersionFixtures() throws Exception {
 		final var path = Path.of(System.getProperty("spt.test.semver-fixtures"));
 		return Files.readAllLines(path).stream()

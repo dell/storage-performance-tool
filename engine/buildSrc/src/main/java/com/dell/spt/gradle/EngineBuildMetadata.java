@@ -1,12 +1,16 @@
 package com.dell.spt.gradle;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
-import java.util.LinkedHashMap;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Properties;
 
 /** Normalized build inputs shared by generated metadata and JAR manifests. */
 public record EngineBuildMetadata(
@@ -21,8 +25,8 @@ public record EngineBuildMetadata(
 				final GitProbe git,
 				final Clock clock) {
 		final var release = parseBoolean(first(properties.get("sptBuildRelease"), environment.get("SPT_BUILD_RELEASE")), false);
-		final var revision = first(
-					properties.get("sptBuildRevision"), environment.get("SPT_BUILD_REVISION"), git.revision(), UNKNOWN);
+		final var explicitRevision = first(properties.get("sptBuildRevision"), environment.get("SPT_BUILD_REVISION"));
+		final var revision = explicitRevision == null ? first(git.revision(), UNKNOWN) : explicitRevision;
 		final var buildTimeInput = first(properties.get("sptBuildTime"), environment.get("SPT_BUILD_TIME"));
 		final var sourceDateEpoch = environment.get("SOURCE_DATE_EPOCH");
 		final String buildTime;
@@ -43,6 +47,26 @@ public record EngineBuildMetadata(
 		return metadata;
 	}
 
+	/** Whether generation should capture UTC time rather than use an explicit build input. */
+	public static boolean usesCurrentTime(final Map<String, String> properties, final Map<String, String> environment) {
+		return !parseBoolean(first(properties.get("sptBuildRelease"), environment.get("SPT_BUILD_RELEASE")), false)
+				&& first(properties.get("sptBuildTime"), environment.get("SPT_BUILD_TIME"), environment.get("SOURCE_DATE_EPOCH")) == null;
+	}
+
+	/** Reads the single persisted snapshot after its generating task has completed. */
+	public static EngineBuildMetadata read(final File file) throws IOException {
+		final var values = new Properties();
+		try (final var input = Files.newInputStream(file.toPath())) {
+			values.load(input);
+		}
+		final var metadata = new EngineBuildMetadata(
+				values.getProperty("version"), values.getProperty("revision"), values.getProperty("build_time"),
+				parseBoolean(values.getProperty("development"), true),
+				UNKNOWN.equals(values.getProperty("source_dirty")) ? null : parseBoolean(values.getProperty("source_dirty"), false));
+		metadata.validate();
+		return metadata;
+	}
+
 	public Map<String, String> resourceValues() {
 		final var values = new LinkedHashMap<String, String>();
 		values.put("schema_version", "1");
@@ -56,13 +80,15 @@ public record EngineBuildMetadata(
 	}
 
 	public Map<String, String> manifestAttributes() {
-		return Map.of(
-					"Implementation-Title", "spt-engine",
-					"Implementation-Version", version,
-					"Spt-Source-Revision", revision,
-					"Spt-Build-Time", buildTime,
-					"Spt-Development", Boolean.toString(development),
-					"Spt-Source-Dirty", sourceDirty == null ? UNKNOWN : sourceDirty.toString());
+		// Manifest attribute order affects JAR bytes and Gradle's archive input snapshot.
+		final var values = new LinkedHashMap<String, String>();
+		values.put("Implementation-Title", "spt-engine");
+		values.put("Implementation-Version", version);
+		values.put("Spt-Source-Revision", revision);
+		values.put("Spt-Build-Time", buildTime);
+		values.put("Spt-Development", Boolean.toString(development));
+		values.put("Spt-Source-Dirty", sourceDirty == null ? UNKNOWN : sourceDirty.toString());
+		return Collections.unmodifiableMap(values);
 	}
 
 	private void validate() {

@@ -40,23 +40,10 @@ ext {
 	mainClass = "${rootPkg}.Main"
 }
 
-def engineBuildMetadata = rootProject.ext.SPT_BUILD_METADATA
+def buildInputs = rootProject.ext.SPT_BUILD_INPUTS
 def generatedBuildInfoDir = layout.buildDirectory.dir("generated/resources/engineBuildInfo")
-def generatedBuildInfoFile = generatedBuildInfoDir.map { it.file("META-INF/spt-build-info.properties") }
-
-tasks.register("generateEngineBuildInfo") {
-	group = "build"
-	description = "Generates immutable engine build information"
-	inputs.properties(engineBuildMetadata.resourceValues())
-	outputs.file(generatedBuildInfoFile)
-	doLast {
-		def outputFile = generatedBuildInfoFile.get().asFile
-		outputFile.parentFile.mkdirs()
-		outputFile.setText(
-				engineBuildMetadata.resourceValues().collect { key, value -> "${key}=${value}" }.join("\n") + "\n",
-				"UTF-8")
-	}
-}
+def generateBuildInfo = tasks.named("generateEngineBuildInfo")
+def engineBuildMetadata = rootProject.ext.SPT_BUILD_METADATA
 
 sourceSets.main.resources.srcDir(generatedBuildInfoDir)
 tasks.named("processResources") {
@@ -142,12 +129,7 @@ tasks.withType(Test) {
 	systemProperty "spt.test.semver-fixtures",
 		rootProject.file("../test-fixtures/engine-build-info/semantic-versions.txt").absolutePath
 	systemProperty "spt.test.expected-build-version", project.version.toString()
-	systemProperty "spt.test.expected-build-revision", engineBuildMetadata.revision()
-	systemProperty "spt.test.expected-build-time", engineBuildMetadata.buildTime()
-	systemProperty "spt.test.expected-build-development", engineBuildMetadata.development().toString()
-	systemProperty "spt.test.expected-build-source-dirty", engineBuildMetadata.sourceDirty() == null
-			? "unknown"
-			: engineBuildMetadata.sourceDirty().toString()
+	jvmArgumentProviders.add(new com.dell.spt.gradle.EngineBuildTestArguments(generateBuildInfo.flatMap { it.outputFile }))
 	jvmArgs "-XX:MaxDirectMemorySize=2g"
 	jvmArgs "-XX:+HeapDumpOnOutOfMemoryError"
 	maxHeapSize = "2g"
@@ -205,7 +187,10 @@ jar {
 	// Keep the regular JAR enabled for inter-project dependencies
 	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 	manifest {
-		attributes(engineBuildMetadata.manifestAttributes())
+		// Values stay lazy until the generated resource is available.
+		buildInputs.manifestAttributes().keySet().each { key ->
+			attributes([(key): engineBuildMetadata.map { it.manifestAttributes().get(key) }])
+		}
 	}
 }
 
@@ -312,7 +297,10 @@ shadowJar {
 			"Automatic-Module-Name": rootPkg,
 			"Main-Class": mainClass,
 		)
-		attributes(engineBuildMetadata.manifestAttributes())
+		// Values stay lazy until the generated resource is available.
+		buildInputs.manifestAttributes().keySet().each { key ->
+			attributes([(key): engineBuildMetadata.map { it.manifestAttributes().get(key) }])
+		}
 	}
 	
 	// Exclude unnecessary files to reduce size

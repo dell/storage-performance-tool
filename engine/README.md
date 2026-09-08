@@ -72,6 +72,12 @@ make help       # Show all available targets
 
 Note: The Makefile is a convenience wrapper and requires a Unix-like environment. For official builds, CI/CD, and cross-platform compatibility, use the Gradle Wrapper (`./gradlew`).
 
+### Build identity and incremental builds
+
+Development builds capture the current UTC time when `generateEngineBuildInfo` executes. Unchanged builds and artifacts restored from the Gradle cache retain that timestamp. Changes to engine sources or build inputs regenerate the metadata. JAR manifests and runtime build information use the same generated snapshot.
+
+An explicit `-PsptBuildTime` or `SPT_BUILD_TIME` takes precedence over `SOURCE_DATE_EPOCH`; changing an explicit timestamp invalidates the metadata. Release workflows supply the release revision and timestamp, and discover source cleanliness from Git. Tracked changes and untracked, non-ignored files prevent release packaging.
+
 ### Running Your First Test
 
 ```bash

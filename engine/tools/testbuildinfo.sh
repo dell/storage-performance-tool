@@ -45,6 +45,7 @@ JAVA_BIN="${JAVA:-java}"
 command -v "$JAVA_BIN" >/dev/null 2>&1 || die "Java executable not found: $JAVA_BIN"
 
 if [[ "$SKIP_BUILD" != "true" ]]; then
+	python3 "$SCRIPT_DIR/testbuildincrementality.py" --evidence-dir "$ENGINE_ROOT/build/build-info-incrementality"
 	(
 		cd "$ENGINE_ROOT"
 		./gradlew :bundle:verifyEngineBuildInfoCanary --no-daemon

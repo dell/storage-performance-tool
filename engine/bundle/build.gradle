@@ -369,7 +369,7 @@ tasks.register('verifyEngineBuildInfoCanary') {
 
 	inputs.file(file("${distDir}/${sptJar}"))
 	inputs.dir(file("${distDir}/ext"))
-	inputs.properties(engineBuildMetadata.resourceValues())
+	inputs.property("buildInformation", engineBuildMetadata.map { it.resourceValues() })
 	def canaryRootProvider = layout.buildDirectory.dir('engine-build-info-canary')
 	outputs.dir(canaryRootProvider)
 
@@ -382,7 +382,7 @@ tasks.register('verifyEngineBuildInfoCanary') {
 			'bin/java' + (System.getProperty('os.name').toLowerCase().contains('win') ? '.exe' : '')
 		).absolutePath
 		def jarFile = file("${distDir}/${sptJar}")
-		def expectedResource = engineBuildMetadata.resourceValues()
+		def expectedResource = engineBuildMetadata.get().resourceValues()
 
 		def versionExecution = providers.exec {
 			workingDir distDir
