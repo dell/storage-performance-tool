@@ -23,7 +23,7 @@ final class SemanticVersion {
 		}
 		final var prerelease = value.substring(
 					prereleaseStart + 1, buildStart < 0 ? value.length() : buildStart);
-		for (final var identifier : prerelease.split("\\.")) {
+		for (final var identifier : prerelease.split("\\.", -1)) {
 			if (identifier.length() > 1 && identifier.charAt(0) == '0' && onlyDigits(identifier)) {
 				return false;
 			}

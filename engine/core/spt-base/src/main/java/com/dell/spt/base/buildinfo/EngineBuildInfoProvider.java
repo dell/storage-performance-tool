@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
+import java.util.NoSuchElementException;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -66,7 +67,13 @@ public final class EngineBuildInfoProvider {
 	/** Owns a final step/context configuration without modifying a caller's input. */
 	public Config copyWithProjectedVersion(final Config source) {
 		final Config copy = new BasicConfig(source);
-		projectVersion(copy, !snapshot.version().equals(copy.stringVal("run-version")));
+		String configuredVersion = null;
+		try {
+			configuredVersion = copy.stringVal("run-version");
+		} catch (final NoSuchElementException ignored) {
+			// Pipeline contexts may omit values inherited from the base configuration.
+		}
+		projectVersion(copy, configuredVersion != null && !snapshot.version().equals(configuredVersion));
 		return copy;
 	}
 

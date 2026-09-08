@@ -209,10 +209,6 @@ func TestPublishedIdentitySurvivesRealArtifactFetchAndImmediateSummaryLoad(t *te
 	}
 
 	assertIndependent()
-	if err := writeRunMetadata(metadata, root); err != nil {
-		t.Fatal(err)
-	}
-	assertIndependent()
 
 	// A fresh loader represents a process that stopped immediately after artifact fetching;
 	// no later writeRunMetadata pass repairs or republishes the on-disk bundle.
@@ -233,6 +229,11 @@ func TestPublishedIdentitySurvivesRealArtifactFetchAndImmediateSummaryLoad(t *te
 	if !foundEngineInfo {
 		t.Fatalf("engine information was erased from index after fetch: %+v", loaded.Manifest.RunFiles)
 	}
+
+	if err := writeRunMetadata(metadata, root); err != nil {
+		t.Fatal(err)
+	}
+	assertIndependent()
 }
 
 func TestPersistRejectedEngineIdentityRecordsLifecycleAndMinimalIndex(t *testing.T) {
