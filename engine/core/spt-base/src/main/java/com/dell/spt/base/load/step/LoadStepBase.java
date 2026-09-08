@@ -8,6 +8,7 @@ import static org.apache.logging.log4j.CloseableThreadContext.put;
 
 import com.dell.spt.base.concurrent.DaemonBase;
 import com.dell.spt.base.buildinfo.EngineBuildInfoPublisher;
+import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
 import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.config.TimeUtil;
@@ -26,7 +27,6 @@ import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
-import com.github.akurilov.confuse.impl.BasicConfig;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -37,6 +37,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.stream.Collectors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -69,9 +70,11 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 					final List<Extension> extensions,
 					final List<Config> ctxConfigs,
 					final MetricsManager metricsMgr) {
-		this.config = new BasicConfig(config);
+		final var buildInfo = EngineBuildInfoProvider.global();
+		this.config = buildInfo.copyWithProjectedVersion(config);
 		this.extensions = extensions;
-		this.ctxConfigs = ctxConfigs;
+		this.ctxConfigs = ctxConfigs == null ? null
+						: ctxConfigs.stream().map(buildInfo::copyWithProjectedVersion).collect(Collectors.toList());
 		this.metricsMgr = metricsMgr;
 		try {
 			this.integrityModeEnabled = IntegrityConfig.validateLoadStep(this.config).enabled();
@@ -88,7 +91,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		this.standaloneDeleteDurationMode = standaloneDelete.durationMode();
 		this.standaloneDeletePreValidationEnabled = standaloneDelete.preValidation();
 		this.standaloneDeletePostVerificationEnabled = standaloneDelete.postVerification();
-		Loggers.CONFIG.info(ConfigUtil.toString(config, ConfigFormat.YAML, resolveStepTypeName()));
+		Loggers.CONFIG.info(ConfigUtil.toString(this.config, ConfigFormat.YAML, resolveStepTypeName()));
 	}
 
 	private String resolveStepTypeName() {

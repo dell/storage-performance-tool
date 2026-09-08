@@ -416,7 +416,7 @@ tasks.register('verifyEngineBuildInfoCanary') {
 		def scenarioFile = new File(canaryRoot, 'engine-build-info-canary.js')
 		def effectiveVersionMarker = "ENGINE_EFFECTIVE_VERSION=${expectedResource.version}"
 		scenarioFile.setText(
-			"print('ENGINE_EFFECTIVE_VERSION=' + config.stringVal('run-version'));\nLoad.run();\n",
+			"print('ENGINE_EFFECTIVE_VERSION=' + config.stringVal('run-version'));\nLoad.config({run: {version: '9.9.9'}}).append({run: {version: '8.8.8'}}).run();\n",
 			'UTF-8')
 		def scenarioExecution = providers.exec {
 			workingDir distDir
@@ -462,6 +462,13 @@ tasks.register('verifyEngineBuildInfoCanary') {
 			if (!new File(stepArtifact.parentFile, name).isFile()) {
 				throw new GradleException("Packaged workload ${name} is not colocated with engine.build.json")
 			}
+		}
+
+		def stepConfigText = new File(stepArtifact.parentFile, 'config.yaml').getText('UTF-8')
+		if (!stepConfigText.readLines().contains('  version: "' + expectedResource.version + '"')
+				|| stepConfigText.contains('9.9.9') || stepConfigText.contains('8.8.8')
+				|| scenarioOutput.count('Configured run.version override is ignored') != 1) {
+			throw new GradleException('Packaged scenario override bypassed engine version authority or one-shot warning')
 		}
 
 		def expectedJson = [
@@ -543,19 +550,26 @@ tasks.register('verifyEngineBuildInfoCanary') {
 						+ nodeStdout.getText('UTF-8') + nodeStderr.getText('UTF-8'))
 			}
 
-			def request = { String path, String method ->
+			def request = { String path, String method, String scenario = null ->
 				def connection = (java.net.HttpURLConnection) new URL("http://127.0.0.1:${nodePort}${path}").openConnection()
 				connection.requestMethod = method
 				connection.connectTimeout = 1000
 				connection.readTimeout = 2000
 				try {
+					if (scenario != null) {
+						def boundary = 'engine-build-info-canary'
+						connection.doOutput = true
+						connection.setRequestProperty('Content-Type', 'multipart/form-data; boundary=' + boundary)
+						def multipart = "--${boundary}\r\nContent-Disposition: form-data; name=\"scenario\"; filename=\"scenario.js\"\r\nContent-Type: application/javascript\r\n\r\n${scenario}\r\n--${boundary}--\r\n"
+						connection.outputStream.withCloseable { it.write(multipart.getBytes('UTF-8')) }
+					}
 					def status = connection.responseCode
 					return [status: status, body: status == 200 ? connection.inputStream.getText('UTF-8') : '']
 				} finally {
 					connection.disconnect()
 				}
 			}
-			if (request('/run', 'POST').status != 202) {
+			if (request('/run', 'POST', "Load.config({run: {version: '9.9.9'}}).append({run: {version: '8.8.8'}}).run();").status != 202) {
 				throw new GradleException('Packaged node workload was not accepted')
 			}
 			deadline = System.nanoTime() + java.time.Duration.ofSeconds(20).toNanos()
@@ -580,6 +594,12 @@ tasks.register('verifyEngineBuildInfoCanary') {
 				}
 			}
 
+			def nodeConfig = request(logsPath + 'Config', 'GET')
+			if (nodeConfig.status != 200 || !nodeConfig.body.readLines().contains('  version: "' + expectedResource.version + '"')
+					|| nodeConfig.body.contains('9.9.9') || nodeConfig.body.contains('8.8.8')) {
+				throw new GradleException('Packaged Control API scenario bypassed engine version authority')
+			}
+
 			def shutdownConnection = (java.net.HttpURLConnection) new URL(
 				"http://127.0.0.1:${nodePort}/shutdown").openConnection()
 			shutdownConnection.requestMethod = 'POST'
@@ -596,6 +616,7 @@ tasks.register('verifyEngineBuildInfoCanary') {
 			if (nodeProcess.exitValue() != 0
 					|| nodeOutput.count(expectedBanner) != 1
 					|| nodeOutput.count('Engine build:') != 1
+					|| nodeOutput.count('Configured run.version override is ignored') != 1
 					|| !nodeOutput.contains(startupMarker)) {
 				throw new GradleException("Packaged node banner/startup build information differs from generated metadata:\n${nodeOutput}")
 			}

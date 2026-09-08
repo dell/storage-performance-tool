@@ -5,6 +5,7 @@ import static com.dell.spt.base.Constants.KEY_HOME_DIR;
 import com.dell.spt.base.logging.Loggers;
 import org.apache.logging.log4j.ThreadContext;
 import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.impl.BasicConfig;
 import java.io.IOException;
 import java.io.InputStream;
 import java.time.Instant;
@@ -60,6 +61,13 @@ public final class EngineBuildInfoProvider {
 			warningSink.accept("Configured run.version override is ignored; using immutable Engine Build Identity");
 		}
 		config.val("run-version", snapshot.version());
+	}
+
+	/** Owns a final step/context configuration without modifying a caller's input. */
+	public Config copyWithProjectedVersion(final Config source) {
+		final Config copy = new BasicConfig(source);
+		projectVersion(copy, !snapshot.version().equals(copy.stringVal("run-version")));
+		return copy;
 	}
 
 	private static EngineBuildInfo parse(final InputStream input) throws IOException {

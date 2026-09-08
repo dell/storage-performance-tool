@@ -7,6 +7,7 @@ import static com.dell.spt.base.config.ConfigUtil.flatten;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
 
+import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
 import com.dell.spt.base.config.AliasingUtil;
 import com.dell.spt.base.data.DataInput;
@@ -2576,6 +2577,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			aliasedArgs.forEach(configCopy::val); // merge
+			EngineBuildInfoProvider.global().projectVersion(configCopy, aliasedArgs.containsKey("run-version"));
 		} catch (final Exception e) {
 			LogUtil.exception(Level.FATAL, e, "Scenario syntax error");
 			throwUnchecked(e);
@@ -2598,6 +2600,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		try {
 			final var aliasedArgs = AliasingUtil.apply(argValPairs, aliasingConfig);
 			aliasedArgs.forEach(ctxConfig::val); // merge
+			EngineBuildInfoProvider.global().projectVersion(ctxConfig, aliasedArgs.containsKey("run-version"));
 		} catch (final Exception e) {
 			LogUtil.exception(Level.FATAL, e, "Scenario syntax error");
 			throwUnchecked(e);
