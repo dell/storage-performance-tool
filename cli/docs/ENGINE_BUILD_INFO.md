@@ -64,6 +64,52 @@ records the run ID and finalization time, and stores one consistency result:
 - `indeterminate`: no mismatch is proven, but at least one participant lacks
   complete comparable identity.
 
+A schema-1 manifest for an entry node and one worker sharing a build is:
+
+```json
+{
+  "schema_version": 1,
+  "run_id": 1787750472685,
+  "generated_at": "2026-08-26T13:21:42Z",
+  "consistency": {
+    "status": "consistent",
+    "forced": false,
+    "reason": "all 2 participants reported consistent engine build identity fields"
+  },
+  "builds": [
+    {
+      "build_id": "build-1",
+      "product": "spt-engine",
+      "version": "5.15.0",
+      "revision": "0123456789abcdef0123456789abcdef01234567",
+      "build_time": "2026-08-26T12:34:56Z",
+      "development": false,
+      "source_dirty": false
+    }
+  ],
+  "participants": [
+    {
+      "node_id": "entry.example:9999",
+      "role": "entry",
+      "collection_status": "collected",
+      "reported_schema_version": 1,
+      "build_id": "build-1"
+    },
+    {
+      "node_id": "worker.example:9999",
+      "role": "worker",
+      "collection_status": "collected",
+      "reported_schema_version": 1,
+      "build_id": "build-1"
+    }
+  ]
+}
+```
+
+Both participants reference the same document-local `build_id`; it is not a
+global build identifier. `generated_at` is the manifest finalization time,
+while each build retains its own `build_time`.
+
 The Environment section of the human summary shows compact, separate CLI and
 engine identities. `spt_run_params.json` extends its `cli` object with the CLI
 version, revision, and build time, then references `engine.info.json` and its
@@ -98,9 +144,18 @@ Compatibility states are explicit in participant records:
   malformed, omits a required field, or otherwise violates the contract.
 
 The first three states make consistency indeterminate unless other records
-already prove a mismatch. `collection_failed` stops submission. Older result
-bundles without Engine Build Information continue to load and show an explicit
-unavailable legacy state. A replay does not require source-run identity.
+already prove a mismatch. `collection_failed` stops submission; the persisted
+manifest records `consistency.status: "indeterminate"` unless other collected
+records already prove a mismatch, which remains `mismatch`. Its reason is
+`"engine identity collection failed before scenario submission"`; collection
+failure is not a fourth consistency status and cannot be forced through.
+
+A `legacy_endpoint_unavailable` participant may include `configured_version_hint`
+from fetched legacy configuration. This is an informational hint, never verified
+build identity, and never upgrades an indeterminate assessment.
+
+Older result bundles without Engine Build Information continue to load and show
+an explicit unavailable legacy state. A replay does not require source-run identity.
 
 ## Privacy and scope
 

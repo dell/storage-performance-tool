@@ -10,6 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - **Standalone S3 DELETE benchmarking** — Added public `spt run delete` support with safe seeded inventories, explicit canonical manifests, and guarded existing-prefix selection; single- and batched requests retain exact-version identities and report logical-request and object-outcome units separately. Optional full inventory validation and post-delete absence verification distinguish accepted API outcomes from confirmed absence. Qualification covers real-constructor Netty and AWS S3 canaries, hardware-free inherited-HTTP S3 RDMA contracts, lifecycle and distributed-routing safety, and versioned result and recovery artifacts.
 
+- **Engine Build Information** — Added immutable engine provenance through `GET /version`, engine-local `engine.build.json`, and the combined CLI result artifact `engine.info.json`. Managed runs and replays check participating engine builds before scenario submission by default and show engine provenance in result summaries.
+
+### Changed
+
+- **Engine build mismatch policy** — `spt run` and `spt replay` reject known engine build mismatches by default. In addition to supported port-conflict handling, `--force` now permits a known build mismatch and records a prominent warning and forced-mismatch evidence; it cannot bypass malformed build information or collection failures.
+
 ## [5.14.2] - 2026-08-13
 
 ### Changed
