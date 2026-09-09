@@ -3,6 +3,7 @@ package com.dell.spt.base.item.op.data.range;
 import com.dell.spt.base.load.lifecycle.OperationLifecycle;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.item.DataItem;
+import com.dell.spt.base.item.op.OperationRetryPolicy;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import java.util.Objects;
 import java.util.function.LongSupplier;
@@ -56,12 +57,20 @@ public final class RangeReadCirculation {
 					return null;
 				}
 			} else {
-				if (state != OperationLifecycleState.DISPATCHED || !outcomeClaimed) {
+				if (!outcomeClaimed) {
 					return null;
 				}
 				final var outcome = current.outcome();
 				if (outcome == null || (outcome.category() != RangeReadAttempt.Category.HTTP
 								&& outcome.category() != RangeReadAttempt.Category.TRANSPORT)) {
+					return null;
+				}
+				if (!OperationRetryPolicy.isRetryableStatus(outcome.status())) {
+					return null;
+				}
+				final boolean queuedSubmissionFailure = state == OperationLifecycleState.DRIVER_QUEUED
+								&& outcome.category() == RangeReadAttempt.Category.TRANSPORT && !outcome.requestHandedOff();
+				if (state != OperationLifecycleState.DISPATCHED && !queuedSubmissionFailure) {
 					return null;
 				}
 			}

@@ -65,6 +65,8 @@ class RangeReadMetricsTest {
 		var http = op(tracker, 2);
 		var ha = send(http, tracker, metrics);
 		ha.headers(404, Status.RESP_FAIL_NOT_FOUND, List.of(), List.of(), List.of(), false);
+		assertTrue(metrics.recordAttempt(http.circulation(), ha));
+		assertNull(http.circulation().beginAttempt(ha));
 		assertTrue(http.circulation().complete(http, tracker, ha));
 		var validation = op(tracker, 2);
 		var va = send(validation, tracker, metrics);
@@ -184,6 +186,64 @@ class RangeReadMetricsTest {
 		assertEquals(1, snapshot.httpAttemptFailures());
 		assertEquals(1, snapshot.httpFailures());
 		assertEquals(0, snapshot.failedReceivedBytes());
+		assertTrue(snapshot.reconciled());
+	}
+
+	@Test
+	void submissionFailureCanRetryBeforeAnyRequestIsHandedOff() {
+		var metrics = new RangeReadMetrics(POLICY);
+		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
+		tracker.terminalObserver(result -> metrics.recordFinal(result.circulation()));
+		var op = op(tracker, 2);
+		var first = op.circulation().beginAttempt(null);
+		first.transportFailure(Status.FAIL_IO);
+		assertTrue(metrics.recordAttempt(op.circulation(), first));
+		var retry = op.circulation().beginAttempt(first);
+		assertNotNull(retry);
+		assertSame(first.lifecycle(), retry.lifecycle());
+		assertEquals(first.range(), retry.range());
+		assertEquals(0, tracker.snapshot().dispatched());
+		assertEquals(0, tracker.inFlightCount());
+		assertTrue(tracker.dispatched(op));
+		assertTrue(metrics.requestHandoff(retry));
+		headers(retry);
+		retry.bodyBytes(2);
+		retry.finish(true);
+		assertTrue(op.circulation().complete(op, tracker, retry));
+		var snapshot = metrics.snapshot(tracker.counters());
+		assertEquals(1, snapshot.logical().selected());
+		assertEquals(1, snapshot.requestsSent());
+		assertEquals(1, snapshot.transportAttemptFailures());
+		assertEquals(0, snapshot.transportFailures());
+		assertTrue(snapshot.reconciled());
+	}
+
+	@Test
+	void shutdownAfterSubmissionFailureRetainsFailureWithZeroRequests() {
+		var metrics = new RangeReadMetrics(POLICY);
+		var tracker = OperationLifecycleTracker.<RangeReadOperation<DataItemImpl>> withDeadlineSettlement((result, owner) -> {
+			boolean changed = result.circulation().settleAtDeadline(result, owner);
+			if (changed) {
+				metrics.recordFinal(result.circulation());
+			}
+			return changed;
+		});
+		tracker.terminalObserver(result -> metrics.recordFinal(result.circulation()));
+		var op = op(tracker, 2);
+		var first = op.circulation().beginAttempt(null);
+		first.transportFailure(Status.FAIL_IO);
+		assertTrue(metrics.recordAttempt(op.circulation(), first));
+		var retry = op.circulation().beginAttempt(first);
+		assertNotNull(retry);
+		assertEquals(0, tracker.expireTerminalDeadline());
+		assertFalse(metrics.requestHandoff(retry));
+		var snapshot = metrics.snapshot(tracker.counters());
+		assertEquals(0, snapshot.requestsSent());
+		assertEquals(0, tracker.snapshot().dispatched());
+		assertEquals(1, snapshot.transportAttemptFailures());
+		assertEquals(1, snapshot.transportFailures());
+		assertEquals(0, snapshot.logical().unattempted());
+		assertEquals(0, snapshot.logical().unresolved());
 		assertTrue(snapshot.reconciled());
 	}
 }

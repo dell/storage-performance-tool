@@ -79,7 +79,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Future;
-import java.util.concurrent.ThreadLocalRandom;
+import com.dell.spt.base.item.op.OperationRetryPolicy;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -130,12 +130,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	private final ThreadLocal<SplittableRandom> rand = ThreadLocal.withInitial(SplittableRandom::new);
-
-	// Full-jitter exponential backoff before a load-op-retry re-dispatch, mirroring the
-	// shape of common S3-client retry defaults (e.g. minio-go's own 200ms/1s retry timer)
-	// rather than immediately re-hitting a target that just failed the operation.
-	private static final long RETRY_BACKOFF_BASE_MILLIS = 200L;
-	private static final long RETRY_BACKOFF_CAP_MILLIS = 1000L;
 
 	// Tracks load-op-retry redispatches currently sitting in their backoff delay, keyed by
 	// the operation awaiting redispatch, so a stop/shutdown can cancel them and resolve
@@ -1009,10 +1003,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	 * never succeed.
 	 */
 	private static boolean isRetryableStatus(final Status status) {
-		return switch (status) {
-		case FAIL_IO, FAIL_TIMEOUT, FAIL_UNKNOWN, RESP_FAIL_UNKNOWN, RESP_FAIL_SVC -> true;
-		default -> false;
-		};
+		return OperationRetryPolicy.isRetryableStatus(status);
 	}
 
 	/**
@@ -1249,10 +1240,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	 * inventing a new backoff policy from scratch. Package-private for direct unit testing.
 	 */
 	static long retryBackoffMillis(final int attempt) {
-		final int shift = Math.min(Math.max(attempt - 1, 0), 16); // guard against overflow
-		final long exp = RETRY_BACKOFF_BASE_MILLIS << shift;
-		final long capped = Math.min(exp, RETRY_BACKOFF_CAP_MILLIS);
-		return capped <= 0 ? 0 : ThreadLocalRandom.current().nextLong(capped + 1);
+		return OperationRetryPolicy.backoffMillis(attempt);
 	}
 
 	@Override
