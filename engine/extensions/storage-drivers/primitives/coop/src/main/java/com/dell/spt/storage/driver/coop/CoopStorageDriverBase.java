@@ -28,6 +28,7 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
@@ -93,12 +94,16 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		int maxParts = 0;
 		try {
 			mpuObjects = storageConfig.intVal("driver-limit-multipart-objects");
-		} catch (final NoSuchElementException | InvalidValuePathException ignored) {} catch (final Exception e) {
+		} catch (final NoSuchElementException | InvalidValuePathException ignored) {
+			// Older extension schemas omit optional multipart limits; retain the unlimited default.
+		} catch (final Exception e) {
 			Loggers.ERR.warn("{}: Failed to parse multipart limits: {}. Proceeding with unlimited.", testStepId, e.getMessage());
 		}
 		try {
 			maxParts = storageConfig.intVal("driver-limit-multipart-parts");
-		} catch (final NoSuchElementException | InvalidValuePathException ignored) {} catch (final Exception e) {
+		} catch (final NoSuchElementException | InvalidValuePathException ignored) {
+			// Older extension schemas omit optional multipart limits; retain the unlimited default.
+		} catch (final Exception e) {
 			Loggers.ERR.warn("{}: Failed to parse multipart limits: {}. Proceeding with unlimited.", testStepId, e.getMessage());
 		}
 
@@ -210,17 +215,26 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	private boolean offerIncomingOperation(final O op) {
 		dispatchLock.lock();
 		try {
-			if (!inOpQueue.offer(op)) {
-				return false;
-			}
-			if (operationLifecycle().driverQueued(op)) {
-				return true;
-			}
-			inOpQueue.removeIf(queuedOp -> queuedOp == op);
-			return false;
+			return offerIncomingOperationLocked(op, inOpQueue);
 		} finally {
 			dispatchLock.unlock();
 		}
+	}
+
+	/**
+	 * Queue/lifecycle handoff under the driver's admission lock. Retained-attempt adapters may
+	 * override this to preserve dispatched custody. They must reject duplicate tokens before
+	 * offering, leave ownership unchanged on queue refusal, and never retain the queue reference.
+	 */
+	protected boolean offerIncomingOperationLocked(final O op, final BlockingQueue<O> queue) {
+		if (!queue.offer(op)) {
+			return false;
+		}
+		if (operationLifecycle().driverQueued(op)) {
+			return true;
+		}
+		queue.removeIf(queuedOp -> queuedOp == op);
+		return false;
 	}
 
 	@Override
@@ -316,10 +330,10 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				return null;
 			}
 			inOpQueue.poll();
-			if (markDispatchOwnership(head)) {
+			if (claimDispatchOwnership(head)) {
 				return head;
 			}
-			operationLifecycle().unattempted(head);
+			recoverQueuedOperation(head);
 			return null;
 		} finally {
 			admissionLock.unlock();
@@ -342,18 +356,42 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	/** Atomically crosses the actual dispatch boundary while admission remains open. */
 	protected final boolean beginDispatch(final O op) {
 		if (admissionLock == null) {
-			return markDispatchOwnership(op);
+			return claimDispatchOwnership(op);
 		}
 		admissionLock.lock();
 		try {
-			return admissionOpen && markDispatchOwnership(op);
+			return admissionOpen && claimDispatchOwnership(op);
 		} finally {
 			admissionLock.unlock();
 		}
 	}
 
+	/**
+	 * Runs a bounded transport-handoff action while admission is open. Range adapters use this
+	 * at the actual execute/write boundary, validating their captured attempt inside the action.
+	 * The action must not wait for I/O or invoke result output. Returning from an earlier
+	 * beginDispatch call is not permission to hand off after admission closes.
+	 */
+	protected final boolean withDispatchAdmission(final BooleanSupplier handoff) {
+		if (admissionLock == null) {
+			return handoff.getAsBoolean();
+		}
+		admissionLock.lock();
+		try {
+			return admissionOpen && handoff.getAsBoolean();
+		} finally {
+			admissionLock.unlock();
+		}
+	}
+
+	/**
+	 * Called under admission lock by queued and direct dispatch. The compatibility default
+	 * records logical dispatch; retained-attempt adapters may defer that record until actual
+	 * transport handoff and must fence stale/duplicate attempt tokens themselves.
+	 */
+
 	@SuppressWarnings("unchecked")
-	private boolean markDispatchOwnership(final O op) {
+	protected boolean claimDispatchOwnership(final O op) {
 		final var lifecycle = operationLifecycle();
 		final var state = lifecycle.stateOf(op);
 		if (op instanceof CompositeOperation && state == OperationLifecycleState.DISPATCHED) {
@@ -411,8 +449,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 					throws IllegalStateException;
 
 	boolean isMpuInit(final O op) {
-		if (op instanceof CompositeOperation && OpType.CREATE.equals(op.type())) {
-			final var compositeOp = (CompositeOperation) op;
+		if (op instanceof CompositeOperation compositeOp && OpType.CREATE.equals(op.type())) {
 			return !compositeOp.allSubOperationsDone() && compositeOp.get("uploadId") == null && !OpType.NOOP.equals(op.type());
 		}
 		return false;
@@ -684,8 +721,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		final var lifecycle = operationLifecycle();
 		return !lifecycle.isEnabled()
 						|| lifecycle.stateOf(childOp) == OperationLifecycleState.DRIVER_QUEUED
-						|| childOp instanceof CompositeOperation
-										&& lifecycle.stateOf(childOp) == OperationLifecycleState.DISPATCHED
+						|| (childOp instanceof CompositeOperation
+										&& lifecycle.stateOf(childOp) == OperationLifecycleState.DISPATCHED)
 						|| lifecycle.driverQueued(childOp);
 	}
 
@@ -805,8 +842,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		}
 
 		completedOpCount.increment();
-		if (op instanceof CompositeOperation) {
-			final var parentOp = (CompositeOperation) op;
+		if (op instanceof CompositeOperation parentOp) {
 			if (!parentOp.allSubOperationsDone()) {
 				if (op.status() == Operation.Status.SUCC) {
 					final List<O> subOps = (List<O>) parentOp.nextSubOperations(mpuMaxParts > 0 ? mpuMaxParts : Integer.MAX_VALUE);
@@ -817,8 +853,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			} else {
 				safeReleaseMpuObjectPermit(op);
 			}
-		} else if (op instanceof PartialOperation) {
-			final var subOp = (PartialOperation) op;
+		} else if (op instanceof PartialOperation subOp) {
 			final var parentOp = subOp.parent();
 			List<O> nextChildOps = List.of();
 			String childFailureContext = "part operation";
@@ -912,12 +947,16 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 
 	/** @deprecated always returns {@code false}; direct fast recycle was removed */
 	@Deprecated
+	// Preserve the overridable extension ABI; inlining would require making this method final.
+	@SuppressWarnings("InlineMeSuggester")
 	protected boolean isFastRecycleEnabled() {
 		return false;
 	}
 
 	/** @deprecated always returns {@code false}; direct fast-recycle quiescing was removed */
 	@Deprecated
+	// Preserve the overridable extension ABI; inlining would require making this method final.
+	@SuppressWarnings("InlineMeSuggester")
 	protected boolean isFastRecycleQuiesceActive() {
 		return false;
 	}
@@ -927,6 +966,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	 * @deprecated always returns {@code false}; completed operations use shared circulation
 	 */
 	@Deprecated
+	// Preserve the overridable extension ABI; inlining would require making this method final.
+	@SuppressWarnings("InlineMeSuggester")
 	protected boolean isFastRecycleEligible(final O op) {
 		return false;
 	}
@@ -1011,11 +1052,20 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		recovered.removeAll(indeterminateSubmissions);
 		final var unattempted = new ArrayList<O>(recovered.size());
 		for (final O op : recovered) {
-			if (operationLifecycle().unattempted(op)) {
+			if (recoverQueuedOperation(op)) {
 				unattempted.add(op);
 			}
 		}
 		return List.copyOf(unattempted);
+	}
+
+	/**
+	 * Settles a recovered queue entry. Return true only when it became unattempted and should
+	 * enter the legacy recovery output. Retained retries instead settle their known failure
+	 * and return false; no result output or transport action may run here.
+	 */
+	protected boolean recoverQueuedOperation(final O op) {
+		return operationLifecycle().unattempted(op);
 	}
 
 	/** Extension hook for cooperative drivers with an additional pre-dispatch queue. */

@@ -1822,6 +1822,52 @@ public class LoadStepContextImplTest {
 	}
 
 	@Test
+	@SuppressWarnings({"unchecked", "rawtypes"
+	})
+	void listExhaustionWaitsForRecycledPageAcrossGeneratorAndDriverCustody() throws Exception {
+		final Config listConfig = TestConfigBuilder.config();
+		listConfig.val("item-type", "path");
+		listConfig.val("load-op-type", "list");
+		listConfig.val("load-op-limit-count", 0);
+		final LoadGenerator<Item, Operation<Item>> generator = mock(LoadGenerator.class);
+		final StorageDriver<Item, Operation<Item>> driver = mock(StorageDriver.class);
+		final var tracker = new OperationLifecycleTracker<Operation<Item>>();
+		when(driver.operationLifecycle()).thenReturn(tracker);
+		when(driver.metadataIntegrityEnabled()).thenReturn(true);
+		final MetricsContext metrics = mock(MetricsContext.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+		when(generator.generatedOpCount()).thenReturn(1L);
+		when(generator.isItemInputFinished()).thenReturn(true);
+		// Model the gap after recycleQueue.poll and before the generator updates its count.
+		when(generator.isNothingToRecycle()).thenReturn(true);
+		when(driver.activeOpCount()).thenReturn(0);
+		doAnswer(call -> tracker.generatorBuffered(call.getArgument(0))).when(generator).recycle(any());
+		final var ctx = new LoadStepContextImpl<>("list-recycle-custody", generator, driver,
+						metrics, listConfig.configVal("load"), false);
+		ctx.start();
+		try {
+			final var page = new ListOperationImpl<PathItemImpl>(0, OpType.LIST, new PathItemImpl("prefix/"), null);
+			page.status(Operation.Status.SUCC);
+			page.objectsListed(2);
+			page.truncated(true);
+			page.continuationToken("next");
+			final Operation<Item> result = (Operation) page;
+			assertTrue(ctx.put(result));
+			assertEquals(OperationLifecycleState.GENERATOR_BUFFERED, result.lifecycle().state());
+			assertFalse(ctx.isDone(), "a polled recycled page is still outstanding work");
+			assertTrue(tracker.driverQueued(result));
+			assertFalse(ctx.isDone(), "queued work can be invisible to activeOpCount");
+			assertTrue(tracker.explicitlyDispatched(result));
+			assertFalse(ctx.isDone(), "tracked in-flight custody remains authoritative");
+			page.truncated(false);
+			assertTrue(tracker.completionStarted(result));
+			assertTrue(tracker.terminal(result, Operation.Status.SUCC));
+			assertTrue(ctx.isDone(), "completed namespace must still terminate");
+		} finally {
+			ctx.close();
+		}
+	}
+
+	@Test
 	public void listWorkloadCompletesOnceNamespaceExhausted() {
 		final Config listConfig = TestConfigBuilder.config();
 		listConfig.val("item-type", "path");

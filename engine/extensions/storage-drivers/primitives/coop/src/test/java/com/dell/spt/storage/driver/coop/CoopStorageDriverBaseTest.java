@@ -697,9 +697,19 @@ class CoopStorageDriverBaseTest {
 						new DataOperationImpl<>(
 										0, OpType.DELETE, new DataItemImpl("legacy-batch-third", 0, 1), null,
 										"/bucket", null, List.of(), 0));
+		final var lockField = CoopStorageDriverBase.class.getDeclaredField("dispatchLock");
+		lockField.setAccessible(true);
+		final var queueLock = (ReentrantLock) lockField.get(driver);
 		try {
-			driver.start();
-			assertEquals(ops.size(), driver.put(ops));
+			// This case requires one legacy submission containing all three operations.
+			// Prevent the dispatcher from draining a prefix while put enqueues each member.
+			queueLock.lock();
+			try {
+				driver.start();
+				assertEquals(ops.size(), driver.put(ops));
+			} finally {
+				queueLock.unlock();
+			}
 			assertTrue(submitEntered.await(2, TimeUnit.SECONDS));
 
 			driver.closeAdmission();
@@ -1897,33 +1907,36 @@ class CoopStorageDriverBaseTest {
 
 		assertTrue(listenerReady.await(5, TimeUnit.SECONDS), "listener should be ready");
 
-		// Hold dispatchLock for the whole burst: completions must still wake the listener.
-		lock.lock();
-
 		// Fire completions from multiple threads simultaneously
 		final var startLatch = new CountDownLatch(1);
+		final var completionFailure = new AtomicReference<Throwable>();
 		for (int i = 0; i < completionCount; i++) {
 			Thread.ofVirtual().start(() -> {
 				try {
-					startLatch.await(5, TimeUnit.SECONDS);
+					assertTrue(startLatch.await(5, TimeUnit.SECONDS), "completion burst should be released");
 					final Operation<Item> op = mock(Operation.class);
 					when(op.status()).thenReturn(Operation.Status.SUCC);
 					when(op.result()).thenReturn(mock(Operation.class));
 					driver.handleCompleted(op);
-				} catch (final Exception ignored) {} finally {
+				} catch (final Throwable failure) {
+					completionFailure.compareAndSet(null, failure);
+				} finally {
 					allCompleted.countDown();
 				}
 			});
 		}
 
-		startLatch.countDown(); // release all completion threads
+		// Hold dispatchLock for the whole burst: completions must still wake the listener.
+		lock.lock();
 		try {
+			startLatch.countDown(); // release all completion threads only after taking the lock
 			assertTrue(allCompleted.await(10, TimeUnit.SECONDS),
 							"all completions should finish without needing dispatchLock");
 		} finally {
 			lock.unlock();
 		}
 		assertTrue(listenerDone.await(5, TimeUnit.SECONDS), "listener should finish");
+		assertNull(completionFailure.get(), "completion workers must not fail silently");
 
 		// We expect at least 1 wake-up (unparks coalesce), and all ops completed
 		assertTrue(signalCount.get() >= 1,

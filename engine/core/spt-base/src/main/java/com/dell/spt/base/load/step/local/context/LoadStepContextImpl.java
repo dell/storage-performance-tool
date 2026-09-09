@@ -546,7 +546,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			return true;
 		}
 		// issue SLTM-938 fix: only bail out when we've actually produced work
-		if (recycleFlag && counterResults.sum() > 0 && isNothingToRecycle()) {
+		if (!listPathWorkload && recycleFlag && counterResults.sum() > 0 && isNothingToRecycle()) {
 			Loggers.ERR.warn("{}: no load operations to recycle (all failed?)", id);
 			return true;
 		}
@@ -666,7 +666,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		if (driver.activeOpCount() > 0) {
 			return false;
 		}
-		return counterResults.sum() >= generator.generatedOpCount();
+		// A recycled page can already have left recycleQueue while its generated count still
+		// lags and no driver permit is held. Its registered lifecycle remains outstanding
+		// throughout that handoff; queue emptiness and activeOpCount alone cannot prove EOF.
+		return counterResults.sum() >= generator.generatedOpCount()
+						&& !operationLifecycle.hasOutstandingOperations();
 	}
 
 	/**

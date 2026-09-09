@@ -824,6 +824,11 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		return enabled ? inFlight.get() : 0;
 	}
 
+	/** Includes generator and driver queues, which are invisible to transport concurrency. */
+	public boolean hasOutstandingOperations() {
+		return enabled && !outstanding.isEmpty();
+	}
+
 	int outstandingOperationCount() {
 		return enabled ? outstanding.size() : 0;
 	}
