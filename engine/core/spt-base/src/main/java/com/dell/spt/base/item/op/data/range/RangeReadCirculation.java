@@ -16,8 +16,10 @@ public final class RangeReadCirculation {
 	private RangeReadAttempt current;
 	private RangeReadAttempt.Outcome lastFailure;
 	private boolean outcomeClaimed;
+	private boolean finalMetricsClaimed;
 	private boolean closed;
 	private RangeReadAttempt.Outcome terminalOutcome;
+	private RangeReadAttempt terminalAttempt;
 
 	public RangeReadCirculation(final OperationLifecycle lifecycle, final RangeReadPolicy.Selection selection) {
 		this(lifecycle, selection, RangeReadAttempt::clockMicros);
@@ -77,14 +79,17 @@ public final class RangeReadCirculation {
 
 	/**
 	 * Returns an immutable outcome once for accounting/retry decisions. No user callback runs
-	 * under this lock. A stale token or recovered lifecycle cannot publish an outcome.
+	 * under this lock. A stale token cannot publish an outcome. Final accounting may claim the retained terminal attempt.
 	 */
 	public RangeReadAttempt.Outcome claimOutcome(final RangeReadAttempt expected) {
 		synchronized (lifecycle) {
 			final var state = lifecycle.state();
-			if (closed || current == null || current != expected || outcomeClaimed
-							|| (state != OperationLifecycleState.DRIVER_QUEUED
-											&& state != OperationLifecycleState.DISPATCHED)) {
+			final boolean live = !closed && (state == OperationLifecycleState.DRIVER_QUEUED
+							|| state == OperationLifecycleState.DISPATCHED);
+			final boolean retained = terminalOutcome != null && current != null
+							&& current == terminalAttempt && (state == OperationLifecycleState.TERMINAL
+											|| state == OperationLifecycleState.UNRESOLVED);
+			if (current == null || current != expected || outcomeClaimed || (!live && !retained)) {
 				return null;
 			}
 			final var outcome = current.outcome();
@@ -115,16 +120,17 @@ public final class RangeReadCirculation {
 			if (outcome == null || outcome.category() == RangeReadAttempt.Category.UNRESOLVED) {
 				return false;
 			}
-			return retainAndCommit(op, tracker, outcome);
+			return retainAndCommit(op, tracker, outcome, current);
 		}
 	}
 
 	private <I extends DataItem> boolean retainAndCommit(final RangeReadOperation<I> op,
 					final OperationLifecycleTracker<? super RangeReadOperation<I>> tracker,
-					final RangeReadAttempt.Outcome outcome) {
+					final RangeReadAttempt.Outcome outcome, final RangeReadAttempt owner) {
 		final long previousBytes = op.countBytesDone();
 		final var previousTiming = op.timing();
 		terminalOutcome = outcome;
+		terminalAttempt = owner;
 		if (outcome.category() == RangeReadAttempt.Category.SUCCESS) {
 			if (firstDispatch == 0) {
 				firstDispatch = outcome.timing().dispatch();
@@ -144,6 +150,7 @@ public final class RangeReadCirculation {
 				closed = true;
 			} else {
 				terminalOutcome = null;
+				terminalAttempt = null;
 				op.countBytesDone(previousBytes);
 				op.timing(previousTiming);
 			}
@@ -171,12 +178,13 @@ public final class RangeReadCirculation {
 					}
 					if (!current.wasHandedOff() && lastFailure != null) {
 						current.cancelBeforeHandoff();
-						return retainAndCommit(op, tracker, lastFailure);
+						return retainAndCommit(op, tracker, lastFailure, null);
 					}
 					if (current.wasHandedOff()) {
 						current.unresolved();
 						if (tracker.unresolved(op)) {
 							terminalOutcome = current.outcome();
+							terminalAttempt = current;
 							closed = true;
 							return true;
 						}
@@ -190,6 +198,25 @@ public final class RangeReadCirculation {
 				return true;
 			}
 			return false;
+		}
+	}
+
+	public record FinalOutcome(RangeReadPolicy.SelectionError localError,
+					RangeReadAttempt.Outcome outcome, RangeReadAttempt attempt) {}
+
+	/** Claims additive final accounting once, including local errors and indeterminate recovery. */
+	public FinalOutcome claimFinalMetrics() {
+		synchronized (lifecycle) {
+			final var state = lifecycle.state();
+			if (finalMetricsClaimed || (state != OperationLifecycleState.TERMINAL
+							&& state != OperationLifecycleState.UNRESOLVED)) {
+				return null;
+			}
+			if (terminalOutcome == null && selection.error() == null) {
+				throw new IllegalStateException("Range final accounting requires a retained outcome");
+			}
+			finalMetricsClaimed = true;
+			return new FinalOutcome(selection.error(), terminalOutcome, terminalAttempt);
 		}
 	}
 
