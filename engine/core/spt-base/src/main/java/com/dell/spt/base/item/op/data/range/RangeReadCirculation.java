@@ -17,6 +17,7 @@ public final class RangeReadCirculation {
 	private RangeReadAttempt current;
 	private RangeReadAttempt.Outcome lastFailure;
 	private boolean outcomeClaimed;
+	private boolean retryQueueClaimed;
 	private boolean finalMetricsClaimed;
 	private boolean closed;
 	private RangeReadAttempt.Outcome terminalOutcome;
@@ -82,7 +83,29 @@ public final class RangeReadCirculation {
 			}
 			current = new RangeReadAttempt(lifecycle, selection.range(), clock);
 			outcomeClaimed = false;
+			retryQueueClaimed = false;
 			return current;
+		}
+	}
+
+	/** True while this exact prepared attempt still awaits transport handoff. */
+	public boolean isPendingAttempt(final RangeReadAttempt expected) {
+		synchronized (lifecycle) {
+			final var state = lifecycle.state();
+			return !closed && current != null && current == expected
+							&& (state == OperationLifecycleState.DRIVER_QUEUED || state == OperationLifecycleState.DISPATCHED)
+							&& !current.wasHandedOff() && current.outcome() == null;
+		}
+	}
+
+	/** Once-only generator retry queue ownership, after the retry coordinator creates the token. */
+	public boolean claimRetryQueue(final RangeReadAttempt expected) {
+		synchronized (lifecycle) {
+			if (retryQueueClaimed || lastFailure == null || !isPendingAttempt(expected)) {
+				return false;
+			}
+			retryQueueClaimed = true;
+			return true;
 		}
 	}
 
