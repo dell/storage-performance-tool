@@ -19,6 +19,7 @@ public final class RangeReadCirculation {
 	private boolean outcomeClaimed;
 	private boolean retryQueueClaimed;
 	private boolean finalMetricsClaimed;
+	private boolean resultOutputClaimed;
 	private boolean closed;
 	private RangeReadAttempt.Outcome terminalOutcome;
 	private RangeReadAttempt terminalAttempt;
@@ -249,6 +250,34 @@ public final class RangeReadCirculation {
 			}
 			finalMetricsClaimed = true;
 			return new FinalOutcome(selection.error(), terminalOutcome, terminalAttempt);
+		}
+	}
+
+	/** Immutable values for optional output; independent of mutable operation/result copies. */
+	record OutputResult(com.dell.spt.base.item.op.Operation.Status status, long bytes,
+					RangeReadAttempt.Timing timing) {}
+
+	/** One publication attempt per determinate circulation, independent of metrics claims. */
+	OutputResult claimResultOutput() {
+		synchronized (lifecycle) {
+			if (resultOutputClaimed || lifecycle.state() != OperationLifecycleState.TERMINAL) {
+				return null;
+			}
+			if (selection.error() != null) {
+				resultOutputClaimed = true;
+				return new OutputResult(com.dell.spt.base.item.op.Operation.Status.RESP_FAIL_CLIENT,
+								0, RangeReadAttempt.Timing.EMPTY);
+			}
+			if (terminalOutcome == null) {
+				return null;
+			}
+			resultOutputClaimed = true;
+			final boolean success = terminalOutcome.category() == RangeReadAttempt.Category.SUCCESS;
+			final var timing = terminalOutcome.timing();
+			return new OutputResult(terminalOutcome.status(), success ? selection.range().length() : 0,
+							success ? new RangeReadAttempt.Timing(firstDispatch, timing.requestComplete(),
+											timing.responseHeaders(), timing.firstBody(), timing.responseComplete())
+											: RangeReadAttempt.Timing.EMPTY);
 		}
 	}
 

@@ -18,6 +18,8 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.data.range.RangeReadOperation;
+import com.dell.spt.base.item.op.data.range.RangeReadCirculation;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
@@ -326,6 +328,28 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 
 	protected final int integrityDigestWorkerCount() {
 		return integrityHasher == null ? 0 : integrityHasher.workerCount();
+	}
+
+	/**
+	 * Range-only optional output after authoritative terminal accounting. Never fabricates
+	 * dispatch, invokes generic completion, or changes a retained outcome on output failure.
+	 * False means stale/duplicate/uncommitted; rejection or exceptions are reporting failures
+	 * which the runtime coordinator must propagate to the run. A failed output is not retried.
+	 */
+	@SuppressWarnings("unchecked")
+	protected final boolean publishRetainedRangeResult(final O op, final RangeReadCirculation expected) {
+		if (!(op instanceof RangeReadOperation<?> range)) {
+			throw new IllegalArgumentException("Retained range output requires a range operation");
+		}
+		final var snapshot = range.claimTerminalResult(expected);
+		if (snapshot == null) {
+			return false;
+		}
+		final var output = opResultOut;
+		if (output == null || !output.put((O) snapshot)) {
+			throw new IllegalStateException("Retained range result output rejected a committed outcome");
+		}
+		return true;
 	}
 
 	protected boolean handleCompleted(final O op) {

@@ -79,6 +79,26 @@ public final class RangeReadOperation<I extends DataItem> extends OperationImpl<
 		return new RangeReadOperation<>(this);
 	}
 
+	/**
+	 * Claims a detached terminal snapshot once across all copies. A captured circulation is
+	 * mandatory: callbacks for an old selection cannot publish a newly recycled operation.
+	 * Output must run after this method returns, outside operation and lifecycle monitors.
+	 */
+	public synchronized RangeReadOperation<I> claimTerminalResult(final RangeReadCirculation expected) {
+		if (expected == null || circulation != expected || lifecycle() != expected.lifecycle()) {
+			return null;
+		}
+		final var retained = expected.claimResultOutput();
+		if (retained == null) {
+			return null;
+		}
+		final var snapshot = result();
+		snapshot.status(retained.status());
+		snapshot.countBytesDone(retained.bytes());
+		snapshot.timing(retained.timing());
+		return snapshot;
+	}
+
 	@Override
 	public synchronized OperationLifecycle startNextLifecycle() {
 		final var previous = lifecycle();
