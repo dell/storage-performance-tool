@@ -1,6 +1,8 @@
 package com.dell.spt.base.load.generator;
 
 import com.dell.spt.base.item.DataItemImpl;
+import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.data.range.RangeReadOperation;
 import com.dell.spt.base.item.op.data.range.RangeReadOperationsBuilder;
@@ -63,7 +65,7 @@ class RangeReadAdmissionTest {
 			return tracker.driverQueued(op);
 		});
 		var clock = new AtomicLong();
-		var admission = new RangeReadAdmission<>(driver, tracker, clock::get);
+		var admission = new RangeReadAdmission<>(driver, tracker, 4, clock::get);
 		var generator = new LoadGeneratorImpl<>(input(List.of(item("bad-a", 0), item("bad-b", 0),
 						item("valid", 2), item("bad-c", 0))), new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY),
 						List.of(), admission, 4, 4, 4, false, false);
@@ -114,7 +116,7 @@ class RangeReadAdmissionTest {
 				return allowed;
 			}
 		};
-		var admission = new RangeReadAdmission<>(driver, tracker, clock::get);
+		var admission = new RangeReadAdmission<>(driver, tracker, 4, clock::get);
 		var generator = new LoadGeneratorImpl<>(input(List.of(item("a", 0), item("b", 0))),
 						new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY), List.of(throttle), admission,
 						2, 2, 2, false, false);
@@ -144,7 +146,7 @@ class RangeReadAdmissionTest {
 	void closingDuringValidBatchHandoffReturnsAcceptedPrefix() {
 		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
 		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
-		var admission = new RangeReadAdmission<>(driver, tracker);
+		var admission = new RangeReadAdmission<>(driver, tracker, 4);
 		var builder = new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY);
 		var first = builder.buildOp(item("a", 2));
 		var second = builder.buildOp(item("b", 0));
@@ -167,9 +169,9 @@ class RangeReadAdmissionTest {
 		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
 		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
 		assertThrows(IllegalArgumentException.class,
-						() -> new RangeReadAdmission<>(driver, OperationLifecycleTracker.disabled()));
+						() -> new RangeReadAdmission<>(driver, OperationLifecycleTracker.disabled(), 4));
 		var clock = new AtomicLong(Long.MAX_VALUE - 500_000);
-		var admission = new RangeReadAdmission<>(driver, tracker, clock::get);
+		var admission = new RangeReadAdmission<>(driver, tracker, 4, clock::get);
 		var builder = new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY);
 		var a = builder.buildOp(item("a", 0));
 		var b = builder.buildOp(item("b", 0));
@@ -193,7 +195,7 @@ class RangeReadAdmissionTest {
 			throw new IllegalStateException("broken counter observer");
 		});
 		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
-		var admission = new RangeReadAdmission<>(driver, tracker);
+		var admission = new RangeReadAdmission<>(driver, tracker, 4);
 		var generator = new LoadGeneratorImpl<>(input(List.of(item("bad", 0))),
 						new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY), List.of(), admission,
 						1, 1, 1, false, false);
@@ -216,7 +218,7 @@ class RangeReadAdmissionTest {
 		var metrics = new RangeReadMetrics(POLICY);
 		tracker.terminalObserver(result -> metrics.recordFinal(result.circulation()));
 		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
-		var admission = new RangeReadAdmission<>(driver, tracker, () -> 0L);
+		var admission = new RangeReadAdmission<>(driver, tracker, 4, () -> 0L);
 		var builder = new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY);
 		List<RangeReadOperation<DataItemImpl>> operations = new ArrayList<>();
 		for (int i = 0; i < 64; i++) {
@@ -246,4 +248,158 @@ class RangeReadAdmissionTest {
 		assertTrue(metrics.snapshot(tracker.counters()).reconciled());
 		verifyNoInteractions(driver);
 	}
+
+	@Test
+	void capacitySurvivesRetriesAndFinalReleaseUsesExactCirculation() {
+		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
+		var metrics = new RangeReadMetrics(POLICY);
+		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
+		var admission = new RangeReadAdmission<>(driver, tracker, 1);
+		tracker.terminalObserver(op -> {
+			metrics.recordFinal(op.circulation());
+			assertTrue(admission.releaseSettled(op.circulation()));
+		});
+		when(driver.put(any(RangeReadOperation.class))).thenAnswer(call -> {
+			RangeReadOperation<DataItemImpl> op = call.getArgument(0);
+			return op.lifecycle().state() == OperationLifecycleState.DISPATCHED || tracker.driverQueued(op);
+		});
+		var builder = new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY);
+		var first = builder.buildOp(item("first", 2));
+		var second = builder.buildOp(item("second", 2));
+		tracker.generatorBuffered(first);
+		tracker.generatorBuffered(second);
+		assertTrue(admission.put(first));
+		var circulation = first.circulation();
+		var attempt = circulation.beginAttempt(null);
+		assertTrue(tracker.explicitlyDispatched(first));
+		assertTrue(metrics.requestHandoff(attempt));
+		assertTrue(attempt.transportFailure(Operation.Status.FAIL_IO));
+		metrics.recordAttempt(circulation, attempt);
+		var retry = circulation.beginAttempt(attempt);
+		assertFalse(admission.releaseSettled(circulation));
+		assertFalse(admission.put(second));
+		assertTrue(admission.put(first));
+		assertEquals(1, admission.admittedCirculations());
+		assertTrue(metrics.requestHandoff(retry));
+		assertTrue(retry.transportFailure(Operation.Status.FAIL_IO));
+		assertTrue(circulation.complete(first, tracker, retry));
+		assertEquals(0, admission.admittedCirculations());
+		assertTrue(admission.put(second));
+		assertFalse(admission.releaseSettled(circulation));
+		assertEquals(1, admission.admittedCirculations());
+		admission.closeAdmission();
+		assertTrue(tracker.unattempted(second));
+		assertTrue(admission.releaseSettled(second.circulation()));
+		assertEquals(0, admission.admittedCirculations());
+		assertTrue(metrics.snapshot(tracker.counters()).reconciled());
+	}
+
+	@Test
+	void downstreamRefusalReturnsOnlyItsOwnReservation() {
+		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
+		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
+		assertThrows(IllegalArgumentException.class, () -> new RangeReadAdmission<>(driver, tracker, 0));
+		var admission = new RangeReadAdmission<>(driver, tracker, 1);
+		var builder = new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY);
+		var op = builder.buildOp(item("refused", 2));
+		tracker.generatorBuffered(op);
+		assertFalse(admission.put(op));
+		assertEquals(0, admission.admittedCirculations());
+		when(driver.put(op)).thenAnswer(call -> tracker.driverQueued(op));
+		assertTrue(admission.put(op));
+		assertEquals(1, admission.admittedCirculations());
+		admission.closeAdmission();
+		tracker.unattempted(op);
+		assertTrue(admission.releaseSettled(op.circulation()));
+	}
+
+	@Test
+	void concurrentValidAdmissionsCannotExceedCapacity() throws Exception {
+		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
+		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
+		var admission = new RangeReadAdmission<>(driver, tracker, 3);
+		when(driver.put(any(RangeReadOperation.class))).thenAnswer(call -> tracker.driverQueued(call.getArgument(0)));
+		var builder = new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY);
+		List<RangeReadOperation<DataItemImpl>> operations = new ArrayList<>();
+		for (int i = 0; i < 64; i++) {
+			var op = builder.buildOp(item("valid-" + i, 2));
+			tracker.generatorBuffered(op);
+			operations.add(op);
+		}
+		int accepted = 0;
+		try (var pool = Executors.newFixedThreadPool(8)) {
+			List<Future<Boolean>> pending = new ArrayList<>();
+			for (var op : operations)
+				pending.add(pool.submit(() -> admission.put(op)));
+			for (var result : pending)
+				if (result.get(5, TimeUnit.SECONDS))
+					accepted++;
+		}
+		assertEquals(3, accepted);
+		assertEquals(3, admission.admittedCirculations());
+		admission.closeAdmission();
+		for (var op : operations) {
+			tracker.unattempted(op);
+			admission.releaseSettled(op.circulation());
+		}
+		assertEquals(0, admission.admittedCirculations());
+		assertTrue(tracker.counters().reconciled());
+	}
+
+	@Test
+	void synchronousCompletionAndRecycleCannotReleaseNewCirculationsSlot() {
+		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
+		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
+		var admission = new RangeReadAdmission<>(driver, tracker, 1);
+		tracker.terminalObserver(op -> assertTrue(admission.releaseSettled(op.circulation())));
+		var builder = new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY);
+		var op = builder.buildOp(item("recycled", 2));
+		tracker.generatorBuffered(op);
+		var old = op.circulation();
+		var calls = new AtomicInteger();
+		when(driver.put(op)).thenAnswer(call -> {
+			assertTrue(tracker.driverQueued(op));
+			if (calls.getAndIncrement() == 0) {
+				var attempt = old.beginAttempt(null);
+				assertTrue(tracker.explicitlyDispatched(op));
+				assertTrue(attempt.requestHandoff());
+				assertTrue(attempt.headers(206, Operation.Status.SUCC, List.of("bytes 0-1/2"),
+								List.of("2"), List.of(), false));
+				assertTrue(attempt.bodyBytes(2));
+				assertTrue(attempt.finish(true));
+				assertTrue(old.complete(op, tracker, attempt));
+				assertTrue(tracker.generatorBuffered(op));
+				assertNotSame(old, op.circulation());
+				assertTrue(admission.put(op));
+			}
+			return true;
+		});
+		assertTrue(admission.put(op));
+		assertEquals(1, admission.admittedCirculations());
+		assertFalse(admission.releaseSettled(old));
+		assertEquals(1, admission.admittedCirculations());
+		admission.closeAdmission();
+		tracker.unattempted(op);
+		assertTrue(admission.releaseSettled(op.circulation()));
+		assertEquals(0, admission.admittedCirculations());
+		assertTrue(tracker.counters().reconciled());
+	}
+
+	@Test
+	void exceptionalHandoffKeepsCapacityUntilRecoveryResolvesOwnership() {
+		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
+		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
+		var admission = new RangeReadAdmission<>(driver, tracker, 1);
+		var op = new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY).buildOp(item("exception", 2));
+		tracker.generatorBuffered(op);
+		when(driver.put(op)).thenThrow(new IllegalStateException("handoff contract violation"));
+		assertThrows(IntegrityTerminalException.class, () -> admission.put(op));
+		assertEquals(1, admission.admittedCirculations());
+		assertFalse(admission.releaseSettled(op.circulation()));
+		admission.closeAdmission();
+		tracker.unattempted(op);
+		assertTrue(admission.releaseSettled(op.circulation()));
+		assertEquals(0, admission.admittedCirculations());
+	}
+
 }

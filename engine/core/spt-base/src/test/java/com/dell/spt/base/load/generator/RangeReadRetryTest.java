@@ -5,6 +5,7 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.range.*;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.metrics.range.RangeReadMetrics;
+import com.dell.spt.base.load.generator.range.RangeReadAdmission;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.concurrent.throttle.Throttle;
@@ -23,6 +24,7 @@ class RangeReadRetryTest {
 		final OperationLifecycleTracker<RangeReadOperation<DataItemImpl>> tracker = OperationLifecycleTracker.withDeadlineSettlement((op, owner) -> op.circulation().settleAtDeadline(op, owner));
 		final RangeReadMetrics metrics = new RangeReadMetrics(policy);
 		final Output<RangeReadOperation<DataItemImpl>> output = mock(Output.class);
+		final RangeReadAdmission<DataItemImpl> admission = new RangeReadAdmission<>(output, tracker, 1);
 		final AtomicInteger quota = new AtomicInteger(1);
 		final AtomicReference<RangeReadOperation<DataItemImpl>> operation = new AtomicReference<>();
 		final LoadGeneratorImpl<DataItemImpl, RangeReadOperation<DataItemImpl>> generator;
@@ -44,14 +46,17 @@ class RangeReadRetryTest {
 				quota.addAndGet(-allowed);
 				return allowed;
 			});
-			tracker.terminalObserver(op -> metrics.recordFinal(op.circulation()));
+			tracker.terminalObserver(op -> {
+				metrics.recordFinal(op.circulation());
+				admission.releaseSettled(op.circulation());
+			});
 			when(output.put(any(RangeReadOperation.class))).thenAnswer(call -> {
 				RangeReadOperation<DataItemImpl> op = call.getArgument(0);
 				operation.set(op);
 				return tracker.driverQueued(op);
 			});
 			generator = new LoadGeneratorImpl<>(input, new RangeReadOperationsBuilder<>(0, policy),
-							List.of(throttle), output, 1, 1, 1, false, false, true);
+							List.of(throttle), admission, 1, 1, 1, false, false, true);
 			generator.operationLifecycle(tracker);
 			generator.doWork();
 			assertNotNull(operation.get());
@@ -70,11 +75,12 @@ class RangeReadRetryTest {
 		}
 
 		@Override
-		public void close() {
+		public void close() throws Exception {
 			generator.closeAdmission();
 			generator.recoverBufferedOperations();
 			tracker.resolveOutstandingAsUnresolved();
 			generator.close();
+			admission.close();
 		}
 	}
 
