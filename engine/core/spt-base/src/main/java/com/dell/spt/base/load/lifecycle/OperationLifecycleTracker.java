@@ -15,6 +15,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
+import java.util.function.BiPredicate;
+import java.util.Objects;
 
 /**
  * Tracks outstanding operation ownership while leaving exactly-once terminal state on each
@@ -102,6 +104,7 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 	private static final OperationLifecycleTracker<?> DISABLED = new OperationLifecycleTracker<>(false, null);
 
 	private final boolean enabled;
+	private final BiPredicate<O, OperationLifecycleTracker<O>> deadlineSettlement;
 	private final Consumer<O> dispatchPublicationObserver;
 	private volatile Consumer<O> dispatchObserver;
 	private volatile Consumer<O> terminalObserver;
@@ -135,8 +138,24 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 
 	private OperationLifecycleTracker(
 					final boolean enabled, final Consumer<O> dispatchPublicationObserver) {
+		this(enabled, dispatchPublicationObserver, null);
+	}
+
+	private OperationLifecycleTracker(final boolean enabled, final Consumer<O> dispatchPublicationObserver,
+					final BiPredicate<O, OperationLifecycleTracker<O>> deadlineSettlement) {
 		this.enabled = enabled;
 		this.dispatchPublicationObserver = dispatchPublicationObserver;
+		this.deadlineSettlement = deadlineSettlement;
+	}
+
+	/**
+	 * Construction-selected deadline settlement for retained-outcome workloads. The callback
+	 * returns whether it committed recovery, must remain bounded, and must not invoke output or
+	 * transport code. Ordinary trackers keep their existing recovery behavior.
+	 */
+	public static <O extends Operation<? extends Item>> OperationLifecycleTracker<O> withDeadlineSettlement(
+					final BiPredicate<O, OperationLifecycleTracker<O>> settlement) {
+		return new OperationLifecycleTracker<>(true, null, Objects.requireNonNull(settlement));
 	}
 
 	/** Returns the allocation-free compatibility tracker used by lifecycle-unaware extensions. */
@@ -502,6 +521,57 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		}
 	}
 
+	/** Exact tracked custody check for opt-in completion/recovery coordinators. */
+	public boolean hasOutstandingCustody(final O op, final OperationLifecycle expected) {
+		if (!enabled || expected == null || !expected.isTracked()) {
+			return false;
+		}
+		synchronized (expected) {
+			return lifecycle(op) == expected && outstanding.contains(identityKey(op));
+		}
+	}
+
+	/**
+	 * Publishes an already retained, determinate outcome before optional result output. Used by
+	 * range completion, including a failed attempt retained while waiting to retry at shutdown.
+	 * The caller owns the expected lifecycle monitor while retaining its immutable result.
+	 * A queued submission failure may finish without dispatch; success requires real dispatch.
+	 * Recovery competes for the same lifecycle claim. The drain clock alone cannot erase a known
+	 * outcome, but an already committed recovery outcome wins. Observers must be bounded counter
+	 * updates only, as with localFailure; arbitrary output follows outside the monitor.
+	 */
+	public boolean retainedTerminal(final O op, final OperationLifecycle expected,
+					final Operation.Status terminalStatus) {
+		if (!enabled || expected == null || !expected.isTracked()) {
+			return false;
+		}
+		if (terminalStatus == null || terminalStatus == Operation.Status.PENDING
+						|| terminalStatus == Operation.Status.ACTIVE || terminalStatus == Operation.Status.OMIT
+						|| terminalStatus == Operation.Status.INTERRUPTED) {
+			throw new IllegalArgumentException("A retained terminal result requires success or failure");
+		}
+		synchronized (expected) {
+			final boolean wasDispatched = expected.state() == OperationLifecycleState.DISPATCHED;
+			if (lifecycle(op) != expected || !outstanding.contains(identityKey(op))
+							|| (terminalStatus == Operation.Status.SUCC && !wasDispatched)
+							|| !expected.retainedTerminal()) {
+				return false;
+			}
+			op.status(terminalStatus);
+			terminal.increment();
+			try {
+				observeTerminal(op, terminalStatus);
+			} finally {
+				// Counter/outcome retention precedes custody release even if an observer is faulty.
+				outstanding.remove(identityKey(op));
+				if (wasDispatched) {
+					inFlight.decrementAndGet();
+				}
+			}
+			return true;
+		}
+	}
+
 	/** Commits the status captured before result output can recycle the operation. */
 	public boolean terminal(final O op, final Operation.Status terminalStatus) {
 		if (!enabled) {
@@ -670,6 +740,12 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		var count = 0;
 		for (final var operationKey : Set.copyOf(outstanding)) {
 			final O op = operationKey.value;
+			if (deadlineSettlement != null) {
+				if (deadlineSettlement.test(op, this) && stateOf(op) == OperationLifecycleState.UNRESOLVED) {
+					count++;
+				}
+				continue;
+			}
 			final var state = stateOf(op);
 			if ((state == OperationLifecycleState.DISPATCHED
 							|| state == OperationLifecycleState.COMPLETING) && unresolved(op)) {

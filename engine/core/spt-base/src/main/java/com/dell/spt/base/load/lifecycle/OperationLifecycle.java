@@ -84,6 +84,17 @@ public final class OperationLifecycle {
 						&& state.compareAndSet(current, OperationLifecycleState.TERMINAL);
 	}
 
+	/** Opt-in retained outcome; legacy output-before-terminal transitions are unchanged. */
+	boolean retainedTerminal() {
+		if (!tracked) {
+			return false;
+		}
+		final var current = state.get();
+		return (current == OperationLifecycleState.DRIVER_QUEUED
+						|| current == OperationLifecycleState.DISPATCHED)
+						&& state.compareAndSet(current, OperationLifecycleState.TERMINAL);
+	}
+
 	boolean unattempted() {
 		return transitionTo(OperationLifecycleState.UNATTEMPTED);
 	}

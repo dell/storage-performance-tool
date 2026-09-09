@@ -23,6 +23,7 @@ public final class RangeReadAttempt {
 	private final ByteRange range;
 	private final RangeResponseValidator validator;
 	private boolean handedOff;
+	private boolean cancelledBeforeHandoff;
 	private Integer httpStatus;
 	private Outcome outcome;
 
@@ -42,7 +43,7 @@ public final class RangeReadAttempt {
 
 	/** True exactly once at the transport execute/write boundary, not at request construction. */
 	public synchronized boolean requestHandoff() {
-		if (outcome != null || handedOff) {
+		if (outcome != null || cancelledBeforeHandoff || handedOff) {
 			return false;
 		}
 		handedOff = true;
@@ -53,7 +54,7 @@ public final class RangeReadAttempt {
 	public synchronized boolean headers(final int status, final Operation.Status mappedStatus,
 					final List<String> ranges, final List<String> lengths, final List<String> types,
 					final boolean transferEncoding) {
-		if (outcome != null) {
+		if (outcome != null || cancelledBeforeHandoff) {
 			return false;
 		}
 		requireHandoff();
@@ -75,7 +76,7 @@ public final class RangeReadAttempt {
 	}
 
 	public synchronized boolean bodyBytes(final int count) {
-		if (outcome != null) {
+		if (outcome != null || cancelledBeforeHandoff) {
 			return false;
 		}
 		requireHandoff();
@@ -88,7 +89,7 @@ public final class RangeReadAttempt {
 
 	/** Exact bytes alone are insufficient: successful framing completion is required. */
 	public synchronized boolean finish(final boolean framingValid) {
-		if (outcome != null) {
+		if (outcome != null || cancelledBeforeHandoff) {
 			return false;
 		}
 		requireHandoff();
@@ -102,7 +103,7 @@ public final class RangeReadAttempt {
 
 	/** Also covers a rejected submission before transport handoff, with zero requests. */
 	public synchronized boolean transportFailure(final Operation.Status status) {
-		if (outcome != null) {
+		if (outcome != null || cancelledBeforeHandoff) {
 			return false;
 		}
 		if (status != Operation.Status.FAIL_IO && status != Operation.Status.FAIL_TIMEOUT
@@ -115,11 +116,24 @@ public final class RangeReadAttempt {
 
 	/** Only an indeterminate dispatched attempt is unresolved; a known outcome always wins. */
 	public synchronized boolean unresolved() {
-		if (outcome != null || !handedOff) {
+		if (outcome != null || cancelledBeforeHandoff || !handedOff) {
 			return false;
 		}
 		retain(Category.UNRESOLVED, null);
 		return true;
+	}
+
+	/** Fences a queued attempt without inventing a failed request or response outcome. */
+	public synchronized boolean cancelBeforeHandoff() {
+		if (handedOff || outcome != null || cancelledBeforeHandoff) {
+			return false;
+		}
+		cancelledBeforeHandoff = true;
+		return true;
+	}
+
+	public synchronized boolean wasHandedOff() {
+		return handedOff;
 	}
 
 	public synchronized Outcome outcome() {
