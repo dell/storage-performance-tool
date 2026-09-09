@@ -22,7 +22,7 @@ import java.util.function.LongUnaryOperator;
 public final class RangeReadOperation<I extends DataItem> extends OperationImpl<I> implements DataOperation<I> {
 	private final RangeReadPolicy policy;
 	private final LongUnaryOperator boundedDraw;
-	private RangeReadPolicy.Selection selection;
+	private volatile RangeReadCirculation circulation;
 	private long bytesDone;
 	private long dataResponseStart;
 
@@ -38,7 +38,7 @@ public final class RangeReadOperation<I extends DataItem> extends OperationImpl<
 		super(originIndex, OpType.READ, item, srcPath, dstPath, credential);
 		this.policy = Objects.requireNonNull(policy);
 		this.boundedDraw = Objects.requireNonNull(boundedDraw);
-		this.selection = select();
+		this.circulation = new RangeReadCirculation(lifecycle(), select());
 		reset();
 	}
 
@@ -46,7 +46,7 @@ public final class RangeReadOperation<I extends DataItem> extends OperationImpl<
 		super(other);
 		policy = other.policy;
 		boundedDraw = other.boundedDraw;
-		selection = other.selection;
+		circulation = other.circulation;
 		bytesDone = other.bytesDone;
 		dataResponseStart = other.dataResponseStart;
 	}
@@ -56,11 +56,15 @@ public final class RangeReadOperation<I extends DataItem> extends OperationImpl<
 	}
 
 	public RangeReadPolicy.Selection selection() {
-		return selection;
+		return circulation.selection();
+	}
+
+	public RangeReadCirculation circulation() {
+		return circulation;
 	}
 
 	@Override
-	public RangeReadOperation<I> result() {
+	public synchronized RangeReadOperation<I> result() {
 		buildItemPath(item, dstPath == null ? srcPath : dstPath);
 		return new RangeReadOperation<>(this);
 	}
@@ -76,7 +80,7 @@ public final class RangeReadOperation<I extends DataItem> extends OperationImpl<
 		}
 		final var next = super.startNextLifecycle();
 		if (next != previous) {
-			selection = select();
+			circulation = new RangeReadCirculation(next, select());
 		}
 		return next;
 	}
