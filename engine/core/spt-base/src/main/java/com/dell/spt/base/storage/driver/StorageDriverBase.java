@@ -279,6 +279,24 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 		}
 	}
 
+	/**
+	 * Installs a workload-specific tracker during subclass construction, before exposing the
+	 * driver to a generator or context. This permits retained-outcome deadline settlement
+	 * without replacing an active ownership registry. Callers must not race construction
+	 * with start/admission; this is not a runtime reconfiguration API.
+	 */
+	protected final void enableOperationLifecycle(final OperationLifecycleTracker<O> tracker) {
+		java.util.Objects.requireNonNull(tracker);
+		if (!tracker.isEnabled()) {
+			throw new IllegalArgumentException("An instrumented driver requires an enabled lifecycle tracker");
+		}
+		if (!isInitial() || operationLifecycle().counters().selected() != 0
+						|| tracker.counters().selected() != 0) {
+			throw new IllegalStateException("Lifecycle tracker installation must precede driver start and operation admission");
+		}
+		operationLifecycle = tracker;
+	}
+
 	/** Records the exact boundary at which transport execution begins. */
 	protected final boolean markOperationDispatched(final O op) {
 		return operationLifecycle().explicitlyDispatched(op);

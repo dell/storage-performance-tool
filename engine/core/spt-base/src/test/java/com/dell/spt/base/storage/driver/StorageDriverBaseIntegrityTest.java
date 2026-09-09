@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doReturn;
@@ -19,12 +21,91 @@ import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl;
+import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.data.range.RangeReadOperation;
+import com.dell.spt.base.item.op.data.range.RangeReadOperationsBuilder;
+import com.dell.spt.base.item.op.data.range.RangeReadPolicy;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
+import com.dell.spt.base.metrics.range.RangeReadMetrics;
 import com.github.akurilov.confuse.Config;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 class StorageDriverBaseIntegrityTest {
+
+	@Test
+	void constructionSelectedTrackerSettlesQueuedRangeRetryAtDriverDeadline() throws Exception {
+		try (var driver = rangeDriver()) {
+			var policy = new RangeReadPolicy(2, 0L, 1);
+			var metrics = new RangeReadMetrics(policy);
+			var tracker = OperationLifecycleTracker.<RangeReadOperation<DataItem>> withDeadlineSettlement(
+							(op, owner) -> op.circulation().settleAtDeadline(op, owner));
+			driver.enableOperationLifecycle(); // Cooperative bases enable ordinary tracking first.
+			driver.enableOperationLifecycle(tracker);
+			driver.enableOperationLifecycle(); // A later base call must preserve the installed policy.
+			assertSame(tracker, driver.operationLifecycle());
+			tracker.terminalObserver(op -> metrics.recordFinal(op.circulation()));
+			var op = new RangeReadOperationsBuilder<DataItem>(0, policy)
+							.buildOp(new DataItemImpl("object", 0, 10));
+			assertTrue(tracker.generatorBuffered(op));
+			assertTrue(tracker.driverQueued(op));
+			var first = op.circulation().beginAttempt(null);
+			assertTrue(driver.markOperationDispatched(op));
+			assertTrue(metrics.requestHandoff(first));
+			assertTrue(first.transportFailure(Operation.Status.FAIL_IO));
+			metrics.recordAttempt(op.circulation(), first);
+			var retry = op.circulation().beginAttempt(first);
+			assertNotNull(retry);
+			driver.operationLifecycle().expireTerminalDeadline();
+			assertEquals(1, tracker.counters().failed());
+			assertEquals(0, tracker.counters().unattempted());
+			assertEquals(0, tracker.counters().unresolved());
+			assertFalse(retry.requestHandoff());
+			assertEquals(1, metrics.snapshot(tracker.counters()).requestsSent());
+			assertTrue(metrics.snapshot(tracker.counters()).reconciled());
+		}
+	}
+
+	@Test
+	void trackerInstallationRejectsStartedDriversAndExistingCustody() throws Exception {
+		try (var driver = rangeDriver()) {
+			var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItem>>();
+			assertThrows(IllegalArgumentException.class,
+							() -> driver.enableOperationLifecycle(OperationLifecycleTracker.disabled()));
+			var op = new RangeReadOperationsBuilder<DataItem>(0, new RangeReadPolicy(2, 0L, 1))
+							.buildOp(new DataItemImpl("object", 0, 10));
+			assertTrue(tracker.generatorBuffered(op));
+			assertThrows(IllegalStateException.class, () -> driver.enableOperationLifecycle(tracker));
+			assertFalse(driver.operationLifecycle().isEnabled());
+			var installed = new OperationLifecycleTracker<RangeReadOperation<DataItem>>();
+			driver.enableOperationLifecycle(installed);
+			var other = new RangeReadOperationsBuilder<DataItem>(0, new RangeReadPolicy(2, 0L, 1))
+							.buildOp(new DataItemImpl("other", 0, 10));
+			assertTrue(installed.generatorBuffered(other));
+			assertThrows(IllegalStateException.class,
+							() -> driver.enableOperationLifecycle(new OperationLifecycleTracker<>()));
+			assertSame(installed, driver.operationLifecycle());
+			tracker.unattempted(op);
+			installed.unattempted(other);
+		}
+		try (var driver = rangeDriver()) {
+			driver.start();
+			assertThrows(IllegalStateException.class,
+							() -> driver.enableOperationLifecycle(new OperationLifecycleTracker<>()));
+			driver.stop();
+			assertThrows(IllegalStateException.class,
+							() -> driver.enableOperationLifecycle(new OperationLifecycleTracker<>()));
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private static StorageDriverBase<DataItem, RangeReadOperation<DataItem>> rangeDriver() throws Exception {
+		return Mockito.mock(StorageDriverBase.class, Mockito.withSettings()
+						.useConstructor("range-test", new SeedDataInput(1, 1024, 1, true),
+										TestConfigBuilder.config().configVal("storage"), false)
+						.defaultAnswer(CALLS_REAL_METHODS));
+	}
 
 	@Test
 	void directLegacySubclassRetainsDisabledLifecycleCompatibility() throws Exception {
