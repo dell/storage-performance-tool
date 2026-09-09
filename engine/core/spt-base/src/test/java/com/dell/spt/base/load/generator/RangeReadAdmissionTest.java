@@ -1,0 +1,249 @@
+package com.dell.spt.base.load.generator;
+
+import com.dell.spt.base.item.DataItemImpl;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.item.op.data.range.RangeReadOperation;
+import com.dell.spt.base.item.op.data.range.RangeReadOperationsBuilder;
+import com.dell.spt.base.item.op.data.range.RangeReadPolicy;
+import com.dell.spt.base.load.generator.range.RangeReadAdmission;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
+import com.dell.spt.base.metrics.range.RangeReadMetrics;
+import com.github.akurilov.commons.concurrent.throttle.Throttle;
+import com.github.akurilov.commons.io.Input;
+import com.github.akurilov.commons.io.Output;
+import java.io.EOFException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+@SuppressWarnings("unchecked")
+class RangeReadAdmissionTest {
+	private static final RangeReadPolicy POLICY = new RangeReadPolicy(2, null, 1);
+
+	private static Input<DataItemImpl> input(List<DataItemImpl> items) {
+		Input<DataItemImpl> input = mock(Input.class);
+		when(input.toString()).thenReturn("range-admission-input");
+		var next = new AtomicInteger();
+		doAnswer(call -> {
+			if (next.get() == items.size()) {
+				throw new EOFException();
+			}
+			List<DataItemImpl> target = call.getArgument(0);
+			int limit = call.getArgument(1);
+			int start = next.get();
+			int end = Math.min(items.size(), start + limit);
+			target.addAll(items.subList(start, end));
+			next.set(end);
+			return end - start;
+		}).when(input).get(anyList(), anyInt());
+		return input;
+	}
+
+	private static DataItemImpl item(String name, long size) {
+		return new DataItemImpl(name, 0, size);
+	}
+
+	@Test
+	void realGeneratorPreservesBatchPrefixWhilePacingOnlyLocalFailures() throws Exception {
+		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
+		var metrics = new RangeReadMetrics(POLICY);
+		tracker.terminalObserver(result -> metrics.recordFinal(result.circulation()));
+		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
+		List<RangeReadOperation<DataItemImpl>> received = new ArrayList<>();
+		when(driver.put(any(RangeReadOperation.class))).thenAnswer(call -> {
+			RangeReadOperation<DataItemImpl> op = call.getArgument(0);
+			received.add(op);
+			return tracker.driverQueued(op);
+		});
+		var clock = new AtomicLong();
+		var admission = new RangeReadAdmission<>(driver, tracker, clock::get);
+		var generator = new LoadGeneratorImpl<>(input(List.of(item("bad-a", 0), item("bad-b", 0),
+						item("valid", 2), item("bad-c", 0))), new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY),
+						List.of(), admission, 4, 4, 4, false, false);
+		generator.operationLifecycle(tracker);
+		try {
+			generator.doWork();
+			assertEquals(4, generator.generatedOpCount());
+			assertEquals(1, tracker.counters().failed());
+			assertTrue(received.isEmpty());
+			generator.doWork(); // Frozen time: a refusal cannot consume another logical result.
+			assertEquals(1, tracker.counters().failed());
+			clock.addAndGet(1_000_000);
+			generator.doWork();
+			assertEquals(2, tracker.counters().failed());
+			assertEquals(1, received.size());
+			assertEquals("valid", received.getFirst().item().name());
+			clock.addAndGet(1_000_000);
+			generator.doWork();
+			assertEquals(3, tracker.counters().failed());
+			assertEquals(0, tracker.snapshot().dispatched());
+			assertEquals(0, metrics.snapshot(tracker.counters()).requestsSent());
+			assertTrue(tracker.unattempted(received.getFirst()));
+			assertTrue(metrics.snapshot(tracker.counters()).reconciled());
+		} finally {
+			admission.closeAdmission();
+			generator.close();
+		}
+	}
+
+	@Test
+	void generatorRatePermitsStillApplyAndCloseRecoversPacedWork() throws Exception {
+		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
+		var metrics = new RangeReadMetrics(POLICY);
+		tracker.terminalObserver(result -> metrics.recordFinal(result.circulation()));
+		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
+		var clock = new AtomicLong();
+		var quota = new AtomicInteger();
+		Throttle throttle = new Throttle() {
+			@Override
+			public boolean tryAcquire() {
+				return tryAcquire(1) == 1;
+			}
+
+			@Override
+			public int tryAcquire(int count) {
+				int allowed = Math.min(count, quota.get());
+				quota.addAndGet(-allowed);
+				return allowed;
+			}
+		};
+		var admission = new RangeReadAdmission<>(driver, tracker, clock::get);
+		var generator = new LoadGeneratorImpl<>(input(List.of(item("a", 0), item("b", 0))),
+						new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY), List.of(throttle), admission,
+						2, 2, 2, false, false);
+		generator.operationLifecycle(tracker);
+		try {
+			generator.doWork();
+			assertEquals(0, tracker.counters().failed());
+			quota.set(1);
+			generator.doWork();
+			assertEquals(1, tracker.counters().failed());
+			clock.addAndGet(1_000_000);
+			generator.doWork();
+			assertEquals(1, tracker.counters().failed());
+			admission.closeAdmission();
+			generator.closeAdmission();
+			generator.recoverBufferedOperations();
+			assertEquals(1, tracker.counters().unattempted());
+			assertTrue(metrics.snapshot(tracker.counters()).reconciled());
+			verifyNoInteractions(driver);
+		} finally {
+			admission.closeAdmission();
+			generator.close();
+		}
+	}
+
+	@Test
+	void closingDuringValidBatchHandoffReturnsAcceptedPrefix() {
+		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
+		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
+		var admission = new RangeReadAdmission<>(driver, tracker);
+		var builder = new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY);
+		var first = builder.buildOp(item("a", 2));
+		var second = builder.buildOp(item("b", 0));
+		tracker.generatorBuffered(first);
+		tracker.generatorBuffered(second);
+		when(driver.put(first)).thenAnswer(call -> {
+			admission.closeAdmission();
+			return tracker.driverQueued(first);
+		});
+		assertEquals(1, admission.put(List.of(first, second)));
+		assertThrows(EOFException.class, () -> admission.put(second));
+		assertEquals(0, tracker.counters().failed());
+		tracker.unattempted(first);
+		tracker.unattempted(second);
+		assertTrue(tracker.counters().reconciled());
+	}
+
+	@Test
+	void localPacingSurvivesNanoTimeWrapAndDisabledTrackingFailsClosed() {
+		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
+		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
+		assertThrows(IllegalArgumentException.class,
+						() -> new RangeReadAdmission<>(driver, OperationLifecycleTracker.disabled()));
+		var clock = new AtomicLong(Long.MAX_VALUE - 500_000);
+		var admission = new RangeReadAdmission<>(driver, tracker, clock::get);
+		var builder = new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY);
+		var a = builder.buildOp(item("a", 0));
+		var b = builder.buildOp(item("b", 0));
+		tracker.generatorBuffered(a);
+		tracker.generatorBuffered(b);
+		assertTrue(admission.put(a));
+		clock.addAndGet(999_999);
+		assertFalse(admission.put(b));
+		clock.incrementAndGet();
+		assertTrue(admission.put(b));
+		assertEquals(0, a.reqTimeStart());
+		assertEquals(0, b.reqTimeStart());
+		assertTrue(tracker.counters().reconciled());
+		verifyNoInteractions(driver);
+	}
+
+	@Test
+	void observerFailurePropagatesTerminalErrorInsteadOfRetryingCommittedLocalWork() {
+		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
+		tracker.terminalObserver(result -> {
+			throw new IllegalStateException("broken counter observer");
+		});
+		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
+		var admission = new RangeReadAdmission<>(driver, tracker);
+		var generator = new LoadGeneratorImpl<>(input(List.of(item("bad", 0))),
+						new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY), List.of(), admission,
+						1, 1, 1, false, false);
+		generator.operationLifecycle(tracker);
+		try {
+			assertThrows(IntegrityTerminalException.class, generator::doWork);
+			assertEquals(1, tracker.counters().failed());
+			assertEquals(0, tracker.snapshot().dispatched());
+			assertTrue(tracker.counters().reconciled());
+			verifyNoInteractions(driver);
+		} finally {
+			admission.closeAdmission();
+			generator.close();
+		}
+	}
+
+	@Test
+	void concurrentCallersShareOneLocalErrorPacingBudget() throws Exception {
+		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
+		var metrics = new RangeReadMetrics(POLICY);
+		tracker.terminalObserver(result -> metrics.recordFinal(result.circulation()));
+		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
+		var admission = new RangeReadAdmission<>(driver, tracker, () -> 0L);
+		var builder = new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY);
+		List<RangeReadOperation<DataItemImpl>> operations = new ArrayList<>();
+		for (int i = 0; i < 64; i++) {
+			var op = builder.buildOp(item("bad-" + i, 0));
+			tracker.generatorBuffered(op);
+			operations.add(op);
+		}
+		int accepted = 0;
+		try (var pool = Executors.newFixedThreadPool(8)) {
+			List<Future<Boolean>> pending = new ArrayList<>();
+			for (var op : operations) {
+				pending.add(pool.submit(() -> admission.put(op)));
+			}
+			for (var future : pending) {
+				if (future.get(5, TimeUnit.SECONDS)) {
+					accepted++;
+				}
+			}
+		}
+		assertEquals(1, accepted);
+		admission.closeAdmission();
+		for (var op : operations) {
+			tracker.unattempted(op);
+		}
+		assertEquals(1, tracker.counters().failed());
+		assertEquals(63, tracker.counters().unattempted());
+		assertTrue(metrics.snapshot(tracker.counters()).reconciled());
+		verifyNoInteractions(driver);
+	}
+}
