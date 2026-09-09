@@ -467,6 +467,41 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		return terminal(op, enabled ? op.status() : null);
 	}
 
+	/**
+	 * Commits a retained local validation failure without synthesizing transport dispatch.
+	 *
+	 * <p>The caller must already have accepted the initial logical count/rate admission and
+	 * retained its immutable validation reason on the operation. The expected lifecycle fences
+	 * callbacks from earlier circulations. Unsupported/disabled tracking fails closed; callers
+	 * must not fall back to a transport completion path. Only bounded counter observers run here,
+	 * never arbitrary result output. Optional output follows this commit outside the lock.
+	 */
+	public boolean localFailure(final O op, final OperationLifecycle expected) {
+		if (!enabled || expected == null || !expected.isTracked()) {
+			return false;
+		}
+		synchronized (expected) {
+			if (lifecycle(op) != expected || !outstanding.contains(identityKey(op))
+							|| !expected.localFailure()) {
+				return false;
+			}
+			op.status(Operation.Status.RESP_FAIL_CLIENT);
+			// A local validation failure has never incremented dispatched or inFlight.
+			// Retain its outcome before releasing custody, even if an observer violates its contract.
+			failed.increment();
+			terminal.increment();
+			try {
+				final var observer = terminalObserver;
+				if (observer != null) {
+					observer.accept(op);
+				}
+			} finally {
+				outstanding.remove(identityKey(op));
+			}
+			return true;
+		}
+	}
+
 	/** Commits the status captured before result output can recycle the operation. */
 	public boolean terminal(final O op, final Operation.Status terminalStatus) {
 		if (!enabled) {

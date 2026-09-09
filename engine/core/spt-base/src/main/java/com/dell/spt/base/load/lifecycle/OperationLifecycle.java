@@ -73,6 +73,17 @@ public final class OperationLifecycle {
 		return transitionTo(OperationLifecycleState.TERMINAL);
 	}
 
+	/** Explicit local validation only; ordinary terminal transitions still require completion. */
+	boolean localFailure() {
+		if (!tracked) {
+			return false;
+		}
+		final var current = state.get();
+		return (current == OperationLifecycleState.GENERATOR_BUFFERED
+						|| current == OperationLifecycleState.DRIVER_QUEUED)
+						&& state.compareAndSet(current, OperationLifecycleState.TERMINAL);
+	}
+
 	boolean unattempted() {
 		return transitionTo(OperationLifecycleState.UNATTEMPTED);
 	}
