@@ -10,6 +10,8 @@ import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.concurrent.throttle.Throttle;
 import java.io.EOFException;
+import java.util.concurrent.CompletableFuture;
+import com.dell.spt.base.load.step.local.context.range.RangeReadRetryCoordinator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -81,6 +83,68 @@ class RangeReadRetryTest {
 			tracker.resolveOutstandingAsUnresolved();
 			generator.close();
 			admission.close();
+		}
+	}
+
+	@Test
+	void coordinatorRetriesThroughRealGeneratorWithoutConsumingAnotherLogicalCount() throws Exception {
+		try (var f = new Fixture()) {
+			var op = f.operation.get();
+			var circulation = op.circulation();
+			var published = new AtomicReference<RangeReadOperation<DataItemImpl>>();
+			try (var coordinator = new RangeReadRetryCoordinator<>(true, 1, 1, f.generator, f.tracker, f.metrics,
+							(delay, task) -> {
+								task.run();
+								return CompletableFuture.completedFuture(null);
+							}, (owner, token) -> {
+								var result = owner.claimTerminalResult(token);
+								if (result != null) {
+									assertEquals(0, f.admission.admittedCirculations());
+									assertEquals(1, f.tracker.counters().accepted());
+									assertTrue(published.compareAndSet(null, result));
+								}
+							})) {
+				assertNull(circulation.pendingAttempt());
+				var first = circulation.beginAttempt(null);
+				assertSame(first, circulation.pendingAttempt());
+				assertTrue(f.tracker.explicitlyDispatched(op));
+				assertTrue(f.metrics.requestHandoff(first));
+				assertNull(circulation.pendingAttempt());
+				assertTrue(first.transportFailure(Operation.Status.FAIL_IO));
+				assertTrue(coordinator.completed(op, circulation, first));
+				var retry = circulation.pendingAttempt();
+				assertNotNull(retry);
+				assertNotSame(first, retry);
+				assertEquals(1, f.admission.admittedCirculations());
+				assertFalse(f.generator.isNothingPendingRetry());
+				f.generator.doWork(); // No rate permit left after the one initial logical read.
+				verify(f.output, times(1)).put(op);
+				doAnswer(call -> {
+					assertSame(retry, circulation.pendingAttempt());
+					assertTrue(circulation.isPendingAttempt(retry));
+					assertTrue(f.metrics.requestHandoff(retry));
+					assertTrue(retry.headers(206, Operation.Status.SUCC,
+									List.of("bytes 0-1/10"), List.of("2"), List.of(), false));
+					assertTrue(retry.bodyBytes(2));
+					assertTrue(retry.finish(true));
+					assertTrue(coordinator.completed(op, circulation, retry));
+					return true;
+				}).when(f.output).put(op);
+				f.quota.set(1);
+				f.generator.doWork();
+				verify(f.output, times(2)).put(op);
+				assertEquals(1, f.generator.generatedOpCount());
+				assertEquals(1, f.tracker.counters().selected());
+				assertEquals(1, f.tracker.snapshot().dispatched());
+				assertEquals(2, f.metrics.snapshot(f.tracker.counters()).requestsSent());
+				assertEquals(1, f.metrics.snapshot(f.tracker.counters()).transportAttemptFailures());
+				assertEquals(2, published.get().countBytesDone());
+				assertEquals(10, op.item().size());
+				assertNull(circulation.pendingAttempt());
+				assertTrue(f.generator.isNothingPendingRetry());
+				assertTrue(f.metrics.snapshot(f.tracker.counters()).reconciled());
+				assertNull(coordinator.failure());
+			}
 		}
 	}
 

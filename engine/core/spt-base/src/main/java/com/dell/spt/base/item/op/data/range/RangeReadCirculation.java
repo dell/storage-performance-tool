@@ -18,6 +18,7 @@ public final class RangeReadCirculation {
 	private RangeReadAttempt.Outcome lastFailure;
 	private boolean outcomeClaimed;
 	private boolean retryQueueClaimed;
+	private int retryCount;
 	private boolean finalMetricsClaimed;
 	private boolean resultOutputClaimed;
 	private boolean closed;
@@ -59,7 +60,7 @@ public final class RangeReadCirculation {
 					return null;
 				}
 			} else {
-				if (!outcomeClaimed) {
+				if (!outcomeClaimed || retryCount == Integer.MAX_VALUE) {
 					return null;
 				}
 				final var outcome = current.outcome();
@@ -77,6 +78,7 @@ public final class RangeReadCirculation {
 				}
 			}
 			if (current != null) {
+				retryCount++;
 				lastFailure = current.outcome();
 				if (firstDispatch == 0) {
 					firstDispatch = lastFailure.timing().dispatch();
@@ -86,6 +88,23 @@ public final class RangeReadCirculation {
 			outcomeClaimed = false;
 			retryQueueClaimed = false;
 			return current;
+		}
+	}
+
+	/** Additional attempts in this circulation, shared by every operation/result copy. */
+	public int retryCount() {
+		synchronized (lifecycle) {
+			return retryCount;
+		}
+	}
+
+	/**
+	 * Captures the prepared token for driver queue ownership. This is not transport permission:
+	 * the adapter must recheck isPendingAttempt(token) under its actual handoff admission gate.
+	 */
+	public RangeReadAttempt pendingAttempt() {
+		synchronized (lifecycle) {
+			return isPendingAttempt(current) ? current : null;
 		}
 	}
 
