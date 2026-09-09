@@ -2,6 +2,8 @@ package com.dell.spt.integration;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import com.dell.spt.base.buildinfo.EngineBuildInfoJson;
+import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
 import com.dell.spt.testing.tags.IntegrationTest;
 import java.io.IOException;
 import java.net.URI;
@@ -106,6 +108,7 @@ public class NodeJarShutdownE2ETest {
 			// Basic /status should be 200
 			var statusResp = client.send(HttpRequest.newBuilder(URI.create(base + "/status")).GET().build(), HttpResponse.BodyHandlers.ofString());
 			assertEquals(200, statusResp.statusCode());
+			assertVersionAvailable(client, base);
 
 			// Start a real packaged Netty workload so shutdown exercises the extension loader.
 			var runResp = client.send(
@@ -113,6 +116,7 @@ public class NodeJarShutdownE2ETest {
 							HttpResponse.BodyHandlers.discarding());
 			assertEquals(202, runResp.statusCode());
 			awaitStatus(client, base, "RUNNING", Duration.ofSeconds(5));
+			assertVersionAvailable(client, base);
 
 			// Request shutdown
 			var shutResp = client.send(HttpRequest.newBuilder(URI.create(base + "/shutdown")).POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.discarding());
@@ -126,6 +130,7 @@ public class NodeJarShutdownE2ETest {
 				fail("Interrupted while waiting during linger", e);
 			}
 			awaitStatus(client, base, "STOPPED", Duration.ofSeconds(5));
+			assertVersionAvailable(client, base);
 
 			// Wait for process to exit within linger+grace period
 			boolean exited = node.waitFor(15, java.util.concurrent.TimeUnit.SECONDS);
@@ -139,6 +144,7 @@ public class NodeJarShutdownE2ETest {
 			assertFalse(output.contains("I/O workers did not stop"), output);
 			assertFalse(output.contains("Graceful I/O workers shutdown was interrupted"), output);
 			assertFalse(output.contains("Uncaught exception"), output);
+			assertEquals(1, countOccurrences(output, "Engine build:"), output);
 		} finally {
 			if (node.isAlive()) {
 				node.destroy();
@@ -147,6 +153,25 @@ public class NodeJarShutdownE2ETest {
 				}
 			}
 		}
+	}
+
+	private static void assertVersionAvailable(final HttpClient client, final String base) throws Exception {
+		final var response = client.send(
+						HttpRequest.newBuilder(URI.create(base + "/version")).GET().build(),
+						HttpResponse.BodyHandlers.ofString());
+		assertEquals(200, response.statusCode());
+		assertEquals("application/json;charset=utf-8", response.headers().firstValue("content-type").orElseThrow());
+		assertEquals(EngineBuildInfoJson.serialize(EngineBuildInfoProvider.global().snapshot()), response.body());
+	}
+
+	private static int countOccurrences(final String value, final String marker) {
+		int count = 0;
+		int offset = 0;
+		while ((offset = value.indexOf(marker, offset)) >= 0) {
+			count++;
+			offset += marker.length();
+		}
+		return count;
 	}
 
 	private static HttpResponse<String> awaitStatus(

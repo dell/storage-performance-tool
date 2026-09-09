@@ -6,6 +6,10 @@ The SPT Engine is the high-performance Java core of the Dell Storage Performance
 
 This directory contains the engine source, extensions (storage drivers, load patterns), and Docker bundle configuration.
 
+Standalone and CLI-managed runs expose immutable engine provenance; see
+[Engine Build Information](../cli/docs/ENGINE_BUILD_INFO.md) for the version
+endpoint, local build records, combined manifests, and compatibility policy.
+
 ## Key Features
 
 - **High Performance**: Leverages Virtual Threads to sustain millions of concurrent operations
@@ -67,6 +71,12 @@ make help       # Show all available targets
 ```
 
 Note: The Makefile is a convenience wrapper and requires a Unix-like environment. For official builds, CI/CD, and cross-platform compatibility, use the Gradle Wrapper (`./gradlew`).
+
+### Build identity and incremental builds
+
+Development builds capture the current UTC time when `generateEngineBuildInfo` executes. Unchanged builds and artifacts restored from the Gradle cache retain that timestamp. Changes to engine sources or build inputs regenerate the metadata. JAR manifests and runtime build information use the same generated snapshot.
+
+An explicit `-PsptBuildTime` or `SPT_BUILD_TIME` takes precedence over `SOURCE_DATE_EPOCH`; changing an explicit timestamp invalidates the metadata. Release workflows supply the release revision and timestamp, and discover source cleanliness from Git. Tracked changes and untracked, non-ignored files prevent release packaging.
 
 ### Running Your First Test
 
@@ -135,6 +145,10 @@ Note: Extensions are loaded from the `ext/` directory next to `spt.jar`.
 # Run with custom configuration file
 ./run.sh --run-scenario=mytest.js
 ```
+
+`--version` reports the same immutable Engine Build Information snapshot used by startup reporting,
+the `/version` endpoint, effective `run.version`, and local `engine.build.json` records. It does not
+derive the engine version from mutable defaults or command-line configuration.
 
 ### Distribution Structure
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/logging"
 )
 
 func newTestServer(t *testing.T, handlers map[string]http.HandlerFunc) *httptest.Server {
@@ -938,5 +942,154 @@ func TestFetcherPreservesDiscoveredIntegrityNodeSources(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("node source status was not recorded")
+	}
+}
+
+func TestFetcherReplacesStepEvidenceWithoutErasingIndependentIndexFields(t *testing.T) {
+	step := "mt-002-test-read"
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"/logs/" + step + "/index.json": func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{
+				{"logger": "metrics.FileTotal", "size": 5},
+			}})
+		},
+		"/logs/" + step + "/metrics.FileTotal": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("total"))
+		},
+	})
+	defer srv.Close()
+
+	out := t.TempDir()
+	prior := Manifest{
+		Steps: []StepManifest{{StepID: "obsolete-step"}},
+		RunFiles: []FileStatus{
+			{Name: "engine.info.json", Size: 701, Status: fileStatusOK, ContentType: "application/json"},
+			{Name: "trace.log", Size: 19, Status: fileStatusOK, ContentType: "text/plain"},
+		},
+		Integrity: &IntegritySummary{Complete: true, SelectionSourceCount: 41, VerifiedCount: 41},
+	}
+	priorData, err := json.Marshal(prior)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var priorMembers map[string]json.RawMessage
+	if err := json.Unmarshal(priorData, &priorMembers); err != nil {
+		t.Fatal(err)
+	}
+	priorMembers["futureEvidence"] = json.RawMessage(`{"owner":"independent","generation":2}`)
+	priorData, err = json.Marshal(priorMembers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out, constants.ResultsManifestFileName), priorData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fetcher := NewFetcher(srv.URL, out)
+	fetcher.Artifacts = []ArtifactSpec{{
+		Loggers: []string{"metrics.FileTotal"}, Suffix: constants.ResultsArtifactSuffixMetricsTotal, Required: true,
+	}}
+	manifest, err := fetcher.FetchArtifactsForSteps(context.Background(), []string{step})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(manifest.Steps) != 1 || manifest.Steps[0].StepID != step {
+		t.Fatalf("step evidence = %+v, want only current step %q", manifest.Steps, step)
+	}
+	if len(manifest.RunFiles) != 2 || manifest.RunFiles[0] != prior.RunFiles[0] || manifest.RunFiles[1] != prior.RunFiles[1] {
+		t.Fatalf("run files = %+v, want preserved %+v", manifest.RunFiles, prior.RunFiles)
+	}
+	if manifest.Integrity == nil || !manifest.Integrity.Complete ||
+		manifest.Integrity.SelectionSourceCount != 41 || manifest.Integrity.VerifiedCount != 41 {
+		t.Fatalf("integrity = %+v, want preserved %+v", manifest.Integrity, prior.Integrity)
+	}
+
+	persistedData, err := os.ReadFile(filepath.Join(out, constants.ResultsManifestFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted Manifest
+	if err := json.Unmarshal(persistedData, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted.RunFiles) != 2 || persisted.Integrity == nil || persisted.Integrity.VerifiedCount != 41 {
+		t.Fatalf("persisted independent fields = runFiles %+v, integrity %+v", persisted.RunFiles, persisted.Integrity)
+	}
+	var persistedMembers map[string]json.RawMessage
+	if err := json.Unmarshal(persistedData, &persistedMembers); err != nil {
+		t.Fatal(err)
+	}
+	var futureEvidence struct {
+		Owner      string `json:"owner"`
+		Generation int    `json:"generation"`
+	}
+	if err := json.Unmarshal(persistedMembers["futureEvidence"], &futureEvidence); err != nil {
+		t.Fatalf("additive independently owned field was not preserved: %v", err)
+	}
+	if futureEvidence.Owner != "independent" || futureEvidence.Generation != 2 {
+		t.Fatalf("additive independently owned field changed: %+v", futureEvidence)
+	}
+}
+
+func TestFetcherReplacesCorruptIndexWithFreshStepEvidence(t *testing.T) {
+	const step = "mt-002-test-read"
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"/logs/" + step + "/index.json": func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{
+				{"logger": "metrics.FileTotal", "size": 5},
+			}})
+		},
+		"/logs/" + step + "/metrics.FileTotal": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("total"))
+		},
+	})
+	defer srv.Close()
+
+	out := t.TempDir()
+	indexPath := filepath.Join(out, constants.ResultsManifestFileName)
+	const corruptContents = "not-json-sensitive-marker"
+	if err := os.WriteFile(indexPath, []byte(corruptContents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	previousLogger := logging.GetLogger()
+	var warning bytes.Buffer
+	logging.SetLogger(slog.New(slog.NewTextHandler(&warning, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { logging.SetLogger(previousLogger) })
+
+	fetcher := NewFetcher(srv.URL, out)
+	fetcher.Artifacts = []ArtifactSpec{{
+		Loggers: []string{"metrics.FileTotal"}, Suffix: constants.ResultsArtifactSuffixMetricsTotal, Required: true,
+	}}
+	manifest, err := fetcher.FetchArtifactsForSteps(context.Background(), []string{step})
+	if err != nil {
+		t.Fatalf("FetchArtifactsForSteps should replace a corrupt index: %v", err)
+	}
+	if manifest == nil || len(manifest.Steps) != 1 || manifest.Steps[0].StepID != step {
+		t.Fatalf("manifest = %+v, want fresh step evidence for %q", manifest, step)
+	}
+	if len(manifest.Steps[0].Files) != 1 || manifest.Steps[0].Files[0].Status != fileStatusOK {
+		t.Fatalf("fetched files = %+v, want one successful metrics artifact", manifest.Steps[0].Files)
+	}
+
+	persistedData, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted Manifest
+	if err := json.Unmarshal(persistedData, &persisted); err != nil {
+		t.Fatalf("replacement index is invalid: %v", err)
+	}
+	if len(persisted.Steps) != 1 || persisted.Steps[0].StepID != step {
+		t.Fatalf("persisted steps = %+v, want only %q", persisted.Steps, step)
+	}
+
+	warningText := warning.String()
+	if strings.Count(warningText, "replacing corrupt results index") != 1 {
+		t.Fatalf("warning = %q, want exactly one replacement warning", warningText)
+	}
+	if strings.Contains(warningText, corruptContents) {
+		t.Fatalf("warning exposed corrupt index contents: %q", warningText)
 	}
 }

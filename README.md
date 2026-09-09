@@ -193,6 +193,8 @@ read data paths; see the [S3-RDMA guide](cli/docs/S3_RDMA.md).
   distributed operation.
 - [CLI syntax reference](cli/docs/SPT_SYNTAX.md) - all commands, flags, and
   examples.
+- [Engine Build Information](cli/docs/ENGINE_BUILD_INFO.md) - build identity,
+  consistency gates, and result provenance.
 - [S3 integrity testing](cli/docs/S3_INTEGRITY.md) - persisted-object write/read
   verification, artifacts, and automation contracts.
 - [S3 DELETE](cli/docs/S3_DELETE.md) - destructive selection safety, batching,

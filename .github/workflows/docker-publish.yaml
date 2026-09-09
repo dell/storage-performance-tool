@@ -152,8 +152,12 @@ jobs:
 
       - name: Build Engine distribution
         working-directory: engine
+        env:
+          SPT_BUILD_RELEASE: 'true'
+          SPT_BUILD_REVISION: ${{ github.sha }}
         run: |
           # CI already ran tests - just build the distribution
+          export SPT_BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           ./gradlew :bundle:assembleDist --no-daemon
 
       - name: Verify version alignment

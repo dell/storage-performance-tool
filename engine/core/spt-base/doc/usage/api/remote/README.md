@@ -20,6 +20,7 @@
 &nbsp;&nbsp;&nbsp;&nbsp;4.2.6. [Status](#426-status)<br/>
 &nbsp;&nbsp;&nbsp;&nbsp;4.2.7. [Health](#427-health)<br/>
 &nbsp;&nbsp;&nbsp;&nbsp;4.2.8. [Readiness](#428-readiness)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;4.2.9. [Version](#429-version)<br/>
 5. [Configuration](#5-configuration)<br/>
 6. [Output](#6-output)<br/>
 &nbsp;&nbsp;6.1. [Metrics](#61-metrics)<br/>
@@ -100,6 +101,10 @@ curl -v -X POST \
     http://localhost:9999/run
 ```
 > **Note**: use this example above as the most simple way to start via the remote API.
+
+Partial configurations may omit `run` or provide only `run.id`. `run.version` is projected from immutable Engine Build Information
+after the submitted configuration is merged with local defaults. A submitted `run.version` is ignored with a warning and cannot
+redefine the executing engine build.
 
 If successful, the response will contain the ETag header with the hexadecimal timestamp (Unix epoch time):
 ```bash
@@ -608,3 +613,49 @@ Responses:
 Readiness criteria:
 - Set to ready after core services are started on the node.
 - Also considered ready if any metrics context exists (useful for worker-only runs).
+
+### 4.2.9 Version
+
+`GET /version` returns the process's immutable Engine Build Information snapshot:
+`200 OK`, `Content-Type: application/json` (UTF-8). No authentication is required.
+It is available as soon as the node's HTTP server responds, including before
+`GET /ready` reports readiness. It is independent of run state and requires no
+active or completed run; it remains available while the HTTP server is serving.
+
+```bash
+curl -i http://localhost:9999/version
+```
+
+Schema 1 includes all of the following fields:
+
+| Field | Type | Meaning |
+|:--|:--|:--|
+| `schema_version` | integer | Response schema version, currently `1` |
+| `product` | string | `spt-engine` |
+| `version` | string | Semantic engine version; `unknown` for a degraded development identity |
+| `revision` | string | Full source object ID, or `unknown` when unavailable |
+| `build_time` | string | UTC RFC 3339 build timestamp, or `unknown` when unavailable |
+| `development` | boolean | Whether this is a development build |
+| `source_dirty` | boolean or null | Source cleanliness evidence; `null` when unavailable |
+
+Example response:
+
+```json
+{
+  "schema_version": 1,
+  "product": "spt-engine",
+  "version": "5.15.0",
+  "revision": "0123456789abcdef0123456789abcdef01234567",
+  "build_time": "2030-01-02T03:04:05Z",
+  "development": false,
+  "source_dirty": false
+}
+```
+
+The response is the same snapshot used by `--version`, the startup build line,
+and `engine.build.json`. It contains no configuration, credentials, environment
+variables, filesystem paths, host inventory, or topology information. Changing
+run configuration does not change this response.
+
+See [Engine Build Information](../../../../../../../cli/docs/ENGINE_BUILD_INFO.md) for CLI result manifests,
+compatibility states, and the build-consistency gate.

@@ -6,6 +6,7 @@ plugins {
 
 def sptVersion = rootProject.ext.SPT_VERSION
 def sptReleaseVersion = rootProject.ext.SPT_RELEASE_VERSION
+def engineBuildMetadata = rootProject.ext.SPT_BUILD_METADATA
 
 description = "Spt Bundle - Distribution assembly for all components"
 group = "io.github.dell.spt"
@@ -257,6 +258,45 @@ def directJarScenarioSpecs = [
 	],
 ]
 
+def engineBuildInfoDocumentation = [
+	[
+		file: file("${rootDir}/README.md"),
+		required: 'same immutable Engine Build Information snapshot used by startup reporting',
+	],
+	[
+		file: file("${rootDir}/core/spt-base/doc/usage/input/cli/README.md"),
+		required: '`--run-version` is retained only as a compatibility option',
+	],
+	[
+		file: file("${rootDir}/core/spt-base/doc/usage/input/configuration/README.md"),
+		required: 'projected from immutable Engine Build Information after configuration merging',
+	],
+	[
+		file: file("${rootDir}/core/spt-base/doc/design/installer/README.md"),
+		required: 'renders the startup banner from that snapshot',
+	],
+	[
+		file: file("${rootDir}/core/spt-base/doc/usage/api/remote/README.md"),
+		required: '`run.version` is projected from immutable Engine Build Information',
+	],
+]
+
+tasks.register('verifyEngineBuildInfoDocumentation') {
+	group = 'verification'
+	description = 'Verifies engine version documentation keeps immutable build information authoritative'
+	inputs.files(engineBuildInfoDocumentation.collect { it.file })
+
+	doLast {
+		engineBuildInfoDocumentation.each { contract ->
+			def content = contract.file.getText('UTF-8')
+			if (!content.contains(contract.required)) {
+				throw new GradleException(
+					"${contract.file} does not document the Engine Build Information authority contract")
+			}
+		}
+	}
+}
+
 tasks.register('verifyDirectJarScenarioConfigs') {
 	group = 'verification'
 	description = 'Validates direct-JAR integrity scenarios through the packaged Nashorn and Confuse path'
@@ -322,10 +362,281 @@ tasks.register('verifyDirectJarScenarioConfigs') {
 	}
 }
 
+tasks.register('verifyEngineBuildInfoCanary') {
+	group = 'verification'
+	description = 'Verifies all packaged engine version surfaces use generated build information'
+	dependsOn assembleDist
+
+	inputs.file(file("${distDir}/${sptJar}"))
+	inputs.dir(file("${distDir}/ext"))
+	inputs.property("buildInformation", engineBuildMetadata.map { it.resourceValues() })
+	def canaryRootProvider = layout.buildDirectory.dir('engine-build-info-canary')
+	outputs.dir(canaryRootProvider)
+
+	doLast {
+		def canaryRoot = canaryRootProvider.get().asFile
+		delete canaryRoot
+		canaryRoot.mkdirs()
+		def javaExecutable = new File(
+			System.getProperty('java.home'),
+			'bin/java' + (System.getProperty('os.name').toLowerCase().contains('win') ? '.exe' : '')
+		).absolutePath
+		def jarFile = file("${distDir}/${sptJar}")
+		def expectedResource = engineBuildMetadata.get().resourceValues()
+
+		def versionExecution = providers.exec {
+			workingDir distDir
+			commandLine javaExecutable, '-jar', jarFile.absolutePath, '--version'
+			ignoreExitValue = true
+		}
+		def versionResult = versionExecution.result.get()
+		def versionOutput = versionExecution.standardOutput.asText.get() + versionExecution.standardError.asText.get()
+		def bannerMessage = " spt v ${expectedResource.version} "
+		def bannerPadding = '#' * (120 - bannerMessage.length()).intdiv(2)
+		def expectedBanner = bannerPadding + bannerMessage + bannerPadding
+		def expectedVersionLines = [
+			expectedBanner,
+			"Engine build schema: ${expectedResource.schema_version}",
+			"Engine product: ${expectedResource.product}",
+			"Engine version: ${expectedResource.version}",
+			"Engine revision: ${expectedResource.revision}",
+			"Engine build time: ${expectedResource.build_time}",
+			"Engine development: ${expectedResource.development}",
+			"Engine source dirty: ${expectedResource.source_dirty}",
+			'Java version: ',
+			'Available extensions:',
+		]
+		if (versionResult.exitValue != 0 || !expectedVersionLines.every { versionOutput.contains(it) }) {
+			throw new GradleException(
+				"Packaged --version build-information canary failed (exit ${versionResult.exitValue}):\n${versionOutput}")
+		}
+
+		def scenarioHome = new File(canaryRoot, 'home')
+		def scenarioLog = new File(canaryRoot, 'output')
+		def scenarioFile = new File(canaryRoot, 'engine-build-info-canary.js')
+		def effectiveVersionMarker = "ENGINE_EFFECTIVE_VERSION=${expectedResource.version}"
+		scenarioFile.setText(
+			"print('ENGINE_EFFECTIVE_VERSION=' + config.stringVal('run-version'));\nLoad.config({run: {version: '9.9.9'}}).append({run: {version: '8.8.8'}}).run();\n",
+			'UTF-8')
+		def scenarioExecution = providers.exec {
+			workingDir distDir
+			commandLine(
+				javaExecutable,
+				'-jar',
+				jarFile.absolutePath,
+				"--run-scenario=${scenarioFile.absolutePath}",
+				'--storage-driver-type=netty-mock',
+				'--storage-driver-limit-concurrency=1',
+				'--item-data-size=1KiB',
+				'--load-op-limit-count=1',
+				'--load-step-id=engine-build-info-canary')
+			environment(
+				'SPT_HOME': scenarioHome.absolutePath,
+				'SPT_LOG_DIR': scenarioLog.absolutePath,
+			)
+			ignoreExitValue = true
+		}
+		def scenarioResult = scenarioExecution.result.get()
+		def scenarioOutput = scenarioExecution.standardOutput.asText.get() + scenarioExecution.standardError.asText.get()
+		def startupMarker = "Engine build: ${expectedResource.version} (${expectedResource.revision.take(12)}"
+		if (scenarioResult.exitValue != 0
+				|| scenarioOutput.count(expectedBanner) != 1
+				|| scenarioOutput.count('Engine build:') != 1
+				|| !scenarioOutput.contains(startupMarker)
+				|| scenarioOutput.count(effectiveVersionMarker) != 1) {
+			throw new GradleException(
+				"Packaged direct-scenario build-information canary failed (exit ${scenarioResult.exitValue}):\n${scenarioOutput}")
+		}
+
+		def logRoot = new File(scenarioLog, 'log')
+		def stepArtifact = new File(logRoot, 'engine-build-info-canary/engine.build.json')
+		def initializationArtifacts = fileTree(logRoot) {
+			include 'none-*/engine.build.json'
+		}.files
+		if (!stepArtifact.isFile() || initializationArtifacts.size() != 1) {
+			throw new GradleException(
+				"Direct scenario did not produce initialization and workload Engine Build Records under ${logRoot}")
+		}
+
+		['config.yaml', 'metrics.total.csv'].each { name ->
+			if (!new File(stepArtifact.parentFile, name).isFile()) {
+				throw new GradleException("Packaged workload ${name} is not colocated with engine.build.json")
+			}
+		}
+
+		def stepConfigText = new File(stepArtifact.parentFile, 'config.yaml').getText('UTF-8')
+		if (!stepConfigText.readLines().contains('  version: "' + expectedResource.version + '"')
+				|| stepConfigText.contains('9.9.9') || stepConfigText.contains('8.8.8')
+				|| scenarioOutput.count('Configured run.version override is ignored') != 1) {
+			throw new GradleException('Packaged scenario override bypassed engine version authority or one-shot warning')
+		}
+
+		def expectedJson = [
+			schema_version: expectedResource.schema_version as Integer,
+			product: expectedResource.product,
+			version: expectedResource.version,
+			revision: expectedResource.revision,
+			build_time: expectedResource.build_time,
+			development: expectedResource.development.toBoolean(),
+			source_dirty: expectedResource.source_dirty == 'unknown'
+				? null
+				: expectedResource.source_dirty.toBoolean(),
+		]
+		def parser = new groovy.json.JsonSlurper()
+		def records = [stepArtifact, initializationArtifacts.iterator().next()].collect {
+			parser.parseText(it.getText('UTF-8'))
+		}
+		if (!records.every { it == expectedJson } || records[0] != records[1]) {
+			throw new GradleException("Packaged direct-scenario Engine Build Records differ from generated metadata")
+		}
+
+		def reservePort = {
+			def socket = new java.net.ServerSocket(0)
+			try {
+				return socket.localPort
+			} finally {
+				socket.close()
+			}
+		}
+		def nodePort = reservePort()
+		def nodeServicePort = reservePort()
+		while (nodeServicePort == nodePort) {
+			nodeServicePort = reservePort()
+		}
+		def nodeHome = new File(canaryRoot, 'node-home')
+		def nodeLog = new File(canaryRoot, 'node-output')
+		def nodeStdout = new File(canaryRoot, 'node.stdout.log')
+		def nodeStderr = new File(canaryRoot, 'node.stderr.log')
+		nodeHome.mkdirs()
+		nodeLog.mkdirs()
+		def nodeBuilder = new ProcessBuilder(
+			javaExecutable,
+			'-jar',
+			jarFile.absolutePath,
+			'--run-node',
+			"--run-port=${nodePort}",
+			"--load-step-node-port=${nodeServicePort}",
+			'--api-linger-sec=0',
+			'--storage-driver-type=netty-mock',
+			'--storage-driver-limit-concurrency=1',
+			'--item-data-size=1KiB',
+			'--load-op-limit-count=1',
+			'--load-step-id=engine-build-info-node-canary')
+		nodeBuilder.directory(file(distDir))
+		nodeBuilder.environment().put('SPT_HOME', nodeHome.absolutePath)
+		nodeBuilder.environment().put('SPT_LOG_DIR', nodeLog.absolutePath)
+		nodeBuilder.redirectOutput(nodeStdout)
+		nodeBuilder.redirectError(nodeStderr)
+		def nodeProcess = nodeBuilder.start()
+		try {
+			def versionBody = null
+			def deadline = System.nanoTime() + java.time.Duration.ofSeconds(30).toNanos()
+			while (versionBody == null && nodeProcess.isAlive() && System.nanoTime() < deadline) {
+				try {
+					def connection = (java.net.HttpURLConnection) new URL("http://127.0.0.1:${nodePort}/version").openConnection()
+					connection.connectTimeout = 500
+					connection.readTimeout = 1000
+					if (connection.responseCode == 200) {
+						versionBody = connection.inputStream.getText('UTF-8')
+					}
+					connection.disconnect()
+				} catch (IOException ignored) {
+					Thread.sleep(100)
+				}
+			}
+			if (versionBody == null || parser.parseText(versionBody) != expectedJson) {
+				throw new GradleException(
+					"Packaged node /version differs from generated metadata:\n"
+						+ nodeStdout.getText('UTF-8') + nodeStderr.getText('UTF-8'))
+			}
+
+			def request = { String path, String method, String scenario = null ->
+				def connection = (java.net.HttpURLConnection) new URL("http://127.0.0.1:${nodePort}${path}").openConnection()
+				connection.requestMethod = method
+				connection.connectTimeout = 1000
+				connection.readTimeout = 2000
+				try {
+					if (scenario != null) {
+						def boundary = 'engine-build-info-canary'
+						connection.doOutput = true
+						connection.setRequestProperty('Content-Type', 'multipart/form-data; boundary=' + boundary)
+						def multipart = "--${boundary}\r\nContent-Disposition: form-data; name=\"scenario\"; filename=\"scenario.js\"\r\nContent-Type: application/javascript\r\n\r\n${scenario}\r\n--${boundary}--\r\n"
+						connection.outputStream.withCloseable { it.write(multipart.getBytes('UTF-8')) }
+					}
+					def status = connection.responseCode
+					return [status: status, body: status == 200 ? connection.inputStream.getText('UTF-8') : '']
+				} finally {
+					connection.disconnect()
+				}
+			}
+			if (request('/run', 'POST', "Load.config({run: {version: '9.9.9'}}).append({run: {version: '8.8.8'}}).run();").status != 202) {
+				throw new GradleException('Packaged node workload was not accepted')
+			}
+			deadline = System.nanoTime() + java.time.Duration.ofSeconds(20).toNanos()
+			def completed = false
+			while (!completed && nodeProcess.isAlive() && System.nanoTime() < deadline) {
+				completed = parser.parseText(request('/status', 'GET').body).state == 'COMPLETED'
+				if (!completed) Thread.sleep(100)
+			}
+			if (!completed) throw new GradleException('Packaged node workload did not complete')
+			def logsPath = '/logs/engine-build-info-node-canary/'
+			def buildResponse = request(logsPath + 'engine.build.json', 'GET')
+			if (buildResponse.status != 200 || parser.parseText(buildResponse.body) != expectedJson) {
+				throw new GradleException('Packaged node logs cannot serve the identical Engine Build Record')
+			}
+			def indexResponse = request(logsPath + 'index.json', 'GET')
+			if (indexResponse.status != 200 || !parser.parseText(indexResponse.body).items.any { it.logger == 'engine.build.json' }) {
+				throw new GradleException('Packaged node logs index omits Engine Build Record')
+			}
+			['config.yaml', 'metrics.total.csv', 'engine.build.json'].each { name ->
+				if (!new File(nodeLog, "log/engine-build-info-node-canary/${name}").isFile()) {
+					throw new GradleException("Packaged node ${name} is not under the configured log root")
+				}
+			}
+
+			def nodeConfig = request(logsPath + 'Config', 'GET')
+			if (nodeConfig.status != 200 || !nodeConfig.body.readLines().contains('  version: "' + expectedResource.version + '"')
+					|| nodeConfig.body.contains('9.9.9') || nodeConfig.body.contains('8.8.8')) {
+				throw new GradleException('Packaged Control API scenario bypassed engine version authority')
+			}
+
+			def shutdownConnection = (java.net.HttpURLConnection) new URL(
+				"http://127.0.0.1:${nodePort}/shutdown").openConnection()
+			shutdownConnection.requestMethod = 'POST'
+			shutdownConnection.connectTimeout = 1000
+			shutdownConnection.readTimeout = 1000
+			if (shutdownConnection.responseCode != 202) {
+				throw new GradleException("Packaged node shutdown was not accepted")
+			}
+			shutdownConnection.disconnect()
+			if (!nodeProcess.waitFor(20, java.util.concurrent.TimeUnit.SECONDS)) {
+				throw new GradleException("Packaged node did not stop after the canary")
+			}
+			def nodeOutput = nodeStdout.getText('UTF-8') + nodeStderr.getText('UTF-8')
+			if (nodeProcess.exitValue() != 0
+					|| nodeOutput.count(expectedBanner) != 1
+					|| nodeOutput.count('Engine build:') != 1
+					|| nodeOutput.count('Configured run.version override is ignored') != 1
+					|| !nodeOutput.contains(startupMarker)) {
+				throw new GradleException("Packaged node banner/startup build information differs from generated metadata:\n${nodeOutput}")
+			}
+		} finally {
+			if (nodeProcess.isAlive()) {
+				nodeProcess.destroy()
+				if (!nodeProcess.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
+					nodeProcess.destroyForcibly()
+				}
+			}
+		}
+	}
+}
+
 tasks.register('test') {
 	group = 'verification'
 	description = 'Runs bundle-level tests'
-	dependsOn tasks.named('verifyDirectJarScenarioConfigs')
+	dependsOn tasks.named('verifyDirectJarScenarioConfigs'),
+		tasks.named('verifyEngineBuildInfoCanary'),
+		tasks.named('verifyEngineBuildInfoDocumentation')
 }
 
 check.dependsOn tasks.named('test')

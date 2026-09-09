@@ -13,6 +13,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/config"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/replay"
@@ -51,6 +52,11 @@ var (
 	connectReplayOrchestrator       = func(ctx context.Context, orchestrator *tui.MultiHostOrchestrator) error {
 		return orchestrator.ConnectHosts(ctx)
 	}
+	newReplayEngineIdentityCollector = func() engineinfo.FleetCollector {
+		return engineinfo.NewCollector(engineinfo.NewClient())
+	}
+	replayLocalEnginePlan       = localRunEngineParticipants
+	replayDistributedEnginePlan = distributedRunEngineParticipants
 )
 
 func runReplay(cmd *cobra.Command, _ []string) error {
@@ -269,6 +275,23 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	if runSession != nil {
 		launchHooks = tui.NewSessionLaunchHooks(runSession, armMonitor)
 	}
+	forceMode, _ := cmd.Flags().GetBool("force")
+	verbose, _ := cmd.Flags().GetBool("verbose")
+	participantPlan := func() ([]engineinfo.ParticipantDescriptor, error) {
+		if orchestratedReplay {
+			return replayDistributedEnginePlan(replayOrchestrator, apiPort, false)
+		}
+		return replayLocalEnginePlan(apiPort)
+	}
+	launchHooks = attachEngineIdentityGate(
+		launchHooks,
+		newReplayEngineIdentityCollector(),
+		engineIdentityGateOptions{
+			force: forceMode, verbose: verbose,
+			autoResults: resultsOpts.AutoResults, resultsRoot: plannedResultsRoot,
+			runID: params.RunID, metadata: metadata, descriptors: participantPlan,
+		},
+	)
 	finalizeReplaySession := func(ctx context.Context) {
 		if runSession == nil {
 			return
@@ -308,7 +331,6 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	if orchestratedReplay {
 		startReplayAutoResults()
 		if headlessMode {
-			verbose, _ := cmd.Flags().GetBool("verbose")
 			delegateShutdownToAutoResults := resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete
 			options := buildHeadlessOptions(traceOpts, verbose, apiPort, autoTerminate, delegateShutdownToAutoResults, replayStepIDs(generated))
 			options.Context = replayContext
@@ -344,7 +366,6 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		if autoTerminate > 0 {
 			_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
 		}
-		verbose, _ := cmd.Flags().GetBool("verbose")
 		err = startReplayRemoteTUI(
 			replayOrchestrator, sptImage, paths.Scenario, params, tui.RunOptions{
 				Context:              replayContext,
@@ -363,7 +384,6 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 
 	startReplayAutoResults()
 	if headlessMode {
-		verbose, _ := cmd.Flags().GetBool("verbose")
 		options := buildHeadlessOptions(traceOpts, verbose, apiPort, autoTerminate, false, replayStepIDs(generated))
 		options.Context = replayContext
 		options.NetworkMode = networkMode
@@ -382,7 +402,6 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	if autoTerminate > 0 {
 		_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
 	}
-	verbose, _ := cmd.Flags().GetBool("verbose")
 	err = startReplayLocalTUI(
 		sptImage, paths.Scenario, params, tui.RunOptions{
 			Context:              replayContext,
@@ -528,7 +547,7 @@ func init() {
 	replayCmd.Flags().Bool("headless", false, "Force headless (non-interactive) mode")
 	replayCmd.Flags().Bool("minimal", false, "Start TUI with only the live stats panel visible")
 	replayCmd.Flags().Int("auto-terminate-seconds", 0, "Automatically terminate runs after N seconds (0 = unlimited)")
-	replayCmd.Flags().Bool("force", false, "Automatically resolve port conflicts without user interaction")
+	replayCmd.Flags().Bool("force", false, "Resolve port conflicts and permit known engine build mismatches; does not override invalid build information or collection failures")
 	replayCmd.Flags().String("api-port", "", "Spt API port (defaults to 9999)")
 	replayCmd.Flags().Int("min-hosts", 0, "Minimum number of replay hosts that must connect (default: all hosts)")
 	replayCmd.Flags().Bool(flagAttachExistingWorkers, false, "Attach to prestarted worker nodes; replay still launches the entry node")

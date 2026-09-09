@@ -1,12 +1,8 @@
 package com.dell.spt.base.env;
 
-import static com.dell.spt.base.Constants.APP_NAME;
-import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
-import static com.dell.spt.base.config.CliArgUtil.ARG_PATH_SEP;
-
-import com.dell.spt.base.config.BundledDefaultsProvider;
-import com.github.akurilov.confuse.Config;
-import com.github.akurilov.confuse.SchemaProvider;
+import com.dell.spt.base.buildinfo.EngineBuildInfo;
+import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
+import com.dell.spt.base.buildinfo.EngineBuildInfoRenderer;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -21,8 +17,6 @@ import java.util.List;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
-import org.apache.commons.lang3.StringUtils;
-
 public final class CoreResourcesToInstall extends InstallableJarResources {
 
 	public static final String RESOURCES_FILE_NAME = "/install_resources.txt";
@@ -30,18 +24,11 @@ public final class CoreResourcesToInstall extends InstallableJarResources {
 	private final Path appHomePath;
 
 	public CoreResourcesToInstall() {
-		final Config bundledDefaults;
-		try {
-			final var schema = SchemaProvider.resolveAndReduce(APP_NAME, Thread.currentThread().getContextClassLoader());
-			bundledDefaults = new BundledDefaultsProvider().config(ARG_PATH_SEP, schema);
-		} catch (final Exception e) {
-			throwUncheckedIfInterrupted(e);
-			throw new IllegalStateException("Failed to load the bundled default config from the resources", e);
-		}
-		final var appVersion = bundledDefaults.stringVal("run-version");
-		final var msg = " " + APP_NAME + " v " + appVersion + " ";
-		final var pad = StringUtils.repeat("#", (120 - msg.length()) / 2);
-		System.out.println(pad + msg + pad);
+		this(EngineBuildInfoProvider.global().snapshot());
+	}
+
+	CoreResourcesToInstall(final EngineBuildInfo buildInfo) {
+		System.out.println(EngineBuildInfoRenderer.banner(buildInfo));
 		appHomePath = resolveAppHome();
 	}
 

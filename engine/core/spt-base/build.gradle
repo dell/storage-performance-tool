@@ -1,17 +1,3 @@
-buildscript {
-	repositories {
-		mavenCentral()
-		maven {
-			url = "https://plugins.gradle.org/m2/"
-		}
-	}
-	dependencies {
-		classpath(
-			"org.yaml:snakeyaml:2.6",
-		)
-	}
-}
-
 plugins {
 	id "java-library"
 	id "scala"
@@ -42,18 +28,26 @@ repositories {
 
 description = "Spt is a high-load storage performance testing tool"
 group = "io.github.dell.spt"
-version = defineVersion()
+version = rootProject.ext.SPT_VERSION
 
 java {
 	sourceCompatibility = JavaVersion.VERSION_21
 	targetCompatibility = JavaVersion.VERSION_21
 }
 
-import org.yaml.snakeyaml.Yaml
-
 ext {
 	rootPkg = "com.dell.spt.base"
 	mainClass = "${rootPkg}.Main"
+}
+
+def buildInputs = rootProject.ext.SPT_BUILD_INPUTS
+def generatedBuildInfoDir = layout.buildDirectory.dir("generated/resources/engineBuildInfo")
+def generateBuildInfo = tasks.named("generateEngineBuildInfo")
+def engineBuildMetadata = rootProject.ext.SPT_BUILD_METADATA
+
+sourceSets.main.resources.srcDir(generatedBuildInfoDir)
+tasks.named("processResources") {
+	dependsOn tasks.named("generateEngineBuildInfo")
 }
 // No custom configurations needed
 
@@ -132,6 +126,10 @@ tasks.named("compileJava", JavaCompile) {
 // Common test configuration for all test tasks
 tasks.withType(Test) {
 	useJUnitPlatform()
+	systemProperty "spt.test.semver-fixtures",
+		rootProject.file("../test-fixtures/engine-build-info/semantic-versions.txt").absolutePath
+	systemProperty "spt.test.expected-build-version", project.version.toString()
+	jvmArgumentProviders.add(new com.dell.spt.gradle.EngineBuildTestArguments(generateBuildInfo.flatMap { it.outputFile }))
 	jvmArgs "-XX:MaxDirectMemorySize=2g"
 	jvmArgs "-XX:+HeapDumpOnOutOfMemoryError"
 	maxHeapSize = "2g"
@@ -179,15 +177,6 @@ task integrationTest(type: Test) {
 	shouldRunAfter test
 }
 
-String defineVersion() {
-	def configFilePath = [ project.projectDir, "src", "main", "resources", "config", "defaults.yaml"]
-		.join(File.separator);
-	def inputFile = new File(configFilePath)
-	def parser = new Yaml()
-	def y = parser.load(inputFile.text)
-	y.run.version
-}
-
 task sptVersion {
 	group = "versioning"
 	description = "Prints Spt version."
@@ -197,6 +186,12 @@ task sptVersion {
 jar {
 	// Keep the regular JAR enabled for inter-project dependencies
 	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+	manifest {
+		// Values stay lazy until the generated resource is available.
+		buildInputs.manifestAttributes().keySet().each { key ->
+			attributes([(key): engineBuildMetadata.map { it.manifestAttributes().get(key) }])
+		}
+	}
 }
 
 // TODO: Shadow plugin's Log4j2PluginsCacheFileTransformer is not working correctly
@@ -302,6 +297,10 @@ shadowJar {
 			"Automatic-Module-Name": rootPkg,
 			"Main-Class": mainClass,
 		)
+		// Values stay lazy until the generated resource is available.
+		buildInputs.manifestAttributes().keySet().each { key ->
+			attributes([(key): engineBuildMetadata.map { it.manifestAttributes().get(key) }])
+		}
 	}
 	
 	// Exclude unnecessary files to reduce size

@@ -566,7 +566,7 @@ Executes a benchmark test with the specified workload type.
 - `--create-prefix`: Ensure target prefix exists before testing
 - `--output-dir, -O`: Directory to save detailed Spt reports
 - `--generate-only`: Generate scenario file without executing Docker
-- `--force`: Automatically resolve port conflicts without user interaction. Spt uses port 9999 for its API - if another Spt instance is running, this flag will automatically stop it before starting the new test
+- `--force`: Resolve supported port conflicts without interaction and permit a known engine build mismatch. It does not override invalid build information or collection failures
 - `--api-port`: Specify custom Spt API port (defaults to 9999, legacy: 43234)
 - `--spt-image`: Override the engine image ref. By default, release builds use an image tag matching the CLI version (for example, `...:v5.10.3`) and local/dev builds use `...:spt_dev`.
 - `--skip-image-pull`: Use the locally cached Spt image instead of pulling before each run. Dev images such as `spt_dev` automatically skip pulls because they are local-only.
@@ -628,6 +628,11 @@ launching containers. RDMA replay launch is not implemented yet; `--s3-driver
 rdma` is limited to generate-only inspection. See [`REPLAY.md`](docs/REPLAY.md)
 for source archive requirements, supported transformations, limitations, and
 troubleshooting.
+
+Managed runs and replays record the CLI and every participating engine build,
+then reject known mixed-build fleets unless `--force` is supplied. See
+[`ENGINE_BUILD_INFO.md`](docs/ENGINE_BUILD_INFO.md) for the endpoint, artifacts,
+compatibility states, summaries, and force policy.
 
 #### `spt verify`
 
@@ -789,6 +794,7 @@ Auto Results and Shutdown
 - `--auto-results` (default: true): automatically discovers step IDs, waits for terminal state via `/status` + idle JSON, then fetches artifacts (preferring per-step `/logs/<stepId>/index.json`).
 - When auto-results completes successfully, `spt` now writes a human-readable summary alongside the fetched artifacts (`spt_<runID>_results_summary.txt`) and prints a shortened version to the console. The summary pulls from the same metrics `.csv` files, `spt_run_params.json`, and the copied scenario file so the bundle stays self-contained.
 - `--results-dir`: directory where fetched artifacts and a manifest `index.json` are saved.
+- Engine provenance is recorded in one run-level `engine.info.json` and shown with the separate CLI identity in the Environment section. See [`ENGINE_BUILD_INFO.md`](docs/ENGINE_BUILD_INFO.md).
 - `--label`: prefix for the output directory name and step ID prefix used in filenames.
 - `--shutdown-on-complete` (default: true): after a successful fetch, POST `/shutdown` to all Spt hosts and wait for `/status` to linger in a terminal state.
 

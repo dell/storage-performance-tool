@@ -10,4 +10,12 @@ repositories {
 dependencies {
 	// Required for the convention plugin to use Spotless
 	implementation 'com.diffplug.spotless:spotless-plugin-gradle:6.25.0'
+	testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.11.4'
+}
+
+test {
+	useJUnitPlatform()
+	systemProperty "spt.test.semver-fixtures",
+		file("../../test-fixtures/engine-build-info/semantic-versions.txt").absolutePath
 }

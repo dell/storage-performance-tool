@@ -11,8 +11,328 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
+	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 )
+
+func TestLoaderLoadsReferencedEngineIdentityAndCLIIdentity(t *testing.T) {
+	runDir := filepath.Join(t.TempDir(), "identity-run")
+	if err := os.Mkdir(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeManifest(t, runDir, &results.Manifest{
+		OutputDir: runDir,
+		RunFiles: []results.FileStatus{{
+			Name: constants.EngineInfoManifestName, Status: "ok",
+		}},
+	})
+	writeParams(t, runDir, &RunParams{
+		ScenarioParams:    ScenarioParams{RunID: 17},
+		EngineInfoFile:    constants.EngineInfoManifestName,
+		EngineConsistency: engineinfo.ConsistencyIndeterminate,
+		CLI:               RunCLI{Version: "5.15.0-dev", Revision: strings.Repeat("c", 40), BuildTime: "2026-08-26T12:00:00Z"},
+	})
+	manifest := engineinfo.Manifest{
+		SchemaVersion: constants.EngineInfoManifestSchemaVersion,
+		RunID:         17,
+		GeneratedAt:   "2026-08-26T13:21:42Z",
+		Consistency: engineinfo.ManifestConsistency{
+			Status: engineinfo.ConsistencyIndeterminate, Reason: "legacy engine",
+		},
+		Builds: []engineinfo.ManifestBuild{},
+		Participants: []engineinfo.ManifestParticipant{{
+			NodeID: "127.0.0.1:9999", Role: engineinfo.RoleStandalone,
+			CollectionStatus: engineinfo.StatusLegacyEndpointUnavailable,
+			Reason:           "engine version endpoint is unavailable",
+		}},
+	}
+	if err := engineinfo.WriteManifestAtomic(runDir, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := NewLoader().Load(context.Background(), runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.EngineInfo == nil || loaded.EngineInfo.RunID != 17 ||
+		loaded.Params.CLI.Version != "5.15.0-dev" ||
+		loaded.EngineInfoPath != filepath.Join(runDir, constants.EngineInfoManifestName) {
+		t.Fatalf("loaded identity = %+v params = %+v path = %q", loaded.EngineInfo, loaded.Params, loaded.EngineInfoPath)
+	}
+}
+
+func TestLoaderLoadsExplicitNullSourceDirtyAsIncompleteIdentity(t *testing.T) {
+	runDir := t.TempDir()
+	writeManifest(t, runDir, &results.Manifest{
+		OutputDir: runDir,
+		RunFiles:  []results.FileStatus{{Name: constants.EngineInfoManifestName, Status: "ok"}},
+	})
+	writeParams(t, runDir, &RunParams{
+		ScenarioParams:    ScenarioParams{RunID: 17},
+		EngineInfoFile:    constants.EngineInfoManifestName,
+		EngineConsistency: engineinfo.ConsistencyIndeterminate,
+	})
+	manifest := engineinfo.Manifest{
+		SchemaVersion: constants.EngineInfoManifestSchemaVersion,
+		RunID:         17,
+		GeneratedAt:   "2026-08-26T13:21:42Z",
+		Consistency: engineinfo.ManifestConsistency{
+			Status: engineinfo.ConsistencyIndeterminate, Reason: "comparison fields are incomplete",
+		},
+		Builds: []engineinfo.ManifestBuild{{
+			BuildID: "build-1", Product: "spt-engine", Version: "5.14.2",
+			Revision: strings.Repeat("a", 40), BuildTime: "2026-08-26T12:00:00Z",
+			Development: true, SourceDirty: nil,
+		}},
+		Participants: []engineinfo.ManifestParticipant{{
+			NodeID: "127.0.0.1:9999", Role: engineinfo.RoleStandalone,
+			CollectionStatus:      engineinfo.StatusIncompleteBuildInfo,
+			ReportedSchemaVersion: 1, BuildID: "build-1", Reason: "source dirty state is unknown",
+		}},
+	}
+	if err := engineinfo.WriteManifestAtomic(runDir, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := NewLoader().Load(context.Background(), runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.EngineInfo == nil || len(loaded.EngineInfo.Builds) != 1 ||
+		loaded.EngineInfo.Builds[0].SourceDirty != nil ||
+		loaded.EngineInfo.Participants[0].CollectionStatus != engineinfo.StatusIncompleteBuildInfo {
+		t.Fatalf("explicit null source_dirty was not retained as incomplete identity: %+v", loaded.EngineInfo)
+	}
+}
+
+func TestLoaderQuarantinesUnusableEngineBuildInformation(t *testing.T) {
+	const invalidSchema = `{"schema_version":2,"run_id":17,"generated_at":"2026-08-26T13:21:42Z",` +
+		`"consistency":{"status":"indeterminate","forced":false,"reason":"legacy engine"},"builds":[],` +
+		`"participants":[{"node_id":"127.0.0.1:9999","role":"standalone",` +
+		`"collection_status":"legacy_endpoint_unavailable","reason":"endpoint unavailable"}]}`
+	const collectedIdentity = `{"schema_version":1,"run_id":17,"generated_at":"2026-08-26T13:21:42Z",` +
+		`"consistency":{"status":"consistent","forced":false,"reason":"all participants match"},` +
+		`"builds":[{"build_id":"build-1","product":"spt-engine","version":"5.14.2",` +
+		`"revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","build_time":"2026-08-26T12:00:00Z",` +
+		`"development":false,"source_dirty":false}],"participants":[{"node_id":"127.0.0.1:9999",` +
+		`"role":"standalone","collection_status":"collected","reported_schema_version":1,"build_id":"build-1"}]}`
+	const incompleteIdentity = `{"schema_version":1,"run_id":17,"generated_at":"2026-08-26T13:21:42Z",` +
+		`"consistency":{"status":"indeterminate","forced":false,"reason":"comparison fields are incomplete"},` +
+		`"builds":[{"build_id":"build-1","product":"spt-engine","version":"5.14.2",` +
+		`"revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","build_time":"2026-08-26T12:00:00Z",` +
+		`"development":true,"source_dirty":null}],"participants":[{"node_id":"127.0.0.1:9999",` +
+		`"role":"standalone","collection_status":"incomplete_build_info","reported_schema_version":1,` +
+		`"build_id":"build-1","reason":"source dirty state is unknown"}]}`
+	tests := []struct {
+		name       string
+		wantReason string
+		setup      func(t *testing.T, parent, runDir string, index *results.Manifest, params *RunParams)
+	}{
+		{
+			name: "missing reference", wantReason: "manifest reference is missing",
+			setup: func(_ *testing.T, _, _ string, _ *results.Manifest, params *RunParams) {
+				params.EngineInfoFile = ""
+				params.EngineConsistency = ""
+			},
+		},
+		{
+			name: "unsafe reference", wantReason: "manifest reference is invalid",
+			setup: func(t *testing.T, parent, _ string, index *results.Manifest, params *RunParams) {
+				params.EngineInfoFile = "../" + constants.EngineInfoManifestName
+				index.RunFiles[0].Name = params.EngineInfoFile
+				if err := engineinfo.WriteManifestAtomic(parent, legacyEngineIdentityManifest(17)); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "unlisted manifest", wantReason: "manifest is not listed in index.json",
+			setup: func(_ *testing.T, _, _ string, index *results.Manifest, _ *RunParams) {
+				index.RunFiles = nil
+			},
+		},
+		{name: "missing manifest", wantReason: "manifest file is missing"},
+		{
+			name: "symlink escape", wantReason: "manifest file is not contained in result bundle",
+			setup: func(t *testing.T, parent, runDir string, _ *results.Manifest, _ *RunParams) {
+				if err := engineinfo.WriteManifestAtomic(parent, legacyEngineIdentityManifest(17)); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(
+					filepath.Join(parent, constants.EngineInfoManifestName),
+					filepath.Join(runDir, constants.EngineInfoManifestName),
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "malformed manifest", wantReason: "manifest is malformed or invalid",
+			setup: func(t *testing.T, _, runDir string, _ *results.Manifest, _ *RunParams) {
+				if err := os.WriteFile(filepath.Join(runDir, constants.EngineInfoManifestName), []byte(`{"schema_version":`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "unsupported manifest schema", wantReason: "manifest is malformed or invalid",
+			setup: func(t *testing.T, _, runDir string, _ *results.Manifest, _ *RunParams) {
+				if err := os.WriteFile(filepath.Join(runDir, constants.EngineInfoManifestName), []byte(invalidSchema), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "missing required development", wantReason: "manifest is malformed or invalid",
+			setup: func(t *testing.T, _, runDir string, _ *results.Manifest, params *RunParams) {
+				params.EngineConsistency = engineinfo.ConsistencyConsistent
+				content := strings.Replace(collectedIdentity, `,"development":false`, "", 1)
+				if err := os.WriteFile(filepath.Join(runDir, constants.EngineInfoManifestName), []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "null required development", wantReason: "manifest is malformed or invalid",
+			setup: func(t *testing.T, _, runDir string, _ *results.Manifest, params *RunParams) {
+				params.EngineConsistency = engineinfo.ConsistencyConsistent
+				content := strings.Replace(collectedIdentity, `"development":false`, `"development":null`, 1)
+				if err := os.WriteFile(filepath.Join(runDir, constants.EngineInfoManifestName), []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "missing required source dirty", wantReason: "manifest is malformed or invalid",
+			setup: func(t *testing.T, _, runDir string, _ *results.Manifest, _ *RunParams) {
+				content := strings.Replace(incompleteIdentity, `,"source_dirty":null`, "", 1)
+				if err := os.WriteFile(filepath.Join(runDir, constants.EngineInfoManifestName), []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "missing required forced state", wantReason: "manifest is malformed or invalid",
+			setup: func(t *testing.T, _, runDir string, _ *results.Manifest, params *RunParams) {
+				params.EngineConsistency = engineinfo.ConsistencyConsistent
+				content := strings.Replace(collectedIdentity, `"forced":false,`, "", 1)
+				if err := os.WriteFile(filepath.Join(runDir, constants.EngineInfoManifestName), []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "null required forced state", wantReason: "manifest is malformed or invalid",
+			setup: func(t *testing.T, _, runDir string, _ *results.Manifest, params *RunParams) {
+				params.EngineConsistency = engineinfo.ConsistencyConsistent
+				content := strings.Replace(collectedIdentity, `"forced":false`, `"forced":null`, 1)
+				if err := os.WriteFile(filepath.Join(runDir, constants.EngineInfoManifestName), []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "duplicate nested build field", wantReason: "manifest is malformed or invalid",
+			setup: func(t *testing.T, _, runDir string, _ *results.Manifest, params *RunParams) {
+				params.EngineConsistency = engineinfo.ConsistencyConsistent
+				content := strings.Replace(
+					collectedIdentity, `"source_dirty":false`, `"source_dirty":true,"source_dirty":false`, 1,
+				)
+				if err := os.WriteFile(filepath.Join(runDir, constants.EngineInfoManifestName), []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "consistency mismatch", wantReason: "indexed consistency does not match manifest",
+			setup: func(t *testing.T, _, runDir string, _ *results.Manifest, params *RunParams) {
+				params.EngineConsistency = engineinfo.ConsistencyConsistent
+				if err := engineinfo.WriteManifestAtomic(runDir, legacyEngineIdentityManifest(17)); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "run ID mismatch", wantReason: "manifest run ID does not match current run",
+			setup: func(t *testing.T, _, runDir string, _ *results.Manifest, _ *RunParams) {
+				if err := engineinfo.WriteManifestAtomic(runDir, legacyEngineIdentityManifest(18)); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parent := t.TempDir()
+			runDir := filepath.Join(parent, "identity-run")
+			if err := os.Mkdir(runDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			index := makeManifest(t, runDir, []stepFixture{{
+				ID: "step-read",
+				MetricsContent: sampleMetricsCSV([]string{
+					`"2025-09-26T17:27:00Z",READ,8,1,8,8,100,0,104857600,1,8,100,100,100,100,1000,500,750,900,950,2000,800,400,650,800,900,1800`,
+				}),
+			}})
+			index.RunFiles = []results.FileStatus{{Name: constants.EngineInfoManifestName, Status: "ok"}}
+			params := &RunParams{
+				ScenarioParams: ScenarioParams{RunID: 17}, EngineInfoFile: constants.EngineInfoManifestName,
+				EngineConsistency: engineinfo.ConsistencyIndeterminate,
+			}
+			if test.setup != nil {
+				test.setup(t, parent, runDir, index, params)
+			}
+			writeManifest(t, runDir, index)
+			writeParams(t, runDir, params)
+
+			loaded, err := NewLoader().Load(context.Background(), runDir)
+			if err != nil {
+				t.Fatalf("Load() error = %v, want performance evidence to remain loadable", err)
+			}
+			if loaded.EngineInfo != nil || loaded.EngineInfoPath != "" ||
+				loaded.EngineInfoUnavailableReason != test.wantReason {
+				t.Fatalf("engine identity was not quarantined: %+v", loaded)
+			}
+			if loaded.Steps["step-read"] == nil || loaded.Steps["step-read"].Metrics == nil {
+				t.Fatalf("performance evidence was not loaded: %+v", loaded.Steps)
+			}
+		})
+	}
+}
+
+func legacyEngineIdentityManifest(runID int64) engineinfo.Manifest {
+	return engineinfo.Manifest{
+		SchemaVersion: constants.EngineInfoManifestSchemaVersion,
+		RunID:         runID,
+		GeneratedAt:   "2026-08-26T13:21:42Z",
+		Consistency: engineinfo.ManifestConsistency{
+			Status: engineinfo.ConsistencyIndeterminate, Reason: "legacy engine",
+		},
+		Builds: []engineinfo.ManifestBuild{},
+		Participants: []engineinfo.ManifestParticipant{{
+			NodeID: "127.0.0.1:9999", Role: engineinfo.RoleStandalone,
+			CollectionStatus: engineinfo.StatusLegacyEndpointUnavailable,
+			Reason:           "engine version endpoint is unavailable",
+		}},
+	}
+}
+
+func TestLoaderKeepsPreIdentityBundlesBackwardCompatible(t *testing.T) {
+	runDir := filepath.Join(t.TempDir(), "legacy-run")
+	if err := os.Mkdir(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeManifest(t, runDir, &results.Manifest{})
+	writeParams(t, runDir, &RunParams{WorkloadType: "read"})
+
+	loaded, err := NewLoader().Load(context.Background(), runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.EngineInfo != nil || loaded.EngineInfoPath != "" || loaded.Params.EngineInfoFile != "" {
+		t.Fatalf("legacy bundle invented identity: %+v", loaded)
+	}
+}
 
 func TestLoaderLoadSuccess(t *testing.T) {
 	t.Parallel()

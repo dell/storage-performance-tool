@@ -4,12 +4,65 @@ plugins {
     alias(libs.plugins.versions)
 }
 
+import com.dell.spt.gradle.EngineBuildMetadata
+import com.dell.spt.gradle.GitCommandProbe
+import java.time.Clock
+
 def sptVersion = file('../VERSION').text.trim()
 def sptReleaseVersion = sptVersion.tokenize('-').first()
+def engineBuildPropertyNames = [
+    'sptBuildRevision',
+    'sptBuildTime',
+    'sptBuildRelease',
+    'sptBuildSourceDirty',
+]
+def engineBuildProperties = engineBuildPropertyNames.collectEntries { propertyName ->
+    def propertyValue = findProperty(propertyName)
+    propertyValue == null ? [:] : [(propertyName): propertyValue.toString()]
+}
+def engineBuildMetadata = EngineBuildMetadata.resolve(
+    sptVersion,
+    engineBuildProperties,
+    System.getenv(),
+    new GitCommandProbe(file('..')),
+    Clock.systemUTC())
 
 ext {
     SPT_VERSION = sptVersion
     SPT_RELEASE_VERSION = sptReleaseVersion
+    SPT_BUILD_INPUTS = engineBuildMetadata
+    SPT_BUILD_CURRENT_TIME = EngineBuildMetadata.usesCurrentTime(engineBuildProperties, System.getenv())
+}
+
+// Register before subproject evaluation so all consumers can share the output provider.
+project(':core:spt-base') {
+    def buildInputs = rootProject.ext.SPT_BUILD_INPUTS
+    def generatedBuildInfoDir = layout.buildDirectory.dir("generated/resources/engineBuildInfo")
+    def generatedBuildInfoFile = generatedBuildInfoDir.map { it.file("META-INF/spt-build-info.properties") }
+
+    def generateBuildInfo = tasks.register("generateEngineBuildInfo", com.dell.spt.gradle.GenerateEngineBuildInfo) {
+        group = "build"
+        description = "Generates immutable engine build information"
+        def values = new LinkedHashMap(buildInputs.resourceValues())
+        def currentTime = rootProject.ext.SPT_BUILD_CURRENT_TIME
+        if (currentTime) {
+            // The task captures the clock only when actual build inputs change.
+            values.remove('build_time')
+        }
+        metadataValues.set(values)
+        useCurrentTime.set(currentTime)
+        outputFile.set(generatedBuildInfoFile)
+        // Include source and build definitions across extensions as well as the core.
+        // Generated output trees are deliberately excluded from the input snapshot.
+        sources.from(rootProject.fileTree('.') {
+            include '**/src/**', '**/*.gradle', '**/gradle.properties', 'gradle/**', 'libs/**', 'bundle/docker/**', 'bundle/Dockerfile'
+            exclude '**/build/**', '**/.gradle/**'
+        })
+        sources.from(rootProject.file('../VERSION'))
+    }
+    rootProject.ext.SPT_BUILD_METADATA = generateBuildInfo.flatMap { it.outputFile }.map {
+        EngineBuildMetadata.read(it.asFile)
+    }
 }
 
 allprojects {

@@ -24,6 +24,12 @@ Use replay when you want to:
 Replay currently targets S3-compatible object storage workloads. Non-S3
 protocols are reported as unsupported rather than silently converted.
 
+Before submission, replay checks the Engine Build Information of only the
+participants executing the new run. A known mismatch is rejected by default;
+`--force` permits that mismatch but cannot override invalid build information
+or collection failures. Source-run identity remains provenance rather than an
+equality requirement. See [Engine Build Information](ENGINE_BUILD_INFO.md).
+
 ## Quick Start
 
 Start with a generate-only preview:

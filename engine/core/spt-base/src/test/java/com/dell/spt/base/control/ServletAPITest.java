@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
+import com.dell.spt.base.buildinfo.EngineBuildInfoJson;
+import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.control.logs.LogServlet;
 import com.dell.spt.base.metrics.MetricsManager;
@@ -47,6 +49,8 @@ public class ServletAPITest {
 		server.setHandler(context);
 
 		// Add all servlets here
+		context.addServlet(
+						new ServletHolder(new VersionServlet(EngineBuildInfoProvider.global().snapshot())), "/version");
 		context.addServlet(new ServletHolder(new ConfigServlet(testConfig)), "/config/*");
 		context.addServlet(new ServletHolder(new LogServlet()), "/logs/*");
 		context.addServlet(new ServletHolder(new MetricsServlet()), "/metrics");
@@ -128,6 +132,20 @@ public class ServletAPITest {
 		final ObjectMapper mapper = new ObjectMapper();
 		final JsonNode obj = mapper.readTree(resp.body());
 		assertTrue(obj.get("ready").asBoolean());
+	}
+
+	@Test
+	void getVersionIsAvailableBeforeAndAfterReadiness() throws IOException, InterruptedException {
+		final String expected = EngineBuildInfoJson.serialize(EngineBuildInfoProvider.global().snapshot());
+
+		var response = responseFromServer(HOST + "/version");
+		assertEquals(200, response.statusCode());
+		assertEquals(expected, response.body());
+
+		readinessGate.setReady(true);
+		response = responseFromServer(HOST + "/version");
+		assertEquals(200, response.statusCode());
+		assertEquals(expected, response.body());
 	}
 
 	@Test

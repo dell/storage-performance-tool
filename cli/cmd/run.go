@@ -23,6 +23,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/config"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
+	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/integrityplan"
@@ -61,6 +62,8 @@ var resolvePortConflictFunc = portcheck.ResolvePortConflict
 // validateRunWorkloadTypeFunc keeps command-path tests behind the same workload gate as
 // production while allowing prerelease workload slices to exercise later safety seams.
 var validateRunWorkloadTypeFunc = ValidateWorkloadType
+
+var shouldRunHeadlessForRun = shouldRunHeadless
 
 type autoResultsRunTracker interface {
 	WaitForCompletion(context.Context, []string) (*portcheck.RunResult, error)
@@ -1862,7 +1865,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			}
 		}
 
-		headlessMode := shouldRunHeadless(cmd)
+		headlessMode := shouldRunHeadlessForRun(cmd)
 
 		var summaryWriter *summaryMessageWriter
 		var setSummarySink func(func(string))
@@ -1892,6 +1895,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 				PortCount:   rmiPortCount,
 			}
 			multiHostOrchestrator = tui.NewMultiHostOrchestratorWithRMI(hostInfos, minHosts, rmiConfig)
+			multiHostOrchestrator.SetAPIPort(apiPort)
 			// Provide image to orchestrator for preflight image checks
 			multiHostOrchestrator.SetImage(sptImage)
 			multiHostOrchestrator.SetAttachExistingWorkers(attachExisting)
@@ -1939,6 +1943,27 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 		if runSession != nil {
 			launchHooks = tui.NewSessionLaunchHooks(runSession, onSubmitted)
 		}
+		forceMode, _ := cmd.Flags().GetBool("force")
+		verbose, _ := cmd.Flags().GetBool("verbose")
+		participantPlan := func() ([]engineinfo.ParticipantDescriptor, error) {
+			if useMultiHostOrchestrator {
+				return distributedRunEnginePlan(
+					multiHostOrchestrator,
+					apiPort,
+					strings.EqualFold(params.WorkloadType, scenario.WorkloadTypeList),
+				)
+			}
+			return localRunEnginePlan(apiPort)
+		}
+		launchHooks = attachEngineIdentityGate(
+			launchHooks,
+			engineinfo.NewCollector(engineinfo.NewClient()),
+			engineIdentityGateOptions{
+				force: forceMode, verbose: verbose,
+				autoResults: resultsOpts.AutoResults, resultsRoot: plannedResultsRoot,
+				runID: params.RunID, metadata: metadata, descriptors: participantPlan,
+			},
+		)
 		startAutoResultsMonitoring := func() {
 			if resultsOpts.AutoResults && autoMonitor == nil {
 				autoMonitor = startAutoResultsFunc(runContext, baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, params.RunID, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path, finalizeRunSession, integrityOptions)
@@ -2004,7 +2029,6 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			ctx := runContext
 
 			// Respect force cleanup for preflight conflicts
-			forceMode, _ := cmd.Flags().GetBool("force")
 			orchestrator.SetForceCleanup(forceMode)
 
 			// Connect to all hosts
@@ -2106,7 +2130,6 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 		if autoTerminate > 0 {
 			fmt.Printf("Auto-terminate: will stop after %d seconds\n", autoTerminate)
 		}
-		verbose, _ := cmd.Flags().GetBool("verbose")
 		err = startLocalTUIRunFunc(
 			sptImage, scenarioPath, params, tui.RunOptions{
 				Context:              runContext,
@@ -2187,7 +2210,7 @@ func init() {
 	runCmd.Flags().Bool(flagReadShuffle, false, "Read workload: shuffle items within each fetched batch before issuing reads (widens randomness, increases engine buffer usage, and does not guarantee storage-cache avoidance)")
 	runCmd.Flags().Int(flagReadShuffleBatchSize, 0, fmt.Sprintf("Read workload: batch size to use with --shuffle (0 = use the bounded default, max %d)", constants.ReadShuffleMaxBatchSize))
 	runCmd.Flags().Int(flagReadPhasePauseSeconds, scenario.DefaultReadPhasePauseSeconds, "Read workload: seconds to settle between seed, read, and cleanup phases")
-	runCmd.Flags().Bool("force", false, "Automatically resolve port conflicts without user interaction")
+	runCmd.Flags().Bool("force", false, "Resolve port conflicts and permit known engine build mismatches; does not override invalid build information or collection failures")
 
 	// Mixed Workload Distribution Options (defaults: GET 45 / STAT 30 / PUT 15 / DELETE 10)
 	runCmd.Flags().Int("get-distrib", scenario.MixedDefaultGetDistrib, "Percentage of GET (read) operations for mixed workload (default: 45)")

@@ -13,6 +13,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
+	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"gopkg.in/yaml.v3"
 )
@@ -34,15 +35,18 @@ func NewLoader() *Loader {
 
 // RunData captures the raw ingestion outputs required for summary generation.
 type RunData struct {
-	RunDir               string
-	RunID                string
-	Manifest             *results.Manifest
-	Params               *RunParams
-	Steps                map[string]*StepData
-	StepOrder            []string
-	MissingExpectedSteps []string
-	ManifestPath         string
-	MetadataPath         string
+	RunDir                      string
+	RunID                       string
+	Manifest                    *results.Manifest
+	Params                      *RunParams
+	Steps                       map[string]*StepData
+	StepOrder                   []string
+	MissingExpectedSteps        []string
+	ManifestPath                string
+	MetadataPath                string
+	EngineInfo                  *engineinfo.Manifest
+	EngineInfoPath              string
+	EngineInfoUnavailableReason string
 }
 
 // StepData captures per-step artifact availability and metrics totals.
@@ -80,6 +84,8 @@ const (
 	fileStatusMissing = "missing"
 )
 
+var errEngineInfoNotContained = errors.New("engine identity manifest is not a regular file in the result bundle")
+
 // Load ingests results artifacts located under runDir. The returned RunData is populated
 // even when recoverable issues occur; such issues are joined into the returned error.
 func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
@@ -111,6 +117,35 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 		Steps:        make(map[string]*StepData, len(manifest.Steps)),
 		ManifestPath: manifestPath,
 		MetadataPath: metadataPath,
+	}
+	if params.EngineInfoFile == "" &&
+		(params.EngineConsistency != "" || manifestListsRunFileName(manifest, constants.EngineInfoManifestName)) {
+		data.EngineInfoUnavailableReason = "manifest reference is missing"
+	} else if params.EngineInfoFile != "" {
+		if params.EngineInfoFile != constants.EngineInfoManifestName || filepath.Base(params.EngineInfoFile) != params.EngineInfoFile {
+			data.EngineInfoUnavailableReason = "manifest reference is invalid"
+		} else if !manifestListsRunFile(manifest, params.EngineInfoFile) {
+			data.EngineInfoUnavailableReason = "manifest is not listed in index.json"
+		} else {
+			engineInfoPath := filepath.Join(runDir, params.EngineInfoFile)
+			engineIdentity, loadErr := loadEngineInfoManifest(runDir, params.EngineInfoFile)
+			if loadErr != nil {
+				if errors.Is(loadErr, os.ErrNotExist) {
+					data.EngineInfoUnavailableReason = "manifest file is missing"
+				} else if errors.Is(loadErr, errEngineInfoNotContained) {
+					data.EngineInfoUnavailableReason = "manifest file is not contained in result bundle"
+				} else {
+					data.EngineInfoUnavailableReason = "manifest is malformed or invalid"
+				}
+			} else if params.EngineConsistency != engineIdentity.Consistency.Status {
+				data.EngineInfoUnavailableReason = "indexed consistency does not match manifest"
+			} else if params.ScenarioParams.RunID != engineIdentity.RunID {
+				data.EngineInfoUnavailableReason = "manifest run ID does not match current run"
+			} else {
+				data.EngineInfo = engineIdentity
+				data.EngineInfoPath = engineInfoPath
+			}
+		}
 	}
 	if params.DeleteArtifactsVersion != 0 &&
 		params.DeleteArtifactsVersion != constants.ResultsDeleteArtifactsVersionV1 &&
@@ -239,6 +274,45 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 		return data, errors.Join(stepErrs...)
 	}
 	return data, nil
+}
+
+func manifestListsRunFile(manifest *results.Manifest, name string) bool {
+	for _, file := range manifest.RunFiles {
+		if file.Name == name && file.Status == fileStatusOK {
+			return true
+		}
+	}
+	return false
+}
+
+func manifestListsRunFileName(manifest *results.Manifest, name string) bool {
+	for _, file := range manifest.RunFiles {
+		if file.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func loadEngineInfoManifest(runDir, name string) (*engineinfo.Manifest, error) {
+	root, err := os.OpenRoot(runDir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+
+	info, err := root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errEngineInfoNotContained
+	}
+	content, err := root.ReadFile(name)
+	if err != nil {
+		return nil, err
+	}
+	return engineinfo.DecodeManifest(content)
 }
 
 func (l *Loader) loadManifest(path string) (*results.Manifest, error) {
@@ -405,10 +479,25 @@ type RunParams struct {
 	ResultsOptions         RunResultsOptions                 `json:"resultsOptions"`
 	CLI                    RunCLI                            `json:"cli"`
 	MultiHost              RunMultiHost                      `json:"multiHost"`
+	EngineInfoFile         string                            `json:"engineInfoFile,omitempty"`
+	EngineConsistency      engineinfo.ConsistencyStatus      `json:"engineConsistency,omitempty"`
+	Lifecycle              *RunLifecycle                     `json:"lifecycle,omitempty"`
+}
+
+// RunLifecycle contains the stored phase state needed by human summaries.
+type RunLifecycle struct {
+	Workload LifecyclePhase `json:"workload"`
+}
+
+// LifecyclePhase contains the durable rejection diagnostic for pre-submission gates.
+type LifecyclePhase struct {
+	State string `json:"state,omitempty"`
+	Error string `json:"error,omitempty"`
 }
 
 // ScenarioParams captures key scenario tunables stored with the run.
 type ScenarioParams struct {
+	RunID          int64    `json:"RunID"`
 	WorkloadType   string   `json:"WorkloadType"`
 	Endpoint       string   `json:"Endpoint"`
 	Endpoints      []string `json:"Endpoints"`
@@ -440,6 +529,9 @@ type RunHost struct {
 
 // RunCLI captures the command vector and sanitized flag values.
 type RunCLI struct {
+	Version      string            `json:"version,omitempty"`
+	Revision     string            `json:"revision,omitempty"`
+	BuildTime    string            `json:"buildTime,omitempty"`
 	Command      []string          `json:"command"`
 	ChangedFlags map[string]string `json:"changedFlags"`
 }

@@ -2,6 +2,8 @@ package com.dell.spt.integration;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import com.dell.spt.base.buildinfo.EngineBuildInfoJson;
+import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.control.AddCorsHeadersRule;
@@ -9,6 +11,7 @@ import com.dell.spt.base.control.ApiStatus;
 import com.dell.spt.base.control.FleetMetricsHandler;
 import com.dell.spt.base.control.NodeMetricsHandler;
 import com.dell.spt.base.control.StatusServlet;
+import com.dell.spt.base.control.VersionServlet;
 import com.dell.spt.base.control.logs.LogServlet;
 import com.dell.spt.base.control.run.RunServlet;
 import com.dell.spt.base.env.Extension;
@@ -76,6 +79,8 @@ public class NodeLifecycleIntegrationTest {
 		// /status + /run
 		apiStatus = new ApiStatus();
 		apiStatus.setIdle();
+		context.addServlet(
+						new ServletHolder(new VersionServlet(EngineBuildInfoProvider.global().snapshot())), "/version");
 		context.addServlet(new ServletHolder(new StatusServlet(apiStatus)), "/status");
 		final var runServletHolder = new ServletHolder(new RunServlet(
 						null, List.of(), metricsMgr, config, Path.of("."), scenarioStepSvc, apiStatus));
@@ -102,8 +107,11 @@ public class NodeLifecycleIntegrationTest {
 		int port = ((ServerConnector) server.getConnectors()[0]).getLocalPort();
 		final String base = "http://127.0.0.1:" + port;
 		final var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
+		final var getVersion = HttpRequest.newBuilder(URI.create(base + "/version")).GET().build();
+		final String expectedVersion = EngineBuildInfoJson.serialize(EngineBuildInfoProvider.global().snapshot());
 
 		// Initially IDLE
+		assertVersionAvailable(client, getVersion, expectedVersion);
 		var getStatus = HttpRequest.newBuilder(URI.create(base + "/status")).GET().build();
 		var statusResp = client.send(getStatus, HttpResponse.BodyHandlers.ofString());
 		assertEquals(200, statusResp.statusCode());
@@ -121,6 +129,7 @@ public class NodeLifecycleIntegrationTest {
 		assertEquals(200, statusResp.statusCode());
 		assertTrue(statusResp.body().contains("\"RUNNING\""));
 		assertTrue(statusResp.body().contains("run_id"));
+		assertVersionAvailable(client, getVersion, expectedVersion);
 
 		// Stop run
 		var delRun = HttpRequest.newBuilder(URI.create(base + "/run"))
@@ -130,6 +139,16 @@ public class NodeLifecycleIntegrationTest {
 
 		// STOPPED is published only after the interrupted run finishes cleanup.
 		awaitStatus(client, getStatus, "STOPPED", Duration.ofSeconds(2));
+		assertVersionAvailable(client, getVersion, expectedVersion);
+	}
+
+	private static void assertVersionAvailable(
+					final HttpClient client, final HttpRequest request, final String expectedVersion)
+					throws Exception {
+		final var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+		assertEquals(200, response.statusCode());
+		assertEquals("application/json;charset=utf-8", response.headers().firstValue("content-type").orElseThrow());
+		assertEquals(expectedVersion, response.body());
 	}
 
 	private static void awaitStatus(
