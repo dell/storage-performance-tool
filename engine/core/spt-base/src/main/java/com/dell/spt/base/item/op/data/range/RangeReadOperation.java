@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.LongUnaryOperator;
+import java.util.function.LongSupplier;
 
 /**
  * One explicit range READ, never a legacy composite or item slice. Reset preserves selection;
@@ -22,6 +23,7 @@ import java.util.function.LongUnaryOperator;
 public final class RangeReadOperation<I extends DataItem> extends OperationImpl<I> implements DataOperation<I> {
 	private final RangeReadPolicy policy;
 	private final LongUnaryOperator boundedDraw;
+	private final LongSupplier clock;
 	private volatile RangeReadCirculation circulation;
 	private long bytesDone;
 	private long dataResponseStart;
@@ -35,16 +37,24 @@ public final class RangeReadOperation<I extends DataItem> extends OperationImpl<
 	RangeReadOperation(final int originIndex, final I item, final String srcPath,
 					final String dstPath, final Credential credential, final RangeReadPolicy policy,
 					final LongUnaryOperator boundedDraw) {
+		this(originIndex, item, srcPath, dstPath, credential, policy, boundedDraw, RangeReadAttempt::clockMicros);
+	}
+
+	RangeReadOperation(final int originIndex, final I item, final String srcPath, final String dstPath,
+					final Credential credential, final RangeReadPolicy policy, final LongUnaryOperator boundedDraw,
+					final LongSupplier clock) {
 		super(originIndex, OpType.READ, item, srcPath, dstPath, credential);
+		this.clock = Objects.requireNonNull(clock);
 		this.policy = Objects.requireNonNull(policy);
 		this.boundedDraw = Objects.requireNonNull(boundedDraw);
-		this.circulation = new RangeReadCirculation(lifecycle(), select());
+		this.circulation = new RangeReadCirculation(lifecycle(), select(), clock);
 		reset();
 	}
 
 	private RangeReadOperation(final RangeReadOperation<I> other) {
 		super(other);
 		policy = other.policy;
+		clock = other.clock;
 		boundedDraw = other.boundedDraw;
 		circulation = other.circulation;
 		bytesDone = other.bytesDone;
@@ -80,7 +90,7 @@ public final class RangeReadOperation<I extends DataItem> extends OperationImpl<
 		}
 		final var next = super.startNextLifecycle();
 		if (next != previous) {
-			circulation = new RangeReadCirculation(next, select());
+			circulation = new RangeReadCirculation(next, select(), clock);
 		}
 		return next;
 	}
@@ -107,6 +117,18 @@ public final class RangeReadOperation<I extends DataItem> extends OperationImpl<
 		integrityVerificationResult = null;
 		bytesDone = 0;
 		dataResponseStart = 0;
+	}
+
+	RangeReadAttempt.Timing timing() {
+		return new RangeReadAttempt.Timing(reqTimeStart, reqTimeDone, respTimeStart, dataResponseStart, respTimeDone);
+	}
+
+	void timing(final RangeReadAttempt.Timing timing) {
+		reqTimeStart = timing.dispatch();
+		reqTimeDone = timing.requestComplete();
+		respTimeStart = timing.responseHeaders();
+		dataResponseStart = timing.firstBody();
+		respTimeDone = timing.responseComplete();
 	}
 
 	@Override

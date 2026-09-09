@@ -5,10 +5,13 @@ import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import java.util.Objects;
+import java.util.function.LongSupplier;
 
 /** Shared by operation/result copies of one logical selection; bounded to the current attempt. */
 public final class RangeReadCirculation {
 	private final OperationLifecycle lifecycle;
+	private final LongSupplier clock;
+	private long firstDispatch;
 	private final RangeReadPolicy.Selection selection;
 	private RangeReadAttempt current;
 	private RangeReadAttempt.Outcome lastFailure;
@@ -17,6 +20,12 @@ public final class RangeReadCirculation {
 	private RangeReadAttempt.Outcome terminalOutcome;
 
 	public RangeReadCirculation(final OperationLifecycle lifecycle, final RangeReadPolicy.Selection selection) {
+		this(lifecycle, selection, RangeReadAttempt::clockMicros);
+	}
+
+	RangeReadCirculation(final OperationLifecycle lifecycle, final RangeReadPolicy.Selection selection,
+					final LongSupplier clock) {
+		this.clock = Objects.requireNonNull(clock);
 		this.lifecycle = Objects.requireNonNull(lifecycle);
 		this.selection = Objects.requireNonNull(selection);
 	}
@@ -56,8 +65,11 @@ public final class RangeReadCirculation {
 			}
 			if (current != null) {
 				lastFailure = current.outcome();
+				if (firstDispatch == 0) {
+					firstDispatch = lastFailure.timing().dispatch();
+				}
 			}
-			current = new RangeReadAttempt(lifecycle, selection.range());
+			current = new RangeReadAttempt(lifecycle, selection.range(), clock);
 			outcomeClaimed = false;
 			return current;
 		}
@@ -111,7 +123,18 @@ public final class RangeReadCirculation {
 					final OperationLifecycleTracker<? super RangeReadOperation<I>> tracker,
 					final RangeReadAttempt.Outcome outcome) {
 		final long previousBytes = op.countBytesDone();
+		final var previousTiming = op.timing();
 		terminalOutcome = outcome;
+		if (outcome.category() == RangeReadAttempt.Category.SUCCESS) {
+			if (firstDispatch == 0) {
+				firstDispatch = outcome.timing().dispatch();
+			}
+			final var timing = outcome.timing();
+			op.timing(new RangeReadAttempt.Timing(firstDispatch, timing.requestComplete(),
+							timing.responseHeaders(), timing.firstBody(), timing.responseComplete()));
+		} else {
+			op.timing(RangeReadAttempt.Timing.EMPTY);
+		}
 		op.countBytesDone(outcome.category() == RangeReadAttempt.Category.SUCCESS ? selection.range().length() : 0);
 		try {
 			return tracker.retainedTerminal(op, lifecycle, outcome.status());
@@ -122,6 +145,7 @@ public final class RangeReadCirculation {
 			} else {
 				terminalOutcome = null;
 				op.countBytesDone(previousBytes);
+				op.timing(previousTiming);
 			}
 		}
 	}

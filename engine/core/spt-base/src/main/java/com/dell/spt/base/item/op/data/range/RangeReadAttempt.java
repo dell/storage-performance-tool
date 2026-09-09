@@ -4,6 +4,7 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.load.lifecycle.OperationLifecycle;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.LongSupplier;
 
 /**
  * Bounded, serialized response state for one transport attempt. The instance itself is its token.
@@ -15,12 +16,19 @@ public final class RangeReadAttempt {
 		SUCCESS, HTTP, VALIDATION, TRANSPORT, UNRESOLVED
 	}
 
+	public record Timing(long dispatch, long requestComplete, long responseHeaders, long firstBody,
+					long responseComplete) {
+		public static final Timing EMPTY = new Timing(0, 0, 0, 0, 0);
+	}
+
 	public record Outcome(Category category, Operation.Status status, Integer httpStatus,
 					RangeResponseValidator.Failure validationFailure, long receivedBytes,
-					boolean receivedBytesOverflow, boolean requestHandedOff) {}
+					boolean receivedBytesOverflow, boolean requestHandedOff, Timing timing) {}
 
 	private final OperationLifecycle lifecycle;
 	private final ByteRange range;
+	private final LongSupplier clock;
+	private long dispatchTime, requestCompleteTime, responseHeadersTime, firstBodyTime, responseCompleteTime;
 	private final RangeResponseValidator validator;
 	private boolean handedOff;
 	private boolean cancelledBeforeHandoff;
@@ -28,6 +36,11 @@ public final class RangeReadAttempt {
 	private Outcome outcome;
 
 	public RangeReadAttempt(final OperationLifecycle lifecycle, final ByteRange range) {
+		this(lifecycle, range, RangeReadAttempt::clockMicros);
+	}
+
+	RangeReadAttempt(final OperationLifecycle lifecycle, final ByteRange range, final LongSupplier clock) {
+		this.clock = Objects.requireNonNull(clock);
 		this.lifecycle = Objects.requireNonNull(lifecycle);
 		this.range = Objects.requireNonNull(range);
 		validator = new RangeResponseValidator(range);
@@ -46,7 +59,22 @@ public final class RangeReadAttempt {
 		if (outcome != null || cancelledBeforeHandoff || handedOff) {
 			return false;
 		}
+		dispatchTime = clock.getAsLong();
 		handedOff = true;
+		return true;
+	}
+
+	static long clockMicros() {
+		return Operation.START_OFFSET_MICROS + System.nanoTime() / 1000;
+	}
+
+	/** Optional actual request-write completion; absent observations do not produce latency samples. */
+	public synchronized boolean requestComplete() {
+		if (!handedOff || cancelledBeforeHandoff || outcome != null || requestCompleteTime != 0
+						|| responseHeadersTime != 0) {
+			return false;
+		}
+		requestCompleteTime = clock.getAsLong();
 		return true;
 	}
 
@@ -62,6 +90,9 @@ public final class RangeReadAttempt {
 						&& (mappedStatus == null || mappedStatus == Operation.Status.SUCC
 										|| mappedStatus == Operation.Status.PENDING)) {
 			throw new IllegalArgumentException("HTTP failure requires a failure status mapping");
+		}
+		if (responseHeadersTime == 0) {
+			responseHeadersTime = clock.getAsLong();
 		}
 		httpStatus = status;
 		if (validator.headers(status, ranges, lengths, types, transferEncoding)) {
@@ -80,6 +111,9 @@ public final class RangeReadAttempt {
 			return false;
 		}
 		requireHandoff();
+		if (count > 0 && firstBodyTime == 0) {
+			firstBodyTime = clock.getAsLong();
+		}
 		if (validator.bodyBytes(count)) {
 			return true;
 		}
@@ -93,6 +127,7 @@ public final class RangeReadAttempt {
 			return false;
 		}
 		requireHandoff();
+		responseCompleteTime = clock.getAsLong();
 		if (validator.finish(framingValid)) {
 			retain(Category.SUCCESS, Operation.Status.SUCC);
 		} else {
@@ -148,6 +183,7 @@ public final class RangeReadAttempt {
 
 	private void retain(final Category category, final Operation.Status status) {
 		outcome = new Outcome(category, status, httpStatus, validator.failure(),
-						validator.receivedBytes(), validator.receivedBytesOverflow(), handedOff);
+						validator.receivedBytes(), validator.receivedBytesOverflow(), handedOff,
+						new Timing(dispatchTime, requestCompleteTime, responseHeadersTime, firstBodyTime, responseCompleteTime));
 	}
 }
