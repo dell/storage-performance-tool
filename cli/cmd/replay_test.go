@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
@@ -912,6 +913,140 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 			}
 			if sessionManagedCalls.Load() != 1 {
 				t.Fatalf("session-managed replay route calls=%d, want 1", sessionManagedCalls.Load())
+			}
+		})
+	}
+}
+
+// The headless runners return on the first of the presentation-owned
+// completion heuristic or the session's authoritative WorkloadTerminal signal.
+// When the heuristic never fires (for example the engine is shut down by
+// auto-results before metrics ever report 100% completion), the launcher must
+// still be released by the auto-results tracker through the bound RunSession,
+// otherwise runReplay never returns and the process hangs after a successful
+// run.
+func TestReplayCommandReleasesLaunchersOnAuthoritativeWorkloadTerminal(t *testing.T) {
+	server := newReplayArchiveServer(t)
+	defer server.Close()
+	tests := []struct {
+		name     string
+		hosts    string
+		headless bool
+	}{
+		{name: "local headless", hosts: "127.0.0.1", headless: true},
+		{name: "local tui", hosts: "127.0.0.1"},
+		{name: "remote headless", hosts: "qa-entry.example", headless: true},
+		{name: "remote tui", hosts: "qa-entry.example"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			origPort := resolvePortConflictFunc
+			origConnect := connectReplayOrchestrator
+			origConfirm := confirmReplayLaunchCommand
+			origRemoteHeadless := startReplayRemoteHeadless
+			origRemoteTUI := startReplayRemoteTUI
+			origLocalHeadless := startReplayLocalHeadless
+			origLocalTUI := startReplayLocalTUI
+			origShouldHeadless := shouldReplayRunHeadless
+			origTracker := newRunTrackerFunc
+			origDiscover := discoverStepIDsFunc
+			origFleetDiscover := discoverFleetStepIDsFunc
+			origFetcher := newResultsFetcherFunc
+			origSummary := generateRunSummaryFunc
+			t.Cleanup(func() {
+				resolvePortConflictFunc = origPort
+				connectReplayOrchestrator = origConnect
+				confirmReplayLaunchCommand = origConfirm
+				startReplayRemoteHeadless = origRemoteHeadless
+				startReplayRemoteTUI = origRemoteTUI
+				startReplayLocalHeadless = origLocalHeadless
+				startReplayLocalTUI = origLocalTUI
+				shouldReplayRunHeadless = origShouldHeadless
+				newRunTrackerFunc = origTracker
+				discoverStepIDsFunc = origDiscover
+				discoverFleetStepIDsFunc = origFleetDiscover
+				newResultsFetcherFunc = origFetcher
+				generateRunSummaryFunc = origSummary
+			})
+			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+				return &portcheck.ResolutionResult{Success: true}, nil
+			}
+			connectReplayOrchestrator = func(context.Context, *tui.MultiHostOrchestrator) error { return nil }
+			confirmReplayLaunchCommand = func(io.Writer) error { return nil }
+			shouldReplayRunHeadless = func(*cobra.Command) bool { return test.headless }
+
+			newRunTrackerFunc = func(string) autoResultsRunTracker {
+				return &fakeRunTracker{result: &portcheck.RunResult{FinalState: constants.StateCompleted}}
+			}
+			discoverStepIDsFunc = func(context.Context, string, int64) ([]string, error) {
+				return []string{"replay-001-runtime-create"}, nil
+			}
+			discoverFleetStepIDsFunc = func(context.Context, string, int64) ([]string, error) { return nil, nil }
+			newResultsFetcherFunc = func(_, output string) autoResultsFetcher { return &fakeFetcher{output: output} }
+			generateRunSummaryFunc = func(context.Context, string, io.Writer) error { return nil }
+
+			// Mirror the real runners: never complete on our own, only on the
+			// authoritative session signal.
+			awaitTerminal := func(hooks tui.LaunchHooks) error {
+				if !hooks.SessionManaged() {
+					return errors.New("replay launch hooks are not session-managed")
+				}
+				hooks.NotifySubmitted()
+				select {
+				case <-hooks.WorkloadTerminal():
+					return nil
+				case <-time.After(3 * time.Second):
+					return errors.New("launcher never received authoritative terminal signal from auto-results")
+				}
+			}
+			var launchCalls atomic.Int32
+			startReplayRemoteHeadless = func(
+				_ *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params, options headless.HeadlessOptions, _ []byte, _ []byte,
+			) error {
+				launchCalls.Add(1)
+				return awaitTerminal(options.LaunchHooks)
+			}
+			startReplayRemoteTUI = func(
+				_ *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params, options tui.RunOptions,
+			) error {
+				launchCalls.Add(1)
+				return awaitTerminal(options.LaunchHooks)
+			}
+			startReplayLocalHeadless = func(
+				_ string, _ string, _ scenario.Params, options headless.HeadlessOptions, _ []byte, _ []byte,
+			) error {
+				launchCalls.Add(1)
+				return awaitTerminal(options.LaunchHooks)
+			}
+			startReplayLocalTUI = func(_ string, _ string, _ scenario.Params, options tui.RunOptions) error {
+				launchCalls.Add(1)
+				return awaitTerminal(options.LaunchHooks)
+			}
+
+			cmd := newReplayCommandForTest(t)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			args := []string{
+				"--from", server.URL, "--endpoints", "http://s3.example",
+				"--test-hosts", test.hosts, "--results-dir", t.TempDir(),
+				"--auto-results=true", "--shutdown-on-complete=false",
+			}
+			if test.headless {
+				args = append(args, "--headless")
+			}
+			cmd.SetArgs(args)
+			done := make(chan error, 1)
+			go func() { done <- cmd.Execute() }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("Execute() error = %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("runReplay did not return after auto-results completed")
+			}
+			if launchCalls.Load() != 1 {
+				t.Fatalf("launcher calls = %d, want 1", launchCalls.Load())
 			}
 		})
 	}

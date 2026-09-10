@@ -313,6 +313,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, paths.Scenario,
 			metadata, out, out, traceOpts.Path, finalizeReplaySession,
 		)
+		replayMonitor.BindSession(runSession)
 	}
 	defer func() {
 		if replayMonitor != nil {
