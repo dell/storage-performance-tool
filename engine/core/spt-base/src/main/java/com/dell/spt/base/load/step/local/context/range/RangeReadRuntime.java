@@ -24,6 +24,7 @@ import java.util.function.Consumer;
 
 /** One step's opt-in range accounting, admission, retry and result-delivery wiring. */
 public final class RangeReadRuntime<I extends DataItem> implements Output<RangeReadOperation<I>> {
+	private final RangeReadPolicy policy;
 	private final RangeReadMetrics metrics;
 	private final OperationLifecycleTracker<RangeReadOperation<I>> tracker;
 	private final RangeReadAdmission<I> admission;
@@ -40,6 +41,7 @@ public final class RangeReadRuntime<I extends DataItem> implements Output<RangeR
 	/** Adapter installs tracker() before start; generator sends initial/retry operations to admission(). */
 	public RangeReadRuntime(RangeReadPolicy policy, int capacity, Output<RangeReadOperation<I>> driver,
 					BiConsumer<RangeReadOperation<I>, RangeReadCirculation> publish) {
+		this.policy = Objects.requireNonNull(policy);
 		this.capacity = capacity;
 		this.publish = Objects.requireNonNull(publish);
 		metrics = new RangeReadMetrics(policy);
@@ -58,6 +60,10 @@ public final class RangeReadRuntime<I extends DataItem> implements Output<RangeR
 
 	public RangeReadMetrics metrics() {
 		return metrics;
+	}
+
+	public RangeReadPolicy policy() {
+		return policy;
 	}
 
 	public RangeReadSnapshot snapshot() {
