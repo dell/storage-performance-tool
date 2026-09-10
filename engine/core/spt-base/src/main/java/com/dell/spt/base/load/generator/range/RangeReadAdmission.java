@@ -25,7 +25,7 @@ import java.util.function.LongSupplier;
  * runtime must share/allocate this admission budget at the step boundary and close admission
  * before recovery; this does not replace the driver's actual transport admission guard.
  * Capacity bounds admitted logical reads, including retry delays and queues. Runtime construction
- * supplies the capacity and installs releaseSettled in final accounting/recovery. Local selection
+ * supplies the capacity and installs releaseSettled after final delivery or recovery. Local selection
  * errors need no long-lived capacity reservation.
  */
 public final class RangeReadAdmission<I extends DataItem> implements Output<RangeReadOperation<I>> {

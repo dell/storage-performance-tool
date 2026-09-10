@@ -21,6 +21,7 @@ public final class RangeReadCirculation {
 	private int retryCount;
 	private boolean finalMetricsClaimed;
 	private boolean resultOutputClaimed;
+	private boolean stepResultClaimed;
 	private boolean closed;
 	private RangeReadAttempt.Outcome terminalOutcome;
 	private RangeReadAttempt terminalAttempt;
@@ -279,25 +280,40 @@ public final class RangeReadCirculation {
 	/** One publication attempt per determinate circulation, independent of metrics claims. */
 	OutputResult claimResultOutput() {
 		synchronized (lifecycle) {
-			if (resultOutputClaimed || lifecycle.state() != OperationLifecycleState.TERMINAL) {
+			if (resultOutputClaimed)
 				return null;
-			}
-			if (selection.error() != null) {
+			final var result = retainedOutput();
+			if (result != null)
 				resultOutputClaimed = true;
-				return new OutputResult(com.dell.spt.base.item.op.Operation.Status.RESP_FAIL_CLIENT,
-								0, RangeReadAttempt.Timing.EMPTY);
-			}
-			if (terminalOutcome == null) {
-				return null;
-			}
-			resultOutputClaimed = true;
-			final boolean success = terminalOutcome.category() == RangeReadAttempt.Category.SUCCESS;
-			final var timing = terminalOutcome.timing();
-			return new OutputResult(terminalOutcome.status(), success ? selection.range().length() : 0,
-							success ? new RangeReadAttempt.Timing(firstDispatch, timing.requestComplete(),
-											timing.responseHeaders(), timing.firstBody(), timing.responseComplete())
-											: RangeReadAttempt.Timing.EMPTY);
+			return result;
 		}
+	}
+
+	/** Once-only step output/recycle routing, separate from the driver's publication claim. */
+	OutputResult claimStepResult() {
+		synchronized (lifecycle) {
+			if (stepResultClaimed)
+				return null;
+			final var result = retainedOutput();
+			if (result != null)
+				stepResultClaimed = true;
+			return result;
+		}
+	}
+
+	private OutputResult retainedOutput() {
+		if (lifecycle.state() != OperationLifecycleState.TERMINAL)
+			return null;
+		if (selection.error() != null)
+			return new OutputResult(
+							com.dell.spt.base.item.op.Operation.Status.RESP_FAIL_CLIENT, 0, RangeReadAttempt.Timing.EMPTY);
+		if (terminalOutcome == null)
+			return null;
+		final boolean success = terminalOutcome.category() == RangeReadAttempt.Category.SUCCESS;
+		final var timing = terminalOutcome.timing();
+		return new OutputResult(terminalOutcome.status(), success ? selection.range().length() : 0,
+						success ? new RangeReadAttempt.Timing(firstDispatch, timing.requestComplete(),
+										timing.responseHeaders(), timing.firstBody(), timing.responseComplete()) : RangeReadAttempt.Timing.EMPTY);
 	}
 
 	public RangeReadAttempt.Outcome terminalOutcome() {

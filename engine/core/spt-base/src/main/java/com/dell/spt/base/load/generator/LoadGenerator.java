@@ -176,6 +176,11 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends T
 		return true;
 	}
 
+	/** Explicit capability for retryRange's retained-circulation handoff; legacy generators fail closed. */
+	default boolean supportsRangeRetry() {
+		return false;
+	}
+
 	/**
 	 * Returns the terminal integrity/input failure observed by the generator task, if any.
 	 *

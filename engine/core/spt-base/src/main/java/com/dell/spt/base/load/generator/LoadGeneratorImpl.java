@@ -935,6 +935,11 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		}
 	}
 
+	@Override
+	public final boolean supportsRangeRetry() {
+		return true;
+	}
+
 	/** Enqueues one prepared range retry without starting another logical circulation. */
 	@Override
 	public final boolean retryRange(final O op, final RangeReadAttempt attempt) {

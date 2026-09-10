@@ -92,6 +92,18 @@ public final class RangeReadOperation<I extends DataItem> extends OperationImpl<
 		if (retained == null) {
 			return null;
 		}
+		return retainedSnapshot(retained);
+	}
+
+	/** Claims step routing across copies and reconstructs the authoritative terminal values. */
+	public synchronized RangeReadOperation<I> claimStepResult(final RangeReadCirculation expected) {
+		if (expected == null || circulation != expected || lifecycle() != expected.lifecycle())
+			return null;
+		final var retained = expected.claimStepResult();
+		return retained == null ? null : retainedSnapshot(retained);
+	}
+
+	private RangeReadOperation<I> retainedSnapshot(final RangeReadCirculation.OutputResult retained) {
 		final var snapshot = result();
 		snapshot.status(retained.status());
 		snapshot.countBytesDone(retained.bytes());
