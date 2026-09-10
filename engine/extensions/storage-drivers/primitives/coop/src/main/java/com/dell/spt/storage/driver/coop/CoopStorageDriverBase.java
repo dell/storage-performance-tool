@@ -900,6 +900,18 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return true;
 	}
 
+	/**
+	 * Range adapters call this only after the retained coordinator accepts a completion
+	 * callback once. This is the legacy driver callback count, not logical range accounting;
+	 * queue recovery does not invent a completion callback. Release attempt resources before
+	 * requesting a wake-up, or pass false if that release already signaled capacity.
+	 */
+	protected final void recordRetainedAttemptCompletion(final boolean wakeDispatcher) {
+		completedOpCount.increment();
+		if (wakeDispatcher)
+			signalDispatch();
+	}
+
 	private boolean shouldEnqueueFinalization(final CompositeOperation parentOp) {
 		if (parentOp.get("mpuAbort") != null) {
 			return markFinalizationEnqueued(parentOp);

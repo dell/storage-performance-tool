@@ -150,6 +150,13 @@ public final class RangeReadAdmission<I extends DataItem> implements Output<Rang
 		}
 	}
 
+	/** Driver queue admission must be backed by the step's bounded logical reservation. */
+	public boolean isAdmitted(final RangeReadCirculation circulation) {
+		synchronized (localAdmissionLock) {
+			return admitted.contains(circulation);
+		}
+	}
+
 	public int admittedCirculations() {
 		synchronized (localAdmissionLock) {
 			return admitted.size();
