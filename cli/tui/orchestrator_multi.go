@@ -2939,14 +2939,15 @@ func (o *MultiHostOrchestrator) startWorkerNode(ctx context.Context, host *HostC
 	}
 
 	// Determine advertised IP for java.rmi.server.hostname
-	// Prefer detection; fall back to SSH host if detection fails
+	// Detection has its own budget; container startup and readiness use the caller's context.
 	advIP := ""
 	if o.detectAdvIP == nil {
 		return fmt.Errorf("no advertised IP detector configured")
 	}
-	ctx, cancel := context.WithTimeout(normalizeContext(ctx), constants.AdvertisedIPDetectionTimeout)
-	defer cancel()
-	ip, derr := o.detectAdvIP(ctx, host.Info)
+	ctx = normalizeContext(ctx)
+	detectCtx, cancelDetection := context.WithTimeout(ctx, constants.AdvertisedIPDetectionTimeout)
+	ip, derr := o.detectAdvIP(detectCtx, host.Info)
+	cancelDetection()
 	if derr != nil {
 		return fmt.Errorf("advertised IP detection failed on %s: %w", host.Info.Original, derr)
 	}
