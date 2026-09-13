@@ -187,8 +187,13 @@ preflight object or bucket request. A fixed span is sent unchanged even when the
 inventory size is smaller. Responses require strict status, range metadata, body
 length and framing validation; rejected responses close the connection.
 
-This remains draft functionality. Packaging, CLI/real-target integration and
-READ/WRITE performance qualification are pending; this is not release qualification.
+This remains draft functionality. Local packaged-engine scenario activation,
+artifact collection, log API discovery and CLI retrieval have been exercised.
+Distributed runtime, real-target enablement and READ/WRITE performance qualification
+remain required; local checks are not release qualification.
+
+For CLI examples, aligned selection, full-span requests and mutable datasets, see
+[Partial-object READs](../../../../../../../../cli/docs/PARTIAL_READS.md).
 
 ### Terminal partial-read evidence (draft)
 
