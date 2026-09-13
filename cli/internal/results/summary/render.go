@@ -958,6 +958,11 @@ func (r *Renderer) renderRangeRead(b *strings.Builder, summary *RunSummary) {
 		fmt.Fprintf(b, "Partial READ — %s\n", step.StepID)
 		fmt.Fprintf(b, "  Terminal: %t; selected %d, successful %d, failed %d, unattempted %d, unresolved %d\n", evidence.Complete, evidence.Totals["selected"], evidence.Totals["accepted"], evidence.Totals["failed"], evidence.Totals["unattempted"], evidence.Totals["unresolved"])
 		fmt.Fprintf(b, "  Requests sent: %d; validated successful bytes: %d\n", evidence.Totals["requests_sent"], evidence.Totals["successful_bytes"])
+		if evidence.WorkerCountVerified {
+			fmt.Fprintf(b, "  Worker count: %d, checked against READ metrics\n", evidence.ExpectedWorkers)
+		} else {
+			b.WriteString("  Worker count: not independently verified\n")
+		}
 		fmt.Fprintf(b, "  Failures: local selection %d, HTTP %d, response validation %d, transport %d\n", evidence.Totals["local_selection_errors"], evidence.Totals["http_failures"], evidence.Totals["response_validation_failures"], evidence.Totals["transport_failures"])
 		for _, row := range evidence.Rows {
 			offset := "random"

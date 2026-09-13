@@ -236,6 +236,9 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 		if rangeErr == nil && rangeEvidence != nil && params.ScenarioParams.RunID > 0 && rangeEvidence.Rows[0].RunID != fmt.Sprint(params.ScenarioParams.RunID) {
 			rangeErr = fmt.Errorf("partial READ artifact engine run identity does not match run metadata")
 		}
+		if rangeErr == nil && rangeExpected {
+			rangeErr = validateRangeContributors(rangeEvidence, step.Metrics)
+		}
 		if rangeErr != nil {
 			step.Status = StepStatusError
 			step.Notes = append(step.Notes, fmt.Sprintf("partial READ artifact error: %v", rangeErr))

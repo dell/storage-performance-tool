@@ -199,3 +199,39 @@ func TestRangeReadUnavailableLegacyConfigDoesNotIntroduceAnError(t *testing.T) {
 		}
 	}
 }
+
+func TestRangeReadContributorCount(t *testing.T) {
+	for _, tc := range []struct {
+		workers  int
+		expected int64
+		valid    bool
+	}{
+		{1, 1, true}, {2, 2, true}, {1, 2, false}, {2, 1, false}, {2, 0, true},
+	} {
+		changes := []map[string]string{nil}
+		if tc.workers == 2 {
+			changes = append(changes, map[string]string{"worker_id": "worker-b"})
+		}
+		e, err := parseRangeRead(strings.NewReader(rangeFixture(changes...)), "step-read")
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = validateRangeContributors(e, &MetricsTotals{Rows: []MetricsTotalsRow{{Operation: "READ", NodeCount: tc.expected}}})
+		if (err == nil) != tc.valid {
+			t.Fatalf("%+v: %v", tc, err)
+		}
+		if tc.valid && e.WorkerCountVerified != (tc.expected > 0) {
+			t.Fatalf("unexpected verification %+v", e)
+		}
+	}
+	e, err := parseRangeRead(strings.NewReader(rangeFixture(nil, map[string]string{"context_index": "1"})), "step-read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = validateRangeContributors(e, &MetricsTotals{Rows: []MetricsTotalsRow{{Operation: "READ", NodeCount: 1}}}); err != nil {
+		t.Fatal("contexts counted as workers", err)
+	}
+	if err = validateRangeContributors(e, &MetricsTotals{Rows: []MetricsTotalsRow{{Operation: "READ", NodeCount: 1}, {Operation: "READ", NodeCount: 2}}}); err == nil {
+		t.Fatal("conflicting expected counts accepted")
+	}
+}

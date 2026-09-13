@@ -120,8 +120,11 @@ counts must be zero. Overflow, malformed policy, duplicate worker/context rows,
 mixed run identities and inconsistent terminal counters are rejected by the
 summary reader. Incomplete rows mark the step partial. Known partial-read steps
 require the artifact; ordinary runs retain optional/absent compatibility.
-These checks validate the available records; they do not replace distributed
-contributor validation or performance qualification.
+For known partial-read steps, the summary compares distinct worker IDs with the
+READ metrics' reported node count and rejects mismatches. Multiple contexts on one
+worker count once. If those metrics do not provide a node count, coverage is
+explicitly unverified. This count check does not independently authenticate worker
+identities or replace distributed runtime and performance qualification.
 
 For direct-engine settings and legacy range operations, see the
 [engine byte-range reference](../../engine/core/spt-base/doc/usage/load/operations/byte_ranges/README.md).

@@ -17,9 +17,11 @@ const canonicalBooleanFalse = "false"
 
 // RangeReadEvidence retains distinct worker/context policies and checked step totals.
 type RangeReadEvidence struct {
-	Complete bool
-	Rows     []RangeReadRow
-	Totals   map[string]int64
+	WorkerCountVerified bool
+	ExpectedWorkers     int64
+	Complete            bool
+	Rows                []RangeReadRow
+	Totals              map[string]int64
 }
 
 // RangeReadRow is one versioned terminal context record.
@@ -192,4 +194,40 @@ func loadRangeRead(runDir string, step *results.StepManifest) (*RangeReadEvidenc
 		return parseRangeRead(f, step.StepID)
 	}
 	return nil, nil
+}
+
+// Compare distinct workers, not context rows. Legacy metrics without a node count
+// leave this independent coverage check explicitly unverified.
+func validateRangeContributors(evidence *RangeReadEvidence, metrics *MetricsTotals) error {
+	if evidence == nil {
+		return nil
+	}
+	evidence.WorkerCountVerified = false
+	evidence.ExpectedWorkers = 0
+	if metrics == nil {
+		return nil
+	}
+	expected := int64(0)
+	for _, row := range metrics.Rows {
+		if !strings.EqualFold(row.Operation, "read") || row.NodeCount <= 0 {
+			continue
+		}
+		if expected != 0 && expected != row.NodeCount {
+			return fmt.Errorf("conflicting READ worker counts in metrics")
+		}
+		expected = row.NodeCount
+	}
+	if expected == 0 {
+		return nil
+	}
+	workers := map[string]struct{}{}
+	for _, row := range evidence.Rows {
+		workers[row.WorkerID] = struct{}{}
+	}
+	evidence.ExpectedWorkers = expected
+	if int64(len(workers)) != expected {
+		return fmt.Errorf("partial READ evidence has %d workers; metrics report %d", len(workers), expected)
+	}
+	evidence.WorkerCountVerified = true
+	return nil
 }
