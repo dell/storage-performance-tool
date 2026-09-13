@@ -31,6 +31,15 @@ func ParseRangePolicy(params Params) (*RangePolicy, error) {
 	default:
 		return nil, fmt.Errorf("partial reads require the Netty S3 driver; AWS and native S3-RDMA are deferred")
 	}
+	if params.PartSize != "" {
+		partSize, err := sizeparse.Parse(params.PartSize)
+		if err != nil {
+			return nil, fmt.Errorf("--part-size: %w", err)
+		}
+		if partSize > 0 {
+			return nil, fmt.Errorf("--range-size conflicts with positive --part-size (legacy range splitting)")
+		}
+	}
 	length, err := sizeparse.Parse(params.RangeSize)
 	if err != nil {
 		return nil, fmt.Errorf("--range-size: %w", err)

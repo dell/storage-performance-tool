@@ -549,7 +549,7 @@ Executes a benchmark test with the specified workload type.
 - `--object-data-dedupable`: Whether generated data remains dedupe-friendly (default: true). Set `false` to stamp every 4KB with a unique object-id + offset header that defeats inline deduplication. Incompatible with `--items-file` / file-based data input. (env: `SPT_OBJECT_DATA_DEDUPABLE`)
 - `--range-size`: Partial READ length (for example `64KiB`); supported with the Netty S3 driver only.
 - `--range-offset`: Fixed partial READ offset, including explicit `0`. Omit it for a random aligned offset selected from inventory size and retained across retries.
-- `--range-align`: Alignment in bytes or binary units; omitted, `0`, and `1` mean byte alignment. A fixed offset must be divisible by the effective alignment. Offset/alignment require `--range-size`.
+- `--range-align`: Alignment in bytes or binary units; omitted, `0`, and `1` mean byte alignment. A fixed offset must be divisible by the effective alignment. Offset/alignment require `--range-size`. A positive `--part-size` conflicts with partial reads.
 
 Partial reads apply only to the READ phase. Size must be positive and the inclusive endpoint must fit a signed 64-bit integer. Fixed spans are sent unchanged, including out-of-bounds spans; random selection fails locally when the recorded object size is too small. Success requires a structurally valid, complete HTTP 206 response with the exact requested bytes. Inventory size is preserved when objects change, and content is not verified. READ-VERIFY, MIXED, AWS S3, and native S3-RDMA are unsupported. Partial-read count runs do not recycle; duration runs do. This feature remains in draft qualification.
 

@@ -92,3 +92,22 @@ func TestRangePolicyOnlyInReadPhase(t *testing.T) {
 		}
 	}
 }
+
+func TestRangeReadRejectsActiveMultipartThresholdBeforeGeneratingSeed(t *testing.T) {
+	for _, part := range []string{"1", "5MiB", "invalid"} {
+		for _, items := range []string{"", "/work/items.csv"} {
+			p := Params{WorkloadType: "read", RangeSize: "3", PartSize: part, ItemsFile: items}
+			if s, err := GenerateScenario(p); err == nil || s != "" {
+				t.Fatalf("part=%q items=%q accepted", part, items)
+			}
+		}
+	}
+	for _, part := range []string{"", "0", "0KiB"} {
+		if _, err := ParseRangePolicy(Params{WorkloadType: "read", RangeSize: "3", PartSize: part}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if p, err := ParseRangePolicy(Params{WorkloadType: "write", PartSize: "5MiB"}); err != nil || p != nil {
+		t.Fatal("ordinary multipart changed")
+	}
+}
