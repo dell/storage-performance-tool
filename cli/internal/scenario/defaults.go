@@ -442,6 +442,10 @@ func GenerateDefaults(params Params) ([]byte, error) {
 		}
 	}
 
+	if err := validateRangeDefaults(params, data); err != nil {
+		return nil, err
+	}
+
 	return data, nil
 }
 
