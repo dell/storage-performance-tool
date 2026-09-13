@@ -174,9 +174,18 @@ updates are unsupported. Active legacy fixed/random ranges or a positive splitti
 threshold conflict with this mode. Disabled single-range configuration preserves
 legacy behavior; inert legacy settings remain allowed.
 
-Driver integration and qualification are pending on this draft branch. A configured
-policy requires a factory implementing `RangeReadDriverFactory` and an explicitly
-matching range runtime; it cannot silently execute an ordinary whole-object READ.
-Linear, pipeline and weighted steps pass their effective policy during driver
-construction. Existing factories retain their ordinary construction API when the
-mode is disabled. The Netty S3 factory opt-in remains pending. This configuration draft is not public enablement.
+The draft Netty S3 factory installs a dedicated range driver and matching runtime.
+Linear, pipeline and weighted steps pass their effective policy during construction.
+Other factories must explicitly implement `RangeReadDriverFactory`; configured range
+mode cannot silently execute a whole-object READ. Disabled mode retains ordinary
+factory construction.
+
+Range mode requires a positive `storage.net.timeoutMilliSec` (the shipped default
+is 30000), body READ rather than metadata-only READ, and object tagging disabled.
+The driver sends one signed GET with the selected inclusive Range header and no
+preflight object or bucket request. A fixed span is sent unchanged even when the
+inventory size is smaller. Responses require strict status, range metadata, body
+length and framing validation; rejected responses close the connection.
+
+This remains draft functionality. Packaging, CLI/real-target integration and
+READ/WRITE performance qualification are pending; this is not release qualification.

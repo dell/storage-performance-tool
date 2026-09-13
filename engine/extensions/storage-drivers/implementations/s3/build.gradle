@@ -26,6 +26,7 @@ dependencies {
 		libs.confuse,
 		libs.confuse.io.yaml,
 		libs.java.commons,
+		libs.netty.connection.pool,
 		libs.log4j.api,
 		libs.log4j.core,
 	)

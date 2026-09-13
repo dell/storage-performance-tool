@@ -5,7 +5,8 @@ import com.dell.spt.base.env.ExtensionBase;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
-import com.dell.spt.base.storage.driver.StorageDriverFactory;
+import com.dell.spt.base.storage.driver.range.RangeReadDriverFactory;
+import com.dell.spt.base.item.op.data.range.RangeReadPolicy;
 import static com.dell.spt.base.Constants.APP_NAME;
 
 import com.github.akurilov.confuse.Config;
@@ -19,7 +20,7 @@ import java.util.List;
 
 public final class S3StorageDriverExtension<I extends Item, O extends Operation<I>, T extends S3StorageDriver<I, O>>
 				extends ExtensionBase
-				implements StorageDriverFactory<I, O, T> {
+				implements RangeReadDriverFactory<I, O, T> {
 
 	private static final String NAME = "s3";
 	private static final String DEFAULTS_FILE_NAME = "defaults-storage-s3.yaml";
@@ -37,6 +38,13 @@ public final class S3StorageDriverExtension<I extends Item, O extends Operation<
 					final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
 					final int batchSize) throws IllegalConfigurationException, InterruptedException {
 		return (T) new S3StorageDriver<>(stepId, dataInput, storageConfig, verifyFlag, batchSize);
+	}
+
+	@Override
+	@SuppressWarnings("unchecked")
+	public T createRangeRead(String stepId, DataInput dataInput, Config storageConfig,
+					int batchSize, RangeReadPolicy policy) throws IllegalConfigurationException, InterruptedException {
+		return (T) (S3StorageDriver<?, ?>) new S3RangeStorageDriver(stepId, dataInput, storageConfig, batchSize, policy);
 	}
 
 	@Override

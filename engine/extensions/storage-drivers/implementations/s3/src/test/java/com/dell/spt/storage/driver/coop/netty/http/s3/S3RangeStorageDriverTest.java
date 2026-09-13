@@ -1,0 +1,270 @@
+package com.dell.spt.storage.driver.coop.netty.http.s3;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+import com.dell.spt.base.item.DataItem;
+import com.dell.spt.base.item.DataItemImpl;
+import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.data.range.*;
+import com.dell.spt.base.load.generator.LoadGenerator;
+import com.dell.spt.base.load.step.local.context.range.RangeReadRuntime;
+import com.dell.spt.base.metrics.range.RangeReadSnapshot;
+import com.sun.net.httpserver.HttpServer;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.IntFunction;
+import org.junit.jupiter.api.Test;
+
+class S3RangeStorageDriverTest {
+	private record Request(String method, String path, String range, String authorization) {}
+
+	private record Response(int status, String contentRange, String body) {}
+
+	private static final class Fixture implements AutoCloseable {
+		final HttpServer server;
+		final ExecutorService serverThreads = Executors.newFixedThreadPool(2);
+		final ScheduledExecutorService retryThread = Executors.newSingleThreadScheduledExecutor();
+		final BlockingQueue<Request> requests = new LinkedBlockingQueue<>();
+		final BlockingQueue<Operation.Status> terminal = new LinkedBlockingQueue<>();
+		final BlockingQueue<RangeReadOperation<DataItem>> results = new LinkedBlockingQueue<>();
+		final AtomicInteger requestCount = new AtomicInteger();
+		final S3RangeStorageDriver driver;
+		final RangeReadRuntime<DataItem> runtime;
+		final RangeReadPolicy policy;
+
+		@SuppressWarnings("unchecked")
+		Fixture(RangeReadPolicy policy, boolean retry, IntFunction<Response> responses) throws Exception {
+			this.policy = policy;
+			server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 8);
+			server.setExecutor(serverThreads);
+			server.createContext("/", exchange -> {
+				try (exchange) {
+					String range = exchange.getRequestHeaders().getFirst("Range");
+					requests.add(new Request(exchange.getRequestMethod(), exchange.getRequestURI().getRawPath(), range,
+									exchange.getRequestHeaders().getFirst("Authorization")));
+					Response response = responses.apply(requestCount.incrementAndGet());
+					if (response.contentRange() != null)
+						exchange.getResponseHeaders().set("Content-Range", response.contentRange().equals("echo")
+										? "bytes " + range.substring(6) + "/*"
+										: response.contentRange());
+					byte[] body = response.body().getBytes(StandardCharsets.US_ASCII);
+					exchange.sendResponseHeaders(response.status(), body.length);
+					exchange.getResponseBody().write(body);
+				}
+			});
+			server.start();
+			var config = S3StorageDriverTest.baseConfig(false, 4, false, null, "127.0.0.1");
+			config.val("storage-net-node-port", server.getAddress().getPort());
+			config.val("storage-net-timeoutMilliSec", 2000);
+			config.val("storage-driver-limit-concurrency", 1);
+			config.val("storage-driver-threads", 1);
+			config.val("storage-net-http-headers", Map.of());
+			driver = (S3RangeStorageDriver) new S3StorageDriverExtension<DataItem, RangeReadOperation<DataItem>, S3StorageDriver<DataItem, RangeReadOperation<DataItem>>>()
+							.createRangeRead("range-loopback", new com.dell.spt.base.data.SeedDataInput(1, 1024, 1, true), config.configVal("storage"), 4, policy);
+			runtime = driver.rangeReadRuntime();
+			LoadGenerator<DataItem, RangeReadOperation<DataItem>> generator = mock(LoadGenerator.class);
+			when(generator.supportsRangeRetry()).thenReturn(true);
+			when(generator.retryRange(any(), any())).thenAnswer(call -> {
+				RangeReadOperation<DataItem> op = call.getArgument(0);
+				RangeReadAttempt attempt = call.getArgument(1);
+				return op.circulation().claimRetryQueue(attempt) && runtime.admission().put(op);
+			});
+			driver.operationResultOutput(runtime.bind(generator, driver.operationLifecycle(), retry, 1,
+							(delay, task) -> retryThread.schedule(task, delay, TimeUnit.MILLISECONDS),
+							op -> terminal.add(op.status()), results::add));
+			driver.start();
+		}
+
+		RangeReadOperation<DataItem> read(String name, long size) {
+			var op = new RangeReadOperation<DataItem>(0, new DataItemImpl(name, 0, size), "/bucket", "/bucket", null, policy);
+			assertTrue(runtime.tracker().generatorBuffered(op));
+			assertTrue(runtime.admission().put(op));
+			return op;
+		}
+
+		Operation.Status outcome() throws Exception {
+			var status = terminal.poll(5, TimeUnit.SECONDS);
+			assertNotNull(status, () -> "No terminal result: " + runtime.snapshot());
+			if (status == Operation.Status.SUCC)
+				assertNotNull(results.poll(5, TimeUnit.SECONDS));
+			assertEquals(0, driver.activeRangeTransports());
+			return status;
+		}
+
+		RangeReadSnapshot snapshot() {
+			return runtime.snapshot();
+		}
+
+		public void close() throws Exception {
+			try {
+				runtime.closeAdmission();
+				driver.closeAdmission();
+				driver.close();
+				runtime.close();
+				assertEquals(0, driver.activeRangeTransports());
+				assertNull(driver.terminalFailure());
+				assertNull(runtime.failure());
+			} finally {
+				retryThread.shutdownNow();
+				server.stop(0);
+				serverThreads.shutdownNow();
+				assertTrue(retryThread.awaitTermination(5, TimeUnit.SECONDS));
+				assertTrue(serverThreads.awaitTermination(5, TimeUnit.SECONDS));
+			}
+		}
+	}
+
+	@Test
+	void exactSignedGetPreservesWholeObjectMetadataAndSendsFixedOutOfBoundsUnchanged() throws Exception {
+		var policy = new RangeReadPolicy(3, 2L, 1);
+		try (var f = new Fixture(policy, false, n -> n == 1
+						? new Response(206, "bytes 2-4/8", "abc")
+						: new Response(416, null, "error"))) {
+			var first = f.read("key~literal", 10);
+			assertEquals(Operation.Status.SUCC, f.outcome());
+			assertEquals(10, first.item().size());
+			assertEquals("/bucket/key~literal", first.item().name());
+			assertEquals(3, first.countBytesDone());
+			f.read("small", 1);
+			assertEquals(Operation.Status.RESP_FAIL_CLIENT, f.outcome());
+			assertEquals(2, f.requests.size());
+			for (Request request : f.requests) {
+				assertEquals("GET", request.method());
+				assertEquals("bytes=2-4", request.range());
+				assertTrue(request.authorization().startsWith("AWS4-HMAC-SHA256 "));
+			}
+			assertEquals("/bucket/key~literal", f.requests.peek().path());
+			assertEquals(2, f.snapshot().requestsSent());
+			assertEquals(1, f.snapshot().logical().accepted());
+			assertEquals(1, f.snapshot().logical().failed());
+			assertTrue(f.snapshot().logical().reconciled());
+		}
+	}
+
+	@Test
+	void randomRetryRetainsRangeAndOneLogicalOutcome() throws Exception {
+		try (var f = new Fixture(new RangeReadPolicy(3, null, 1), true,
+						n -> n == 1 ? new Response(503, null, "error") : new Response(206, "echo", "abc"))) {
+			f.read("retry", 10);
+			assertEquals(Operation.Status.SUCC, f.outcome());
+			var first = f.requests.poll();
+			var retry = f.requests.poll();
+			assertEquals(first.range(), retry.range());
+			assertEquals(2, f.snapshot().requestsSent());
+			assertEquals(1, f.snapshot().httpAttemptFailures());
+			assertEquals(0, f.snapshot().logical().failed());
+			assertEquals(1, f.snapshot().logical().accepted());
+			assertEquals(3, f.snapshot().successfulBytes());
+			assertTrue(f.snapshot().logical().reconciled());
+		}
+	}
+
+	@Test
+	void localSelectionFailureSendsNoRequest() throws Exception {
+		try (var f = new Fixture(new RangeReadPolicy(3, null, 1), false,
+						n -> new Response(500, null, "unexpected"))) {
+			f.read("too-small", 1);
+			assertNotEquals(Operation.Status.SUCC, f.outcome());
+			assertEquals(0, f.requestCount.get());
+			assertEquals(0, f.snapshot().requestsSent());
+			assertEquals(1, f.snapshot().localSelectionErrors());
+			assertTrue(f.snapshot().logical().reconciled());
+		}
+	}
+
+	@Test
+	void rejectedResponseReleasesTransportForNextSuccessfulOperation() throws Exception {
+		try (var f = new Fixture(new RangeReadPolicy(3, 2L, 1), false,
+						n -> n == 1 ? new Response(200, null, "abc") : new Response(206, "echo", "abc"))) {
+			f.read("ignored-range", 10);
+			assertEquals(Operation.Status.RESP_FAIL_CLIENT, f.outcome());
+			f.read("next", 10);
+			assertEquals(Operation.Status.SUCC, f.outcome());
+			assertEquals(1, f.snapshot().responseValidationFailures());
+			assertEquals(1, f.snapshot().logical().accepted());
+			assertEquals(2, f.snapshot().requestsSent());
+			assertTrue(f.snapshot().logical().reconciled());
+		}
+	}
+
+	@Test
+	void timeoutReleasesPermitAndAllowsNextRead() throws Exception {
+		var release = new CountDownLatch(1);
+		try (var f = new Fixture(new RangeReadPolicy(3, 2L, 1), false, n -> {
+			if (n == 1) {
+				try {
+					release.await(4, TimeUnit.SECONDS);
+				} catch (InterruptedException interrupted) {
+					Thread.currentThread().interrupt();
+				}
+			}
+			return new Response(206, "echo", "abc");
+		})) {
+			try {
+				f.read("timeout", 10);
+				assertEquals(Operation.Status.FAIL_TIMEOUT, f.outcome());
+				f.read("next", 10);
+				assertEquals(Operation.Status.SUCC, f.outcome());
+				assertEquals(1, f.snapshot().transportFailures());
+				assertTrue(f.snapshot().logical().reconciled());
+			} finally {
+				release.countDown();
+			}
+		}
+	}
+
+	@Test
+	void drainFencesQueuedWorkAndRetainsUnresolvedDispatchedAttempt() throws Exception {
+		var release = new CountDownLatch(1);
+		try (var f = new Fixture(new RangeReadPolicy(3, 2L, 1), false, n -> {
+			try {
+				release.await(4, TimeUnit.SECONDS);
+			} catch (InterruptedException interrupted) {
+				Thread.currentThread().interrupt();
+			}
+			return new Response(206, "echo", "abc");
+		})) {
+			try {
+				f.read("dispatched", 10);
+				assertNotNull(f.requests.poll(3, TimeUnit.SECONDS));
+				f.read("queued", 10);
+				f.runtime.closeAdmission();
+				f.driver.closeAdmission();
+				f.driver.recoverQueuedOperations();
+				f.runtime.tracker().enforceTerminalDeadline(System.nanoTime());
+				f.runtime.tracker().resolveOutstandingAsUnresolved();
+				assertEquals(1, f.snapshot().logical().unattempted());
+				assertEquals(1, f.snapshot().logical().unresolved());
+				assertEquals(1, f.snapshot().requestsSent());
+				assertTrue(f.snapshot().logical().reconciled());
+			} finally {
+				release.countDown();
+			}
+		}
+	}
+
+	@Test
+	void ordinaryFactoryRemainsOrdinaryAndInvalidRangeOptionsFailBeforeResources() throws Exception {
+		var config = S3StorageDriverTest.baseConfig(false, 4, false, null, "127.0.0.1").configVal("storage");
+		var factory = new S3StorageDriverExtension<DataItem, RangeReadOperation<DataItem>, S3StorageDriver<DataItem, RangeReadOperation<DataItem>>>();
+		var input = new com.dell.spt.base.data.SeedDataInput(1, 1024, 1, true);
+		try (var ordinary = factory.create("ordinary-factory", input, config, false, 4)) {
+			assertFalse(ordinary instanceof com.dell.spt.base.storage.driver.range.RangeReadDriverSupport);
+		}
+		var policy = new RangeReadPolicy(3, 2L, 1);
+		assertThrows(com.dell.spt.base.config.IllegalConfigurationException.class,
+						() -> factory.createRangeRead("invalid-timeout", null, config, 4, policy));
+		config.val("net-timeoutMilliSec", 1000);
+		config.val("net-http-read-metadata-only", true);
+		assertThrows(com.dell.spt.base.config.IllegalConfigurationException.class,
+						() -> factory.createRangeRead("metadata-only", null, config, 4, policy));
+		config.val("net-http-read-metadata-only", false);
+		config.val("object-tagging-enabled", true);
+		assertThrows(com.dell.spt.base.config.IllegalConfigurationException.class,
+						() -> factory.createRangeRead("tagging", null, config, 4, policy));
+	}
+
+}
