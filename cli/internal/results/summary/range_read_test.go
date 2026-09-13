@@ -137,3 +137,65 @@ func TestRangeReadFlowsThroughLoaderAndSummary(t *testing.T) {
 		}
 	}
 }
+
+func TestRangeReadMissingEvidenceIsRequiredOnlyForRangeReadSteps(t *testing.T) {
+	for _, tc := range []struct {
+		name, op, size, configSize string
+		required                   bool
+	}{
+		{"metadata", "read", "3", "", true},
+		{"config", "read", "", "3", true},
+		{"ordinary", "read", "", "", false},
+		{"seed", "create", "3", "", false},
+		{"cleanup", "delete", "3", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			step := "step-read"
+			configName := step + ".config.yaml"
+			config := "output:\n  metrics:\n    summary:\n      persist: false\nload:\n  op:\n    type: " + tc.op + "\n"
+			if tc.configSize != "" {
+				config += "    read:\n      range:\n        size: " + tc.configSize + "\n"
+			}
+			if err := os.WriteFile(filepath.Join(dir, configName), []byte(config), 0600); err != nil {
+				t.Fatal(err)
+			}
+			writeManifest(t, dir, &results.Manifest{OutputDir: dir, Steps: []results.StepManifest{{StepID: step, Files: []results.FileStatus{{Name: configName, Status: "ok"}, {Name: step + ".range.read.csv", Status: "missing"}}}}})
+			writeParams(t, dir, &RunParams{ScenarioParams: ScenarioParams{WorkloadType: "read", RangeSize: tc.size}})
+			data, err := NewLoader().Load(context.Background(), dir)
+			if (err != nil) != tc.required {
+				t.Fatalf("required=%t err=%v", tc.required, err)
+			}
+			found := false
+			for _, s := range data.Steps[step].MissingRequired {
+				if s == "range.read.csv" {
+					found = true
+				}
+			}
+			if found != tc.required {
+				t.Fatalf("missing required=%v", data.Steps[step].MissingRequired)
+			}
+		})
+	}
+}
+
+func TestRangeReadUnavailableLegacyConfigDoesNotIntroduceAnError(t *testing.T) {
+	dir := t.TempDir()
+	name := "step-read.config.yaml"
+	sm := &results.StepManifest{StepID: "step-read", Files: []results.FileStatus{{Name: name, Status: "ok"}}}
+	for _, body := range []string{"", "load: [invalid yaml"} {
+		if body != "" {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		expected, err := NewLoader().rangeReadExpected(dir, sm, &RunParams{}, nil)
+		if expected || err != nil {
+			t.Fatalf("ordinary expected=%t err=%v", expected, err)
+		}
+		_, err = NewLoader().rangeReadExpected(dir, sm, &RunParams{ScenarioParams: ScenarioParams{RangeSize: "3"}}, nil)
+		if err == nil {
+			t.Fatal("known range configuration error hidden")
+		}
+	}
+}

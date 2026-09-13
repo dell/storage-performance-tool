@@ -222,6 +222,17 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 		}
 
 		rangeEvidence, rangeErr := loadRangeRead(runDir, sm)
+		rangeExpected, rangeConfigErr := l.rangeReadExpected(runDir, sm, params, step.Metrics)
+		if rangeErr == nil && rangeConfigErr != nil {
+			rangeErr = rangeConfigErr
+		}
+		if rangeExpected && rangeEvidence == nil {
+			step.MissingRequired = appendUnique(step.MissingRequired, constants.ResultsArtifactSuffixRangeRead)
+			step.MissingOptional = removeString(step.MissingOptional, constants.ResultsArtifactSuffixRangeRead)
+			if rangeErr == nil {
+				rangeErr = fmt.Errorf("required partial READ evidence is unavailable")
+			}
+		}
 		if rangeErr == nil && rangeEvidence != nil && params.ScenarioParams.RunID > 0 && rangeEvidence.Rows[0].RunID != fmt.Sprint(params.ScenarioParams.RunID) {
 			rangeErr = fmt.Errorf("partial READ artifact engine run identity does not match run metadata")
 		}
@@ -514,6 +525,9 @@ type LifecyclePhase struct {
 
 // ScenarioParams captures key scenario tunables stored with the run.
 type ScenarioParams struct {
+	RangeSize      string   `json:"RangeSize"`
+	RangeOffset    string   `json:"RangeOffset"`
+	RangeAlign     string   `json:"RangeAlign"`
 	RunID          int64    `json:"RunID"`
 	WorkloadType   string   `json:"WorkloadType"`
 	Endpoint       string   `json:"Endpoint"`
@@ -572,4 +586,50 @@ type RunMultiHost struct {
 	NetworkMode    string `json:"networkMode"`
 	RMIPortStart   int    `json:"rmiPortStart"`
 	RMIPortCount   int    `json:"rmiPortCount"`
+}
+
+// rangeReadExpected uses effective step configuration first to keep seed and cleanup ordinary.
+func (l *Loader) rangeReadExpected(runDir string, sm *results.StepManifest, params *RunParams, metrics *MetricsTotals) (bool, error) {
+	expected := params.ScenarioParams.RangeSize != "" && strings.EqualFold(operationFromStep(sm.StepID, metrics), "read")
+	entry := l.findConfigEntry(sm)
+	if entry == nil || entry.Status != fileStatusOK {
+		return expected, nil
+	}
+	root, err := os.OpenRoot(runDir)
+	if err != nil {
+		if !expected {
+			return false, nil
+		}
+		return expected, err
+	}
+	defer func() { _ = root.Close() }()
+	data, err := root.ReadFile(entry.Name)
+	if err != nil {
+		if !expected {
+			return false, nil
+		}
+		return expected, err
+	}
+	var config struct {
+		Load struct {
+			Op struct {
+				Type string `yaml:"type"`
+				Read struct {
+					Range struct {
+						Size any `yaml:"size"`
+					} `yaml:"range"`
+				} `yaml:"read"`
+			} `yaml:"op"`
+		} `yaml:"load"`
+	}
+	if err = yaml.Unmarshal(data, &config); err != nil {
+		if !expected {
+			return false, nil
+		}
+		return expected, fmt.Errorf("range step configuration: %w", err)
+	}
+	if config.Load.Op.Type != "" && !strings.EqualFold(config.Load.Op.Type, "read") {
+		return false, nil
+	}
+	return expected || config.Load.Op.Read.Range.Size != nil, nil
 }
