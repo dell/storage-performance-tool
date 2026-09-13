@@ -19,6 +19,8 @@ dependencies {
 		libs.log4j.core,
 	)
 
+	testImplementation(libs.mockito.core)
+
 	testRuntimeOnly(
 		libs.commons.codec,
 		libs.confuse.io.yaml,

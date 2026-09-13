@@ -7,6 +7,8 @@ import java.util.Objects;
 
 /** Construction-time access and validation for the opt-in single-range READ mode. */
 public final class RangeReadConfig {
+	public static final String DRIVER_TYPE = "s3";
+
 	private RangeReadConfig() {}
 
 	/** Preserve legacy extension configurations which predate the nullable read subtree. */
@@ -46,7 +48,7 @@ public final class RangeReadConfig {
 						|| !"data".equalsIgnoreCase(config.stringVal("item-type"))) {
 			throw invalid("requires DATA READ");
 		}
-		if (!"s3".equals(config.stringVal("storage-driver-type"))) {
+		if (!DRIVER_TYPE.equals(config.stringVal("storage-driver-type"))) {
 			throw invalid("requires the Netty s3 driver; AWS, native RDMA and other drivers are unsupported");
 		}
 		if (config.boolVal("item-data-verify")

@@ -1,5 +1,7 @@
 package com.dell.spt.base.storage.driver;
 
+import com.dell.spt.base.item.op.data.range.RangeReadPolicy;
+import com.dell.spt.base.storage.driver.range.RangeReadDriverFactory;
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
 
@@ -155,6 +157,15 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 					final int batchSize,
 					final String stepId)
 					throws IllegalArgumentException, InterruptedException, IllegalConfigurationException {
+		return instance(extensions, storageConfig, dataInput, verifyFlag, batchSize, stepId, null);
+	}
+
+	/** Construct a range-only driver only through an explicit factory opt-in. */
+	@SuppressWarnings("unchecked")
+	static <I extends Item, O extends Operation<I>> StorageDriver<I, O> instance(
+					final List<Extension> extensions, final Config storageConfig, final DataInput dataInput,
+					final boolean verifyFlag, final int batchSize, final String stepId,
+					final RangeReadPolicy rangePolicy) throws InterruptedException {
 		try (final var ctx = CloseableThreadContext.put(KEY_STEP_ID, stepId)
 						.put(KEY_CLASS_NAME, StorageDriver.class.getSimpleName())) {
 
@@ -182,6 +193,15 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 			Loggers.MSG.info(
 							"{}: creating the storage driver instance for the type \"{}\"", stepId, driverType);
 
+			if (rangePolicy != null) {
+				if (verifyFlag || !com.dell.spt.base.config.RangeReadConfig.DRIVER_TYPE.equals(driverType)
+								|| !(selectedFactory instanceof RangeReadDriverFactory<?, ?, ?>)) {
+					throw new IllegalConfigurationException(
+									"load.op.read.range requires an opt-in Netty s3 factory without verification");
+				}
+				return ((RangeReadDriverFactory<I, O, ?>) selectedFactory)
+								.createRangeRead(stepId, dataInput, storageConfig, batchSize, rangePolicy);
+			}
 			return selectedFactory.create(stepId, dataInput, storageConfig, verifyFlag, batchSize);
 		}
 	}

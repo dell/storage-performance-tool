@@ -111,7 +111,8 @@ public class LinearLoadStepLocal
 			try {
 
 				final StorageDriver driver = StorageDriver.instance(
-								extensions, storageConfig, dataInput, effectiveVerifyFlag, batchSize, testStepId);
+								extensions, storageConfig, dataInput, effectiveVerifyFlag, batchSize, testStepId,
+								com.dell.spt.base.config.RangeReadConfig.fromLoad(loadConfig));
 
 				final ItemType itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
 				final ItemFactory<? extends Item> itemFactory = ItemType.getItemFactory(itemType);

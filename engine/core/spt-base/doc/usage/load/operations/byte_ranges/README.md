@@ -175,5 +175,8 @@ threshold conflict with this mode. Disabled single-range configuration preserves
 legacy behavior; inert legacy settings remain allowed.
 
 Driver integration and qualification are pending on this draft branch. A configured
-policy requires an explicitly matching range runtime; it cannot silently execute
-an ordinary whole-object READ. This configuration draft is not public enablement.
+policy requires a factory implementing `RangeReadDriverFactory` and an explicitly
+matching range runtime; it cannot silently execute an ordinary whole-object READ.
+Linear, pipeline and weighted steps pass their effective policy during driver
+construction. Existing factories retain their ordinary construction API when the
+mode is disabled. The Netty S3 factory opt-in remains pending. This configuration draft is not public enablement.
