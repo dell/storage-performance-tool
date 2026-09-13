@@ -61,6 +61,54 @@ class CsvLoggerArtifactAggregatorTest {
 	}
 
 	@Test
+	void collectsRangePolicyAndOutcomesFromEveryContributor() throws Exception {
+		final Path dir = Files.createTempDirectory("range-read-aggregation-");
+		final var artifact = com.dell.spt.base.metrics.range.RangeReadArtifact.FILE_NAME;
+		final var header = com.dell.spt.base.metrics.range.RangeReadArtifact.HEADER;
+		final var counters = new com.dell.spt.base.metrics.range.RangeReadSnapshot(1,
+						new com.dell.spt.base.item.op.data.range.RangeReadPolicy(3, 0L, 1),
+						new com.dell.spt.base.load.lifecycle.OperationLifecycleCounters(true, 1, 1, 0, 1, 0, 0, 0, 0, 0),
+						1, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, false);
+		final Path canonical = dir.resolve(artifact);
+		final var managers = new java.util.ArrayList<FileManager>();
+		try {
+			for (int i = 0; i < 3; i++) {
+				final var manager = mock(FileManager.class);
+				managers.add(manager);
+				final String source = i == 0 ? canonical.toString() : "/worker-" + i + "/" + artifact;
+				when(manager.logFileName("RangeRead", "step")).thenReturn(source);
+				final String body = header + "\n" + com.dell.spt.base.metrics.range.RangeReadArtifact.rows(
+								123, "step", "worker-" + i, List.of(counters), true) + "\n";
+				if (i == 0) {
+					Files.writeString(canonical, body);
+				} else {
+					final byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+					when(manager.readFromFile(source, 0)).thenReturn(bytes);
+					when(manager.readFromFile(source, bytes.length)).thenThrow(new EOFException());
+				}
+			}
+			new CsvLoggerArtifactAggregator("step", managers, "RangeRead", artifact, header).close();
+			try (final var parser = CSVFormat.RFC4180.builder().setHeader().get().parse(Files.newBufferedReader(canonical))) {
+				final var rows = parser.getRecords();
+				assertEquals(3, rows.size());
+				for (int i = 0; i < 3; i++) {
+					assertEquals("worker-" + i, rows.get(i).get("worker_id"));
+					assertEquals("3", rows.get(i).get("successful_bytes"));
+					assertEquals("0", rows.get(i).get("fixed_offset"));
+					assertEquals("true", rows.get(i).get("terminal"));
+					org.junit.jupiter.api.Assertions.assertTrue(Files.exists(CsvLoggerArtifactAggregator.nodeSourcePath(canonical, i)));
+				}
+			}
+		} finally {
+			try (final var files = Files.list(dir)) {
+				for (final var file : files.toList())
+					Files.deleteIfExists(file);
+			}
+			Files.deleteIfExists(dir);
+		}
+	}
+
+	@Test
 	void preservesNodeSourcesAndMergesCompleteCsvRecords() throws Exception {
 		final Path dir = Files.createTempDirectory("integrity-logger-aggregation-");
 		final Path canonical = dir.resolve(IntegrityCsvArtifacts.PERFORMANCE_FILE_NAME);

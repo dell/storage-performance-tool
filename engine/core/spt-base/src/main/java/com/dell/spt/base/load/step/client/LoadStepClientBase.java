@@ -166,6 +166,21 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	private MetricsAggregator metricsAggregator = null;
 
+	private boolean hasRangeReadPolicy() {
+		if (ctxConfigs == null || ctxConfigs.isEmpty())
+			return com.dell.spt.base.config.RangeReadConfig.fromLoad(config.configVal("load")) != null;
+		if (ctxConfigs != null) {
+			for (final var context : ctxConfigs) {
+				final var merged = com.github.akurilov.commons.collection.TreeUtil.reduceForest(
+								List.of(Config.deepToMap(config), Config.deepToMap(context)));
+				final var effective = new com.github.akurilov.confuse.impl.BasicConfig(config.pathSep(), config.schema(), merged);
+				if (com.dell.spt.base.config.RangeReadConfig.fromLoad(effective.configVal("load")) != null)
+					return true;
+			}
+		}
+		return false;
+	}
+
 	@Override
 	protected final void doStartWrapped()
 					throws IllegalArgumentException {
@@ -426,6 +441,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 								Loggers.OPERATION_LIFECYCLE.getName(),
 								OperationLifecycleArtifact.FILE_NAME,
 								OperationLifecycleArtifact.HEADER));
+				if (hasRangeReadPolicy()) {
+					operationLifecycleAggregators.add(new CsvLoggerArtifactAggregator(loadStepId(), fileMgrs,
+									Loggers.RANGE_READ.getName(), com.dell.spt.base.metrics.range.RangeReadArtifact.FILE_NAME,
+									com.dell.spt.base.metrics.range.RangeReadArtifact.HEADER));
+				}
 			} catch (final IOException e) {
 				throw new IllegalStateException("failed to initialize operation lifecycle aggregation", e);
 			}

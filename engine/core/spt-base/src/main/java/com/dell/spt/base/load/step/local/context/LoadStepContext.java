@@ -32,6 +32,11 @@ public interface LoadStepContext<I extends Item, O extends Operation<I>> extends
 		return null;
 	}
 
+	/** Range counters, or null for an ordinary context. Read only after stop for terminal evidence. */
+	default com.dell.spt.base.metrics.range.RangeReadSnapshot rangeReadSnapshot() {
+		return null;
+	}
+
 	/** Returns object-level identity accounting, or {@code null} when the context cannot supply it. */
 	default DeleteObjectLifecycleSnapshot deleteObjectLifecycle() {
 		return null;

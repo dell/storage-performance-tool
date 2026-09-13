@@ -189,3 +189,25 @@ length and framing validation; rejected responses close the connection.
 
 This remains draft functionality. Packaging, CLI/real-target integration and
 READ/WRITE performance qualification are pending; this is not release qualification.
+
+### Terminal partial-read evidence (draft)
+
+Partial READ contexts publish `range.read.csv` through the `RangeRead` logger after
+stop. The coordinator collects worker rows and preserves `range.read.node-NNN.csv`
+sources. The CLI fetches and indexes these optional artifacts; ordinary workloads
+produce no range artifact.
+
+Schema version 1 identifies the engine run, step, worker and context index. Each
+row records fixed/random mode, requested size, explicit fixed-offset presence and
+value, and effective alignment. Different context policies remain separate rows.
+Successful bytes include only structurally validated responses. Logical outcomes
+(selected, accepted, failed, unattempted, unresolved) are separate from attempted
+logical reads, sent requests, and per-transport-attempt failure counters. HTTP,
+response-validation, transport and local-selection failures have separate fields.
+Failed/unresolved received bytes count delivered response-body bytes, not network
+wire bytes. No object keys, credentials, or per-operation records are emitted.
+
+`terminal=true` requires completed contexts and reconciled counters; inspect the
+lifecycle fields and `overflow` alongside it. Source rows must be counted once:
+do not sum the canonical collected file together with its node source copies.
+AWS SDK retry accounting is deferred with the AWS driver implementation.

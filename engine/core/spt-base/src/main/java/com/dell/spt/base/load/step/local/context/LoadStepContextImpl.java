@@ -1650,6 +1650,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	@Override
+	public final com.dell.spt.base.metrics.range.RangeReadSnapshot rangeReadSnapshot() {
+		return rangeRuntime == null ? null : rangeRuntime.snapshot();
+	}
+
+	@Override
 	public final DeleteObjectLifecycleSnapshot deleteObjectLifecycle() {
 		if (!standaloneDeleteEnabled) {
 			return DeleteObjectLifecycleSnapshot.empty();

@@ -659,6 +659,17 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			OperationLifecycleArtifact.publish(runId(), loadStepId(),
 							operationLifecycleWorkerId, counters, expectedOperationLifecycleContexts.equals(stepContexts));
 		}
+		final var ranges = new ArrayList<com.dell.spt.base.metrics.range.RangeReadSnapshot>();
+		boolean complete = expectedOperationLifecycleContexts.equals(stepContexts);
+		for (final var context : expectedOperationLifecycleContexts) {
+			ranges.add(context.rangeReadSnapshot());
+			complete &= context.terminalOperationCounters() != null;
+		}
+		if (ranges.stream().anyMatch(java.util.Objects::nonNull)) {
+			try (final var logContext = put(KEY_STEP_ID, loadStepId())) {
+				com.dell.spt.base.metrics.range.RangeReadArtifact.publish(runId(), loadStepId(), operationLifecycleWorkerId, ranges, complete);
+			}
+		}
 		operationLifecyclePublished = true;
 	}
 

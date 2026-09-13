@@ -46,6 +46,7 @@ const (
 	ResultsArtifactSuffixVerifyRemaining       = "verify-remaining.csv"
 	ResultsArtifactSuffixIntegrityFailures     = "integrity.failures.csv"
 	ResultsArtifactSuffixIntegrityPerformance  = "integrity.performance.csv"
+	ResultsArtifactSuffixRangeRead             = "range.read.csv"
 	ResultsArtifactSuffixOperationLifecycle    = "operation.lifecycle.csv"
 	ResultsArtifactSuffixMultipartLifecycle    = "multipart.lifecycle.csv"
 	ResultsArtifactSuffixMultipart             = "multipart.csv"
