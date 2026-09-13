@@ -21,7 +21,11 @@ import org.junit.jupiter.api.Test;
 class S3RangeStorageDriverTest {
 	private record Request(String method, String path, String range, String authorization) {}
 
-	private record Response(int status, String contentRange, String body) {}
+	private record Response(int status, String contentRange, String body) {
+		static Response disconnect() {
+			return new Response(0, null, "");
+		}
+	}
 
 	private static final class Fixture implements AutoCloseable {
 		final HttpServer server;
@@ -46,6 +50,9 @@ class S3RangeStorageDriverTest {
 					requests.add(new Request(exchange.getRequestMethod(), exchange.getRequestURI().getRawPath(), range,
 									exchange.getRequestHeaders().getFirst("Authorization")));
 					Response response = responses.apply(requestCount.incrementAndGet());
+					// Close the accepted connection before any response headers reach the driver.
+					if (response.status() == 0)
+						return;
 					if (response.contentRange() != null)
 						exchange.getResponseHeaders().set("Content-Range", response.contentRange().startsWith("echo")
 										? "bytes " + range.substring(6) + "/" + (response.contentRange().equals("echo")
@@ -229,6 +236,41 @@ class S3RangeStorageDriverTest {
 			assertEquals(1, f.snapshot().logical().accepted());
 			assertEquals(2, f.snapshot().requestsSent());
 			assertTrue(f.snapshot().logical().reconciled());
+		}
+	}
+
+	@Test
+	void connectionLossReleasesTransportAndRetryRetainsSelectedRange() throws Exception {
+		for (boolean retry : new boolean[]{false, true
+		}) {
+			try (var f = new Fixture(new RangeReadPolicy(3, null, 1), retry,
+							n -> n == 1 ? Response.disconnect() : new Response(206, "echo/10", "abc"))) {
+				var op = f.read("connection-loss", 10);
+				assertEquals(retry ? Operation.Status.SUCC : Operation.Status.FAIL_IO, f.outcome());
+				assertEquals(10, op.item().size());
+				var first = f.requests.poll();
+				assertNotNull(first);
+				if (retry) {
+					var second = f.requests.poll();
+					assertNotNull(second);
+					assertEquals(first.method(), second.method());
+					assertEquals(first.path(), second.path());
+					assertEquals(first.range(), second.range(), "Retry must retain the selected range");
+					assertTrue(second.authorization().startsWith("AWS4-HMAC-SHA256 "));
+				}
+				f.read("after-connection-loss", 10);
+				assertEquals(Operation.Status.SUCC, f.outcome());
+				assertEquals(retry ? 3 : 2, f.requestCount.get());
+				assertEquals(retry ? 3 : 2, f.snapshot().requestsSent());
+				assertEquals(1, f.snapshot().transportAttemptFailures());
+				assertEquals(retry ? 0 : 1, f.snapshot().transportFailures());
+				assertEquals(retry ? 0 : 1, f.snapshot().logical().failed());
+				assertEquals(retry ? 2 : 1, f.snapshot().logical().accepted());
+				assertEquals(retry ? 6 : 3, f.snapshot().successfulBytes());
+				assertEquals(0, f.snapshot().responseValidationFailures());
+				assertEquals(0, f.snapshot().httpFailures());
+				assertTrue(f.snapshot().reconciled());
+			}
 		}
 	}
 
