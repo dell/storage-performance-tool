@@ -590,7 +590,8 @@ ReadLoad
                 "size": {{.ReadShuffleBatchSize}}
             },
 {{end}}            "op": {
-                "type": "read",{{if .ReadShuffle}}
+                "type": "read",{{if .RangePolicy}}
+                "read": {"range": {{.RangePolicy}}},{{end}}{{if .ReadShuffle}}
                 "shuffle": true,{{end}}
                 "recycle": {
                     "mode": true
@@ -734,10 +735,11 @@ ReadLoad
                 "size": {{.ReadShuffleBatchSize}}
             },
 {{end}}            "op": {
-                "type": "read",{{if .ReadShuffle}}
+                "type": "read",{{if .RangePolicy}}
+                "read": {"range": {{.RangePolicy}}},{{end}}{{if .ReadShuffle}}
                 "shuffle": true,{{end}}
                 "recycle": {
-                    "mode": true
+                    "mode": {{if .RangePolicy}}false{{else}}true{{end}}
                 },
                 "limit": {
                     "count": readCount
@@ -871,7 +873,8 @@ ReadLoad
                 "size": {{.ReadShuffleBatchSize}}
             },
 {{end}}            "op": {
-                "type": "read",{{if .ReadShuffle}}
+                "type": "read",{{if .RangePolicy}}
+                "read": {"range": {{.RangePolicy}}},{{end}}{{if .ReadShuffle}}
                 "shuffle": true,{{end}}
                 "recycle": {
                     "mode": true
@@ -985,10 +988,11 @@ ReadLoad
                 "size": {{.ReadShuffleBatchSize}}
             },
 {{end}}            "op": {
-                "type": "read",{{if .ReadShuffle}}
+                "type": "read",{{if .RangePolicy}}
+                "read": {"range": {{.RangePolicy}}},{{end}}{{if .ReadShuffle}}
                 "shuffle": true,{{end}}
                 "recycle": {
-                    "mode": true
+                    "mode": {{if .RangePolicy}}false{{else}}true{{end}}
                 },
                 "limit": {
                     "count": readCount
@@ -1106,7 +1110,8 @@ ReadLoad
                 "size": {{.ReadShuffleBatchSize}}
             },
 {{end}}            "op": {
-                "type": "read",{{if .ReadShuffle}}
+                "type": "read",{{if .RangePolicy}}
+                "read": {"range": {{.RangePolicy}}},{{end}}{{if .ReadShuffle}}
                 "shuffle": true,{{end}}
                 "recycle": {
                     "mode": true
@@ -1217,7 +1222,8 @@ ReadLoad
                 "size": {{.ReadShuffleBatchSize}}
             },
 {{end}}            "op": {
-                "type": "read",{{if .ReadShuffle}}
+                "type": "read",{{if .RangePolicy}}
+                "read": {"range": {{.RangePolicy}}},{{end}}{{if .ReadShuffle}}
                 "shuffle": true,{{end}}
                 "recycle": {
                     "mode": true
@@ -1300,10 +1306,11 @@ ReadLoad
                 "size": {{.ReadShuffleBatchSize}}
             },
 {{end}}            "op": {
-                "type": "read",{{if .ReadShuffle}}
+                "type": "read",{{if .RangePolicy}}
+                "read": {"range": {{.RangePolicy}}},{{end}}{{if .ReadShuffle}}
                 "shuffle": true,{{end}}
                 "recycle": {
-                    "mode": true
+                    "mode": {{if .RangePolicy}}false{{else}}true{{end}}
                 },
                 "limit": {
                     "count": readCount
@@ -1383,7 +1390,8 @@ ReadLoad
                 "size": {{.ReadShuffleBatchSize}}
             },
 {{end}}            "op": {
-                "type": "read",{{if .ReadShuffle}}
+                "type": "read",{{if .RangePolicy}}
+                "read": {"range": {{.RangePolicy}}},{{end}}{{if .ReadShuffle}}
                 "shuffle": true,{{end}}
                 "recycle": {
                     "mode": true
@@ -1489,10 +1497,11 @@ ReadLoad
                 "size": {{.ReadShuffleBatchSize}}
             },
 {{end}}            "op": {
-                "type": "read",{{if .ReadShuffle}}
+                "type": "read",{{if .RangePolicy}}
+                "read": {"range": {{.RangePolicy}}},{{end}}{{if .ReadShuffle}}
                 "shuffle": true,{{end}}
                 "recycle": {
-                    "mode": true
+                    "mode": {{if .RangePolicy}}false{{else}}true{{end}}
                 },
                 "limit": {
                     "count": readCount

@@ -31,6 +31,9 @@ var scenarioGenerators = map[string]scenarioGenerator{
 // GenerateScenario creates a JavaScript scenario from parameters. The workload registry is the
 // public support gate; every supported workload must have a registered scenario generator.
 func GenerateScenario(params Params) (string, error) {
+	if _, err := ParseRangePolicy(params); err != nil {
+		return "", err
+	}
 	spec, ok := workload.Lookup(params.WorkloadType)
 	if !ok {
 		return "", fmt.Errorf("unsupported workload type: %s", params.WorkloadType)
@@ -114,6 +117,18 @@ func GenerateWriteScenario(params Params) (string, error) {
 
 // GenerateReadScenario creates a read benchmark scenario with seed, read, and optional cleanup phases.
 func GenerateReadScenario(params Params) (string, error) {
+	policy, err := ParseRangePolicy(params)
+	if err != nil {
+		return "", err
+	}
+	var rangeJSON string
+	if policy != nil {
+		encoded, marshalErr := json.Marshal(policy)
+		if marshalErr != nil {
+			return "", marshalErr
+		}
+		rangeJSON = string(encoded)
+	}
 	bucketPath := "/" + strings.TrimPrefix(params.Bucket, "/")
 
 	ts := resolveTimestamp(params)
@@ -151,6 +166,7 @@ func GenerateReadScenario(params Params) (string, error) {
 		templateKeyTimestamp:            time.Now().Unix(),
 		templateKeyStorageDriverType:    fmt.Sprintf(`"%s"`, driverType),
 		templateKeySeedCount:            seedCount,
+		"RangePolicy":                   rangeJSON,
 		templateKeyReadShuffle:          params.ReadShuffle,
 		templateKeyReadShuffleBatchSize: readShuffleBatchSize,
 		templateKeyReadPhasePause:       readPhasePauseSeconds,

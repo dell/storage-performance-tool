@@ -2170,6 +2170,9 @@ func init() {
 
 	// Workload Definition Options
 	runCmd.Flags().IntP("threads", "t", 1, "Number of parallel client threads to run (e.g., 16)")
+	runCmd.Flags().String("range-size", "", "Partial READ length in bytes or binary units (e.g. 64KiB); Netty S3 only")
+	runCmd.Flags().String("range-offset", "", "Fixed partial READ offset; omitted selects a random aligned offset")
+	runCmd.Flags().String("range-align", "", "Partial READ alignment in bytes or binary units; 0 and 1 mean byte alignment")
 	runCmd.Flags().StringP("object-size", "o", "", fmt.Sprintf("Object size (e.g., 1MiB, 256KiB, 4GiB); seeded DELETE defaults to %s", scenario.DefaultDeleteObjectSize))
 	runCmd.Flags().Float64("object-data-compressibility", 0.0, "Compressibility percentage of object payloads (0.0 to 100.0, default 0.0)")
 	runCmd.Flags().Bool("object-data-dedupable", true, "Allow object payloads to be deduplicated by the storage array (default true)")
@@ -2625,6 +2628,20 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		params.DeleteItemsFile, _ = cmd.Flags().GetString("delete-items-file")
 	}
 
+	for _, flag := range []string{"range-size", "range-offset", "range-align"} {
+		if cmd.Flags().Changed(flag) {
+			value, _ := cmd.Flags().GetString(flag)
+			if strings.TrimSpace(value) == "" {
+				return params, fmt.Errorf("--%s must not be empty", flag)
+			}
+		}
+	}
+	params.RangeSize, _ = cmd.Flags().GetString("range-size")
+	params.RangeOffset, _ = cmd.Flags().GetString("range-offset")
+	params.RangeAlign, _ = cmd.Flags().GetString("range-align")
+	if _, err := scenario.ParseRangePolicy(params); err != nil {
+		return params, err
+	}
 	return params, nil
 }
 
