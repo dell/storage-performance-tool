@@ -26,6 +26,22 @@ import org.junit.jupiter.api.Test;
 
 @SuppressWarnings("unchecked")
 class RangeReadGeneratorBuilderTest {
+	@Test
+	void configuredPolicyMustMatchTheInstalledDriverBeforeGeneration() throws Exception {
+		try (var f = new Fixture(new RangeReadPolicy(16, null, 1))) {
+			f.config.val("load-op-read-range-size", "8");
+			assertThrows(com.dell.spt.base.config.IllegalConfigurationException.class,
+							() -> f.builder(true).build());
+			verify(f.driver, never()).put(any(RangeReadOperation.class));
+		}
+		try (var f = new Fixture(new RangeReadPolicy(16, null, 1))) {
+			f.config.val("load-op-read-range-size", "16");
+			f.generator = f.builder(true).build();
+			assertNotNull(f.generator);
+			verify(f.driver, never()).put(any(RangeReadOperation.class));
+		}
+	}
+
 	private static final class Fixture implements AutoCloseable {
 		final Config config = TestConfigBuilder.config();
 		final StorageDriver<DataItem, RangeReadOperation<DataItem>> driver = mock(StorageDriver.class,

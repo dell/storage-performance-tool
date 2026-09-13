@@ -1,5 +1,7 @@
 package com.dell.spt.base.load.step;
 
+import com.dell.spt.base.config.RangeReadConfig;
+import com.dell.spt.base.config.IllegalConfigurationException;
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
@@ -76,6 +78,15 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		this.ctxConfigs = ctxConfigs == null ? null
 						: ctxConfigs.stream().map(buildInfo::copyWithProjectedVersion).collect(Collectors.toList());
 		this.metricsMgr = metricsMgr;
+		validateRangeConfig(this.config);
+		if (this.ctxConfigs != null) {
+			this.ctxConfigs.forEach(context -> {
+				final var merged = com.github.akurilov.commons.collection.TreeUtil.reduceForest(
+								List.of(Config.deepToMap(this.config), Config.deepToMap(context)));
+				validateRangeConfig(new com.github.akurilov.confuse.impl.BasicConfig(
+								this.config.pathSep(), this.config.schema(), merged));
+			});
+		}
 		try {
 			this.integrityModeEnabled = IntegrityConfig.validateLoadStep(this.config).enabled();
 		} catch (final RuntimeException e) {
@@ -92,6 +103,13 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		this.standaloneDeletePreValidationEnabled = standaloneDelete.preValidation();
 		this.standaloneDeletePostVerificationEnabled = standaloneDelete.postVerification();
 		Loggers.CONFIG.info(ConfigUtil.toString(this.config, ConfigFormat.YAML, resolveStepTypeName()));
+	}
+
+	private void validateRangeConfig(final Config value) {
+		if (RangeReadConfig.validate(value) != null
+						&& ConfigUtil.MIXED_LOAD_STEP_TYPE.equals(resolveStepTypeName())) {
+			throw new IllegalConfigurationException("load.op.read.range does not support MixedLoad");
+		}
 	}
 
 	private String resolveStepTypeName() {

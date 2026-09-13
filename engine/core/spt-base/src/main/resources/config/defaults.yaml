@@ -38,6 +38,11 @@ load:
   batch:
     size: 32768
   op:
+    read:
+      range:
+        size: null
+        offset: null
+        align: null
     limit:
       count: 0
       fail:

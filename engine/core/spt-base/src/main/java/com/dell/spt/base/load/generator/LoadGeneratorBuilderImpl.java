@@ -183,6 +183,9 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 		final var rangeRuntime = opOutput instanceof RangeReadDriverSupport support
 						? java.util.Objects.requireNonNull(support.rangeReadRuntime(), "Range driver runtime")
 						: null;
+		com.dell.spt.base.config.RangeReadConfig.requireMatchingRuntime(
+						com.dell.spt.base.config.RangeReadConfig.fromLoad(loadConfig),
+						rangeRuntime == null ? null : rangeRuntime.policy());
 		if (rangeRuntime != null && (!ItemType.DATA.equals(itemType) || opType != OpType.READ))
 			throw new IllegalConfigurationException("Single-range operations require DATA READ");
 		// init the op builder

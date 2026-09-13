@@ -140,3 +140,40 @@ java -jar spt-<VERSION>.jar \
 	--item-output-file=items_appended.csv \
 	...
 ```
+
+### Fixed-size single-range READ configuration (draft)
+
+The separate `load.op.read.range` configuration uses nullable string values:
+
+```yaml
+load:
+  op:
+    read:
+      range:
+        size: "65536"
+        offset: null
+        align: "4096"
+```
+
+Null size disables this mode. Offset and alignment cannot be supplied without size.
+Null offset selects a random aligned range; `"0"` selects fixed offset zero.
+Null alignment and values `"0"` or `"1"` all mean effective alignment one.
+Size must be positive, and offset and alignment must be nonnegative. A fixed offset
+must be divisible by the effective alignment, and the inclusive endpoint must fit
+in a signed 64-bit integer. Alignment need not be a power of two.
+
+Direct-engine setters use nested paths, for example
+`--load-op-read-range-size=64KiB --load-op-read-range-align=4KiB`.
+Add `--load-op-read-range-offset=0` for fixed zero. Use quoted decimal byte strings
+in generated configurations. Binary suffixes from B through EiB are also accepted;
+fractions, signs, unknown suffixes and overflow are rejected.
+
+This mode is restricted to DATA READ with the Netty `s3` driver. AWS, native RDMA,
+other drivers, mixed workloads, content/metadata verification and recycled content
+updates are unsupported. Active legacy fixed/random ranges or a positive splitting
+threshold conflict with this mode. Disabled single-range configuration preserves
+legacy behavior; inert legacy settings remain allowed.
+
+Driver integration and qualification are pending on this draft branch. A configured
+policy requires an explicitly matching range runtime; it cannot silently execute
+an ordinary whole-object READ. This configuration draft is not public enablement.
