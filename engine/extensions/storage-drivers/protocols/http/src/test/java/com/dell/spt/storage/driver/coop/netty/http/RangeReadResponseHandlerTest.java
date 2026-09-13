@@ -21,6 +21,43 @@ import org.junit.jupiter.params.provider.ValueSource;
 class RangeReadResponseHandlerTest {
 	private record Result(RangeReadAttempt attempt, boolean reusable) {}
 
+	@ParameterizedTest
+	@ValueSource(booleans = {true, false
+	})
+	void rejectedCompletionReleasesInboundBeforeSettlingOnce(boolean validBody) {
+		var payload = Unpooled.buffer().writeZero(validBody ? 3 : 4);
+		var results = new ArrayList<Result>();
+		var handler = new RangeReadResponseHandler((attempt, reusable) -> {
+			assertEquals(0, payload.refCnt());
+			results.add(new Result(attempt, reusable));
+		});
+		var channel = new EmbeddedChannel(handler);
+		try {
+			var ctx = org.mockito.Mockito.spy(channel.pipeline().context(handler));
+			var executor = org.mockito.Mockito.mock(io.netty.util.concurrent.EventExecutor.class);
+			org.mockito.Mockito.when(executor.inEventLoop()).thenReturn(true);
+			org.mockito.Mockito.doThrow(new java.util.concurrent.RejectedExecutionException("stopping"))
+							.when(executor).execute(org.mockito.ArgumentMatchers.any(Runnable.class));
+			org.mockito.Mockito.doReturn(executor).when(ctx).executor();
+			handler.handlerAdded(ctx);
+			var attempt = new RangeReadAttempt(new OperationLifecycle(), new ByteRange(2, 3));
+			handler.bind(attempt);
+			assertTrue(attempt.requestHandoff());
+			var response = new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.PARTIAL_CONTENT);
+			response.headers().set(HttpHeaderNames.CONTENT_RANGE, "bytes 2-4/8");
+			response.headers().setInt(HttpHeaderNames.CONTENT_LENGTH, 3);
+			channel.writeInbound(response);
+			channel.writeInbound(new DefaultLastHttpContent(payload));
+			channel.runPendingTasks();
+			assertEquals(List.of(new Result(attempt, false)), results);
+			assertFalse(channel.isActive());
+			handler.handlerRemoved(ctx);
+			assertEquals(1, results.size());
+		} finally {
+			channel.finishAndReleaseAll();
+		}
+	}
+
 	private static class Connection implements AutoCloseable {
 		final List<Result> results = new ArrayList<>();
 		final RangeReadResponseHandler handler = new RangeReadResponseHandler((a, reuse) -> results.add(new Result(a, reuse)));
@@ -44,6 +81,27 @@ class RangeReadResponseHandlerTest {
 
 		public void close() {
 			channel.finishAndReleaseAll();
+		}
+	}
+
+	@Test
+	void rejectedCompletionWithoutInboundSettlesCancellationOnce() {
+		try (var c = new Connection()) {
+			var attempt = c.begin();
+			var ctx = org.mockito.Mockito.spy(c.channel.pipeline().context(c.handler));
+			var executor = org.mockito.Mockito.mock(io.netty.util.concurrent.EventExecutor.class);
+			org.mockito.Mockito.when(executor.inEventLoop()).thenReturn(true);
+			org.mockito.Mockito.doThrow(new java.util.concurrent.RejectedExecutionException("stopping"))
+							.when(executor).execute(org.mockito.ArgumentMatchers.any(Runnable.class));
+			org.mockito.Mockito.doReturn(executor).when(ctx).executor();
+			c.handler.handlerAdded(ctx);
+			assertTrue(c.handler.fail(attempt, Operation.Status.FAIL_TIMEOUT));
+			assertEquals(List.of(new Result(attempt, false)), c.results);
+			assertEquals(Operation.Status.FAIL_TIMEOUT, attempt.outcome().status());
+			assertFalse(c.handler.fail(attempt, Operation.Status.FAIL_IO));
+			c.channel.runPendingTasks();
+			assertEquals(1, c.results.size());
+			assertFalse(c.channel.isActive());
 		}
 	}
 

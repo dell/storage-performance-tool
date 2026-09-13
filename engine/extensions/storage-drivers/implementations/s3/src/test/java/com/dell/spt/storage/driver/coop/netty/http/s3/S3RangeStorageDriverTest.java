@@ -127,6 +127,42 @@ class S3RangeStorageDriverTest {
 	}
 
 	@Test
+	void rejectedRequestHandoffReleasesTransportAndPermitBeforeNextRead() throws Exception {
+		try (var f = new Fixture(new RangeReadPolicy(3, 2L, 1), false,
+						n -> new Response(206, "echo/10", "abc"))) {
+			var field = S3RangeStorageDriver.class.getDeclaredField("rangePool");
+			field.setAccessible(true);
+			var original = field.get(f.driver);
+			var pool = mock(com.github.akurilov.netty.connection.pool.NonBlockingConnPool.class);
+			var channel = mock(io.netty.channel.Channel.class);
+			var loop = mock(io.netty.channel.EventLoop.class);
+			when(pool.lease()).thenReturn(channel);
+			when(channel.isActive()).thenReturn(true);
+			when(channel.eventLoop()).thenReturn(loop);
+			doThrow(new RejectedExecutionException("stopping")).when(loop).execute(any(Runnable.class));
+			field.set(f.driver, pool);
+			try {
+				f.read("rejected-handoff", 10);
+				assertEquals(Operation.Status.FAIL_UNKNOWN, f.outcome());
+				assertEquals(0, f.requestCount.get());
+				assertEquals(0, f.snapshot().requestsSent());
+				assertEquals(1, f.snapshot().transportAttemptFailures());
+				verify(channel).close();
+				verify(pool).release(channel);
+			} finally {
+				field.set(f.driver, original);
+			}
+			f.read("after-rejected-handoff", 10);
+			assertEquals(Operation.Status.SUCC, f.outcome());
+			assertEquals(1, f.requestCount.get());
+			assertEquals(1, f.snapshot().logical().accepted());
+			assertEquals(1, f.snapshot().logical().failed());
+			assertEquals(0, f.snapshot().logical().unresolved());
+			assertTrue(f.snapshot().reconciled());
+		}
+	}
+
+	@Test
 	void exactSignedGetPreservesWholeObjectMetadataAndSendsFixedOutOfBoundsUnchanged() throws Exception {
 		var policy = new RangeReadPolicy(3, 2L, 1);
 		try (var f = new Fixture(policy, false, n -> n == 1

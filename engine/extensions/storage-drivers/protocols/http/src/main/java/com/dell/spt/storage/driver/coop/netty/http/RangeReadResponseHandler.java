@@ -13,6 +13,7 @@ import io.netty.handler.codec.http.HttpUtil;
 import io.netty.handler.codec.http.LastHttpContent;
 import io.netty.handler.timeout.IdleStateEvent;
 import java.util.Objects;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.BiConsumer;
 
 /**
@@ -27,6 +28,8 @@ public final class RangeReadResponseHandler extends SimpleChannelInboundHandler<
 	private boolean informational;
 	private boolean keepAlive;
 	private boolean completionPending;
+	private int inboundDepth;
+	private RangeReadAttempt rejectedCompletion;
 
 	public RangeReadResponseHandler(BiConsumer<RangeReadAttempt, Boolean> completion) {
 		this.completion = Objects.requireNonNull(completion);
@@ -57,6 +60,19 @@ public final class RangeReadResponseHandler extends SimpleChannelInboundHandler<
 		attempt.transportFailure(status);
 		complete(false);
 		return true;
+	}
+
+	@Override
+	public void channelRead(ChannelHandlerContext ctx, Object message) throws Exception {
+		inboundDepth++;
+		try {
+			super.channelRead(ctx, message);
+		} finally {
+			inboundDepth--;
+			// SimpleChannelInboundHandler has now released the inbound reference.
+			if (inboundDepth == 0)
+				settleRejectedCompletion();
+		}
 	}
 
 	@Override
@@ -158,10 +174,27 @@ public final class RangeReadResponseHandler extends SimpleChannelInboundHandler<
 			context.close();
 		completionPending = true;
 		// Release the current inbound reference and finish the decoder batch before reuse.
-		context.executor().execute(() -> {
+		try {
+			context.executor().execute(() -> {
+				completionPending = false;
+				completion.accept(completed, reusable && !context.isRemoved() && context.channel().isActive());
+			});
+		} catch (RejectedExecutionException rejected) {
+			// A stopping executor cannot finish the decoder batch; retire this connection.
+			rejectedCompletion = completed;
+			context.close();
+			if (inboundDepth == 0)
+				settleRejectedCompletion();
+		}
+	}
+
+	private void settleRejectedCompletion() {
+		if (rejectedCompletion != null) {
+			final var completed = rejectedCompletion;
+			rejectedCompletion = null;
 			completionPending = false;
-			completion.accept(completed, reusable && !context.isRemoved() && context.channel().isActive());
-		});
+			completion.accept(completed, false);
+		}
 	}
 
 	private void requireEventLoop() {
