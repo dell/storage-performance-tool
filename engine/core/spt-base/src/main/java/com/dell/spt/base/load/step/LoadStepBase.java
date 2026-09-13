@@ -78,15 +78,10 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		this.ctxConfigs = ctxConfigs == null ? null
 						: ctxConfigs.stream().map(buildInfo::copyWithProjectedVersion).collect(Collectors.toList());
 		this.metricsMgr = metricsMgr;
-		validateRangeConfig(this.config);
-		if (this.ctxConfigs != null) {
-			this.ctxConfigs.forEach(context -> {
-				final var merged = com.github.akurilov.commons.collection.TreeUtil.reduceForest(
-								List.of(Config.deepToMap(this.config), Config.deepToMap(context)));
-				validateRangeConfig(new com.github.akurilov.confuse.impl.BasicConfig(
-								this.config.pathSep(), this.config.schema(), merged));
-			});
-		}
+		// Script bindings eagerly construct dormant client prototypes for every operation/step type.
+		// Validate local steps immediately, and clients only when selected for execution.
+		if (!(this instanceof com.dell.spt.base.load.step.client.LoadStepClient<?>))
+			validateRangeConfiguration();
 		try {
 			this.integrityModeEnabled = IntegrityConfig.validateLoadStep(this.config).enabled();
 		} catch (final RuntimeException e) {
@@ -103,6 +98,18 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		this.standaloneDeletePreValidationEnabled = standaloneDelete.preValidation();
 		this.standaloneDeletePostVerificationEnabled = standaloneDelete.postVerification();
 		Loggers.CONFIG.info(ConfigUtil.toString(this.config, ConfigFormat.YAML, resolveStepTypeName()));
+	}
+
+	private void validateRangeConfiguration() {
+		validateRangeConfig(this.config);
+		if (this.ctxConfigs != null) {
+			this.ctxConfigs.forEach(context -> {
+				final var merged = com.github.akurilov.commons.collection.TreeUtil.reduceForest(
+								List.of(Config.deepToMap(this.config), Config.deepToMap(context)));
+				validateRangeConfig(new com.github.akurilov.confuse.impl.BasicConfig(
+								this.config.pathSep(), this.config.schema(), merged));
+			});
+		}
 	}
 
 	private void validateRangeConfig(final Config value) {
@@ -298,6 +305,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	@Override
 	protected void doStart() throws IllegalStateException {
 
+		validateRangeConfiguration();
 		init();
 		EngineBuildInfoPublisher.global().publishForStep(loadStepId());
 
