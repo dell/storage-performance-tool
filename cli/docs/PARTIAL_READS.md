@@ -1,9 +1,10 @@
 # Partial-object READs
 
 Partial-object READs request one fixed-length byte range per logical READ using the
-Netty S3 driver. This feature is in draft qualification. Local packaged-engine and
-CLI artifact checks have passed; distributed runtime, real-target enablement and
-READ/WRITE performance qualification remain required before release acceptance.
+Netty S3 driver. This feature is in draft qualification. Local and two-worker CLI
+canaries against an S3 target have passed, including range result retrieval.
+The full functional matrix and READ/WRITE performance qualification remain
+required before release acceptance.
 AWS S3 and native S3-RDMA support are deferred.
 
 ## Choose a range
