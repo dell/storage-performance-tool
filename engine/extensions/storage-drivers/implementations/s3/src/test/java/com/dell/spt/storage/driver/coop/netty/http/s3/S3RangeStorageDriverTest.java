@@ -47,8 +47,10 @@ class S3RangeStorageDriverTest {
 									exchange.getRequestHeaders().getFirst("Authorization")));
 					Response response = responses.apply(requestCount.incrementAndGet());
 					if (response.contentRange() != null)
-						exchange.getResponseHeaders().set("Content-Range", response.contentRange().equals("echo")
-										? "bytes " + range.substring(6) + "/*"
+						exchange.getResponseHeaders().set("Content-Range", response.contentRange().startsWith("echo")
+										? "bytes " + range.substring(6) + "/" + (response.contentRange().equals("echo")
+														? "*"
+														: response.contentRange().substring(5))
 										: response.contentRange());
 					byte[] body = response.body().getBytes(StandardCharsets.US_ASCII);
 					exchange.sendResponseHeaders(response.status(), body.length);
@@ -141,6 +143,46 @@ class S3RangeStorageDriverTest {
 			assertEquals(1, f.snapshot().logical().accepted());
 			assertEquals(1, f.snapshot().logical().failed());
 			assertTrue(f.snapshot().logical().reconciled());
+		}
+	}
+
+	@Test
+	void mutableObjectsUseResponseStructureWithoutRefreshingInventoryOrReselecting() throws Exception {
+		record Mutation(String name, Response response, Operation.Status expected) {}
+		var mutations = new Mutation[]{
+				new Mutation("growth", new Response(206, "echo/16", "abc"), Operation.Status.SUCC),
+				new Mutation("shrink-with-valid-span", new Response(206, "echo/5", "abc"), Operation.Status.SUCC),
+				new Mutation("shrink-out-of-bounds", new Response(416, null, "error"), Operation.Status.RESP_FAIL_CLIENT),
+				new Mutation("deletion", new Response(404, null, "missing"), Operation.Status.RESP_FAIL_NOT_FOUND),
+				new Mutation("same-size-replacement", new Response(206, "echo/8", "xyz"), Operation.Status.SUCC)
+		};
+		// Alignment leaves one legal random selection, making the wire assertion deterministic.
+		for (var policy : new RangeReadPolicy[]{new RangeReadPolicy(3, 2L, 1), new RangeReadPolicy(3, null, 8)}) {
+			for (var mutation : mutations) {
+				try (var f = new Fixture(policy, false,
+								n -> n == 1 ? mutation.response() : new Response(206, "echo/8", "abc"))) {
+					var op = f.read(mutation.name(), 8);
+					assertEquals(mutation.expected(), f.outcome(), mutation.name());
+					assertEquals(8, op.item().size(), "Response size must not replace inventory size");
+					assertEquals(1, f.requestCount.get(), "No metadata probe or fallback GET");
+					var request = f.requests.poll();
+					assertNotNull(request);
+					assertEquals("GET", request.method());
+					assertEquals("/bucket/" + mutation.name(), request.path());
+					assertEquals(policy.equals(new RangeReadPolicy(3, 2L, 1)) ? "bytes=2-4" : "bytes=0-2", request.range());
+					boolean success = mutation.expected() == Operation.Status.SUCC;
+					assertEquals(success ? 3 : 0, f.snapshot().successfulBytes());
+					assertEquals(success ? 0 : 1, f.snapshot().httpFailures());
+					assertEquals(0, f.snapshot().responseValidationFailures());
+					f.read("after-mutation", 8);
+					assertEquals(Operation.Status.SUCC, f.outcome());
+					assertEquals(2, f.requestCount.get());
+					assertEquals(2, f.snapshot().requestsSent());
+					assertEquals(success ? 2 : 1, f.snapshot().logical().accepted());
+					assertEquals(success ? 0 : 1, f.snapshot().logical().failed());
+					assertTrue(f.snapshot().reconciled());
+				}
+			}
 		}
 	}
 
