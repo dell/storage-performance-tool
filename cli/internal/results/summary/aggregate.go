@@ -117,6 +117,7 @@ type WorkloadSummary struct {
 
 // StepSummary aggregates per-step metrics and artifact health.
 type StepSummary struct {
+	RangeRead          *RangeReadEvidence
 	Ordinal            int
 	StepID             string
 	PhaseLabel         string
@@ -373,6 +374,7 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 			continue
 		}
 		summary := StepSummary{
+			RangeRead:       stepData.RangeRead,
 			Ordinal:         idx + 1,
 			StepID:          stepData.StepID,
 			PhaseLabel:      phaseLabelFromStep(stepData.StepID),

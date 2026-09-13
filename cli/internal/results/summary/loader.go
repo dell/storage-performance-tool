@@ -51,6 +51,7 @@ type RunData struct {
 
 // StepData captures per-step artifact availability and metrics totals.
 type StepData struct {
+	RangeRead         *RangeReadEvidence
 	StepID            string
 	Manifest          *results.StepManifest
 	Metrics           *MetricsTotals
@@ -217,6 +218,22 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 			step.MissingRequired = appendUnique(step.MissingRequired, constants.ResultsArtifactSuffixMetricsTotal)
 			if metricsEntry != nil && metricsEntry.Status != fileStatusOK && metricsEntry.Error != "" {
 				step.Notes = append(step.Notes, metricsEntry.Error)
+			}
+		}
+
+		rangeEvidence, rangeErr := loadRangeRead(runDir, sm)
+		if rangeErr == nil && rangeEvidence != nil && params.ScenarioParams.RunID > 0 && rangeEvidence.Rows[0].RunID != fmt.Sprint(params.ScenarioParams.RunID) {
+			rangeErr = fmt.Errorf("partial READ artifact engine run identity does not match run metadata")
+		}
+		if rangeErr != nil {
+			step.Status = StepStatusError
+			step.Notes = append(step.Notes, fmt.Sprintf("partial READ artifact error: %v", rangeErr))
+			stepErrs = append(stepErrs, fmt.Errorf("step %s: %w", sm.StepID, rangeErr))
+		} else {
+			step.RangeRead = rangeEvidence
+			if rangeEvidence != nil && !rangeEvidence.Complete {
+				step.Status = StepStatusPartial
+				step.Notes = append(step.Notes, "Partial READ evidence is not terminal")
 			}
 		}
 
