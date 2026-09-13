@@ -301,6 +301,41 @@ class S3RangeStorageDriverTest {
 	}
 
 	@Test
+	void closingDriverSettlesActiveTransportOnceWithoutRetryingAfterAdmissionCloses() throws Exception {
+		var release = new CountDownLatch(1);
+		try (var f = new Fixture(new RangeReadPolicy(3, 2L, 1), true, n -> {
+			try {
+				release.await(5, TimeUnit.SECONDS);
+			} catch (InterruptedException interrupted) {
+				Thread.currentThread().interrupt();
+			}
+			return new Response(206, "echo/10", "abc");
+		})) {
+			try {
+				f.read("close-in-flight", 10);
+				assertNotNull(f.requests.poll(3, TimeUnit.SECONDS));
+				assertEquals(1, f.driver.activeRangeTransports());
+				f.runtime.closeAdmission();
+				f.driver.closeAdmission();
+				// Match LoadStepContextImpl.prepareOperationDrain before closing transport.
+				f.runtime.closeRetries();
+				f.driver.close();
+				assertEquals(Operation.Status.FAIL_IO, f.outcome());
+				assertEquals(1, f.snapshot().requestsSent());
+				assertEquals(1, f.snapshot().transportAttemptFailures());
+				assertEquals(1, f.snapshot().logical().failed());
+				assertEquals(0, f.snapshot().successfulBytes());
+				assertTrue(f.snapshot().reconciled());
+				assertTrue(f.terminal.isEmpty(), "Driver close must not publish duplicate terminal results");
+				assertTrue(f.results.isEmpty());
+				assertEquals(1, f.requestCount.get(), "Closed admission must prevent retries");
+			} finally {
+				release.countDown();
+			}
+		}
+	}
+
+	@Test
 	void drainFencesQueuedWorkAndRetainsUnresolvedDispatchedAttempt() throws Exception {
 		var release = new CountDownLatch(1);
 		try (var f = new Fixture(new RangeReadPolicy(3, 2L, 1), false, n -> {
