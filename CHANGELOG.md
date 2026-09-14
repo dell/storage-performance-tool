@@ -18,6 +18,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - **Engine build mismatch policy** — `spt run` and `spt replay` reject known engine build mismatches by default. In addition to supported port-conflict handling, `--force` now permits a known build mismatch and records a prominent warning and forced-mismatch evidence; it cannot bypass malformed build information or collection failures.
 
+### Fixed
+
+- **Worker startup timeout** — Isolated advertised-IP detection's 10-second timeout from container startup and API readiness, preventing premature worker failures while preserving caller cancellation.
+
+- **`spt replay` exit after completion** — `spt replay` could finish its workload, fetch results, stop containers, and print the summary, then never exit. The auto-results completion tracker was not bound to the replay run session, so the launcher was only released by the metrics-based completion heuristic, which does not fire for small distributed op-count replays. Replay now shares the authoritative terminal signal with `spt run`.
+
 ## [5.14.2] - 2026-08-13
 
 ### Changed
