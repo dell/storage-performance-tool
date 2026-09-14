@@ -102,6 +102,9 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--object-count` | `-n` | `0` | Fixed number of objects to process. Seeded DELETE creates and selects exactly this many global identities (`0` resolves to 2,500 in finite default mode). With `read-verify --versions=all`, caps canonical version identities rather than distinct keys. In manifest or existing-prefix DELETE, it caps the globally sorted, de-duplicated object selection rather than DELETE requests (`0` means all discovered identities) |
 | `--duration` | `-d` | `""` | Fixed time duration (e.g., `5m`, `1h`). Standalone DELETE requires enough finite live inventory to remain schedulable for the full interval |
 | `--prefix-shards` | | `-1` | Prefix directories for generated write, write-verify, mixed, and seeded-read object keys. `-1` derives the count from aggregate configured concurrency, `0` disables sharding, and a positive value selects an exact count |
+| `--range-size` | | `""` | Opt-in single-range READ length, e.g. `64KiB`; positive, Netty S3 only |
+| `--range-offset` | | `""` | Fixed byte offset, including `0`; omitted selects a random offset from inventory size. Requires `--range-size` |
+| `--range-align` | | `""` | Alignment in bytes or binary units; omitted, `0`, and `1` mean byte alignment. Fixed offsets must be divisible by effective alignment. Requires `--range-size`; positive `--part-size` conflicts |
 | `--seed-objects` | | `2500` | Objects to pre-create for `read` benchmarks and duration-based standalone DELETE |
 | `--checksum` | | `""` | Enable S3 checksum validation with the specified algorithm: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`. Omit to disable checksums. When set with `--part-size`, checksums are applied per part. (env: `SPT_CHECKSUM`) |
 | `--object-data-compressibility` | | `0` | Target compressibility percentage for generated object data (0-100). Each 4KB chunk is split into random and zero-filled portions. 0 = fully random, 100 = fully compressible. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`) |
@@ -136,6 +139,11 @@ objects: `--object-count` caps its deterministic discovery selection and
 `--attach-existing`; both require automatic result collection. See
 [S3_INTEGRITY.md](S3_INTEGRITY.md) for metadata, artifacts, resumability, empty
 selection behavior, and exit codes `0`, `1`, and `20`.
+
+For fixed/random partial READ examples, supported combinations, count/retry
+semantics, and `range.read.csv`, see [Partial-object READs](PARTIAL_READS.md).
+Range policy applies only to the READ phase; seed and cleanup operate on whole
+objects. Use the public range flags rather than global range-policy overrides.
 
 #### Count and duration DELETE contract
 

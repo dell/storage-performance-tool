@@ -1,4 +1,9 @@
-# Byte Ranges Operations
+# Byte-range operations
+
+For fixed-length single-range S3 READs, use the [single-range configuration](#fixed-size-single-range-read-configuration)
+or the [CLI guide](../../../../../../../../cli/docs/PARTIAL_READS.md).
+Sections 1–4 below describe the separate legacy `item.data.ranges` interface;
+do not combine active legacy ranges with the single-range READ policy.
 
 Partial write/read and append operations performance is the subject of interest also in some cases.
 To configure the partial/append operations it's necessary to specify the byte ranges to work with somehow.
@@ -141,7 +146,7 @@ java -jar spt-<VERSION>.jar \
 	...
 ```
 
-### Fixed-size single-range READ configuration (draft)
+## Fixed-size single-range READ configuration
 
 The separate `load.op.read.range` configuration uses nullable string values:
 
@@ -174,7 +179,7 @@ updates are unsupported. Active legacy fixed/random ranges or a positive splitti
 threshold conflict with this mode. Disabled single-range configuration preserves
 legacy behavior; inert legacy settings remain allowed.
 
-The draft Netty S3 factory installs a dedicated range driver and matching runtime.
+The Netty S3 factory installs a dedicated range driver and matching runtime.
 Linear, pipeline and weighted steps pass their effective policy during construction.
 Other factories must explicitly implement `RangeReadDriverFactory`; configured range
 mode cannot silently execute a whole-object READ. Disabled mode retains ordinary
@@ -187,20 +192,19 @@ preflight object or bucket request. A fixed span is sent unchanged even when the
 inventory size is smaller. Responses require strict status, range metadata, body
 length and framing validation; rejected responses close the connection.
 
-This remains draft functionality. Local packaged-engine scenario activation,
-artifact collection, log API discovery and CLI retrieval have been exercised.
-Distributed runtime, real-target enablement and READ/WRITE performance qualification
-remain required; local checks are not release qualification.
+READ/WRITE performance qualification remains pending. See the CLI guide below
+for the release-qualification status; functional checks do not establish parity.
 
 For CLI examples, aligned selection, full-span requests and mutable datasets, see
 [Partial-object READs](../../../../../../../../cli/docs/PARTIAL_READS.md).
 
-### Terminal partial-read evidence (draft)
+## Terminal partial-read evidence
 
 Partial READ contexts publish `range.read.csv` through the `RangeRead` logger after
 stop. The coordinator collects worker rows and preserves `range.read.node-NNN.csv`
-sources. The CLI fetches and indexes these optional artifacts; ordinary workloads
-produce no range artifact.
+sources. The CLI fetches and indexes these artifacts. A known partial-read step requires
+the canonical artifact; it remains optional for ordinary workloads, which produce
+no range artifact.
 
 Schema version 1 identifies the engine run, step, worker and context index. Each
 row records fixed/random mode, requested size, explicit fixed-offset presence and
@@ -210,7 +214,10 @@ Successful bytes include only structurally validated responses. Logical outcomes
 logical reads, sent requests, and per-transport-attempt failure counters. HTTP,
 response-validation, transport and local-selection failures have separate fields.
 Failed/unresolved received bytes count delivered response-body bytes, not network
-wire bytes. No object keys, credentials, or per-operation records are emitted.
+wire bytes. The aggregate range artifact contains no object keys, credentials, or
+per-operation records. Optional `output.metrics.trace.persist=true` emits the
+separate `op.trace.csv`, including determinate local selection failures. It is
+disabled by default and does include item paths.
 
 `terminal=true` requires completed contexts and reconciled counters; inspect the
 lifecycle fields and `overflow` alongside it. Source rows must be counted once:
