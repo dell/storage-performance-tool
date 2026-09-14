@@ -103,8 +103,7 @@ public abstract class HttpResponseHandlerBase<I extends Item, O extends Operatio
 	protected void handleResponseContentChunk(final Channel channel, final O op, final ByteBuf contentChunk)
 					throws IOException {
 		if (OpType.READ.equals(op.type())) {
-			if (op instanceof DataOperation) {
-				final DataOperation dataOp = (DataOperation) op;
+			if (op instanceof DataOperation dataOp) {
 				final long countBytesDone = dataOp.countBytesDone();
 				final int chunkSize = contentChunk.readableBytes();
 				if (chunkSize > 0) {
@@ -119,8 +118,7 @@ public abstract class HttpResponseHandlerBase<I extends Item, O extends Operatio
 						dataOp.countBytesDone(countBytesDone + chunkSize);
 					}
 				}
-			} else if (op instanceof PathOperation) {
-				final PathOperation pathOp = (PathOperation) op;
+			} else if (op instanceof PathOperation pathOp) {
 				final long countBytesDone = pathOp.countBytesDone();
 				final int chunkSize = contentChunk.readableBytes();
 				if (chunkSize > 0) {
@@ -129,8 +127,7 @@ public abstract class HttpResponseHandlerBase<I extends Item, O extends Operatio
 					}
 					pathOp.countBytesDone(countBytesDone + chunkSize);
 				}
-			} else if (op instanceof TokenOperation) {
-				final TokenOperation tokenOp = (TokenOperation) op;
+			} else if (op instanceof TokenOperation tokenOp) {
 				final long countBytesDone = tokenOp.countBytesDone();
 				final int chunkSize = contentChunk.readableBytes();
 				if (chunkSize > 0) {

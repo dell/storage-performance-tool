@@ -12,5 +12,6 @@ public interface SigningKeyCreateFunction
 	 * @param datestamp the scope name
 	 * @return the created signing key
 	 */
+	@Override
 	byte[] apply(final String datestamp);
 }

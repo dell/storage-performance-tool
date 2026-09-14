@@ -50,3 +50,19 @@ dependencies {
 
 // S3-specific comment configuration (preserved from original)
 // Code Formatting /////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Wire encodings must not depend on the JVM's host charset. Run in a fresh JVM
+// because Charset.defaultCharset() is initialized before any individual test.
+def wireEncodingTest = tasks.register('wireEncodingTest', Test) {
+	group = 'verification'
+	description = 'Verify S3 wire bytes with a non-UTF-8 default charset'
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform()
+	include '**/S3WireEncodingTest.class'
+	jvmArgs '-Dfile.encoding=ISO-8859-1'
+	systemProperty 'spt.test.expectedCharset', 'ISO-8859-1'
+}
+tasks.named('test') {
+	dependsOn wireEncodingTest
+}

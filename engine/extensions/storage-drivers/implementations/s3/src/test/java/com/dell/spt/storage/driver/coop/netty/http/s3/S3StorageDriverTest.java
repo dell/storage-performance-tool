@@ -239,11 +239,7 @@ public class S3StorageDriverTest {
 			config.val("storage-net-node-port", 9024);
 			config.val("storage-net-node-connAttemptsLimit", 0);
 			// HTTP
-			config.val("storage-net-http-headers", new HashMap<String, String>() {
-				{
-					put("Date", "#{date:formatNowRfc1123()}%{date:formatNowRfc1123()}");
-				}
-			});
+			config.val("storage-net-http-headers", new HashMap<>(Map.of("Date", "#{date:formatNowRfc1123()}%{date:formatNowRfc1123()}")));
 			config.val("storage-net-http-read-metadata-only", false);
 			config.val("storage-net-http-max-chunk-size", 65536);
 			config.val("storage-net-http-uri-args", Map.of());
@@ -935,7 +931,7 @@ public class S3StorageDriverTest {
 		final Operation<Item> op = new OperationImpl<>(1, OpType.CREATE, dataItem, null, "/bucket", TEST_CRED);
 		final HttpHeaders headers = new DefaultHttpHeaders();
 		drv.applyChecksum(headers, op);
-		assertFalse(headers.names().stream().anyMatch(name -> name.toString().toLowerCase().startsWith("x-amz-checksum-")));
+		assertFalse(headers.names().stream().anyMatch(name -> name.toString().toLowerCase(java.util.Locale.ROOT).startsWith("x-amz-checksum-")));
 		assertNull(headers.get(HttpHeaderNames.CONTENT_MD5));
 		Mockito.verify(dataItem, Mockito.times(1)).reset();
 	}
@@ -948,7 +944,7 @@ public class S3StorageDriverTest {
 		final Operation<Item> op = new OperationImpl<>(1, OpType.CREATE, dataItem, null, "/bucket", TEST_CRED);
 		final HttpHeaders headers = new DefaultHttpHeaders();
 		drv.applyChecksum(headers, op);
-		assertFalse(headers.names().stream().anyMatch(name -> name.toString().toLowerCase().startsWith("x-amz-checksum-")));
+		assertFalse(headers.names().stream().anyMatch(name -> name.toString().toLowerCase(java.util.Locale.ROOT).startsWith("x-amz-checksum-")));
 		assertNull(headers.get(HttpHeaderNames.CONTENT_MD5));
 		Mockito.verify(dataItem, Mockito.never()).read(Mockito.any(ByteBuffer.class));
 		Mockito.verify(dataItem, Mockito.never()).reset();
@@ -1257,7 +1253,7 @@ public class S3StorageDriverTest {
 		HttpRequest req = drv.partUploadRequest(slice, "s3.us-east-1.amazonaws.com");
 		// No x-amz-checksum-* header should be present
 		boolean hasChecksumHeader = req.headers().names().stream().anyMatch(
-						name -> name.toString().toLowerCase().startsWith("x-amz-checksum-"));
+						name -> name.toString().toLowerCase(java.util.Locale.ROOT).startsWith("x-amz-checksum-"));
 		assertFalse(hasChecksumHeader, "Part upload should not include checksum header when checksums disabled");
 		assertNull(req.headers().get(HttpHeaderNames.CONTENT_MD5), "No Content-MD5 when checksums disabled");
 	}
@@ -1920,7 +1916,9 @@ public class S3StorageDriverTest {
 		// Allow async logger thread to finish processing before removing the appender
 		try {
 			Thread.sleep(50);
-		} catch (InterruptedException ignored) {}
+		} catch (InterruptedException ignored) {
+			Thread.currentThread().interrupt();
+		}
 		var logger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.MULTIPART.getName());
 		logger.removeAppender(appender);
 		appender.stop();
@@ -2058,7 +2056,7 @@ public class S3StorageDriverTest {
 		// 4 PART rows + 1 COMPLETE row
 		assertEquals(5, capture.messages.size(), "4 PART + 1 COMPLETE rows expected");
 		for (int i = 0; i < 4; i++) {
-			String[] cols = capture.messages.get(i).split(",");
+			String[] cols = capture.messages.get(i).split(",", 0);
 			assertEquals(8, cols.length, "PART row should have 8 CSV columns");
 			assertEquals("PART", cols[0]);
 			assertEquals("/bucket/obj", cols[1], "ItemPath should be the composite item name");
@@ -2070,7 +2068,7 @@ public class S3StorageDriverTest {
 			assertDoesNotThrow(() -> Long.parseLong(cols[6]), "Latency should be numeric");
 			assertEquals("1024", cols[7], "Bytes should equal the part size");
 		}
-		String[] completeCols = capture.messages.get(4).split(",");
+		String[] completeCols = capture.messages.get(4).split(",", 0);
 		assertEquals(8, completeCols.length, "COMPLETE row should have 8 CSV columns");
 		assertEquals("COMPLETE", completeCols[0]);
 		assertEquals("/bucket/obj", completeCols[1]);
@@ -2103,7 +2101,7 @@ public class S3StorageDriverTest {
 		}
 
 		assertEquals(1, capture.messages.size(), "Exactly one ABORT log row expected");
-		String[] cols = capture.messages.get(0).split(",");
+		String[] cols = capture.messages.get(0).split(",", 0);
 		assertEquals(8, cols.length, "ABORT row should have 8 CSV columns");
 		assertEquals("ABORT", cols[0]);
 		assertEquals("", cols[2], "UploadId should be empty when not set");
@@ -2139,11 +2137,11 @@ public class S3StorageDriverTest {
 		assertEquals(6, capture.messages.size(), "5 PART + 1 COMPLETE rows expected");
 		// First 4 parts: 1024 bytes each
 		for (int i = 0; i < 4; i++) {
-			String[] cols = capture.messages.get(i).split(",");
+			String[] cols = capture.messages.get(i).split(",", 0);
 			assertEquals("1024", cols[7], "Full part should be 1024 bytes");
 		}
 		// Tail part: 904 bytes
-		String[] tailCols = capture.messages.get(4).split(",");
+		String[] tailCols = capture.messages.get(4).split(",", 0);
 		assertEquals("PART", tailCols[0]);
 		assertEquals("5", tailCols[3], "Tail part number should be 5");
 		assertEquals("904", tailCols[7], "Tail part should be 904 bytes");

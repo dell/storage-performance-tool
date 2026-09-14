@@ -187,7 +187,7 @@ lint: spotless errorprone
 # Run Error Prone analysis (compile-only)
 errorprone:
 	@echo "Running Error Prone analysis (compileJava + compileTestJava)..."
-	@bash -c 'set -o pipefail; $(GRADLE) -I tools/errorprone-init.gradle :core:spt-base:compileJava :core:spt-base:compileTestJava --rerun-tasks -x test 2>&1 | tee errorprone_scan.txt'
+	@bash -c 'set -o pipefail; $(GRADLE) -I tools/errorprone-init.gradle :core:spt-base:compileJava :core:spt-base:compileTestJava :extensions:storage-drivers:primitives:netty:compileTestJava :extensions:storage-drivers:protocols:http:compileTestJava :extensions:storage-drivers:implementations:s3:compileTestJava --rerun-tasks -x test 2>&1 | tee errorprone_scan.txt'
 
 # Apply spotless formatting only
 spotless:

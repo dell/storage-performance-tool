@@ -38,6 +38,7 @@ public final class NettyStorageDriverMock<I extends Item, O extends Operation<I>
 		super(stepId, itemDataInput, storageConfig, verifyFlag, batchSize);
 	}
 
+	@Override
 	protected NonBlockingConnPool createConnectionPool() {
 		return new MultiNodeConnPoolMock(
 						storageNodeAddrs, bootstrap, this, storageNodePort, connAttemptsLimit);
@@ -60,9 +61,7 @@ public final class NettyStorageDriverMock<I extends Item, O extends Operation<I>
 				}
 			} else if (OpType.UPDATE.equals(opType)) {
 				final I item = op.item();
-				if (item instanceof DataItem) {
-
-					final DataItem dataItem = (DataItem) item;
+				if (item instanceof DataItem dataItem) {
 					final DataOperation dataOp = (DataOperation) op;
 
 					final List<Range> fixedRanges = dataOp.fixedRanges();
@@ -74,7 +73,9 @@ public final class NettyStorageDriverMock<I extends Item, O extends Operation<I>
 					dataOp.countBytesDone(dataOp.markedRangesSize());
 				}
 			}
-		} catch (final IOException ignored) {}
+		} catch (final IOException ignored) {
+			// This synthetic driver intentionally completes without real item I/O.
+		}
 
 		op.status(Operation.Status.SUCC);
 		try {

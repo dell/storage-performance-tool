@@ -158,7 +158,7 @@ final class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOper
 					break;
 				final var stale = channel;
 				channel = null;
-				stale.close();
+				final var unusedClose = stale.close();
 				rangePool.release(stale);
 			}
 			if (channel == null) {
@@ -168,7 +168,7 @@ final class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOper
 			}
 			final var flight = new Flight(op, op.circulation(), attempt, channel);
 			if (flights.putIfAbsent(attempt, flight) != null) {
-				channel.close();
+				final var unusedClose = channel.close();
 				rangePool.release(channel);
 				concurrencyThrottle.release();
 				return true;
@@ -236,11 +236,13 @@ final class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOper
 		if (flight == null || flight.channel() != channel || !flights.remove(attempt, flight))
 			return;
 		try {
-			if (!reusable)
-				channel.close();
+			if (!reusable) {
+				// Logical settlement and permit release do not await transport teardown.
+				final var unusedClose = channel.close();
+			}
 			rangePool.release(channel);
 		} catch (RuntimeException failure) {
-			channel.close();
+			final var unusedClose = channel.close();
 			recordTerminalFailure(new IntegrityTerminalException(IntegrityTerminalException.Category.EXECUTION,
 							"Range transport cleanup failed", failure));
 		} finally {

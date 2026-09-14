@@ -171,16 +171,16 @@ final class DeleteObjectsXmlHandler extends DefaultHandler {
 	private void setScalar(final String name, final String value) throws SAXException {
 		switch (name) {
 		case KEY:
-			key = setOnce(key, value, KEY);
+			key = setOnce(key, value);
 			break;
 		case VERSION_ID:
-			versionId = setOnce(versionId, value, VERSION_ID);
+			versionId = setOnce(versionId, value);
 			break;
 		case CODE:
-			code = setOnce(code, value, CODE);
+			code = setOnce(code, value);
 			break;
 		case MESSAGE:
-			message = setOnce(message, value, MESSAGE);
+			message = setOnce(message, value);
 			break;
 		default:
 			// Delete-marker response metadata is not part of the requested identity.
@@ -188,7 +188,7 @@ final class DeleteObjectsXmlHandler extends DefaultHandler {
 	}
 
 	private static String setOnce(
-					final String current, final String value, final String field) throws SAXException {
+					final String current, final String value) throws SAXException {
 		if (current != null) {
 			throw failure(FailureClass.INVALID_ENTRY, StructuralContext.ENTRY_FIELD);
 		}

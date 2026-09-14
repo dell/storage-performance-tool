@@ -79,6 +79,7 @@ class RangeReadResponseHandlerTest {
 			channel.runPendingTasks();
 		}
 
+		@Override
 		public void close() {
 			channel.finishAndReleaseAll();
 		}
@@ -195,7 +196,7 @@ class RangeReadResponseHandlerTest {
 			c.channel.pipeline().fireUserEventTriggered(IdleStateEvent.FIRST_READER_IDLE_STATE_EVENT);
 			c.channel.runPendingTasks();
 			assertEquals(Operation.Status.FAIL_TIMEOUT, attempt.outcome().status());
-			c.channel.close();
+			c.channel.close().syncUninterruptibly();
 			c.channel.runPendingTasks();
 			assertEquals(1, c.results.size());
 			assertEquals(3, attempt.outcome().receivedBytes());
@@ -207,7 +208,7 @@ class RangeReadResponseHandlerTest {
 		try (var c = new Connection()) {
 			var attempt = c.begin();
 			c.receive("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 2-4/8\r\nContent-Length: 3\r\n\r\na");
-			c.channel.close();
+			c.channel.close().syncUninterruptibly();
 			c.channel.runPendingTasks();
 			assertEquals(RangeReadAttempt.Category.TRANSPORT, attempt.outcome().category());
 			assertEquals(1, c.results.size());
@@ -246,7 +247,7 @@ class RangeReadResponseHandlerTest {
 			var attempt = c.begin();
 			c.receive("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 2-4/8\r\nConnection: close\r\n\r\nabc");
 			assertNull(attempt.outcome());
-			c.channel.close();
+			c.channel.close().syncUninterruptibly();
 			c.channel.runPendingTasks();
 			assertEquals(RangeReadAttempt.Category.SUCCESS, attempt.outcome().category());
 			assertEquals(List.of(new Result(attempt, false)), c.results);

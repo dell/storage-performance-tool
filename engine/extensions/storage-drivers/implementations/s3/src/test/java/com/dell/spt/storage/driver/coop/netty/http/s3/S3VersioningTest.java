@@ -94,11 +94,7 @@ public class S3VersioningTest
 			config.val("storage-object-versioning", true);
 			config.val(
 							"storage-net-http-headers",
-							new HashMap<String, String>() {
-								{
-									put("Date", "#{date:formatNowRfc1123()}%{date:formatNowRfc1123()}");
-								}
-							});
+							new HashMap<>(Map.of("Date", "#{date:formatNowRfc1123()}%{date:formatNowRfc1123()}")));
 			config.val("storage-net-http-read-metadata-only", false);
 			config.val("storage-net-http-uri-args", Collections.EMPTY_MAP);
 			config.val("storage-auth-uid", CREDENTIAL.getUid());
@@ -195,6 +191,8 @@ public class S3VersioningTest
 
 	private static void assertCloseToNow(final Instant instant) {
 		final long now = Instant.now().toEpochMilli();
-		assertEquals(now, instant.toEpochMilli(), DATE_TOLERANCE_MILLIS);
+		final long actual = instant.toEpochMilli();
+		org.junit.jupiter.api.Assertions.assertTrue(actual >= now - DATE_TOLERANCE_MILLIS && actual <= now + DATE_TOLERANCE_MILLIS,
+						() -> "Expected timestamp within " + DATE_TOLERANCE_MILLIS + " ms of " + now + ", got " + actual);
 	}
 }

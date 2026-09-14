@@ -61,7 +61,7 @@ final class S3ResponseHandlerListTest {
 			assertEquals("token-123", op.continuationToken());
 			assertEquals(0, S3ResponseHandler.activeListSpoolCount());
 		} finally {
-			channel.close();
+			channel.close().syncUninterruptibly();
 			payload.release();
 		}
 	}
@@ -78,7 +78,7 @@ final class S3ResponseHandlerListTest {
 			op.status(Operation.Status.SUCC);
 			handler.handleResponseContentFinish(channel, asItemOperation(op));
 		} finally {
-			channel.close();
+			channel.close().syncUninterruptibly();
 			payload.release();
 		}
 	}
@@ -102,7 +102,7 @@ final class S3ResponseHandlerListTest {
 			assertTrue(op.listedObjects() == null || op.listedObjects().isEmpty());
 			assertEquals(0, S3ResponseHandler.activeListSpoolCount());
 		} finally {
-			channel.close();
+			channel.close().syncUninterruptibly();
 			malformed.release();
 		}
 	}
@@ -130,7 +130,7 @@ final class S3ResponseHandlerListTest {
 			assertEquals(0, op.objectsListed());
 			assertEquals(0, S3ResponseHandler.activeListSpoolCount());
 		} finally {
-			channel.close();
+			channel.close().syncUninterruptibly();
 			malformed.release();
 			ordinaryDriver.close();
 		}
@@ -162,7 +162,7 @@ final class S3ResponseHandlerListTest {
 			assertEquals(2000, op.objectsListed());
 			assertEquals(0, S3ResponseHandler.activeListSpoolCount());
 		} finally {
-			channel.close();
+			channel.close().syncUninterruptibly();
 		}
 	}
 
@@ -179,7 +179,7 @@ final class S3ResponseHandlerListTest {
 			assertEquals(Operation.Status.RESP_FAIL_CLIENT, op.status());
 			assertEquals(0, S3ResponseHandler.activeListSpoolCount());
 		} finally {
-			channel.close();
+			channel.close().syncUninterruptibly();
 		}
 	}
 
@@ -211,7 +211,7 @@ final class S3ResponseHandlerListTest {
 				overflow.release();
 			}
 		} finally {
-			channel.close();
+			channel.close().syncUninterruptibly();
 		}
 	}
 

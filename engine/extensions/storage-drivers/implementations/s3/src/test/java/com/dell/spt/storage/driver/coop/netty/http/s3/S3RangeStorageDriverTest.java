@@ -42,7 +42,8 @@ class S3RangeStorageDriverTest {
 		@SuppressWarnings("unchecked")
 		Fixture(RangeReadPolicy policy, boolean retry, IntFunction<Response> responses) throws Exception {
 			this.policy = policy;
-			server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 8);
+			server = HttpServer.create(new InetSocketAddress(java.net.InetAddress.getByAddress(new byte[]{127, 0, 0, 1
+			}), 0), 8);
 			server.setExecutor(serverThreads);
 			server.createContext("/", exchange -> {
 				try (exchange) {
@@ -111,6 +112,7 @@ class S3RangeStorageDriverTest {
 			return runtime.snapshot();
 		}
 
+		@Override
 		public void close() throws Exception {
 			try {
 				runtime.closeAdmission();

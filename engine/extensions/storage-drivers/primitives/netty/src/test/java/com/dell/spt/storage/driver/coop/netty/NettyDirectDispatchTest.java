@@ -109,7 +109,7 @@ class NettyDirectDispatchTest {
 		assertEquals(Boolean.FALSE, channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).get(),
 						"the channel is held again on behalf of the next operation");
 		assertTrue(channel.isActive());
-		channel.close();
+		channel.close().syncUninterruptibly();
 	}
 
 	@Test
@@ -123,7 +123,7 @@ class NettyDirectDispatchTest {
 		verify(connPool).release(channel);
 		verify(driver, never()).sendRequest(any(), any());
 		assertEquals(Boolean.TRUE, channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).get());
-		channel.close();
+		channel.close().syncUninterruptibly();
 	}
 
 	@Test
@@ -139,7 +139,7 @@ class NettyDirectDispatchTest {
 		verify(driver, never()).sendRequest(any(), any());
 		assertEquals(1, concurrencyThrottle.availablePermits());
 		verify(connPool).release(channel);
-		channel.close();
+		channel.close().syncUninterruptibly();
 	}
 
 	@Test
@@ -172,7 +172,7 @@ class NettyDirectDispatchTest {
 		verify(driver, never()).sendRequest(any(), any());
 		assertEquals(1, concurrencyThrottle.availablePermits());
 		verify(connPool).release(channel);
-		channel.close();
+		channel.close().syncUninterruptibly();
 	}
 
 	@Test
@@ -189,13 +189,13 @@ class NettyDirectDispatchTest {
 		verify(driver, never()).sendRequest(any(), any());
 		assertEquals(1, concurrencyThrottle.availablePermits());
 		verify(connPool).release(channel);
-		channel.close();
+		channel.close().syncUninterruptibly();
 	}
 
 	@Test
 	void inactiveChannelIsReleasedNotReused() {
 		final var channel = heldChannel();
-		channel.close();
+		channel.close().syncUninterruptibly();
 		final var done = completedOp(Operation.Status.SUCC);
 		inOpQueue.add(nextOp());
 
@@ -220,7 +220,7 @@ class NettyDirectDispatchTest {
 		verify(driver, never()).sendRequest(any(), any());
 		assertEquals(1, concurrencyThrottle.availablePermits());
 		verify(connPool).release(channel);
-		channel.close();
+		channel.close().syncUninterruptibly();
 	}
 
 	@Test
@@ -236,7 +236,7 @@ class NettyDirectDispatchTest {
 		verify(driver, never()).sendRequest(any(), any());
 		assertEquals(0, concurrencyThrottle.availablePermits(), "a released channel owns no permit to give back");
 		verify(connPool, never()).release(channel);
-		channel.close();
+		channel.close().syncUninterruptibly();
 	}
 
 	@Test
@@ -269,6 +269,6 @@ class NettyDirectDispatchTest {
 		verify(connPool).release(channel);
 		verify(driver, never()).sendRequest(any(), any());
 		assertEquals(1, inOpQueue.size(), "nothing is polled once completion has failed");
-		channel.close();
+		channel.close().syncUninterruptibly();
 	}
 }

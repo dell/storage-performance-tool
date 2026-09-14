@@ -107,13 +107,6 @@ class NettyCompletionPathTest {
 		return channel;
 	}
 
-	private EmbeddedChannel newResubmitChannel() {
-		final var channel = new EmbeddedChannel();
-		channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.FALSE);
-		channel.attr(NonBlockingConnPool.ATTR_KEY_NODE).set("test-node:9020");
-		return channel;
-	}
-
 	@Test
 	void complete_releasesPermitAndChannel() throws Exception {
 		final var channel = newChannelWithReleasedFlag();
@@ -127,7 +120,7 @@ class NettyCompletionPathTest {
 
 		assertEquals(1, concurrencyThrottle.availablePermits(), "permit should be released");
 		verify(connPool).release(channel);
-		channel.close();
+		channel.close().syncUninterruptibly();
 	}
 
 	@Test
@@ -195,7 +188,7 @@ class NettyCompletionPathTest {
 		driver.complete(channel, op);
 
 		verify(opResultOut).put(resultCopy);
-		channel.close();
+		channel.close().syncUninterruptibly();
 	}
 
 	@Test
@@ -208,7 +201,7 @@ class NettyCompletionPathTest {
 		driver.complete(channel, op);
 
 		verify(op).finishResponse();
-		channel.close();
+		channel.close().syncUninterruptibly();
 	}
 
 	@Test
@@ -234,7 +227,7 @@ class NettyCompletionPathTest {
 		driver.complete(channel, op);
 
 		assertTrue(channel.isOpen(), "channel should remain open on success");
-		channel.close();
+		channel.close().syncUninterruptibly();
 	}
 
 	@Test
@@ -255,7 +248,7 @@ class NettyCompletionPathTest {
 		assertEquals(1, concurrencyThrottle.availablePermits(),
 						"permit should only be released once even with double complete");
 		verify(connPool, times(1)).release(channel);
-		channel.close();
+		channel.close().syncUninterruptibly();
 	}
 
 	@Test
@@ -284,7 +277,7 @@ class NettyCompletionPathTest {
 		driver.complete(channel, op);
 
 		assertEquals(1, driver.completedOpCount(), "completedOpCount should be incremented");
-		channel.close();
+		channel.close().syncUninterruptibly();
 	}
 
 	@Test
@@ -310,7 +303,7 @@ class NettyCompletionPathTest {
 
 		verify(connPool, never()).lease();
 		assertEquals(4, sem.availablePermits(), "deprecated hook must not retain the completion permit");
-		channel.close();
+		channel.close().syncUninterruptibly();
 	}
 
 	// ---------- Timing accuracy tests ----------
@@ -339,7 +332,7 @@ class NettyCompletionPathTest {
 						"respTimeDone must be <= time just after complete() call");
 		assertTrue(realOp.duration() > 0,
 						"duration (respTimeDone - reqTimeStart) should be positive");
-		channel.close();
+		channel.close().syncUninterruptibly();
 	}
 
 	@Test
@@ -408,7 +401,7 @@ class NettyCompletionPathTest {
 		assertTrue(resultCopy.reqTimeStart() > 0, "result copy reqTimeStart should be set");
 		assertTrue(resultCopy.respTimeDone() > 0, "result copy respTimeDone should be set");
 		assertTrue(resultCopy.duration() > 0, "result copy duration should be positive");
-		channel.close();
+		channel.close().syncUninterruptibly();
 	}
 
 	// ---------- Mixed success/failure permit accounting ----------
@@ -488,7 +481,7 @@ class NettyCompletionPathTest {
 		assertTrue(handleCompletedOrder.get() > 0, "handleCompleted should have been called");
 		assertTrue(channelReleaseOrder.get() < handleCompletedOrder.get(),
 						"channel must be released BEFORE handleCompleted processes the result");
-		channel.close();
+		channel.close().syncUninterruptibly();
 	}
 
 	// ---------- Batch submit permit math ----------
@@ -666,7 +659,7 @@ class NettyCompletionPathTest {
 					when(op.status()).thenReturn(Operation.Status.SUCC);
 					when(op.result()).thenReturn(mock(Operation.class));
 					driver.complete(ch, op);
-					ch.close();
+					ch.close().syncUninterruptibly();
 				} catch (final Exception e) {
 					errors.incrementAndGet();
 				} finally {

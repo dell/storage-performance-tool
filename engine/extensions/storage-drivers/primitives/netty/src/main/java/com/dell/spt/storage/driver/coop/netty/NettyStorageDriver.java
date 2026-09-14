@@ -20,23 +20,18 @@ public interface NettyStorageDriver<I extends Item, O extends Operation<I>>
 		NIO, EPOLL, KQUEUE, IOURING
 	}
 
-	Map<Transport, String> IO_EXECUTOR_IMPLS = new HashMap<Transport, String>() {
-		{
-			put(Transport.NIO, "io.netty.channel.nio.NioEventLoopGroup");
-			put(Transport.EPOLL, "io.netty.channel.epoll.EpollEventLoopGroup");
-			put(Transport.KQUEUE, "io.netty.channel.kqueue.KQueueEventLoopGroup");
-			put(Transport.IOURING, "io.netty.incubator.channel.uring.IOUringEventLoopGroup");
-		}
-	};
+	// Keep these extension-facing registries mutable while avoiding anonymous map subclasses.
+	Map<Transport, String> IO_EXECUTOR_IMPLS = new HashMap<>(Map.of(
+					Transport.NIO, "io.netty.channel.nio.NioEventLoopGroup",
+					Transport.EPOLL, "io.netty.channel.epoll.EpollEventLoopGroup",
+					Transport.KQUEUE, "io.netty.channel.kqueue.KQueueEventLoopGroup",
+					Transport.IOURING, "io.netty.incubator.channel.uring.IOUringEventLoopGroup"));
 
-	Map<Transport, String> SOCKET_CHANNEL_IMPLS = new HashMap<Transport, String>() {
-		{
-			put(Transport.NIO, "io.netty.channel.socket.nio.NioSocketChannel");
-			put(Transport.EPOLL, "io.netty.channel.epoll.EpollSocketChannel");
-			put(Transport.KQUEUE, "io.netty.channel.kqueue.KQueueSocketChannel");
-			put(Transport.IOURING, "io.netty.incubator.channel.uring.IOUringSocketChannel");
-		}
-	};
+	Map<Transport, String> SOCKET_CHANNEL_IMPLS = new HashMap<>(Map.of(
+					Transport.NIO, "io.netty.channel.socket.nio.NioSocketChannel",
+					Transport.EPOLL, "io.netty.channel.epoll.EpollSocketChannel",
+					Transport.KQUEUE, "io.netty.channel.kqueue.KQueueSocketChannel",
+					Transport.IOURING, "io.netty.incubator.channel.uring.IOUringSocketChannel"));
 
 	AttributeKey<Operation> ATTR_KEY_OPERATION = AttributeKey.valueOf("op");
 

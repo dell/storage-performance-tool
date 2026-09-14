@@ -167,7 +167,7 @@ final class S3DeleteRequestAdapterTest {
 				assertNull(deleteResponseState(channel));
 			} finally {
 				content.release();
-				channel.close();
+				channel.close().syncUninterruptibly();
 			}
 		}
 	}
@@ -267,7 +267,7 @@ final class S3DeleteRequestAdapterTest {
 			} finally {
 				prefix.release();
 				overflow.release();
-				channel.close();
+				channel.close().syncUninterruptibly();
 			}
 		}
 	}
@@ -474,7 +474,7 @@ final class S3DeleteRequestAdapterTest {
 			handler.handleResponseContentFinish(channel, operation);
 		} finally {
 			content.release();
-			channel.close();
+			channel.close().syncUninterruptibly();
 		}
 	}
 

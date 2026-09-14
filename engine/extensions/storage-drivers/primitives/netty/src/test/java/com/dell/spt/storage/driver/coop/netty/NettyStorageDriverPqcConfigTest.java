@@ -60,6 +60,23 @@ class NettyStorageDriverPqcConfigTest {
 	private static final String NAMED_GROUPS_WARNING_FRAGMENT = "failed to apply SSL named groups";
 
 	@Test
+	void unavailableConfiguredTransportReportsLinkageCauseAndAllowsRegistryRestore() {
+		final var config = storageConfig("off", "");
+		config.val("net-ssl-enabled", false);
+		config.val("net-transport", "nio");
+		final var registry = NettyStorageDriver.IO_EXECUTOR_IMPLS;
+		final var original = registry.put(NettyStorageDriver.Transport.NIO, "missing.test.EventLoopGroup");
+		try {
+			final var failure = assertThrows(LinkageError.class, () -> newDriver(config));
+			assertTrue(failure.getCause() instanceof ClassNotFoundException);
+			assertTrue(failure.getMessage().contains("Netty transport"));
+		} finally {
+			registry.put(NettyStorageDriver.Transport.NIO, original);
+		}
+		assertEquals(original, registry.get(NettyStorageDriver.Transport.NIO));
+	}
+
+	@Test
 	void requireModeMissingJsseProviderFailsFast() {
 		final var storageConfig = storageConfig("require", MISSING_JSSE_PROVIDER);
 		assertThrows(IllegalConfigurationException.class, () -> newDriver(storageConfig));
@@ -225,7 +242,7 @@ class NettyStorageDriverPqcConfigTest {
 			sslCtxField.setAccessible(true);
 			return (SslContext) sslCtxField.get(driver);
 		} catch (final ReflectiveOperationException e) {
-			throw new AssertionError(e);
+			throw new LinkageError("Test fixture cannot access TLS context", e);
 		}
 	}
 

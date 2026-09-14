@@ -78,7 +78,7 @@ public final class RangeReadResponseHandler extends SimpleChannelInboundHandler<
 	@Override
 	protected void channelRead0(ChannelHandlerContext ctx, HttpObject message) {
 		if (active == null) {
-			ctx.close();
+			final var unusedClose = ctx.close();
 			return;
 		}
 		if (!message.decoderResult().isSuccess()) {
@@ -136,7 +136,7 @@ public final class RangeReadResponseHandler extends SimpleChannelInboundHandler<
 				active.transportFailure(Operation.Status.FAIL_IO);
 			complete(false);
 		} else {
-			ctx.close();
+			final var unusedClose = ctx.close();
 		}
 	}
 
@@ -170,8 +170,10 @@ public final class RangeReadResponseHandler extends SimpleChannelInboundHandler<
 	private void complete(boolean reusable) {
 		final var completed = active;
 		active = null;
-		if (!reusable)
-			context.close();
+		if (!reusable) {
+			// Retire transport asynchronously; logical completion does not wait for close.
+			final var unusedClose = context.close();
+		}
 		completionPending = true;
 		// Release the current inbound reference and finish the decoder batch before reuse.
 		try {
@@ -182,7 +184,7 @@ public final class RangeReadResponseHandler extends SimpleChannelInboundHandler<
 		} catch (RejectedExecutionException rejected) {
 			// A stopping executor cannot finish the decoder batch; retire this connection.
 			rejectedCompletion = completed;
-			context.close();
+			final var unusedClose = context.close();
 			if (inboundDepth == 0)
 				settleRejectedCompletion();
 		}

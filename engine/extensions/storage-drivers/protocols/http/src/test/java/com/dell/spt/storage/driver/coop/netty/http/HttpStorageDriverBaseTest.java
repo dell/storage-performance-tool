@@ -115,10 +115,6 @@ class HttpStorageDriverBaseTest {
 			super("test-http", DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true), storage.configVal("storage"), false, 1024);
 		}
 
-		TestHttpDriver(final Config storage, final boolean readMetaOnly) throws Exception {
-			super("test-http", DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true), storage.configVal("storage"), false, 1024);
-		}
-
 		String exposeDataUriPath(final DataItemImpl item, final String src, final String dst, final OpType t) {
 			return dataUriPath(item, src, dst, t);
 		}
@@ -344,7 +340,7 @@ class HttpStorageDriverBaseTest {
 	void dataHttpMethod_readMetadataOnly_returnsHead() throws Exception {
 		final var cfg = baseConfig();
 		cfg.val("storage-net-http-read-metadata-only", true);
-		final var drv = new TestHttpDriver(cfg, true);
+		final var drv = new TestHttpDriver(cfg);
 		assertEquals(HttpMethod.HEAD, drv.exposeDataHttpMethod(OpType.READ));
 	}
 

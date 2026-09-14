@@ -19,7 +19,6 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
-import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.netty.connection.pool.NonBlockingConnPool;
@@ -249,7 +248,7 @@ class NettyStorageDriverBaseTest {
 		verify(connPool).release(deadConn);
 
 		// Assert: The live connection was actually used to send the request
-		verify(liveConn.attr(ATTR_KEY_RELEASED)).set(Boolean.FALSE);
+		verify(releasedAttr).set(Boolean.FALSE);
 		assertEquals(1, driver.sentRequestCount.get());
 		assertTrue(driver.lastSentOperation.get() == op);
 		assertEquals(OperationLifecycleState.DISPATCHED, op.lifecycle().state());
@@ -406,7 +405,8 @@ class NettyStorageDriverBaseTest {
 		errLogger.setLevel(Level.DEBUG);
 		try {
 			assertEquals(3, driver.submit(ops, 0, ops.size()));
-			LogUtil.flushAll();
+			errLogger.debug(CapturingAppender.FENCE);
+			assertTrue(capture.fence.await(5, TimeUnit.SECONDS), "Async log fence was not delivered");
 			assertEquals(1, capture.count(Level.WARN, "Failed to submit the load operations"));
 			assertEquals(2, capture.count(Level.DEBUG, "Failed to submit the load operations"));
 		} finally {
@@ -417,6 +417,8 @@ class NettyStorageDriverBaseTest {
 	}
 
 	private static final class CapturingAppender extends AbstractAppender {
+		private static final String FENCE = "netty-submission-test-fence";
+		private final CountDownLatch fence = new CountDownLatch(1);
 		private final List<LogEvent> events = new java.util.concurrent.CopyOnWriteArrayList<>();
 
 		private CapturingAppender() {
@@ -426,6 +428,9 @@ class NettyStorageDriverBaseTest {
 		@Override
 		public void append(final LogEvent event) {
 			events.add(event.toImmutable());
+			if (FENCE.equals(event.getMessage().getFormattedMessage())) {
+				fence.countDown();
+			}
 		}
 
 		private long count(final Level level, final String messageFragment) {
