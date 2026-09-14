@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Added
 
+- **Partial S3 reads** — Added opt-in `--range-size`, `--range-offset`, and `--range-align` flags for fixed or random single-range READs with the Netty S3 driver. Strict response validation, retained retries, `range.read.csv`, and reconciled result summaries account for logical reads and transport attempts separately. Explicit operation traces include local selection and transport failures. AWS and S3-RDMA support are deferred; release-baseline READ/WRITE performance qualification remains pending.
+
 - **Standalone S3 DELETE benchmarking** — Added public `spt run delete` support with safe seeded inventories, explicit canonical manifests, and guarded existing-prefix selection; single- and batched requests retain exact-version identities and report logical-request and object-outcome units separately. Optional full inventory validation and post-delete absence verification distinguish accepted API outcomes from confirmed absence. Qualification covers real-constructor Netty and AWS S3 canaries, hardware-free inherited-HTTP S3 RDMA contracts, lifecycle and distributed-routing safety, and versioned result and recovery artifacts.
 
 - **Engine Build Information** — Added immutable engine provenance through `GET /version`, engine-local `engine.build.json`, and the combined CLI result artifact `engine.info.json`. Managed runs and replays check participating engine builds before scenario submission by default and show engine provenance in result summaries.

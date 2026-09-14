@@ -92,9 +92,6 @@ class S3RangeStorageDriverTest {
 			var op = new RangeReadOperation<DataItem>(0, new DataItemImpl(name, 0, size), "/bucket", "/bucket", null, policy);
 			assertTrue(runtime.tracker().generatorBuffered(op));
 			assertTrue(runtime.admission().put(op));
-			// The real generator publishes accepted local failures without driver completion.
-			if (op.selection().error() != null)
-				assertTrue(runtime.put(op.result()));
 			return op;
 		}
 

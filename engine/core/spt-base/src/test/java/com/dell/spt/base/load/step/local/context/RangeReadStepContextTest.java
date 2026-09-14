@@ -37,6 +37,10 @@ class RangeReadStepContextTest {
 			enableOperationLifecycle(runtime.tracker());
 		}
 
+		boolean publish(RangeReadOperation<DataItemImpl> op) {
+			return publishRetainedRangeResult(op, op.circulation());
+		}
+
 		@Override
 		public RangeReadRuntime<DataItemImpl> rangeReadRuntime() {
 			return runtime;
@@ -167,9 +171,7 @@ class RangeReadStepContextTest {
 						Output<RangeReadOperation<DataItemImpl>> itemOutput = mock(Output.class);
 						f.context.operationsResultsOutput(itemOutput);
 						var op = f.admit(local ? 1 : 10);
-						if (local) {
-							assertTrue(f.runtime.put(op.result()));
-						} else {
+						if (!local) {
 							var attempt = f.attempt(op);
 							assertTrue(attempt.transportFailure(Status.FAIL_IO));
 							assertTrue(f.runtime.completed(op, op.circulation(), attempt));
@@ -245,8 +247,90 @@ class RangeReadStepContextTest {
 			assertEquals(0, f.runtime.snapshot().requestsSent());
 			assertEquals(1, f.runtime.snapshot().localSelectionErrors());
 			assertTrue(f.runtime.snapshot().reconciled());
-			assertEquals(1, f.runtime.put(List.of(op.result(), op.result())));
+			assertEquals(0, f.runtime.put(List.of(op.result(), op.result())));
 			verify(f.metrics, times(1)).markFail();
+		}
+	}
+
+	@Test
+	void failedResultRetainsDrainCustodyUntilPublicationAndRetainsCapacity() throws Exception {
+		try (var f = new Fixture(false, false, new RangeReadPolicy(2, 0L, 1))) {
+			var op = f.admit(10);
+			var attempt = f.attempt(op);
+			assertTrue(attempt.transportFailure(Status.FAIL_IO));
+			// Deterministically pause between terminal accounting and driver publication.
+			assertTrue(op.circulation().complete(op, f.runtime.tracker(), attempt));
+			assertEquals(0, f.runtime.tracker().inFlightCount());
+			verify(f.metrics).markFail();
+			assertTrue(f.runtime.hasPendingResults());
+			// Reaching the count limit requests stop; the following drain must retain output custody.
+			assertTrue(f.context.isDone());
+			assertEquals(1, f.runtime.admission().admittedCirculations());
+			assertTrue(f.driver.publish(op));
+			assertDoesNotThrow(() -> f.context.drainDispatchedOperationsForStepStop(System.nanoTime() + TimeUnit.SECONDS.toNanos(1)));
+			assertFalse(f.runtime.hasPendingResults());
+			assertEquals(0, f.runtime.admission().admittedCirculations());
+			assertTrue(f.context.isDone());
+			assertNull(f.runtime.failure());
+			assertTrue(f.runtime.snapshot().reconciled());
+		}
+	}
+
+	@Test
+	void undeliveredFailureUsesDrainDeadlineWithoutErasingCommittedOutcome() throws Exception {
+		try (var f = new Fixture(false, false, new RangeReadPolicy(2, 0L, 1))) {
+			var op = f.admit(10);
+			var attempt = f.attempt(op);
+			assertTrue(attempt.transportFailure(Status.FAIL_IO));
+			assertTrue(op.circulation().complete(op, f.runtime.tracker(), attempt));
+			assertThrows(IntegrityTerminalException.class,
+							() -> f.context.drainDispatchedOperationsForStepStop(System.nanoTime()));
+			assertEquals(1, f.runtime.snapshot().logical().failed());
+			assertEquals(0, f.runtime.snapshot().logical().unresolved());
+			assertEquals(0, f.runtime.admission().admittedCirculations());
+			assertFalse(f.runtime.hasPendingResults());
+			assertFalse(f.runtime.put(op.result()));
+			assertTrue(f.runtime.snapshot().reconciled());
+		}
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void stolenTerminalMetricsClaimFailsRunInsteadOfLeavingResultCountShort() throws Exception {
+		try (var f = new Fixture(false, false, new RangeReadPolicy(2, 0L, 1))) {
+			// Fault injection: violate the observer's exclusive final-metrics ownership.
+			var field = com.dell.spt.base.load.lifecycle.OperationLifecycleTracker.class.getDeclaredField("terminalObserver");
+			field.setAccessible(true);
+			var observer = (java.util.function.Consumer<RangeReadOperation<DataItemImpl>>) field.get(f.runtime.tracker());
+			f.runtime.tracker().terminalObserver(op -> {
+				assertTrue(f.runtime.metrics().recordFinal(op.circulation()));
+				observer.accept(op);
+			});
+			var op = f.admit(10);
+			f.success(op, true);
+			assertThrows(IntegrityTerminalException.class, f.context::isDone);
+			assertNotNull(f.runtime.failure());
+			assertEquals(0, f.runtime.admission().admittedCirculations());
+			assertEquals(1, f.runtime.snapshot().logical().accepted());
+			assertEquals(2, f.runtime.snapshot().successfulBytes());
+			verify(f.metrics, never()).markSucc(anyLong(), anyLong(), anyLong(), anyLong());
+		}
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void rejectedLocalPublicationReleasesPendingCustodyAndPreservesFailure() throws Exception {
+		try (var f = new Fixture(false, false, new RangeReadPolicy(2, null, 1))) {
+			Output<RangeReadOperation<DataItemImpl>> rejected = mock(Output.class);
+			f.driver.operationResultOutput(rejected);
+			assertThrows(IntegrityTerminalException.class, () -> f.admit(0));
+			assertFalse(f.runtime.hasPendingResults());
+			assertNotNull(f.runtime.failure());
+			assertThrows(IntegrityTerminalException.class, f.context::isDone);
+			verify(f.metrics).markFail();
+			assertEquals(1, f.runtime.snapshot().localSelectionErrors());
+			assertEquals(0, f.runtime.snapshot().requestsSent());
+			assertTrue(f.runtime.snapshot().reconciled());
 		}
 	}
 

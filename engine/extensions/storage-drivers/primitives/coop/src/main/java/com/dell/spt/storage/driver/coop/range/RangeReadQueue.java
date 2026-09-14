@@ -44,6 +44,11 @@ public final class RangeReadQueue<I extends DataItem> {
 			if (!queue.offer(op))
 				return false;
 			if (attempt == null) {
+				// Lock-order invariant: this is pre-publication initial queue ownership.
+				// driverQueued may take the operation monitor under the lifecycle monitor;
+				// result claims take those monitors in reverse order, but only after terminal
+				// settlement, and publication/recycling uses detached result copies.
+				// Never add result publication here or reuse a publishing instance for admission.
 				if (!runtime.tracker().driverQueued(op)) {
 					queue.removeIf(queued -> queued == op);
 					return false;

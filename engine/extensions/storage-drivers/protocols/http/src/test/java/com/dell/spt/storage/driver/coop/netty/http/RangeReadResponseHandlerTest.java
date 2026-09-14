@@ -85,6 +85,22 @@ class RangeReadResponseHandlerTest {
 		}
 	}
 
+	@ParameterizedTest
+	@ValueSource(booleans = {true, false
+	})
+	void decoderRejectsResponsesBeyondOrdinaryDriverLimits(boolean initialLine) {
+		try (var c = new Connection()) {
+			var attempt = c.begin();
+			String wire = initialLine
+							? "HTTP/1.1 206 " + "x".repeat(HttpStorageDriver.REQ_LINE_LEN) + "\r\n"
+							: "HTTP/1.1 206 Partial Content\r\nX-Padding: " + "x".repeat(HttpStorageDriver.HEADERS_LEN) + "\r\n";
+			c.receive(wire + "Content-Range: bytes 2-4/8\r\nContent-Length: 3\r\n\r\nabc");
+			assertEquals(List.of(new Result(attempt, false)), c.results);
+			assertNotEquals(Operation.Status.SUCC, attempt.outcome().status());
+			assertFalse(c.channel.isActive());
+		}
+	}
+
 	@Test
 	void rejectedCompletionWithoutInboundSettlesCancellationOnce() {
 		try (var c = new Connection()) {

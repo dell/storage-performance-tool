@@ -4,10 +4,15 @@ import io.netty.handler.codec.http.HttpDecoderConfig;
 import io.netty.handler.codec.http.HttpMessage;
 import io.netty.handler.codec.http.HttpResponseDecoder;
 
-/** Range-only decoder: reject ambiguous framing before Netty can normalize away its evidence. */
+/**
+ * Range-only decoder: retain ordinary HTTP size limits and reject ambiguous framing before
+ * Netty can normalize away its evidence. The GET-only range pipeline uses its validated
+ * positive transport timeout and channelInactive settlement for missing responses.
+ */
 public final class RangeReadResponseDecoder extends HttpResponseDecoder {
 	public RangeReadResponseDecoder(int maxChunkSize) {
-		super(new HttpDecoderConfig().setMaxChunkSize(maxChunkSize).setAllowDuplicateContentLengths(false));
+		super(new HttpDecoderConfig().setMaxInitialLineLength(HttpStorageDriver.REQ_LINE_LEN)
+						.setMaxHeaderSize(HttpStorageDriver.HEADERS_LEN).setMaxChunkSize(maxChunkSize).setAllowDuplicateContentLengths(false));
 	}
 
 	@Override

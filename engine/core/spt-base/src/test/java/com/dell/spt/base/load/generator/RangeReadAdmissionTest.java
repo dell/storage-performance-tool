@@ -123,6 +123,48 @@ class RangeReadAdmissionTest {
 	}
 
 	@Test
+	void localPublicationIsOutsideLifecycleLockAndBoundsPendingLocalErrors() throws Exception {
+		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
+		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
+		var entered = new CountDownLatch(1);
+		var release = new CountDownLatch(1);
+		var publications = new AtomicInteger();
+		var admission = new RangeReadAdmission<>(driver, tracker, 1, () -> 0L, op -> {
+			assertFalse(Thread.holdsLock(op.lifecycle()));
+			assertEquals(OperationLifecycleState.TERMINAL, op.lifecycle().state());
+			assertEquals(0, tracker.inFlightCount());
+			publications.incrementAndGet();
+			entered.countDown();
+			try {
+				assertTrue(release.await(5, TimeUnit.SECONDS));
+			} catch (InterruptedException failure) {
+				Thread.currentThread().interrupt();
+				throw new IllegalStateException(failure);
+			}
+		});
+		var builder = new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY);
+		var first = builder.buildOp(item("first", 0));
+		var second = builder.buildOp(item("second", 0));
+		tracker.generatorBuffered(first);
+		tracker.generatorBuffered(second);
+		try (var pool = Executors.newFixedThreadPool(2)) {
+			var pending = pool.submit(() -> admission.put(first));
+			try {
+				assertTrue(entered.await(2, TimeUnit.SECONDS));
+				assertFalse(pool.submit(() -> admission.put(second)).get(2, TimeUnit.SECONDS));
+				pool.submit(admission::closeAdmission).get(2, TimeUnit.SECONDS);
+				assertTrue(tracker.unattempted(second));
+			} finally {
+				release.countDown();
+			}
+			assertTrue(pending.get(2, TimeUnit.SECONDS));
+		}
+		assertEquals(1, publications.get());
+		assertTrue(tracker.counters().reconciled());
+		verifyNoInteractions(driver);
+	}
+
+	@Test
 	void recoveredLocalFailureDoesNotConsumePacingSlot() {
 		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
 		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);

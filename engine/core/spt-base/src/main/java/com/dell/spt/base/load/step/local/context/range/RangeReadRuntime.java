@@ -46,7 +46,7 @@ public final class RangeReadRuntime<I extends DataItem> implements Output<RangeR
 		this.publish = Objects.requireNonNull(publish);
 		metrics = new RangeReadMetrics(policy);
 		tracker = OperationLifecycleTracker.withDeadlineSettlement(this::settleAtDeadline);
-		admission = new RangeReadAdmission<>(driver, tracker, capacity);
+		admission = new RangeReadAdmission<>(driver, tracker, capacity, System::nanoTime, this::publishLocalResult);
 		tracker.terminalObserver(this::recordTerminal);
 	}
 
@@ -96,21 +96,35 @@ public final class RangeReadRuntime<I extends DataItem> implements Output<RangeR
 
 	private void recordTerminal(RangeReadOperation<I> op) {
 		final var circulation = op.circulation();
-		if (!metrics.recordFinal(circulation))
+		if (!metrics.recordFinal(circulation)) {
+			// This observer runs exactly once per terminal transition. A lost claim is
+			// a programming error; fail the run instead of leaving its result count short.
+			recordFailure(new IllegalStateException("Range terminal metrics claim was already consumed"));
+			admission.releaseSettled(circulation);
 			return;
+		}
+		synchronized (resultLock) {
+			if (!deliveryOpen)
+				throw new IllegalStateException("Range result arrived after result drain closed");
+			pendingResults.add(circulation);
+		}
+		Objects.requireNonNull(terminalAccounting, "Range runtime is not bound").accept(op);
+		// All determinate transport results retain their admission slot until output.
+		// Local errors are bounded separately by admission's single pacing reservation.
+	}
+
+	private void publishLocalResult(RangeReadOperation<I> op) {
+		final var circulation = op.circulation();
 		try {
-			if (op.status() == Operation.Status.SUCC) {
-				synchronized (resultLock) {
-					if (!deliveryOpen)
-						throw new IllegalStateException("Range success arrived after result drain closed");
-					pendingResults.add(circulation);
-				}
+			publish.accept(op, circulation);
+		} catch (Exception failure) {
+			recordFailure(failure);
+			// Publication is never retried. Retire this pending entry before admission
+			// releases its single local-error reservation, even if a caller keeps running.
+			synchronized (resultLock) {
+				pendingResults.remove(circulation);
 			}
-			Objects.requireNonNull(terminalAccounting, "Range runtime is not bound").accept(op);
-		} finally {
-			// Successful output retains the existing admission slot, bounding pending results.
-			if (op.status() != Operation.Status.SUCC)
-				admission.releaseSettled(circulation);
+			throw reportingFailure.get();
 		}
 	}
 
@@ -133,7 +147,7 @@ public final class RangeReadRuntime<I extends DataItem> implements Output<RangeR
 	public boolean put(RangeReadOperation<I> result) {
 		final var circulation = result.circulation();
 		// Never acquire a lifecycle monitor under resultLock: terminal accounting takes
-		// these locks in the opposite order when registering pending success delivery.
+		// these locks in the opposite order when registering pending result delivery.
 		final var snapshot = result.claimStepResult(circulation);
 		if (snapshot == null)
 			return false;

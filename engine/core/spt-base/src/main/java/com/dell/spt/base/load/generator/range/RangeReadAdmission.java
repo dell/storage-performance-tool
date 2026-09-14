@@ -17,6 +17,7 @@ import java.io.EOFException;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.LongSupplier;
+import java.util.function.Consumer;
 
 /**
  * Range-only generator output: valid selections reach the driver, invalid selections consume
@@ -33,6 +34,7 @@ public final class RangeReadAdmission<I extends DataItem> implements Output<Rang
 	private final Output<RangeReadOperation<I>> driver;
 	private final OperationLifecycleTracker<? super RangeReadOperation<I>> tracker;
 	private final LongSupplier clock;
+	private final Consumer<RangeReadOperation<I>> localResultOutput;
 	private final Object localAdmissionLock = new Object();
 	private volatile boolean open = true;
 	private boolean pacingStarted;
@@ -49,6 +51,13 @@ public final class RangeReadAdmission<I extends DataItem> implements Output<Rang
 	public RangeReadAdmission(final Output<RangeReadOperation<I>> driver,
 					final OperationLifecycleTracker<? super RangeReadOperation<I>> tracker, final int capacity,
 					final LongSupplier clock) {
+		this(driver, tracker, capacity, clock, ignored -> {});
+	}
+
+	public RangeReadAdmission(final Output<RangeReadOperation<I>> driver,
+					final OperationLifecycleTracker<? super RangeReadOperation<I>> tracker, final int capacity,
+					final LongSupplier clock, final Consumer<RangeReadOperation<I>> localResultOutput) {
+		this.localResultOutput = Objects.requireNonNull(localResultOutput);
 		if (capacity <= 0) {
 			throw new IllegalArgumentException("Range admission capacity must be positive");
 		}
@@ -98,6 +107,10 @@ public final class RangeReadAdmission<I extends DataItem> implements Output<Rang
 		boolean accepted = false;
 		try {
 			accepted = tracker.localFailure(op, op.lifecycle());
+			// Optional publication follows committed accounting, outside both monitors.
+			// Keep the single local-error pacing reservation until publication returns.
+			if (accepted)
+				localResultOutput.accept(op);
 			return accepted;
 		} finally {
 			synchronized (localAdmissionLock) {
