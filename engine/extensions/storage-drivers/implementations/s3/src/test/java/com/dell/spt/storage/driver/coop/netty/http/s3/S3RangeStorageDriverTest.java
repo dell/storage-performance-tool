@@ -91,14 +91,18 @@ class S3RangeStorageDriverTest {
 			var op = new RangeReadOperation<DataItem>(0, new DataItemImpl(name, 0, size), "/bucket", "/bucket", null, policy);
 			assertTrue(runtime.tracker().generatorBuffered(op));
 			assertTrue(runtime.admission().put(op));
+			// The real generator publishes accepted local failures without driver completion.
+			if (op.selection().error() != null)
+				assertTrue(runtime.put(op.result()));
 			return op;
 		}
 
 		Operation.Status outcome() throws Exception {
 			var status = terminal.poll(5, TimeUnit.SECONDS);
 			assertNotNull(status, () -> "No terminal result: " + runtime.snapshot());
-			if (status == Operation.Status.SUCC)
-				assertNotNull(results.poll(5, TimeUnit.SECONDS));
+			var result = results.poll(5, TimeUnit.SECONDS);
+			assertNotNull(result, "Every determinate outcome reaches the optional trace callback");
+			assertEquals(status, result.status());
 			assertEquals(0, driver.activeRangeTransports());
 			return status;
 		}

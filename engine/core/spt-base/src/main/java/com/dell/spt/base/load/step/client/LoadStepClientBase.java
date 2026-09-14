@@ -7,6 +7,8 @@ import static com.dell.spt.base.config.ConfigUtil.flatten;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
 
+import com.github.akurilov.commons.collection.TreeUtil;
+import com.dell.spt.base.config.RangeReadConfig;
 import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
 import com.dell.spt.base.config.AliasingUtil;
@@ -168,15 +170,13 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	private boolean hasRangeReadPolicy() {
 		if (ctxConfigs == null || ctxConfigs.isEmpty())
-			return com.dell.spt.base.config.RangeReadConfig.fromLoad(config.configVal("load")) != null;
-		if (ctxConfigs != null) {
-			for (final var context : ctxConfigs) {
-				final var merged = com.github.akurilov.commons.collection.TreeUtil.reduceForest(
-								List.of(Config.deepToMap(config), Config.deepToMap(context)));
-				final var effective = new com.github.akurilov.confuse.impl.BasicConfig(config.pathSep(), config.schema(), merged);
-				if (com.dell.spt.base.config.RangeReadConfig.fromLoad(effective.configVal("load")) != null)
-					return true;
-			}
+			return RangeReadConfig.fromLoad(config.configVal("load")) != null;
+		for (final var context : ctxConfigs) {
+			final var merged = TreeUtil.reduceForest(
+							List.of(Config.deepToMap(config), Config.deepToMap(context)));
+			final var effective = new BasicConfig(config.pathSep(), config.schema(), merged);
+			if (RangeReadConfig.fromLoad(effective.configVal("load")) != null)
+				return true;
 		}
 		return false;
 	}
@@ -941,11 +941,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		Config effectiveConfig = this.config;
 		try {
 			if (ctxConfigs != null && originIndex >= 0 && originIndex < ctxConfigs.size()) {
-				final var merged = com.github.akurilov.commons.collection.TreeUtil.reduceForest(
+				final var merged = TreeUtil.reduceForest(
 								java.util.Arrays.asList(
 												com.github.akurilov.confuse.Config.deepToMap(this.config),
 												com.github.akurilov.confuse.Config.deepToMap(ctxConfigs.get(originIndex))));
-				effectiveConfig = new com.github.akurilov.confuse.impl.BasicConfig(
+				effectiveConfig = new BasicConfig(
 								this.config.pathSep(), this.config.schema(), merged);
 			}
 		} catch (final Exception e) {

@@ -12,6 +12,7 @@ import static com.dell.spt.base.metrics.MetricsConstants.DELETE_IDENTITY_MODE_SI
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 
+import com.dell.spt.base.metrics.range.RangeReadSnapshot;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleCounters;
 import com.dell.spt.base.concurrent.DaemonBase;
 import com.dell.spt.base.config.IllegalConfigurationException;
@@ -570,7 +571,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			return true;
 		}
 		// issue SLTM-938 fix: only bail out when we've actually produced work
-		if (!listPathWorkload && recycleFlag && counterResults.sum() > 0 && isNothingToRecycle()) {
+		if (recycleFlag && counterResults.sum() > 0 && isNothingToRecycle()) {
 			Loggers.ERR.warn("{}: no load operations to recycle (all failed?)", id);
 			return true;
 		}
@@ -690,11 +691,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		if (driver.activeOpCount() > 0) {
 			return false;
 		}
-		// A recycled page can already have left recycleQueue while its generated count still
-		// lags and no driver permit is held. Its registered lifecycle remains outstanding
-		// throughout that handoff; queue emptiness and activeOpCount alone cannot prove EOF.
-		return counterResults.sum() >= generator.generatedOpCount()
-						&& !operationLifecycle.hasOutstandingOperations();
+		return counterResults.sum() >= generator.generatedOpCount();
 	}
 
 	/**
@@ -1571,6 +1568,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		try {
 			if (tracePersistFlag)
 				Loggers.OP_TRACES.info(new OperationTraceCsvLogMessage<>(op));
+			if (op.status() != Status.SUCC)
+				return;
 			if (opsResultsOutput != null && !opsResultsOutput.put(op))
 				throw new IOException("Range item output rejected a committed result");
 			if (opsMetricsOutput != null && !opsMetricsOutput.put(op))
@@ -1650,7 +1649,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	@Override
-	public final com.dell.spt.base.metrics.range.RangeReadSnapshot rangeReadSnapshot() {
+	public final RangeReadSnapshot rangeReadSnapshot() {
 		return rangeRuntime == null ? null : rangeRuntime.snapshot();
 	}
 

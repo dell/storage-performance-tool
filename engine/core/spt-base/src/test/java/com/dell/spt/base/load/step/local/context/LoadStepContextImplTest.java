@@ -1824,7 +1824,7 @@ public class LoadStepContextImplTest {
 	@Test
 	@SuppressWarnings({"unchecked", "rawtypes"
 	})
-	void listExhaustionWaitsForRecycledPageAcrossGeneratorAndDriverCustody() throws Exception {
+	void listNamespaceExhaustionRetainsBaselineCounterSemantics() throws Exception {
 		final Config listConfig = TestConfigBuilder.config();
 		listConfig.val("item-type", "path");
 		listConfig.val("load-op-type", "list");
@@ -1853,11 +1853,11 @@ public class LoadStepContextImplTest {
 			final Operation<Item> result = (Operation) page;
 			assertTrue(ctx.put(result));
 			assertEquals(OperationLifecycleState.GENERATOR_BUFFERED, result.lifecycle().state());
-			assertFalse(ctx.isDone(), "a polled recycled page is still outstanding work");
+			assertTrue(ctx.isDone(), "Preserve baseline LIST exhaustion once result and generated counts match");
 			assertTrue(tracker.driverQueued(result));
-			assertFalse(ctx.isDone(), "queued work can be invisible to activeOpCount");
+			assertTrue(ctx.isDone(), "Partial reads must not change ordinary LIST completion predicates");
 			assertTrue(tracker.explicitlyDispatched(result));
-			assertFalse(ctx.isDone(), "tracked in-flight custody remains authoritative");
+			assertTrue(ctx.isDone(), "Baseline LIST uses driver activeOpCount, not the new range custody predicate");
 			page.truncated(false);
 			assertTrue(tracker.completionStarted(result));
 			assertTrue(tracker.terminal(result, Operation.Status.SUCC));

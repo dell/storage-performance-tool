@@ -70,7 +70,11 @@ public final class RangeReadRuntime<I extends DataItem> implements Output<RangeR
 		return metrics.snapshot(tracker.counters());
 	}
 
-	/** Bridge selected once by the generic step constructor, after matching the exact driver tracker. */
+	/**
+	 * Bridge selected once by the generic step constructor, after matching the exact driver tracker.
+	 * Output receives each determinate result once, including failures for optional tracing.
+	 * The consumer must gate successful item/timing output and recycling on SUCC.
+	 */
 	@SuppressWarnings("unchecked")
 	public <T extends Item, O extends Operation<T>> Output<O> bind(LoadGenerator<T, O> generator,
 					OperationLifecycleTracker<O> owner, boolean retryEnabled, int retryLimit,
@@ -138,8 +142,7 @@ public final class RangeReadRuntime<I extends DataItem> implements Output<RangeR
 				return false;
 		}
 		try {
-			if (snapshot.status() == Operation.Status.SUCC)
-				resultOutput.accept(snapshot);
+			resultOutput.accept(snapshot);
 			return true;
 		} catch (Exception failure) {
 			recordFailure(failure);

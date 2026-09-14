@@ -64,7 +64,7 @@ public final class RangeReadConfig {
 		final long thresholdBytes = threshold instanceof String text
 						? BinarySizeFormat.parseFixedSize(text)
 						: com.github.akurilov.commons.reflection.TypeUtil.typeConvert(threshold, long.class);
-		if (fixed != null && !fixed.isEmpty() || ranges.intVal("random") > 0 || thresholdBytes > 0) {
+		if ((fixed != null && !fixed.isEmpty()) || ranges.intVal("random") > 0 || thresholdBytes > 0) {
 			throw invalid("conflicts with active item.data.ranges fixed, random or threshold settings");
 		}
 		return policy;

@@ -1,13 +1,16 @@
 package com.dell.spt.base.load.step;
 
-import com.dell.spt.base.config.RangeReadConfig;
-import com.dell.spt.base.config.IllegalConfigurationException;
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
 
+import com.github.akurilov.confuse.impl.BasicConfig;
+import com.github.akurilov.commons.collection.TreeUtil;
+import com.dell.spt.base.load.step.client.LoadStepClient;
+import com.dell.spt.base.config.RangeReadConfig;
+import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.concurrent.DaemonBase;
 import com.dell.spt.base.buildinfo.EngineBuildInfoPublisher;
 import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
@@ -80,7 +83,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		this.metricsMgr = metricsMgr;
 		// Script bindings eagerly construct dormant client prototypes for every operation/step type.
 		// Validate local steps immediately, and clients only when selected for execution.
-		if (!(this instanceof com.dell.spt.base.load.step.client.LoadStepClient<?>))
+		if (!(this instanceof LoadStepClient<?>))
 			validateRangeConfiguration();
 		try {
 			this.integrityModeEnabled = IntegrityConfig.validateLoadStep(this.config).enabled();
@@ -104,9 +107,9 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		validateRangeConfig(this.config);
 		if (this.ctxConfigs != null) {
 			this.ctxConfigs.forEach(context -> {
-				final var merged = com.github.akurilov.commons.collection.TreeUtil.reduceForest(
+				final var merged = TreeUtil.reduceForest(
 								List.of(Config.deepToMap(this.config), Config.deepToMap(context)));
-				validateRangeConfig(new com.github.akurilov.confuse.impl.BasicConfig(
+				validateRangeConfig(new BasicConfig(
 								this.config.pathSep(), this.config.schema(), merged));
 			});
 		}

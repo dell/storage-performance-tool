@@ -61,6 +61,10 @@ class RangeReadStepContextTest {
 
 		@SuppressWarnings("unchecked")
 		Fixture(boolean retry, boolean recycle, RangeReadPolicy policy) throws Exception {
+			this(retry, recycle, policy, false);
+		}
+
+		Fixture(boolean retry, boolean recycle, RangeReadPolicy policy, boolean trace) throws Exception {
 			this.policy = policy;
 			driver = mock(Driver.class, withSettings().useConstructor(policy).defaultAnswer(CALLS_REAL_METHODS));
 			runtime = driver.runtime;
@@ -89,7 +93,7 @@ class RangeReadStepContextTest {
 			config.val("load-op-wait-finish", true);
 			config.val("load-op-wait-limit", 0);
 			context = new LoadStepContextImpl<>("range-step", generator, driver, metrics, null,
-							config.configVal("load"), false, null, null, config.configVal("item"));
+							config.configVal("load"), trace, null, null, config.configVal("item"));
 			context.setRetryScheduler((delay, task) -> {
 				scheduled.add(task);
 				return new CompletableFuture<>();
@@ -134,6 +138,69 @@ class RangeReadStepContextTest {
 			} finally {
 				driver.close();
 			}
+		}
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void explicitTraceIncludesFailedResultsOnceWithoutRecyclingOrSuccessfulItemOutput() throws Exception {
+		var logger = (org.apache.logging.log4j.core.Logger) com.dell.spt.base.logging.Loggers.OP_TRACES;
+		var appender = mock(org.apache.logging.log4j.core.Appender.class);
+		when(appender.getName()).thenReturn("range-failure-test");
+		when(appender.isStarted()).thenReturn(true);
+		var events = new java.util.concurrent.LinkedBlockingQueue<String>();
+		doAnswer(call -> {
+			org.apache.logging.log4j.core.LogEvent event = call.getArgument(0);
+			events.add(event.getMessage().getFormattedMessage());
+			return null;
+		}).when(appender).append(any());
+		var previousLevel = logger.getLevel();
+		logger.addAppender(appender);
+		logger.setLevel(org.apache.logging.log4j.Level.INFO);
+		try {
+			for (boolean trace : List.of(false, true)) {
+				for (boolean local : List.of(false, true)) {
+					try (var f = new Fixture(false, true, new RangeReadPolicy(2, local ? null : Long.valueOf(0), 1), trace)) {
+						logger.addAppender(appender);
+						logger.setLevel(org.apache.logging.log4j.Level.INFO);
+						events.clear();
+						Output<RangeReadOperation<DataItemImpl>> itemOutput = mock(Output.class);
+						f.context.operationsResultsOutput(itemOutput);
+						var op = f.admit(local ? 1 : 10);
+						if (local) {
+							assertTrue(f.runtime.put(op.result()));
+						} else {
+							var attempt = f.attempt(op);
+							assertTrue(attempt.transportFailure(Status.FAIL_IO));
+							assertTrue(f.runtime.completed(op, op.circulation(), attempt));
+						}
+						assertFalse(f.runtime.put(op.result()), "Duplicate failure must not produce another trace");
+						// A same-thread logging fence drains earlier async events, so disabled
+						// traces and duplicate suppression are asserted without timing guesses.
+						String fence = "range-trace-fence-" + trace + "-" + local;
+						logger.info(fence);
+						String event = events.poll(2, java.util.concurrent.TimeUnit.SECONDS);
+						if (trace) {
+							assertNotNull(event);
+							String[] columns = event.strip().split(",", -1);
+							assertEquals(9, columns.length);
+							assertEquals(op.item().name(), columns[1]);
+							assertEquals("READ", columns[2]);
+							assertEquals(op.status().name(), columns[3]);
+							event = events.poll(2, java.util.concurrent.TimeUnit.SECONDS);
+						}
+						assertEquals(fence, event, "Exactly one enabled trace, none when disabled");
+						verifyNoInteractions(itemOutput);
+						assertTrue(f.recycled.isEmpty());
+						assertEquals(0, f.runtime.snapshot().successfulBytes());
+						assertTrue(f.runtime.snapshot().reconciled());
+						verify(f.metrics).markFail();
+					}
+				}
+			}
+		} finally {
+			logger.removeAppender(appender);
+			logger.setLevel(previousLevel);
 		}
 	}
 

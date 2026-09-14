@@ -8,6 +8,7 @@ import static com.github.akurilov.commons.io.el.ExpressionInput.INIT_MARKER;
 import static com.github.akurilov.commons.io.el.ExpressionInput.SYNC_MARKER;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 
+import com.dell.spt.base.config.RangeReadConfig;
 import com.dell.spt.base.config.ConstantValueInputImpl;
 import com.dell.spt.base.config.el.CompositeExpressionInputBuilder;
 import com.dell.spt.base.config.IllegalConfigurationException;
@@ -183,8 +184,8 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 		final var rangeRuntime = opOutput instanceof RangeReadDriverSupport support
 						? java.util.Objects.requireNonNull(support.rangeReadRuntime(), "Range driver runtime")
 						: null;
-		com.dell.spt.base.config.RangeReadConfig.requireMatchingRuntime(
-						com.dell.spt.base.config.RangeReadConfig.fromLoad(loadConfig),
+		RangeReadConfig.requireMatchingRuntime(
+						RangeReadConfig.fromLoad(loadConfig),
 						rangeRuntime == null ? null : rangeRuntime.policy());
 		if (rangeRuntime != null && (!ItemType.DATA.equals(itemType) || opType != OpType.READ))
 			throw new IllegalConfigurationException("Single-range operations require DATA READ");

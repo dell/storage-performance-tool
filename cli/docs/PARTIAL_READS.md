@@ -54,9 +54,10 @@ spt run read --s3-driver netty --bucket partial-read-demo \
 
 The phase order remains PreconditionLoad → inventory → ReadLoad → optional
 DeleteLoad. `--items-file` skips preparation. Only ReadLoad receives the range
-policy. Count mode consumes the finite inventory without recycling; the available
-inventory can therefore limit completion below a requested count. Duration mode
-uses nested recycle configuration to reuse the inventory until the deadline.
+policy. Count mode recycles successful reads to reach the requested operation count,
+even when the inventory is smaller. Duration mode reuses the inventory until the
+deadline. Each recycled logical read selects a fresh range; retries retain their
+original selection. Failed reads retire under the ordinary READ failure policy.
 Cleanup of an existing-items READ operates on the supplied inventory, so use
 `--cleanup` only when those objects are intended for deletion.
 

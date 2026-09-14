@@ -36,6 +36,7 @@ public final class RangeReadAdmission<I extends DataItem> implements Output<Rang
 	private final Object localAdmissionLock = new Object();
 	private volatile boolean open = true;
 	private boolean pacingStarted;
+	private boolean localErrorInProgress;
 	private long nextLocalError;
 	private final int capacity;
 	private final Set<RangeReadCirculation> admitted = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -80,21 +81,33 @@ public final class RangeReadAdmission<I extends DataItem> implements Output<Rang
 		if (op.selection().error() == null) {
 			return admitValid(op);
 		}
+		final long now;
 		synchronized (localAdmissionLock) {
 			if (!open) {
 				throwUnchecked(new EOFException("Range admission is closed"));
 			}
-			final long now = clock.getAsLong();
-			if (pacingStarted && now - nextLocalError < 0) {
+			now = clock.getAsLong();
+			if (localErrorInProgress || (pacingStarted && now - nextLocalError < 0)) {
 				return false;
 			}
-			if (!tracker.localFailure(op, op.lifecycle())) {
-				return false;
+			localErrorInProgress = true;
+		}
+		// Terminal observers acquire capacity under the lifecycle monitor. Reserve the
+		// pacing slot first, but never acquire that monitor under localAdmissionLock.
+		// Shutdown recovery may win the lifecycle claim; a refusal consumes no slot.
+		boolean accepted = false;
+		try {
+			accepted = tracker.localFailure(op, op.lifecycle());
+			return accepted;
+		} finally {
+			synchronized (localAdmissionLock) {
+				if (accepted) {
+					// nanoTime wraparound is valid over this short pacing interval.
+					nextLocalError = now + LOCAL_ERROR_INTERVAL_NANOS;
+					pacingStarted = true;
+				}
+				localErrorInProgress = false;
 			}
-			// Clock arithmetic deliberately permits nanoTime wraparound over this short interval.
-			nextLocalError = now + LOCAL_ERROR_INTERVAL_NANOS;
-			pacingStarted = true;
-			return true;
 		}
 	}
 

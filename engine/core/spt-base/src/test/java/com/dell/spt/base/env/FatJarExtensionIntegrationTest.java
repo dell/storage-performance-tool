@@ -59,7 +59,7 @@ public class FatJarExtensionIntegrationTest {
 	@Test
 	void testLoadFatJarExtension() throws Exception {
 		Path s3FatJar = findS3FatJar();
-		assumeTrue(s3FatJar != null && Files.exists(s3FatJar), "S3 fat JAR not found. Run './gradlew :extensions:storage-drivers:implementations:s3:shadowJar' first");
+		assertTrue(s3FatJar != null && Files.exists(s3FatJar), "Required S3 fat JAR missing after the declared shadowJar dependency");
 
 		// Create extension directory with the fat JAR
 		Path extDir = tempDir.resolve("ext");

@@ -6,7 +6,9 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.LongUnaryOperator;
 
 /** Immutable, construction-time policy for fixed-length single-range READs. */
-public record RangeReadPolicy(long length,Long fixedOffset,long alignment){
+// @formatter:off
+public record RangeReadPolicy(long length, Long fixedOffset, long alignment) {
+// @formatter:on
 
 public enum SelectionError {
 	SIZE_UNAVAILABLE, EMPTY_OBJECT, UNDERSIZED_OBJECT

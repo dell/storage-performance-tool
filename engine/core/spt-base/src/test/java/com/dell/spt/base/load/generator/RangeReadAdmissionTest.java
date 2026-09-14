@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.Executors;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -50,6 +51,95 @@ class RangeReadAdmissionTest {
 
 	private static DataItemImpl item(String name, long size) {
 		return new DataItemImpl(name, 0, size);
+	}
+
+	@Test
+	void localFailureObserverDoesNotHoldAdmissionLock() throws Exception {
+		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
+		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
+		var admission = new RangeReadAdmission<>(driver, tracker, 1, () -> 0L);
+		var executor = Executors.newSingleThreadExecutor();
+		tracker.terminalObserver(op -> {
+			try {
+				// Another terminal observer must be able to release/query admission capacity.
+				assertEquals(0, executor.submit(admission::admittedCirculations).get(2, TimeUnit.SECONDS));
+			} catch (Exception failure) {
+				throw new IllegalStateException("Terminal observer runs under admission lock", failure);
+			}
+		});
+		try {
+			var op = new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY).buildOp(item("invalid", 0));
+			assertTrue(tracker.generatorBuffered(op));
+			assertTrue(admission.put(op));
+			assertEquals(1, tracker.counters().failed());
+		} finally {
+			admission.closeAdmission();
+			executor.shutdownNow();
+			assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+		}
+	}
+
+	@Test
+	void pendingLocalObserverAllowsCapacityReleaseRefusalAndShutdown() throws Exception {
+		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
+		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
+		var admission = new RangeReadAdmission<>(driver, tracker, 1, () -> 0L);
+		var builder = new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY);
+		var first = builder.buildOp(item("first", 0));
+		var second = builder.buildOp(item("second", 0));
+		tracker.generatorBuffered(first);
+		tracker.generatorBuffered(second);
+		var entered = new CountDownLatch(1);
+		var release = new CountDownLatch(1);
+		tracker.terminalObserver(op -> {
+			entered.countDown();
+			try {
+				assertTrue(release.await(5, TimeUnit.SECONDS));
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				throw new IllegalStateException(e);
+			}
+		});
+		var pool = Executors.newFixedThreadPool(2);
+		try {
+			var pending = pool.submit(() -> admission.put(first));
+			assertTrue(entered.await(2, TimeUnit.SECONDS));
+			assertFalse(pool.submit(() -> admission.put(second)).get(2, TimeUnit.SECONDS));
+			pool.submit(admission::closeAdmission).get(2, TimeUnit.SECONDS);
+			assertThrows(EOFException.class, () -> admission.put(second));
+			release.countDown();
+			assertTrue(pending.get(2, TimeUnit.SECONDS));
+			assertTrue(tracker.unattempted(second));
+			assertEquals(1, tracker.counters().failed());
+			assertEquals(1, tracker.counters().unattempted());
+			assertTrue(tracker.counters().reconciled());
+			verifyNoInteractions(driver);
+		} finally {
+			release.countDown();
+			pool.shutdownNow();
+			assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS));
+			admission.closeAdmission();
+		}
+	}
+
+	@Test
+	void recoveredLocalFailureDoesNotConsumePacingSlot() {
+		var tracker = new OperationLifecycleTracker<RangeReadOperation<DataItemImpl>>();
+		Output<RangeReadOperation<DataItemImpl>> driver = mock(Output.class);
+		var admission = new RangeReadAdmission<>(driver, tracker, 1, () -> 0L);
+		var builder = new RangeReadOperationsBuilder<DataItemImpl>(0, POLICY);
+		var recovered = builder.buildOp(item("recovered", 0));
+		var next = builder.buildOp(item("next", 0));
+		tracker.generatorBuffered(recovered);
+		tracker.generatorBuffered(next);
+		assertTrue(tracker.unattempted(recovered));
+		assertFalse(admission.put(recovered));
+		assertTrue(admission.put(next));
+		assertEquals(1, tracker.counters().failed());
+		assertEquals(1, tracker.counters().unattempted());
+		assertTrue(tracker.counters().reconciled());
+		verifyNoInteractions(driver);
+		admission.closeAdmission();
 	}
 
 	@Test

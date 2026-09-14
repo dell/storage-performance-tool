@@ -739,7 +739,7 @@ ReadLoad
                 "read": {"range": {{.RangePolicy}}},{{end}}{{if .ReadShuffle}}
                 "shuffle": true,{{end}}
                 "recycle": {
-                    "mode": {{if .RangePolicy}}false{{else}}true{{end}}
+                    "mode": true
                 },
                 "limit": {
                     "count": readCount
@@ -992,7 +992,7 @@ ReadLoad
                 "read": {"range": {{.RangePolicy}}},{{end}}{{if .ReadShuffle}}
                 "shuffle": true,{{end}}
                 "recycle": {
-                    "mode": {{if .RangePolicy}}false{{else}}true{{end}}
+                    "mode": true
                 },
                 "limit": {
                     "count": readCount
@@ -1310,7 +1310,7 @@ ReadLoad
                 "read": {"range": {{.RangePolicy}}},{{end}}{{if .ReadShuffle}}
                 "shuffle": true,{{end}}
                 "recycle": {
-                    "mode": {{if .RangePolicy}}false{{else}}true{{end}}
+                    "mode": true
                 },
                 "limit": {
                     "count": readCount
@@ -1501,7 +1501,7 @@ ReadLoad
                 "read": {"range": {{.RangePolicy}}},{{end}}{{if .ReadShuffle}}
                 "shuffle": true,{{end}}
                 "recycle": {
-                    "mode": {{if .RangePolicy}}false{{else}}true{{end}}
+                    "mode": true
                 },
                 "limit": {
                     "count": readCount

@@ -64,7 +64,7 @@ func TestRangePolicyOnlyInReadPhase(t *testing.T) {
 					if has {
 						found++
 						mode, _ := configPath(c, "load", "op", "recycle", "mode")
-						if mode != (count == 0) {
+						if mode != true {
 							t.Fatalf("count=%d recycle=%v", count, mode)
 						}
 						if op != "read" {
