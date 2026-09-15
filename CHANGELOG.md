@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Changed
 
+- **Dependency updates** — Updated Jackson to 2.22.2, Commons Codec to 1.22.1, Guava to 33.7.1, Javassist to 3.33.0-GA, AWS SDK/CRT to 2.54.18/0.48.4, Bouncy Castle to 1.86/1.86.1, and Docker Go connections to 0.8.1.
+
 - **Engine build mismatch policy** — `spt run` and `spt replay` reject known engine build mismatches by default. In addition to supported port-conflict handling, `--force` now permits a known build mismatch and records a prominent warning and forced-mismatch evidence; it cannot bypass malformed build information or collection failures.
 
 ### Fixed

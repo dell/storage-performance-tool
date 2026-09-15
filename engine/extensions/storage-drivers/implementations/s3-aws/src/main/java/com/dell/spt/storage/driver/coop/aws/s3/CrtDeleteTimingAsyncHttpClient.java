@@ -153,24 +153,25 @@ final class CrtDeleteTimingAsyncHttpClient implements SdkAsyncHttpClient {
 						.request(asyncRequest)
 						.protocol(Protocol.HTTP1_1)
 						.build();
+		final var completion = createExecutionFuture(asyncRequest);
+		final CrtResponseAdapter responseAdapter = CrtResponseAdapter.toCrtResponseHandler(
+						completion, asyncRequest.responseHandler());
 		final HttpRequestBase crtRequest;
 		try {
-			crtRequest = CrtRequestAdapter.toAsyncCrtRequest(context);
+			crtRequest = CrtRequestAdapter.toAsyncCrtRequest(context, responseAdapter::failRequest);
 		} catch (Throwable error) {
-			final var completion = createExecutionFuture(asyncRequest);
 			reportAsyncFailure(error, completion, asyncRequest.responseHandler());
 			return completion;
 		}
-		return executeRequest(asyncRequest, crtRequest, operation);
+		return executeRequest(asyncRequest, crtRequest, operation, completion, responseAdapter);
 	}
 
 	private CompletableFuture<Void> executeRequest(
 					final AsyncExecuteRequest request,
 					final HttpRequestBase crtRequest,
-					final DeleteRequestOperation operation) {
-		final var completion = createExecutionFuture(request);
-		final CrtResponseAdapter responseAdapter = CrtResponseAdapter.toCrtResponseHandler(
-						completion, request.responseHandler());
+					final DeleteRequestOperation operation,
+					final CompletableFuture<Void> completion,
+					final CrtResponseAdapter responseAdapter) {
 		completion.whenComplete((ignored, error) -> {
 			inFlightRequests.remove(completion);
 			if (error != null) {
