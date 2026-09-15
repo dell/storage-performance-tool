@@ -36,14 +36,15 @@ public class CoopStorageDriverMock<I extends Item, O extends Operation<I>>
 		op.startRequest();
 		op.finishRequest();
 		op.startResponse();
-		if (op instanceof DataOperation) {
-			final DataOperation dataOp = (DataOperation) op;
+		if (op instanceof DataOperation dataOp) {
 			final DataItem dataItem = dataOp.item();
 			switch (dataOp.type()) {
 			case CREATE:
 				try {
 					dataOp.countBytesDone(dataItem.size());
-				} catch (final IOException ignored) {}
+				} catch (final IOException ignored) {
+					// The mock retains its default byte count when size metadata is unavailable.
+				}
 				break;
 			case READ:
 				dataOp.startDataResponse();
@@ -56,7 +57,9 @@ public class CoopStorageDriverMock<I extends Item, O extends Operation<I>>
 					} else {
 						try {
 							dataOp.countBytesDone(dataItem.size());
-						} catch (final IOException ignored) {}
+						} catch (final IOException ignored) {
+							// The mock retains its default byte count when size metadata is unavailable.
+						}
 					}
 				} else {
 					dataOp.countBytesDone(dataOp.markedRangesSize());

@@ -19,6 +19,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -608,30 +609,39 @@ class OperationDispatchTaskTest {
 	@Test
 	void backpressureRecoveryViaSignal() throws Exception {
 		final Operation<Item> op = mock(Operation.class);
-		when(driverMock.submit(any(Operation.class)))
-						.thenReturn(false)
-						.thenReturn(true);
-		when(driverMock.hasAvailableDispatchCapacity()).thenReturn(false);
+		final AtomicBoolean capacityAvailable = new AtomicBoolean();
+		final AtomicInteger acceptedCount = new AtomicInteger();
+		final CountDownLatch rejected = new CountDownLatch(1);
+		final CountDownLatch accepted = new CountDownLatch(1);
+		when(driverMock.hasAvailableDispatchCapacity()).thenAnswer(invocation -> capacityAvailable.get());
+		when(driverMock.submit(same(op))).thenAnswer(invocation -> {
+			if (!capacityAvailable.get()) {
+				rejected.countDown();
+				return false;
+			}
+			acceptedCount.incrementAndGet();
+			accepted.countDown();
+			return true;
+		});
 
 		task.start();
-
-		// Add op and signal
 		inOpQueue.add(op);
 		task.unpark();
 
-		// Wait until the first attempt has entered backpressure before signaling the completion.
-		// Otherwise a busy suite may deliver this signal before the dispatcher starts awaiting it.
-		verify(driverMock, timeout(1000)).submit(any(Operation.class));
-		// doReturn: the dispatcher thread is invoking this mock concurrently, so when(...) could
-		// bind the stub to whichever call the other thread made last.
-		doReturn(true).when(driverMock).hasAvailableDispatchCapacity();
+		// A stale unpark permit or a spurious wakeup may cause more than one rejection.
+		// Keep submission blocked until the simulated transport releases capacity.
+		assertTrue(rejected.await(1, TimeUnit.SECONDS), "operation must encounter backpressure");
+		assertEquals(0, acceptedCount.get());
+		capacityAvailable.set(true);
 		task.unpark();
-
-		// Should eventually succeed on retry
-		verify(driverMock, timeout(500).atLeast(2)).submit(any(Operation.class));
+		assertTrue(accepted.await(1, TimeUnit.SECONDS), "capacity signal must wake the retained operation");
 
 		task.stop();
 		assertTrue(task.await(5, TimeUnit.SECONDS), "task should stop within timeout");
+		assertEquals(1, acceptedCount.get(), "the retained operation must be accepted exactly once");
+		verify(driverMock, atLeast(2)).submit(same(op));
+		assertTrue(inOpQueue.isEmpty());
+		assertEquals(0, task.backlog());
 	}
 
 	@Test

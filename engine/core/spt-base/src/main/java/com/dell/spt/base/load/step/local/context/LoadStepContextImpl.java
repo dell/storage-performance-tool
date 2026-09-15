@@ -12,6 +12,7 @@ import static com.dell.spt.base.metrics.MetricsConstants.DELETE_IDENTITY_MODE_SI
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 
+import com.dell.spt.base.metrics.range.RangeReadSnapshot;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleCounters;
 import com.dell.spt.base.concurrent.DaemonBase;
 import com.dell.spt.base.config.IllegalConfigurationException;
@@ -52,6 +53,8 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.logging.OperationTraceCsvBatchLogMessage;
 import com.dell.spt.base.logging.OperationTraceCsvLogMessage;
 import com.dell.spt.base.metrics.context.MetricsContext;
+import com.dell.spt.base.load.step.local.context.range.RangeReadRuntime;
+import com.dell.spt.base.storage.driver.range.RangeReadDriverSupport;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
@@ -70,6 +73,7 @@ import java.rmi.RemoteException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Locale;
 import java.util.Map;
 import java.util.OptionalLong;
@@ -79,7 +83,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Future;
-import java.util.concurrent.ThreadLocalRandom;
+import com.dell.spt.base.item.op.OperationRetryPolicy;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -106,9 +110,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final ConcurrentMap<I, O> latestSuccOpResultByItem;
 	private final boolean recycleFlag;
 	private final boolean listPathWorkload;
+	private boolean listLifecycleWaitLogged;
 	private final boolean retryFlag;
 	private final int retryLimit;
 	private final MetricsContext metricsCtx;
+	private final RangeReadRuntime<?> rangeRuntime;
 	private final Map<OpType, MetricsContext> metricsCtxByOpType;
 	private final LongAdder counterResults = new LongAdder();
 	private final boolean tracePersistFlag;
@@ -130,12 +136,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	private final ThreadLocal<SplittableRandom> rand = ThreadLocal.withInitial(SplittableRandom::new);
-
-	// Full-jitter exponential backoff before a load-op-retry re-dispatch, mirroring the
-	// shape of common S3-client retry defaults (e.g. minio-go's own 200ms/1s retry timer)
-	// rather than immediately re-hitting a target that just failed the operation.
-	private static final long RETRY_BACKOFF_BASE_MILLIS = 200L;
-	private static final long RETRY_BACKOFF_CAP_MILLIS = 1000L;
 
 	// Tracks load-op-retry redispatches currently sitting in their backoff delay, keyed by
 	// the operation awaiting redispatch, so a stop/shutdown can cancel them and resolve
@@ -348,6 +348,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		this.id = id;
 		this.generator = generator;
 		this.driver = driver;
+		this.rangeRuntime = driver instanceof RangeReadDriverSupport support
+						? Objects.requireNonNull(support.rangeReadRuntime(), "Missing range runtime")
+						: null;
 		final var driverLifecycle = driver.operationLifecycle();
 		this.operationLifecycle = driverLifecycle == null
 						? OperationLifecycleTracker.disabled()
@@ -372,6 +375,12 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		this.updateContents = recycleConfig.boolVal("content-update");
 		this.retryFlag = opConfig.boolVal("retry");
 		this.retryLimit = opConfig.intVal("retryLimit");
+		if (rangeRuntime != null && (opType != OpType.READ || (itemType != null && itemType != ItemType.DATA)
+						|| updateContents || (metricsCtxByOpType != null && !metricsCtxByOpType.isEmpty())
+						|| driver.metadataIntegrityEnabled()
+						|| (itemConfig != null && itemConfig.boolVal("data-verify")))) {
+			throw new IllegalConfigurationException("Range runtime requires an ordinary data READ without integrity or content mutation");
+		}
 		final var standaloneDelete = StandaloneDeleteConfig.from(loadConfig);
 		this.standaloneDeleteConfig = standaloneDelete;
 		this.deleteObjectLifecycleCounters = new DeleteObjectLifecycleCounters(
@@ -487,7 +496,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				operationLifecycle.dispatchObserver(this::recordStandaloneDeleteDispatch);
 				operationLifecycle.terminalObserver(this::recordStandaloneDeleteTerminal);
 			}
-			this.driver.operationResultOutput(this);
+			this.driver.operationResultOutput(rangeRuntime == null ? this
+							: rangeRuntime.bind(
+											generator, operationLifecycle, retryFlag, retryLimit,
+											(delay, task) -> retryScheduler.schedule(delay, task),
+											this::recordRangeTerminal, this::outputRangeResult));
 		} catch (final RuntimeException | Error failure) {
 			if (deleteArtifactRecorder != null) {
 				deleteArtifactRecorder.close();
@@ -510,6 +523,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	public boolean isDone() {
+		if (rangeRuntime != null && rangeRuntime.failure() != null)
+			throw rangeRuntime.failure();
 		final var generatorFailure = generator.terminalFailure();
 		if (generatorFailure != null) {
 			throw generatorFailure;
@@ -534,9 +549,15 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			Loggers.ERR.warn("{}: done due to \"BAD\" state", id);
 			return true;
 		}
-		if (listPathWorkload && isListNamespaceExhausted()) {
-			Loggers.MSG.debug("{}: done after exhausting LIST namespace", id);
-			return true;
+		if (rangeRuntime != null) {
+			return generator.isItemInputFinished() && !operationLifecycle.hasOutstandingOperations()
+							&& !rangeRuntime.hasPendingResults() && counterResults.sum() >= generator.generatedOpCount()
+							&& (!recycleFlag || generator.isNothingToRecycle());
+		}
+		if (listPathWorkload) {
+			// LIST continuations can leave the recycle queue before generated/active
+			// counts advance. Do not fall through to generic recycle completion.
+			return isListNamespaceExhausted();
 		}
 		if (standaloneDeleteDurationMode && generator.isStopped()) {
 			Loggers.MSG.debug(
@@ -672,7 +693,19 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		if (driver.activeOpCount() > 0) {
 			return false;
 		}
-		return counterResults.sum() >= generator.generatedOpCount();
+		if (counterResults.sum() < generator.generatedOpCount()) {
+			return false;
+		}
+		if (operationLifecycle.hasOutstandingOperations()) {
+			if (!listLifecycleWaitLogged && Loggers.MSG.isDebugEnabled()) {
+				Loggers.MSG.debug("{}: waiting for outstanding LIST operation lifecycle ownership to settle", id);
+				listLifecycleWaitLogged = true;
+			}
+			return false;
+		}
+		listLifecycleWaitLogged = false;
+		Loggers.MSG.debug("{}: done after exhausting LIST namespace", id);
+		return true;
 	}
 
 	/**
@@ -1009,10 +1042,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	 * never succeed.
 	 */
 	private static boolean isRetryableStatus(final Status status) {
-		return switch (status) {
-		case FAIL_IO, FAIL_TIMEOUT, FAIL_UNKNOWN, RESP_FAIL_UNKNOWN, RESP_FAIL_SVC -> true;
-		default -> false;
-		};
+		return OperationRetryPolicy.isRetryableStatus(status);
 	}
 
 	/**
@@ -1249,10 +1279,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	 * inventing a new backoff policy from scratch. Package-private for direct unit testing.
 	 */
 	static long retryBackoffMillis(final int attempt) {
-		final int shift = Math.min(Math.max(attempt - 1, 0), 16); // guard against overflow
-		final long exp = RETRY_BACKOFF_BASE_MILLIS << shift;
-		final long capped = Math.min(exp, RETRY_BACKOFF_CAP_MILLIS);
-		return capped <= 0 ? 0 : ThreadLocalRandom.current().nextLong(capped + 1);
+		return OperationRetryPolicy.backoffMillis(attempt);
 	}
 
 	@Override
@@ -1539,6 +1566,36 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		}
 	}
 
+	/** Bounded accounting observer, before retained outcome custody is released. */
+	private void recordRangeTerminal(final O op) {
+		if (op.status() == Status.SUCC) {
+			final var data = (DataOperation<?>) op;
+			metricsCtx.markSucc(data.countBytesDone(), op.duration(), op.latency(), timeToFirstByte(op));
+		} else {
+			metricsCtx.markFail();
+		}
+		counterResults.increment();
+	}
+
+	/** Range-only optional output; generic output swallows some rejections and cannot be reused. */
+	private void outputRangeResult(final O op) {
+		try {
+			if (tracePersistFlag)
+				Loggers.OP_TRACES.info(new OperationTraceCsvLogMessage<>(op));
+			if (op.status() != Status.SUCC)
+				return;
+			if (opsResultsOutput != null && !opsResultsOutput.put(op))
+				throw new IOException("Range item output rejected a committed result");
+			if (opsMetricsOutput != null && !opsMetricsOutput.put(op))
+				throw new IOException("Range timing output rejected a committed result");
+			if (recycleFlag && !stepShuttingDown.get() && !operationAdmissionClosed.get())
+				generator.recycle(op);
+		} catch (Exception failure) {
+			throw new IntegrityTerminalException(IntegrityTerminalException.Category.PUBLICATION,
+							id, "Range result output failed", failure);
+		}
+	}
+
 	private void outputResults(final O opResult) {
 		final var opsResultsOutput = this.opsResultsOutput;
 		if (opsResultsOutput != null) {
@@ -1603,6 +1660,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	@Override
 	public final OperationLifecycleCounters terminalOperationCounters() {
 		return isStopped() && operationDrainComplete.get() ? operationLifecycle.counters() : null;
+	}
+
+	@Override
+	public final RangeReadSnapshot rangeReadSnapshot() {
+		return rangeRuntime == null ? null : rangeRuntime.snapshot();
 	}
 
 	@Override
@@ -1985,6 +2047,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				// generator admission closure and recovery to remain bounded.
 				driver.closeAdmission();
 			} finally {
+				if (rangeRuntime != null)
+					rangeRuntime.closeAdmission();
 				try {
 					generator.closeAdmission();
 				} finally {
@@ -2042,6 +2106,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private void prepareOperationDrain() {
 		stepShuttingDown.set(true);
 		closeOperationAdmission();
+		if (rangeRuntime != null)
+			rangeRuntime.closeRetries();
 		cancelPendingRetries();
 		awaitRetryTasksSettled();
 		recoverQueuedOperations();
@@ -2091,7 +2157,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			if (operationLifecycle.isEnabled()) {
 				try {
 					if (waitOpFinishBeforeStop) {
-						awaitOutstanding(() -> operationLifecycle.inFlightCount() > 0, deadlineNanos);
+						awaitOutstanding(() -> operationLifecycle.inFlightCount() > 0
+										|| (rangeRuntime != null && rangeRuntime.hasPendingResults()), deadlineNanos);
 					}
 				} finally {
 					operationLifecycle.resolveOutstandingAsUnresolved();
@@ -2101,7 +2168,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				// historical active-concurrency wait behavior.
 				awaitOutstanding(() -> activeOpCount() != 0, deadlineNanos);
 			}
+			if (rangeRuntime != null)
+				rangeRuntime.finishResults();
 			operationDrainComplete.set(true);
+			if (rangeRuntime != null && rangeRuntime.failure() != null)
+				throw rangeRuntime.failure();
 		} finally {
 			if (standaloneDeleteEnabled && !deleteDrainTimestampRecorded.get()) {
 				deleteDrainCompletedNanos.set(System.nanoTime());
@@ -2151,6 +2222,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			final O operation = pending.get(readIndex);
 			try {
 				operationLifecycle.unattempted(operation);
+				if (rangeRuntime != null)
+					rangeRuntime.releaseRecovered(operation);
 			} catch (final RuntimeException failure) {
 				pending.set(retainedCount++, operation);
 				recoveryFailure = appendRecoveryFailure(recoveryFailure, failure);

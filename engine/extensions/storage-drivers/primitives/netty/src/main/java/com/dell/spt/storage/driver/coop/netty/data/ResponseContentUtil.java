@@ -54,9 +54,10 @@ public abstract class ResponseContentUtil {
 				try {
 					Loggers.MSG.debug(
 									"{}: invalid size, expected: {}, actual: {} ", dataItem.name(), dataItem.size(), e.getOffset());
-				} catch (final IOException ignored) {}
-			} else if (e instanceof DataCorruptionException) {
-				final DataCorruptionException ee = (DataCorruptionException) e;
+				} catch (final IOException ignored) {
+					// Diagnostic size lookup must not replace the recorded corruption outcome.
+				}
+			} else if (e instanceof DataCorruptionException ee) {
 				Loggers.MSG.debug(
 								"{}: content mismatch @ offset {}, expected: {}, actual: {} ", dataItem.name(), ee.getOffset(),
 								String.format("\"0x%X\"", (int) (ee.expected & 0xFF)),

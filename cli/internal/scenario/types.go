@@ -30,6 +30,9 @@ type Params struct {
 	SliceEndpoints bool // Partition endpoint list across nodes in distributed runs
 
 	// Read workload
+	RangeSize             string // Empty disables partial reads.
+	RangeOffset           string // Empty selects random offsets; explicit "0" selects fixed zero.
+	RangeAlign            string // Empty or zero means byte alignment.
 	SeedCount             int    // Number of seed objects; zero resolves to the public seed default.
 	ItemsFile             string // Path to a local items.csv for read workload (skips seed phase)
 	ReadShuffle           bool   // Enable batch-local item shuffling for the read phase

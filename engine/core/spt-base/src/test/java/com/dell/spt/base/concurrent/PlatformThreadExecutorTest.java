@@ -143,8 +143,13 @@ class PlatformThreadExecutorTest {
 			awaitAll(tasks);
 		}
 
-		assertTrue(taskThreads.stream().noneMatch(Thread::isAlive),
-						"all scaled service-task threads should terminate after close");
+		// The JDK executor signals termination from taskComplete before its worker's
+		// run method returns. Await physical thread exit as well, under one shared bound.
+		final long exitDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+		for (final var thread : taskThreads) {
+			assertTrue(thread.join(java.time.Duration.ofNanos(Math.max(0, exitDeadline - System.nanoTime()))),
+							"all scaled service-task threads should terminate after close: " + thread.getName());
+		}
 	}
 
 	private static void awaitAll(final List<TaskBase> tasks) throws InterruptedException {

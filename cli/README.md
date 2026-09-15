@@ -547,6 +547,10 @@ Executes a benchmark test with the specified workload type.
 - `--checksum`: Enable S3 checksum validation with the specified algorithm: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`. When used with `--part-size`, checksums are applied per part. (env: `SPT_CHECKSUM`)
 - `--object-data-compressibility`: Target compressibility percentage for generated object data, 0-100 (default: 0 = fully random). Each 4KB chunk is split into random and zero-filled portions according to the percentage. (env: `SPT_OBJECT_DATA_COMPRESSIBILITY`)
 - `--object-data-dedupable`: Whether generated data remains dedupe-friendly (default: true). Set `false` to stamp every 4KB with a unique object-id + offset header that defeats inline deduplication. Incompatible with `--items-file` / file-based data input. (env: `SPT_OBJECT_DATA_DEDUPABLE`)
+- `--range-size`: Partial READ length (for example `64KiB`); supported with the Netty S3 driver only.
+- `--range-offset`: Fixed partial READ offset, including explicit `0`. Omit it for a random aligned offset selected from inventory size and retained across retries.
+- `--range-align`: Alignment in bytes or binary units; omitted, `0`, and `1` mean byte alignment. A fixed offset must be divisible by the effective alignment. Offset/alignment require `--range-size`. A positive `--part-size` conflicts with partial reads.
+
 - `--seed-objects`: Objects to pre-create for `read` benchmarks and duration-based standalone DELETE (default: 2500)
 - `--items-file`: Path to a saved `items.csv` for `read`, or a canonical manifest for `read-verify` and explicit-manifest DELETE. Mutually exclusive with `--delete-existing`
 - `--delete-batch-size`: Standalone DELETE request size, from 1 through 1000 canonical identities (default 100). Multi-bucket manifests require 1
@@ -562,7 +566,7 @@ Executes a benchmark test with the specified workload type.
 - `--integrity-runtime-identity-tier`: Distributed verification or guarded existing-prefix DELETE runtime proof: `image` (default) or the stronger `payload` tier required for controlled comparisons and release evidence
 - `--shuffle`: `read` only. Shuffle items within each fetched read batch before issuing reads.
 - `--shuffle-batch-size`: `read` only. Override the read-phase shuffle window used with `--shuffle` (bounded to 1,000,000).
-- `--cleanup`: Best-effort deletion of SPT-created objects after test completion. Seeded DELETE retries its immutable measured residual in a separate phase; explicit-manifest and existing-prefix DELETE reject it. For `write-verify`, delete only successfully verified objects; unsupported for `read-verify` and deferred verification
+- `--cleanup`: Best-effort deletion after test completion. For READ with `--items-file`, this deletes objects from the supplied inventory, including objects not created by the current run. Seeded DELETE retries its immutable measured residual in a separate phase; explicit-manifest and existing-prefix DELETE reject it. For `write-verify`, delete only successfully verified objects; unsupported for `read-verify` and deferred verification
 - `--create-prefix`: Ensure target prefix exists before testing
 - `--output-dir, -O`: Directory to save detailed Spt reports
 - `--generate-only`: Generate scenario file without executing Docker
@@ -571,6 +575,10 @@ Executes a benchmark test with the specified workload type.
 - `--spt-image`: Override the engine image ref. By default, release builds use an image tag matching the CLI version (for example, `...:v5.10.3`) and local/dev builds use `...:spt_dev`.
 - `--skip-image-pull`: Use the locally cached Spt image instead of pulling before each run. Dev images such as `spt_dev` automatically skip pulls because they are local-only.
 - `--keep-scenario`: Keep the generated JavaScript scenario file after test completes (useful for debugging)
+
+See [Partial-object READs](docs/PARTIAL_READS.md) for examples, response rules, mutable datasets, and result semantics.
+
+Partial reads apply only to the READ phase. Size must be positive and the inclusive endpoint must fit a signed 64-bit integer. Fixed spans are sent unchanged, including out-of-bounds spans; random selection fails locally when the recorded object size is too small. Success requires a structurally valid, complete HTTP 206 response with the exact requested bytes. Inventory size is preserved when objects change, and content is not verified. READ-VERIFY, MIXED, AWS S3, and native S3-RDMA are unsupported. Count and duration runs recycle successful partial reads; failures retire the item. When range flags are enabled, merged engine overrides must keep legacy ranges, verification, metadata-only reads, tagging, and recycled content updates disabled, and any explicit network timeout must be positive. Set the partial-read policy with the range flags; global `load.op.read.range` overrides would also affect preparation and cleanup. READ/WRITE performance qualification remains pending; see the feature guide for current limitations.
 
 The public `delete` command's explicit-manifest mode requires the exact CSV header
 `bucket,key,size,version_id`, performs strict

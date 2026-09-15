@@ -1822,6 +1822,91 @@ public class LoadStepContextImplTest {
 	}
 
 	@Test
+	@SuppressWarnings({"unchecked", "rawtypes"
+	})
+	void listNamespaceExhaustionWaitsForRecycledPageCustody() throws Exception {
+		final Config listConfig = TestConfigBuilder.config();
+		listConfig.val("item-type", "path");
+		listConfig.val("load-op-type", "list");
+		listConfig.val("load-op-limit-count", 0);
+		final LoadGenerator<Item, Operation<Item>> generator = mock(LoadGenerator.class);
+		final StorageDriver<Item, Operation<Item>> driver = mock(StorageDriver.class);
+		final var tracker = new OperationLifecycleTracker<Operation<Item>>();
+		when(driver.operationLifecycle()).thenReturn(tracker);
+		when(driver.metadataIntegrityEnabled()).thenReturn(true);
+		final MetricsContext metrics = mock(MetricsContext.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+		when(generator.generatedOpCount()).thenReturn(1L);
+		when(generator.isItemInputFinished()).thenReturn(true);
+		// Model the gap after recycleQueue.poll and before the generator updates its count.
+		when(generator.isNothingToRecycle()).thenReturn(true);
+		when(driver.activeOpCount()).thenReturn(0);
+		doAnswer(call -> tracker.generatorBuffered(call.getArgument(0))).when(generator).recycle(any());
+		final var ctx = new LoadStepContextImpl<>("list-recycle-custody", generator, driver,
+						metrics, listConfig.configVal("load"), false);
+		ctx.start();
+		final var logger = (org.apache.logging.log4j.core.Logger) com.dell.spt.base.logging.Loggers.MSG;
+		final var appender = mock(org.apache.logging.log4j.core.Appender.class);
+		when(appender.getName()).thenReturn("list-custody-diagnostics");
+		when(appender.isStarted()).thenReturn(true);
+		final var messages = new java.util.concurrent.LinkedBlockingQueue<String>();
+		final var waitLogFence = new CountDownLatch(1);
+		final var completionLogFence = new CountDownLatch(1);
+		doAnswer(call -> {
+			org.apache.logging.log4j.core.LogEvent event = call.getArgument(0);
+			if (Level.DEBUG.equals(event.getLevel())) {
+				final var message = event.getMessage().getFormattedMessage();
+				messages.add(message);
+				if ("list-wait-fence".equals(message)) {
+					waitLogFence.countDown();
+				} else if ("list-completion-fence".equals(message)) {
+					completionLogFence.countDown();
+				}
+			}
+			return null;
+		}).when(appender).append(any());
+		final var previousLevel = logger.getLevel();
+		logger.addAppender(appender);
+		logger.setLevel(Level.DEBUG);
+		try {
+			final var page = new ListOperationImpl<PathItemImpl>(0, OpType.LIST, new PathItemImpl("prefix/"), null);
+			page.status(Operation.Status.SUCC);
+			page.objectsListed(2);
+			page.truncated(true);
+			page.continuationToken("next");
+			final Operation<Item> result = (Operation) page;
+			assertTrue(ctx.put(result));
+			assertEquals(OperationLifecycleState.GENERATOR_BUFFERED, result.lifecycle().state());
+			assertFalse(ctx.isDone(), "A page removed from the recycle queue still belongs to the generator");
+			assertTrue(tracker.driverQueued(result));
+			assertFalse(ctx.isDone(), "A queued continuation is invisible to active transport counts");
+			assertTrue(tracker.explicitlyDispatched(result));
+			assertFalse(ctx.isDone(), "A dispatched continuation must finish before namespace exhaustion");
+			// Same-thread fences drain asynchronous logging before inspecting its output.
+			logger.debug("list-wait-fence");
+			assertTrue(waitLogFence.await(2, TimeUnit.SECONDS));
+			assertEquals(1, messages.stream().filter(message -> message.contains(
+							"waiting for outstanding LIST operation lifecycle ownership")).count(),
+							"repeated completion polls must not flood the debug log");
+			page.truncated(false);
+			assertTrue(tracker.completionStarted(result));
+			assertTrue(tracker.terminal(result, Operation.Status.SUCC));
+			assertTrue(ctx.isDone(), "completed namespace must still terminate");
+			logger.debug("list-completion-fence");
+			assertTrue(completionLogFence.await(2, TimeUnit.SECONDS));
+			assertTrue(messages.stream().anyMatch(message -> message.contains("done after exhausting LIST namespace")));
+			when(generator.isItemInputFinished()).thenReturn(false);
+			assertFalse(ctx.isDone(), "An empty recycle queue cannot override unfinished namespace input");
+			when(generator.isItemInputFinished()).thenReturn(true);
+			when(driver.activeOpCount()).thenReturn(1);
+			assertFalse(ctx.isDone(), "Generic recycle completion must not override active LIST work");
+		} finally {
+			logger.removeAppender(appender);
+			logger.setLevel(previousLevel);
+			ctx.close();
+		}
+	}
+
+	@Test
 	public void listWorkloadCompletesOnceNamespaceExhausted() {
 		final Config listConfig = TestConfigBuilder.config();
 		listConfig.val("item-type", "path");

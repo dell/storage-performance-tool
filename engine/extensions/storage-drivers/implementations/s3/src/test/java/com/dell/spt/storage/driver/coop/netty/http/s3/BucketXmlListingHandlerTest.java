@@ -8,6 +8,7 @@ import com.dell.spt.base.item.DataItemFactoryImpl;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.xml.sax.SAXException;
@@ -119,7 +120,7 @@ final class BucketXmlListingHandlerTest {
 		}
 	}
 
-	private static ArrayList<DataItem> parse(
+	private static List<DataItem> parse(
 					final String key, final String prefix, final long size) throws Exception {
 		final var items = new ArrayList<DataItem>();
 		final var handler = new BucketXmlListingHandler<>(
@@ -130,7 +131,7 @@ final class BucketXmlListingHandlerTest {
 		return items;
 	}
 
-	private static ArrayList<DataItem> parseXml(final String xml, final String prefix)
+	private static List<DataItem> parseXml(final String xml, final String prefix)
 					throws Exception {
 		final var items = new ArrayList<DataItem>();
 		final var handler = new BucketXmlListingHandler<>(

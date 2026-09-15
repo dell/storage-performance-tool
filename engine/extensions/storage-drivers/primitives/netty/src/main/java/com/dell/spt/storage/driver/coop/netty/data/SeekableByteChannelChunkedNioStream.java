@@ -46,6 +46,8 @@ public final class SeekableByteChannelChunkedNioStream implements ChunkedInput<B
 		in.close();
 	}
 
+	// Retain the deprecated Netty interface bridge without adding an InlineMe annotation dependency.
+	@SuppressWarnings("InlineMeSuggester")
 	@Deprecated
 	@Override
 	public ByteBuf readChunk(ChannelHandlerContext ctx) throws Exception {

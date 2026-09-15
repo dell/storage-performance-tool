@@ -197,6 +197,8 @@ read data paths; see the [S3-RDMA guide](cli/docs/S3_RDMA.md).
   consistency gates, and result provenance.
 - [S3 integrity testing](cli/docs/S3_INTEGRITY.md) - persisted-object write/read
   verification, artifacts, and automation contracts.
+- [Partial-object READs](cli/docs/PARTIAL_READS.md) - fixed or random aligned S3
+  ranges, response validation, and result accounting.
 - [S3 DELETE](cli/docs/S3_DELETE.md) - destructive selection safety, batching,
   verification, results, and recovery.
 - [Archived workload replay](cli/docs/REPLAY.md) - import and replay SPT or

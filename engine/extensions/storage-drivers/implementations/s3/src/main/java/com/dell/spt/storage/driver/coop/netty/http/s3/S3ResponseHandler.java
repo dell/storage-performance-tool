@@ -145,6 +145,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 			}
 		}
 
+		@Override
 		public void close() throws IOException {
 			if (closed) {
 				return;
@@ -425,8 +426,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		} else {
 			final Attribute<ByteBuf> contentAttr = channel.attr(CONTENT_ATTR_KEY);
 			final ByteBuf content = contentAttr.get();
-			if (content != null && content.readableBytes() > 0 && op instanceof CompositeDataOperation) {
-				final CompositeDataOperation mpuOp = (CompositeDataOperation) op;
+			if (content != null && content.readableBytes() > 0 && op instanceof CompositeDataOperation mpuOp) {
 				if (!mpuOp.allSubOperationsDone()) {
 					// this is an MPU init response
 					final String contentStr = content.toString(UTF_8);
@@ -512,6 +512,8 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	 * Response parsing is a request-frequency path. Emit at most one DEBUG diagnostic for each
 	 * fixed failure class during the process lifetime, and log only enum-backed structural context.
 	 */
+	// Ordinals index a process-local array sized from this same enum; never persisted or exposed.
+	@SuppressWarnings("EnumOrdinal")
 	private static void logDeleteResponseDiagnostic(
 					final DeleteResponseDiagnosticClass failureClass,
 					final Enum<?> structuralContext) {

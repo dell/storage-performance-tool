@@ -3,6 +3,7 @@ package com.dell.spt.base.load.generator;
 import com.dell.spt.base.concurrent.Task;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.op.data.range.RangeReadAttempt;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import java.util.List;
@@ -114,6 +115,16 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends T
 	}
 
 	/**
+	 * Enqueues a prepared range retry while retaining the current logical lifecycle.
+	 * The coordinator owns retry policy, delay and attempt accounting before this handoff.
+	 * False means no queue ownership was accepted; a closed generator settles a valid pending
+	 * token's previous failure. Third-party generators must explicitly support this contract.
+	 */
+	default boolean retryRange(final O op, final RangeReadAttempt attempt) {
+		throw new UnsupportedOperationException("Retained range retry admission is unsupported");
+	}
+
+	/**
 	 * Returns {@code true} when there is currently no {@link #retry}-enqueued operation
 	 * still waiting to be drained/redispatched. {@code LoadStepContextImpl} polls this
 	 * during shutdown, after confirming no more retries can newly be enqueued, to make
@@ -163,6 +174,11 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends T
 	 */
 	default boolean supportsRetry() {
 		return true;
+	}
+
+	/** Explicit capability for retryRange's retained-circulation handoff; legacy generators fail closed. */
+	default boolean supportsRangeRetry() {
+		return false;
 	}
 
 	/**

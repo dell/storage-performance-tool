@@ -6,6 +6,8 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
 
+import com.dell.spt.base.metrics.range.RangeReadSnapshot;
+import com.dell.spt.base.metrics.range.RangeReadArtifact;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleCounters;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
@@ -658,6 +660,17 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		try (final var logContext = put(KEY_STEP_ID, loadStepId())) {
 			OperationLifecycleArtifact.publish(runId(), loadStepId(),
 							operationLifecycleWorkerId, counters, expectedOperationLifecycleContexts.equals(stepContexts));
+		}
+		final var ranges = new ArrayList<RangeReadSnapshot>();
+		boolean complete = expectedOperationLifecycleContexts.equals(stepContexts);
+		for (final var context : expectedOperationLifecycleContexts) {
+			ranges.add(context.rangeReadSnapshot());
+			complete &= context.terminalOperationCounters() != null;
+		}
+		if (ranges.stream().anyMatch(java.util.Objects::nonNull)) {
+			try (final var logContext = put(KEY_STEP_ID, loadStepId())) {
+				RangeReadArtifact.publish(runId(), loadStepId(), operationLifecycleWorkerId, ranges, complete);
+			}
 		}
 		operationLifecyclePublished = true;
 	}

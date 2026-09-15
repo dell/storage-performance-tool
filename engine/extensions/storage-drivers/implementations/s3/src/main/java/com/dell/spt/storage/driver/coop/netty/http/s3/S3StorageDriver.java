@@ -1141,7 +1141,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		if (rawQuery == null || rawQuery.isEmpty()) {
 			return "";
 		}
-		final var parts = rawQuery.split("&");
+		final var parts = rawQuery.split("&", 0);
 		final List<String> canonicalComponents = new ArrayList<>(parts.length);
 		for (final var part : parts) {
 			if (part == null || part.isEmpty()) {
@@ -1227,9 +1227,9 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	private static boolean isUnreserved(final int ch) {
-		return ch >= '0' && ch <= '9'
-						|| ch >= 'A' && ch <= 'Z'
-						|| ch >= 'a' && ch <= 'z'
+		return (ch >= '0' && ch <= '9')
+						|| (ch >= 'A' && ch <= 'Z')
+						|| (ch >= 'a' && ch <= 'z')
 						|| ch == '-' || ch == '_' || ch == '.' || ch == '~';
 	}
 
@@ -1540,15 +1540,15 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final HttpHeaders httpHeaders = new DefaultHttpHeaders();
 		httpHeaders.set(HttpHeaderNames.HOST, nodeAddr);
 		final var httpMethod = HttpMethod.POST;
-		final var contentStr = content.toString();
+		final var contentBytes = content.toString().getBytes(UTF_8);
 		final FullHttpRequest httpRequest = new DefaultFullHttpRequest(
 						HTTP_1_1,
 						httpMethod,
 						uri,
-						Unpooled.wrappedBuffer(contentStr.getBytes()),
+						Unpooled.wrappedBuffer(contentBytes),
 						httpHeaders,
 						EmptyHttpHeaders.INSTANCE);
-		httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, content.length());
+		httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, contentBytes.length);
 		applyMetaDataHeaders(httpHeaders);
 		applyDynamicHeaders(httpHeaders);
 		applySharedHeaders(httpHeaders);
@@ -1606,7 +1606,9 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				if (item instanceof DataItem) {
 					try {
 						httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, ((DataItem) item).size());
-					} catch (final IOException ignored) {}
+					} catch (final IOException ignored) {
+						// Unavailable size metadata must not replace the existing operation outcome.
+					}
 				} else {
 					httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 				}
@@ -1634,6 +1636,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			break;
 		case DELETE:
 			httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
+			break;
+		case NOOP:
+		case LIST:
+		case STAT:
+			// Preserve existing versioned-request behavior for types without content headers.
 			break;
 		}
 		applyMetaDataHeaders(httpHeaders, op);
@@ -1663,7 +1670,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			break;
 		case UPDATE:
 			final var content = taggingContentInput.get();
-			final var contentBytes = content.getBytes();
+			final var contentBytes = content.getBytes(UTF_8);
 			httpRequest = new DefaultFullHttpRequest(
 							HTTP_1_1,
 							PUT,
@@ -1801,9 +1808,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				throw failure;
 			}
 		}
-		if (channel != null && op instanceof CompositeDataOperation
+		if (channel != null && op instanceof CompositeDataOperation compositeOp
 						&& OpType.CREATE.equals(op.type())) {
-			final var compositeOp = (CompositeDataOperation) op;
 			final boolean abortRequested = compositeOp.get(S3Api.KEY_MPU_ABORT) != null;
 			final boolean completing = !abortRequested && compositeOp.allSubOperationsDone();
 			if (abortRequested) {
@@ -1855,7 +1861,9 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					long partBytes = 0;
 					try {
 						partBytes = ((DataItem) subOp.item()).size();
-					} catch (final IOException ignored) {}
+					} catch (final IOException ignored) {
+						// Unavailable size metadata must not replace the existing operation outcome.
+					}
 					Loggers.MULTIPART.info(
 									"PART,{},{},{},{},{},{},{}",
 									compositeOp.item().name(),
@@ -2087,7 +2095,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			if (authVersion == 2) {
 				final var mac = MAC_BY_SECRET.get().computeIfAbsent(secret, GET_MAC_BY_SECRET);
 				final var canonicalForm = getCanonical(httpHeaders, httpMethod, dstUriPath);
-				final var sigData = mac.doFinal(canonicalForm.getBytes());
+				final var sigData = mac.doFinal(canonicalForm.getBytes(UTF_8));
 				httpHeaders.set(
 								HttpHeaderNames.AUTHORIZATION,
 								S3Api.AUTH_PREFIX + uid + ':' + BASE64_ENCODER.encodeToString(sigData));

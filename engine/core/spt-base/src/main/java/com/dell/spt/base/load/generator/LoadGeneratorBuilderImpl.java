@@ -8,6 +8,7 @@ import static com.github.akurilov.commons.io.el.ExpressionInput.INIT_MARKER;
 import static com.github.akurilov.commons.io.el.ExpressionInput.SYNC_MARKER;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 
+import com.dell.spt.base.config.RangeReadConfig;
 import com.dell.spt.base.config.ConstantValueInputImpl;
 import com.dell.spt.base.config.el.CompositeExpressionInputBuilder;
 import com.dell.spt.base.config.IllegalConfigurationException;
@@ -29,6 +30,8 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationsBuilder;
 import com.dell.spt.base.item.op.data.DataOperationsBuilder;
 import com.dell.spt.base.item.op.data.DataOperationsBuilderImpl;
+import com.dell.spt.base.item.op.data.range.RangeReadOperationsBuilder;
+import com.dell.spt.base.storage.driver.range.RangeReadDriverSupport;
 import com.dell.spt.base.item.op.deletion.DeleteRequestAssembler;
 import com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig;
 import com.dell.spt.base.item.op.list.shard.ListShard;
@@ -128,18 +131,10 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 	}
 
 	@Override
-	@SuppressWarnings("unchecked")
 	public LoadGeneratorBuilderImpl<I, O, T> itemInput(final Input<I> itemInput) {
 		this.itemInput = itemInput;
-		// pipeline transfer buffer is not resettable
-		if (!(itemInput instanceof TransferConvertBuffer)) {
-			final var opType = OpType.valueOf(loadConfig.stringVal("op-type").toUpperCase(Locale.ROOT));
-			// DELETE and STAT transfer 0 bytes — skip size estimation (also avoids blocking on
-			// queue-backed inputs that are empty at init time, e.g. MixedLoad's DELETE queue)
-			if (OpType.DELETE != opType && OpType.STAT != opType) {
-				sizeEstimate = estimateTransferSize(null, opType, (Input<DataItem>) itemInput);
-			}
-		}
+		// Estimate at build time, once the driver capability is known regardless of setter order.
+		sizeEstimate = -1;
 		return this;
 	}
 
@@ -185,6 +180,15 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 		if (originIndex < 0) {
 			throw new IllegalConfigurationException("No origin index is set");
 		}
+		final var opType = OpType.valueOf(opConfig.stringVal("type").toUpperCase(Locale.ROOT));
+		final var rangeRuntime = opOutput instanceof RangeReadDriverSupport support
+						? java.util.Objects.requireNonNull(support.rangeReadRuntime(), "Range driver runtime")
+						: null;
+		RangeReadConfig.requireMatchingRuntime(
+						RangeReadConfig.fromLoad(loadConfig),
+						rangeRuntime == null ? null : rangeRuntime.policy());
+		if (rangeRuntime != null && (!ItemType.DATA.equals(itemType) || opType != OpType.READ))
+			throw new IllegalConfigurationException("Single-range operations require DATA READ");
 		// init the op builder
 		if (ItemType.DATA.equals(itemType)) {
 			final var fixedRangesConfig = rangesConfig.<String> listVal("fixed");
@@ -208,17 +212,22 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 												+ "backpressure; load.batch.size=1 remains a conservative troubleshooting setting.",
 								sizeThreshold, batchSize);
 			}
-			opsBuilder = (OperationsBuilder<I, O>) new DataOperationsBuilderImpl(originIndex)
-							.fixedRanges(fixedRanges)
-							.randomRangesCount(rangesConfig.intVal("random"))
-							.sizeThreshold(sizeThreshold);
+			if (rangeRuntime != null) {
+				if (!fixedRanges.isEmpty() || rangesConfig.intVal("random") > 0 || sizeThreshold > 0)
+					throw new IllegalConfigurationException("Single-range READ conflicts with active legacy ranges");
+				opsBuilder = (OperationsBuilder<I, O>) new RangeReadOperationsBuilder<>(originIndex, rangeRuntime.policy());
+			} else {
+				opsBuilder = (OperationsBuilder<I, O>) new DataOperationsBuilderImpl(originIndex)
+								.fixedRanges(fixedRanges)
+								.randomRangesCount(rangesConfig.intVal("random"))
+								.sizeThreshold(sizeThreshold);
+			}
 		} else if (ItemType.PATH.equals(itemType)) {
 			opsBuilder = (OperationsBuilder<I, O>) new PathOperationsBuilderImpl(originIndex);
 		} else {
 			opsBuilder = (OperationsBuilder<I, O>) new TokenOperationsBuilderImpl(originIndex);
 		}
 		// determine the operations type
-		final var opType = OpType.valueOf(opConfig.stringVal("type").toUpperCase(Locale.ROOT));
 		opsBuilder.opType(opType);
 		ListShardingConfig shardingConfig = null;
 		if (opType == OpType.LIST && opsBuilder instanceof PathOperationsBuilderImpl) {
@@ -256,6 +265,14 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 				opsBuilder.credentialInput(
 								new ConstantValueInputImpl<>(Credential.getInstance(uid, secret)));
 			}
+		}
+		// Supplied inputs previously estimated in itemInput(...). Keep ordinary sizing, but
+		// never sample/reset range inputs or size their streaming buffer from object length.
+		if (rangeRuntime != null) {
+			sizeEstimate = BUFF_SIZE_MIN;
+		} else if (itemInput != null && !(itemInput instanceof TransferConvertBuffer)
+						&& opType != OpType.DELETE && opType != OpType.STAT) {
+			sizeEstimate = estimateTransferSize(null, opType, (Input<DataItem>) itemInput);
 		}
 		// init the items input
 		final var itemInputFile = inputConfig.stringVal("file");
@@ -313,7 +330,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 			if (itemInput == null) {
 				throw new IllegalConfigurationException("No item input available");
 			}
-			if (ItemType.DATA.equals(itemType)) {
+			if (rangeRuntime == null && ItemType.DATA.equals(itemType)) {
 				sizeEstimate = estimateTransferSize(
 								(DataOperationsBuilder) opsBuilder,
 								opsBuilder.opType(),
@@ -444,11 +461,13 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 							shuffleFlag,
 							false);
 		}
+		final Output<O> generatorOutput = rangeRuntime == null ? opOutput
+						: (Output<O>) (Output<?>) rangeRuntime.admission();
 		return (T) new LoadGeneratorImpl<>(
 						itemInput,
 						opsBuilder,
 						throttles,
-						opOutput,
+						generatorOutput,
 						batchSize,
 						countLimit,
 						recycleLimit,

@@ -6,6 +6,11 @@ import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
 
+import com.github.akurilov.confuse.impl.BasicConfig;
+import com.github.akurilov.commons.collection.TreeUtil;
+import com.dell.spt.base.load.step.client.LoadStepClient;
+import com.dell.spt.base.config.RangeReadConfig;
+import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.concurrent.DaemonBase;
 import com.dell.spt.base.buildinfo.EngineBuildInfoPublisher;
 import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
@@ -76,6 +81,10 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		this.ctxConfigs = ctxConfigs == null ? null
 						: ctxConfigs.stream().map(buildInfo::copyWithProjectedVersion).collect(Collectors.toList());
 		this.metricsMgr = metricsMgr;
+		// Script bindings eagerly construct dormant client prototypes for every operation/step type.
+		// Validate local steps immediately, and clients only when selected for execution.
+		if (!(this instanceof LoadStepClient<?>))
+			validateRangeConfiguration();
 		try {
 			this.integrityModeEnabled = IntegrityConfig.validateLoadStep(this.config).enabled();
 		} catch (final RuntimeException e) {
@@ -92,6 +101,25 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		this.standaloneDeletePreValidationEnabled = standaloneDelete.preValidation();
 		this.standaloneDeletePostVerificationEnabled = standaloneDelete.postVerification();
 		Loggers.CONFIG.info(ConfigUtil.toString(this.config, ConfigFormat.YAML, resolveStepTypeName()));
+	}
+
+	private void validateRangeConfiguration() {
+		validateRangeConfig(this.config);
+		if (this.ctxConfigs != null) {
+			this.ctxConfigs.forEach(context -> {
+				final var merged = TreeUtil.reduceForest(
+								List.of(Config.deepToMap(this.config), Config.deepToMap(context)));
+				validateRangeConfig(new BasicConfig(
+								this.config.pathSep(), this.config.schema(), merged));
+			});
+		}
+	}
+
+	private void validateRangeConfig(final Config value) {
+		if (RangeReadConfig.validate(value) != null
+						&& ConfigUtil.MIXED_LOAD_STEP_TYPE.equals(resolveStepTypeName())) {
+			throw new IllegalConfigurationException("load.op.read.range does not support MixedLoad");
+		}
 	}
 
 	private String resolveStepTypeName() {
@@ -280,6 +308,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	@Override
 	protected void doStart() throws IllegalStateException {
 
+		validateRangeConfiguration();
 		init();
 		EngineBuildInfoPublisher.global().publishForStep(loadStepId());
 

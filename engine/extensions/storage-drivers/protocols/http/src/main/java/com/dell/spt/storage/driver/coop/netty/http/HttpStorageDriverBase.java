@@ -68,7 +68,6 @@ import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
@@ -82,9 +81,11 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 
 	private static final String CLS_NAME = HttpStorageDriverBase.class.getSimpleName();
 	private static final String DELETE_REQUEST_TIMING_HANDLER = "deleteRequestTiming";
-	private static final Function<String, Input<String>> EXPR_INPUT_FUNC = expr -> CompositeExpressionInputBuilder.newInstance()
-					.expression(expr)
-					.build();
+
+	private static Input<String> expressionInput(final String expression) {
+		return CompositeExpressionInputBuilder.newInstance().expression(expression).build();
+	}
+
 	private final Map<String, Input<String>> headerNameInputs = new ConcurrentHashMap<>();
 	private final Map<String, Input<String>> headerValueInputs = new ConcurrentHashMap<>();
 	private final AtomicBoolean requestBuildFailureLogged = new AtomicBoolean(false);
@@ -129,7 +130,7 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 						.map(entry -> entry.getKey() + '=' + entry.getValue())
 						.collect(Collectors.joining("&"));
 		if (uriQueryExpr.length() > 0) {
-			uriQueryInput = EXPR_INPUT_FUNC.apply('?' + uriQueryExpr);
+			uriQueryInput = expressionInput('?' + uriQueryExpr);
 		} else {
 			uriQueryInput = new ConstantValueInputImpl("");
 		}
@@ -188,7 +189,8 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 				throw new ConnectException("Connection failure: " + e.toString());
 			}
 		} finally {
-			channel.close();
+			// Teardown is asynchronous; this synchronous request has already settled.
+			final var unusedClose = channel.close();
 		}
 		return resp;
 	}
@@ -231,7 +233,8 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 					deleteOperation.markRequestFirstByteSent();
 				}
 			}
-			ctx.write(msg, promise);
+			// The caller owns this exact promise and observes completion downstream.
+			final var unusedWrite = ctx.write(msg, promise);
 		}
 	}
 
@@ -266,7 +269,9 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 				if (item instanceof DataItem) {
 					try {
 						httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, ((DataItem) item).size());
-					} catch (final IOException ignored) {}
+					} catch (final IOException ignored) {
+						// Leave length unspecified when the item cannot provide size metadata.
+					}
 				} else {
 					httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 				}
@@ -291,6 +296,10 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			break;
 		case STAT:
 			httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
+			break;
+		case NOOP:
+		case LIST:
+			// These operation types do not add content headers here.
 			break;
 		}
 		applyChecksum(httpHeaders, op);
@@ -419,7 +428,7 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		for (final var nextHeader : dynamicHeaders.entrySet()) {
 			headerName = nextHeader.getKey();
 			// header name is a generator pattern
-			headerNameInput = headerNameInputs.computeIfAbsent(headerName, EXPR_INPUT_FUNC);
+			headerNameInput = headerNameInputs.computeIfAbsent(headerName, HttpStorageDriverBase::expressionInput);
 			if (headerNameInput == null) {
 				continue;
 			}
@@ -427,7 +436,7 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			headerName = headerNameInput.get();
 			headerValue = nextHeader.getValue();
 			// header value is a generator pattern
-			headerValueInput = headerValueInputs.computeIfAbsent(headerValue, EXPR_INPUT_FUNC);
+			headerValueInput = headerValueInputs.computeIfAbsent(headerValue, HttpStorageDriverBase::expressionInput);
 			if (headerValueInput == null) {
 				continue;
 			}
@@ -569,7 +578,9 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		super.doClose();
 		try {
 			uriQueryInput.close();
-		} catch (final Exception ignored) {}
+		} catch (final Exception ignored) {
+			// Best-effort shutdown must continue closing the remaining expression inputs.
+		}
 		sharedHeaders.clear();
 		dynamicHeaders.clear();
 		headerNameInputs
@@ -578,7 +589,9 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 										headerNameInput -> {
 											try {
 												headerNameInput.close();
-											} catch (final Exception ignored) {}
+											} catch (final Exception ignored) {
+												// Best-effort shutdown must continue closing the remaining expression inputs.
+											}
 										});
 		headerNameInputs.clear();
 		headerValueInputs
@@ -587,7 +600,9 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 										headerValueInput -> {
 											try {
 												headerValueInput.close();
-											} catch (final Exception ignored) {}
+											} catch (final Exception ignored) {
+												// Best-effort shutdown must continue closing the remaining expression inputs.
+											}
 										});
 		headerValueInputs.clear();
 	}

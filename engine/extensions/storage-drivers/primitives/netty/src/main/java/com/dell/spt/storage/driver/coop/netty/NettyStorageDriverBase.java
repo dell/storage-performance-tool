@@ -225,14 +225,14 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			}
 
 		} catch (final ReflectiveOperationException e) {
-			throw new AssertionError(e);
+			throw new LinkageError("Unable to initialize configured Netty transport", e);
 		}
 
 		final var socketChannelClsName = SOCKET_CHANNEL_IMPLS.get(transportKey);
 		try {
 			socketChannelCls = (Class<SocketChannel>) Class.forName(socketChannelClsName);
 		} catch (final ReflectiveOperationException e) {
-			throw new AssertionError(e);
+			throw new LinkageError("Unable to initialize configured Netty transport", e);
 		}
 
 		bootstrap = new Bootstrap().group(ioExecutor).channel(socketChannelCls);
@@ -311,7 +311,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 
 		final InetSocketAddress socketAddr;
 		if (storageNodeAddr.contains(":")) {
-			final String addrParts[] = storageNodeAddr.split(":");
+			final String addrParts[] = storageNodeAddr.split(":", 0);
 			socketAddr = new InetSocketAddress(addrParts[0], Integer.parseInt(addrParts[1]));
 		} else {
 			socketAddr = new InetSocketAddress(storageNodeAddr, storageNodePort);
@@ -371,7 +371,8 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 				conn.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
 				return conn;
 			}
-			conn.close();
+			// An inactive connection is retired without waiting for asynchronous teardown.
+			final var unusedClose = conn.close();
 			connPool.release(conn);
 		}
 	}
@@ -614,6 +615,9 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	*/
 	protected abstract void sendRequest(final Channel channel, final O op);
 
+	// Payload writes are queued; the protocol's final write owns request-completion timing.
+	// Awaiting or adding callbacks per chunk would change this established streaming contract.
+	@SuppressWarnings("FutureReturnValueIgnored")
 	protected final void sendRequestData(final Channel channel, final O op) throws IOException {
 
 		final var opType = op.type();
@@ -637,9 +641,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			}
 		} else if (OpType.UPDATE.equals(opType)) {
 			final var item = op.item();
-			if (item instanceof DataItem) {
-
-				final var dataItem = (DataItem) item;
+			if (item instanceof DataItem dataItem) {
 				final var dataOp = (DataOperation) op;
 
 				final var fixedRanges = (List<Range>) dataOp.fixedRanges();
@@ -780,7 +782,8 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		}
 
 		if (op.status() != Operation.Status.SUCC && channel != null) {
-			channel.close();
+			// Completion accounting must not wait for asynchronous channel teardown.
+			final var unusedClose = channel.close();
 		}
 
 		final boolean transportHeld = channel != null
@@ -963,7 +966,9 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			if (Provider.class.isAssignableFrom(providerClass)) {
 				return (Provider) providerClass.getDeclaredConstructor().newInstance();
 			}
-		} catch (final ReflectiveOperationException ignored) {}
+		} catch (final ReflectiveOperationException ignored) {
+			// Optional provider lookup: the caller selects the configured fallback.
+		}
 		return null;
 	}
 

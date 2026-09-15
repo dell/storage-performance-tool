@@ -32,6 +32,9 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import com.dell.spt.base.item.op.data.range.RangeReadOperation;
+import com.dell.spt.base.item.op.data.range.RangeReadAttempt;
+import com.dell.spt.base.item.op.data.range.RangeReadCirculation;
 import java.util.ConcurrentModificationException;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -98,12 +101,27 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private final Queue<O> recycleQueue;
 	private final int recycleQueueCapacity;
 	private final AtomicInteger recycleQueueSize = new AtomicInteger();
+
 	// load-op-retry redispatches: deliberately a *separate* queue from recycleQueue above,
 	// drained unconditionally on every doWork() iteration regardless of countLimit/
 	// itemInputFinishFlag state. See LoadGenerator#retry's javadoc for why a retry must not
 	// be gated by (or count against) load-op-limit-count the way recycleQueue's true
 	// recycle-mode contents deliberately are.
-	private final Queue<O> retryQueue = new ConcurrentLinkedQueue<>();
+	private static final class RetryEntry<T> {
+		final T operation;
+		final RangeReadCirculation circulation;
+		final RangeReadAttempt attempt;
+
+		RetryEntry(T operation, RangeReadCirculation circulation, RangeReadAttempt attempt) {
+			this.operation = operation;
+			this.circulation = circulation;
+			this.attempt = attempt;
+		}
+	}
+
+	private final Queue<RetryEntry<O>> retryQueue = new ConcurrentLinkedQueue<>();
+	// Access only under admissionLock; includes polled range entries until handoff returns.
+	private Set<RetryEntry<O>> retainedRetries;
 	private final boolean recycleFlag;
 	// See the retryFlag constructor javadoc: only controls the countLimit self-stop below.
 	private final boolean retryFlag;
@@ -900,6 +918,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 	@Override
 	public final void retry(final O op) {
+		if (op instanceof RangeReadOperation<?>) {
+			throw new IllegalArgumentException("Range retries require an attempt-token handoff");
+		}
 		admissionLock.lock();
 		try {
 			if (!admissionAllowedLocked()) {
@@ -908,9 +929,73 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 			}
 			operationLifecycle.generatorBuffered(op);
 			bufferedOperations.add(identityKey(op));
-			retryQueue.add(op);
+			retryQueue.add(new RetryEntry<>(op, null, null));
 		} finally {
 			admissionLock.unlock();
+		}
+	}
+
+	@Override
+	public final boolean supportsRangeRetry() {
+		return true;
+	}
+
+	/** Enqueues one prepared range retry without starting another logical circulation. */
+	@Override
+	public final boolean retryRange(final O op, final RangeReadAttempt attempt) {
+		if (!retryFlag) {
+			throw new IllegalStateException("Range retry admission requires retry-enabled generator lifetime");
+		}
+		if (!(op instanceof RangeReadOperation<?> range)) {
+			throw new IllegalArgumentException("Expected a range operation");
+		}
+		admissionLock.lock();
+		try {
+			final var circulation = range.circulation();
+			if (!operationLifecycle.hasOutstandingCustody(op, circulation.lifecycle())
+							|| !circulation.claimRetryQueue(attempt)) {
+				return false;
+			}
+			final var entry = new RetryEntry<>(op, circulation, attempt);
+			if (!admissionAllowedLocked()) {
+				settleRangeRetry(entry);
+				return false;
+			}
+			if (retainedRetries == null) {
+				retainedRetries = ConcurrentHashMap.newKeySet();
+			}
+			retainedRetries.add(entry);
+			retryQueue.add(entry);
+			return true;
+		} finally {
+			admissionLock.unlock();
+		}
+	}
+
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	private void settleRangeRetry(final RetryEntry<O> entry) {
+		final var range = (RangeReadOperation<?>) entry.operation;
+		synchronized (entry.circulation.lifecycle()) {
+			synchronized (entry.attempt) {
+				if (range.circulation() == entry.circulation
+								&& entry.circulation.isPendingAttempt(entry.attempt)) {
+					entry.circulation.settleAtDeadline(range, (OperationLifecycleTracker) operationLifecycle);
+				}
+			}
+		}
+	}
+
+	private void releaseRetryEntry(final RetryEntry<O> entry) {
+		if (entry.circulation == null) {
+			bufferedOperations.remove(identityKey(entry.operation));
+		} else {
+			admissionLock.lock();
+			try {
+				retainedRetries.remove(entry);
+			} finally {
+				admissionLock.unlock();
+			}
 		}
 	}
 
@@ -991,10 +1076,19 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					recovered.put(operationKey, operationKey.value);
 				}
 				bufferedOperations.clear();
-				O op;
-				while ((op = retryQueue.poll()) != null) {
-					recovered.put(identityKey(op), op);
+				RetryEntry<O> entry;
+				while ((entry = retryQueue.poll()) != null) {
+					if (entry.circulation == null) {
+						recovered.put(identityKey(entry.operation), entry.operation);
+					}
 				}
+				if (retainedRetries != null) {
+					for (var retained : retainedRetries) {
+						settleRangeRetry(retained);
+					}
+					retainedRetries.clear();
+				}
+				O op;
 				while ((op = recycleQueue.poll()) != null) {
 					recovered.put(identityKey(op), op);
 				}
@@ -1050,18 +1144,23 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private void drainRetryQueue() {
 		var remaining = retryQueue.size();
 		while (remaining-- > 0) {
-			O retryOp = null;
+			RetryEntry<O> entry = null;
 			admissionLock.lock();
 			try {
 				if (!admissionAllowedLocked()) {
 					break;
 				}
-				retryOp = retryQueue.poll();
-				if (retryOp == null) {
+				entry = retryQueue.poll();
+				if (entry == null) {
 					break;
 				}
 			} finally {
 				admissionLock.unlock();
+			}
+			final O retryOp = entry.operation;
+			if (entry.circulation != null && !entry.circulation.isPendingAttempt(entry.attempt)) {
+				releaseRetryEntry(entry);
+				continue;
 			}
 			try {
 				var permitted = 1;
@@ -1077,23 +1176,31 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				if (permitted <= 0) {
 					// Throttled - preserve it for a later iteration rather than dropping it or
 					// busy-spinning retrying the same op immediately.
-					requeueRetry(retryOp);
+					requeueRetry(entry);
 					break;
 				}
 				if (!isAdmissionOpen() || !opOutput.put(retryOp)) {
 					// Driver backpressure - preserve it for the next iteration rather than
 					// dropping it, same as the normal dispatch path does for its own buffer.
-					requeueRetry(retryOp);
+					requeueRetry(entry);
 					break;
 				}
-				bufferedOperations.remove(identityKey(retryOp));
+				releaseRetryEntry(entry);
 			} catch (final Exception e) {
 				throwUncheckedIfInterrupted(e);
 				final var terminal = IntegrityTerminalException.find(e);
 				if (terminal != null) {
 					throw terminal;
 				}
+				if (entry.circulation != null && !(e instanceof EOFException)) {
+					throw new IntegrityTerminalException(IntegrityTerminalException.Category.EXECUTION,
+									"Range retry handoff failed outside the attempt completion contract", e);
+				}
 				if (e instanceof EOFException) {
+					if (entry.circulation != null) {
+						settleRangeRetry(entry);
+						releaseRetryEntry(entry);
+					}
 					// The output itself is done and will never accept anything again
 					// (including a re-enqueue) - matches how the normal dispatch path
 					// below also abandons its own buffered op on output EOF rather than
@@ -1104,7 +1211,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				} else {
 					LogUtil.exception(Level.ERROR, e, "{}: retry redispatch failure, will retry next iteration", name);
 					if (retryOp != null) {
-						requeueRetry(retryOp);
+						requeueRetry(entry);
 					}
 					break;
 				}
@@ -1112,14 +1219,18 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		}
 	}
 
-	private void requeueRetry(final O retryOp) {
+	private void requeueRetry(final RetryEntry<O> entry) {
 		admissionLock.lock();
 		try {
 			if (admissionAllowedLocked()) {
-				retryQueue.add(retryOp);
+				retryQueue.add(entry);
 			} else {
-				operationLifecycle.unattempted(retryOp);
-				bufferedOperations.remove(identityKey(retryOp));
+				if (entry.circulation == null) {
+					operationLifecycle.unattempted(entry.operation);
+				} else {
+					settleRangeRetry(entry);
+				}
+				releaseRetryEntry(entry);
 			}
 		} finally {
 			admissionLock.unlock();
@@ -1133,7 +1244,12 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 	@Override
 	public final boolean isNothingPendingRetry() {
-		return retryQueue.isEmpty();
+		admissionLock.lock();
+		try {
+			return retryQueue.isEmpty() && (retainedRetries == null || retainedRetries.isEmpty());
+		} finally {
+			admissionLock.unlock();
+		}
 	}
 
 	@Override
@@ -1143,13 +1259,26 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 
 	@Override
 	public final List<O> drainPendingRetries() {
-		if (retryQueue.isEmpty()) {
-			return List.of();
-		}
 		final List<O> drained = new ArrayList<>();
-		O op;
-		while ((op = retryQueue.poll()) != null) {
-			drained.add(op);
+		admissionLock.lock();
+		try {
+			RetryEntry<O> entry;
+			while ((entry = retryQueue.poll()) != null) {
+				if (entry.circulation == null) {
+					drained.add(entry.operation);
+				} else {
+					settleRangeRetry(entry);
+					retainedRetries.remove(entry);
+				}
+			}
+			if (retainedRetries != null) {
+				for (var retained : retainedRetries) {
+					settleRangeRetry(retained);
+				}
+				retainedRetries.clear();
+			}
+		} finally {
+			admissionLock.unlock();
 		}
 		return drained;
 	}

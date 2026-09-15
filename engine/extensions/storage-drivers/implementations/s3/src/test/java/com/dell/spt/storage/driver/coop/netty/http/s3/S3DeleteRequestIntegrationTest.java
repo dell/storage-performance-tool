@@ -757,8 +757,7 @@ final class S3DeleteRequestIntegrationTest {
 
 	@Test
 	@Timeout(30)
-	void integrityDiscoveryKeepsStartupPartitionAfterAdaptiveThreshold(
-					@TempDir final Path tempDir) throws Exception {
+	void integrityDiscoveryKeepsStartupPartitionAfterAdaptiveThreshold(@TempDir final Path tempDir) throws Exception {
 		final long runId = 905;
 		final Path manifest = tempDir.resolve("verify-input.csv");
 		final AtomicInteger delimiterProbeCount = new AtomicInteger();

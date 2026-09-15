@@ -27,6 +27,8 @@ public interface S3Api {
 	String AMZ_UNSIGNED_PAYLOAD = "UNSIGNED-PAYLOAD";
 	String AMZ_EMPTY_BODY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
+	// Preserve the existing extension-facing array field type and mutability.
+	@SuppressWarnings("MutablePublicArray")
 	AsciiString HEADERS_CANONICAL[] = {
 			HttpHeaderNames.CONTENT_MD5,
 			HttpHeaderNames.CONTENT_TYPE,
@@ -34,6 +36,8 @@ public interface S3Api {
 			HttpHeaderNames.DATE
 	};
 
+	// Preserve the existing extension-facing array field type and mutability.
+	@SuppressWarnings("MutablePublicArray")
 	AsciiString HEADERS_CANONICAL_V4[] = {
 			HttpHeaderNames.CONTENT_MD5,
 			HttpHeaderNames.CONTENT_TYPE,

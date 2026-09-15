@@ -1149,7 +1149,13 @@ class LoadStepClientBaseTest {
 			addStepSlice(client, blocker);
 		}
 		final LoadStep exhausted = mock(LoadStep.class);
-		when(exhausted.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
+		doAnswer(invocation -> {
+			// Establish the blocked leading wave before completing the trailing probe.
+			// Otherwise successful early exhaustion may cancel probes before they start.
+			assertTrue(blockersEntered.await(BLOCKING_PROBE_SETUP_TIMEOUT_SECONDS, TimeUnit.SECONDS),
+							"all leading probes must enter before the trailing probe reports exhaustion");
+			return true;
+		}).when(exhausted).await(anyLong(), any(TimeUnit.class));
 		addStepSlice(client, exhausted);
 
 		final AtomicReference<Throwable> awaitFailure = new AtomicReference<>();

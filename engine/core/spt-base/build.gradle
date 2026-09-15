@@ -152,10 +152,14 @@ test {
 	//exclude "com/dell/spt/util/*"
 	//exclude "**/TemplateTest.*"
 	//exclude "**/*PerfTest.*"
-	ignoreFailures = true
+	// Core unit-test failures must fail local builds and CI.
+	ignoreFailures = false
 	
 	// Ensure all shadow JARs are built before running integration tests
-	dependsOn rootProject.subprojects.collect { it.tasks.findByName('shadowJar') }.findAll { it != null }
+	dependsOn ':extensions:storage-drivers:implementations:s3:shadowJar',
+		':extensions:storage-drivers:primitives:coop:shadowJar',
+		':extensions:storage-drivers:primitives:netty:shadowJar',
+		':extensions:storage-drivers:protocols:http:shadowJar'
 }
 
 task perfTest(type: Test) {
@@ -169,7 +173,10 @@ task integrationTest(type: Test) {
 	exclude "**/RollingAppenderTest*"
 
 	// Build all shadow JARs beforehand like in the unit test task
-	dependsOn rootProject.subprojects.collect { it.tasks.findByName('shadowJar') }.findAll { it != null }
+	dependsOn ':extensions:storage-drivers:implementations:s3:shadowJar',
+		':extensions:storage-drivers:primitives:coop:shadowJar',
+		':extensions:storage-drivers:primitives:netty:shadowJar',
+		':extensions:storage-drivers:protocols:http:shadowJar'
 	// Aggregate builds must refresh the packaged JAR and extension directory used by the E2E canary.
 	if (rootProject.findProject(':bundle') != null) {
 		dependsOn ':bundle:assembleDist'

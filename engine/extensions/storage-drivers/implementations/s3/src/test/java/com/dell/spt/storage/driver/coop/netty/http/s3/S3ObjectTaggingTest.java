@@ -94,12 +94,7 @@ public class S3ObjectTaggingTest
 			config.val("storage-object-tagging-enabled", true);
 			config.val(
 							"storage-object-tagging-tags",
-							new HashMap<String, String>() {
-								{
-									put("tag1", "value1");
-									put("tag2", "value2");
-								}
-							});
+							new HashMap<>(Map.of("tag1", "value1", "tag2", "value2")));
 			config.val("storage-object-versioning", true);
 			config.val("storage-net-http-headers", new HashMap<>());
 			config.val("storage-net-http-read-metadata-only", false);

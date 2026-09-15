@@ -71,6 +71,7 @@ func (r *Renderer) FullReport(summary *RunSummary) string {
 	r.renderPerformance(b, summary)
 	r.renderDeleteDetails(b, summary)
 	r.renderIntegrity(b, summary)
+	r.renderRangeRead(b, summary)
 	r.renderMixedBreakdowns(b, summary)
 	r.renderTotals(b, summary)
 	r.renderArtifactsAndWarnings(b, summary)
@@ -205,6 +206,7 @@ func (r *Renderer) CompactSnippet(summary *RunSummary) string {
 	sb.WriteString(r.performanceTable(summary))
 	sb.WriteByte('\n')
 	r.renderIntegrity(sb, summary)
+	r.renderRangeRead(sb, summary)
 	r.renderCompactMixedBreakdowns(sb, summary)
 	fmt.Fprintf(sb, "Totals: duration %s, data moved %s\n", summary.Totals.DurationHuman, formatBytesHuman(summary.Totals.DataBytes))
 	if len(summary.Warnings) > 0 {
@@ -945,4 +947,30 @@ func drawTableRow(values []string, widths []int, pad func(string, int) string) s
 		}
 	}
 	return "│ " + strings.Join(padded, " │ ") + " │"
+}
+
+func (r *Renderer) renderRangeRead(b *strings.Builder, summary *RunSummary) {
+	for _, step := range summary.Steps {
+		evidence := step.RangeRead
+		if evidence == nil {
+			continue
+		}
+		fmt.Fprintf(b, "Partial READ — %s\n", step.StepID)
+		fmt.Fprintf(b, "  Terminal: %t; selected %d, successful %d, failed %d, unattempted %d, unresolved %d\n", evidence.Complete, evidence.Totals["selected"], evidence.Totals["accepted"], evidence.Totals["failed"], evidence.Totals["unattempted"], evidence.Totals["unresolved"])
+		fmt.Fprintf(b, "  Requests sent: %d; validated successful bytes: %d\n", evidence.Totals["requests_sent"], evidence.Totals["successful_bytes"])
+		if evidence.WorkerCountVerified {
+			fmt.Fprintf(b, "  Worker count: %d, checked against READ metrics\n", evidence.ExpectedWorkers)
+		} else {
+			b.WriteString("  Worker count: not independently verified\n")
+		}
+		fmt.Fprintf(b, "  Failures: local selection %d, HTTP %d, response validation %d, transport %d\n", evidence.Totals["local_selection_errors"], evidence.Totals["http_failures"], evidence.Totals["response_validation_failures"], evidence.Totals["transport_failures"])
+		for _, row := range evidence.Rows {
+			offset := "random"
+			if row.FixedOffset != nil {
+				offset = fmt.Sprintf("fixed offset %d", *row.FixedOffset)
+			}
+			fmt.Fprintf(b, "  Worker %s context %d: size %d bytes, %s, alignment %d\n", row.WorkerID, row.ContextIndex, row.Size, offset, row.Alignment)
+		}
+		b.WriteString("\n")
+	}
 }

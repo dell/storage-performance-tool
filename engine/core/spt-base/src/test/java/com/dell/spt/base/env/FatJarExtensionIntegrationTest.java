@@ -59,12 +59,14 @@ public class FatJarExtensionIntegrationTest {
 	@Test
 	void testLoadFatJarExtension() throws Exception {
 		Path s3FatJar = findS3FatJar();
-		assumeTrue(s3FatJar != null && Files.exists(s3FatJar), "S3 fat JAR not found. Run './gradlew :extensions:storage-drivers:implementations:s3:shadowJar' first");
+		assertTrue(s3FatJar != null && Files.exists(s3FatJar), "Required S3 fat JAR missing after the declared shadowJar dependency");
 
 		// Create extension directory with the fat JAR
 		Path extDir = tempDir.resolve("ext");
 		Files.createDirectory(extDir);
 		Files.copy(s3FatJar, extDir.resolve("s3-all.jar"));
+
+		copyDriverDependencies(s3FatJar, extDir);
 
 		// Load extensions using the Extension.extClassLoader method
 		URLClassLoader extClassLoader = Extension.extClassLoader(extDir.toFile());
@@ -84,6 +86,15 @@ public class FatJarExtensionIntegrationTest {
 						.findFirst();
 
 		assertTrue(s3Extension.isPresent(), "Should find S3 extension");
+		assertInstanceOf(com.dell.spt.base.storage.driver.range.RangeReadDriverFactory.class, s3Extension.get());
+		final var rangeDriver = extClassLoader.loadClass(
+						"com.dell.spt.storage.driver.coop.netty.http.s3.S3RangeStorageDriver");
+		assertTrue(com.dell.spt.base.storage.driver.range.RangeReadDriverSupport.class.isAssignableFrom(rangeDriver));
+		assertEquals(extClassLoader, rangeDriver.getClassLoader());
+		assertNotNull(rangeDriver.getDeclaredConstructor(String.class,
+						com.dell.spt.base.data.DataInput.class, com.github.akurilov.confuse.Config.class,
+						int.class, com.dell.spt.base.item.op.data.range.RangeReadPolicy.class));
+		extClassLoader.close();
 	}
 
 	@Test
@@ -171,6 +182,8 @@ public class FatJarExtensionIntegrationTest {
 		Files.createDirectory(extDir);
 		Files.copy(s3FatJar, extDir.resolve("s3-all.jar"));
 
+		copyDriverDependencies(s3FatJar, extDir);
+
 		// Load using Extension's standard mechanism
 		URLClassLoader extClassLoader = Extension.extClassLoader(extDir.toFile());
 		List<Extension> extensions = Extension.load(extClassLoader);
@@ -223,6 +236,20 @@ public class FatJarExtensionIntegrationTest {
 		}, "Should not find missing dependency class");
 
 		loader.close();
+	}
+
+	// S3 bundles external libraries, but its driver layers are separate distribution JARs.
+	private static void copyDriverDependencies(Path s3Jar, Path destination) throws Exception {
+		Path driverRoot = s3Jar.toRealPath().getParent().getParent().getParent().getParent().getParent();
+		for (String module : List.of("primitives/coop", "primitives/netty", "protocols/http")) {
+			Path libraries = driverRoot.resolve(module).resolve("build/libs");
+			assertTrue(Files.isDirectory(libraries), "Missing built driver dependency: " + libraries);
+			try (var entries = Files.list(libraries)) {
+				var jars = entries.filter(path -> path.getFileName().toString().endsWith("-all.jar")).toList();
+				assertEquals(1, jars.size(), "Expected one current fat JAR; rebuild/clean dependency: " + module);
+				Files.copy(jars.get(0), destination.resolve(jars.get(0).getFileName()));
+			}
+		}
 	}
 
 	// Helper methods

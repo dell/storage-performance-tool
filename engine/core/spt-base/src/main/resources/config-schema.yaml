@@ -48,6 +48,11 @@ load:
   service:
     threads: int
   op:
+    read:
+      range:
+        size: string
+        offset: string
+        align: string
     limit:
       count: long
       fail:

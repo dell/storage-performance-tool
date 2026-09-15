@@ -190,11 +190,13 @@ class InMemoryListShardQueueTest {
 
 	@Test
 	void watchdogRescuesStalledLease() throws Exception {
-		final var rescued = new java.util.ArrayList<String>();
+		final var rescued = new java.util.concurrent.ConcurrentLinkedQueue<String>();
+		final var rescueReported = new CountDownLatch(1);
 		final var recorder = new ListShardMetricsRecorder() {
 			@Override
 			public void onRescue(final ListShard shard) {
 				rescued.add(shard.prefix());
+				rescueReported.countDown();
 			}
 
 			@Override
@@ -206,8 +208,9 @@ class InMemoryListShardQueueTest {
 		final var shard = new ListShard("rescue", null, null, null);
 		assertTrue(queue.offer(shard));
 		final ListShardQueue.Lease lease = queue.acquire();
-		// simulate worker stall by doing nothing and allowing watchdog to run
-		Thread.sleep(150L);
+		// Queue publication precedes the metrics callback. Wait for the callback explicitly;
+		// acquiring the rescued shard alone does not establish that its metric was recorded.
+		assertTrue(rescueReported.await(1, TimeUnit.SECONDS), "watchdog should report the rescue");
 		final ListShardQueue.Lease rescuedLease = queue.acquire(1, TimeUnit.SECONDS);
 		assertNotNull(rescuedLease, "watchdog should requeue stalled shard");
 		assertEquals("rescue", rescuedLease.shard().prefix());

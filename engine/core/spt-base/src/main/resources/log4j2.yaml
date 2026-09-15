@@ -185,6 +185,13 @@ Configuration:
         DirectWriteRolloverStrategy: {}
         PatternLayout:
           pattern: "%m%n"
+      - name: rangeReadFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}range.read.csv"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          pattern: "%m%n"
       - name: operationLifecycleFile
         filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}operation.lifecycle.csv"
         Policies:
@@ -364,6 +371,11 @@ Configuration:
         level: DEBUG
         AppenderRef:
           ref: partsUploadFile
+        additivity: false
+      - name: com.dell.spt.base.logging.RangeRead
+        level: INFO
+        AppenderRef:
+          ref: rangeReadFile
         additivity: false
       - name: com.dell.spt.base.logging.OperationLifecycle
         level: INFO

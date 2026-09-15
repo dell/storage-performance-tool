@@ -33,6 +33,7 @@ public interface Loggers {
 	Logger METRICS_THRESHOLD_FILE_TOTAL = LogManager.getLogger(BASE_METRICS_THRESHOLD + "FileTotal");
 	Logger MSG = LogManager.getLogger(BASE + "Messages");
 	Logger MULTIPART = LogManager.getLogger(BASE + "Multipart");
+	Logger RANGE_READ = LogManager.getLogger(BASE + "RangeRead");
 	Logger OPERATION_LIFECYCLE = LogManager.getLogger(BASE + "OperationLifecycle");
 	Logger MULTIPART_LIFECYCLE = LogManager.getLogger(BASE + "MultipartLifecycle");
 	Logger TABLES_METRICS = LogManager.getLogger(BASE + "TablesMetrics");
@@ -69,6 +70,7 @@ public interface Loggers {
 									"Threshold Metrics Total"),
 					Map.entry(MSG.getName().substring(BASE.length()), "Messages"),
 					Map.entry(MULTIPART.getName().substring(BASE.length()), "Multipart Upload Phases"),
+					Map.entry(RANGE_READ.getName().substring(BASE.length()), "Terminal Partial READ v1"),
 					Map.entry(OPERATION_LIFECYCLE.getName().substring(BASE.length()), "Terminal Operation Lifecycle v1"),
 					Map.entry(MULTIPART_LIFECYCLE.getName().substring(BASE.length()), "Multipart Upload Lifecycle"),
 					Map.entry(SCENARIO.getName().substring(BASE.length()), "Scenario"),

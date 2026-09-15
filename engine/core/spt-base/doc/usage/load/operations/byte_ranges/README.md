@@ -1,4 +1,9 @@
-# Byte Ranges Operations
+# Byte-range operations
+
+For fixed-length single-range S3 READs, use the [single-range configuration](#fixed-size-single-range-read-configuration)
+or the [CLI guide](../../../../../../../../cli/docs/PARTIAL_READS.md).
+Sections 1–4 below describe the separate legacy `item.data.ranges` interface;
+do not combine active legacy ranges with the single-range READ policy.
 
 Partial write/read and append operations performance is the subject of interest also in some cases.
 To configure the partial/append operations it's necessary to specify the byte ranges to work with somehow.
@@ -140,3 +145,81 @@ java -jar spt-<VERSION>.jar \
 	--item-output-file=items_appended.csv \
 	...
 ```
+
+## Fixed-size single-range READ configuration
+
+The separate `load.op.read.range` configuration uses nullable string values:
+
+```yaml
+load:
+  op:
+    read:
+      range:
+        size: "65536"
+        offset: null
+        align: "4096"
+```
+
+Null size disables this mode. Offset and alignment cannot be supplied without size.
+Null offset selects a random aligned range; `"0"` selects fixed offset zero.
+Null alignment and values `"0"` or `"1"` all mean effective alignment one.
+Size must be positive, and offset and alignment must be nonnegative. A fixed offset
+must be divisible by the effective alignment, and the inclusive endpoint must fit
+in a signed 64-bit integer. Alignment need not be a power of two.
+
+Direct-engine setters use nested paths, for example
+`--load-op-read-range-size=64KiB --load-op-read-range-align=4KiB`.
+Add `--load-op-read-range-offset=0` for fixed zero. Use quoted decimal byte strings
+in generated configurations. Binary suffixes from B through EiB are also accepted;
+fractions, signs, unknown suffixes and overflow are rejected.
+
+This mode is restricted to DATA READ with the Netty `s3` driver. AWS, native RDMA,
+other drivers, mixed workloads, content/metadata verification and recycled content
+updates are unsupported. Active legacy fixed/random ranges or a positive splitting
+threshold conflict with this mode. Disabled single-range configuration preserves
+legacy behavior; inert legacy settings remain allowed.
+
+The Netty S3 factory installs a dedicated range driver and matching runtime.
+Linear, pipeline and weighted steps pass their effective policy during construction.
+Other factories must explicitly implement `RangeReadDriverFactory`; configured range
+mode cannot silently execute a whole-object READ. Disabled mode retains ordinary
+factory construction.
+
+Range mode requires a positive `storage.net.timeoutMilliSec` (the shipped default
+is 30000), body READ rather than metadata-only READ, and object tagging disabled.
+The driver sends one signed GET with the selected inclusive Range header and no
+preflight object or bucket request. A fixed span is sent unchanged even when the
+inventory size is smaller. Responses require strict status, range metadata, body
+length and framing validation; rejected responses close the connection.
+
+READ/WRITE performance qualification remains pending. See the CLI guide below
+for the release-qualification status; functional checks do not establish parity.
+
+For CLI examples, aligned selection, full-span requests and mutable datasets, see
+[Partial-object READs](../../../../../../../../cli/docs/PARTIAL_READS.md).
+
+## Terminal partial-read evidence
+
+Partial READ contexts publish `range.read.csv` through the `RangeRead` logger after
+stop. The coordinator collects worker rows and preserves `range.read.node-NNN.csv`
+sources. The CLI fetches and indexes these artifacts. A known partial-read step requires
+the canonical artifact; it remains optional for ordinary workloads, which produce
+no range artifact.
+
+Schema version 1 identifies the engine run, step, worker and context index. Each
+row records fixed/random mode, requested size, explicit fixed-offset presence and
+value, and effective alignment. Different context policies remain separate rows.
+Successful bytes include only structurally validated responses. Logical outcomes
+(selected, accepted, failed, unattempted, unresolved) are separate from attempted
+logical reads, sent requests, and per-transport-attempt failure counters. HTTP,
+response-validation, transport and local-selection failures have separate fields.
+Failed/unresolved received bytes count delivered response-body bytes, not network
+wire bytes. The aggregate range artifact contains no object keys, credentials, or
+per-operation records. Optional `output.metrics.trace.persist=true` emits the
+separate `op.trace.csv`, including determinate local selection failures. It is
+disabled by default and does include item paths.
+
+`terminal=true` requires completed contexts and reconciled counters; inspect the
+lifecycle fields and `overflow` alongside it. Source rows must be counted once:
+do not sum the canonical collected file together with its node source copies.
+AWS SDK retry accounting is deferred with the AWS driver implementation.

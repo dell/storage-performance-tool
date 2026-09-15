@@ -15,6 +15,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
+import java.util.function.BiPredicate;
+import java.util.Objects;
 
 /**
  * Tracks outstanding operation ownership while leaving exactly-once terminal state on each
@@ -102,6 +104,7 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 	private static final OperationLifecycleTracker<?> DISABLED = new OperationLifecycleTracker<>(false, null);
 
 	private final boolean enabled;
+	private final BiPredicate<O, OperationLifecycleTracker<O>> deadlineSettlement;
 	private final Consumer<O> dispatchPublicationObserver;
 	private volatile Consumer<O> dispatchObserver;
 	private volatile Consumer<O> terminalObserver;
@@ -135,8 +138,24 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 
 	private OperationLifecycleTracker(
 					final boolean enabled, final Consumer<O> dispatchPublicationObserver) {
+		this(enabled, dispatchPublicationObserver, null);
+	}
+
+	private OperationLifecycleTracker(final boolean enabled, final Consumer<O> dispatchPublicationObserver,
+					final BiPredicate<O, OperationLifecycleTracker<O>> deadlineSettlement) {
 		this.enabled = enabled;
 		this.dispatchPublicationObserver = dispatchPublicationObserver;
+		this.deadlineSettlement = deadlineSettlement;
+	}
+
+	/**
+	 * Construction-selected deadline settlement for retained-outcome workloads. The callback
+	 * returns whether it committed recovery, must remain bounded, and must not invoke output or
+	 * transport code. Ordinary trackers keep their existing recovery behavior.
+	 */
+	public static <O extends Operation<? extends Item>> OperationLifecycleTracker<O> withDeadlineSettlement(
+					final BiPredicate<O, OperationLifecycleTracker<O>> settlement) {
+		return new OperationLifecycleTracker<>(true, null, Objects.requireNonNull(settlement));
 	}
 
 	/** Returns the allocation-free compatibility tracker used by lifecycle-unaware extensions. */
@@ -467,6 +486,92 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		return terminal(op, enabled ? op.status() : null);
 	}
 
+	/**
+	 * Commits a retained local validation failure without synthesizing transport dispatch.
+	 *
+	 * <p>The caller must already have accepted the initial logical count/rate admission and
+	 * retained its immutable validation reason on the operation. The expected lifecycle fences
+	 * callbacks from earlier circulations. Unsupported/disabled tracking fails closed; callers
+	 * must not fall back to a transport completion path. Only bounded counter observers run here,
+	 * never arbitrary result output. Optional output follows this commit outside the lock.
+	 */
+	public boolean localFailure(final O op, final OperationLifecycle expected) {
+		if (!enabled || expected == null || !expected.isTracked()) {
+			return false;
+		}
+		synchronized (expected) {
+			if (lifecycle(op) != expected || !outstanding.contains(identityKey(op))
+							|| !expected.localFailure()) {
+				return false;
+			}
+			op.status(Operation.Status.RESP_FAIL_CLIENT);
+			// A local validation failure has never incremented dispatched or inFlight.
+			// Retain its outcome before releasing custody, even if an observer violates its contract.
+			failed.increment();
+			terminal.increment();
+			try {
+				final var observer = terminalObserver;
+				if (observer != null) {
+					observer.accept(op);
+				}
+			} finally {
+				outstanding.remove(identityKey(op));
+			}
+			return true;
+		}
+	}
+
+	/** Exact tracked custody check for opt-in completion/recovery coordinators. */
+	public boolean hasOutstandingCustody(final O op, final OperationLifecycle expected) {
+		if (!enabled || expected == null || !expected.isTracked()) {
+			return false;
+		}
+		synchronized (expected) {
+			return lifecycle(op) == expected && outstanding.contains(identityKey(op));
+		}
+	}
+
+	/**
+	 * Publishes an already retained, determinate outcome before optional result output. Used by
+	 * range completion, including a failed attempt retained while waiting to retry at shutdown.
+	 * The caller owns the expected lifecycle monitor while retaining its immutable result.
+	 * A queued submission failure may finish without dispatch; success requires real dispatch.
+	 * Recovery competes for the same lifecycle claim. The drain clock alone cannot erase a known
+	 * outcome, but an already committed recovery outcome wins. Observers must be bounded counter
+	 * updates only, as with localFailure; arbitrary output follows outside the monitor.
+	 */
+	public boolean retainedTerminal(final O op, final OperationLifecycle expected,
+					final Operation.Status terminalStatus) {
+		if (!enabled || expected == null || !expected.isTracked()) {
+			return false;
+		}
+		if (terminalStatus == null || terminalStatus == Operation.Status.PENDING
+						|| terminalStatus == Operation.Status.ACTIVE || terminalStatus == Operation.Status.OMIT
+						|| terminalStatus == Operation.Status.INTERRUPTED) {
+			throw new IllegalArgumentException("A retained terminal result requires success or failure");
+		}
+		synchronized (expected) {
+			final boolean wasDispatched = expected.state() == OperationLifecycleState.DISPATCHED;
+			if (lifecycle(op) != expected || !outstanding.contains(identityKey(op))
+							|| (terminalStatus == Operation.Status.SUCC && !wasDispatched)
+							|| !expected.retainedTerminal()) {
+				return false;
+			}
+			op.status(terminalStatus);
+			terminal.increment();
+			try {
+				observeTerminal(op, terminalStatus);
+			} finally {
+				// Counter/outcome retention precedes custody release even if an observer is faulty.
+				outstanding.remove(identityKey(op));
+				if (wasDispatched) {
+					inFlight.decrementAndGet();
+				}
+			}
+			return true;
+		}
+	}
+
 	/** Commits the status captured before result output can recycle the operation. */
 	public boolean terminal(final O op, final Operation.Status terminalStatus) {
 		if (!enabled) {
@@ -635,6 +740,12 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		var count = 0;
 		for (final var operationKey : Set.copyOf(outstanding)) {
 			final O op = operationKey.value;
+			if (deadlineSettlement != null) {
+				if (deadlineSettlement.test(op, this) && stateOf(op) == OperationLifecycleState.UNRESOLVED) {
+					count++;
+				}
+				continue;
+			}
 			final var state = stateOf(op);
 			if ((state == OperationLifecycleState.DISPATCHED
 							|| state == OperationLifecycleState.COMPLETING) && unresolved(op)) {
@@ -711,6 +822,11 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 	 */
 	public long inFlightCount() {
 		return enabled ? inFlight.get() : 0;
+	}
+
+	/** Includes generator and driver queues, which are invisible to transport concurrency. */
+	public boolean hasOutstandingOperations() {
+		return enabled && !outstanding.isEmpty();
 	}
 
 	int outstandingOperationCount() {
