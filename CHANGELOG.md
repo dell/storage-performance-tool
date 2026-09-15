@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.15.0] - 2026-09-15
+
 ### Added
 
 - **Partial S3 reads** — Added opt-in `--range-size`, `--range-offset`, and `--range-align` flags for fixed or random single-range READs with the Netty S3 driver. Strict response validation, retained retries, `range.read.csv`, and reconciled result summaries account for logical reads and transport attempts separately. Explicit operation traces include local selection and transport failures. AWS and S3-RDMA support are deferred; release-baseline READ/WRITE performance qualification remains pending.
