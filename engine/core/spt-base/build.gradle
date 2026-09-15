@@ -152,7 +152,8 @@ test {
 	//exclude "com/dell/spt/util/*"
 	//exclude "**/TemplateTest.*"
 	//exclude "**/*PerfTest.*"
-	ignoreFailures = true
+	// Core unit-test failures must fail local builds and CI.
+	ignoreFailures = false
 	
 	// Ensure all shadow JARs are built before running integration tests
 	dependsOn ':extensions:storage-drivers:implementations:s3:shadowJar',
