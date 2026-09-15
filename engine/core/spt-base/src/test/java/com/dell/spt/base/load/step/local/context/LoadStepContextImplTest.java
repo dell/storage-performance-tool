@@ -1824,7 +1824,7 @@ public class LoadStepContextImplTest {
 	@Test
 	@SuppressWarnings({"unchecked", "rawtypes"
 	})
-	void listNamespaceExhaustionRetainsBaselineCounterSemantics() throws Exception {
+	void listNamespaceExhaustionWaitsForRecycledPageCustody() throws Exception {
 		final Config listConfig = TestConfigBuilder.config();
 		listConfig.val("item-type", "path");
 		listConfig.val("load-op-type", "list");
@@ -1853,15 +1853,20 @@ public class LoadStepContextImplTest {
 			final Operation<Item> result = (Operation) page;
 			assertTrue(ctx.put(result));
 			assertEquals(OperationLifecycleState.GENERATOR_BUFFERED, result.lifecycle().state());
-			assertTrue(ctx.isDone(), "Preserve baseline LIST exhaustion once result and generated counts match");
+			assertFalse(ctx.isDone(), "A page removed from the recycle queue still belongs to the generator");
 			assertTrue(tracker.driverQueued(result));
-			assertTrue(ctx.isDone(), "Partial reads must not change ordinary LIST completion predicates");
+			assertFalse(ctx.isDone(), "A queued continuation is invisible to active transport counts");
 			assertTrue(tracker.explicitlyDispatched(result));
-			assertTrue(ctx.isDone(), "Baseline LIST uses driver activeOpCount, not the new range custody predicate");
+			assertFalse(ctx.isDone(), "A dispatched continuation must finish before namespace exhaustion");
 			page.truncated(false);
 			assertTrue(tracker.completionStarted(result));
 			assertTrue(tracker.terminal(result, Operation.Status.SUCC));
 			assertTrue(ctx.isDone(), "completed namespace must still terminate");
+			when(generator.isItemInputFinished()).thenReturn(false);
+			assertFalse(ctx.isDone(), "An empty recycle queue cannot override unfinished namespace input");
+			when(generator.isItemInputFinished()).thenReturn(true);
+			when(driver.activeOpCount()).thenReturn(1);
+			assertFalse(ctx.isDone(), "Generic recycle completion must not override active LIST work");
 		} finally {
 			ctx.close();
 		}

@@ -553,9 +553,10 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 							&& !rangeRuntime.hasPendingResults() && counterResults.sum() >= generator.generatedOpCount()
 							&& (!recycleFlag || generator.isNothingToRecycle());
 		}
-		if (listPathWorkload && isListNamespaceExhausted()) {
-			Loggers.MSG.debug("{}: done after exhausting LIST namespace", id);
-			return true;
+		if (listPathWorkload) {
+			// LIST continuations can leave the recycle queue before generated/active
+			// counts advance. Do not fall through to generic recycle completion.
+			return isListNamespaceExhausted();
 		}
 		if (standaloneDeleteDurationMode && generator.isStopped()) {
 			Loggers.MSG.debug(
@@ -691,7 +692,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		if (driver.activeOpCount() > 0) {
 			return false;
 		}
-		return counterResults.sum() >= generator.generatedOpCount();
+		return counterResults.sum() >= generator.generatedOpCount()
+						&& !operationLifecycle.hasOutstandingOperations();
 	}
 
 	/**
