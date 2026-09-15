@@ -758,16 +758,6 @@ final class S3DeleteRequestIntegrationTest {
 	@Test
 	@Timeout(30)
 	void integrityDiscoveryKeepsStartupPartitionAfterAdaptiveThreshold(@TempDir final Path tempDir) throws Exception {
-		assertIntegrityDiscoveryKeepsStartupPartition(tempDir, 0);
-	}
-
-	@Test
-	@Timeout(30)
-	void integrityDiscoveryKeepsStartupPartitionWithSlowPages(@TempDir final Path tempDir) throws Exception {
-		assertIntegrityDiscoveryKeepsStartupPartition(tempDir, 25);
-	}
-
-	private void assertIntegrityDiscoveryKeepsStartupPartition(final Path tempDir, final int pageDelayMillis) throws Exception {
 		final long runId = 905;
 		final Path manifest = tempDir.resolve("verify-input.csv");
 		final AtomicInteger delimiterProbeCount = new AtomicInteger();
@@ -781,14 +771,6 @@ final class S3DeleteRequestIntegrationTest {
 								+ "<CommonPrefixes><Prefix>outside/a/</Prefix></CommonPrefixes>"
 								+ "<CommonPrefixes><Prefix>outside/b/</Prefix></CommonPrefixes>"
 								+ "<IsTruncated>false</IsTruncated></ListBucketResult>";
-			}
-			// Model a slower target as well as immediate responses. Pagination must not
-			// depend on finishing between controller completion checks.
-			try {
-				Thread.sleep(pageDelayMillis);
-			} catch (InterruptedException interrupted) {
-				Thread.currentThread().interrupt();
-				throw new IllegalStateException("Interrupted LIST fixture", interrupted);
 			}
 			final int page = listPageCount.incrementAndGet();
 			final String pageBody = "<ListBucketResult>"

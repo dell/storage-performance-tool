@@ -110,6 +110,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final ConcurrentMap<I, O> latestSuccOpResultByItem;
 	private final boolean recycleFlag;
 	private final boolean listPathWorkload;
+	private boolean listLifecycleWaitLogged;
 	private final boolean retryFlag;
 	private final int retryLimit;
 	private final MetricsContext metricsCtx;
@@ -692,8 +693,19 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		if (driver.activeOpCount() > 0) {
 			return false;
 		}
-		return counterResults.sum() >= generator.generatedOpCount()
-						&& !operationLifecycle.hasOutstandingOperations();
+		if (counterResults.sum() < generator.generatedOpCount()) {
+			return false;
+		}
+		if (operationLifecycle.hasOutstandingOperations()) {
+			if (!listLifecycleWaitLogged && Loggers.MSG.isDebugEnabled()) {
+				Loggers.MSG.debug("{}: waiting for outstanding LIST operation lifecycle ownership to settle", id);
+				listLifecycleWaitLogged = true;
+			}
+			return false;
+		}
+		listLifecycleWaitLogged = false;
+		Loggers.MSG.debug("{}: done after exhausting LIST namespace", id);
+		return true;
 	}
 
 	/**
