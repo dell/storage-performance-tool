@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.15.1] - 2026-09-16
+
+### Fixed
+
+- **Distributed TUI metrics** — Fixed frozen graphs and zero-valued progress during distributed runs by preserving the effective run and cluster identity in live and terminal metrics. Worker metrics now use the submitted step identity after startup while retaining safe fallback behavior for missing or legacy identity configuration.
+
 ## [5.15.0] - 2026-09-15
 
 ### Added
