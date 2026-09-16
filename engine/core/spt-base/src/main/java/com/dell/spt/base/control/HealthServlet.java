@@ -1,5 +1,6 @@
 package com.dell.spt.base.control;
 
+import com.dell.spt.base.config.RunIdentityConfig;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -67,13 +68,7 @@ public final class HealthServlet extends HttpServlet {
 	}
 
 	private String resolveClusterId() {
-		for (String path : List.of("run-cluster-id", "run-cluster")) {
-			final String value = safeStringValue(path);
-			if (value != null && !value.isBlank()) {
-				return value;
-			}
-		}
-		return null;
+		return RunIdentityConfig.clusterId(config);
 	}
 
 	private String safeStringValue(final String path) {

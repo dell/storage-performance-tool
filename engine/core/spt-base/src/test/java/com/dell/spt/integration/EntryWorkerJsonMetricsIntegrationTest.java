@@ -7,6 +7,7 @@ import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.control.FleetMetricsHandler;
 import com.dell.spt.base.control.NodeMetricsHandler;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.load.step.LoadStepBase;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.context.DistributedMetricsContextImpl;
@@ -15,6 +16,7 @@ import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.params.ItemSize;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.impl.BasicConfig;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.prometheus.client.exporter.MetricsServlet;
@@ -36,6 +38,7 @@ import java.io.OutputStream;
 import java.util.Locale;
 import com.sun.net.httpserver.HttpServer;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 /*
  * Simulates 1 entry + 1 worker: worker has only local metrics; entry has a distributed
@@ -64,6 +67,7 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 	private MetricsContext entryLocalCtx;
 	private ObjectMapper om;
 	private Config workerConfig;
+	private WorkerMetricsStep workerStep;
 	private Config entryConfig;
 
 	@BeforeEach
@@ -75,7 +79,6 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		workerConfig.val("run-comment", "worker-node");
 		workerConfig.val("run-port", WORKER_JSON_PORT);
 		workerConfig.val("run-id", 77L);
-		workerConfig.val("run-cluster-id", "spt-run-77");
 		workerConfig.val("server-metrics-expose_fleet", true);
 		entryConfig = TestConfigBuilder.config();
 		entryConfig.val("run-comment", "entry-node");
@@ -96,23 +99,17 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		workerContext.addServlet(new ServletHolder(new FleetMetricsHandler(workerMgr, workerConfig)), "/metrics/cluster/json");
 		workerJsonServer.start();
 
-		// Worker local context
+		// Deliver the run configuration only after the worker API has started.
+		assertFalse(om.readTree(fetch(WORKER_JSON_URL)).get(0).has("cluster_id"));
+		final Config sliceConfig = new BasicConfig(workerConfig.pathSep(), workerConfig.schema(),
+						Config.deepToMap(workerConfig));
+		sliceConfig.val("run-cluster-id", "spt-run-77");
+		sliceConfig.val("load-step-id", "step-agg-1");
 		final SizeInBytes size = ItemSize.SMALL.getValue();
-		workerLocalCtx = MetricsContextImpl.builder()
-						.loadStepId("step-agg-1")
-						.opType(OpType.CREATE)
-						.actualConcurrencyGauge(() -> 2)
-						.concurrencyLimit(8)
-						.concurrencyThreshold(0)
-						.itemDataSize(size)
-						.outputPeriodSec(0)
-						.stdOutColorFlag(false)
-						.comment("worker")
-						.runId(77)
-						.build();
-		workerLocalCtx.metadata().put(com.dell.spt.base.metrics.MetricsConstants.METADATA_LIMIT_OP_COUNT, 200L);
-		workerLocalCtx.start();
-		workerMgr.register(workerLocalCtx);
+		workerStep = new WorkerMetricsStep(sliceConfig, workerMgr, size);
+		workerStep.start();
+		workerLocalCtx = workerStep.local;
+
 		for (int i = 0; i < 20; i++) {
 			workerLocalCtx.markSucc(size.get(), 1000 + i, 500 + i);
 		}
@@ -166,9 +163,9 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 			entryLocalCtx.close();
 			entryLocalCtx = null;
 		}
-		if (workerLocalCtx != null) {
-			workerMgr.unregister(workerLocalCtx);
-			workerLocalCtx.close();
+		if (workerStep != null) {
+			workerStep.stop();
+			workerStep.close();
 		}
 		if (workerJsonServer != null)
 			workerJsonServer.stop();
@@ -210,6 +207,16 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		assertEquals(arrCluster.size(), arrFleet.size(), "Cluster and fleet endpoints should return same number of samples");
 		assertEquals(404, fetchStatus(WORKER_CLUSTER_URL), "Worker /metrics/cluster/json should return 404");
 		assertEquals(404, fetchStatus(WORKER_FLEET_URL), "Worker /metrics/fleet/json should return 404");
+	}
+
+	@Test
+	public void workerTerminalRowsRetainIdentityFromReceivedSlice() throws Exception {
+		workerStep.stop();
+		final JsonNode row = om.readTree(fetch(WORKER_JSON_URL)).get(0);
+		assertTrue(row.path("terminal").asBoolean());
+		assertEquals("77", row.path("run_id").asText());
+		assertEquals("spt-run-77", row.path("cluster_id").asText());
+		assertEquals(20L, row.path("operations").path("success_count").asLong());
 	}
 
 	@Test
@@ -360,4 +367,41 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		}
 		return StandardCharsets.UTF_8;
 	}
+
+	/** Uses the production step-start identity binding on a worker-only manager. */
+	private static final class WorkerMetricsStep extends LoadStepBase {
+		private final MetricsContext<?> local;
+
+		WorkerMetricsStep(final Config receivedConfig, final MetricsManager manager, final SizeInBytes size) {
+			super(receivedConfig, List.of(), List.of(), manager);
+			local = MetricsContextImpl.builder().loadStepId(loadStepId()).runId(runId())
+							.opType(OpType.CREATE).actualConcurrencyGauge(() -> 2).concurrencyLimit(8)
+							.concurrencyThreshold(0).itemDataSize(size).outputPeriodSec(0)
+							.stdOutColorFlag(false).comment("worker").build();
+			local.metadata().put(com.dell.spt.base.metrics.MetricsConstants.METADATA_LIMIT_OP_COUNT, 200L);
+			metricsContexts.add(local);
+		}
+
+		@Override
+		protected void init() {}
+
+		@Override
+		protected void doStartWrapped() {}
+
+		@Override
+		protected void initMetrics(final int originIndex, final OpType opType,
+						final int concurrency, final Config metricsConfig, final SizeInBytes itemDataSize,
+						final boolean outputColorFlag) {}
+
+		@Override
+		public boolean await(final long timeout, final TimeUnit unit) {
+			return true;
+		}
+
+		@Override
+		public String getTypeName() {
+			return "worker-identity-test";
+		}
+	}
+
 }

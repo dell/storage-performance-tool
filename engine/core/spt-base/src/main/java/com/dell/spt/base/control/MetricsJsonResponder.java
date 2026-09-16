@@ -8,6 +8,7 @@ import static com.dell.spt.base.metrics.MetricsConstants.DELETE_OUTCOME_ACCEPTED
 import static com.dell.spt.base.metrics.MetricsConstants.DELETE_REQUEST_UNIT;
 import static com.dell.spt.base.metrics.MetricsConstants.DELETE_VERIFICATION_NOTICE;
 
+import com.dell.spt.base.config.RunIdentityConfig;
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder;
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder.ShardSnapshot;
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder.Snapshot;
@@ -1088,14 +1089,7 @@ final class MetricsJsonResponder {
 	}
 
 	private static String resolveClusterId(final Config config) {
-		for (String path : List.of("run-cluster-id", "run-cluster")) {
-			final String value = safeString(config, path);
-			if (value != null && !value.isBlank()) {
-				return value;
-			}
-		}
-		return null;
-
+		return RunIdentityConfig.clusterId(config);
 	}
 
 	private static long resolveConfiguredRunId(final Config config) {

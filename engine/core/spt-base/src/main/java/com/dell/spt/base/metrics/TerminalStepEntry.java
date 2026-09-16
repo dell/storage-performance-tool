@@ -308,7 +308,10 @@ public final class TerminalStepEntry {
 						deleteDetailsExpected);
 	}
 
-	/** Creates a terminal entry with separate legacy node and contributor identity presentations. */
+	/**
+	 * Compatibility constructor for extensions compiled before run cluster identity was retained.
+	 * Delegates to the full constructor; a missing cluster ID uses the API startup fallback.
+	 */
 	public TerminalStepEntry(
 					String stepId,
 					OpType opType,

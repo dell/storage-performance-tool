@@ -41,6 +41,7 @@ class MetricsRunIdentityTest {
 					assertIdentity(responder.buildNodeMetrics(false), runId);
 					assertIdentity(responder.buildClusterMetrics(false), runId);
 					step.stop();
+					assertTrue(manager.awaitStop(5, TimeUnit.SECONDS), "Metrics task must stop before the next run");
 				}
 				assertIdentity(responder.buildNodeMetrics(false), runId);
 				assertIdentity(responder.buildClusterMetrics(false), runId);

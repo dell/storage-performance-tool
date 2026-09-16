@@ -899,6 +899,36 @@ public class MetricsJsonResponderTest {
 		assertEquals("spt-run-123", obj.get("cluster_id").asText());
 	}
 
+	@Test
+	void startupClusterIdentityIsUsedForLegacyLiveAndTerminalContexts() {
+		final Config config = defaultConfig();
+		config.val("run-cluster-id", "startup-cluster");
+		final DistributedMetricsContext ctx = mockDistributedContext(
+						"legacy-live", OpType.CREATE, mockDistributedSnapshot(1L, 0L, 1_000L), Map.of());
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of(ctx));
+		when(mgr.getAllContexts()).thenReturn(Set.of());
+		when(mgr.getTerminalSteps()).thenReturn(List.of());
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, config);
+		assertEquals("startup-cluster", responder.buildClusterMetrics(false).get(0).path("cluster_id").asText());
+
+		when(mgr.getDistributedContexts()).thenReturn(Set.of());
+		for (final boolean distributed : List.of(false, true)) {
+			// Exercise the preserved 25-argument extension constructor directly.
+			final TerminalStepEntry entry = new TerminalStepEntry(
+							"legacy-terminal", OpType.CREATE, 123L, System.currentTimeMillis(),
+							1L, 0L, 0L, 1024L, 10.0, 20.0, null, null, null,
+							0L, 0.0, 1L, 0L, 1000L, distributed, 1,
+							List.of("local"), List.of("local"), false, null, false);
+			assertNull(entry.clusterId);
+			when(mgr.getTerminalSteps()).thenReturn(List.of(entry));
+			final JsonNode row = (distributed ? responder.buildClusterMetrics(false)
+							: responder.buildNodeMetrics(false)).get(0);
+			assertTrue(row.path("terminal").asBoolean());
+			assertEquals("startup-cluster", row.path("cluster_id").asText());
+		}
+	}
+
 	private static ListShardMetricsRecorder testRecorder() {
 		final var shard = new ListShardMetricsRecorder.ShardSnapshot(
 						"prefix-0",
