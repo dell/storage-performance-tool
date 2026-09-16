@@ -95,6 +95,8 @@ Schema 4 is additive. Consumers should ignore unknown fields, tolerate optional 
 
 ### Selecting the correct sample
 
+Live node and fleet samples use `run.cluster.id` from the effective load-step configuration, including defaults submitted through `/run` after the API starts. Retained terminal samples preserve that run's cluster identity. For contexts created by extensions without run cluster metadata, the API's startup-configured cluster identity remains the fallback.
+
 Treat this tuple as the sample identity:
 
 ```text

@@ -6,6 +6,7 @@ import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
 
+import com.dell.spt.base.config.RunIdentityConfig;
 import com.github.akurilov.confuse.impl.BasicConfig;
 import com.github.akurilov.commons.collection.TreeUtil;
 import com.dell.spt.base.load.step.client.LoadStepClient;
@@ -27,6 +28,7 @@ import com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.github.akurilov.commons.reflection.TypeUtil;
@@ -341,7 +343,16 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			LogUtil.exception(Level.WARN, cause, "{} step failed to start", loadStepId());
 		}
 
-		metricsContexts.stream().peek(MetricsContext::start).forEach(metricsMgr::register);
+		// The API is initialized before /run defaults arrive. Bind identity to the
+		// effective step configuration so reused APIs and remote workers report it.
+		final String clusterId = RunIdentityConfig.clusterId(config);
+		for (final MetricsContext<?> metricsContext : metricsContexts) {
+			if (clusterId != null && !clusterId.isBlank()) {
+				metricsContext.metadata().put(MetricsConstants.METADATA_CLUSTER_ID, clusterId);
+			}
+			metricsContext.start();
+			metricsMgr.register(metricsContext);
+		}
 	}
 
 	protected abstract void doStartWrapped();

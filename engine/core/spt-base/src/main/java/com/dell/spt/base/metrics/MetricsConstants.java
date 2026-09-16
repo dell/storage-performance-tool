@@ -98,6 +98,7 @@ public interface MetricsConstants {
 	String METADATA_CONTRIBUTOR_IDS = "contributor_ids";
 	String METADATA_COMMENT = "user_comment";
 	String METADATA_RUN_ID = "run_id";
+	String METADATA_CLUSTER_ID = "cluster_id";
 	// Optional fields used for progress calculation
 	String METADATA_LIMIT_OP_COUNT = "load_op_limit_count"; // long, 0 or missing means unlimited
 	String METADATA_LIMIT_TIME_SEC = "load_step_limit_time_sec"; // long, seconds; 0 or missing means unlimited

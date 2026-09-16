@@ -8,6 +8,7 @@ import static com.dell.spt.base.metrics.MetricsConstants.DELETE_OUTCOME_ACCEPTED
 import static com.dell.spt.base.metrics.MetricsConstants.DELETE_REQUEST_UNIT;
 import static com.dell.spt.base.metrics.MetricsConstants.DELETE_VERIFICATION_NOTICE;
 
+import com.dell.spt.base.config.RunIdentityConfig;
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder;
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder.ShardSnapshot;
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder.Snapshot;
@@ -152,7 +153,7 @@ final class MetricsJsonResponder {
 		final int completionPercent = calculateCompletionPercent(ctx.metadata(), successCount, failCount, elapsedMillis);
 
 		final ObjectNode jsonObj = objectMapper.createObjectNode();
-		applyCommonMetadata(jsonObj, "node", ctx.runId());
+		applyCommonMetadata(jsonObj, "node", ctx.runId(), (String) ctx.metadata().get(MetricsConstants.METADATA_CLUSTER_ID));
 		jsonObj.put("step_id", ctx.loadStepId());
 		jsonObj.put("op_type", ctx.opType().name());
 		jsonObj.put("timestamp", System.currentTimeMillis());
@@ -223,7 +224,7 @@ final class MetricsJsonResponder {
 		final int completionPercent = calculateCompletionPercent(ctx.metadata(), successCount, failCount, elapsedMillis);
 
 		final ObjectNode jsonObj = objectMapper.createObjectNode();
-		applyCommonMetadata(jsonObj, "fleet", ctx.runId());
+		applyCommonMetadata(jsonObj, "fleet", ctx.runId(), (String) ctx.metadata().get(MetricsConstants.METADATA_CLUSTER_ID));
 		jsonObj.put("step_id", ctx.loadStepId());
 		jsonObj.put("op_type", ctx.opType().name());
 		jsonObj.put("timestamp", System.currentTimeMillis());
@@ -685,7 +686,7 @@ final class MetricsJsonResponder {
 			}
 			final ObjectNode jsonObj = objectMapper.createObjectNode();
 			final long runId = entry.runId > 0 ? entry.runId : configuredRunId;
-			applyCommonMetadata(jsonObj, "node", runId);
+			applyCommonMetadata(jsonObj, "node", runId, entry.clusterId);
 			jsonObj.put("step_id", entry.stepId);
 			jsonObj.put("op_type", entry.opType.name());
 			jsonObj.put("timestamp", entry.recordedAtMillis);
@@ -775,7 +776,7 @@ final class MetricsJsonResponder {
 			}
 			final ObjectNode jsonObj = objectMapper.createObjectNode();
 			final long runId = entry.runId > 0 ? entry.runId : configuredRunId;
-			applyCommonMetadata(jsonObj, "fleet", runId);
+			applyCommonMetadata(jsonObj, "fleet", runId, entry.clusterId);
 			jsonObj.put("role", "aggregate");
 			jsonObj.put("step_id", entry.stepId);
 			jsonObj.put("op_type", entry.opType.name());
@@ -1044,12 +1045,17 @@ final class MetricsJsonResponder {
 	}
 
 	private void applyCommonMetadata(final ObjectNode jsonObj, final String scope, final long runId) {
+		applyCommonMetadata(jsonObj, scope, runId, null);
+	}
+
+	private void applyCommonMetadata(final ObjectNode jsonObj, final String scope, final long runId, final String runClusterId) {
 		jsonObj.put("metrics_schema", METRICS_SCHEMA_VERSION);
 		jsonObj.put("scope", scope);
 		jsonObj.put("role", resolveRole());
 		jsonObj.put("node_id", nodeId);
-		if (clusterId != null && !clusterId.isBlank()) {
-			jsonObj.put("cluster_id", clusterId);
+		final String effectiveClusterId = runClusterId == null || runClusterId.isBlank() ? clusterId : runClusterId;
+		if (effectiveClusterId != null && !effectiveClusterId.isBlank()) {
+			jsonObj.put("cluster_id", effectiveClusterId);
 		}
 		jsonObj.put("run_id", String.valueOf(runId));
 		jsonObj.put("sample_ts", Instant.now().toString());
@@ -1083,14 +1089,7 @@ final class MetricsJsonResponder {
 	}
 
 	private static String resolveClusterId(final Config config) {
-		for (String path : List.of("run-cluster-id", "run-cluster")) {
-			final String value = safeString(config, path);
-			if (value != null && !value.isBlank()) {
-				return value;
-			}
-		}
-		return null;
-
+		return RunIdentityConfig.clusterId(config);
 	}
 
 	private static long resolveConfiguredRunId(final Config config) {
