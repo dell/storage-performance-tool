@@ -10,6 +10,7 @@ public final class TerminalStepEntry {
 	public final String stepId;
 	public final OpType opType;
 	public final long runId;
+	public final String clusterId;
 	public final long recordedAtMillis;
 
 	public final long successCount;
@@ -334,9 +335,41 @@ public final class TerminalStepEntry {
 					boolean partial,
 					DeleteMetricsSnapshot deleteMetrics,
 					boolean deleteDetailsExpected) {
+		this(stepId, opType, runId, recordedAtMillis, successCount, failedCount, corruptCount, bytesTotal, latencyMeanUs, durationMeanUs, latencySnapshot, durationSnapshot, ttfbSnapshot, concurrencyLast, concurrencyMean, countLimit, timeLimitSec, elapsedTimeMillis, distributed, nodeCount, nodesPresent, contributorsPresent, partial, deleteMetrics, deleteDetailsExpected, null);
+	}
+
+	/** Creates a terminal entry retaining the effective run cluster identity. */
+	public TerminalStepEntry(
+					String stepId,
+					OpType opType,
+					long runId,
+					long recordedAtMillis,
+					long successCount,
+					long failedCount,
+					long corruptCount,
+					long bytesTotal,
+					double latencyMeanUs,
+					double durationMeanUs,
+					TimingMetricSnapshot latencySnapshot,
+					TimingMetricSnapshot durationSnapshot,
+					TimingMetricSnapshot ttfbSnapshot,
+					long concurrencyLast,
+					double concurrencyMean,
+					long countLimit,
+					long timeLimitSec,
+					long elapsedTimeMillis,
+					boolean distributed,
+					int nodeCount,
+					List<String> nodesPresent,
+					List<String> contributorsPresent,
+					boolean partial,
+					DeleteMetricsSnapshot deleteMetrics,
+					boolean deleteDetailsExpected,
+					String clusterId) {
 		this.stepId = stepId;
 		this.opType = opType;
 		this.runId = runId;
+		this.clusterId = clusterId;
 		this.recordedAtMillis = recordedAtMillis;
 		this.successCount = successCount;
 		this.failedCount = failedCount;
@@ -390,7 +423,7 @@ public final class TerminalStepEntry {
 						contributorsPresent,
 						partial,
 						deleteMetrics.toBuilder().failureOutcome(outcome).build(),
-						deleteDetailsExpected);
+						deleteDetailsExpected, clusterId);
 	}
 
 	public TerminalStepEntry(

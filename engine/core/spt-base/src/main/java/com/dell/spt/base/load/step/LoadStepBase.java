@@ -27,6 +27,7 @@ import com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.github.akurilov.commons.reflection.TypeUtil;
@@ -341,7 +342,21 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			LogUtil.exception(Level.WARN, cause, "{} step failed to start", loadStepId());
 		}
 
-		metricsContexts.stream().peek(MetricsContext::start).forEach(metricsMgr::register);
+		// The API is initialized before /run defaults arrive. Bind identity to the
+		// effective step configuration so reused APIs and remote workers report it.
+		String clusterId = null;
+		try {
+			clusterId = config.stringVal("run-cluster-id");
+		} catch (final java.util.NoSuchElementException ignored) {
+			// Older extension configurations may not define cluster identity.
+		}
+		for (final MetricsContext<?> metricsContext : metricsContexts) {
+			if (clusterId != null && !clusterId.isBlank()) {
+				metricsContext.metadata().put(MetricsConstants.METADATA_CLUSTER_ID, clusterId);
+			}
+			metricsContext.start();
+			metricsMgr.register(metricsContext);
+		}
 	}
 
 	protected abstract void doStartWrapped();

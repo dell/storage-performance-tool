@@ -578,7 +578,8 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 						partial,
 						snapshot.deleteMetrics(),
 						metricsCtx.metadata() != null
-										&& metricsCtx.metadata().containsKey(MetricsConstants.METADATA_DELETE_METRICS));
+										&& metricsCtx.metadata().containsKey(MetricsConstants.METADATA_DELETE_METRICS),
+						metricsCtx.metadata() == null ? null : (String) metricsCtx.metadata().get(MetricsConstants.METADATA_CLUSTER_ID));
 	}
 
 	private long extractLongMetadata(final Map metadata, final String key) {
