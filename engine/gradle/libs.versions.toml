@@ -40,6 +40,7 @@ nashorn = "15.7"
 commonsCsv = "1.14.1"  # Updated from 1.11.0
 commonsMath3 = "3.6.1"
 guava = "33.7.1-jre"  # Updated from 33.5.0-jre
+jsonSchemaValidator = "1.5.9"
 mockito = "5.23.0"  # Updated from 5.14.2
 
 # Parquet / Avro (S3 Tables data plane)
@@ -133,6 +134,7 @@ nashorn-core = { module = "org.openjdk.nashorn:nashorn-core", version.ref = "nas
 commons-csv = { module = "org.apache.commons:commons-csv", version.ref = "commonsCsv" }
 commons-math3 = { module = "org.apache.commons:commons-math3", version.ref = "commonsMath3" }
 guava = { module = "com.google.guava:guava", version.ref = "guava" }
+json-schema-validator = { module = "com.networknt:json-schema-validator", version.ref = "jsonSchemaValidator" }
 mockito-core = { module = "org.mockito:mockito-core", version.ref = "mockito" }
 
 # Parquet / Avro

@@ -266,61 +266,15 @@ If no files exist yet the endpoint still returns 200 with `"items": []`.
 
 ### 4.2.4 Metrics
 
-For real-time monitoring the metrics are exposed in the [Prometheus's](https://github.com/prometheus/client_java) format.
-Notice that since 4.3.0 only mean latency and duration are available during the test run. The qunatile values can be
-accessed through the metrics.total.csv log file.
+SPT exposes Prometheus text at `GET /metrics` and structured schema-4 JSON at `GET /metrics/json` and `GET /metrics/cluster/json`. The legacy `GET /metrics/fleet/json` path is an alias of the cluster endpoint.
 
-Example using the command:
 ```bash
-curl http://localhost:9999/metrics
+curl -s http://localhost:9999/metrics
+curl -s http://localhost:9999/metrics/json | jq .
+curl -s http://localhost:9999/metrics/cluster/json | jq .
 ```
 
-->
-
-```
-# HELP spt_duration 
-# TYPE spt_duration gauge
-spt_duration_count{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 559.0
-spt_duration_sum{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 0.083571
-spt_duration_mean{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 1.4950089445438282E-4
-spt_duration_min{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 2.0E-6
-spt_duration_quantile_0_25{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 2.0E-6
-spt_duration_quantile_0_5{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 6.0E-6
-spt_duration_quantile_0_75{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 9.0E-6
-spt_duration_max{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 0.011517
-# HELP spt_latency 
-# TYPE spt_latency gauge
-spt_latency_count{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 559.0
-spt_latency_sum{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 0.029502
-spt_latency_mean{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 5.2776386404293386E-5
-spt_latency_min{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 1.0E-6
-spt_latency_quantile_0_25{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 1.0E-6
-spt_latency_quantile_0_5{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 1.0E-6
-spt_latency_quantile_0_75{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 5.0E-6
-spt_latency_max{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 0.011512
-# HELP spt_concurrency 
-# TYPE spt_concurrency gauge
-spt_concurrency_mean{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 0.0
-spt_concurrency_last{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 0.0
-# HELP spt_byte 
-# TYPE spt_byte gauge
-spt_byte_count{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 2.628929978368E12
-spt_byte_rate_mean{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 8.763099927893334E11
-spt_byte_rate_last{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 7.021527038085463E11
-# HELP spt_success_op 
-# TYPE spt_success_op gauge
-spt_success_op_count{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 2507143.0
-spt_success_op_rate_mean{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 835714.3333333334
-spt_success_op_rate_last{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 669624.9998174155
-# HELP spt_failed_op 
-# TYPE spt_failed_op gauge
-spt_failed_op_count{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 0.0
-spt_failed_op_rate_mean{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 0.0
-spt_failed_op_rate_last{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 0.0
-# HELP spt_elapsed_time 
-# TYPE spt_elapsed_time gauge
-spt_elapsed_time_value{load_step_id="linear_20190304.123915.606",load_op_type="READ",storage_driver_limit_concurrency="1",item_data_size="1MB",start_time="1551703155695",node_list="[]",user_comment="",run_id="123"} 3.778
-```
+See the [Metrics API guide](METRICS.md) for the endpoint/node matrix, complete field reference, distributed aggregation rules, operation-specific metrics, Prometheus series, versioned examples, and machine-readable schema.
 
 Additionally, JSON-formatted endpoints are available for clients that prefer structured data:
 

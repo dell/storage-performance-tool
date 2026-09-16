@@ -1,0 +1,38 @@
+[
+  {
+    "metrics_schema": 4,
+    "scope": "node",
+    "role": "worker",
+    "cluster_id": "run-42",
+    "node_id": "worker-a:1099",
+    "run_id": "42",
+    "sample_ts": "2026-09-15T12:01:00Z",
+    "step_id": "read-main",
+    "op_type": "READ",
+    "timestamp": 1789473660000,
+    "elapsed_time_seconds": 30.0,
+    "test_state": 1,
+    "unbounded": false,
+    "limit": {"type": "time", "time_sec": 60},
+    "completion_percent": 50,
+    "overall_completion_percent": 50,
+    "overall_unbounded": false,
+    "operations": {
+      "success_count": 2400,
+      "failed_count": 2,
+      "corrupt_count": 0,
+      "success_rate_last": 81.5,
+      "failed_rate_last": 0.0
+    },
+    "bandwidth": {"bytes_total": 2516582400, "bytes_rate_last": 85458944.0},
+    "timing": {
+      "latency_mean_us": 1450.2,
+      "duration_mean_us": 12150.8,
+      "latency": {"count": 2402, "mean_us": 1450.2, "min_us": 620, "p50_us": 1320, "p90_us": 2100, "p99_us": 4100, "p999_us": 7300, "max_us": 9100, "overflow_count": 0},
+      "duration": {"count": 2402, "mean_us": 12150.8, "min_us": 7200, "p50_us": 11600, "p90_us": 15800, "p99_us": 24100, "p999_us": 38900, "max_us": 44100, "overflow_count": 0},
+      "ttfb": {"count": 2400, "mean_us": 3150.4, "min_us": 1100, "p50_us": 2900, "p90_us": 4700, "p99_us": 8200, "p999_us": 13400, "max_us": 15100, "overflow_count": 0}
+    },
+    "concurrency": {"current": 8.0, "mean": 7.7},
+    "delete_detail_expected": false
+  }
+]

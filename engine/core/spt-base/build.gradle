@@ -114,6 +114,9 @@ dependencies {
 		libs.commons.math3,
 		libs.mockito.core,
 	)
+	testImplementation(libs.json.schema.validator) {
+		exclude group: "org.slf4j", module: "slf4j-api"
+	}
 }
 
 tasks.named("compileJava", JavaCompile) {

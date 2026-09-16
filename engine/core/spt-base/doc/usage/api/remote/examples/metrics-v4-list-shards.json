@@ -1,0 +1,81 @@
+[
+  {
+    "metrics_schema": 4,
+    "scope": "node",
+    "role": "worker",
+    "cluster_id": "run-43",
+    "node_id": "worker-a:1099",
+    "run_id": "43",
+    "sample_ts": "2026-09-15T12:02:00Z",
+    "step_id": "list-discovery",
+    "op_type": "LIST",
+    "timestamp": 1789473720000,
+    "elapsed_time_seconds": 12.0,
+    "test_state": 1,
+    "unbounded": true,
+    "limit": {"type": "none"},
+    "completion_percent": 0,
+    "overall_completion_percent": 0,
+    "overall_unbounded": true,
+    "operations": {"success_count": 18, "failed_count": 0, "corrupt_count": 0, "success_rate_last": 1.5, "failed_rate_last": 0.0},
+    "bandwidth": {"bytes_total": 0, "bytes_rate_last": 0.0},
+    "timing": {
+      "latency_mean_us": 24500.0,
+      "duration_mean_us": 28700.0,
+      "latency": {"count": 18, "mean_us": 24500.0, "min_us": 11000, "p50_us": 22000, "p90_us": 41000, "p99_us": 52000, "p999_us": 52000, "max_us": 52000, "overflow_count": 0},
+      "duration": {"count": 18, "mean_us": 28700.0, "min_us": 14000, "p50_us": 26000, "p90_us": 46000, "p99_us": 57000, "p999_us": 57000, "max_us": 57000, "overflow_count": 0},
+      "ttfb": null
+    },
+    "concurrency": {"current": 2.0, "mean": 1.8},
+    "delete_detail_expected": false,
+    "list_shards": {
+      "total_pages": 18,
+      "total_objects": 17320,
+      "avg_page_millis": 28.7,
+      "captured_at_millis": 1789473720000,
+      "total_splits": 1,
+      "max_depth": 1,
+      "split_reasons": {"full_page_streak": 1},
+      "shards": [
+        {
+          "prefix": "bench/",
+          "pages": 10,
+          "objects": 10000,
+          "avg_page_millis": 31.2,
+          "first_update_millis": 1789473708100,
+          "last_update_millis": 1789473715400,
+          "active": false,
+          "stall_warnings": 0,
+          "consecutive_full_pages": 10,
+          "last_page_objects": 1000,
+          "last_page_max_keys": 1000,
+          "last_full_page_millis": 1789473715400,
+          "split_count": 1,
+          "max_depth": 0,
+          "last_split_millis": 1789473715500,
+          "last_split_reason": "full_page_streak",
+          "last_split_children": 2
+        },
+        {
+          "prefix": "bench/a",
+          "pages": 8,
+          "objects": 7320,
+          "avg_page_millis": 25.6,
+          "first_update_millis": 1789473715700,
+          "last_update_millis": 1789473719900,
+          "active": true,
+          "stall_warnings": 0,
+          "consecutive_full_pages": 7,
+          "last_page_objects": 320,
+          "last_page_max_keys": 1000,
+          "last_full_page_millis": 1789473719200,
+          "split_count": 0,
+          "max_depth": 1,
+          "last_split_millis": 0,
+          "last_split_reason": "",
+          "last_split_children": 0
+        }
+      ]
+    }
+  }
+]
