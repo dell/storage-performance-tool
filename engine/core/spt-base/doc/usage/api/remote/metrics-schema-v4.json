@@ -1,0 +1,386 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dell/storage-performance-tool/metrics-schema-v4.json",
+  "title": "SPT JSON metrics response, schema 4",
+  "description": "A successful response from /metrics/json, /metrics/cluster/json, or /metrics/fleet/json.",
+  "type": "array",
+  "minItems": 1,
+  "items": {"$ref": "#/$defs/sample"},
+  "$defs": {
+    "nonNegativeInteger": {"type": "integer", "minimum": 0},
+    "nonNegativeNumber": {"type": "number", "minimum": 0},
+    "percent": {"type": "number", "minimum": 0, "maximum": 100},
+    "timingDistribution": {
+      "type": "object",
+      "required": ["count", "mean_us", "min_us", "p50_us", "p90_us", "p99_us", "p999_us", "max_us", "overflow_count"],
+      "properties": {
+        "count": {"$ref": "#/$defs/nonNegativeInteger"},
+        "mean_us": {"$ref": "#/$defs/nonNegativeNumber"},
+        "min_us": {"$ref": "#/$defs/nonNegativeInteger"},
+        "p50_us": {"$ref": "#/$defs/nonNegativeInteger"},
+        "p90_us": {"$ref": "#/$defs/nonNegativeInteger"},
+        "p99_us": {"$ref": "#/$defs/nonNegativeInteger"},
+        "p999_us": {"$ref": "#/$defs/nonNegativeInteger"},
+        "max_us": {"$ref": "#/$defs/nonNegativeInteger"},
+        "overflow_count": {"$ref": "#/$defs/nonNegativeInteger"}
+      }
+    },
+    "operations": {
+      "type": "object",
+      "required": ["success_count", "failed_count", "corrupt_count", "success_rate_last", "failed_rate_last"],
+      "properties": {
+        "success_count": {"$ref": "#/$defs/nonNegativeInteger"},
+        "failed_count": {"$ref": "#/$defs/nonNegativeInteger"},
+        "corrupt_count": {"$ref": "#/$defs/nonNegativeInteger"},
+        "success_rate_last": {"$ref": "#/$defs/nonNegativeNumber"},
+        "failed_rate_last": {"$ref": "#/$defs/nonNegativeNumber"}
+      }
+    },
+    "bandwidth": {
+      "type": "object",
+      "required": ["bytes_total", "bytes_rate_last"],
+      "properties": {
+        "bytes_total": {"$ref": "#/$defs/nonNegativeInteger"},
+        "bytes_rate_last": {"$ref": "#/$defs/nonNegativeNumber"}
+      }
+    },
+    "timing": {
+      "type": "object",
+      "required": ["latency_mean_us", "duration_mean_us"],
+      "properties": {
+        "latency_mean_us": {"$ref": "#/$defs/nonNegativeNumber"},
+        "duration_mean_us": {"$ref": "#/$defs/nonNegativeNumber"},
+        "latency": {"$ref": "#/$defs/timingDistribution"},
+        "duration": {"$ref": "#/$defs/timingDistribution"},
+        "ttfb": {
+          "oneOf": [
+            {"$ref": "#/$defs/timingDistribution"},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "concurrency": {
+      "type": "object",
+      "required": ["current", "mean"],
+      "properties": {
+        "current": {"$ref": "#/$defs/nonNegativeNumber"},
+        "mean": {"$ref": "#/$defs/nonNegativeNumber"}
+      }
+    },
+    "limit": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "op_count"],
+          "properties": {
+            "type": {"const": "op_count"},
+            "op_count": {"type": "integer", "minimum": 1}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "time_sec"],
+          "properties": {
+            "type": {"const": "time"},
+            "time_sec": {"type": "integer", "minimum": 1}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type"],
+          "properties": {"type": {"const": "none"}}
+        }
+      ]
+    },
+    "deleteBucket": {
+      "type": "object",
+      "required": ["bucket", "selected", "attempted", "accepted", "failed"],
+      "properties": {
+        "bucket": {"type": "string"},
+        "selected": {"$ref": "#/$defs/nonNegativeInteger"},
+        "attempted": {"$ref": "#/$defs/nonNegativeInteger"},
+        "accepted": {"$ref": "#/$defs/nonNegativeInteger"},
+        "failed": {"$ref": "#/$defs/nonNegativeInteger"}
+      }
+    },
+    "deleteVerification": {
+      "type": "object",
+      "required": [
+        "enabled", "pre_validation_enabled", "post_verification_enabled", "pre_validation_complete",
+        "post_verification_complete", "post_verification_skipped", "timeout_seconds", "pre_validation_failures",
+        "verified_absent", "still_present", "unresolved", "accepted_absent", "accepted_present",
+        "accepted_unresolved", "failed_absent", "failed_present", "failed_unresolved",
+        "operational_unresolved_absent", "operational_unresolved_present", "operational_unresolved_unresolved",
+        "unattempted_absent", "unattempted_present", "unattempted_unresolved", "correctness_failures",
+        "inconclusive_failures", "residual", "removal_confirmed", "notice"
+      ],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "pre_validation_enabled": {"type": "boolean"},
+        "post_verification_enabled": {"type": "boolean"},
+        "pre_validation_complete": {"type": "boolean"},
+        "post_verification_complete": {"type": "boolean"},
+        "post_verification_skipped": {"type": "boolean"},
+        "timeout_seconds": {"$ref": "#/$defs/nonNegativeNumber"},
+        "pre_validation_failures": {"$ref": "#/$defs/nonNegativeInteger"},
+        "verified_absent": {"$ref": "#/$defs/nonNegativeInteger"},
+        "still_present": {"$ref": "#/$defs/nonNegativeInteger"},
+        "unresolved": {"$ref": "#/$defs/nonNegativeInteger"},
+        "accepted_absent": {"$ref": "#/$defs/nonNegativeInteger"},
+        "accepted_present": {"$ref": "#/$defs/nonNegativeInteger"},
+        "accepted_unresolved": {"$ref": "#/$defs/nonNegativeInteger"},
+        "failed_absent": {"$ref": "#/$defs/nonNegativeInteger"},
+        "failed_present": {"$ref": "#/$defs/nonNegativeInteger"},
+        "failed_unresolved": {"$ref": "#/$defs/nonNegativeInteger"},
+        "operational_unresolved_absent": {"$ref": "#/$defs/nonNegativeInteger"},
+        "operational_unresolved_present": {"$ref": "#/$defs/nonNegativeInteger"},
+        "operational_unresolved_unresolved": {"$ref": "#/$defs/nonNegativeInteger"},
+        "unattempted_absent": {"$ref": "#/$defs/nonNegativeInteger"},
+        "unattempted_present": {"$ref": "#/$defs/nonNegativeInteger"},
+        "unattempted_unresolved": {"$ref": "#/$defs/nonNegativeInteger"},
+        "correctness_failures": {"$ref": "#/$defs/nonNegativeInteger"},
+        "inconclusive_failures": {"$ref": "#/$defs/nonNegativeInteger"},
+        "residual": {"$ref": "#/$defs/nonNegativeInteger"},
+        "removal_confirmed": {"type": "boolean"},
+        "notice": {"type": "string", "minLength": 1}
+      }
+    },
+    "delete": {
+      "type": "object",
+      "required": [
+        "units", "requests", "objects", "batches", "completion", "versions", "buckets", "phases",
+        "identity", "failure_policy", "timing", "performance", "outcome_terminology", "verification",
+        "terminal_reconciled"
+      ],
+      "properties": {
+        "units": {
+          "type": "object",
+          "required": ["requests", "objects", "batches"],
+          "properties": {
+            "requests": {"const": "logical_api_requests"},
+            "objects": {"const": "object_identities"},
+            "batches": {"const": "logical_api_requests"}
+          }
+        },
+        "requests": {
+          "type": "object",
+          "required": ["attempted", "full_success", "partial", "failed", "unresolved", "per_second"],
+          "properties": {
+            "attempted": {"$ref": "#/$defs/nonNegativeInteger"},
+            "full_success": {"$ref": "#/$defs/nonNegativeInteger"},
+            "partial": {"$ref": "#/$defs/nonNegativeInteger"},
+            "failed": {"$ref": "#/$defs/nonNegativeInteger"},
+            "unresolved": {"$ref": "#/$defs/nonNegativeInteger"},
+            "per_second": {"$ref": "#/$defs/nonNegativeNumber"}
+          }
+        },
+        "objects": {
+          "type": "object",
+          "required": ["selected", "attempted", "accepted", "failed", "unattempted", "unresolved", "per_second"],
+          "properties": {
+            "selected": {"$ref": "#/$defs/nonNegativeInteger"},
+            "attempted": {"$ref": "#/$defs/nonNegativeInteger"},
+            "accepted": {"$ref": "#/$defs/nonNegativeInteger"},
+            "failed": {"$ref": "#/$defs/nonNegativeInteger"},
+            "unattempted": {"$ref": "#/$defs/nonNegativeInteger"},
+            "unresolved": {"$ref": "#/$defs/nonNegativeInteger"},
+            "per_second": {"$ref": "#/$defs/nonNegativeNumber"}
+          }
+        },
+        "batches": {
+          "type": "object",
+          "required": ["configured_size", "actual_request_count", "actual_object_count", "mean_objects_per_request", "full_batch_count", "partial_batch_count", "full_batch_percent"],
+          "properties": {
+            "configured_size": {"$ref": "#/$defs/nonNegativeInteger"},
+            "actual_request_count": {"$ref": "#/$defs/nonNegativeInteger"},
+            "actual_object_count": {"$ref": "#/$defs/nonNegativeInteger"},
+            "mean_objects_per_request": {"$ref": "#/$defs/nonNegativeNumber"},
+            "full_batch_count": {"$ref": "#/$defs/nonNegativeInteger"},
+            "partial_batch_count": {"$ref": "#/$defs/nonNegativeInteger"},
+            "full_batch_percent": {"$ref": "#/$defs/percent"}
+          }
+        },
+        "completion": {
+          "type": "object",
+          "required": ["request_percent", "object_percent", "terminal_reconciled"],
+          "properties": {
+            "request_percent": {"$ref": "#/$defs/percent"},
+            "object_percent": {"$ref": "#/$defs/percent"},
+            "terminal_reconciled": {"type": "boolean"}
+          }
+        },
+        "versions": {
+          "type": "object",
+          "required": ["current_key", "exact_version"],
+          "properties": {
+            "current_key": {"$ref": "#/$defs/nonNegativeInteger"},
+            "exact_version": {"$ref": "#/$defs/nonNegativeInteger"}
+          }
+        },
+        "buckets": {"type": "array", "items": {"$ref": "#/$defs/deleteBucket"}},
+        "phases": {
+          "type": "object",
+          "required": ["seed", "discovery", "pre_validation", "scheduled_delete_seconds", "drain_seconds", "post_verification", "cleanup", "total_wall_seconds"],
+          "properties": {
+            "seed": {"type": ["number", "null"], "minimum": 0},
+            "discovery": {"type": ["number", "null"], "minimum": 0},
+            "pre_validation": {"type": ["number", "null"], "minimum": 0},
+            "scheduled_delete_seconds": {"type": ["number", "null"], "minimum": 0},
+            "drain_seconds": {"type": ["number", "null"], "minimum": 0},
+            "post_verification": {"type": ["number", "null"], "minimum": 0},
+            "cleanup": {"type": ["number", "null"], "minimum": 0},
+            "total_wall_seconds": {"type": ["number", "null"], "minimum": 0}
+          }
+        },
+        "identity": {
+          "type": "object",
+          "required": ["mode", "configured_batch_size", "selection_order"],
+          "properties": {
+            "mode": {"enum": ["single", "batch"]},
+            "configured_batch_size": {"$ref": "#/$defs/nonNegativeInteger"},
+            "selection_order": {"const": "canonical"}
+          }
+        },
+        "failure_policy": {
+          "type": "object",
+          "required": ["mode", "outcome", "max_failed_objects", "max_failure_percent", "grace_seconds", "operational_failed_objects", "excluded_failed_objects", "observed_failure_percent"],
+          "properties": {
+            "mode": {"enum": ["fixed", "percentage"]},
+            "outcome": {"enum": ["running", "completed_cleanly", "completed_within_failure_budget", "failed"]},
+            "max_failed_objects": {"$ref": "#/$defs/nonNegativeInteger"},
+            "max_failure_percent": {"$ref": "#/$defs/nonNegativeNumber"},
+            "grace_seconds": {"$ref": "#/$defs/nonNegativeInteger"},
+            "operational_failed_objects": {"$ref": "#/$defs/nonNegativeInteger"},
+            "excluded_failed_objects": {"$ref": "#/$defs/nonNegativeInteger"},
+            "observed_failure_percent": {"$ref": "#/$defs/nonNegativeNumber"}
+          }
+        },
+        "timing": {
+          "type": "object",
+          "required": ["latency_definition", "duration_definition", "latency", "duration", "object_latency"],
+          "properties": {
+            "latency_definition": {"const": "first_request_byte_sent_to_first_response_byte_received"},
+            "duration_definition": {"const": "request_formulation_to_last_response_byte_received"},
+            "latency": {"oneOf": [{"$ref": "#/$defs/timingDistribution"}, {"type": "null"}]},
+            "duration": {"oneOf": [{"$ref": "#/$defs/timingDistribution"}, {"type": "null"}]},
+            "object_latency": {"type": "null"}
+          }
+        },
+        "performance": {
+          "type": "object",
+          "required": ["object_size", "data_moved", "bandwidth", "ttfb"],
+          "properties": {
+            "object_size": {"const": "not_applicable"},
+            "data_moved": {"const": "not_applicable"},
+            "bandwidth": {"const": "not_applicable"},
+            "ttfb": {"const": "not_applicable"}
+          }
+        },
+        "outcome_terminology": {"const": "accepted"},
+        "verification": {"$ref": "#/$defs/deleteVerification"},
+        "terminal_reconciled": {"type": "boolean"}
+      }
+    },
+    "listShard": {
+      "type": "object",
+      "required": ["prefix", "pages", "objects", "avg_page_millis", "first_update_millis", "last_update_millis", "active", "stall_warnings", "consecutive_full_pages", "last_page_objects", "last_page_max_keys", "last_full_page_millis", "split_count", "max_depth", "last_split_millis", "last_split_reason", "last_split_children"],
+      "properties": {
+        "prefix": {"type": "string"},
+        "pages": {"$ref": "#/$defs/nonNegativeInteger"},
+        "objects": {"$ref": "#/$defs/nonNegativeInteger"},
+        "avg_page_millis": {"$ref": "#/$defs/nonNegativeNumber"},
+        "first_update_millis": {"$ref": "#/$defs/nonNegativeInteger"},
+        "last_update_millis": {"$ref": "#/$defs/nonNegativeInteger"},
+        "active": {"type": "boolean"},
+        "stall_warnings": {"$ref": "#/$defs/nonNegativeInteger"},
+        "consecutive_full_pages": {"$ref": "#/$defs/nonNegativeInteger"},
+        "last_page_objects": {"$ref": "#/$defs/nonNegativeInteger"},
+        "last_page_max_keys": {"$ref": "#/$defs/nonNegativeInteger"},
+        "last_full_page_millis": {"$ref": "#/$defs/nonNegativeInteger"},
+        "split_count": {"$ref": "#/$defs/nonNegativeInteger"},
+        "max_depth": {"$ref": "#/$defs/nonNegativeInteger"},
+        "last_split_millis": {"$ref": "#/$defs/nonNegativeInteger"},
+        "last_split_reason": {"type": "string"},
+        "last_split_children": {"$ref": "#/$defs/nonNegativeInteger"}
+      }
+    },
+    "listShards": {
+      "type": "object",
+      "required": ["total_pages", "total_objects", "avg_page_millis", "captured_at_millis", "total_splits", "max_depth", "split_reasons", "shards"],
+      "properties": {
+        "total_pages": {"$ref": "#/$defs/nonNegativeInteger"},
+        "total_objects": {"$ref": "#/$defs/nonNegativeInteger"},
+        "avg_page_millis": {"$ref": "#/$defs/nonNegativeNumber"},
+        "captured_at_millis": {"$ref": "#/$defs/nonNegativeInteger"},
+        "total_splits": {"$ref": "#/$defs/nonNegativeInteger"},
+        "max_depth": {"$ref": "#/$defs/nonNegativeInteger"},
+        "split_reasons": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/nonNegativeInteger"}
+        },
+        "shards": {"type": "array", "items": {"$ref": "#/$defs/listShard"}}
+      }
+    },
+    "sample": {
+      "type": "object",
+      "required": ["metrics_schema", "scope", "role", "node_id", "run_id", "sample_ts", "step_id", "op_type", "timestamp", "elapsed_time_seconds", "test_state", "completion_percent", "operations", "bandwidth", "timing", "concurrency"],
+      "properties": {
+        "metrics_schema": {"const": 4},
+        "scope": {"enum": ["node", "fleet"]},
+        "role": {"enum": ["entry", "worker", "aggregate"]},
+        "cluster_id": {"type": "string", "minLength": 1},
+        "node_id": {"type": "string", "minLength": 1},
+        "run_id": {"type": "string"},
+        "sample_ts": {"type": "string", "format": "date-time"},
+        "step_id": {"type": "string"},
+        "op_type": {"type": "string", "minLength": 1},
+        "timestamp": {"$ref": "#/$defs/nonNegativeInteger"},
+        "elapsed_time_seconds": {"$ref": "#/$defs/nonNegativeNumber"},
+        "test_state": {"enum": [0, 1, 2]},
+        "unbounded": {"type": "boolean"},
+        "limit": {"$ref": "#/$defs/limit"},
+        "completion_percent": {"$ref": "#/$defs/percent"},
+        "overall_completion_percent": {"$ref": "#/$defs/percent"},
+        "overall_unbounded": {"type": "boolean"},
+        "operations": {"$ref": "#/$defs/operations"},
+        "bandwidth": {"$ref": "#/$defs/bandwidth"},
+        "timing": {"$ref": "#/$defs/timing"},
+        "concurrency": {"$ref": "#/$defs/concurrency"},
+        "nodes_count": {"$ref": "#/$defs/nonNegativeInteger"},
+        "nodes_present": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "contributors_present": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "partial": {"type": "boolean"},
+        "delete_detail_expected": {"type": "boolean"},
+        "delete": {"$ref": "#/$defs/delete"},
+        "list_shards": {"$ref": "#/$defs/listShards"},
+        "diag_cached_progress": {"type": "boolean"},
+        "diag_distributed_contexts": {"$ref": "#/$defs/nonNegativeInteger"},
+        "diag_local_contexts": {"$ref": "#/$defs/nonNegativeInteger"},
+        "terminal": {"const": true}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"scope": {"const": "fleet"}}, "required": ["scope"]},
+          "then": {"properties": {"role": {"const": "aggregate"}}, "required": ["nodes_count", "contributors_present"]},
+          "else": {"properties": {"role": {"enum": ["entry", "worker"]}}}
+        },
+        {
+          "if": {"properties": {"delete_detail_expected": {"const": true}}, "required": ["delete_detail_expected"]},
+          "then": {"required": ["delete"]}
+        },
+        {
+          "if": {"properties": {"op_type": {"const": "none"}}, "required": ["op_type"]},
+          "then": {
+            "properties": {
+              "scope": {"const": "node"},
+              "run_id": {"const": ""},
+              "step_id": {"const": ""},
+              "test_state": {"const": 0}
+            }
+          }
+        }
+      ]
+    }
+  }
+}
