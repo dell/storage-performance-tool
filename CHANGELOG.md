@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.15.2] - 2026-09-21
+
 ### Fixed
 
 - **Large-object SigV4 signing** — Sign S3 requests with payload lengths above 2 GiB without rejecting their 64-bit `Content-Length` values.
