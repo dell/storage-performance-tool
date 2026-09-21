@@ -548,6 +548,39 @@ public class S3StorageDriverTest {
 	}
 
 	@Test
+	void applyAuthHeaders_v4_acceptsContentLengthAboveIntegerRange() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		HttpHeaders headers = new DefaultHttpHeaders();
+		headers.set(HttpHeaderNames.HOST, "s3.us-east-1.amazonaws.com:443");
+		headers.set(HttpHeaderNames.CONTENT_LENGTH, (long) Integer.MAX_VALUE + 1);
+
+		Method m = S3StorageDriver.class.getDeclaredMethod(
+						"applyAuthHeaders", HttpHeaders.class, HttpMethod.class, String.class, Credential.class);
+		m.setAccessible(true);
+		m.invoke(drv, headers, HttpMethod.PUT, "/bucket/obj", TEST_CRED);
+
+		assertEquals(S3Api.AMZ_UNSIGNED_PAYLOAD, headers.get(S3Api.AMZ_PAYLOAD_HEADER));
+		assertNotNull(headers.get(HttpHeaderNames.AUTHORIZATION));
+	}
+
+	@Test
+	void canonicalV4_acceptsContentLengthAboveIntegerRange() throws Exception {
+		S3StorageDriver<Item, Operation<Item>> drv = newDriverMock();
+		HttpHeaders headers = new DefaultHttpHeaders();
+		headers.set(HttpHeaderNames.HOST, "s3.test:443");
+		headers.set(HttpHeaderNames.CONTENT_LENGTH, (long) Integer.MAX_VALUE + 1);
+
+		Method m = S3StorageDriver.class.getDeclaredMethod(
+						"getCanonicalV4", HttpHeaders.class, Map.class, HttpMethod.class, String.class);
+		m.setAccessible(true);
+		String canonical = (String) m.invoke(
+						drv, headers, new TreeMap<String, String>(), HttpMethod.PUT, "/bucket/object");
+
+		assertTrue(canonical.endsWith(S3Api.AMZ_UNSIGNED_PAYLOAD));
+	}
+
+	@Test
 	void canonicalV4_insertsEmptyQueryLineWhenAbsent() throws Exception {
 		Config cfg = baseConfig(false, 4, false, null, "127.0.0.1:9020");
 		TestS3Driver drv = new TestS3Driver(cfg);

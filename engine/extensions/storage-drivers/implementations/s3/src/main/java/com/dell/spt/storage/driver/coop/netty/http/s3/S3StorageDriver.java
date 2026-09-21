@@ -2122,7 +2122,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 				// Set payload header
 				final String contentLengthHeader = httpHeaders.get(HttpHeaderNames.CONTENT_LENGTH);
-				final int contentLength = contentLengthHeader == null ? 0 : Integer.parseInt(contentLengthHeader);
+				final long contentLength = contentLengthHeader == null ? 0 : Long.parseLong(contentLengthHeader);
 				if (contentLength > 0) {
 					httpHeaders.set(S3Api.AMZ_PAYLOAD_HEADER, S3Api.AMZ_UNSIGNED_PAYLOAD);
 				} else {
@@ -2259,7 +2259,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final String payloadHashHeader = httpHeaders.get(S3Api.AMZ_PAYLOAD_HEADER);
 		if (payloadHashHeader != null && !payloadHashHeader.isEmpty()) {
 			buffCanonical.append(payloadHashHeader);
-		} else if (Integer.parseInt(httpHeaders.get(HttpHeaderNames.CONTENT_LENGTH)) > 0) {
+		} else if (Long.parseLong(httpHeaders.get(HttpHeaderNames.CONTENT_LENGTH)) > 0) {
 			buffCanonical.append(S3Api.AMZ_UNSIGNED_PAYLOAD);
 		} else {
 			buffCanonical.append(S3Api.AMZ_EMPTY_BODY_SHA256);
