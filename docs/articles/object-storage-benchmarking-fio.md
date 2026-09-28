@@ -15,7 +15,7 @@ Figures: Figures 1-5 = images/article1-*.png
 Open review items: see the launch review sheet in mcli-poc planning
 -->
 
-![Figure 1. Two benchmark ecosystems](images/article1-benchmark-ecosystems.png)
+<p align="center"><img src="images/article1-benchmark-ecosystems.png" alt="Figure 1. Two benchmark ecosystems" width="800"></p>
 
 *Figure 1. File and block storage have a shared reference point. Object storage has capable tools, but not yet a methodology-complete reference point.*
 
@@ -41,7 +41,7 @@ This article asks a practical question: if object storage eventually gets its `f
 
 ## Why object benchmarks mislead
 
-![Figure 2. Why object benchmarks can mislead](images/article1-four-failure-modes.png)
+<p align="center"><img src="images/article1-four-failure-modes.png" alt="Figure 2. Why object benchmarks can mislead" width="700"></p>
 
 *Figure 2. Four common ways object benchmarks mislead, plus one factor that shapes all of them: the S3 client implementation.*
 
@@ -85,7 +85,7 @@ Dell participates in industry efforts around object-storage interoperability, in
 
 ## What a trustworthy object benchmark should do
 
-![Figure 3. Trust dimensions for object-storage benchmarking](images/article1-trust-dimensions.png)
+<p align="center"><img src="images/article1-trust-dimensions.png" alt="Figure 3. Trust dimensions for object-storage benchmarking" width="700"></p>
 
 *Figure 3. Five questions a trustworthy object-storage benchmark should help answer.*
 
@@ -107,7 +107,7 @@ Dell SPT is designed to meet this bar.
 
 Dell SPT is Dell’s open-source, MIT-licensed benchmark for S3-compatible object storage. It pairs a Go command-line interface and terminal UI (TUI) with a Java benchmark engine that the CLI runs in managed Docker containers. The engine is a modernized descendant of EMC Mongoose, which Dell and EMC performance engineering used for enterprise object-storage testing for years. SPT keeps that engine’s workload modeling and distributed execution, and wraps them in a task-oriented workflow: configure, verify, run, observe, collect.
 
-![Figure 4. Dell SPT first-run workflow](images/article1-first-run-workflow.png)
+<p align="center"><img src="images/article1-first-run-workflow.png" alt="Figure 4. Dell SPT first-run workflow" width="420"></p>
 
 *Figure 4. A typical first SPT workflow: configure defaults in `.env`, validate every node with `spt verify`, launch a workload, watch it live or run it headless, and keep the results bundle.*
 
@@ -133,7 +133,7 @@ SPT also pins the engine build. Each CLI release runs its matching, version-tagg
 
 ### Trust the measurement
 
-![Figure 5. The Dell SPT TUI during a distributed run](images/article1-distributed-run-tui.png)
+<p align="center"><img src="images/article1-distributed-run-tui.png" alt="Figure 5. The Dell SPT TUI during a distributed run" width="800"></p>
 
 *Figure 5. The SPT TUI during a multi-host run: cluster-wide progress, live throughput and latency, and a per-client table that makes an underperforming node visible before its numbers disappear into the aggregate.*
 
