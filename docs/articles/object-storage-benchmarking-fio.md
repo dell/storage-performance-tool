@@ -2,19 +2,6 @@
 
 *Why S3 performance testing is harder than it looks, and how Dell SPT is designed to make benchmark results easier to trust.*
 
-<!--
-PRODUCTION NOTES (remove before publishing)
-Channel: Dell InfoHub, Dell SPT technical series, launch article (co-launch with corporate blog)
-Source: mcli-poc planning/SPT_InfoHub_Article1_Fio_Final_20260927.md (supersedes the 2026-06-18 draft)
-Product facts checked against: storage-performance-tool v5.15.2 (2026-09-21)
-Competitor facts checked against: MinIO Warp v1.8.2 (2026-09-23), elbencho v3.2.1 (2026-09-25)
-Figures: Figures 1-5 = images/article1-*.png
-         Figure 5 is a copy of cli/docs/images/spt-distributed-write-tui.png (sanitized)
-         kept separately so it can change independently of the README image. The
-         internal 2026-05-26 TUI capture must not be committed to this repo.
-Open review items: see the launch review sheet in mcli-poc planning
--->
-
 <p align="center"><img src="images/article1-benchmark-ecosystems.png" alt="Figure 1. Two benchmark ecosystems" width="800"></p>
 
 *Figure 1. File and block storage have a shared reference point. Object storage has capable tools, but not yet a methodology-complete reference point.*
