@@ -7,6 +7,9 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+
+import com.github.akurilov.commons.io.el.ExpressionInputImpl;
 
 import com.dell.spt.base.env.DateUtil;
 import com.github.akurilov.commons.io.collection.CompositeStringInput;
@@ -40,12 +43,66 @@ public class CompositeExpressionInputTest {
 	public void testSelfReferenceInCompositeExpression()
 					throws Exception {
 		final var data = "Foo${this.expr()}Bar#{this.expr()}";
-		final var in = CompositeExpressionInputBuilder.newInstance()
-						.expression(data)
-						.build();
-		TimeUnit.MILLISECONDS.sleep(100);
-		final var result = in.get();
-		assertEquals(data, result);
+		try (final var in = CompositeExpressionInputBuilder.newInstance().expression(data).build()) {
+			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+			String result;
+			do {
+				result = in.get();
+				if (data.equals(result)) {
+					break;
+				}
+				Thread.sleep(1);
+			} while (System.nanoTime() < deadline);
+			assertEquals(data, result, "asynchronous segment should become ready");
+			for (int i = 0; i < 10_000; i++) {
+				assertEquals(data, in.get(), "mixed segments must remain stable during concurrent evaluation");
+			}
+		}
+	}
+
+	@Test
+	public void segmentsAndRepeatedBuildsOwnSeparateEvaluationContexts() throws Exception {
+		final var builder = CompositeExpressionInputBuilder.newInstance()
+						.expression("${this.expr()}|${this.expr()}");
+		try (final var first = builder.build(); final var second = builder.build()) {
+			// ELContext contains mutable method-resolution state. Assert isolation directly,
+			// so this regression does not depend on winning a thread scheduling race.
+			final var segmentsField = CompositeStringInput.class.getDeclaredField("segments");
+			segmentsField.setAccessible(true);
+			final var contextField = ExpressionInputImpl.class.getDeclaredField("ctx");
+			contextField.setAccessible(true);
+			final var contexts = new java.util.ArrayList<Object>();
+			for (final var input : new CompositeStringInput[]{first, second
+			}) {
+				for (final var segment : (Object[]) segmentsField.get(input)) {
+					if (segment instanceof ExpressionInputImpl) {
+						final var context = contextField.get(segment);
+						for (final var previous : contexts) {
+							assertNotSame(previous, context, "independently evaluated segments must not share ELContext");
+						}
+						contexts.add(context);
+					}
+				}
+				assertEquals("${this.expr()}|${this.expr()}", input.get());
+			}
+			assertEquals(4, contexts.size());
+		}
+	}
+
+	@Test
+	public void isolatedSegmentsRetainBindingsOverridesAndInitialValues() throws Exception {
+		final var builder = CompositeExpressionInputBuilder.newInstance()
+						.value("increment", 2, int.class)
+						.function("custom", "abs", Math.class.getMethod("abs", int.class))
+						.expression("${this.last() + increment}%{0}|${custom:abs(-increment)}");
+		try (final var first = builder.build()) {
+			assertEquals("2|2", first.get());
+			builder.value("increment", 3, int.class);
+			try (final var second = builder.build()) {
+				assertEquals("3|3", second.get());
+				assertEquals("4|2", first.get(), "reusing a builder must preserve existing input bindings");
+			}
+		}
 	}
 
 	@Test

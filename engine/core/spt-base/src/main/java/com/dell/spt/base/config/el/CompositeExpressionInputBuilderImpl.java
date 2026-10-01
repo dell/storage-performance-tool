@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.TimeZone;
 import java.util.regex.Pattern;
+import java.util.function.Consumer;
 
 public class CompositeExpressionInputBuilderImpl
 				implements CompositeExpressionInputBuilder {
@@ -23,13 +24,9 @@ public class CompositeExpressionInputBuilderImpl
 	}
 	static final Pattern INITIAL_VALUE_PATTERN = Pattern.compile(".*(%\\{.+})([$#]\\{.+}.)*");
 	static final Formatter FORMATTER = new Formatter(Locale.ROOT);
-	private final ExpressionInput.Builder inputBuilder = ExpressionInput.builder();
+	private final List<Consumer<ExpressionInput.Builder>> bindings = new ArrayList<>();
 
 	private volatile String expr;
-
-	public CompositeExpressionInputBuilderImpl() {
-		withLanguage(inputBuilder);
-	}
 
 	@Override
 	public final CompositeExpressionInputBuilder expression(final String expr) {
@@ -40,14 +37,14 @@ public class CompositeExpressionInputBuilderImpl
 	@Override
 	public final CompositeExpressionInputBuilder function(
 					final String prefix, final String name, final Method method) {
-		inputBuilder.function(prefix, name, method);
+		bindings.add(builder -> builder.function(prefix, name, method));
 		return this;
 	}
 
 	@Override
 	public final CompositeExpressionInputBuilder value(
 					final String name, final Object value, final Class<?> type) {
-		inputBuilder.value(name, value, type);
+		bindings.add(builder -> builder.value(name, value, type));
 		return this;
 	}
 
@@ -74,6 +71,10 @@ public class CompositeExpressionInputBuilderImpl
 					segments.add(constSegment);
 					constSegmentBuilder.setLength(0);
 				}
+				// Builders retain a mutable ELContext. Never share it between segments,
+				// since asynchronous and synchronous expressions evaluate concurrently.
+				final var inputBuilder = withLanguage(ExpressionInput.builder());
+				bindings.forEach(binding -> binding.accept(inputBuilder));
 				final var inputSegment = inputBuilder
 								.expression(fullSegmentExpr)
 								.build();
