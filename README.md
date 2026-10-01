@@ -50,7 +50,15 @@ mv spt-*-linux-amd64 spt
 After configuring the target and hosts below, run `./spt verify` to check the
 runtime infrastructure automatically. For a distributed configuration, it
 validates SSH connectivity, Docker availability, and required ports on every
-configured node.
+configured node. After container launch, verification polls the required service
+ports for up to 30 seconds, then checks the metrics and control endpoints.
+
+If verification fails, distinguish the failed stage: `Container Start` means the
+Docker launch failed; `Ports Accessible` means the services did not become reachable
+within the startup window. Rerun `./spt verify --debug` and retain the report and
+`spt.log`. For a container-launch failure, also inspect the Docker daemon logs for
+the same time window; a JVM readiness delay cannot explain a container that never
+started. Verification attempts to remove its temporary container after the checks.
 
 ### Engine image selection
 

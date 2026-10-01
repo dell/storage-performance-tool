@@ -6,6 +6,7 @@ package verification
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -150,7 +151,7 @@ func TestCheckPorts_AllOpen(t *testing.T) {
 	host := &hostparse.HostInfo{Host: "test.example.com", IsLocal: false, Original: "test.example.com"}
 	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, config, mockCmd, mockNet, mockTime)
 
-	result := verifier.checkPorts(host)
+	result := verifier.checkPorts(context.Background(), host)
 
 	if !result.Passed {
 		t.Errorf("Expected ports check to pass, but it failed: %s", result.Message)
@@ -197,7 +198,7 @@ func TestCheckPorts_SomeClosed(t *testing.T) {
 	host := &hostparse.HostInfo{Host: "test.example.com", IsLocal: false, Original: "test.example.com"}
 	verifier := NewVerifierWithDeps([]*hostparse.HostInfo{host}, config, mockCmd, mockNet, mockTime)
 
-	result := verifier.checkPorts(host)
+	result := verifier.checkPorts(context.Background(), host)
 
 	if result.Passed {
 		t.Error("Expected ports check to fail due to closed ports")
@@ -1263,5 +1264,130 @@ func TestRdmaChecksSkippedWhenDisabled(t *testing.T) {
 	}
 	if result.RdmaDriver.Message != "" {
 		t.Errorf("Expected empty RDMA driver check when RDMA disabled, got: %s", result.RdmaDriver.Message)
+	}
+}
+
+// startupNetworkChecker simulates ports becoming available on different probes.
+type startupNetworkChecker struct {
+	MockNetworkChecker
+	probe func(string, int, time.Duration) bool
+}
+
+func (n *startupNetworkChecker) IsPortOpen(host string, port int, timeout time.Duration) bool {
+	return n.probe(host, port, timeout)
+}
+
+func TestWaitForPorts(t *testing.T) {
+	for _, local := range []bool{true, false} {
+		for _, delayed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("local=%t/delayed=%t", local, delayed), func(t *testing.T) {
+				host := &hostparse.HostInfo{Host: "node.example.com", IsLocal: local}
+				wantHost := host.Host
+				if local {
+					wantHost = "127.0.0.1"
+				}
+				probes := 0
+				network := &startupNetworkChecker{probe: func(address string, port int, timeout time.Duration) bool {
+					if address != wantHost {
+						t.Fatalf("probe host = %q, want %q", address, wantHost)
+					}
+					if port != constants.DefaultRMIRegistryPort && port != 9999 {
+						t.Fatalf("unexpected port %d", port)
+					}
+					if timeout <= 0 || timeout > time.Second {
+						t.Fatalf("unbounded probe timeout %s", timeout)
+					}
+					probes++
+					// RMI opens first; the REST API needs another probe.
+					return !delayed || port == constants.DefaultRMIRegistryPort || probes > 2
+				}}
+				v := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{APIPort: 9999}, &MockCommandExecutor{}, network, &RealTimeProvider{})
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				check := v.waitForPorts(ctx, host, time.Millisecond)
+				wantProbes := 2
+				if delayed {
+					wantProbes = 4
+				}
+				if !check.Passed || probes != wantProbes {
+					t.Fatalf("check = %+v, probes = %d, want %d", check, probes, wantProbes)
+				}
+			})
+		}
+	}
+}
+
+func TestWaitForPorts_Deadline(t *testing.T) {
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true}
+	probes := 0
+	network := &startupNetworkChecker{probe: func(_ string, _ int, timeout time.Duration) bool {
+		probes++
+		if timeout <= 0 || timeout > 20*time.Millisecond {
+			t.Fatalf("probe exceeds remaining budget: %s", timeout)
+		}
+		return false
+	}}
+	v := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{APIPort: 9999}, &MockCommandExecutor{}, network, &RealTimeProvider{})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	check := v.waitForPorts(ctx, host, time.Millisecond)
+	if check.Passed || !errors.Is(check.Error, context.DeadlineExceeded) || probes == 0 {
+		t.Fatalf("expected bounded failure, got %+v (probes %d)", check, probes)
+	}
+	if !strings.Contains(check.Message, "1099") || !strings.Contains(check.Message, "9999") {
+		t.Fatalf("missing failed ports: %s", check.Message)
+	}
+}
+
+func TestWaitForPorts_Canceled(t *testing.T) {
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true}
+	network := &startupNetworkChecker{probe: func(_ string, _ int, _ time.Duration) bool {
+		t.Fatal("canceled wait probed a port")
+		return true
+	}}
+	v := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{APIPort: 9999}, &MockCommandExecutor{}, network, &RealTimeProvider{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	check := v.waitForPorts(ctx, host, time.Millisecond)
+	if check.Passed || !errors.Is(check.Error, context.Canceled) {
+		t.Fatalf("expected cancellation, got %+v", check)
+	}
+}
+
+func TestWaitForPorts_PreservesObservedFailureOnCancellation(t *testing.T) {
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	network := &startupNetworkChecker{probe: func(_ string, port int, _ time.Duration) bool {
+		if port == constants.DefaultRMIRegistryPort {
+			return true
+		}
+		cancel()
+		return false
+	}}
+	v := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{APIPort: 9999}, &MockCommandExecutor{}, network, &RealTimeProvider{})
+	check := v.waitForPorts(ctx, host, time.Millisecond)
+	if check.Passed || !errors.Is(check.Error, context.Canceled) {
+		t.Fatalf("expected cancellation, got %+v", check)
+	}
+	if !strings.Contains(check.Message, "9999") || strings.Contains(check.Message, "1099") {
+		t.Fatalf("lost last actual port observations: %s", check.Message)
+	}
+}
+
+func TestWaitForPorts_CancellationDuringProbeCannotPass(t *testing.T) {
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	network := &startupNetworkChecker{probe: func(_ string, port int, _ time.Duration) bool {
+		if port == 9999 {
+			cancel()
+		}
+		return true
+	}}
+	v := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{APIPort: 9999}, &MockCommandExecutor{}, network, &RealTimeProvider{})
+	check := v.waitForPorts(ctx, host, time.Millisecond)
+	if check.Passed || !errors.Is(check.Error, context.Canceled) {
+		t.Fatalf("a canceled startup cannot pass: %+v", check)
 	}
 }
