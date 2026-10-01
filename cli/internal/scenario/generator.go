@@ -69,6 +69,8 @@ func GenerateWriteScenario(params Params) (string, error) {
 		templateKeyTimestamp:         time.Now().Unix(),
 		templateKeyStorageDriverType: fmt.Sprintf(`"%s"`, driverType),
 		templateKeySaveItems:         params.SaveItems,
+		templateKeyHasPrefix:         params.Prefix != "",
+		templateKeyPrefix:            quoteJS(params.Prefix),
 		// Step IDs using shared timestamp and ordered numbers
 		templateKeyStepID:       formatStepID(1, ts, stepOpCreate),
 		templateKeyStepIDCreate: formatStepID(1, ts, stepOpCreate),
