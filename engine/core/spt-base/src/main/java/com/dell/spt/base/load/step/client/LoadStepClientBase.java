@@ -1827,7 +1827,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		final long deadlineNanos = durationDeadlineNanos(timeoutNanos);
 		setDurationDrainDeadlineIfAbsent(durationDrainDeadlineNanos(deadlineNanos));
 		if (failureBudgetFailure != null) {
-			return false;
+			throw failureBudgetFailure;
 		}
 		return awaitDurationSlices(activeSlices, deadlineNanos);
 	}

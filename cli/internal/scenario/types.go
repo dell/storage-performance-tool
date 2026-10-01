@@ -7,6 +7,7 @@ type Params struct {
 	WorkloadType string
 	Endpoint     string
 	Endpoints    []string
+	Region       string // Optional AWS region; empty preserves engine defaults.
 	AccessKey    string
 	SecretKey    string
 	Bucket       string

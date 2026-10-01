@@ -39,6 +39,7 @@ type RunClusterConfig struct {
 
 // StorageConfig represents storage configuration
 type StorageConfig struct {
+	Region   string          `yaml:"region,omitempty"`
 	Driver   DriverConfig    `yaml:"driver,omitempty"`
 	Net      NetConfig       `yaml:"net,omitempty"`
 	Auth     AuthConfig      `yaml:"auth,omitempty"`
@@ -213,6 +214,7 @@ func GenerateDefaults(params Params) ([]byte, error) {
 			return nil, fmt.Errorf("invalid port in endpoint %q", eps[0])
 		}
 		config.Storage = StorageConfig{
+			Region: params.Region,
 			Driver: DriverConfig{
 				Type:  storageDriverTypeS3Tables,
 				Limit: DriverLimits{Concurrency: params.Tables.ConcurrentWriters},
@@ -337,6 +339,7 @@ func GenerateDefaults(params Params) ([]byte, error) {
 		}
 
 		config.Storage = StorageConfig{
+			Region: params.Region,
 			Driver: DriverConfig{
 				Limit: DriverLimits{
 					Concurrency: params.Threads,

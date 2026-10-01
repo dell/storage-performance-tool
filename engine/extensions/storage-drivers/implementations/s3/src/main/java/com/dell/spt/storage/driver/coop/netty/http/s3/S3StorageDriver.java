@@ -410,10 +410,13 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			checksumStrategy = null;
 		}
 
+		final String configuredRegion = storageConfig.stringVal("region");
 		// Look for an AWS endpoint, e.g. "s3.us-east-1.amazonaws.com:80"
 		Pattern awsPattern = Pattern.compile("s3\\.([^\\.]+)\\.amazonaws\\.com:[0-9]+");
 		Matcher awsMatcher = null;
-		if (storageNodeAddrs.length == 1 && (awsMatcher = awsPattern.matcher(storageNodeAddrs[0])).matches()) {
+		if (configuredRegion != null && !configuredRegion.isEmpty()) {
+			awsRegion = configuredRegion;
+		} else if (storageNodeAddrs.length == 1 && (awsMatcher = awsPattern.matcher(storageNodeAddrs[0])).matches()) {
 			// Extract the AWS region
 			awsRegion = awsMatcher.group(1);
 		} else {

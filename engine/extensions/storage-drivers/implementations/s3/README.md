@@ -141,6 +141,21 @@ docker run \
 
 ## 3. Configuration Reference
 
+### AWS region
+
+Set `storage.region` in engine YAML to select the region used for S3 signing:
+
+```yaml
+storage:
+  region: us-west-2
+```
+
+The equivalent engine argument is `--storage-region=us-west-2`; the SPT CLI
+exposes it as `spt run <workload> --region us-west-2`. The default is an empty
+string, preserving endpoint-based region detection and the existing fallback.
+An explicit region takes precedence over endpoint detection. The AWS SDK driver
+also consumes this setting and retains its existing fallback when it is empty.
+
 ### 3.1. S3 Specific Options
 
 | Name                                           | Type         | Default Value    | Description                                      |

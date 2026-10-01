@@ -2166,6 +2166,7 @@ func init() {
 	runCmd.Flags().StringP("secret-key", "s", "", "The S3 secret key credential")
 	runCmd.Flags().StringP("bucket", "b", "", "Target bucket; for DELETE --items-file it is an optional assertion applied to every manifest row")
 	runCmd.Flags().String("prefix", "", "Write/write-verify: generated-key prefix (literal, include trailing / for a directory); seeded DELETE: owned namespace root; guarded existing DELETE: exact S3 prefix without a leading slash; list/read-verify: listing constraint")
+	runCmd.Flags().String("region", "", "AWS region for S3 requests (empty preserves engine region selection)")
 	runCmd.Flags().Int("auth-version", 4, "S3 authentication signature version (2 or 4; default 4)")
 
 	// Workload Definition Options
@@ -2363,6 +2364,7 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 
 		accessKey, _ := cmd.Flags().GetString("access-key")
 		params.AccessKey = accessKey
+		params.Region, _ = cmd.Flags().GetString("region")
 
 		secretKey, _ := cmd.Flags().GetString("secret-key")
 		params.SecretKey = secretKey
