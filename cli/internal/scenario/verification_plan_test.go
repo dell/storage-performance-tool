@@ -64,6 +64,7 @@ func TestBuildVerificationPlanGeneratedRoutes(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			test.params.Label = "qs-integrity"
 			rendered, err := GenerateScenario(test.params)
 			if err != nil {
 				t.Fatal(err)

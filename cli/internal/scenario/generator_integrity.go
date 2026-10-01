@@ -20,9 +20,9 @@ func GenerateWriteVerifyScenario(params Params) (string, error) {
 		return "", fmt.Errorf("deferred write-verify does not support cleanup")
 	}
 	ts := resolveTimestamp(params)
-	createID := formatStepID(1, ts, constants.IntegrityStepRoleCreate)
-	readID := formatStepID(2, ts, constants.IntegrityStepRoleVerify)
-	deleteID := formatStepID(3, ts, stepOpDelete)
+	createID := formatStepID(params.Label, 1, ts, constants.IntegrityStepRoleCreate)
+	readID := formatStepID(params.Label, 2, ts, constants.IntegrityStepRoleVerify)
+	deleteID := formatStepID(params.Label, 3, ts, stepOpDelete)
 	bucketPath := "/" + strings.TrimPrefix(params.Bucket, "/")
 	count := params.ObjectCount
 	if count <= 0 && strings.TrimSpace(params.Duration) == "" {
@@ -97,7 +97,7 @@ func GenerateReadVerifyScenario(params Params) (string, error) {
 	driver := resolveStorageDriverType(params.S3Driver)
 	bucketPath := "/" + strings.TrimPrefix(params.Bucket, "/")
 	readNumber := 2
-	producerID := formatStepID(1, ts, constants.IntegrityStepRoleList)
+	producerID := formatStepID(params.Label, 1, ts, constants.IntegrityStepRoleList)
 	provenance := constants.IntegrityProvenanceEngineStep
 	discovery := params.ItemsFile == ""
 	if params.ItemsFile != "" {
@@ -105,11 +105,11 @@ func GenerateReadVerifyScenario(params Params) (string, error) {
 		producerID = constants.IntegrityCLIStagerProducerID
 		provenance = constants.IntegrityProvenanceCLIStager
 	}
-	readID := formatStepID(readNumber, ts, constants.IntegrityStepRoleVerify)
+	readID := formatStepID(params.Label, readNumber, ts, constants.IntegrityStepRoleVerify)
 	selectionMaxCount := params.ObjectCount
 	return executeIntegrityScenario("read-verify", readVerifyScenarioData{
 		Discovery: discovery,
-		ListStep:  formatStepID(1, ts, constants.IntegrityStepRoleList),
+		ListStep:  formatStepID(params.Label, 1, ts, constants.IntegrityStepRoleList),
 		ReadStep:  readID,
 		ListStorage: integrityStorageTemplateData{
 			Driver: driver, Concurrency: params.Threads,
@@ -175,7 +175,7 @@ func GenerateDeleteScenario(params Params) (string, error) {
 		return "", fmt.Errorf("delete explicit-manifest mode cannot use cleanup because SPT did not create the selected objects")
 	}
 	return executeIntegrityScenario("delete-manifest", deleteManifestScenarioData{
-		DeleteStep: formatStepID(1, resolveTimestamp(params), stepOpDelete),
+		DeleteStep: formatStepID(params.Label, 1, resolveTimestamp(params), stepOpDelete),
 		DeleteStorage: integrityStorageTemplateData{
 			Driver:      resolveStorageDriverType(params.S3Driver),
 			Concurrency: params.Threads,
@@ -224,12 +224,12 @@ func generateExistingPrefixDeleteScenario(
 	}
 
 	ts := resolveTimestamp(params)
-	listStep := formatStepID(1, ts, stepOpList)
+	listStep := formatStepID(params.Label, 1, ts, stepOpList)
 	driver := resolveStorageDriverType(params.S3Driver)
 	selectionMaxCount := params.ObjectCount
 	return executeIntegrityScenario("delete-existing", deleteExistingScenarioData{
 		ListStep:   listStep,
-		DeleteStep: formatStepID(2, ts, stepOpDelete),
+		DeleteStep: formatStepID(params.Label, 2, ts, stepOpDelete),
 		ListStorage: integrityStorageTemplateData{
 			Driver: driver, Concurrency: params.Threads,
 			Integrity: integrityTemplateData{
@@ -284,13 +284,13 @@ func generateSeededDeleteScenario(
 		objectSize = DefaultDeleteObjectSize
 	}
 	ts := resolveTimestamp(params)
-	seedStep := formatStepID(1, ts, stepOpSeed)
-	deleteStep := formatStepID(2, ts, stepOpDelete)
+	seedStep := formatStepID(params.Label, 1, ts, stepOpSeed)
+	deleteStep := formatStepID(params.Label, 2, ts, stepOpDelete)
 	driver := resolveStorageDriverType(params.S3Driver)
 	return executeIntegrityScenario("delete-seeded", deleteSeededScenarioData{
 		SeedStep:    seedStep,
 		DeleteStep:  deleteStep,
-		CleanupStep: formatStepID(3, ts, stepOpCleanup),
+		CleanupStep: formatStepID(params.Label, 3, ts, stepOpCleanup),
 		SeedStorage: integrityStorageTemplateData{
 			Driver: driver, Concurrency: params.Threads,
 			Integrity: integrityTemplateData{

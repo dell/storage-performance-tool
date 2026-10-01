@@ -86,9 +86,17 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--access-key` | `-a` | *(required)* | S3 access key credential |
 | `--secret-key` | `-s` | *(required)* | S3 secret key credential |
 | `--bucket` | `-b` | *(required)* | Target bucket to use for the test. In explicit-manifest DELETE mode it is an optional safety assertion checked against every source row; omit it to permit multiple buckets |
-| `--prefix` | | `""` | Generated-key namespace for `write-verify`; owned namespace root for seeded DELETE; listing constraint for `list` and LIST-based `read-verify` |
+| `--prefix` | | `""` | Literal generated-key prefix for `write` and `write-verify`; owned namespace root for seeded DELETE; listing constraint for `list` and LIST-based `read-verify`; rejected for `read`, `mixed`, `mock`, and `tables` |
 | `--auth-version` | | `4` | S3 signature version (`2` or `4`) |
 | `--slice-endpoints` | | `false` | Partition endpoints across nodes in distributed runs |
+
+For `write`, the key is `<prefix><shard-directory>/<object-id>` when sharding is enabled,
+or `<prefix><object-id>` with `--prefix-shards 0`. The prefix is literal: use `quickstart/`
+for `quickstart/s0000000/<id>`, or `quickstart-` for `quickstart-s0000000/<id>`.
+No separator is inserted automatically. Saved item lists retain complete object identities;
+`read --items-file` and write cleanup use those identities without prepending the prefix again.
+`write --save-items --cleanup` keeps the created-item manifest in the results even after the
+objects have been removed; those entries therefore no longer refer to readable objects.
 
 #### 2. Workload Definition Options
 
@@ -557,7 +565,7 @@ spt run write \
 |------|---------|-------------|
 | `--auto-results` | `true` | Automatically retrieve results artifacts at end of run |
 | `--results-dir` | `./results` | Directory to write retrieved results artifacts |
-| `--label` | `""` | Label for output directory naming and step ID prefix (default: `mt`) |
+| `--label` | `""` | Label for output directory naming and step ID prefix (default: `mt`); step artifacts use the same prefix |
 | `--auto-results-debug` | `false` | Enable verbose debug logs for results retrieval |
 | `--shutdown-on-complete` | `true` | Request `/shutdown` on all hosts after fetching results |
 | `--shutdown-linger` | `5` | Seconds to wait for `/status` linger after `/shutdown` |

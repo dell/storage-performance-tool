@@ -108,16 +108,18 @@ Start with a local mock workload, which requires no S3 endpoint:
 
 > **Data safety:** S3 write and mixed workloads mutate the target (mixed
 > workloads include DELETE), and standalone `delete` can remove selected objects.
-> Use a dedicated benchmark bucket or isolated prefix; never use production data.
+> Use a dedicated benchmark bucket; never use production data. For `write`,
+> `--prefix` groups generated keys under a literal prefix, before any shard directories.
 > Seeded DELETE owns a unique run namespace; `--items-file` and
 > `--delete-existing` target scopes you select. Review the [S3 DELETE safety
 > guide](cli/docs/S3_DELETE.md) before deleting existing data.
 
-After configuring `.env`, run an S3 write workload in an isolated prefix:
+After configuring `.env` with a dedicated benchmark bucket, run an S3 write workload:
 
 ```bash
 ./spt run write \
   --prefix spt-quickstart/write/ \
+  --label qs-write \
   --duration 2m \
   --threads 8 \
   --object-size 1MB
@@ -125,7 +127,11 @@ After configuring `.env`, run an S3 write workload in an isolated prefix:
 
 For unattended execution, add `--headless` and a bounded
 `--auto-terminate-seconds` value. Add `--cleanup` when you want SPT to remove
-objects created by the workload.
+objects created by the workload. `--save-items` retains the full object keys in
+`<step-id>.items.csv`, including when `--cleanup` is used. With sharding enabled,
+this example writes keys such as `spt-quickstart/write/s0000000/<id>`; the trailing
+slash is part of the supplied prefix. `--label qs-write` names both the results
+directory and generated step files, such as `qs-write-001-<timestamp>-create.metrics.total.csv`.
 
 ### TUI navigation
 

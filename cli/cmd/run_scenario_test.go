@@ -518,7 +518,8 @@ func TestBuildScenarioParams(t *testing.T) {
 				t.Fatalf("buildScenarioParams() unexpected error: %v", err)
 			}
 
-			// Check result — fill in S3Driver default if the test didn't set it
+			// Check result — fill in defaults if the test did not set them
+			tt.expected.Label = sanitizeLabel(tt.expected.Label)
 			if tt.expected.S3Driver == "" {
 				tt.expected.S3Driver = scenario.S3DriverDefault
 			}

@@ -1121,3 +1121,61 @@ func TestValidatePartSize(t *testing.T) {
 		})
 	}
 }
+
+func TestValidatePrefixFlag(t *testing.T) {
+	for _, workloadType := range []string{
+		WorkloadTypeWrite, WorkloadTypeRead, WorkloadTypeMixed, WorkloadTypeMock,
+		WorkloadTypeTables, WorkloadTypeWriteVerify, WorkloadTypeReadVerify,
+		WorkloadTypeDelete, WorkloadTypeList,
+	} {
+		for _, value := range []string{"", "x/"} {
+			t.Run(workloadType+"/"+value, func(t *testing.T) {
+				cmd := &cobra.Command{}
+				cmd.Flags().String("prefix", "", "")
+				if err := validatePrefixFlag(cmd, workloadType); err != nil {
+					t.Fatalf("omitted prefix rejected: %v", err)
+				}
+				if err := cmd.Flags().Set("prefix", value); err != nil {
+					t.Fatal(err)
+				}
+				err := validatePrefixFlag(cmd, workloadType)
+				supported := workloadType == WorkloadTypeWrite || workloadType == WorkloadTypeWriteVerify || workloadType == WorkloadTypeReadVerify ||
+					workloadType == WorkloadTypeDelete || workloadType == WorkloadTypeList
+				if supported {
+					if err != nil {
+						t.Fatalf("supported prefix rejected: %v", err)
+					}
+				} else if err == nil || !strings.Contains(err.Error(), "supported: write, write-verify, delete, list, read-verify") {
+					t.Fatalf("expected actionable unsupported-prefix error, got %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestValidateRunCommand_PrefixRejectedBeforeLaunch(t *testing.T) {
+	for _, workloadType := range []string{WorkloadTypeRead, WorkloadTypeMixed, WorkloadTypeMock, WorkloadTypeTables} {
+		for _, value := range []string{"x/", ""} {
+			t.Run(workloadType+"/"+value, func(t *testing.T) {
+				launched := false
+				cmd := &cobra.Command{
+					Use:     "run",
+					Args:    cobra.ExactArgs(1),
+					PreRunE: ValidateRunCommand,
+					RunE:    func(*cobra.Command, []string) error { launched = true; return nil },
+				}
+				cmd.Flags().String("prefix", "", "")
+				cmd.SetOut(io.Discard)
+				cmd.SetErr(io.Discard)
+				cmd.SetArgs([]string{workloadType, "--prefix=" + value})
+				err := cmd.Execute()
+				if err == nil || !strings.Contains(err.Error(), "--prefix is not supported for '"+workloadType+"'") {
+					t.Fatalf("expected prefix rejection, got %v", err)
+				}
+				if launched {
+					t.Fatal("unsupported prefix reached workload launch")
+				}
+			})
+		}
+	}
+}

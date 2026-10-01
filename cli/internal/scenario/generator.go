@@ -69,10 +69,12 @@ func GenerateWriteScenario(params Params) (string, error) {
 		templateKeyTimestamp:         time.Now().Unix(),
 		templateKeyStorageDriverType: fmt.Sprintf(`"%s"`, driverType),
 		templateKeySaveItems:         params.SaveItems,
+		templateKeyHasPrefix:         params.Prefix != "",
+		templateKeyPrefix:            quoteJS(params.Prefix),
 		// Step IDs using shared timestamp and ordered numbers
-		templateKeyStepID:       formatStepID(1, ts, stepOpCreate),
-		templateKeyStepIDCreate: formatStepID(1, ts, stepOpCreate),
-		templateKeyStepIDDelete: formatStepID(2, ts, stepOpDelete),
+		templateKeyStepID:       formatStepID(params.Label, 1, ts, stepOpCreate),
+		templateKeyStepIDCreate: formatStepID(params.Label, 1, ts, stepOpCreate),
+		templateKeyStepIDDelete: formatStepID(params.Label, 2, ts, stepOpDelete),
 	}
 
 	// Choose appropriate template based on parameters
@@ -171,9 +173,9 @@ func GenerateReadScenario(params Params) (string, error) {
 		templateKeyReadShuffleBatchSize: readShuffleBatchSize,
 		templateKeyReadPhasePause:       readPhasePauseSeconds,
 		// Step IDs: seed=1, read=2, delete=3 (read-from-file: read=1, delete=2)
-		templateKeyStepIDSeed:   formatStepID(1, ts, stepOpSeed),
-		templateKeyStepIDRead:   formatStepID(2, ts, stepOpRead),
-		templateKeyStepIDDelete: formatStepID(3, ts, stepOpDelete),
+		templateKeyStepIDSeed:   formatStepID(params.Label, 1, ts, stepOpSeed),
+		templateKeyStepIDRead:   formatStepID(params.Label, 2, ts, stepOpRead),
+		templateKeyStepIDDelete: formatStepID(params.Label, 3, ts, stepOpDelete),
 	}
 
 	var tmplStr string
@@ -182,8 +184,8 @@ func GenerateReadScenario(params Params) (string, error) {
 	if params.ItemsFile != "" {
 		data[templateKeyItemsFile] = fmt.Sprintf(`"%s"`, escapeJSONString(params.ItemsFile))
 		// Renumber step IDs: read=1, delete=2 (no seed)
-		data[templateKeyStepIDRead] = formatStepID(1, ts, stepOpRead)
-		data[templateKeyStepIDDelete] = formatStepID(2, ts, stepOpDelete)
+		data[templateKeyStepIDRead] = formatStepID(params.Label, 1, ts, stepOpRead)
+		data[templateKeyStepIDDelete] = formatStepID(params.Label, 2, ts, stepOpDelete)
 
 		if params.Cleanup {
 			if params.ObjectCount > 0 {
@@ -280,7 +282,7 @@ func GenerateListScenario(params Params) (string, error) {
 		templateKeyOpLimitCount:         opLimit,
 		templateKeyOpLimitRate:          listOpLimitRateUnlimited,
 		templateKeyHasOpLimitCount:      hasOpLimitCount,
-		templateKeyStepID:               formatStepID(1, baseTS, listStepSuffix),
+		templateKeyStepID:               formatStepID(params.Label, 1, baseTS, listStepSuffix),
 		templateKeyHasDuration:          hasDuration,
 		templateKeyDuration:             durationValue,
 		templateKeyHasPrefix:            hasPrefix,
@@ -316,8 +318,8 @@ func GenerateMockScenario(params Params) (string, error) {
 	ts := resolveTimestamp(params)
 	if params.Cleanup && params.ObjectCount > 0 {
 		// Use PipelineLoad for cleanup - create then delete
-		stepCreate := formatStepID(1, ts, "create")
-		stepDelete := formatStepID(2, ts, "delete")
+		stepCreate := formatStepID(params.Label, 1, ts, "create")
+		stepDelete := formatStepID(params.Label, 2, ts, "delete")
 		scenario := fmt.Sprintf(`// Mock pipeline configuration for create and delete operations
 var concurrency = %d;
 var itemSize = "%s";
@@ -382,7 +384,7 @@ PipelineLoad
 	var scenario string
 
 	if params.ObjectCount > 0 {
-		stepID := formatStepID(1, ts, "create")
+		stepID := formatStepID(params.Label, 1, ts, "create")
 		scenario = fmt.Sprintf(`// Mock operation configuration
 var concurrency = %d;
 var itemSize = "%s";
@@ -423,7 +425,7 @@ Load
 			params.ObjectCount,
 			stepID)
 	} else if params.Duration != "" {
-		stepID := formatStepID(1, ts, "create")
+		stepID := formatStepID(params.Label, 1, ts, "create")
 		scenario = fmt.Sprintf(`// Mock operation configuration
 var concurrency = %d;
 var itemSize = "%s";
@@ -465,7 +467,7 @@ Load
 			stepID)
 	} else {
 		// Default to 100 objects if no limit specified
-		stepID := formatStepID(1, ts, "create")
+		stepID := formatStepID(params.Label, 1, ts, "create")
 		scenario = fmt.Sprintf(`// Mock operation configuration (default count)
 var concurrency = %d;
 var itemSize = "%s";

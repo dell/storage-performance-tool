@@ -9,6 +9,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/spf13/cobra"
 )
 
@@ -223,5 +224,44 @@ func TestAppendTraceToResultsManifest_NoManifestNoError(t *testing.T) {
 	}
 	if err := appendTraceToResultsManifest(filepath.Join(tmpDir, "missing-root"), traceSrc); err != nil {
 		t.Fatalf("appendTraceToResultsManifest should ignore missing manifest, got: %v", err)
+	}
+}
+
+func TestRunLabelAndPrefixReachGeneratedSteps(t *testing.T) {
+	for _, label := range []string{"", "qs-write", " run 42/\" "} {
+		t.Run(label, func(t *testing.T) {
+			cmd := newResultsFlagsTestCmd()
+			cmd.Flags().String("prefix", "", "")
+			if err := cmd.Flags().Set("label", label); err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Flags().Set("prefix", "quickstart/"); err != nil {
+				t.Fatal(err)
+			}
+			params, err := buildScenarioParams(WorkloadTypeWrite, cmd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			options := buildResultsOptions(cmd)
+			if params.Label != options.Label || params.Prefix != "quickstart/" {
+				t.Fatal("flag values lost before generation")
+			}
+			params.ObjectSize = "1KiB"
+			params.SaveItems = true
+			text, err := scenario.GenerateScenario(params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := scenario.BuildStepPlanFromScenario(text)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plan.Steps) != 1 || !strings.HasPrefix(plan.Steps[0].ID, options.Label+"-") {
+				t.Fatalf("wrong step plan: %+v", plan)
+			}
+			if !strings.Contains(text, `"prefix": "quickstart/"`) {
+				t.Fatal("prefix lost in CREATE configuration")
+			}
+		})
 	}
 }

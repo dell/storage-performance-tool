@@ -60,7 +60,7 @@ func enginePagedArtifactHandler(content []byte, pageSize int, plainCalls, rangeC
 }
 
 func TestFetcher_HappyPath_AllArtifacts(t *testing.T) {
-	step := "mt-001-20250101.000000.000-create"
+	step := "qs-write-001-20250101.000000.000-create"
 	srv := newTestServer(t, map[string]http.HandlerFunc{
 		"/logs/" + step + "/index.json": func(w http.ResponseWriter, r *http.Request) {
 			idx := map[string]any{

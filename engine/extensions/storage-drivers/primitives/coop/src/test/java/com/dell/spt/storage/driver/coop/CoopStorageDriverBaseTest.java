@@ -1326,15 +1326,21 @@ class CoopStorageDriverBaseTest {
 			logger.addAppender(appender);
 			logger.setLevel(Level.WARN);
 
+			final var marker = "fast-recycle-hooks-complete:" + driver;
+			Loggers.MSG.warn("unrelated warning before deprecated hooks");
 			driver.enableFastRecycle(4);
 			driver.enableFastRecycle(8);
 			driver.enableFastRecycleQuiesce();
-			awaitCapturedEvents(appender, 1, 2000);
+			// The same-thread marker follows all hook events in the async logger queue.
+			Loggers.MSG.warn(marker);
+			awaitCondition(
+							() -> appender.events().stream().anyMatch(e -> marker.equals(e.getMessage().getFormattedMessage())),
+							"logger did not drain the deprecated-hook events", 2000);
 
 			final var warningMessages = appender.events().stream()
 							.filter(e -> Level.WARN.equals(e.getLevel()))
 							.map(e -> e.getMessage().getFormattedMessage())
-							.filter(msg -> msg.contains("deprecated fast-recycle request ignored"))
+							.filter(msg -> msg.startsWith(driver + ": deprecated fast-recycle request ignored"))
 							.toList();
 			assertEquals(1, warningMessages.size(), "deprecated hooks should warn once per driver");
 			assertTrue(warningMessages.get(0).contains("shared generator circulation"));

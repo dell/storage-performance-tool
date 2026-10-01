@@ -98,13 +98,12 @@ Dell SPT is Dell’s open-source, MIT-licensed benchmark for S3-compatible objec
 
 *Figure 4. A typical first SPT workflow: configure defaults in `.env`, validate every node with `spt verify`, launch a workload, watch it live or run it headless, and keep the results bundle.*
 
-A first pass looks like this, with endpoint, credentials, and bucket read automatically from a `.env` file:
+A first pass looks like this, with endpoint, credentials, and a dedicated benchmark bucket read automatically from a `.env` file:
 
 ```bash
 spt verify
 
 spt run write \
-  --prefix spt-quickstart/write/ \
   --duration 2m \
   --threads 8 \
   --object-size 1MiB

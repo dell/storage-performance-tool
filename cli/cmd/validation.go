@@ -144,6 +144,19 @@ func ValidateMixedFlags(cmd *cobra.Command) error {
 	return nil
 }
 
+// validatePrefixFlag rejects explicit namespace requests that a workload would ignore.
+func validatePrefixFlag(cmd *cobra.Command, workloadType string) error {
+	if !cmd.Flags().Changed("prefix") {
+		return nil
+	}
+	switch workloadType {
+	case WorkloadTypeWrite, WorkloadTypeWriteVerify, WorkloadTypeDelete, WorkloadTypeList, WorkloadTypeReadVerify:
+		return nil
+	default:
+		return fmt.Errorf("--prefix is not supported for '%s'; supported: write, write-verify, delete, list, read-verify", workloadType)
+	}
+}
+
 func validateReadShuffleFlags(cmd *cobra.Command, workloadType string) error {
 	shuffleChanged := cmd.Flags().Changed(flagReadShuffle)
 	batchChanged := cmd.Flags().Changed(flagReadShuffleBatchSize)
@@ -340,6 +353,11 @@ func mustStringArrayFlag(cmd *cobra.Command, name string) []string {
 // ValidateRunCommand performs all validation for the run command
 func ValidateRunCommand(cmd *cobra.Command, args []string) error {
 	workloadType := args[0]
+
+	if err := validatePrefixFlag(cmd, workloadType); err != nil {
+		cmd.SilenceUsage = false
+		return err
+	}
 
 	// Validate S3 flags
 	if err := ValidateS3Flags(cmd, workloadType); err != nil {

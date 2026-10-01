@@ -40,11 +40,11 @@ func GenerateTablesScenario(params Params) (string, error) {
 		"OpModeTableCatalog":   tablesOpModeTableCatalog,
 		"OpModeCompactionPoll": tablesOpModeCompactionPoll,
 		// Step IDs
-		templateKeyTablesStepIDProvision:  formatStepID(1, ts, "provision"),
-		templateKeyTablesStepIDWrite:      formatStepID(2, ts, "write"),
-		templateKeyTablesStepIDCompaction: formatStepID(3, ts, "compaction"),
-		templateKeyTablesStepIDSeed:       formatStepID(2, ts, "seed"),
-		templateKeyTablesStepIDCatalog:    formatStepID(3, ts, "catalog"),
+		templateKeyTablesStepIDProvision:  formatStepID(params.Label, 1, ts, "provision"),
+		templateKeyTablesStepIDWrite:      formatStepID(params.Label, 2, ts, "write"),
+		templateKeyTablesStepIDCompaction: formatStepID(params.Label, 3, ts, "compaction"),
+		templateKeyTablesStepIDSeed:       formatStepID(params.Label, 2, ts, "seed"),
+		templateKeyTablesStepIDCatalog:    formatStepID(params.Label, 3, ts, "catalog"),
 		// Derived counts
 		"TablesIngestFileCount": ingestFileCount(tp.TotalIngestBytes, tp.IngestFileSizeBytes),
 		"TablesSeedCount":       tp.NamespaceCount * tp.TablesPerNs,

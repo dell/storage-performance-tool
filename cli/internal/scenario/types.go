@@ -83,7 +83,8 @@ type Params struct {
 	// functions use this value instead of calling time.Now(), ensuring that
 	// repeated generation from the same Params produces identical step IDs.
 	BaseTimestamp string
-	RunID         int64 // Positive public-run identity shared by generated steps, defaults, and staged input markers
+	Label         string // Output directory and step-ID prefix; empty defaults to mt.
+	RunID         int64  // Positive public-run identity shared by generated steps, defaults, and staged input markers
 
 	// TUI layout
 	MinimalTUI                  bool

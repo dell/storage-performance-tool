@@ -82,7 +82,13 @@ var concurrency = {{.Concurrency}};
 var itemSize = {{.ItemSize}};
 var itemCount = {{.ItemCount}};
 var outputPath = {{.OutputPath}};
+{{- if .SaveItems}}
+var sptLogDir = org.apache.logging.log4j.ThreadContext.get("home_dir");
+if (!sptLogDir) { sptLogDir = java.lang.System.getProperty("user.dir"); }
+var itemsFile = sptLogDir + "/log/" + "{{.StepIDCreate}}" + "/items.csv";
+{{- else}}
 var itemsFile = "/tmp/spt-items-{{.Timestamp}}.csv";
+{{- end}}
 var pauseTime = 10; // seconds between operations
 
 // Helper functions
@@ -135,6 +141,9 @@ CreateLoad
     .config(sharedConfig)
     .config({
         "item": {
+{{- if .HasPrefix}}
+            "naming": {"prefix": {{.Prefix}}},
+{{- end}}
             "output": {
                 "file": itemsFile  // Save created items for deletion
             }
@@ -185,7 +194,9 @@ print("[" + new Date().toISOString() + "] Delete phase completed");
 pause(pauseTime, "Allowing final operations to settle...");
 
 // Cleanup temporary file
+{{- if not .SaveItems}}
 cleanup(itemsFile);
+{{- end}}
 print("[" + new Date().toISOString() + "] Test completed and cleaned up");
 `
 
@@ -199,7 +210,13 @@ var concurrency = {{.Concurrency}};
 var itemSize = {{.ItemSize}};
 var duration = {{.Duration}};
 var outputPath = {{.OutputPath}};
+{{- if .SaveItems}}
+var sptLogDir = org.apache.logging.log4j.ThreadContext.get("home_dir");
+if (!sptLogDir) { sptLogDir = java.lang.System.getProperty("user.dir"); }
+var itemsFile = sptLogDir + "/log/" + "{{.StepIDCreate}}" + "/items.csv";
+{{- else}}
 var itemsFile = "/tmp/spt-items-{{.Timestamp}}.csv";
+{{- end}}
 var pauseTime = 10; // seconds between operations
 
 // Helper functions
@@ -252,6 +269,9 @@ CreateLoad
     .config(sharedConfig)
     .config({
         "item": {
+{{- if .HasPrefix}}
+            "naming": {"prefix": {{.Prefix}}},
+{{- end}}
             "output": {
                 "file": itemsFile  // Save created items for deletion
             }
@@ -302,7 +322,9 @@ print("[" + new Date().toISOString() + "] Delete phase completed");
 pause(pauseTime, "Allowing final operations to settle...");
 
 // Cleanup temporary file
+{{- if not .SaveItems}}
 cleanup(itemsFile);
+{{- end}}
 print("[" + new Date().toISOString() + "] Test completed and cleaned up");
 `
 
@@ -332,6 +354,9 @@ var config = {
         }
     },
     "item": {
+{{- if .HasPrefix}}
+        "naming": {"prefix": {{.Prefix}}},
+{{- end}}
         "data": {
             "size": itemSize{{if .HasPartSize}},
             "ranges": {
@@ -392,6 +417,9 @@ var config = {
         }
     },
     "item": {
+{{- if .HasPrefix}}
+        "naming": {"prefix": {{.Prefix}}},
+{{- end}}
         "data": {
             "size": itemSize{{if .HasPartSize}},
             "ranges": {
@@ -452,6 +480,9 @@ var config = {
         }
     },
     "item": {
+{{- if .HasPrefix}}
+        "naming": {"prefix": {{.Prefix}}},
+{{- end}}
         "data": {
             "size": itemSize{{if .HasPartSize}},
             "ranges": {
