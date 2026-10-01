@@ -900,6 +900,25 @@ public class S3StorageDriverTest {
 		assertEquals("us-west-2", regionF.get(drv));
 	}
 
+	@Test
+	void configuredRegionControlsSigningAndPreservesFallbacks() throws Exception {
+		for (final String host : List.of("127.0.0.1", "s3.us-west-2.amazonaws.com:80")) {
+			for (final String region : List.of("", "eu-central-1")) {
+				final Config cfg = baseConfig(false, 4, false, null, host);
+				cfg.val("storage-region", region);
+				final String expected = region.isEmpty()
+								? (host.startsWith("s3.") ? "us-west-2" : S3Api.AMZ_DEFAULT_REGION)
+								: region;
+				try (final TestS3Driver driver = new TestS3Driver(cfg)) {
+					final Item item = new com.dell.spt.base.item.DataItemImpl("/bucket/key", 0, 1);
+					final Operation<Item> op = new OperationImpl<>(123, OpType.READ, item, null, "/bucket", TEST_CRED);
+					final HttpRequest request = driver.httpRequest(op, host);
+					assertTrue(request.headers().get(HttpHeaderNames.AUTHORIZATION).contains("/" + expected + "/s3/aws4_request"));
+				}
+			}
+		}
+	}
+
 	// ---------- checksum characterization ----------
 	@Test
 	void applyChecksum_md5_knownVector_123456789_setsContentMd5Header() throws Exception {

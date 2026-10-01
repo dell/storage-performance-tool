@@ -2103,20 +2103,24 @@ class LoadStepClientBaseTest {
 	}
 
 	@Test
-	void durationBudgetStopReportsPolicyInsteadOfInventoryExhaustion() throws Exception {
+	void durationBudgetStopDuringAwaitReportsPolicyInsteadOfInventoryExhaustion() throws Exception {
 		final Config config = durationConfig();
 		config.val("load-op-wait-limit", 0);
 		config.val("load-op-failureBudget-maxFailedObjects", 0L);
 		final TestLoadStepClient client = new TestLoadStepClient(
 						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch awaitEntered = new CountDownLatch(1);
 		final CountDownLatch admissionClosed = new CountDownLatch(1);
 		final LoadStep slice = mock(LoadStep.class);
 		when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
-			assertTrue(admissionClosed.await(1, TimeUnit.SECONDS));
+			awaitEntered.countDown();
+			assertTrue(admissionClosed.await(5, TimeUnit.SECONDS), "budget monitor did not close admission");
 			return true;
 		});
-		when(slice.deleteObjectLifecycle()).thenReturn(
-						new DeleteObjectLifecycleSnapshot(1, 1, 0, 1, 0, 0, 0, 0, true));
+		// The monitor cannot observe a breach until the controller has entered its await phase.
+		when(slice.deleteObjectLifecycle()).thenAnswer(invocation -> awaitEntered.getCount() == 0
+						? new DeleteObjectLifecycleSnapshot(1, 1, 0, 1, 0, 0, 0, 0, true)
+						: DeleteObjectLifecycleSnapshot.empty());
 		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
 		doAnswer(invocation -> {
 			admissionClosed.countDown();
@@ -2124,15 +2128,58 @@ class LoadStepClientBaseTest {
 		}).when(slice).closeOperationAdmissionForStepStop();
 		addRawStepSlice(client, slice);
 
-		final IntegrityTerminalException failure = assertThrows(
-						IntegrityTerminalException.class,
-						() -> client.await(5, TimeUnit.SECONDS));
-		assertTrue(failure.getMessage().contains("failed-object budget exceeded"));
-		assertFalse(failure.getMessage().contains("inventory slice exhausted"));
-		assertThrows(IntegrityTerminalException.class, client::close);
-		assertNoLiveThreads(
-						"spt-delete-failure-budget-",
-						"spt-delete-failure-budget-snapshot-");
+		assertDurationBudgetFailureAndClose(client);
+		verify(slice).await(anyLong(), any(TimeUnit.class));
+	}
+
+	@Test
+	void durationBudgetStopDuringStartupReportsPolicyInsteadOfInventoryExhaustion() throws Exception {
+		final Config config = durationConfig();
+		config.val("load-op-wait-limit", 0);
+		config.val("load-op-failureBudget-maxFailedObjects", 0L);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch startEntered = new CountDownLatch(1);
+		final CountDownLatch admissionClosed = new CountDownLatch(1);
+		final LoadStep slice = mock(LoadStep.class);
+		doAnswer(invocation -> {
+			startEntered.countDown();
+			// Admission closes only after the monitor records the failure. Hold startup here
+			// so the controller must observe that failure before it can enter the await phase.
+			assertTrue(admissionClosed.await(5, TimeUnit.SECONDS), "budget monitor did not close admission");
+			return null;
+		}).when(slice).startDurationInterval(anyLong());
+		when(slice.deleteObjectLifecycle()).thenAnswer(invocation -> startEntered.getCount() == 0
+						? new DeleteObjectLifecycleSnapshot(1, 1, 0, 1, 0, 0, 0, 0, true)
+						: DeleteObjectLifecycleSnapshot.empty());
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		doAnswer(invocation -> {
+			admissionClosed.countDown();
+			return null;
+		}).when(slice).closeOperationAdmissionForStepStop();
+		addRawStepSlice(client, slice);
+
+		assertDurationBudgetFailureAndClose(client);
+		verify(slice, never()).await(anyLong(), any(TimeUnit.class));
+	}
+
+	private static void assertDurationBudgetFailureAndClose(final TestLoadStepClient client) throws Exception {
+		try {
+			final IntegrityTerminalException failure = assertThrows(
+							IntegrityTerminalException.class,
+							() -> client.await(30, TimeUnit.SECONDS));
+			assertTrue(failure.getMessage().contains("failed-object budget exceeded"));
+			assertFalse(failure.getMessage().contains("inventory slice exhausted"));
+		} finally {
+			final IntegrityTerminalException closeFailure = assertThrows(IntegrityTerminalException.class, client::close);
+			assertTrue(closeFailure.getMessage().contains("failed-object budget exceeded"));
+			assertFalse(closeFailure.getMessage().contains("inventory slice exhausted"));
+			assertNoLiveThreads(
+							"spt-delete-failure-budget-",
+							"spt-delete-failure-budget-snapshot-",
+							"spt-delete-duration-start-",
+							"spt-delete-await-");
+		}
 	}
 
 	@Test

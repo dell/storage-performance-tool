@@ -6,7 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- **S3 region selection** — Added `spt run --region` and engine YAML `storage.region` support to explicitly select the AWS region for S3 requests. Omitting the setting preserves each driver’s existing region selection.
+
 ### Fixed
+
+- **DELETE failure-budget reporting** — Duration-based DELETE runs now propagate a failure-budget exception consistently when the budget is exceeded during worker startup, matching failures detected during active waiting.
 
 - **Composite expression evaluation** — Give each expression segment its own evaluation context to prevent intermittent method-resolution failures when synchronous and asynchronous segments run together.
 

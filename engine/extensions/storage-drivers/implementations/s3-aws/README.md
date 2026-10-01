@@ -167,7 +167,7 @@ S3StorageDriver driver = S3StorageDriverFactory.create(config);
 |----------|------|---------|-------------|
 | accessKey | String | Required | AWS access key ID |
 | secretKey | String | Required | AWS secret access key |
-| region | String | Required | AWS region |
+| region | String | `eu-west-2` fallback | AWS region from `storage.region` in YAML or `--storage-region` in the engine; exposed by `spt run --region`. Empty or omitted uses the fallback. |
 | bucketName | String | Required | S3 bucket name |
 | endpointOverride | String | null | Override S3 endpoint (for S3-compatible services) |
 | pathStyleAccess | boolean | false | Use path-style access (required for some S3-compatible services) |
