@@ -22,12 +22,52 @@ func resolveTimestamp(params Params) string {
 	return BaseTimestamp()
 }
 
-// formatStepID builds: mt-<step-number>-<base-ts>-<op>
-// Example: mt-1-20250909.154500.123-create
-func formatStepID(stepNumber int, baseTS, op string) string {
+// formatStepID builds: <label>-<step-number>-<base-ts>-<op>.
+// Empty labels retain the default mt prefix.
+func formatStepID(label string, stepNumber int, baseTS, op string) string {
 	op = strings.ToLower(strings.TrimSpace(op))
 	if op == "" {
 		op = "step"
 	}
-	return fmt.Sprintf("mt-%03d-%s-%s", stepNumber, baseTS, op)
+	return fmt.Sprintf("%s-%03d-%s-%s", SanitizeLabel(label), stepNumber, baseTS, op)
+}
+
+// SanitizeLabel enforces the allowed character set and length for labels.
+// Allowed: A–Z, a–z, 0–9, dot, underscore, hyphen. Others become '_'.
+// Empty after trimming yields default "mt".
+func SanitizeLabel(s string) string {
+	const (
+		allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+		maxLen  = 64
+		def     = "mt"
+	)
+
+	// Trim whitespace
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return def
+	}
+
+	// Replace any disallowed rune with '_'
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if strings.ContainsRune(allowed, r) {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	out := b.String()
+
+	// Enforce max length
+	if len(out) > maxLen {
+		out = out[:maxLen]
+	}
+
+	// Avoid empty (could happen if input had only spaces)
+	if out == "" {
+		return def
+	}
+	return out
 }

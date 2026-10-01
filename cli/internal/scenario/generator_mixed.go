@@ -206,10 +206,10 @@ func GenerateMixedScenario(params Params) (string, error) {
 		cleanupPutStepNum = 3
 	}
 
-	stepIDSeed := formatStepID(seedStepNum, ts, stepOpSeed)
-	stepIDMixed := formatStepID(mixedStepNum, ts, stepOpMixed)
-	stepIDSeedCleanup := formatStepID(cleanupSeedStepNum, ts, "cleanup-seed")
-	stepIDPutCleanup := formatStepID(cleanupPutStepNum, ts, "cleanup-put")
+	stepIDSeed := formatStepID(params.Label, seedStepNum, ts, stepOpSeed)
+	stepIDMixed := formatStepID(params.Label, mixedStepNum, ts, stepOpMixed)
+	stepIDSeedCleanup := formatStepID(params.Label, cleanupSeedStepNum, ts, "cleanup-seed")
+	stepIDPutCleanup := formatStepID(params.Label, cleanupPutStepNum, ts, "cleanup-put")
 
 	data := map[string]interface{}{
 		templateKeyConcurrency:       params.Threads,

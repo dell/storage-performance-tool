@@ -2317,6 +2317,9 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		ObjectDataDedupable: true,
 	}
 
+	rawLabel, _ := cmd.Flags().GetString("label")
+	params.Label = sanitizeLabel(rawLabel)
+
 	// Get connection parameters (not required for mock)
 	if workloadType != WorkloadTypeMock {
 		endpoint, _ := cmd.Flags().GetString("endpoint")
@@ -2687,44 +2690,9 @@ func buildResultsOptions(cmd *cobra.Command) ResultsOptions {
 	}
 }
 
-// sanitizeLabel enforces the allowed character set and length for labels.
-// Allowed: A–Z, a–z, 0–9, dot, underscore, hyphen. Others become '_'.
-// Empty after trimming yields default "mt".
+// sanitizeLabel shares the step-ID label rules with scenario generation.
 func sanitizeLabel(s string) string {
-	const (
-		allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
-		maxLen  = 64
-		def     = "mt"
-	)
-
-	// Trim whitespace
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return def
-	}
-
-	// Replace any disallowed rune with '_'
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		if strings.ContainsRune(allowed, r) {
-			b.WriteRune(r)
-		} else {
-			b.WriteByte('_')
-		}
-	}
-	out := b.String()
-
-	// Enforce max length
-	if len(out) > maxLen {
-		out = out[:maxLen]
-	}
-
-	// Avoid empty (could happen if input had only spaces)
-	if out == "" {
-		return def
-	}
-	return out
+	return scenario.SanitizeLabel(s)
 }
 
 func applyPrefixShards(params *scenario.Params, shardCount int) error {

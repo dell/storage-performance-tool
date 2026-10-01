@@ -119,6 +119,7 @@ After configuring `.env` with a dedicated benchmark bucket, run an S3 write work
 ```bash
 ./spt run write \
   --prefix spt-quickstart/write/ \
+  --label qs-write \
   --duration 2m \
   --threads 8 \
   --object-size 1MB
@@ -129,7 +130,8 @@ For unattended execution, add `--headless` and a bounded
 objects created by the workload. `--save-items` retains the full object keys in
 `<step-id>.items.csv`, including when `--cleanup` is used. With sharding enabled,
 this example writes keys such as `spt-quickstart/write/s0000000/<id>`; the trailing
-slash is part of the supplied prefix.
+slash is part of the supplied prefix. `--label qs-write` names both the results
+directory and generated step files, such as `qs-write-001-<timestamp>-create.metrics.total.csv`.
 
 ### TUI navigation
 

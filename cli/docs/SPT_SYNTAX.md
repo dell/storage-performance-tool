@@ -565,7 +565,7 @@ spt run write \
 |------|---------|-------------|
 | `--auto-results` | `true` | Automatically retrieve results artifacts at end of run |
 | `--results-dir` | `./results` | Directory to write retrieved results artifacts |
-| `--label` | `""` | Label for output directory naming and step ID prefix (default: `mt`) |
+| `--label` | `""` | Label for output directory naming and step ID prefix (default: `mt`); step artifacts use the same prefix |
 | `--auto-results-debug` | `false` | Enable verbose debug logs for results retrieval |
 | `--shutdown-on-complete` | `true` | Request `/shutdown` on all hosts after fetching results |
 | `--shutdown-linger` | `5` | Seconds to wait for `/status` linger after `/shutdown` |
