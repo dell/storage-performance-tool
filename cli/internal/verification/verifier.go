@@ -160,7 +160,6 @@ func (v *Verifier) verifyNode(host *hostparse.HostInfo) *NodeResult {
 		v.stepRdmaDriver(host, result)
 		v.stepRdmaReadiness(host, result)
 	}
-	v.stepWaitForServices(result)
 	v.stepVerifyPorts(host, result)
 	v.stepCheckEndpoints(host, result)
 	v.stepCleanup(host, result)
@@ -332,29 +331,46 @@ func (v *Verifier) stepStartContainer(host *hostparse.HostInfo, result *NodeResu
 	return false
 }
 
-func (v *Verifier) stepWaitForServices(result *NodeResult) {
-	if result.containerID == "" {
-		return
-	}
-	if v.config.ShowProgress {
-		fmt.Print("  ⏳ Waiting for services to initialize (10s)...")
-	}
-	time.Sleep(constants.ServiceInitializationSecs * time.Second)
-	if v.config.ShowProgress {
-		fmt.Println(" ✅")
-	}
-}
-
 func (v *Verifier) stepVerifyPorts(host *hostparse.HostInfo, result *NodeResult) {
 	if v.config.ShowProgress {
-		fmt.Printf("  ⏳ Verifying network ports (1099, %d)...", v.config.APIPort)
+		fmt.Printf("  ⏳ Waiting for network ports (1099, %d; up to %s)...", v.config.APIPort, constants.APIReadinessTimeout)
 	}
-	result.PortsAccessible = v.checkPorts(host)
+	ctx, cancel := context.WithTimeout(context.Background(), constants.APIReadinessTimeout)
+	defer cancel()
+	result.PortsAccessible = v.waitForPorts(ctx, host, constants.APIReadinessPollInterval)
 	if v.config.ShowProgress {
 		if result.PortsAccessible.Passed {
 			fmt.Println(" ✅")
 		} else {
 			fmt.Println(" ❌")
+		}
+	}
+}
+
+// waitForPorts allows slow engines to initialize without delaying already-ready nodes.
+func (v *Verifier) waitForPorts(ctx context.Context, host *hostparse.HostInfo, interval time.Duration) Check {
+	start := v.timeProvider.Now()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	check := v.checkPorts(ctx, host)
+	for {
+		check.Duration = v.timeProvider.Since(start)
+		if err := ctx.Err(); err != nil {
+			check.Passed = false
+			check.Error = err
+			check.Message = fmt.Sprintf("Service startup wait ended: %v; %s", err, check.Message)
+			return check
+		}
+		if check.Passed {
+			return check
+		}
+		select {
+		case <-ctx.Done():
+		case <-ticker.C:
+			// Retain the last actual port observations if the deadline wins the race.
+			if ctx.Err() == nil {
+				check = v.checkPorts(ctx, host)
+			}
 		}
 	}
 }
@@ -781,20 +797,26 @@ func (v *Verifier) startNodeContainer(host *hostparse.HostInfo, result *NodeResu
 }
 
 // checkPorts verifies that required ports are accessible
-func (v *Verifier) checkPorts(host *hostparse.HostInfo) Check {
+func (v *Verifier) checkPorts(ctx context.Context, host *hostparse.HostInfo) Check {
 	start := v.timeProvider.Now()
 	targetIP := v.getExternalIP(host)
 
 	failed := []string{}
 
-	// Check RMI registry
-	if !v.netChecker.IsPortOpen(targetIP, constants.DefaultRMIRegistryPort, constants.PortCheckTimeoutSecs*time.Second) {
-		failed = append(failed, fmt.Sprintf("%d (RMI registry)", constants.DefaultRMIRegistryPort))
-	}
-
-	// Check REST API
-	if !v.netChecker.IsPortOpen(targetIP, v.config.APIPort, constants.PortCheckTimeoutSecs*time.Second) {
-		failed = append(failed, fmt.Sprintf("%d (REST API)", v.config.APIPort))
+	for _, port := range []struct {
+		number int
+		name   string
+	}{
+		{constants.DefaultRMIRegistryPort, "RMI registry"},
+		{v.config.APIPort, "REST API"},
+	} {
+		timeout := constants.PortCheckTimeoutSecs * time.Second
+		if deadline, ok := ctx.Deadline(); ok {
+			timeout = min(timeout, time.Until(deadline))
+		}
+		if ctx.Err() != nil || timeout <= 0 || !v.netChecker.IsPortOpen(targetIP, port.number, timeout) {
+			failed = append(failed, fmt.Sprintf("%d (%s)", port.number, port.name))
+		}
 	}
 
 	// NOTE: RMI object ports (40000-40009) are only created during active load testing

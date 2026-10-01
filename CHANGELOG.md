@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - **Write prefixes and saved manifests** — `spt run write` now honors `--prefix` before any shard directories, preserving complete object keys in saved manifests for subsequent reads and cleanup. Combining `--save-items` with `--cleanup` retains the manifest after object deletion. Workloads that do not support `--prefix` now reject it explicitly instead of silently ignoring it.
 - **Run labels on result artifacts** — `spt run --label` now applies the same sanitized label to generated step IDs and their result filenames as to the results directory. Runs without a label retain the `mt` prefix.
 - **Distributed launch messages** — Ordinary distributed workloads now report “distributed run” instead of the misleading “distributed replay.”
+- **Verification service startup** — `spt verify` now polls the required service ports for up to 30 seconds instead of checking once after a fixed ten-second sleep. Healthy engines that start more slowly can pass, already-ready engines proceed immediately, and unavailable ports still cause a bounded failure followed by container cleanup.
 
 ## [5.15.2] - 2026-09-21
 

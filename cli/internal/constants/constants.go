@@ -71,7 +71,6 @@ const (
 	PortCheckTimeoutSecs      = 2
 	HTTPRequestTimeoutSecs    = 5
 	ContainerReadyPollSecs    = 1
-	ServiceInitializationSecs = 10
 )
 
 // Container configuration constants
