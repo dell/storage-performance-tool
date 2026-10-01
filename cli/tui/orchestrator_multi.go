@@ -2583,7 +2583,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 		if m.onStatusUpdate != nil {
 			m.onStatusUpdate(&TestStatus{
 				State:   constants.StateRunning,
-				Message: fmt.Sprintf("Multi-host distributed replay running on %d hosts", len(readyHosts)),
+				Message: fmt.Sprintf("Distributed run running on %d hosts", len(readyHosts)),
 			})
 		}
 		if m.onOutput != nil {
@@ -2591,14 +2591,14 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 			for i, host := range readyHosts {
 				hostList[i] = host.Info.Original
 			}
-			m.onOutput(fmt.Sprintf("Starting distributed replay on hosts: %s", strings.Join(hostList, ", ")))
+			m.onOutput(fmt.Sprintf("Starting distributed run on hosts: %s", strings.Join(hostList, ", ")))
 		}
 
 		if err := m.multiHost.StartDistributedTestWithContent(ctx, image, params, scenarioContent); err != nil {
 			return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 		}
 		return m.startEntryAPIRun(
-			ctx, image, params, scenarioContent, defaultsContent, "Distributed replay", hooks)
+			ctx, image, params, scenarioContent, defaultsContent, "Distributed run", hooks)
 	}
 
 	host := readyHosts[0]
