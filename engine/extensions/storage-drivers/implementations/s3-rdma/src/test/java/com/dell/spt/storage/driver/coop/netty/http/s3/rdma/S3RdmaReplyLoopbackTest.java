@@ -1,0 +1,581 @@
+package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
+
+import static com.dell.spt.base.Constants.APP_NAME;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import com.dell.spt.base.config.InitialConfigSchemaProvider;
+import com.dell.spt.base.data.DataInput;
+import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.item.DataItem;
+import com.dell.spt.base.item.DataItemImpl;
+import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
+import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
+import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.storage.Credential;
+import com.github.akurilov.commons.collection.TreeUtil;
+import com.github.akurilov.commons.io.Input;
+import com.github.akurilov.commons.io.Output;
+import com.github.akurilov.commons.system.SizeInBytes;
+import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.SchemaProvider;
+import com.github.akurilov.confuse.impl.BasicConfig;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+/**
+ * Drives the real S3-RDMA driver against a loopback HTTP server that answers like an RDMA-capable
+ * S3 endpoint. The server emulates the one-sided transfer through {@link FakeRdmaTransport}: for a
+ * PUT it reads the client's registered buffer, for a GET it writes into it. Each test then checks
+ * the operation status, the bytes accounted, and the data-path counters.
+ */
+final class S3RdmaReplyLoopbackTest {
+
+	private static final long RESULT_TIMEOUT_SECONDS = 5;
+	private static final Credential CREDENTIAL = Credential.getInstance("access", "secret");
+	private static final int SIZE = 4096;
+	private static final long THRESHOLD = 1024;
+	private static final String OBJECT_BODY = "x".repeat(SIZE);
+	private static final String DECLINE_BODY = "<Error><Code>RDMANotSupported</Code><Message>RDMA not available</Message></Error>";
+
+	private final List<CapturedRequest> requests = new CopyOnWriteArrayList<>();
+	private final ExecutorService executor = Executors.newSingleThreadExecutor();
+	private HttpServer server;
+	private FakeRdmaTransport transport;
+	private volatile Reply reply;
+	private volatile byte[] serverReadPayload;
+	private final List<Integer> serverReadSizes = new CopyOnWriteArrayList<>();
+
+	/** How the emulated server answers an object request carrying an RDMA token. */
+	private record Reply(
+					int httpStatus,
+					String rdmaReply,
+					String bytesTransferred,
+					String body,
+					boolean performTransfer) {}
+
+	private record CapturedRequest(
+					String method,
+					String rawPath,
+					String rawQuery,
+					String rdmaToken,
+					String contentLength,
+					int bodyLength) {}
+
+	@BeforeEach
+	void startServer() throws IOException {
+		server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+		server.createContext("/", this::handle);
+		server.setExecutor(executor);
+		server.start();
+	}
+
+	@AfterEach
+	void stopServer() {
+		if (server != null) {
+			server.stop(0);
+		}
+		executor.shutdownNow();
+	}
+
+	// ---------- PUT ----------
+
+	@Test
+	void putTransferredWhenServerReportsRdmaSuccess() throws Exception {
+		reply = new Reply(200, "200", null, null, true);
+		try (final var driver = newDriver(true)) {
+			final var result = execute(driver, op(OpType.CREATE, SIZE));
+
+			assertEquals(Operation.Status.SUCC, result.status());
+			assertEquals(SIZE, ((DataOperation<?>) result).countBytesDone());
+			final CapturedRequest put = onlyObjectRequest("PUT");
+			assertNotNull(put.rdmaToken());
+			assertEquals("0", put.contentLength());
+			assertEquals(0, put.bodyLength());
+			assertNotNull(serverReadPayload, "server should read the payload from registered memory");
+			assertEquals(SIZE, serverReadPayload.length);
+			assertEquals(1, driver.pathStats().rdmaTransferred.sum());
+			assertTrue(transport.areAllDeregistered());
+		}
+	}
+
+	@Test
+	void putDeclinedWithHttp200AndReply501FailsWithoutBytes() throws Exception {
+		// The response observed from an ECS 4.5 server while its RDMA server could not start.
+		reply = new Reply(200, "501", null, DECLINE_BODY, false);
+		try (final var driver = newDriver(true)) {
+			final var result = execute(driver, op(OpType.CREATE, SIZE));
+
+			assertEquals(Operation.Status.RESP_FAIL_SVC, result.status());
+			assertEquals(0, ((DataOperation<?>) result).countBytesDone());
+			assertEquals(1, driver.pathStats().rdmaDeclined.sum());
+			assertEquals(0, driver.pathStats().rdmaTransferred.sum());
+			assertTrue(transport.areAllDeregistered());
+		}
+	}
+
+	@Test
+	void putWithoutReplyHeaderIsDeclined() throws Exception {
+		reply = new Reply(200, null, null, null, false);
+		try (final var driver = newDriver(true)) {
+			final var result = execute(driver, op(OpType.CREATE, SIZE));
+
+			assertEquals(Operation.Status.RESP_FAIL_SVC, result.status());
+			assertEquals(1, driver.pathStats().rdmaDeclined.sum());
+		}
+	}
+
+	@Test
+	void putTransferFailureStatusIsHttpError() throws Exception {
+		reply = new Reply(500, null, null, "<Error><Code>RDMATransferFailed</Code></Error>", false);
+		try (final var driver = newDriver(true)) {
+			final var result = execute(driver, op(OpType.CREATE, SIZE));
+
+			assertEquals(Operation.Status.RESP_FAIL_SVC, result.status());
+			assertEquals(1, driver.pathStats().rdmaHttpError.sum());
+			assertEquals(0, driver.pathStats().rdmaDeclined.sum());
+			assertTrue(transport.areAllDeregistered());
+		}
+	}
+
+	// ---------- GET ----------
+
+	@Test
+	void getTransferredCountsReportedBytesAndKeepsWrittenData() throws Exception {
+		reply = new Reply(200, "200", Integer.toString(SIZE), null, true);
+		try (final var driver = newDriver(true)) {
+			final var result = execute(driver, op(OpType.READ, SIZE));
+
+			assertEquals(Operation.Status.SUCC, result.status());
+			assertEquals(SIZE, ((DataOperation<?>) result).countBytesDone());
+			final CapturedRequest get = onlyObjectRequest("GET");
+			assertNotNull(get.rdmaToken());
+			assertEquals(1, driver.pathStats().rdmaTransferred.sum());
+			assertEquals(0, driver.pathStats().rdmaBytesAssumed.sum());
+		}
+	}
+
+	@Test
+	void getDeclinedBodyIsCountedOnceWhenFallbackAllowed() throws Exception {
+		reply = new Reply(200, "501", null, OBJECT_BODY, false);
+		try (final var driver = newDriver(true)) {
+			final var result = execute(driver, op(OpType.READ, SIZE));
+
+			assertEquals(Operation.Status.SUCC, result.status());
+			assertEquals(SIZE, ((DataOperation<?>) result).countBytesDone(),
+							"HTTP body bytes must not be added to the RDMA buffer size");
+			assertEquals(1, driver.pathStats().rdmaDeclined.sum());
+		}
+	}
+
+	@Test
+	void getDeclinedFailsWhenFallbackDisabled() throws Exception {
+		reply = new Reply(200, "501", null, OBJECT_BODY, false);
+		try (final var driver = newDriver(false)) {
+			final var result = execute(driver, op(OpType.READ, SIZE));
+
+			assertEquals(Operation.Status.RESP_FAIL_SVC, result.status());
+			assertEquals(0, ((DataOperation<?>) result).countBytesDone());
+		}
+	}
+
+	@Test
+	void getShortTransferIsProtocolError() throws Exception {
+		reply = new Reply(200, "200", Integer.toString(SIZE - 1), null, true);
+		try (final var driver = newDriver(true)) {
+			final var result = execute(driver, op(OpType.READ, SIZE));
+
+			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, result.status());
+			assertEquals(0, ((DataOperation<?>) result).countBytesDone());
+			assertEquals(1, driver.pathStats().rdmaProtocolError.sum());
+		}
+	}
+
+	@Test
+	void getRdmaSuccessWithHttpBodyIsProtocolError() throws Exception {
+		reply = new Reply(200, "200", Integer.toString(SIZE), OBJECT_BODY, true);
+		try (final var driver = newDriver(true)) {
+			final var result = execute(driver, op(OpType.READ, SIZE));
+
+			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, result.status());
+			assertEquals(1, driver.pathStats().rdmaProtocolError.sum());
+		}
+	}
+
+	// ---------- Preparation fallback and eligibility ----------
+
+	@Test
+	void registrationFailureWithoutFallbackFailsBeforeSending() throws Exception {
+		reply = new Reply(200, "200", null, null, true);
+		try (final var driver = newDriver(false)) {
+			transport.setFailAfterNRegistrations(0);
+			final var result = execute(driver, op(OpType.CREATE, SIZE));
+
+			assertEquals(Operation.Status.FAIL_IO, result.status());
+			assertTrue(objectRequests().isEmpty(), "no request may be sent: " + requests);
+			assertEquals(1, driver.pathStats().prepareFailed.sum());
+		}
+	}
+
+	@Test
+	void registrationFailureWithFallbackSendsHttpBody() throws Exception {
+		reply = new Reply(200, null, null, null, false);
+		try (final var driver = newDriver(true)) {
+			transport.setFailAfterNRegistrations(0);
+			final var result = execute(driver, op(OpType.CREATE, SIZE));
+
+			assertEquals(Operation.Status.SUCC, result.status());
+			final CapturedRequest put = onlyObjectRequest("PUT");
+			assertNull(put.rdmaToken());
+			assertEquals(SIZE, put.bodyLength());
+			assertEquals(1, driver.pathStats().httpFallback.sum());
+		}
+	}
+
+	@Test
+	void belowThresholdUsesHttpAndIsCounted() throws Exception {
+		reply = new Reply(200, null, null, null, false);
+		try (final var driver = newDriver(true)) {
+			final var result = execute(driver, op(OpType.CREATE, THRESHOLD - 1));
+
+			assertEquals(Operation.Status.SUCC, result.status());
+			final CapturedRequest put = onlyObjectRequest("PUT");
+			assertNull(put.rdmaToken());
+			assertEquals(THRESHOLD - 1, put.bodyLength());
+			assertEquals(1, driver.pathStats().httpBelowThreshold.sum());
+			assertEquals(0, transport.getRegisterCount());
+		}
+	}
+
+	// ---------- Multipart upload ----------
+
+	@Test
+	void uploadPartsEachCarryTheirOwnPartSizedToken() throws Exception {
+		reply = new Reply(200, "200", null, null, true);
+		final int partSize = 2048;
+		final int parts = 2;
+		try (final var driver = newDriver(true)) {
+			final var item = new DataItemImpl("obj", 0, (long) partSize * parts);
+			@SuppressWarnings("unchecked")
+			final Operation<DataItem> mpu = (Operation<DataItem>) (Operation<?>) new CompositeDataOperationImpl<>(
+							0, OpType.CREATE, item, null, "/bucket", CREDENTIAL, null, 0, partSize);
+			final var result = executeUntil(driver, mpu, done -> done instanceof CompositeDataOperation<?> composite
+							&& composite.allSubOperationsDone());
+
+			assertEquals(Operation.Status.SUCC, result.status(), "requests: " + requests);
+			final List<CapturedRequest> partRequests = objectRequests().stream()
+							.filter(request -> "PUT".equals(request.method())
+											&& request.rawQuery() != null
+											&& request.rawQuery().contains("partNumber="))
+							.toList();
+			assertEquals(parts, partRequests.size(), "requests: " + requests);
+			for (final CapturedRequest part : partRequests) {
+				assertTrue(part.rawQuery().contains("uploadId=upload-1"), part.rawQuery());
+				assertNotNull(part.rdmaToken(), "part must be proposed for RDMA");
+				assertEquals(partSize, Integer.parseInt(part.rdmaToken().split(":", -1)[1], 16),
+								"token must describe the part, not the whole object");
+				assertEquals("0", part.contentLength());
+				assertEquals(0, part.bodyLength());
+			}
+			final List<CapturedRequest> controlRequests = objectRequests().stream()
+							.filter(request -> "POST".equals(request.method()))
+							.toList();
+			assertEquals(2, controlRequests.size(), "initiate and complete: " + requests);
+			controlRequests.forEach(request -> assertNull(request.rdmaToken(),
+							"multipart control requests carry no payload: " + request));
+			assertEquals(List.of(partSize, partSize), serverReadSizes);
+			assertEquals(parts, driver.pathStats().rdmaTransferred.sum());
+			assertTrue(transport.areAllDeregistered());
+		}
+	}
+
+	// ---------- Emulated server ----------
+
+	private void handle(final HttpExchange exchange) throws IOException {
+		final byte[] requestBody = exchange.getRequestBody().readAllBytes();
+		final String token = exchange.getRequestHeaders().getFirst(S3RdmaStorageDriver.RDMA_TOKEN_HEADER);
+		final String method = exchange.getRequestMethod();
+		final String path = exchange.getRequestURI().getRawPath();
+		final String query = exchange.getRequestURI().getRawQuery();
+		requests.add(new CapturedRequest(
+						method, path, query, token,
+						exchange.getRequestHeaders().getFirst("Content-Length"), requestBody.length));
+		final boolean objectRequest = path.chars().filter(c -> c == '/').count() > 1;
+		if (!objectRequest || token == null) {
+			plainResponse(exchange, method, query);
+			return;
+		}
+		final Reply current = reply;
+		if (current.performTransfer()) {
+			final ByteBuffer clientMemory = transport.getRegisteredBuffer(rkeyHandle(token)).duplicate();
+			if ("PUT".equals(method)) {
+				final byte[] payload = new byte[clientMemory.remaining()];
+				clientMemory.get(payload);
+				serverReadPayload = payload;
+				serverReadSizes.add(payload.length);
+			} else {
+				clientMemory.clear();
+				while (clientMemory.hasRemaining()) {
+					clientMemory.put((byte) 0x5a);
+				}
+			}
+		}
+		if (current.rdmaReply() != null) {
+			exchange.getResponseHeaders().set(RdmaReplyContract.REPLY_HEADER, current.rdmaReply());
+		}
+		if (query != null && query.contains("partNumber=")) {
+			exchange.getResponseHeaders().set("ETag", "\"etag-" + query.hashCode() + "\"");
+		}
+		if (current.bytesTransferred() != null) {
+			exchange.getResponseHeaders().set(
+							RdmaReplyContract.BYTES_TRANSFERRED_HEADER, current.bytesTransferred());
+		}
+		final byte[] body = current.body() == null ? null : current.body().getBytes(StandardCharsets.UTF_8);
+		exchange.sendResponseHeaders(current.httpStatus(), body == null ? -1 : body.length);
+		if (body != null) {
+			exchange.getResponseBody().write(body);
+		}
+		exchange.close();
+	}
+
+	private static void plainResponse(final HttpExchange exchange, final String method, final String query)
+					throws IOException {
+		if ("POST".equals(method) && "uploads".equals(query)) {
+			xmlResponse(exchange, "<InitiateMultipartUploadResult><Bucket>bucket</Bucket>"
+							+ "<Key>obj</Key><UploadId>upload-1</UploadId></InitiateMultipartUploadResult>");
+		} else if ("POST".equals(method) && query != null && query.startsWith("uploadId=")) {
+			xmlResponse(exchange, "<CompleteMultipartUploadResult><Bucket>bucket</Bucket>"
+							+ "<Key>obj</Key><ETag>\"mpu-etag\"</ETag></CompleteMultipartUploadResult>");
+		} else if ("GET".equals(method)) {
+			final byte[] body = new byte[SIZE];
+			exchange.sendResponseHeaders(200, body.length);
+			exchange.getResponseBody().write(body);
+		} else {
+			exchange.sendResponseHeaders(200, -1);
+		}
+		exchange.close();
+	}
+
+	private static void xmlResponse(final HttpExchange exchange, final String xml) throws IOException {
+		final byte[] body = xml.getBytes(StandardCharsets.UTF_8);
+		exchange.getResponseHeaders().set("Content-Type", "application/xml");
+		exchange.sendResponseHeaders(200, body.length);
+		exchange.getResponseBody().write(body);
+		exchange.close();
+	}
+
+	/** {@link FakeRdmaTransport} tokens carry the registration handle in the rkey field. */
+	private static long rkeyHandle(final String token) {
+		return Long.parseLong(token.split(":", -1)[2], 16);
+	}
+
+	// ---------- Helpers ----------
+
+	private List<CapturedRequest> objectRequests() {
+		return requests.stream()
+						.filter(request -> request.rawPath().chars().filter(c -> c == '/').count() > 1)
+						.toList();
+	}
+
+	private CapturedRequest onlyObjectRequest(final String method) {
+		final List<CapturedRequest> matching = objectRequests().stream()
+						.filter(request -> method.equals(request.method()))
+						.toList();
+		assertEquals(1, matching.size(), "object requests: " + requests);
+		return matching.get(0);
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Operation<DataItem> op(final OpType opType, final long size) {
+		return (Operation<DataItem>) (Operation<?>) new DataOperationImpl<>(
+						0, opType, new DataItemImpl("obj-" + opType, 0, size), null, "/bucket",
+						CREDENTIAL, null, 0);
+	}
+
+	private S3RdmaStorageDriver<DataItem, Operation<DataItem>> newDriver(final boolean fallback)
+					throws Exception {
+		final Config config = config(fallback);
+		final RdmaConfig rdmaConfig = new RdmaConfig(config.configVal("storage").configVal("rdma"));
+		transport = new FakeRdmaTransport(rdmaConfig);
+		return new S3RdmaStorageDriver<>(
+						"s3-rdma-reply-loopback",
+						DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false, 0.0, true),
+						config.configVal("storage"),
+						false,
+						config.intVal("load-batch-size"),
+						ignored -> transport);
+	}
+
+	private static Operation<DataItem> execute(
+					final S3RdmaStorageDriver<DataItem, Operation<DataItem>> driver,
+					final Operation<DataItem> operation) throws Exception {
+		final ResultOutput output = new ResultOutput();
+		driver.operationResultOutput(output);
+		driver.start();
+		assertTrue(driver.put(operation));
+		final Operation<DataItem> result = output.await();
+		assertNotNull(result, "operation did not complete");
+		return result;
+	}
+
+	private static Operation<DataItem> executeUntil(
+					final S3RdmaStorageDriver<DataItem, Operation<DataItem>> driver,
+					final Operation<DataItem> operation,
+					final Predicate<Operation<DataItem>> finalResult) throws Exception {
+		final ResultOutput output = new ResultOutput();
+		driver.operationResultOutput(output);
+		driver.start();
+		assertTrue(driver.put(operation));
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+		while (System.nanoTime() < deadline) {
+			final Operation<DataItem> result = output.await();
+			if (result != null && finalResult.test(result)) {
+				return result;
+			}
+		}
+		throw new AssertionError("no final result");
+	}
+
+	private Config config(final boolean fallback) {
+		try {
+			final List<Map<String, Object>> configSchemas = Extension
+							.load(Thread.currentThread().getContextClassLoader())
+							.stream()
+							.map(Extension::schemaProvider)
+							.filter(Objects::nonNull)
+							.map(provider -> {
+								try {
+									return provider.schema();
+								} catch (final Exception e) {
+									throw new IllegalStateException(e);
+								}
+							})
+							.filter(Objects::nonNull)
+							.collect(Collectors.toList());
+			configSchemas.add(0, InitialConfigSchemaProvider.provider().schema());
+			SchemaProvider
+							.resolve(APP_NAME, Thread.currentThread().getContextClassLoader())
+							.stream()
+							.findFirst()
+							.ifPresent(configSchemas::add);
+			final Config config = new BasicConfig("-", TreeUtil.reduceForest(configSchemas));
+			config.val("load-batch-size", 1024);
+			config.val("storage-driver-limit-concurrency", 1);
+			config.val("storage-driver-threads", 0);
+			config.val("storage-driver-limit-queue-input", 8);
+			config.val("storage-namespace", "/bucket");
+			config.val("storage-net-transport", "nio");
+			config.val("storage-net-reuseAddr", true);
+			config.val("storage-net-bindBacklogSize", 0);
+			config.val("storage-net-keepAlive", true);
+			config.val("storage-net-rcvBuf", 0);
+			config.val("storage-net-sndBuf", 0);
+			config.val("storage-net-ssl-enabled", false);
+			config.val("storage-net-ssl-protocols", List.of());
+			config.val("storage-net-ssl-provider", "OPENSSL");
+			config.val("storage-net-tcpNoDelay", false);
+			config.val("storage-net-interestOpQueued", false);
+			config.val("storage-net-writeSpinCount", 1);
+			config.val("storage-net-linger", 0);
+			config.val("storage-net-timeoutMilliSec", 2_000);
+			config.val("storage-net-ioRatio", 50);
+			config.val("storage-net-node-addrs", List.of("127.0.0.1"));
+			config.val("storage-net-node-port", server.getAddress().getPort());
+			config.val("storage-net-node-connAttemptsLimit", 0);
+			config.val("storage-net-http-headers", new HashMap<String, String>(
+							Map.of("Date", "#{date:formatNowRfc1123()}%{date:formatNowRfc1123()}")));
+			config.val("storage-net-http-read-metadata-only", false);
+			config.val("storage-net-http-max-chunk-size", 65536);
+			config.val("storage-net-http-uri-args", Map.of());
+			config.val("storage-object-fsAccess", true);
+			config.val("storage-object-tagging-enabled", false);
+			config.val("storage-object-tagging-tags", Map.of());
+			config.val("storage-object-versioning", false);
+			config.val("storage-auth-uid", CREDENTIAL.getUid());
+			config.val("storage-auth-token", null);
+			config.val("storage-auth-secret", CREDENTIAL.getSecret());
+			config.val("storage-auth-version", 4);
+			config.val("storage-checksum-enabled", false);
+			config.val("storage-integrity-mode", "none");
+			config.val("storage-integrity-algorithm", "sha256");
+			config.val("storage-integrity-input-provenance", "none");
+			config.val("storage-integrity-input-expectedProducerId", "");
+			config.val("storage-integrity-selection-maxCount", 0L);
+			config.val("storage-rdma-enabled", true);
+			config.val("storage-rdma-thresholdBytes", THRESHOLD);
+			config.val("storage-rdma-fallback", fallback);
+			config.val("storage-rdma-device", "auto");
+			config.val("storage-rdma-localIp", "");
+			config.val("storage-rdma-logLevel", "WARN");
+			config.val("storage-rdma-timeoutMs", 30_000L);
+			return config;
+		} catch (final Exception e) {
+			throw new IllegalStateException(e);
+		}
+	}
+
+	private static final class ResultOutput implements Output<Operation<DataItem>> {
+
+		private final LinkedBlockingQueue<Operation<DataItem>> results = new LinkedBlockingQueue<>();
+
+		@Override
+		public boolean put(final Operation<DataItem> value) {
+			return results.offer(value);
+		}
+
+		@Override
+		public int put(final List<Operation<DataItem>> values, final int from, final int to) {
+			int count = 0;
+			for (int i = from; i < to; i++) {
+				if (!results.offer(values.get(i))) {
+					break;
+				}
+				count++;
+			}
+			return count;
+		}
+
+		@Override
+		public int put(final List<Operation<DataItem>> values) {
+			return put(values, 0, values.size());
+		}
+
+		@Override
+		public Input<Operation<DataItem>> getInput() {
+			return null;
+		}
+
+		@Override
+		public void close() {
+			results.clear();
+		}
+
+		private Operation<DataItem> await() throws InterruptedException {
+			return results.poll(RESULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+		}
+	}
+}

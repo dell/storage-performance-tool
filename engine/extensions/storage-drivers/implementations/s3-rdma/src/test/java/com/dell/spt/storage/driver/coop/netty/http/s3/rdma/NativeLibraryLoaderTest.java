@@ -1,5 +1,6 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 
+import java.util.Locale;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
@@ -33,8 +34,8 @@ public class NativeLibraryLoaderTest {
 	@Test
 	void testGetOsArch_currentPlatform() throws Exception {
 		final String result = invokeGetOsArch();
-		final String os = System.getProperty("os.name", "").toLowerCase();
-		final String arch = System.getProperty("os.arch", "").toLowerCase();
+		final String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+		final String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
 
 		// On Linux x86_64 (our target platform), expect "linux-amd64"
 		if (os.contains("linux") && (arch.equals("amd64") || arch.equals("x86_64"))) {
@@ -64,7 +65,7 @@ public class NativeLibraryLoaderTest {
 
 	@Test
 	void testGetLibraryFileName_currentPlatform() throws Exception {
-		final String os = System.getProperty("os.name", "").toLowerCase();
+		final String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
 		final String result = invokeGetLibraryFileName("spt_rdma");
 
 		if (os.contains("linux")) {
@@ -79,7 +80,7 @@ public class NativeLibraryLoaderTest {
 	@Test
 	void testGetLibraryFileName_linuxFormat() throws Exception {
 		// On Linux (our CI/test environment), verify .so format
-		final String os = System.getProperty("os.name", "").toLowerCase();
+		final String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
 		if (os.contains("linux")) {
 			final String result = invokeGetLibraryFileName("mylib");
 			assertTrue(result.startsWith("lib"), "Linux: expected 'lib' prefix");

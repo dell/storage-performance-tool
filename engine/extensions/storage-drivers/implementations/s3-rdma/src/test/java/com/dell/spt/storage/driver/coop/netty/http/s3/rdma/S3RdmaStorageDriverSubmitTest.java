@@ -86,53 +86,6 @@ public class S3RdmaStorageDriverSubmitTest {
 		assertTrue(invokeShouldUseRdma(driver, dataOp(OpType.CREATE, THRESHOLD * 10)));
 	}
 
-	// ---------- extractBucket ----------
-
-	@Test
-	void testExtractBucket_stripsLeadingSlash() throws Exception {
-		assertEquals("mybucket", invokeExtractBucket(driverWithNamespace("/mybucket")));
-	}
-
-	@Test
-	void testExtractBucket_noLeadingSlash() throws Exception {
-		assertEquals("mybucket", invokeExtractBucket(driverWithNamespace("mybucket")));
-	}
-
-	@Test
-	void testExtractBucket_extractsFirstSegment() throws Exception {
-		assertEquals("mybucket", invokeExtractBucket(driverWithNamespace("/mybucket/prefix")));
-	}
-
-	@Test
-	void testExtractBucket_emptyNamespace() throws Exception {
-		assertEquals("", invokeExtractBucket(driverWithNamespace("")));
-	}
-
-	@Test
-	void testExtractBucket_nullNamespace() throws Exception {
-		assertEquals("", invokeExtractBucket(driverWithNamespace(null)));
-	}
-
-	// ---------- extractKey ----------
-
-	@Test
-	void testExtractKey_stripsLeadingSlash() throws Exception {
-		final var driver = newDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
-		assertEquals("mykey", invokeExtractKey(driver, new ItemImpl("/mykey")));
-	}
-
-	@Test
-	void testExtractKey_noLeadingSlash() throws Exception {
-		final var driver = newDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
-		assertEquals("mykey", invokeExtractKey(driver, new ItemImpl("mykey")));
-	}
-
-	@Test
-	void testExtractKey_nestedPath() throws Exception {
-		final var driver = newDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
-		assertEquals("a/b/c", invokeExtractKey(driver, new ItemImpl("a/b/c")));
-	}
-
 	// ---------- buildEndpointAddrs ----------
 
 	@Test
@@ -191,34 +144,6 @@ public class S3RdmaStorageDriverSubmitTest {
 		// When addr has no port and storageNodePort=443, scheme should be https
 		assertEquals("https://s3.example.com:443",
 						invokeBuildEndpointAddrs(driverWithNode("s3.example.com", 443)));
-	}
-
-	// ---------- extractBucket: edge cases ----------
-
-	@Test
-	void testExtractBucket_slashOnly() throws Exception {
-		// Namespace "/" → after stripping leading slash, empty → return ""
-		assertEquals("", invokeExtractBucket(driverWithNamespace("/")));
-	}
-
-	@Test
-	void testExtractBucket_trailingSlash() throws Exception {
-		// "/mybucket/" → strips leading slash → "mybucket/" → indexOf('/') at 8 → "mybucket"
-		assertEquals("mybucket", invokeExtractBucket(driverWithNamespace("/mybucket/")));
-	}
-
-	// ---------- extractKey: edge cases ----------
-
-	@Test
-	void testExtractKey_leadingSlashWithNestedPath() throws Exception {
-		final var driver = newDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
-		assertEquals("a/b/c", invokeExtractKey(driver, new ItemImpl("/a/b/c")));
-	}
-
-	@Test
-	void testExtractKey_slashOnly() throws Exception {
-		final var driver = newDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
-		assertEquals("", invokeExtractKey(driver, new ItemImpl("/")));
 	}
 
 	// ---------- shouldUseRdma: zero threshold ----------
@@ -287,13 +212,6 @@ public class S3RdmaStorageDriverSubmitTest {
 		return S3RdmaStorageDriverTestSupport.newDriver(config, transport);
 	}
 
-	private static S3RdmaStorageDriver<Item, Operation<Item>> driverWithNamespace(
-					final String namespace) throws Exception {
-		final var config = enabledConfig();
-		return S3RdmaStorageDriverTestSupport.newDriver(
-						config, new RdmaTransport(config), namespace, List.of("127.0.0.1"), 9020);
-	}
-
 	private static S3RdmaStorageDriver<Item, Operation<Item>> driverWithNode(
 					final String addr, final int port) throws Exception {
 		final var config = enabledConfig();
@@ -314,21 +232,6 @@ public class S3RdmaStorageDriverSubmitTest {
 						"shouldUseRdma", Operation.class);
 		m.setAccessible(true);
 		return (boolean) m.invoke(driver, op);
-	}
-
-	private static String invokeExtractBucket(
-					final S3RdmaStorageDriver<Item, Operation<Item>> driver) throws Exception {
-		final Method m = S3RdmaStorageDriver.class.getDeclaredMethod("extractBucket");
-		m.setAccessible(true);
-		return (String) m.invoke(driver);
-	}
-
-	private static String invokeExtractKey(
-					final S3RdmaStorageDriver<Item, Operation<Item>> driver,
-					final Item item) throws Exception {
-		final Method m = S3RdmaStorageDriver.class.getDeclaredMethod("extractKey", Item.class);
-		m.setAccessible(true);
-		return (String) m.invoke(driver, item);
 	}
 
 	private static String invokeBuildEndpointAddrs(

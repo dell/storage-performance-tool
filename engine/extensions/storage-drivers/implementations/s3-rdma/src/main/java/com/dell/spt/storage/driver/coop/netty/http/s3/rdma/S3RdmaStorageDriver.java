@@ -1,14 +1,14 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 
-import static com.dell.spt.base.item.op.Operation.SLASH;
-
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.storage.driver.coop.netty.http.s3.S3StorageDriver;
@@ -16,16 +16,24 @@ import com.github.akurilov.confuse.Config;
 
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandler;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.ChannelPipeline;
 import io.netty.util.AttributeKey;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.EmptyHttpHeaders;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.HttpResponse;
 
 import org.apache.logging.log4j.Level;
 
 import java.io.IOException;
+import java.net.DatagramSocket;
+import java.net.Inet4Address;
+import java.net.InetAddress;
 import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
 import java.util.List;
@@ -34,6 +42,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
@@ -66,6 +75,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 	private static final AttributeKey<RdmaContext> RDMA_CONTEXT_ATTR_KEY = AttributeKey.newInstance("spt-rdma-attempt");
 
+	/** Pipeline name of the handler that records the RDMA reply ahead of S3 response handling. */
+	static final String RDMA_REPLY_HANDLER_NAME = "spt-rdma-reply";
+
 	/**
 	 * Per-operation RDMA state tracked across the request/response lifecycle.
 	 * Created in submitRdma(), read in httpRequest(), cleaned up in complete().
@@ -78,6 +90,10 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		final int size;
 		volatile Channel channel;
 		volatile long startTimeNanos;
+		// Response fields are written and read on the channel's event loop.
+		int reply = RdmaReplyContract.REPLY_ABSENT;
+		long bytesTransferred = RdmaReplyContract.VALUE_ABSENT;
+		long responseContentLength = RdmaReplyContract.VALUE_ABSENT;
 
 		RdmaContext(final String token, final ByteBuffer buffer, final long mrHandle,
 						final OpType opType, final int size) {
@@ -87,6 +103,39 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			this.opType = opType;
 			this.size = size;
 		}
+
+		void observeResponse(final HttpHeaders headers) {
+			reply = RdmaReplyContract.parseReply(headers.get(RdmaReplyContract.REPLY_HEADER));
+			bytesTransferred = RdmaReplyContract.parseCount(
+							headers.get(RdmaReplyContract.BYTES_TRANSFERRED_HEADER));
+			responseContentLength = RdmaReplyContract.parseCount(headers.get(HttpHeaderNames.CONTENT_LENGTH));
+		}
+
+		boolean replyAcceptedRdma() {
+			return reply == RdmaReplyContract.REPLY_OK
+							|| reply == RdmaReplyContract.REPLY_NO_CONTENT
+							|| reply == RdmaReplyContract.REPLY_PARTIAL_CONTENT;
+		}
+	}
+
+	/**
+	 * Records the RDMA reply headers into the channel's {@link RdmaContext} before the S3 response
+	 * handler runs, so body routing and completion can follow what the server actually did.
+	 */
+	@ChannelHandler.Sharable
+	private static final class RdmaReplyObserver extends ChannelInboundHandlerAdapter {
+		static final RdmaReplyObserver INSTANCE = new RdmaReplyObserver();
+
+		@Override
+		public void channelRead(final ChannelHandlerContext handlerContext, final Object msg) {
+			if (msg instanceof HttpResponse response) {
+				final RdmaContext ctx = handlerContext.channel().attr(RDMA_CONTEXT_ATTR_KEY).get();
+				if (ctx != null) {
+					ctx.observeResponse(response.headers());
+				}
+			}
+			handlerContext.fireChannelRead(msg);
+		}
 	}
 
 	/** In-flight RDMA operations keyed by Operation identity. */
@@ -94,6 +143,12 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 	/** Log-once guard for the below-threshold warning. */
 	private final AtomicBoolean belowThresholdWarned = new AtomicBoolean(false);
+	private final AtomicBoolean oversizeWarned = new AtomicBoolean(false);
+	private final AtomicBoolean prepareFailureWarned = new AtomicBoolean(false);
+	private final AtomicBoolean declinedWarned = new AtomicBoolean(false);
+	private final AtomicBoolean protocolErrorWarned = new AtomicBoolean(false);
+
+	private final RdmaPathStats pathStats = new RdmaPathStats();
 
 	/**
 	 * ThreadLocal to pass the RDMA token from httpRequest() into applyMetaDataHeaders().
@@ -133,12 +188,16 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 					throws IllegalConfigurationException, InterruptedException {
 		super(stepId, itemDataInput, storageConfig, verifyFlag, batchSize);
 
-		// Parse RDMA configuration
-		rdmaConfig = new RdmaConfig(storageConfig.configVal("rdma"));
-		Loggers.MSG.info("{}: RDMA config: {}", stepId, rdmaConfig);
-
 		// Build endpoint address summary from storage node config
 		endpointAddrs = buildEndpointAddrs();
+
+		// Parse RDMA configuration; without an explicit local address, use the one routed to the
+		// storage endpoint so each worker host selects its own RoCE GID.
+		final RdmaConfig configured = new RdmaConfig(storageConfig.configVal("rdma"));
+		rdmaConfig = configured.isEnabled() && configured.getLocalIp().isEmpty()
+						? withRoutedLocalIp(configured)
+						: configured;
+		Loggers.MSG.info("{}: RDMA config: {}", stepId, rdmaConfig);
 
 		// Initialize RDMA transport
 		rdmaTransport = Objects.requireNonNull(
@@ -171,7 +230,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 					return t;
 				});
 				final long intervalMs = Math.max(rdmaConfig.getTimeoutMs() / 2, 1000);
-				rdmaReaper.scheduleAtFixedRate(this::reapTimedOutOps, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
+				// The task handles its own exceptions and ends with shutdownNow() in doClose().
+				final ScheduledFuture<?> unused = rdmaReaper.scheduleAtFixedRate(
+								this::reapTimedOutOps, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
 				Loggers.MSG.info("{}: RDMA operation timeout reaper started (timeoutMs={}, intervalMs={})",
 								stepId, rdmaConfig.getTimeoutMs(), intervalMs);
 			} else {
@@ -256,11 +317,21 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			Loggers.MSG.trace("{}: RDMA skip: opType={} not CREATE/READ", stepId, opType);
 			return false;
 		}
+		if (op instanceof CompositeOperation) {
+			// Multipart initiate/complete requests carry no payload; their parts carry the data.
+			return false;
+		}
+		if (op instanceof PartialOperation && opType == OpType.READ) {
+			// Ranged part reads are not proposed for RDMA.
+			pathStats.httpIneligible.increment();
+			return false;
+		}
 		final var dataOp = (DataOperation) op;
 		try {
 			final long size = dataOp.item().size();
 			final boolean useRdma = size >= rdmaConfig.getThresholdBytes();
 			if (!useRdma) {
+				pathStats.httpBelowThreshold.increment();
 				if (belowThresholdWarned.compareAndSet(false, true)) {
 					Loggers.MSG.warn(
 									"{}: object size ({}) below RDMA threshold ({}); using HTTP path."
@@ -297,7 +368,11 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		try {
 			final long rawSize = item.size();
 			if (rawSize > Integer.MAX_VALUE) {
-				Loggers.MSG.trace("{}: RDMA skip: size={} exceeds int range, falling back to HTTP", stepId, rawSize);
+				pathStats.httpOversize.increment();
+				if (oversizeWarned.compareAndSet(false, true)) {
+					Loggers.MSG.warn("{}: object size ({}) exceeds the largest RDMA buffer ({}); using HTTP path",
+									stepId, rawSize, Integer.MAX_VALUE);
+				}
 				return super.submit(op);
 			}
 			size = (int) rawSize;
@@ -314,8 +389,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 			mrHandle = rdmaTransport.registerBuffer(buf, size);
 			if (mrHandle == 0) {
-				Loggers.MSG.trace("{}: RDMA buffer registration failed, falling back to HTTP", stepId);
-				return super.submit(op);
+				return prepareFailed(op, "buffer registration failed");
 			}
 
 			// For PUT: copy data into the registered buffer
@@ -328,9 +402,8 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 			final String token = rdmaTransport.generateToken(mrHandle, size);
 			if (token == null) {
-				Loggers.MSG.trace("{}: RDMA token generation failed, falling back to HTTP", stepId);
 				rdmaTransport.deregisterBuffer(buf, mrHandle);
-				return super.submit(op);
+				return prepareFailed(op, "token generation failed");
 			}
 
 			// Store RDMA context — httpRequest() adds the header, complete() cleans up
@@ -346,7 +419,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			return submitted;
 
 		} catch (final Exception e) {
-			LogUtil.exception(Level.WARN, e, "{}: RDMA submit failed for {}",
+			LogUtil.exception(Level.DEBUG, e, "{}: RDMA submit failed for {}",
 							stepId, item.name());
 
 			// Clean up — check rdmaOps first (context may already be stored)
@@ -356,15 +429,29 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 				}
 			}
 
-			if (rdmaConfig.isFallbackEnabled()) {
-				Loggers.MSG.trace("{}: falling back to HTTP after RDMA exception", stepId);
-				return super.submit(op);
-			}
-
-			op.status(Operation.Status.FAIL_IO);
-			handleCompleted(op);
-			return true;
+			return prepareFailed(op, e.getClass().getSimpleName());
 		}
+	}
+
+	/**
+	 * Handles an RDMA preparation failure: with fallback enabled the operation is sent over HTTP,
+	 * otherwise it fails rather than being reported as an RDMA transfer.
+	 */
+	private boolean prepareFailed(final O op, final String reason) {
+		final boolean fallback = rdmaConfig.isFallbackEnabled();
+		if (prepareFailureWarned.compareAndSet(false, true)) {
+			Loggers.MSG.warn("{}: RDMA preparation failed ({}); {}", stepId, reason,
+							fallback ? "falling back to HTTP (storage.rdma.fallback=true)"
+											: "failing the operation (storage.rdma.fallback=false)");
+		}
+		if (fallback) {
+			pathStats.httpFallback.increment();
+			return super.submit(op);
+		}
+		pathStats.prepareFailed.increment();
+		op.status(Operation.Status.FAIL_IO);
+		handleCompleted(op);
+		return true;
 	}
 
 	/** Remove and clean up RDMA context for an operation. Returns true if found. */
@@ -401,25 +488,40 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		dst.flip();
 	}
 
-	/**
-	 * Extract the bucket name from the driver's namespace configuration.
-	 * The namespace is typically the bucket name, possibly with a leading slash.
-	 */
-	private String extractBucket() {
-		if (namespace == null || namespace.isEmpty()) {
-			return "";
+	private RdmaConfig withRoutedLocalIp(final RdmaConfig configured) {
+		if (storageNodeAddrs.length == 0) {
+			return configured;
 		}
-		final String ns = namespace.startsWith(SLASH) ? namespace.substring(1) : namespace;
-		final int slashPos = ns.indexOf(SLASH);
-		return slashPos > 0 ? ns.substring(0, slashPos) : ns;
+		final String addr = storageNodeAddrs[0];
+		final int colonPos = addr.lastIndexOf(':');
+		final String host = colonPos > 0 ? addr.substring(0, colonPos) : addr;
+		final int port = colonPos > 0 ? Integer.parseInt(addr.substring(colonPos + 1)) : storageNodePort;
+		final String localIp = routedLocalAddress(host, port);
+		if (localIp.isEmpty()) {
+			Loggers.MSG.info("{}: RDMA local address not resolved by route to {}; native GID selection applies",
+							stepId, host);
+			return configured;
+		}
+		Loggers.MSG.info("{}: RDMA local address {} selected by route to {}", stepId, localIp, host);
+		return configured.withLocalIp(localIp);
 	}
 
 	/**
-	 * Extract the object key from an item's name.
+	 * Returns the local IPv4 address the OS routes toward {@code host}, or an empty string when
+	 * it cannot be determined or is a loopback/wildcard address. Connecting a UDP socket only
+	 * performs the route lookup; no packet is sent.
 	 */
-	private String extractKey(final Item item) {
-		final String name = item.name();
-		return name.startsWith(SLASH) ? name.substring(1) : name;
+	static String routedLocalAddress(final String host, final int port) {
+		try (final DatagramSocket socket = new DatagramSocket()) {
+			socket.connect(InetAddress.getByName(host), port);
+			final InetAddress local = socket.getLocalAddress();
+			if (local instanceof Inet4Address && !local.isLoopbackAddress() && !local.isAnyLocalAddress()) {
+				return local.getHostAddress();
+			}
+		} catch (final IOException | RuntimeException e) {
+			Loggers.MSG.debug("RDMA local address route lookup to {} failed: {}", host, e.getMessage());
+		}
+		return "";
 	}
 
 	/**
@@ -531,8 +633,23 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	@Override
+	protected void appendHandlers(final Channel channel) {
+		super.appendHandlers(channel);
+		final ChannelPipeline pipeline = channel.pipeline();
+		pipeline.addBefore(pipeline.lastContext().name(), RDMA_REPLY_HANDLER_NAME, RdmaReplyObserver.INSTANCE);
+	}
+
+	/**
+	 * A GET body is out of band only when the server reported an RDMA transfer; a declined GET
+	 * carries the object in the HTTP body and is verified in band like any HTTP read.
+	 */
+	@Override
 	protected boolean observesReadBodyOutOfBand(final O op) {
-		return rdmaOps.containsKey(op) && OpType.READ.equals(op.type());
+		if (!OpType.READ.equals(op.type())) {
+			return false;
+		}
+		final RdmaContext ctx = rdmaOps.get(op);
+		return ctx != null && ctx.replyAcceptedRdma();
 	}
 
 	/**
@@ -564,12 +681,52 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 	private void completeRdmaContext(final Channel channel, final O op, final RdmaContext ctx) {
 		try {
-			if (op.status() == Operation.Status.SUCC && ctx.opType == OpType.READ) {
-				final ByteBuffer body = ctx.buffer.asReadOnlyBuffer();
-				body.position(0);
-				body.limit(ctx.size);
-				finishOutOfBandIntegrityRead(channel, op, body);
-				((DataOperation) op).countBytesDone(ctx.size);
+			if (op.status() != Operation.Status.SUCC) {
+				pathStats.rdmaHttpError.increment();
+				return;
+			}
+			final RdmaReplyContract.Result result = RdmaReplyContract.classify(
+							ctx.opType, ctx.reply, ctx.bytesTransferred, ctx.responseContentLength, ctx.size);
+			final var dataOp = (DataOperation) op;
+			switch (result.outcome()) {
+			case TRANSFERRED -> {
+				pathStats.rdmaTransferred.increment();
+				if (result.bytesAssumed()) {
+					pathStats.rdmaBytesAssumed.increment();
+				}
+				if (ctx.opType == OpType.READ) {
+					final ByteBuffer body = ctx.buffer.asReadOnlyBuffer();
+					body.position(0);
+					body.limit((int) result.bytes());
+					finishOutOfBandIntegrityRead(channel, op, body);
+					dataOp.countBytesDone(result.bytes());
+				}
+			}
+			case DECLINED -> {
+				pathStats.rdmaDeclined.increment();
+				// A declined PUT stored nothing. A declined GET delivered its body over HTTP,
+				// which counts only when HTTP fallback is allowed.
+				final boolean fail = ctx.opType == OpType.CREATE || !rdmaConfig.isFallbackEnabled();
+				if (declinedWarned.compareAndSet(false, true)) {
+					Loggers.MSG.warn("{}: server declined RDMA ({}) for {}; {}", stepId, result.reason(),
+									ctx.opType, fail ? "operations fail"
+													: "GET bodies arrive over HTTP (storage.rdma.fallback=true)");
+				}
+				if (fail) {
+					op.status(Operation.Status.RESP_FAIL_SVC);
+					dataOp.countBytesDone(0);
+				}
+			}
+			case PROTOCOL_ERROR -> {
+				pathStats.rdmaProtocolError.increment();
+				if (protocolErrorWarned.compareAndSet(false, true)) {
+					Loggers.MSG.warn("{}: RDMA reply contract violated for {}: {}",
+									stepId, ctx.opType, result.reason());
+				}
+				discardOutOfBandIntegrityRead(channel);
+				op.status(Operation.Status.RESP_FAIL_CORRUPT);
+				dataOp.countBytesDone(0);
+			}
 			}
 		} finally {
 			rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
@@ -600,6 +757,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 										stepId, ctx.opType, ctx.size, elapsedMs, op.status(),
 										(op instanceof DataOperation ? ((DataOperation) op).item().name() : "?"));
 						rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+						pathStats.rdmaTimedOut.increment();
 						op.status(Operation.Status.FAIL_IO);
 						discardOutOfBandIntegrityRead(ctx.channel);
 						super.complete(ctx.channel, (O) op);
@@ -640,7 +798,13 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 				rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
 			}
 		}
+		Loggers.MSG.info("{}: RDMA data path summary (transport {}): {}", stepId,
+						rdmaTransport.isAvailable() ? "available" : "unavailable", pathStats.summary());
 		rdmaTransport.close();
 		super.doClose();
+	}
+
+	RdmaPathStats pathStats() {
+		return pathStats;
 	}
 }

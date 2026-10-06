@@ -642,6 +642,7 @@ public class S3RdmaStorageDriverOverrideTest {
 		buffer.put(payload);
 		final long handle = 123L;
 		final var ctx = newRdmaContext("read-token", buffer, handle, OpType.READ, payload.length);
+		observeResponse(ctx, successfulGetReply(payload.length));
 		final var channel = new EmbeddedChannel();
 		final HttpHeaders headers = new DefaultHttpHeaders();
 		headers.set(IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_VERSION, "1");
@@ -669,6 +670,20 @@ public class S3RdmaStorageDriverOverrideTest {
 						op.integrityVerificationResult().verified());
 		Mockito.verify(transport).deregisterBuffer(buffer, handle);
 		channel.finishAndReleaseAll();
+	}
+
+	private static HttpHeaders successfulGetReply(final int bytes) {
+		final HttpHeaders reply = new DefaultHttpHeaders();
+		reply.set(RdmaReplyContract.REPLY_HEADER, "200");
+		reply.set(RdmaReplyContract.BYTES_TRANSFERRED_HEADER, Integer.toString(bytes));
+		reply.set(HttpHeaderNames.CONTENT_LENGTH, "0");
+		return reply;
+	}
+
+	private static void observeResponse(final Object ctx, final HttpHeaders reply) throws Exception {
+		final Method method = ctx.getClass().getDeclaredMethod("observeResponse", HttpHeaders.class);
+		method.setAccessible(true);
+		method.invoke(ctx, reply);
 	}
 
 	private static RdmaTransport availableTransport() {

@@ -54,14 +54,6 @@ public final class RdmaConfig {
 		}
 	}
 
-	private static int getInt(final Config config, final String key, final int defaultValue) {
-		try {
-			return config.intVal(key);
-		} catch (final Exception e) {
-			return defaultValue;
-		}
-	}
-
 	private static String getString(final Config config, final String key, final String defaultValue) {
 		try {
 			final String val = config.stringVal(key);
@@ -96,6 +88,11 @@ public final class RdmaConfig {
 		this.localIp = localIp;
 		this.logLevel = logLevel;
 		this.timeoutMs = timeoutMs;
+	}
+
+	/** Returns a copy with {@code localIp} replaced. */
+	public RdmaConfig withLocalIp(final String localIp) {
+		return new RdmaConfig(enabled, thresholdBytes, fallbackEnabled, device, localIp, logLevel, timeoutMs);
 	}
 
 	public boolean isEnabled() {

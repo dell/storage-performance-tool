@@ -9,8 +9,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Added
 
 - **S3 region selection** — Added `spt run --region` and engine YAML `storage.region` support to explicitly select the AWS region for S3 requests. Omitting the setting preserves each driver’s existing region selection.
+- **S3-RDMA data-path summary** — The `s3-rdma` driver now logs one end-of-step summary in `messages.log` showing how many data operations actually moved over RDMA, were declined by the server, failed, or used HTTP (below threshold, oversize, ineligible, or preparation fallback).
+- **Automatic RDMA local address** — When `--rdma-local-ip` is not set, each worker now selects the local address it routes toward the first S3 endpoint for RoCE GID selection, so distributed runs no longer need one shared address. Leave the flag unset for multi-host runs.
 
 ### Fixed
+
+- **S3-RDMA reply validation** — RDMA PUT and GET now honor the server's `x-amz-rdma-reply` and `x-amz-rdma-bytes-transferred` headers. A server that declines RDMA (HTTP 200 with reply 501, or no reply) previously produced "successful" writes counted at full object size although nothing was stored; declined PUTs now fail. Declined GETs are counted once over HTTP when `--rdma-fallback` is enabled and fail otherwise, GET bytes come from the server's reported transfer size, and responses that violate the reply contract fail as corrupt.
+- **S3-RDMA multipart uploads** — The multipart initiate request no longer allocates, copies, and registers the entire object; only upload parts use RDMA, each with a part-sized buffer.
+- **S3-RDMA fallback setting** — With `--rdma-fallback` disabled, RDMA buffer-registration or token failures now fail the operation instead of silently sending it over HTTP.
 
 - **DELETE failure-budget reporting** — Duration-based DELETE runs now propagate a failure-budget exception consistently when the budget is exceeded during worker startup, matching failures detected during active waiting.
 
