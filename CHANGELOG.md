@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - **Run labels on result artifacts** — `spt run --label` now applies the same sanitized label to generated step IDs and their result filenames as to the results directory. Runs without a label retain the `mt` prefix.
 - **Distributed launch messages** — Ordinary distributed workloads now report “distributed run” instead of the misleading “distributed replay.”
 - **Verification service startup** — `spt verify` now polls the required service ports for up to 30 seconds instead of checking once after a fixed ten-second sleep. Healthy engines that start more slowly can pass, already-ready engines proceed immediately, and unavailable ports still cause a bounded failure followed by container cleanup.
+- **False metrics-schema warning at run start** — The TUI no longer reports “Incompatible metrics JSON … requires metrics_schema >= 2” while engines are reachable but have not yet published metrics for the current run, such as during the pre-step stabilization pause. Genuinely incompatible metrics payloads still produce the warning, including when they first appear after startup.
 
 ## [5.15.2] - 2026-09-21
 

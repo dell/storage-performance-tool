@@ -1769,7 +1769,7 @@ func selectCurrentMetricSetForRun(
 		consider(metric)
 	}
 	if newest == nil {
-		return nil, fmt.Errorf("%w: no current metrics rows", ErrMetricsIncompatible)
+		return nil, fmt.Errorf("%w: no current metrics rows", ErrMetricsPending)
 	}
 
 	sameRun := func(metric *PerformanceMetric) bool {
@@ -1802,7 +1802,7 @@ func selectCurrentMetricSetForRun(
 		selected = append(selected, metric)
 	}
 	if len(selected) == 0 {
-		return nil, fmt.Errorf("%w: no current metrics rows", ErrMetricsIncompatible)
+		return nil, fmt.Errorf("%w: no current metrics rows", ErrMetricsPending)
 	}
 	return selected, nil
 }

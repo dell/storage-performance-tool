@@ -30,6 +30,11 @@ const apiLogPreviewLen = 160
 // ErrMetricsIncompatible indicates that the metrics payload cannot be consumed by this client.
 var ErrMetricsIncompatible = errors.New("spt metrics payload incompatible with this client")
 
+// ErrMetricsPending indicates that the engine responded but has not yet
+// published metrics for the current run, e.g. during pre-step stabilization.
+// It is a normal transient state, not a compatibility failure.
+var ErrMetricsPending = errors.New("spt metrics not yet available for this run")
+
 // ErrRunOwnershipUnknown prevents destructive run operations when the client
 // has not established ownership through a confirmed submission or bounded
 // submission reconciliation.
@@ -874,7 +879,7 @@ func (c *SptAPIClient) parseJSONMetricsScope(data, expectedScope string) ([]*Per
 	}
 
 	if len(steps) == 0 {
-		return nil, fmt.Errorf("no metrics steps found in JSON response: %w", ErrMetricsIncompatible)
+		return nil, fmt.Errorf("%w: no metrics steps found in JSON response", ErrMetricsPending)
 	}
 
 	type validated struct {

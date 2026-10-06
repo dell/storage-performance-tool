@@ -542,3 +542,77 @@ func TestMultiHostCompatibilityWarning(t *testing.T) {
 		t.Errorf("warning should mention schema, got %q", messages[0])
 	}
 }
+
+func TestMultiHostWarmupMetricsArePendingNotIncompatible(t *testing.T) {
+	var payload atomic.Value
+	setPayload := func(steps []JSONMetricsStep) {
+		payload.Store(marshalSteps(t, steps))
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/metrics/json" {
+			_, _ = w.Write([]byte(payload.Load().(string)))
+		}
+	}))
+	defer server.Close()
+
+	hostInfos := []*hostparse.HostInfo{{Original: "warmup", Host: "warmup"}}
+	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
+	orchestrator.hosts[0].SetStatus(HostStatusRunning)
+	orchestrator.hosts[0].APIClient = NewSptAPIClient(server.URL)
+	orchestrator.hosts[0].APIClient.SetRunID("run-1")
+
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	wrapper.SetExpectedStepIDs([]string{"step1"})
+	var messages []string
+	wrapper.SetMessageSink(func(msg string) {
+		messages = append(messages, msg)
+	})
+	poll := func() NodeConnectionStatus {
+		t.Helper()
+		results := wrapper.pollNodesConcurrently(context.Background(), orchestrator.GetReadyHosts())
+		status, ok := results.Status["warmup"]
+		if !ok {
+			t.Fatal("expected status for warmup host")
+		}
+		return status
+	}
+
+	staleRun := newTestStep()
+	staleRun.RunID = "run-0"
+	otherStep := newTestStep()
+	otherStep.StepID = "not-yet-expected"
+	warmupPayloads := map[string][]JSONMetricsStep{
+		"empty":      {},
+		"stale run":  {staleRun},
+		"other step": {otherStep},
+	}
+	for name, steps := range warmupPayloads {
+		setPayload(steps)
+		status := poll()
+		if !errors.Is(status.Error, ErrMetricsPending) {
+			t.Fatalf("%s: expected ErrMetricsPending, got %v", name, status.Error)
+		}
+		if errors.Is(status.Error, ErrMetricsIncompatible) {
+			t.Fatalf("%s: pending metrics must not be incompatible: %v", name, status.Error)
+		}
+		if !status.IsConnected || status.Phase != NodePhaseAPIReady {
+			t.Fatalf("%s: expected connected api_ready node, got %+v", name, status)
+		}
+	}
+	if len(messages) != 0 {
+		t.Fatalf("expected no compatibility warning during warmup, got %q", messages)
+	}
+
+	setPayload([]JSONMetricsStep{newTestStep()})
+	if status := poll(); status.Error != nil || status.Phase != NodePhaseMetricsFlowing {
+		t.Fatalf("expected metrics to flow once the step starts, got %+v", status)
+	}
+
+	legacy := newTestStep()
+	legacy.MetricsSchema = 1
+	setPayload([]JSONMetricsStep{legacy})
+	poll()
+	if len(messages) != 1 || !strings.Contains(messages[0], "metrics_schema=1") {
+		t.Fatalf("expected a real incompatibility to still warn after warmup, got %q", messages)
+	}
+}
