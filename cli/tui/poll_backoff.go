@@ -23,6 +23,7 @@ const (
 	pollErrorRetryable
 	pollErrorParse
 	pollErrorFatal
+	pollErrorPending
 )
 
 const metricsPayloadPreviewLen = 200
@@ -141,6 +142,10 @@ func (s *nodePollState) lastErrorSnapshot() error {
 func classifyPollError(err error) pollErrorKind {
 	if err == nil {
 		return pollErrorNone
+	}
+
+	if errors.Is(err, ErrMetricsPending) {
+		return pollErrorPending
 	}
 
 	if errors.Is(err, ErrMetricsIncompatible) {

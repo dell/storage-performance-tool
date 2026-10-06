@@ -109,6 +109,11 @@ func TestClassifyPollError(t *testing.T) {
 		t.Fatalf("expected pollErrorParse, got %v", kind)
 	}
 
+	pendingErr := fmt.Errorf("%w: no current metrics rows", ErrMetricsPending)
+	if kind := classifyPollError(pendingErr); kind != pollErrorPending {
+		t.Fatalf("expected pollErrorPending, got %v", kind)
+	}
+
 	jsonErr := &json.SyntaxError{Offset: 10}
 	if kind := classifyPollError(jsonErr); kind != pollErrorParse {
 		t.Fatalf("expected pollErrorParse for syntax error, got %v", kind)

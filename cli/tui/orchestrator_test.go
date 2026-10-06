@@ -1664,3 +1664,33 @@ func TestAmbiguousSubmissionCleanupDefersToSessionOwner(t *testing.T) {
 		t.Fatalf("canonical cleanup = %+v calls=%d", outcome, manager.GetCleanupCallCount())
 	}
 }
+
+func TestOrchestratorEmptyMetricsArePendingNotIncompatible(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/metrics/json" {
+			_, _ = w.Write([]byte("[]"))
+		}
+	}))
+	defer server.Close()
+
+	orchestrator := NewTestOrchestrator(nil, constants.SptAPIPort, "")
+	orchestrator.apiClient = NewSptAPIClient(server.URL)
+
+	var outputs []string
+	orchestrator.SetCallbacks(nil, nil, func(line string) {
+		outputs = append(outputs, line)
+	}, func(err string) {
+		outputs = append(outputs, "ERR:"+err)
+	})
+
+	_, _, err := orchestrator.tryJSONMetrics()
+	if !errors.Is(err, ErrMetricsPending) || errors.Is(err, ErrMetricsIncompatible) {
+		t.Fatalf("expected pending (not incompatible) error, got %v", err)
+	}
+	if kind := classifyPollError(err); kind != pollErrorPending {
+		t.Fatalf("expected pollErrorPending, got %v", kind)
+	}
+	if len(outputs) != 0 {
+		t.Fatalf("expected no compatibility warning for empty metrics, got %q", outputs)
+	}
+}

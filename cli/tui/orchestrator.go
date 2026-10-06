@@ -666,7 +666,7 @@ func (o *TestOrchestrator) collectMetricsUpdate() (*MultiNodeMetricsUpdate, stri
 		return nil, source, err
 	}
 	if len(allMetrics) == 0 {
-		return nil, source, fmt.Errorf("%w: local metrics are empty", ErrMetricsIncompatible)
+		return nil, source, fmt.Errorf("%w: local metrics are empty", ErrMetricsPending)
 	}
 	update, err := buildLocalMetricsUpdateForRun(allMetrics, o.apiClient.getRunID())
 	if err != nil {
