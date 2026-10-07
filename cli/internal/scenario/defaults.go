@@ -79,6 +79,8 @@ type RdmaConfig struct {
 	TimeoutMs int64  `yaml:"timeoutMs"`
 	// Emitted only when enabled so engines without this schema key still accept the defaults.
 	AllowMissingBytesHeader bool `yaml:"allowMissingBytesHeader,omitempty"`
+	// Emitted only when the pool is disabled; the engine default reuses registered buffers.
+	BufferPool *bool `yaml:"bufferPool,omitempty"`
 }
 
 // DriverConfig represents storage driver configuration
@@ -392,6 +394,10 @@ func GenerateDefaults(params Params) ([]byte, error) {
 				TimeoutMs: timeoutMs,
 
 				AllowMissingBytesHeader: params.RdmaAllowMissingBytesHeader,
+			}
+			if params.RdmaDisableBufferPool {
+				bufferPool := false
+				config.Storage.Rdma.BufferPool = &bufferPool
 			}
 		}
 

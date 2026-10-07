@@ -76,6 +76,9 @@ type Params struct {
 	// RdmaAllowMissingBytesHeader accepts RDMA GET successes without x-amz-rdma-bytes-transferred
 	// and counts the requested size (legacy servers; default: false).
 	RdmaAllowMissingBytesHeader bool
+	// RdmaDisableBufferPool registers a buffer per operation instead of reusing registered
+	// buffers (default: false, so the pool is used).
+	RdmaDisableBufferPool bool
 
 	// Checksum validation
 	Checksum string // Checksum algorithm: crc32, crc32c, sha1, sha256, crc64-nvme (empty = disabled)

@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.dell.spt.base.config.InitialConfigSchemaProvider;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.integrity.IntegrityMetadataCodec;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
@@ -35,6 +36,9 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -44,6 +48,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterEach;
@@ -65,6 +70,7 @@ final class S3RdmaReplyLoopbackTest {
 	/** Part retries allowed by {@code CoopStorageDriverBase.MAX_PART_RETRIES}. */
 	private static final int MAX_PART_RETRIES = 3;
 	private static final String OBJECT_BODY = "x".repeat(SIZE);
+	private static final int NO_RESPONSE = 0;
 	private static final String DECLINE_BODY = "<Error><Code>RDMANotSupported</Code><Message>RDMA not available</Message></Error>";
 
 	private final List<CapturedRequest> requests = new CopyOnWriteArrayList<>();
@@ -74,9 +80,16 @@ final class S3RdmaReplyLoopbackTest {
 	private volatile Reply reply;
 	private volatile byte[] serverReadPayload;
 	private volatile boolean chunkedReplies;
+	/** Byte the emulated server writes into client memory for an RDMA GET. */
+	private static final byte SERVER_GET_FILL = 0x5a;
+	/** Extra headers on object responses, such as integrity metadata. */
+	private volatile Map<String, String> objectResponseHeaders = Map.of();
 	private final List<Integer> serverReadSizes = new CopyOnWriteArrayList<>();
 
-	/** How the emulated server answers an object request carrying an RDMA token. */
+	/**
+	 * How the emulated server answers an object request carrying an RDMA token. An
+	 * {@code httpStatus} of {@link #NO_RESPONSE} closes the connection without answering.
+	 */
 	private record Reply(
 					int httpStatus,
 					String rdmaReply,
@@ -125,7 +138,7 @@ final class S3RdmaReplyLoopbackTest {
 			assertNotNull(serverReadPayload, "server should read the payload from registered memory");
 			assertEquals(SIZE, serverReadPayload.length);
 			assertEquals(1, driver.pathStats().rdmaTransferred.sum());
-			assertTrue(transport.areAllDeregistered());
+			assertNoBufferInUse(driver);
 		}
 	}
 
@@ -140,7 +153,7 @@ final class S3RdmaReplyLoopbackTest {
 			assertEquals(0, ((DataOperation<?>) result).countBytesDone());
 			assertEquals(1, driver.pathStats().rdmaDeclined.sum());
 			assertEquals(0, driver.pathStats().rdmaTransferred.sum());
-			assertTrue(transport.areAllDeregistered());
+			assertNoBufferInUse(driver);
 		}
 	}
 
@@ -164,7 +177,7 @@ final class S3RdmaReplyLoopbackTest {
 			assertEquals(Operation.Status.RESP_FAIL_SVC, result.status());
 			assertEquals(1, driver.pathStats().rdmaHttpError.sum());
 			assertEquals(0, driver.pathStats().rdmaDeclined.sum());
-			assertTrue(transport.areAllDeregistered());
+			assertNoBufferInUse(driver);
 		}
 	}
 
@@ -360,6 +373,96 @@ final class S3RdmaReplyLoopbackTest {
 		}
 	}
 
+	// ---------- Buffer pool ----------
+
+	@Test
+	void pooledBufferIsReusedAfterTheResponse() throws Exception {
+		reply = new Reply(200, "200", null, null, true);
+		try (final var driver = newDriver(false)) {
+			final var results = executeInSequence(driver, List.of(op(OpType.CREATE, SIZE), op(OpType.CREATE, SIZE)));
+
+			results.forEach(result -> assertEquals(Operation.Status.SUCC, result.status()));
+			assertEquals(List.of(SIZE, SIZE), serverReadSizes);
+			assertEquals(1, transport.getRegisterCount(), "the second PUT reuses the first PUT's registration");
+			assertEquals(1, driver.bufferPool().hits.sum());
+			assertNoBufferInUse(driver);
+		}
+	}
+
+	@Test
+	void disabledPoolRegistersAndReleasesEachOperation() throws Exception {
+		reply = new Reply(200, "200", null, null, true);
+		try (final var driver = newDriver(false, config -> config.val("storage-rdma-bufferPool", false))) {
+			final var results = executeInSequence(driver, List.of(op(OpType.CREATE, SIZE), op(OpType.CREATE, SIZE)));
+
+			results.forEach(result -> assertEquals(Operation.Status.SUCC, result.status()));
+			assertNull(driver.bufferPool());
+			assertEquals(2, transport.getRegisterCount());
+			assertTrue(transport.areAllDeregistered());
+		}
+	}
+
+	@Test
+	void closeDeregistersIdlePooledBuffers() throws Exception {
+		reply = new Reply(200, "200", null, null, true);
+		final RdmaBufferPool pool;
+		try (final var driver = newDriver(false)) {
+			assertEquals(Operation.Status.SUCC, execute(driver, op(OpType.CREATE, SIZE)).status());
+			pool = driver.bufferPool();
+			assertEquals(1, pool.idleBuffers());
+		}
+		assertEquals(0, pool.liveBuffers());
+		assertEquals(transport.getRegisterCount(), transport.getDeregisterCount());
+	}
+
+	@Test
+	void bufferOfARequestWithoutResponseIsNeverReused() throws Exception {
+		// The server might still access memory it never answered for.
+		reply = new Reply(NO_RESPONSE, null, null, null, false);
+		try (final var driver = newDriver(false)) {
+			final var dropped = execute(driver, op(OpType.CREATE, SIZE));
+			assertTrue(dropped.status() != Operation.Status.SUCC, "dropped request status: " + dropped.status());
+			assertEquals(1, driver.bufferPool().discarded.sum());
+			assertEquals(0, driver.bufferPool().liveBuffers());
+			assertEquals(1, transport.getDeregisterCount());
+		}
+	}
+
+	@Test
+	void verifiedGetOnAReusedBufferDoesNotPassOnStaleContent() throws Exception {
+		// Reading the same object twice: if the server claims the second transfer without
+		// writing, the buffer still holds the first read's (correct) content.
+		final byte[] content = new byte[SIZE];
+		Arrays.fill(content, SERVER_GET_FILL);
+		final String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
+		objectResponseHeaders = Map.of(
+						IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_VERSION, "1",
+						IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_ALGORITHM, "sha256",
+						IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_DIGEST, digest,
+						IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_SIZE, Integer.toString(SIZE));
+		try (final var driver = newDriver(false, config -> {
+			config.val("storage-driver-type", "s3-rdma");
+			config.val("storage-integrity-mode", "metadata");
+			config.val("storage-integrity-input-provenance", "external");
+		})) {
+			final ResultOutput output = new ResultOutput();
+			driver.operationResultOutput(output);
+			driver.start();
+
+			reply = new Reply(200, "200", Integer.toString(SIZE), null, true);
+			assertTrue(driver.put(op(OpType.READ, SIZE)));
+			final Operation<DataItem> first = output.await();
+			assertEquals(Operation.Status.SUCC, first.status());
+			assertTrue(first.integrityVerificationResult().verified());
+
+			reply = new Reply(200, "200", Integer.toString(SIZE), null, false);
+			assertTrue(driver.put(op(OpType.READ, SIZE)));
+			final Operation<DataItem> second = output.await();
+			assertEquals(1, driver.bufferPool().hits.sum(), "the second GET must reuse the first GET's buffer");
+			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, second.status());
+		}
+	}
+
 	// ---------- Multipart upload ----------
 
 	@Test
@@ -398,7 +501,7 @@ final class S3RdmaReplyLoopbackTest {
 							"multipart control requests carry no payload: " + request));
 			assertEquals(List.of(partSize, partSize), serverReadSizes);
 			assertEquals(parts, driver.pathStats().rdmaTransferred.sum());
-			assertTrue(transport.areAllDeregistered());
+			assertNoBufferInUse(driver);
 		}
 	}
 
@@ -426,7 +529,8 @@ final class S3RdmaReplyLoopbackTest {
 		// First attempt of each part reaches the server (declined, so its response timing is set);
 		// every retry then fails preparation. The retried part keeps the stale response timing.
 		reply = new Reply(200, "501", null, DECLINE_BODY, false);
-		try (final var driver = newDriver(false)) {
+		// Per-operation buffers: a pool would reuse the declined attempt's buffer and register nothing.
+		try (final var driver = newDriver(false, config -> config.val("storage-rdma-bufferPool", false))) {
 			transport.setFailAfterNRegistrations(2);
 			final var upload = multipartUpload(2048, 2);
 			final var result = executeUntil(driver, upload, S3RdmaReplyLoopbackTest::uploadTerminal);
@@ -484,19 +588,26 @@ final class S3RdmaReplyLoopbackTest {
 		}
 		final Reply current = reply;
 		if (current.performTransfer()) {
+			// The server accesses exactly the region the token describes.
 			final ByteBuffer clientMemory = transport.getRegisteredBuffer(rkeyHandle(token)).duplicate();
+			clientMemory.clear().limit(tokenSize(token));
 			if ("PUT".equals(method)) {
 				final byte[] payload = new byte[clientMemory.remaining()];
 				clientMemory.get(payload);
 				serverReadPayload = payload;
 				serverReadSizes.add(payload.length);
 			} else {
-				clientMemory.clear();
 				while (clientMemory.hasRemaining()) {
-					clientMemory.put((byte) 0x5a);
+					clientMemory.put(SERVER_GET_FILL);
 				}
 			}
 		}
+		if (current.httpStatus() == NO_RESPONSE) {
+			// Closing without sending headers makes the JDK server drop the connection.
+			exchange.close();
+			return;
+		}
+		objectResponseHeaders.forEach((name, value) -> exchange.getResponseHeaders().set(name, value));
 		if (current.rdmaReply() != null) {
 			exchange.getResponseHeaders().set(RdmaReplyContract.REPLY_HEADER, current.rdmaReply());
 		}
@@ -557,6 +668,10 @@ final class S3RdmaReplyLoopbackTest {
 		return Long.parseLong(token.split(":", -1)[2], 16);
 	}
 
+	private static int tokenSize(final String token) {
+		return Integer.parseInt(token.split(":", -1)[1], 16);
+	}
+
 	// ---------- Helpers ----------
 
 	private List<CapturedRequest> objectRequests() {
@@ -587,8 +702,13 @@ final class S3RdmaReplyLoopbackTest {
 
 	private S3RdmaStorageDriver<DataItem, Operation<DataItem>> newDriver(
 					final boolean fallback, final boolean allowMissingBytesHeader) throws Exception {
+		return newDriver(fallback, config -> config.val("storage-rdma-allowMissingBytesHeader", allowMissingBytesHeader));
+	}
+
+	private S3RdmaStorageDriver<DataItem, Operation<DataItem>> newDriver(
+					final boolean fallback, final Consumer<Config> customize) throws Exception {
 		final Config config = config(fallback);
-		config.val("storage-rdma-allowMissingBytesHeader", allowMissingBytesHeader);
+		customize.accept(config);
 		final RdmaConfig rdmaConfig = new RdmaConfig(config.configVal("storage").configVal("rdma"));
 		transport = new FakeRdmaTransport(rdmaConfig);
 		return new S3RdmaStorageDriver<>(
@@ -610,6 +730,34 @@ final class S3RdmaReplyLoopbackTest {
 		final Operation<DataItem> result = output.await();
 		assertNotNull(result, "operation did not complete");
 		return result;
+	}
+
+	/** Runs operations one after another, so each starts after the previous one completed. */
+	private static List<Operation<DataItem>> executeInSequence(
+					final S3RdmaStorageDriver<DataItem, Operation<DataItem>> driver,
+					final List<Operation<DataItem>> operations) throws Exception {
+		final ResultOutput output = new ResultOutput();
+		driver.operationResultOutput(output);
+		driver.start();
+		final List<Operation<DataItem>> results = new java.util.ArrayList<>();
+		for (final Operation<DataItem> operation : operations) {
+			assertTrue(driver.put(operation));
+			final Operation<DataItem> result = output.await();
+			assertNotNull(result, "operation did not complete");
+			results.add(result);
+		}
+		return results;
+	}
+
+	/** Every registered buffer is either deregistered or idle in the pool; none is held by a request. */
+	private void assertNoBufferInUse(final S3RdmaStorageDriver<?, ?> driver) {
+		final RdmaBufferPool pool = driver.bufferPool();
+		if (pool == null) {
+			assertTrue(transport.areAllDeregistered());
+			return;
+		}
+		assertEquals(pool.idleBuffers(), pool.liveBuffers(), pool.summary());
+		assertEquals(pool.idleBuffers(), transport.getActiveRegistrationCount(), pool.summary());
 	}
 
 	private Operation<DataItem> executeUntil(
@@ -708,6 +856,8 @@ final class S3RdmaReplyLoopbackTest {
 			config.val("storage-rdma-localIp", "");
 			config.val("storage-rdma-logLevel", "WARN");
 			config.val("storage-rdma-timeoutMs", 30_000L);
+			config.val("storage-rdma-allowMissingBytesHeader", false);
+			config.val("storage-rdma-bufferPool", true);
 			return config;
 		} catch (final Exception e) {
 			throw new IllegalStateException(e);

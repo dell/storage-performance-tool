@@ -46,7 +46,7 @@ You can use these variables to avoid repeating sensitive or commonly used parame
 - **Integrity qualification:** `SPT_DEFER_VERIFICATION` (true/false), `SPT_INTEGRITY_MAX_CONSOLE_FAILURES`, `SPT_INTEGRITY_RUNTIME_IDENTITY_TIER` (`image` or `payload`)
 - **Data shaping:** `SPT_OBJECT_DATA_COMPRESSIBILITY` (0-100, default 0), `SPT_OBJECT_DATA_DEDUPABLE` (true/false, default true)
 - **Storage driver:** `SPT_S3_DRIVER` (driver backend: `default`, `aws`, `rdma`)
-- **RDMA:** `SPT_RDMA`, `RDMA_LOCAL_IP`, `RDMA_DEVICE`, `RDMA_LOG_LEVEL`, `RDMA_THRESHOLD_BYTES`, `RDMA_TIMEOUT_MS`, `RDMA_FALLBACK_ENABLED`, `RDMA_ALLOW_MISSING_BYTES_HEADER`
+- **RDMA:** `SPT_RDMA`, `RDMA_LOCAL_IP`, `RDMA_DEVICE`, `RDMA_LOG_LEVEL`, `RDMA_THRESHOLD_BYTES`, `RDMA_TIMEOUT_MS`, `RDMA_FALLBACK_ENABLED`, `RDMA_ALLOW_MISSING_BYTES_HEADER`, `RDMA_BUFFER_POOL`
 
 Variable expansion: use `$VAR` or `${VAR}`. Command substitutions like `$(pwd)` are not supported; use `$PWD` instead.
 
@@ -618,6 +618,7 @@ See [S3_RDMA.md](S3_RDMA.md) for detailed documentation, architecture, and troub
 | `--rdma-log-level` | `WARN` | RDMA native library log level |
 | `--rdma-timeout-ms` | `30000` | RDMA operation timeout in milliseconds |
 | `--rdma-allow-missing-bytes-header` | `false` | Legacy servers only: accept an RDMA GET success without `x-amz-rdma-bytes-transferred` and count the requested size. By default such a response fails as corrupt |
+| `--rdma-buffer-pool` | `true` | Reuse registered RDMA buffers across operations. `false` allocates and registers a buffer for every operation (the previous behavior) |
 
 #### 8. S3 Tables Options
 

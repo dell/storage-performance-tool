@@ -194,6 +194,7 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 	for flag, env := range map[string]string{
 		"rdma-fallback":                   constants.EnvRdmaFallback,
 		"rdma-allow-missing-bytes-header": constants.EnvRdmaAllowMissingBytesHeader,
+		"rdma-buffer-pool":                constants.EnvRdmaBufferPool,
 	} {
 		if f := cmd.Flags().Lookup(flag); f != nil && !cmd.Flags().Changed(flag) {
 			if v := strings.TrimSpace(os.Getenv(env)); v != "" {

@@ -17,6 +17,7 @@ public final class RdmaConfig {
 	private final String logLevel;
 	private final long timeoutMs;
 	private final boolean allowMissingBytesHeader;
+	private final boolean bufferPool;
 
 	public RdmaConfig(final Config rdmaConfig) {
 		if (rdmaConfig == null) {
@@ -29,6 +30,7 @@ public final class RdmaConfig {
 			this.logLevel = DEFAULT_LOG_LEVEL;
 			this.timeoutMs = DEFAULT_TIMEOUT_MS;
 			this.allowMissingBytesHeader = false;
+			this.bufferPool = true;
 		} else {
 			this.enabled = getBoolean(rdmaConfig, "enabled", true);
 			this.thresholdBytes = getLong(rdmaConfig, "thresholdBytes", DEFAULT_THRESHOLD_BYTES);
@@ -38,6 +40,7 @@ public final class RdmaConfig {
 			this.logLevel = getString(rdmaConfig, "logLevel", DEFAULT_LOG_LEVEL);
 			this.timeoutMs = getLong(rdmaConfig, "timeoutMs", DEFAULT_TIMEOUT_MS);
 			this.allowMissingBytesHeader = getBoolean(rdmaConfig, "allowMissingBytesHeader", false);
+			this.bufferPool = getBoolean(rdmaConfig, "bufferPool", true);
 		}
 	}
 
@@ -100,6 +103,21 @@ public final class RdmaConfig {
 					final String logLevel,
 					final long timeoutMs,
 					final boolean allowMissingBytesHeader) {
+		this(enabled, thresholdBytes, fallbackEnabled, device, localIp, logLevel, timeoutMs, allowMissingBytesHeader,
+						true);
+	}
+
+	/** @param bufferPool reuse registered buffers across operations instead of registering one per operation */
+	public RdmaConfig(
+					final boolean enabled,
+					final long thresholdBytes,
+					final boolean fallbackEnabled,
+					final String device,
+					final String localIp,
+					final String logLevel,
+					final long timeoutMs,
+					final boolean allowMissingBytesHeader,
+					final boolean bufferPool) {
 		this.enabled = enabled;
 		this.thresholdBytes = thresholdBytes;
 		this.fallbackEnabled = fallbackEnabled;
@@ -108,13 +126,14 @@ public final class RdmaConfig {
 		this.logLevel = logLevel;
 		this.timeoutMs = timeoutMs;
 		this.allowMissingBytesHeader = allowMissingBytesHeader;
+		this.bufferPool = bufferPool;
 	}
 
 	/** Returns a copy with {@code localIp} replaced. */
 	public RdmaConfig withLocalIp(final String localIp) {
 		return new RdmaConfig(
 						enabled, thresholdBytes, fallbackEnabled, device, localIp, logLevel, timeoutMs,
-						allowMissingBytesHeader);
+						allowMissingBytesHeader, bufferPool);
 	}
 
 	public boolean isEnabled() {
@@ -150,6 +169,11 @@ public final class RdmaConfig {
 		return allowMissingBytesHeader;
 	}
 
+	/** Whether registered buffers are reused across operations. */
+	public boolean isBufferPoolEnabled() {
+		return bufferPool;
+	}
+
 	/** Whether {@code device} names a specific RDMA device rather than requesting auto-detection. */
 	public boolean hasExplicitDevice() {
 		return device != null && !device.isEmpty() && !DEFAULT_DEVICE.equals(device);
@@ -166,6 +190,7 @@ public final class RdmaConfig {
 						", logLevel='" + logLevel + '\'' +
 						", timeoutMs=" + timeoutMs +
 						", allowMissingBytesHeader=" + allowMissingBytesHeader +
+						", bufferPool=" + bufferPool +
 						'}';
 	}
 }

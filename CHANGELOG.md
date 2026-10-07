@@ -13,6 +13,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - **Automatic RDMA local address** — When `--rdma-local-ip` is not set and `--rdma-device` is `auto`, each worker now selects the local address it routes toward the first S3 endpoint for RoCE GID selection, so distributed runs no longer need one shared address. Leave the flag unset for multi-host runs; a named `--rdma-device` keeps device selection authoritative.
 - **Legacy RDMA byte-count option** — Added `spt run --rdma-allow-missing-bytes-header` (env `RDMA_ALLOW_MISSING_BYTES_HEADER`, engine `storage.rdma.allowMissingBytesHeader`) for servers that report RDMA GET success without `x-amz-rdma-bytes-transferred`; it counts the requested size instead of failing the read.
 
+### Changed
+
+- **S3-RDMA buffer reuse** — The `s3-rdma` driver now keeps registered buffers and reuses them across operations instead of allocating, zero-filling, and registering a new buffer for every PUT and GET, which limited RDMA throughput. A buffer is reused only after the server answered its request; buffers of requests that time out or lose their connection are deregistered. `spt run --rdma-buffer-pool=false` (env `RDMA_BUFFER_POOL`, engine `storage.rdma.bufferPool`) restores per-operation buffers. The RDMA data-path summary in `messages.log` adds pool counters.
+
 ### Fixed
 
 - **S3-RDMA reply validation** — RDMA PUT and GET now honor the server's `x-amz-rdma-reply` and `x-amz-rdma-bytes-transferred` headers. A server that declines RDMA (HTTP 200 with reply 501, or no reply) previously produced "successful" writes counted at full object size although nothing was stored; declined PUTs now fail. Declined GETs are counted once over HTTP when `--rdma-fallback` is enabled and fail otherwise. GET bytes come from the server's reported transfer size, and a success without that header, a byte-count mismatch, or any HTTP body (including chunked bodies) on an RDMA success fails as corrupt.

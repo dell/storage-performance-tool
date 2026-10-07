@@ -96,6 +96,10 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		long bytesTransferred = RdmaReplyContract.VALUE_ABSENT;
 		long responseContentLength = RdmaReplyContract.VALUE_ABSENT;
 		long responseBodyBytes;
+		/** A server response was received, so the server no longer accesses the buffer. */
+		boolean responseObserved;
+		/** Pool buffer backing this request, or {@code null} for a per-operation buffer. */
+		RdmaBufferPool.PooledBuffer pooled;
 
 		RdmaContext(final String token, final ByteBuffer buffer, final long mrHandle,
 						final OpType opType, final int size) {
@@ -107,6 +111,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		}
 
 		void observeResponse(final HttpHeaders headers) {
+			responseObserved = true;
 			reply = RdmaReplyContract.parseReply(headers.get(RdmaReplyContract.REPLY_HEADER));
 			bytesTransferred = RdmaReplyContract.parseCount(
 							headers.get(RdmaReplyContract.BYTES_TRANSFERRED_HEADER));
@@ -164,6 +169,15 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 	private final RdmaPathStats pathStats = new RdmaPathStats();
 
+	/** Spacing of the bytes altered in a reused GET buffer; one per page. */
+	static final int STALE_CONTENT_STRIDE_BYTES = 4096;
+
+	/** Bound used when the driver's concurrency is unlimited. */
+	private static final int UNLIMITED_CONCURRENCY_POOL_LIMIT = 256;
+
+	/** Reused registered buffers, or {@code null} when storage.rdma.bufferPool is disabled. */
+	private final RdmaBufferPool bufferPool;
+
 	/**
 	 * ThreadLocal to pass the RDMA token from httpRequest() into applyMetaDataHeaders().
 	 * Used because applyMetaDataHeaders() does not receive the Operation as a parameter.
@@ -219,6 +233,12 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		rdmaTransport = Objects.requireNonNull(
 						transportFactory, "RDMA transport factory").apply(rdmaConfig);
 		Objects.requireNonNull(rdmaTransport, "RDMA transport");
+		// In-flight RDMA operations are bounded by the concurrency throttle; one extra buffer per
+		// size class covers an operation prepared just before the throttle rejects it.
+		bufferPool = rdmaConfig.isBufferPoolEnabled()
+						? new RdmaBufferPool(rdmaTransport,
+										concurrencyLimit > 0 ? concurrencyLimit + 1 : UNLIMITED_CONCURRENCY_POOL_LIMIT)
+						: null;
 		boolean transportInitialized = false;
 		try {
 			if (rdmaConfig.isEnabled()) {
@@ -405,12 +425,22 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 		ByteBuffer buf = null;
 		long mrHandle = 0;
+		RdmaBufferPool.PooledBuffer pooled = null;
 		try {
-			buf = ByteBuffer.allocateDirect(size);
-
-			mrHandle = rdmaTransport.registerBuffer(buf, size);
-			if (mrHandle == 0) {
-				return prepareFailed(op, "buffer registration failed");
+			pooled = bufferPool == null ? null : bufferPool.acquire(size);
+			if (pooled != null) {
+				buf = pooled.buffer();
+				mrHandle = pooled.mrHandle();
+				// Integrity verification is the only check of RDMA-delivered GET content.
+				if (opType == OpType.READ && integrityMetadataEnabled()) {
+					invalidateStaleContent(buf, size);
+				}
+			} else {
+				buf = ByteBuffer.allocateDirect(size);
+				mrHandle = rdmaTransport.registerBuffer(buf, size);
+				if (mrHandle == 0) {
+					return prepareFailed(op, "buffer registration failed");
+				}
 			}
 
 			// For PUT: copy data into the registered buffer
@@ -423,19 +453,22 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 			final String token = rdmaTransport.generateToken(mrHandle, size);
 			if (token == null) {
-				rdmaTransport.deregisterBuffer(buf, mrHandle);
+				// Nothing was sent, so a pool buffer can be reused.
+				releaseBuffer(pooled, buf, mrHandle, true);
 				return prepareFailed(op, "token generation failed");
 			}
 
 			// Store RDMA context — httpRequest() adds the header, complete() cleans up
-			rdmaOps.put(op, new RdmaContext(token, buf, mrHandle, opType, size));
+			final RdmaContext ctx = new RdmaContext(token, buf, mrHandle, opType, size);
+			ctx.pooled = pooled;
+			rdmaOps.put(op, ctx);
 
 			Loggers.MSG.debug("{}: RDMA submit: type={} size={} token={}", stepId, opType, size, token);
 
 			final boolean submitted = super.submit(op);
 			if (!submitted) {
-				// Throttle exhausted — clean up since complete() won't be called
-				cleanupRdmaContext(op);
+				// Throttle exhausted: the request was not sent and complete() won't be called.
+				cleanupRdmaContext(op, true);
 			}
 			return submitted;
 
@@ -443,11 +476,10 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			LogUtil.exception(Level.DEBUG, e, "{}: RDMA submit failed for {}",
 							stepId, item.name());
 
-			// Clean up — check rdmaOps first (context may already be stored)
-			if (!cleanupRdmaContext(op)) {
-				if (mrHandle != 0) {
-					rdmaTransport.deregisterBuffer(buf, mrHandle);
-				}
+			// Clean up — check rdmaOps first (context may already be stored). The request may
+			// have been dispatched, so the buffer is not reused.
+			if (!cleanupRdmaContext(op, false)) {
+				releaseBuffer(pooled, buf, mrHandle, false);
 			}
 
 			return prepareFailed(op, e.getClass().getSimpleName());
@@ -491,16 +523,49 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/** Remove and clean up RDMA context for an operation. Returns true if found. */
-	private boolean cleanupRdmaContext(final O op) {
+	private boolean cleanupRdmaContext(final O op, final boolean reusable) {
 		final RdmaContext ctx;
 		synchronized (op) {
 			ctx = rdmaOps.remove(op);
 		}
 		if (ctx != null) {
-			rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+			releaseBuffer(ctx.pooled, ctx.buffer, ctx.mrHandle, reusable);
 			return true;
 		}
 		return false;
+	}
+
+	/**
+	 * Ends a request's use of its buffer. A pool buffer is reused only when {@code reusable}:
+	 * the request was never sent, or the server's response was received. Otherwise the server
+	 * might still access it, so it is deregistered and dropped.
+	 */
+	private void releaseBuffer(
+					final RdmaBufferPool.PooledBuffer pooled, final ByteBuffer buffer, final long mrHandle,
+					final boolean reusable) {
+		if (pooled != null) {
+			if (reusable) {
+				bufferPool.release(pooled);
+			} else {
+				bufferPool.discard(pooled);
+			}
+		} else if (mrHandle != 0) {
+			rdmaTransport.deregisterBuffer(buffer, mrHandle);
+		}
+	}
+
+	/**
+	 * Alters a reused buffer at every page so a read the server reports but does not write cannot
+	 * pass verification on content left by an earlier read of the same object.
+	 */
+	static void invalidateStaleContent(final ByteBuffer buffer, final int size) {
+		for (int i = 0; i < size; i += STALE_CONTENT_STRIDE_BYTES) {
+			buffer.put(i, (byte) ~buffer.get(i));
+		}
+		final int last = size - 1;
+		if (last > 0 && last % STALE_CONTENT_STRIDE_BYTES != 0) {
+			buffer.put(last, (byte) ~buffer.get(last));
+		}
 	}
 
 	/**
@@ -770,7 +835,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			}
 			}
 		} finally {
-			rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+			releaseBuffer(ctx.pooled, ctx.buffer, ctx.mrHandle, ctx.responseObserved);
 		}
 	}
 
@@ -797,7 +862,8 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 						Loggers.MSG.warn("{}: RDMA operation timed out: type={} size={} elapsed={}ms status={} item={}",
 										stepId, ctx.opType, ctx.size, elapsedMs, op.status(),
 										(op instanceof DataOperation ? ((DataOperation) op).item().name() : "?"));
-						rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+						// The server may still access a timed-out request's buffer.
+						releaseBuffer(ctx.pooled, ctx.buffer, ctx.mrHandle, false);
 						pathStats.rdmaTimedOut.increment();
 						op.status(Operation.Status.FAIL_IO);
 						// finishResponse() throws before settling a part whose response never
@@ -841,16 +907,24 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			final var entry = it.next();
 			final var ctx = entry.getValue();
 			if (rdmaOps.remove(entry.getKey(), ctx)) {
-				rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+				releaseBuffer(ctx.pooled, ctx.buffer, ctx.mrHandle, false);
 			}
 		}
-		Loggers.MSG.info("{}: RDMA data path summary (transport {}): {}", stepId,
-						rdmaTransport.isAvailable() ? "available" : "unavailable", pathStats.summary());
+		if (bufferPool != null) {
+			bufferPool.close();
+		}
+		Loggers.MSG.info("{}: RDMA data path summary (transport {}): {}{}", stepId,
+						rdmaTransport.isAvailable() ? "available" : "unavailable", pathStats.summary(),
+						bufferPool == null ? ", bufferPool=disabled" : ", " + bufferPool.summary());
 		rdmaTransport.close();
 		super.doClose();
 	}
 
 	RdmaPathStats pathStats() {
 		return pathStats;
+	}
+
+	RdmaBufferPool bufferPool() {
+		return bufferPool;
 	}
 }

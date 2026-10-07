@@ -68,8 +68,9 @@ spt run read \
 | `--rdma-log-level` | `WARN` | RDMA native library log level |
 | `--rdma-timeout-ms` | `30000` | RDMA operation timeout in milliseconds |
 | `--rdma-allow-missing-bytes-header` | `false` | Legacy servers only: accept an RDMA GET success without `x-amz-rdma-bytes-transferred` and count the requested size. By default such a response fails as corrupt |
+| `--rdma-buffer-pool` | `true` | Reuse registered RDMA buffers across operations. `false` allocates and registers a buffer for every operation (the previous behavior) |
 
-**Environment variable overrides:** `SPT_RDMA`, `RDMA_LOCAL_IP`, `RDMA_DEVICE`, `RDMA_LOG_LEVEL`, `RDMA_THRESHOLD_BYTES`, `RDMA_TIMEOUT_MS`, `RDMA_FALLBACK_ENABLED`, `RDMA_ALLOW_MISSING_BYTES_HEADER`
+**Environment variable overrides:** `SPT_RDMA`, `RDMA_LOCAL_IP`, `RDMA_DEVICE`, `RDMA_LOG_LEVEL`, `RDMA_THRESHOLD_BYTES`, `RDMA_TIMEOUT_MS`, `RDMA_FALLBACK_ENABLED`, `RDMA_ALLOW_MISSING_BYTES_HEADER`, `RDMA_BUFFER_POOL`
 
 ---
 
@@ -101,6 +102,8 @@ Selecting the RDMA driver does not by itself prove that payloads moved over RDMA
 | Reply 200 with an HTTP body, a byte-count mismatch, or a GET without `x-amz-rdma-bytes-transferred` | Contract violation: the operation fails as corrupt (see `--rdma-allow-missing-bytes-header` for legacy servers) |
 
 At the end of each step the engine logs one `RDMA data path summary` line in `messages.log` with counts of operations transferred over RDMA, declined by the server, failed, timed out, and sent over HTTP (below threshold, ineligible, oversize, or preparation fallback). Check it before trusting RDMA results.
+
+The summary also reports the buffer pool: `poolHits` operations reused a registered buffer, `poolCreated` buffers were allocated and registered, `poolExhausted` operations found every buffer of their size in use and registered their own, and `poolDiscarded` buffers were deregistered because their request ended without a server response (timeout, lost connection, or shutdown). A buffer is reused only after the server answered its request, so the server can no longer access it.
 
 ---
 

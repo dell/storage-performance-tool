@@ -22,3 +22,4 @@ storage:
     logLevel: WARN
     timeoutMs: 30000
     allowMissingBytesHeader: false
+    bufferPool: true

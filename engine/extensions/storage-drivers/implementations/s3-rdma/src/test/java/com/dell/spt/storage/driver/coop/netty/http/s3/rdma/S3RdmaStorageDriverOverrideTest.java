@@ -735,9 +735,10 @@ public class S3RdmaStorageDriverOverrideTest {
 					final S3RdmaStorageDriver<?, ?> driver,
 					final Operation<?> op) throws Exception {
 		final Method m = S3RdmaStorageDriver.class.getDeclaredMethod(
-						"cleanupRdmaContext", Operation.class);
+						"cleanupRdmaContext", Operation.class, boolean.class);
 		m.setAccessible(true);
-		return (boolean) m.invoke(driver, op);
+		// Not reusable: the cleanup paths under test end requests that may have been sent.
+		return (boolean) m.invoke(driver, op, false);
 	}
 
 	private static void invokeBindRequestChannel(
