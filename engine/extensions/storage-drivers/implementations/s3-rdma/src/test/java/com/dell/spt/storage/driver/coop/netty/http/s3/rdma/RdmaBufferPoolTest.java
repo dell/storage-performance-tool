@@ -139,6 +139,54 @@ class RdmaBufferPoolTest {
 	}
 
 	@Test
+	void reclaimIdleDropsOnlyIdleBuffers() {
+		final var pool = new RdmaBufferPool(transport, 4, UNBOUNDED);
+		final var idle = pool.acquire(2 * MIB);
+		final var leased = pool.acquire(MIB);
+		pool.release(idle);
+
+		assertEquals(2L * MIB, pool.reclaimIdle());
+
+		assertTrue(transport.wasDeregistered(idle.mrHandle()));
+		assertFalse(transport.wasDeregistered(leased.mrHandle()));
+		assertEquals(0, pool.idleBuffers());
+		assertEquals(1, pool.liveBuffers());
+		assertEquals((long) MIB, pool.liveBytes());
+	}
+
+	@Test
+	void exhaustedUnpooledAllocationReclaimsIdleBuffersAndRetriesOnce() {
+		final var pool = new RdmaBufferPool(transport, 4, UNBOUNDED);
+		pool.release(pool.acquire(MIB));
+		final int[] calls = {0};
+
+		final ByteBuffer allocated = RdmaBufferPool.allocateUnpooled(4096, pool, size -> {
+			if (calls[0]++ == 0) {
+				throw new OutOfMemoryError("Cannot reserve 4096 bytes of direct buffer memory");
+			}
+			return ByteBuffer.allocateDirect(size);
+		});
+
+		assertNotNull(allocated);
+		assertEquals(2, calls[0]);
+		assertEquals(0, pool.idleBuffers());
+	}
+
+	@Test
+	void exhaustedUnpooledAllocationWithNothingToReclaimFails() {
+		final var pool = new RdmaBufferPool(transport, 4, UNBOUNDED);
+		final int[] calls = {0};
+		final java.util.function.IntFunction<ByteBuffer> exhausted = size -> {
+			calls[0]++;
+			throw new OutOfMemoryError("Cannot reserve direct buffer memory");
+		};
+
+		assertNull(RdmaBufferPool.allocateUnpooled(4096, pool, exhausted));
+		assertEquals(1, calls[0], "no retry without reclaimed memory");
+		assertNull(RdmaBufferPool.allocateUnpooled(4096, null, exhausted));
+	}
+
+	@Test
 	void defaultBudgetIsAShareOfTheDirectMemoryLimit() {
 		assertTrue(RdmaBufferPool.defaultMaxPooledBytes() > 0);
 	}

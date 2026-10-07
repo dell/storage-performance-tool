@@ -49,6 +49,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
+import java.util.function.IntFunction;
 
 /**
  * S3 storage driver with RDMA support for high-performance data transfer.
@@ -188,6 +189,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 	/** Reused registered buffers, or {@code null} when storage.rdma.bufferPool is disabled. */
 	private final RdmaBufferPool bufferPool;
+
+	/** Allocates per-operation buffers; replaced only by tests to simulate exhausted direct memory. */
+	IntFunction<ByteBuffer> directAllocator = ByteBuffer::allocateDirect;
 
 	/**
 	 * ThreadLocal to pass the RDMA token from httpRequest() into applyMetaDataHeaders().
@@ -451,7 +455,10 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 					invalidated = true;
 				}
 			} else {
-				buf = ByteBuffer.allocateDirect(size);
+				buf = RdmaBufferPool.allocateUnpooled(size, bufferPool, directAllocator);
+				if (buf == null) {
+					return prepareFailed(op, "direct memory exhausted");
+				}
 				mrHandle = rdmaTransport.registerBuffer(buf, size);
 				if (mrHandle == 0) {
 					return prepareFailed(op, "buffer registration failed");

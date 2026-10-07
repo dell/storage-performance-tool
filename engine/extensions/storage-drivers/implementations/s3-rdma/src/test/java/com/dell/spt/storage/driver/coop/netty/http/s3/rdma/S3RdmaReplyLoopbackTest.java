@@ -313,6 +313,36 @@ final class S3RdmaReplyLoopbackTest {
 	}
 
 	@Test
+	void exhaustedDirectMemoryFailsTheOperationInsteadOfThrowing() throws Exception {
+		reply = new Reply(200, "200", null, null, true);
+		try (final var driver = newDriver(false, config -> config.val("storage-rdma-bufferPool", false))) {
+			driver.directAllocator = size -> {
+				throw new OutOfMemoryError("Cannot reserve " + size + " bytes of direct buffer memory");
+			};
+			final var result = execute(driver, op(OpType.CREATE, SIZE));
+
+			assertEquals(Operation.Status.FAIL_IO, result.status());
+			assertTrue(objectRequests().isEmpty(), "no request may be sent: " + requests);
+			assertEquals(1, driver.pathStats().prepareFailed.sum());
+		}
+	}
+
+	@Test
+	void exhaustedDirectMemoryWithFallbackSendsHttpBody() throws Exception {
+		reply = new Reply(200, null, null, null, false);
+		try (final var driver = newDriver(true, config -> config.val("storage-rdma-bufferPool", false))) {
+			driver.directAllocator = size -> {
+				throw new OutOfMemoryError("Cannot reserve " + size + " bytes of direct buffer memory");
+			};
+			final var result = execute(driver, op(OpType.CREATE, SIZE));
+
+			assertEquals(Operation.Status.SUCC, result.status());
+			assertNull(onlyObjectRequest("PUT").rdmaToken());
+			assertEquals(1, driver.pathStats().httpFallback.sum());
+		}
+	}
+
+	@Test
 	void registrationFailureWithFallbackSendsHttpBody() throws Exception {
 		reply = new Reply(200, null, null, null, false);
 		try (final var driver = newDriver(true)) {

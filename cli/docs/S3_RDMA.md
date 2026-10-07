@@ -109,11 +109,11 @@ The summary also reports the buffer pool. The counters are:
 - `poolCreated`: buffers allocated and registered.
 - `poolExhausted`: operations that found their size class or the pool's memory budget fully in use and used a per-operation buffer.
 - `poolUnpooled`: operations larger than 1 GiB, which always use a per-operation buffer.
-- `poolEvicted`: idle buffers deregistered to make room for another size.
+- `poolEvicted`: idle buffers deregistered to make room for another size, or to free direct memory for a per-operation buffer.
 - `poolDiscarded`: buffers deregistered because their request ended without the server's final response (timeout, lost connection, informational-only reply, or shutdown) or because a GET that integrity verification checks did not deliver verified content.
 - `poolInvalidReturns`: must be 0.
 
-A buffer is reused only after the server's final response to its request, when the server can no longer access it. All pooled buffers together stay within half of the JVM's direct-memory limit (`-XX:MaxDirectMemorySize`).
+A buffer is reused only after the server's final response to its request, when the server can no longer access it. All pooled buffers together stay within half of the JVM's direct-memory limit (`-XX:MaxDirectMemorySize`). If a per-operation buffer cannot be allocated because direct memory is exhausted, the idle pooled buffers are released and the allocation is retried once. If it still fails, the operation fails, or uses HTTP with `--rdma-fallback`.
 
 ---
 

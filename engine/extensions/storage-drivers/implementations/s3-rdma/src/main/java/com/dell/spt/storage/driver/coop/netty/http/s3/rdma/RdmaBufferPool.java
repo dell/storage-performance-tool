@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.IntFunction;
 
 /**
  * Registered direct buffers reused across RDMA operations.
@@ -28,7 +29,8 @@ import java.util.concurrent.atomic.LongAdder;
  * buffers together at most {@code maxPooledBytes}. A new buffer that would exceed the byte budget
  * first evicts idle buffers of other classes. Transfers larger than {@link #MAX_CLASS_BYTES}, and
  * requests that find their class or the budget exhausted, get {@code null} from {@link #acquire}
- * and use a per-operation buffer instead.
+ * and use a per-operation buffer instead. Idle buffers stay reclaimable for those: see
+ * {@link #allocateUnpooled}.
  */
 final class RdmaBufferPool {
 
@@ -194,6 +196,50 @@ final class RdmaBufferPool {
 		}
 		discarded.increment();
 		transport.deregisterBuffer(pooled.buffer, pooled.mrHandle);
+	}
+
+	/**
+	 * Allocates a per-operation direct buffer. If direct memory is exhausted, the pool's idle
+	 * buffers are deregistered and dropped so their memory can be reclaimed, and the allocation is
+	 * retried once.
+	 *
+	 * @param pool the pool whose idle buffers may be reclaimed, or {@code null}
+	 * @return the buffer, or {@code null} if direct memory is still exhausted
+	 */
+	static ByteBuffer allocateUnpooled(
+					final int size, final RdmaBufferPool pool, final IntFunction<ByteBuffer> allocator) {
+		try {
+			return allocator.apply(size);
+		} catch (final OutOfMemoryError exhausted) {
+			if (pool == null || pool.reclaimIdle() == 0) {
+				return null;
+			}
+		}
+		try {
+			// The JDK collects the dropped buffers when the retry finds direct memory exhausted.
+			return allocator.apply(size);
+		} catch (final OutOfMemoryError stillExhausted) {
+			return null;
+		}
+	}
+
+	/** Deregisters and drops every idle buffer; returns the capacity released. */
+	long reclaimIdle() {
+		final List<PooledBuffer> reclaimed = new ArrayList<>();
+		long bytes = 0;
+		synchronized (this) {
+			for (final ArrayDeque<PooledBuffer> list : idle.values()) {
+				PooledBuffer pooled;
+				while ((pooled = list.pollFirst()) != null) {
+					unreserve(pooled.capacity);
+					bytes += pooled.capacity;
+					reclaimed.add(pooled);
+				}
+			}
+		}
+		evicted.add(reclaimed.size());
+		deregisterAfterUnlock(reclaimed);
+		return bytes;
 	}
 
 	/** Deregisters every idle buffer; leased buffers are discarded or released by their owners. */
