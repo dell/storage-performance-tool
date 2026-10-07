@@ -106,6 +106,7 @@ netty-codec-http = { module = "io.netty:netty-codec-http", version.ref = "netty"
 netty-codec-http2 = { module = "io.netty:netty-codec-http2", version.ref = "netty" }
 netty-common = { module = "io.netty:netty-common", version.ref = "netty" }
 netty-handler = { module = "io.netty:netty-handler", version.ref = "netty" }
+netty-resolver-dns = { module = "io.netty:netty-resolver-dns", version.ref = "netty" }
 netty-transport = { module = "io.netty:netty-transport", version.ref = "netty" }
 netty-transport-native-epoll = { module = "io.netty:netty-transport-native-epoll", version.ref = "netty" }
 netty-transport-native-kqueue = { module = "io.netty:netty-transport-native-kqueue", version.ref = "netty" }

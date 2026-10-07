@@ -38,6 +38,7 @@ dependencies {
 		libs.netty.transport.native.kqueue,
 		libs.netty.handler,
 		libs.netty.codec,
+		libs.netty.resolver.dns,
 		libs.disruptor,
 		libs.javassist,
 		libs.bouncycastle.bcprov.jdk18on,
