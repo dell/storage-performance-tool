@@ -15,7 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Changed
 
-- **S3-RDMA buffer reuse** — The `s3-rdma` driver now keeps registered buffers and reuses them across operations instead of allocating, zero-filling, and registering a new buffer for every PUT and GET, which limited RDMA throughput. A buffer is reused only after the server answered its request; buffers of requests that time out or lose their connection are deregistered. `spt run --rdma-buffer-pool=false` (env `RDMA_BUFFER_POOL`, engine `storage.rdma.bufferPool`) restores per-operation buffers. The RDMA data-path summary in `messages.log` adds pool counters.
+- **S3-RDMA buffer reuse** — The `s3-rdma` driver now keeps registered buffers and reuses them across operations instead of allocating, zero-filling, and registering a new buffer for every PUT and GET, which limited RDMA throughput. A buffer is reused only after the server's final response to its request, and a buffer used by an integrity-verified GET only after that GET verified; buffers of requests that time out, lose their connection, or fail are deregistered. Pooled buffers stay within half of the JVM's direct-memory limit, and transfers above 1 GiB are not pooled. `spt run --rdma-buffer-pool=false` (env `RDMA_BUFFER_POOL`, engine `storage.rdma.bufferPool`) restores per-operation buffers. The RDMA data-path summary in `messages.log` adds pool counters.
 
 ### Fixed
 

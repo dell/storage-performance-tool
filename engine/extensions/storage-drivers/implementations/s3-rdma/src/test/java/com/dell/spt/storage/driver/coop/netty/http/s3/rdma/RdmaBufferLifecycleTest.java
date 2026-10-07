@@ -14,6 +14,7 @@ import com.dell.spt.storage.driver.coop.netty.NettyStorageDriver;
 import com.github.akurilov.commons.io.Output;
 import io.netty.channel.embedded.EmbeddedChannel;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.concurrent.ConcurrentMap;
 import org.junit.jupiter.api.AfterEach;
@@ -69,6 +70,32 @@ class RdmaBufferLifecycleTest {
 	}
 
 	@Test
+	void failedResultPublicationAfterTokenFailureKeepsThePoolConsistent() throws Exception {
+		// The released buffer belongs to the pool again; the exception cleanup must not return it twice.
+		final var transport = transport();
+		transport.setFailTokenGeneration(true);
+		final var driver = S3RdmaStorageDriverTestSupport.newDriver(
+						new RdmaConfig(true, 0, false, "auto", "", "WARN", 60_000L), transport);
+		@SuppressWarnings("unchecked")
+		final Output<Operation<Item>> results = Mockito.mock(Output.class);
+		Mockito.when(results.put(Mockito.<Operation<Item>> any())).thenThrow(new IllegalStateException("output closed"));
+		driver.operationResultOutput(results);
+		driver.start();
+
+		try {
+			invoke(driver, "submitRdma", new Class<?>[]{Operation.class}, op(OpType.READ));
+		} catch (final InvocationTargetException expected) {
+			// publication failure may propagate
+		}
+
+		final RdmaBufferPool pool = driver.bufferPool();
+		assertEquals(0, pool.invalidReturns.sum(), pool.summary());
+		assertEquals(1, pool.idleBuffers());
+		assertEquals(1, pool.liveBuffers());
+		assertEquals(1, transport.getActiveRegistrationCount(), "the idle buffer must stay registered");
+	}
+
+	@Test
 	void shippedDefaultsEnableThePool() throws Exception {
 		assertTrue(new RdmaConfig(null).isBufferPoolEnabled());
 		assertNotNull(driver(new RdmaConfig(null), transport()).bufferPool());
@@ -90,10 +117,14 @@ class RdmaBufferLifecycleTest {
 		return driver;
 	}
 
-	@SuppressWarnings("unchecked")
 	private static Operation<Item> op() {
+		return op(OpType.CREATE);
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Operation<Item> op(final OpType type) {
 		return (Operation<Item>) (Operation<?>) new DataOperationImpl<>(
-						0, OpType.CREATE, new DataItemImpl("obj", 0, SIZE), null, "/bucket", CREDENTIAL, null, 0);
+						0, type, new DataItemImpl("obj", 0, SIZE), null, "/bucket", CREDENTIAL, null, 0);
 	}
 
 	/** Registers {@code op} as an in-flight RDMA request holding a pool buffer. */

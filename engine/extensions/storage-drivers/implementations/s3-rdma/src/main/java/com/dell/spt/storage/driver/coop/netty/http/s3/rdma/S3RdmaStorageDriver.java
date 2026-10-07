@@ -1,6 +1,7 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 
 import com.dell.spt.base.data.DataInput;
+import com.dell.spt.base.integrity.IntegrityVerificationResult;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
@@ -28,6 +29,7 @@ import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpContent;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.http.HttpStatusClass;
 
 import org.apache.logging.log4j.Level;
 
@@ -96,10 +98,15 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		long bytesTransferred = RdmaReplyContract.VALUE_ABSENT;
 		long responseContentLength = RdmaReplyContract.VALUE_ABSENT;
 		long responseBodyBytes;
-		/** A server response was received, so the server no longer accesses the buffer. */
-		boolean responseObserved;
+		/**
+		 * The server's final (non-1xx) response was received, so it no longer accesses the buffer.
+		 * An informational response does not end the request.
+		 */
+		boolean finalResponseObserved;
 		/** Pool buffer backing this request, or {@code null} for a per-operation buffer. */
 		RdmaBufferPool.PooledBuffer pooled;
+		/** Stale content was invalidated; the buffer is reusable only after a verified fill. */
+		boolean contentInvalidated;
 
 		RdmaContext(final String token, final ByteBuffer buffer, final long mrHandle,
 						final OpType opType, final int size) {
@@ -110,8 +117,12 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			this.size = size;
 		}
 
-		void observeResponse(final HttpHeaders headers) {
-			responseObserved = true;
+		void observeResponse(final HttpResponse response) {
+			if (response.status().codeClass() == HttpStatusClass.INFORMATIONAL) {
+				return;
+			}
+			finalResponseObserved = true;
+			final HttpHeaders headers = response.headers();
 			reply = RdmaReplyContract.parseReply(headers.get(RdmaReplyContract.REPLY_HEADER));
 			bytesTransferred = RdmaReplyContract.parseCount(
 							headers.get(RdmaReplyContract.BYTES_TRANSFERRED_HEADER));
@@ -145,7 +156,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 				final RdmaContext ctx = handlerContext.channel().attr(RDMA_CONTEXT_ATTR_KEY).get();
 				if (ctx != null) {
 					if (msg instanceof HttpResponse response) {
-						ctx.observeResponse(response.headers());
+						ctx.observeResponse(response);
 					}
 					if (msg instanceof HttpContent content) {
 						ctx.responseBodyBytes += content.content().readableBytes();
@@ -237,7 +248,8 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		// size class covers an operation prepared just before the throttle rejects it.
 		bufferPool = rdmaConfig.isBufferPoolEnabled()
 						? new RdmaBufferPool(rdmaTransport,
-										concurrencyLimit > 0 ? concurrencyLimit + 1 : UNLIMITED_CONCURRENCY_POOL_LIMIT)
+										concurrencyLimit > 0 ? concurrencyLimit + 1 : UNLIMITED_CONCURRENCY_POOL_LIMIT,
+										RdmaBufferPool.defaultMaxPooledBytes())
 						: null;
 		boolean transportInitialized = false;
 		try {
@@ -423,9 +435,11 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			return true;
 		}
 
+		// Until the context is stored, this method owns the buffer; afterwards the context does.
 		ByteBuffer buf = null;
 		long mrHandle = 0;
 		RdmaBufferPool.PooledBuffer pooled = null;
+		boolean invalidated = false;
 		try {
 			pooled = bufferPool == null ? null : bufferPool.acquire(size);
 			if (pooled != null) {
@@ -434,6 +448,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 				// Integrity verification is the only check of RDMA-delivered GET content.
 				if (opType == OpType.READ && integrityMetadataEnabled()) {
 					invalidateStaleContent(buf, size);
+					invalidated = true;
 				}
 			} else {
 				buf = ByteBuffer.allocateDirect(size);
@@ -453,15 +468,20 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 			final String token = rdmaTransport.generateToken(mrHandle, size);
 			if (token == null) {
-				// Nothing was sent, so a pool buffer can be reused.
-				releaseBuffer(pooled, buf, mrHandle, true);
+				// Nothing was sent, so the buffer is reusable unless its content was invalidated.
+				releaseBuffer(pooled, buf, mrHandle, !invalidated);
+				pooled = null;
+				mrHandle = 0;
 				return prepareFailed(op, "token generation failed");
 			}
 
 			// Store RDMA context — httpRequest() adds the header, complete() cleans up
 			final RdmaContext ctx = new RdmaContext(token, buf, mrHandle, opType, size);
 			ctx.pooled = pooled;
+			ctx.contentInvalidated = invalidated;
 			rdmaOps.put(op, ctx);
+			pooled = null;
+			mrHandle = 0;
 
 			Loggers.MSG.debug("{}: RDMA submit: type={} size={} token={}", stepId, opType, size, token);
 
@@ -476,8 +496,8 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			LogUtil.exception(Level.DEBUG, e, "{}: RDMA submit failed for {}",
 							stepId, item.name());
 
-			// Clean up — check rdmaOps first (context may already be stored). The request may
-			// have been dispatched, so the buffer is not reused.
+			// The request may have been dispatched, so the buffer is not reused. A stored context
+			// owns the buffer; if it was already completed, there is nothing left to clean up.
 			if (!cleanupRdmaContext(op, false)) {
 				releaseBuffer(pooled, buf, mrHandle, false);
 			}
@@ -529,7 +549,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			ctx = rdmaOps.remove(op);
 		}
 		if (ctx != null) {
-			releaseBuffer(ctx.pooled, ctx.buffer, ctx.mrHandle, reusable);
+			releaseBuffer(ctx.pooled, ctx.buffer, ctx.mrHandle, reusable && !ctx.contentInvalidated);
 			return true;
 		}
 		return false;
@@ -559,8 +579,8 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	 * pass verification on content left by an earlier read of the same object.
 	 */
 	static void invalidateStaleContent(final ByteBuffer buffer, final int size) {
-		for (int i = 0; i < size; i += STALE_CONTENT_STRIDE_BYTES) {
-			buffer.put(i, (byte) ~buffer.get(i));
+		for (long i = 0; i < size; i += STALE_CONTENT_STRIDE_BYTES) {
+			buffer.put((int) i, (byte) ~buffer.get((int) i));
 		}
 		final int last = size - 1;
 		if (last > 0 && last % STALE_CONTENT_STRIDE_BYTES != 0) {
@@ -781,6 +801,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	private void completeRdmaContext(final Channel channel, final O op, final RdmaContext ctx) {
+		boolean verifiedFill = false;
 		try {
 			if (op.status() != Operation.Status.SUCC) {
 				pathStats.rdmaHttpError.increment();
@@ -802,9 +823,14 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 				}
 				if (ctx.opType == OpType.READ) {
 					final ByteBuffer body = ctx.buffer.asReadOnlyBuffer();
-					body.position(0);
+					body.clear();
 					body.limit((int) result.bytes());
+					final IntegrityVerificationResult prior = op.integrityVerificationResult();
 					finishOutOfBandIntegrityRead(channel, op, body);
+					// Only a result produced by this read counts.
+					final IntegrityVerificationResult verification = op.integrityVerificationResult();
+					verifiedFill = verification != null && verification != prior && verification.verified()
+									&& op.status() == Operation.Status.SUCC;
 					dataOp.countBytesDone(result.bytes());
 				}
 			}
@@ -835,7 +861,10 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			}
 			}
 		} finally {
-			releaseBuffer(ctx.pooled, ctx.buffer, ctx.mrHandle, ctx.responseObserved);
+			// An invalidated buffer holds altered stale content unless the server wrote a payload
+			// that verified; reusing it otherwise would let a second invalidation restore the content.
+			releaseBuffer(ctx.pooled, ctx.buffer, ctx.mrHandle,
+							ctx.finalResponseObserved && (!ctx.contentInvalidated || verifiedFill));
 		}
 	}
 

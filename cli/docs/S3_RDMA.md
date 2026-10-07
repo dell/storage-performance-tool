@@ -103,7 +103,17 @@ Selecting the RDMA driver does not by itself prove that payloads moved over RDMA
 
 At the end of each step the engine logs one `RDMA data path summary` line in `messages.log` with counts of operations transferred over RDMA, declined by the server, failed, timed out, and sent over HTTP (below threshold, ineligible, oversize, or preparation fallback). Check it before trusting RDMA results.
 
-The summary also reports the buffer pool: `poolHits` operations reused a registered buffer, `poolCreated` buffers were allocated and registered, `poolExhausted` operations found every buffer of their size in use and registered their own, and `poolDiscarded` buffers were deregistered because their request ended without a server response (timeout, lost connection, or shutdown). A buffer is reused only after the server answered its request, so the server can no longer access it.
+The summary also reports the buffer pool. The counters are:
+
+- `poolHits`: operations that reused a registered buffer.
+- `poolCreated`: buffers allocated and registered.
+- `poolExhausted`: operations that found their size class or the pool's memory budget fully in use and used a per-operation buffer.
+- `poolUnpooled`: operations larger than 1 GiB, which always use a per-operation buffer.
+- `poolEvicted`: idle buffers deregistered to make room for another size.
+- `poolDiscarded`: buffers deregistered because their request ended without the server's final response (timeout, lost connection, informational-only reply, or shutdown) or because a GET that integrity verification checks did not deliver verified content.
+- `poolInvalidReturns`: must be 0.
+
+A buffer is reused only after the server's final response to its request, when the server can no longer access it. All pooled buffers together stay within half of the JVM's direct-memory limit (`-XX:MaxDirectMemorySize`).
 
 ---
 

@@ -1,6 +1,7 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -8,12 +9,16 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Random;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class RdmaBufferPoolTest {
 
 	private static final int MIB = 1 << 20;
+	private static final long UNBOUNDED = Long.MAX_VALUE;
 
 	private FakeRdmaTransport transport;
 
@@ -31,12 +36,116 @@ class RdmaBufferPoolTest {
 		assertEquals(4 * MIB, RdmaBufferPool.capacityFor(3 * MIB));
 		assertEquals(4 * MIB, RdmaBufferPool.capacityFor(4 * MIB));
 		assertEquals(1 << 30, RdmaBufferPool.capacityFor(1 << 30));
-		assertEquals((1 << 30) + 1, RdmaBufferPool.capacityFor((1 << 30) + 1));
+	}
+
+	@Test
+	void transfersAboveTheLargestClassAreNotPooled() {
+		// Also bounds stale-content invalidation, which runs only on pool buffers, to 1 GiB.
+		final var pool = new RdmaBufferPool(transport, 2, UNBOUNDED);
+
+		assertNull(pool.acquire(RdmaBufferPool.MAX_CLASS_BYTES + 1));
+
+		assertEquals(1, pool.unpooled.sum());
+		assertEquals(0, transport.getRegisterCount());
+	}
+
+	@Test
+	void reusedBufferIsCleared() {
+		final var pool = new RdmaBufferPool(transport, 1, UNBOUNDED);
+		final var first = pool.acquire(MIB);
+		first.buffer().limit(4096).position(7);
+		pool.release(first);
+
+		final var reused = pool.acquire(2 * 4096);
+
+		assertSame(first, reused);
+		assertEquals(0, reused.buffer().position());
+		assertEquals(MIB, reused.buffer().limit(), "a smaller earlier limit must not constrain the next request");
+	}
+
+	@Test
+	void newBufferEvictsIdleBuffersOfOtherClassesToStayWithinTheBudget() {
+		final var pool = new RdmaBufferPool(transport, 4, 4L * MIB);
+		final var small = pool.acquire(MIB);
+		final var medium = pool.acquire(2 * MIB);
+		pool.release(small);
+		pool.release(medium);
+
+		final var large = pool.acquire(3 * MIB);
+
+		assertNotNull(large);
+		assertEquals(4 * MIB, large.capacity());
+		assertEquals(2, pool.evicted.sum());
+		assertTrue(transport.wasDeregistered(small.mrHandle()));
+		assertTrue(transport.wasDeregistered(medium.mrHandle()));
+		assertEquals(4L * MIB, pool.liveBytes());
+	}
+
+	@Test
+	void bufferThatCannotFitIsNotPooledAndEvictsNothing() {
+		final var pool = new RdmaBufferPool(transport, 4, 4L * MIB);
+		final var held = pool.acquire(2 * MIB);
+		final var idle = pool.acquire(MIB);
+		pool.release(idle);
+
+		assertNull(pool.acquire(4 * MIB), "2 MiB leased + 4 MiB exceeds the 4 MiB budget even after eviction");
+
+		assertNotNull(held);
+		assertEquals(1, pool.exhausted.sum());
+		assertEquals(0, pool.evicted.sum());
+		assertEquals(1, pool.idleBuffers());
+	}
+
+	@Test
+	void liveBytesNeverExceedTheBudget() {
+		final long budget = 6L * MIB;
+		final var pool = new RdmaBufferPool(transport, 3, budget);
+		final var random = new Random(20261007);
+		final List<RdmaBufferPool.PooledBuffer> leased = new ArrayList<>();
+		for (int step = 0; step < 2_000; step++) {
+			if (!leased.isEmpty() && random.nextBoolean()) {
+				final var returned = leased.remove(random.nextInt(leased.size()));
+				if (random.nextInt(4) == 0) {
+					pool.discard(returned);
+				} else {
+					pool.release(returned);
+				}
+			} else {
+				final var pooled = pool.acquire(1 + random.nextInt(5 * MIB));
+				if (pooled != null) {
+					leased.add(pooled);
+				}
+			}
+			assertTrue(pool.liveBytes() <= budget, "step " + step + ": " + pool.liveBytes());
+		}
+		leased.forEach(pool::release);
+		pool.close();
+		assertEquals(0, pool.liveBuffers());
+		assertEquals(0, pool.invalidReturns.sum());
+		assertTrue(transport.areAllDeregistered());
+	}
+
+	@Test
+	void secondReturnOfABufferIsIgnored() {
+		final var pool = new RdmaBufferPool(transport, 1, UNBOUNDED);
+		final var pooled = pool.acquire(MIB);
+		pool.release(pooled);
+
+		pool.discard(pooled);
+
+		assertEquals(1, pool.invalidReturns.sum());
+		assertFalse(transport.wasDeregistered(pooled.mrHandle()), "the idle buffer must stay registered");
+		assertSame(pooled, pool.acquire(MIB));
+	}
+
+	@Test
+	void defaultBudgetIsAShareOfTheDirectMemoryLimit() {
+		assertTrue(RdmaBufferPool.defaultMaxPooledBytes() > 0);
 	}
 
 	@Test
 	void releasedBufferIsReusedWithoutRegistering() {
-		final var pool = new RdmaBufferPool(transport, 2);
+		final var pool = new RdmaBufferPool(transport, 2, UNBOUNDED);
 		final var first = pool.acquire(MIB);
 		pool.release(first);
 
@@ -45,12 +154,12 @@ class RdmaBufferPoolTest {
 		assertSame(first, second);
 		assertEquals(1, transport.getRegisterCount());
 		assertEquals(1, pool.hits.sum());
-		assertEquals(1, pool.misses.sum());
+		assertEquals(1, pool.created.sum());
 	}
 
 	@Test
 	void eachSizeClassHasItsOwnBuffers() {
-		final var pool = new RdmaBufferPool(transport, 2);
+		final var pool = new RdmaBufferPool(transport, 2, UNBOUNDED);
 		final var small = pool.acquire(MIB);
 		pool.release(small);
 
@@ -63,7 +172,7 @@ class RdmaBufferPoolTest {
 
 	@Test
 	void exhaustedClassReturnsNullUntilABufferIsReleased() {
-		final var pool = new RdmaBufferPool(transport, 1);
+		final var pool = new RdmaBufferPool(transport, 1, UNBOUNDED);
 		final var held = pool.acquire(MIB);
 
 		assertNull(pool.acquire(MIB));
@@ -75,7 +184,7 @@ class RdmaBufferPoolTest {
 
 	@Test
 	void discardDeregistersAndFreesTheSlot() {
-		final var pool = new RdmaBufferPool(transport, 1);
+		final var pool = new RdmaBufferPool(transport, 1, UNBOUNDED);
 		final var discarded = pool.acquire(MIB);
 
 		pool.discard(discarded);
@@ -89,7 +198,7 @@ class RdmaBufferPoolTest {
 
 	@Test
 	void registrationFailureDoesNotConsumeASlot() {
-		final var pool = new RdmaBufferPool(transport, 1);
+		final var pool = new RdmaBufferPool(transport, 1, UNBOUNDED);
 		transport.setFailAfterNRegistrations(0);
 		assertNull(pool.acquire(MIB));
 		assertEquals(0, pool.liveBuffers());
@@ -100,7 +209,7 @@ class RdmaBufferPoolTest {
 
 	@Test
 	void closeDeregistersIdleBuffersAndLaterReleasesDiscard() {
-		final var pool = new RdmaBufferPool(transport, 2);
+		final var pool = new RdmaBufferPool(transport, 2, UNBOUNDED);
 		final var idle = pool.acquire(MIB);
 		final var inUse = pool.acquire(MIB);
 		pool.release(idle);

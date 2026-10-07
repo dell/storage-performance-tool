@@ -16,12 +16,15 @@ import io.netty.buffer.Unpooled;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.handler.codec.http.DefaultHttpRequest;
+import io.netty.handler.codec.http.DefaultHttpResponse;
 import io.netty.handler.codec.http.EmptyHttpHeaders;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.util.AttributeKey;
@@ -681,9 +684,27 @@ public class S3RdmaStorageDriverOverrideTest {
 	}
 
 	private static void observeResponse(final Object ctx, final HttpHeaders reply) throws Exception {
-		final Method method = ctx.getClass().getDeclaredMethod("observeResponse", HttpHeaders.class);
+		observeResponse(ctx, HttpResponseStatus.OK, reply);
+	}
+
+	private static void observeResponse(final Object ctx, final HttpResponseStatus status, final HttpHeaders reply)
+					throws Exception {
+		final Method method = ctx.getClass().getDeclaredMethod("observeResponse", HttpResponse.class);
 		method.setAccessible(true);
-		method.invoke(ctx, reply);
+		method.invoke(ctx, new DefaultHttpResponse(HttpVersion.HTTP_1_1, status, reply));
+	}
+
+	@Test
+	void onlyAFinalResponseEndsTheServersAccessToTheBuffer() throws Exception {
+		final var ctx = newRdmaContext("token", ByteBuffer.allocateDirect(8), 7L, OpType.CREATE, 8);
+		final Field finalResponse = ctx.getClass().getDeclaredField("finalResponseObserved");
+		finalResponse.setAccessible(true);
+
+		observeResponse(ctx, HttpResponseStatus.CONTINUE, new DefaultHttpHeaders());
+		assertFalse((Boolean) finalResponse.get(ctx), "100 Continue is informational");
+
+		observeResponse(ctx, successfulGetReply(8));
+		assertTrue((Boolean) finalResponse.get(ctx));
 	}
 
 	private static RdmaTransport availableTransport() {

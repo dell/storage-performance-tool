@@ -34,6 +34,8 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -430,37 +432,145 @@ final class S3RdmaReplyLoopbackTest {
 
 	@Test
 	void verifiedGetOnAReusedBufferDoesNotPassOnStaleContent() throws Exception {
-		// Reading the same object twice: if the server claims the second transfer without
-		// writing, the buffer still holds the first read's (correct) content.
-		final byte[] content = new byte[SIZE];
+		// Reading the same object repeatedly: GETs the server claims without writing must fail
+		// however often they repeat, although the first read left the correct content behind.
+		integrityHeaders(SIZE);
+		try (final var driver = newDriver(false, S3RdmaReplyLoopbackTest::integrityMode)) {
+			final ResultOutput output = startWith(driver);
+
+			final Operation<DataItem> filled = read(driver, output, SIZE, new Reply(200, "200", Integer.toString(SIZE), null, true));
+			assertEquals(Operation.Status.SUCC, filled.status());
+			assertTrue(filled.integrityVerificationResult().verified());
+
+			for (int attempt = 1; attempt <= 2; attempt++) {
+				final Operation<DataItem> unwritten =
+								read(driver, output, SIZE, new Reply(200, "200", Integer.toString(SIZE), null, false));
+				assertEquals(Operation.Status.RESP_FAIL_CORRUPT, unwritten.status(), "unwritten GET " + attempt);
+			}
+			assertEquals(1, driver.bufferPool().hits.sum(), "only the verified fill's buffer is reused");
+			assertEquals(2, driver.bufferPool().discarded.sum(), "each failed read's buffer is discarded");
+		}
+	}
+
+	@Test
+	void declinedGetDoesNotReturnAnInvalidatedBufferToThePool() throws Exception {
+		// A declined GET delivers its body over HTTP and leaves its invalidated buffer unwritten.
+		integrityHeaders(SIZE);
+		try (final var driver = newDriver(true, S3RdmaReplyLoopbackTest::integrityMode)) {
+			final ResultOutput output = startWith(driver);
+
+			assertEquals(Operation.Status.SUCC,
+							read(driver, output, SIZE, new Reply(200, "200", Integer.toString(SIZE), null, true)).status());
+			final String body = new String(new byte[SIZE], StandardCharsets.ISO_8859_1).replace('\0', (char) SERVER_GET_FILL);
+			assertEquals(Operation.Status.SUCC,
+							read(driver, output, SIZE, new Reply(200, "501", null, body, false)).status());
+			assertEquals(Operation.Status.RESP_FAIL_CORRUPT,
+							read(driver, output, SIZE, new Reply(200, "200", Integer.toString(SIZE), null, false)).status());
+			assertEquals(1, driver.bufferPool().hits.sum());
+			assertEquals(2, driver.bufferPool().discarded.sum(), "the declined and the failed reads' buffers");
+		}
+	}
+
+	@Test
+	void informationalResponseDoesNotReturnTheBufferToThePool() throws Exception {
+		// The server may access the buffer until its final response; a 1xx does not end the request.
+		try (final ServerSocket raw = new ServerSocket(0, 0, InetAddress.getLoopbackAddress());
+				final var driver = newDriver(false, config -> config.val("storage-net-node-port", raw.getLocalPort()))) {
+			final Thread responder = Thread.ofVirtual().start(() -> serveContinueThenOk(raw));
+			try {
+				execute(driver, op(OpType.CREATE, SIZE));
+
+				assertEquals(0, driver.bufferPool().idleBuffers(), driver.bufferPool().summary());
+				assertEquals(1, driver.bufferPool().discarded.sum(), driver.bufferPool().summary());
+			} finally {
+				raw.close();
+				responder.join(TimeUnit.SECONDS.toMillis(RESULT_TIMEOUT_SECONDS));
+			}
+		}
+	}
+
+	private static void integrityMode(final Config config) {
+		config.val("storage-driver-type", "s3-rdma");
+		config.val("storage-integrity-mode", "metadata");
+		config.val("storage-integrity-input-provenance", "external");
+	}
+
+	/** Integrity metadata for an object of {@code size} bytes of {@link #SERVER_GET_FILL}. */
+	private void integrityHeaders(final int size) throws Exception {
+		final byte[] content = new byte[size];
 		Arrays.fill(content, SERVER_GET_FILL);
 		final String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
 		objectResponseHeaders = Map.of(
 						IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_VERSION, "1",
 						IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_ALGORITHM, "sha256",
 						IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_DIGEST, digest,
-						IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_SIZE, Integer.toString(SIZE));
-		try (final var driver = newDriver(false, config -> {
-			config.val("storage-driver-type", "s3-rdma");
-			config.val("storage-integrity-mode", "metadata");
-			config.val("storage-integrity-input-provenance", "external");
-		})) {
-			final ResultOutput output = new ResultOutput();
-			driver.operationResultOutput(output);
-			driver.start();
+						IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_SIZE, Integer.toString(size));
+	}
 
-			reply = new Reply(200, "200", Integer.toString(SIZE), null, true);
-			assertTrue(driver.put(op(OpType.READ, SIZE)));
-			final Operation<DataItem> first = output.await();
-			assertEquals(Operation.Status.SUCC, first.status());
-			assertTrue(first.integrityVerificationResult().verified());
+	private static ResultOutput startWith(final S3RdmaStorageDriver<DataItem, Operation<DataItem>> driver)
+					throws Exception {
+		final ResultOutput output = new ResultOutput();
+		driver.operationResultOutput(output);
+		driver.start();
+		return output;
+	}
 
-			reply = new Reply(200, "200", Integer.toString(SIZE), null, false);
-			assertTrue(driver.put(op(OpType.READ, SIZE)));
-			final Operation<DataItem> second = output.await();
-			assertEquals(1, driver.bufferPool().hits.sum(), "the second GET must reuse the first GET's buffer");
-			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, second.status());
+	private Operation<DataItem> read(
+					final S3RdmaStorageDriver<DataItem, Operation<DataItem>> driver, final ResultOutput output,
+					final int size, final Reply serverReply) throws Exception {
+		reply = serverReply;
+		assertTrue(driver.put(op(OpType.READ, size)));
+		final Operation<DataItem> result = output.await();
+		assertNotNull(result, "read did not complete");
+		return result;
+	}
+
+	/**
+	 * Minimal HTTP/1.1 server: object requests get {@code 100 Continue} and later the final RDMA
+	 * success; other requests get an empty 200.
+	 */
+	private static void serveContinueThenOk(final ServerSocket server) {
+		while (!server.isClosed()) {
+			try (Socket socket = server.accept()) {
+				final var in = new java.io.BufferedInputStream(socket.getInputStream());
+				final var out = socket.getOutputStream();
+				String head;
+				while ((head = readHead(in)) != null) {
+					final String path = head.split(" ", 3)[1];
+					final boolean object = path.split("\\?", 2)[0].chars().filter(c -> c == '/').count() > 1;
+					if (object) {
+						out.write("HTTP/1.1 100 Continue\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+						out.flush();
+						Thread.sleep(200);
+						out.write(("HTTP/1.1 200 OK\r\n" + RdmaReplyContract.REPLY_HEADER
+										+ ": 200\r\nContent-Length: 0\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+					} else {
+						out.write("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+					}
+					out.flush();
+				}
+			} catch (final IOException | InterruptedException e) {
+				// the server was closed or the client went away
+			}
 		}
+	}
+
+	/** Reads one request head and discards its body; {@code null} at end of stream. */
+	private static String readHead(final java.io.InputStream in) throws IOException {
+		final StringBuilder head = new StringBuilder();
+		int c;
+		while ((c = in.read()) >= 0) {
+			head.append((char) c);
+			if (head.length() >= 4 && head.substring(head.length() - 4).equals("\r\n\r\n")) {
+				final java.util.regex.Matcher length = java.util.regex.Pattern
+								.compile("(?im)^content-length:\\s*(\\d+)").matcher(head);
+				if (length.find()) {
+					in.readNBytes(Integer.parseInt(length.group(1)));
+				}
+				return head.toString();
+			}
+		}
+		return null;
 	}
 
 	// ---------- Multipart upload ----------
