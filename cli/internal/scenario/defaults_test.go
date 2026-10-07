@@ -359,6 +359,38 @@ func TestGenerateDefaults(t *testing.T) {
 				if config.Storage.Rdma.TimeoutMs != 30000 {
 					t.Errorf("Expected default timeout 30000, got %d", config.Storage.Rdma.TimeoutMs)
 				}
+				if strings.Contains(string(data), "allowMissingBytesHeader") {
+					t.Error("allowMissingBytesHeader must be omitted unless enabled, so older engines accept the defaults")
+				}
+			},
+		},
+		{
+			name: "S3 read with RDMA legacy missing-bytes-header opt-in",
+			params: Params{
+				WorkloadType:                "read",
+				Endpoint:                    "http://minio:9000",
+				AccessKey:                   "testkey",
+				SecretKey:                   "testsecret",
+				Bucket:                      "testbucket",
+				Threads:                     4,
+				S3Driver:                    S3DriverRdma,
+				RdmaThresholdBytes:          1048576,
+				RdmaTimeoutMs:               30000,
+				RdmaAllowMissingBytesHeader: true,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Rdma == nil || !config.Storage.Rdma.AllowMissingBytesHeader {
+					t.Fatal("Expected storage.rdma.allowMissingBytesHeader to be true")
+				}
+				if !strings.Contains(string(data), "allowMissingBytesHeader: true") {
+					t.Errorf("Expected allowMissingBytesHeader: true in YAML, got:\n%s", data)
+				}
 			},
 		},
 		{

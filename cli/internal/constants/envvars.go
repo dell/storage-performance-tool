@@ -38,4 +38,7 @@ const (
 	EnvRdmaDevice    = "RDMA_DEVICE"
 	EnvRdmaLogLevel  = "RDMA_LOG_LEVEL"
 	EnvRdmaTimeout   = "RDMA_TIMEOUT_MS"
+	// EnvRdmaAllowMissingBytesHeader enables the legacy acceptance of RDMA GET successes without
+	// an x-amz-rdma-bytes-transferred header.
+	EnvRdmaAllowMissingBytesHeader = "RDMA_ALLOW_MISSING_BYTES_HEADER"
 )

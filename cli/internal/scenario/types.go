@@ -73,6 +73,9 @@ type Params struct {
 	RdmaDevice         string // RDMA device name (default: "auto")
 	RdmaLogLevel       string // Native RDMA log level (default: "WARN")
 	RdmaTimeoutMs      int64  // RDMA operation timeout (default: 30000)
+	// RdmaAllowMissingBytesHeader accepts RDMA GET successes without x-amz-rdma-bytes-transferred
+	// and counts the requested size (legacy servers; default: false).
+	RdmaAllowMissingBytesHeader bool
 
 	// Checksum validation
 	Checksum string // Checksum algorithm: crc32, crc32c, sha1, sha256, crc64-nvme (empty = disabled)

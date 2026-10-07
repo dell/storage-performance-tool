@@ -21,3 +21,4 @@ storage:
     localIp: ""
     logLevel: WARN
     timeoutMs: 30000
+    allowMissingBytesHeader: false

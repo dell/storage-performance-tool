@@ -20,3 +20,4 @@ storage:
     localIp: string
     logLevel: string
     timeoutMs: long
+    allowMissingBytesHeader: boolean

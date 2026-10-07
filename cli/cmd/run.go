@@ -2278,6 +2278,8 @@ Shorthand: --use-rdma is equivalent to --s3-driver rdma. (env: SPT_S3_DRIVER)`)
 	runCmd.Flags().String("rdma-device", "auto", "RDMA device name or 'auto' for auto-detection (env: RDMA_DEVICE)")
 	runCmd.Flags().String("rdma-log-level", "WARN", "RDMA native library log level (env: RDMA_LOG_LEVEL)")
 	runCmd.Flags().Int64("rdma-timeout-ms", 30000, "RDMA operation timeout in milliseconds (env: RDMA_TIMEOUT_MS)")
+	runCmd.Flags().Bool("rdma-allow-missing-bytes-header", false,
+		"Legacy servers: accept RDMA GET successes without x-amz-rdma-bytes-transferred and count the requested size (env: RDMA_ALLOW_MISSING_BYTES_HEADER)")
 
 	// Checksum Options
 	runCmd.Flags().String("checksum", "",
@@ -2576,6 +2578,7 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		params.RdmaDevice, _ = cmd.Flags().GetString("rdma-device")
 		params.RdmaLogLevel, _ = cmd.Flags().GetString("rdma-log-level")
 		params.RdmaTimeoutMs, _ = cmd.Flags().GetInt64("rdma-timeout-ms")
+		params.RdmaAllowMissingBytesHeader, _ = cmd.Flags().GetBool("rdma-allow-missing-bytes-header")
 	}
 
 	// Checksum validation

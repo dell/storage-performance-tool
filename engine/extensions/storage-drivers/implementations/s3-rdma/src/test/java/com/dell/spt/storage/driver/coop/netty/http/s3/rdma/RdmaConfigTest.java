@@ -82,6 +82,7 @@ public class RdmaConfigTest {
 		assertEquals("", config.getLocalIp());
 		assertEquals("WARN", config.getLogLevel());
 		assertEquals(30_000L, config.getTimeoutMs());
+		assertFalse(config.isAllowMissingBytesHeader());
 	}
 
 	// ---------- Config-based constructor with mock ----------
@@ -96,8 +97,10 @@ public class RdmaConfigTest {
 		when(mockCfg.stringVal("localIp")).thenReturn("10.247.128.125");
 		when(mockCfg.stringVal("logLevel")).thenReturn("DEBUG");
 		when(mockCfg.longVal("timeoutMs")).thenReturn(60_000L);
+		when(mockCfg.boolVal("allowMissingBytesHeader")).thenReturn(true);
 
 		final var config = new RdmaConfig(mockCfg);
+		assertTrue(config.isAllowMissingBytesHeader());
 		assertFalse(config.isEnabled());
 		assertEquals(4_194_304L, config.getThresholdBytes());
 		assertFalse(config.isFallbackEnabled());
@@ -118,9 +121,11 @@ public class RdmaConfigTest {
 		when(mockCfg.stringVal("localIp")).thenThrow(new RuntimeException("missing"));
 		when(mockCfg.stringVal("logLevel")).thenThrow(new RuntimeException("missing"));
 		when(mockCfg.longVal("timeoutMs")).thenThrow(new RuntimeException("missing"));
+		when(mockCfg.boolVal("allowMissingBytesHeader")).thenThrow(new RuntimeException("missing"));
 
 		final var config = new RdmaConfig(mockCfg);
 		// All should be defaults
+		assertFalse(config.isAllowMissingBytesHeader());
 		assertTrue(config.isEnabled());
 		assertEquals(1_048_576L, config.getThresholdBytes());
 		assertFalse(config.isFallbackEnabled());

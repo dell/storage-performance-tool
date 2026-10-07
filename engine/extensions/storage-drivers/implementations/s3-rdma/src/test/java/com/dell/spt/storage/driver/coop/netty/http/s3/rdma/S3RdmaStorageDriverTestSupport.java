@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /** Constructor-faithful S3-RDMA driver fixtures shared by hardware-free unit tests. */
@@ -38,6 +39,16 @@ final class S3RdmaStorageDriverTestSupport {
 					final String namespace,
 					final List<String> nodeAddrs,
 					final int nodePort) throws Exception {
+		return newDriver(rdmaConfig, ignored -> transport, namespace, nodeAddrs, nodePort);
+	}
+
+	/** Variant whose factory receives the driver's effective RDMA configuration. */
+	static S3RdmaStorageDriver<Item, Operation<Item>> newDriver(
+					final RdmaConfig rdmaConfig,
+					final Function<RdmaConfig, RdmaTransport> transportFactory,
+					final String namespace,
+					final List<String> nodeAddrs,
+					final int nodePort) throws Exception {
 		final Config config = config(rdmaConfig, namespace, nodeAddrs, nodePort);
 		final DataInput dataInput = DataInput.instance(
 						null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false, 0.0, true);
@@ -48,7 +59,7 @@ final class S3RdmaStorageDriverTestSupport {
 							config.configVal("storage"),
 							false,
 							config.intVal("load-batch-size"),
-							ignored -> transport);
+							transportFactory);
 			CREATED_DRIVERS.get().add(driver);
 			return driver;
 		} catch (final Throwable failure) {

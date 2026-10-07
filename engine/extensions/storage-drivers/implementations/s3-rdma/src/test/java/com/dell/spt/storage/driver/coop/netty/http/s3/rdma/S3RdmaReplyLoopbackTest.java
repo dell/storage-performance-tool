@@ -15,6 +15,9 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
+import com.github.akurilov.commons.collection.Range;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.storage.Credential;
@@ -59,6 +62,8 @@ final class S3RdmaReplyLoopbackTest {
 	private static final Credential CREDENTIAL = Credential.getInstance("access", "secret");
 	private static final int SIZE = 4096;
 	private static final long THRESHOLD = 1024;
+	/** Part retries allowed by {@code CoopStorageDriverBase.MAX_PART_RETRIES}. */
+	private static final int MAX_PART_RETRIES = 3;
 	private static final String OBJECT_BODY = "x".repeat(SIZE);
 	private static final String DECLINE_BODY = "<Error><Code>RDMANotSupported</Code><Message>RDMA not available</Message></Error>";
 
@@ -68,6 +73,7 @@ final class S3RdmaReplyLoopbackTest {
 	private FakeRdmaTransport transport;
 	private volatile Reply reply;
 	private volatile byte[] serverReadPayload;
+	private volatile boolean chunkedReplies;
 	private final List<Integer> serverReadSizes = new CopyOnWriteArrayList<>();
 
 	/** How the emulated server answers an object request carrying an RDMA token. */
@@ -226,6 +232,56 @@ final class S3RdmaReplyLoopbackTest {
 		}
 	}
 
+	@Test
+	void getWithoutBytesHeaderIsProtocolErrorByDefault() throws Exception {
+		// Server reports RDMA success but omits the byte count and writes nothing into client memory.
+		reply = new Reply(200, "200", null, null, false);
+		try (final var driver = newDriver(true)) {
+			final var result = execute(driver, op(OpType.READ, SIZE));
+
+			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, result.status());
+			assertEquals(0, ((DataOperation<?>) result).countBytesDone());
+			assertEquals(1, driver.pathStats().rdmaProtocolError.sum());
+			assertEquals(0, driver.pathStats().rdmaBytesAssumed.sum());
+		}
+	}
+
+	@Test
+	void legacyOptInCountsRequestedSizeWithoutBytesHeader() throws Exception {
+		reply = new Reply(200, "200", null, null, true);
+		try (final var driver = newDriver(true, true)) {
+			final var result = execute(driver, op(OpType.READ, SIZE));
+
+			assertEquals(Operation.Status.SUCC, result.status());
+			assertEquals(SIZE, ((DataOperation<?>) result).countBytesDone());
+			assertEquals(1, driver.pathStats().rdmaBytesAssumed.sum());
+		}
+	}
+
+	@Test
+	void chunkedBodyOnAcceptedRdmaGetIsProtocolError() throws Exception {
+		chunkedReplies = true;
+		reply = new Reply(200, "200", Integer.toString(SIZE), "unexpected body", true);
+		try (final var driver = newDriver(true)) {
+			final var result = execute(driver, op(OpType.READ, SIZE));
+
+			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, result.status());
+			assertEquals(1, driver.pathStats().rdmaProtocolError.sum());
+		}
+	}
+
+	@Test
+	void chunkedBodyOnAcceptedRdmaPutIsProtocolError() throws Exception {
+		chunkedReplies = true;
+		reply = new Reply(200, "200", null, "unexpected body", true);
+		try (final var driver = newDriver(true)) {
+			final var result = execute(driver, op(OpType.CREATE, SIZE));
+
+			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, result.status());
+			assertEquals(1, driver.pathStats().rdmaProtocolError.sum());
+		}
+	}
+
 	// ---------- Preparation fallback and eligibility ----------
 
 	@Test
@@ -271,6 +327,39 @@ final class S3RdmaReplyLoopbackTest {
 		}
 	}
 
+	@Test
+	void fixedRangeReadUsesHttpAndCountsTheRange() throws Exception {
+		reply = new Reply(200, "200", Integer.toString(SIZE), null, true);
+		try (final var driver = newDriver(false)) {
+			@SuppressWarnings("unchecked")
+			final Operation<DataItem> ranged = (Operation<DataItem>) (Operation<?>) new DataOperationImpl<>(
+							0, OpType.READ, new DataItemImpl("obj-range", 0, SIZE), null, "/bucket", CREDENTIAL,
+							List.of(new Range(0L, SIZE / 2 - 1, -1L)), 0);
+			final var result = execute(driver, ranged);
+
+			assertEquals(Operation.Status.SUCC, result.status());
+			assertEquals(SIZE / 2, ((DataOperation<?>) result).countBytesDone());
+			assertNull(onlyObjectRequest("GET").rdmaToken());
+			assertEquals(1, driver.pathStats().httpIneligible.sum());
+			assertEquals(0, transport.getRegisterCount());
+		}
+	}
+
+	@Test
+	void randomRangeReadIsNotProposedForRdma() throws Exception {
+		try (final var driver = newDriver(false)) {
+			@SuppressWarnings("unchecked")
+			final Operation<DataItem> ranged = (Operation<DataItem>) (Operation<?>) new DataOperationImpl<>(
+							0, OpType.READ, new DataItemImpl("obj-random", 0, SIZE), null, "/bucket", CREDENTIAL,
+							null, 1);
+			final Method eligible = S3RdmaStorageDriver.class.getDeclaredMethod("shouldUseRdma", Operation.class);
+			eligible.setAccessible(true);
+
+			assertEquals(false, eligible.invoke(driver, ranged));
+			assertEquals(1, driver.pathStats().httpIneligible.sum());
+		}
+	}
+
 	// ---------- Multipart upload ----------
 
 	@Test
@@ -313,6 +402,70 @@ final class S3RdmaReplyLoopbackTest {
 		}
 	}
 
+	@Test
+	void partPreparationFailuresExhaustRetriesAndAbortTheUpload() throws Exception {
+		reply = new Reply(200, "200", null, null, true);
+		try (final var driver = newDriver(false)) {
+			transport.setFailAfterNRegistrations(0);
+			final var upload = multipartUpload(2048, 2);
+			final var result = executeUntil(driver, upload, S3RdmaReplyLoopbackTest::uploadTerminal);
+
+			assertTrue(result.status() != Operation.Status.SUCC, "upload must fail: " + result.status());
+			assertTrue(objectRequests().stream().noneMatch(r -> r.rawQuery() != null && r.rawQuery().contains("partNumber=")),
+							"no part may be sent: " + requests);
+			assertTrue(abortRequested(), "upload must be aborted: " + requests);
+			// One part exhausts its retries; the upload is then aborted before the second part runs.
+			assertEquals(1L + MAX_PART_RETRIES, driver.pathStats().prepareFailed.sum());
+			assertEquals(1, pendingParts(upload),
+							"every failed attempt is settled; only the never-dispatched second part remains pending");
+		}
+	}
+
+	@Test
+	void partRetryThatFailsPreparationAfterADeclinedAttemptStillSettles() throws Exception {
+		// First attempt of each part reaches the server (declined, so its response timing is set);
+		// every retry then fails preparation. The retried part keeps the stale response timing.
+		reply = new Reply(200, "501", null, DECLINE_BODY, false);
+		try (final var driver = newDriver(false)) {
+			transport.setFailAfterNRegistrations(2);
+			final var upload = multipartUpload(2048, 2);
+			final var result = executeUntil(driver, upload, S3RdmaReplyLoopbackTest::uploadTerminal);
+
+			assertTrue(result.status() != Operation.Status.SUCC, "upload must fail: " + result.status());
+			assertTrue(abortRequested(), "upload must be aborted: " + requests);
+			assertEquals(2, driver.pathStats().rdmaDeclined.sum());
+			assertEquals(1L + MAX_PART_RETRIES - 2, driver.pathStats().prepareFailed.sum(),
+							"the retries after the two declined attempts fail preparation");
+			assertEquals(1, pendingParts(upload),
+							"every failed attempt is settled; only the never-dispatched second part remains pending");
+		}
+	}
+
+	/** An upload is terminal when every part is done or it failed (an abort need not wait for parts). */
+	private static boolean uploadTerminal(final Operation<DataItem> result) {
+		return result instanceof CompositeDataOperation<?> composite
+						&& (composite.allSubOperationsDone() || composite.status() != Operation.Status.SUCC);
+	}
+
+	/** Live parent's pending sub-task count (parts reference this instance, not result copies). */
+	private static int pendingParts(final Operation<DataItem> upload) throws Exception {
+		final Field field = CompositeDataOperationImpl.class.getDeclaredField("pendingSubTasksCount");
+		field.setAccessible(true);
+		return ((java.util.concurrent.atomic.AtomicInteger) field.get(upload)).get();
+	}
+
+	private boolean abortRequested() {
+		return objectRequests().stream().anyMatch(r -> "DELETE".equals(r.method())
+						&& r.rawQuery() != null && r.rawQuery().contains("uploadId=upload-1"));
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Operation<DataItem> multipartUpload(final int partSize, final int parts) {
+		return (Operation<DataItem>) (Operation<?>) new CompositeDataOperationImpl<>(
+						0, OpType.CREATE, new DataItemImpl("obj", 0, (long) partSize * parts), null, "/bucket",
+						CREDENTIAL, null, 0, partSize);
+	}
+
 	// ---------- Emulated server ----------
 
 	private void handle(final HttpExchange exchange) throws IOException {
@@ -326,7 +479,7 @@ final class S3RdmaReplyLoopbackTest {
 						exchange.getRequestHeaders().getFirst("Content-Length"), requestBody.length));
 		final boolean objectRequest = path.chars().filter(c -> c == '/').count() > 1;
 		if (!objectRequest || token == null) {
-			plainResponse(exchange, method, query);
+			plainResponse(exchange, method, query, exchange.getRequestHeaders().getFirst("Range"));
 			return;
 		}
 		final Reply current = reply;
@@ -355,14 +508,16 @@ final class S3RdmaReplyLoopbackTest {
 							RdmaReplyContract.BYTES_TRANSFERRED_HEADER, current.bytesTransferred());
 		}
 		final byte[] body = current.body() == null ? null : current.body().getBytes(StandardCharsets.UTF_8);
-		exchange.sendResponseHeaders(current.httpStatus(), body == null ? -1 : body.length);
+		// A zero length makes the JDK server use chunked transfer encoding (no Content-Length).
+		exchange.sendResponseHeaders(current.httpStatus(), body == null ? -1 : chunkedReplies ? 0 : body.length);
 		if (body != null) {
 			exchange.getResponseBody().write(body);
 		}
 		exchange.close();
 	}
 
-	private static void plainResponse(final HttpExchange exchange, final String method, final String query)
+	private static void plainResponse(
+					final HttpExchange exchange, final String method, final String query, final String range)
 					throws IOException {
 		if ("POST".equals(method) && "uploads".equals(query)) {
 			xmlResponse(exchange, "<InitiateMultipartUploadResult><Bucket>bucket</Bucket>"
@@ -370,6 +525,15 @@ final class S3RdmaReplyLoopbackTest {
 		} else if ("POST".equals(method) && query != null && query.startsWith("uploadId=")) {
 			xmlResponse(exchange, "<CompleteMultipartUploadResult><Bucket>bucket</Bucket>"
 							+ "<Key>obj</Key><ETag>\"mpu-etag\"</ETag></CompleteMultipartUploadResult>");
+		} else if ("GET".equals(method) && range != null) {
+			// Single range "bytes=a-b", as produced by the tests' fixed ranges.
+			final String[] bounds = range.substring("bytes=".length()).split("-", -1);
+			final long first = Long.parseLong(bounds[0]);
+			final long last = Long.parseLong(bounds[1]);
+			final byte[] body = new byte[(int) (last - first + 1)];
+			exchange.getResponseHeaders().set("Content-Range", "bytes " + first + "-" + last + "/" + SIZE);
+			exchange.sendResponseHeaders(206, body.length);
+			exchange.getResponseBody().write(body);
 		} else if ("GET".equals(method)) {
 			final byte[] body = new byte[SIZE];
 			exchange.sendResponseHeaders(200, body.length);
@@ -418,7 +582,13 @@ final class S3RdmaReplyLoopbackTest {
 
 	private S3RdmaStorageDriver<DataItem, Operation<DataItem>> newDriver(final boolean fallback)
 					throws Exception {
+		return newDriver(fallback, false);
+	}
+
+	private S3RdmaStorageDriver<DataItem, Operation<DataItem>> newDriver(
+					final boolean fallback, final boolean allowMissingBytesHeader) throws Exception {
 		final Config config = config(fallback);
+		config.val("storage-rdma-allowMissingBytesHeader", allowMissingBytesHeader);
 		final RdmaConfig rdmaConfig = new RdmaConfig(config.configVal("storage").configVal("rdma"));
 		transport = new FakeRdmaTransport(rdmaConfig);
 		return new S3RdmaStorageDriver<>(
@@ -442,7 +612,7 @@ final class S3RdmaReplyLoopbackTest {
 		return result;
 	}
 
-	private static Operation<DataItem> executeUntil(
+	private Operation<DataItem> executeUntil(
 					final S3RdmaStorageDriver<DataItem, Operation<DataItem>> driver,
 					final Operation<DataItem> operation,
 					final Predicate<Operation<DataItem>> finalResult) throws Exception {
@@ -450,14 +620,20 @@ final class S3RdmaReplyLoopbackTest {
 		driver.operationResultOutput(output);
 		driver.start();
 		assertTrue(driver.put(operation));
+		final List<String> seen = new java.util.ArrayList<>();
 		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
 		while (System.nanoTime() < deadline) {
 			final Operation<DataItem> result = output.await();
-			if (result != null && finalResult.test(result)) {
-				return result;
+			if (result != null) {
+				seen.add(result.getClass().getSimpleName() + ":" + result.status()
+								+ (result instanceof CompositeDataOperation<?> c ? ":done=" + c.allSubOperationsDone() : ""));
+				if (finalResult.test(result)) {
+					return result;
+				}
 			}
 		}
-		throw new AssertionError("no final result");
+		throw new AssertionError("no final result; results=" + seen + "; requests=" + requests
+						+ "; paths=" + driver.pathStats().summary());
 	}
 
 	private Config config(final boolean fallback) {

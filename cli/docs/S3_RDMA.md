@@ -27,8 +27,7 @@ spt run write \
   --threads 16 \
   --object-size 1MB \
   --duration 5m \
-  --use-rdma \
-  --rdma-local-ip 10.247.128.125
+  --use-rdma
 
 # RDMA-accelerated read
 spt run read \
@@ -40,8 +39,7 @@ spt run read \
   --object-size 1MB \
   --seed-objects 5000 \
   --duration 5m \
-  --use-rdma \
-  --rdma-local-ip 10.247.128.125
+  --use-rdma
 
 # RDMA read from a saved item list (skips seed phase)
 spt run read \
@@ -53,8 +51,7 @@ spt run read \
   --object-size 1MB \
   --duration 5m \
   --items-file ./results/w-1mb-*/w-1mb-*.items.csv \
-  --use-rdma \
-  --rdma-local-ip 10.247.128.125
+  --use-rdma
 ```
 
 ---
@@ -64,14 +61,15 @@ spt run read \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--use-rdma` | `false` | Enable the RDMA-accelerated S3 driver |
-| `--rdma-local-ip` | `""` | Local RDMA interface IP address |
+| `--rdma-local-ip` | `""` | Local RDMA interface IP address. When unset and `--rdma-device` is `auto`, each worker uses the local address it routes toward the first S3 endpoint; leave it unset for multi-host runs |
 | `--rdma-threshold` | `1MB` | Minimum object size for RDMA transfer (e.g., `0`, `256KB`, `4MB`) |
-| `--rdma-fallback` | `false` | Fall back to HTTP if RDMA initialization fails |
-| `--rdma-device` | `auto` | RDMA device name or `auto` for auto-detection |
+| `--rdma-fallback` | `false` | Use HTTP when RDMA initialization or per-operation buffer preparation fails, and count GET bodies returned by a server that declines RDMA. When disabled, those operations fail |
+| `--rdma-device` | `auto` | RDMA device name or `auto` for auto-detection. A named device disables automatic local address selection |
 | `--rdma-log-level` | `WARN` | RDMA native library log level |
 | `--rdma-timeout-ms` | `30000` | RDMA operation timeout in milliseconds |
+| `--rdma-allow-missing-bytes-header` | `false` | Legacy servers only: accept an RDMA GET success without `x-amz-rdma-bytes-transferred` and count the requested size. By default such a response fails as corrupt |
 
-**Environment variable overrides:** `SPT_RDMA_ENABLED`, `RDMA_LOCAL_IP`, `RDMA_DEVICE`, `RDMA_LOG_LEVEL`, `RDMA_THRESHOLD_BYTES`, `RDMA_TIMEOUT_MS`, `RDMA_FALLBACK_ENABLED`
+**Environment variable overrides:** `SPT_RDMA`, `RDMA_LOCAL_IP`, `RDMA_DEVICE`, `RDMA_LOG_LEVEL`, `RDMA_THRESHOLD_BYTES`, `RDMA_TIMEOUT_MS`, `RDMA_FALLBACK_ENABLED`, `RDMA_ALLOW_MISSING_BYTES_HEADER`
 
 ---
 
@@ -85,7 +83,24 @@ The `--rdma-threshold` flag controls the cutoff:
 - Objects **below** the threshold use standard HTTP.
 - Set to `0` to force all objects through RDMA.
 
-The default of `1MB` is a good starting point. At 1MB, RDMA memory registration overhead is approximately 2% of total operation time.
+The default of `1MB` is a good starting point.
+
+Some operations are never proposed for RDMA and use HTTP regardless of size: ranged reads (fixed or random byte ranges), multipart initiate/complete requests (their upload parts do use RDMA), and objects larger than one RDMA buffer (2 GiB − 1).
+
+---
+
+## Transfer Validation and Data Path Summary
+
+Selecting the RDMA driver does not by itself prove that payloads moved over RDMA. SPT checks the server's answer to every RDMA-proposed request:
+
+| Server response | Result |
+|-----------------|--------|
+| `x-amz-rdma-reply: 200` (or 204/206) with an empty HTTP body | Transfer counted. GET bytes come from `x-amz-rdma-bytes-transferred`, which must equal the requested size |
+| `x-amz-rdma-reply: 501`, or no reply header, on a PUT | The server declined RDMA and stored nothing: the operation fails |
+| `x-amz-rdma-reply: 501`, or no reply header, on a GET | The object arrived in the HTTP body: counted once as an HTTP read with `--rdma-fallback`, otherwise the operation fails |
+| Reply 200 with an HTTP body, a byte-count mismatch, or a GET without `x-amz-rdma-bytes-transferred` | Contract violation: the operation fails as corrupt (see `--rdma-allow-missing-bytes-header` for legacy servers) |
+
+At the end of each step the engine logs one `RDMA data path summary` line in `messages.log` with counts of operations transferred over RDMA, declined by the server, failed, timed out, and sent over HTTP (below threshold, ineligible, oversize, or preparation fallback). Check it before trusting RDMA results.
 
 ---
 
@@ -138,7 +153,7 @@ SPT Engine (Java)
     └── rdma-core           — system packages (libibverbs, libmlx5, librdmacm)
 ```
 
-The native layer uses Mellanox DC (Dynamically Connected) transport for scalable connections and RoCE v2 for Ethernet-based RDMA. Memory registration is done on-demand per operation — the overhead (~88 microseconds at 1MB) is negligible relative to the transfer time.
+The native layer uses Mellanox DC (Dynamically Connected) transport for scalable connections and RoCE v2 for Ethernet-based RDMA. Each RDMA operation currently allocates and registers its own buffer on the driver's dispatch path; for large objects and high request rates, this per-operation preparation can limit the throughput of a single driver.
 
 ---
 
@@ -154,11 +169,11 @@ If SPT reports that RDMA is not available:
 
 ### Fallback to HTTP
 
-If `--rdma-fallback` is set and RDMA initialization fails, all operations silently use HTTP. Check engine logs for `RDMA initialization failed, falling back to HTTP` to confirm.
+If `--rdma-fallback` is set and RDMA initialization fails, all operations use HTTP; check the engine log for `RDMA unavailable, falling back to HTTP`. Per-operation fallbacks and server declines are counted in the `RDMA data path summary` line at the end of each step.
 
 ### Performance lower than expected
 
-- Ensure `--rdma-local-ip` matches your RDMA interface (not a management NIC)
+- If you set `--rdma-local-ip`, ensure it is the address of your RDMA interface (not a management NIC); in multi-host runs leave it unset so each worker selects its own
 - Check that object sizes are above `--rdma-threshold`
 - Verify RoCE v2 is properly configured on the network (PFC/ECN flow control)
 - Use `--rdma-log-level DEBUG` for detailed native-layer diagnostics

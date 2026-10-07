@@ -11,7 +11,8 @@ import com.dell.spt.base.item.op.OpType;
  * received no data, so it did not create the object even though the HTTP status is 2xx. A
  * declined GET carries the object in the HTTP body instead. A successful GET reports the bytes
  * written into client memory in {@code x-amz-rdma-bytes-transferred}, and every successful reply
- * has an empty HTTP body.
+ * has an empty HTTP body. A GET success without that header is a protocol error unless the legacy
+ * {@code storage.rdma.allowMissingBytesHeader} option accepts the requested size instead.
  */
 final class RdmaReplyContract {
 
@@ -80,18 +81,22 @@ final class RdmaReplyContract {
 	/**
 	 * Classifies a response whose HTTP status was successful.
 	 *
-	 * @param opType        CREATE (PUT/UploadPart) or READ (GET)
-	 * @param reply         parsed {@code x-amz-rdma-reply}
-	 * @param bytesHeader   parsed {@code x-amz-rdma-bytes-transferred}
-	 * @param contentLength parsed HTTP Content-Length, or {@link #VALUE_ABSENT}
-	 * @param requestedSize bytes described by the request's token
+	 * @param opType                  CREATE (PUT/UploadPart) or READ (GET)
+	 * @param reply                   parsed {@code x-amz-rdma-reply}
+	 * @param bytesHeader             parsed {@code x-amz-rdma-bytes-transferred}
+	 * @param bodyBytes               HTTP body size: the larger of Content-Length and the body bytes
+	 *                                actually received, so chunked bodies are included
+	 * @param requestedSize           bytes described by the request's token
+	 * @param allowMissingBytesHeader legacy compatibility: a GET success without the bytes header
+	 *                                counts the requested size instead of failing
 	 */
 	static Result classify(
 					final OpType opType,
 					final int reply,
 					final long bytesHeader,
-					final long contentLength,
-					final long requestedSize) {
+					final long bodyBytes,
+					final long requestedSize,
+					final boolean allowMissingBytesHeader) {
 		if (reply == REPLY_ABSENT || reply == REPLY_DECLINED) {
 			return new Result(Outcome.DECLINED, 0, false, reply == REPLY_ABSENT ? "reply header absent" : "reply 501");
 		}
@@ -99,9 +104,9 @@ final class RdmaReplyContract {
 			return new Result(Outcome.PROTOCOL_ERROR, 0, false,
 							reply == REPLY_MALFORMED ? "malformed reply header" : "unexpected reply " + reply);
 		}
-		if (contentLength > 0) {
+		if (bodyBytes > 0) {
 			return new Result(Outcome.PROTOCOL_ERROR, 0, false,
-							"reply " + reply + " with HTTP body of " + contentLength + " bytes");
+							"reply " + reply + " with HTTP body of " + bodyBytes + " bytes");
 		}
 		if (opType == OpType.CREATE) {
 			return new Result(Outcome.TRANSFERRED, requestedSize, false, null);
@@ -110,8 +115,11 @@ final class RdmaReplyContract {
 			return new Result(Outcome.PROTOCOL_ERROR, 0, false, "malformed bytes-transferred header");
 		}
 		if (bytesHeader == VALUE_ABSENT) {
-			// Servers predating the bytes header deliver the whole requested buffer.
-			return new Result(Outcome.TRANSFERRED, requestedSize, true, null);
+			// Without the header nothing proves how much was written into client memory.
+			return allowMissingBytesHeader
+							? new Result(Outcome.TRANSFERRED, requestedSize, true, null)
+							: new Result(Outcome.PROTOCOL_ERROR, 0, false,
+											"bytes-transferred header absent (storage.rdma.allowMissingBytesHeader=false)");
 		}
 		if (bytesHeader != requestedSize) {
 			return new Result(Outcome.PROTOCOL_ERROR, 0, false,

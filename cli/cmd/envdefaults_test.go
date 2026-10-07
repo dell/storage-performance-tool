@@ -27,6 +27,7 @@ func newRunLikeCmd() *cobra.Command {
 	c.Flags().String("rdma-device", "auto", "")
 	c.Flags().String("rdma-log-level", "WARN", "")
 	c.Flags().Int64("rdma-timeout-ms", 30000, "")
+	c.Flags().Bool("rdma-allow-missing-bytes-header", false, "")
 	c.Flags().Int("service-threads", 0, "")
 	c.Flags().StringArray(flagEngineOverride, []string{}, "")
 	c.Flags().String("s3-driver", "default", "")
@@ -62,6 +63,7 @@ func clearEnvDefaultsTestEnv(t *testing.T) {
 		constants.EnvRdmaThreshold,
 		constants.EnvRdmaTimeout,
 		constants.EnvRdmaFallback,
+		constants.EnvRdmaAllowMissingBytesHeader,
 		constants.EnvServiceThreads,
 		constants.EnvEngineOverrides,
 		constants.EnvPartSize,
@@ -272,6 +274,35 @@ func TestApplyEnvDefaultsToRunFlags_RdmaFromEnv(t *testing.T) {
 	}
 	if v, _ := cmd.Flags().GetBool("rdma-fallback"); v {
 		t.Fatal("rdma-fallback not applied from env (expected false)")
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_RdmaAllowMissingBytesHeaderFromEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
+	t.Setenv(constants.EnvRdmaAllowMissingBytesHeader, "true")
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToRunFlags error: %v", err)
+	}
+	if v, _ := cmd.Flags().GetBool("rdma-allow-missing-bytes-header"); !v {
+		t.Fatal("rdma-allow-missing-bytes-header not applied from env")
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_RdmaAllowMissingBytesHeaderFlagWinsOverEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
+	t.Setenv(constants.EnvRdmaAllowMissingBytesHeader, "true")
+	if err := cmd.Flags().Set("rdma-allow-missing-bytes-header", "false"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToRunFlags error: %v", err)
+	}
+	if v, _ := cmd.Flags().GetBool("rdma-allow-missing-bytes-header"); v {
+		t.Fatal("explicit --rdma-allow-missing-bytes-header=false must win over env")
 	}
 }
 

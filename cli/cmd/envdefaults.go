@@ -190,11 +190,16 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 		}
 	}
 
-	// RDMA bool setting
-	if f := cmd.Flags().Lookup("rdma-fallback"); f != nil && !cmd.Flags().Changed("rdma-fallback") {
-		if v := strings.TrimSpace(os.Getenv(constants.EnvRdmaFallback)); v != "" {
-			if b, err := strconv.ParseBool(v); err == nil {
-				_ = setFromEnv("rdma-fallback", strconv.FormatBool(b))
+	// RDMA bool settings
+	for flag, env := range map[string]string{
+		"rdma-fallback":                   constants.EnvRdmaFallback,
+		"rdma-allow-missing-bytes-header": constants.EnvRdmaAllowMissingBytesHeader,
+	} {
+		if f := cmd.Flags().Lookup(flag); f != nil && !cmd.Flags().Changed(flag) {
+			if v := strings.TrimSpace(os.Getenv(env)); v != "" {
+				if b, err := strconv.ParseBool(v); err == nil {
+					_ = setFromEnv(flag, strconv.FormatBool(b))
+				}
 			}
 		}
 	}

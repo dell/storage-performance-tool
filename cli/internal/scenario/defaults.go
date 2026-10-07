@@ -77,6 +77,8 @@ type RdmaConfig struct {
 	LocalIP   string `yaml:"localIp,omitempty"`
 	LogLevel  string `yaml:"logLevel,omitempty"`
 	TimeoutMs int64  `yaml:"timeoutMs"`
+	// Emitted only when enabled so engines without this schema key still accept the defaults.
+	AllowMissingBytesHeader bool `yaml:"allowMissingBytesHeader,omitempty"`
 }
 
 // DriverConfig represents storage driver configuration
@@ -388,6 +390,8 @@ func GenerateDefaults(params Params) ([]byte, error) {
 				LocalIP:   params.RdmaLocalIP,
 				LogLevel:  logLevel,
 				TimeoutMs: timeoutMs,
+
+				AllowMissingBytesHeader: params.RdmaAllowMissingBytesHeader,
 			}
 		}
 

@@ -46,7 +46,7 @@ You can use these variables to avoid repeating sensitive or commonly used parame
 - **Integrity qualification:** `SPT_DEFER_VERIFICATION` (true/false), `SPT_INTEGRITY_MAX_CONSOLE_FAILURES`, `SPT_INTEGRITY_RUNTIME_IDENTITY_TIER` (`image` or `payload`)
 - **Data shaping:** `SPT_OBJECT_DATA_COMPRESSIBILITY` (0-100, default 0), `SPT_OBJECT_DATA_DEDUPABLE` (true/false, default true)
 - **Storage driver:** `SPT_S3_DRIVER` (driver backend: `default`, `aws`, `rdma`)
-- **RDMA:** `SPT_RDMA_ENABLED`, `RDMA_LOCAL_IP`, `RDMA_DEVICE`, `RDMA_LOG_LEVEL`, `RDMA_THRESHOLD_BYTES`, `RDMA_TIMEOUT_MS`, `RDMA_FALLBACK_ENABLED`
+- **RDMA:** `SPT_RDMA`, `RDMA_LOCAL_IP`, `RDMA_DEVICE`, `RDMA_LOG_LEVEL`, `RDMA_THRESHOLD_BYTES`, `RDMA_TIMEOUT_MS`, `RDMA_FALLBACK_ENABLED`, `RDMA_ALLOW_MISSING_BYTES_HEADER`
 
 Variable expansion: use `$VAR` or `${VAR}`. Command substitutions like `$(pwd)` are not supported; use `$PWD` instead.
 
@@ -611,12 +611,13 @@ See [S3_RDMA.md](S3_RDMA.md) for detailed documentation, architecture, and troub
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--use-rdma` | `false` | Use the S3-RDMA driver. Standalone DELETE requests use HTTP, but driver startup still requires RDMA access unless `--rdma-fallback` is enabled |
-| `--rdma-local-ip` | `""` | Local RDMA interface IP address |
+| `--rdma-local-ip` | `""` | Local RDMA interface IP address. When unset and `--rdma-device` is `auto`, each worker uses the local address it routes toward the first S3 endpoint; leave it unset for multi-host runs |
 | `--rdma-threshold` | `1MB` | Minimum object size for RDMA transfer (e.g., `0`, `256KB`, `4MB`) |
-| `--rdma-fallback` | `false` | Fall back to HTTP if RDMA initialization fails |
-| `--rdma-device` | `auto` | RDMA device name or `auto` for auto-detection |
+| `--rdma-fallback` | `false` | Use HTTP when RDMA initialization or per-operation buffer preparation fails, and count GET bodies returned by a server that declines RDMA. When disabled, those operations fail |
+| `--rdma-device` | `auto` | RDMA device name or `auto` for auto-detection. A named device disables automatic local address selection |
 | `--rdma-log-level` | `WARN` | RDMA native library log level |
 | `--rdma-timeout-ms` | `30000` | RDMA operation timeout in milliseconds |
+| `--rdma-allow-missing-bytes-header` | `false` | Legacy servers only: accept an RDMA GET success without `x-amz-rdma-bytes-transferred` and count the requested size. By default such a response fails as corrupt |
 
 #### 8. S3 Tables Options
 
@@ -1036,7 +1037,6 @@ spt run write \
     --object-size 4MB \
     --duration 5m \
     --use-rdma \
-    --rdma-local-ip 10.247.128.125 \
     --rdma-threshold 1MB
 ```
 

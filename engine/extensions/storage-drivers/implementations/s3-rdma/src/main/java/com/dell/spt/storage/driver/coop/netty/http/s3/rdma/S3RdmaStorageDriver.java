@@ -25,6 +25,7 @@ import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.EmptyHttpHeaders;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
+import io.netty.handler.codec.http.HttpContent;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponse;
 
@@ -94,6 +95,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		int reply = RdmaReplyContract.REPLY_ABSENT;
 		long bytesTransferred = RdmaReplyContract.VALUE_ABSENT;
 		long responseContentLength = RdmaReplyContract.VALUE_ABSENT;
+		long responseBodyBytes;
 
 		RdmaContext(final String token, final ByteBuffer buffer, final long mrHandle,
 						final OpType opType, final int size) {
@@ -111,6 +113,11 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			responseContentLength = RdmaReplyContract.parseCount(headers.get(HttpHeaderNames.CONTENT_LENGTH));
 		}
 
+		/** HTTP body size, including chunked bodies that carry no Content-Length. */
+		long bodyBytes() {
+			return Math.max(responseContentLength, responseBodyBytes);
+		}
+
 		boolean replyAcceptedRdma() {
 			return reply == RdmaReplyContract.REPLY_OK
 							|| reply == RdmaReplyContract.REPLY_NO_CONTENT
@@ -119,8 +126,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * Records the RDMA reply headers into the channel's {@link RdmaContext} before the S3 response
-	 * handler runs, so body routing and completion can follow what the server actually did.
+	 * Records the RDMA reply headers and the HTTP body size into the channel's {@link RdmaContext}
+	 * before the S3 response handler runs, so body routing and completion can follow what the
+	 * server actually did.
 	 */
 	@ChannelHandler.Sharable
 	private static final class RdmaReplyObserver extends ChannelInboundHandlerAdapter {
@@ -128,10 +136,15 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 		@Override
 		public void channelRead(final ChannelHandlerContext handlerContext, final Object msg) {
-			if (msg instanceof HttpResponse response) {
+			if (msg instanceof HttpResponse || msg instanceof HttpContent) {
 				final RdmaContext ctx = handlerContext.channel().attr(RDMA_CONTEXT_ATTR_KEY).get();
 				if (ctx != null) {
-					ctx.observeResponse(response.headers());
+					if (msg instanceof HttpResponse response) {
+						ctx.observeResponse(response.headers());
+					}
+					if (msg instanceof HttpContent content) {
+						ctx.responseBodyBytes += content.content().readableBytes();
+					}
 				}
 			}
 			handlerContext.fireChannelRead(msg);
@@ -147,6 +160,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	private final AtomicBoolean prepareFailureWarned = new AtomicBoolean(false);
 	private final AtomicBoolean declinedWarned = new AtomicBoolean(false);
 	private final AtomicBoolean protocolErrorWarned = new AtomicBoolean(false);
+	private final AtomicBoolean bytesAssumedWarned = new AtomicBoolean(false);
 
 	private final RdmaPathStats pathStats = new RdmaPathStats();
 
@@ -193,8 +207,10 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 		// Parse RDMA configuration; without an explicit local address, use the one routed to the
 		// storage endpoint so each worker host selects its own RoCE GID.
+		// An explicit device keeps native device selection authoritative: the native layer binds
+		// by address first and would otherwise use whichever NIC carries the routed address.
 		final RdmaConfig configured = new RdmaConfig(storageConfig.configVal("rdma"));
-		rdmaConfig = configured.isEnabled() && configured.getLocalIp().isEmpty()
+		rdmaConfig = configured.isEnabled() && configured.getLocalIp().isEmpty() && !configured.hasExplicitDevice()
 						? withRoutedLocalIp(configured)
 						: configured;
 		Loggers.MSG.info("{}: RDMA config: {}", stepId, rdmaConfig);
@@ -321,12 +337,12 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			// Multipart initiate/complete requests carry no payload; their parts carry the data.
 			return false;
 		}
-		if (op instanceof PartialOperation && opType == OpType.READ) {
-			// Ranged part reads are not proposed for RDMA.
+		final var dataOp = (DataOperation) op;
+		if (opType == OpType.READ && (op instanceof PartialOperation || isRangedRead(dataOp))) {
+			// Ranged reads are not proposed for RDMA: the token and buffer describe the whole object.
 			pathStats.httpIneligible.increment();
 			return false;
 		}
-		final var dataOp = (DataOperation) op;
 		try {
 			final long size = dataOp.item().size();
 			final boolean useRdma = size >= rdmaConfig.getThresholdBytes();
@@ -345,6 +361,11 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			Loggers.MSG.warn("{}: RDMA skip: IOException getting size", stepId);
 			return false;
 		}
+	}
+
+	private static boolean isRangedRead(final DataOperation dataOp) {
+		final var fixedRanges = dataOp.fixedRanges();
+		return (fixedRanges != null && !fixedRanges.isEmpty()) || dataOp.randomRangesCount() > 0;
 	}
 
 	/**
@@ -450,8 +471,23 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		}
 		pathStats.prepareFailed.increment();
 		op.status(Operation.Status.FAIL_IO);
+		// This completion bypasses finishResponse(), so the part is settled here.
+		markPartSettled(op);
 		handleCompleted(op);
 		return true;
+	}
+
+	/**
+	 * Marks a multipart part's sub-task complete on its parent.
+	 *
+	 * <p>A part is normally settled by {@code PartialDataOperationImpl.finishResponse()}, and a part
+	 * retry undoes that mark. Completion paths that do not reach that settlement must call this
+	 * exactly once so retries and finalization keep the parent's pending count balanced.
+	 */
+	static void markPartSettled(final Operation<?> op) {
+		if (op instanceof PartialOperation<?> part) {
+			part.parent().markSubTaskCompleted();
+		}
 	}
 
 	/** Remove and clean up RDMA context for an operation. Returns true if found. */
@@ -686,13 +722,18 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 				return;
 			}
 			final RdmaReplyContract.Result result = RdmaReplyContract.classify(
-							ctx.opType, ctx.reply, ctx.bytesTransferred, ctx.responseContentLength, ctx.size);
+							ctx.opType, ctx.reply, ctx.bytesTransferred, ctx.bodyBytes(), ctx.size,
+							rdmaConfig.isAllowMissingBytesHeader());
 			final var dataOp = (DataOperation) op;
 			switch (result.outcome()) {
 			case TRANSFERRED -> {
 				pathStats.rdmaTransferred.increment();
 				if (result.bytesAssumed()) {
 					pathStats.rdmaBytesAssumed.increment();
+					if (bytesAssumedWarned.compareAndSet(false, true)) {
+						Loggers.MSG.warn("{}: RDMA GET success without x-amz-rdma-bytes-transferred; counting the "
+										+ "requested size (storage.rdma.allowMissingBytesHeader=true)", stepId);
+					}
 				}
 				if (ctx.opType == OpType.READ) {
 					final ByteBuffer body = ctx.buffer.asReadOnlyBuffer();
@@ -759,6 +800,11 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 						rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
 						pathStats.rdmaTimedOut.increment();
 						op.status(Operation.Status.FAIL_IO);
+						// finishResponse() throws before settling a part whose response never
+						// started; it settles it otherwise (timing may carry over from a retry).
+						if (op.respTimeStart() == 0) {
+							markPartSettled(op);
+						}
 						discardOutOfBandIntegrityRead(ctx.channel);
 						super.complete(ctx.channel, (O) op);
 						reaped++;

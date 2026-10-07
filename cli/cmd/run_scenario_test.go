@@ -745,11 +745,37 @@ func TestBuildScenarioParams_S3DriverFlag(t *testing.T) {
 		cmd.Flags().String("rdma-device", "auto", "")
 		cmd.Flags().String("rdma-log-level", "WARN", "")
 		cmd.Flags().Int64("rdma-timeout-ms", 30000, "")
+		cmd.Flags().Bool("rdma-allow-missing-bytes-header", false, "")
 		cmd.Flags().String("checksum", "", "")
 		cmd.Flags().Float64("object-data-compressibility", 0.0, "")
 		cmd.Flags().Bool("object-data-dedupable", true, "")
 		return cmd
 	}
+
+	t.Run("--rdma-allow-missing-bytes-header reaches RDMA params", func(t *testing.T) {
+		cmd := newCmd()
+		_ = cmd.Flags().Set("s3-driver", "rdma")
+		_ = cmd.Flags().Set("rdma-allow-missing-bytes-header", "true")
+		p, err := buildScenarioParams("mock", cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !p.RdmaAllowMissingBytesHeader {
+			t.Error("RdmaAllowMissingBytesHeader = false, want true")
+		}
+	})
+
+	t.Run("RDMA missing-bytes-header option defaults off", func(t *testing.T) {
+		cmd := newCmd()
+		_ = cmd.Flags().Set("s3-driver", "rdma")
+		p, err := buildScenarioParams("mock", cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.RdmaAllowMissingBytesHeader {
+			t.Error("RdmaAllowMissingBytesHeader = true, want false by default")
+		}
+	})
 
 	t.Run("--s3-driver aws sets S3Driver", func(t *testing.T) {
 		cmd := newCmd()
