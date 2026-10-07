@@ -40,11 +40,15 @@ public final class S3StorageDriverExtension<I extends Item, O extends Operation<
 					final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
 					final int batchSize) throws IllegalConfigurationException, InterruptedException {
 		final var endpointSelection = EndpointSelectionSettings.fromStorage(storageConfig);
-		if (!endpointSelection.isDefault()) {
+		if (endpointSelection.isDefault()) {
+			return (T) new S3StorageDriver<>(stepId, dataInput, storageConfig, verifyFlag, batchSize);
+		}
+		if (endpointSelection.mode() != EndpointSelectionSettings.Mode.ROUND_ROBIN) {
 			throw new IllegalConfigurationException("Endpoint selection \""
 							+ endpointSelection.mode().configValue() + "\" is not available yet");
 		}
-		return (T) new S3StorageDriver<>(stepId, dataInput, storageConfig, verifyFlag, batchSize);
+		return (T) new S3EndpointSelectionDriver<>(
+						stepId, dataInput, storageConfig, verifyFlag, batchSize, endpointSelection);
 	}
 
 	@Override
