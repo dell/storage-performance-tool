@@ -43,11 +43,7 @@ public final class S3StorageDriverExtension<I extends Item, O extends Operation<
 		if (endpointSelection.isDefault()) {
 			return (T) new S3StorageDriver<>(stepId, dataInput, storageConfig, verifyFlag, batchSize);
 		}
-		if (endpointSelection.mode() != EndpointSelectionSettings.Mode.ROUND_ROBIN) {
-			throw new IllegalConfigurationException("Endpoint selection \""
-							+ endpointSelection.mode().configValue() + "\" is not available yet");
-		}
-		return (T) new S3EndpointSelectionDriver<>(
+		return (T) S3EndpointSelectionDriver.create(
 						stepId, dataInput, storageConfig, verifyFlag, batchSize, endpointSelection);
 	}
 

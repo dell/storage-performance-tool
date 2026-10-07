@@ -7,7 +7,6 @@ import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.resolver.ResolvedAddressTypes;
 import io.netty.resolver.dns.DnsNameResolver;
 import io.netty.resolver.dns.DnsNameResolverBuilder;
-import io.netty.resolver.dns.DnsQueryLifecycleObserverFactory;
 import io.netty.resolver.dns.NoopAuthoritativeDnsServerCache;
 import io.netty.resolver.dns.NoopDnsCache;
 import io.netty.resolver.dns.NoopDnsCnameCache;
@@ -43,8 +42,7 @@ public final class PerRequestDnsResolver implements AutoCloseable {
 					final String hostname,
 					final List<InetSocketAddress> servers,
 					final long timeoutMillis,
-					final ThreadFactory threadFactory,
-					final DnsQueryLifecycleObserverFactory queryObserver) {
+					final ThreadFactory threadFactory) {
 		if (servers.isEmpty()) {
 			throw new IllegalArgumentException("At least one DNS server is required");
 		}
@@ -57,7 +55,7 @@ public final class PerRequestDnsResolver implements AutoCloseable {
 		this.group = new NioEventLoopGroup(1, threadFactory);
 		this.loop = group.next();
 		try {
-			final var builder = new DnsNameResolverBuilder(loop)
+			this.resolver = new DnsNameResolverBuilder(loop)
 							.datagramChannelType(NioDatagramChannel.class)
 							// TCP is used only after a truncated UDP answer, never as a retry on timeout.
 							.socketChannelType(NioSocketChannel.class, false)
@@ -69,11 +67,8 @@ public final class PerRequestDnsResolver implements AutoCloseable {
 							.hostsFileEntriesResolver((name, types) -> null)
 							.resolvedAddressTypes(ResolvedAddressTypes.IPV4_ONLY)
 							.searchDomains(List.of())
-							.queryTimeoutMillis(Math.max(1, timeoutMillis / this.servers.size()));
-			if (queryObserver != null) {
-				builder.dnsQueryLifecycleObserverFactory(queryObserver);
-			}
-			this.resolver = builder.build();
+							.queryTimeoutMillis(Math.max(1, timeoutMillis / this.servers.size()))
+							.build();
 		} catch (final RuntimeException e) {
 			group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS);
 			throw e;

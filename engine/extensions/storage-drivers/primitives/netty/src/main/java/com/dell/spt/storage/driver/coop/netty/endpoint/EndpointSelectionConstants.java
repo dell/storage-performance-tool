@@ -11,6 +11,13 @@ public final class EndpointSelectionConstants {
 	/** Host resolver configuration read when no explicit DNS server is configured. */
 	public static final Path RESOLV_CONF = Path.of("/etc/resolv.conf");
 
+	/**
+	 * How long a per-request connection waits for the server to close it after the response. The
+	 * request carries {@code Connection: close}; a server-side close keeps TIME_WAIT off the client's
+	 * ephemeral ports. The client closes after this grace period otherwise.
+	 */
+	public static final long SERVER_CLOSE_GRACE_MILLIS = 1_000;
+
 	/** Upper bound for closing resolver and connection resources owned by a driver. */
 	public static final long CLOSE_TIMEOUT_MILLIS = 5_000;
 

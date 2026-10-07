@@ -1,5 +1,10 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3;
 
+import static com.dell.spt.storage.driver.coop.netty.http.s3.EndpointSelectionTestSupport.CREDENTIAL;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.EndpointSelectionTestSupport.HOSTNAME;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.EndpointSelectionTestSupport.ITEM_SIZE;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.EndpointSelectionTestSupport.RESULT_TIMEOUT_SECONDS;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.EndpointSelectionTestSupport.dataOp;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -12,11 +17,6 @@ import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
-import com.dell.spt.base.item.op.data.DataOperation;
-import com.dell.spt.base.item.op.data.DataOperationImpl;
-import com.dell.spt.base.storage.Credential;
-import com.github.akurilov.commons.io.Input;
-import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.confuse.Config;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -30,7 +30,6 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -39,11 +38,6 @@ import org.junit.jupiter.api.Timeout;
 /** Real-driver round-robin selection against loopback listeners that record every request. */
 @Timeout(60)
 final class S3EndpointSelectionRoundRobinTest {
-
-	private static final Credential CREDENTIAL = Credential.getInstance("user1", "u5QtPuQx+W5nrrQQEg7nArBqSgC8qLiDt2RhQthb");
-	private static final int ITEM_SIZE = 1024;
-	private static final long RESULT_TIMEOUT_SECONDS = 10;
-	private static final String HOSTNAME = "s3.example.test";
 
 	private final List<HttpServer> servers = new ArrayList<>();
 	private final ExecutorService serverThreads = Executors.newCachedThreadPool();
@@ -353,7 +347,8 @@ final class S3EndpointSelectionRoundRobinTest {
 		void apply(Config config);
 	}
 
-	private record Run(S3EndpointSelectionDriver<DataItem, Operation<DataItem>> driver, Results results) {
+	private record Run(S3EndpointSelectionDriver<DataItem, Operation<DataItem>> driver,
+					EndpointSelectionTestSupport.Results results) {
 		Operation<?> execute(final Operation<DataItem> op) throws Exception {
 			assertTrue(driver.put(op));
 			return results.await();
@@ -383,15 +378,10 @@ final class S3EndpointSelectionRoundRobinTest {
 						"round-robin-test", new SeedDataInput(1, ITEM_SIZE, 1, true), config.configVal("storage"), false, 16);
 		final var driver = assertInstanceOf(S3EndpointSelectionDriver.class, created);
 		resources.add(driver);
-		final var results = new Results();
+		final var results = new EndpointSelectionTestSupport.Results();
 		driver.operationResultOutput(results);
 		driver.start();
 		return new Run(driver, results);
-	}
-
-	private static DataOperation<DataItem> dataOp(final OpType type, final String name) {
-		return new DataOperationImpl<>(0, type, new DataItemImpl(name, name.hashCode() & 0xFFFF, ITEM_SIZE), null,
-						"/bucket", CREDENTIAL, null, 0);
 	}
 
 	private List<String> listeners(final int count) throws IOException {
@@ -502,51 +492,6 @@ final class S3EndpointSelectionRoundRobinTest {
 	private static int unusedPort() throws IOException {
 		try (final var socket = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
 			return socket.getLocalPort();
-		}
-	}
-
-	private static final class Results implements Output<Operation<DataItem>> {
-
-		private final LinkedBlockingQueue<Operation<DataItem>> results = new LinkedBlockingQueue<>();
-
-		@Override
-		public boolean put(final Operation<DataItem> value) {
-			return results.offer(value);
-		}
-
-		@Override
-		public int put(final List<Operation<DataItem>> values, final int from, final int to) {
-			for (var i = from; i < to; i++) {
-				results.offer(values.get(i));
-			}
-			return to - from;
-		}
-
-		@Override
-		public int put(final List<Operation<DataItem>> values) {
-			return put(values, 0, values.size());
-		}
-
-		@Override
-		public Input<Operation<DataItem>> getInput() {
-			return null;
-		}
-
-		@Override
-		public void close() {}
-
-		Operation<?> poll() throws InterruptedException {
-			return poll(10);
-		}
-
-		Operation<?> poll(final long millis) throws InterruptedException {
-			return results.poll(millis, TimeUnit.MILLISECONDS);
-		}
-
-		Operation<?> await() throws InterruptedException {
-			final var result = results.poll(RESULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-			assertNotNull(result, "no operation result before the timeout");
-			return result;
 		}
 	}
 

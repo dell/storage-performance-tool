@@ -21,6 +21,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -175,6 +176,10 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 	public void release(final Channel channel) {
 		final var bound = binding;
 		final var destination = channel.attr(ATTR_KEY_DESTINATION).get();
+		if (bound != null && !bound.pooled() && !closed && channel.isActive()) {
+			closeAfterServerGrace(channel);
+			return;
+		}
 		if (bound == null || !bound.pooled() || closed || destination == null || !channel.isActive()) {
 			final var unusedClose = channel.close();
 			return;
@@ -187,6 +192,16 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 		idleChannels.computeIfAbsent(destination, ignored -> new ConcurrentLinkedDeque<>()).offerLast(channel);
 		if (closed) {
 			closeIdle();
+		}
+	}
+
+	private static void closeAfterServerGrace(final Channel channel) {
+		try {
+			channel.eventLoop().schedule(() -> {
+				final var unusedClose = channel.close();
+			}, EndpointSelectionConstants.SERVER_CLOSE_GRACE_MILLIS, TimeUnit.MILLISECONDS);
+		} catch (final RejectedExecutionException e) {
+			final var unusedClose = channel.close();
 		}
 	}
 

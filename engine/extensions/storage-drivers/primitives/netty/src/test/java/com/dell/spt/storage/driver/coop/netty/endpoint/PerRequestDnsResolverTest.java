@@ -229,7 +229,7 @@ class PerRequestDnsResolverTest {
 	void closeTerminatesTheResolverAndRejectsNewLookups() throws Exception {
 		final var dns = server(q -> Reply.answers(q.name(), "10.0.0.1"));
 		final var resolver = new PerRequestDnsResolver(NAME, List.of(dns.address()), TIMEOUT_MILLIS,
-						new DefaultThreadFactory("test-dns", true), null);
+						new DefaultThreadFactory("test-dns", true));
 		await(resolver.resolve());
 
 		resolver.close();
@@ -243,7 +243,7 @@ class PerRequestDnsResolverTest {
 	@Test
 	void rejectsInvalidConstruction() {
 		final var threads = new DefaultThreadFactory("test-dns", true);
-		assertThrows(IllegalArgumentException.class, () -> new PerRequestDnsResolver(NAME, List.of(), 1, threads, null));
+		assertThrows(IllegalArgumentException.class, () -> new PerRequestDnsResolver(NAME, List.of(), 1, threads));
 	}
 
 	private ScriptedDnsServer server(final Function<Received, Reply> script) throws InterruptedException {
@@ -258,8 +258,7 @@ class PerRequestDnsResolverTest {
 						name,
 						Arrays.stream(servers).map(ScriptedDnsServer::address).toList(),
 						timeoutMillis,
-						new DefaultThreadFactory("test-dns", true),
-						null);
+						new DefaultThreadFactory("test-dns", true));
 		resources.add(resolver);
 		return resolver;
 	}

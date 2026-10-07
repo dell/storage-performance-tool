@@ -42,22 +42,22 @@ import java.util.function.Function;
  * Loopback UDP and TCP DNS server on one port whose answers come from a script. It records every
  * query it receives, which makes it the test oracle for query counts, order and transport.
  */
-final class ScriptedDnsServer implements AutoCloseable {
+public final class ScriptedDnsServer implements AutoCloseable {
 
-	enum Transport {
+	public enum Transport {
 		UDP, TCP
 	}
 
-	record Received(Transport transport, String name, DnsRecordType type) {}
+	public record Received(Transport transport, String name, DnsRecordType type) {}
 
 	/** One record in a reply; {@code data} is already in wire form. */
-	record Rr(DnsSection section, String name, DnsRecordType type, long ttl, byte[] data) {}
+	public record Rr(DnsSection section, String name, DnsRecordType type, long ttl, byte[] data) {}
 
 	/** A scripted reply; {@code null} from the script means "drop the query". */
-	record Reply(DnsResponseCode code, boolean authoritative, boolean recursionAvailable, boolean truncated,
+	public record Reply(DnsResponseCode code, boolean authoritative, boolean recursionAvailable, boolean truncated,
 					long delayMillis, List<Rr> records) {
 
-		static Reply answers(final String name, final String... ipv4) {
+		public static Reply answers(final String name, final String... ipv4) {
 			final List<Rr> records = new ArrayList<>();
 			for (final var ip : ipv4) {
 				records.add(a(DnsSection.ANSWER, name, ip));
@@ -65,11 +65,11 @@ final class ScriptedDnsServer implements AutoCloseable {
 			return new Reply(DnsResponseCode.NOERROR, false, true, false, 0, records);
 		}
 
-		static Reply code(final DnsResponseCode code) {
+		public static Reply code(final DnsResponseCode code) {
 			return new Reply(code, false, true, false, 0, List.of());
 		}
 
-		Reply delayed(final long millis) {
+		public Reply delayed(final long millis) {
 			return new Reply(code, authoritative, recursionAvailable, truncated, millis, records);
 		}
 	}
@@ -82,7 +82,7 @@ final class ScriptedDnsServer implements AutoCloseable {
 	private final Channel udp;
 	private final Channel tcp;
 
-	ScriptedDnsServer(final Function<Received, Reply> script) throws InterruptedException {
+	public ScriptedDnsServer(final Function<Received, Reply> script) throws InterruptedException {
 		this.script = script;
 		Channel boundUdp = null;
 		Channel boundTcp = null;
@@ -105,28 +105,28 @@ final class ScriptedDnsServer implements AutoCloseable {
 		this.tcp = boundTcp;
 	}
 
-	InetSocketAddress address() {
+	public InetSocketAddress address() {
 		return (InetSocketAddress) udp.localAddress();
 	}
 
-	List<Received> received() {
+	public List<Received> received() {
 		return List.copyOf(received);
 	}
 
-	long count(final Transport transport) {
+	public long count(final Transport transport) {
 		return received.stream().filter(r -> r.transport() == transport).count();
 	}
 
-	static Rr a(final DnsSection section, final String name, final String ip) {
+	public static Rr a(final DnsSection section, final String name, final String ip) {
 		final var address = Ipv4Literal.parse(ip).orElseThrow();
 		return new Rr(section, name, DnsRecordType.A, 0, address.getAddress());
 	}
 
-	static Rr nameRecord(final DnsSection section, final String name, final DnsRecordType type, final String target) {
+	public static Rr nameRecord(final DnsSection section, final String name, final DnsRecordType type, final String target) {
 		return new Rr(section, name, type, 0, wireName(target));
 	}
 
-	static byte[] wireName(final String name) {
+	public static byte[] wireName(final String name) {
 		final var out = new java.io.ByteArrayOutputStream();
 		for (final var label : name.split("\\.")) {
 			if (label.isEmpty()) {
