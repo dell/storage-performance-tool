@@ -76,6 +76,10 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	testHosts, _ := cmd.Flags().GetString("test-hosts")
 	label, _ := cmd.Flags().GetString("label")
 	s3Driver, _ := cmd.Flags().GetString("s3-driver")
+	endpointSelection, err := endpointSelectionFromFlags(cmd)
+	if err != nil {
+		return err
+	}
 	out := cmd.OutOrStdout()
 
 	generated, err := replay.Generate(cmd.Context(), replay.Options{
@@ -89,6 +93,8 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		TestHosts:   testHosts,
 		Label:       label,
 		S3Driver:    s3Driver,
+
+		EndpointSelection: endpointSelection,
 	})
 	if err != nil {
 		if generated != nil && strings.TrimSpace(generated.Preflight) != "" {
@@ -545,6 +551,7 @@ func init() {
 	replayCmd.Flags().String("test-hosts", "127.0.0.1", "Comma-separated local test host list for replay variable remapping")
 	replayCmd.Flags().String("label", "replay", "Label prefix for generated canonical step IDs")
 	replayCmd.Flags().String("s3-driver", "default", "S3 driver selection: default, netty, aws, or rdma")
+	registerEndpointSelectionFlags(replayCmd.Flags())
 	replayCmd.Flags().Bool("headless", false, "Force headless (non-interactive) mode")
 	replayCmd.Flags().Bool("minimal", false, "Start TUI with only the live stats panel visible")
 	replayCmd.Flags().Int("auto-terminate-seconds", 0, "Automatically terminate runs after N seconds (0 = unlimited)")

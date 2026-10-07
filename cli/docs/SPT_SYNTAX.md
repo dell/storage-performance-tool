@@ -90,6 +90,11 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--prefix` | | `""` | Literal generated-key prefix for `write` and `write-verify`; owned namespace root for seeded DELETE; listing constraint for `list` and LIST-based `read-verify`; rejected for `read`, `mixed`, `mock`, and `tables` |
 | `--auth-version` | | `4` | S3 signature version (`2` or `4`) |
 | `--slice-endpoints` | | `false` | Partition endpoints across nodes in distributed runs |
+| `--endpoint-selection` | | `default` | Connect destination per S3 request attempt: `default`, `round-robin` over the `--endpoints` IPv4 addresses, or `per-request-dns` for the single `--endpoints` hostname. Netty S3 driver only. See [Endpoint Selection](ENDPOINT_SELECTION.md) |
+| `--endpoint-hostname` | | *(none)* | Round robin: hostname used for HTTP Host, request signing and TLS SNI |
+| `--dns-server` | | *(host DNS configuration)* | Per-request DNS: `IPv4[:port]` DNS server queried without fallback |
+| `--dns-timeout` | | `5s` | Per-request DNS: total deadline of one lookup |
+| `--endpoint-connect-timeout` | | `30s` | Round robin and per-request DNS: TCP connect deadline |
 
 For `write`, the key is `<prefix><shard-directory>/<object-id>` when sharding is enabled,
 or `<prefix><object-id>` with `--prefix-shards 0`. The prefix is literal: use `quickstart/`

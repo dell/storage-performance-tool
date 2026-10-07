@@ -156,6 +156,52 @@ string, preserving endpoint-based region detection and the existing fallback.
 An explicit region takes precedence over endpoint detection. The AWS SDK driver
 also consumes this setting and retains its existing fallback when it is empty.
 
+### Endpoint selection
+
+By default the driver pools connections to the configured node addresses. The
+opt-in `storage.net.endpoint` settings instead choose the connect destination of
+every request attempt:
+
+```yaml
+storage:
+  net:
+    node:
+      addrs: [10.0.0.1, 10.0.0.2, 10.0.0.3]
+      port: 9020
+    endpoint:
+      selection: round-robin        # default | round-robin | per-request-dns
+      hostname: s3.example.com      # round robin only: Host, signing and TLS SNI
+      connect:
+        timeoutMilliSec: 30000      # TCP connect deadline in either mode
+```
+
+For `per-request-dns`, `storage.net.node.addrs` holds exactly one hostname, which
+is resolved afresh for every request attempt:
+
+```yaml
+storage:
+  net:
+    node:
+      addrs: [s3.example.com]
+      port: 9021
+    endpoint:
+      selection: per-request-dns
+      dns:
+        server: 10.0.0.53           # optional IPv4[:port]; omitted = /etc/resolv.conf servers
+        timeoutMilliSec: 5000       # total deadline of one lookup
+```
+
+The engine rejects:
+- settings that do not apply to the selected mode;
+- duplicate or non-IPv4 round-robin addresses;
+- IPv6;
+- `storage.net.node.slice`;
+- partial-object reads;
+- every storage driver other than this one (`s3`).
+
+Behavior, limits and log output are described in the CLI's
+[Endpoint Selection](../../../../../cli/docs/ENDPOINT_SELECTION.md) guide.
+
 ### 3.1. S3 Specific Options
 
 | Name                                           | Type         | Default Value    | Description                                      |

@@ -117,6 +117,7 @@ present and supported.
 | Archived input or config | Replay behavior | Reason |
 |---|---|---|
 | Archived S3 endpoints or storage node addresses | Replaced by `--endpoints`, `S3_ENDPOINTS`, or `S3_ENDPOINT` | Replay targets the current S3-compatible storage system |
+| Archived endpoint selection (`storage.net.endpoint`) | Mode and timeouts preserved; hostname and DNS server are reported as unmodeled. `--endpoint-selection` and related flags apply to the replay target | Hostnames and DNS servers belong to the original environment |
 | Archived bucket or item-output path | Replaced by `--bucket` or `S3_BUCKET` | Avoid writing to the original environment |
 | Archived access keys and secret keys | Sanitized from processed config and never reused | Credentials must come from the current environment |
 | Archived client hosts | Replaced by `--test-hosts` or `HOSTS` | Execute on current worker hosts |

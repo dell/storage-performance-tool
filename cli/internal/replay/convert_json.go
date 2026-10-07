@@ -56,6 +56,7 @@ const (
 	legacyKeyNet         = "net"
 	legacyKeyOutput      = "output"
 	legacyKeySSL         = "ssl"
+	legacyKeyEndpoint    = "endpoint"
 	legacyKeyEnabled     = "enabled"
 	legacyKeyStep        = "step"
 	legacyKeyStorage     = "storage"
@@ -412,6 +413,16 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	if pqcMode := resolveString(getPath(step.Config, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "pqcMode"), vars); pqcMode != "" {
 		setPath(config, pqcMode, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "pqcMode")
 	}
+	// Endpoint selection mode and timeouts carry over; hostname and DNS server are environment-specific
+	// and come from the replay flags, like the endpoints themselves.
+	if selection := resolveString(getPath(step.Config, legacyKeyStorage, legacyKeyNet, legacyKeyEndpoint, "selection"), vars); selection != "" {
+		setPath(config, selection, legacyKeyStorage, legacyKeyNet, legacyKeyEndpoint, "selection")
+	}
+	for _, section := range []string{"dns", "connect"} {
+		if timeout := intValue(getPath(step.Config, legacyKeyStorage, legacyKeyNet, legacyKeyEndpoint, section, "timeoutMilliSec"), vars); timeout > 0 {
+			setPath(config, timeout, legacyKeyStorage, legacyKeyNet, legacyKeyEndpoint, section, "timeoutMilliSec")
+		}
+	}
 
 	var rewrites []PathRewrite
 	if rawOutput := itemPathString(getPath(step.Config, "item", legacyKeyOutput, "file"), vars); rawOutput != "" {
@@ -651,6 +662,9 @@ func isModeledJSONConfigPath(path string) bool {
 		"storage.net.ssl.provider",
 		"storage.net.node.addrs",
 		"storage.net.node.port",
+		"storage.net.endpoint.selection",
+		"storage.net.endpoint.dns.timeoutMilliSec",
+		"storage.net.endpoint.connect.timeoutMilliSec",
 		"test.step.id",
 		"test.step.limit.fail.count",
 		"test.step.limit.count",
