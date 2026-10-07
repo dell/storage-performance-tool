@@ -136,15 +136,15 @@ class SelectingConnectionPoolTest {
 		assertThrows(IllegalStateException.class, pool::acquire);
 
 		final var destinations = new RoundRobinDestinations(List.of(new InetSocketAddress("127.0.0.1", 9)));
-		pool.bind(destinations, true, 1, 1_000, 1_000);
-		assertThrows(IllegalStateException.class, () -> pool.bind(destinations, true, 1, 1_000, 1_000));
+		pool.bind(destinations, true, 1, 1_000, 1_000, new EndpointSelectionCounters());
+		assertThrows(IllegalStateException.class, () -> pool.bind(destinations, true, 1, 1_000, 1_000, new EndpointSelectionCounters()));
 		pool.close();
 	}
 
 	private SelectingConnectionPool pool(final List<InetSocketAddress> destinations, final boolean pooled,
 					final int idleLimit) {
 		final var pool = new SelectingConnectionPool(bootstrap, new NoopHandler());
-		pool.bind(new RoundRobinDestinations(destinations), pooled, idleLimit, 2_000, 2_000);
+		pool.bind(new RoundRobinDestinations(destinations), pooled, idleLimit, 2_000, 2_000, new EndpointSelectionCounters());
 		return pool;
 	}
 

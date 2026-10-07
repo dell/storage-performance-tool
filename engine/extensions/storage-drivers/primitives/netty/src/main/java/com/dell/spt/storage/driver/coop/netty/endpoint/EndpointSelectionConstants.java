@@ -18,6 +18,9 @@ public final class EndpointSelectionConstants {
 	 */
 	public static final long SERVER_CLOSE_GRACE_MILLIS = 1_000;
 
+	/** Distinct destinations counted individually per driver; further ones are counted as "other". */
+	public static final int MAX_TRACKED_DESTINATIONS = 256;
+
 	/** Upper bound for closing resolver and connection resources owned by a driver. */
 	public static final long CLOSE_TIMEOUT_MILLIS = 5_000;
 

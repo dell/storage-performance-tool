@@ -29,6 +29,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -100,6 +101,12 @@ final class S3EndpointSelectionDnsTest {
 		requests.stream().filter(r -> "PUT".equals(r.method()))
 						.forEach(r -> assertEquals("close", r.connection()));
 		awaitNoOpenConnections(run);
+		final var counters = run.driver().counters().snapshot();
+		assertEquals(dns.received().size(), counters.lookups());
+		assertEquals(5, counters.selections().values().stream().mapToLong(Long::longValue).sum());
+		assertEquals(5, counters.connectsNew());
+		assertEquals(0, counters.connectsReused());
+		assertEquals(5, counters.closes());
 	}
 
 	@Test
@@ -125,6 +132,7 @@ final class S3EndpointSelectionDnsTest {
 	@Test
 	void lookupFailuresFailTheAttemptWithoutFallback() throws Exception {
 		listeners();
+		final Set<String> failureKinds = new HashSet<>();
 		for (final Function<ScriptedDnsServer.Received, Reply> failure : List.<Function<ScriptedDnsServer.Received, Reply>> of(
 						q -> Reply.code(DnsResponseCode.SERVFAIL),
 						q -> Reply.code(DnsResponseCode.NXDOMAIN),
@@ -141,7 +149,9 @@ final class S3EndpointSelectionDnsTest {
 			assertEquals(Operation.Status.FAIL_IO, result.status());
 			assertEquals(List.of("HEAD"), requests.stream().map(Captured::method).toList());
 			assertEquals(0, run.driver().activeOpCount());
+			failureKinds.addAll(run.driver().counters().snapshot().lookupFailures().keySet());
 		}
+		assertEquals(Set.of("SERVER_FAILURE", "NOT_FOUND", "NO_ADDRESS", "TIMEOUT"), failureKinds);
 	}
 
 	@Test

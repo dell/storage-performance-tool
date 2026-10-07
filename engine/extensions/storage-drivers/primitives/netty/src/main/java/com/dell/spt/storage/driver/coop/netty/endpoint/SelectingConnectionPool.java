@@ -50,7 +50,7 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 	private volatile boolean closed;
 
 	private record Binding(DestinationSource source, boolean pooled, int idleLimit, int connectTimeoutMillis,
-					long setupTimeoutMillis) {}
+					long setupTimeoutMillis, EndpointSelectionCounters counters) {}
 
 	public SelectingConnectionPool(final Bootstrap bootstrap, final ChannelPoolHandler channelHandler) {
 		this.bootstrap = bootstrap;
@@ -65,11 +65,11 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 	 * @param setupTimeoutMillis bound for a synchronous {@link #lease()}, covering selection and connect
 	 */
 	public void bind(final DestinationSource source, final boolean pooled, final int idleLimit,
-					final int connectTimeoutMillis, final long setupTimeoutMillis) {
+					final int connectTimeoutMillis, final long setupTimeoutMillis, final EndpointSelectionCounters counters) {
 		if (binding != null) {
 			throw new IllegalStateException("Connection pool is already bound");
 		}
-		binding = new Binding(source, pooled, idleLimit, connectTimeoutMillis, setupTimeoutMillis);
+		binding = new Binding(source, pooled, idleLimit, connectTimeoutMillis, setupTimeoutMillis, counters);
 	}
 
 	/**
@@ -87,9 +87,15 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 			return loop.newFailedFuture(new ConnectException("Endpoint selection pool is closed"));
 		}
 		final var selection = bound.source().next();
-		if (allowReuse && bound.pooled() && selection.isSuccess()) {
+		// Count each selection exactly once, whether it is already complete or completes later.
+		final var countedNow = selection.isSuccess();
+		if (countedNow) {
+			bound.counters().selected(selection.getNow());
+		}
+		if (allowReuse && bound.pooled() && countedNow) {
 			final var idle = pollActiveIdle(selection.getNow());
 			if (idle != null) {
+				bound.counters().connected(true);
 				// Completing on the channel's own loop lets the caller send without another hand-off.
 				return idle.eventLoop().newSucceededFuture(idle);
 			}
@@ -97,6 +103,9 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 		final Promise<Channel> result = loop.newPromise();
 		selection.addListener((Future<InetSocketAddress> selected) -> {
 			if (selected.isSuccess()) {
+				if (!countedNow) {
+					bound.counters().selected(selected.getNow());
+				}
 				connect(bound, loop, selected.getNow(), result);
 			} else {
 				result.tryFailure(selected.cause());
@@ -128,9 +137,16 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 		channel.attr(ATTR_KEY_DESTINATION).set(destination);
 		channel.attr(ATTR_KEY_NODE).set(destination.getAddress().getHostAddress() + ":" + destination.getPort());
 		openChannels.add(channel);
-		channel.closeFuture().addListener(ignored -> openChannels.remove(channel));
+		channel.closeFuture().addListener(ignored -> {
+			openChannels.remove(channel);
+			bound.counters().closed();
+		});
 		connect.addListener(done -> {
+			if (done.isSuccess()) {
+				bound.counters().connected(false);
+			}
 			if (!done.isSuccess()) {
+				bound.counters().connectFailed();
 				result.tryFailure(done.cause());
 			} else if (closed || !result.trySuccess(channel)) {
 				final var unusedClose = channel.close();

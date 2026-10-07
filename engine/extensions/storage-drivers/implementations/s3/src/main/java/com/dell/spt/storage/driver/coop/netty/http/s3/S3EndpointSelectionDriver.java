@@ -17,6 +17,7 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.storage.driver.coop.netty.endpoint.DestinationSource;
 import com.dell.spt.storage.driver.coop.netty.endpoint.DnsDestinations;
 import com.dell.spt.storage.driver.coop.netty.endpoint.EndpointSelectionConstants;
+import com.dell.spt.storage.driver.coop.netty.endpoint.EndpointSelectionCounters;
 import com.dell.spt.storage.driver.coop.netty.endpoint.EndpointSelectionSettings;
 import com.dell.spt.storage.driver.coop.netty.endpoint.EndpointSelectionSettings.Mode;
 import com.dell.spt.storage.driver.coop.netty.endpoint.HostDnsServers;
@@ -56,6 +57,7 @@ final class S3EndpointSelectionDriver<I extends Item, O extends Operation<I>> ex
 	private final String logicalHostname;
 	private final AtomicBoolean setupFailureWarned = new AtomicBoolean();
 	private final List<InetSocketAddress> dnsServers;
+	private final EndpointSelectionCounters counters = new EndpointSelectionCounters();
 	private final boolean hostConfiguredDns;
 	// Assigned by createConnectionPool() while the superclass constructor runs; no initializer, so
 	// the assignment survives this class's own field initialization.
@@ -135,14 +137,14 @@ final class S3EndpointSelectionDriver<I extends Item, O extends Operation<I>> ex
 		} else {
 			final var resolver = new PerRequestDnsResolver(logicalHostname, dnsServers, settings.dnsTimeoutMillis(),
 							new LogContextThreadFactory("dnsResolver", true));
-			destinations = new DnsDestinations(resolver, settings.port());
+			destinations = new DnsDestinations(resolver, settings.port(), counters);
 			pooled = false;
 			idleLimit = 0;
 			firstPort = settings.port();
 			sharedHeaders.set(HttpHeaderNames.CONNECTION, HttpHeaderValues.CLOSE);
 		}
 		selectingPool.bind(destinations, pooled, idleLimit, settings.connectTimeoutMillis(),
-						(long) settings.connectTimeoutMillis() + settings.dnsTimeoutMillis());
+						(long) settings.connectTimeoutMillis() + settings.dnsTimeoutMillis(), counters);
 		if (logicalHostname != null) {
 			helperAuthority(logicalHostname + ":" + firstPort);
 		}
@@ -164,6 +166,16 @@ final class S3EndpointSelectionDriver<I extends Item, O extends Operation<I>> ex
 			Loggers.MSG.warn("{}: Per-request DNS is using this worker's host DNS configuration {}. Resolver "
 							+ "caching may prevent each lookup from reaching the DNS load-balancing service; "
 							+ "configure a DNS server for direct queries.", stepId, dnsServers);
+		}
+	}
+
+	@Override
+	protected void doClose() throws IllegalStateException, IOException {
+		try {
+			super.doClose();
+		} finally {
+			Loggers.MSG.info("{}: endpoint selection {} summary: {}", stepId, settings.mode().configValue(),
+							counters.summary());
 		}
 	}
 
@@ -309,6 +321,10 @@ final class S3EndpointSelectionDriver<I extends Item, O extends Operation<I>> ex
 
 	List<InetSocketAddress> dnsServers() {
 		return dnsServers;
+	}
+
+	EndpointSelectionCounters counters() {
+		return counters;
 	}
 
 	boolean hostConfiguredDns() {

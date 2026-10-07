@@ -80,6 +80,19 @@ final class S3EndpointSelectionRoundRobinTest {
 		for (final var request : requests.subList(1, requests.size())) {
 			assertEquals(endpoints.get(request.listener()), request.host());
 		}
+
+		// Counters reconcile with what the listeners received: the helper's own connection plus one
+		// pooled connection per destination, reused for the remaining requests.
+		final var counters = run.driver().counters().snapshot();
+		for (var listener = 0; listener < 3; listener++) {
+			final var index = listener;
+			assertEquals(requests.stream().filter(r -> r.listener() == index).count(),
+							counters.selections().get(endpoints.get(listener)));
+		}
+		assertEquals(4, counters.connectsNew());
+		assertEquals(4, counters.connectsReused());
+		assertEquals(0, counters.connectsFailed());
+		assertEquals(0, counters.lookups());
 	}
 
 	@Test
