@@ -88,7 +88,8 @@ content verification, metadata-integrity verification, metadata-only reads,
 object tagging and recycled content updates are unsupported. Active legacy
 `item.data.ranges.fixed`, `.random`, or a positive `.threshold` conflict with this
 mode, including a positive `--part-size`. Inactive legacy settings remain allowed.
-The network timeout must be positive.
+The network timeout must be positive. [Endpoint selection](ENDPOINT_SELECTION.md)
+(`--endpoint-selection`) applies to every range attempt, retries included.
 
 With public range flags enabled, advanced overrides are checked after merging,
 including parent-map replacements and dotted/dashed paths. Use the range flags

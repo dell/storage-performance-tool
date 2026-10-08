@@ -265,6 +265,56 @@ class SelectingConnectionPoolTest {
 		pool.close();
 	}
 
+	@Test
+	void markedConnectionKeepsWaitingWhenClosedAgain() throws Exception {
+		final var holding = holder();
+		final var pool = pool(List.of(holding.address()), false, 0);
+		final var channel = pool.lease();
+		pool.awaitServerClose(channel);
+
+		// A protocol handler closes the completed connection, then the driver closes and releases it.
+		final var closing = System.nanoTime();
+		final var first = channel.close();
+		final var second = channel.close();
+		pool.release(channel);
+
+		assertTrue(channel.isActive(), "a repeated close must join the wait, not cut it short");
+		assertTrue(second.await(5, TimeUnit.SECONDS));
+		assertTrue(first.isSuccess() && second.isSuccess());
+		final var elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - closing);
+		assertTrue(elapsed >= EndpointSelectionConstants.SERVER_CLOSE_GRACE_MILLIS - 50, "closed after " + elapsed);
+		pool.close();
+	}
+
+	@Test
+	void poolCloseEndsTheServerCloseWaitAtOnce() throws Exception {
+		final var holding = holder();
+		final var pool = pool(List.of(holding.address()), false, 0);
+		final var channel = pool.lease();
+		pool.release(channel);
+		assertTrue(channel.isActive());
+
+		final var closing = System.nanoTime();
+		pool.close();
+
+		assertTrue(channel.closeFuture().await(5, TimeUnit.SECONDS));
+		final var elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - closing);
+		assertTrue(elapsed < EndpointSelectionConstants.SERVER_CLOSE_GRACE_MILLIS / 2, "closed after " + elapsed);
+	}
+
+	@Test
+	void markingAPooledConnectionHasNoEffect() throws Exception {
+		final var holding = holder();
+		final var pool = pool(List.of(holding.address()), true, 4);
+		final var channel = pool.lease();
+
+		pool.awaitServerClose(channel);
+		channel.close().syncUninterruptibly();
+
+		assertTrue(!channel.isActive());
+		pool.close();
+	}
+
 	private SelectingConnectionPool pool(final List<InetSocketAddress> destinations, final boolean pooled,
 					final int idleLimit) {
 		final var pool = new SelectingConnectionPool(bootstrap, new NoopHandler());

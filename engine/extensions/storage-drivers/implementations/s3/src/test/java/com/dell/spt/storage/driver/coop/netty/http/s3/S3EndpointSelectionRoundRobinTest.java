@@ -12,6 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.data.SeedDataInput;
+import com.dell.spt.storage.driver.coop.netty.http.s3.EndpointSelectionTestSupport.ClientHelloListener;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
@@ -507,84 +508,6 @@ final class S3EndpointSelectionRoundRobinTest {
 	private static int unusedPort() throws IOException {
 		try (final var socket = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
 			return socket.getLocalPort();
-		}
-	}
-
-	/** Accepts one TLS connection, records the SNI host name from its ClientHello and closes it. */
-	private static final class ClientHelloListener implements AutoCloseable {
-
-		private static final int HANDSHAKE = 22;
-		private static final int CLIENT_HELLO = 1;
-		private static final int SERVER_NAME_EXTENSION = 0;
-
-		private final ServerSocket socket = new ServerSocket(0, 8, InetAddress.getLoopbackAddress());
-		private final Thread acceptor;
-		private volatile boolean helloReceived;
-		private volatile String serverName;
-
-		ClientHelloListener() throws IOException {
-			acceptor = new Thread(this::acceptOne, "client-hello-listener");
-			acceptor.setDaemon(true);
-			acceptor.start();
-		}
-
-		int port() {
-			return socket.getLocalPort();
-		}
-
-		boolean helloReceived() throws InterruptedException {
-			acceptor.join(TimeUnit.SECONDS.toMillis(RESULT_TIMEOUT_SECONDS));
-			return helloReceived;
-		}
-
-		String serverName() throws InterruptedException {
-			acceptor.join(TimeUnit.SECONDS.toMillis(RESULT_TIMEOUT_SECONDS));
-			return serverName;
-		}
-
-		private void acceptOne() {
-			try (final var connection = socket.accept()) {
-				final var in = connection.getInputStream();
-				final var header = in.readNBytes(5);
-				if (header.length < 5 || header[0] != HANDSHAKE) {
-					return;
-				}
-				final var record = in.readNBytes(((header[3] & 0xFF) << 8) | (header[4] & 0xFF));
-				if (record.length > 0 && record[0] == CLIENT_HELLO) {
-					helloReceived = true;
-					serverName = parseServerName(record);
-				}
-			} catch (final IOException ignored) {
-				// The test asserts on what was captured before the connection ended.
-			}
-		}
-
-		private static String parseServerName(final byte[] hello) {
-			var at = 4 + 2 + 32; // handshake header, client version, random
-			at += 1 + (hello[at] & 0xFF); // session id
-			at += 2 + u16(hello, at); // cipher suites
-			at += 1 + (hello[at] & 0xFF); // compression methods
-			final var end = at + 2 + u16(hello, at);
-			at += 2;
-			while (at + 4 <= end) {
-				final var type = u16(hello, at);
-				final var length = u16(hello, at + 2);
-				if (type == SERVER_NAME_EXTENSION) {
-					final var nameLength = u16(hello, at + 4 + 3);
-					return new String(hello, at + 4 + 5, nameLength, StandardCharsets.US_ASCII);
-				}
-				at += 4 + length;
-			}
-			return null;
-		}
-
-		private static int u16(final byte[] data, final int at) {
-			return ((data[at] & 0xFF) << 8) | (data[at + 1] & 0xFF);
-		}
-
-		@Override
-		public void close() throws IOException {
-			socket.close();
 		}
 	}
 }

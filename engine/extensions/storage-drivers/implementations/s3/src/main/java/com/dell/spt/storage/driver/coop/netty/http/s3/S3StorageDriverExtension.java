@@ -52,11 +52,11 @@ public final class S3StorageDriverExtension<I extends Item, O extends Operation<
 	public T createRangeRead(String stepId, DataInput dataInput, Config storageConfig,
 					int batchSize, RangeReadPolicy policy) throws IllegalConfigurationException, InterruptedException {
 		final var endpointSelection = EndpointSelectionSettings.fromStorage(storageConfig);
-		if (!endpointSelection.isDefault()) {
-			throw new IllegalConfigurationException("Partial-object Reads do not support endpoint selection \""
-							+ endpointSelection.mode().configValue() + "\" yet");
+		if (endpointSelection.isDefault()) {
+			return (T) (S3StorageDriver<?, ?>) new S3RangeStorageDriver(stepId, dataInput, storageConfig, batchSize, policy);
 		}
-		return (T) (S3StorageDriver<?, ?>) new S3RangeStorageDriver(stepId, dataInput, storageConfig, batchSize, policy);
+		return (T) (S3StorageDriver<?, ?>) S3RangeEndpointSelectionDriver.create(
+						stepId, dataInput, storageConfig, batchSize, policy, endpointSelection);
 	}
 
 	@Override

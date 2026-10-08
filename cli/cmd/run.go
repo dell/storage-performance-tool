@@ -2657,7 +2657,6 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		RawEndpoints:   rawEndpointFlags(cmd),
 		S3Driver:       params.S3Driver,
 		SliceEndpoints: params.SliceEndpoints,
-		RangeRead:      params.RangeSize != "",
 		WorkloadType:   workloadType,
 	}); err != nil {
 		return params, err

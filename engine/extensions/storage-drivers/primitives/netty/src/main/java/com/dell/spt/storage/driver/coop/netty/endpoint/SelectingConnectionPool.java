@@ -309,12 +309,24 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 		}
 	}
 
+	/**
+	 * Marks a per-request connection whose response has fully arrived, so that closing it, now or by
+	 * a later release, waits for the server's close. No effect on pooled connections or after
+	 * {@link #close()}. For protocol handlers that close a completed connection before release.
+	 */
+	public void awaitServerClose(final Channel channel) {
+		final var bound = binding;
+		if (bound != null && !bound.pooled() && !closed) {
+			channel.attr(ServerCloseGraceHandler.AWAIT_SERVER_CLOSE).set(Boolean.TRUE);
+		}
+	}
+
 	@Override
 	public void release(final Channel channel) {
 		final var bound = binding;
 		final var destination = channel.attr(ATTR_KEY_DESTINATION).get();
 		if (bound != null && !bound.pooled() && !closed && channel.isActive()) {
-			channel.attr(ServerCloseGraceHandler.AWAIT_SERVER_CLOSE).set(Boolean.TRUE);
+			awaitServerClose(channel);
 			final var unusedClose = channel.close();
 			return;
 		}

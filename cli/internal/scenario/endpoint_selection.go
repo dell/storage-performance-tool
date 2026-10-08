@@ -45,7 +45,6 @@ type EndpointSelectionTarget struct {
 	RawEndpoints   []string
 	S3Driver       string
 	SliceEndpoints bool
-	RangeRead      bool
 	WorkloadType   string
 }
 
@@ -100,9 +99,6 @@ func ValidateEndpointSelection(sel EndpointSelection, target EndpointSelectionTa
 	}
 	if target.SliceEndpoints {
 		return fmt.Errorf("--endpoint-selection %s cannot be combined with --slice-endpoints", sel.Mode)
-	}
-	if target.RangeRead {
-		return fmt.Errorf("--endpoint-selection %s does not support partial-object reads yet", sel.Mode)
 	}
 	endpoints, err := parseSelectionEndpoints(target.RawEndpoints)
 	if err != nil {

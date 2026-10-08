@@ -19,7 +19,8 @@ Every request a workload sends follows the mode:
 - listing pages and probes;
 - delete verification;
 - multipart initiate, part, complete and abort;
-- composite READ range requests.
+- composite READ range requests;
+- partial-object reads (`--range-size`).
 
 Retries select again, and the previous destination remains eligible.
 
@@ -79,7 +80,6 @@ endpoint selection, and are rejected:
 - `--slice-endpoints`;
 - `--s3-driver aws` or `rdma`;
 - the `tables` workload;
-- partial-object reads (`--range-size`);
 - IPv6 addresses.
 
 The flags are also accepted by `spt replay`, where they take precedence over endpoint-selection
@@ -100,6 +100,7 @@ S3 driver README for direct engine use.
 
 - **Timing:** HTTP latency metrics keep their existing meaning and exclude DNS and connection setup. Low request latency can therefore coexist with low throughput.
 - **Request trace:** `op.trace.csv` records the selected `ip:port` for each operation.
+- **Partial-object reads:** a failed lookup or connect is a transport failure in `range.read.csv`. A read still waiting for its lookup or connection when the run stops never sent a request, so it counts as unattempted.
 - **Engine log:** each driver writes a start line and, at close, a summary. The summary has selections per address (at most 256 addresses, then `other`), new, reused, failed and closed connections, and, for per-request DNS, lookup counts, failure kinds and latency.
 - **TLS:** certificate trust is unchanged: the S3 driver accepts any server certificate. Session resumption is allowed.
 - **Port limits:** per-request DNS opens one connection per request. The connection rate, not only concurrency, determines socket and port pressure on the workers and the storage system.

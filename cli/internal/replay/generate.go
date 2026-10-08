@@ -75,7 +75,6 @@ func Generate(ctx context.Context, opts Options) (*Generated, error) {
 	if err := scenario.ValidateEndpointSelection(params.EndpointSelection, scenario.EndpointSelectionTarget{
 		RawEndpoints: opts.Endpoints,
 		S3Driver:     opts.S3Driver,
-		RangeRead:    params.RangeSize != "",
 		WorkloadType: params.WorkloadType,
 	}); err != nil {
 		return generated, newClassifiedError(failureInvalidEndpointSelection, err.Error(), err)

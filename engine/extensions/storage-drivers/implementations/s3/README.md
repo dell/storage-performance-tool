@@ -196,7 +196,6 @@ The engine rejects:
 - duplicate or non-IPv4 round-robin addresses;
 - IPv6;
 - `storage.net.node.slice`;
-- partial-object reads;
 - every storage driver other than this one (`s3`).
 
 Behavior, limits and log output are described in the CLI's

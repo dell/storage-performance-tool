@@ -111,6 +111,25 @@ func TestPerRequestDNSFlagsReachEngineYAML(t *testing.T) {
 	}
 }
 
+func TestPartialObjectReadsAcceptEndpointSelection(t *testing.T) {
+	for _, args := range [][]string{
+		{"--endpoints", "http://10.0.0.1:9020,http://10.0.0.2:9020", "--endpoint-selection", "round-robin"},
+		{"--endpoints", "https://s3.example.com:9021", "--endpoint-selection", "per-request-dns", "--dns-server", "10.0.0.53"},
+	} {
+		params, err := newEndpointSelectionCmdFor(t, "read", append(args, "--range-size", "4KiB")...)
+		if err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		if policy, err := scenario.ParseRangePolicy(params); err != nil || policy == nil || policy.Size != 4096 {
+			t.Fatalf("%v: range policy %+v, %v", args, policy, err)
+		}
+		endpoint, ok := endpointYAML(t, params)
+		if !ok || endpoint["selection"] != args[3] {
+			t.Fatalf("%v: endpoint selection must reach the engine YAML, got %v", args, endpoint)
+		}
+	}
+}
+
 func TestEndpointSelectionRejectsInvalidCombinations(t *testing.T) {
 	rr := []string{"--endpoint-selection", "round-robin"}
 	dns := []string{"--endpoint-selection", "per-request-dns"}
@@ -130,7 +149,6 @@ func TestEndpointSelectionRejectsInvalidCombinations(t *testing.T) {
 		{"round robin ip hostname", append([]string{"--endpoints", "http://10.0.0.1", "--endpoint-hostname", "10.0.0.9"}, rr...), "not an IP address", ""},
 		{"round robin with slicing", append([]string{"--endpoints", "http://10.0.0.1", "--slice-endpoints"}, rr...), "--slice-endpoints", ""},
 		{"round robin with aws driver", append([]string{"--endpoints", "http://10.0.0.1", "--s3-driver", "aws"}, rr...), "default Netty S3 driver", ""},
-		{"round robin with partial reads", append([]string{"--endpoints", "http://10.0.0.1", "--range-size", "4KiB"}, rr...), "partial-object reads", "read"},
 		{"dns with two endpoints", append([]string{"--endpoints", "http://a.example.com,http://b.example.com"}, dns...), "exactly one endpoint hostname", ""},
 		{"dns with ip endpoint", append([]string{"--endpoints", "http://10.0.0.1"}, dns...), "not an IP address", ""},
 		{"dns with endpoint hostname", append([]string{"--endpoints", "http://s3.example.com", "--endpoint-hostname", "s3.example.com"}, dns...), "applies only to --endpoint-selection round-robin", ""},
