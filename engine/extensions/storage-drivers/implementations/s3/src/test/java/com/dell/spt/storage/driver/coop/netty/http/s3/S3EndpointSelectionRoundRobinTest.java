@@ -19,6 +19,11 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.github.akurilov.confuse.Config;
+import org.apache.logging.log4j.core.config.Property;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.LogManager;
+import com.dell.spt.base.logging.Loggers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
@@ -361,6 +366,50 @@ final class S3EndpointSelectionRoundRobinTest {
 
 	private interface ConfigTweak {
 		void apply(Config config);
+	}
+
+	@Test
+	void onlyAStartedDriverLogsItsConfigurationAndSummary() throws Exception {
+		final var endpoints = listeners(2);
+		final List<String> messages = new CopyOnWriteArrayList<>();
+		final var capture = new AbstractAppender("endpoint-selection-capture", null, null, true, Property.EMPTY_ARRAY) {
+			@Override
+			public void append(final LogEvent event) {
+				final var message = event.getMessage().getFormattedMessage();
+				if (message.contains("endpoint selection")) {
+					messages.add(message);
+				}
+			}
+		};
+		capture.start();
+		final var logger = (org.apache.logging.log4j.core.Logger) LogManager.getLogger(Loggers.MSG.getName());
+		logger.addAppender(capture);
+		try {
+			final Config config = S3StorageDriverTest.baseConfig(false, 4, false, null, "127.0.0.1");
+			config.val("storage-net-node-addrs", endpoints);
+			config.val("storage-net-endpoint-selection", "round-robin");
+			config.val("storage-net-endpoint-connect-timeoutMilliSec", 1_000);
+			try (final var unstarted = new S3StorageDriverExtension<>().create(
+							"never-started", new SeedDataInput(1, ITEM_SIZE, 1, true), config.configVal("storage"), false, 16)) {
+				assertInstanceOf(S3EndpointSelectionDriver.class, unstarted);
+			}
+			final var run = driver(endpoints, null, 1);
+			run.execute(dataOp(OpType.CREATE, "logged"));
+			run.driver().close();
+
+			final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+			while (messages.size() < 2 && System.nanoTime() < deadline) {
+				Thread.sleep(10);
+			}
+			Thread.sleep(100);
+			assertEquals(2, messages.size(), messages::toString);
+			assertTrue(messages.get(0).startsWith("round-robin-test: endpoint selection round-robin over 2"), messages::toString);
+			assertTrue(messages.get(1).startsWith("round-robin-test: endpoint selection round-robin summary"), messages::toString);
+			assertTrue(messages.stream().noneMatch(message -> message.startsWith("never-started")), messages::toString);
+		} finally {
+			logger.removeAppender(capture);
+			capture.stop();
+		}
 	}
 
 	private record Run(S3EndpointSelectionDriver<DataItem, Operation<DataItem>> driver,

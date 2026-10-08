@@ -40,6 +40,9 @@ final class EndpointSelectionSupport {
 	private final boolean hostConfiguredDns;
 	private final EndpointSelectionCounters counters = new EndpointSelectionCounters();
 	private final AtomicBoolean setupFailureWarned = new AtomicBoolean();
+	private int firstPort;
+	// Drivers a step creates but never starts log nothing.
+	private volatile boolean started;
 
 	/**
 	 * Creates the support for a non-default mode. DNS server discovery happens first, so a host
@@ -83,7 +86,6 @@ final class EndpointSelectionSupport {
 		final DestinationSource destinations;
 		final boolean pooled;
 		final int idleLimit;
-		final int firstPort;
 		if (settings.mode() == Mode.ROUND_ROBIN) {
 			destinations = new RoundRobinDestinations(settings.destinations());
 			pooled = true;
@@ -104,6 +106,12 @@ final class EndpointSelectionSupport {
 		}
 		pool.bind(destinations, pooled, idleLimit, settings.connectTimeoutMillis(),
 						(long) settings.connectTimeoutMillis() + settings.dnsTimeoutMillis(), counters);
+		return logicalHostname == null ? null : logicalHostname + ":" + firstPort;
+	}
+
+	/** Logs the configuration, and the host-DNS caching warning, once per started driver. */
+	void logStart() {
+		started = true;
 		if (settings.mode() == Mode.ROUND_ROBIN) {
 			Loggers.MSG.info("{}: endpoint selection round-robin over {} destination(s), logical hostname: {}",
 							stepId, settings.destinations().size(),
@@ -113,7 +121,11 @@ final class EndpointSelectionSupport {
 							stepId, logicalHostname, firstPort, hostConfiguredDns ? "host-configured" : "explicit",
 							dnsServers);
 		}
-		return logicalHostname == null ? null : logicalHostname + ":" + firstPort;
+		if (hostConfiguredDns) {
+			Loggers.MSG.warn("{}: Per-request DNS is using this worker's host DNS configuration {}. Resolver "
+							+ "caching may prevent each lookup from reaching the DNS load-balancing service; "
+							+ "configure a DNS server for direct queries.", stepId, dnsServers);
+		}
 	}
 
 	/** True when every connection serves one request and is then closed. */
@@ -140,23 +152,20 @@ final class EndpointSelectionSupport {
 		}
 	}
 
-	/** Logs the host-DNS caching warning once per started driver. */
-	void warnIfHostConfiguredDns() {
-		if (hostConfiguredDns) {
-			Loggers.MSG.warn("{}: Per-request DNS is using this worker's host DNS configuration {}. Resolver "
-							+ "caching may prevent each lookup from reaching the DNS load-balancing service; "
-							+ "configure a DNS server for direct queries.", stepId, dnsServers);
+	/** Logs the counter summary of a driver that started. */
+	void logSummary() {
+		if (started) {
+			Loggers.MSG.info("{}: endpoint selection {} summary: {}", stepId, settings.mode().configValue(),
+							counters.summary());
 		}
 	}
 
-	void logSummary() {
-		Loggers.MSG.info("{}: endpoint selection {} summary: {}", stepId, settings.mode().configValue(),
-						counters.summary());
-	}
-
-	/** The first setup failure is a warning; later ones are logged at DEBUG. */
-	void logSetupFailure(final Throwable failure) {
-		if (setupFailureWarned.compareAndSet(false, true)) {
+	/**
+	 * The first setup failure that affects a result is a warning; later ones, and setups ended by
+	 * shutdown, are logged at DEBUG.
+	 */
+	void logSetupFailure(final Throwable failure, final boolean shutdown) {
+		if (!shutdown && setupFailureWarned.compareAndSet(false, true)) {
 			LogUtil.exception(Level.WARN, failure,
 							"Endpoint selection failed to set up a request; further failures are logged at DEBUG");
 		} else {

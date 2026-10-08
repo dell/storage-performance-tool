@@ -20,6 +20,8 @@ public final class DnsLookupException extends IOException {
 		NO_ADDRESS,
 		/** The server answered with another error code, such as SERVFAIL or REFUSED. */
 		SERVER_FAILURE,
+		/** The resolver closed before the lookup finished, normally because the driver stopped. */
+		CANCELLED,
 	}
 
 	private final Kind kind;

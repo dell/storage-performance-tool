@@ -92,7 +92,7 @@ final class S3EndpointSelectionDriver<I extends Item, O extends Operation<I>> ex
 	@Override
 	protected void doStart() throws IllegalStateException {
 		super.doStart();
-		selection.warnIfHostConfiguredDns();
+		selection.logStart();
 	}
 
 	@Override
@@ -168,7 +168,7 @@ final class S3EndpointSelectionDriver<I extends Item, O extends Operation<I>> ex
 			sendRequest(channel, op);
 		} catch (final Throwable thrown) {
 			throwUncheckedIfInterrupted(thrown);
-			selection.logSetupFailure(thrown);
+			selection.logSetupFailure(thrown, false);
 			op.status(Operation.Status.FAIL_UNKNOWN);
 			completeQuietly(channel, op);
 		}
@@ -176,7 +176,7 @@ final class S3EndpointSelectionDriver<I extends Item, O extends Operation<I>> ex
 
 	/** Mirrors a failed default-pool lease: the dispatched operation fails with FAIL_IO. */
 	private void failSetup(final O op, final Throwable cause) {
-		selection.logSetupFailure(cause);
+		selection.logSetupFailure(cause, isStopped());
 		concurrencyThrottle.release();
 		signalDispatchCapacityAvailable();
 		if (isStopped()) {

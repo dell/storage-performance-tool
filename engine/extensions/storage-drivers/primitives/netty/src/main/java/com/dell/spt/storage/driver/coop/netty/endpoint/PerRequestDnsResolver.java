@@ -94,7 +94,8 @@ public final class PerRequestDnsResolver implements AutoCloseable {
 	 */
 	public Future<InetAddress> resolve() {
 		if (closed) {
-			return GlobalEventExecutor.INSTANCE.newFailedFuture(new IllegalStateException("DNS resolver is closed"));
+			return GlobalEventExecutor.INSTANCE.newFailedFuture(
+							new DnsLookupException(DnsLookupException.Kind.CANCELLED, hostname, null));
 		}
 		final Promise<InetAddress> result;
 		try {
@@ -121,7 +122,7 @@ public final class PerRequestDnsResolver implements AutoCloseable {
 			});
 		} catch (final RejectedExecutionException e) {
 			return GlobalEventExecutor.INSTANCE.newFailedFuture(
-							new IllegalStateException("DNS resolver is closed", e));
+							new DnsLookupException(DnsLookupException.Kind.CANCELLED, hostname, e));
 		}
 		return result;
 	}
@@ -134,7 +135,7 @@ public final class PerRequestDnsResolver implements AutoCloseable {
 	public void close() {
 		closed = true;
 		for (final var lookup : new ArrayList<>(outstanding)) {
-			lookup.tryFailure(new IllegalStateException("DNS resolver is closed"));
+			lookup.tryFailure(new DnsLookupException(DnsLookupException.Kind.CANCELLED, hostname, null));
 		}
 		try {
 			resolver.close();

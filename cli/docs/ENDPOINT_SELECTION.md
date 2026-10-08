@@ -101,6 +101,7 @@ S3 driver README for direct engine use.
 - **Timing:** HTTP latency metrics keep their existing meaning and exclude DNS and connection setup. Low request latency can therefore coexist with low throughput.
 - **Request trace:** `op.trace.csv` records the selected `ip:port` for each operation.
 - **Partial-object reads:** a failed lookup or connect is a transport failure in `range.read.csv`. A read still waiting for its lookup or connection when the run stops never sent a request, so it counts as unattempted.
-- **Engine log:** each driver writes a start line and, at close, a summary. The summary has selections per address (at most 256 addresses, then `other`), new, reused, failed and closed connections, and, for per-request DNS, lookup counts, failure kinds and latency.
+- **Engine log:** each driver writes a start line when it starts and a summary when it closes. The summary has selections per address (at most 256 addresses, then `other`), new, reused, failed and closed connections, and, for per-request DNS, lookup counts, failure kinds and latency. `CANCELLED` counts lookups still pending when the driver closed; they are not DNS failures.
+- **Consistency across nodes:** spreading requests over nodes can expose delays that a single connection target hides. For example, a bucket created at the start of a run may be reported as missing (HTTP 404) by some nodes for a moment.
 - **TLS:** certificate trust is unchanged: the S3 driver accepts any server certificate. Session resumption is allowed.
 - **Port limits:** per-request DNS opens one connection per request. The connection rate, not only concurrency, determines socket and port pressure on the workers and the storage system.

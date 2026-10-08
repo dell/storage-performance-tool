@@ -235,9 +235,7 @@ class PerRequestDnsResolverTest {
 		resolver.close();
 
 		assertTrue(resolver.isTerminated());
-		final var afterClose = resolver.resolve();
-		assertTrue(afterClose.awaitUninterruptibly(AWAIT_SECONDS, TimeUnit.SECONDS));
-		assertFalse(afterClose.isSuccess());
+		assertEquals(Kind.CANCELLED, awaitFailure(resolver.resolve()).kind());
 	}
 
 	@Test
@@ -250,8 +248,7 @@ class PerRequestDnsResolverTest {
 		final var started = System.nanoTime();
 		resolver.close();
 
-		assertTrue(lookup.awaitUninterruptibly(AWAIT_SECONDS, TimeUnit.SECONDS));
-		assertFalse(lookup.isSuccess());
+		assertEquals(Kind.CANCELLED, awaitFailure(lookup).kind(), "a shutdown cancellation is not a DNS failure");
 		assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < 5_000);
 		assertTrue(resolver.isTerminated());
 	}

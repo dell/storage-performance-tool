@@ -108,8 +108,9 @@ final class S3RangeEndpointSelectionDriver extends S3RangeStorageDriver {
 
 	/** Mirrors a failed default-pool lease: the attempt fails with FAIL_IO and its permit is released. */
 	private void failSetup(final RangeReadOperation<DataItem> op, final RangeReadAttempt attempt, final Throwable failure) {
-		selection.logSetupFailure(failure);
-		attempt.transportFailure(Operation.Status.FAIL_IO);
+		// False when shutdown recovery already settled the attempt.
+		final boolean counted = attempt.transportFailure(Operation.Status.FAIL_IO);
+		selection.logSetupFailure(failure, !counted);
 		concurrencyThrottle.release();
 		signalDispatchCapacityAvailable();
 		completeAttempt(op, op.circulation(), attempt);
@@ -135,7 +136,7 @@ final class S3RangeEndpointSelectionDriver extends S3RangeStorageDriver {
 	@Override
 	protected void doStart() throws IllegalStateException {
 		super.doStart();
-		selection.warnIfHostConfiguredDns();
+		selection.logStart();
 	}
 
 	@Override
