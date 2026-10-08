@@ -335,13 +335,41 @@ func TestConvertJSRejectsEndpointDeclarationsItCannotEvaluate(t *testing.T) {
 			raw:  "var archivedEndpoint = {\"selection\" : \"per-request-dns\"};\n" + withInlineNet(t, `{ "endpoint" : archivedEndpoint }`),
 			want: "cannot evaluate",
 		},
-		"unquoted key": {
-			raw:  withInlineNet(t, `{ endpoint : { "selection" : "per-request-dns" } }`),
+		"key outside a net object": {
+			raw:  strings.Replace(withInlineNet(t, `{}`), `"net" : {}`, `"endpoint" : { "selection" : "per-request-dns" }`, 1),
 			want: "cannot evaluate",
 		},
 		"expression value": {
 			raw:  withInlineNet(t, `{ "endpoint" : { "selection" : mode + "-dns" } }`),
-			want: "expression replay cannot evaluate",
+			want: `expression in the value of "selection"`,
+		},
+		"object expression": {
+			raw:  withInlineNet(t, `{ "endpoint" : { "selection" : "round-robin" } && { "selection" : "per-request-dns" } }`),
+			want: "expression rather than a single object literal",
+		},
+		"dns object expression": {
+			raw:  withInlineNet(t, `{ "endpoint" : { "selection" : "per-request-dns", "dns" : { "timeoutMilliSec" : 8000 } || fallback } }`),
+			want: `expression in the value of "dns"`,
+		},
+		"connect object expression": {
+			raw:  withInlineNet(t, `{ "endpoint" : { "selection" : "round-robin", "connect" : Object.assign({}, base) } }`),
+			want: `expression in the value of "connect"`,
+		},
+		"connect variable": {
+			raw:  withInlineNet(t, `{ "endpoint" : { "selection" : "round-robin", "connect" : CONNECT } }`),
+			want: "wrong shape",
+		},
+		"spread": {
+			raw:  withInlineNet(t, `{ "endpoint" : { "selection" : "per-request-dns", ...extras } }`),
+			want: "spread",
+		},
+		"nested spread": {
+			raw:  withInlineNet(t, `{ "endpoint" : { "selection" : "per-request-dns", "dns" : { ...dnsExtras } } }`),
+			want: "spread",
+		},
+		"repeated key": {
+			raw:  withInlineNet(t, `{ "endpoint" : { "selection" : "per-request-dns", "selection" : "round-robin" } }`),
+			want: "more than once",
 		},
 		"unexported variable value": {
 			raw:  withInlineNet(t, `{ "endpoint" : { "selection" : chosenMode } }`),
@@ -358,11 +386,45 @@ func TestConvertJSRejectsEndpointDeclarationsItCannotEvaluate(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := convertJSResult(tc.raw, nil)
+			got, err := convertJSResult(tc.raw, map[string]string{"CONNECT": "4000"})
 			if ErrorClass(err) != failureInvalidEndpointSelection || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("want an endpoint selection error containing %q, got %v", tc.want, err)
 			}
+			if got != nil && len(got.ScenarioJS) != 0 {
+				t.Fatalf("a rejected archive must not produce a scenario:\n%s", got.ScenarioJS)
+			}
 		})
+	}
+}
+
+func TestConvertJSAcceptsUnquotedLiteralKeys(t *testing.T) {
+	got, err := convertJSResult(withInlineNet(t, `{ endpoint : { selection : 'per-request-dns', dns : { timeoutMilliSec : 8000 } } }`), nil)
+	if err != nil {
+		t.Fatalf("ConvertJS() error = %v", err)
+	}
+	want := []scenario.EndpointSelection{{Mode: scenario.EndpointSelectionPerRequestDNS, DNSTimeoutMillis: 8000}}
+	if !reflect.DeepEqual(got.ArchivedEndpointSelection.Declarations, want) {
+		t.Fatalf("Declarations = %+v, want %+v", got.ArchivedEndpointSelection.Declarations, want)
+	}
+	if js := string(got.ScenarioJS); strings.Contains(js, "per-request-dns") || strings.Contains(js, "endpoint") {
+		t.Fatalf("the inline step config must not carry endpoint selection; the defaults do\n%s", js)
+	}
+}
+
+func TestEndpointConfigInsideStringsDoesNotAffectReplay(t *testing.T) {
+	raw := `print('Previous config: {"storage":{"net":{"endpoint":{"selection":"per-request-dns"}}}}');` + "\n" +
+		`var note = "\"net\": {\"endpoint\": {\"selection\": \"round-robin\"}}";` + "\n" +
+		"var template = `\"net\": {\"endpoint\": {\"selection\": \"round-robin\"}}`;\n" + maxS3SanityJS
+
+	got, err := generateFromJSArchive(t, raw, []string{"http://10.0.0.1:9020"}, scenario.EndpointSelection{})
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(got.ArchivedEndpointSelection.Declarations) != 0 || strings.Contains(string(got.DefaultsYAML), "endpoint:") {
+		t.Fatalf("string contents must not declare endpoint selection: %+v\n%s", got.ArchivedEndpointSelection, got.DefaultsYAML)
+	}
+	if !strings.Contains(string(got.ScenarioJS), `print('Previous config: {"storage":{"net":{"endpoint":{"selection":"per-request-dns"}}}}');`) {
+		t.Fatalf("string contents must be left unchanged:\n%s", got.ScenarioJS)
 	}
 }
 

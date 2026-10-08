@@ -10,11 +10,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
-var (
-	jsNetObjectRe      = regexp.MustCompile(`"net"\s*:\s*\{`)
-	jsEndpointObjectRe = regexp.MustCompile(`"endpoint"\s*:\s*\{`)
-	jsUnquotedKeyRe    = regexp.MustCompile(`[{,]\s*[A-Za-z_$][A-Za-z0-9_$]*\s*:`)
-)
+var jsNumberRe = regexp.MustCompile(`^-?[0-9]+(?:\.[0-9]+)?`)
 
 // ArchivedEndpointSelection lists the distinct endpoint-selection declarations found in an
 // archive. A declaration counts only where a config states the mode explicitly, "default"
@@ -86,34 +82,18 @@ func archivedEndpointSelectionFromConfig(config map[string]any, vars map[string]
 
 // extractJSEndpointSelections records every storage.net.endpoint declaration in a JavaScript
 // scenario, whether in a parent config or an inline step config, and removes it so that the
-// generated defaults alone carry endpoint selection. Comments are ignored. Replay only evaluates
-// literal declarations: an endpoint object directly inside a literal "net" object, with an explicit
-// mode and literal or exported-variable values. Any other endpoint declaration, and any partial
-// one that would inherit settings from another config, is rejected rather than left to override
-// the validated defaults.
+// generated defaults alone carry endpoint selection. A lexical scan skips comments and treats
+// strings as whole tokens, so neither can be mistaken for configuration. Replay only evaluates
+// literal declarations: an endpoint key directly inside a "net" object whose whole value is an
+// object literal of literal values or exported variables, stating its mode. Any other endpoint
+// declaration, including a partial one that would inherit settings from another config, is
+// rejected rather than left to override the validated defaults.
 func extractJSEndpointSelections(source string, vars map[string]string, archived *ArchivedEndpointSelection) (string, []Diagnostic) {
 	code := jsCodeMask(source)
 	var diagnostics []Diagnostic
 	var replacements []jsReplacement
-	handled := map[int]struct{}{}
-	for _, netMatch := range jsNetObjectRe.FindAllStringIndex(code, -1) {
-		netOpen := netMatch[1] - 1
-		netClose := findMatchingJSBrace(code, netOpen)
-		if netClose < 0 {
-			continue
-		}
-		keyMatch := jsEndpointObjectRe.FindStringIndex(code[netOpen : netClose+1])
-		if keyMatch == nil {
-			continue
-		}
-		keyStart := netOpen + keyMatch[0]
-		endpointOpen := netOpen + keyMatch[1] - 1
-		endpointClose := findMatchingJSBrace(code, endpointOpen)
-		if endpointClose < 0 || endpointClose > netClose {
-			continue
-		}
-		handled[keyStart] = struct{}{}
-		declaration, err := parseJSEndpointObject(code[endpointOpen:endpointClose+1], vars)
+	for _, occurrence := range jsEndpointOccurrences(code) {
+		declaration, valueEnd, err := parseJSEndpointValue(code, occurrence, vars)
 		if err != nil {
 			diagnostics = append(diagnostics, endpointSelectionError("archived scenario "+err.Error()))
 			continue
@@ -124,17 +104,89 @@ func extractJSEndpointSelections(source string, vars map[string]string, archived
 				"archived scenario contains environment-specific endpoint selection setting(s) %s; replay uses --endpoint-hostname and --dns-server instead",
 				strings.Join(declaration.environmentSpecific, ", "))})
 		}
-		start, end := widenToAdjacentComma(code, keyStart, endpointClose+1, netOpen, netClose)
+		start, end := widenToAdjacentComma(code, occurrence.keyStart, valueEnd, occurrence.parentOpen, occurrence.parentClose)
 		replacements = append(replacements, jsReplacement{start: start, end: end, text: ""})
 	}
-	for _, position := range jsEndpointKeyPositions(code) {
-		if _, ok := handled[position]; !ok {
-			diagnostics = append(diagnostics, endpointSelectionError("archived scenario declares storage.net.endpoint in a form replay "+
-				"cannot evaluate, such as a variable reference or an unquoted key; write it as a literal object inside a literal "+
-				"\"net\" object, or remove it"))
+	return applyJSReplacements(source, replacements), diagnostics
+}
+
+// jsEndpointOccurrence is an object key named endpoint and the object that contains it.
+type jsEndpointOccurrence struct {
+	keyStart    int    // offset of the key
+	valueStart  int    // offset of the value after the colon
+	parentKey   string // key whose value is the containing object; empty if there is none
+	parentOpen  int    // offset of the containing object's opening brace; -1 if there is none
+	parentClose int    // offset of the containing object's closing brace; -1 if it never closes
+}
+
+// jsEndpointOccurrences walks code, which must have its comments masked, as tokens and reports
+// every key named endpoint with its containing object. Strings are skipped as whole tokens, so
+// their contents never count as keys.
+func jsEndpointOccurrences(code string) []jsEndpointOccurrence {
+	type frame struct {
+		key         string
+		open        int
+		occurrences []int // indexes of the endpoint keys directly inside this object
+	}
+	var stack []frame
+	var occurrences []jsEndpointOccurrence
+	pendingKey := "" // a key whose colon was just read, until its value starts
+	colonAfter := func(end int) (int, bool) {
+		j := skipJSWhitespace(code, end)
+		return j, j < len(code) && code[j] == ':'
+	}
+	keyRead := func(name string, start, colon int) {
+		if name == "endpoint" {
+			occurrence := jsEndpointOccurrence{keyStart: start, valueStart: skipJSWhitespace(code, colon+1), parentOpen: -1, parentClose: -1}
+			if len(stack) > 0 {
+				parent := &stack[len(stack)-1]
+				occurrence.parentKey, occurrence.parentOpen = parent.key, parent.open
+				parent.occurrences = append(parent.occurrences, len(occurrences))
+			}
+			occurrences = append(occurrences, occurrence)
+		}
+		pendingKey = name
+	}
+	for i := 0; i < len(code); i++ {
+		c := code[i]
+		switch {
+		case isJSWhitespace(c):
+		case c == '"' || c == '\'' || c == '`':
+			end := jsStringEnd(code, i)
+			if colon, ok := colonAfter(end + 1); ok && c != '`' && end > i {
+				keyRead(code[i+1:end], i, colon)
+				i = colon
+				continue
+			}
+			pendingKey = ""
+			i = end
+		case isJSIdentifierStart(c):
+			start := i
+			for i+1 < len(code) && isJSIdentifierPart(code[i+1]) {
+				i++
+			}
+			if colon, ok := colonAfter(i + 1); ok {
+				keyRead(code[start:i+1], start, colon)
+				i = colon
+				continue
+			}
+			pendingKey = ""
+		case c == '{':
+			stack = append(stack, frame{key: pendingKey, open: i})
+			pendingKey = ""
+		case c == '}':
+			if len(stack) > 0 {
+				for _, index := range stack[len(stack)-1].occurrences {
+					occurrences[index].parentClose = i
+				}
+				stack = stack[:len(stack)-1]
+			}
+			pendingKey = ""
+		default:
+			pendingKey = ""
 		}
 	}
-	return applyJSReplacements(source, replacements), diagnostics
+	return occurrences
 }
 
 type jsEndpointDeclaration struct {
@@ -144,92 +196,200 @@ type jsEndpointDeclaration struct {
 	environmentSpecific  []string
 }
 
+// parseJSEndpointValue evaluates one endpoint declaration and returns the offset after its value.
+func parseJSEndpointValue(code string, occurrence jsEndpointOccurrence, vars map[string]string) (jsEndpointDeclaration, int, error) {
+	if occurrence.parentKey != "net" || occurrence.parentClose < 0 || occurrence.valueStart >= len(code) || code[occurrence.valueStart] != '{' {
+		return jsEndpointDeclaration{}, 0, fmt.Errorf("declares storage.net.endpoint in a form replay cannot evaluate, " +
+			"such as a variable reference or a key outside a \"net\" object; write it as an object literal inside " +
+			"the \"net\" object, or remove it")
+	}
+	entries, end, err := parseJSObjectLiteral(code, occurrence.valueStart)
+	if err != nil {
+		return jsEndpointDeclaration{}, 0, fmt.Errorf("declares storage.net.endpoint with %w", err)
+	}
+	if next := skipJSWhitespace(code, end); next >= len(code) || (code[next] != ',' && code[next] != '}') {
+		return jsEndpointDeclaration{}, 0, fmt.Errorf("sets storage.net.endpoint to an expression rather than a single object literal")
+	}
+	declaration, err := endpointDeclaration(entries, vars)
+	return declaration, end, err
+}
+
+// jsEntry is one key of an object literal: a single literal token or a nested object literal.
+type jsEntry struct {
+	key      string
+	token    string
+	object   []jsEntry
+	isObject bool
+}
+
+// parseJSObjectLiteral parses the object literal opening at open: keys that are names or strings,
+// values that are single literal tokens or nested object literals. Spreads, computed keys and
+// expressions are errors. It returns the offset after the closing brace.
+func parseJSObjectLiteral(code string, open int) ([]jsEntry, int, error) {
+	entries := []jsEntry{}
+	i := open + 1
+	for {
+		i = skipJSWhitespace(code, i)
+		if i >= len(code) {
+			return nil, i, fmt.Errorf("an unterminated object")
+		}
+		if code[i] == '}' {
+			return entries, i + 1, nil
+		}
+		key, next, err := parseJSKey(code, i)
+		if err != nil {
+			return nil, i, err
+		}
+		i = skipJSWhitespace(code, next)
+		if i >= len(code) || code[i] != ':' {
+			return nil, i, fmt.Errorf("an entry that is not a key and value")
+		}
+		i = skipJSWhitespace(code, i+1)
+		entry := jsEntry{key: key}
+		if i < len(code) && code[i] == '{' {
+			if entry.object, i, err = parseJSObjectLiteral(code, i); err != nil {
+				return nil, i, err
+			}
+			entry.isObject = true
+		} else if entry.token, i, err = parseJSLiteralToken(code, i); err != nil {
+			return nil, i, fmt.Errorf("%w in %q", err, key)
+		}
+		entries = append(entries, entry)
+		i = skipJSWhitespace(code, i)
+		switch {
+		case i < len(code) && code[i] == ',':
+			i++
+		case i < len(code) && code[i] == '}':
+			return entries, i + 1, nil
+		default:
+			return nil, i, fmt.Errorf("an expression in the value of %q", key)
+		}
+	}
+}
+
+func parseJSKey(code string, i int) (string, int, error) {
+	switch c := code[i]; {
+	case c == '"' || c == '\'':
+		end := jsStringEnd(code, i)
+		return unquoteJSString(code[i+1 : end]), end + 1, nil
+	case isJSIdentifierStart(c):
+		j := i + 1
+		for j < len(code) && isJSIdentifierPart(code[j]) {
+			j++
+		}
+		return code[i:j], j, nil
+	}
+	return "", i, fmt.Errorf("a key that is not a literal name, such as a spread or computed key")
+}
+
+func parseJSLiteralToken(code string, i int) (string, int, error) {
+	if i < len(code) {
+		switch c := code[i]; {
+		case c == '"' || c == '\'':
+			end := jsStringEnd(code, i)
+			return code[i : end+1], end + 1, nil
+		case c == '-' || (c >= '0' && c <= '9'):
+			if number := jsNumberRe.FindString(code[i:]); number != "" {
+				return number, i + len(number), nil
+			}
+		case isJSIdentifierStart(c):
+			j := i + 1
+			for j < len(code) && isJSIdentifierPart(code[j]) {
+				j++
+			}
+			return code[i:j], j, nil
+		}
+	}
+	return "", i, fmt.Errorf("a value that is not a literal")
+}
+
 // JavaScript boolean literals accepted as endpoint setting values.
 const (
 	jsTrue  = "true"
 	jsFalse = "false"
 )
 
-var jsEndpointKeys = map[string]struct{}{
-	"selection": {}, "hostname": {}, "dns": {}, "connect": {}, "server": {}, "timeoutMilliSec": {},
-}
-
-// parseJSEndpointObject reads a literal endpoint object, rejecting anything replay cannot evaluate.
-func parseJSEndpointObject(text string, vars map[string]string) (jsEndpointDeclaration, error) {
+// endpointDeclaration validates the parsed endpoint object and resolves its values.
+func endpointDeclaration(entries []jsEntry, vars map[string]string) (jsEndpointDeclaration, error) {
 	var declaration jsEndpointDeclaration
-	if jsUnquotedKeyRe.MatchString(jsBlankStrings(text)) {
-		return declaration, fmt.Errorf("declares storage.net.endpoint with an unquoted key, which replay cannot evaluate")
-	}
-	for _, key := range jsObjectKeyRe.FindAllStringSubmatch(text, -1) {
-		if _, ok := jsEndpointKeys[key[1]]; !ok {
-			return declaration, fmt.Errorf("declares an unsupported storage.net.endpoint setting %q", key[1])
-		}
-	}
-	mode, _, err := jsLiteralValue(text, "selection", vars)
+	fields, err := jsFields(entries, "storage.net.endpoint", map[string]bool{"selection": false, "hostname": false, "dns": true, "connect": true})
 	if err != nil {
 		return declaration, err
 	}
-	if mode == "" {
+	dns, err := jsFields(fields["dns"].object, "storage.net.endpoint.dns", map[string]bool{"server": false, "timeoutMilliSec": false})
+	if err != nil {
+		return declaration, err
+	}
+	connect, err := jsFields(fields["connect"].object, "storage.net.endpoint.connect", map[string]bool{"timeoutMilliSec": false})
+	if err != nil {
+		return declaration, err
+	}
+	if declaration.mode, err = jsResolve(fields["selection"].token, "selection", vars); err != nil {
+		return declaration, err
+	}
+	if declaration.mode == "" {
 		return declaration, fmt.Errorf("declares storage.net.endpoint without a selection mode; replay cannot resolve " +
 			"endpoint settings inherited from another config, so state the mode in every endpoint object")
 	}
-	declaration.mode = mode
-	if hostname, _, err := jsLiteralValue(text, "hostname", vars); err != nil {
-		return declaration, err
-	} else if hostname != "" {
-		declaration.environmentSpecific = append(declaration.environmentSpecific, "storage.net.endpoint.hostname")
-	}
-	sections := map[string]string{}
-	for _, section := range []string{"dns", "connect"} {
-		raw, present := jsFieldRawValue(text, section)
-		if present && !strings.HasPrefix(raw, "{") {
-			return declaration, fmt.Errorf("sets storage.net.endpoint.%s to %s, which is not a literal object", section, raw)
+	for _, environmentSpecific := range []struct {
+		entry jsEntry
+		path  string
+	}{{fields["hostname"], "storage.net.endpoint.hostname"}, {dns["server"], "storage.net.endpoint.dns.server"}} {
+		if value, err := jsResolve(environmentSpecific.entry.token, environmentSpecific.path, vars); err != nil {
+			return declaration, err
+		} else if value != "" {
+			declaration.environmentSpecific = append(declaration.environmentSpecific, environmentSpecific.path)
 		}
-		sections[section] = jsObjectForKey(text, section)
 	}
-	if server, _, err := jsLiteralValue(sections["dns"], "server", vars); err != nil {
-		return declaration, err
-	} else if server != "" {
-		declaration.environmentSpecific = append(declaration.environmentSpecific, "storage.net.endpoint.dns.server")
-	}
-	if declaration.dnsTimeoutMillis, err = jsLiteralInt(sections["dns"], "timeoutMilliSec", vars); err != nil {
+	if declaration.dnsTimeoutMillis, err = jsResolveInt(dns["timeoutMilliSec"].token, "dns timeoutMilliSec", vars); err != nil {
 		return declaration, err
 	}
-	if declaration.connectTimeoutMillis, err = jsLiteralInt(sections["connect"], "timeoutMilliSec", vars); err != nil {
+	if declaration.connectTimeoutMillis, err = jsResolveInt(connect["timeoutMilliSec"].token, "connect timeoutMilliSec", vars); err != nil {
 		return declaration, err
 	}
 	return declaration, nil
 }
 
-// jsLiteralValue returns a field written as a single literal token: a string (with export
-// placeholders expanded), a number, a boolean, or the name of an exported variable.
-func jsLiteralValue(text, name string, vars map[string]string) (string, bool, error) {
-	if text == "" {
-		return "", false, nil
+// jsFields indexes an object's entries, rejecting unknown or repeated keys and values of the wrong
+// shape; allowed maps each key to whether its value must be an object.
+func jsFields(entries []jsEntry, path string, allowed map[string]bool) (map[string]jsEntry, error) {
+	fields := map[string]jsEntry{}
+	for _, entry := range entries {
+		isObject, ok := allowed[entry.key]
+		if !ok {
+			return nil, fmt.Errorf("declares an unsupported setting %s.%s", path, entry.key)
+		}
+		if _, duplicate := fields[entry.key]; duplicate {
+			return nil, fmt.Errorf("declares %s.%s more than once", path, entry.key)
+		}
+		if entry.isObject != isObject {
+			return nil, fmt.Errorf("declares %s.%s with a value of the wrong shape", path, entry.key)
+		}
+		fields[entry.key] = entry
 	}
-	raw, present := jsFieldRawValue(text, name)
-	if !present {
-		return "", false, nil
-	}
-	token, ok := jsFieldToken(text, name)
-	if !ok || token != strings.TrimSpace(raw) {
-		return "", true, fmt.Errorf("sets storage.net.endpoint %s to an expression replay cannot evaluate: %s", name, raw)
-	}
-	switch {
-	case strings.HasPrefix(token, `"`):
-		return expandWithExports(unquoteJSString(strings.Trim(token, `"`)), vars), true, nil
-	case token == jsTrue || token == jsFalse || (token[0] >= '0' && token[0] <= '9') || token[0] == '-':
-		return token, true, nil
-	}
-	if value, ok := vars[token]; ok {
-		return value, true, nil
-	}
-	return "", true, fmt.Errorf("sets storage.net.endpoint %s from the variable %s, which replay cannot evaluate", name, token)
+	return fields, nil
 }
 
-func jsLiteralInt(text, name string, vars map[string]string) (int, error) {
-	value, present, err := jsLiteralValue(text, name, vars)
-	if err != nil || !present {
+// jsResolve evaluates a literal token: a string (with export placeholders expanded), a number, a
+// boolean, or the name of an exported variable. An empty token means the setting is absent.
+func jsResolve(token, name string, vars map[string]string) (string, error) {
+	switch {
+	case token == "":
+		return "", nil
+	case token[0] == '"' || token[0] == '\'':
+		return expandWithExports(unquoteJSString(token[1:len(token)-1]), vars), nil
+	case token == jsTrue || token == jsFalse || token[0] == '-' || (token[0] >= '0' && token[0] <= '9'):
+		return token, nil
+	}
+	if value, ok := vars[token]; ok {
+		return value, nil
+	}
+	return "", fmt.Errorf("sets %s from the variable %s, which replay cannot evaluate", name, token)
+}
+
+func jsResolveInt(token, name string, vars map[string]string) (int, error) {
+	value, err := jsResolve(token, name, vars)
+	if err != nil || value == "" {
 		return 0, err
 	}
 	number, err := strconv.Atoi(strings.TrimSpace(value))
@@ -241,36 +401,6 @@ func jsLiteralInt(text, name string, vars map[string]string) (int, error) {
 
 func endpointSelectionError(message string) Diagnostic {
 	return Diagnostic{Severity: severityError, Code: failureInvalidEndpointSelection, Message: message}
-}
-
-// jsEndpointKeyPositions finds every object key named endpoint in code, quoted or not, ignoring
-// string contents. code must already have its comments masked.
-func jsEndpointKeyPositions(code string) []int {
-	var positions []int
-	followedByColon := func(i int) bool {
-		j := skipJSWhitespace(code, i)
-		return j < len(code) && code[j] == ':'
-	}
-	for i := 0; i < len(code); i++ {
-		c := code[i]
-		switch {
-		case c == '"' || c == '\'' || c == '`':
-			end := jsStringEnd(code, i)
-			if end > i && code[i+1:end] == "endpoint" && followedByColon(end+1) {
-				positions = append(positions, i)
-			}
-			i = end
-		case isJSIdentifierStart(c):
-			start := i
-			for i+1 < len(code) && isJSIdentifierPart(code[i+1]) {
-				i++
-			}
-			if code[start:i+1] == "endpoint" && followedByColon(i+1) {
-				positions = append(positions, start)
-			}
-		}
-	}
-	return positions
 }
 
 // jsCodeMask returns source with comment text replaced by spaces (line breaks kept), so scans
@@ -297,21 +427,6 @@ func jsCodeMask(source string) string {
 				}
 			}
 			i = stop - 1
-		}
-	}
-	return string(out)
-}
-
-// jsBlankStrings replaces string contents with spaces, keeping the quotes and offsets.
-func jsBlankStrings(source string) string {
-	out := []byte(source)
-	for i := 0; i < len(out); i++ {
-		if out[i] == '"' || out[i] == '\'' || out[i] == '`' {
-			end := jsStringEnd(source, i)
-			for j := i + 1; j < end; j++ {
-				out[j] = ' '
-			}
-			i = end
 		}
 	}
 	return string(out)
