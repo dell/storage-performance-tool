@@ -25,7 +25,6 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -66,44 +65,70 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 	private record Binding(DestinationSource source, boolean pooled, int idleLimit, int connectTimeoutMillis,
 					long setupTimeoutMillis, EndpointSelectionCounters counters) {}
 
-	/** One outstanding acquisition; it settles once, on whichever thread finishes it first. */
+	/**
+	 * One outstanding acquisition. It reports exactly once: a failure on the thread that observes it,
+	 * or a channel on that channel's own event loop. A channel handed to its loop stays tracked, and
+	 * {@link #close()} can still cancel it, until the loop claims delivery; a cancelled hand-off only
+	 * closes the channel when it runs.
+	 */
 	private final class Pending {
 
+		private static final int WAITING = 0;
+		private static final int QUEUED = 1;
+		private static final int DONE = 2;
+
 		private final Acquisition callback;
-		private final AtomicBoolean settled = new AtomicBoolean();
+		private final AtomicInteger state = new AtomicInteger(WAITING);
 
 		private Pending(final Acquisition callback) {
 			this.callback = callback;
 		}
 
 		boolean isSettled() {
-			return settled.get();
+			return state.get() != WAITING;
 		}
 
-		/**
-		 * Settles once. A channel is always reported on its own event loop, so request preparation
-		 * runs there and never on the thread that asked; if that loop has already terminated, the
-		 * channel is closed and the acquisition fails on the current thread instead.
-		 */
-		boolean settle(final Channel channel, final Throwable failure) {
-			if (!settled.compareAndSet(false, true)) {
-				return false;
+		/** Reports a failure, cancelling a queued hand-off if necessary. False if already reported. */
+		boolean fail(final Throwable failure) {
+			while (true) {
+				final var current = state.get();
+				if (current == DONE) {
+					return false;
+				}
+				if (state.compareAndSet(current, DONE)) {
+					pending.remove(this);
+					callback.complete(null, failure);
+					return true;
+				}
 			}
-			pending.remove(this);
-			if (channel == null) {
-				callback.complete(null, failure);
-				return true;
-			}
+		}
+
+		/** Hands an active channel to the callback on the channel's loop. False if already settled. */
+		boolean deliver(final Channel channel) {
 			final var loop = channel.eventLoop();
 			if (loop.inEventLoop()) {
+				if (!state.compareAndSet(WAITING, DONE)) {
+					return false;
+				}
+				pending.remove(this);
 				callback.complete(channel, null);
 				return true;
 			}
+			if (!state.compareAndSet(WAITING, QUEUED)) {
+				return false;
+			}
 			try {
-				loop.execute(() -> callback.complete(channel, null));
+				loop.execute(() -> {
+					if (state.compareAndSet(QUEUED, DONE)) {
+						pending.remove(this);
+						callback.complete(channel, null);
+					} else {
+						final var unusedClose = channel.close();
+					}
+				});
 			} catch (final RejectedExecutionException e) {
 				final var unusedClose = channel.close();
-				callback.complete(null, closedFailure());
+				fail(closedFailure());
 			}
 			return true;
 		}
@@ -144,14 +169,14 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 		final var attempt = new Pending(callback);
 		pending.add(attempt);
 		if (closed) {
-			attempt.settle(null, closedFailure());
+			attempt.fail(closedFailure());
 			return;
 		}
 		final Future<InetSocketAddress> selection;
 		try {
 			selection = bound.source().next();
 		} catch (final RuntimeException e) {
-			attempt.settle(null, e);
+			attempt.fail(e);
 			return;
 		}
 		// Count each selection exactly once, whether it is already complete or completes later.
@@ -163,7 +188,7 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 			final var idle = pollActiveIdle(selection.getNow());
 			if (idle != null) {
 				bound.counters().connected(true);
-				if (!attempt.settle(idle, null)) {
+				if (!attempt.deliver(idle)) {
 					release(idle);
 				}
 				return;
@@ -174,7 +199,7 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 				return;
 			}
 			if (!selected.isSuccess()) {
-				attempt.settle(null, selected.cause());
+				attempt.fail(selected.cause());
 				return;
 			}
 			if (!countedNow) {
@@ -187,7 +212,7 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 	private void connect(final Binding bound, final InetSocketAddress destination, final Pending attempt) {
 		final EventLoop loop = bootstrap.config().group().next();
 		if (closed || loop.isShuttingDown()) {
-			attempt.settle(null, closedFailure());
+			attempt.fail(closedFailure());
 			return;
 		}
 		final var connecting = bootstrap.clone(loop)
@@ -218,14 +243,14 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 		connect.addListener(done -> {
 			if (!done.isSuccess()) {
 				bound.counters().connectFailed();
-				attempt.settle(null, done.cause());
+				attempt.fail(done.cause());
 				return;
 			}
 			bound.counters().connected(false);
 			if (closed) {
-				attempt.settle(null, closedFailure());
+				attempt.fail(closedFailure());
 				final var unusedClose = channel.close();
-			} else if (!attempt.settle(channel, null)) {
+			} else if (!attempt.deliver(channel)) {
 				final var unusedClose = channel.close();
 			}
 		});
@@ -325,7 +350,7 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 	public void close() {
 		closed = true;
 		for (final var attempt : new ArrayList<>(pending)) {
-			attempt.settle(null, closedFailure());
+			attempt.fail(closedFailure());
 		}
 		closeIdle();
 		for (final var channel : new ArrayList<>(openChannels)) {

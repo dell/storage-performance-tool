@@ -72,6 +72,39 @@ class SelectingConnectionPoolTest {
 	}
 
 	@Test
+	void closeCancelsAHandOffQueuedOnABusyEventLoop() throws Exception {
+		final var a = holder();
+		final var pool = pool(List.of(a.address()), true, 4);
+		final var idle = pool.lease();
+		pool.release(idle);
+		final var loopRunning = new java.util.concurrent.CountDownLatch(1);
+		final var resumeLoop = new java.util.concurrent.CountDownLatch(1);
+		idle.eventLoop().execute(() -> {
+			loopRunning.countDown();
+			try {
+				resumeLoop.await();
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		});
+		assertTrue(loopRunning.await(5, TimeUnit.SECONDS));
+		final var outcomes = new CopyOnWriteArrayList<Object>();
+
+		// The reused channel is queued for its paused loop; the acquisition must stay cancellable.
+		pool.acquire((channel, failure) -> outcomes.add(failure != null ? failure : channel));
+		assertEquals(1, pool.pendingAcquisitionCount());
+		pool.close();
+
+		assertEquals(1, outcomes.size());
+		assertInstanceOf(ConnectException.class, outcomes.get(0));
+		assertEquals(0, pool.pendingAcquisitionCount());
+		resumeLoop.countDown();
+		assertTrue(idle.closeFuture().await(5, TimeUnit.SECONDS));
+		Thread.sleep(50);
+		assertEquals(1, outcomes.size(), "the late hand-off must not deliver after close");
+	}
+
+	@Test
 	void pooledReleaseClosesConnectionsBeyondTheIdleLimit() throws Exception {
 		final var a = holder();
 		final var b = holder();

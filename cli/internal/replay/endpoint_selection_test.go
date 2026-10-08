@@ -261,7 +261,21 @@ func TestConvertJSRecordsAndStripsInlineEndpointSelection(t *testing.T) {
 }
 
 func TestGenerateExplicitFlagsOverrideInlineJSSelection(t *testing.T) {
-	raw := inlineDNSArchiveJS(t)
+	got, err := generateFromJSArchive(t, inlineDNSArchiveJS(t), []string{"http://10.0.0.1:9020", "http://10.0.0.2:9020"},
+		scenario.EndpointSelection{Mode: scenario.EndpointSelectionRoundRobin})
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if !strings.Contains(string(got.DefaultsYAML), "selection: round-robin") {
+		t.Fatalf("defaults must carry the validated round-robin selection:\n%s", got.DefaultsYAML)
+	}
+	if strings.Contains(string(got.ScenarioJS), "per-request-dns") {
+		t.Fatalf("an inline step must not override the validated selection:\n%s", got.ScenarioJS)
+	}
+}
+
+func generateFromJSArchive(t *testing.T, raw string, endpoints []string, flags scenario.EndpointSelection) (*Generated, error) {
+	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, `<a href="run.sh">run</a><a href="archived.js">scenario</a>`)
@@ -279,19 +293,101 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 
-	got, err := Generate(context.Background(), Options{
-		SourceURL: server.URL, Endpoints: []string{"http://10.0.0.1:9020", "http://10.0.0.2:9020"},
-		Bucket: "local-bucket", BaseTimestamp: "20260605.121400.000", HTTPClient: server.Client(),
-		EndpointSelection: scenario.EndpointSelection{Mode: scenario.EndpointSelectionRoundRobin},
+	return Generate(context.Background(), Options{
+		SourceURL: server.URL, Endpoints: endpoints, Bucket: "local-bucket",
+		BaseTimestamp: "20260605.121400.000", HTTPClient: server.Client(), EndpointSelection: flags,
 	})
+}
+
+func convertJSResult(raw string, exports map[string]string) (*Generated, error) {
+	vars := map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"}
+	for k, v := range exports {
+		vars[k] = v
+	}
+	return ConvertJS([]byte(raw), RunScript{Exports: vars, ItemOutputPath: "bucket"}, Options{
+		Endpoints: []string{"https://s3.example.test:9021"}, BaseTimestamp: "20260605.121400.000",
+	})
+}
+
+// withInlineNet inserts a "net" entry into the first step's inline storage config.
+func withInlineNet(t *testing.T, net string) string {
+	t.Helper()
+	raw := strings.Replace(maxS3SanityJS, `"storage" : {
+        "driver" : {
+          "limit" : {
+            "concurrency" : 70`, `"storage" : {
+        "net" : `+net+`,
+        "driver" : {
+          "limit" : {
+            "concurrency" : 70`, 1)
+	if raw == maxS3SanityJS {
+		t.Fatal("inline fixture replacement failed")
+	}
+	return raw
+}
+
+func TestConvertJSRejectsEndpointDeclarationsItCannotEvaluate(t *testing.T) {
+	cases := map[string]struct {
+		raw  string
+		want string
+	}{
+		"variable reference": {
+			raw:  "var archivedEndpoint = {\"selection\" : \"per-request-dns\"};\n" + withInlineNet(t, `{ "endpoint" : archivedEndpoint }`),
+			want: "cannot evaluate",
+		},
+		"unquoted key": {
+			raw:  withInlineNet(t, `{ endpoint : { "selection" : "per-request-dns" } }`),
+			want: "cannot evaluate",
+		},
+		"expression value": {
+			raw:  withInlineNet(t, `{ "endpoint" : { "selection" : mode + "-dns" } }`),
+			want: "expression replay cannot evaluate",
+		},
+		"unexported variable value": {
+			raw:  withInlineNet(t, `{ "endpoint" : { "selection" : chosenMode } }`),
+			want: "variable chosenMode",
+		},
+		"partial override inheriting the mode": {
+			raw: strings.Replace(withInlineNet(t, `{ "endpoint" : { "dns" : { "timeoutMilliSec" : 8000 } } }`), `"net" : {
+      "node" : {
+        "port" : 9020
+      }
+    },`, jsParentEndpoint, 1),
+			want: "without a selection mode",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := convertJSResult(tc.raw, nil)
+			if ErrorClass(err) != failureInvalidEndpointSelection || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want an endpoint selection error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestConvertJSResolvesExportedVariableValues(t *testing.T) {
+	got, err := convertJSResult(withInlineNet(t, `{ "endpoint" : { "selection" : DNS_MODE, "connect" : { "timeoutMilliSec" : CONNECT_MS } } }`),
+		map[string]string{"DNS_MODE": "per-request-dns", "CONNECT_MS": "4000"})
+	if err != nil {
+		t.Fatalf("ConvertJS() error = %v", err)
+	}
+	want := []scenario.EndpointSelection{{Mode: scenario.EndpointSelectionPerRequestDNS, ConnectTimeoutMillis: 4000}}
+	if !reflect.DeepEqual(got.ArchivedEndpointSelection.Declarations, want) {
+		t.Fatalf("Declarations = %+v, want %+v", got.ArchivedEndpointSelection.Declarations, want)
+	}
+}
+
+func TestCommentedEndpointConfigsDoNotAffectReplay(t *testing.T) {
+	raw := "// Previous config: {\"storage\": {\"net\": {\"endpoint\": {\"selection\": \"per-request-dns\"}}}}\n" +
+		"/* \"net\" : { \"endpoint\" : { \"selection\" : \"round-robin\" } } */\n" + maxS3SanityJS
+
+	got, err := generateFromJSArchive(t, raw, []string{"http://10.0.0.1:9020"}, scenario.EndpointSelection{})
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
-	if !strings.Contains(string(got.DefaultsYAML), "selection: round-robin") {
-		t.Fatalf("defaults must carry the validated round-robin selection:\n%s", got.DefaultsYAML)
-	}
-	if strings.Contains(string(got.ScenarioJS), "per-request-dns") {
-		t.Fatalf("an inline step must not override the validated selection:\n%s", got.ScenarioJS)
+	if len(got.ArchivedEndpointSelection.Declarations) != 0 || strings.Contains(string(got.DefaultsYAML), "endpoint:") {
+		t.Fatalf("comments must not declare endpoint selection: %+v\n%s", got.ArchivedEndpointSelection, got.DefaultsYAML)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
@@ -12,6 +13,7 @@ import (
 var (
 	jsNetObjectRe      = regexp.MustCompile(`"net"\s*:\s*\{`)
 	jsEndpointObjectRe = regexp.MustCompile(`"endpoint"\s*:\s*\{`)
+	jsUnquotedKeyRe    = regexp.MustCompile(`[{,]\s*[A-Za-z_$][A-Za-z0-9_$]*\s*:`)
 )
 
 // ArchivedEndpointSelection lists the distinct endpoint-selection declarations found in an
@@ -82,50 +84,259 @@ func archivedEndpointSelectionFromConfig(config map[string]any, vars map[string]
 		intValue(getPath(config, append(endpoint, "connect", "timeoutMilliSec")...), vars))
 }
 
-// extractJSEndpointSelections records every storage.net.endpoint object in a JavaScript scenario,
-// whether in a parent config or an inline step config, and removes it so that the generated
-// defaults alone carry endpoint selection.
+// extractJSEndpointSelections records every storage.net.endpoint declaration in a JavaScript
+// scenario, whether in a parent config or an inline step config, and removes it so that the
+// generated defaults alone carry endpoint selection. Comments are ignored. Replay only evaluates
+// literal declarations: an endpoint object directly inside a literal "net" object, with an explicit
+// mode and literal or exported-variable values. Any other endpoint declaration, and any partial
+// one that would inherit settings from another config, is rejected rather than left to override
+// the validated defaults.
 func extractJSEndpointSelections(source string, vars map[string]string, archived *ArchivedEndpointSelection) (string, []Diagnostic) {
+	code := jsCodeMask(source)
 	var diagnostics []Diagnostic
 	var replacements []jsReplacement
-	for _, netMatch := range jsNetObjectRe.FindAllStringIndex(source, -1) {
+	handled := map[int]struct{}{}
+	for _, netMatch := range jsNetObjectRe.FindAllStringIndex(code, -1) {
 		netOpen := netMatch[1] - 1
-		netClose := findMatchingJSBrace(source, netOpen)
+		netClose := findMatchingJSBrace(code, netOpen)
 		if netClose < 0 {
 			continue
 		}
-		keyMatch := jsEndpointObjectRe.FindStringIndex(source[netOpen : netClose+1])
+		keyMatch := jsEndpointObjectRe.FindStringIndex(code[netOpen : netClose+1])
 		if keyMatch == nil {
 			continue
 		}
+		keyStart := netOpen + keyMatch[0]
 		endpointOpen := netOpen + keyMatch[1] - 1
-		endpointClose := findMatchingJSBrace(source, endpointOpen)
+		endpointClose := findMatchingJSBrace(code, endpointOpen)
 		if endpointClose < 0 || endpointClose > netClose {
 			continue
 		}
-		endpointText := source[endpointOpen : endpointClose+1]
-		dnsText := jsObjectForKey(endpointText, "dns")
-		connectText := jsObjectForKey(endpointText, "connect")
-		archived.add(
-			resolveString(jsFieldValue(endpointText, "selection", vars), vars),
-			intValue(jsFieldValue(dnsText, "timeoutMilliSec", vars), vars),
-			intValue(jsFieldValue(connectText, "timeoutMilliSec", vars), vars))
-		var environmentSpecific []string
-		if resolveString(jsFieldValue(endpointText, "hostname", vars), vars) != "" {
-			environmentSpecific = append(environmentSpecific, "storage.net.endpoint.hostname")
+		handled[keyStart] = struct{}{}
+		declaration, err := parseJSEndpointObject(code[endpointOpen:endpointClose+1], vars)
+		if err != nil {
+			diagnostics = append(diagnostics, endpointSelectionError("archived scenario "+err.Error()))
+			continue
 		}
-		if resolveString(jsFieldValue(dnsText, "server", vars), vars) != "" {
-			environmentSpecific = append(environmentSpecific, "storage.net.endpoint.dns.server")
-		}
-		if len(environmentSpecific) > 0 {
+		archived.add(declaration.mode, declaration.dnsTimeoutMillis, declaration.connectTimeoutMillis)
+		if len(declaration.environmentSpecific) > 0 {
 			diagnostics = append(diagnostics, Diagnostic{Severity: severityWarning, Message: fmt.Sprintf(
 				"archived scenario contains environment-specific endpoint selection setting(s) %s; replay uses --endpoint-hostname and --dns-server instead",
-				strings.Join(environmentSpecific, ", "))})
+				strings.Join(declaration.environmentSpecific, ", "))})
 		}
-		start, end := widenToAdjacentComma(source, netOpen+keyMatch[0], endpointClose+1, netOpen, netClose)
+		start, end := widenToAdjacentComma(code, keyStart, endpointClose+1, netOpen, netClose)
 		replacements = append(replacements, jsReplacement{start: start, end: end, text: ""})
 	}
+	for _, position := range jsEndpointKeyPositions(code) {
+		if _, ok := handled[position]; !ok {
+			diagnostics = append(diagnostics, endpointSelectionError("archived scenario declares storage.net.endpoint in a form replay "+
+				"cannot evaluate, such as a variable reference or an unquoted key; write it as a literal object inside a literal "+
+				"\"net\" object, or remove it"))
+		}
+	}
 	return applyJSReplacements(source, replacements), diagnostics
+}
+
+type jsEndpointDeclaration struct {
+	mode                 string
+	dnsTimeoutMillis     int
+	connectTimeoutMillis int
+	environmentSpecific  []string
+}
+
+// JavaScript boolean literals accepted as endpoint setting values.
+const (
+	jsTrue  = "true"
+	jsFalse = "false"
+)
+
+var jsEndpointKeys = map[string]struct{}{
+	"selection": {}, "hostname": {}, "dns": {}, "connect": {}, "server": {}, "timeoutMilliSec": {},
+}
+
+// parseJSEndpointObject reads a literal endpoint object, rejecting anything replay cannot evaluate.
+func parseJSEndpointObject(text string, vars map[string]string) (jsEndpointDeclaration, error) {
+	var declaration jsEndpointDeclaration
+	if jsUnquotedKeyRe.MatchString(jsBlankStrings(text)) {
+		return declaration, fmt.Errorf("declares storage.net.endpoint with an unquoted key, which replay cannot evaluate")
+	}
+	for _, key := range jsObjectKeyRe.FindAllStringSubmatch(text, -1) {
+		if _, ok := jsEndpointKeys[key[1]]; !ok {
+			return declaration, fmt.Errorf("declares an unsupported storage.net.endpoint setting %q", key[1])
+		}
+	}
+	mode, _, err := jsLiteralValue(text, "selection", vars)
+	if err != nil {
+		return declaration, err
+	}
+	if mode == "" {
+		return declaration, fmt.Errorf("declares storage.net.endpoint without a selection mode; replay cannot resolve " +
+			"endpoint settings inherited from another config, so state the mode in every endpoint object")
+	}
+	declaration.mode = mode
+	if hostname, _, err := jsLiteralValue(text, "hostname", vars); err != nil {
+		return declaration, err
+	} else if hostname != "" {
+		declaration.environmentSpecific = append(declaration.environmentSpecific, "storage.net.endpoint.hostname")
+	}
+	sections := map[string]string{}
+	for _, section := range []string{"dns", "connect"} {
+		raw, present := jsFieldRawValue(text, section)
+		if present && !strings.HasPrefix(raw, "{") {
+			return declaration, fmt.Errorf("sets storage.net.endpoint.%s to %s, which is not a literal object", section, raw)
+		}
+		sections[section] = jsObjectForKey(text, section)
+	}
+	if server, _, err := jsLiteralValue(sections["dns"], "server", vars); err != nil {
+		return declaration, err
+	} else if server != "" {
+		declaration.environmentSpecific = append(declaration.environmentSpecific, "storage.net.endpoint.dns.server")
+	}
+	if declaration.dnsTimeoutMillis, err = jsLiteralInt(sections["dns"], "timeoutMilliSec", vars); err != nil {
+		return declaration, err
+	}
+	if declaration.connectTimeoutMillis, err = jsLiteralInt(sections["connect"], "timeoutMilliSec", vars); err != nil {
+		return declaration, err
+	}
+	return declaration, nil
+}
+
+// jsLiteralValue returns a field written as a single literal token: a string (with export
+// placeholders expanded), a number, a boolean, or the name of an exported variable.
+func jsLiteralValue(text, name string, vars map[string]string) (string, bool, error) {
+	if text == "" {
+		return "", false, nil
+	}
+	raw, present := jsFieldRawValue(text, name)
+	if !present {
+		return "", false, nil
+	}
+	token, ok := jsFieldToken(text, name)
+	if !ok || token != strings.TrimSpace(raw) {
+		return "", true, fmt.Errorf("sets storage.net.endpoint %s to an expression replay cannot evaluate: %s", name, raw)
+	}
+	switch {
+	case strings.HasPrefix(token, `"`):
+		return expandWithExports(unquoteJSString(strings.Trim(token, `"`)), vars), true, nil
+	case token == jsTrue || token == jsFalse || (token[0] >= '0' && token[0] <= '9') || token[0] == '-':
+		return token, true, nil
+	}
+	if value, ok := vars[token]; ok {
+		return value, true, nil
+	}
+	return "", true, fmt.Errorf("sets storage.net.endpoint %s from the variable %s, which replay cannot evaluate", name, token)
+}
+
+func jsLiteralInt(text, name string, vars map[string]string) (int, error) {
+	value, present, err := jsLiteralValue(text, name, vars)
+	if err != nil || !present {
+		return 0, err
+	}
+	number, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return 0, fmt.Errorf("sets storage.net.endpoint %s to %q, which is not a whole number of milliseconds", name, value)
+	}
+	return number, nil
+}
+
+func endpointSelectionError(message string) Diagnostic {
+	return Diagnostic{Severity: severityError, Code: failureInvalidEndpointSelection, Message: message}
+}
+
+// jsEndpointKeyPositions finds every object key named endpoint in code, quoted or not, ignoring
+// string contents. code must already have its comments masked.
+func jsEndpointKeyPositions(code string) []int {
+	var positions []int
+	followedByColon := func(i int) bool {
+		j := skipJSWhitespace(code, i)
+		return j < len(code) && code[j] == ':'
+	}
+	for i := 0; i < len(code); i++ {
+		c := code[i]
+		switch {
+		case c == '"' || c == '\'' || c == '`':
+			end := jsStringEnd(code, i)
+			if end > i && code[i+1:end] == "endpoint" && followedByColon(end+1) {
+				positions = append(positions, i)
+			}
+			i = end
+		case isJSIdentifierStart(c):
+			start := i
+			for i+1 < len(code) && isJSIdentifierPart(code[i+1]) {
+				i++
+			}
+			if code[start:i+1] == "endpoint" && followedByColon(i+1) {
+				positions = append(positions, start)
+			}
+		}
+	}
+	return positions
+}
+
+// jsCodeMask returns source with comment text replaced by spaces (line breaks kept), so scans
+// see only executable code at unchanged offsets.
+func jsCodeMask(source string) string {
+	out := []byte(source)
+	for i := 0; i < len(out); i++ {
+		switch {
+		case out[i] == '"' || out[i] == '\'' || out[i] == '`':
+			i = jsStringEnd(source, i)
+		case out[i] == '/' && i+1 < len(out) && out[i+1] == '/':
+			for ; i < len(out) && out[i] != '\n'; i++ {
+				out[i] = ' '
+			}
+		case out[i] == '/' && i+1 < len(out) && out[i+1] == '*':
+			end := strings.Index(source[i+2:], "*/")
+			stop := len(out)
+			if end >= 0 {
+				stop = i + 2 + end + 2
+			}
+			for j := i; j < stop; j++ {
+				if out[j] != '\n' {
+					out[j] = ' '
+				}
+			}
+			i = stop - 1
+		}
+	}
+	return string(out)
+}
+
+// jsBlankStrings replaces string contents with spaces, keeping the quotes and offsets.
+func jsBlankStrings(source string) string {
+	out := []byte(source)
+	for i := 0; i < len(out); i++ {
+		if out[i] == '"' || out[i] == '\'' || out[i] == '`' {
+			end := jsStringEnd(source, i)
+			for j := i + 1; j < end; j++ {
+				out[j] = ' '
+			}
+			i = end
+		}
+	}
+	return string(out)
+}
+
+// jsStringEnd returns the index of the quote closing the string that opens at open.
+func jsStringEnd(source string, open int) int {
+	quote := source[open]
+	for i := open + 1; i < len(source); i++ {
+		switch source[i] {
+		case '\\':
+			i++
+		case quote:
+			return i
+		}
+	}
+	return len(source) - 1
+}
+
+func isJSIdentifierStart(c byte) bool {
+	return c == '_' || c == '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func isJSIdentifierPart(c byte) bool {
+	return isJSIdentifierStart(c) || (c >= '0' && c <= '9')
 }
 
 // widenToAdjacentComma extends [start, end) over the comma that separates the entry from its

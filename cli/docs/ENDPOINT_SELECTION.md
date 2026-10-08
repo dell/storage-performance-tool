@@ -88,6 +88,7 @@ settings found in the archive. Archived settings are resolved field by field:
 - An archived timeout applies only to steps of that same mode, and only when its flag is not given.
 - If archived steps disagree on a field, replay stops and names the flag that settles it.
 - Archived hostnames and DNS servers are never reused.
+- In JavaScript archives, each endpoint declaration must be a literal object that states its mode. Variable references, expressions and partial overrides are rejected; commented-out configs are ignored.
 
 Replay validates the result against the local endpoints and applies it to every replayed step.
 
