@@ -7,6 +7,7 @@ import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.range.*;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.step.local.context.range.RangeReadRuntime;
 import com.dell.spt.base.storage.driver.range.RangeReadDriverSupport;
 import com.dell.spt.storage.driver.coop.range.RangeReadQueue;
@@ -24,6 +25,7 @@ import java.util.Objects;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * Dedicated range transport; the ordinary S3 driver and its per-operation route remain unchanged.
@@ -111,7 +113,40 @@ class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOperation<
 
 	@Override
 	protected boolean recoverQueuedOperation(RangeReadOperation<DataItem> op) {
-		return ranges.recover(op);
+		final var circulation = op.circulation();
+		final boolean unattempted = ranges.recover(op);
+		if (!unattempted && circulation.lifecycle().state() == OperationLifecycleState.TERMINAL) {
+			// Queue recovery must not run output; publish the settled result from an I/O thread.
+			try {
+				bootstrap.config().group().execute(() -> publishRecovered(op, circulation));
+			} catch (RejectedExecutionException stopped) {
+				// The I/O threads have stopped, so no transport callback can race this publication.
+				publishRecovered(op, circulation);
+			}
+		}
+		return unattempted;
+	}
+
+	/**
+	 * Recovers an operation fenced before its request handoff, on a dispatch or I/O thread. A
+	 * retry recovered this way settles its earlier attempt's retained failure, which is
+	 * published here; the publication claim is once-only.
+	 */
+	final boolean recover(RangeReadOperation<DataItem> op) {
+		final var circulation = op.circulation();
+		final boolean unattempted = ranges.recover(op);
+		if (!unattempted && circulation.lifecycle().state() == OperationLifecycleState.TERMINAL)
+			publishRecovered(op, circulation);
+		return unattempted;
+	}
+
+	private void publishRecovered(RangeReadOperation<DataItem> op, RangeReadCirculation circulation) {
+		try {
+			publishRetainedRangeResult(op, circulation);
+		} catch (RuntimeException failure) {
+			recordTerminalFailure(new IntegrityTerminalException(IntegrityTerminalException.Category.PUBLICATION,
+							"Recovered range result publication failed", failure));
+		}
 	}
 
 	@Override
@@ -171,7 +206,7 @@ class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOperation<
 			}
 			if (channel == null) {
 				concurrencyThrottle.release();
-				ranges.recover(op);
+				recover(op);
 				return true;
 			}
 			final var flight = new Flight(op, op.circulation(), attempt, channel);
@@ -231,7 +266,7 @@ class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOperation<
 				// Admission was fenced before transport. Preserve unattempted/retry settlement.
 				attempt.cancelBeforeHandoff();
 				finish(attempt, channel, false);
-				ranges.recover(flight.operation());
+				recover(flight.operation());
 			}
 		} catch (Exception failure) {
 			attempt.transportFailure(Operation.Status.FAIL_UNKNOWN);

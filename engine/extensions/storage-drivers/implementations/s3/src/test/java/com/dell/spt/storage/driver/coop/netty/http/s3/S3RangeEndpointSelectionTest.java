@@ -326,6 +326,78 @@ final class S3RangeEndpointSelectionTest {
 		assertTrue(snapshot.reconciled());
 	}
 
+	@Test
+	void drainPublishesTheRetainedFailureOfARetryStillInSetup() throws Exception {
+		final var port = listen(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0));
+		failRequest = n -> true;
+		for (final var httpFailure : List.of(false, true)) {
+			final var lookups = new AtomicInteger();
+			// The first attempt fails; the retry's lookup is never answered.
+			final var dns = dns(q -> lookups.incrementAndGet() > 1 ? null
+							: httpFailure ? Reply.answers(q.name(), "127.0.0.1") : Reply.code(DnsResponseCode.NXDOMAIN));
+			final var run = run(perRequestDns(dns, port, 30_000), FIXED, true);
+			final var pool = run.driver.connectionPool();
+			run.read("retry-in-setup");
+			awaitRetryInSetup(lookups, pool);
+
+			run.runtime.closeAdmission();
+			run.driver.closeAdmission();
+			run.runtime.closeRetries();
+			assertTrue(run.driver.recoverQueuedOperations().isEmpty());
+
+			assertRetainedFailurePublishedOnce(run, httpFailure);
+		}
+	}
+
+	@Test
+	void lateAnswerForARetryPublishesTheRetainedFailure() throws Exception {
+		final var port = listen(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0));
+		failRequest = n -> true;
+		final var lookups = new AtomicInteger();
+		// The retry's answer arrives after admission closed, so its fenced handoff settles it.
+		final var dns = dns(q -> lookups.incrementAndGet() > 1
+						? Reply.answers(q.name(), "127.0.0.1").delayed(400)
+						: Reply.answers(q.name(), "127.0.0.1"));
+		final var run = run(perRequestDns(dns, port, 5_000), FIXED, true);
+		run.read("late-retry");
+		awaitRetryInSetup(lookups, run.driver.connectionPool());
+
+		run.runtime.closeAdmission();
+		run.driver.closeAdmission();
+		run.runtime.closeRetries();
+
+		assertRetainedFailurePublishedOnce(run, true);
+		assertEquals(1, requests.size(), "the retry must not be sent");
+	}
+
+	private static void awaitRetryInSetup(final AtomicInteger lookups, final SelectingConnectionPool pool)
+					throws InterruptedException {
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		while ((lookups.get() < 2 || pool.pendingAcquisitionCount() == 0) && System.nanoTime() < deadline) {
+			Thread.sleep(10);
+		}
+		assertEquals(2, lookups.get());
+		assertEquals(1, pool.pendingAcquisitionCount());
+	}
+
+	/** One terminal outcome and one result, nothing left pending, and no delivery failure at close. */
+	private static void assertRetainedFailurePublishedOnce(final Run run, final boolean httpFailure) throws Exception {
+		final var result = run.outcome();
+		assertEquals(httpFailure ? Operation.Status.RESP_FAIL_SVC : Operation.Status.FAIL_IO, result.status());
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		while (run.runtime.hasPendingResults() && System.nanoTime() < deadline) {
+			Thread.sleep(10);
+		}
+		assertFalse(run.runtime.hasPendingResults());
+		run.close();
+		assertTrue(run.terminal.isEmpty(), "no second outcome");
+		assertTrue(run.results.isEmpty(), "no second result");
+		final var snapshot = run.runtime.snapshot();
+		assertEquals(1, snapshot.logical().failed());
+		assertEquals(httpFailure ? 1 : 0, snapshot.requestsSent());
+		assertTrue(snapshot.reconciled());
+	}
+
 	private static void awaitPendingAcquisition(final SelectingConnectionPool pool) throws InterruptedException {
 		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
 		while (pool.pendingAcquisitionCount() == 0 && System.nanoTime() < deadline) {
