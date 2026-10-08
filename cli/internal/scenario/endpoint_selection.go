@@ -179,14 +179,11 @@ func validatePerRequestDNS(sel EndpointSelection, endpoints []selectionEndpoint)
 }
 
 func validateDNSServer(server string) error {
-	host, port := server, ""
-	if i := strings.LastIndex(server, ":"); i >= 0 {
-		host, port = server[:i], server[i+1:]
-	}
+	host, port, hasPort := strings.Cut(server, ":")
 	if !isIPv4Literal(host) {
 		return fmt.Errorf("--dns-server must be an IPv4 address with an optional port, got %q", server)
 	}
-	if port != "" {
+	if hasPort {
 		if p, err := strconv.Atoi(port); err != nil || p < 1 || p > maxPort {
 			return fmt.Errorf("--dns-server has an invalid port: %q", server)
 		}

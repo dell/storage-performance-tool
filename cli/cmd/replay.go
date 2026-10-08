@@ -76,7 +76,8 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	testHosts, _ := cmd.Flags().GetString("test-hosts")
 	label, _ := cmd.Flags().GetString("label")
 	s3Driver, _ := cmd.Flags().GetString("s3-driver")
-	endpointSelection, err := endpointSelectionFromFlags(cmd)
+	// Replay merges these flags with archived settings; generation validates the effective result.
+	endpointSelection, err := readEndpointSelectionFlags(cmd)
 	if err != nil {
 		return err
 	}

@@ -25,16 +25,19 @@ func registerEndpointSelectionFlags(flags *pflag.FlagSet) {
 	flags.Duration(flagEndpointConnectTimeout, 0, "Round robin and per-request DNS: TCP connect deadline (default 30s)")
 }
 
-// endpointSelectionFromFlags reads the endpoint-selection flags. Auxiliary flags given with the
-// default mode are rejected even when they equal their defaults, because they would have no effect.
-func endpointSelectionFromFlags(cmd *cobra.Command) (scenario.EndpointSelection, error) {
+// readEndpointSelectionFlags reads the endpoint-selection flags as given. The mode is empty when
+// --endpoint-selection is not given, and durations are zero unless given, so callers can tell
+// explicit settings from defaults.
+func readEndpointSelectionFlags(cmd *cobra.Command) (scenario.EndpointSelection, error) {
 	flags := cmd.Flags()
 	if flags.Lookup(flagEndpointSelection) == nil {
 		return scenario.EndpointSelection{}, nil
 	}
 	var sel scenario.EndpointSelection
-	mode, _ := flags.GetString(flagEndpointSelection)
-	sel.Mode = strings.TrimSpace(mode)
+	if flags.Changed(flagEndpointSelection) {
+		mode, _ := flags.GetString(flagEndpointSelection)
+		sel.Mode = strings.TrimSpace(mode)
+	}
 	hostname, _ := flags.GetString(flagEndpointHostname)
 	sel.Hostname = strings.TrimSpace(hostname)
 	server, _ := flags.GetString(flagDNSServer)
@@ -56,12 +59,21 @@ func endpointSelectionFromFlags(cmd *cobra.Command) (scenario.EndpointSelection,
 		}
 		*duration.millis = millis
 	}
-	if !sel.Active() {
-		for _, flag := range endpointSelectionAuxFlags {
-			if flags.Changed(flag) {
-				return sel, fmt.Errorf("--%s requires --%s %s or %s", flag, flagEndpointSelection,
-					scenario.EndpointSelectionRoundRobin, scenario.EndpointSelectionPerRequestDNS)
-			}
+	return sel, nil
+}
+
+// endpointSelectionFromFlags reads the endpoint-selection flags for spt run. Auxiliary flags given
+// with the default mode are rejected even when they equal their defaults, because they would have
+// no effect. Replay instead merges the flags with archived settings and validates the result.
+func endpointSelectionFromFlags(cmd *cobra.Command) (scenario.EndpointSelection, error) {
+	sel, err := readEndpointSelectionFlags(cmd)
+	if err != nil || sel.Active() {
+		return sel, err
+	}
+	for _, flag := range endpointSelectionAuxFlags {
+		if cmd.Flags().Changed(flag) {
+			return sel, fmt.Errorf("--%s requires --%s %s or %s", flag, flagEndpointSelection,
+				scenario.EndpointSelectionRoundRobin, scenario.EndpointSelectionPerRequestDNS)
 		}
 	}
 	return sel, nil

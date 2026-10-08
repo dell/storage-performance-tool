@@ -351,6 +351,8 @@ final class S3EndpointSelectionRoundRobinTest {
 		assertEquals(Operation.Status.FAIL_IO, result.status());
 		assertNull(run.results().poll(500));
 		assertEquals(0, pool.openChannelCount());
+		assertEquals(0, pool.pendingAcquisitionCount());
+		assertEquals(0, run.driver().activeOpCount());
 		assertEquals(List.of(0), listenerSequence());
 	}
 

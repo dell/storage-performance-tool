@@ -241,6 +241,22 @@ class PerRequestDnsResolverTest {
 	}
 
 	@Test
+	void closeFailsOutstandingLookupsPromptly() throws Exception {
+		final var silent = server(q -> null);
+		final var resolver = new PerRequestDnsResolver(NAME, List.of(silent.address()), 30_000,
+						new DefaultThreadFactory("test-dns", true));
+		final var lookup = resolver.resolve();
+
+		final var started = System.nanoTime();
+		resolver.close();
+
+		assertTrue(lookup.awaitUninterruptibly(AWAIT_SECONDS, TimeUnit.SECONDS));
+		assertFalse(lookup.isSuccess());
+		assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < 5_000);
+		assertTrue(resolver.isTerminated());
+	}
+
+	@Test
 	void rejectsInvalidConstruction() {
 		final var threads = new DefaultThreadFactory("test-dns", true);
 		assertThrows(IllegalArgumentException.class, () -> new PerRequestDnsResolver(NAME, List.of(), 1, threads));

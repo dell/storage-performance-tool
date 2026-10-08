@@ -16,7 +16,10 @@ import io.netty.util.concurrent.GlobalEventExecutor;
 import io.netty.util.concurrent.Promise;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
@@ -37,6 +40,8 @@ public final class PerRequestDnsResolver implements AutoCloseable {
 	private final NioEventLoopGroup group;
 	private final EventLoop loop;
 	private final DnsNameResolver resolver;
+	private final Set<Promise<InetAddress>> outstanding = ConcurrentHashMap.newKeySet();
+	private volatile boolean closed;
 
 	public PerRequestDnsResolver(
 					final String hostname,
@@ -85,12 +90,17 @@ public final class PerRequestDnsResolver implements AutoCloseable {
 
 	/**
 	 * Starts a fresh lookup. The returned future completes with the first IPv4 answer, or fails with
-	 * a {@link DnsLookupException} no later than the total deadline.
+	 * a {@link DnsLookupException} no later than the total deadline, or when the resolver closes.
 	 */
 	public Future<InetAddress> resolve() {
+		if (closed) {
+			return GlobalEventExecutor.INSTANCE.newFailedFuture(new IllegalStateException("DNS resolver is closed"));
+		}
 		final Promise<InetAddress> result;
 		try {
 			result = loop.newPromise();
+			outstanding.add(result);
+			result.addListener(done -> outstanding.remove(result));
 			final var lookup = resolver.resolve(hostname);
 			final var deadline = loop.schedule(
 							() -> {
@@ -116,9 +126,16 @@ public final class PerRequestDnsResolver implements AutoCloseable {
 		return result;
 	}
 
-	/** Closes the resolver and waits, within a bound, for its event loop to terminate. */
+	/**
+	 * Fails every outstanding lookup, closes the resolver and waits, within a bound, for its event
+	 * loop to terminate. Lookup failures are delivered on that loop before it terminates.
+	 */
 	@Override
 	public void close() {
+		closed = true;
+		for (final var lookup : new ArrayList<>(outstanding)) {
+			lookup.tryFailure(new IllegalStateException("DNS resolver is closed"));
+		}
 		try {
 			resolver.close();
 		} finally {

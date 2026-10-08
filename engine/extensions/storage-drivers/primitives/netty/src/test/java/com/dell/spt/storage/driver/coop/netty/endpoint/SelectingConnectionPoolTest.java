@@ -1,6 +1,7 @@
 package com.dell.spt.storage.driver.coop.netty.endpoint;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -18,6 +19,8 @@ import java.net.Socket;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
+import io.netty.util.concurrent.ImmediateEventExecutor;
+import io.netty.util.concurrent.Promise;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -133,11 +136,83 @@ class SelectingConnectionPoolTest {
 	@Test
 	void bindingIsRequiredOnceBeforeUse() {
 		final var pool = new SelectingConnectionPool(bootstrap, new NoopHandler());
-		assertThrows(IllegalStateException.class, pool::acquire);
+		assertThrows(IllegalStateException.class, () -> pool.acquire((channel, failure) -> {}));
 
 		final var destinations = new RoundRobinDestinations(List.of(new InetSocketAddress("127.0.0.1", 9)));
 		pool.bind(destinations, true, 1, 1_000, 1_000, new EndpointSelectionCounters());
 		assertThrows(IllegalStateException.class, () -> pool.bind(destinations, true, 1, 1_000, 1_000, new EndpointSelectionCounters()));
+		pool.close();
+	}
+
+	@Test
+	void closeSettlesAnAcquisitionStillWaitingForItsSelectionExactlyOnce() throws Exception {
+		final Promise<InetSocketAddress> selection = ImmediateEventExecutor.INSTANCE.newPromise();
+		final var pool = new SelectingConnectionPool(bootstrap, new NoopHandler());
+		pool.bind(() -> selection, false, 0, 2_000, 2_000, new EndpointSelectionCounters());
+		final var outcomes = new CopyOnWriteArrayList<Throwable>();
+		final var threads = new CopyOnWriteArrayList<Thread>();
+		pool.acquire((channel, failure) -> {
+			outcomes.add(failure);
+			threads.add(Thread.currentThread());
+		});
+		assertEquals(1, pool.pendingAcquisitionCount());
+
+		pool.close();
+		// A selection that completes afterwards must not connect or report again.
+		selection.setSuccess(new InetSocketAddress("127.0.0.1", 9));
+
+		assertEquals(1, outcomes.size());
+		assertInstanceOf(ConnectException.class, outcomes.get(0));
+		assertSame(Thread.currentThread(), threads.get(0));
+		assertEquals(0, pool.pendingAcquisitionCount());
+		assertEquals(0, pool.openChannelCount());
+	}
+
+	@Test
+	void selectionCompletingAfterTheIoLoopTerminatedSettlesWithoutLeakingAChannel() throws Exception {
+		final var holding = holder();
+		final Promise<InetSocketAddress> selection = ImmediateEventExecutor.INSTANCE.newPromise();
+		final var pool = new SelectingConnectionPool(bootstrap, new NoopHandler());
+		pool.bind(() -> selection, false, 0, 2_000, 2_000, new EndpointSelectionCounters());
+		final var outcomes = new CopyOnWriteArrayList<Throwable>();
+		pool.acquire((channel, failure) -> outcomes.add(failure));
+		group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
+
+		selection.setSuccess(holding.address());
+		pool.close();
+
+		assertEquals(1, outcomes.size());
+		assertInstanceOf(ConnectException.class, outcomes.get(0));
+		assertEquals(0, pool.pendingAcquisitionCount());
+		assertEquals(0, pool.openChannelCount());
+		assertEquals(0, holding.accepted());
+	}
+
+	@Test
+	void unpooledHelperConnectionWaitsForTheServerToClose() throws Exception {
+		final var holding = holder();
+		final var pool = pool(List.of(holding.address()), false, 0);
+		final var channel = pool.connectUnpooled();
+
+		final var closing = System.nanoTime();
+		channel.close();
+
+		assertTrue(channel.isActive(), "the helper close must wait for the server first");
+		assertTrue(channel.closeFuture().await(5, TimeUnit.SECONDS));
+		final var elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - closing);
+		assertTrue(elapsed >= EndpointSelectionConstants.SERVER_CLOSE_GRACE_MILLIS - 50, "closed after " + elapsed);
+		pool.close();
+	}
+
+	@Test
+	void failureCloseIsNotDeferred() throws Exception {
+		final var holding = holder();
+		final var pool = pool(List.of(holding.address()), false, 0);
+		final var channel = pool.lease();
+
+		channel.close().syncUninterruptibly();
+
+		assertTrue(!channel.isActive());
 		pool.close();
 	}
 

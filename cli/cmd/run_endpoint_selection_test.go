@@ -136,6 +136,7 @@ func TestEndpointSelectionRejectsInvalidCombinations(t *testing.T) {
 		{"dns with endpoint hostname", append([]string{"--endpoints", "http://s3.example.com", "--endpoint-hostname", "s3.example.com"}, dns...), "applies only to --endpoint-selection round-robin", ""},
 		{"dns with hostname server", append([]string{"--endpoints", "http://s3.example.com", "--dns-server", "dns.example.com"}, dns...), "must be an IPv4 address", ""},
 		{"dns with bad server port", append([]string{"--endpoints", "http://s3.example.com", "--dns-server", "10.0.0.53:0"}, dns...), "invalid port", ""},
+		{"dns with empty server port", append([]string{"--endpoints", "http://s3.example.com", "--dns-server", "10.0.0.53:"}, dns...), "invalid port", ""},
 		{"fractional milliseconds", append([]string{"--endpoints", "http://s3.example.com", "--dns-timeout", "1500us"}, dns...), "whole number of milliseconds", ""},
 		{"zero duration", append([]string{"--endpoints", "http://s3.example.com", "--endpoint-connect-timeout", "0s"}, dns...), "must be positive", ""},
 		{"overflowing duration", append([]string{"--endpoints", "http://s3.example.com", "--dns-timeout", "600h"}, dns...), "at most", ""},

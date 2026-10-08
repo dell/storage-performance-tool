@@ -66,7 +66,9 @@ func Generate(ctx context.Context, opts Options) (*Generated, error) {
 	if len(opts.Endpoints) == 1 {
 		params.Endpoint = opts.Endpoints[0]
 	}
-	params.EndpointSelection = opts.EndpointSelection
+	selection, selectionDiagnostics := mergeEndpointSelection(opts.EndpointSelection, generated.ArchivedEndpointSelection)
+	generated.Diagnostics = append(generated.Diagnostics, selectionDiagnostics...)
+	params.EndpointSelection = selection
 	if err := scenario.ValidateEndpointSelection(params.EndpointSelection, scenario.EndpointSelectionTarget{
 		RawEndpoints: opts.Endpoints,
 		S3Driver:     opts.S3Driver,

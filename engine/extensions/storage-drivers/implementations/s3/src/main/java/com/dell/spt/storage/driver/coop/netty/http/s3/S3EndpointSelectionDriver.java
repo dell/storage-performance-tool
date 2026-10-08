@@ -31,7 +31,6 @@ import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaderValues;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.ssl.SslHandler;
-import io.netty.util.concurrent.Future;
 import java.io.IOException;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
@@ -206,14 +205,12 @@ final class S3EndpointSelectionDriver<I extends Item, O extends Operation<I>> ex
 			concurrencyThrottle.release();
 			return false;
 		}
-		final Future<Channel> acquisition;
 		try {
-			acquisition = selectingPool.acquire();
+			// The pool reports exactly once, even when the event loops terminate first (close settles it).
+			selectingPool.acquire((channel, failure) -> onAcquired(op, channel, failure));
 		} catch (final RuntimeException e) {
 			failSetup(op, e);
-			return true;
 		}
-		acquisition.addListener((Future<Channel> acquired) -> onAcquired(op, acquired));
 		return true;
 	}
 
@@ -232,12 +229,11 @@ final class S3EndpointSelectionDriver<I extends Item, O extends Operation<I>> ex
 						|| (op instanceof CompositeDataOperation && OpType.READ.equals(op.type()));
 	}
 
-	private void onAcquired(final O op, final Future<Channel> acquired) {
-		if (!acquired.isSuccess()) {
-			failSetup(op, acquired.cause());
+	private void onAcquired(final O op, final Channel channel, final Throwable failure) {
+		if (failure != null) {
+			failSetup(op, failure);
 			return;
 		}
-		final var channel = acquired.getNow();
 		try {
 			channel.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
 			channel.attr(ATTR_KEY_OPERATION).set(op);

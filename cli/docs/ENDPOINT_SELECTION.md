@@ -82,7 +82,10 @@ endpoint selection, and are rejected:
 - partial-object reads (`--range-size`);
 - IPv6 addresses.
 
-The flags are also accepted by `spt replay`.
+The flags are also accepted by `spt replay`, where they take precedence over endpoint-selection
+settings found in the archive. An archived mode and its timeouts apply only when the corresponding flags are
+not given, archived hostnames and DNS servers are never reused, and replay validates the combined settings
+against the local endpoints.
 
 The engine settings are `storage.net.endpoint.selection`, `.hostname`,
 `.dns.server`, `.dns.timeoutMilliSec` and `.connect.timeoutMilliSec`. See the

@@ -11,7 +11,6 @@ import io.netty.channel.EventLoop;
 import io.netty.channel.pool.ChannelPoolHandler;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
-import io.netty.util.concurrent.Promise;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
@@ -19,18 +18,25 @@ import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
-import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Connection source for opt-in endpoint selection. Every acquisition takes a new destination from
  * its {@link DestinationSource}. A pooled source reuses an idle connection to exactly that
  * destination, otherwise a connection opens asynchronously; waiting never takes another selection
- * and never falls back to another destination. A non-pooled source closes every connection on
- * release.
+ * and never falls back to another destination. A non-pooled source never reuses a connection and
+ * lets the server close it first after a completed exchange.
+ *
+ * <p>Each acquisition reports its outcome exactly once through an {@link Acquisition} callback that
+ * does not depend on any event loop staying alive: {@link #close()} settles every outstanding
+ * acquisition on the closing thread, even when the I/O or resolver loops have already terminated.
  *
  * <p>The pool is created during driver construction and bound to its settings once the driver's
  * own fields exist. The synchronous {@link NonBlockingConnPool} methods serve inherited release
@@ -39,11 +45,18 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class SelectingConnectionPool implements NonBlockingConnPool {
 
+	/** Receives the outcome of one acquisition exactly once: an active channel, or the failure. */
+	@FunctionalInterface
+	public interface Acquisition {
+		void complete(Channel channel, Throwable failure);
+	}
+
 	private static final AttributeKey<InetSocketAddress> ATTR_KEY_DESTINATION = AttributeKey.valueOf("endpointSelectionDestination");
 
 	private final Bootstrap bootstrap;
 	private final ChannelPoolHandler channelHandler;
 	private final Set<Channel> openChannels = ConcurrentHashMap.newKeySet();
+	private final Set<Pending> pending = ConcurrentHashMap.newKeySet();
 	private final Map<InetSocketAddress, Deque<Channel>> idleChannels = new ConcurrentHashMap<>();
 	private final AtomicInteger idleCount = new AtomicInteger();
 	private volatile Binding binding;
@@ -51,6 +64,30 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 
 	private record Binding(DestinationSource source, boolean pooled, int idleLimit, int connectTimeoutMillis,
 					long setupTimeoutMillis, EndpointSelectionCounters counters) {}
+
+	/** One outstanding acquisition; it settles once, on whichever thread finishes it first. */
+	private final class Pending {
+
+		private final Acquisition callback;
+		private final AtomicBoolean settled = new AtomicBoolean();
+
+		private Pending(final Acquisition callback) {
+			this.callback = callback;
+		}
+
+		boolean isSettled() {
+			return settled.get();
+		}
+
+		boolean settle(final Channel channel, final Throwable failure) {
+			if (!settled.compareAndSet(false, true)) {
+				return false;
+			}
+			pending.remove(this);
+			callback.complete(channel, failure);
+			return true;
+		}
+	}
 
 	public SelectingConnectionPool(final Bootstrap bootstrap, final ChannelPoolHandler channelHandler) {
 		this.bootstrap = bootstrap;
@@ -60,7 +97,7 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 	/**
 	 * Binds the destination source once.
 	 *
-	 * @param pooled reuse idle connections per destination; otherwise close each connection on release
+	 * @param pooled reuse idle connections per destination; otherwise every connection serves one request
 	 * @param idleLimit maximum idle connections kept across all destinations
 	 * @param setupTimeoutMillis bound for a synchronous {@link #lease()}, covering selection and connect
 	 */
@@ -73,20 +110,30 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 	}
 
 	/**
-	 * Selects the next destination and completes with an active channel to it, or fails with the
-	 * selection or connect failure. Completion happens on the selected channel's event loop.
+	 * Selects the next destination and reports an active channel to it, or the selection or connect
+	 * failure, to {@code callback} exactly once. A reused connection is reported on the calling
+	 * thread; a new one on its event loop; a failure on the thread that observed it, which is the
+	 * closing thread for acquisitions still outstanding at {@link #close()}.
 	 */
-	public Future<Channel> acquire() {
-		return acquire(true);
+	public void acquire(final Acquisition callback) {
+		acquire(true, callback);
 	}
 
-	private Future<Channel> acquire(final boolean allowReuse) {
+	private void acquire(final boolean allowReuse, final Acquisition callback) {
 		final var bound = boundOrFail();
-		final EventLoop loop = bootstrap.config().group().next();
+		final var attempt = new Pending(callback);
+		pending.add(attempt);
 		if (closed) {
-			return loop.newFailedFuture(new ConnectException("Endpoint selection pool is closed"));
+			attempt.settle(null, closedFailure());
+			return;
 		}
-		final var selection = bound.source().next();
+		final Future<InetSocketAddress> selection;
+		try {
+			selection = bound.source().next();
+		} catch (final RuntimeException e) {
+			attempt.settle(null, e);
+			return;
+		}
 		// Count each selection exactly once, whether it is already complete or completes later.
 		final var countedNow = selection.isSuccess();
 		if (countedNow) {
@@ -96,28 +143,31 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 			final var idle = pollActiveIdle(selection.getNow());
 			if (idle != null) {
 				bound.counters().connected(true);
-				// Completing on the channel's own loop lets the caller send without another hand-off.
-				return idle.eventLoop().newSucceededFuture(idle);
+				if (!attempt.settle(idle, null)) {
+					release(idle);
+				}
+				return;
 			}
 		}
-		final Promise<Channel> result = loop.newPromise();
 		selection.addListener((Future<InetSocketAddress> selected) -> {
-			if (selected.isSuccess()) {
-				if (!countedNow) {
-					bound.counters().selected(selected.getNow());
-				}
-				connect(bound, loop, selected.getNow(), result);
-			} else {
-				result.tryFailure(selected.cause());
+			if (attempt.isSettled()) {
+				return;
 			}
+			if (!selected.isSuccess()) {
+				attempt.settle(null, selected.cause());
+				return;
+			}
+			if (!countedNow) {
+				bound.counters().selected(selected.getNow());
+			}
+			connect(bound, selected.getNow(), attempt);
 		});
-		return result;
 	}
 
-	private void connect(final Binding bound, final EventLoop loop, final InetSocketAddress destination,
-					final Promise<Channel> result) {
-		if (closed) {
-			result.tryFailure(new ConnectException("Endpoint selection pool is closed"));
+	private void connect(final Binding bound, final InetSocketAddress destination, final Pending attempt) {
+		final EventLoop loop = bootstrap.config().group().next();
+		if (closed || loop.isShuttingDown()) {
+			attempt.settle(null, closedFailure());
 			return;
 		}
 		final var connecting = bootstrap.clone(loop)
@@ -125,6 +175,9 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 							@Override
 							protected void initChannel(final Channel channel) throws Exception {
 								channelHandler.channelCreated(channel);
+								if (!bound.pooled()) {
+									channel.pipeline().addFirst(new ServerCloseGraceHandler());
+								}
 							}
 						})
 						.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, bound.connectTimeoutMillis());
@@ -141,28 +194,38 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 			openChannels.remove(channel);
 			bound.counters().closed();
 		});
+		// If the loop terminates before this listener runs, close() settles the attempt instead.
 		connect.addListener(done -> {
-			if (done.isSuccess()) {
-				bound.counters().connected(false);
-			}
 			if (!done.isSuccess()) {
 				bound.counters().connectFailed();
-				result.tryFailure(done.cause());
-			} else if (closed || !result.trySuccess(channel)) {
+				attempt.settle(null, done.cause());
+				return;
+			}
+			bound.counters().connected(false);
+			if (closed) {
+				attempt.settle(null, closedFailure());
 				final var unusedClose = channel.close();
-				result.tryFailure(new ConnectException("Endpoint selection pool is closed"));
+			} else if (!attempt.settle(channel, null)) {
+				final var unusedClose = channel.close();
 			}
 		});
 	}
 
-	/** Selects a destination and opens a new connection that the caller closes after use. */
+	/**
+	 * Selects a destination and opens a new connection that the caller closes after one exchange. A
+	 * per-request connection waits for the server's close, like a released workload connection.
+	 */
 	public Channel connectUnpooled() throws ConnectException {
-		return await(acquire(false));
+		final var channel = await(false);
+		if (!boundOrFail().pooled()) {
+			channel.attr(ServerCloseGraceHandler.AWAIT_SERVER_CLOSE).set(Boolean.TRUE);
+		}
+		return channel;
 	}
 
 	@Override
 	public Channel lease() throws ConnectException {
-		return await(acquire(true));
+		return await(true);
 	}
 
 	@Override
@@ -173,19 +236,32 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 		return count;
 	}
 
-	private Channel await(final Future<Channel> acquisition) throws ConnectException {
+	private Channel await(final boolean allowReuse) throws ConnectException {
 		final var bound = boundOrFail();
-		if (!acquisition.awaitUninterruptibly(bound.setupTimeoutMillis(), TimeUnit.MILLISECONDS)) {
-			acquisition.cancel(false);
+		final var result = new CompletableFuture<Channel>();
+		acquire(allowReuse, (channel, failure) -> {
+			if (failure != null) {
+				result.completeExceptionally(failure);
+			} else if (!result.complete(channel)) {
+				// The caller gave up waiting; nobody owns this connection.
+				final var unusedClose = channel.close();
+			}
+		});
+		try {
+			return result.get(bound.setupTimeoutMillis(), TimeUnit.MILLISECONDS);
+		} catch (final TimeoutException e) {
+			result.cancel(false);
 			throw new ConnectException("Endpoint selection did not produce a connection within "
 							+ bound.setupTimeoutMillis() + " ms");
-		}
-		if (!acquisition.isSuccess()) {
-			final var failure = new ConnectException("Endpoint selection failed: " + acquisition.cause());
-			failure.initCause(acquisition.cause());
+		} catch (final ExecutionException e) {
+			final var failure = new ConnectException("Endpoint selection failed: " + e.getCause());
+			failure.initCause(e.getCause());
 			throw failure;
+		} catch (final InterruptedException e) {
+			result.cancel(false);
+			Thread.currentThread().interrupt();
+			throw new ConnectException("Interrupted while waiting for an endpoint selection connection");
 		}
-		return acquisition.getNow();
 	}
 
 	@Override
@@ -193,7 +269,8 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 		final var bound = binding;
 		final var destination = channel.attr(ATTR_KEY_DESTINATION).get();
 		if (bound != null && !bound.pooled() && !closed && channel.isActive()) {
-			closeAfterServerGrace(channel);
+			channel.attr(ServerCloseGraceHandler.AWAIT_SERVER_CLOSE).set(Boolean.TRUE);
+			final var unusedClose = channel.close();
 			return;
 		}
 		if (bound == null || !bound.pooled() || closed || destination == null || !channel.isActive()) {
@@ -211,16 +288,6 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 		}
 	}
 
-	private static void closeAfterServerGrace(final Channel channel) {
-		try {
-			channel.eventLoop().schedule(() -> {
-				final var unusedClose = channel.close();
-			}, EndpointSelectionConstants.SERVER_CLOSE_GRACE_MILLIS, TimeUnit.MILLISECONDS);
-		} catch (final RejectedExecutionException e) {
-			final var unusedClose = channel.close();
-		}
-	}
-
 	@Override
 	public void release(final List<Channel> channels) {
 		channels.forEach(this::release);
@@ -230,14 +297,23 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 	@Override
 	public void preConnect(final int count) {}
 
-	/** Closes every connection and the destination source. Idempotent. */
+	/**
+	 * Settles every outstanding acquisition as failed, closes every connection at once and closes
+	 * the destination source. Idempotent; safe after the event loops have terminated.
+	 */
 	@Override
 	public void close() {
 		closed = true;
+		for (final var attempt : new ArrayList<>(pending)) {
+			attempt.settle(null, closedFailure());
+		}
 		closeIdle();
 		for (final var channel : new ArrayList<>(openChannels)) {
+			channel.attr(ServerCloseGraceHandler.AWAIT_SERVER_CLOSE).set(Boolean.FALSE);
 			final var unusedClose = channel.close();
 		}
+		// A terminated loop cannot run close listeners; nothing remains in use after close.
+		openChannels.clear();
 		final var bound = binding;
 		if (bound != null) {
 			bound.source().close();
@@ -251,6 +327,11 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 
 	public int idleChannelCount() {
 		return idleCount.get();
+	}
+
+	/** Acquisitions that have not reported an outcome yet. */
+	public int pendingAcquisitionCount() {
+		return pending.size();
 	}
 
 	private Channel pollActiveIdle(final InetSocketAddress destination) {
@@ -277,6 +358,10 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 				final var unusedClose = channel.close();
 			}
 		}
+	}
+
+	private static ConnectException closedFailure() {
+		return new ConnectException("Endpoint selection pool is closed");
 	}
 
 	private Binding boundOrFail() {

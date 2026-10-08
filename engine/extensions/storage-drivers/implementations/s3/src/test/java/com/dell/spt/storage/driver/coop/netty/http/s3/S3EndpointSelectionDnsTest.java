@@ -59,6 +59,7 @@ final class S3EndpointSelectionDnsTest {
 	private final List<Captured> requests = new CopyOnWriteArrayList<>();
 	private final List<AutoCloseable> resources = new ArrayList<>();
 	private int port;
+	private int dnsTimeoutMillis = 500;
 
 	@TempDir
 	Path dir;
@@ -183,24 +184,46 @@ final class S3EndpointSelectionDnsTest {
 	}
 
 	@Test
-	void stopDuringPendingLookupFailsTheOperationOnce() throws Exception {
+	void stopWhileTheLookupAnswerIsDelayedReleasesEverything() throws Exception {
 		listeners();
 		final var answered = new AtomicInteger();
+		// The bucket check is answered at once; the operation's answer arrives after the driver stopped.
+		final var dns = dns(q -> answered.getAndIncrement() == 0
+						? Reply.answers(q.name(), "127.0.0.1")
+						: Reply.answers(q.name(), "127.0.0.2").delayed(800));
+		assertStopReleasesEverything(driver(dns, 1), 2_000);
+	}
+
+	@Test
+	void stopWhileTheLookupIsUnansweredReleasesEverything() throws Exception {
+		listeners();
+		dnsTimeoutMillis = 30_000;
+		final var answered = new AtomicInteger();
 		final var dns = dns(q -> answered.getAndIncrement() == 0 ? Reply.answers(q.name(), "127.0.0.1") : null);
-		final var run = driver(dns, 1);
+		assertStopReleasesEverything(driver(dns, 1), 0);
+	}
+
+	/** Stops the driver with one operation in setup; nothing may stay held or be published twice. */
+	private void assertStopReleasesEverything(final Run run, final long settleMillis) throws Exception {
 		assertTrue(run.driver().put(dataOp(OpType.CREATE, "pending")));
-		Thread.sleep(100);
+		Thread.sleep(150);
+		final var pool = run.driver().connectionPool();
+		assertEquals(1, pool.pendingAcquisitionCount());
 
 		final var started = System.nanoTime();
 		run.driver().close();
+		Thread.sleep(settleMillis);
 
 		assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < 10_000);
-		final var result = run.results().poll(1_500);
+		final var result = run.results().poll(500);
 		if (result != null) {
 			assertEquals(Operation.Status.FAIL_IO, result.status());
 		}
 		assertNull(run.results().poll(500));
-		assertEquals(0, run.driver().connectionPool().openChannelCount());
+		assertEquals(0, run.driver().activeOpCount(), "the setup's permit was not released");
+		assertEquals(0, pool.pendingAcquisitionCount());
+		assertEquals(0, pool.openChannelCount());
+		assertEquals(List.of("HEAD"), requests.stream().map(Captured::method).toList());
 	}
 
 	@Test
@@ -253,7 +276,7 @@ final class S3EndpointSelectionDnsTest {
 		root.val("storage-net-timeoutMilliSec", 5_000);
 		root.val("storage-net-node-port", port == 0 ? 9020 : port);
 		root.val("storage-net-endpoint-selection", "per-request-dns");
-		root.val("storage-net-endpoint-dns-timeoutMilliSec", 500);
+		root.val("storage-net-endpoint-dns-timeoutMilliSec", dnsTimeoutMillis);
 		root.val("storage-net-endpoint-connect-timeoutMilliSec", 1_000);
 		if (dns != null) {
 			root.val("storage-net-endpoint-dns-server", "127.0.0.1:" + dns.address().getPort());

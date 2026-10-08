@@ -170,12 +170,16 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 
 	loadStepNumber := 0
 	waitNumber := 0
+	archived := &archivedSelections{}
 	for i, step := range legacySteps {
 		stepType := strings.ToLower(strings.TrimSpace(step.Type))
 		switch stepType {
 		case legacyStepTypeLoad, legacyStepTypePrecondition:
 			loadStepNumber++
 			step.Config = mergeConfig(legacy.Config, step.Config)
+			if selection, ok := archivedEndpointSelectionFromConfig(step.Config, effectiveVars); ok {
+				archived.add(selection)
+			}
 			converted, err := convertLoadStep(step, i, loadStepNumber, label, baseTS, bucket, opts, effectiveVars, archiveToStepID, itemVars, &itemVarOrder)
 			if err != nil {
 				diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: err.Error()})
@@ -235,6 +239,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	if len(stepsOut) == 0 {
 		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "scenario contains no load steps"})
 	}
+	diagnostics = append(diagnostics, archived.diagnostics(opts)...)
 	pathRewrites = uniquePathRewrites(pathRewrites)
 	diagnostics = normalizeDiagnostics(diagnostics)
 	if hasErrors(diagnostics) {
@@ -275,6 +280,8 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 		PathRewrites:    pathRewrites,
 		CommandOps:      commandOps,
 		EffectiveBucket: bucket,
+
+		ArchivedEndpointSelection: archived.selection,
 	}, nil
 }
 
@@ -413,17 +420,6 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	if pqcMode := resolveString(getPath(step.Config, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "pqcMode"), vars); pqcMode != "" {
 		setPath(config, pqcMode, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "pqcMode")
 	}
-	// Endpoint selection mode and timeouts carry over; hostname and DNS server are environment-specific
-	// and come from the replay flags, like the endpoints themselves.
-	if selection := resolveString(getPath(step.Config, legacyKeyStorage, legacyKeyNet, legacyKeyEndpoint, "selection"), vars); selection != "" {
-		setPath(config, selection, legacyKeyStorage, legacyKeyNet, legacyKeyEndpoint, "selection")
-	}
-	for _, section := range []string{"dns", "connect"} {
-		if timeout := intValue(getPath(step.Config, legacyKeyStorage, legacyKeyNet, legacyKeyEndpoint, section, "timeoutMilliSec"), vars); timeout > 0 {
-			setPath(config, timeout, legacyKeyStorage, legacyKeyNet, legacyKeyEndpoint, section, "timeoutMilliSec")
-		}
-	}
-
 	var rewrites []PathRewrite
 	if rawOutput := itemPathString(getPath(step.Config, "item", legacyKeyOutput, "file"), vars); rawOutput != "" {
 		item := itemFileVariable(rawOutput, archiveToStepID, itemVars, itemVarOrder)
