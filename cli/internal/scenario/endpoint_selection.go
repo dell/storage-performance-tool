@@ -68,6 +68,18 @@ func DurationMillis(flag string, d time.Duration) (int, error) {
 // ValidateEndpointSelection checks the settings against the endpoints and workload. Errors name
 // the CLI flags. The engine repeats equivalent checks for direct engine configuration.
 func ValidateEndpointSelection(sel EndpointSelection, target EndpointSelectionTarget) error {
+	// Timeouts can come from archived configs as well as flags, so their bounds are checked here too.
+	for _, timeout := range []struct {
+		name   string
+		millis int
+	}{
+		{"--dns-timeout (storage.net.endpoint.dns.timeoutMilliSec)", sel.DNSTimeoutMillis},
+		{"--endpoint-connect-timeout (storage.net.endpoint.connect.timeoutMilliSec)", sel.ConnectTimeoutMillis},
+	} {
+		if timeout.millis < 0 || timeout.millis > math.MaxInt32 {
+			return fmt.Errorf("%s must be between 1 and %d ms, got %d", timeout.name, math.MaxInt32, timeout.millis)
+		}
+	}
 	switch sel.Mode {
 	case "", EndpointSelectionDefault:
 		if sel.Hostname != "" || sel.DNSServer != "" || sel.DNSTimeoutMillis != 0 || sel.ConnectTimeoutMillis != 0 {

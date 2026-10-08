@@ -6,8 +6,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
 type jsReplacement struct {
@@ -31,25 +29,20 @@ var (
 	jsPathKeyRe               = regexp.MustCompile(`"path"\s*:`)
 	jsIdentifierRe            = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	jsParentConfigAllowedKeys = map[string]struct{}{
-		"storage":         {},
-		legacyKeyNet:      {},
-		"node":            {},
-		"port":            {},
-		"driver":          {},
-		"type":            {},
-		legacyKeySSL:      {},
-		legacyKeyEnabled:  {},
-		"ciphers":         {},
-		"protocols":       {},
-		"provider":        {},
-		"jsseProvider":    {},
-		"namedGroups":     {},
-		"pqcMode":         {},
-		legacyKeyEndpoint: {},
-		"selection":       {},
-		"dns":             {},
-		"connect":         {},
-		"timeoutMilliSec": {},
+		"storage":        {},
+		legacyKeyNet:     {},
+		"node":           {},
+		"port":           {},
+		"driver":         {},
+		"type":           {},
+		legacyKeySSL:     {},
+		legacyKeyEnabled: {},
+		"ciphers":        {},
+		"protocols":      {},
+		"provider":       {},
+		"jsseProvider":   {},
+		"namedGroups":    {},
+		"pqcMode":        {},
 	}
 	jsParentSSLAllowedKeys = map[string]struct{}{
 		legacyKeyEnabled: {},
@@ -114,11 +107,13 @@ func ConvertJS(raw []byte, runScript RunScript, opts Options) (*Generated, error
 	pathRewrites = append(pathRewrites, scenarioPathRewrites...)
 	diagnostics = append(diagnostics, pathDiagnostics...)
 
+	archived := &ArchivedEndpointSelection{}
+	var endpointDiagnostics []Diagnostic
+	body, endpointDiagnostics = extractJSEndpointSelections(body, effectiveVars, archived)
+	diagnostics = append(diagnostics, endpointDiagnostics...)
 	var parentDiagnostics []Diagnostic
-	archived := &archivedSelections{}
-	body, parentDiagnostics = rewriteJSParentConfigs(body, opts, bucket, effectiveVars, archived)
+	body, parentDiagnostics = rewriteJSParentConfigs(body, opts, bucket, effectiveVars)
 	diagnostics = append(diagnostics, parentDiagnostics...)
-	diagnostics = append(diagnostics, archived.diagnostics(opts)...)
 	if bucket != "" {
 		body = rewriteJSOutputPaths(body, bucket)
 	}
@@ -150,7 +145,7 @@ func ConvertJS(raw []byte, runScript RunScript, opts Options) (*Generated, error
 		CommandOps:      commandOps,
 		EffectiveBucket: bucket,
 
-		ArchivedEndpointSelection: archived.selection,
+		ArchivedEndpointSelection: *archived,
 	}, nil
 }
 
@@ -491,7 +486,7 @@ func rewriteJSMongoosePaths(source string, archiveToStepID map[string]string) (s
 	return out, rewrites, diagnostics
 }
 
-func rewriteJSParentConfigs(source string, opts Options, bucket string, vars map[string]string, archived *archivedSelections) (string, []Diagnostic) {
+func rewriteJSParentConfigs(source string, opts Options, bucket string, vars map[string]string) (string, []Diagnostic) {
 	var diagnostics []Diagnostic
 	var replacements []jsReplacement
 	matches := jsParentConfigRe.FindAllStringSubmatchIndex(source, -1)
@@ -508,16 +503,6 @@ func rewriteJSParentConfigs(source string, opts Options, bucket string, vars map
 		}
 		configText := source[open : closeIdx+1]
 		sslConfig, unsupportedSSLKeys := extractJSParentSSLConfig(configText, vars)
-		selection, archivedSelection, environmentSpecific := extractJSParentEndpointSelection(configText, vars)
-		if archivedSelection {
-			archived.add(selection)
-		}
-		if len(environmentSpecific) > 0 {
-			diagnostics = append(diagnostics, Diagnostic{
-				Severity: severityWarning,
-				Message:  fmt.Sprintf("%s contained environment-specific endpoint selection setting(s) %s; replay uses --endpoint-hostname and --dns-server instead", name, strings.Join(environmentSpecific, ", ")),
-			})
-		}
 		if enabled, ok := sslConfig[legacyKeyEnabled].(bool); ok {
 			if warning, mismatch := archivedSSLMismatchWarning(enabled, opts.Endpoints, name); mismatch {
 				diagnostics = append(diagnostics, Diagnostic{Severity: severityWarning, Message: warning})
@@ -595,37 +580,6 @@ func sanitizedJSParentConfig(name string, opts Options, bucket string, sslConfig
 };`, name, jsQuote(jsBucketPath(bucket)), jsQuote(s3DriverType(opts.S3Driver)))
 	}
 	return fmt.Sprintf("var %s = %s;", name, configJS)
-}
-
-// extractJSParentEndpointSelection reads the archived endpoint-selection mode and timeouts from a
-// parent config. The subtree itself is never written back: the effective settings go into the
-// generated defaults. Hostname and DNS server are reported as environment-specific.
-func extractJSParentEndpointSelection(configText string, vars map[string]string) (scenario.EndpointSelection, bool, []string) {
-	endpointText := jsObjectForKey(jsObjectForKey(jsObjectForKey(configText, "storage"), legacyKeyNet), legacyKeyEndpoint)
-	if endpointText == "" {
-		return scenario.EndpointSelection{}, false, nil
-	}
-	dnsText := jsObjectForKey(endpointText, "dns")
-	connectText := jsObjectForKey(endpointText, "connect")
-	var environmentSpecific []string
-	if jsFieldValue(endpointText, "hostname", vars) != nil {
-		environmentSpecific = append(environmentSpecific, "storage.net.endpoint.hostname")
-	}
-	if dnsText != "" && jsFieldValue(dnsText, "server", vars) != nil {
-		environmentSpecific = append(environmentSpecific, "storage.net.endpoint.dns.server")
-	}
-	mode := resolveString(jsFieldValue(endpointText, "selection", vars), vars)
-	if mode == "" || mode == scenario.EndpointSelectionDefault {
-		return scenario.EndpointSelection{}, false, environmentSpecific
-	}
-	selection := scenario.EndpointSelection{Mode: mode}
-	if dnsText != "" {
-		selection.DNSTimeoutMillis = intValue(jsFieldValue(dnsText, "timeoutMilliSec", vars), vars)
-	}
-	if connectText != "" {
-		selection.ConnectTimeoutMillis = intValue(jsFieldValue(connectText, "timeoutMilliSec", vars), vars)
-	}
-	return selection, true, environmentSpecific
 }
 
 func extractJSParentSSLConfig(configText string, vars map[string]string) (map[string]any, []string) {

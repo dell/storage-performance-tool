@@ -56,6 +56,22 @@ class SelectingConnectionPoolTest {
 	}
 
 	@Test
+	void reusedConnectionIsReportedOnItsOwnEventLoop() throws Exception {
+		final var a = holder();
+		final var pool = pool(List.of(a.address()), true, 4);
+		final var first = pool.lease();
+		pool.release(first);
+		final var reported = new java.util.concurrent.CompletableFuture<Boolean>();
+
+		// Requests are prepared in the callback; it must never run on the thread that asked.
+		pool.acquire((channel, failure) -> reported.complete(
+						failure == null && channel == first && channel.eventLoop().inEventLoop()));
+
+		assertTrue(reported.get(5, TimeUnit.SECONDS));
+		pool.close();
+	}
+
+	@Test
 	void pooledReleaseClosesConnectionsBeyondTheIdleLimit() throws Exception {
 		final var a = holder();
 		final var b = holder();

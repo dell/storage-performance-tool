@@ -97,8 +97,8 @@ type Generated struct {
 	PathRewrites    []PathRewrite
 	CommandOps      []CommandOperation
 	EffectiveBucket string
-	// ArchivedEndpointSelection holds the endpoint-selection mode and timeouts the archive declares.
-	ArchivedEndpointSelection *scenario.EndpointSelection
+	// ArchivedEndpointSelection lists the endpoint-selection declarations the archive contains.
+	ArchivedEndpointSelection ArchivedEndpointSelection
 }
 
 // OutputPaths records where generated artifacts were written.

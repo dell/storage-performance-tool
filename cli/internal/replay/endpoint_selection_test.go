@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -124,6 +125,29 @@ func generateFromArchive(t *testing.T, scenarioJSON string, endpoints []string, 
 	})
 }
 
+var archivedDNSDeclaration = scenario.EndpointSelection{
+	Mode: scenario.EndpointSelectionPerRequestDNS, DNSTimeoutMillis: 1500, ConnectTimeoutMillis: 2500,
+}
+
+// scenarioWithEndpoints builds a legacy JSON scenario with an optional top-level endpoint object
+// and one load step per stepEndpoints entry ("" means the step declares nothing).
+func scenarioWithEndpoints(parentEndpoint string, stepEndpoints ...string) string {
+	var steps []string
+	for i, endpoint := range stepEndpoints {
+		storage := ""
+		if endpoint != "" {
+			storage = fmt.Sprintf(`"storage": {"net": {"endpoint": %s}}, `, endpoint)
+		}
+		steps = append(steps, fmt.Sprintf(`{"type": "load", "config": {%s"test": {"step": {"id": "STEP-%d", "limit": {"count": 1}}}}}`, storage, i))
+	}
+	parent := ""
+	if parentEndpoint != "" {
+		parent = fmt.Sprintf(`, "net": {"endpoint": %s}`, parentEndpoint)
+	}
+	return fmt.Sprintf(`{"type": "sequential", "config": {"storage": {"driver": {"type": "s3"}%s}}, "steps": [%s]}`,
+		parent, strings.Join(steps, ", "))
+}
+
 func TestConvertJSONRecordsArchivedEndpointSelectionWithoutWritingSteps(t *testing.T) {
 	got, err := ConvertJSON([]byte(archivedDNSScenario), RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}, Options{
 		Endpoints:     []string{"https://s3.example.test:9021"},
@@ -132,9 +156,8 @@ func TestConvertJSONRecordsArchivedEndpointSelectionWithoutWritingSteps(t *testi
 	if err != nil {
 		t.Fatalf("ConvertJSON() error = %v", err)
 	}
-	want := scenario.EndpointSelection{Mode: scenario.EndpointSelectionPerRequestDNS, DNSTimeoutMillis: 1500, ConnectTimeoutMillis: 2500}
-	if got.ArchivedEndpointSelection == nil || *got.ArchivedEndpointSelection != want {
-		t.Fatalf("ArchivedEndpointSelection = %+v, want %+v", got.ArchivedEndpointSelection, want)
+	if want := []scenario.EndpointSelection{archivedDNSDeclaration}; !reflect.DeepEqual(got.ArchivedEndpointSelection.Declarations, want) {
+		t.Fatalf("Declarations = %+v, want %+v", got.ArchivedEndpointSelection.Declarations, want)
 	}
 	js := string(got.ScenarioJS)
 	for _, unwanted := range []string{"per-request-dns", "timeoutMilliSec", "archive.example.test", "10.9.9.53"} {
@@ -149,12 +172,7 @@ func TestConvertJSONRecordsArchivedEndpointSelectionWithoutWritingSteps(t *testi
 	}
 }
 
-func TestConvertJSRecordsArchivedEndpointSelection(t *testing.T) {
-	raw := []byte(strings.Replace(maxS3SanityJS, `"net" : {
-      "node" : {
-        "port" : 9020
-      }
-    },`, `"net" : {
+const jsParentEndpoint = `"net" : {
       "node" : {
         "port" : 9020
       },
@@ -169,9 +187,11 @@ func TestConvertJSRecordsArchivedEndpointSelection(t *testing.T) {
           "timeoutMilliSec" : 2500
         }
       }
-    },`, 1))
+    },`
 
-	got, err := ConvertJS(raw, RunScript{
+func convertJSWith(t *testing.T, raw string) *Generated {
+	t.Helper()
+	got, err := ConvertJS([]byte(raw), RunScript{
 		Exports:        map[string]string{"RUN_TIME": "900", "RUN_TIME_FOR_SMALL_OBJ": "1800", "WAIT_TIME": "60"},
 		ItemOutputPath: "bucket",
 	}, Options{
@@ -181,50 +201,165 @@ func TestConvertJSRecordsArchivedEndpointSelection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConvertJS() error = %v", err)
 	}
-	want := scenario.EndpointSelection{Mode: scenario.EndpointSelectionPerRequestDNS, DNSTimeoutMillis: 1500, ConnectTimeoutMillis: 2500}
-	if got.ArchivedEndpointSelection == nil || *got.ArchivedEndpointSelection != want {
-		t.Fatalf("ArchivedEndpointSelection = %+v, want %+v", got.ArchivedEndpointSelection, want)
+	return got
+}
+
+func TestConvertJSRecordsAndStripsParentEndpointSelection(t *testing.T) {
+	got := convertJSWith(t, strings.Replace(maxS3SanityJS, `"net" : {
+      "node" : {
+        "port" : 9020
+      }
+    },`, jsParentEndpoint, 1))
+
+	if want := []scenario.EndpointSelection{archivedDNSDeclaration}; !reflect.DeepEqual(got.ArchivedEndpointSelection.Declarations, want) {
+		t.Fatalf("Declarations = %+v, want %+v", got.ArchivedEndpointSelection.Declarations, want)
 	}
 	if !hasDiagnosticContaining(got.Diagnostics, severityWarning, "environment-specific endpoint selection setting(s) storage.net.endpoint.hostname, storage.net.endpoint.dns.server") {
 		t.Fatalf("Diagnostics = %+v, want environment-specific warning", got.Diagnostics)
 	}
-	if strings.Contains(string(got.ScenarioJS), "per-request-dns") {
-		t.Fatalf("parent config must not carry endpoint selection; the defaults do\n%s", got.ScenarioJS)
+	if js := string(got.ScenarioJS); strings.Contains(js, "per-request-dns") || strings.Contains(js, `"endpoint"`) {
+		t.Fatalf("parent config must not carry endpoint selection; the defaults do\n%s", js)
 	}
 }
 
-func TestConflictingArchivedSelectionsNeedAnExplicitMode(t *testing.T) {
-	conflicting := strings.Replace(archivedDNSScenario, `"steps": [{
-    "type": "load",
-    "config": {"test": {"step": {"id": "MAX-W10KB", "limit": {"count": 1}}}}
-  }]`, `"steps": [{
-    "type": "load",
-    "config": {"test": {"step": {"id": "MAX-W10KB", "limit": {"count": 1}}}}
-  }, {
-    "type": "load",
-    "config": {
-      "storage": {"net": {"endpoint": {"selection": "round-robin"}}},
-      "test": {"step": {"id": "MAX-R10KB", "limit": {"count": 1}}}
-    }
-  }]`, 1)
-	if conflicting == archivedDNSScenario {
-		t.Fatal("fixture replacement failed")
-	}
-	runScript := RunScript{Exports: map[string]string{}, ItemOutputPath: "bucket"}
+const jsInlineDNSStorage = `"storage" : {
+        "net" : {
+          "endpoint" : {
+            "selection" : "per-request-dns"
+          }
+        },
+        "driver" : {
+          "limit" : {
+            "concurrency" : 70`
 
-	_, err := ConvertJSON([]byte(conflicting), runScript, Options{
-		Endpoints: []string{"https://s3.example.test:9021"}, BaseTimestamp: "20260605.121400.000",
+func inlineDNSArchiveJS(t *testing.T) string {
+	t.Helper()
+	raw := strings.Replace(maxS3SanityJS, `"storage" : {
+        "driver" : {
+          "limit" : {
+            "concurrency" : 70`, jsInlineDNSStorage, 1)
+	if raw == maxS3SanityJS {
+		t.Fatal("inline fixture replacement failed")
+	}
+	return raw
+}
+
+func TestConvertJSRecordsAndStripsInlineEndpointSelection(t *testing.T) {
+	got := convertJSWith(t, inlineDNSArchiveJS(t))
+
+	want := []scenario.EndpointSelection{{Mode: scenario.EndpointSelectionPerRequestDNS}}
+	if !reflect.DeepEqual(got.ArchivedEndpointSelection.Declarations, want) {
+		t.Fatalf("Declarations = %+v, want %+v", got.ArchivedEndpointSelection.Declarations, want)
+	}
+	js := string(got.ScenarioJS)
+	if strings.Contains(js, "per-request-dns") || strings.Contains(js, `"endpoint"`) {
+		t.Fatalf("inline step config must not carry endpoint selection; the defaults do\n%s", js)
+	}
+	if !strings.Contains(js, `"concurrency" : 70`) {
+		t.Fatalf("stripping the endpoint must keep the rest of the inline config\n%s", js)
+	}
+}
+
+func TestGenerateExplicitFlagsOverrideInlineJSSelection(t *testing.T) {
+	raw := inlineDNSArchiveJS(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `<a href="run.sh">run</a><a href="archived.js">scenario</a>`)
 	})
-	if err == nil || !strings.Contains(err.Error(), "different endpoint selection settings") {
-		t.Fatalf("want conflict error without --endpoint-selection, got %v", err)
+	mux.HandleFunc("/run.sh", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `export RUN_TIME=900
+export RUN_TIME_FOR_SMALL_OBJ=1800
+export WAIT_TIME=60
+export BUCKET=archive-bucket
+java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scenario-file=/tmp/perf/archived.js`)
+	})
+	mux.HandleFunc("/archived.js", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, raw)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	got, err := Generate(context.Background(), Options{
+		SourceURL: server.URL, Endpoints: []string{"http://10.0.0.1:9020", "http://10.0.0.2:9020"},
+		Bucket: "local-bucket", BaseTimestamp: "20260605.121400.000", HTTPClient: server.Client(),
+		EndpointSelection: scenario.EndpointSelection{Mode: scenario.EndpointSelectionRoundRobin},
+	})
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if !strings.Contains(string(got.DefaultsYAML), "selection: round-robin") {
+		t.Fatalf("defaults must carry the validated round-robin selection:\n%s", got.DefaultsYAML)
+	}
+	if strings.Contains(string(got.ScenarioJS), "per-request-dns") {
+		t.Fatalf("an inline step must not override the validated selection:\n%s", got.ScenarioJS)
+	}
+}
+
+func TestGenerateRejectsConflictingArchivedModesWithoutAFlag(t *testing.T) {
+	cases := map[string]string{
+		"dns and round robin":      scenarioWithEndpoints(`{"selection": "per-request-dns"}`, "", `{"selection": "round-robin"}`),
+		"dns and explicit default": scenarioWithEndpoints(`{"selection": "per-request-dns"}`, "", `{"selection": "default"}`),
+	}
+	for name, archive := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := generateFromArchive(t, archive, []string{"https://s3.example.test:9021"}, scenario.EndpointSelection{})
+			if got := ErrorClass(err); got != failureInvalidEndpointSelection || !strings.Contains(err.Error(), "choose one with --endpoint-selection") {
+				t.Fatalf("ErrorClass() = %q, err = %v; want a mode conflict", got, err)
+			}
+			got, err := generateFromArchive(t, archive, []string{"https://s3.example.test:9021"},
+				scenario.EndpointSelection{Mode: scenario.EndpointSelectionDefault})
+			if err != nil || !hasDiagnosticContaining(got.Diagnostics, severityWarning, "overrides the archived endpoint selection") {
+				t.Fatalf("an explicit mode must resolve the conflict: err=%v", err)
+			}
+			if strings.Contains(string(got.DefaultsYAML), "endpoint:") {
+				t.Fatalf("explicit default must emit no endpoint settings:\n%s", got.DefaultsYAML)
+			}
+		})
+	}
+}
+
+func TestGenerateRequiresAFlagForConflictingArchivedTimeouts(t *testing.T) {
+	archive := scenarioWithEndpoints("",
+		`{"selection": "per-request-dns", "dns": {"timeoutMilliSec": 1500}}`,
+		`{"selection": "per-request-dns", "dns": {"timeoutMilliSec": 8000}}`)
+	modeOnly := scenario.EndpointSelection{Mode: scenario.EndpointSelectionPerRequestDNS}
+
+	_, err := generateFromArchive(t, archive, []string{"https://s3.example.test:9021"}, modeOnly)
+	if ErrorClass(err) != failureInvalidEndpointSelection || !strings.Contains(err.Error(), "set --dns-timeout") {
+		t.Fatalf("want a timeout conflict naming --dns-timeout, got %v", err)
 	}
 
-	got, err := ConvertJSON([]byte(conflicting), runScript, Options{
-		Endpoints: []string{"https://s3.example.test:9021"}, BaseTimestamp: "20260605.121400.000",
-		EndpointSelection: scenario.EndpointSelection{Mode: scenario.EndpointSelectionDefault},
-	})
-	if err != nil || !hasDiagnosticContaining(got.Diagnostics, severityWarning, "replay uses the --endpoint-selection flags") {
-		t.Fatalf("explicit mode must turn the conflict into a warning: err=%v diagnostics=%+v", err, got)
+	withTimeout := modeOnly
+	withTimeout.DNSTimeoutMillis = 3000
+	got, err := generateFromArchive(t, archive, []string{"https://s3.example.test:9021"}, withTimeout)
+	if err != nil || !strings.Contains(string(got.DefaultsYAML), "timeoutMilliSec: 3000") {
+		t.Fatalf("an explicit timeout must resolve the conflict: err=%v", err)
+	}
+}
+
+func TestGenerateAcceptsRoundRobinArchiveWithShippedDNSTimeout(t *testing.T) {
+	archive := scenarioWithEndpoints(`{"selection": "round-robin", "dns": {"timeoutMilliSec": 5000}, "connect": {"timeoutMilliSec": 30000}}`, "")
+
+	got, err := generateFromArchive(t, archive, []string{"http://10.0.0.1:9020", "http://10.0.0.2:9020"}, scenario.EndpointSelection{})
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	defaults := string(got.DefaultsYAML)
+	if !strings.Contains(defaults, "selection: round-robin") || !strings.Contains(defaults, "timeoutMilliSec: 30000") {
+		t.Fatalf("round robin and its connect timeout must carry over:\n%s", defaults)
+	}
+	if strings.Contains(defaults, "dns:") {
+		t.Fatalf("a round-robin archive must not import a DNS timeout:\n%s", defaults)
+	}
+}
+
+func TestGenerateRejectsOutOfRangeArchivedTimeouts(t *testing.T) {
+	for _, timeout := range []string{"-1", "2147483648"} {
+		archive := scenarioWithEndpoints(fmt.Sprintf(`{"selection": "per-request-dns", "dns": {"timeoutMilliSec": %s}}`, timeout), "")
+		_, err := generateFromArchive(t, archive, []string{"https://s3.example.test:9021"}, scenario.EndpointSelection{})
+		if ErrorClass(err) != failureInvalidEndpointSelection || !strings.Contains(err.Error(), "must be between 1 and") {
+			t.Fatalf("timeout %s: want a range error, got %v", timeout, err)
+		}
 	}
 }
 

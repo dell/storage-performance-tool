@@ -66,8 +66,11 @@ func Generate(ctx context.Context, opts Options) (*Generated, error) {
 	if len(opts.Endpoints) == 1 {
 		params.Endpoint = opts.Endpoints[0]
 	}
-	selection, selectionDiagnostics := mergeEndpointSelection(opts.EndpointSelection, generated.ArchivedEndpointSelection)
+	selection, selectionDiagnostics, err := mergeEndpointSelection(opts.EndpointSelection, generated.ArchivedEndpointSelection)
 	generated.Diagnostics = append(generated.Diagnostics, selectionDiagnostics...)
+	if err != nil {
+		return generated, newClassifiedError(failureInvalidEndpointSelection, err.Error(), err)
+	}
 	params.EndpointSelection = selection
 	if err := scenario.ValidateEndpointSelection(params.EndpointSelection, scenario.EndpointSelectionTarget{
 		RawEndpoints: opts.Endpoints,

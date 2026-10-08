@@ -83,9 +83,13 @@ endpoint selection, and are rejected:
 - IPv6 addresses.
 
 The flags are also accepted by `spt replay`, where they take precedence over endpoint-selection
-settings found in the archive. An archived mode and its timeouts apply only when the corresponding flags are
-not given, archived hostnames and DNS servers are never reused, and replay validates the combined settings
-against the local endpoints.
+settings found in the archive. Archived settings are resolved field by field:
+- An archived mode applies only when `--endpoint-selection` is not given.
+- An archived timeout applies only to steps of that same mode, and only when its flag is not given.
+- If archived steps disagree on a field, replay stops and names the flag that settles it.
+- Archived hostnames and DNS servers are never reused.
+
+Replay validates the result against the local endpoints and applies it to every replayed step.
 
 The engine settings are `storage.net.endpoint.selection`, `.hostname`,
 `.dns.server`, `.dns.timeoutMilliSec` and `.connect.timeoutMilliSec`. See the

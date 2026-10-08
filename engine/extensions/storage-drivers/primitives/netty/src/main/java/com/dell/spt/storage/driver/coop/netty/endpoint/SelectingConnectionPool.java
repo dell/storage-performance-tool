@@ -22,6 +22,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -79,12 +80,31 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 			return settled.get();
 		}
 
+		/**
+		 * Settles once. A channel is always reported on its own event loop, so request preparation
+		 * runs there and never on the thread that asked; if that loop has already terminated, the
+		 * channel is closed and the acquisition fails on the current thread instead.
+		 */
 		boolean settle(final Channel channel, final Throwable failure) {
 			if (!settled.compareAndSet(false, true)) {
 				return false;
 			}
 			pending.remove(this);
-			callback.complete(channel, failure);
+			if (channel == null) {
+				callback.complete(null, failure);
+				return true;
+			}
+			final var loop = channel.eventLoop();
+			if (loop.inEventLoop()) {
+				callback.complete(channel, null);
+				return true;
+			}
+			try {
+				loop.execute(() -> callback.complete(channel, null));
+			} catch (final RejectedExecutionException e) {
+				final var unusedClose = channel.close();
+				callback.complete(null, closedFailure());
+			}
 			return true;
 		}
 	}
@@ -111,9 +131,9 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 
 	/**
 	 * Selects the next destination and reports an active channel to it, or the selection or connect
-	 * failure, to {@code callback} exactly once. A reused connection is reported on the calling
-	 * thread; a new one on its event loop; a failure on the thread that observed it, which is the
-	 * closing thread for acquisitions still outstanding at {@link #close()}.
+	 * failure, to {@code callback} exactly once. A channel is reported on its own event loop; a
+	 * failure on the thread that observed it, which is the closing thread for acquisitions still
+	 * outstanding at {@link #close()}.
 	 */
 	public void acquire(final Acquisition callback) {
 		acquire(true, callback);
