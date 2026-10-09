@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - **S3 region selection** — Added `spt run --region` and engine YAML `storage.region` support to explicitly select the AWS region for S3 requests. Omitting the setting preserves each driver’s existing region selection.
 
+### Changed
+
+- **Remote entry-node log relay** — Entry-node output now arrives over one `docker logs --follow` SSH session instead of a new SSH session twice a second, reducing CPU load on the entry host. The console still shows only the engine's stdout; its stderr (such as JVM and logging warnings) is kept only in the CLI log, and only with `--log-level debug`.
+
 ### Fixed
 
 - **DELETE failure-budget reporting** — Duration-based DELETE runs now propagate a failure-budget exception consistently when the budget is exceeded during worker startup, matching failures detected during active waiting.
