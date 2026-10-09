@@ -47,6 +47,21 @@ spt run write \
 - **Helper Host:** bucket checks and the other helper requests are signed before a connection is chosen. Their `Host` carries the first entry's port, or, without a hostname, the first entry itself.
 - **Order matters:** to alternate between nodes, list the addresses in node order.
 
+### Generating the Address List
+
+`--endpoints` accepts a comma-separated list, repeated flags, or a mix of both, and
+all of them give the same ordered list. A script can therefore let the shell
+build the list. In bash, brace expansion turns this word into one `--endpoints=`
+flag per address, the same three addresses as in the example above:
+
+```bash
+--endpoints=http://10.0.0.{1..3}:9020
+```
+
+Keep the `=`. With a space instead, only the first address keeps the flag name,
+and `spt` rejects the rest as extra arguments. A range lists addresses in
+numeric order, so check **Order matters** above.
+
 ## Per-Request DNS
 
 ```bash

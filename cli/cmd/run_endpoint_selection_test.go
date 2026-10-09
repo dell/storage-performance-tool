@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"bytes"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
+	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
 )
 
@@ -145,11 +148,13 @@ func TestEndpointSelectionRejectsInvalidCombinations(t *testing.T) {
 		{"round robin hostname endpoint", append([]string{"--endpoints", "http://s3.example.com"}, rr...), "requires IPv4 endpoint addresses", ""},
 		{"round robin duplicate before deduplication", append([]string{"--endpoints", "http://10.0.0.1:9020,http://10.0.0.1:9020"}, rr...), "duplicate round-robin endpoint", ""},
 		{"round robin duplicate via default port", append([]string{"--endpoints", "http://10.0.0.1,http://10.0.0.1:80"}, rr...), "duplicate round-robin endpoint", ""},
+		{"round robin duplicate across repeated flags", append([]string{"--endpoints=http://10.0.0.1:9020", "--endpoints=http://10.0.0.1:9020"}, rr...), "duplicate round-robin endpoint", ""},
 		{"round robin with dns server", append([]string{"--endpoints", "http://10.0.0.1", "--dns-server", "10.0.0.53"}, rr...), "--dns-server and --dns-timeout require", ""},
 		{"round robin ip hostname", append([]string{"--endpoints", "http://10.0.0.1", "--endpoint-hostname", "10.0.0.9"}, rr...), "not an IP address", ""},
 		{"round robin with slicing", append([]string{"--endpoints", "http://10.0.0.1", "--slice-endpoints"}, rr...), "--slice-endpoints", ""},
 		{"round robin with aws driver", append([]string{"--endpoints", "http://10.0.0.1", "--s3-driver", "aws"}, rr...), "default Netty S3 driver", ""},
 		{"dns with two endpoints", append([]string{"--endpoints", "http://a.example.com,http://b.example.com"}, dns...), "exactly one endpoint hostname", ""},
+		{"dns with repeated endpoint flags", append([]string{"--endpoints=http://a.example.com", "--endpoints=http://b.example.com"}, dns...), "exactly one endpoint hostname", ""},
 		{"dns with ip endpoint", append([]string{"--endpoints", "http://10.0.0.1"}, dns...), "not an IP address", ""},
 		{"dns with endpoint hostname", append([]string{"--endpoints", "http://s3.example.com", "--endpoint-hostname", "s3.example.com"}, dns...), "applies only to --endpoint-selection round-robin", ""},
 		{"dns with hostname server", append([]string{"--endpoints", "http://s3.example.com", "--dns-server", "dns.example.com"}, dns...), "must be an IPv4 address", ""},
@@ -186,5 +191,58 @@ func TestRoundRobinKeepsDistinctPortsOnOneAddress(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "10.0.0.1:9020") || !strings.Contains(string(data), "10.0.0.1:9021") {
 		t.Fatalf("per-entry ports must be preserved:\n%s", data)
+	}
+}
+
+// Scripts often generate the endpoint list, for example with bash brace expansion, which yields
+// one --endpoints= word per address. Repeated and mixed forms must equal the comma-separated list.
+func TestRepeatedEndpointsFlagsMatchCommaSeparatedList(t *testing.T) {
+	rr := []string{"--endpoint-selection", "round-robin"}
+	want, err := newEndpointSelectionCmd(t, append([]string{
+		"--endpoints=http://10.0.0.1:9020,http://10.0.0.2:9020,http://10.0.0.3:9020"}, rr...)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(want.Endpoints, []string{"http://10.0.0.1:9020", "http://10.0.0.2:9020", "http://10.0.0.3:9020"}) {
+		t.Fatalf("comma-separated endpoints out of order: %v", want.Endpoints)
+	}
+	wantYAML, err := scenario.GenerateDefaults(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, endpointArgs := range map[string][]string{
+		"repeated": {"--endpoints=http://10.0.0.1:9020", "--endpoints=http://10.0.0.2:9020", "--endpoints=http://10.0.0.3:9020"},
+		"mixed":    {"--endpoints=http://10.0.0.1:9020,http://10.0.0.2:9020", "--endpoints=http://10.0.0.3:9020"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			params, err := newEndpointSelectionCmd(t, append(endpointArgs, rr...)...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(params.Endpoints, want.Endpoints) {
+				t.Fatalf("endpoints %v, want %v", params.Endpoints, want.Endpoints)
+			}
+			gotYAML, err := scenario.GenerateDefaults(params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(gotYAML, wantYAML) {
+				t.Fatalf("engine defaults differ from the comma-separated form:\n%s\nwant:\n%s", gotYAML, wantYAML)
+			}
+		})
+	}
+}
+
+// The repeated form depends on --endpoints staying a string slice, which both splits on commas
+// and appends repeated flags, on every command that accepts it.
+func TestEndpointsFlagIsRepeatableOnRunAndReplay(t *testing.T) {
+	for name, flags := range map[string]*pflag.FlagSet{
+		"run":    runCmd.Flags(),
+		"replay": replayCmd.Flags(),
+	} {
+		f := flags.Lookup("endpoints")
+		if f == nil || f.Value.Type() != "stringSlice" || f.Shorthand != "e" {
+			t.Fatalf("%s must register --endpoints/-e as a string slice, got %+v", name, f)
+		}
 	}
 }
