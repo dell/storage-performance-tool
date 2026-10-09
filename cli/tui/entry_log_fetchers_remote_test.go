@@ -65,7 +65,7 @@ func newTestRemoteLogFetcher(ops dockerLogsFollower, reconnect time.Duration) *r
 
 var errSessionDropped = errors.New("exit status 255")
 
-func TestRemoteLogFetcher_Stream_StripsTimestampsAndEndsWithContainer(t *testing.T) {
+func TestRemoteLogFetcher_Stream_RelaysStdoutAndEndsWithContainer(t *testing.T) {
 	follower := &scriptedFollower{sessions: []followSession{{
 		stdout: []string{
 			"2025-09-14T12:00:01.000000000Z first line",
@@ -82,8 +82,8 @@ func TestRemoteLogFetcher_Stream_StripsTimestampsAndEndsWithContainer(t *testing
 	if err := f.Stream(context.Background(), func(s string) { got = append(got, s) }); err != nil {
 		t.Fatalf("Stream returned error: %v", err)
 	}
-	if want := "first line|second line|engine warning"; strings.Join(got, "|") != want {
-		t.Fatalf("relayed lines = %q, want %q (untimestamped ssh/docker diagnostics must not be relayed)", got, want)
+	if want := "first line|second line"; strings.Join(got, "|") != want {
+		t.Fatalf("relayed lines = %q, want %q (stderr, including ssh/docker diagnostics, must not be relayed)", got, want)
 	}
 	if sinces := follower.recordedSinces(); len(sinces) != 1 || !sinces[0].IsZero() {
 		t.Fatalf("expected one session from container start, got %v", sinces)
@@ -115,6 +115,33 @@ func TestRemoteLogFetcher_Stream_ResumesPastLastTimestamp(t *testing.T) {
 	want := last.Add(dockerSinceInclusiveSkew)
 	if !sinces[1].Equal(want) || !sinces[2].Equal(want) {
 		t.Fatalf("resume watermarks = %v, want %v for both", sinces[1:], want)
+	}
+}
+
+func TestRemoteLogFetcher_Stream_ResumePointOnlyMovesForward(t *testing.T) {
+	newest := time.Date(2025, 9, 14, 12, 0, 5, 0, time.UTC)
+	follower := &scriptedFollower{sessions: []followSession{
+		{
+			// Stdout and stderr arrive through separate pipes, so older stderr can
+			// follow newer stdout; a skewed stdout timestamp must not rewind either.
+			stdout: []string{newest.Format(time.RFC3339Nano) + " newer", "2025-09-14T12:00:03.000000000Z skewed"},
+			stderr: []string{"2025-09-14T12:00:04.000000000Z older stderr"},
+			err:    errSessionDropped,
+		},
+		{stdout: []string{"2025-09-14T12:00:06.000000000Z next"}},
+	}}
+	f := newTestRemoteLogFetcher(follower, time.Millisecond)
+
+	var got []string
+	if err := f.Stream(context.Background(), func(s string) { got = append(got, s) }); err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+	if strings.Join(got, "|") != "newer|skewed|next" {
+		t.Fatalf("relayed lines = %q", got)
+	}
+	sinces := follower.recordedSinces()
+	if len(sinces) != 2 || !sinces[1].Equal(newest.Add(dockerSinceInclusiveSkew)) {
+		t.Fatalf("resume watermarks = %v, want just past %v", sinces, newest)
 	}
 }
 

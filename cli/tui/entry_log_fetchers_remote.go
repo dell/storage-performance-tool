@@ -16,9 +16,9 @@ type dockerLogsFollower interface {
 	FollowContainerLogs(ctx context.Context, containerID string, since time.Time, stdoutCallback, stderrCallback func(string)) error
 }
 
-// remoteLogFetcher follows docker logs on a remote host over one long-lived
+// remoteLogFetcher follows a remote container's stdout over one long-lived
 // session instead of opening a new SSH session per poll. If the session drops,
-// it resumes just after the last relayed timestamp.
+// it resumes just after the newest relayed timestamp.
 type remoteLogFetcher struct {
 	ops          dockerLogsFollower
 	containerID  string
@@ -47,19 +47,21 @@ func (f *remoteLogFetcher) Stream(ctx context.Context, onLine func(string)) erro
 	for {
 		relayed := false
 		diagnostic := ""
-		forward := func(line string) {
+		err := f.ops.FollowContainerLogs(ctx, f.containerID, since, func(line string) {
 			text, ts, ok := splitDockerTimestamp(line)
-			if ok {
-				// docker logs --since is inclusive, so resume past the last relayed line
-				since = ts.Add(dockerSinceInclusiveSkew)
+			// docker logs --since is inclusive, so resume just past the newest relayed line.
+			if resume := ts.Add(dockerSinceInclusiveSkew); ok && resume.After(since) {
+				since = resume
 			}
 			onLine(text)
 			relayed = true
-		}
-		err := f.ops.FollowContainerLogs(ctx, f.containerID, since, forward, func(line string) {
-			// Container stderr carries docker timestamps; anything else is from ssh or the docker CLI.
-			if _, _, ok := splitDockerTimestamp(line); ok {
-				forward(line)
+		}, func(line string) {
+			// Only stdout is relayed: it arrives in timestamp order, while stderr
+			// comes through a separate pipe, so one resume point cannot cover both.
+			// Timestamped stderr is the engine's (JVM and logging warnings); the rest
+			// comes from ssh or the docker CLI.
+			if text, _, ok := splitDockerTimestamp(line); ok {
+				logging.LogDebug("entry-log-relay", "remote engine stderr", "line", text)
 				return
 			}
 			diagnostic = line

@@ -36,7 +36,8 @@ type Executor interface {
 type LineStreamer interface {
 	// StreamCommand runs command on host until it exits or ctx is cancelled.
 	// Callbacks receive complete lines without line terminators and are never
-	// invoked concurrently.
+	// invoked concurrently. A final unterminated line is delivered only when the
+	// command succeeds, since after a failure it may be a fragment.
 	StreamCommand(ctx context.Context, host *hostparse.HostInfo, command []string, stdoutLine, stderrLine func(string)) error
 }
 
@@ -76,13 +77,20 @@ func (r *RealCommandExecutor) ExecuteCommand(ctx context.Context, host *hostpars
 
 // StreamCommand runs a long-lived command locally or over one SSH session and
 // delivers each output line as it arrives. Cancelling ctx kills the local
-// process; a remote command ends when its next write finds the session closed
-// or when it exits on its own.
+// process; a remote command runs under remoteStreamGuard, which ends it when
+// the session closes.
 func (r *RealCommandExecutor) StreamCommand(ctx context.Context, host *hostparse.HostInfo, command []string, stdoutLine, stderrLine func(string)) error {
 	if len(command) == 0 {
 		return fmt.Errorf("empty command")
 	}
-	cmd := hostCommand(ctx, host, command, constants.SSHServerAliveInterval, constants.SSHServerAliveCountMax)
+	cmd := streamHostCommand(ctx, host, command)
+	if !host.IsLocal {
+		// Hold the session's stdin open until the command ends: the remote guard
+		// treats its EOF as the session closing.
+		if _, err := cmd.StdinPipe(); err != nil {
+			return err
+		}
+	}
 	var emitMu sync.Mutex
 	stdout := &lineWriter{mu: &emitMu, emit: stdoutLine}
 	stderr := &lineWriter{mu: &emitMu, emit: stderrLine}
@@ -91,10 +99,35 @@ func (r *RealCommandExecutor) StreamCommand(ctx context.Context, host *hostparse
 	// Bound the wait if a descendant (for example an ssh ProxyCommand) keeps the
 	// output pipes open after the process exits or is killed.
 	cmd.WaitDelay = constants.StreamCommandWaitDelay
-	err := cmd.Run()
+	if err := cmd.Run(); err != nil {
+		// A trailing unterminated line may have been cut off mid-write; callers
+		// that resume replay it whole instead.
+		return err
+	}
 	stdout.flush()
 	stderr.flush()
-	return err
+	return nil
+}
+
+// remoteStreamGuard runs "$@" in the background and kills it when stdin
+// reaches EOF, which happens when the SSH session closes. Without it a quiet
+// remote command outlives a cancelled or dropped session, because sshd does not
+// signal commands that run without a pty. When the command ends first, the
+// guard stops its watcher and exits with the command's status. The watcher
+// reads a copy of stdin on fd 3 because sh gives background jobs /dev/null.
+const remoteStreamGuard = `exec 3<&0 </dev/null; "$@" & p=$!; ` +
+	`{ while read -r line; do :; done <&3; kill "$p"; } >/dev/null 2>&1 & w=$!; ` +
+	`wait "$p"; s=$?; kill "$w" 2>/dev/null; exit "$s"`
+
+// streamHostCommand builds a streamed command: run directly when local, or over
+// SSH with keepalives under remoteStreamGuard. The single-quoted guard reaches
+// sh as one word after the remote login shell parses the command line.
+func streamHostCommand(ctx context.Context, host *hostparse.HostInfo, command []string) *exec.Cmd {
+	if host.IsLocal {
+		return hostCommand(ctx, host, command)
+	}
+	guarded := append([]string{"sh", "-c", "'" + remoteStreamGuard + "'", "sh"}, command...)
+	return hostCommand(ctx, host, guarded, constants.SSHServerAliveInterval, constants.SSHServerAliveCountMax)
 }
 
 // hostCommand builds command for local execution or wraps it in ssh for a
@@ -136,7 +169,8 @@ func (w *lineWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// flush emits a trailing line that had no terminator.
+// flush emits a trailing line that had no terminator. Call it only after the
+// stream completed successfully.
 func (w *lineWriter) flush() {
 	if len(w.pending) > 0 {
 		w.emitLine(w.pending)
