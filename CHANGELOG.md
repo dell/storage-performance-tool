@@ -12,6 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - **S3 endpoint selection** — Added opt-in `--endpoint-selection` for the Netty S3 driver to choose the connect destination of every request attempt: `round-robin` over the `--endpoints` addresses, or `per-request-dns`, a fresh DNS lookup of the endpoint hostname. The default mode is unchanged; see `cli/docs/ENDPOINT_SELECTION.md`.
 
+### Changed
+
+- **Remote entry-node log relay** — Entry-node output now arrives over one `docker logs --follow` SSH session instead of a new SSH session twice a second, reducing CPU load on the entry host. The console still shows only the engine's stdout; its stderr (such as JVM and logging warnings) is kept only in the CLI log, and only with `--log-level debug`.
+
 ### Fixed
 
 - **Partial-read retries at stop** — A partial read whose retry had not yet sent its request when a run stopped now delivers its earlier failure exactly once. Previously, the failure was counted but its result was never delivered, and the run ended with “Range result delivery failed.”

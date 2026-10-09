@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"time"
 
 	"github.com/docker/docker/api/types/container"
 )
@@ -62,9 +61,4 @@ func (f *sdkLogFetcher) Stream(ctx context.Context, onLine func(string)) error {
 			onLine(s)
 		}
 	}
-}
-
-func (f *sdkLogFetcher) Poll(_ context.Context, _ time.Time) ([]string, time.Time, error) {
-	// Polling is not used for SDK fetcher.
-	return nil, time.Time{}, nil
 }

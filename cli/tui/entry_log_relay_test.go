@@ -7,15 +7,10 @@ import (
 	"time"
 )
 
-// fakeFetcher supports both streaming and polling behaviors for tests.
+// fakeFetcher emits scripted lines, then blocks until cancelled to emulate follow.
 type fakeFetcher struct {
-	// streaming mode
 	streamLines []string
 	streamDelay time.Duration
-
-	// polling mode
-	polls [][]string
-	mu    sync.Mutex
 }
 
 func (f *fakeFetcher) Stream(ctx context.Context, onLine func(string)) error {
@@ -35,20 +30,9 @@ func (f *fakeFetcher) Stream(ctx context.Context, onLine func(string)) error {
 	return ctx.Err()
 }
 
-func (f *fakeFetcher) Poll(ctx context.Context, _ time.Time) ([]string, time.Time, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if len(f.polls) == 0 {
-		return nil, time.Time{}, nil
-	}
-	batch := f.polls[0]
-	f.polls = f.polls[1:]
-	return batch, time.Now(), nil
-}
-
 func TestEntryLogRelay_Stream_ForwardsAndStops(t *testing.T) {
 	ff := &fakeFetcher{streamLines: []string{"line1", "line2", "line3"}, streamDelay: 5 * time.Millisecond}
-	relay := NewEntryLogRelay(ff, true, 0)
+	relay := NewEntryLogRelay(ff)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -75,35 +59,23 @@ func TestEntryLogRelay_Stream_ForwardsAndStops(t *testing.T) {
 	}
 }
 
-func TestEntryLogRelay_Poll_PaginatesAndStops(t *testing.T) {
-	ff := &fakeFetcher{polls: [][]string{{"a1", "a2"}, {"b1"}, {}}}
-	relay := NewEntryLogRelay(ff, false, 10*time.Millisecond)
+func TestEntryLogRelay_SkipsLinesWithoutVisibleText(t *testing.T) {
+	ff := &fakeFetcher{streamLines: []string{"line1", "", "\x1b[m", " \x1b[0m\t", "\x1b[32mgreen\x1b[0m"}}
+	relay := NewEntryLogRelay(ff)
+	lines := make(chan string, len(ff.streamLines))
+	relay.Start(context.Background(), func(s string) { lines <- s })
+	defer relay.Stop()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var got []string
-	var mu sync.Mutex
-	relay.Start(ctx, func(s string) {
-		mu.Lock()
-		got = append(got, s)
-		mu.Unlock()
-	})
-
-	// Wait for a few polling ticks
-	time.Sleep(50 * time.Millisecond)
-	relay.Stop()
-
-	mu.Lock()
-	defer mu.Unlock()
-	// Expect a1,a2,b1 in order with prefix
-	want := []string{"[SPT] a1", "[SPT] a2", "[SPT] b1"}
-	if len(got) < len(want) {
-		t.Fatalf("expected at least %d lines, got %d: %#v", len(want), len(got), got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("at %d: want %q got %q (all: %#v)", i, want[i], got[i], got)
+	// Lines arrive in order, so receiving the last one right after the first
+	// means the blank ones between them were skipped.
+	for _, want := range []string{"[SPT] line1", "[SPT] \x1b[32mgreen\x1b[0m"} {
+		select {
+		case got := <-lines:
+			if got != want {
+				t.Fatalf("relayed %q, want %q", got, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("no line relayed, want %q", want)
 		}
 	}
 }
