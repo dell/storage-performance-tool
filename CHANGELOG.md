@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - **S3 region selection** — Added `spt run --region` and engine YAML `storage.region` support to explicitly select the AWS region for S3 requests. Omitting the setting preserves each driver’s existing region selection.
 
-- **S3 endpoint selection** — Added opt-in `--endpoint-selection` for the Netty S3 driver, which chooses the connect destination of every request attempt, retries included. `round-robin` sends each attempt to the next `--endpoints` IPv4 address in order and reuses idle connections per address; the optional `--endpoint-hostname` sets HTTP Host, request signing and TLS SNI. `per-request-dns` resolves the single `--endpoints` hostname for every attempt through `--dns-server` (or the worker's resolver configuration) and uses a new connection that the server closes first. Both modes cover object, multipart, listing, helper and partial-object read requests, record the selected `ip:port` in `op.trace.csv`, and log per-driver selection, connection and DNS summaries. `--dns-timeout` and `--endpoint-connect-timeout` bound setup, `spt replay` accepts the same flags and resolves archived settings field by field, and engine YAML exposes `storage.net.endpoint.*`. Endpoint selection cannot be combined with `--slice-endpoints`, the AWS or S3-RDMA drivers, or the tables workload. The default mode is unchanged.
+- **S3 endpoint selection** — Added opt-in `--endpoint-selection` for the Netty S3 driver to choose the connect destination of every request attempt: `round-robin` over the `--endpoints` addresses, or `per-request-dns`, a fresh DNS lookup of the endpoint hostname. The default mode is unchanged; see `cli/docs/ENDPOINT_SELECTION.md`.
 
 ### Fixed
 
