@@ -94,10 +94,10 @@ type DockerOperations interface {
 	// GetContainerLogs streams logs from a container
 	GetContainerLogs(ctx context.Context, containerID string, follow bool, stdoutCallback, stderrCallback func(string)) error
 
-	// GetContainerLogsSince fetches logs newer than 'since'. When timestamps is true,
-	// docker will prefix each line with an RFC3339 timestamp which callers can parse
-	// for watermark advancement.
-	GetContainerLogsSince(ctx context.Context, containerID string, since time.Time, timestamps bool, stdoutCallback, stderrCallback func(string)) error
+	// FollowContainerLogs streams log lines newer than 'since' (all lines when zero)
+	// until the container stops or ctx is cancelled. Docker prefixes each container
+	// line with an RFC3339Nano timestamp that callers can use to resume a stream.
+	FollowContainerLogs(ctx context.Context, containerID string, since time.Time, stdoutCallback, stderrCallback func(string)) error
 
 	// ListContainers returns list of containers (optionally filtered)
 	ListContainers(ctx context.Context, filters map[string]string) ([]ContainerInfo, error)
