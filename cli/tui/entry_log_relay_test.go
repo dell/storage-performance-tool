@@ -58,3 +58,24 @@ func TestEntryLogRelay_Stream_ForwardsAndStops(t *testing.T) {
 		t.Fatalf("unexpected prefixing: %#v", got[:3])
 	}
 }
+
+func TestEntryLogRelay_SkipsLinesWithoutVisibleText(t *testing.T) {
+	ff := &fakeFetcher{streamLines: []string{"line1", "", "\x1b[m", " \x1b[0m\t", "\x1b[32mgreen\x1b[0m"}}
+	relay := NewEntryLogRelay(ff)
+	lines := make(chan string, len(ff.streamLines))
+	relay.Start(context.Background(), func(s string) { lines <- s })
+	defer relay.Stop()
+
+	// Lines arrive in order, so receiving the last one right after the first
+	// means the blank ones between them were skipped.
+	for _, want := range []string{"[SPT] line1", "[SPT] \x1b[32mgreen\x1b[0m"} {
+		select {
+		case got := <-lines:
+			if got != want {
+				t.Fatalf("relayed %q, want %q", got, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("no line relayed, want %q", want)
+		}
+	}
+}

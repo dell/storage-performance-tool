@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,7 +48,9 @@ func (r *EntryLogRelay) Start(parent context.Context, onLine func(string)) {
 		defer close(done)
 		// Single blocking call that emits lines until ctx is cancelled
 		if err := fetcher.Stream(ctx, func(s string) {
-			if s != "" {
+			// Skip lines with no visible text, such as the bare ANSI reset the
+			// engine writes as its last output when the container stops.
+			if strings.TrimSpace(stripANSIEscapeSequences(s)) != "" {
 				onLine("[SPT] " + s)
 			}
 		}); err != nil {
