@@ -12,7 +12,9 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * Per-driver endpoint-selection counters. Selection counts are kept for at most
+ * Per-driver endpoint-selection counters. Once the driver has stopped, each counted selection has
+ * exactly one connection outcome: new, reused, failed, or cancelled because the driver stopped
+ * while it was connecting. Closes count established connections only. Selection counts are kept for at most
  * {@link EndpointSelectionConstants#MAX_TRACKED_DESTINATIONS} distinct destinations; later ones are
  * counted under {@link #OTHER}, so a changing DNS population cannot grow memory without bound.
  */
@@ -31,6 +33,7 @@ public final class EndpointSelectionCounters {
 	private final LongAdder connectsNew = new LongAdder();
 	private final LongAdder connectsReused = new LongAdder();
 	private final LongAdder connectsFailed = new LongAdder();
+	private final LongAdder connectsCancelled = new LongAdder();
 	private final LongAdder closes = new LongAdder();
 
 	/** Immutable view for reporting and tests. Durations are nanoseconds. */
@@ -44,6 +47,7 @@ public final class EndpointSelectionCounters {
 					long connectsNew,
 					long connectsReused,
 					long connectsFailed,
+					long connectsCancelled,
 					long closes) {}
 
 	public EndpointSelectionCounters() {
@@ -85,6 +89,11 @@ public final class EndpointSelectionCounters {
 		connectsFailed.increment();
 	}
 
+	/** A connect for a counted selection that ended, or never started, because the driver stopped. */
+	public void connectCancelled() {
+		connectsCancelled.increment();
+	}
+
 	public void closed() {
 		closes.increment();
 	}
@@ -117,6 +126,7 @@ public final class EndpointSelectionCounters {
 						connectsNew.sum(),
 						connectsReused.sum(),
 						connectsFailed.sum(),
+						connectsCancelled.sum(),
 						closes.sum());
 	}
 
@@ -128,6 +138,7 @@ public final class EndpointSelectionCounters {
 						.append("; connections new=").append(s.connectsNew())
 						.append(" reused=").append(s.connectsReused())
 						.append(" failed=").append(s.connectsFailed())
+						.append(" cancelled=").append(s.connectsCancelled())
 						.append(" closed=").append(s.closes());
 		if (s.lookups() > 0) {
 			text.append("; DNS lookups=").append(s.lookups())

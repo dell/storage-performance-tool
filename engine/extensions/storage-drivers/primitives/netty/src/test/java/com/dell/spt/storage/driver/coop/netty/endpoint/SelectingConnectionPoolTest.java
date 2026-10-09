@@ -1,6 +1,7 @@
 package com.dell.spt.storage.driver.coop.netty.endpoint;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -16,12 +17,17 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
+import java.nio.channels.ClosedChannelException;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import io.netty.util.concurrent.ImmediateEventExecutor;
 import io.netty.util.concurrent.Promise;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -32,11 +38,15 @@ class SelectingConnectionPoolTest {
 	private final NioEventLoopGroup group = new NioEventLoopGroup(1);
 	private final Bootstrap bootstrap = new Bootstrap().group(group).channel(NioSocketChannel.class);
 	private final List<Holder> holders = new CopyOnWriteArrayList<>();
+	private final List<AutoCloseable> resources = new CopyOnWriteArrayList<>();
 
 	@AfterEach
 	void closeAll() throws Exception {
 		for (final var holder : holders) {
 			holder.close();
+		}
+		for (final var resource : resources) {
+			resource.close();
 		}
 		group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
 	}
@@ -170,16 +180,80 @@ class SelectingConnectionPoolTest {
 	@Test
 	void refusedDestinationFailsTheLeaseWithoutTryingAnother() throws Exception {
 		final var live = holder();
-		final int refusedPort;
-		try (final var socket = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
-			refusedPort = socket.getLocalPort();
-		}
-		final var pool = pool(List.of(new InetSocketAddress(InetAddress.getLoopbackAddress(), refusedPort), live.address()), true, 4);
+		final var pool = pool(List.of(refusedAddress(), live.address()), true, 4);
 
 		assertThrows(ConnectException.class, pool::lease);
 		assertEquals(0, live.accepted());
 		assertTrue(pool.lease().isActive());
 		pool.close();
+	}
+
+	@Test
+	void everySelectionHasOneOutcomeAndOnlyEstablishedConnectionsClose() throws Exception {
+		final var live = holder();
+		final var counters = new EndpointSelectionCounters();
+		final var pool = pool(List.of(refusedAddress(), live.address()), true, 4, counters);
+
+		assertThrows(ConnectException.class, pool::lease);
+		final var first = pool.lease();
+		pool.release(first);
+		assertThrows(ConnectException.class, pool::lease);
+		assertSame(first, pool.lease());
+		pool.close();
+		stopIoLoop();
+
+		final var snapshot = counters.snapshot();
+		assertEquals(1, snapshot.connectsNew());
+		assertEquals(1, snapshot.connectsReused());
+		assertEquals(2, snapshot.connectsFailed(), "a refused connect is a target failure");
+		assertEquals(0, snapshot.connectsCancelled());
+		assertEquals(1, snapshot.closes(), "a refused connect never opened a connection");
+		assertReconciled(snapshot);
+	}
+
+	@Test
+	void poolCloseDuringAConnectCountsItAsCancelled() throws Exception {
+		final var holding = holder();
+		final var counters = new EndpointSelectionCounters();
+		final var pool = pool(List.of(holding.address()), false, 0, counters);
+		final var resumeLoop = pauseIoLoop();
+		final var outcomes = new CopyOnWriteArrayList<Object>();
+
+		// The connection's registration and connect queue behind the paused loop; close() overtakes them.
+		pool.acquire((channel, failure) -> outcomes.add(failure != null ? failure : channel));
+		pool.close();
+		resumeLoop.countDown();
+		stopIoLoop();
+
+		assertEquals(1, outcomes.size());
+		assertInstanceOf(ConnectException.class, outcomes.get(0));
+		assertEquals(0, holding.accepted());
+		final var snapshot = counters.snapshot();
+		assertEquals(1, snapshot.connectsCancelled());
+		assertEquals(0, snapshot.connectsFailed(), "a connect ended by close() is not a target failure");
+		assertEquals(0, snapshot.closes(), "the connection never opened");
+		assertReconciled(snapshot);
+	}
+
+	@Test
+	void ioLoopShutdownDuringAConnectCountsItAsCancelled() throws Exception {
+		final var counters = new EndpointSelectionCounters();
+		final var pool = pool(List.of(unansweredAddress()), false, 0, counters);
+		final var outcome = new CompletableFuture<Throwable>();
+		pool.acquire((channel, failure) -> outcome.complete(failure));
+		Thread.sleep(100);
+		assertFalse(outcome.isDone(), "the connect must still be in flight");
+
+		// A stopping driver shuts its I/O loop down before it closes the pool.
+		stopIoLoop();
+		pool.close();
+
+		assertInstanceOf(ClosedChannelException.class, outcome.get(5, TimeUnit.SECONDS));
+		final var snapshot = counters.snapshot();
+		assertEquals(1, snapshot.connectsCancelled());
+		assertEquals(0, snapshot.connectsFailed(), "a connect ended by shutdown is not a target failure");
+		assertEquals(0, snapshot.closes());
+		assertReconciled(snapshot);
 	}
 
 	@Test
@@ -196,8 +270,9 @@ class SelectingConnectionPoolTest {
 	@Test
 	void closeSettlesAnAcquisitionStillWaitingForItsSelectionExactlyOnce() throws Exception {
 		final Promise<InetSocketAddress> selection = ImmediateEventExecutor.INSTANCE.newPromise();
+		final var counters = new EndpointSelectionCounters();
 		final var pool = new SelectingConnectionPool(bootstrap, new NoopHandler());
-		pool.bind(() -> selection, false, 0, 2_000, 2_000, new EndpointSelectionCounters());
+		pool.bind(() -> selection, false, 0, 2_000, 2_000, counters);
 		final var outcomes = new CopyOnWriteArrayList<Throwable>();
 		final var threads = new CopyOnWriteArrayList<Thread>();
 		pool.acquire((channel, failure) -> {
@@ -215,17 +290,20 @@ class SelectingConnectionPoolTest {
 		assertSame(Thread.currentThread(), threads.get(0));
 		assertEquals(0, pool.pendingAcquisitionCount());
 		assertEquals(0, pool.openChannelCount());
+		assertEquals(1, counters.snapshot().connectsCancelled());
+		assertReconciled(counters.snapshot());
 	}
 
 	@Test
 	void selectionCompletingAfterTheIoLoopTerminatedSettlesWithoutLeakingAChannel() throws Exception {
 		final var holding = holder();
 		final Promise<InetSocketAddress> selection = ImmediateEventExecutor.INSTANCE.newPromise();
+		final var counters = new EndpointSelectionCounters();
 		final var pool = new SelectingConnectionPool(bootstrap, new NoopHandler());
-		pool.bind(() -> selection, false, 0, 2_000, 2_000, new EndpointSelectionCounters());
+		pool.bind(() -> selection, false, 0, 2_000, 2_000, counters);
 		final var outcomes = new CopyOnWriteArrayList<Throwable>();
 		pool.acquire((channel, failure) -> outcomes.add(failure));
-		group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
+		stopIoLoop();
 
 		selection.setSuccess(holding.address());
 		pool.close();
@@ -235,6 +313,10 @@ class SelectingConnectionPoolTest {
 		assertEquals(0, pool.pendingAcquisitionCount());
 		assertEquals(0, pool.openChannelCount());
 		assertEquals(0, holding.accepted());
+		final var snapshot = counters.snapshot();
+		assertEquals(1, snapshot.connectsCancelled());
+		assertEquals(0, snapshot.connectsNew() + snapshot.connectsFailed() + snapshot.closes());
+		assertReconciled(snapshot);
 	}
 
 	@Test
@@ -317,9 +399,71 @@ class SelectingConnectionPoolTest {
 
 	private SelectingConnectionPool pool(final List<InetSocketAddress> destinations, final boolean pooled,
 					final int idleLimit) {
+		return pool(destinations, pooled, idleLimit, new EndpointSelectionCounters());
+	}
+
+	private SelectingConnectionPool pool(final List<InetSocketAddress> destinations, final boolean pooled,
+					final int idleLimit, final EndpointSelectionCounters counters) {
 		final var pool = new SelectingConnectionPool(bootstrap, new NoopHandler());
-		pool.bind(new RoundRobinDestinations(destinations), pooled, idleLimit, 2_000, 2_000, new EndpointSelectionCounters());
+		pool.bind(new RoundRobinDestinations(destinations), pooled, idleLimit, 2_000, 2_000, counters);
 		return pool;
+	}
+
+	/** Every counted selection has exactly one outcome, and every established connection has closed. */
+	private static void assertReconciled(final EndpointSelectionCounters.Snapshot snapshot) {
+		final var selections = snapshot.selections().values().stream().mapToLong(Long::longValue).sum();
+		assertEquals(selections, snapshot.connectsNew() + snapshot.connectsReused() + snapshot.connectsFailed()
+						+ snapshot.connectsCancelled(), snapshot.toString());
+		assertEquals(snapshot.connectsNew(), snapshot.closes(), snapshot.toString());
+	}
+
+	/** Shuts the I/O loop down as a stopping driver does; every pending loop task and listener has run after. */
+	private void stopIoLoop() {
+		group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
+	}
+
+	/** Occupies the single I/O loop until the returned latch opens; work handed to the loop queues behind it. */
+	private CountDownLatch pauseIoLoop() throws InterruptedException {
+		final var running = new CountDownLatch(1);
+		final var resume = new CountDownLatch(1);
+		group.next().execute(() -> {
+			running.countDown();
+			try {
+				resume.await();
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		});
+		assertTrue(running.await(5, TimeUnit.SECONDS));
+		return resume;
+	}
+
+	private static InetSocketAddress refusedAddress() throws Exception {
+		try (final var socket = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
+			return new InetSocketAddress(InetAddress.getLoopbackAddress(), socket.getLocalPort());
+		}
+	}
+
+	/**
+	 * A loopback listener whose accept queue is full. Linux then drops further connection requests, so
+	 * a connect to it stays in flight. Aborts the test on a platform that answers or refuses instead.
+	 */
+	private InetSocketAddress unansweredAddress() throws Exception {
+		final var listener = new ServerSocket(0, 1, InetAddress.getLoopbackAddress());
+		resources.add(listener);
+		final var address = new InetSocketAddress(InetAddress.getLoopbackAddress(), listener.getLocalPort());
+		for (var i = 0; i < 8; i++) {
+			final var queued = new Socket();
+			resources.add(queued);
+			try {
+				queued.connect(address, 250);
+			} catch (final SocketTimeoutException full) {
+				return address;
+			} catch (final ConnectException refused) {
+				break;
+			}
+		}
+		return Assumptions.abort("this platform does not leave connects to a full listener in flight");
 	}
 
 	private Holder holder() throws Exception {

@@ -172,6 +172,13 @@ final class S3RangeEndpointSelectionTest {
 		assertEquals(2, snapshot.logical().accepted());
 		assertEquals(1, snapshot.logical().failed());
 		assertTrue(snapshot.reconciled());
+		// After the driver stops, each selection has one outcome and every opened connection has closed.
+		final var connections = run.driver.counters().snapshot();
+		assertEquals(1, connections.connectsFailed());
+		assertEquals(0, connections.connectsCancelled());
+		assertEquals(connections.selections().values().stream().mapToLong(Long::longValue).sum(),
+						connections.connectsNew() + connections.connectsReused() + connections.connectsFailed());
+		assertEquals(connections.connectsNew(), connections.closes());
 	}
 
 	@Test

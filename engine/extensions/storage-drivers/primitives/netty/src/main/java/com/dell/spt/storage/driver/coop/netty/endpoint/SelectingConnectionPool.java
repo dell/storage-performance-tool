@@ -84,10 +84,6 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 			this.callback = callback;
 		}
 
-		boolean isSettled() {
-			return state.get() != WAITING;
-		}
-
 		/** Reports a failure, cancelling a queued hand-off if necessary. False if already reported. */
 		boolean fail(final Throwable failure) {
 			while (true) {
@@ -194,10 +190,8 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 				return;
 			}
 		}
+		// An attempt that close() settled first reaches connect(), which counts it as cancelled.
 		selection.addListener((Future<InetSocketAddress> selected) -> {
-			if (attempt.isSettled()) {
-				return;
-			}
 			if (!selected.isSuccess()) {
 				attempt.fail(selected.cause());
 				return;
@@ -209,9 +203,14 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 		});
 	}
 
+	/**
+	 * Opens a connection for a counted selection and counts its outcome once. A connect that never
+	 * starts, or ends, while the pool is closed or the I/O loop is stopping is cancelled, not failed.
+	 */
 	private void connect(final Binding bound, final InetSocketAddress destination, final Pending attempt) {
 		final EventLoop loop = bootstrap.config().group().next();
 		if (closed || loop.isShuttingDown()) {
+			bound.counters().connectCancelled();
 			attempt.fail(closedFailure());
 			return;
 		}
@@ -235,18 +234,21 @@ public final class SelectingConnectionPool implements NonBlockingConnPool {
 		channel.attr(ATTR_KEY_DESTINATION).set(destination);
 		channel.attr(ATTR_KEY_NODE).set(destination.getAddress().getHostAddress() + ":" + destination.getPort());
 		openChannels.add(channel);
-		channel.closeFuture().addListener(ignored -> {
-			openChannels.remove(channel);
-			bound.counters().closed();
-		});
+		channel.closeFuture().addListener(ignored -> openChannels.remove(channel));
 		// If the loop terminates before this listener runs, close() settles the attempt instead.
 		connect.addListener(done -> {
 			if (!done.isSuccess()) {
-				bound.counters().connectFailed();
+				if (closed || loop.isShuttingDown()) {
+					bound.counters().connectCancelled();
+				} else {
+					bound.counters().connectFailed();
+				}
 				attempt.fail(done.cause());
 				return;
 			}
 			bound.counters().connected(false);
+			// Only established connections count as closed.
+			channel.closeFuture().addListener(ignored -> bound.counters().closed());
 			if (closed) {
 				attempt.fail(closedFailure());
 				final var unusedClose = channel.close();

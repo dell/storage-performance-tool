@@ -51,11 +51,12 @@ class EndpointSelectionCountersTest {
 		counters.connected(false);
 		counters.connected(true);
 		counters.connectFailed();
+		counters.connectCancelled();
 		counters.closed();
 
 		final var summary = counters.summary();
 
-		assertEquals("selections {10.0.0.1:9020=1}; connections new=1 reused=1 failed=1 closed=1", summary);
+		assertEquals("selections {10.0.0.1:9020=1}; connections new=1 reused=1 failed=1 cancelled=1 closed=1", summary);
 		assertFalse(summary.contains("DNS"));
 	}
 }
