@@ -174,7 +174,7 @@ class SelectingConnectionPoolTest {
 		try (final var socket = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
 			refusedPort = socket.getLocalPort();
 		}
-		final var pool = pool(List.of(new InetSocketAddress("127.0.0.1", refusedPort), live.address()), true, 4);
+		final var pool = pool(List.of(new InetSocketAddress(InetAddress.getLoopbackAddress(), refusedPort), live.address()), true, 4);
 
 		assertThrows(ConnectException.class, pool::lease);
 		assertEquals(0, live.accepted());
@@ -187,7 +187,7 @@ class SelectingConnectionPoolTest {
 		final var pool = new SelectingConnectionPool(bootstrap, new NoopHandler());
 		assertThrows(IllegalStateException.class, () -> pool.acquire((channel, failure) -> {}));
 
-		final var destinations = new RoundRobinDestinations(List.of(new InetSocketAddress("127.0.0.1", 9)));
+		final var destinations = new RoundRobinDestinations(List.of(new InetSocketAddress(InetAddress.getLoopbackAddress(), 9)));
 		pool.bind(destinations, true, 1, 1_000, 1_000, new EndpointSelectionCounters());
 		assertThrows(IllegalStateException.class, () -> pool.bind(destinations, true, 1, 1_000, 1_000, new EndpointSelectionCounters()));
 		pool.close();
@@ -208,7 +208,7 @@ class SelectingConnectionPoolTest {
 
 		pool.close();
 		// A selection that completes afterwards must not connect or report again.
-		selection.setSuccess(new InetSocketAddress("127.0.0.1", 9));
+		selection.setSuccess(new InetSocketAddress(InetAddress.getLoopbackAddress(), 9));
 
 		assertEquals(1, outcomes.size());
 		assertInstanceOf(ConnectException.class, outcomes.get(0));
@@ -244,7 +244,7 @@ class SelectingConnectionPoolTest {
 		final var channel = pool.connectUnpooled();
 
 		final var closing = System.nanoTime();
-		channel.close();
+		final var unusedClose = channel.close();
 
 		assertTrue(channel.isActive(), "the helper close must wait for the server first");
 		assertTrue(channel.closeFuture().await(5, TimeUnit.SECONDS));
@@ -346,7 +346,7 @@ class SelectingConnectionPoolTest {
 		}
 
 		InetSocketAddress address() {
-			return new InetSocketAddress("127.0.0.1", server.getLocalPort());
+			return new InetSocketAddress(InetAddress.getLoopbackAddress(), server.getLocalPort());
 		}
 
 		int accepted() throws InterruptedException {

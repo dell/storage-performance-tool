@@ -29,7 +29,7 @@ final class ServerCloseGraceHandler extends ChannelOutboundHandlerAdapter {
 	public void close(final ChannelHandlerContext ctx, final ChannelPromise promise) throws Exception {
 		final var channel = ctx.channel();
 		if (!Boolean.TRUE.equals(channel.attr(AWAIT_SERVER_CLOSE).get()) || !channel.isActive()) {
-			ctx.close(promise);
+			final var unusedClose = ctx.close(promise);
 			return;
 		}
 		channel.closeFuture().addListener(closed -> promise.trySuccess());
@@ -43,7 +43,7 @@ final class ServerCloseGraceHandler extends ChannelOutboundHandlerAdapter {
 			fallback = scheduled;
 			channel.closeFuture().addListener(closed -> scheduled.cancel(false));
 		} catch (final RejectedExecutionException e) {
-			ctx.close(promise);
+			final var unusedClose = ctx.close(promise);
 		}
 	}
 }

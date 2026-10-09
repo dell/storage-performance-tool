@@ -26,7 +26,7 @@ public final class HostDnsServers {
 		final List<InetSocketAddress> servers = new ArrayList<>();
 		final List<String> ignored = new ArrayList<>();
 		for (final var line : Files.readAllLines(resolvConf, StandardCharsets.UTF_8)) {
-			final var tokens = line.strip().split("\\s+");
+			final var tokens = line.strip().split("\\s+", -1);
 			if (tokens.length < 2 || !NAMESERVER.equals(tokens[0])) {
 				continue;
 			}

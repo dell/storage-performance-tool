@@ -30,6 +30,7 @@ import io.netty.handler.codec.dns.DnsSection;
 import io.netty.handler.codec.dns.TcpDnsQueryDecoder;
 import io.netty.handler.codec.dns.TcpDnsResponseEncoder;
 import java.net.BindException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -51,6 +52,7 @@ public final class ScriptedDnsServer implements AutoCloseable {
 	public record Received(Transport transport, String name, DnsRecordType type) {}
 
 	/** One record in a reply; {@code data} is already in wire form. */
+	@SuppressWarnings("ArrayRecordComponent") // Only wrapped for the wire; records are never compared.
 	public record Rr(DnsSection section, String name, DnsRecordType type, long ttl, byte[] data) {}
 
 	/** A scripted reply; {@code null} from the script means "drop the query". */
@@ -98,7 +100,7 @@ public final class ScriptedDnsServer implements AutoCloseable {
 			}
 		}
 		if (boundTcp == null) {
-			group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS);
+			final var unusedShutdown = group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS);
 			throw new IllegalStateException("No free UDP+TCP port pair for the scripted DNS server");
 		}
 		this.udp = boundUdp;
@@ -128,7 +130,7 @@ public final class ScriptedDnsServer implements AutoCloseable {
 
 	public static byte[] wireName(final String name) {
 		final var out = new java.io.ByteArrayOutputStream();
-		for (final var label : name.split("\\.")) {
+		for (final var label : name.split("\\.", -1)) {
 			if (label.isEmpty()) {
 				continue;
 			}
@@ -159,7 +161,7 @@ public final class ScriptedDnsServer implements AutoCloseable {
 												});
 							}
 						})
-						.bind(new InetSocketAddress("127.0.0.1", 0))
+						.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0))
 						.sync()
 						.channel();
 	}
@@ -182,7 +184,7 @@ public final class ScriptedDnsServer implements AutoCloseable {
 												});
 							}
 						})
-						.bind(new InetSocketAddress("127.0.0.1", port))
+						.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), port))
 						.sync()
 						.channel();
 	}
@@ -207,9 +209,11 @@ public final class ScriptedDnsServer implements AutoCloseable {
 			response.addRecord(rr.section(), new DefaultDnsRawRecord(rr.name(), rr.type(), rr.ttl(), data));
 		}
 		if (reply.delayMillis() > 0) {
-			ctx.executor().schedule(() -> ctx.writeAndFlush(response), reply.delayMillis(), TimeUnit.MILLISECONDS);
+			final var unusedReply = ctx.executor().schedule(() -> {
+				final var unusedWrite = ctx.writeAndFlush(response);
+			}, reply.delayMillis(), TimeUnit.MILLISECONDS);
 		} else {
-			ctx.writeAndFlush(response);
+			final var unusedWrite = ctx.writeAndFlush(response);
 		}
 	}
 

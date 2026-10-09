@@ -75,7 +75,7 @@ public final class PerRequestDnsResolver implements AutoCloseable {
 							.queryTimeoutMillis(Math.max(1, timeoutMillis / this.servers.size()))
 							.build();
 		} catch (final RuntimeException e) {
-			group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS);
+			final var unusedShutdown = group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS);
 			throw e;
 		}
 	}

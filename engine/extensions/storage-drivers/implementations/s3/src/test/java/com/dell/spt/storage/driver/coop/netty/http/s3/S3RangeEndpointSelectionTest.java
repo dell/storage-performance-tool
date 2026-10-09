@@ -577,7 +577,7 @@ final class S3RangeEndpointSelectionTest {
 				exchange.getResponseBody().write(error);
 				return;
 			}
-			final var bounds = range.substring("bytes=".length()).split("-");
+			final var bounds = range.substring("bytes=".length()).split("-", -1);
 			final var length = Integer.parseInt(bounds[1]) - Integer.parseInt(bounds[0]) + 1;
 			exchange.getResponseHeaders().set("Content-Range", "bytes " + bounds[0] + "-" + bounds[1] + "/" + OBJECT_SIZE);
 			exchange.sendResponseHeaders(206, length);
@@ -613,7 +613,7 @@ final class S3RangeEndpointSelectionTest {
 
 		private static final int HOLD_MILLIS = 300;
 
-		private final ServerSocket socket = new ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"));
+		private final ServerSocket socket = new ServerSocket(0, 8, InetAddress.getLoopbackAddress());
 		private final Thread acceptor;
 		private volatile boolean clientClosedFirst;
 

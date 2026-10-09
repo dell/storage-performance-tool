@@ -114,10 +114,10 @@ final class S3EndpointSelectionRoundRobinTest {
 		assertEquals(List.of("HEAD", "PUT", "HEAD", "GET", "DELETE"), requests.stream().map(Captured::method).toList());
 		assertEquals(List.of(0, 1, 2, 0, 1), listenerSequence());
 		for (final var request : requests) {
-			final var port = endpoints.get(request.listener()).split(":")[1];
+			final var port = endpoints.get(request.listener()).split(":", -1)[1];
 			if ("HEAD".equals(request.method())) {
 				// Helpers sign before a connection exists, so their Host carries the first endpoint's port.
-				assertEquals(HOSTNAME + ":" + endpoints.get(0).split(":")[1], request.host());
+				assertEquals(HOSTNAME + ":" + endpoints.get(0).split(":", -1)[1], request.host());
 			} else {
 				assertEquals(HOSTNAME + ":" + port, request.host());
 			}
@@ -325,7 +325,7 @@ final class S3EndpointSelectionRoundRobinTest {
 		assertTrue(abort.query().contains("uploadId=upload-1"), abort.query());
 		// HEAD, INIT, three parts, failed complete, abort on the next turn.
 		assertEquals(List.of(0, 1, 2, 0, 1, 2, 0), listenerSequence());
-		assertEquals(HOSTNAME + ":" + endpoints.get(0).split(":")[1], abort.host());
+		assertEquals(HOSTNAME + ":" + endpoints.get(0).split(":", -1)[1], abort.host());
 	}
 
 	@Test
@@ -483,7 +483,7 @@ final class S3EndpointSelectionRoundRobinTest {
 				return;
 			}
 			if ("GET".equals(method) && range != null) {
-				final var bounds = range.substring("bytes=".length()).split("-");
+				final var bounds = range.substring("bytes=".length()).split("-", -1);
 				final var first = Long.parseLong(bounds[0]);
 				final var last = Long.parseLong(bounds[1]);
 				exchange.getResponseHeaders().set("Content-Range", "bytes " + first + "-" + last + "/" + 3 * ITEM_SIZE);
