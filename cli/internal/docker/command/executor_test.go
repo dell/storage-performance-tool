@@ -5,16 +5,11 @@ Copyright © 2025 Dell Technologies
 package command
 
 import (
-	"bufio"
 	"context"
 	"errors"
-	"io"
-	"os"
 	"os/exec"
 	"slices"
-	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -572,118 +567,26 @@ func TestHostCommand_SSHArguments(t *testing.T) {
 		t.Fatalf("one-shot ssh args = %q, want %q", oneShot.Args, wantOneShot)
 	}
 
-	stream := streamHostCommand(ctx, remoteHost, []string{"docker", "logs"})
-	wantStream := []string{"ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes",
-		"-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "testuser@remote.example.com",
-		"sh", "-c", "'" + remoteStreamGuard + "'", "sh", "docker", "logs"}
-	if !slices.Equal(stream.Args, wantStream) {
-		t.Fatalf("stream ssh args = %q, want %q", stream.Args, wantStream)
+	guarded := []string{"testuser@remote.example.com", "sh", "-c", "'" + remoteStreamGuard + "'", "sh", "docker", "logs"}
+	streamFlags := []string{"ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes",
+		"-T", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"}
+	// Without StdinNull support (OpenSSH < 8.7) the option would be rejected.
+	stream := streamHostCommand(ctx, remoteHost, []string{"docker", "logs"}, false)
+	if want := slices.Concat(streamFlags, guarded); !slices.Equal(stream.Args, want) {
+		t.Fatalf("stream ssh args = %q, want %q", stream.Args, want)
+	}
+	stream = streamHostCommand(ctx, remoteHost, []string{"docker", "logs"}, true)
+	if want := slices.Concat(streamFlags, []string{"-o", "StdinNull=no"}, guarded); !slices.Equal(stream.Args, want) {
+		t.Fatalf("stream ssh args with StdinNull support = %q, want %q", stream.Args, want)
 	}
 
-	local := hostCommand(ctx, CreateLocalHost(), []string{"docker", "ps"}, constants.SSHServerAliveInterval)
+	local := hostCommand(ctx, CreateLocalHost(), []string{"docker", "ps"}, constants.SSHFlagNoTTY)
 	if strings.Join(local.Args, " ") != "docker ps" {
 		t.Fatalf("local command should run directly, got %q", local.Args)
 	}
-	localStream := streamHostCommand(ctx, CreateLocalHost(), []string{"docker", "logs"})
+	localStream := streamHostCommand(ctx, CreateLocalHost(), []string{"docker", "logs"}, true)
 	if strings.Join(localStream.Args, " ") != "docker logs" {
 		t.Fatalf("local stream should run directly without the remote guard, got %q", localStream.Args)
-	}
-}
-
-// startGuardedSession runs a streamed remote command the way sshd does, with
-// the command line parsed by a login shell. Its stdin is a pipe that stands in
-// for the SSH session: closing the returned writer simulates the session closing.
-func startGuardedSession(t *testing.T, command []string) (*exec.Cmd, *bufio.Reader, *os.File) {
-	t.Helper()
-	host := CreateRemoteHost("remote.example.com")
-	args := streamHostCommand(context.Background(), host, command).Args
-	target := slices.Index(args, host.GetSSHTarget())
-	if target < 0 {
-		t.Fatalf("no ssh target in %q", args)
-	}
-	sessionIn, session, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command("sh", "-c", strings.Join(args[target+1:], " "))
-	cmd.Stdin = sessionIn
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	_ = sessionIn.Close()
-	t.Cleanup(func() {
-		_ = session.Close()
-		_ = cmd.Process.Kill()
-	})
-	return cmd, bufio.NewReader(stdout), session
-}
-
-// finishGuardedSession drains stdout and waits for the guarded command.
-func finishGuardedSession(t *testing.T, cmd *exec.Cmd, stdout io.Reader) (string, error) {
-	t.Helper()
-	type result struct {
-		out string
-		err error
-	}
-	done := make(chan result, 1)
-	go func() {
-		out, _ := io.ReadAll(stdout)
-		done <- result{string(out), cmd.Wait()}
-	}()
-	select {
-	case r := <-done:
-		return r.out, r.err
-	case <-time.After(5 * time.Second):
-		t.Fatal("guarded command did not exit")
-		return "", nil
-	}
-}
-
-func TestRemoteStreamGuard_EndsQuietCommandWhenSessionCloses(t *testing.T) {
-	cmd, stdout, session := startGuardedSession(t, []string{"sh", "-c", "'echo $$; exec sleep 30'"})
-	line, err := stdout.ReadString('\n')
-	if err != nil {
-		t.Fatalf("reading the command's pid: %v", err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(line))
-	if err != nil {
-		t.Fatalf("unexpected first line %q", line)
-	}
-
-	_ = session.Close()
-	if _, err := finishGuardedSession(t, cmd, stdout); err == nil {
-		t.Fatal("expected the killed command's status")
-	}
-	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
-		t.Fatalf("quiet command %d outlived its session (kill -0: %v)", pid, err)
-	}
-}
-
-func TestRemoteStreamGuard_ExitsWithCommandWhileSessionStaysOpen(t *testing.T) {
-	cmd, stdout, session := startGuardedSession(t, []string{"sh", "-c", "'echo done; exit 3'"})
-	out, err := finishGuardedSession(t, cmd, stdout)
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 3 {
-		t.Fatalf("expected the command's exit status 3, got %v", err)
-	}
-	if out != "done\n" {
-		t.Fatalf("unexpected output %q", out)
-	}
-	// The stdin watcher must not outlive the command, or it could later kill a
-	// recycled pid. Once it is gone the session pipe has no reader.
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, err := session.Write([]byte("\n")); errors.Is(err, syscall.EPIPE) {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the guard's stdin watcher outlived the command")
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 

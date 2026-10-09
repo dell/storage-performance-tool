@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Changed
 
-- **Remote entry-node log relay** — Entry-node output now arrives over one `docker logs --follow` SSH session instead of a new SSH session twice a second, reducing CPU load on the entry host.
+- **Remote entry-node log relay** — Entry-node output now arrives over one `docker logs --follow` SSH session instead of a new SSH session twice a second, reducing CPU load on the entry host. The console still shows only the engine's stdout; its stderr (such as JVM and logging warnings) is kept only in the CLI log, and only with `--log-level debug`.
 
 ### Fixed
 

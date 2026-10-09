@@ -51,6 +51,10 @@ const (
 	// Keepalives let a quiet long-lived session detect a dead peer instead of hanging.
 	SSHServerAliveInterval = "ServerAliveInterval=15"
 	SSHServerAliveCountMax = "ServerAliveCountMax=3"
+	// Streams need stderr kept separate and stdin kept open whatever the client
+	// config says: -T refuses a pty, and StdinNull=no (OpenSSH 8.7+) keeps stdin.
+	SSHFlagNoTTY   = "-T"
+	SSHStdinNullNo = "StdinNull=no"
 )
 
 // Docker format string constants

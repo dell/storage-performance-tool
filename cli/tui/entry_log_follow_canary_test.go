@@ -7,12 +7,14 @@ import (
 	"errors"
 	"os"
 	osexec "os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 )
@@ -92,6 +94,8 @@ func TestRemoteLogFetcherDockerCanary(t *testing.T) {
 // Docker host over SSH. It proves that the stream still ends when the
 // container stops although the session's stdin is held open, and that
 // cancelling the relay of a quiet container leaves no follower on the host.
+// It repeats both checks under a client config that forces a pty and, where
+// the client supports it, a null stdin: the stream must override both.
 //
 //	SPT_TEST_SSH_HOST=<user@host> SPT_TEST_DOCKER_IMAGE=<image with sh on that host> \
 //	  go test -tags docker_log_follow_canary ./tui -run SSHCanary
@@ -104,6 +108,35 @@ func TestRemoteLogFetcherSSHCanary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Run("default client config", func(t *testing.T) { sshFollowCanary(t, host, image) })
+	t.Run("client config forces pty and null stdin", func(t *testing.T) {
+		realSSH, err := osexec.LookPath(constants.SSHCommand)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		config := "RequestTTY force\n"
+		if osexec.Command(realSSH, "-G", "-F", os.DevNull, "-o", "StdinNull=yes", "spt-ssh-probe.invalid").Run() == nil {
+			config += "StdinNull yes\n"
+		} else {
+			t.Log("ssh client predates StdinNull; checking the forced pty only")
+		}
+		// First obtained value wins, so these override the user's own config.
+		config += "Include ~/.ssh/config\n"
+		configPath := filepath.Join(dir, "ssh_config")
+		wrapper := "#!/bin/sh\nexec '" + realSSH + "' -F '" + configPath + "' \"$@\"\n"
+		if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, constants.SSHCommand), []byte(wrapper), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		sshFollowCanary(t, host, image)
+	})
+}
+
+func sshFollowCanary(t *testing.T, host *hostparse.HostInfo, image string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	exec := command.NewCommandExecutor()

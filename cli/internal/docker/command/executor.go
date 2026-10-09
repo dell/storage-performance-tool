@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -83,7 +84,7 @@ func (r *RealCommandExecutor) StreamCommand(ctx context.Context, host *hostparse
 	if len(command) == 0 {
 		return fmt.Errorf("empty command")
 	}
-	cmd := streamHostCommand(ctx, host, command)
+	cmd := streamHostCommand(ctx, host, command, !host.IsLocal && sshSupportsStdinNull())
 	if !host.IsLocal {
 		// Hold the session's stdin open until the command ends: the remote guard
 		// treats its EOF as the session closing.
@@ -120,28 +121,49 @@ const remoteStreamGuard = `exec 3<&0 </dev/null; "$@" & p=$!; ` +
 	`wait "$p"; s=$?; kill "$w" 2>/dev/null; exit "$s"`
 
 // streamHostCommand builds a streamed command: run directly when local, or over
-// SSH with keepalives under remoteStreamGuard. The single-quoted guard reaches
-// sh as one word after the remote login shell parses the command line.
-func streamHostCommand(ctx context.Context, host *hostparse.HostInfo, command []string) *exec.Cmd {
+// SSH under remoteStreamGuard. The SSH session has keepalives, no pty (which
+// would merge stderr into stdout), and, when the client supports the option, an
+// explicit StdinNull=no so client config cannot close the stdin the guard
+// watches. The single-quoted guard reaches sh as one word after the remote
+// login shell parses the command line.
+func streamHostCommand(ctx context.Context, host *hostparse.HostInfo, command []string, supportsStdinNull bool) *exec.Cmd {
 	if host.IsLocal {
 		return hostCommand(ctx, host, command)
 	}
+	sshFlags := []string{constants.SSHFlagNoTTY,
+		"-o", constants.SSHServerAliveInterval, "-o", constants.SSHServerAliveCountMax}
+	if supportsStdinNull {
+		sshFlags = append(sshFlags, "-o", constants.SSHStdinNullNo)
+	}
 	guarded := append([]string{"sh", "-c", "'" + remoteStreamGuard + "'", "sh"}, command...)
-	return hostCommand(ctx, host, guarded, constants.SSHServerAliveInterval, constants.SSHServerAliveCountMax)
+	return hostCommand(ctx, host, guarded, sshFlags...)
+}
+
+// sshSupportsStdinNull reports, once per process, whether the local ssh client
+// accepts StdinNull (OpenSSH 8.7+). Older clients cannot null stdin from config
+// either, so they keep it open without the option.
+var sshSupportsStdinNull = sync.OnceValue(func() bool {
+	return sshAcceptsOption(constants.SSHCommand, constants.SSHStdinNullNo)
+})
+
+// sshAcceptsOption reports whether the ssh client accepts option. It only
+// prints the configuration for a placeholder host from an empty config file,
+// so it neither reads user config nor connects.
+func sshAcceptsOption(sshCommand, option string) bool {
+	// #nosec G204: probes the configured ssh client with a constant option
+	return exec.Command(sshCommand, "-G", "-F", os.DevNull, "-o", option, "spt-ssh-probe.invalid").Run() == nil
 }
 
 // hostCommand builds command for local execution or wraps it in ssh for a
-// remote host. extraSSHOptions are appended as additional -o options.
-func hostCommand(ctx context.Context, host *hostparse.HostInfo, command []string, extraSSHOptions ...string) *exec.Cmd {
+// remote host. sshFlags go after the default options, before the target.
+func hostCommand(ctx context.Context, host *hostparse.HostInfo, command []string, sshFlags ...string) *exec.Cmd {
 	if host.IsLocal {
 		// #nosec G204: command and arguments originate from trusted spt constructors
 		return exec.CommandContext(ctx, command[0], command[1:]...)
 	}
-	sshOptions := append([]string{constants.SSHConnectTimeout, constants.SSHBatchMode}, extraSSHOptions...)
-	sshArgs := make([]string, 0, 2*len(sshOptions)+1+len(command))
-	for _, option := range sshOptions {
-		sshArgs = append(sshArgs, "-o", option)
-	}
+	sshArgs := make([]string, 0, 5+len(sshFlags)+len(command))
+	sshArgs = append(sshArgs, "-o", constants.SSHConnectTimeout, "-o", constants.SSHBatchMode)
+	sshArgs = append(sshArgs, sshFlags...)
 	sshArgs = append(sshArgs, host.GetSSHTarget())
 	sshArgs = append(sshArgs, command...)
 	// #nosec G204: SSH used intentionally with constructed args
