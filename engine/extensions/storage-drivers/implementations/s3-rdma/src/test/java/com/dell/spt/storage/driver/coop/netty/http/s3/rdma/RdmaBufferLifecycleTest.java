@@ -43,8 +43,10 @@ class RdmaBufferLifecycleTest {
 		final var pooled = track(driver, op);
 		final var channel = new EmbeddedChannel();
 		channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.TRUE);
-		invoke(driver, "bindRequestChannel", new Class<?>[]{io.netty.channel.Channel.class, Operation.class}, channel, op);
-		invoke(driver, "onRequestDispatched", new Class<?>[]{io.netty.channel.Channel.class, Operation.class}, channel, op);
+		invoke(driver, "bindRequestChannel", new Class<?>[]{io.netty.channel.Channel.class, Operation.class
+		}, channel, op);
+		invoke(driver, "onRequestDispatched", new Class<?>[]{io.netty.channel.Channel.class, Operation.class
+		}, channel, op);
 		Thread.sleep(5);
 
 		invoke(driver, "reapTimedOutOps", new Class<?>[0]);
@@ -83,7 +85,8 @@ class RdmaBufferLifecycleTest {
 		driver.start();
 
 		try {
-			invoke(driver, "submitRdma", new Class<?>[]{Operation.class}, op(OpType.READ));
+			invoke(driver, "submitRdma", new Class<?>[]{Operation.class
+			}, op(OpType.READ));
 		} catch (final InvocationTargetException expected) {
 			// publication failure may propagate
 		}
