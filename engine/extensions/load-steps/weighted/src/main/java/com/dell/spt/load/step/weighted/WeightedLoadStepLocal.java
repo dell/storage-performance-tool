@@ -206,7 +206,7 @@ public class WeightedLoadStepLocal extends LoadStepLocalBase {
 
 						// Overwrite step config with sub step config
 						ThreadContext.put(Constants.KEY_STEP_ID, testStepId);
-						Loggers.CONFIG.info(ConfigUtil.toString(subConfig, ConfigFormat.YAML, getTypeName()));
+						Loggers.CONFIG.info(ConfigUtil.toMaskedString(subConfig, ConfigFormat.YAML, getTypeName()));
 					} catch (final IllegalConfigurationException e) {
 						throw new IllegalStateException("Failed to initialize the load generator", e);
 					}
