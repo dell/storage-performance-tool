@@ -158,7 +158,8 @@ class RdmaBufferPoolTest {
 	void exhaustedUnpooledAllocationReclaimsIdleBuffersAndRetriesOnce() {
 		final var pool = new RdmaBufferPool(transport, 4, UNBOUNDED);
 		pool.release(pool.acquire(MIB));
-		final int[] calls = {0};
+		final int[] calls = {0
+		};
 
 		final ByteBuffer allocated = RdmaBufferPool.allocateUnpooled(4096, pool, size -> {
 			if (calls[0]++ == 0) {
@@ -175,7 +176,8 @@ class RdmaBufferPoolTest {
 	@Test
 	void exhaustedUnpooledAllocationWithNothingToReclaimFails() {
 		final var pool = new RdmaBufferPool(transport, 4, UNBOUNDED);
-		final int[] calls = {0};
+		final int[] calls = {0
+		};
 		final java.util.function.IntFunction<ByteBuffer> exhausted = size -> {
 			calls[0]++;
 			throw new OutOfMemoryError("Cannot reserve direct buffer memory");

@@ -473,8 +473,7 @@ final class S3RdmaReplyLoopbackTest {
 			assertTrue(filled.integrityVerificationResult().verified());
 
 			for (int attempt = 1; attempt <= 2; attempt++) {
-				final Operation<DataItem> unwritten =
-								read(driver, output, SIZE, new Reply(200, "200", Integer.toString(SIZE), null, false));
+				final Operation<DataItem> unwritten = read(driver, output, SIZE, new Reply(200, "200", Integer.toString(SIZE), null, false));
 				assertEquals(Operation.Status.RESP_FAIL_CORRUPT, unwritten.status(), "unwritten GET " + attempt);
 			}
 			assertEquals(1, driver.bufferPool().hits.sum(), "only the verified fill's buffer is reused");
@@ -505,7 +504,7 @@ final class S3RdmaReplyLoopbackTest {
 	void informationalResponseDoesNotReturnTheBufferToThePool() throws Exception {
 		// The server may access the buffer until its final response; a 1xx does not end the request.
 		try (final ServerSocket raw = new ServerSocket(0, 0, InetAddress.getLoopbackAddress());
-				final var driver = newDriver(false, config -> config.val("storage-net-node-port", raw.getLocalPort()))) {
+						final var driver = newDriver(false, config -> config.val("storage-net-node-port", raw.getLocalPort()))) {
 			final Thread responder = Thread.ofVirtual().start(() -> serveContinueThenOk(raw));
 			try {
 				execute(driver, op(OpType.CREATE, SIZE));

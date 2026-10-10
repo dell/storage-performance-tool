@@ -22,11 +22,11 @@ public final class RdmaDirectMemoryCanary {
 		final var pool = new RdmaBufferPool(transport, 4, budget);
 		fillWithIdleBuffers(pool, budget);
 		final String result = switch (args[0]) {
-			case "plain" -> plainAllocation(request);
-			case "reclaim" -> RdmaBufferPool.allocateUnpooled(request, pool, ByteBuffer::allocateDirect) == null
-							? "exhausted"
-							: "allocated idle=" + pool.idleBuffers();
-			default -> throw new IllegalArgumentException(args[0]);
+		case "plain" -> plainAllocation(request);
+		case "reclaim" -> RdmaBufferPool.allocateUnpooled(request, pool, ByteBuffer::allocateDirect) == null
+						? "exhausted"
+						: "allocated idle=" + pool.idleBuffers();
+		default -> throw new IllegalArgumentException(args[0]);
 		};
 		System.out.println(RESULT_PREFIX + result);
 	}
