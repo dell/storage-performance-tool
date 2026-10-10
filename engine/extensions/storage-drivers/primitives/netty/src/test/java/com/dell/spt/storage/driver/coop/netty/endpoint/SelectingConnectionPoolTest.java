@@ -156,6 +156,8 @@ class SelectingConnectionPoolTest {
 		assertTrue(channel.closeFuture().await(5, TimeUnit.SECONDS));
 
 		pool.release(channel);
+		// closeFuture() wakes its waiters before the loop runs the listener that untracks the connection.
+		channel.eventLoop().submit(() -> {}).get(5, TimeUnit.SECONDS);
 
 		assertEquals(0, pool.openChannelCount());
 		pool.close();
