@@ -1,6 +1,7 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 
 import static com.dell.spt.base.Constants.APP_NAME;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -66,6 +67,7 @@ import org.junit.jupiter.api.Test;
 final class S3RdmaReplyLoopbackTest {
 
 	private static final long RESULT_TIMEOUT_SECONDS = 5;
+	private static final String STEP_ID = "s3-rdma-reply-loopback";
 	private static final Credential CREDENTIAL = Credential.getInstance("access", "secret");
 	private static final int SIZE = 4096;
 	private static final long THRESHOLD = 1024;
@@ -518,6 +520,44 @@ final class S3RdmaReplyLoopbackTest {
 		}
 	}
 
+	// ---------- PUT payload copy ----------
+
+	@Test
+	void putCopiedOnSeveralThreadsSendsTheSameBytesAndEndsItsThreadsOnClose() throws Exception {
+		reply = new Reply(200, "200", null, null, true);
+		final int copyThreads = 3;
+		final int size = copyThreads * RdmaPayloadCopier.PART_BYTES + 4097;
+		final byte[] copiedByTheDispatcher;
+		try (final var driver = newDriver(false)) {
+			assertEquals(Operation.Status.SUCC, execute(driver, op(OpType.CREATE, size)).status());
+			copiedByTheDispatcher = serverReadPayload;
+			assertEquals(0, copyThreadsAlive(), "the shipped default starts no copy thread");
+		}
+		final RdmaPayloadCopier copier;
+		try (final var driver = newDriver(false, config -> config.val("storage-rdma-copyThreads", copyThreads))) {
+			copier = driver.payloadCopier();
+			final var results = executeInSequence(driver, List.of(op(OpType.CREATE, size), op(OpType.CREATE, size)));
+
+			results.forEach(result -> assertEquals(Operation.Status.SUCC, result.status()));
+			assertEquals(size, ((DataOperation<?>) results.get(1)).countBytesDone());
+			assertArrayEquals(copiedByTheDispatcher, serverReadPayload);
+			assertEquals(copyThreads - 1, copyThreadsAlive(), "the dispatcher copies one part itself");
+			assertNoBufferInUse(driver);
+		}
+		assertTrue(copier.isTerminated());
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+		while (copyThreadsAlive() > 0 && System.nanoTime() < deadline) {
+			Thread.sleep(10);
+		}
+		assertEquals(0, copyThreadsAlive(), "closing the driver ends its copy threads");
+	}
+
+	private static long copyThreadsAlive() {
+		return Thread.getAllStackTraces().keySet().stream()
+						.filter(thread -> thread.isAlive() && thread.getName().startsWith(STEP_ID + "-rdma-copy-"))
+						.count();
+	}
+
 	private static void integrityMode(final Config config) {
 		config.val("storage-driver-type", "s3-rdma");
 		config.val("storage-integrity-mode", "metadata");
@@ -851,7 +891,7 @@ final class S3RdmaReplyLoopbackTest {
 		final RdmaConfig rdmaConfig = new RdmaConfig(config.configVal("storage").configVal("rdma"));
 		transport = new FakeRdmaTransport(rdmaConfig);
 		return new S3RdmaStorageDriver<>(
-						"s3-rdma-reply-loopback",
+						STEP_ID,
 						DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false, 0.0, true),
 						config.configVal("storage"),
 						false,

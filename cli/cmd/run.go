@@ -2282,6 +2282,8 @@ Shorthand: --use-rdma is equivalent to --s3-driver rdma. (env: SPT_S3_DRIVER)`)
 		"Legacy servers: accept RDMA GET successes without x-amz-rdma-bytes-transferred and count the requested size (env: RDMA_ALLOW_MISSING_BYTES_HEADER)")
 	runCmd.Flags().Bool("rdma-buffer-pool", true,
 		"Reuse registered RDMA buffers across operations; false registers a buffer per operation (env: RDMA_BUFFER_POOL)")
+	runCmd.Flags().Int("rdma-copy-threads", 1,
+		"Threads copying one RDMA PUT payload into its buffer; 1 copies on the dispatcher thread alone (env: RDMA_COPY_THREADS)")
 
 	// Checksum Options
 	runCmd.Flags().String("checksum", "",
@@ -2583,6 +2585,11 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		params.RdmaAllowMissingBytesHeader, _ = cmd.Flags().GetBool("rdma-allow-missing-bytes-header")
 		bufferPool, _ := cmd.Flags().GetBool("rdma-buffer-pool")
 		params.RdmaDisableBufferPool = !bufferPool
+		copyThreads, _ := cmd.Flags().GetInt("rdma-copy-threads")
+		if copyThreads < 1 {
+			return params, fmt.Errorf("invalid --rdma-copy-threads value %d: must be at least 1", copyThreads)
+		}
+		params.RdmaCopyThreads = copyThreads
 	}
 
 	// Checksum validation

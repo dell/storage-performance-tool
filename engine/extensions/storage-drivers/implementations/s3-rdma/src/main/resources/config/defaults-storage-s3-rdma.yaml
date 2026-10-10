@@ -23,3 +23,4 @@ storage:
     timeoutMs: 30000
     allowMissingBytesHeader: false
     bufferPool: true
+    copyThreads: 1

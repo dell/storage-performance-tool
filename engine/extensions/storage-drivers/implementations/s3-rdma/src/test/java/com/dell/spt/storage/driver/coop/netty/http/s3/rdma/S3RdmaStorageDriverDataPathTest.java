@@ -31,7 +31,7 @@ import static org.junit.jupiter.api.Assertions.*;
  *
  * <p>Uses {@link FakeRdmaTransport} to simulate RDMA operations and verify:
  * <ul>
- *   <li>Buffer data copy ({@code transferDataItemToBuffer})</li>
+ *   <li>Buffer data copy ({@code RdmaPayloadCopier}, as the driver uses it)</li>
  *   <li>Resource lifecycle tracking (register → deregister)</li>
  *   <li>Failure injection and fallback behavior</li>
  * </ul>
@@ -149,10 +149,10 @@ public class S3RdmaStorageDriverDataPathTest {
 		assertEquals(0, fake.getActiveRegistrationCount(), "Close should clear registrations");
 	}
 
-	// ---------- transferDataItemToBuffer ----------
+	// ---------- payload copy ----------
 
 	@Test
-	void testTransferDataItemToBuffer_copiesCorrectData() throws Exception {
+	void testPayloadCopy_copiesCorrectData() throws Exception {
 		final DataInput dataInput = new SeedDataInput(SEED, LAYER_SIZE, 1, false);
 		final int size = 256;
 
@@ -168,11 +168,11 @@ public class S3RdmaStorageDriverDataPathTest {
 		expected.put(ringBuf);
 		expected.flip();
 
-		// Now invoke transferDataItemToBuffer via the driver
+		// Now copy through the driver's payload copier
 		final var driver = newDriver(enabledConfig(), new FakeRdmaTransport(enabledConfig()));
 		final ByteBuffer actual = ByteBuffer.allocateDirect(size);
 
-		invokeTransferDataItemToBuffer(driver, item, actual, size);
+		copyPayload(driver, item, actual, size);
 
 		// Compare contents byte by byte
 		expected.rewind();
@@ -184,7 +184,7 @@ public class S3RdmaStorageDriverDataPathTest {
 	}
 
 	@Test
-	void testTransferDataItemToBuffer_fillsEntireBuffer() throws Exception {
+	void testPayloadCopy_fillsEntireBuffer() throws Exception {
 		final DataInput dataInput = new SeedDataInput(SEED, LAYER_SIZE, 1, false);
 		final int size = 1024;
 
@@ -194,7 +194,7 @@ public class S3RdmaStorageDriverDataPathTest {
 		final var driver = newDriver(enabledConfig(), new FakeRdmaTransport(enabledConfig()));
 		final ByteBuffer buf = ByteBuffer.allocateDirect(size);
 
-		invokeTransferDataItemToBuffer(driver, item, buf, size);
+		copyPayload(driver, item, buf, size);
 
 		// After the method, buffer should be flipped: position=0, limit=size
 		assertEquals(0, buf.position(), "Buffer should be flipped (position=0)");
@@ -203,7 +203,7 @@ public class S3RdmaStorageDriverDataPathTest {
 	}
 
 	@Test
-	void testTransferDataItemToBuffer_smallSize() throws Exception {
+	void testPayloadCopy_smallSize() throws Exception {
 		final DataInput dataInput = new SeedDataInput(SEED, LAYER_SIZE, 1, false);
 		final int size = 1;
 
@@ -213,7 +213,7 @@ public class S3RdmaStorageDriverDataPathTest {
 		final var driver = newDriver(enabledConfig(), new FakeRdmaTransport(enabledConfig()));
 		final ByteBuffer buf = ByteBuffer.allocateDirect(size);
 
-		invokeTransferDataItemToBuffer(driver, item, buf, size);
+		copyPayload(driver, item, buf, size);
 
 		assertEquals(1, buf.remaining());
 		// Verify the single byte matches the data input
@@ -223,7 +223,7 @@ public class S3RdmaStorageDriverDataPathTest {
 	}
 
 	@Test
-	void testTransferDataItemToBuffer_nonZeroOffset() throws Exception {
+	void testPayloadCopy_nonZeroOffset() throws Exception {
 		final DataInput dataInput = new SeedDataInput(SEED, LAYER_SIZE, 1, false);
 		final int size = 128;
 		final long offset = 512;
@@ -242,7 +242,7 @@ public class S3RdmaStorageDriverDataPathTest {
 		final var driver = newDriver(enabledConfig(), new FakeRdmaTransport(enabledConfig()));
 		final ByteBuffer actual = ByteBuffer.allocateDirect(size);
 
-		invokeTransferDataItemToBuffer(driver, item, actual, size);
+		copyPayload(driver, item, actual, size);
 
 		expected.rewind();
 		actual.rewind();
@@ -520,13 +520,10 @@ public class S3RdmaStorageDriverDataPathTest {
 		return ctor.newInstance(token, buffer, mrHandle, opType, size);
 	}
 
-	private static void invokeTransferDataItemToBuffer(
+	private static void copyPayload(
 					final S3RdmaStorageDriver<?, ?> driver,
 					final DataItem item, final ByteBuffer dst, final int size) throws Exception {
-		final Method m = S3RdmaStorageDriver.class.getDeclaredMethod(
-						"transferDataItemToBuffer", DataItem.class, ByteBuffer.class, int.class);
-		m.setAccessible(true);
-		m.invoke(driver, item, dst, size);
+		driver.payloadCopier().copy(item, dst, size);
 	}
 
 	private static boolean invokeCleanupRdmaContext(

@@ -189,6 +189,15 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 			_ = setFromEnv("rdma-timeout-ms", v)
 		}
 	}
+	// RDMA copy threads (integer, at least 1)
+	if f := cmd.Flags().Lookup("rdma-copy-threads"); f != nil && !cmd.Flags().Changed("rdma-copy-threads") {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvRdmaCopyThreads)); v != "" {
+			if n, err := strconv.Atoi(v); err != nil || n < 1 {
+				return fmt.Errorf("invalid %s value %q: must be an integer of at least 1", constants.EnvRdmaCopyThreads, v)
+			}
+			_ = setFromEnv("rdma-copy-threads", v)
+		}
+	}
 
 	// RDMA bool settings
 	for flag, env := range map[string]string{

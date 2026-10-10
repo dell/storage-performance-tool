@@ -79,6 +79,9 @@ type Params struct {
 	// RdmaDisableBufferPool registers a buffer per operation instead of reusing registered
 	// buffers (default: false, so the pool is used).
 	RdmaDisableBufferPool bool
+	// RdmaCopyThreads is the number of threads copying one PUT payload into its buffer, the
+	// dispatcher included (default: 1; 0 leaves the engine default).
+	RdmaCopyThreads int
 
 	// Checksum validation
 	Checksum string // Checksum algorithm: crc32, crc32c, sha1, sha256, crc64-nvme (empty = disabled)

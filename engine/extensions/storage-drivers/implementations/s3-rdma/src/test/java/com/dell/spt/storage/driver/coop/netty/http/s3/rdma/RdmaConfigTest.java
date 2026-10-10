@@ -1,6 +1,9 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 
+import com.dell.spt.base.config.ConfigFormat;
+import com.dell.spt.base.config.ConfigUtil;
 import com.github.akurilov.confuse.Config;
+import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
@@ -216,6 +219,46 @@ public class RdmaConfigTest {
 		assertTrue(str.contains("localIp='10.0.0.1'"));
 		assertTrue(str.contains("logLevel='DEBUG'"));
 		assertTrue(str.contains("timeoutMs=60000"));
+	}
+
+	// ---------- PUT payload copy threads ----------
+
+	@Test
+	void shippedDefaultsCopyOnTheDispatcherAlone() throws Exception {
+		assertEquals(1, new RdmaConfig((Config) null).getCopyThreads());
+		final Config shipped = shippedDefaults();
+		// Read by its full path first: a key missing from the shipped file would throw here.
+		assertEquals(1, shipped.intVal("storage-rdma-copyThreads"));
+		assertEquals(1, new RdmaConfig(shipped.configVal("storage").configVal("rdma")).getCopyThreads());
+	}
+
+	@Test
+	void copyThreadsSetThroughTheSchemaReachTheConfig() throws Exception {
+		final Config config = shippedDefaults();
+		// The path and the string value the CLI argument --storage-rdma-copyThreads=4 sets.
+		config.val("storage-rdma-copyThreads", "4");
+
+		final var parsed = new RdmaConfig(config.configVal("storage").configVal("rdma"));
+		assertEquals(4, parsed.getCopyThreads());
+		assertEquals(4, parsed.withLocalIp("10.0.0.1").getCopyThreads());
+		assertTrue(parsed.toString().contains("copyThreads=4"));
+	}
+
+	@Test
+	void missingCopyThreadsKeyLeavesTheDefault() {
+		final Config mockCfg = Mockito.mock(Config.class);
+		when(mockCfg.intVal("copyThreads")).thenThrow(new RuntimeException("missing"));
+		assertEquals(1, new RdmaConfig(mockCfg).getCopyThreads());
+	}
+
+	/** The shipped defaults file, loaded against the shipped schema as the engine loads it. */
+	private static Config shippedDefaults() throws Exception {
+		final String defaults;
+		try (final var in = RdmaConfigTest.class.getResourceAsStream("/config/defaults-storage-s3-rdma.yaml")) {
+			defaults = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+		}
+		return ConfigUtil.loadConfig(
+						defaults, ConfigFormat.YAML, new S3RdmaStorageDriverExtension<>().schemaProvider().schema());
 	}
 
 	@Test

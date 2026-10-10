@@ -43,4 +43,6 @@ const (
 	EnvRdmaAllowMissingBytesHeader = "RDMA_ALLOW_MISSING_BYTES_HEADER"
 	// EnvRdmaBufferPool controls reuse of registered RDMA buffers across operations.
 	EnvRdmaBufferPool = "RDMA_BUFFER_POOL"
+	// EnvRdmaCopyThreads sets how many threads copy one RDMA PUT payload into its buffer.
+	EnvRdmaCopyThreads = "RDMA_COPY_THREADS"
 )

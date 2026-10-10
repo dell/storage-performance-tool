@@ -365,6 +365,9 @@ func TestGenerateDefaults(t *testing.T) {
 				if strings.Contains(string(data), "bufferPool") {
 					t.Error("bufferPool must be omitted unless disabled, so older engines accept the defaults")
 				}
+				if strings.Contains(string(data), "copyThreads") {
+					t.Error("copyThreads must be omitted unless above 1, so older engines accept the defaults")
+				}
 			},
 		},
 		{
@@ -415,6 +418,54 @@ func TestGenerateDefaults(t *testing.T) {
 				t.Helper()
 				if !strings.Contains(string(data), "bufferPool: false") {
 					t.Errorf("Expected bufferPool: false in YAML, got:\n%s", data)
+				}
+			},
+		},
+		{
+			name: "S3 write with RDMA copy threads",
+			params: Params{
+				WorkloadType:       "write",
+				Endpoint:           "http://minio:9000",
+				AccessKey:          "testkey",
+				SecretKey:          "testsecret",
+				Bucket:             "testbucket",
+				Threads:            4,
+				S3Driver:           S3DriverRdma,
+				RdmaThresholdBytes: 1048576,
+				RdmaTimeoutMs:      30000,
+				RdmaCopyThreads:    4,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				var config DefaultsConfig
+				if err := yaml.Unmarshal(data, &config); err != nil {
+					t.Fatalf("Failed to unmarshal YAML: %v", err)
+				}
+				if config.Storage.Rdma == nil || config.Storage.Rdma.CopyThreads != 4 {
+					t.Fatalf("Expected storage.rdma.copyThreads 4, got:\n%s", data)
+				}
+			},
+		},
+		{
+			name: "S3 write with RDMA copy threads at the default",
+			params: Params{
+				WorkloadType:       "write",
+				Endpoint:           "http://minio:9000",
+				AccessKey:          "testkey",
+				SecretKey:          "testsecret",
+				Bucket:             "testbucket",
+				Threads:            4,
+				S3Driver:           S3DriverRdma,
+				RdmaThresholdBytes: 1048576,
+				RdmaTimeoutMs:      30000,
+				RdmaCopyThreads:    1,
+			},
+			wantErr: false,
+			checkOutput: func(t *testing.T, data []byte) {
+				t.Helper()
+				if strings.Contains(string(data), "copyThreads") {
+					t.Errorf("copyThreads must be omitted at 1, got:\n%s", data)
 				}
 			},
 		},

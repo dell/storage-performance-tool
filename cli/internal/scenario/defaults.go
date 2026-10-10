@@ -81,6 +81,8 @@ type RdmaConfig struct {
 	AllowMissingBytesHeader bool `yaml:"allowMissingBytesHeader,omitempty"`
 	// Emitted only when the pool is disabled; the engine default reuses registered buffers.
 	BufferPool *bool `yaml:"bufferPool,omitempty"`
+	// Emitted only above 1; the engine default copies a PUT payload on the dispatcher alone.
+	CopyThreads int `yaml:"copyThreads,omitempty"`
 }
 
 // DriverConfig represents storage driver configuration
@@ -398,6 +400,9 @@ func GenerateDefaults(params Params) ([]byte, error) {
 			if params.RdmaDisableBufferPool {
 				bufferPool := false
 				config.Storage.Rdma.BufferPool = &bufferPool
+			}
+			if params.RdmaCopyThreads > 1 {
+				config.Storage.Rdma.CopyThreads = params.RdmaCopyThreads
 			}
 		}
 

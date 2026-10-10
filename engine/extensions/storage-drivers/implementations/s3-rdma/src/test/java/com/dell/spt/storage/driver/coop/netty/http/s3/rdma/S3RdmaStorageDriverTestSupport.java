@@ -167,6 +167,7 @@ final class S3RdmaStorageDriverTestSupport {
 			config.val("storage-rdma-timeoutMs", rdmaConfig.getTimeoutMs());
 			config.val("storage-rdma-allowMissingBytesHeader", rdmaConfig.isAllowMissingBytesHeader());
 			config.val("storage-rdma-bufferPool", rdmaConfig.isBufferPoolEnabled());
+			config.val("storage-rdma-copyThreads", rdmaConfig.getCopyThreads());
 			return config;
 		} catch (final Exception e) {
 			throw new IllegalStateException(e);

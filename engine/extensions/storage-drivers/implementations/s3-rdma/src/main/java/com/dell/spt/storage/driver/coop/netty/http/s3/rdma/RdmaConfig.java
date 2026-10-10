@@ -8,6 +8,7 @@ public final class RdmaConfig {
 	private static final String DEFAULT_DEVICE = "auto";
 	private static final String DEFAULT_LOG_LEVEL = "WARN";
 	private static final long DEFAULT_TIMEOUT_MS = 30_000; // 30 seconds
+	private static final int DEFAULT_COPY_THREADS = 1;
 
 	private final boolean enabled;
 	private final long thresholdBytes;
@@ -18,6 +19,7 @@ public final class RdmaConfig {
 	private final long timeoutMs;
 	private final boolean allowMissingBytesHeader;
 	private final boolean bufferPool;
+	private final int copyThreads;
 
 	public RdmaConfig(final Config rdmaConfig) {
 		if (rdmaConfig == null) {
@@ -31,6 +33,7 @@ public final class RdmaConfig {
 			this.timeoutMs = DEFAULT_TIMEOUT_MS;
 			this.allowMissingBytesHeader = false;
 			this.bufferPool = true;
+			this.copyThreads = DEFAULT_COPY_THREADS;
 		} else {
 			this.enabled = getBoolean(rdmaConfig, "enabled", true);
 			this.thresholdBytes = getLong(rdmaConfig, "thresholdBytes", DEFAULT_THRESHOLD_BYTES);
@@ -41,12 +44,21 @@ public final class RdmaConfig {
 			this.timeoutMs = getLong(rdmaConfig, "timeoutMs", DEFAULT_TIMEOUT_MS);
 			this.allowMissingBytesHeader = getBoolean(rdmaConfig, "allowMissingBytesHeader", false);
 			this.bufferPool = getBoolean(rdmaConfig, "bufferPool", true);
+			this.copyThreads = getInt(rdmaConfig, "copyThreads", DEFAULT_COPY_THREADS);
 		}
 	}
 
 	private static boolean getBoolean(final Config config, final String key, final boolean defaultValue) {
 		try {
 			return config.boolVal(key);
+		} catch (final Exception e) {
+			return defaultValue;
+		}
+	}
+
+	private static int getInt(final Config config, final String key, final int defaultValue) {
+		try {
+			return config.intVal(key);
 		} catch (final Exception e) {
 			return defaultValue;
 		}
@@ -118,6 +130,22 @@ public final class RdmaConfig {
 					final long timeoutMs,
 					final boolean allowMissingBytesHeader,
 					final boolean bufferPool) {
+		this(enabled, thresholdBytes, fallbackEnabled, device, localIp, logLevel, timeoutMs, allowMissingBytesHeader,
+						bufferPool, DEFAULT_COPY_THREADS);
+	}
+
+	/** @param copyThreads threads copying one PUT payload into its buffer, the dispatcher included */
+	public RdmaConfig(
+					final boolean enabled,
+					final long thresholdBytes,
+					final boolean fallbackEnabled,
+					final String device,
+					final String localIp,
+					final String logLevel,
+					final long timeoutMs,
+					final boolean allowMissingBytesHeader,
+					final boolean bufferPool,
+					final int copyThreads) {
 		this.enabled = enabled;
 		this.thresholdBytes = thresholdBytes;
 		this.fallbackEnabled = fallbackEnabled;
@@ -127,13 +155,14 @@ public final class RdmaConfig {
 		this.timeoutMs = timeoutMs;
 		this.allowMissingBytesHeader = allowMissingBytesHeader;
 		this.bufferPool = bufferPool;
+		this.copyThreads = copyThreads;
 	}
 
 	/** Returns a copy with {@code localIp} replaced. */
 	public RdmaConfig withLocalIp(final String localIp) {
 		return new RdmaConfig(
 						enabled, thresholdBytes, fallbackEnabled, device, localIp, logLevel, timeoutMs,
-						allowMissingBytesHeader, bufferPool);
+						allowMissingBytesHeader, bufferPool, copyThreads);
 	}
 
 	public boolean isEnabled() {
@@ -174,6 +203,11 @@ public final class RdmaConfig {
 		return bufferPool;
 	}
 
+	/** Threads copying one PUT payload into its buffer, the dispatcher included; 1 copies on the dispatcher alone. */
+	public int getCopyThreads() {
+		return copyThreads;
+	}
+
 	/** Whether {@code device} names a specific RDMA device rather than requesting auto-detection. */
 	public boolean hasExplicitDevice() {
 		return device != null && !device.isEmpty() && !DEFAULT_DEVICE.equals(device);
@@ -191,6 +225,7 @@ public final class RdmaConfig {
 						", timeoutMs=" + timeoutMs +
 						", allowMissingBytesHeader=" + allowMissingBytesHeader +
 						", bufferPool=" + bufferPool +
+						", copyThreads=" + copyThreads +
 						'}';
 	}
 }

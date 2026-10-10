@@ -190,6 +190,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	/** Reused registered buffers, or {@code null} when storage.rdma.bufferPool is disabled. */
 	private final RdmaBufferPool bufferPool;
 
+	/** Copies PUT payloads into their buffers, on storage.rdma.copyThreads threads. */
+	private final RdmaPayloadCopier payloadCopier;
+
 	/** Allocates per-operation buffers; replaced only by tests to simulate exhausted direct memory. */
 	IntFunction<ByteBuffer> directAllocator = ByteBuffer::allocateDirect;
 
@@ -243,6 +246,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 						? withRoutedLocalIp(configured)
 						: configured;
 		Loggers.MSG.info("{}: RDMA config: {}", stepId, rdmaConfig);
+		payloadCopier = new RdmaPayloadCopier(rdmaConfig.getCopyThreads(), stepId + "-rdma-copy-");
 
 		// Initialize RDMA transport
 		rdmaTransport = Objects.requireNonNull(
@@ -467,7 +471,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 			// For PUT: copy data into the registered buffer
 			if (opType == OpType.CREATE) {
-				transferDataItemToBuffer((DataItem) item, buf, size);
+				payloadCopier.copy((DataItem) item, buf, size);
 				// Mark bytes as done — sendRequestData() will be skipped for RDMA PUT
 				// because httpRequest() returns a FullHttpRequest with empty body
 				dataOp.countBytesDone(size);
@@ -593,27 +597,6 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		if (last > 0 && last % STALE_CONTENT_STRIDE_BYTES != 0) {
 			buffer.put(last, (byte) ~buffer.get(last));
 		}
-	}
-
-	/**
-	 * Copy data from a DataItem into a direct ByteBuffer for RDMA transfer.
-	 */
-	private void transferDataItemToBuffer(final DataItem item, final ByteBuffer dst, final int size)
-					throws IOException {
-		dst.clear();
-		dst.limit(size);
-		int totalRead = 0;
-		while (totalRead < size) {
-			final int bytesRead = item.read(dst);
-			if (bytesRead < 0) {
-				break;
-			}
-			totalRead += bytesRead;
-		}
-		if (totalRead < size) {
-			throw new IOException("RDMA short read: expected " + size + " bytes but got " + totalRead);
-		}
-		dst.flip();
 	}
 
 	private RdmaConfig withRoutedLocalIp(final RdmaConfig configured) {
@@ -936,6 +919,8 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 				Thread.currentThread().interrupt();
 			}
 		}
+		// Parts already handed to the copy threads finish before the buffers are released below.
+		payloadCopier.close();
 		// Drain any leaked RDMA contexts (e.g. from interrupted operations).
 		// Use remove(op, ctx) to atomically claim each entry — prevents double-free
 		// if a concurrent complete() is still draining the last in-flight operations.
@@ -962,5 +947,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 	RdmaBufferPool bufferPool() {
 		return bufferPool;
+	}
+
+	RdmaPayloadCopier payloadCopier() {
+		return payloadCopier;
 	}
 }
