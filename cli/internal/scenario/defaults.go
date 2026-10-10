@@ -99,8 +99,28 @@ type MultipartLimits struct {
 
 // NetConfig represents network configuration
 type NetConfig struct {
-	Node NodeConfig `yaml:"node,omitempty"`
-	SSL  SSLConfig  `yaml:"ssl,omitempty"`
+	Node     NodeConfig      `yaml:"node,omitempty"`
+	SSL      SSLConfig       `yaml:"ssl,omitempty"`
+	Endpoint *EndpointConfig `yaml:"endpoint,omitempty"` // pointer so omitted in the default mode
+}
+
+// EndpointConfig represents storage.net.endpoint (opt-in endpoint selection).
+type EndpointConfig struct {
+	Selection string                 `yaml:"selection"`
+	Hostname  string                 `yaml:"hostname,omitempty"`
+	DNS       *EndpointDNSConfig     `yaml:"dns,omitempty"`
+	Connect   *EndpointConnectConfig `yaml:"connect,omitempty"`
+}
+
+// EndpointDNSConfig represents storage.net.endpoint.dns.
+type EndpointDNSConfig struct {
+	Server          string `yaml:"server,omitempty"`
+	TimeoutMilliSec int    `yaml:"timeoutMilliSec,omitempty"`
+}
+
+// EndpointConnectConfig represents storage.net.endpoint.connect.
+type EndpointConnectConfig struct {
+	TimeoutMilliSec int `yaml:"timeoutMilliSec,omitempty"`
 }
 
 // NodeConfig represents node configuration
@@ -357,7 +377,8 @@ func GenerateDefaults(params Params) ([]byte, error) {
 					}(),
 					Slice: params.SliceEndpoints,
 				},
-				SSL: SSLConfig{Enabled: scheme == schemeHTTPS},
+				SSL:      SSLConfig{Enabled: scheme == schemeHTTPS},
+				Endpoint: endpointConfig(params.EndpointSelection),
 			},
 			Auth: AuthConfig{UID: params.AccessKey, Secret: params.SecretKey, Version: authVersion},
 		}

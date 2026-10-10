@@ -1,5 +1,6 @@
 plugins {
 	id 'spt.java-extension'
+	id 'java-test-fixtures'
 	alias(libs.plugins.shadow)
 }
 
@@ -28,6 +29,15 @@ dependencies {
 	// Test-only dependencies
 	testImplementation libs.mockito.core
 
+	// Shared test fixtures, such as the scripted DNS server used by driver tests
+	testFixturesApi(
+		libs.netty.resolver.dns,
+		libs.netty.transport,
+		libs.netty.codec,
+		libs.netty.buffer,
+		libs.netty.common,
+	)
+
 	// External dependencies that will be bundled
 	implementation(
 		libs.netty.connection.pool,
@@ -38,6 +48,7 @@ dependencies {
 		libs.netty.transport.native.kqueue,
 		libs.netty.handler,
 		libs.netty.codec,
+		libs.netty.resolver.dns,
 		libs.disruptor,
 		libs.javassist,
 		libs.bouncycastle.bcprov.jdk18on,

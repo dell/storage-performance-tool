@@ -375,6 +375,56 @@ class S3RangeStorageDriverTest {
 	}
 
 	@Test
+	void retryQueuedAtDrainPublishesItsRetainedFailureOnce() throws Exception {
+		var firstResponse = new CountDownLatch(1);
+		var release = new CountDownLatch(1);
+		try (var f = new Fixture(new RangeReadPolicy(3, 2L, 1), true, n -> {
+			try {
+				(n == 1 ? firstResponse : release).await(5, TimeUnit.SECONDS);
+			} catch (InterruptedException interrupted) {
+				Thread.currentThread().interrupt();
+			}
+			return n == 1 ? new Response(503, null, "error") : new Response(206, "echo/10", "abc");
+		})) {
+			try {
+				f.read("failing", 10);
+				assertNotNull(f.requests.poll(3, TimeUnit.SECONDS));
+				// Queued behind the only permit before the first read's retry exists.
+				f.read("holding", 10);
+				firstResponse.countDown();
+				var held = f.requests.poll(3, TimeUnit.SECONDS);
+				assertNotNull(held);
+				assertEquals("/bucket/holding", held.path());
+				var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+				while (f.driver.ranges.pendingCount() == 0 && System.nanoTime() < deadline)
+					Thread.sleep(10);
+				assertEquals(1, f.driver.ranges.pendingCount(), "the retry waits in the driver queue");
+
+				f.runtime.closeAdmission();
+				f.driver.closeAdmission();
+				f.runtime.closeRetries();
+				assertTrue(f.driver.recoverQueuedOperations().isEmpty());
+
+				assertEquals(Operation.Status.RESP_FAIL_SVC, f.terminal.poll(5, TimeUnit.SECONDS));
+				var recovered = f.results.poll(5, TimeUnit.SECONDS);
+				assertNotNull(recovered, "recovery must publish the retained failure");
+				assertEquals(Operation.Status.RESP_FAIL_SVC, recovered.status());
+				release.countDown();
+				assertEquals(Operation.Status.SUCC, f.outcome());
+				assertNull(f.results.poll(300, TimeUnit.MILLISECONDS), "each result is published once");
+				assertFalse(f.runtime.hasPendingResults());
+				assertEquals(2, f.snapshot().requestsSent());
+				assertEquals(1, f.snapshot().logical().failed());
+				assertEquals(1, f.snapshot().logical().accepted());
+				assertTrue(f.snapshot().reconciled());
+			} finally {
+				firstResponse.countDown();
+				release.countDown();
+			}
+		}
+	}
+
+	@Test
 	void drainFencesQueuedWorkAndRetainsUnresolvedDispatchedAttempt() throws Exception {
 		var release = new CountDownLatch(1);
 		try (var f = new Fixture(new RangeReadPolicy(3, 2L, 1), false, n -> {

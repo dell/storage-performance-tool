@@ -4,6 +4,18 @@
 storage:
   net:
     bindBacklogSize: 0
+    # Opt-in endpoint selection (storage.net.endpoint.selection is defined with the base defaults).
+    endpoint:
+      # Round robin only: logical hostname for Host, request signing and TLS SNI.
+      hostname: null
+      dns:
+        # Per-request DNS only: IPv4[:port] server queried without fallback; null uses the host resolver configuration.
+        server: null
+        # Total deadline of one per-request DNS lookup.
+        timeoutMilliSec: 5000
+      connect:
+        # TCP connect deadline for round-robin and per-request DNS selection.
+        timeoutMilliSec: 30000
     interestOpQueued: false
     keepAlive: true
     linger: 0

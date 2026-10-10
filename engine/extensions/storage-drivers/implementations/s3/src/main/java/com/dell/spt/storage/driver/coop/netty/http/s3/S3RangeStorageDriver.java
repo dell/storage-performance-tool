@@ -7,6 +7,7 @@ import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.range.*;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.step.local.context.range.RangeReadRuntime;
 import com.dell.spt.base.storage.driver.range.RangeReadDriverSupport;
 import com.dell.spt.storage.driver.coop.range.RangeReadQueue;
@@ -24,18 +25,22 @@ import java.util.Objects;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.RejectedExecutionException;
 
-/** Dedicated range transport; the ordinary S3 driver and its per-operation route remain unchanged. */
-final class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOperation<DataItem>>
+/**
+ * Dedicated range transport; the ordinary S3 driver and its per-operation route remain unchanged.
+ * {@link S3RangeEndpointSelectionDriver} replaces only connection acquisition and the request Host.
+ */
+class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOperation<DataItem>>
 				implements RangeReadDriverSupport {
-	private record Flight(RangeReadOperation<DataItem> operation, RangeReadCirculation circulation,
+	record Flight(RangeReadOperation<DataItem> operation, RangeReadCirculation circulation,
 					RangeReadAttempt attempt, Channel channel) {}
 
 	// Set by the existing superclass construction hook, before this class's field initializers.
 	private NonBlockingConnPool rangePool;
 	private final RangeReadRuntime<DataItem> runtime;
-	private final RangeReadQueue<DataItem> ranges;
-	private final ConcurrentMap<RangeReadAttempt, Flight> flights = new ConcurrentHashMap<>();
+	final RangeReadQueue<DataItem> ranges;
+	final ConcurrentMap<RangeReadAttempt, Flight> flights = new ConcurrentHashMap<>();
 
 	S3RangeStorageDriver(String stepId, DataInput input, Config storage, int batchSize, RangeReadPolicy policy)
 					throws InterruptedException {
@@ -66,7 +71,12 @@ final class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOper
 
 	@Override
 	protected NonBlockingConnPool createConnectionPool() {
-		return rangePool = super.createConnectionPool();
+		return rangePool = createRangePool();
+	}
+
+	/** Called once while the superclass constructor runs, before this class's fields exist. */
+	NonBlockingConnPool createRangePool() {
+		return super.createConnectionPool();
 	}
 
 	@Override
@@ -103,7 +113,40 @@ final class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOper
 
 	@Override
 	protected boolean recoverQueuedOperation(RangeReadOperation<DataItem> op) {
-		return ranges.recover(op);
+		final var circulation = op.circulation();
+		final boolean unattempted = ranges.recover(op);
+		if (!unattempted && circulation.lifecycle().state() == OperationLifecycleState.TERMINAL) {
+			// Queue recovery must not run output; publish the settled result from an I/O thread.
+			try {
+				bootstrap.config().group().execute(() -> publishRecovered(op, circulation));
+			} catch (RejectedExecutionException stopped) {
+				// The I/O threads have stopped, so no transport callback can race this publication.
+				publishRecovered(op, circulation);
+			}
+		}
+		return unattempted;
+	}
+
+	/**
+	 * Recovers an operation fenced before its request handoff, on a dispatch or I/O thread. A
+	 * retry recovered this way settles its earlier attempt's retained failure, which is
+	 * published here; the publication claim is once-only.
+	 */
+	final boolean recover(RangeReadOperation<DataItem> op) {
+		final var circulation = op.circulation();
+		final boolean unattempted = ranges.recover(op);
+		if (!unattempted && circulation.lifecycle().state() == OperationLifecycleState.TERMINAL)
+			publishRecovered(op, circulation);
+		return unattempted;
+	}
+
+	private void publishRecovered(RangeReadOperation<DataItem> op, RangeReadCirculation circulation) {
+		try {
+			publishRetainedRangeResult(op, circulation);
+		} catch (RuntimeException failure) {
+			recordTerminalFailure(new IntegrityTerminalException(IntegrityTerminalException.Category.PUBLICATION,
+							"Recovered range result publication failed", failure));
+		}
 	}
 
 	@Override
@@ -122,7 +165,7 @@ final class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOper
 	}
 
 	/** Build a fresh signed request from the retained span without modifying item size/name/version. */
-	FullHttpRequest rangeRequest(RangeReadOperation<DataItem> op, RangeReadAttempt attempt, String node)
+	FullHttpRequest rangeRequest(RangeReadOperation<DataItem> op, RangeReadAttempt attempt, String host)
 					throws URISyntaxException {
 		final String uri = dataUriPath(op.item(), op.srcPath(), op.dstPath(), OpType.READ);
 		final var request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, uri);
@@ -130,7 +173,7 @@ final class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOper
 			final var headers = request.headers();
 			applyDynamicHeaders(headers);
 			applySharedHeaders(headers);
-			headers.set(HttpHeaderNames.HOST, node);
+			headers.set(HttpHeaderNames.HOST, host);
 			headers.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 			headers.set(HttpHeaderNames.RANGE, attempt.range().requestHeader());
 			applyAuthHeaders(headers, HttpMethod.GET, uri, op.credential());
@@ -163,7 +206,7 @@ final class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOper
 			}
 			if (channel == null) {
 				concurrencyThrottle.release();
-				ranges.recover(op);
+				recover(op);
 				return true;
 			}
 			final var flight = new Flight(op, op.circulation(), attempt, channel);
@@ -173,7 +216,8 @@ final class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOper
 				concurrencyThrottle.release();
 				return true;
 			}
-			channel.eventLoop().execute(() -> send(flight));
+			// The Host is the leased node.
+			channel.eventLoop().execute(() -> send(flight, flight.channel().attr(NonBlockingConnPool.ATTR_KEY_NODE).get()));
 		} catch (Exception failure) {
 			attempt.transportFailure(failure instanceof ConnectException ? Operation.Status.FAIL_IO : Operation.Status.FAIL_UNKNOWN);
 			if (channel == null) {
@@ -194,13 +238,14 @@ final class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOper
 		return i - from;
 	}
 
-	private void send(Flight flight) {
+	/** Runs on the flight's event loop; {@code host} is the request's Host and signing authority. */
+	final void send(Flight flight, String host) {
 		final var channel = flight.channel();
 		final var attempt = flight.attempt();
 		FullHttpRequest request = null;
 		try {
 			final var handler = channel.pipeline().get(RangeReadResponseHandler.class);
-			request = rangeRequest(flight.operation(), attempt, channel.attr(NonBlockingConnPool.ATTR_KEY_NODE).get());
+			request = rangeRequest(flight.operation(), attempt, host);
 			final var outbound = request;
 			final boolean sent = withDispatchAdmission(() -> {
 				handler.bind(attempt);
@@ -221,7 +266,7 @@ final class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOper
 				// Admission was fenced before transport. Preserve unattempted/retry settlement.
 				attempt.cancelBeforeHandoff();
 				finish(attempt, channel, false);
-				ranges.recover(flight.operation());
+				recover(flight.operation());
 			}
 		} catch (Exception failure) {
 			attempt.transportFailure(Operation.Status.FAIL_UNKNOWN);
@@ -253,7 +298,7 @@ final class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOper
 		}
 	}
 
-	private void completeAttempt(RangeReadOperation<DataItem> op, RangeReadCirculation circulation, RangeReadAttempt attempt) {
+	final void completeAttempt(RangeReadOperation<DataItem> op, RangeReadCirculation circulation, RangeReadAttempt attempt) {
 		if (ranges.completed(op, circulation, attempt))
 			recordRetainedAttemptCompletion(false);
 	}

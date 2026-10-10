@@ -25,6 +25,11 @@ const (
 	flagValidateInventory            = "validate-inventory"
 	flagVerifyDelete                 = "verify"
 	flagVerificationTimeout          = "verification-timeout"
+	flagEndpointSelection            = "endpoint-selection"
+	flagEndpointHostname             = "endpoint-hostname"
+	flagDNSServer                    = "dns-server"
+	flagDNSTimeout                   = "dns-timeout"
+	flagEndpointConnectTimeout       = "endpoint-connect-timeout"
 )
 
 // Workload type constants
