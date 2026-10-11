@@ -8,20 +8,23 @@ type Params struct {
 	Endpoint     string
 	Endpoints    []string
 	Region       string // Optional AWS region; empty preserves engine defaults.
-	AccessKey    string
-	SecretKey    string
-	Bucket       string
-	Prefix       string
-	Threads      int
-	ObjectSize   string
-	PartSize     string // Multipart upload part size (e.g. "64MB"); empty = single PUT
-	MpuObjects   int    // Max concurrent multipart objects in flight (0 = unlimited)
-	MpuParts     int    // Max concurrent parts in flight per multipart object (0 = unlimited)
-	ObjectCount  int
-	Duration     string
-	AuthVersion  int
-	Cleanup      bool // Automatically delete created objects after test
-	KeepScenario bool // Keep the scenario file after test completes
+
+	// EndpointSelection is the opt-in per-request endpoint selection; the zero value keeps the default.
+	EndpointSelection EndpointSelection
+	AccessKey         string
+	SecretKey         string
+	Bucket            string
+	Prefix            string
+	Threads           int
+	ObjectSize        string
+	PartSize          string // Multipart upload part size (e.g. "64MB"); empty = single PUT
+	MpuObjects        int    // Max concurrent multipart objects in flight (0 = unlimited)
+	MpuParts          int    // Max concurrent parts in flight per multipart object (0 = unlimited)
+	ObjectCount       int
+	Duration          string
+	AuthVersion       int
+	Cleanup           bool // Automatically delete created objects after test
+	KeepScenario      bool // Keep the scenario file after test completes
 	// Engine tuning
 	ServiceThreads  int      // VT carrier thread parallelism (0 = JVM default)
 	EngineOverrides []string // Advanced engine defaults overrides as YAML path=value entries

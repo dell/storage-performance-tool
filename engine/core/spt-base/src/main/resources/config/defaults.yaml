@@ -194,6 +194,9 @@ storage:
       requireNonEmpty: false
   namespace: null
   net:
+    endpoint:
+      # default, round-robin or per-request-dns; non-default modes require the Netty s3 driver
+      selection: default
     node:
       slice: false
 

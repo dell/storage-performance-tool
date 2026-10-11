@@ -107,6 +107,10 @@ func ConvertJS(raw []byte, runScript RunScript, opts Options) (*Generated, error
 	pathRewrites = append(pathRewrites, scenarioPathRewrites...)
 	diagnostics = append(diagnostics, pathDiagnostics...)
 
+	archived := &ArchivedEndpointSelection{}
+	var endpointDiagnostics []Diagnostic
+	body, endpointDiagnostics = extractJSEndpointSelections(body, effectiveVars, archived)
+	diagnostics = append(diagnostics, endpointDiagnostics...)
 	var parentDiagnostics []Diagnostic
 	body, parentDiagnostics = rewriteJSParentConfigs(body, opts, bucket, effectiveVars)
 	diagnostics = append(diagnostics, parentDiagnostics...)
@@ -140,6 +144,8 @@ func ConvertJS(raw []byte, runScript RunScript, opts Options) (*Generated, error
 		PathRewrites:    pathRewrites,
 		CommandOps:      commandOps,
 		EffectiveBucket: bucket,
+
+		ArchivedEndpointSelection: *archived,
 	}, nil
 }
 

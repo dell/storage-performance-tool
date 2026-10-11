@@ -13,6 +13,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - **Automatic RDMA local address** — When `--rdma-local-ip` is not set and `--rdma-device` is `auto`, each worker now selects the local address it routes toward the first S3 endpoint for RoCE GID selection, so distributed runs no longer need one shared address. Leave the flag unset for multi-host runs; a named `--rdma-device` keeps device selection authoritative.
 - **Legacy RDMA byte-count option** — Added `spt run --rdma-allow-missing-bytes-header` (env `RDMA_ALLOW_MISSING_BYTES_HEADER`, engine `storage.rdma.allowMissingBytesHeader`) for servers that report RDMA GET success without `x-amz-rdma-bytes-transferred`; it counts the requested size instead of failing the read.
 
+- **S3 endpoint selection** — Added opt-in `--endpoint-selection` for the Netty S3 driver to choose the connect destination of every request attempt: `round-robin` over the `--endpoints` addresses, or `per-request-dns`, a fresh DNS lookup of the endpoint hostname. The default mode is unchanged; see `cli/docs/ENDPOINT_SELECTION.md`.
+
+### Changed
+
+- **Remote entry-node log relay** — Entry-node output now arrives over one `docker logs --follow` SSH session instead of a new SSH session twice a second, reducing CPU load on the entry host. The console still shows only the engine's stdout; its stderr (such as JVM and logging warnings) is kept only in the CLI log, and only with `--log-level debug`.
+
 ### Fixed
 
 - **S3-RDMA reply validation** — RDMA PUT and GET now honor the server's `x-amz-rdma-reply` and `x-amz-rdma-bytes-transferred` headers. A server that declines RDMA (HTTP 200 with reply 501, or no reply) previously produced "successful" writes counted at full object size although nothing was stored; declined PUTs now fail. Declined GETs are counted once over HTTP when `--rdma-fallback` is enabled and fail otherwise. GET bytes come from the server's reported transfer size, and a success without that header, a byte-count mismatch, or any HTTP body (including chunked bodies) on an RDMA success fails as corrupt.
@@ -20,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - **S3-RDMA ranged reads** — Reads with fixed or random byte ranges now use HTTP instead of an RDMA buffer sized for the whole object, which previously miscounted or failed valid range responses.
 - **S3-RDMA fallback setting** — With `--rdma-fallback` disabled, RDMA buffer-registration or token failures now fail the operation instead of silently sending it over HTTP.
 - **S3-RDMA fallback payload** — With `--rdma-fallback`, a PUT whose RDMA preparation failed after its payload was copied (for example, when no RDMA token could be generated) was sent over HTTP without its body and failed. The fallback request now carries the whole payload, and the same failure with `--rdma-fallback` disabled no longer reports the object's bytes as written.
+- **Partial-read retries at stop** — A partial read whose retry had not yet sent its request when a run stopped now delivers its earlier failure exactly once. Previously, the failure was counted but its result was never delivered, and the run ended with “Range result delivery failed.”
 
 - **DELETE failure-budget reporting** — Duration-based DELETE runs now propagate a failure-budget exception consistently when the budget is exceeded during worker startup, matching failures detected during active waiting.
 
@@ -30,6 +37,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - **Distributed launch messages** — Ordinary distributed workloads now report “distributed run” instead of the misleading “distributed replay.”
 - **Verification service startup** — `spt verify` now polls the required service ports for up to 30 seconds instead of checking once after a fixed ten-second sleep. Healthy engines that start more slowly can pass, already-ready engines proceed immediately, and unavailable ports still cause a bounded failure followed by container cleanup.
 - **False metrics-schema warning at run start** — The TUI no longer reports “Incompatible metrics JSON … requires metrics_schema >= 2” while engines are reachable but have not yet published metrics for the current run, such as during the pre-step stabilization pause. Genuinely incompatible metrics payloads still produce the warning, including when they first appear after startup.
+- **Credentials in step config logs** — The engine now masks storage credentials in each step's logged `config.yaml`, which single-host runs keep under `.node-home` in the results folder.
 
 ## [5.15.2] - 2026-09-21
 

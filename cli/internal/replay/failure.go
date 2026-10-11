@@ -35,6 +35,7 @@ const (
 	failureTimeout                   = "timeout"
 	failureInvalidArtifactLink       = "invalid_artifact_link"
 	failureReplayDefaultsGeneration  = "replay_defaults_generation_error"
+	failureInvalidEndpointSelection  = "invalid_endpoint_selection"
 )
 
 // ClassifiedError wraps replay errors with a stable failure class.

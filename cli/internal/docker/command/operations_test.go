@@ -444,25 +444,76 @@ func TestDockerOperationsImpl_GetContainerLogs(t *testing.T) {
 	}
 }
 
-func TestDockerOperationsImpl_GetContainerLogsSince_WithTimestamps(t *testing.T) {
-	mockExecutor := NewMockCommandExecutor()
-	host := CreateRemoteHost("remote-host")
-	ops := NewDockerOperations(mockExecutor, host)
-
+func TestDockerOperationsImpl_FollowContainerLogs(t *testing.T) {
 	since := time.Date(2025, 9, 14, 12, 0, 0, 123000000, time.UTC)
-	cmd := fmt.Sprintf("%s %s %s %s %s abc123def456", constants.DockerCommand, constants.DockerCmdLogs, constants.DockerFlagTimestamps, constants.DockerFlagSince, since.Format(time.RFC3339Nano))
-	mockExecutor.SetCommandSuccess(cmd, "2025-09-14T12:00:01.000000000Z first\n2025-09-14T12:00:02.100000000Z second")
-
-	got := []string{}
-	err := ops.GetContainerLogsSince(context.Background(), "abc123def456", since, true,
-		func(line string) { got = append(got, line) },
-		func(line string) { got = append(got, line) },
-	)
-	if err != nil {
-		t.Fatalf("GetContainerLogsSince returned error: %v", err)
+	tests := []struct {
+		name    string
+		since   time.Time
+		wantCmd string
+	}{
+		{name: "from container start", since: time.Time{}, wantCmd: "docker logs --follow --timestamps abc123def456"},
+		{name: "resume after watermark", since: since, wantCmd: "docker logs --follow --timestamps --since 2025-09-14T12:00:00.123Z abc123def456"},
 	}
-	if len(got) != 2 || !strings.Contains(got[0], "first") || !strings.Contains(got[1], "second") {
-		t.Fatalf("unexpected lines: %#v", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockExecutor := NewMockCommandExecutor()
+			mockExecutor.SetCommandResponse(tt.wantCmd, MockResponse{
+				Stdout: "2025-09-14T12:00:01.000000000Z first\n2025-09-14T12:00:02.100000000Z second",
+				Stderr: "2025-09-14T12:00:01.500000000Z warning",
+			})
+			ops := NewDockerOperations(mockExecutor, CreateRemoteHost("remote-host"))
+
+			var stdout, stderr []string
+			err := ops.FollowContainerLogs(context.Background(), "abc123def456", tt.since,
+				func(line string) { stdout = append(stdout, line) },
+				func(line string) { stderr = append(stderr, line) },
+			)
+			if err != nil {
+				t.Fatalf("FollowContainerLogs returned error: %v", err)
+			}
+			if got := len(mockExecutor.GetExecutedCommands()); got != 1 {
+				t.Fatalf("expected one streamed command, got %d", got)
+			}
+			if len(stdout) != 2 || !strings.HasSuffix(stdout[0], " first") || !strings.HasSuffix(stdout[1], " second") {
+				t.Fatalf("unexpected stdout lines: %#v", stdout)
+			}
+			if len(stderr) != 1 || !strings.HasSuffix(stderr[0], " warning") {
+				t.Fatalf("unexpected stderr lines: %#v", stderr)
+			}
+		})
+	}
+}
+
+func TestDockerOperationsImpl_FollowContainerLogs_WrapsStreamError(t *testing.T) {
+	mockExecutor := NewMockCommandExecutor()
+	mockExecutor.SetCommandFailure("docker logs --follow --timestamps abc123def456",
+		"Error response from daemon: No such container: abc123def456", fmt.Errorf("exit status 1"))
+	ops := NewDockerOperations(mockExecutor, CreateRemoteHost("remote-host"))
+
+	var stderr []string
+	err := ops.FollowContainerLogs(context.Background(), "abc123def456", time.Time{},
+		func(string) {}, func(line string) { stderr = append(stderr, line) })
+	if err == nil || !strings.Contains(err.Error(), "remote-host") {
+		t.Fatalf("expected wrapped error naming the host, got %v", err)
+	}
+	if len(stderr) != 1 {
+		t.Fatalf("expected the daemon diagnostic on stderr, got %#v", stderr)
+	}
+}
+
+// nonStreamingExecutor hides MockCommandExecutor.StreamCommand.
+type nonStreamingExecutor struct{ Executor }
+
+func TestDockerOperationsImpl_FollowContainerLogs_RequiresStreamingExecutor(t *testing.T) {
+	mockExecutor := NewMockCommandExecutor()
+	ops := NewDockerOperations(nonStreamingExecutor{mockExecutor}, CreateRemoteHost("remote-host"))
+
+	err := ops.FollowContainerLogs(context.Background(), "abc123def456", time.Time{}, func(string) {}, func(string) {})
+	if err == nil {
+		t.Fatal("expected an error from an executor that cannot stream")
+	}
+	if got := len(mockExecutor.GetExecutedCommands()); got != 0 {
+		t.Fatalf("expected no fallback command execution, got %d", got)
 	}
 }
 
