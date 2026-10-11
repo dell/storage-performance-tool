@@ -36,6 +36,7 @@ const (
 	DockerFlagAll        = "-a"
 	DockerFlagTimestamps = "--timestamps"
 	DockerFlagSince      = "--since"
+	DockerFlagFollow     = "--follow"
 	DockerFlagRemove     = "--rm"
 	DockerFlagReadOnly   = "--read-only"
 	DockerFlagEntrypoint = "--entrypoint"
@@ -47,6 +48,13 @@ const (
 	SCPCommand        = "scp"
 	SSHConnectTimeout = "ConnectTimeout=10"
 	SSHBatchMode      = "BatchMode=yes"
+	// Keepalives let a quiet long-lived session detect a dead peer instead of hanging.
+	SSHServerAliveInterval = "ServerAliveInterval=15"
+	SSHServerAliveCountMax = "ServerAliveCountMax=3"
+	// Streams need stderr kept separate and stdin kept open whatever the client
+	// config says: -T refuses a pty, and StdinNull=no (OpenSSH 8.7+) keeps stdin.
+	SSHFlagNoTTY   = "-T"
+	SSHStdinNullNo = "StdinNull=no"
 )
 
 // Docker format string constants

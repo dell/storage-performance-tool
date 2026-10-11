@@ -327,6 +327,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	protected final ChecksumStrategy checksumStrategy;
 	protected final String sigV4ServiceName;
 	private final Set<CompletableFuture<Void>> multipartCleanupTasks = ConcurrentHashMap.newKeySet();
+	// Host of driver-built helper requests (bucket setup, listing, verification, abort).
+	private String helperAuthority;
 
 	public S3StorageDriver(
 					final String stepId,
@@ -348,6 +350,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					throws IllegalConfigurationException, InterruptedException {
 		super(stepId, itemDataInput, storageConfig, verifyFlag, batchSize);
 		this.sigV4ServiceName = sigV4ServiceName;
+		this.helperAuthority = storageNodeAddrs[0];
 		sharedHeaders.remove(HttpHeaderNames.CONNECTION);
 		sharedHeaders.remove(HttpHeaderNames.DATE);
 		final var objectConfig = storageConfig.configVal("object");
@@ -473,6 +476,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		return SLASH + (slashPos > 0 ? relPath.substring(0, slashPos) : relPath);
 	}
 
+	/** Replaces the Host of helper requests; for drivers that select destinations per request. */
+	protected final void helperAuthority(final String authority) {
+		this.helperAuthority = authority;
+	}
+
 	@Override
 	protected String requestNewPath(final String path) {
 		final var bucketPath = requestNewPathCacheKey(path);
@@ -484,7 +492,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 						bucketPath,
 						uri);
 		// check the destination bucket if it exists w/ HEAD request
-		final var nodeAddr = storageNodeAddrs[0];
+		final var nodeAddr = helperAuthority;
 		var reqHeaders = (HttpHeaders) new DefaultHttpHeaders();
 		reqHeaders.set(HttpHeaderNames.HOST, nodeAddr);
 		reqHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
@@ -682,7 +690,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					final String delimiter,
 					final int maxKeys) throws IOException {
 		final String canonicalPrefix = sanitizePrefix(prefix);
-		final var nodeAddr = storageNodeAddrs[0];
+		final var nodeAddr = helperAuthority;
 		final var reqHeaders = new DefaultHttpHeaders();
 		reqHeaders.set(HttpHeaderNames.HOST, nodeAddr);
 		reqHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
@@ -749,7 +757,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final var requestedMax = options.maxKeys() > 0 ? options.maxKeys() : S3Api.MAX_KEYS_LIMIT;
 		final var countLimit = Math.min(
 						Math.max(count, 1), Math.min(requestedMax, S3Api.MAX_KEYS_LIMIT));
-		final var nodeAddr = storageNodeAddrs[0];
+		final var nodeAddr = helperAuthority;
 		final var reqHeaders = new DefaultHttpHeaders();
 		reqHeaders.set(HttpHeaderNames.HOST, nodeAddr);
 		reqHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
@@ -979,7 +987,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 						? objectUri
 						: objectUri + "?versionId=" + percentEncode(target.versionId());
 		final HttpHeaders headers = new DefaultHttpHeaders();
-		final String nodeAddr = storageNodeAddrs[0];
+		final String nodeAddr = helperAuthority;
 		headers.set(HttpHeaderNames.HOST, nodeAddr);
 		headers.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 		applyDynamicHeaders(headers);
@@ -1948,7 +1956,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					final CompositeDataOperation op, final Operation.Status completionStatus) {
 		FullHttpResponse response = null;
 		try {
-			final HttpRequest abortRequest = abortMultipartUploadRequest(op, storageNodeAddrs[0]);
+			final HttpRequest abortRequest = abortMultipartUploadRequest(op, helperAuthority);
 			final FullHttpRequest fullAbortRequest = new DefaultFullHttpRequest(
 							abortRequest.protocolVersion(),
 							abortRequest.method(),

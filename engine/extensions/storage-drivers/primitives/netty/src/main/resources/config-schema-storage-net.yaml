@@ -3,6 +3,13 @@
 storage:
   net:
     bindBacklogSize: int
+    endpoint:
+      hostname: string
+      dns:
+        server: string
+        timeoutMilliSec: int
+      connect:
+        timeoutMilliSec: int
     interestOpQueued: boolean
     keepAlive: boolean
     linger: int

@@ -39,6 +39,7 @@ dependencies {
 	)
 
 	testImplementation(libs.mockito.core)
+	testImplementation(testFixtures(project(':extensions:storage-drivers:primitives:netty')))
 
 	testRuntimeOnly(
 		libs.commons.codec,

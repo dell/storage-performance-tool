@@ -178,6 +178,8 @@ storage:
       requireNonEmpty: boolean
   namespace: string
   net:
+    endpoint:
+      selection: string
     node:
       slice: boolean
 aliasing: list

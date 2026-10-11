@@ -198,46 +198,28 @@ func (d *DockerOperationsImpl) GetContainerLogs(ctx context.Context, containerID
 	return nil
 }
 
-// GetContainerLogsSince fetches logs newer than 'since' and optionally includes timestamps per line.
-func (d *DockerOperationsImpl) GetContainerLogsSince(ctx context.Context, containerID string, since time.Time, timestamps bool, stdoutCallback, stderrCallback func(string)) error {
-	dockerCmd := []string{constants.DockerCommand, constants.DockerCmdLogs}
-
-	if timestamps {
-		dockerCmd = append(dockerCmd, constants.DockerFlagTimestamps)
+// FollowContainerLogs streams timestamped log lines newer than since (all lines
+// when since is zero) over one command session until the container stops or ctx
+// is cancelled.
+func (d *DockerOperationsImpl) FollowContainerLogs(ctx context.Context, containerID string, since time.Time, stdoutCallback, stderrCallback func(string)) error {
+	streamer, ok := d.executor.(LineStreamer)
+	if !ok {
+		return fmt.Errorf("executor %T cannot stream command output", d.executor)
 	}
+	dockerCmd := []string{constants.DockerCommand, constants.DockerCmdLogs, constants.DockerFlagFollow, constants.DockerFlagTimestamps}
 	if !since.IsZero() {
 		dockerCmd = append(dockerCmd, constants.DockerFlagSince, since.Format(time.RFC3339Nano))
 	}
-
 	dockerCmd = append(dockerCmd, containerID)
 
-	logging.LogDebug("docker-command", "getting container logs since",
+	logging.LogDebug("docker-command", "following container logs",
 		"host", d.host.Host,
 		"container_id", containerID,
-		"since", since,
-		"timestamps", timestamps)
+		"since", since)
 
-	stdout, stderr, err := d.executor.ExecuteCommand(ctx, d.host, dockerCmd)
-	if err != nil {
-		return fmt.Errorf("failed to get logs for container %s on %s: %w",
+	if err := streamer.StreamCommand(ctx, d.host, dockerCmd, stdoutCallback, stderrCallback); err != nil {
+		return fmt.Errorf("failed to follow logs for container %s on %s: %w",
 			containerID, d.host.Host, err)
-	}
-
-	if stdout != "" {
-		lines := strings.Split(stdout, "\n")
-		for _, line := range lines {
-			if line != "" {
-				stdoutCallback(line)
-			}
-		}
-	}
-	if stderr != "" {
-		lines := strings.Split(stderr, "\n")
-		for _, line := range lines {
-			if line != "" {
-				stderrCallback(line)
-			}
-		}
 	}
 	return nil
 }

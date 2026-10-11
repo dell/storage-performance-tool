@@ -56,6 +56,7 @@ const (
 	legacyKeyNet         = "net"
 	legacyKeyOutput      = "output"
 	legacyKeySSL         = "ssl"
+	legacyKeyEndpoint    = "endpoint"
 	legacyKeyEnabled     = "enabled"
 	legacyKeyStep        = "step"
 	legacyKeyStorage     = "storage"
@@ -169,12 +170,14 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 
 	loadStepNumber := 0
 	waitNumber := 0
+	archived := &ArchivedEndpointSelection{}
 	for i, step := range legacySteps {
 		stepType := strings.ToLower(strings.TrimSpace(step.Type))
 		switch stepType {
 		case legacyStepTypeLoad, legacyStepTypePrecondition:
 			loadStepNumber++
 			step.Config = mergeConfig(legacy.Config, step.Config)
+			archivedEndpointSelectionFromConfig(step.Config, effectiveVars, archived)
 			converted, err := convertLoadStep(step, i, loadStepNumber, label, baseTS, bucket, opts, effectiveVars, archiveToStepID, itemVars, &itemVarOrder)
 			if err != nil {
 				diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: err.Error()})
@@ -274,6 +277,8 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 		PathRewrites:    pathRewrites,
 		CommandOps:      commandOps,
 		EffectiveBucket: bucket,
+
+		ArchivedEndpointSelection: *archived,
 	}, nil
 }
 
@@ -412,7 +417,6 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	if pqcMode := resolveString(getPath(step.Config, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "pqcMode"), vars); pqcMode != "" {
 		setPath(config, pqcMode, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "pqcMode")
 	}
-
 	var rewrites []PathRewrite
 	if rawOutput := itemPathString(getPath(step.Config, "item", legacyKeyOutput, "file"), vars); rawOutput != "" {
 		item := itemFileVariable(rawOutput, archiveToStepID, itemVars, itemVarOrder)
@@ -651,6 +655,9 @@ func isModeledJSONConfigPath(path string) bool {
 		"storage.net.ssl.provider",
 		"storage.net.node.addrs",
 		"storage.net.node.port",
+		"storage.net.endpoint.selection",
+		"storage.net.endpoint.dns.timeoutMilliSec",
+		"storage.net.endpoint.connect.timeoutMilliSec",
 		"test.step.id",
 		"test.step.limit.fail.count",
 		"test.step.limit.count",

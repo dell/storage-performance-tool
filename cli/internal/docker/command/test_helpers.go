@@ -114,6 +114,23 @@ func (m *MockCommandExecutor) ExecuteCommand(ctx context.Context, host *hostpars
 	return m.DefaultResponse.Stdout, m.DefaultResponse.Stderr, m.DefaultResponse.Error
 }
 
+// StreamCommand simulates a streamed command by replaying the configured
+// response line by line after recording the execution.
+func (m *MockCommandExecutor) StreamCommand(ctx context.Context, host *hostparse.HostInfo, command []string, stdoutLine, stderrLine func(string)) error {
+	stdout, stderr, err := m.ExecuteCommand(ctx, host, command)
+	for _, line := range strings.Split(stdout, "\n") {
+		if line != "" {
+			stdoutLine(line)
+		}
+	}
+	for _, line := range strings.Split(stderr, "\n") {
+		if line != "" {
+			stderrLine(line)
+		}
+	}
+	return err
+}
+
 // CopyFile simulates copying a local file to a host.
 func (m *MockCommandExecutor) CopyFile(_ context.Context, host *hostparse.HostInfo, localPath, remotePath string) error {
 	copied := CopiedFile{Host: host, LocalPath: localPath, RemotePath: remotePath}
