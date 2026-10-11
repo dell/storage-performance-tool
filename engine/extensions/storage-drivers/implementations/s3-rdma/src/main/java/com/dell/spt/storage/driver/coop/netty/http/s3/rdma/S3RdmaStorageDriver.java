@@ -328,7 +328,15 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	protected int submit(final List<O> ops, final int from, final int to) throws IllegalStateException {
 		if (!rdmaTransport.isAvailable()) {
 			// Fast path: if RDMA is not available, use parent's optimized batch submit
-			return super.submit(ops, from, to);
+			final int submitted = super.submit(ops, from, to);
+			int withPayload = 0;
+			for (int i = from; i < from + submitted; i++) {
+				if (carriesPayload(ops.get(i))) {
+					withPayload++;
+				}
+			}
+			pathStats.httpRdmaUnavailable.add(withPayload);
+			return submitted;
 		}
 
 		// Process operations individually to allow RDMA routing decisions per-operation
@@ -358,6 +366,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		if (!rdmaTransport.isAvailable()) {
 			// TRACE level - checked on every operation in high-throughput workloads
 			Loggers.MSG.trace("{}: RDMA skip: transport not available", stepId);
+			if (carriesPayload(op)) {
+				pathStats.httpRdmaUnavailable.increment();
+			}
 			return false;
 		}
 		if (!(op instanceof DataOperation)) {
@@ -397,6 +408,15 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			Loggers.MSG.warn("{}: RDMA skip: IOException getting size", stepId);
 			return false;
 		}
+	}
+
+	/** Whether the operation is one the data-path summary counts: a CREATE or READ with a payload. */
+	private static boolean carriesPayload(final Operation<?> op) {
+		if (!(op instanceof DataOperation) || op instanceof CompositeOperation) {
+			return false;
+		}
+		final var opType = op.type();
+		return opType == OpType.CREATE || opType == OpType.READ;
 	}
 
 	private static boolean isRangedRead(final DataOperation dataOp) {
@@ -444,6 +464,8 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		long mrHandle = 0;
 		RdmaBufferPool.PooledBuffer pooled = null;
 		boolean invalidated = false;
+		// The item's position before its payload was copied; negative while nothing was copied.
+		long payloadStart = -1;
 		try {
 			pooled = bufferPool == null ? null : bufferPool.acquire(size);
 			if (pooled != null) {
@@ -467,6 +489,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 			// For PUT: copy data into the registered buffer
 			if (opType == OpType.CREATE) {
+				payloadStart = ((DataItem) item).position();
 				transferDataItemToBuffer((DataItem) item, buf, size);
 				// Mark bytes as done — sendRequestData() will be skipped for RDMA PUT
 				// because httpRequest() returns a FullHttpRequest with empty body
@@ -479,6 +502,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 				releaseBuffer(pooled, buf, mrHandle, !invalidated);
 				pooled = null;
 				mrHandle = 0;
+				rewindPayload(dataOp, payloadStart);
 				return prepareFailed(op, "token generation failed");
 			}
 
@@ -509,7 +533,22 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 				releaseBuffer(pooled, buf, mrHandle, false);
 			}
 
+			rewindPayload(dataOp, payloadStart);
 			return prepareFailed(op, e.getClass().getSimpleName());
+		}
+	}
+
+	/**
+	 * Undoes the payload copy of a preparation that ends without an RDMA request. The copy leaves
+	 * the item at its end and the operation counted as written: without this, the HTTP fallback
+	 * would send an empty body and a failed operation would report bytes.
+	 *
+	 * @param payloadStart the item's position before the copy; negative if nothing was copied
+	 */
+	private static void rewindPayload(final DataOperation<?> dataOp, final long payloadStart) {
+		if (payloadStart >= 0) {
+			dataOp.item().position(payloadStart);
+			dataOp.countBytesDone(0);
 		}
 	}
 

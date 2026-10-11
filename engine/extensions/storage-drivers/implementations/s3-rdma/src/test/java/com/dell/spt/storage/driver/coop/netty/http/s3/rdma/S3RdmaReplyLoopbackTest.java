@@ -1,10 +1,15 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 
 import static com.dell.spt.base.Constants.APP_NAME;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 
 import com.dell.spt.base.config.InitialConfigSchemaProvider;
 import com.dell.spt.base.data.DataInput;
@@ -46,10 +51,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -68,6 +75,8 @@ final class S3RdmaReplyLoopbackTest {
 	private static final long RESULT_TIMEOUT_SECONDS = 5;
 	private static final Credential CREDENTIAL = Credential.getInstance("access", "secret");
 	private static final int SIZE = 4096;
+	/** Longer than the 64 KB data ring of {@link #newDriver}, and not a multiple of it. */
+	private static final int PAYLOAD_SIZE = 3 * 65536 + 4097;
 	private static final long THRESHOLD = 1024;
 	/** Part retries allowed by {@code CoopStorageDriverBase.MAX_PART_RETRIES}. */
 	private static final int MAX_PART_RETRIES = 3;
@@ -77,6 +86,12 @@ final class S3RdmaReplyLoopbackTest {
 
 	private final List<CapturedRequest> requests = new CopyOnWriteArrayList<>();
 	private final ExecutorService executor = Executors.newSingleThreadExecutor();
+	/** Makes the transport of the next driver fail its initialization. */
+	private boolean rdmaInitFails;
+	/** While set and closed, the emulated server answers no object request. */
+	private volatile CountDownLatch replyGate;
+	/** Body of the last PUT that carried one. */
+	private volatile byte[] httpPutBody;
 	private HttpServer server;
 	private FakeRdmaTransport transport;
 	private volatile Reply reply;
@@ -369,6 +384,132 @@ final class S3RdmaReplyLoopbackTest {
 			assertEquals(THRESHOLD - 1, put.bodyLength());
 			assertEquals(1, driver.pathStats().httpBelowThreshold.sum());
 			assertEquals(0, transport.getRegisterCount());
+		}
+	}
+
+	@Test
+	void tokenFailureWithFallbackSendsTheWholePayloadOverHttp() throws Exception {
+		final byte[] payload = payloadSentOverRdma(PAYLOAD_SIZE);
+		reply = new Reply(200, null, null, null, false);
+		try (final var driver = newDriver(true)) {
+			transport.setFailTokenGeneration(true);
+			final var result = execute(driver, op(OpType.CREATE, PAYLOAD_SIZE));
+
+			assertEquals(Operation.Status.SUCC, result.status());
+			assertEquals(PAYLOAD_SIZE, ((DataOperation<?>) result).countBytesDone());
+			assertNull(onlyObjectRequest("PUT").rdmaToken());
+			assertArrayEquals(payload, httpPutBody, "the payload was already copied once for RDMA");
+			assertEquals(1, driver.pathStats().httpFallback.sum());
+			assertNoBufferInUse(driver);
+		}
+	}
+
+	@Test
+	void copyFailureWithFallbackSendsTheWholePayloadOverHttp() throws Exception {
+		final byte[] payload = payloadSentOverRdma(PAYLOAD_SIZE);
+		reply = new Reply(200, null, null, null, false);
+		try (final var driver = newDriver(true)) {
+			final var result = execute(driver, putFailingAfterPartialCopy(PAYLOAD_SIZE));
+
+			assertEquals(Operation.Status.SUCC, result.status());
+			assertEquals(PAYLOAD_SIZE, ((DataOperation<?>) result).countBytesDone());
+			assertNull(onlyObjectRequest("PUT").rdmaToken());
+			assertArrayEquals(payload, httpPutBody, "the payload was partly copied for RDMA");
+			assertEquals(1, driver.pathStats().httpFallback.sum());
+			assertNoBufferInUse(driver);
+		}
+	}
+
+	@Test
+	void tokenFailureWithoutFallbackFailsWithoutBytes() throws Exception {
+		reply = new Reply(200, "200", null, null, true);
+		try (final var driver = newDriver(false)) {
+			transport.setFailTokenGeneration(true);
+			final var result = execute(driver, op(OpType.CREATE, SIZE));
+
+			assertEquals(Operation.Status.FAIL_IO, result.status());
+			assertEquals(0, ((DataOperation<?>) result).countBytesDone());
+			assertTrue(objectRequests().isEmpty(), "no request may be sent: " + requests);
+			assertEquals(1, driver.pathStats().prepareFailed.sum());
+			assertNoBufferInUse(driver);
+		}
+	}
+
+	/** The bytes of {@code op(OpType.CREATE, size)}, as an RDMA PUT places them in registered memory. */
+	private byte[] payloadSentOverRdma(final int size) throws Exception {
+		reply = new Reply(200, "200", null, null, true);
+		try (final var driver = newDriver(false)) {
+			assertEquals(Operation.Status.SUCC, execute(driver, op(OpType.CREATE, size)).status());
+		}
+		requests.clear();
+		return serverReadPayload;
+	}
+
+	/** The PUT of {@link #op}, except that its first read delivers half the payload and its second fails. */
+	@SuppressWarnings("unchecked")
+	private static Operation<DataItem> putFailingAfterPartialCopy(final int size) throws IOException {
+		final DataItem whole = new DataItemImpl("obj-" + OpType.CREATE, 0, size);
+		final DataItem item = mock(DataItem.class, delegatesTo(whole));
+		final AtomicInteger reads = new AtomicInteger();
+		doAnswer(invocation -> {
+			if (reads.getAndIncrement() > 0) {
+				throw new IOException("injected read failure");
+			}
+			final ByteBuffer dst = invocation.getArgument(0);
+			final ByteBuffer half = dst.duplicate().limit(dst.position() + size / 2);
+			final int count = whole.read(half);
+			dst.position(half.position());
+			return count;
+		}).when(item).read(any(ByteBuffer.class));
+		return (Operation<DataItem>) (Operation<?>) new DataOperationImpl<>(
+						0, OpType.CREATE, item, null, "/bucket", CREDENTIAL, null, 0);
+	}
+
+	// ---------- RDMA unavailable ----------
+
+	@Test
+	void initializationFallbackSendsOperationsOverHttpAndCountsThem() throws Exception {
+		rdmaInitFails = true;
+		for (final OpType opType : List.of(OpType.CREATE, OpType.READ)) {
+			try (final var driver = newDriver(true)) {
+				final var result = execute(driver, op(opType, SIZE));
+
+				assertEquals(Operation.Status.SUCC, result.status(), opType.toString());
+				assertEquals(SIZE, ((DataOperation<?>) result).countBytesDone(), opType.toString());
+				assertEquals(1, driver.pathStats().httpRdmaUnavailable.sum(), opType.toString());
+				assertTrue(driver.pathStats().summary().contains("httpRdmaUnavailable=1"),
+								driver.pathStats().summary());
+				assertEquals(0, transport.getRegisterCount());
+			}
+		}
+		assertNull(onlyObjectRequest("PUT").rdmaToken());
+		assertEquals(SIZE, onlyObjectRequest("PUT").bodyLength());
+		assertNull(onlyObjectRequest("GET").rdmaToken());
+	}
+
+	@Test
+	void initializationFallbackCountsTheDataOperationsOfABatch() throws Exception {
+		rdmaInitFails = true;
+		try (final var driver = newDriver(true)) {
+			final ResultOutput output = new ResultOutput();
+			driver.operationResultOutput(output);
+			driver.start();
+			// The first operation holds the only permit until the gate opens. The others are then
+			// queued together, so the dispatcher submits them as a batch.
+			replyGate = new CountDownLatch(1);
+			assertTrue(driver.put(op(OpType.CREATE, SIZE)));
+			final List<Operation<DataItem>> queued = List.of(
+							op(OpType.READ, SIZE), op(OpType.DELETE, SIZE), op(OpType.CREATE, SIZE));
+			assertEquals(queued.size(), driver.put(queued));
+			replyGate.countDown();
+
+			for (int i = 0; i <= queued.size(); i++) {
+				final Operation<DataItem> result = output.await();
+				assertNotNull(result, "operation " + i + " did not complete: " + requests);
+				assertEquals(Operation.Status.SUCC, result.status(), result.type() + ": " + requests);
+			}
+			assertEquals(3, driver.pathStats().httpRdmaUnavailable.sum(),
+							"two PUTs and one GET carry a payload; the DELETE does not");
 		}
 	}
 
@@ -720,7 +861,13 @@ final class S3RdmaReplyLoopbackTest {
 		requests.add(new CapturedRequest(
 						method, path, query, token,
 						exchange.getRequestHeaders().getFirst("Content-Length"), requestBody.length));
+		if ("PUT".equals(method) && requestBody.length > 0) {
+			httpPutBody = requestBody;
+		}
 		final boolean objectRequest = path.chars().filter(c -> c == '/').count() > 1;
+		if (objectRequest) {
+			awaitReplyGate();
+		}
 		if (!objectRequest || token == null) {
 			plainResponse(exchange, method, query, exchange.getRequestHeaders().getFirst("Range"));
 			return;
@@ -764,6 +911,18 @@ final class S3RdmaReplyLoopbackTest {
 			exchange.getResponseBody().write(body);
 		}
 		exchange.close();
+	}
+
+	private void awaitReplyGate() throws IOException {
+		final CountDownLatch gate = replyGate;
+		try {
+			if (gate != null && !gate.await(RESULT_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+				throw new IOException("reply gate was not opened");
+			}
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new IOException(e);
+		}
 	}
 
 	private static void plainResponse(
@@ -850,6 +1009,7 @@ final class S3RdmaReplyLoopbackTest {
 		customize.accept(config);
 		final RdmaConfig rdmaConfig = new RdmaConfig(config.configVal("storage").configVal("rdma"));
 		transport = new FakeRdmaTransport(rdmaConfig);
+		transport.setFailInit(rdmaInitFails);
 		return new S3RdmaStorageDriver<>(
 						"s3-rdma-reply-loopback",
 						DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false, 0.0, true),

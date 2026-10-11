@@ -23,6 +23,8 @@ final class RdmaPathStats {
 	final LongAdder rdmaProtocolError = new LongAdder();
 	/** RDMA-proposed request ended by the client-side timeout reaper. */
 	final LongAdder rdmaTimedOut = new LongAdder();
+	/** RDMA disabled, or its initialization failed with fallback enabled: sent over HTTP. */
+	final LongAdder httpRdmaUnavailable = new LongAdder();
 	/** Below {@code thresholdBytes}: sent over HTTP by design. */
 	final LongAdder httpBelowThreshold = new LongAdder();
 	/** Operation kind not proposed for RDMA (ranged part reads): sent over HTTP. */
@@ -41,6 +43,7 @@ final class RdmaPathStats {
 						+ ", rdmaHttpError=" + rdmaHttpError.sum()
 						+ ", rdmaProtocolError=" + rdmaProtocolError.sum()
 						+ ", rdmaTimedOut=" + rdmaTimedOut.sum()
+						+ ", httpRdmaUnavailable=" + httpRdmaUnavailable.sum()
 						+ ", httpBelowThreshold=" + httpBelowThreshold.sum()
 						+ ", httpIneligible=" + httpIneligible.sum()
 						+ ", httpOversize=" + httpOversize.sum()
