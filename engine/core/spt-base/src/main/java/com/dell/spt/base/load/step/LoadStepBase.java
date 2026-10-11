@@ -102,7 +102,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		this.standaloneDeleteDurationMode = standaloneDelete.durationMode();
 		this.standaloneDeletePreValidationEnabled = standaloneDelete.preValidation();
 		this.standaloneDeletePostVerificationEnabled = standaloneDelete.postVerification();
-		Loggers.CONFIG.info(ConfigUtil.toString(this.config, ConfigFormat.YAML, resolveStepTypeName()));
+		Loggers.CONFIG.info(ConfigUtil.toMaskedString(this.config, ConfigFormat.YAML, resolveStepTypeName()));
 	}
 
 	private void validateRangeConfiguration() {

@@ -15,18 +15,20 @@ const (
 
 // Options contains user/local runtime inputs for importing and generating a replay.
 type Options struct {
-	SourceURL     string
-	RunID         int64
-	Endpoints     []string
-	AccessKey     string
-	SecretKey     string
-	Bucket        string
-	AuthVersion   int
-	TestHosts     string
-	Label         string
-	S3Driver      string
-	BaseTimestamp string
-	HTTPClient    *http.Client
+	SourceURL   string
+	RunID       int64
+	Endpoints   []string
+	AccessKey   string
+	SecretKey   string
+	Bucket      string
+	AuthVersion int
+	TestHosts   string
+	Label       string
+	S3Driver    string
+	// EndpointSelection applies opt-in endpoint selection to the local replay target.
+	EndpointSelection scenario.EndpointSelection
+	BaseTimestamp     string
+	HTTPClient        *http.Client
 }
 
 // Diagnostic describes a conversion/import issue surfaced during replay planning.
@@ -95,6 +97,8 @@ type Generated struct {
 	PathRewrites    []PathRewrite
 	CommandOps      []CommandOperation
 	EffectiveBucket string
+	// ArchivedEndpointSelection lists the endpoint-selection declarations the archive contains.
+	ArchivedEndpointSelection ArchivedEndpointSelection
 }
 
 // OutputPaths records where generated artifacts were written.

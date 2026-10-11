@@ -66,6 +66,19 @@ func Generate(ctx context.Context, opts Options) (*Generated, error) {
 	if len(opts.Endpoints) == 1 {
 		params.Endpoint = opts.Endpoints[0]
 	}
+	selection, selectionDiagnostics, err := mergeEndpointSelection(opts.EndpointSelection, generated.ArchivedEndpointSelection)
+	generated.Diagnostics = append(generated.Diagnostics, selectionDiagnostics...)
+	if err != nil {
+		return generated, newClassifiedError(failureInvalidEndpointSelection, err.Error(), err)
+	}
+	params.EndpointSelection = selection
+	if err := scenario.ValidateEndpointSelection(params.EndpointSelection, scenario.EndpointSelectionTarget{
+		RawEndpoints: opts.Endpoints,
+		S3Driver:     opts.S3Driver,
+		WorkloadType: params.WorkloadType,
+	}); err != nil {
+		return generated, newClassifiedError(failureInvalidEndpointSelection, err.Error(), err)
+	}
 	defaults, err := scenario.GenerateDefaults(params)
 	if err != nil {
 		return generated, newClassifiedError(failureReplayDefaultsGeneration, fmt.Sprintf("generate replay defaults: %v", err), err)

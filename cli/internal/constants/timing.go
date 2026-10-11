@@ -10,6 +10,9 @@ import "time"
 const (
 	// API and connection timeouts
 	APIPollingTimeout               = 500 * time.Millisecond // Timeout for API polling requests
+	StreamCommandWaitDelay          = 1 * time.Second        // Bound on draining a streamed command's output after it exits or is cancelled
+	EntryLogRelayReconnectMin       = 1 * time.Second        // First delay before resuming a dropped remote log stream
+	EntryLogRelayReconnectMax       = 30 * time.Second       // Cap on the doubling reconnect delay for a remote log stream
 	APIReadinessPollInterval        = 500 * time.Millisecond // Interval between API readiness probes
 	APIReadinessTimeout             = 30 * time.Second       // Timeout for waiting for APIs to be ready
 	SubmissionReconciliationTimeout = 10 * time.Second       // Bounded /status reconciliation after an ambiguous POST /run

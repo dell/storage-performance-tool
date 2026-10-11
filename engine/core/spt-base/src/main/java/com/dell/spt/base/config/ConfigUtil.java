@@ -15,6 +15,7 @@ import com.github.akurilov.confuse.impl.BasicConfig;
 import java.io.File;
 import java.io.IOException;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -25,6 +26,12 @@ import static com.dell.spt.base.config.ConfigFormat.YAML;
 public interface ConfigUtil {
 
 	String MIXED_LOAD_STEP_TYPE = "MixedLoad";
+
+	/** Written in place of credential values in logged configuration; the CLI masks with the same value. */
+	String MASKED_VALUE = "***";
+
+	/** Credential leaves under {@code storage.auth} that logged configuration must not reveal. */
+	List<String> MASKED_AUTH_KEYS = List.of("uid", "secret", "token");
 
 	static ObjectMapper readConfigMapper(final ConfigFormat format, final Map<String, Object> schema)
 					throws NoSuchMethodException {
@@ -86,13 +93,46 @@ public interface ConfigUtil {
 	}
 
 	static String toString(final Config config, final ConfigFormat format, final String stepTypeName) {
+		final var configTree = configTree(config);
+		trimLoadOpNoise(configTree, stepTypeName);
+		return writeTree(configTree, format);
+	}
+
+	/** Serializes a step configuration for logs and result artifacts, with credential values masked. */
+	static String toMaskedString(final Config config, final ConfigFormat format, final String stepTypeName) {
+		final var configTree = configTree(config);
+		trimLoadOpNoise(configTree, stepTypeName);
+		maskCredentials(configTree);
+		return writeTree(configTree, format);
+	}
+
+	private static String writeTree(final Map<String, Object> configTree, final ConfigFormat format) {
 		try {
-			final var configTree = configTree(config);
-			trimLoadOpNoise(configTree, stepTypeName);
 			return configWriter(format).writeValueAsString(configTree);
 		} catch (final JsonProcessingException e) {
 			throw new RuntimeException(e);
 		}
+	}
+
+	/**
+	 * Replaces each set {@code storage.auth} credential with {@link #MASKED_VALUE}. The storage and auth
+	 * maps are replaced with copies, so no map shared with the source configuration is modified.
+	 */
+	static void maskCredentials(final Map<String, Object> configTree) {
+		if (!(configTree.get("storage") instanceof Map<?, ?> storage)
+						|| !(storage.get("auth") instanceof Map<?, ?> auth)) {
+			return;
+		}
+		final var maskedAuth = new LinkedHashMap<Object, Object>(auth);
+		for (final var key : MASKED_AUTH_KEYS) {
+			final var value = maskedAuth.get(key);
+			if (value != null && !value.toString().isEmpty()) {
+				maskedAuth.put(key, MASKED_VALUE);
+			}
+		}
+		final var maskedStorage = new LinkedHashMap<Object, Object>(storage);
+		maskedStorage.put("auth", maskedAuth);
+		configTree.put("storage", maskedStorage);
 	}
 
 	@SuppressWarnings("unchecked")

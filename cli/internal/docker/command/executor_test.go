@@ -6,7 +6,9 @@ package command
 
 import (
 	"context"
+	"errors"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -553,4 +555,147 @@ func TestMockCommandExecutor_DelaySimulation(t *testing.T) {
 			t.Errorf("Command took too long: %v (should have been cancelled)", duration)
 		}
 	})
+}
+
+func TestHostCommand_SSHArguments(t *testing.T) {
+	remoteHost := CreateRemoteHost("remote.example.com")
+	ctx := context.Background()
+
+	oneShot := hostCommand(ctx, remoteHost, []string{"docker", "ps"})
+	wantOneShot := []string{"ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", "testuser@remote.example.com", "docker", "ps"}
+	if strings.Join(oneShot.Args, " ") != strings.Join(wantOneShot, " ") {
+		t.Fatalf("one-shot ssh args = %q, want %q", oneShot.Args, wantOneShot)
+	}
+
+	guarded := []string{"testuser@remote.example.com", "sh", "-c", "'" + remoteStreamGuard + "'", "sh", "docker", "logs"}
+	streamFlags := []string{"ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes",
+		"-T", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"}
+	// Without StdinNull support (OpenSSH < 8.7) the option would be rejected.
+	stream := streamHostCommand(ctx, remoteHost, []string{"docker", "logs"}, false)
+	if want := slices.Concat(streamFlags, guarded); !slices.Equal(stream.Args, want) {
+		t.Fatalf("stream ssh args = %q, want %q", stream.Args, want)
+	}
+	stream = streamHostCommand(ctx, remoteHost, []string{"docker", "logs"}, true)
+	if want := slices.Concat(streamFlags, []string{"-o", "StdinNull=no"}, guarded); !slices.Equal(stream.Args, want) {
+		t.Fatalf("stream ssh args with StdinNull support = %q, want %q", stream.Args, want)
+	}
+
+	local := hostCommand(ctx, CreateLocalHost(), []string{"docker", "ps"}, constants.SSHFlagNoTTY)
+	if strings.Join(local.Args, " ") != "docker ps" {
+		t.Fatalf("local command should run directly, got %q", local.Args)
+	}
+	localStream := streamHostCommand(ctx, CreateLocalHost(), []string{"docker", "logs"}, true)
+	if strings.Join(localStream.Args, " ") != "docker logs" {
+		t.Fatalf("local stream should run directly without the remote guard, got %q", localStream.Args)
+	}
+}
+
+func TestRealCommandExecutor_StreamCommand_SplitsLines(t *testing.T) {
+	executor := NewCommandExecutor()
+	var stdout, stderr []string
+	err := executor.StreamCommand(context.Background(), CreateLocalHost(),
+		[]string{"sh", "-c", `printf 'one\ntwo\r\n'; printf 'warn\n' >&2; printf 'tail'`},
+		func(line string) { stdout = append(stdout, line) },
+		func(line string) { stderr = append(stderr, line) },
+	)
+	if err != nil {
+		t.Fatalf("StreamCommand returned error: %v", err)
+	}
+	if strings.Join(stdout, "|") != "one|two|tail" {
+		t.Fatalf("unexpected stdout lines: %q", stdout)
+	}
+	if strings.Join(stderr, "|") != "warn" {
+		t.Fatalf("unexpected stderr lines: %q", stderr)
+	}
+}
+
+func TestRealCommandExecutor_StreamCommand_DropsPartialLineOnFailure(t *testing.T) {
+	executor := NewCommandExecutor()
+	var stdout []string
+	// A dropped session can cut a line mid-write. Delivering the fragment would
+	// let a resuming caller move past the complete line.
+	err := executor.StreamCommand(context.Background(), CreateLocalHost(),
+		[]string{"sh", "-c", `printf 'complete\ninterrup'; exit 255`},
+		func(line string) { stdout = append(stdout, line) }, func(string) {},
+	)
+	if err == nil {
+		t.Fatal("expected the exit error")
+	}
+	if strings.Join(stdout, "|") != "complete" {
+		t.Fatalf("unexpected stdout lines: %q", stdout)
+	}
+}
+
+func TestRealCommandExecutor_StreamCommand_DeliversBeforeExitAndCancelsPromptly(t *testing.T) {
+	executor := NewCommandExecutor()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	first := make(chan struct{})
+	result := make(chan error, 1)
+	// The backgrounded sleep keeps the output pipe open after sh is killed,
+	// exercising the bounded wait for descendants.
+	go func() {
+		result <- executor.StreamCommand(ctx, CreateLocalHost(),
+			[]string{"sh", "-c", "echo first; sleep 5 & wait"},
+			func(line string) {
+				if line == "first" {
+					close(first)
+				}
+			},
+			func(string) {},
+		)
+	}()
+
+	select {
+	case <-first:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first line was not delivered while the command was still running")
+	}
+	cancelled := time.Now()
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("expected an error after cancellation")
+		}
+	case <-time.After(constants.StreamCommandWaitDelay + 2*time.Second):
+		t.Fatal("StreamCommand did not return promptly after cancellation")
+	}
+	if elapsed := time.Since(cancelled); elapsed > constants.StreamCommandWaitDelay+time.Second {
+		t.Fatalf("cancellation took %v", elapsed)
+	}
+}
+
+func TestRealCommandExecutor_StreamCommand_SerializesCallbacks(t *testing.T) {
+	executor := NewCommandExecutor()
+	// Shared state without its own lock: the race detector flags concurrent callbacks.
+	var lines []string
+	record := func(line string) { lines = append(lines, line) }
+	err := executor.StreamCommand(context.Background(), CreateLocalHost(),
+		[]string{"sh", "-c", `i=0; while [ $i -lt 500 ]; do echo out$i; echo err$i >&2; i=$((i+1)); done`},
+		record, record,
+	)
+	if err != nil {
+		t.Fatalf("StreamCommand returned error: %v", err)
+	}
+	if len(lines) != 1000 {
+		t.Fatalf("expected 1000 lines, got %d", len(lines))
+	}
+}
+
+func TestRealCommandExecutor_StreamCommand_ReturnsExitError(t *testing.T) {
+	executor := NewCommandExecutor()
+	var stderr []string
+	err := executor.StreamCommand(context.Background(), CreateLocalHost(),
+		[]string{"sh", "-c", "echo 'No such container' >&2; exit 1"},
+		func(string) {}, func(line string) { stderr = append(stderr, line) },
+	)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected exit status 1, got %v", err)
+	}
+	if strings.Join(stderr, "|") != "No such container" {
+		t.Fatalf("unexpected stderr lines: %q", stderr)
+	}
 }
