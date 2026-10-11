@@ -873,9 +873,12 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 					body.limit((int) result.bytes());
 					final IntegrityVerificationResult prior = op.integrityVerificationResult();
 					finishOutOfBandIntegrityRead(channel, op, body);
-					// Only a result produced by this read counts.
+					// Only a result produced by this read counts. Identity is the test: a new result
+					// may equal the earlier one field by field.
 					final IntegrityVerificationResult verification = op.integrityVerificationResult();
-					verifiedFill = verification != null && verification != prior && verification.verified()
+					@SuppressWarnings("ReferenceEquality")
+					final boolean producedByThisRead = verification != prior;
+					verifiedFill = verification != null && producedByThisRead && verification.verified()
 									&& op.status() == Operation.Status.SUCC;
 					dataOp.countBytesDone(result.bytes());
 				}
