@@ -45,13 +45,16 @@ public class FakeRdmaTransport extends RdmaTransport {
 	/** When true, generateToken() returns null. */
 	private volatile boolean failTokenGeneration;
 
+	/** When true, init() fails and the transport stays unavailable. */
+	private volatile boolean failInit;
+
 	public FakeRdmaTransport(final RdmaConfig config) {
 		super(config);
 	}
 
 	@Override
 	public boolean init(final String endpoint, final String accessKey, final String secretKey) {
-		if (endpoint == null || endpoint.isEmpty() || accessKey == null || secretKey == null) {
+		if (failInit || endpoint == null || endpoint.isEmpty() || accessKey == null || secretKey == null) {
 			available = false;
 			return false;
 		}
@@ -145,6 +148,11 @@ public class FakeRdmaTransport extends RdmaTransport {
 	/** When true, generateToken() always returns null. */
 	public void setFailTokenGeneration(final boolean fail) {
 		this.failTokenGeneration = fail;
+	}
+
+	/** When true, init() returns false (simulates a host without a usable RDMA device). */
+	public void setFailInit(final boolean fail) {
+		this.failInit = fail;
 	}
 
 	/** Manually control availability (simulates transport going down). */

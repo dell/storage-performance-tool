@@ -102,7 +102,7 @@ Selecting the RDMA driver does not by itself prove that payloads moved over RDMA
 | `x-amz-rdma-reply: 501`, or no reply header, on a GET | The object arrived in the HTTP body: counted once as an HTTP read with `--rdma-fallback`, otherwise the operation fails |
 | Reply 200 with an HTTP body, a byte-count mismatch, or a GET without `x-amz-rdma-bytes-transferred` | Contract violation: the operation fails as corrupt (see `--rdma-allow-missing-bytes-header` for legacy servers) |
 
-At the end of each step the engine logs one `RDMA data path summary` line in `messages.log` with counts of operations transferred over RDMA, declined by the server, failed, timed out, and sent over HTTP (below threshold, ineligible, oversize, or preparation fallback). Check it before trusting RDMA results.
+At the end of each step the engine logs one `RDMA data path summary` line in `messages.log` with counts of operations transferred over RDMA, declined by the server, failed, timed out, and sent over HTTP (RDMA unavailable, below threshold, ineligible, oversize, or preparation fallback). Check it before trusting RDMA results.
 
 The summary also reports the buffer pool. The counters are:
 
@@ -167,7 +167,7 @@ SPT Engine (Java)
     └── rdma-core           — system packages (libibverbs, libmlx5, librdmacm)
 ```
 
-The native layer uses Mellanox DC (Dynamically Connected) transport for scalable connections and RoCE v2 for Ethernet-based RDMA. Each RDMA operation currently allocates and registers its own buffer on the driver's dispatch path; for large objects and high request rates, this per-operation preparation can limit the throughput of a single driver.
+The native layer uses Mellanox DC (Dynamically Connected) transport for scalable connections and RoCE v2 for Ethernet-based RDMA. By default, registered buffers are reused across operations (`--rdma-buffer-pool`). A PUT payload is still copied into its buffer on the driver's dispatch path; for large objects and high request rates, this copy can limit the PUT throughput of a single driver.
 
 ---
 
@@ -183,11 +183,12 @@ If SPT reports that RDMA is not available:
 
 ### Fallback to HTTP
 
-If `--rdma-fallback` is set and RDMA initialization fails, all operations use HTTP; check the engine log for `RDMA unavailable, falling back to HTTP`. Per-operation fallbacks and server declines are counted in the `RDMA data path summary` line at the end of each step.
+If `--rdma-fallback` is set and RDMA initialization fails, all operations use HTTP; check the engine log for `RDMA unavailable, falling back to HTTP`. The `RDMA data path summary` line at the end of each step then reports `transport unavailable` and counts those operations as `httpRdmaUnavailable`. Per-operation fallbacks and server declines are counted in the same line.
 
 ### Performance lower than expected
 
 - If you set `--rdma-local-ip`, ensure it is the address of your RDMA interface (not a management NIC); in multi-host runs leave it unset so each worker selects its own
 - Check that object sizes are above `--rdma-threshold`
+- In a multi-host run against several storage nodes, try one node per worker: `--slice-endpoints` (engine YAML `storage.net.node.slice: true`) divides the endpoint list among the workers instead of connecting every worker to every node. In the only RDMA environment available for testing (four workers, four nodes), this gave equal or higher RDMA throughput, most clearly for GET. The effect may be specific to that environment, so compare both layouts
 - Verify RoCE v2 is properly configured on the network (PFC/ECN flow control)
 - Use `--rdma-log-level DEBUG` for detailed native-layer diagnostics

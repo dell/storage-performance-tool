@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Added
 
 - **S3 region selection** — Added `spt run --region` and engine YAML `storage.region` support to explicitly select the AWS region for S3 requests. Omitting the setting preserves each driver’s existing region selection.
-- **S3-RDMA data-path summary** — The `s3-rdma` driver now logs one end-of-step summary in `messages.log` showing how many data operations actually moved over RDMA, were declined by the server, failed, or used HTTP (below threshold, oversize, ineligible, or preparation fallback).
+- **S3-RDMA data-path summary** — The `s3-rdma` driver now logs one end-of-step summary in `messages.log` showing how many data operations actually moved over RDMA, were declined by the server, failed, or used HTTP (RDMA unavailable, below threshold, oversize, ineligible, or preparation fallback).
 - **Automatic RDMA local address** — When `--rdma-local-ip` is not set and `--rdma-device` is `auto`, each worker now selects the local address it routes toward the first S3 endpoint for RoCE GID selection, so distributed runs no longer need one shared address. Leave the flag unset for multi-host runs; a named `--rdma-device` keeps device selection authoritative.
 - **S3-RDMA payload copy threads** — Added `spt run --rdma-copy-threads` (env `RDMA_COPY_THREADS`, engine `storage.rdma.copyThreads`) to copy each RDMA PUT payload of 2 MiB or more into its buffer on several threads instead of on the driver's dispatcher thread alone. The default of 1 keeps the previous behavior.
 - **Legacy RDMA byte-count option** — Added `spt run --rdma-allow-missing-bytes-header` (env `RDMA_ALLOW_MISSING_BYTES_HEADER`, engine `storage.rdma.allowMissingBytesHeader`) for servers that report RDMA GET success without `x-amz-rdma-bytes-transferred`; it counts the requested size instead of failing the read.
@@ -25,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - **S3-RDMA ranged reads** — Reads with fixed or random byte ranges now use HTTP instead of an RDMA buffer sized for the whole object, which previously miscounted or failed valid range responses.
 - **S3-RDMA direct-memory exhaustion** — An RDMA buffer allocation that runs out of JVM direct memory now fails the operation, or sends it over HTTP with `--rdma-fallback`, instead of escaping the driver.
 - **S3-RDMA fallback setting** — With `--rdma-fallback` disabled, RDMA buffer-registration or token failures now fail the operation instead of silently sending it over HTTP.
+- **S3-RDMA fallback payload** — With `--rdma-fallback`, a PUT whose RDMA preparation failed after its payload was copied (for example, when no RDMA token could be generated) was sent over HTTP without its body and failed. The fallback request now carries the whole payload, and the same failure with `--rdma-fallback` disabled no longer reports the object's bytes as written.
 
 - **DELETE failure-budget reporting** — Duration-based DELETE runs now propagate a failure-budget exception consistently when the budget is exceeded during worker startup, matching failures detected during active waiting.
 
