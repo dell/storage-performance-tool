@@ -100,7 +100,7 @@ Selecting the RDMA driver does not by itself prove that payloads moved over RDMA
 | `x-amz-rdma-reply: 501`, or no reply header, on a GET | The object arrived in the HTTP body: counted once as an HTTP read with `--rdma-fallback`, otherwise the operation fails |
 | Reply 200 with an HTTP body, a byte-count mismatch, or a GET without `x-amz-rdma-bytes-transferred` | Contract violation: the operation fails as corrupt (see `--rdma-allow-missing-bytes-header` for legacy servers) |
 
-At the end of each step the engine logs one `RDMA data path summary` line in `messages.log` with counts of operations transferred over RDMA, declined by the server, failed, timed out, and sent over HTTP (below threshold, ineligible, oversize, or preparation fallback). Check it before trusting RDMA results.
+At the end of each step the engine logs one `RDMA data path summary` line in `messages.log` with counts of operations transferred over RDMA, declined by the server, failed, timed out, and sent over HTTP (RDMA unavailable, below threshold, ineligible, oversize, or preparation fallback). Check it before trusting RDMA results.
 
 ---
 
@@ -169,7 +169,7 @@ If SPT reports that RDMA is not available:
 
 ### Fallback to HTTP
 
-If `--rdma-fallback` is set and RDMA initialization fails, all operations use HTTP; check the engine log for `RDMA unavailable, falling back to HTTP`. Per-operation fallbacks and server declines are counted in the `RDMA data path summary` line at the end of each step.
+If `--rdma-fallback` is set and RDMA initialization fails, all operations use HTTP; check the engine log for `RDMA unavailable, falling back to HTTP`. The `RDMA data path summary` line at the end of each step then reports `transport unavailable` and counts those operations as `httpRdmaUnavailable`. Per-operation fallbacks and server declines are counted in the same line.
 
 ### Performance lower than expected
 
