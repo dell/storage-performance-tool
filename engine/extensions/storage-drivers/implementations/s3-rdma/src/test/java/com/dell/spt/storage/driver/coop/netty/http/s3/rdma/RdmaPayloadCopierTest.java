@@ -3,6 +3,7 @@ package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -21,7 +22,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
-import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -267,8 +267,208 @@ class RdmaPayloadCopierTest {
 			final var copier = new RdmaPayloadCopier(2, "rdma-copy-closed-");
 			copier.close();
 
-			assertThrows(RejectedExecutionException.class,
+			assertThrows(RdmaPayloadCopier.StoppedException.class,
 							() -> copier.copy(item(input, size), ByteBuffer.allocateDirect(size), size));
+		}
+	}
+
+	@Test
+	void shutdownStopsACopyWhosePoolPartIsBlocked() throws Exception {
+		final int size = 2 * PART;
+		final var poolPartCopying = new CountDownLatch(1);
+		final DataItem item = Mockito.mock(DataItem.class);
+		Mockito.when(item.slice(eq(0L), anyLong())).thenAnswer(slice -> part(dst -> fill(dst, (byte) 0)));
+		Mockito.when(item.slice(eq((long) PART), anyLong())).thenAnswer(slice -> part(dst -> {
+			poolPartCopying.countDown();
+			// Ends only when shutdown interrupts the pool thread.
+			new CountDownLatch(1).await();
+			return fill(dst, (byte) 1);
+		}));
+		final var copier = new RdmaPayloadCopier(2, "rdma-copy-stop-");
+		final var thrown = new AtomicReference<Throwable>();
+		final Thread caller = startCopy(copier, item, size, thrown, new CountDownLatch(0));
+		assertTrue(poolPartCopying.await(WAIT_SECONDS, TimeUnit.SECONDS));
+
+		assertTrue(copier.shutdown());
+
+		assertTrue(copier.isTerminated());
+		caller.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS));
+		assertFalse(caller.isAlive());
+		assertInstanceOf(RdmaPayloadCopier.StoppedException.class, thrown.get());
+	}
+
+	@Test
+	void shutdownWaitsUntilTheBufferOfAStoppedCopyIsReleased() throws Exception {
+		final int size = 2 * PART;
+		final var poolPartCopying = new CountDownLatch(1);
+		final var releaseBuffer = new CountDownLatch(1);
+		final DataItem item = Mockito.mock(DataItem.class);
+		Mockito.when(item.slice(eq(0L), anyLong())).thenAnswer(slice -> part(dst -> fill(dst, (byte) 0)));
+		Mockito.when(item.slice(eq((long) PART), anyLong())).thenAnswer(slice -> part(dst -> {
+			poolPartCopying.countDown();
+			new CountDownLatch(1).await();
+			return fill(dst, (byte) 1);
+		}));
+		final var copier = new RdmaPayloadCopier(2, "rdma-copy-release-", STILL_WAITING_MILLIS);
+		final var thrown = new AtomicReference<Throwable>();
+		final Thread caller = startCopy(copier, item, size, thrown, releaseBuffer);
+		assertTrue(poolPartCopying.await(WAIT_SECONDS, TimeUnit.SECONDS));
+
+		assertFalse(copier.shutdown(), "the stopped copy's caller still holds the buffer");
+		assertTrue(copier.isTerminated(), "the pool's threads ended all the same");
+
+		releaseBuffer.countDown();
+		caller.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS));
+		assertFalse(caller.isAlive());
+		assertInstanceOf(RdmaPayloadCopier.StoppedException.class, thrown.get());
+		assertTrue(copier.shutdown());
+	}
+
+	@Test
+	void shutdownReportsACopyThatHasNotEndedAndTheCopyIsStoppedWhenItDoes() throws Exception {
+		final int size = 2 * PART;
+		final var poolPartCopying = new CountDownLatch(1);
+		final var releasePoolPart = new CountDownLatch(1);
+		final DataItem item = Mockito.mock(DataItem.class);
+		Mockito.when(item.slice(eq(0L), anyLong())).thenAnswer(slice -> part(dst -> fill(dst, (byte) 0)));
+		Mockito.when(item.slice(eq((long) PART), anyLong())).thenAnswer(slice -> part(dst -> {
+			poolPartCopying.countDown();
+			awaitIgnoringInterrupts(releasePoolPart);
+			return fill(dst, (byte) 1);
+		}));
+		final var copier = new RdmaPayloadCopier(2, "rdma-copy-late-", STILL_WAITING_MILLIS);
+		final var thrown = new AtomicReference<Throwable>();
+		final Thread caller = startCopy(copier, item, size, thrown, new CountDownLatch(0));
+		assertTrue(poolPartCopying.await(WAIT_SECONDS, TimeUnit.SECONDS));
+
+		assertFalse(copier.shutdown(), "a part that does not react to the interrupt is still copying");
+		assertFalse(copier.isTerminated());
+
+		releasePoolPart.countDown();
+		caller.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS));
+		assertFalse(caller.isAlive());
+		assertInstanceOf(RdmaPayloadCopier.StoppedException.class, thrown.get(),
+						"every part was copied, but the copy ended after the shutdown began");
+		assertTrue(copier.shutdown());
+		assertTrue(copier.isTerminated());
+	}
+
+	@Test
+	void shutdownFailsAPartThatHasNotStarted() throws Exception {
+		final int size = 2 * PART;
+		final var firstPoolPartCopying = new CountDownLatch(1);
+		final var secondCallerPartCopied = new CountDownLatch(1);
+		final var queuedPartRead = new AtomicBoolean();
+		final DataItem first = Mockito.mock(DataItem.class);
+		Mockito.when(first.slice(eq(0L), anyLong())).thenAnswer(slice -> part(dst -> fill(dst, (byte) 0)));
+		Mockito.when(first.slice(eq((long) PART), anyLong())).thenAnswer(slice -> part(dst -> {
+			firstPoolPartCopying.countDown();
+			new CountDownLatch(1).await();
+			return fill(dst, (byte) 1);
+		}));
+		final DataItem second = Mockito.mock(DataItem.class);
+		Mockito.when(second.slice(eq(0L), anyLong())).thenAnswer(slice -> part(dst -> {
+			final int count = fill(dst, (byte) 0);
+			secondCallerPartCopied.countDown();
+			return count;
+		}));
+		Mockito.when(second.slice(eq((long) PART), anyLong())).thenAnswer(slice -> part(dst -> {
+			queuedPartRead.set(true);
+			return fill(dst, (byte) 1);
+		}));
+		// One pool thread: while it copies for the first payload, the second payload's part is queued.
+		final var copier = new RdmaPayloadCopier(2, "rdma-copy-queued-");
+		final var firstThrown = new AtomicReference<Throwable>();
+		final var secondThrown = new AtomicReference<Throwable>();
+		final Thread firstCaller = startCopy(copier, first, size, firstThrown, new CountDownLatch(0));
+		assertTrue(firstPoolPartCopying.await(WAIT_SECONDS, TimeUnit.SECONDS));
+		final Thread secondCaller = startCopy(copier, second, size, secondThrown, new CountDownLatch(0));
+		assertTrue(secondCallerPartCopied.await(WAIT_SECONDS, TimeUnit.SECONDS));
+
+		assertTrue(copier.shutdown());
+
+		for (final Thread caller : new Thread[]{firstCaller, secondCaller
+		}) {
+			caller.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS));
+			assertFalse(caller.isAlive());
+		}
+		assertInstanceOf(RdmaPayloadCopier.StoppedException.class, firstThrown.get());
+		assertInstanceOf(RdmaPayloadCopier.StoppedException.class, secondThrown.get());
+		assertFalse(queuedPartRead.get(), "a part that had not started must not copy after the shutdown");
+	}
+
+	@Test
+	void interruptedShutdownStillWaitsForTheCopy() throws Exception {
+		final int size = 2 * PART;
+		final var poolPartCopying = new CountDownLatch(1);
+		final var releasePoolPart = new CountDownLatch(1);
+		final DataItem item = Mockito.mock(DataItem.class);
+		Mockito.when(item.slice(eq(0L), anyLong())).thenAnswer(slice -> part(dst -> fill(dst, (byte) 0)));
+		Mockito.when(item.slice(eq((long) PART), anyLong())).thenAnswer(slice -> part(dst -> {
+			poolPartCopying.countDown();
+			awaitIgnoringInterrupts(releasePoolPart);
+			return fill(dst, (byte) 1);
+		}));
+		final var copier = new RdmaPayloadCopier(2, "rdma-copy-interrupted-close-");
+		final var thrown = new AtomicReference<Throwable>();
+		final Thread caller = startCopy(copier, item, size, thrown, new CountDownLatch(0));
+		assertTrue(poolPartCopying.await(WAIT_SECONDS, TimeUnit.SECONDS));
+		final var ended = new AtomicBoolean();
+		final var interruptKept = new AtomicBoolean();
+		final Thread closer = new Thread(() -> {
+			Thread.currentThread().interrupt();
+			ended.set(copier.shutdown());
+			interruptKept.set(Thread.currentThread().isInterrupted());
+		});
+		closer.start();
+
+		closer.join(STILL_WAITING_MILLIS);
+		assertTrue(closer.isAlive(), "an interrupt must not end the shutdown while a part is still copying");
+
+		releasePoolPart.countDown();
+		closer.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS));
+		assertFalse(closer.isAlive());
+		assertTrue(ended.get());
+		assertTrue(interruptKept.get(), "the closing thread's interrupt must be kept");
+		caller.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS));
+		assertInstanceOf(RdmaPayloadCopier.StoppedException.class, thrown.get());
+	}
+
+	/**
+	 * Starts a copy on its own thread, as the driver's dispatcher makes it: what the copy throws is
+	 * kept in {@code thrown}, and a stopped copy reports its buffer released once
+	 * {@code releaseBuffer} opens.
+	 */
+	private static Thread startCopy(
+					final RdmaPayloadCopier copier, final DataItem item, final int size,
+					final AtomicReference<Throwable> thrown, final CountDownLatch releaseBuffer) {
+		final Thread caller = new Thread(() -> {
+			try {
+				copier.copy(item, ByteBuffer.allocateDirect(size), size);
+			} catch (final RdmaPayloadCopier.StoppedException e) {
+				thrown.set(e);
+				awaitIgnoringInterrupts(releaseBuffer);
+				copier.stoppedCopyReleased();
+			} catch (final Throwable t) {
+				thrown.set(t);
+			}
+		});
+		caller.start();
+		return caller;
+	}
+
+	private static void awaitIgnoringInterrupts(final CountDownLatch latch) {
+		boolean interrupted = false;
+		while (true) {
+			try {
+				latch.await();
+				break;
+			} catch (final InterruptedException e) {
+				interrupted = true;
+			}
+		}
+		if (interrupted) {
+			Thread.currentThread().interrupt();
 		}
 	}
 

@@ -494,7 +494,19 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			// For PUT: copy data into the registered buffer
 			if (opType == OpType.CREATE) {
 				payloadStart = ((DataItem) item).position();
-				payloadCopier.copy((DataItem) item, buf, size);
+				try {
+					payloadCopier.copy((DataItem) item, buf, size);
+				} catch (final OutOfMemoryError e) {
+					// The copy could not allocate the data it reads from: for an item above layer 0,
+					// every thread that reads it caches that layer for itself. Handled as an
+					// exhausted destination buffer is; the buffer is dropped so that its memory
+					// can be reclaimed.
+					releaseBuffer(pooled, buf, mrHandle, false);
+					pooled = null;
+					mrHandle = 0;
+					rewindPayload(dataOp, payloadStart);
+					return prepareFailed(op, "out of memory copying the payload");
+				}
 				// Mark bytes as done — sendRequestData() will be skipped for RDMA PUT
 				// because httpRequest() returns a FullHttpRequest with empty body
 				dataOp.countBytesDone(size);
@@ -527,19 +539,41 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			}
 			return submitted;
 
+		} catch (final RdmaPayloadCopier.StoppedException e) {
+			// The driver is closing. Nothing was sent, so the operation stays undispatched and
+			// is recovered with the other queued operations.
+			try {
+				abandonPreparation(op, pooled, buf, mrHandle, dataOp, payloadStart);
+			} finally {
+				// doClose() waits for this before it closes the buffer pool and the transport.
+				payloadCopier.stoppedCopyReleased();
+			}
+			return false;
 		} catch (final Exception e) {
 			LogUtil.exception(Level.DEBUG, e, "{}: RDMA submit failed for {}",
 							stepId, item.name());
-
-			// The request may have been dispatched, so the buffer is not reused. A stored context
-			// owns the buffer; if it was already completed, there is nothing left to clean up.
-			if (!cleanupRdmaContext(op, false)) {
-				releaseBuffer(pooled, buf, mrHandle, false);
-			}
-
-			rewindPayload(dataOp, payloadStart);
+			abandonPreparation(op, pooled, buf, mrHandle, dataOp, payloadStart);
 			return prepareFailed(op, e.getClass().getSimpleName());
+		} catch (final Error e) {
+			// Not handled here. Only what this method still owns is released: a stored context
+			// keeps its buffer until the response, the reaper or close.
+			releaseBuffer(pooled, buf, mrHandle, false);
+			throw e;
 		}
+	}
+
+	/**
+	 * Releases what a preparation that ended abnormally still owns and undoes its payload copy.
+	 * The request may have been dispatched, so the buffer is not reused. A stored context owns the
+	 * buffer; if it was already completed, there is nothing left to release.
+	 */
+	private void abandonPreparation(
+					final O op, final RdmaBufferPool.PooledBuffer pooled, final ByteBuffer buf, final long mrHandle,
+					final DataOperation<?> dataOp, final long payloadStart) {
+		if (!cleanupRdmaContext(op, false)) {
+			releaseBuffer(pooled, buf, mrHandle, false);
+		}
+		rewindPayload(dataOp, payloadStart);
 	}
 
 	/**
@@ -961,8 +995,13 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 				Thread.currentThread().interrupt();
 			}
 		}
-		// Parts already handed to the copy threads finish before the buffers are released below.
-		payloadCopier.close();
+		// close() closed admission before this point, so no new preparation starts. A split copy
+		// that still runs is stopped here, and its buffer released, before the pool and the
+		// transport go away.
+		if (!payloadCopier.shutdown()) {
+			Loggers.MSG.warn("{}: RDMA payload copy did not stop within {} ms", stepId,
+							RdmaPayloadCopier.CLOSE_WAIT_MILLIS);
+		}
 		// Drain any leaked RDMA contexts (e.g. from interrupted operations).
 		// Use remove(op, ctx) to atomically claim each entry — prevents double-free
 		// if a concurrent complete() is still draining the last in-flight operations.

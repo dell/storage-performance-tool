@@ -48,6 +48,9 @@ public class FakeRdmaTransport extends RdmaTransport {
 	/** When true, init() fails and the transport stays unavailable. */
 	private volatile boolean failInit;
 
+	/** Buffers still registered when the transport was closed; negative until then. */
+	private volatile int activeRegistrationsAtClose = -1;
+
 	public FakeRdmaTransport(final RdmaConfig config) {
 		super(config);
 	}
@@ -108,6 +111,9 @@ public class FakeRdmaTransport extends RdmaTransport {
 	@Override
 	public void close() {
 		available = false;
+		if (activeRegistrationsAtClose < 0) {
+			activeRegistrationsAtClose = activeRegistrations.size();
+		}
 		activeRegistrations.clear();
 	}
 
@@ -131,6 +137,11 @@ public class FakeRdmaTransport extends RdmaTransport {
 	/** Number of buffers currently registered (not yet deregistered). */
 	public int getActiveRegistrationCount() {
 		return activeRegistrations.size();
+	}
+
+	/** Buffers nobody had deregistered when the transport was closed; negative before the close. */
+	public int getActiveRegistrationsAtClose() {
+		return activeRegistrationsAtClose;
 	}
 
 	/** Get the buffer associated with a registration handle (for content verification). */

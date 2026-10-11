@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 
@@ -690,6 +691,127 @@ final class S3RdmaReplyLoopbackTest {
 			Thread.sleep(10);
 		}
 		assertEquals(0, copyThreadsAlive(), "closing the driver ends its copy threads");
+	}
+
+	@Test
+	void copyOutOfMemoryOnACopyThreadFailsTheOperationAndReleasesItsBuffer() throws Exception {
+		reply = new Reply(200, "200", null, null, true);
+		final int size = 2 * RdmaPayloadCopier.PART_BYTES;
+		try (final var driver = newDriver(false, config -> config.val("storage-rdma-copyThreads", 2))) {
+			final var results = executeInSequence(driver, List.of(
+							putWithReadHook(size, S3RdmaReplyLoopbackTest::outOfMemoryOnACopyThread),
+							op(OpType.CREATE, size)));
+
+			assertEquals(Operation.Status.FAIL_IO, results.get(0).status());
+			assertEquals(0, ((DataOperation<?>) results.get(0)).countBytesDone());
+			assertEquals(1, driver.pathStats().prepareFailed.sum());
+			assertEquals(Operation.Status.SUCC, results.get(1).status(), "the driver must go on dispatching");
+			assertNotNull(onlyObjectRequest("PUT").rdmaToken());
+			assertNoBufferInUse(driver);
+		}
+	}
+
+	@Test
+	void copyOutOfMemoryWithFallbackSendsTheWholePayloadOverHttp() throws Exception {
+		final int size = 2 * RdmaPayloadCopier.PART_BYTES;
+		final byte[] payload = payloadSentOverRdma(size);
+		reply = new Reply(200, null, null, null, false);
+		try (final var driver = newDriver(true, config -> config.val("storage-rdma-copyThreads", 2))) {
+			final var result = execute(
+							driver, putWithReadHook(size, S3RdmaReplyLoopbackTest::outOfMemoryOnACopyThread));
+
+			assertEquals(Operation.Status.SUCC, result.status());
+			assertEquals(size, ((DataOperation<?>) result).countBytesDone());
+			assertNull(onlyObjectRequest("PUT").rdmaToken());
+			assertArrayEquals(payload, httpPutBody, "the first part was already copied for RDMA");
+			assertEquals(1, driver.pathStats().httpFallback.sum());
+			assertNoBufferInUse(driver);
+		}
+	}
+
+	@Test
+	void copyOutOfMemoryOnTheDispatcherFailsTheOperationAndTheNextOneIsSent() throws Exception {
+		reply = new Reply(200, "200", null, null, true);
+		try (final var driver = newDriver(false)) {
+			final var results = executeInSequence(driver, List.of(
+							putWithReadHook(SIZE, partOffset -> {
+								throw new OutOfMemoryError("Cannot reserve " + SIZE + " bytes of direct buffer memory");
+							}),
+							op(OpType.CREATE, SIZE)));
+
+			assertEquals(Operation.Status.FAIL_IO, results.get(0).status());
+			assertEquals(0, ((DataOperation<?>) results.get(0)).countBytesDone());
+			assertEquals(1, driver.pathStats().prepareFailed.sum());
+			assertEquals(Operation.Status.SUCC, results.get(1).status(), "the driver must go on dispatching");
+			assertNotNull(onlyObjectRequest("PUT").rdmaToken());
+			assertNoBufferInUse(driver);
+		}
+	}
+
+	@Test
+	void closeStopsARunningSplitCopyAndReleasesItsBufferBeforeTheTransportCloses() throws Exception {
+		reply = new Reply(200, "200", null, null, true);
+		final int size = 2 * RdmaPayloadCopier.PART_BYTES;
+		final var copyThreadCopying = new CountDownLatch(1);
+		final var driver = newDriver(false, config -> config.val("storage-rdma-copyThreads", 2));
+		try {
+			startWith(driver);
+			assertTrue(driver.put(putWithReadHook(size, partOffset -> {
+				if (partOffset > 0) {
+					copyThreadCopying.countDown();
+					// Ends only when the close interrupts the copy thread.
+					new CountDownLatch(1).await();
+				}
+			})));
+			assertTrue(copyThreadCopying.await(RESULT_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+		} finally {
+			driver.close();
+		}
+
+		assertTrue(driver.payloadCopier().isTerminated());
+		assertEquals(0, transport.getActiveRegistrationsAtClose(),
+						"the stopped copy's buffer must be deregistered while the transport is still open");
+		assertEquals(0, driver.bufferPool().liveBuffers(), driver.bufferPool().summary());
+		assertEquals(0, copyThreadsAlive(), "closing the driver ends its copy threads");
+		assertTrue(objectRequests().isEmpty(), "no request may be sent: " + requests);
+		assertEquals(0, driver.pathStats().prepareFailed.sum(), "a copy stopped by the close is not a failure");
+	}
+
+	/** Runs before a read of a PUT's payload; {@code partOffset} is 0 for the item and its first part. */
+	private interface ReadHook {
+		void beforeRead(long partOffset) throws Exception;
+	}
+
+	/** Fails a part copied by a copy thread as an exhausted data-layer allocation does. */
+	private static void outOfMemoryOnACopyThread(final long partOffset) {
+		if (partOffset > 0) {
+			throw new OutOfMemoryError("Cannot reserve 1048576 bytes of direct buffer memory");
+		}
+	}
+
+	/** The PUT of {@link #op}, except that {@code hook} runs before each read of the item or of a part of it. */
+	@SuppressWarnings("unchecked")
+	private static Operation<DataItem> putWithReadHook(final int size, final ReadHook hook) throws IOException {
+		final DataItem whole = new DataItemImpl("obj-" + OpType.CREATE, 0, size);
+		final DataItem item = hooked(whole, 0, hook);
+		doAnswer(slice -> {
+			final long from = slice.getArgument(0);
+			final long partSize = slice.getArgument(1);
+			return hooked(whole.slice(from, partSize), from, hook);
+		}).when(item).slice(anyLong(), anyLong());
+		return (Operation<DataItem>) (Operation<?>) new DataOperationImpl<>(
+						0, OpType.CREATE, item, null, "/bucket", CREDENTIAL, null, 0);
+	}
+
+	private static DataItem hooked(final DataItem source, final long partOffset, final ReadHook hook)
+					throws IOException {
+		final DataItem item = mock(DataItem.class, delegatesTo(source));
+		doAnswer(read -> {
+			hook.beforeRead(partOffset);
+			final ByteBuffer dst = read.getArgument(0);
+			return source.read(dst);
+		}).when(item).read(any(ByteBuffer.class));
+		return item;
 	}
 
 	private static long copyThreadsAlive() {

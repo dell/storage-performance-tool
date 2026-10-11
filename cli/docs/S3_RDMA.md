@@ -114,7 +114,7 @@ The summary also reports the buffer pool. The counters are:
 - `poolDiscarded`: buffers deregistered because their request ended without the server's final response (timeout, lost connection, informational-only reply, or shutdown) or because a GET that integrity verification checks did not deliver verified content.
 - `poolInvalidReturns`: must be 0.
 
-A buffer is reused only after the server's final response to its request, when the server can no longer access it. All pooled buffers together stay within half of the JVM's direct-memory limit (`-XX:MaxDirectMemorySize`). If a per-operation buffer cannot be allocated because direct memory is exhausted, the idle pooled buffers are released and the allocation is retried once. If it still fails, the operation fails, or uses HTTP with `--rdma-fallback`.
+A buffer is reused only after the server's final response to its request, when the server can no longer access it. All pooled buffers together stay within half of the JVM's direct-memory limit (`-XX:MaxDirectMemorySize`). If a per-operation buffer cannot be allocated because direct memory is exhausted, the idle pooled buffers are released and the allocation is retried once. If it still fails, the operation fails, or uses HTTP with `--rdma-fallback`. A PUT whose payload cannot be copied into its buffer because memory is exhausted is handled the same way.
 
 ---
 
@@ -167,7 +167,7 @@ SPT Engine (Java)
     └── rdma-core           — system packages (libibverbs, libmlx5, librdmacm)
 ```
 
-The native layer uses Mellanox DC (Dynamically Connected) transport for scalable connections and RoCE v2 for Ethernet-based RDMA. By default, registered buffers are reused across operations (`--rdma-buffer-pool`). A PUT payload is still copied into its buffer on the driver's dispatch path; for large objects and high request rates, this copy can limit the PUT throughput of a single driver.
+The native layer uses Mellanox DC (Dynamically Connected) transport for scalable connections and RoCE v2 for Ethernet-based RDMA. By default, registered buffers are reused across operations (`--rdma-buffer-pool`). A PUT payload is still copied into its buffer on the driver's dispatch path; for large objects and high request rates, this copy can limit the PUT throughput of a single driver. `--rdma-copy-threads` spreads the copy of one payload over several threads.
 
 ---
 

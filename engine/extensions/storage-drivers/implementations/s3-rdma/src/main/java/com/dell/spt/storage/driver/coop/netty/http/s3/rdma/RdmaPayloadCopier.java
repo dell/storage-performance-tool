@@ -18,24 +18,53 @@ import java.util.concurrent.atomic.AtomicInteger;
  * on a {@link #PART_BYTES} boundary, where a slice of the item yields the same bytes as the item
  * itself. {@link #copy} returns only after every part has finished, so the caller may release the
  * buffer as soon as it returns or throws.
+ *
+ * <p>{@link #shutdown} stops the split copies that still run and waits until their buffers are
+ * released. A copy made by the calling thread alone is not tracked and not stopped: it ends with
+ * its caller.
  */
 final class RdmaPayloadCopier implements AutoCloseable {
 
 	/** Smallest part, and the boundary parts start on: a multiple of the data item's stamp chunk. */
 	static final int PART_BYTES = 1 << 20;
 
-	private static final long CLOSE_WAIT_SECONDS = 5;
+	/** How long {@link #shutdown} waits for the split copies and the pool's threads to end. */
+	static final long CLOSE_WAIT_MILLIS = 5_000;
+
+	/**
+	 * Thrown by a split copy that {@link #shutdown} stopped: nothing of it may be used. The copy
+	 * stays counted as running until its caller reports through {@link #stoppedCopyReleased} that
+	 * it no longer uses the destination buffer.
+	 */
+	static final class StoppedException extends IOException {
+		private static final long serialVersionUID = 1L;
+
+		StoppedException() {
+			super("RDMA payload copy stopped: the driver is closing");
+		}
+	}
 
 	private final int threads;
+	private final long closeWaitMillis;
 	/** Copies every part but the first; {@code null} when the calling thread copies alone. */
 	private final ExecutorService helpers;
+	/** Split copies still in {@link #copy}, and stopped ones whose buffer was not released yet. */
+	private final AtomicInteger activeSplitCopies = new AtomicInteger();
+	/** Set by {@link #shutdown}: split copies stop before their next read and new ones are refused. */
+	private volatile boolean stopped;
 
 	/**
 	 * @param threads threads copying one payload, the calling thread included
 	 * @param threadNamePrefix name prefix of the pool's threads
 	 */
 	RdmaPayloadCopier(final int threads, final String threadNamePrefix) {
+		this(threads, threadNamePrefix, CLOSE_WAIT_MILLIS);
+	}
+
+	/** @param closeWaitMillis how long {@link #shutdown} waits; shortened by tests */
+	RdmaPayloadCopier(final int threads, final String threadNamePrefix, final long closeWaitMillis) {
 		this.threads = threads;
+		this.closeWaitMillis = closeWaitMillis;
 		if (threads < 2) {
 			helpers = null;
 		} else {
@@ -51,6 +80,9 @@ final class RdmaPayloadCopier implements AutoCloseable {
 	/**
 	 * Fills {@code dst} with the next {@code size} bytes of {@code item} and flips it. The item's
 	 * position advances by {@code size}.
+	 *
+	 * @throws StoppedException if {@link #shutdown} stopped the split copy; the caller then calls
+	 *         {@link #stoppedCopyReleased} once it has released {@code dst}
 	 */
 	void copy(final DataItem item, final ByteBuffer dst, final int size) throws IOException {
 		dst.clear();
@@ -60,7 +92,18 @@ final class RdmaPayloadCopier implements AutoCloseable {
 		if (parts < 2) {
 			fill(item, dst, size);
 		} else {
-			copyInParts(item, dst, size, parts);
+			activeSplitCopies.incrementAndGet();
+			boolean awaitsRelease = false;
+			try {
+				copyInParts(item, dst, size, parts);
+			} catch (final StoppedException e) {
+				awaitsRelease = true;
+				throw e;
+			} finally {
+				if (!awaitsRelease) {
+					activeSplitCopies.decrementAndGet();
+				}
+			}
 			item.position(size);
 			dst.position(size);
 		}
@@ -80,11 +123,11 @@ final class RdmaPayloadCopier implements AutoCloseable {
 				final DataItem part = item.slice(from, length);
 				final ByteBuffer window = dst.duplicate().limit(from + length).position(from);
 				pending[i - 1] = helpers.submit(() -> {
-					fill(part, window, length);
+					fillPart(part, window, length);
 					return null;
 				});
 			}
-			fill(item.slice(0, partSize), dst.duplicate().limit(partSize), partSize);
+			fillPart(item.slice(0, partSize), dst.duplicate().limit(partSize), partSize);
 		} catch (final Throwable thrown) {
 			failure = thrown;
 		}
@@ -108,6 +151,11 @@ final class RdmaPayloadCopier implements AutoCloseable {
 		}
 		if (interrupted) {
 			Thread.currentThread().interrupt();
+		}
+		if (stopped) {
+			// Whatever the parts reported, the copy ended while the copier was being shut down. Its
+			// caller must not go on to use what is closed next.
+			throw new StoppedException();
 		}
 		if (failure instanceof IOException ioFailure) {
 			throw ioFailure;
@@ -137,18 +185,82 @@ final class RdmaPayloadCopier implements AutoCloseable {
 		}
 	}
 
-	/** Ends the pool's threads. Parts already submitted are still copied. */
+	/** Fills one part of a split copy; unlike {@link #fill}, it gives up once the copier is shut down. */
+	private void fillPart(final DataItem part, final ByteBuffer window, final int size) throws IOException {
+		int totalRead = 0;
+		while (totalRead < size) {
+			if (stopped) {
+				throw new StoppedException();
+			}
+			final int bytesRead = part.read(window);
+			if (bytesRead < 0) {
+				break;
+			}
+			totalRead += bytesRead;
+		}
+		if (totalRead < size) {
+			throw new IOException("RDMA short read: expected " + size + " bytes but got " + totalRead);
+		}
+	}
+
+	/**
+	 * Reports that the caller of a copy that threw {@link StoppedException} has released the
+	 * destination buffer. {@link #shutdown} waits for it, so that whatever is closed afterwards is
+	 * no longer used by a stopped copy.
+	 */
+	void stoppedCopyReleased() {
+		activeSplitCopies.decrementAndGet();
+	}
+
+	/** Same as {@link #shutdown}, for callers that do not need its result. */
 	@Override
 	public void close() {
+		shutdown();
+	}
+
+	/**
+	 * Stops the split copies and ends the pool's threads. A part that has not started fails without
+	 * copying, a running part fails before its next read, and a pool thread blocked in a read is
+	 * interrupted. Each split copy that had not returned then fails in its caller with
+	 * {@link StoppedException}, and a split copy requested later fails the same way.
+	 *
+	 * <p>Waits up to the close wait for every split copy to end, for the callers of the stopped
+	 * ones to release their buffers, and for the pool's threads to end. An interrupt does not end
+	 * the wait; it is restored before returning.
+	 *
+	 * @return whether all of that happened within the wait
+	 */
+	boolean shutdown() {
+		stopped = true;
 		if (helpers == null) {
-			return;
+			return true;
 		}
-		helpers.shutdown();
-		try {
-			final boolean unused = helpers.awaitTermination(CLOSE_WAIT_SECONDS, TimeUnit.SECONDS);
-		} catch (final InterruptedException e) {
+		// A part still queued is run here: it sees the stopped copier and fails at once, which
+		// ends the wait of the copy that submitted it.
+		for (final Runnable queued : helpers.shutdownNow()) {
+			queued.run();
+		}
+		final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(closeWaitMillis);
+		boolean interrupted = false;
+		boolean ended = false;
+		while (!ended) {
+			final long remainingNanos = deadline - System.nanoTime();
+			try {
+				ended = helpers.awaitTermination(Math.max(remainingNanos, 0), TimeUnit.NANOSECONDS)
+								&& activeSplitCopies.get() == 0;
+				if (ended || remainingNanos <= 0) {
+					break;
+				}
+				// The pool may have ended while a caller is still in its own part or releasing.
+				TimeUnit.MILLISECONDS.sleep(1);
+			} catch (final InterruptedException e) {
+				interrupted = true;
+			}
+		}
+		if (interrupted) {
 			Thread.currentThread().interrupt();
 		}
+		return ended;
 	}
 
 	/** Whether the pool's threads have ended; true when there is no pool. */
