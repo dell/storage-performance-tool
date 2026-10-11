@@ -76,6 +76,15 @@ type Params struct {
 	RdmaDevice         string // RDMA device name (default: "auto")
 	RdmaLogLevel       string // Native RDMA log level (default: "WARN")
 	RdmaTimeoutMs      int64  // RDMA operation timeout (default: 30000)
+	// RdmaAllowMissingBytesHeader accepts RDMA GET successes without x-amz-rdma-bytes-transferred
+	// and counts the requested size (legacy servers; default: false).
+	RdmaAllowMissingBytesHeader bool
+	// RdmaDisableBufferPool registers a buffer per operation instead of reusing registered
+	// buffers (default: false, so the pool is used).
+	RdmaDisableBufferPool bool
+	// RdmaCopyThreads is the number of threads copying one PUT payload into its buffer, the
+	// dispatcher included (default: 1; 0 leaves the engine default).
+	RdmaCopyThreads int
 
 	// Checksum validation
 	Checksum string // Checksum algorithm: crc32, crc32c, sha1, sha256, crc64-nvme (empty = disabled)

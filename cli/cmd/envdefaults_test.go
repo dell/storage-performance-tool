@@ -27,6 +27,9 @@ func newRunLikeCmd() *cobra.Command {
 	c.Flags().String("rdma-device", "auto", "")
 	c.Flags().String("rdma-log-level", "WARN", "")
 	c.Flags().Int64("rdma-timeout-ms", 30000, "")
+	c.Flags().Bool("rdma-allow-missing-bytes-header", false, "")
+	c.Flags().Bool("rdma-buffer-pool", true, "")
+	c.Flags().Int("rdma-copy-threads", 1, "")
 	c.Flags().Int("service-threads", 0, "")
 	c.Flags().StringArray(flagEngineOverride, []string{}, "")
 	c.Flags().String("s3-driver", "default", "")
@@ -62,6 +65,9 @@ func clearEnvDefaultsTestEnv(t *testing.T) {
 		constants.EnvRdmaThreshold,
 		constants.EnvRdmaTimeout,
 		constants.EnvRdmaFallback,
+		constants.EnvRdmaAllowMissingBytesHeader,
+		constants.EnvRdmaBufferPool,
+		constants.EnvRdmaCopyThreads,
 		constants.EnvServiceThreads,
 		constants.EnvEngineOverrides,
 		constants.EnvPartSize,
@@ -272,6 +278,90 @@ func TestApplyEnvDefaultsToRunFlags_RdmaFromEnv(t *testing.T) {
 	}
 	if v, _ := cmd.Flags().GetBool("rdma-fallback"); v {
 		t.Fatal("rdma-fallback not applied from env (expected false)")
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_RdmaAllowMissingBytesHeaderFromEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
+	t.Setenv(constants.EnvRdmaAllowMissingBytesHeader, "true")
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToRunFlags error: %v", err)
+	}
+	if v, _ := cmd.Flags().GetBool("rdma-allow-missing-bytes-header"); !v {
+		t.Fatal("rdma-allow-missing-bytes-header not applied from env")
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_RdmaBufferPoolDisabledFromEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
+	t.Setenv(constants.EnvRdmaBufferPool, "false")
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if v, _ := cmd.Flags().GetBool("rdma-buffer-pool"); v {
+		t.Fatal("rdma-buffer-pool=false not applied from env")
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_RdmaCopyThreadsFromEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
+	t.Setenv(constants.EnvRdmaCopyThreads, "4")
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if v, _ := cmd.Flags().GetInt("rdma-copy-threads"); v != 4 {
+		t.Fatalf("rdma-copy-threads not applied from env, got %d", v)
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_RdmaCopyThreadsFlagWinsOverEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
+	t.Setenv(constants.EnvRdmaCopyThreads, "4")
+	_ = cmd.Flags().Set("rdma-copy-threads", "2")
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if v, _ := cmd.Flags().GetInt("rdma-copy-threads"); v != 2 {
+		t.Fatalf("rdma-copy-threads = %d, want the flag value 2", v)
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_RdmaInvalidCopyThreads(t *testing.T) {
+	for _, value := range []string{"abc", "0", "-2", "1.5"} {
+		t.Run(value, func(t *testing.T) {
+			cmd := newRunLikeCmd()
+			clearEnvDefaultsTestEnv(t)
+			t.Setenv(constants.EnvRdmaCopyThreads, value)
+
+			err := applyEnvDefaultsToRunFlags(cmd)
+			if err == nil {
+				t.Fatalf("expected error for %s=%q", constants.EnvRdmaCopyThreads, value)
+			}
+			if !strings.Contains(err.Error(), constants.EnvRdmaCopyThreads) {
+				t.Errorf("error should mention %s, got: %v", constants.EnvRdmaCopyThreads, err)
+			}
+		})
+	}
+}
+
+func TestApplyEnvDefaultsToRunFlags_RdmaAllowMissingBytesHeaderFlagWinsOverEnv(t *testing.T) {
+	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
+	t.Setenv(constants.EnvRdmaAllowMissingBytesHeader, "true")
+	if err := cmd.Flags().Set("rdma-allow-missing-bytes-header", "false"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToRunFlags error: %v", err)
+	}
+	if v, _ := cmd.Flags().GetBool("rdma-allow-missing-bytes-header"); v {
+		t.Fatal("explicit --rdma-allow-missing-bytes-header=false must win over env")
 	}
 }
 

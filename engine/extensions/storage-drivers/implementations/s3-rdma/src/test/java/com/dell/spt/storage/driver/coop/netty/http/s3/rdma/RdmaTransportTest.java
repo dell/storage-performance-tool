@@ -59,7 +59,6 @@ public class RdmaTransportTest {
 
 	@Test
 	void testGenerateTokenReturnsNullInStubMode() {
-		final ByteBuffer buf = ByteBuffer.allocateDirect(1024);
 		// In stub mode, generateToken should return null
 		final String token = transport.generateToken(0, 1024);
 		assertNull(token);

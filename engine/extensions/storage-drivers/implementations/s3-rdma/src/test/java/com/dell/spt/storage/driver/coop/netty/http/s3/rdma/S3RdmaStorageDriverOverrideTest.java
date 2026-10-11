@@ -16,12 +16,15 @@ import io.netty.buffer.Unpooled;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.handler.codec.http.DefaultHttpRequest;
+import io.netty.handler.codec.http.DefaultHttpResponse;
 import io.netty.handler.codec.http.EmptyHttpHeaders;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.util.AttributeKey;
@@ -642,6 +645,7 @@ public class S3RdmaStorageDriverOverrideTest {
 		buffer.put(payload);
 		final long handle = 123L;
 		final var ctx = newRdmaContext("read-token", buffer, handle, OpType.READ, payload.length);
+		observeResponse(ctx, successfulGetReply(payload.length));
 		final var channel = new EmbeddedChannel();
 		final HttpHeaders headers = new DefaultHttpHeaders();
 		headers.set(IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_VERSION, "1");
@@ -669,6 +673,38 @@ public class S3RdmaStorageDriverOverrideTest {
 						op.integrityVerificationResult().verified());
 		Mockito.verify(transport).deregisterBuffer(buffer, handle);
 		channel.finishAndReleaseAll();
+	}
+
+	private static HttpHeaders successfulGetReply(final int bytes) {
+		final HttpHeaders reply = new DefaultHttpHeaders();
+		reply.set(RdmaReplyContract.REPLY_HEADER, "200");
+		reply.set(RdmaReplyContract.BYTES_TRANSFERRED_HEADER, Integer.toString(bytes));
+		reply.set(HttpHeaderNames.CONTENT_LENGTH, "0");
+		return reply;
+	}
+
+	private static void observeResponse(final Object ctx, final HttpHeaders reply) throws Exception {
+		observeResponse(ctx, HttpResponseStatus.OK, reply);
+	}
+
+	private static void observeResponse(final Object ctx, final HttpResponseStatus status, final HttpHeaders reply)
+					throws Exception {
+		final Method method = ctx.getClass().getDeclaredMethod("observeResponse", HttpResponse.class);
+		method.setAccessible(true);
+		method.invoke(ctx, new DefaultHttpResponse(HttpVersion.HTTP_1_1, status, reply));
+	}
+
+	@Test
+	void onlyAFinalResponseEndsTheServersAccessToTheBuffer() throws Exception {
+		final var ctx = newRdmaContext("token", ByteBuffer.allocateDirect(8), 7L, OpType.CREATE, 8);
+		final Field finalResponse = ctx.getClass().getDeclaredField("finalResponseObserved");
+		finalResponse.setAccessible(true);
+
+		observeResponse(ctx, HttpResponseStatus.CONTINUE, new DefaultHttpHeaders());
+		assertFalse((Boolean) finalResponse.get(ctx), "100 Continue is informational");
+
+		observeResponse(ctx, successfulGetReply(8));
+		assertTrue((Boolean) finalResponse.get(ctx));
 	}
 
 	private static RdmaTransport availableTransport() {
@@ -720,9 +756,10 @@ public class S3RdmaStorageDriverOverrideTest {
 					final S3RdmaStorageDriver<?, ?> driver,
 					final Operation<?> op) throws Exception {
 		final Method m = S3RdmaStorageDriver.class.getDeclaredMethod(
-						"cleanupRdmaContext", Operation.class);
+						"cleanupRdmaContext", Operation.class, boolean.class);
 		m.setAccessible(true);
-		return (boolean) m.invoke(driver, op);
+		// Not reusable: the cleanup paths under test end requests that may have been sent.
+		return (boolean) m.invoke(driver, op, false);
 	}
 
 	private static void invokeBindRequestChannel(

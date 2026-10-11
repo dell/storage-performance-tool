@@ -109,6 +109,7 @@ public class RdmaTransport implements AutoCloseable {
 		}
 
 		@Override
+		@SuppressWarnings("ReferenceEquality") // identity is the key: ByteBuffer.equals compares contents
 		public boolean equals(final Object obj) {
 			return obj instanceof IdentityKey && ((IdentityKey) obj).buffer == this.buffer;
 		}
@@ -261,16 +262,12 @@ public class RdmaTransport implements AutoCloseable {
 		}
 	}
 
-	/**
-	 * @return true if native RDMA library is loaded (may still need init)
-	 */
+	/** Returns true if the native RDMA library is loaded (it may still need init). */
 	public static boolean isNativeAvailable() {
 		return NATIVE_AVAILABLE;
 	}
 
-	/**
-	 * @return true if RDMA transport is initialized and available for operations
-	 */
+	/** Returns true if the RDMA transport is initialized and available for operations. */
 	public boolean isAvailable() {
 		return initialized && nativeHandle != 0;
 	}
@@ -306,7 +303,9 @@ public class RdmaTransport implements AutoCloseable {
 			if (NATIVE_AVAILABLE && handle != 0) {
 				try {
 					nativeDeregisterBuffer(handle, entry.getValue());
-				} catch (final Exception ignored) {}
+				} catch (final Exception e) {
+					Loggers.MSG.debug("RDMA buffer deregistration at close failed: {}", e.getMessage());
+				}
 			}
 		}
 		mrHandles.clear();

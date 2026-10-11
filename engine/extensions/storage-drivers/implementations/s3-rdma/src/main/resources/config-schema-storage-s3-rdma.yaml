@@ -20,3 +20,6 @@ storage:
     localIp: string
     logLevel: string
     timeoutMs: long
+    allowMissingBytesHeader: boolean
+    bufferPool: boolean
+    copyThreads: int

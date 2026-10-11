@@ -189,12 +189,27 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 			_ = setFromEnv("rdma-timeout-ms", v)
 		}
 	}
+	// RDMA copy threads (integer, at least 1)
+	if f := cmd.Flags().Lookup("rdma-copy-threads"); f != nil && !cmd.Flags().Changed("rdma-copy-threads") {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvRdmaCopyThreads)); v != "" {
+			if n, err := strconv.Atoi(v); err != nil || n < 1 {
+				return fmt.Errorf("invalid %s value %q: must be an integer of at least 1", constants.EnvRdmaCopyThreads, v)
+			}
+			_ = setFromEnv("rdma-copy-threads", v)
+		}
+	}
 
-	// RDMA bool setting
-	if f := cmd.Flags().Lookup("rdma-fallback"); f != nil && !cmd.Flags().Changed("rdma-fallback") {
-		if v := strings.TrimSpace(os.Getenv(constants.EnvRdmaFallback)); v != "" {
-			if b, err := strconv.ParseBool(v); err == nil {
-				_ = setFromEnv("rdma-fallback", strconv.FormatBool(b))
+	// RDMA bool settings
+	for flag, env := range map[string]string{
+		"rdma-fallback":                   constants.EnvRdmaFallback,
+		"rdma-allow-missing-bytes-header": constants.EnvRdmaAllowMissingBytesHeader,
+		"rdma-buffer-pool":                constants.EnvRdmaBufferPool,
+	} {
+		if f := cmd.Flags().Lookup(flag); f != nil && !cmd.Flags().Changed(flag) {
+			if v := strings.TrimSpace(os.Getenv(env)); v != "" {
+				if b, err := strconv.ParseBool(v); err == nil {
+					_ = setFromEnv(flag, strconv.FormatBool(b))
+				}
 			}
 		}
 	}

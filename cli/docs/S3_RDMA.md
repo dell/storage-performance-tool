@@ -27,8 +27,7 @@ spt run write \
   --threads 16 \
   --object-size 1MB \
   --duration 5m \
-  --use-rdma \
-  --rdma-local-ip 10.247.128.125
+  --use-rdma
 
 # RDMA-accelerated read
 spt run read \
@@ -40,8 +39,7 @@ spt run read \
   --object-size 1MB \
   --seed-objects 5000 \
   --duration 5m \
-  --use-rdma \
-  --rdma-local-ip 10.247.128.125
+  --use-rdma
 
 # RDMA read from a saved item list (skips seed phase)
 spt run read \
@@ -53,8 +51,7 @@ spt run read \
   --object-size 1MB \
   --duration 5m \
   --items-file ./results/w-1mb-*/w-1mb-*.items.csv \
-  --use-rdma \
-  --rdma-local-ip 10.247.128.125
+  --use-rdma
 ```
 
 ---
@@ -64,14 +61,17 @@ spt run read \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--use-rdma` | `false` | Enable the RDMA-accelerated S3 driver |
-| `--rdma-local-ip` | `""` | Local RDMA interface IP address |
+| `--rdma-local-ip` | `""` | Local RDMA interface IP address. When unset and `--rdma-device` is `auto`, each worker uses the local address it routes toward the first S3 endpoint; leave it unset for multi-host runs |
 | `--rdma-threshold` | `1MB` | Minimum object size for RDMA transfer (e.g., `0`, `256KB`, `4MB`) |
-| `--rdma-fallback` | `false` | Fall back to HTTP if RDMA initialization fails |
-| `--rdma-device` | `auto` | RDMA device name or `auto` for auto-detection |
+| `--rdma-fallback` | `false` | Use HTTP when RDMA initialization or per-operation buffer preparation fails, and count GET bodies returned by a server that declines RDMA. When disabled, those operations fail |
+| `--rdma-device` | `auto` | RDMA device name or `auto` for auto-detection. A named device disables automatic local address selection |
 | `--rdma-log-level` | `WARN` | RDMA native library log level |
 | `--rdma-timeout-ms` | `30000` | RDMA operation timeout in milliseconds |
+| `--rdma-allow-missing-bytes-header` | `false` | Legacy servers only: accept an RDMA GET success without `x-amz-rdma-bytes-transferred` and count the requested size. By default such a response fails as corrupt |
+| `--rdma-buffer-pool` | `true` | Reuse registered RDMA buffers across operations. `false` allocates and registers a buffer for every operation (the previous behavior) |
+| `--rdma-copy-threads` | `1` | Threads that copy one PUT payload into its RDMA buffer. `1` copies on the driver's dispatcher thread alone. A higher value splits each payload of 2 MiB or more across that many threads; each worker then keeps that many threads less one for the copy |
 
-**Environment variable overrides:** `SPT_RDMA_ENABLED`, `RDMA_LOCAL_IP`, `RDMA_DEVICE`, `RDMA_LOG_LEVEL`, `RDMA_THRESHOLD_BYTES`, `RDMA_TIMEOUT_MS`, `RDMA_FALLBACK_ENABLED`
+**Environment variable overrides:** `SPT_RDMA`, `RDMA_LOCAL_IP`, `RDMA_DEVICE`, `RDMA_LOG_LEVEL`, `RDMA_THRESHOLD_BYTES`, `RDMA_TIMEOUT_MS`, `RDMA_FALLBACK_ENABLED`, `RDMA_ALLOW_MISSING_BYTES_HEADER`, `RDMA_BUFFER_POOL`, `RDMA_COPY_THREADS`
 
 ---
 
@@ -85,7 +85,36 @@ The `--rdma-threshold` flag controls the cutoff:
 - Objects **below** the threshold use standard HTTP.
 - Set to `0` to force all objects through RDMA.
 
-The default of `1MB` is a good starting point. At 1MB, RDMA memory registration overhead is approximately 2% of total operation time.
+The default of `1MB` is a good starting point.
+
+Some operations are never proposed for RDMA and use HTTP regardless of size: ranged reads (fixed or random byte ranges), multipart initiate/complete requests (their upload parts do use RDMA), and objects larger than one RDMA buffer (2 GiB − 1).
+
+---
+
+## Transfer Validation and Data Path Summary
+
+Selecting the RDMA driver does not by itself prove that payloads moved over RDMA. SPT checks the server's answer to every RDMA-proposed request:
+
+| Server response | Result |
+|-----------------|--------|
+| `x-amz-rdma-reply: 200` (or 204/206) with an empty HTTP body | Transfer counted. GET bytes come from `x-amz-rdma-bytes-transferred`, which must equal the requested size |
+| `x-amz-rdma-reply: 501`, or no reply header, on a PUT | The server declined RDMA and stored nothing: the operation fails |
+| `x-amz-rdma-reply: 501`, or no reply header, on a GET | The object arrived in the HTTP body: counted once as an HTTP read with `--rdma-fallback`, otherwise the operation fails |
+| Reply 200 with an HTTP body, a byte-count mismatch, or a GET without `x-amz-rdma-bytes-transferred` | Contract violation: the operation fails as corrupt (see `--rdma-allow-missing-bytes-header` for legacy servers) |
+
+At the end of each step the engine logs one `RDMA data path summary` line in `messages.log` with counts of operations transferred over RDMA, declined by the server, failed, timed out, and sent over HTTP (RDMA unavailable, below threshold, ineligible, oversize, or preparation fallback). Check it before trusting RDMA results.
+
+The summary also reports the buffer pool. The counters are:
+
+- `poolHits`: operations that reused a registered buffer.
+- `poolCreated`: buffers allocated and registered.
+- `poolExhausted`: operations that found their size class or the pool's memory budget fully in use and used a per-operation buffer.
+- `poolUnpooled`: operations larger than 1 GiB, which always use a per-operation buffer.
+- `poolEvicted`: idle buffers deregistered to make room for another size, or to free direct memory for a per-operation buffer.
+- `poolDiscarded`: buffers deregistered because their request ended without the server's final response (timeout, lost connection, informational-only reply, or shutdown) or because a GET that integrity verification checks did not deliver verified content.
+- `poolInvalidReturns`: must be 0.
+
+A buffer is reused only after the server's final response to its request, when the server can no longer access it. All pooled buffers together stay within half of the JVM's direct-memory limit (`-XX:MaxDirectMemorySize`). If a per-operation buffer cannot be allocated because direct memory is exhausted, the idle pooled buffers are released and the allocation is retried once. If it still fails, the operation fails, or uses HTTP with `--rdma-fallback`. A PUT whose payload cannot be copied into its buffer because memory is exhausted is handled the same way.
 
 ---
 
@@ -138,7 +167,7 @@ SPT Engine (Java)
     └── rdma-core           — system packages (libibverbs, libmlx5, librdmacm)
 ```
 
-The native layer uses Mellanox DC (Dynamically Connected) transport for scalable connections and RoCE v2 for Ethernet-based RDMA. Memory registration is done on-demand per operation — the overhead (~88 microseconds at 1MB) is negligible relative to the transfer time.
+The native layer uses Mellanox DC (Dynamically Connected) transport for scalable connections and RoCE v2 for Ethernet-based RDMA. By default, registered buffers are reused across operations (`--rdma-buffer-pool`). A PUT payload is still copied into its buffer on the driver's dispatch path; for large objects and high request rates, this copy can limit the PUT throughput of a single driver. `--rdma-copy-threads` spreads the copy of one payload over several threads.
 
 ---
 
@@ -154,11 +183,13 @@ If SPT reports that RDMA is not available:
 
 ### Fallback to HTTP
 
-If `--rdma-fallback` is set and RDMA initialization fails, all operations silently use HTTP. Check engine logs for `RDMA initialization failed, falling back to HTTP` to confirm.
+If `--rdma-fallback` is set and RDMA initialization fails, all operations use HTTP; check the engine log for `RDMA unavailable, falling back to HTTP`. The `RDMA data path summary` line at the end of each step then reports `transport unavailable` and counts those operations as `httpRdmaUnavailable`. Per-operation fallbacks and server declines are counted in the same line.
 
 ### Performance lower than expected
 
-- Ensure `--rdma-local-ip` matches your RDMA interface (not a management NIC)
+- If you set `--rdma-local-ip`, ensure it is the address of your RDMA interface (not a management NIC); in multi-host runs leave it unset so each worker selects its own
 - Check that object sizes are above `--rdma-threshold`
+- In a multi-host run against several storage nodes, try one node per worker: `--slice-endpoints` (engine YAML `storage.net.node.slice: true`) divides the endpoint list among the workers instead of connecting every worker to every node. In the only RDMA environment available for testing (four workers, four nodes), this gave equal or higher RDMA throughput, most clearly for GET. The effect may be specific to that environment, so compare both layouts
+- For PUT of large objects, try more copy threads: `--rdma-copy-threads 4` (engine YAML `storage.rdma.copyThreads: 4`). In the same environment, with one node per worker, four threads gave about 7–11% more PUT throughput with 128 MiB objects, a smaller and less certain gain (about 3–5%) with 1 GiB objects, and no measurable gain with 4 MiB objects, for roughly a quarter to a half more client CPU. GET does not use this copy. The effect may be specific to that environment, so compare both settings
 - Verify RoCE v2 is properly configured on the network (PFC/ECN flow control)
 - Use `--rdma-log-level DEBUG` for detailed native-layer diagnostics

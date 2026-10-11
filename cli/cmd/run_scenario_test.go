@@ -745,11 +745,99 @@ func TestBuildScenarioParams_S3DriverFlag(t *testing.T) {
 		cmd.Flags().String("rdma-device", "auto", "")
 		cmd.Flags().String("rdma-log-level", "WARN", "")
 		cmd.Flags().Int64("rdma-timeout-ms", 30000, "")
+		cmd.Flags().Bool("rdma-allow-missing-bytes-header", false, "")
+		cmd.Flags().Bool("rdma-buffer-pool", true, "")
+		cmd.Flags().Int("rdma-copy-threads", 1, "")
 		cmd.Flags().String("checksum", "", "")
 		cmd.Flags().Float64("object-data-compressibility", 0.0, "")
 		cmd.Flags().Bool("object-data-dedupable", true, "")
 		return cmd
 	}
+
+	t.Run("--rdma-allow-missing-bytes-header reaches RDMA params", func(t *testing.T) {
+		cmd := newCmd()
+		_ = cmd.Flags().Set("s3-driver", "rdma")
+		_ = cmd.Flags().Set("rdma-allow-missing-bytes-header", "true")
+		p, err := buildScenarioParams("mock", cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !p.RdmaAllowMissingBytesHeader {
+			t.Error("RdmaAllowMissingBytesHeader = false, want true")
+		}
+	})
+
+	t.Run("RDMA missing-bytes-header option defaults off", func(t *testing.T) {
+		cmd := newCmd()
+		_ = cmd.Flags().Set("s3-driver", "rdma")
+		p, err := buildScenarioParams("mock", cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.RdmaAllowMissingBytesHeader {
+			t.Error("RdmaAllowMissingBytesHeader = true, want false by default")
+		}
+	})
+
+	t.Run("RDMA buffer pool defaults on", func(t *testing.T) {
+		cmd := newCmd()
+		_ = cmd.Flags().Set("s3-driver", "rdma")
+		p, err := buildScenarioParams("mock", cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.RdmaDisableBufferPool {
+			t.Error("RdmaDisableBufferPool = true, want false by default")
+		}
+	})
+
+	t.Run("--rdma-buffer-pool=false disables the pool", func(t *testing.T) {
+		cmd := newCmd()
+		_ = cmd.Flags().Set("s3-driver", "rdma")
+		_ = cmd.Flags().Set("rdma-buffer-pool", "false")
+		p, err := buildScenarioParams("mock", cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !p.RdmaDisableBufferPool {
+			t.Error("RdmaDisableBufferPool = false, want true")
+		}
+	})
+
+	t.Run("RDMA copy threads default to 1", func(t *testing.T) {
+		cmd := newCmd()
+		_ = cmd.Flags().Set("s3-driver", "rdma")
+		p, err := buildScenarioParams("mock", cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.RdmaCopyThreads != 1 {
+			t.Errorf("RdmaCopyThreads = %d, want 1 by default", p.RdmaCopyThreads)
+		}
+	})
+
+	t.Run("--rdma-copy-threads reaches RDMA params", func(t *testing.T) {
+		cmd := newCmd()
+		_ = cmd.Flags().Set("s3-driver", "rdma")
+		_ = cmd.Flags().Set("rdma-copy-threads", "4")
+		p, err := buildScenarioParams("mock", cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.RdmaCopyThreads != 4 {
+			t.Errorf("RdmaCopyThreads = %d, want 4", p.RdmaCopyThreads)
+		}
+	})
+
+	t.Run("--rdma-copy-threads below 1 is rejected", func(t *testing.T) {
+		cmd := newCmd()
+		_ = cmd.Flags().Set("s3-driver", "rdma")
+		_ = cmd.Flags().Set("rdma-copy-threads", "0")
+		_, err := buildScenarioParams("mock", cmd)
+		if err == nil || !strings.Contains(err.Error(), "--rdma-copy-threads") {
+			t.Fatalf("expected an error naming --rdma-copy-threads, got: %v", err)
+		}
+	})
 
 	t.Run("--s3-driver aws sets S3Driver", func(t *testing.T) {
 		cmd := newCmd()

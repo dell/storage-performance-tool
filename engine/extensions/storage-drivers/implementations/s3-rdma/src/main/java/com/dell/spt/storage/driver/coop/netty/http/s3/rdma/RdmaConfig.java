@@ -8,6 +8,7 @@ public final class RdmaConfig {
 	private static final String DEFAULT_DEVICE = "auto";
 	private static final String DEFAULT_LOG_LEVEL = "WARN";
 	private static final long DEFAULT_TIMEOUT_MS = 30_000; // 30 seconds
+	private static final int DEFAULT_COPY_THREADS = 1;
 
 	private final boolean enabled;
 	private final long thresholdBytes;
@@ -16,6 +17,9 @@ public final class RdmaConfig {
 	private final String localIp;
 	private final String logLevel;
 	private final long timeoutMs;
+	private final boolean allowMissingBytesHeader;
+	private final boolean bufferPool;
+	private final int copyThreads;
 
 	public RdmaConfig(final Config rdmaConfig) {
 		if (rdmaConfig == null) {
@@ -27,6 +31,9 @@ public final class RdmaConfig {
 			this.localIp = "";
 			this.logLevel = DEFAULT_LOG_LEVEL;
 			this.timeoutMs = DEFAULT_TIMEOUT_MS;
+			this.allowMissingBytesHeader = false;
+			this.bufferPool = true;
+			this.copyThreads = DEFAULT_COPY_THREADS;
 		} else {
 			this.enabled = getBoolean(rdmaConfig, "enabled", true);
 			this.thresholdBytes = getLong(rdmaConfig, "thresholdBytes", DEFAULT_THRESHOLD_BYTES);
@@ -35,6 +42,9 @@ public final class RdmaConfig {
 			this.localIp = getString(rdmaConfig, "localIp", "");
 			this.logLevel = getString(rdmaConfig, "logLevel", DEFAULT_LOG_LEVEL);
 			this.timeoutMs = getLong(rdmaConfig, "timeoutMs", DEFAULT_TIMEOUT_MS);
+			this.allowMissingBytesHeader = getBoolean(rdmaConfig, "allowMissingBytesHeader", false);
+			this.bufferPool = getBoolean(rdmaConfig, "bufferPool", true);
+			this.copyThreads = getInt(rdmaConfig, "copyThreads", DEFAULT_COPY_THREADS);
 		}
 	}
 
@@ -46,17 +56,17 @@ public final class RdmaConfig {
 		}
 	}
 
-	private static long getLong(final Config config, final String key, final long defaultValue) {
+	private static int getInt(final Config config, final String key, final int defaultValue) {
 		try {
-			return config.longVal(key);
+			return config.intVal(key);
 		} catch (final Exception e) {
 			return defaultValue;
 		}
 	}
 
-	private static int getInt(final Config config, final String key, final int defaultValue) {
+	private static long getLong(final Config config, final String key, final long defaultValue) {
 		try {
-			return config.intVal(key);
+			return config.longVal(key);
 		} catch (final Exception e) {
 			return defaultValue;
 		}
@@ -89,6 +99,53 @@ public final class RdmaConfig {
 					final String localIp,
 					final String logLevel,
 					final long timeoutMs) {
+		this(enabled, thresholdBytes, fallbackEnabled, device, localIp, logLevel, timeoutMs, false);
+	}
+
+	/**
+	 * @param allowMissingBytesHeader legacy compatibility: accept an RDMA GET success that omits
+	 *                                {@code x-amz-rdma-bytes-transferred} and count the requested size
+	 */
+	public RdmaConfig(
+					final boolean enabled,
+					final long thresholdBytes,
+					final boolean fallbackEnabled,
+					final String device,
+					final String localIp,
+					final String logLevel,
+					final long timeoutMs,
+					final boolean allowMissingBytesHeader) {
+		this(enabled, thresholdBytes, fallbackEnabled, device, localIp, logLevel, timeoutMs, allowMissingBytesHeader,
+						true);
+	}
+
+	/** @param bufferPool reuse registered buffers across operations instead of registering one per operation */
+	public RdmaConfig(
+					final boolean enabled,
+					final long thresholdBytes,
+					final boolean fallbackEnabled,
+					final String device,
+					final String localIp,
+					final String logLevel,
+					final long timeoutMs,
+					final boolean allowMissingBytesHeader,
+					final boolean bufferPool) {
+		this(enabled, thresholdBytes, fallbackEnabled, device, localIp, logLevel, timeoutMs, allowMissingBytesHeader,
+						bufferPool, DEFAULT_COPY_THREADS);
+	}
+
+	/** @param copyThreads threads copying one PUT payload into its buffer, the dispatcher included */
+	public RdmaConfig(
+					final boolean enabled,
+					final long thresholdBytes,
+					final boolean fallbackEnabled,
+					final String device,
+					final String localIp,
+					final String logLevel,
+					final long timeoutMs,
+					final boolean allowMissingBytesHeader,
+					final boolean bufferPool,
+					final int copyThreads) {
 		this.enabled = enabled;
 		this.thresholdBytes = thresholdBytes;
 		this.fallbackEnabled = fallbackEnabled;
@@ -96,6 +153,16 @@ public final class RdmaConfig {
 		this.localIp = localIp;
 		this.logLevel = logLevel;
 		this.timeoutMs = timeoutMs;
+		this.allowMissingBytesHeader = allowMissingBytesHeader;
+		this.bufferPool = bufferPool;
+		this.copyThreads = copyThreads;
+	}
+
+	/** Returns a copy with {@code localIp} replaced. */
+	public RdmaConfig withLocalIp(final String localIp) {
+		return new RdmaConfig(
+						enabled, thresholdBytes, fallbackEnabled, device, localIp, logLevel, timeoutMs,
+						allowMissingBytesHeader, bufferPool, copyThreads);
 	}
 
 	public boolean isEnabled() {
@@ -126,6 +193,26 @@ public final class RdmaConfig {
 		return timeoutMs;
 	}
 
+	/** Whether an RDMA GET success without a bytes-transferred header is accepted (legacy servers). */
+	public boolean isAllowMissingBytesHeader() {
+		return allowMissingBytesHeader;
+	}
+
+	/** Whether registered buffers are reused across operations. */
+	public boolean isBufferPoolEnabled() {
+		return bufferPool;
+	}
+
+	/** Threads copying one PUT payload into its buffer, the dispatcher included; 1 copies on the dispatcher alone. */
+	public int getCopyThreads() {
+		return copyThreads;
+	}
+
+	/** Whether {@code device} names a specific RDMA device rather than requesting auto-detection. */
+	public boolean hasExplicitDevice() {
+		return device != null && !device.isEmpty() && !DEFAULT_DEVICE.equals(device);
+	}
+
 	@Override
 	public String toString() {
 		return "RdmaConfig{" +
@@ -136,6 +223,9 @@ public final class RdmaConfig {
 						", localIp='" + localIp + '\'' +
 						", logLevel='" + logLevel + '\'' +
 						", timeoutMs=" + timeoutMs +
+						", allowMissingBytesHeader=" + allowMissingBytesHeader +
+						", bufferPool=" + bufferPool +
+						", copyThreads=" + copyThreads +
 						'}';
 	}
 }

@@ -45,13 +45,19 @@ public class FakeRdmaTransport extends RdmaTransport {
 	/** When true, generateToken() returns null. */
 	private volatile boolean failTokenGeneration;
 
+	/** When true, init() fails and the transport stays unavailable. */
+	private volatile boolean failInit;
+
+	/** Buffers still registered when the transport was closed; negative until then. */
+	private volatile int activeRegistrationsAtClose = -1;
+
 	public FakeRdmaTransport(final RdmaConfig config) {
 		super(config);
 	}
 
 	@Override
 	public boolean init(final String endpoint, final String accessKey, final String secretKey) {
-		if (endpoint == null || endpoint.isEmpty() || accessKey == null || secretKey == null) {
+		if (failInit || endpoint == null || endpoint.isEmpty() || accessKey == null || secretKey == null) {
 			available = false;
 			return false;
 		}
@@ -105,6 +111,9 @@ public class FakeRdmaTransport extends RdmaTransport {
 	@Override
 	public void close() {
 		available = false;
+		if (activeRegistrationsAtClose < 0) {
+			activeRegistrationsAtClose = activeRegistrations.size();
+		}
 		activeRegistrations.clear();
 	}
 
@@ -130,6 +139,11 @@ public class FakeRdmaTransport extends RdmaTransport {
 		return activeRegistrations.size();
 	}
 
+	/** Buffers nobody had deregistered when the transport was closed; negative before the close. */
+	public int getActiveRegistrationsAtClose() {
+		return activeRegistrationsAtClose;
+	}
+
 	/** Get the buffer associated with a registration handle (for content verification). */
 	public ByteBuffer getRegisteredBuffer(final long handle) {
 		return activeRegistrations.get(handle);
@@ -145,6 +159,11 @@ public class FakeRdmaTransport extends RdmaTransport {
 	/** When true, generateToken() always returns null. */
 	public void setFailTokenGeneration(final boolean fail) {
 		this.failTokenGeneration = fail;
+	}
+
+	/** When true, init() returns false (simulates a host without a usable RDMA device). */
+	public void setFailInit(final boolean fail) {
+		this.failInit = fail;
 	}
 
 	/** Manually control availability (simulates transport going down). */

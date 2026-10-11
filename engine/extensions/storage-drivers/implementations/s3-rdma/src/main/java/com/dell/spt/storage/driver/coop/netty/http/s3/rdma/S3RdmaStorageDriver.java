@@ -1,14 +1,15 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 
-import static com.dell.spt.base.item.op.Operation.SLASH;
-
 import com.dell.spt.base.data.DataInput;
+import com.dell.spt.base.integrity.IntegrityVerificationResult;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.storage.driver.coop.netty.http.s3.S3StorageDriver;
@@ -16,16 +17,26 @@ import com.github.akurilov.confuse.Config;
 
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandler;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.ChannelPipeline;
 import io.netty.util.AttributeKey;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.EmptyHttpHeaders;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
+import io.netty.handler.codec.http.HttpContent;
 import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.http.HttpStatusClass;
 
 import org.apache.logging.log4j.Level;
 
 import java.io.IOException;
+import java.net.DatagramSocket;
+import java.net.Inet4Address;
+import java.net.InetAddress;
 import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
 import java.util.List;
@@ -34,9 +45,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
+import java.util.function.IntFunction;
 
 /**
  * S3 storage driver with RDMA support for high-performance data transfer.
@@ -66,6 +79,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 	private static final AttributeKey<RdmaContext> RDMA_CONTEXT_ATTR_KEY = AttributeKey.newInstance("spt-rdma-attempt");
 
+	/** Pipeline name of the handler that records the RDMA reply ahead of S3 response handling. */
+	static final String RDMA_REPLY_HANDLER_NAME = "spt-rdma-reply";
+
 	/**
 	 * Per-operation RDMA state tracked across the request/response lifecycle.
 	 * Created in submitRdma(), read in httpRequest(), cleaned up in complete().
@@ -78,6 +94,20 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		final int size;
 		volatile Channel channel;
 		volatile long startTimeNanos;
+		// Response fields are written and read on the channel's event loop.
+		int reply = RdmaReplyContract.REPLY_ABSENT;
+		long bytesTransferred = RdmaReplyContract.VALUE_ABSENT;
+		long responseContentLength = RdmaReplyContract.VALUE_ABSENT;
+		long responseBodyBytes;
+		/**
+		 * The server's final (non-1xx) response was received, so it no longer accesses the buffer.
+		 * An informational response does not end the request.
+		 */
+		boolean finalResponseObserved;
+		/** Pool buffer backing this request, or {@code null} for a per-operation buffer. */
+		RdmaBufferPool.PooledBuffer pooled;
+		/** Stale content was invalidated; the buffer is reusable only after a verified fill. */
+		boolean contentInvalidated;
 
 		RdmaContext(final String token, final ByteBuffer buffer, final long mrHandle,
 						final OpType opType, final int size) {
@@ -87,6 +117,55 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			this.opType = opType;
 			this.size = size;
 		}
+
+		void observeResponse(final HttpResponse response) {
+			if (response.status().codeClass() == HttpStatusClass.INFORMATIONAL) {
+				return;
+			}
+			finalResponseObserved = true;
+			final HttpHeaders headers = response.headers();
+			reply = RdmaReplyContract.parseReply(headers.get(RdmaReplyContract.REPLY_HEADER));
+			bytesTransferred = RdmaReplyContract.parseCount(
+							headers.get(RdmaReplyContract.BYTES_TRANSFERRED_HEADER));
+			responseContentLength = RdmaReplyContract.parseCount(headers.get(HttpHeaderNames.CONTENT_LENGTH));
+		}
+
+		/** HTTP body size, including chunked bodies that carry no Content-Length. */
+		long bodyBytes() {
+			return Math.max(responseContentLength, responseBodyBytes);
+		}
+
+		boolean replyAcceptedRdma() {
+			return reply == RdmaReplyContract.REPLY_OK
+							|| reply == RdmaReplyContract.REPLY_NO_CONTENT
+							|| reply == RdmaReplyContract.REPLY_PARTIAL_CONTENT;
+		}
+	}
+
+	/**
+	 * Records the RDMA reply headers and the HTTP body size into the channel's {@link RdmaContext}
+	 * before the S3 response handler runs, so body routing and completion can follow what the
+	 * server actually did.
+	 */
+	@ChannelHandler.Sharable
+	private static final class RdmaReplyObserver extends ChannelInboundHandlerAdapter {
+		static final RdmaReplyObserver INSTANCE = new RdmaReplyObserver();
+
+		@Override
+		public void channelRead(final ChannelHandlerContext handlerContext, final Object msg) {
+			if (msg instanceof HttpResponse || msg instanceof HttpContent) {
+				final RdmaContext ctx = handlerContext.channel().attr(RDMA_CONTEXT_ATTR_KEY).get();
+				if (ctx != null) {
+					if (msg instanceof HttpResponse response) {
+						ctx.observeResponse(response);
+					}
+					if (msg instanceof HttpContent content) {
+						ctx.responseBodyBytes += content.content().readableBytes();
+					}
+				}
+			}
+			handlerContext.fireChannelRead(msg);
+		}
 	}
 
 	/** In-flight RDMA operations keyed by Operation identity. */
@@ -94,6 +173,28 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 	/** Log-once guard for the below-threshold warning. */
 	private final AtomicBoolean belowThresholdWarned = new AtomicBoolean(false);
+	private final AtomicBoolean oversizeWarned = new AtomicBoolean(false);
+	private final AtomicBoolean prepareFailureWarned = new AtomicBoolean(false);
+	private final AtomicBoolean declinedWarned = new AtomicBoolean(false);
+	private final AtomicBoolean protocolErrorWarned = new AtomicBoolean(false);
+	private final AtomicBoolean bytesAssumedWarned = new AtomicBoolean(false);
+
+	private final RdmaPathStats pathStats = new RdmaPathStats();
+
+	/** Spacing of the bytes altered in a reused GET buffer; one per page. */
+	static final int STALE_CONTENT_STRIDE_BYTES = 4096;
+
+	/** Bound used when the driver's concurrency is unlimited. */
+	private static final int UNLIMITED_CONCURRENCY_POOL_LIMIT = 256;
+
+	/** Reused registered buffers, or {@code null} when storage.rdma.bufferPool is disabled. */
+	private final RdmaBufferPool bufferPool;
+
+	/** Copies PUT payloads into their buffers, on storage.rdma.copyThreads threads. */
+	private final RdmaPayloadCopier payloadCopier;
+
+	/** Allocates per-operation buffers; replaced only by tests to simulate exhausted direct memory. */
+	IntFunction<ByteBuffer> directAllocator = ByteBuffer::allocateDirect;
 
 	/**
 	 * ThreadLocal to pass the RDMA token from httpRequest() into applyMetaDataHeaders().
@@ -133,17 +234,31 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 					throws IllegalConfigurationException, InterruptedException {
 		super(stepId, itemDataInput, storageConfig, verifyFlag, batchSize);
 
-		// Parse RDMA configuration
-		rdmaConfig = new RdmaConfig(storageConfig.configVal("rdma"));
-		Loggers.MSG.info("{}: RDMA config: {}", stepId, rdmaConfig);
-
 		// Build endpoint address summary from storage node config
 		endpointAddrs = buildEndpointAddrs();
+
+		// Parse RDMA configuration; without an explicit local address, use the one routed to the
+		// storage endpoint so each worker host selects its own RoCE GID.
+		// An explicit device keeps native device selection authoritative: the native layer binds
+		// by address first and would otherwise use whichever NIC carries the routed address.
+		final RdmaConfig configured = new RdmaConfig(storageConfig.configVal("rdma"));
+		rdmaConfig = configured.isEnabled() && configured.getLocalIp().isEmpty() && !configured.hasExplicitDevice()
+						? withRoutedLocalIp(configured)
+						: configured;
+		Loggers.MSG.info("{}: RDMA config: {}", stepId, rdmaConfig);
+		payloadCopier = new RdmaPayloadCopier(rdmaConfig.getCopyThreads(), stepId + "-rdma-copy-");
 
 		// Initialize RDMA transport
 		rdmaTransport = Objects.requireNonNull(
 						transportFactory, "RDMA transport factory").apply(rdmaConfig);
 		Objects.requireNonNull(rdmaTransport, "RDMA transport");
+		// In-flight RDMA operations are bounded by the concurrency throttle; one extra buffer per
+		// size class covers an operation prepared just before the throttle rejects it.
+		bufferPool = rdmaConfig.isBufferPoolEnabled()
+						? new RdmaBufferPool(rdmaTransport,
+										concurrencyLimit > 0 ? concurrencyLimit + 1 : UNLIMITED_CONCURRENCY_POOL_LIMIT,
+										RdmaBufferPool.defaultMaxPooledBytes())
+						: null;
 		boolean transportInitialized = false;
 		try {
 			if (rdmaConfig.isEnabled()) {
@@ -171,7 +286,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 					return t;
 				});
 				final long intervalMs = Math.max(rdmaConfig.getTimeoutMs() / 2, 1000);
-				rdmaReaper.scheduleAtFixedRate(this::reapTimedOutOps, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
+				// The task handles its own exceptions and ends with shutdownNow() in doClose().
+				final ScheduledFuture<?> unused = rdmaReaper.scheduleAtFixedRate(
+								this::reapTimedOutOps, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
 				Loggers.MSG.info("{}: RDMA operation timeout reaper started (timeoutMs={}, intervalMs={})",
 								stepId, rdmaConfig.getTimeoutMs(), intervalMs);
 			} else {
@@ -215,7 +332,15 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	protected int submit(final List<O> ops, final int from, final int to) throws IllegalStateException {
 		if (!rdmaTransport.isAvailable()) {
 			// Fast path: if RDMA is not available, use parent's optimized batch submit
-			return super.submit(ops, from, to);
+			final int submitted = super.submit(ops, from, to);
+			int withPayload = 0;
+			for (int i = from; i < from + submitted; i++) {
+				if (carriesPayload(ops.get(i))) {
+					withPayload++;
+				}
+			}
+			pathStats.httpRdmaUnavailable.add(withPayload);
+			return submitted;
 		}
 
 		// Process operations individually to allow RDMA routing decisions per-operation
@@ -245,6 +370,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		if (!rdmaTransport.isAvailable()) {
 			// TRACE level - checked on every operation in high-throughput workloads
 			Loggers.MSG.trace("{}: RDMA skip: transport not available", stepId);
+			if (carriesPayload(op)) {
+				pathStats.httpRdmaUnavailable.increment();
+			}
 			return false;
 		}
 		if (!(op instanceof DataOperation)) {
@@ -256,11 +384,21 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			Loggers.MSG.trace("{}: RDMA skip: opType={} not CREATE/READ", stepId, opType);
 			return false;
 		}
+		if (op instanceof CompositeOperation) {
+			// Multipart initiate/complete requests carry no payload; their parts carry the data.
+			return false;
+		}
 		final var dataOp = (DataOperation) op;
+		if (opType == OpType.READ && (op instanceof PartialOperation || isRangedRead(dataOp))) {
+			// Ranged reads are not proposed for RDMA: the token and buffer describe the whole object.
+			pathStats.httpIneligible.increment();
+			return false;
+		}
 		try {
 			final long size = dataOp.item().size();
 			final boolean useRdma = size >= rdmaConfig.getThresholdBytes();
 			if (!useRdma) {
+				pathStats.httpBelowThreshold.increment();
 				if (belowThresholdWarned.compareAndSet(false, true)) {
 					Loggers.MSG.warn(
 									"{}: object size ({}) below RDMA threshold ({}); using HTTP path."
@@ -274,6 +412,20 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			Loggers.MSG.warn("{}: RDMA skip: IOException getting size", stepId);
 			return false;
 		}
+	}
+
+	/** Whether the operation is one the data-path summary counts: a CREATE or READ with a payload. */
+	private static boolean carriesPayload(final Operation<?> op) {
+		if (!(op instanceof DataOperation) || op instanceof CompositeOperation) {
+			return false;
+		}
+		final var opType = op.type();
+		return opType == OpType.CREATE || opType == OpType.READ;
+	}
+
+	private static boolean isRangedRead(final DataOperation dataOp) {
+		final var fixedRanges = dataOp.fixedRanges();
+		return (fixedRanges != null && !fixedRanges.isEmpty()) || dataOp.randomRangesCount() > 0;
 	}
 
 	/**
@@ -297,7 +449,11 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		try {
 			final long rawSize = item.size();
 			if (rawSize > Integer.MAX_VALUE) {
-				Loggers.MSG.trace("{}: RDMA skip: size={} exceeds int range, falling back to HTTP", stepId, rawSize);
+				pathStats.httpOversize.increment();
+				if (oversizeWarned.compareAndSet(false, true)) {
+					Loggers.MSG.warn("{}: object size ({}) exceeds the largest RDMA buffer ({}); using HTTP path",
+									stepId, rawSize, Integer.MAX_VALUE);
+				}
 				return super.submit(op);
 			}
 			size = (int) rawSize;
@@ -307,20 +463,50 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			return true;
 		}
 
+		// Until the context is stored, this method owns the buffer; afterwards the context does.
 		ByteBuffer buf = null;
 		long mrHandle = 0;
+		RdmaBufferPool.PooledBuffer pooled = null;
+		boolean invalidated = false;
+		// The item's position before its payload was copied; negative while nothing was copied.
+		long payloadStart = -1;
 		try {
-			buf = ByteBuffer.allocateDirect(size);
-
-			mrHandle = rdmaTransport.registerBuffer(buf, size);
-			if (mrHandle == 0) {
-				Loggers.MSG.trace("{}: RDMA buffer registration failed, falling back to HTTP", stepId);
-				return super.submit(op);
+			pooled = bufferPool == null ? null : bufferPool.acquire(size);
+			if (pooled != null) {
+				buf = pooled.buffer();
+				mrHandle = pooled.mrHandle();
+				// Integrity verification is the only check of RDMA-delivered GET content.
+				if (opType == OpType.READ && integrityMetadataEnabled()) {
+					invalidateStaleContent(buf, size);
+					invalidated = true;
+				}
+			} else {
+				buf = RdmaBufferPool.allocateUnpooled(size, bufferPool, directAllocator);
+				if (buf == null) {
+					return prepareFailed(op, "direct memory exhausted");
+				}
+				mrHandle = rdmaTransport.registerBuffer(buf, size);
+				if (mrHandle == 0) {
+					return prepareFailed(op, "buffer registration failed");
+				}
 			}
 
 			// For PUT: copy data into the registered buffer
 			if (opType == OpType.CREATE) {
-				transferDataItemToBuffer((DataItem) item, buf, size);
+				payloadStart = ((DataItem) item).position();
+				try {
+					payloadCopier.copy((DataItem) item, buf, size);
+				} catch (final OutOfMemoryError e) {
+					// The copy could not allocate the data it reads from: for an item above layer 0,
+					// every thread that reads it caches that layer for itself. Handled as an
+					// exhausted destination buffer is; the buffer is dropped so that its memory
+					// can be reclaimed.
+					releaseBuffer(pooled, buf, mrHandle, false);
+					pooled = null;
+					mrHandle = 0;
+					rewindPayload(dataOp, payloadStart);
+					return prepareFailed(op, "out of memory copying the payload");
+				}
 				// Mark bytes as done — sendRequestData() will be skipped for RDMA PUT
 				// because httpRequest() returns a FullHttpRequest with empty body
 				dataOp.countBytesDone(size);
@@ -328,98 +514,198 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 			final String token = rdmaTransport.generateToken(mrHandle, size);
 			if (token == null) {
-				Loggers.MSG.trace("{}: RDMA token generation failed, falling back to HTTP", stepId);
-				rdmaTransport.deregisterBuffer(buf, mrHandle);
-				return super.submit(op);
+				// Nothing was sent, so the buffer is reusable unless its content was invalidated.
+				releaseBuffer(pooled, buf, mrHandle, !invalidated);
+				pooled = null;
+				mrHandle = 0;
+				rewindPayload(dataOp, payloadStart);
+				return prepareFailed(op, "token generation failed");
 			}
 
 			// Store RDMA context — httpRequest() adds the header, complete() cleans up
-			rdmaOps.put(op, new RdmaContext(token, buf, mrHandle, opType, size));
+			final RdmaContext ctx = new RdmaContext(token, buf, mrHandle, opType, size);
+			ctx.pooled = pooled;
+			ctx.contentInvalidated = invalidated;
+			rdmaOps.put(op, ctx);
+			pooled = null;
+			mrHandle = 0;
 
 			Loggers.MSG.debug("{}: RDMA submit: type={} size={} token={}", stepId, opType, size, token);
 
 			final boolean submitted = super.submit(op);
 			if (!submitted) {
-				// Throttle exhausted — clean up since complete() won't be called
-				cleanupRdmaContext(op);
+				// Throttle exhausted: the request was not sent and complete() won't be called.
+				cleanupRdmaContext(op, true);
 			}
 			return submitted;
 
+		} catch (final RdmaPayloadCopier.StoppedException e) {
+			// The driver is closing. Nothing was sent, so the operation stays undispatched and
+			// is recovered with the other queued operations.
+			try {
+				abandonPreparation(op, pooled, buf, mrHandle, dataOp, payloadStart);
+			} finally {
+				// doClose() waits for this before it closes the buffer pool and the transport.
+				payloadCopier.stoppedCopyReleased();
+			}
+			return false;
 		} catch (final Exception e) {
-			LogUtil.exception(Level.WARN, e, "{}: RDMA submit failed for {}",
+			LogUtil.exception(Level.DEBUG, e, "{}: RDMA submit failed for {}",
 							stepId, item.name());
+			abandonPreparation(op, pooled, buf, mrHandle, dataOp, payloadStart);
+			return prepareFailed(op, e.getClass().getSimpleName());
+		} catch (final Error e) {
+			// Not handled here. Only what this method still owns is released: a stored context
+			// keeps its buffer until the response, the reaper or close.
+			releaseBuffer(pooled, buf, mrHandle, false);
+			throw e;
+		}
+	}
 
-			// Clean up — check rdmaOps first (context may already be stored)
-			if (!cleanupRdmaContext(op)) {
-				if (mrHandle != 0) {
-					rdmaTransport.deregisterBuffer(buf, mrHandle);
-				}
-			}
+	/**
+	 * Releases what a preparation that ended abnormally still owns and undoes its payload copy.
+	 * The request may have been dispatched, so the buffer is not reused. A stored context owns the
+	 * buffer; if it was already completed, there is nothing left to release.
+	 */
+	private void abandonPreparation(
+					final O op, final RdmaBufferPool.PooledBuffer pooled, final ByteBuffer buf, final long mrHandle,
+					final DataOperation<?> dataOp, final long payloadStart) {
+		if (!cleanupRdmaContext(op, false)) {
+			releaseBuffer(pooled, buf, mrHandle, false);
+		}
+		rewindPayload(dataOp, payloadStart);
+	}
 
-			if (rdmaConfig.isFallbackEnabled()) {
-				Loggers.MSG.trace("{}: falling back to HTTP after RDMA exception", stepId);
-				return super.submit(op);
-			}
+	/**
+	 * Undoes the payload copy of a preparation that ends without an RDMA request. The copy leaves
+	 * the item at its end and the operation counted as written: without this, the HTTP fallback
+	 * would send an empty body and a failed operation would report bytes.
+	 *
+	 * @param payloadStart the item's position before the copy; negative if nothing was copied
+	 */
+	private static void rewindPayload(final DataOperation<?> dataOp, final long payloadStart) {
+		if (payloadStart >= 0) {
+			dataOp.item().position(payloadStart);
+			dataOp.countBytesDone(0);
+		}
+	}
 
-			op.status(Operation.Status.FAIL_IO);
-			handleCompleted(op);
-			return true;
+	/**
+	 * Handles an RDMA preparation failure: with fallback enabled the operation is sent over HTTP,
+	 * otherwise it fails rather than being reported as an RDMA transfer.
+	 */
+	private boolean prepareFailed(final O op, final String reason) {
+		final boolean fallback = rdmaConfig.isFallbackEnabled();
+		if (prepareFailureWarned.compareAndSet(false, true)) {
+			Loggers.MSG.warn("{}: RDMA preparation failed ({}); {}", stepId, reason,
+							fallback ? "falling back to HTTP (storage.rdma.fallback=true)"
+											: "failing the operation (storage.rdma.fallback=false)");
+		}
+		if (fallback) {
+			pathStats.httpFallback.increment();
+			return super.submit(op);
+		}
+		pathStats.prepareFailed.increment();
+		op.status(Operation.Status.FAIL_IO);
+		// This completion bypasses finishResponse(), so the part is settled here.
+		markPartSettled(op);
+		handleCompleted(op);
+		return true;
+	}
+
+	/**
+	 * Marks a multipart part's sub-task complete on its parent.
+	 *
+	 * <p>A part is normally settled by {@code PartialDataOperationImpl.finishResponse()}, and a part
+	 * retry undoes that mark. Completion paths that do not reach that settlement must call this
+	 * exactly once so retries and finalization keep the parent's pending count balanced.
+	 */
+	static void markPartSettled(final Operation<?> op) {
+		if (op instanceof PartialOperation<?> part) {
+			part.parent().markSubTaskCompleted();
 		}
 	}
 
 	/** Remove and clean up RDMA context for an operation. Returns true if found. */
-	private boolean cleanupRdmaContext(final O op) {
+	private boolean cleanupRdmaContext(final O op, final boolean reusable) {
 		final RdmaContext ctx;
 		synchronized (op) {
 			ctx = rdmaOps.remove(op);
 		}
 		if (ctx != null) {
-			rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+			releaseBuffer(ctx.pooled, ctx.buffer, ctx.mrHandle, reusable && !ctx.contentInvalidated);
 			return true;
 		}
 		return false;
 	}
 
 	/**
-	 * Copy data from a DataItem into a direct ByteBuffer for RDMA transfer.
+	 * Ends a request's use of its buffer. A pool buffer is reused only when {@code reusable}:
+	 * the request was never sent, or the server's response was received. Otherwise the server
+	 * might still access it, so it is deregistered and dropped.
 	 */
-	private void transferDataItemToBuffer(final DataItem item, final ByteBuffer dst, final int size)
-					throws IOException {
-		dst.clear();
-		dst.limit(size);
-		int totalRead = 0;
-		while (totalRead < size) {
-			final int bytesRead = item.read(dst);
-			if (bytesRead < 0) {
-				break;
+	private void releaseBuffer(
+					final RdmaBufferPool.PooledBuffer pooled, final ByteBuffer buffer, final long mrHandle,
+					final boolean reusable) {
+		if (pooled != null) {
+			if (reusable) {
+				bufferPool.release(pooled);
+			} else {
+				bufferPool.discard(pooled);
 			}
-			totalRead += bytesRead;
+		} else if (mrHandle != 0) {
+			rdmaTransport.deregisterBuffer(buffer, mrHandle);
 		}
-		if (totalRead < size) {
-			throw new IOException("RDMA short read: expected " + size + " bytes but got " + totalRead);
-		}
-		dst.flip();
 	}
 
 	/**
-	 * Extract the bucket name from the driver's namespace configuration.
-	 * The namespace is typically the bucket name, possibly with a leading slash.
+	 * Alters a reused buffer at every page so a read the server reports but does not write cannot
+	 * pass verification on content left by an earlier read of the same object.
 	 */
-	private String extractBucket() {
-		if (namespace == null || namespace.isEmpty()) {
-			return "";
+	static void invalidateStaleContent(final ByteBuffer buffer, final int size) {
+		for (long i = 0; i < size; i += STALE_CONTENT_STRIDE_BYTES) {
+			buffer.put((int) i, (byte) ~buffer.get((int) i));
 		}
-		final String ns = namespace.startsWith(SLASH) ? namespace.substring(1) : namespace;
-		final int slashPos = ns.indexOf(SLASH);
-		return slashPos > 0 ? ns.substring(0, slashPos) : ns;
+		final int last = size - 1;
+		if (last > 0 && last % STALE_CONTENT_STRIDE_BYTES != 0) {
+			buffer.put(last, (byte) ~buffer.get(last));
+		}
+	}
+
+	private RdmaConfig withRoutedLocalIp(final RdmaConfig configured) {
+		if (storageNodeAddrs.length == 0) {
+			return configured;
+		}
+		final String addr = storageNodeAddrs[0];
+		final int colonPos = addr.lastIndexOf(':');
+		final String host = colonPos > 0 ? addr.substring(0, colonPos) : addr;
+		final int port = colonPos > 0 ? Integer.parseInt(addr.substring(colonPos + 1)) : storageNodePort;
+		final String localIp = routedLocalAddress(host, port);
+		if (localIp.isEmpty()) {
+			Loggers.MSG.info("{}: RDMA local address not resolved by route to {}; native GID selection applies",
+							stepId, host);
+			return configured;
+		}
+		Loggers.MSG.info("{}: RDMA local address {} selected by route to {}", stepId, localIp, host);
+		return configured.withLocalIp(localIp);
 	}
 
 	/**
-	 * Extract the object key from an item's name.
+	 * Returns the local IPv4 address the OS routes toward {@code host}, or an empty string when
+	 * it cannot be determined or is a loopback/wildcard address. Connecting a UDP socket only
+	 * performs the route lookup; no packet is sent.
 	 */
-	private String extractKey(final Item item) {
-		final String name = item.name();
-		return name.startsWith(SLASH) ? name.substring(1) : name;
+	static String routedLocalAddress(final String host, final int port) {
+		try (final DatagramSocket socket = new DatagramSocket()) {
+			socket.connect(InetAddress.getByName(host), port);
+			final InetAddress local = socket.getLocalAddress();
+			if (local instanceof Inet4Address && !local.isLoopbackAddress() && !local.isAnyLocalAddress()) {
+				return local.getHostAddress();
+			}
+		} catch (final IOException | RuntimeException e) {
+			Loggers.MSG.debug("RDMA local address route lookup to {} failed: {}", host, e.getMessage());
+		}
+		return "";
 	}
 
 	/**
@@ -531,8 +817,23 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	@Override
+	protected void appendHandlers(final Channel channel) {
+		super.appendHandlers(channel);
+		final ChannelPipeline pipeline = channel.pipeline();
+		pipeline.addBefore(pipeline.lastContext().name(), RDMA_REPLY_HANDLER_NAME, RdmaReplyObserver.INSTANCE);
+	}
+
+	/**
+	 * A GET body is out of band only when the server reported an RDMA transfer; a declined GET
+	 * carries the object in the HTTP body and is verified in band like any HTTP read.
+	 */
+	@Override
 	protected boolean observesReadBodyOutOfBand(final O op) {
-		return rdmaOps.containsKey(op) && OpType.READ.equals(op.type());
+		if (!OpType.READ.equals(op.type())) {
+			return false;
+		}
+		final RdmaContext ctx = rdmaOps.get(op);
+		return ctx != null && ctx.replyAcceptedRdma();
 	}
 
 	/**
@@ -563,16 +864,73 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	private void completeRdmaContext(final Channel channel, final O op, final RdmaContext ctx) {
+		boolean verifiedFill = false;
 		try {
-			if (op.status() == Operation.Status.SUCC && ctx.opType == OpType.READ) {
-				final ByteBuffer body = ctx.buffer.asReadOnlyBuffer();
-				body.position(0);
-				body.limit(ctx.size);
-				finishOutOfBandIntegrityRead(channel, op, body);
-				((DataOperation) op).countBytesDone(ctx.size);
+			if (op.status() != Operation.Status.SUCC) {
+				pathStats.rdmaHttpError.increment();
+				return;
+			}
+			final RdmaReplyContract.Result result = RdmaReplyContract.classify(
+							ctx.opType, ctx.reply, ctx.bytesTransferred, ctx.bodyBytes(), ctx.size,
+							rdmaConfig.isAllowMissingBytesHeader());
+			final var dataOp = (DataOperation) op;
+			switch (result.outcome()) {
+			case TRANSFERRED -> {
+				pathStats.rdmaTransferred.increment();
+				if (result.bytesAssumed()) {
+					pathStats.rdmaBytesAssumed.increment();
+					if (bytesAssumedWarned.compareAndSet(false, true)) {
+						Loggers.MSG.warn("{}: RDMA GET success without x-amz-rdma-bytes-transferred; counting the "
+										+ "requested size (storage.rdma.allowMissingBytesHeader=true)", stepId);
+					}
+				}
+				if (ctx.opType == OpType.READ) {
+					final ByteBuffer body = ctx.buffer.asReadOnlyBuffer();
+					body.clear();
+					body.limit((int) result.bytes());
+					final IntegrityVerificationResult prior = op.integrityVerificationResult();
+					finishOutOfBandIntegrityRead(channel, op, body);
+					// Only a result produced by this read counts. Identity is the test: a new result
+					// may equal the earlier one field by field.
+					final IntegrityVerificationResult verification = op.integrityVerificationResult();
+					@SuppressWarnings("ReferenceEquality")
+					final boolean producedByThisRead = verification != prior;
+					verifiedFill = verification != null && producedByThisRead && verification.verified()
+									&& op.status() == Operation.Status.SUCC;
+					dataOp.countBytesDone(result.bytes());
+				}
+			}
+			case DECLINED -> {
+				pathStats.rdmaDeclined.increment();
+				// A declined PUT stored nothing. A declined GET delivered its body over HTTP,
+				// which counts only when HTTP fallback is allowed.
+				final boolean fail = ctx.opType == OpType.CREATE || !rdmaConfig.isFallbackEnabled();
+				if (declinedWarned.compareAndSet(false, true)) {
+					Loggers.MSG.warn("{}: server declined RDMA ({}) for {}; {}", stepId, result.reason(),
+									ctx.opType, fail ? "operations fail"
+													: "GET bodies arrive over HTTP (storage.rdma.fallback=true)");
+				}
+				if (fail) {
+					op.status(Operation.Status.RESP_FAIL_SVC);
+					dataOp.countBytesDone(0);
+				}
+			}
+			case PROTOCOL_ERROR -> {
+				pathStats.rdmaProtocolError.increment();
+				if (protocolErrorWarned.compareAndSet(false, true)) {
+					Loggers.MSG.warn("{}: RDMA reply contract violated for {}: {}",
+									stepId, ctx.opType, result.reason());
+				}
+				discardOutOfBandIntegrityRead(channel);
+				op.status(Operation.Status.RESP_FAIL_CORRUPT);
+				dataOp.countBytesDone(0);
+			}
 			}
 		} finally {
-			rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+			// An invalidated buffer holds altered stale content unless the server wrote a payload
+			// that verified; reusing it otherwise would let a second invalidation restore the content.
+			releaseBuffer(ctx.pooled, ctx.buffer, ctx.mrHandle,
+							ctx.finalResponseObserved && (!ctx.contentInvalidated || verifiedFill));
 		}
 	}
 
@@ -599,8 +957,15 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 						Loggers.MSG.warn("{}: RDMA operation timed out: type={} size={} elapsed={}ms status={} item={}",
 										stepId, ctx.opType, ctx.size, elapsedMs, op.status(),
 										(op instanceof DataOperation ? ((DataOperation) op).item().name() : "?"));
-						rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+						// The server may still access a timed-out request's buffer.
+						releaseBuffer(ctx.pooled, ctx.buffer, ctx.mrHandle, false);
+						pathStats.rdmaTimedOut.increment();
 						op.status(Operation.Status.FAIL_IO);
+						// finishResponse() throws before settling a part whose response never
+						// started; it settles it otherwise (timing may carry over from a retry).
+						if (op.respTimeStart() == 0) {
+							markPartSettled(op);
+						}
 						discardOutOfBandIntegrityRead(ctx.channel);
 						super.complete(ctx.channel, (O) op);
 						reaped++;
@@ -630,6 +995,13 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 				Thread.currentThread().interrupt();
 			}
 		}
+		// close() closed admission before this point, so no new preparation starts. A split copy
+		// that still runs is stopped here, and its buffer released, before the pool and the
+		// transport go away.
+		if (!payloadCopier.shutdown()) {
+			Loggers.MSG.warn("{}: RDMA payload copy did not stop within {} ms", stepId,
+							RdmaPayloadCopier.CLOSE_WAIT_MILLIS);
+		}
 		// Drain any leaked RDMA contexts (e.g. from interrupted operations).
 		// Use remove(op, ctx) to atomically claim each entry — prevents double-free
 		// if a concurrent complete() is still draining the last in-flight operations.
@@ -637,10 +1009,28 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			final var entry = it.next();
 			final var ctx = entry.getValue();
 			if (rdmaOps.remove(entry.getKey(), ctx)) {
-				rdmaTransport.deregisterBuffer(ctx.buffer, ctx.mrHandle);
+				releaseBuffer(ctx.pooled, ctx.buffer, ctx.mrHandle, false);
 			}
 		}
+		if (bufferPool != null) {
+			bufferPool.close();
+		}
+		Loggers.MSG.info("{}: RDMA data path summary (transport {}): {}{}", stepId,
+						rdmaTransport.isAvailable() ? "available" : "unavailable", pathStats.summary(),
+						bufferPool == null ? ", bufferPool=disabled" : ", " + bufferPool.summary());
 		rdmaTransport.close();
 		super.doClose();
+	}
+
+	RdmaPathStats pathStats() {
+		return pathStats;
+	}
+
+	RdmaBufferPool bufferPool() {
+		return bufferPool;
+	}
+
+	RdmaPayloadCopier payloadCopier() {
+		return payloadCopier;
 	}
 }
