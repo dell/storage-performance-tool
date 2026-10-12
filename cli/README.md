@@ -241,7 +241,7 @@ DELETE detail retains compatibility with engines that do not expose the detailed
 
 ### Prerequisites
 
-- Go 1.27 or higher
+- Go 1.25 or higher
 - Docker (Docker daemon must be running)
 - Local CI checks: golangci-lint v2.2+ (required for `make ci-local`).
 
