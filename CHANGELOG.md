@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - **S3-RDMA buffer reuse** — The `s3-rdma` driver now keeps registered buffers and reuses them across operations instead of allocating, zero-filling, and registering a new buffer for every PUT and GET, which limited RDMA throughput. A buffer is reused only after the server's final response to its request, and a buffer used by an integrity-verified GET only after that GET verified; buffers of requests that time out, lose their connection, or fail are deregistered. Pooled buffers stay within half of the JVM's direct-memory limit and are released when a per-operation buffer would otherwise not fit; transfers above 1 GiB are not pooled. `spt run --rdma-buffer-pool=false` (env `RDMA_BUFFER_POOL`, engine `storage.rdma.bufferPool`) restores per-operation buffers. The RDMA data-path summary in `messages.log` adds pool counters.
 - **Remote entry-node log relay** — Entry-node output now arrives over one `docker logs --follow` SSH session instead of a new SSH session twice a second, reducing CPU load on the entry host. The console still shows only the engine's stdout; its stderr (such as JVM and logging warnings) is kept only in the CLI log, and only with `--log-level debug`.
+- **Dependency updates** — The CLI is now built with Go 1.27.2 (previously 1.25.10), and building it from source requires Go 1.27 or later. Updated `golang.org/x/sys` to 0.49.0.
 
 ### Fixed
 
