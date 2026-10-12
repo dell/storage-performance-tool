@@ -21,6 +21,11 @@ import org.junit.jupiter.api.Test;
 
 final class SwiftLifecycleTest {
 	private static final class TestSwiftDriver extends SwiftStorageDriver<DataItem, Operation<DataItem>> {
+		// A started driver runs its own dispatch task, which drains the same child queue the test
+		// submits to. Only the test thread may cross the dispatch boundary, so that task can never
+		// claim a segment before the test does.
+		private final Thread testThread = Thread.currentThread();
+
 		private TestSwiftDriver() throws Exception {
 			super(
 							"swift-lifecycle-step",
@@ -33,6 +38,11 @@ final class SwiftLifecycleTest {
 
 		private boolean beginTransport(final Operation<DataItem> op) {
 			return beginDispatch(op);
+		}
+
+		@Override
+		protected boolean claimDispatchOwnership(final Operation<DataItem> op) {
+			return Thread.currentThread() == testThread && super.claimDispatchOwnership(op);
 		}
 	}
 
