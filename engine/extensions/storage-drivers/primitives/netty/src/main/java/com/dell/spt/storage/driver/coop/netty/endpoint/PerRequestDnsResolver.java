@@ -31,6 +31,9 @@ import java.util.concurrent.TimeUnit;
  * queried in the given order, starting with the first on every lookup; a truncated UDP answer is
  * retried over TCP with the same server. Each lookup has a total deadline, and the per-query
  * timeout divides it across the servers so ordered failover fits inside that deadline.
+ *
+ * <p>The exception is {@code localhost} and any name under {@code .localhost}: Netty resolves
+ * these to the loopback address itself, without a DNS query (RFC 6761).
  */
 public final class PerRequestDnsResolver implements AutoCloseable {
 

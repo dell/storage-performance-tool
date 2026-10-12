@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.dell.spt.storage.driver.coop.netty.endpoint.DnsLookupException.Kind;
 import com.dell.spt.storage.driver.coop.netty.endpoint.ScriptedDnsServer.Received;
@@ -17,6 +18,7 @@ import com.dell.spt.storage.driver.coop.netty.endpoint.ScriptedDnsServer.Reply;
 import io.netty.handler.codec.dns.DnsRecordType;
 import io.netty.handler.codec.dns.DnsResponseCode;
 import io.netty.handler.codec.dns.DnsSection;
+import io.netty.resolver.HostsFileParser;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import io.netty.util.concurrent.Future;
 import java.net.InetAddress;
@@ -90,11 +92,27 @@ class PerRequestDnsResolverTest {
 
 	@Test
 	void hostsFileIsIgnored() throws Exception {
+		// localhost names cannot prove this: Netty answers them itself, not from the hosts file
+		final var mapped = HostsFileParser.parse().inet4Entries().keySet().stream()
+						.filter(name -> !name.equals("localhost") && !name.endsWith(".localhost"))
+						.findFirst();
+		assumeTrue(mapped.isPresent(), "the hosts file maps no IPv4 name other than localhost");
 		final var dns = server(q -> Reply.answers(q.name(), "10.9.9.9"));
-		final var resolver = resolver("localhost", TIMEOUT_MILLIS, dns);
+		final var resolver = resolver(mapped.get(), TIMEOUT_MILLIS, dns);
 
 		assertEquals("10.9.9.9", await(resolver.resolve()).getHostAddress());
 		assertEquals(1, dns.count(UDP));
+	}
+
+	@Test
+	void localhostNamesResolveToLoopbackWithoutDns() throws Exception {
+		final var dns = server(q -> Reply.answers(q.name(), "10.9.9.9"));
+
+		for (final var name : List.of("localhost", "s3.localhost")) {
+			final var resolver = resolver(name, TIMEOUT_MILLIS, dns);
+			assertEquals("127.0.0.1", await(resolver.resolve()).getHostAddress());
+		}
+		assertEquals(0, dns.count(UDP));
 	}
 
 	@Test
