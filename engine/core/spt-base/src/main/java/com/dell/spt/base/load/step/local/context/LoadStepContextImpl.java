@@ -57,6 +57,7 @@ import com.dell.spt.base.load.step.local.context.range.RangeReadRuntime;
 import com.dell.spt.base.storage.driver.range.RangeReadDriverSupport;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.base.storage.driver.StorageDriver;
@@ -495,6 +496,12 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 								(java.util.function.Supplier<DeleteMetricsSnapshot>) this::deleteMetricsSnapshot);
 				operationLifecycle.dispatchObserver(this::recordStandaloneDeleteDispatch);
 				operationLifecycle.terminalObserver(this::recordStandaloneDeleteTerminal);
+			}
+			// One driver, one carrier: only the step's primary metrics context reports it.
+			if (this.metricsCtx != null) {
+				this.metricsCtx.metadata().put(
+								com.dell.spt.base.metrics.MetricsConstants.METADATA_DRIVER_STATS,
+								(java.util.function.Supplier<DriverStatsSnapshot>) this.driver::driverStats);
 			}
 			this.driver.operationResultOutput(rangeRuntime == null ? this
 							: rangeRuntime.bind(

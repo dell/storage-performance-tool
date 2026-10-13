@@ -19,6 +19,8 @@ public interface MetricsConstants {
 	String METRIC_NAME_STEP_COMPLETION = "step_completion_percent";
 	String METRIC_NAME_DELETE_DETAIL_EXPECTED = "delete_detail_expected";
 	String METRIC_NAME_CONTRIBUTORS_PRESENT = "contributors_present";
+	/** JSON field holding the statistics a storage driver reports about itself. */
+	String METRIC_NAME_DRIVER_STATS = "driver_stats";
 
 	/** Unit for logical DELETE API request and batch counters. */
 	String DELETE_REQUEST_UNIT = "logical_api_requests";
@@ -105,6 +107,8 @@ public interface MetricsConstants {
 	String METADATA_LIST_SHARD_METRICS = "list_shard_metrics";
 	/** Metadata key for the optional detailed DELETE metrics snapshot. */
 	String METADATA_DELETE_METRICS = "delete_metrics";
+	/** Metadata key for the optional supplier of the storage driver's own statistics. */
+	String METADATA_DRIVER_STATS = "driver_stats";
 	/** Metadata key for the controller-owned DELETE failure-budget outcome. */
 	String METADATA_DELETE_FAILURE_OUTCOME = "delete_failure_outcome";
 	//

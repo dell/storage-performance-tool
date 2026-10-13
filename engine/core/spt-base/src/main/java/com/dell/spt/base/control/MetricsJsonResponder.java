@@ -19,6 +19,7 @@ import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -329,6 +330,23 @@ final class MetricsJsonResponder {
 		concurrency.put("mean", snapshot.concurrencySnapshot().mean());
 		jsonObj.set("concurrency", concurrency);
 		addDeleteMetrics(jsonObj, snapshot.deleteMetrics(), snapshot.latencySnapshot(), snapshot.durationSnapshot());
+		addDriverStats(jsonObj, snapshot.driverStats());
+	}
+
+	/** Adds the storage driver's own statistics; a driver that reports none adds no field. */
+	private void addDriverStats(final ObjectNode jsonObj, final DriverStatsSnapshot stats) {
+		if (stats == null) {
+			return;
+		}
+		final ObjectNode driverStats = objectMapper.createObjectNode();
+		driverStats.put("driver", stats.driver());
+		final ObjectNode counters = objectMapper.createObjectNode();
+		stats.counters().forEach(counters::put);
+		driverStats.set("counters", counters);
+		final ObjectNode gauges = objectMapper.createObjectNode();
+		stats.gauges().forEach(gauges::put);
+		driverStats.set("gauges", gauges);
+		jsonObj.set(MetricsConstants.METRIC_NAME_DRIVER_STATS, driverStats);
 	}
 
 	private static void addDeleteDetailExpectation(

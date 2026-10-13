@@ -18,6 +18,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
+import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
 import com.dell.spt.base.concurrent.AsyncRunnable;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.confuse.Config;
@@ -75,6 +76,18 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 
 	default boolean metadataIntegrityEnabled() {
 		return false;
+	}
+
+	/**
+	 * Returns the counts and levels this driver keeps about itself, or {@code null} when it keeps
+	 * none.
+	 *
+	 * <p>Metrics threads call this at any time, also while the driver closes and afterwards. An
+	 * implementation must not block on the per-operation route and must not use resources that
+	 * close releases.
+	 */
+	default DriverStatsSnapshot driverStats() {
+		return null;
 	}
 
 	/** Returns whether this driver explicitly handles first-class standalone DELETE requests. */

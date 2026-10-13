@@ -33,6 +33,11 @@ public interface AllMetricsSnapshot extends Serializable {
 		return null;
 	}
 
+	/** Optional statistics of the storage driver; null when the driver reports none. */
+	default DriverStatsSnapshot driverStats() {
+		return null;
+	}
+
 	/** Returns the duration of the measurement window in milliseconds. */
 	long elapsedTimeMillis();
 }

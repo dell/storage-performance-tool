@@ -13,6 +13,7 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 	private final RateMetricSnapshot successSnapshot;
 	private final RateMetricSnapshot bytesSnapshot;
 	private final DeleteMetricsSnapshot deleteMetrics;
+	private final DriverStatsSnapshot driverStats;
 	protected final long elapsedTimeMillis;
 
 	public AllMetricsSnapshotImpl(
@@ -104,6 +105,47 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 					final RateMetricSnapshot bytesSnapshot,
 					final long elapsedTimeMillis,
 					final DeleteMetricsSnapshot deleteMetrics) {
+		this(
+						durSnapshot,
+						latSnapshot,
+						ttfbSnapshot,
+						actualConcurrencySnapshot,
+						failsSnapshot,
+						corruptSnapshot,
+						successSnapshot,
+						bytesSnapshot,
+						elapsedTimeMillis,
+						deleteMetrics,
+						null);
+	}
+
+	/**
+	 * Creates a complete snapshot including the optional storage driver statistics.
+	 *
+	 * @param durSnapshot request-duration distribution
+	 * @param latSnapshot request-latency distribution
+	 * @param ttfbSnapshot time-to-first-byte distribution
+	 * @param actualConcurrencySnapshot observed concurrency
+	 * @param failsSnapshot failed-operation rate
+	 * @param corruptSnapshot corrupt-operation rate
+	 * @param successSnapshot successful-operation rate
+	 * @param bytesSnapshot transferred-byte rate
+	 * @param elapsedTimeMillis elapsed step time in milliseconds
+	 * @param deleteMetrics optional detailed DELETE metrics
+	 * @param driverStats optional statistics of the storage driver
+	 */
+	public AllMetricsSnapshotImpl(
+					final TimingMetricSnapshot durSnapshot,
+					final TimingMetricSnapshot latSnapshot,
+					final TimingMetricSnapshot ttfbSnapshot,
+					final ConcurrencyMetricSnapshot actualConcurrencySnapshot,
+					final RateMetricSnapshot failsSnapshot,
+					final RateMetricSnapshot corruptSnapshot,
+					final RateMetricSnapshot successSnapshot,
+					final RateMetricSnapshot bytesSnapshot,
+					final long elapsedTimeMillis,
+					final DeleteMetricsSnapshot deleteMetrics,
+					final DriverStatsSnapshot driverStats) {
 		this.durSnapshot = durSnapshot;
 		this.latSnapshot = latSnapshot;
 		this.ttfbSnapshot = ttfbSnapshot;
@@ -114,6 +156,7 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 		this.bytesSnapshot = bytesSnapshot;
 		this.elapsedTimeMillis = elapsedTimeMillis;
 		this.deleteMetrics = deleteMetrics;
+		this.driverStats = driverStats;
 	}
 
 	@Override
@@ -159,6 +202,11 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 	@Override
 	public DeleteMetricsSnapshot deleteMetrics() {
 		return deleteMetrics;
+	}
+
+	@Override
+	public DriverStatsSnapshot driverStats() {
+		return driverStats;
 	}
 
 	@Override

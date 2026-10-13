@@ -12,6 +12,7 @@ import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
 import com.dell.spt.storage.driver.coop.netty.http.s3.S3StorageDriver;
 import com.github.akurilov.confuse.Config;
 
@@ -1020,6 +1021,16 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 						bufferPool == null ? ", bufferPool=disabled" : ", " + bufferPool.summary());
 		rdmaTransport.close();
 		super.doClose();
+	}
+
+	/**
+	 * Reports the data path and buffer pool counts. Reads counters only: it takes no lock that the
+	 * per-operation route takes and makes no native call, so it is safe while the driver closes and
+	 * afterwards.
+	 */
+	@Override
+	public DriverStatsSnapshot driverStats() {
+		return RdmaDriverStats.snapshot(pathStats, bufferPool, rdmaTransport.isAvailable());
 	}
 
 	RdmaPathStats pathStats() {

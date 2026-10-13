@@ -27,6 +27,11 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.metrics.MetricsConstants;
+import com.dell.spt.base.metrics.context.MetricsContext;
+import com.dell.spt.base.metrics.context.MetricsContextImpl;
+import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshotImpl;
+import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
 import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.commons.collection.TreeUtil;
 import com.github.akurilov.commons.io.Input;
@@ -60,6 +65,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -659,6 +665,83 @@ final class S3RdmaReplyLoopbackTest {
 				responder.join(TimeUnit.SECONDS.toMillis(RESULT_TIMEOUT_SECONDS));
 			}
 		}
+	}
+
+	// ---------- Driver statistics ----------
+
+	@Test
+	void metricsSnapshotCarriesTheCountsOfTheRequestsTheDriverSent() throws Exception {
+		try (final var driver = newDriver(true)) {
+			final MetricsContext<AllMetricsSnapshotImpl> metrics = metricsReporting(driver);
+			try {
+				final ResultOutput output = new ResultOutput();
+				driver.operationResultOutput(output);
+				driver.start();
+				// Two transfers on one pooled buffer, a request the server fails, a payload below the threshold.
+				reply = new Reply(200, "200", null, null, true);
+				assertEquals(Operation.Status.SUCC, complete(driver, output, op(OpType.CREATE, SIZE)).status());
+				assertEquals(Operation.Status.SUCC, complete(driver, output, op(OpType.CREATE, SIZE)).status());
+				reply = new Reply(500, null, null, "<Error><Code>RDMATransferFailed</Code></Error>", false);
+				assertEquals(
+								Operation.Status.RESP_FAIL_SVC, complete(driver, output, op(OpType.CREATE, SIZE)).status());
+				reply = new Reply(200, null, null, null, false);
+				assertEquals(
+								Operation.Status.SUCC, complete(driver, output, op(OpType.CREATE, THRESHOLD - 1)).status());
+
+				metrics.refreshLastSnapshot(true);
+				final DriverStatsSnapshot stats = metrics.lastSnapshot().driverStats();
+
+				assertEquals("s3-rdma", stats.driver());
+				assertEquals(2L, stats.counters().get("rdma_transferred"));
+				assertEquals(1L, stats.counters().get("rdma_request_failed"));
+				assertEquals(1L, stats.counters().get("http_below_threshold"));
+				assertEquals(1L, stats.counters().get("registrations_pooled"));
+				assertEquals(2L, stats.counters().get("pool_hits"));
+				assertEquals(0L, stats.counters().get("http_fallback"));
+				assertEquals(0L, stats.counters().get("prepare_failed"));
+				assertEquals(1L, stats.gauges().get("drivers"));
+				assertEquals(1L, stats.gauges().get("transport_available"));
+				// Name by name, the snapshot holds the driver's own counts.
+				assertEquals(driver.pathStats().rdmaTransferred.sum(), stats.counters().get("rdma_transferred"));
+				assertEquals(driver.pathStats().rdmaHttpError.sum(), stats.counters().get("rdma_request_failed"));
+				assertEquals(driver.pathStats().httpBelowThreshold.sum(), stats.counters().get("http_below_threshold"));
+				assertEquals(driver.bufferPool().created.sum(), stats.counters().get("registrations_pooled"));
+				assertEquals(driver.bufferPool().hits.sum(), stats.counters().get("pool_hits"));
+				assertEquals(driver.driverStats(), stats);
+			} finally {
+				metrics.close();
+			}
+		}
+	}
+
+	/** A metrics context that reports the driver as a step's context does. */
+	@SuppressWarnings("unchecked")
+	private static MetricsContext<AllMetricsSnapshotImpl> metricsReporting(final S3RdmaStorageDriver<?, ?> driver) {
+		final MetricsContext<AllMetricsSnapshotImpl> metrics = MetricsContextImpl.builder()
+						.loadStepId(STEP_ID)
+						.runId(1L)
+						.opType(OpType.CREATE)
+						.concurrencyLimit(1)
+						.concurrencyThreshold(0)
+						.itemDataSize(new SizeInBytes(SIZE))
+						.stdOutColorFlag(false)
+						.outputPeriodSec(1)
+						.actualConcurrencyGauge(() -> 0)
+						.build();
+		metrics.metadata().put(
+						MetricsConstants.METADATA_DRIVER_STATS, (Supplier<DriverStatsSnapshot>) driver::driverStats);
+		metrics.start();
+		return metrics;
+	}
+
+	private static Operation<DataItem> complete(
+					final S3RdmaStorageDriver<DataItem, Operation<DataItem>> driver,
+					final ResultOutput output,
+					final Operation<DataItem> operation) throws Exception {
+		assertTrue(driver.put(operation));
+		final Operation<DataItem> result = output.await();
+		assertNotNull(result, "operation did not complete");
+		return result;
 	}
 
 	// ---------- PUT payload copy ----------
