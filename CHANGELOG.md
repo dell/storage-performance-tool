@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.16.0] - 2026-10-13
+
 ### Added
 
 - **S3 region selection** — Added `spt run --region` and engine YAML `storage.region` support to explicitly select the AWS region for S3 requests. Omitting the setting preserves each driver’s existing region selection.
@@ -13,7 +15,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - **Automatic RDMA local address** — When `--rdma-local-ip` is not set and `--rdma-device` is `auto`, each worker now selects the local address it routes toward the first S3 endpoint for RoCE GID selection, so distributed runs no longer need one shared address. Leave the flag unset for multi-host runs; a named `--rdma-device` keeps device selection authoritative.
 - **S3-RDMA payload copy threads** — Added `spt run --rdma-copy-threads` (env `RDMA_COPY_THREADS`, engine `storage.rdma.copyThreads`) to copy each RDMA PUT payload of 2 MiB or more into its buffer on several threads instead of on the driver's dispatcher thread alone. The default of 1 keeps the previous behavior.
 - **Legacy RDMA byte-count option** — Added `spt run --rdma-allow-missing-bytes-header` (env `RDMA_ALLOW_MISSING_BYTES_HEADER`, engine `storage.rdma.allowMissingBytesHeader`) for servers that report RDMA GET success without `x-amz-rdma-bytes-transferred`; it counts the requested size instead of failing the read.
-
 - **S3 endpoint selection** — Added opt-in `--endpoint-selection` for the Netty S3 driver to choose the connect destination of every request attempt: `round-robin` over the `--endpoints` addresses, or `per-request-dns`, a fresh DNS lookup of the endpoint hostname. The default mode is unchanged; see `cli/docs/ENDPOINT_SELECTION.md`.
 
 ### Changed
@@ -31,9 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - **S3-RDMA fallback setting** — With `--rdma-fallback` disabled, RDMA buffer-registration or token failures now fail the operation instead of silently sending it over HTTP.
 - **S3-RDMA fallback payload** — With `--rdma-fallback`, a PUT whose RDMA preparation failed after its payload was copied (for example, when no RDMA token could be generated) was sent over HTTP without its body and failed. The fallback request now carries the whole payload, and the same failure with `--rdma-fallback` disabled no longer reports the object's bytes as written.
 - **Partial-read retries at stop** — A partial read whose retry had not yet sent its request when a run stopped now delivers its earlier failure exactly once. Previously, the failure was counted but its result was never delivered, and the run ended with “Range result delivery failed.”
-
 - **DELETE failure-budget reporting** — Duration-based DELETE runs now propagate a failure-budget exception consistently when the budget is exceeded during worker startup, matching failures detected during active waiting.
-
 - **Composite expression evaluation** — Give each expression segment its own evaluation context to prevent intermittent method-resolution failures when synchronous and asynchronous segments run together.
 
 - **Write prefixes and saved manifests** — `spt run write` now honors `--prefix` before any shard directories, preserving complete object keys in saved manifests for subsequent reads and cleanup. Combining `--save-items` with `--cleanup` retains the manifest after object deletion. Workloads that do not support `--prefix` now reject it explicitly instead of silently ignoring it.
