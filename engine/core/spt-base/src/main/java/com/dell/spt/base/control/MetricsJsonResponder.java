@@ -774,6 +774,7 @@ final class MetricsJsonResponder {
 							MetricsConstants.METRIC_NAME_DELETE_DETAIL_EXPECTED,
 							entry.deleteDetailsExpected);
 			addDeleteMetrics(jsonObj, entry.deleteMetrics, entry.latencySnapshot, entry.durationSnapshot);
+			addDriverStats(jsonObj, entry.driverStats);
 
 			if (verbose) {
 				jsonObj.put("diag_cached_progress", true);

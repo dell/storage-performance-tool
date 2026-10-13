@@ -3,6 +3,7 @@ package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 import static com.dell.spt.base.Constants.APP_NAME;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -12,6 +13,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 
+import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.InitialConfigSchemaProvider;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
@@ -27,7 +29,10 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsConstants;
+import com.dell.spt.base.metrics.MetricsManagerImpl;
+import com.dell.spt.base.metrics.TerminalStepEntry;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshotImpl;
@@ -50,12 +55,15 @@ import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HexFormat;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -66,7 +74,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -711,6 +726,160 @@ final class S3RdmaReplyLoopbackTest {
 			} finally {
 				metrics.close();
 			}
+		}
+	}
+
+	/** The fields of the driver's close summary, each with the counter that holds the same count. */
+	private static final Map<String, String> CLOSE_SUMMARY_COUNTERS = Map.ofEntries(
+					Map.entry("rdmaTransferred", "rdma_transferred"),
+					Map.entry("bytesAssumed", "rdma_bytes_assumed"),
+					Map.entry("rdmaHttpError", "rdma_request_failed"),
+					Map.entry("rdmaProtocolError", "rdma_protocol_error"),
+					Map.entry("rdmaTimedOut", "rdma_timed_out"),
+					Map.entry("httpRdmaUnavailable", "http_rdma_unavailable"),
+					Map.entry("httpBelowThreshold", "http_below_threshold"),
+					Map.entry("httpIneligible", "http_ineligible"),
+					Map.entry("httpOversize", "http_oversize"),
+					Map.entry("httpFallback", "http_fallback"),
+					Map.entry("prepareFailed", "prepare_failed"),
+					Map.entry("poolHits", "pool_hits"),
+					Map.entry("poolCreated", "registrations_pooled"),
+					Map.entry("poolExhausted", "pool_exhausted"),
+					Map.entry("poolUnpooled", "pool_oversize"),
+					Map.entry("poolEvicted", "pool_evicted"),
+					Map.entry("poolDiscarded", "pool_discarded"),
+					Map.entry("poolInvalidReturns", "pool_invalid_returns"));
+	/** Close summary fields that no counter holds yet. */
+	private static final List<String> CLOSE_SUMMARY_ONLY = List.of("rdmaDeclined");
+	private static final String CLOSE_SUMMARY = "RDMA data path summary";
+
+	@Test
+	void finishedStepKeepsTheCountsOfItsStoppedDriverAndTheyMatchTheCloseSummary() throws Exception {
+		final MetricsManagerImpl mgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+		mgr.setTerminalRetentionMillis(TimeUnit.MINUTES.toMillis(1));
+		final DriverStatsSnapshot kept;
+		final DriverStatsSnapshot afterClose;
+		final int idleBuffersWhenStopped;
+		final String closeSummary;
+		try (final MessageLog log = new MessageLog()) {
+			final var driver = newDriver(true);
+			final MetricsContext<AllMetricsSnapshotImpl> metrics = metricsReporting(driver);
+			try (driver) {
+				mgr.register(metrics);
+				final ResultOutput output = new ResultOutput();
+				driver.operationResultOutput(output);
+				driver.start();
+				// A registration failure sent over HTTP, a request the server never answers, two transfers
+				// on one pooled buffer, a request the server fails, a payload below the threshold.
+				reply = new Reply(200, null, null, null, false);
+				transport.setFailAfterNRegistrations(0);
+				assertEquals(Operation.Status.SUCC, complete(driver, output, op(OpType.CREATE, SIZE)).status());
+				transport.setFailAfterNRegistrations(-1);
+				reply = new Reply(NO_RESPONSE, null, null, null, false);
+				assertTrue(complete(driver, output, op(OpType.CREATE, SIZE)).status() != Operation.Status.SUCC);
+				reply = new Reply(200, "200", null, null, true);
+				assertEquals(Operation.Status.SUCC, complete(driver, output, op(OpType.CREATE, SIZE)).status());
+				assertEquals(Operation.Status.SUCC, complete(driver, output, op(OpType.CREATE, SIZE)).status());
+				reply = new Reply(500, null, null, "<Error><Code>RDMATransferFailed</Code></Error>", false);
+				assertEquals(
+								Operation.Status.RESP_FAIL_SVC, complete(driver, output, op(OpType.CREATE, SIZE)).status());
+				reply = new Reply(200, null, null, null, false);
+				assertEquals(
+								Operation.Status.SUCC, complete(driver, output, op(OpType.CREATE, THRESHOLD - 1)).status());
+
+				// The step stops its driver, then its metrics context leaves the metrics manager.
+				driver.stop();
+				mgr.unregister(metrics);
+
+				final List<TerminalStepEntry> entries = mgr.getTerminalSteps();
+				assertEquals(1, entries.size(), entries.toString());
+				kept = entries.get(0).driverStats;
+				assertEquals(driver.driverStats(), kept, "the values of the stopped driver");
+				idleBuffersWhenStopped = driver.bufferPool().idleBuffers();
+			} finally {
+				metrics.close();
+			}
+			afterClose = driver.driverStats();
+			closeSummary = log.only(CLOSE_SUMMARY);
+		}
+
+		assertEquals(2L, kept.counters().get("rdma_transferred"), closeSummary);
+		assertEquals(2L, kept.counters().get("rdma_request_failed"), "the unanswered and the failed: " + closeSummary);
+		assertEquals(1L, kept.counters().get("http_below_threshold"), closeSummary);
+		assertEquals(1L, kept.counters().get("http_fallback"), closeSummary);
+		assertEquals(1L, kept.counters().get("pool_discarded"), "the buffer of the unanswered: " + closeSummary);
+		// Every request had its outcome when the step stopped, so closing the driver changed no count:
+		// field by field, the close summary shows what the step kept.
+		final Map<String, Long> summary = summaryFields(closeSummary);
+		final Map<String, Long> summaryAsCounters = new TreeMap<>();
+		CLOSE_SUMMARY_COUNTERS.forEach((field, counter) -> summaryAsCounters.put(counter, summary.get(field)));
+		assertEquals(summaryAsCounters, kept.counters(), closeSummary);
+		final List<String> otherFields = new ArrayList<>(summary.keySet());
+		otherFields.removeAll(CLOSE_SUMMARY_COUNTERS.keySet());
+		assertEquals(CLOSE_SUMMARY_ONLY, otherFields, closeSummary);
+		assertEquals(kept.counters(), afterClose.counters());
+		// Closing drained an idle buffer; that is no discard.
+		assertEquals(1, idleBuffersWhenStopped);
+		// The gauges are those of the driver before it closed.
+		assertTrue(closeSummary.contains("(transport available)"), closeSummary);
+		assertEquals(1L, kept.gauges().get("transport_available"));
+		assertEquals(0L, afterClose.gauges().get("transport_available"));
+	}
+
+	/** The {@code name=count} fields of a close summary, by name. */
+	private static Map<String, Long> summaryFields(final String closeSummary) {
+		final Map<String, Long> fields = new TreeMap<>();
+		final Matcher field = Pattern.compile("(\\w+)=(\\d+)").matcher(closeSummary);
+		while (field.find()) {
+			assertNull(fields.put(field.group(1), Long.parseLong(field.group(2))), closeSummary);
+		}
+		return fields;
+	}
+
+	/**
+	 * Collects the records of the engine's message logger. The logger is asynchronous, so a read
+	 * first sends a marker through it and waits for the marker.
+	 */
+	private static final class MessageLog extends AbstractAppender implements AutoCloseable {
+
+		private static final String MARKER = "s3-rdma-loopback-test-marker";
+		private final List<String> captured = Collections.synchronizedList(new ArrayList<>());
+		private final org.apache.logging.log4j.core.Logger logger = LoggerContext.getContext(false).getLogger(Loggers.MSG.getName());
+		private final Level previousLevel = logger.getLevel();
+
+		MessageLog() {
+			super("s3RdmaLoopbackMessageLog", null, null, true, Property.EMPTY_ARRAY);
+			start();
+			logger.addAppender(this);
+			logger.setLevel(Level.INFO);
+		}
+
+		@Override
+		public void append(final LogEvent event) {
+			captured.add(event.getMessage().getFormattedMessage());
+		}
+
+		/** The one record that contains the text. */
+		String only(final String text) throws InterruptedException {
+			Loggers.MSG.warn(MARKER);
+			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+			while (!captured.contains(MARKER)) {
+				assertFalse(System.nanoTime() > deadline, "log marker did not arrive: " + captured);
+				Thread.sleep(5);
+			}
+			final List<String> matching;
+			synchronized (captured) {
+				matching = captured.stream().filter(message -> message.contains(text)).toList();
+			}
+			assertEquals(1, matching.size(), captured.toString());
+			return matching.get(0);
+		}
+
+		@Override
+		public void close() {
+			logger.removeAppender(this);
+			logger.setLevel(previousLevel);
+			stop();
 		}
 	}
 

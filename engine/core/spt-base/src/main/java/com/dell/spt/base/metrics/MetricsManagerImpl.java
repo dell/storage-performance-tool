@@ -24,6 +24,7 @@ import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.dell.spt.base.metrics.util.PrometheusMetricsExporter;
 import com.dell.spt.base.metrics.util.PrometheusMetricsExporterImpl;
@@ -315,14 +316,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 						}
 					} else {
 						// Cache terminal entry for JSON endpoint for local (non-distributed) contexts
-						if (snapshot != null
-										&& snapshot.successSnapshot() != null
-										&& snapshot.failsSnapshot() != null
-										&& snapshot.byteSnapshot() != null
-										&& snapshot.latencySnapshot() != null
-										&& snapshot.durationSnapshot() != null
-										&& snapshot.concurrencySnapshot() != null
-										&& hasProgress(snapshot)) {
+						if (hasAllParts(snapshot) && hasProgress(snapshot)) {
 							terminalEntry = buildEntryFromSnapshot(
 											metricsCtx,
 											snapshot,
@@ -341,6 +335,12 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 							final TerminalStepEntry lastProgressEntry = lastProgressByStepId.get(progressKey);
 							if (lastProgressEntry != null) {
 								terminalByStepId.put(progressKey, lastProgressEntry);
+							} else if (!distributedEntry && hasAllParts(snapshot) && driverActive(snapshot.driverStats())) {
+								// Nothing completed, but the driver did work: keep what it counted.
+								terminalByStepId.put(
+												progressKey,
+												buildEntryFromSnapshot(
+																metricsCtx, snapshot, false, 0, List.of(), List.of(), false));
 							}
 						}
 					}
@@ -481,13 +481,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	}
 
 	private void recordProgressSnapshot(final MetricsContext metricsCtx, final AllMetricsSnapshot snapshot) {
-		if (snapshot == null
-						|| snapshot.successSnapshot() == null
-						|| snapshot.failsSnapshot() == null
-						|| snapshot.byteSnapshot() == null
-						|| snapshot.latencySnapshot() == null
-						|| snapshot.durationSnapshot() == null
-						|| snapshot.concurrencySnapshot() == null) {
+		if (!hasAllParts(snapshot)) {
 			return;
 		}
 
@@ -579,7 +573,8 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 						snapshot.deleteMetrics(),
 						metricsCtx.metadata() != null
 										&& metricsCtx.metadata().containsKey(MetricsConstants.METADATA_DELETE_METRICS),
-						metricsCtx.metadata() == null ? null : (String) metricsCtx.metadata().get(MetricsConstants.METADATA_CLUSTER_ID));
+						metricsCtx.metadata() == null ? null : (String) metricsCtx.metadata().get(MetricsConstants.METADATA_CLUSTER_ID),
+						snapshot.driverStats());
 	}
 
 	private long extractLongMetadata(final Map metadata, final String key) {
@@ -655,6 +650,17 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		return corruptSnapshot == null ? 0L : corruptSnapshot.count();
 	}
 
+	/** Whether the snapshot has every part a terminal entry is built from. */
+	private static boolean hasAllParts(final AllMetricsSnapshot snapshot) {
+		return snapshot != null
+						&& snapshot.successSnapshot() != null
+						&& snapshot.failsSnapshot() != null
+						&& snapshot.byteSnapshot() != null
+						&& snapshot.latencySnapshot() != null
+						&& snapshot.durationSnapshot() != null
+						&& snapshot.concurrencySnapshot() != null;
+	}
+
 	private static boolean hasProgress(final AllMetricsSnapshot snapshot) {
 		if (snapshot == null) {
 			return false;
@@ -672,6 +678,22 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 
 	private static long deleteProgress(final AllMetricsSnapshot snapshot) {
 		return snapshot == null ? 0 : deleteProgress(snapshot.deleteMetrics());
+	}
+
+	/**
+	 * A storage driver that counted anything did work in the step, even when no operation
+	 * completed. Gauges are not work: they describe a level.
+	 */
+	private static boolean driverActive(final DriverStatsSnapshot stats) {
+		if (stats == null) {
+			return false;
+		}
+		for (final long count : stats.counters().values()) {
+			if (count > 0) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private static long deleteProgress(final DeleteMetricsSnapshot snapshot) {

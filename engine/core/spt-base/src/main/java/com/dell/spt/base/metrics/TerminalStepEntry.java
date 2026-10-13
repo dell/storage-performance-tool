@@ -2,6 +2,7 @@ package com.dell.spt.base.metrics;
 
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import java.util.List;
 
@@ -39,6 +40,8 @@ public final class TerminalStepEntry {
 	public final DeleteMetricsSnapshot deleteMetrics;
 	/** Whether this step opted in to the standalone detailed DELETE contract. */
 	public final boolean deleteDetailsExpected;
+	/** The storage driver's own statistics at the end of the step; null when it reports none. */
+	public final DriverStatsSnapshot driverStats;
 
 	public TerminalStepEntry(
 					String stepId,
@@ -341,7 +344,10 @@ public final class TerminalStepEntry {
 		this(stepId, opType, runId, recordedAtMillis, successCount, failedCount, corruptCount, bytesTotal, latencyMeanUs, durationMeanUs, latencySnapshot, durationSnapshot, ttfbSnapshot, concurrencyLast, concurrencyMean, countLimit, timeLimitSec, elapsedTimeMillis, distributed, nodeCount, nodesPresent, contributorsPresent, partial, deleteMetrics, deleteDetailsExpected, null);
 	}
 
-	/** Creates a terminal entry retaining the effective run cluster identity. */
+	/**
+	 * Compatibility constructor for extensions compiled before storage driver statistics were
+	 * retained. Delegates to the full constructor without statistics.
+	 */
 	public TerminalStepEntry(
 					String stepId,
 					OpType opType,
@@ -369,6 +375,38 @@ public final class TerminalStepEntry {
 					DeleteMetricsSnapshot deleteMetrics,
 					boolean deleteDetailsExpected,
 					String clusterId) {
+		this(stepId, opType, runId, recordedAtMillis, successCount, failedCount, corruptCount, bytesTotal, latencyMeanUs, durationMeanUs, latencySnapshot, durationSnapshot, ttfbSnapshot, concurrencyLast, concurrencyMean, countLimit, timeLimitSec, elapsedTimeMillis, distributed, nodeCount, nodesPresent, contributorsPresent, partial, deleteMetrics, deleteDetailsExpected, clusterId, null);
+	}
+
+	/** Creates a terminal entry retaining the storage driver's own statistics. */
+	public TerminalStepEntry(
+					String stepId,
+					OpType opType,
+					long runId,
+					long recordedAtMillis,
+					long successCount,
+					long failedCount,
+					long corruptCount,
+					long bytesTotal,
+					double latencyMeanUs,
+					double durationMeanUs,
+					TimingMetricSnapshot latencySnapshot,
+					TimingMetricSnapshot durationSnapshot,
+					TimingMetricSnapshot ttfbSnapshot,
+					long concurrencyLast,
+					double concurrencyMean,
+					long countLimit,
+					long timeLimitSec,
+					long elapsedTimeMillis,
+					boolean distributed,
+					int nodeCount,
+					List<String> nodesPresent,
+					List<String> contributorsPresent,
+					boolean partial,
+					DeleteMetricsSnapshot deleteMetrics,
+					boolean deleteDetailsExpected,
+					String clusterId,
+					DriverStatsSnapshot driverStats) {
 		this.stepId = stepId;
 		this.opType = opType;
 		this.runId = runId;
@@ -395,6 +433,7 @@ public final class TerminalStepEntry {
 		this.partial = partial;
 		this.deleteMetrics = deleteMetrics;
 		this.deleteDetailsExpected = deleteDetailsExpected;
+		this.driverStats = driverStats;
 	}
 
 	TerminalStepEntry withDeleteFailureOutcome(final String outcome) {
@@ -426,7 +465,7 @@ public final class TerminalStepEntry {
 						contributorsPresent,
 						partial,
 						deleteMetrics.toBuilder().failureOutcome(outcome).build(),
-						deleteDetailsExpected, clusterId);
+						deleteDetailsExpected, clusterId, driverStats);
 	}
 
 	public TerminalStepEntry(

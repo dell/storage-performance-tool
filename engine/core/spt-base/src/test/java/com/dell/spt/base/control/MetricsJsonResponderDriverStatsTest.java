@@ -2,19 +2,23 @@ package com.dell.spt.base.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshotImpl;
 import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
 import com.dell.spt.base.storage.driver.mock.StatsReportingDriverMock;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import java.util.ArrayList;
@@ -73,6 +77,86 @@ class MetricsJsonResponderDriverStatsTest {
 		assertFalse(withoutSupplier.has(MetricsConstants.METRIC_NAME_DRIVER_STATS));
 		assertFalse(reportingNothing.has(MetricsConstants.METRIC_NAME_DRIVER_STATS));
 		assertEquals(fieldNames(withoutSupplier), fieldNames(reportingNothing));
+	}
+
+	@Test
+	void terminalNodeRowCarriesTheStatisticsTheStepKept() {
+		final MetricsContext<AllMetricsSnapshotImpl> ctx = context("stats-step", () -> StatsReportingDriverMock.stats(41, 0, 7));
+		ctx.markSucc(4096, 1_000, 100);
+		final JsonNode live = nodeRow(ctx).get(MetricsConstants.METRIC_NAME_DRIVER_STATS);
+
+		final JsonNode row = onlyRow(finished(ctx));
+
+		assertTrue(row.get("terminal").asBoolean());
+		assertEquals(live, row.get(MetricsConstants.METRIC_NAME_DRIVER_STATS), "the same object as on the live row");
+		assertEquals(List.of("driver", "counters", "gauges"), fieldNames(row.get(MetricsConstants.METRIC_NAME_DRIVER_STATS)));
+	}
+
+	@Test
+	void terminalNodeRowOfAStepInWhichNothingCompletedCarriesTheStatistics() {
+		final MetricsContext<AllMetricsSnapshotImpl> ctx = context("stats-step", () -> StatsReportingDriverMock.stats(2, 5, 7));
+
+		final JsonNode row = onlyRow(finished(ctx));
+
+		assertTrue(row.get("terminal").asBoolean());
+		assertEquals(0, row.get("operations").get("success_count").asLong());
+		final JsonNode counters = row.get(MetricsConstants.METRIC_NAME_DRIVER_STATS).get("counters");
+		assertEquals(2, counters.get(StatsReportingDriverMock.COUNTER_WIDGETS).asLong());
+		assertEquals(5, counters.get(StatsReportingDriverMock.COUNTER_SPROCKETS).asLong());
+	}
+
+	@Test
+	void terminalNodeRowOfADriverWithoutStatisticsIsUnchanged() {
+		final MetricsContext<AllMetricsSnapshotImpl> withoutSupplier = context("plain-step", null);
+		final MetricsContext<AllMetricsSnapshotImpl> reportingNothing = context("plain-step", () -> null);
+		withoutSupplier.markSucc(4096, 1_000, 100);
+		reportingNothing.markSucc(4096, 1_000, 100);
+
+		final JsonNode first = onlyRow(finished(withoutSupplier));
+		final JsonNode second = onlyRow(finished(reportingNothing));
+
+		assertTrue(first.get("terminal").asBoolean());
+		assertFalse(first.has(MetricsConstants.METRIC_NAME_DRIVER_STATS));
+		assertFalse(second.has(MetricsConstants.METRIC_NAME_DRIVER_STATS));
+		assertEquals(fieldNames(first), fieldNames(second));
+	}
+
+	@Test
+	void terminalStatisticsStayReadableForTheLingerTimeAndGoWithTheRow() throws InterruptedException {
+		final MetricsContext<AllMetricsSnapshotImpl> ctx = context("stats-step", () -> StatsReportingDriverMock.stats(41, 0, 7));
+		final MetricsManagerImpl mgr = finished(ctx);
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, config());
+
+		final JsonNode first = onlyRow(responder.buildNodeMetrics(false)).get(MetricsConstants.METRIC_NAME_DRIVER_STATS);
+		final JsonNode again = onlyRow(responder.buildNodeMetrics(false)).get(MetricsConstants.METRIC_NAME_DRIVER_STATS);
+		assertEquals(41, first.get("counters").get(StatsReportingDriverMock.COUNTER_WIDGETS).asLong());
+		assertEquals(first, again);
+
+		// The linger time (api.linger.sec) has passed.
+		mgr.setTerminalRetentionMillis(0);
+		Thread.sleep(5);
+
+		final JsonNode idle = onlyRow(responder.buildNodeMetrics(false));
+		assertFalse(idle.has("terminal"));
+		assertFalse(idle.has(MetricsConstants.METRIC_NAME_DRIVER_STATS));
+	}
+
+	/** A metrics manager in which the context's step has ended. */
+	private static MetricsManagerImpl finished(final MetricsContext<?> ctx) {
+		final MetricsManagerImpl mgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+		mgr.setTerminalRetentionMillis(30_000);
+		mgr.register(ctx);
+		mgr.unregister(ctx);
+		return mgr;
+	}
+
+	private static JsonNode onlyRow(final MetricsManagerImpl mgr) {
+		return onlyRow(new MetricsJsonResponder(mgr, config()).buildNodeMetrics(false));
+	}
+
+	private static JsonNode onlyRow(final ArrayNode rows) {
+		assertEquals(1, rows.size(), rows.toString());
+		return rows.get(0);
 	}
 
 	@SuppressWarnings("unchecked")
