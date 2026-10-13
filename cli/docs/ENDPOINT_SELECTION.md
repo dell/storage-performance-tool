@@ -73,7 +73,7 @@ spt run write \
   --bucket qa-bucket --threads 16 --duration 5m
 ```
 
-- **One lookup per attempt:** each request attempt resolves the hostname again, with no SPT or JVM cache, no hosts-file entries, no search domains and no sharing of concurrent lookups. The first IPv4 answer is used, and the request goes to that address on the endpoint's port.
+- **One lookup per attempt:** each request attempt resolves the hostname again, with no SPT or JVM cache, no hosts-file entries, no search domains and no sharing of concurrent lookups. The first IPv4 answer is used, and the request goes to that address on the endpoint's port. The one exception is `localhost` and any name under `.localhost`, which always resolve to the loopback address without a DNS query.
 - **One connection per attempt:** each attempt uses a new connection and sends `Connection: close`. The client waits up to one second for the server to close the connection, then closes it itself. Letting the server close first keeps TIME_WAIT sockets off the client's ephemeral ports.
 - **Explicit DNS server:** `--dns-server` (`IPv4[:port]`, port 53 by default) sends every query to that server only, with no fallback.
 - **Host DNS configuration:** without `--dns-server`, the name servers in the worker's `/etc/resolv.conf` are queried in order, and a warning is logged when the driver starts. A caching resolver on that path can answer from its cache, so each lookup is not guaranteed to reach the DNS load-balancing service. Inside containers the worker's resolver configuration can differ from the host's.

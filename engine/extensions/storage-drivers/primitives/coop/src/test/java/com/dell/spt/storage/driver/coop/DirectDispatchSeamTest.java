@@ -31,7 +31,7 @@ import org.junit.jupiter.api.Test;
 class DirectDispatchSeamTest {
 
 	/** Refuses every submit so the dispatcher never consumes queued work on its own. */
-	private static final class RefusingDriver
+	private static class RefusingDriver
 					extends CoopStorageDriverMock<DataItem, Operation<DataItem>> {
 		private RefusingDriver(final Config storageConfig) throws Exception {
 			super("direct-dispatch-step", dataInput(), storageConfig, false, 4);
@@ -56,6 +56,16 @@ class DirectDispatchSeamTest {
 		protected int submit(final List<Operation<DataItem>> ops) {
 			return 0;
 		}
+	}
+
+	/** Runs no dispatch task, so work placed on the driver's queues stays there for the caller. */
+	private static final class UndispatchedDriver extends RefusingDriver {
+		private UndispatchedDriver(final Config storageConfig) throws Exception {
+			super(storageConfig);
+		}
+
+		@Override
+		protected void doStart() {}
 	}
 
 	/** Steals the only permit inside its first submit so the dispatcher retains a backlog. */
@@ -167,7 +177,11 @@ class DirectDispatchSeamTest {
 
 	/** Starts a driver whose single permit is held by the caller, as a completing op would hold it. */
 	private CoopStorageDriverBase<DataItem, Operation<DataItem>> startWithPermitHeld() throws Exception {
-		final var started = new RefusingDriver(storageConfig(1));
+		return startWithPermitHeld(new RefusingDriver(storageConfig(1)));
+	}
+
+	private CoopStorageDriverBase<DataItem, Operation<DataItem>> startWithPermitHeld(
+					final RefusingDriver started) throws Exception {
 		final Output<Operation<DataItem>> resultOutput = mock(Output.class);
 		when(resultOutput.put(any(Operation.class))).thenReturn(true);
 		started.operationResultOutput(resultOutput);
@@ -256,12 +270,12 @@ class DirectDispatchSeamTest {
 
 	@Test
 	void refusesWhileChildOperationsArePending() throws Exception {
-		final var driver = startWithPermitHeld();
+		// A live dispatch task may drain the child before this caller polls, and reports it as
+		// backlog only at the end of that iteration; the queued child must be what refuses here
+		final var driver = startWithPermitHeld(new UndispatchedDriver(storageConfig(1)));
 		final var plain = plainOp("plain");
 		assertTrue(driver.put(plain));
-		awaitCondition(
-						() -> driver.operationLifecycle().snapshot().driverQueued() == 1,
-						"operation should be queued while the permit is held");
+		assertEquals(1, driver.operationLifecycle().snapshot().driverQueued());
 		final var child = plainOp("child");
 		assertTrue(driver.operationLifecycle().driverQueued(child));
 		assertTrue(driver.childOpQueue.offer(child));

@@ -295,3 +295,11 @@ tasks.register('testAll') {
 
 // Add aggregate report to standard build verification
 check.dependsOn jacocoRootReport
+
+// Dependency update report: skip the Scala incremental-analysis configurations, which cannot
+// resolve version queries, and offer pre-releases only to dependencies already on one
+def isPreRelease = { String version -> version =~ /(?i)[.-](alpha|beta|rc|cr|m|preview|snapshot)[.\d-]*$/ }
+tasks.named('dependencyUpdates') {
+    filterConfigurations = { !it.name.startsWith('incrementalScalaAnalysis') }
+    rejectVersionIf { isPreRelease(it.candidate.version) && !isPreRelease(it.currentVersion) }
+}
