@@ -302,13 +302,13 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 
 						// Cache terminal entry for JSON endpoint
 						if (terminalEntry != null) {
-							terminalByStepId.put(progressKey, terminalEntry);
+							retainTerminal(progressKey, terminalEntry);
 						}
 					} else {
 						// Cache terminal entry for JSON endpoint for local (non-distributed) contexts
 						if (hasAllParts(snapshot) && hasProgress(snapshot)) {
 							terminalEntry = buildEntry(metricsCtx, snapshot);
-							terminalByStepId.put(progressKey, terminalEntry);
+							retainTerminal(progressKey, terminalEntry);
 						}
 					}
 					if (terminalEntry == null) {
@@ -317,12 +317,12 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 						if (!failedDistributedRefresh) {
 							final TerminalStepEntry lastProgressEntry = lastProgressByStepId.get(progressKey);
 							if (lastProgressEntry != null) {
-								terminalByStepId.put(progressKey, lastProgressEntry);
+								retainTerminal(progressKey, lastProgressEntry);
 							} else if (hasAllParts(snapshot)
 											&& distributedEntry == (snapshot instanceof DistributedAllMetricsSnapshot)
 											&& driverActive(snapshot)) {
 								// Nothing completed, but the driver did work: keep what it counted.
-								terminalByStepId.put(progressKey, buildEntry(metricsCtx, snapshot));
+								retainTerminal(progressKey, buildEntry(metricsCtx, snapshot));
 							}
 						}
 					}
@@ -501,6 +501,15 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 							entry.corruptCount,
 							entry.bytesTotal);
 		}
+	}
+
+	/**
+	 * Retains the entry a metrics context leaves of its finished step, in place of the entry of a
+	 * context of the same step that ended before it. The statistics of the step's storage driver
+	 * stay with the step whichever of its contexts ends last.
+	 */
+	private void retainTerminal(final ProgressKey progressKey, final TerminalStepEntry entry) {
+		terminalByStepId.merge(progressKey, entry, (earlier, latest) -> latest.withDriverStatsOf(earlier));
 	}
 
 	/** Builds the entry of a step from a snapshot of its metrics context: a fleet's or a node's. */

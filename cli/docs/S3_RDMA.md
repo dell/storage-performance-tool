@@ -197,7 +197,7 @@ Every name is always reported. With `--rdma-buffer-pool=false` the pool statisti
 
 ### Reading the metrics JSON
 
-`/metrics/json` on a node returns that node's rows, and `/metrics/fleet/json` on the entry node returns the rows of the whole run. A row of a step whose driver reports statistics carries them in `driver_stats`. A mixed step has several rows, one per operation; one of them carries the object, and it covers the whole step.
+`/metrics/json` on a node returns that node's rows, and `/metrics/fleet/json` on the entry node returns the rows of the whole run. A row of a step whose driver reports statistics carries them in `driver_stats`. A mixed step has several rows, one per operation; one of them carries the object, and it covers the whole step. After the step ends the engine keeps one row for it, and that row carries the object.
 
 ```json
 "driver_stats": {
@@ -218,6 +218,7 @@ When reading these rows:
 - A fleet `transport_available` below `drivers` means some nodes run without RDMA. Their node rows show which, and count their payload requests as `http_rdma_unavailable`.
 - While a step runs, the counters are read one after another and requests complete in between. `rdma_requests_sent` can therefore differ from the sum of its outcomes by the requests in flight, and briefly by a few more in either direction. Compare counters exactly only on a finished step.
 - To find the node behind a fleet problem count, read `/metrics/json` on each node: a node row has the same names and no `reporting` or `partial`.
+- A weighted or pipeline step, which a scenario run with the engine directly can use, has one driver for each of its operations. While it runs, each of its rows carries the statistics of its own driver. The one row kept after it ends carries the statistics of one of these drivers, not their sum.
 - The engine keeps the row of a finished step for a short time after the step ends (currently 20 seconds) and then drops it. In a run of several steps, the rows of the earlier steps are gone before the run ends. The stored values below keep the final statistics of every step.
 
 ### Stored values
