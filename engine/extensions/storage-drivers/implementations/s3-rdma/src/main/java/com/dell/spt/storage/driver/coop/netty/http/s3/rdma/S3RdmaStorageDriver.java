@@ -316,11 +316,26 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 	@Override
 	protected boolean submit(final O op) throws IllegalStateException {
-		if (shouldUseRdma(op)) {
+		final PathSelection selection = selectPath(op);
+		if (selection == PathSelection.RDMA) {
 			Loggers.MSG.trace("{}: submit(op) routing to RDMA, op={}", stepId, op.type());
 			return submitRdma(op);
 		}
-		return super.submit(op);
+		final boolean sent = super.submit(op);
+		if (sent) {
+			countHttpRequest(selection);
+		}
+		return sent;
+	}
+
+	/** Counts a request sent over HTTP under the reason it was not proposed for RDMA. */
+	private void countHttpRequest(final PathSelection selection) {
+		switch (selection) {
+		case HTTP_RDMA_UNAVAILABLE -> pathStats.httpRdmaUnavailable.increment();
+		case HTTP_INELIGIBLE -> pathStats.httpIneligible.increment();
+		case HTTP_BELOW_THRESHOLD -> pathStats.httpBelowThreshold.increment();
+		case RDMA, HTTP_UNCOUNTED -> {}
+		}
 	}
 
 	/**
@@ -360,58 +375,64 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * Determine whether this operation should use the RDMA data path.
+	 * The data path chosen for an operation and, for HTTP, the reason its request is counted under
+	 * once it is sent.
+	 */
+	enum PathSelection {
+		RDMA, HTTP_RDMA_UNAVAILABLE, HTTP_INELIGIBLE, HTTP_BELOW_THRESHOLD,
+		/** Not a CREATE or READ with a payload, or its size is unreadable: sent over HTTP, not counted. */
+		HTTP_UNCOUNTED
+	}
+
+	/**
+	 * Chooses the data path for an operation. It counts nothing: a request is counted when it is
+	 * sent, and a submission may be refused and repeated.
 	 *
 	 * RDMA is used when all of the following are true:
 	 * - RDMA transport is initialized and available
 	 * - The operation is a data operation (CREATE or READ)
 	 * - The data item size meets or exceeds the configured threshold
 	 */
-	private boolean shouldUseRdma(final O op) {
+	PathSelection selectPath(final O op) {
 		if (!rdmaTransport.isAvailable()) {
 			// TRACE level - checked on every operation in high-throughput workloads
 			Loggers.MSG.trace("{}: RDMA skip: transport not available", stepId);
-			if (carriesPayload(op)) {
-				pathStats.httpRdmaUnavailable.increment();
-			}
-			return false;
+			return carriesPayload(op) ? PathSelection.HTTP_RDMA_UNAVAILABLE : PathSelection.HTTP_UNCOUNTED;
 		}
 		if (!(op instanceof DataOperation)) {
 			Loggers.MSG.trace("{}: RDMA skip: not a DataOperation", stepId);
-			return false;
+			return PathSelection.HTTP_UNCOUNTED;
 		}
 		final var opType = op.type();
 		if (opType != OpType.CREATE && opType != OpType.READ) {
 			Loggers.MSG.trace("{}: RDMA skip: opType={} not CREATE/READ", stepId, opType);
-			return false;
+			return PathSelection.HTTP_UNCOUNTED;
 		}
 		if (op instanceof CompositeOperation) {
 			// Multipart initiate/complete requests carry no payload; their parts carry the data.
-			return false;
+			return PathSelection.HTTP_UNCOUNTED;
 		}
 		final var dataOp = (DataOperation) op;
 		if (opType == OpType.READ && (op instanceof PartialOperation || isRangedRead(dataOp))) {
 			// Ranged reads are not proposed for RDMA: the token and buffer describe the whole object.
-			pathStats.httpIneligible.increment();
-			return false;
+			return PathSelection.HTTP_INELIGIBLE;
 		}
 		try {
 			final long size = dataOp.item().size();
-			final boolean useRdma = size >= rdmaConfig.getThresholdBytes();
-			if (!useRdma) {
-				pathStats.httpBelowThreshold.increment();
-				if (belowThresholdWarned.compareAndSet(false, true)) {
-					Loggers.MSG.warn(
-									"{}: object size ({}) below RDMA threshold ({}); using HTTP path."
-													+ " To force RDMA for all sizes, set storage.rdma.thresholdBytes=0",
-									stepId, size, rdmaConfig.getThresholdBytes());
-				}
-				Loggers.MSG.trace("{}: RDMA skip: size={} < threshold={}", stepId, size, rdmaConfig.getThresholdBytes());
+			if (size >= rdmaConfig.getThresholdBytes()) {
+				return PathSelection.RDMA;
 			}
-			return useRdma;
+			if (belowThresholdWarned.compareAndSet(false, true)) {
+				Loggers.MSG.warn(
+								"{}: object size ({}) below RDMA threshold ({}); using HTTP path."
+												+ " To force RDMA for all sizes, set storage.rdma.thresholdBytes=0",
+								stepId, size, rdmaConfig.getThresholdBytes());
+			}
+			Loggers.MSG.trace("{}: RDMA skip: size={} < threshold={}", stepId, size, rdmaConfig.getThresholdBytes());
+			return PathSelection.HTTP_BELOW_THRESHOLD;
 		} catch (final IOException e) {
 			Loggers.MSG.warn("{}: RDMA skip: IOException getting size", stepId);
-			return false;
+			return PathSelection.HTTP_UNCOUNTED;
 		}
 	}
 
@@ -450,12 +471,15 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		try {
 			final long rawSize = item.size();
 			if (rawSize > Integer.MAX_VALUE) {
-				pathStats.httpOversize.increment();
 				if (oversizeWarned.compareAndSet(false, true)) {
 					Loggers.MSG.warn("{}: object size ({}) exceeds the largest RDMA buffer ({}); using HTTP path",
 									stepId, rawSize, Integer.MAX_VALUE);
 				}
-				return super.submit(op);
+				final boolean sent = super.submit(op);
+				if (sent) {
+					pathStats.httpOversize.increment();
+				}
+				return sent;
 			}
 			size = (int) rawSize;
 		} catch (final IOException e) {
@@ -484,12 +508,15 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			} else {
 				buf = RdmaBufferPool.allocateUnpooled(size, bufferPool, directAllocator);
 				if (buf == null) {
+					pathStats.allocationFailedOnDemand.increment();
 					return prepareFailed(op, "direct memory exhausted");
 				}
 				mrHandle = rdmaTransport.registerBuffer(buf, size);
 				if (mrHandle == 0) {
+					pathStats.registrationFailedOnDemand.increment();
 					return prepareFailed(op, "buffer registration failed");
 				}
+				pathStats.registrationsOnDemand.increment();
 			}
 
 			// For PUT: copy data into the registered buffer
@@ -515,6 +542,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 			final String token = rdmaTransport.generateToken(mrHandle, size);
 			if (token == null) {
+				pathStats.tokenGenerationFailed.increment();
 				// Nothing was sent, so the buffer is reusable unless its content was invalidated.
 				releaseBuffer(pooled, buf, mrHandle, !invalidated);
 				pooled = null;
@@ -534,9 +562,11 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			Loggers.MSG.debug("{}: RDMA submit: type={} size={} token={}", stepId, opType, size, token);
 
 			final boolean submitted = super.submit(op);
-			if (!submitted) {
-				// Throttle exhausted: the request was not sent and complete() won't be called.
-				cleanupRdmaContext(op, true);
+			// A refused submission whose context is still here was not sent (the throttle is
+			// exhausted), and complete() won't be called. A context that is gone was claimed by a
+			// completion: that request was sent and failed while the parent was still submitting it.
+			if (submitted || !cleanupRdmaContext(op, true)) {
+				pathStats.rdmaRequestsSent.increment();
 			}
 			return submitted;
 
@@ -603,8 +633,11 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 											: "failing the operation (storage.rdma.fallback=false)");
 		}
 		if (fallback) {
-			pathStats.httpFallback.increment();
-			return super.submit(op);
+			final boolean sent = super.submit(op);
+			if (sent) {
+				pathStats.httpFallback.increment();
+			}
+			return sent;
 		}
 		pathStats.prepareFailed.increment();
 		op.status(Operation.Status.FAIL_IO);
@@ -902,10 +935,10 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 				}
 			}
 			case DECLINED -> {
-				pathStats.rdmaDeclined.increment();
 				// A declined PUT stored nothing. A declined GET delivered its body over HTTP,
 				// which counts only when HTTP fallback is allowed.
 				final boolean fail = ctx.opType == OpType.CREATE || !rdmaConfig.isFallbackEnabled();
+				(fail ? pathStats.rdmaDeclinedFailed : pathStats.rdmaDeclinedServedOverHttp).increment();
 				if (declinedWarned.compareAndSet(false, true)) {
 					Loggers.MSG.warn("{}: server declined RDMA ({}) for {}; {}", stepId, result.reason(),
 									ctx.opType, fail ? "operations fail"
@@ -1024,8 +1057,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * Reports the data path and buffer pool counts. Reads counters only: it takes no lock that the
-	 * per-operation route takes and makes no native call, so it is safe while the driver closes and
+	 * Reports the data path and buffer pool counts and the pool's levels. It reads counters and, once
+	 * for the levels, the pool's own records under the pool's lock, which is never held across a
+	 * native call. It makes no native call itself, so it is safe while the driver closes and
 	 * afterwards.
 	 */
 	@Override

@@ -26,7 +26,6 @@ import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.github.akurilov.commons.collection.Range;
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.logging.Loggers;
@@ -63,6 +62,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -191,7 +191,7 @@ final class S3RdmaReplyLoopbackTest {
 
 			assertEquals(Operation.Status.RESP_FAIL_SVC, result.status());
 			assertEquals(0, ((DataOperation<?>) result).countBytesDone());
-			assertEquals(1, driver.pathStats().rdmaDeclined.sum());
+			assertEquals(1, driver.pathStats().rdmaDeclinedFailed.sum());
 			assertEquals(0, driver.pathStats().rdmaTransferred.sum());
 			assertNoBufferInUse(driver);
 		}
@@ -204,7 +204,7 @@ final class S3RdmaReplyLoopbackTest {
 			final var result = execute(driver, op(OpType.CREATE, SIZE));
 
 			assertEquals(Operation.Status.RESP_FAIL_SVC, result.status());
-			assertEquals(1, driver.pathStats().rdmaDeclined.sum());
+			assertEquals(1, driver.pathStats().rdmaDeclinedFailed.sum());
 		}
 	}
 
@@ -216,7 +216,7 @@ final class S3RdmaReplyLoopbackTest {
 
 			assertEquals(Operation.Status.RESP_FAIL_SVC, result.status());
 			assertEquals(1, driver.pathStats().rdmaHttpError.sum());
-			assertEquals(0, driver.pathStats().rdmaDeclined.sum());
+			assertEquals(0, driver.pathStats().rdmaDeclinedFailed.sum());
 			assertNoBufferInUse(driver);
 		}
 	}
@@ -247,7 +247,8 @@ final class S3RdmaReplyLoopbackTest {
 			assertEquals(Operation.Status.SUCC, result.status());
 			assertEquals(SIZE, ((DataOperation<?>) result).countBytesDone(),
 							"HTTP body bytes must not be added to the RDMA buffer size");
-			assertEquals(1, driver.pathStats().rdmaDeclined.sum());
+			assertEquals(1, driver.pathStats().rdmaDeclinedServedOverHttp.sum());
+			assertEquals(0, driver.pathStats().rdmaDeclinedFailed.sum());
 		}
 	}
 
@@ -259,6 +260,8 @@ final class S3RdmaReplyLoopbackTest {
 
 			assertEquals(Operation.Status.RESP_FAIL_SVC, result.status());
 			assertEquals(0, ((DataOperation<?>) result).countBytesDone());
+			assertEquals(1, driver.pathStats().rdmaDeclinedFailed.sum());
+			assertEquals(0, driver.pathStats().rdmaDeclinedServedOverHttp.sum());
 		}
 	}
 
@@ -561,11 +564,7 @@ final class S3RdmaReplyLoopbackTest {
 			final Operation<DataItem> ranged = (Operation<DataItem>) (Operation<?>) new DataOperationImpl<>(
 							0, OpType.READ, new DataItemImpl("obj-random", 0, SIZE), null, "/bucket", CREDENTIAL,
 							null, 1);
-			final Method eligible = S3RdmaStorageDriver.class.getDeclaredMethod("shouldUseRdma", Operation.class);
-			eligible.setAccessible(true);
-
-			assertEquals(false, eligible.invoke(driver, ranged));
-			assertEquals(1, driver.pathStats().httpIneligible.sum());
+			assertEquals(S3RdmaStorageDriver.PathSelection.HTTP_INELIGIBLE, driver.selectPath(ranged));
 		}
 	}
 
@@ -684,49 +683,490 @@ final class S3RdmaReplyLoopbackTest {
 
 	// ---------- Driver statistics ----------
 
+	/** The server performed the transfer and reports no byte count: complete for a PUT. */
+	private static final Reply TRANSFERRED = new Reply(200, "200", null, null, true);
+	private static final Reply GET_TRANSFERRED = new Reply(200, "200", Integer.toString(SIZE), null, true);
+	private static final Reply GET_DECLINED = new Reply(200, "501", null, OBJECT_BODY, false);
+	private static final Reply PUT_DECLINED = new Reply(200, "501", null, DECLINE_BODY, false);
+	private static final Reply FAILED = new Reply(500, null, null, "<Error><Code>RDMATransferFailed</Code></Error>", false);
+	private static final Reply UNANSWERED = new Reply(NO_RESPONSE, null, null, null, false);
+	private static final long MIB = 1L << 20;
+
 	@Test
 	void metricsSnapshotCarriesTheCountsOfTheRequestsTheDriverSent() throws Exception {
-		try (final var driver = newDriver(true)) {
-			final MetricsContext<AllMetricsSnapshotImpl> metrics = metricsReporting(driver);
+		try (final NodeStats node = new NodeStats(newDriver(true))) {
+			// Two transfers on one pooled buffer, a request the server fails, a payload below the threshold.
+			assertEquals(Operation.Status.SUCC, node.run(TRANSFERRED, op(OpType.CREATE, SIZE)).status());
+			assertEquals(Operation.Status.SUCC, node.run(TRANSFERRED, op(OpType.CREATE, SIZE)).status());
+			assertEquals(Operation.Status.RESP_FAIL_SVC, node.run(FAILED, op(OpType.CREATE, SIZE)).status());
+			assertEquals(Operation.Status.SUCC, node.run(op(OpType.CREATE, THRESHOLD - 1)).status());
+
+			node.assertCounted(Map.of(
+							"rdma_requests_sent", 3L,
+							"rdma_transferred", 2L,
+							"rdma_request_failed", 1L,
+							"http_below_threshold", 1L,
+							"registrations_pooled", 1L,
+							"pool_hits", 2L));
+			final DriverStatsSnapshot stats = node.stats();
+			assertEquals("s3-rdma", stats.driver());
+			assertEquals(1L, stats.gauges().get("drivers"));
+			assertEquals(1L, stats.gauges().get("transport_available"));
+			// Name by name, the snapshot holds the driver's own counts.
+			assertEquals(node.driver.driverStats(), stats);
+		}
+	}
+
+	@Test
+	void transfersAreCountedAsRequestsSentAndAsTransferred() throws Exception {
+		try (final NodeStats node = new NodeStats(newDriver(true))) {
+			assertEquals(Operation.Status.SUCC, node.run(TRANSFERRED, op(OpType.CREATE, SIZE)).status());
+			node.assertCounted(Map.of("registrations_pooled", 1L, "rdma_requests_sent", 1L, "rdma_transferred", 1L));
+
+			assertEquals(Operation.Status.SUCC, node.run(GET_TRANSFERRED, op(OpType.READ, SIZE)).status());
+			node.assertCounted(Map.of(
+							"registrations_pooled", 1L, "pool_hits", 1L, "rdma_requests_sent", 2L, "rdma_transferred", 2L));
+		}
+	}
+
+	@Test
+	void transferWithoutAByteCountIsCountedAsAssumedUnderTheLegacyOptIn() throws Exception {
+		try (final NodeStats node = new NodeStats(newDriver(true, true))) {
+			assertEquals(Operation.Status.SUCC, node.run(TRANSFERRED, op(OpType.READ, SIZE)).status());
+			node.assertCounted(Map.of(
+							"registrations_pooled", 1L,
+							"rdma_requests_sent", 1L,
+							"rdma_transferred", 1L,
+							"rdma_bytes_assumed", 1L));
+		}
+	}
+
+	@Test
+	void declinedRequestsAreCountedByWhatBecameOfThem() throws Exception {
+		try (final NodeStats node = new NodeStats(newDriver(true))) {
+			// With fallback a declined GET delivers its body over HTTP; a declined PUT stored nothing.
+			assertEquals(Operation.Status.SUCC, node.run(GET_DECLINED, op(OpType.READ, SIZE)).status());
+			assertEquals(Operation.Status.RESP_FAIL_SVC, node.run(PUT_DECLINED, op(OpType.CREATE, SIZE)).status());
+			node.assertCounted(Map.of(
+							"registrations_pooled", 1L,
+							"pool_hits", 1L,
+							"rdma_requests_sent", 2L,
+							"rdma_declined_served_over_http", 1L,
+							"rdma_declined_failed", 1L));
+		}
+		try (final NodeStats node = new NodeStats(newDriver(false))) {
+			assertEquals(Operation.Status.RESP_FAIL_SVC, node.run(GET_DECLINED, op(OpType.READ, SIZE)).status());
+			node.assertCounted(Map.of("registrations_pooled", 1L, "rdma_requests_sent", 1L, "rdma_declined_failed", 1L));
+		}
+	}
+
+	@Test
+	void requestsTheServerFailsOrNeverAnswersAreCountedAsFailed() throws Exception {
+		try (final NodeStats node = new NodeStats(newDriver(true))) {
+			assertEquals(Operation.Status.RESP_FAIL_SVC, node.run(FAILED, op(OpType.CREATE, SIZE)).status());
+			assertTrue(node.run(UNANSWERED, op(OpType.CREATE, SIZE)).status() != Operation.Status.SUCC);
+			// The server might still access the buffer of the request it never answered.
+			node.assertCounted(Map.of(
+							"registrations_pooled", 1L,
+							"pool_hits", 1L,
+							"pool_discarded", 1L,
+							"rdma_requests_sent", 2L,
+							"rdma_request_failed", 2L));
+		}
+	}
+
+	@Test
+	void replyThatBreaksTheContractIsCountedAsAProtocolError() throws Exception {
+		final Reply shortTransfer = new Reply(200, "200", Integer.toString(SIZE - 1), null, true);
+		try (final NodeStats node = new NodeStats(newDriver(true))) {
+			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, node.run(shortTransfer, op(OpType.READ, SIZE)).status());
+			node.assertCounted(Map.of("registrations_pooled", 1L, "rdma_requests_sent", 1L, "rdma_protocol_error", 1L));
+		}
+	}
+
+	@Test
+	void requestTheReaperGivesUpOnIsCountedAsTimedOut() throws Exception {
+		// The reaper looks once a second; a request it then finds has waited longer than this timeout.
+		try (final NodeStats node = new NodeStats(newDriver(true, config -> config.val("storage-rdma-timeoutMs", 1L)))) {
+			replyGate = new CountDownLatch(1);
 			try {
-				final ResultOutput output = new ResultOutput();
-				driver.operationResultOutput(output);
-				driver.start();
-				// Two transfers on one pooled buffer, a request the server fails, a payload below the threshold.
-				reply = new Reply(200, "200", null, null, true);
-				assertEquals(Operation.Status.SUCC, complete(driver, output, op(OpType.CREATE, SIZE)).status());
-				assertEquals(Operation.Status.SUCC, complete(driver, output, op(OpType.CREATE, SIZE)).status());
-				reply = new Reply(500, null, null, "<Error><Code>RDMATransferFailed</Code></Error>", false);
-				assertEquals(
-								Operation.Status.RESP_FAIL_SVC, complete(driver, output, op(OpType.CREATE, SIZE)).status());
-				reply = new Reply(200, null, null, null, false);
-				assertEquals(
-								Operation.Status.SUCC, complete(driver, output, op(OpType.CREATE, THRESHOLD - 1)).status());
-
-				metrics.refreshLastSnapshot(true);
-				final DriverStatsSnapshot stats = metrics.lastSnapshot().driverStats();
-
-				assertEquals("s3-rdma", stats.driver());
-				assertEquals(2L, stats.counters().get("rdma_transferred"));
-				assertEquals(1L, stats.counters().get("rdma_request_failed"));
-				assertEquals(1L, stats.counters().get("http_below_threshold"));
-				assertEquals(1L, stats.counters().get("registrations_pooled"));
-				assertEquals(2L, stats.counters().get("pool_hits"));
-				assertEquals(0L, stats.counters().get("http_fallback"));
-				assertEquals(0L, stats.counters().get("prepare_failed"));
-				assertEquals(1L, stats.gauges().get("drivers"));
-				assertEquals(1L, stats.gauges().get("transport_available"));
-				// Name by name, the snapshot holds the driver's own counts.
-				assertEquals(driver.pathStats().rdmaTransferred.sum(), stats.counters().get("rdma_transferred"));
-				assertEquals(driver.pathStats().rdmaHttpError.sum(), stats.counters().get("rdma_request_failed"));
-				assertEquals(driver.pathStats().httpBelowThreshold.sum(), stats.counters().get("http_below_threshold"));
-				assertEquals(driver.bufferPool().created.sum(), stats.counters().get("registrations_pooled"));
-				assertEquals(driver.bufferPool().hits.sum(), stats.counters().get("pool_hits"));
-				assertEquals(driver.driverStats(), stats);
+				assertEquals(Operation.Status.FAIL_IO, node.run(FAILED, op(OpType.READ, SIZE)).status());
 			} finally {
-				metrics.close();
+				// The answer comes after the request was given up; it is counted under nothing.
+				replyGate.countDown();
+			}
+			node.assertCounted(Map.of(
+							"registrations_pooled", 1L,
+							"pool_discarded", 1L,
+							"rdma_requests_sent", 1L,
+							"rdma_timed_out", 1L));
+		}
+	}
+
+	@Test
+	void requestsNotProposedForRdmaAreCountedByTheReason() throws Exception {
+		try (final NodeStats node = new NodeStats(newDriver(true))) {
+			assertEquals(Operation.Status.SUCC, node.run(op(OpType.CREATE, THRESHOLD - 1)).status());
+			node.assertCounted(Map.of("http_below_threshold", 1L));
+			assertEquals(Operation.Status.SUCC, node.run(rangedRead()).status());
+			node.assertCounted(Map.of("http_below_threshold", 1L, "http_ineligible", 1L));
+			node.run(largerThanAnyRdmaBuffer());
+			node.assertCounted(Map.of("http_below_threshold", 1L, "http_ineligible", 1L, "http_oversize", 1L));
+			// A request without a payload is counted under no reason.
+			assertEquals(Operation.Status.SUCC, node.run(op(OpType.DELETE, SIZE)).status());
+			node.assertCounted(Map.of("http_below_threshold", 1L, "http_ineligible", 1L, "http_oversize", 1L));
+
+			assertEquals(4, objectRequests().size(), requests.toString());
+			assertTrue(objectRequests().stream().allMatch(request -> request.rdmaToken() == null), requests.toString());
+			assertEquals(0, transport.getRegisterCount());
+		}
+	}
+
+	@Test
+	void requestsOfADriverWithoutRdmaAreCountedAsRdmaUnavailable() throws Exception {
+		rdmaInitFails = true;
+		try (final NodeStats node = new NodeStats(newDriver(true))) {
+			assertEquals(Operation.Status.SUCC, node.run(op(OpType.CREATE, SIZE)).status());
+			assertEquals(Operation.Status.SUCC, node.run(op(OpType.READ, SIZE)).status());
+			// A request without a payload is counted under no reason.
+			assertEquals(Operation.Status.SUCC, node.run(op(OpType.DELETE, SIZE)).status());
+			node.assertCounted(Map.of("http_rdma_unavailable", 2L));
+			assertEquals(0L, node.gauge("transport_available"));
+		}
+	}
+
+	// A preparation failure is counted under its cause and, apart from that, under what became of
+	// the operation: sent over HTTP, or failed.
+
+	@Test
+	void exhaustedDirectMemoryForAnOnDemandBufferIsCountedByItsCause() throws Exception {
+		assertPutCounted(false, true, S3RdmaReplyLoopbackTest::exhaustDirectMemory, Operation.Status.SUCC,
+						Map.of("allocation_failed_on_demand", 1L, "http_fallback", 1L));
+		assertPutCounted(false, false, S3RdmaReplyLoopbackTest::exhaustDirectMemory, Operation.Status.FAIL_IO,
+						Map.of("allocation_failed_on_demand", 1L, "prepare_failed", 1L));
+	}
+
+	@Test
+	void refusedRegistrationOfAnOnDemandBufferIsCountedByItsCause() throws Exception {
+		assertPutCounted(false, true, driver -> transport.setFailNextRegistrations(1), Operation.Status.SUCC,
+						Map.of("registration_failed_on_demand", 1L, "http_fallback", 1L));
+		assertPutCounted(false, false, driver -> transport.setFailNextRegistrations(1), Operation.Status.FAIL_IO,
+						Map.of("registration_failed_on_demand", 1L, "prepare_failed", 1L));
+	}
+
+	@Test
+	void tokenGenerationFailureIsCountedByItsCause() throws Exception {
+		assertPutCounted(true, true, driver -> transport.setFailTokenGeneration(true), Operation.Status.SUCC,
+						Map.of("registrations_pooled", 1L, "token_generation_failed", 1L, "http_fallback", 1L));
+		assertPutCounted(true, false, driver -> transport.setFailTokenGeneration(true), Operation.Status.FAIL_IO,
+						Map.of("registrations_pooled", 1L, "token_generation_failed", 1L, "prepare_failed", 1L));
+		assertPutCounted(false, true, driver -> transport.setFailTokenGeneration(true), Operation.Status.SUCC,
+						Map.of("registrations_on_demand", 1L, "token_generation_failed", 1L, "http_fallback", 1L));
+	}
+
+	@Test
+	void poolBufferThatCannotBeCreatedIsCountedByItsCauseAndTheRequestRegistersOnDemand() throws Exception {
+		assertPutCounted(true, false, driver -> transport.setFailNextRegistrations(1), Operation.Status.SUCC,
+						Map.of(
+										"registration_failed_pooled", 1L,
+										"registrations_on_demand", 1L,
+										"rdma_requests_sent", 1L,
+										"rdma_transferred", 1L));
+		assertEquals(2, transport.getRegisterCount(), "the pool's refused registration and the request's own");
+
+		assertPutCounted(true, false, driver -> driver.bufferPool().allocator = size -> {
+			throw new OutOfMemoryError("Cannot reserve " + size + " bytes of direct buffer memory");
+		}, Operation.Status.SUCC,
+						Map.of(
+										"allocation_failed_pooled", 1L,
+										"registrations_on_demand", 1L,
+										"rdma_requests_sent", 1L,
+										"rdma_transferred", 1L));
+		assertEquals(1, transport.getRegisterCount(), "the pool had no buffer to register");
+	}
+
+	@Test
+	void registrationRefusedForThePoolAndThenOnDemandIsCountedOnceForEach() throws Exception {
+		assertPutCounted(true, true, driver -> transport.setFailAfterNRegistrations(0), Operation.Status.SUCC,
+						Map.of("registration_failed_pooled", 1L, "registration_failed_on_demand", 1L, "http_fallback", 1L));
+	}
+
+	@Test
+	void payloadCopyFailureHasNoCauseOfItsOwnAndIsCountedByWhatBecameOfTheOperation() throws Exception {
+		try (final NodeStats node = new NodeStats(newDriver(true))) {
+			assertEquals(Operation.Status.SUCC, node.run(putFailingAfterPartialCopy(PAYLOAD_SIZE)).status());
+			// An abandoned preparation's buffer is never reused.
+			node.assertCounted(Map.of("registrations_pooled", 1L, "pool_discarded", 1L, "http_fallback", 1L));
+		}
+	}
+
+	/** Sends one PUT on a new driver that {@code fault} prepared and checks what the node then counts. */
+	private void assertPutCounted(
+					final boolean pool,
+					final boolean fallback,
+					final Consumer<S3RdmaStorageDriver<DataItem, Operation<DataItem>>> fault,
+					final Operation.Status status,
+					final Map<String, Long> counted) throws Exception {
+		try (final NodeStats node = new NodeStats(
+						newDriver(fallback, config -> config.val("storage-rdma-bufferPool", pool)))) {
+			fault.accept(node.driver);
+			assertEquals(status, node.run(TRANSFERRED, op(OpType.CREATE, SIZE)).status());
+			node.assertCounted(counted);
+		}
+	}
+
+	private static void exhaustDirectMemory(final S3RdmaStorageDriver<?, ?> driver) {
+		driver.directAllocator = size -> {
+			throw new OutOfMemoryError("Cannot reserve " + size + " bytes of direct buffer memory");
+		};
+	}
+
+	// Whatever keeps a request out of the pool, it registers a buffer of its own, counted once.
+
+	@Test
+	void disabledPoolRegistersEveryRequestOnDemand() throws Exception {
+		try (final NodeStats node = new NodeStats(
+						newDriver(false, config -> config.val("storage-rdma-bufferPool", false)))) {
+			assertEquals(Operation.Status.SUCC, node.run(TRANSFERRED, op(OpType.CREATE, SIZE)).status());
+			assertEquals(Operation.Status.SUCC, node.run(TRANSFERRED, op(OpType.CREATE, SIZE)).status());
+			node.assertCounted(Map.of("registrations_on_demand", 2L, "rdma_requests_sent", 2L, "rdma_transferred", 2L));
+			assertEquals(2, transport.getRegisterCount());
+			assertEquals(0L, node.gauge("pool_budget_bytes"));
+		}
+	}
+
+	@Test
+	void exhaustedPoolRegistersTheRequestOnDemand() throws Exception {
+		try (final NodeStats node = new NodeStats(newDriver(false))) {
+			// The buffers of the request's size class are held, as requests in flight hold them: with
+			// one permit the class has two.
+			final RdmaBufferPool pool = node.driver.bufferPool();
+			final List<RdmaBufferPool.PooledBuffer> held = List.of(pool.acquire(SIZE), pool.acquire(SIZE));
+			try {
+				assertEquals(Operation.Status.SUCC, node.run(TRANSFERRED, op(OpType.CREATE, SIZE)).status());
+				node.assertCounted(Map.of(
+								"registrations_pooled", 2L,
+								"pool_exhausted", 1L,
+								"registrations_on_demand", 1L,
+								"rdma_requests_sent", 1L,
+								"rdma_transferred", 1L));
+				assertEquals(3, transport.getRegisterCount());
+			} finally {
+				held.forEach(pool::release);
 			}
 		}
+	}
+
+	@Test
+	void requestLargerThanThePoolsLargestBufferRegistersOnDemand() throws Exception {
+		try (final NodeStats node = new NodeStats(newDriver(false))) {
+			// A small buffer stands in for one of that size: the server fails the request without accessing it.
+			node.driver.directAllocator = size -> ByteBuffer.allocateDirect(SIZE);
+			assertEquals(Operation.Status.RESP_FAIL_SVC, node.run(FAILED, largerThanAnyPoolBuffer()).status());
+			node.assertCounted(Map.of(
+							"pool_oversize", 1L,
+							"registrations_on_demand", 1L,
+							"rdma_requests_sent", 1L,
+							"rdma_request_failed", 1L));
+			assertEquals(1, transport.getRegisterCount());
+		}
+	}
+
+	@Test
+	void idleBuffersGivenUpForAnOnDemandBufferAreCountedAsEvicted() throws Exception {
+		try (final NodeStats node = new NodeStats(newDriver(false))) {
+			assertEquals(Operation.Status.SUCC, node.run(TRANSFERRED, op(OpType.CREATE, SIZE)).status());
+			assertEquals(1L, node.gauge("pool_idle_buffers"));
+			// Direct memory is exhausted until the pool gives up its idle buffer.
+			final AtomicInteger allocations = new AtomicInteger();
+			node.driver.directAllocator = size -> {
+				if (allocations.getAndIncrement() == 0) {
+					throw new OutOfMemoryError("Cannot reserve " + size + " bytes of direct buffer memory");
+				}
+				return ByteBuffer.allocateDirect(SIZE);
+			};
+			assertEquals(Operation.Status.RESP_FAIL_SVC, node.run(FAILED, largerThanAnyPoolBuffer()).status());
+			// The allocation succeeded when it was repeated, so the preparation did not fail.
+			node.assertCounted(Map.of(
+							"registrations_pooled", 1L,
+							"pool_evicted", 1L,
+							"pool_oversize", 1L,
+							"registrations_on_demand", 1L,
+							"rdma_requests_sent", 2L,
+							"rdma_transferred", 1L,
+							"rdma_request_failed", 1L));
+			assertEquals(0L, node.gauge("pool_buffers"));
+			assertEquals(0L, node.gauge("pool_reserved_bytes"));
+		}
+	}
+
+	@Test
+	void poolBufferReturnedTwiceIsCountedAsAnInvalidReturn() throws Exception {
+		try (final NodeStats node = new NodeStats(newDriver(false))) {
+			final RdmaBufferPool pool = node.driver.bufferPool();
+			final RdmaBufferPool.PooledBuffer buffer = pool.acquire(SIZE);
+			pool.release(buffer);
+			pool.release(buffer);
+			node.assertCounted(Map.of("registrations_pooled", 1L, "pool_invalid_returns", 1L));
+			assertEquals(1L, node.gauge("pool_idle_buffers"));
+		}
+	}
+
+	// A submission is refused while no permit is free, and is then repeated. The dispatcher asks for
+	// the free permits before it submits, so these tests submit as it does while a request holds the
+	// only permit.
+
+	@Test
+	void refusedRdmaSubmissionIsCountedAsSentOnlyWhenItsRepeatIsAccepted() throws Exception {
+		try (final NodeStats node = new NodeStats(newDriver(true))) {
+			final Operation<DataItem> read = op(OpType.READ, SIZE);
+			holdTheOnlyPermit(node);
+			assertFalse(node.driver.submit(read));
+			// The refused attempt registered a pool buffer and returned it; no request left.
+			node.assertCounted(Map.of("registrations_pooled", 1L));
+			assertEquals(1L, node.gauge("pool_idle_buffers"));
+			freeThePermit(node);
+
+			assertEquals(Operation.Status.SUCC, node.run(GET_TRANSFERRED, read).status());
+			node.assertCounted(Map.of(
+							"registrations_pooled", 1L, "pool_hits", 1L, "rdma_requests_sent", 1L, "rdma_transferred", 1L));
+			assertNotNull(onlyObjectRequest("GET").rdmaToken());
+		}
+	}
+
+	@Test
+	void refusedHttpSubmissionIsCountedOnlyWhenItsRepeatIsAccepted() throws Exception {
+		try (final NodeStats node = new NodeStats(newDriver(true))) {
+			final List<Operation<DataItem>> overHttp = List.of(
+							op(OpType.CREATE, THRESHOLD - 1), rangedRead(), largerThanAnyRdmaBuffer());
+			holdTheOnlyPermit(node);
+			for (final Operation<DataItem> operation : overHttp) {
+				assertFalse(node.driver.submit(operation));
+			}
+			node.assertCounted(Map.of());
+			freeThePermit(node);
+
+			for (final Operation<DataItem> operation : overHttp) {
+				node.run(operation);
+			}
+			node.assertCounted(Map.of("http_below_threshold", 1L, "http_ineligible", 1L, "http_oversize", 1L));
+		}
+		rdmaInitFails = true;
+		try (final NodeStats node = new NodeStats(newDriver(true))) {
+			final Operation<DataItem> put = op(OpType.CREATE, SIZE);
+			holdTheOnlyPermit(node);
+			assertFalse(node.driver.submit(put));
+			node.assertCounted(Map.of());
+			freeThePermit(node);
+
+			assertEquals(Operation.Status.SUCC, node.run(put).status());
+			node.assertCounted(Map.of("http_rdma_unavailable", 1L));
+		}
+	}
+
+	@Test
+	void preparationFailureIsCountedForEachAttemptAndItsFallbackOnceItIsAccepted() throws Exception {
+		try (final NodeStats node = new NodeStats(newDriver(true))) {
+			transport.setFailTokenGeneration(true);
+			final Operation<DataItem> read = op(OpType.READ, SIZE);
+			holdTheOnlyPermit(node);
+			assertFalse(node.driver.submit(read));
+			node.assertCounted(Map.of("registrations_pooled", 1L, "token_generation_failed", 1L));
+			freeThePermit(node);
+
+			assertEquals(Operation.Status.SUCC, node.run(read).status());
+			node.assertCounted(Map.of(
+							"registrations_pooled", 1L,
+							"pool_hits", 1L,
+							"token_generation_failed", 2L,
+							"http_fallback", 1L));
+			assertNull(onlyObjectRequest("GET").rdmaToken());
+		}
+	}
+
+	@Test
+	void requestInFlightIsCountedAsSentAndHasNoOutcomeYet() throws Exception {
+		try (final NodeStats node = new NodeStats(newDriver(true))) {
+			reply = GET_TRANSFERRED;
+			replyGate = new CountDownLatch(1);
+			assertTrue(node.driver.put(op(OpType.READ, SIZE)));
+			node.assertCounted(Map.of("registrations_pooled", 1L, "rdma_requests_sent", 1L));
+			assertEquals(MIB, node.gauge("pool_reserved_bytes"));
+			assertEquals(1L, node.gauge("pool_buffers"));
+			assertEquals(0L, node.gauge("pool_idle_buffers"));
+
+			replyGate.countDown();
+			assertEquals(Operation.Status.SUCC, node.awaitResult().status());
+			// Every request sent now has exactly one outcome.
+			node.assertCounted(Map.of("registrations_pooled", 1L, "rdma_requests_sent", 1L, "rdma_transferred", 1L));
+			assertEquals(MIB, node.gauge("pool_reserved_bytes"));
+			assertEquals(1L, node.gauge("pool_buffers"));
+			assertEquals(1L, node.gauge("pool_idle_buffers"));
+			assertEquals(MIB, node.gauge("pool_peak_reserved_bytes"));
+			assertEquals(RdmaBufferPool.defaultMaxPooledBytes(), node.gauge("pool_budget_bytes"));
+		}
+	}
+
+	@Test
+	void batchSubmissionCountsEachRequestAsItsSingleSubmissionWould() throws Exception {
+		try (final NodeStats node = new NodeStats(newDriver(true))) {
+			reply = GET_TRANSFERRED;
+			// The operations are queued together while a request holds the only permit, so the
+			// dispatcher submits them as a batch.
+			holdTheOnlyPermit(node);
+			final List<Operation<DataItem>> queued = List.of(
+							op(OpType.READ, SIZE), op(OpType.CREATE, THRESHOLD - 1), rangedRead(), op(OpType.DELETE, SIZE));
+			assertEquals(queued.size(), node.driver.put(queued));
+			freeThePermit(node);
+
+			for (int i = 0; i < queued.size(); i++) {
+				assertEquals(Operation.Status.SUCC, node.awaitResult().status(), "operation " + i + ": " + requests);
+			}
+			node.assertCounted(Map.of(
+							"registrations_pooled", 1L,
+							"rdma_requests_sent", 1L,
+							"rdma_transferred", 1L,
+							"http_below_threshold", 1L,
+							"http_ineligible", 1L));
+		}
+	}
+
+	/** Has a DELETE, which is counted under no name, hold the driver's only permit until the gate opens. */
+	private void holdTheOnlyPermit(final NodeStats node) throws Exception {
+		final int sentBefore = objectRequests().size();
+		replyGate = new CountDownLatch(1);
+		assertTrue(node.driver.put(op(OpType.DELETE, SIZE)));
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+		while (objectRequests().size() == sentBefore) {
+			assertTrue(System.nanoTime() < deadline, "the DELETE was not sent: " + requests);
+			Thread.sleep(5);
+		}
+	}
+
+	/** Lets the DELETE of {@link #holdTheOnlyPermit} complete. */
+	private void freeThePermit(final NodeStats node) throws Exception {
+		replyGate.countDown();
+		final Operation<DataItem> deleted = node.awaitResult();
+		assertEquals(OpType.DELETE, deleted.type());
+		assertEquals(Operation.Status.SUCC, deleted.status());
+	}
+
+	/** A READ of half an object: ranged reads are not proposed for RDMA. */
+	@SuppressWarnings("unchecked")
+	private static Operation<DataItem> rangedRead() {
+		return (Operation<DataItem>) (Operation<?>) new DataOperationImpl<>(
+						0, OpType.READ, new DataItemImpl("obj-range", 0, SIZE), null, "/bucket", CREDENTIAL,
+						List.of(new Range(0L, SIZE / 2 - 1, -1L)), 0);
+	}
+
+	/** A READ that no single RDMA buffer can hold; it goes over HTTP. */
+	private static Operation<DataItem> largerThanAnyRdmaBuffer() {
+		return op(OpType.READ, Integer.MAX_VALUE + 1L);
+	}
+
+	/** A READ proposed for RDMA whose buffer the pool has no size class for. */
+	private static Operation<DataItem> largerThanAnyPoolBuffer() {
+		return op(OpType.READ, RdmaBufferPool.MAX_CLASS_BYTES + 1L);
 	}
 
 	/** The fields of the driver's close summary, each with the counter that holds the same count. */
@@ -749,8 +1189,19 @@ final class S3RdmaReplyLoopbackTest {
 					Map.entry("poolEvicted", "pool_evicted"),
 					Map.entry("poolDiscarded", "pool_discarded"),
 					Map.entry("poolInvalidReturns", "pool_invalid_returns"));
-	/** Close summary fields that no counter holds yet. */
-	private static final List<String> CLOSE_SUMMARY_ONLY = List.of("rdmaDeclined");
+	/** The close summary field whose count two counters hold between them. */
+	private static final String CLOSE_SUMMARY_DECLINED = "rdmaDeclined";
+	/** The counters the close summary has no field for. */
+	private static final Set<String> NOT_IN_CLOSE_SUMMARY = Set.of(
+					"rdma_requests_sent",
+					"rdma_declined_served_over_http",
+					"rdma_declined_failed",
+					"registrations_on_demand",
+					"registration_failed_pooled",
+					"registration_failed_on_demand",
+					"allocation_failed_pooled",
+					"allocation_failed_on_demand",
+					"token_generation_failed");
 	private static final String CLOSE_SUMMARY = "RDMA data path summary";
 
 	@Test
@@ -759,7 +1210,6 @@ final class S3RdmaReplyLoopbackTest {
 		mgr.setTerminalRetentionMillis(TimeUnit.MINUTES.toMillis(1));
 		final DriverStatsSnapshot kept;
 		final DriverStatsSnapshot afterClose;
-		final int idleBuffersWhenStopped;
 		final String closeSummary;
 		try (final MessageLog log = new MessageLog()) {
 			final var driver = newDriver(true);
@@ -770,7 +1220,8 @@ final class S3RdmaReplyLoopbackTest {
 				driver.operationResultOutput(output);
 				driver.start();
 				// A registration failure sent over HTTP, a request the server never answers, two transfers
-				// on one pooled buffer, a request the server fails, a payload below the threshold.
+				// on one pooled buffer, a request the server fails, a declined GET and a declined PUT, a
+				// payload below the threshold.
 				reply = new Reply(200, null, null, null, false);
 				transport.setFailAfterNRegistrations(0);
 				assertEquals(Operation.Status.SUCC, complete(driver, output, op(OpType.CREATE, SIZE)).status());
@@ -781,6 +1232,11 @@ final class S3RdmaReplyLoopbackTest {
 				assertEquals(Operation.Status.SUCC, complete(driver, output, op(OpType.CREATE, SIZE)).status());
 				assertEquals(Operation.Status.SUCC, complete(driver, output, op(OpType.CREATE, SIZE)).status());
 				reply = new Reply(500, null, null, "<Error><Code>RDMATransferFailed</Code></Error>", false);
+				assertEquals(
+								Operation.Status.RESP_FAIL_SVC, complete(driver, output, op(OpType.CREATE, SIZE)).status());
+				reply = GET_DECLINED;
+				assertEquals(Operation.Status.SUCC, complete(driver, output, op(OpType.READ, SIZE)).status());
+				reply = PUT_DECLINED;
 				assertEquals(
 								Operation.Status.RESP_FAIL_SVC, complete(driver, output, op(OpType.CREATE, SIZE)).status());
 				reply = new Reply(200, null, null, null, false);
@@ -795,7 +1251,6 @@ final class S3RdmaReplyLoopbackTest {
 				assertEquals(1, entries.size(), entries.toString());
 				kept = entries.get(0).driverStats;
 				assertEquals(driver.driverStats(), kept, "the values of the stopped driver");
-				idleBuffersWhenStopped = driver.bufferPool().idleBuffers();
 			} finally {
 				metrics.close();
 			}
@@ -808,22 +1263,35 @@ final class S3RdmaReplyLoopbackTest {
 		assertEquals(1L, kept.counters().get("http_below_threshold"), closeSummary);
 		assertEquals(1L, kept.counters().get("http_fallback"), closeSummary);
 		assertEquals(1L, kept.counters().get("pool_discarded"), "the buffer of the unanswered: " + closeSummary);
+		assertEquals(1L, kept.counters().get("rdma_declined_served_over_http"), closeSummary);
+		assertEquals(1L, kept.counters().get("rdma_declined_failed"), closeSummary);
+		assertEquals(6L, kept.counters().get("rdma_requests_sent"), "all but the two sent over HTTP: " + closeSummary);
 		// Every request had its outcome when the step stopped, so closing the driver changed no count:
 		// field by field, the close summary shows what the step kept.
 		final Map<String, Long> summary = summaryFields(closeSummary);
 		final Map<String, Long> summaryAsCounters = new TreeMap<>();
 		CLOSE_SUMMARY_COUNTERS.forEach((field, counter) -> summaryAsCounters.put(counter, summary.get(field)));
-		assertEquals(summaryAsCounters, kept.counters(), closeSummary);
+		final Map<String, Long> keptInSummary = new TreeMap<>(kept.counters());
+		keptInSummary.keySet().removeAll(NOT_IN_CLOSE_SUMMARY);
+		assertEquals(summaryAsCounters, keptInSummary, closeSummary);
+		assertTrue(kept.counters().keySet().containsAll(NOT_IN_CLOSE_SUMMARY), kept.counters().toString());
+		// The summary's declined requests are the two kinds the counters tell apart.
+		assertEquals(2L, summary.get(CLOSE_SUMMARY_DECLINED), closeSummary);
 		final List<String> otherFields = new ArrayList<>(summary.keySet());
 		otherFields.removeAll(CLOSE_SUMMARY_COUNTERS.keySet());
-		assertEquals(CLOSE_SUMMARY_ONLY, otherFields, closeSummary);
+		assertEquals(List.of(CLOSE_SUMMARY_DECLINED), otherFields, closeSummary);
 		assertEquals(kept.counters(), afterClose.counters());
-		// Closing drained an idle buffer; that is no discard.
-		assertEquals(1, idleBuffersWhenStopped);
-		// The gauges are those of the driver before it closed.
+		// The gauges are those of the driver before it closed. Closing drained an idle buffer; that is
+		// no discard, and the peak stays.
 		assertTrue(closeSummary.contains("(transport available)"), closeSummary);
 		assertEquals(1L, kept.gauges().get("transport_available"));
 		assertEquals(0L, afterClose.gauges().get("transport_available"));
+		assertEquals(1L, kept.gauges().get("pool_idle_buffers"));
+		assertEquals(MIB, kept.gauges().get("pool_reserved_bytes"));
+		assertEquals(0L, afterClose.gauges().get("pool_idle_buffers"));
+		assertEquals(0L, afterClose.gauges().get("pool_reserved_bytes"));
+		assertEquals(MIB, kept.gauges().get("pool_peak_reserved_bytes"));
+		assertEquals(MIB, afterClose.gauges().get("pool_peak_reserved_bytes"));
 	}
 
 	/** The {@code name=count} fields of a close summary, by name. */
@@ -901,6 +1369,90 @@ final class S3RdmaReplyLoopbackTest {
 						MetricsConstants.METADATA_DRIVER_STATS, (Supplier<DriverStatsSnapshot>) driver::driverStats);
 		metrics.start();
 		return metrics;
+	}
+
+	/**
+	 * A started driver and the statistics its node reports for it: those in the snapshot of a
+	 * metrics context that asks the driver, as a step's context does.
+	 *
+	 * <p>A request is counted as sent once the dispatcher's submission of it has returned, which may
+	 * be after its result was output. {@link #assertCounted} therefore waits for the counts it
+	 * expects; counts only grow, so the wait cannot hide one that is already too high. Closing
+	 * stops the driver, whose dispatcher has then returned from every submission, and fails if
+	 * anything was counted after the last assertion.
+	 */
+	private final class NodeStats implements AutoCloseable {
+
+		private final S3RdmaStorageDriver<DataItem, Operation<DataItem>> driver;
+		private final MetricsContext<AllMetricsSnapshotImpl> metrics;
+		private final ResultOutput output = new ResultOutput();
+		private Map<String, Long> lastAsserted;
+
+		NodeStats(final S3RdmaStorageDriver<DataItem, Operation<DataItem>> driver) {
+			this.driver = driver;
+			metrics = metricsReporting(driver);
+			driver.operationResultOutput(output);
+			driver.start();
+		}
+
+		/** Sends an operation whose request carries no RDMA token and returns its result. */
+		Operation<DataItem> run(final Operation<DataItem> operation) throws Exception {
+			return complete(driver, output, operation);
+		}
+
+		/** Sends an operation whose RDMA request the server answers with {@code answer}; returns its result. */
+		Operation<DataItem> run(final Reply answer, final Operation<DataItem> operation) throws Exception {
+			reply = answer;
+			return complete(driver, output, operation);
+		}
+
+		Operation<DataItem> awaitResult() throws InterruptedException {
+			final Operation<DataItem> result = output.await();
+			assertNotNull(result, "operation did not complete: " + requests);
+			return result;
+		}
+
+		DriverStatsSnapshot stats() {
+			metrics.refreshLastSnapshot(true);
+			return metrics.lastSnapshot().driverStats();
+		}
+
+		long gauge(final String name) {
+			return stats().gauges().get(name);
+		}
+
+		/** Waits for the counters that are not zero to be exactly these. */
+		void assertCounted(final Map<String, Long> expected) throws InterruptedException {
+			final Map<String, Long> ordered = new TreeMap<>(expected);
+			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+			while (!ordered.equals(counted()) && System.nanoTime() < deadline) {
+				Thread.sleep(5);
+			}
+			assertEquals(ordered, counted());
+			lastAsserted = ordered;
+		}
+
+		private Map<String, Long> counted() {
+			final Map<String, Long> counted = new TreeMap<>(stats().counters());
+			counted.values().removeIf(count -> count == 0);
+			return counted;
+		}
+
+		@Override
+		public void close() throws Exception {
+			try {
+				if (lastAsserted != null) {
+					driver.stop();
+					assertEquals(lastAsserted, counted(), "counted after the last assertion");
+				}
+			} finally {
+				try {
+					metrics.close();
+				} finally {
+					driver.close();
+				}
+			}
+		}
 	}
 
 	private static Operation<DataItem> complete(
@@ -1230,7 +1782,7 @@ final class S3RdmaReplyLoopbackTest {
 
 			assertTrue(result.status() != Operation.Status.SUCC, "upload must fail: " + result.status());
 			assertTrue(abortRequested(), "upload must be aborted: " + requests);
-			assertEquals(2, driver.pathStats().rdmaDeclined.sum());
+			assertEquals(2, driver.pathStats().rdmaDeclinedFailed.sum());
 			assertEquals(1L + MAX_PART_RETRIES - 2, driver.pathStats().prepareFailed.sum(),
 							"the retries after the two declined attempts fail preparation");
 			assertEquals(1, pendingParts(upload),

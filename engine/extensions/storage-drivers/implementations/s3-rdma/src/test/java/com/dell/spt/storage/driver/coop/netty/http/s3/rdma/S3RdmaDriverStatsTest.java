@@ -12,7 +12,10 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -27,6 +30,8 @@ final class S3RdmaDriverStatsTest {
 
 	/** The published counter names, in name order. A change here changes the public metrics JSON. */
 	private static final List<String> COUNTERS = List.of(
+					"allocation_failed_on_demand",
+					"allocation_failed_pooled",
 					"http_below_threshold",
 					"http_fallback",
 					"http_ineligible",
@@ -40,14 +45,30 @@ final class S3RdmaDriverStatsTest {
 					"pool_oversize",
 					"prepare_failed",
 					"rdma_bytes_assumed",
+					"rdma_declined_failed",
+					"rdma_declined_served_over_http",
 					"rdma_protocol_error",
 					"rdma_request_failed",
+					"rdma_requests_sent",
 					"rdma_timed_out",
 					"rdma_transferred",
-					"registrations_pooled");
+					"registration_failed_on_demand",
+					"registration_failed_pooled",
+					"registrations_on_demand",
+					"registrations_pooled",
+					"token_generation_failed");
 
 	/** The published gauge names, in name order. */
-	private static final List<String> GAUGES = List.of("drivers", "transport_available");
+	private static final List<String> GAUGES = List.of(
+					"drivers",
+					"pool_budget_bytes",
+					"pool_buffers",
+					"pool_idle_buffers",
+					"pool_peak_reserved_bytes",
+					"pool_reserved_bytes",
+					"transport_available");
+
+	private static final int MIB = 1 << 20;
 
 	@AfterEach
 	void closeDrivers() throws Exception {
@@ -66,6 +87,11 @@ final class S3RdmaDriverStatsTest {
 		assertEquals(GAUGES, List.copyOf(stats.gauges().keySet()));
 		assertEquals(1L, stats.gauges().get("drivers"));
 		assertEquals(1L, stats.gauges().get("transport_available"));
+		assertEquals(RdmaBufferPool.defaultMaxPooledBytes(), stats.gauges().get("pool_budget_bytes"));
+		for (final String level : List.of(
+						"pool_reserved_bytes", "pool_buffers", "pool_idle_buffers", "pool_peak_reserved_bytes")) {
+			assertEquals(0L, stats.gauges().get(level), level);
+		}
 	}
 
 	@Test
@@ -78,6 +104,9 @@ final class S3RdmaDriverStatsTest {
 		assertEquals(COUNTERS, List.copyOf(stats.counters().keySet()));
 		assertEquals(GAUGES, List.copyOf(stats.gauges().keySet()));
 		stats.counters().forEach((name, value) -> assertEquals(0L, value, name));
+		// No pool: no budget and no level.
+		stats.gauges().forEach((name, value) -> assertEquals(
+						"drivers".equals(name) || "transport_available".equals(name) ? 1L : 0L, value, name));
 	}
 
 	@Test
@@ -115,27 +144,68 @@ final class S3RdmaDriverStatsTest {
 		pool.evicted.add(16);
 		pool.discarded.add(17);
 		pool.invalidReturns.add(18);
+		path.rdmaRequestsSent.add(19);
+		path.rdmaDeclinedServedOverHttp.add(20);
+		path.rdmaDeclinedFailed.add(21);
+		path.registrationsOnDemand.add(22);
+		path.registrationFailedOnDemand.add(23);
+		path.allocationFailedOnDemand.add(24);
+		path.tokenGenerationFailed.add(25);
+		pool.registrationFailed.add(26);
+		pool.allocationFailed.add(27);
 
-		final var counters = driver.driverStats().counters();
+		final Map<String, Long> expected = new TreeMap<>();
+		expected.put("rdma_transferred", 1L);
+		expected.put("rdma_bytes_assumed", 2L);
+		expected.put("rdma_request_failed", 3L);
+		expected.put("rdma_protocol_error", 4L);
+		expected.put("rdma_timed_out", 5L);
+		expected.put("http_rdma_unavailable", 6L);
+		expected.put("http_below_threshold", 7L);
+		expected.put("http_ineligible", 8L);
+		expected.put("http_oversize", 9L);
+		expected.put("http_fallback", 10L);
+		expected.put("prepare_failed", 11L);
+		expected.put("registrations_pooled", 12L);
+		expected.put("pool_hits", 13L);
+		expected.put("pool_exhausted", 14L);
+		expected.put("pool_oversize", 15L);
+		expected.put("pool_evicted", 16L);
+		expected.put("pool_discarded", 17L);
+		expected.put("pool_invalid_returns", 18L);
+		expected.put("rdma_requests_sent", 19L);
+		expected.put("rdma_declined_served_over_http", 20L);
+		expected.put("rdma_declined_failed", 21L);
+		expected.put("registrations_on_demand", 22L);
+		expected.put("registration_failed_on_demand", 23L);
+		expected.put("allocation_failed_on_demand", 24L);
+		expected.put("token_generation_failed", 25L);
+		expected.put("registration_failed_pooled", 26L);
+		expected.put("allocation_failed_pooled", 27L);
+		assertEquals(COUNTERS.size(), expected.size(), "a value for every published counter");
 
-		assertEquals(1L, counters.get("rdma_transferred"));
-		assertEquals(2L, counters.get("rdma_bytes_assumed"));
-		assertEquals(3L, counters.get("rdma_request_failed"));
-		assertEquals(4L, counters.get("rdma_protocol_error"));
-		assertEquals(5L, counters.get("rdma_timed_out"));
-		assertEquals(6L, counters.get("http_rdma_unavailable"));
-		assertEquals(7L, counters.get("http_below_threshold"));
-		assertEquals(8L, counters.get("http_ineligible"));
-		assertEquals(9L, counters.get("http_oversize"));
-		assertEquals(10L, counters.get("http_fallback"));
-		assertEquals(11L, counters.get("prepare_failed"));
-		assertEquals(12L, counters.get("registrations_pooled"));
-		assertEquals(13L, counters.get("pool_hits"));
-		assertEquals(14L, counters.get("pool_exhausted"));
-		assertEquals(15L, counters.get("pool_oversize"));
-		assertEquals(16L, counters.get("pool_evicted"));
-		assertEquals(17L, counters.get("pool_discarded"));
-		assertEquals(18L, counters.get("pool_invalid_returns"));
+		assertEquals(expected, driver.driverStats().counters());
+	}
+
+	@Test
+	void poolLevelsAppearUnderTheirPublishedNames() throws Exception {
+		final var driver = newDriver(config(true, true), false);
+		final RdmaBufferPool pool = driver.bufferPool();
+		// Three buffers reserved at the peak; then one is idle, one leased and one gone.
+		final RdmaBufferPool.PooledBuffer idle = pool.acquire(MIB);
+		final RdmaBufferPool.PooledBuffer leased = pool.acquire(4 * MIB);
+		final RdmaBufferPool.PooledBuffer gone = pool.acquire(2 * MIB);
+		pool.release(idle);
+		pool.discard(gone);
+
+		final var gauges = driver.driverStats().gauges();
+
+		assertEquals(5L * MIB, gauges.get("pool_reserved_bytes"));
+		assertEquals(7L * MIB, gauges.get("pool_peak_reserved_bytes"));
+		assertEquals(2L, gauges.get("pool_buffers"));
+		assertEquals(1L, gauges.get("pool_idle_buffers"));
+		assertEquals(RdmaBufferPool.defaultMaxPooledBytes(), gauges.get("pool_budget_bytes"));
+		pool.release(leased);
 	}
 
 	@Test
@@ -143,14 +213,18 @@ final class S3RdmaDriverStatsTest {
 		final RdmaConfig config = config(true, true);
 		final FakeRdmaTransport transport = spy(new FakeRdmaTransport(config));
 		final var driver = S3RdmaStorageDriverTestSupport.newDriver(config, transport);
+		// The pool holds a leased and an idle buffer, so its levels describe registered memory.
+		final RdmaBufferPool.PooledBuffer leased = driver.bufferPool().acquire(MIB);
+		driver.bufferPool().release(driver.bufferPool().acquire(2 * MIB));
 		clearInvocations(transport);
 
 		for (int i = 0; i < 100; i++) {
-			driver.driverStats();
+			assertEquals(3L * MIB, driver.driverStats().gauges().get("pool_reserved_bytes"));
 		}
 
 		verify(transport, atLeastOnce()).isAvailable();
 		verifyNoMoreInteractions(transport);
+		driver.bufferPool().release(leased);
 	}
 
 	@Test
@@ -160,15 +234,22 @@ final class S3RdmaDriverStatsTest {
 		final var driver = S3RdmaStorageDriverTestSupport.newDriver(config, transport);
 		driver.pathStats().rdmaTransferred.add(4);
 		driver.bufferPool().hits.add(3);
+		driver.bufferPool().release(driver.bufferPool().acquire(MIB));
 		driver.close();
 		clearInvocations(transport);
 
 		final DriverStatsSnapshot stats = driver.driverStats();
 
 		assertEquals(COUNTERS, List.copyOf(stats.counters().keySet()));
+		assertEquals(GAUGES, List.copyOf(stats.gauges().keySet()));
 		assertEquals(4L, stats.counters().get("rdma_transferred"));
 		assertEquals(3L, stats.counters().get("pool_hits"));
 		assertEquals(0L, stats.gauges().get("transport_available"));
+		// The closed pool holds nothing; what it once reserved stays on record.
+		assertEquals(0L, stats.gauges().get("pool_reserved_bytes"));
+		assertEquals(0L, stats.gauges().get("pool_buffers"));
+		assertEquals(0L, stats.gauges().get("pool_idle_buffers"));
+		assertEquals((long) MIB, stats.gauges().get("pool_peak_reserved_bytes"));
 		verify(transport, atLeastOnce()).isAvailable();
 		verifyNoMoreInteractions(transport);
 	}
@@ -176,6 +257,12 @@ final class S3RdmaDriverStatsTest {
 	@Test
 	void statisticsAreReadableWhileTheDriverCloses() throws Exception {
 		final var driver = newDriver(config(true, true), false);
+		// Idle buffers for the close to deregister while the levels are read.
+		final List<RdmaBufferPool.PooledBuffer> leases = new ArrayList<>();
+		for (int i = 0; i < 2; i++) {
+			leases.add(driver.bufferPool().acquire(MIB));
+		}
+		leases.forEach(driver.bufferPool()::release);
 		final CountDownLatch reading = new CountDownLatch(1);
 		final AtomicBoolean closed = new AtomicBoolean();
 		final AtomicReference<Throwable> failure = new AtomicReference<>();
@@ -185,7 +272,7 @@ final class S3RdmaDriverStatsTest {
 				// Keep reading until the close has finished, and a while longer.
 				for (int afterClose = 0; afterClose < 1_000; reads++) {
 					final DriverStatsSnapshot stats = driver.driverStats();
-					if (stats.counters().size() != COUNTERS.size()) {
+					if (stats.counters().size() != COUNTERS.size() || stats.gauges().size() != GAUGES.size()) {
 						throw new AssertionError("incomplete statistics after " + reads + " reads: " + stats);
 					}
 					reading.countDown();
