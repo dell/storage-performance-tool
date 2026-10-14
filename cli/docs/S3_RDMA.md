@@ -223,7 +223,7 @@ When reading these rows:
 
 ### On the Prometheus endpoint
 
-`/metrics` on the entry node exports the fleet total of each running step: every counter as a Prometheus counter `spt_driver_<name>_total` and every gauge as `spt_driver_<name>`, with `spt_driver_reporting`, `spt_driver_partial` and a `driver` label. The counters and gauges are left out while the total is partial, and the series disappear when the step ends, so use the stored values below for a step's final statistics. The engine's [metrics guide](../../engine/core/spt-base/doc/usage/api/remote/METRICS.md#storage-driver-statistics) has the details.
+`/metrics` on the entry node exports the fleet total of each running step: every counter as a Prometheus counter `spt_driver_<name>_total` and every gauge as `spt_driver_<name>`, with `spt_driver_reporting`, `spt_driver_partial` and a `driver` label. The counters and gauges are left out while the total is partial, a counter never falls below a value it showed, and the series disappear when the step ends, so use the stored values below for a step's final statistics. The engine's [metrics guide](../../engine/core/spt-base/doc/usage/api/remote/METRICS.md#storage-driver-statistics) has the details.
 
 ### Stored values
 

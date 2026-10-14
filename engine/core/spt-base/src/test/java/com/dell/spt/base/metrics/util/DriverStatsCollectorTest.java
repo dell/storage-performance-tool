@@ -173,6 +173,48 @@ class DriverStatsCollectorTest {
 	}
 
 	@Test
+	void counterIsNeverExportedBelowWhatItsSeriesShowedWhileGaugesFollowTheTotal() {
+		final DistributedMetricsContext<?> step = step("read-1", OpType.READ, null);
+		// The second read finds the total of a refresh that read older snapshots and published last.
+		final DistributedAllMetricsSnapshot newer = snapshot(complete(
+						stats(DRIVER, Map.of("rdma_transferred", 20L), Map.of("pool_reserved_bytes", 5L))));
+		final DistributedAllMetricsSnapshot older = snapshot(complete(
+						stats(DRIVER, Map.of("rdma_transferred", 10L), Map.of("pool_reserved_bytes", 3L))));
+		final DistributedAllMetricsSnapshot latest = snapshot(complete(
+						stats(DRIVER, Map.of("rdma_transferred", 25L), Map.of("pool_reserved_bytes", 4L))));
+		when(step.lastSnapshot()).thenReturn(newer, older, latest);
+		final DriverStatsCollector collector = new DriverStatsCollector(() -> List.of(step));
+
+		final List<Double> counters = new ArrayList<>();
+		final List<Double> gauges = new ArrayList<>();
+		for (int i = 0; i < 3; i++) {
+			final Map<String, MetricFamilySamples> families = byName(collector.collect());
+			counters.add(only(families.get("spt_driver_rdma_transferred")).value);
+			gauges.add(only(families.get("spt_driver_pool_reserved_bytes")).value);
+		}
+
+		assertEquals(List.of(20.0, 20.0, 25.0), counters);
+		assertEquals(List.of(5.0, 3.0, 4.0), gauges);
+	}
+
+	@Test
+	void whatACounterShowedIsForgottenWhenItsStepLeaves() {
+		final DistributedMetricsContext<?> step = step("read-1", OpType.READ, null);
+		final DistributedAllMetricsSnapshot before = snapshot(complete(stats(DRIVER, Map.of("rdma_transferred", 20L), Map.of())));
+		final DistributedAllMetricsSnapshot after = snapshot(complete(stats(DRIVER, Map.of("rdma_transferred", 10L), Map.of())));
+		when(step.lastSnapshot()).thenReturn(before, after);
+		final List<DistributedMetricsContext<?>> running = new ArrayList<>(List.of(step));
+		final DriverStatsCollector collector = new DriverStatsCollector(() -> running);
+
+		assertEquals(20.0, only(byName(collector.collect()).get("spt_driver_rdma_transferred")).value);
+		running.clear();
+		assertEquals(List.of(), collector.collect());
+		running.add(step);
+
+		assertEquals(10.0, only(byName(collector.collect()).get("spt_driver_rdma_transferred")).value);
+	}
+
+	@Test
 	void collectionRefreshesEachStep() {
 		final DistributedMetricsContext<?> step = step("read-1", OpType.READ, null);
 
@@ -212,8 +254,7 @@ class DriverStatsCollectorTest {
 	@SuppressWarnings({"unchecked", "rawtypes"
 	})
 	private static DistributedMetricsContext<?> step(final String stepId, final OpType opType, final DriverStatsTotal total) {
-		final DistributedAllMetricsSnapshot snapshot = mock(DistributedAllMetricsSnapshot.class);
-		when(snapshot.driverStatsTotal()).thenReturn(total);
+		final DistributedAllMetricsSnapshot snapshot = snapshot(total);
 		final DistributedMetricsContext context = mock(DistributedMetricsContext.class);
 		when(context.loadStepId()).thenReturn(stepId);
 		when(context.opType()).thenReturn(opType);
@@ -225,6 +266,12 @@ class DriverStatsCollectorTest {
 		when(context.runId()).thenReturn(7L);
 		when(context.lastSnapshot()).thenReturn(snapshot);
 		return context;
+	}
+
+	private static DistributedAllMetricsSnapshot snapshot(final DriverStatsTotal total) {
+		final DistributedAllMetricsSnapshot snapshot = mock(DistributedAllMetricsSnapshot.class);
+		when(snapshot.driverStatsTotal()).thenReturn(total);
+		return snapshot;
 	}
 
 	/** Returns the warnings logged while the action runs. */

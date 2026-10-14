@@ -29,6 +29,10 @@ import java.util.function.Supplier;
  * {@code driver_reporting} and {@code driver_partial} are exported for every total. The series
  * leave with the step. Its final values are on the fleet metrics endpoint and in the run results.
  *
+ * <p>A counter is never exported below the highest value exported before for its series, which
+ * Prometheus would read as a reset. A step's context is refreshed by several callers at once, and
+ * a refresh that read older snapshots can publish its total after a newer one.
+ *
  * <p>A driver names its statistics freely. A name Prometheus does not accept is exported in a
  * valid form, and a statistic whose name would take the series of another is left out. Each is
  * logged once.
@@ -45,6 +49,8 @@ public final class DriverStatsCollector extends Collector implements Collector.D
 
 	private final Supplier<? extends Collection<? extends DistributedMetricsContext>> contexts;
 	private final Set<String> logged = ConcurrentHashMap.newKeySet();
+	/** The highest value exported for each counter series of the steps that run. */
+	private final Map<Series, Double> highest = new ConcurrentHashMap<>();
 
 	/** @param contexts the distributed metrics contexts of the steps that run */
 	public DriverStatsCollector(final Supplier<? extends Collection<? extends DistributedMetricsContext>> contexts) {
@@ -60,14 +66,18 @@ public final class DriverStatsCollector extends Collector implements Collector.D
 	@Override
 	public List<MetricFamilySamples> collect() {
 		final List<Step> steps = new ArrayList<>();
+		final Set<List<String>> running = new HashSet<>();
 		for (final DistributedMetricsContext<?> context : contexts.get()) {
+			final List<String> labelValues = List.of(PrometheusMetricsExporterImpl.labelValues(context));
+			running.add(labelValues);
 			context.refreshLastSnapshot();
 			final DistributedAllMetricsSnapshot snapshot = context.lastSnapshot();
 			final DriverStatsTotal total = snapshot == null ? null : snapshot.driverStatsTotal();
 			if (total != null) {
-				steps.add(new Step(List.of(PrometheusMetricsExporterImpl.labelValues(context)), total));
+				steps.add(new Step(labelValues, total));
 			}
 		}
+		highest.keySet().removeIf(series -> !running.contains(series.step()));
 		// The order decides which of two statistics that take the same series is left out.
 		steps.sort(Comparator.comparing(step -> String.join("\u0000", step.labelValues())));
 		final Families families = new Families();
@@ -90,7 +100,12 @@ public final class DriverStatsCollector extends Collector implements Collector.D
 		}
 		sum.counters().forEach((statistic, value) -> {
 			final String family = statisticName(driver, statistic, Type.COUNTER);
-			if (!families.add(family, Type.COUNTER, HELP_COUNTER, labelValues, value)) {
+			final Series series = new Series(step.labelValues(), driver, family);
+			final Double before = highest.get(series);
+			final double exported = before == null ? value : Math.max(value, before);
+			if (families.add(family, Type.COUNTER, HELP_COUNTER, labelValues, exported)) {
+				highest.merge(series, exported, Math::max);
+			} else {
 				leftOut(driver, statistic, family);
 			}
 		});
@@ -137,6 +152,9 @@ public final class DriverStatsCollector extends Collector implements Collector.D
 
 	/** The fleet total of one step's metrics context, with the values of its labels. */
 	private record Step(List<String> labelValues, DriverStatsTotal total) {}
+
+	/** A counter series: the labels of its step, its driver and its family. */
+	private record Series(List<String> step, String driver, String family) {}
 
 	/** The families of one collection and the sample names they take. */
 	private static final class Families {
