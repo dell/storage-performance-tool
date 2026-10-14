@@ -284,15 +284,18 @@ func terminalDeleteOutcomeError(metrics map[string]*deletemetrics.Metrics) error
 }
 
 // captureStoredDriverStats stores the terminal driver statistics of the run's steps. It runs
-// for every workload. A refused or failed capture stores nothing and records why; it never
-// fails the run, and it is independent of the DELETE capture. A capture without statistics
-// is recorded only for a run that selected the S3-RDMA driver.
+// for every workload. The steps that ended earlier in the run come from observed, which may be
+// nil; the capture made here adds the steps the engine still reports. A refused or failed
+// capture stores nothing and records why; it never fails the run, and it is independent of the
+// DELETE capture. A capture without statistics is recorded only for a run that selected the
+// S3-RDMA driver.
 func captureStoredDriverStats(
 	ctx context.Context,
 	baseURL string,
 	expectedRunID int64,
 	stepIDs []string,
 	metadata *runMetadata,
+	observed *driverStatsCollector,
 ) {
 	if metadata == nil {
 		return
@@ -305,6 +308,9 @@ func captureStoredDriverStats(
 		captured, err = captureDriverStatsFunc(
 			ctx, baseURL, expectedRunID, stepIDs, expectedContributorIDs,
 			len(expectedContributorIDs) == 1)
+	}
+	if err == nil {
+		captured, err = observed.withFinal(captured)
 	}
 	if err != nil {
 		metadata.DriverStatsError = err.Error()
@@ -505,6 +511,8 @@ var (
 	discoverFleetStepIDsFunc      = results.DiscoverFleetStepIDsForRunContext
 	captureDeleteMetricsFunc      = results.CaptureTerminalDeleteMetricsForRunContext
 	captureDriverStatsFunc        = results.CaptureTerminalDriverStatsForRunContext
+	observeDriverStatsFunc        = results.ObserveTerminalDriverStatsForRunContext
+	driverStatsCollectInterval    = constants.AutoResultsDriverStatsInterval
 	newResultsFetcherFunc         = func(baseURL, outputDir string) autoResultsFetcher {
 		return &fetcherAdapter{results.NewFetcher(baseURL, outputDir)}
 	}
@@ -716,6 +724,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			var mu sync.Mutex
 			seen := make(map[string]struct{})
 			fleetSeen := make(map[string]struct{})
+			driverStats := &driverStatsCollector{}
 			stopCh := make(chan struct{})
 			var pollWG sync.WaitGroup
 			pollWG.Add(1)
@@ -723,12 +732,23 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				defer pollWG.Done()
 				ticker := time.NewTicker(constants.AutoResultsDiscoveryInterval)
 				defer ticker.Stop()
+				driverStatsTicker := time.NewTicker(driverStatsCollectInterval)
+				defer driverStatsTicker.Stop()
 				for {
 					select {
 					case <-stopCh:
 						return
 					case <-parentCtx.Done():
 						return
+					case <-driverStatsTicker.C:
+						mu.Lock()
+						_, runtimeStepIDs := selectResultStepIDs(expectedStepIDs, fleetDiscovered, discovered)
+						mu.Unlock()
+						// The engine names its rows by the runtime identifiers. Under the planned
+						// ones an observation would refuse a finished step as unexpected.
+						if len(runtimeStepIDs) > 0 {
+							driverStats.observe(parentCtx, baseURL, expectedRunID, runtimeStepIDs, metadata)
+						}
 					case <-ticker.C:
 						if ids, err := discoverStepIDsFunc(parentCtx, baseURL, expectedRunID); err == nil && len(ids) > 0 {
 							mu.Lock()
@@ -905,7 +925,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				} else {
 					outcome.DeleteTerminalErr = terminalDeleteOutcomeError(metadata.DeleteMetrics)
 				}
-				captureStoredDriverStats(artifactCtx, baseURL, expectedRunID, stepIDs, metadata)
+				captureStoredDriverStats(artifactCtx, baseURL, expectedRunID, stepIDs, metadata, driverStats)
 				if metadata.DriverStatsError != "" {
 					logging.LogWarn("auto-results", "driver statistics not stored", "reason", metadata.DriverStatsError)
 				}

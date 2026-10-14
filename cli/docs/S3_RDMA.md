@@ -218,10 +218,11 @@ When reading these rows:
 - A fleet `transport_available` below `drivers` means some nodes run without RDMA. Their node rows show which, and count their payload requests as `http_rdma_unavailable`.
 - While a step runs, the counters are read one after another and requests complete in between. `rdma_requests_sent` can therefore differ from the sum of its outcomes by the requests in flight, and briefly by a few more in either direction. Compare counters exactly only on a finished step.
 - To find the node behind a fleet problem count, read `/metrics/json` on each node: a node row has the same names and no `reporting` or `partial`.
+- The engine keeps the row of a finished step for a short time after the step ends (currently 20 seconds) and then drops it. In a run of several steps, the rows of the earlier steps are gone before the run ends. The stored values below keep the final statistics of every step.
 
 ### Stored values
 
-When a run finishes, the CLI stores each step's final statistics in `spt_run_params.json` under `driverStats`, keyed by step ID, as reported: names the CLI does not know are kept. The stored values are those of the fleet row, which a single-host run has as well, as a total of one node.
+When a run finishes, the CLI stores each step's final statistics in `spt_run_params.json` under `driverStats`, keyed by step ID, as reported: names the CLI does not know are kept. The stored values are those of the fleet row, which a single-host run has as well, as a total of one node. The CLI reads them while it monitors the run, as each step ends, so the steps that end early are stored as well.
 
 The final values are taken when the step ends, after its requests have completed and the driver has stopped, and before the driver closes. The `RDMA data path summary` log line is written at close. The two agree on every count, with two exceptions: `poolDiscarded` in the log line also counts the buffers released at close, and a request that was still without an outcome when the step ended is counted by the log line if it ends before the driver closes. The stored pool gauges describe the pool as the step left it, not the empty pool after close.
 

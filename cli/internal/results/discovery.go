@@ -254,6 +254,42 @@ func CaptureTerminalDriverStatsForRunContext(
 		})
 }
 
+// DriverStatsObservation is what one metrics response says about the driver statistics of the
+// steps of a run that have ended. A step that is still running is in neither map.
+type DriverStatsObservation struct {
+	// Steps holds the terminal statistics that passed every check, by step.
+	Steps map[string]*driverstats.Stats
+	// Refused holds the check that the statistics of a step failed, by step.
+	Refused map[string]error
+}
+
+// ObserveTerminalDriverStatsForRunContext reads the terminal driver statistics of the expected
+// steps that have ended, while the run may still be in progress. The engine keeps the metrics
+// row of a finished step for a limited time, so a run of several steps is observed repeatedly
+// and CaptureTerminalDriverStatsForRunContext then reads what is left at its end. The checks
+// are those of the capture. An error means that the response could not be read and says
+// nothing about any step.
+func ObserveTerminalDriverStatsForRunContext(
+	ctx context.Context,
+	baseURL string,
+	expectedRunID int64,
+	expectedStepIDs []string,
+	expectedContributorIDs []string,
+	allowNodeFallback bool,
+) (*DriverStatsObservation, error) {
+	const capture = "observe terminal driver statistics"
+	target, err := newTerminalCaptureTarget(
+		captureKindDriverStats, expectedRunID, expectedStepIDs, expectedContributorIDs)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", capture, err)
+	}
+	return captureFromAuthoritativeEndpoint(
+		capture, target, allowNodeFallback,
+		func(metricsPath, wantScope string) (*DriverStatsObservation, bool, error) {
+			return observeTerminalDriverStatsFromPath(ctx, baseURL, metricsPath, wantScope, target)
+		})
+}
+
 // captureFromAuthoritativeEndpoint applies the endpoint rule terminal captures share: fleet
 // metrics are authoritative when that endpoint exists, and node metrics are only a single-node
 // compatibility fallback when it does not. fromPath reports whether its endpoint exists.
@@ -433,9 +469,76 @@ func captureTerminalDeleteMetricsFromPath(
 	return metrics, true, nil
 }
 
-// captureTerminalDriverStatsFromPath differs from the DELETE capture in one rule: a step
-// without statistics is not missing. Drivers that report nothing, engines that predate the
-// field and the other operation rows of a mixed step all publish rows without driver_stats.
+// driverStatsOutcome is what one metrics row says about the driver statistics of a step: the
+// statistics, or the check they failed. running marks a row that is not terminal yet. Its
+// error is the one a terminal capture reports; an observation of a run in progress skips it.
+type driverStatsOutcome struct {
+	stepID  string
+	stats   *driverstats.Stats
+	running bool
+	err     error
+}
+
+// driverStatsRows differs from the DELETE capture in one rule: a step without statistics is
+// not missing. Drivers that report nothing, engines that predate the field and the other
+// operation rows of a mixed step all publish rows without driver_stats.
+func driverStatsRows(
+	ctx context.Context,
+	baseURL string,
+	metricsPath string,
+	wantScope string,
+	target *terminalCaptureTarget,
+) ([]driverStatsOutcome, bool, error) {
+	steps, available, err := fetchMetricsRows[terminalDriverStatsStep](ctx, baseURL, metricsPath)
+	if err != nil || !available {
+		return nil, available, err
+	}
+	checker := target.checker(metricsPath, wantScope)
+	rows := make([]driverStatsOutcome, 0, len(target.steps))
+	for i := range steps {
+		step := &steps[i]
+		admitted, admitErr := checker.admit(&step.terminalMetricsRow, hasJSONValue(step.DriverStats))
+		if admitErr != nil {
+			rows = append(rows, driverStatsOutcome{stepID: step.StepID, running: !step.Terminal, err: admitErr})
+			continue
+		}
+		if !admitted {
+			continue
+		}
+		stats, statsErr := checker.driverStats(step)
+		rows = append(rows, driverStatsOutcome{
+			stepID: step.StepID, stats: stats, running: !step.Terminal, err: statsErr,
+		})
+	}
+	return rows, true, nil
+}
+
+// driverStats returns the statistics of an admitted row, or the check they fail.
+func (c *terminalRowChecker) driverStats(step *terminalDriverStatsStep) (*driverstats.Stats, error) {
+	if !c.authoritative(&step.terminalMetricsRow) {
+		return nil, fmt.Errorf(
+			"%s returned incomplete authoritative driver statistics step %q", c.metricsPath, step.StepID)
+	}
+	if !c.contributorsComplete(&step.terminalMetricsRow) {
+		return nil, fmt.Errorf(
+			"%s returned incomplete contributor evidence for driver statistics step %q", c.metricsPath, step.StepID)
+	}
+	fleetContributors := 0
+	if c.fleet() {
+		fleetContributors = len(c.target.contributors)
+	}
+	stats := &driverstats.Stats{}
+	if decodeErr := json.Unmarshal(step.DriverStats, stats); decodeErr != nil {
+		return nil, fmt.Errorf("%s driver statistics step %q: %w", c.metricsPath, step.StepID, decodeErr)
+	}
+	if validateErr := driverstats.ValidateTerminal(stats, fleetContributors); validateErr != nil {
+		return nil, fmt.Errorf("%s driver statistics step %q: %w", c.metricsPath, step.StepID, validateErr)
+	}
+	return stats, nil
+}
+
+// captureTerminalDriverStatsFromPath refuses the whole response when a row fails a check or is
+// not terminal: at the end of a run every step has ended.
 func captureTerminalDriverStatsFromPath(
 	ctx context.Context,
 	baseURL string,
@@ -443,43 +546,49 @@ func captureTerminalDriverStatsFromPath(
 	wantScope string,
 	target *terminalCaptureTarget,
 ) (map[string]*driverstats.Stats, bool, error) {
-	steps, available, err := fetchMetricsRows[terminalDriverStatsStep](ctx, baseURL, metricsPath)
+	rows, available, err := driverStatsRows(ctx, baseURL, metricsPath, wantScope, target)
 	if err != nil || !available {
 		return nil, available, err
 	}
-	checker := target.checker(metricsPath, wantScope)
-	fleetContributors := 0
-	if checker.fleet() {
-		fleetContributors = len(target.contributors)
-	}
-	captured := make(map[string]*driverstats.Stats)
-	for i := range steps {
-		step := &steps[i]
-		admitted, admitErr := checker.admit(&step.terminalMetricsRow, hasJSONValue(step.DriverStats))
-		if admitErr != nil {
-			return nil, true, admitErr
+	captured := make(map[string]*driverstats.Stats, len(rows))
+	for _, row := range rows {
+		if row.err != nil {
+			return nil, true, row.err
 		}
-		if !admitted {
-			continue
-		}
-		if !checker.authoritative(&step.terminalMetricsRow) {
-			return nil, true, fmt.Errorf(
-				"%s returned incomplete authoritative driver statistics step %q", metricsPath, step.StepID)
-		}
-		if !checker.contributorsComplete(&step.terminalMetricsRow) {
-			return nil, true, fmt.Errorf(
-				"%s returned incomplete contributor evidence for driver statistics step %q", metricsPath, step.StepID)
-		}
-		stats := &driverstats.Stats{}
-		if decodeErr := json.Unmarshal(step.DriverStats, stats); decodeErr != nil {
-			return nil, true, fmt.Errorf("%s driver statistics step %q: %w", metricsPath, step.StepID, decodeErr)
-		}
-		if validateErr := driverstats.ValidateTerminal(stats, fleetContributors); validateErr != nil {
-			return nil, true, fmt.Errorf("%s driver statistics step %q: %w", metricsPath, step.StepID, validateErr)
-		}
-		captured[step.StepID] = stats
+		captured[row.stepID] = row.stats
 	}
 	return captured, true, nil
+}
+
+// observeTerminalDriverStatsFromPath judges each step on its own and leaves out the steps that
+// are still running: their statistics are not final.
+func observeTerminalDriverStatsFromPath(
+	ctx context.Context,
+	baseURL string,
+	metricsPath string,
+	wantScope string,
+	target *terminalCaptureTarget,
+) (*DriverStatsObservation, bool, error) {
+	rows, available, err := driverStatsRows(ctx, baseURL, metricsPath, wantScope, target)
+	if err != nil || !available {
+		return nil, available, err
+	}
+	observation := &DriverStatsObservation{
+		Steps:   make(map[string]*driverstats.Stats, len(rows)),
+		Refused: make(map[string]error),
+	}
+	for _, row := range rows {
+		switch {
+		case row.running:
+		case row.err != nil:
+			// A refusal decides for the step, also over statistics an earlier row gave it.
+			delete(observation.Steps, row.stepID)
+			observation.Refused[row.stepID] = row.err
+		default:
+			observation.Steps[row.stepID] = row.stats
+		}
+	}
+	return observation, true, nil
 }
 
 // hasJSONValue reports whether an optional row field is present and not null.

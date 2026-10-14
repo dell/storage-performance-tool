@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/driverstats"
@@ -224,6 +225,26 @@ func TestCaptureTerminalDriverStatsKeepsUnknownNames(t *testing.T) {
 }
 
 func TestCaptureTerminalDriverStatsFailsClosedOnInvalidFleetResponse(t *testing.T) {
+	for name, fleet := range invalidFleetDriverStatsResponses() {
+		t.Run(name, func(t *testing.T) {
+			server := driverStatsServer(fleet, endpointNotFound)
+			defer server.Close()
+			captured, err := CaptureTerminalDriverStatsForRunContext(
+				context.Background(), server.URL, driverStatsRunID, []string{"read-current"},
+				driverStatsFleetContributors, false)
+			if err == nil {
+				t.Fatalf("invalid fleet response was accepted: %s", asJSON(t, captured))
+			}
+			if captured != nil {
+				t.Fatalf("refused capture returned statistics: %s", asJSON(t, captured))
+			}
+		})
+	}
+}
+
+// invalidFleetDriverStatsResponses are fleet responses for the expected step "read-current"
+// that a terminal capture refuses, by what is wrong with them.
+func invalidFleetDriverStatsResponses() map[string]http.HandlerFunc {
 	valid := func() map[string]any {
 		return driverStatsRow(driverStatsRunID, "read-current", "READ", "fleet", "aggregate", fleetDriverStats(2))
 	}
@@ -237,7 +258,7 @@ func TestCaptureTerminalDriverStatsFailsClosedOnInvalidFleetResponse(t *testing.
 		mutate(stats)
 		return metricsRows(driverStatsRow(driverStatsRunID, "read-current", "READ", "fleet", "aggregate", stats))
 	}
-	tests := map[string]http.HandlerFunc{
+	return map[string]http.HandlerFunc{
 		"malformed response": func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`[{"run_id":"17","step_id":"read-current","driver_stats":`))
 		},
@@ -282,21 +303,6 @@ func TestCaptureTerminalDriverStatsFailsClosedOnInvalidFleetResponse(t *testing.
 		"two rows with statistics for one step": metricsRows(
 			valid(),
 			driverStatsRow(driverStatsRunID, "read-current", "CREATE", "fleet", "aggregate", fleetDriverStats(2))),
-	}
-	for name, fleet := range tests {
-		t.Run(name, func(t *testing.T) {
-			server := driverStatsServer(fleet, endpointNotFound)
-			defer server.Close()
-			captured, err := CaptureTerminalDriverStatsForRunContext(
-				context.Background(), server.URL, driverStatsRunID, []string{"read-current"},
-				driverStatsFleetContributors, false)
-			if err == nil {
-				t.Fatalf("invalid fleet response was accepted: %s", asJSON(t, captured))
-			}
-			if captured != nil {
-				t.Fatalf("refused capture returned statistics: %s", asJSON(t, captured))
-			}
-		})
 	}
 }
 
@@ -406,6 +412,161 @@ func TestCaptureTerminalDriverStatsRequiresExactExpectedIdentity(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestObserveTerminalDriverStatsLeavesOutStepsThatAreStillRunning(t *testing.T) {
+	running := driverStatsRow(driverStatsRunID, "read", "READ", "fleet", "aggregate", fleetDriverStats(2))
+	running["terminal"] = false
+	// The run learns the identifiers of its steps while it is monitored: a step can be running
+	// before the caller can name it.
+	notNamedYet := driverStatsRow(driverStatsRunID, "started-just-now", "READ", "fleet", "aggregate", fleetDriverStats(2))
+	notNamedYet["terminal"] = false
+	server := driverStatsServer(
+		metricsRows(
+			driverStatsRow(driverStatsRunID, "seed", "CREATE", "fleet", "aggregate", fleetDriverStats(2)),
+			running,
+			notNamedYet,
+			// A step that has not started has no row; a step of a driver that reports nothing has
+			// a row without statistics.
+			driverStatsRow(driverStatsRunID, "cleanup", "DELETE", "fleet", "aggregate", nil),
+		),
+		endpointNotFound)
+	defer server.Close()
+
+	observation, err := ObserveTerminalDriverStatsForRunContext(
+		context.Background(), server.URL, driverStatsRunID, []string{"seed", "read", "cleanup", "later"},
+		driverStatsFleetContributors, false)
+	if err != nil {
+		t.Fatalf("observe a run in progress: %v", err)
+	}
+	want := map[string]*driverstats.Stats{"seed": {
+		Driver:    "s3-rdma",
+		Counters:  map[string]int64{"rdma_transferred": 120, "http_fallback": 0},
+		Gauges:    map[string]int64{"pool_reserved_bytes": 8192, "transport_available": 2},
+		Reporting: 2,
+	}}
+	if !reflect.DeepEqual(observation.Steps, want) {
+		t.Fatalf("observed statistics = %s, want %s", asJSON(t, observation.Steps), asJSON(t, want))
+	}
+	if len(observation.Refused) != 0 {
+		t.Fatalf("a run in progress was refused: %v", observation.Refused)
+	}
+
+	// The same response is not a terminal capture: the running step refuses it.
+	captured, err := CaptureTerminalDriverStatsForRunContext(
+		context.Background(), server.URL, driverStatsRunID, []string{"seed", "read", "cleanup", "later"},
+		driverStatsFleetContributors, false)
+	if err == nil || captured != nil {
+		t.Fatalf("terminal capture accepted a running step: err=%v captured=%s", err, asJSON(t, captured))
+	}
+}
+
+func TestObserveTerminalDriverStatsJudgesEachStepOnItsOwn(t *testing.T) {
+	partial := fleetDriverStats(1)
+	partial["partial"] = true
+	server := driverStatsServer(
+		metricsRows(
+			driverStatsRow(driverStatsRunID, "seed", "CREATE", "fleet", "aggregate", fleetDriverStats(2)),
+			driverStatsRow(driverStatsRunID, "read", "READ", "fleet", "aggregate", partial),
+		),
+		endpointNotFound)
+	defer server.Close()
+
+	observation, err := ObserveTerminalDriverStatsForRunContext(
+		context.Background(), server.URL, driverStatsRunID, []string{"seed", "read"},
+		driverStatsFleetContributors, false)
+	if err != nil {
+		t.Fatalf("observe: %v", err)
+	}
+	if _, kept := observation.Steps["seed"]; !kept || len(observation.Steps) != 1 {
+		t.Fatalf("observed statistics = %s, want those of the valid step only", asJSON(t, observation.Steps))
+	}
+	if refusal := observation.Refused["read"]; refusal == nil || len(observation.Refused) != 1 ||
+		!strings.Contains(refusal.Error(), `"read"`) {
+		t.Fatalf("refused steps = %v, want the partial step with its reason", observation.Refused)
+	}
+}
+
+func TestObserveTerminalDriverStatsRefusesWhatTheCaptureRefuses(t *testing.T) {
+	// What the observation makes of each response the capture refuses: it cannot be read, its
+	// step is still running, or the named step is refused.
+	const unreadable, running = "unreadable", "running"
+	outcomes := map[string]string{
+		"malformed response":          unreadable,
+		"server error":                unreadable,
+		"not terminal":                running,
+		"unexpected current-run step": "read-unplanned",
+	}
+	for name, fleet := range invalidFleetDriverStatsResponses() {
+		t.Run(name, func(t *testing.T) {
+			server := driverStatsServer(fleet, endpointNotFound)
+			defer server.Close()
+			observation, err := ObserveTerminalDriverStatsForRunContext(
+				context.Background(), server.URL, driverStatsRunID, []string{"read-current"},
+				driverStatsFleetContributors, false)
+			outcome, listed := outcomes[name]
+			if !listed {
+				outcome = "read-current"
+			}
+			switch outcome {
+			case unreadable:
+				if err == nil || observation != nil {
+					t.Fatalf("unreadable response was observed: err=%v observation=%+v", err, observation)
+				}
+			case running:
+				if err != nil || len(observation.Steps) != 0 || len(observation.Refused) != 0 {
+					t.Fatalf("running step was judged: err=%v observation=%+v", err, observation)
+				}
+			default:
+				if err != nil {
+					t.Fatalf("observe: %v", err)
+				}
+				if observation.Refused[outcome] == nil || len(observation.Refused) != 1 {
+					t.Fatalf("refused steps = %v, want %q", observation.Refused, outcome)
+				}
+				if _, kept := observation.Steps[outcome]; kept {
+					t.Fatalf("refused step %q also has statistics: %s", outcome, asJSON(t, observation.Steps))
+				}
+			}
+		})
+	}
+}
+
+func TestObserveTerminalDriverStatsFollowsTheEndpointRuleOfTheCapture(t *testing.T) {
+	nodeStats := map[string]any{"driver": "s3-rdma", "counters": map[string]int64{"http_rdma_unavailable": 9}}
+	node := metricsRows(driverStatsRow(driverStatsRunID, "create-current", "CREATE", "node", "entry", nodeStats))
+
+	t.Run("node row of a single local engine without a fleet endpoint", func(t *testing.T) {
+		server := driverStatsServer(endpointNotFound, node)
+		defer server.Close()
+		observation, err := ObserveTerminalDriverStatsForRunContext(
+			context.Background(), server.URL, driverStatsRunID, []string{"create-current"}, []string{"local"}, true)
+		if err != nil {
+			t.Fatalf("observe: %v", err)
+		}
+		if got := observation.Steps["create-current"]; got == nil || got.Counters["http_rdma_unavailable"] != 9 {
+			t.Fatalf("observed statistics = %s, want the node row", asJSON(t, observation.Steps))
+		}
+	})
+	t.Run("no node fallback for a fleet", func(t *testing.T) {
+		server := driverStatsServer(endpointNotFound, node)
+		defer server.Close()
+		observation, err := ObserveTerminalDriverStatsForRunContext(
+			context.Background(), server.URL, driverStatsRunID, []string{"create-current"},
+			driverStatsFleetContributors, false)
+		if err == nil || observation != nil {
+			t.Fatalf("fleet observation fell back to a node row: err=%v observation=%+v", err, observation)
+		}
+	})
+	t.Run("expected identity is required", func(t *testing.T) {
+		server := driverStatsServer(node, node)
+		defer server.Close()
+		observation, err := ObserveTerminalDriverStatsForRunContext(
+			context.Background(), server.URL, driverStatsRunID, nil, []string{"local"}, true)
+		if err == nil || observation != nil {
+			t.Fatalf("observation without expected steps was accepted: err=%v observation=%+v", err, observation)
+		}
+	})
 }
 
 // driverStatsRow builds a terminal metrics row as the engine writes it; stats is its

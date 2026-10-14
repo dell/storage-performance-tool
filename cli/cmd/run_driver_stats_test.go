@@ -11,7 +11,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
@@ -52,6 +55,39 @@ func stubDriverStatsCapture(
 	return calls
 }
 
+type driverStatsObservationResult struct {
+	observation *results.DriverStatsObservation
+	err         error
+}
+
+// stubDriverStatsObservations replaces the observation for one test and records its calls.
+// Each call returns the next scripted result; calls after the last one observe nothing.
+func stubDriverStatsObservations(
+	t *testing.T, script ...driverStatsObservationResult,
+) *[]driverStatsCaptureCall {
+	t.Helper()
+	original := observeDriverStatsFunc
+	t.Cleanup(func() { observeDriverStatsFunc = original })
+	calls := &[]driverStatsCaptureCall{}
+	observeDriverStatsFunc = func(
+		_ context.Context, baseURL string, runID int64, stepIDs, contributorIDs []string,
+		allowNodeFallback bool,
+	) (*results.DriverStatsObservation, error) {
+		next := len(*calls)
+		*calls = append(*calls, driverStatsCaptureCall{
+			baseURL: baseURL, runID: runID,
+			stepIDs:           append([]string(nil), stepIDs...),
+			contributorIDs:    append([]string(nil), contributorIDs...),
+			allowNodeFallback: allowNodeFallback,
+		})
+		if next >= len(script) {
+			return nil, nil
+		}
+		return script[next].observation, script[next].err
+	}
+	return calls
+}
+
 func TestCaptureStoredDriverStatsRunsForEveryWorkload(t *testing.T) {
 	steps := []string{"mt-001-20260823.100000.001-seed", "mt-002-20260823.100000.001-work"}
 	for _, workloadType := range []string{
@@ -67,7 +103,7 @@ func TestCaptureStoredDriverStatsRunsForEveryWorkload(t *testing.T) {
 				Hosts:        []runHostMetadata{{Host: "local", IsLocal: true}},
 			}
 
-			captureStoredDriverStats(context.Background(), "http://engine", 77, steps, metadata)
+			captureStoredDriverStats(context.Background(), "http://engine", 77, steps, metadata, nil)
 
 			want := []driverStatsCaptureCall{{
 				baseURL: "http://engine", runID: 77, stepIDs: steps,
@@ -93,7 +129,7 @@ func TestCaptureStoredDriverStatsBindsFleetContributorsOfMultiHostRun(t *testing
 		},
 	}
 
-	captureStoredDriverStats(context.Background(), "http://engine", 77, []string{"mt-001-read"}, metadata)
+	captureStoredDriverStats(context.Background(), "http://engine", 77, []string{"mt-001-read"}, metadata, nil)
 
 	if len(*calls) != 1 || (*calls)[0].allowNodeFallback ||
 		!reflect.DeepEqual((*calls)[0].contributorIDs, []string{"local", "192.0.2.25:1099"}) {
@@ -113,7 +149,7 @@ func TestCaptureStoredDriverStatsStoresNothingWhenRefused(t *testing.T) {
 			DriverStats: map[string]*driverstats.Stats{"mt-001-read": {Driver: "stale"}},
 		}
 
-		captureStoredDriverStats(context.Background(), "http://engine", 77, []string{"mt-001-read"}, metadata)
+		captureStoredDriverStats(context.Background(), "http://engine", 77, []string{"mt-001-read"}, metadata, nil)
 
 		if metadata.DriverStats != nil || metadata.DriverStatsError != refusal.Error() {
 			t.Fatalf("refused capture stored %+v error %q", metadata.DriverStats, metadata.DriverStatsError)
@@ -124,7 +160,7 @@ func TestCaptureStoredDriverStatsStoresNothingWhenRefused(t *testing.T) {
 		calls := stubDriverStatsCapture(t, map[string]*driverstats.Stats{"mt-001-read": {Driver: "s3-rdma"}}, nil)
 		metadata := &runMetadata{Hosts: []runHostMetadata{{Host: "worker-a"}, {Host: "worker-b"}}}
 
-		captureStoredDriverStats(context.Background(), "http://engine", 77, []string{"mt-001-read"}, metadata)
+		captureStoredDriverStats(context.Background(), "http://engine", 77, []string{"mt-001-read"}, metadata, nil)
 
 		if len(*calls) != 0 {
 			t.Fatalf("capture ran without contributor identities: %+v", *calls)
@@ -135,7 +171,7 @@ func TestCaptureStoredDriverStatsStoresNothingWhenRefused(t *testing.T) {
 	})
 
 	t.Run("no metadata", func(_ *testing.T) {
-		captureStoredDriverStats(context.Background(), "http://engine", 77, []string{"mt-001-read"}, nil)
+		captureStoredDriverStats(context.Background(), "http://engine", 77, []string{"mt-001-read"}, nil, nil)
 	})
 }
 
@@ -165,7 +201,7 @@ func TestCaptureStoredDriverStatsRecordsThatASelectedS3RDMADriverReportedNone(t 
 				ScenarioParams: scenario.Params{S3Driver: tc.s3Driver},
 			}
 
-			captureStoredDriverStats(context.Background(), "http://engine", 77, []string{"mt-001-read"}, metadata)
+			captureStoredDriverStats(context.Background(), "http://engine", 77, []string{"mt-001-read"}, metadata, nil)
 
 			if metadata.DriverStatsError != tc.wantError {
 				t.Fatalf("stored reason = %q, want %q", metadata.DriverStatsError, tc.wantError)
@@ -178,6 +214,169 @@ func TestCaptureStoredDriverStatsRecordsThatASelectedS3RDMADriverReportedNone(t 
 			}
 		})
 	}
+}
+
+func TestCaptureStoredDriverStatsAddsTheStepsThatEndedDuringTheRun(t *testing.T) {
+	const seedStep, readStep, cleanupStep = "mt-001-seed", "mt-002-read", "mt-003-delete"
+	stats := func(transferred int64) *driverstats.Stats {
+		return &driverstats.Stats{
+			Driver: "s3-rdma", Counters: map[string]int64{"rdma_transferred": transferred}, Reporting: 1,
+		}
+	}
+	ended := func(steps map[string]*driverstats.Stats) driverStatsObservationResult {
+		return driverStatsObservationResult{observation: &results.DriverStatsObservation{Steps: steps}}
+	}
+	refused := func(steps map[string]error) driverStatsObservationResult {
+		return driverStatsObservationResult{observation: &results.DriverStatsObservation{Refused: steps}}
+	}
+	seedRefusal := errors.New(
+		`/metrics/fleet/json returned incomplete contributor evidence for driver statistics step "mt-001-seed"`)
+	readRefusal := errors.New(`/metrics/fleet/json driver statistics step "mt-002-read": statistics are partial`)
+	captureFailure := errors.New("GET /metrics/fleet/json: connection refused")
+	type steps = map[string]*driverstats.Stats
+
+	tests := map[string]struct {
+		observations []driverStatsObservationResult
+		final        steps
+		finalErr     error
+		want         steps
+		wantErr      error
+	}{
+		"a step that ended early is stored after the engine dropped its row": {
+			observations: []driverStatsObservationResult{
+				ended(steps{}), ended(steps{seedStep: stats(8)}), ended(steps{seedStep: stats(8)}), ended(steps{}),
+			},
+			final: steps{readStep: stats(64), cleanupStep: stats(0)},
+			want:  steps{seedStep: stats(8), readStep: stats(64), cleanupStep: stats(0)},
+		},
+		"nothing ended before the capture at the end": {
+			final: steps{readStep: stats(64)},
+			want:  steps{readStep: stats(64)},
+		},
+		"the capture at the end decides for a step it still holds": {
+			observations: []driverStatsObservationResult{ended(steps{readStep: stats(60)})},
+			final:        steps{readStep: stats(64)},
+			want:         steps{readStep: stats(64)},
+		},
+		"the capture at the end clears the refusal of a step it holds": {
+			observations: []driverStatsObservationResult{refused(map[string]error{readStep: readRefusal})},
+			final:        steps{readStep: stats(64)},
+			want:         steps{readStep: stats(64)},
+		},
+		"a later observation of a step clears its refusal": {
+			observations: []driverStatsObservationResult{
+				refused(map[string]error{seedStep: seedRefusal}), ended(steps{seedStep: stats(8)}),
+			},
+			final: steps{readStep: stats(64)},
+			want:  steps{seedStep: stats(8), readStep: stats(64)},
+		},
+		"a later refusal of a step drops its statistics": {
+			observations: []driverStatsObservationResult{
+				ended(steps{seedStep: stats(8)}), refused(map[string]error{seedStep: seedRefusal}),
+			},
+			final:   steps{readStep: stats(64)},
+			wantErr: seedRefusal,
+		},
+		"one refused step refuses every step": {
+			observations: []driverStatsObservationResult{
+				ended(steps{seedStep: stats(8)}), refused(map[string]error{readStep: readRefusal}),
+			},
+			final:   steps{cleanupStep: stats(0)},
+			wantErr: readRefusal,
+		},
+		"the first of the refused steps gives the reason": {
+			observations: []driverStatsObservationResult{
+				refused(map[string]error{readStep: readRefusal, seedStep: seedRefusal}),
+			},
+			wantErr: seedRefusal,
+		},
+		"an observation that could not be read changes nothing": {
+			observations: []driverStatsObservationResult{
+				ended(steps{seedStep: stats(8)}), {err: captureFailure}, {},
+			},
+			final: steps{readStep: stats(64)},
+			want:  steps{seedStep: stats(8), readStep: stats(64)},
+		},
+		"a capture at the end that fails stores nothing": {
+			observations: []driverStatsObservationResult{ended(steps{seedStep: stats(8)})},
+			finalErr:     captureFailure,
+			wantErr:      captureFailure,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			stubDriverStatsObservations(t, tc.observations...)
+			stubDriverStatsCapture(t, tc.final, tc.finalErr)
+			metadata := &runMetadata{
+				WorkloadType: WorkloadTypeRead,
+				Hosts:        []runHostMetadata{{Host: "local", IsLocal: true}},
+			}
+			planned := []string{seedStep, readStep, cleanupStep}
+			collector := &driverStatsCollector{}
+			for range tc.observations {
+				collector.observe(context.Background(), "http://engine", 77, planned, metadata)
+			}
+
+			captureStoredDriverStats(context.Background(), "http://engine", 77, planned, metadata, collector)
+
+			wantReason := ""
+			if tc.wantErr != nil {
+				wantReason = tc.wantErr.Error()
+			}
+			if !reflect.DeepEqual(metadata.DriverStats, tc.want) || metadata.DriverStatsError != wantReason {
+				got, _ := json.Marshal(metadata.DriverStats)
+				want, _ := json.Marshal(tc.want)
+				t.Fatalf("stored statistics = %s reason %q, want %s reason %q",
+					got, metadata.DriverStatsError, want, wantReason)
+			}
+		})
+	}
+}
+
+func TestDriverStatsCollectorObservesWithTheContributorsOfTheRun(t *testing.T) {
+	planned := []string{"mt-001-seed", "mt-002-read"}
+	t.Run("single local engine", func(t *testing.T) {
+		calls := stubDriverStatsObservations(t)
+		metadata := &runMetadata{Hosts: []runHostMetadata{{Host: "local", IsLocal: true}}}
+
+		(&driverStatsCollector{}).observe(context.Background(), "http://engine", 77, planned, metadata)
+
+		want := []driverStatsCaptureCall{{
+			baseURL: "http://engine", runID: 77, stepIDs: planned,
+			contributorIDs: []string{constants.MetricsLocalContributorID}, allowNodeFallback: true,
+		}}
+		if !reflect.DeepEqual(*calls, want) {
+			t.Fatalf("observation calls = %+v, want %+v", *calls, want)
+		}
+	})
+
+	t.Run("fleet", func(t *testing.T) {
+		calls := stubDriverStatsObservations(t)
+		metadata := &runMetadata{
+			Hosts: []runHostMetadata{{Host: "worker-a"}, {Host: "worker-b"}},
+			metricContributors: func() ([]string, error) {
+				return []string{"local", "192.0.2.25:1099"}, nil
+			},
+		}
+
+		(&driverStatsCollector{}).observe(context.Background(), "http://engine", 77, planned, metadata)
+
+		if len(*calls) != 1 || (*calls)[0].allowNodeFallback ||
+			!reflect.DeepEqual((*calls)[0].contributorIDs, []string{"local", "192.0.2.25:1099"}) {
+			t.Fatalf("observation calls = %+v, want the exact fleet contributors without node fallback", *calls)
+		}
+	})
+
+	t.Run("contributors unknown", func(t *testing.T) {
+		calls := stubDriverStatsObservations(t)
+		metadata := &runMetadata{Hosts: []runHostMetadata{{Host: "worker-a"}, {Host: "worker-b"}}}
+
+		(&driverStatsCollector{}).observe(context.Background(), "http://engine", 77, planned, metadata)
+
+		if len(*calls) != 0 {
+			t.Fatalf("observation ran without contributor identities: %+v", *calls)
+		}
+	})
 }
 
 func TestRunMetadataStoresDriverStatsOnlyWhenPresent(t *testing.T) {
@@ -415,6 +614,118 @@ func TestAutoResultsDeleteCaptureFailureDoesNotDropDriverStats(t *testing.T) {
 	}
 	stored, raw := readStoredDriverStats(t, resultsRoot)
 	if !reflect.DeepEqual(stored.DriverStats, statistics) || stored.DriverStatsError != "" {
+		t.Fatalf("stored statistics = %+v error %q in %s", stored.DriverStats, stored.DriverStatsError, raw)
+	}
+}
+
+// stagedRunTracker reports the run as completed when wait returns.
+type stagedRunTracker struct{ wait func() }
+
+func (s *stagedRunTracker) WaitForCompletion(context.Context, []string) (*portcheck.RunResult, error) {
+	s.wait()
+	return &portcheck.RunResult{FinalState: constants.StateCompleted}, nil
+}
+
+func (*stagedRunTracker) SetDebug(bool) {}
+
+func (*stagedRunTracker) SetExpectedRunID(int64) {}
+
+func (*stagedRunTracker) SetRequireTerminalState(bool) {}
+
+// The engine keeps the metrics row of a finished step only for a retention period. In a run of
+// several steps the row of an early step is gone when the run ends, and its statistics are
+// stored all the same.
+func TestAutoResultsStoresDriverStatsOfAStepWhoseRowTheEngineDroppedBeforeTheRunEnded(t *testing.T) {
+	const runID = int64(42)
+	steps := []string{"mt-001-20260823.100000.001-seed", "mt-002-20260823.100000.001-read"}
+	fleetRow := func(stepID, opType string, unavailable int64, terminal bool) map[string]any {
+		return map[string]any{
+			"scope": "fleet", "role": "aggregate", "run_id": "42", "cluster_id": constants.RunClusterID(runID),
+			"step_id": stepID, "op_type": opType, "terminal": terminal, "partial": false,
+			"nodes_count": 1, "contributors_present": []string{constants.MetricsLocalContributorID},
+			"driver_stats": map[string]any{
+				"driver":    "s3-rdma",
+				"counters":  map[string]int64{"http_rdma_unavailable": unavailable},
+				"gauges":    map[string]int64{"transport_available": 0},
+				"reporting": 1, "partial": false,
+			},
+		}
+	}
+	// What the engine reports, stage by stage.
+	stages := [][]any{
+		// The seed step is running.
+		{fleetRow(steps[0], "CREATE", 300, false)},
+		// The seed step has ended and its row is retained; the read step is running.
+		{fleetRow(steps[0], "CREATE", 561, true), fleetRow(steps[1], "READ", 40, false)},
+		// The retention period of the seed row is over; the read step has ended.
+		{fleetRow(steps[1], "READ", 900, true)},
+	}
+	var stage atomic.Int32
+	served := make([]chan struct{}, len(stages))
+	servedOnce := make([]sync.Once, len(stages))
+	for i := range served {
+		served[i] = make(chan struct{})
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc(constants.SptFleetMetricsEndpoint, func(w http.ResponseWriter, _ *http.Request) {
+		at := stage.Load()
+		_ = json.NewEncoder(w).Encode(stages[at])
+		servedOnce[at].Do(func() { close(served[at]) })
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	installAutoResultsFakes(t, steps)
+	// The run lasts until the monitor has read the engine's metrics in every stage.
+	newRunTrackerFunc = func(string) autoResultsRunTracker {
+		return &stagedRunTracker{wait: func() {
+			for at := range stages {
+				stage.Store(int32(at))
+				select {
+				case <-served[at]:
+				case <-time.After(10 * time.Second):
+					t.Errorf("the monitor did not read the engine's metrics in stage %d of the run", at)
+					return
+				}
+			}
+		}}
+	}
+	stubCapture, stubObserve, interval := captureDriverStatsFunc, observeDriverStatsFunc, driverStatsCollectInterval
+	t.Cleanup(func() {
+		captureDriverStatsFunc, observeDriverStatsFunc, driverStatsCollectInterval = stubCapture, stubObserve, interval
+	})
+	captureDriverStatsFunc = engineCaptureDriverStats
+	observeDriverStatsFunc = engineObserveDriverStats
+	driverStatsCollectInterval = 5 * time.Millisecond
+
+	resultsRoot := t.TempDir()
+	metadata := &runMetadata{
+		ResultsRoot:    resultsRoot,
+		WorkloadType:   WorkloadTypeRead,
+		Hosts:          []runHostMetadata{{Host: "local", IsLocal: true}},
+		ScenarioParams: scenario.Params{S3Driver: scenario.S3DriverRdma},
+	}
+	monitor := startAutoResultsMonitor(
+		context.Background(), server.URL, "mt", resultsRoot,
+		[]string{"mt-001-20260823.100000.000-seed", "mt-002-20260823.100000.000-read"}, runID,
+		false, nil, "9999", false, 0, "", metadata, io.Discard, io.Discard, "", nil)
+	monitor.Arm()
+	outcome := <-monitor.done
+
+	if outcome.ArtifactErr != nil {
+		t.Fatalf("ArtifactErr = %v", outcome.ArtifactErr)
+	}
+	stored, raw := readStoredDriverStats(t, resultsRoot)
+	statistics := func(unavailable int64) *driverstats.Stats {
+		return &driverstats.Stats{
+			Driver:    "s3-rdma",
+			Counters:  map[string]int64{"http_rdma_unavailable": unavailable},
+			Gauges:    map[string]int64{"transport_available": 0},
+			Reporting: 1,
+		}
+	}
+	want := map[string]*driverstats.Stats{steps[0]: statistics(561), steps[1]: statistics(900)}
+	if !reflect.DeepEqual(stored.DriverStats, want) || stored.DriverStatsError != "" {
 		t.Fatalf("stored statistics = %+v error %q in %s", stored.DriverStats, stored.DriverStatsError, raw)
 	}
 }
