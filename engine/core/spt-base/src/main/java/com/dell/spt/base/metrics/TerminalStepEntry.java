@@ -3,6 +3,7 @@ package com.dell.spt.base.metrics;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DriverStatsTotal;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import java.util.List;
 
@@ -42,6 +43,8 @@ public final class TerminalStepEntry {
 	public final boolean deleteDetailsExpected;
 	/** The storage driver's own statistics at the end of the step; null when it reports none. */
 	public final DriverStatsSnapshot driverStats;
+	/** For a distributed step, the total of its contributors' driver statistics; null otherwise. */
+	public final DriverStatsTotal driverStatsTotal;
 
 	public TerminalStepEntry(
 					String stepId,
@@ -375,10 +378,13 @@ public final class TerminalStepEntry {
 					DeleteMetricsSnapshot deleteMetrics,
 					boolean deleteDetailsExpected,
 					String clusterId) {
-		this(stepId, opType, runId, recordedAtMillis, successCount, failedCount, corruptCount, bytesTotal, latencyMeanUs, durationMeanUs, latencySnapshot, durationSnapshot, ttfbSnapshot, concurrencyLast, concurrencyMean, countLimit, timeLimitSec, elapsedTimeMillis, distributed, nodeCount, nodesPresent, contributorsPresent, partial, deleteMetrics, deleteDetailsExpected, clusterId, null);
+		this(stepId, opType, runId, recordedAtMillis, successCount, failedCount, corruptCount, bytesTotal, latencyMeanUs, durationMeanUs, latencySnapshot, durationSnapshot, ttfbSnapshot, concurrencyLast, concurrencyMean, countLimit, timeLimitSec, elapsedTimeMillis, distributed, nodeCount, nodesPresent, contributorsPresent, partial, deleteMetrics, deleteDetailsExpected, clusterId, null, null);
 	}
 
-	/** Creates a terminal entry retaining the storage driver's own statistics. */
+	/**
+	 * Creates a terminal entry retaining storage driver statistics: a node's own in {@code
+	 * driverStats}, or the total of a distributed step in {@code driverStatsTotal}.
+	 */
 	public TerminalStepEntry(
 					String stepId,
 					OpType opType,
@@ -406,7 +412,8 @@ public final class TerminalStepEntry {
 					DeleteMetricsSnapshot deleteMetrics,
 					boolean deleteDetailsExpected,
 					String clusterId,
-					DriverStatsSnapshot driverStats) {
+					DriverStatsSnapshot driverStats,
+					DriverStatsTotal driverStatsTotal) {
 		this.stepId = stepId;
 		this.opType = opType;
 		this.runId = runId;
@@ -434,6 +441,7 @@ public final class TerminalStepEntry {
 		this.deleteMetrics = deleteMetrics;
 		this.deleteDetailsExpected = deleteDetailsExpected;
 		this.driverStats = driverStats;
+		this.driverStatsTotal = driverStatsTotal;
 	}
 
 	TerminalStepEntry withDeleteFailureOutcome(final String outcome) {
@@ -465,7 +473,7 @@ public final class TerminalStepEntry {
 						contributorsPresent,
 						partial,
 						deleteMetrics.toBuilder().failureOutcome(outcome).build(),
-						deleteDetailsExpected, clusterId, driverStats);
+						deleteDetailsExpected, clusterId, driverStats, driverStatsTotal);
 	}
 
 	public TerminalStepEntry(

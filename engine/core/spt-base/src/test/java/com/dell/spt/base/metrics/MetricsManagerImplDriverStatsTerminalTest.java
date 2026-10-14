@@ -1,6 +1,7 @@
 package com.dell.spt.base.metrics;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -10,13 +11,18 @@ import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.metrics.context.DistributedMetricsContext;
+import com.dell.spt.base.metrics.context.DriverStatsFleet;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DriverStatsTotal;
 import com.dell.spt.base.storage.driver.mock.StatsReportingDriverMock;
 import com.github.akurilov.commons.system.SizeInBytes;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
@@ -156,18 +162,141 @@ class MetricsManagerImplDriverStatsTerminalTest {
 	@Test
 	void entryKeepsItsStatisticsWhenTheDeleteOutcomeIsUpdated() {
 		final DriverStatsSnapshot stats = StatsReportingDriverMock.stats(8, 0, 2);
+		final DriverStatsTotal total = DriverStatsTotal.of(List.of(stats, stats), true);
 		final TerminalStepEntry entry = new TerminalStepEntry(
 						STEP_ID, OpType.DELETE, 1, 0, 1, 0, 0, 0, 0, 0, null, null, null, 0, 0, 0, 0, 0, true, 1,
-						List.of(), List.of(), false,
-						com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot.builder(1).build(), true, "cluster", stats);
+						List.of(), List.of(), false, DeleteMetricsSnapshot.builder(1).build(), true, "cluster", stats, total);
 
-		assertSame(stats, entry.withDeleteFailureOutcome("failed").driverStats);
+		final TerminalStepEntry updated = entry.withDeleteFailureOutcome("failed");
+
+		assertSame(stats, updated.driverStats);
+		assertSame(total, updated.driverStatsTotal);
+	}
+
+	@Test
+	void entryBuiltWithoutStatisticsHasNone() {
+		final TerminalStepEntry entry = new TerminalStepEntry(
+						STEP_ID, OpType.DELETE, 1, 0, 1, 0, 0, 0, 0, 0, null, null, null, 0, 0, 0, 0, 0, true, 1,
+						List.of(), List.of(), false, DeleteMetricsSnapshot.builder(1).build(), true, "cluster");
+
+		assertNull(entry.driverStats);
+		assertNull(entry.driverStatsTotal);
+	}
+
+	@Test
+	void fleetEntryKeepsTheTotalOfWhatItsContributorsReportedWhenTheContextWasUnregistered() {
+		final AtomicLong localWidgets = new AtomicLong(5);
+		final AtomicLong remoteWidgets = new AtomicLong(2);
+		final MetricsContext<?> local = context(() -> StatsReportingDriverMock.stats(localWidgets.get(), 1, 3));
+		final MetricsContext<?> remote = context(() -> StatsReportingDriverMock.stats(remoteWidgets.get(), 0, 4));
+		local.markSucc(1024, 1_000, 100);
+		final DistributedMetricsContext<?> fleet = fleet(local, remote);
+		mgr.register(fleet);
+		// A periodic refresh has seen 5 and 2.
+		fleet.refreshLastSnapshot();
+		// The last requests end before the step stops.
+		localWidgets.set(7);
+		remoteWidgets.set(6);
+
+		mgr.unregister(fleet);
+		// What the drivers change afterwards, when they close.
+		localWidgets.set(9);
+		remoteWidgets.set(9);
+
+		final TerminalStepEntry entry = onlyEntry();
+		assertTrue(entry.distributed);
+		assertEquals(StatsReportingDriverMock.stats(13, 1, 7), entry.driverStatsTotal.sum());
+		assertEquals(2, entry.driverStatsTotal.reporting());
+		assertFalse(entry.driverStatsTotal.partial());
+		assertNull(entry.driverStats, "a fleet entry has a total, not the statistics of one driver");
+		assertEquals(1, entry.successCount);
+	}
+
+	@Test
+	void nodeEntryHasNoTotal() {
+		final MetricsContext<?> ctx = context(() -> StatsReportingDriverMock.stats(2, 0, 4));
+		mgr.register(ctx);
+
+		mgr.unregister(ctx);
+
+		assertNull(onlyEntry().driverStatsTotal);
+	}
+
+	@Test
+	void fleetStepInWhichNothingCompletedKeepsWhatItsDriversCounted() {
+		final MetricsContext<?> local = context(() -> StatsReportingDriverMock.stats(2, 0, 4));
+		final MetricsContext<?> remote = context(() -> StatsReportingDriverMock.stats(0, 0, 1));
+		final DistributedMetricsContext<?> fleet = fleet(local, remote);
+		mgr.register(fleet);
+
+		mgr.unregister(fleet);
+
+		final TerminalStepEntry entry = onlyEntry();
+		assertTrue(entry.distributed);
+		assertEquals(StatsReportingDriverMock.stats(2, 0, 5), entry.driverStatsTotal.sum());
+		assertEquals(2, entry.driverStatsTotal.reporting());
+		assertEquals(0, entry.successCount);
+		assertEquals(0, entry.failedCount);
+		assertEquals(2, entry.nodeCount);
+		assertFalse(entry.partial);
+	}
+
+	@Test
+	void fleetStepWhoseDriversCountedNothingKeepsNoEntryWithoutProgress() {
+		final MetricsContext<?> local = context(() -> StatsReportingDriverMock.stats(0, 0, 4));
+		final MetricsContext<?> remote = context(null);
+		final DistributedMetricsContext<?> fleet = fleet(local, remote);
+		mgr.register(fleet);
+
+		mgr.unregister(fleet);
+
+		assertTrue(mgr.getTerminalSteps().isEmpty());
+	}
+
+	@Test
+	void fleetStepWhoseDriversDifferKeepsNoEntryWithoutProgress() {
+		// Without a sum there is no count that shows work.
+		final MetricsContext<?> local = context(() -> StatsReportingDriverMock.stats(2, 0, 4));
+		final MetricsContext<?> remote = context(
+						() -> DriverStatsSnapshot.builder("other-mock").counter("gears_cut", 6).build());
+		final DistributedMetricsContext<?> fleet = fleet(local, remote);
+		mgr.register(fleet);
+
+		mgr.unregister(fleet);
+
+		assertTrue(mgr.getTerminalSteps().isEmpty());
+	}
+
+	@Test
+	void fleetStepWithoutAllItsContributorsKeepsNoEntryWithoutProgress() {
+		// The rule for a fleet that could not be read at its end: unchanged by driver activity.
+		final MetricsContext<?> local = context(() -> StatsReportingDriverMock.stats(2, 0, 4));
+		final DistributedMetricsContext<?> fleet = DriverStatsFleet.fleet(
+						STEP_ID, OpType.CREATE, 2, () -> Arrays.asList(DriverStatsFleet.snapshotOf(local), null));
+		contexts.add(fleet);
+		mgr.register(fleet);
+
+		mgr.unregister(fleet);
+
+		assertTrue(fleet.partial());
+		assertTrue(mgr.getTerminalSteps().isEmpty());
 	}
 
 	private TerminalStepEntry onlyEntry() {
 		final List<TerminalStepEntry> entries = mgr.getTerminalSteps();
 		assertEquals(1, entries.size(), entries.toString());
 		return entries.get(0);
+	}
+
+	/** A fleet of the given contributors, each of which answers with its current values. */
+	private DistributedMetricsContext<?> fleet(final MetricsContext<?> local, final MetricsContext<?> remote) {
+		final DistributedMetricsContext<?> fleet = DriverStatsFleet.fleet(
+						STEP_ID,
+						OpType.CREATE,
+						2,
+						() -> List.of(DriverStatsFleet.snapshotOf(local), DriverStatsFleet.snapshotOf(remote)));
+		contexts.add(fleet);
+		return fleet;
 	}
 
 	private MetricsContext<?> context(final Supplier<DriverStatsSnapshot> stats) {

@@ -19,7 +19,9 @@ import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DriverStatsTotal;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -235,6 +237,9 @@ final class MetricsJsonResponder {
 
 		addLimitFields(jsonObj, ctx.metadata());
 		addMetrics(jsonObj, snapshot, successCount, failCount, corruptCount, bytesTotal, latencyMean, durationMean);
+		if (snapshot instanceof DistributedAllMetricsSnapshot fleet) {
+			addDriverStatsTotal(jsonObj, fleet.driverStatsTotal());
+		}
 		addDeleteDetailExpectation(jsonObj, ctx.metadata());
 		addListShardMetrics(jsonObj, ctx.metadata());
 
@@ -335,9 +340,36 @@ final class MetricsJsonResponder {
 
 	/** Adds the storage driver's own statistics; a driver that reports none adds no field. */
 	private void addDriverStats(final ObjectNode jsonObj, final DriverStatsSnapshot stats) {
-		if (stats == null) {
+		if (stats != null) {
+			jsonObj.set(MetricsConstants.METRIC_NAME_DRIVER_STATS, driverStatsObject(stats));
+		}
+	}
+
+	/**
+	 * Adds the total of the contributors' storage driver statistics to a fleet row; no field when
+	 * no contributor reported any. Contributors that reported different drivers have no sum: the
+	 * object then names the drivers seen.
+	 */
+	private void addDriverStatsTotal(final ObjectNode jsonObj, final DriverStatsTotal total) {
+		if (total == null) {
 			return;
 		}
+		final ObjectNode driverStats;
+		if (total.sum() == null) {
+			driverStats = objectMapper.createObjectNode();
+			driverStats.put("partial", total.partial());
+			final ArrayNode drivers = objectMapper.createArrayNode();
+			total.drivers().forEach(drivers::add);
+			driverStats.set("drivers", drivers);
+		} else {
+			driverStats = driverStatsObject(total.sum());
+			driverStats.put("reporting", total.reporting());
+			driverStats.put("partial", total.partial());
+		}
+		jsonObj.set(MetricsConstants.METRIC_NAME_DRIVER_STATS, driverStats);
+	}
+
+	private ObjectNode driverStatsObject(final DriverStatsSnapshot stats) {
 		final ObjectNode driverStats = objectMapper.createObjectNode();
 		driverStats.put("driver", stats.driver());
 		final ObjectNode counters = objectMapper.createObjectNode();
@@ -346,7 +378,7 @@ final class MetricsJsonResponder {
 		final ObjectNode gauges = objectMapper.createObjectNode();
 		stats.gauges().forEach(gauges::put);
 		driverStats.set("gauges", gauges);
-		jsonObj.set(MetricsConstants.METRIC_NAME_DRIVER_STATS, driverStats);
+		return driverStats;
 	}
 
 	private static void addDeleteDetailExpectation(
@@ -864,6 +896,7 @@ final class MetricsJsonResponder {
 							MetricsConstants.METRIC_NAME_DELETE_DETAIL_EXPECTED,
 							entry.deleteDetailsExpected);
 			addDeleteMetrics(jsonObj, entry.deleteMetrics, entry.latencySnapshot, entry.durationSnapshot);
+			addDriverStatsTotal(jsonObj, entry.driverStatsTotal);
 
 			jsonObj.put("overall_completion_percent", completionPercent);
 			jsonObj.put("overall_unbounded", unbounded);

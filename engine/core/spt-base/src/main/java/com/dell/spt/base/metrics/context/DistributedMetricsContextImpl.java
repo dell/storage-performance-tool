@@ -7,6 +7,8 @@ import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshotImpl;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshotImpl;
 import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DriverStatsTotal;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshotImpl;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
@@ -292,7 +294,8 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 							bytesSnapshot,
 							nodeCountSupplier.getAsInt(),
 							elapsedTimeMillis(),
-							deleteMetrics);
+							deleteMetrics,
+							driverStatsTotal(snapshots, contributorsAuthoritative));
 			if (metricsListener != null) {
 				metricsListener.notify(lastSnapshot);
 			}
@@ -302,6 +305,15 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 		} else {
 			lastSnapshot = null;
 		}
+	}
+
+	private static DriverStatsTotal driverStatsTotal(
+					final List<AllMetricsSnapshot> snapshots, final boolean allPresent) {
+		final List<DriverStatsSnapshot> contributions = new ArrayList<>(snapshots.size());
+		for (final AllMetricsSnapshot snapshot : snapshots) {
+			contributions.add(snapshot.driverStats());
+		}
+		return DriverStatsTotal.of(contributions, allPresent);
 	}
 
 	private DeleteMetricsSnapshot applyFailureBudgetOutcome(

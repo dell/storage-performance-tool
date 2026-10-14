@@ -12,6 +12,8 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
+import com.dell.spt.base.metrics.context.DistributedMetricsContext;
+import com.dell.spt.base.metrics.context.DriverStatsFleet;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshotImpl;
@@ -32,6 +34,7 @@ import org.junit.jupiter.api.Test;
 class MetricsJsonResponderDriverStatsTest {
 
 	private static final long RUN_ID = 123L;
+	private static final String OTHER_DRIVER = "other-mock";
 
 	private final List<MetricsContext<?>> contexts = new ArrayList<>();
 
@@ -141,6 +144,97 @@ class MetricsJsonResponderDriverStatsTest {
 		assertFalse(idle.has(MetricsConstants.METRIC_NAME_DRIVER_STATS));
 	}
 
+	@Test
+	void fleetRowCarriesTheTotalOfItsContributors() {
+		final DistributedMetricsContext<?> fleet = fleet(
+						StatsReportingDriverMock.stats(8, 3, 5), StatsReportingDriverMock.stats(6, 2, 4));
+
+		final JsonNode row = fleetRow(fleet);
+
+		final JsonNode stats = row.get(MetricsConstants.METRIC_NAME_DRIVER_STATS);
+		assertEquals(List.of("driver", "counters", "gauges", "reporting", "partial"), fieldNames(stats));
+		assertEquals(StatsReportingDriverMock.DRIVER, stats.get("driver").asText());
+		assertEquals(
+						List.of(StatsReportingDriverMock.COUNTER_SPROCKETS, StatsReportingDriverMock.COUNTER_WIDGETS),
+						fieldNames(stats.get("counters")));
+		assertEquals(14, stats.get("counters").get(StatsReportingDriverMock.COUNTER_WIDGETS).asLong());
+		assertEquals(5, stats.get("counters").get(StatsReportingDriverMock.COUNTER_SPROCKETS).asLong());
+		assertEquals(9, stats.get("gauges").get(StatsReportingDriverMock.GAUGE_SHELF).asLong());
+		assertEquals(2, stats.get("reporting").asInt());
+		assertFalse(stats.get("partial").asBoolean());
+		assertFalse(row.get("partial").asBoolean());
+		assertEquals(2, row.get("operations").get("success_count").asLong());
+	}
+
+	@Test
+	void fleetRowSaysHowManyContributorsItsTotalHolds() {
+		final DistributedMetricsContext<?> fleet = fleet(StatsReportingDriverMock.stats(8, 3, 5), null);
+
+		final JsonNode row = fleetRow(fleet);
+
+		final JsonNode stats = row.get(MetricsConstants.METRIC_NAME_DRIVER_STATS);
+		assertEquals(8, stats.get("counters").get(StatsReportingDriverMock.COUNTER_WIDGETS).asLong());
+		assertEquals(1, stats.get("reporting").asInt());
+		assertTrue(stats.get("partial").asBoolean());
+		assertFalse(row.get("partial").asBoolean(), "the row itself is complete: both contributors are present");
+	}
+
+	@Test
+	void fleetRowOfContributorsWithDifferentDriversNamesThemAndCarriesNoTotal() {
+		final DistributedMetricsContext<?> fleet = fleet(StatsReportingDriverMock.stats(8, 3, 5), otherDriverStats());
+
+		final JsonNode row = fleetRow(fleet);
+
+		final JsonNode stats = row.get(MetricsConstants.METRIC_NAME_DRIVER_STATS);
+		assertEquals(List.of("partial", "drivers"), fieldNames(stats));
+		assertTrue(stats.get("partial").asBoolean());
+		assertEquals(List.of(OTHER_DRIVER, StatsReportingDriverMock.DRIVER), texts(stats.get("drivers")));
+		assertFalse(row.get("partial").asBoolean());
+	}
+
+	@Test
+	void fleetRowHasNoStatisticsWhenNoContributorReports() {
+		final JsonNode row = fleetRow(fleet(null, null));
+
+		assertFalse(row.has(MetricsConstants.METRIC_NAME_DRIVER_STATS));
+		assertEquals(2, row.get("operations").get("success_count").asLong());
+	}
+
+	@Test
+	void terminalFleetRowCarriesTheTotalTheStepKept() {
+		final DistributedMetricsContext<?> fleet = fleet(
+						StatsReportingDriverMock.stats(8, 3, 5), StatsReportingDriverMock.stats(6, 2, 4));
+		final JsonNode live = fleetRow(fleet).get(MetricsConstants.METRIC_NAME_DRIVER_STATS);
+
+		final JsonNode row = onlyRow(new MetricsJsonResponder(finished(fleet), config()).buildClusterMetrics(false));
+
+		assertTrue(row.get("terminal").asBoolean());
+		assertEquals(live, row.get(MetricsConstants.METRIC_NAME_DRIVER_STATS), "the same object as on the live row");
+		assertEquals(14, live.get("counters").get(StatsReportingDriverMock.COUNTER_WIDGETS).asLong());
+		assertEquals(2, live.get("reporting").asInt());
+	}
+
+	@Test
+	void terminalFleetRowOfContributorsWithDifferentDriversNamesThem() {
+		final DistributedMetricsContext<?> fleet = fleet(StatsReportingDriverMock.stats(8, 3, 5), otherDriverStats());
+
+		final JsonNode row = onlyRow(new MetricsJsonResponder(finished(fleet), config()).buildClusterMetrics(false));
+
+		assertTrue(row.get("terminal").asBoolean());
+		final JsonNode stats = row.get(MetricsConstants.METRIC_NAME_DRIVER_STATS);
+		assertEquals(List.of("partial", "drivers"), fieldNames(stats));
+		assertEquals(List.of(OTHER_DRIVER, StatsReportingDriverMock.DRIVER), texts(stats.get("drivers")));
+	}
+
+	@Test
+	void terminalFleetRowHasNoStatisticsWhenNoContributorReported() {
+		final JsonNode row = onlyRow(
+						new MetricsJsonResponder(finished(fleet(null, null)), config()).buildClusterMetrics(false));
+
+		assertTrue(row.get("terminal").asBoolean());
+		assertFalse(row.has(MetricsConstants.METRIC_NAME_DRIVER_STATS));
+	}
+
 	/** A metrics manager in which the context's step has ended. */
 	private static MetricsManagerImpl finished(final MetricsContext<?> ctx) {
 		final MetricsManagerImpl mgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
@@ -188,6 +282,46 @@ class MetricsJsonResponderDriverStatsTest {
 		final var rows = new MetricsJsonResponder(mgr, config()).buildNodeMetrics(false);
 		assertEquals(1, rows.size(), rows.toString());
 		return rows.get(0);
+	}
+
+	/**
+	 * A distributed step on each contributor of which one operation succeeded.
+	 *
+	 * @param reported what the driver of each contributor reports; null for a driver that reports none
+	 */
+	private DistributedMetricsContext<?> fleet(final DriverStatsSnapshot... reported) {
+		final List<MetricsContext<?>> nodes = new ArrayList<>();
+		for (final DriverStatsSnapshot stats : reported) {
+			final MetricsContext<?> node = DriverStatsFleet.node("fleet-step", () -> stats);
+			node.markSucc(DriverStatsFleet.ITEM_SIZE, 1_000, 100);
+			nodes.add(node);
+		}
+		contexts.addAll(nodes);
+		final DistributedMetricsContext<?> fleet = DriverStatsFleet.fleet(
+						"fleet-step",
+						OpType.CREATE,
+						reported.length,
+						() -> nodes.stream().map(DriverStatsFleet::snapshotOf).toList());
+		contexts.add(fleet);
+		return fleet;
+	}
+
+	private static DriverStatsSnapshot otherDriverStats() {
+		return DriverStatsSnapshot.builder(OTHER_DRIVER).counter("gears_cut", 6).build();
+	}
+
+	private static JsonNode fleetRow(final DistributedMetricsContext<?> fleet) {
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of(fleet));
+		when(mgr.getAllContexts()).thenReturn(Set.of(fleet));
+		when(mgr.getTerminalSteps()).thenReturn(List.of());
+		return onlyRow(new MetricsJsonResponder(mgr, config()).buildClusterMetrics(false));
+	}
+
+	private static List<String> texts(final JsonNode array) {
+		final List<String> texts = new ArrayList<>();
+		array.forEach(element -> texts.add(element.asText()));
+		return texts;
 	}
 
 	private static List<String> fieldNames(final JsonNode node) {

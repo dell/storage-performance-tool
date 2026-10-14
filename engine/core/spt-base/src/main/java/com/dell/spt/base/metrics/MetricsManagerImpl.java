@@ -25,6 +25,7 @@ import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DriverStatsTotal;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.dell.spt.base.metrics.util.PrometheusMetricsExporter;
 import com.dell.spt.base.metrics.util.PrometheusMetricsExporterImpl;
@@ -244,18 +245,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 
 						if (snapshot instanceof DistributedAllMetricsSnapshot aggregSnapshot) {
 							if (hasProgress(snapshot)) {
-								final var nodesPresent = distributedMetricsCtx.nodesPresent();
-								final var contributorsPresent = distributedMetricsCtx.contributorsPresent();
-								final int nodeCount = distributedMetricsCtx.nodeCount();
-								final boolean partial = distributedMetricsCtx.partial();
-								terminalEntry = buildEntryFromSnapshot(
-												metricsCtx,
-												aggregSnapshot,
-												true,
-												nodeCount,
-												nodesPresent,
-												contributorsPresent,
-												partial);
+								terminalEntry = buildEntry(metricsCtx, aggregSnapshot);
 							}
 							// file output
 							// due to unknown reasons writing to a csv.total is based on a flag and not on a metrics
@@ -317,14 +307,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 					} else {
 						// Cache terminal entry for JSON endpoint for local (non-distributed) contexts
 						if (hasAllParts(snapshot) && hasProgress(snapshot)) {
-							terminalEntry = buildEntryFromSnapshot(
-											metricsCtx,
-											snapshot,
-											false,
-											0,
-											List.of(),
-											List.of(),
-											false);
+							terminalEntry = buildEntry(metricsCtx, snapshot);
 							terminalByStepId.put(progressKey, terminalEntry);
 						}
 					}
@@ -335,12 +318,11 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 							final TerminalStepEntry lastProgressEntry = lastProgressByStepId.get(progressKey);
 							if (lastProgressEntry != null) {
 								terminalByStepId.put(progressKey, lastProgressEntry);
-							} else if (!distributedEntry && hasAllParts(snapshot) && driverActive(snapshot.driverStats())) {
+							} else if (hasAllParts(snapshot)
+											&& distributedEntry == (snapshot instanceof DistributedAllMetricsSnapshot)
+											&& driverActive(snapshot)) {
 								// Nothing completed, but the driver did work: keep what it counted.
-								terminalByStepId.put(
-												progressKey,
-												buildEntryFromSnapshot(
-																metricsCtx, snapshot, false, 0, List.of(), List.of(), false));
+								terminalByStepId.put(progressKey, buildEntry(metricsCtx, snapshot));
 							}
 						}
 					}
@@ -506,19 +488,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 			return;
 		}
 
-		final TerminalStepEntry entry;
-		if (distributedEntry) {
-			final var distributedMetricsCtx = (DistributedMetricsContext<?>) metricsCtx;
-			final var nodesPresent = distributedMetricsCtx.nodesPresent();
-			final var contributorsPresent = distributedMetricsCtx.contributorsPresent();
-			final int nodeCount = distributedMetricsCtx.nodeCount();
-			final boolean partial = distributedMetricsCtx.partial();
-			entry = buildEntryFromSnapshot(
-							metricsCtx, snapshot, true, nodeCount, nodesPresent, contributorsPresent, partial);
-		} else {
-			entry = buildEntryFromSnapshot(
-							metricsCtx, snapshot, false, 0, List.of(), List.of(), false);
-		}
+		final TerminalStepEntry entry = buildEntry(metricsCtx, snapshot);
 
 		lastProgressByStepId.put(progressKey, entry);
 		if (Loggers.MSG.isDebugEnabled()) {
@@ -531,6 +501,22 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 							entry.corruptCount,
 							entry.bytesTotal);
 		}
+	}
+
+	/** Builds the entry of a step from a snapshot of its metrics context: a fleet's or a node's. */
+	private TerminalStepEntry buildEntry(final MetricsContext metricsCtx, final AllMetricsSnapshot snapshot) {
+		if (metricsCtx instanceof DistributedMetricsContext<?> distributedMetricsCtx
+						&& snapshot instanceof DistributedAllMetricsSnapshot) {
+			return buildEntryFromSnapshot(
+							metricsCtx,
+							snapshot,
+							true,
+							distributedMetricsCtx.nodeCount(),
+							distributedMetricsCtx.nodesPresent(),
+							distributedMetricsCtx.contributorsPresent(),
+							distributedMetricsCtx.partial());
+		}
+		return buildEntryFromSnapshot(metricsCtx, snapshot, false, 0, List.of(), List.of(), false);
 	}
 
 	private TerminalStepEntry buildEntryFromSnapshot(
@@ -574,7 +560,8 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 						metricsCtx.metadata() != null
 										&& metricsCtx.metadata().containsKey(MetricsConstants.METADATA_DELETE_METRICS),
 						metricsCtx.metadata() == null ? null : (String) metricsCtx.metadata().get(MetricsConstants.METADATA_CLUSTER_ID),
-						snapshot.driverStats());
+						snapshot.driverStats(),
+						snapshot instanceof DistributedAllMetricsSnapshot fleet ? fleet.driverStatsTotal() : null);
 	}
 
 	private long extractLongMetadata(final Map metadata, final String key) {
@@ -682,9 +669,17 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 
 	/**
 	 * A storage driver that counted anything did work in the step, even when no operation
-	 * completed. Gauges are not work: they describe a level.
+	 * completed. Gauges are not work: they describe a level. For a fleet the counts are those of
+	 * the total.
 	 */
-	private static boolean driverActive(final DriverStatsSnapshot stats) {
+	private static boolean driverActive(final AllMetricsSnapshot snapshot) {
+		final DriverStatsSnapshot stats;
+		if (snapshot instanceof DistributedAllMetricsSnapshot fleet) {
+			final DriverStatsTotal total = fleet.driverStatsTotal();
+			stats = total == null ? null : total.sum();
+		} else {
+			stats = snapshot.driverStats();
+		}
 		if (stats == null) {
 			return false;
 		}

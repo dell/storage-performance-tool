@@ -243,6 +243,11 @@ public final class StatsReportingDriverMock {
 			this.drivers = () -> driver;
 		}
 
+		/** Every driver created is a new {@link SelfCounting} one that answers {@code resultLimit} operations. */
+		public Extension(final long resultLimit) {
+			this.drivers = () -> new SelfCounting<>(resultLimit);
+		}
+
 		/** The drivers created so far, in order. */
 		public List<StorageDriver<I, O>> created() {
 			return created;
