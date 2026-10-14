@@ -261,6 +261,9 @@ type DriverStatsObservation struct {
 	Steps map[string]*driverstats.Stats
 	// Refused holds the check that the statistics of a step failed, by step.
 	Refused map[string]error
+	// Active holds the steps, running or ended, whose row showed their driver at work. The
+	// engine keeps a terminal row with statistics for each of them.
+	Active map[string]struct{}
 }
 
 // ObserveTerminalDriverStatsForRunContext reads the terminal driver statistics of the expected
@@ -472,10 +475,12 @@ func captureTerminalDeleteMetricsFromPath(
 // driverStatsOutcome is what one metrics row says about the driver statistics of a step: the
 // statistics, or the check they failed. running marks a row that is not terminal yet. Its
 // error is the one a terminal capture reports; an observation of a run in progress skips it.
+// active marks a row whose statistics show the driver at work, terminal or not.
 type driverStatsOutcome struct {
 	stepID  string
 	stats   *driverstats.Stats
 	running bool
+	active  bool
 	err     error
 }
 
@@ -507,10 +512,17 @@ func driverStatsRows(
 		}
 		stats, statsErr := checker.driverStats(step)
 		rows = append(rows, driverStatsOutcome{
-			stepID: step.StepID, stats: stats, running: !step.Terminal, err: statsErr,
+			stepID: step.StepID, stats: stats, running: !step.Terminal, active: driverCounted(step.DriverStats),
+			err: statsErr,
 		})
 	}
 	return rows, true, nil
+}
+
+// driverCounted reports whether the statistics of a row, checked or not, show the driver at work.
+func driverCounted(raw json.RawMessage) bool {
+	stats := &driverstats.Stats{}
+	return json.Unmarshal(raw, stats) == nil && stats.Counted()
 }
 
 // driverStats returns the statistics of an admitted row, or the check they fail.
@@ -576,8 +588,12 @@ func observeTerminalDriverStatsFromPath(
 	observation := &DriverStatsObservation{
 		Steps:   make(map[string]*driverstats.Stats, len(rows)),
 		Refused: make(map[string]error),
+		Active:  make(map[string]struct{}),
 	}
 	for _, row := range rows {
+		if row.active {
+			observation.Active[row.stepID] = struct{}{}
+		}
 		switch {
 		case row.running:
 		case row.err != nil:

@@ -68,3 +68,22 @@ func TestStatsKeepUnknownNamesThroughJSON(t *testing.T) {
 		t.Fatalf("stored statistics = %+v, want %+v", reloaded, want)
 	}
 }
+
+func TestCountedIsTrueOnlyWhenACounterIsAboveZero(t *testing.T) {
+	tests := map[string]struct {
+		stats *Stats
+		want  bool
+	}{
+		"no statistics":        {stats: nil},
+		"no counters":          {stats: &Stats{Driver: "s3-rdma", Gauges: map[string]int64{"pool_reserved_bytes": 8192}}},
+		"counters at zero":     {stats: &Stats{Driver: "s3-rdma", Counters: map[string]int64{"rdma_transferred": 0}}},
+		"a counter above zero": {stats: &Stats{Counters: map[string]int64{"rdma_transferred": 0, "http_fallback": 3}}, want: true},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := tc.stats.Counted(); got != tc.want {
+				t.Fatalf("Counted() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

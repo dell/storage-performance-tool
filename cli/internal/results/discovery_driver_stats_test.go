@@ -461,6 +461,40 @@ func TestObserveTerminalDriverStatsLeavesOutStepsThatAreStillRunning(t *testing.
 	}
 }
 
+func TestObserveTerminalDriverStatsNamesTheStepsWhoseDriverDidWork(t *testing.T) {
+	running := driverStatsRow(driverStatsRunID, "read", "READ", "fleet", "aggregate", fleetDriverStats(2))
+	running["terminal"] = false
+	partial := fleetDriverStats(1)
+	partial["partial"] = true
+	// A gauge is a level, not work: the engine keeps no row for a step whose driver counted nothing.
+	idle := fleetDriverStats(2)
+	idle["counters"] = map[string]int64{"rdma_transferred": 0, "http_fallback": 0}
+	notNamedYet := driverStatsRow(driverStatsRunID, "started-just-now", "READ", "fleet", "aggregate", fleetDriverStats(2))
+	notNamedYet["terminal"] = false
+	server := driverStatsServer(
+		metricsRows(
+			driverStatsRow(driverStatsRunID, "seed", "CREATE", "fleet", "aggregate", fleetDriverStats(2)),
+			running,
+			driverStatsRow(driverStatsRunID, "refused", "READ", "fleet", "aggregate", partial),
+			driverStatsRow(driverStatsRunID, "idle", "DELETE", "fleet", "aggregate", idle),
+			driverStatsRow(driverStatsRunID, "cleanup", "DELETE", "fleet", "aggregate", nil),
+			notNamedYet,
+		),
+		endpointNotFound)
+	defer server.Close()
+
+	observation, err := ObserveTerminalDriverStatsForRunContext(
+		context.Background(), server.URL, driverStatsRunID, []string{"seed", "read", "refused", "idle", "cleanup"},
+		driverStatsFleetContributors, false)
+	if err != nil {
+		t.Fatalf("observe a run in progress: %v", err)
+	}
+	want := map[string]struct{}{"seed": {}, "read": {}, "refused": {}}
+	if !reflect.DeepEqual(observation.Active, want) {
+		t.Fatalf("steps whose driver did work = %v, want %v", observation.Active, want)
+	}
+}
+
 func TestObserveTerminalDriverStatsJudgesEachStepOnItsOwn(t *testing.T) {
 	partial := fleetDriverStats(1)
 	partial["partial"] = true

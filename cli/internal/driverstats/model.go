@@ -21,6 +21,20 @@ type Stats struct {
 	Drivers []string `json:"drivers,omitempty"`
 }
 
+// Counted reports whether a counter is above zero: the driver did work. A gauge is a level and
+// does not count. The engine keeps the row of a finished step whose driver did work.
+func (s *Stats) Counted() bool {
+	if s == nil {
+		return false
+	}
+	for _, count := range s.Counters {
+		if count > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // ValidateTerminal reports why the statistics of a terminal row must not be stored.
 // fleetContributors is the number of contributors a fleet total must cover; zero validates a
 // node row, which carries the statistics of one driver and no contributor count.

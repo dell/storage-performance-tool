@@ -724,7 +724,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			var mu sync.Mutex
 			seen := make(map[string]struct{})
 			fleetSeen := make(map[string]struct{})
-			driverStats := &driverStatsCollector{}
+			driverStats := newDriverStatsCollector(time.Now)
 			stopCh := make(chan struct{})
 			var pollWG sync.WaitGroup
 			pollWG.Add(1)
@@ -750,7 +750,9 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 							driverStats.observe(parentCtx, baseURL, expectedRunID, runtimeStepIDs, metadata)
 						}
 					case <-ticker.C:
-						if ids, err := discoverStepIDsFunc(parentCtx, baseURL, expectedRunID); err == nil && len(ids) > 0 {
+						discoveryStart := time.Now()
+						ids, nodeErr := discoverStepIDsFunc(parentCtx, baseURL, expectedRunID)
+						if nodeErr == nil && len(ids) > 0 {
 							mu.Lock()
 							updated := false
 							for _, id := range ids {
@@ -771,7 +773,8 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 							}
 						}
 						// Also poll fleet endpoint for distributed step IDs
-						if fids, err := discoverFleetStepIDsFunc(parentCtx, baseURL, expectedRunID); err == nil && len(fids) > 0 {
+						fids, fleetErr := discoverFleetStepIDsFunc(parentCtx, baseURL, expectedRunID)
+						if fleetErr == nil && len(fids) > 0 {
 							mu.Lock()
 							updated := false
 							for _, id := range fids {
@@ -789,6 +792,15 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 							mu.Unlock()
 							if debug && updated && len(snapshot) > 0 {
 								logging.LogDebug("auto-results", "discover-fleet", "steps", strings.Join(snapshot, ","))
+							}
+						}
+						if nodeErr == nil && fleetErr == nil {
+							mu.Lock()
+							_, runtimeStepIDs := selectResultStepIDs(expectedStepIDs, fleetDiscovered, discovered)
+							mu.Unlock()
+							// Until a step of the run has a row there are no statistics to miss.
+							if len(runtimeStepIDs) == 0 {
+								driverStats.readBeforeSteps(discoveryStart)
 							}
 						}
 					}

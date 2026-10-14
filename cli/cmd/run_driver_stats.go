@@ -2,20 +2,38 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"slices"
 	"sync"
+	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/driverstats"
 )
 
 // driverStatsCollector keeps the terminal driver statistics of the steps that end while a run
 // is monitored. The engine drops the metrics row of a finished step after a retention period,
 // so a capture at the end of a run finds only the steps that ended last.
+//
+// It also keeps what it needs to tell whether a step was missed: the steps seen with their
+// driver at work, and the longest time the run's metrics went unread. A row the engine keeps
+// for its retention period cannot fall between two reads that are closer together than that.
 type driverStatsCollector struct {
 	mu      sync.Mutex
+	now     func() time.Time
 	steps   map[string]*driverstats.Stats
 	refused map[string]error
+	active  map[string]struct{}
+	// lastRead is when the latest successful read began; zero before the first one when the
+	// collector was not started with newDriverStatsCollector.
+	lastRead   time.Time
+	longestGap time.Duration
+}
+
+// newDriverStatsCollector starts a collector at the beginning of a run. now is its clock.
+func newDriverStatsCollector(now func() time.Time) *driverStatsCollector {
+	return &driverStatsCollector{now: now, lastRead: now()}
 }
 
 // observe reads the statistics of the steps that have ended so far. For each step, the latest
@@ -28,6 +46,7 @@ func (c *driverStatsCollector) observe(
 	if err != nil {
 		return
 	}
+	start := c.clock()
 	observation, err := observeDriverStatsFunc(
 		ctx, baseURL, expectedRunID, stepIDs, contributorIDs, len(contributorIDs) == 1)
 	if err != nil || observation == nil {
@@ -35,17 +54,34 @@ func (c *driverStatsCollector) observe(
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.read(start)
 	for stepID, stats := range observation.Steps {
 		c.keep(stepID, stats)
 	}
 	for stepID, refusal := range observation.Refused {
 		c.refuse(stepID, refusal)
 	}
+	for stepID := range observation.Active {
+		if c.active == nil {
+			c.active = make(map[string]struct{})
+		}
+		c.active[stepID] = struct{}{}
+	}
+}
+
+// readBeforeSteps records a successful read of the run's metrics, begun at start, that found
+// no step of the run: nothing could be missed before it.
+func (c *driverStatsCollector) readBeforeSteps(start time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.read(start)
 }
 
 // withFinal returns the statistics of every step: those observed during the run and those of
-// the capture at its end, which decide for the steps they hold. A step whose statistics were
-// refused refuses them all, because partial statistics are never stored.
+// the capture at its end, which decide for the steps they hold and has just been read. Partial
+// statistics are never stored, so it refuses them all when a step's statistics were refused,
+// when the run's metrics went unread for as long as the engine keeps a finished step's row, or
+// when a step whose driver was seen at work has none.
 func (c *driverStatsCollector) withFinal(
 	final map[string]*driverstats.Stats,
 ) (map[string]*driverstats.Stats, error) {
@@ -54,13 +90,42 @@ func (c *driverStatsCollector) withFinal(
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.read(c.clock())
 	for stepID, stats := range final {
 		c.keep(stepID, stats)
 	}
 	if len(c.refused) > 0 {
 		return nil, c.refused[slices.Min(slices.Collect(maps.Keys(c.refused)))]
 	}
+	if c.longestGap >= constants.EngineTerminalRowRetention {
+		return nil, fmt.Errorf(
+			"the run's metrics went unread for %s; the engine keeps the row of a finished step for %s",
+			c.longestGap.Round(time.Second), constants.EngineTerminalRowRetention)
+	}
+	for _, stepID := range slices.Sorted(maps.Keys(c.active)) {
+		if _, stored := c.steps[stepID]; !stored {
+			return nil, fmt.Errorf("no terminal driver statistics were read for step %q, whose driver did work", stepID)
+		}
+	}
 	return maps.Clone(c.steps), nil
+}
+
+func (c *driverStatsCollector) clock() time.Time {
+	if c == nil || c.now == nil {
+		return time.Now()
+	}
+	return c.now()
+}
+
+// read records a successful read that began at start. The gap it closes runs from the start of
+// the previous one to the end of this one: the most time that can lie between what they saw.
+func (c *driverStatsCollector) read(start time.Time) {
+	if !c.lastRead.IsZero() {
+		if gap := c.clock().Sub(c.lastRead); gap > c.longestGap {
+			c.longestGap = gap
+		}
+	}
+	c.lastRead = start
 }
 
 func (c *driverStatsCollector) keep(stepID string, stats *driverstats.Stats) {

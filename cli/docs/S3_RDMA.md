@@ -227,7 +227,7 @@ When a run finishes, the CLI stores each step's final statistics in `spt_run_par
 
 The final values are taken when the step ends, after its requests have completed and the driver has stopped, and before the driver closes. The `RDMA data path summary` log line is written at close. The two agree on every count, with two exceptions: `poolDiscarded` in the log line also counts the buffers released at close, and a request that was still without an outcome when the step ended is counted by the log line if it ends before the driver closes. The stored pool gauges describe the pool as the step left it, not the empty pool after close.
 
-The CLI stores statistics only when they are complete: the row is the final one of this run and step, every expected node contributed, and `partial` is `false`. Otherwise it stores none, records the reason in `driverStatsError`, and logs one warning. This does not fail the run.
+The CLI stores statistics only when they are complete. For each step the row is the final one of this run and step, every expected node contributed, and `partial` is `false`. No step may be missing either: a step whose rows showed its driver at work (a counter above zero) must have its final statistics read, and the CLI must not have gone without reading the engine's metrics for as long as the engine keeps a finished step's row, since a step could have ended and been dropped unseen. Otherwise it stores none, records the reason in `driverStatsError`, and logs one warning. This does not fail the run. A step in which the driver counted nothing can be absent from the stored values.
 
 ---
 

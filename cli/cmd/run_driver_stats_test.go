@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -229,6 +230,16 @@ func TestCaptureStoredDriverStatsAddsTheStepsThatEndedDuringTheRun(t *testing.T)
 	refused := func(steps map[string]error) driverStatsObservationResult {
 		return driverStatsObservationResult{observation: &results.DriverStatsObservation{Refused: steps}}
 	}
+	// working is a response in which the rows of the given steps, running or ended, showed their
+	// driver at work; ended lists those of them whose terminal statistics passed every check.
+	working := func(ended map[string]*driverstats.Stats, stepIDs ...string) driverStatsObservationResult {
+		active := make(map[string]struct{}, len(stepIDs))
+		for _, stepID := range stepIDs {
+			active[stepID] = struct{}{}
+		}
+		return driverStatsObservationResult{observation: &results.DriverStatsObservation{Steps: ended, Active: active}}
+	}
+	seedMissed := errors.New(`no terminal driver statistics were read for step "mt-001-seed", whose driver did work`)
 	seedRefusal := errors.New(
 		`/metrics/fleet/json returned incomplete contributor evidence for driver statistics step "mt-001-seed"`)
 	readRefusal := errors.New(`/metrics/fleet/json driver statistics step "mt-002-read": statistics are partial`)
@@ -297,6 +308,35 @@ func TestCaptureStoredDriverStatsAddsTheStepsThatEndedDuringTheRun(t *testing.T)
 			final: steps{readStep: stats(64)},
 			want:  steps{seedStep: stats(8), readStep: stats(64)},
 		},
+		"a step seen at work whose terminal statistics were never read refuses every step": {
+			// Its row was dropped before an observation read it as ended.
+			observations: []driverStatsObservationResult{working(nil, seedStep), working(nil, readStep)},
+			final:        steps{readStep: stats(64)},
+			wantErr:      seedMissed,
+		},
+		"a step seen at work is stored once its terminal statistics are read": {
+			observations: []driverStatsObservationResult{
+				working(nil, seedStep), working(steps{seedStep: stats(8)}, seedStep, readStep),
+			},
+			final: steps{readStep: stats(64)},
+			want:  steps{seedStep: stats(8), readStep: stats(64)},
+		},
+		"the capture at the end covers a step seen at work": {
+			observations: []driverStatsObservationResult{working(nil, readStep)},
+			final:        steps{readStep: stats(64)},
+			want:         steps{readStep: stats(64)},
+		},
+		"a step whose driver did no work is not missing": {
+			observations: []driverStatsObservationResult{ended(steps{})},
+			final:        steps{readStep: stats(64)},
+			want:         steps{readStep: stats(64)},
+		},
+		"a refusal is reported before a missing step": {
+			observations: []driverStatsObservationResult{
+				working(nil, seedStep), refused(map[string]error{readStep: readRefusal}),
+			},
+			wantErr: readRefusal,
+		},
 		"a capture at the end that fails stores nothing": {
 			observations: []driverStatsObservationResult{ended(steps{seedStep: stats(8)})},
 			finalErr:     captureFailure,
@@ -328,6 +368,121 @@ func TestCaptureStoredDriverStatsAddsTheStepsThatEndedDuringTheRun(t *testing.T)
 				want, _ := json.Marshal(tc.want)
 				t.Fatalf("stored statistics = %s reason %q, want %s reason %q",
 					got, metadata.DriverStatsError, want, wantReason)
+			}
+		})
+	}
+}
+
+func TestCaptureStoredDriverStatsRefusesARunWhoseMetricsWentUnreadForTheRowRetention(t *testing.T) {
+	const readStep = "mt-002-read"
+	retention := constants.EngineTerminalRowRetention
+	type read struct {
+		after       time.Duration // since the end of the previous read
+		takes       time.Duration
+		failed      bool
+		beforeSteps bool // a discovery that found no step of the run
+	}
+	every := func(n int, r read) []read { return slices.Repeat([]read{r}, n) }
+	observed := read{after: 2 * time.Second, takes: 100 * time.Millisecond}
+	failed := read{after: 2 * time.Second, takes: 100 * time.Millisecond, failed: true}
+	discovered := read{after: 500 * time.Millisecond, takes: 10 * time.Millisecond, beforeSteps: true}
+	quick := read{after: time.Second}
+
+	tests := map[string]struct {
+		reads   []read
+		final   read
+		wantGap bool
+	}{
+		"reads well within the retention": {
+			reads: every(30, observed),
+			final: quick,
+		},
+		"an engine start read by discovery before any step has a row": {
+			reads: append(every(80, discovered), every(3, observed)...),
+			final: quick,
+		},
+		"an engine start without any read": {
+			reads:   []read{{after: retention + time.Second}},
+			final:   quick,
+			wantGap: true,
+		},
+		"observations that failed for as long as the retention": {
+			reads:   append(append(every(2, observed), every(10, failed)...), every(2, observed)...),
+			final:   quick,
+			wantGap: true,
+		},
+		"a few failed observations": {
+			reads: append(append(every(2, observed), every(3, failed)...), every(2, observed)...),
+			final: quick,
+		},
+		"a capture at the end that comes as late as the retention": {
+			reads:   every(2, observed),
+			final:   read{after: retention},
+			wantGap: true,
+		},
+		"a capture at the end that comes just in time": {
+			reads: every(2, observed),
+			final: read{after: retention - time.Second},
+		},
+		"reads whose duration closes the gap": {
+			// From the start of one read to the end of the next: what they saw can lie that far apart.
+			reads:   []read{{takes: 6 * time.Second}, {after: retention - 10*time.Second, takes: 6 * time.Second}},
+			final:   quick,
+			wantGap: true,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			at := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+			var current read
+			original := observeDriverStatsFunc
+			t.Cleanup(func() { observeDriverStatsFunc = original })
+			observeDriverStatsFunc = func(
+				context.Context, string, int64, []string, []string, bool,
+			) (*results.DriverStatsObservation, error) {
+				at = at.Add(current.takes)
+				if current.failed {
+					return nil, errors.New("GET /metrics/json: connection refused")
+				}
+				return &results.DriverStatsObservation{}, nil
+			}
+			stats := &driverstats.Stats{Driver: "s3-rdma", Counters: map[string]int64{"rdma_transferred": 64}}
+			originalCapture := captureDriverStatsFunc
+			t.Cleanup(func() { captureDriverStatsFunc = originalCapture })
+			captureDriverStatsFunc = func(
+				context.Context, string, int64, []string, []string, bool,
+			) (map[string]*driverstats.Stats, error) {
+				at = at.Add(tc.final.takes)
+				return map[string]*driverstats.Stats{readStep: stats}, nil
+			}
+			metadata := &runMetadata{
+				WorkloadType: WorkloadTypeRead,
+				Hosts:        []runHostMetadata{{Host: "local", IsLocal: true}},
+			}
+			collector := newDriverStatsCollector(func() time.Time { return at })
+			for _, r := range tc.reads {
+				at = at.Add(r.after)
+				current = r
+				if r.beforeSteps {
+					start := at
+					at = at.Add(r.takes)
+					collector.readBeforeSteps(start)
+					continue
+				}
+				collector.observe(context.Background(), "http://engine", 77, []string{readStep}, metadata)
+			}
+			at = at.Add(tc.final.after)
+
+			captureStoredDriverStats(context.Background(), "http://engine", 77, []string{readStep}, metadata, collector)
+
+			if tc.wantGap {
+				if metadata.DriverStats != nil || !strings.Contains(metadata.DriverStatsError, "went unread") {
+					t.Fatalf("stored %+v reason %q, want a refusal for the unread time", metadata.DriverStats, metadata.DriverStatsError)
+				}
+				return
+			}
+			if metadata.DriverStatsError != "" || metadata.DriverStats[readStep] != stats {
+				t.Fatalf("stored %+v reason %q, want the statistics of the step", metadata.DriverStats, metadata.DriverStatsError)
 			}
 		})
 	}
@@ -636,30 +791,71 @@ func (*stagedRunTracker) SetRequireTerminalState(bool) {}
 // several steps the row of an early step is gone when the run ends, and its statistics are
 // stored all the same.
 func TestAutoResultsStoresDriverStatsOfAStepWhoseRowTheEngineDroppedBeforeTheRunEnded(t *testing.T) {
-	const runID = int64(42)
 	steps := []string{"mt-001-20260823.100000.001-seed", "mt-002-20260823.100000.001-read"}
-	fleetRow := func(stepID, opType string, unavailable int64, terminal bool) map[string]any {
-		return map[string]any{
-			"scope": "fleet", "role": "aggregate", "run_id": "42", "cluster_id": constants.RunClusterID(runID),
-			"step_id": stepID, "op_type": opType, "terminal": terminal, "partial": false,
-			"nodes_count": 1, "contributors_present": []string{constants.MetricsLocalContributorID},
-			"driver_stats": map[string]any{
-				"driver":    "s3-rdma",
-				"counters":  map[string]int64{"http_rdma_unavailable": unavailable},
-				"gauges":    map[string]int64{"transport_available": 0},
-				"reporting": 1, "partial": false,
-			},
-		}
-	}
-	// What the engine reports, stage by stage.
-	stages := [][]any{
+	stored, raw := monitorStagedDriverStats(t, steps, [][]any{
 		// The seed step is running.
-		{fleetRow(steps[0], "CREATE", 300, false)},
+		{stagedFleetRow(steps[0], "CREATE", 300, false)},
 		// The seed step has ended and its row is retained; the read step is running.
-		{fleetRow(steps[0], "CREATE", 561, true), fleetRow(steps[1], "READ", 40, false)},
+		{stagedFleetRow(steps[0], "CREATE", 561, true), stagedFleetRow(steps[1], "READ", 40, false)},
 		// The retention period of the seed row is over; the read step has ended.
-		{fleetRow(steps[1], "READ", 900, true)},
+		{stagedFleetRow(steps[1], "READ", 900, true)},
+	})
+
+	want := map[string]*driverstats.Stats{steps[0]: stagedStatistics(561), steps[1]: stagedStatistics(900)}
+	if !reflect.DeepEqual(stored.DriverStats, want) || stored.DriverStatsError != "" {
+		t.Fatalf("stored statistics = %+v error %q in %s", stored.DriverStats, stored.DriverStatsError, raw)
 	}
+}
+
+func TestAutoResultsRefusesDriverStatsWhenAStepSeenAtWorkEndedUnread(t *testing.T) {
+	steps := []string{"mt-001-20260823.100000.001-seed", "mt-002-20260823.100000.001-read"}
+	stored, raw := monitorStagedDriverStats(t, steps, [][]any{
+		// The seed step is running and its driver is at work.
+		{stagedFleetRow(steps[0], "CREATE", 300, false)},
+		// Its row is gone before the monitor read it as ended; the read step is running.
+		{stagedFleetRow(steps[1], "READ", 40, false)},
+		// The read step has ended.
+		{stagedFleetRow(steps[1], "READ", 900, true)},
+	})
+
+	if stored.DriverStats != nil || !strings.Contains(stored.DriverStatsError, steps[0]) {
+		t.Fatalf("stored statistics = %+v error %q in %s, want a refusal naming the seed step",
+			stored.DriverStats, stored.DriverStatsError, raw)
+	}
+}
+
+// stagedFleetRow is the fleet row of a step of run 42 whose S3-RDMA driver counted unavailable
+// RDMA transports.
+func stagedFleetRow(stepID, opType string, unavailable int64, terminal bool) map[string]any {
+	return map[string]any{
+		"scope": "fleet", "role": "aggregate", "run_id": "42", "cluster_id": constants.RunClusterID(42),
+		"step_id": stepID, "op_type": opType, "terminal": terminal, "partial": false,
+		"nodes_count": 1, "contributors_present": []string{constants.MetricsLocalContributorID},
+		"driver_stats": map[string]any{
+			"driver":    "s3-rdma",
+			"counters":  map[string]int64{"http_rdma_unavailable": unavailable},
+			"gauges":    map[string]int64{"transport_available": 0},
+			"reporting": 1, "partial": false,
+		},
+	}
+}
+
+// stagedStatistics is what the CLI stores from a terminal stagedFleetRow.
+func stagedStatistics(unavailable int64) *driverstats.Stats {
+	return &driverstats.Stats{
+		Driver:    "s3-rdma",
+		Counters:  map[string]int64{"http_rdma_unavailable": unavailable},
+		Gauges:    map[string]int64{"transport_available": 0},
+		Reporting: 1,
+	}
+}
+
+// monitorStagedDriverStats monitors a single-host S3-RDMA run 42 of the given steps whose engine
+// reports the given fleet rows, stage by stage, and returns the driver statistics it stored. The run
+// lasts until the monitor has read the engine's metrics in every stage.
+func monitorStagedDriverStats(t *testing.T, steps []string, stages [][]any) (storedDriverStats, string) {
+	t.Helper()
+	const runID = int64(42)
 	var stage atomic.Int32
 	served := make([]chan struct{}, len(stages))
 	servedOnce := make([]sync.Once, len(stages))
@@ -673,10 +869,9 @@ func TestAutoResultsStoresDriverStatsOfAStepWhoseRowTheEngineDroppedBeforeTheRun
 		servedOnce[at].Do(func() { close(served[at]) })
 	})
 	server := httptest.NewServer(mux)
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	installAutoResultsFakes(t, steps)
-	// The run lasts until the monitor has read the engine's metrics in every stage.
 	newRunTrackerFunc = func(string) autoResultsRunTracker {
 		return &stagedRunTracker{wait: func() {
 			for at := range stages {
@@ -715,17 +910,5 @@ func TestAutoResultsStoresDriverStatsOfAStepWhoseRowTheEngineDroppedBeforeTheRun
 	if outcome.ArtifactErr != nil {
 		t.Fatalf("ArtifactErr = %v", outcome.ArtifactErr)
 	}
-	stored, raw := readStoredDriverStats(t, resultsRoot)
-	statistics := func(unavailable int64) *driverstats.Stats {
-		return &driverstats.Stats{
-			Driver:    "s3-rdma",
-			Counters:  map[string]int64{"http_rdma_unavailable": unavailable},
-			Gauges:    map[string]int64{"transport_available": 0},
-			Reporting: 1,
-		}
-	}
-	want := map[string]*driverstats.Stats{steps[0]: statistics(561), steps[1]: statistics(900)}
-	if !reflect.DeepEqual(stored.DriverStats, want) || stored.DriverStatsError != "" {
-		t.Fatalf("stored statistics = %+v error %q in %s", stored.DriverStats, stored.DriverStatsError, raw)
-	}
+	return readStoredDriverStats(t, resultsRoot)
 }
