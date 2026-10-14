@@ -302,7 +302,11 @@ func captureStoredDriverStats(
 	}
 	metadata.DriverStats = nil
 	metadata.DriverStatsError = ""
-	var captured map[string]*driverstats.Stats
+	// The S3-RDMA driver always reports statistics. The steps the CLI generates for a run that
+	// selected it use it, unless the workload has a driver of its own: then no step reports any.
+	rdma := strings.EqualFold(strings.TrimSpace(metadata.ScenarioParams.S3Driver), scenario.S3DriverRdma)
+	var captured *results.DriverStatsCapture
+	var stored map[string]*driverstats.Stats
 	expectedContributorIDs, err := expectedMetricContributorIDs(metadata, metricCaptureKindDriverStats)
 	if err == nil {
 		captured, err = captureDriverStatsFunc(
@@ -310,19 +314,19 @@ func captureStoredDriverStats(
 			len(expectedContributorIDs) == 1)
 	}
 	if err == nil {
-		captured, err = observed.withFinal(captured)
+		stored, err = observed.withFinal(captured, rdma)
 	}
 	if err != nil {
 		metadata.DriverStatsError = err.Error()
 		return
 	}
-	if len(captured) > 0 {
-		metadata.DriverStats = captured
+	if len(stored) > 0 {
+		metadata.DriverStats = stored
 		return
 	}
-	// The S3-RDMA driver always reports statistics. A run that selected it and has none must
-	// say so: the summary then warns instead of showing nothing about the data path.
-	if strings.EqualFold(strings.TrimSpace(metadata.ScenarioParams.S3Driver), scenario.S3DriverRdma) {
+	// A run that selected the S3-RDMA driver and has no statistics must say so: the summary
+	// then warns instead of showing nothing about the data path.
+	if rdma {
 		metadata.DriverStatsError = driverStatsNotReported
 	}
 }

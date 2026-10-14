@@ -34,7 +34,7 @@ func TestCaptureTerminalDriverStatsReadsFleetTotalOfMultiHostRun(t *testing.T) {
 		))
 	defer server.Close()
 
-	captured, err := CaptureTerminalDriverStatsForRunContext(
+	captured, err := captureDriverStatsSteps(
 		context.Background(), server.URL, driverStatsRunID, []string{"read-current"},
 		driverStatsFleetContributors, false)
 	if err != nil {
@@ -76,7 +76,7 @@ func TestCaptureTerminalDriverStatsReadsSingleNodeRun(t *testing.T) {
 		server := driverStatsServer(metricsRows(row), endpointNotFound)
 		defer server.Close()
 
-		captured, err := CaptureTerminalDriverStatsForRunContext(
+		captured, err := captureDriverStatsSteps(
 			context.Background(), server.URL, driverStatsRunID, []string{"create-current"}, []string{"local"}, true)
 		if err != nil {
 			t.Fatal(err)
@@ -93,7 +93,7 @@ func TestCaptureTerminalDriverStatsReadsSingleNodeRun(t *testing.T) {
 			driverStatsRow(driverStatsRunID, "create-current", "CREATE", "node", "entry", nodeStats)))
 		defer server.Close()
 
-		captured, err := CaptureTerminalDriverStatsForRunContext(
+		captured, err := captureDriverStatsSteps(
 			context.Background(), server.URL, driverStatsRunID, []string{"create-current"}, []string{"local"}, true)
 		if err != nil {
 			t.Fatal(err)
@@ -118,7 +118,7 @@ func TestCaptureTerminalDriverStatsCoversEveryOperationOfARun(t *testing.T) {
 	defer server.Close()
 
 	steps := []string{"seed", "read", "mixed", "cleanup"}
-	captured, err := CaptureTerminalDriverStatsForRunContext(
+	captured, err := captureDriverStatsSteps(
 		context.Background(), server.URL, driverStatsRunID, steps, driverStatsFleetContributors, false)
 	if err != nil {
 		t.Fatal(err)
@@ -151,7 +151,7 @@ func TestCaptureTerminalDriverStatsIgnoresRowsOfOtherRuns(t *testing.T) {
 		endpointNotFound)
 	defer server.Close()
 
-	captured, err := CaptureTerminalDriverStatsForRunContext(
+	captured, err := captureDriverStatsSteps(
 		context.Background(), server.URL, driverStatsRunID, []string{"read-current"},
 		driverStatsFleetContributors, false)
 	if err != nil {
@@ -188,7 +188,7 @@ func TestCaptureTerminalDriverStatsIsEmptyWhenNothingIsReported(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			server := driverStatsServer(tc.fleet, tc.node)
 			defer server.Close()
-			captured, err := CaptureTerminalDriverStatsForRunContext(
+			captured, err := captureDriverStatsSteps(
 				context.Background(), server.URL, driverStatsRunID, []string{"read-current"}, []string{"local"}, true)
 			if err != nil {
 				t.Fatalf("a run without driver statistics was refused: %v", err)
@@ -209,7 +209,7 @@ func TestCaptureTerminalDriverStatsKeepsUnknownNames(t *testing.T) {
 		})))
 	defer server.Close()
 
-	captured, err := CaptureTerminalDriverStatsForRunContext(
+	captured, err := captureDriverStatsSteps(
 		context.Background(), server.URL, driverStatsRunID, []string{"step"}, []string{"local"}, true)
 	if err != nil {
 		t.Fatal(err)
@@ -229,7 +229,7 @@ func TestCaptureTerminalDriverStatsFailsClosedOnInvalidFleetResponse(t *testing.
 		t.Run(name, func(t *testing.T) {
 			server := driverStatsServer(fleet, endpointNotFound)
 			defer server.Close()
-			captured, err := CaptureTerminalDriverStatsForRunContext(
+			captured, err := captureDriverStatsSteps(
 				context.Background(), server.URL, driverStatsRunID, []string{"read-current"},
 				driverStatsFleetContributors, false)
 			if err == nil {
@@ -331,7 +331,7 @@ func TestCaptureTerminalDriverStatsDoesNotFallBackWhenFleetAnswered(t *testing.T
 					"driver": "s3-rdma", "counters": map[string]int64{"rdma_transferred": 1},
 				})))
 			defer server.Close()
-			captured, err := CaptureTerminalDriverStatsForRunContext(
+			captured, err := captureDriverStatsSteps(
 				context.Background(), server.URL, driverStatsRunID, []string{"read-current"}, []string{"local"}, true)
 			if err == nil || captured != nil {
 				t.Fatalf("node row replaced an invalid fleet answer: err=%v captured=%s", err, asJSON(t, captured))
@@ -351,7 +351,7 @@ func TestCaptureTerminalDriverStatsStoresNothingWhenOneStepFails(t *testing.T) {
 		endpointNotFound)
 	defer server.Close()
 
-	captured, err := CaptureTerminalDriverStatsForRunContext(
+	captured, err := captureDriverStatsSteps(
 		context.Background(), server.URL, driverStatsRunID, []string{"seed", "read"},
 		driverStatsFleetContributors, false)
 	if err == nil || captured != nil {
@@ -381,7 +381,7 @@ func TestCaptureTerminalDriverStatsRestrictsNodeFallback(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			server := driverStatsServer(endpointNotFound, tc.node)
 			defer server.Close()
-			if captured, err := CaptureTerminalDriverStatsForRunContext(
+			if captured, err := captureDriverStatsSteps(
 				context.Background(), server.URL, driverStatsRunID, []string{"read-current"},
 				tc.contributors, tc.allowNodeFallback); err == nil {
 				t.Fatalf("unproven node fallback was accepted: %s", asJSON(t, captured))
@@ -406,7 +406,7 @@ func TestCaptureTerminalDriverStatsRequiresExactExpectedIdentity(t *testing.T) {
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			if _, err := CaptureTerminalDriverStatsForRunContext(
+			if _, err := captureDriverStatsSteps(
 				context.Background(), "http://127.0.0.1:1", tc.runID, tc.steps, tc.contributors, false); err == nil {
 				t.Fatal("invalid expected identity was accepted")
 			}
@@ -453,7 +453,7 @@ func TestObserveTerminalDriverStatsLeavesOutStepsThatAreStillRunning(t *testing.
 	}
 
 	// The same response is not a terminal capture: the running step refuses it.
-	captured, err := CaptureTerminalDriverStatsForRunContext(
+	captured, err := captureDriverStatsSteps(
 		context.Background(), server.URL, driverStatsRunID, []string{"seed", "read", "cleanup", "later"},
 		driverStatsFleetContributors, false)
 	if err == nil || captured != nil {
@@ -601,6 +601,102 @@ func TestObserveTerminalDriverStatsFollowsTheEndpointRuleOfTheCapture(t *testing
 			t.Fatalf("observation without expected steps was accepted: err=%v observation=%+v", err, observation)
 		}
 	})
+}
+
+func TestCaptureTerminalDriverStatsNamesTheStepsThatCompletedOperations(t *testing.T) {
+	rows := []any{
+		withOperations(driverStatsRow(driverStatsRunID, "seed", "CREATE", "fleet", "aggregate", fleetDriverStats(2)), 8, 0),
+		// A step whose driver reports nothing worked all the same.
+		withOperations(driverStatsRow(driverStatsRunID, "read", "READ", "fleet", "aggregate", nil), 64, 0),
+		// The carrier of a mixed step completed nothing; another of its rows did.
+		withOperations(driverStatsRow(driverStatsRunID, "mixed", "READ", "fleet", "aggregate", nil), 10, 0),
+		withOperations(driverStatsRow(driverStatsRunID, "mixed", "CREATE", "fleet", "aggregate", fleetDriverStats(2)), 0, 0),
+		withOperations(driverStatsRow(driverStatsRunID, "failing", "DELETE", "fleet", "aggregate", nil), 0, 3),
+		withOperations(driverStatsRow(driverStatsRunID, "idle", "DELETE", "fleet", "aggregate", nil), 0, 0),
+		driverStatsRow(driverStatsRunID, "unreported", "READ", "fleet", "aggregate", nil),
+		// Rows of another run, of a step the run does not plan or without a run identity say
+		// nothing about the run.
+		withOperations(driverStatsRow(driverStatsPriorRunID, "later", "READ", "fleet", "aggregate", nil), 99, 0),
+		withOperations(driverStatsRow(driverStatsRunID, "unplanned", "READ", "fleet", "aggregate", nil), 99, 0),
+		withOperations(withRunID(driverStatsRow(driverStatsRunID, "later", "READ", "fleet", "aggregate", nil), "x"), 99, 0),
+	}
+	server := driverStatsServer(metricsRows(rows...), endpointNotFound)
+	defer server.Close()
+	planned := []string{"seed", "read", "mixed", "failing", "idle", "unreported", "later"}
+
+	captured, err := CaptureTerminalDriverStatsForRunContext(
+		context.Background(), server.URL, driverStatsRunID, planned, driverStatsFleetContributors, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantWorked := map[string]struct{}{"seed": {}, "read": {}, "mixed": {}, "failing": {}}
+	if !reflect.DeepEqual(captured.Worked, wantWorked) {
+		t.Fatalf("steps that completed operations = %v, want %v", captured.Worked, wantWorked)
+	}
+	if len(captured.Steps) != 2 || captured.Steps["seed"] == nil || captured.Steps["mixed"] == nil {
+		t.Fatalf("captured statistics = %s, want those of the seed and mixed steps", asJSON(t, captured.Steps))
+	}
+
+	observation, err := ObserveTerminalDriverStatsForRunContext(
+		context.Background(), server.URL, driverStatsRunID, planned, driverStatsFleetContributors, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(observation.Worked, wantWorked) {
+		t.Fatalf("observed steps that completed operations = %v, want %v", observation.Worked, wantWorked)
+	}
+}
+
+func TestObserveTerminalDriverStatsNamesTheRunningStepsThatCompletedOperations(t *testing.T) {
+	running := withOperations(driverStatsRow(driverStatsRunID, "read", "READ", "fleet", "aggregate", nil), 40, 0)
+	running["terminal"] = false
+	starting := driverStatsRow(driverStatsRunID, "cleanup", "DELETE", "fleet", "aggregate", nil)
+	starting["terminal"] = false
+	server := driverStatsServer(metricsRows(running, starting), endpointNotFound)
+	defer server.Close()
+
+	observation, err := ObserveTerminalDriverStatsForRunContext(
+		context.Background(), server.URL, driverStatsRunID, []string{"read", "cleanup"},
+		driverStatsFleetContributors, false)
+	if err != nil {
+		t.Fatalf("observe a run in progress: %v", err)
+	}
+	if want := map[string]struct{}{"read": {}}; !reflect.DeepEqual(observation.Worked, want) {
+		t.Fatalf("steps that completed operations = %v, want %v", observation.Worked, want)
+	}
+	if len(observation.Steps) != 0 || len(observation.Refused) != 0 {
+		t.Fatalf("running steps were judged: %+v", observation)
+	}
+}
+
+// captureDriverStatsSteps captures as CaptureTerminalDriverStatsForRunContext and returns the
+// statistics alone.
+func captureDriverStatsSteps(
+	ctx context.Context,
+	baseURL string,
+	expectedRunID int64,
+	expectedStepIDs []string,
+	expectedContributorIDs []string,
+	allowNodeFallback bool,
+) (map[string]*driverstats.Stats, error) {
+	captured, err := CaptureTerminalDriverStatsForRunContext(
+		ctx, baseURL, expectedRunID, expectedStepIDs, expectedContributorIDs, allowNodeFallback)
+	if captured == nil {
+		return nil, err
+	}
+	return captured.Steps, err
+}
+
+// withOperations sets the operations a metrics row counted.
+func withOperations(row map[string]any, success, failed int64) map[string]any {
+	row["operations"] = map[string]any{"success_count": success, "failed_count": failed}
+	return row
+}
+
+// withRunID sets the run identity of a metrics row as the engine wrote it.
+func withRunID(row map[string]any, runID string) map[string]any {
+	row["run_id"] = runID
+	return row
 }
 
 // driverStatsRow builds a terminal metrics row as the engine writes it; stats is its

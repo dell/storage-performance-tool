@@ -33,9 +33,18 @@ type driverStatsCaptureCall struct {
 	allowNodeFallback bool
 }
 
-// stubDriverStatsCapture replaces the capture for one test and records its calls.
+// stubDriverStatsCapture replaces the capture for one test with one of the given statistics, in
+// which no step worked without them, and records its calls.
 func stubDriverStatsCapture(
 	t *testing.T, captured map[string]*driverstats.Stats, captureErr error,
+) *[]driverStatsCaptureCall {
+	t.Helper()
+	return stubDriverStatsFinal(t, &results.DriverStatsCapture{Steps: captured}, captureErr)
+}
+
+// stubDriverStatsFinal replaces the capture for one test and records its calls.
+func stubDriverStatsFinal(
+	t *testing.T, captured *results.DriverStatsCapture, captureErr error,
 ) *[]driverStatsCaptureCall {
 	t.Helper()
 	original := captureDriverStatsFunc
@@ -44,7 +53,7 @@ func stubDriverStatsCapture(
 	captureDriverStatsFunc = func(
 		_ context.Context, baseURL string, runID int64, stepIDs, contributorIDs []string,
 		allowNodeFallback bool,
-	) (map[string]*driverstats.Stats, error) {
+	) (*results.DriverStatsCapture, error) {
 		*calls = append(*calls, driverStatsCaptureCall{
 			baseURL: baseURL, runID: runID,
 			stepIDs:           append([]string(nil), stepIDs...),
@@ -54,6 +63,15 @@ func stubDriverStatsCapture(
 		return captured, captureErr
 	}
 	return calls
+}
+
+// stepSet is the set of the given steps.
+func stepSet(stepIDs ...string) map[string]struct{} {
+	set := make(map[string]struct{}, len(stepIDs))
+	for _, stepID := range stepIDs {
+		set[stepID] = struct{}{}
+	}
+	return set
 }
 
 type driverStatsObservationResult struct {
@@ -233,13 +251,22 @@ func TestCaptureStoredDriverStatsAddsTheStepsThatEndedDuringTheRun(t *testing.T)
 	// working is a response in which the rows of the given steps, running or ended, showed their
 	// driver at work; ended lists those of them whose terminal statistics passed every check.
 	working := func(ended map[string]*driverstats.Stats, stepIDs ...string) driverStatsObservationResult {
-		active := make(map[string]struct{}, len(stepIDs))
-		for _, stepID := range stepIDs {
-			active[stepID] = struct{}{}
-		}
-		return driverStatsObservationResult{observation: &results.DriverStatsObservation{Steps: ended, Active: active}}
+		return driverStatsObservationResult{observation: &results.DriverStatsObservation{
+			Steps: ended, Active: stepSet(stepIDs...),
+		}}
+	}
+	// completing is a response in which the rows of the given steps, running or ended, counted
+	// completed operations; ended lists those of them whose terminal statistics passed every check.
+	completing := func(ended map[string]*driverstats.Stats, stepIDs ...string) driverStatsObservationResult {
+		return driverStatsObservationResult{observation: &results.DriverStatsObservation{
+			Steps: ended, Worked: stepSet(stepIDs...),
+		}}
 	}
 	seedMissed := errors.New(`no terminal driver statistics were read for step "mt-001-seed", whose driver did work`)
+	workedUnread := func(stepID string) error {
+		return errors.New(`no terminal driver statistics were read for step "` + stepID +
+			`", which completed operations with a driver that always reports them`)
+	}
 	seedRefusal := errors.New(
 		`/metrics/fleet/json returned incomplete contributor evidence for driver statistics step "mt-001-seed"`)
 	readRefusal := errors.New(`/metrics/fleet/json driver statistics step "mt-002-read": statistics are partial`)
@@ -247,8 +274,10 @@ func TestCaptureStoredDriverStatsAddsTheStepsThatEndedDuringTheRun(t *testing.T)
 	type steps = map[string]*driverstats.Stats
 
 	tests := map[string]struct {
+		s3Driver     string
 		observations []driverStatsObservationResult
 		final        steps
+		finalWorked  []string // the steps of the capture at the end that counted completed operations
 		finalErr     error
 		want         steps
 		wantErr      error
@@ -342,14 +371,65 @@ func TestCaptureStoredDriverStatsAddsTheStepsThatEndedDuringTheRun(t *testing.T)
 			finalErr:     captureFailure,
 			wantErr:      captureFailure,
 		},
+		"on an S3-RDMA run, a step that completed operations without statistics refuses every step": {
+			s3Driver:     scenario.S3DriverRdma,
+			observations: []driverStatsObservationResult{completing(steps{seedStep: stats(8)}, seedStep, readStep)},
+			final:        steps{seedStep: stats(8)},
+			finalWorked:  []string{seedStep, readStep},
+			wantErr:      workedUnread(readStep),
+		},
+		"on an S3-RDMA run, a step seen completing operations whose row was dropped refuses every step": {
+			s3Driver:     scenario.S3DriverRdma,
+			observations: []driverStatsObservationResult{completing(nil, seedStep), completing(nil, readStep)},
+			final:        steps{readStep: stats(64)},
+			finalWorked:  []string{readStep},
+			wantErr:      workedUnread(seedStep),
+		},
+		"on an S3-RDMA run, the steps that completed operations are stored when each has statistics": {
+			s3Driver: scenario.S3DriverRdma,
+			observations: []driverStatsObservationResult{
+				completing(nil, seedStep), completing(steps{seedStep: stats(8)}, seedStep, readStep),
+			},
+			final:       steps{readStep: stats(64)},
+			finalWorked: []string{readStep},
+			want:        steps{seedStep: stats(8), readStep: stats(64)},
+		},
+		"on an S3-RDMA run, a step that completed no operations is not missing": {
+			s3Driver:     scenario.S3DriverRdma,
+			observations: []driverStatsObservationResult{ended(steps{})},
+			final:        steps{readStep: stats(64)},
+			finalWorked:  []string{readStep},
+			want:         steps{readStep: stats(64)},
+		},
+		"on an S3-RDMA run without any statistics, the run says that none were reported": {
+			s3Driver:     scenario.S3DriverRdma,
+			observations: []driverStatsObservationResult{completing(nil, seedStep)},
+			finalWorked:  []string{readStep},
+			wantErr:      errors.New(driverStatsNotReported),
+		},
+		"on a run of another driver, a step that completed operations without statistics is not missing": {
+			s3Driver:     scenario.S3DriverAws,
+			observations: []driverStatsObservationResult{completing(steps{seedStep: stats(8)}, seedStep, readStep)},
+			final:        steps{seedStep: stats(8)},
+			finalWorked:  []string{seedStep, readStep},
+			want:         steps{seedStep: stats(8)},
+		},
+		"on a custom scenario, a step that completed operations without statistics is not missing": {
+			observations: []driverStatsObservationResult{completing(nil, seedStep)},
+			final:        steps{readStep: stats(64)},
+			finalWorked:  []string{readStep},
+			want:         steps{readStep: stats(64)},
+		},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			stubDriverStatsObservations(t, tc.observations...)
-			stubDriverStatsCapture(t, tc.final, tc.finalErr)
+			stubDriverStatsFinal(t, &results.DriverStatsCapture{Steps: tc.final, Worked: stepSet(tc.finalWorked...)},
+				tc.finalErr)
 			metadata := &runMetadata{
-				WorkloadType: WorkloadTypeRead,
-				Hosts:        []runHostMetadata{{Host: "local", IsLocal: true}},
+				WorkloadType:   WorkloadTypeRead,
+				Hosts:          []runHostMetadata{{Host: "local", IsLocal: true}},
+				ScenarioParams: scenario.Params{S3Driver: tc.s3Driver},
 			}
 			planned := []string{seedStep, readStep, cleanupStep}
 			collector := &driverStatsCollector{}
@@ -451,9 +531,9 @@ func TestCaptureStoredDriverStatsRefusesARunWhoseMetricsWentUnreadForTheRowReten
 			t.Cleanup(func() { captureDriverStatsFunc = originalCapture })
 			captureDriverStatsFunc = func(
 				context.Context, string, int64, []string, []string, bool,
-			) (map[string]*driverstats.Stats, error) {
+			) (*results.DriverStatsCapture, error) {
 				at = at.Add(tc.final.takes)
-				return map[string]*driverstats.Stats{readStep: stats}, nil
+				return &results.DriverStatsCapture{Steps: map[string]*driverstats.Stats{readStep: stats}}, nil
 			}
 			metadata := &runMetadata{
 				WorkloadType: WorkloadTypeRead,
@@ -822,6 +902,43 @@ func TestAutoResultsRefusesDriverStatsWhenAStepSeenAtWorkEndedUnread(t *testing.
 		t.Fatalf("stored statistics = %+v error %q in %s, want a refusal naming the seed step",
 			stored.DriverStats, stored.DriverStatsError, raw)
 	}
+}
+
+// The S3-RDMA driver always reports statistics, so a step of a run that selected it which
+// completed operations without them was missed, even when every read of the run succeeded.
+func TestAutoResultsRefusesDriverStatsWhenAnS3RDMAStepCompletedOperationsWithoutThem(t *testing.T) {
+	steps := []string{"mt-001-20260823.100000.001-seed", "mt-002-20260823.100000.001-read"}
+	stored, raw := monitorStagedDriverStats(t, steps, [][]any{
+		{stagedFleetRow(steps[0], "CREATE", 561, true), stagedFleetRowWithoutStats(steps[1], "READ", 40, false)},
+		{stagedFleetRow(steps[0], "CREATE", 561, true), stagedFleetRowWithoutStats(steps[1], "READ", 64, true)},
+	})
+
+	if stored.DriverStats != nil || !strings.Contains(stored.DriverStatsError, steps[1]) {
+		t.Fatalf("stored statistics = %+v error %q in %s, want a refusal naming the read step",
+			stored.DriverStats, stored.DriverStatsError, raw)
+	}
+}
+
+func TestAutoResultsStoresDriverStatsOfAnS3RDMARunWhoseOtherStepCompletedNoOperations(t *testing.T) {
+	steps := []string{"mt-001-20260823.100000.001-seed", "mt-002-20260823.100000.001-read"}
+	stored, raw := monitorStagedDriverStats(t, steps, [][]any{
+		{stagedFleetRow(steps[0], "CREATE", 561, true), stagedFleetRowWithoutStats(steps[1], "READ", 0, false)},
+		{stagedFleetRow(steps[0], "CREATE", 561, true), stagedFleetRowWithoutStats(steps[1], "READ", 0, true)},
+	})
+
+	want := map[string]*driverstats.Stats{steps[0]: stagedStatistics(561)}
+	if !reflect.DeepEqual(stored.DriverStats, want) || stored.DriverStatsError != "" {
+		t.Fatalf("stored statistics = %+v error %q in %s", stored.DriverStats, stored.DriverStatsError, raw)
+	}
+}
+
+// stagedFleetRowWithoutStats is the fleet row of a step of run 42 that completed the given
+// number of operations and reports no driver statistics.
+func stagedFleetRowWithoutStats(stepID, opType string, completed int64, terminal bool) map[string]any {
+	row := stagedFleetRow(stepID, opType, 0, terminal)
+	delete(row, "driver_stats")
+	row["operations"] = map[string]any{"success_count": completed, "failed_count": 0}
+	return row
 }
 
 // stagedFleetRow is the fleet row of a step of run 42 whose S3-RDMA driver counted unavailable

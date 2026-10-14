@@ -154,6 +154,10 @@ type terminalDeleteMetricsStep struct {
 
 type terminalDriverStatsStep struct {
 	terminalMetricsRow
+	Operations struct {
+		SuccessCount int64 `json:"success_count"`
+		FailedCount  int64 `json:"failed_count"`
+	} `json:"operations"`
 	DriverStats json.RawMessage `json:"driver_stats"`
 }
 
@@ -228,10 +232,20 @@ func CaptureTerminalDeleteMetricsForRunContext(
 		})
 }
 
+// DriverStatsCapture is what the metrics at the end of a run say about the driver statistics of
+// its steps.
+type DriverStatsCapture struct {
+	// Steps holds the terminal statistics of the steps that report them, by step.
+	Steps map[string]*driverstats.Stats
+	// Worked holds the steps whose rows counted completed operations, with statistics or
+	// without. A step whose driver always reports statistics has them when it is in this set.
+	Worked map[string]struct{}
+}
+
 // CaptureTerminalDriverStatsForRunContext captures the terminal driver statistics of every
 // expected step that reports them, under the endpoint, identity and completeness rules of
 // CaptureTerminalDeleteMetricsForRunContext. A step whose driver reports nothing is left out, so
-// an engine without driver statistics yields an empty result. Statistics that fail a check are
+// an engine without driver statistics yields no statistics. Statistics that fail a check are
 // an error and nothing is returned: partial statistics are never stored.
 func CaptureTerminalDriverStatsForRunContext(
 	ctx context.Context,
@@ -240,7 +254,7 @@ func CaptureTerminalDriverStatsForRunContext(
 	expectedStepIDs []string,
 	expectedContributorIDs []string,
 	allowNodeFallback bool,
-) (map[string]*driverstats.Stats, error) {
+) (*DriverStatsCapture, error) {
 	const capture = "capture terminal driver statistics"
 	target, err := newTerminalCaptureTarget(
 		captureKindDriverStats, expectedRunID, expectedStepIDs, expectedContributorIDs)
@@ -249,13 +263,13 @@ func CaptureTerminalDriverStatsForRunContext(
 	}
 	return captureFromAuthoritativeEndpoint(
 		capture, target, allowNodeFallback,
-		func(metricsPath, wantScope string) (map[string]*driverstats.Stats, bool, error) {
+		func(metricsPath, wantScope string) (*DriverStatsCapture, bool, error) {
 			return captureTerminalDriverStatsFromPath(ctx, baseURL, metricsPath, wantScope, target)
 		})
 }
 
 // DriverStatsObservation is what one metrics response says about the driver statistics of the
-// steps of a run that have ended. A step that is still running is in neither map.
+// steps of a run that have ended. A step that is still running is in neither Steps nor Refused.
 type DriverStatsObservation struct {
 	// Steps holds the terminal statistics that passed every check, by step.
 	Steps map[string]*driverstats.Stats
@@ -264,6 +278,9 @@ type DriverStatsObservation struct {
 	// Active holds the steps, running or ended, whose row showed their driver at work. The
 	// engine keeps a terminal row with statistics for each of them.
 	Active map[string]struct{}
+	// Worked holds the steps, running or ended, whose rows counted completed operations, as in
+	// DriverStatsCapture.
+	Worked map[string]struct{}
 }
 
 // ObserveTerminalDriverStatsForRunContext reads the terminal driver statistics of the expected
@@ -484,39 +501,63 @@ type driverStatsOutcome struct {
 	err     error
 }
 
+// driverStatsResponse is what one metrics response says about the driver statistics of the
+// expected steps: an outcome for each row with statistics, and the steps that worked.
+type driverStatsResponse struct {
+	rows   []driverStatsOutcome
+	worked map[string]struct{}
+}
+
 // driverStatsRows differs from the DELETE capture in one rule: a step without statistics is
 // not missing. Drivers that report nothing, engines that predate the field and the other
-// operation rows of a mixed step all publish rows without driver_stats.
+// operation rows of a mixed step all publish rows without driver_stats. Whether a step that
+// worked must have statistics depends on its driver, which the rows do not name.
 func driverStatsRows(
 	ctx context.Context,
 	baseURL string,
 	metricsPath string,
 	wantScope string,
 	target *terminalCaptureTarget,
-) ([]driverStatsOutcome, bool, error) {
+) (*driverStatsResponse, bool, error) {
 	steps, available, err := fetchMetricsRows[terminalDriverStatsStep](ctx, baseURL, metricsPath)
 	if err != nil || !available {
 		return nil, available, err
 	}
 	checker := target.checker(metricsPath, wantScope)
-	rows := make([]driverStatsOutcome, 0, len(target.steps))
+	response := &driverStatsResponse{
+		rows:   make([]driverStatsOutcome, 0, len(target.steps)),
+		worked: make(map[string]struct{}),
+	}
 	for i := range steps {
 		step := &steps[i]
+		if target.worked(step) {
+			response.worked[step.StepID] = struct{}{}
+		}
 		admitted, admitErr := checker.admit(&step.terminalMetricsRow, hasJSONValue(step.DriverStats))
 		if admitErr != nil {
-			rows = append(rows, driverStatsOutcome{stepID: step.StepID, running: !step.Terminal, err: admitErr})
+			response.rows = append(response.rows,
+				driverStatsOutcome{stepID: step.StepID, running: !step.Terminal, err: admitErr})
 			continue
 		}
 		if !admitted {
 			continue
 		}
 		stats, statsErr := checker.driverStats(step)
-		rows = append(rows, driverStatsOutcome{
+		response.rows = append(response.rows, driverStatsOutcome{
 			stepID: step.StepID, stats: stats, running: !step.Terminal, active: driverCounted(step.DriverStats),
 			err: statsErr,
 		})
 	}
-	return rows, true, nil
+	return response, true, nil
+}
+
+// worked reports whether a row is one of an expected step of the run that counted completed
+// operations, successful or failed.
+func (t *terminalCaptureTarget) worked(step *terminalDriverStatsStep) bool {
+	runID, err := parseMetricsRunID(step.RunID)
+	_, expected := t.steps[strings.TrimSpace(step.StepID)]
+	return err == nil && runID == t.runID && expected &&
+		step.Operations.SuccessCount+step.Operations.FailedCount > 0
 }
 
 // driverCounted reports whether the statistics of a row, checked or not, show the driver at work.
@@ -557,17 +598,20 @@ func captureTerminalDriverStatsFromPath(
 	metricsPath string,
 	wantScope string,
 	target *terminalCaptureTarget,
-) (map[string]*driverstats.Stats, bool, error) {
-	rows, available, err := driverStatsRows(ctx, baseURL, metricsPath, wantScope, target)
+) (*DriverStatsCapture, bool, error) {
+	response, available, err := driverStatsRows(ctx, baseURL, metricsPath, wantScope, target)
 	if err != nil || !available {
 		return nil, available, err
 	}
-	captured := make(map[string]*driverstats.Stats, len(rows))
-	for _, row := range rows {
+	captured := &DriverStatsCapture{
+		Steps:  make(map[string]*driverstats.Stats, len(response.rows)),
+		Worked: response.worked,
+	}
+	for _, row := range response.rows {
 		if row.err != nil {
 			return nil, true, row.err
 		}
-		captured[row.stepID] = row.stats
+		captured.Steps[row.stepID] = row.stats
 	}
 	return captured, true, nil
 }
@@ -581,16 +625,17 @@ func observeTerminalDriverStatsFromPath(
 	wantScope string,
 	target *terminalCaptureTarget,
 ) (*DriverStatsObservation, bool, error) {
-	rows, available, err := driverStatsRows(ctx, baseURL, metricsPath, wantScope, target)
+	response, available, err := driverStatsRows(ctx, baseURL, metricsPath, wantScope, target)
 	if err != nil || !available {
 		return nil, available, err
 	}
 	observation := &DriverStatsObservation{
-		Steps:   make(map[string]*driverstats.Stats, len(rows)),
+		Steps:   make(map[string]*driverstats.Stats, len(response.rows)),
 		Refused: make(map[string]error),
 		Active:  make(map[string]struct{}),
+		Worked:  response.worked,
 	}
-	for _, row := range rows {
+	for _, row := range response.rows {
 		if row.active {
 			observation.Active[row.stepID] = struct{}{}
 		}

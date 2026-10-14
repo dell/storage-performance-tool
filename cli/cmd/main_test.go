@@ -5,7 +5,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/dell/storage-performance-tool/cli/internal/driverstats"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 )
 
@@ -20,7 +19,7 @@ var (
 func TestMain(m *testing.M) {
 	captureDriverStatsFunc = func(
 		context.Context, string, int64, []string, []string, bool,
-	) (map[string]*driverstats.Stats, error) {
+	) (*results.DriverStatsCapture, error) {
 		return nil, nil
 	}
 	observeDriverStatsFunc = func(
