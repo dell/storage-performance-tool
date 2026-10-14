@@ -28,6 +28,7 @@ import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DriverStatsTotal;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.dell.spt.base.metrics.util.PrometheusMetricsExporter;
+import com.dell.spt.base.metrics.util.DriverStatsCollector;
 import com.dell.spt.base.metrics.util.PrometheusMetricsExporterImpl;
 import com.dell.spt.base.metrics.util.CombinedCompletionCollector;
 import io.prometheus.client.Collector;
@@ -82,6 +83,11 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 			Loggers.MSG.debug("CombinedCompletionCollector already registered, skipping duplicate registration");
 		} catch (final RuntimeException e) {
 			LogUtil.exception(Level.WARN, e, "Failed to register CombinedCompletionCollector");
+		}
+		try {
+			CollectorRegistry.defaultRegistry.register(new DriverStatsCollector(distributedMetrics::keySet));
+		} catch (final RuntimeException e) {
+			LogUtil.exception(Level.WARN, e, "Failed to register the storage driver statistics collector");
 		}
 	}
 
@@ -177,20 +183,10 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 			lastProgressByStepId.remove(ProgressKey.of(metricsCtx.loadStepId(), metricsCtx instanceof DistributedMetricsContext));
 			allMetrics.add(metricsCtx);
 			if (metricsCtx instanceof DistributedMetricsContext<?> distributedMetricsCtx) {
-				final String[] labelValues = {
-						metricsCtx.loadStepId(),
-						metricsCtx.opType().name(),
-						String.valueOf(metricsCtx.concurrencyLimit()),
-						metricsCtx.itemDataSize().toString(),
-						String.valueOf(metricsCtx.startTimeStamp()),
-						((DistributedMetricsContext) metricsCtx).nodeAddrs().toString(),
-						metricsCtx.comment(),
-						String.valueOf(metricsCtx.runId())
-				};
 				distributedMetrics.put(
 								distributedMetricsCtx,
 								new PrometheusMetricsExporterImpl(distributedMetricsCtx)
-												.labels(metricLabelsArray(), labelValues)
+												.labels(metricLabelsArray(), PrometheusMetricsExporterImpl.labelValues(distributedMetricsCtx))
 												//.quantiles(distributedMetricsCtx.quantileValues())
 												.register());
 			}

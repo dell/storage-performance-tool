@@ -21,6 +21,14 @@ public interface MetricsConstants {
 	String METRIC_NAME_CONTRIBUTORS_PRESENT = "contributors_present";
 	/** JSON field holding the statistics a storage driver reports about itself. */
 	String METRIC_NAME_DRIVER_STATS = "driver_stats";
+	/** Prometheus name prefix of a storage driver statistic: the statistic's name follows. */
+	String METRIC_NAME_DRIVER_PREFIX = "driver_";
+	/** Prometheus gauge: the contributors whose storage driver statistics are in a fleet total. */
+	String METRIC_NAME_DRIVER_REPORTING = METRIC_NAME_DRIVER_PREFIX + "reporting";
+	/** Prometheus gauge: 1 when a fleet total of storage driver statistics is incomplete. */
+	String METRIC_NAME_DRIVER_PARTIAL = METRIC_NAME_DRIVER_PREFIX + "partial";
+	/** Prometheus label holding the storage driver type. */
+	String METRIC_LABEL_DRIVER = "driver";
 
 	/** Unit for logical DELETE API request and batch counters. */
 	String DELETE_REQUEST_UNIT = "logical_api_requests";

@@ -402,6 +402,26 @@ SPT's custom collector is registered for distributed metrics contexts. Therefore
 
 Prometheus timing values are seconds; JSON timing distribution values are microseconds. The current Prometheus collector does not export percentile series. Use JSON schema-4 timing distributions or the final metrics artifact when percentiles are required.
 
+### Storage driver statistics
+
+While a step whose storage driver reports statistics about itself runs (the `s3-rdma` driver does), the entry node also exports the fleet total of those statistics. The names are those of the `driver_stats` object of the step's `/metrics/fleet/json` row, after `spt_driver_`:
+
+| Series | Type | Meaning |
+|:--|:--|:--|
+| `spt_driver_<counter>_total` | counter | Fleet total of a driver counter, for example `spt_driver_rdma_transferred_total` |
+| `spt_driver_<gauge>` | gauge | Sum of a driver gauge over the nodes, for example `spt_driver_pool_reserved_bytes` |
+| `spt_driver_reporting` | gauge | Nodes whose statistics are in the total |
+| `spt_driver_partial` | gauge | `1` when the total is incomplete, otherwise `0` |
+
+These series carry the labels below and `driver`, the driver type. They are the only SPT series typed as counters.
+
+- The counters and gauges are exported only while the total is complete, so a counter does not fall when a node is missing from one sum. While `spt_driver_partial` is `1` (a node is missing, or the nodes report different drivers), only `spt_driver_reporting` and `spt_driver_partial` are exported. When the drivers differ, `driver` lists them, separated by commas.
+- A fleet gauge is a sum of node levels, each read at its own moment, as in the JSON.
+- The series disappear when the step ends, like the other SPT series, so a scrape can miss the last seconds of a step. The final values are in the step's retained `/metrics/fleet/json` row and, for a run through the CLI, in `spt_run_params.json`.
+- In a mixed step the series carry the `load_op_type` of one of the step's operations and cover the whole step.
+- Prometheus names allow letters, digits, `_` and `:`. A statistic whose name has another character is exported with `_` in its place. A statistic whose name would take the series of another is not exported. The engine logs a warning for each such statistic, once.
+
+
 ### Labels
 
 SPT custom series use these labels:
@@ -414,6 +434,8 @@ SPT custom series use these labels:
 - `node_list`
 - `user_comment`
 - `run_id`
+
+Storage driver series add `driver`.
 
 Treat `user_comment`, step identifiers, and node lists as potential cardinality sources. Avoid copying arbitrary run-specific values into long-retention recording rules unless needed.
 
@@ -434,6 +456,12 @@ spt_latency_mean * 1000
 
 # Bounded completion
 spt_completion_percent_value
+
+# Payload transfers over RDMA per second
+rate(spt_driver_rdma_transferred_total{driver="s3-rdma"}[1m])
+
+# Steps whose driver statistics total is incomplete
+spt_driver_partial == 1
 ```
 
 ## Consumer guidance

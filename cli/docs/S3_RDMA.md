@@ -221,6 +221,10 @@ When reading these rows:
 - A weighted or pipeline step, which a scenario run with the engine directly can use, has one driver for each of its operations. While it runs, each of its rows carries the statistics of its own driver. The one row kept after it ends carries the statistics of one of these drivers, not their sum.
 - The engine keeps the row of a finished step for a short time after the step ends (currently 20 seconds) and then drops it. In a run of several steps, the rows of the earlier steps are gone before the run ends. The stored values below keep the final statistics of every step.
 
+### On the Prometheus endpoint
+
+`/metrics` on the entry node exports the fleet total of each running step: every counter as a Prometheus counter `spt_driver_<name>_total` and every gauge as `spt_driver_<name>`, with `spt_driver_reporting`, `spt_driver_partial` and a `driver` label. The counters and gauges are left out while the total is partial, and the series disappear when the step ends, so use the stored values below for a step's final statistics. The engine's [metrics guide](../../engine/core/spt-base/doc/usage/api/remote/METRICS.md#storage-driver-statistics) has the details.
+
 ### Stored values
 
 When a run finishes, the CLI stores each step's final statistics in `spt_run_params.json` under `driverStats`, keyed by step ID, as reported: names the CLI does not know are kept. The stored values are those of the fleet row, which a single-host run has as well, as a total of one node. The CLI reads them while it monitors the run, as each step ends, so the steps that end early are stored as well.
