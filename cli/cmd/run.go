@@ -285,7 +285,8 @@ func terminalDeleteOutcomeError(metrics map[string]*deletemetrics.Metrics) error
 
 // captureStoredDriverStats stores the terminal driver statistics of the run's steps. It runs
 // for every workload. A refused or failed capture stores nothing and records why; it never
-// fails the run, and it is independent of the DELETE capture.
+// fails the run, and it is independent of the DELETE capture. A capture without statistics
+// is recorded only for a run that selected the S3-RDMA driver.
 func captureStoredDriverStats(
 	ctx context.Context,
 	baseURL string,
@@ -311,12 +312,20 @@ func captureStoredDriverStats(
 	}
 	if len(captured) > 0 {
 		metadata.DriverStats = captured
+		return
+	}
+	// The S3-RDMA driver always reports statistics. A run that selected it and has none must
+	// say so: the summary then warns instead of showing nothing about the data path.
+	if strings.EqualFold(strings.TrimSpace(metadata.ScenarioParams.S3Driver), scenario.S3DriverRdma) {
+		metadata.DriverStatsError = driverStatsNotReported
 	}
 }
 
 const (
 	metricCaptureKindDelete      = "DELETE"
 	metricCaptureKindDriverStats = "driver statistics"
+	// driverStatsNotReported is the stored reason when a valid capture held no statistics.
+	driverStatsNotReported = "the engine reported no driver statistics"
 )
 
 // expectedMetricContributorIDs returns the exact contributor identities a terminal capture must

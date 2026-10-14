@@ -139,6 +139,47 @@ func TestCaptureStoredDriverStatsStoresNothingWhenRefused(t *testing.T) {
 	})
 }
 
+func TestCaptureStoredDriverStatsRecordsThatASelectedS3RDMADriverReportedNone(t *testing.T) {
+	reported := map[string]*driverstats.Stats{
+		"mt-001-read": {Driver: "s3-rdma", Counters: map[string]int64{"rdma_transferred": 5}, Reporting: 1},
+	}
+	tests := map[string]struct {
+		s3Driver  string
+		captured  map[string]*driverstats.Stats
+		wantError string
+	}{
+		"S3-RDMA selected, nothing reported":      {s3Driver: scenario.S3DriverRdma, wantError: driverStatsNotReported},
+		"selection in another letter case":        {s3Driver: " RDMA ", wantError: driverStatsNotReported},
+		"S3-RDMA selected, statistics reported":   {s3Driver: scenario.S3DriverRdma, captured: reported},
+		"another driver, nothing reported":        {s3Driver: "aws"},
+		"custom scenario without a selection":     {},
+		"another driver, statistics of its own":   {s3Driver: "aws", captured: reported},
+		"empty capture is the same as no capture": {s3Driver: scenario.S3DriverRdma, captured: map[string]*driverstats.Stats{}, wantError: driverStatsNotReported},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			stubDriverStatsCapture(t, tc.captured, nil)
+			metadata := &runMetadata{
+				WorkloadType:   WorkloadTypeRead,
+				Hosts:          []runHostMetadata{{Host: "local", IsLocal: true}},
+				ScenarioParams: scenario.Params{S3Driver: tc.s3Driver},
+			}
+
+			captureStoredDriverStats(context.Background(), "http://engine", 77, []string{"mt-001-read"}, metadata)
+
+			if metadata.DriverStatsError != tc.wantError {
+				t.Fatalf("stored reason = %q, want %q", metadata.DriverStatsError, tc.wantError)
+			}
+			if len(tc.captured) == 0 && metadata.DriverStats != nil {
+				t.Fatalf("stored statistics = %+v, want none", metadata.DriverStats)
+			}
+			if len(tc.captured) > 0 && !reflect.DeepEqual(metadata.DriverStats, tc.captured) {
+				t.Fatalf("stored statistics = %+v, want %+v", metadata.DriverStats, tc.captured)
+			}
+		})
+	}
+}
+
 func TestRunMetadataStoresDriverStatsOnlyWhenPresent(t *testing.T) {
 	without, err := json.Marshal(&runMetadata{})
 	if err != nil {

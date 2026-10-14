@@ -114,6 +114,9 @@ type WorkloadSummary struct {
 	KeepScenario      bool
 	SliceEndpoints    bool
 	MixedDistribution MixedDistribution
+	// S3Driver is the stored S3 driver selection; empty for a custom scenario and for results
+	// stored before the selection was kept.
+	S3Driver string
 }
 
 // StepSummary aggregates per-step metrics and artifact health.
@@ -250,6 +253,10 @@ func Aggregate(data *RunData) (*RunSummary, error) {
 	summary.Steps = steps
 	summary.Totals = totals
 	summary.Warnings = append(summary.Warnings, stepWarnings...)
+	if !summary.Rejected {
+		// A rejected run submitted no scenario: no driver ran, so nothing is missing.
+		summary.Warnings = append(summary.Warnings, rdmaDataPathWarnings(steps, workload, data.Params.DriverStatsError)...)
+	}
 
 	if len(summary.MissingExpected) > 1 {
 		sort.Strings(summary.MissingExpected)
@@ -358,6 +365,7 @@ func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 		KeepScenario:      params.KeepScenario,
 		SliceEndpoints:    params.SliceEndpoints,
 		MixedDistribution: mixedDistributionFromParams(workloadType, params),
+		S3Driver:          params.S3Driver,
 	}
 	if isList {
 		summary.ObjectSizeHuman = ""

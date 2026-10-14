@@ -69,6 +69,7 @@ func (r *Renderer) FullReport(summary *RunSummary) string {
 	}
 	r.renderWorkload(b, summary)
 	r.renderPerformance(b, summary)
+	r.renderRDMADataPath(b, summary, 0)
 	r.renderDeleteDetails(b, summary)
 	r.renderIntegrity(b, summary)
 	r.renderRangeRead(b, summary)
@@ -205,6 +206,7 @@ func (r *Renderer) CompactSnippet(summary *RunSummary) string {
 	sb.WriteString("Performance by Phase\n")
 	sb.WriteString(r.performanceTable(summary))
 	sb.WriteByte('\n')
+	r.renderRDMADataPath(sb, summary, wrapWidth)
 	r.renderIntegrity(sb, summary)
 	r.renderRangeRead(sb, summary)
 	r.renderCompactMixedBreakdowns(sb, summary)
