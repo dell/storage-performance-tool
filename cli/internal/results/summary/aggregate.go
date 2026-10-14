@@ -11,6 +11,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
+	"github.com/dell/storage-performance-tool/cli/internal/driverstats"
 	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
@@ -133,6 +134,7 @@ type StepSummary struct {
 	Notes              []string
 	Delete             *deletemetrics.Metrics
 	DeleteEvidence     *DeleteArtifactEvidence
+	DriverStats        *driverstats.Stats
 }
 
 // MixedDistribution stores the configured mixed-workload share for each known operation.
@@ -385,6 +387,7 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 			Notes:           append([]string(nil), stepData.Notes...),
 			Delete:          stepData.Delete,
 			DeleteEvidence:  stepData.DeleteEvidence,
+			DriverStats:     stepData.DriverStats,
 		}
 
 		var metrics *PhaseMetrics

@@ -23,6 +23,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/config"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
+	"github.com/dell/storage-performance-tool/cli/internal/driverstats"
 	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
@@ -227,7 +228,7 @@ func captureStoredDeleteMetrics(
 		return fmt.Errorf("capture terminal DELETE metrics: %w", err)
 	}
 	metadata.DeleteArtifactStepIDs = append([]string(nil), expectedDeleteSteps...)
-	expectedContributorIDs, err := expectedDeleteContributorIDs(metadata)
+	expectedContributorIDs, err := expectedMetricContributorIDs(metadata, metricCaptureKindDelete)
 	if err != nil {
 		return fmt.Errorf("capture terminal DELETE metrics: %w", err)
 	}
@@ -282,24 +283,62 @@ func terminalDeleteOutcomeError(metrics map[string]*deletemetrics.Metrics) error
 	return errors.New(strings.Join(parts, "; "))
 }
 
-func expectedDeleteContributorIDs(metadata *runMetadata) ([]string, error) {
+// captureStoredDriverStats stores the terminal driver statistics of the run's steps. It runs
+// for every workload. A refused or failed capture stores nothing and records why; it never
+// fails the run, and it is independent of the DELETE capture.
+func captureStoredDriverStats(
+	ctx context.Context,
+	baseURL string,
+	expectedRunID int64,
+	stepIDs []string,
+	metadata *runMetadata,
+) {
 	if metadata == nil {
-		return nil, fmt.Errorf("expected DELETE contributor identity is unavailable")
+		return
 	}
-	if metadata.deleteContributors != nil {
-		contributorIDs, err := metadata.deleteContributors()
+	metadata.DriverStats = nil
+	metadata.DriverStatsError = ""
+	var captured map[string]*driverstats.Stats
+	expectedContributorIDs, err := expectedMetricContributorIDs(metadata, metricCaptureKindDriverStats)
+	if err == nil {
+		captured, err = captureDriverStatsFunc(
+			ctx, baseURL, expectedRunID, stepIDs, expectedContributorIDs,
+			len(expectedContributorIDs) == 1)
+	}
+	if err != nil {
+		metadata.DriverStatsError = err.Error()
+		return
+	}
+	if len(captured) > 0 {
+		metadata.DriverStats = captured
+	}
+}
+
+const (
+	metricCaptureKindDelete      = "DELETE"
+	metricCaptureKindDriverStats = "driver statistics"
+)
+
+// expectedMetricContributorIDs returns the exact contributor identities a terminal capture must
+// find in fleet metrics. kind names the captured value in errors.
+func expectedMetricContributorIDs(metadata *runMetadata, kind string) ([]string, error) {
+	if metadata == nil {
+		return nil, fmt.Errorf("expected %s contributor identity is unavailable", kind)
+	}
+	if metadata.metricContributors != nil {
+		contributorIDs, err := metadata.metricContributors()
 		if err != nil {
-			return nil, fmt.Errorf("resolve DELETE contributor identity: %w", err)
+			return nil, fmt.Errorf("resolve %s contributor identity: %w", kind, err)
 		}
 		if len(contributorIDs) == 0 {
-			return nil, fmt.Errorf("expected DELETE contributor identity is unavailable")
+			return nil, fmt.Errorf("expected %s contributor identity is unavailable", kind)
 		}
 		return append([]string(nil), contributorIDs...), nil
 	}
 	if len(metadata.Hosts) == 1 {
 		return []string{constants.MetricsLocalContributorID}, nil
 	}
-	return nil, fmt.Errorf("expected DELETE contributor identity is unavailable for fleet capture")
+	return nil, fmt.Errorf("expected %s contributor identity is unavailable for fleet capture", kind)
 }
 
 // bindRuntimeDeleteSteps binds the planned DELETE role to runtime identity by
@@ -456,6 +495,7 @@ var (
 	discoverStepIDsFunc           = results.DiscoverStepIDsForRunContext
 	discoverFleetStepIDsFunc      = results.DiscoverFleetStepIDsForRunContext
 	captureDeleteMetricsFunc      = results.CaptureTerminalDeleteMetricsForRunContext
+	captureDriverStatsFunc        = results.CaptureTerminalDriverStatsForRunContext
 	newResultsFetcherFunc         = func(baseURL, outputDir string) autoResultsFetcher {
 		return &fetcherAdapter{results.NewFetcher(baseURL, outputDir)}
 	}
@@ -855,6 +895,10 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 					outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, captureErr)
 				} else {
 					outcome.DeleteTerminalErr = terminalDeleteOutcomeError(metadata.DeleteMetrics)
+				}
+				captureStoredDriverStats(artifactCtx, baseURL, expectedRunID, stepIDs, metadata)
+				if metadata.DriverStatsError != "" {
+					logging.LogWarn("auto-results", "driver statistics not stored", "reason", metadata.DriverStatsError)
 				}
 				if err := writeRunMetadata(metadata, root); err != nil {
 					logging.LogError("auto-results", "write run metadata", err, "dest", root)
@@ -1904,7 +1948,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 				metadata.RuntimeIdentity = &evidence
 			})
 			multiHostOrchestrator.SetIntegrityRuntimeIdentityTier(integrityIdentityTier)
-			metadata.deleteContributors = multiHostOrchestrator.MetricContributorIDs
+			metadata.metricContributors = multiHostOrchestrator.MetricContributorIDs
 		}
 		var runSession *runcontrol.Session
 		if resultsOpts.AutoResults {
