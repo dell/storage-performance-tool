@@ -317,7 +317,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 						if (!failedDistributedRefresh) {
 							final TerminalStepEntry lastProgressEntry = lastProgressByStepId.get(progressKey);
 							if (lastProgressEntry != null) {
-								retainTerminal(progressKey, lastProgressEntry);
+								retainTerminal(progressKey, withFinalDriverStats(lastProgressEntry, snapshot, distributedEntry));
 							} else if (hasAllParts(snapshot)
 											&& distributedEntry == (snapshot instanceof DistributedAllMetricsSnapshot)
 											&& driverActive(snapshot)) {
@@ -510,6 +510,22 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	 */
 	private void retainTerminal(final ProgressKey progressKey, final TerminalStepEntry entry) {
 		terminalByStepId.merge(progressKey, entry, (earlier, latest) -> latest.withDriverStatsOf(earlier));
+	}
+
+	/**
+	 * Returns a cached entry with the storage driver statistics of the final snapshot of the context
+	 * that leaves it, when that snapshot is of the entry's scope and has any. The cached entry was
+	 * built from an earlier snapshot, maybe of another context of the step; the statistics kept are
+	 * the driver's values at the end.
+	 */
+	private static TerminalStepEntry withFinalDriverStats(
+					final TerminalStepEntry entry, final AllMetricsSnapshot snapshot, final boolean distributedEntry) {
+		if (snapshot == null || distributedEntry != (snapshot instanceof DistributedAllMetricsSnapshot)) {
+			return entry;
+		}
+		return entry.withDriverStats(
+						snapshot.driverStats(),
+						snapshot instanceof DistributedAllMetricsSnapshot fleet ? fleet.driverStatsTotal() : null);
 	}
 
 	/** Builds the entry of a step from a snapshot of its metrics context: a fleet's or a node's. */

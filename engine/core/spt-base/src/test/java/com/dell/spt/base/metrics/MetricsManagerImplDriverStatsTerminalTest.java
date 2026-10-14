@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.AfterEach;
@@ -146,17 +147,18 @@ class MetricsManagerImplDriverStatsTerminalTest {
 
 	@Test
 	void cachedProgressWinsOverAFinalSnapshotThatOnlyShowsDriverActivity() throws Exception {
-		// Driver activity adds an entry where there would be none; it never replaces one.
-		final DriverStatsSnapshot earlier = StatsReportingDriverMock.stats(3, 0, 1);
-		final MetricsContext<?> ctx = mockContext(snapshot(0, StatsReportingDriverMock.stats(4, 0, 1)));
+		// Driver activity adds an entry where there would be none; it never replaces one. The
+		// statistics are still those of the finalization point, not of the cached snapshot.
+		final DriverStatsSnapshot last = StatsReportingDriverMock.stats(4, 0, 1);
+		final MetricsContext<?> ctx = mockContext(snapshot(0, last));
 		mgr.register(ctx);
-		recordProgress(ctx, snapshot(6_000, earlier));
+		recordProgress(ctx, snapshot(6_000, StatsReportingDriverMock.stats(3, 0, 1)));
 
 		mgr.unregister(ctx);
 
 		final TerminalStepEntry entry = onlyEntry();
 		assertEquals(6_000, entry.successCount);
-		assertSame(earlier, entry.driverStats, "the statistics of the snapshot the row was built from");
+		assertSame(last, entry.driverStats, "the statistics of the final snapshot");
 	}
 
 	@Test
@@ -346,6 +348,55 @@ class MetricsManagerImplDriverStatsTerminalTest {
 	}
 
 	@Test
+	void stepWhoseCarrierCompletedNothingKeepsTheStatisticsOfItsDriverWithTheProgressOfAnotherContext()
+					throws Exception {
+		// A mixed step whose reads completed nothing: the progress cached for the step is that of
+		// its writes, and the reads end first.
+		final MetricsContext<?> read = context(STEP_ID, OpType.READ, 7, () -> StatsReportingDriverMock.stats(7, 1, 3));
+		final MetricsContext<?> create = context(STEP_ID, OpType.CREATE, 7, null);
+		create.markSucc(2048, 1_000, 100);
+		mgr.register(read);
+		mgr.register(create);
+		create.refreshLastSnapshot(true);
+		recordProgress(create, create.lastSnapshot());
+
+		mgr.unregister(read);
+		mgr.unregister(create);
+
+		final TerminalStepEntry entry = onlyEntry();
+		assertEquals(OpType.CREATE, entry.opType);
+		assertEquals(1, entry.successCount);
+		assertEquals(StatsReportingDriverMock.stats(7, 1, 3), entry.driverStats);
+	}
+
+	@Test
+	void fleetStepWhoseCarrierCompletedNothingKeepsTheTotalOfItsDriversWithTheProgressOfAnotherContext()
+					throws Exception {
+		final MetricsContext<?> localRead = context(() -> StatsReportingDriverMock.stats(7, 1, 3));
+		final MetricsContext<?> remoteRead = context(() -> StatsReportingDriverMock.stats(6, 0, 4));
+		final MetricsContext<?> localCreate = context(null);
+		final MetricsContext<?> remoteCreate = context(null);
+		localCreate.markSucc(2048, 1_000, 100);
+		final DistributedMetricsContext<?> read = fleet(OpType.READ, localRead, remoteRead);
+		final DistributedMetricsContext<?> create = fleet(OpType.CREATE, localCreate, remoteCreate);
+		mgr.register(read);
+		mgr.register(create);
+		create.refreshLastSnapshot(true);
+		recordProgress(create, create.lastSnapshot());
+
+		mgr.unregister(read);
+		mgr.unregister(create);
+
+		final TerminalStepEntry entry = onlyEntry();
+		assertTrue(entry.distributed);
+		assertEquals(OpType.CREATE, entry.opType);
+		assertEquals(1, entry.successCount);
+		assertEquals(StatsReportingDriverMock.stats(13, 1, 7), entry.driverStatsTotal.sum());
+		assertEquals(2, entry.driverStatsTotal.reporting());
+		assertNull(entry.driverStats);
+	}
+
+	@Test
 	void entryWithStatisticsOfItsOwnKeepsThem() {
 		// A weighted or pipeline step has a driver per operation and so a carrier per context.
 		// The step keeps one entry: that of the context that ended last, with its own statistics.
@@ -363,13 +414,15 @@ class MetricsManagerImplDriverStatsTerminalTest {
 	}
 
 	@Test
-	void statisticsOfAnEarlierRunDoNotReachAStepOfTheSameIdentifier() {
+	void statisticsOfAnEarlierRunDoNotReachAStepOfTheSameIdentifier() throws Exception {
 		// A custom scenario can name its step, and an engine can run it again.
 		final MetricsContext<?> earlierRun = context(
 						STEP_ID, OpType.CREATE, 7, () -> StatsReportingDriverMock.stats(7, 1, 3));
 		earlierRun.markSucc(1024, 1_000, 100);
 		mgr.register(earlierRun);
 		mgr.unregister(earlierRun);
+		// The manager stops with its last context; the next run starts after it has stopped.
+		assertTrue(mgr.awaitStop(5, TimeUnit.SECONDS), "the metrics manager did not stop");
 		final MetricsContext<?> laterRun = context(STEP_ID, OpType.CREATE, 8, null);
 		laterRun.markSucc(1024, 1_000, 100);
 		mgr.register(laterRun);

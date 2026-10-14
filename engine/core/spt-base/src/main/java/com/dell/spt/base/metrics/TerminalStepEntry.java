@@ -468,6 +468,17 @@ public final class TerminalStepEntry {
 		return with(deleteMetrics, earlier.driverStats, earlier.driverStatsTotal);
 	}
 
+	/**
+	 * Returns this entry with the given storage driver statistics in place of its own, or this
+	 * entry when there are none to give.
+	 */
+	TerminalStepEntry withDriverStats(final DriverStatsSnapshot stats, final DriverStatsTotal total) {
+		if (stats == null && total == null) {
+			return this;
+		}
+		return with(deleteMetrics, stats, total);
+	}
+
 	private TerminalStepEntry with(
 					final DeleteMetricsSnapshot deleteMetrics,
 					final DriverStatsSnapshot driverStats,
