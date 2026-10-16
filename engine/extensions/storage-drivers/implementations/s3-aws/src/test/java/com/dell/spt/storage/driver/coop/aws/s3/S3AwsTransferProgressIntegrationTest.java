@@ -12,6 +12,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.parallel.Execution;
@@ -26,7 +27,12 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
  * The stall timeout ends a connection that moves no data, in any phase of a request, and leaves
  * alone a transfer that keeps moving data for longer than the timeout. The clients are built as
  * the driver builds them; the server is scripted by the object a request names.
+ *
+ * <p>Tagged {@code slow}: a request fails only after every retry of its client, so these tests
+ * take minutes in all. The build runs {@link S3AwsTimeoutsCanaryTest} instead; run these with the
+ * {@code slowTest} task after an upgrade of the AWS SDK or CRT.
  */
+@Tag("slow")
 @Execution(ExecutionMode.CONCURRENT)
 @Timeout(180)
 final class S3AwsTransferProgressIntegrationTest {

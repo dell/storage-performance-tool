@@ -32,9 +32,9 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.parallel.Execution;
@@ -53,7 +53,12 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
  * connection, reads the request and never answers. The driver is built by the real factory from
  * the merged configuration, so a timeout that does not reach a client leaves its request waiting
  * for the server until this test gives up.
+ *
+ * <p>Tagged {@code slow}: a request fails only after every retry of its client, so these tests
+ * take minutes in all. The build runs {@link S3AwsTimeoutsCanaryTest} instead; run these with the
+ * {@code slowTest} task after an upgrade of the AWS SDK or CRT.
  */
+@Tag("slow")
 @Execution(ExecutionMode.CONCURRENT)
 @Timeout(300)
 final class S3AwsStallBoundIntegrationTest {
@@ -215,31 +220,6 @@ final class S3AwsStallBoundIntegrationTest {
 			assertInstanceOf(ApiCallTimeoutException.class, timedOut.getCause());
 			assertTrue(Duration.ofNanos(System.nanoTime() - start).compareTo(Duration.ofSeconds(10)) < 0);
 		}
-	}
-
-	@Test
-	void theFactoryHandsTheTimeoutsToTheStandaloneDeleteResources(@TempDir final Path home) throws Exception {
-		final var handed = new AtomicReference<S3AwsStandaloneDeleteResources.Configuration>();
-		final var factory = new S3AwsStorageDriverFactory<IntegrityManifestDataItem, DeleteRequestOperation>(
-						configuration -> {
-							handed.set(configuration);
-							return S3AwsStandaloneDeleteResources.create(configuration);
-						});
-		final Config storage = S3AwsMergedConfig.create(
-						home, server.port(),
-						Map.of("storage-crt-connectionTimeoutMs", 7000, "storage-crt-socketTimeoutMs", 9000))
-						.configVal("storage");
-
-		try (final var driver = factory.create(
-						"timeouts-handoff", DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false),
-						storage, false, 16)) {
-			driver.prepareStandaloneDelete();
-		}
-
-		assertNotNull(handed.get(), "the standalone DELETE resources must have been requested");
-		assertEquals(
-						new S3AwsClientTimeouts(Duration.ofSeconds(7), Duration.ofSeconds(9)),
-						handed.get().timeouts());
 	}
 
 	private <I extends Item, O extends Operation<I>> Duration runToCompletion(

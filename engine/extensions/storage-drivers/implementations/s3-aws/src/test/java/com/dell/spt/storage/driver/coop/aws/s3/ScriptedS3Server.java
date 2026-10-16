@@ -1,6 +1,8 @@
 package com.dell.spt.storage.driver.coop.aws.s3;
 
+import java.io.EOFException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -8,7 +10,13 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -25,16 +33,19 @@ import java.util.concurrent.atomic.AtomicLong;
  *   <li>{@code body-stall}: a GET that sends its headers and one chunk of the body, then stops;
  *       a HEAD of either object, which the CRT transfer client makes first, is answered;
  *   <li>{@code upload-stall}: a PUT whose body the server reads up to a limit and then stops reading;
+ *   <li>{@code stall-once}: the first request is read and never answered, and the same request
+ *       made again, as a client does after it gives up the connection, succeeds;
  *   <li>any other object: the request is read and never answered.
+ * </ul>
  *
  * <p>A key may continue the name of a scripted object, so that a test can tell its requests apart.
- * </ul>
  */
 final class ScriptedS3Server implements AutoCloseable {
 
 	static final String PROGRESS_KEY = "progress";
 	static final String BODY_STALL_KEY = "body-stall";
 	static final String UPLOAD_STALL_KEY = "upload-stall";
+	static final String STALL_ONCE_KEY = "stall-once";
 	static final int CHUNK_BYTES = 1024;
 	static final int CHUNKS = 6;
 	static final long CHUNK_INTERVAL_MS = 1000;
@@ -56,6 +67,8 @@ final class ScriptedS3Server implements AutoCloseable {
 	private final AtomicLong uploadBytesRead = new AtomicLong();
 	private final List<String> requestLines = new CopyOnWriteArrayList<>();
 	private final List<String> requestHeads = new CopyOnWriteArrayList<>();
+	private final List<String> stalledRequestsGivenUp = new CopyOnWriteArrayList<>();
+	private final Set<String> stalledOnce = ConcurrentHashMap.newKeySet();
 	private final List<Socket> sockets = new CopyOnWriteArrayList<>();
 	private final CountDownLatch closed = new CountDownLatch(1);
 	private volatile boolean accepting = true;
@@ -83,6 +96,11 @@ final class ScriptedS3Server implements AutoCloseable {
 	/** Returns the connections left with a request unanswered that the client has closed. */
 	int stalledClosedByClient() {
 		return stalledClosedByClient.get();
+	}
+
+	/** Returns the first line of each request left unanswered whose connection the client closed. */
+	List<String> stalledRequestsGivenUp() {
+		return List.copyOf(stalledRequestsGivenUp);
 	}
 
 	/** Returns the first line of each request received, such as {@code PUT /bucket/key HTTP/1.1}. */
@@ -146,6 +164,7 @@ final class ScriptedS3Server implements AutoCloseable {
 	private void serve(final Socket socket) {
 		final var received = new StringBuilder();
 		boolean stalled = false;
+		String stalledRequest = null;
 		try {
 			final var in = socket.getInputStream();
 			final var out = socket.getOutputStream();
@@ -164,7 +183,12 @@ final class ScriptedS3Server implements AutoCloseable {
 					final String requestLine = lineEnd < 0 ? head : head.substring(0, lineEnd);
 					requestLines.add(requestLine);
 					requestHeads.add(head);
+					if (requestLine.contains("/bucket/" + STALL_ONCE_KEY) && !stalledOnce.add(requestLine)) {
+						answerRetry(requestLine, head, received, in, out, buffer);
+						continue;
+					}
 					stalled = respond(requestLine, head, out);
+					stalledRequest = stalled ? requestLine : null;
 					if (requestLine.startsWith("PUT /bucket/" + UPLOAD_STALL_KEY)) {
 						long bodyBytes = received.length();
 						while (bodyBytes < UPLOAD_READ_LIMIT_BYTES && (read = in.read(buffer)) >= 0) {
@@ -178,15 +202,58 @@ final class ScriptedS3Server implements AutoCloseable {
 				}
 			}
 			if (stalled) {
-				stalledClosedByClient.incrementAndGet();
+				givenUp(stalledRequest);
 			}
 		} catch (final IOException failure) {
 			if (stalled && !server.isClosed()) {
-				stalledClosedByClient.incrementAndGet();
+				givenUp(stalledRequest);
 			}
 		} catch (final InterruptedException interrupted) {
 			Thread.currentThread().interrupt();
 		}
+	}
+
+	private void givenUp(final String stalledRequest) {
+		stalledClosedByClient.incrementAndGet();
+		stalledRequestsGivenUp.add(stalledRequest);
+	}
+
+	/** Reads the body of a request made again after a stall and answers it as S3 answers success. */
+	private static void answerRetry(
+					final String requestLine,
+					final String head,
+					final StringBuilder received,
+					final InputStream in,
+					final OutputStream out,
+					final byte[] buffer) throws IOException {
+		if (head.toLowerCase(Locale.ROOT).contains("\r\nexpect: 100-continue")) {
+			write(out, "HTTP/1.1 100 Continue\r\n\r\n");
+		}
+		long remaining = contentLength(head);
+		final int buffered = (int) Math.min(remaining, received.length());
+		received.delete(0, buffered);
+		remaining -= buffered;
+		while (remaining > 0) {
+			final int read = in.read(buffer, 0, (int) Math.min(buffer.length, remaining));
+			if (read < 0) {
+				throw new EOFException("the client closed the connection within a request body");
+			}
+			remaining -= read;
+		}
+		// A 204 without any header is read by the CRT clients as a response without a status.
+		final String date = "Date: " + DateTimeFormatter.RFC_1123_DATE_TIME.format(ZonedDateTime.now(ZoneOffset.UTC)) + "\r\n";
+		write(out, requestLine.startsWith("DELETE ")
+						? "HTTP/1.1 204 No Content\r\n" + date + "\r\n"
+						: "HTTP/1.1 200 OK\r\n" + date + "ETag: \"scripted\"\r\nContent-Length: 0\r\n\r\n");
+	}
+
+	private static long contentLength(final String head) {
+		for (final String line : head.split("\r\n")) {
+			if (line.regionMatches(true, 0, "Content-Length:", 0, "Content-Length:".length())) {
+				return Long.parseLong(line.substring("Content-Length:".length()).trim());
+			}
+		}
+		return 0;
 	}
 
 	/** Answers a request as the scripted object says, and returns whether it left the connection stalled. */
@@ -217,7 +284,7 @@ final class ScriptedS3Server implements AutoCloseable {
 	private void writeBody(final OutputStream out, final String head, final int chunks)
 					throws IOException, InterruptedException {
 		final int total = CHUNKS * CHUNK_BYTES;
-		final boolean ranged = head.toLowerCase(java.util.Locale.ROOT).contains("\r\nrange:");
+		final boolean ranged = head.toLowerCase(Locale.ROOT).contains("\r\nrange:");
 		write(out, (ranged ? "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-" + (total - 1) + "/" + total + "\r\n"
 						: "HTTP/1.1 200 OK\r\n")
 						+ "Content-Length: " + total + "\r\nContent-Type: application/octet-stream\r\n\r\n");

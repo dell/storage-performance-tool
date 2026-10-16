@@ -54,6 +54,22 @@ dependencies {
 	testImplementation project(':core:spt-base')
 }
 
+// The tests tagged slow prove that the timeouts end real requests: a request fails only after
+// every retry of its native client, so they take minutes, and the default test task leaves them
+// out. Run them after an upgrade of the AWS SDK or CRT. Their classes run at the same time.
+tasks.register('slowTest', Test) {
+	description = 'Runs the slow s3-aws timeout tests against local scripted servers.'
+	group = 'verification'
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform {
+		includeTags 'slow'
+	}
+	systemProperty 'junit.jupiter.execution.parallel.enabled', 'true'
+	systemProperty 'junit.jupiter.execution.parallel.mode.default', 'same_thread'
+	systemProperty 'junit.jupiter.execution.parallel.mode.classes.default', 'same_thread'
+}
+
 shadowJar {
 	// Preserve SPI registrations from dependencies + this module
 	mergeServiceFiles()

@@ -62,7 +62,7 @@ final class S3AwsTimeoutFailureTest {
 
 	@BeforeEach
 	void captureTheDriverLog() {
-		// Other tests run drivers at the same time; only what this thread logs is its own.
+		// Only what this thread logs belongs to this test.
 		testThread = Thread.currentThread().getName();
 		appender = new CapturingAppender();
 		appender.start();

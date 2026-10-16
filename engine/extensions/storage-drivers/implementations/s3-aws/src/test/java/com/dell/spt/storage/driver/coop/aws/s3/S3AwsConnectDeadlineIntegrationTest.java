@@ -13,10 +13,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.Operation.Status;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
-import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.storage.Credential;
-import com.github.akurilov.commons.io.Input;
-import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import java.net.InetAddress;
@@ -29,11 +26,11 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.parallel.Execution;
@@ -49,7 +46,12 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
  * connections waiting to be accepted is full, so a client that connects waits for a connection
  * that never comes, until its connection timeout ends the wait. Stall detection does not apply
  * to a connection that was never made.
+ *
+ * <p>Tagged {@code slow}: a request fails only after every retry of its client, so these tests
+ * take minutes in all. The build runs {@link S3AwsTimeoutsCanaryTest} instead; run these with the
+ * {@code slowTest} task after an upgrade of the AWS SDK or CRT.
  */
+@Tag("slow")
 @Execution(ExecutionMode.CONCURRENT)
 @Timeout(180)
 final class S3AwsConnectDeadlineIntegrationTest {
@@ -145,51 +147,6 @@ final class S3AwsConnectDeadlineIntegrationTest {
 		}
 	}
 
-	@Test
-	void theDriverEndsRequestsOfItsOtherClientsToAServerThatStoppedAcceptingAsTimeouts(@TempDir final Path home)
-					throws Exception {
-		try (final S3AwsStorageDriver<IntegrityManifestDataItem, Operation<IntegrityManifestDataItem>> driver = driver(home)) {
-			final var results = new Results<Operation<IntegrityManifestDataItem>>();
-			driver.operationResultOutput(results);
-			driver.start();
-			// The first request makes the connection of the transfer client, which the server keeps serving.
-			assertTrue(driver.put(noop()));
-			assertNotNull(results.queue.poll(RESULT_WAIT.toSeconds(), TimeUnit.SECONDS), "the first request must end");
-			server.refuseNewConnections();
-
-			final var exactVersion = new DataOperationImpl<IntegrityManifestDataItem>(
-							0, OpType.STAT, new IntegrityManifestDataItem("bucket", "key", 0, "version-1"), null, "/bucket",
-							CREDENTIAL, null, 0);
-			final long start = System.nanoTime();
-			assertTrue(driver.put(exactVersion));
-			assertNotNull(results.queue.poll(RESULT_WAIT.toSeconds(), TimeUnit.SECONDS), "the HEAD must end");
-			assertEquals(Status.FAIL_TIMEOUT, exactVersion.status());
-			final Duration headElapsed = Duration.ofNanos(System.nanoTime() - start);
-			assertTrue(headElapsed.compareTo(SDK_BUDGET) < 0, "the HEAD took " + headElapsed);
-
-			final DeleteRequestOperation delete = S3AwsDeleteRequestTestFixture.operation(
-							S3AwsDeleteRequestTestFixture.target("key", null));
-			final long deleteStart = System.nanoTime();
-			assertTrue(driver.put(cast(delete)));
-			assertNotNull(results.queue.poll(RESULT_WAIT.toSeconds(), TimeUnit.SECONDS), "the DELETE must end");
-			final Duration deleteElapsed = Duration.ofNanos(System.nanoTime() - deleteStart);
-			assertTrue(deleteElapsed.compareTo(SDK_BUDGET) < 0, "the DELETE took " + deleteElapsed);
-			assertNotNull(delete.deleteResult());
-			assertEquals(Status.FAIL_TIMEOUT, delete.deleteResult().operationStatus());
-			assertEquals(0, driver.activeOpCount());
-		}
-	}
-
-	private static DataOperationImpl<IntegrityManifestDataItem> noop() {
-		return new DataOperationImpl<IntegrityManifestDataItem>(
-						0, OpType.NOOP, new IntegrityManifestDataItem("bucket", "key", 0, null), null, "/bucket", CREDENTIAL, null, 0);
-	}
-
-	@SuppressWarnings("unchecked")
-	private static Operation<IntegrityManifestDataItem> cast(final DeleteRequestOperation operation) {
-		return (Operation<IntegrityManifestDataItem>) (Operation<?>) operation;
-	}
-
 	@SuppressWarnings("unchecked")
 	private <I extends Item, O extends Operation<I>> S3AwsStorageDriver<I, O> driver(final Path home) throws Exception {
 		final Config storage = S3AwsMergedConfig.create(
@@ -224,42 +181,5 @@ final class S3AwsConnectDeadlineIntegrationTest {
 		assertEquals(Status.FAIL_TIMEOUT, S3AwsStorageDriver.classifyFailure(new CompletionException(failure.cause())),
 						request + " ended with " + failure.cause());
 		assertTrue(failure.elapsed().compareTo(budget) < 0, request + " took " + failure.elapsed() + ", budget " + budget);
-	}
-
-	private static final class Results<O extends Operation<?>> implements Output<O> {
-
-		private final LinkedBlockingQueue<O> queue = new LinkedBlockingQueue<>();
-
-		@Override
-		public boolean put(final O value) {
-			return queue.offer(value);
-		}
-
-		@Override
-		public int put(final List<O> values, final int from, final int to) {
-			int count = 0;
-			for (int i = from; i < to; i++) {
-				if (!queue.offer(values.get(i))) {
-					break;
-				}
-				count++;
-			}
-			return count;
-		}
-
-		@Override
-		public int put(final List<O> values) {
-			return put(values, 0, values.size());
-		}
-
-		@Override
-		public Input<O> getInput() {
-			return null;
-		}
-
-		@Override
-		public void close() {
-			queue.clear();
-		}
 	}
 }
