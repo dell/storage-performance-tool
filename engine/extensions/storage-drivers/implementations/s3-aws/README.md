@@ -213,6 +213,14 @@ The module includes comprehensive unit tests using JUnit and Mockito:
 ./gradlew test
 ```
 
+The default suite includes a fast canary, `S3AwsTimeoutsCanaryTest`, which checks that each S3 client the driver builds receives `storage.crt.connectionTimeoutMs` and `storage.crt.socketTimeoutMs`. The slower tests, tagged `slow`, let requests fail after every retry of their client: stalls in each phase of a request, a transfer that keeps moving data, stall detection turned off, and connections that cannot be made. They take about a minute and run only on request, from `engine/`:
+
+```bash
+./gradlew :extensions:storage-drivers:implementations:s3-aws:slowTest
+```
+
+Run them after upgrading the AWS SDK or the AWS CRT, and after changing how the driver builds its S3 clients or classifies timeouts.
+
 ## Migration from Legacy REST Implementation
 
 This AWS SDK implementation provides the same interface as the legacy REST implementation (`com.dell.spt.storage.driver.coop.netty.http.s3.S3StorageDriver`). Migration steps:
