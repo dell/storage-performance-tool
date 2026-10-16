@@ -41,6 +41,12 @@ record S3AwsClientTimeouts(Duration connectionTimeout, Duration stallTimeout) {
 	/** Part of the message of the failure a client reports when the monitor closes a connection. */
 	static final String STALL_FAILURE_MESSAGE = "failure to meet throughput minimum";
 
+	/**
+	 * Part of the message of the native socket timeout, which the clients report when a connection
+	 * cannot be established within the connection timeout.
+	 */
+	static final String SOCKET_TIMEOUT_MESSAGE = "socket operation timed out";
+
 	S3AwsClientTimeouts {
 		Objects.requireNonNull(connectionTimeout);
 		Objects.requireNonNull(stallTimeout);
@@ -79,6 +85,30 @@ record S3AwsClientTimeouts(Duration connectionTimeout, Duration stallTimeout) {
 			throw new IllegalConfigurationException(
 							"storage.crt." + key + " is missing or is not an integer number of milliseconds", failure);
 		}
+	}
+
+	/**
+	 * Returns whether the native connection monitor closed the connection of a failed request
+	 * because it moved no data. The clients report it as a client or I/O failure that carries only
+	 * the message of the native error.
+	 */
+	static boolean isStall(final Throwable failure) {
+		return hasMessage(failure, STALL_FAILURE_MESSAGE);
+	}
+
+	/** Returns whether a failed request ended with the native socket timeout, such as a connect deadline. */
+	static boolean isSocketTimeout(final Throwable failure) {
+		return hasMessage(failure, SOCKET_TIMEOUT_MESSAGE);
+	}
+
+	private static boolean hasMessage(final Throwable failure, final String text) {
+		for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+			final String message = cause.getMessage();
+			if (message != null && message.contains(text)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	boolean stallDetectionEnabled() {

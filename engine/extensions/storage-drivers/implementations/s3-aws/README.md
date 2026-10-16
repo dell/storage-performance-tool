@@ -172,7 +172,7 @@ S3StorageDriver driver = S3StorageDriverFactory.create(config);
 | endpointOverride | String | null | Override S3 endpoint (for S3-compatible services) |
 | pathStyleAccess | boolean | false | Use path-style access (required for some S3-compatible services) |
 | maxConnections | int | 50 | Maximum number of concurrent connections |
-| storage.crt.socketTimeoutMs | int | 30000 | Milliseconds a connection with a request in flight may move no data before it is closed and the request fails as a timeout; `0` turns the detection off, otherwise at least `2000` (see [AWS SDK driver timeouts](../../../../README.md#aws-sdk-driver-timeouts)) |
+| storage.crt.socketTimeoutMs | int | 30000 | Milliseconds a connection with a request in flight may move no data before it is closed and the request fails as a timeout; `0` turns the detection off, otherwise at least `2000`, counted in whole seconds rounded down (see [AWS SDK driver timeouts](../../../../README.md#aws-sdk-driver-timeouts)) |
 | storage.crt.connectionTimeoutMs | int | 5000 | Milliseconds allowed to establish a connection |
 | enableRequestMetrics | boolean | false | Enable AWS SDK request metrics |
 | checksumEnabled | boolean | false | Compute and send a checksum on write requests |

@@ -129,6 +129,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private final Map<String, String> objectTags;
 	private final long smallObjectThresholdBytes;
 	private final long partSizeBytes;
+	private final AtomicBoolean stallFailureReported = new AtomicBoolean();
 	private final AtomicBoolean timeoutFailureReported = new AtomicBoolean();
 
 	public S3AwsStorageDriver(
@@ -508,18 +509,26 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	}
 
 	/**
-	 * Timeouts come in bursts when a server or a network path stalls, so only the first one is
-	 * logged above DEBUG. Every failed operation is still counted and written to the errors log by
-	 * the load step.
+	 * Timeouts come in bursts when a server or a network path stalls, so only the first one of each
+	 * kind is logged above DEBUG. Every failed operation is still counted and written to the errors
+	 * log by the load step. Only a connection the stall monitor closed is put down to
+	 * storage.crt.socketTimeoutMs: a gateway timeout or a call deadline says nothing about it.
 	 *
-	 * @return whether this was the first timeout, which is logged as a warning
+	 * @return whether this was the first timeout of its kind, which is logged as a warning
 	 */
 	boolean logTimeoutFailure(final O op, final Throwable failure) {
-		if (timeoutFailureReported.compareAndSet(false, true)) {
+		if (S3AwsClientTimeouts.isStall(failure)) {
+			if (stallFailureReported.compareAndSet(false, true)) {
+				LOG.warn(
+								"{} {} timed out: {}. The connection moved no data for storage.crt.{}; further stalled"
+												+ " requests are logged at DEBUG",
+								op.type(), op.item().name(), failure, S3AwsClientTimeouts.SOCKET_TIMEOUT_KEY);
+				return true;
+			}
+		} else if (timeoutFailureReported.compareAndSet(false, true)) {
 			LOG.warn(
-							"{} {} timed out: {}. A request that made no progress for storage.crt.{} is failed;"
-											+ " further timeouts are logged at DEBUG",
-							op.type(), op.item().name(), failure, S3AwsClientTimeouts.SOCKET_TIMEOUT_KEY);
+							"{} {} timed out: {}. Further timeouts of this kind are logged at DEBUG",
+							op.type(), op.item().name(), failure);
 			return true;
 		}
 		LOG.debug("{} {} timed out: {}", op.type(), op.item().name(), failure);
@@ -610,28 +619,14 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			}
 		}
 		if (ex instanceof ApiCallTimeoutException || ex instanceof ApiCallAttemptTimeoutException
-						|| ex instanceof TimeoutException || isStalledConnection(ex)) {
+						|| ex instanceof TimeoutException || S3AwsClientTimeouts.isStall(ex)
+						|| S3AwsClientTimeouts.isSocketTimeout(ex)) {
 			return Status.FAIL_TIMEOUT;
 		}
 		if (ex instanceof IOException || (ex instanceof SdkClientException && ex.getCause() instanceof IOException)) {
 			return Status.FAIL_IO;
 		}
 		return Status.FAIL_UNKNOWN;
-	}
-
-	/**
-	 * Returns whether the native connection monitor closed the connection of the request because
-	 * it moved no data for storage.crt.socketTimeoutMs. The clients report it as a client or I/O
-	 * failure that carries only the message of the native error.
-	 */
-	private static boolean isStalledConnection(final Throwable failure) {
-		for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
-			final String message = cause.getMessage();
-			if (message != null && message.contains(S3AwsClientTimeouts.STALL_FAILURE_MESSAGE)) {
-				return true;
-			}
-		}
-		return false;
 	}
 
 	@Override

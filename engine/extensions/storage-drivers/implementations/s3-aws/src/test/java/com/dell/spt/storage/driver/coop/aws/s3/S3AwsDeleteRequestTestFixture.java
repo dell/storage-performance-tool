@@ -6,6 +6,8 @@ import static org.mockito.Mockito.when;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.integrity.IntegrityMetadataCodec;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
+import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.deletion.DeleteRequest;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperationImpl;
@@ -45,6 +47,22 @@ final class S3AwsDeleteRequestTestFixture {
 						() -> exactVersionClient,
 						standaloneDeleteClient,
 						standaloneDeleteHttpClient,
+						100 * 1024L,
+						8 * 1024 * 1024L);
+	}
+
+	/** A driver over the given clients for operations of any type. */
+	static <I extends Item, O extends Operation<I>> S3AwsStorageDriver<I, O> anyDriver(
+					final S3AsyncClient primaryClient, final S3AsyncClient exactVersionClient) throws Exception {
+		return new S3AwsStorageDriver<I, O>(
+						"aws-timeout-test",
+						DataInput.instance(
+										null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false),
+						storageConfig(),
+						false,
+						16,
+						primaryClient,
+						exactVersionClient,
 						100 * 1024L,
 						8 * 1024 * 1024L);
 	}

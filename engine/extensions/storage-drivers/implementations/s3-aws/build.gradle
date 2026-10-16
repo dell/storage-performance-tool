@@ -44,6 +44,7 @@ dependencies {
 	testImplementation libs.junit.jupiter.params
 	testRuntimeOnly libs.junit.jupiter.engine
 	testImplementation libs.log4j.api
+	testImplementation libs.log4j.core
 	testImplementation libs.mockito.core
 	// Add primitives for test compilation
 	testImplementation project(':extensions:storage-drivers:primitives:coop')

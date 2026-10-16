@@ -1,10 +1,8 @@
 package com.dell.spt.storage.driver.coop.aws.s3;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -22,9 +20,11 @@ import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
+import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletionException;
@@ -37,6 +37,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.junit.jupiter.api.io.TempDir;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
@@ -52,6 +54,7 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
  * the merged configuration, so a timeout that does not reach a client leaves its request waiting
  * for the server until this test gives up.
  */
+@Execution(ExecutionMode.CONCURRENT)
 @Timeout(300)
 final class S3AwsStallBoundIntegrationTest {
 
@@ -68,11 +71,11 @@ final class S3AwsStallBoundIntegrationTest {
 
 	private static final Duration RESULT_WAIT = Duration.ofSeconds(120);
 
-	private NeverRespondingServer server;
+	private ScriptedS3Server server;
 
 	@BeforeEach
 	void startServer() throws Exception {
-		server = new NeverRespondingServer();
+		server = new ScriptedS3Server();
 	}
 
 	@AfterEach
@@ -102,10 +105,25 @@ final class S3AwsStallBoundIntegrationTest {
 		}
 	}
 
-	private Void stalledPut(final Path home) throws Exception {
-		final DataItem item = new DataItemImpl("put-key", 0, OBJECT_BYTES);
+	private static DataOperationImpl<DataItem> putOp(final String key) throws IOException {
+		final DataItem item = new DataItemImpl(key, 0, OBJECT_BYTES);
 		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4MB"), 1, false));
-		final var op = new DataOperationImpl<DataItem>(0, OpType.CREATE, item, null, "/bucket", CREDENTIAL, null, 0);
+		return new DataOperationImpl<DataItem>(0, OpType.CREATE, item, null, "/bucket", CREDENTIAL, null, 0);
+	}
+
+	/** A request for one version of an object, which the exact-version client serves. */
+	private static DataOperationImpl<IntegrityManifestDataItem> versionedStatOp(final String key) {
+		return new DataOperationImpl<IntegrityManifestDataItem>(
+						0, OpType.STAT, new IntegrityManifestDataItem("bucket", key, 0, "version-1"), null, "/bucket",
+						CREDENTIAL, null, 0);
+	}
+
+	private static DeleteRequestOperation deleteOp(final String key) {
+		return S3AwsDeleteRequestTestFixture.operation(S3AwsDeleteRequestTestFixture.target(key, null));
+	}
+
+	private Void stalledPut(final Path home) throws Exception {
+		final var op = putOp("put-key");
 
 		final Duration elapsed = runToCompletion("PUT", home, op);
 
@@ -117,9 +135,7 @@ final class S3AwsStallBoundIntegrationTest {
 	}
 
 	private Void stalledExactVersionRequest(final Path home) throws Exception {
-		final var item = new IntegrityManifestDataItem("bucket", "exact-key", 0, "version-1");
-		final var op = new DataOperationImpl<IntegrityManifestDataItem>(
-						0, OpType.STAT, item, null, "/bucket", CREDENTIAL, null, 0);
+		final var op = versionedStatOp("exact-key");
 
 		final Duration elapsed = runToCompletion("exact-version HEAD", home, op);
 
@@ -130,8 +146,7 @@ final class S3AwsStallBoundIntegrationTest {
 	}
 
 	private Void stalledStandaloneDelete(final Path home) throws Exception {
-		final var op = S3AwsDeleteRequestTestFixture.operation(
-						S3AwsDeleteRequestTestFixture.target("delete-key", null));
+		final var op = deleteOp("delete-key");
 
 		final Duration elapsed = runToCompletion("standalone DELETE", home, op);
 
@@ -143,27 +158,29 @@ final class S3AwsStallBoundIntegrationTest {
 	}
 
 	@Test
-	void withTheMonitorDisabledAStalledConnectionIsNotGivenUp(@TempDir final Path home) throws Exception {
-		final var item = new IntegrityManifestDataItem("bucket", "key", 0, "version-1");
-		final var op = new DataOperationImpl<IntegrityManifestDataItem>(
-						0, OpType.STAT, item, null, "/bucket", CREDENTIAL, null, 0);
-		final var results = new Results<DataOperationImpl<IntegrityManifestDataItem>>();
+	void withTheMonitorDisabledNoClientGivesUpAStalledConnection(@TempDir final Path home) throws Exception {
+		final var running = new ArrayList<Running>();
+		try {
+			running.add(start("PUT", home.resolve("put"), putOp("put-key")));
+			running.add(start("exact-version HEAD", home.resolve("exact-version"), versionedStatOp("exact-key")));
+			running.add(start("standalone DELETE", home.resolve("delete"), deleteOp("delete-key")));
 
-		try (final S3AwsStorageDriver<IntegrityManifestDataItem, DataOperationImpl<IntegrityManifestDataItem>> driver = driver(home, Map.of("storage-crt-socketTimeoutMs", 0))) {
-			driver.operationResultOutput(results);
-			driver.start();
-			assertTrue(driver.put(op));
+			// Enabled, a client gives up its first stalled connection in about five seconds.
+			Thread.sleep(STALL_TIMEOUT_MS * 5L);
 
-			// Enabled, the client gives up the first stalled connection in about five seconds.
-			assertNull(results.queue.poll(STALL_TIMEOUT_MS * 5L, TimeUnit.MILLISECONDS));
-			assertEquals(0, server.stalledClosedByClient(), "the client must not give up the stalled connection");
-			assertEquals(1, driver.activeOpCount());
-			assertFalse(server.requestLines().isEmpty(), "the request must have reached the server");
-
-			// Nothing but the end of the server can end the request, and the driver waits for it on close.
+			assertRequestSent("PUT /bucket/put-key");
+			assertRequestSent("HEAD /bucket/exact-key?versionId=version-1");
+			assertRequestSent("DELETE /bucket/delete-key");
+			assertEquals(0, server.stalledClosedByClient(), "no client may give up a stalled connection");
+			for (final Running request : running) {
+				assertEquals(1, request.driver().activeOpCount(), "the stalled " + request.name() + " must stay in flight");
+			}
+		} finally {
+			// Nothing but the end of the server can end a stalled request, and a driver waits for its requests on close.
 			server.close();
-			assertNotNull(results.queue.poll(RESULT_WAIT.toMillis(), TimeUnit.MILLISECONDS),
-							"the request must end once the server is gone");
+			for (final Running request : running) {
+				request.finish();
+			}
 		}
 	}
 
@@ -239,6 +256,27 @@ final class S3AwsStallBoundIntegrationTest {
 			assertEquals(0, driver.activeOpCount(), "a failed " + request + " must not stay active");
 			assertTrue(driver.isIdle());
 			return elapsed;
+		}
+	}
+
+	/** Starts a driver without stall detection and hands it an operation. */
+	private <I extends Item, O extends Operation<I>> Running start(final String name, final Path home, final O op)
+					throws Exception {
+		final S3AwsStorageDriver<I, O> driver = driver(home, Map.of("storage-crt-socketTimeoutMs", 0));
+		final var results = new Results<O>();
+		driver.operationResultOutput(results);
+		driver.start();
+		assertTrue(driver.put(op));
+		return new Running(name, driver, results.queue);
+	}
+
+	/** A driver with an operation in flight, and the results it has output. */
+	private record Running(String name, S3AwsStorageDriver<?, ?> driver, LinkedBlockingQueue<?> results) {
+
+		/** Waits for the operation to end, which needs the server gone, and closes the driver. */
+		void finish() throws Exception {
+			results.poll(RESULT_WAIT.toMillis(), TimeUnit.MILLISECONDS);
+			driver.close();
 		}
 	}
 

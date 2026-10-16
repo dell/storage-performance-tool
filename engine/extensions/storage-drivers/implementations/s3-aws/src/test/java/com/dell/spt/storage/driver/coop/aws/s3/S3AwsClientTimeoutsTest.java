@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import software.amazon.awssdk.crtcore.CrtConfigurationUtils;
 
 /**
  * The connection and stall bounds of the s3-aws clients: the shipped defaults, the CLI overrides,
@@ -90,6 +91,19 @@ final class S3AwsClientTimeoutsTest {
 
 		assertTrue(failure.getMessage().contains("storage.crt." + flag.substring("storage-crt-".length())),
 						failure.getMessage());
+	}
+
+	@ParameterizedTest(name = "{0} ms is {1} s for the native monitor")
+	@CsvSource({"2000,2", "2500,2", "2999,2", "3000,3", "30000,30"
+	})
+	void theNativeMonitorCountsWholeSecondsRoundedDown(final int milliseconds, final int seconds) {
+		final var timeouts = new S3AwsClientTimeouts(Duration.ofSeconds(5), Duration.ofMillis(milliseconds));
+
+		final var options = CrtConfigurationUtils.resolveHttpMonitoringOptions(
+						timeouts.crtHttpConfiguration().healthConfiguration()).orElseThrow();
+
+		assertEquals(seconds, options.getAllowableThroughputFailureIntervalSeconds());
+		assertEquals(S3AwsClientTimeouts.MINIMUM_PROGRESS_BYTES_PER_SECOND, options.getMinThroughputBytesPerSecond());
 	}
 
 	@Test
