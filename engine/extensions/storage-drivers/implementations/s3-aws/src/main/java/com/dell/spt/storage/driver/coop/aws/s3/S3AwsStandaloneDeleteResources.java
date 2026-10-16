@@ -1,7 +1,6 @@
 package com.dell.spt.storage.driver.coop.aws.s3;
 
 import java.net.URI;
-import java.time.Duration;
 import java.util.Objects;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -24,13 +23,13 @@ final class S3AwsStandaloneDeleteResources implements AutoCloseable {
 				URI endpoint,
 				boolean pathStyle,
 				int maxConcurrency,
-				Duration connectionTimeout) {
+				S3AwsClientTimeouts timeouts) {
 
 		Configuration {
 			Objects.requireNonNull(credentialsProvider);
 			Objects.requireNonNull(region);
 			Objects.requireNonNull(endpoint);
-			Objects.requireNonNull(connectionTimeout);
+			Objects.requireNonNull(timeouts);
 		}
 	}
 
@@ -46,10 +45,9 @@ final class S3AwsStandaloneDeleteResources implements AutoCloseable {
 	static S3AwsStandaloneDeleteResources create(final Configuration configuration) {
 		return create(
 						() -> new DeleteTimingAsyncHttpClient(
-										CrtDeleteTimingAsyncHttpClient.builder()
+										configuration.timeouts().applyTo(CrtDeleteTimingAsyncHttpClient.builder()
 														.operationAttribute(DeleteTimingAsyncHttpClient.DELETE_OPERATION)
-														.maxConcurrency(configuration.maxConcurrency())
-														.connectionTimeout(configuration.connectionTimeout())
+														.maxConcurrency(configuration.maxConcurrency()))
 														.build()),
 						httpClient -> S3AsyncClient.builder()
 										.credentialsProvider(configuration.credentialsProvider())

@@ -172,8 +172,8 @@ S3StorageDriver driver = S3StorageDriverFactory.create(config);
 | endpointOverride | String | null | Override S3 endpoint (for S3-compatible services) |
 | pathStyleAccess | boolean | false | Use path-style access (required for some S3-compatible services) |
 | maxConnections | int | 50 | Maximum number of concurrent connections |
-| socketTimeout | int | 30000 | Socket timeout in milliseconds |
-| connectionTimeout | int | 10000 | Connection timeout in milliseconds |
+| storage.crt.socketTimeoutMs | int | 30000 | Milliseconds a connection with a request in flight may move no data before it is closed and the request fails as a timeout; `0` turns the detection off, otherwise at least `2000` (see [AWS SDK driver timeouts](../../../../README.md#aws-sdk-driver-timeouts)) |
+| storage.crt.connectionTimeoutMs | int | 5000 | Milliseconds allowed to establish a connection |
 | enableRequestMetrics | boolean | false | Enable AWS SDK request metrics |
 | checksumEnabled | boolean | false | Compute and send a checksum on write requests |
 | checksumAlgorithm | String | null | Checksum algorithm: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`. MD5 is not supported as a flexible checksum by the AWS SDK |

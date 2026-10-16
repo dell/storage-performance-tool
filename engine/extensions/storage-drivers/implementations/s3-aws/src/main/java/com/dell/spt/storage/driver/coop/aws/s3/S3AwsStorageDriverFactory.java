@@ -20,7 +20,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.InputStream;
 import java.net.URI;
-import java.time.Duration;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Objects;
@@ -175,21 +174,9 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 			LOG.debug("Could not read storage.crt.smallObjectThresholdBytes from config, using default: {}", smallObjectThresholdBytes);
 		}
 
-		// Connection timeout settings
-		int connectionTimeoutMs = 5000;  // 5 seconds
-		try {
-			connectionTimeoutMs = storageConfig.configVal("crt").intVal("connectionTimeoutMs");
-		} catch (Exception e) {
-			LOG.debug("Could not read storage.crt.connectionTimeoutMs from config, using default: {}", connectionTimeoutMs);
-		}
-
-		// Socket timeout settings
-		int socketTimeoutMs = 30000;  // 30 seconds
-		try {
-			socketTimeoutMs = storageConfig.configVal("crt").intVal("socketTimeoutMs");
-		} catch (Exception e) {
-			LOG.debug("Could not read storage.crt.socketTimeoutMs from config, using default: {}", socketTimeoutMs);
-		}
+		// Connection and stall bounds, applied to every client below. Both keys ship with defaults,
+		// so a value that cannot be used is a configuration error.
+		final S3AwsClientTimeouts timeouts = S3AwsClientTimeouts.from(storageConfig);
 
 		// ---------------------------
 		// Build AWS S3 Async Client with CRT
@@ -203,7 +190,8 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 						.forcePathStyle(pathStyle)
 						.targetThroughputInGbps(targetThroughputInGbps)
 						.minimumPartSizeInBytes(minimumPartSizeInBytes)
-						.maxConcurrency(maxConcurrency);
+						.maxConcurrency(maxConcurrency)
+						.httpConfiguration(timeouts.crtHttpConfiguration());
 
 		// Note: partSizeBytes is used for driver-level multipart decisions
 		// The CRT manages part size internally based on minimumPartSizeInBytes
@@ -219,7 +207,7 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 							URI.create(endpoint),
 							pathStyle,
 							maxConcurrency,
-							Duration.ofMillis(connectionTimeoutMs));
+							timeouts);
 			final S3AwsStorageDriver<I, O> driver = new S3AwsStorageDriver<>(
 							stepId,
 							dataInput,
@@ -236,8 +224,8 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 												.region(Region.of(exactClientRegion))
 												.endpointOverride(URI.create(endpoint))
 												.forcePathStyle(pathStyle)
-												.httpClientBuilder(AwsCrtAsyncHttpClient.builder()
-																.maxConcurrency(exactClientMaxConcurrency))
+												.httpClientBuilder(timeouts.applyTo(AwsCrtAsyncHttpClient.builder()
+																.maxConcurrency(exactClientMaxConcurrency)))
 												.build();
 							},
 							() -> standaloneDeleteResourcesFactory.create(

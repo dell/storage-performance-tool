@@ -130,6 +130,17 @@ SPT supports multiple S3 storage driver backends. Use `--storage-driver-type` to
   --load-op-limit-count=500
 ```
 
+#### AWS SDK driver timeouts
+
+The `s3-aws` driver applies two timeouts to every S3 client it builds (the transfer client, the client for exact-version requests and the client for standalone DELETE):
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `--storage-crt-connectionTimeoutMs` | `5000` | Milliseconds allowed to establish a connection |
+| `--storage-crt-socketTimeoutMs` | `30000` | Milliseconds a connection with a request in flight may move no data. After that the connection is closed and the request fails as a timeout, which is counted as a failed operation and written to the errors log. `0` turns the detection off; any other value must be at least `2000` and counts whole seconds |
+
+`socketTimeoutMs` is an idle timeout, not a request deadline: a transfer that keeps moving data is never cut off, and no timer runs per request. The AWS clients retry a failed request on a new connection before they give up (the transfer client up to five times, the others up to three), so a request that stalls on every attempt fails only after all of them: with the defaults, after more than three minutes. Lower `socketTimeoutMs` for a tighter bound; raise it for operations that stay silent for longer than 30 seconds. A missing or invalid value stops the driver from starting and names the option. Only the first timeout of a run is logged as a warning.
+
 Note: Extensions are loaded from the `ext/` directory next to `spt.jar`.
 
 ### Common Command-Line Options

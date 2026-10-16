@@ -26,5 +26,11 @@ storage:
     partSizeBytes: long
     smallObjectThresholdBytes: long
     optimizeForSmallObjects: boolean
+    # Milliseconds allowed to establish a connection, for every S3 client of the driver.
     connectionTimeoutMs: int
+    # Milliseconds a connection with a request in flight may move no data before it is closed and
+    # the request fails (an idle timeout, not a request deadline). 0 does not detect stalled
+    # requests; any other value is at least 2000, applied in whole seconds. A client may retry the
+    # request on a new connection, so a request that stalls on every attempt fails after all of
+    # them.
     socketTimeoutMs: int
