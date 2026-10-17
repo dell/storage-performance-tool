@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Fixed
+
+- **S3-AWS stalled requests** — The `s3-aws` driver now applies `storage.crt.connectionTimeoutMs` (default 5000) and `storage.crt.socketTimeoutMs` (default 30000) to all of its S3 clients. Before, a request that stopped making progress stayed in flight indefinitely and could keep the step from stopping. Now such a request fails as a timeout once its connection has moved no data for `socketTimeoutMs`, possibly after the AWS client retries it. `0` turns this off; any other value must be at least 2000.
+
 ## [5.16.0] - 2026-10-13
 
 ### Added

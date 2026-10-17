@@ -16,3 +16,10 @@ storage:
   crt:
     targetThroughputGbps: 20.0
     minimumPartSizeBytes: 16777216
+    # TCP connect deadline for every S3 client of the driver.
+    connectionTimeoutMs: 5000
+    # Idle timeout of a connection with a request in flight: 30 seconds, as for the Netty driver
+    # (storage.net.timeoutMilliSec). A stalled request then fails and is counted instead of
+    # holding its slot for the rest of the run. Raise it for operations that legitimately stay
+    # silent for longer; 0 does not detect stalled requests.
+    socketTimeoutMs: 30000

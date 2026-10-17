@@ -129,6 +129,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private final Map<String, String> objectTags;
 	private final long smallObjectThresholdBytes;
 	private final long partSizeBytes;
+	private final AtomicBoolean stallFailureReported = new AtomicBoolean();
+	private final AtomicBoolean timeoutFailureReported = new AtomicBoolean();
 
 	public S3AwsStorageDriver(
 					final String stepId,
@@ -485,6 +487,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				LOG.debug(
 								"Standalone DELETE request with {} targets failed: {}",
 								deleteOperation.deleteRequest().targets().size(), originalStatus);
+			} else if (originalStatus == Status.FAIL_TIMEOUT) {
+				logTimeoutFailure(op, failure);
+				LOG.debug("{} {} stack trace", op.type(), op.item().name(), e);
 			} else {
 				LOG.error(
 								"{} {} requested version {} failed: {}: {}",
@@ -501,6 +506,33 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				}
 			}
 		}
+	}
+
+	/**
+	 * Timeouts come in bursts when a server or a network path stalls, so only the first one of each
+	 * kind is logged above DEBUG. Every failed operation is still counted and written to the errors
+	 * log by the load step. Only a connection the stall monitor closed is put down to
+	 * storage.crt.socketTimeoutMs: a gateway timeout or a call deadline says nothing about it.
+	 *
+	 * @return whether this was the first timeout of its kind, which is logged as a warning
+	 */
+	boolean logTimeoutFailure(final O op, final Throwable failure) {
+		if (S3AwsClientTimeouts.isStall(failure)) {
+			if (stallFailureReported.compareAndSet(false, true)) {
+				LOG.warn(
+								"{} {} timed out: {}. The connection moved no data for storage.crt.{}; further stalled"
+												+ " requests are logged at DEBUG",
+								op.type(), op.item().name(), failure, S3AwsClientTimeouts.SOCKET_TIMEOUT_KEY);
+				return true;
+			}
+		} else if (timeoutFailureReported.compareAndSet(false, true)) {
+			LOG.warn(
+							"{} {} timed out: {}. Further timeouts of this kind are logged at DEBUG",
+							op.type(), op.item().name(), failure);
+			return true;
+		}
+		LOG.debug("{} {} timed out: {}", op.type(), op.item().name(), failure);
+		return false;
 	}
 
 	private void finishStandaloneDeleteOperation(final O op) {
@@ -587,7 +619,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			}
 		}
 		if (ex instanceof ApiCallTimeoutException || ex instanceof ApiCallAttemptTimeoutException
-						|| ex instanceof TimeoutException) {
+						|| ex instanceof TimeoutException || S3AwsClientTimeouts.isStall(ex)
+						|| S3AwsClientTimeouts.isSocketTimeout(ex)) {
 			return Status.FAIL_TIMEOUT;
 		}
 		if (ex instanceof IOException || (ex instanceof SdkClientException && ex.getCause() instanceof IOException)) {
