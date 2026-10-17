@@ -6,6 +6,7 @@ import static com.dell.spt.storage.driver.coop.aws.s3.S3AwsDriverHarness.op;
 import static com.dell.spt.storage.driver.coop.aws.s3.S3AwsDriverHarness.putOp;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -24,19 +25,26 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import org.apache.logging.log4j.Level;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsResponse;
+import software.amazon.awssdk.services.s3.model.DeletedObject;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 
 /**
  * When the driver stops, after the load step has waited for the requests in flight, it cancels
  * the ones still in flight. Before, a worker waiting for a request that never ended kept the
- * driver from stopping, and closing the clients left the worker waiting.
+ * driver from stopping, and closing the clients left the worker waiting. A response that arrives
+ * as the driver stops is applied by the worker before it gives up the operation, never after.
  */
 // A request the driver fails to cancel is waited for without end, which an interrupt does not stop.
 @Timeout(value = 60, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
@@ -48,7 +56,7 @@ final class S3AwsStopTest {
 	/** How long a cancelled request may take to close its connection, and its result to arrive. */
 	private static final Duration CANCEL_BUDGET = Duration.ofSeconds(5);
 
-	private static final Duration SENT_BUDGET = Duration.ofSeconds(10);
+	private static final Duration STALL_BUDGET = Duration.ofSeconds(10);
 
 	@Test
 	void stoppingTheDriverCancelsTheRequestsStillInFlightOnEveryClient(@TempDir final Path home) throws Exception {
@@ -57,6 +65,7 @@ final class S3AwsStopTest {
 			final Map<String, Object> noStallDetection = Map.of("storage-crt-socketTimeoutMs", 0);
 			final String transferGet = ScriptedS3Server.BODY_STALL_KEY + "-transfer";
 			final String exactGet = ScriptedS3Server.BODY_STALL_KEY + "-exact";
+			final var exactGetOp = op(OpType.READ, exactGet, "version-1");
 			final List<InFlight> requests = List.of(
 							inFlight("a PUT by the transfer client",
 											driver(home.resolve("put"), server, noStallDetection),
@@ -72,7 +81,7 @@ final class S3AwsStopTest {
 							// abandoned, even once the client is closed, until the stall monitor closes it.
 							inFlight("a GET by the exact-version client, read up to where its body stopped",
 											driver(home.resolve("exact-get"), server, noStallDetection),
-											op(OpType.READ, exactGet, "version-1"), "GET /bucket/" + exactGet + "?versionId=version-1", false,
+											exactGetOp, "GET /bucket/" + exactGet + "?versionId=version-1", false,
 											Operation::status),
 							inFlight("a DELETE by the standalone DELETE client",
 											driver(home.resolve("delete"), server, noStallDetection),
@@ -84,10 +93,15 @@ final class S3AwsStopTest {
 											}));
 			try {
 				for (final InFlight request : requests) {
-					awaitSent(server, request);
+					awaitStalled(server, request);
 				}
-				// Let the GETs receive what the server sends of their bodies.
-				Thread.sleep(500);
+				// The exact-version client hands the body to the worker, which must be reading it when the
+				// driver stops. The transfer client buffers the body, so its worker waits for the request.
+				final long deadline = System.nanoTime() + STALL_BUDGET.toNanos();
+				while (exactGetOp.respTimeStart() == 0) {
+					assertTrue(System.nanoTime() < deadline, "the worker never started reading the body of the exact-version GET");
+					Thread.sleep(10);
+				}
 
 				for (final InFlight request : requests) {
 					final long start = System.nanoTime();
@@ -143,6 +157,76 @@ final class S3AwsStopTest {
 		}
 	}
 
+	@Test
+	void aResponseBeingAppliedWhenTheDriverStopsIsAppliedBeforeTheWorkerGivesUpItsOperation() throws Exception {
+		final var sent = new CompletableFuture<DeleteObjectsResponse>();
+		final var client = mock(S3AsyncClient.class);
+		when(client.deleteObjects(any(DeleteObjectsRequest.class))).thenReturn(sent);
+		final var applier = new AtomicReference<Thread>();
+		final var applying = new CountDownLatch(1);
+		final var release = new CountDownLatch(1);
+		final var response = mock(DeleteObjectsResponse.class);
+		when(response.deleted()).thenAnswer(invocation -> {
+			applier.set(Thread.currentThread());
+			applying.countDown();
+			awaitIgnoringInterrupts(release);
+			return List.of(DeletedObject.builder().key("a").build(), DeletedObject.builder().key("b").build());
+		});
+		when(response.errors()).thenReturn(List.of());
+		final var op = S3AwsDeleteRequestTestFixture.operation(
+						S3AwsDeleteRequestTestFixture.target("a", null), S3AwsDeleteRequestTestFixture.target("b", null));
+		op.startRequest();
+		op.finishRequest();
+
+		try (final var driver = S3AwsDeleteRequestTestFixture.driver(client, client)) {
+			final var returned = new AtomicReference<Status>();
+			final Thread worker = Thread.ofVirtual().start(() -> {
+				driver.invokeNio(op);
+				returned.set(op.status());
+			});
+			final long deadline = System.nanoTime() + STALL_BUDGET.toNanos();
+			while (sent.getNumberOfDependents() == 0) {
+				assertTrue(System.nanoTime() < deadline, "the worker never waited for the response");
+				Thread.sleep(1);
+			}
+			final Thread responder = Thread.ofVirtual().start(() -> sent.complete(response));
+			try {
+				assertTrue(applying.await(STALL_BUDGET.toSeconds(), TimeUnit.SECONDS));
+				worker.interrupt();
+				// A worker that gave up the operation while another thread applies the response would
+				// return now, and the response would then change the operation.
+				if (applier.get() != worker) {
+					worker.join(STALL_BUDGET.toMillis());
+				}
+			} finally {
+				release.countDown();
+				responder.join(STALL_BUDGET.toMillis());
+				worker.join(STALL_BUDGET.toMillis());
+			}
+
+			assertEquals(op.status(), returned.get(), "the operation changed after the worker gave it up");
+			assertEquals(Status.SUCC, op.status(), "the response arrived before the stop, so it completes the operation");
+			assertEquals(2, op.deleteResult().acceptedObjectCount());
+			assertSame(worker, applier.get(), "the worker, not a thread of the client, applies the response");
+		}
+	}
+
+	/** Applying a response is ordinary code, which an interrupt does not cut short. */
+	private static void awaitIgnoringInterrupts(final CountDownLatch latch) {
+		boolean interrupted = false;
+		while (true) {
+			try {
+				assertTrue(latch.await(STALL_BUDGET.toSeconds(), TimeUnit.SECONDS));
+				break;
+			} catch (final InterruptedException ignored) {
+				interrupted = true;
+			}
+		}
+		if (interrupted) {
+			Thread.currentThread().interrupt();
+		}
+	}
+
 	private static <I extends Item, O extends Operation<I>> InFlight inFlight(
 					final String name,
 					final S3AwsStorageDriver<I, O> driver,
@@ -154,10 +238,11 @@ final class S3AwsStopTest {
 		return new InFlight(name, started, requestLine, abortedAtStop, budget -> status.apply(started.await(budget)));
 	}
 
-	private static void awaitSent(final ScriptedS3Server server, final InFlight request) throws InterruptedException {
-		final long deadline = System.nanoTime() + SENT_BUDGET.toNanos();
-		while (server.requestLines().stream().noneMatch(line -> line.startsWith(request.requestLine()))) {
-			assertTrue(System.nanoTime() < deadline, request.name() + " never reached the server: " + server.requestLines());
+	/** Waits until the server has answered the request as far as it will. */
+	private static void awaitStalled(final ScriptedS3Server server, final InFlight request) throws InterruptedException {
+		final long deadline = System.nanoTime() + STALL_BUDGET.toNanos();
+		while (server.stalledRequests().stream().noneMatch(line -> line.startsWith(request.requestLine()))) {
+			assertTrue(System.nanoTime() < deadline, request.name() + " never stalled on the server: " + server.requestLines());
 			Thread.sleep(10);
 		}
 	}

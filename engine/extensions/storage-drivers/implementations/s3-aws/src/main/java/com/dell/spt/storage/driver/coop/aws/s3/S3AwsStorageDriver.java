@@ -44,6 +44,7 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutionException;
@@ -426,8 +427,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		final boolean aborting = mpuOp != null && mpuOp.get(KEY_MPU_ABORT) != null;
 		final boolean completing = mpuOp != null && !aborting && mpuOp.allSubOperationsDone();
 		try {
-			// Execute AWS SDK operation asynchronously and block for result. Stopping the worker
-			// interrupts it, which cancels the request.
+			// Each request is waited for where it is made, and its response applied on this worker.
+			// Stopping the worker interrupts it, which cancels the request.
 			S3AwsRequests.await(execute(op));
 
 			// Set bytes transferred for metrics (skip READs — readObject sets actual bytes).
@@ -998,11 +999,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private CompletableFuture<Void> dispatchPutObject(
 					final O op, final PutObjectRequest request, final AsyncRequestBody body) {
 		markIntegrityRequestDispatched();
-		final var sent = s3AsyncClient.putObject(request, body);
-		return S3AwsRequests.forwardCancellation(
-						sent.thenAccept(response -> captureResponseIdentity(
-										op, response.versionId(), requestId(response))),
-						sent);
+		final var response = S3AwsRequests.await(s3AsyncClient.putObject(request, body));
+		captureResponseIdentity(op, response.versionId(), requestId(response));
+		return CompletableFuture.completedFuture(null);
 	}
 
 	private static void captureResponseIdentity(
@@ -1136,8 +1135,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		if (identity.versionId() != null) {
 			request.versionId(identity.versionId());
 		}
-		final var sent = deleteClient(identity.versionId() != null).deleteObject(request.build());
-		return S3AwsRequests.forwardCancellation(sent.thenApply(response -> null), sent);
+		S3AwsRequests.await(deleteClient(identity.versionId() != null).deleteObject(request.build()));
+		return CompletableFuture.completedFuture(null);
 	}
 
 	private CompletableFuture<Void> deleteRequest(final DeleteRequestOperation operation) {
@@ -1155,16 +1154,14 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			}
 			final DeleteObjectRequest builtRequest = sdkRequest.build();
 			final S3AsyncClient client = standaloneDeleteClient(target.versionId() != null);
-			final var sent = client.deleteObject(builtRequest);
-			return S3AwsRequests.forwardCancellation(
-							sent.handle((response, failure) -> {
-								completeDelete(
-												operation,
-												failure,
-												response == null ? null : DeleteTransportResult.success(request.targets()));
-								return null;
-							}),
-							sent);
+			try {
+				S3AwsRequests.await(client.deleteObject(builtRequest));
+			} catch (final CompletionException failure) {
+				failDelete(operation, failure);
+				return CompletableFuture.completedFuture(null);
+			}
+			operation.completeDelete(DeleteTransportResult.success(request.targets()));
+			return CompletableFuture.completedFuture(null);
 		}
 
 		final var objectIdentifiers = request.targets().stream()
@@ -1183,13 +1180,15 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		final boolean exactVersion = request.targets().stream()
 						.anyMatch(target -> target.versionId() != null);
 		final S3AsyncClient client = standaloneDeleteClient(exactVersion);
-		final var sent = client.deleteObjects(sdkRequest);
-		return S3AwsRequests.forwardCancellation(
-						sent.handle((response, failure) -> {
-							completeDelete(operation, failure, deleteTransportResult(response));
-							return null;
-						}),
-						sent);
+		final DeleteObjectsResponse response;
+		try {
+			response = S3AwsRequests.await(client.deleteObjects(sdkRequest));
+		} catch (final CompletionException failure) {
+			failDelete(operation, failure);
+			return CompletableFuture.completedFuture(null);
+		}
+		operation.completeDelete(deleteTransportResult(response));
+		return CompletableFuture.completedFuture(null);
 	}
 
 	private static ObjectIdentifier objectIdentifier(final DeleteTarget target) {
@@ -1227,18 +1226,12 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		return message == null || message.isEmpty() ? code : code + ": " + message;
 	}
 
-	private static void completeDelete(
-					final DeleteRequestOperation operation,
-					final Throwable failure,
-					final DeleteTransportResult successfulResult) {
-		if (failure == null) {
-			operation.completeDelete(successfulResult);
-			return;
-		}
-		final Exception exception = failure instanceof Exception
-						? (Exception) failure
-						: new RuntimeException(failure);
-		final Status status = classifyFailure(exception);
+	/**
+	 * A request that failed gets one conservative failed result. A cancelled request is left to
+	 * invokeNio, which gives a DELETE cancelled at stop no result.
+	 */
+	private static void failDelete(final DeleteRequestOperation operation, final CompletionException failure) {
+		final Status status = classifyFailure(failure);
 		LOG.debug(
 						"Standalone DELETE request with {} targets failed: {}",
 						operation.deleteRequest().targets().size(), status);
@@ -1266,8 +1259,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		if (identity.versionId() != null) {
 			request.versionId(identity.versionId());
 		}
-		final var sent = deleteClient(identity.versionId() != null).headObject(request.build());
-		return S3AwsRequests.forwardCancellation(sent.thenApply(response -> null), sent);
+		S3AwsRequests.await(deleteClient(identity.versionId() != null).headObject(request.build()));
+		return CompletableFuture.completedFuture(null);
 	}
 
 	@SuppressWarnings("unchecked")
@@ -1320,52 +1313,50 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			}
 		}
 
-		final var sent = s3AsyncClient.listObjectsV2(reqBuilder.build());
-		return S3AwsRequests.forwardCancellation(sent
-						.thenAccept(resp -> {
-							int objectCount = 0;
-							long bytesTotal = 0;
-							final List<ListedObject> listedObjects = new ArrayList<>(resp.contents().size());
-							String firstKey = null;
-							String lastKey = null;
+		final ListObjectsV2Response resp = S3AwsRequests.await(s3AsyncClient.listObjectsV2(reqBuilder.build()));
+		int objectCount = 0;
+		long bytesTotal = 0;
+		final List<ListedObject> listedObjects = new ArrayList<>(resp.contents().size());
+		String firstKey = null;
+		String lastKey = null;
 
-							for (S3Object s3obj : resp.contents()) {
-								objectCount++;
-								if (options.fetchMetadata()) {
-									bytesTotal += s3obj.size();
-								}
-								final var key = s3obj.key();
-								listedObjects.add(new ListedObject(key, Math.max(0, s3obj.size())));
-								if (firstKey == null) {
-									firstKey = key;
-								}
-								lastKey = key;
-							}
+		for (S3Object s3obj : resp.contents()) {
+			objectCount++;
+			if (options.fetchMetadata()) {
+				bytesTotal += s3obj.size();
+			}
+			final var key = s3obj.key();
+			listedObjects.add(new ListedObject(key, Math.max(0, s3obj.size())));
+			if (firstKey == null) {
+				firstKey = key;
+			}
+			lastKey = key;
+		}
 
-							listOp.objectsListed(objectCount);
-							listOp.listedObjects(listedObjects);
-							listOp.bytesListed(options.fetchMetadata() ? bytesTotal : 0);
-							listOp.truncated(Boolean.TRUE.equals(resp.isTruncated()));
+		listOp.objectsListed(objectCount);
+		listOp.listedObjects(listedObjects);
+		listOp.bytesListed(options.fetchMetadata() ? bytesTotal : 0);
+		listOp.truncated(Boolean.TRUE.equals(resp.isTruncated()));
 
-							if (firstKey != null) {
-								listOp.pageFirstKey(firstKey);
-							}
-							listOp.continuationToken(resp.nextContinuationToken());
+		if (firstKey != null) {
+			listOp.pageFirstKey(firstKey);
+		}
+		listOp.continuationToken(resp.nextContinuationToken());
 
-							// Update options with the new continuation token for the next page
-							listOp.options(
-											options.toBuilder()
-															.continuationToken(resp.nextContinuationToken())
-															.build());
+		// Update options with the new continuation token for the next page
+		listOp.options(
+						options.toBuilder()
+										.continuationToken(resp.nextContinuationToken())
+										.build());
 
-							if (lastKey != null) {
-								listOp.startAfter(lastKey);
-							}
-							listOp.countBytesDone(listOp.bytesListed());
-							if (listOp.respDataTimeStart() == 0) {
-								LOG.debug("{}: LIST completed before first body byte was observed; TTFB unavailable", listOp);
-							}
-						}), sent);
+		if (lastKey != null) {
+			listOp.startAfter(lastKey);
+		}
+		listOp.countBytesDone(listOp.bytesListed());
+		if (listOp.respDataTimeStart() == 0) {
+			LOG.debug("{}: LIST completed before first body byte was observed; TTFB unavailable", listOp);
+		}
+		return CompletableFuture.completedFuture(null);
 	}
 
 	private CompletableFuture<Void> listObjectVersions(
@@ -1394,82 +1385,80 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			request.versionIdMarker(options.versionIdMarker());
 		}
 
-		final var sent = s3AsyncClient.listObjectVersions(request.build());
-		return S3AwsRequests.forwardCancellation(sent
-						.thenAccept(response -> {
-							final boolean truncated = Boolean.TRUE.equals(response.isTruncated());
-							if (truncated
-											&& (response.nextKeyMarker() == null
-															|| response.nextKeyMarker().isEmpty()
-															|| response.nextVersionIdMarker() == null
-															|| response.nextVersionIdMarker().isEmpty())) {
-								throw new IllegalStateException(
-												"Truncated S3 version LIST result is missing its next markers");
-							}
-							final List<ListedObject> listedObjects = new ArrayList<>(response.versions().size());
-							long bytesTotal = 0;
-							String firstKey = null;
-							String lastKey = null;
-							for (final ObjectVersion version : response.versions()) {
-								final String key = version.key();
-								final String versionId = version.versionId();
-								if (key == null || key.isEmpty() || versionId == null || versionId.isEmpty()) {
-									throw new IllegalStateException(
-													"ListObjectVersions returned a data version without an exact identity");
-								}
-								final Long responseSize = version.size();
-								if (responseSize == null) {
-									throw new IllegalStateException(
-													"S3 LIST entry is missing Size for key \"" + key + "\"");
-								}
-								final long size = Math.max(0L, responseSize);
-								listedObjects.add(new ListedObject(key, size, versionId));
-								if (options.fetchMetadata()) {
-									bytesTotal = Math.addExact(bytesTotal, size);
-								}
-								if (firstKey == null || key.compareTo(firstKey) < 0) {
-									firstKey = key;
-								}
-								if (lastKey == null || key.compareTo(lastKey) > 0) {
-									lastKey = key;
-								}
-							}
-							for (final DeleteMarkerEntry deleteMarker : response.deleteMarkers()) {
-								final String key = deleteMarker.key();
-								if (key != null && !key.isEmpty()) {
-									if (firstKey == null || key.compareTo(firstKey) < 0) {
-										firstKey = key;
-									}
-									if (lastKey == null || key.compareTo(lastKey) > 0) {
-										lastKey = key;
-									}
-								}
-							}
-							listOp.objectsListed(listedObjects.size() + response.deleteMarkers().size());
-							listOp.listedObjects(listedObjects);
-							listOp.deleteMarkersListed(response.deleteMarkers().size());
-							listOp.bytesListed(options.fetchMetadata() ? bytesTotal : 0);
-							listOp.truncated(truncated);
-							if (firstKey != null) {
-								listOp.pageFirstKey(firstKey);
-							}
-							listOp.continuationToken(response.nextKeyMarker());
-							listOp.options(
-											options.toBuilder()
-															.continuationToken(null)
-															.keyMarker(response.nextKeyMarker())
-															.versionIdMarker(response.nextVersionIdMarker())
-															.build());
-							if (lastKey != null) {
-								listOp.startAfter(lastKey);
-							}
-							listOp.countBytesDone(listOp.bytesListed());
-							if (listOp.respDataTimeStart() == 0) {
-								LOG.debug(
-												"{}: LIST versions completed before first body byte was observed; TTFB unavailable",
-												listOp);
-							}
-						}), sent);
+		final ListObjectVersionsResponse response = S3AwsRequests.await(s3AsyncClient.listObjectVersions(request.build()));
+		final boolean truncated = Boolean.TRUE.equals(response.isTruncated());
+		if (truncated
+						&& (response.nextKeyMarker() == null
+										|| response.nextKeyMarker().isEmpty()
+										|| response.nextVersionIdMarker() == null
+										|| response.nextVersionIdMarker().isEmpty())) {
+			throw new IllegalStateException(
+							"Truncated S3 version LIST result is missing its next markers");
+		}
+		final List<ListedObject> listedObjects = new ArrayList<>(response.versions().size());
+		long bytesTotal = 0;
+		String firstKey = null;
+		String lastKey = null;
+		for (final ObjectVersion version : response.versions()) {
+			final String key = version.key();
+			final String versionId = version.versionId();
+			if (key == null || key.isEmpty() || versionId == null || versionId.isEmpty()) {
+				throw new IllegalStateException(
+								"ListObjectVersions returned a data version without an exact identity");
+			}
+			final Long responseSize = version.size();
+			if (responseSize == null) {
+				throw new IllegalStateException(
+								"S3 LIST entry is missing Size for key \"" + key + "\"");
+			}
+			final long size = Math.max(0L, responseSize);
+			listedObjects.add(new ListedObject(key, size, versionId));
+			if (options.fetchMetadata()) {
+				bytesTotal = Math.addExact(bytesTotal, size);
+			}
+			if (firstKey == null || key.compareTo(firstKey) < 0) {
+				firstKey = key;
+			}
+			if (lastKey == null || key.compareTo(lastKey) > 0) {
+				lastKey = key;
+			}
+		}
+		for (final DeleteMarkerEntry deleteMarker : response.deleteMarkers()) {
+			final String key = deleteMarker.key();
+			if (key != null && !key.isEmpty()) {
+				if (firstKey == null || key.compareTo(firstKey) < 0) {
+					firstKey = key;
+				}
+				if (lastKey == null || key.compareTo(lastKey) > 0) {
+					lastKey = key;
+				}
+			}
+		}
+		listOp.objectsListed(listedObjects.size() + response.deleteMarkers().size());
+		listOp.listedObjects(listedObjects);
+		listOp.deleteMarkersListed(response.deleteMarkers().size());
+		listOp.bytesListed(options.fetchMetadata() ? bytesTotal : 0);
+		listOp.truncated(truncated);
+		if (firstKey != null) {
+			listOp.pageFirstKey(firstKey);
+		}
+		listOp.continuationToken(response.nextKeyMarker());
+		listOp.options(
+						options.toBuilder()
+										.continuationToken(null)
+										.keyMarker(response.nextKeyMarker())
+										.versionIdMarker(response.nextVersionIdMarker())
+										.build());
+		if (lastKey != null) {
+			listOp.startAfter(lastKey);
+		}
+		listOp.countBytesDone(listOp.bytesListed());
+		if (listOp.respDataTimeStart() == 0) {
+			LOG.debug(
+							"{}: LIST versions completed before first body byte was observed; TTFB unavailable",
+							listOp);
+		}
+		return CompletableFuture.completedFuture(null);
 	}
 
 	private static void markListDataResponseStart(final ListOperation<? extends PathItem> op) {
@@ -1750,14 +1739,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 
 		markIntegrityRequestDispatched();
-		final var sent = s3AsyncClient.createMultipartUpload(reqBuilder.build());
-		return S3AwsRequests.forwardCancellation(
-						sent.thenAccept(response -> {
-							op.put(KEY_UPLOAD_ID, response.uploadId());
-							captureResponseIdentity(
-											op, null, requestId(response));
-						}),
-						sent);
+		final var response = S3AwsRequests.await(s3AsyncClient.createMultipartUpload(reqBuilder.build()));
+		op.put(KEY_UPLOAD_ID, response.uploadId());
+		captureResponseIdentity(
+						op, null, requestId(response));
+		return CompletableFuture.completedFuture(null);
 	}
 
 	/**
@@ -1792,17 +1778,13 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				final long size = dataItem.size();
 				final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
 				// Use dedicated upload executor to maximize throughput
-				final var sent = s3AsyncClient.uploadPart(
+				final var response = S3AwsRequests.await(s3AsyncClient.uploadPart(
 								reqBuilder.build(),
-								AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor));
-				return S3AwsRequests.forwardCancellation(
-								sent.thenApply(response -> {
-									// Store the ETag in the parent operation context
-									// Key format: part number as string
-									parent.put(String.valueOf(partNumber), response.eTag());
-									return null;
-								}),
-								sent);
+								AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor)));
+				// Store the ETag in the parent operation context
+				// Key format: part number as string
+				parent.put(String.valueOf(partNumber), response.eTag());
+				return CompletableFuture.completedFuture(null);
 			} catch (IOException e) {
 				return CompletableFuture.failedFuture(e);
 			}
@@ -1848,11 +1830,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 						.uploadId(uploadId)
 						.multipartUpload(CompletedMultipartUpload.builder().parts(completedParts).build());
 
-		final var sent = s3AsyncClient.completeMultipartUpload(reqBuilder.build());
-		return S3AwsRequests.forwardCancellation(
-						sent.thenAccept(response -> captureResponseIdentity(
-										op, response.versionId(), requestId(response))),
-						sent);
+		final var response = S3AwsRequests.await(s3AsyncClient.completeMultipartUpload(reqBuilder.build()));
+		captureResponseIdentity(op, response.versionId(), requestId(response));
+		return CompletableFuture.completedFuture(null);
 	}
 
 	/**
@@ -1866,13 +1846,13 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 
 		final var bk = resolveBucketAndKey((O) op);
-		final var sent = s3AsyncClient.abortMultipartUpload(
+		S3AwsRequests.await(s3AsyncClient.abortMultipartUpload(
 						AbortMultipartUploadRequest.builder()
 										.bucket(bk[0])
 										.key(bk[1])
 										.uploadId(uploadId)
-										.build());
-		return S3AwsRequests.forwardCancellation(sent.thenApply(response -> null), sent);
+										.build()));
+		return CompletableFuture.completedFuture(null);
 	}
 
 	// -----------------------------------------------------------------------
@@ -1952,8 +1932,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 						.destinationBucket(dstBk[0])
 						.destinationKey(dstBk[1]);
 
-		final var sent = s3AsyncClient.copyObject(reqBuilder.build());
-		return S3AwsRequests.forwardCancellation(sent.thenApply(response -> null), sent);
+		S3AwsRequests.await(s3AsyncClient.copyObject(reqBuilder.build()));
+		return CompletableFuture.completedFuture(null);
 	}
 
 	@Override

@@ -60,30 +60,4 @@ final class S3AwsRequestsTest {
 		assertTrue(request.isCancelled());
 		assertTrue(stillInterrupted.get(), "the interrupt must stay set, so that the worker stops");
 	}
-
-	@Test
-	void cancellingAStageCancelsTheRequestItIsChainedOnto() {
-		final var request = new CompletableFuture<String>();
-		final var stage = S3AwsRequests.forwardCancellation(request.thenApply(String::length), request);
-
-		stage.cancel(true);
-
-		assertTrue(request.isCancelled());
-	}
-
-	@Test
-	void aStageThatEndsOtherwiseLeavesTheRequestAlone() {
-		final var completed = new CompletableFuture<String>();
-		final var completedStage = S3AwsRequests.forwardCancellation(completed.thenApply(String::length), completed);
-		completed.complete("done");
-
-		final var failed = new CompletableFuture<String>();
-		final var failedStage = S3AwsRequests.forwardCancellation(failed.thenApply(String::length), failed);
-		failed.completeExceptionally(new IOException("connection reset"));
-
-		assertEquals(4, completedStage.join());
-		assertFalse(completed.isCancelled());
-		assertTrue(failedStage.isCompletedExceptionally());
-		assertFalse(failed.isCancelled());
-	}
 }

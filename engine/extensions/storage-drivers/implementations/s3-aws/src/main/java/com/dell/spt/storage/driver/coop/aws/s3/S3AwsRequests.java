@@ -11,6 +11,10 @@ import java.util.concurrent.ExecutionException;
  * waiting for is then cancelled. Cancelling the future an S3 client returned aborts the request in
  * the CRT. Closing the client does not end it: its future is left incomplete, and a worker waiting
  * for it would wait forever.
+ *
+ * <p>A worker changes its operation only after the wait returns the response, never from a
+ * callback on the client's threads, so a request cancelled at stop cannot change the operation
+ * after the worker has given it up.
  */
 final class S3AwsRequests {
 
@@ -34,20 +38,5 @@ final class S3AwsRequests {
 		} catch (final ExecutionException failed) {
 			throw new CompletionException(failed.getCause());
 		}
-	}
-
-	/**
-	 * Makes a stage chained onto a request cancel the request when the stage is cancelled, which a
-	 * dependent stage does not do by itself.
-	 *
-	 * @return the stage
-	 */
-	static <T> CompletableFuture<T> forwardCancellation(final CompletableFuture<T> stage, final CompletableFuture<?> request) {
-		stage.whenComplete((ignored, failure) -> {
-			if (failure instanceof CancellationException) {
-				request.cancel(true);
-			}
-		});
-		return stage;
 	}
 }
