@@ -1787,10 +1787,9 @@ public class S3AwsStorageDriverTest {
 		when(mockS3Client.listObjectVersions(any(ListObjectVersionsRequest.class)))
 						.thenReturn(CompletableFuture.completedFuture(response));
 
-		CompletionException failure = assertThrows(
-						CompletionException.class,
+		assertThrows(
+						IllegalStateException.class,
 						() -> drv.execute((Operation<Item>) (Operation<?>) op).join());
-		assertInstanceOf(IllegalStateException.class, failure.getCause());
 		verify(op, never()).listedObjects(anyList());
 	}
 
@@ -1815,14 +1814,13 @@ public class S3AwsStorageDriverTest {
 		when(mockS3Client.listObjectVersions(any(ListObjectVersionsRequest.class)))
 						.thenReturn(CompletableFuture.completedFuture(response));
 
-		CompletionException failure = assertThrows(
-						CompletionException.class,
+		IllegalStateException failure = assertThrows(
+						IllegalStateException.class,
 						() -> drv.execute((Operation<Item>) (Operation<?>) op).join());
 
-		assertInstanceOf(IllegalStateException.class, failure.getCause());
 		assertEquals(
 						"Truncated S3 version LIST result is missing its next markers",
-						failure.getCause().getMessage());
+						failure.getMessage());
 		verify(op, never()).listedObjects(anyList());
 	}
 
@@ -1846,14 +1844,13 @@ public class S3AwsStorageDriverTest {
 		when(mockS3Client.listObjectVersions(any(ListObjectVersionsRequest.class)))
 						.thenReturn(CompletableFuture.completedFuture(response));
 
-		CompletionException failure = assertThrows(
-						CompletionException.class,
+		IllegalStateException failure = assertThrows(
+						IllegalStateException.class,
 						() -> drv.execute((Operation<Item>) (Operation<?>) op).join());
 
-		assertInstanceOf(IllegalStateException.class, failure.getCause());
 		assertEquals(
 						"S3 LIST entry is missing Size for key \"prefix/key\"",
-						failure.getCause().getMessage());
+						failure.getMessage());
 		verify(op, never()).listedObjects(anyList());
 	}
 

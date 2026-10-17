@@ -141,6 +141,8 @@ The `s3-aws` driver applies two timeouts to every S3 client it builds (the trans
 
 `socketTimeoutMs` is an idle timeout, not a request deadline: a transfer that keeps moving data is never cut off, and no timer runs per request. The AWS clients retry a failed request on a new connection before they give up (the transfer client up to five times, the others up to three), so a request that stalls on every attempt fails only after all of them: with the defaults, after more than three minutes. Lower `socketTimeoutMs` for a tighter bound; raise it for operations that stay silent for longer than 30 seconds. A missing or invalid value stops the driver from starting and names the option. The first stalled connection of a run and the first timeout of any other kind are each logged once as a warning, and only the stall warning names `socketTimeoutMs`; further timeouts are logged at DEBUG.
 
+When a step stops, it first waits up to `load.op.wait.limit` seconds for the requests in flight. The driver then cancels any request still in flight, which ends as `INTERRUPTED`; a cancelled DELETE gets no result, because the server may or may not have carried it out. The first cancelled request of a run is logged as a warning, and the others at DEBUG.
+
 Note: Extensions are loaded from the `ext/` directory next to `spt.jar`.
 
 ### Common Command-Line Options
