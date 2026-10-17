@@ -1,28 +1,31 @@
 package com.dell.spt.storage.driver.coop.aws.s3;
 
-import static com.dell.spt.storage.driver.coop.aws.s3.S3AwsDriverHarness.driver;
-import static com.dell.spt.storage.driver.coop.aws.s3.S3AwsDriverHarness.op;
-import static com.dell.spt.storage.driver.coop.aws.s3.S3AwsDriverHarness.putOp;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.item.DataItem;
+import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
+import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.Operation.Status;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOutcome;
-import com.dell.spt.storage.driver.coop.aws.s3.S3AwsDriverHarness.Started;
+import com.dell.spt.base.storage.Credential;
+import com.github.akurilov.commons.io.Input;
+import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -41,6 +44,8 @@ import org.junit.jupiter.api.io.TempDir;
 @Timeout(60)
 final class S3AwsTimeoutsCanaryTest {
 
+	private static final Credential CREDENTIAL = Credential.getInstance("access-key", "secret-key");
+
 	/** The stall is noticed after about four seconds, and the retry is answered at once. */
 	private static final Duration STALL_BUDGET = Duration.ofSeconds(20);
 
@@ -57,7 +62,7 @@ final class S3AwsTimeoutsCanaryTest {
 							driver(home.resolve("put"), server, stallBound), putOp(ScriptedS3Server.STALL_ONCE_KEY + "-put"));
 							final var head = Started.<IntegrityManifestDataItem, DataOperationImpl<IntegrityManifestDataItem>> start(
 											driver(home.resolve("exact-version"), server, stallBound),
-											op(OpType.STAT, ScriptedS3Server.STALL_ONCE_KEY + "-head", "version-1"));
+											versionedStatOp(ScriptedS3Server.STALL_ONCE_KEY + "-head"));
 							final var delete = Started.<IntegrityManifestDataItem, DeleteRequestOperation> start(
 											driver(home.resolve("delete"), server, stallBound),
 											S3AwsDeleteRequestTestFixture.operation(S3AwsDeleteRequestTestFixture.target(
@@ -86,13 +91,14 @@ final class S3AwsTimeoutsCanaryTest {
 	void theConnectionTimeoutEndsRequestsOfTheExactVersionAndDeleteClients(@TempDir final Path home) throws Exception {
 		try (final var server = new ScriptedS3Server(1)) {
 			final S3AwsStorageDriver<IntegrityManifestDataItem, Operation<IntegrityManifestDataItem>> driver = driver(home, server, Map.of("storage-crt-connectionTimeoutMs", 100));
-			try (final var started = Started.start(driver, cast(op(OpType.NOOP, "key", null)))) {
+			try (final var started = Started.start(driver, noop())) {
 				// The first request makes the connection of the transfer client, which the server keeps serving.
 				started.await(STALL_BUDGET);
 				server.refuseNewConnections();
 
+				final var exactVersion = versionedStatOp("key");
 				final long headStart = System.nanoTime();
-				assertEquals(Status.FAIL_TIMEOUT, started.next(cast(op(OpType.STAT, "key", "version-1")), CONNECT_BUDGET).status());
+				assertEquals(Status.FAIL_TIMEOUT, started.next(cast(exactVersion), CONNECT_BUDGET).status());
 				assertWithin(CONNECT_BUDGET, headStart, "the HEAD");
 
 				final DeleteRequestOperation delete = S3AwsDeleteRequestTestFixture.operation(
@@ -128,9 +134,39 @@ final class S3AwsTimeoutsCanaryTest {
 		assertEquals(new S3AwsClientTimeouts(Duration.ofSeconds(7), Duration.ofSeconds(9)), handed.get().timeouts());
 	}
 
+	private static DataOperationImpl<DataItem> putOp(final String key) throws Exception {
+		final DataItem item = new DataItemImpl(key, 0, 10 * 1024);
+		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4MB"), 1, false));
+		return new DataOperationImpl<DataItem>(0, OpType.CREATE, item, null, "/bucket", CREDENTIAL, null, 0);
+	}
+
+	/** A request for one version of an object, which the exact-version client serves. */
+	private static DataOperationImpl<IntegrityManifestDataItem> versionedStatOp(final String key) {
+		return new DataOperationImpl<IntegrityManifestDataItem>(
+						0, OpType.STAT, new IntegrityManifestDataItem("bucket", key, 0, "version-1"), null, "/bucket",
+						CREDENTIAL, null, 0);
+	}
+
+	private static Operation<IntegrityManifestDataItem> noop() {
+		return new DataOperationImpl<IntegrityManifestDataItem>(
+						0, OpType.NOOP, new IntegrityManifestDataItem("bucket", "key", 0, null), null, "/bucket", CREDENTIAL, null, 0);
+	}
+
 	@SuppressWarnings("unchecked")
 	private static Operation<IntegrityManifestDataItem> cast(final Operation<?> operation) {
 		return (Operation<IntegrityManifestDataItem>) operation;
+	}
+
+	@SuppressWarnings("unchecked")
+	private static <I extends Item, O extends Operation<I>> S3AwsStorageDriver<I, O> driver(
+					final Path home, final ScriptedS3Server server, final Map<String, Object> overrides) throws Exception {
+		final Config storage = S3AwsMergedConfig.create(home, server.port(), overrides).configVal("storage");
+		return (S3AwsStorageDriver<I, O>) new S3AwsStorageDriverFactory<I, O>().create(
+						"timeouts-canary",
+						DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false),
+						storage,
+						false,
+						16);
 	}
 
 	private static void assertGivenUp(final List<String> givenUp, final String request) {
@@ -142,4 +178,76 @@ final class S3AwsTimeoutsCanaryTest {
 		final Duration elapsed = Duration.ofNanos(System.nanoTime() - startNanos);
 		assertTrue(elapsed.compareTo(budget) < 0, request + " took " + elapsed + ", budget " + budget);
 	}
-}
+
+	/** A started driver, the results it outputs, and its close. */
+	private static final class Started<I extends Item, O extends Operation<I>> implements AutoCloseable {
+
+		private final S3AwsStorageDriver<I, O> driver;
+		private final LinkedBlockingQueue<O> results = new LinkedBlockingQueue<>();
+
+		private Started(final S3AwsStorageDriver<I, O> driver) {
+			this.driver = driver;
+		}
+
+		/** Starts the driver and hands it a first operation. */
+		static <I extends Item, O extends Operation<I>> Started<I, O> start(final S3AwsStorageDriver<I, O> driver, final O op)
+						throws Exception {
+			final var started = new Started<I, O>(driver);
+			driver.operationResultOutput(new ResultOutput<>(started.results));
+			driver.start();
+			assertTrue(driver.put(op));
+			return started;
+		}
+
+		O await(final Duration budget) throws InterruptedException {
+			final O result = results.poll(budget.toMillis(), TimeUnit.MILLISECONDS);
+			assertNotNull(result, "the request was still in flight after " + budget);
+			return result;
+		}
+
+		O next(final O op, final Duration budget) throws Exception {
+			assertTrue(driver.put(op));
+			return await(budget);
+		}
+
+		@Override
+		public void close() throws Exception {
+			driver.close();
+		}
+	}
+
+	private record ResultOutput<O>(LinkedBlockingQueue<O> results)implements Output<O>
+	{
+
+	@Override
+	public boolean put(final O value) {
+		return results.offer(value);
+	}
+
+	@Override
+	public int put(final List<O> values, final int from, final int to) {
+		int count = 0;
+		for (int i = from; i < to; i++) {
+			if (!results.offer(values.get(i))) {
+				break;
+			}
+			count++;
+		}
+		return count;
+	}
+
+	@Override
+	public int put(final List<O> values) {
+		return put(values, 0, values.size());
+	}
+
+	@Override
+	public Input<O> getInput() {
+		return null;
+	}
+
+	@Override
+	public void close() {
+		results.clear();
+	}
+}}

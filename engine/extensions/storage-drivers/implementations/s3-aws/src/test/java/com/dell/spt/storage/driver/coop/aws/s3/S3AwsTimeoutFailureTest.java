@@ -1,6 +1,5 @@
 package com.dell.spt.storage.driver.coop.aws.s3;
 
-import static com.dell.spt.storage.driver.coop.aws.s3.DriverLogCapture.count;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -15,9 +14,18 @@ import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.storage.Credential;
 import java.io.IOException;
 import java.net.ConnectException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -44,16 +52,31 @@ final class S3AwsTimeoutFailureTest {
 	/** The same for an ordinary SDK client over the CRT HTTP client. */
 	private static final String HTTP_SOCKET_TIMEOUT = "software.amazon.awssdk.crt.http.HttpException: socket operation timed out.";
 
-	private DriverLogCapture log;
+	private final List<Captured> captured = Collections.synchronizedList(new ArrayList<>());
+	private volatile String flushMarker = "";
+	private volatile CountDownLatch flushed = new CountDownLatch(0);
+	private org.apache.logging.log4j.core.Logger driverLogger;
+	private String testThread;
+	private Level previousLevel;
+	private CapturingAppender appender;
 
 	@BeforeEach
 	void captureTheDriverLog() {
-		log = new DriverLogCapture();
+		// Only what this thread logs belongs to this test.
+		testThread = Thread.currentThread().getName();
+		appender = new CapturingAppender();
+		appender.start();
+		driverLogger = LoggerContext.getContext(false).getLogger(S3AwsStorageDriver.class.getName());
+		previousLevel = driverLogger.getLevel();
+		driverLogger.setLevel(Level.DEBUG);
+		driverLogger.addAppender(appender);
 	}
 
 	@AfterEach
 	void releaseTheDriverLog() {
-		log.close();
+		driverLogger.removeAppender(appender);
+		driverLogger.setLevel(previousLevel);
+		appender.stop();
 	}
 
 	@Test
@@ -109,7 +132,7 @@ final class S3AwsTimeoutFailureTest {
 
 		assertEquals(Status.FAIL_TIMEOUT, first.status());
 		assertEquals(Status.FAIL_TIMEOUT, second.status());
-		final var events = log.events();
+		final var events = events();
 		assertEquals(1, count(events, Level.WARN), events.toString());
 		assertEquals(0, count(events, Level.ERROR), events.toString());
 		assertFalse(events.stream().anyMatch(event -> event.message().contains("socketTimeoutMs")), events.toString());
@@ -126,7 +149,7 @@ final class S3AwsTimeoutFailureTest {
 			assertEquals(Status.FAIL_TIMEOUT, invoke(driver).status());
 		}
 
-		final var events = log.events();
+		final var events = events();
 		assertEquals(1, count(events, Level.WARN), events.toString());
 		assertEquals(0, count(events, Level.ERROR), events.toString());
 		assertTrue(events.stream().anyMatch(event -> event.level() == Level.WARN
@@ -148,7 +171,7 @@ final class S3AwsTimeoutFailureTest {
 		}
 
 		// A gateway timeout and a socket timeout share one warning; a stall has its own.
-		final var events = log.events();
+		final var events = events();
 		assertEquals(2, count(events, Level.WARN), events.toString());
 		assertEquals(1, events.stream().filter(event -> event.level() == Level.WARN
 						&& event.message().contains("storage.crt.socketTimeoutMs")).count(), events.toString());
@@ -163,7 +186,7 @@ final class S3AwsTimeoutFailureTest {
 
 		assertEquals(Status.RESP_FAIL_AUTH, invoke(driver).status());
 
-		final var events = log.events();
+		final var events = events();
 		assertEquals(1, count(events, Level.ERROR), events.toString());
 		assertEquals(0, count(events, Level.WARN), events.toString());
 	}
@@ -177,5 +200,48 @@ final class S3AwsTimeoutFailureTest {
 		op.finishRequest();
 		driver.invokeNio(op);
 		return op;
+	}
+
+	/**
+	 * Returns what the driver has logged. The engine's loggers are asynchronous, so a marker is
+	 * logged and awaited: the events before it have been delivered when it arrives.
+	 */
+	private List<Captured> events() throws InterruptedException {
+		final String marker = "flush-" + System.nanoTime();
+		final var latch = new CountDownLatch(1);
+		flushMarker = marker;
+		flushed = latch;
+		driverLogger.info(marker);
+		assertTrue(latch.await(10, TimeUnit.SECONDS), "the logged events were not delivered");
+		synchronized (captured) {
+			return List.copyOf(captured);
+		}
+	}
+
+	private static long count(final List<Captured> events, final Level level) {
+		return events.stream().filter(event -> event.level() == level).count();
+	}
+
+	private record Captured(Level level, String message) {}
+
+	private final class CapturingAppender extends AbstractAppender {
+
+		private CapturingAppender() {
+			super("s3-aws-timeout-capture", null, null, true, Property.EMPTY_ARRAY);
+		}
+
+		@Override
+		public void append(final LogEvent event) {
+			final String message = event.getMessage().getFormattedMessage();
+			if (!testThread.equals(event.getThreadName())) {
+				return;
+			}
+			if (message.equals(flushMarker)) {
+				flushed.countDown();
+			} else if (event.getLevel() != Level.DEBUG || !message.endsWith("stack trace")) {
+				// The stack trace logged at DEBUG next to every failure is not a message of its own.
+				captured.add(new Captured(event.getLevel(), message));
+			}
+		}
 	}
 }
