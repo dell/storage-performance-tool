@@ -965,9 +965,15 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				final long size = dataItem.size();
 				if (size <= 8 * 1024) {
 					ByteBuffer buffer = ByteBuffer.allocate((int) size);
-					int bytesRead = dataItem.read(buffer);
-					if (bytesRead != size) {
-						return CompletableFuture.failedFuture(new IOException("Unexpected read size"));
+					if (dataItem.read(buffer) != size) {
+						// A dedupable item's read stops at the end of the data input ring, so an object
+						// that wraps it needs another read for the rest.
+						while (buffer.hasRemaining()) {
+							if (dataItem.read(buffer) <= 0) {
+								return CompletableFuture.failedFuture(new IOException(
+												"Unexpected read size: " + buffer.position() + " of " + size + " bytes"));
+							}
+						}
 					}
 					buffer.flip();
 					return dispatchPutObject(
