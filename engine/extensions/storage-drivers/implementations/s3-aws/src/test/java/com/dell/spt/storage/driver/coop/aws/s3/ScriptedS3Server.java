@@ -67,6 +67,7 @@ final class ScriptedS3Server implements AutoCloseable {
 	private final AtomicLong uploadBytesRead = new AtomicLong();
 	private final List<String> requestLines = new CopyOnWriteArrayList<>();
 	private final List<String> requestHeads = new CopyOnWriteArrayList<>();
+	private final List<String> stalledRequests = new CopyOnWriteArrayList<>();
 	private final List<String> stalledRequestsGivenUp = new CopyOnWriteArrayList<>();
 	private final Set<String> stalledOnce = ConcurrentHashMap.newKeySet();
 	private final List<Socket> sockets = new CopyOnWriteArrayList<>();
@@ -96,6 +97,11 @@ final class ScriptedS3Server implements AutoCloseable {
 	/** Returns the connections left with a request unanswered that the client has closed. */
 	int stalledClosedByClient() {
 		return stalledClosedByClient.get();
+	}
+
+	/** Returns the first line of each request answered as far as its script goes and then left unanswered. */
+	List<String> stalledRequests() {
+		return List.copyOf(stalledRequests);
 	}
 
 	/** Returns the first line of each request left unanswered whose connection the client closed. */
@@ -189,6 +195,9 @@ final class ScriptedS3Server implements AutoCloseable {
 					}
 					stalled = respond(requestLine, head, out);
 					stalledRequest = stalled ? requestLine : null;
+					if (stalled) {
+						stalledRequests.add(requestLine);
+					}
 					if (requestLine.startsWith("PUT /bucket/" + UPLOAD_STALL_KEY)) {
 						long bodyBytes = received.length();
 						while (bodyBytes < UPLOAD_READ_LIMIT_BYTES && (read = in.read(buffer)) >= 0) {
