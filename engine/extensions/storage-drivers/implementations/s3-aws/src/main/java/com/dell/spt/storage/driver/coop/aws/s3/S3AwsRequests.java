@@ -39,11 +39,21 @@ final class S3AwsRequests {
 		}
 	}
 
+	/** The failure of a request that was cancelled because the load step or the worker stopped. */
+	static final class RequestStoppedException extends CancellationException {
+
+		private static final long serialVersionUID = 1L;
+
+		RequestStoppedException(final String message) {
+			super(message);
+		}
+	}
+
 	/**
 	 * Waits for a request as {@link CompletableFuture#join()} does, except that an interrupt
 	 * cancels the request and ends the wait.
 	 *
-	 * @throws CancellationException when the thread is interrupted, whose interrupt stays set
+	 * @throws RequestStoppedException when the thread is interrupted, whose interrupt stays set
 	 */
 	static <T> T await(final CompletableFuture<T> request) {
 		return await(request, 0);
@@ -54,7 +64,7 @@ final class S3AwsRequests {
 	 * otherwise, except that an interrupt cancels the request and ends the wait.
 	 *
 	 * @param timeoutNanos how long to wait, or 0 to wait without bound
-	 * @throws CancellationException when the thread is interrupted, whose interrupt stays set
+	 * @throws RequestStoppedException when the thread is interrupted, whose interrupt stays set
 	 * @throws CompletionException with a {@link RequestTimeoutException} cause when the wait runs
 	 *     out, after the request has been cancelled
 	 */
@@ -64,9 +74,9 @@ final class S3AwsRequests {
 		} catch (final InterruptedException interrupted) {
 			request.cancel(true);
 			Thread.currentThread().interrupt();
-			final var cancelled = new CancellationException("the request was cancelled because the driver stopped");
-			cancelled.initCause(interrupted);
-			throw cancelled;
+			final var stopped = new RequestStoppedException("the request was cancelled because the driver stopped");
+			stopped.initCause(interrupted);
+			throw stopped;
 		} catch (final TimeoutException expired) {
 			request.cancel(true);
 			throw new CompletionException(new RequestTimeoutException(timeoutNanos));

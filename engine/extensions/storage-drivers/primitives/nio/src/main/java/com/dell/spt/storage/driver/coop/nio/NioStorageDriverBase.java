@@ -54,9 +54,10 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 	private final static VirtualThreadExecutor IO_EXECUTOR = new VirtualThreadExecutor();
 
 	/**
-	 * The buffer capacity of a worker that serves one concurrency permit. Its buffer only ever
-	 * holds the few operations the round-robin submission lands on it, and a worker blocked in
-	 * one request must not strand thousands of permits behind it.
+	 * The buffer capacity of a worker that serves one concurrency permit. Such a worker is handed
+	 * an operation only while it is idle, so its buffer holds that one operation and whatever it
+	 * keeps active between invocations; the rest is slack. A worker blocked in one request must
+	 * not strand thousands of permits behind it.
 	 */
 	static final int PERMIT_WORKER_BUFF_CAPACITY = 4;
 
@@ -210,14 +211,14 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 						throwUncheckedIfInterrupted(cause);
 						logOperationFailure(cause, "I/O operation invocation failure");
 						op.status(Operation.Status.FAIL_UNKNOWN);
-						concurrencyThrottle.release();
+						releaseCompletedPermit();
 						processedCount++;
 						handleCompletedSafely(op);
 						continue;
 					}
 					// remove the op from the buffer if it is not active more
 					if (!ACTIVE.equals(op.status())) {
-						concurrencyThrottle.release();
+						releaseCompletedPermit();
 						// Advance ownership before external result publication. If output throws,
 						// shutdown recovery must not revisit and release this permit again.
 						processedCount++;
@@ -261,6 +262,27 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 					signalDispatchCapacityAvailable();
 				}
 			}
+		}
+
+		/**
+		 * Releases the permit of an operation this worker has finished with. With a worker per
+		 * permit the worker first gives up its reservation for the operation, so that whoever takes
+		 * the permit finds this worker idle and hands it the next operation: all the worker has
+		 * left to do is publish the result. Before, the worker counted as busy until it had
+		 * published, and the next operation could be placed behind a worker blocked in a request.
+		 */
+		private void releaseCompletedPermit() {
+			if (ioWorkerPerPermit) {
+				opBuffLock.lock();
+				try {
+					if (opBuffReserved[workerIdx] > 0) {
+						opBuffReserved[workerIdx]--;
+					}
+				} finally {
+					opBuffLock.unlock();
+				}
+			}
+			concurrencyThrottle.release();
 		}
 
 		private boolean recoverUnprocessedLocalOperation(final O op) {
@@ -464,27 +486,23 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 
 	/**
 	 * Hands an operation to a worker, starting the round robin at the given worker. With a worker
-	 * per permit an idle worker is preferred: a worker busy with a blocking request would hold the
-	 * operation until that request ends, with the permit it carries.
+	 * per permit only an idle worker takes it: a worker busy with a blocking request would hold the
+	 * operation until that request ends, with the permit it carries. A worker releases a permit
+	 * only after it has given up its reservation for the operation that held it, so a permit in
+	 * hand means a worker that shows idle, and the caller retries when a race hides it.
 	 *
 	 * @return the worker that took the operation, or -1 when none could
 	 */
 	private int placeOnWorker(final O op, final int startIdx) {
-		if (ioWorkerPerPermit) {
-			final int idleWorker = placeOnWorker(op, startIdx, true);
-			if (idleWorker >= 0) {
-				return idleWorker;
-			}
-		}
-		return placeOnWorker(op, startIdx, false);
+		return placeOnWorker(op, startIdx, ioWorkerPerPermit);
 	}
 
 	private int placeOnWorker(final O op, final int startIdx, final boolean idleOnly) {
 		for (var i = 0; i < nioWorkerCount && isStarted(); i++) {
 			final var workerIdx = (startIdx + i) % nioWorkerCount;
 			final var opBuffLock = opBuffLocks[workerIdx];
-			// A worker holds its buffer lock only while it takes its batch. The idle pass waits for
-			// it, so that an idle worker is never passed over for a busy one; the pass over all
+			// A worker holds its buffer lock only while it takes its batch or releases a permit. The
+			// idle pass waits for it, so that an idle worker is never passed over; the pass over all
 			// workers keeps trying the lock, as it always has.
 			if (idleOnly) {
 				opBuffLock.lock();

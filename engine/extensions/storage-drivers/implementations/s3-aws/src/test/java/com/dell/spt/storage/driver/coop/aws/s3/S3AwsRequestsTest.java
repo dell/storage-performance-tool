@@ -91,7 +91,8 @@ final class S3AwsRequestsTest {
 			stillInterrupted.set(Thread.currentThread().isInterrupted());
 		});
 		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-		while (worker.getState() != Thread.State.WAITING && System.nanoTime() < deadline) {
+		// A bounded wait parks with a timeout.
+		while (worker.getState() != Thread.State.TIMED_WAITING && System.nanoTime() < deadline) {
 			Thread.sleep(1);
 		}
 

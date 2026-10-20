@@ -43,9 +43,7 @@ import java.io.IOException;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CancellationException;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -53,6 +51,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 
 import org.reactivestreams.Publisher;
@@ -93,6 +92,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				implements ListDiscoveryProbe, DeleteVerificationProbe, StandaloneDeletePreparable {
 
 	private static final Logger LOG = LoggerFactory.getLogger(S3AwsStorageDriver.class);
+
+	/** How often the request watchdog looks at the requests in flight. */
+	static final long WATCHDOG_TICK_MILLIS = 100;
+	private static final long NOT_STOPPING = Long.MIN_VALUE;
 
 	@Override
 	protected boolean integrityAdditionalPayloadPassRequired(final O op) {
@@ -138,14 +141,21 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private final AtomicBoolean timeoutFailureReported = new AtomicBoolean();
 	private final AtomicBoolean cancellationReported = new AtomicBoolean();
 	private final S3AwsClientTimeouts timeouts;
-	/** How long a worker waits for a request before cancelling it; 0 waits without bound. */
+	/** How long a request may take in all before the driver ends it; 0 for no deadline. */
 	private final long requestTimeoutNanos;
-	/** The requests being waited for, so that the stop grace can cancel them. */
-	private final Set<CompletableFuture<?>> requestsInFlight = ConcurrentHashMap.newKeySet();
-	private final AtomicBoolean stopGraceArmed = new AtomicBoolean();
-	private volatile Thread stopGraceTimer;
-	/** Set once the driver cancels requests on its own, so that their cancellation counts as a stop. */
-	private volatile boolean cancellingAtStop;
+	/** The requests being waited for or read, so that the watchdog can end them. */
+	private final Set<S3AwsInFlightRequest> requestsInFlight = ConcurrentHashMap.newKeySet();
+	/** When the stop grace ends, or {@link #NOT_STOPPING} while admission is open. */
+	private final AtomicLong stopDeadlineNanos = new AtomicLong(NOT_STOPPING);
+	/**
+	 * Set by the watchdog before it ends the requests in flight at stop, so that a request made
+	 * after that is ended at once; cleared when admission opens again.
+	 */
+	private volatile boolean stopGraceOver;
+	/** Guards the start of the watchdog; the driver's own monitor is held while a client is built. */
+	private final Object requestWatchdogLock = new Object();
+	private volatile Thread requestWatchdog;
+	private volatile boolean closed;
 
 	public S3AwsStorageDriver(
 					final String stepId,
@@ -537,64 +547,120 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	}
 
 	/**
-	 * Waits for a request on this worker, for at most storage.crt.requestTimeoutMs, and keeps it
-	 * where the stop grace can cancel it. A mocked driver without a constructor has no bound and
-	 * no tracking.
+	 * Registers a request this worker is about to make, with the deadline of
+	 * storage.crt.requestTimeoutMs, where the watchdog can end it. A mocked driver without a
+	 * constructor has no deadline and no watchdog.
 	 */
+	private S3AwsInFlightRequest trackRequest() {
+		final var request = new S3AwsInFlightRequest(requestsInFlight, requestTimeoutNanos);
+		// Registered first, then checked: the watchdog sets the flag before it sweeps the requests
+		// in flight, so a request made once the grace is over is ended here or by that sweep.
+		if (stopGraceOver) {
+			request.stop();
+		}
+		return request;
+	}
+
+	/** Waits for a request on this worker, within its deadline, where the watchdog can end it. */
 	<T> T awaitRequest(final CompletableFuture<T> request) {
-		final Set<CompletableFuture<?>> tracked = requestsInFlight;
-		if (tracked != null) {
-			tracked.add(request);
+		try (final var inFlight = trackRequest()) {
+			return inFlight.await(request);
 		}
-		try {
-			return S3AwsRequests.await(request, requestTimeoutNanos);
-		} finally {
-			if (tracked != null) {
-				tracked.remove(request);
-			}
+	}
+
+	/** Admission opens as the driver starts or restarts: a stop of an earlier cycle is over. */
+	@Override
+	protected void onAdmissionOpened() {
+		if (timeouts == null) {
+			return;
 		}
+		stopDeadlineNanos.set(NOT_STOPPING);
+		stopGraceOver = false;
+		ensureRequestWatchdog();
 	}
 
 	/**
 	 * The load step closes admission first when it stops, then waits for the requests in flight
 	 * before it stops the workers. A request the client has lost would make it wait for the whole
 	 * of load.op.wait.limit and leave the operation active, so the requests in flight get
-	 * storage.crt.stopTimeoutMs from here to finish, and are then cancelled.
+	 * storage.crt.stopTimeoutMs from here to finish, and the watchdog then ends them.
 	 */
 	@Override
 	protected void onAdmissionClosed() {
-		if (timeouts == null || !timeouts.cancelAtStopEnabled() || !stopGraceArmed.compareAndSet(false, true)) {
+		if (timeouts == null || !timeouts.cancelAtStopEnabled()) {
 			return;
 		}
-		final long graceNanos = timeouts.stopTimeout().toNanos();
-		stopGraceTimer = Thread.ofVirtual().name("s3-aws-stop-grace-" + stepId).start(() -> {
-			try {
-				TimeUnit.NANOSECONDS.sleep(graceNanos);
-			} catch (final InterruptedException closed) {
-				return;
-			}
-			cancelRequestsInFlight(graceNanos);
-		});
+		stopDeadlineNanos.compareAndSet(NOT_STOPPING, System.nanoTime() + timeouts.stopTimeout().toNanos());
+		ensureRequestWatchdog();
 	}
 
-	/** Cancels every request still being waited for; each then ends its operation as interrupted. */
-	private void cancelRequestsInFlight(final long afterNanos) {
-		cancellingAtStop = true;
-		final Set<CompletableFuture<?>> tracked = requestsInFlight;
-		if (tracked == null) {
+	/**
+	 * Runs the watchdog unless it is running or the driver is closed. One virtual thread per driver
+	 * looks at the requests in flight every {@link #WATCHDOG_TICK_MILLIS}: it ends a request whose
+	 * deadline has passed, a GET still reading its body included, and once the stop grace is over
+	 * it ends them all. No timer is armed per request.
+	 */
+	private void ensureRequestWatchdog() {
+		if (!timeouts.requestBoundEnabled() && !timeouts.cancelAtStopEnabled()) {
 			return;
 		}
-		int cancelled = 0;
-		for (final CompletableFuture<?> request : tracked) {
-			if (request.cancel(true)) {
-				cancelled++;
+		synchronized (requestWatchdogLock) {
+			final Thread running = requestWatchdog;
+			if (closed || (running != null && running.isAlive())) {
+				return;
+			}
+			requestWatchdog = Thread.ofVirtual().name("s3-aws-request-watchdog-" + stepId).start(() -> {
+				while (!closed) {
+					try {
+						Thread.sleep(WATCHDOG_TICK_MILLIS);
+					} catch (final InterruptedException closing) {
+						return;
+					}
+					sweepRequests(System.nanoTime());
+				}
+			});
+		}
+	}
+
+	/** Whether the watchdog is running; for tests. */
+	boolean requestWatchdogRunning() {
+		final Thread running = requestWatchdog;
+		return running != null && running.isAlive();
+	}
+
+	/**
+	 * Ends the requests whose deadline passed before the given time and, once the stop grace is
+	 * over, every request in flight. Each then ends its operation on its worker.
+	 */
+	void sweepRequests(final long nowNanos) {
+		final long stopAt = stopDeadlineNanos.get();
+		final boolean stopping = stopAt != NOT_STOPPING && nowNanos - stopAt >= 0;
+		if (stopping) {
+			stopGraceOver = true;
+			final int ended = stopRequestsInFlight();
+			if (ended > 0) {
+				LOG.warn(
+								"{} request(s) still in flight {} ms after the step stopped were cancelled (storage.crt.{})",
+								ended, timeouts.stopTimeout().toMillis(), S3AwsClientTimeouts.STOP_TIMEOUT_KEY);
+			}
+			return;
+		}
+		for (final S3AwsInFlightRequest request : requestsInFlight) {
+			if (request.expired(nowNanos)) {
+				request.timeOut();
 			}
 		}
-		if (cancelled > 0) {
-			LOG.warn(
-							"{} request(s) still in flight {} ms after the step stopped were cancelled (storage.crt.{})",
-							cancelled, TimeUnit.NANOSECONDS.toMillis(afterNanos), S3AwsClientTimeouts.STOP_TIMEOUT_KEY);
+	}
+
+	/** Ends every request in flight because the step stopped, and returns how many it ended. */
+	private int stopRequestsInFlight() {
+		int ended = 0;
+		for (final S3AwsInFlightRequest request : requestsInFlight) {
+			if (request.stop()) {
+				ended++;
+			}
 		}
+		return ended;
 	}
 
 	/**
@@ -694,24 +760,13 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	/**
 	 * A worker is interrupted only to stop it, and whatever a request ends with then, the driver
-	 * cancelled it. A request the driver cancelled itself after the step stopped ended the same
-	 * way.
+	 * cancelled it. A request the watchdog ended after the step stopped ended the same way.
 	 */
-	private Status failureStatus(final Exception e) {
-		if (Thread.currentThread().isInterrupted()) {
-			return Status.INTERRUPTED;
-		}
-		if (cancellingAtStop && isCancellation(e)) {
+	private static Status failureStatus(final Exception e) {
+		if (Thread.currentThread().isInterrupted() || e instanceof S3AwsRequests.RequestStoppedException) {
 			return Status.INTERRUPTED;
 		}
 		return classifyFailure(e);
-	}
-
-	private static boolean isCancellation(final Exception e) {
-		final Throwable cause = e instanceof java.util.concurrent.CompletionException && e.getCause() != null
-						? e.getCause()
-						: e;
-		return cause instanceof CancellationException;
 	}
 
 	/**
@@ -1128,9 +1183,20 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		final S3AsyncClient readClient = identity.versionId() == null
 						? s3AsyncClient
 						: exactVersionS3Client();
-		try (var response = awaitRequest(readClient.getObject(
-						reqBuilder.build(),
-						AsyncResponseTransformer.toBlockingInputStream()))) {
+		// The response arrives with the headers; the body is read from the stream on this worker.
+		// The request stays in flight, with its deadline, until the body has been read.
+		try (final var inFlight = trackRequest()) {
+			readObject(op, inFlight, readClient, reqBuilder.build());
+		}
+		return CompletableFuture.completedFuture(null);
+	}
+
+	private void readObject(
+					final O op, final S3AwsInFlightRequest inFlight, final S3AsyncClient readClient,
+					final GetObjectRequest request) {
+		try (var response = inFlight.await(readClient.getObject(
+						request, AsyncResponseTransformer.toBlockingInputStream()))) {
+			inFlight.body(response);
 			final GetObjectResponse getResponse = response.response();
 			captureResponseIdentity(
 							op, getResponse.versionId(), requestId(getResponse));
@@ -1164,11 +1230,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				}
 			}
 			op.finishResponse();
-		} catch (IOException e) {
-			throw new RuntimeException("Failed to read S3 object data", e);
+		} catch (final IOException | RuntimeException e) {
+			throw inFlight.failure(e, "Failed to read S3 object data");
 		}
-
-		return CompletableFuture.completedFuture(null);
 	}
 
 	private synchronized S3AsyncClient exactVersionS3Client() {
@@ -1983,9 +2047,16 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		// Get the response asynchronously - this completes when headers arrive
 		// Since invokeNio already blocks, we can wait here and read synchronously
 		// This avoids the overhead of thenAcceptAsync and the thread pool bottleneck
-		try (var response = awaitRequest(s3AsyncClient.getObject(
-						reqBuilder.build(),
-						AsyncResponseTransformer.toBlockingInputStream()))) {
+		try (final var inFlight = trackRequest()) {
+			readRange(op, inFlight, reqBuilder.build());
+		}
+		return CompletableFuture.completedFuture(null);
+	}
+
+	private void readRange(final PartialDataOperation op, final S3AwsInFlightRequest inFlight, final GetObjectRequest request) {
+		try (var response = inFlight.await(s3AsyncClient.getObject(
+						request, AsyncResponseTransformer.toBlockingInputStream()))) {
+			inFlight.body(response);
 			op.startResponse();
 			// This blocking read runs on the caller thread (virtual thread)
 			long bytesRead = 0;
@@ -1999,11 +2070,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			}
 			op.countBytesDone(bytesRead);
 			op.finishResponse();
-		} catch (IOException e) {
-			throw new RuntimeException("Failed to read S3 object range", e);
+		} catch (final IOException | RuntimeException e) {
+			throw inFlight.failure(e, "Failed to read S3 object range");
 		}
-
-		return CompletableFuture.completedFuture(null);
 	}
 
 	// -----------------------------------------------------------------------
@@ -2047,14 +2116,22 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	@Override
 	protected void doClose()
 					throws IOException {
-		if (stopGraceArmed != null) {
-			// Closing ends the grace: cancel what is still in flight now rather than later.
-			stopGraceArmed.set(true);
-			final Thread timer = stopGraceTimer;
-			if (timer != null) {
-				timer.interrupt();
+		closed = true;
+		if (requestWatchdogLock != null) {
+			synchronized (requestWatchdogLock) {
+				final Thread watchdog = requestWatchdog;
+				if (watchdog != null) {
+					watchdog.interrupt();
+				}
 			}
-			cancelRequestsInFlight(0);
+		}
+		if (requestsInFlight != null) {
+			// Closing ends the grace: end what is still in flight now rather than later.
+			stopGraceOver = true;
+			final int ended = stopRequestsInFlight();
+			if (ended > 0) {
+				LOG.warn("{} request(s) still in flight when the driver closed were cancelled", ended);
+			}
 		}
 		try {
 			if (lazyStandaloneDeleteResources != null) {

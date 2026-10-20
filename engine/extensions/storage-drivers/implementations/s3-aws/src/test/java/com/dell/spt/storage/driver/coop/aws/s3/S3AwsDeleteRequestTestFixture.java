@@ -142,7 +142,7 @@ final class S3AwsDeleteRequestTestFixture {
 		when(crt.intVal(S3AwsClientTimeouts.REQUEST_TIMEOUT_KEY))
 						.thenReturn(crtMillis.getOrDefault(S3AwsClientTimeouts.REQUEST_TIMEOUT_KEY, 300000));
 		when(crt.intVal(S3AwsClientTimeouts.STOP_TIMEOUT_KEY))
-						.thenReturn(crtMillis.getOrDefault(S3AwsClientTimeouts.STOP_TIMEOUT_KEY, 10000));
+						.thenReturn(crtMillis.getOrDefault(S3AwsClientTimeouts.STOP_TIMEOUT_KEY, 5000));
 
 		when(storage.configVal("driver")).thenReturn(driver);
 		when(driver.configVal("limit")).thenReturn(limits);

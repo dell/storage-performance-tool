@@ -125,7 +125,15 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		} else {
 			opDispatchTask.start();
 		}
+		onAdmissionOpened();
 	}
+
+	/**
+	 * Called when admission opens, as the driver starts or restarts, before any operation of the
+	 * new cycle is dispatched. A driver that keeps state from {@link #onAdmissionClosed()} resets
+	 * it here, so that a stop of an earlier cycle cannot act on the requests of this one.
+	 */
+	protected void onAdmissionOpened() {}
 
 	@Override
 	public final boolean put(final O op) {

@@ -23,15 +23,18 @@ import software.amazon.awssdk.services.s3.crt.S3CrtHttpConfiguration;
  * keeps moving data is never cut off, and no timer is armed per request.
  *
  * <p>The request timeout is the deadline the driver itself puts on each request, from the moment
- * it is made: it covers a request the clients have lost with no connection the monitor could
- * watch. The stop timeout bounds the requests in flight when the load step stops: once admission
- * has closed, they get that long to finish before the driver cancels them.
+ * it is made until its response has been read in full, a GET's body included: it covers a request
+ * the clients have lost with no connection the monitor could watch, and a response that keeps
+ * coming but never ends. The stop timeout bounds the requests in flight when the load step stops:
+ * once admission has closed, they get that long to finish before the driver cancels them. It is
+ * half of the engine's ten-second budget for stopping a run, so that the stop itself fits in the
+ * rest.
  *
  * @param connectionTimeout the time allowed to establish a connection
  * @param stallTimeout the time a connection with a request in flight may move no data, or
  *     {@link Duration#ZERO} when stalled requests are not detected
- * @param requestTimeout the time the driver waits for a request before it cancels it, or
- *     {@link Duration#ZERO} to wait without bound
+ * @param requestTimeout the time a request may take in all before the driver ends it, or
+ *     {@link Duration#ZERO} for no deadline
  * @param stopTimeout the time requests in flight get once the step stops, or {@link Duration#ZERO}
  *     when the driver does not cancel them on its own
  */
@@ -75,7 +78,7 @@ record S3AwsClientTimeouts(
 
 	/** The values the driver ships with, as in its defaults file. */
 	static final S3AwsClientTimeouts SHIPPED = new S3AwsClientTimeouts(
-					Duration.ofMillis(5000), Duration.ofMillis(30000), Duration.ofMillis(300000), Duration.ofMillis(10000));
+					Duration.ofMillis(5000), Duration.ofMillis(30000), Duration.ofMillis(300000), Duration.ofMillis(5000));
 
 	/**
 	 * Reads the bounds for a driver. The factory reads them strictly, with {@link #from}, before it

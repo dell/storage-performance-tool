@@ -44,7 +44,7 @@ final class S3AwsClientTimeoutsTest {
 		assertTrue(timeouts.stallDetectionEnabled());
 		assertEquals(Duration.ofMinutes(5), timeouts.requestTimeout());
 		assertTrue(timeouts.requestBoundEnabled());
-		assertEquals(Duration.ofSeconds(10), timeouts.stopTimeout());
+		assertEquals(Duration.ofSeconds(5), timeouts.stopTimeout());
 		assertTrue(timeouts.cancelAtStopEnabled());
 	}
 

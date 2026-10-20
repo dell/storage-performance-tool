@@ -769,6 +769,105 @@ public class NioStorageDriverBaseTest {
 	// --- Test infrastructure ---
 
 	/** Minimal storage config matching the driver constructor hierarchy. */
+	/**
+	 * A worker that has finished an operation gives up its reservation before it releases the
+	 * permit, so the operation that takes the permit is handed to an idle worker. Before, the worker
+	 * counted as busy until it had published the result, and the operation could be queued behind a
+	 * worker blocked in a request, where it waited for that request although its permit was free.
+	 */
+	@Test
+	void anOperationThatTakesAReleasedPermitNeverWaitsBehindAWorkerBlockedInARequest() throws Exception {
+		replacementsRunWhileAWorkerIsBlocked(1);
+	}
+
+	@Test
+	void aBatchThatTakesReleasedPermitsNeverWaitsBehindAWorkerBlockedInARequest() throws Exception {
+		replacementsRunWhileAWorkerIsBlocked(3);
+	}
+
+	private void replacementsRunWhileAWorkerIsBlocked(final int replacements) throws Exception {
+		final var stuckEntered = new CountDownLatch(1);
+		final var unstick = new CountDownLatch(1);
+		final var publishing = new CountDownLatch(replacements);
+		final var publish = new CountDownLatch(1);
+		final var replaced = new CountDownLatch(replacements);
+		final var drv = new PermitWorkerDriver(
+						"test-nio-replacement", dataInput, buildStorageConfig(replacements + 1, 0), false, 16) {
+			@Override
+			protected void invokeNio(final Operation<DataItemImpl> op) {
+				if (op.item().name().equals("stuck") && !awaitUnlessInterrupted(stuckEntered, unstick)) {
+					op.status(Operation.Status.INTERRUPTED);
+					return;
+				}
+				if (op.item().name().startsWith("replacement-")) {
+					replaced.countDown();
+				}
+				super.invokeNio(op);
+			}
+		};
+		drv.operationResultOutput(new OpResultCollector() {
+			@Override
+			public boolean put(final Operation<DataItemImpl> op) {
+				// A published result names its item with the path.
+				if (op.item().name().contains("/fast-")) {
+					publishing.countDown();
+					awaitUnlessInterrupted(null, publish);
+				}
+				return super.put(op);
+			}
+
+			@Override
+			public int put(final List<Operation<DataItemImpl>> ops, final int from, final int to) {
+				var n = 0;
+				for (var i = from; i < to && put(ops.get(i)); i++) {
+					n++;
+				}
+				return n;
+			}
+		});
+		try {
+			drv.start();
+			assertTrue(drv.put(newCreateOp("stuck", 256)));
+			assertTrue(stuckEntered.await(5, TimeUnit.SECONDS), "the first operation never reached its worker");
+			for (var i = 0; i < replacements; i++) {
+				assertTrue(drv.put(newCreateOp("fast-" + i, 256)));
+			}
+			assertTrue(publishing.await(5, TimeUnit.SECONDS), "the fast operations never reached the output");
+			// Their permits are free while their workers are still publishing, and one worker is
+			// blocked in its request.
+			final var batch = new ArrayList<Operation<DataItemImpl>>();
+			for (var i = 0; i < replacements; i++) {
+				batch.add(newCreateOp("replacement-" + i, 256));
+			}
+			if (replacements == 1) {
+				assertTrue(drv.put(batch.get(0)));
+			} else {
+				assertEquals(replacements, drv.put(batch, 0, replacements));
+			}
+			publish.countDown();
+			assertTrue(replaced.await(2, TimeUnit.SECONDS),
+							"a replacement waited behind the worker blocked in its request");
+		} finally {
+			publish.countDown();
+			unstick.countDown();
+			drv.close();
+		}
+	}
+
+	/** Counts the first latch down, if given, then waits for the second; false when interrupted. */
+	private static boolean awaitUnlessInterrupted(final CountDownLatch entered, final CountDownLatch release) {
+		if (entered != null) {
+			entered.countDown();
+		}
+		try {
+			release.await();
+			return true;
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
+			return false;
+		}
+	}
+
 	private static Config buildStorageConfig() {
 		return buildStorageConfig(4);
 	}

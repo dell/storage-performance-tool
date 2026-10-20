@@ -5,6 +5,7 @@ import static com.dell.spt.storage.driver.coop.aws.s3.S3AwsDriverHarness.driver;
 import static com.dell.spt.storage.driver.coop.aws.s3.S3AwsDriverHarness.op;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -20,6 +21,8 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.Level;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -32,7 +35,9 @@ import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
  * A request the CRT has lost, with no connection, no timer and no pending read, never completes or
  * fails on its own. The driver bounds its wait for every request, and once the load step has
  * stopped it cancels the requests still in flight after a grace, so that a lost request costs one
- * operation and never a worker, the permits queued behind it, or the stop of the step.
+ * operation and never a worker, the permits queued behind it, or the stop of the step. Both cover
+ * a GET until its body has been read, and both are the watchdog's: a request made after the grace
+ * is ended at once, and a restart of the driver gets a grace of its own.
  */
 @Timeout(value = 60, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 final class S3AwsRequestBoundTest {
@@ -167,6 +172,198 @@ final class S3AwsRequestBoundTest {
 				assertEquals(Status.INTERRUPTED, started.await(RESULT_BUDGET).status());
 			} finally {
 				started.close();
+			}
+		}
+	}
+
+	private static Map<String, Object> onlyTheDriverBounds(final int requestMs, final int stopMs) {
+		// Without stall detection only the driver can end these requests.
+		return Map.of(
+						"storage-crt-socketTimeoutMs", 0,
+						"storage-crt-" + S3AwsClientTimeouts.REQUEST_TIMEOUT_KEY, requestMs,
+						"storage-crt-" + S3AwsClientTimeouts.STOP_TIMEOUT_KEY, stopMs);
+	}
+
+	/**
+	 * A GET's response arrives with its headers; the body is read afterwards, on the worker. The
+	 * exact-version client hands the body over as it arrives, so the worker is reading it when it
+	 * stops coming; the transfer client buffers it, so the worker is still waiting for the response.
+	 */
+	@Test
+	void theDeadlineCoversTheBodyOfAGet(@TempDir final Path home) throws Exception {
+		try (final var server = new ScriptedS3Server()) {
+			for (final String versionId : new String[]{"version-1", null
+			}) {
+				final var op = op(OpType.READ, ScriptedS3Server.BODY_STALL_KEY + "-deadline", versionId);
+				try (final var started = Started.start(
+								driver(home.resolve("body-" + versionId), server, onlyTheDriverBounds(300, 0)), op)) {
+					final long start = System.nanoTime();
+					final var result = started.await(RESULT_BUDGET);
+					final Duration waited = Duration.ofNanos(System.nanoTime() - start);
+					assertEquals(Status.FAIL_TIMEOUT, result.status(), "a GET whose body never ends must fail as a timeout");
+					assertTrue(waited.compareTo(Duration.ofSeconds(5)) < 0, "the GET was ended only after " + waited);
+					assertEquals(0, started.driver().activeOpCount());
+				}
+			}
+		}
+	}
+
+	@Test
+	void theStopGraceEndsAGetStillReadingItsBody(@TempDir final Path home) throws Exception {
+		try (final var server = new ScriptedS3Server()) {
+			final var op = op(OpType.READ, ScriptedS3Server.BODY_STALL_KEY + "-stop", "version-1");
+			try (final var started = Started.start(driver(home.resolve("body-stop"), server, onlyTheDriverBounds(0, 300)), op)) {
+				final long deadline = System.nanoTime() + RESULT_BUDGET.toNanos();
+				while (op.respTimeStart() == 0) {
+					assertTrue(System.nanoTime() < deadline, "the worker never started reading the body");
+					Thread.sleep(10);
+				}
+				started.driver().closeAdmission();
+				final var result = started.await(RESULT_BUDGET);
+				assertEquals(Status.INTERRUPTED, result.status(), "a GET cancelled at stop ends as interrupted");
+				assertEquals(0, started.driver().activeOpCount());
+			}
+		}
+	}
+
+	/**
+	 * The grace ends the requests in flight at that moment. A request a worker makes afterwards,
+	 * such as the abort of a multipart upload whose completion was just cancelled, must not be
+	 * waited for with a fresh deadline: the step has stopped.
+	 */
+	@Test
+	void aRequestMadeAfterTheStopGraceIsCancelledAtOnce() throws Exception {
+		final var client = mock(S3AsyncClient.class);
+		final var making = new CountDownLatch(1);
+		final var made = new CountDownLatch(1);
+		final var response = new CompletableFuture<HeadObjectResponse>();
+		when(client.headObject(any(HeadObjectRequest.class))).thenAnswer(invocation -> {
+			making.countDown();
+			assertTrue(made.await(RESULT_BUDGET.toMillis(), TimeUnit.MILLISECONDS));
+			return response;
+		});
+		final var driver = S3AwsDeleteRequestTestFixture
+						.<IntegrityManifestDataItem, DataOperationImpl<IntegrityManifestDataItem>> anyDriver(
+										client, client,
+										Map.of(S3AwsClientTimeouts.REQUEST_TIMEOUT_KEY, 0, S3AwsClientTimeouts.STOP_TIMEOUT_KEY, 150));
+		final var op = op(OpType.STAT, "late", null);
+		op.startRequest();
+		op.finishRequest();
+		final Thread worker = Thread.ofVirtual().start(() -> driver.invokeNio(op));
+		try {
+			assertTrue(making.await(RESULT_BUDGET.toMillis(), TimeUnit.MILLISECONDS));
+			driver.closeAdmission();
+			Thread.sleep(500); // the grace is over before the client hands the request back
+			made.countDown();
+			worker.join(RESULT_BUDGET.toMillis());
+			assertFalse(worker.isAlive(), "a request made after the grace was waited for");
+			assertEquals(Status.INTERRUPTED, op.status());
+			assertTrue(response.isCancelled());
+		} finally {
+			made.countDown();
+			worker.interrupt();
+			worker.join(Duration.ofSeconds(2).toMillis());
+			driver.close();
+		}
+	}
+
+	/** The driver may be stopped and started again; each stop gets a grace of its own. */
+	@Test
+	void everyStopGetsItsOwnGrace(@TempDir final Path home) throws Exception {
+		try (final var server = new ScriptedS3Server()) {
+			final var first = op(OpType.STAT, "restart-first", "version-1");
+			try (final var started = Started.start(driver(home.resolve("restart"), server, onlyTheDriverBounds(0, 300)), first)) {
+				awaitStalled(server, "HEAD /bucket/restart-first?versionId=version-1");
+				started.driver().closeAdmission();
+				assertEquals(Status.INTERRUPTED, started.await(RESULT_BUDGET).status());
+				started.driver().stop();
+				started.driver().start();
+				assertTrue(started.driver().requestWatchdogRunning());
+
+				final var second = op(OpType.STAT, "restart-second", "version-1");
+				assertTrue(started.driver().put(second));
+				awaitStalled(server, "HEAD /bucket/restart-second?versionId=version-1");
+				started.driver().closeAdmission();
+				assertEquals(Status.INTERRUPTED, started.await(RESULT_BUDGET).status(), "the second stop must end its request too");
+				assertEquals(0, started.driver().activeOpCount());
+			}
+		}
+	}
+
+	/** A stop undone by a restart before its grace ran out must not act on the next cycle. */
+	@Test
+	void aGraceOfAnEarlierCycleDoesNotEndTheRequestsOfTheNext(@TempDir final Path home) throws Exception {
+		try (final var server = new ScriptedS3Server()) {
+			final var first = op(OpType.STAT, "cycle-first", "version-1");
+			try (final var started = Started.start(driver(home.resolve("cycle"), server, onlyTheDriverBounds(0, 300)), first)) {
+				awaitStalled(server, "HEAD /bucket/cycle-first?versionId=version-1");
+				started.driver().closeAdmission();
+				// Stopping the workers ends the first request well before the grace does.
+				started.driver().stop();
+				assertEquals(Status.INTERRUPTED, started.await(RESULT_BUDGET).status());
+				started.driver().start();
+
+				final var second = op(OpType.STAT, "cycle-second", "version-1");
+				assertTrue(started.driver().put(second));
+				awaitStalled(server, "HEAD /bucket/cycle-second?versionId=version-1");
+				Thread.sleep(700);
+				assertEquals(1, started.driver().activeOpCount(), "the grace of the first stop ended a request of the second cycle");
+				assertNotEquals(Status.INTERRUPTED, second.status());
+
+				started.driver().shutdown();
+				assertEquals(Status.INTERRUPTED, started.await(RESULT_BUDGET).status());
+			}
+		}
+	}
+
+	/**
+	 * The engine gives a run ten seconds to stop. With the shipped grace a lost request is cancelled
+	 * at five, which leaves the other five for the stop itself: the worker publishes the result,
+	 * the step's drain sees nothing in flight, and the workers and the clients are stopped.
+	 */
+	@Test
+	void withTheShippedGraceAStopWithALostRequestFitsTheEngineBudget(@TempDir final Path home) throws Exception {
+		try (final var server = new ScriptedS3Server()) {
+			final Map<String, Object> onlyTheGrace = Map.of(
+							"storage-crt-socketTimeoutMs", 0,
+							"storage-crt-" + S3AwsClientTimeouts.REQUEST_TIMEOUT_KEY, 0);
+			final var op = op(OpType.STAT, "shipped-grace", "version-1");
+			final var started = Started.start(driver(home.resolve("shipped"), server, onlyTheGrace), op);
+			final Duration cancelledAfter;
+			final Duration stopped;
+			final Status status;
+			try {
+				awaitStalled(server, "HEAD /bucket/shipped-grace?versionId=version-1");
+				final long stopStart = System.nanoTime();
+				started.driver().closeAdmission();
+				status = started.await(Duration.ofSeconds(9)).status();
+				cancelledAfter = Duration.ofNanos(System.nanoTime() - stopStart);
+				assertEquals(0, started.driver().activeOpCount());
+				started.driver().shutdown();
+				started.driver().close();
+				stopped = Duration.ofNanos(System.nanoTime() - stopStart);
+			} finally {
+				started.close();
+			}
+			assertEquals(Status.INTERRUPTED, status);
+			assertTrue(cancelledAfter.compareTo(Duration.ofMillis(4500)) >= 0, "cancelled before the shipped grace: " + cancelledAfter);
+			assertTrue(stopped.compareTo(Duration.ofSeconds(8)) < 0, "the stop took " + stopped + " of the engine's ten seconds");
+		}
+	}
+
+	@Test
+	void theWatchdogEndsWithTheDriver(@TempDir final Path home) throws Exception {
+		try (final var server = new ScriptedS3Server()) {
+			final var driver = S3AwsDriverHarness.<IntegrityManifestDataItem, DataOperationImpl<IntegrityManifestDataItem>> driver(
+							home.resolve("watchdog"), server, Map.of());
+			assertFalse(driver.requestWatchdogRunning(), "nothing to watch before the driver starts");
+			driver.start();
+			assertTrue(driver.requestWatchdogRunning());
+			driver.close();
+			final long deadline = System.nanoTime() + RESULT_BUDGET.toNanos();
+			while (driver.requestWatchdogRunning()) {
+				assertTrue(System.nanoTime() < deadline, "the watchdog outlived the driver");
+				Thread.sleep(10);
 			}
 		}
 	}
