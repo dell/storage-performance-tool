@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Changed
+
+- **S3-AWS workers** — With `storage.driver.threads` unset, the `s3-aws` driver now runs one I/O worker per concurrency permit instead of at most one per hardware thread. Every request blocks its worker, so a run with `--threads` above the node's CPU count previously kept only as many requests in flight as the node had CPUs and queued the rest behind busy workers; it now keeps the configured number in flight. A worker blocked in a request no longer takes queued permits with it: new operations go to idle workers first.
+
+### Fixed
+
+- **S3-AWS lost requests** — A request the AWS client lost with no connection (so that `storage.crt.socketTimeoutMs` could not see it) stayed in flight for the rest of the run and, through the worker it blocked, stalled every permit queued behind it. The driver now bounds its wait for each request with `storage.crt.requestTimeoutMs` (default 300000, `0` for no bound): a request that outlives it is cancelled and fails as a timeout, counted and logged like any other.
+- **S3-AWS stop with a lost request** — A step that stopped with such a request in flight waited for the whole of `load.op.wait.limit`, could not be stopped within the engine's budget, and ended with the operation still active. Once the step has closed admission, the driver now gives the requests in flight `storage.crt.stopTimeoutMs` (default 10000, `0` to turn off) and then cancels them, so they end as `INTERRUPTED` and the stop completes.
+
 ## [5.16.1] - 2026-10-19
 
 ### Fixed

@@ -31,17 +31,19 @@ public class NioStorageDriverMock<I extends Item, O extends Operation<I>>
 	@Override
 	protected void invokeNio(final O op) {
 		op.startResponse();
-		if (op instanceof DataOperation) {
-			final DataOperation dataOp = (DataOperation) op;
+		if (op instanceof DataOperation dataOp) {
 			final DataItem dataItem = dataOp.item();
 			switch (dataOp.type()) {
 			case CREATE:
 				try {
 					dataOp.countBytesDone(dataItem.size());
-				} catch (final IOException ignored) {}
+				} catch (final IOException ignored) {
+					// A mock item without a size counts nothing.
+				}
 				break;
 			case READ:
 				dataOp.startDataResponse();
+				// fall through
 			case UPDATE:
 				final List<Range> fixedRanges = dataOp.fixedRanges();
 				if (fixedRanges == null || fixedRanges.isEmpty()) {
@@ -50,7 +52,9 @@ public class NioStorageDriverMock<I extends Item, O extends Operation<I>>
 					} else {
 						try {
 							dataOp.countBytesDone(dataItem.size());
-						} catch (final IOException ignored) {}
+						} catch (final IOException ignored) {
+							// A mock item without a size counts nothing.
+						}
 					}
 				} else {
 					dataOp.countBytesDone(dataOp.markedRangesSize());

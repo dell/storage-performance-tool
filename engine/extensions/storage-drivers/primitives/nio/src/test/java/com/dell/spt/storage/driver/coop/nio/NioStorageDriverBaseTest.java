@@ -213,6 +213,59 @@ public class NioStorageDriverBaseTest {
 	}
 
 	@Test
+	void aDriverThatAsksForAWorkerPerPermitGetsOneWhenDriverThreadsIsUnset() throws Exception {
+		final int permits = Runtime.getRuntime().availableProcessors() * 4 + 3;
+		try (var drv = new PermitWorkerDriver("test-nio-permits", dataInput, buildStorageConfig(permits, 0), false, 16)) {
+			assertEquals(permits, drv.workerCount(), "one worker per concurrency permit");
+			assertTrue(drv.workerPerPermit());
+		}
+	}
+
+	@Test
+	void driverThreadsStillDecidesTheWorkerCountForADriverThatAsksForAWorkerPerPermit() throws Exception {
+		try (var drv = new PermitWorkerDriver("test-nio-permits-set", dataInput, buildStorageConfig(40, 5), false, 16)) {
+			assertEquals(5, drv.workerCount());
+			assertFalse(drv.workerPerPermit(), "fewer workers than permits is not a worker per permit");
+		}
+	}
+
+	@Test
+	void theDefaultWorkerCountIsStillCappedAtTheHardwareThreads() throws Exception {
+		final int hardwareThreads = Runtime.getRuntime().availableProcessors();
+		try (var drv = newDriver(buildStorageConfig(hardwareThreads * 4 + 3, 0))) {
+			assertEquals(hardwareThreads, drv.ioWorkerCount());
+			assertFalse(drv.ioWorkerPerPermit());
+		}
+	}
+
+	/**
+	 * With a worker per permit, as many operations as there are permits run at once, although each
+	 * blocks its worker for the whole operation. With a worker per hardware thread the rest would
+	 * wait in the workers' buffers.
+	 */
+	@Test
+	void everyPermitIsInFlightAtOnceWhenEachHasAWorker() throws Exception {
+		final int permits = Runtime.getRuntime().availableProcessors() + 2;
+		final var drv = new BlockingPermitWorkerDriver("test-nio-permits-blocking", dataInput, buildStorageConfig(permits, 0), false, 16);
+		drv.operationResultOutput(results);
+		try {
+			drv.start();
+			for (var i = 0; i < permits; i++) {
+				assertTrue(drv.put(newCreateOp("permit-" + i, 256)));
+			}
+			assertTrue(drv.awaitWorkerThreadCountAtLeast(permits, 5_000),
+							"only " + drv.workerThreadIds.size() + " of " + permits + " operations were in flight at once");
+			assertEquals(permits, drv.activeOpCount());
+		} finally {
+			drv.releaseInvokes();
+			for (var i = 0; i < permits; i++) {
+				assertNotNull(results.await(5_000));
+			}
+			drv.close();
+		}
+	}
+
+	@Test
 	void repeatedRestartCyclesTerminateEveryWorkerAndBoundOutstandingState() throws Exception {
 		final var config = buildStorageConfig(8, 2);
 		try (var drv = newDriver(config)) {
@@ -1184,6 +1237,92 @@ public class NioStorageDriverBaseTest {
 		@Override
 		protected void invokeNio(final Operation<DataItemImpl> op) {
 			throw new IllegalStateException("invoke always fails");
+		}
+	}
+
+	/** The mock with a worker per permit, as a driver whose invokeNio blocks for the whole request asks for. */
+	static class PermitWorkerDriver extends NioStorageDriverBase<DataItemImpl, Operation<DataItemImpl>> {
+
+		PermitWorkerDriver(
+						final String testStepName,
+						final DataInput dataInput,
+						final Config storageConfig,
+						final boolean verifyFlag,
+						final int batchSize) throws Exception {
+			super(testStepName, dataInput, storageConfig, verifyFlag, batchSize, true);
+		}
+
+		int workerCount() {
+			return ioWorkerCount();
+		}
+
+		boolean workerPerPermit() {
+			return ioWorkerPerPermit();
+		}
+
+		@Override
+		protected void invokeNio(final Operation<DataItemImpl> op) {
+			finishOperation(op);
+		}
+
+		@Override
+		protected String requestNewPath(final String path) {
+			return path;
+		}
+
+		@Override
+		protected String requestNewAuthToken(final com.dell.spt.base.storage.Credential credential) {
+			return null;
+		}
+
+		@Override
+		public java.util.List<DataItemImpl> list(
+						final com.dell.spt.base.item.ItemFactory<DataItemImpl> itemFactory, final String path, final String prefix,
+						final int idRadix, final DataItemImpl lastPrevItem, final int count) {
+			return java.util.List.of();
+		}
+
+		@Override
+		public void adjustIoBuffers(final long avgTransferSize, final OpType opType) {}
+	}
+
+	/** A worker per permit whose invokeNio blocks until released, to count how many run at once. */
+	static final class BlockingPermitWorkerDriver extends PermitWorkerDriver {
+		private final CountDownLatch releaseInvoke = new CountDownLatch(1);
+		final Set<Long> workerThreadIds = ConcurrentHashMap.newKeySet();
+
+		BlockingPermitWorkerDriver(
+						final String testStepName,
+						final DataInput dataInput,
+						final Config storageConfig,
+						final boolean verifyFlag,
+						final int batchSize) throws Exception {
+			super(testStepName, dataInput, storageConfig, verifyFlag, batchSize);
+		}
+
+		@Override
+		protected void invokeNio(final Operation<DataItemImpl> op) {
+			workerThreadIds.add(Thread.currentThread().threadId());
+			try {
+				releaseInvoke.await();
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+				op.status(Operation.Status.INTERRUPTED);
+				return;
+			}
+			super.invokeNio(op);
+		}
+
+		boolean awaitWorkerThreadCountAtLeast(final int minCount, final long timeoutMs) throws InterruptedException {
+			final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+			while (System.nanoTime() < deadline && workerThreadIds.size() < minCount) {
+				Thread.sleep(1);
+			}
+			return workerThreadIds.size() >= minCount;
+		}
+
+		void releaseInvokes() {
+			releaseInvoke.countDown();
 		}
 	}
 

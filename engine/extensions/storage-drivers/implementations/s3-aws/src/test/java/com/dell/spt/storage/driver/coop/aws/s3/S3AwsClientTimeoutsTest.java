@@ -28,6 +28,8 @@ final class S3AwsClientTimeoutsTest {
 
 	private static final String CONNECTION_FLAG = "storage-crt-connectionTimeoutMs";
 	private static final String SOCKET_FLAG = "storage-crt-socketTimeoutMs";
+	private static final String REQUEST_FLAG = "storage-crt-requestTimeoutMs";
+	private static final String STOP_FLAG = "storage-crt-stopTimeoutMs";
 
 	private static Config storageConfig(final Path home, final Map<String, Object> overrides) throws Exception {
 		return S3AwsMergedConfig.create(home, 9000, overrides).configVal("storage");
@@ -40,6 +42,24 @@ final class S3AwsClientTimeoutsTest {
 		assertEquals(Duration.ofSeconds(5), timeouts.connectionTimeout());
 		assertEquals(Duration.ofSeconds(30), timeouts.stallTimeout());
 		assertTrue(timeouts.stallDetectionEnabled());
+		assertEquals(Duration.ofMinutes(5), timeouts.requestTimeout());
+		assertTrue(timeouts.requestBoundEnabled());
+		assertEquals(Duration.ofSeconds(10), timeouts.stopTimeout());
+		assertTrue(timeouts.cancelAtStopEnabled());
+	}
+
+	@Test
+	void theDriverBoundsCanBeOverriddenAndTurnedOff(@TempDir final Path home) throws Exception {
+		final var bounded = S3AwsClientTimeouts.from(
+						storageConfig(home, Map.of(REQUEST_FLAG, "45000", STOP_FLAG, "2500")));
+		assertEquals(Duration.ofSeconds(45), bounded.requestTimeout());
+		assertEquals(Duration.ofMillis(2500), bounded.stopTimeout());
+
+		final var off = S3AwsClientTimeouts.from(storageConfig(home, Map.of(REQUEST_FLAG, 0, STOP_FLAG, 0)));
+		assertFalse(off.requestBoundEnabled());
+		assertFalse(off.cancelAtStopEnabled());
+		// The network bounds are untouched by the driver bounds.
+		assertEquals(Duration.ofSeconds(30), off.stallTimeout());
 	}
 
 	@Test
@@ -81,7 +101,9 @@ final class S3AwsClientTimeoutsTest {
 			SOCKET_FLAG + ",-1",
 			SOCKET_FLAG + ",1999",
 			SOCKET_FLAG + ",1000",
-			SOCKET_FLAG + ",1"
+			SOCKET_FLAG + ",1",
+			REQUEST_FLAG + ",-1",
+			STOP_FLAG + ",-1"
 	})
 	void valuesOutsideTheirRangeAreRefusedWithTheirKey(
 					final String flag, final int value, @TempDir final Path home) throws Exception {

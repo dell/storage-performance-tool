@@ -34,3 +34,12 @@ storage:
     # request on a new connection, so a request that stalls on every attempt fails after all of
     # them.
     socketTimeoutMs: int
+    # Milliseconds the driver waits for a request from the moment it makes it. A request that
+    # outlives this is cancelled and fails as a timeout. It covers a request the client has lost
+    # with no connection for the socket timeout to watch. Must exceed the longest request the
+    # workload makes; 0 waits without bound.
+    requestTimeoutMs: int
+    # Milliseconds the requests in flight get to finish once the load step stops (closes admission)
+    # before the driver cancels them, so that the stop does not wait on a request that never ends.
+    # 0 leaves them to the step's wait (load.op.wait.limit) and the stop of the workers.
+    stopTimeoutMs: int

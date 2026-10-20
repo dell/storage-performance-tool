@@ -1036,7 +1036,15 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				throwUnchecked(e);
 			}
 		}
+		onAdmissionClosed();
 	}
+
+	/**
+	 * Called after admission has been closed, which is the first thing a load step does when it
+	 * stops, before it waits for the operations in flight. A driver that can end its requests
+	 * in flight on its own may bound that wait here. May be called more than once.
+	 */
+	protected void onAdmissionClosed() {}
 
 	@Override
 	public final List<O> recoverQueuedOperations() {
