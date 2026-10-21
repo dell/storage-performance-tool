@@ -213,6 +213,59 @@ public class NioStorageDriverBaseTest {
 	}
 
 	@Test
+	void aDriverThatAsksForAWorkerPerPermitGetsOneWhenDriverThreadsIsUnset() throws Exception {
+		final int permits = Runtime.getRuntime().availableProcessors() * 4 + 3;
+		try (var drv = new PermitWorkerDriver("test-nio-permits", dataInput, buildStorageConfig(permits, 0), false, 16)) {
+			assertEquals(permits, drv.workerCount(), "one worker per concurrency permit");
+			assertTrue(drv.workerPerPermit());
+		}
+	}
+
+	@Test
+	void driverThreadsStillDecidesTheWorkerCountForADriverThatAsksForAWorkerPerPermit() throws Exception {
+		try (var drv = new PermitWorkerDriver("test-nio-permits-set", dataInput, buildStorageConfig(40, 5), false, 16)) {
+			assertEquals(5, drv.workerCount());
+			assertFalse(drv.workerPerPermit(), "fewer workers than permits is not a worker per permit");
+		}
+	}
+
+	@Test
+	void theDefaultWorkerCountIsStillCappedAtTheHardwareThreads() throws Exception {
+		final int hardwareThreads = Runtime.getRuntime().availableProcessors();
+		try (var drv = newDriver(buildStorageConfig(hardwareThreads * 4 + 3, 0))) {
+			assertEquals(hardwareThreads, drv.ioWorkerCount());
+			assertFalse(drv.ioWorkerPerPermit());
+		}
+	}
+
+	/**
+	 * With a worker per permit, as many operations as there are permits run at once, although each
+	 * blocks its worker for the whole operation. With a worker per hardware thread the rest would
+	 * wait in the workers' buffers.
+	 */
+	@Test
+	void everyPermitIsInFlightAtOnceWhenEachHasAWorker() throws Exception {
+		final int permits = Runtime.getRuntime().availableProcessors() + 2;
+		final var drv = new BlockingPermitWorkerDriver("test-nio-permits-blocking", dataInput, buildStorageConfig(permits, 0), false, 16);
+		drv.operationResultOutput(results);
+		try {
+			drv.start();
+			for (var i = 0; i < permits; i++) {
+				assertTrue(drv.put(newCreateOp("permit-" + i, 256)));
+			}
+			assertTrue(drv.awaitWorkerThreadCountAtLeast(permits, 5_000),
+							"only " + drv.workerThreadIds.size() + " of " + permits + " operations were in flight at once");
+			assertEquals(permits, drv.activeOpCount());
+		} finally {
+			drv.releaseInvokes();
+			for (var i = 0; i < permits; i++) {
+				assertNotNull(results.await(5_000));
+			}
+			drv.close();
+		}
+	}
+
+	@Test
 	void repeatedRestartCyclesTerminateEveryWorkerAndBoundOutstandingState() throws Exception {
 		final var config = buildStorageConfig(8, 2);
 		try (var drv = newDriver(config)) {
@@ -716,6 +769,105 @@ public class NioStorageDriverBaseTest {
 	// --- Test infrastructure ---
 
 	/** Minimal storage config matching the driver constructor hierarchy. */
+	/**
+	 * A worker that has finished an operation gives up its reservation before it releases the
+	 * permit, so the operation that takes the permit is handed to an idle worker. Before, the worker
+	 * counted as busy until it had published the result, and the operation could be queued behind a
+	 * worker blocked in a request, where it waited for that request although its permit was free.
+	 */
+	@Test
+	void anOperationThatTakesAReleasedPermitNeverWaitsBehindAWorkerBlockedInARequest() throws Exception {
+		replacementsRunWhileAWorkerIsBlocked(1);
+	}
+
+	@Test
+	void aBatchThatTakesReleasedPermitsNeverWaitsBehindAWorkerBlockedInARequest() throws Exception {
+		replacementsRunWhileAWorkerIsBlocked(3);
+	}
+
+	private void replacementsRunWhileAWorkerIsBlocked(final int replacements) throws Exception {
+		final var stuckEntered = new CountDownLatch(1);
+		final var unstick = new CountDownLatch(1);
+		final var publishing = new CountDownLatch(replacements);
+		final var publish = new CountDownLatch(1);
+		final var replaced = new CountDownLatch(replacements);
+		final var drv = new PermitWorkerDriver(
+						"test-nio-replacement", dataInput, buildStorageConfig(replacements + 1, 0), false, 16) {
+			@Override
+			protected void invokeNio(final Operation<DataItemImpl> op) {
+				if (op.item().name().equals("stuck") && !awaitUnlessInterrupted(stuckEntered, unstick)) {
+					op.status(Operation.Status.INTERRUPTED);
+					return;
+				}
+				if (op.item().name().startsWith("replacement-")) {
+					replaced.countDown();
+				}
+				super.invokeNio(op);
+			}
+		};
+		drv.operationResultOutput(new OpResultCollector() {
+			@Override
+			public boolean put(final Operation<DataItemImpl> op) {
+				// A published result names its item with the path.
+				if (op.item().name().contains("/fast-")) {
+					publishing.countDown();
+					awaitUnlessInterrupted(null, publish);
+				}
+				return super.put(op);
+			}
+
+			@Override
+			public int put(final List<Operation<DataItemImpl>> ops, final int from, final int to) {
+				var n = 0;
+				for (var i = from; i < to && put(ops.get(i)); i++) {
+					n++;
+				}
+				return n;
+			}
+		});
+		try {
+			drv.start();
+			assertTrue(drv.put(newCreateOp("stuck", 256)));
+			assertTrue(stuckEntered.await(5, TimeUnit.SECONDS), "the first operation never reached its worker");
+			for (var i = 0; i < replacements; i++) {
+				assertTrue(drv.put(newCreateOp("fast-" + i, 256)));
+			}
+			assertTrue(publishing.await(5, TimeUnit.SECONDS), "the fast operations never reached the output");
+			// Their permits are free while their workers are still publishing, and one worker is
+			// blocked in its request.
+			final var batch = new ArrayList<Operation<DataItemImpl>>();
+			for (var i = 0; i < replacements; i++) {
+				batch.add(newCreateOp("replacement-" + i, 256));
+			}
+			if (replacements == 1) {
+				assertTrue(drv.put(batch.get(0)));
+			} else {
+				assertEquals(replacements, drv.put(batch, 0, replacements));
+			}
+			publish.countDown();
+			assertTrue(replaced.await(2, TimeUnit.SECONDS),
+							"a replacement waited behind the worker blocked in its request");
+		} finally {
+			publish.countDown();
+			unstick.countDown();
+			drv.close();
+		}
+	}
+
+	/** Counts the first latch down, if given, then waits for the second; false when interrupted. */
+	private static boolean awaitUnlessInterrupted(final CountDownLatch entered, final CountDownLatch release) {
+		if (entered != null) {
+			entered.countDown();
+		}
+		try {
+			release.await();
+			return true;
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
+			return false;
+		}
+	}
+
 	private static Config buildStorageConfig() {
 		return buildStorageConfig(4);
 	}
@@ -1184,6 +1336,92 @@ public class NioStorageDriverBaseTest {
 		@Override
 		protected void invokeNio(final Operation<DataItemImpl> op) {
 			throw new IllegalStateException("invoke always fails");
+		}
+	}
+
+	/** The mock with a worker per permit, as a driver whose invokeNio blocks for the whole request asks for. */
+	static class PermitWorkerDriver extends NioStorageDriverBase<DataItemImpl, Operation<DataItemImpl>> {
+
+		PermitWorkerDriver(
+						final String testStepName,
+						final DataInput dataInput,
+						final Config storageConfig,
+						final boolean verifyFlag,
+						final int batchSize) throws Exception {
+			super(testStepName, dataInput, storageConfig, verifyFlag, batchSize, true);
+		}
+
+		int workerCount() {
+			return ioWorkerCount();
+		}
+
+		boolean workerPerPermit() {
+			return ioWorkerPerPermit();
+		}
+
+		@Override
+		protected void invokeNio(final Operation<DataItemImpl> op) {
+			finishOperation(op);
+		}
+
+		@Override
+		protected String requestNewPath(final String path) {
+			return path;
+		}
+
+		@Override
+		protected String requestNewAuthToken(final com.dell.spt.base.storage.Credential credential) {
+			return null;
+		}
+
+		@Override
+		public java.util.List<DataItemImpl> list(
+						final com.dell.spt.base.item.ItemFactory<DataItemImpl> itemFactory, final String path, final String prefix,
+						final int idRadix, final DataItemImpl lastPrevItem, final int count) {
+			return java.util.List.of();
+		}
+
+		@Override
+		public void adjustIoBuffers(final long avgTransferSize, final OpType opType) {}
+	}
+
+	/** A worker per permit whose invokeNio blocks until released, to count how many run at once. */
+	static final class BlockingPermitWorkerDriver extends PermitWorkerDriver {
+		private final CountDownLatch releaseInvoke = new CountDownLatch(1);
+		final Set<Long> workerThreadIds = ConcurrentHashMap.newKeySet();
+
+		BlockingPermitWorkerDriver(
+						final String testStepName,
+						final DataInput dataInput,
+						final Config storageConfig,
+						final boolean verifyFlag,
+						final int batchSize) throws Exception {
+			super(testStepName, dataInput, storageConfig, verifyFlag, batchSize);
+		}
+
+		@Override
+		protected void invokeNio(final Operation<DataItemImpl> op) {
+			workerThreadIds.add(Thread.currentThread().threadId());
+			try {
+				releaseInvoke.await();
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+				op.status(Operation.Status.INTERRUPTED);
+				return;
+			}
+			super.invokeNio(op);
+		}
+
+		boolean awaitWorkerThreadCountAtLeast(final int minCount, final long timeoutMs) throws InterruptedException {
+			final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+			while (System.nanoTime() < deadline && workerThreadIds.size() < minCount) {
+				Thread.sleep(1);
+			}
+			return workerThreadIds.size() >= minCount;
+		}
+
+		void releaseInvokes() {
+			releaseInvoke.countDown();
 		}
 	}
 

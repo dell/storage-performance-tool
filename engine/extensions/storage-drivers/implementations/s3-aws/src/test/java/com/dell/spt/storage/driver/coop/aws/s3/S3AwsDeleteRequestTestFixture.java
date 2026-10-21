@@ -16,6 +16,7 @@ import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
@@ -54,11 +55,21 @@ final class S3AwsDeleteRequestTestFixture {
 	/** A driver over the given clients for operations of any type. */
 	static <I extends Item, O extends Operation<I>> S3AwsStorageDriver<I, O> anyDriver(
 					final S3AsyncClient primaryClient, final S3AsyncClient exactVersionClient) throws Exception {
+		return anyDriver(primaryClient, exactVersionClient, Map.of());
+	}
+
+	/**
+	 * A driver over the given clients for operations of any type, with the given values of the
+	 * {@code storage.crt.*Ms} keys in place of the shipped defaults.
+	 */
+	static <I extends Item, O extends Operation<I>> S3AwsStorageDriver<I, O> anyDriver(
+					final S3AsyncClient primaryClient, final S3AsyncClient exactVersionClient,
+					final Map<String, Integer> crtMillis) throws Exception {
 		return new S3AwsStorageDriver<I, O>(
 						"aws-timeout-test",
 						DataInput.instance(
 										null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false),
-						storageConfig(),
+						storageConfig(crtMillis),
 						false,
 						16,
 						primaryClient,
@@ -110,12 +121,29 @@ final class S3AwsDeleteRequestTestFixture {
 	}
 
 	private static Config storageConfig() {
+		return storageConfig(Map.of());
+	}
+
+	/** The configuration {@link #anyDriver} builds its driver from, for a test that subclasses the driver. */
+	static Config storageConfig(final Map<String, Integer> crtMillis) {
 		final Config storage = mock(Config.class);
 		final Config driver = mock(Config.class);
 		final Config limits = mock(Config.class);
 		final Config auth = mock(Config.class);
 		final Config integrity = mock(Config.class);
 		final Config integrityInput = mock(Config.class);
+		final Config crt = mock(Config.class);
+
+		// The shipped defaults of the timeouts, unless the test says otherwise.
+		when(storage.configVal("crt")).thenReturn(crt);
+		when(crt.intVal(S3AwsClientTimeouts.CONNECTION_TIMEOUT_KEY))
+						.thenReturn(crtMillis.getOrDefault(S3AwsClientTimeouts.CONNECTION_TIMEOUT_KEY, 5000));
+		when(crt.intVal(S3AwsClientTimeouts.SOCKET_TIMEOUT_KEY))
+						.thenReturn(crtMillis.getOrDefault(S3AwsClientTimeouts.SOCKET_TIMEOUT_KEY, 30000));
+		when(crt.intVal(S3AwsClientTimeouts.REQUEST_TIMEOUT_KEY))
+						.thenReturn(crtMillis.getOrDefault(S3AwsClientTimeouts.REQUEST_TIMEOUT_KEY, 300000));
+		when(crt.intVal(S3AwsClientTimeouts.STOP_TIMEOUT_KEY))
+						.thenReturn(crtMillis.getOrDefault(S3AwsClientTimeouts.STOP_TIMEOUT_KEY, 5000));
 
 		when(storage.configVal("driver")).thenReturn(driver);
 		when(driver.configVal("limit")).thenReturn(limits);

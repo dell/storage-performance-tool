@@ -174,6 +174,9 @@ S3StorageDriver driver = S3StorageDriverFactory.create(config);
 | maxConnections | int | 50 | Maximum number of concurrent connections |
 | storage.crt.socketTimeoutMs | int | 30000 | Milliseconds a connection with a request in flight may move no data before it is closed and the request fails as a timeout; `0` turns the detection off, otherwise at least `2000`, counted in whole seconds rounded down (see [AWS SDK driver timeouts](../../../../README.md#aws-sdk-driver-timeouts)) |
 | storage.crt.connectionTimeoutMs | int | 5000 | Milliseconds allowed to establish a connection |
+| storage.crt.requestTimeoutMs | int | 300000 | Milliseconds a request may take from the moment the driver makes it until its response has been read in full, a GET's body included; a request that outlives this is cancelled and fails as a timeout. `0` waits without bound (see [AWS SDK driver timeouts](../../../../README.md#aws-sdk-driver-timeouts)) |
+| storage.crt.stopTimeoutMs | int | 5000 | Milliseconds the requests in flight get once the step stops before the driver cancels them; `0` leaves them to the step's wait and the stop of the workers |
+| storage.driver.threads | int | 0 | I/O workers. `0` runs one worker per concurrency permit, since every request blocks its worker (see [AWS SDK driver workers](../../../../README.md#aws-sdk-driver-workers)) |
 | enableRequestMetrics | boolean | false | Enable AWS SDK request metrics |
 | checksumEnabled | boolean | false | Compute and send a checksum on write requests |
 | checksumAlgorithm | String | null | Checksum algorithm: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`. MD5 is not supported as a flexible checksum by the AWS SDK |

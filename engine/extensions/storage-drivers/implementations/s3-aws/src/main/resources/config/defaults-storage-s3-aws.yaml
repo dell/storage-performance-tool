@@ -23,3 +23,14 @@ storage:
     # holding its slot for the rest of the run. Raise it for operations that legitimately stay
     # silent for longer; 0 does not detect stalled requests.
     socketTimeoutMs: 30000
+    # Deadline of each request, from the moment the driver makes it until its response has been
+    # read in full (a GET's body included): a request the client has lost with no connection to
+    # watch fails as a timeout after 5 minutes instead of holding its worker for the rest of the
+    # run. Raise it for requests that legitimately take longer (very large objects on slow links);
+    # 0 waits without bound.
+    requestTimeoutMs: 300000
+    # Requests still in flight once the step stops get 5 seconds before the driver cancels them and
+    # counts them as interrupted: half of the engine's 10-second budget for stopping a run, so that
+    # the stop itself fits in the rest. 0 leaves them to the step's wait (load.op.wait.limit) and
+    # the stop of the workers.
+    stopTimeoutMs: 5000

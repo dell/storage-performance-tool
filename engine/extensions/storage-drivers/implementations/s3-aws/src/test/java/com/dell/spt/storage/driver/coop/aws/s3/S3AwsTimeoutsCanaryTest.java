@@ -125,7 +125,10 @@ final class S3AwsTimeoutsCanaryTest {
 		}
 
 		assertNotNull(handed.get(), "the standalone DELETE resources must have been requested");
-		assertEquals(new S3AwsClientTimeouts(Duration.ofSeconds(7), Duration.ofSeconds(9)), handed.get().timeouts());
+		// The network bounds as overridden, the driver's own bounds as shipped.
+		assertEquals(
+						new S3AwsClientTimeouts(Duration.ofSeconds(7), Duration.ofSeconds(9), Duration.ofMinutes(5), Duration.ofSeconds(5)),
+						handed.get().timeouts());
 	}
 
 	@SuppressWarnings("unchecked")
