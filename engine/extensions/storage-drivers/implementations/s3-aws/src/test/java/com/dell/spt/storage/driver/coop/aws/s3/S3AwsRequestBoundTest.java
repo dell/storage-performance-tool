@@ -6,23 +6,29 @@ import static com.dell.spt.storage.driver.coop.aws.s3.S3AwsDriverHarness.op;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation.Status;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.storage.driver.coop.aws.s3.S3AwsDriverHarness.Started;
+import com.github.akurilov.commons.system.SizeInBytes;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.logging.log4j.Level;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -37,7 +43,8 @@ import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
  * stopped it cancels the requests still in flight after a grace, so that a lost request costs one
  * operation and never a worker, the permits queued behind it, or the stop of the step. Both cover
  * a GET until its body has been read, and both are the watchdog's: a request made after the grace
- * is ended at once, and a restart of the driver gets a grace of its own.
+ * is ended at once, and a restart of the driver gets a grace of its own, once a sweep of the earlier
+ * stop has finished.
  */
 @Timeout(value = 60, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 final class S3AwsRequestBoundTest {
@@ -313,6 +320,83 @@ final class S3AwsRequestBoundTest {
 				started.driver().shutdown();
 				assertEquals(Status.INTERRUPTED, started.await(RESULT_BUDGET).status());
 			}
+		}
+	}
+
+	/**
+	 * The watchdog ends the requests in flight at stop under the lock a restart takes to reset the
+	 * stop, so a sweep that has seen the grace over finishes before the next cycle admits anything:
+	 * it can end neither a request of that cycle nor its grace. A driver whose sweep is held at
+	 * that point shows the restart waiting and the next cycle's request surviving the sweep.
+	 */
+	@Test
+	void aRestartWaitsForAStopSweepThatHasBegun() throws Exception {
+		final var sent = new CopyOnWriteArrayList<CompletableFuture<HeadObjectResponse>>();
+		final var client = neverAnsweringClient(sent);
+		final var sweeping = new CountDownLatch(1);
+		final var resumeSweep = new CountDownLatch(1);
+		final var held = new AtomicBoolean();
+		final var driver = new S3AwsStorageDriver<IntegrityManifestDataItem, DataOperationImpl<IntegrityManifestDataItem>>(
+						"aws-restart-test",
+						DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false),
+						S3AwsDeleteRequestTestFixture.storageConfig(
+										Map.of(S3AwsClientTimeouts.REQUEST_TIMEOUT_KEY, 0, S3AwsClientTimeouts.STOP_TIMEOUT_KEY, 50)),
+						false, 16, client, client, 100 * 1024L, 8 * 1024 * 1024L) {
+			@Override
+			int stopRequestsInFlight() {
+				// The first sweep is held once it has seen the grace over, before it ends anything.
+				if (held.compareAndSet(false, true)) {
+					sweeping.countDown();
+					try {
+						resumeSweep.await(RESULT_BUDGET.toMillis(), TimeUnit.MILLISECONDS);
+					} catch (final InterruptedException interrupted) {
+						Thread.currentThread().interrupt();
+					}
+				}
+				return super.stopRequestsInFlight();
+			}
+		};
+		final var first = op(OpType.STAT, "sweep-first", null);
+		try (final var started = Started.start(driver, first)) {
+			awaitSent(sent, 1);
+			driver.closeAdmission();
+			assertTrue(sweeping.await(RESULT_BUDGET.toMillis(), TimeUnit.MILLISECONDS), "the watchdog never swept at the end of the grace");
+			// The stop of the workers ends the first request while the sweep of its grace is held.
+			driver.stop();
+			assertEquals(Status.INTERRUPTED, started.await(RESULT_BUDGET).status());
+
+			final var restartFailure = new AtomicReference<Throwable>();
+			final Thread restarting = Thread.ofVirtual().start(() -> {
+				try {
+					driver.start();
+				} catch (final Exception failure) {
+					restartFailure.set(failure);
+				}
+			});
+			restarting.join(3 * S3AwsStorageDriver.WATCHDOG_TICK_MILLIS);
+			assertTrue(restarting.isAlive(), "the restart did not wait for the stop sweep of the earlier cycle");
+			resumeSweep.countDown();
+			restarting.join(RESULT_BUDGET.toMillis());
+			assertFalse(restarting.isAlive(), "the restart did not go on once the sweep had ended");
+			assertNull(restartFailure.get());
+
+			final var second = op(OpType.STAT, "sweep-second", null);
+			assertTrue(driver.put(second));
+			awaitSent(sent, 2);
+			Thread.sleep(3 * S3AwsStorageDriver.WATCHDOG_TICK_MILLIS);
+			assertFalse(sent.get(1).isCancelled(), "the stop sweep of the earlier cycle ended a request of the next");
+			assertNotEquals(Status.INTERRUPTED, second.status());
+			assertEquals(1, driver.activeOpCount());
+		} finally {
+			resumeSweep.countDown();
+		}
+	}
+
+	private static void awaitSent(final List<?> sent, final int count) throws InterruptedException {
+		final long deadline = System.nanoTime() + RESULT_BUDGET.toNanos();
+		while (sent.size() < count) {
+			assertTrue(System.nanoTime() - deadline < 0, "request " + count + " was never made");
+			Thread.sleep(1);
 		}
 	}
 

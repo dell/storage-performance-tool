@@ -152,8 +152,14 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	 * after that is ended at once; cleared when admission opens again.
 	 */
 	private volatile boolean stopGraceOver;
-	/** Guards the start of the watchdog; the driver's own monitor is held while a client is built. */
-	private final Object requestWatchdogLock = new Object();
+	/**
+	 * Guards the watchdog thread and the stop: the watchdog ends the requests in flight at stop
+	 * under this lock, from reading the deadline to the last request, and a restart resets the stop
+	 * under it, so that a stop of an earlier cycle has ended before the next cycle admits anything
+	 * and a sweep that starts after the reset sees no stop. The driver's own monitor is not used:
+	 * it is held while a client is built.
+	 */
+	private final Object watchdogLock = new Object();
 	private volatile Thread requestWatchdog;
 	private volatile boolean closed;
 
@@ -568,15 +574,21 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 	}
 
-	/** Admission opens as the driver starts or restarts: a stop of an earlier cycle is over. */
+	/**
+	 * Admission opens as the driver starts or restarts: a stop of an earlier cycle is over. The
+	 * reset waits for a stop sweep the watchdog has begun, so that the sweep cannot end a request
+	 * of the new cycle or flag its grace as over.
+	 */
 	@Override
 	protected void onAdmissionOpened() {
 		if (timeouts == null) {
 			return;
 		}
-		stopDeadlineNanos.set(NOT_STOPPING);
-		stopGraceOver = false;
-		ensureRequestWatchdog();
+		synchronized (watchdogLock) {
+			stopDeadlineNanos.set(NOT_STOPPING);
+			stopGraceOver = false;
+			ensureRequestWatchdog();
+		}
 	}
 
 	/**
@@ -601,10 +613,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	 * it ends them all. No timer is armed per request.
 	 */
 	private void ensureRequestWatchdog() {
-		if (!timeouts.requestBoundEnabled() && !timeouts.cancelAtStopEnabled()) {
+		if ((!timeouts.requestBoundEnabled() && !timeouts.cancelAtStopEnabled()) || requestWatchdogRunning()) {
+			// A running watchdog is not waited for: it may be ending the requests in flight.
 			return;
 		}
-		synchronized (requestWatchdogLock) {
+		synchronized (watchdogLock) {
 			final Thread running = requestWatchdog;
 			if (closed || (running != null && running.isAlive())) {
 				return;
@@ -633,16 +646,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	 * over, every request in flight. Each then ends its operation on its worker.
 	 */
 	void sweepRequests(final long nowNanos) {
-		final long stopAt = stopDeadlineNanos.get();
-		final boolean stopping = stopAt != NOT_STOPPING && nowNanos - stopAt >= 0;
-		if (stopping) {
-			stopGraceOver = true;
-			final int ended = stopRequestsInFlight();
-			if (ended > 0) {
-				LOG.warn(
-								"{} request(s) still in flight {} ms after the step stopped were cancelled (storage.crt.{})",
-								ended, timeouts.stopTimeout().toMillis(), S3AwsClientTimeouts.STOP_TIMEOUT_KEY);
-			}
+		if (stopRequestsIfGraceOver(nowNanos)) {
 			return;
 		}
 		for (final S3AwsInFlightRequest request : requestsInFlight) {
@@ -652,8 +656,35 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 	}
 
-	/** Ends every request in flight because the step stopped, and returns how many it ended. */
-	private int stopRequestsInFlight() {
+	/**
+	 * Ends every request in flight if the stop grace was over at the given time, under the
+	 * watchdog lock: the deadline is read, the grace flagged as over and the requests ended before
+	 * a restart can reset the stop, and a restart that has reset it leaves nothing to end.
+	 *
+	 * @return whether the grace was over
+	 */
+	private boolean stopRequestsIfGraceOver(final long nowNanos) {
+		synchronized (watchdogLock) {
+			final long stopAt = stopDeadlineNanos.get();
+			if (stopAt == NOT_STOPPING || nowNanos - stopAt < 0) {
+				return false;
+			}
+			stopGraceOver = true;
+			final int ended = stopRequestsInFlight();
+			if (ended > 0) {
+				LOG.warn(
+								"{} request(s) still in flight {} ms after the step stopped were cancelled (storage.crt.{})",
+								ended, timeouts.stopTimeout().toMillis(), S3AwsClientTimeouts.STOP_TIMEOUT_KEY);
+			}
+			return true;
+		}
+	}
+
+	/**
+	 * Ends every request in flight because the step stopped, and returns how many it ended. Called
+	 * under the watchdog lock; a test may override it to hold a sweep.
+	 */
+	int stopRequestsInFlight() {
 		int ended = 0;
 		for (final S3AwsInFlightRequest request : requestsInFlight) {
 			if (request.stop()) {
@@ -2117,20 +2148,18 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	protected void doClose()
 					throws IOException {
 		closed = true;
-		if (requestWatchdogLock != null) {
-			synchronized (requestWatchdogLock) {
+		if (watchdogLock != null) {
+			synchronized (watchdogLock) {
 				final Thread watchdog = requestWatchdog;
 				if (watchdog != null) {
 					watchdog.interrupt();
 				}
-			}
-		}
-		if (requestsInFlight != null) {
-			// Closing ends the grace: end what is still in flight now rather than later.
-			stopGraceOver = true;
-			final int ended = stopRequestsInFlight();
-			if (ended > 0) {
-				LOG.warn("{} request(s) still in flight when the driver closed were cancelled", ended);
+				// Closing ends the grace: end what is still in flight now rather than later.
+				stopGraceOver = true;
+				final int ended = stopRequestsInFlight();
+				if (ended > 0) {
+					LOG.warn("{} request(s) still in flight when the driver closed were cancelled", ended);
+				}
 			}
 		}
 		try {

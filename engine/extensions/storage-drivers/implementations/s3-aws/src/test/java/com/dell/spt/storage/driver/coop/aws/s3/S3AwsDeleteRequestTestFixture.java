@@ -124,7 +124,8 @@ final class S3AwsDeleteRequestTestFixture {
 		return storageConfig(Map.of());
 	}
 
-	private static Config storageConfig(final Map<String, Integer> crtMillis) {
+	/** The configuration {@link #anyDriver} builds its driver from, for a test that subclasses the driver. */
+	static Config storageConfig(final Map<String, Integer> crtMillis) {
 		final Config storage = mock(Config.class);
 		final Config driver = mock(Config.class);
 		final Config limits = mock(Config.class);
