@@ -379,7 +379,8 @@ func (m *RemoteDockerManager) StartWorkerNodeContainerContext(ctx context.Contex
 	// Host networking with explicit JVM RMI hostname and explicit ports
 	name := generateRemoteContainerName("worker", m.host.Host)
 	cmd := make([]string, 0, 3+len(additionalArgs))
-	cmd = append(cmd, dockerNodeModeArg, "--run-port=9999", "--load-step-node-port=1099")
+	cmd = append(cmd, dockerNodeModeArg, "--run-port=9999",
+		fmt.Sprintf("%s%d", constants.EngineNodePortArgPrefix, constants.DefaultRMIRegistryPort))
 	cmd = append(cmd, additionalArgs...)
 	cfg := command.ContainerConfig{
 		Image:       image,

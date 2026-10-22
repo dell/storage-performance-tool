@@ -573,6 +573,7 @@ Executes a benchmark test with the specified workload type.
 - `--generate-only`: Generate scenario file without executing Docker
 - `--force`: Resolve supported port conflicts without interaction and permit a known engine build mismatch. It does not override invalid build information or collection failures
 - `--api-port`: Specify custom Spt API port (defaults to 9999, legacy: 43234)
+- `--rmi-registry-port`: Engine RMI registry port for a local single-host run (default 1099). To run several `spt run` instances on one host at once, give each its own `--api-port` and `--rmi-registry-port`; remote and distributed runs reject any other value
 - `--spt-image`: Override the engine image ref. By default, release builds use an image tag matching the CLI version (for example, `...:v5.10.3`) and local/dev builds use `...:spt_dev`.
 - `--skip-image-pull`: Use the locally cached Spt image instead of pulling before each run. Dev images such as `spt_dev` automatically skip pulls because they are local-only.
 - `--keep-scenario`: Keep the generated JavaScript scenario file after test completes (useful for debugging)

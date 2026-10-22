@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- **Concurrent local runs** — Added `spt run --rmi-registry-port` (default 1099) to set the local engine's RMI registry port, so several `spt run` instances can run on one host at once, each with its own `--api-port` and registry port. Before, a second instance failed to start with `Port already in use: 1099`. Remote and distributed runs keep port 1099 and reject any other value.
+
 ### Changed
 
 - **Target-bucket provisioning** — Before each phase of an `s3`, `s3-rdma` or `s3-aws` workload starts, the engine on the entry node now checks the phase's target buckets: the bucket it writes to, the bucket it reads or lists, and every bucket its items file names. It creates a missing bucket only for the phase that writes the run's objects (the write or seed phase), and only after the target answers 404. `spt run --provision-target-bucket=false` (engine `storage.targetBucket.provision`, default `true`) still checks every bucket but never creates one. A bucket that is missing or not accessible ends the run before any object operation, with the phase and the cause in the console and exit code 1. Before, each worker checked and created the bucket on the first object it wrote, distributed workers could race to create it, and a failure only failed operations. Existing buckets are used as they are; SPT never clears, deletes or reconfigures a bucket. See [Target Buckets](cli/docs/TARGET_BUCKETS.md).

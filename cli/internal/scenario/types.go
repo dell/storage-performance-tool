@@ -33,6 +33,7 @@ type Params struct {
 	ServiceThreads  int      // VT carrier thread parallelism (0 = JVM default)
 	EngineOverrides []string // Advanced engine defaults overrides as YAML path=value entries
 	PrefixShards    int      // Optional count of fixed-width object-key prefix directories (0 = disabled)
+	RMIRegistryPort int      // Single-host engine RMI registry port (0 = engine default 1099)
 
 	// Multi-endpoint controls
 	SliceEndpoints bool // Partition endpoint list across nodes in distributed runs
