@@ -180,9 +180,13 @@ Only a 404 counts as missing. After a failed create the engine checks once more
 and continues only if the bucket is now accessible. A failure ends the scenario
 with a structured FAILED status before any slice starts.
 
-Bucket requests reuse the step's endpoint, TLS, signing credentials and
-version, region, `storage.net.http.headers` and `storage.net.http.uri-args`,
-and per-path credentials from `storage.auth.file`. They carry no object
+Bucket requests reuse the step's endpoint and endpoint selection (logical
+hostname, rotation, SNI and DNS server), TLS, signing credentials and version,
+region, `storage.net.http.headers` and `storage.net.http.uri-args`, and per-path
+credentials from `storage.auth.file`; a bucket is checked once per credential
+that uses it, and contexts share a control client only when their effective
+storage configuration is equal. An unreadable `storage.auth.file` or item input
+file fails the step before it starts. They carry no object
 metadata, tags, checksums or RDMA headers. A `storage.net.timeoutMilliSec` of
 `0` is bounded to 30 seconds for these requests. A CreateBucket request to a
 standard AWS endpoint outside `us-east-1` carries the region's location

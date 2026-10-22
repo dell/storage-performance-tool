@@ -37,10 +37,11 @@ A phase that only checks needs its buckets to exist already. For `read --items-f
 - Provisioning creates a bucket only after the target answers that it does not exist (HTTP 404). An authorization failure (401, 403), a redirect, a timeout, a connection failure or a server error stops the run and never leads to a create request.
 - An existing bucket is used as it is. SPT never clears it, deletes it, or changes its ACLs, policy, encryption, tags, lifecycle, object lock or versioning. Cleanup phases delete only objects.
 - When two runs create the same bucket at once, the run whose create request fails checks the bucket once more. It continues only if the bucket is now accessible.
+- Each credential is checked separately. When per-path credentials (`storage.auth.file`) give two phases or paths different users for the same bucket, SPT checks the bucket as each user. A configured credentials file or items file that cannot be read fails the run before the phase starts, rather than skipping the check.
 
 ## Distributed runs
 
-The engine on the entry node checks and creates the buckets once per phase, before any node starts the phase, using the entry node's network path and credentials. Worker nodes never create a bucket.
+The engine on the entry node checks and creates the buckets once per phase, before any node starts the phase, using the entry node's network path and credentials. Bucket requests follow `--endpoint-selection` as object requests do: round robin keeps `--endpoint-hostname` for Host, signing and TLS SNI, and per-request DNS uses `--dns-server`. Worker nodes never create a bucket.
 
 ## Bucket names
 
