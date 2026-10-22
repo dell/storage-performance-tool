@@ -6,6 +6,9 @@ import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.storage.driver.StorageDriverFactory;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketControl;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketControlFactory;
+import com.dell.spt.storage.driver.coop.netty.http.s3.S3TargetBucketControl;
 import static com.dell.spt.base.Constants.APP_NAME;
 
 import com.github.akurilov.confuse.Config;
@@ -19,7 +22,7 @@ import java.util.List;
 
 public final class S3RdmaStorageDriverExtension<I extends Item, O extends Operation<I>, T extends S3RdmaStorageDriver<I, O>>
 				extends ExtensionBase
-				implements StorageDriverFactory<I, O, T> {
+				implements StorageDriverFactory<I, O, T>, TargetBucketControlFactory {
 
 	private static final String NAME = "s3-rdma";
 	private static final String DEFAULTS_FILE_NAME = "defaults-storage-s3-rdma.yaml";
@@ -37,6 +40,13 @@ public final class S3RdmaStorageDriverExtension<I extends Item, O extends Operat
 					final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
 					final int batchSize) throws IllegalConfigurationException, InterruptedException {
 		return (T) new S3RdmaStorageDriver<>(stepId, dataInput, storageConfig, verifyFlag, batchSize);
+	}
+
+	/** Bucket control requests are plain HTTP, so the controller needs no RDMA device. */
+	@Override
+	public TargetBucketControl openTargetBucketControl(final String stepId, final Config storageConfig)
+					throws IllegalConfigurationException, InterruptedException {
+		return S3TargetBucketControl.open(stepId, storageConfig);
 	}
 
 	@Override

@@ -390,6 +390,12 @@ public class S3StorageDriverTest {
 		}
 
 		@Override
+		protected FullHttpResponse executeHttpRequest(final FullHttpRequest httpRequest, final boolean warnOnTimeout)
+						throws InterruptedException, ConnectException {
+			return executeHttpRequest(httpRequest);
+		}
+
+		@Override
 		protected FullHttpResponse executeHttpRequest(final FullHttpRequest httpRequest)
 						throws ConnectException {
 			requests.add(httpRequest);
@@ -433,26 +439,20 @@ public class S3StorageDriverTest {
 	}
 
 	@Test
-	void requestNewPath_createsBucketWhenMissing() throws Exception {
+	void requestNewPath_neverCreatesAMissingBucket() throws Exception {
 		Config cfg = baseConfig(false, 2, false, null, "127.0.0.1");
 		TestS3Driver drv = new TestS3Driver(cfg);
-		// Simulate: HEAD -> 404, PUT -> 200
+		// The controller engine owns creation; a worker's HEAD only reports.
 		drv.enqueueResponse(new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.NOT_FOUND));
-		drv.enqueueResponse(new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK));
 
-		String path = "/bucket-create";
-		String res = drv.requestNewPath(path);
-		assertEquals(path, res);
+		String path = "/bucket-missing";
+		assertEquals(path, drv.requestNewPath(path));
 		Queue<FullHttpRequest> log = drv.log();
-		assertEquals(2, log.size());
+		assertEquals(1, log.size());
 		FullHttpRequest head = log.poll();
 		assertEquals(HttpMethod.HEAD, head.method());
 		assertEquals(path, head.uri());
 		assertTrue(head.headers().contains(HttpHeaderNames.AUTHORIZATION));
-		FullHttpRequest put = log.poll();
-		assertEquals(HttpMethod.PUT, put.method());
-		assertEquals(path, put.uri());
-		assertTrue(put.headers().contains(HttpHeaderNames.AUTHORIZATION));
 	}
 
 	@Test
