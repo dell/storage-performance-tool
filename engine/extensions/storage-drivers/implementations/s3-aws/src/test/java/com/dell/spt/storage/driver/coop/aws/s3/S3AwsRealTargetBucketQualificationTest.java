@@ -87,6 +87,7 @@ class S3AwsRealTargetBucketQualificationTest {
 		}
 	}
 
+	// Unique bucket names and step IDs keep reruns independent of earlier runs and their step logs.
 	@Test
 	void provisioningCreatesUsesAndRefusesBucketsOnTheConfiguredEndpoint() throws Exception {
 		final var target = Target.fromEnvironment();
@@ -99,17 +100,18 @@ class S3AwsRealTargetBucketQualificationTest {
 				assertFalse(exists(fixture, created), "the qualification bucket must start absent");
 				assertFalse(exists(fixture, refused), "the refused bucket must start absent");
 
-				run(target, created, true, "tbq-create");
+				run(target, created, true, "tbq-create-" + suffix);
 				assertTrue(exists(fixture, created), "the absent bucket was not created");
 				assertEquals(1, objects(fixture, created).size(), "exactly one measured object operation");
 
-				run(target, created, true, "tbq-existing");
+				run(target, created, true, "tbq-existing-" + suffix);
 				assertEquals(2, objects(fixture, created).size(), "the existing bucket keeps its contents");
 
-				final var failure = assertThrows(RunTerminalException.class, () -> run(target, refused, false, "tbq-refused"));
+				final var refusedStep = "tbq-refused-" + suffix;
+				final var failure = assertThrows(RunTerminalException.class, () -> run(target, refused, false, refusedStep));
 				assertFalse(failure instanceof IntegrityTerminalException);
 				assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
-				assertEquals("tbq-refused", failure.stepId());
+				assertEquals(refusedStep, failure.stepId());
 				assertTrue(failure.getMessage().contains("target bucket \"" + refused + "\" does not exist"),
 								failure.getMessage());
 				assertFalse(exists(fixture, refused), "a disabled policy must leave the bucket absent");
