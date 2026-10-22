@@ -83,7 +83,8 @@ Required for S3 workloads, optional/ignored for `mock`.
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
 | `--endpoints` | `-e` | *(required)* | One or more S3 endpoint URLs (comma-separated or repeatable) |
-| `--region` | | *(engine selection)* | AWS region for S3 requests; passed to engine YAML `storage.region`. Empty or omitted preserves the driver’s existing selection. |
+| `--region` | | *(engine selection)* | AWS region for S3 requests (env `S3_REGION`); passed to engine YAML `storage.region`. Empty or omitted uses the region of a standard AWS endpoint, else `us-east-1`. See [Target Buckets](TARGET_BUCKETS.md#region) |
+| `--provision-target-bucket` | | `true` | Create a missing target bucket before the phase that writes the run's objects. `false` still checks that every target bucket exists and is accessible. Never clears or deletes a bucket. See [Target Buckets](TARGET_BUCKETS.md) |
 | `--access-key` | `-a` | *(required)* | S3 access key credential |
 | `--secret-key` | `-s` | *(required)* | S3 secret key credential |
 | `--bucket` | `-b` | *(required)* | Target bucket to use for the test. In explicit-manifest DELETE mode it is an optional safety assertion checked against every source row; omit it to permit multiple buckets |
