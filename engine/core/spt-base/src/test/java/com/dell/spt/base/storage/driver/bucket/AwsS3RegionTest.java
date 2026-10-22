@@ -30,7 +30,7 @@ class AwsS3RegionTest {
 	@ValueSource(strings = {
 			"bucket.s3.us-east-1.amazonaws.com", "s3.dualstack.us-east-1.amazonaws.com",
 			"s3-fips.us-east-1.amazonaws.com", "s3-external-1.amazonaws.com",
-			"s3.cn-north-1.amazonaws.com.cn", "minio.example:9000", "10.0.0.5", "[::1]:9000", ""
+			"s3.cn-north-1.amazonaws.com.cn", "minio.example:9000", "192.0.2.5", "[::1]:9000", ""
 	})
 	void treatsEverythingElseAsGenericS3(final String endpoint) {
 		assertNull(AwsS3Region.ofEndpoint(endpoint));

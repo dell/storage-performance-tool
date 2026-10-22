@@ -72,7 +72,7 @@ class S3TargetBucketControlTest {
 	@Test
 	void transportFailuresAreNeverAbsence() throws Exception {
 		final var refused = driver(S3StorageDriverTest.baseConfig(false, 4, false, null, "127.0.0.1"));
-		refused.failRequestsForTest(new ConnectException("Connection refused: 10.1.2.3:9024"));
+		refused.failRequestsForTest(new ConnectException("Connection refused: 192.0.2.3:9024"));
 		final var connect = refused.checkTargetBucket("bench", null);
 		assertEquals(Kind.FAILED, connect.kind());
 		assertEquals("connection failed", connect.detail(), "the public detail never names the endpoint");

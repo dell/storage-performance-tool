@@ -43,7 +43,7 @@ class S3AwsTargetBucketControlTest {
 	Path home;
 
 	private static S3Exception status(final int code) {
-		return (S3Exception) S3Exception.builder().statusCode(code).message("raw SDK text with 10.1.2.3").build();
+		return (S3Exception) S3Exception.builder().statusCode(code).message("raw SDK text with 192.0.2.3").build();
 	}
 
 	@Test
@@ -58,7 +58,7 @@ class S3AwsTargetBucketControlTest {
 		}
 		assertEquals("timed out", S3AwsTargetBucketControl.classify(ApiCallTimeoutException.create(1000)).detail());
 		assertEquals("connection failed",
-						S3AwsTargetBucketControl.classify(SdkClientException.create("Unable to connect to 10.1.2.3")).detail());
+						S3AwsTargetBucketControl.classify(SdkClientException.create("Unable to connect to 192.0.2.3")).detail());
 		assertEquals("request failed", S3AwsTargetBucketControl.classify(new IllegalStateException("x")).detail());
 	}
 
