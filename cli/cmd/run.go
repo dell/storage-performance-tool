@@ -50,6 +50,7 @@ const (
 	flagReadPhasePauseSeconds = "read-phase-pause-seconds"
 	flagEngineOverride        = "engine-override"
 	flagPrefixShards          = "prefix-shards"
+	flagRMIRegistryPort       = "rmi-registry-port"
 	itemNamingShardsPath      = "item.naming.shards"
 	prefixShardsAuto          = -1
 	deleteAllDiscoveredLabel  = "all discovered identities (unbounded)"
@@ -1788,6 +1789,10 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			"hosts", testHostsStr,
 			"attach_existing", attachExisting)
 		useMultiHostOrchestrator := shouldUseMultiHostOrchestrator(hostInfos)
+		if useMultiHostOrchestrator && params.RMIRegistryPort != 0 {
+			return fmt.Errorf("--%s applies only to local single-host runs; distributed and remote engines use port %d",
+				flagRMIRegistryPort, constants.DefaultRMIRegistryPort)
+		}
 
 		// The local single-host runner owns Docker on the controller, so it
 		// needs the controller port check. Remote and multi-host runs perform
@@ -2267,6 +2272,8 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 	runCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
 	runCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
 	runCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
+	runCmd.Flags().Int(flagRMIRegistryPort, constants.DefaultRMIRegistryPort,
+		"Engine RMI registry port for a local single-host run; give each concurrent spt run on one host its own port")
 
 	// RDMA Acceleration Options
 	runCmd.Flags().String("s3-driver", "default",
@@ -2484,6 +2491,16 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 
 	serviceThreads, _ := cmd.Flags().GetInt("service-threads")
 	params.ServiceThreads = serviceThreads
+
+	if registryPort, err := cmd.Flags().GetInt(flagRMIRegistryPort); err == nil {
+		if registryPort < 1 || registryPort > 65535 {
+			return scenario.Params{}, fmt.Errorf("--%s must be between 1 and 65535, got %d", flagRMIRegistryPort, registryPort)
+		}
+		// The default leaves the engine command line unchanged.
+		if registryPort != constants.DefaultRMIRegistryPort {
+			params.RMIRegistryPort = registryPort
+		}
+	}
 
 	engineOverrides, _ := cmd.Flags().GetStringArray(flagEngineOverride)
 	if len(engineOverrides) > 0 {

@@ -244,6 +244,10 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 	if err != nil {
 		return fmt.Errorf("resolve engine startup settings: %w", err)
 	}
+	// Only the single-host engine moves its registry; distributed workers keep the default.
+	if params.RMIRegistryPort > 0 {
+		startupArgs = append(startupArgs, fmt.Sprintf("%s%d", constants.EngineNodePortArgPrefix, params.RMIRegistryPort))
+	}
 
 	// Save scenario to file if requested
 	if params.KeepScenario {
