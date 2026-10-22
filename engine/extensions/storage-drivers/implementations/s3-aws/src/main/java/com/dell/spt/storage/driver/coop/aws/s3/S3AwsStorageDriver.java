@@ -289,6 +289,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		this.uploadExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
 		this.bucketName = resolveBucketName(config);
+		// The controller engine checks and creates target buckets before any slice starts, so a
+		// worker initializes no bucket and no output path costs a bucket request.
+		this.requestNewPathFunc = null;
 
 		boolean ckEnabled = false;
 		ChecksumAlgorithm ckAlgo = null;
@@ -847,39 +850,15 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		return Status.FAIL_UNKNOWN;
 	}
 
+	/**
+	 * Returns the bucket path of an output path without any request. The driver does not
+	 * initialize paths: the controller engine provisions target buckets before slices start.
+	 */
 	@Override
 	protected String requestNewPath(final String path) {
-		// Extract bucket name from path and validate/create it
-		// Path format: /bucketname or /bucketname/prefix
 		final String relPath = path.startsWith("/") ? path.substring(1) : path;
 		final int slashPos = relPath.indexOf('/');
-		final String targetBucket = slashPos > 0 ? relPath.substring(0, slashPos) : relPath;
-		final String bucketPath = "/" + targetBucket;
-
-		try {
-			// Validate that the target bucket exists
-			s3AsyncClient.headBucket(HeadBucketRequest.builder().bucket(targetBucket).build()).join();
-		} catch (Exception e) {
-			if (e.getCause() instanceof NoSuchBucketException || isNoSuchBucket(e)) {
-				// Bucket doesn't exist — create it (matches standard S3 driver behavior)
-				try {
-					s3AsyncClient.createBucket(CreateBucketRequest.builder().bucket(targetBucket).build()).join();
-				} catch (Exception createEx) {
-					throw new RuntimeException("Failed to create bucket: " + targetBucket, createEx);
-				}
-			} else {
-				throw new RuntimeException("Failed to validate bucket: " + targetBucket, e);
-			}
-		}
-
-		return bucketPath;
-	}
-
-	private boolean isNoSuchBucket(Exception e) {
-		if (e.getCause() instanceof S3Exception) {
-			return ((S3Exception) e.getCause()).statusCode() == 404;
-		}
-		return false;
+		return "/" + (slashPos > 0 ? relPath.substring(0, slashPos) : relPath);
 	}
 
 	@Override

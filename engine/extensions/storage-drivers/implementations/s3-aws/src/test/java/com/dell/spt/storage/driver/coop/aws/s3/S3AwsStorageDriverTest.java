@@ -1940,59 +1940,20 @@ public class S3AwsStorageDriverTest {
 	class RequestNewPathTest {
 
 		@Test
-		void extractsBucketPath_withSlash() {
-			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
-							.thenReturn(CompletableFuture.completedFuture(HeadBucketResponse.builder().build()));
+		void workerNeverChecksOrCreatesBuckets() {
+			assertEquals("/large", drv.requestNewPath("/large/prefix"));
+			assertEquals("/mybucket", drv.requestNewPath("/mybucket"));
 
-			String result = drv.requestNewPath("/large/prefix");
-			assertEquals("/large", result);
-
-			// Verify headBucket was called with the bucket from path, not this.bucketName
-			ArgumentCaptor<HeadBucketRequest> cap = ArgumentCaptor.forClass(HeadBucketRequest.class);
-			verify(mockS3Client).headBucket(cap.capture());
-			assertEquals("large", cap.getValue().bucket());
+			verify(mockS3Client, never()).headBucket(any(HeadBucketRequest.class));
+			verify(mockS3Client, never()).createBucket(any(CreateBucketRequest.class));
 		}
 
 		@Test
-		void extractsBucketPath_noSubpath() {
-			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
-							.thenReturn(CompletableFuture.completedFuture(HeadBucketResponse.builder().build()));
-
-			String result = drv.requestNewPath("/mybucket");
-			assertEquals("/mybucket", result);
-		}
-
-		@Test
-		void missingBucket_createsIt() {
-			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
-							.thenReturn(CompletableFuture.failedFuture(NoSuchBucketException.builder().message("no bucket").build()));
-			when(mockS3Client.createBucket(any(CreateBucketRequest.class)))
-							.thenReturn(CompletableFuture.completedFuture(CreateBucketResponse.builder().build()));
-
-			String result = drv.requestNewPath("/newbucket");
-			assertEquals("/newbucket", result);
-
-			ArgumentCaptor<CreateBucketRequest> cap = ArgumentCaptor.forClass(CreateBucketRequest.class);
-			verify(mockS3Client).createBucket(cap.capture());
-			assertEquals("newbucket", cap.getValue().bucket());
-		}
-
-		@Test
-		void headBucketFailure_nonNoSuchBucket_throwsRuntimeException() {
-			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
-							.thenReturn(CompletableFuture.failedFuture(S3Exception.builder().message("access denied").build()));
-
-			assertThrows(RuntimeException.class, () -> drv.requestNewPath("/nonexistent"));
-		}
-
-		@Test
-		void createBucketFailure_throwsRuntimeException() {
-			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
-							.thenReturn(CompletableFuture.failedFuture(NoSuchBucketException.builder().message("no bucket").build()));
-			when(mockS3Client.createBucket(any(CreateBucketRequest.class)))
-							.thenReturn(CompletableFuture.failedFuture(S3Exception.builder().message("create failed").build()));
-
-			assertThrows(RuntimeException.class, () -> drv.requestNewPath("/failbucket"));
+		void operationsDoNotInitializeTheirOutputPath() throws Exception {
+			// The controller engine provisions target buckets; the per-operation path cache is off.
+			final var field = com.dell.spt.base.storage.driver.StorageDriverBase.class.getDeclaredField("requestNewPathFunc");
+			field.setAccessible(true);
+			assertNull(field.get(drv));
 		}
 	}
 
@@ -2250,11 +2211,8 @@ public class S3AwsStorageDriverTest {
 
 		@Test
 		void pathWithoutLeadingSlash() {
-			when(mockS3Client.headBucket(any(HeadBucketRequest.class)))
-							.thenReturn(CompletableFuture.completedFuture(HeadBucketResponse.builder().build()));
-
-			String result = drv.requestNewPath("nobucket");
-			assertEquals("/nobucket", result);
+			assertEquals("/nobucket", drv.requestNewPath("nobucket"));
+			assertEquals("/nobucket", drv.requestNewPath("nobucket/prefix"));
 		}
 	}
 

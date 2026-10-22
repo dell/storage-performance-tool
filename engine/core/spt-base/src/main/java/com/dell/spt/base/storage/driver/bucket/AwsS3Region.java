@@ -61,12 +61,17 @@ public final class AwsS3Region {
 	 * outside {@link #DEFAULT}, otherwise empty, as generic S3-compatible services expect.
 	 */
 	public static byte[] createBucketBody(final String region, final String endpoint) {
-		if (endpoint == null || ofEndpoint(endpoint) == null || region == null || DEFAULT.equals(region)) {
+		if (!needsLocationConstraint(region, endpoint)) {
 			return new byte[0];
 		}
 		return ("<CreateBucketConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
 						+ "<LocationConstraint>" + region + "</LocationConstraint>"
 						+ "</CreateBucketConfiguration>").getBytes(StandardCharsets.UTF_8);
+	}
+
+	/** True for a recognized AWS endpoint and a region other than {@link #DEFAULT}. */
+	public static boolean needsLocationConstraint(final String region, final String endpoint) {
+		return endpoint != null && ofEndpoint(endpoint) != null && region != null && !DEFAULT.equals(region);
 	}
 
 	/** Normalizes a host, {@code host:port} or URI to a lowercase host without port or trailing dot. */
