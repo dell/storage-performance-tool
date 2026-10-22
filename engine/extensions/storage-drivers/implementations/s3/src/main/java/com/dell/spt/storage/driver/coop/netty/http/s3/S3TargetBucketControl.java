@@ -7,6 +7,7 @@ import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketControl;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketResponse;
+import com.dell.spt.storage.driver.coop.netty.endpoint.EndpointSelectionSettings;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.impl.BasicConfig;
 import java.io.IOException;
@@ -15,9 +16,10 @@ import org.apache.logging.log4j.Level;
 /**
  * Target-bucket control client of the Netty S3 family, {@code s3} and {@code s3-rdma}.
  *
- * <p>It owns a plain HTTP S3 driver built from the step's storage configuration, so it reuses the
- * driver's endpoint, TLS, signing, region, global headers and URI arguments, and needs no RDMA
- * hardware. The driver is never started and is closed with the client.
+ * <p>It owns an HTTP S3 driver built from the step's storage configuration as the {@code s3}
+ * factory builds it, so it reuses the driver's endpoint, endpoint selection (logical hostname,
+ * rotation, TLS SNI and DNS resolver), TLS, signing, region, global headers and URI arguments, and
+ * needs no RDMA hardware. The driver is never started and is closed with the client.
  */
 public final class S3TargetBucketControl implements TargetBucketControl {
 
@@ -33,14 +35,17 @@ public final class S3TargetBucketControl implements TargetBucketControl {
 	/** Opens a control client for the step's storage configuration. */
 	public static S3TargetBucketControl open(final String stepId, final Config storageConfig)
 					throws IllegalConfigurationException, InterruptedException {
-		return new S3TargetBucketControl(
-						new S3StorageDriver<Item, Operation<Item>>(stepId, null, controlConfig(storageConfig), false, 1));
+		final var config = controlConfig(storageConfig);
+		final var endpointSelection = EndpointSelectionSettings.fromStorage(config);
+		final S3StorageDriver<Item, Operation<Item>> driver = endpointSelection.isDefault()
+						? new S3StorageDriver<>(stepId, null, config, false, 1)
+						: S3EndpointSelectionDriver.create(stepId, null, config, false, 1, endpointSelection);
+		return new S3TargetBucketControl(driver);
 	}
 
-	/** A copy of the storage configuration with default endpoint selection and a bounded timeout. */
+	/** A copy of the storage configuration whose network timeout is bounded. */
 	static Config controlConfig(final Config storageConfig) {
 		final var config = new BasicConfig(storageConfig);
-		config.val("net-endpoint-selection", "default");
 		if (config.intVal("net-timeoutMilliSec") <= 0) {
 			config.val("net-timeoutMilliSec", UNBOUNDED_TIMEOUT_REPLACEMENT_MILLIS);
 		}

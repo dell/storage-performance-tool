@@ -50,7 +50,7 @@ final class S3AwsTargetBucketControl implements TargetBucketControl {
 
 	@Override
 	public TargetBucketResponse check(final String bucket, final Credential credential) throws InterruptedException {
-		return await(client.headBucket(request -> request.bucket(bucket)).thenApply(ignored -> null));
+		return await(client.headBucket(request -> request.bucket(bucket)));
 	}
 
 	@Override
@@ -59,12 +59,16 @@ final class S3AwsTargetBucketControl implements TargetBucketControl {
 		if (AwsS3Region.needsLocationConstraint(region, endpoint)) {
 			request.createBucketConfiguration(configuration -> configuration.locationConstraint(region));
 		}
-		final var response = await(client.createBucket(request.build()).thenApply(ignored -> null));
+		final var response = await(client.createBucket(request.build()));
 		// Absence is a check outcome only; a create that reports 404 failed.
 		return response.kind() == TargetBucketResponse.Kind.NOT_FOUND ? TargetBucketResponse.failed("HTTP 404") : response;
 	}
 
-	private TargetBucketResponse await(final CompletableFuture<Void> future) throws InterruptedException {
+	/**
+	 * Waits for the SDK's own request future and cancels that future, not a dependent stage, on a
+	 * timeout or interruption: cancelling a dependent stage leaves the request running.
+	 */
+	private TargetBucketResponse await(final CompletableFuture<?> future) throws InterruptedException {
 		try {
 			future.get(requestBound.toMillis(), TimeUnit.MILLISECONDS);
 			return TargetBucketResponse.ok();

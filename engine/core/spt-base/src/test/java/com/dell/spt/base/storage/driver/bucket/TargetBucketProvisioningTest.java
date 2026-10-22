@@ -166,6 +166,7 @@ class TargetBucketProvisioningTest {
 			final var failure = assertThrows(
 							RunTerminalException.class, () -> provision(stepConfig("create", path)), path);
 			assertEquals(Category.CONFIGURATION, failure.category());
+			assertEquals("step", failure.stepId());
 			assertTrue(failure.getMessage().startsWith("the bucket segment of item.output.path must be static"));
 		}
 		assertEquals(0, extension.opened);
@@ -275,6 +276,109 @@ class TargetBucketProvisioningTest {
 		provision(config);
 
 		assertEquals(List.of("HEAD bench as writer", "HEAD source as reader"), extension.requests);
+	}
+
+	@Test
+	void unreadableCredentialsAreATerminalConfigurationFailure() throws Exception {
+		final var config = stepConfig("create", "/bench");
+		config.val("storage-auth-file", tempDir.resolve("missing-auth.csv").toString());
+
+		final var failure = assertThrows(RunTerminalException.class, () -> provision(config));
+
+		assertEquals(Category.CONFIGURATION, failure.category());
+		assertEquals("failed to read storage.auth.file to check the step's target buckets", failure.getMessage());
+		assertEquals("step", failure.stepId());
+		assertEquals(0, extension.opened, "no bucket may be checked with an unknown identity");
+	}
+
+	@Test
+	void undecodableItemsFileIsATerminalInputFailure() throws Exception {
+		final var items = tempDir.resolve("items.csv");
+		Files.write(items, new byte[]{'/', 'b', '/', 'k', ',', (byte) 0xC3, (byte) 0x28, '\n'
+		});
+		final var config = stepConfig("read", "/unused");
+		config.val("item-input-file", items.toString());
+
+		final var failure = assertThrows(RunTerminalException.class, () -> provision(config));
+
+		assertEquals(Category.INPUT, failure.category());
+		assertEquals("failed to read item.input.file to find the step's target buckets", failure.getMessage());
+		assertEquals(0, extension.opened);
+	}
+
+	@Test
+	void missingItemsFileNamesNoBucketAndKeepsTheStepsOwnHandling() throws Exception {
+		// A generated cleanup may name a file no earlier phase wrote, such as put-remaining.csv
+		// after a mixed run without PUTs; the step itself treats that as an empty input.
+		final var config = stepConfig("delete", "/unused");
+		config.val("item-input-file", tempDir.resolve("put-remaining.csv").toString());
+
+		assertDoesNotThrow(() -> provision(config));
+		assertEquals(0, extension.opened);
+	}
+
+	@Test
+	void eachContextUsesItsEffectiveStorageConfiguration() throws Exception {
+		final var config = stepConfig("create", "/placeholder");
+		final var first = new BasicConfig(config.pathSep(), config.schema(), Map.of(
+						"item", Map.of("output", Map.of("path", "/bucket-a")),
+						"storage", Map.of("namespace", "tenant-a")));
+		final var second = new BasicConfig(config.pathSep(), config.schema(), Map.of(
+						"item", Map.of("output", Map.of("path", "/bucket-b")),
+						"storage", Map.of("namespace", "tenant-b")));
+
+		TargetBucketProvisioning.provision("step", config, List.of(first, second), List.of(extension));
+
+		assertEquals(List.of("HEAD bucket-a", "HEAD bucket-b"), extension.requests);
+		// Any effective storage setting separates control clients; region, TLS and headers live in
+		// extension schemas, so the core schema's namespace stands in for them here.
+		assertEquals(List.of("tenant-a", "tenant-b"),
+						extension.openedWith.stream().map(c -> c.stringVal("namespace")).toList(),
+						"each control client must use its context's effective storage configuration");
+		assertEquals(2, extension.closed);
+	}
+
+	@Test
+	void eachCredentialForASharedBucketIsChecked() throws Exception {
+		final var config = stepConfig("create", "/bench");
+		final var authA = Files.writeString(tempDir.resolve("a.csv"), "/bench,tenant-a,example-secret-a\n");
+		final var authB = Files.writeString(tempDir.resolve("b.csv"), "/bench,tenant-b,example-secret-b\n");
+		final var first = new BasicConfig(config.pathSep(), config.schema(), Map.of(
+						"storage", Map.of("auth", Map.of("file", authA.toString()))));
+		final var second = new BasicConfig(config.pathSep(), config.schema(), Map.of(
+						"storage", Map.of("auth", Map.of("file", authB.toString()))));
+
+		TargetBucketProvisioning.provision("step", config, List.of(first, second), List.of(extension));
+
+		assertEquals(List.of("HEAD bench as tenant-a", "HEAD bench as tenant-b"), extension.requests,
+						"checking the first tenant does not establish access for the second");
+	}
+
+	@Test
+	void oneContextChecksASharedBucketOncePerCredential() throws Exception {
+		final var auth = Files.writeString(tempDir.resolve("auth.csv"),
+						"/bench/out,writer,example-secret-w\n/bench,reader,example-secret-r\n");
+		final var config = stepConfig("create", "/bench/out");
+		config.val("item-input-path", "/bench");
+		config.val("storage-auth-file", auth.toString());
+
+		provision(config);
+
+		assertEquals(List.of("HEAD bench as writer", "HEAD bench as reader"), extension.requests);
+	}
+
+	@Test
+	void logFingerprintIsNotA32BitHashAndCarriesNoSecret() throws Exception {
+		final var config = stepConfig("create", "/bench");
+		config.val("storage-auth-uid", "uid-1");
+		config.val("storage-auth-secret", "secret-1");
+		final var fingerprint = TargetBucketProvisioning.fingerprint(config.configVal("storage"));
+
+		assertEquals(32, fingerprint.length());
+		assertFalse(fingerprint.contains("secret-1") || fingerprint.contains("uid-1"));
+		config.val("storage-auth-secret", "secret-2");
+		assertEquals(fingerprint, TargetBucketProvisioning.fingerprint(config.configVal("storage")),
+						"the secret plays no part in the fingerprint");
 	}
 
 	@Test

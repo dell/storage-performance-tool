@@ -8,14 +8,16 @@ import com.dell.spt.base.control.run.RunScope;
 import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.integrity.IntegrityTerminalException.Category;
-import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.driver.StorageDriverFactory;
 import com.dell.spt.base.storage.driver.bucket.TargetBuckets.Target;
 import com.github.akurilov.commons.collection.TreeUtil;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.impl.BasicConfig;
-import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -60,17 +62,19 @@ public final class TargetBucketProvisioning {
 		// The step's log context routes messages to its messages.log; closing it also undoes any
 		// context a driver's control request leaves behind on this scenario thread.
 		try (final var logCtx = logContext(stepId)) {
-			final var targetsByDriver = new LinkedHashMap<String, DriverTargets>();
+			final var targetsByDriver = new LinkedHashMap<Map<String, Object>, DriverTargets>();
 			if (ctxConfigs == null || ctxConfigs.isEmpty()) {
-				collect(stepId, config, null, config, extensions, targetsByDriver);
+				collect(config, null, config, extensions, targetsByDriver);
 			} else {
 				for (final var ctxConfig : ctxConfigs) {
-					collect(stepId, config, ctxConfig, merge(config, ctxConfig), extensions, targetsByDriver);
+					collect(config, ctxConfig, merge(config, ctxConfig), extensions, targetsByDriver);
 				}
 			}
-			for (final var entry : targetsByDriver.entrySet()) {
-				provision(stepId, entry.getKey(), entry.getValue());
+			for (final var driverTargets : targetsByDriver.values()) {
+				provision(stepId, driverTargets);
 			}
+		} catch (final RunTerminalException e) {
+			throw e.withStepId(stepId);
 		}
 	}
 
@@ -85,12 +89,11 @@ public final class TargetBucketProvisioning {
 	 * where the path is defined, so every slice copies the resolved value.
 	 */
 	private static void collect(
-					final String stepId,
 					final Config config,
 					final Config ctxConfig,
 					final Config effective,
 					final List<Extension> extensions,
-					final Map<String, DriverTargets> targetsByDriver) {
+					final Map<Map<String, Object>, DriverTargets> targetsByDriver) {
 		final var factory = controlFactory(extensions, effective.stringVal("storage-driver-type"));
 		if (factory == null) {
 			return;
@@ -102,19 +105,15 @@ public final class TargetBucketProvisioning {
 				context = merge(config, ctxConfig);
 			}
 		}
-		final List<Target> targets;
-		try {
-			targets = TargetBuckets.targets(context, context.boolVal(POLICY));
-		} catch (final IOException e) {
-			LogUtil.exception(Level.WARN, e, "{}: could not read the inputs naming the step's target buckets", stepId);
-			return;
-		}
+		final var targets = TargetBuckets.targets(context, context.boolVal(POLICY));
 		if (targets.isEmpty()) {
 			return;
 		}
+		// Contexts share a control client only when their whole effective storage configuration is
+		// equal: region, TLS, headers and credentials all shape the requests.
 		final var storageConfig = context.configVal("storage");
 		targetsByDriver
-						.computeIfAbsent(identity(storageConfig), key -> new DriverTargets(factory, storageConfig))
+						.computeIfAbsent(Config.deepToMap(storageConfig), key -> new DriverTargets(factory, storageConfig))
 						.merge(targets);
 	}
 
@@ -161,7 +160,7 @@ public final class TargetBucketProvisioning {
 		return null;
 	}
 
-	private static void provision(final String stepId, final String identity, final DriverTargets driverTargets) {
+	private static void provision(final String stepId, final DriverTargets driverTargets) {
 		final TargetBucketControl control;
 		try {
 			control = driverTargets.factory.openTargetBucketControl(stepId, driverTargets.storageConfig);
@@ -175,13 +174,11 @@ public final class TargetBucketProvisioning {
 		}
 		try (control) {
 			for (final var target : driverTargets.targets.values()) {
-				report(stepId, identity, target.bucket(), provision(control, target));
+				report(stepId, driverTargets.fingerprint, target, provision(control, target));
 			}
 		} catch (final InterruptedException e) {
 			Thread.currentThread().interrupt();
 			throwUnchecked(e);
-		} catch (final RunTerminalException e) {
-			throw e.withStepId(stepId);
 		}
 	}
 
@@ -226,9 +223,11 @@ public final class TargetBucketProvisioning {
 		return new RunTerminalException(Category.EXECUTION, message, null);
 	}
 
-	private static void report(final String stepId, final String identity, final String bucket, final Outcome outcome) {
+	private static void report(final String stepId, final String fingerprint, final Target target, final Outcome outcome) {
+		final var bucket = target.bucket();
 		final var scope = RunScope.current();
-		final var first = scope == null || scope.firstReport(identity + "/" + bucket);
+		final var first = scope == null || scope.firstReport(
+						fingerprint + "/" + bucket + "/" + (target.credential() == null ? "" : target.credential().getUid()));
 		final var level = first ? Level.INFO : Level.DEBUG;
 		final var step = stepId == null ? "load step" : stepId;
 		// A control request may have replaced the class name of this thread's log context.
@@ -241,34 +240,44 @@ public final class TargetBucketProvisioning {
 		}
 	}
 
-	/** Identifies the storage a bucket lives in without exposing endpoints or credentials. */
-	private static String identity(final Config storageConfig) {
+	/**
+	 * Returns a non-secret fingerprint of the storage a bucket lives in, used only to report each
+	 * target once per run. Control-client reuse is keyed by exact configuration equality instead.
+	 */
+	static String fingerprint(final Config storageConfig) {
 		final var identity = new StringBuilder(storageConfig.stringVal("driver-type"));
 		try {
 			identity.append('|').append(storageConfig.listVal("net-node-addrs"));
 			identity.append('|').append(storageConfig.val("net-node-port"));
 		} catch (final RuntimeException ignored) {
-			// drivers without the Netty endpoint settings share one identity per driver type
+			// drivers without the Netty endpoint settings share one fingerprint per driver type
 		}
 		identity.append('|').append(storageConfig.stringVal("auth-uid"));
-		return Integer.toHexString(identity.toString().hashCode());
+		try {
+			final var digest = MessageDigest.getInstance("SHA-256").digest(identity.toString().getBytes(StandardCharsets.UTF_8));
+			return HexFormat.of().formatHex(digest, 0, 16);
+		} catch (final NoSuchAlgorithmException e) {
+			throw new IllegalStateException("SHA-256 is unavailable", e);
+		}
 	}
 
-	/** Targets of one storage identity, deduplicated by bucket across contexts. */
+	/** Targets sharing one effective storage configuration, deduplicated by bucket and credential. */
 	private static final class DriverTargets {
 
 		private final TargetBucketControlFactory factory;
 		private final Config storageConfig;
-		private final Map<String, Target> targets = new LinkedHashMap<>();
+		private final String fingerprint;
+		private final Map<TargetBuckets.Key, Target> targets = new LinkedHashMap<>();
 
 		private DriverTargets(final TargetBucketControlFactory factory, final Config storageConfig) {
 			this.factory = factory;
 			this.storageConfig = storageConfig;
+			this.fingerprint = fingerprint(storageConfig);
 		}
 
 		private void merge(final List<Target> more) {
 			for (final var target : more) {
-				targets.merge(target.bucket(), target, Target::mergedWith);
+				targets.merge(target.key(), target, Target::mergedWith);
 			}
 		}
 	}

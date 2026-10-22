@@ -27,6 +27,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import software.amazon.awssdk.core.exception.ApiCallTimeoutException;
 import software.amazon.awssdk.core.exception.SdkClientException;
@@ -116,8 +118,9 @@ class S3AwsTargetBucketControlTest {
 	@SuppressWarnings("unchecked")
 	void waitsAreBoundedAndInterruptible() throws Exception {
 		final var client = mock(S3AsyncClient.class);
-		final var pending = new CompletableFuture<HeadBucketResponse>();
-		when(client.headBucket(any(Consumer.class))).thenReturn(pending);
+		// Each check gets its own request: a timed-out wait cancels the request it waited for.
+		when(client.headBucket(any(Consumer.class)))
+						.thenReturn(new CompletableFuture<HeadBucketResponse>(), new CompletableFuture<HeadBucketResponse>());
 		final var control = new S3AwsTargetBucketControl(client, "us-east-1", "http://minio.example", Duration.ofMillis(50));
 
 		final var timeout = control.check("bench", null);
@@ -132,6 +135,57 @@ class S3AwsTargetBucketControlTest {
 			Thread.interrupted();
 		}
 		assertEquals(Duration.ofSeconds(30), S3AwsTargetBucketControl.UNBOUNDED_REQUEST_REPLACEMENT);
+	}
+
+	@ParameterizedTest(name = "create: {0}")
+	@ValueSource(booleans = {false, true
+	})
+	@SuppressWarnings({"unchecked", "rawtypes"
+	})
+	void timeoutCancelsTheSdkRequestItself(final boolean create) throws Exception {
+		final var client = mock(S3AsyncClient.class);
+		final CompletableFuture original = new CompletableFuture<>();
+		if (create) {
+			when(client.createBucket(any(CreateBucketRequest.class))).thenReturn(original);
+		} else {
+			when(client.headBucket(any(Consumer.class))).thenReturn(original);
+		}
+		final var control = new S3AwsTargetBucketControl(client, "us-east-1", "http://minio.example", Duration.ofMillis(20));
+
+		final var response = create ? control.create("bench", null) : control.check("bench", null);
+
+		assertEquals("timed out after 20 ms", response.detail());
+		assertTrue(original.isCancelled(), "a timed-out wait must cancel the SDK request, not a dependent stage");
+	}
+
+	@ParameterizedTest(name = "create: {0}")
+	@ValueSource(booleans = {false, true
+	})
+	@SuppressWarnings({"unchecked", "rawtypes"
+	})
+	void interruptionCancelsTheSdkRequestItself(final boolean create) throws Exception {
+		final var client = mock(S3AsyncClient.class);
+		final CompletableFuture original = new CompletableFuture<>();
+		if (create) {
+			when(client.createBucket(any(CreateBucketRequest.class))).thenReturn(original);
+		} else {
+			when(client.headBucket(any(Consumer.class))).thenReturn(original);
+		}
+		final var control = new S3AwsTargetBucketControl(client, "us-east-1", "http://minio.example", Duration.ofSeconds(5));
+		Thread.currentThread().interrupt();
+		try {
+			assertThrows(InterruptedException.class,
+							() -> {
+								if (create) {
+									control.create("bench", null);
+								} else {
+									control.check("bench", null);
+								}
+							});
+		} finally {
+			Thread.interrupted();
+		}
+		assertTrue(original.isCancelled(), "an interrupted wait must cancel the SDK request");
 	}
 
 	@Test

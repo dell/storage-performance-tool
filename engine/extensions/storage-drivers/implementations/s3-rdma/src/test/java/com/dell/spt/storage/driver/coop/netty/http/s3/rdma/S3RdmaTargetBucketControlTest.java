@@ -36,7 +36,7 @@ class S3RdmaTargetBucketControlTest {
 		server.createContext("/", exchange -> {
 			final var method = exchange.getRequestMethod();
 			requests.add(method + " " + exchange.getRequestURI().getRawPath()
-							+ (exchange.getRequestHeaders().keySet().stream().anyMatch(h -> h.toLowerCase().startsWith("x-amz-rdma"))
+							+ (exchange.getRequestHeaders().keySet().stream().anyMatch(h -> h.toLowerCase(java.util.Locale.ROOT).startsWith("x-amz-rdma"))
 											? " with-rdma-token"
 											: ""));
 			exchange.getRequestBody().readAllBytes();

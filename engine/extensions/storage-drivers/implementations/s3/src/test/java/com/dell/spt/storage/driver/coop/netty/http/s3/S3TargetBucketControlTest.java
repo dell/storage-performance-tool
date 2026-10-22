@@ -9,7 +9,9 @@ import com.dell.spt.base.storage.driver.StorageDriverFactory;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketControlFactory;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketProvisioning;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketResponse.Kind;
+import com.dell.spt.storage.driver.coop.netty.endpoint.ScriptedDnsServer;
 import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.impl.BasicConfig;
 import com.sun.net.httpserver.HttpServer;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.FullHttpRequest;
@@ -106,7 +108,7 @@ class S3TargetBucketControlTest {
 			assertEquals("on", request.headers().get("X-Spt-Global"));
 			assertTrue(request.headers().contains(HttpHeaderNames.AUTHORIZATION));
 			for (final var header : request.headers()) {
-				final var name = header.getKey().toLowerCase();
+				final var name = header.getKey().toLowerCase(java.util.Locale.ROOT);
 				assertFalse(name.startsWith("x-amz-meta-") || name.startsWith("x-amz-checksum")
 								|| name.equals("x-amz-tagging") || name.equals("content-md5")
 								|| name.startsWith("x-amz-rdma") || name.equals("x-amz-copy-source"),
@@ -180,8 +182,69 @@ class S3TargetBucketControlTest {
 		final var control = S3TargetBucketControl.controlConfig(config.configVal("storage"));
 
 		assertEquals(S3TargetBucketControl.UNBOUNDED_TIMEOUT_REPLACEMENT_MILLIS, control.intVal("net-timeoutMilliSec"));
-		assertEquals("default", control.stringVal("net-endpoint-selection"));
+		assertEquals("round-robin", control.stringVal("net-endpoint-selection"), "endpoint selection is preserved");
 		assertEquals(0, config.intVal("storage-net-timeoutMilliSec"), "the step configuration is not modified");
+	}
+
+	@Test
+	void roundRobinControlRequestsUseTheLogicalHostname() throws Exception {
+		final var hosts = new CopyOnWriteArrayList<String>();
+		final var server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+		server.createContext("/", exchange -> {
+			hosts.add(exchange.getRequestHeaders().getFirst("Host"));
+			exchange.sendResponseHeaders(200, -1);
+			exchange.close();
+		});
+		server.start();
+		try {
+			final int port = server.getAddress().getPort();
+			final Config config = S3StorageDriverTest.baseConfig(false, 4, false, null, "127.0.0.1");
+			config.val("storage-net-node-port", port);
+			config.val("storage-net-timeoutMilliSec", 2000);
+			config.val("storage-net-endpoint-selection", "round-robin");
+			config.val("storage-net-endpoint-hostname", "buckets.example.test");
+			config.val("storage-net-endpoint-connect-timeoutMilliSec", 1000);
+
+			try (final var control = new S3StorageDriverExtension<>().openTargetBucketControl("step", config.configVal("storage"))) {
+				assertEquals(Kind.OK, control.check("bench", null).kind());
+			}
+
+			assertEquals(List.of("buckets.example.test:" + port), hosts,
+							"bucket checks use the logical hostname for Host and signing");
+		} finally {
+			server.stop(0);
+		}
+	}
+
+	@Test
+	void perRequestDnsControlRequestsResolveThroughTheConfiguredServer() throws Exception {
+		final var hosts = new CopyOnWriteArrayList<String>();
+		final var server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+		server.createContext("/", exchange -> {
+			hosts.add(exchange.getRequestHeaders().getFirst("Host"));
+			exchange.sendResponseHeaders(404, -1);
+			exchange.close();
+		});
+		server.start();
+		try (final var dns = new ScriptedDnsServer(query -> ScriptedDnsServer.Reply.answers(query.name(), "127.0.0.1"))) {
+			final int port = server.getAddress().getPort();
+			final Config config = S3StorageDriverTest.baseConfig(false, 4, false, null, EndpointSelectionTestSupport.HOSTNAME);
+			config.val("storage-net-node-port", port);
+			config.val("storage-net-timeoutMilliSec", 2000);
+			config.val("storage-net-endpoint-selection", "per-request-dns");
+			config.val("storage-net-endpoint-dns-server", "127.0.0.1:" + dns.address().getPort());
+			config.val("storage-net-endpoint-dns-timeoutMilliSec", 2000);
+			config.val("storage-net-endpoint-connect-timeoutMilliSec", 1000);
+
+			try (final var control = new S3StorageDriverExtension<>().openTargetBucketControl("step", config.configVal("storage"))) {
+				assertEquals(Kind.NOT_FOUND, control.check("bench", null).kind());
+			}
+
+			assertFalse(dns.received().isEmpty(), "the controller must resolve through the configured DNS server");
+			assertEquals(List.of(EndpointSelectionTestSupport.HOSTNAME + ":" + port), hosts);
+		} finally {
+			server.stop(0);
+		}
 	}
 
 	@Test
@@ -192,6 +255,47 @@ class S3TargetBucketControlTest {
 						.findFirst()
 						.orElseThrow();
 		assertInstanceOf(TargetBucketControlFactory.class, s3);
+	}
+
+	@Test
+	void contextsWithDifferentRegionsSignWithTheirOwnRegion() throws Exception {
+		final var authorizations = new CopyOnWriteArrayList<String>();
+		final var server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+		server.createContext("/", exchange -> {
+			authorizations.add(exchange.getRequestURI().getRawPath() + " " + exchange.getRequestHeaders().getFirst("Authorization"));
+			exchange.sendResponseHeaders(200, -1);
+			exchange.close();
+		});
+		server.start();
+		try {
+			final Config config = S3StorageDriverTest.baseConfig(false, 4, false, null, "127.0.0.1");
+			config.val("storage-net-node-port", server.getAddress().getPort());
+			config.val("storage-net-timeoutMilliSec", 2000);
+			config.val("storage-targetBucket-provision", true);
+			config.val("storage-auth-file", null);
+			config.val("load-op-type", "create");
+			config.val("item-type", "data");
+			config.val("item-output-path", "/unused");
+			config.val("item-input-path", null);
+			config.val("item-input-file", null);
+			final var east = new BasicConfig(config.pathSep(), config.schema(), Map.of(
+							"item", Map.of("output", Map.of("path", "/bucket-east")),
+							"storage", Map.of("region", "us-east-1")));
+			final var west = new BasicConfig(config.pathSep(), config.schema(), Map.of(
+							"item", Map.of("output", Map.of("path", "/bucket-west")),
+							"storage", Map.of("region", "eu-west-1")));
+
+			TargetBucketProvisioning.provision("regions", config, List.of(east, west),
+							Extension.load(Thread.currentThread().getContextClassLoader()));
+
+			assertEquals(2, authorizations.size(), authorizations.toString());
+			assertTrue(authorizations.get(0).startsWith("/bucket-east ") && authorizations.get(0).contains("/us-east-1/s3/"),
+							authorizations.get(0));
+			assertTrue(authorizations.get(1).startsWith("/bucket-west ") && authorizations.get(1).contains("/eu-west-1/s3/"),
+							authorizations.get(1));
+		} finally {
+			server.stop(0);
+		}
 	}
 
 	@Test

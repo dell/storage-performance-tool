@@ -14,6 +14,7 @@ import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.confuse.Config;
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -40,10 +41,18 @@ final class TargetBuckets {
 	 */
 	record Target(String bucket, boolean written, boolean creatable, Credential credential) {
 
+		/** One check per bucket and credential identity: one tenant's access says nothing of another's. */
+		Key key() {
+			return new Key(bucket, credential);
+		}
+
 		Target mergedWith(final Target other) {
 			return new Target(bucket, written || other.written, creatable || other.creatable, credential);
 		}
 	}
+
+	/** Exact identity of a target; the credential (null for the driver's own) compares uid and secret. */
+	record Key(String bucket, Credential credential) {}
 
 	private TargetBuckets() {}
 
@@ -66,7 +75,7 @@ final class TargetBuckets {
 		}
 		final var bucket = bucketSegment(path);
 		if (bucket.contains(SYNC_MARKER) || bucket.contains(ASYNC_MARKER)) {
-			throw dynamicBucket("item.output.path", path);
+			throw dynamicBucket("item.output.path");
 		}
 		if (!bucket.contains(INIT_MARKER)) {
 			return path;
@@ -94,10 +103,11 @@ final class TargetBuckets {
 	 * when the context writes there, the input path's bucket and the buckets named by its item
 	 * input file.
 	 *
-	 * @throws RunTerminalException when a bucket segment is not a literal name
+	 * @throws RunTerminalException when a bucket segment is not a literal name, or the credentials or
+	 *     items that name the buckets cannot be read
 	 */
-	static List<Target> targets(final Config ctxConfig, final boolean provision) throws IOException {
-		final var targets = new LinkedHashMap<String, Target>();
+	static List<Target> targets(final Config ctxConfig, final boolean provision) {
+		final var targets = new LinkedHashMap<Key, Target>();
 		final var credentials = credentialsByPath(ctxConfig);
 		final var writes = writesOutputPath(ctxConfig);
 		if (writes) {
@@ -112,7 +122,14 @@ final class TargetBuckets {
 		}
 		final var inputFile = ctxConfig.stringVal(INPUT_FILE);
 		if (inputFile != null && !inputFile.isEmpty()) {
-			for (final var bucket : itemFileBuckets(Path.of(inputFile))) {
+			final List<String> buckets;
+			try {
+				buckets = itemFileBuckets(Path.of(inputFile));
+			} catch (final IOException | UncheckedIOException | IllegalStateException e) {
+				throw new RunTerminalException(
+								Category.INPUT, "failed to read item.input.file to find the step's target buckets", e);
+			}
+			for (final var bucket : buckets) {
 				add(targets, bucket, false, false, credentials, "/" + bucket);
 			}
 		}
@@ -120,7 +137,7 @@ final class TargetBuckets {
 	}
 
 	private static void add(
-					final Map<String, Target> targets,
+					final Map<Key, Target> targets,
 					final String bucket,
 					final boolean written,
 					final boolean creatable,
@@ -130,14 +147,14 @@ final class TargetBuckets {
 			return;
 		}
 		final var target = new Target(bucket, written, written && creatable, credential(credentials, path, bucket));
-		targets.merge(bucket, target, Target::mergedWith);
+		targets.merge(target.key(), target, Target::mergedWith);
 	}
 
 	/** Returns the bucket segment of a path that must name a literal bucket. */
 	static String literalBucket(final String setting, final String path) {
 		final var bucket = bucketSegment(path);
 		if (bucket.contains(SYNC_MARKER) || bucket.contains(ASYNC_MARKER) || bucket.contains(INIT_MARKER)) {
-			throw dynamicBucket(setting, path);
+			throw dynamicBucket(setting);
 		}
 		return bucket;
 	}
@@ -166,7 +183,7 @@ final class TargetBuckets {
 		return path.startsWith("/") ? 1 : 0;
 	}
 
-	private static RunTerminalException dynamicBucket(final String setting, final String path) {
+	private static RunTerminalException dynamicBucket(final String setting) {
 		return new RunTerminalException(
 						Category.CONFIGURATION,
 						"the bucket segment of " + setting + " must be static: per-operation expressions (${...}, #{...}) "
@@ -218,8 +235,12 @@ final class TargetBuckets {
 		return List.copyOf(buckets.keySet());
 	}
 
-	/** Loads {@code storage.auth.file} rows of {@code path,uid,secret}, keyed by path. */
-	private static Map<String, Credential> credentialsByPath(final Config ctxConfig) throws IOException {
+	/**
+	 * Loads {@code storage.auth.file} rows of {@code path,uid,secret}, keyed by path. A configured
+	 * file that cannot be read is a configuration failure: the workers would otherwise send
+	 * unauthenticated requests and no bucket check would have used the intended identity.
+	 */
+	private static Map<String, Credential> credentialsByPath(final Config ctxConfig) {
 		final var authFile = ctxConfig.stringVal("storage-auth-file");
 		if (authFile == null || authFile.isEmpty()) {
 			return Map.of();
@@ -233,6 +254,9 @@ final class TargetBuckets {
 					result.put(parts[0], Credential.getInstance(parts[1], parts[2]));
 				}
 			}
+		} catch (final IOException | UncheckedIOException e) {
+			throw new RunTerminalException(
+							Category.CONFIGURATION, "failed to read storage.auth.file to check the step's target buckets", e);
 		}
 		return result;
 	}

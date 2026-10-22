@@ -61,7 +61,7 @@ class S3AwsRealTargetBucketQualificationTest {
 							|| secretKey == null || secretKey.isBlank()) {
 				fail("SPT_REAL_S3_TEST=true requires S3_ENDPOINTS (or S3_ENDPOINT), S3_ACCESS_KEY and S3_SECRET_KEY");
 			}
-			var first = endpoints.split(",")[0].trim();
+			var first = endpoints.split(",", -1)[0].trim();
 			if (!first.contains("://")) {
 				first = "http://" + first;
 			}

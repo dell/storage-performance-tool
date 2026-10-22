@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -142,7 +143,57 @@ func TestDistributedFailureOfAnotherRunIsIgnored(t *testing.T) {
 	orchestrator.hosts[0].APIClient.SetRunID("41")
 	wrapper := NewMultiHostTestOrchestrator(orchestrator)
 
-	if wrapper.observeEntrySetupFailure(context.Background()) {
-		t.Fatal("a FAILED status attributed to another run must not complete this one")
+	if failure := wrapper.observeEntryTerminalFailure(context.Background()); failure != nil {
+		t.Fatalf("a FAILED status attributed to another run must not complete this one: %v", failure)
+	}
+}
+
+// Provisioning runs before every phase: a later phase can fail its bucket check after earlier
+// phases published metrics, and must still end the run with its own cause.
+func TestDistributedLaterPhaseSetupFailureCompletesAfterEarlierMetrics(t *testing.T) {
+	step := newTestStep()
+	step.StepID = "seed-step"
+	step.RunID = "41"
+	step.OpType = "CREATE"
+	step.TestState = constants.TestStateCompleted
+	step.CompletionPercent = 100
+	step.ElapsedTimeSeconds = 300
+	payload := marshalSteps(t, []JSONMetricsStep{step})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/status" {
+			_, _ = w.Write([]byte(`{"state":"FAILED","run_id":41,"step_id":"read-step","category":"execution",` +
+				`"message":"target bucket bench is not accessible (HTTP 403)"}`))
+			return
+		}
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer server.Close()
+
+	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{{Original: "entry", Host: "entry"}}, 1)
+	orchestrator.hosts[0].SetStatus(HostStatusRunning)
+	orchestrator.hosts[0].APIClient = NewSptAPIClient(server.URL)
+	orchestrator.hosts[0].APIClient.SetRunID("41")
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	wrapper.SetExpectedStepIDs([]string{"seed-step", "read-step"})
+	wrapper.pollInterval = 5 * time.Millisecond
+	var metricsSeen atomic.Bool
+	wrapper.SetCallbacks(nil, func(*MultiNodeMetricsUpdate) { metricsSeen.Store(true) }, nil, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	wrapper.StartMetricsPolling(ctx)
+	defer wrapper.StopMetricsPolling()
+
+	select {
+	case <-wrapper.CompletionCh():
+	case <-ctx.Done():
+		t.Fatal("a later phase's setup failure did not complete orchestration after earlier metrics")
+	}
+	if !metricsSeen.Load() {
+		t.Fatal("the earlier phase's metrics were not published")
+	}
+	err := wrapper.CompletionError()
+	if err == nil || !strings.Contains(err.Error(), "step read-step (execution): target bucket bench is not accessible") {
+		t.Fatalf("completion error = %v, want the later phase's setup failure", err)
 	}
 }

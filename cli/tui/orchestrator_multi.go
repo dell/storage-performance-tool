@@ -1506,7 +1506,7 @@ func (m *MultiHostTestOrchestrator) metricsPollingLoop(ctx context.Context) {
 	ticker := time.NewTicker(m.pollInterval)
 	defer ticker.Stop()
 
-	metricsObserved := false
+	completed := false
 	for {
 		select {
 		case <-ticker.C:
@@ -1514,16 +1514,18 @@ func (m *MultiHostTestOrchestrator) metricsPollingLoop(ctx context.Context) {
 			if update != nil && m.onMetrics != nil {
 				m.onMetrics(update)
 			}
-			if update != nil && update.Aggregated != nil {
-				metricsObserved = true
-			}
 			if update != nil && shouldSignalCompletionForExpectedSteps(update.Aggregated, m.expectedStepIDs) {
 				if failure := terminalDeletePolicyFailure(update); failure != nil {
 					m.recordCompletionFailure(failure)
 				}
 				m.signalCompletion()
+				completed = true
 			}
-			if !metricsObserved && m.observeEntrySetupFailure(ctx) {
+			if completed {
+				continue
+			}
+			if failure := m.observeEntryTerminalFailure(ctx); failure != nil {
+				m.recordCompletionFailure(errors.Join(terminalDeletePolicyFailure(update), failure))
 				m.signalCompletion()
 				return
 			}
@@ -1533,27 +1535,27 @@ func (m *MultiHostTestOrchestrator) metricsPollingLoop(ctx context.Context) {
 	}
 }
 
-// observeEntrySetupFailure reports whether the entry engine published FAILED for the owned run
-// before any metrics appeared. A run that fails during setup, before any slice starts, publishes
-// no metrics, so metrics-driven completion alone would wait for it forever.
-func (m *MultiHostTestOrchestrator) observeEntrySetupFailure(ctx context.Context) bool {
+// observeEntryTerminalFailure returns the failure the entry engine published as FAILED for the owned
+// run, or nil. A phase that fails during setup, before its slices start, publishes no metrics of its
+// own, so metrics-driven completion alone would wait for its step forever, whether or not earlier
+// phases published metrics.
+func (m *MultiHostTestOrchestrator) observeEntryTerminalFailure(ctx context.Context) error {
 	if m.multiHost == nil || len(m.multiHost.hosts) == 0 || m.multiHost.hosts[0] == nil {
-		return false
+		return nil
 	}
 	client := m.multiHost.hosts[0].APIClient
 	if client == nil {
-		return false
+		return nil
 	}
 	status, err := client.GetStatusContext(ctx)
 	if err != nil || status == nil || status.State != constants.StateFailed ||
 		!client.statusMatchesOwnedRun(status) {
-		return false
+		return nil
 	}
 	if m.onStatusUpdate != nil {
 		m.onStatusUpdate(status)
 	}
-	m.recordCompletionFailure(ownedTerminalStatusFailure(status))
-	return true
+	return ownedTerminalStatusFailure(status)
 }
 
 // shouldSignalCompletion reports whether an aggregated metrics sample indicates
