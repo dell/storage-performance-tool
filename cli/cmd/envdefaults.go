@@ -35,7 +35,7 @@ func markEnvApplied(cmd *cobra.Command, flag, value string) {
 // Env variables honored:
 //
 //	S3_ENDPOINTS (CSV) or S3_ENDPOINT (single)
-//	S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET
+//	S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET, S3_REGION
 //	HOSTS (equivalent to --test-hosts)
 func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 	// setFromEnv sets a flag's value and records that it came from env, not
@@ -79,6 +79,7 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 	_ = setIf("access-key", "S3_ACCESS_KEY")
 	_ = setIf("secret-key", "S3_SECRET_KEY")
 	_ = setIf("bucket", "S3_BUCKET")
+	_ = setIf("region", constants.EnvS3Region)
 
 	if f := cmd.Flags().Lookup("auth-version"); f != nil && !cmd.Flags().Changed("auth-version") {
 		if v := strings.TrimSpace(os.Getenv(constants.EnvS3AuthVersion)); v != "" {

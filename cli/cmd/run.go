@@ -50,9 +50,13 @@ const (
 	flagReadPhasePauseSeconds = "read-phase-pause-seconds"
 	flagEngineOverride        = "engine-override"
 	flagPrefixShards          = "prefix-shards"
+	flagProvisionTargetBucket = "provision-target-bucket"
+	flagCreatePrefix          = "create-prefix"
 	itemNamingShardsPath      = "item.naming.shards"
 	prefixShardsAuto          = -1
 	deleteAllDiscoveredLabel  = "all discovered identities (unbounded)"
+	createPrefixDeprecation   = "it never had an effect and will be removed in the next minor release; " +
+		"spt provisions target buckets by default (see --provision-target-bucket)"
 )
 
 // resolvePortConflictFunc is a test seam for port conflict resolution.
@@ -2197,7 +2201,8 @@ func init() {
 	runCmd.Flags().StringP("secret-key", "s", "", "The S3 secret key credential")
 	runCmd.Flags().StringP("bucket", "b", "", "Target bucket; for DELETE --items-file it is an optional assertion applied to every manifest row")
 	runCmd.Flags().String("prefix", "", "Write/write-verify: generated-key prefix (literal, include trailing / for a directory); seeded DELETE: owned namespace root; guarded existing DELETE: exact S3 prefix without a leading slash; list/read-verify: listing constraint")
-	runCmd.Flags().String("region", "", "AWS region for S3 requests (empty preserves engine region selection)")
+	runCmd.Flags().String("region", "", "AWS region for S3 requests (env S3_REGION); empty uses the region of a standard AWS endpoint, else us-east-1")
+	runCmd.Flags().Bool(flagProvisionTargetBucket, true, "Create a missing target bucket before the phase that writes the run's objects; false still checks that every target bucket exists and is accessible. Never clears or deletes a bucket")
 	registerEndpointSelectionFlags(runCmd.Flags())
 	runCmd.Flags().Int("auth-version", 4, "S3 authentication signature version (2 or 4; default 4)")
 
@@ -2232,7 +2237,8 @@ func init() {
 	runCmd.Flags().Bool("cleanup", false, "Best-effort deletion of SPT-created objects after the benchmark; DELETE permits this only for seeded mode")
 	runCmd.Flags().Bool(flagDeferVerification, false, "Write-verify only: stop after durable nonempty CREATE evidence and defer readback (env: SPT_DEFER_VERIFICATION)")
 	runCmd.Flags().String(flagVersions, scenario.VersionsCurrent, "Read-verify prefix discovery: current or all object versions")
-	runCmd.Flags().Bool("create-prefix", false, "A boolean flag to ensure the target prefix (directory) is created if it doesn't exist")
+	runCmd.Flags().Bool(flagCreatePrefix, false, "Deprecated: has no effect")
+	_ = runCmd.Flags().MarkDeprecated(flagCreatePrefix, createPrefixDeprecation)
 	runCmd.Flags().StringP("output-dir", "O", "", "Specifies a local directory on the host machine to save the detailed Spt report files (e.g., ./results/test-01)")
 	runCmd.Flags().Bool("generate-only", false, "Generate the scenario file without running Docker or Spt")
 	// Headless auto-termination
@@ -2403,6 +2409,10 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		accessKey, _ := cmd.Flags().GetString("access-key")
 		params.AccessKey = accessKey
 		params.Region, _ = cmd.Flags().GetString("region")
+		if cmd.Flags().Lookup(flagProvisionTargetBucket) != nil {
+			provision, _ := cmd.Flags().GetBool(flagProvisionTargetBucket)
+			params.TargetBucketProvisionDisabled = !provision
+		}
 		selection, err := endpointSelectionFromFlags(cmd)
 		if err != nil {
 			return params, err

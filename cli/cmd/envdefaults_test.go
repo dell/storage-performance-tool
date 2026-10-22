@@ -58,6 +58,7 @@ func clearEnvDefaultsTestEnv(t *testing.T) {
 		"THREADS",
 		constants.EnvSkipImagePull,
 		constants.EnvS3AuthVersion,
+		constants.EnvS3Region,
 		constants.EnvRdmaEnabled,
 		constants.EnvRdmaLocalIP,
 		constants.EnvRdmaDevice,

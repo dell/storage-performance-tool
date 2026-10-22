@@ -39,12 +39,18 @@ type RunClusterConfig struct {
 
 // StorageConfig represents storage configuration
 type StorageConfig struct {
-	Region   string          `yaml:"region,omitempty"`
-	Driver   DriverConfig    `yaml:"driver,omitempty"`
-	Net      NetConfig       `yaml:"net,omitempty"`
-	Auth     AuthConfig      `yaml:"auth,omitempty"`
-	Checksum *ChecksumConfig `yaml:"checksum,omitempty"` // pointer so omitted when nil
-	Rdma     *RdmaConfig     `yaml:"rdma,omitempty"`     // pointer so omitted when nil
+	Region       string              `yaml:"region,omitempty"`
+	TargetBucket *TargetBucketConfig `yaml:"targetBucket,omitempty"` // emitted only to disable creation
+	Driver       DriverConfig        `yaml:"driver,omitempty"`
+	Net          NetConfig           `yaml:"net,omitempty"`
+	Auth         AuthConfig          `yaml:"auth,omitempty"`
+	Checksum     *ChecksumConfig     `yaml:"checksum,omitempty"` // pointer so omitted when nil
+	Rdma         *RdmaConfig         `yaml:"rdma,omitempty"`     // pointer so omitted when nil
+}
+
+// TargetBucketConfig represents storage.targetBucket. The engine ships provision: true.
+type TargetBucketConfig struct {
+	Provision bool `yaml:"provision"`
 }
 
 // ItemConfig represents item-level configuration knobs.
@@ -365,7 +371,8 @@ func GenerateDefaults(params Params) ([]byte, error) {
 		}
 
 		config.Storage = StorageConfig{
-			Region: params.Region,
+			Region:       params.Region,
+			TargetBucket: targetBucketConfig(params),
 			Driver: DriverConfig{
 				Limit: DriverLimits{
 					Concurrency: params.Threads,
@@ -486,6 +493,15 @@ func GenerateDefaults(params Params) ([]byte, error) {
 	}
 
 	return data, nil
+}
+
+// targetBucketConfig returns the storage.targetBucket defaults for an opt-out only, so the
+// generated defaults are unchanged when provisioning stays on.
+func targetBucketConfig(params Params) *TargetBucketConfig {
+	if !params.TargetBucketProvisionDisabled {
+		return nil
+	}
+	return &TargetBucketConfig{Provision: false}
 }
 
 func applyEngineOverrides(data []byte, overrides []string) ([]byte, error) {

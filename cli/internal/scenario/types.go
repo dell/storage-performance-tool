@@ -7,7 +7,11 @@ type Params struct {
 	WorkloadType string
 	Endpoint     string
 	Endpoints    []string
-	Region       string // Optional AWS region; empty preserves engine defaults.
+	Region       string // Optional AWS region; empty lets the engine infer it from an AWS endpoint, else us-east-1.
+
+	// TargetBucketProvisionDisabled forbids creating a missing target bucket
+	// (--provision-target-bucket=false); target buckets are still checked.
+	TargetBucketProvisionDisabled bool
 
 	// EndpointSelection is the opt-in per-request endpoint selection; the zero value keeps the default.
 	EndpointSelection EndpointSelection
