@@ -90,6 +90,8 @@ const (
 	JavaRMIHostnamePrefix    = "-Djava.rmi.server.hostname="
 	ManagedContainerLogRoot  = "/tmp/spt-node-home"
 	SptNodeCommand           = "--run-node"
+	// EngineNodePortArgPrefix sets the engine's RMI registry port (load.step.node.port).
+	EngineNodePortArgPrefix = "--load-step-node-port="
 
 	DockerLabelManaged = "spt.managed"
 	DockerLabelRole    = "spt.role"

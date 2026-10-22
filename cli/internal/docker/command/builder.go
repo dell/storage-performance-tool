@@ -120,7 +120,7 @@ func (b *DockerCommandBuilderImpl) BuildWorkerNodeCommand(image, containerName, 
 		Command: []string{
 			"--run-node=true",
 			fmt.Sprintf("--run-port=%d", constants.DefaultSptAPIPort),
-			fmt.Sprintf("--load-step-node-port=%d", constants.DefaultRMIRegistryPort),
+			fmt.Sprintf("%s%d", constants.EngineNodePortArgPrefix, constants.DefaultRMIRegistryPort),
 		},
 	}
 

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- **Concurrent local runs** — Added `spt run --rmi-registry-port` (default 1099) to set the local engine's RMI registry port, so several `spt run` instances can run on one host at once, each with its own `--api-port` and registry port. Before, a second instance failed to start with `Port already in use: 1099`. Remote and distributed runs keep port 1099 and reject any other value.
+
 ### Changed
 
 - **S3-AWS workers** — With `storage.driver.threads` unset, the `s3-aws` driver now runs one I/O worker per concurrency permit instead of at most one per hardware thread. Every request blocks its worker, so a run with `--threads` above the node's CPU count previously kept only as many requests in flight as the node had CPUs and queued the rest behind busy workers; it now keeps the configured number in flight. A worker blocked in a request no longer takes queued permits with it: new operations go to idle workers first.
