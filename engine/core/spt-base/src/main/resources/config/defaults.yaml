@@ -199,6 +199,10 @@ storage:
       selection: default
     node:
       slice: false
+  # Before a step starts, the controller engine checks its S3 target buckets and creates a missing
+  # one for a step that writes new objects. false still checks them but never creates one.
+  targetBucket:
+    provision: true
 
 aliasing:
 # common

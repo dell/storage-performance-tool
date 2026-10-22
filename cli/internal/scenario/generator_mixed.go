@@ -57,6 +57,9 @@ var sharedConfig = {
         }
     }
 };
+
+// Phases that use existing objects check their target buckets and never create one.
+var existingBucketsOnly = {"storage": {"targetBucket": {"provision": false}}};
 {{if .HasSeedPhase}}
 // Phase 1: Seed (PreconditionLoad - metrics suppressed)
 pause(pauseTime, "Allowing system to stabilize before test...");
@@ -89,6 +92,7 @@ pause(pauseTime, "Starting mixed workload - duration: " + duration);
 print("[" + new Date().toISOString() + "] Mixed benchmark started");
 MixedLoad
     .config(sharedConfig)
+    .config(existingBucketsOnly)
     .config({
         "item": {
             "input": {
@@ -131,6 +135,7 @@ pause(pauseTime, "Pausing before cleanup...");
 print("[" + new Date().toISOString() + "] Cleaning up seed objects");
 DeleteLoad
     .config(sharedConfig)
+    .config(existingBucketsOnly)
     .config({
         "item": {
             "input": {
@@ -153,6 +158,7 @@ print("[" + new Date().toISOString() + "] Seed cleanup completed");
 print("[" + new Date().toISOString() + "] Cleaning up PUT-created objects");
 DeleteLoad
     .config(sharedConfig)
+    .config(existingBucketsOnly)
     .config({
         "item": {
             "input": {

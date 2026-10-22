@@ -67,7 +67,10 @@ var config = {
   }
 };
 
-var step = Load.config(config).start();
+// Phases that use existing objects check their target buckets and never create one.
+var existingBucketsOnly = {"storage": {"targetBucket": {"provision": false}}};
+
+var step = Load.config(config).config(existingBucketsOnly).start();
 step.await();
 step.close();
 `
@@ -132,6 +135,9 @@ var sharedConfig = {
     }
 };
 
+// Phases that use existing objects check their target buckets and never create one.
+var existingBucketsOnly = {"storage": {"targetBucket": {"provision": false}}};
+
 // Pre-test stabilization
 pause(pauseTime, "Allowing system to stabilize before test...");
 
@@ -171,6 +177,7 @@ pause(pauseTime, "Pausing between create and delete phases...");
 print("[" + new Date().toISOString() + "] Starting delete phase");
 DeleteLoad
     .config(sharedConfig)
+    .config(existingBucketsOnly)
     .config({
         "item": {
             "input": {
@@ -260,6 +267,9 @@ var sharedConfig = {
     }
 };
 
+// Phases that use existing objects check their target buckets and never create one.
+var existingBucketsOnly = {"storage": {"targetBucket": {"provision": false}}};
+
 // Pre-test stabilization
 pause(pauseTime, "Allowing system to stabilize before test...");
 
@@ -299,6 +309,7 @@ pause(pauseTime, "Pausing between create and delete phases...");
 print("[" + new Date().toISOString() + "] Starting delete phase");
 DeleteLoad
     .config(sharedConfig)
+    .config(existingBucketsOnly)
     .config({
         "item": {
             "input": {
@@ -579,6 +590,9 @@ var sharedConfig = {
     }
 };
 
+// Phases that use existing objects check their target buckets and never create one.
+var existingBucketsOnly = {"storage": {"targetBucket": {"provision": false}}};
+
 // Phase 1: Seed (PreconditionLoad - metrics suppressed)
 pause(pauseTime, "Allowing system to stabilize before test...");
 print("[" + new Date().toISOString() + "] Starting seed phase - " + seedCount + " objects");
@@ -610,6 +624,7 @@ pause(pauseTime, "Pausing before read phase...");
 print("[" + new Date().toISOString() + "] Starting read phase - duration: " + duration);
 ReadLoad
     .config(sharedConfig)
+    .config(existingBucketsOnly)
     .config({
         "item": {
             "input": {
@@ -644,6 +659,7 @@ pause(pauseTime, "Pausing before cleanup phase...");
 print("[" + new Date().toISOString() + "] Starting cleanup phase");
 DeleteLoad
     .config(sharedConfig)
+    .config(existingBucketsOnly)
     .config({
         "item": {
             "input": {
@@ -724,6 +740,9 @@ var sharedConfig = {
     }
 };
 
+// Phases that use existing objects check their target buckets and never create one.
+var existingBucketsOnly = {"storage": {"targetBucket": {"provision": false}}};
+
 // Phase 1: Seed (PreconditionLoad - metrics suppressed)
 pause(pauseTime, "Allowing system to stabilize before test...");
 print("[" + new Date().toISOString() + "] Starting seed phase - " + seedCount + " objects");
@@ -755,6 +774,7 @@ pause(pauseTime, "Pausing before read phase...");
 print("[" + new Date().toISOString() + "] Starting read phase - " + readCount + " reads");
 ReadLoad
     .config(sharedConfig)
+    .config(existingBucketsOnly)
     .config({
         "item": {
             "input": {
@@ -789,6 +809,7 @@ pause(pauseTime, "Pausing before cleanup phase...");
 print("[" + new Date().toISOString() + "] Starting cleanup phase");
 DeleteLoad
     .config(sharedConfig)
+    .config(existingBucketsOnly)
     .config({
         "item": {
             "input": {
@@ -862,6 +883,9 @@ var sharedConfig = {
     }
 };
 
+// Phases that use existing objects check their target buckets and never create one.
+var existingBucketsOnly = {"storage": {"targetBucket": {"provision": false}}};
+
 // Phase 1: Seed (PreconditionLoad - metrics suppressed)
 pause(pauseTime, "Allowing system to stabilize before test...");
 print("[" + new Date().toISOString() + "] Starting seed phase - " + seedCount + " objects");
@@ -893,6 +917,7 @@ pause(pauseTime, "Pausing before read phase...");
 print("[" + new Date().toISOString() + "] Starting read phase - duration: " + duration);
 ReadLoad
     .config(sharedConfig)
+    .config(existingBucketsOnly)
     .config({
         "item": {
             "input": {
@@ -977,6 +1002,9 @@ var sharedConfig = {
     }
 };
 
+// Phases that use existing objects check their target buckets and never create one.
+var existingBucketsOnly = {"storage": {"targetBucket": {"provision": false}}};
+
 // Phase 1: Seed (PreconditionLoad - metrics suppressed)
 pause(pauseTime, "Allowing system to stabilize before test...");
 print("[" + new Date().toISOString() + "] Starting seed phase - " + seedCount + " objects");
@@ -1008,6 +1036,7 @@ pause(pauseTime, "Pausing before read phase...");
 print("[" + new Date().toISOString() + "] Starting read phase - " + readCount + " reads");
 ReadLoad
     .config(sharedConfig)
+    .config(existingBucketsOnly)
     .config({
         "item": {
             "input": {
@@ -1099,6 +1128,9 @@ var sharedConfig = {
     }
 };
 
+// Phases that use existing objects check their target buckets and never create one.
+var existingBucketsOnly = {"storage": {"targetBucket": {"provision": false}}};
+
 // Phase 1: Seed (PreconditionLoad - metrics suppressed)
 pause(pauseTime, "Allowing system to stabilize before test...");
 print("[" + new Date().toISOString() + "] Starting seed phase - " + seedCount + " objects");
@@ -1130,6 +1162,7 @@ pause(pauseTime, "Pausing before read phase...");
 print("[" + new Date().toISOString() + "] Starting read phase - duration: " + duration);
 ReadLoad
     .config(sharedConfig)
+    .config(existingBucketsOnly)
     .config({
         "item": {
             "input": {
@@ -1164,6 +1197,7 @@ pause(pauseTime, "Pausing before cleanup phase...");
 print("[" + new Date().toISOString() + "] Starting cleanup phase");
 DeleteLoad
     .config(sharedConfig)
+    .config(existingBucketsOnly)
     .config({
         "item": {
             "input": {
@@ -1236,12 +1270,16 @@ var sharedConfig = {
     }
 };
 
+// Phases that use existing objects check their target buckets and never create one.
+var existingBucketsOnly = {"storage": {"targetBucket": {"provision": false}}};
+
 // Read benchmark (no seed phase - using pre-existing items.csv)
 pause(pauseTime, "Allowing system to stabilize before test...");
 print("[" + new Date().toISOString() + "] Starting read phase - duration: " + duration);
 print("[" + new Date().toISOString() + "] Using items file: " + itemsFile);
 ReadLoad
     .config(sharedConfig)
+    .config(existingBucketsOnly)
     .config({
         "item": {
             "input": {
@@ -1320,12 +1358,16 @@ var sharedConfig = {
     }
 };
 
+// Phases that use existing objects check their target buckets and never create one.
+var existingBucketsOnly = {"storage": {"targetBucket": {"provision": false}}};
+
 // Read benchmark (no seed phase - using pre-existing items.csv)
 pause(pauseTime, "Allowing system to stabilize before test...");
 print("[" + new Date().toISOString() + "] Starting read phase - " + readCount + " reads");
 print("[" + new Date().toISOString() + "] Using items file: " + itemsFile);
 ReadLoad
     .config(sharedConfig)
+    .config(existingBucketsOnly)
     .config({
         "item": {
             "input": {
@@ -1404,12 +1446,16 @@ var sharedConfig = {
     }
 };
 
+// Phases that use existing objects check their target buckets and never create one.
+var existingBucketsOnly = {"storage": {"targetBucket": {"provision": false}}};
+
 // Read benchmark (no seed phase - using pre-existing items.csv)
 pause(pauseTime, "Allowing system to stabilize before test...");
 print("[" + new Date().toISOString() + "] Starting read phase - duration: " + duration);
 print("[" + new Date().toISOString() + "] Using items file: " + itemsFile);
 ReadLoad
     .config(sharedConfig)
+    .config(existingBucketsOnly)
     .config({
         "item": {
             "input": {
@@ -1444,6 +1490,7 @@ pause(pauseTime, "Pausing before cleanup phase...");
 print("[" + new Date().toISOString() + "] Starting cleanup phase");
 DeleteLoad
     .config(sharedConfig)
+    .config(existingBucketsOnly)
     .config({
         "item": {
             "input": {
@@ -1511,12 +1558,16 @@ var sharedConfig = {
     }
 };
 
+// Phases that use existing objects check their target buckets and never create one.
+var existingBucketsOnly = {"storage": {"targetBucket": {"provision": false}}};
+
 // Read benchmark (no seed phase - using pre-existing items.csv)
 pause(pauseTime, "Allowing system to stabilize before test...");
 print("[" + new Date().toISOString() + "] Starting read phase - " + readCount + " reads");
 print("[" + new Date().toISOString() + "] Using items file: " + itemsFile);
 ReadLoad
     .config(sharedConfig)
+    .config(existingBucketsOnly)
     .config({
         "item": {
             "input": {
@@ -1551,6 +1602,7 @@ pause(pauseTime, "Pausing before cleanup phase...");
 print("[" + new Date().toISOString() + "] Starting cleanup phase");
 DeleteLoad
     .config(sharedConfig)
+    .config(existingBucketsOnly)
     .config({
         "item": {
             "input": {

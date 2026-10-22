@@ -10,6 +10,7 @@ import com.dell.spt.base.metrics.range.RangeReadSnapshot;
 import com.dell.spt.base.metrics.range.RangeReadArtifact;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleCounters;
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
@@ -169,7 +170,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				stepCtx.start();
 				anyStarted = true;
 			} catch (final IllegalStateException e) {
-				final var terminal = IntegrityTerminalException.find(e);
+				final var terminal = RunTerminalException.find(e);
 				if (terminal != null) {
 					throw terminal;
 				}

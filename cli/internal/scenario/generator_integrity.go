@@ -46,7 +46,7 @@ func GenerateWriteVerifyScenario(params Params) (string, error) {
 		ReadStep:   readID,
 		DeleteStep: deleteID,
 		CreateStorage: integrityStorageTemplateData{
-			Driver: driver, Concurrency: params.Threads,
+			Driver: driver, Concurrency: params.Threads, CreatesObjects: true,
 			Integrity: integrityTemplateData{
 				Provenance: constants.IntegrityProvenanceNone,
 			},
@@ -292,7 +292,7 @@ func generateSeededDeleteScenario(
 		DeleteStep:  deleteStep,
 		CleanupStep: formatStepID(params.Label, 3, ts, stepOpCleanup),
 		SeedStorage: integrityStorageTemplateData{
-			Driver: driver, Concurrency: params.Threads,
+			Driver: driver, Concurrency: params.Threads, CreatesObjects: true,
 			Integrity: integrityTemplateData{
 				Provenance:              constants.IntegrityProvenanceNone,
 				RequireExactOutputCount: true,

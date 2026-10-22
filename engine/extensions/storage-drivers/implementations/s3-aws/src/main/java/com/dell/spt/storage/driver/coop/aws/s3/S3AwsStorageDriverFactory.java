@@ -7,6 +7,9 @@ import com.dell.spt.base.env.ExtensionBase;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.storage.driver.StorageDriverFactory;
+import com.dell.spt.base.storage.driver.bucket.AwsS3Region;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketControl;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketControlFactory;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.SchemaProvider;
 import com.github.akurilov.confuse.io.yaml.YamlSchemaProviderBase;
@@ -23,17 +26,22 @@ import java.net.URI;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * ServiceLoader entry point for the AWS SDK based S3 storage driver.
  */
 public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation<I>>
 				extends ExtensionBase
-				implements StorageDriverFactory<I, O, S3AwsStorageDriver<I, O>> {
+				implements StorageDriverFactory<I, O, S3AwsStorageDriver<I, O>>, TargetBucketControlFactory {
 
 	private static final Logger LOG = LoggerFactory.getLogger(S3AwsStorageDriverFactory.class);
 	private static final String NAME = "s3-aws";
 	private static final String DEFAULTS_FILE_NAME = "defaults-storage-s3-aws.yaml";
+	// Path-style access: S3-compatible stores (SeaweedFS, MinIO) require it, and AWS accepts it.
+	private static final boolean PATH_STYLE = true;
+	private static final Set<String> REGION_CONFLICT_WARNINGS = ConcurrentHashMap.newKeySet();
 	private final S3AwsStandaloneDeleteResources.Factory standaloneDeleteResourcesFactory;
 
 	/** Creates the ServiceLoader-compatible AWS S3 driver factory. */
@@ -72,35 +80,7 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 					final int batchSize)
 					throws IllegalConfigurationException, InterruptedException {
 
-		// ---------------------------
-		// Authentication — confuse splits "auth-uid" into path auth→uid,
-		// which matches the standard storage.auth.uid config path.
-		// ---------------------------
-		final String accessKey;
-		final String secretKey;
-		try {
-			accessKey = storageConfig.stringVal("auth-uid");
-		} catch (Exception e) {
-			throw new IllegalConfigurationException(
-							"Missing required config: storage.auth.uid (access key)");
-		}
-		try {
-			secretKey = storageConfig.stringVal("auth-secret");
-		} catch (Exception e) {
-			throw new IllegalConfigurationException(
-							"Missing required config: storage.auth.secret (secret key)");
-		}
-
-		// Region — optional for S3-compatible services
-		String region;
-		try {
-			region = storageConfig.stringVal("region");
-		} catch (Exception e) {
-			region = null;
-		}
-		if (region == null || region.isEmpty()) {
-			region = "eu-west-2";
-		}
+		final var creds = credentials(storageConfig);
 
 		// Note: bucket resolution is handled by the driver constructor,
 		// not by the factory — the driver reads it from config directly.
@@ -112,10 +92,9 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 		//   storage.net.ssl.enabled (scheme selection)
 		// ---------------------------
 		final String endpoint = resolveEndpoint(storageConfig);
+		final String region = effectiveRegion(storageConfig, endpoint);
 
-		// Path-style access — S3-compatible stores (SeaweedFS, MinIO) require this.
-		// Default to true since this driver targets non-AWS endpoints.
-		final boolean pathStyle = true;
+		final boolean pathStyle = PATH_STYLE;
 
 		// ---------------------------
 		// CRT Configuration
@@ -181,8 +160,6 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 		// ---------------------------
 		// Build AWS S3 Async Client with CRT
 		// ---------------------------
-		final var creds = AwsBasicCredentials.create(accessKey, secretKey);
-
 		var crtBuilder = S3AsyncClient.crtBuilder()
 						.credentialsProvider(StaticCredentialsProvider.create(creds))
 						.region(Region.of(region))
@@ -237,6 +214,69 @@ public final class S3AwsStorageDriverFactory<I extends Item, O extends Operation
 		} catch (final RuntimeException | Error failure) {
 			constructionResources.closeOnFailure(failure);
 			throw failure;
+		}
+	}
+
+	/**
+	 * Opens the controller's target-bucket control client: an ordinary SDK client with the
+	 * driver's endpoint, path-style addressing, credentials, region and connection bounds.
+	 */
+	@Override
+	public TargetBucketControl openTargetBucketControl(final String stepId, final Config storageConfig)
+					throws IllegalConfigurationException {
+		final var creds = credentials(storageConfig);
+		final String endpoint = resolveEndpoint(storageConfig);
+		final String region = effectiveRegion(storageConfig, endpoint);
+		final S3AwsClientTimeouts timeouts = S3AwsClientTimeouts.from(storageConfig);
+		final S3AsyncClient client = S3AsyncClient.builder()
+						.credentialsProvider(StaticCredentialsProvider.create(creds))
+						.region(Region.of(region))
+						.endpointOverride(URI.create(endpoint))
+						.forcePathStyle(PATH_STYLE)
+						.httpClientBuilder(timeouts.applyTo(AwsCrtAsyncHttpClient.builder().maxConcurrency(1)))
+						.build();
+		return new S3AwsTargetBucketControl(client, region, endpoint, timeouts.requestTimeout());
+	}
+
+	/**
+	 * Reads the static credentials. Confuse splits "auth-uid" into the path auth→uid, which matches
+	 * the standard storage.auth.uid config path.
+	 */
+	static AwsBasicCredentials credentials(final Config storageConfig) throws IllegalConfigurationException {
+		final String accessKey;
+		final String secretKey;
+		try {
+			accessKey = storageConfig.stringVal("auth-uid");
+		} catch (Exception e) {
+			throw new IllegalConfigurationException(
+							"Missing required config: storage.auth.uid (access key)");
+		}
+		try {
+			secretKey = storageConfig.stringVal("auth-secret");
+		} catch (Exception e) {
+			throw new IllegalConfigurationException(
+							"Missing required config: storage.auth.secret (secret key)");
+		}
+		return AwsBasicCredentials.create(accessKey, secretKey);
+	}
+
+	/**
+	 * Returns the signing region: {@code storage.region}, else the region a standard AWS endpoint
+	 * names, else us-east-1, the same order as the other S3 drivers.
+	 */
+	static String effectiveRegion(final Config storageConfig, final String endpoint) {
+		String configured;
+		try {
+			configured = storageConfig.stringVal("region");
+		} catch (Exception e) {
+			configured = null;
+		}
+		return AwsS3Region.effective(configured, endpoint, S3AwsStorageDriverFactory::warnRegionConflictOnce);
+	}
+
+	private static void warnRegionConflictOnce(final String warning) {
+		if (REGION_CONFLICT_WARNINGS.add(warning)) {
+			LOG.warn(warning);
 		}
 	}
 

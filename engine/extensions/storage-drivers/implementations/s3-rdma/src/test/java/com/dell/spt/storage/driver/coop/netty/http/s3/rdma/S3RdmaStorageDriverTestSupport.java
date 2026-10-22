@@ -89,7 +89,7 @@ final class S3RdmaStorageDriverTestSupport {
 		}
 	}
 
-	private static Config config(
+	static Config config(
 					final RdmaConfig rdmaConfig,
 					final String namespace,
 					final List<String> nodeAddrs,

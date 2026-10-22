@@ -1506,6 +1506,7 @@ func (m *MultiHostTestOrchestrator) metricsPollingLoop(ctx context.Context) {
 	ticker := time.NewTicker(m.pollInterval)
 	defer ticker.Stop()
 
+	completed := false
 	for {
 		select {
 		case <-ticker.C:
@@ -1518,11 +1519,43 @@ func (m *MultiHostTestOrchestrator) metricsPollingLoop(ctx context.Context) {
 					m.recordCompletionFailure(failure)
 				}
 				m.signalCompletion()
+				completed = true
+			}
+			if completed {
+				continue
+			}
+			if failure := m.observeEntryTerminalFailure(ctx); failure != nil {
+				m.recordCompletionFailure(errors.Join(terminalDeletePolicyFailure(update), failure))
+				m.signalCompletion()
+				return
 			}
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+// observeEntryTerminalFailure returns the failure the entry engine published as FAILED for the owned
+// run, or nil. A phase that fails during setup, before its slices start, publishes no metrics of its
+// own, so metrics-driven completion alone would wait for its step forever, whether or not earlier
+// phases published metrics.
+func (m *MultiHostTestOrchestrator) observeEntryTerminalFailure(ctx context.Context) error {
+	if m.multiHost == nil || len(m.multiHost.hosts) == 0 || m.multiHost.hosts[0] == nil {
+		return nil
+	}
+	client := m.multiHost.hosts[0].APIClient
+	if client == nil {
+		return nil
+	}
+	status, err := client.GetStatusContext(ctx)
+	if err != nil || status == nil || status.State != constants.StateFailed ||
+		!client.statusMatchesOwnedRun(status) {
+		return nil
+	}
+	if m.onStatusUpdate != nil {
+		m.onStatusUpdate(status)
+	}
+	return ownedTerminalStatusFailure(status)
 }
 
 // shouldSignalCompletion reports whether an aggregated metrics sample indicates

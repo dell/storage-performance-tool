@@ -5,6 +5,8 @@ import com.dell.spt.base.env.ExtensionBase;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketControl;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketControlFactory;
 import com.dell.spt.base.storage.driver.endpoint.EndpointSelectionDriverFactory;
 import com.dell.spt.base.storage.driver.range.RangeReadDriverFactory;
 import com.dell.spt.base.item.op.data.range.RangeReadPolicy;
@@ -22,7 +24,7 @@ import java.util.List;
 
 public final class S3StorageDriverExtension<I extends Item, O extends Operation<I>, T extends S3StorageDriver<I, O>>
 				extends ExtensionBase
-				implements RangeReadDriverFactory<I, O, T>, EndpointSelectionDriverFactory<I, O, T> {
+				implements RangeReadDriverFactory<I, O, T>, EndpointSelectionDriverFactory<I, O, T>, TargetBucketControlFactory {
 
 	private static final String NAME = "s3";
 	private static final String DEFAULTS_FILE_NAME = "defaults-storage-s3.yaml";
@@ -45,6 +47,12 @@ public final class S3StorageDriverExtension<I extends Item, O extends Operation<
 		}
 		return (T) S3EndpointSelectionDriver.create(
 						stepId, dataInput, storageConfig, verifyFlag, batchSize, endpointSelection);
+	}
+
+	@Override
+	public TargetBucketControl openTargetBucketControl(final String stepId, final Config storageConfig)
+					throws IllegalConfigurationException, InterruptedException {
+		return S3TargetBucketControl.open(stepId, storageConfig);
 	}
 
 	@Override

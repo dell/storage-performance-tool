@@ -299,7 +299,7 @@ func validateIntegrityWorkloadFlags(cmd *cobra.Command, workloadType string) err
 	unsupported := []string{
 		"duration", "part-size", "mpu-concurrent-objects", "mpu-concurrent-parts",
 		"cleanup", "save-items", "object-size", "object-data-compressibility",
-		"object-data-dedupable", "seed-objects", "create-prefix", flagPrefixShards,
+		"object-data-dedupable", "seed-objects", flagCreatePrefix, flagPrefixShards,
 	}
 	for _, name := range unsupported {
 		// Applicability is based on the effective configuration, irrespective
@@ -577,8 +577,8 @@ func validateListFlagCompatibility(cmd *cobra.Command) error {
 		return fmt.Errorf(ErrFlagNotSupported, "--cleanup", WorkloadTypeList)
 	}
 
-	if createPrefixFlag := cmd.Flags().Lookup("create-prefix"); createPrefixFlag != nil {
-		createPrefix, _ := cmd.Flags().GetBool("create-prefix")
+	if createPrefixFlag := cmd.Flags().Lookup(flagCreatePrefix); createPrefixFlag != nil {
+		createPrefix, _ := cmd.Flags().GetBool(flagCreatePrefix)
 		if createPrefix {
 			return fmt.Errorf(ErrFlagNotSupported, "--create-prefix", WorkloadTypeList)
 		}

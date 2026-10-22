@@ -42,6 +42,8 @@ import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.Credential;
+import com.dell.spt.base.storage.driver.bucket.AwsS3Region;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketResponse;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.storage.driver.coop.netty.http.HttpStorageDriverBase;
 import com.github.akurilov.commons.io.Input;
@@ -90,8 +92,6 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.function.Function;
 import java.util.function.Supplier;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.zip.CRC32;
 import java.util.zip.CRC32C;
 import java.util.zip.Checksum;
@@ -413,17 +413,17 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			checksumStrategy = null;
 		}
 
-		final String configuredRegion = storageConfig.stringVal("region");
-		// Look for an AWS endpoint, e.g. "s3.us-east-1.amazonaws.com:80"
-		Pattern awsPattern = Pattern.compile("s3\\.([^\\.]+)\\.amazonaws\\.com:[0-9]+");
-		Matcher awsMatcher = null;
-		if (configuredRegion != null && !configuredRegion.isEmpty()) {
-			awsRegion = configuredRegion;
-		} else if (storageNodeAddrs.length == 1 && (awsMatcher = awsPattern.matcher(storageNodeAddrs[0])).matches()) {
-			// Extract the AWS region
-			awsRegion = awsMatcher.group(1);
-		} else {
-			awsRegion = S3Api.AMZ_DEFAULT_REGION;
+		awsRegion = AwsS3Region.effective(
+						storageConfig.stringVal("region"),
+						storageNodeAddrs.length == 1 ? storageNodeAddrs[0] : null,
+						S3StorageDriver::warnRegionConflictOnce);
+	}
+
+	private static final Set<String> REGION_CONFLICT_WARNINGS = ConcurrentHashMap.newKeySet();
+
+	private static void warnRegionConflictOnce(final String warning) {
+		if (REGION_CONFLICT_WARNINGS.add(warning)) {
+			Loggers.MSG.warn(warning);
 		}
 	}
 
@@ -481,6 +481,13 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		this.helperAuthority = authority;
 	}
 
+	/**
+	 * Worker-side initialization of a destination bucket, once per bucket per driver instance.
+	 *
+	 * <p>The controller engine provisions target buckets before any slice starts, so a worker never
+	 * creates one. It checks the bucket with {@code HEAD}, which only reports, and reconciles bucket
+	 * versioning when that is enabled.
+	 */
 	@Override
 	protected String requestNewPath(final String path) {
 		final var bucketPath = requestNewPathCacheKey(path);
@@ -491,7 +498,6 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 						path,
 						bucketPath,
 						uri);
-		// check the destination bucket if it exists w/ HEAD request
 		final var nodeAddr = helperAuthority;
 		var reqHeaders = (HttpHeaders) new DefaultHttpHeaders();
 		reqHeaders.set(HttpHeaderNames.HOST, nodeAddr);
@@ -524,50 +530,12 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			LogUtil.exception(Level.WARN, e, "Failed to connect to the storage node");
 			return null;
 		}
-		var bucketExistedBefore = true;
 		if (checkBucketResp != null) {
 			if (!HttpStatusClass.SUCCESS.equals(checkBucketResp.status().codeClass())) {
-				Loggers.MSG.info(
-								"The bucket checking response is: {}", checkBucketResp.status().toString());
-				if (Loggers.MSG.isInfoEnabled() && checkBucketResp.content().isReadable()) {
-					Loggers.MSG.info(
-									"Bucket check error body: {}",
-									checkBucketResp.content().toString(StandardCharsets.UTF_8));
-				}
-				bucketExistedBefore = false;
+				Loggers.MSG.debug(
+								"{}: the bucket {} check response is {}", stepId, bucketPath, checkBucketResp.status());
 			}
 			checkBucketResp.release();
-		}
-		// create the destination bucket if it doesn't exists
-		if (!bucketExistedBefore) {
-			reqHeaders = new DefaultHttpHeaders();
-			reqHeaders.set(HttpHeaderNames.HOST, nodeAddr);
-			reqHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
-			applyMetaDataHeaders(reqHeaders);
-			applyDynamicHeaders(reqHeaders);
-			applySharedHeaders(reqHeaders);
-			applyAuthHeaders(reqHeaders, HttpMethod.PUT, uri, credential);
-			final FullHttpRequest putBucketReq = new DefaultFullHttpRequest(
-							HttpVersion.HTTP_1_1,
-							HttpMethod.PUT,
-							uri,
-							Unpooled.EMPTY_BUFFER,
-							reqHeaders,
-							EmptyHttpHeaders.INSTANCE);
-			final FullHttpResponse putBucketResp;
-			try {
-				putBucketResp = executeHttpRequest(putBucketReq);
-				if (!HttpStatusClass.SUCCESS.equals(putBucketResp.status().codeClass())) {
-					Loggers.ERR.warn("The bucket creating response is: {}", putBucketResp.status().toString());
-					return null;
-				}
-				putBucketResp.release();
-			} catch (final InterruptedException e) {
-				throwUnchecked(e);
-			} catch (final ConnectException e) {
-				LogUtil.exception(Level.WARN, e, "Failed to connect to the storage node");
-				return null;
-			}
 		}
 
 		// check the bucket versioning state
@@ -606,6 +574,75 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			}
 		}
 		return path;
+	}
+
+	/**
+	 * Target-bucket provisioning check: {@code HEAD /bucket} with the documented global HTTP
+	 * headers and URI arguments, signed with the bucket's credential.
+	 *
+	 * @param credential the per-path credential, or null for the driver's own
+	 */
+	public final TargetBucketResponse checkTargetBucket(final String bucket, final Credential credential)
+					throws InterruptedException {
+		return targetBucketRequest(HttpMethod.HEAD, bucket, new byte[0], credential);
+	}
+
+	/**
+	 * Target-bucket provisioning creation: {@code PUT /bucket}, with a location constraint only for
+	 * a recognized AWS endpoint outside {@code us-east-1}. It carries no object metadata.
+	 *
+	 * @param credential the per-path credential, or null for the driver's own
+	 */
+	public final TargetBucketResponse createTargetBucket(final String bucket, final Credential credential)
+					throws InterruptedException {
+		final var body = AwsS3Region.createBucketBody(awsRegion, helperAuthority);
+		return targetBucketRequest(HttpMethod.PUT, bucket, body, credential);
+	}
+
+	private TargetBucketResponse targetBucketRequest(
+					final HttpMethod method, final String bucket, final byte[] body, final Credential credential)
+					throws InterruptedException {
+		final var uriQuery = uriQuery();
+		final var bucketPath = SLASH + bucket;
+		final var uri = uriQuery == null || uriQuery.isEmpty() ? bucketPath : bucketPath + uriQuery;
+		final var reqHeaders = new DefaultHttpHeaders();
+		reqHeaders.set(HttpHeaderNames.HOST, helperAuthority);
+		reqHeaders.set(HttpHeaderNames.CONTENT_LENGTH, body.length);
+		applyDynamicHeaders(reqHeaders);
+		applySharedHeaders(reqHeaders);
+		applyAuthHeaders(reqHeaders, method, uri, credential);
+		if (Loggers.MSG.isDebugEnabled()) {
+			for (final var header : reqHeaders) {
+				Loggers.MSG.debug(
+								"{}: target bucket {} header {}: {}",
+								stepId,
+								method,
+								header.getKey(),
+								safeHeaderValueForLogging(header.getKey(), header.getValue()));
+			}
+		}
+		final FullHttpRequest request = new DefaultFullHttpRequest(
+						HttpVersion.HTTP_1_1,
+						method,
+						uri,
+						body.length == 0 ? Unpooled.EMPTY_BUFFER : Unpooled.wrappedBuffer(body),
+						reqHeaders,
+						EmptyHttpHeaders.INSTANCE);
+		final FullHttpResponse response;
+		try {
+			response = executeHttpRequest(request, false);
+		} catch (final ConnectException e) {
+			Loggers.MSG.debug("{}: target bucket {} connection failure: {}", stepId, method, e.toString());
+			return TargetBucketResponse.failed("connection failed");
+		}
+		if (response == null) {
+			return TargetBucketResponse.failed("timed out after " + netTimeoutMilliSec + " ms");
+		}
+		try {
+			return TargetBucketResponse.ofHttpStatus(response.status().code());
+		} finally {
+			response.release();
+		}
 	}
 
 	static String safeHeaderValueForLogging(final String headerName, final String headerValue) {

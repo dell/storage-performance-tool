@@ -123,6 +123,8 @@ type statusResponse struct {
 	Message     string   `json:"message"`
 	RunID       *int64   `json:"run_id"`
 	LegacyRunID string   `json:"runId"`
+	StepID      string   `json:"step_id"`
+	Category    string   `json:"category"`
 }
 
 // TestStatus represents the status of a running test
@@ -131,6 +133,8 @@ type TestStatus struct {
 	Progress         float64 // Progress percentage if available
 	Message          string  // Status message or error
 	RunID            string  // Current run ID
+	StepID           string  // Step the engine attributes its state to, when known
+	Category         string  // Lowercase failure category of a FAILED run
 	runIDFromPayload bool
 }
 
@@ -753,6 +757,8 @@ func (c *SptAPIClient) getStatusContext(ctx context.Context) (*TestStatus, error
 	}
 
 	status.Message = statusData.Message
+	status.StepID = strings.TrimSpace(statusData.StepID)
+	status.Category = strings.TrimSpace(statusData.Category)
 
 	if statusData.RunID != nil {
 		status.RunID = strconv.FormatInt(*statusData.RunID, 10)

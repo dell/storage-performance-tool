@@ -416,7 +416,7 @@ final class S3AwsDeleteRequestIntegrationTest {
 		assertEquals(3, verification.size());
 		assertTrue(verification.subList(1, verification.size()).stream()
 						.allMatch(row -> row.contains(",unattempted,true,absent,true,unattempted,")));
-		assertEquals(2, requests.stream().filter(request -> "HEAD".equals(request.method())).count());
+		assertEquals(2, requests.stream().filter(S3AwsDeleteRequestIntegrationTest::isObjectHead).count());
 		assertEquals(0, requests.stream()
 						.filter(request -> "DELETE".equals(request.method()) || "POST".equals(request.method()))
 						.count());
@@ -628,7 +628,9 @@ final class S3AwsDeleteRequestIntegrationTest {
 						exchange.getRequestURI().getRawQuery(),
 						body));
 		if ("HEAD".equals(exchange.getRequestMethod())) {
-			exchange.sendResponseHeaders(headResponseStatus.apply(requests.get(requests.size() - 1)), -1);
+			// Bucket checks (target-bucket provisioning) see an existing bucket; objects follow the test.
+			final CapturedRequest request = requests.get(requests.size() - 1);
+			exchange.sendResponseHeaders(isBucketPath(request.rawPath()) ? 200 : headResponseStatus.apply(request), -1);
 		} else if ("DELETE".equals(exchange.getRequestMethod())) {
 			exchange.sendResponseHeaders(204, -1);
 		} else if ("POST".equals(exchange.getRequestMethod())
@@ -641,6 +643,14 @@ final class S3AwsDeleteRequestIntegrationTest {
 			exchange.sendResponseHeaders(500, -1);
 		}
 		exchange.close();
+	}
+
+	private static boolean isBucketPath(final String rawPath) {
+		return rawPath.indexOf('/', 1) < 0;
+	}
+
+	private static boolean isObjectHead(final CapturedRequest request) {
+		return "HEAD".equals(request.method()) && !isBucketPath(request.rawPath());
 	}
 
 	private record CapturedRequest(String method, String rawPath, String rawQuery, String body) {}
