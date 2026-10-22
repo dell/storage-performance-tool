@@ -34,8 +34,16 @@ final class TargetBuckets {
 	static final String INPUT_PATH = "item-input-path";
 	static final String INPUT_FILE = "item-input-file";
 
-	/** A bucket the step uses; creatable when the step may provision it. */
-	record Target(String bucket, boolean creatable, Credential credential) {}
+	/**
+	 * A bucket the step uses. {@code written} when the step writes new objects into it;
+	 * {@code creatable} when, in addition, its policy permits creating it.
+	 */
+	record Target(String bucket, boolean written, boolean creatable, Credential credential) {
+
+		Target mergedWith(final Target other) {
+			return new Target(bucket, written || other.written, creatable || other.creatable, credential);
+		}
+	}
 
 	private TargetBuckets() {}
 
@@ -95,17 +103,17 @@ final class TargetBuckets {
 		if (writes) {
 			final var outputPath = ctxConfig.stringVal(OUTPUT_PATH);
 			if (outputPath != null && !outputPath.isEmpty()) {
-				add(targets, literalBucket("item.output.path", outputPath), provision, credentials, outputPath);
+				add(targets, literalBucket("item.output.path", outputPath), true, provision, credentials, outputPath);
 			}
 		}
 		final var inputPath = ctxConfig.stringVal(INPUT_PATH);
 		if (inputPath != null && !inputPath.isEmpty()) {
-			add(targets, literalBucket("item.input.path", inputPath), false, credentials, inputPath);
+			add(targets, literalBucket("item.input.path", inputPath), false, false, credentials, inputPath);
 		}
 		final var inputFile = ctxConfig.stringVal(INPUT_FILE);
 		if (inputFile != null && !inputFile.isEmpty()) {
 			for (final var bucket : itemFileBuckets(Path.of(inputFile))) {
-				add(targets, bucket, false, credentials, "/" + bucket);
+				add(targets, bucket, false, false, credentials, "/" + bucket);
 			}
 		}
 		return List.copyOf(targets.values());
@@ -114,18 +122,15 @@ final class TargetBuckets {
 	private static void add(
 					final Map<String, Target> targets,
 					final String bucket,
+					final boolean written,
 					final boolean creatable,
 					final Map<String, Credential> credentials,
 					final String path) {
 		if (bucket.isEmpty()) {
 			return;
 		}
-		final var existing = targets.get(bucket);
-		if (existing == null) {
-			targets.put(bucket, new Target(bucket, creatable, credential(credentials, path, bucket)));
-		} else if (creatable && !existing.creatable()) {
-			targets.put(bucket, new Target(bucket, true, existing.credential()));
-		}
+		final var target = new Target(bucket, written, written && creatable, credential(credentials, path, bucket));
+		targets.merge(bucket, target, Target::mergedWith);
 	}
 
 	/** Returns the bucket segment of a path that must name a literal bucket. */

@@ -15,6 +15,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import org.apache.logging.log4j.ThreadContext;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -78,7 +79,8 @@ class TargetBucketProvisioningTest {
 		assertEquals(List.of("HEAD bench"), extension.requests);
 		assertEquals(Category.EXECUTION, failure.category());
 		assertEquals("step", failure.stepId());
-		assertTrue(failure.getMessage().contains("target bucket \"bench\" does not exist"), failure.getMessage());
+		assertEquals("target bucket \"bench\" does not exist and target-bucket provisioning is disabled "
+						+ "(--provision-target-bucket=false, storage.targetBucket.provision: false)", failure.getMessage());
 		assertEquals(1, extension.closed);
 	}
 
@@ -88,10 +90,29 @@ class TargetBucketProvisioningTest {
 		final var config = stepConfig("read", "%{date:format(\"yyyy\").format(date:from(time:millisSinceEpoch()))}");
 		config.val("item-input-path", "/source");
 
-		assertThrows(RunTerminalException.class, () -> provision(config));
+		final var failure = assertThrows(RunTerminalException.class, () -> provision(config));
 
 		assertEquals(List.of("HEAD source"), extension.requests,
 						"a reading step validates its source and ignores its unused output path");
+		assertEquals("target bucket \"source\" does not exist; this step uses existing objects only "
+						+ "and never creates a bucket", failure.getMessage());
+	}
+
+	@Test
+	void requestsRunInTheStepLogContextAndTheCallersContextIsRestored() throws Exception {
+		extension.leakLogContext = true;
+		ThreadContext.put(Constants.KEY_STEP_ID, "previous-step");
+		ThreadContext.put(Constants.KEY_CLASS_NAME, "Caller");
+		try {
+			provision(stepConfig("create", "/bench"));
+
+			assertEquals(List.of("step"), extension.stepIdsSeen, "messages must reach the step's messages.log");
+			assertEquals("previous-step", ThreadContext.get(Constants.KEY_STEP_ID));
+			assertEquals("Caller", ThreadContext.get(Constants.KEY_CLASS_NAME));
+		} finally {
+			ThreadContext.remove(Constants.KEY_STEP_ID);
+			ThreadContext.remove(Constants.KEY_CLASS_NAME);
+		}
 	}
 
 	@Test

@@ -1,5 +1,6 @@
 package com.dell.spt.base.storage.driver.bucket;
 
+import com.dell.spt.base.Constants;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.StorageDriver;
@@ -13,6 +14,7 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import org.apache.logging.log4j.ThreadContext;
 
 /**
  * Deterministic target-bucket capability for tests: each bucket answers from a script, and every
@@ -27,9 +29,12 @@ final class ScriptedTargetBucketExtension implements StorageDriverFactory, Targe
 	final Map<String, Deque<TargetBucketResponse>> checks = new HashMap<>();
 	final Map<String, TargetBucketResponse> creates = new HashMap<>();
 	final List<Config> openedWith = new ArrayList<>();
+	final List<String> stepIdsSeen = new ArrayList<>();
 	int opened;
 	int closed;
 	boolean interruptOnCheck;
+	/** Leaves its own log context behind, as the Netty helper requests do. */
+	boolean leakLogContext;
 
 	ScriptedTargetBucketExtension check(final String bucket, final TargetBucketResponse... responses) {
 		checks.computeIfAbsent(bucket, key -> new ArrayDeque<>()).addAll(List.of(responses));
@@ -75,6 +80,11 @@ final class ScriptedTargetBucketExtension implements StorageDriverFactory, Targe
 			public TargetBucketResponse check(final String bucket, final Credential credential)
 							throws InterruptedException {
 				requests.add("HEAD " + bucket + uid(credential));
+				stepIdsSeen.add(ThreadContext.get(Constants.KEY_STEP_ID));
+				if (leakLogContext) {
+					ThreadContext.put(Constants.KEY_STEP_ID, "leaked-step");
+					ThreadContext.put(Constants.KEY_CLASS_NAME, "LeakyDriver");
+				}
 				if (interruptOnCheck) {
 					throw new InterruptedException("test interruption");
 				}

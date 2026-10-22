@@ -1,5 +1,7 @@
 package com.dell.spt.base.storage.driver.bucket;
 
+import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
+import static com.dell.spt.base.Constants.KEY_STEP_ID;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 
 import com.dell.spt.base.control.run.RunScope;
@@ -17,6 +19,7 @@ import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.apache.logging.log4j.CloseableThreadContext;
 import org.apache.logging.log4j.Level;
 
 /**
@@ -31,6 +34,7 @@ import org.apache.logging.log4j.Level;
 public final class TargetBucketProvisioning {
 
 	static final String POLICY = "storage-targetBucket-provision";
+	private static final String CLS_NAME = TargetBucketProvisioning.class.getSimpleName();
 
 	public enum Outcome {
 		EXISTING, CREATED
@@ -53,17 +57,26 @@ public final class TargetBucketProvisioning {
 					final Config config,
 					final List<Config> ctxConfigs,
 					final List<Extension> extensions) {
-		final var targetsByDriver = new LinkedHashMap<String, DriverTargets>();
-		if (ctxConfigs == null || ctxConfigs.isEmpty()) {
-			collect(stepId, config, null, config, extensions, targetsByDriver);
-		} else {
-			for (final var ctxConfig : ctxConfigs) {
-				collect(stepId, config, ctxConfig, merge(config, ctxConfig), extensions, targetsByDriver);
+		// The step's log context routes messages to its messages.log; closing it also undoes any
+		// context a driver's control request leaves behind on this scenario thread.
+		try (final var logCtx = logContext(stepId)) {
+			final var targetsByDriver = new LinkedHashMap<String, DriverTargets>();
+			if (ctxConfigs == null || ctxConfigs.isEmpty()) {
+				collect(stepId, config, null, config, extensions, targetsByDriver);
+			} else {
+				for (final var ctxConfig : ctxConfigs) {
+					collect(stepId, config, ctxConfig, merge(config, ctxConfig), extensions, targetsByDriver);
+				}
+			}
+			for (final var entry : targetsByDriver.entrySet()) {
+				provision(stepId, entry.getKey(), entry.getValue());
 			}
 		}
-		for (final var entry : targetsByDriver.entrySet()) {
-			provision(stepId, entry.getKey(), entry.getValue());
-		}
+	}
+
+	private static CloseableThreadContext.Instance logContext(final String stepId) {
+		final var context = CloseableThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
+		return stepId == null ? context : context.put(KEY_STEP_ID, stepId);
 	}
 
 	/**
@@ -188,10 +201,13 @@ public final class TargetBucketProvisioning {
 		default:
 			break;
 		}
+		if (!target.written()) {
+			throw failure("target bucket \"" + bucket + "\" does not exist; this step uses existing objects only "
+							+ "and never creates a bucket");
+		}
 		if (!target.creatable()) {
-			throw failure("target bucket \"" + bucket + "\" does not exist; this step uses only existing buckets "
-							+ "(target-bucket provisioning creates the bucket of a step that writes new objects, "
-							+ "when storage.targetBucket.provision is true)");
+			throw failure("target bucket \"" + bucket + "\" does not exist and target-bucket provisioning is disabled "
+							+ "(--provision-target-bucket=false, storage.targetBucket.provision: false)");
 		}
 		final var create = control.create(bucket, target.credential());
 		if (create.kind() == TargetBucketResponse.Kind.OK) {
@@ -215,10 +231,13 @@ public final class TargetBucketProvisioning {
 		final var first = scope == null || scope.firstReport(identity + "/" + bucket);
 		final var level = first ? Level.INFO : Level.DEBUG;
 		final var step = stepId == null ? "load step" : stepId;
-		if (outcome == Outcome.CREATED) {
-			Loggers.MSG.log(level, "{}: created target bucket \"{}\"", step, bucket);
-		} else {
-			Loggers.MSG.log(level, "{}: using existing target bucket \"{}\"", step, bucket);
+		// A control request may have replaced the class name of this thread's log context.
+		try (final var logCtx = CloseableThreadContext.put(KEY_CLASS_NAME, CLS_NAME)) {
+			if (outcome == Outcome.CREATED) {
+				Loggers.MSG.log(level, "{}: created target bucket \"{}\"", step, bucket);
+			} else {
+				Loggers.MSG.log(level, "{}: using existing target bucket \"{}\"", step, bucket);
+			}
 		}
 	}
 
@@ -249,12 +268,7 @@ public final class TargetBucketProvisioning {
 
 		private void merge(final List<Target> more) {
 			for (final var target : more) {
-				final var existing = targets.get(target.bucket());
-				if (existing == null) {
-					targets.put(target.bucket(), target);
-				} else if (target.creatable() && !existing.creatable()) {
-					targets.put(target.bucket(), new Target(target.bucket(), true, existing.credential()));
-				}
+				targets.merge(target.bucket(), target, Target::mergedWith);
 			}
 		}
 	}

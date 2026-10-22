@@ -77,7 +77,8 @@ A failure ends the run with exit code 1 and names the phase and the cause, for e
 
 ```text
 step mt-001-20261022.120000.000-create failed (execution): target bucket "bench" is not accessible (HTTP 403)
-step mt-001-20261022.120000.000-read failed (execution): target bucket "bench" does not exist; this step uses only existing buckets ...
+step mt-001-20261022.120000.000-create failed (execution): target bucket "bench" does not exist and target-bucket provisioning is disabled (--provision-target-bucket=false, storage.targetBucket.provision: false)
+step mt-001-20261022.120000.000-read failed (execution): target bucket "bench" does not exist; this step uses existing objects only and never creates a bucket
 ```
 
 Failure messages name only the bucket and the kind of failure. They never include credentials, request headers, query strings, response bodies or endpoint addresses.
