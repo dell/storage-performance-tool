@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [5.16.2] - 2026-10-22
+
 ### Added
 
 - **Concurrent local runs** — Added `spt run --rmi-registry-port` (default 1099) to set the local engine's RMI registry port, so several `spt run` instances can run on one host at once, each with its own `--api-port` and registry port. Before, a second instance failed to start with `Port already in use: 1099`. Remote and distributed runs keep port 1099 and reject any other value.
