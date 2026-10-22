@@ -311,6 +311,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	protected void doStart() throws IllegalStateException {
 
 		validateRangeConfiguration();
+		provisionTargetBuckets();
 		init();
 		EngineBuildInfoPublisher.global().publishForStep(loadStepId());
 
@@ -357,6 +358,12 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	}
 
 	protected abstract void doStartWrapped();
+
+	/**
+	 * Controller-side setup that must finish before metrics contexts exist, before the
+	 * configuration is sliced and before any slice starts. Local slices do nothing here.
+	 */
+	protected void provisionTargetBuckets() {}
 
 	/**
 	 * Initializes the actual configuration and metrics contexts

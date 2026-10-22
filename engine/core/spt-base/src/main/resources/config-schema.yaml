@@ -182,4 +182,6 @@ storage:
       selection: string
     node:
       slice: boolean
+  targetBucket:
+    provision: boolean
 aliasing: list

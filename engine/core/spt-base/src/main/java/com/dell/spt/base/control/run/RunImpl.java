@@ -35,7 +35,7 @@ public final class RunImpl implements Run {
 	@Override
 	public final void run() {
 		Loggers.SCENARIO.log(Level.INFO, scenario);
-		try {
+		try (final var scope = RunScope.open()) {
 			scriptEngine.eval(scenario);
 		} catch (final RuntimeException e) {
 			final var cause = e.getCause();
