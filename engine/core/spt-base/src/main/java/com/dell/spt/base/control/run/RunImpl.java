@@ -1,6 +1,5 @@
 package com.dell.spt.base.control.run;
 
-import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import javax.script.ScriptEngine;
@@ -43,9 +42,9 @@ public final class RunImpl implements Run {
 			if (cause instanceof InterruptedException) {
 				throwUnchecked(cause);
 			}
-			rethrowIntegrityTerminal(e);
+			rethrowRunTerminal(e);
 		} catch (final ScriptException e) {
-			final var terminalCause = IntegrityTerminalException.find(e);
+			final var terminalCause = RunTerminalException.find(e);
 			LogUtil.trace(
 							Loggers.ERR,
 							Level.ERROR,
@@ -60,10 +59,10 @@ public final class RunImpl implements Run {
 		}
 	}
 
-	private static void rethrowIntegrityTerminal(final Throwable outer) {
-		final var terminalCause = IntegrityTerminalException.find(outer);
+	private static void rethrowRunTerminal(final Throwable outer) {
+		final var terminalCause = RunTerminalException.find(outer);
 		if (terminalCause != null) {
-			LogUtil.exception(Level.ERROR, terminalCause, "Metadata-integrity scenario failure");
+			LogUtil.exception(Level.ERROR, terminalCause, "Scenario terminal failure");
 			throw terminalCause;
 		}
 	}

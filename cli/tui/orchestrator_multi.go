@@ -1506,6 +1506,7 @@ func (m *MultiHostTestOrchestrator) metricsPollingLoop(ctx context.Context) {
 	ticker := time.NewTicker(m.pollInterval)
 	defer ticker.Stop()
 
+	metricsObserved := false
 	for {
 		select {
 		case <-ticker.C:
@@ -1513,16 +1514,46 @@ func (m *MultiHostTestOrchestrator) metricsPollingLoop(ctx context.Context) {
 			if update != nil && m.onMetrics != nil {
 				m.onMetrics(update)
 			}
+			if update != nil && update.Aggregated != nil {
+				metricsObserved = true
+			}
 			if update != nil && shouldSignalCompletionForExpectedSteps(update.Aggregated, m.expectedStepIDs) {
 				if failure := terminalDeletePolicyFailure(update); failure != nil {
 					m.recordCompletionFailure(failure)
 				}
 				m.signalCompletion()
 			}
+			if !metricsObserved && m.observeEntrySetupFailure(ctx) {
+				m.signalCompletion()
+				return
+			}
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+// observeEntrySetupFailure reports whether the entry engine published FAILED for the owned run
+// before any metrics appeared. A run that fails during setup, before any slice starts, publishes
+// no metrics, so metrics-driven completion alone would wait for it forever.
+func (m *MultiHostTestOrchestrator) observeEntrySetupFailure(ctx context.Context) bool {
+	if m.multiHost == nil || len(m.multiHost.hosts) == 0 || m.multiHost.hosts[0] == nil {
+		return false
+	}
+	client := m.multiHost.hosts[0].APIClient
+	if client == nil {
+		return false
+	}
+	status, err := client.GetStatusContext(ctx)
+	if err != nil || status == nil || status.State != constants.StateFailed ||
+		!client.statusMatchesOwnedRun(status) {
+		return false
+	}
+	if m.onStatusUpdate != nil {
+		m.onStatusUpdate(status)
+	}
+	m.recordCompletionFailure(ownedTerminalStatusFailure(status))
+	return true
 }
 
 // shouldSignalCompletion reports whether an aggregated metrics sample indicates

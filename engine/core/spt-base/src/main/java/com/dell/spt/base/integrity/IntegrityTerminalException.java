@@ -1,12 +1,13 @@
 package com.dell.spt.base.integrity;
 
+import com.dell.spt.base.control.run.RunTerminalException;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Locale;
 import java.util.Set;
 
 /** Typed terminal cause for metadata-mode lifecycle failures. */
-public final class IntegrityTerminalException extends RuntimeException {
+public final class IntegrityTerminalException extends RunTerminalException {
 
 	public enum Category {
 		CONFIGURATION, INPUT, EXECUTION, AGGREGATION, PUBLICATION, CLEANUP;
@@ -15,9 +16,6 @@ public final class IntegrityTerminalException extends RuntimeException {
 			return name().toLowerCase(Locale.ROOT);
 		}
 	}
-
-	private final Category category;
-	private final String stepId;
 
 	public IntegrityTerminalException(
 					final Category category, final String message, final Throwable cause) {
@@ -33,28 +31,15 @@ public final class IntegrityTerminalException extends RuntimeException {
 					final String stepId,
 					final String message,
 					final Throwable cause) {
-		super(message, cause);
-		this.category = category;
-		this.stepId = stepId;
+		super(category, stepId, message, cause);
 	}
 
-	public Category category() {
-		return category;
-	}
-
-	public String stepId() {
-		return stepId;
-	}
-
+	@Override
 	public IntegrityTerminalException withStepId(final String value) {
-		if (stepId != null || value == null || value.isBlank()) {
+		if (stepId() != null || value == null || value.isBlank()) {
 			return this;
 		}
-		final var result = new IntegrityTerminalException(category, value, getMessage(), this);
-		for (final var suppressed : getSuppressed()) {
-			result.addSuppressed(suppressed);
-		}
-		return result;
+		return copySuppressed(new IntegrityTerminalException(category(), value, getMessage(), this));
 	}
 
 	/** Finds a typed terminal cause through script-engine/runtime wrappers. */

@@ -22,6 +22,7 @@ import com.dell.spt.base.util.BinarySizeFormat;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.integrity.IntegrityConfig;
 import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
+import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig;
@@ -181,7 +182,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	public final void run() {
 		runFailure = null;
 		completedRunMetricsSnapshots = null;
-		IntegrityTerminalException terminalCause = null;
+		RunTerminalException terminalCause = null;
 		try {
 			start();
 			try {
@@ -190,12 +191,11 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 					terminalCause = standaloneDeleteEarlyExhaustionFailure();
 				}
 			} catch (final RuntimeException e) {
-				if (IntegrityTerminalException.find(e) != null || integrityModeEnabled) {
-					terminalCause = terminalFailure(
-									IntegrityTerminalException.Category.EXECUTION,
-									"failed to await metadata-mode step",
-									e);
-				} else {
+				terminalCause = lifecycleTerminalFailure(
+								IntegrityTerminalException.Category.EXECUTION,
+								"failed to await metadata-mode step",
+								e);
+				if (terminalCause == null) {
 					recordRunFailure(e);
 					LogUtil.exception(Level.WARN, e, "Failed to await \"{}\"", toString());
 				}
@@ -205,17 +205,17 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			throwUnchecked(e);
 		} catch (final Throwable cause) {
 			throwUncheckedIfInterrupted(cause);
-			if (IntegrityTerminalException.find(cause) != null || integrityModeEnabled) {
-				terminalCause = terminalFailure(
-								IntegrityTerminalException.Category.EXECUTION,
-								"metadata-mode step execution failed",
-								cause);
-			} else if (cause instanceof IllegalStateException) {
+			terminalCause = lifecycleTerminalFailure(
+							IntegrityTerminalException.Category.EXECUTION,
+							"metadata-mode step execution failed",
+							cause);
+			if (terminalCause == null) {
 				recordRunFailure(cause);
-				LogUtil.exception(Level.ERROR, cause, "Failed to start \"{}\"", toString());
-			} else {
-				recordRunFailure(cause);
-				LogUtil.exception(Level.ERROR, cause, "Load step execution failure \"{}\"", toString());
+				if (cause instanceof IllegalStateException) {
+					LogUtil.exception(Level.ERROR, cause, "Failed to start \"{}\"", toString());
+				} else {
+					LogUtil.exception(Level.ERROR, cause, "Load step execution failure \"{}\"", toString());
+				}
 			}
 		} finally {
 			try {
@@ -228,14 +228,14 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			final Throwable closeCause = closeAfterRun();
 			if (closeCause != null) {
 				throwUncheckedIfInterrupted(closeCause);
-				if (IntegrityTerminalException.find(closeCause) != null || integrityModeEnabled) {
-					final var cleanupFailure = terminalFailure(
-									IntegrityTerminalException.Category.CLEANUP,
-									"metadata-mode step cleanup failed",
-									closeCause);
+				final var cleanupFailure = lifecycleTerminalFailure(
+								IntegrityTerminalException.Category.CLEANUP,
+								"metadata-mode step cleanup failed",
+								closeCause);
+				if (cleanupFailure != null) {
 					if (terminalCause == null) {
 						terminalCause = cleanupFailure;
-					} else {
+					} else if (cleanupFailure != terminalCause) {
 						terminalCause.addSuppressed(cleanupFailure);
 					}
 				} else {
@@ -333,11 +333,12 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 
 		} catch (final Throwable cause) {
 			throwUncheckedIfInterrupted(cause);
-			if (IntegrityTerminalException.find(cause) != null || integrityModeEnabled) {
-				throw terminalFailure(
-								IntegrityTerminalException.Category.EXECUTION,
-								"metadata-mode step failed to start",
-								cause);
+			final var terminalCause = lifecycleTerminalFailure(
+							IntegrityTerminalException.Category.EXECUTION,
+							"metadata-mode step failed to start",
+							cause);
+			if (terminalCause != null) {
+				throw terminalCause;
 			}
 			recordRunFailure(cause);
 			LogUtil.exception(Level.WARN, cause, "{} step failed to start", loadStepId());
@@ -644,6 +645,23 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 						"Standalone DELETE inventory slice exhausted before the requested duration; "
 										+ "increase --seed-objects for a seeded run or provide/select a larger frozen inventory",
 						null);
+	}
+
+	/**
+	 * Returns the terminal failure a lifecycle phase ends with, or null when the cause is ordinary
+	 * and keeps the legacy non-throwing behavior. A generic typed cause keeps its own category and
+	 * message, also in metadata mode; any other failure of a metadata-mode step becomes the given
+	 * integrity failure.
+	 */
+	private RunTerminalException lifecycleTerminalFailure(
+					final IntegrityTerminalException.Category category,
+					final String integrityMessage,
+					final Throwable cause) {
+		final var typed = RunTerminalException.find(cause);
+		if (typed instanceof IntegrityTerminalException || (typed == null && integrityModeEnabled)) {
+			return terminalFailure(category, integrityMessage, cause);
+		}
+		return typed == null ? null : typed.withStepId(loadStepId());
 	}
 
 	protected final IntegrityTerminalException terminalFailure(

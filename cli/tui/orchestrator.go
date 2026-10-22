@@ -437,7 +437,15 @@ func (o *TestOrchestrator) monitorStatus(ctx context.Context) {
 				logging.LogInfo("orchestrator", "test finished", "state", status.State)
 				ready, terminalErr, captureErr := o.publishTerminalMetrics()
 				if captureErr != nil {
-					o.failTerminalMetricsCapture(captureErr)
+					if statusFailure := ownedTerminalStatusFailure(status); statusFailure != nil {
+						// The engine's FAILED cause is authoritative. A run that failed before
+						// any slice started has no metrics, so their absence is not the cause.
+						logging.LogWarn("orchestrator", "terminal metrics unavailable for failed run",
+							"error", captureErr.Error())
+						o.failOwnedTerminalRun(statusFailure)
+					} else {
+						o.failTerminalMetricsCapture(captureErr)
+					}
 					o.signalCompletion()
 					return
 				}
@@ -469,6 +477,16 @@ func ownedTerminalStatusFailure(status *TestStatus) error {
 	detail := strings.TrimSpace(status.Message)
 	if detail == "" {
 		detail = "engine reported FAILED"
+	}
+	var attribution []string
+	if status.StepID != "" {
+		attribution = append(attribution, "step "+status.StepID)
+	}
+	if status.Category != "" {
+		attribution = append(attribution, "("+status.Category+")")
+	}
+	if len(attribution) > 0 {
+		detail = strings.Join(attribution, " ") + ": " + detail
 	}
 	return &runcontrol.OwnedEngineTerminalFailure{Detail: detail}
 }

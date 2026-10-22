@@ -1060,9 +1060,40 @@ func stepRoleLifecycle(result *portcheck.RunResult, runtimeStepID, plannedStepID
 	return ""
 }
 
+// resolveOrdinaryRunError makes an engine FAILED status authoritative for workloads outside the
+// integrity and DELETE contracts: the run exits 1 with the engine's cause even when the presenter
+// reported none, and missing metrics or artifacts never replace that cause.
+func resolveOrdinaryRunError(runErr error, outcome autoResultsOutcome) error {
+	if outcome.Tracker == nil || outcome.Tracker.FinalState != constants.StateFailed {
+		return runErr
+	}
+	message := trackedFailureReason(outcome.Tracker)
+	if runErr != nil && !runcontrol.IsOnlyOwnedEngineTerminalFailure(runErr) {
+		message += "; run also failed: " + runErr.Error()
+	}
+	return &ExitCodeError{Code: constants.ExitCodeWorkloadFailure, Msg: message, Cause: runErr}
+}
+
+// trackedFailureReason describes a FAILED terminal status, omitting attribution the engine did not report.
+func trackedFailureReason(result *portcheck.RunResult) string {
+	reason := "step"
+	if result.FailureStepID != "" {
+		reason += " " + result.FailureStepID
+	}
+	reason += " failed"
+	if result.FailureCategory != "" {
+		reason += " (" + result.FailureCategory + ")"
+	}
+	message := strings.TrimSpace(result.FailureMessage)
+	if message == "" {
+		message = "engine reported FAILED"
+	}
+	return reason + ": " + message
+}
+
 func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, received bool, params scenario.Params) error {
 	if !scenario.IsIntegrityWorkload(params) {
-		return runErr
+		return resolveOrdinaryRunError(runErr, outcome)
 	}
 	corrupt := int64(0)
 	if outcome.ObservedCorruptCount != nil {
