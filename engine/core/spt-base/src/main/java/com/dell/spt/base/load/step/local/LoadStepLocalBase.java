@@ -24,6 +24,7 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
+import com.dell.spt.base.metrics.steady.SteadySettings;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import java.util.UUID;
@@ -390,6 +391,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 						.stdOutColorFlag(outputColorFlag)
 						.comment(config.stringVal("run-comment"))
 						.runId(runId())
+						.steadySettings(SteadySettings.fromMetricsConfig(metricsConfig))
 						.build();
 
 		// enrich metadata with limits so /metrics/json can compute completion on workers

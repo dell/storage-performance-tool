@@ -315,6 +315,16 @@ public class TestConfigBuilder {
 
 		metrics.put("threshold", 0.0);
 
+		Map<String, Object> metricsSteadyWarmup = new HashMap<>();
+		metricsSteadyWarmup.put("turnovers", 1.0);
+		Map<String, Object> metricsSteadyMin = new HashMap<>();
+		metricsSteadyMin.put("turnovers", 20.0);
+		metricsSteadyMin.put("duration", "20s");
+		Map<String, Object> metricsSteady = new HashMap<>();
+		metricsSteady.put("warmup", metricsSteadyWarmup);
+		metricsSteady.put("min", metricsSteadyMin);
+		metrics.put("steady", metricsSteady);
+
 		Map<String, Object> metricsTiming = new HashMap<>();
 		metricsTiming.put("persist", false);
 		metrics.put("timing", metricsTiming);

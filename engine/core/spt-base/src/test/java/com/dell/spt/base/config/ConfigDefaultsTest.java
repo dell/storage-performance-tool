@@ -1,5 +1,6 @@
 package com.dell.spt.base.config;
 
+import com.dell.spt.base.metrics.steady.SteadySettings;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -37,5 +38,9 @@ class ConfigDefaultsTest {
 		assertEquals(
 						StandaloneDeleteConfig.DEFAULT_VERIFICATION_TIMEOUT_MILLIS,
 						DeleteVerificationSummary.disabled().timeoutMillis());
+		assertEquals(
+						SteadySettings.DEFAULTS,
+						SteadySettings.fromMetricsConfig(config.configVal("output-metrics")),
+						"shipped steady-state settings must be the calibrated defaults");
 	}
 }

@@ -7,9 +7,11 @@ import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
+import com.dell.spt.base.metrics.steady.SteadyCut;
+import com.dell.spt.base.metrics.steady.SteadyResult;
+import com.dell.spt.base.metrics.steady.SteadySettings;
+import com.dell.spt.base.metrics.steady.SteadyWindow;
 import com.dell.spt.base.metrics.type.ConcurrencyMeterImpl;
-import com.dell.spt.base.metrics.type.LongMeter;
-import com.dell.spt.base.metrics.type.RateMeter;
 import com.dell.spt.base.metrics.type.RateMeterImpl;
 import com.dell.spt.base.metrics.type.TimingMeterImpl;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -30,13 +32,14 @@ import static com.dell.spt.base.metrics.MetricsConstants.METADATA_STEP_ID;
 public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends MetricsContextBase<S>
 				implements MetricsContext<S> {
 
-	private final LongMeter<TimingMetricSnapshot> reqDuration, respLatency, timeToFirstByte;
-	private final LongMeter<ConcurrencyMetricSnapshot> actualConcurrency;
-	private final RateMeter<RateMetricSnapshot> throughputSuccess, throughputFail, throughputCorrupt, reqBytes;
+	private final TimingMeterImpl reqDuration, respLatency, timeToFirstByte;
+	private final ConcurrencyMeterImpl actualConcurrency;
+	private final RateMeterImpl throughputSuccess, throughputFail, throughputCorrupt, reqBytes;
 	private volatile TimingMetricSnapshot reqDurSnapshot, respLatSnapshot, ttfbSnapshot;
 	private volatile ConcurrencyMetricSnapshot actualConcurrencySnapshot;
 	private volatile long lastSnapshotsUpdateTs = 0;
 	private final IntSupplier actualConcurrencyGauge;
+	private final SteadyWindow steadyWindow;
 
 	public MetricsContextImpl(
 					final Map<String, Object> metadata,
@@ -44,6 +47,20 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 					final int concurrencyThreshold,
 					final int updateIntervalSec,
 					final boolean stdOutColorFlag) {
+		this(metadata, actualConcurrencyGauge, concurrencyThreshold, updateIntervalSec, stdOutColorFlag, null);
+	}
+
+	/**
+	 * @param steadySettings settings of the Steady-State Window, or null to measure none (as for
+	 *     a threshold context)
+	 */
+	public MetricsContextImpl(
+					final Map<String, Object> metadata,
+					final IntSupplier actualConcurrencyGauge,
+					final int concurrencyThreshold,
+					final int updateIntervalSec,
+					final boolean stdOutColorFlag,
+					final SteadySettings steadySettings) {
 		super(
 						metadata,
 						concurrencyThreshold,
@@ -72,6 +89,10 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 		throughputCorrupt = new RateMeterImpl(clock, MetricsConstants.METRIC_NAME_CORRUPT);
 		//
 		reqBytes = new RateMeterImpl(clock, MetricsConstants.METRIC_NAME_BYTE);
+		//
+		steadyWindow = steadySettings == null
+						? null
+						: new SteadyWindow(steadySettings, new SteadySource(), System::nanoTime);
 	}
 
 	@Override
@@ -81,6 +102,68 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 		throughputFail.resetStartTime();
 		throughputCorrupt.resetStartTime();
 		reqBytes.resetStartTime();
+		if (steadyWindow != null) {
+			steadyWindow.markStepStart();
+		}
+	}
+
+	@Override
+	public final void observeSteadyWindow() {
+		if (steadyWindow != null) {
+			steadyWindow.observe();
+		}
+	}
+
+	@Override
+	public final SteadyResult closeSteadyWindow(final String cause) {
+		return steadyWindow == null ? null : steadyWindow.close(cause);
+	}
+
+	@Override
+	public final SteadyResult steadyResult() {
+		return steadyWindow == null ? null : steadyWindow.result();
+	}
+
+	/** Reads this context's meters for its Steady-State Window, without touching the recording path. */
+	private final class SteadySource implements SteadyWindow.Source {
+
+		@Override
+		public long succeeded() {
+			return throughputSuccess.count();
+		}
+
+		@Override
+		public long failed() {
+			return throughputFail.count();
+		}
+
+		@Override
+		public int inFlight() {
+			return actualConcurrencyGauge.getAsInt();
+		}
+
+		@Override
+		public SteadyCut.Readings read() {
+			final RateMetricSnapshot succeeded = throughputSuccess.snapshot();
+			final RateMetricSnapshot failed = throughputFail.snapshot();
+			final RateMetricSnapshot corrupt = throughputCorrupt.snapshot();
+			final RateMetricSnapshot bytes = reqBytes.snapshot();
+			return new SteadyCut.Readings(
+							succeeded.count(),
+							failed.count(),
+							corrupt.count(),
+							bytes.count(),
+							succeeded.last(),
+							failed.last(),
+							corrupt.last(),
+							bytes.last(),
+							actualConcurrency.sampleSum(),
+							actualConcurrency.sampleCount(),
+							actualConcurrencyGauge.getAsInt(),
+							reqDuration.histogramCopy(),
+							respLatency.histogramCopy(),
+							timeToFirstByte.histogramCopy());
+		}
 	}
 
 	@Override
@@ -327,6 +410,7 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 		private int concurrencyThreshold;
 		private boolean stdOutColorFlag;
 		private int outputPeriodSec;
+		private SteadySettings steadySettings;
 		private Map<String, Object> metadata = new HashMap();
 
 		@Override
@@ -336,7 +420,14 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 							actualConcurrencyGauge,
 							concurrencyThreshold,
 							outputPeriodSec,
-							stdOutColorFlag);
+							stdOutColorFlag,
+							steadySettings);
+		}
+
+		@Override
+		public ContextBuilderImpl steadySettings(final SteadySettings settings) {
+			this.steadySettings = settings;
+			return this;
 		}
 
 		@Override

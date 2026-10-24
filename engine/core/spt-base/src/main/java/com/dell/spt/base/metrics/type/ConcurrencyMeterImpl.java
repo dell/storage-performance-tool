@@ -23,6 +23,16 @@ public class ConcurrencyMeterImpl implements LongMeter<ConcurrencyMetricSnapshot
 		last = v;
 	}
 
+	/** The number of gauge samples recorded so far. */
+	public final long sampleCount() {
+		return counter.sum();
+	}
+
+	/** The sum of the gauge samples recorded so far. */
+	public final long sampleSum() {
+		return sumAdder.sum();
+	}
+
 	@Override
 	public final ConcurrencyMetricSnapshotImpl snapshot() {
 		final long count = counter.sum();

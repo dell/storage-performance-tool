@@ -103,6 +103,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 				ThreadContext.put(KEY_STEP_ID, metricsCtx.loadStepId());
 				// TODO: as a future improvement consider whether throttling is needed here.
 				metricsCtx.refreshLastSnapshot();
+				metricsCtx.observeSteadyWindow();
 
 				final AllMetricsSnapshot snapshot = metricsCtx.lastSnapshot();
 				if (null != snapshot) {
