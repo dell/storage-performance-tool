@@ -158,4 +158,26 @@ class SteadyStabilityTest {
 		assertTrue(rates.length >= 6);
 		return SteadyStability.compute(time, succeeded, failed, n, 1);
 	}
+
+	/** The end cut is the series' last sample: here it completes the sixth bin. */
+	@Test
+	void theEndCutCompletesTheLastBin() {
+		final var clock = new AtomicLong();
+		final var source = new SteadyWindowTest.FakeSource();
+		final var window = new SteadyWindow(new SteadySettings(1, 0, 0), source, clock::get);
+		window.markStepStart();
+		source.inFlight = 1;
+		source.succeeded = 1;
+		window.observe();
+		for (int i = 0; i < 5; i++) {
+			clock.addAndGet(TimeUnit.SECONDS.toNanos(1));
+			source.succeeded += 1_000;
+			window.observe();
+		}
+		clock.addAndGet(TimeUnit.SECONDS.toNanos(1));
+		source.succeeded += 1_000;
+		final SteadyResult result = window.close("t");
+		assertNotNull(result.cv(), "six one-second bins need the end cut as their last sample");
+		assertEquals(0.0, result.cv(), 1e-12);
+	}
 }

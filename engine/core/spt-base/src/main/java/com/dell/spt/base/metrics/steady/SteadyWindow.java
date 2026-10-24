@@ -121,17 +121,24 @@ public final class SteadyWindow {
 		}
 		synchronized (lock) {
 			if (result == null) {
-				final SteadyCut endCut = cut();
-				SteadyResult computed = SteadyComputation.compute(settings, stepStartNanos, startCut, endCut, cause);
-				if (computed.status().hasStatistics()) {
-					appendSample(endCut);
-					final SteadyStability.Indicators indicators = SteadyStability.compute(
-									sampleTimes,
-									sampleSucceeded,
-									sampleFailed,
-									sampleCount,
-									computed.statistics().concurrencySnapshot().mean());
-					computed = computed.withStability(indicators.trendPercent(), indicators.cv());
+				SteadyResult computed;
+				try {
+					final SteadyCut endCut = cut();
+					computed = SteadyComputation.compute(settings, stepStartNanos, startCut, endCut, cause);
+					if (computed.status().hasStatistics()) {
+						appendSample(endCut);
+						final SteadyStability.Indicators indicators = SteadyStability.compute(
+										sampleTimes,
+										sampleSucceeded,
+										sampleFailed,
+										sampleCount,
+										computed.statistics().concurrencySnapshot().mean());
+						computed = computed.withStability(indicators.trendPercent(), indicators.cv());
+					}
+				} catch (final RuntimeException e) {
+					// A close never fails the stop path that calls it, and never takes a third cut.
+					Loggers.MSG.warn("Steady-state window closed by {} could not be measured: {}", cause, e.toString());
+					computed = SteadyResult.notReached(cause + "; measurement failed", SteadyResult.NONE);
 				}
 				result = computed;
 				startCut = null;

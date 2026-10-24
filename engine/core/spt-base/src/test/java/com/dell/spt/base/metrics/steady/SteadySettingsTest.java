@@ -50,6 +50,14 @@ class SteadySettingsTest {
 		assertThrows(IllegalConfigurationException.class, () -> new SteadySettings(1, 20, -1));
 		assertThrows(IllegalConfigurationException.class, () -> new SteadySettings(Double.NaN, 20, 20_000));
 		final Config config = TestConfigBuilder.config();
+		for (final String malformed : new String[]{"", "s", "1.5s", "-5s"
+		}) {
+			config.val("output-metrics-steady-min-duration", malformed);
+			assertThrows(
+							IllegalConfigurationException.class,
+							() -> SteadySettings.fromMetricsConfig(config.configVal("output-metrics")),
+							"\"" + malformed + "\"");
+		}
 		config.val("output-metrics-steady-min-duration", "soon");
 		assertThrows(
 						IllegalConfigurationException.class,

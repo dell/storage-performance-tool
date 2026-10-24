@@ -1,7 +1,6 @@
 package com.dell.spt.base.metrics.context;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -67,12 +66,17 @@ class MetricsContextImplSteadyTest {
 		}
 		ctx.refreshLastSnapshot(true); // caches 10 in flight
 		gauge.set(100);
-		ctx.observeSteadyWindow();
-		assertNull(ctx.steadyResult());
+		ctx.observeSteadyWindow(); // 50 completions start the window at the cached 10, not at a fresh 100
+		for (int i = 0; i < 10; i++) {
+			ctx.markSucc(1, 1_000, 500);
+		}
 		gauge.set(40);
-		ctx.observeSteadyWindow();
+		ctx.observeSteadyWindow(); // 60 completions at a fresh 40: the window starts here
+		for (int i = 0; i < 5; i++) {
+			ctx.markSucc(1, 1_000, 500);
+		}
 		final SteadyResult result = ctx.closeSteadyWindow("t");
-		assertTrue(result.status().hasStatistics(), "50 completions at 40 fresh in flight start the window");
+		assertEquals(5, result.statistics().successSnapshot().count(), "a start at the cached gauge would count 15");
 	}
 
 	@Test
@@ -143,7 +147,7 @@ class MetricsContextImplSteadyTest {
 		}
 		final var stats = result.statistics();
 		assertTrue(stats.successSnapshot().count() > 0);
-		assertFalse(stats.durationSnapshot().count() < 0);
+		assertTrue(stats.durationSnapshot().count() > 0);
 		assertSame(result, ctx.steadyResult());
 	}
 }

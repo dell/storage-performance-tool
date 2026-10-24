@@ -321,12 +321,14 @@ class SteadyWindowTest {
 		source.pauseNextRead(winnerReading, releaseWinner);
 		final var winner = CompletableFuture.supplyAsync(() -> window.close("deadline"), threads);
 		assertTrue(winnerReading.await(5, TimeUnit.SECONDS));
-		final var loser = CompletableFuture.supplyAsync(() -> window.close("doShutdown"), threads);
-		Thread.sleep(100);
-		assertFalse(loser.isDone(), "the loser must wait for the published result, not return early");
+		final var loserResult = new CompletableFuture<SteadyResult>();
+		final Thread loser = Thread.ofPlatform().start(() -> loserResult.complete(window.close("doShutdown")));
+		awaitBlocked(loser);
+		assertFalse(loserResult.isDone(), "the loser must wait for the published result, not return early");
+		assertEquals(2, source.readCount(), "the loser acquires no cut of its own");
 		releaseWinner.countDown();
 		final SteadyResult result = winner.get(5, TimeUnit.SECONDS);
-		assertSame(result, loser.get(5, TimeUnit.SECONDS));
+		assertSame(result, loserResult.get(5, TimeUnit.SECONDS));
 		assertEquals("deadline", result.cause());
 		assertEquals(2, window.cutCount());
 	}
@@ -341,14 +343,38 @@ class SteadyWindowTest {
 		source.pauseNextRead(startReading, releaseStart);
 		final var observer = CompletableFuture.runAsync(window::observe, threads);
 		assertTrue(startReading.await(5, TimeUnit.SECONDS));
-		final var closer = CompletableFuture.supplyAsync(() -> window.close("deadline"), threads);
-		Thread.sleep(100);
-		assertFalse(closer.isDone(), "the close must wait for the start cut in progress");
+		final var closerResult = new CompletableFuture<SteadyResult>();
+		final Thread closer = Thread.ofPlatform().start(() -> closerResult.complete(window.close("deadline")));
+		awaitBlocked(closer);
+		assertEquals(1, source.readCount(), "the end cut must not begin while the start cut is in progress");
 		releaseStart.countDown();
 		observer.get(5, TimeUnit.SECONDS);
-		final SteadyResult result = closer.get(5, TimeUnit.SECONDS);
+		final SteadyResult result = closerResult.get(5, TimeUnit.SECONDS);
 		assertTrue(result.status().hasStatistics(), "the window started before it closed");
-		assertEquals(List.of(1, 2), source.readOrder);
+		assertEquals(2, source.readCount());
+	}
+
+	@Test
+	void aCloseThatCannotBeMeasuredPublishesAResultAndTakesNoThirdCut() {
+		final var window = defaultWindow();
+		source.inFlight = 1;
+		source.succeeded = 1;
+		window.observe();
+		source.failNextRead = true;
+		final SteadyResult result = window.close("deadline");
+		assertEquals(SteadyStatus.NOT_REACHED, result.status());
+		assertTrue(result.cause().startsWith("deadline"));
+		assertSame(result, window.close("doShutdown"));
+		assertEquals(2, source.readCount());
+	}
+
+	/** Waits until the thread blocks on the window's monitor, without a fixed sleep. */
+	private static void awaitBlocked(final Thread thread) throws InterruptedException {
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		while (thread.getState() != Thread.State.BLOCKED) {
+			assertTrue(System.nanoTime() < deadline, "thread never blocked: " + thread.getState());
+			Thread.onSpinWait();
+		}
 	}
 
 	@Test
@@ -388,6 +414,7 @@ class SteadyWindowTest {
 		int inFlight;
 		final Histogram duration = histogram(), latency = histogram(), ttfb = histogram();
 		final List<Integer> readOrder = new ArrayList<>();
+		boolean failNextRead;
 		private int reads;
 		private CountDownLatch pausedSignal, pauseRelease;
 
@@ -420,11 +447,19 @@ class SteadyWindowTest {
 			return inFlight;
 		}
 
+		synchronized int readCount() {
+			return reads;
+		}
+
 		@Override
 		public SteadyCut.Readings read() {
 			final CountDownLatch signal, release;
 			synchronized (this) {
 				readOrder.add(++reads);
+				if (failNextRead) {
+					failNextRead = false;
+					throw new IllegalStateException("simulated meter failure");
+				}
 				signal = pausedSignal;
 				release = pauseRelease;
 				pausedSignal = null;

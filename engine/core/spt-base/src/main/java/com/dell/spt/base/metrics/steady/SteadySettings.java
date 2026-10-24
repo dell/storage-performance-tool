@@ -4,6 +4,7 @@ import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.config.TimeUtil;
 import com.github.akurilov.confuse.Config;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 /**
  * The {@code output.metrics.steady} settings of a Steady-State Window.
@@ -30,8 +31,15 @@ public record SteadySettings(double warmupTurnovers, double minTurnovers, long m
 						durationMillis(metricsConfig.val("steady-min-duration")));
 	}
 
+	private static final Pattern DURATION = Pattern.compile(
+					"[0-9]+([smhdSMHD]|\\.[a-zA-Z]{4,7})?");
+
 	private static long durationMillis(final Object raw) {
 		if (raw instanceof String text) {
+			if (!DURATION.matcher(text.trim()).matches()) {
+				throw new IllegalConfigurationException(
+								"output.metrics.steady.min.duration is not a duration: \"" + text + "\"");
+			}
 			final TimeUnit unit;
 			final long value;
 			try {

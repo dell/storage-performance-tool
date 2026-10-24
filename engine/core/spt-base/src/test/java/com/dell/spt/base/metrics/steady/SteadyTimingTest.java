@@ -151,4 +151,54 @@ class SteadyTimingTest {
 			succeeded.increment();
 		}
 	}
+
+	/**
+	 * An operation paused between its throughput and its timing accounting at the end cut: the
+	 * window counts it as succeeded but its timing is not in the end histogram, and the window's
+	 * timing population follows the histogram alone.
+	 */
+	@Test
+	void writerPausedBetweenThroughputAndTimingKeepsTheTimingPopulationConsistent() {
+		final var duration = new TimingMeterImpl(MetricsConstants.METRIC_NAME_DUR);
+		final var succeeded = new LongAdder();
+		final SteadyWindow.Source source = new SteadyWindow.Source() {
+			@Override
+			public long succeeded() {
+				return succeeded.sum();
+			}
+
+			@Override
+			public long failed() {
+				return 0;
+			}
+
+			@Override
+			public int inFlight() {
+				return 1;
+			}
+
+			@Override
+			public SteadyCut.Readings read() {
+				return new SteadyCut.Readings(
+								succeeded.sum(), 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+								duration.histogramCopy(), SteadyWindowTest.FakeSource.histogram(),
+								SteadyWindowTest.FakeSource.histogram());
+			}
+		};
+		final var window = new SteadyWindow(new SteadySettings(1, 0, 0), source, System::nanoTime);
+		window.markStepStart();
+		succeeded.increment();
+		duration.update(700);
+		window.observe();
+		for (int i = 0; i < 20; i++) {
+			succeeded.increment();
+			duration.update(1_000);
+		}
+		succeeded.increment(); // counted, its timing still to be recorded
+		final var stats = window.close("deadline").statistics();
+		duration.update(9_000);
+		assertEquals(21, stats.successSnapshot().count());
+		assertEquals(20, stats.durationSnapshot().count(), "only the histogram's own population");
+		assertEquals(1_000.0, stats.durationSnapshot().mean(), 1_000 * 0.01);
+	}
 }

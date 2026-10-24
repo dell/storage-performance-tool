@@ -27,6 +27,8 @@ final class SteadyStability {
 	private SteadyStability() {}
 
 	/**
+	 * Both indicators from one window's series.
+	 *
 	 * @param time monotonic sample times, nanoseconds
 	 * @param succeeded cumulative succeeded operations at each sample
 	 * @param failed cumulative failed operations at each sample
