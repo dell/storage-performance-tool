@@ -357,7 +357,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						: driverLifecycle;
 		this.metricsCtx = metricsCtx;
 		this.metricsCtxByOpType = metricsCtxByOpType;
-		generator.onSchedulingExhaustion(() -> closeSteadyWindows("scheduling exhaustion"));
+		if (generator != null) {
+			generator.onSchedulingExhaustion(() -> closeSteadyWindows("scheduling exhaustion"));
+		}
 		this.tracePersistFlag = tracePersistFlag;
 		this.listShardMetricsRecorder = shardMetricsRecorder == null ? ListShardMetricsRecorder.NO_OP : shardMetricsRecorder;
 		this.immutableListRootPrefix = canonicalListPrefix(immutableListRootPrefix);

@@ -46,6 +46,12 @@ public final class SteadyResult implements Serializable {
 		this.statistics = status.hasStatistics() ? statistics : null;
 	}
 
+	/** The Entry Node's result when no expected contributor closed a window it could report. */
+	public static SteadyResult incomplete(final String cause) {
+		return new SteadyResult(
+						SteadyStatus.INCOMPLETE, cause, NONE, 0L, 0.0, null, null, NONE, NONE, null);
+	}
+
 	static SteadyResult notReached(final String cause, final long endAcquisitionNanos) {
 		return new SteadyResult(
 						SteadyStatus.NOT_REACHED, cause, NONE, 0L, 0.0, null, null, NONE, endAcquisitionNanos, null);

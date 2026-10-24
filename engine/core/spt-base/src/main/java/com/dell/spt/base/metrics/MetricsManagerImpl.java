@@ -16,6 +16,7 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.logging.MetricsAsciiTableLogMessage;
 import com.dell.spt.base.logging.ExtResultsXmlLogMessage;
 import com.dell.spt.base.logging.MetricsCsvLogMessage;
+import com.dell.spt.base.logging.MetricsSteadyTotalCsvLogMessage;
 import com.dell.spt.base.logging.MetricsTotalCsvLogMessage;
 import com.dell.spt.base.logging.StepResultsMetricsLogMessage;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
@@ -25,6 +26,7 @@ import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
+import com.dell.spt.base.metrics.steady.SteadyResult;
 import com.dell.spt.base.metrics.util.PrometheusMetricsExporter;
 import com.dell.spt.base.metrics.util.PrometheusMetricsExporterImpl;
 import com.dell.spt.base.metrics.util.CombinedCompletionCollector;
@@ -63,6 +65,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	// CLI and jar-only users get well-formed XML (log4j2 header/footer had async timing issues).
 	private final Set<String> openResultXmlSteps = ConcurrentHashMap.newKeySet();
 	private final Set<String> openMetricsTotalCsvSteps = ConcurrentHashMap.newKeySet();
+	private final Set<String> openMetricsSteadyTotalCsvSteps = ConcurrentHashMap.newKeySet();
 
 	// Terminal entries retention for /metrics/json when idle
 	private final Map<ProgressKey, TerminalStepEntry> terminalByStepId = new ConcurrentHashMap<>();
@@ -243,6 +246,10 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 										: quantileValues(snapshot.ttfbSnapshot(), quantileValues);
 
 						if (snapshot instanceof DistributedAllMetricsSnapshot aggregSnapshot) {
+							// Every expected slice has closed its window by now; a missing one makes it incomplete.
+							final SteadyResult steady = aggregSnapshot.steadyResult() != null
+											? aggregSnapshot.steadyResult()
+											: SteadyResult.incomplete("no slice reported a closed window");
 							if (hasProgress(snapshot)) {
 								final var nodesPresent = distributedMetricsCtx.nodesPresent();
 								final var contributorsPresent = distributedMetricsCtx.contributorsPresent();
@@ -255,7 +262,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 												nodeCount,
 												nodesPresent,
 												contributorsPresent,
-												partial);
+												partial).withSteady(steady);
 							}
 							// file output
 							// due to unknown reasons writing to a csv.total is based on a flag and not on a metrics
@@ -268,6 +275,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 								final StringBuilder csvOutput = new StringBuilder();
 								message.formatTo(csvOutput, includeHeader);
 								Loggers.METRICS_FILE_TOTAL.info(csvOutput.toString());
+								writeSteadyTotalRow(metricsCtx, steady, aggregSnapshot.nodeCount(), quantileValues);
 							}
 						}
 						// console output
@@ -303,6 +311,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 							Loggers.METRICS_EXT_RESULTS_FILE.info("</result>");
 							openResultXmlSteps.remove(metricsCtx.loadStepId());
 							openMetricsTotalCsvSteps.remove(metricsCtx.loadStepId());
+							openMetricsSteadyTotalCsvSteps.remove(metricsCtx.loadStepId());
 						}
 
 						final PrometheusMetricsExporter exporter = distributedMetrics.remove(distributedMetricsCtx);
@@ -331,7 +340,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 											0,
 											List.of(),
 											List.of(),
-											false);
+											false).withSteady(metricsCtx.steadyResult());
 							terminalByStepId.put(progressKey, terminalEntry);
 						}
 					}
@@ -363,6 +372,32 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 				Loggers.MSG.debug("Stopped the metrics manager task");
 			}
 		}
+	}
+
+	/** The {@code metrics.steady.total.csv} row beside the total row, with the same quantile columns. */
+	private void writeSteadyTotalRow(
+					final MetricsContext<?> metricsCtx,
+					final SteadyResult steady,
+					final int nodeCount,
+					final List<Double> quantileValues) {
+		final AllMetricsSnapshot window = steady.statistics();
+		final MetricsSteadyTotalCsvLogMessage message = new MetricsSteadyTotalCsvLogMessage(
+						steady,
+						metricsCtx.opType(),
+						metricsCtx.concurrencyLimit(),
+						nodeCount,
+						window == null ? emptyQuantileValues(quantileValues) : quantileValues(window.latencySnapshot(), quantileValues),
+						window == null ? emptyQuantileValues(quantileValues) : quantileValues(window.durationSnapshot(), quantileValues),
+						window == null ? emptyQuantileValues(quantileValues) : quantileValues(window.ttfbSnapshot(), quantileValues));
+		final StringBuilder csvOutput = new StringBuilder();
+		message.formatTo(csvOutput, openMetricsSteadyTotalCsvSteps.add(metricsCtx.loadStepId()));
+		Loggers.METRICS_STEADY_FILE_TOTAL.info(csvOutput.toString());
+		Loggers.MSG.debug(
+						"{}: steady-state window {} (start cut acquisition {} ns, end cut {} ns)",
+						metricsCtx.loadStepId(),
+						steady,
+						steady.startAcquisitionNanos(),
+						steady.endAcquisitionNanos());
 	}
 
 	private static void exitMetricsThresholdState(final MetricsContext<?> metricsCtx) {

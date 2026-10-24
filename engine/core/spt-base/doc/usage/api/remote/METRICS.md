@@ -1,6 +1,6 @@
 # Metrics API guide
 
-SPT exposes live metrics through JSON endpoints and the Prometheus text exposition endpoint. This guide describes schema 4, how metrics are scoped in standalone and distributed runs, and how consumers should interpret them.
+SPT exposes live metrics through JSON endpoints and the Prometheus text exposition endpoint. This guide describes schema 5, how metrics are scoped in standalone and distributed runs, and how consumers should interpret them.
 
 - [Quick start](#quick-start)
 - [Endpoint and node matrix](#endpoint-and-node-matrix)
@@ -68,7 +68,7 @@ JSON responses use `application/json` and include `Access-Control-Allow-Origin: 
 
 A successful JSON response is an array. Each element represents one load step or a retained terminal step. `/metrics/json` emits a single idle element when no local or retained step is available, so it is never an empty successful response. The cluster endpoint returns 404 instead of an empty successful response.
 
-Schema 4 is additive. Consumers should ignore unknown fields, tolerate optional operation-specific sections, and check `metrics_schema` before applying schema-specific rules.
+Schema 5 is additive over schema 4: it adds the optional `steady` object ([Steady-state window](#steady-state-window)) and changes nothing else. Consumers should ignore unknown fields, tolerate optional operation-specific sections, and check `metrics_schema` before applying schema-specific rules.
 
 ### Top-level fields
 
@@ -170,6 +170,23 @@ DELETE retains this compatibility group with zero values. Use `delete.performanc
 | `concurrency.mean` | Mean observed in-flight operation count |
 
 A momentary `current` value of zero does not by itself prove that a bounded run has completed. Use `test_state`, limits, and terminal status.
+
+### Steady-state window
+
+Schema 5 adds `steady`: the same measurement as `metrics.steady.total.csv`, over the Steady-State Window instead of the whole step. The window starts once completions reach the in-flight operation count (`output.metrics.steady.warmup.turnovers`, default 1) and ends at the step's first end event (a stop, the time limit, or scheduling exhaustion), before any drain. `steady` is absent while the window is open, and absent wherever no terminal entry exists.
+
+| Field | Unit and behavior |
+|:--|:--|
+| `steady.status` | `valid`, `short`, `not-reached` or `incomplete`. It describes only the measurement: `valid` means at least `output.metrics.steady.min.turnovers` (default 20) and `output.metrics.steady.min.duration` (default 20 s). It is a coverage test, not a stationarity test, and does not reflect whether the step failed. `incomplete` appears on aggregates only, when a contributor is missing or had no closed window. |
+| `steady.cause` | What ended the window, for diagnostics |
+| `steady.start_seconds` | Window start, seconds from step start; `null` when the window never started |
+| `steady.duration_seconds` | Window duration. On an aggregate, the shortest slice window: coverage metadata, not the denominator of the summed rates |
+| `steady.turnovers` | Window completions per mean operation in flight; `null` unless the status reports statistics |
+| `steady.trend_percent`, `steady.cv` | Stability indicators: the change of the last third of the window's rate bins over the first third, and the bins' coefficient of variation. `null` when the window has fewer than 6 bins. The engine applies no threshold |
+| `steady.start_cut_acquisition_ns`, `steady.end_cut_acquisition_ns` | How long the engine took to read the context's meters at each edge; operations completing during that time may fall on either side of the edge |
+| `steady.operations`, `steady.bandwidth`, `steady.timing`, `steady.concurrency` | The groups above, over the window, plus `operations.success_rate_mean` and `bandwidth.bytes_rate_mean`, the window's IOPS and bandwidth. Present only for `valid` and `short` |
+
+Window timing statistics come from the difference of two copies of each timing histogram, so a window mean is within histogram precision (about 0.4%) of the exact mean. An aggregate's `steady` sums independently measured slice windows: counts and rates are summed and timing populations merged, its start is the latest slice start and its turnovers the lowest slice value, and its status is `incomplete` or the worst slice status. A mixed or weighted step has one window per operation type, but the JSON keeps one entry per step; `metrics.steady.total.csv` is the authoritative per-operation record for those steps.
 
 ## Timing distributions
 
@@ -447,7 +464,7 @@ spt_completion_percent_value
 7. Never average worker percentiles.
 8. Use DELETE object counters for object throughput; generic operation counters are request units.
 9. Treat `null` and absent optional sections as unavailable, not zero.
-10. Ignore unknown additive fields within schema 4.
+10. Ignore unknown additive fields within schema 5.
 11. Require explicit support before interpreting another `metrics_schema` value.
 12. Use `sample_ts` to detect stale HTTP samples and `timestamp` to identify retained completion time.
 
@@ -487,13 +504,13 @@ Verbose JSON can add:
 
 ## Schema and examples
 
-The machine-readable schema is [metrics-schema-v4.json](metrics-schema-v4.json). Published examples are under [examples](examples):
+The machine-readable schema is [metrics-schema-v5.json](metrics-schema-v5.json). Published examples are under [examples](examples):
 
-- [Idle node](examples/metrics-v4-idle.json)
-- [Local READ](examples/metrics-v4-node-read.json)
-- [Aggregate READ](examples/metrics-v4-cluster-read.json)
-- [Local DELETE](examples/metrics-v4-node-delete.json)
-- [Aggregate DELETE](examples/metrics-v4-cluster-delete.json)
-- [LIST shard discovery](examples/metrics-v4-list-shards.json)
+- [Idle node](examples/metrics-v5-idle.json)
+- [Local READ, with `steady`](examples/metrics-v5-node-read.json)
+- [Aggregate READ, with `steady`](examples/metrics-v5-cluster-read.json)
+- [Local DELETE](examples/metrics-v5-node-delete.json)
+- [Aggregate DELETE](examples/metrics-v5-cluster-delete.json)
+- [LIST shard discovery](examples/metrics-v5-list-shards.json)
 
-Contract tests validate these examples and the engine's schema-4 DELETE fixtures against the schema. When the runtime contract changes, update the responder tests, schema, examples, and this guide together. Preserve older versioned schemas and examples for consumers that still support them.
+The schema 4 contract remains in [metrics-schema-v4.json](metrics-schema-v4.json), with its `metrics-v4-*` examples. Contract tests validate each version's examples, and the engine's schema-4 DELETE fixtures, against their schema. When the runtime contract changes, update the responder tests, schema, examples, and this guide together. Preserve older versioned schemas and examples for consumers that still support them.

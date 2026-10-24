@@ -56,7 +56,7 @@ public class MetricsJsonResponderTest {
 						.buildClusterMetrics(false)
 						.get(0);
 
-		assertEquals(4, json.get("metrics_schema").asInt());
+		assertEquals(5, json.get("metrics_schema").asInt());
 		assertTrue(json.get("delete_detail_expected").asBoolean());
 		assertEquals(2, json.get("operations").get("success_count").asLong());
 		assertEquals(1, json.get("operations").get("failed_count").asLong());
@@ -292,7 +292,7 @@ public class MetricsJsonResponderTest {
 		final ArrayNode payload = responder.buildClusterMetrics(false);
 		assertEquals(1, payload.size());
 		final JsonNode obj = payload.get(0);
-		assertEquals(4, obj.get("metrics_schema").asInt());
+		assertEquals(5, obj.get("metrics_schema").asInt());
 		assertEquals("fleet", obj.get("scope").asText());
 		assertEquals("aggregate", obj.get("role").asText());
 		assertEquals("step-agg", obj.get("step_id").asText());
@@ -417,8 +417,52 @@ public class MetricsJsonResponderTest {
 		assertEquals("777", first.get("run_id").asText());
 		assertTrue(first.get("terminal").asBoolean());
 		assertEquals("node", nodePayload.get(0).get("scope").asText());
-		assertEquals(4, nodePayload.get(0).get("metrics_schema").asInt());
+		assertEquals(5, nodePayload.get(0).get("metrics_schema").asInt());
 		assertEquals("entry", nodePayload.get(0).get("role").asText());
+	}
+
+	@Test
+	void terminalEntriesCarryTheSteadyObject() {
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of());
+		when(mgr.getAllContexts()).thenReturn(Set.of());
+		final var window = new com.dell.spt.base.metrics.snapshot.AllMetricsSnapshotImpl(
+						com.dell.spt.base.metrics.snapshot.TimingMetricSnapshotImpl.fromSamples("duration", List.of(1_000L, 3_000L)),
+						com.dell.spt.base.metrics.snapshot.TimingMetricSnapshotImpl.fromSamples("latency", List.of(500L, 700L)),
+						new com.dell.spt.base.metrics.snapshot.TimingMetricSnapshotImpl(0, 0, 0, 0, 0.0, "ttfb"),
+						new com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshotImpl("concurrency", 4, 3.5),
+						new com.dell.spt.base.metrics.snapshot.RateMetricSnapshotImpl(0.0, 0.0, "failed_op", 0, 20_000),
+						new com.dell.spt.base.metrics.snapshot.RateMetricSnapshotImpl(0.0, 0.0, "corrupt_op", 0, 20_000),
+						new com.dell.spt.base.metrics.snapshot.RateMetricSnapshotImpl(9.5, 10.0, "success_op", 200, 20_000),
+						new com.dell.spt.base.metrics.snapshot.RateMetricSnapshotImpl(9.5e5, 1e6, "byte", 20_000_000, 20_000),
+						20_000);
+		final var valid = new com.dell.spt.base.metrics.steady.SteadyResult(
+						com.dell.spt.base.metrics.steady.SteadyStatus.VALID, "shutdown", 1_500, 20_000_000_000L, 57.1, null, 0.02,
+						800, 900, window);
+		final TerminalStepEntry entry = new TerminalStepEntry(
+						"step-steady", OpType.READ, 778L, System.currentTimeMillis(), 250L, 0L, 25_000_000L, 100.0, 200.0, 0L,
+						0.0, 0L, 0L, 25_000L)
+						.withSteady(valid);
+		when(mgr.getTerminalSteps()).thenReturn(List.of(entry));
+
+		final JsonNode steady = new MetricsJsonResponder(mgr, defaultConfig()).buildNodeMetrics(false).get(0).get("steady");
+		assertEquals("valid", steady.get("status").asText());
+		assertEquals(1.5, steady.get("start_seconds").asDouble(), 1e-9);
+		assertEquals(20.0, steady.get("duration_seconds").asDouble(), 1e-9);
+		assertTrue(steady.get("trend_percent").isNull(), "an indicator the window could not judge is null");
+		assertEquals(0.02, steady.get("cv").asDouble(), 1e-12);
+		assertEquals(900.0, steady.get("end_cut_acquisition_ns").asDouble(), 1e-9);
+		assertEquals(200, steady.get("operations").get("success_count").asLong());
+		assertEquals(10.0, steady.get("operations").get("success_rate_mean").asDouble(), 1e-9);
+		assertEquals(1e6, steady.get("bandwidth").get("bytes_rate_mean").asDouble(), 1e-9);
+		assertEquals(3.5, steady.get("concurrency").get("mean").asDouble(), 1e-9);
+		assertEquals(2, steady.get("timing").get("duration").get("count").asLong());
+
+		final TerminalStepEntry withoutWindow = new TerminalStepEntry(
+						"step-open", OpType.READ, 779L, System.currentTimeMillis(), 1L, 0L, 1L, 1.0, 1.0, 0L, 0.0, 0L, 0L, 1L);
+		when(mgr.getTerminalSteps()).thenReturn(List.of(withoutWindow));
+		final JsonNode open = new MetricsJsonResponder(mgr, defaultConfig()).buildNodeMetrics(false).get(0);
+		assertTrue(open.get("steady") == null, "steady is absent while no window has closed");
 	}
 
 	@Test
@@ -843,7 +887,7 @@ public class MetricsJsonResponderTest {
 		final ArrayNode payload = responder.buildNodeMetrics(false);
 		assertEquals(1, payload.size(), "Expected a single idle element");
 		final JsonNode obj = payload.get(0);
-		assertEquals(4, obj.get("metrics_schema").asInt());
+		assertEquals(5, obj.get("metrics_schema").asInt());
 		assertEquals("node", obj.get("scope").asText());
 		assertEquals("worker", obj.get("role").asText());
 		assertEquals("idle-node", obj.get("node_id").asText());
