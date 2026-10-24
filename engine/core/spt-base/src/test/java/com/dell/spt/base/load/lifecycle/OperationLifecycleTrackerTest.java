@@ -72,6 +72,29 @@ final class OperationLifecycleTrackerTest {
 	}
 
 	@Test
+	void awaitingDispatchCountsOnlyUndispatchedLogicalOperations() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final var buffered = operation("buffered");
+		final var queued = operation("queued");
+		final var sent = operation("sent");
+		assertEquals(0, tracker.awaitingDispatchCount());
+		assertTrue(tracker.generatorBuffered(buffered));
+		assertTrue(tracker.generatorBuffered(queued));
+		assertTrue(tracker.driverQueued(queued));
+		assertTrue(tracker.generatorBuffered(sent));
+		assertTrue(tracker.dispatched(sent));
+		assertEquals(2, tracker.awaitingDispatchCount(), "buffered and queued, not dispatched");
+		assertTrue(tracker.dispatched(buffered));
+		assertTrue(tracker.dispatched(queued));
+		assertEquals(0, tracker.awaitingDispatchCount(), "every logical operation is in flight");
+		assertTrue(tracker.completionStarted(sent));
+		sent.status(Operation.Status.SUCC);
+		assertTrue(tracker.terminal(sent));
+		assertEquals(0, tracker.awaitingDispatchCount());
+		assertEquals(-1, OperationLifecycleTracker.disabled().awaitingDispatchCount());
+	}
+
+	@Test
 	void recycledCirculationsAndDirectUnattemptedSelectionAreCounted() {
 		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
 		final var op = operation("recycle");

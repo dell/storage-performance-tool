@@ -824,6 +824,21 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		return enabled ? inFlight.get() : 0;
 	}
 
+	/**
+	 * Logical operations in custody that have not been dispatched (generator-buffered or
+	 * driver-queued), or -1 when tracking is disabled. Counter-only: it reads the outstanding set's
+	 * size before the in-flight count, so an operation completing between the reads is counted and
+	 * the answer errs towards "not yet". Child requests of a composite operation are not logical
+	 * operations and never count.
+	 */
+	public long awaitingDispatchCount() {
+		if (!enabled) {
+			return -1;
+		}
+		final long outstandingCount = outstanding.size();
+		return Math.max(0, outstandingCount - inFlight.get());
+	}
+
 	/** Includes generator and driver queues, which are invisible to transport concurrency. */
 	public boolean hasOutstandingOperations() {
 		return enabled && !outstanding.isEmpty();

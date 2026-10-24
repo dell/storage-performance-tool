@@ -2051,12 +2051,25 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	/**
-	 * Whether every operation the driver accepted has been dispatched, read on the metrics manager
-	 * thread. A full set of slots means work is still queued; with free slots, nothing accepted may
-	 * still be waiting. Completions are read before in-flight operations, so an operation moving
-	 * between them is counted at most once and the answer errs towards "not yet".
+	 * Whether every logical operation scheduled for this step has been dispatched, read on the
+	 * metrics manager thread once scheduling ended. With lifecycle tracking this is exact for
+	 * logical operations, multipart objects included.
 	 */
 	private boolean schedulingDrained() {
+		final long awaitingDispatch = operationLifecycle.awaitingDispatchCount();
+		if (awaitingDispatch >= 0) {
+			return awaitingDispatch == 0;
+		}
+		return transportQueueDrained();
+	}
+
+	/**
+	 * The fallback for a driver without lifecycle tracking, from its transport counts: a full set
+	 * of slots means work is still queued, and with free slots nothing accepted may still wait.
+	 * These counts include child requests, so the fallback is only approximate for composite
+	 * operations, and a completion counted while its permit is held can end it one operation early.
+	 */
+	private boolean transportQueueDrained() {
 		final long scheduled = driver.scheduledOpCount();
 		final long completed = driver.completedOpCount();
 		final int active = driver.activeOpCount();
