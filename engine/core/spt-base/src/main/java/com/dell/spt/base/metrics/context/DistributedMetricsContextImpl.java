@@ -14,6 +14,7 @@ import com.dell.spt.base.metrics.snapshot.RateMetricSnapshotImpl;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshotImpl;
 import com.github.akurilov.commons.system.SizeInBytes;
+import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -48,6 +49,7 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 	private volatile List<String> nodesPresent = List.of();
 	private volatile List<String> contributorsPresent = List.of();
 	private volatile boolean partial;
+	private volatile CachedSteady cachedSteady;
 	private final List<Double> quantileValues;
 
 	public DistributedMetricsContextImpl(
@@ -138,6 +140,33 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 	public List<String> contributorsPresent() {
 		return contributorsPresent;
 	}
+
+	/**
+	 * The slices' aggregate, recomputed only when an input changed: slice results are immutable once
+	 * closed, but each RMI read deserializes new copies, so inputs are compared by a small key rather
+	 * than by identity. This keeps the drain's 100 Hz refreshes from re-merging every histogram.
+	 */
+	private SteadyResult steadyAggregate(final List<SteadyResult> results, final boolean contributorsAuthoritative) {
+		final List<Object> key = new ArrayList<>(results.size() + 2);
+		key.add(contributorsAuthoritative);
+		key.add(nodeCountSupplier.getAsInt());
+		for (final SteadyResult result : results) {
+			key.add(result == null ? null
+							: Arrays.asList(
+											result.status(), result.cause(), result.startOffsetMillis(), result.durationNanos(),
+											result.turnovers()));
+		}
+		final var cached = cachedSteady;
+		if (cached != null && cached.key().equals(key)) {
+			return cached.aggregate();
+		}
+		final SteadyResult aggregate = SteadyAggregation.aggregate(
+						results, contributorsAuthoritative, nodeCountSupplier.getAsInt());
+		cachedSteady = new CachedSteady(key, aggregate);
+		return aggregate;
+	}
+
+	private record CachedSteady(List<Object> key, SteadyResult aggregate) {}
 
 	/** The slices' aggregate steady result in the last snapshot, once any slice window closed. */
 	@Override
@@ -293,8 +322,7 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 			for (final var supplied : suppliedSnapshots) {
 				steadyResults.add(supplied == null ? null : supplied.steadyResult());
 			}
-			final SteadyResult steadyResult = SteadyAggregation.aggregate(
-							steadyResults, contributorsAuthoritative, nodeCountSupplier.getAsInt());
+			final SteadyResult steadyResult = steadyAggregate(steadyResults, contributorsAuthoritative);
 
 			lastSnapshot = (S) new DistributedAllMetricsSnapshotImpl(
 							durSnapshot,

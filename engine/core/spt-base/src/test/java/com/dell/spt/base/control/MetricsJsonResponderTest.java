@@ -466,6 +466,55 @@ public class MetricsJsonResponderTest {
 	}
 
 	@Test
+	void everySteadyStatusTheResponderEmitsMatchesTheSchema5Definition() throws Exception {
+		final var schemaNode = (com.fasterxml.jackson.databind.node.ObjectNode) new com.fasterxml.jackson.databind.ObjectMapper()
+						.readTree(java.nio.file.Files.readString(java.nio.file.Path.of(
+										"doc", "usage", "api", "remote", "metrics-schema-v5.json")));
+		// The published root is an array of samples; validate one object against its steady definition.
+		final var wrapper = new com.fasterxml.jackson.databind.ObjectMapper().createObjectNode();
+		wrapper.set("$schema", schemaNode.get("$schema"));
+		wrapper.set("$defs", schemaNode.get("$defs"));
+		wrapper.put("$ref", "#/$defs/steady");
+		final var steadySchema = com.networknt.schema.JsonSchemaFactory
+						.getInstance(com.networknt.schema.SpecVersion.VersionFlag.V202012)
+						.getSchema(wrapper);
+		steadySchema.initializeValidators();
+		final var window = new com.dell.spt.base.metrics.snapshot.AllMetricsSnapshotImpl(
+						com.dell.spt.base.metrics.snapshot.TimingMetricSnapshotImpl.fromSamples("duration", List.of(1_000L)),
+						com.dell.spt.base.metrics.snapshot.TimingMetricSnapshotImpl.fromSamples("latency", List.of(500L)),
+						new com.dell.spt.base.metrics.snapshot.TimingMetricSnapshotImpl(0, 0, 0, 0, 0.0, "ttfb"),
+						new com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshotImpl("concurrency", 1, 1.0),
+						new com.dell.spt.base.metrics.snapshot.RateMetricSnapshotImpl(0.0, 0.0, "failed_op", 0, 1_000),
+						new com.dell.spt.base.metrics.snapshot.RateMetricSnapshotImpl(0.0, 0.0, "corrupt_op", 0, 1_000),
+						new com.dell.spt.base.metrics.snapshot.RateMetricSnapshotImpl(1.0, 1.0, "success_op", 1, 1_000),
+						new com.dell.spt.base.metrics.snapshot.RateMetricSnapshotImpl(1.0, 1.0, "byte", 1, 1_000),
+						1_000);
+		final List<com.dell.spt.base.metrics.steady.SteadyResult> results = List.of(
+						new com.dell.spt.base.metrics.steady.SteadyResult(
+										com.dell.spt.base.metrics.steady.SteadyStatus.VALID, "shutdown", 0, 1_000_000_000L, 20.0,
+										1.0, 0.1, 5, 6, window),
+						new com.dell.spt.base.metrics.steady.SteadyResult(
+										com.dell.spt.base.metrics.steady.SteadyStatus.SHORT, "shutdown", 10, 1_000_000L, 1.0, null,
+										null, 5, 6, window),
+						com.dell.spt.base.metrics.steady.SteadyResult.incomplete("a slice never closed"),
+						new com.dell.spt.base.metrics.steady.SteadyResult(
+										com.dell.spt.base.metrics.steady.SteadyStatus.NOT_REACHED, "user stop",
+										com.dell.spt.base.metrics.steady.SteadyResult.NONE, 0L, 0.0, null, null,
+										com.dell.spt.base.metrics.steady.SteadyResult.NONE, 7, null));
+		for (final var result : results) {
+			final MetricsManager mgr = mock(MetricsManager.class);
+			when(mgr.getDistributedContexts()).thenReturn(Set.of());
+			when(mgr.getAllContexts()).thenReturn(Set.of());
+			when(mgr.getTerminalSteps()).thenReturn(List.of(new TerminalStepEntry(
+							"step-" + result.status().label(), OpType.READ, 1L, System.currentTimeMillis(), 1L, 0L, 1L, 1.0,
+							1.0, 0L, 0.0, 0L, 0L, 1L).withSteady(result)));
+			final JsonNode steady = new MetricsJsonResponder(mgr, defaultConfig()).buildNodeMetrics(false).get(0).get("steady");
+			assertEquals(result.status().label(), steady.get("status").asText());
+			assertTrue(steadySchema.validate(steady).isEmpty(), () -> steady + ": " + steadySchema.validate(steady));
+		}
+	}
+
+	@Test
 	void terminalNodeMetricsRetainSchema4DeleteContract() {
 		final MetricsManager mgr = mock(MetricsManager.class);
 		when(mgr.getDistributedContexts()).thenReturn(Set.of());
