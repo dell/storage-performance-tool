@@ -51,6 +51,8 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 	}
 
 	/**
+	 * Creates a context that also measures a Steady-State Window.
+	 *
 	 * @param steadySettings settings of the Steady-State Window, or null to measure none (as for
 	 *     a threshold context)
 	 */
@@ -116,7 +118,13 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 
 	@Override
 	public final SteadyResult closeSteadyWindow(final String cause) {
-		return steadyWindow == null ? null : steadyWindow.close(cause);
+		if (steadyWindow == null) {
+			return null;
+		}
+		final SteadyResult closed = steadyWindow.close(cause);
+		// Every snapshot taken from now on carries the result, including a frozen or final one.
+		refreshLastSnapshot();
+		return closed;
 	}
 
 	@Override
@@ -334,7 +342,8 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 						throughputSuccess.snapshot(),
 						reqBytes.snapshot(),
 						elapsedTimeMillis(),
-						deleteMetricsSnapshot());
+						deleteMetricsSnapshot(),
+						steadyWindow == null ? null : steadyWindow.result());
 		super.refreshLastSnapshot(force);
 	}
 

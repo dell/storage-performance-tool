@@ -1,5 +1,7 @@
 package com.dell.spt.base.metrics.context;
 
+import com.dell.spt.base.metrics.steady.SteadyAggregation;
+import com.dell.spt.base.metrics.steady.SteadyResult;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.DistributedMetricsListener;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
@@ -135,6 +137,13 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 	@Override
 	public List<String> contributorsPresent() {
 		return contributorsPresent;
+	}
+
+	/** The slices' aggregate steady result in the last snapshot, once any slice window closed. */
+	@Override
+	public SteadyResult steadyResult() {
+		final var snapshot = lastSnapshot;
+		return snapshot == null ? null : snapshot.steadyResult();
 	}
 
 	@Override
@@ -280,6 +289,12 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 								: null;
 			}
 			final DeleteMetricsSnapshot deleteMetrics = applyFailureBudgetOutcome(suppliedDeleteMetrics);
+			final List<SteadyResult> steadyResults = new ArrayList<>(suppliedSnapshots.size());
+			for (final var supplied : suppliedSnapshots) {
+				steadyResults.add(supplied == null ? null : supplied.steadyResult());
+			}
+			final SteadyResult steadyResult = SteadyAggregation.aggregate(
+							steadyResults, contributorsAuthoritative, nodeCountSupplier.getAsInt());
 
 			lastSnapshot = (S) new DistributedAllMetricsSnapshotImpl(
 							durSnapshot,
@@ -292,7 +307,8 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 							bytesSnapshot,
 							nodeCountSupplier.getAsInt(),
 							elapsedTimeMillis(),
-							deleteMetrics);
+							deleteMetrics,
+							steadyResult);
 			if (metricsListener != null) {
 				metricsListener.notify(lastSnapshot);
 			}

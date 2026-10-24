@@ -1,5 +1,7 @@
 package com.dell.spt.base.metrics.snapshot;
 
+import com.dell.spt.base.metrics.steady.SteadyResult;
+
 import com.dell.spt.base.metrics.MetricsConstants;
 import java.io.Serializable;
 
@@ -35,4 +37,12 @@ public interface AllMetricsSnapshot extends Serializable {
 
 	/** Returns the duration of the measurement window in milliseconds. */
 	long elapsedTimeMillis();
+
+	/**
+	 * The context's Steady-State Window result, carried in every snapshot taken after the window
+	 * closed; null while it is open, and for snapshots that carry none.
+	 */
+	default SteadyResult steadyResult() {
+		return null;
+	}
 }

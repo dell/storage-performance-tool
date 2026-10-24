@@ -1,5 +1,6 @@
 package com.dell.spt.base.metrics.snapshot;
 
+import com.dell.spt.base.metrics.steady.SteadyResult;
 import com.dell.spt.base.metrics.MetricsConstants;
 
 public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
@@ -13,6 +14,7 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 	private final RateMetricSnapshot successSnapshot;
 	private final RateMetricSnapshot bytesSnapshot;
 	private final DeleteMetricsSnapshot deleteMetrics;
+	private final SteadyResult steadyResult;
 	protected final long elapsedTimeMillis;
 
 	public AllMetricsSnapshotImpl(
@@ -104,6 +106,38 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 					final RateMetricSnapshot bytesSnapshot,
 					final long elapsedTimeMillis,
 					final DeleteMetricsSnapshot deleteMetrics) {
+		this(
+						durSnapshot,
+						latSnapshot,
+						ttfbSnapshot,
+						actualConcurrencySnapshot,
+						failsSnapshot,
+						corruptSnapshot,
+						successSnapshot,
+						bytesSnapshot,
+						elapsedTimeMillis,
+						deleteMetrics,
+						null);
+	}
+
+	/**
+	 * Creates a complete snapshot that also carries the context's closed Steady-State Window.
+	 *
+	 * @param steadyResult the window's result once it is closed, otherwise null
+	 */
+	public AllMetricsSnapshotImpl(
+					final TimingMetricSnapshot durSnapshot,
+					final TimingMetricSnapshot latSnapshot,
+					final TimingMetricSnapshot ttfbSnapshot,
+					final ConcurrencyMetricSnapshot actualConcurrencySnapshot,
+					final RateMetricSnapshot failsSnapshot,
+					final RateMetricSnapshot corruptSnapshot,
+					final RateMetricSnapshot successSnapshot,
+					final RateMetricSnapshot bytesSnapshot,
+					final long elapsedTimeMillis,
+					final DeleteMetricsSnapshot deleteMetrics,
+					final SteadyResult steadyResult) {
+		this.steadyResult = steadyResult;
 		this.durSnapshot = durSnapshot;
 		this.latSnapshot = latSnapshot;
 		this.ttfbSnapshot = ttfbSnapshot;
@@ -114,6 +148,11 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 		this.bytesSnapshot = bytesSnapshot;
 		this.elapsedTimeMillis = elapsedTimeMillis;
 		this.deleteMetrics = deleteMetrics;
+	}
+
+	@Override
+	public SteadyResult steadyResult() {
+		return steadyResult;
 	}
 
 	@Override
