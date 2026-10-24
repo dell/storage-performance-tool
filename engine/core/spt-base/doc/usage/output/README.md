@@ -502,7 +502,7 @@ Each window has a status, which describes only its measurement:
 
 | Status | Meaning |
 |:--|:--|
-| `valid` | At least `output-metrics-steady-min-turnovers` (default 20) turnovers and `output-metrics-steady-min-duration` (default `20s`). A turnover is as many completions as there are operations in flight. |
+| `valid` | At least `output-metrics-steady-min-turnovers` (default 20) turnovers and `output-metrics-steady-min-duration` (default `20s`). A turnover is as many completions as there are operations in flight on average, and one completion when fewer than one is. |
 | `short` | The window exists but misses a criterion, including a zero-length window or one without completions. Its statistics are reported. |
 | `not-reached` | The step ended before the window started. No statistics. |
 | `incomplete` | Distributed steps only: a node is missing or reported no closed window. No statistics. |
@@ -528,7 +528,7 @@ duration, followed by five columns:
 | Column | Meaning |
 |:--|:--|
 | `SteadyStart[s]` | When the window started, in seconds from the step's start |
-| `SteadyTurnovers` | Window completions per mean operation in flight |
+| `SteadyTurnovers` | Window completions per mean operation in flight, with a mean below one counted as one |
 | `SteadyTrend[%]` | The window's rate in its last third relative to its first third, in percent |
 | `SteadyCV` | The coefficient of variation of the window's rate |
 | `SteadyStatus` | `valid`, `short`, `not-reached` or `incomplete` |

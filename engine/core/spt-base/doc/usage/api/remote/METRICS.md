@@ -181,7 +181,7 @@ Schema 5 adds `steady`: the same measurement as `metrics.steady.total.csv`, over
 | `steady.cause` | What ended the window, for diagnostics |
 | `steady.start_seconds` | Window start, seconds from step start; `null` when the window never started |
 | `steady.duration_seconds` | Window duration. On an aggregate, the shortest slice window: coverage metadata, not the denominator of the summed rates |
-| `steady.turnovers` | Window completions per mean operation in flight; `null` unless the status reports statistics |
+| `steady.turnovers` | Window completions per mean operation in flight, with a mean below one counted as one; `null` unless the status reports statistics |
 | `steady.trend_percent`, `steady.cv` | Stability indicators: the change of the last third of the window's rate bins over the first third, and the bins' coefficient of variation. `null` when the window has fewer than 6 bins. The engine applies no threshold |
 | `steady.start_cut_acquisition_ns`, `steady.end_cut_acquisition_ns` | How long the engine took to read the context's meters at each edge; operations completing during that time may fall on either side of the edge |
 | `steady.operations`, `steady.bandwidth`, `steady.timing`, `steady.concurrency` | The groups above, over the window, plus `operations.success_rate_mean` and `bandwidth.bytes_rate_mean`, the window's IOPS and bandwidth. Present only for `valid` and `short` |
