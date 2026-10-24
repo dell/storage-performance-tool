@@ -248,6 +248,54 @@ class LinearLoadStepSteadyLifecycleTest {
 	}
 
 	/**
+	 * Count limit: the generator hands every operation to the driver's input queue at once, so
+	 * scheduling ends before the first completion. The window ends at the metrics manager's first
+	 * observation after the driver has drained, when nothing is queued and a freed permit is not
+	 * refilled; the requests then in flight are excluded.
+	 */
+	@Test
+	void countLimitedStepEndsItsWindowOnceTheDriverHasDrained() throws Exception {
+		final long countLimit = 24L * C;
+		final Config config = createStepConfig("steady-count-limit", C);
+		config.val("load-op-limit-count", countLimit);
+		config.val("load-batch-size", 1024); // one handoff of the whole count
+		steadySettings(config, 1.0, 5.0, 0.2);
+		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.data(C, L_MILLIS).inputQueue(1_000_000);
+		try (final var metricsMgr = new RecordingMetricsManager()) {
+			final var step = new ProbeLinearStep(config, driver, metricsMgr);
+			// Once the driver has drained, later completions wait for the window to close, so the
+			// step cannot finish and close it at run exit before the manager's next observation.
+			driver.gateCompletionsWhile(() -> driver.queuedNow() == 0
+							&& driver.dispatchedCount() >= countLimit
+							&& driver.activeOpCount() < C
+							&& !step.windowsClosed());
+			try {
+				step.run();
+
+				assertNull(step.runFailure());
+				assertEquals(countLimit, driver.acceptedAtFirstCompletion(), "scheduling ended before any completion");
+				final SteadyResult steady = step.metrics().steadyResult();
+				final AllMetricsSnapshot window = statistics(steady);
+				final AllMetricsSnapshot total = metricsMgr.total(step.metrics());
+				assertEquals("scheduling exhaustion", steady.cause());
+				assertEquals(SteadyStatus.VALID, steady.status(), steady.toString());
+				assertEquals(countLimit, total.successSnapshot().count());
+				// The start excludes the first wave, the end the requests in flight at the cut.
+				final long inFlightAtCut = window.concurrencySnapshot().last();
+				assertTrue(inFlightAtCut >= 1, "requests in flight at the cut: " + inFlightAtCut);
+				final long windowCount = window.successSnapshot().count();
+				assertTrue(windowCount <= countLimit - C - inFlightAtCut, "window " + windowCount);
+				// The cut follows the last dispatch by at most the last wave and a manager tick, and
+				// the start follows the first wave by at most one more.
+				assertTrue(windowCount >= countLimit - 3L * C, "window " + windowCount);
+				assertWithin(window.successSnapshot().mean(), RATE_LOW * C_OVER_L, RATE_HIGH * C_OVER_L, "steady TPAvg vs C/L");
+			} finally {
+				step.close();
+			}
+		}
+	}
+
+	/**
 	 * Failed step: a terminal failure after the window closed keeps the measured statistics and
 	 * status, and the step reports the failure as today: a typed cause ends {@code run()}, an
 	 * ordinary one is recorded and logged.
