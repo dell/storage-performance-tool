@@ -1551,7 +1551,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			deleteScheduledStartedNanos.set(releasedNanos);
 			deleteScheduledDeadlineNanos.set(deadlineNanos);
 			operationLifecycle.enforceDispatchDeadline(deadlineNanos);
-			enforceDispatchedOperationsDeadlineForStepStop(DurationTime.deadlineAfter(
+			// Arming the interval's terminal deadline is not an end event, so it bypasses the
+			// stop-path entry point, which closes the steady-state windows first.
+			operationLifecycle.enforceTerminalDeadline(DurationTime.deadlineAfter(
 							deadlineNanos,
 							TimeUnit.SECONDS.toNanos(Math.max(0, waitOpFinishLimit))));
 			generator.openAdmissionUntil(deadlineNanos);
