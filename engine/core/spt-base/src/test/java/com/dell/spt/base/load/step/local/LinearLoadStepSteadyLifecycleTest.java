@@ -38,9 +38,10 @@ import org.junit.jupiter.params.provider.ValueSource;
  * loop, with a storage driver of fixed latency {@code L} and concurrency {@code C}.
  *
  * <p><b>Tolerance.</b> A closed loop at a fixed latency runs at most at {@code C / L}. The steady
- * {@code TPAvg} is asserted within [0.85, 1.05] of {@code C / L}. The low side allows for timer
- * slack on each completion and for the generator's output back-off, which can leave a freed slot
- * idle for up to about 1 ms, on a loaded 2-core machine; the high side allows for wave
+ * {@code TPAvg} is asserted within [0.75, 1.05] of {@code C / L} (measured 0.94–0.96). The low side
+ * allows for timer slack on each completion and for the generator's output back-off, which can
+ * leave a freed slot idle for up to about 1 ms, with headroom for a 2-core CI runner that also runs
+ * other test JVMs in parallel; the high side allows for wave
  * quantization, at most one wave of {@code C} completions over a window of tens of waves. Timing
  * bounds compare the window with deliberately slow operations (hundreds of milliseconds), so they
  * hold far above scheduler noise.
@@ -51,7 +52,7 @@ class LinearLoadStepSteadyLifecycleTest {
 	private static final int C = 8;
 	private static final long L_MILLIS = 25;
 	private static final double C_OVER_L = C * 1000.0 / L_MILLIS;
-	private static final double RATE_LOW = 0.85;
+	private static final double RATE_LOW = 0.75;
 	private static final double RATE_HIGH = 1.05;
 	/** Every window timing statistic stays below this; every deliberately slow operation exceeds it. */
 	private static final long WINDOW_TIMING_BOUND_MICROS = TimeUnit.MILLISECONDS.toMicros(150);

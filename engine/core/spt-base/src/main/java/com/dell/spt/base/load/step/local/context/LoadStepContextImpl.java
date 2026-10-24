@@ -109,6 +109,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final boolean failRateLimitFlag;
 	private final ConcurrentMap<I, O> latestSuccOpResultByItem;
 	private final boolean recycleFlag;
+	// Read and written only by the metrics manager thread, through schedulingDrained().
+	private int drainedObservations;
 	private final boolean listPathWorkload;
 	private boolean listLifecycleWaitLogged;
 	private final boolean retryFlag;
@@ -2051,23 +2053,32 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	/**
-	 * Whether every logical operation scheduled for this step has been dispatched, read on the
-	 * metrics manager thread once scheduling ended. With lifecycle tracking this is exact for
-	 * logical operations, multipart objects included.
+	 * Whether nothing scheduled for this step still waits for dispatch, read on the metrics manager
+	 * thread once scheduling ended. It must hold on two consecutive observations, so a read that
+	 * lands between two writes of one lifecycle transition cannot end the window.
+	 *
+	 * <p>A recycle-mode step keeps recycling completed operations into the generator after its count
+	 * limit is reached, where they stay in custody but are never dispatched again, so it is judged
+	 * from the driver's transport counts, which are exact for its non-composite operations. Every
+	 * other step is judged from logical custody. For a multipart object that counts the requests
+	 * created so far: the window ends once none of them is queued, and the parts the in-flight
+	 * objects create later belong to the drain, as they do after a stop.
 	 */
 	private boolean schedulingDrained() {
-		final long awaitingDispatch = operationLifecycle.awaitingDispatchCount();
-		if (awaitingDispatch >= 0) {
-			return awaitingDispatch == 0;
+		final long awaitingDispatch = recycleFlag ? -1 : operationLifecycle.awaitingDispatchCount();
+		final boolean drained = awaitingDispatch >= 0 ? awaitingDispatch == 0 : transportQueueDrained();
+		if (!drained) {
+			drainedObservations = 0;
+			return false;
 		}
-		return transportQueueDrained();
+		return ++drainedObservations >= 2;
 	}
 
 	/**
-	 * The fallback for a driver without lifecycle tracking, from its transport counts: a full set
-	 * of slots means work is still queued, and with free slots nothing accepted may still wait.
-	 * These counts include child requests, so the fallback is only approximate for composite
-	 * operations, and a completion counted while its permit is held can end it one operation early.
+	 * Drained from the driver's transport counts: a full set of slots means work is still queued,
+	 * and with free slots nothing accepted may still wait. Completions include child requests while
+	 * acceptances do not, so these counts misjudge composite operations, and a completion counted
+	 * while its permit is still held can end the window one operation early.
 	 */
 	private boolean transportQueueDrained() {
 		final long scheduled = driver.scheduledOpCount();

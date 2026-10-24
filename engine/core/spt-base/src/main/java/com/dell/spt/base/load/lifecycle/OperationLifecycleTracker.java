@@ -825,11 +825,12 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 	}
 
 	/**
-	 * Logical operations in custody that have not been dispatched (generator-buffered or
-	 * driver-queued), or -1 when tracking is disabled. Counter-only: it reads the outstanding set's
-	 * size before the in-flight count, so an operation completing between the reads is counted and
-	 * the answer errs towards "not yet". Child requests of a composite operation are not logical
-	 * operations and never count.
+	 * Operations in custody that have not been dispatched (generator-buffered or driver-queued), or
+	 * -1 when tracking is disabled. Queued child requests of a composite operation count; children
+	 * a composite has not created yet do not. Counter-only and approximate: the outstanding set's
+	 * size is read before the in-flight count, so an operation completing between the reads is
+	 * counted once too often, but a read between a terminal transition's removal and its in-flight
+	 * decrement can count one too few.
 	 */
 	public long awaitingDispatchCount() {
 		if (!enabled) {

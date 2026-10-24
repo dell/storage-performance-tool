@@ -68,6 +68,7 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 	private final int concurrency;
 	private final long latencyNanos;
 	private final boolean standaloneDelete;
+	private final boolean trackData;
 	private final OperationLifecycleTracker<O> lifecycle;
 	private final ScheduledExecutorService completer;
 	private final AtomicInteger inFlight = new AtomicInteger();
@@ -99,10 +100,16 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 
 	private LatencyStorageDriver(
 					final int concurrency, final long latencyNanos, final boolean standaloneDelete) {
+		this(concurrency, latencyNanos, standaloneDelete, false);
+	}
+
+	private LatencyStorageDriver(
+					final int concurrency, final long latencyNanos, final boolean standaloneDelete, final boolean trackData) {
+		this.trackData = trackData;
 		this.concurrency = concurrency;
 		this.latencyNanos = latencyNanos;
 		this.standaloneDelete = standaloneDelete;
-		this.lifecycle = standaloneDelete
+		this.lifecycle = standaloneDelete || trackData
 						? new OperationLifecycleTracker<>()
 						: OperationLifecycleTracker.disabled();
 		this.completer = Executors.newScheduledThreadPool(
@@ -113,6 +120,11 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 	static <I extends Item, O extends Operation<I>> LatencyStorageDriver<I, O> data(
 					final int concurrency, final long latencyMillis) {
 		return new LatencyStorageDriver<>(concurrency, TimeUnit.MILLISECONDS.toNanos(latencyMillis), false);
+	}
+
+	static <I extends Item, O extends Operation<I>> LatencyStorageDriver<I, O> trackedData(
+					final int concurrency, final long latencyMillis) {
+		return new LatencyStorageDriver<>(concurrency, TimeUnit.MILLISECONDS.toNanos(latencyMillis), false, true);
 	}
 
 	/** A driver for standalone DELETE requests, with operation lifecycle accounting. */
@@ -245,6 +257,9 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 				if (inputQueue.size() >= inputQueueCapacity) {
 					return false;
 				}
+				if (!lifecycle.driverQueued(op)) {
+					return false;
+				}
 				inputQueue.add(op);
 				accepted.incrementAndGet();
 			}
@@ -306,6 +321,7 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 				}
 				next = inputQueue.poll();
 			}
+			lifecycle.explicitlyDispatched(next);
 			dispatch(next);
 		}
 	}
@@ -395,7 +411,17 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 		}
 		op.finishResponse();
 		op.status(Operation.Status.SUCC);
-		resultOutput.put(op);
+		if (trackData) {
+			if (lifecycle.completionStarted(op)) {
+				@SuppressWarnings("unchecked")
+				final O result = (O) op.result();
+				if (resultOutput.put(result)) {
+					lifecycle.terminal(op, Operation.Status.SUCC);
+				}
+			}
+		} else {
+			resultOutput.put(op);
+		}
 		finished.incrementAndGet();
 	}
 

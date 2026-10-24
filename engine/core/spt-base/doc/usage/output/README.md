@@ -490,10 +490,10 @@ size, latency and stop behavior. The engine therefore also measures each step ov
   not the concurrency limit, so it serves saturated, rate-limited, client-bound and unlimited-concurrency steps.
 * The window **ends** at the step's first end event, before any drain: a stop (the time limit, a user stop, a
   failure-budget stop), the end of the step, or the end of scheduling. For a count limit or an exhausted item input,
-  the window ends once every operation the generator scheduled has been dispatched, not when the last one is queued.
-  A mixed step, which ends on its time limit, closes its windows at that stop. A custom storage driver that does not
-  track operation custody is judged from its transport counts instead, which is approximate for multipart uploads; when
-  those never show a drained queue, the window ends at the step's stop and includes the drain.
+  the window ends once nothing the step scheduled still waits for dispatch, not when the last operation is queued. For
+  a multipart upload, the parts that objects already in flight create after that point belong to the drain, as they do
+  after a stop. A mixed step, which ends on its time limit, closes its windows at that stop. If a storage driver's
+  counts never show a drained queue, the window ends at the step's stop and includes the drain.
 * The window's statistics are the summary's statistics computed over the window: counts and bytes are differences
   between the two edges, rates are those differences divided by the window's duration, and every latency, duration
   and TTFB statistic, quantiles included, comes from the difference of two copies of the step's timing histograms.
