@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Fixed
+
+- **Rate-limited runs start paced** — With `load.op.limit.rate` set, each node's first request for operations was granted in full, so every node sent one extra batch (`load.batch.size`, default 32768 operations) at full speed before pacing began. A short or slow-object run reported a rate well above its limit: a 60 s run limited to 500 ops/s averaged about 1,050. Each node now paces from its first operation, so the measured rate matches the limit from the start. The limit's meaning is unchanged: operations per second for the step, divided evenly among its nodes.
+
 ## [5.16.2] - 2026-10-22
 
 ### Added
