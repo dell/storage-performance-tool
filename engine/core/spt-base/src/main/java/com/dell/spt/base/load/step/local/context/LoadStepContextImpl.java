@@ -357,6 +357,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						: driverLifecycle;
 		this.metricsCtx = metricsCtx;
 		this.metricsCtxByOpType = metricsCtxByOpType;
+		generator.onSchedulingExhaustion(() -> closeSteadyWindows("scheduling exhaustion"));
 		this.tracePersistFlag = tracePersistFlag;
 		this.listShardMetricsRecorder = shardMetricsRecorder == null ? ListShardMetricsRecorder.NO_OP : shardMetricsRecorder;
 		this.immutableListRootPrefix = canonicalListPrefix(immutableListRootPrefix);
@@ -2033,8 +2034,24 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						.sum();
 	}
 
+	/**
+	 * Closes the Steady-State Windows this context records into, before any stop-path action on
+	 * it: a backstop for paths that reach a context directly rather than through its step.
+	 */
+	private void closeSteadyWindows(final String cause) {
+		if (metricsCtx != null) {
+			metricsCtx.closeSteadyWindow(cause);
+		}
+		if (metricsCtxByOpType != null) {
+			for (final MetricsContext opTypeCtx : metricsCtxByOpType.values()) {
+				opTypeCtx.closeSteadyWindow(cause);
+			}
+		}
+	}
+
 	/** Closes both admission gates without recovering or draining queued work. */
 	private void closeOperationAdmission() {
+		closeSteadyWindows("close operation admission");
 		operationAdmissionCloseLock.lock();
 		try {
 			if (operationAdmissionClosed.get()) {
@@ -2122,22 +2139,26 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	public final void recoverQueuedOperationsForStepStop() {
+		closeSteadyWindows("recover queued operations");
 		prepareOperationDrain();
 	}
 
 	@Override
 	public final void enforceDispatchedOperationsDeadlineForStepStop(
 					final long deadlineNanos) {
+		closeSteadyWindows("dispatched operations deadline");
 		operationLifecycle.enforceTerminalDeadline(deadlineNanos);
 	}
 
 	@Override
 	public final void expireDispatchedOperationsDeadlineForStepStop() {
+		closeSteadyWindows("dispatched operations deadline");
 		operationLifecycle.expireTerminalDeadline();
 	}
 
 	@Override
 	public final void drainDispatchedOperationsForStepStop(final long deadlineNanos) {
+		closeSteadyWindows("drain dispatched operations");
 		prepareOperationDrain();
 		drainDispatchedOperations(deadlineNanos);
 	}
