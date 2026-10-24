@@ -358,7 +358,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		this.metricsCtx = metricsCtx;
 		this.metricsCtxByOpType = metricsCtxByOpType;
 		if (generator != null) {
-			generator.onSchedulingExhaustion(() -> closeSteadyWindows("scheduling exhaustion"));
+			generator.onSchedulingExhaustion(this::markSchedulingEnded);
 		}
 		this.tracePersistFlag = tracePersistFlag;
 		this.listShardMetricsRecorder = shardMetricsRecorder == null ? ListShardMetricsRecorder.NO_OP : shardMetricsRecorder;
@@ -2034,6 +2034,32 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						.map(DeleteRequestOperation.class::cast)
 						.mapToLong(operation -> operation.deleteRequest().targets().size())
 						.sum();
+	}
+
+	/** Arms the end edge of this context's windows once its generator's scheduling ended. */
+	private void markSchedulingEnded() {
+		if (metricsCtx != null) {
+			metricsCtx.markSchedulingEnded(this::schedulingDrained);
+		}
+		if (metricsCtxByOpType != null) {
+			for (final MetricsContext opTypeCtx : metricsCtxByOpType.values()) {
+				opTypeCtx.markSchedulingEnded(this::schedulingDrained);
+			}
+		}
+	}
+
+	/**
+	 * Whether every operation the driver accepted has been dispatched, read on the metrics manager
+	 * thread. A full set of slots means work is still queued; with free slots, nothing accepted may
+	 * still be waiting. Completions are read before in-flight operations, so an operation moving
+	 * between them is counted at most once and the answer errs towards "not yet".
+	 */
+	private boolean schedulingDrained() {
+		final long scheduled = driver.scheduledOpCount();
+		final long completed = driver.completedOpCount();
+		final int active = driver.activeOpCount();
+		final int limit = driver.concurrencyLimit();
+		return (limit <= 0 || active < limit) && completed + active >= scheduled;
 	}
 
 	/**

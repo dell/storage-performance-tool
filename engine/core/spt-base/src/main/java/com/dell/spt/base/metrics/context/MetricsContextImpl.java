@@ -1,5 +1,6 @@
 package com.dell.spt.base.metrics.context;
 
+import java.util.function.BooleanSupplier;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshotImpl;
@@ -125,6 +126,13 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 		// Every snapshot taken from now on carries the result, including a frozen or final one.
 		refreshLastSnapshot();
 		return closed;
+	}
+
+	@Override
+	public final void markSchedulingEnded(final BooleanSupplier drained) {
+		if (steadyWindow != null) {
+			steadyWindow.markSchedulingEnded(drained);
+		}
 	}
 
 	@Override

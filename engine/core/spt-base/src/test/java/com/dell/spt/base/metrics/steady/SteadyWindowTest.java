@@ -378,6 +378,38 @@ class SteadyWindowTest {
 	}
 
 	@Test
+	void scheduledEndClosesOnlyOnceTheDriverHasDrained() {
+		final var window = window(1, 0, 0);
+		source.inFlight = 4;
+		source.succeeded = 4;
+		window.observe();
+		final var drained = new java.util.concurrent.atomic.AtomicBoolean();
+		window.markSchedulingEnded(drained::get);
+		clock.addAndGet(SECOND);
+		source.succeeded = 400;
+		window.observe();
+		assertNull(window.result(), "queued work still keeps the slots full");
+		drained.set(true);
+		clock.addAndGet(SECOND);
+		source.succeeded = 800;
+		window.observe();
+		final SteadyResult result = window.result();
+		assertEquals("scheduling exhaustion", result.cause());
+		assertEquals(796, result.statistics().successSnapshot().count());
+		assertEquals(2 * SECOND, result.durationNanos());
+	}
+
+	@Test
+	void scheduledEndBeforeTheStartIsNotReached() {
+		final var window = defaultWindow();
+		source.inFlight = 64;
+		source.succeeded = 3;
+		window.markSchedulingEnded(() -> true);
+		window.observe();
+		assertEquals(SteadyStatus.NOT_REACHED, window.result().status());
+	}
+
+	@Test
 	void noStartBeginsAfterAClose() {
 		final var window = defaultWindow();
 		window.close("user-stop");

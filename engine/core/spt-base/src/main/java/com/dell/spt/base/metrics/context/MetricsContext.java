@@ -1,5 +1,6 @@
 package com.dell.spt.base.metrics.context;
 
+import java.util.function.BooleanSupplier;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.steady.SteadyResult;
@@ -98,6 +99,12 @@ public interface MetricsContext<S extends AllMetricsSnapshot>
 	default SteadyResult closeSteadyWindow(final String cause) {
 		return null;
 	}
+
+	/**
+	 * Arms the Steady-State Window's end edge once the step's scheduling ended: the metrics manager
+	 * closes the window at its first observation at which {@code drained} holds.
+	 */
+	default void markSchedulingEnded(final BooleanSupplier drained) {}
 
 	/** The Steady-State Window's result once it is closed, otherwise null. */
 	default SteadyResult steadyResult() {

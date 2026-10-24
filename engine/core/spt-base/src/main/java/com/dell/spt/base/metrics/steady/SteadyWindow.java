@@ -2,6 +2,7 @@ package com.dell.spt.base.metrics.steady;
 
 import com.dell.spt.base.logging.Loggers;
 import java.util.Arrays;
+import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 
 /**
@@ -47,6 +48,7 @@ public final class SteadyWindow {
 	private final LongSupplier nanoClock;
 	private final Object lock = new Object();
 	private volatile boolean stepStarted;
+	private volatile BooleanSupplier schedulingDrained;
 	private volatile State state = State.OPEN;
 	private volatile SteadyResult result;
 	private long stepStartNanos;
@@ -72,11 +74,27 @@ public final class SteadyWindow {
 	}
 
 	/**
-	 * One metrics-manager observation: starts the window when the start rule holds, and while the
-	 * window is open appends to its stability series.
+	 * Arms the end edge of a step whose scheduling ended (a count limit or exhausted input). The
+	 * generator hands its last operation to the driver's queue long before the driver dispatches
+	 * it, so the window closes at the first observation at which nothing is left to dispatch.
+	 *
+	 * @param drained whether every operation the driver accepted has been dispatched
+	 */
+	public void markSchedulingEnded(final BooleanSupplier drained) {
+		schedulingDrained = drained;
+	}
+
+	/**
+	 * One metrics-manager observation: starts the window when the start rule holds, appends to
+	 * its stability series while it is open, and closes it once scheduling ended and drained.
 	 */
 	public void observe() {
 		if (!stepStarted) {
+			return;
+		}
+		final BooleanSupplier drained = schedulingDrained;
+		if (drained != null && state != State.CLOSED && drained.getAsBoolean()) {
+			close("scheduling exhaustion");
 			return;
 		}
 		final State current = state;
