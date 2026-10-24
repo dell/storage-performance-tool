@@ -108,23 +108,32 @@ func TestRendererStandaloneDeleteShowsNoFabricatedTransferMetrics(t *testing.T) 
 		}},
 	}
 
-	table := NewRenderer(RenderOptions{}).performanceTable(summary)
-	line := ""
+	renderer := NewRenderer(RenderOptions{})
+	phaseLine := tableRowLine(t, renderer.phaseTable(summary), "Delete")
+	if strings.Count(phaseLine, notApplicableCell) < 3 {
+		t.Fatalf("DELETE size/data/TTFB must be N/A:\n%s", phaseLine)
+	}
+	if !strings.Contains(phaseLine, "2.50 ms") {
+		t.Fatalf("DELETE request latency missing:\n%s", phaseLine)
+	}
+	rateLine := tableRowLine(t, renderer.rateTable(summary), "Delete")
+	if strings.Count(rateLine, notApplicableCell) < 2 {
+		t.Fatalf("DELETE Avg and steady bandwidth must be N/A:\n%s", rateLine)
+	}
+	if !strings.Contains(rateLine, "4.00 ops/s") {
+		t.Fatalf("DELETE request rate missing:\n%s", rateLine)
+	}
+}
+
+func tableRowLine(t *testing.T, table, label string) string {
+	t.Helper()
 	for _, candidate := range strings.Split(table, "\n") {
-		if strings.Contains(candidate, "Delete") {
-			line = candidate
-			break
+		if strings.HasPrefix(candidate, "│ "+label+" ") {
+			return candidate
 		}
 	}
-	if line == "" {
-		t.Fatalf("DELETE row missing:\n%s", table)
-	}
-	if strings.Count(line, notApplicableCell) < 4 {
-		t.Fatalf("DELETE size/data/TTFB/bandwidth must be N/A:\n%s", line)
-	}
-	if !strings.Contains(line, "4.00 ops/s") || !strings.Contains(line, "2.50 ms") {
-		t.Fatalf("DELETE request rate/latency missing:\n%s", line)
-	}
+	t.Fatalf("%s row missing:\n%s", label, table)
+	return ""
 }
 
 func TestFormatSuccessCountUsesExplicitRowUnit(t *testing.T) {

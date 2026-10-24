@@ -55,6 +55,8 @@ type StepData struct {
 	StepID            string
 	Manifest          *results.StepManifest
 	Metrics           *MetricsTotals
+	Steady            *SteadyTotals
+	SteadyUnreadable  bool
 	Delete            *deletemetrics.Metrics
 	DeleteEvidence    *DeleteArtifactEvidence
 	Status            StepStatus
@@ -218,6 +220,21 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 			step.MissingRequired = appendUnique(step.MissingRequired, constants.ResultsArtifactSuffixMetricsTotal)
 			if metricsEntry != nil && metricsEntry.Status != fileStatusOK && metricsEntry.Error != "" {
 				step.Notes = append(step.Notes, metricsEntry.Error)
+			}
+		}
+
+		// An absent or unreadable steady file never fails the step: the summary shows why
+		// its steady rates are unavailable instead.
+		if steadyEntry := findArtifactEntry(sm, constants.ResultsArtifactSuffixMetricsSteady); steadyEntry != nil && steadyEntry.Status == fileStatusOK {
+			steady, parseErr := parseSteadyTotals(sm.StepID, filepath.Join(runDir, steadyEntry.Name))
+			switch {
+			case errors.Is(parseErr, os.ErrNotExist):
+				// A listed file that is gone is absent, like an unlisted one.
+			case parseErr != nil:
+				step.SteadyUnreadable = true
+				step.Notes = append(step.Notes, fmt.Sprintf("steady metrics totals parse error: %v", parseErr))
+			default:
+				step.Steady = steady
 			}
 		}
 

@@ -21,6 +21,12 @@ const (
 	MetricsLocalContributorID = "local"
 )
 
+// Engine release that first writes the steady-state window totals artifact.
+const (
+	ResultsSteadyMetricsMinEngineMajor = 5
+	ResultsSteadyMetricsMinEngineMinor = 17
+)
+
 // Results artifact suffixes.
 const (
 	ResultsArtifactSuffixMetricsTotal          = "metrics.total.csv"
@@ -31,6 +37,7 @@ const (
 	ResultsArtifactSuffixMetrics               = "metrics.csv"
 	ResultsArtifactSuffixScenario              = "scenario.txt"
 	ResultsArtifactSuffixMetricsThreshold      = "metrics.threshold.total.csv"
+	ResultsArtifactSuffixMetricsSteady         = "metrics.steady.total.csv"
 	ResultsArtifactSuffixOpTrace               = "op.trace.csv"
 	ResultsArtifactSuffixDeleteMetricsTotal    = "delete.metrics.total.csv"
 	ResultsArtifactSuffixDeleteRequests        = "delete.requests.csv"
