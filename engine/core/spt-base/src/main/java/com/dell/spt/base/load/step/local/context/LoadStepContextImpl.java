@@ -2054,19 +2054,23 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	/**
 	 * Whether nothing scheduled for this step still waits for dispatch, read on the metrics manager
-	 * thread once scheduling ended. It must hold on two consecutive observations, so a read that
-	 * lands between two writes of one lifecycle transition cannot end the window.
+	 * thread once scheduling ended. It must hold on two consecutive observations.
 	 *
 	 * <p>A recycle-mode step keeps recycling completed operations into the generator after its count
 	 * limit is reached, where they stay in custody but are never dispatched again, so it is judged
 	 * from the driver's transport counts, which are exact for its non-composite operations. Every
-	 * other step is judged from logical custody. For a multipart object that counts the requests
-	 * created so far: the window ends once none of them is queued, and the parts the in-flight
-	 * objects create later belong to the drain, as they do after a stop.
+	 * other step is judged from logical custody: the custody count must be zero, and a scan of the
+	 * operations' lifecycle states confirms it. A completion stalled between its custody removal and
+	 * its in-flight decrement keeps the count one too low for as long as it stalls, which repeated
+	 * observations cannot rule out. For a multipart object custody holds the requests created so
+	 * far: the window ends once none of them is queued, and the parts the in-flight objects create
+	 * later belong to the drain, as they do after a stop.
 	 */
 	private boolean schedulingDrained() {
 		final long awaitingDispatch = recycleFlag ? -1 : operationLifecycle.awaitingDispatchCount();
-		final boolean drained = awaitingDispatch >= 0 ? awaitingDispatch == 0 : transportQueueDrained();
+		final boolean drained = awaitingDispatch >= 0
+						? awaitingDispatch == 0 && !operationLifecycle.hasUndispatchedOperations()
+						: transportQueueDrained();
 		if (!drained) {
 			drainedObservations = 0;
 			return false;
@@ -2078,7 +2082,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	 * Drained from the driver's transport counts: a full set of slots means work is still queued,
 	 * and with free slots nothing accepted may still wait. Completions include child requests while
 	 * acceptances do not, so these counts misjudge composite operations, and a completion counted
-	 * while its permit is still held can end the window one operation early.
+	 * while its permit is still held can end the window one operation early. Two observations do
+	 * not rule that out when the completing thread stalls between its updates.
 	 */
 	private boolean transportQueueDrained() {
 		final long scheduled = driver.scheduledOpCount();

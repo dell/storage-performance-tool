@@ -95,6 +95,44 @@ final class OperationLifecycleTrackerTest {
 	}
 
 	@Test
+	void undispatchedOperationsAreReadFromLifecycleStates() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final var buffered = operation("buffered");
+		final var queued = operation("queued");
+		assertFalse(tracker.hasUndispatchedOperations());
+		assertTrue(tracker.generatorBuffered(buffered));
+		assertTrue(tracker.hasUndispatchedOperations(), "generator-buffered");
+		assertTrue(tracker.dispatched(buffered));
+		assertFalse(tracker.hasUndispatchedOperations(), "in flight");
+		assertTrue(tracker.driverQueued(queued));
+		assertTrue(tracker.hasUndispatchedOperations(), "driver-queued");
+		assertTrue(tracker.dispatched(queued));
+		assertTrue(tracker.completionStarted(queued));
+		assertFalse(tracker.hasUndispatchedOperations(), "completing");
+		queued.status(Operation.Status.SUCC);
+		assertTrue(tracker.terminal(queued));
+		assertFalse(tracker.hasUndispatchedOperations());
+		assertFalse(OperationLifecycleTracker.disabled().hasUndispatchedOperations());
+	}
+
+	@Test
+	void aStalledTerminalTransitionCannotHideAQueuedOperation() throws Exception {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final var queued = operation("queued");
+		final var completing = operation("completing");
+		assertTrue(tracker.driverQueued(queued));
+		assertTrue(tracker.dispatched(completing));
+		assertTrue(tracker.completionStarted(completing));
+		completing.status(Operation.Status.SUCC);
+		try (var stalled = StalledTerminalTransition.stall(tracker, completing)) {
+			assertEquals(0, tracker.awaitingDispatchCount(), "removed from custody, still counted in flight");
+			assertTrue(tracker.hasUndispatchedOperations());
+		}
+		assertEquals(1, tracker.awaitingDispatchCount());
+		assertTrue(tracker.hasUndispatchedOperations());
+	}
+
+	@Test
 	void recycledCirculationsAndDirectUnattemptedSelectionAreCounted() {
 		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
 		final var op = operation("recycle");
