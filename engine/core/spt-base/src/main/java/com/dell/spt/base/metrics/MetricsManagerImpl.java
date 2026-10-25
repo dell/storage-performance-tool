@@ -246,10 +246,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 										: quantileValues(snapshot.ttfbSnapshot(), quantileValues);
 
 						if (snapshot instanceof DistributedAllMetricsSnapshot aggregSnapshot) {
-							// Every expected slice has closed its window by now; a missing one makes it incomplete.
-							final SteadyResult steady = aggregSnapshot.steadyResult() != null
-											? aggregSnapshot.steadyResult()
-											: SteadyResult.incomplete("no slice reported a closed window");
+							final SteadyResult steady = terminalSteady(snapshotAfter);
 							if (hasProgress(snapshot)) {
 								final var nodesPresent = distributedMetricsCtx.nodesPresent();
 								final var contributorsPresent = distributedMetricsCtx.contributorsPresent();
@@ -673,6 +670,21 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		public int hashCode() {
 			return Objects.hash(stepId, distributed);
 		}
+	}
+
+	/**
+	 * A distributed context's terminal steady result, from its final read alone. Every expected slice
+	 * has closed its window by then, so a missing one makes it incomplete. A final read that no slice
+	 * answered is incomplete too, although the whole-step totals fall back to an earlier read: the
+	 * contributor set at the final read decides, as it does when only some slices are missing.
+	 */
+	private static SteadyResult terminalSteady(final AllMetricsSnapshot finalSnapshot) {
+		if (!(finalSnapshot instanceof DistributedAllMetricsSnapshot fresh)) {
+			return SteadyResult.incomplete("no slice answered the final read");
+		}
+		return fresh.steadyResult() != null
+						? fresh.steadyResult()
+						: SteadyResult.incomplete("no slice reported a closed window");
 	}
 
 	private static AllMetricsSnapshot preferTerminalSnapshot(

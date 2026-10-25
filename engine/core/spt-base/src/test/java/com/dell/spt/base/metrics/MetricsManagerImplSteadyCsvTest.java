@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -15,6 +16,7 @@ import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.logging.MetricsSteadyTotalCsvLogMessage;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
+import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshotImpl;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshotImpl;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshotImpl;
@@ -29,6 +31,7 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVParser;
 import org.apache.logging.log4j.ThreadContext;
@@ -118,6 +121,68 @@ class MetricsManagerImplSteadyCsvTest {
 							.orElseThrow();
 			assertEquals(OpType.CREATE, terminal.opType);
 			assertNotNull(terminal.steady);
+			assertEquals(SteadyStatus.INCOMPLETE, terminal.steady.status());
+		} finally {
+			ThreadContext.remove(KEY_HOME_DIR);
+			steadyLogger.removeAppender(steadyRows);
+			totalLogger.removeAppender(totalRows);
+			steadyRows.stop();
+			totalRows.stop();
+		}
+	}
+
+	@Test
+	void aFinalReadThatNoSliceAnsweredWritesAnIncompleteSteadyRow(@TempDir final Path tempDir) throws Exception {
+		final String stepId = "steady-csv-final-read-" + System.nanoTime();
+		final CapturingAppender steadyRows = new CapturingAppender(stepId, "steadyCapture");
+		final CapturingAppender totalRows = new CapturingAppender(stepId, "totalCapture");
+		final var loggerCtx = LoggerContext.getContext(false);
+		final var steadyLogger = loggerCtx.getLogger(Loggers.METRICS_STEADY_FILE_TOTAL.getName());
+		final var totalLogger = loggerCtx.getLogger(Loggers.METRICS_FILE_TOTAL.getName());
+		steadyRows.start();
+		totalRows.start();
+		steadyLogger.addAppender(steadyRows);
+		totalLogger.addAppender(totalRows);
+		ThreadContext.put(KEY_HOME_DIR, tempDir.toString());
+		try {
+			final MetricsManagerImpl mgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+			final SteadyResult valid = new SteadyResult(
+							SteadyStatus.VALID, "shutdown", 2_500, 30_000_000_000L, 120.0, -1.5, 0.04, 1_000, 2_000,
+							snapshot(3_000L, 12_288_000L, 30_000));
+			final DistributedMetricsContext ctx = distributedContext(stepId, OpType.READ, valid);
+			// The earlier read carried every slice's window; the final read finds no slice.
+			final AtomicReference<AllMetricsSnapshot> last = new AtomicReference<>(ctx.lastSnapshot());
+			when(ctx.lastSnapshot()).thenAnswer(invocation -> last.get());
+			doAnswer(invocation -> {
+				last.set(null);
+				return null;
+			}).when(ctx).refreshLastSnapshot(true);
+			when(ctx.partial()).thenReturn(true);
+			configureSortOrder(List.of(ctx));
+			mgr.register(ctx);
+			mgr.unregister(ctx);
+
+			final String steadyCsv = joined(await(steadyRows, 1));
+			final String totalCsv = joined(await(totalRows, 1));
+			try (final CSVParser steadyParser = CSVFormat.DEFAULT.builder()
+							.setHeader()
+							.setSkipHeaderRecord(true)
+							.build()
+							.parse(new StringReader(steadyCsv));
+							final CSVParser totalParser = CSVFormat.DEFAULT.builder()
+											.setHeader()
+											.setSkipHeaderRecord(true)
+											.build()
+											.parse(new StringReader(totalCsv))) {
+				final var steady = steadyParser.getRecords().get(0);
+				assertEquals("incomplete", steady.get("SteadyStatus"));
+				assertEquals("", steady.get("CountSucc"), "the earlier read's window is not reused");
+				assertEquals("5000", totalParser.getRecords().get(0).get("CountSucc"), "the totals keep the earlier read");
+			}
+			final TerminalStepEntry terminal = mgr.getTerminalSteps().stream()
+							.filter(entry -> entry.distributed && entry.stepId.equals(stepId))
+							.findFirst()
+							.orElseThrow();
 			assertEquals(SteadyStatus.INCOMPLETE, terminal.steady.status());
 		} finally {
 			ThreadContext.remove(KEY_HOME_DIR);

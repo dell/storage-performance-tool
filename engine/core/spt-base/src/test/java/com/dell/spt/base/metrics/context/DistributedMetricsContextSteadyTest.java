@@ -4,9 +4,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.MetricsConstants;
+import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshotImpl;
 import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshotImpl;
@@ -16,6 +19,7 @@ import com.dell.spt.base.metrics.steady.SteadyResult;
 import com.dell.spt.base.metrics.steady.SteadyStatus;
 import com.github.akurilov.commons.system.SizeInBytes;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -58,6 +62,41 @@ class DistributedMetricsContextSteadyTest {
 		ctx.refreshLastSnapshot(true);
 		assertNotSame(first, ctx.steadyResult());
 		assertEquals(350, ctx.steadyResult().statistics().successSnapshot().count());
+	}
+
+	@Test
+	void aFinalReadWithoutEverySliceIsIncompleteAlthoughEveryWindowWasReportedBefore() {
+		final List<List<AllMetricsSnapshot>> finalReads = List.of(
+						Arrays.asList(slice(valid(100)), null),
+						Arrays.asList(null, null));
+		for (final List<AllMetricsSnapshot> finalRead : finalReads) {
+			final String stepId = "steady-final-read-" + finalRead.stream().filter(s -> s != null).count();
+			final AtomicReference<List<AllMetricsSnapshot>> supplied = new AtomicReference<>(
+							List.of(slice(valid(100)), slice(valid(200))));
+			final DistributedMetricsContextImpl<?> ctx = DistributedMetricsContextImpl.builder()
+							.loadStepId(stepId).runId(1L).opType(OpType.CREATE)
+							.nodeCountSupplier(() -> 2).concurrencyLimit(4).concurrencyThreshold(0)
+							.itemDataSize(new SizeInBytes(1024)).outputPeriodSec(0).stdOutColorFlag(false)
+							.avgPersistFlag(false).sumPersistFlag(false).timingPersistFlag(false)
+							.snapshotsSupplier(supplied::get)
+							.quantileValues(List.of(0.5)).nodeAddrs(List.of("a:1099", "b:1099"))
+							.build();
+			ctx.metadata().put(MetricsConstants.METADATA_LIMIT_OP_COUNT, 0L);
+			final MetricsManagerImpl manager = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+			manager.register(ctx);
+			ctx.refreshLastSnapshot(true);
+			assertEquals(SteadyStatus.VALID, ctx.steadyResult().status(), "every slice has reported its window");
+
+			supplied.set(finalRead);
+			manager.unregister(ctx);
+			final var entry = manager.getTerminalSteps().stream()
+							.filter(e -> e.distributed && e.stepId.equals(stepId))
+							.findFirst()
+							.orElseThrow();
+			assertTrue(entry.partial, stepId);
+			assertEquals(SteadyStatus.INCOMPLETE, entry.steady.status(), stepId + ": the final read decides");
+			assertNull(entry.steady.statistics(), stepId);
+		}
 	}
 
 	private static SteadyResult valid(final long succeeded) {
