@@ -2747,6 +2747,81 @@ class LoadStepClientBaseTest {
 		assertFalse(Files.exists(IntegrityManifestCompletion.completionPath(manifest)));
 	}
 
+	@Test
+	@SuppressWarnings("unchecked")
+	void closeHandsTheCollectedItemOutputAndTheFinalSuccessCountsToTheStep() throws Exception {
+		final Config config = TestConfigBuilder.config();
+		config.val("load-step-id", "item-output-step");
+		final String itemOutputFile = tempDir.resolve("items.csv").toString();
+		config.val("item-output-file", itemOutputFile);
+		final List<String> events = Collections.synchronizedList(new ArrayList<>());
+		final TestLoadStepClient client = new TestLoadStepClient(config, extensions, ctxConfigs, mockMetricsManager) {
+			@Override
+			protected void itemOutputCollected(final String file, final Map<OpType, Long> successCounts) {
+				events.add("checked " + file + " " + successCounts);
+			}
+		};
+		final MetricsContext<AllMetricsSnapshot> createMetrics = mock(MetricsContext.class);
+		final AllMetricsSnapshot snapshot = mock(AllMetricsSnapshot.class);
+		final RateMetricSnapshot successes = mock(RateMetricSnapshot.class);
+		when(createMetrics.opType()).thenReturn(OpType.CREATE);
+		when(createMetrics.lastSnapshot()).thenReturn(snapshot);
+		when(snapshot.successSnapshot()).thenReturn(successes);
+		when(successes.count()).thenReturn(7L);
+		// A closed context has no snapshot, so the counts must be read before the contexts close.
+		doAnswer(invocation -> {
+			events.add("metrics closed");
+			when(createMetrics.lastSnapshot()).thenReturn(null);
+			return null;
+		}).when(createMetrics).close();
+		client.addMetricsContextForTest(createMetrics);
+		addItemOutputAggregator(client, () -> events.add("collected"));
+
+		client.doClose();
+
+		assertEquals(List.of("metrics closed", "collected", "checked " + itemOutputFile + " {CREATE=7}"), events);
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void closeChecksNoItemOutputWhenTheStepHasNone() throws Exception {
+		final Config config = TestConfigBuilder.config();
+		config.val("load-step-id", "no-item-output-step");
+		final List<String> events = Collections.synchronizedList(new ArrayList<>());
+		final TestLoadStepClient client = new TestLoadStepClient(config, extensions, ctxConfigs, mockMetricsManager) {
+			@Override
+			protected void itemOutputCollected(final String file, final Map<OpType, Long> successCounts) {
+				events.add("checked " + file);
+			}
+		};
+
+		client.doClose();
+
+		assertEquals(List.of(), events);
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void successCountsSumEachTypeAndOmitTypesWithoutFinalMetrics() {
+		final List<MetricsContext<AllMetricsSnapshot>> contexts = new ArrayList<>();
+		for (final long count : new long[]{3, 4
+		}) {
+			final MetricsContext<AllMetricsSnapshot> context = mock(MetricsContext.class);
+			final AllMetricsSnapshot snapshot = mock(AllMetricsSnapshot.class);
+			final RateMetricSnapshot successes = mock(RateMetricSnapshot.class);
+			when(context.opType()).thenReturn(OpType.CREATE);
+			when(context.lastSnapshot()).thenReturn(snapshot);
+			when(snapshot.successSnapshot()).thenReturn(successes);
+			when(successes.count()).thenReturn(count);
+			contexts.add(context);
+		}
+		final MetricsContext<AllMetricsSnapshot> unread = mock(MetricsContext.class);
+		when(unread.opType()).thenReturn(OpType.READ);
+		contexts.add(unread);
+
+		assertEquals(Map.of(OpType.CREATE, 7L), LoadStepClientBase.successCounts(contexts));
+	}
+
 	@Nested
 	@DisplayName("Constructor Tests")
 	class ConstructorTests {

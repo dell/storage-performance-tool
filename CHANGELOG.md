@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Fixed
 
 - **Rate-limited runs start paced** — With `load.op.limit.rate` set, the first request for operations on each node (and for each sub-step of a pipeline or weighted step) was granted in full, so it sent up to one extra batch (`load.batch.size`, default 32768 operations) at full speed before pacing began. A short or slow-object run reported a rate well above its limit: a 60 s run limited to 500 ops/s averaged about 1,050. Each node now paces from its first operation, so the measured rate matches the limit from the start. The limit's meaning is unchanged: operations per second for the step, divided evenly among its nodes.
+- **Mixed cleanup on several workers** — `spt run mixed --cleanup` on more than one worker left objects behind: a three-worker, 40 s run left about 44,700 of the 202,000 it created. Each worker listed the objects it created, but cleanup read only the entry engine's list. The mixed step now collects every worker's list into the entry engine's `put-remaining.csv` before cleanup starts, so cleanup deletes them all, and logs an error with the shortfall if that file lists fewer objects than the step created. The `put-remaining.csv` in the run's results now covers every worker too. In a custom scenario, `item.output.file` sets where a mixed step writes this list.
 
 ## [5.16.2] - 2026-10-22
 

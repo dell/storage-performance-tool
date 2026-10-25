@@ -61,8 +61,8 @@ import static com.github.akurilov.confuse.Config.deepToMap;
  *
  * <p>PUT-created items are:
  * <ol>
- *   <li>Written to {@code put-remaining.csv} for post-run cleanup. Exact remaining-set
- *       generation is deferred.
+ *   <li>Written to {@code item.output.file}, by default {@code put-remaining.csv} in the step's
+ *       log directory, for post-run cleanup. Exact remaining-set generation is deferred.
  *   <li>Pushed into the {@link PoolItemInput} delete queue so freshly-written objects
  *       are eligible for deletion in the same run.
  * </ol>
@@ -212,13 +212,11 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		}
 
 		// ── 7. put-remaining.csv path ──────────────────────────────────────
-		final String homeDir = ThreadContext.get("home_dir");
-		final Path putRemainingFilePath;
-		if (homeDir != null && !homeDir.isEmpty()) {
-			putRemainingFilePath = Paths.get(homeDir, "log", stepId, "put-remaining.csv");
-		} else {
-			putRemainingFilePath = Paths.get(System.getProperty("user.dir"), "put-remaining-" + stepId + ".csv");
-		}
+		// In a distributed step the client names each remote slice's file and collects them all.
+		final String itemOutputFile = itemConfig.stringVal("output-file");
+		final Path putRemainingFilePath = itemOutputFile != null && !itemOutputFile.isEmpty()
+						? Paths.get(itemOutputFile)
+						: defaultPutRemainingFile(stepId);
 
 		// ── 8. Create single StorageDriver ─────────────────────────────────
 		final StorageDriver driver;
@@ -444,6 +442,15 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 	}
 
 	// ── Helpers ────────────────────────────────────────────────────────────────
+
+	/** The file that lists a step's created items when {@code item.output.file} is not set. */
+	static Path defaultPutRemainingFile(final String stepId) {
+		final String homeDir = ThreadContext.get("home_dir");
+		if (homeDir != null && !homeDir.isEmpty()) {
+			return Paths.get(homeDir, "log", stepId, "put-remaining.csv");
+		}
+		return Paths.get(System.getProperty("user.dir"), "put-remaining-" + stepId + ".csv");
+	}
 
 	/** Creates an {@link OperationsBuilder} for the given op type. */
 	private static OperationsBuilder makeOpsBuilder(

@@ -62,6 +62,7 @@ import java.rmi.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -584,6 +585,29 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	@Override
 	protected boolean emitsOperationArtifacts() {
 		return false;
+	}
+
+	/**
+	 * Called at close, after every step slice is closed and the item output file has received the
+	 * records of every slice. The default does nothing.
+	 *
+	 * @param itemOutputFile the step's item output file
+	 * @param successCounts the step's final count of successful operations by type, without the
+	 *                      types whose final metrics were unavailable
+	 */
+	protected void itemOutputCollected(final String itemOutputFile, final Map<OpType, Long> successCounts)
+					throws IOException {}
+
+	static Map<OpType, Long> successCounts(
+					final List<? extends MetricsContext<? extends AllMetricsSnapshot>> contexts) {
+		final Map<OpType, Long> counts = new EnumMap<>(OpType.class);
+		for (final var context : contexts) {
+			final AllMetricsSnapshot snapshot = context.lastSnapshot();
+			if (snapshot != null && snapshot.successSnapshot() != null) {
+				counts.merge(context.opType(), snapshot.successSnapshot().count(), Math::addExact);
+			}
+		}
+		return counts;
 	}
 
 	private void initAndStartMetricsAggregator(Config config) {
@@ -2151,6 +2175,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 									cause);
 				}
 			}
+			// Closing the metrics contexts drops their final snapshots.
+			final Map<OpType, Long> successCounts = itemOutputFileAggregators.isEmpty()
+							? Map.of()
+							: successCounts(metricsContexts);
 			try {
 				closeMetricsContexts();
 			} catch (final Throwable cause) {
@@ -2303,6 +2331,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			itemInputFileSlicers.clear();
+			final boolean itemOutputCollected = !itemOutputFileAggregators.isEmpty();
 			for (final var itemOutputFileAggregator : itemOutputFileAggregators) {
 				try {
 					if (itemOutputFileAggregator instanceof CsvArtifactAggregator csvAggregator) {
@@ -2330,6 +2359,14 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			itemOutputFileAggregators.clear();
+			if (itemOutputCollected) {
+				try {
+					itemOutputCollected(config.stringVal("item-output-file"), successCounts);
+				} catch (final Exception e) {
+					throwUncheckedIfInterrupted(e);
+					LogUtil.exception(Level.WARN, e, "{}: failed to check the item output file", loadStepId());
+				}
+			}
 			for (final var opTraceLogFileAggregator : opTraceLogFileAggregators) {
 				try {
 					opTraceLogFileAggregator.close();
