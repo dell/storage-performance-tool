@@ -414,8 +414,9 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 						} else {
 							throw new AssertionError("Unexpected throttle type: " + throttle.getClass());
 						}
-						// RateThrottle reports an exhausted quota as a negative count (the schedule
-						// deficit) rather than zero. That is a refusal, not a contract violation.
+						// Some throttles, such as java-commons' RateThrottle, report an exhausted quota as
+						// a negative count (the schedule deficit) rather than zero. That is a refusal, not
+						// a contract violation. SPT's own PacedRateThrottle never returns one.
 						permittedCount = Math.max(0, permittedCount);
 					}
 					assertOutputRange("Throttle permit", permittedCount, pendingOpCount, opBuff.size());

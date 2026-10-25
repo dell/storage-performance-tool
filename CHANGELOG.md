@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - **Steady-state metrics** — Each step is now also measured over its steady-state window, which starts once every operation slot has turned over (completions reach the operations in flight) and ends at the step's first stop, before the drain. `metrics.steady.total.csv`, written next to `metrics.total.csv`, has the same columns computed over that window, latency and duration quantiles included, plus `SteadyStart[s]`, `SteadyTurnovers`, `SteadyTrend[%]`, `SteadyCV` and `SteadyStatus` (`valid`, `short`, `not-reached` or `incomplete`). A window is `valid` with at least 20 turnovers and 20 s; the engine settings `output.metrics.steady.warmup.turnovers`, `.min.turnovers` and `.min.duration` change the rule. The run summary shows IOPS Steady and Bandwidth Steady beside the Avg columns, in a second table so it stays within 100 columns, and "n/a" with the reason when the window is not valid. The JSON metrics API (`metrics_schema` 5) adds the same window as a `steady` object. `metrics.total.csv`, `metrics.csv` and `result.xml` are unchanged. A distributed run needs the same engine version on every node.
 
+### Fixed
+
+- **Rate-limited runs start paced** — With `load.op.limit.rate` set, the first request for operations on each node (and for each sub-step of a pipeline or weighted step) was granted in full, so it sent up to one extra batch (`load.batch.size`, default 32768 operations) at full speed before pacing began. A short or slow-object run reported a rate well above its limit: a 60 s run limited to 500 ops/s averaged about 1,050. Each node now paces from its first operation, so the measured rate matches the limit from the start. The limit's meaning is unchanged: operations per second for the step, divided evenly among its nodes.
+
 ## [5.16.2] - 2026-10-22
 
 ### Added
