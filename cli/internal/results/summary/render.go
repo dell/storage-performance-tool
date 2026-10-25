@@ -27,7 +27,7 @@ type RenderOptions struct {
 
 const (
 	defaultMaxWidth       = 100
-	defaultSnippetLineCap = 48 // room for the rate table below the phase table
+	defaultSnippetLineCap = 48 // room for both performance tables
 	headerIOPSAvg         = "IOPS Avg"
 	headerIOPSSteady      = "IOPS Steady"
 	headerRateAvg         = "Rate Avg"
@@ -500,10 +500,10 @@ func (r *Renderer) renderIntegrity(b *strings.Builder, summary *RunSummary) {
 	b.WriteString("\n")
 }
 
-// performanceTable renders the phase table and, below it, the rate table, which keeps each
-// steady rate beside its whole-step Avg. Two tables keep the section within the default width.
+// performanceTable renders the rate table, which keeps each steady rate beside its whole-step
+// Avg, and below it the phase table. Two tables keep the section within the default width.
 func (r *Renderer) performanceTable(summary *RunSummary) string {
-	return r.phaseTable(summary) + "\n" + r.rateTable(summary)
+	return r.rateTable(summary) + "\n" + r.phaseTable(summary)
 }
 
 func (r *Renderer) phaseTable(summary *RunSummary) string {
