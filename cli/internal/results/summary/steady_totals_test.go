@@ -216,6 +216,17 @@ func TestSummarySteadyRatesShowValidWindowsAndExplainTheRest(t *testing.T) {
 	nonNumeric := strings.Replace(steadyTestCSV(steadyTestHeader, []map[string]string{
 		steadyTestRow{op: "READ", steadyTP: 350, steadyBW: 350, status: steadyStatusValid}.steadyValues(),
 	}), ",350,", ",fast,", 1)
+	withoutRates := func(status string) string {
+		values := steadyTestRow{op: "READ", steadyTP: 350, steadyBW: 350, status: status}.steadyValues()
+		values[columnTPAvg] = ""
+		values[columnBWAvg] = ""
+		return steadyTestCSV(steadyTestHeader, []map[string]string{values})
+	}
+	validWithoutRates := withoutRates(steadyStatusValid)
+	shortWithoutRates := withoutRates(steadyStatusShort)
+	zeroRates := steadyTestCSV(steadyTestHeader, []map[string]string{
+		steadyTestRow{op: "READ", status: steadyStatusValid}.steadyValues(),
+	})
 	empty := ""
 	extraRow := steadyTestCSV(steadyTestHeader, []map[string]string{
 		steadyTestRow{op: "READ", steadyTP: 350, steadyBW: 350, status: steadyStatusValid}.steadyValues(),
@@ -240,6 +251,9 @@ func TestSummarySteadyRatesShowValidWindowsAndExplainTheRest(t *testing.T) {
 		{name: "unknown status", identity: release, status: "stable", listed: fileStatusOK, wantRate: "n/a (unreadable)", wantBW: "n/a (unreadable)"},
 		{name: "malformed header", identity: release, listed: fileStatusOK, steady: &malformedHeader, wantRate: "n/a (unreadable)", wantBW: "n/a (unreadable)"},
 		{name: "malformed value", identity: release, listed: fileStatusOK, steady: &nonNumeric, wantRate: "n/a (unreadable)", wantBW: "n/a (unreadable)"},
+		{name: "valid window without rates", identity: release, listed: fileStatusOK, steady: &validWithoutRates, wantRate: "n/a (unreadable)", wantBW: "n/a (unreadable)"},
+		{name: "short window without rates", identity: release, listed: fileStatusOK, steady: &shortWithoutRates, wantRate: "n/a (unreadable)", wantBW: "n/a (unreadable)"},
+		{name: "valid window measuring zero", identity: release, listed: fileStatusOK, steady: &zeroRates, wantRate: "0 ops/s", wantBW: "0 MiB/s"},
 		{name: "empty file", identity: release, listed: fileStatusOK, steady: &empty, wantRate: "n/a (unreadable)", wantBW: "n/a (unreadable)"},
 		{name: "rows disagree with totals", identity: release, listed: fileStatusOK, steady: &extraRow, wantRate: "n/a (unreadable)", wantBW: "n/a (unreadable)"},
 		{name: "new engine with file missing", identity: release, listed: fileStatusMissing, wantRate: "n/a (missing)", wantBW: "n/a (missing)"},
@@ -326,6 +340,25 @@ func TestSummarySteadyRatesFollowTheRowOfASingleOperationPhase(t *testing.T) {
 	want := []string{"340 ops/s", "350 ops/s", "340 MiB/s", "350 MiB/s"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("rate cells = %q, want %q", got, want)
+	}
+}
+
+func TestSummarySteadyRatesFollowTheAvgRowWhenContextsShareAnOperation(t *testing.T) {
+	// A phase whose contexts share one operation is not mixed: its Avg columns report one selected
+	// row, so its steady columns report that row's window, whatever the other rows' windows are.
+	const readStep = "spt-002-20261024.120000.000-read"
+	first := steadyTestRow{op: "READ", tp: 100, bw: 100, steadyTP: 110, steadyBW: 110, status: steadyStatusValid}
+	for _, status := range []string{steadyStatusValid, steadyStatusShort} {
+		t.Run(status, func(t *testing.T) {
+			second := steadyTestRow{op: "READ", tp: 50, bw: 50, steadyTP: 55, steadyBW: 55, status: status}
+			step := steadyTestStep{id: readStep, rows: []steadyTestRow{first, second}, steadyListed: fileStatusOK}
+			summary := loadSteadyTestSummary(t, writeSteadyTestRun(t, "read", releaseEngineIdentity("5.17.0", false), []steadyTestStep{step}))
+			got := rateCells(t, summary, "Read")
+			want := []string{"100 ops/s", "110 ops/s", "100 MiB/s", "110 MiB/s"}
+			if strings.Join(got, "|") != strings.Join(want, "|") {
+				t.Fatalf("rate cells = %q, want %q", got, want)
+			}
+		})
 	}
 }
 

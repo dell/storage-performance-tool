@@ -82,7 +82,15 @@ func parseSteadyTotalsRow(record []string, index map[string]int) (SteadyTotalsRo
 	}
 	status := strings.TrimSpace(valueAt(record, index, columnSteadyStatus))
 	switch status {
-	case steadyStatusValid, steadyStatusShort, steadyStatusNotReached, steadyStatusIncomplete:
+	case steadyStatusValid, steadyStatusShort:
+		// The engine writes both rates for every window with statistics; parseMetricsTotalsRow reads
+		// a blank cell as 0, which would show a damaged row as a measured zero.
+		for _, column := range []string{columnTPAvg, columnBWAvg} {
+			if strings.TrimSpace(valueAt(record, index, column)) == "" {
+				return SteadyTotalsRow{}, fmt.Errorf("%s row without %s", status, column)
+			}
+		}
+	case steadyStatusNotReached, steadyStatusIncomplete:
 	default:
 		return SteadyTotalsRow{}, fmt.Errorf("unknown %s %q", columnSteadyStatus, status)
 	}
