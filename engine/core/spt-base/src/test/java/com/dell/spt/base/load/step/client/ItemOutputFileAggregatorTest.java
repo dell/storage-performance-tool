@@ -1,101 +1,152 @@
 package com.dell.spt.base.load.step.client;
 
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
+import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.load.step.file.FileManager;
-import java.io.ByteArrayOutputStream;
+import com.dell.spt.base.load.step.service.file.FileManagerService;
+import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.impl.BasicConfig;
 import java.io.EOFException;
 import java.io.IOException;
-import java.io.OutputStream;
-import java.lang.reflect.Method;
-import java.util.concurrent.atomic.LongAdder;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
 
-/**
- * Tests for the helper logic in {@link ItemOutputFileAggregator}.
- */
+/** How {@link ItemOutputFileAggregator} collects each remote slice's item output file. */
+@Timeout(30)
 public class ItemOutputFileAggregatorTest {
 
+	private static final String REMOTE_FILE = "remote-items";
+
+	@TempDir
+	Path dir;
+
 	@Test
-	public void transferToLocalStopsOnEofAndCountsBytes() throws Exception {
-		final Method method = ItemOutputFileAggregator.class.getDeclaredMethod(
-						"transferToLocal",
-						FileManager.class,
-						String.class,
-						OutputStream.class,
-						Lock.class,
-						LongAdder.class);
-		method.setAccessible(true);
+	void aCompleteRemoteFileIsAppendedOnceAndThenDeleted() throws Exception {
+		final FileManagerService remote = remote();
+		when(remote.readFromFile(REMOTE_FILE, 0)).thenReturn(bytes("a\nb\n"));
+		when(remote.readFromFile(REMOTE_FILE, 4)).thenReturn(bytes("c\n"));
+		when(remote.readFromFile(REMOTE_FILE, 6)).thenThrow(new EOFException());
 
-		final RecordingFileManager fileManager = new RecordingFileManager("remote.out", new byte[]{5, 6, 7
-		});
-		final ByteArrayOutputStream local = new ByteArrayOutputStream();
-		final LongAdder counter = new LongAdder();
+		collect(output(), remote);
 
-		method.invoke(null, fileManager, "remote.out", local, new ReentrantLock(), counter);
-
-		assertArrayEquals(new byte[]{5, 6, 7
-		}, local.toByteArray());
-		assertEquals(3L, counter.longValue());
-		assertEquals(1, fileManager.transferCount);
+		assertEquals("a\nb\nc\n", Files.readString(output()));
+		verify(remote).deleteFile(REMOTE_FILE);
 	}
 
-	private static final class RecordingFileManager implements FileManager {
-		private final String expectedFile;
-		private final byte[] payload;
-		private boolean served;
-		private int transferCount;
+	@Test
+	void anEmptyRemoteFileIsCompleteAndDeleted() throws Exception {
+		final FileManagerService ended = remote();
+		when(ended.readFromFile(REMOTE_FILE, 0)).thenThrow(new EOFException());
+		final FileManagerService empty = remote();
+		when(empty.readFromFile(REMOTE_FILE, 0)).thenReturn(new byte[0]);
 
-		RecordingFileManager(final String expectedFile, final byte[] payload) {
-			this.expectedFile = expectedFile;
-			this.payload = payload;
-		}
+		collect(output(), ended, empty);
 
-		@Override
-		public byte[] readFromFile(final String fileName, final long offset) throws IOException {
-			if (!expectedFile.equals(fileName)) {
-				throw new IOException("unexpected file");
-			}
-			if (served) {
-				throw new EOFException();
-			}
-			served = true;
-			transferCount++;
-			return payload;
-		}
+		assertEquals("", Files.readString(output()));
+		verify(ended).deleteFile(REMOTE_FILE);
+		verify(empty).deleteFile(REMOTE_FILE);
+	}
 
-		// Remaining interface methods are unused in this test.
-		@Override
-		public String logFileName(final String loggerName, final String testStepId) throws IOException {
-			throw new UnsupportedOperationException();
-		}
+	@Test
+	void aReadFailingBeforeTheFirstPartIsRetried() throws Exception {
+		final FileManagerService remote = remote();
+		when(remote.readFromFile(REMOTE_FILE, 0))
+						.thenThrow(new IOException("injected read failure"))
+						.thenReturn(bytes("a\nb\n"));
+		when(remote.readFromFile(REMOTE_FILE, 4)).thenThrow(new EOFException());
 
-		@Override
-		public String newTmpFileName() throws IOException {
-			throw new UnsupportedOperationException();
-		}
+		collect(output(), remote);
 
-		@Override
-		public void writeToFile(final String fileName, final byte[] buff) throws IOException {
-			throw new UnsupportedOperationException();
-		}
+		assertEquals("a\nb\n", Files.readString(output()));
+		verify(remote).deleteFile(REMOTE_FILE);
+	}
 
-		@Override
-		public long fileSize(final String fileName) throws IOException {
-			throw new UnsupportedOperationException();
-		}
+	@Test
+	void aReadFailingAfterAPartResumesFromItsOffsetWithoutDuplicates() throws Exception {
+		final FileManagerService remote = remote();
+		when(remote.readFromFile(REMOTE_FILE, 0)).thenReturn(bytes("a\nb\n"));
+		when(remote.readFromFile(REMOTE_FILE, 4))
+						.thenThrow(new IOException("injected read failure"))
+						.thenReturn(bytes("c\n"));
+		when(remote.readFromFile(REMOTE_FILE, 6)).thenThrow(new EOFException());
 
-		@Override
-		public void truncateFile(final String fileName, final long size) throws IOException {
-			throw new UnsupportedOperationException();
-		}
+		collect(output(), remote);
 
-		@Override
-		public void deleteFile(final String fileName) throws IOException {
-			throw new UnsupportedOperationException();
+		assertEquals("a\nb\nc\n", Files.readString(output()));
+		verify(remote, times(1)).readFromFile(REMOTE_FILE, 0);
+		verify(remote, times(2)).readFromFile(REMOTE_FILE, 4);
+		verify(remote).deleteFile(REMOTE_FILE);
+	}
+
+	@Test
+	void aRemoteFileWhoseReadsKeepFailingIsKeptWithWhatArrived() throws Exception {
+		final FileManagerService remote = remote();
+		when(remote.readFromFile(REMOTE_FILE, 0)).thenReturn(bytes("a\nb\n"));
+		when(remote.readFromFile(REMOTE_FILE, 4)).thenThrow(new IOException("injected read failure"));
+		final FileManagerService other = remote();
+		when(other.readFromFile(REMOTE_FILE, 0)).thenReturn(bytes("x\n"));
+		when(other.readFromFile(REMOTE_FILE, 2)).thenThrow(new EOFException());
+
+		collect(output(), remote, other);
+
+		final List<String> collected = Files.readAllLines(output());
+		assertEquals(List.of("a", "b", "x"), collected.stream().sorted().toList());
+		verify(remote, times(ItemOutputFileAggregator.READ_ATTEMPTS)).readFromFile(REMOTE_FILE, 4);
+		verify(remote, never()).deleteFile(anyString());
+		verify(other).deleteFile(REMOTE_FILE);
+	}
+
+	@Test
+	void aFailedLocalWriteKeepsTheRemoteFileAndIsNotRetried() throws Exception {
+		final Path full = Path.of("/dev/full");
+		assumeTrue(Files.isWritable(full), "needs a device whose writes fail");
+		final FileManagerService remote = remote();
+		when(remote.readFromFile(REMOTE_FILE, 0)).thenReturn(bytes("a\nb\n"));
+
+		collect(full, remote);
+
+		verify(remote, times(1)).readFromFile(anyString(), anyLong());
+		verify(remote, never()).deleteFile(anyString());
+	}
+
+	private Path output() {
+		return dir.resolve("items.csv");
+	}
+
+	private static FileManagerService remote() throws IOException {
+		final FileManagerService remote = mock(FileManagerService.class);
+		when(remote.newTmpFileName()).thenReturn(REMOTE_FILE);
+		return remote;
+	}
+
+	private static void collect(final Path output, final FileManagerService... remotes) {
+		final List<FileManager> fileMgrs = new ArrayList<>();
+		fileMgrs.add(FileManager.INSTANCE);
+		fileMgrs.addAll(List.of(remotes));
+		final Config base = TestConfigBuilder.config();
+		final List<Config> slices = new ArrayList<>();
+		for (int i = 0; i < fileMgrs.size(); i++) {
+			slices.add(new BasicConfig(base));
 		}
+		new ItemOutputFileAggregator("collect-step", fileMgrs, slices, output.toString(), 0).close();
+	}
+
+	private static byte[] bytes(final String text) {
+		return text.getBytes(StandardCharsets.UTF_8);
 	}
 }

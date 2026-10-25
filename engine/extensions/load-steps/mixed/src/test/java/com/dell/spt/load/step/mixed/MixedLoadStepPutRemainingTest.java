@@ -1,9 +1,15 @@
 package com.dell.spt.load.step.mixed;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.spy;
 
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.ConfigFormat;
@@ -13,7 +19,9 @@ import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.step.LoadStepBase;
+import com.dell.spt.base.load.step.client.FileManagerClient;
 import com.dell.spt.base.load.step.service.LoadStepManagerServiceImpl;
+import com.dell.spt.base.load.step.service.file.FileManagerService;
 import com.dell.spt.base.load.step.service.file.FileManagerServiceImpl;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
@@ -42,6 +50,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.MockedStatic;
 
 /** The list of created items that a mixed step leaves for its cleanup, {@code put-remaining.csv}. */
 class MixedLoadStepPutRemainingTest {
@@ -63,10 +72,56 @@ class MixedLoadStepPutRemainingTest {
 
 	@Test
 	void aDistributedStepListsEverySlicesCreatedItemsInTheEntryFile() throws Exception {
+		final TwoNodeRun run = runOnTwoNodes(null);
+
+		run.assertEveryCreatedItemListedOnce();
+	}
+
+	@Test
+	void aWorkerFileReadThatFailsOnceIsRetriedAndTheFileListsEveryCreatedItem() throws Exception {
+		final List<String> failedReads = Collections.synchronizedList(new ArrayList<>());
+		final TwoNodeRun run = runOnTwoNodes(files -> {
+			final FileManagerService flaky = spy(files);
+			doAnswer(read -> {
+				if (failedReads.isEmpty()) {
+					failedReads.add(read.getArgument(0));
+					throw new IOException("injected read failure");
+				}
+				return read.callRealMethod();
+			}).when(flaky).readFromFile(anyString(), anyLong());
+			return flaky;
+		});
+
+		run.assertEveryCreatedItemListedOnce();
+		assertEquals(1, failedReads.size());
+		assertFalse(Files.exists(Path.of(failedReads.get(0))), "a worker file is deleted once all of it arrived");
+	}
+
+	/** What the client reaches a node's files through, given the node's file service. */
+	private interface RemoteFiles {
+		FileManagerService apply(FileManagerService files) throws IOException;
+	}
+
+	/** The final CREATE counts of a two-node step and the items its entry file lists. */
+	private record TwoNodeRun(long stepCreated, long nodeCreated, List<String> listed) {
+
+		void assertEveryCreatedItemListedOnce() {
+			assertTrue(0 < nodeCreated && nodeCreated < stepCreated, nodeCreated + " of " + stepCreated);
+			assertEquals(stepCreated, listed.size(), "every created item, from both slices, is listed once");
+			assertEquals(listed.size(), new HashSet<>(listed).size());
+		}
+	}
+
+	/**
+	 * Runs the step on this engine and one node engine over loopback RMI. With {@code remoteFiles},
+	 * the client reaches the node's files through what it returns for the node's file service.
+	 */
+	private TwoNodeRun runOnTwoNodes(final RemoteFiles remoteFiles) throws Exception {
 		final int port;
 		try (ServerSocket socket = new ServerSocket(0)) {
 			port = socket.getLocalPort();
 		}
+		final String nodeAddr = "127.0.0.1:" + port;
 		final List<Extension> extensions = List.of(new MixedLoadStepExtension(), new DummyStorageDriverMockExtension<>());
 		final MetricsManagerImpl entryMetrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 		final MetricsManagerImpl nodeMetrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
@@ -81,7 +136,7 @@ class MixedLoadStepPutRemainingTest {
 			stepService.start();
 			ThreadContext.put("home_dir", home.toString());
 			final Config config = stepConfig();
-			config.val("load-step-node-addrs", List.of("127.0.0.1:" + port));
+			config.val("load-step-node-addrs", List.of(nodeAddr));
 			// Both slices share this JVM's log files, which the operation lifecycle collection of a
 			// CREATE or READ step cannot tell apart. A mixed step takes its operations from its weights.
 			config.val("load-op-type", "noop");
@@ -89,14 +144,20 @@ class MixedLoadStepPutRemainingTest {
 			config.val("load-op-weights-delete", 0);
 			config.val("load-op-weights-stat", 0);
 
-			new MixedLoadStepClient(config, extensions, null, entryMetrics).run();
+			if (remoteFiles == null) {
+				new MixedLoadStepClient(config, extensions, null, entryMetrics).run();
+			} else {
+				final FileManagerService nodeFiles = remoteFiles.apply(fileService);
+				try (MockedStatic<FileManagerClient> resolver = mockStatic(FileManagerClient.class)) {
+					resolver.when(() -> FileManagerClient.resolve(nodeAddr)).thenReturn(nodeFiles);
+					new MixedLoadStepClient(config, extensions, null, entryMetrics).run();
+				}
+			}
 
-			final long stepCreated = createdCount(entryMetrics, true);
-			final long nodeCreated = createdCount(nodeMetrics, false);
-			assertTrue(0 < nodeCreated && nodeCreated < stepCreated, nodeCreated + " of " + stepCreated);
-			final List<String> listed = Files.readAllLines(putRemainingFile(), StandardCharsets.ISO_8859_1);
-			assertEquals(stepCreated, listed.size(), "every created item, from both slices, is listed once");
-			assertEquals(listed.size(), new HashSet<>(listed).size());
+			return new TwoNodeRun(
+							createdCount(entryMetrics, true),
+							createdCount(nodeMetrics, false),
+							Files.readAllLines(putRemainingFile(), StandardCharsets.ISO_8859_1));
 		} finally {
 			if (!stepService.isClosed()) {
 				stepService.close();
