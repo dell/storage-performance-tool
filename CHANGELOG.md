@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Changed
+
+- **Dependency updates** — The CLI is now built with Go 1.26.0 (previously 1.25.14), and building it from source needs Go 1.26 or later. Updated `golang.org/x/sys` to 0.49.0.
+
 ## [5.16.2] - 2026-10-22
 
 ### Added
