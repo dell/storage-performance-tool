@@ -111,6 +111,17 @@ func TestTargetBucketPhasePolicyMatrix(t *testing.T) {
 		{"mixed external items", func() (string, error) {
 			return GenerateScenario(Params{WorkloadType: workload.Mixed, Bucket: "b", ObjectSize: "1KiB", Duration: "1s", ReadItemsFile: "/spt-input/read.csv", GetDistrib: 70, PutDistrib: 30, Threads: 4, BaseTimestamp: ts})
 		}, nil},
+		// A bucket set writes its generated members only through PUTs: without a seed phase the
+		// measured mixed phase is the first to write them, so its setup may create them.
+		{"mixed external items bucket set", func() (string, error) {
+			return GenerateScenario(Params{WorkloadType: workload.Mixed, Bucket: "b", BucketCount: 4, ObjectSize: "1KiB", Duration: "1s", ReadItemsFile: "/spt-input/read.csv", DeleteItemsFile: "/spt-input/delete.csv", GetDistrib: 60, PutDistrib: 30, DeleteDistrib: 10, Threads: 4, BaseTimestamp: ts})
+		}, []phasePolicy{create("MixedLoad")}},
+		{"seeded mixed bucket set", func() (string, error) {
+			return GenerateScenario(Params{WorkloadType: workload.Mixed, Bucket: "b", BucketCount: 4, ObjectSize: "1KiB", Duration: "1s", SeedCount: 10, GetDistrib: 50, PutDistrib: 30, DeleteDistrib: 10, StatDistrib: 10, Cleanup: true, Threads: 4, BaseTimestamp: ts})
+		}, []phasePolicy{create("PreconditionLoad"), existing("MixedLoad"), existing("DeleteLoad"), existing("DeleteLoad")}},
+		{"seeded read bucket set", func() (string, error) {
+			return GenerateScenario(Params{WorkloadType: workload.Read, Bucket: "b", BucketCount: 4, ObjectSize: "1KiB", Duration: "1s", Cleanup: true, Threads: 1, BaseTimestamp: ts})
+		}, []phasePolicy{create("PreconditionLoad"), existing("ReadLoad"), existing("DeleteLoad")}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

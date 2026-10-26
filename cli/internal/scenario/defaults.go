@@ -40,7 +40,7 @@ type RunClusterConfig struct {
 // StorageConfig represents storage configuration
 type StorageConfig struct {
 	Region       string              `yaml:"region,omitempty"`
-	TargetBucket *TargetBucketConfig `yaml:"targetBucket,omitempty"` // emitted only to disable creation
+	TargetBucket *TargetBucketConfig `yaml:"targetBucket,omitempty"` // emitted only for a bucket set or to disable creation
 	Driver       DriverConfig        `yaml:"driver,omitempty"`
 	Net          NetConfig           `yaml:"net,omitempty"`
 	Auth         AuthConfig          `yaml:"auth,omitempty"`
@@ -48,9 +48,10 @@ type StorageConfig struct {
 	Rdma         *RdmaConfig         `yaml:"rdma,omitempty"`     // pointer so omitted when nil
 }
 
-// TargetBucketConfig represents storage.targetBucket. The engine ships provision: true.
+// TargetBucketConfig represents storage.targetBucket. The engine ships count: 1 and provision: true.
 type TargetBucketConfig struct {
-	Provision bool `yaml:"provision"`
+	Count     int   `yaml:"count,omitempty"`
+	Provision *bool `yaml:"provision,omitempty"`
 }
 
 // ItemConfig represents item-level configuration knobs.
@@ -495,13 +496,21 @@ func GenerateDefaults(params Params) ([]byte, error) {
 	return data, nil
 }
 
-// targetBucketConfig returns the storage.targetBucket defaults for an opt-out only, so the
-// generated defaults are unchanged when provisioning stays on.
+// targetBucketConfig returns the storage.targetBucket defaults only for a bucket set or a
+// provisioning opt-out, so the generated defaults are unchanged for one bucket with provisioning on.
 func targetBucketConfig(params Params) *TargetBucketConfig {
-	if !params.TargetBucketProvisionDisabled {
+	var config TargetBucketConfig
+	if params.BucketCount > 1 {
+		config.Count = params.BucketCount
+	}
+	if params.TargetBucketProvisionDisabled {
+		provision := false
+		config.Provision = &provision
+	}
+	if config.Count == 0 && config.Provision == nil {
 		return nil
 	}
-	return &TargetBucketConfig{Provision: false}
+	return &config
 }
 
 func applyEngineOverrides(data []byte, overrides []string) ([]byte, error) {
