@@ -6,6 +6,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 func bucketCountTestCommand(t *testing.T, value string) *cobra.Command {
@@ -130,6 +131,45 @@ func TestApplyBucketCountAcceptsOverridesThatLeaveTheCountAlone(t *testing.T) {
 		params := scenario.Params{WorkloadType: WorkloadTypeWrite, Bucket: "bench", EngineOverrides: []string{override}}
 		if err := applyBucketCount(bucketCountTestCommand(t, "4"), &params); err != nil || params.BucketCount != 4 {
 			t.Fatalf("override %q: err = %v, BucketCount = %d", override, err, params.BucketCount)
+		}
+	}
+}
+
+func TestTheValidatedCountSurvivesOverridesThatReplaceItsAncestors(t *testing.T) {
+	cases := []struct {
+		override  string
+		provision any
+	}{
+		{"storage.targetBucket.provision=false", false},
+		{"storage.targetBucket={provision: false}", false},
+		{"storage-targetBucket={}", nil},
+		{"storage.targetBucket=null", nil},
+	}
+	for _, c := range cases {
+		params := scenario.Params{
+			WorkloadType: WorkloadTypeWrite, Endpoint: "http://127.0.0.1:9000", Bucket: "bench",
+			AccessKey: "a", SecretKey: "s", EngineOverrides: []string{c.override},
+		}
+		if err := applyBucketCount(bucketCountTestCommand(t, "4"), &params); err != nil {
+			t.Fatalf("override %q: %v", c.override, err)
+		}
+		data, err := scenario.GenerateDefaults(params)
+		if err != nil {
+			t.Fatalf("override %q: %v", c.override, err)
+		}
+		var root struct {
+			Storage struct {
+				TargetBucket map[string]any `yaml:"targetBucket"`
+			} `yaml:"storage"`
+		}
+		if err := yaml.Unmarshal(data, &root); err != nil {
+			t.Fatal(err)
+		}
+		if root.Storage.TargetBucket["count"] != 4 {
+			t.Fatalf("override %q: generated storage.targetBucket = %v, want count 4", c.override, root.Storage.TargetBucket)
+		}
+		if root.Storage.TargetBucket["provision"] != c.provision {
+			t.Fatalf("override %q: provision = %v, want %v", c.override, root.Storage.TargetBucket["provision"], c.provision)
 		}
 	}
 }

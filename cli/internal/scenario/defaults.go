@@ -487,6 +487,15 @@ func GenerateDefaults(params Params) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		// An override that replaces storage.targetBucket or storage as a whole, such as
+		// storage.targetBucket={provision: false}, would drop the bucket count the CLI validated.
+		// Overrides that set the count itself are rejected earlier, so the flag's count is final.
+		if params.BucketCount > 1 {
+			data, err = applyEngineOverrides(data, []string{fmt.Sprintf("storage.targetBucket.count=%d", params.BucketCount)})
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	if err := validateRangeDefaults(params, data); err != nil {
