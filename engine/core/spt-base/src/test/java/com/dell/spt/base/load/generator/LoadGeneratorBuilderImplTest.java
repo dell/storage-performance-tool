@@ -559,6 +559,43 @@ public class LoadGeneratorBuilderImplTest {
 		}
 	}
 
+	/** A count-limited generator reports its once-per-step scheduling exhaustion exactly once. */
+	@Test
+	public void schedulingExhaustionListenerRunsOnceAtTheTransition() throws Exception {
+		final Map<String, Object> options = baseSingleOpOptions();
+		options.put("load-batch-size", 3);
+		options.put("load-op-limit-count", 3);
+		final var config = (Config) new BasicConfig("-", CONFIG_SCHEMA);
+		options.forEach(config::val);
+		final var itemFactory = (ItemFactory) new DataItemFactoryImpl();
+		final var calls = new java.util.concurrent.atomic.AtomicInteger();
+
+		try (final IoBuffer<DataOperation<DataItem>> opBuff = new LimitedQueueBuffer<>(new ArrayBlockingQueue<>(10));
+						final LoadGenerator loadGenerator = new LoadGeneratorBuilderImpl()
+										.authConfig(config.configVal("storage-auth"))
+										.itemConfig(config.configVal("item"))
+										.itemFactory(itemFactory)
+										.itemType(ItemType.DATA)
+										.loadConfig(config.configVal("load"))
+										.loadOperationsOutput(opBuff)
+										.originIndex(0)
+										.build()) {
+			loadGenerator.onSchedulingExhaustion(() -> {
+				assertTrue(loadGenerator.schedulingExhaustedAtNanos() > 0, "the transition is recorded before the callback");
+				calls.incrementAndGet();
+			});
+			loadGenerator.start();
+			final long deadline = System.currentTimeMillis() + 2000;
+			while (calls.get() == 0 && System.currentTimeMillis() < deadline) {
+				Thread.sleep(5);
+			}
+			Thread.sleep(100); // further work-loop iterations must not repeat it
+			assertEquals(3, opBuff.size());
+			assertEquals(1, calls.get());
+			loadGenerator.stop();
+		}
+	}
+
 	/**
 	 * A rate-limited generator asks its throttle for a whole batch at once. The paced throttle
 	 * must hand out one permit at the start, not the batch, and then follow its clock.

@@ -266,7 +266,7 @@ If no files exist yet the endpoint still returns 200 with `"items": []`.
 
 ### 4.2.4 Metrics
 
-SPT exposes Prometheus text at `GET /metrics` and structured schema-4 JSON at `GET /metrics/json` and `GET /metrics/cluster/json`. The legacy `GET /metrics/fleet/json` path is an alias of the cluster endpoint.
+SPT exposes Prometheus text at `GET /metrics` and structured schema-5 JSON at `GET /metrics/json` and `GET /metrics/cluster/json`. The legacy `GET /metrics/fleet/json` path is an alias of the cluster endpoint.
 
 ```bash
 curl -s http://localhost:9999/metrics
@@ -279,13 +279,14 @@ See the [Metrics API guide](METRICS.md) for the endpoint/node matrix, complete f
 Additionally, JSON-formatted endpoints are available for clients that prefer structured data:
 
 - `GET /metrics/json` (always present) returns per-node metrics. Each array element includes:
-  - Metadata: `metrics_schema` (currently `4`), `scope` (`"node"`), `role` (`"entry"` or `"worker"`), `run_id`, `node_id`, `cluster_id` for configured active runs, and `sample_ts` (RFC3339 timestamp). The public CLI supplies one nonempty cluster identity to every participant from the preallocated run ID.
+  - Metadata: `metrics_schema` (currently `5`), `scope` (`"node"`), `role` (`"entry"` or `"worker"`), `run_id`, `node_id`, `cluster_id` for configured active runs, and `sample_ts` (RFC3339 timestamp). The public CLI supplies one nonempty cluster identity to every participant from the preallocated run ID.
   - Step data: `step_id`, `op_type`, `timestamp`, `elapsed_time_seconds`, `test_state`.
   - Metric groups: `operations{success_count,failed_count,success_rate_last,failed_rate_last}`, `bandwidth{bytes_total,bytes_rate_last}`, `timing`, `concurrency{current,mean}`.
   - Timing: schema 4 retains the schema 2/3 compatibility fields `timing.latency_mean_us` and `timing.duration_mean_us`, and the nested `timing.latency` and `timing.duration` objects with `count`, `mean_us`, `min_us`, `p50_us`, `p90_us`, `p99_us`, `p999_us`, `max_us`, and `overflow_count`.
   - Time to first byte: `timing.ttfb` has the same nested shape when available, or `null` when the operation type has no body timing sample. TTFB is measured from request completion to the first non-empty response body byte.
   - Progress helpers: `completion_percent`, `overall_completion_percent`, `overall_unbounded`, plus `limit{type,op_count?,time_sec?}`.
   - Terminal entries (`"terminal": true`) persist after a step finishes so idle nodes still return context; their rate gauges are set to zero and `timestamp` reflects completion time.
+  - Steady-state window: schema 5 adds `steady`, present once the step's steady-state window has closed, with its status, coverage and, for a `valid` or `short` window, the metric groups above over the window. See [Steady-state window](METRICS.md#steady-state-window).
 
 Schema 4 adds a `delete` object only for the first-class standalone DELETE request path. It is
 additive: every schema 2/3 field above keeps its name and meaning, and tolerant older consumers may

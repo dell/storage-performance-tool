@@ -24,6 +24,7 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
+import com.dell.spt.base.metrics.steady.SteadySettings;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import java.util.UUID;
@@ -390,6 +391,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 						.stdOutColorFlag(outputColorFlag)
 						.comment(config.stringVal("run-comment"))
 						.runId(runId())
+						.steadySettings(SteadySettings.fromMetricsConfig(metricsConfig))
 						.build();
 
 		// enrich metadata with limits so /metrics/json can compute completion on workers
@@ -441,6 +443,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	protected final void doShutdown() {
+		closeSteadyWindows("shutdown");
 		if (standaloneDeleteDurationMode()) {
 			prepareDurationStop();
 			if (durationAdmissionBarrierSatisfied && durationStopFailure == null) {
@@ -705,6 +708,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	public final void closeOperationAdmissionForStepStop() {
+		closeSteadyWindows("close operation admission");
 		synchronized (durationAdmissionClose) {
 			if (durationAdmissionClosedLocally) {
 				return;
@@ -731,6 +735,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	@Override
 	public final void enforceDispatchedOperationsDeadlineForStepStop(
 					final long remainingNanos) {
+		closeSteadyWindows("dispatched operations deadline");
 		final long selectedDeadlineNanos;
 		synchronized (this) {
 			final long observedNanos = System.nanoTime();
@@ -765,6 +770,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	public final void recoverQueuedOperationsForStepStop() {
+		closeSteadyWindows("recover queued operations");
 		invokeDurationContextPhase(
 						"recover queued operations",
 						LoadStepContext::recoverQueuedOperationsForStepStop);
@@ -772,6 +778,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	public final void drainDispatchedOperationsForStepStop(final long remainingNanos) {
+		closeSteadyWindows("drain dispatched operations");
 		final long requestedDeadlineNanos = durationDeadlineNanos(remainingNanos);
 		final long workerDeadlineNanos = durationDrainDeadlineNanos;
 		final long drainDeadlineNanos = !durationDrainDeadlineSet
@@ -789,6 +796,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	public final synchronized void validateTerminalStateForStepStop() {
+		closeSteadyWindows("validate terminal state");
 		durationTerminalValidationDelegated = true;
 		invokeDurationContextPhase(
 						"validate terminal state", LoadStepContext::validateTerminalState);
@@ -820,6 +828,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	public final synchronized void verifyDeleteInventoryForStepStop() {
+		closeSteadyWindows("verify delete inventory");
 		if (deletePostVerificationTask == null) {
 			deletePostVerificationTask = startDeleteInventoryPhase(
 							"post-verification", LoadStepContext::verifyDeleteInventoryAfterDrain);

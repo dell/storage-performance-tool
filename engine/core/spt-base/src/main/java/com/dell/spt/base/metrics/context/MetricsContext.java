@@ -1,7 +1,9 @@
 package com.dell.spt.base.metrics.context;
 
+import java.util.function.BooleanSupplier;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import com.dell.spt.base.metrics.steady.SteadyResult;
 import com.github.akurilov.commons.system.SizeInBytes;
 
 import java.util.Map;
@@ -80,6 +82,34 @@ public interface MetricsContext<S extends AllMetricsSnapshot>
 	}
 
 	S lastSnapshot();
+
+	/**
+	 * One metrics-manager observation of the Steady-State Window: starts the window when the
+	 * start rule holds. Contexts that measure no window ignore it.
+	 */
+	default void observeSteadyWindow() {}
+
+	/**
+	 * Closes the Steady-State Window on the calling thread at an end event, if it is not already
+	 * closed, and returns its result. Every caller gets the first closer's result.
+	 *
+	 * @param cause what ended the window, for diagnostics
+	 * @return the result, or null for a context that measures no window
+	 */
+	default SteadyResult closeSteadyWindow(final String cause) {
+		return null;
+	}
+
+	/**
+	 * Arms the Steady-State Window's end edge once the step's scheduling ended: the metrics manager
+	 * closes the window at its first observation at which {@code drained} holds.
+	 */
+	default void markSchedulingEnded(final BooleanSupplier drained) {}
+
+	/** The Steady-State Window's result once it is closed, otherwise null. */
+	default SteadyResult steadyResult() {
+		return null;
+	}
 
 	// threshold-related accounting methods below
 

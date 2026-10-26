@@ -50,6 +50,8 @@ var DefaultArtifacts = []ArtifactSpec{
 	{Loggers: []string{"metrics.File"}, Suffix: constants.ResultsArtifactSuffixMetrics, Required: false},
 	{Loggers: []string{"Scenario"}, Suffix: constants.ResultsArtifactSuffixScenario, Required: false},
 	{Loggers: []string{"metrics.threshold.FileTotal"}, Suffix: constants.ResultsArtifactSuffixMetricsThreshold, Required: false},
+	// Steady-state window totals; engines before 5.17 do not write them.
+	{Loggers: []string{"metrics.steady.FileTotal"}, Suffix: constants.ResultsArtifactSuffixMetricsSteady, Required: false},
 	{Loggers: []string{"OpTraces"}, Suffix: constants.ResultsArtifactSuffixOpTrace, Required: false},
 	{Loggers: []string{"DeleteMetricsTotal"}, Suffix: constants.ResultsArtifactSuffixDeleteMetricsTotal, Required: false},
 	{Loggers: []string{"DeleteRequests"}, Suffix: constants.ResultsArtifactSuffixDeleteRequests, Required: false},

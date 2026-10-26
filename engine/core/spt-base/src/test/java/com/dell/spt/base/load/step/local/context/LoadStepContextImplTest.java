@@ -43,6 +43,7 @@ import com.dell.spt.base.load.generator.LoadGeneratorBuilderImpl;
 import com.dell.spt.base.load.generator.LoadGeneratorImpl;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
+import com.dell.spt.base.load.lifecycle.StalledTerminalTransition;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
@@ -184,6 +185,46 @@ public class LoadStepContextImplTest {
 			verify((StandaloneDeletePreparable) driver, never()).prepareStandaloneDelete();
 			verify(generator).openAdmission();
 			verify(generator).start();
+		} finally {
+			context.close();
+		}
+	}
+
+	@Test
+	void aStalledCompletionCannotEndTheDrainedEdgeWhileAnOperationIsQueued() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final var tracker = new OperationLifecycleTracker<Operation<DataItem>>();
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> driver = mock(StorageDriver.class);
+		when(driver.operationLifecycle()).thenReturn(tracker);
+		@SuppressWarnings("unchecked")
+		final LoadGenerator<DataItem, Operation<DataItem>> generator = mock(LoadGenerator.class);
+		final var context = new LoadStepContextImpl<>(
+						"stalled-completion-drained-edge",
+						generator,
+						driver,
+						null,
+						testConfig.configVal("load"),
+						false);
+		final var schedulingDrained = LoadStepContextImpl.class.getDeclaredMethod("schedulingDrained");
+		schedulingDrained.setAccessible(true);
+		final Operation<DataItem> queued = new DataOperationImpl<DataItem>(
+						0, OpType.DELETE, new DataItemImpl("queued", 0, 1), null, "/bucket", null, null, 0);
+		final Operation<DataItem> completing = new DataOperationImpl<DataItem>(
+						0, OpType.DELETE, new DataItemImpl("completing", 0, 1), null, "/bucket", null, null, 0);
+		try {
+			assertTrue(tracker.driverQueued(queued));
+			assertTrue(tracker.dispatched(completing));
+			assertTrue(tracker.completionStarted(completing));
+			completing.status(Operation.Status.SUCC);
+			try (var stalled = StalledTerminalTransition.stall(tracker, completing)) {
+				assertEquals(0, tracker.awaitingDispatchCount(), "the stalled completion hides the queued operation");
+				assertFalse((boolean) schedulingDrained.invoke(context));
+				assertFalse((boolean) schedulingDrained.invoke(context), "a queued operation keeps the window open");
+			}
+			assertTrue(tracker.dispatched(queued));
+			assertFalse((boolean) schedulingDrained.invoke(context), "the first drained observation");
+			assertTrue((boolean) schedulingDrained.invoke(context), "the second drained observation");
 		} finally {
 			context.close();
 		}

@@ -104,6 +104,18 @@ var requiredColumnGroups = [][]string{
 }
 
 func parseMetricsTotals(stepID, path string) (*MetricsTotals, error) {
+	rows, err := parseTotalsCSV(path, "metrics", nil, parseMetricsTotalsRow)
+	if err != nil {
+		return nil, err
+	}
+	return &MetricsTotals{StepID: stepID, Rows: rows}, nil
+}
+
+// parseTotalsCSV reads a totals CSV that carries the metrics.total.csv columns plus
+// extraColumns; noun names the file in errors.
+func parseTotalsCSV[R any](
+	path, noun string, extraColumns []string, parseRow func([]string, map[string]int) (R, error),
+) ([]R, error) {
 	file, err := os.Open(path) // #nosec G304 -- CSV path validated when manifest is loaded
 	if err != nil {
 		return nil, err
@@ -118,19 +130,20 @@ func parseMetricsTotals(stepID, path string) (*MetricsTotals, error) {
 	header, err := reader.Read()
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			return nil, fmt.Errorf("metrics totals empty")
+			return nil, fmt.Errorf("%s totals empty", noun)
 		}
-		return nil, fmt.Errorf("read metrics header: %w", err)
+		return nil, fmt.Errorf("read %s header: %w", noun, err)
 	}
 
 	index := mapColumnIndexes(header)
 	missing := missingColumns(requiredColumns, index)
 	missing = append(missing, missingColumnGroups(requiredColumnGroups, index)...)
+	missing = append(missing, missingColumns(extraColumns, index)...)
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("metrics totals missing columns: %s", strings.Join(missing, ", "))
+		return nil, fmt.Errorf("%s totals missing columns: %s", noun, strings.Join(missing, ", "))
 	}
 
-	rows := make([]MetricsTotalsRow, 0, 4)
+	rows := make([]R, 0, 4)
 	recordIndex := 1
 	for {
 		record, err := reader.Read()
@@ -138,24 +151,24 @@ func parseMetricsTotals(stepID, path string) (*MetricsTotals, error) {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("read metrics row %d: %w", recordIndex, err)
+			return nil, fmt.Errorf("read %s row %d: %w", noun, recordIndex, err)
 		}
 		if len(record) == 0 {
 			recordIndex++
 			continue
 		}
-		row, parseErr := parseMetricsTotalsRow(record, index)
+		row, parseErr := parseRow(record, index)
 		if parseErr != nil {
-			return nil, fmt.Errorf("parse metrics row %d: %w", recordIndex, parseErr)
+			return nil, fmt.Errorf("parse %s row %d: %w", noun, recordIndex, parseErr)
 		}
 		rows = append(rows, row)
 		recordIndex++
 	}
 
 	if len(rows) == 0 {
-		return nil, fmt.Errorf("metrics totals contains no data rows")
+		return nil, fmt.Errorf("%s totals contains no data rows", noun)
 	}
-	return &MetricsTotals{StepID: stepID, Rows: rows}, nil
+	return rows, nil
 }
 
 func parseMetricsTotalsRow(record []string, index map[string]int) (MetricsTotalsRow, error) {

@@ -1,5 +1,7 @@
 package com.dell.spt.base.metrics.snapshot;
 
+import com.dell.spt.base.metrics.steady.SteadyResult;
+
 /** Snapshot aggregating metrics from all nodes in distributed mode. */
 public final class DistributedAllMetricsSnapshotImpl extends AllMetricsSnapshotImpl
 				implements DistributedAllMetricsSnapshot {
@@ -100,6 +102,39 @@ public final class DistributedAllMetricsSnapshotImpl extends AllMetricsSnapshotI
 					final int nodeCount,
 					final long elapsedTimeMillis,
 					final DeleteMetricsSnapshot deleteMetrics) {
+		this(
+						durSnapshot,
+						latSnapshot,
+						ttfbSnapshot,
+						actualConcurrencySnapshot,
+						failsSnapshot,
+						corruptSnapshot,
+						successSnapshot,
+						bytesSnapshot,
+						nodeCount,
+						elapsedTimeMillis,
+						deleteMetrics,
+						null);
+	}
+
+	/**
+	 * Creates a distributed snapshot that also carries the aggregate Steady-State Window.
+	 *
+	 * @param steadyResult the slices' aggregate result once any window is closed, otherwise null
+	 */
+	public DistributedAllMetricsSnapshotImpl(
+					final TimingMetricSnapshot durSnapshot,
+					final TimingMetricSnapshot latSnapshot,
+					final TimingMetricSnapshot ttfbSnapshot,
+					final ConcurrencyMetricSnapshot actualConcurrencySnapshot,
+					final RateMetricSnapshot failsSnapshot,
+					final RateMetricSnapshot corruptSnapshot,
+					final RateMetricSnapshot successSnapshot,
+					final RateMetricSnapshot bytesSnapshot,
+					final int nodeCount,
+					final long elapsedTimeMillis,
+					final DeleteMetricsSnapshot deleteMetrics,
+					final SteadyResult steadyResult) {
 		super(
 						durSnapshot,
 						latSnapshot,
@@ -110,7 +145,8 @@ public final class DistributedAllMetricsSnapshotImpl extends AllMetricsSnapshotI
 						successSnapshot,
 						bytesSnapshot,
 						elapsedTimeMillis,
-						deleteMetrics);
+						deleteMetrics,
+						steadyResult);
 		this.nodeCount = nodeCount;
 	}
 

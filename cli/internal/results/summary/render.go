@@ -27,13 +27,17 @@ type RenderOptions struct {
 
 const (
 	defaultMaxWidth       = 100
-	defaultSnippetLineCap = 40
+	defaultSnippetLineCap = 48 // room for both performance tables
 	headerIOPSAvg         = "IOPS Avg"
+	headerIOPSSteady      = "IOPS Steady"
+	headerRateAvg         = "Rate Avg"
+	headerRateSteady      = "Rate Steady"
 	notApplicableCell     = "—"
 	objectSizeDiscovered  = "discovered at runtime"
 	headerLatencyP50      = "Latency P50"
 	headerTTFBP50         = "TTFB P50"
 	headerBandwidthAvg    = "Bandwidth Avg"
+	headerBandwidthSteady = "Bandwidth Steady"
 	successObjectsLabel   = "object identities"
 	successRequestsLabel  = "logical API requests"
 )
@@ -496,11 +500,14 @@ func (r *Renderer) renderIntegrity(b *strings.Builder, summary *RunSummary) {
 	b.WriteString("\n")
 }
 
+// performanceTable renders the rate table, which keeps each steady rate beside its whole-step
+// Avg, and below it the phase table. Two tables keep the section within the default width.
 func (r *Renderer) performanceTable(summary *RunSummary) string {
-	headers := []string{"Phase", "Object Size", "Success", "Data Moved", headerIOPSAvg, headerLatencyP50, headerTTFBP50, headerBandwidthAvg}
-	if hasListStep(summary) {
-		headers[4] = "Rate Avg"
-	}
+	return r.rateTable(summary) + "\n" + r.phaseTable(summary)
+}
+
+func (r *Renderer) phaseTable(summary *RunSummary) string {
+	headers := []string{"Phase", "Object Size", "Success", "Data Moved", headerLatencyP50, headerTTFBP50}
 	rows := make([][]string, 0, len(summary.Steps))
 	for _, step := range summary.Steps {
 		if step.Metrics == nil {
@@ -509,34 +516,73 @@ func (r *Renderer) performanceTable(summary *RunSummary) string {
 		m := step.Metrics
 		sizeCell := nonEmpty(m.ObjectSizeHuman, summary.Workload.ObjectSizeHuman)
 		dataCell := formatBytesHuman(m.DataBytes)
-		bandwidthCell := formatNumber(m.BandwidthAvgMiBps, constants.UnitMiBPerSecond)
-		rateCell := formatNumber(m.ThroughputAvgOps, "ops/s")
-		if strings.EqualFold(step.Operation, workloadTypeList) {
-			sizeCell, dataCell, bandwidthCell = notApplicableCell, notApplicableCell, notApplicableCell
-			rateCell = formatNumber(m.ThroughputAvgOps, "objects/s")
-		}
-		if strings.EqualFold(step.Operation, "DELETE") {
-			sizeCell, dataCell, bandwidthCell = notApplicableCell, notApplicableCell, notApplicableCell
+		if strings.EqualFold(step.Operation, workloadTypeList) || strings.EqualFold(step.Operation, "DELETE") {
+			sizeCell, dataCell = notApplicableCell, notApplicableCell
 		}
 		if strings.TrimSpace(sizeCell) == "" {
 			sizeCell = notApplicableCell
 		}
-		row := []string{
+		rows = append(rows, []string{
 			step.PhaseLabel,
 			sizeCell,
 			formatSuccessCount(m.SuccessCount, step.SuccessUnit),
 			dataCell,
-			rateCell,
 			mixedLatencyCell(step, m),
 			mixedTTFBCell(step, m),
-			bandwidthCell,
-		}
-		rows = append(rows, row)
+		})
 	}
 	if len(rows) == 0 {
-		rows = append(rows, []string{notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell, notApplicableCell})
+		rows = append(rows, notApplicableRow(len(headers)))
 	}
-	return renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight})
+	return renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight})
+}
+
+func (r *Renderer) rateTable(summary *RunSummary) string {
+	headers := []string{"Phase", headerIOPSAvg, headerIOPSSteady, headerBandwidthAvg, headerBandwidthSteady}
+	if hasListStep(summary) {
+		headers[1], headers[2] = headerRateAvg, headerRateSteady
+	}
+	rows := make([][]string, 0, len(summary.Steps))
+	for _, step := range summary.Steps {
+		if step.Metrics == nil {
+			continue
+		}
+		m := step.Metrics
+		rateUnit := "ops/s"
+		rateCell := formatNumber(m.ThroughputAvgOps, rateUnit)
+		steadyRateCell := formatSteadyCell(m.Steady, m.Steady.ThroughputOps, rateUnit)
+		bandwidthCell := formatNumber(m.BandwidthAvgMiBps, constants.UnitMiBPerSecond)
+		steadyBandwidthCell := formatSteadyCell(m.Steady, m.Steady.BandwidthMiBps, constants.UnitMiBPerSecond)
+		if strings.EqualFold(step.Operation, workloadTypeList) {
+			// A LIST Avg rate can be normalized to canonical selections, which have no steady window.
+			rateCell = formatNumber(m.ThroughputAvgOps, "objects/s")
+			steadyRateCell, bandwidthCell, steadyBandwidthCell = notApplicableCell, notApplicableCell, notApplicableCell
+		}
+		if strings.EqualFold(step.Operation, "DELETE") {
+			bandwidthCell, steadyBandwidthCell = notApplicableCell, notApplicableCell
+		}
+		rows = append(rows, []string{step.PhaseLabel, rateCell, steadyRateCell, bandwidthCell, steadyBandwidthCell})
+	}
+	if len(rows) == 0 {
+		rows = append(rows, notApplicableRow(len(headers)))
+	}
+	return renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight})
+}
+
+// formatSteadyCell shows a steady rate only for valid windows, and otherwise "n/a" and the reason.
+func formatSteadyCell(steady SteadyRates, value float64, unit string) string {
+	if !steady.Valid {
+		return "n/a (" + nonEmpty(steady.Reason, steadyReasonMissing) + ")"
+	}
+	return formatNumber(value, unit)
+}
+
+func notApplicableRow(columns int) []string {
+	row := make([]string, columns)
+	for i := range row {
+		row[i] = notApplicableCell
+	}
+	return row
 }
 
 func formatSuccessCount(count int64, unit string) string {

@@ -5,6 +5,7 @@ import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshotImpl;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import org.HdrHistogram.ConcurrentHistogram;
+import org.HdrHistogram.Histogram;
 
 /** Meter tracking timing samples with min/max/sum aggregation. */
 public class TimingMeterImpl implements LongMeter<TimingMetricSnapshot> {
@@ -41,6 +42,17 @@ public class TimingMeterImpl implements LongMeter<TimingMetricSnapshot> {
 		max.accumulateAndGet(recordedValue, Math::max);
 		histogram.recordValue(recordedValue);
 		count.increment();
+	}
+
+	/**
+	 * A plain copy of the histogram, consistent with itself: every recorded value is in exactly
+	 * one bucket of the copy, and its total count is the sum of the buckets it read. A plain
+	 * {@link Histogram} holds one count array, half the size of a concurrent copy.
+	 */
+	public Histogram histogramCopy() {
+		final Histogram copy = new Histogram(1L, HIGHEST_TRACKABLE_VALUE_MICROS, SIGNIFICANT_VALUE_DIGITS);
+		copy.add(histogram);
+		return copy;
 	}
 
 	@Override

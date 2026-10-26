@@ -218,6 +218,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 				}
 			}
 		} finally {
+			// The window ends where the run does, before the freeze, on normal and exceptional exits.
+			closeSteadyWindows("run exit");
 			try {
 				completedRunMetricsSnapshots = List.copyOf(currentMetricsSnapshots());
 			} catch (final Throwable metricsFailure) {
@@ -248,6 +250,21 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		if (terminalCause != null) {
 			recordRunFailure(terminalCause);
 			throw terminalCause;
+		}
+	}
+
+	/**
+	 * Closes the Steady-State Window of every metrics context of this step at an end event, on
+	 * the calling thread, before the caller's stop-path action reaches any context. Contexts that
+	 * measure no window, such as an Entry Node's distributed contexts, ignore it.
+	 */
+	protected final void closeSteadyWindows(final String cause) {
+		for (final var metricsCtx : List.copyOf(metricsContexts)) {
+			try {
+				metricsCtx.closeSteadyWindow(cause);
+			} catch (final RuntimeException e) {
+				LogUtil.exception(Level.WARN, e, "{}: failed to close the steady-state window", loadStepId());
+			}
 		}
 	}
 

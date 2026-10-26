@@ -29,6 +29,9 @@
 &nbsp;&nbsp;2.4. [Threshold](#24-threshold)<br/>
 &nbsp;&nbsp;&nbsp;&nbsp;2.4.1. [Console](#241-console)<br/>
 &nbsp;&nbsp;&nbsp;&nbsp;2.4.2. [File](#242-files)<br/>
+&nbsp;&nbsp;2.5. [Steady-State Window](#25-steady-state-window)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;2.5.1. [File](#251-file)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;2.5.2. [Accuracy and limits](#252-accuracy-and-limits)<br/>
 
 # 1. General
 
@@ -473,3 +476,92 @@ java -jar spt-<VER>.jar \
 The layout is the same as usual metrics log files layout, the log file name is: `metrics.threshold.total.csv`. Note that
 the file output for the metrics is always disabled for the load step slices (i.e. on the additional/remote nodes in the
 distributed mode).
+
+## 2.5. Steady-State Window
+
+The summary in `metrics.total.csv` divides a step's whole output by its whole duration, including the
+ramp-up before every operation slot has completed an operation and the drain after the stop, when operations in
+flight finish and no new ones start. Both lower the rates, by an amount that depends on the step's length, object
+size, latency and stop behavior. The engine therefore also measures each step over its *steady-state window*:
+
+* The window **starts** at the first metrics-manager observation (every 10 ms) at which the step's completed
+  operations, succeeded plus failed, reach at least one and at least `output-metrics-steady-warmup-turnovers`
+  (default 1) times the operations in flight at that moment. The rule follows the operations actually in flight,
+  not the concurrency limit, so it serves saturated, rate-limited, client-bound and unlimited-concurrency steps.
+* The window **ends** at the step's first end event, before any drain: a stop (the time limit, a user stop, a
+  failure-budget stop), the end of the step, or the end of scheduling. For a count limit or an exhausted item input,
+  the window ends once nothing the step scheduled still waits for dispatch, not when the last operation is queued. For
+  a multipart upload, the parts that objects already in flight create after that point belong to the drain, as they do
+  after a stop. A mixed step, which ends on its time limit, closes its windows at that stop. If a storage driver's
+  counts never show a drained queue, the window ends at the step's stop and includes the drain.
+* The window's statistics are the summary's statistics computed over the window: counts and bytes are differences
+  between the two edges, rates are those differences divided by the window's duration, and every latency, duration
+  and TTFB statistic, quantiles included, comes from the difference of two copies of the step's timing histograms.
+
+Each window has a status, which describes only its measurement:
+
+| Status | Meaning |
+|:--|:--|
+| `valid` | At least `output-metrics-steady-min-turnovers` (default 20) turnovers and `output-metrics-steady-min-duration` (default `20s`). A turnover is as many completions as there are operations in flight on average, and one completion when fewer than one is. |
+| `short` | The window exists but misses a criterion, including a zero-length window or one without completions. Its statistics are reported. |
+| `not-reached` | The step ended before the window started. No statistics. |
+| `incomplete` | Distributed steps only: a node is missing or reported no closed window. No statistics. |
+
+`valid` is a coverage test, not a proof that the rate was steady, and a failed step keeps its window's statistics,
+just as it keeps its summary. Setting either minimum to 0 disables that criterion. Each operation type of a mixed or
+weighted step has its own window.
+
+CLI example: start the window after two turnovers and accept windows of at least 10 seconds:
+```bash
+java -jar spt-<VER>.jar \
+    --output-metrics-steady-warmup-turnovers=2 \
+    --output-metrics-steady-min-duration=10s
+```
+
+### 2.5.1. File
+
+`metrics.steady.total.csv` is written next to `metrics.total.csv`, by the same node and under the same
+`output-metrics-summary-persist` setting. It has one row per operation type with exactly the columns of
+`metrics.total.csv`, in the same order and computed over the window, where `StepDuration[s]` is the window's
+duration, followed by five columns:
+
+| Column | Meaning |
+|:--|:--|
+| `SteadyStart[s]` | When the window started, in seconds from the step's start |
+| `SteadyTurnovers` | Window completions per mean operation in flight, with a mean below one counted as one |
+| `SteadyTrend[%]` | The window's rate in its last third relative to its first third, in percent |
+| `SteadyCV` | The coefficient of variation of the window's rate |
+| `SteadyStatus` | `valid`, `short`, `not-reached` or `incomplete` |
+
+Check `SteadyStatus` first: a `not-reached` or `incomplete` row leaves every statistic empty, and a timing meter
+with no observations in the window leaves its cells empty. The CLI shows the steady IOPS and bandwidth beside the
+Avg columns of its summary when the window is `valid`, and "n/a" with the reason otherwise. The same window is in
+the JSON metrics API as the `steady` object of metrics schema 5 (see the [metrics API guide](../api/remote/METRICS.md)).
+
+`SteadyTrend[%]` and `SteadyCV` come from the window's completions, grouped into consecutive bins of at least 100
+completions and 20 turnovers each; with fewer than 6 bins both are empty. The trend catches drift, ramps and stalls;
+the CV catches dips and oscillation and reacts weakly to drift. The engine applies no threshold to either. The
+calibration that set the defaults treated a window as not steady when the trend was beyond ±5% or the CV above 0.10.
+
+In a distributed step the Entry Node sums the nodes' independently measured windows, as it sums their summary rates:
+counts and rates are added and timing histograms merged. Its `SteadyStart[s]` is the latest node start,
+`StepDuration[s]` the shortest node window, `SteadyTurnovers` the lowest node value, `SteadyTrend[%]` the node value
+with the largest magnitude and `SteadyCV` the largest node value. The start and duration describe coverage: the
+count divided by the duration need not equal the summed rate. Every node of a distributed run must run the same
+engine version.
+
+### 2.5.2. Accuracy and limits
+
+* **Histogram precision:** window timing statistics come from histograms with two significant digits, so a window
+  mean is within about 0.4% of the exact mean, and minimum and maximum are bucket bounds.
+* **Edge skew:** the engine reads a step's meters one after another at each edge, without pausing operations. An
+  operation that completes during that reading can fall on either side of the edge. The time each reading took is in
+  the JSON `steady` object and in a debug log line; at 1 ms per edge it affects about 0.01% of a 20-second window.
+* **Short windows** carry a warm-up bias of about −(deficit ÷ duration): an operation pool that needs about a
+  second longer to reach full speed lowers a 20-second window's rate by about 5%. Prefer steps well above the minimum
+  duration for comparisons.
+* **Ramps the window keeps:** the start rule cannot separate load from a client-side ramp that runs at the full
+  in-flight count, such as an RDMA buffer pool warming up over the first tens of seconds. Such a window is often
+  `valid` with a large `SteadyTrend[%]`.
+* **Mixed and weighted steps:** the JSON API keeps one entry per step, so `metrics.steady.total.csv` is the
+  authoritative per-operation-type record for those steps.

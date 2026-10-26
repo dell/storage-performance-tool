@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- **Steady-state metrics** — Each step is now also measured over its steady-state window, which starts once every operation slot has turned over (completions reach the operations in flight) and ends before the drain: at the step's first stop or, for a count limit or an exhausted item input, once nothing it scheduled still waits for dispatch. `metrics.steady.total.csv`, written next to `metrics.total.csv`, has the same columns computed over that window, latency and duration quantiles included, plus `SteadyStart[s]`, `SteadyTurnovers`, `SteadyTrend[%]`, `SteadyCV` and `SteadyStatus` (`valid`, `short`, `not-reached` or `incomplete`). A window is `valid` with at least 20 turnovers and 20 s; the engine settings `output.metrics.steady.warmup.turnovers`, `.min.turnovers` and `.min.duration` change the rule. The run summary shows IOPS Steady and Bandwidth Steady beside the Avg columns, in a rate table above the phase table so the summary stays within 100 columns, and "n/a" with the reason when the window is not valid. The JSON metrics API (`metrics_schema` 5) adds the same window as a `steady` object. `metrics.total.csv`, `metrics.csv` and `result.xml` are unchanged. A distributed run needs the same engine version on every node.
+
 ### Changed
 
 - **Dependency updates** — The CLI is now built with Go 1.26.0 (previously 1.25.14), and building it from source needs Go 1.26 or later. Updated `golang.org/x/sys` to 0.49.0.
@@ -13,6 +17,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Fixed
 
 - **Rate-limited runs start paced** — With `load.op.limit.rate` set, the first request for operations on each node (and for each sub-step of a pipeline or weighted step) was granted in full, so it sent up to one extra batch (`load.batch.size`, default 32768 operations) at full speed before pacing began. A short or slow-object run reported a rate well above its limit: a 60 s run limited to 500 ops/s averaged about 1,050. Each node now paces from its first operation, so the measured rate matches the limit from the start. The limit's meaning is unchanged: operations per second for the step, divided evenly among its nodes.
+- **Mixed cleanup on several workers** — `spt run mixed --cleanup` on more than one worker left objects behind: a three-worker, 40 s run left about 44,700 of the 202,000 it created. Each worker listed the objects it created, but cleanup read only the entry engine's list. The mixed step now collects every worker's list into the entry engine's `put-remaining.csv` before cleanup starts, so cleanup deletes them all, and logs an error with the shortfall if that file lists fewer objects than the step created. The `put-remaining.csv` in the run's results now covers every worker too. In a custom scenario, `item.output.file` sets where a mixed step writes this list.
+- **Collecting a worker's item list survives a failed read** — When a distributed step collects the workers' `item.output.file` lists (a seed `items.csv`, a mixed `put-remaining.csv`), a failed read from a worker is now retried from where it stopped, up to 3 times, 1 s apart. A worker's list that still cannot be read is kept on that worker, with an error naming it and how much arrived, instead of being deleted.
 
 ## [5.16.2] - 2026-10-22
 

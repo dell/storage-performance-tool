@@ -802,7 +802,7 @@ When run in a terminal with TTY support, spt displays an interactive interface w
 
 Auto Results and Shutdown
 - `--auto-results` (default: true): automatically discovers step IDs, waits for terminal state via `/status` + idle JSON, then fetches artifacts (preferring per-step `/logs/<stepId>/index.json`).
-- When auto-results completes successfully, `spt` now writes a human-readable summary alongside the fetched artifacts (`spt_<runID>_results_summary.txt`) and prints a shortened version to the console. The summary pulls from the same metrics `.csv` files, `spt_run_params.json`, and the copied scenario file so the bundle stays self-contained.
+- When auto-results completes successfully, `spt` now writes a human-readable summary alongside the fetched artifacts (`spt_<runID>_results_summary.txt`) and prints a shortened version to the console. The summary pulls from the same metrics `.csv` files, `spt_run_params.json`, and the copied scenario file so the bundle stays self-contained. Its rate table shows each phase's steady-state IOPS and bandwidth from `metrics.steady.total.csv` beside the whole-step Avg values, or "n/a" with the reason when the window is not `valid` or the engine predates 5.17; see [steady-state window](../engine/core/spt-base/doc/usage/output/README.md#25-steady-state-window).
 - `--results-dir`: directory where fetched artifacts and a manifest `index.json` are saved.
 - Engine provenance is recorded in one run-level `engine.info.json` and shown with the separate CLI identity in the Environment section. See [`ENGINE_BUILD_INFO.md`](docs/ENGINE_BUILD_INFO.md).
 - `--label`: prefix for the output directory name and step ID prefix used in filenames.

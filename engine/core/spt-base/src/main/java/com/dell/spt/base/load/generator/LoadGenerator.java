@@ -40,6 +40,12 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends T
 	boolean isItemInputFinished();
 
 	/**
+	 * Registers a callback run once, on the generator thread, when scheduling ends for the step:
+	 * at the first of exhausted input and a reached operation count limit.
+	 */
+	default void onSchedulingExhaustion(final Runnable listener) {}
+
+	/**
 	 * Returns the monotonic time when this finite generator lost the ability to schedule another
 	 * fresh operation, or {@link Long#MAX_VALUE} while it remains schedulable. Use {@link
 	 * #schedulingExhaustionNanos()} when explicit presence is required because {@code Long.MAX_VALUE}
