@@ -210,8 +210,8 @@ Each new object goes to member `floorMod(floorDiv(id, max(item.naming.shards, 1)
 id. Existing objects keep the bucket their items file or manifest records, and
 `item.input.path` is used as written. The controller engine checks and creates the members
 like any target bucket. With `N > 1`, the engine rejects `storage.auth.file`, LIST, a CREATE
-step with `item.input.path` or `item.input.file`, a mixed step with `item.input.path`, and
-expressions after the bucket in `item.output.path`; an initialization expression in the
+step with `item.input.path` or `item.input.file`, a pipeline CREATE sub-step after the first, a
+mixed step with `item.input.path`, and expressions after the bucket in `item.output.path`; an initialization expression in the
 bucket segment is evaluated once before the suffix is added.
 
 ```bash
