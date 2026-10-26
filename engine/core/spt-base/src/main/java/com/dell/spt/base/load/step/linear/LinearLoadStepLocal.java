@@ -16,6 +16,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilder;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilderImpl;
+import com.dell.spt.base.load.generator.PacedRateThrottle;
 import com.dell.spt.base.load.step.local.LoadStepLocalBase;
 import com.dell.spt.base.load.step.local.context.LoadStepContext;
 import com.dell.spt.base.load.step.local.context.LoadStepContextImpl;
@@ -24,7 +25,6 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.util.BinarySizeFormat;
-import com.github.akurilov.commons.concurrent.throttle.RateThrottle;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -128,7 +128,7 @@ public class LinearLoadStepLocal
 									.authConfig(storageConfig.configVal("auth"))
 									.originIndex(0);
 					if (rateLimit > 0) {
-						generatorBuilder.addThrottle(new RateThrottle(rateLimit));
+						generatorBuilder.addThrottle(new PacedRateThrottle(rateLimit));
 					}
 					final LoadGenerator generator = generatorBuilder.build();
 					final var shardMetrics = generatorBuilder.listShardMetricsRecorder();

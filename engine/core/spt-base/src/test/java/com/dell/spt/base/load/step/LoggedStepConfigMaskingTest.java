@@ -25,12 +25,15 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class LoggedStepConfigMaskingTest {
+	// Engine loggers are asynchronous, so a record from a step built by an earlier test can arrive
+	// after this test attaches its appender. Only this test's step id identifies its own record.
+	private final String stepId = "masking-" + System.nanoTime();
 	private CapturingAppender appender;
 	private Level previousLevel;
 
 	@BeforeEach
 	void attach() {
-		appender = new CapturingAppender();
+		appender = new CapturingAppender(stepId);
 		appender.start();
 		final var logger = LoggerContext.getContext(false).getLogger(Loggers.CONFIG.getName());
 		previousLevel = logger.getLevel();
@@ -49,6 +52,7 @@ class LoggedStepConfigMaskingTest {
 	@Test
 	void stepConfigLogMasksCredentialsWhileStepKeepsThem() throws InterruptedException {
 		final var config = TestConfigBuilder.config();
+		config.val("load-step-id", stepId);
 		config.val("storage-auth-uid", "step-uid-value");
 		config.val("storage-auth-secret", "step-secret-value");
 
@@ -68,15 +72,20 @@ class LoggedStepConfigMaskingTest {
 	private static final class CapturingAppender extends AbstractAppender {
 		private final List<String> captured = Collections.synchronizedList(new ArrayList<>());
 		private final CountDownLatch first = new CountDownLatch(1);
+		private final String marker;
 
-		CapturingAppender() {
+		CapturingAppender(final String marker) {
 			super("testStepConfigCapture", null, null, true, Property.EMPTY_ARRAY);
+			this.marker = marker;
 		}
 
 		@Override
 		public void append(final LogEvent event) {
-			captured.add(event.getMessage().getFormattedMessage());
-			first.countDown();
+			final String message = event.getMessage().getFormattedMessage();
+			if (message.contains(marker)) {
+				captured.add(message);
+				first.countDown();
+			}
 		}
 
 		boolean awaitFirst(final long timeout, final TimeUnit unit) throws InterruptedException {

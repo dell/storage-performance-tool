@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - **Dependency updates** — The CLI is now built with Go 1.26.0 (previously 1.25.14), and building it from source needs Go 1.26 or later. Updated `golang.org/x/sys` to 0.49.0.
 
+### Fixed
+
+- **Rate-limited runs start paced** — With `load.op.limit.rate` set, the first request for operations on each node (and for each sub-step of a pipeline or weighted step) was granted in full, so it sent up to one extra batch (`load.batch.size`, default 32768 operations) at full speed before pacing began. A short or slow-object run reported a rate well above its limit: a 60 s run limited to 500 ops/s averaged about 1,050. Each node now paces from its first operation, so the measured rate matches the limit from the start. The limit's meaning is unchanged: operations per second for the step, divided evenly among its nodes.
+
 ## [5.16.2] - 2026-10-22
 
 ### Added

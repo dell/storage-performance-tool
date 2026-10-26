@@ -15,6 +15,7 @@ import com.dell.spt.base.item.ItemType;
 import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilder;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilderImpl;
+import com.dell.spt.base.load.generator.PacedRateThrottle;
 import com.dell.spt.base.load.step.local.LoadStepLocalBase;
 import com.dell.spt.base.load.step.local.context.LoadStepContext;
 import com.dell.spt.base.load.step.local.context.LoadStepContextImpl;
@@ -28,7 +29,6 @@ import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.commons.concurrent.throttle.IndexThrottle;
-import com.github.akurilov.commons.concurrent.throttle.RateThrottle;
 import com.github.akurilov.commons.concurrent.throttle.SequentialWeightsThrottle;
 import static com.github.akurilov.commons.collection.TreeUtil.reduceForest;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
@@ -160,7 +160,7 @@ public class WeightedLoadStepLocal extends LoadStepLocalBase {
 										.originIndex(originIndex)
 										.addThrottle(weightThrottle);
 						if (rateLimit > 0) {
-							generatorBuilder.addThrottle(new RateThrottle(rateLimit));
+							generatorBuilder.addThrottle(new PacedRateThrottle(rateLimit));
 						}
 						final LoadGenerator generator = generatorBuilder.build();
 						final var shardMetrics = generatorBuilder.listShardMetricsRecorder();
