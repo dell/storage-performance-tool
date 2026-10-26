@@ -24,6 +24,8 @@ This applies to the `s3` (Netty), `s3-rdma` and `s3-aws` drivers. The `tables` w
 spt run write --bucket ps --bucket-count 12 --threads 64 --duration 5m
 ```
 
+To try a set, `cli/tools/testmultibucket.sh [BUCKETS]` runs a short headless write over `BUCKETS` buckets (default 16) with the connection settings from `cli/.env` or its options, then deletes the objects it created and leaves the buckets in place. `--workload` selects `write-verify`, seeded `read`, seeded `delete` or seeded `mixed` instead; `--help` lists the options.
+
 - **Names:** `ps-0` to `ps-11`. The index is not padded, so a bucket's name does not depend on the count: `ps-3` is `ps-3` with 4 buckets or with 12. `--bucket` names only the base. With more than one bucket, SPT never uses the base as one of the set; it is contacted only when an items file names objects in it.
 - **New objects:** each new object goes to a bucket chosen from its object id. With the default random naming every worker spreads its objects evenly over all the buckets, so all of them receive writes at the same time. The spread is statistical: a short run can be slightly uneven, and requests, bytes or concurrency per bucket are not equal at every instant.
 - **Existing objects:** reads, deletes and cleanup address each object in the bucket its items file or manifest records. The count never changes where an existing object is looked for.
