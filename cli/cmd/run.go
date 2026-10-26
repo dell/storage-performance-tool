@@ -2829,11 +2829,9 @@ func applyPrefixShards(params *scenario.Params, shardCount int) error {
 // see the count the engine uses.
 func applyBucketCount(cmd *cobra.Command, params *scenario.Params) error {
 	for _, override := range params.EngineOverrides {
-		path, _, _ := strings.Cut(override, "=")
-		path = strings.TrimSpace(path)
-		if path == targetBucketCountPath || path == strings.ReplaceAll(targetBucketCountPath, ".", "-") {
-			return fmt.Errorf("engine override %q is not supported; use --%s",
-				secretmask.EngineOverride(override), flagBucketCount)
+		if scenario.EngineOverrideSets(override, strings.Split(targetBucketCountPath, ".")...) {
+			return fmt.Errorf("engine override %q sets %s, which is not supported; use --%s",
+				secretmask.EngineOverride(override), targetBucketCountPath, flagBucketCount)
 		}
 	}
 	flag := cmd.Flags().Lookup(flagBucketCount)

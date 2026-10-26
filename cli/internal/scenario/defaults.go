@@ -569,6 +569,27 @@ func applyEngineOverride(root map[string]any, override string) error {
 	return nil
 }
 
+// EngineOverrideSets reports whether an engine override sets the configuration path, directly or
+// through a map value of one of its ancestors, such as storage.targetBucket={count: 4}. An
+// override that does not parse sets nothing; GenerateDefaults reports it.
+func EngineOverrideSets(override string, path ...string) bool {
+	root := map[string]any{}
+	if err := applyEngineOverride(root, override); err != nil {
+		return false
+	}
+	var node any = root
+	for _, part := range path {
+		children, ok := node.(map[string]any)
+		if !ok {
+			return false
+		}
+		if node, ok = children[part]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func engineOverrideError(override, reason string) error {
 	return fmt.Errorf(
 		"invalid engine override %q: %s",

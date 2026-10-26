@@ -91,7 +91,7 @@ final class S3FirstUseBucketCheckTest {
 	}
 
 	@Test
-	void aResponseTimeoutIsCachedAndNotRetried() throws Exception {
+	void aResponseTimeoutReturnsThePathAtTheHelperTimeout() throws Exception {
 		headDelayMillis = 3_000;
 		final var driver = driver(List.of(listener()), "default", 300, false);
 
@@ -100,6 +100,41 @@ final class S3FirstUseBucketCheckTest {
 		final long millis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
 
 		assertTrue(millis < 2_500, "the wait ends at the helper timeout, not the response: " + millis + " ms");
+	}
+
+	@Test
+	void aResponseTimeoutIsCachedAndNotRetried() throws Exception {
+		headDelayMillis = 3_000;
+		final var driver = driver(List.of(listener()), "default", 300, false);
+
+		final var outcomes = putTwice(driver, "/bench-2/p");
+
+		assertEquals(List.of(Operation.Status.SUCC, Operation.Status.SUCC), outcomes);
+		assertEquals(1, requests.stream().filter(r -> "HEAD".equals(r.method())).count(), requests::toString);
+	}
+
+	@Test
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	void aConnectionFailureOfTheVersioningCheckIsCached() throws Exception {
+		// Round robin over a listener and a closed port: the HEAD goes to the listener, the versioning
+		// GET to the closed port, and the first object request to the listener again.
+		final var driver = driver(List.of(listener(), "127.0.0.1:" + closedPort()), "round-robin", 5_000, true);
+		final var results = new EndpointSelectionTestSupport.Results();
+		driver.operationResultOutput((com.github.akurilov.commons.io.Output) results);
+
+		for (int i = 0; i < 2; i++) {
+			final Operation<DataItem> op = new DataOperationImpl<>(
+							0, OpType.CREATE, new DataItemImpl("v" + i, i, ITEM_SIZE), null, "/bench-1/p", CREDENTIAL, null, 0);
+			assertTrue(driver.put(op));
+			final var result = results.await();
+			if (i == 0) {
+				assertEquals(Operation.Status.SUCC, result.status(), "the first object request reaches the listener");
+			}
+		}
+
+		assertEquals(1, requests.stream().filter(r -> "HEAD".equals(r.method())).count(), requests::toString);
+		assertEquals(0, requests.stream().filter(r -> "versioning".equals(r.query())).count(), requests::toString);
 	}
 
 	@Test
@@ -149,7 +184,9 @@ final class S3FirstUseBucketCheckTest {
 
 		assertFalse(thread.isAlive(), "the interrupt ended the wait");
 		assertInstanceOf(InterruptedException.class, failure.get());
-		driver.close();
+		final int requestsAtInterrupt = requests.size();
+		assertTimeoutPreemptively(java.time.Duration.ofSeconds(10), driver::close, "the driver closes without waiting for the check");
+		assertEquals(requestsAtInterrupt, requests.size(), "nothing is sent after the interrupt: " + requests);
 	}
 
 	@SuppressWarnings({"rawtypes", "unchecked"

@@ -5,6 +5,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.step.client.LoadStepClientBase;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketStep;
 import com.dell.spt.base.util.BinarySizeFormat;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -30,6 +31,12 @@ public class PipelineLoadStepClient
 					final Config config, final List<Extension> extensions, final List<Config> ctxConfigs,
 					final MetricsManager metricsManager) {
 		super(config, extensions, ctxConfigs, metricsManager);
+	}
+
+	/** Each sub-step after the first takes its items from the previous one. */
+	@Override
+	protected TargetBucketStep targetBucketStep() {
+		return TargetBucketStep.PIPELINE;
 	}
 
 	@Override

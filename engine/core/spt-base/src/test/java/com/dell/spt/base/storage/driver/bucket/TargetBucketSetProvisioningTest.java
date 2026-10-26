@@ -7,9 +7,11 @@ import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.integrity.IntegrityTerminalException.Category;
 import com.dell.spt.base.item.DataItemImpl;
 import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.impl.BasicConfig;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -197,6 +199,27 @@ class TargetBucketSetProvisioningTest {
 			assertRejected(stepConfig("create", path, 2), List.of(extension), "static item.output.path after the bucket");
 		}
 		assertTrue(extension.requests.isEmpty(), extension.requests.toString());
+	}
+
+	@Test
+	void aPipelineCreateFedByThePreviousSubStepIsRejectedBeforeAnyRequest() throws Exception {
+		final var config = stepConfig("create", "/bench", 4);
+		final var create = new BasicConfig(config.pathSep(), config.schema(),
+						Map.of("load", Map.of("op", Map.of("type", "create"))));
+		final var read = new BasicConfig(config.pathSep(), config.schema(),
+						Map.of("load", Map.of("op", Map.of("type", "read"))));
+
+		final var failure = assertThrows(RunTerminalException.class, () -> TargetBucketProvisioning.provision(
+						"step", config, List.of(create, create), List.<Extension> of(extension), TargetBucketStep.PIPELINE));
+
+		assertEquals(Category.CONFIGURATION, failure.category());
+		assertTrue(failure.getMessage().contains("pipeline CREATE sub-step after the first"), failure.getMessage());
+		assertTrue(extension.requests.isEmpty(), extension.requests.toString());
+
+		TargetBucketProvisioning.provision(
+						"step", config, List.of(create, read), List.<Extension> of(extension), TargetBucketStep.PIPELINE);
+		assertEquals(List.of("HEAD bench-0", "HEAD bench-1", "HEAD bench-2", "HEAD bench-3"), extension.requests,
+						"a first CREATE sub-step writes the set; a later READ only reads what it passes on");
 	}
 
 	@Test

@@ -171,9 +171,15 @@ public final class TargetBucketSet {
 	 * always bounded, and with more than one bucket the combinations the set cannot serve fail.
 	 *
 	 * @param hasControl whether the selected storage driver provisions target buckets
+	 * @param fedByPreviousContext whether the context takes its items from the previous context of a
+	 *     pipeline step
 	 * @throws RunTerminalException when the configuration is invalid
 	 */
-	static void validate(final Config ctxConfig, final TargetBucketStep step, final boolean hasControl) {
+	static void validate(
+					final Config ctxConfig,
+					final TargetBucketStep step,
+					final boolean hasControl,
+					final boolean fedByPreviousContext) {
 		final int count = count(ctxConfig);
 		if (count == 1) {
 			return;
@@ -209,6 +215,11 @@ public final class TargetBucketSet {
 			if (notEmpty(ctxConfig.stringVal(TargetBuckets.INPUT_FILE))) {
 				throw configuration(setting + " cannot be combined with item.input.file in a CREATE step: the "
 								+ "bucket count applies only to newly generated objects");
+			}
+			if (fedByPreviousContext) {
+				throw configuration(setting + " cannot be combined with a pipeline CREATE sub-step after the first, "
+								+ "which writes the items the previous sub-step passes on: the bucket count applies "
+								+ "only to newly generated objects");
 			}
 		}
 		if (TargetBuckets.writes(ctxConfig, step, count)) {

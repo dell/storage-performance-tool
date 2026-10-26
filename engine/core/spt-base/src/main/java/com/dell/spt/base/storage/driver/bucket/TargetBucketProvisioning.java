@@ -81,10 +81,12 @@ public final class TargetBucketProvisioning {
 		try (final var logCtx = logContext(stepId)) {
 			final var targetsByDriver = new LinkedHashMap<Map<String, Object>, DriverTargets>();
 			if (ctxConfigs == null || ctxConfigs.isEmpty()) {
-				collect(config, null, config, extensions, step, targetsByDriver);
+				collect(config, null, config, extensions, step, false, targetsByDriver);
 			} else {
-				for (final var ctxConfig : ctxConfigs) {
-					collect(config, ctxConfig, merge(config, ctxConfig), extensions, step, targetsByDriver);
+				for (int index = 0; index < ctxConfigs.size(); index++) {
+					final var ctxConfig = ctxConfigs.get(index);
+					collect(config, ctxConfig, merge(config, ctxConfig), extensions, step, step.pipeline() && index > 0,
+									targetsByDriver);
 				}
 			}
 			for (final var driverTargets : targetsByDriver.values()) {
@@ -111,9 +113,10 @@ public final class TargetBucketProvisioning {
 					final Config effective,
 					final List<Extension> extensions,
 					final TargetBucketStep step,
+					final boolean fedByPreviousContext,
 					final Map<Map<String, Object>, DriverTargets> targetsByDriver) {
 		final var factory = controlFactory(extensions, effective.stringVal("storage-driver-type"));
-		TargetBucketSet.validate(effective, step, factory != null);
+		TargetBucketSet.validate(effective, step, factory != null, fedByPreviousContext);
 		if (factory == null) {
 			return;
 		}

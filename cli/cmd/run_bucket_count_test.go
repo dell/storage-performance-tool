@@ -107,13 +107,29 @@ func TestApplyBucketCountRejectsOutOfRangeCountsAndInvalidMemberNames(t *testing
 }
 
 func TestApplyBucketCountRejectsEveryEngineOverrideOfTheCount(t *testing.T) {
-	for _, override := range []string{"storage.targetBucket.count=4", "storage-targetBucket-count=4", " storage.targetBucket.count = 1"} {
+	for _, override := range []string{
+		"storage.targetBucket.count=4",
+		"storage-targetBucket-count=4",
+		" storage.targetBucket.count = 1",
+		"storage.targetBucket={count: 4}",
+		"storage-targetBucket={count: 4, provision: false}",
+		"storage={targetBucket: {count: 4}}",
+	} {
 		for _, value := range []string{"", "1", "4"} {
 			params := scenario.Params{WorkloadType: WorkloadTypeWrite, Bucket: "bench", EngineOverrides: []string{override}}
 			err := applyBucketCount(bucketCountTestCommand(t, value), &params)
 			if err == nil || !strings.Contains(err.Error(), "use --bucket-count") {
 				t.Fatalf("override %q with flag %q: err = %v", override, value, err)
 			}
+		}
+	}
+}
+
+func TestApplyBucketCountAcceptsOverridesThatLeaveTheCountAlone(t *testing.T) {
+	for _, override := range []string{"storage.targetBucket.provision=false", "storage.targetBucket={provision: false}", "item.naming.shards=8"} {
+		params := scenario.Params{WorkloadType: WorkloadTypeWrite, Bucket: "bench", EngineOverrides: []string{override}}
+		if err := applyBucketCount(bucketCountTestCommand(t, "4"), &params); err != nil || params.BucketCount != 4 {
+			t.Fatalf("override %q: err = %v, BucketCount = %d", override, err, params.BucketCount)
 		}
 	}
 }

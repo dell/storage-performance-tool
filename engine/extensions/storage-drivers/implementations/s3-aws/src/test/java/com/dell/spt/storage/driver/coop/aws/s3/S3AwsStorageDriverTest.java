@@ -3594,6 +3594,57 @@ public class S3AwsStorageDriverTest {
 		}
 
 		@Test
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		void multipartInitiateAndAbortRequestsCarryTheParentsMemberBucket() throws Exception {
+			when(mockS3Client.createMultipartUpload(any(CreateMultipartUploadRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(
+											CreateMultipartUploadResponse.builder().uploadId("upload-member").build()));
+			when(mockS3Client.abortMultipartUpload(any(AbortMultipartUploadRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(AbortMultipartUploadResponse.builder().build()));
+			final var parent = (CompositeDataOperation) build(OpType.CREATE, new DataItemImpl("big", 7, 3000), 1024);
+			assertEquals("/bench-3/prefix", parent.dstPath());
+			final CompositeDataOperation initiate = mock(CompositeDataOperation.class);
+			final CompositeDataOperation abort = mock(CompositeDataOperation.class);
+			for (final var op : List.of(initiate, abort)) {
+				when(op.type()).thenReturn(OpType.CREATE);
+				when(op.item()).thenReturn(parent.item());
+				when(op.dstPath()).thenReturn(parent.dstPath());
+			}
+			when(initiate.allSubOperationsDone()).thenReturn(false);
+			when(abort.get(KEY_UPLOAD_ID)).thenReturn("upload-member");
+			when(abort.get(KEY_MPU_ABORT)).thenReturn("true");
+
+			drv.execute((Operation) initiate).join();
+			drv.execute((Operation) abort).join();
+
+			final ArgumentCaptor<CreateMultipartUploadRequest> created = ArgumentCaptor.forClass(CreateMultipartUploadRequest.class);
+			verify(mockS3Client).createMultipartUpload(created.capture());
+			assertEquals("bench-3", created.getValue().bucket());
+			assertEquals("prefix/big", created.getValue().key());
+			final ArgumentCaptor<AbortMultipartUploadRequest> aborted = ArgumentCaptor.forClass(AbortMultipartUploadRequest.class);
+			verify(mockS3Client).abortMultipartUpload(aborted.capture());
+			assertEquals("bench-3", aborted.getValue().bucket());
+			assertEquals("prefix/big", aborted.getValue().key());
+		}
+
+		@Test
+		void theConstructorFallbackBucketNeverComesFromTheBaseOfABucketSet() throws Exception {
+			final String defaults;
+			try (final var stream = getClass().getResourceAsStream("/config/defaults.yaml")) {
+				defaults = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+			}
+			final Config config = com.dell.spt.base.config.ConfigUtil.loadConfig(
+							defaults, com.dell.spt.base.config.ConfigFormat.YAML,
+							com.dell.spt.base.config.InitialConfigSchemaProvider.provider().schema());
+			config.val("item-output-path", "/bench");
+			config.val("storage-targetBucket-count", 4);
+
+			// The factory hands the driver the storage configuration only, which holds no item paths.
+			assertNotEquals("bench", S3AwsStorageDriver.resolveBucketName(config.configVal("storage")));
+		}
+
+		@Test
 		@SuppressWarnings("unchecked")
 		void putAndDeleteRequestsCarryTheMemberBucket() throws Exception {
 			when(mockS3Client.putObject(any(PutObjectRequest.class), any(AsyncRequestBody.class)))
