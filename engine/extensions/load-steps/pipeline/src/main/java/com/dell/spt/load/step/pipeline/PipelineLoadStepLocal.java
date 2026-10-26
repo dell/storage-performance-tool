@@ -24,6 +24,7 @@ import com.dell.spt.base.load.generator.PacedRateThrottle;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.util.BinarySizeFormat;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketSet;
 
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.reflection.TypeUtil;
@@ -143,6 +144,7 @@ public class PipelineLoadStepLocal
 										.itemFactory((ItemFactory) itemFactory)
 										.loadOperationsOutput(driver)
 										.authConfig(storageConfig.configVal("auth"))
+										.targetBucketCount(TargetBucketSet.countOfStorage(storageConfig))
 										.originIndex(originIndex);
 						if (rateLimit > 0) {
 							generatorBuilder.addThrottle(new PacedRateThrottle(rateLimit));

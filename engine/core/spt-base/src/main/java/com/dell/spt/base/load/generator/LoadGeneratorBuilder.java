@@ -26,6 +26,18 @@ public interface LoadGeneratorBuilder<I extends Item, O extends Operation<I>, T 
 
 	LoadGeneratorBuilder<I, O, T> authConfig(final Config authConfig);
 
+	/**
+	 * Sets the number of target buckets, {@code storage.targetBucket.count}, that a CREATE of new
+	 * data items spreads its objects over. A builder without target bucket sets rejects any count
+	 * other than 1.
+	 */
+	default LoadGeneratorBuilder<I, O, T> targetBucketCount(final int count) {
+		if (count != 1) {
+			throw new UnsupportedOperationException(getClass().getName() + " supports one target bucket only, not " + count);
+		}
+		return this;
+	}
+
 	LoadGeneratorBuilder<I, O, T> loadOperationsOutput(Output<O> storageDriver);
 
 	LoadGeneratorBuilder<I, O, T> itemInput(final Input<I> itemInput);

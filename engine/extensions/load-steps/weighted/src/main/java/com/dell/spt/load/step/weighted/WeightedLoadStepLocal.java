@@ -24,6 +24,7 @@ import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.util.BinarySizeFormat;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketSet;
 
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.reflection.TypeUtil;
@@ -157,6 +158,7 @@ public class WeightedLoadStepLocal extends LoadStepLocalBase {
 										.itemFactory((ItemFactory) itemFactory)
 										.loadOperationsOutput(driver)
 										.authConfig(storageConfig.configVal("auth"))
+										.targetBucketCount(TargetBucketSet.countOfStorage(storageConfig))
 										.originIndex(originIndex)
 										.addThrottle(weightThrottle);
 						if (rateLimit > 0) {

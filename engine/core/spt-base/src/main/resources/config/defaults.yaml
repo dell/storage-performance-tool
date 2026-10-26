@@ -210,6 +210,10 @@ storage:
   # Before a step starts, the controller engine checks its S3 target buckets and creates a missing
   # one for a step that writes new objects. false still checks them but never creates one.
   targetBucket:
+    # Number of buckets a step writes new objects into: 1 writes under item.output.path; N > 1
+    # spreads new objects over <base>-0 ... <base>-<N-1>, where <base> is the output path's bucket.
+    # Existing objects keep the bucket their input records. At most 1000.
+    count: 1
     provision: true
 
 aliasing:

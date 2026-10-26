@@ -169,6 +169,70 @@ public class LoadGeneratorBuilderImplTest {
 		}
 	}
 
+	private static List<String> targetBucketDestinations(final int count, final String outputPath) throws Exception {
+		final var options = baseSingleOpOptions();
+		options.put("item-output-path", outputPath);
+		options.put("item-naming-type", "serial");
+		options.put("load-batch-size", 8);
+		options.put("load-op-limit-count", 40);
+		final var config = (Config) new BasicConfig("-", CONFIG_SCHEMA);
+		options.forEach(config::val);
+		final List<DataOperation<DataItem>> ops = new ArrayList<>();
+		try (final IoBuffer<DataOperation<DataItem>> opBuff = new LimitedQueueBuffer<>(new ArrayBlockingQueue<>(40));
+						final LoadGenerator loadGenerator = new LoadGeneratorBuilderImpl()
+										.authConfig(config.configVal("storage-auth"))
+										.targetBucketCount(count)
+										.itemConfig(config.configVal("item"))
+										.itemFactory((ItemFactory) new DataItemFactoryImpl())
+										.itemType(ItemType.DATA)
+										.loadConfig(config.configVal("load"))
+										.loadOperationsOutput(opBuff)
+										.originIndex(0)
+										.build()) {
+			loadGenerator.start();
+			assertTrue(loadGenerator.await(10, TimeUnit.SECONDS), "load generator await timeout");
+			assertEquals(40, opBuff.get(ops, 40));
+		}
+		return ops.stream().map(Operation::dstPath).toList();
+	}
+
+	@Test
+	public void targetBucketSetSpreadsNewObjectsEvenlyOverItsMembers() throws Exception {
+		final var destinations = targetBucketDestinations(4, "/bench/prefix");
+
+		final Map<String, Long> perMember = destinations.stream()
+						.collect(Collectors.groupingBy(path -> path, Collectors.counting()));
+		assertEquals(Map.of(
+						"/bench-0/prefix", 10L, "/bench-1/prefix", 10L, "/bench-2/prefix", 10L, "/bench-3/prefix", 10L),
+						perMember);
+	}
+
+	@Test
+	public void oneTargetBucketKeepsTheOutputPathAsConfigured() throws Exception {
+		assertEquals(List.of("test-bucket"), targetBucketDestinations(1, "test-bucket").stream().distinct().toList());
+	}
+
+	@Test
+	public void targetBucketSetRejectsACreateOfSuppliedItems() {
+		final var config = (Config) new BasicConfig("-", CONFIG_SCHEMA);
+		baseSingleOpOptions().forEach(config::val);
+		final var builder = new LoadGeneratorBuilderImpl()
+						.authConfig(config.configVal("storage-auth"))
+						.targetBucketCount(4)
+						.itemConfig(config.configVal("item"))
+						.itemFactory((ItemFactory) new DataItemFactoryImpl())
+						.itemType(ItemType.DATA)
+						.loadConfig(config.configVal("load"))
+						.loadOperationsOutput(new LimitedQueueBuffer<>(new ArrayBlockingQueue<>(1)))
+						.itemInput(new com.github.akurilov.commons.io.collection.ListInput<>(
+										List.of(new DataItemImpl("/bench-2/existing", 5, 1024))))
+						.originIndex(0);
+
+		final var failure = assertThrows(IllegalConfigurationException.class, builder::build);
+
+		assertTrue(failure.getMessage().contains("applies only to newly generated objects"), failure.getMessage());
+	}
+
 	private static Map<String, Object> baseSingleOpOptions() {
 		final Map<String, Object> options = new HashMap<>();
 		options.put("item-data-ranges-concat", null);

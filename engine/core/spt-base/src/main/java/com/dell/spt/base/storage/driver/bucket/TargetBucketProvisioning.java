@@ -59,15 +59,32 @@ public final class TargetBucketProvisioning {
 					final Config config,
 					final List<Config> ctxConfigs,
 					final List<Extension> extensions) {
+		provision(stepId, config, ctxConfigs, extensions, TargetBucketStep.ORDINARY);
+	}
+
+	/**
+	 * Provisions the target buckets of a step, as {@link #provision(String, Config, List, List)} does,
+	 * for a step that tells setup what its configuration cannot: whether it is a mixed step and
+	 * whether that step writes new objects. Every context's {@code storage.targetBucket.count} is
+	 * validated first, for every storage driver.
+	 *
+	 * @param step what setup must know about the step beyond its configuration
+	 */
+	public static void provision(
+					final String stepId,
+					final Config config,
+					final List<Config> ctxConfigs,
+					final List<Extension> extensions,
+					final TargetBucketStep step) {
 		// The step's log context routes messages to its messages.log; closing it also undoes any
 		// context a driver's control request leaves behind on this scenario thread.
 		try (final var logCtx = logContext(stepId)) {
 			final var targetsByDriver = new LinkedHashMap<Map<String, Object>, DriverTargets>();
 			if (ctxConfigs == null || ctxConfigs.isEmpty()) {
-				collect(config, null, config, extensions, targetsByDriver);
+				collect(config, null, config, extensions, step, targetsByDriver);
 			} else {
 				for (final var ctxConfig : ctxConfigs) {
-					collect(config, ctxConfig, merge(config, ctxConfig), extensions, targetsByDriver);
+					collect(config, ctxConfig, merge(config, ctxConfig), extensions, step, targetsByDriver);
 				}
 			}
 			for (final var driverTargets : targetsByDriver.values()) {
@@ -93,19 +110,21 @@ public final class TargetBucketProvisioning {
 					final Config ctxConfig,
 					final Config effective,
 					final List<Extension> extensions,
+					final TargetBucketStep step,
 					final Map<Map<String, Object>, DriverTargets> targetsByDriver) {
 		final var factory = controlFactory(extensions, effective.stringVal("storage-driver-type"));
+		TargetBucketSet.validate(effective, step, factory != null);
 		if (factory == null) {
 			return;
 		}
 		var context = effective;
-		if (TargetBuckets.writesOutputPath(context)) {
+		if (TargetBuckets.writes(context, step, TargetBucketSet.count(context))) {
 			final var owner = ctxConfig != null && definesOutputPath(ctxConfig) ? ctxConfig : config;
 			if (resolveOutputPath(owner) && ctxConfig != null) {
 				context = merge(config, ctxConfig);
 			}
 		}
-		final var targets = TargetBuckets.targets(context, context.boolVal(POLICY));
+		final var targets = TargetBuckets.targets(context, context.boolVal(POLICY), step);
 		if (targets.isEmpty()) {
 			return;
 		}

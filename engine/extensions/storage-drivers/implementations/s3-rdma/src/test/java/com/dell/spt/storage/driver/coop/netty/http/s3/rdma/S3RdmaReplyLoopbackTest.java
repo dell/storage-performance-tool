@@ -162,6 +162,34 @@ final class S3RdmaReplyLoopbackTest {
 	}
 
 	@Test
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	void aTargetBucketSetMemberIsTheBucketOfRdmaPutAndGet() throws Exception {
+		reply = new Reply(200, "200", null, null, true);
+		final var builder = new com.dell.spt.base.item.op.data.DataOperationsBuilderImpl(0);
+		builder.opType(OpType.CREATE);
+		builder.outputPathInput(new com.dell.spt.base.config.ConstantValueInputImpl<>("/bench/prefix"));
+		builder.credentialInput(new com.dell.spt.base.config.ConstantValueInputImpl<>(CREDENTIAL));
+		builder.sizeThreshold(Long.MAX_VALUE);
+		builder.targetBucketMembers(com.dell.spt.base.storage.driver.bucket.TargetBucketSet.memberPaths("/bench/prefix", 4), 0);
+		final var create = (Operation<DataItem>) builder.buildOp(new DataItemImpl("k6", 6, SIZE));
+		try (final var driver = newDriver(true)) {
+			assertEquals(Operation.Status.SUCC, execute(driver, create).status());
+		}
+		final var recorded = create.item().name();
+		reply = new Reply(200, "200", Integer.toString(SIZE), null, true);
+		try (final var driver = newDriver(true)) {
+			final Operation<DataItem> read = (Operation<DataItem>) (Operation<?>) new DataOperationImpl<>(
+							0, OpType.READ, new DataItemImpl(recorded, 6, SIZE), null, null, CREDENTIAL, null, 0);
+			assertEquals(Operation.Status.SUCC, execute(driver, read).status());
+		}
+
+		assertEquals("/bench-2/prefix/k6", onlyObjectRequest("PUT").rawPath());
+		assertEquals("/bench-2/prefix/k6", onlyObjectRequest("GET").rawPath());
+		assertTrue(requests.stream().noneMatch(r -> r.rawPath().startsWith("/bench/")), requests::toString);
+	}
+
+	@Test
 	void putDeclinedWithHttp200AndReply501FailsWithoutBytes() throws Exception {
 		// The response observed from an ECS 4.5 server while its RDMA server could not start.
 		reply = new Reply(200, "501", null, DECLINE_BODY, false);

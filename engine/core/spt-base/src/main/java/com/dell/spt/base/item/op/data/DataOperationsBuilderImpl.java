@@ -116,7 +116,7 @@ public class DataOperationsBuilderImpl<I extends DataItem, O extends DataOperati
 	@Override
 	@SuppressWarnings("unchecked")
 	public O buildOp(final I dataItem) throws IOException, IllegalArgumentException {
-		final String outputPath = getNextOutputPath();
+		final String outputPath = nextOutputPath(dataItem);
 		if (dataItem.size() > sizeThreshold) {
 			if (randomRangesCount > 0 || (fixedRanges != null && fixedRanges.size() > 0)) {
 				throw new IllegalArgumentException(
@@ -170,7 +170,7 @@ public class DataOperationsBuilderImpl<I extends DataItem, O extends DataOperati
 					throws IOException, IllegalArgumentException {
 		String outputPath;
 		for (final I nextItem : items) {
-			outputPath = getNextOutputPath();
+			outputPath = nextOutputPath(nextItem);
 			if (nextItem.size() > sizeThreshold) {
 				if (randomRangesCount > 0 || (fixedRanges != null && fixedRanges.size() > 0)) {
 					throw new IllegalArgumentException(

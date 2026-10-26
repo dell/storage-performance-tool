@@ -18,7 +18,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import org.apache.commons.csv.CSVPrinter;
 
 /** Writes successful operation results in the canonical integrity-manifest format. */
@@ -27,6 +29,8 @@ public final class IntegrityOperationManifestOutput<O extends Operation<? extend
 
 	private final Path manifestPath;
 	private final String configuredBucket;
+	/** Buckets of operation paths outside the configured bucket, such as target bucket set members. */
+	private final Map<String, String> bucketsByPath = new HashMap<>();
 	private final OpType opType;
 	private final String requestedListPrefix;
 	private final CSVPrinter printer;
@@ -98,7 +102,7 @@ public final class IntegrityOperationManifestOutput<O extends Operation<? extend
 				bucket = manifestItem.bucket();
 				key = manifestItem.name();
 			} else {
-				bucket = configuredBucket;
+				bucket = resultBucket(result);
 				key = keyFromResult(item.name(), bucket);
 			}
 			final String version = OpType.CREATE.equals(opType)
@@ -178,6 +182,34 @@ public final class IntegrityOperationManifestOutput<O extends Operation<? extend
 				Files.deleteIfExists(staging);
 			}
 		}
+	}
+
+	/**
+	 * Returns the bucket the operation itself addressed: that of its destination path for CREATE,
+	 * otherwise of its source path. A path within the configured bucket, the only case with one
+	 * target bucket, reuses the configured name; another path, such as a member of a target bucket
+	 * set, is parsed once and remembered.
+	 */
+	private String resultBucket(final O result) {
+		final String path = OpType.CREATE.equals(result.type()) ? result.dstPath() : result.srcPath();
+		if (path == null || path.isEmpty() || withinBucket(path, configuredBucket)) {
+			return configuredBucket;
+		}
+		return bucketsByPath.computeIfAbsent(path, IntegrityOperationManifestOutput::bucketFromPath);
+	}
+
+	/** True when the path's first segment is the given bucket, compared without allocating. */
+	static boolean withinBucket(final String path, final String bucket) {
+		if (bucket.isEmpty()) {
+			return false;
+		}
+		int start = 0;
+		while (start < path.length() && path.charAt(start) == '/') {
+			start++;
+		}
+		final int end = start + bucket.length();
+		return path.regionMatches(start, bucket, 0, bucket.length())
+						&& (end == path.length() || path.charAt(end) == '/');
 	}
 
 	static String bucketFromPath(final String path) {

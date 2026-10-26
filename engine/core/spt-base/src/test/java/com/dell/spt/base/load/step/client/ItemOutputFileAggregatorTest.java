@@ -49,6 +49,19 @@ public class ItemOutputFileAggregatorTest {
 	}
 
 	@Test
+	void itemsOfABucketSetKeepTheirMemberPathsAcrossUnevenNodes() throws Exception {
+		final String local = "/bench-0/p/a,0,400,0/0\n/bench-1/p/b,1,400,0/0\n/bench-2/p/c,2,400,0/0\n/bench-3/p/d,3,400,0/0\n";
+		Files.writeString(output(), local);
+		final FileManagerService remote = remote();
+		when(remote.readFromFile(REMOTE_FILE, 0)).thenReturn(bytes("/bench-2/p/e,6,400,0/0\n"));
+		when(remote.readFromFile(REMOTE_FILE, 23)).thenThrow(new EOFException());
+
+		collect(output(), remote);
+
+		assertEquals(local + "/bench-2/p/e,6,400,0/0\n", Files.readString(output()));
+	}
+
+	@Test
 	void anEmptyRemoteFileIsCompleteAndDeleted() throws Exception {
 		final FileManagerService ended = remote();
 		when(ended.readFromFile(REMOTE_FILE, 0)).thenThrow(new EOFException());
