@@ -88,6 +88,7 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--access-key` | `-a` | *(required)* | S3 access key credential |
 | `--secret-key` | `-s` | *(required)* | S3 secret key credential |
 | `--bucket` | `-b` | *(required)* | Target bucket to use for the test. In explicit-manifest DELETE mode it is an optional safety assertion checked against every source row; omit it to permit multiple buckets |
+| `--bucket-count` | | `1` | Spread the run's new objects over `N` buckets `<bucket>-0` ... `<bucket>-<N-1>` (1 to 1000). Existing objects keep the bucket their items file records. For `write`, `write-verify`, seeded `read`, seeded `delete` (with `--delete-batch-size=1`) and `mixed`. See [Target Buckets](TARGET_BUCKETS.md#bucket-sets) |
 | `--prefix` | | `""` | Literal generated-key prefix for `write` and `write-verify`; owned namespace root for seeded DELETE; listing constraint for `list` and LIST-based `read-verify`; rejected for `read`, `mixed`, `mock`, and `tables` |
 | `--auth-version` | | `4` | S3 signature version (`2` or `4`) |
 | `--slice-endpoints` | | `false` | Partition endpoints across nodes in distributed runs |
@@ -527,6 +528,16 @@ does contain a generating CREATE phase, but its keys stay beneath the run-owned
 and existing-prefix DELETE consume frozen names and cannot rewrite them.
 Automatic mode is also a no-op for non-generating list workloads. Do not combine
 a positive or automatic CLI setting with an `item.naming.shards` engine override.
+
+**`--bucket-count` behavior:** with `--bucket-count N` greater than 1, every new
+object is written to one of `<bucket>-0` to `<bucket>-<N-1>`, chosen from its
+object id, so all buckets receive writes concurrently. The base `--bucket` itself
+is not one of them. Reads, deletes and cleanup use the bucket each object's items
+file or manifest records, so a later run with a different count still finds the
+earlier objects. With `--prefix-shards`, each bucket gets every shard directory.
+Phase setup checks and creates the buckets of the set as described in
+[Target Buckets](TARGET_BUCKETS.md#bucket-sets). The count is set only by this
+flag; an `--engine-override` of `storage.targetBucket.count` is rejected.
 
 ```bash
 # Automatic: three workers x 16 threads creates 48 prefix directories.
