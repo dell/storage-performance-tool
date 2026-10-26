@@ -39,6 +39,7 @@ public final class DummyStorageDriverMock<I extends Item, O extends Operation<I>
 	private final int concurrencyLimit;
 	private final LongAdder scheduledOpCount = new LongAdder();
 	private final LongAdder completedOpCount = new LongAdder();
+	private volatile boolean admissionOpen = true;
 	private Output<O> opResultOut = null;
 
 	/**
@@ -92,13 +93,7 @@ public final class DummyStorageDriverMock<I extends Item, O extends Operation<I>
 			throwUnchecked(new EOFException());
 		}
 		checkStateFor(task);
-		if (opResultOut.put(task)) {
-			scheduledOpCount.increment();
-			completedOpCount.increment();
-			return true;
-		} else {
-			return false;
-		}
+		return complete(task);
 	}
 
 	@Override
@@ -111,16 +106,13 @@ public final class DummyStorageDriverMock<I extends Item, O extends Operation<I>
 		while (i < to && isStarted()) {
 			nextTask = tasks.get(i);
 			checkStateFor(nextTask);
-			if (opResultOut.put(tasks.get(i))) {
+			if (complete(nextTask)) {
 				i++;
 			} else {
 				break;
 			}
 		}
-		final int n = i - from;
-		scheduledOpCount.add(n);
-		completedOpCount.add(n);
-		return n;
+		return i - from;
 	}
 
 	@Override
@@ -132,7 +124,7 @@ public final class DummyStorageDriverMock<I extends Item, O extends Operation<I>
 		for (final O nextOp : tasks) {
 			if (isStarted()) {
 				checkStateFor(nextOp);
-				if (opResultOut.put(nextOp)) {
+				if (complete(nextOp)) {
 					n++;
 				} else {
 					break;
@@ -141,9 +133,32 @@ public final class DummyStorageDriverMock<I extends Item, O extends Operation<I>
 				break;
 			}
 		}
-		scheduledOpCount.add(n);
-		completedOpCount.add(n);
 		return n;
+	}
+
+	/**
+	 * Outputs one completed operation unless admission is closed. As with a real driver, the
+	 * operation counts as active until its result output returns, so a step draining after
+	 * {@link #closeAdmission()} either waits for it or finds it refused.
+	 */
+	private boolean complete(final O op) {
+		scheduledOpCount.increment();
+		var completed = false;
+		try {
+			completed = admissionOpen && opResultOut.put(op);
+			return completed;
+		} finally {
+			if (completed) {
+				completedOpCount.increment();
+			} else {
+				scheduledOpCount.decrement();
+			}
+		}
+	}
+
+	@Override
+	public final void closeAdmission() {
+		admissionOpen = false;
 	}
 
 	@Override
