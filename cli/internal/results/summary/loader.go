@@ -13,6 +13,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
+	"github.com/dell/storage-performance-tool/cli/internal/driverstats"
 	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"gopkg.in/yaml.v3"
@@ -59,6 +60,7 @@ type StepData struct {
 	SteadyUnreadable  bool
 	Delete            *deletemetrics.Metrics
 	DeleteEvidence    *DeleteArtifactEvidence
+	DriverStats       *driverstats.Stats
 	Status            StepStatus
 	MetricsSuppressed bool
 	MissingRequired   []string
@@ -188,10 +190,11 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 		}
 		sm := &manifest.Steps[i]
 		step := &StepData{
-			StepID:   sm.StepID,
-			Manifest: sm,
-			Status:   StepStatusUnknown,
-			Delete:   params.DeleteMetrics[sm.StepID],
+			StepID:      sm.StepID,
+			Manifest:    sm,
+			Status:      StepStatusUnknown,
+			Delete:      params.DeleteMetrics[sm.StepID],
+			DriverStats: params.DriverStats[sm.StepID],
 		}
 		step.MetricsSuppressed = l.metricsSummaryPersistSuppressed(runDir, sm)
 		required, optional := l.categorizeMissing(sm)
@@ -524,6 +527,8 @@ type RunParams struct {
 	DeleteMetrics          map[string]*deletemetrics.Metrics `json:"deleteMetrics,omitempty"`
 	DeleteArtifactsVersion int                               `json:"deleteArtifactsVersion,omitempty"`
 	DeleteArtifactStepIDs  []string                          `json:"deleteArtifactStepIds,omitempty"`
+	DriverStats            map[string]*driverstats.Stats     `json:"driverStats,omitempty"`
+	DriverStatsError       string                            `json:"driverStatsError,omitempty"`
 	ResultsOptions         RunResultsOptions                 `json:"resultsOptions"`
 	CLI                    RunCLI                            `json:"cli"`
 	MultiHost              RunMultiHost                      `json:"multiHost"`
@@ -557,6 +562,7 @@ type ScenarioParams struct {
 	Bucket         string   `json:"Bucket"`
 	Prefix         string   `json:"Prefix"`
 	Threads        int      `json:"Threads"`
+	S3Driver       string   `json:"S3Driver"`
 	ObjectSize     string   `json:"ObjectSize"`
 	ObjectCount    int64    `json:"ObjectCount"`
 	GetDistrib     int      `json:"GetDistrib"`

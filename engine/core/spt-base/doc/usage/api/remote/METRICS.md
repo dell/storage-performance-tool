@@ -68,7 +68,7 @@ JSON responses use `application/json` and include `Access-Control-Allow-Origin: 
 
 A successful JSON response is an array. Each element represents one load step or a retained terminal step. `/metrics/json` emits a single idle element when no local or retained step is available, so it is never an empty successful response. The cluster endpoint returns 404 instead of an empty successful response.
 
-Schema 5 is additive over schema 4: it adds the optional `steady` object ([Steady-state window](#steady-state-window)) and changes nothing else. Consumers should ignore unknown fields, tolerate optional operation-specific sections, and check `metrics_schema` before applying schema-specific rules.
+Schema 5 is additive over schema 4: it adds the optional `steady` object ([Steady-state window](#steady-state-window)) and the optional `driver_stats` object ([Driver statistics](#driver-statistics)), and changes nothing else. Consumers should ignore unknown fields, tolerate optional operation-specific sections, and check `metrics_schema` before applying schema-specific rules.
 
 ### Top-level fields
 
@@ -88,6 +88,7 @@ Schema 5 is additive over schema 4: it adds the optional `steady` object ([Stead
 | `test_state` | integer | Always | Lifecycle state described below |
 | `terminal` | boolean | Terminal only | `true` for a retained final sample |
 | `delete_detail_expected` | boolean | Non-idle samples | Whether a standalone DELETE detail block is required |
+| `driver_stats` | object | When the step's storage driver reports statistics | The driver's own counters and gauges; see [Driver statistics](#driver-statistics) |
 
 `node_id` names the server that emitted the document. On an aggregate sample it identifies the entry node, not every contributing worker.
 
@@ -187,6 +188,16 @@ Schema 5 adds `steady`: the same measurement as `metrics.steady.total.csv`, over
 | `steady.operations`, `steady.bandwidth`, `steady.timing`, `steady.concurrency` | The groups above, over the window, plus `operations.success_rate_mean` and `bandwidth.bytes_rate_mean`, the window's IOPS and bandwidth. Present only for `valid` and `short` |
 
 Window timing statistics come from the difference of two copies of each timing histogram, so a window mean is within histogram precision (about 0.4%) of the exact mean. An aggregate's `steady` sums independently measured slice windows: counts and rates are summed and timing populations merged, its start is the latest slice start and its turnovers the lowest slice value, and its status is `incomplete` or the worst slice status. A mixed or weighted step has one window per operation type, but the JSON keeps one entry per step; `metrics.steady.total.csv` is the authoritative per-operation record for those steps.
+
+### Driver statistics
+
+A row of a step whose storage driver reports statistics about itself carries `driver_stats`. The `s3-rdma` driver reports them; the rows of the other shipped drivers are unchanged.
+
+- **Node row:** `driver`, the driver's name; `counters`, names mapped to non-negative integers; and `gauges`, names mapped to integers. The driver chooses the names. A mixed step has one row per operation, and exactly one of them carries the object, for the whole step. A terminal row carries the values the step kept when it ended.
+- **Fleet row:** the sum of the nodes' objects, plus `reporting`, the number of nodes in the sum, and `partial`, `false` only when every expected node reported the same driver and the same names. When nodes report different drivers the object has no sums: it carries only `partial: true` and `drivers`, the names seen.
+- **Reading the values:** a fleet gauge is a sum of node gauges, not a level the fleet held at one moment. While a step runs its counters are read one after another, so compare counters exactly only on a finished step.
+
+The `s3-rdma` statistics, what each one counts and how the CLI stores the final values, are described in [S3_RDMA.md](../../../../../../../cli/docs/S3_RDMA.md). The entry node also exports the fleet total on the Prometheus endpoint ([Storage driver statistics](#storage-driver-statistics)).
 
 ## Timing distributions
 
@@ -419,6 +430,27 @@ SPT's custom collector is registered for distributed metrics contexts. Therefore
 
 Prometheus timing values are seconds; JSON timing distribution values are microseconds. The current Prometheus collector does not export percentile series. Use JSON schema-4 timing distributions or the final metrics artifact when percentiles are required.
 
+### Storage driver statistics
+
+While a step whose storage driver reports statistics about itself runs (the `s3-rdma` driver does), the entry node also exports the fleet total of those statistics. The names are those of the `driver_stats` object of the step's `/metrics/fleet/json` row, after `spt_driver_`:
+
+| Series | Type | Meaning |
+|:--|:--|:--|
+| `spt_driver_<counter>_total` | counter | Fleet total of a driver counter, for example `spt_driver_rdma_transferred_total` |
+| `spt_driver_<gauge>` | gauge | Sum of a driver gauge over the nodes, for example `spt_driver_pool_reserved_bytes` |
+| `spt_driver_reporting` | gauge | Nodes whose statistics are in the total |
+| `spt_driver_partial` | gauge | `1` when the total is incomplete, otherwise `0` |
+
+These series carry the labels below and `driver`, the driver type. They are the only SPT series typed as counters.
+
+- The counters and gauges are exported only while the total is complete, so a counter does not fall when a node is missing from one sum. While `spt_driver_partial` is `1` (a node is missing, or the nodes report different drivers), only `spt_driver_reporting` and `spt_driver_partial` are exported. When the drivers differ, `driver` lists them, separated by commas.
+- A counter is never exported below a value it showed before during the step, which Prometheus would read as a reset. A step's metrics are refreshed one refresh at a time, so a complete total does not fall; the exporter enforces it as well.
+- A fleet gauge is a sum of node levels, each read at its own moment, as in the JSON.
+- The series disappear when the step ends, like the other SPT series, so a scrape can miss the last seconds of a step. The final values are in the step's retained `/metrics/fleet/json` row and, for a run through the CLI, in `spt_run_params.json`.
+- In a mixed step the series carry the `load_op_type` of one of the step's operations and cover the whole step.
+- Prometheus names allow letters, digits, `_` and `:`. A statistic whose name has another character is exported with `_` in its place. A statistic whose name would take the series of another is not exported. The engine logs a warning for each such statistic, once.
+
+
 ### Labels
 
 SPT custom series use these labels:
@@ -431,6 +463,8 @@ SPT custom series use these labels:
 - `node_list`
 - `user_comment`
 - `run_id`
+
+Storage driver series add `driver`.
 
 Treat `user_comment`, step identifiers, and node lists as potential cardinality sources. Avoid copying arbitrary run-specific values into long-retention recording rules unless needed.
 
@@ -451,6 +485,12 @@ spt_latency_mean * 1000
 
 # Bounded completion
 spt_completion_percent_value
+
+# Payload transfers over RDMA per second
+rate(spt_driver_rdma_transferred_total{driver="s3-rdma"}[1m])
+
+# Steps whose driver statistics total is incomplete
+spt_driver_partial == 1
 ```
 
 ## Consumer guidance
@@ -512,5 +552,6 @@ The machine-readable schema is [metrics-schema-v5.json](metrics-schema-v5.json).
 - [Local DELETE](examples/metrics-v5-node-delete.json)
 - [Aggregate DELETE](examples/metrics-v5-cluster-delete.json)
 - [LIST shard discovery](examples/metrics-v5-list-shards.json)
+- [Aggregate S3-RDMA READ, with `driver_stats`](examples/metrics-v5-fleet-rdma-read.json)
 
 The schema 4 contract remains in [metrics-schema-v4.json](metrics-schema-v4.json), with its `metrics-v4-*` examples. Contract tests validate each version's examples, and the engine's schema-4 DELETE fixtures, against their schema. When the runtime contract changes, update the responder tests, schema, examples, and this guide together. Preserve older versioned schemas and examples for consumers that still support them.

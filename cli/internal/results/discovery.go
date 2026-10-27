@@ -12,6 +12,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
+	"github.com/dell/storage-performance-tool/cli/internal/driverstats"
 )
 
 // DiscoverStepIDs fetches /metrics/json and returns unique step IDs found.
@@ -58,30 +59,10 @@ func DiscoverFleetStepIDsForRunContext(ctx context.Context, baseURL string, expe
 // discoverStepIDsFromPath is the shared implementation for both node and fleet
 // step-ID discovery endpoints.
 func discoverStepIDsFromPath(ctx context.Context, baseURL, metricsPath string, expectedRunID int64) ([]string, error) {
-	client := &http.Client{Timeout: constants.ResultsDiscoveryHTTPTimeout}
-	req, err := http.NewRequestWithContext(
-		ctx, http.MethodGet, strings.TrimSuffix(baseURL, "/")+metricsPath, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create %s request: %w", metricsPath, err)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetch %s: %w", metricsPath, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusNotFound {
-		// Fleet endpoint may not be available on all engine versions.
-		return nil, nil
-	}
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("%s status: %d", metricsPath, resp.StatusCode)
-	}
-	var steps []struct {
-		StepID string          `json:"step_id"`
-		RunID  json.RawMessage `json:"run_id"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&steps); err != nil {
-		return nil, fmt.Errorf("decode %s: %w", metricsPath, err)
+	// Fleet endpoint may not be available on all engine versions.
+	steps, available, err := fetchMetricsRows[stepIdentityRow](ctx, baseURL, metricsPath)
+	if err != nil || !available {
+		return nil, err
 	}
 	seen := map[string]bool{}
 	out := make([]string, 0, len(steps))
@@ -102,140 +83,14 @@ func discoverStepIDsFromPath(ctx context.Context, baseURL, metricsPath string, e
 	return out, nil
 }
 
-func parseMetricsRunID(raw json.RawMessage) (int64, error) {
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return 0, nil
-	}
-	var number json.Number
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := decoder.Decode(&number); err == nil {
-		return number.Int64()
-	}
-	var text string
-	if err := json.Unmarshal(raw, &text); err != nil {
-		return 0, fmt.Errorf("decode run_id: %w", err)
-	}
-	return strconv.ParseInt(strings.TrimSpace(text), 10, 64)
+type stepIdentityRow struct {
+	StepID string          `json:"step_id"`
+	RunID  json.RawMessage `json:"run_id"`
 }
 
-type terminalDeleteMetricsStep struct {
-	MetricsSchema        int                    `json:"metrics_schema"`
-	Scope                string                 `json:"scope"`
-	Role                 string                 `json:"role"`
-	ClusterID            string                 `json:"cluster_id"`
-	RunID                json.RawMessage        `json:"run_id"`
-	StepID               string                 `json:"step_id"`
-	OpType               string                 `json:"op_type"`
-	Terminal             bool                   `json:"terminal"`
-	Partial              bool                   `json:"partial"`
-	NodesCount           int                    `json:"nodes_count"`
-	ContributorsPresent  []string               `json:"contributors_present"`
-	DeleteDetailExpected bool                   `json:"delete_detail_expected"`
-	Delete               *deletemetrics.Metrics `json:"delete"`
-}
-
-// CaptureTerminalDeleteMetricsForRunContext captures the additive terminal v4 model used by
-// stored summaries. expectedContributorIDs must contain the exact engine contributor identities
-// ("local" plus every remote node address). Fleet metrics are authoritative when that endpoint
-// exists; node metrics are only a single-node compatibility fallback when fleet metrics are
-// unavailable.
-func CaptureTerminalDeleteMetricsForRunContext(
-	ctx context.Context,
-	baseURL string,
-	expectedRunID int64,
-	expectedStepIDs []string,
-	expectedContributorIDs []string,
-	allowNodeFallback bool,
-) (map[string]*deletemetrics.Metrics, error) {
-	if expectedRunID <= 0 {
-		return nil, fmt.Errorf("capture terminal DELETE metrics: expected run identity is unavailable")
-	}
-	expectedSteps, err := exactStepSet(expectedStepIDs)
-	if err != nil {
-		return nil, fmt.Errorf("capture terminal DELETE metrics: %w", err)
-	}
-	expectedContributors, err := exactContributorSet(expectedContributorIDs)
-	if err != nil {
-		return nil, fmt.Errorf("capture terminal DELETE metrics: %w", err)
-	}
-	expectedClusterID := constants.RunClusterID(expectedRunID)
-	fleet, available, err := captureTerminalDeleteMetricsFromPath(
-		ctx, baseURL, constants.SptFleetMetricsEndpoint, "fleet", expectedRunID, expectedClusterID,
-		expectedSteps, expectedContributors)
-	if err != nil {
-		return nil, err
-	}
-	if available {
-		return fleet, nil
-	}
-	if !allowNodeFallback {
-		return nil, fmt.Errorf("capture terminal DELETE metrics: authoritative fleet endpoint is unavailable")
-	}
-	if len(expectedContributors) != 1 {
-		return nil, fmt.Errorf("capture terminal DELETE metrics: node fallback requires exactly one expected contributor")
-	}
-	if _, local := expectedContributors["local"]; !local {
-		return nil, fmt.Errorf("capture terminal DELETE metrics: node fallback requires the local contributor identity")
-	}
-	node, available, err := captureTerminalDeleteMetricsFromPath(
-		ctx, baseURL, constants.SptMetricsEndpoint, "node", expectedRunID, expectedClusterID,
-		expectedSteps, expectedContributors)
-	if err != nil {
-		return nil, err
-	}
-	if !available {
-		return nil, fmt.Errorf("capture terminal DELETE metrics: node endpoint is unavailable")
-	}
-	return node, nil
-}
-
-func exactContributorSet(contributorIDs []string) (map[string]struct{}, error) {
-	expected := make(map[string]struct{}, len(contributorIDs))
-	for _, contributorID := range contributorIDs {
-		contributorID = strings.TrimSpace(contributorID)
-		if contributorID == "" {
-			return nil, fmt.Errorf("expected DELETE contributor identity is empty")
-		}
-		if _, duplicate := expected[contributorID]; duplicate {
-			return nil, fmt.Errorf("expected DELETE contributor identity %q is duplicated", contributorID)
-		}
-		expected[contributorID] = struct{}{}
-	}
-	if len(expected) == 0 {
-		return nil, fmt.Errorf("expected DELETE contributor identity is unavailable")
-	}
-	return expected, nil
-}
-
-func exactStepSet(stepIDs []string) (map[string]struct{}, error) {
-	expected := make(map[string]struct{}, len(stepIDs))
-	for _, stepID := range stepIDs {
-		stepID = strings.TrimSpace(stepID)
-		if stepID == "" {
-			return nil, fmt.Errorf("expected DELETE step identity is empty")
-		}
-		if _, duplicate := expected[stepID]; duplicate {
-			return nil, fmt.Errorf("expected DELETE step identity %q is duplicated", stepID)
-		}
-		expected[stepID] = struct{}{}
-	}
-	if len(expected) == 0 {
-		return nil, fmt.Errorf("expected DELETE step identity is unavailable")
-	}
-	return expected, nil
-}
-
-func captureTerminalDeleteMetricsFromPath(
-	ctx context.Context,
-	baseURL string,
-	metricsPath string,
-	wantScope string,
-	expectedRunID int64,
-	expectedClusterID string,
-	expectedSteps map[string]struct{},
-	expectedContributors map[string]struct{},
-) (map[string]*deletemetrics.Metrics, bool, error) {
+// fetchMetricsRows decodes the rows of one metrics endpoint. available is false when the
+// endpoint does not exist.
+func fetchMetricsRows[R any](ctx context.Context, baseURL, metricsPath string) (rows []R, available bool, err error) {
 	client := &http.Client{Timeout: constants.ResultsDiscoveryHTTPTimeout}
 	req, err := http.NewRequestWithContext(
 		ctx, http.MethodGet, strings.TrimSuffix(baseURL, "/")+metricsPath, nil)
@@ -253,43 +108,372 @@ func captureTerminalDeleteMetricsFromPath(
 	if resp.StatusCode != http.StatusOK {
 		return nil, true, fmt.Errorf("%s status: %d", metricsPath, resp.StatusCode)
 	}
-	var steps []terminalDeleteMetricsStep
-	if err := json.NewDecoder(resp.Body).Decode(&steps); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
 		return nil, true, fmt.Errorf("decode %s: %w", metricsPath, err)
 	}
+	return rows, true, nil
+}
+
+func parseMetricsRunID(raw json.RawMessage) (int64, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return 0, nil
+	}
+	var number json.Number
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&number); err == nil {
+		return number.Int64()
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return 0, fmt.Errorf("decode run_id: %w", err)
+	}
+	return strconv.ParseInt(strings.TrimSpace(text), 10, 64)
+}
+
+// terminalMetricsRow holds the identity and completeness fields every terminal capture checks.
+type terminalMetricsRow struct {
+	Scope               string          `json:"scope"`
+	Role                string          `json:"role"`
+	ClusterID           string          `json:"cluster_id"`
+	RunID               json.RawMessage `json:"run_id"`
+	StepID              string          `json:"step_id"`
+	OpType              string          `json:"op_type"`
+	Terminal            bool            `json:"terminal"`
+	Partial             bool            `json:"partial"`
+	NodesCount          int             `json:"nodes_count"`
+	ContributorsPresent []string        `json:"contributors_present"`
+}
+
+type terminalDeleteMetricsStep struct {
+	terminalMetricsRow
+	MetricsSchema        int                    `json:"metrics_schema"`
+	DeleteDetailExpected bool                   `json:"delete_detail_expected"`
+	Delete               *deletemetrics.Metrics `json:"delete"`
+}
+
+type terminalDriverStatsStep struct {
+	terminalMetricsRow
+	Operations struct {
+		SuccessCount int64 `json:"success_count"`
+		FailedCount  int64 `json:"failed_count"`
+	} `json:"operations"`
+	DriverStats json.RawMessage `json:"driver_stats"`
+}
+
+const (
+	// captureKindDelete and captureKindDriverStats name the captured value in errors.
+	captureKindDelete      = "DELETE"
+	captureKindDriverStats = "driver statistics"
+	metricsOpTypeDelete    = "DELETE"
+	metricsScopeFleet      = "fleet"
+	metricsScopeNode       = "node"
+)
+
+// terminalCaptureTarget identifies the run, steps and contributors a terminal capture accepts
+// rows for. kind names the captured value in errors.
+type terminalCaptureTarget struct {
+	kind         string
+	runID        int64
+	clusterID    string
+	steps        map[string]struct{}
+	contributors map[string]struct{}
+}
+
+func newTerminalCaptureTarget(
+	kind string,
+	expectedRunID int64,
+	expectedStepIDs []string,
+	expectedContributorIDs []string,
+) (*terminalCaptureTarget, error) {
+	if expectedRunID <= 0 {
+		return nil, fmt.Errorf("expected run identity is unavailable")
+	}
+	steps, err := exactStepSet(kind, expectedStepIDs)
+	if err != nil {
+		return nil, err
+	}
+	contributors, err := exactContributorSet(kind, expectedContributorIDs)
+	if err != nil {
+		return nil, err
+	}
+	return &terminalCaptureTarget{
+		kind:         kind,
+		runID:        expectedRunID,
+		clusterID:    constants.RunClusterID(expectedRunID),
+		steps:        steps,
+		contributors: contributors,
+	}, nil
+}
+
+// CaptureTerminalDeleteMetricsForRunContext captures the additive terminal v4 model used by
+// stored summaries. expectedContributorIDs must contain the exact engine contributor identities
+// ("local" plus every remote node address). Fleet metrics are authoritative when that endpoint
+// exists; node metrics are only a single-node compatibility fallback when fleet metrics are
+// unavailable.
+func CaptureTerminalDeleteMetricsForRunContext(
+	ctx context.Context,
+	baseURL string,
+	expectedRunID int64,
+	expectedStepIDs []string,
+	expectedContributorIDs []string,
+	allowNodeFallback bool,
+) (map[string]*deletemetrics.Metrics, error) {
+	const capture = "capture terminal DELETE metrics"
+	target, err := newTerminalCaptureTarget(
+		captureKindDelete, expectedRunID, expectedStepIDs, expectedContributorIDs)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", capture, err)
+	}
+	return captureFromAuthoritativeEndpoint(
+		capture, target, allowNodeFallback,
+		func(metricsPath, wantScope string) (map[string]*deletemetrics.Metrics, bool, error) {
+			return captureTerminalDeleteMetricsFromPath(ctx, baseURL, metricsPath, wantScope, target)
+		})
+}
+
+// DriverStatsCapture is what the metrics at the end of a run say about the driver statistics of
+// its steps.
+type DriverStatsCapture struct {
+	// Steps holds the terminal statistics of the steps that report them, by step.
+	Steps map[string]*driverstats.Stats
+	// Worked holds the steps whose rows counted completed operations, with statistics or
+	// without. A step whose driver always reports statistics has them when it is in this set.
+	Worked map[string]struct{}
+}
+
+// CaptureTerminalDriverStatsForRunContext captures the terminal driver statistics of every
+// expected step that reports them, under the endpoint, identity and completeness rules of
+// CaptureTerminalDeleteMetricsForRunContext. A step whose driver reports nothing is left out, so
+// an engine without driver statistics yields no statistics. Statistics that fail a check are
+// an error and nothing is returned: partial statistics are never stored.
+func CaptureTerminalDriverStatsForRunContext(
+	ctx context.Context,
+	baseURL string,
+	expectedRunID int64,
+	expectedStepIDs []string,
+	expectedContributorIDs []string,
+	allowNodeFallback bool,
+) (*DriverStatsCapture, error) {
+	const capture = "capture terminal driver statistics"
+	target, err := newTerminalCaptureTarget(
+		captureKindDriverStats, expectedRunID, expectedStepIDs, expectedContributorIDs)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", capture, err)
+	}
+	return captureFromAuthoritativeEndpoint(
+		capture, target, allowNodeFallback,
+		func(metricsPath, wantScope string) (*DriverStatsCapture, bool, error) {
+			return captureTerminalDriverStatsFromPath(ctx, baseURL, metricsPath, wantScope, target)
+		})
+}
+
+// DriverStatsObservation is what one metrics response says about the driver statistics of the
+// steps of a run that have ended. A step that is still running is in neither Steps nor Refused.
+type DriverStatsObservation struct {
+	// Steps holds the terminal statistics that passed every check, by step.
+	Steps map[string]*driverstats.Stats
+	// Refused holds the check that the statistics of a step failed, by step.
+	Refused map[string]error
+	// Active holds the steps, running or ended, whose row showed their driver at work. The
+	// engine keeps a terminal row with statistics for each of them.
+	Active map[string]struct{}
+	// Worked holds the steps, running or ended, whose rows counted completed operations, as in
+	// DriverStatsCapture.
+	Worked map[string]struct{}
+}
+
+// ObserveTerminalDriverStatsForRunContext reads the terminal driver statistics of the expected
+// steps that have ended, while the run may still be in progress. The engine keeps the metrics
+// row of a finished step for a limited time, so a run of several steps is observed repeatedly
+// and CaptureTerminalDriverStatsForRunContext then reads what is left at its end. The checks
+// are those of the capture. An error means that the response could not be read and says
+// nothing about any step.
+func ObserveTerminalDriverStatsForRunContext(
+	ctx context.Context,
+	baseURL string,
+	expectedRunID int64,
+	expectedStepIDs []string,
+	expectedContributorIDs []string,
+	allowNodeFallback bool,
+) (*DriverStatsObservation, error) {
+	const capture = "observe terminal driver statistics"
+	target, err := newTerminalCaptureTarget(
+		captureKindDriverStats, expectedRunID, expectedStepIDs, expectedContributorIDs)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", capture, err)
+	}
+	return captureFromAuthoritativeEndpoint(
+		capture, target, allowNodeFallback,
+		func(metricsPath, wantScope string) (*DriverStatsObservation, bool, error) {
+			return observeTerminalDriverStatsFromPath(ctx, baseURL, metricsPath, wantScope, target)
+		})
+}
+
+// captureFromAuthoritativeEndpoint applies the endpoint rule terminal captures share: fleet
+// metrics are authoritative when that endpoint exists, and node metrics are only a single-node
+// compatibility fallback when it does not. fromPath reports whether its endpoint exists.
+func captureFromAuthoritativeEndpoint[V any](
+	capture string,
+	target *terminalCaptureTarget,
+	allowNodeFallback bool,
+	fromPath func(metricsPath, wantScope string) (V, bool, error),
+) (V, error) {
+	var none V
+	fleet, available, err := fromPath(constants.SptFleetMetricsEndpoint, metricsScopeFleet)
+	if err != nil {
+		return none, err
+	}
+	if available {
+		return fleet, nil
+	}
+	if !allowNodeFallback {
+		return none, fmt.Errorf("%s: authoritative fleet endpoint is unavailable", capture)
+	}
+	if len(target.contributors) != 1 {
+		return none, fmt.Errorf("%s: node fallback requires exactly one expected contributor", capture)
+	}
+	if _, local := target.contributors[constants.MetricsLocalContributorID]; !local {
+		return none, fmt.Errorf("%s: node fallback requires the local contributor identity", capture)
+	}
+	node, available, err := fromPath(constants.SptMetricsEndpoint, metricsScopeNode)
+	if err != nil {
+		return none, err
+	}
+	if !available {
+		return none, fmt.Errorf("%s: node endpoint is unavailable", capture)
+	}
+	return node, nil
+}
+
+func exactContributorSet(kind string, contributorIDs []string) (map[string]struct{}, error) {
+	expected := make(map[string]struct{}, len(contributorIDs))
+	for _, contributorID := range contributorIDs {
+		contributorID = strings.TrimSpace(contributorID)
+		if contributorID == "" {
+			return nil, fmt.Errorf("expected %s contributor identity is empty", kind)
+		}
+		if _, duplicate := expected[contributorID]; duplicate {
+			return nil, fmt.Errorf("expected %s contributor identity %q is duplicated", kind, contributorID)
+		}
+		expected[contributorID] = struct{}{}
+	}
+	if len(expected) == 0 {
+		return nil, fmt.Errorf("expected %s contributor identity is unavailable", kind)
+	}
+	return expected, nil
+}
+
+func exactStepSet(kind string, stepIDs []string) (map[string]struct{}, error) {
+	expected := make(map[string]struct{}, len(stepIDs))
+	for _, stepID := range stepIDs {
+		stepID = strings.TrimSpace(stepID)
+		if stepID == "" {
+			return nil, fmt.Errorf("expected %s step identity is empty", kind)
+		}
+		if _, duplicate := expected[stepID]; duplicate {
+			return nil, fmt.Errorf("expected %s step identity %q is duplicated", kind, stepID)
+		}
+		expected[stepID] = struct{}{}
+	}
+	if len(expected) == 0 {
+		return nil, fmt.Errorf("expected %s step identity is unavailable", kind)
+	}
+	return expected, nil
+}
+
+// terminalRowChecker applies the checks every terminal capture shares to the rows of one
+// endpoint, and remembers the steps it admitted so a repeated step is refused.
+type terminalRowChecker struct {
+	target      *terminalCaptureTarget
+	metricsPath string
+	wantScope   string
+	seen        map[string]struct{}
+}
+
+func (t *terminalCaptureTarget) checker(metricsPath, wantScope string) *terminalRowChecker {
+	return &terminalRowChecker{
+		target:      t,
+		metricsPath: metricsPath,
+		wantScope:   wantScope,
+		seen:        make(map[string]struct{}, len(t.steps)),
+	}
+}
+
+// admit reports whether row belongs to the expected run and carries the captured value.
+// Rows of other runs, and rows without the value, are skipped. A current-run row with the value
+// is an error when its step is unexpected or repeated; so is an expected step's row with the
+// value when its run identity cannot be read.
+func (c *terminalRowChecker) admit(row *terminalMetricsRow, carriesValue bool) (bool, error) {
+	runID, parseErr := parseMetricsRunID(row.RunID)
+	_, expectedStep := c.target.steps[strings.TrimSpace(row.StepID)]
+	if parseErr != nil {
+		if expectedStep && carriesValue {
+			return false, fmt.Errorf(
+				"%s expected %s step %q has malformed run identity", c.metricsPath, c.target.kind, row.StepID)
+		}
+		return false, nil
+	}
+	if runID != c.target.runID || !carriesValue {
+		return false, nil
+	}
+	if !expectedStep {
+		return false, fmt.Errorf(
+			"%s returned unexpected current-run %s step %q", c.metricsPath, c.target.kind, row.StepID)
+	}
+	if _, duplicate := c.seen[row.StepID]; duplicate {
+		return false, fmt.Errorf("%s returned duplicate %s step %q", c.metricsPath, c.target.kind, row.StepID)
+	}
+	c.seen[row.StepID] = struct{}{}
+	return true, nil
+}
+
+// authoritative reports whether an admitted row is a complete terminal row of the wanted scope
+// and role for the run's cluster.
+func (c *terminalRowChecker) authoritative(row *terminalMetricsRow) bool {
+	return strings.EqualFold(row.Scope, c.wantScope) && validMetricsRole(c.wantScope, row.Role) &&
+		row.ClusterID == c.target.clusterID && row.Terminal && !row.Partial
+}
+
+// contributorsComplete reports whether a fleet row names exactly the expected contributors.
+// A node row carries no contributor evidence to check.
+func (c *terminalRowChecker) contributorsComplete(row *terminalMetricsRow) bool {
+	return !c.fleet() ||
+		completeContributorEvidence(row.NodesCount, row.ContributorsPresent, c.target.contributors)
+}
+
+func (c *terminalRowChecker) fleet() bool {
+	return strings.EqualFold(c.wantScope, metricsScopeFleet)
+}
+
+func captureTerminalDeleteMetricsFromPath(
+	ctx context.Context,
+	baseURL string,
+	metricsPath string,
+	wantScope string,
+	target *terminalCaptureTarget,
+) (map[string]*deletemetrics.Metrics, bool, error) {
+	steps, available, err := fetchMetricsRows[terminalDeleteMetricsStep](ctx, baseURL, metricsPath)
+	if err != nil || !available {
+		return nil, available, err
+	}
+	checker := target.checker(metricsPath, wantScope)
 	metrics := make(map[string]*deletemetrics.Metrics)
-	seen := make(map[string]struct{}, len(expectedSteps))
 	for i := range steps {
 		step := &steps[i]
-		runID, parseErr := parseMetricsRunID(step.RunID)
-		_, expectedStep := expectedSteps[strings.TrimSpace(step.StepID)]
-		if parseErr != nil {
-			if expectedStep && strings.EqualFold(step.OpType, "DELETE") {
-				return nil, true, fmt.Errorf("%s expected DELETE step %q has malformed run identity", metricsPath, step.StepID)
-			}
+		admitted, admitErr := checker.admit(
+			&step.terminalMetricsRow, strings.EqualFold(step.OpType, metricsOpTypeDelete))
+		if admitErr != nil {
+			return nil, true, admitErr
+		}
+		if !admitted {
 			continue
 		}
-		if runID != expectedRunID {
-			continue
-		}
-		if !strings.EqualFold(step.OpType, "DELETE") {
-			continue
-		}
-		if !expectedStep {
-			return nil, true, fmt.Errorf("%s returned unexpected current-run DELETE step %q", metricsPath, step.StepID)
-		}
-		if _, duplicate := seen[step.StepID]; duplicate {
-			return nil, true, fmt.Errorf("%s returned duplicate DELETE step %q", metricsPath, step.StepID)
-		}
-		seen[step.StepID] = struct{}{}
 		if step.MetricsSchema < deletemetrics.SchemaVersion ||
-			!strings.EqualFold(step.Scope, wantScope) || !validMetricsRole(wantScope, step.Role) ||
-			step.ClusterID != expectedClusterID || !step.Terminal || step.Partial ||
-			!step.DeleteDetailExpected {
+			!checker.authoritative(&step.terminalMetricsRow) || !step.DeleteDetailExpected {
 			return nil, true, fmt.Errorf("%s returned incomplete authoritative DELETE step %q", metricsPath, step.StepID)
 		}
-		if strings.EqualFold(wantScope, "fleet") &&
-			!completeContributorEvidence(step.NodesCount, step.ContributorsPresent, expectedContributors) {
+		if !checker.contributorsComplete(&step.terminalMetricsRow) {
 			return nil, true, fmt.Errorf("%s returned incomplete contributor evidence for DELETE step %q", metricsPath, step.StepID)
 		}
 		if validateErr := deletemetrics.ValidateTerminal(step.Delete); validateErr != nil {
@@ -297,12 +481,181 @@ func captureTerminalDeleteMetricsFromPath(
 		}
 		metrics[step.StepID] = step.Delete
 	}
-	for stepID := range expectedSteps {
+	for stepID := range target.steps {
 		if _, ok := metrics[stepID]; !ok {
 			return nil, true, fmt.Errorf("%s is missing authoritative terminal DELETE step %q", metricsPath, stepID)
 		}
 	}
 	return metrics, true, nil
+}
+
+// driverStatsOutcome is what one metrics row says about the driver statistics of a step: the
+// statistics, or the check they failed. running marks a row that is not terminal yet. Its
+// error is the one a terminal capture reports; an observation of a run in progress skips it.
+// active marks a row whose statistics show the driver at work, terminal or not.
+type driverStatsOutcome struct {
+	stepID  string
+	stats   *driverstats.Stats
+	running bool
+	active  bool
+	err     error
+}
+
+// driverStatsResponse is what one metrics response says about the driver statistics of the
+// expected steps: an outcome for each row with statistics, and the steps that worked.
+type driverStatsResponse struct {
+	rows   []driverStatsOutcome
+	worked map[string]struct{}
+}
+
+// driverStatsRows differs from the DELETE capture in one rule: a step without statistics is
+// not missing. Drivers that report nothing, engines that predate the field and the other
+// operation rows of a mixed step all publish rows without driver_stats. Whether a step that
+// worked must have statistics depends on its driver, which the rows do not name.
+func driverStatsRows(
+	ctx context.Context,
+	baseURL string,
+	metricsPath string,
+	wantScope string,
+	target *terminalCaptureTarget,
+) (*driverStatsResponse, bool, error) {
+	steps, available, err := fetchMetricsRows[terminalDriverStatsStep](ctx, baseURL, metricsPath)
+	if err != nil || !available {
+		return nil, available, err
+	}
+	checker := target.checker(metricsPath, wantScope)
+	response := &driverStatsResponse{
+		rows:   make([]driverStatsOutcome, 0, len(target.steps)),
+		worked: make(map[string]struct{}),
+	}
+	for i := range steps {
+		step := &steps[i]
+		if target.worked(step) {
+			response.worked[step.StepID] = struct{}{}
+		}
+		admitted, admitErr := checker.admit(&step.terminalMetricsRow, hasJSONValue(step.DriverStats))
+		if admitErr != nil {
+			response.rows = append(response.rows,
+				driverStatsOutcome{stepID: step.StepID, running: !step.Terminal, err: admitErr})
+			continue
+		}
+		if !admitted {
+			continue
+		}
+		stats, statsErr := checker.driverStats(step)
+		response.rows = append(response.rows, driverStatsOutcome{
+			stepID: step.StepID, stats: stats, running: !step.Terminal, active: driverCounted(step.DriverStats),
+			err: statsErr,
+		})
+	}
+	return response, true, nil
+}
+
+// worked reports whether a row is one of an expected step of the run that counted completed
+// operations, successful or failed.
+func (t *terminalCaptureTarget) worked(step *terminalDriverStatsStep) bool {
+	runID, err := parseMetricsRunID(step.RunID)
+	_, expected := t.steps[strings.TrimSpace(step.StepID)]
+	return err == nil && runID == t.runID && expected &&
+		step.Operations.SuccessCount+step.Operations.FailedCount > 0
+}
+
+// driverCounted reports whether the statistics of a row, checked or not, show the driver at work.
+func driverCounted(raw json.RawMessage) bool {
+	stats := &driverstats.Stats{}
+	return json.Unmarshal(raw, stats) == nil && stats.Counted()
+}
+
+// driverStats returns the statistics of an admitted row, or the check they fail.
+func (c *terminalRowChecker) driverStats(step *terminalDriverStatsStep) (*driverstats.Stats, error) {
+	if !c.authoritative(&step.terminalMetricsRow) {
+		return nil, fmt.Errorf(
+			"%s returned incomplete authoritative driver statistics step %q", c.metricsPath, step.StepID)
+	}
+	if !c.contributorsComplete(&step.terminalMetricsRow) {
+		return nil, fmt.Errorf(
+			"%s returned incomplete contributor evidence for driver statistics step %q", c.metricsPath, step.StepID)
+	}
+	fleetContributors := 0
+	if c.fleet() {
+		fleetContributors = len(c.target.contributors)
+	}
+	stats := &driverstats.Stats{}
+	if decodeErr := json.Unmarshal(step.DriverStats, stats); decodeErr != nil {
+		return nil, fmt.Errorf("%s driver statistics step %q: %w", c.metricsPath, step.StepID, decodeErr)
+	}
+	if validateErr := driverstats.ValidateTerminal(stats, fleetContributors); validateErr != nil {
+		return nil, fmt.Errorf("%s driver statistics step %q: %w", c.metricsPath, step.StepID, validateErr)
+	}
+	return stats, nil
+}
+
+// captureTerminalDriverStatsFromPath refuses the whole response when a row fails a check or is
+// not terminal: at the end of a run every step has ended.
+func captureTerminalDriverStatsFromPath(
+	ctx context.Context,
+	baseURL string,
+	metricsPath string,
+	wantScope string,
+	target *terminalCaptureTarget,
+) (*DriverStatsCapture, bool, error) {
+	response, available, err := driverStatsRows(ctx, baseURL, metricsPath, wantScope, target)
+	if err != nil || !available {
+		return nil, available, err
+	}
+	captured := &DriverStatsCapture{
+		Steps:  make(map[string]*driverstats.Stats, len(response.rows)),
+		Worked: response.worked,
+	}
+	for _, row := range response.rows {
+		if row.err != nil {
+			return nil, true, row.err
+		}
+		captured.Steps[row.stepID] = row.stats
+	}
+	return captured, true, nil
+}
+
+// observeTerminalDriverStatsFromPath judges each step on its own and leaves out the steps that
+// are still running: their statistics are not final.
+func observeTerminalDriverStatsFromPath(
+	ctx context.Context,
+	baseURL string,
+	metricsPath string,
+	wantScope string,
+	target *terminalCaptureTarget,
+) (*DriverStatsObservation, bool, error) {
+	response, available, err := driverStatsRows(ctx, baseURL, metricsPath, wantScope, target)
+	if err != nil || !available {
+		return nil, available, err
+	}
+	observation := &DriverStatsObservation{
+		Steps:   make(map[string]*driverstats.Stats, len(response.rows)),
+		Refused: make(map[string]error),
+		Active:  make(map[string]struct{}),
+		Worked:  response.worked,
+	}
+	for _, row := range response.rows {
+		if row.active {
+			observation.Active[row.stepID] = struct{}{}
+		}
+		switch {
+		case row.running:
+		case row.err != nil:
+			// A refusal decides for the step, also over statistics an earlier row gave it.
+			delete(observation.Steps, row.stepID)
+			observation.Refused[row.stepID] = row.err
+		default:
+			observation.Steps[row.stepID] = row.stats
+		}
+	}
+	return observation, true, nil
+}
+
+// hasJSONValue reports whether an optional row field is present and not null.
+func hasJSONValue(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
 }
 
 func completeContributorEvidence(
@@ -331,7 +684,7 @@ func completeContributorEvidence(
 }
 
 func validMetricsRole(scope, role string) bool {
-	if strings.EqualFold(scope, "fleet") {
+	if strings.EqualFold(scope, metricsScopeFleet) {
 		return strings.EqualFold(role, "aggregate")
 	}
 	return strings.EqualFold(role, "entry") || strings.EqualFold(role, "worker")

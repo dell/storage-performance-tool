@@ -42,6 +42,18 @@ final class RdmaBufferPool {
 	static final int DIRECT_MEMORY_SHARE_DIVISOR = 2;
 	private static final String MAX_DIRECT_MEMORY_OPTION = "MaxDirectMemorySize";
 
+	/**
+	 * The pool's levels at one moment. Capacity counts from the moment it is reserved, so the bytes
+	 * and the buffers include a buffer that is still being created.
+	 *
+	 * @param reservedBytes capacity of all live buffers
+	 * @param budgetBytes the most the pool may reserve
+	 * @param buffers live buffers, leased or idle
+	 * @param idleBuffers buffers no request holds
+	 * @param peakReservedBytes the largest {@code reservedBytes} since the pool was created
+	 */
+	record Levels(long reservedBytes, long budgetBytes, int buffers, int idleBuffers, long peakReservedBytes) {}
+
 	/** A registered buffer owned by the pool; leased to at most one request at a time. */
 	static final class PooledBuffer {
 		private final ByteBuffer buffer;
@@ -78,12 +90,21 @@ final class RdmaBufferPool {
 	private final Map<Integer, Integer> live = new HashMap<>();
 	/** Capacity of all live buffers; guarded by this. */
 	private long liveBytes;
+	/** The largest {@link #liveBytes} so far; guarded by this. */
+	private long peakBytes;
 	/** Guarded by this. */
 	private boolean closed;
 	private final AtomicBoolean invalidReturnLogged = new AtomicBoolean();
 
+	/** Allocates pool buffers; replaced only by tests to simulate exhausted direct memory. */
+	IntFunction<ByteBuffer> allocator = ByteBuffer::allocateDirect;
+
 	final LongAdder hits = new LongAdder();
 	final LongAdder created = new LongAdder();
+	/** Direct memory for a new pool buffer could not be allocated. */
+	final LongAdder allocationFailed = new LongAdder();
+	/** The transport refused to register a new pool buffer. */
+	final LongAdder registrationFailed = new LongAdder();
 	final LongAdder exhausted = new LongAdder();
 	final LongAdder unpooled = new LongAdder();
 	final LongAdder evicted = new LongAdder();
@@ -154,12 +175,14 @@ final class RdmaBufferPool {
 		ByteBuffer buffer = null;
 		long mrHandle = 0;
 		try {
-			buffer = ByteBuffer.allocateDirect(capacity);
+			buffer = allocator.apply(capacity);
 			mrHandle = transport.registerBuffer(buffer, capacity);
 		} catch (final RuntimeException | OutOfMemoryError e) {
 			Loggers.MSG.debug("RDMA pool buffer of {} bytes unavailable: {}", capacity, e.toString());
 		}
 		if (mrHandle == 0) {
+			// Without a buffer the allocation failed; with one, its registration did.
+			(buffer == null ? allocationFailed : registrationFailed).increment();
 			synchronized (this) {
 				unreserve(capacity);
 			}
@@ -273,6 +296,22 @@ final class RdmaBufferPool {
 		return idle.values().stream().mapToInt(ArrayDeque::size).sum();
 	}
 
+	/**
+	 * Reads the levels together, so they agree with one another. It reads the pool's own records
+	 * only: no buffer and nothing native, so it is safe while the pool closes and afterwards.
+	 */
+	synchronized Levels levels() {
+		int buffers = 0;
+		for (final int count : live.values()) {
+			buffers += count;
+		}
+		int idleBuffers = 0;
+		for (final ArrayDeque<PooledBuffer> list : idle.values()) {
+			idleBuffers += list.size();
+		}
+		return new Levels(liveBytes, maxPooledBytes, buffers, idleBuffers, peakBytes);
+	}
+
 	String summary() {
 		return "poolHits=" + hits.sum() + ", poolCreated=" + created.sum() + ", poolExhausted=" + exhausted.sum()
 						+ ", poolUnpooled=" + unpooled.sum() + ", poolEvicted=" + evicted.sum()
@@ -322,6 +361,7 @@ final class RdmaBufferPool {
 		}
 		live.merge(capacity, 1, Integer::sum);
 		liveBytes += capacity;
+		peakBytes = Math.max(peakBytes, liveBytes);
 		return true;
 	}
 

@@ -110,6 +110,7 @@ class MetricsManagerImplCsvTotalTest {
 		when(ctx.loadStepId()).thenReturn(stepId);
 		when(ctx.opType()).thenReturn(opType);
 		when(ctx.lastSnapshot()).thenReturn(snapshot);
+		when(ctx.terminalSnapshot()).thenCallRealMethod();
 		when(ctx.quantileValues()).thenReturn(List.of(0.5, 0.9, 0.99, 0.999));
 		when(ctx.nodeCount()).thenReturn(1);
 		when(ctx.metadata()).thenReturn(Map.of(MetricsConstants.METADATA_LIMIT_OP_COUNT, snapshot.successSnapshot().count()));

@@ -2,10 +2,12 @@ package com.dell.spt.base.metrics.context;
 
 import java.util.function.BooleanSupplier;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshotImpl;
 import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
+import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
 import com.dell.spt.base.metrics.steady.SteadyCut;
@@ -20,8 +22,11 @@ import java.time.Clock;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.IntSupplier;
 import java.util.function.Supplier;
+import org.apache.logging.log4j.Level;
 
 import static com.dell.spt.base.metrics.MetricsConstants.METADATA_COMMENT;
 import static com.dell.spt.base.metrics.MetricsConstants.METADATA_ITEM_DATA_SIZE;
@@ -38,7 +43,14 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 	private final RateMeterImpl throughputSuccess, throughputFail, throughputCorrupt, reqBytes;
 	private volatile TimingMetricSnapshot reqDurSnapshot, respLatSnapshot, ttfbSnapshot;
 	private volatile ConcurrencyMetricSnapshot actualConcurrencySnapshot;
+	/** The driver's statistics as of the last throttled update; refreshes in between reuse them. */
+	private volatile DriverStatsSnapshot driverStatsSnapshot;
+	private final AtomicBoolean driverStatsFailureWarned = new AtomicBoolean();
 	private volatile long lastSnapshotsUpdateTs = 0;
+	/** Refreshes run one at a time, so one that started earlier never publishes over a later one. */
+	private final ReentrantLock refreshLock = new ReentrantLock();
+	/** Whether the terminal snapshot is taken; guarded by {@link #refreshLock}. */
+	private boolean terminalTaken = false;
 	private final IntSupplier actualConcurrencyGauge;
 	private final SteadyWindow steadyWindow;
 
@@ -101,6 +113,7 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 	@Override
 	public final void start() {
 		super.start();
+		reopenRefreshes();
 		throughputSuccess.resetStartTime();
 		throughputFail.resetStartTime();
 		throughputCorrupt.resetStartTime();
@@ -331,14 +344,50 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 	}
 
 	@Override
-	@SuppressWarnings("unchecked")
 	public void refreshLastSnapshot(final boolean force) {
+		refreshLock.lock();
+		try {
+			if (!terminalTaken) {
+				publishLastSnapshot(force);
+			}
+		} finally {
+			refreshLock.unlock();
+		}
+	}
+
+	@Override
+	public S terminalSnapshot() {
+		refreshLock.lock();
+		try {
+			if (!terminalTaken) {
+				publishLastSnapshot(true);
+				terminalTaken = true;
+			}
+			return lastSnapshot;
+		} finally {
+			refreshLock.unlock();
+		}
+	}
+
+	/** Lets refreshes publish again, after a new start or a close. */
+	private void reopenRefreshes() {
+		refreshLock.lock();
+		try {
+			terminalTaken = false;
+		} finally {
+			refreshLock.unlock();
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private void publishLastSnapshot(final boolean force) {
 		final var currentTimeMillis = System.currentTimeMillis();
 		if (force || currentTimeMillis - lastSnapshotsUpdateTs > DEFAULT_SNAPSHOT_UPDATE_PERIOD_MILLIS) {
 			lastSnapshotsUpdateTs = currentTimeMillis;
 			updateTimingSnapshots();
 			actualConcurrency.update(actualConcurrencyGauge.getAsInt());
 			actualConcurrencySnapshot = actualConcurrency.snapshot();
+			driverStatsSnapshot = collectDriverStats();
 		}
 		lastSnapshot = (S) new AllMetricsSnapshotImpl(
 						reqDurSnapshot,
@@ -351,8 +400,30 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 						reqBytes.snapshot(),
 						elapsedTimeMillis(),
 						deleteMetricsSnapshot(),
-						steadyWindow == null ? null : steadyWindow.result());
+						steadyWindow == null ? null : steadyWindow.result(),
+						driverStatsSnapshot);
 		super.refreshLastSnapshot(force);
+	}
+
+	/**
+	 * Asks the storage driver for its statistics. A driver that fails to answer leaves this
+	 * snapshot without statistics; the failure never reaches the refresh.
+	 */
+	private DriverStatsSnapshot collectDriverStats() {
+		if (!(metadata.get(MetricsConstants.METADATA_DRIVER_STATS) instanceof Supplier<?> supplier)) {
+			return null;
+		}
+		try {
+			return supplier.get() instanceof DriverStatsSnapshot stats ? stats : null;
+		} catch (final RuntimeException e) {
+			if (driverStatsFailureWarned.compareAndSet(false, true)) {
+				LogUtil.exception(
+								Level.WARN, e,
+								"{}: storage driver statistics are unavailable; further failures are not logged",
+								loadStepId());
+			}
+			return null;
+		}
 	}
 
 	@SuppressWarnings("unchecked")
@@ -414,6 +485,7 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 	@Override
 	public final void close() {
 		super.close();
+		reopenRefreshes();
 	}
 
 	public static ContextBuilder builder() {

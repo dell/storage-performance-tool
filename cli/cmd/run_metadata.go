@@ -16,6 +16,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/cmdline"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
+	"github.com/dell/storage-performance-tool/cli/internal/driverstats"
 	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
@@ -52,6 +53,8 @@ type runMetadata struct {
 	DeleteMetricsError      string                                                  `json:"deleteMetricsError,omitempty"`
 	DeleteArtifactsVersion  int                                                     `json:"deleteArtifactsVersion,omitempty"`
 	DeleteArtifactStepIDs   []string                                                `json:"deleteArtifactStepIds,omitempty"`
+	DriverStats             map[string]*driverstats.Stats                           `json:"driverStats,omitempty"`
+	DriverStatsError        string                                                  `json:"driverStatsError,omitempty"`
 	StepLifecycles          map[string]string                                       `json:"stepLifecycles,omitempty"`
 	ResultsOptions          resultsOptionsSnapshot                                  `json:"resultsOptions"`
 	CLI                     runCLIInfo                                              `json:"cli"`
@@ -63,7 +66,7 @@ type runMetadata struct {
 	AutoTerminateSeconds    int                                                     `json:"autoTerminateSeconds,omitempty"`
 	Lifecycle               *runLifecycleMetadata                                   `json:"lifecycle,omitempty"`
 	runtimeIdentityProvider func() (*tui.DistributedRuntimeIdentityEvidence, error) `json:"-"`
-	deleteContributors      func() ([]string, error)                                `json:"-"`
+	metricContributors      func() ([]string, error)                                `json:"-"`
 	resourceFinalization    *runcontrol.FinalizationOutcome                         `json:"-"`
 	preparedCleanup         func(context.Context) error                             `json:"-"`
 	preparedInputs          bool                                                    `json:"-"`

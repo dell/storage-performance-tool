@@ -118,6 +118,123 @@ A buffer is reused only after the server's final response to its request, when t
 
 ---
 
+## Driver Statistics
+
+The `s3-rdma` driver reports the same counts, and the levels of its buffer pool, as *driver statistics*: in the engine's metrics JSON while a step runs, and in the run summary and `spt_run_params.json` when the run has finished.
+
+Two terms are used below. A *request sent* is a request the driver handed to its connection layer. An *outcome* is how a request sent over RDMA ended. Every statistic counts requests or events, never operations and never data: an operation that is retried, and each part of a multipart upload, counts once per request.
+
+### Run summary
+
+For every step in which the driver sent payload requests or met a problem, the run summary shows the counts:
+
+```
+RDMA Data Path — Read
+  • Requests           52113 transfers reported over RDMA, 14 payload requests sent over HTTP
+  • Problem            3 RDMA requests timed out
+```
+
+- *Transfers reported over RDMA* is `rdma_transferred`.
+- *Payload requests sent over HTTP* is the sum of the five `http_*` counters and `rdma_declined_served_over_http`.
+- A `Problem` line appears for each of these that is not zero: `rdma_declined_failed`, `rdma_request_failed`, `rdma_protocol_error`, `rdma_timed_out`, `prepare_failed`, the registration, allocation, and token failures, and the requests sent over RDMA that had no outcome when the step ended.
+- A mixed step has one such block. The driver counts the step's payload operations together, so the block is labelled `all payload operations of the step` and is not divided between READ and CREATE.
+- A step that sends no payload, such as a DELETE or a list step, has no block.
+
+The summary gives counts and no percentage. The counts do not say how much data moved over either path.
+
+Two warnings can appear in the summary's warnings:
+
+- `<step>: the S3-RDMA driver ran and no payload moved over RDMA`. The step has a block as above and its transfers reported over RDMA are 0.
+- `S3-RDMA driver statistics are not available: <reason>`. The run selected `--s3-driver rdma` and the CLI stored no statistics. The reason is the check that failed, or that the engine reported none, as an engine older than this feature does. The warning needs the driver selection and the reason that are stored with the run: results of a scenario the CLI did not generate, and results stored by an earlier CLI release, show no such warning.
+
+### Statistic names
+
+Counters only grow during a step. The names are part of the JSON and of the stored results, and keep their meaning.
+
+| Counter | Counts | Not to be read as |
+|---------|--------|-------------------|
+| `rdma_requests_sent` | Payload requests sent with an RDMA proposal | Operations, or transfers: see the outcomes |
+| `rdma_transferred` | Outcome: the server reported that the payload moved over RDMA | Successful operations. A READ can still fail integrity verification after its transfer |
+| `rdma_bytes_assumed` | The part of `rdma_transferred` whose reply gave no byte count, so the requested size was counted (`--rdma-allow-missing-bytes-header`) | A number of bytes |
+| `rdma_declined_served_over_http` | Outcome: a GET the server declined or ignored for RDMA and answered with the object in the HTTP body (`--rdma-fallback`) | A failure. The read is counted once, as an HTTP read |
+| `rdma_declined_failed` | Outcome: a PUT the server declined, or a declined GET without `--rdma-fallback`. The operation failed | |
+| `rdma_request_failed` | Outcome: the request ended without success, for example with an HTTP error status or a lost connection | Only HTTP error statuses |
+| `rdma_protocol_error` | Outcome: the reply broke the RDMA reply contract. The operation failed as corrupt | |
+| `rdma_timed_out` | Outcome: the client ended the request after its timeout | |
+| `http_rdma_unavailable` | Payload requests sent over HTTP because RDMA is disabled or did not initialize | |
+| `http_below_threshold` | Payload requests sent over HTTP because the size is below `--rdma-threshold` | A problem. This is the configured routing |
+| `http_ineligible` | Payload requests sent over HTTP because the read is ranged or partial | A problem |
+| `http_oversize` | Payload requests sent over HTTP because the object is larger than one RDMA buffer | |
+| `http_fallback` | Payload requests sent over HTTP because RDMA preparation failed (`--rdma-fallback`) | Server declines, which are `rdma_declined_served_over_http` |
+| `prepare_failed` | Attempts that failed before any request because RDMA preparation failed without `--rdma-fallback` | Requests sent |
+| `registrations_pooled` | Pool buffers allocated and registered (`poolCreated` in the log line) | Requests. One buffer serves many |
+| `registrations_on_demand` | Per-operation buffers registered: the pool is disabled or gave none | |
+| `registration_failed_pooled`, `registration_failed_on_demand` | The RDMA device refused to register a buffer | Allocation failures: the remedy is the locked-memory limit or the device |
+| `allocation_failed_pooled`, `allocation_failed_on_demand` | JVM direct memory for a buffer could not be allocated. A per-operation buffer is counted when the retry after releasing idle pool buffers also failed | Registration failures: the remedy is `-XX:MaxDirectMemorySize` |
+| `token_generation_failed` | The transport gave no token for a registered buffer | |
+| `pool_hits` | Requests that reused a registered buffer | |
+| `pool_exhausted` | Requests that found their size class or the pool's budget in use and used a per-operation buffer | A failure |
+| `pool_oversize` | Requests larger than 1 GiB, which never use the pool (`poolUnpooled` in the log line) | `http_oversize` |
+| `pool_evicted` | Idle buffers deregistered to make room | |
+| `pool_discarded` | Buffers deregistered because their request ended without the server's final response, or a verified GET did not verify | |
+| `pool_invalid_returns` | Must be 0 | |
+
+`rdma_requests_sent` equals the sum of the six outcomes plus the requests that have no outcome yet.
+
+Gauges are levels at the moment they are read.
+
+| Gauge | Value |
+|-------|-------|
+| `drivers` | 1 for each driver, so a fleet total is the number of drivers in the sum |
+| `transport_available` | 1 while the driver's RDMA transport is initialized, otherwise 0 |
+| `pool_reserved_bytes` | Capacity the pool has reserved, including a buffer still being created |
+| `pool_budget_bytes` | The most the pool may reserve |
+| `pool_buffers` | Buffers the pool holds, in use or idle |
+| `pool_idle_buffers` | Pool buffers no request holds |
+| `pool_peak_reserved_bytes` | The largest `pool_reserved_bytes` since the driver started |
+
+Every name is always reported. With `--rdma-buffer-pool=false` the pool statistics are 0.
+
+### Reading the metrics JSON
+
+`/metrics/json` on a node returns that node's rows, and `/metrics/fleet/json` on the entry node returns the rows of the whole run. A row of a step whose driver reports statistics carries them in `driver_stats`. A mixed step has several rows, one per operation; one of them carries the object, and it covers the whole step. After the step ends the engine keeps one row for it, and that row carries the object.
+
+```json
+"driver_stats": {
+  "driver": "s3-rdma",
+  "counters": { "rdma_requests_sent": 52116, "rdma_transferred": 52113, "rdma_timed_out": 3 },
+  "gauges": { "drivers": 1, "transport_available": 1, "pool_buffers": 64 }
+}
+```
+
+A fleet row sums the statistics of the nodes and adds two fields:
+
+- `reporting`: the number of nodes whose statistics are in the sum.
+- `partial`: `true` unless every expected node is present and reported statistics with the same driver and the same names. When nodes report different drivers the object has no sums: it carries `partial: true` and `drivers`, the names seen.
+
+When reading these rows:
+
+- A fleet gauge is a sum of the node gauges, not a value the fleet held at one moment. In particular a fleet `pool_peak_reserved_bytes` is the sum of each node's peak, and the nodes may have reached their peaks at different times.
+- A fleet `transport_available` below `drivers` means some nodes run without RDMA. Their node rows show which, and count their payload requests as `http_rdma_unavailable`.
+- While a step runs, the counters are read one after another and requests complete in between. `rdma_requests_sent` can therefore differ from the sum of its outcomes by the requests in flight, and briefly by a few more in either direction. Compare counters exactly only on a finished step.
+- To find the node behind a fleet problem count, read `/metrics/json` on each node: a node row has the same names and no `reporting` or `partial`.
+- A weighted or pipeline step, which a scenario run with the engine directly can use, has one driver for each of its operations. While it runs, each of its rows carries the statistics of its own driver. The one row kept after it ends carries the statistics of one of these drivers, not their sum.
+- The engine keeps the row of a finished step for a short time after the step ends (currently 20 seconds) and then drops it. In a run of several steps, the rows of the earlier steps are gone before the run ends. The stored values below keep the final statistics of every step.
+
+### On the Prometheus endpoint
+
+`/metrics` on the entry node exports the fleet total of each running step: every counter as a Prometheus counter `spt_driver_<name>_total` and every gauge as `spt_driver_<name>`, with `spt_driver_reporting`, `spt_driver_partial` and a `driver` label. The counters and gauges are left out while the total is partial, a counter never falls below a value it showed, and the series disappear when the step ends, so use the stored values below for a step's final statistics. The engine's [metrics guide](../../engine/core/spt-base/doc/usage/api/remote/METRICS.md#storage-driver-statistics) has the details.
+
+### Stored values
+
+When a run finishes, the CLI stores each step's final statistics in `spt_run_params.json` under `driverStats`, keyed by step ID, as reported: names the CLI does not know are kept. The stored values are those of the fleet row, which a single-host run has as well, as a total of one node. The CLI reads them while it monitors the run, as each step ends, so the steps that end early are stored as well.
+
+The final values are taken when the step ends, after its requests have completed and the driver has stopped, and before the driver closes. The `RDMA data path summary` log line is written at close. The two agree on every count, with two exceptions: `poolDiscarded` in the log line also counts the buffers released at close, and a request that was still without an outcome when the step ended is counted by the log line if it ends before the driver closes. The stored pool gauges describe the pool as the step left it, not the empty pool after close.
+
+The CLI stores statistics only when they are complete. For each step the row is the final one of this run and step, every expected node contributed, and `partial` is `false`. No step may be missing either: a step whose rows showed its driver at work (a counter above zero) must have its final statistics read, and so must a step of a run with `--s3-driver rdma` whose rows counted completed or failed operations, since the `s3-rdma` driver always reports statistics. The CLI must also not have gone without reading the engine's metrics for as long as the engine keeps a finished step's row, since a step could have ended and been dropped unseen. That retention is the engine's `api.linger.sec`, 20 seconds by default; the CLI does not change it and assumes the default. Otherwise it stores none, records the reason in `driverStatsError`, and logs one warning. This does not fail the run. A step that completed no operations, or in which a driver other than `s3-rdma` counted nothing, can be absent from the stored values. A run of `--s3-driver rdma` in which no step reported statistics records that the engine reported none.
+
+---
+
 ## Infrastructure Verification
 
 Use `spt verify --use-rdma` to pre-check RDMA readiness on your test nodes:
@@ -183,7 +300,7 @@ If SPT reports that RDMA is not available:
 
 ### Fallback to HTTP
 
-If `--rdma-fallback` is set and RDMA initialization fails, all operations use HTTP; check the engine log for `RDMA unavailable, falling back to HTTP`. The `RDMA data path summary` line at the end of each step then reports `transport unavailable` and counts those operations as `httpRdmaUnavailable`. Per-operation fallbacks and server declines are counted in the same line.
+If `--rdma-fallback` is set and RDMA initialization fails, all operations use HTTP; check the engine log for `RDMA unavailable, falling back to HTTP`. The `RDMA data path summary` line at the end of each step then reports `transport unavailable` and counts those operations as `httpRdmaUnavailable`. Per-operation fallbacks and server declines are counted in the same line. The run summary shows these counts under `RDMA Data Path` and warns when a step moved no payload over RDMA; see [Driver Statistics](#driver-statistics).
 
 ### Performance lower than expected
 

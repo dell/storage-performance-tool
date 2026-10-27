@@ -34,6 +34,20 @@ public class PrometheusMetricsExporterImpl extends Collector implements Promethe
 		this.metricsContext = context;
 	}
 
+	/** Returns the values of the labels every series of a step's metrics context has, in label order. */
+	public static String[] labelValues(final DistributedMetricsContext<?> context) {
+		return new String[]{
+				context.loadStepId(),
+				context.opType().name(),
+				String.valueOf(context.concurrencyLimit()),
+				context.itemDataSize().toString(),
+				String.valueOf(context.startTimeStamp()),
+				context.nodeAddrs().toString(),
+				context.comment(),
+				String.valueOf(context.runId())
+		};
+	}
+
 	@Override
 	public PrometheusMetricsExporterImpl quantile(final double value) {
 		if (value < 1.0 && value >= 0.0) {

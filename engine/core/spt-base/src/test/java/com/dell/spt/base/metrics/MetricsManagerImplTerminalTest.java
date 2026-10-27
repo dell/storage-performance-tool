@@ -37,6 +37,7 @@ class MetricsManagerImplTerminalTest {
 		when(ctx.loadStepId()).thenReturn("delete-unresolved-only");
 		when(ctx.opType()).thenReturn(OpType.DELETE);
 		when(ctx.lastSnapshot()).thenReturn(snapshot);
+		when(ctx.terminalSnapshot()).thenCallRealMethod();
 		when(ctx.metadata()).thenReturn(Map.of());
 		when(ctx.itemDataSize()).thenReturn(new com.github.akurilov.commons.system.SizeInBytes(0));
 		when(ctx.sumPersistEnabled()).thenReturn(false);
@@ -86,6 +87,7 @@ class MetricsManagerImplTerminalTest {
 		when(ctx.loadStepId()).thenReturn("step-t-1");
 		when(ctx.opType()).thenReturn(OpType.CREATE);
 		when(ctx.lastSnapshot()).thenReturn(snap);
+		when(ctx.terminalSnapshot()).thenCallRealMethod();
 		when(ctx.quantileValues()).thenReturn(List.of());
 		when(ctx.nodeCount()).thenReturn(1);
 		when(ctx.metadata()).thenReturn(Map.of(MetricsConstants.METADATA_LIMIT_OP_COUNT, 100L));
@@ -154,6 +156,7 @@ class MetricsManagerImplTerminalTest {
 		when(ctx.loadStepId()).thenReturn("delete-detail-partial");
 		when(ctx.opType()).thenReturn(OpType.DELETE);
 		when(ctx.lastSnapshot()).thenReturn(snapshot);
+		when(ctx.terminalSnapshot()).thenCallRealMethod();
 		when(ctx.metadata()).thenReturn(Map.of());
 		when(ctx.quantileValues()).thenReturn(List.of());
 		when(ctx.nodeCount()).thenReturn(2);
@@ -209,6 +212,7 @@ class MetricsManagerImplTerminalTest {
 		when(ctx.loadStepId()).thenReturn("delete-final-refresh-failed");
 		when(ctx.opType()).thenReturn(OpType.DELETE);
 		when(ctx.lastSnapshot()).thenReturn(null);
+		when(ctx.terminalSnapshot()).thenCallRealMethod();
 		when(ctx.metadata()).thenReturn(Map.of(MetricsConstants.METADATA_DELETE_METRICS, true));
 		when(ctx.quantileValues()).thenReturn(List.of());
 		when(ctx.nodeCount()).thenReturn(2);
@@ -275,6 +279,7 @@ class MetricsManagerImplTerminalTest {
 		when(ctx.thresholdStateEntered()).thenReturn(false);
 		when(ctx.thresholdStateExited()).thenReturn(false);
 		when(ctx.lastSnapshot()).thenReturn(nonZero, nonZero, zero, zero);
+		when(ctx.terminalSnapshot()).thenCallRealMethod();
 
 		mgr.register(ctx);
 		mgr.unregister(ctx);
@@ -308,6 +313,7 @@ class MetricsManagerImplTerminalTest {
 		when(localCtx.loadStepId()).thenReturn("step-shared");
 		when(localCtx.opType()).thenReturn(OpType.CREATE);
 		when(localCtx.lastSnapshot()).thenReturn(localSnapshot);
+		when(localCtx.terminalSnapshot()).thenCallRealMethod();
 		when(localCtx.metadata()).thenReturn(Map.of(MetricsConstants.METADATA_LIMIT_OP_COUNT, 1_200L));
 		when(localCtx.concurrencyLimit()).thenReturn(8);
 		when(localCtx.itemDataSize()).thenReturn(new com.github.akurilov.commons.system.SizeInBytes(10_240));
@@ -350,6 +356,7 @@ class MetricsManagerImplTerminalTest {
 		when(distCtx.loadStepId()).thenReturn("step-shared");
 		when(distCtx.opType()).thenReturn(OpType.CREATE);
 		when(distCtx.lastSnapshot()).thenReturn(distSnapshot);
+		when(distCtx.terminalSnapshot()).thenCallRealMethod();
 		when(distCtx.quantileValues()).thenReturn(List.of());
 		when(distCtx.nodeCount()).thenReturn(5);
 		when(distCtx.metadata()).thenReturn(Map.of(MetricsConstants.METADATA_LIMIT_OP_COUNT, 6_000L));

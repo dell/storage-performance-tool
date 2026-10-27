@@ -23,6 +23,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/config"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
+	"github.com/dell/storage-performance-tool/cli/internal/driverstats"
 	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
@@ -234,7 +235,7 @@ func captureStoredDeleteMetrics(
 		return fmt.Errorf("capture terminal DELETE metrics: %w", err)
 	}
 	metadata.DeleteArtifactStepIDs = append([]string(nil), expectedDeleteSteps...)
-	expectedContributorIDs, err := expectedDeleteContributorIDs(metadata)
+	expectedContributorIDs, err := expectedMetricContributorIDs(metadata, metricCaptureKindDelete)
 	if err != nil {
 		return fmt.Errorf("capture terminal DELETE metrics: %w", err)
 	}
@@ -289,24 +290,81 @@ func terminalDeleteOutcomeError(metrics map[string]*deletemetrics.Metrics) error
 	return errors.New(strings.Join(parts, "; "))
 }
 
-func expectedDeleteContributorIDs(metadata *runMetadata) ([]string, error) {
+// captureStoredDriverStats stores the terminal driver statistics of the run's steps. It runs
+// for every workload. The steps that ended earlier in the run come from observed, which may be
+// nil; the capture made here adds the steps the engine still reports. A refused or failed
+// capture stores nothing and records why; it never fails the run, and it is independent of the
+// DELETE capture. A capture without statistics is recorded only for a run that selected the
+// S3-RDMA driver.
+func captureStoredDriverStats(
+	ctx context.Context,
+	baseURL string,
+	expectedRunID int64,
+	stepIDs []string,
+	metadata *runMetadata,
+	observed *driverStatsCollector,
+) {
 	if metadata == nil {
-		return nil, fmt.Errorf("expected DELETE contributor identity is unavailable")
+		return
 	}
-	if metadata.deleteContributors != nil {
-		contributorIDs, err := metadata.deleteContributors()
+	metadata.DriverStats = nil
+	metadata.DriverStatsError = ""
+	// The S3-RDMA driver always reports statistics. The steps the CLI generates for a run that
+	// selected it use it, unless the workload has a driver of its own: then no step reports any.
+	rdma := strings.EqualFold(strings.TrimSpace(metadata.ScenarioParams.S3Driver), scenario.S3DriverRdma)
+	var captured *results.DriverStatsCapture
+	var stored map[string]*driverstats.Stats
+	expectedContributorIDs, err := expectedMetricContributorIDs(metadata, metricCaptureKindDriverStats)
+	if err == nil {
+		captured, err = captureDriverStatsFunc(
+			ctx, baseURL, expectedRunID, stepIDs, expectedContributorIDs,
+			len(expectedContributorIDs) == 1)
+	}
+	if err == nil {
+		stored, err = observed.withFinal(captured, rdma)
+	}
+	if err != nil {
+		metadata.DriverStatsError = err.Error()
+		return
+	}
+	if len(stored) > 0 {
+		metadata.DriverStats = stored
+		return
+	}
+	// A run that selected the S3-RDMA driver and has no statistics must say so: the summary
+	// then warns instead of showing nothing about the data path.
+	if rdma {
+		metadata.DriverStatsError = driverStatsNotReported
+	}
+}
+
+const (
+	metricCaptureKindDelete      = "DELETE"
+	metricCaptureKindDriverStats = "driver statistics"
+	// driverStatsNotReported is the stored reason when a valid capture held no statistics.
+	driverStatsNotReported = "the engine reported no driver statistics"
+)
+
+// expectedMetricContributorIDs returns the exact contributor identities a terminal capture must
+// find in fleet metrics. kind names the captured value in errors.
+func expectedMetricContributorIDs(metadata *runMetadata, kind string) ([]string, error) {
+	if metadata == nil {
+		return nil, fmt.Errorf("expected %s contributor identity is unavailable", kind)
+	}
+	if metadata.metricContributors != nil {
+		contributorIDs, err := metadata.metricContributors()
 		if err != nil {
-			return nil, fmt.Errorf("resolve DELETE contributor identity: %w", err)
+			return nil, fmt.Errorf("resolve %s contributor identity: %w", kind, err)
 		}
 		if len(contributorIDs) == 0 {
-			return nil, fmt.Errorf("expected DELETE contributor identity is unavailable")
+			return nil, fmt.Errorf("expected %s contributor identity is unavailable", kind)
 		}
 		return append([]string(nil), contributorIDs...), nil
 	}
 	if len(metadata.Hosts) == 1 {
 		return []string{constants.MetricsLocalContributorID}, nil
 	}
-	return nil, fmt.Errorf("expected DELETE contributor identity is unavailable for fleet capture")
+	return nil, fmt.Errorf("expected %s contributor identity is unavailable for fleet capture", kind)
 }
 
 // bindRuntimeDeleteSteps binds the planned DELETE role to runtime identity by
@@ -463,6 +521,9 @@ var (
 	discoverStepIDsFunc           = results.DiscoverStepIDsForRunContext
 	discoverFleetStepIDsFunc      = results.DiscoverFleetStepIDsForRunContext
 	captureDeleteMetricsFunc      = results.CaptureTerminalDeleteMetricsForRunContext
+	captureDriverStatsFunc        = results.CaptureTerminalDriverStatsForRunContext
+	observeDriverStatsFunc        = results.ObserveTerminalDriverStatsForRunContext
+	driverStatsCollectInterval    = constants.AutoResultsDriverStatsInterval
 	newResultsFetcherFunc         = func(baseURL, outputDir string) autoResultsFetcher {
 		return &fetcherAdapter{results.NewFetcher(baseURL, outputDir)}
 	}
@@ -674,6 +735,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			var mu sync.Mutex
 			seen := make(map[string]struct{})
 			fleetSeen := make(map[string]struct{})
+			driverStats := newDriverStatsCollector(time.Now)
 			stopCh := make(chan struct{})
 			var pollWG sync.WaitGroup
 			pollWG.Add(1)
@@ -681,14 +743,27 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				defer pollWG.Done()
 				ticker := time.NewTicker(constants.AutoResultsDiscoveryInterval)
 				defer ticker.Stop()
+				driverStatsTicker := time.NewTicker(driverStatsCollectInterval)
+				defer driverStatsTicker.Stop()
 				for {
 					select {
 					case <-stopCh:
 						return
 					case <-parentCtx.Done():
 						return
+					case <-driverStatsTicker.C:
+						mu.Lock()
+						_, runtimeStepIDs := selectResultStepIDs(expectedStepIDs, fleetDiscovered, discovered)
+						mu.Unlock()
+						// The engine names its rows by the runtime identifiers. Under the planned
+						// ones an observation would refuse a finished step as unexpected.
+						if len(runtimeStepIDs) > 0 {
+							driverStats.observe(parentCtx, baseURL, expectedRunID, runtimeStepIDs, metadata)
+						}
 					case <-ticker.C:
-						if ids, err := discoverStepIDsFunc(parentCtx, baseURL, expectedRunID); err == nil && len(ids) > 0 {
+						discoveryStart := time.Now()
+						ids, nodeErr := discoverStepIDsFunc(parentCtx, baseURL, expectedRunID)
+						if nodeErr == nil && len(ids) > 0 {
 							mu.Lock()
 							updated := false
 							for _, id := range ids {
@@ -709,7 +784,8 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 							}
 						}
 						// Also poll fleet endpoint for distributed step IDs
-						if fids, err := discoverFleetStepIDsFunc(parentCtx, baseURL, expectedRunID); err == nil && len(fids) > 0 {
+						fids, fleetErr := discoverFleetStepIDsFunc(parentCtx, baseURL, expectedRunID)
+						if fleetErr == nil && len(fids) > 0 {
 							mu.Lock()
 							updated := false
 							for _, id := range fids {
@@ -727,6 +803,15 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 							mu.Unlock()
 							if debug && updated && len(snapshot) > 0 {
 								logging.LogDebug("auto-results", "discover-fleet", "steps", strings.Join(snapshot, ","))
+							}
+						}
+						if nodeErr == nil && fleetErr == nil {
+							mu.Lock()
+							_, runtimeStepIDs := selectResultStepIDs(expectedStepIDs, fleetDiscovered, discovered)
+							mu.Unlock()
+							// Until a step of the run has a row there are no statistics to miss.
+							if len(runtimeStepIDs) == 0 {
+								driverStats.readBeforeSteps(discoveryStart)
 							}
 						}
 					}
@@ -862,6 +947,10 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 					outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, captureErr)
 				} else {
 					outcome.DeleteTerminalErr = terminalDeleteOutcomeError(metadata.DeleteMetrics)
+				}
+				captureStoredDriverStats(artifactCtx, baseURL, expectedRunID, stepIDs, metadata, driverStats)
+				if metadata.DriverStatsError != "" {
+					logging.LogWarn("auto-results", "driver statistics not stored", "reason", metadata.DriverStatsError)
 				}
 				if err := writeRunMetadata(metadata, root); err != nil {
 					logging.LogError("auto-results", "write run metadata", err, "dest", root)
@@ -1946,7 +2035,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 				metadata.RuntimeIdentity = &evidence
 			})
 			multiHostOrchestrator.SetIntegrityRuntimeIdentityTier(integrityIdentityTier)
-			metadata.deleteContributors = multiHostOrchestrator.MetricContributorIDs
+			metadata.metricContributors = multiHostOrchestrator.MetricContributorIDs
 		}
 		var runSession *runcontrol.Session
 		if resultsOpts.AutoResults {

@@ -8,6 +8,8 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.storage.Credential;
+import com.dell.spt.storage.driver.coop.netty.http.s3.rdma.S3RdmaStorageDriver.PathSelection;
+import com.github.akurilov.commons.collection.Range;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -29,61 +31,61 @@ public class S3RdmaStorageDriverSubmitTest {
 		S3RdmaStorageDriverTestSupport.closeCreatedDrivers();
 	}
 
-	// ---------- shouldUseRdma: transport availability ----------
+	// ---------- selectPath: transport availability ----------
 
 	@Test
-	void testShouldUseRdma_falseWhenTransportUnavailable() throws Exception {
+	void testSelectPath_falseWhenTransportUnavailable() throws Exception {
 		final var driver = newDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
 		final var op = dataOp(OpType.CREATE, THRESHOLD + 1);
-		assertFalse(invokeShouldUseRdma(driver, op));
+		assertFalse(selectsRdma(driver, op));
 	}
 
-	// ---------- shouldUseRdma: operation type filtering ----------
+	// ---------- selectPath: operation type filtering ----------
 
 	@Test
-	void testShouldUseRdma_falseForNonDataOp() throws Exception {
+	void testSelectPath_falseForNonDataOp() throws Exception {
 		final var driver = newDriver(enabledConfig(), availableTransport());
 		final var op = (Operation<Item>) (Operation<?>) new OperationImpl<>(
 						0, OpType.CREATE, new ItemImpl("item"), null, "/bucket", TEST_CRED);
-		assertFalse(invokeShouldUseRdma(driver, op));
+		assertFalse(selectsRdma(driver, op));
 	}
 
 	@Test
-	void testShouldUseRdma_falseForDeleteOp() throws Exception {
+	void testSelectPath_falseForDeleteOp() throws Exception {
 		final var driver = newDriver(enabledConfig(), availableTransport());
-		assertFalse(invokeShouldUseRdma(driver, dataOp(OpType.DELETE, THRESHOLD + 1)));
+		assertFalse(selectsRdma(driver, dataOp(OpType.DELETE, THRESHOLD + 1)));
 	}
 
 	@Test
-	void testShouldUseRdma_falseForUpdateOp() throws Exception {
+	void testSelectPath_falseForUpdateOp() throws Exception {
 		final var driver = newDriver(enabledConfig(), availableTransport());
-		assertFalse(invokeShouldUseRdma(driver, dataOp(OpType.UPDATE, THRESHOLD + 1)));
+		assertFalse(selectsRdma(driver, dataOp(OpType.UPDATE, THRESHOLD + 1)));
 	}
 
-	// ---------- shouldUseRdma: size threshold ----------
+	// ---------- selectPath: size threshold ----------
 
 	@Test
-	void testShouldUseRdma_falseWhenBelowThreshold() throws Exception {
+	void testSelectPath_falseWhenBelowThreshold() throws Exception {
 		final var driver = newDriver(enabledConfig(), availableTransport());
-		assertFalse(invokeShouldUseRdma(driver, dataOp(OpType.CREATE, THRESHOLD - 1)));
-	}
-
-	@Test
-	void testShouldUseRdma_trueForCreateAtThreshold() throws Exception {
-		final var driver = newDriver(enabledConfig(), availableTransport());
-		assertTrue(invokeShouldUseRdma(driver, dataOp(OpType.CREATE, THRESHOLD)));
+		assertFalse(selectsRdma(driver, dataOp(OpType.CREATE, THRESHOLD - 1)));
 	}
 
 	@Test
-	void testShouldUseRdma_trueForReadAtThreshold() throws Exception {
+	void testSelectPath_trueForCreateAtThreshold() throws Exception {
 		final var driver = newDriver(enabledConfig(), availableTransport());
-		assertTrue(invokeShouldUseRdma(driver, dataOp(OpType.READ, THRESHOLD)));
+		assertTrue(selectsRdma(driver, dataOp(OpType.CREATE, THRESHOLD)));
 	}
 
 	@Test
-	void testShouldUseRdma_trueForLargeCreate() throws Exception {
+	void testSelectPath_trueForReadAtThreshold() throws Exception {
 		final var driver = newDriver(enabledConfig(), availableTransport());
-		assertTrue(invokeShouldUseRdma(driver, dataOp(OpType.CREATE, THRESHOLD * 10)));
+		assertTrue(selectsRdma(driver, dataOp(OpType.READ, THRESHOLD)));
+	}
+
+	@Test
+	void testSelectPath_trueForLargeCreate() throws Exception {
+		final var driver = newDriver(enabledConfig(), availableTransport());
+		assertTrue(selectsRdma(driver, dataOp(OpType.CREATE, THRESHOLD * 10)));
 	}
 
 	// ---------- buildEndpointAddrs ----------
@@ -146,26 +148,62 @@ public class S3RdmaStorageDriverSubmitTest {
 						invokeBuildEndpointAddrs(driverWithNode("s3.example.com", 443)));
 	}
 
-	// ---------- shouldUseRdma: zero threshold ----------
+	// ---------- selectPath: the reason a request goes over HTTP ----------
 
 	@Test
-	void testShouldUseRdma_zeroThresholdAcceptsAnySizeCreate() throws Exception {
-		final var config = new RdmaConfig(true, 0L, true, "auto", "", "WARN");
-		final var driver = newDriver(config, availableTransport());
-		assertTrue(invokeShouldUseRdma(driver, dataOp(OpType.CREATE, 1)));
+	void testSelectPath_namesTheReasonForHttp() throws Exception {
+		final var unavailable = newDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
+		assertEquals(PathSelection.HTTP_RDMA_UNAVAILABLE, unavailable.selectPath(dataOp(OpType.CREATE, THRESHOLD + 1)));
+		assertEquals(PathSelection.HTTP_RDMA_UNAVAILABLE, unavailable.selectPath(dataOp(OpType.READ, 1)));
+		assertEquals(PathSelection.HTTP_UNCOUNTED, unavailable.selectPath(dataOp(OpType.DELETE, THRESHOLD + 1)),
+						"only a CREATE or READ carries a payload");
+
+		final var driver = newDriver(enabledConfig(), availableTransport());
+		assertEquals(PathSelection.RDMA, driver.selectPath(dataOp(OpType.READ, THRESHOLD)));
+		assertEquals(PathSelection.HTTP_BELOW_THRESHOLD, driver.selectPath(dataOp(OpType.READ, THRESHOLD - 1)));
+		assertEquals(PathSelection.HTTP_INELIGIBLE, driver.selectPath(rangedRead(THRESHOLD + 1)));
+		assertEquals(PathSelection.HTTP_UNCOUNTED, driver.selectPath(dataOp(OpType.DELETE, THRESHOLD + 1)));
+		assertEquals(PathSelection.HTTP_UNCOUNTED, driver.selectPath(dataOp(OpType.UPDATE, THRESHOLD + 1)));
 	}
 
 	@Test
-	void testShouldUseRdma_zeroThresholdAcceptsZeroSizeCreate() throws Exception {
-		final var config = new RdmaConfig(true, 0L, true, "auto", "", "WARN");
-		final var driver = newDriver(config, availableTransport());
-		assertTrue(invokeShouldUseRdma(driver, dataOp(OpType.CREATE, 0)));
+	void testSelectPath_countsNothing() throws Exception {
+		// A request is counted when it is sent; choosing its path may happen more than once.
+		final var unavailable = newDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
+		unavailable.selectPath(dataOp(OpType.CREATE, THRESHOLD + 1));
+		unavailable.driverStats().counters().forEach((name, value) -> assertEquals(0L, value, name));
+
+		final var driver = newDriver(enabledConfig(), availableTransport());
+		for (final var op : List.of(
+						dataOp(OpType.READ, THRESHOLD),
+						dataOp(OpType.READ, THRESHOLD - 1),
+						rangedRead(THRESHOLD + 1),
+						dataOp(OpType.DELETE, THRESHOLD + 1))) {
+			driver.selectPath(op);
+		}
+		driver.driverStats().counters().forEach((name, value) -> assertEquals(0L, value, name));
 	}
 
-	// ---------- shouldUseRdma: below-threshold warning ----------
+	// ---------- selectPath: zero threshold ----------
 
 	@Test
-	void testShouldUseRdma_warnsBelowThresholdOnce() throws Exception {
+	void testSelectPath_zeroThresholdAcceptsAnySizeCreate() throws Exception {
+		final var config = new RdmaConfig(true, 0L, true, "auto", "", "WARN");
+		final var driver = newDriver(config, availableTransport());
+		assertTrue(selectsRdma(driver, dataOp(OpType.CREATE, 1)));
+	}
+
+	@Test
+	void testSelectPath_zeroThresholdAcceptsZeroSizeCreate() throws Exception {
+		final var config = new RdmaConfig(true, 0L, true, "auto", "", "WARN");
+		final var driver = newDriver(config, availableTransport());
+		assertTrue(selectsRdma(driver, dataOp(OpType.CREATE, 0)));
+	}
+
+	// ---------- selectPath: below-threshold warning ----------
+
+	@Test
+	void testSelectPath_warnsBelowThresholdOnce() throws Exception {
 		final var config = new RdmaConfig(true, THRESHOLD, false, "auto", "", "WARN");
 		final var driver = newDriver(config, availableTransport());
 
@@ -174,22 +212,22 @@ public class S3RdmaStorageDriverSubmitTest {
 
 		// First sub-threshold call should trip the guard
 		final var smallOp = dataOp(OpType.CREATE, THRESHOLD - 1);
-		assertFalse(invokeShouldUseRdma(driver, smallOp));
+		assertFalse(selectsRdma(driver, smallOp));
 		assertTrue(getBelowThresholdWarned(driver), "belowThresholdWarned should be true after first sub-threshold op");
 
 		// Second call — guard stays true (log-once behaviour)
-		assertFalse(invokeShouldUseRdma(driver, smallOp));
+		assertFalse(selectsRdma(driver, smallOp));
 		assertTrue(getBelowThresholdWarned(driver));
 	}
 
 	@Test
-	void testShouldUseRdma_noWarningWhenAboveThreshold() throws Exception {
+	void testSelectPath_noWarningWhenAboveThreshold() throws Exception {
 		final var config = new RdmaConfig(true, THRESHOLD, false, "auto", "", "WARN");
 		final var driver = newDriver(config, availableTransport());
 
 		// Above-threshold op should not trip the guard
 		final var largeOp = dataOp(OpType.CREATE, THRESHOLD + 1);
-		assertTrue(invokeShouldUseRdma(driver, largeOp));
+		assertTrue(selectsRdma(driver, largeOp));
 		assertFalse(getBelowThresholdWarned(driver), "belowThresholdWarned should remain false for above-threshold ops");
 	}
 
@@ -225,13 +263,16 @@ public class S3RdmaStorageDriverSubmitTest {
 						TEST_CRED, null, 0);
 	}
 
-	private static boolean invokeShouldUseRdma(
+	private static boolean selectsRdma(
 					final S3RdmaStorageDriver<Item, Operation<Item>> driver,
-					final Operation<Item> op) throws Exception {
-		final Method m = S3RdmaStorageDriver.class.getDeclaredMethod(
-						"shouldUseRdma", Operation.class);
-		m.setAccessible(true);
-		return (boolean) m.invoke(driver, op);
+					final Operation<Item> op) {
+		return driver.selectPath(op) == PathSelection.RDMA;
+	}
+
+	private static Operation<Item> rangedRead(final long size) {
+		return (Operation<Item>) (Operation<?>) new DataOperationImpl<>(
+						0, OpType.READ, new DataItemImpl("testItem", 0, size), null, "/bucket",
+						TEST_CRED, List.of(new Range(0L, size / 2, -1L)), 0);
 	}
 
 	private static String invokeBuildEndpointAddrs(

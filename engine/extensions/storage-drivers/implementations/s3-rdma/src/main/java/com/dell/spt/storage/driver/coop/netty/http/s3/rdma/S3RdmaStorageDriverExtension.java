@@ -24,7 +24,7 @@ public final class S3RdmaStorageDriverExtension<I extends Item, O extends Operat
 				extends ExtensionBase
 				implements StorageDriverFactory<I, O, T>, TargetBucketControlFactory {
 
-	private static final String NAME = "s3-rdma";
+	static final String NAME = "s3-rdma";
 	private static final String DEFAULTS_FILE_NAME = "defaults-storage-s3-rdma.yaml";
 	private static final List<String> RES_INSTALL_FILES = Collections.unmodifiableList(
 					Arrays.asList(

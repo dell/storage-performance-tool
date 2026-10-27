@@ -212,7 +212,7 @@ func TestCaptureStoredDeleteMetricsBindsFleetRuntimeDeleteIdentity(t *testing.T)
 		WorkloadType:    WorkloadTypeDelete,
 		ExpectedStepIDs: []string{"mt-001-20260823.100000.000-delete"},
 		Hosts:           []runHostMetadata{{Host: "worker-a"}, {Host: "worker-b"}},
-		deleteContributors: func() ([]string, error) {
+		metricContributors: func() ([]string, error) {
 			return []string{"local", "192.0.2.25:1099"}, nil
 		},
 	}

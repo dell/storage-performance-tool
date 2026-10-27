@@ -260,6 +260,9 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	})
 	metadata.TraceFile = traceOpts.Path
 	metadata.TraceAuto = traceOpts.Auto
+	if replayOrchestrator != nil {
+		metadata.metricContributors = replayOrchestrator.MetricContributorIDs
+	}
 	if plannedResultsRoot != "" {
 		metadata.ResultsRoot = plannedResultsRoot
 	}

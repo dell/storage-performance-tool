@@ -5,6 +5,7 @@ import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -42,6 +43,9 @@ public class FakeRdmaTransport extends RdmaTransport {
 	/** When >= 0, registerBuffer() returns 0 (failure) after this many successful registrations. */
 	private volatile int failAfterNRegistrations = -1;
 
+	/** How many of the next registerBuffer() calls still return 0 (failure) before they succeed again. */
+	private final AtomicInteger failNextRegistrations = new AtomicInteger();
+
 	/** When true, generateToken() returns null. */
 	private volatile boolean failTokenGeneration;
 
@@ -78,6 +82,9 @@ public class FakeRdmaTransport extends RdmaTransport {
 		final long count = registerCount.incrementAndGet();
 		if (failAfterNRegistrations >= 0 && count > failAfterNRegistrations) {
 			return 0; // simulate registration failure
+		}
+		if (failNextRegistrations.getAndUpdate(left -> Math.max(0, left - 1)) > 0) {
+			return 0; // simulate a registration failure that does not last
 		}
 		final long handle = handleCounter.incrementAndGet();
 		activeRegistrations.put(handle, buffer);
@@ -154,6 +161,11 @@ public class FakeRdmaTransport extends RdmaTransport {
 	/** After n successful registrations, subsequent calls return 0 (failure). Set -1 to disable. */
 	public void setFailAfterNRegistrations(final int n) {
 		this.failAfterNRegistrations = n;
+	}
+
+	/** The next n registerBuffer() calls return 0 (failure); the calls after them succeed. */
+	public void setFailNextRegistrations(final int n) {
+		this.failNextRegistrations.set(n);
 	}
 
 	/** When true, generateToken() always returns null. */
