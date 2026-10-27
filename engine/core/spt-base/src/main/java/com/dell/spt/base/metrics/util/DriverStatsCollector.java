@@ -30,8 +30,8 @@ import java.util.function.Supplier;
  * leave with the step. Its final values are on the fleet metrics endpoint and in the run results.
  *
  * <p>A counter is never exported below the highest value exported before for its series, which
- * Prometheus would read as a reset. A step's context is refreshed by several callers at once, and
- * a refresh that read older snapshots can publish its total after a newer one.
+ * Prometheus would read as a reset. The built-in contexts publish their refreshes in order, so a
+ * complete total does not fall; the guard keeps that true for a context that does not order them.
  *
  * <p>A driver names its statistics freely. A name Prometheus does not accept is exported in a
  * valid form, and a statistic whose name would take the series of another is left out. Each is

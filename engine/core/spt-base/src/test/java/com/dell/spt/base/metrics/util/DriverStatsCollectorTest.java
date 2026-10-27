@@ -175,7 +175,7 @@ class DriverStatsCollectorTest {
 	@Test
 	void counterIsNeverExportedBelowWhatItsSeriesShowedWhileGaugesFollowTheTotal() {
 		final DistributedMetricsContext<?> step = step("read-1", OpType.READ, null);
-		// The second read finds the total of a refresh that read older snapshots and published last.
+		// The second read finds an older total, as from a context that does not order its refreshes.
 		final DistributedAllMetricsSnapshot newer = snapshot(complete(
 						stats(DRIVER, Map.of("rdma_transferred", 20L), Map.of("pool_reserved_bytes", 5L))));
 		final DistributedAllMetricsSnapshot older = snapshot(complete(

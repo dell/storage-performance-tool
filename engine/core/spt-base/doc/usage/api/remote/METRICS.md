@@ -444,7 +444,7 @@ While a step whose storage driver reports statistics about itself runs (the `s3-
 These series carry the labels below and `driver`, the driver type. They are the only SPT series typed as counters.
 
 - The counters and gauges are exported only while the total is complete, so a counter does not fall when a node is missing from one sum. While `spt_driver_partial` is `1` (a node is missing, or the nodes report different drivers), only `spt_driver_reporting` and `spt_driver_partial` are exported. When the drivers differ, `driver` lists them, separated by commas.
-- A counter is never exported below a value it showed before during the step. Several readers refresh a step's metrics at once, and a refresh that read older node values can finish after a newer one; the counter then repeats its value until the total passes it. The JSON row can show the older total for that moment.
+- A counter is never exported below a value it showed before during the step, which Prometheus would read as a reset. A step's metrics are refreshed one refresh at a time, so a complete total does not fall; the exporter enforces it as well.
 - A fleet gauge is a sum of node levels, each read at its own moment, as in the JSON.
 - The series disappear when the step ends, like the other SPT series, so a scrape can miss the last seconds of a step. The final values are in the step's retained `/metrics/fleet/json` row and, for a run through the CLI, in `spt_run_params.json`.
 - In a mixed step the series carry the `load_op_type` of one of the step's operations and cover the whole step.
