@@ -6,6 +6,7 @@ import com.dell.spt.base.load.step.client.LoadStepClientBase;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketStep;
 import com.dell.spt.base.util.BinarySizeFormat;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -39,6 +40,12 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 	@Override
 	public String getTypeName() {
 		return MixedLoadStepExtension.TYPE;
+	}
+
+	/** A mixed step writes new objects only through PUTs; its item input file is its GET/STAT pool. */
+	@Override
+	protected TargetBucketStep targetBucketStep() {
+		return TargetBucketStep.mixed(config.intVal("load-op-weights-put") > 0);
 	}
 
 	@Override

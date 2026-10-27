@@ -189,5 +189,6 @@ storage:
     node:
       slice: boolean
   targetBucket:
+    count: int
     provision: boolean
 aliasing: list

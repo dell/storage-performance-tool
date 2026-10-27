@@ -201,6 +201,28 @@ configuration. Workers never create buckets; the Netty worker keeps its
 existing bucket `HEAD` and versioning check. See the CLI guide
 [Target Buckets](../../../../../cli/docs/TARGET_BUCKETS.md).
 
+### Target bucket sets
+
+`storage.targetBucket.count` (default `1`, at most `1000`) spreads a step's newly generated
+objects over the buckets `<base>-0` to `<base>-<N-1>`, where `<base>` is the bucket of
+`item.output.path`; the rest of the path is kept, so `/bench/prefix` gives `/bench-3/prefix`.
+Each new object goes to member `floorMod(floorDiv(id, max(item.naming.shards, 1)), N)` of its
+id. Existing objects keep the bucket their items file or manifest records, and
+`item.input.path` is used as written. The controller engine checks and creates the members
+like any target bucket. With `N > 1`, the engine rejects `storage.auth.file`, LIST, a CREATE
+step with `item.input.path` or `item.input.file`, a pipeline CREATE sub-step after the first, a
+mixed step with `item.input.path`, and expressions after the bucket in `item.output.path`; an initialization expression in the
+bucket segment is evaluated once before the suffix is added.
+
+```bash
+java -jar spt-base-<VERSION>.jar \
+    --storage-driver-type=s3 \
+    --storage-net-node-addrs=<NODE_IP_ADDRS> \
+    --item-output-path=/bench \
+    --storage-targetBucket-count=4 \
+    --load-op-limit-count=1000
+```
+
 ### Endpoint selection
 
 By default the driver pools connections to the configured node addresses. The

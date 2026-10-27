@@ -34,6 +34,8 @@ final class TargetBuckets {
 	static final String OUTPUT_PATH = "item-output-path";
 	static final String INPUT_PATH = "item-input-path";
 	static final String INPUT_FILE = "item-input-file";
+	/** A mixed step's DELETE queue; enumerated only for a step with more than one target bucket. */
+	static final String MIXED_DELETE_INPUT_FILE = "load-op-delete-input-file";
 
 	/**
 	 * A bucket the step uses. {@code written} when the step writes new objects into it;
@@ -55,6 +57,15 @@ final class TargetBuckets {
 	record Key(String bucket, Credential credential) {}
 
 	private TargetBuckets() {}
+
+	/**
+	 * True when the context writes new objects to its output path. With more than one target
+	 * bucket a mixed step writes only when its PUT weight is positive; otherwise, as with one
+	 * bucket, the operation type decides.
+	 */
+	static boolean writes(final Config ctxConfig, final TargetBucketStep step, final int count) {
+		return (count > 1 && step.mixed()) ? step.writesNewObjects() : writesOutputPath(ctxConfig);
+	}
 
 	/** True when the context's operations write new objects to its output path. */
 	static boolean writesOutputPath(final Config ctxConfig) {
@@ -98,42 +109,68 @@ final class TargetBuckets {
 		return "/" + resolved + path.substring(leadingSlash(path) + bucket.length());
 	}
 
-	/**
-	 * Lists the context's distinct target buckets in first-use order: the output path's bucket
-	 * when the context writes there, the input path's bucket and the buckets named by its item
-	 * input file.
-	 *
-	 * @throws RunTerminalException when a bucket segment is not a literal name, or the credentials or
-	 *     items that name the buckets cannot be read
-	 */
+	/** Lists the target buckets of an ordinary step; see {@link #targets(Config, boolean, TargetBucketStep)}. */
 	static List<Target> targets(final Config ctxConfig, final boolean provision) {
+		return targets(ctxConfig, provision, TargetBucketStep.ORDINARY);
+	}
+
+	/**
+	 * Lists the context's distinct target buckets in first-use order: the output path's bucket, or
+	 * with more than one target bucket each member of the set, when the context writes there; the
+	 * input path's bucket; and the buckets named by its item input file and, for a mixed step with
+	 * more than one target bucket, by its DELETE input file. Buckets an input names are used as
+	 * written and only checked.
+	 *
+	 * @throws RunTerminalException when a bucket segment is not a literal name, a member name is
+	 *     invalid, or the credentials or items that name the buckets cannot be read
+	 */
+	static List<Target> targets(final Config ctxConfig, final boolean provision, final TargetBucketStep step) {
 		final var targets = new LinkedHashMap<Key, Target>();
 		final var credentials = credentialsByPath(ctxConfig);
-		final var writes = writesOutputPath(ctxConfig);
-		if (writes) {
+		final var count = TargetBucketSet.count(ctxConfig);
+		if (writes(ctxConfig, step, count)) {
 			final var outputPath = ctxConfig.stringVal(OUTPUT_PATH);
 			if (outputPath != null && !outputPath.isEmpty()) {
-				add(targets, literalBucket("item.output.path", outputPath), true, provision, credentials, outputPath);
+				final var bucket = literalBucket("item.output.path", outputPath);
+				if (count == 1) {
+					add(targets, bucket, true, provision, credentials, outputPath);
+				} else {
+					for (final var memberPath : TargetBucketSet.memberPaths(outputPath, count)) {
+						add(targets, bucketSegment(memberPath), true, provision, credentials, memberPath);
+					}
+				}
 			}
 		}
 		final var inputPath = ctxConfig.stringVal(INPUT_PATH);
 		if (inputPath != null && !inputPath.isEmpty()) {
 			add(targets, literalBucket("item.input.path", inputPath), false, false, credentials, inputPath);
 		}
-		final var inputFile = ctxConfig.stringVal(INPUT_FILE);
-		if (inputFile != null && !inputFile.isEmpty()) {
-			final List<String> buckets;
-			try {
-				buckets = itemFileBuckets(Path.of(inputFile));
-			} catch (final IOException | UncheckedIOException | IllegalStateException e) {
-				throw new RunTerminalException(
-								Category.INPUT, "failed to read item.input.file to find the step's target buckets", e);
-			}
-			for (final var bucket : buckets) {
-				add(targets, bucket, false, false, credentials, "/" + bucket);
-			}
+		addItemFileBuckets(targets, credentials, ctxConfig.stringVal(INPUT_FILE), "item.input.file");
+		if (count > 1 && step.mixed()) {
+			addItemFileBuckets(
+							targets, credentials, ctxConfig.stringVal(MIXED_DELETE_INPUT_FILE), "load.op.delete.input.file");
 		}
 		return List.copyOf(targets.values());
+	}
+
+	private static void addItemFileBuckets(
+					final Map<Key, Target> targets,
+					final Map<String, Credential> credentials,
+					final String file,
+					final String setting) {
+		if (file == null || file.isEmpty()) {
+			return;
+		}
+		final List<String> buckets;
+		try {
+			buckets = itemFileBuckets(Path.of(file));
+		} catch (final IOException | UncheckedIOException | IllegalStateException e) {
+			throw new RunTerminalException(
+							Category.INPUT, "failed to read " + setting + " to find the step's target buckets", e);
+		}
+		for (final var bucket : buckets) {
+			add(targets, bucket, false, false, credentials, "/" + bucket);
+		}
 	}
 
 	private static void add(

@@ -43,6 +43,9 @@ var (
 		"jsseProvider":   {},
 		"namedGroups":    {},
 		"pqcMode":        {},
+
+		legacyKeyTargetBucket: {},
+		legacyKeyCount:        {},
 	}
 	jsParentSSLAllowedKeys = map[string]struct{}{
 		legacyKeyEnabled: {},
@@ -503,6 +506,7 @@ func rewriteJSParentConfigs(source string, opts Options, bucket string, vars map
 		}
 		configText := source[open : closeIdx+1]
 		sslConfig, unsupportedSSLKeys := extractJSParentSSLConfig(configText, vars)
+		bucketCount := intValue(jsFieldValue(jsObjectForKey(jsObjectForKey(configText, "storage"), legacyKeyTargetBucket), legacyKeyCount, vars), vars)
 		if enabled, ok := sslConfig[legacyKeyEnabled].(bool); ok {
 			if warning, mismatch := archivedSSLMismatchWarning(enabled, opts.Endpoints, name); mismatch {
 				diagnostics = append(diagnostics, Diagnostic{Severity: severityWarning, Message: warning})
@@ -530,7 +534,7 @@ func rewriteJSParentConfigs(source string, opts Options, bucket string, vars map
 		replacements = append(replacements, jsReplacement{
 			start: match[0],
 			end:   end,
-			text:  sanitizedJSParentConfig(name, opts, bucket, sslConfig),
+			text:  sanitizedJSParentConfig(name, opts, bucket, sslConfig, bucketCount),
 		})
 	}
 	return applyJSReplacements(source, replacements), diagnostics
@@ -548,7 +552,7 @@ func parentConfigHasExtraKeys(configText string) bool {
 	return false
 }
 
-func sanitizedJSParentConfig(name string, opts Options, bucket string, sslConfig map[string]any) string {
+func sanitizedJSParentConfig(name string, opts Options, bucket string, sslConfig map[string]any, bucketCount int) string {
 	config := map[string]any{
 		"item": map[string]any{
 			legacyKeyOutput: map[string]any{
@@ -563,6 +567,10 @@ func sanitizedJSParentConfig(name string, opts Options, bucket string, sslConfig
 	}
 	if len(sslConfig) > 0 {
 		setPath(config, sslConfig, "storage", legacyKeyNet, legacyKeySSL)
+	}
+	// A target bucket set is kept; its base becomes the replay bucket of item.output.path.
+	if bucketCount > 1 {
+		setPath(config, bucketCount, "storage", legacyKeyTargetBucket, legacyKeyCount)
 	}
 	configJS, err := marshalJSConfig(config)
 	if err != nil {

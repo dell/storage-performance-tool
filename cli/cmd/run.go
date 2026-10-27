@@ -50,6 +50,8 @@ const (
 	flagReadPhasePauseSeconds = "read-phase-pause-seconds"
 	flagEngineOverride        = "engine-override"
 	flagPrefixShards          = "prefix-shards"
+	flagBucketCount           = "bucket-count"
+	targetBucketCountPath     = "storage.targetBucket.count"
 	flagProvisionTargetBucket = "provision-target-bucket"
 	flagCreatePrefix          = "create-prefix"
 	flagRMIRegistryPort       = "rmi-registry-port"
@@ -2205,6 +2207,9 @@ func init() {
 	runCmd.Flags().StringP("access-key", "a", "", "The S3 access key credential")
 	runCmd.Flags().StringP("secret-key", "s", "", "The S3 secret key credential")
 	runCmd.Flags().StringP("bucket", "b", "", "Target bucket; for DELETE --items-file it is an optional assertion applied to every manifest row")
+	runCmd.Flags().Int(flagBucketCount, 1, fmt.Sprintf("Spread new objects over N buckets <bucket>-0 ... <bucket>-<N-1> (1-%d); "+
+		"existing objects keep the bucket their items file records; write, write-verify, seeded read and delete, mixed",
+		scenario.MaxBucketCount))
 	runCmd.Flags().String("prefix", "", "Write/write-verify: generated-key prefix (literal, include trailing / for a directory); seeded DELETE: owned namespace root; guarded existing DELETE: exact S3 prefix without a leading slash; list/read-verify: listing constraint")
 	runCmd.Flags().String("region", "", "AWS region for S3 requests (env S3_REGION); empty uses the region of a standard AWS endpoint, else us-east-1")
 	runCmd.Flags().Bool(flagProvisionTargetBucket, true, "Create a missing target bucket before the phase that writes the run's objects; false still checks that every target bucket exists and is accessible. Never clears or deletes a bucket")
@@ -2554,6 +2559,9 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	if err := applyPrefixShards(&params, prefixShards); err != nil {
 		return scenario.Params{}, err
 	}
+	if err := applyBucketCount(cmd, &params); err != nil {
+		return scenario.Params{}, err
+	}
 
 	// S3 Tables parameters
 	if workloadType == WorkloadTypeTables {
@@ -2815,6 +2823,81 @@ func applyPrefixShards(params *scenario.Params, shardCount int) error {
 	return nil
 }
 
+// applyBucketCount validates --bucket-count for the workload and records a bucket set of more
+// than one bucket. The flag is the only CLI source of the count: an engine override of
+// storage.targetBucket.count is rejected so validation, scenario policy and run metadata always
+// see the count the engine uses.
+func applyBucketCount(cmd *cobra.Command, params *scenario.Params) error {
+	for _, override := range params.EngineOverrides {
+		if scenario.EngineOverrideSets(override, strings.Split(targetBucketCountPath, ".")...) {
+			return fmt.Errorf("engine override %q sets %s, which is not supported; use --%s",
+				secretmask.EngineOverride(override), targetBucketCountPath, flagBucketCount)
+		}
+	}
+	flag := cmd.Flags().Lookup(flagBucketCount)
+	if flag == nil {
+		return nil
+	}
+	count, err := cmd.Flags().GetInt(flagBucketCount)
+	if err != nil {
+		return err
+	}
+	if count < 1 || count > scenario.MaxBucketCount {
+		return fmt.Errorf("--%s must be between 1 and %d, got %d", flagBucketCount, scenario.MaxBucketCount, count)
+	}
+	if count == 1 {
+		return nil
+	}
+	if reason := bucketCountUnsupportedReason(*params); reason != "" {
+		return fmt.Errorf("--%s %d is not supported for %s", flagBucketCount, count, reason)
+	}
+	if params.WorkloadType == WorkloadTypeDelete {
+		// Seeded DELETE then deletes from a multi-bucket manifest, and standalone DELETE does not batch
+		// across buckets, the same rule as a multi-bucket --items-file.
+		batchSize := scenario.DefaultDeleteBatchSize
+		if cmd.Flags().Lookup(flagDeleteBatchSize) != nil {
+			batchSize, _ = cmd.Flags().GetInt(flagDeleteBatchSize)
+		}
+		if batchSize > scenario.MinDeleteBatchSize {
+			return fmt.Errorf("--%s %d with seeded delete requires --%s=1: each DELETE request covers one bucket, "+
+				"and batching across buckets is not supported", flagBucketCount, count, flagDeleteBatchSize)
+		}
+	}
+	if _, err := scenario.TargetBucketMemberNames(params.Bucket, count); err != nil {
+		return fmt.Errorf("--%s: %w", flagBucketCount, err)
+	}
+	params.BucketCount = count
+	return nil
+}
+
+// bucketCountUnsupportedReason names why a workload cannot spread its new objects over a bucket
+// set, or returns "" when it can.
+func bucketCountUnsupportedReason(params scenario.Params) string {
+	switch params.WorkloadType {
+	case WorkloadTypeWrite, WorkloadTypeWriteVerify, WorkloadTypeMixed:
+		return ""
+	case WorkloadTypeRead:
+		if strings.TrimSpace(params.ItemsFile) != "" {
+			return "read --items-file: the items file records each object's bucket"
+		}
+		return ""
+	case WorkloadTypeDelete:
+		if strings.TrimSpace(params.ItemsFile) != "" {
+			return "delete --items-file: the items file records each object's bucket"
+		}
+		if params.DeleteExisting {
+			return "delete --delete-existing, which discovers objects in a single bucket"
+		}
+		return ""
+	case WorkloadTypeReadVerify:
+		return "read-verify, which lists a single bucket"
+	case WorkloadTypeList:
+		return "list, which lists a single bucket"
+	default:
+		return params.WorkloadType + " workload"
+	}
+}
+
 func resolvePrefixShardCount(cmd *cobra.Command, params scenario.Params) (int, error) {
 	flag := cmd.Flags().Lookup(flagPrefixShards)
 	if flag == nil {
@@ -2867,6 +2950,11 @@ func formatScenarioParams(params scenario.Params) string {
 	lines = append(lines, fmt.Sprintf("Threads: %d", params.Threads))
 	if params.PrefixShards > 0 {
 		lines = append(lines, fmt.Sprintf("Prefix Shards: %d", params.PrefixShards))
+	}
+	if params.BucketCount > 1 {
+		if names, err := scenario.TargetBucketMemberNames(params.Bucket, params.BucketCount); err == nil {
+			lines = append(lines, fmt.Sprintf("Bucket Count: %d (%s ... %s)", params.BucketCount, names[0], names[len(names)-1]))
+		}
 	}
 	if (params.WorkloadType == WorkloadTypeDelete &&
 		(strings.TrimSpace(params.ItemsFile) != "" || params.DeleteExisting)) ||

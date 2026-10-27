@@ -40,7 +40,7 @@ type RunClusterConfig struct {
 // StorageConfig represents storage configuration
 type StorageConfig struct {
 	Region       string              `yaml:"region,omitempty"`
-	TargetBucket *TargetBucketConfig `yaml:"targetBucket,omitempty"` // emitted only to disable creation
+	TargetBucket *TargetBucketConfig `yaml:"targetBucket,omitempty"` // emitted only for a bucket set or to disable creation
 	Driver       DriverConfig        `yaml:"driver,omitempty"`
 	Net          NetConfig           `yaml:"net,omitempty"`
 	Auth         AuthConfig          `yaml:"auth,omitempty"`
@@ -48,9 +48,10 @@ type StorageConfig struct {
 	Rdma         *RdmaConfig         `yaml:"rdma,omitempty"`     // pointer so omitted when nil
 }
 
-// TargetBucketConfig represents storage.targetBucket. The engine ships provision: true.
+// TargetBucketConfig represents storage.targetBucket. The engine ships count: 1 and provision: true.
 type TargetBucketConfig struct {
-	Provision bool `yaml:"provision"`
+	Count     int   `yaml:"count,omitempty"`
+	Provision *bool `yaml:"provision,omitempty"`
 }
 
 // ItemConfig represents item-level configuration knobs.
@@ -486,6 +487,15 @@ func GenerateDefaults(params Params) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		// An override that replaces storage.targetBucket or storage as a whole, such as
+		// storage.targetBucket={provision: false}, would drop the bucket count the CLI validated.
+		// Overrides that set the count itself are rejected earlier, so the flag's count is final.
+		if params.BucketCount > 1 {
+			data, err = applyEngineOverrides(data, []string{fmt.Sprintf("storage.targetBucket.count=%d", params.BucketCount)})
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	if err := validateRangeDefaults(params, data); err != nil {
@@ -495,13 +505,21 @@ func GenerateDefaults(params Params) ([]byte, error) {
 	return data, nil
 }
 
-// targetBucketConfig returns the storage.targetBucket defaults for an opt-out only, so the
-// generated defaults are unchanged when provisioning stays on.
+// targetBucketConfig returns the storage.targetBucket defaults only for a bucket set or a
+// provisioning opt-out, so the generated defaults are unchanged for one bucket with provisioning on.
 func targetBucketConfig(params Params) *TargetBucketConfig {
-	if !params.TargetBucketProvisionDisabled {
+	var config TargetBucketConfig
+	if params.BucketCount > 1 {
+		config.Count = params.BucketCount
+	}
+	if params.TargetBucketProvisionDisabled {
+		provision := false
+		config.Provision = &provision
+	}
+	if config.Count == 0 && config.Provision == nil {
 		return nil
 	}
-	return &TargetBucketConfig{Provision: false}
+	return &config
 }
 
 func applyEngineOverrides(data []byte, overrides []string) ([]byte, error) {
@@ -558,6 +576,27 @@ func applyEngineOverride(root map[string]any, override string) error {
 
 	node[parts[len(parts)-1]] = value
 	return nil
+}
+
+// EngineOverrideSets reports whether an engine override sets the configuration path, directly or
+// through a map value of one of its ancestors, such as storage.targetBucket={count: 4}. An
+// override that does not parse sets nothing; GenerateDefaults reports it.
+func EngineOverrideSets(override string, path ...string) bool {
+	root := map[string]any{}
+	if err := applyEngineOverride(root, override); err != nil {
+		return false
+	}
+	var node any = root
+	for _, part := range path {
+		children, ok := node.(map[string]any)
+		if !ok {
+			return false
+		}
+		if node, ok = children[part]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func engineOverrideError(override, reason string) error {

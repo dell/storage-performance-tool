@@ -46,6 +46,26 @@ class ControllerTargetBucketProvisioningTest {
 	@ParameterizedTest(name = "remote slices: {0}")
 	@ValueSource(booleans = {false, true
 	})
+	void aDeniedMemberOfABucketSetEndsTheStepBeforeInitAndSlices(final boolean distributed) throws Exception {
+		final var extension = new ScriptedTargetBucketExtension().check("bench-2", TargetBucketResponse.ofHttpStatus(403));
+		final Config config = TargetBucketProvisioningTest.stepConfig("create", "/bench");
+		config.val(TargetBucketSet.COUNT, 4);
+		config.val("load-step-id", "create-step");
+		config.val("load-step-node-addrs", distributed ? List.of("192.0.2.10:1099", "192.0.2.11:1099") : List.of());
+		final var metrics = mock(MetricsManager.class);
+		final var client = new TestLoadStepClient(config, List.<Extension> of(extension), null, metrics);
+
+		final var failure = assertThrows(RunTerminalException.class, client::run);
+
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertEquals(List.of("HEAD bench-0", "HEAD bench-1", "HEAD bench-2"), extension.requests);
+		assertFalse(client.wasInitCalled(), "metrics contexts must not exist when setup fails");
+		verify(metrics, never()).register(any());
+	}
+
+	@ParameterizedTest(name = "remote slices: {0}")
+	@ValueSource(booleans = {false, true
+	})
 	void provisioningUsesTheUnslicedStepConfiguration(final boolean distributed) throws Exception {
 		final var extension = new ScriptedTargetBucketExtension().check("bench", TargetBucketResponse.ofHttpStatus(403));
 		final Config config = TargetBucketProvisioningTest.stepConfig("create", "/bench");

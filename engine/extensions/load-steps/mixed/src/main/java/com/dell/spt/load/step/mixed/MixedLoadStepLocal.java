@@ -26,6 +26,7 @@ import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.util.BinarySizeFormat;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketSet;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.reflection.TypeUtil;
@@ -248,9 +249,6 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 
 		// Output path for CREATE ops (bucket prefix)
 		final String outputPath = itemConfig.stringVal("output-path");
-		final Input<String> outputPathInput = outputPath != null
-						? new ConstantValueInputImpl<>(outputPath)
-						: null;
 
 		// Multipart threshold — same logic as LoadGeneratorBuilderImpl
 		final Config rangesConfig = itemConfig.configVal("data-ranges");
@@ -267,7 +265,8 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		if (getWeight > 0)
 			builders.put(OpType.READ, makeOpsBuilder(originIdx++, OpType.READ, itemInputPath, null, credInput, sizeThreshold));
 		if (putWeight > 0)
-			builders.put(OpType.CREATE, makeOpsBuilder(originIdx++, OpType.CREATE, itemInputPath, outputPathInput, credInput, sizeThreshold));
+			builders.put(OpType.CREATE, makePutBuilder(
+							originIdx++, itemInputPath, outputPath, credInput, sizeThreshold, storageConfig, itemConfig));
 		if (deleteWeight > 0)
 			builders.put(OpType.DELETE, makeOpsBuilder(originIdx++, OpType.DELETE, itemInputPath, null, credInput, sizeThreshold));
 		if (statWeight > 0)
@@ -452,8 +451,36 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		return Paths.get(System.getProperty("user.dir"), "put-remaining-" + stepId + ".csv");
 	}
 
+	/**
+	 * Creates the PUT builder. With more than one target bucket its new objects are spread over the
+	 * members of the output path's bucket set.
+	 */
+	static DataOperationsBuilderImpl makePutBuilder(
+					final int originIndex,
+					final String inputPath,
+					final String outputPath,
+					final Input credInput,
+					final long sizeThreshold,
+					final Config storageConfig,
+					final Config itemConfig) {
+		final var builder = makeOpsBuilder(
+						originIndex,
+						OpType.CREATE,
+						inputPath,
+						outputPath != null ? new ConstantValueInputImpl<>(outputPath) : null,
+						credInput,
+						sizeThreshold);
+		final int bucketCount = TargetBucketSet.countOfStorage(storageConfig);
+		if (bucketCount > 1) {
+			builder.targetBucketMembers(
+							TargetBucketSet.memberPaths(outputPath, bucketCount),
+							ItemNameInputFactory.shardCount(itemConfig.configVal("naming")));
+		}
+		return builder;
+	}
+
 	/** Creates an {@link OperationsBuilder} for the given op type. */
-	private static OperationsBuilder makeOpsBuilder(
+	private static DataOperationsBuilderImpl makeOpsBuilder(
 					final int originIndex,
 					final OpType opType,
 					final String inputPath,

@@ -91,8 +91,8 @@ print("[" + new Date().toISOString() + "] Seed phase completed");
 pause(pauseTime, "Starting mixed workload - duration: " + duration);
 print("[" + new Date().toISOString() + "] Mixed benchmark started");
 MixedLoad
-    .config(sharedConfig)
-    .config(existingBucketsOnly)
+    .config(sharedConfig){{if not .MixedPhaseCreatesMembers}}
+    .config(existingBucketsOnly){{end}}
     .config({
         "item": {
             "input": {
@@ -253,6 +253,10 @@ func GenerateMixedScenario(params Params) (string, error) {
 		"MixedPhaseNumber":       mixedStepNum,
 		"CleanupSeedPhaseNumber": cleanupSeedStepNum,
 		"CleanupPutPhaseNumber":  cleanupPutStepNum,
+
+		// Without a seed phase, the measured phase is the first to write the generated members of
+		// a bucket set, so its setup may create them; items-file buckets stay check-only.
+		"MixedPhaseCreatesMembers": !hasSeedPhase && params.BucketCount > 1,
 	}
 
 	tmpl, err := template.New("mixedScenario").Parse(mixedWorkloadTemplate)

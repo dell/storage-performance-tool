@@ -268,6 +268,28 @@ class CsvArtifactAggregatorTest {
 	}
 
 	@Test
+	void distributedCreateKeepsEachRecordsMemberBucketAcrossUnevenNodes() throws Exception {
+		final Path manifest = tempDir.resolve("written.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\r\n"
+						+ "bench-0,p/a,1,v1\r\nbench-1,p/b,1,\r\nbench-2,p/c,1,\r\nbench-3,p/d,1,v4\r\nbench-0,p/e,1,\r\n");
+		final String remoteManifest = "/remote/written.csv";
+		final FileManagerService remote = remoteFileManager(remoteManifest, Map.of(
+						remoteManifest, "bucket,key,size,version_id\r\nbench-2,p/f,1,v6\r\n"));
+
+		new CsvArtifactAggregator(
+						"create-step", List.of(FileManager.INSTANCE, remote),
+						List.of(mock(Config.class), mock(Config.class)),
+						manifest.toString(), 107, 0).close(0);
+
+		final var records = CSVFormat.RFC4180.parse(Files.newBufferedReader(manifest)).getRecords();
+		final var identities = records.stream().skip(1).map(r -> r.get(0) + "/" + r.get(1) + "@" + r.get(3)).sorted().toList();
+		assertEquals(List.of("bench-0/p/a@v1", "bench-0/p/e@", "bench-1/p/b@", "bench-2/p/c@", "bench-2/p/f@v6",
+						"bench-3/p/d@v4"), identities);
+		assertEquals(6, IntegrityManifestCompletion.validate(
+						manifest, 107, IntegrityInputProvenance.ENGINE_STEP, "create-step").selectedRecordCount());
+	}
+
+	@Test
 	void distributedCollectionFailureRemovesPartialNodeArtifacts() throws Exception {
 		final Path manifest = tempDir.resolve("verify-input.csv");
 		Files.writeString(manifest, "bucket,key,size,version_id\r\nb,a,1,v1\r\n");
