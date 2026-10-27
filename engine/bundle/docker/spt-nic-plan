@@ -6,9 +6,10 @@
 # Run --help for the arguments. Exit codes: 0 output produced, 2 usage error, 1 internal error.
 #
 # The JVM is kept small: no pre-touched heap, no ZGC. UseAVX=2 matches the entrypoint on x86-64.
+# Native access is enabled so loading the s3-rdma library under --rdma prints no JVM warning.
 set -eu
 
-JAVA_OPTS="-Xmx256m -XX:+UseSerialGC -Xshare:off"
+JAVA_OPTS="-Xmx256m -XX:+UseSerialGC -Xshare:off --enable-native-access=ALL-UNNAMED"
 case "$(uname -m)" in
 	x86_64) JAVA_OPTS="${JAVA_OPTS} -XX:UseAVX=2" ;;
 esac

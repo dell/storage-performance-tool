@@ -29,6 +29,7 @@ public final class NicPlanCommand {
 					Prints the inventory, and with --interfaces the plan, as JSON on stdout.""";
 
 	private static final String LOG_CONFIG = "nic-plan-log4j2.yaml";
+	private static final String SYNC_LOG_CONTEXT_SELECTOR = "org.apache.logging.log4j.core.selector.ClassLoaderContextSelector";
 
 	private final Function<Boolean, SysfsInventoryReader> readers;
 	private final EndpointResolver resolver;
@@ -48,6 +49,8 @@ public final class NicPlanCommand {
 	public static void main(final String... args) {
 		// The JSON owns stdout: anything else that prints, logging included, goes to stderr.
 		System.setProperty("log4j2.configurationFile", LOG_CONFIG);
+		// Synchronous loggers, unlike the engine's async ones: nothing is left queued at exit, and no disruptor starts.
+		System.setProperty("Log4jContextSelector", SYNC_LOG_CONTEXT_SELECTOR);
 		final var out = System.out;
 		System.setOut(System.err);
 		final int status = production().run(args, out, System.err);
