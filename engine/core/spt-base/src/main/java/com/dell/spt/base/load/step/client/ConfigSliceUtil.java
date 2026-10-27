@@ -96,7 +96,7 @@ public interface ConfigSliceUtil {
 									j,
 									(j == 0 ? "local" : "remote"),
 									Arrays.toString(storageNodeAddrsSlice.toArray()));
-					configSlices.get(i).val("storage-net-node-addrs", storageNodeAddrsSlice);
+					configSlices.get(j).val("storage-net-node-addrs", storageNodeAddrsSlice);
 				}
 			}
 		}
