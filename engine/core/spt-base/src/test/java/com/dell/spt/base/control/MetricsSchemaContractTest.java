@@ -36,7 +36,8 @@ class MetricsSchemaContractTest {
 					DOC_DIR.resolve("examples/metrics-v5-cluster-read.json"),
 					DOC_DIR.resolve("examples/metrics-v5-node-delete.json"),
 					DOC_DIR.resolve("examples/metrics-v5-cluster-delete.json"),
-					DOC_DIR.resolve("examples/metrics-v5-list-shards.json"));
+					DOC_DIR.resolve("examples/metrics-v5-list-shards.json"),
+					DOC_DIR.resolve("examples/metrics-v5-fleet-rdma-read.json"));
 	private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
 	@Test
@@ -69,6 +70,23 @@ class MetricsSchemaContractTest {
 		steady.put("status", "short");
 		steady.remove("operations");
 		assertFalse(schema.validate(payload).isEmpty(), "a short window reports its statistics");
+	}
+
+	@Test
+	void schema5RejectsMalformedDriverStatistics() throws Exception {
+		final JsonSchema schema = loadSchema(SCHEMA_V5_PATH);
+		final JsonNode payload = OBJECT_MAPPER.readTree(
+						DOC_DIR.resolve("examples/metrics-v5-fleet-rdma-read.json").toFile());
+		final ObjectNode row = (ObjectNode) payload.get(0);
+		((ObjectNode) row.get("driver_stats").get("counters")).put("rdma_transferred", -1);
+		assertFalse(schema.validate(payload).isEmpty(), "a counter is never negative");
+		final ObjectNode differentDrivers = OBJECT_MAPPER.createObjectNode();
+		differentDrivers.put("partial", true);
+		differentDrivers.putArray("drivers").add("s3").add("s3-rdma");
+		row.set("driver_stats", differentDrivers);
+		assertTrue(schema.validate(payload).isEmpty(), () -> "different drivers: " + schema.validate(payload));
+		differentDrivers.put("partial", false);
+		assertFalse(schema.validate(payload).isEmpty(), "a total without sums is partial");
 	}
 
 	private static void assertAllValid(final JsonSchema schema, final List<Path> payloadPaths) throws Exception {

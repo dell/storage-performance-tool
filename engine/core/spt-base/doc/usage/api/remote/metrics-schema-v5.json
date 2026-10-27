@@ -862,6 +862,64 @@
         }
       }
     },
+    "driverStats": {
+      "description": "Statistics a storage driver reports about itself; see METRICS.md, Storage driver statistics. A node row carries its driver's values. A fleet row sums its nodes and adds reporting and partial; when nodes report different drivers it has no sums and names the drivers seen.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "driver",
+            "counters",
+            "gauges"
+          ],
+          "properties": {
+            "driver": {
+              "type": "string",
+              "minLength": 1
+            },
+            "counters": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/nonNegativeInteger"
+              }
+            },
+            "gauges": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            },
+            "reporting": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "partial": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "partial",
+            "drivers"
+          ],
+          "properties": {
+            "partial": {
+              "const": true
+            },
+            "drivers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 2
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
     "sample": {
       "type": "object",
       "required": [
@@ -963,6 +1021,9 @@
         },
         "steady": {
           "$ref": "#/$defs/steady"
+        },
+        "driver_stats": {
+          "$ref": "#/$defs/driverStats"
         },
         "nodes_count": {
           "$ref": "#/$defs/nonNegativeInteger"

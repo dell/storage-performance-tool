@@ -20,9 +20,16 @@ import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshotImpl;
 import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
 import com.dell.spt.base.storage.driver.mock.StatsReportingDriverMock;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
+import com.networknt.schema.JsonSchema;
+import com.networknt.schema.JsonSchemaFactory;
+import com.networknt.schema.SpecVersion.VersionFlag;
+import com.networknt.schema.ValidationMessage;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -44,7 +51,7 @@ class MetricsJsonResponderDriverStatsTest {
 	}
 
 	@Test
-	void nodeRowCarriesStatisticsOfADriverTheCoreDoesNotKnow() {
+	void nodeRowCarriesStatisticsOfADriverTheCoreDoesNotKnow() throws Exception {
 		final MetricsContext<AllMetricsSnapshotImpl> ctx = context("stats-step", () -> StatsReportingDriverMock.stats(41, 0, 7));
 
 		final JsonNode row = nodeRow(ctx);
@@ -59,6 +66,7 @@ class MetricsJsonResponderDriverStatsTest {
 		assertEquals(0, stats.get("counters").get(StatsReportingDriverMock.COUNTER_SPROCKETS).asLong());
 		assertEquals(List.of(StatsReportingDriverMock.GAUGE_SHELF), fieldNames(stats.get("gauges")));
 		assertEquals(7, stats.get("gauges").get(StatsReportingDriverMock.GAUGE_SHELF).asLong());
+		assertSchema5Accepts(row);
 	}
 
 	@Test
@@ -145,7 +153,7 @@ class MetricsJsonResponderDriverStatsTest {
 	}
 
 	@Test
-	void fleetRowCarriesTheTotalOfItsContributors() {
+	void fleetRowCarriesTheTotalOfItsContributors() throws Exception {
 		final DistributedMetricsContext<?> fleet = fleet(
 						StatsReportingDriverMock.stats(8, 3, 5), StatsReportingDriverMock.stats(6, 2, 4));
 
@@ -164,10 +172,11 @@ class MetricsJsonResponderDriverStatsTest {
 		assertFalse(stats.get("partial").asBoolean());
 		assertFalse(row.get("partial").asBoolean());
 		assertEquals(2, row.get("operations").get("success_count").asLong());
+		assertSchema5Accepts(row);
 	}
 
 	@Test
-	void fleetRowSaysHowManyContributorsItsTotalHolds() {
+	void fleetRowSaysHowManyContributorsItsTotalHolds() throws Exception {
 		final DistributedMetricsContext<?> fleet = fleet(StatsReportingDriverMock.stats(8, 3, 5), null);
 
 		final JsonNode row = fleetRow(fleet);
@@ -177,10 +186,11 @@ class MetricsJsonResponderDriverStatsTest {
 		assertEquals(1, stats.get("reporting").asInt());
 		assertTrue(stats.get("partial").asBoolean());
 		assertFalse(row.get("partial").asBoolean(), "the row itself is complete: both contributors are present");
+		assertSchema5Accepts(row);
 	}
 
 	@Test
-	void fleetRowOfContributorsWithDifferentDriversNamesThemAndCarriesNoTotal() {
+	void fleetRowOfContributorsWithDifferentDriversNamesThemAndCarriesNoTotal() throws Exception {
 		final DistributedMetricsContext<?> fleet = fleet(StatsReportingDriverMock.stats(8, 3, 5), otherDriverStats());
 
 		final JsonNode row = fleetRow(fleet);
@@ -190,6 +200,7 @@ class MetricsJsonResponderDriverStatsTest {
 		assertTrue(stats.get("partial").asBoolean());
 		assertEquals(List.of(OTHER_DRIVER, StatsReportingDriverMock.DRIVER), texts(stats.get("drivers")));
 		assertFalse(row.get("partial").asBoolean());
+		assertSchema5Accepts(row);
 	}
 
 	@Test
@@ -316,6 +327,16 @@ class MetricsJsonResponderDriverStatsTest {
 		when(mgr.getAllContexts()).thenReturn(Set.of(fleet));
 		when(mgr.getTerminalSteps()).thenReturn(List.of());
 		return onlyRow(new MetricsJsonResponder(mgr, config()).buildClusterMetrics(false));
+	}
+
+	/** The published metrics schema 5 accepts the row as the responder wrote it. */
+	private static void assertSchema5Accepts(final JsonNode row) throws Exception {
+		final ObjectMapper mapper = new ObjectMapper();
+		final JsonSchema schema = JsonSchemaFactory.getInstance(VersionFlag.V202012).getSchema(
+						mapper.readTree(Files.readString(Path.of("doc", "usage", "api", "remote", "metrics-schema-v5.json"))));
+		schema.initializeValidators();
+		final Set<ValidationMessage> errors = schema.validate(mapper.createArrayNode().add(row));
+		assertTrue(errors.isEmpty(), errors::toString);
 	}
 
 	private static List<String> texts(final JsonNode array) {
