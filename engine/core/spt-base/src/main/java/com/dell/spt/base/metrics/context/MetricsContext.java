@@ -84,6 +84,16 @@ public interface MetricsContext<S extends AllMetricsSnapshot>
 	S lastSnapshot();
 
 	/**
+	 * Takes the terminal snapshot with one forced refresh and returns that refresh's result. The
+	 * built-in contexts let a refresh already in flight finish first, and let no later refresh
+	 * replace the result until the context starts again or closes.
+	 */
+	default S terminalSnapshot() {
+		refreshLastSnapshot(true);
+		return lastSnapshot();
+	}
+
+	/**
 	 * One metrics-manager observation of the Steady-State Window: starts the window when the
 	 * start rule holds. Contexts that measure no window ignore it.
 	 */

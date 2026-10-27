@@ -23,6 +23,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 import org.apache.logging.log4j.Level;
@@ -46,6 +47,10 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 	private volatile DriverStatsSnapshot driverStatsSnapshot;
 	private final AtomicBoolean driverStatsFailureWarned = new AtomicBoolean();
 	private volatile long lastSnapshotsUpdateTs = 0;
+	/** Refreshes run one at a time, so one that started earlier never publishes over a later one. */
+	private final ReentrantLock refreshLock = new ReentrantLock();
+	/** Whether the terminal snapshot is taken; guarded by {@link #refreshLock}. */
+	private boolean terminalTaken = false;
 	private final IntSupplier actualConcurrencyGauge;
 	private final SteadyWindow steadyWindow;
 
@@ -108,6 +113,7 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 	@Override
 	public final void start() {
 		super.start();
+		reopenRefreshes();
 		throughputSuccess.resetStartTime();
 		throughputFail.resetStartTime();
 		throughputCorrupt.resetStartTime();
@@ -338,8 +344,43 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 	}
 
 	@Override
-	@SuppressWarnings("unchecked")
 	public void refreshLastSnapshot(final boolean force) {
+		refreshLock.lock();
+		try {
+			if (!terminalTaken) {
+				publishLastSnapshot(force);
+			}
+		} finally {
+			refreshLock.unlock();
+		}
+	}
+
+	@Override
+	public S terminalSnapshot() {
+		refreshLock.lock();
+		try {
+			if (!terminalTaken) {
+				publishLastSnapshot(true);
+				terminalTaken = true;
+			}
+			return lastSnapshot;
+		} finally {
+			refreshLock.unlock();
+		}
+	}
+
+	/** Lets refreshes publish again, after a new start or a close. */
+	private void reopenRefreshes() {
+		refreshLock.lock();
+		try {
+			terminalTaken = false;
+		} finally {
+			refreshLock.unlock();
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private void publishLastSnapshot(final boolean force) {
 		final var currentTimeMillis = System.currentTimeMillis();
 		if (force || currentTimeMillis - lastSnapshotsUpdateTs > DEFAULT_SNAPSHOT_UPDATE_PERIOD_MILLIS) {
 			lastSnapshotsUpdateTs = currentTimeMillis;
@@ -444,6 +485,7 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 	@Override
 	public final void close() {
 		super.close();
+		reopenRefreshes();
 	}
 
 	public static ContextBuilder builder() {

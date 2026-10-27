@@ -559,6 +559,7 @@ class MetricsManagerImplDriverStatsTerminalTest {
 		when(ctx.metadata()).thenReturn(Map.of());
 		when(ctx.itemDataSize()).thenReturn(new SizeInBytes(1024));
 		when(ctx.lastSnapshot()).thenAnswer(invocation -> lastSnapshot);
+		when(ctx.terminalSnapshot()).thenCallRealMethod();
 		return ctx;
 	}
 

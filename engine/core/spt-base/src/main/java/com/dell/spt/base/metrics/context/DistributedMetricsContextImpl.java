@@ -23,6 +23,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 
@@ -52,6 +53,13 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 	private volatile List<String> contributorsPresent = List.of();
 	private volatile boolean partial;
 	private volatile CachedSteady cachedSteady;
+	/**
+	 * Refreshes run one at a time, so one that started earlier never publishes its snapshot or its
+	 * presence and partial state over a later one.
+	 */
+	private final ReentrantLock refreshLock = new ReentrantLock();
+	/** Whether the terminal snapshot is taken; guarded by {@link #refreshLock}. */
+	private boolean terminalTaken = false;
 	private final List<Double> quantileValues;
 
 	public DistributedMetricsContextImpl(
@@ -214,8 +222,54 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 	}
 
 	@Override
-	@SuppressWarnings("unchecked")
 	public void refreshLastSnapshot(final boolean force) {
+		refreshLock.lock();
+		try {
+			if (!terminalTaken) {
+				publishLastSnapshot(force);
+			}
+		} finally {
+			refreshLock.unlock();
+		}
+	}
+
+	/**
+	 * Takes the terminal snapshot with one forced read of every slice. The presence and partial
+	 * state of that read stay with it: no later refresh replaces either until the context starts
+	 * again or closes.
+	 */
+	@Override
+	public S terminalSnapshot() {
+		refreshLock.lock();
+		try {
+			if (!terminalTaken) {
+				publishLastSnapshot(true);
+				terminalTaken = true;
+			}
+			return lastSnapshot;
+		} finally {
+			refreshLock.unlock();
+		}
+	}
+
+	@Override
+	public void start() {
+		super.start();
+		reopenRefreshes();
+	}
+
+	/** Lets refreshes publish again, after a new start or a close. */
+	private void reopenRefreshes() {
+		refreshLock.lock();
+		try {
+			terminalTaken = false;
+		} finally {
+			refreshLock.unlock();
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private void publishLastSnapshot(final boolean force) {
 
 		final var suppliedSnapshots = snapshotsSupplier.get();
 		if (suppliedSnapshots == null) {
@@ -429,6 +483,7 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 	@Override
 	public final void close() {
 		super.close();
+		reopenRefreshes();
 	}
 
 	public static DistributedContextBuilder builder() {
