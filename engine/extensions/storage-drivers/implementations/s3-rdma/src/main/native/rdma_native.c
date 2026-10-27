@@ -713,6 +713,117 @@ Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeIsR
 }
 
 /* ============================================================================
+ * Device Query (NIC inventory)
+ * ============================================================================ */
+
+/*
+ * Whether a DC target can be created on the device: the same mlx5dv call the driver makes, so a
+ * device whose firmware lacks DC answers 0. Returns 1, 0, or -1 when something else failed first.
+ */
+static jint probe_dc_target(struct ibv_context *ctx) {
+    jint supported = -1;
+    struct ibv_srq_init_attr srq_attr = {0};
+    struct ibv_srq *srq = NULL;
+    struct ibv_cq *cq = NULL;
+    struct ibv_pd *pd = ibv_alloc_pd(ctx);
+
+    if (pd != NULL) {
+        cq = ibv_create_cq(ctx, 1, NULL, NULL, 0);
+    }
+    if (cq != NULL) {
+        srq_attr.attr.max_wr = 1;
+        srq_attr.attr.max_sge = 1;
+        srq = ibv_create_srq(pd, &srq_attr);
+    }
+    if (srq != NULL) {
+        struct ibv_qp_init_attr_ex qp_attr = {0};
+        struct mlx5dv_qp_init_attr mlx5_qp_attr = {0};
+
+        qp_attr.qp_type = IBV_QPT_DRIVER;
+        qp_attr.send_cq = cq;
+        qp_attr.recv_cq = cq;
+        qp_attr.srq = srq;
+        qp_attr.pd = pd;
+        qp_attr.cap.max_recv_wr = 1;
+        qp_attr.cap.max_recv_sge = 1;
+        qp_attr.comp_mask = IBV_QP_INIT_ATTR_PD;
+        mlx5_qp_attr.comp_mask = MLX5DV_QP_INIT_ATTR_MASK_DC;
+        mlx5_qp_attr.dc_init_attr.dc_type = MLX5DV_DCTYPE_DCT;
+        mlx5_qp_attr.dc_init_attr.dct_access_key = DC_KEY;
+
+        struct ibv_qp *qp = mlx5dv_create_qp(ctx, &qp_attr, &mlx5_qp_attr);
+        if (qp != NULL) {
+            supported = 1;
+            ibv_destroy_qp(qp);
+        } else if (errno == EOPNOTSUPP || errno == EPROTONOSUPPORT) {
+            supported = 0;
+        }
+        ibv_destroy_srq(srq);
+    }
+    if (cq != NULL) {
+        ibv_destroy_cq(cq);
+    }
+    if (pd != NULL) {
+        ibv_dealloc_pd(pd);
+    }
+    return supported;
+}
+
+/*
+ * Reports what sysfs does not show about one device: DC support and port 1's active MTU in
+ * bytes. Opens the device by its exact name, with no fallback, and releases everything.
+ * Returns {dc, activeMtu}; dc is 1, 0 or -1 (unknown), the MTU -1 when unknown.
+ */
+JNIEXPORT jintArray JNICALL
+Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeQueryDevice(
+        JNIEnv *env, jclass cls, jstring deviceName) {
+    jint result[2] = {-1, -1};
+    const char *name = deviceName != NULL ? (*env)->GetStringUTFChars(env, deviceName, NULL) : NULL;
+
+    if (name != NULL) {
+        int num_devices = 0;
+        struct ibv_device **dev_list = ibv_get_device_list(&num_devices);
+        struct ibv_device *device = NULL;
+
+        for (int i = 0; dev_list != NULL && i < num_devices; i++) {
+            if (strcmp(ibv_get_device_name(dev_list[i]), name) == 0) {
+                device = dev_list[i];
+                break;
+            }
+        }
+        if (device != NULL) {
+            int mlx5 = mlx5dv_is_supported(device);
+            struct ibv_context *ctx = ibv_open_device(device);
+
+            if (!mlx5) {
+                result[0] = 0;
+            }
+            if (ctx != NULL) {
+                struct ibv_port_attr port_attr;
+                if (ibv_query_port(ctx, 1, &port_attr) == 0
+                        && port_attr.active_mtu >= IBV_MTU_256 && port_attr.active_mtu <= IBV_MTU_4096) {
+                    result[1] = 128 << port_attr.active_mtu;
+                }
+                if (mlx5) {
+                    result[0] = probe_dc_target(ctx);
+                }
+                ibv_close_device(ctx);
+            }
+        }
+        if (dev_list != NULL) {
+            ibv_free_device_list(dev_list);
+        }
+        (*env)->ReleaseStringUTFChars(env, deviceName, name);
+    }
+
+    jintArray array = (*env)->NewIntArray(env, 2);
+    if (array != NULL) {
+        (*env)->SetIntArrayRegion(env, array, 0, 2, result);
+    }
+    return array;
+}
+
+/* ============================================================================
  * JNI Lifecycle
  * ============================================================================ */
 
