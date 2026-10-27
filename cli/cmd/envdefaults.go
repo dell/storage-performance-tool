@@ -62,12 +62,12 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 	// Prefer multi-endpoints if provided in env
 	if f := cmd.Flags().Lookup("endpoints"); f != nil && !cmd.Flags().Changed("endpoints") {
 		if !cmd.Flags().Changed("endpoint") {
-			if v := strings.TrimSpace(os.Getenv("S3_ENDPOINTS")); v != "" {
+			if v := strings.TrimSpace(os.Getenv(constants.EnvS3Endpoints)); v != "" {
 				// Cobra accepts CSV for StringSlice Set
 				if err := setFromEnv("endpoints", v); err != nil {
 					return err
 				}
-			} else if v := strings.TrimSpace(os.Getenv("S3_ENDPOINT")); v != "" {
+			} else if v := strings.TrimSpace(os.Getenv(constants.EnvS3Endpoint)); v != "" {
 				if err := setFromEnv("endpoints", v); err != nil {
 					return err
 				}
@@ -108,7 +108,7 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 
 	// Concurrency (THREADS): allow .env/OS to set default when --threads not provided
 	if f := cmd.Flags().Lookup("threads"); f != nil && !cmd.Flags().Changed("threads") {
-		if v := strings.TrimSpace(os.Getenv("THREADS")); v != "" {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvThreads)); v != "" {
 			if _, err := strconv.Atoi(v); err != nil {
 				return fmt.Errorf("invalid THREADS value %q: %w", v, err)
 			}
@@ -269,11 +269,46 @@ func splitEngineOverridesEnv(value string) []string {
 	return overrides
 }
 
-// applyEnvDefaultsToVerifyFlags injects HOSTS env into verify flags when not provided.
+// applyEnvDefaultsToVerifyFlags injects HOSTS env into verify flags when not provided,
+// and the run's SPT_INTERFACES, S3_ENDPOINTS or S3_ENDPOINT, and THREADS for the NIC plan.
 func applyEnvDefaultsToVerifyFlags(cmd *cobra.Command) error {
 	if !cmd.Flags().Changed("test-hosts") {
 		if v := strings.TrimSpace(os.Getenv("HOSTS")); v != "" {
 			if err := cmd.Flags().Set("test-hosts", v); err != nil {
+				return err
+			}
+		}
+	}
+
+	setIf := func(flag, envKey string) error {
+		if cmd.Flags().Lookup(flag) == nil || cmd.Flags().Changed(flag) {
+			return nil
+		}
+		if v := strings.TrimSpace(os.Getenv(envKey)); v != "" {
+			return cmd.Flags().Set(flag, v)
+		}
+		return nil
+	}
+	if err := setIf(flagInterfaces, constants.EnvInterfaces); err != nil {
+		return err
+	}
+	if cmd.Flags().Lookup("endpoints") != nil && !cmd.Flags().Changed("endpoints") {
+		endpoints := strings.TrimSpace(os.Getenv(constants.EnvS3Endpoints))
+		if endpoints == "" {
+			endpoints = strings.TrimSpace(os.Getenv(constants.EnvS3Endpoint))
+		}
+		if endpoints != "" {
+			if err := cmd.Flags().Set("endpoints", endpoints); err != nil {
+				return err
+			}
+		}
+	}
+	if cmd.Flags().Lookup("threads") != nil && !cmd.Flags().Changed("threads") {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvThreads)); v != "" {
+			if _, err := strconv.Atoi(v); err != nil {
+				return fmt.Errorf("invalid THREADS value %q: %w", v, err)
+			}
+			if err := cmd.Flags().Set("threads", v); err != nil {
 				return err
 			}
 		}

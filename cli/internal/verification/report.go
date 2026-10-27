@@ -102,10 +102,14 @@ func (r *Report) printNodeResult(host string, result *NodeResult, color bool) {
 	if result.RdmaReadiness.Message != "" {
 		r.printCheck("RDMA Readiness", result.RdmaReadiness, color)
 	}
+	if result.NicPlan.Message != "" {
+		r.printCheck("NIC Plan", result.NicPlan, color)
+	}
 	r.printCheck("Ports Accessible", result.PortsAccessible, color)
 	r.printCheck("Metrics Endpoint", result.MetricsEndpoint, color)
 	r.printCheck("Control Endpoint", result.ControlEndpoint, color)
 	r.printCheck("Container Cleanup", result.ContainerCleanup, color)
+	printNics(result.NICs)
 
 	// Overall status
 	if result.Overall.Passed {

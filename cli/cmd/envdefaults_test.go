@@ -56,6 +56,7 @@ func clearEnvDefaultsTestEnv(t *testing.T) {
 		"S3_BUCKET",
 		"HOSTS",
 		"THREADS",
+		constants.EnvInterfaces,
 		constants.EnvSkipImagePull,
 		constants.EnvS3AuthVersion,
 		constants.EnvS3Region,
@@ -231,6 +232,81 @@ func TestApplyEnvDefaultsToVerifyFlags(t *testing.T) {
 	}
 	if v, _ := cmd.Flags().GetString("test-hosts"); v != "cli1,cli2" {
 		t.Fatalf("user flag should win, got %q", v)
+	}
+}
+
+func newVerifyNicPlanLikeCmd() *cobra.Command {
+	c := newVerifyLikeCmd()
+	c.Flags().String(flagInterfaces, "", "")
+	c.Flags().StringSliceP("endpoints", "e", []string{}, "")
+	c.Flags().IntP("threads", "t", 1, "")
+	return c
+}
+
+func TestApplyEnvDefaultsToVerifyFlags_NicPlan(t *testing.T) {
+	clearEnvDefaultsTestEnv(t)
+	t.Setenv(constants.EnvInterfaces, "auto")
+	t.Setenv("S3_ENDPOINTS", "http://192.0.2.101:9000,http://192.0.2.102:9000")
+	t.Setenv("S3_ENDPOINT", "http://192.0.2.200:9000")
+	t.Setenv("THREADS", "64")
+
+	cmd := newVerifyNicPlanLikeCmd()
+	if err := applyEnvDefaultsToVerifyFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToVerifyFlags error: %v", err)
+	}
+	if v, _ := cmd.Flags().GetString(flagInterfaces); v != "auto" {
+		t.Fatalf("interfaces = %q", v)
+	}
+	if v, _ := cmd.Flags().GetStringSlice("endpoints"); strings.Join(v, ",") != "http://192.0.2.101:9000,http://192.0.2.102:9000" {
+		t.Fatalf("endpoints = %v", v)
+	}
+	if v, _ := cmd.Flags().GetInt("threads"); v != 64 {
+		t.Fatalf("threads = %d", v)
+	}
+
+	cmd = newVerifyNicPlanLikeCmd()
+	_ = cmd.Flags().Set(flagInterfaces, "ens2np0")
+	_ = cmd.Flags().Set("endpoints", "http://192.0.2.103:9000")
+	_ = cmd.Flags().Set("threads", "8")
+	if err := applyEnvDefaultsToVerifyFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToVerifyFlags error: %v", err)
+	}
+	if v, _ := cmd.Flags().GetString(flagInterfaces); v != "ens2np0" {
+		t.Fatalf("user interfaces should win, got %q", v)
+	}
+	if v, _ := cmd.Flags().GetStringSlice("endpoints"); strings.Join(v, ",") != "http://192.0.2.103:9000" {
+		t.Fatalf("user endpoints should win, got %v", v)
+	}
+	if v, _ := cmd.Flags().GetInt("threads"); v != 8 {
+		t.Fatalf("user threads should win, got %d", v)
+	}
+}
+
+func TestApplyEnvDefaultsToVerifyFlags_SingleEndpointAndBadThreads(t *testing.T) {
+	clearEnvDefaultsTestEnv(t)
+	t.Setenv("S3_ENDPOINT", "http://192.0.2.200:9000")
+	cmd := newVerifyNicPlanLikeCmd()
+	if err := applyEnvDefaultsToVerifyFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToVerifyFlags error: %v", err)
+	}
+	if v, _ := cmd.Flags().GetStringSlice("endpoints"); strings.Join(v, ",") != "http://192.0.2.200:9000" {
+		t.Fatalf("endpoints = %v", v)
+	}
+
+	t.Setenv("THREADS", "many")
+	err := applyEnvDefaultsToVerifyFlags(newVerifyNicPlanLikeCmd())
+	if err == nil || !strings.Contains(err.Error(), `invalid THREADS value "many"`) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestApplyEnvDefaultsToVerifyFlags_WithoutNicPlanFlags(t *testing.T) {
+	clearEnvDefaultsTestEnv(t)
+	t.Setenv(constants.EnvInterfaces, "auto")
+	t.Setenv("S3_ENDPOINTS", "http://192.0.2.101:9000")
+	t.Setenv("THREADS", "64")
+	if err := applyEnvDefaultsToVerifyFlags(newVerifyLikeCmd()); err != nil {
+		t.Fatalf("a command without the NIC plan flags ignores their variables, got %v", err)
 	}
 }
 

@@ -79,6 +79,7 @@ const (
 	PortCheckTimeoutSecs      = 2
 	HTTPRequestTimeoutSecs    = 5
 	ContainerReadyPollSecs    = 1
+	NicPlanTimeoutSecs        = 60
 )
 
 // Container configuration constants
@@ -90,6 +91,8 @@ const (
 	JavaRMIHostnamePrefix    = "-Djava.rmi.server.hostname="
 	ManagedContainerLogRoot  = "/tmp/spt-node-home"
 	SptNodeCommand           = "--run-node"
+	// SptNicPlanCommand prints the host's NIC inventory and plan as spt.nic-plan JSON (SPT 5.17 and later images).
+	SptNicPlanCommand = "/opt/spt/spt-nic-plan"
 	// EngineNodePortArgPrefix sets the engine's RMI registry port (load.step.node.port).
 	EngineNodePortArgPrefix = "--load-step-node-port="
 

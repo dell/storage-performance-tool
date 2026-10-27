@@ -292,75 +292,9 @@ func GenerateDefaults(params Params) ([]byte, error) {
 			return nil, fmt.Errorf("endpoint is required for %s workload", params.WorkloadType)
 		}
 
-		type hostPort struct {
-			host string
-			port int
-		}
-		parsed := make([]hostPort, 0, len(eps))
-		scheme := ""
-
-		for _, ep := range eps {
-			u, err := url.Parse(ep)
-			if err != nil {
-				return nil, fmt.Errorf("invalid endpoint URL: %w", err)
-			}
-			if u.Scheme != schemeHTTP && u.Scheme != schemeHTTPS {
-				return nil, fmt.Errorf("invalid endpoint URL: unsupported scheme %q (must be http or https)", u.Scheme)
-			}
-			if scheme == "" {
-				scheme = u.Scheme
-			} else if scheme != u.Scheme {
-				return nil, fmt.Errorf("all endpoints must use the same scheme; found %q and %q", scheme, u.Scheme)
-			}
-
-			h := u.Hostname()
-			p := u.Port()
-			if p == "" {
-				if u.Scheme == schemeHTTPS {
-					p = constants.DefaultHTTPSPort
-				} else {
-					p = constants.DefaultHTTPPort
-				}
-			}
-			var pi int
-			if _, err := fmt.Sscanf(p, "%d", &pi); err != nil {
-				return nil, fmt.Errorf("invalid port: %s", p)
-			}
-			parsed = append(parsed, hostPort{host: h, port: pi})
-		}
-
-		// Deduplicate while preserving order
-		seen := make(map[string]struct{}, len(parsed))
-		uniq := make([]hostPort, 0, len(parsed))
-		for _, hp := range parsed {
-			key := fmt.Sprintf("%s:%d", hp.host, hp.port)
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			uniq = append(uniq, hp)
-		}
-
-		// Determine if ports are uniform
-		uniformPort := true
-		refPort := uniq[0].port
-		for _, hp := range uniq[1:] {
-			if hp.port != refPort {
-				uniformPort = false
-				break
-			}
-		}
-
-		// Build node.addrs and optional node.port
-		addrs := make([]string, 0, len(uniq))
-		if uniformPort {
-			for _, hp := range uniq {
-				addrs = append(addrs, hp.host)
-			}
-		} else {
-			for _, hp := range uniq {
-				addrs = append(addrs, fmt.Sprintf("%s:%d", hp.host, hp.port))
-			}
+		nodes, err := ParseNodeEndpoints(eps)
+		if err != nil {
+			return nil, err
 		}
 
 		var multipartLimits *MultipartLimits
@@ -382,16 +316,11 @@ func GenerateDefaults(params Params) ([]byte, error) {
 			},
 			Net: NetConfig{
 				Node: NodeConfig{
-					Addrs: addrs,
-					Port: func() int {
-						if uniformPort {
-							return refPort
-						}
-						return 0
-					}(),
+					Addrs: nodes.Addrs,
+					Port:  nodes.Port,
 					Slice: params.SliceEndpoints,
 				},
-				SSL:      SSLConfig{Enabled: scheme == schemeHTTPS},
+				SSL:      SSLConfig{Enabled: nodes.Scheme == schemeHTTPS},
 				Endpoint: endpointConfig(params.EndpointSelection),
 			},
 			Auth: AuthConfig{UID: params.AccessKey, Secret: params.SecretKey, Version: authVersion},

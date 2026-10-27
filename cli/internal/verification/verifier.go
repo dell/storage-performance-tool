@@ -160,6 +160,7 @@ func (v *Verifier) verifyNode(host *hostparse.HostInfo) *NodeResult {
 		v.stepRdmaDriver(host, result)
 		v.stepRdmaReadiness(host, result)
 	}
+	v.stepListNics(host, result)
 	v.stepVerifyPorts(host, result)
 	v.stepCheckEndpoints(host, result)
 	v.stepCleanup(host, result)
@@ -457,7 +458,7 @@ func (v *Verifier) stepRdmaReadiness(host *hostparse.HostInfo, result *NodeResul
 	}
 }
 
-// checkRdmaReadiness verifies that the RDMA device is accessible and active
+// checkRdmaReadiness verifies that every RDMA device is accessible and active
 // from inside the container by reading /sys/class/infiniband/.  This proves
 // the full stack: device mapped in, kernel driver loaded, and port link up.
 func (v *Verifier) checkRdmaReadiness(host *hostparse.HostInfo, containerID string) Check {
@@ -489,43 +490,82 @@ func (v *Verifier) checkRdmaReadiness(host *hostparse.HostInfo, containerID stri
 		}
 	}
 
-	device := strings.Fields(stdout)[0]
+	devices := strings.Fields(stdout)
+	var ready, notReady []string
+	for _, device := range devices {
+		// Read port state — expect "4: ACTIVE"
+		portState, linkLayer, err := v.readRdmaPort(host, containerID, device)
+		if err != nil {
+			if len(devices) == 1 {
+				return Check{
+					Passed:   false,
+					Warning:  true,
+					Message:  fmt.Sprintf("Cannot read port state for %s", device),
+					Duration: v.timeProvider.Since(start),
+					Error:    err,
+				}
+			}
+			notReady = append(notReady, fmt.Sprintf("%s (port state unreadable)", device))
+			continue
+		}
+		if !strings.Contains(portState, "ACTIVE") {
+			if len(devices) == 1 {
+				return Check{
+					Passed:   false,
+					Warning:  true,
+					Message:  fmt.Sprintf("RDMA port not active: %s (device %s)", portState, device),
+					Duration: v.timeProvider.Since(start),
+				}
+			}
+			notReady = append(notReady, fmt.Sprintf("%s (%s)", device, portState))
+			continue
+		}
 
-	// Read port state — expect "4: ACTIVE"
+		if len(devices) == 1 {
+			return Check{
+				Passed:   true,
+				Message:  fmt.Sprintf("%s port 1 %s (%s)", device, portState, linkLayer),
+				Duration: v.timeProvider.Since(start),
+			}
+		}
+		ready = append(ready, fmt.Sprintf("%s (%s)", device, linkLayer))
+	}
+
+	// Every device is covered, not only the first: a NIC set can use any of them.
+	if len(notReady) > 0 {
+		return Check{
+			Passed:   false,
+			Warning:  true,
+			Message:  fmt.Sprintf("RDMA port 1 not active on %d of %d devices: %s", len(notReady), len(devices), strings.Join(notReady, ", ")),
+			Duration: v.timeProvider.Since(start),
+		}
+	}
+	return Check{
+		Passed:   true,
+		Message:  fmt.Sprintf("Port 1 ACTIVE on all %d devices: %s", len(devices), strings.Join(ready, ", ")),
+		Duration: v.timeProvider.Since(start),
+	}
+}
+
+// readRdmaPort reads a device's port 1 state and link layer (Ethernet = RoCE, InfiniBand = IB),
+// with a timeout per device so that a host with many devices is not cut short.
+func (v *Verifier) readRdmaPort(host *hostparse.HostInfo, containerID, device string) (string, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	portState, _, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{
 		constants.DockerCommand, dockerExecCommand, containerID, "cat", fmt.Sprintf("/sys/class/infiniband/%s/ports/1/state", device),
 	})
 	if err != nil {
-		return Check{
-			Passed:   false,
-			Warning:  true,
-			Message:  fmt.Sprintf("Cannot read port state for %s", device),
-			Duration: v.timeProvider.Since(start),
-			Error:    err,
-		}
+		return "", "", err
 	}
 	portState = strings.TrimSpace(portState)
-
 	if !strings.Contains(portState, "ACTIVE") {
-		return Check{
-			Passed:   false,
-			Warning:  true,
-			Message:  fmt.Sprintf("RDMA port not active: %s (device %s)", portState, device),
-			Duration: v.timeProvider.Since(start),
-		}
+		return portState, "", nil
 	}
-
-	// Read link layer (Ethernet = RoCE, InfiniBand = IB)
 	linkLayer, _, _ := v.cmdExecutor.ExecuteCommand(ctx, host, []string{
 		constants.DockerCommand, dockerExecCommand, containerID, "cat", fmt.Sprintf("/sys/class/infiniband/%s/ports/1/link_layer", device),
 	})
-	linkLayer = strings.TrimSpace(linkLayer)
-
-	return Check{
-		Passed:   true,
-		Message:  fmt.Sprintf("%s port 1 %s (%s)", device, portState, linkLayer),
-		Duration: v.timeProvider.Since(start),
-	}
+	return portState, strings.TrimSpace(linkLayer), nil
 }
 
 // checkRdmaDevice verifies that RDMA hardware is accessible on the host
@@ -1023,6 +1063,14 @@ func (v *Verifier) assessNode(result *NodeResult) Check {
 				Passed:  false,
 				Message: check.Message,
 			}
+		}
+	}
+
+	// With --interfaces, a host where the step would fail fails; warnings do not.
+	if len(v.config.Interfaces) > 0 && !result.NicPlan.Passed && !result.NicPlan.Warning {
+		return Check{
+			Passed:  false,
+			Message: "NIC plan: " + result.NicPlan.Message,
 		}
 	}
 

@@ -1314,6 +1314,10 @@ spt verify [--test-hosts <hosts>] [options]
 | `--rmi-port-count` | `10` | Number of RMI ports to verify |
 | `--force-cleanup` | `false` | Automatically clean up conflicting containers without prompting |
 | `--use-rdma` | `false` | Include RDMA hardware and configuration checks |
+| `--interfaces` | `""` (none) | Plan each node's NIC set: `auto`, or a comma-separated list of interface names, IPv4 addresses or RDMA devices. Reads `SPT_INTERFACES` when not given |
+| `--endpoints`, `-e` | `[]` | S3 endpoint URLs to plan Paths for with `--interfaces`. Reads `S3_ENDPOINTS`, then `S3_ENDPOINT`, when not given |
+| `--slice-endpoints` | `false` | Plan each node's slice of the endpoints, as a distributed run with `--slice-endpoints` |
+| `--threads`, `-t` | `1` | Concurrency limit whose per-NIC permit shares the plan shows. Reads `THREADS` when not given |
 
 ### Verification Process
 
@@ -1324,7 +1328,46 @@ For each specified host, the verify command:
 3. **Detects Port Conflicts** — checks ports 1099 and 9999, identifies existing SPT containers
 4. **Starts Test Container** — launches SPT in node mode, validates startup and port mapping
 5. **Verifies Services** — tests RMI Registry (1099) and REST API (9999)
-6. **Performs Cleanup** — removes test container, ensures clean state
+6. **Lists NICs** — reads the node's interfaces and RDMA devices in the test container and, with `--interfaces`, plans the node's NIC set
+7. **Performs Cleanup** — removes test container, ensures clean state
+
+With `--use-rdma`, the RDMA readiness check reads port 1 of every RDMA device in the container, not only the first.
+
+### NICs and the NIC Plan
+
+Each node's report ends with its NICs, read in the test container by the SPT 5.17 or later image: the interface, its state, IPv4 address and prefix, speed, MTU and NUMA node, its RDMA device, the port and index of its RoCE v2 GID, and the other interfaces on the same physical port. DC support and the RoCE active MTU of the RDMA devices are read with `--use-rdma`, and show `?` without it. Without `--interfaces`, the list is information only and checks nothing: a node whose image predates the list shows `NICs: not listed` with the reason, and passes or fails as before.
+
+With `--interfaces`, verify plans the node's NIC set for the S3 endpoints as a run would, and adds a `NIC Plan` check. The plan shows:
+
+- the endpoints the node targets and its NIC set;
+- each interface, whether it is used, with its Paths, its permit share at `--threads` and the endpoints it serves, or why it is not used;
+- each pairing group, with its Paths, each a NIC paired with an endpoint it serves;
+- the failures, each with its fix when there is one, and the warnings;
+- the node's policy routing rules other than the defaults, which the NIC choice does not follow: it uses connected subnets and the main routing table only.
+
+A node whose plan has a failure fails verification; warnings do not. With `--slice-endpoints`, each node plans its own slice of the endpoints, the entry node first and the workers in `--test-hosts` order, as a distributed run slices them. `--interfaces` needs the S3 endpoints and `--network-mode host`: a container on a bridge network sees only its own interface, and verify says so in the NIC list.
+
+```text
+  NICs (engine 5.17.0):
+    INTERFACE  STATE  ADDRESS           SPEED  MTU   NUMA  RDMA      PORT  GID  DC   ROCE MTU  SHARES PORT WITH
+    eno8303    up     198.51.100.10/24  1G     1500  0     -         -     -    -    -         -
+    ens2np0    up     192.0.2.11/24     400G   9000  0     mlx5_0    1     3    yes  4096      -
+    ens5f0np0  up     192.0.2.21/24     200G   9000  0     bnxt_re0  1     3    no   4096      -
+    ens10np0   up     192.0.2.12/24     400G   9000  0     mlx5_1    1     3    yes  4096      -
+  NIC plan (--interfaces auto, RDMA): ok
+    Endpoints: 192.0.2.101:9000, 192.0.2.102:9000
+    NIC set: ens2np0, ens10np0
+    Permits at --threads 64: 32 per NIC
+    eno8303    not used: no endpoint on its subnet
+    ens2np0    used: 1 Path, 32 permits; serves all 2 endpoints
+    ens5f0np0  not used: RDMA device without DC support
+    ens10np0   used: 1 Path, 32 permits; serves all 2 endpoints
+    Group 1: ens2np0, ens10np0; 2 endpoints, 2 Paths
+      ens2np0 → 192.0.2.101:9000
+      ens10np0 → 192.0.2.102:9000
+```
+
+The plan uses the same rules as the run step for the same endpoints, NICs and slices. It does not reproduce exact-output participation: a step that must write an exact object count smaller than the node count runs only on the first nodes, and slices the endpoints over those nodes alone, so verify's slices can differ from that step's.
 
 ### Examples
 
@@ -1343,6 +1386,10 @@ spt verify --test-hosts "test1,test2" --force-cleanup
 
 # Include RDMA hardware checks
 spt verify --test-hosts "rdma1,rdma2" --use-rdma
+
+# Preview each node's NICs and Paths for a run's endpoints
+spt verify --test-hosts "rdma1,rdma2" --use-rdma --interfaces auto \
+  -e http://192.0.2.101:9000,http://192.0.2.102:9000 --slice-endpoints --threads 64
 ```
 
 ### Output Interpretation
