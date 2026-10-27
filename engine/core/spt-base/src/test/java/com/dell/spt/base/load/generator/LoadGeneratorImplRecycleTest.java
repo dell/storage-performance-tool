@@ -109,8 +109,8 @@ class LoadGeneratorImplRecycleTest {
 	}
 
 	/**
-	 * {@code RateThrottle.tryAcquire(int)} returns the schedule deficit (a negative count) once
-	 * the quota is exhausted instead of zero. The generator must treat that as a refusal and keep
+	 * A throttle such as java-commons' {@code RateThrottle} returns the schedule deficit (a negative
+	 * count) once the quota is exhausted instead of zero. The generator must treat that as a refusal and keep
 	 * running, not fail its permit-range contract and die.
 	 */
 	@Test

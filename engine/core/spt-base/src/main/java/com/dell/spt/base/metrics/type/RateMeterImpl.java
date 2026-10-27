@@ -71,6 +71,11 @@ public class RateMeterImpl implements RateMeter<RateMetricSnapshot> {
 						lastRate(), meanRate(), metricName, count.sum(), elapsedTimeMillis());
 	}
 
+	/** The number of events recorded so far, without computing rates. */
+	public long count() {
+		return count.sum();
+	}
+
 	long elapsedTimeMillis() {
 		return (clock.millis() - startTimeMillis);
 	}

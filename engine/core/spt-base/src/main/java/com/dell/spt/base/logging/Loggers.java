@@ -11,6 +11,7 @@ public interface Loggers {
 	String BASE = Loggers.class.getPackage().getName() + '.';
 	String BASE_METRICS = BASE + "metrics.";
 	String BASE_METRICS_THRESHOLD = BASE_METRICS + "threshold.";
+	String BASE_METRICS_STEADY = BASE_METRICS + "steady.";
 	Logger CLI = LogManager.getLogger(BASE + "Cli");
 	Logger CONFIG = LogManager.getLogger(BASE + "Config");
 	Logger DELETE_COMPLETION = LogManager.getLogger(BASE + "DeleteCompletion");
@@ -31,6 +32,7 @@ public interface Loggers {
 	Logger METRICS_STD_OUT = LogManager.getLogger(BASE_METRICS + "StdOut");
 	Logger METRICS_THRESHOLD_EXT_RESULTS_FILE = LogManager.getLogger(BASE_METRICS_THRESHOLD + "ExtResultsFile");
 	Logger METRICS_THRESHOLD_FILE_TOTAL = LogManager.getLogger(BASE_METRICS_THRESHOLD + "FileTotal");
+	Logger METRICS_STEADY_FILE_TOTAL = LogManager.getLogger(BASE_METRICS_STEADY + "FileTotal");
 	Logger MSG = LogManager.getLogger(BASE + "Messages");
 	Logger MULTIPART = LogManager.getLogger(BASE + "Multipart");
 	Logger RANGE_READ = LogManager.getLogger(BASE + "RangeRead");
@@ -68,6 +70,9 @@ public interface Loggers {
 					Map.entry(
 									METRICS_THRESHOLD_FILE_TOTAL.getName().substring(BASE.length()),
 									"Threshold Metrics Total"),
+					Map.entry(
+									METRICS_STEADY_FILE_TOTAL.getName().substring(BASE.length()),
+									"Steady-State Metrics Total"),
 					Map.entry(MSG.getName().substring(BASE.length()), "Messages"),
 					Map.entry(MULTIPART.getName().substring(BASE.length()), "Multipart Upload Phases"),
 					Map.entry(RANGE_READ.getName().substring(BASE.length()), "Terminal Partial READ v1"),

@@ -1,5 +1,6 @@
 package com.dell.spt.base.metrics.snapshot;
 
+import com.dell.spt.base.metrics.steady.SteadyResult;
 import com.dell.spt.base.metrics.MetricsConstants;
 
 public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
@@ -13,6 +14,7 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 	private final RateMetricSnapshot successSnapshot;
 	private final RateMetricSnapshot bytesSnapshot;
 	private final DeleteMetricsSnapshot deleteMetrics;
+	private final SteadyResult steadyResult;
 	private final DriverStatsSnapshot driverStats;
 	protected final long elapsedTimeMillis;
 
@@ -116,22 +118,45 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 						bytesSnapshot,
 						elapsedTimeMillis,
 						deleteMetrics,
+						null,
+						null);
+	}
+
+	/**
+	 * Creates a complete snapshot that also carries the context's closed Steady-State Window.
+	 *
+	 * @param steadyResult the window's result once it is closed, otherwise null
+	 */
+	public AllMetricsSnapshotImpl(
+					final TimingMetricSnapshot durSnapshot,
+					final TimingMetricSnapshot latSnapshot,
+					final TimingMetricSnapshot ttfbSnapshot,
+					final ConcurrencyMetricSnapshot actualConcurrencySnapshot,
+					final RateMetricSnapshot failsSnapshot,
+					final RateMetricSnapshot corruptSnapshot,
+					final RateMetricSnapshot successSnapshot,
+					final RateMetricSnapshot bytesSnapshot,
+					final long elapsedTimeMillis,
+					final DeleteMetricsSnapshot deleteMetrics,
+					final SteadyResult steadyResult) {
+		this(
+						durSnapshot,
+						latSnapshot,
+						ttfbSnapshot,
+						actualConcurrencySnapshot,
+						failsSnapshot,
+						corruptSnapshot,
+						successSnapshot,
+						bytesSnapshot,
+						elapsedTimeMillis,
+						deleteMetrics,
+						steadyResult,
 						null);
 	}
 
 	/**
 	 * Creates a complete snapshot including the optional storage driver statistics.
 	 *
-	 * @param durSnapshot request-duration distribution
-	 * @param latSnapshot request-latency distribution
-	 * @param ttfbSnapshot time-to-first-byte distribution
-	 * @param actualConcurrencySnapshot observed concurrency
-	 * @param failsSnapshot failed-operation rate
-	 * @param corruptSnapshot corrupt-operation rate
-	 * @param successSnapshot successful-operation rate
-	 * @param bytesSnapshot transferred-byte rate
-	 * @param elapsedTimeMillis elapsed step time in milliseconds
-	 * @param deleteMetrics optional detailed DELETE metrics
 	 * @param driverStats optional statistics of the storage driver
 	 */
 	public AllMetricsSnapshotImpl(
@@ -146,6 +171,50 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 					final long elapsedTimeMillis,
 					final DeleteMetricsSnapshot deleteMetrics,
 					final DriverStatsSnapshot driverStats) {
+		this(
+						durSnapshot,
+						latSnapshot,
+						ttfbSnapshot,
+						actualConcurrencySnapshot,
+						failsSnapshot,
+						corruptSnapshot,
+						successSnapshot,
+						bytesSnapshot,
+						elapsedTimeMillis,
+						deleteMetrics,
+						null,
+						driverStats);
+	}
+
+	/**
+	 * Creates a complete snapshot with the Steady-State Window and the storage driver statistics.
+	 *
+	 * @param durSnapshot request-duration distribution
+	 * @param latSnapshot request-latency distribution
+	 * @param ttfbSnapshot time-to-first-byte distribution
+	 * @param actualConcurrencySnapshot observed concurrency
+	 * @param failsSnapshot failed-operation rate
+	 * @param corruptSnapshot corrupt-operation rate
+	 * @param successSnapshot successful-operation rate
+	 * @param bytesSnapshot transferred-byte rate
+	 * @param elapsedTimeMillis elapsed step time in milliseconds
+	 * @param deleteMetrics optional detailed DELETE metrics
+	 * @param steadyResult the window's result once it is closed, otherwise null
+	 * @param driverStats optional statistics of the storage driver
+	 */
+	public AllMetricsSnapshotImpl(
+					final TimingMetricSnapshot durSnapshot,
+					final TimingMetricSnapshot latSnapshot,
+					final TimingMetricSnapshot ttfbSnapshot,
+					final ConcurrencyMetricSnapshot actualConcurrencySnapshot,
+					final RateMetricSnapshot failsSnapshot,
+					final RateMetricSnapshot corruptSnapshot,
+					final RateMetricSnapshot successSnapshot,
+					final RateMetricSnapshot bytesSnapshot,
+					final long elapsedTimeMillis,
+					final DeleteMetricsSnapshot deleteMetrics,
+					final SteadyResult steadyResult,
+					final DriverStatsSnapshot driverStats) {
 		this.durSnapshot = durSnapshot;
 		this.latSnapshot = latSnapshot;
 		this.ttfbSnapshot = ttfbSnapshot;
@@ -156,7 +225,13 @@ public class AllMetricsSnapshotImpl implements AllMetricsSnapshot {
 		this.bytesSnapshot = bytesSnapshot;
 		this.elapsedTimeMillis = elapsedTimeMillis;
 		this.deleteMetrics = deleteMetrics;
+		this.steadyResult = steadyResult;
 		this.driverStats = driverStats;
+	}
+
+	@Override
+	public SteadyResult steadyResult() {
+		return steadyResult;
 	}
 
 	@Override

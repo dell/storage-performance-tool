@@ -603,6 +603,68 @@ func TestOrchestratorStartTestUsesConfiguredNetworkMode(t *testing.T) {
 	}
 }
 
+func TestOrchestratorStartTestPassesRMIRegistryPortToTheEngine(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready", "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ready":true,"status":"ok"}`))
+		case "/run":
+			if r.Method == http.MethodPost {
+				w.Header().Set("ETag", `"run-registry-port"`)
+				_, _ = w.Write([]byte(`{"runId":"run-registry-port"}`))
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		case "/status":
+			_, _ = w.Write([]byte(`{"state":"RUNNING","message":"running"}`))
+		case "/metrics/json":
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	tests := []struct {
+		name     string
+		port     int
+		wantArgs []string
+	}{
+		{name: "engine default", port: 0},
+		{name: "custom port", port: 41099, wantArgs: []string{constants.EngineNodePortArgPrefix + "41099"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockDM := NewMockDockerManager()
+			orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
+			orchestrator.apiClient = NewSptAPIClient(server.URL)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			params := scenario.ScenarioParams{RMIRegistryPort: tt.port}
+			if err := orchestrator.StartTestWithContent(ctx, "test-image", params, []byte(`Load.run({})`), nil); err != nil {
+				t.Fatalf("StartTestWithContent() error = %v", err)
+			}
+			cancel()
+
+			calls := mockDM.GetContainerCalls()
+			if len(calls) != 1 {
+				t.Fatalf("container calls = %d, want 1", len(calls))
+			}
+			var got []string
+			for _, arg := range calls[0].Cmd {
+				if strings.HasPrefix(arg, constants.EngineNodePortArgPrefix) {
+					got = append(got, arg)
+				}
+			}
+			if strings.Join(got, " ") != strings.Join(tt.wantArgs, " ") {
+				t.Fatalf("registry port args = %v, want %v (command %v)", got, tt.wantArgs, calls[0].Cmd)
+			}
+		})
+	}
+}
+
 func TestOrchestratorSubmissionHookDoesNotHoldLifecycleMutex(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

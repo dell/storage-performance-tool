@@ -14,6 +14,7 @@ import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder.ShardSnapsh
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder.Snapshot;
 import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.metrics.steady.SteadyResult;
 import com.dell.spt.base.metrics.TerminalStepEntry;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
@@ -38,7 +39,7 @@ import com.dell.spt.base.logging.Loggers;
 
 final class MetricsJsonResponder {
 
-	private static final int METRICS_SCHEMA_VERSION = 4;
+	private static final int METRICS_SCHEMA_VERSION = 5;
 
 	private final MetricsManager metricsManager;
 	private final ObjectMapper objectMapper = new ObjectMapper();
@@ -166,6 +167,7 @@ final class MetricsJsonResponder {
 
 		addLimitFields(jsonObj, ctx.metadata());
 		addMetrics(jsonObj, snapshot, successCount, failCount, corruptCount, bytesTotal, latencyMean, durationMean);
+		addSteady(jsonObj, snapshot.steadyResult());
 		addDeleteDetailExpectation(jsonObj, ctx.metadata());
 		addListShardMetrics(jsonObj, ctx.metadata());
 
@@ -237,6 +239,7 @@ final class MetricsJsonResponder {
 
 		addLimitFields(jsonObj, ctx.metadata());
 		addMetrics(jsonObj, snapshot, successCount, failCount, corruptCount, bytesTotal, latencyMean, durationMean);
+		addSteady(jsonObj, snapshot.steadyResult());
 		if (snapshot instanceof DistributedAllMetricsSnapshot fleet) {
 			addDriverStatsTotal(jsonObj, fleet.driverStatsTotal());
 		}
@@ -587,6 +590,58 @@ final class MetricsJsonResponder {
 		return corruptSnapshot == null ? 0L : corruptSnapshot.count();
 	}
 
+	/**
+	 * The {@code steady} object: the Steady-State Window's status and coverage, and once it reports
+	 * statistics, the entry's counts, bytes, means, timing and concurrency over the window. Absent
+	 * while the window is open.
+	 */
+	private void addSteady(final ObjectNode jsonObj, final SteadyResult steady) {
+		if (steady == null) {
+			return;
+		}
+		final ObjectNode node = objectMapper.createObjectNode();
+		node.put("status", steady.status().label());
+		node.put("cause", steady.cause());
+		if (steady.startOffsetMillis() == SteadyResult.NONE) {
+			node.putNull("start_seconds");
+		} else {
+			node.put("start_seconds", steady.startOffsetMillis() / 1000.0);
+		}
+		node.put("duration_seconds", steady.durationNanos() / 1e9);
+		putNullable(node, "turnovers", steady.status().hasStatistics() ? steady.turnovers() : null);
+		putNullable(node, "trend_percent", steady.trendPercent());
+		putNullable(node, "cv", steady.cv());
+		putNullable(node, "start_cut_acquisition_ns", nanosOrNull(steady.startAcquisitionNanos()));
+		putNullable(node, "end_cut_acquisition_ns", nanosOrNull(steady.endAcquisitionNanos()));
+		final AllMetricsSnapshot window = steady.statistics();
+		if (window != null) {
+			addMetrics(
+							node,
+							window,
+							window.successSnapshot().count(),
+							window.failsSnapshot().count(),
+							corruptCount(window),
+							window.byteSnapshot().count(),
+							window.latencySnapshot().mean(),
+							window.durationSnapshot().mean());
+			((ObjectNode) node.get("operations")).put("success_rate_mean", window.successSnapshot().mean());
+			((ObjectNode) node.get("bandwidth")).put("bytes_rate_mean", window.byteSnapshot().mean());
+		}
+		jsonObj.set("steady", node);
+	}
+
+	private static Double nanosOrNull(final long nanos) {
+		return nanos == SteadyResult.NONE ? null : (double) nanos;
+	}
+
+	private static void putNullable(final ObjectNode node, final String field, final Double value) {
+		if (value == null) {
+			node.putNull(field);
+		} else {
+			node.put(field, value);
+		}
+	}
+
 	private ObjectNode timingObject(final TimingMetricSnapshot snapshot, final double mean) {
 		if (snapshot == null || snapshot.count() == 0) {
 			return emptyTimingObject(mean);
@@ -811,6 +866,7 @@ final class MetricsJsonResponder {
 			if (verbose) {
 				jsonObj.put("diag_cached_progress", true);
 			}
+			addSteady(jsonObj, entry.steady);
 			jsonObj.put("terminal", true);
 			jsonArray.add(jsonObj);
 		}
@@ -917,6 +973,7 @@ final class MetricsJsonResponder {
 			if (verbose) {
 				jsonObj.put("diag_cached_progress", true);
 			}
+			addSteady(jsonObj, entry.steady);
 			jsonObj.put("terminal", true);
 			jsonArray.add(jsonObj);
 		}

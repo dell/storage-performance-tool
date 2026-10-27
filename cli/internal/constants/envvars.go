@@ -10,6 +10,7 @@ const (
 	EnvS3SecretKey     = "S3_SECRET_KEY" // #nosec G101 -- env var names only
 	EnvS3Bucket        = "S3_BUCKET"
 	EnvS3AuthVersion   = "S3_AUTH_VERSION"
+	EnvS3Region        = "S3_REGION"
 	EnvSkipImagePull   = "SPT_SKIP_IMAGE_PULL"
 	EnvSptJavaOpts     = "SPT_JAVA_OPTS"
 	EnvSptLogDir       = "SPT_LOG_DIR"

@@ -20,14 +20,15 @@ import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.load.step.local.context.LoadStepContextImpl;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilderImpl;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilder;
+import com.dell.spt.base.load.generator.PacedRateThrottle;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.util.BinarySizeFormat;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketSet;
 
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
-import com.github.akurilov.commons.concurrent.throttle.RateThrottle;
 import static com.github.akurilov.commons.collection.TreeUtil.reduceForest;
 
 import com.github.akurilov.confuse.Config;
@@ -143,9 +144,10 @@ public class PipelineLoadStepLocal
 										.itemFactory((ItemFactory) itemFactory)
 										.loadOperationsOutput(driver)
 										.authConfig(storageConfig.configVal("auth"))
+										.targetBucketCount(TargetBucketSet.countOfStorage(storageConfig))
 										.originIndex(originIndex);
 						if (rateLimit > 0) {
-							generatorBuilder.addThrottle(new RateThrottle(rateLimit));
+							generatorBuilder.addThrottle(new PacedRateThrottle(rateLimit));
 						}
 						if (nextItemBuff != null) {
 							generatorBuilder.itemInput(nextItemBuff);

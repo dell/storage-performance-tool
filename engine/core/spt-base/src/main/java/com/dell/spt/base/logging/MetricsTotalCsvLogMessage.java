@@ -62,6 +62,15 @@ public class MetricsTotalCsvLogMessage extends LogMessageBase {
 	}
 
 	private void appendHeader(final StringBuilder strb) {
+		appendHeader(strb, durations, latencies, ttfbs);
+	}
+
+	/** The total file's header for the given quantile columns; the steady file starts with the same columns. */
+	static void appendHeader(
+					final StringBuilder strb,
+					final Map<Double, Long> durations,
+					final Map<Double, Long> latencies,
+					final Map<Double, Long> ttfbs) {
 		strb.append("DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,")
 						.append("CountFail,CountCorrupt,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],")
 						.append(COLUMN_BW_AVG_MIB_PER_SECOND)

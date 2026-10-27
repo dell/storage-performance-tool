@@ -46,6 +46,49 @@ class IntegrityOperationManifestOutputTest {
 	}
 
 	@Test
+	void createRecordsTheMemberBucketEachOperationAddressed() throws Exception {
+		final Path manifest = tempDir.resolve("written.csv");
+		try (final var output = new IntegrityOperationManifestOutput<>(manifest, "/bench", OpType.CREATE)) {
+			for (final var member : List.of("/bench-2/prefix", "/bench-0/prefix", "/bench-2/prefix")) {
+				final var item = new DataItemImpl(member + "/key" + member.charAt(7), 0, 3);
+				final var op = new OperationImpl<>(0, OpType.CREATE, item, null, member, Credential.NONE);
+				op.returnedVersionId("v" + member.charAt(7));
+				output.put(op);
+			}
+		}
+
+		final var records = CSVFormat.RFC4180.parse(java.nio.file.Files.newBufferedReader(manifest)).getRecords();
+		assertEquals(List.of("bench-2", "prefix/key2", "3", "v2"), records.get(1).toList());
+		assertEquals(List.of("bench-0", "prefix/key0", "3", "v0"), records.get(2).toList());
+		assertEquals(List.of("bench-2", "prefix/key2", "3", "v2"), records.get(3).toList());
+	}
+
+	@Test
+	void oneBucketKeepsTheConfiguredBucketAndKey() throws Exception {
+		final Path manifest = tempDir.resolve("written.csv");
+		try (final var output = new IntegrityOperationManifestOutput<>(manifest, "/bench", OpType.CREATE)) {
+			output.put(new OperationImpl<>(0, OpType.CREATE, new DataItemImpl("/bench/p/k", 0, 1), null, "/bench/p",
+							Credential.NONE));
+			output.put(new OperationImpl<>(0, OpType.CREATE, new DataItemImpl("/bench/k2", 0, 1), null, null,
+							Credential.NONE));
+		}
+
+		final var records = CSVFormat.RFC4180.parse(java.nio.file.Files.newBufferedReader(manifest)).getRecords();
+		assertEquals(List.of("bench", "p/k", "1", ""), records.get(1).toList());
+		assertEquals(List.of("bench", "k2", "1", ""), records.get(2).toList());
+	}
+
+	@Test
+	void aBucketIsWithinTheConfiguredOneOnlyAsAWholeSegment() {
+		assertTrue(IntegrityOperationManifestOutput.withinBucket("/bench", "bench"));
+		assertTrue(IntegrityOperationManifestOutput.withinBucket("//bench/a", "bench"));
+		assertTrue(IntegrityOperationManifestOutput.withinBucket("bench", "bench"));
+		assertFalse(IntegrityOperationManifestOutput.withinBucket("/bench-2/a", "bench"));
+		assertFalse(IntegrityOperationManifestOutput.withinBucket("/benc", "bench"));
+		assertFalse(IntegrityOperationManifestOutput.withinBucket("/bench", ""));
+	}
+
+	@Test
 	void createEmitsExactSharedLFManifestBytes() throws Exception {
 		final Path manifest = tempDir.resolve("written.csv");
 		final var item = new DataItemImpl("/b/k", 0, 1);

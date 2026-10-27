@@ -51,9 +51,16 @@ const (
 	flagReadPhasePauseSeconds = "read-phase-pause-seconds"
 	flagEngineOverride        = "engine-override"
 	flagPrefixShards          = "prefix-shards"
+	flagBucketCount           = "bucket-count"
+	targetBucketCountPath     = "storage.targetBucket.count"
+	flagProvisionTargetBucket = "provision-target-bucket"
+	flagCreatePrefix          = "create-prefix"
+	flagRMIRegistryPort       = "rmi-registry-port"
 	itemNamingShardsPath      = "item.naming.shards"
 	prefixShardsAuto          = -1
 	deleteAllDiscoveredLabel  = "all discovered identities (unbounded)"
+	createPrefixDeprecation   = "it never had an effect and will be removed in the next minor release; " +
+		"spt provisions target buckets by default (see --provision-target-bucket)"
 )
 
 // resolvePortConflictFunc is a test seam for port conflict resolution.
@@ -1149,9 +1156,40 @@ func stepRoleLifecycle(result *portcheck.RunResult, runtimeStepID, plannedStepID
 	return ""
 }
 
+// resolveOrdinaryRunError makes an engine FAILED status authoritative for workloads outside the
+// integrity and DELETE contracts: the run exits 1 with the engine's cause even when the presenter
+// reported none, and missing metrics or artifacts never replace that cause.
+func resolveOrdinaryRunError(runErr error, outcome autoResultsOutcome) error {
+	if outcome.Tracker == nil || outcome.Tracker.FinalState != constants.StateFailed {
+		return runErr
+	}
+	message := trackedFailureReason(outcome.Tracker)
+	if runErr != nil && !runcontrol.IsOnlyOwnedEngineTerminalFailure(runErr) {
+		message += "; run also failed: " + runErr.Error()
+	}
+	return &ExitCodeError{Code: constants.ExitCodeWorkloadFailure, Msg: message, Cause: runErr}
+}
+
+// trackedFailureReason describes a FAILED terminal status, omitting attribution the engine did not report.
+func trackedFailureReason(result *portcheck.RunResult) string {
+	reason := "step"
+	if result.FailureStepID != "" {
+		reason += " " + result.FailureStepID
+	}
+	reason += " failed"
+	if result.FailureCategory != "" {
+		reason += " (" + result.FailureCategory + ")"
+	}
+	message := strings.TrimSpace(result.FailureMessage)
+	if message == "" {
+		message = "engine reported FAILED"
+	}
+	return reason + ": " + message
+}
+
 func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, received bool, params scenario.Params) error {
 	if !scenario.IsIntegrityWorkload(params) {
-		return runErr
+		return resolveOrdinaryRunError(runErr, outcome)
 	}
 	corrupt := int64(0)
 	if outcome.ObservedCorruptCount != nil {
@@ -1877,6 +1915,10 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			"hosts", testHostsStr,
 			"attach_existing", attachExisting)
 		useMultiHostOrchestrator := shouldUseMultiHostOrchestrator(hostInfos)
+		if useMultiHostOrchestrator && params.RMIRegistryPort != 0 {
+			return fmt.Errorf("--%s applies only to local single-host runs; distributed and remote engines use port %d",
+				flagRMIRegistryPort, constants.DefaultRMIRegistryPort)
+		}
 
 		// The local single-host runner owns Docker on the controller, so it
 		// needs the controller port check. Remote and multi-host runs perform
@@ -2254,8 +2296,12 @@ func init() {
 	runCmd.Flags().StringP("access-key", "a", "", "The S3 access key credential")
 	runCmd.Flags().StringP("secret-key", "s", "", "The S3 secret key credential")
 	runCmd.Flags().StringP("bucket", "b", "", "Target bucket; for DELETE --items-file it is an optional assertion applied to every manifest row")
+	runCmd.Flags().Int(flagBucketCount, 1, fmt.Sprintf("Spread new objects over N buckets <bucket>-0 ... <bucket>-<N-1> (1-%d); "+
+		"existing objects keep the bucket their items file records; write, write-verify, seeded read and delete, mixed",
+		scenario.MaxBucketCount))
 	runCmd.Flags().String("prefix", "", "Write/write-verify: generated-key prefix (literal, include trailing / for a directory); seeded DELETE: owned namespace root; guarded existing DELETE: exact S3 prefix without a leading slash; list/read-verify: listing constraint")
-	runCmd.Flags().String("region", "", "AWS region for S3 requests (empty preserves engine region selection)")
+	runCmd.Flags().String("region", "", "AWS region for S3 requests (env S3_REGION); empty uses the region of a standard AWS endpoint, else us-east-1")
+	runCmd.Flags().Bool(flagProvisionTargetBucket, true, "Create a missing target bucket before the phase that writes the run's objects; false still checks that every target bucket exists and is accessible. Never clears or deletes a bucket")
 	registerEndpointSelectionFlags(runCmd.Flags())
 	runCmd.Flags().Int("auth-version", 4, "S3 authentication signature version (2 or 4; default 4)")
 
@@ -2290,7 +2336,8 @@ func init() {
 	runCmd.Flags().Bool("cleanup", false, "Best-effort deletion of SPT-created objects after the benchmark; DELETE permits this only for seeded mode")
 	runCmd.Flags().Bool(flagDeferVerification, false, "Write-verify only: stop after durable nonempty CREATE evidence and defer readback (env: SPT_DEFER_VERIFICATION)")
 	runCmd.Flags().String(flagVersions, scenario.VersionsCurrent, "Read-verify prefix discovery: current or all object versions")
-	runCmd.Flags().Bool("create-prefix", false, "A boolean flag to ensure the target prefix (directory) is created if it doesn't exist")
+	runCmd.Flags().Bool(flagCreatePrefix, false, "Deprecated: has no effect")
+	_ = runCmd.Flags().MarkDeprecated(flagCreatePrefix, createPrefixDeprecation)
 	runCmd.Flags().StringP("output-dir", "O", "", "Specifies a local directory on the host machine to save the detailed Spt report files (e.g., ./results/test-01)")
 	runCmd.Flags().Bool("generate-only", false, "Generate the scenario file without running Docker or Spt")
 	// Headless auto-termination
@@ -2356,6 +2403,8 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 	runCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
 	runCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
 	runCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
+	runCmd.Flags().Int(flagRMIRegistryPort, constants.DefaultRMIRegistryPort,
+		"Engine RMI registry port for a local single-host run; give each concurrent spt run on one host its own port")
 
 	// RDMA Acceleration Options
 	runCmd.Flags().String("s3-driver", "default",
@@ -2461,6 +2510,10 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		accessKey, _ := cmd.Flags().GetString("access-key")
 		params.AccessKey = accessKey
 		params.Region, _ = cmd.Flags().GetString("region")
+		if cmd.Flags().Lookup(flagProvisionTargetBucket) != nil {
+			provision, _ := cmd.Flags().GetBool(flagProvisionTargetBucket)
+			params.TargetBucketProvisionDisabled = !provision
+		}
 		selection, err := endpointSelectionFromFlags(cmd)
 		if err != nil {
 			return params, err
@@ -2574,6 +2627,16 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	serviceThreads, _ := cmd.Flags().GetInt("service-threads")
 	params.ServiceThreads = serviceThreads
 
+	if registryPort, err := cmd.Flags().GetInt(flagRMIRegistryPort); err == nil {
+		if registryPort < 1 || registryPort > 65535 {
+			return scenario.Params{}, fmt.Errorf("--%s must be between 1 and 65535, got %d", flagRMIRegistryPort, registryPort)
+		}
+		// The default leaves the engine command line unchanged.
+		if registryPort != constants.DefaultRMIRegistryPort {
+			params.RMIRegistryPort = registryPort
+		}
+	}
+
 	engineOverrides, _ := cmd.Flags().GetStringArray(flagEngineOverride)
 	if len(engineOverrides) > 0 {
 		params.EngineOverrides = engineOverrides
@@ -2583,6 +2646,9 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		return scenario.Params{}, err
 	}
 	if err := applyPrefixShards(&params, prefixShards); err != nil {
+		return scenario.Params{}, err
+	}
+	if err := applyBucketCount(cmd, &params); err != nil {
 		return scenario.Params{}, err
 	}
 
@@ -2846,6 +2912,81 @@ func applyPrefixShards(params *scenario.Params, shardCount int) error {
 	return nil
 }
 
+// applyBucketCount validates --bucket-count for the workload and records a bucket set of more
+// than one bucket. The flag is the only CLI source of the count: an engine override of
+// storage.targetBucket.count is rejected so validation, scenario policy and run metadata always
+// see the count the engine uses.
+func applyBucketCount(cmd *cobra.Command, params *scenario.Params) error {
+	for _, override := range params.EngineOverrides {
+		if scenario.EngineOverrideSets(override, strings.Split(targetBucketCountPath, ".")...) {
+			return fmt.Errorf("engine override %q sets %s, which is not supported; use --%s",
+				secretmask.EngineOverride(override), targetBucketCountPath, flagBucketCount)
+		}
+	}
+	flag := cmd.Flags().Lookup(flagBucketCount)
+	if flag == nil {
+		return nil
+	}
+	count, err := cmd.Flags().GetInt(flagBucketCount)
+	if err != nil {
+		return err
+	}
+	if count < 1 || count > scenario.MaxBucketCount {
+		return fmt.Errorf("--%s must be between 1 and %d, got %d", flagBucketCount, scenario.MaxBucketCount, count)
+	}
+	if count == 1 {
+		return nil
+	}
+	if reason := bucketCountUnsupportedReason(*params); reason != "" {
+		return fmt.Errorf("--%s %d is not supported for %s", flagBucketCount, count, reason)
+	}
+	if params.WorkloadType == WorkloadTypeDelete {
+		// Seeded DELETE then deletes from a multi-bucket manifest, and standalone DELETE does not batch
+		// across buckets, the same rule as a multi-bucket --items-file.
+		batchSize := scenario.DefaultDeleteBatchSize
+		if cmd.Flags().Lookup(flagDeleteBatchSize) != nil {
+			batchSize, _ = cmd.Flags().GetInt(flagDeleteBatchSize)
+		}
+		if batchSize > scenario.MinDeleteBatchSize {
+			return fmt.Errorf("--%s %d with seeded delete requires --%s=1: each DELETE request covers one bucket, "+
+				"and batching across buckets is not supported", flagBucketCount, count, flagDeleteBatchSize)
+		}
+	}
+	if _, err := scenario.TargetBucketMemberNames(params.Bucket, count); err != nil {
+		return fmt.Errorf("--%s: %w", flagBucketCount, err)
+	}
+	params.BucketCount = count
+	return nil
+}
+
+// bucketCountUnsupportedReason names why a workload cannot spread its new objects over a bucket
+// set, or returns "" when it can.
+func bucketCountUnsupportedReason(params scenario.Params) string {
+	switch params.WorkloadType {
+	case WorkloadTypeWrite, WorkloadTypeWriteVerify, WorkloadTypeMixed:
+		return ""
+	case WorkloadTypeRead:
+		if strings.TrimSpace(params.ItemsFile) != "" {
+			return "read --items-file: the items file records each object's bucket"
+		}
+		return ""
+	case WorkloadTypeDelete:
+		if strings.TrimSpace(params.ItemsFile) != "" {
+			return "delete --items-file: the items file records each object's bucket"
+		}
+		if params.DeleteExisting {
+			return "delete --delete-existing, which discovers objects in a single bucket"
+		}
+		return ""
+	case WorkloadTypeReadVerify:
+		return "read-verify, which lists a single bucket"
+	case WorkloadTypeList:
+		return "list, which lists a single bucket"
+	default:
+		return params.WorkloadType + " workload"
+	}
+}
+
 func resolvePrefixShardCount(cmd *cobra.Command, params scenario.Params) (int, error) {
 	flag := cmd.Flags().Lookup(flagPrefixShards)
 	if flag == nil {
@@ -2898,6 +3039,11 @@ func formatScenarioParams(params scenario.Params) string {
 	lines = append(lines, fmt.Sprintf("Threads: %d", params.Threads))
 	if params.PrefixShards > 0 {
 		lines = append(lines, fmt.Sprintf("Prefix Shards: %d", params.PrefixShards))
+	}
+	if params.BucketCount > 1 {
+		if names, err := scenario.TargetBucketMemberNames(params.Bucket, params.BucketCount); err == nil {
+			lines = append(lines, fmt.Sprintf("Bucket Count: %d (%s ... %s)", params.BucketCount, names[0], names[len(names)-1]))
+		}
 	}
 	if (params.WorkloadType == WorkloadTypeDelete &&
 		(strings.TrimSpace(params.ItemsFile) != "" || params.DeleteExisting)) ||

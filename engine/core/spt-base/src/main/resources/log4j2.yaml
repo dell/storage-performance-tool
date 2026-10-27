@@ -77,6 +77,14 @@ Configuration:
         PatternLayout:
           # header: is removed as it's dynamically generated based on the passed quantiles
           pattern: "%m%n"
+      - name: metricsSteadyFileTotal
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}metrics.steady.total.csv"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          # the header is written with the first row, from the step's configured quantiles
+          pattern: "%m%n"
       - name: metricsThresholdFileTotal
         filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}metrics.threshold.total.csv"
         Policies:
@@ -340,6 +348,11 @@ Configuration:
         level: INFO
         AppenderRef:
           ref: metricsThresholdFileTotal
+        additivity: false
+      - name: com.dell.spt.base.logging.metrics.steady.FileTotal
+        level: INFO
+        AppenderRef:
+          ref: metricsSteadyFileTotal
         additivity: false
       - name: com.dell.spt.base.logging.metrics.ExtResultsFile
         level: INFO

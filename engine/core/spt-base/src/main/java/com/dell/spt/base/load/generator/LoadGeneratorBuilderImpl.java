@@ -50,6 +50,8 @@ import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.base.util.BinarySizeFormat;
+import com.dell.spt.base.item.op.OperationsBuilderImpl;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketSet;
 import com.github.akurilov.commons.collection.Range;
 import com.github.akurilov.commons.concurrent.throttle.IndexThrottle;
 import com.github.akurilov.commons.concurrent.throttle.Throttle;
@@ -85,6 +87,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 	private ItemType itemType = null;
 	private ItemFactory<I> itemFactory = null;
 	private Config authConfig = null;
+	private int targetBucketCount = 1;
 	private Output<O> opOutput = null;
 	private Input<I> itemInput = null;
 	private long sizeEstimate = -1;
@@ -121,6 +124,12 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 	@Override
 	public LoadGeneratorBuilderImpl<I, O, T> authConfig(final Config authConfig) {
 		this.authConfig = authConfig;
+		return this;
+	}
+
+	@Override
+	public LoadGeneratorBuilderImpl<I, O, T> targetBucketCount(final int count) {
+		this.targetBucketCount = count;
 		return this;
 	}
 
@@ -421,6 +430,15 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 				((DataOperationsBuilder) opsBuilder).srcItemsForConcat(srcItemsBuff);
 				itemInput = newItemInput();
 			}
+		}
+		if (targetBucketCount > 1 && OpType.CREATE.equals(opType) && ItemType.DATA.equals(itemType)) {
+			if (!(itemInput instanceof NewItemInput)) {
+				throw new IllegalConfigurationException("storage.targetBucket.count " + targetBucketCount
+								+ " applies only to newly generated objects, but this CREATE step has an item input");
+			}
+			((OperationsBuilderImpl<?, ?>) opsBuilder).targetBucketMembers(
+							TargetBucketSet.memberPaths(itemConfig.stringVal("output-path"), targetBucketCount),
+							ItemNameInputFactory.shardCount(itemConfig.configVal("naming")));
 		}
 		// adjust the storage drivers for the estimated transfer size
 		if (opOutput == null) {

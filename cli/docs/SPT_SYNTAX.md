@@ -83,10 +83,12 @@ Required for S3 workloads, optional/ignored for `mock`.
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
 | `--endpoints` | `-e` | *(required)* | One or more S3 endpoint URLs (comma-separated or repeatable) |
-| `--region` | | *(engine selection)* | AWS region for S3 requests; passed to engine YAML `storage.region`. Empty or omitted preserves the driver’s existing selection. |
+| `--region` | | *(engine selection)* | AWS region for S3 requests (env `S3_REGION`); passed to engine YAML `storage.region`. Empty or omitted uses the region of a standard AWS endpoint, else `us-east-1`. See [Target Buckets](TARGET_BUCKETS.md#region) |
+| `--provision-target-bucket` | | `true` | Create a missing target bucket before the phase that writes the run's objects. `false` still checks that every target bucket exists and is accessible. Never clears or deletes a bucket. See [Target Buckets](TARGET_BUCKETS.md) |
 | `--access-key` | `-a` | *(required)* | S3 access key credential |
 | `--secret-key` | `-s` | *(required)* | S3 secret key credential |
 | `--bucket` | `-b` | *(required)* | Target bucket to use for the test. In explicit-manifest DELETE mode it is an optional safety assertion checked against every source row; omit it to permit multiple buckets |
+| `--bucket-count` | | `1` | Spread the run's new objects over `N` buckets `<bucket>-0` ... `<bucket>-<N-1>` (1 to 1000). Existing objects keep the bucket their items file records. For `write`, `write-verify`, seeded `read`, seeded `delete` (with `--delete-batch-size=1`) and `mixed`. See [Target Buckets](TARGET_BUCKETS.md#bucket-sets) |
 | `--prefix` | | `""` | Literal generated-key prefix for `write` and `write-verify`; owned namespace root for seeded DELETE; listing constraint for `list` and LIST-based `read-verify`; rejected for `read`, `mixed`, `mock`, and `tables` |
 | `--auth-version` | | `4` | S3 signature version (`2` or `4`) |
 | `--slice-endpoints` | | `false` | Partition endpoints across nodes in distributed runs |
@@ -527,6 +529,16 @@ and existing-prefix DELETE consume frozen names and cannot rewrite them.
 Automatic mode is also a no-op for non-generating list workloads. Do not combine
 a positive or automatic CLI setting with an `item.naming.shards` engine override.
 
+**`--bucket-count` behavior:** with `--bucket-count N` greater than 1, every new
+object is written to one of `<bucket>-0` to `<bucket>-<N-1>`, chosen from its
+object id, so all buckets receive writes concurrently. The base `--bucket` itself
+is not one of them. Reads, deletes and cleanup use the bucket each object's items
+file or manifest records, so a later run with a different count still finds the
+earlier objects. With `--prefix-shards`, each bucket gets every shard directory.
+Phase setup checks and creates the buckets of the set as described in
+[Target Buckets](TARGET_BUCKETS.md#bucket-sets). The count is set only by this
+flag; an `--engine-override` of `storage.targetBucket.count` is rejected.
+
 ```bash
 # Automatic: three workers x 16 threads creates 48 prefix directories.
 spt run write \
@@ -561,6 +573,7 @@ spt run write \
 | `--keep-scenario` | | `false` | Keep the scenario file after test completion |
 | `--force` | | `false` | Resolve port conflicts and permit known engine build mismatches; invalid build information and collection failures remain non-forceable |
 | `--api-port` | | `9999` | SPT engine API port |
+| `--rmi-registry-port` | | `1099` | Engine RMI registry port for a local single-host run. Give each concurrent `spt run` on one host its own value (and its own `--api-port`); remote and distributed runs reject any other value |
 | `--skip-image-pull` | | `false` | Use locally cached Docker image without pulling |
 | `--output-dir` | `-O` | `""` | Local directory to save detailed SPT report files |
 | `--service-threads` | | `0` | Engine virtual-thread carrier parallelism (0 = JVM default `max(2, cpus/4)`) |

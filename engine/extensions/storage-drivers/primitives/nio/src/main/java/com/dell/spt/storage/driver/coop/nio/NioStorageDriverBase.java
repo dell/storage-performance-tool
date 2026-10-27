@@ -53,7 +53,20 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 	private final static String CLS_NAME = NioStorageDriverBase.class.getSimpleName();
 	private final static VirtualThreadExecutor IO_EXECUTOR = new VirtualThreadExecutor();
 
-	private final int ioWorkerCount;
+	/**
+	 * The buffer capacity of a worker that serves one concurrency permit. Such a worker is handed
+	 * an operation only while it is idle, so its buffer holds that one operation and whatever it
+	 * keeps active between invocations; the rest is slack. A worker blocked in one request must
+	 * not strand thousands of permits behind it.
+	 */
+	static final int PERMIT_WORKER_BUFF_CAPACITY = 4;
+
+	/** How long a worker that serves one permit waits for work before it checks its buffer again. */
+	private static final long PERMIT_WORKER_IDLE_WAIT_MILLIS = 100;
+
+	private final int nioWorkerCount;
+	private final boolean ioWorkerPerPermit;
+	private final long idleWaitMillis;
 	private final int opBuffCapacity;
 	private final List<Task> ioWorkers;
 	private final CircularBuffer<O>[] opBuffs;
@@ -63,26 +76,47 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 	private final AtomicLong rrc = new AtomicLong(0);
 	private final AtomicBoolean operationFailureReported = new AtomicBoolean(false);
 
-	@SuppressWarnings("unchecked")
 	public NioStorageDriverBase(
 					final String testStepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
 					final int batchSize) throws IllegalConfigurationException {
+		this(testStepId, dataInput, storageConfig, verifyFlag, batchSize, false);
+	}
+
+	/**
+	 * @param ioWorkerPerPermit whether, when {@code storage.driver.threads} is not set, to run one
+	 *     worker per concurrency permit instead of one per hardware thread. A driver whose
+	 *     {@link #invokeNio} blocks for the whole request needs this to keep the configured number
+	 *     of requests in flight: with fewer workers than permits, the permits beyond the worker
+	 *     count wait in the workers' buffers, and a worker blocked in a lost request strands the
+	 *     permits queued behind it.
+	 */
+	@SuppressWarnings("unchecked")
+	protected NioStorageDriverBase(
+					final String testStepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
+					final int batchSize, final boolean ioWorkerPerPermit) throws IllegalConfigurationException {
 		super(testStepId, dataInput, storageConfig, verifyFlag, batchSize);
 		final var confWorkerCount = storageConfig.intVal("driver-threads");
 		if (confWorkerCount > 0) {
-			ioWorkerCount = confWorkerCount;
+			nioWorkerCount = confWorkerCount;
 		} else if (concurrencyLimit > 0) {
-			ioWorkerCount = Math.min(concurrencyLimit, ThreadUtil.getHardwareThreadCount());
+			nioWorkerCount = ioWorkerPerPermit
+							? concurrencyLimit
+							: Math.min(concurrencyLimit, ThreadUtil.getHardwareThreadCount());
 		} else {
-			ioWorkerCount = ThreadUtil.getHardwareThreadCount();
+			nioWorkerCount = ThreadUtil.getHardwareThreadCount();
 		}
-		ioWorkers = new ArrayList<>(ioWorkerCount);
-		opBuffs = new CircularBuffer[ioWorkerCount];
-		opBuffLocks = new Lock[ioWorkerCount];
-		opAvailableConditions = new Condition[ioWorkerCount];
-		opBuffReserved = new int[ioWorkerCount];
-		opBuffCapacity = Math.max(MIN_TASK_BUFF_CAPACITY, concurrencyLimit / ioWorkerCount);
-		for (var i = 0; i < ioWorkerCount; i++) {
+		// One worker per permit holds, by construction, as long as no worker serves several permits.
+		this.ioWorkerPerPermit = ioWorkerPerPermit && concurrencyLimit > 0 && nioWorkerCount >= concurrencyLimit;
+		this.idleWaitMillis = this.ioWorkerPerPermit ? PERMIT_WORKER_IDLE_WAIT_MILLIS : 1;
+		ioWorkers = new ArrayList<>(nioWorkerCount);
+		opBuffs = new CircularBuffer[nioWorkerCount];
+		opBuffLocks = new Lock[nioWorkerCount];
+		opAvailableConditions = new Condition[nioWorkerCount];
+		opBuffReserved = new int[nioWorkerCount];
+		opBuffCapacity = this.ioWorkerPerPermit
+						? PERMIT_WORKER_BUFF_CAPACITY
+						: Math.max(MIN_TASK_BUFF_CAPACITY, concurrencyLimit / nioWorkerCount);
+		for (var i = 0; i < nioWorkerCount; i++) {
 			opBuffs[i] = new CircularArrayBuffer<>(opBuffCapacity);
 			opBuffLocks[i] = new ReentrantLock();
 			opAvailableConditions[i] = opBuffLocks[i].newCondition();
@@ -123,6 +157,9 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 			ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
 		}
 
+		// The single timed await is a safety net inside the task's own work loop: doWork() returns
+		// when the buffer is still empty, and the task calls it again.
+		@SuppressWarnings("WaitNotInLoop")
 		@Override
 		protected final void doWork() throws Exception {
 
@@ -131,8 +168,9 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 				var opBuffSize = opBuff.size();
 				if (opBuffSize == 0) {
 					// Wait for work — VT unmounts during await, freeing the carrier thread.
-					// The 1ms timeout is a safety net; normal wake-up is via signal from submit().
-					opAvailable.await(1, TimeUnit.MILLISECONDS);
+					// The timeout is a safety net; normal wake-up is via signal from submit(). A
+					// worker per permit waits longer, so that many idle workers cost few wake-ups.
+					opAvailable.await(idleWaitMillis, TimeUnit.MILLISECONDS);
 					opBuffSize = opBuff.size();
 					if (opBuffSize == 0) {
 						return;
@@ -173,14 +211,14 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 						throwUncheckedIfInterrupted(cause);
 						logOperationFailure(cause, "I/O operation invocation failure");
 						op.status(Operation.Status.FAIL_UNKNOWN);
-						concurrencyThrottle.release();
+						releaseCompletedPermit();
 						processedCount++;
 						handleCompletedSafely(op);
 						continue;
 					}
 					// remove the op from the buffer if it is not active more
 					if (!ACTIVE.equals(op.status())) {
-						concurrencyThrottle.release();
+						releaseCompletedPermit();
 						// Advance ownership before external result publication. If output throws,
 						// shutdown recovery must not revisit and release this permit again.
 						processedCount++;
@@ -224,6 +262,27 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 					signalDispatchCapacityAvailable();
 				}
 			}
+		}
+
+		/**
+		 * Releases the permit of an operation this worker has finished with. With a worker per
+		 * permit the worker first gives up its reservation for the operation, so that whoever takes
+		 * the permit finds this worker idle and hands it the next operation: all the worker has
+		 * left to do is publish the result. Before, the worker counted as busy until it had
+		 * published, and the next operation could be placed behind a worker blocked in a request.
+		 */
+		private void releaseCompletedPermit() {
+			if (ioWorkerPerPermit) {
+				opBuffLock.lock();
+				try {
+					if (opBuffReserved[workerIdx] > 0) {
+						opBuffReserved[workerIdx]--;
+					}
+				} finally {
+					opBuffLock.unlock();
+				}
+			}
+			concurrencyThrottle.release();
 		}
 
 		private boolean recoverUnprocessedLocalOperation(final O op) {
@@ -338,11 +397,21 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 		}
 	}
 
+	/** The number of I/O workers this driver runs. */
+	public final int ioWorkerCount() {
+		return nioWorkerCount;
+	}
+
+	/** Whether every concurrency permit has a worker of its own. */
+	public final boolean ioWorkerPerPermit() {
+		return ioWorkerPerPermit;
+	}
+
 	/**
 	Reentrant method which decorates the actual non-blocking create/read/etc I/O operation.
 	May change the task status or not change if the I/O operation is not completed during this
 	particular invocation
-	@param op
+	@param op the operation to invoke
 	*/
 	protected abstract void invokeNio(final O op);
 
@@ -407,24 +476,51 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 		if (!concurrencyThrottle.tryAcquire()) {
 			return false;
 		}
-		final var startIdx = (int) (rrc.getAndIncrement() % ioWorkerCount);
-		for (var i = 0; i < ioWorkerCount && isStarted(); i++) {
-			final var workerIdx = (startIdx + i) % ioWorkerCount;
-			final var opBuffLock = opBuffLocks[workerIdx];
-			if (opBuffLock.tryLock()) {
-				try {
-					final var bufferedCount = opBuffs[workerIdx].size() + opBuffReserved[workerIdx];
-					if (bufferedCount < opBuffCapacity && opBuffs[workerIdx].add(op)) {
-						opAvailableConditions[workerIdx].signal();
-						return true;
-					}
-				} finally {
-					opBuffLock.unlock();
-				}
-			}
+		final var startIdx = (int) (rrc.getAndIncrement() % nioWorkerCount);
+		if (placeOnWorker(op, startIdx) >= 0) {
+			return true;
 		}
 		concurrencyThrottle.release();
 		return false;
+	}
+
+	/**
+	 * Hands an operation to a worker, starting the round robin at the given worker. With a worker
+	 * per permit only an idle worker takes it: a worker busy with a blocking request would hold the
+	 * operation until that request ends, with the permit it carries. A worker releases a permit
+	 * only after it has given up its reservation for the operation that held it, so a permit in
+	 * hand means a worker that shows idle, and the caller retries when a race hides it.
+	 *
+	 * @return the worker that took the operation, or -1 when none could
+	 */
+	private int placeOnWorker(final O op, final int startIdx) {
+		return placeOnWorker(op, startIdx, ioWorkerPerPermit);
+	}
+
+	private int placeOnWorker(final O op, final int startIdx, final boolean idleOnly) {
+		for (var i = 0; i < nioWorkerCount && isStarted(); i++) {
+			final var workerIdx = (startIdx + i) % nioWorkerCount;
+			final var opBuffLock = opBuffLocks[workerIdx];
+			// A worker holds its buffer lock only while it takes its batch or releases a permit. The
+			// idle pass waits for it, so that an idle worker is never passed over; the pass over all
+			// workers keeps trying the lock, as it always has.
+			if (idleOnly) {
+				opBuffLock.lock();
+			} else if (!opBuffLock.tryLock()) {
+				continue;
+			}
+			try {
+				final var bufferedCount = opBuffs[workerIdx].size() + opBuffReserved[workerIdx];
+				final var hasRoom = idleOnly ? bufferedCount == 0 : bufferedCount < opBuffCapacity;
+				if (hasRoom && opBuffs[workerIdx].add(op)) {
+					opAvailableConditions[workerIdx].signal();
+					return workerIdx;
+				}
+			} finally {
+				opBuffLock.unlock();
+			}
+		}
+		return -1;
 	}
 
 	@Override
@@ -449,34 +545,14 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 		}
 		var submitted = 0;
 		var opIdx = from;
-		var nextStartIdx = (int) (rrc.getAndIncrement() % ioWorkerCount);
+		var nextStartIdx = (int) (rrc.getAndIncrement() % nioWorkerCount);
 		while (submitted < permits && isStarted()) {
-			var accepted = false;
-			for (var i = 0; i < ioWorkerCount; i++) {
-				final var workerIdx = (nextStartIdx + i) % ioWorkerCount;
-				final var opBuffLock = opBuffLocks[workerIdx];
-				if (opBuffLock.tryLock()) {
-					try {
-						final var opBuff = opBuffs[workerIdx];
-						final var bufferedCount = opBuff.size() + opBuffReserved[workerIdx];
-						if (bufferedCount < opBuffCapacity && opBuff.add(ops.get(opIdx))) {
-							opAvailableConditions[workerIdx].signal();
-							accepted = true;
-						}
-					} finally {
-						opBuffLock.unlock();
-					}
-				}
-				if (accepted) {
-					break;
-				}
-			}
-			if (!accepted) {
+			if (placeOnWorker(ops.get(opIdx), nextStartIdx) < 0) {
 				break;
 			}
 			submitted++;
 			opIdx++;
-			nextStartIdx = (nextStartIdx + 1) % ioWorkerCount;
+			nextStartIdx = (nextStartIdx + 1) % nioWorkerCount;
 		}
 		if (submitted < permits) {
 			concurrencyThrottle.release(permits - submitted);
@@ -493,7 +569,7 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 	@Override
 	protected final List<O> recoverAdditionalQueuedOperations() {
 		final var recovered = new ArrayList<O>();
-		for (var i = 0; i < ioWorkerCount; i++) {
+		for (var i = 0; i < nioWorkerCount; i++) {
 			final var opBuffLock = opBuffLocks[i];
 			opBuffLock.lock();
 			try {
@@ -546,7 +622,7 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 						});
 		ioWorkers.clear();
 
-		for (var i = 0; i < ioWorkerCount; i++) {
+		for (var i = 0; i < nioWorkerCount; i++) {
 			try (final var logCtx = CloseableThreadContext.put(KEY_CLASS_NAME, CLS_NAME)) {
 				if (opBuffLocks[i].tryLock(1, TimeUnit.SECONDS)) {
 					try {

@@ -137,6 +137,14 @@ output:
     trace:
       persist: false
     threshold: 0
+    # Steady-State Window: starts once completions reach warmup.turnovers x operations in
+    # flight; "valid" needs at least min.turnovers and min.duration (0 disables either).
+    steady:
+      warmup:
+        turnovers: 1
+      min:
+        turnovers: 20
+        duration: 20s
     timing:
       persist: false
     quantiles:
@@ -152,7 +160,7 @@ run:
   node: false
   port: 9999
   scenario: null
-  version: 5.16.0
+  version: 5.16.2
 
 log:
   level: info
@@ -199,6 +207,14 @@ storage:
       selection: default
     node:
       slice: false
+  # Before a step starts, the controller engine checks its S3 target buckets and creates a missing
+  # one for a step that writes new objects. false still checks them but never creates one.
+  targetBucket:
+    # Number of buckets a step writes new objects into: 1 writes under item.output.path; N > 1
+    # spreads new objects over <base>-0 ... <base>-<N-1>, where <base> is the output path's bucket.
+    # Existing objects keep the bucket their input records. At most 1000.
+    count: 1
+    provision: true
 
 aliasing:
 # common

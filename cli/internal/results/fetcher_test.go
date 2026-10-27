@@ -166,6 +166,71 @@ func TestDefaultArtifactsRegisterCompleteDeleteEvidence(t *testing.T) {
 	}
 }
 
+func TestFetcherRetrievesOptionalSteadyTotalsFromEntryNode(t *testing.T) {
+	const steadyLogger = "metrics.steady.FileTotal"
+	registered := 0
+	for _, spec := range DefaultArtifacts {
+		if spec.Suffix == constants.ResultsArtifactSuffixMetricsSteady {
+			registered++
+			if spec.Required || len(spec.Loggers) != 1 || spec.Loggers[0] != steadyLogger {
+				t.Fatalf("steady totals spec = %+v, want optional logger %q", spec, steadyLogger)
+			}
+		}
+	}
+	if registered != 1 {
+		t.Fatalf("steady totals registered %d times, want once", registered)
+	}
+
+	const newStep, oldStep = "mt-001-20261024.120000.000-read", "mt-002-20261024.120000.000-delete"
+	steady := "OpType,SteadyStatus\nREAD,valid\n"
+	indexHandler := func(step string, steadyListed bool) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			items := []map[string]any{{"logger": "metrics.FileTotal", "size": 5}}
+			if steadyListed {
+				items = append(items, map[string]any{"logger": steadyLogger, "size": len(steady)})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"step_id": step, "items": items})
+		}
+	}
+	total := func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("total")) }
+	// An engine before 5.17 does not list the steady logger in its step index.
+	srv := newTestServer(t, map[string]http.HandlerFunc{
+		"/logs/" + newStep + "/index.json":        indexHandler(newStep, true),
+		"/logs/" + newStep + "/metrics.FileTotal": total,
+		"/logs/" + newStep + "/" + steadyLogger:   func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(steady)) },
+		"/logs/" + oldStep + "/index.json":        indexHandler(oldStep, false),
+		"/logs/" + oldStep + "/metrics.FileTotal": total,
+	})
+	defer srv.Close()
+
+	out := t.TempDir()
+	f := NewFetcher(srv.URL, out)
+	f.Sleeper = func(time.Duration) {}
+	man, err := f.FetchArtifactsForSteps(context.Background(), []string{newStep, oldStep})
+	if err != nil {
+		t.Fatalf("FetchArtifactsForSteps error: %v", err)
+	}
+	statusOf := func(sm StepManifest) FileStatus {
+		for _, file := range sm.Files {
+			if file.Name == sm.StepID+"."+constants.ResultsArtifactSuffixMetricsSteady {
+				return file
+			}
+		}
+		t.Fatalf("step %s has no steady totals entry: %+v", sm.StepID, sm.Files)
+		return FileStatus{}
+	}
+	if got := statusOf(man.Steps[0]); got.Status != fileStatusOK || got.Size != int64(len(steady)) {
+		t.Fatalf("new engine steady totals entry = %+v", got)
+	}
+	content, err := os.ReadFile(filepath.Join(out, newStep+"."+constants.ResultsArtifactSuffixMetricsSteady))
+	if err != nil || string(content) != steady {
+		t.Fatalf("steady totals content = %q, %v", content, err)
+	}
+	if got := statusOf(man.Steps[1]); got.Status != fileStatusMissing || got.Error != "" {
+		t.Fatalf("old engine steady totals entry = %+v, want missing without error", got)
+	}
+}
+
 func TestSuccessfulDeleteTotalsDoesNotSubstituteForRequiredGenericTotals(t *testing.T) {
 	sm := StepManifest{StepID: "mt-001-delete", Files: []FileStatus{
 		{Name: "mt-001-delete.delete.metrics.total.csv", Status: fileStatusOK},

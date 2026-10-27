@@ -26,5 +26,20 @@ storage:
     partSizeBytes: long
     smallObjectThresholdBytes: long
     optimizeForSmallObjects: boolean
+    # Milliseconds allowed to establish a connection, for every S3 client of the driver.
     connectionTimeoutMs: int
+    # Milliseconds a connection with a request in flight may move no data before it is closed and
+    # the request fails (an idle timeout, not a request deadline). 0 does not detect stalled
+    # requests; any other value is at least 2000, applied in whole seconds rounded down. A client may retry the
+    # request on a new connection, so a request that stalls on every attempt fails after all of
+    # them.
     socketTimeoutMs: int
+    # Milliseconds a request may take from the moment the driver makes it until its response has
+    # been read in full, a GET's body included. A request that outlives this is cancelled and fails
+    # as a timeout. It covers a request the client has lost with no connection for the socket
+    # timeout to watch. Must exceed the longest request the workload makes; 0 waits without bound.
+    requestTimeoutMs: int
+    # Milliseconds the requests in flight get to finish once the load step stops (closes admission)
+    # before the driver cancels them, so that the stop does not wait on a request that never ends.
+    # 0 leaves them to the step's wait (load.op.wait.limit) and the stop of the workers.
+    stopTimeoutMs: int

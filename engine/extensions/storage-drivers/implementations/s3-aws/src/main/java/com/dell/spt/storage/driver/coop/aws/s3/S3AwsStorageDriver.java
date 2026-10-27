@@ -43,11 +43,15 @@ import java.io.IOException;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 
 import org.reactivestreams.Publisher;
@@ -89,6 +93,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	private static final Logger LOG = LoggerFactory.getLogger(S3AwsStorageDriver.class);
 
+	/** How often the request watchdog looks at the requests in flight. */
+	static final long WATCHDOG_TICK_MILLIS = 100;
+	private static final long NOT_STOPPING = Long.MIN_VALUE;
+
 	@Override
 	protected boolean integrityAdditionalPayloadPassRequired(final O op) {
 		return checksumEnabled && checksumAlgorithm != null
@@ -129,6 +137,31 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private final Map<String, String> objectTags;
 	private final long smallObjectThresholdBytes;
 	private final long partSizeBytes;
+	private final AtomicBoolean stallFailureReported = new AtomicBoolean();
+	private final AtomicBoolean timeoutFailureReported = new AtomicBoolean();
+	private final AtomicBoolean cancellationReported = new AtomicBoolean();
+	private final S3AwsClientTimeouts timeouts;
+	/** How long a request may take in all before the driver ends it; 0 for no deadline. */
+	private final long requestTimeoutNanos;
+	/** The requests being waited for or read, so that the watchdog can end them. */
+	private final Set<S3AwsInFlightRequest> requestsInFlight = ConcurrentHashMap.newKeySet();
+	/** When the stop grace ends, or {@link #NOT_STOPPING} while admission is open. */
+	private final AtomicLong stopDeadlineNanos = new AtomicLong(NOT_STOPPING);
+	/**
+	 * Set by the watchdog before it ends the requests in flight at stop, so that a request made
+	 * after that is ended at once; cleared when admission opens again.
+	 */
+	private volatile boolean stopGraceOver;
+	/**
+	 * Guards the watchdog thread and the stop: the watchdog ends the requests in flight at stop
+	 * under this lock, from reading the deadline to the last request, and a restart resets the stop
+	 * under it, so that a stop of an earlier cycle has ended before the next cycle admits anything
+	 * and a sweep that starts after the reset sees no stop. The driver's own monitor is not used:
+	 * it is held while a client is built.
+	 */
+	private final Object watchdogLock = new Object();
+	private volatile Thread requestWatchdog;
+	private volatile boolean closed;
 
 	public S3AwsStorageDriver(
 					final String stepId,
@@ -231,7 +264,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					final long smallObjectThresholdBytes,
 					final long partSizeBytes)
 					throws IllegalConfigurationException {
-		super(stepId, dataInput, config, verifyFlag, batchSize);
+		// Every request blocks its worker, so a worker per permit keeps the configured number of
+		// requests in flight; see NioStorageDriverBase.
+		super(stepId, dataInput, config, verifyFlag, batchSize, true);
+		this.timeouts = S3AwsClientTimeouts.forDriver(config);
+		this.requestTimeoutNanos = timeouts.requestTimeout().toNanos();
 		if (verifyFlag) {
 			throw new IllegalConfigurationException(
 							"S3-AWS driver does not support legacy item.data.verify; "
@@ -252,6 +289,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		this.uploadExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
 		this.bucketName = resolveBucketName(config);
+		// The controller engine checks and creates target buckets before any slice starts, so a
+		// worker initializes no bucket and no output path costs a bucket request.
+		this.requestNewPathFunc = null;
 
 		boolean ckEnabled = false;
 		ChecksumAlgorithm ckAlgo = null;
@@ -423,8 +463,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		final boolean aborting = mpuOp != null && mpuOp.get(KEY_MPU_ABORT) != null;
 		final boolean completing = mpuOp != null && !aborting && mpuOp.allSubOperationsDone();
 		try {
-			// Execute AWS SDK operation asynchronously and block for result.
-			execute(op).join();
+			// Each request is waited for where it is made, and its response applied on this worker.
+			// Stopping the worker interrupts it, which cancels the request.
+			awaitRequest(execute(op));
 
 			// Set bytes transferred for metrics (skip READs — readObject sets actual bytes).
 			if (op.type() != OpType.READ && op.item() instanceof DataItem) {
@@ -452,13 +493,13 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			}
 
 		} catch (final Exception e) {
-			final Status originalStatus = classifyFailure(e);
+			final Status originalStatus = failureStatus(e);
 			if (aborting) {
 				emitMultipartLifecycle(
 								mpuOp, "failed_orphaned", true, false, "abort failed: " + originalStatus.name());
 			} else if (completing && mpuOp.get(KEY_UPLOAD_ID) != null) {
 				try {
-					abortMultipartUpload(mpuOp).join();
+					awaitRequest(abortMultipartUpload(mpuOp));
 					emitMultipartLifecycle(
 									mpuOp, "failed_aborted", true, true, "completion failed: " + originalStatus.name());
 				} catch (final Exception abortFailure) {
@@ -468,23 +509,34 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 									true,
 									false,
 									"completion failed: " + originalStatus.name()
-													+ "; abort failed: " + classifyFailure(abortFailure).name());
+													+ "; abort failed: " + failureStatus(abortFailure).name());
 				}
 			}
 			if (op instanceof DeleteRequestOperation deleteOperation) {
 				if (deleteOperation.deleteResult() == null) {
-					deleteOperation.completeDelete(DeleteTransportResult.failure(
-									originalStatus, DELETE_TRANSPORT_FAILURE));
+					if (originalStatus == Status.INTERRUPTED) {
+						// A cancelled DELETE may or may not have been carried out, so it gets no
+						// result, like any operation still active when the driver stops.
+						op.status(originalStatus);
+					} else {
+						deleteOperation.completeDelete(DeleteTransportResult.failure(
+										originalStatus, DELETE_TRANSPORT_FAILURE));
+					}
 				}
 			} else {
 				op.status(originalStatus);
 			}
 			final Throwable failure = e instanceof java.util.concurrent.CompletionException
 							&& e.getCause() != null ? e.getCause() : e;
-			if (op instanceof DeleteRequestOperation deleteOperation) {
+			if (originalStatus == Status.INTERRUPTED) {
+				logCancelledRequest(op);
+			} else if (op instanceof DeleteRequestOperation deleteOperation) {
 				LOG.debug(
 								"Standalone DELETE request with {} targets failed: {}",
 								deleteOperation.deleteRequest().targets().size(), originalStatus);
+			} else if (originalStatus == Status.FAIL_TIMEOUT) {
+				logTimeoutFailure(op, failure);
+				LOG.debug("{} {} stack trace", op.type(), op.item().name(), e);
 			} else {
 				LOG.error(
 								"{} {} requested version {} failed: {}: {}",
@@ -501,6 +553,196 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				}
 			}
 		}
+	}
+
+	/**
+	 * Registers a request this worker is about to make, with the deadline of
+	 * storage.crt.requestTimeoutMs, where the watchdog can end it. A mocked driver without a
+	 * constructor has no deadline and no watchdog.
+	 */
+	private S3AwsInFlightRequest trackRequest() {
+		final var request = new S3AwsInFlightRequest(requestsInFlight, requestTimeoutNanos);
+		// Registered first, then checked: the watchdog sets the flag before it sweeps the requests
+		// in flight, so a request made once the grace is over is ended here or by that sweep.
+		if (stopGraceOver) {
+			request.stop();
+		}
+		return request;
+	}
+
+	/** Waits for a request on this worker, within its deadline, where the watchdog can end it. */
+	<T> T awaitRequest(final CompletableFuture<T> request) {
+		try (final var inFlight = trackRequest()) {
+			return inFlight.await(request);
+		}
+	}
+
+	/**
+	 * Admission opens as the driver starts or restarts: a stop of an earlier cycle is over. The
+	 * reset waits for a stop sweep the watchdog has begun, so that the sweep cannot end a request
+	 * of the new cycle or flag its grace as over.
+	 */
+	@Override
+	protected void onAdmissionOpened() {
+		if (timeouts == null) {
+			return;
+		}
+		synchronized (watchdogLock) {
+			stopDeadlineNanos.set(NOT_STOPPING);
+			stopGraceOver = false;
+			ensureRequestWatchdog();
+		}
+	}
+
+	/**
+	 * The load step closes admission first when it stops, then waits for the requests in flight
+	 * before it stops the workers. A request the client has lost would make it wait for the whole
+	 * of load.op.wait.limit and leave the operation active, so the requests in flight get
+	 * storage.crt.stopTimeoutMs from here to finish, and the watchdog then ends them.
+	 */
+	@Override
+	protected void onAdmissionClosed() {
+		if (timeouts == null || !timeouts.cancelAtStopEnabled()) {
+			return;
+		}
+		stopDeadlineNanos.compareAndSet(NOT_STOPPING, System.nanoTime() + timeouts.stopTimeout().toNanos());
+		ensureRequestWatchdog();
+	}
+
+	/**
+	 * Runs the watchdog unless it is running or the driver is closed. One virtual thread per driver
+	 * looks at the requests in flight every {@link #WATCHDOG_TICK_MILLIS}: it ends a request whose
+	 * deadline has passed, a GET still reading its body included, and once the stop grace is over
+	 * it ends them all. No timer is armed per request.
+	 */
+	private void ensureRequestWatchdog() {
+		if ((!timeouts.requestBoundEnabled() && !timeouts.cancelAtStopEnabled()) || requestWatchdogRunning()) {
+			// A running watchdog is not waited for: it may be ending the requests in flight.
+			return;
+		}
+		synchronized (watchdogLock) {
+			final Thread running = requestWatchdog;
+			if (closed || (running != null && running.isAlive())) {
+				return;
+			}
+			requestWatchdog = Thread.ofVirtual().name("s3-aws-request-watchdog-" + stepId).start(() -> {
+				while (!closed) {
+					try {
+						Thread.sleep(WATCHDOG_TICK_MILLIS);
+					} catch (final InterruptedException closing) {
+						return;
+					}
+					sweepRequests(System.nanoTime());
+				}
+			});
+		}
+	}
+
+	/** Whether the watchdog is running; for tests. */
+	boolean requestWatchdogRunning() {
+		final Thread running = requestWatchdog;
+		return running != null && running.isAlive();
+	}
+
+	/**
+	 * Ends the requests whose deadline passed before the given time and, once the stop grace is
+	 * over, every request in flight. Each then ends its operation on its worker.
+	 */
+	void sweepRequests(final long nowNanos) {
+		if (stopRequestsIfGraceOver(nowNanos)) {
+			return;
+		}
+		for (final S3AwsInFlightRequest request : requestsInFlight) {
+			if (request.expired(nowNanos)) {
+				request.timeOut();
+			}
+		}
+	}
+
+	/**
+	 * Ends every request in flight if the stop grace was over at the given time, under the
+	 * watchdog lock: the deadline is read, the grace flagged as over and the requests ended before
+	 * a restart can reset the stop, and a restart that has reset it leaves nothing to end.
+	 *
+	 * @return whether the grace was over
+	 */
+	private boolean stopRequestsIfGraceOver(final long nowNanos) {
+		synchronized (watchdogLock) {
+			final long stopAt = stopDeadlineNanos.get();
+			if (stopAt == NOT_STOPPING || nowNanos - stopAt < 0) {
+				return false;
+			}
+			stopGraceOver = true;
+			final int ended = stopRequestsInFlight();
+			if (ended > 0) {
+				LOG.warn(
+								"{} request(s) still in flight {} ms after the step stopped were cancelled (storage.crt.{})",
+								ended, timeouts.stopTimeout().toMillis(), S3AwsClientTimeouts.STOP_TIMEOUT_KEY);
+			}
+			return true;
+		}
+	}
+
+	/**
+	 * Ends every request in flight because the step stopped, and returns how many it ended. Called
+	 * under the watchdog lock; a test may override it to hold a sweep.
+	 */
+	int stopRequestsInFlight() {
+		int ended = 0;
+		for (final S3AwsInFlightRequest request : requestsInFlight) {
+			if (request.stop()) {
+				ended++;
+			}
+		}
+		return ended;
+	}
+
+	/**
+	 * Timeouts come in bursts when a server or a network path stalls, so only the first one of each
+	 * kind is logged above DEBUG. Every failed operation is still counted and written to the errors
+	 * log by the load step. Only a connection the stall monitor closed is put down to
+	 * storage.crt.socketTimeoutMs: a gateway timeout or a call deadline says nothing about it.
+	 *
+	 * @return whether this was the first timeout of its kind, which is logged as a warning
+	 */
+	boolean logTimeoutFailure(final O op, final Throwable failure) {
+		if (S3AwsClientTimeouts.isStall(failure)) {
+			if (stallFailureReported.compareAndSet(false, true)) {
+				LOG.warn(
+								"{} {} timed out: {}. The connection moved no data for storage.crt.{}; further stalled"
+												+ " requests are logged at DEBUG",
+								op.type(), op.item().name(), failure, S3AwsClientTimeouts.SOCKET_TIMEOUT_KEY);
+				return true;
+			}
+		} else if (timeoutFailureReported.compareAndSet(false, true)) {
+			LOG.warn(
+							"{} {} timed out: {}. Further timeouts of this kind are logged at DEBUG",
+							op.type(), op.item().name(), failure);
+			return true;
+		}
+		LOG.debug("{} {} timed out: {}", op.type(), op.item().name(), failure);
+		return false;
+	}
+
+	/**
+	 * A request the driver cancels when it stops has outlived the load step's wait for the
+	 * requests in flight, which is worth a warning; only the first one is logged above DEBUG.
+	 *
+	 * @return whether this was the first cancelled request, which is logged as a warning
+	 */
+	boolean logCancelledRequest(final O op) {
+		final String request = op instanceof DeleteRequestOperation deleteOperation
+						? "DELETE request with " + deleteOperation.deleteRequest().targets().size() + " targets"
+						: op.type() + " " + op.item().name();
+		if (cancellationReported.compareAndSet(false, true)) {
+			LOG.warn(
+							"{} was still in flight when the driver stopped, so it was cancelled; further cancelled requests are"
+											+ " logged at DEBUG",
+							request);
+			return true;
+		}
+		LOG.debug("{} was cancelled because the driver stopped", request);
+		return false;
 	}
 
 	private void finishStandaloneDeleteOperation(final O op) {
@@ -551,6 +793,17 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	}
 
 	/**
+	 * A worker is interrupted only to stop it, and whatever a request ends with then, the driver
+	 * cancelled it. A request the watchdog ended after the step stopped ended the same way.
+	 */
+	private static Status failureStatus(final Exception e) {
+		if (Thread.currentThread().isInterrupted() || e instanceof S3AwsRequests.RequestStoppedException) {
+			return Status.INTERRUPTED;
+		}
+		return classifyFailure(e);
+	}
+
+	/**
 	 * Map an exception to the most specific Operation.Status failure code.
 	 * Unwraps CompletionException to handle async failures properly.
 	 */
@@ -587,7 +840,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			}
 		}
 		if (ex instanceof ApiCallTimeoutException || ex instanceof ApiCallAttemptTimeoutException
-						|| ex instanceof TimeoutException) {
+						|| ex instanceof TimeoutException || S3AwsClientTimeouts.isStall(ex)
+						|| S3AwsClientTimeouts.isSocketTimeout(ex)) {
 			return Status.FAIL_TIMEOUT;
 		}
 		if (ex instanceof IOException || (ex instanceof SdkClientException && ex.getCause() instanceof IOException)) {
@@ -596,39 +850,15 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		return Status.FAIL_UNKNOWN;
 	}
 
+	/**
+	 * Returns the bucket path of an output path without any request. The driver does not
+	 * initialize paths: the controller engine provisions target buckets before slices start.
+	 */
 	@Override
 	protected String requestNewPath(final String path) {
-		// Extract bucket name from path and validate/create it
-		// Path format: /bucketname or /bucketname/prefix
 		final String relPath = path.startsWith("/") ? path.substring(1) : path;
 		final int slashPos = relPath.indexOf('/');
-		final String targetBucket = slashPos > 0 ? relPath.substring(0, slashPos) : relPath;
-		final String bucketPath = "/" + targetBucket;
-
-		try {
-			// Validate that the target bucket exists
-			s3AsyncClient.headBucket(HeadBucketRequest.builder().bucket(targetBucket).build()).join();
-		} catch (Exception e) {
-			if (e.getCause() instanceof NoSuchBucketException || isNoSuchBucket(e)) {
-				// Bucket doesn't exist — create it (matches standard S3 driver behavior)
-				try {
-					s3AsyncClient.createBucket(CreateBucketRequest.builder().bucket(targetBucket).build()).join();
-				} catch (Exception createEx) {
-					throw new RuntimeException("Failed to create bucket: " + targetBucket, createEx);
-				}
-			} else {
-				throw new RuntimeException("Failed to validate bucket: " + targetBucket, e);
-			}
-		}
-
-		return bucketPath;
-	}
-
-	private boolean isNoSuchBucket(Exception e) {
-		if (e.getCause() instanceof S3Exception) {
-			return ((S3Exception) e.getCause()).statusCode() == 404;
-		}
-		return false;
+		return "/" + (slashPos > 0 ? relPath.substring(0, slashPos) : relPath);
 	}
 
 	@Override
@@ -892,9 +1122,15 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				final long size = dataItem.size();
 				if (size <= 8 * 1024) {
 					ByteBuffer buffer = ByteBuffer.allocate((int) size);
-					int bytesRead = dataItem.read(buffer);
-					if (bytesRead != size) {
-						return CompletableFuture.failedFuture(new IOException("Unexpected read size"));
+					if (dataItem.read(buffer) != size) {
+						// A dedupable item's read stops at the end of the data input ring, so an object
+						// that wraps it needs another read for the rest.
+						while (buffer.hasRemaining()) {
+							if (dataItem.read(buffer) <= 0) {
+								return CompletableFuture.failedFuture(new IOException(
+												"Unexpected read size: " + buffer.position() + " of " + size + " bytes"));
+							}
+						}
 					}
 					buffer.flip();
 					return dispatchPutObject(
@@ -926,9 +1162,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private CompletableFuture<Void> dispatchPutObject(
 					final O op, final PutObjectRequest request, final AsyncRequestBody body) {
 		markIntegrityRequestDispatched();
-		return s3AsyncClient.putObject(request, body)
-						.thenAccept(response -> captureResponseIdentity(
-										op, response.versionId(), requestId(response)));
+		final var response = awaitRequest(s3AsyncClient.putObject(request, body));
+		captureResponseIdentity(op, response.versionId(), requestId(response));
+		return CompletableFuture.completedFuture(null);
 	}
 
 	private static void captureResponseIdentity(
@@ -957,9 +1193,20 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		final S3AsyncClient readClient = identity.versionId() == null
 						? s3AsyncClient
 						: exactVersionS3Client();
-		try (var response = readClient.getObject(
-						reqBuilder.build(),
-						AsyncResponseTransformer.toBlockingInputStream()).join()) {
+		// The response arrives with the headers; the body is read from the stream on this worker.
+		// The request stays in flight, with its deadline, until the body has been read.
+		try (final var inFlight = trackRequest()) {
+			readObject(op, inFlight, readClient, reqBuilder.build());
+		}
+		return CompletableFuture.completedFuture(null);
+	}
+
+	private void readObject(
+					final O op, final S3AwsInFlightRequest inFlight, final S3AsyncClient readClient,
+					final GetObjectRequest request) {
+		try (var response = inFlight.await(readClient.getObject(
+						request, AsyncResponseTransformer.toBlockingInputStream()))) {
+			inFlight.body(response);
 			final GetObjectResponse getResponse = response.response();
 			captureResponseIdentity(
 							op, getResponse.versionId(), requestId(getResponse));
@@ -993,11 +1240,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				}
 			}
 			op.finishResponse();
-		} catch (IOException e) {
-			throw new RuntimeException("Failed to read S3 object data", e);
+		} catch (final IOException | RuntimeException e) {
+			throw inFlight.failure(e, "Failed to read S3 object data");
 		}
-
-		return CompletableFuture.completedFuture(null);
 	}
 
 	private synchronized S3AsyncClient exactVersionS3Client() {
@@ -1062,8 +1307,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		if (identity.versionId() != null) {
 			request.versionId(identity.versionId());
 		}
-		return deleteClient(identity.versionId() != null).deleteObject(request.build())
-						.thenApply(response -> null);
+		awaitRequest(deleteClient(identity.versionId() != null).deleteObject(request.build()));
+		return CompletableFuture.completedFuture(null);
 	}
 
 	private CompletableFuture<Void> deleteRequest(final DeleteRequestOperation operation) {
@@ -1081,14 +1326,14 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			}
 			final DeleteObjectRequest builtRequest = sdkRequest.build();
 			final S3AsyncClient client = standaloneDeleteClient(target.versionId() != null);
-			return client.deleteObject(builtRequest)
-							.handle((response, failure) -> {
-								completeDelete(
-												operation,
-												failure,
-												response == null ? null : DeleteTransportResult.success(request.targets()));
-								return null;
-							});
+			try {
+				awaitRequest(client.deleteObject(builtRequest));
+			} catch (final CompletionException failure) {
+				failDelete(operation, failure);
+				return CompletableFuture.completedFuture(null);
+			}
+			operation.completeDelete(DeleteTransportResult.success(request.targets()));
+			return CompletableFuture.completedFuture(null);
 		}
 
 		final var objectIdentifiers = request.targets().stream()
@@ -1107,11 +1352,15 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		final boolean exactVersion = request.targets().stream()
 						.anyMatch(target -> target.versionId() != null);
 		final S3AsyncClient client = standaloneDeleteClient(exactVersion);
-		return client.deleteObjects(sdkRequest)
-						.handle((response, failure) -> {
-							completeDelete(operation, failure, deleteTransportResult(response));
-							return null;
-						});
+		final DeleteObjectsResponse response;
+		try {
+			response = awaitRequest(client.deleteObjects(sdkRequest));
+		} catch (final CompletionException failure) {
+			failDelete(operation, failure);
+			return CompletableFuture.completedFuture(null);
+		}
+		operation.completeDelete(deleteTransportResult(response));
+		return CompletableFuture.completedFuture(null);
 	}
 
 	private static ObjectIdentifier objectIdentifier(final DeleteTarget target) {
@@ -1149,18 +1398,12 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		return message == null || message.isEmpty() ? code : code + ": " + message;
 	}
 
-	private static void completeDelete(
-					final DeleteRequestOperation operation,
-					final Throwable failure,
-					final DeleteTransportResult successfulResult) {
-		if (failure == null) {
-			operation.completeDelete(successfulResult);
-			return;
-		}
-		final Exception exception = failure instanceof Exception
-						? (Exception) failure
-						: new RuntimeException(failure);
-		final Status status = classifyFailure(exception);
+	/**
+	 * A request that failed gets one conservative failed result. A cancelled request is left to
+	 * invokeNio, which gives a DELETE cancelled at stop no result.
+	 */
+	private static void failDelete(final DeleteRequestOperation operation, final CompletionException failure) {
+		final Status status = classifyFailure(failure);
 		LOG.debug(
 						"Standalone DELETE request with {} targets failed: {}",
 						operation.deleteRequest().targets().size(), status);
@@ -1188,8 +1431,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		if (identity.versionId() != null) {
 			request.versionId(identity.versionId());
 		}
-		return deleteClient(identity.versionId() != null).headObject(request.build())
-						.thenApply(response -> null);
+		awaitRequest(deleteClient(identity.versionId() != null).headObject(request.build()));
+		return CompletableFuture.completedFuture(null);
 	}
 
 	@SuppressWarnings("unchecked")
@@ -1242,51 +1485,50 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			}
 		}
 
-		return s3AsyncClient.listObjectsV2(reqBuilder.build())
-						.thenAccept(resp -> {
-							int objectCount = 0;
-							long bytesTotal = 0;
-							final List<ListedObject> listedObjects = new ArrayList<>(resp.contents().size());
-							String firstKey = null;
-							String lastKey = null;
+		final ListObjectsV2Response resp = awaitRequest(s3AsyncClient.listObjectsV2(reqBuilder.build()));
+		int objectCount = 0;
+		long bytesTotal = 0;
+		final List<ListedObject> listedObjects = new ArrayList<>(resp.contents().size());
+		String firstKey = null;
+		String lastKey = null;
 
-							for (S3Object s3obj : resp.contents()) {
-								objectCount++;
-								if (options.fetchMetadata()) {
-									bytesTotal += s3obj.size();
-								}
-								final var key = s3obj.key();
-								listedObjects.add(new ListedObject(key, Math.max(0, s3obj.size())));
-								if (firstKey == null) {
-									firstKey = key;
-								}
-								lastKey = key;
-							}
+		for (S3Object s3obj : resp.contents()) {
+			objectCount++;
+			if (options.fetchMetadata()) {
+				bytesTotal += s3obj.size();
+			}
+			final var key = s3obj.key();
+			listedObjects.add(new ListedObject(key, Math.max(0, s3obj.size())));
+			if (firstKey == null) {
+				firstKey = key;
+			}
+			lastKey = key;
+		}
 
-							listOp.objectsListed(objectCount);
-							listOp.listedObjects(listedObjects);
-							listOp.bytesListed(options.fetchMetadata() ? bytesTotal : 0);
-							listOp.truncated(Boolean.TRUE.equals(resp.isTruncated()));
+		listOp.objectsListed(objectCount);
+		listOp.listedObjects(listedObjects);
+		listOp.bytesListed(options.fetchMetadata() ? bytesTotal : 0);
+		listOp.truncated(Boolean.TRUE.equals(resp.isTruncated()));
 
-							if (firstKey != null) {
-								listOp.pageFirstKey(firstKey);
-							}
-							listOp.continuationToken(resp.nextContinuationToken());
+		if (firstKey != null) {
+			listOp.pageFirstKey(firstKey);
+		}
+		listOp.continuationToken(resp.nextContinuationToken());
 
-							// Update options with the new continuation token for the next page
-							listOp.options(
-											options.toBuilder()
-															.continuationToken(resp.nextContinuationToken())
-															.build());
+		// Update options with the new continuation token for the next page
+		listOp.options(
+						options.toBuilder()
+										.continuationToken(resp.nextContinuationToken())
+										.build());
 
-							if (lastKey != null) {
-								listOp.startAfter(lastKey);
-							}
-							listOp.countBytesDone(listOp.bytesListed());
-							if (listOp.respDataTimeStart() == 0) {
-								LOG.debug("{}: LIST completed before first body byte was observed; TTFB unavailable", listOp);
-							}
-						});
+		if (lastKey != null) {
+			listOp.startAfter(lastKey);
+		}
+		listOp.countBytesDone(listOp.bytesListed());
+		if (listOp.respDataTimeStart() == 0) {
+			LOG.debug("{}: LIST completed before first body byte was observed; TTFB unavailable", listOp);
+		}
+		return CompletableFuture.completedFuture(null);
 	}
 
 	private CompletableFuture<Void> listObjectVersions(
@@ -1315,81 +1557,80 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			request.versionIdMarker(options.versionIdMarker());
 		}
 
-		return s3AsyncClient.listObjectVersions(request.build())
-						.thenAccept(response -> {
-							final boolean truncated = Boolean.TRUE.equals(response.isTruncated());
-							if (truncated
-											&& (response.nextKeyMarker() == null
-															|| response.nextKeyMarker().isEmpty()
-															|| response.nextVersionIdMarker() == null
-															|| response.nextVersionIdMarker().isEmpty())) {
-								throw new IllegalStateException(
-												"Truncated S3 version LIST result is missing its next markers");
-							}
-							final List<ListedObject> listedObjects = new ArrayList<>(response.versions().size());
-							long bytesTotal = 0;
-							String firstKey = null;
-							String lastKey = null;
-							for (final ObjectVersion version : response.versions()) {
-								final String key = version.key();
-								final String versionId = version.versionId();
-								if (key == null || key.isEmpty() || versionId == null || versionId.isEmpty()) {
-									throw new IllegalStateException(
-													"ListObjectVersions returned a data version without an exact identity");
-								}
-								final Long responseSize = version.size();
-								if (responseSize == null) {
-									throw new IllegalStateException(
-													"S3 LIST entry is missing Size for key \"" + key + "\"");
-								}
-								final long size = Math.max(0L, responseSize);
-								listedObjects.add(new ListedObject(key, size, versionId));
-								if (options.fetchMetadata()) {
-									bytesTotal = Math.addExact(bytesTotal, size);
-								}
-								if (firstKey == null || key.compareTo(firstKey) < 0) {
-									firstKey = key;
-								}
-								if (lastKey == null || key.compareTo(lastKey) > 0) {
-									lastKey = key;
-								}
-							}
-							for (final DeleteMarkerEntry deleteMarker : response.deleteMarkers()) {
-								final String key = deleteMarker.key();
-								if (key != null && !key.isEmpty()) {
-									if (firstKey == null || key.compareTo(firstKey) < 0) {
-										firstKey = key;
-									}
-									if (lastKey == null || key.compareTo(lastKey) > 0) {
-										lastKey = key;
-									}
-								}
-							}
-							listOp.objectsListed(listedObjects.size() + response.deleteMarkers().size());
-							listOp.listedObjects(listedObjects);
-							listOp.deleteMarkersListed(response.deleteMarkers().size());
-							listOp.bytesListed(options.fetchMetadata() ? bytesTotal : 0);
-							listOp.truncated(truncated);
-							if (firstKey != null) {
-								listOp.pageFirstKey(firstKey);
-							}
-							listOp.continuationToken(response.nextKeyMarker());
-							listOp.options(
-											options.toBuilder()
-															.continuationToken(null)
-															.keyMarker(response.nextKeyMarker())
-															.versionIdMarker(response.nextVersionIdMarker())
-															.build());
-							if (lastKey != null) {
-								listOp.startAfter(lastKey);
-							}
-							listOp.countBytesDone(listOp.bytesListed());
-							if (listOp.respDataTimeStart() == 0) {
-								LOG.debug(
-												"{}: LIST versions completed before first body byte was observed; TTFB unavailable",
-												listOp);
-							}
-						});
+		final ListObjectVersionsResponse response = awaitRequest(s3AsyncClient.listObjectVersions(request.build()));
+		final boolean truncated = Boolean.TRUE.equals(response.isTruncated());
+		if (truncated
+						&& (response.nextKeyMarker() == null
+										|| response.nextKeyMarker().isEmpty()
+										|| response.nextVersionIdMarker() == null
+										|| response.nextVersionIdMarker().isEmpty())) {
+			throw new IllegalStateException(
+							"Truncated S3 version LIST result is missing its next markers");
+		}
+		final List<ListedObject> listedObjects = new ArrayList<>(response.versions().size());
+		long bytesTotal = 0;
+		String firstKey = null;
+		String lastKey = null;
+		for (final ObjectVersion version : response.versions()) {
+			final String key = version.key();
+			final String versionId = version.versionId();
+			if (key == null || key.isEmpty() || versionId == null || versionId.isEmpty()) {
+				throw new IllegalStateException(
+								"ListObjectVersions returned a data version without an exact identity");
+			}
+			final Long responseSize = version.size();
+			if (responseSize == null) {
+				throw new IllegalStateException(
+								"S3 LIST entry is missing Size for key \"" + key + "\"");
+			}
+			final long size = Math.max(0L, responseSize);
+			listedObjects.add(new ListedObject(key, size, versionId));
+			if (options.fetchMetadata()) {
+				bytesTotal = Math.addExact(bytesTotal, size);
+			}
+			if (firstKey == null || key.compareTo(firstKey) < 0) {
+				firstKey = key;
+			}
+			if (lastKey == null || key.compareTo(lastKey) > 0) {
+				lastKey = key;
+			}
+		}
+		for (final DeleteMarkerEntry deleteMarker : response.deleteMarkers()) {
+			final String key = deleteMarker.key();
+			if (key != null && !key.isEmpty()) {
+				if (firstKey == null || key.compareTo(firstKey) < 0) {
+					firstKey = key;
+				}
+				if (lastKey == null || key.compareTo(lastKey) > 0) {
+					lastKey = key;
+				}
+			}
+		}
+		listOp.objectsListed(listedObjects.size() + response.deleteMarkers().size());
+		listOp.listedObjects(listedObjects);
+		listOp.deleteMarkersListed(response.deleteMarkers().size());
+		listOp.bytesListed(options.fetchMetadata() ? bytesTotal : 0);
+		listOp.truncated(truncated);
+		if (firstKey != null) {
+			listOp.pageFirstKey(firstKey);
+		}
+		listOp.continuationToken(response.nextKeyMarker());
+		listOp.options(
+						options.toBuilder()
+										.continuationToken(null)
+										.keyMarker(response.nextKeyMarker())
+										.versionIdMarker(response.nextVersionIdMarker())
+										.build());
+		if (lastKey != null) {
+			listOp.startAfter(lastKey);
+		}
+		listOp.countBytesDone(listOp.bytesListed());
+		if (listOp.respDataTimeStart() == 0) {
+			LOG.debug(
+							"{}: LIST versions completed before first body byte was observed; TTFB unavailable",
+							listOp);
+		}
+		return CompletableFuture.completedFuture(null);
 	}
 
 	private static void markListDataResponseStart(final ListOperation<? extends PathItem> op) {
@@ -1670,12 +1911,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 
 		markIntegrityRequestDispatched();
-		return s3AsyncClient.createMultipartUpload(reqBuilder.build())
-						.thenAccept(response -> {
-							op.put(KEY_UPLOAD_ID, response.uploadId());
-							captureResponseIdentity(
-											op, null, requestId(response));
-						});
+		final var response = awaitRequest(s3AsyncClient.createMultipartUpload(reqBuilder.build()));
+		op.put(KEY_UPLOAD_ID, response.uploadId());
+		captureResponseIdentity(
+						op, null, requestId(response));
+		return CompletableFuture.completedFuture(null);
 	}
 
 	/**
@@ -1710,15 +1950,13 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				final long size = dataItem.size();
 				final DataItemInputStream inputStream = new DataItemInputStream(dataItem);
 				// Use dedicated upload executor to maximize throughput
-				return s3AsyncClient.uploadPart(
+				final var response = awaitRequest(s3AsyncClient.uploadPart(
 								reqBuilder.build(),
-								AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor))
-								.thenApply(response -> {
-									// Store the ETag in the parent operation context
-									// Key format: part number as string
-									parent.put(String.valueOf(partNumber), response.eTag());
-									return null;
-								});
+								AsyncRequestBody.fromInputStream(inputStream, size, uploadExecutor)));
+				// Store the ETag in the parent operation context
+				// Key format: part number as string
+				parent.put(String.valueOf(partNumber), response.eTag());
+				return CompletableFuture.completedFuture(null);
 			} catch (IOException e) {
 				return CompletableFuture.failedFuture(e);
 			}
@@ -1764,9 +2002,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 						.uploadId(uploadId)
 						.multipartUpload(CompletedMultipartUpload.builder().parts(completedParts).build());
 
-		return s3AsyncClient.completeMultipartUpload(reqBuilder.build())
-						.thenAccept(response -> captureResponseIdentity(
-										op, response.versionId(), requestId(response)));
+		final var response = awaitRequest(s3AsyncClient.completeMultipartUpload(reqBuilder.build()));
+		captureResponseIdentity(op, response.versionId(), requestId(response));
+		return CompletableFuture.completedFuture(null);
 	}
 
 	/**
@@ -1780,13 +2018,13 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 
 		final var bk = resolveBucketAndKey((O) op);
-		return s3AsyncClient.abortMultipartUpload(
+		awaitRequest(s3AsyncClient.abortMultipartUpload(
 						AbortMultipartUploadRequest.builder()
 										.bucket(bk[0])
 										.key(bk[1])
 										.uploadId(uploadId)
-										.build())
-						.thenApply(response -> null);
+										.build()));
+		return CompletableFuture.completedFuture(null);
 	}
 
 	// -----------------------------------------------------------------------
@@ -1817,11 +2055,18 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 						.range("bytes=" + rangeStart + "-" + rangeEnd);
 
 		// Get the response asynchronously - this completes when headers arrive
-		// Since invokeNio already blocks, we can join() here and read synchronously
+		// Since invokeNio already blocks, we can wait here and read synchronously
 		// This avoids the overhead of thenAcceptAsync and the thread pool bottleneck
-		try (var response = s3AsyncClient.getObject(
-						reqBuilder.build(),
-						AsyncResponseTransformer.toBlockingInputStream()).join()) {
+		try (final var inFlight = trackRequest()) {
+			readRange(op, inFlight, reqBuilder.build());
+		}
+		return CompletableFuture.completedFuture(null);
+	}
+
+	private void readRange(final PartialDataOperation op, final S3AwsInFlightRequest inFlight, final GetObjectRequest request) {
+		try (var response = inFlight.await(s3AsyncClient.getObject(
+						request, AsyncResponseTransformer.toBlockingInputStream()))) {
+			inFlight.body(response);
 			op.startResponse();
 			// This blocking read runs on the caller thread (virtual thread)
 			long bytesRead = 0;
@@ -1835,11 +2080,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			}
 			op.countBytesDone(bytesRead);
 			op.finishResponse();
-		} catch (IOException e) {
-			throw new RuntimeException("Failed to read S3 object range", e);
+		} catch (final IOException | RuntimeException e) {
+			throw inFlight.failure(e, "Failed to read S3 object range");
 		}
-
-		return CompletableFuture.completedFuture(null);
 	}
 
 	// -----------------------------------------------------------------------
@@ -1866,8 +2109,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 						.destinationBucket(dstBk[0])
 						.destinationKey(dstBk[1]);
 
-		return s3AsyncClient.copyObject(reqBuilder.build())
-						.thenApply(response -> null);
+		awaitRequest(s3AsyncClient.copyObject(reqBuilder.build()));
+		return CompletableFuture.completedFuture(null);
 	}
 
 	@Override
@@ -1883,6 +2126,21 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	@Override
 	protected void doClose()
 					throws IOException {
+		closed = true;
+		if (watchdogLock != null) {
+			synchronized (watchdogLock) {
+				final Thread watchdog = requestWatchdog;
+				if (watchdog != null) {
+					watchdog.interrupt();
+				}
+				// Closing ends the grace: end what is still in flight now rather than later.
+				stopGraceOver = true;
+				final int ended = stopRequestsInFlight();
+				if (ended > 0) {
+					LOG.warn("{} request(s) still in flight when the driver closed were cancelled", ended);
+				}
+			}
+		}
 		try {
 			if (lazyStandaloneDeleteResources != null) {
 				lazyStandaloneDeleteResources.close();

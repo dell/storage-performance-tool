@@ -7,7 +7,11 @@ type Params struct {
 	WorkloadType string
 	Endpoint     string
 	Endpoints    []string
-	Region       string // Optional AWS region; empty preserves engine defaults.
+	Region       string // Optional AWS region; empty lets the engine infer it from an AWS endpoint, else us-east-1.
+
+	// TargetBucketProvisionDisabled forbids creating a missing target bucket
+	// (--provision-target-bucket=false); target buckets are still checked.
+	TargetBucketProvisionDisabled bool
 
 	// EndpointSelection is the opt-in per-request endpoint selection; the zero value keeps the default.
 	EndpointSelection EndpointSelection
@@ -29,6 +33,8 @@ type Params struct {
 	ServiceThreads  int      // VT carrier thread parallelism (0 = JVM default)
 	EngineOverrides []string // Advanced engine defaults overrides as YAML path=value entries
 	PrefixShards    int      // Optional count of fixed-width object-key prefix directories (0 = disabled)
+	BucketCount     int      // storage.targetBucket.count when greater than 1; 0 or 1 targets the bucket alone
+	RMIRegistryPort int      // Single-host engine RMI registry port (0 = engine default 1099)
 
 	// Multi-endpoint controls
 	SliceEndpoints bool // Partition endpoint list across nodes in distributed runs

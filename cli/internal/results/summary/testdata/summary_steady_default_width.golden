@@ -1,0 +1,38 @@
+==========================================================================
+ SPT Run Summary  •  spt-20261024.120000.000  •  2026-10-24 12:02:00 UTC
+==========================================================================
+
+Environment
+  • CLI                5.17.0 (cccccccccccc)
+  • Engine             5.17.0 (aaaaaaaaaaaa), 2 participants, consistency verified
+  • Spt image          ghcr.io/dell/storage-performance-tool:5.17.0
+  • API endpoint       http://entry.example:9999
+  • Hosts (2)          entry.example, worker.example
+
+Workload Configuration
+  • Workload           Read
+  • Object size        1.00 MiB
+  • Threads            8
+  • Endpoints          http://s3.example:9020
+  • Bucket             spt-bench
+  • Requested duration 60s
+
+Performance by Phase
+┌────────┬────────────┬─────────────┬───────────────┬──────────────────┐
+│ Phase  │   IOPS Avg │ IOPS Steady │ Bandwidth Avg │ Bandwidth Steady │
+├────────┼────────────┼─────────────┼───────────────┼──────────────────┤
+│ Seed   │  335 ops/s │   351 ops/s │     335 MiB/s │        351 MiB/s │
+│ Read   │ 1180 ops/s │  1237 ops/s │    1180 MiB/s │       1237 MiB/s │
+│ Delete │ 1227 ops/s │ n/a (short) │             — │                — │
+└────────┴────────────┴─────────────┴───────────────┴──────────────────┘
+┌────────┬─────────────┬────────────────────────────┬────────────┬─────────────┬──────────┐
+│ Phase  │ Object Size │                    Success │ Data Moved │ Latency P50 │ TTFB P50 │
+├────────┼─────────────┼────────────────────────────┼────────────┼─────────────┼──────────┤
+│ Seed   │ 1.00 MiB    │                      20082 │  19.61 GiB │     20.5 ms │        — │
+│ Read   │ 1.00 MiB    │                      70824 │  69.16 GiB │     20.5 ms │  4.20 ms │
+│ Delete │ —           │ 73620 logical API requests │          — │     20.5 ms │        — │
+└────────┴─────────────┴────────────────────────────┴────────────┴─────────────┴──────────┘
+
+Run Totals
+  • Duration           3m 0.6s
+  • Data moved         88.78 GiB

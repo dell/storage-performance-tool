@@ -191,6 +191,7 @@ type PhaseMetrics struct {
 	ConcurrencyMean    float64
 	NodeCount          int64
 	SampleTimestamp    string
+	Steady             SteadyRates
 }
 
 // RunTotals aggregates run-wide duration and data transfer metrics.
@@ -377,6 +378,7 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 	steps := make([]StepSummary, 0, len(data.StepOrder))
 	totals := RunTotals{}
 	warnings := make([]string, 0)
+	steadyAbsent := steadyAbsentReason(data.EngineInfo)
 
 	for idx, stepID := range data.StepOrder {
 		stepData := data.Steps[stepID]
@@ -412,6 +414,9 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 			metrics = deriveMetrics(stepData, workload.ObjectSizeBytes)
 		}
 		summary.SuccessUnit = successUnitForOperation(summary.Operation)
+		if metrics != nil {
+			metrics.Steady = deriveSteadyRates(stepData, summary.IsMixed, steadyAbsent)
+		}
 		if metrics != nil && strings.EqualFold(summary.Operation, workloadreg.List) {
 			normalizeListMetrics(metrics, integrity)
 		}
@@ -738,7 +743,7 @@ func deriveMetrics(stepData *StepData, objectSizeBytes int64) *PhaseMetrics {
 		return nil
 	}
 	operationHint := operationFromStep(stepData.StepID, stepData.Metrics)
-	row := selectMetricsRow(stepData.Metrics, operationHint)
+	row := stepData.Metrics.Rows[selectMetricsRowIndex(stepData.Metrics, operationHint)]
 
 	metrics := &PhaseMetrics{
 		SuccessCount:       row.SuccessCount,
@@ -813,23 +818,22 @@ func preferredLatencyMicros(row MetricsTotalsRow) float64 {
 	return row.LatencyAvgMicros
 }
 
-func selectMetricsRow(totals *MetricsTotals, operationHint string) MetricsTotalsRow {
-	if totals == nil || len(totals.Rows) == 0 {
-		return MetricsTotalsRow{}
-	}
+// selectMetricsRowIndex returns the position of the row a single-operation phase reports;
+// totals must contain at least one row.
+func selectMetricsRowIndex(totals *MetricsTotals, operationHint string) int {
 	if operationHint != "" {
 		upperHint := strings.ToUpper(operationHint)
-		for _, row := range totals.Rows {
+		for i, row := range totals.Rows {
 			if strings.ToUpper(strings.TrimSpace(row.Operation)) == upperHint {
-				return row
+				return i
 			}
 		}
 	}
 	// Fallback: choose the row with the highest success count, otherwise the first row.
-	best := totals.Rows[0]
-	for _, row := range totals.Rows[1:] {
-		if row.SuccessCount > best.SuccessCount {
-			best = row
+	best := 0
+	for i, row := range totals.Rows {
+		if row.SuccessCount > totals.Rows[best].SuccessCount {
+			best = i
 		}
 	}
 	return best

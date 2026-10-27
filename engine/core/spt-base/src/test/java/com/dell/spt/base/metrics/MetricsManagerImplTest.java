@@ -58,6 +58,18 @@ public class MetricsManagerImplTest {
 	}
 
 	@Test
+	void eachIterationObservesTheSteadyStateWindow() throws Exception {
+		final FakeMetricsContext<AllMetricsSnapshot> ctx = new FakeMetricsContext<>("step-steady");
+		mgr.register(ctx);
+		final long deadline = System.currentTimeMillis() + 5_000;
+		while (ctx.steadyObservations.get() < 3 && System.currentTimeMillis() < deadline) {
+			Thread.sleep(10);
+		}
+		assertTrue(ctx.steadyObservations.get() >= 3, "the 100 Hz loop must observe the window on each iteration");
+		mgr.unregister(ctx);
+	}
+
+	@Test
 	void registerNonDistributedDoesNotExposeDistributedContext() {
 		FakeMetricsContext<AllMetricsSnapshot> ctx = new FakeMetricsContext<>("step-A");
 		mgr.register(ctx);
@@ -347,6 +359,7 @@ public class MetricsManagerImplTest {
 	// --- Test fakes ---
 
 	private static class FakeMetricsContext<S extends AllMetricsSnapshot> implements MetricsContext<S> {
+		final java.util.concurrent.atomic.AtomicInteger steadyObservations = new java.util.concurrent.atomic.AtomicInteger();
 		final String id;
 		long runId = 1L;
 		OpType opType = OpType.READ;
@@ -446,6 +459,11 @@ public class MetricsManagerImplTest {
 
 		@Override
 		public void refreshLastSnapshot() { /* no-op */ }
+
+		@Override
+		public void observeSteadyWindow() {
+			steadyObservations.incrementAndGet();
+		}
 
 		@Override
 		public S lastSnapshot() {

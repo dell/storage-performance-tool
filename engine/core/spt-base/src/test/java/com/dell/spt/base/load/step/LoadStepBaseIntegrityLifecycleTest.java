@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
 
 import com.dell.spt.base.config.TestConfigBuilder;
+import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.MetricsManager;
@@ -80,6 +81,38 @@ class LoadStepBaseIntegrityLifecycleTest {
 						"best-effort callers need the real swallowed lifecycle outcome");
 		assertEquals(1, step.runFailure().getSuppressed().length,
 						"cleanup failure should remain distinguishable behind the first failure");
+	}
+
+	@Test
+	void genericTerminalStartFailureEscapesOrdinaryStepWithStepIdentity() {
+		final Config config = metadataConfig();
+		config.val("storage-integrity-mode", "none");
+		final var typed = new RunTerminalException(
+						IntegrityTerminalException.Category.EXECUTION, "target bucket is missing", null);
+		final var step = new TestStep(config, new IllegalStateException("wrapper", typed), false);
+
+		final var failure = assertThrows(RunTerminalException.class, step::run);
+
+		assertFalse(failure instanceof IntegrityTerminalException);
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertEquals("target bucket is missing", failure.getMessage());
+		assertEquals("integrity-step", failure.stepId());
+		assertSame(failure, step.runFailure());
+		assertTrue(step.closeCalled);
+	}
+
+	@Test
+	void genericTerminalCauseIsNotRewrappedByMetadataMode() {
+		final var typed = new RunTerminalException(
+						IntegrityTerminalException.Category.CONFIGURATION, "dynamic bucket segment", null);
+		final var step = new TestStep(metadataConfig(), typed, false);
+
+		final var failure = assertThrows(RunTerminalException.class, step::run);
+
+		assertFalse(failure instanceof IntegrityTerminalException,
+						"a setup failure must keep its own category and message in metadata mode");
+		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, failure.category());
+		assertEquals("dynamic bucket segment", failure.getMessage());
 	}
 
 	@Test

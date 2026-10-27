@@ -18,6 +18,9 @@ type integrityStorageTemplateData struct {
 	Driver      string
 	Concurrency int
 	Integrity   integrityTemplateData
+	// CreatesObjects marks the phase that writes the run's objects. Every other phase checks its
+	// target buckets but never creates one, whatever --provision-target-bucket says.
+	CreatesObjects bool
 }
 
 type deleteCleanupStorageTemplateData struct {
@@ -127,13 +130,15 @@ var integrityScenarioTemplates = template.Must(
       "output": {"requireExactCount": true}{{end}}{{if or .MaxCount .RequireNonEmpty}},
       "selection": { {{if .MaxCount}}"maxCount": {{.MaxCount}}{{if .RequireNonEmpty}}, {{end}}{{end}}{{if .RequireNonEmpty}}"requireNonEmpty": true{{end}}}{{end}}
     }{{end}}
+{{define "existing-buckets-only"}}"targetBucket": {"provision": false}{{end}}
 {{define "storage"}}
 "storage": {
     "driver": {"type": {{jsq .Driver}}, "limit": {"concurrency": {{.Concurrency}}}},
-    {{template "integrity" .Integrity}}
+    {{template "integrity" .Integrity}}{{if not .CreatesObjects}},
+    {{template "existing-buckets-only"}}{{end}}
   }{{end}}
 {{define "delete-cleanup-storage"}}
-"storage": {"driver": {"type": {{jsq .Driver}}, "limit": {"concurrency": {{.Concurrency}}}}}{{end}}
+"storage": {"driver": {"type": {{jsq .Driver}}, "limit": {"concurrency": {{.Concurrency}}}}, {{template "existing-buckets-only"}}}{{end}}
 {{define "summary"}}
 "output": {"metrics": {"summary": {"persist": true}}}{{end}}
 {{define "failure-budget"}}"failureBudget": {"mode": {{jsq .Mode}}, "maxFailedObjects": {{.MaxFailedObjects}}, "maxFailurePercent": {{.MaxFailurePercent}}, "graceSeconds": {{.GraceSeconds}}}{{end}}

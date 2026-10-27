@@ -110,6 +110,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final boolean failRateLimitFlag;
 	private final ConcurrentMap<I, O> latestSuccOpResultByItem;
 	private final boolean recycleFlag;
+	// Read and written only by the metrics manager thread, through schedulingDrained().
+	private int drainedObservations;
 	private final boolean listPathWorkload;
 	private boolean listLifecycleWaitLogged;
 	private final boolean retryFlag;
@@ -358,6 +360,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						: driverLifecycle;
 		this.metricsCtx = metricsCtx;
 		this.metricsCtxByOpType = metricsCtxByOpType;
+		if (generator != null) {
+			generator.onSchedulingExhaustion(this::markSchedulingEnded);
+		}
 		this.tracePersistFlag = tracePersistFlag;
 		this.listShardMetricsRecorder = shardMetricsRecorder == null ? ListShardMetricsRecorder.NO_OP : shardMetricsRecorder;
 		this.immutableListRootPrefix = canonicalListPrefix(immutableListRootPrefix);
@@ -1557,7 +1562,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			deleteScheduledStartedNanos.set(releasedNanos);
 			deleteScheduledDeadlineNanos.set(deadlineNanos);
 			operationLifecycle.enforceDispatchDeadline(deadlineNanos);
-			enforceDispatchedOperationsDeadlineForStepStop(DurationTime.deadlineAfter(
+			// Arming the interval's terminal deadline is not an end event, so it bypasses the
+			// stop-path entry point, which closes the steady-state windows first.
+			operationLifecycle.enforceTerminalDeadline(DurationTime.deadlineAfter(
 							deadlineNanos,
 							TimeUnit.SECONDS.toNanos(Math.max(0, waitOpFinishLimit))));
 			generator.openAdmissionUntil(deadlineNanos);
@@ -2040,8 +2047,77 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 						.sum();
 	}
 
+	/** Arms the end edge of this context's windows once its generator's scheduling ended. */
+	private void markSchedulingEnded() {
+		if (metricsCtx != null) {
+			metricsCtx.markSchedulingEnded(this::schedulingDrained);
+		}
+		if (metricsCtxByOpType != null) {
+			for (final MetricsContext opTypeCtx : metricsCtxByOpType.values()) {
+				opTypeCtx.markSchedulingEnded(this::schedulingDrained);
+			}
+		}
+	}
+
+	/**
+	 * Whether nothing scheduled for this step still waits for dispatch, read on the metrics manager
+	 * thread once scheduling ended. It must hold on two consecutive observations.
+	 *
+	 * <p>A recycle-mode step keeps recycling completed operations into the generator after its count
+	 * limit is reached, where they stay in custody but are never dispatched again, so it is judged
+	 * from the driver's transport counts, which are exact for its non-composite operations. Every
+	 * other step is judged from logical custody: the custody count must be zero, and a scan of the
+	 * operations' lifecycle states confirms it. A completion stalled between its custody removal and
+	 * its in-flight decrement keeps the count one too low for as long as it stalls, which repeated
+	 * observations cannot rule out. For a multipart object custody holds the requests created so
+	 * far: the window ends once none of them is queued, and the parts the in-flight objects create
+	 * later belong to the drain, as they do after a stop.
+	 */
+	private boolean schedulingDrained() {
+		final long awaitingDispatch = recycleFlag ? -1 : operationLifecycle.awaitingDispatchCount();
+		final boolean drained = awaitingDispatch >= 0
+						? awaitingDispatch == 0 && !operationLifecycle.hasUndispatchedOperations()
+						: transportQueueDrained();
+		if (!drained) {
+			drainedObservations = 0;
+			return false;
+		}
+		return ++drainedObservations >= 2;
+	}
+
+	/**
+	 * Drained from the driver's transport counts: a full set of slots means work is still queued,
+	 * and with free slots nothing accepted may still wait. Completions include child requests while
+	 * acceptances do not, so these counts misjudge composite operations, and a completion counted
+	 * while its permit is still held can end the window one operation early. Two observations do
+	 * not rule that out when the completing thread stalls between its updates.
+	 */
+	private boolean transportQueueDrained() {
+		final long scheduled = driver.scheduledOpCount();
+		final long completed = driver.completedOpCount();
+		final int active = driver.activeOpCount();
+		final int limit = driver.concurrencyLimit();
+		return (limit <= 0 || active < limit) && completed + active >= scheduled;
+	}
+
+	/**
+	 * Closes the Steady-State Windows this context records into, before any stop-path action on
+	 * it: a backstop for paths that reach a context directly rather than through its step.
+	 */
+	private void closeSteadyWindows(final String cause) {
+		if (metricsCtx != null) {
+			metricsCtx.closeSteadyWindow(cause);
+		}
+		if (metricsCtxByOpType != null) {
+			for (final MetricsContext opTypeCtx : metricsCtxByOpType.values()) {
+				opTypeCtx.closeSteadyWindow(cause);
+			}
+		}
+	}
+
 	/** Closes both admission gates without recovering or draining queued work. */
 	private void closeOperationAdmission() {
+		closeSteadyWindows("close operation admission");
 		operationAdmissionCloseLock.lock();
 		try {
 			if (operationAdmissionClosed.get()) {
@@ -2129,22 +2205,26 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	public final void recoverQueuedOperationsForStepStop() {
+		closeSteadyWindows("recover queued operations");
 		prepareOperationDrain();
 	}
 
 	@Override
 	public final void enforceDispatchedOperationsDeadlineForStepStop(
 					final long deadlineNanos) {
+		closeSteadyWindows("dispatched operations deadline");
 		operationLifecycle.enforceTerminalDeadline(deadlineNanos);
 	}
 
 	@Override
 	public final void expireDispatchedOperationsDeadlineForStepStop() {
+		closeSteadyWindows("dispatched operations deadline");
 		operationLifecycle.expireTerminalDeadline();
 	}
 
 	@Override
 	public final void drainDispatchedOperationsForStepStop(final long deadlineNanos) {
+		closeSteadyWindows("drain dispatched operations");
 		prepareOperationDrain();
 		drainDispatchedOperations(deadlineNanos);
 	}

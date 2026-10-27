@@ -63,6 +63,8 @@ const (
 	legacyKeyTest        = "test"
 	legacyKeyType        = "type"
 
+	legacyKeyTargetBucket = "targetBucket"
+
 	opTypeCreate = "create"
 	opTypeDelete = "delete"
 	opTypeRead   = "read"
@@ -417,6 +419,10 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	if pqcMode := resolveString(getPath(step.Config, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "pqcMode"), vars); pqcMode != "" {
 		setPath(config, pqcMode, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "pqcMode")
 	}
+	// A target bucket set is kept; its base becomes the replay bucket of item.output.path.
+	if bucketCount := int64Value(getPath(step.Config, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyCount), vars); bucketCount > 1 {
+		setPath(config, bucketCount, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyCount)
+	}
 	var rewrites []PathRewrite
 	if rawOutput := itemPathString(getPath(step.Config, "item", legacyKeyOutput, "file"), vars); rawOutput != "" {
 		item := itemFileVariable(rawOutput, archiveToStepID, itemVars, itemVarOrder)
@@ -658,6 +664,7 @@ func isModeledJSONConfigPath(path string) bool {
 		"storage.net.endpoint.selection",
 		"storage.net.endpoint.dns.timeoutMilliSec",
 		"storage.net.endpoint.connect.timeoutMilliSec",
+		"storage.targetBucket.count",
 		"test.step.id",
 		"test.step.limit.fail.count",
 		"test.step.limit.count",

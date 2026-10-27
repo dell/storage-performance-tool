@@ -167,13 +167,16 @@ S3StorageDriver driver = S3StorageDriverFactory.create(config);
 |----------|------|---------|-------------|
 | accessKey | String | Required | AWS access key ID |
 | secretKey | String | Required | AWS secret access key |
-| region | String | `eu-west-2` fallback | AWS region from `storage.region` in YAML or `--storage-region` in the engine; exposed by `spt run --region`. Empty or omitted uses the fallback. |
+| region | String | `us-east-1` fallback | AWS region from `storage.region` in YAML or `--storage-region` in the engine; exposed by `spt run --region`. Empty or omitted uses the region of a standard AWS endpoint (`s3.<region>.amazonaws.com`), else `us-east-1`. Before 5.16.2 the fallback was `eu-west-2`. |
 | bucketName | String | Required | S3 bucket name |
 | endpointOverride | String | null | Override S3 endpoint (for S3-compatible services) |
 | pathStyleAccess | boolean | false | Use path-style access (required for some S3-compatible services) |
 | maxConnections | int | 50 | Maximum number of concurrent connections |
-| socketTimeout | int | 30000 | Socket timeout in milliseconds |
-| connectionTimeout | int | 10000 | Connection timeout in milliseconds |
+| storage.crt.socketTimeoutMs | int | 30000 | Milliseconds a connection with a request in flight may move no data before it is closed and the request fails as a timeout; `0` turns the detection off, otherwise at least `2000`, counted in whole seconds rounded down (see [AWS SDK driver timeouts](../../../../README.md#aws-sdk-driver-timeouts)) |
+| storage.crt.connectionTimeoutMs | int | 5000 | Milliseconds allowed to establish a connection |
+| storage.crt.requestTimeoutMs | int | 300000 | Milliseconds a request may take from the moment the driver makes it until its response has been read in full, a GET's body included; a request that outlives this is cancelled and fails as a timeout. `0` waits without bound (see [AWS SDK driver timeouts](../../../../README.md#aws-sdk-driver-timeouts)) |
+| storage.crt.stopTimeoutMs | int | 5000 | Milliseconds the requests in flight get once the step stops before the driver cancels them; `0` leaves them to the step's wait and the stop of the workers |
+| storage.driver.threads | int | 0 | I/O workers. `0` runs one worker per concurrency permit, since every request blocks its worker (see [AWS SDK driver workers](../../../../README.md#aws-sdk-driver-workers)) |
 | enableRequestMetrics | boolean | false | Enable AWS SDK request metrics |
 | checksumEnabled | boolean | false | Compute and send a checksum on write requests |
 | checksumAlgorithm | String | null | Checksum algorithm: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`. MD5 is not supported as a flexible checksum by the AWS SDK |
@@ -212,6 +215,14 @@ The module includes comprehensive unit tests using JUnit and Mockito:
 ```bash
 ./gradlew test
 ```
+
+The default suite includes a fast canary, `S3AwsTimeoutsCanaryTest`, which checks that each S3 client the driver builds receives `storage.crt.connectionTimeoutMs` and `storage.crt.socketTimeoutMs`. The slower tests, tagged `slow`, let requests fail after every retry of their client: stalls in each phase of a request, a transfer that keeps moving data, stall detection turned off, and connections that cannot be made. They take about a minute and run only on request, from `engine/`:
+
+```bash
+./gradlew :extensions:storage-drivers:implementations:s3-aws:slowTest
+```
+
+Run them after upgrading the AWS SDK or the AWS CRT, and after changing how the driver builds its S3 clients or classifies timeouts.
 
 ## Migration from Legacy REST Implementation
 

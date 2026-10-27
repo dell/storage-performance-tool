@@ -152,9 +152,76 @@ storage:
 
 The equivalent engine argument is `--storage-region=us-west-2`; the SPT CLI
 exposes it as `spt run <workload> --region us-west-2`. The default is an empty
-string, preserving endpoint-based region detection and the existing fallback.
-An explicit region takes precedence over endpoint detection. The AWS SDK driver
-also consumes this setting and retains its existing fallback when it is empty.
+string: the driver then uses the region of a standard AWS endpoint
+(`s3.amazonaws.com` is `us-east-1`, `s3.<region>.amazonaws.com` is `<region>`,
+recognized when the step has one node address), else `us-east-1`. An explicit
+region takes precedence over the endpoint's and logs one warning when they
+differ. The `s3-rdma` and `s3-aws` drivers use the same order.
+
+### Target-bucket provisioning
+
+`storage.targetBucket.provision` (default `true`) controls whether the
+controller engine may create a missing target bucket:
+
+```yaml
+storage:
+  targetBucket:
+    provision: false   # check target buckets, never create one
+```
+
+Before a step's configuration is sliced and before any slice or metrics context
+starts, the controller engine resolves the step's static target buckets: the
+bucket of `item.output.path` for a CREATE step, the bucket of `item.input.path`,
+and the buckets an `item.input.file` names (an integrity manifest's `bucket`
+column, or the first segment of absolute item names in an items CSV). It checks
+each one with `HEAD /bucket`. A missing bucket is created only for the output
+path of a CREATE step whose policy is true; every other bucket is checked only.
+Only a 404 counts as missing. After a failed create the engine checks once more
+and continues only if the bucket is now accessible. A failure ends the scenario
+with a structured FAILED status before any slice starts.
+
+Bucket requests reuse the step's endpoint and endpoint selection (logical
+hostname, rotation, SNI and DNS server), TLS, signing credentials and version,
+region, `storage.net.http.headers` and `storage.net.http.uri-args`, and per-path
+credentials from `storage.auth.file`; a bucket is checked once per credential
+that uses it, and contexts share a control client only when their effective
+storage configuration is equal. An unreadable `storage.auth.file` or item input
+file fails the step before it starts. They carry no object
+metadata, tags, checksums or RDMA headers. A `storage.net.timeoutMilliSec` of
+`0` is bounded to 30 seconds for these requests. A CreateBucket request to a
+standard AWS endpoint outside `us-east-1` carries the region's location
+constraint; any other endpoint gets an empty body. `s3-rdma` sends these
+requests over plain HTTP, so the controller needs no RDMA device.
+
+Per-operation expressions (`${...}`, `#{...}`) in the bucket segment of
+`item.output.path` are rejected; dynamic prefixes after the bucket are
+supported. An initialization expression (`%{...}`) in the bucket segment is
+evaluated once by the controller and written into every slice's
+configuration. Workers never create buckets; the Netty worker keeps its
+existing bucket `HEAD` and versioning check. See the CLI guide
+[Target Buckets](../../../../../cli/docs/TARGET_BUCKETS.md).
+
+### Target bucket sets
+
+`storage.targetBucket.count` (default `1`, at most `1000`) spreads a step's newly generated
+objects over the buckets `<base>-0` to `<base>-<N-1>`, where `<base>` is the bucket of
+`item.output.path`; the rest of the path is kept, so `/bench/prefix` gives `/bench-3/prefix`.
+Each new object goes to member `floorMod(floorDiv(id, max(item.naming.shards, 1)), N)` of its
+id. Existing objects keep the bucket their items file or manifest records, and
+`item.input.path` is used as written. The controller engine checks and creates the members
+like any target bucket. With `N > 1`, the engine rejects `storage.auth.file`, LIST, a CREATE
+step with `item.input.path` or `item.input.file`, a pipeline CREATE sub-step after the first, a
+mixed step with `item.input.path`, and expressions after the bucket in `item.output.path`; an initialization expression in the
+bucket segment is evaluated once before the suffix is added.
+
+```bash
+java -jar spt-base-<VERSION>.jar \
+    --storage-driver-type=s3 \
+    --storage-net-node-addrs=<NODE_IP_ADDRS> \
+    --item-output-path=/bench \
+    --storage-targetBucket-count=4 \
+    --load-op-limit-count=1000
+```
 
 ### Endpoint selection
 

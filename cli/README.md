@@ -241,7 +241,7 @@ DELETE detail retains compatibility with engines that do not expose the detailed
 
 ### Prerequisites
 
-- Go 1.25 or higher
+- Go 1.26 or higher
 - Docker (Docker daemon must be running)
 - Local CI checks: golangci-lint v2.2+ (required for `make ci-local`).
 
@@ -567,11 +567,13 @@ Executes a benchmark test with the specified workload type.
 - `--shuffle`: `read` only. Shuffle items within each fetched read batch before issuing reads.
 - `--shuffle-batch-size`: `read` only. Override the read-phase shuffle window used with `--shuffle` (bounded to 1,000,000).
 - `--cleanup`: Best-effort deletion after test completion. For READ with `--items-file`, this deletes objects from the supplied inventory, including objects not created by the current run. Seeded DELETE retries its immutable measured residual in a separate phase; explicit-manifest and existing-prefix DELETE reject it. For `write-verify`, delete only successfully verified objects; unsupported for `read-verify` and deferred verification
-- `--create-prefix`: Ensure target prefix exists before testing
+- `--provision-target-bucket`: Create a missing target bucket before the phase that writes the run's objects (default true); `false` still checks that every target bucket exists and is accessible. See [Target Buckets](docs/TARGET_BUCKETS.md)
+- `--create-prefix`: Deprecated; has no effect and will be removed in the next minor release
 - `--output-dir, -O`: Directory to save detailed Spt reports
 - `--generate-only`: Generate scenario file without executing Docker
 - `--force`: Resolve supported port conflicts without interaction and permit a known engine build mismatch. It does not override invalid build information or collection failures
 - `--api-port`: Specify custom Spt API port (defaults to 9999, legacy: 43234)
+- `--rmi-registry-port`: Engine RMI registry port for a local single-host run (default 1099). To run several `spt run` instances on one host at once, give each its own `--api-port` and `--rmi-registry-port`; remote and distributed runs reject any other value
 - `--spt-image`: Override the engine image ref. By default, release builds use an image tag matching the CLI version (for example, `...:v5.10.3`) and local/dev builds use `...:spt_dev`.
 - `--skip-image-pull`: Use the locally cached Spt image instead of pulling before each run. Dev images such as `spt_dev` automatically skip pulls because they are local-only.
 - `--keep-scenario`: Keep the generated JavaScript scenario file after test completes (useful for debugging)
@@ -800,7 +802,7 @@ When run in a terminal with TTY support, spt displays an interactive interface w
 
 Auto Results and Shutdown
 - `--auto-results` (default: true): automatically discovers step IDs, waits for terminal state via `/status` + idle JSON, then fetches artifacts (preferring per-step `/logs/<stepId>/index.json`).
-- When auto-results completes successfully, `spt` now writes a human-readable summary alongside the fetched artifacts (`spt_<runID>_results_summary.txt`) and prints a shortened version to the console. The summary pulls from the same metrics `.csv` files, `spt_run_params.json`, and the copied scenario file so the bundle stays self-contained.
+- When auto-results completes successfully, `spt` now writes a human-readable summary alongside the fetched artifacts (`spt_<runID>_results_summary.txt`) and prints a shortened version to the console. The summary pulls from the same metrics `.csv` files, `spt_run_params.json`, and the copied scenario file so the bundle stays self-contained. Its rate table shows each phase's steady-state IOPS and bandwidth from `metrics.steady.total.csv` beside the whole-step Avg values, or "n/a" with the reason when the window is not `valid` or the engine predates 5.17; see [steady-state window](../engine/core/spt-base/doc/usage/output/README.md#25-steady-state-window).
 - `--results-dir`: directory where fetched artifacts and a manifest `index.json` are saved.
 - Engine provenance is recorded in one run-level `engine.info.json` and shown with the separate CLI identity in the Environment section. See [`ENGINE_BUILD_INFO.md`](docs/ENGINE_BUILD_INFO.md).
 - `--label`: prefix for the output directory name and step ID prefix used in filenames.

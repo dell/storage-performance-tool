@@ -129,6 +129,12 @@ output:
     trace:
       persist: boolean
     threshold: double
+    steady:
+      warmup:
+        turnovers: double
+      min:
+        turnovers: double
+        duration: any
     timing:
       persist: boolean
     quantiles: list
@@ -182,4 +188,7 @@ storage:
       selection: string
     node:
       slice: boolean
+  targetBucket:
+    count: int
+    provision: boolean
 aliasing: list

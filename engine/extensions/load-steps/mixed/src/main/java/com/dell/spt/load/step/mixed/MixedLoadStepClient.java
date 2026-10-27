@@ -4,17 +4,26 @@ import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.step.client.LoadStepClientBase;
 import com.dell.spt.base.logging.LogUtil;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketStep;
 import com.dell.spt.base.util.BinarySizeFormat;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Stream;
 
 /**
  * Client-side counterpart of {@link MixedLoadStepLocal}. Responsible for registering one metrics
- * context per enabled operation type (GET, PUT, DELETE) in distributed mode.
+ * context per enabled operation type (GET, PUT, DELETE) in distributed mode, and for collecting
+ * every slice's created items into one file for the cleanup.
  */
 @SuppressWarnings({"unchecked", "rawtypes"
 })
@@ -31,6 +40,12 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 	@Override
 	public String getTypeName() {
 		return MixedLoadStepExtension.TYPE;
+	}
+
+	/** A mixed step writes new objects only through PUTs; its item input file is its GET/STAT pool. */
+	@Override
+	protected TargetBucketStep targetBucketStep() {
+		return TargetBucketStep.mixed(config.intVal("load-op-weights-put") > 0);
 	}
 
 	@Override
@@ -51,6 +66,15 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 		final int putWeight = config.intVal("load-op-weights-put");
 		final int deleteWeight = config.intVal("load-op-weights-delete");
 		final int statWeight = config.intVal("load-op-weights-stat");
+
+		// An item output file makes the base client give each remote slice its own file and append
+		// them all to this one once the slices close.
+		final String itemOutputFile = config.stringVal("item-output-file");
+		if (putWeight > 0 && (itemOutputFile == null || itemOutputFile.isEmpty())) {
+			config.val(
+							"item-output-file",
+							MixedLoadStepLocal.defaultPutRemainingFile(stepConfig.stringVal("id")).toString());
+		}
 
 		final int concurrencyLimit = config.intVal("storage-driver-limit-concurrency");
 		final Config outputConfig = config.configVal("output");
@@ -77,6 +101,53 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 		}
 		if (statWeight > 0) {
 			initMetrics(originIndex++, OpType.STAT, concurrencyLimit, metricsConfig, itemDataSize, colorFlag);
+		}
+	}
+
+	/** Checks that the collected file lists every item the step created. */
+	@Override
+	protected void itemOutputCollected(final String itemOutputFile, final Map<OpType, Long> successCounts)
+					throws IOException {
+		if (config.intVal("load-op-weights-put") <= 0) {
+			return;
+		}
+		final Long created = successCounts.get(OpType.CREATE);
+		if (created == null) {
+			Loggers.ERR.warn(
+							"{}: the final CREATE count is unavailable, so \"{}\" was not checked against it",
+							loadStepId(),
+							itemOutputFile);
+			return;
+		}
+		final long listed = listedItemCount(Path.of(itemOutputFile));
+		if (listed < created) {
+			Loggers.ERR.error(
+							"{}: \"{}\" lists {} of the {} items the step created; a cleanup that reads it can leave up to {}"
+											+ " objects behind",
+							loadStepId(),
+							itemOutputFile,
+							listed,
+							created,
+							created - listed);
+		} else if (listed > created) {
+			Loggers.ERR.warn(
+							"{}: \"{}\" lists {} items, more than the {} the step created",
+							loadStepId(),
+							itemOutputFile,
+							listed,
+							created);
+		} else {
+			Loggers.MSG.info("{}: \"{}\" lists all {} items the step created", loadStepId(), itemOutputFile, created);
+		}
+	}
+
+	/** Counts the lines of an item list; one item per line, so any byte is a valid character. */
+	static long listedItemCount(final Path itemList) throws IOException {
+		if (!Files.exists(itemList)) {
+			return 0;
+		}
+		try (final Stream<String> lines = Files.lines(itemList, StandardCharsets.ISO_8859_1)) {
+			return lines.count();
 		}
 	}
 }

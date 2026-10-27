@@ -39,10 +39,7 @@ public final class ItemNameInputFactory {
 								"Item naming seed (" + seedRaw + ") should be an integer or an expression", e);
 			}
 		}
-		final var shardCountRaw = namingConfig.val("shards");
-		final int shardCount = shardCountRaw == null
-						? 0
-						: TypeUtil.typeConvert(shardCountRaw, int.class);
+		final int shardCount = shardCount(namingConfig);
 		return ItemNameInput.Builder.newInstance()
 						.length(length)
 						.seed(seed)
@@ -53,5 +50,11 @@ public final class ItemNameInputFactory {
 						.type(ItemNameInput.ItemNamingType.valueOf(
 										namingConfig.stringVal("type").toUpperCase(Locale.ROOT)))
 						.build();
+	}
+
+	/** Returns {@code item.naming.shards}, 0 when it is not set. */
+	public static int shardCount(final Config namingConfig) {
+		final var shardCountRaw = namingConfig.val("shards");
+		return shardCountRaw == null ? 0 : TypeUtil.typeConvert(shardCountRaw, int.class);
 	}
 }

@@ -1,5 +1,6 @@
 package com.dell.spt.base.metrics;
 
+import com.dell.spt.base.metrics.steady.SteadyResult;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
@@ -45,6 +46,8 @@ public final class TerminalStepEntry {
 	public final DriverStatsSnapshot driverStats;
 	/** For a distributed step, the total of its contributors' driver statistics; null otherwise. */
 	public final DriverStatsTotal driverStatsTotal;
+	/** The step's Steady-State Window result at its end, or null when the context measures none. */
+	public final SteadyResult steady;
 
 	public TerminalStepEntry(
 					String stepId,
@@ -414,6 +417,70 @@ public final class TerminalStepEntry {
 					String clusterId,
 					DriverStatsSnapshot driverStats,
 					DriverStatsTotal driverStatsTotal) {
+		this(
+						stepId,
+						opType,
+						runId,
+						recordedAtMillis,
+						successCount,
+						failedCount,
+						corruptCount,
+						bytesTotal,
+						latencyMeanUs,
+						durationMeanUs,
+						latencySnapshot,
+						durationSnapshot,
+						ttfbSnapshot,
+						concurrencyLast,
+						concurrencyMean,
+						countLimit,
+						timeLimitSec,
+						elapsedTimeMillis,
+						distributed,
+						nodeCount,
+						nodesPresent,
+						contributorsPresent,
+						partial,
+						deleteMetrics,
+						deleteDetailsExpected,
+						clusterId,
+						driverStats,
+						driverStatsTotal,
+						null);
+	}
+
+	/** Creates a terminal entry that also retains the step's Steady-State Window result. */
+	private TerminalStepEntry(
+					String stepId,
+					OpType opType,
+					long runId,
+					long recordedAtMillis,
+					long successCount,
+					long failedCount,
+					long corruptCount,
+					long bytesTotal,
+					double latencyMeanUs,
+					double durationMeanUs,
+					TimingMetricSnapshot latencySnapshot,
+					TimingMetricSnapshot durationSnapshot,
+					TimingMetricSnapshot ttfbSnapshot,
+					long concurrencyLast,
+					double concurrencyMean,
+					long countLimit,
+					long timeLimitSec,
+					long elapsedTimeMillis,
+					boolean distributed,
+					int nodeCount,
+					List<String> nodesPresent,
+					List<String> contributorsPresent,
+					boolean partial,
+					DeleteMetricsSnapshot deleteMetrics,
+					boolean deleteDetailsExpected,
+					String clusterId,
+					DriverStatsSnapshot driverStats,
+					DriverStatsTotal driverStatsTotal,
+					SteadyResult steady) {
+		this.steady = steady;
 		this.stepId = stepId;
 		this.opType = opType;
 		this.runId = runId;
@@ -508,7 +575,45 @@ public final class TerminalStepEntry {
 						contributorsPresent,
 						partial,
 						deleteMetrics,
-						deleteDetailsExpected, clusterId, driverStats, driverStatsTotal);
+						deleteDetailsExpected,
+						clusterId,
+						driverStats,
+						driverStatsTotal,
+						steady);
+	}
+
+	/** A copy that retains the step's Steady-State Window result. */
+	public TerminalStepEntry withSteady(final SteadyResult steadyResult) {
+		return new TerminalStepEntry(
+						stepId,
+						opType,
+						runId,
+						recordedAtMillis,
+						successCount,
+						failedCount,
+						corruptCount,
+						bytesTotal,
+						latencyMeanUs,
+						durationMeanUs,
+						latencySnapshot,
+						durationSnapshot,
+						ttfbSnapshot,
+						concurrencyLast,
+						concurrencyMean,
+						countLimit,
+						timeLimitSec,
+						elapsedTimeMillis,
+						distributed,
+						nodeCount,
+						nodesPresent,
+						contributorsPresent,
+						partial,
+						deleteMetrics,
+						deleteDetailsExpected,
+						clusterId,
+						driverStats,
+						driverStatsTotal,
+						steadyResult);
 	}
 
 	public TerminalStepEntry(

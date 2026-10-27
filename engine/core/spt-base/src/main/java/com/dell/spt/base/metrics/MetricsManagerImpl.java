@@ -16,6 +16,7 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.logging.MetricsAsciiTableLogMessage;
 import com.dell.spt.base.logging.ExtResultsXmlLogMessage;
 import com.dell.spt.base.logging.MetricsCsvLogMessage;
+import com.dell.spt.base.logging.MetricsSteadyTotalCsvLogMessage;
 import com.dell.spt.base.logging.MetricsTotalCsvLogMessage;
 import com.dell.spt.base.logging.StepResultsMetricsLogMessage;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
@@ -27,6 +28,7 @@ import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DriverStatsTotal;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
+import com.dell.spt.base.metrics.steady.SteadyResult;
 import com.dell.spt.base.metrics.util.PrometheusMetricsExporter;
 import com.dell.spt.base.metrics.util.DriverStatsCollector;
 import com.dell.spt.base.metrics.util.PrometheusMetricsExporterImpl;
@@ -66,6 +68,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	// CLI and jar-only users get well-formed XML (log4j2 header/footer had async timing issues).
 	private final Set<String> openResultXmlSteps = ConcurrentHashMap.newKeySet();
 	private final Set<String> openMetricsTotalCsvSteps = ConcurrentHashMap.newKeySet();
+	private final Set<String> openMetricsSteadyTotalCsvSteps = ConcurrentHashMap.newKeySet();
 
 	// Terminal entries retention for /metrics/json when idle
 	private final Map<ProgressKey, TerminalStepEntry> terminalByStepId = new ConcurrentHashMap<>();
@@ -111,6 +114,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 				ThreadContext.put(KEY_STEP_ID, metricsCtx.loadStepId());
 				// TODO: as a future improvement consider whether throttling is needed here.
 				metricsCtx.refreshLastSnapshot();
+				metricsCtx.observeSteadyWindow();
 
 				final AllMetricsSnapshot snapshot = metricsCtx.lastSnapshot();
 				if (null != snapshot) {
@@ -240,8 +244,9 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 										: quantileValues(snapshot.ttfbSnapshot(), quantileValues);
 
 						if (snapshot instanceof DistributedAllMetricsSnapshot aggregSnapshot) {
+							final SteadyResult steady = terminalSteady(snapshotAfter);
 							if (hasProgress(snapshot)) {
-								terminalEntry = buildEntry(metricsCtx, aggregSnapshot);
+								terminalEntry = buildEntry(metricsCtx, aggregSnapshot).withSteady(steady);
 							}
 							// file output
 							// due to unknown reasons writing to a csv.total is based on a flag and not on a metrics
@@ -254,6 +259,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 								final StringBuilder csvOutput = new StringBuilder();
 								message.formatTo(csvOutput, includeHeader);
 								Loggers.METRICS_FILE_TOTAL.info(csvOutput.toString());
+								writeSteadyTotalRow(metricsCtx, steady, aggregSnapshot.nodeCount(), quantileValues);
 							}
 						}
 						// console output
@@ -289,6 +295,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 							Loggers.METRICS_EXT_RESULTS_FILE.info("</result>");
 							openResultXmlSteps.remove(metricsCtx.loadStepId());
 							openMetricsTotalCsvSteps.remove(metricsCtx.loadStepId());
+							openMetricsSteadyTotalCsvSteps.remove(metricsCtx.loadStepId());
 						}
 
 						final PrometheusMetricsExporter exporter = distributedMetrics.remove(distributedMetricsCtx);
@@ -303,7 +310,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 					} else {
 						// Cache terminal entry for JSON endpoint for local (non-distributed) contexts
 						if (hasAllParts(snapshot) && hasProgress(snapshot)) {
-							terminalEntry = buildEntry(metricsCtx, snapshot);
+							terminalEntry = buildEntry(metricsCtx, snapshot).withSteady(metricsCtx.steadyResult());
 							retainTerminal(progressKey, terminalEntry);
 						}
 					}
@@ -340,6 +347,32 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 				Loggers.MSG.debug("Stopped the metrics manager task");
 			}
 		}
+	}
+
+	/** The {@code metrics.steady.total.csv} row beside the total row, with the same quantile columns. */
+	private void writeSteadyTotalRow(
+					final MetricsContext<?> metricsCtx,
+					final SteadyResult steady,
+					final int nodeCount,
+					final List<Double> quantileValues) {
+		final AllMetricsSnapshot window = steady.statistics();
+		final MetricsSteadyTotalCsvLogMessage message = new MetricsSteadyTotalCsvLogMessage(
+						steady,
+						metricsCtx.opType(),
+						metricsCtx.concurrencyLimit(),
+						nodeCount,
+						window == null ? emptyQuantileValues(quantileValues) : quantileValues(window.latencySnapshot(), quantileValues),
+						window == null ? emptyQuantileValues(quantileValues) : quantileValues(window.durationSnapshot(), quantileValues),
+						window == null ? emptyQuantileValues(quantileValues) : quantileValues(window.ttfbSnapshot(), quantileValues));
+		final StringBuilder csvOutput = new StringBuilder();
+		message.formatTo(csvOutput, openMetricsSteadyTotalCsvSteps.add(metricsCtx.loadStepId()));
+		Loggers.METRICS_STEADY_FILE_TOTAL.info(csvOutput.toString());
+		Loggers.MSG.debug(
+						"{}: steady-state window {} (start cut acquisition {} ns, end cut {} ns)",
+						metricsCtx.loadStepId(),
+						steady,
+						steady.startAcquisitionNanos(),
+						steady.endAcquisitionNanos());
 	}
 
 	private static void exitMetricsThresholdState(final MetricsContext<?> metricsCtx) {
@@ -640,6 +673,21 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		public int hashCode() {
 			return Objects.hash(stepId, distributed);
 		}
+	}
+
+	/**
+	 * A distributed context's terminal steady result, from its final read alone. Every expected slice
+	 * has closed its window by then, so a missing one makes it incomplete. A final read that no slice
+	 * answered is incomplete too, although the whole-step totals fall back to an earlier read: the
+	 * contributor set at the final read decides, as it does when only some slices are missing.
+	 */
+	private static SteadyResult terminalSteady(final AllMetricsSnapshot finalSnapshot) {
+		if (!(finalSnapshot instanceof DistributedAllMetricsSnapshot fresh)) {
+			return SteadyResult.incomplete("no slice answered the final read");
+		}
+		return fresh.steadyResult() != null
+						? fresh.steadyResult()
+						: SteadyResult.incomplete("no slice reported a closed window");
 	}
 
 	private static AllMetricsSnapshot preferTerminalSnapshot(

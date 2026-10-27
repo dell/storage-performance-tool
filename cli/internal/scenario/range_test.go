@@ -58,7 +58,7 @@ func TestRangePolicyOnlyInReadPhase(t *testing.T) {
 					t.Fatal(err)
 				}
 				found := 0
-				for _, c := range parseGeneratedScenarioConfigs(t, strings.NewReplacer(".config(sharedConfig)", "", ": itemsFile", ": \"items.csv\"", ": seedCount", ": 1", ": duration", ": \"1s\"", ": itemCount", ": 2", ": readCount", ": 2").Replace(s)) {
+				for _, c := range parseGeneratedScenarioConfigs(t, strings.NewReplacer(".config(sharedConfig)", "", ".config(existingBucketsOnly)", "", ": itemsFile", ": \"items.csv\"", ": seedCount", ": 1", ": duration", ": \"1s\"", ": itemCount", ": 2", ": readCount", ": 2").Replace(s)) {
 					r, has := configPath(c, "load", "op", "read", "range")
 					op, _ := configPath(c, "load", "op", "type")
 					if has {

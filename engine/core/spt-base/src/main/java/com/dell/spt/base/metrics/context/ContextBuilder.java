@@ -1,6 +1,7 @@
 package com.dell.spt.base.metrics.context;
 
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.metrics.steady.SteadySettings;
 import com.github.akurilov.commons.system.SizeInBytes;
 import java.util.function.IntSupplier;
 
@@ -28,4 +29,10 @@ public interface ContextBuilder<B extends ContextBuilder, C extends MetricsConte
 	B actualConcurrencyGauge(final IntSupplier actualConcurrencyGauge);
 
 	B runId(final long id);
+
+	/** Settings of the Steady-State Window. Only local contexts measure one; others ignore them. */
+	@SuppressWarnings("unchecked")
+	default B steadySettings(final SteadySettings settings) {
+		return (B) this;
+	}
 }

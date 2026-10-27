@@ -44,6 +44,7 @@ dependencies {
 	testImplementation libs.junit.jupiter.params
 	testRuntimeOnly libs.junit.jupiter.engine
 	testImplementation libs.log4j.api
+	testImplementation libs.log4j.core
 	testImplementation libs.mockito.core
 	// Add primitives for test compilation
 	testImplementation project(':extensions:storage-drivers:primitives:coop')
@@ -51,6 +52,22 @@ dependencies {
 	// The bundle merges this shared network schema for s3-aws endpoint configuration.
 	testImplementation project(':extensions:storage-drivers:primitives:netty')
 	testImplementation project(':core:spt-base')
+}
+
+// The tests tagged slow prove that the timeouts end real requests: a request fails only after
+// every retry of its native client, so they take minutes, and the default test task leaves them
+// out. Run them after an upgrade of the AWS SDK or CRT. Their classes run at the same time.
+tasks.register('slowTest', Test) {
+	description = 'Runs the slow s3-aws timeout tests against local scripted servers.'
+	group = 'verification'
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform {
+		includeTags 'slow'
+	}
+	systemProperty 'junit.jupiter.execution.parallel.enabled', 'true'
+	systemProperty 'junit.jupiter.execution.parallel.mode.default', 'same_thread'
+	systemProperty 'junit.jupiter.execution.parallel.mode.classes.default', 'same_thread'
 }
 
 shadowJar {

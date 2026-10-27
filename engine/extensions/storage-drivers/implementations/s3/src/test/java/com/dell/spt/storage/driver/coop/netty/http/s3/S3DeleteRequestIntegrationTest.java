@@ -306,7 +306,7 @@ final class S3DeleteRequestIntegrationTest {
 			assertNotNull(IntegrityTerminalException.find(failure));
 		}
 
-		assertEquals(2, requests.stream().filter(request -> "HEAD".equals(request.method())).count());
+		assertEquals(2, requests.stream().filter(S3DeleteRequestIntegrationTest::isObjectHead).count());
 		assertEquals(0, requests.stream().filter(request -> "DELETE".equals(request.method()) || "POST".equals(request.method())).count());
 	}
 
@@ -1095,7 +1095,8 @@ final class S3DeleteRequestIntegrationTest {
 			}
 			exchange.sendResponseHeaders(200, -1);
 		} else if ("HEAD".equals(request.method())) {
-			exchange.sendResponseHeaders(headResponseStatus.apply(request), -1);
+			// Bucket checks (target-bucket provisioning) see an existing bucket; objects follow the test.
+			exchange.sendResponseHeaders(isBucketPath(request.rawPath()) ? 200 : headResponseStatus.apply(request), -1);
 		} else if ("DELETE".equals(request.method())) {
 			exchange.sendResponseHeaders(deleteResponseStatus.apply(request), -1);
 		} else if ("POST".equals(request.method()) && "delete".equals(request.rawQuery())) {
@@ -1168,6 +1169,14 @@ final class S3DeleteRequestIntegrationTest {
 			TimeUnit.MILLISECONDS.sleep(10);
 		} while (System.nanoTime() < deadline);
 		throw new AssertionError("terminal metrics were not published for step " + stepId);
+	}
+
+	private static boolean isBucketPath(final String rawPath) {
+		return rawPath.indexOf('/', 1) < 0;
+	}
+
+	private static boolean isObjectHead(final CapturedRequest request) {
+		return "HEAD".equals(request.method()) && !isBucketPath(request.rawPath());
 	}
 
 	private record CapturedRequest(

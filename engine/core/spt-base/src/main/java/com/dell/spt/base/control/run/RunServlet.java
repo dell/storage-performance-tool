@@ -13,7 +13,6 @@ import com.dell.spt.base.control.ApiStatus;
 import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.env.Extension;
-import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.load.step.LoadStepManagerService;
 import com.dell.spt.base.load.step.ScenarioUtil;
 import com.dell.spt.base.logging.LogUtil;
@@ -307,7 +306,7 @@ public class RunServlet extends HttpServlet {
 			}
 			try {
 				delegate.run();
-			} catch (final IntegrityTerminalException e) {
+			} catch (final RunTerminalException e) {
 				apiStatus.setFailed(e.stepId(), e.category(), e.getMessage());
 				throw e;
 			} finally {

@@ -16,9 +16,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.dell.spt.base.Constants;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
-import com.dell.spt.base.config.BundledDefaultsProvider;
 import com.dell.spt.base.control.run.RunImpl;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
@@ -35,12 +33,10 @@ import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.storage.driver.StandaloneDeletePreparable;
-import com.github.akurilov.commons.collection.TreeUtil;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
-import com.github.akurilov.confuse.SchemaProvider;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
@@ -53,7 +49,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -61,7 +56,6 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
-import java.util.stream.Collectors;
 import javax.script.ScriptEngine;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -85,6 +79,10 @@ final class S3AwsDeleteRequestIntegrationTest {
 	private static final String DELETE_RESULT_NAMESPACE = " xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"";
 
 	private final List<CapturedRequest> requests = new CopyOnWriteArrayList<>();
+
+	@TempDir
+	Path configHome;
+
 	private final ExecutorService executor = Executors.newSingleThreadExecutor();
 	private HttpServer server;
 	private volatile String multiDeleteResponse;
@@ -418,7 +416,7 @@ final class S3AwsDeleteRequestIntegrationTest {
 		assertEquals(3, verification.size());
 		assertTrue(verification.subList(1, verification.size()).stream()
 						.allMatch(row -> row.contains(",unattempted,true,absent,true,unattempted,")));
-		assertEquals(2, requests.stream().filter(request -> "HEAD".equals(request.method())).count());
+		assertEquals(2, requests.stream().filter(S3AwsDeleteRequestIntegrationTest::isObjectHead).count());
 		assertEquals(0, requests.stream()
 						.filter(request -> "DELETE".equals(request.method()) || "POST".equals(request.method()))
 						.count());
@@ -488,34 +486,11 @@ final class S3AwsDeleteRequestIntegrationTest {
 	}
 
 	private Config scenarioConfig(final long runId) throws Exception {
-		final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
-		final List<Map<String, Object>> schemas = Extension.load(classLoader).stream()
-						.map(Extension::schemaProvider)
-						.filter(Objects::nonNull)
-						.map(provider -> {
-							try {
-								return provider.schema();
-							} catch (final Exception failure) {
-								throw new IllegalStateException(failure);
-							}
-						})
-						.collect(Collectors.toCollection(ArrayList::new));
-		SchemaProvider.resolve(Constants.APP_NAME, classLoader).stream()
-						.findFirst()
-						.ifPresent(schemas::add);
-		final Config config = new BundledDefaultsProvider().config("-", TreeUtil.reduceForest(schemas));
-		config.val("run-id", runId);
-		config.val("storage-driver-type", "s3-aws");
-		config.val("storage-driver-limit-concurrency", 1);
-		config.val("storage-driver-limit-queue-input", 8);
-		config.val("storage-auth-uid", CREDENTIAL.getUid());
-		config.val("storage-auth-secret", CREDENTIAL.getSecret());
-		config.val("storage-region", "us-east-1");
-		config.val("storage-net-node-addrs", List.of("127.0.0.1"));
-		config.val("storage-net-node-port", server.getAddress().getPort());
-		config.val("storage-net-ssl-enabled", false);
-		config.val("output-color", false);
-		return config;
+		// As the engine builds it, with the shipped defaults of the s3-aws extension.
+		return S3AwsMergedConfig.create(
+						configHome,
+						server.getAddress().getPort(),
+						Map.of("run-id", runId, "storage-region", "us-east-1"));
 	}
 
 	private static Path publishManifest(final Path tempDir, final long runId) throws IOException {
@@ -653,7 +628,9 @@ final class S3AwsDeleteRequestIntegrationTest {
 						exchange.getRequestURI().getRawQuery(),
 						body));
 		if ("HEAD".equals(exchange.getRequestMethod())) {
-			exchange.sendResponseHeaders(headResponseStatus.apply(requests.get(requests.size() - 1)), -1);
+			// Bucket checks (target-bucket provisioning) see an existing bucket; objects follow the test.
+			final CapturedRequest request = requests.get(requests.size() - 1);
+			exchange.sendResponseHeaders(isBucketPath(request.rawPath()) ? 200 : headResponseStatus.apply(request), -1);
 		} else if ("DELETE".equals(exchange.getRequestMethod())) {
 			exchange.sendResponseHeaders(204, -1);
 		} else if ("POST".equals(exchange.getRequestMethod())
@@ -666,6 +643,14 @@ final class S3AwsDeleteRequestIntegrationTest {
 			exchange.sendResponseHeaders(500, -1);
 		}
 		exchange.close();
+	}
+
+	private static boolean isBucketPath(final String rawPath) {
+		return rawPath.indexOf('/', 1) < 0;
+	}
+
+	private static boolean isObjectHead(final CapturedRequest request) {
+		return "HEAD".equals(request.method()) && !isBucketPath(request.rawPath());
 	}
 
 	private record CapturedRequest(String method, String rawPath, String rawQuery, String body) {}

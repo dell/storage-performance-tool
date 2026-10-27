@@ -125,7 +125,15 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		} else {
 			opDispatchTask.start();
 		}
+		onAdmissionOpened();
 	}
+
+	/**
+	 * Called when admission opens, as the driver starts or restarts, before any operation of the
+	 * new cycle is dispatched. A driver that keeps state from {@link #onAdmissionClosed()} resets
+	 * it here, so that a stop of an earlier cycle cannot act on the requests of this one.
+	 */
+	protected void onAdmissionOpened() {}
 
 	@Override
 	public final boolean put(final O op) {
@@ -1036,7 +1044,15 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				throwUnchecked(e);
 			}
 		}
+		onAdmissionClosed();
 	}
+
+	/**
+	 * Called after admission has been closed, which is the first thing a load step does when it
+	 * stops, before it waits for the operations in flight. A driver that can end its requests
+	 * in flight on its own may bound that wait here. May be called more than once.
+	 */
+	protected void onAdmissionClosed() {}
 
 	@Override
 	public final List<O> recoverQueuedOperations() {
