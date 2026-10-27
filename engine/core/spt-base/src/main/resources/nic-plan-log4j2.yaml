@@ -1,0 +1,16 @@
+# Logging for the image's spt-nic-plan command: warnings and errors on stderr only, because its
+# JSON owns stdout, and no log files.
+Configuration:
+  status: warn
+  name: spt-nic-plan
+  appenders:
+    Console:
+      name: stderr
+      target: SYSTEM_ERR
+      PatternLayout:
+        pattern: "%d{ISO8601}{GMT+0} %p %m%n"
+  Loggers:
+    Root:
+      level: warn
+      AppenderRef:
+        ref: stderr
