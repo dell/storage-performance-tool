@@ -30,6 +30,13 @@ public record NicSetSettings(List<String> interfaces, int connectTimeoutMillis, 
 	/** The probe never waits longer than this per Path. */
 	public static final int MAX_PROBE_TIMEOUT_MILLIS = 10_000;
 
+	/**
+	 * Without a concurrency limit, the attempts per NIC that may connect or wait for a connection at
+	 * once. It bounds the connects to one failing Path at P5's storm bound, while in-flight requests
+	 * stay unbounded.
+	 */
+	public static final int UNLIMITED_WAITING_LIMIT = 8;
+
 	public NicSetSettings {
 		interfaces = List.copyOf(interfaces);
 	}
@@ -93,6 +100,25 @@ public record NicSetSettings(List<String> interfaces, int connectTimeoutMillis, 
 			return 1;
 		}
 		return concurrencyLimit / nics + (index < concurrencyLimit % nics ? 1 : 0);
+	}
+
+	/**
+	 * The attempts NIC {@code index} of {@code nics} admits at once: its open limit when the
+	 * concurrency limit is positive, counted until each attempt ends, and otherwise
+	 * {@link #UNLIMITED_WAITING_LIMIT}, counted until each attempt's wait for a connection ends.
+	 */
+	public static int admissionLimit(final int concurrencyLimit, final int nics, final int index) {
+		return concurrencyLimit <= 0 ? UNLIMITED_WAITING_LIMIT : openLimit(concurrencyLimit, nics, index);
+	}
+
+	/**
+	 * Whether every one of {@code nics} NICs has its own share of the concurrency limit,
+	 * {@code P >= N}. Only then does a completed attempt hand its connection and permit straight to
+	 * the next queued operation (D37): in the shared mode every attempt goes through the rotation,
+	 * and without a limit there are no shares.
+	 */
+	public static boolean hasShares(final int concurrencyLimit, final int nics) {
+		return concurrencyLimit > 0 && concurrencyLimit >= nics;
 	}
 
 	/**

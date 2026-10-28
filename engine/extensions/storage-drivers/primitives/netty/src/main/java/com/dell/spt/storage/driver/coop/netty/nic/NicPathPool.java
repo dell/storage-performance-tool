@@ -50,6 +50,7 @@ final class NicPathPool {
 
 	static final AttributeKey<NicPath> ATTR_KEY_PATH = AttributeKey.valueOf("nicPath");
 
+	private final int index;
 	private final String nic;
 	private final Inet4Address address;
 	private final EventLoopGroup group;
@@ -193,12 +194,15 @@ final class NicPathPool {
 		}
 	}
 
-	NicPathPool(final String nic, final Inet4Address address, final EventLoopGroup group, final Bootstrap template,
-					final ChannelPoolHandler channelHandler, final NicBinding binding, final int connectTimeoutMillis,
-					final int openLimit, final List<NicSetLayout.PathSpec> pathSpecs, final LongSupplier nanoClock) {
+	/** @param index the NIC's index in the layout's NIC-set order */
+	NicPathPool(final int index, final String nic, final Inet4Address address, final EventLoopGroup group,
+					final Bootstrap template, final ChannelPoolHandler channelHandler, final NicBinding binding,
+					final int connectTimeoutMillis, final int openLimit, final List<NicSetLayout.PathSpec> pathSpecs,
+					final LongSupplier nanoClock) {
 		if (pathSpecs.isEmpty()) {
 			throw new IllegalArgumentException("NIC " + nic + " has no Path");
 		}
+		this.index = index;
 		this.nic = nic;
 		this.address = address;
 		this.group = group;
@@ -212,6 +216,11 @@ final class NicPathPool {
 			built.add(new NicPath(built.size(), spec.endpoint(), spec.destination(), nanoClock));
 		}
 		this.paths = List.copyOf(built);
+	}
+
+	/** The NIC's index in the layout's NIC-set order. */
+	int index() {
+		return index;
 	}
 
 	String nic() {

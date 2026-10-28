@@ -250,7 +250,7 @@ class NicSetConnectionPoolTest {
 
 	@Test
 	void anUnreachableEndpointIsExplainedFromTheRoutingTable() throws Exception {
-		final var pool = new NicPathPool("lo-a", NIC_A, group("lo-a"), template(), handler, NicBinding.SOURCE_ADDRESS,
+		final var pool = new NicPathPool(0, "lo-a", NIC_A, group("lo-a"), template(), handler, NicBinding.SOURCE_ADDRESS,
 						CONNECT_TIMEOUT_MILLIS, 0,
 						List.of(new NicSetLayout.PathSpec("s3-a.example:9000", new InetSocketAddress("192.0.2.30", 9000))),
 						now::get);

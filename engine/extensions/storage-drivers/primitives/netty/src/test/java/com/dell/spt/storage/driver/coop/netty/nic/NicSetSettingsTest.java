@@ -1,6 +1,7 @@
 package com.dell.spt.storage.driver.coop.netty.nic;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -99,6 +100,25 @@ class NicSetSettingsTest {
 		assertEquals(1, NicSetSettings.preOpenCount(1, 4, 2, 2));
 		assertEquals(2, NicSetSettings.preOpenCount(0, 4, 0, 2), "one per Path when unlimited");
 		assertEquals(5, NicSetSettings.preOpenCount(-1, 1, 0, 5));
+	}
+
+	@Test
+	void admissionFollowsTheOpenLimitsAndBoundsWaitingAttemptsWhenUnlimited() {
+		assertEquals(3, NicSetSettings.admissionLimit(10, 4, 0));
+		assertEquals(2, NicSetSettings.admissionLimit(10, 4, 3));
+		assertEquals(1, NicSetSettings.admissionLimit(3, 4, 3), "one per NIC in the shared mode");
+		assertEquals(NicSetSettings.UNLIMITED_WAITING_LIMIT, NicSetSettings.admissionLimit(0, 4, 2));
+		assertEquals(NicSetSettings.UNLIMITED_WAITING_LIMIT, NicSetSettings.admissionLimit(-1, 1, 0));
+	}
+
+	@Test
+	void onlyAConcurrencyLimitOfAtLeastOnePerNicGivesEveryNicAShare() {
+		assertTrue(NicSetSettings.hasShares(4, 4));
+		assertTrue(NicSetSettings.hasShares(10, 4));
+		assertTrue(NicSetSettings.hasShares(1, 1));
+		assertFalse(NicSetSettings.hasShares(3, 4), "the shared mode");
+		assertFalse(NicSetSettings.hasShares(0, 1), "unlimited");
+		assertFalse(NicSetSettings.hasShares(-1, 1), "unlimited");
 	}
 
 	private static List<Integer> limits(final int concurrency, final int nics) {

@@ -26,9 +26,10 @@ import java.util.function.LongSupplier;
  * created empty while the driver is constructed, when the NICs are not resolved yet, and opened
  * once at start.
  *
- * <p>An acquisition takes the next NIC in rotation that has an idle connection or a free slot, and
- * the first NIC of that rotation when every NIC is at its limit. It then stays on that NIC. Ticket
- * 04 replaces this choice with per-NIC permits.
+ * <p>A request attempt names its NIC, which the dispatch task took from the pool's
+ * {@link #admission()} (item 8b), and stays on it. The synchronous {@link #lease()} instead takes
+ * the next NIC in rotation that has an idle connection or a free slot, and the first NIC of that
+ * rotation when every NIC is at its limit.
  *
  * <p>The synchronous {@link NonBlockingConnPool} methods serve inherited release and close paths;
  * {@link #lease()} waits on the calling thread, never on an event loop of this pool.
@@ -63,6 +64,7 @@ public final class NicSetConnectionPool implements NonBlockingConnPool {
 	private final LongSupplier nanoClock;
 	private final AtomicInteger next = new AtomicInteger();
 	private volatile List<NicPathPool> pools = List.of();
+	private volatile NicAdmission admission = NicAdmission.none();
 	private volatile int connectTimeoutMillis;
 	private volatile boolean closed;
 
@@ -82,7 +84,8 @@ public final class NicSetConnectionPool implements NonBlockingConnPool {
 
 	/**
 	 * Builds one Path Pool per NIC, in layout order, each limited per {@link NicSetSettings#openLimit}
-	 * and binding its sockets with {@code binding}. Once only.
+	 * and binding its sockets with {@code binding}, and the NICs' admission for
+	 * {@code concurrencyLimit}. Once only.
 	 */
 	public synchronized void open(final List<OpenNic> nics, final NicBinding binding, final int connectTimeoutMillis,
 					final int concurrencyLimit) {
@@ -95,12 +98,29 @@ public final class NicSetConnectionPool implements NonBlockingConnPool {
 		final var built = new ArrayList<NicPathPool>(nics.size());
 		for (var i = 0; i < nics.size(); i++) {
 			final var nic = nics.get(i).nic();
-			built.add(new NicPathPool(nic.name(), nic.address(), nics.get(i).group(), template, channelHandler, binding,
+			built.add(new NicPathPool(i, nic.name(), nic.address(), nics.get(i).group(), template, channelHandler, binding,
 							connectTimeoutMillis, NicSetSettings.openLimit(concurrencyLimit, nics.size(), i), nic.paths(),
 							nanoClock));
 		}
 		this.connectTimeoutMillis = connectTimeoutMillis;
+		this.admission = NicAdmission.of(concurrencyLimit, nics.size());
 		this.pools = List.copyOf(built);
+	}
+
+	/** The NICs' admission; it has no NIC until {@link #open}. */
+	public NicAdmission admission() {
+		return admission;
+	}
+
+	/** The number of NICs; 0 until {@link #open}. */
+	public int nicCount() {
+		return pools.size();
+	}
+
+	/** The index of the NIC whose Path Pool opened {@code channel}, or -1 for a channel of no Path Pool. */
+	public static int nicIndex(final Channel channel) {
+		final var path = channel.attr(NicPathPool.ATTR_KEY_PATH).get();
+		return path == null ? -1 : path.pool().index();
 	}
 
 	/**
@@ -149,6 +169,19 @@ public final class NicSetConnectionPool implements NonBlockingConnPool {
 		} catch (final ExecutionException | TimeoutException e) {
 			// Pre-open failures warn per Path and start its back-off; they never fail the step.
 		}
+	}
+
+	/**
+	 * Reports an active channel on one of NIC {@code nic}'s Paths, or the failure, to
+	 * {@code callback} exactly once. A channel is reported on its own event loop.
+	 */
+	public void acquire(final int nic, final Acquisition callback) {
+		final var current = pools;
+		if (closed || current.isEmpty()) {
+			callback.complete(null, new ConnectException(closed ? "The NIC-set pool is closed" : "The NIC-set pool is not open"));
+			return;
+		}
+		current.get(nic).acquire(callback);
 	}
 
 	/**
