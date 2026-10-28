@@ -9,6 +9,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.data.SeedDataInput;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
@@ -21,11 +23,13 @@ import com.dell.spt.base.load.step.local.context.range.RangeReadRuntime;
 import com.dell.spt.base.nic.Ipv4;
 import com.dell.spt.base.nic.Ipv4Prefix;
 import com.dell.spt.base.nic.NicInventory;
+import com.dell.spt.base.storage.driver.nic.NicSetDriverFactory;
 import com.dell.spt.storage.driver.coop.netty.nic.NicBinding;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetConnectionPool;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetSettings;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetSupport;
 import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.SchemaProvider;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.ByteArrayOutputStream;
@@ -36,12 +40,13 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -53,6 +58,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.IntPredicate;
+import java.util.regex.Pattern;
 
 /**
  * Loopback NICs and an in-memory S3 stub for tests of the real S3 drivers with a NIC set. Four
@@ -70,6 +76,7 @@ final class NicSetLoopback implements AutoCloseable {
 	static final String HOSTNAME = "s3-b.example";
 	static final String BUCKET = "/bucket";
 	private static final long HOLD_SECONDS = 30;
+	private static final Pattern KEY = Pattern.compile("<Key>([^<]*)</Key>");
 
 	private static final NicInventory.Sysctls SYSCTLS = new NicInventory.Sysctls(1, 2, 2);
 	private static final NicInventory INVENTORY = new NicInventory(
@@ -82,11 +89,12 @@ final class NicSetLoopback implements AutoCloseable {
 					host -> HOSTNAME.equals(host) ? Ipv4.parse(KERNEL_SOURCE) : Ipv4.parse(host),
 					NicBinding.SOURCE_ADDRESS);
 
-	/** One request as the stub received it. */
-	record Request(int listener, String method, String path, String query, String host, String source, String range) {
+	/** One request as the stub received it; {@code source} and {@code port} name its connection. */
+	record Request(int listener, String method, String path, String query, String host, String source, int port, String range) {
 
+		/** A request on an object key in any bucket; the bucket check and listings are on the bucket itself. */
 		boolean isObjectRequest() {
-			return path.startsWith(BUCKET + "/");
+			return path.indexOf('/', 1) > 0;
 		}
 	}
 
@@ -94,7 +102,9 @@ final class NicSetLoopback implements AutoCloseable {
 	private final ExecutorService serverThreads = Executors.newCachedThreadPool();
 	private final List<Request> requests = new CopyOnWriteArrayList<>();
 	private final Map<String, byte[]> objects = new ConcurrentHashMap<>();
+	/** Each upload's parts by number; parts of one upload arrive on several listeners at once. */
 	private final Map<String, Map<Integer, byte[]>> uploads = new ConcurrentHashMap<>();
+	private final Map<String, String> tags = new ConcurrentHashMap<>();
 	private final AtomicInteger uploadIds = new AtomicInteger();
 	private final Map<String, AtomicInteger> active = new ConcurrentHashMap<>();
 	private final Map<String, AtomicInteger> peaks = new ConcurrentHashMap<>();
@@ -107,6 +117,11 @@ final class NicSetLoopback implements AutoCloseable {
 
 	/** The storage configuration of a driver with these endpoints and NICs. */
 	static Config storage(final List<String> endpoints, final List<String> interfaces, final int concurrency) {
+		return root(endpoints, interfaces, concurrency).configVal("storage");
+	}
+
+	/** The whole configuration around {@link #storage}, for engine scenarios. */
+	static Config root(final List<String> endpoints, final List<String> interfaces, final int concurrency) {
 		final Config root = S3StorageDriverTest.baseConfig(false, 4, false, null, KERNEL_SOURCE);
 		root.val("storage-net-transport", "epoll");
 		root.val("storage-net-interfaces", interfaces);
@@ -115,7 +130,7 @@ final class NicSetLoopback implements AutoCloseable {
 		root.val("storage-net-http-headers", Map.of());
 		root.val("storage-driver-limit-concurrency", concurrency);
 		root.val("storage-driver-threads", 1);
-		return root.configVal("storage");
+		return root;
 	}
 
 	/** A plain-driver test run: the driver and the results it published. */
@@ -143,6 +158,48 @@ final class NicSetLoopback implements AutoCloseable {
 		driver.operationResultOutput(results);
 		driver.start();
 		return new Run(driver, results);
+	}
+
+	/** The driver type of {@link Factory}. */
+	static final String DRIVER_TYPE = "s3-nic-loopback";
+
+	/**
+	 * The {@code s3} NIC-set drivers on the fixture environment, for engine scenarios, in which the
+	 * shipped factory would resolve its NICs on the host. It keeps every driver it creates.
+	 */
+	static final class Factory
+					implements NicSetDriverFactory<DataItem, Operation<DataItem>, S3NicSetDriver<DataItem, Operation<DataItem>>> {
+
+		final List<S3NicSetDriver<DataItem, Operation<DataItem>>> drivers = new CopyOnWriteArrayList<>();
+
+		@Override
+		public String id() {
+			return DRIVER_TYPE;
+		}
+
+		@Override
+		public S3NicSetDriver<DataItem, Operation<DataItem>> create(final String stepId, final DataInput dataInput,
+						final Config storageConfig, final boolean verifyFlag, final int batchSize)
+						throws IllegalConfigurationException, InterruptedException {
+			final S3NicSetDriver<DataItem, Operation<DataItem>> driver = S3NicSetDriver.create(stepId, dataInput, storageConfig,
+							verifyFlag, batchSize, NicSetSettings.fromStorage(storageConfig).orElseThrow(), ENVIRONMENT);
+			drivers.add(driver);
+			return driver;
+		}
+
+		/** The S3 extension on the class path brings the schema and the defaults. */
+		@Override
+		public Config defaults(final Path appHomePath) {
+			return null;
+		}
+
+		@Override
+		public SchemaProvider schemaProvider() {
+			return null;
+		}
+
+		@Override
+		public void install(final Path dstPath) {}
 	}
 
 	/** Drives the range driver through its runtime, as the range endpoint-selection tests do. */
@@ -269,8 +326,14 @@ final class NicSetLoopback implements AutoCloseable {
 		return requests.stream().filter(Request::isObjectRequest).toList();
 	}
 
+	/** The stored object itself, not a copy, so a test can corrupt it in place. */
 	byte[] object(final String path) {
 		return objects.get(path);
+	}
+
+	/** The tagging document last written to {@code path}. */
+	String tags(final String path) {
+		return tags.get(path);
 	}
 
 	/**
@@ -307,9 +370,11 @@ final class NicSetLoopback implements AutoCloseable {
 		try (exchange) {
 			final var body = exchange.getRequestBody().readAllBytes();
 			final var uri = exchange.getRequestURI();
-			final var source = exchange.getRemoteAddress().getAddress().getHostAddress();
+			final var remote = exchange.getRemoteAddress();
+			final var source = remote.getAddress().getHostAddress();
 			final var request = new Request(listener, exchange.getRequestMethod(), uri.getRawPath(), uri.getRawQuery(),
-							exchange.getRequestHeaders().getFirst("Host"), source, exchange.getRequestHeaders().getFirst("Range"));
+							exchange.getRequestHeaders().getFirst("Host"), source, remote.getPort(),
+							exchange.getRequestHeaders().getFirst("Range"));
 			final var concurrent = active.computeIfAbsent(source, unused -> new AtomicInteger()).incrementAndGet();
 			peaks.computeIfAbsent(source, unused -> new AtomicInteger()).accumulateAndGet(concurrent, Math::max);
 			try {
@@ -339,8 +404,10 @@ final class NicSetLoopback implements AutoCloseable {
 		final var path = request.path();
 		switch (request.method()) {
 		case "PUT" -> {
-			if (query.contains("partNumber=")) {
-				uploads.computeIfAbsent(param(query, "uploadId"), unused -> new TreeMap<>())
+			if ("tagging".equals(query)) {
+				tags.put(path, new String(body, StandardCharsets.UTF_8));
+			} else if (query.contains("partNumber=")) {
+				uploads.computeIfAbsent(param(query, "uploadId"), unused -> new ConcurrentSkipListMap<>())
 								.put(Integer.parseInt(param(query, "partNumber")), body);
 			} else {
 				objects.put(path, body);
@@ -349,9 +416,11 @@ final class NicSetLoopback implements AutoCloseable {
 			exchange.sendResponseHeaders(200, -1);
 		}
 		case "POST" -> {
-			if (query.contains("uploads")) {
+			if ("delete".equals(query)) {
+				respond(exchange, 200, deleteObjects(path, new String(body, StandardCharsets.UTF_8)));
+			} else if (query.contains("uploads")) {
 				final var uploadId = "upload-" + uploadIds.incrementAndGet();
-				uploads.put(uploadId, new TreeMap<>());
+				uploads.put(uploadId, new ConcurrentSkipListMap<>());
 				respond(exchange, 200, "<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>k</Key><UploadId>"
 								+ uploadId + "</UploadId></InitiateMultipartUploadResult>");
 			} else {
@@ -401,6 +470,17 @@ final class NicSetLoopback implements AutoCloseable {
 		}
 		default -> exchange.sendResponseHeaders(405, -1);
 		}
+	}
+
+	/** Answers a multi-object delete: removes each listed key and reports it deleted. */
+	private String deleteObjects(final String bucket, final String body) {
+		final var xml = new StringBuilder("<DeleteResult>");
+		final var keys = KEY.matcher(body);
+		while (keys.find()) {
+			objects.remove(bucket + "/" + keys.group(1));
+			xml.append("<Deleted><Key>").append(keys.group(1)).append("</Key></Deleted>");
+		}
+		return xml.append("</DeleteResult>").toString();
 	}
 
 	private String listing(final String bucket) {

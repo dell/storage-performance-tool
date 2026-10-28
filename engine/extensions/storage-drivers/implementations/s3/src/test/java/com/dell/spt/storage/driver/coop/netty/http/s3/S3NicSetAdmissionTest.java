@@ -12,9 +12,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.dell.spt.base.item.DataItem;
+import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.data.range.RangeReadPolicy;
+import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
 import com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.RangeRun;
@@ -243,6 +246,49 @@ final class S3NicSetAdmissionTest {
 	}
 
 	@Test
+	void aStopWhileAPartWaitsForItsConnectionSendsNothingMoreOfTheUpload() throws Exception {
+		final var run = started(stub.listeners(2), nics(2), 2);
+		final var pool = run.pool();
+		final var admission = pool.admission();
+		// The first-use bucket check, on the kernel route, passes before the upload.
+		assertEquals(Operation.Status.SUCC, run.execute(dataOp(OpType.CREATE, "before")).status());
+		final var channels = List.of(channelOf(pool, 0), channelOf(pool, 1));
+		final var upload = new CompositeDataOperationImpl<DataItem>(0, OpType.CREATE, new DataItemImpl("upload", 7,
+						2L * EndpointSelectionTestSupport.ITEM_SIZE), null, "/bucket", EndpointSelectionTestSupport.CREDENTIAL,
+						null, 0, EndpointSelectionTestSupport.ITEM_SIZE);
+		stub.hold();
+
+		assertTrue(run.driver().put(upload));
+		waitFor(() -> stub.objectRequests().size() == 2, "the initiation reaches the stub");
+		// The other NIC's event loop is blocked, so the part it takes waits there for its connection.
+		final int waiting = ADDRESSES.get(0).equals(stub.objectRequests().get(1).source()) ? 1 : 0;
+		final var unblock = block(channels.get(waiting));
+		stub.release();
+		waitFor(() -> admission.count(waiting) == 1 && admission.count(1 - waiting) == 0 && parts() == 1,
+						"one part was sent and answered while the other waits for its connection");
+		run.driver().closeAdmission();
+		final var recovered = run.driver().recoverQueuedOperations();
+		unblock.countDown();
+
+		waitFor(() -> admission.count(waiting) == 0 && run.driver().activeOpCount() == 0, "the waiting part released its NIC and permit");
+		assertEquals(1, recovered.size(), recovered::toString);
+		assertTrue(recovered.get(0) instanceof PartialOperation<?> part && part.parent() == upload, "the waiting part was recovered");
+		final var lifecycle = run.driver().operationLifecycle();
+		assertEquals(OperationLifecycleState.UNATTEMPTED, lifecycle.stateOf(recovered.get(0)));
+		assertEquals(1, parts(), () -> "requests: " + stub.objectRequests());
+		assertTrue(stub.objectRequests().stream().noneMatch(request -> "POST".equals(request.method())
+						&& request.query() != null && request.query().startsWith("uploadId=")), "the upload was not completed");
+		assertEquals(0, lifecycle.counters().failed(), "fresh work charges no failure");
+		// As on the default route, the upload stays in flight for the step's bounded drain to settle.
+		assertEquals(OperationLifecycleState.DISPATCHED, lifecycle.stateOf(upload));
+		assertEquals(1, lifecycle.snapshot().unattempted());
+		assertEquals(1, lifecycle.snapshot().inFlight());
+		lifecycle.expireTerminalDeadline();
+		assertEquals(OperationLifecycleState.UNRESOLVED, lifecycle.stateOf(upload));
+		assertTrue(lifecycle.counters().reconciled(), lifecycle.counters()::toString);
+	}
+
+	@Test
 	void aRangeAttemptWaitingOnOneNicDoesNotHoldBackTheOther() throws Exception {
 		final var endpoints = stub.listeners(2);
 		final var run = rangeRun(endpoints, 2);
@@ -414,6 +460,12 @@ final class S3NicSetAdmissionTest {
 		final var admission = run.pool().admission();
 		waitFor(() -> run.driver().activeOpCount() == 0 && counts(admission).stream().allMatch(count -> count == 0),
 						"every attempt ended: " + counts(admission));
+	}
+
+	/** The upload parts the stub received. */
+	private long parts() {
+		return stub.objectRequests().stream().filter(request -> request.query() != null && request.query().contains("partNumber="))
+						.count();
 	}
 
 	private long fromAddress(final int nic) {

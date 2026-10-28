@@ -49,6 +49,11 @@ dependencies {
 		libs.disruptor,
 		libs.netty.transport.native.epoll,
 	)
+	// S3NicSetWorkloadTest runs pipeline and weighted steps as engine scenarios on the NIC-set route.
+	testRuntimeOnly(
+		project(':extensions:load-steps:pipeline'),
+		project(':extensions:load-steps:weighted'),
+	)
 }
 
 // S3-specific comment configuration (preserved from original)
