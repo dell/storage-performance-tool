@@ -232,6 +232,21 @@ final class S3NicSetDriverTest {
 	}
 
 	@Test
+	void aRepeatedEndpointFailsTheStartAsAConfigurationError() throws Exception {
+		final var endpoint = listeners(1).get(0);
+		final var driver = created(List.of(endpoint, endpoint), List.of(NIC_A, NIC_B), 2);
+
+		final var thrown = assertThrows(RuntimeException.class, driver::start);
+
+		final var terminal = RunTerminalException.find(thrown);
+		assertNotNull(terminal, () -> "not a run terminal failure: " + thrown);
+		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, terminal.category());
+		assertTrue(terminal.getMessage().contains("endpoint " + endpoint + " is given more than once"), terminal.getMessage());
+		awaitNoNicIoThreads();
+		assertTrue(requests.isEmpty());
+	}
+
+	@Test
 	void aPathThatRefusesFailsTheStartNamingTheNicAndTheEndpoint() throws Exception {
 		final var refused = KERNEL_SOURCE + ":" + unusedPort();
 		final var driver = created(List.of(listeners(1).get(0), refused), List.of(NIC_A, NIC_B), 2);
@@ -445,7 +460,7 @@ final class S3NicSetDriverTest {
 		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
 		while (System.nanoTime() < deadline) {
 			try (final var socket = new Socket()) {
-				socket.connect(new InetSocketAddress(KERNEL_SOURCE, port(endpoint)), 1_000);
+				socket.connect(new InetSocketAddress(InetAddress.getLoopbackAddress(), port(endpoint)), 1_000);
 			} catch (final ConnectException e) {
 				return;
 			} catch (final IOException e) {
