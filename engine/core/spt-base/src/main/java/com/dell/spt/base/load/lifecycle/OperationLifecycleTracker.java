@@ -336,6 +336,19 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 
 	/** Dispatches only if the token still names the same queued circulation. */
 	public boolean dispatched(final DispatchToken<O> token) {
+		return dispatched(token, false);
+	}
+
+	/**
+	 * Records the exact transport handoff, as {@link #explicitlyDispatched(Operation)} does, only if
+	 * the token still names the same queued circulation. A driver which defers custody from
+	 * admission to the request write uses it at the write.
+	 */
+	public boolean explicitlyDispatched(final DispatchToken<O> token) {
+		return dispatched(token, true);
+	}
+
+	private boolean dispatched(final DispatchToken<O> token, final boolean explicit) {
 		if (!enabled) {
 			return true;
 		}
@@ -347,7 +360,7 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 			synchronized (token.lifecycle) {
 				if (dispatchDeadlineReached()
 								|| lifecycle(op) != token.lifecycle
-								|| !token.lifecycle.dispatched()) {
+								|| !(explicit ? token.lifecycle.explicitlyDispatched() : token.lifecycle.dispatched())) {
 					return false;
 				}
 				recordDispatched(op);
@@ -364,6 +377,9 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 				return false;
 			}
 			compatibilityState.state = OperationLifecycleState.DISPATCHED;
+			if (explicit) {
+				compatibilityState.explicitDispatchCirculation = compatibilityState.circulation;
+			}
 			recordDispatched(op);
 			observeDispatchPublication(op);
 			return true;

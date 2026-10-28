@@ -880,7 +880,11 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		return true;
 	}
 
-	private void releaseTransport(final Channel channel) {
+	/**
+	 * Returns a completed operation's permit and channel, once per request attempt. A driver whose
+	 * attempts hold capacity beyond the permit releases it here too, then signals the dispatcher.
+	 */
+	protected void releaseTransport(final Channel channel) {
 		concurrencyThrottle.release();
 		connPool.release(channel);
 		signalDispatchCapacityAvailable();

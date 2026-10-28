@@ -291,12 +291,16 @@ class S3RangeStorageDriver extends S3StorageDriver<DataItem, RangeReadOperation<
 			recordTerminalFailure(new IntegrityTerminalException(IntegrityTerminalException.Category.EXECUTION,
 							"Range transport cleanup failed", failure));
 		} finally {
+			transportReleased(channel);
 			concurrencyThrottle.release();
 			signalDispatchCapacityAvailable();
 			if (attempt.outcome() != null)
 				completeAttempt(flight.operation(), flight.circulation(), attempt);
 		}
 	}
+
+	/** A flight's channel went back to the pool; its permit is released next. */
+	void transportReleased(Channel channel) {}
 
 	final void completeAttempt(RangeReadOperation<DataItem> op, RangeReadCirculation circulation, RangeReadAttempt attempt) {
 		if (ranges.completed(op, circulation, attempt))

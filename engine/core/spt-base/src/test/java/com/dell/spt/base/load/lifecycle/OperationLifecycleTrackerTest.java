@@ -236,6 +236,39 @@ final class OperationLifecycleTrackerTest {
 	}
 
 	@Test
+	void aTokenCheckedExplicitDispatchClaimsOnlyItsQueuedCirculationOnce() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final var written = operation("written");
+		assertTrue(tracker.driverQueued(written));
+		final var token = tracker.queuedDispatchToken(written);
+		assertTrue(tracker.explicitlyDispatched(token));
+		assertEquals(OperationLifecycleState.DISPATCHED, tracker.stateOf(written));
+		assertTrue(tracker.hasExplicitDispatchBoundary(written));
+		assertFalse(tracker.explicitlyDispatched(token), "a token claims its circulation once");
+
+		final var recovered = operation("recovered");
+		assertTrue(tracker.driverQueued(recovered));
+		final var stale = tracker.queuedDispatchToken(recovered);
+		assertTrue(tracker.unattempted(recovered));
+		assertFalse(tracker.explicitlyDispatched(stale), "a recovered circulation is never written");
+		assertEquals(OperationLifecycleState.UNATTEMPTED, tracker.stateOf(recovered));
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void aTokenCheckedExplicitDispatchRecordsTheBoundaryOfACompatibilityOperation() {
+		final var tracker = new OperationLifecycleTracker<Operation<Item>>();
+		final Operation<Item> legacy = mock(Operation.class, Answers.CALLS_REAL_METHODS);
+		assertTrue(tracker.driverQueued(legacy));
+		final var token = tracker.queuedDispatchToken(legacy);
+		assertTrue(tracker.explicitlyDispatched(token));
+		assertEquals(OperationLifecycleState.DISPATCHED, tracker.stateOf(legacy));
+		assertTrue(tracker.hasExplicitDispatchBoundary(legacy));
+		assertTrue(tracker.hasExplicitDispatchBoundary(token));
+		assertFalse(tracker.explicitlyDispatched(token));
+	}
+
+	@Test
 	void recoveredAndTimedOutOperationsRemainDistinct() {
 		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
 		final var generatorBuffered = operation("generator-buffered");
