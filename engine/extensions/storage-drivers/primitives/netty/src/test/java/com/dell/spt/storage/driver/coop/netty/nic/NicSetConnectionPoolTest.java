@@ -31,6 +31,7 @@ import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -182,7 +183,7 @@ class NicSetConnectionPoolTest {
 
 		assertSame(first, acquire(pool).get(5, TimeUnit.SECONDS), "an idle connection serves");
 		final var refused = failure(acquire(pool));
-		assertTrue(String.valueOf(refused.getMessage()).toLowerCase().contains("refused"), refused.toString());
+		assertTrue(String.valueOf(refused.getMessage()).toLowerCase(Locale.ROOT).contains("refused"), refused.toString());
 		assertTrue(path.inBackoff());
 		assertEquals(3, path.connectsStarted());
 
@@ -215,7 +216,7 @@ class NicSetConnectionPoolTest {
 		first.close().syncUninterruptibly();
 
 		final var refused = failure(waiting);
-		assertTrue(String.valueOf(refused.getMessage()).toLowerCase().contains("refused"), refused.toString());
+		assertTrue(String.valueOf(refused.getMessage()).toLowerCase(Locale.ROOT).contains("refused"), refused.toString());
 		waitFor(() -> pool.state().get(0).open() == 0);
 		assertEquals(0, pool.pendingCount());
 	}
@@ -325,7 +326,7 @@ class NicSetConnectionPoolTest {
 	@Test
 	void anUnopenedOrClosedPoolFailsAtOnceAndLeasingWaitsOnTheCaller() throws Exception {
 		final var pool = new NicSetConnectionPool(template(), handler, now::get);
-		resources.add(pool::close);
+		resources.add(pool);
 		assertTrue(failure(acquire(pool)).getMessage().contains("not open"));
 
 		final var a = listener();
@@ -362,7 +363,7 @@ class NicSetConnectionPoolTest {
 	private NicSetConnectionPool open(final int concurrency, final OpenNic... nics) {
 		final var pool = new NicSetConnectionPool(template(), handler, now::get);
 		pool.open(List.of(nics), NicBinding.SOURCE_ADDRESS, CONNECT_TIMEOUT_MILLIS, concurrency);
-		resources.add(pool::close);
+		resources.add(pool);
 		return pool;
 	}
 
