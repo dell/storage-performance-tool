@@ -56,6 +56,7 @@ const (
 	flagProvisionTargetBucket = "provision-target-bucket"
 	flagCreatePrefix          = "create-prefix"
 	flagRMIRegistryPort       = "rmi-registry-port"
+	flagInterfaces            = "interfaces"
 	itemNamingShardsPath      = "item.naming.shards"
 	prefixShardsAuto          = -1
 	deleteAllDiscoveredLabel  = "all discovered identities (unbounded)"

@@ -131,6 +131,7 @@ tasks.withType(Test) {
 	useJUnitPlatform()
 	systemProperty "spt.test.semver-fixtures",
 		rootProject.file("../test-fixtures/engine-build-info/semantic-versions.txt").absolutePath
+	systemProperty "spt.test.nic-plan-fixtures", rootProject.file("../test-fixtures/nic-plan").absolutePath
 	systemProperty "spt.test.expected-build-version", project.version.toString()
 	jvmArgumentProviders.add(new com.dell.spt.gradle.EngineBuildTestArguments(generateBuildInfo.flatMap { it.outputFile }))
 	jvmArgs "-XX:MaxDirectMemorySize=2g"

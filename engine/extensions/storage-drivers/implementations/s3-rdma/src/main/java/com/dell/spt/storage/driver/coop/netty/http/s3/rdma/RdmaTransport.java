@@ -89,6 +89,8 @@ public class RdmaTransport implements AutoCloseable {
 
 	private native int nativeIsRdmaAvailable();
 
+	private static native int[] nativeQueryDevice(String deviceName);
+
 	private final RdmaConfig config;
 	private volatile boolean initialized;
 	private volatile long nativeHandle;
@@ -265,6 +267,25 @@ public class RdmaTransport implements AutoCloseable {
 	/** Returns true if the native RDMA library is loaded (it may still need init). */
 	public static boolean isNativeAvailable() {
 		return NATIVE_AVAILABLE;
+	}
+
+	/**
+	 * Port 1's attributes of one device, for the NIC inventory: {@code {dc, activeMtu}}, where
+	 * {@code dc} is 1 when a DC target can be created, 0 when the device does not support DC and -1
+	 * when unknown, and {@code activeMtu} is in bytes or -1 when unknown. The device is opened by its
+	 * exact name and closed again.
+	 *
+	 * @return {@code null} without the native library, or with one that predates the query
+	 */
+	public static int[] queryDevice(final String deviceName) {
+		if (!NATIVE_AVAILABLE) {
+			return null;
+		}
+		try {
+			return nativeQueryDevice(deviceName);
+		} catch (final UnsatisfiedLinkError e) {
+			return null;
+		}
 	}
 
 	/** Returns true if the RDMA transport is initialized and available for operations. */

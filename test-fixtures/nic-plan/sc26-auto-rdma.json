@@ -1,0 +1,569 @@
+{
+  "format" : "spt.nic-plan",
+  "version" : 1,
+  "engine" : {
+    "version" : "5.17.0",
+    "revision" : "0123456789abcdef0123456789abcdef01234567"
+  },
+  "host" : "client-a",
+  "inventory" : {
+    "nics" : [ {
+      "name" : "docker0",
+      "kind" : "virtual",
+      "up" : false,
+      "addresses" : [ "172.17.0.1/16" ],
+      "speedMbps" : null,
+      "mtu" : 1500,
+      "numaNode" : null,
+      "port" : null,
+      "lowerDevices" : [ ],
+      "bondMaster" : null,
+      "bondHashPolicy" : null,
+      "rdmaDevice" : null,
+      "gids" : [ ],
+      "sysctls" : {
+        "arpIgnore" : 0,
+        "arpAnnounce" : 0,
+        "rpFilter" : 0
+      }
+    }, {
+      "name" : "eno8303",
+      "kind" : "physical",
+      "up" : true,
+      "addresses" : [ "198.51.100.10/24" ],
+      "speedMbps" : 1000,
+      "mtu" : 1500,
+      "numaNode" : 0,
+      "port" : "0000:04:00.0/0",
+      "lowerDevices" : [ ],
+      "bondMaster" : null,
+      "bondHashPolicy" : null,
+      "rdmaDevice" : null,
+      "gids" : [ ],
+      "sysctls" : {
+        "arpIgnore" : 0,
+        "arpAnnounce" : 0,
+        "rpFilter" : 0
+      }
+    }, {
+      "name" : "ens2np0",
+      "kind" : "physical",
+      "up" : true,
+      "addresses" : [ "192.0.2.11/24" ],
+      "speedMbps" : 400000,
+      "mtu" : 9000,
+      "numaNode" : 0,
+      "port" : "0000:17:00.0/0",
+      "lowerDevices" : [ ],
+      "bondMaster" : null,
+      "bondHashPolicy" : null,
+      "rdmaDevice" : "mlx5_0",
+      "gids" : [ {
+        "device" : "mlx5_0",
+        "port" : 1,
+        "index" : 2,
+        "address" : "192.0.2.11",
+        "roceV2" : false
+      }, {
+        "device" : "mlx5_0",
+        "port" : 1,
+        "index" : 3,
+        "address" : "192.0.2.11",
+        "roceV2" : true
+      } ],
+      "sysctls" : {
+        "arpIgnore" : 0,
+        "arpAnnounce" : 0,
+        "rpFilter" : 0
+      }
+    }, {
+      "name" : "ens5f0np0",
+      "kind" : "physical",
+      "up" : true,
+      "addresses" : [ "192.0.2.21/24" ],
+      "speedMbps" : 200000,
+      "mtu" : 9000,
+      "numaNode" : 0,
+      "port" : "0000:31:00.0/0",
+      "lowerDevices" : [ ],
+      "bondMaster" : null,
+      "bondHashPolicy" : null,
+      "rdmaDevice" : "bnxt_re0",
+      "gids" : [ {
+        "device" : "bnxt_re0",
+        "port" : 1,
+        "index" : 2,
+        "address" : "192.0.2.21",
+        "roceV2" : false
+      }, {
+        "device" : "bnxt_re0",
+        "port" : 1,
+        "index" : 3,
+        "address" : "192.0.2.21",
+        "roceV2" : true
+      } ],
+      "sysctls" : {
+        "arpIgnore" : 0,
+        "arpAnnounce" : 0,
+        "rpFilter" : 0
+      }
+    }, {
+      "name" : "ens5f1np1",
+      "kind" : "physical",
+      "up" : true,
+      "addresses" : [ "192.0.2.22/24" ],
+      "speedMbps" : 200000,
+      "mtu" : 9000,
+      "numaNode" : 0,
+      "port" : "0000:31:00.1/0",
+      "lowerDevices" : [ ],
+      "bondMaster" : null,
+      "bondHashPolicy" : null,
+      "rdmaDevice" : "bnxt_re1",
+      "gids" : [ {
+        "device" : "bnxt_re1",
+        "port" : 1,
+        "index" : 2,
+        "address" : "192.0.2.22",
+        "roceV2" : false
+      }, {
+        "device" : "bnxt_re1",
+        "port" : 1,
+        "index" : 3,
+        "address" : "192.0.2.22",
+        "roceV2" : true
+      } ],
+      "sysctls" : {
+        "arpIgnore" : 0,
+        "arpAnnounce" : 0,
+        "rpFilter" : 0
+      }
+    }, {
+      "name" : "ens6f0np0",
+      "kind" : "physical",
+      "up" : true,
+      "addresses" : [ "192.0.2.23/24" ],
+      "speedMbps" : 200000,
+      "mtu" : 9000,
+      "numaNode" : 1,
+      "port" : "0000:b1:00.0/0",
+      "lowerDevices" : [ ],
+      "bondMaster" : null,
+      "bondHashPolicy" : null,
+      "rdmaDevice" : "bnxt_re2",
+      "gids" : [ {
+        "device" : "bnxt_re2",
+        "port" : 1,
+        "index" : 2,
+        "address" : "192.0.2.23",
+        "roceV2" : false
+      }, {
+        "device" : "bnxt_re2",
+        "port" : 1,
+        "index" : 3,
+        "address" : "192.0.2.23",
+        "roceV2" : true
+      } ],
+      "sysctls" : {
+        "arpIgnore" : 0,
+        "arpAnnounce" : 0,
+        "rpFilter" : 0
+      }
+    }, {
+      "name" : "ens6f1np1",
+      "kind" : "physical",
+      "up" : true,
+      "addresses" : [ "192.0.2.24/24" ],
+      "speedMbps" : 200000,
+      "mtu" : 9000,
+      "numaNode" : 1,
+      "port" : "0000:b1:00.1/0",
+      "lowerDevices" : [ ],
+      "bondMaster" : null,
+      "bondHashPolicy" : null,
+      "rdmaDevice" : "bnxt_re3",
+      "gids" : [ {
+        "device" : "bnxt_re3",
+        "port" : 1,
+        "index" : 2,
+        "address" : "192.0.2.24",
+        "roceV2" : false
+      }, {
+        "device" : "bnxt_re3",
+        "port" : 1,
+        "index" : 3,
+        "address" : "192.0.2.24",
+        "roceV2" : true
+      } ],
+      "sysctls" : {
+        "arpIgnore" : 0,
+        "arpAnnounce" : 0,
+        "rpFilter" : 0
+      }
+    }, {
+      "name" : "ens10np0",
+      "kind" : "physical",
+      "up" : true,
+      "addresses" : [ "192.0.2.12/24" ],
+      "speedMbps" : 400000,
+      "mtu" : 9000,
+      "numaNode" : 0,
+      "port" : "0000:3d:00.0/0",
+      "lowerDevices" : [ ],
+      "bondMaster" : null,
+      "bondHashPolicy" : null,
+      "rdmaDevice" : "mlx5_1",
+      "gids" : [ {
+        "device" : "mlx5_1",
+        "port" : 1,
+        "index" : 2,
+        "address" : "192.0.2.12",
+        "roceV2" : false
+      }, {
+        "device" : "mlx5_1",
+        "port" : 1,
+        "index" : 3,
+        "address" : "192.0.2.12",
+        "roceV2" : true
+      } ],
+      "sysctls" : {
+        "arpIgnore" : 0,
+        "arpAnnounce" : 0,
+        "rpFilter" : 0
+      }
+    }, {
+      "name" : "ens33np0",
+      "kind" : "physical",
+      "up" : true,
+      "addresses" : [ "192.0.2.13/24" ],
+      "speedMbps" : 400000,
+      "mtu" : 9000,
+      "numaNode" : 1,
+      "port" : "0000:9a:00.0/0",
+      "lowerDevices" : [ ],
+      "bondMaster" : null,
+      "bondHashPolicy" : null,
+      "rdmaDevice" : "mlx5_2",
+      "gids" : [ {
+        "device" : "mlx5_2",
+        "port" : 1,
+        "index" : 2,
+        "address" : "192.0.2.13",
+        "roceV2" : false
+      }, {
+        "device" : "mlx5_2",
+        "port" : 1,
+        "index" : 3,
+        "address" : "192.0.2.13",
+        "roceV2" : true
+      } ],
+      "sysctls" : {
+        "arpIgnore" : 0,
+        "arpAnnounce" : 0,
+        "rpFilter" : 0
+      }
+    }, {
+      "name" : "ens101np0",
+      "kind" : "physical",
+      "up" : true,
+      "addresses" : [ "192.0.2.14/24" ],
+      "speedMbps" : 400000,
+      "mtu" : 9000,
+      "numaNode" : 1,
+      "port" : "0000:bc:00.0/0",
+      "lowerDevices" : [ ],
+      "bondMaster" : null,
+      "bondHashPolicy" : null,
+      "rdmaDevice" : "mlx5_3",
+      "gids" : [ {
+        "device" : "mlx5_3",
+        "port" : 1,
+        "index" : 2,
+        "address" : "192.0.2.14",
+        "roceV2" : false
+      }, {
+        "device" : "mlx5_3",
+        "port" : 1,
+        "index" : 3,
+        "address" : "192.0.2.14",
+        "roceV2" : true
+      } ],
+      "sysctls" : {
+        "arpIgnore" : 0,
+        "arpAnnounce" : 0,
+        "rpFilter" : 0
+      }
+    }, {
+      "name" : "lo",
+      "kind" : "loopback",
+      "up" : true,
+      "addresses" : [ "127.0.0.1/8" ],
+      "speedMbps" : null,
+      "mtu" : 1500,
+      "numaNode" : null,
+      "port" : null,
+      "lowerDevices" : [ ],
+      "bondMaster" : null,
+      "bondHashPolicy" : null,
+      "rdmaDevice" : null,
+      "gids" : [ ],
+      "sysctls" : {
+        "arpIgnore" : 0,
+        "arpAnnounce" : 0,
+        "rpFilter" : 0
+      }
+    } ],
+    "rdmaDevices" : [ {
+      "name" : "bnxt_re0",
+      "driver" : "bnxt_en",
+      "dcSupported" : false,
+      "activeMtu" : 4096,
+      "ports" : [ {
+        "number" : 1,
+        "state" : "ACTIVE",
+        "linkLayer" : "Ethernet"
+      } ]
+    }, {
+      "name" : "bnxt_re1",
+      "driver" : "bnxt_en",
+      "dcSupported" : false,
+      "activeMtu" : 4096,
+      "ports" : [ {
+        "number" : 1,
+        "state" : "ACTIVE",
+        "linkLayer" : "Ethernet"
+      } ]
+    }, {
+      "name" : "bnxt_re2",
+      "driver" : "bnxt_en",
+      "dcSupported" : false,
+      "activeMtu" : 4096,
+      "ports" : [ {
+        "number" : 1,
+        "state" : "ACTIVE",
+        "linkLayer" : "Ethernet"
+      } ]
+    }, {
+      "name" : "bnxt_re3",
+      "driver" : "bnxt_en",
+      "dcSupported" : false,
+      "activeMtu" : 4096,
+      "ports" : [ {
+        "number" : 1,
+        "state" : "ACTIVE",
+        "linkLayer" : "Ethernet"
+      } ]
+    }, {
+      "name" : "mlx5_0",
+      "driver" : "mlx5_core",
+      "dcSupported" : true,
+      "activeMtu" : 4096,
+      "ports" : [ {
+        "number" : 1,
+        "state" : "ACTIVE",
+        "linkLayer" : "Ethernet"
+      } ]
+    }, {
+      "name" : "mlx5_1",
+      "driver" : "mlx5_core",
+      "dcSupported" : true,
+      "activeMtu" : 4096,
+      "ports" : [ {
+        "number" : 1,
+        "state" : "ACTIVE",
+        "linkLayer" : "Ethernet"
+      } ]
+    }, {
+      "name" : "mlx5_2",
+      "driver" : "mlx5_core",
+      "dcSupported" : true,
+      "activeMtu" : 4096,
+      "ports" : [ {
+        "number" : 1,
+        "state" : "ACTIVE",
+        "linkLayer" : "Ethernet"
+      } ]
+    }, {
+      "name" : "mlx5_3",
+      "driver" : "mlx5_core",
+      "dcSupported" : true,
+      "activeMtu" : 4096,
+      "ports" : [ {
+        "number" : 1,
+        "state" : "ACTIVE",
+        "linkLayer" : "Ethernet"
+      } ]
+    } ],
+    "sysctls" : {
+      "arpIgnore" : 1,
+      "arpAnnounce" : 2,
+      "rpFilter" : 2
+    }
+  },
+  "plan" : {
+    "interfaces" : [ "auto" ],
+    "mode" : "auto",
+    "rdma" : true,
+    "ok" : true,
+    "nicSet" : [ "ens2np0", "ens10np0", "ens33np0", "ens101np0" ],
+    "nics" : [ {
+      "name" : "docker0",
+      "used" : false,
+      "address" : null,
+      "gidIndex" : null,
+      "serves" : [ ],
+      "paths" : 0,
+      "reason" : {
+        "code" : "virtual",
+        "text" : "virtual"
+      }
+    }, {
+      "name" : "eno8303",
+      "used" : false,
+      "address" : null,
+      "gidIndex" : null,
+      "serves" : [ ],
+      "paths" : 0,
+      "reason" : {
+        "code" : "no_endpoint_on_subnet",
+        "text" : "no endpoint on its subnet"
+      }
+    }, {
+      "name" : "ens2np0",
+      "used" : true,
+      "address" : "192.0.2.11",
+      "gidIndex" : 3,
+      "serves" : [ "192.0.2.101:9000", "192.0.2.102:9000", "192.0.2.103:9000", "192.0.2.104:9000" ],
+      "paths" : 1,
+      "reason" : null
+    }, {
+      "name" : "ens5f0np0",
+      "used" : false,
+      "address" : null,
+      "gidIndex" : null,
+      "serves" : [ ],
+      "paths" : 0,
+      "reason" : {
+        "code" : "rdma_no_dc",
+        "text" : "RDMA device without DC support"
+      }
+    }, {
+      "name" : "ens5f1np1",
+      "used" : false,
+      "address" : null,
+      "gidIndex" : null,
+      "serves" : [ ],
+      "paths" : 0,
+      "reason" : {
+        "code" : "rdma_no_dc",
+        "text" : "RDMA device without DC support"
+      }
+    }, {
+      "name" : "ens6f0np0",
+      "used" : false,
+      "address" : null,
+      "gidIndex" : null,
+      "serves" : [ ],
+      "paths" : 0,
+      "reason" : {
+        "code" : "rdma_no_dc",
+        "text" : "RDMA device without DC support"
+      }
+    }, {
+      "name" : "ens6f1np1",
+      "used" : false,
+      "address" : null,
+      "gidIndex" : null,
+      "serves" : [ ],
+      "paths" : 0,
+      "reason" : {
+        "code" : "rdma_no_dc",
+        "text" : "RDMA device without DC support"
+      }
+    }, {
+      "name" : "ens10np0",
+      "used" : true,
+      "address" : "192.0.2.12",
+      "gidIndex" : 3,
+      "serves" : [ "192.0.2.101:9000", "192.0.2.102:9000", "192.0.2.103:9000", "192.0.2.104:9000" ],
+      "paths" : 1,
+      "reason" : null
+    }, {
+      "name" : "ens33np0",
+      "used" : true,
+      "address" : "192.0.2.13",
+      "gidIndex" : 3,
+      "serves" : [ "192.0.2.101:9000", "192.0.2.102:9000", "192.0.2.103:9000", "192.0.2.104:9000" ],
+      "paths" : 1,
+      "reason" : null
+    }, {
+      "name" : "ens101np0",
+      "used" : true,
+      "address" : "192.0.2.14",
+      "gidIndex" : 3,
+      "serves" : [ "192.0.2.101:9000", "192.0.2.102:9000", "192.0.2.103:9000", "192.0.2.104:9000" ],
+      "paths" : 1,
+      "reason" : null
+    }, {
+      "name" : "lo",
+      "used" : false,
+      "address" : null,
+      "gidIndex" : null,
+      "serves" : [ ],
+      "paths" : 0,
+      "reason" : {
+        "code" : "virtual",
+        "text" : "virtual"
+      }
+    } ],
+    "endpoints" : [ {
+      "endpoint" : "192.0.2.101:9000",
+      "address" : "192.0.2.101",
+      "candidates" : [ "ens2np0", "ens10np0", "ens33np0", "ens101np0" ],
+      "tierSpeedMbps" : 400000,
+      "kept" : [ "ens2np0", "ens10np0", "ens33np0", "ens101np0" ],
+      "reductions" : [ ]
+    }, {
+      "endpoint" : "192.0.2.102:9000",
+      "address" : "192.0.2.102",
+      "candidates" : [ "ens2np0", "ens10np0", "ens33np0", "ens101np0" ],
+      "tierSpeedMbps" : 400000,
+      "kept" : [ "ens2np0", "ens10np0", "ens33np0", "ens101np0" ],
+      "reductions" : [ ]
+    }, {
+      "endpoint" : "192.0.2.103:9000",
+      "address" : "192.0.2.103",
+      "candidates" : [ "ens2np0", "ens10np0", "ens33np0", "ens101np0" ],
+      "tierSpeedMbps" : 400000,
+      "kept" : [ "ens2np0", "ens10np0", "ens33np0", "ens101np0" ],
+      "reductions" : [ ]
+    }, {
+      "endpoint" : "192.0.2.104:9000",
+      "address" : "192.0.2.104",
+      "candidates" : [ "ens2np0", "ens10np0", "ens33np0", "ens101np0" ],
+      "tierSpeedMbps" : 400000,
+      "kept" : [ "ens2np0", "ens10np0", "ens33np0", "ens101np0" ],
+      "reductions" : [ ]
+    } ],
+    "ports" : [ ],
+    "groups" : [ {
+      "nics" : [ "ens2np0", "ens10np0", "ens33np0", "ens101np0" ],
+      "endpoints" : [ "192.0.2.101:9000", "192.0.2.102:9000", "192.0.2.103:9000", "192.0.2.104:9000" ],
+      "paths" : [ {
+        "nic" : "ens2np0",
+        "endpoint" : "192.0.2.101:9000"
+      }, {
+        "nic" : "ens10np0",
+        "endpoint" : "192.0.2.102:9000"
+      }, {
+        "nic" : "ens33np0",
+        "endpoint" : "192.0.2.103:9000"
+      }, {
+        "nic" : "ens101np0",
+        "endpoint" : "192.0.2.104:9000"
+      } ]
+    } ],
+    "failures" : [ ],
+    "warnings" : [ ]
+  }
+}

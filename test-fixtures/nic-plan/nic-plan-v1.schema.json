@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "spt.nic-plan version 1",
+  "description": "The output of the engine image's /opt/spt/spt-nic-plan command. Version 1 readers ignore fields they do not know, and show codes they do not know verbatim; a removed or renamed field, or a changed meaning, increments the version.",
+  "type": "object",
+  "required": ["format", "version", "engine", "host", "inventory"],
+  "properties": {
+    "format": { "const": "spt.nic-plan" },
+    "version": { "const": 1 },
+    "engine": {
+      "type": "object",
+      "required": ["version", "revision"],
+      "properties": {
+        "version": { "type": ["string", "null"] },
+        "revision": { "type": ["string", "null"] }
+      }
+    },
+    "host": { "type": ["string", "null"] },
+    "inventory": { "$ref": "#/$defs/inventory" },
+    "plan": { "$ref": "#/$defs/plan" }
+  },
+  "$defs": {
+    "code": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+    "names": { "type": "array", "items": { "type": "string" } },
+    "count": { "type": ["integer", "null"], "minimum": 0 },
+    "sysctls": {
+      "type": "object",
+      "required": ["arpIgnore", "arpAnnounce", "rpFilter"],
+      "properties": {
+        "arpIgnore": { "type": ["integer", "null"] },
+        "arpAnnounce": { "type": ["integer", "null"] },
+        "rpFilter": { "type": ["integer", "null"] }
+      }
+    },
+    "inventory": {
+      "type": "object",
+      "required": ["nics", "rdmaDevices", "sysctls"],
+      "properties": {
+        "nics": { "type": "array", "items": { "$ref": "#/$defs/nic" } },
+        "rdmaDevices": { "type": "array", "items": { "$ref": "#/$defs/rdmaDevice" } },
+        "sysctls": { "$ref": "#/$defs/sysctls" }
+      }
+    },
+    "nic": {
+      "type": "object",
+      "required": [
+        "name", "kind", "up", "addresses", "speedMbps", "mtu", "numaNode", "port", "lowerDevices",
+        "bondMaster", "bondHashPolicy", "rdmaDevice", "gids", "sysctls"
+      ],
+      "properties": {
+        "name": { "type": "string" },
+        "kind": { "type": "string" },
+        "up": { "type": "boolean" },
+        "addresses": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[0-9]{1,3}(\\.[0-9]{1,3}){3}/[0-9]{1,2}$" }
+        },
+        "speedMbps": { "$ref": "#/$defs/count" },
+        "mtu": { "$ref": "#/$defs/count" },
+        "numaNode": { "$ref": "#/$defs/count" },
+        "port": { "type": ["string", "null"] },
+        "lowerDevices": { "$ref": "#/$defs/names" },
+        "bondMaster": { "type": ["string", "null"] },
+        "bondHashPolicy": { "type": ["string", "null"] },
+        "rdmaDevice": { "type": ["string", "null"] },
+        "gids": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["device", "port", "index", "address", "roceV2"],
+            "properties": {
+              "device": { "type": "string" },
+              "port": { "type": "integer" },
+              "index": { "type": "integer" },
+              "address": { "type": "string" },
+              "roceV2": { "type": "boolean" }
+            }
+          }
+        },
+        "sysctls": { "$ref": "#/$defs/sysctls" }
+      }
+    },
+    "rdmaDevice": {
+      "type": "object",
+      "required": ["name", "driver", "dcSupported", "activeMtu", "ports"],
+      "properties": {
+        "name": { "type": "string" },
+        "driver": { "type": ["string", "null"] },
+        "dcSupported": { "type": ["boolean", "null"] },
+        "activeMtu": { "$ref": "#/$defs/count" },
+        "ports": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["number", "state", "linkLayer"],
+            "properties": {
+              "number": { "type": "integer" },
+              "state": { "type": ["string", "null"] },
+              "linkLayer": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "reason": {
+      "type": "object",
+      "required": ["code", "text"],
+      "properties": {
+        "code": { "$ref": "#/$defs/code" },
+        "text": { "type": "string" },
+        "with": { "type": "string" }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "required": ["code", "text"],
+      "properties": {
+        "code": { "$ref": "#/$defs/code" },
+        "text": { "type": "string" },
+        "nic": { "type": "string" },
+        "endpoint": { "type": "string" },
+        "fix": { "type": "string" }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "required": [
+        "interfaces", "mode", "rdma", "ok", "nicSet", "nics", "endpoints", "ports", "groups", "failures", "warnings"
+      ],
+      "properties": {
+        "interfaces": { "$ref": "#/$defs/names" },
+        "mode": { "enum": ["auto", "list"] },
+        "rdma": { "type": "boolean" },
+        "ok": { "type": "boolean" },
+        "nicSet": { "$ref": "#/$defs/names" },
+        "nics": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "used", "address", "gidIndex", "serves", "paths", "reason"],
+            "properties": {
+              "name": { "type": "string" },
+              "used": { "type": "boolean" },
+              "address": { "type": ["string", "null"] },
+              "gidIndex": { "$ref": "#/$defs/count" },
+              "serves": { "$ref": "#/$defs/names" },
+              "paths": { "type": "integer", "minimum": 0 },
+              "reason": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/reason" }] }
+            }
+          }
+        },
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["endpoint", "address", "candidates", "tierSpeedMbps", "kept", "reductions"],
+            "properties": {
+              "endpoint": { "type": "string" },
+              "address": { "type": ["string", "null"] },
+              "candidates": { "$ref": "#/$defs/names" },
+              "tierSpeedMbps": { "$ref": "#/$defs/count" },
+              "kept": { "$ref": "#/$defs/names" },
+              "reductions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["nic", "code"],
+                  "properties": {
+                    "nic": { "type": "string" },
+                    "code": { "$ref": "#/$defs/code" },
+                    "with": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "ports": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "nics"],
+            "properties": { "id": { "type": "string" }, "nics": { "$ref": "#/$defs/names" } }
+          }
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["nics", "endpoints", "paths"],
+            "properties": {
+              "nics": { "$ref": "#/$defs/names" },
+              "endpoints": { "$ref": "#/$defs/names" },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["nic", "endpoint"],
+                  "properties": { "nic": { "type": "string" }, "endpoint": { "type": "string" } }
+                }
+              }
+            }
+          }
+        },
+        "failures": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+        "warnings": { "type": "array", "items": { "$ref": "#/$defs/finding" } }
+      }
+    }
+  }
+}

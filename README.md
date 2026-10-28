@@ -104,7 +104,10 @@ Verify the local environment and configured target hosts:
 ```
 
 With no `HOSTS` setting, this checks localhost. With `HOSTS`, it runs the
-distributed prerequisite checks described above.
+distributed prerequisite checks described above. Each node's report also lists
+its NICs; add `--interfaces auto` (or a list of NICs) to preview the NICs and
+Paths a run would use for the configured S3 endpoints. See
+[`spt verify`](cli/docs/SPT_SYNTAX.md#infrastructure-command-spt-verify).
 
 ### Run your first test
 

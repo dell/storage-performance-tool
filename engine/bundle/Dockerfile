@@ -56,13 +56,14 @@ RUN useradd --home-dir /home/spt --create-home --shell /bin/bash spt && \
 COPY --chown=spt:spt build/dist/spt.jar /opt/spt/
 COPY --chown=spt:spt build/dist/ext /opt/spt/ext/
 COPY --chown=spt:spt docker/entrypoint.sh /opt/spt/
+COPY --chown=spt:spt docker/spt-nic-plan /opt/spt/
 
 # Copy example scenarios from the distribution
 # These provide ready-to-use test scenarios for common use cases
 COPY --chown=spt:spt build/dist/scenarios /opt/spt/scenarios
 
-# Make entrypoint executable
-RUN chmod +x /opt/spt/entrypoint.sh
+# Make the entrypoint and the NIC plan command executable
+RUN chmod +x /opt/spt/entrypoint.sh /opt/spt/spt-nic-plan
 
 # Create a workspace directory for user scenarios and data
 # This is a convenient mount point for volumes
