@@ -88,6 +88,12 @@ final class FakeHost {
 		return virtual("lo").type(772).address("127.0.0.1/8");
 	}
 
+	/** The bonding driver's control file, which it adds to {@code /sys/class/net} even without bonds. */
+	FakeHost bondingMasters(final String... bonds) {
+		write("sys/class/net/bonding_masters", String.join(" ", bonds));
+		return this;
+	}
+
 	Iface vlan(final String name, final String parent) {
 		final var iface = virtual(name).devType("vlan");
 		link(iface.dir.resolve("lower_" + parent), root.resolve("sys/class/net").resolve(parent));

@@ -73,8 +73,12 @@ public final class SysfsInventoryReader {
 		final var gidsByNetdev = new HashMap<String, List<RoceGid>>();
 		final var rdmaDevices = readRdmaDevices(gidsByNetdev);
 		final var raw = new LinkedHashMap<String, RawNic>();
-		for (final var name : listNames(root.resolve("sys/class/net"))) {
-			raw.put(name, readRawNic(name));
+		final var classNet = root.resolve("sys/class/net");
+		for (final var name : listNames(classNet)) {
+			// Interfaces are directories; the bonding driver also adds its bonding_masters file.
+			if (Files.isDirectory(classNet.resolve(name))) {
+				raw.put(name, readRawNic(name));
+			}
 		}
 		final var nics = new ArrayList<Nic>();
 		for (final var nic : raw.values()) {

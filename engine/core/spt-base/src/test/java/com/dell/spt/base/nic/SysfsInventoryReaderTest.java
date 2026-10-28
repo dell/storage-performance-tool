@@ -73,6 +73,14 @@ class SysfsInventoryReaderTest {
 	}
 
 	@Test
+	void filesInClassNetAreNotInterfaces() {
+		host.physical("eth0", "0000:17:00.0");
+		host.bondingMasters();
+
+		assertEquals(List.of("eth0"), host.read().nics().stream().map(Nic::name).toList());
+	}
+
+	@Test
 	void downAndUnknownOperstates() {
 		host.physical("eth0", "0000:01:00.0").down();
 		host.physical("eth1", "0000:02:00.0").operstate("unknown");
