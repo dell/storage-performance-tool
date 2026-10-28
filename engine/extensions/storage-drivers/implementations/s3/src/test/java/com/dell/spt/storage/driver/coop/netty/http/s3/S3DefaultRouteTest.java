@@ -23,8 +23,11 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -42,6 +45,11 @@ final class S3DefaultRouteTest {
 	private static final RangeReadPolicy RANGE_POLICY = new RangeReadPolicy(3, 2L, 1);
 
 	private final ExecutorService serverThreads = Executors.newCachedThreadPool();
+	private final AtomicInteger puts = new AtomicInteger();
+	private final AtomicInteger activePuts = new AtomicInteger();
+	private final AtomicInteger peakPuts = new AtomicInteger();
+	/** While set, each PUT waits for it before the stub answers. */
+	private volatile CountDownLatch gate;
 	private HttpServer server;
 
 	@BeforeEach
@@ -51,6 +59,18 @@ final class S3DefaultRouteTest {
 			try (exchange) {
 				exchange.getRequestBody().readAllBytes();
 				if ("PUT".equals(exchange.getRequestMethod())) {
+					puts.incrementAndGet();
+					peakPuts.accumulateAndGet(activePuts.incrementAndGet(), Math::max);
+					try {
+						final var held = gate;
+						if (held != null) {
+							held.await(5, TimeUnit.SECONDS);
+						}
+					} catch (final InterruptedException e) {
+						Thread.currentThread().interrupt();
+					} finally {
+						activePuts.decrementAndGet();
+					}
 					exchange.getResponseHeaders().set("ETag", "\"stub\"");
 				}
 				exchange.sendResponseHeaders(200, -1);
@@ -62,6 +82,10 @@ final class S3DefaultRouteTest {
 
 	@AfterEach
 	void stop() {
+		final var held = gate;
+		if (held != null) {
+			held.countDown();
+		}
 		server.stop(0);
 		serverThreads.shutdownNow();
 	}
@@ -87,6 +111,33 @@ final class S3DefaultRouteTest {
 							.toList();
 			assertFalse(ioThreads.isEmpty());
 			assertTrue(ioThreads.stream().noneMatch(name -> name.startsWith("ioWorker-")), () -> "a NIC group: " + ioThreads);
+		}
+	}
+
+	@Test
+	void theDefaultRouteKeepsItsPermitsAcrossDirectDispatch() throws Exception {
+		final var factory = new S3StorageDriverExtension<DataItem, Operation<DataItem>, S3StorageDriver<DataItem, Operation<DataItem>>>();
+		try (final var driver = factory.create("default-route", new SeedDataInput(1, ITEM_SIZE, 1, true), storage(), false, 16)) {
+			final var results = new EndpointSelectionTestSupport.Results();
+			driver.operationResultOutput(results);
+			driver.start();
+			gate = new CountDownLatch(1);
+			for (var i = 0; i < 8; i++) {
+				assertTrue(driver.put(dataOp(OpType.CREATE, "permits-" + i)));
+			}
+
+			NicSetLoopback.waitFor(() -> puts.get() == 2, "the first two PUTs reach the stub");
+			Thread.sleep(300);
+			assertEquals(2, puts.get(), "the two permits bound the requests in flight");
+			gate.countDown();
+			for (var i = 0; i < 8; i++) {
+				assertEquals(Operation.Status.SUCC, results.await().status());
+			}
+
+			assertEquals(8, puts.get());
+			assertEquals(2, peakPuts.get(), "a completion hands its permit on, never a second one");
+			NicSetLoopback.waitFor(() -> driver.activeOpCount() == 0, "every permit came back");
+			assertFiveSixteenParts(driver, true);
 		}
 	}
 

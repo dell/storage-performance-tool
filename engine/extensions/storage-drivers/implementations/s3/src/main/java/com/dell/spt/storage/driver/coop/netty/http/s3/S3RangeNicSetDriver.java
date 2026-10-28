@@ -9,6 +9,7 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.range.RangeReadAttempt;
 import com.dell.spt.base.item.op.data.range.RangeReadOperation;
 import com.dell.spt.base.item.op.data.range.RangeReadPolicy;
+import com.dell.spt.storage.driver.coop.netty.nic.NicAdmission;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetConnectionPool;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetSettings;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetSupport;
@@ -18,12 +19,14 @@ import io.netty.channel.Channel;
 import java.util.List;
 
 /**
- * Partial-object Reads with a NIC set. Every range attempt, retries included, takes a connection
- * from a NIC's Path Pool, which connects asynchronously, so the dispatcher never waits on setup.
- * Once connected, the inherited flight, request handoff and settlement apply unchanged, with the
- * configured endpoint string as Host and signing authority. A setup failure, a Path in connect
- * back-off included, settles the attempt as {@code FAIL_IO}, as a failed default-pool lease does,
- * and the existing retry policy applies.
+ * Partial-object Reads with a NIC set. Every range attempt, retries included, takes its
+ * concurrency permit and a NIC with room ({@link NicAdmission}), and a connection from that NIC's
+ * Path Pool, which connects asynchronously, so the dispatcher never waits on setup. Once connected,
+ * the inherited flight, request handoff and settlement apply unchanged, with the configured
+ * endpoint string as Host and signing authority. A setup failure, a Path in connect back-off
+ * included, settles the attempt as {@code FAIL_IO} while admission is open, as a failed
+ * default-pool lease does, and the existing retry policy applies; after a stop, the attempt is
+ * fenced and recovered as one that never reached its request.
  */
 final class S3RangeNicSetDriver extends S3RangeStorageDriver {
 
@@ -73,35 +76,66 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver {
 		nicPool.closeAdmission();
 	}
 
+	/** A free permit and a NIC with room, so the dispatch task parks while every NIC is full. */
+	@Override
+	protected boolean hasAvailableDispatchCapacity() {
+		return super.hasAvailableDispatchCapacity() && nicPool.admission().hasRoom();
+	}
+
+	@Override
+	protected int dispatchAttemptLimit(final int bufferedOperationCount) {
+		return Math.min(super.dispatchAttemptLimit(bufferedOperationCount), nicPool.admission().room());
+	}
+
+	@Override
+	void transportReleased(final Channel channel) {
+		final int nic = NicSetConnectionPool.nicIndex(channel);
+		if (nic >= 0) {
+			nicPool.admission().attemptEnded(nic);
+		}
+	}
+
 	@Override
 	protected boolean submit(final RangeReadOperation<DataItem> op) {
 		if (!isStarted() || !beginDispatch(op) || !concurrencyThrottle.tryAcquire())
 			return false;
+		final var admission = nicPool.admission();
+		final int nic = admission.take();
+		if (nic < 0) {
+			concurrencyThrottle.release();
+			return false;
+		}
 		final var attempt = ranges.capture(op);
 		if (attempt == null) {
+			admission.cancelled(nic);
 			concurrencyThrottle.release();
 			return true;
 		}
 		try {
 			// The pool reports exactly once: a channel on its own event loop, or the failure.
-			nicPool.acquire((channel, failure) -> {
+			nicPool.acquire(nic, (channel, failure) -> {
 				if (failure == null)
-					start(op, attempt, channel);
+					start(op, attempt, nic, channel);
 				else
-					failSetup(op, attempt, failure);
+					failSetup(op, attempt, nic, failure);
 			});
 		} catch (final RuntimeException e) {
-			failSetup(op, attempt, e);
+			failSetup(op, attempt, nic, e);
 		}
 		return true;
 	}
 
 	/** Runs on the channel's event loop, as the default route's handoff task does. */
-	private void start(final RangeReadOperation<DataItem> op, final RangeReadAttempt attempt, final Channel channel) {
+	private void start(final RangeReadOperation<DataItem> op, final RangeReadAttempt attempt, final int nic,
+					final Channel channel) {
+		final var admission = nicPool.admission();
+		if (admission.waitEnded(nic))
+			signalDispatchCapacityAvailable();
 		final var flight = new Flight(op, op.circulation(), attempt, channel);
 		if (flights.putIfAbsent(attempt, flight) != null) {
 			final var unusedClose = channel.close();
 			nicPool.release(channel);
+			admission.attemptEnded(nic);
 			concurrencyThrottle.release();
 			signalDispatchCapacityAvailable();
 			return;
@@ -110,14 +144,27 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver {
 		send(flight, channel.attr(ATTR_KEY_NODE).get());
 	}
 
-	/** Mirrors a failed default-pool lease: the attempt fails with FAIL_IO and its permit is released. */
-	private void failSetup(final RangeReadOperation<DataItem> op, final RangeReadAttempt attempt, final Throwable failure) {
-		// False when shutdown recovery already settled the attempt.
-		final boolean counted = attempt.transportFailure(Operation.Status.FAIL_IO);
+	/**
+	 * Mirrors a failed default-pool lease while admission is open: the attempt fails with FAIL_IO
+	 * and its permits are released. After a stop it is fenced as one that never reached its
+	 * request, as a fenced write is.
+	 */
+	private void failSetup(final RangeReadOperation<DataItem> op, final RangeReadAttempt attempt, final int nic,
+					final Throwable failure) {
+		// False after a stop, or when shutdown recovery already settled the attempt.
+		final boolean counted = withDispatchAdmission(() -> attempt.transportFailure(Operation.Status.FAIL_IO));
 		nicSet.logSetupFailure(failure, !counted);
+		final var admission = nicPool.admission();
+		admission.waitEnded(nic);
+		admission.attemptEnded(nic);
 		concurrencyThrottle.release();
 		signalDispatchCapacityAvailable();
-		completeAttempt(op, op.circulation(), attempt);
+		if (counted) {
+			completeAttempt(op, op.circulation(), attempt);
+		} else {
+			attempt.cancelBeforeHandoff();
+			recover(op);
+		}
 	}
 
 	NicSetConnectionPool connectionPool() {
