@@ -32,6 +32,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -290,6 +291,42 @@ final class S3NicSetAdmissionTest {
 		assertEquals(0, snapshot.requestsSent());
 	}
 
+	@Test
+	void aStopWhileARangeRetryWaitsPublishesItsRetainedFailureOnce() throws Exception {
+		final var run = rangeRun(stub.listeners(1), 1, true);
+		final var admission = run.pool().admission();
+		final var loop = channelOf(run.pool(), 0).eventLoop();
+		final var unblock = new CountDownLatch(1);
+		blocks.add(unblock);
+		final var retried = new AtomicBoolean();
+		// Queued on the loop that settles the first attempt, so it runs before the retry's connection arrives.
+		run.beforeRetry = () -> {
+			retried.set(true);
+			loop.execute(() -> awaitQuietly(unblock));
+		};
+		stub.failObjectRequest = n -> true;
+
+		run.read("range-retry");
+		waitFor(() -> retried.get() && run.pool().pendingCount() == 1 && admission.count(0) == 1,
+						"the retry took the NIC and waits for its connection");
+		run.runtime.closeAdmission();
+		run.driver.closeAdmission();
+		run.runtime.closeRetries();
+		assertEquals(List.of(), run.driver.recoverQueuedOperations(), "a retry is not fresh work");
+
+		assertEquals(Operation.Status.RESP_FAIL_SVC, run.outcome().status(), "the first attempt's failure is the outcome");
+		unblock.countDown();
+		waitFor(() -> admission.count(0) == 0 && run.pool().pendingCount() == 0 && run.driver.activeRangeTransports() == 0
+						&& !run.runtime.hasPendingResults(), "the fenced retry released its NIC");
+		assertNull(run.pollTerminal(QUIET_MILLIS), "no second outcome");
+		assertEquals(1, stub.objectRequests().size(), "the retry was never sent");
+		run.close();
+		final var snapshot = run.runtime.snapshot();
+		assertTrue(snapshot.reconciled(), snapshot::toString);
+		assertEquals(1, snapshot.logical().failed());
+		assertEquals(1, snapshot.requestsSent());
+	}
+
 	private Run started(final List<String> endpoints, final List<String> interfaces, final int concurrency) throws Exception {
 		final var driver = NicSetLoopback.driver(storage(endpoints, interfaces, concurrency), false);
 		resources.add(driver);
@@ -297,8 +334,12 @@ final class S3NicSetAdmissionTest {
 	}
 
 	private RangeRun rangeRun(final List<String> endpoints, final int concurrency) throws Exception {
+		return rangeRun(endpoints, concurrency, false);
+	}
+
+	private RangeRun rangeRun(final List<String> endpoints, final int concurrency, final boolean retry) throws Exception {
 		stub.absentObjectSize = OBJECT_SIZE;
-		final var run = new RangeRun(storage(endpoints, nics(endpoints.size()), concurrency), FIXED, OBJECT_SIZE);
+		final var run = new RangeRun(storage(endpoints, nics(endpoints.size()), concurrency), FIXED, OBJECT_SIZE, retry);
 		resources.add(run);
 		return run;
 	}
@@ -320,14 +361,18 @@ final class S3NicSetAdmissionTest {
 		blocks.add(unblock);
 		channel.eventLoop().execute(() -> {
 			blocked.countDown();
-			try {
-				unblock.await(NET_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
-			} catch (final InterruptedException e) {
-				Thread.currentThread().interrupt();
-			}
+			awaitQuietly(unblock);
 		});
 		assertTrue(blocked.await(5, TimeUnit.SECONDS), "the event loop runs the blocking task");
 		return unblock;
+	}
+
+	private static void awaitQuietly(final CountDownLatch unblock) {
+		try {
+			unblock.await(NET_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
+		}
 	}
 
 	/** A pre-opened connection of NIC {@code nic}, returned to its pool at once; it outlives the call. */
@@ -360,7 +405,9 @@ final class S3NicSetAdmissionTest {
 		assertEquals(dispatched, snapshot.dispatched());
 		assertEquals(0, snapshot.inFlight());
 		assertEquals(0, snapshot.unresolved());
-		assertEquals(0, lifecycle.counters().failed());
+		final var counters = lifecycle.counters();
+		assertEquals(0, counters.failed(), "fresh work charges no failure");
+		assertTrue(counters.reconciled(), counters::toString);
 	}
 
 	private static void awaitIdle(final Run run) throws InterruptedException {

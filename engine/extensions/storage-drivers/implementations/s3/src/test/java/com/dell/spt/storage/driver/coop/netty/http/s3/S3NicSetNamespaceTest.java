@@ -9,6 +9,7 @@ import static com.dell.spt.storage.driver.coop.netty.http.s3.NetnsTopology.NIC_A
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NetnsTopology.NIC_B;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -20,6 +21,7 @@ import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.storage.driver.coop.netty.nic.NicBinding;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetConnectionPool;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetSettings;
@@ -339,6 +341,45 @@ final class S3NicSetNamespaceTest {
 		Thread.sleep(500);
 		assertEquals(connects, connectsStarted(run, 0), "no connect started after admission closed");
 		assertTrue(synSent().isEmpty());
+	}
+
+	@Test
+	void withoutALimitASilentPathHoldsOnlyItsNicsWaitingAttemptsAndAStopRecoversThem() throws Exception {
+		final var run = started(ENDPOINTS.subList(0, 2), List.of(NIC_A, NIC_B), 0);
+		silence(run, 0);
+		final var admission = run.pool().admission();
+		final long connects = connectsStarted(run, 0);
+
+		for (var i = 0; i < 40; i++) {
+			assertTrue(run.driver().put(dataOp(OpType.CREATE, "unlimited-" + i)));
+		}
+
+		// The rotation alternates until the silent Path's NIC holds its bound, then skips it.
+		final var waiting = NicSetSettings.UNLIMITED_WAITING_LIMIT;
+		for (var i = 0; i < 40 - waiting; i++) {
+			final var result = run.results().await();
+			assertEquals(Operation.Status.SUCC, result.status());
+			assertEquals(ENDPOINTS.get(1), result.nodeAddr(), "only the answering Path serves");
+		}
+		waitFor(() -> admission.count(0) == waiting && run.pool().pendingCount() == waiting && synSent().size() == waiting,
+						"the silent Path's NIC holds its bound of connects");
+		assertEquals(0, admission.count(1));
+		assertEquals(connects + waiting, connectsStarted(run, 0), "one connect per waiting attempt, no more");
+		assertNull(run.results().poll(300), "the waiting attempts neither complete nor fail before their timeout");
+
+		// The step's stop: admission closes and the queue is recovered before the driver stops.
+		run.driver().closeAdmission();
+		final var recovered = run.driver().recoverQueuedOperations();
+		assertEquals(waiting, recovered.size(), "the waiting operations are still queued");
+		final var lifecycle = run.driver().operationLifecycle();
+		recovered.forEach(op -> assertEquals(OperationLifecycleState.UNATTEMPTED, lifecycle.stateOf(op)));
+		run.driver().stop();
+
+		waitFor(() -> admission.count(0) == 0 && run.pool().pendingCount() == 0, "the cancelled connects released their NIC");
+		waitFor(() -> synSent().isEmpty(), "the pending connects were cancelled");
+		assertNull(run.results().poll(300), "a recovered operation publishes no result");
+		assertEquals(0, lifecycle.counters().failed());
+		assertEquals(0, lifecycle.snapshot().inFlight());
 	}
 
 	@Test

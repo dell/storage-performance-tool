@@ -52,6 +52,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import java.util.function.IntPredicate;
 
 /**
  * Loopback NICs and an in-memory S3 stub for tests of the real S3 drivers with a NIC set. Four
@@ -97,9 +98,12 @@ final class NicSetLoopback implements AutoCloseable {
 	private final AtomicInteger uploadIds = new AtomicInteger();
 	private final Map<String, AtomicInteger> active = new ConcurrentHashMap<>();
 	private final Map<String, AtomicInteger> peaks = new ConcurrentHashMap<>();
+	private final AtomicInteger objectRequestCount = new AtomicInteger();
 	private volatile CountDownLatch gate;
 	/** The size the stub gives an object nobody wrote, whose reads return zeros. */
 	volatile long absentObjectSize = EndpointSelectionTestSupport.ITEM_SIZE;
+	/** Which object requests, counted from 1, the stub answers with 503. */
+	volatile IntPredicate failObjectRequest = n -> false;
 
 	/** The storage configuration of a driver with these endpoints and NICs. */
 	static Config storage(final List<String> endpoints, final List<String> interfaces, final int concurrency) {
@@ -151,10 +155,17 @@ final class NicSetLoopback implements AutoCloseable {
 		private final ScheduledExecutorService retryThread = Executors.newSingleThreadScheduledExecutor();
 		private final BlockingQueue<Operation.Status> terminal = new LinkedBlockingQueue<>();
 		private final BlockingQueue<RangeReadOperation<DataItem>> results = new LinkedBlockingQueue<>();
+		/** Runs before a failed attempt's retry is queued, on the thread that settled the attempt. */
+		volatile Runnable beforeRetry = () -> {};
 		private boolean closed;
 
-		@SuppressWarnings("unchecked")
 		RangeRun(final Config storage, final RangeReadPolicy policy, final long objectSize) throws Exception {
+			this(storage, policy, objectSize, false);
+		}
+
+		/** With {@code retry}, a failed attempt is retried once, as the range step's retry limit allows. */
+		@SuppressWarnings("unchecked")
+		RangeRun(final Config storage, final RangeReadPolicy policy, final long objectSize, final boolean retry) throws Exception {
 			this.policy = policy;
 			this.objectSize = objectSize;
 			driver = S3RangeNicSetDriver.create("nic-set-range", new SeedDataInput(1, EndpointSelectionTestSupport.ITEM_SIZE, 1, true),
@@ -165,9 +176,10 @@ final class NicSetLoopback implements AutoCloseable {
 			when(generator.retryRange(any(), any())).thenAnswer(call -> {
 				final RangeReadOperation<DataItem> op = call.getArgument(0);
 				final RangeReadAttempt attempt = call.getArgument(1);
+				beforeRetry.run();
 				return op.circulation().claimRetryQueue(attempt) && runtime.admission().put(op);
 			});
-			driver.operationResultOutput(runtime.bind(generator, driver.operationLifecycle(), false, 1,
+			driver.operationResultOutput(runtime.bind(generator, driver.operationLifecycle(), retry, 1,
 							(delay, task) -> retryThread.schedule(task, delay, TimeUnit.MILLISECONDS),
 							op -> terminal.add(op.status()), results::add));
 			driver.start();
@@ -302,6 +314,12 @@ final class NicSetLoopback implements AutoCloseable {
 			peaks.computeIfAbsent(source, unused -> new AtomicInteger()).accumulateAndGet(concurrent, Math::max);
 			try {
 				requests.add(request);
+				if (request.isObjectRequest() && failObjectRequest.test(objectRequestCount.incrementAndGet())) {
+					final var error = "error".getBytes(StandardCharsets.US_ASCII);
+					exchange.sendResponseHeaders(503, error.length);
+					exchange.getResponseBody().write(error);
+					return;
+				}
 				final var held = gate;
 				if (held != null && request.isObjectRequest() && !held.await(HOLD_SECONDS, TimeUnit.SECONDS)) {
 					exchange.sendResponseHeaders(503, -1);
