@@ -130,47 +130,79 @@ func TestListNicsWithRdmaProbes(t *testing.T) {
 	}
 }
 
+// Docker can put the runtime's diagnostic on stdout and leave stderr empty, as it does for a
+// missing executable with exit status 127.
 func TestListNicsOlderImage(t *testing.T) {
-	commands := map[string]MockCommandResponse{
-		nicInventoryCmd:              {Stderr: missingNicPlan, Error: errors.New("exit status 126")},
-		planCommand(nicEndpoints...): {Stderr: missingNicPlan, Error: errors.New("exit status 126")},
+	for _, stream := range []string{"stdout", "stderr"} {
+		response := MockCommandResponse{Stdout: missingNicPlan, Error: errors.New("exit status 127")}
+		if stream == "stderr" {
+			response = MockCommandResponse{Stderr: missingNicPlan, Error: errors.New("exit status 126")}
+		}
+		commands := map[string]MockCommandResponse{nicInventoryCmd: response, planCommand(nicEndpoints...): response}
+
+		t.Run(stream+", listing only", func(t *testing.T) {
+			v, _ := nicVerifier(Config{NetworkMode: constants.HostNetworkMode}, commands)
+			result := readyResult()
+			v.stepListNics(v.hosts[0], result)
+			if result.NICs == nil || result.NICs.Note != nicplan.ErrImagePredatesNicPlan.Error() {
+				t.Fatalf("NICs = %+v", result.NICs)
+			}
+			if result.NicPlan.Message != "" {
+				t.Fatalf("NicPlan = %+v", result.NicPlan)
+			}
+			if overall := v.assessNode(result); !overall.Passed {
+				t.Fatalf("an older image only lists no NICs, got Overall %+v", overall)
+			}
+		})
+
+		t.Run(stream+", planning", func(t *testing.T) {
+			v, _ := nicVerifier(planConfig(), commands)
+			result := readyResult()
+			v.stepListNics(v.hosts[0], result)
+			if result.NicPlan.Passed || result.NicPlan.Warning || !errors.Is(result.NicPlan.Error, nicplan.ErrImagePredatesNicPlan) {
+				t.Fatalf("NicPlan = %+v", result.NicPlan)
+			}
+			overall := v.assessNode(result)
+			if overall.Passed || overall.Message != "NIC plan: "+nicplan.ErrImagePredatesNicPlan.Error() {
+				t.Fatalf("Overall = %+v", overall)
+			}
+		})
 	}
-
-	t.Run("listing only", func(t *testing.T) {
-		v, _ := nicVerifier(Config{NetworkMode: constants.HostNetworkMode}, commands)
-		result := readyResult()
-		v.stepListNics(v.hosts[0], result)
-		if result.NICs == nil || result.NICs.Note != nicplan.ErrImagePredatesNicPlan.Error() {
-			t.Fatalf("NICs = %+v", result.NICs)
-		}
-		if result.NicPlan.Message != "" {
-			t.Fatalf("NicPlan = %+v", result.NicPlan)
-		}
-		if overall := v.assessNode(result); !overall.Passed {
-			t.Fatalf("an older image only lists no NICs, got Overall %+v", overall)
-		}
-	})
-
-	t.Run("planning", func(t *testing.T) {
-		v, _ := nicVerifier(planConfig(), commands)
-		result := readyResult()
-		v.stepListNics(v.hosts[0], result)
-		if result.NicPlan.Passed || result.NicPlan.Warning || !errors.Is(result.NicPlan.Error, nicplan.ErrImagePredatesNicPlan) {
-			t.Fatalf("NicPlan = %+v", result.NicPlan)
-		}
-		overall := v.assessNode(result)
-		if overall.Passed || overall.Message != "NIC plan: "+nicplan.ErrImagePredatesNicPlan.Error() {
-			t.Fatalf("Overall = %+v", overall)
-		}
-	})
 }
 
 func TestListNicsCommandFailure(t *testing.T) {
+	tests := []struct {
+		name     string
+		response MockCommandResponse
+		want     string
+	}{
+		{"stderr", MockCommandResponse{Stderr: "\nError: cannot read /sys/class/net\n", Error: errors.New("exit status 1")},
+			"spt-nic-plan failed: exit status 1: Error: cannot read /sys/class/net"},
+		{"stdout when stderr is empty", MockCommandResponse{Stdout: "Error response from daemon: container abc123 is not running\n", Error: errors.New("exit status 1")},
+			"spt-nic-plan failed: exit status 1: Error response from daemon: container abc123 is not running"},
+		{"stderr before stdout", MockCommandResponse{Stdout: "partial\n", Stderr: "Error: cannot read /sys/class/net", Error: errors.New("exit status 1")},
+			"spt-nic-plan failed: exit status 1: Error: cannot read /sys/class/net"},
+		{"another missing file is not an older image", MockCommandResponse{Stdout: "open /sys/class/net/x: no such file or directory", Error: errors.New("exit status 1")},
+			"spt-nic-plan failed: exit status 1: open /sys/class/net/x: no such file or directory"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v, _ := nicVerifier(Config{NetworkMode: constants.HostNetworkMode}, map[string]MockCommandResponse{nicInventoryCmd: tc.response})
+			listing, check := v.listNics(v.hosts[0], nicContainer)
+			if check.Passed || listing.Note != tc.want || errors.Is(check.Error, nicplan.ErrImagePredatesNicPlan) {
+				t.Fatalf("listNics = %+v, %+v", listing, check)
+			}
+		})
+	}
+}
+
+// A command that succeeds is read as its output, whatever its text holds.
+func TestListNicsSucceedsWhateverItsOutputSays(t *testing.T) {
 	v, _ := nicVerifier(Config{NetworkMode: constants.HostNetworkMode}, map[string]MockCommandResponse{
-		nicInventoryCmd: {Stderr: "\nError: cannot read /sys/class/net\n", Error: errors.New("exit status 1")},
+		nicInventoryCmd: {Stdout: missingNicPlan},
 	})
 	listing, check := v.listNics(v.hosts[0], nicContainer)
-	if check.Passed || listing.Note != "spt-nic-plan failed: exit status 1: Error: cannot read /sys/class/net" {
+	if check.Passed || errors.Is(check.Error, nicplan.ErrImagePredatesNicPlan) || !strings.HasPrefix(listing.Note, "unreadable spt.nic-plan output") {
 		t.Fatalf("listNics = %+v, %+v", listing, check)
 	}
 }

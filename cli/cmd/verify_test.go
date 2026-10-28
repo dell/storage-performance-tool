@@ -13,17 +13,7 @@ import (
 // helper to build a minimal Cobra command wired to runVerify with the same flags
 func newVerifyTestCmd() *cobra.Command {
 	c := &cobra.Command{Use: "verify", RunE: runVerify}
-	c.Flags().String("test-hosts", "", "")
-	c.Flags().Int("min-hosts", 0, "")
-	c.Flags().String("network-mode", "host", "")
-	c.Flags().Int("api-port", 9999, "")
-	c.Flags().Int("rmi-port-start", 40000, "")
-	c.Flags().Int("rmi-port-count", 10, "")
-	c.Flags().Bool("force-cleanup", false, "")
-	c.Flags().String(flagInterfaces, "", "")
-	c.Flags().StringSliceP("endpoints", "e", []string{}, "")
-	c.Flags().Bool("slice-endpoints", false, "")
-	c.Flags().IntP("threads", "t", 1, "")
+	registerVerifyFlags(c.Flags())
 	return c
 }
 

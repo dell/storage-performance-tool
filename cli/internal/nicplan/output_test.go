@@ -100,6 +100,7 @@ func TestCommandMissing(t *testing.T) {
 		{`exec: "/opt/spt/spt-nic-plan": executable file not found in $PATH`, true},
 		{"Error response from daemon: container abc is not running", false},
 		{"cat: /sys/class/net/eth0/speed: No such file or directory", false},
+		{"/opt/spt/spt-nic-plan: 18: exec: java: not found", false},
 		{"", false},
 	}
 	for _, tt := range tests {

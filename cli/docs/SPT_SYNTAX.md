@@ -1315,9 +1315,9 @@ spt verify [--test-hosts <hosts>] [options]
 | `--force-cleanup` | `false` | Automatically clean up conflicting containers without prompting |
 | `--use-rdma` | `false` | Include RDMA hardware and configuration checks |
 | `--interfaces` | `""` (none) | Plan each node's NIC set: `auto`, or a comma-separated list of interface names, IPv4 addresses or RDMA devices. Reads `SPT_INTERFACES` when not given |
-| `--endpoints`, `-e` | `[]` | S3 endpoint URLs to plan Paths for with `--interfaces`. Reads `S3_ENDPOINTS`, then `S3_ENDPOINT`, when not given |
+| `--endpoints`, `-e` | `[]` | S3 endpoint URLs to plan Paths for with `--interfaces`. With a NIC set, reads `S3_ENDPOINTS`, then `S3_ENDPOINT`, when not given |
 | `--slice-endpoints` | `false` | Plan each node's slice of the endpoints, as a distributed run with `--slice-endpoints` |
-| `--threads`, `-t` | `1` | Concurrency limit whose per-NIC permit shares the plan shows. Reads `THREADS` when not given |
+| `--threads`, `-t` | `1` | Concurrency limit whose per-NIC permit shares the plan shows. With a NIC set, reads `THREADS` when not given |
 
 ### Verification Process
 
@@ -1335,12 +1335,12 @@ With `--use-rdma`, the RDMA readiness check reads port 1 of every RDMA device in
 
 ### NICs and the NIC Plan
 
-Each node's report ends with its NICs, read in the test container by the SPT 5.17 or later image: the interface, its state, IPv4 address and prefix, speed, MTU and NUMA node, its RDMA device, the port and index of its RoCE v2 GID, and the other interfaces on the same physical port. DC support and the RoCE active MTU of the RDMA devices are read with `--use-rdma`, and show `?` without it. Without `--interfaces`, the list is information only and checks nothing: a node whose image predates the list shows `NICs: not listed` with the reason, and passes or fails as before.
+Each node's report ends with its NICs, read in the test container by the SPT 5.17 or later image: the interface, its state, IPv4 address and prefix, speed, MTU and NUMA node, its RDMA device, the port of its RoCE v2 GIDs and the GID index of each address, and the other interfaces on the same physical port. DC support and the RoCE active MTU of the RDMA devices are read with `--use-rdma`, and show `?` without it. Without `--interfaces`, the list is information only and checks nothing, and verify reads none of the endpoint and `THREADS` variables: a node whose image predates the list shows `NICs: not listed` with the reason, and passes or fails as before.
 
 With `--interfaces`, verify plans the node's NIC set for the S3 endpoints as a run would, and adds a `NIC Plan` check. The plan shows:
 
 - the endpoints the node targets and its NIC set;
-- each interface, whether it is used, with its Paths, its permit share at `--threads` and the endpoints it serves, or why it is not used;
+- each interface, whether it is used, with the source address it uses and, with RDMA, that address's GID index, its Paths, its permit share at `--threads` and the endpoints it serves, or why it is not used;
 - each pairing group, with its Paths, each a NIC paired with an endpoint it serves;
 - the failures, each with its fix when there is one, and the warnings;
 - the node's policy routing rules other than the defaults, which the NIC choice does not follow: it uses connected subnets and the main routing table only.
@@ -1359,9 +1359,9 @@ A node whose plan has a failure fails verification; warnings do not. With `--sli
     NIC set: ens2np0, ens10np0
     Permits at --threads 64: 32 per NIC
     eno8303    not used: no endpoint on its subnet
-    ens2np0    used: 1 Path, 32 permits; serves all 2 endpoints
+    ens2np0    used from 192.0.2.11 (GID 3): 1 Path, 32 permits; serves all 2 endpoints
     ens5f0np0  not used: RDMA device without DC support
-    ens10np0   used: 1 Path, 32 permits; serves all 2 endpoints
+    ens10np0   used from 192.0.2.12 (GID 3): 1 Path, 32 permits; serves all 2 endpoints
     Group 1: ens2np0, ens10np0; 2 endpoints, 2 Paths
       ens2np0 → 192.0.2.101:9000
       ens10np0 → 192.0.2.102:9000

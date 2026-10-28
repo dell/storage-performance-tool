@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -41,8 +42,7 @@ func newRunLikeCmd() *cobra.Command {
 
 func newVerifyLikeCmd() *cobra.Command {
 	c := &cobra.Command{Use: "verify"}
-	c.Flags().String("test-hosts", "", "")
-	c.Flags().Bool("use-rdma", false, "")
+	registerVerifyFlags(c.Flags())
 	return c
 }
 
@@ -235,14 +235,6 @@ func TestApplyEnvDefaultsToVerifyFlags(t *testing.T) {
 	}
 }
 
-func newVerifyNicPlanLikeCmd() *cobra.Command {
-	c := newVerifyLikeCmd()
-	c.Flags().String(flagInterfaces, "", "")
-	c.Flags().StringSliceP("endpoints", "e", []string{}, "")
-	c.Flags().IntP("threads", "t", 1, "")
-	return c
-}
-
 func TestApplyEnvDefaultsToVerifyFlags_NicPlan(t *testing.T) {
 	clearEnvDefaultsTestEnv(t)
 	t.Setenv(constants.EnvInterfaces, "auto")
@@ -250,7 +242,7 @@ func TestApplyEnvDefaultsToVerifyFlags_NicPlan(t *testing.T) {
 	t.Setenv("S3_ENDPOINT", "http://192.0.2.200:9000")
 	t.Setenv("THREADS", "64")
 
-	cmd := newVerifyNicPlanLikeCmd()
+	cmd := newVerifyLikeCmd()
 	if err := applyEnvDefaultsToVerifyFlags(cmd); err != nil {
 		t.Fatalf("applyEnvDefaultsToVerifyFlags error: %v", err)
 	}
@@ -264,7 +256,7 @@ func TestApplyEnvDefaultsToVerifyFlags_NicPlan(t *testing.T) {
 		t.Fatalf("threads = %d", v)
 	}
 
-	cmd = newVerifyNicPlanLikeCmd()
+	cmd = newVerifyLikeCmd()
 	_ = cmd.Flags().Set(flagInterfaces, "ens2np0")
 	_ = cmd.Flags().Set("endpoints", "http://192.0.2.103:9000")
 	_ = cmd.Flags().Set("threads", "8")
@@ -282,31 +274,91 @@ func TestApplyEnvDefaultsToVerifyFlags_NicPlan(t *testing.T) {
 	}
 }
 
-func TestApplyEnvDefaultsToVerifyFlags_SingleEndpointAndBadThreads(t *testing.T) {
+func TestApplyEnvDefaultsToVerifyFlags_SingleEndpoint(t *testing.T) {
 	clearEnvDefaultsTestEnv(t)
+	t.Setenv(constants.EnvInterfaces, "auto")
 	t.Setenv("S3_ENDPOINT", "http://192.0.2.200:9000")
-	cmd := newVerifyNicPlanLikeCmd()
+	cmd := newVerifyLikeCmd()
 	if err := applyEnvDefaultsToVerifyFlags(cmd); err != nil {
 		t.Fatalf("applyEnvDefaultsToVerifyFlags error: %v", err)
 	}
 	if v, _ := cmd.Flags().GetStringSlice("endpoints"); strings.Join(v, ",") != "http://192.0.2.200:9000" {
 		t.Fatalf("endpoints = %v", v)
 	}
+}
 
-	t.Setenv("THREADS", "many")
-	err := applyEnvDefaultsToVerifyFlags(newVerifyNicPlanLikeCmd())
-	if err == nil || !strings.Contains(err.Error(), `invalid THREADS value "many"`) {
-		t.Fatalf("error = %v", err)
+// Without a NIC set, verify only lists NICs: the endpoint and THREADS variables are not read,
+// so a malformed one does not fail verify, while HOSTS and RDMA_ENABLED still apply.
+func TestApplyEnvDefaultsToVerifyFlags_WithoutNicSet(t *testing.T) {
+	unused := []struct{ key, value string }{
+		{constants.EnvThreads, "many"},
+		{constants.EnvS3Endpoints, `"unterminated`},
+		{constants.EnvS3Endpoint, `"unterminated`},
+	}
+	routes := []struct {
+		name       string
+		interfaces string
+		flag       *string
+	}{
+		{"no interfaces", "", nil},
+		{"blank SPT_INTERFACES", "  ", nil},
+		{"--interfaces \"\" over SPT_INTERFACES", "auto", new(string)},
+	}
+	for _, route := range routes {
+		for _, variable := range unused {
+			t.Run(route.name+", "+variable.key, func(t *testing.T) {
+				clearEnvDefaultsTestEnv(t)
+				t.Setenv(constants.EnvInterfaces, route.interfaces)
+				t.Setenv(variable.key, variable.value)
+				t.Setenv("HOSTS", "v1,v2")
+				t.Setenv(constants.EnvRdmaEnabled, "true")
+				cmd := newVerifyLikeCmd()
+				if route.flag != nil {
+					_ = cmd.Flags().Set(flagInterfaces, *route.flag)
+				}
+				if err := applyEnvDefaultsToVerifyFlags(cmd); err != nil {
+					t.Fatalf("listing NICs must not read %s: %v", variable.key, err)
+				}
+				if v, _ := cmd.Flags().GetString(flagInterfaces); strings.TrimSpace(v) != "" {
+					t.Fatalf("interfaces = %q", v)
+				}
+				if cmd.Flags().Changed("endpoints") || cmd.Flags().Changed("threads") {
+					t.Fatal("the endpoints and threads flags stay unset")
+				}
+				if v, _ := cmd.Flags().GetString("test-hosts"); v != "v1,v2" {
+					t.Fatalf("test-hosts = %q", v)
+				}
+				if v, _ := cmd.Flags().GetBool("use-rdma"); !v {
+					t.Fatal("use-rdma not applied from env")
+				}
+			})
+		}
 	}
 }
 
-func TestApplyEnvDefaultsToVerifyFlags_WithoutNicPlanFlags(t *testing.T) {
-	clearEnvDefaultsTestEnv(t)
-	t.Setenv(constants.EnvInterfaces, "auto")
-	t.Setenv("S3_ENDPOINTS", "http://192.0.2.101:9000")
-	t.Setenv("THREADS", "64")
-	if err := applyEnvDefaultsToVerifyFlags(newVerifyLikeCmd()); err != nil {
-		t.Fatalf("a command without the NIC plan flags ignores their variables, got %v", err)
+func TestApplyEnvDefaultsToVerifyFlags_NicSetReadsWorkloadEnv(t *testing.T) {
+	malformed := []struct{ key, value, want string }{
+		{constants.EnvThreads, "many", `invalid THREADS value "many"`},
+		{constants.EnvS3Endpoints, `"unterminated`, "--endpoints"},
+		{constants.EnvS3Endpoint, `"unterminated`, "--endpoints"},
+	}
+	for _, fromFlag := range []bool{false, true} {
+		for _, variable := range malformed {
+			t.Run(fmt.Sprintf("flag %v, %s", fromFlag, variable.key), func(t *testing.T) {
+				clearEnvDefaultsTestEnv(t)
+				t.Setenv(variable.key, variable.value)
+				cmd := newVerifyLikeCmd()
+				if fromFlag {
+					_ = cmd.Flags().Set(flagInterfaces, "ens2np0")
+				} else {
+					t.Setenv(constants.EnvInterfaces, "auto")
+				}
+				err := applyEnvDefaultsToVerifyFlags(cmd)
+				if err == nil || !strings.Contains(err.Error(), variable.want) {
+					t.Fatalf("error = %v, want %q", err, variable.want)
+				}
+			})
+		}
 	}
 }
 

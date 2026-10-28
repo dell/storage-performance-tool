@@ -60,7 +60,7 @@ func TestRenderPlan(t *testing.T) {
 		"    Permits at --threads 64: 16 per NIC",
 		"    docker0 not used: virtual",
 		"    eno8303 not used: no endpoint on its subnet",
-		"    ens2np0 used: 1 Path, 16 permits; serves all 4 endpoints",
+		"    ens2np0 used from 192.0.2.11 (GID 3): 1 Path, 16 permits; serves all 4 endpoints",
 		"    ens5f0np0 not used: RDMA device without DC support",
 		"    Group 1: ens2np0, ens10np0, ens33np0, ens101np0; 4 endpoints, 4 Paths",
 		"      ens2np0 → 192.0.2.101:9000",
@@ -79,8 +79,8 @@ func TestRenderSlicedEndpoints(t *testing.T) {
 	assertLines(t, render(out, RenderOptions{Endpoints: sc26Endpoints[2:], Slice: 1, SliceCount: 2, Threads: 10}),
 		"    Endpoints (slice 2 of 2, worker): 192.0.2.103:9000, 192.0.2.104:9000",
 		"    Permits at --threads 10: 2 or 3 per NIC, the first 2 NICs taking one more",
-		"    ens2np0 used: 1 Path, 3 permits; serves all 4 endpoints",
-		"    ens33np0 used: 1 Path, 2 permits; serves all 4 endpoints")
+		"    ens2np0 used from 192.0.2.11 (GID 3): 1 Path, 3 permits; serves all 4 endpoints",
+		"    ens33np0 used from 192.0.2.13 (GID 3): 1 Path, 2 permits; serves all 4 endpoints")
 }
 
 func TestRenderSharedPermits(t *testing.T) {
@@ -88,7 +88,7 @@ func TestRenderSharedPermits(t *testing.T) {
 	text := render(out, RenderOptions{Endpoints: sc26Endpoints, Threads: 2})
 	assertLines(t, text,
 		"    Permits at --threads 2: 2 permits shared by 4 NICs in rotation, fewer than one per NIC",
-		"    ens2np0 used: 1 Path; serves all 4 endpoints")
+		"    ens2np0 used from 192.0.2.11 (GID 3): 1 Path; serves all 4 endpoints")
 	assertLines(t, render(out, RenderOptions{Endpoints: sc26Endpoints, Threads: 0}),
 		"    Permits at --threads 0: unlimited, shared by the NICs in rotation")
 }
@@ -106,7 +106,7 @@ func TestRenderFindingsAndPolicyRules(t *testing.T) {
 			Mode:       "list",
 			NicSet:     []string{"ens1f0", "ens2"},
 			Nics: []PlannedNic{
-				{Name: "ens1f0", Used: true, Serves: []string{"192.0.2.101:9000"}, Paths: 1},
+				{Name: "ens1f0", Used: true, Address: "192.0.2.11", Serves: []string{"192.0.2.101:9000"}, Paths: 1},
 				{Name: "ens1f0v1", Reason: &Reason{Code: "shares_port", Text: "shares a physical port", With: "ens1f0"}},
 				{Name: "ens2", Used: true},
 			},
@@ -127,7 +127,7 @@ func TestRenderFindingsAndPolicyRules(t *testing.T) {
 		"    ens1f0v1 up 192.0.2.12/24 ? ? ? - - - - - ens1f0",
 		"    ens2 up 203.0.113.5/24 ? ? ? - - - - - -",
 		"  NIC plan (--interfaces ens1f0,ens1f0v1,ens2): 2 failures",
-		"    ens1f0 used: 1 Path, 2 permits; serves 192.0.2.101:9000",
+		"    ens1f0 used from 192.0.2.11: 1 Path, 2 permits; serves 192.0.2.101:9000",
 		"    ens1f0v1 not used: shares a physical port with ens1f0",
 		"    ens2 used: 0 Paths, 2 permits",
 		"    Group 1: ens1f0; 1 endpoint, 1 Path",
@@ -174,22 +174,78 @@ func TestSpeed(t *testing.T) {
 	}
 }
 
-func TestRoceV2GidPrefersPortOne(t *testing.T) {
-	nic := Nic{Addresses: []string{"192.0.2.11/24"}, Gids: []Gid{
+// The planner can choose any address of an interface; the plan, not the inventory, names the
+// chosen source address and its GID.
+func TestRenderSelectedSourceOnMultiAddressNic(t *testing.T) {
+	speed, mtu, numa, active, gid := 400000, 9000, 0, 4096, 7
+	dc := true
+	endpoint := "192.0.2.101:9000"
+	out := &Output{
+		Engine: Engine{Version: "5.17.0"},
+		Inventory: Inventory{
+			Nics: []Nic{{Name: "ens2np0", Up: true, Addresses: []string{"192.0.2.11/24", "192.0.2.12/24"},
+				SpeedMbps: &speed, MTU: &mtu, NumaNode: &numa, RdmaDevice: "mlx5_0",
+				Gids: []Gid{
+					{Device: "mlx5_0", Port: 1, Index: 2, Address: "192.0.2.11"},
+					{Device: "mlx5_0", Port: 1, Index: 3, Address: "192.0.2.11", RoceV2: true},
+					{Device: "mlx5_0", Port: 1, Index: 6, Address: "192.0.2.12"},
+					{Device: "mlx5_0", Port: 1, Index: 7, Address: "192.0.2.12", RoceV2: true},
+				}}},
+			RdmaDevices: []RdmaDevice{{Name: "mlx5_0", DcSupported: &dc, ActiveMTU: &active}},
+		},
+		Plan: &Plan{
+			Interfaces: []string{"192.0.2.12"}, Mode: "list", Rdma: true, OK: true, NicSet: []string{"ens2np0"},
+			Nics: []PlannedNic{{Name: "ens2np0", Used: true, Address: "192.0.2.12", GidIndex: &gid,
+				Serves: []string{endpoint}, Paths: 1}},
+			Endpoints: []PlannedEndpoint{{Endpoint: endpoint, Address: "192.0.2.101"}},
+			Groups:    []Group{{Nics: []string{"ens2np0"}, Endpoints: []string{endpoint}, Paths: []Path{{Nic: "ens2np0", Endpoint: endpoint}}}},
+		},
+	}
+	assertLines(t, render(out, RenderOptions{Endpoints: []string{endpoint}, Threads: 8}),
+		"    ens2np0 up 192.0.2.11/24,192.0.2.12/24 400G 9000 0 mlx5_0 1 3,7 yes 4096 -",
+		"  NIC plan (--interfaces 192.0.2.12, RDMA): ok",
+		"    ens2np0 used from 192.0.2.12 (GID 7): 1 Path, 8 permits; serves 192.0.2.101:9000",
+	)
+
+	out.Plan = nil
+	text := render(out, RenderOptions{})
+	assertLines(t, text, "    ens2np0 up 192.0.2.11/24,192.0.2.12/24 400G 9000 0 mlx5_0 1 3,7 yes 4096 -")
+	if strings.Contains(text, "used") {
+		t.Errorf("an inventory alone chooses no source:\n%s", text)
+	}
+}
+
+func TestRoceV2Gids(t *testing.T) {
+	nic := Nic{Addresses: []string{"192.0.2.11/24", "192.0.2.12/24"}, Gids: []Gid{
 		{Port: 2, Index: 5, Address: "192.0.2.11", RoceV2: true},
 		{Port: 1, Index: 2, Address: "192.0.2.11", RoceV2: false},
 		{Port: 1, Index: 3, Address: "192.0.2.11", RoceV2: true},
 		{Port: 1, Index: 7, Address: "192.0.2.99", RoceV2: true},
 	}}
-	if gid, ok := roceV2Gid(nic); !ok || gid.Port != 1 || gid.Index != 3 {
-		t.Errorf("roceV2Gid = %+v, %v", gid, ok)
+	tests := []struct {
+		name           string
+		gids           []Gid
+		ports, indexes string
+	}{
+		{"port 1 preferred, an address without one shown as none", nic.Gids, "1", "3,-"},
+		{"another port without port 1", nic.Gids[:2], "2", "5,-"},
+		{"a RoCE v1 GID is not a RoCE v2 GID", nic.Gids[1:2], "", ""},
+		{"an address of another interface is not this one's", nic.Gids[3:], "", ""},
+		{"each address its own GID", []Gid{
+			{Port: 1, Index: 3, Address: "192.0.2.11", RoceV2: true},
+			{Port: 1, Index: 7, Address: "192.0.2.12", RoceV2: true},
+		}, "1", "3,7"},
 	}
-	nic.Gids = nic.Gids[:2]
-	if gid, ok := roceV2Gid(nic); !ok || gid.Port != 2 || gid.Index != 5 {
-		t.Errorf("roceV2Gid without port 1 = %+v, %v", gid, ok)
-	}
-	nic.Gids = nic.Gids[1:]
-	if _, ok := roceV2Gid(nic); ok {
-		t.Error("a RoCE v1 GID is not a RoCE v2 GID")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			nic.Gids = tc.gids
+			ports, indexes := roceV2Gids(nic)
+			if got := strings.Join(ports, ","); got != tc.ports {
+				t.Errorf("ports = %q, want %q", got, tc.ports)
+			}
+			if got := strings.Join(indexes, ","); got != tc.indexes {
+				t.Errorf("indexes = %q, want %q", got, tc.indexes)
+			}
+		})
 	}
 }

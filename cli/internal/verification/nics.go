@@ -97,11 +97,16 @@ func (v *Verifier) runNicPlan(host *hostparse.HostInfo, containerID string, endp
 	command := append([]string{constants.DockerCommand, dockerExecCommand, containerID},
 		nicplan.Args(v.config.Interfaces, endpoints, v.config.UseRdma)...)
 	stdout, stderr, err := v.cmdExecutor.ExecuteCommand(ctx, host, command)
-	switch {
-	case err != nil && nicplan.CommandMissing(stderr):
-		return nil, nicplan.ErrImagePredatesNicPlan
-	case err != nil:
-		return nil, fmt.Errorf("spt-nic-plan failed: %w%s", err, firstLine(stderr))
+	if err != nil {
+		// docker exec can write the runtime's diagnostic to stdout, leaving stderr empty.
+		if nicplan.CommandMissing(stderr) || nicplan.CommandMissing(stdout) {
+			return nil, nicplan.ErrImagePredatesNicPlan
+		}
+		detail := firstLine(stderr)
+		if detail == "" {
+			detail = firstLine(stdout)
+		}
+		return nil, fmt.Errorf("spt-nic-plan failed: %w%s", err, detail)
 	}
 	output, err := nicplan.Parse([]byte(stdout))
 	if err == nil && len(v.config.Interfaces) > 0 && output.Plan == nil {

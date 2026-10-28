@@ -17,6 +17,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/internal/verification"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 var verifyCmd = &cobra.Command{
@@ -59,19 +60,24 @@ Examples:
 }
 
 func init() {
-	verifyCmd.Flags().String("test-hosts", "", "Comma-separated list of hosts to verify (defaults to localhost)")
+	registerVerifyFlags(verifyCmd.Flags())
+}
+
+// registerVerifyFlags adds verify's flags; tests build verify-shaped commands from it.
+func registerVerifyFlags(flags *pflag.FlagSet) {
+	flags.String("test-hosts", "", "Comma-separated list of hosts to verify (defaults to localhost)")
 	// Removed MarkFlagRequired to allow localhost default
-	verifyCmd.Flags().Int("min-hosts", 0, "Minimum hosts that must pass (0 = all)")
-	verifyCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
-	verifyCmd.Flags().Int("api-port", 9999, "Spt API port to verify")
-	verifyCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
-	verifyCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
-	verifyCmd.Flags().Bool("force-cleanup", false, "Automatically clean up conflicting containers without prompting")
-	verifyCmd.Flags().Bool("use-rdma", false, "Include RDMA hardware and configuration checks")
-	verifyCmd.Flags().String(flagInterfaces, "", "Plan each node's NIC set: auto, or interface names, IPv4 addresses or RDMA devices (comma-separated)")
-	verifyCmd.Flags().StringSliceP("endpoints", "e", []string{}, "S3 endpoint URLs to plan Paths for with --interfaces (comma-separated or repeatable)")
-	verifyCmd.Flags().Bool("slice-endpoints", false, "Plan each node's slice of the endpoints, as a distributed run with --slice-endpoints")
-	verifyCmd.Flags().IntP("threads", "t", 1, "Concurrency limit whose per-NIC permit shares --interfaces shows")
+	flags.Int("min-hosts", 0, "Minimum hosts that must pass (0 = all)")
+	flags.String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
+	flags.Int("api-port", 9999, "Spt API port to verify")
+	flags.Int("rmi-port-start", 40000, "Starting port for RMI range")
+	flags.Int("rmi-port-count", 10, "Number of RMI ports to verify")
+	flags.Bool("force-cleanup", false, "Automatically clean up conflicting containers without prompting")
+	flags.Bool("use-rdma", false, "Include RDMA hardware and configuration checks")
+	flags.String(flagInterfaces, "", "Plan each node's NIC set: auto, or interface names, IPv4 addresses or RDMA devices (comma-separated)")
+	flags.StringSliceP("endpoints", "e", []string{}, "S3 endpoint URLs to plan Paths for with --interfaces (comma-separated or repeatable)")
+	flags.Bool("slice-endpoints", false, "Plan each node's slice of the endpoints, as a distributed run with --slice-endpoints")
+	flags.IntP("threads", "t", 1, "Concurrency limit whose per-NIC permit shares --interfaces shows")
 }
 
 func runVerify(cmd *cobra.Command, _ []string) error {

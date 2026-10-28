@@ -3,6 +3,7 @@ package nicplan
 import (
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -82,8 +83,8 @@ func inventoryRow(nic Nic, devices map[string]RdmaDevice, sharing []string) []st
 	device, port, gid, dc, roceMTU := none, none, none, none, none
 	if nic.RdmaDevice != "" {
 		device = nic.RdmaDevice
-		if g, ok := roceV2Gid(nic); ok {
-			port, gid = strconv.Itoa(g.Port), strconv.Itoa(g.Index)
+		if ports, indexes := roceV2Gids(nic); len(ports) > 0 {
+			port, gid = strings.Join(ports, ","), strings.Join(indexes, ",")
 		}
 		if d, ok := devices[nic.RdmaDevice]; ok {
 			dc, roceMTU = yesNo(d.DcSupported), count(d.ActiveMTU)
@@ -191,23 +192,20 @@ func describePermits(permits Permits, nics int) string {
 	}
 }
 
-// describeUse says whether a NIC is used; share holds the permits of each NIC when the limit
-// is divided, and is empty when the NICs share it.
+// describeUse says whether a NIC is used, from which source address and RDMA GID; share holds
+// the permits of each NIC when the limit is divided, and is empty when the NICs share it.
 func describeUse(nic PlannedNic, share map[string]int, endpoints int) string {
 	if !nic.Used {
-		if nic.Reason == nil {
-			return "not used"
-		}
-		reason := nic.Reason.Text
-		if reason == "" {
-			reason = nic.Reason.Code
-		}
-		if nic.Reason.With != "" {
-			reason += " with " + nic.Reason.With
-		}
-		return "not used: " + reason
+		return describeUnused(nic.Reason)
 	}
-	use := "used: " + plural(nic.Paths, "Path")
+	use := "used"
+	if nic.Address != "" {
+		use += " from " + nic.Address
+		if nic.GidIndex != nil {
+			use += fmt.Sprintf(" (GID %d)", *nic.GidIndex)
+		}
+	}
+	use += ": " + plural(nic.Paths, "Path")
 	if permits, ok := share[nic.Name]; ok {
 		use += ", " + plural(permits, "permit")
 	}
@@ -218,6 +216,20 @@ func describeUse(nic PlannedNic, share map[string]int, endpoints int) string {
 		use += "; serves " + strings.Join(nic.Serves, ", ")
 	}
 	return use
+}
+
+func describeUnused(reason *Reason) string {
+	if reason == nil {
+		return "not used"
+	}
+	text := reason.Text
+	if text == "" {
+		text = reason.Code
+	}
+	if reason.With != "" {
+		text += " with " + reason.With
+	}
+	return "not used: " + text
 }
 
 func describeFinding(finding Finding) string {
@@ -255,23 +267,43 @@ func sharedPorts(nics []Nic) map[string][]string {
 	return sharing
 }
 
-// roceV2Gid is the NIC's RoCE v2 GID for one of its addresses, on port 1 when it has one there.
-func roceV2Gid(nic Nic) (Gid, bool) {
-	addresses := make(map[string]bool, len(nic.Addresses))
+// roceV2Gids are the ports of the NIC's RoCE v2 GIDs and, for each of its addresses in order,
+// the index of its RoCE v2 GID, on port 1 when it has one there, or none. With no RoCE v2 GID
+// the result is empty. The planner's chosen address and GID are the plan's, not these.
+func roceV2Gids(nic Nic) ([]string, []string) {
+	var ports, indexes []string
+	found := false
 	for _, address := range nic.Addresses {
-		addresses[strings.SplitN(address, "/", 2)[0]] = true
+		gid, ok := roceV2Gid(nic.Gids, strings.SplitN(address, "/", 2)[0])
+		if !ok {
+			indexes = append(indexes, none)
+			continue
+		}
+		found = true
+		indexes = append(indexes, strconv.Itoa(gid.Index))
+		if port := strconv.Itoa(gid.Port); !slices.Contains(ports, port) {
+			ports = append(ports, port)
+		}
 	}
+	if !found {
+		return nil, nil
+	}
+	return ports, indexes
+}
+
+// roceV2Gid is the RoCE v2 GID of address, on port 1 when it has one there.
+func roceV2Gid(gids []Gid, address string) (Gid, bool) {
 	var found *Gid
-	for i := range nic.Gids {
-		gid := nic.Gids[i]
-		if !gid.RoceV2 || !addresses[gid.Address] {
+	for i := range gids {
+		gid := gids[i]
+		if !gid.RoceV2 || gid.Address != address {
 			continue
 		}
 		if gid.Port == 1 {
 			return gid, true
 		}
 		if found == nil {
-			found = &nic.Gids[i]
+			found = &gids[i]
 		}
 	}
 	if found != nil {

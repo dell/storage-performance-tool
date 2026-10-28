@@ -269,8 +269,8 @@ func splitEngineOverridesEnv(value string) []string {
 	return overrides
 }
 
-// applyEnvDefaultsToVerifyFlags injects HOSTS env into verify flags when not provided,
-// and the run's SPT_INTERFACES, S3_ENDPOINTS or S3_ENDPOINT, and THREADS for the NIC plan.
+// applyEnvDefaultsToVerifyFlags injects HOSTS env into verify flags when not provided, and
+// SPT_INTERFACES. With a NIC set it also injects the run's S3_ENDPOINTS or S3_ENDPOINT, and THREADS.
 func applyEnvDefaultsToVerifyFlags(cmd *cobra.Command) error {
 	if !cmd.Flags().Changed("test-hosts") {
 		if v := strings.TrimSpace(os.Getenv("HOSTS")); v != "" {
@@ -280,37 +280,17 @@ func applyEnvDefaultsToVerifyFlags(cmd *cobra.Command) error {
 		}
 	}
 
-	setIf := func(flag, envKey string) error {
-		if cmd.Flags().Lookup(flag) == nil || cmd.Flags().Changed(flag) {
-			return nil
-		}
-		if v := strings.TrimSpace(os.Getenv(envKey)); v != "" {
-			return cmd.Flags().Set(flag, v)
-		}
-		return nil
-	}
-	if err := setIf(flagInterfaces, constants.EnvInterfaces); err != nil {
-		return err
-	}
-	if cmd.Flags().Lookup("endpoints") != nil && !cmd.Flags().Changed("endpoints") {
-		endpoints := strings.TrimSpace(os.Getenv(constants.EnvS3Endpoints))
-		if endpoints == "" {
-			endpoints = strings.TrimSpace(os.Getenv(constants.EnvS3Endpoint))
-		}
-		if endpoints != "" {
-			if err := cmd.Flags().Set("endpoints", endpoints); err != nil {
+	if !cmd.Flags().Changed(flagInterfaces) {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvInterfaces)); v != "" {
+			if err := cmd.Flags().Set(flagInterfaces, v); err != nil {
 				return err
 			}
 		}
 	}
-	if cmd.Flags().Lookup("threads") != nil && !cmd.Flags().Changed("threads") {
-		if v := strings.TrimSpace(os.Getenv(constants.EnvThreads)); v != "" {
-			if _, err := strconv.Atoi(v); err != nil {
-				return fmt.Errorf("invalid THREADS value %q: %w", v, err)
-			}
-			if err := cmd.Flags().Set("threads", v); err != nil {
-				return err
-			}
+	// Listing NICs needs no endpoints or concurrency, so their variables are read only for a plan.
+	if interfaces, _ := cmd.Flags().GetString(flagInterfaces); strings.TrimSpace(interfaces) != "" {
+		if err := applyNicPlanEnvDefaults(cmd); err != nil {
+			return err
 		}
 	}
 
@@ -323,5 +303,31 @@ func applyEnvDefaultsToVerifyFlags(cmd *cobra.Command) error {
 		}
 	}
 
+	return nil
+}
+
+// applyNicPlanEnvDefaults injects the endpoints and THREADS a verify NIC plan uses, as a run reads them.
+func applyNicPlanEnvDefaults(cmd *cobra.Command) error {
+	if !cmd.Flags().Changed("endpoints") {
+		endpoints := strings.TrimSpace(os.Getenv(constants.EnvS3Endpoints))
+		if endpoints == "" {
+			endpoints = strings.TrimSpace(os.Getenv(constants.EnvS3Endpoint))
+		}
+		if endpoints != "" {
+			if err := cmd.Flags().Set("endpoints", endpoints); err != nil {
+				return err
+			}
+		}
+	}
+	if !cmd.Flags().Changed("threads") {
+		if v := strings.TrimSpace(os.Getenv(constants.EnvThreads)); v != "" {
+			if _, err := strconv.Atoi(v); err != nil {
+				return fmt.Errorf("invalid THREADS value %q: %w", v, err)
+			}
+			if err := cmd.Flags().Set("threads", v); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
