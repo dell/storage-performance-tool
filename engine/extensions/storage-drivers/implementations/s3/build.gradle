@@ -39,6 +39,8 @@ dependencies {
 	)
 
 	testImplementation(libs.mockito.core)
+	// NetnsTestMain runs the netns tests through the launcher API.
+	testImplementation(libs.junit.platform.launcher)
 	testImplementation(testFixtures(project(':extensions:storage-drivers:primitives:netty')))
 
 	testRuntimeOnly(
@@ -66,4 +68,31 @@ def wireEncodingTest = tasks.register('wireEncodingTest', Test) {
 }
 tasks.named('test') {
 	dependsOn wireEncodingTest
+}
+
+// The tests tagged netns bind connections to real NICs: veth pairs in a network namespace, with
+// stub endpoints in a second one. They need NET_ADMIN and SYS_ADMIN over the namespace, so the
+// default test task leaves them out. CI runs this task as root in a container with both; locally,
+// engine/tools/netns-test.sh runs them without root.
+tasks.register('netnsTest', Test) {
+	group = 'verification'
+	description = 'Runs the NIC-set tests against veth NICs in network namespaces.'
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform {
+		includeTags 'netns'
+	}
+	// The topology is shared; nothing else may run in this JVM's namespace meanwhile.
+	maxParallelForks = 1
+}
+
+// engine/tools/netns-test.sh runs NetnsTestMain inside its namespace on this class path.
+tasks.register('printNetnsTestClasspath') {
+	group = 'verification'
+	description = 'Compiles the tests and prints their runtime class path for tools/netns-test.sh.'
+	dependsOn 'testClasses'
+	def testClasspath = sourceSets.test.runtimeClasspath
+	doLast {
+		println testClasspath.asPath
+	}
 }

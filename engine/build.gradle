@@ -107,7 +107,7 @@ subprojects {
         test {
             useJUnitPlatform {
                 // Tag-based fast path by default
-                excludeTags 'integration', 'perf', 'slow'
+                excludeTags 'integration', 'perf', 'slow', 'netns'
                 // Allow ad-hoc overrides via -PincludeTags / -PexcludeTags
                 if (project.hasProperty('includeTags')) {
                     includeTags project.property('includeTags').toString().split(',') as String[]
