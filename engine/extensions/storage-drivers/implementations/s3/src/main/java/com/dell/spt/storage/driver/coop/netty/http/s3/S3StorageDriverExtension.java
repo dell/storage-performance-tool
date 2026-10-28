@@ -8,9 +8,11 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketControl;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketControlFactory;
 import com.dell.spt.base.storage.driver.endpoint.EndpointSelectionDriverFactory;
+import com.dell.spt.base.storage.driver.nic.NicSetDriverFactory;
 import com.dell.spt.base.storage.driver.range.RangeReadDriverFactory;
 import com.dell.spt.base.item.op.data.range.RangeReadPolicy;
 import com.dell.spt.storage.driver.coop.netty.endpoint.EndpointSelectionSettings;
+import com.dell.spt.storage.driver.coop.netty.nic.NicSetSettings;
 import static com.dell.spt.base.Constants.APP_NAME;
 
 import com.github.akurilov.confuse.Config;
@@ -24,7 +26,8 @@ import java.util.List;
 
 public final class S3StorageDriverExtension<I extends Item, O extends Operation<I>, T extends S3StorageDriver<I, O>>
 				extends ExtensionBase
-				implements RangeReadDriverFactory<I, O, T>, EndpointSelectionDriverFactory<I, O, T>, TargetBucketControlFactory {
+				implements RangeReadDriverFactory<I, O, T>, EndpointSelectionDriverFactory<I, O, T>, NicSetDriverFactory<I, O, T>,
+				TargetBucketControlFactory {
 
 	private static final String NAME = "s3";
 	private static final String DEFAULTS_FILE_NAME = "defaults-storage-s3.yaml";
@@ -41,6 +44,10 @@ public final class S3StorageDriverExtension<I extends Item, O extends Operation<
 	public T create(
 					final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
 					final int batchSize) throws IllegalConfigurationException, InterruptedException {
+		final var nicSet = NicSetSettings.fromStorage(storageConfig);
+		if (nicSet.isPresent()) {
+			return (T) S3NicSetDriver.create(stepId, dataInput, storageConfig, verifyFlag, batchSize, nicSet.get());
+		}
 		final var endpointSelection = EndpointSelectionSettings.fromStorage(storageConfig);
 		if (endpointSelection.isDefault()) {
 			return (T) new S3StorageDriver<>(stepId, dataInput, storageConfig, verifyFlag, batchSize);
@@ -59,6 +66,11 @@ public final class S3StorageDriverExtension<I extends Item, O extends Operation<
 	@SuppressWarnings("unchecked")
 	public T createRangeRead(String stepId, DataInput dataInput, Config storageConfig,
 					int batchSize, RangeReadPolicy policy) throws IllegalConfigurationException, InterruptedException {
+		final var nicSet = NicSetSettings.fromStorage(storageConfig);
+		if (nicSet.isPresent()) {
+			return (T) (S3StorageDriver<?, ?>) S3RangeNicSetDriver.create(
+							stepId, dataInput, storageConfig, batchSize, policy, nicSet.get());
+		}
 		final var endpointSelection = EndpointSelectionSettings.fromStorage(storageConfig);
 		if (endpointSelection.isDefault()) {
 			return (T) (S3StorageDriver<?, ?>) new S3RangeStorageDriver(stepId, dataInput, storageConfig, batchSize, policy);
