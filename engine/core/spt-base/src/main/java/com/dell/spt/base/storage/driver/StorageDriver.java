@@ -3,6 +3,7 @@ package com.dell.spt.base.storage.driver;
 import com.dell.spt.base.item.op.data.range.RangeReadPolicy;
 import com.dell.spt.base.storage.driver.range.RangeReadDriverFactory;
 import com.dell.spt.base.storage.driver.endpoint.EndpointSelectionDriverFactory;
+import com.dell.spt.base.storage.driver.nic.NicSetDriverFactory;
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
 
@@ -10,6 +11,7 @@ import com.dell.spt.base.concurrent.Daemon;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.config.EndpointSelectionConfig;
+import com.dell.spt.base.config.NicSetConfig;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.Item;
@@ -215,6 +217,14 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 								"storage.net.endpoint.selection=" + endpointSelection
 												+ " is not supported by the storage driver type \"" + driverType
 												+ "\"; use the Netty s3 driver or the default selection");
+			}
+			if (NicSetConfig.isSet(storageConfig)) {
+				if (!(selectedFactory instanceof NicSetDriverFactory<?, ?, ?>)) {
+					throw new IllegalConfigurationException(
+									"storage.net.interfaces is not supported by the storage driver type \"" + driverType
+													+ "\"; use the Netty s3 driver");
+				}
+				NicSetConfig.requireNoRdmaAddress(storageConfig);
 			}
 
 			if (rangePolicy != null) {

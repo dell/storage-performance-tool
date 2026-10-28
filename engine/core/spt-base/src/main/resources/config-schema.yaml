@@ -186,6 +186,7 @@ storage:
   net:
     endpoint:
       selection: string
+    interfaces: list
     node:
       slice: boolean
   targetBucket:

@@ -2,6 +2,7 @@ package com.dell.spt.load.step.mixed;
 
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.ConstantValueInputImpl;
+import com.dell.spt.base.config.NicSetConfig;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
@@ -224,6 +225,10 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		try {
 			final boolean effectiveVerifyFlag = effectiveVerifyFlag(
 							dataConfig.boolVal("verify"), dataConfig.boolVal("dedupable"), stepId);
+			if (putWeight > 0) {
+				NicSetConfig.requireSupportedWorkload(
+								storageConfig, OpType.CREATE, itemConfig.configVal("input").stringVal("path"));
+			}
 			driver = StorageDriver.instance(
 							extensions, storageConfig, dataInput,
 							effectiveVerifyFlag, batchSize, stepId);

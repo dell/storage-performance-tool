@@ -28,6 +28,7 @@ storage:
       pqcMode: string
       protocols: list
       provider: string
+    interfaces: list
     node:
       addrs: list
       connAttemptsLimit: int

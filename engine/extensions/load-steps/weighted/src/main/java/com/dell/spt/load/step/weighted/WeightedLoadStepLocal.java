@@ -4,6 +4,7 @@ import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.config.NicSetConfig;
 import com.dell.spt.base.Constants;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.item.op.OpType;
@@ -142,6 +143,8 @@ public class WeightedLoadStepLocal extends LoadStepLocalBase {
 				final int batchSize = loadConfig.intVal("batch-size");
 
 				try {
+					NicSetConfig.requireSupportedWorkload(
+									storageConfig, opType, itemConfig.configVal("input").stringVal("path"));
 					final StorageDriver driver = StorageDriver.instance(
 									extensions, storageConfig, dataInput, effectiveVerifyFlag, batchSize, testStepId,
 									com.dell.spt.base.config.RangeReadConfig.fromLoad(loadConfig));

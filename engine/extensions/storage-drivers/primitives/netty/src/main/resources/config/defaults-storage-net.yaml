@@ -50,6 +50,8 @@ storage:
         - TLSv1.3
         - TLSv1.2
       provider: JDK
+    # Client NICs to bind connections to; [] keeps the kernel's route (see the base defaults).
+    interfaces: []
     node:
       addrs:
         - 127.0.0.1

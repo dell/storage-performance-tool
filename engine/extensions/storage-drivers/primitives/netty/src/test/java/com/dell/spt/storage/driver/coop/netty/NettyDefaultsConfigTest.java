@@ -1,11 +1,20 @@
 package com.dell.spt.storage.driver.coop.netty;
 
+import static com.dell.spt.base.Constants.APP_NAME;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.dell.spt.base.config.CliArgUtil;
+import com.dell.spt.base.config.NicSetConfig;
+import com.dell.spt.base.env.Extension;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
+import com.github.akurilov.commons.collection.TreeUtil;
+import com.github.akurilov.confuse.SchemaProvider;
+import com.github.akurilov.confuse.impl.BasicConfig;
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
@@ -51,5 +60,45 @@ class NettyDefaultsConfigTest {
 		assertTrue(timeoutMilliSec.intValue() >= 10_000,
 						"storage.net.timeoutMilliSec also bounds initial connection attempts; "
 										+ "keep it well above normal same-datacenter connect latency");
+	}
+
+	@Test
+	void shippedNicSetIsEmptyAndDeclaredAsAList() throws Exception {
+		final Map<String, Object> defaults;
+		try (final InputStream in = NettyDefaultsConfigTest.class.getResourceAsStream(DEFAULTS_RESOURCE)) {
+			defaults = new YAMLMapper().readValue(in, Map.class);
+		}
+		final var net = (Map<String, Object>) ((Map<String, Object>) defaults.get("storage")).get("net");
+		assertEquals(List.of(), net.get("interfaces"), "storage.net.interfaces must ship empty: the kernel's route");
+
+		final Map<String, Object> schema;
+		try (final InputStream in = NettyDefaultsConfigTest.class.getResourceAsStream("/config-schema-storage-net.yaml")) {
+			assertNotNull(in, "missing packaged resource: /config-schema-storage-net.yaml");
+			schema = new YAMLMapper().readValue(in, Map.class);
+		}
+		final var netSchema = (Map<String, Object>) ((Map<String, Object>) schema.get("storage")).get("net");
+		assertEquals("list", netSchema.get("interfaces"));
+	}
+
+	@Test
+	void engineCliSetsTheNicSetThroughTheMergedSchema() throws Exception {
+		final var schemas = new ArrayList<Map<String, Object>>();
+		for (final var extension : Extension.load(Thread.currentThread().getContextClassLoader())) {
+			final var provider = extension.schemaProvider();
+			if (provider != null && provider.schema() != null) {
+				schemas.add(provider.schema());
+			}
+		}
+		SchemaProvider.resolve(APP_NAME, Thread.currentThread().getContextClassLoader())
+						.stream().findFirst().ifPresent(schemas::add);
+		final var schema = TreeUtil.reduceForest(schemas);
+		final var config = new BasicConfig("-", schema,
+						Map.of("storage", Map.of("net", Map.of("interfaces", List.of()))));
+		assertEquals(List.of(), NicSetConfig.interfaces(config.configVal("storage")));
+
+		CliArgUtil.parseArgs("--storage-net-interfaces=ens2np0,192.0.2.10").forEach(config::val);
+		assertEquals(List.of("ens2np0", "192.0.2.10"), NicSetConfig.interfaces(config.configVal("storage")));
+		CliArgUtil.parseArgs("--storage-net-interfaces=").forEach(config::val);
+		assertEquals(List.of(), NicSetConfig.interfaces(config.configVal("storage")));
 	}
 }
