@@ -10,6 +10,7 @@ import static com.github.akurilov.netty.connection.pool.NonBlockingConnPool.ATTR
 
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.config.NicSetConfig;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
@@ -49,16 +50,19 @@ import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslProvider;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.handler.timeout.IdleStateHandler;
+import io.netty.util.concurrent.Future;
 
 import java.io.IOException;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.NoSuchElementException;
 import java.security.Provider;
 import java.security.Security;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.CloseableThreadContext;
@@ -79,6 +83,9 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	private static final String BC_JCE_PROVIDER_CLASS = "org.bouncycastle.jce.provider.BouncyCastleProvider";
 
 	static final long IO_WORKER_SHUTDOWN_TIMEOUT_SECONDS = 5;
+	/** With a NIC set, the base group only serves control requests' unbound connections. */
+	static final int NIC_SET_BASE_IO_WORKERS = 2;
+	static final String BASE_IO_GROUP_NAME = "base";
 	static {
 		final java.util.logging.Logger julConnPoolLogger = java.util.logging.Logger.getLogger(MultiNodeConnPoolImpl.class.getName());
 		julConnPoolLogger.setLevel(java.util.logging.Level.WARNING);
@@ -88,6 +95,10 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	}
 
 	private final EventLoopGroup ioExecutor;
+	private final Class<EventLoopGroup> ioExecutorCls;
+	private final int ioRatio;
+	// Groups a NIC-set subclass creates at start; always empty on the default route.
+	private final List<NamedIoGroup> extraIoGroups = new CopyOnWriteArrayList<>();
 	protected final String storageNodeAddrs[];
 	protected final Bootstrap bootstrap;
 	protected final int storageNodePort;
@@ -186,44 +197,23 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 
 		final int workerCount;
 		final var confWorkerCount = storageConfig.intVal("driver-threads");
-		if (confWorkerCount < 1) {
+		if (NicSetConfig.isSet(storageConfig)) {
+			workerCount = NIC_SET_BASE_IO_WORKERS;
+		} else if (confWorkerCount < 1) {
 			workerCount = Math.max(4, ThreadUtil.getHardwareThreadCount() / 8);
 		} else {
 			workerCount = confWorkerCount;
 		}
 
-		final Transport transportKey;
-		final var transportConfig = netConfig.stringVal("transport");
-		if (transportConfig == null || transportConfig.isEmpty()) {
-			if (Epoll.isAvailable()) {
-				transportKey = Transport.EPOLL;
-			} else if (KQueue.isAvailable()) {
-				transportKey = Transport.KQUEUE;
-			} else {
-				transportKey = Transport.NIO;
-			}
-		} else {
-			transportKey = Transport.valueOf(transportConfig.toUpperCase(Locale.ROOT));
-		}
+		final Transport transportKey = resolveTransport(netConfig);
 		Loggers.MSG.info("{}: netty transport: {}", toString(), transportKey);
 
+		ioRatio = netConfig.intVal("ioRatio");
 		try {
-
 			final var ioExecutorClsName = IO_EXECUTOR_IMPLS.get(transportKey);
-			final var transportCls = (Class<EventLoopGroup>) Class.forName(ioExecutorClsName);
-			ioExecutor = transportCls
-							.getConstructor(Integer.TYPE, ThreadFactory.class)
-							.newInstance(workerCount, new LogContextThreadFactory("ioWorker", true));
+			ioExecutorCls = (Class<EventLoopGroup>) Class.forName(ioExecutorClsName);
+			ioExecutor = newIoGroup(ioExecutorCls, workerCount, "ioWorker", ioRatio);
 			Loggers.MSG.info("{}: use {} I/O workers", toString(), workerCount);
-
-			final var ioRatio = netConfig.intVal("ioRatio");
-			try {
-				final var setIoRatioMethod = transportCls.getMethod("setIoRatio", Integer.TYPE);
-				setIoRatioMethod.invoke(ioExecutor, ioRatio);
-			} catch (final ReflectiveOperationException e) {
-				LogUtil.exception(Level.ERROR, e, "Failed to set the I/O ratio");
-			}
-
 		} catch (final ReflectiveOperationException e) {
 			throw new LinkageError("Unable to initialize configured Netty transport", e);
 		}
@@ -259,6 +249,72 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		try (final var logCtx = CloseableThreadContext.put(KEY_STEP_ID, this.stepId).put(KEY_CLASS_NAME, CLS_NAME)) {
 			connPool = createConnectionPool();
 		}
+	}
+
+	/** The transport {@code storage.net.transport} selects; empty picks the best one available. */
+	public static Transport resolveTransport(final Config netConfig) {
+		final var transportConfig = netConfig.stringVal("transport");
+		if (transportConfig == null || transportConfig.isEmpty()) {
+			if (Epoll.isAvailable()) {
+				return Transport.EPOLL;
+			} else if (KQueue.isAvailable()) {
+				return Transport.KQUEUE;
+			} else {
+				return Transport.NIO;
+			}
+		}
+		return Transport.valueOf(transportConfig.toUpperCase(Locale.ROOT));
+	}
+
+	private static EventLoopGroup newIoGroup(
+					final Class<EventLoopGroup> groupCls, final int threads, final String threadNamePrefix, final int ioRatio)
+					throws ReflectiveOperationException {
+		final var group = groupCls
+						.getConstructor(Integer.TYPE, ThreadFactory.class)
+						.newInstance(threads, new LogContextThreadFactory(threadNamePrefix, true));
+		try {
+			final var setIoRatioMethod = groupCls.getMethod("setIoRatio", Integer.TYPE);
+			setIoRatioMethod.invoke(group, ioRatio);
+		} catch (final ReflectiveOperationException e) {
+			LogUtil.exception(Level.ERROR, e, "Failed to set the I/O ratio");
+		}
+		return group;
+	}
+
+	/**
+	 * Creates a further event-loop group with this driver's transport and I/O ratio, its threads
+	 * named {@code ioWorker-<name>}. The driver owns it: {@link #doStop()} shuts it down with the
+	 * base group within one budget, and {@link #shutdownExtraIoGroups()} releases it early when a
+	 * start fails.
+	 */
+	protected final EventLoopGroup createIoGroup(final int threads, final String name) {
+		final EventLoopGroup group;
+		try {
+			group = newIoGroup(ioExecutorCls, threads, "ioWorker-" + name, ioRatio);
+		} catch (final ReflectiveOperationException e) {
+			throw new LinkageError("Unable to initialize configured Netty transport", e);
+		}
+		extraIoGroups.add(new NamedIoGroup(name, group));
+		Loggers.MSG.info("{}: use {} I/O workers for {}", toString(), threads, name);
+		return group;
+	}
+
+	/** Shuts down every group {@link #createIoGroup} made, for a start that fails after making them. */
+	protected final void shutdownExtraIoGroups() {
+		final var groups = List.copyOf(extraIoGroups);
+		extraIoGroups.removeAll(groups);
+		warnLateIoGroups(shutdownIoGroups(groups));
+	}
+
+	/** Runs first in {@link #doStop()}, before any event-loop group shuts down. */
+	protected void beforeIoShutdown() {}
+
+	final EventLoopGroup baseIoGroup() {
+		return ioExecutor;
+	}
+
+	final List<NamedIoGroup> extraIoGroups() {
+		return List.copyOf(extraIoGroups);
 	}
 
 	protected NonBlockingConnPool createConnectionPool() {
@@ -1005,8 +1061,14 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	@Override
 	protected final void doStop() throws IllegalStateException {
 		try (final var ctx = CloseableThreadContext.put(KEY_STEP_ID, stepId).put(KEY_CLASS_NAME, CLS_NAME)) {
+			beforeIoShutdown();
 			Loggers.MSG.debug("{}: shutdown the I/O executor", toString());
-			if (shutdownIoExecutor(ioExecutor)) {
+			if (!extraIoGroups.isEmpty()) {
+				final var groups = new ArrayList<NamedIoGroup>(1 + extraIoGroups.size());
+				groups.add(new NamedIoGroup(BASE_IO_GROUP_NAME, ioExecutor));
+				groups.addAll(extraIoGroups);
+				warnLateIoGroups(shutdownIoGroups(groups));
+			} else if (shutdownIoExecutor(ioExecutor)) {
 				Loggers.MSG.debug("{}: I/O workers stopped in time", toString());
 			} else {
 				Loggers.ERR.warn(
@@ -1023,6 +1085,40 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 						.shutdownGracefully(0, 0, TimeUnit.NANOSECONDS)
 						.awaitUninterruptibly(IO_WORKER_SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
 	}
+
+	/**
+	 * Starts every group's shutdown, then waits for all of them within one
+	 * {@link #IO_WORKER_SHUTDOWN_TIMEOUT_SECONDS} budget.
+	 *
+	 * @return the names of the groups that did not stop in time
+	 */
+	static List<String> shutdownIoGroups(final List<NamedIoGroup> groups) {
+		final var terminations = new ArrayList<Future<?>>(groups.size());
+		for (final var group : groups) {
+			terminations.add(group.group().shutdownGracefully(0, 0, TimeUnit.NANOSECONDS));
+		}
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(IO_WORKER_SHUTDOWN_TIMEOUT_SECONDS);
+		final var late = new ArrayList<String>();
+		for (int i = 0; i < groups.size(); i++) {
+			final long left = Math.max(0, deadline - System.nanoTime());
+			if (!terminations.get(i).awaitUninterruptibly(left, TimeUnit.NANOSECONDS)) {
+				late.add(groups.get(i).name());
+			}
+		}
+		return late;
+	}
+
+	private void warnLateIoGroups(final List<String> late) {
+		for (final var name : late) {
+			Loggers.ERR.warn(
+							"{}: I/O workers of {} did not stop within {} s",
+							toString(),
+							name,
+							IO_WORKER_SHUTDOWN_TIMEOUT_SECONDS);
+		}
+	}
+
+	record NamedIoGroup(String name, EventLoopGroup group) {}
 
 	@Override
 	protected void doClose() throws IllegalStateException, IOException {
