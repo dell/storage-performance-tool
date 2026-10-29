@@ -6,6 +6,7 @@ import com.dell.spt.base.nic.EndpointResolver;
 import com.dell.spt.base.nic.Ipv4;
 import com.dell.spt.base.nic.NicInventory;
 import com.dell.spt.base.nic.NicPlanner;
+import com.dell.spt.base.nic.NicSetResources;
 import com.dell.spt.base.nic.RdmaDeviceProbe;
 import com.dell.spt.base.nic.SysfsInventoryReader;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
@@ -140,6 +141,13 @@ public final class NicSetSupport {
 	/** The layout the driver started with, or {@code null} before a successful open. */
 	public NicSetLayout layout() {
 		return layout;
+	}
+
+	/** The driver's event loops, with the layout's NICs once open succeeded and none before. */
+	public NicSetResources resources() {
+		final var current = layout;
+		return new NicSetResources(settings.driverThreads(), settings.threadsPerNic(),
+						current == null ? List.of() : current.nics().stream().map(NicSetLayout.Nic::name).toList());
 	}
 
 	/** The per-path counters in the layout's order, or {@code null} before a successful open. */

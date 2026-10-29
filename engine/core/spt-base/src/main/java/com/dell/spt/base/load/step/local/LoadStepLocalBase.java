@@ -9,6 +9,7 @@ import static org.apache.logging.log4j.CloseableThreadContext.put;
 import com.dell.spt.base.metrics.range.RangeReadSnapshot;
 import com.dell.spt.base.metrics.range.RangeReadArtifact;
 import com.dell.spt.base.nic.NicPathsArtifact;
+import com.dell.spt.base.nic.NicSetArtifact;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleCounters;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.control.run.RunTerminalException;
@@ -662,29 +663,37 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	}
 
 	/**
-	 * Writes the step's per-path CSV once, when an expected context has a NIC set: after the
-	 * contexts stopped, or at close for a step whose start failed. A context without its rows is
-	 * named missing. A failure to write it warns; the file is evidence, not a step outcome.
+	 * Writes the step's per-path CSV and NIC-set report once, when an expected context has a NIC
+	 * set: after the contexts stopped, or at close for a step whose start failed. A context without
+	 * its rows is named missing in the CSV. A failure to write either file warns; they are evidence,
+	 * not a step outcome.
 	 */
 	private void publishNicPaths() {
 		if (nicPathsPublished) {
 			return;
 		}
 		nicPathsPublished = true;
-		final var contexts = new ArrayList<NicPathsArtifact.Context>();
+		final var paths = new ArrayList<NicPathsArtifact.Context>();
+		final var sets = new ArrayList<NicSetArtifact.Context>();
 		for (var i = 0; i < expectedOperationLifecycleContexts.size(); i++) {
 			final var context = expectedOperationLifecycleContexts.get(i);
 			if (context != null && context.hasNicSet()) {
-				contexts.add(new NicPathsArtifact.Context(i, context.nicPathRows()));
+				paths.add(new NicPathsArtifact.Context(i, context.nicPathRows()));
+				sets.add(new NicSetArtifact.Context(i, context.nicSetResources()));
 			}
 		}
-		if (contexts.isEmpty()) {
+		if (paths.isEmpty()) {
 			return;
 		}
 		try (final var logContext = put(KEY_STEP_ID, loadStepId())) {
-			NicPathsArtifact.publish(runId(), loadStepId(), operationLifecycleWorkerId, contexts);
+			NicPathsArtifact.publish(runId(), loadStepId(), operationLifecycleWorkerId, paths);
 		} catch (final RuntimeException e) {
 			LogUtil.exception(Level.WARN, e, "{}: failed to write the NIC paths file", loadStepId());
+		}
+		try (final var logContext = put(KEY_STEP_ID, loadStepId())) {
+			NicSetArtifact.publish(runId(), loadStepId(), operationLifecycleWorkerId, sets);
+		} catch (final RuntimeException e) {
+			LogUtil.exception(Level.WARN, e, "{}: failed to write the NIC set file", loadStepId());
 		}
 	}
 

@@ -1,11 +1,6 @@
 package com.dell.spt.base.nic;
 
-import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.logging.Loggers;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.commons.csv.CSVFormat;
@@ -31,25 +26,7 @@ public final class NicPathsArtifact {
 
 	/** Publish synchronously after stop; async logging plus flush does not drain its queue. */
 	public static void publish(final long runId, final String stepId, final String workerId, final List<Context> contexts) {
-		Path staging = null;
-		try {
-			final var path = Path.of(FileManager.INSTANCE.logFileName(Loggers.NIC_PATHS.getName(), stepId));
-			Files.createDirectories(path.toAbsolutePath().getParent());
-			if (Files.exists(path)) {
-				throw new IOException("stale NIC paths artifact exists");
-			}
-			staging = Files.createTempFile(path.toAbsolutePath().getParent(), ".nic-paths-", ".tmp");
-			Files.writeString(staging, HEADER + "\n" + rows(runId, stepId, workerId, contexts) + "\n");
-			Files.move(staging, path, StandardCopyOption.ATOMIC_MOVE);
-		} catch (final IOException e) {
-			throw new IllegalStateException("failed to publish the terminal NIC paths evidence", e);
-		} finally {
-			if (staging != null) {
-				try {
-					Files.deleteIfExists(staging);
-				} catch (final IOException ignored) { /* Primary publication error is retained. */ }
-			}
-		}
+		NicStepFile.publish(Loggers.NIC_PATHS, stepId, "NIC paths", HEADER + "\n" + rows(runId, stepId, workerId, contexts) + "\n");
 	}
 
 	public static String rows(final long runId, final String stepId, final String workerId, final List<Context> contexts) {

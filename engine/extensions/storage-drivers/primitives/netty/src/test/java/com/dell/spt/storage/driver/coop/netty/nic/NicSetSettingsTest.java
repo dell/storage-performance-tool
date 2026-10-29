@@ -53,6 +53,17 @@ class NicSetSettingsTest {
 	}
 
 	@Test
+	void theConfiguredDriverThreadsAreKeptWithZeroForTheDefault() {
+		assumeTrue(Epoll.isAvailable());
+		assertEquals(3, NicSetSettings.fromStorage(storage(List.of("ens2np0"), "epoll", "default", 0, 1, 3)).orElseThrow().driverThreads());
+		for (final var unset : List.of(0, -2)) {
+			final var settings = NicSetSettings.fromStorage(storage(List.of("ens2np0"), "epoll", "default", 0, 1, unset)).orElseThrow();
+			assertEquals(0, settings.driverThreads());
+			assertEquals(NicSetSettings.defaultThreadsPerNic(), settings.threadsPerNic());
+		}
+	}
+
+	@Test
 	void aTransportThatCannotBindIsRejectedByName() {
 		for (final var transport : List.of("nio", "kqueue", "iouring")) {
 			final var failure = assertThrows(IllegalConfigurationException.class,

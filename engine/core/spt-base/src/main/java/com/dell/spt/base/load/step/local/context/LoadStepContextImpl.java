@@ -15,6 +15,7 @@ import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 import com.dell.spt.base.metrics.range.RangeReadSnapshot;
 import com.dell.spt.base.nic.NicPathCounting;
 import com.dell.spt.base.nic.NicPathRows;
+import com.dell.spt.base.nic.NicSetResources;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleCounters;
 import com.dell.spt.base.concurrent.DaemonBase;
 import com.dell.spt.base.config.IllegalConfigurationException;
@@ -1691,6 +1692,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	@Override
 	public final NicPathRows nicPathRows() {
 		return driver instanceof NicPathCounting counting ? counting.nicPathRows() : null;
+	}
+
+	@Override
+	public final NicSetResources nicSetResources() {
+		return driver instanceof NicPathCounting counting ? counting.nicSetResources() : null;
 	}
 
 	@Override

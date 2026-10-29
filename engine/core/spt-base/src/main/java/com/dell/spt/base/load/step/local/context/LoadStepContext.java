@@ -47,6 +47,11 @@ public interface LoadStepContext<I extends Item, O extends Operation<I>> extends
 		return null;
 	}
 
+	/** The driver's event loops (D64), or null without a NIC set. */
+	default com.dell.spt.base.nic.NicSetResources nicSetResources() {
+		return null;
+	}
+
 	/** Returns object-level identity accounting, or {@code null} when the context cannot supply it. */
 	default DeleteObjectLifecycleSnapshot deleteObjectLifecycle() {
 		return null;

@@ -10,6 +10,7 @@ import com.dell.spt.base.item.op.data.range.RangeReadAttempt;
 import com.dell.spt.base.item.op.data.range.RangeReadOperation;
 import com.dell.spt.base.item.op.data.range.RangeReadPolicy;
 import com.dell.spt.base.nic.NicPathCounting;
+import com.dell.spt.base.nic.NicSetResources;
 import com.dell.spt.base.nic.NicPathRows;
 import com.dell.spt.storage.driver.coop.netty.nic.NicAdmission;
 import com.dell.spt.storage.driver.coop.netty.nic.NicPathCounters;
@@ -103,6 +104,11 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver implements NicPathC
 		final var ioStopped = ioStoppedInTime();
 		final var table = counters;
 		return table == null || ioStopped == null ? null : table.snapshot(ioStopped && dispatchStoppedInTime());
+	}
+
+	@Override
+	public NicSetResources nicSetResources() {
+		return nicSet.resources();
 	}
 
 	/**

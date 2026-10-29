@@ -58,6 +58,8 @@ import com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.RangeRun;
 import com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.Request;
 import com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.Run;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetConnectionPool;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.akurilov.confuse.Config;
 import io.netty.channel.epoll.Epoll;
 import java.io.IOException;
@@ -91,6 +93,7 @@ final class S3NicSetWorkloadTest {
 
 	private static final Operation.Status SUCC = Operation.Status.SUCC;
 	private static final long OBJECT_SIZE = 10;
+	private static final ObjectMapper MAPPER = new ObjectMapper();
 
 	private final NicSetLoopback stub = new NicSetLoopback();
 	private final List<AutoCloseable> resources = new ArrayList<>();
@@ -441,6 +444,23 @@ final class S3NicSetWorkloadTest {
 		assertEquals(8L * 1024, sum(body, "0", "bytes"));
 		assertEquals(outcomes.get("READ-4").get(0), sum(body, "1", "succeeded"));
 		Files.delete(file);
+
+		// And one report: the two drivers agree on their threads, not on their NICs (D64).
+		final var setFile = nicSetFile(stepId);
+		final var report = MAPPER.readTree(setFile.toFile());
+		assertEquals(1, report.get("schema_version").asInt());
+		assertEquals(stepId, report.get("step_id").asText());
+		assertEquals(1, report.get("driver_threads").asInt());
+		assertEquals(1, report.get("event_loops_per_nic").asInt());
+		assertFalse(report.has("nics"), () -> "report: " + report);
+		assertEquals(4, report.get("event_loops").asInt());
+		final var contexts = report.get("contexts");
+		assertEquals(2, contexts.size(), () -> "report: " + report);
+		assertEquals(List.of("lo-a", "lo-b"), names(contexts.get(0).get("nics")));
+		assertEquals(List.of("lo-c", "lo-d"), names(contexts.get(1).get("nics")));
+		assertEquals(1, contexts.get(1).get("context_index").asInt());
+		assertEquals(2, contexts.get(1).get("event_loops").asInt());
+		Files.delete(setFile);
 	}
 
 	/**
@@ -465,6 +485,14 @@ final class S3NicSetWorkloadTest {
 		assertEquals("0", end.get("missing_contexts"));
 		assertEquals("0", end.get("attempts"));
 		Files.delete(file);
+
+		final var setFile = nicSetFile(stepId);
+		final var report = MAPPER.readTree(setFile.toFile());
+		assertEquals(1, report.get("driver_threads").asInt());
+		assertEquals(List.of(), names(report.get("nics")), "a NIC set that never opened has no NICs");
+		assertEquals(0, report.get("event_loops").asInt());
+		assertFalse(report.has("contexts"));
+		Files.delete(setFile);
 	}
 
 	/** A step without a NIC set writes no per-path file (item 18). */
@@ -477,6 +505,7 @@ final class S3NicSetWorkloadTest {
 
 		assertEquals(Map.of("CREATE-1", List.of(8L, 0L)), outcomes);
 		assertFalse(Files.exists(nicPathsFile(stepId)));
+		assertFalse(Files.exists(nicSetFile(stepId)));
 	}
 
 	/**
@@ -569,6 +598,16 @@ final class S3NicSetWorkloadTest {
 
 	private static Path nicPathsFile(final String stepId) throws IOException {
 		return Path.of(FileManager.INSTANCE.logFileName(Loggers.NIC_PATHS.getName(), stepId));
+	}
+
+	private static Path nicSetFile(final String stepId) throws IOException {
+		return Path.of(FileManager.INSTANCE.logFileName(Loggers.NIC_SET.getName(), stepId));
+	}
+
+	private static List<String> names(final JsonNode array) {
+		final List<String> out = new ArrayList<>();
+		array.forEach(node -> out.add(node.asText()));
+		return out;
 	}
 
 	/** The file's records by column; no field of these files is quoted. */

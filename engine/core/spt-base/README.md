@@ -369,3 +369,25 @@ stopped without handing over its counts, named by index in `missing_contexts`
 (separated by `;`), or its dispatch task or I/O event loops did not stop in time, so
 a late update may be absent. The rows carry no operation identities, and the
 per-attempt route takes no lock: the counts are read once every update has stopped.
+
+### NIC-set report
+
+Beside the CSV, the same step publishes `nic.set.json`, the engine's event loops for
+its NIC set, through the same staging file and atomic move. The Entry Node copies each
+node's report as `nic.set.node-NNN.json` and warns for a missing one, and the logs API
+exposes a single engine's report as `NicSet`. Schema version 1 is one JSON object:
+
+```json
+{"schema_version":1,"engine_run_id":7,"step_id":"read1","worker_id":"worker-a",
+ "hardware_threads":64,"driver_threads":0,"event_loops_per_nic":8,
+ "nics":["ens1f0","ens1f1"],"event_loops":16}
+```
+
+`driver_threads` is the configured `storage.driver.threads`, with 0 for the default.
+`event_loops_per_nic` is each NIC's group size: `driver_threads` when set, otherwise
+`max(4, hardware_threads / 8)`. `nics` lists the NICs that opened, in plan order, and
+is empty when the NIC set never opened, so `event_loops` is then 0. A step with
+several NIC-set drivers (a weighted or pipeline step) adds `contexts`, one object per
+NIC-set context with `context_index`, `driver_threads`, `event_loops_per_nic`, `nics`
+and `event_loops`. Its top-level fields are then those every context agrees on, and
+`event_loops` is the engine's total. Added fields keep schema version 1.

@@ -20,9 +20,11 @@ import java.util.Optional;
  * @param connectTimeoutMillis the Path Pools' connect timeout: {@code storage.net.timeoutMilliSec}
  *     when positive, otherwise {@link #DEFAULT_CONNECT_TIMEOUT_MILLIS}
  * @param probeTimeoutMillis the connect timeout of the start-time probe
+ * @param driverThreads the configured {@code storage.driver.threads}, or 0 for the default
  * @param threadsPerNic event loops in each NIC's group
  */
-public record NicSetSettings(List<String> interfaces, int connectTimeoutMillis, int probeTimeoutMillis, int threadsPerNic) {
+public record NicSetSettings(
+				List<String> interfaces, int connectTimeoutMillis, int probeTimeoutMillis, int driverThreads, int threadsPerNic) {
 
 	/** The connect timeout when {@code storage.net.timeoutMilliSec} is not positive. */
 	public static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 30_000;
@@ -74,11 +76,12 @@ public record NicSetSettings(List<String> interfaces, int connectTimeoutMillis, 
 		}
 		final var timeout = netConfig.intVal("timeoutMilliSec");
 		final var connectTimeout = timeout > 0 ? timeout : DEFAULT_CONNECT_TIMEOUT_MILLIS;
-		final var threads = storageConfig.intVal("driver-threads");
+		final var threads = Math.max(0, storageConfig.intVal("driver-threads"));
 		return Optional.of(new NicSetSettings(
 						interfaces,
 						connectTimeout,
 						Math.min(connectTimeout, MAX_PROBE_TIMEOUT_MILLIS),
+						threads,
 						threads >= 1 ? threads : defaultThreadsPerNic()));
 	}
 

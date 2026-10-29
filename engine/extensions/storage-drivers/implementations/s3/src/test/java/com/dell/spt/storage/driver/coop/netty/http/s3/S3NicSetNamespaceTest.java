@@ -24,6 +24,7 @@ import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
+import com.dell.spt.base.nic.NicSetResources;
 import com.dell.spt.storage.driver.coop.netty.nic.NicBinding;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetConnectionPool;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetSettings;
@@ -170,6 +171,7 @@ final class S3NicSetNamespaceTest {
 
 		assertEquals(Map.of(NIC_A, List.of(ENDPOINTS.get(0), ENDPOINTS.get(2)), NIC_B, List.of(ENDPOINTS.get(1), ENDPOINTS.get(3))),
 						paths(run.pool()));
+		assertEquals(new NicSetResources(1, 1, List.of(NIC_A, NIC_B)), run.driver().nicSetResources(), "the step's NIC set report");
 		final var opened = bound();
 		assertEquals(8, opened.size(), () -> "pre-opened before the first operation: " + opened);
 		for (final var connection : opened) {
