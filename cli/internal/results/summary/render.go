@@ -437,6 +437,10 @@ func (r *Renderer) renderWorkload(b *strings.Builder, summary *RunSummary) {
 	if len(work.Endpoints) > 0 {
 		r.writeBullet(b, "Endpoints", strings.Join(work.Endpoints, ", "))
 	}
+	if len(work.Interfaces) > 0 {
+		r.writeBullet(b, "Interfaces", strings.Join(work.Interfaces, ","))
+		r.writeBullet(b, "Event loops", work.EventLoops)
+	}
 	if work.Bucket != "" {
 		r.writeBullet(b, "Bucket", work.Bucket)
 	}

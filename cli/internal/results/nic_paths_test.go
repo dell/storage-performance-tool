@@ -42,7 +42,7 @@ func TestExpectedNicPathsFilesNameEachParticipatingNodeWithAValue(t *testing.T) 
 		{Node: 4, Host: "worker-e", Interfaces: "auto"},
 	}
 	got := ExpectedNicPathsFiles("read1", nodes, 4)
-	want := []NicPathsFile{
+	want := []NicNodeFile{
 		{Name: "read1.nic.paths.node-000.csv", Node: 0, Host: "worker-a"},
 		{Name: "read1.nic.paths.node-002.csv", Node: 2, Host: "worker-c"},
 	}
@@ -50,7 +50,7 @@ func TestExpectedNicPathsFilesNameEachParticipatingNodeWithAValue(t *testing.T) 
 		t.Fatalf("expected files = %+v, want %+v", got, want)
 	}
 	single := ExpectedNicPathsFiles("read1", nodes, 1)
-	if !reflect.DeepEqual(single, []NicPathsFile{{Name: "read1.nic.paths.csv", Node: 0, Host: "worker-a"}}) {
+	if !reflect.DeepEqual(single, []NicNodeFile{{Name: "read1.nic.paths.csv", Node: 0, Host: "worker-a"}}) {
 		t.Fatalf("a single participant writes the canonical file, got %+v", single)
 	}
 	if got := ExpectedNicPathsFiles("read1", nil, 3); got != nil {
@@ -145,6 +145,7 @@ func fetchNicPathsStep(t *testing.T, step, nodeCount string, nicNodes []NicNode,
 	fetcher.Artifacts = []ArtifactSpec{
 		{Loggers: []string{"metrics.FileTotal"}, Suffix: constants.ResultsArtifactSuffixMetricsTotal, Required: true},
 		{Loggers: []string{"NicPaths"}, Suffix: constants.ResultsArtifactSuffixNicPaths},
+		{Loggers: []string{"NicSet"}, Suffix: constants.ResultsArtifactSuffixNicSet},
 	}
 	manifest, err := fetcher.FetchArtifactsForSteps(context.Background(), []string{step})
 	if err != nil {

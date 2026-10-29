@@ -3,6 +3,7 @@ package nicplan
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -18,7 +19,8 @@ var (
 	endpointPattern = regexp.MustCompile(`^[A-Za-z0-9_.:\[\]-]+$`)
 )
 
-// ParseInterfaces splits an --interfaces value into its entries; an empty value gives none.
+// ParseInterfaces splits an --interfaces value into its entries; an empty value gives none, and
+// auto must be the only entry.
 // Resolving the entries, auto included, is the engine planner's work on each host.
 func ParseInterfaces(value string) ([]string, error) {
 	value = strings.TrimSpace(value)
@@ -36,6 +38,9 @@ func ParseInterfaces(value string) ([]string, error) {
 			return nil, fmt.Errorf("--interfaces entry %q is not an interface name, IPv4 address or RDMA device", entry)
 		}
 		entries = append(entries, entry)
+	}
+	if len(entries) > 1 && slices.Contains(entries, Auto) {
+		return nil, fmt.Errorf("--interfaces %q: %s must be the only entry", value, Auto)
 	}
 	return entries, nil
 }

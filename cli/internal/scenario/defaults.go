@@ -2,6 +2,7 @@
 package scenario
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -115,6 +116,8 @@ type NetConfig struct {
 	Node     NodeConfig      `yaml:"node,omitempty"`
 	SSL      SSLConfig       `yaml:"ssl,omitempty"`
 	Endpoint *EndpointConfig `yaml:"endpoint,omitempty"` // pointer so omitted in the default mode
+	// Interfaces is storage.net.interfaces, written only with a NIC set.
+	Interfaces []string `yaml:"interfaces,omitempty"`
 }
 
 // EndpointConfig represents storage.net.endpoint (opt-in endpoint selection).
@@ -320,8 +323,9 @@ func GenerateDefaults(params Params) ([]byte, error) {
 					Port:  nodes.Port,
 					Slice: params.SliceEndpoints,
 				},
-				SSL:      SSLConfig{Enabled: nodes.Scheme == schemeHTTPS},
-				Endpoint: endpointConfig(params.EndpointSelection),
+				SSL:        SSLConfig{Enabled: nodes.Scheme == schemeHTTPS},
+				Endpoint:   endpointConfig(params.EndpointSelection),
+				Interfaces: params.Interfaces,
 			},
 			Auth: AuthConfig{UID: params.AccessKey, Secret: params.SecretKey, Version: authVersion},
 		}
@@ -421,6 +425,18 @@ func GenerateDefaults(params Params) ([]byte, error) {
 		// Overrides that set the count itself are rejected earlier, so the flag's count is final.
 		if params.BucketCount > 1 {
 			data, err = applyEngineOverrides(data, []string{fmt.Sprintf("storage.targetBucket.count=%d", params.BucketCount)})
+			if err != nil {
+				return nil, err
+			}
+		}
+		// The NIC set likewise survives an override that replaces storage.net or storage. A JSON
+		// list is a YAML value, so every entry stays a string.
+		if len(config.Storage.Net.Interfaces) > 0 {
+			interfaces, err := json.Marshal(config.Storage.Net.Interfaces)
+			if err != nil {
+				return nil, fmt.Errorf("failed to encode %s: %w", InterfacesPath, err)
+			}
+			data, err = applyEngineOverrides(data, []string{InterfacesPath + "=" + string(interfaces)})
 			if err != nil {
 				return nil, err
 			}

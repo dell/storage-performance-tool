@@ -245,6 +245,7 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 		step.NicPaths = nicPathsEvidence(sm, params.NicNodes, step.Metrics)
 		if step.NicPaths != nil && step.NicPaths.Distributed {
 			step.MissingOptional = removeString(step.MissingOptional, constants.ResultsArtifactSuffixNicPaths)
+			step.MissingOptional = removeString(step.MissingOptional, constants.ResultsArtifactSuffixNicSet)
 		}
 
 		rangeEvidence, rangeErr := loadRangeRead(runDir, sm)
@@ -536,6 +537,7 @@ type RunParams struct {
 	DriverStats            map[string]*driverstats.Stats     `json:"driverStats,omitempty"`
 	DriverStatsError       string                            `json:"driverStatsError,omitempty"`
 	NicNodes               []results.NicNode                 `json:"nicNodes,omitempty"`
+	NicEngines             map[string][]results.NicEngine    `json:"nicEngines,omitempty"`
 	ResultsOptions         RunResultsOptions                 `json:"resultsOptions"`
 	CLI                    RunCLI                            `json:"cli"`
 	MultiHost              RunMultiHost                      `json:"multiHost"`
@@ -580,6 +582,7 @@ type ScenarioParams struct {
 	Cleanup        bool     `json:"Cleanup"`
 	KeepScenario   bool     `json:"KeepScenario"`
 	SliceEndpoints bool     `json:"SliceEndpoints"`
+	Interfaces     []string `json:"Interfaces"`
 }
 
 // RunHost describes a host entry in the captured metadata.

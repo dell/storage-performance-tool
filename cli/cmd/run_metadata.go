@@ -19,6 +19,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/driverstats"
 	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
@@ -55,6 +56,9 @@ type runMetadata struct {
 	DeleteArtifactStepIDs   []string                                                `json:"deleteArtifactStepIds,omitempty"`
 	DriverStats             map[string]*driverstats.Stats                           `json:"driverStats,omitempty"`
 	DriverStatsError        string                                                  `json:"driverStatsError,omitempty"`
+	NicNodes                []results.NicNode                                       `json:"nicNodes,omitempty"`
+	NicEngines              map[string][]results.NicEngine                          `json:"nicEngines,omitempty"`
+	NicEnginesError         string                                                  `json:"nicEnginesError,omitempty"`
 	StepLifecycles          map[string]string                                       `json:"stepLifecycles,omitempty"`
 	ResultsOptions          resultsOptionsSnapshot                                  `json:"resultsOptions"`
 	CLI                     runCLIInfo                                              `json:"cli"`
@@ -205,6 +209,7 @@ func buildRunMetadata(in runMetadataInput) *runMetadata {
 		AutoTerminateSeconds: in.AutoTerminateSeconds,
 		runID:                in.Params.RunID,
 	}
+	meta.NicNodes = nicNodesMetadata(in.HostInfos, in.Params.Interfaces)
 	if in.WorkloadType == scenario.WorkloadTypeDelete {
 		meta.DeleteArtifactsVersion = constants.ResultsDeleteArtifactsVersion
 		meta.DeleteArtifactStepIDs = plannedDeleteArtifactStepIDs(expected)
@@ -230,6 +235,27 @@ func buildRunMetadata(in runMetadataInput) *runMetadata {
 	}
 
 	return meta
+}
+
+// nicNodesMetadata gives every slice the run's NIC set, in slice order: the Entry Node, then the
+// workers in host order. A run without a NIC set has none.
+func nicNodesMetadata(hostInfos []*hostparse.HostInfo, interfaces []string) []results.NicNode {
+	if len(interfaces) == 0 {
+		return nil
+	}
+	value := strings.Join(interfaces, ",")
+	nodes := make([]results.NicNode, 0, len(hostInfos))
+	for _, h := range hostInfos {
+		if h == nil {
+			continue
+		}
+		host := strings.TrimSpace(h.Host)
+		if host == "" {
+			host = strings.TrimSpace(h.Original)
+		}
+		nodes = append(nodes, results.NicNode{Node: len(nodes), Host: host, Interfaces: value})
+	}
+	return nodes
 }
 
 func plannedDeleteArtifactStepIDs(stepIDs []string) []string {

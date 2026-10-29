@@ -965,6 +965,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 					logging.LogError("auto-results", "artifact fetch failed", ferr, "base_url", baseURL, "out", root)
 					writeProgress("Results fetch encountered errors; preserving available evidence and continuing shutdown. Output: %s\n", root)
 				}
+				captureNicEngines(root, stepIDs, metadata)
 			}
 			if integrityFinalizationReady && verificationRun {
 				options := *integrityOptions[0]
@@ -2402,6 +2403,7 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 
 	// RMI Configuration Options (for distributed testing)
 	runCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
+	runCmd.Flags().String(flagInterfaces, "", "Spread each engine's connections over a NIC set: auto, or interface names, IPv4 addresses or RDMA devices (comma-separated; default S3 driver, host networking; env: SPT_INTERFACES)")
 	runCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
 	runCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
 	runCmd.Flags().Int(flagRMIRegistryPort, constants.DefaultRMIRegistryPort,
@@ -2642,6 +2644,11 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	if len(engineOverrides) > 0 {
 		params.EngineOverrides = engineOverrides
 	}
+	for _, override := range params.EngineOverrides {
+		if err := scenario.RejectInterfacesOverride(override); err != nil {
+			return scenario.Params{}, err
+		}
+	}
 	prefixShards, err := resolvePrefixShardCount(cmd, params)
 	if err != nil {
 		return scenario.Params{}, err
@@ -2831,6 +2838,24 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	}); err != nil {
 		return params, err
 	}
+	interfaces, source, err := readInterfaces(cmd)
+	if err != nil {
+		return params, err
+	}
+	if err := scenario.ValidateInterfaces(interfaces, scenario.InterfacesTarget{
+		Source:            source,
+		S3Driver:          params.S3Driver,
+		WorkloadType:      workloadType,
+		EndpointSelection: params.EndpointSelection,
+	}); err != nil {
+		return params, err
+	}
+	if len(interfaces) > 0 {
+		if err := rejectSingleNicRdmaSettings(cmd, source); err != nil {
+			return params, err
+		}
+	}
+	params.Interfaces = interfaces
 	return params, nil
 }
 

@@ -21,7 +21,7 @@ type NicPathsEvidence struct {
 	// Nodes counts the files fetched or expected.
 	Nodes int
 	// Missing are the expected files that were not fetched.
-	Missing []results.NicPathsFile
+	Missing []results.NicNodeFile
 }
 
 // nicPathsEvidence returns the step's per-path CSVs, or nil when it has none and

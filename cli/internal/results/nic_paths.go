@@ -27,8 +27,9 @@ type NicNode struct {
 	Source     string `json:"source,omitempty"`
 }
 
-// NicPathsFile is the per-path CSV one node is expected to write for a step.
-type NicPathsFile struct {
+// NicNodeFile is a NIC file one node is expected to write for a step: its per-path CSV
+// or its NIC-set report.
+type NicNodeFile struct {
 	Name string
 	Node int
 	Host string
@@ -39,20 +40,37 @@ func NicPathsNodeFileName(stepID string, node int) string {
 	return fmt.Sprintf("%s.nic.paths.node-%03d.csv", stepID, node)
 }
 
+// NicSetNodeFileName names node's copy of the step's NIC-set report on the Entry Node.
+func NicSetNodeFileName(stepID string, node int) string {
+	return fmt.Sprintf("%s.nic.set.node-%03d.json", stepID, node)
+}
+
 // ExpectedNicPathsFiles lists the per-path CSVs a step should have: one for each of
 // its first participants nodes whose value is not none. A single participant writes
 // the canonical file; several each write a node-NNN copy.
-func ExpectedNicPathsFiles(stepID string, nodes []NicNode, participants int) []NicPathsFile {
-	var out []NicPathsFile
+func ExpectedNicPathsFiles(stepID string, nodes []NicNode, participants int) []NicNodeFile {
+	return expectedNicFiles(stepID, nodes, participants, constants.ResultsArtifactSuffixNicPaths, NicPathsNodeFileName)
+}
+
+// ExpectedNicSetFiles lists the NIC-set reports a step should have, by the rules of
+// ExpectedNicPathsFiles.
+func ExpectedNicSetFiles(stepID string, nodes []NicNode, participants int) []NicNodeFile {
+	return expectedNicFiles(stepID, nodes, participants, constants.ResultsArtifactSuffixNicSet, NicSetNodeFileName)
+}
+
+func expectedNicFiles(stepID string, nodes []NicNode, participants int, suffix string,
+	nodeFileName func(string, int) string,
+) []NicNodeFile {
+	var out []NicNodeFile
 	for _, node := range nodes {
 		if node.Node < 0 || node.Node >= participants || node.Interfaces == "" || node.Interfaces == nicInterfacesNone {
 			continue
 		}
-		name := stepID + "." + constants.ResultsArtifactSuffixNicPaths
+		name := stepID + "." + suffix
 		if participants > 1 {
-			name = NicPathsNodeFileName(stepID, node.Node)
+			name = nodeFileName(stepID, node.Node)
 		}
-		out = append(out, NicPathsFile{Name: name, Node: node.Node, Host: node.Host})
+		out = append(out, NicNodeFile{Name: name, Node: node.Node, Host: node.Host})
 	}
 	return out
 }
@@ -122,20 +140,22 @@ func metricsTotalsNodeCount(path string) (int, error) {
 	return count, nil
 }
 
-// recordMissingNicPaths adds a missing entry for each per-path CSV the step was
-// expected to write and did not. It never makes the step fail.
-func (f *Fetcher) recordMissingNicPaths(sm *StepManifest, nodes []NicNode) {
+// recordMissingNicFiles adds a missing entry for each per-path CSV and NIC-set report
+// the step was expected to write and did not. It never makes the step fail.
+func (f *Fetcher) recordMissingNicFiles(sm *StepManifest, nodes []NicNode) {
 	if len(nodes) == 0 || !hasSuccessfulGenericTotals(*sm) {
 		return
 	}
 	totals := filepath.Join(f.OutputDir, sm.StepID+"."+constants.ResultsArtifactSuffixMetricsTotal)
 	participants, err := metricsTotalsNodeCount(totals)
 	if err != nil {
-		logging.LogWarn("results", "cannot tell which NIC paths files to expect",
+		logging.LogWarn("results", "cannot tell which NIC files to expect",
 			"step", sm.StepID, "error", err)
 		return
 	}
-	for _, expected := range ExpectedNicPathsFiles(sm.StepID, nodes, participants) {
+	expected := append(ExpectedNicPathsFiles(sm.StepID, nodes, participants),
+		ExpectedNicSetFiles(sm.StepID, nodes, participants)...)
+	for _, expected := range expected {
 		reason := fmt.Sprintf("expected from node-%03d (%s); not listed in index.json", expected.Node, expected.Host)
 		index := -1
 		for i := range sm.Files {

@@ -3,6 +3,7 @@ package replay
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -92,7 +93,7 @@ func extractJSEndpointSelections(source string, vars map[string]string, archived
 	code := jsCodeMask(source)
 	var diagnostics []Diagnostic
 	var replacements []jsReplacement
-	for _, occurrence := range jsEndpointOccurrences(code) {
+	for _, occurrence := range jsKeyOccurrences(code, legacyKeyEndpoint) {
 		declaration, valueEnd, err := parseJSEndpointValue(code, occurrence, vars)
 		if err != nil {
 			diagnostics = append(diagnostics, endpointSelectionError("archived scenario "+err.Error()))
@@ -110,8 +111,9 @@ func extractJSEndpointSelections(source string, vars map[string]string, archived
 	return applyJSReplacements(source, replacements), diagnostics
 }
 
-// jsEndpointOccurrence is an object key named endpoint and the object that contains it.
-type jsEndpointOccurrence struct {
+// jsKeyOccurrence is an object key and the object that contains it.
+type jsKeyOccurrence struct {
+	key         string // the key's name
 	keyStart    int    // offset of the key
 	valueStart  int    // offset of the value after the colon
 	parentKey   string // key whose value is the containing object; empty if there is none
@@ -119,25 +121,25 @@ type jsEndpointOccurrence struct {
 	parentClose int    // offset of the containing object's closing brace; -1 if it never closes
 }
 
-// jsEndpointOccurrences walks code, which must have its comments masked, as tokens and reports
-// every key named endpoint with its containing object. Strings are skipped as whole tokens, so
+// jsKeyOccurrences walks code, which must have its comments masked, as tokens and reports every
+// key with one of the names, with its containing object. Strings are skipped as whole tokens, so
 // their contents never count as keys.
-func jsEndpointOccurrences(code string) []jsEndpointOccurrence {
+func jsKeyOccurrences(code string, names ...string) []jsKeyOccurrence {
 	type frame struct {
 		key         string
 		open        int
-		occurrences []int // indexes of the endpoint keys directly inside this object
+		occurrences []int // indexes of the reported keys directly inside this object
 	}
 	var stack []frame
-	var occurrences []jsEndpointOccurrence
+	var occurrences []jsKeyOccurrence
 	pendingKey := "" // a key whose colon was just read, until its value starts
 	colonAfter := func(end int) (int, bool) {
 		j := skipJSWhitespace(code, end)
 		return j, j < len(code) && code[j] == ':'
 	}
 	keyRead := func(name string, start, colon int) {
-		if name == "endpoint" {
-			occurrence := jsEndpointOccurrence{keyStart: start, valueStart: skipJSWhitespace(code, colon+1), parentOpen: -1, parentClose: -1}
+		if slices.Contains(names, name) {
+			occurrence := jsKeyOccurrence{key: name, keyStart: start, valueStart: skipJSWhitespace(code, colon+1), parentOpen: -1, parentClose: -1}
 			if len(stack) > 0 {
 				parent := &stack[len(stack)-1]
 				occurrence.parentKey, occurrence.parentOpen = parent.key, parent.open
@@ -197,7 +199,7 @@ type jsEndpointDeclaration struct {
 }
 
 // parseJSEndpointValue evaluates one endpoint declaration and returns the offset after its value.
-func parseJSEndpointValue(code string, occurrence jsEndpointOccurrence, vars map[string]string) (jsEndpointDeclaration, int, error) {
+func parseJSEndpointValue(code string, occurrence jsKeyOccurrence, vars map[string]string) (jsEndpointDeclaration, int, error) {
 	if occurrence.parentKey != "net" || occurrence.parentClose < 0 || occurrence.valueStart >= len(code) || code[occurrence.valueStart] != '{' {
 		return jsEndpointDeclaration{}, 0, fmt.Errorf("declares storage.net.endpoint in a form replay cannot evaluate, " +
 			"such as a variable reference or a key outside a \"net\" object; write it as an object literal inside " +

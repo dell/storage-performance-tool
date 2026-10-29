@@ -34,6 +34,8 @@ func TestParseInterfacesRejects(t *testing.T) {
 		{"ens2np0;reboot", `--interfaces entry "ens2np0;reboot" is not an interface name, IPv4 address or RDMA device`},
 		{"$(id)", "is not an interface name"},
 		{"eth 0", "is not an interface name"},
+		{"auto,ens2np0", `--interfaces "auto,ens2np0": auto must be the only entry`},
+		{"ens2np0, auto", "auto must be the only entry"},
 	}
 	for _, tt := range tests {
 		_, err := ParseInterfaces(tt.value)

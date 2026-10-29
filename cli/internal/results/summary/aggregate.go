@@ -99,20 +99,23 @@ type HostSummary struct {
 
 // WorkloadSummary records key scenario parameters.
 type WorkloadSummary struct {
-	Type              string
-	ObjectSizeBytes   int64
-	ObjectSizeMiB     float64
-	ObjectSizeGiB     float64
-	ObjectSizeHuman   string
-	ObjectCount       int64
-	Threads           int
-	Endpoints         []string
-	Bucket            string
-	Prefix            string
-	DurationRequest   string
-	CleanupEnabled    bool
-	KeepScenario      bool
-	SliceEndpoints    bool
+	Type            string
+	ObjectSizeBytes int64
+	ObjectSizeMiB   float64
+	ObjectSizeGiB   float64
+	ObjectSizeHuman string
+	ObjectCount     int64
+	Threads         int
+	Endpoints       []string
+	Bucket          string
+	Prefix          string
+	DurationRequest string
+	CleanupEnabled  bool
+	KeepScenario    bool
+	SliceEndpoints  bool
+	// Interfaces is the run's --interfaces value; EventLoops describes its NIC-set reports.
+	Interfaces        []string
+	EventLoops        string
 	MixedDistribution MixedDistribution
 	// S3Driver is the stored S3 driver selection; empty for a custom scenario and for results
 	// stored before the selection was kept.
@@ -366,6 +369,8 @@ func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 		CleanupEnabled:    params.Cleanup,
 		KeepScenario:      params.KeepScenario,
 		SliceEndpoints:    params.SliceEndpoints,
+		Interfaces:        append([]string(nil), params.Interfaces...),
+		EventLoops:        nicEventLoops(data.Params.NicEngines, data.StepOrder),
 		MixedDistribution: mixedDistributionFromParams(workloadType, params),
 		S3Driver:          params.S3Driver,
 	}

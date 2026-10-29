@@ -28,7 +28,7 @@ const (
 	fileStatusOK      = "ok"
 )
 
-var integrityNodeSourcePattern = regexp.MustCompile(`^(written|verify-input|verified|integrity\.failures|integrity\.performance|multipart\.lifecycle|operation\.lifecycle|range\.read|nic\.paths|delete\.metrics\.total|delete\.requests|delete\.objects|delete\.verification|items)\.node-[0-9]{3}\.csv$`)
+var integrityNodeSourcePattern = regexp.MustCompile(`^(?:(written|verify-input|verified|integrity\.failures|integrity\.performance|multipart\.lifecycle|operation\.lifecycle|range\.read|nic\.paths|delete\.metrics\.total|delete\.requests|delete\.objects|delete\.verification|items)\.node-[0-9]{3}\.csv|nic\.set\.node-[0-9]{3}\.json)$`)
 
 // ArtifactSpec defines a log endpoint and its output filename suffix.
 type ArtifactSpec struct {
@@ -43,6 +43,8 @@ var DefaultArtifacts = []ArtifactSpec{
 	{Loggers: []string{"OperationLifecycle"}, Suffix: constants.ResultsArtifactSuffixOperationLifecycle, Required: false},
 	// Per-path CSV of a single engine with a NIC set; distributed steps keep one copy per node.
 	{Loggers: []string{"NicPaths"}, Suffix: constants.ResultsArtifactSuffixNicPaths, Required: false},
+	// NIC-set report of a single engine (D64); distributed steps keep one copy per node.
+	{Loggers: []string{"NicSet"}, Suffix: constants.ResultsArtifactSuffixNicSet, Required: false},
 	{Loggers: []string{"metrics.FileTotal"}, Suffix: constants.ResultsArtifactSuffixMetricsTotal, Required: true},
 	{Loggers: []string{"Config"}, Suffix: constants.ResultsArtifactSuffixConfig, Required: true},
 	{Loggers: []string{"Cli"}, Suffix: constants.ResultsArtifactSuffixCLIArgs, Required: false},
@@ -196,7 +198,7 @@ func (f *Fetcher) FetchArtifactsForSteps(ctx context.Context, stepIDs []string) 
 	haveAnyTotals := false
 	for _, stepID := range stepIDs {
 		sm := f.fetchStep(ctx, stepID)
-		f.recordMissingNicPaths(&sm, nicNodes)
+		f.recordMissingNicFiles(&sm, nicNodes)
 		man.Steps = append(man.Steps, sm)
 		haveAnyTotals = haveAnyTotals || hasSuccessfulGenericTotals(sm)
 	}
