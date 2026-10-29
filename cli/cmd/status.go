@@ -41,7 +41,8 @@ operators to spot stalled or unhealthy nodes while a workload is running.`,
 			if err := initializeLogger(); err != nil {
 				return err
 			}
-			return applyEnvDefaultsToVerifyFlags(cmd)
+			// Status reads only HOSTS: it has no NIC, endpoint or thread flags to fill.
+			return applyEnvHostsDefault(cmd)
 		},
 		RunE: runStatus,
 	}
