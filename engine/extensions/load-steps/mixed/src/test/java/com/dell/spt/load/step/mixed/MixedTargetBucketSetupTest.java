@@ -127,6 +127,96 @@ class MixedTargetBucketSetupTest {
 		assertTrue(control.driverCreated, "setup passed and the step went on to start its slice");
 	}
 
+	@Test
+	void seededMixedWithAListChecksItsListedBucketsWithoutCreatingAny() throws Exception {
+		final var config = listConfig(pool("/ps-eu/a", "/ps-ap/b"), "ps-eu", "ps-us", "ps-ap");
+		config.val("storage-targetBucket-provision", false);
+		control.check("ps-ap", TargetBucketResponse.ofHttpStatus(403));
+
+		final var failure = startFailure(config);
+
+		assertEquals(Category.EXECUTION, failure.category(), failure.getMessage());
+		assertEquals(List.of("HEAD ps-eu", "HEAD ps-us", "HEAD ps-ap"), control.requests);
+	}
+
+	@Test
+	void externalMixedWithAListCreatesMissingListedBucketsAndOnlyChecksDisjointInputBuckets() throws Exception {
+		final var config = listConfig(pool("/read-source/a", "/read-source/b"), "ps-eu", "PS_US");
+		config.val("load-op-delete-input-file", items("deletes.csv", "/delete-source/x").toString());
+		control.check("ps-eu", TargetBucketResponse.notFound());
+		control.check("PS_US", TargetBucketResponse.notFound());
+		control.check("delete-source", TargetBucketResponse.ofHttpStatus(403));
+
+		final var failure = startFailure(config);
+
+		assertEquals(List.of(
+						"HEAD ps-eu", "PUT ps-eu", "HEAD PS_US", "PUT PS_US", "HEAD read-source", "HEAD delete-source"),
+						control.requests, "the placeholder bucket is never contacted");
+		assertTrue(failure.getMessage().contains("\"delete-source\" is not accessible (HTTP 403)"), failure.getMessage());
+	}
+
+	@Test
+	void aMissingDeleteOnlyBucketFailsBeforeAnySliceStartsWithAList() throws Exception {
+		final var config = listConfig(pool("/ps-eu/a"), "ps-eu", "ps-us");
+		config.val("load-op-delete-input-file", items("deletes.csv", "/delete-source/x").toString());
+		control.check("delete-source", TargetBucketResponse.notFound());
+
+		final var failure = startFailure(config);
+
+		assertEquals(List.of("HEAD ps-eu", "HEAD ps-us", "HEAD delete-source"), control.requests);
+		assertTrue(failure.getMessage().contains("\"delete-source\" does not exist; this step uses existing objects only"),
+						failure.getMessage());
+		assertFalse(control.driverCreated, "no slice may start after a setup failure");
+	}
+
+	@Test
+	void anInputBucketThatIsAListedNameIsCreatedAsAMemberNotJustChecked() throws Exception {
+		final var config = listConfig(pool("/ps-us/a"), "ps-eu", "ps-us");
+		control.check("ps-us", TargetBucketResponse.notFound());
+
+		startFailure(config);
+
+		assertEquals(List.of("HEAD ps-eu", "HEAD ps-us", "PUT ps-us"), control.requests);
+	}
+
+	@Test
+	void aMixedStepWithAListAndAnInputPathIsRejectedBeforeAnyRequest() throws Exception {
+		final var config = listConfig(pool("/read-source/a"), "ps-eu", "ps-us");
+		config.val("item-input-path", "/source");
+
+		final var failure = startFailure(config);
+
+		assertEquals(Category.CONFIGURATION, failure.category());
+		assertTrue(failure.getMessage().contains("storage.targetBucket.names (2 names)"), failure.getMessage());
+		assertTrue(failure.getMessage().contains("item.input.path in a mixed step"), failure.getMessage());
+		assertTrue(control.requests.isEmpty(), control.requests.toString());
+	}
+
+	@Test
+	void aListAndACountAboveOneAreRejectedBeforeAnyRequest() throws Exception {
+		final var config = listConfig(pool("/read-source/a"), "ps-eu", "ps-us");
+		config.val("storage-targetBucket-count", 4);
+
+		final var failure = startFailure(config);
+
+		assertEquals(Category.CONFIGURATION, failure.category());
+		assertTrue(failure.getMessage().contains("cannot be combined with storage.targetBucket.count 4"),
+						failure.getMessage());
+		assertTrue(control.requests.isEmpty(), control.requests.toString());
+	}
+
+	@Test
+	void aOneNameListKeepsTodaysSingleBucketMixedSetup() throws Exception {
+		final var config = listConfig(pool("/read-source/a"), "ps-eu");
+		config.val("load-op-delete-input-file", items("deletes.csv", "/delete-source/x").toString());
+		control.check("delete-source", TargetBucketResponse.ofHttpStatus(403));
+
+		assertThrows(Exception.class, () -> start(config));
+
+		assertEquals(List.of("HEAD ps-eu", "HEAD read-source"), control.requests);
+		assertTrue(control.driverCreated, "setup passed and the step went on to start its slice");
+	}
+
 	private RunTerminalException startFailure(final Config config) {
 		return assertInstanceOf(RunTerminalException.class, assertThrows(Exception.class, () -> start(config)));
 	}
@@ -151,6 +241,13 @@ class MixedTargetBucketSetupTest {
 		config.val("item-output-path", "/bench");
 		config.val("item-input-file", pool.toString());
 		config.val("item-output-file", home.resolve("put-remaining.csv").toString());
+		return config;
+	}
+
+	private Config listConfig(final Path pool, final String... names) throws Exception {
+		final var config = mixedConfig(1, pool);
+		config.val("storage-targetBucket-names", List.of(names));
+		config.val("item-output-path", "/placeholder");
 		return config;
 	}
 

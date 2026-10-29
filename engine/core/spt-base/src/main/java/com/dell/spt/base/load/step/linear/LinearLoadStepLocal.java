@@ -128,6 +128,7 @@ public class LinearLoadStepLocal
 									.loadOperationsOutput(driver)
 									.authConfig(storageConfig.configVal("auth"))
 									.targetBucketCount(TargetBucketSet.countOfStorage(storageConfig))
+									.targetBucketNames(TargetBucketSet.namesOfStorage(storageConfig))
 									.originIndex(0);
 					if (rateLimit > 0) {
 						generatorBuilder.addThrottle(new PacedRateThrottle(rateLimit));

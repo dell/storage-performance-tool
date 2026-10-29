@@ -3,6 +3,7 @@ package com.dell.spt.base.load.generator;
 import static com.dell.spt.base.Constants.APP_NAME;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -33,12 +34,15 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.apache.commons.math3.stat.Frequency;
 
@@ -170,6 +174,11 @@ public class LoadGeneratorBuilderImplTest {
 	}
 
 	private static List<String> targetBucketDestinations(final int count, final String outputPath) throws Exception {
+		return targetBucketDestinations(count, List.of(), outputPath);
+	}
+
+	private static List<String> targetBucketDestinations(
+					final int count, final List<String> names, final String outputPath) throws Exception {
 		final var options = baseSingleOpOptions();
 		options.put("item-output-path", outputPath);
 		options.put("item-naming-type", "serial");
@@ -182,6 +191,7 @@ public class LoadGeneratorBuilderImplTest {
 						final LoadGenerator loadGenerator = new LoadGeneratorBuilderImpl()
 										.authConfig(config.configVal("storage-auth"))
 										.targetBucketCount(count)
+										.targetBucketNames(names)
 										.itemConfig(config.configVal("item"))
 										.itemFactory((ItemFactory) new DataItemFactoryImpl())
 										.itemType(ItemType.DATA)
@@ -210,6 +220,66 @@ public class LoadGeneratorBuilderImplTest {
 	@Test
 	public void oneTargetBucketKeepsTheOutputPathAsConfigured() throws Exception {
 		assertEquals(List.of("test-bucket"), targetBucketDestinations(1, "test-bucket").stream().distinct().toList());
+	}
+
+	@Test
+	public void aBucketListSpreadsNewObjectsEvenlyOverItsNamesInOrder() throws Exception {
+		final var names = List.of("ps-eu", "PS_US", "ps-ap", "ps-sa");
+		final var destinations = targetBucketDestinations(4, names, "/placeholder/prefix");
+
+		final Map<String, Long> perMember = destinations.stream()
+						.collect(Collectors.groupingBy(path -> path, Collectors.counting()));
+		assertEquals(Map.of(
+						"/ps-eu/prefix", 10L, "/PS_US/prefix", 10L, "/ps-ap/prefix", 10L, "/ps-sa/prefix", 10L),
+						perMember);
+		final var members = names.stream().map(name -> "/" + name + "/prefix").toList();
+		for (int i = 1; i < destinations.size(); i++) {
+			assertEquals(members.get((members.indexOf(destinations.get(i - 1)) + 1) % members.size()),
+							destinations.get(i), "serial ids walk the members in list order, operation " + i);
+		}
+	}
+
+	@Test
+	public void aBucketListOfTwoUsesTheListAndNotTheGeneratedNames() throws Exception {
+		final var destinations = targetBucketDestinations(2, List.of("alpha", "beta"), "/bench/prefix");
+
+		assertEquals(Set.of("/alpha/prefix", "/beta/prefix"), new HashSet<>(destinations));
+	}
+
+	@Test
+	public void aOneNameBucketListReplacesOnlyTheBucketSegmentOfTheOutputPath() throws Exception {
+		assertEquals(List.of("/ps-eu/prefix"),
+						targetBucketDestinations(1, List.of("ps-eu"), "/placeholder/prefix").stream().distinct().toList());
+		assertEquals(List.of("ps-eu"),
+						targetBucketDestinations(1, List.of("ps-eu"), "test-bucket").stream().distinct().toList());
+		assertEquals(List.of("test-bucket"),
+						targetBucketDestinations(1, List.of("test-bucket"), "test-bucket").stream().distinct().toList(),
+						"a placeholder equal to the name is exactly today's single-bucket path");
+	}
+
+	@Test
+	public void aBucketListRejectsACreateOfSuppliedItemsButAOneNameListDoesNot() {
+		final var config = (Config) new BasicConfig("-", CONFIG_SCHEMA);
+		baseSingleOpOptions().forEach(config::val);
+		final Function<List<String>, LoadGeneratorBuilderImpl<?, ?, ?>> builder = names -> (LoadGeneratorBuilderImpl<?, ?, ?>) new LoadGeneratorBuilderImpl()
+						.authConfig(config.configVal("storage-auth"))
+						.targetBucketCount(names.size())
+						.targetBucketNames(names)
+						.itemConfig(config.configVal("item"))
+						.itemFactory((ItemFactory) new DataItemFactoryImpl())
+						.itemType(ItemType.DATA)
+						.loadConfig(config.configVal("load"))
+						.loadOperationsOutput(new LimitedQueueBuffer<>(new ArrayBlockingQueue<>(1)))
+						.itemInput(new com.github.akurilov.commons.io.collection.ListInput<>(
+										List.of(new DataItemImpl("/ps-eu/existing", 5, 1024))))
+						.originIndex(0);
+
+		final var failure = assertThrows(IllegalConfigurationException.class,
+						() -> builder.apply(List.of("ps-eu", "ps-us")).build());
+
+		assertTrue(failure.getMessage().contains("storage.targetBucket.names (2 names)"), failure.getMessage());
+		assertTrue(failure.getMessage().contains("applies only to newly generated objects"), failure.getMessage());
+		assertDoesNotThrow(() -> builder.apply(List.of("ps-eu")).build().close());
 	}
 
 	@Test

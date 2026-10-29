@@ -24,6 +24,8 @@ import org.junit.jupiter.api.Test;
 class TargetBucketPlacementTest {
 
 	private static final List<String> FOUR = TargetBucketSet.memberPaths("/bench", 4);
+	private static final List<String> LISTED_NAMES = List.of("ps-eu", "PS_US", "ps-ap");
+	private static final List<String> LISTED = TargetBucketSet.memberPaths("/placeholder/p", 3, LISTED_NAMES);
 
 	@SuppressWarnings({"rawtypes", "unchecked"
 	})
@@ -179,6 +181,66 @@ class TargetBucketPlacementTest {
 		for (final Object part : composite.subOperations()) {
 			assertEquals("/bench-2", ((Operation<?>) part).dstPath());
 		}
+	}
+
+	@Test
+	void aListedSetPlacesAnItemInTheNameAtItsIndexInListOrder() throws Exception {
+		final var builder = createBuilder(LISTED, 0);
+		final var batch = new ArrayList<DataOperation<DataItem>>();
+		final var items = new ArrayList<DataItem>();
+		for (long id = 0; id < 7; id++) {
+			items.add(item(id));
+		}
+
+		builder.buildOps(items, batch);
+
+		for (int i = 0; i < 7; i++) {
+			final var expected = "/" + LISTED_NAMES.get(i % 3) + "/p";
+			assertEquals(expected, batch.get(i).dstPath());
+			assertEquals(expected, builder.buildOp(items.get(i)).dstPath());
+		}
+	}
+
+	@Test
+	void aListedSetUsesTheSamePlacementFunctionWithShards() throws Exception {
+		final int shards = 64;
+		final var builder = createBuilder(LISTED, shards);
+
+		for (final long id : new long[]{0, 63, 64, 127, 128, 255, 1000, -1
+		}) {
+			assertEquals("/" + LISTED_NAMES.get(TargetBucketSet.memberIndex(id, shards, 3)) + "/p",
+							builder.buildOp(item(id)).dstPath(), "id " + id);
+		}
+		assertEquals("/PS_US/p", builder.buildOp(item(64)).dstPath(), "ids of one shard cycle share a member");
+	}
+
+	@Test
+	void aListedSetKeepsMultipartPartsInTheirParentsBucket() throws Exception {
+		final var builder = createBuilder(LISTED, 0);
+		builder.sizeThreshold(1024);
+		final var parent = builder.buildOp(new DataItemImpl("big", 4, 4096 + 100));
+
+		final var composite = assertInstanceOf(CompositeDataOperation.class, parent);
+		assertEquals("/PS_US/p", parent.dstPath());
+		assertEquals(5, composite.subOperations().size());
+		for (final Object part : composite.subOperations()) {
+			assertEquals("/PS_US/p", ((Operation<?>) part).dstPath());
+		}
+	}
+
+	@Test
+	void existingObjectsKeepTheirRecordedBucketWhateverItsName() throws Exception {
+		@SuppressWarnings({"rawtypes", "unchecked"
+		})
+		final DataOperationsBuilderImpl<DataItem, DataOperation<DataItem>> read = new DataOperationsBuilderImpl(0);
+		read.opType(OpType.READ);
+		read.inputPath("/placeholder");
+
+		final var recorded = read.buildOp(new DataItemImpl("/PS_US/prefix/key", 99, 1024));
+		final var manifest = read.buildOp(new IntegrityManifestDataItem("ps-ap", "prefix/key", 1024, null));
+
+		assertEquals("/PS_US/prefix", recorded.srcPath());
+		assertEquals("/ps-ap", manifest.srcPath());
 	}
 
 	@Test

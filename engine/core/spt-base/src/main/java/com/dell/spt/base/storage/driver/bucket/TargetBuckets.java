@@ -116,10 +116,10 @@ final class TargetBuckets {
 
 	/**
 	 * Lists the context's distinct target buckets in first-use order: the output path's bucket, or
-	 * with more than one target bucket each member of the set, when the context writes there; the
-	 * input path's bucket; and the buckets named by its item input file and, for a mixed step with
-	 * more than one target bucket, by its DELETE input file. Buckets an input names are used as
-	 * written and only checked.
+	 * with more than one target bucket or a bucket list each member of the set, when the context
+	 * writes there; the input path's bucket; and the buckets named by its item input file and, for
+	 * a mixed step with more than one target bucket, by its DELETE input file. Buckets an input
+	 * names are used as written and only checked.
 	 *
 	 * @throws RunTerminalException when a bucket segment is not a literal name, a member name is
 	 *     invalid, or the credentials or items that name the buckets cannot be read
@@ -128,14 +128,20 @@ final class TargetBuckets {
 		final var targets = new LinkedHashMap<Key, Target>();
 		final var credentials = credentialsByPath(ctxConfig);
 		final var count = TargetBucketSet.count(ctxConfig);
+		final var names = TargetBucketSet.names(ctxConfig);
 		if (writes(ctxConfig, step, count)) {
 			final var outputPath = ctxConfig.stringVal(OUTPUT_PATH);
-			if (outputPath != null && !outputPath.isEmpty()) {
+			if (!names.isEmpty()) {
+				// The output path's bucket segment is only a placeholder: each member path replaces it.
+				for (final var memberPath : TargetBucketSet.memberPaths(outputPath, count, names)) {
+					add(targets, bucketSegment(memberPath), true, provision, credentials, memberPath);
+				}
+			} else if (outputPath != null && !outputPath.isEmpty()) {
 				final var bucket = literalBucket("item.output.path", outputPath);
 				if (count == 1) {
 					add(targets, bucket, true, provision, credentials, outputPath);
 				} else {
-					for (final var memberPath : TargetBucketSet.memberPaths(outputPath, count)) {
+					for (final var memberPath : TargetBucketSet.memberPaths(outputPath, count, names)) {
 						add(targets, bucketSegment(memberPath), true, provision, credentials, memberPath);
 					}
 				}

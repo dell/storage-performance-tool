@@ -38,6 +38,19 @@ public interface LoadGeneratorBuilder<I extends Item, O extends Operation<I>, T 
 		return this;
 	}
 
+	/**
+	 * Sets the names of the target buckets, {@code storage.targetBucket.names}, that a CREATE of new
+	 * data items writes into, in member order; empty means the set is generated from the count. A
+	 * builder without target bucket sets rejects a non-empty list.
+	 */
+	default LoadGeneratorBuilder<I, O, T> targetBucketNames(final java.util.List<String> names) {
+		if (names != null && !names.isEmpty()) {
+			throw new UnsupportedOperationException(
+							getClass().getName() + " supports one target bucket only, not a list of " + names.size());
+		}
+		return this;
+	}
+
 	LoadGeneratorBuilder<I, O, T> loadOperationsOutput(Output<O> storageDriver);
 
 	LoadGeneratorBuilder<I, O, T> itemInput(final Input<I> itemInput);

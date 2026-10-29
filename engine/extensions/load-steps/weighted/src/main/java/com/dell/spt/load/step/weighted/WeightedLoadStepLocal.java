@@ -159,6 +159,7 @@ public class WeightedLoadStepLocal extends LoadStepLocalBase {
 										.loadOperationsOutput(driver)
 										.authConfig(storageConfig.configVal("auth"))
 										.targetBucketCount(TargetBucketSet.countOfStorage(storageConfig))
+										.targetBucketNames(TargetBucketSet.namesOfStorage(storageConfig))
 										.originIndex(originIndex)
 										.addThrottle(weightThrottle);
 						if (rateLimit > 0) {

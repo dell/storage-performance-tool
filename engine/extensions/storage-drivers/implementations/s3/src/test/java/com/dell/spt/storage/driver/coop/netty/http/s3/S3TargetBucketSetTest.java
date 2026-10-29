@@ -40,6 +40,10 @@ final class S3TargetBucketSetTest {
 
 	private static final int ITEM_SIZE = EndpointSelectionTestSupport.ITEM_SIZE;
 	private static final List<String> MEMBERS = TargetBucketSet.memberPaths("/bench/prefix", 4);
+	private static final List<String> GENERATED_NAMES = List.of("bench-0", "bench-1", "bench-2", "bench-3");
+	/** A listed set, whose names no generated set could contain. */
+	private static final List<String> LISTED_NAMES = List.of("ps-eu", "PS_US", "ps-ap", "ps-sa");
+	private static final List<String> LISTED = TargetBucketSet.memberPaths("/placeholder/prefix", 4, LISTED_NAMES);
 
 	private record Captured(String method, String path, String query) {}
 
@@ -75,11 +79,31 @@ final class S3TargetBucketSetTest {
 		objectRequestsAddressTheMemberTheirOperationNames("per-request-dns");
 	}
 
+	@Test
+	void objectRequestsAddressTheListedBucketsWithDefaultSelection() throws Exception {
+		objectRequestsAddressTheMemberTheirOperationNames("default", LISTED, LISTED_NAMES);
+	}
+
+	@Test
+	void objectRequestsAddressTheListedBucketsWithRoundRobin() throws Exception {
+		objectRequestsAddressTheMemberTheirOperationNames("round-robin", LISTED, LISTED_NAMES);
+	}
+
+	@Test
+	void objectRequestsAddressTheListedBucketsWithPerRequestDns() throws Exception {
+		objectRequestsAddressTheMemberTheirOperationNames("per-request-dns", LISTED, LISTED_NAMES);
+	}
+
 	private void objectRequestsAddressTheMemberTheirOperationNames(final String mode) throws Exception {
+		objectRequestsAddressTheMemberTheirOperationNames(mode, MEMBERS, GENERATED_NAMES);
+	}
+
+	private void objectRequestsAddressTheMemberTheirOperationNames(
+					final String mode, final List<String> members, final List<String> names) throws Exception {
 		final var driver = driver(mode);
 		final var created = new ArrayList<Operation<?>>();
 		for (long id = 0; id < 8; id++) {
-			final var op = build(OpType.CREATE, new DataItemImpl("k" + id, id, ITEM_SIZE), Long.MAX_VALUE);
+			final var op = build(OpType.CREATE, new DataItemImpl("k" + id, id, ITEM_SIZE), Long.MAX_VALUE, members);
 			assertTrue(driver.driver.put(op));
 			final var result = driver.results.await();
 			assertEquals(Operation.Status.SUCC, result.status(), result::toString);
@@ -89,13 +113,13 @@ final class S3TargetBucketSetTest {
 			for (final var result : created) {
 				final var item = (DataItem) result.item();
 				assertTrue(driver.driver.put(build(opType, new DataItemImpl(item.name(), item.offset(), ITEM_SIZE),
-								Long.MAX_VALUE)));
+								Long.MAX_VALUE, members)));
 				assertEquals(Operation.Status.SUCC, driver.results.await().status());
 			}
 		}
 
 		for (long id = 0; id < 8; id++) {
-			final var object = "/bench-" + (id % 4) + "/prefix/k" + id;
+			final var object = "/" + names.get((int) (id % names.size())) + "/prefix/k" + id;
 			assertEquals(1, count("PUT", object), object + " " + requests);
 			assertEquals(1, count("GET", object), object + " " + requests);
 			assertEquals(1, count("DELETE", object), object + " " + requests);
@@ -103,8 +127,8 @@ final class S3TargetBucketSetTest {
 		final Map<String, Long> bucketChecks = requests.stream()
 						.filter(r -> "HEAD".equals(r.method()))
 						.collect(Collectors.groupingBy(Captured::path, Collectors.counting()));
-		assertEquals(Map.of("/bench-0", 1L, "/bench-1", 1L, "/bench-2", 1L, "/bench-3", 1L), bucketChecks,
-						"each member is checked once, on first use; the base never");
+		assertEquals(names.stream().collect(Collectors.toMap(name -> "/" + name, name -> 1L)), bucketChecks,
+						"each member is checked once, on first use; the base or placeholder never");
 	}
 
 	@Test
@@ -151,9 +175,48 @@ final class S3TargetBucketSetTest {
 		assertTrue(requests.stream().allMatch(r -> r.path().startsWith("/bench-2")), requests::toString);
 	}
 
+	@Test
+	void multipartRequestsAddressTheirParentsListedBucket() throws Exception {
+		final var driver = driver("default");
+		final var op = build(OpType.CREATE, new DataItemImpl("big", 5, 3L * ITEM_SIZE), ITEM_SIZE, LISTED);
+		assertInstanceOf(CompositeDataOperation.class, op);
+
+		assertTrue(driver.driver.put(op));
+		awaitRequest("POST", "uploadId");
+
+		final var object = "/PS_US/prefix/big";
+		assertTrue(requests.stream().anyMatch(r -> "POST".equals(r.method()) && object.equals(r.path())
+						&& r.query() != null && r.query().contains("uploads")), requests::toString);
+		assertEquals(3, requests.stream().filter(r -> "PUT".equals(r.method()) && object.equals(r.path())
+						&& r.query() != null && r.query().contains("partNumber")).count(), requests::toString);
+		assertTrue(requests.stream().allMatch(r -> r.path().startsWith("/PS_US")), requests::toString);
+	}
+
+	@Test
+	void anAbortedUploadIsAbortedInItsListedBucket() throws Exception {
+		completeStatus = 500;
+		final var driver = driver("default");
+
+		assertTrue(driver.driver.put(
+						build(OpType.CREATE, new DataItemImpl("big", 6, 3L * ITEM_SIZE), ITEM_SIZE, LISTED)));
+		awaitRequest("DELETE", "uploadId");
+
+		assertTrue(requests.stream().anyMatch(r -> "DELETE".equals(r.method()) && "/ps-ap/prefix/big".equals(r.path())
+						&& r.query() != null && r.query().contains("uploadId")), requests::toString);
+		assertTrue(requests.stream().allMatch(r -> r.path().startsWith("/ps-ap")), requests::toString);
+	}
+
 	@SuppressWarnings({"rawtypes", "unchecked"
 	})
 	private static Operation<DataItem> build(final OpType opType, final DataItem item, final long sizeThreshold)
+					throws IOException {
+		return build(opType, item, sizeThreshold, MEMBERS);
+	}
+
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	private static Operation<DataItem> build(
+					final OpType opType, final DataItem item, final long sizeThreshold, final List<String> members)
 					throws IOException {
 		final var builder = new DataOperationsBuilderImpl(0);
 		builder.opType(opType);
@@ -161,7 +224,7 @@ final class S3TargetBucketSetTest {
 		builder.sizeThreshold(sizeThreshold);
 		if (OpType.CREATE.equals(opType)) {
 			builder.outputPathInput(new ConstantValueInputImpl<>("/bench/prefix"));
-			builder.targetBucketMembers(MEMBERS, 0);
+			builder.targetBucketMembers(members, 0);
 		}
 		return (Operation<DataItem>) builder.buildOp(item);
 	}

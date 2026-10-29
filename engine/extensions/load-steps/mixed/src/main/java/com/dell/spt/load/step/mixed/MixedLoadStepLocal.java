@@ -453,7 +453,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 
 	/**
 	 * Creates the PUT builder. With more than one target bucket its new objects are spread over the
-	 * members of the output path's bucket set.
+	 * members of the bucket set: generated from the output path's bucket, or the listed names.
 	 */
 	static DataOperationsBuilderImpl makePutBuilder(
 					final int originIndex,
@@ -463,17 +463,20 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 					final long sizeThreshold,
 					final Config storageConfig,
 					final Config itemConfig) {
+		final int bucketCount = TargetBucketSet.countOfStorage(storageConfig);
+		final var names = TargetBucketSet.namesOfStorage(storageConfig);
+		// a one-name list is a single target bucket at that name, whatever the output path's placeholder says
+		final var singlePath = names.size() == 1 ? TargetBucketSet.memberPaths(outputPath, 1, names).get(0) : outputPath;
 		final var builder = makeOpsBuilder(
 						originIndex,
 						OpType.CREATE,
 						inputPath,
-						outputPath != null ? new ConstantValueInputImpl<>(outputPath) : null,
+						singlePath != null ? new ConstantValueInputImpl<>(singlePath) : null,
 						credInput,
 						sizeThreshold);
-		final int bucketCount = TargetBucketSet.countOfStorage(storageConfig);
 		if (bucketCount > 1) {
 			builder.targetBucketMembers(
-							TargetBucketSet.memberPaths(outputPath, bucketCount),
+							TargetBucketSet.memberPaths(outputPath, bucketCount, names),
 							ItemNameInputFactory.shardCount(itemConfig.configVal("naming")));
 		}
 		return builder;

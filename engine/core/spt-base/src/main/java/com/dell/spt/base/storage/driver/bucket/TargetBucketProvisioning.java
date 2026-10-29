@@ -121,7 +121,9 @@ public final class TargetBucketProvisioning {
 			return;
 		}
 		var context = effective;
-		if (TargetBuckets.writes(context, step, TargetBucketSet.count(context))) {
+		// A bucket list replaces the output path's bucket segment, so there is nothing to evaluate in it.
+		if (TargetBucketSet.names(context).isEmpty()
+						&& TargetBuckets.writes(context, step, TargetBucketSet.count(context))) {
 			final var owner = ctxConfig != null && definesOutputPath(ctxConfig) ? ctxConfig : config;
 			if (resolveOutputPath(owner) && ctxConfig != null) {
 				context = merge(config, ctxConfig);

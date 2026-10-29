@@ -64,6 +64,25 @@ class IntegrityOperationManifestOutputTest {
 	}
 
 	@Test
+	void createRecordsTheListedBucketNamesAsWrittenWhateverThePlaceholder() throws Exception {
+		final Path manifest = tempDir.resolve("written.csv");
+		try (final var output = new IntegrityOperationManifestOutput<>(manifest, "/placeholder", OpType.CREATE)) {
+			for (final var member : List.of("/ps-eu/prefix", "/PS_US/prefix", "/placeholder/prefix", "/ps-eu/prefix")) {
+				final var item = new DataItemImpl(member + "/key", 0, 3);
+				final var op = new OperationImpl<>(0, OpType.CREATE, item, null, member, Credential.NONE);
+				output.put(op);
+			}
+		}
+
+		final var records = CSVFormat.RFC4180.parse(java.nio.file.Files.newBufferedReader(manifest)).getRecords();
+		assertEquals(List.of("ps-eu", "prefix/key", "3", ""), records.get(1).toList());
+		assertEquals(List.of("PS_US", "prefix/key", "3", ""), records.get(2).toList());
+		assertEquals(List.of("placeholder", "prefix/key", "3", ""), records.get(3).toList(),
+						"a listed bucket that happens to equal the placeholder is recorded under its own name");
+		assertEquals(List.of("ps-eu", "prefix/key", "3", ""), records.get(4).toList());
+	}
+
+	@Test
 	void oneBucketKeepsTheConfiguredBucketAndKey() throws Exception {
 		final Path manifest = tempDir.resolve("written.csv");
 		try (final var output = new IntegrityOperationManifestOutput<>(manifest, "/bench", OpType.CREATE)) {

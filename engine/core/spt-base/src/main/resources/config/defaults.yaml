@@ -214,6 +214,10 @@ storage:
     # spreads new objects over <base>-0 ... <base>-<N-1>, where <base> is the output path's bucket.
     # Existing objects keep the bucket their input records. At most 1000.
     count: 1
+    # Names of the buckets a step writes new objects into, used as written and in this order, in
+    # place of the generated names. Empty generates the set from count. A non-empty list is the
+    # whole set, so it cannot be combined with a count above 1. At most 1000, each name distinct.
+    names: []
     provision: true
 
 aliasing:

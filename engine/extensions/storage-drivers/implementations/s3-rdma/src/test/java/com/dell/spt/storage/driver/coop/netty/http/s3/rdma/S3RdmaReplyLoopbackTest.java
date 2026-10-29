@@ -183,17 +183,34 @@ final class S3RdmaReplyLoopbackTest {
 	}
 
 	@Test
+	void aTargetBucketSetMemberIsTheBucketOfRdmaPutAndGet() throws Exception {
+		memberIsTheBucketOfRdmaPutAndGet(
+						com.dell.spt.base.storage.driver.bucket.TargetBucketSet.memberPaths("/bench/prefix", 4),
+						6, "/bench-2/prefix/k6", "/bench/");
+	}
+
+	@Test
+	void aListedBucketIsTheBucketOfRdmaPutAndGet() throws Exception {
+		// Item 5 selects the second name, which no generated set could contain.
+		memberIsTheBucketOfRdmaPutAndGet(
+						com.dell.spt.base.storage.driver.bucket.TargetBucketSet.memberPaths(
+										"/placeholder/prefix", 4, List.of("ps-eu", "PS_US", "ps-ap", "ps-sa")),
+						5, "/PS_US/prefix/k5", "/placeholder/");
+	}
+
 	@SuppressWarnings({"rawtypes", "unchecked"
 	})
-	void aTargetBucketSetMemberIsTheBucketOfRdmaPutAndGet() throws Exception {
+	private void memberIsTheBucketOfRdmaPutAndGet(
+					final List<String> members, final long id, final String expectedPath, final String absentPrefix)
+					throws Exception {
 		reply = new Reply(200, "200", null, null, true);
 		final var builder = new com.dell.spt.base.item.op.data.DataOperationsBuilderImpl(0);
 		builder.opType(OpType.CREATE);
 		builder.outputPathInput(new com.dell.spt.base.config.ConstantValueInputImpl<>("/bench/prefix"));
 		builder.credentialInput(new com.dell.spt.base.config.ConstantValueInputImpl<>(CREDENTIAL));
 		builder.sizeThreshold(Long.MAX_VALUE);
-		builder.targetBucketMembers(com.dell.spt.base.storage.driver.bucket.TargetBucketSet.memberPaths("/bench/prefix", 4), 0);
-		final var create = (Operation<DataItem>) builder.buildOp(new DataItemImpl("k6", 6, SIZE));
+		builder.targetBucketMembers(members, 0);
+		final var create = (Operation<DataItem>) builder.buildOp(new DataItemImpl("k" + id, id, SIZE));
 		try (final var driver = newDriver(true)) {
 			assertEquals(Operation.Status.SUCC, execute(driver, create).status());
 		}
@@ -201,13 +218,13 @@ final class S3RdmaReplyLoopbackTest {
 		reply = new Reply(200, "200", Integer.toString(SIZE), null, true);
 		try (final var driver = newDriver(true)) {
 			final Operation<DataItem> read = (Operation<DataItem>) (Operation<?>) new DataOperationImpl<>(
-							0, OpType.READ, new DataItemImpl(recorded, 6, SIZE), null, null, CREDENTIAL, null, 0);
+							0, OpType.READ, new DataItemImpl(recorded, id, SIZE), null, null, CREDENTIAL, null, 0);
 			assertEquals(Operation.Status.SUCC, execute(driver, read).status());
 		}
 
-		assertEquals("/bench-2/prefix/k6", onlyObjectRequest("PUT").rawPath());
-		assertEquals("/bench-2/prefix/k6", onlyObjectRequest("GET").rawPath());
-		assertTrue(requests.stream().noneMatch(r -> r.rawPath().startsWith("/bench/")), requests::toString);
+		assertEquals(expectedPath, onlyObjectRequest("PUT").rawPath());
+		assertEquals(expectedPath, onlyObjectRequest("GET").rawPath());
+		assertTrue(requests.stream().noneMatch(r -> r.rawPath().startsWith(absentPrefix)), requests::toString);
 	}
 
 	@Test
