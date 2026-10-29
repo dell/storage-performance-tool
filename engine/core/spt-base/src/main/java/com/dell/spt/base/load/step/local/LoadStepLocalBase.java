@@ -8,6 +8,7 @@ import static org.apache.logging.log4j.CloseableThreadContext.put;
 
 import com.dell.spt.base.metrics.range.RangeReadSnapshot;
 import com.dell.spt.base.metrics.range.RangeReadArtifact;
+import com.dell.spt.base.nic.NicPathsArtifact;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleCounters;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.control.run.RunTerminalException;
@@ -54,6 +55,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private List<LoadStepContext> expectedOperationLifecycleContexts = List.of();
 	private String operationLifecycleWorkerId;
 	private boolean operationLifecyclePublished;
+	private boolean nicPathsPublished;
 	private volatile IntegrityTerminalException durationStopFailure;
 	private volatile IntegrityTerminalException durationValidityFailure;
 	private volatile boolean durationAdmissionBarrierSatisfied;
@@ -153,6 +155,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		expectedOperationLifecycleContexts = List.copyOf(stepContexts);
 		operationLifecycleWorkerId = UUID.randomUUID().toString();
 		operationLifecyclePublished = false;
+		nicPathsPublished = false;
 		if (standaloneDeleteEnabled()) {
 			expectedDeleteObjectLifecycleContexts = List.copyOf(stepContexts);
 		}
@@ -639,8 +642,10 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	protected final void doStop() {
+		var contextsStopped = true;
 		if (standaloneDeleteDurationMode()) {
-			if (durationAdmissionBarrierSatisfied && durationStopFailure == null) {
+			contextsStopped = durationAdmissionBarrierSatisfied && durationStopFailure == null;
+			if (contextsStopped) {
 				captureDurationStopFailure(
 								"stop contexts",
 								() -> invokeDurationContextPhase("stop", context -> context.stop()));
@@ -648,8 +653,39 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		} else {
 			stepContexts.forEach(LoadStepContext::stop);
 		}
+		if (contextsStopped) {
+			// Otherwise close stops the contexts and publishes.
+			publishNicPaths();
+		}
 		publishOperationLifecycle();
 		super.doStop();
+	}
+
+	/**
+	 * Writes the step's per-path CSV once, when an expected context has a NIC set: after the
+	 * contexts stopped, or at close for a step whose start failed. A context without its rows is
+	 * named missing. A failure to write it warns; the file is evidence, not a step outcome.
+	 */
+	private void publishNicPaths() {
+		if (nicPathsPublished) {
+			return;
+		}
+		nicPathsPublished = true;
+		final var contexts = new ArrayList<NicPathsArtifact.Context>();
+		for (var i = 0; i < expectedOperationLifecycleContexts.size(); i++) {
+			final var context = expectedOperationLifecycleContexts.get(i);
+			if (context != null && context.hasNicSet()) {
+				contexts.add(new NicPathsArtifact.Context(i, context.nicPathRows()));
+			}
+		}
+		if (contexts.isEmpty()) {
+			return;
+		}
+		try (final var logContext = put(KEY_STEP_ID, loadStepId())) {
+			NicPathsArtifact.publish(runId(), loadStepId(), operationLifecycleWorkerId, contexts);
+		} catch (final RuntimeException e) {
+			LogUtil.exception(Level.WARN, e, "{}: failed to write the NIC paths file", loadStepId());
+		}
 	}
 
 	private void publishOperationLifecycle() {
@@ -1032,7 +1068,11 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	@Override
 	protected final void doClose() throws IOException {
 		if (standaloneDeleteDurationMode()) {
-			closeDurationContexts();
+			try {
+				closeDurationContexts();
+			} finally {
+				publishNicPaths();
+			}
 			return;
 		}
 		super.doClose();
@@ -1051,6 +1091,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 																stepCtx.toString());
 											}
 										});
+		publishNicPaths();
 		RuntimeException terminalFailure = null;
 		for (final var stepContext : stepContexts) {
 			try {

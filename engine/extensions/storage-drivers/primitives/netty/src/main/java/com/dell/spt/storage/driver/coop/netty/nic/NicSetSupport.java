@@ -60,6 +60,7 @@ public final class NicSetSupport {
 	private final Environment environment;
 	private final AtomicBoolean setupFailureLogged = new AtomicBoolean();
 	private volatile NicSetLayout layout;
+	private volatile NicPathCounters counters;
 
 	/** @param driver the driver's name in log lines */
 	public NicSetSupport(final String driver, final NicSetSettings settings, final Environment environment) {
@@ -115,6 +116,7 @@ public final class NicSetSupport {
 			shutdownGroups.run();
 			throw e;
 		}
+		this.counters = NicPathCounters.of(planned, plan, inventory, concurrencyLimit);
 		this.layout = planned;
 	}
 
@@ -138,6 +140,11 @@ public final class NicSetSupport {
 	/** The layout the driver started with, or {@code null} before a successful open. */
 	public NicSetLayout layout() {
 		return layout;
+	}
+
+	/** The per-path counters in the layout's order, or {@code null} before a successful open. */
+	public NicPathCounters counters() {
+		return counters;
 	}
 
 	/**

@@ -37,6 +37,16 @@ public interface LoadStepContext<I extends Item, O extends Operation<I>> extends
 		return null;
 	}
 
+	/** Whether this context's driver has a NIC set, so its step writes the per-path CSV (item 18). */
+	default boolean hasNicSet() {
+		return false;
+	}
+
+	/** The driver's terminal per-path rows once it stopped, or null: no NIC set, not stopped, or never opened. */
+	default com.dell.spt.base.nic.NicPathRows nicPathRows() {
+		return null;
+	}
+
 	/** Returns object-level identity accounting, or {@code null} when the context cannot supply it. */
 	default DeleteObjectLifecycleSnapshot deleteObjectLifecycle() {
 		return null;

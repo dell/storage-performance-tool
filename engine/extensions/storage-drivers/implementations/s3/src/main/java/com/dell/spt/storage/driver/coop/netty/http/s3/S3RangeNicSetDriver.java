@@ -9,7 +9,10 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.range.RangeReadAttempt;
 import com.dell.spt.base.item.op.data.range.RangeReadOperation;
 import com.dell.spt.base.item.op.data.range.RangeReadPolicy;
+import com.dell.spt.base.nic.NicPathCounting;
+import com.dell.spt.base.nic.NicPathRows;
 import com.dell.spt.storage.driver.coop.netty.nic.NicAdmission;
+import com.dell.spt.storage.driver.coop.netty.nic.NicPathCounters;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetConnectionPool;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetSettings;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetSupport;
@@ -27,13 +30,19 @@ import java.util.List;
  * included, settles the attempt as {@code FAIL_IO} while admission is open, as a failed
  * default-pool lease does, and the existing retry policy applies; after a stop, the attempt is
  * fenced and recovered as one that never reached its request.
+ *
+ * <p>Each range attempt counts on one row of the per-path CSV (item 18, D59): admitted when its
+ * flight starts on a Path, or with its setup failure, and ended by its retained outcome, a
+ * succeeded range adding the bytes received.
  */
-final class S3RangeNicSetDriver extends S3RangeStorageDriver {
+final class S3RangeNicSetDriver extends S3RangeStorageDriver implements NicPathCounting {
 
 	private final NicSetSupport nicSet;
 	// Assigned by createRangePool() while the superclass constructor runs; no initializer, so the
 	// assignment survives this class's own field initialization.
 	private NicSetConnectionPool nicPool;
+	// Assigned at start before the dispatch task and the NICs' event loops run.
+	private NicPathCounters counters;
 
 	static S3RangeNicSetDriver create(final String stepId, final DataInput input, final Config storage, final int batchSize,
 					final RangeReadPolicy policy, final NicSetSettings settings) throws InterruptedException {
@@ -64,6 +73,7 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver {
 	protected void doStart() throws IllegalStateException {
 		try {
 			nicSet.open(nicPool, List.of(storageNodeAddrs), concurrencyLimit, this::createIoGroup, this::shutdownExtraIoGroups);
+			counters = nicSet.counters();
 			super.doStart();
 			nicSet.started(nicPool, concurrencyLimit);
 		} catch (final InterruptedException e) {
@@ -88,10 +98,40 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver {
 	}
 
 	@Override
-	void transportReleased(final Channel channel) {
+	public NicPathRows nicPathRows() {
+		// The stop's flag first: it was written after start assigned the counters.
+		final var ioStopped = ioStoppedInTime();
+		final var table = counters;
+		return table == null || ioStopped == null ? null : table.snapshot(ioStopped && dispatchStoppedInTime());
+	}
+
+	/**
+	 * Ends the flight's attempt on its Path. With no outcome yet, an attempt fenced before its
+	 * request is interrupted and one handed off stays unresolved.
+	 */
+	@Override
+	void transportReleased(final Channel channel, final RangeReadAttempt attempt) {
 		final int nic = NicSetConnectionPool.nicIndex(channel);
 		if (nic >= 0) {
 			nicPool.admission().attemptEnded(nic);
+		}
+		final var row = counters.path(channel);
+		if (row == null) {
+			return;
+		}
+		final var outcome = attempt.outcome();
+		if (outcome == null) {
+			if (!attempt.wasHandedOff()) {
+				row.interrupted();
+			}
+			return;
+		}
+		switch (outcome.category()) {
+		case SUCCESS -> row.succeeded(outcome.receivedBytes());
+		case HTTP, VALIDATION, TRANSPORT -> row.failed();
+		case UNRESOLVED -> {
+			// Sent, with no outcome at the drain cut.
+		}
 		}
 	}
 
@@ -113,14 +153,22 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver {
 		}
 		try {
 			// The pool reports exactly once: a channel on its own event loop, or the failure.
-			nicPool.acquire(nic, (channel, failure) -> {
-				if (failure == null)
-					start(op, attempt, nic, channel);
-				else
-					failSetup(op, attempt, nic, failure);
+			nicPool.acquire(nic, new NicSetConnectionPool.Acquisition() {
+				@Override
+				public void complete(final Channel channel, final Throwable failure) {
+					if (failure == null)
+						start(op, attempt, nic, channel);
+					else
+						failSetup(op, attempt, nic, -1, failure);
+				}
+
+				@Override
+				public void failed(final int path, final Throwable failure) {
+					failSetup(op, attempt, nic, path, failure);
+				}
 			});
 		} catch (final RuntimeException e) {
-			failSetup(op, attempt, nic, e);
+			failSetup(op, attempt, nic, -1, e);
 		}
 		return true;
 	}
@@ -132,7 +180,10 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver {
 		if (admission.waitEnded(nic))
 			signalDispatchCapacityAvailable();
 		final var flight = new Flight(op, op.circulation(), attempt, channel);
+		final var row = counters.path(channel);
+		row.attempted();
 		if (flights.putIfAbsent(attempt, flight) != null) {
+			row.interrupted();
 			final var unusedClose = channel.close();
 			nicPool.release(channel);
 			admission.attemptEnded(nic);
@@ -147,12 +198,20 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver {
 	/**
 	 * Mirrors a failed default-pool lease while admission is open: the attempt fails with FAIL_IO
 	 * and its permits are released. After a stop it is fenced as one that never reached its
-	 * request, as a fenced write is.
+	 * request, as a fenced write is. It counts on the Path chosen for it, or on its NIC when none
+	 * was ({@code path} -1).
 	 */
 	private void failSetup(final RangeReadOperation<DataItem> op, final RangeReadAttempt attempt, final int nic,
-					final Throwable failure) {
+					final int path, final Throwable failure) {
 		// False after a stop, or when shutdown recovery already settled the attempt.
 		final boolean counted = withDispatchAdmission(() -> attempt.transportFailure(Operation.Status.FAIL_IO));
+		final var row = counters.path(nic, path);
+		row.attempted();
+		if (counted) {
+			row.failed();
+		} else {
+			row.interrupted();
+		}
 		nicSet.logSetupFailure(failure, !counted);
 		final var admission = nicPool.admission();
 		admission.waitEnded(nic);

@@ -60,6 +60,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	// Admission and dispatch intentionally share one lock to preserve their shutdown boundary.
 	private final ReentrantLock admissionLock = dispatchLock;
 	private final OperationDispatchTask<I, O> opDispatchTask;
+	private volatile boolean dispatchStoppedInTime = true;
 	private final Object mpuSchedulingLock = new Object();
 	private final int configuredMpuObjectLimit;
 	private final int configuredMpuPartLimit;
@@ -1062,7 +1063,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		signalDispatch();
 		if (taskWasRunning || taskWasAlreadyStopped) {
 			try {
-				if (!opDispatchTask.await(TASK_STOP_WAIT_SECONDS, TimeUnit.SECONDS)) {
+				dispatchStoppedInTime = opDispatchTask.await(TASK_STOP_WAIT_SECONDS, TimeUnit.SECONDS);
+				if (!dispatchStoppedInTime) {
 					Loggers.MSG.warn(
 									"{}: dispatch task did not stop within {} second(s); "
 													+ "queued lifecycle ownership will be recovered without touching task buffers",
@@ -1127,6 +1129,11 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	/** Extension hook for cooperative drivers with an additional pre-dispatch queue. */
 	protected List<O> recoverAdditionalQueuedOperations() {
 		return List.of();
+	}
+
+	/** False when the last {@link #closeAdmission()} gave up waiting for the dispatch task. */
+	protected final boolean dispatchStoppedInTime() {
+		return dispatchStoppedInTime;
 	}
 
 	@Override

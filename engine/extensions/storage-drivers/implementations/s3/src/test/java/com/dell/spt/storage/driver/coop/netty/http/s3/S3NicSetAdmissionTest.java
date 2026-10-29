@@ -5,6 +5,9 @@ import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.ADDR
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.awaitNoNicIoThreads;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.awaitRefused;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.nics;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.rowsOf;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.stoppedRows;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.totals;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.waitFor;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -19,6 +22,7 @@ import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.data.range.RangeReadPolicy;
 import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
+import com.dell.spt.base.nic.NicPathRows;
 import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
 import com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.RangeRun;
 import com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.Run;
@@ -108,6 +112,9 @@ final class S3NicSetAdmissionTest {
 		assertEquals(2, stub.peakConcurrency(ADDRESSES.get(1)));
 		stub.objectRequests().forEach(request -> assertEquals(ADDRESSES.get(request.listener()), request.source(), request.toString()));
 		awaitIdle(run);
+		final var rows = stoppedRows(run.driver(), run.driver());
+		assertEquals(List.of(16L, 16L, 0L, 0L, 0L, 16L * EndpointSelectionTestSupport.ITEM_SIZE), totals(rows),
+						"a directly dispatched attempt counts on its connection's Path: " + rows);
 	}
 
 	@Test
@@ -199,6 +206,9 @@ final class S3NicSetAdmissionTest {
 		assertTrue(stub.objectRequests().isEmpty(), () -> "requests: " + stub.objectRequests());
 		assertNull(run.results().poll(QUIET_MILLIS), "a recovered operation publishes no result");
 		assertRecoveredUnattempted(run, op, 0);
+		final var rows = stoppedRows(run.driver(), run.driver());
+		assertEquals(List.of(1L, 0L, 0L, 1L, 0L, 0L), totals(rows), "interrupted on its Path: " + rows);
+		assertEquals(1, rowsOf(rows, NicPathRows.Kind.PATH).get(0).interrupted());
 	}
 
 	@Test
@@ -226,6 +236,9 @@ final class S3NicSetAdmissionTest {
 		waitFor(() -> admission.count(0) == 0 && run.driver().activeOpCount() == 0, "the failed setup released its NIC and permit");
 		assertNull(run.results().poll(QUIET_MILLIS), "the stop, not the refused connect, settled the operation");
 		assertRecoveredUnattempted(run, op, 1);
+		final var rows = stoppedRows(run.driver(), run.driver());
+		assertEquals(List.of(2L, 1L, 0L, 1L, 0L, (long) EndpointSelectionTestSupport.ITEM_SIZE), totals(rows),
+						"the refused connect after the stop is interrupted: " + rows);
 	}
 
 	@Test
@@ -243,6 +256,8 @@ final class S3NicSetAdmissionTest {
 		stub.release();
 		assertEquals(Operation.Status.SUCC, run.results().await().status());
 		awaitIdle(run);
+		assertEquals(List.of(1L, 1L, 0L, 0L, 0L, (long) EndpointSelectionTestSupport.ITEM_SIZE),
+						totals(stoppedRows(run.driver(), run.driver())));
 	}
 
 	@Test
@@ -286,6 +301,27 @@ final class S3NicSetAdmissionTest {
 		lifecycle.expireTerminalDeadline();
 		assertEquals(OperationLifecycleState.UNRESOLVED, lifecycle.stateOf(upload));
 		assertTrue(lifecycle.counters().reconciled(), lifecycle.counters()::toString);
+		// The first PUT, the initiation and the sent part succeeded; the waiting part was never sent.
+		final var rows = stoppedRows(run.driver(), run.driver());
+		assertEquals(List.of(4L, 3L, 0L, 1L, 0L, 2L * EndpointSelectionTestSupport.ITEM_SIZE), totals(rows), rows::toString);
+	}
+
+	@Test
+	void anAttemptSentBeforeTheDrainCutWithNoOutcomeStaysUnresolved() throws Exception {
+		final var run = started(stub.listeners(1), nics(1), 1);
+		final Operation<DataItem> op = dataOp(OpType.CREATE, "cut");
+		stub.hold();
+
+		assertTrue(run.driver().put(op));
+		waitFor(() -> stub.objectRequests().size() == 1, "the request reaches the stub");
+		run.driver().closeAdmission();
+		run.driver().operationLifecycle().expireTerminalDeadline();
+		assertEquals(OperationLifecycleState.UNRESOLVED, run.driver().operationLifecycle().stateOf(op));
+		stub.release();
+		awaitIdle(run);
+
+		final var rows = stoppedRows(run.driver(), run.driver());
+		assertEquals(List.of(1L, 0L, 0L, 0L, 1L, 0L), totals(rows), "a late response does not settle it: " + rows);
 	}
 
 	@Test
@@ -330,7 +366,7 @@ final class S3NicSetAdmissionTest {
 		waitFor(() -> admission.count(0) == 0 && run.driver.activeRangeTransports() == 0, "the fenced attempt released its NIC");
 		assertNull(run.pollTerminal(QUIET_MILLIS), "a recovered read publishes no outcome");
 		assertTrue(stub.objectRequests().isEmpty(), () -> "requests: " + stub.objectRequests());
-		run.close();
+		assertEquals(List.of(1L, 0L, 0L, 1L, 0L, 0L), totals(stoppedRows(run.driver, run)));
 		final var snapshot = run.runtime.snapshot();
 		assertTrue(snapshot.reconciled(), snapshot::toString);
 		assertEquals(1, snapshot.logical().unattempted());
@@ -366,7 +402,7 @@ final class S3NicSetAdmissionTest {
 						&& !run.runtime.hasPendingResults(), "the fenced retry released its NIC");
 		assertNull(run.pollTerminal(QUIET_MILLIS), "no second outcome");
 		assertEquals(1, stub.objectRequests().size(), "the retry was never sent");
-		run.close();
+		assertEquals(List.of(2L, 0L, 1L, 1L, 0L, 0L), totals(stoppedRows(run.driver, run)), "the failure, then the fenced retry");
 		final var snapshot = run.runtime.snapshot();
 		assertTrue(snapshot.reconciled(), snapshot::toString);
 		assertEquals(1, snapshot.logical().failed());

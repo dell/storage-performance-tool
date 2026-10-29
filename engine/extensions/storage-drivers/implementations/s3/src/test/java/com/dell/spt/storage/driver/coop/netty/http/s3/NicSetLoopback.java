@@ -23,6 +23,8 @@ import com.dell.spt.base.load.step.local.context.range.RangeReadRuntime;
 import com.dell.spt.base.nic.Ipv4;
 import com.dell.spt.base.nic.Ipv4Prefix;
 import com.dell.spt.base.nic.NicInventory;
+import com.dell.spt.base.nic.NicPathCounting;
+import com.dell.spt.base.nic.NicPathRows;
 import com.dell.spt.base.storage.driver.nic.NicSetDriverFactory;
 import com.dell.spt.storage.driver.coop.netty.nic.NicBinding;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetConnectionPool;
@@ -554,6 +556,34 @@ final class NicSetLoopback implements AutoCloseable {
 	static void awaitNoNicIoThreads() throws InterruptedException {
 		waitFor(() -> NICS.stream().allMatch(nic -> nicIoThreads(nic).isEmpty()),
 						"the NICs' event loops stopped: " + NICS.stream().flatMap(nic -> nicIoThreads(nic).stream()).toList());
+	}
+
+	/** The terminal rows {@code driver} gives once {@code stop} has closed it. */
+	static NicPathRows stoppedRows(final NicPathCounting driver, final AutoCloseable stop) throws Exception {
+		stop.close();
+		final var rows = driver.nicPathRows();
+		assertNotNull(rows, "a stopped NIC-set driver gives its rows");
+		assertTrue(rows.complete(), "every update had stopped");
+		return rows;
+	}
+
+	/** The sums over {@code rows}: attempts, succeeded, failed, interrupted, unresolved and bytes. */
+	static List<Long> totals(final NicPathRows rows) {
+		final var sums = new long[6];
+		for (final var row : rows.rows()) {
+			sums[0] += row.attempts();
+			sums[1] += row.succeeded();
+			sums[2] += row.failed();
+			sums[3] += row.interrupted();
+			sums[4] += row.unresolved();
+			sums[5] += row.bytes();
+		}
+		return Arrays.stream(sums).boxed().toList();
+	}
+
+	/** The rows of kind {@code kind}. */
+	static List<NicPathRows.Row> rowsOf(final NicPathRows rows, final NicPathRows.Kind kind) {
+		return rows.rows().stream().filter(row -> row.kind() == kind).toList();
 	}
 
 	private static NicInventory.Nic nic(final int index) {

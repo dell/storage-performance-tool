@@ -8,7 +8,10 @@ import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.awai
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.awaitRefused;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.nicIoThreads;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.port;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.rowsOf;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.stoppedRows;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.storage;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.totals;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.unusedPort;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.waitFor;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -26,6 +29,7 @@ import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.nic.NicPathRows;
 import com.dell.spt.base.item.op.data.range.RangeReadPolicy;
 import com.dell.spt.base.storage.driver.nic.NicSetDriverFactory;
 import com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.RangeRun;
@@ -172,6 +176,12 @@ final class S3NicSetDriverTest {
 		assertEquals(List.of(ok, failed, ok, failed), statuses);
 		assertEquals(0, run.driver().activeOpCount(), "every failed setup released its permit");
 		assertEquals(0, pool.pendingCount());
+		// A refused connect fails on the Path chosen for it.
+		final var rows = stoppedRows(run.driver(), run.driver());
+		assertEquals(List.of(6L, 4L, 2L, 0L, 0L, 4L * ITEM_SIZE), totals(rows), rows::toString);
+		final var refused = rowsOf(rows, NicPathRows.Kind.PATH).stream().filter(row -> NIC_B.equals(row.nic().iface()))
+						.findFirst().orElseThrow();
+		assertEquals(2, refused.failed(), refused::toString);
 	}
 
 	@Test

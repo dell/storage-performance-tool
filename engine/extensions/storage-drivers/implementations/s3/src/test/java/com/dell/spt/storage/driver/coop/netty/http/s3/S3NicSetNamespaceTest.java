@@ -7,6 +7,8 @@ import static com.dell.spt.storage.driver.coop.netty.http.s3.NetnsTopology.ADDRE
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NetnsTopology.ENDPOINTS;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NetnsTopology.NIC_A;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NetnsTopology.NIC_B;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.stoppedRows;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.totals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -321,6 +323,11 @@ final class S3NicSetNamespaceTest {
 
 		assertTrue(millis < 1_000, () -> "ten rejected attempts took " + millis + " ms; a connect waits " + TIMEOUT_MILLIS);
 		assertEquals(before + 1, connectsStarted(run, 0), "no connect started besides the trial");
+		// Only the PUT before the silence was sent; the trial ends by its timeout or by the stop.
+		final var totals = totals(stoppedRows(run.driver(), run.driver()));
+		assertEquals(List.of(13L, 1L, 0L, (long) ITEM_SIZE), List.of(totals.get(0), totals.get(1), totals.get(4), totals.get(5)),
+						totals::toString);
+		assertTrue(totals.get(2) >= 11 && totals.get(2) + totals.get(3) == 12, totals::toString);
 	}
 
 	@Test

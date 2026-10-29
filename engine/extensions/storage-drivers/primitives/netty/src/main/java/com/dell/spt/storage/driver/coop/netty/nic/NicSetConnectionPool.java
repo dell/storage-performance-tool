@@ -40,6 +40,14 @@ public final class NicSetConnectionPool implements NonBlockingConnPool {
 	@FunctionalInterface
 	public interface Acquisition {
 		void complete(Channel channel, Throwable failure);
+
+		/**
+		 * The failure, with the index within its NIC of the Path that was chosen for the acquisition,
+		 * or -1 when it failed before a Path was chosen.
+		 */
+		default void failed(final int path, final Throwable failure) {
+			complete(null, failure);
+		}
 	}
 
 	/** Whether the host's routing table has a route through {@code nic} that covers {@code destination}. */

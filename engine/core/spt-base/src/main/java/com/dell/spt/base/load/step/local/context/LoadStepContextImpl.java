@@ -13,6 +13,8 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 
 import com.dell.spt.base.metrics.range.RangeReadSnapshot;
+import com.dell.spt.base.nic.NicPathCounting;
+import com.dell.spt.base.nic.NicPathRows;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleCounters;
 import com.dell.spt.base.concurrent.DaemonBase;
 import com.dell.spt.base.config.IllegalConfigurationException;
@@ -1679,6 +1681,16 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	@Override
 	public final RangeReadSnapshot rangeReadSnapshot() {
 		return rangeRuntime == null ? null : rangeRuntime.snapshot();
+	}
+
+	@Override
+	public final boolean hasNicSet() {
+		return driver instanceof NicPathCounting;
+	}
+
+	@Override
+	public final NicPathRows nicPathRows() {
+		return driver instanceof NicPathCounting counting ? counting.nicPathRows() : null;
 	}
 
 	@Override

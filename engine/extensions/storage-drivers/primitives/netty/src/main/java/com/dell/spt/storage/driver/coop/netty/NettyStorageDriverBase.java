@@ -99,6 +99,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	private final int ioRatio;
 	// Groups a NIC-set subclass creates at start; always empty on the default route.
 	private final List<NamedIoGroup> extraIoGroups = new CopyOnWriteArrayList<>();
+	private volatile Boolean ioStoppedInTime;
 	protected final String storageNodeAddrs[];
 	protected final Bootstrap bootstrap;
 	protected final int storageNodePort;
@@ -308,6 +309,14 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 
 	/** Runs first in {@link #doStop()}, before any event-loop group shuts down. */
 	protected void beforeIoShutdown() {}
+
+	/**
+	 * Whether every event-loop group terminated within the stop's budget; null until
+	 * {@link #doStop()} shut them down.
+	 */
+	protected final Boolean ioStoppedInTime() {
+		return ioStoppedInTime;
+	}
 
 	final EventLoopGroup baseIoGroup() {
 		return ioExecutor;
@@ -1071,10 +1080,14 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 				final var groups = new ArrayList<NamedIoGroup>(1 + extraIoGroups.size());
 				groups.add(new NamedIoGroup(BASE_IO_GROUP_NAME, ioExecutor));
 				groups.addAll(extraIoGroups);
-				warnLateIoGroups(shutdownIoGroups(groups));
+				final var late = shutdownIoGroups(groups);
+				ioStoppedInTime = late.isEmpty();
+				warnLateIoGroups(late);
 			} else if (shutdownIoExecutor(ioExecutor)) {
+				ioStoppedInTime = true;
 				Loggers.MSG.debug("{}: I/O workers stopped in time", toString());
 			} else {
+				ioStoppedInTime = false;
 				Loggers.ERR.warn(
 								"{}: I/O workers did not stop within {} s",
 								toString(),

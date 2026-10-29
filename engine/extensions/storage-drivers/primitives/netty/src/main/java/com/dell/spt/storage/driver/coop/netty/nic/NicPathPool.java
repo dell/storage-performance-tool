@@ -144,9 +144,15 @@ final class NicPathPool {
 
 		private final Acquisition callback;
 		private final AtomicInteger state = new AtomicInteger(WAITING);
+		// The Path chosen for a new connection, set before the connect or its rejection; -1 before.
+		private volatile int path = -1;
 
 		private Pending(final Acquisition callback) {
 			this.callback = callback;
+		}
+
+		void chose(final NicPath chosen) {
+			path = chosen.index;
 		}
 
 		boolean fail(final Throwable failure) {
@@ -157,7 +163,7 @@ final class NicPathPool {
 				}
 				if (state.compareAndSet(current, DONE)) {
 					pending.remove(this);
-					callback.complete(null, failure);
+					callback.failed(path, failure);
 					return true;
 				}
 			}
@@ -264,6 +270,7 @@ final class NicPathPool {
 					return;
 				}
 				connectPath = paths.get(nextPath++ % paths.size());
+				attempt.chose(connectPath);
 				epoch = connectPath.backoff.tryConnect();
 				if (epoch == PathBackoff.REJECTED) {
 					failure = new PathBackoffException(connectPath);
@@ -463,6 +470,7 @@ final class NicPathPool {
 	}
 
 	private void connect(final NicPath path, final long epoch, final Pending attempt) {
+		attempt.chose(path);
 		final EventLoop loop;
 		final ChannelFuture connect;
 		try {
@@ -527,6 +535,7 @@ final class NicPathPool {
 				}
 				waiter = waiters.pollFirst();
 				path = paths.get(nextPath++ % paths.size());
+				waiter.chose(path);
 				epoch = path.backoff.tryConnect();
 				open++;
 			}

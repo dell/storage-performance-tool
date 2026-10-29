@@ -8,9 +8,14 @@ import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.KERN
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.address;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.awaitNoNicIoThreads;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.nics;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.port;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.rowsOf;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.stoppedRows;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.storage;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.totals;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.waitFor;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
@@ -42,15 +47,22 @@ import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.item.op.list.ListOperationImpl;
 import com.dell.spt.base.load.step.ScenarioUtil;
+import com.dell.spt.base.load.step.file.FileManager;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
+import com.dell.spt.base.nic.NicPathRows;
+import com.dell.spt.base.nic.NicPathsArtifact;
 import com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.RangeRun;
 import com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.Request;
 import com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.Run;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetConnectionPool;
 import com.github.akurilov.confuse.Config;
 import io.netty.channel.epoll.Epoll;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -122,6 +134,27 @@ final class S3NicSetWorkloadTest {
 			assertTrue(connections.size() <= 2, () -> nic + " reused its share of connections: " + connections);
 		}
 		assertReleased(run);
+
+		// Each attempt counted once, on the Path that carried it, with the plan's columns.
+		final var rows = stoppedRows(run.driver(), run.driver());
+		assertEquals(List.of(32L, 32L, 0L, 0L, 0L, 32L * ITEM_SIZE), totals(rows), rows::toString);
+		for (final var row : rowsOf(rows, NicPathRows.Kind.PATH)) {
+			final var nic = row.nic();
+			final var endpoint = row.endpoint();
+			assertEquals(address(nic.iface()), nic.ipv4());
+			assertEquals(0, nic.numaNode());
+			assertEquals("2", nic.permitShare(), "P/N of the concurrency limit");
+			assertEquals(port(endpoint.endpoint()), endpoint.port());
+			assertEquals(requests.stream().filter(request -> request.source().equals(nic.ipv4())
+							&& request.host().equals(endpoint.endpoint())).count(), row.attempts(), row::toString);
+		}
+		assertEquals(2, rowsOf(rows, NicPathRows.Kind.NIC).size());
+		assertEquals(1, rowsOf(rows, NicPathRows.Kind.NONE).size());
+		for (final var row : rows.rows()) {
+			if (row.kind() != NicPathRows.Kind.PATH) {
+				assertEquals(0, row.attempts(), row::toString);
+			}
+		}
 	}
 
 	@Test
@@ -139,6 +172,8 @@ final class S3NicSetWorkloadTest {
 						"the verification ran");
 		assertOnPaths(run.pool(), endpoints, stub.objectRequests());
 		assertReleased(run);
+		final var rows = stoppedRows(run.driver(), run.driver());
+		assertEquals(List.of(9L, 8L, 1L, 0L, 0L, 8L * ITEM_SIZE), totals(rows), "the corrupted GET failed with no bytes: " + rows);
 	}
 
 	@Test
@@ -148,10 +183,10 @@ final class S3NicSetWorkloadTest {
 
 		final var fixed = rangeRun(endpoints, new RangeReadPolicy(3, 2L, 1));
 		final var fixedRanges = readRanges(fixed, "fixed-", 4);
-		fixed.close();
+		assertEquals(List.of(4L, 4L, 0L, 0L, 0L, 12L), totals(stoppedRows(fixed.driver, fixed)), "each range's bytes");
 		final var chosen = rangeRun(endpoints, new RangeReadPolicy(3, null, 1));
 		final var chosenRanges = readRanges(chosen, "chosen-", 8);
-		chosen.close();
+		assertEquals(List.of(8L, 8L, 0L, 0L, 0L, 24L), totals(stoppedRows(chosen.driver, chosen)));
 
 		assertEquals(Set.of("bytes=2-4"), Set.copyOf(fixedRanges));
 		assertTrue(Set.copyOf(chosenRanges).size() > 1, () -> "the offsets vary: " + chosenRanges);
@@ -199,6 +234,9 @@ final class S3NicSetWorkloadTest {
 		assertEquals(14, attempts.size(), () -> "requests: " + attempts);
 		assertOnPaths(run.pool(), endpoints, attempts);
 		assertReleased(run);
+		// Initiations and completions carry no payload; the failed completion fails; the abort is not counted.
+		final var rows = stoppedRows(run.driver(), run.driver());
+		assertEquals(List.of(14L, 13L, 1L, 0L, 0L, 10L * ITEM_SIZE), totals(rows), rows::toString);
 	}
 
 	@Test
@@ -352,7 +390,8 @@ final class S3NicSetWorkloadTest {
 	void aPipelineStepsContextsGetTheirOwnDriversPathPoolsAndPermits() throws Exception {
 		final var endpoints = stub.listeners(2);
 		final var factory = new NicSetLoopback.Factory();
-		final var outcomes = runScenario(endpoints, factory, """
+		final var stepId = "nic-set-pipeline-" + System.nanoTime();
+		final var outcomes = runScenario(endpoints, factory, stepId, """
 						PipelineLoad
 							.config({"load": {"step": {"limit": {"time": "30s"}}}})
 							.append({"storage": {"net": {"interfaces": "lo-a,lo-b"}, "driver": {"limit": {"concurrency": 2}}}})
@@ -383,6 +422,61 @@ final class S3NicSetWorkloadTest {
 		}
 		List.of("lo-a", "lo-b").forEach(nic -> assertTrue(stub.peakConcurrency(address(nic)) <= 1, nic));
 		List.of("lo-c", "lo-d").forEach(nic -> assertTrue(stub.peakConcurrency(address(nic)) <= 2, nic));
+
+		// One file for the step: each context's rows on its own NICs, then the end record.
+		final var file = nicPathsFile(stepId);
+		final var rows = csv(file);
+		final var end = rows.get(rows.size() - 1);
+		assertEquals("end", end.get("row"));
+		assertEquals("true", end.get("complete"));
+		assertEquals("", end.get("missing_contexts"));
+		assertEquals("0", end.get("unresolved"));
+		final var body = rows.subList(0, rows.size() - 1);
+		assertTrue(body.stream().allMatch(row -> stepId.equals(row.get("step_id")) && "1".equals(row.get("schema_version"))));
+		assertEquals(Map.of("0", Set.of("lo-a", "lo-b"), "1", Set.of("lo-c", "lo-d")), body.stream()
+						.filter(row -> !"none".equals(row.get("row")))
+						.collect(Collectors.groupingBy(row -> row.get("context_index"),
+										Collectors.mapping(row -> row.get("interface"), Collectors.toSet()))));
+		assertEquals(8L, sum(body, "0", "succeeded"));
+		assertEquals(8L * 1024, sum(body, "0", "bytes"));
+		assertEquals(outcomes.get("READ-4").get(0), sum(body, "1", "succeeded"));
+		Files.delete(file);
+	}
+
+	/**
+	 * A step whose NIC set cannot be planned still writes its file: the end record alone, naming the
+	 * context that never handed over its counts (item 18).
+	 */
+	@Test
+	void aStepThatFailsToResolveAnEndpointWritesOnlyTheEndRecord() throws Exception {
+		final var stepId = "nic-set-unresolved-" + System.nanoTime();
+		final var outcomes = runScenario(List.of(stub.listeners(1).get(0), "nic-paths.invalid:9000"),
+						new NicSetLoopback.Factory(), stepId, """
+										Load.config({"load": {"step": {"limit": {"time": "30s"}}}}).run();
+										""");
+
+		assertTrue(stub.objectRequests().isEmpty(), () -> "outcomes: " + outcomes + ", requests: " + stub.objectRequests());
+		final var file = nicPathsFile(stepId);
+		final var rows = csv(file);
+		assertEquals(1, rows.size(), () -> "rows: " + rows);
+		final var end = rows.get(0);
+		assertEquals("end", end.get("row"));
+		assertEquals("false", end.get("complete"));
+		assertEquals("0", end.get("missing_contexts"));
+		assertEquals("0", end.get("attempts"));
+		Files.delete(file);
+	}
+
+	/** A step without a NIC set writes no per-path file (item 18). */
+	@Test
+	void aStepWithoutANicSetWritesNoNicPathsFile() throws Exception {
+		final var stepId = "nic-set-none-" + System.nanoTime();
+		final var outcomes = runScenario(stub.listeners(1), null, stepId, """
+						Load.config({"load": {"step": {"limit": {"time": "30s"}}}}).run();
+						""");
+
+		assertEquals(Map.of("CREATE-1", List.of(8L, 0L)), outcomes);
+		assertFalse(Files.exists(nicPathsFile(stepId)));
 	}
 
 	/**
@@ -429,9 +523,14 @@ final class S3NicSetWorkloadTest {
 	 */
 	private static Map<String, List<Long>> runScenario(final List<String> endpoints, final NicSetLoopback.Factory factory,
 					final String scenario) throws Exception {
-		final var root = NicSetLoopback.root(endpoints, nics(2), 1);
+		return runScenario(endpoints, factory, "nic-set-scenario-" + System.nanoTime(), scenario);
+	}
+
+	/** As above with step id {@code stepId}; without a {@code factory}, on the shipped {@code s3} driver and no NIC set. */
+	private static Map<String, List<Long>> runScenario(final List<String> endpoints, final NicSetLoopback.Factory factory,
+					final String stepId, final String scenario) throws Exception {
+		final var root = NicSetLoopback.root(endpoints, factory == null ? List.of() : nics(2), 1);
 		final Config config = ConfigUtil.merge("-", List.of(new BundledDefaultsProvider().config("-", root.schema()), root));
-		final var stepId = "nic-set-scenario-" + System.nanoTime();
 		config.val("run-id", 778L);
 		config.val("load-step-id", stepId);
 		config.val("load-step-idAutoGenerated", false);
@@ -442,10 +541,12 @@ final class S3NicSetWorkloadTest {
 		config.val("item-output-delay", 0);
 		config.val("item-output-queue-limit", 1_000);
 		config.val("output-color", false);
-		config.val("storage-driver-type", NicSetLoopback.DRIVER_TYPE);
+		config.val("storage-driver-type", factory == null ? "s3" : NicSetLoopback.DRIVER_TYPE);
 		final var classLoader = Thread.currentThread().getContextClassLoader();
 		final List<Extension> extensions = new ArrayList<>(Extension.load(classLoader));
-		extensions.add(factory);
+		if (factory != null) {
+			extensions.add(factory);
+		}
 		final Map<String, List<Long>> outcomes = new ConcurrentHashMap<>();
 		try (final var metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR) {
 			@Override
@@ -464,6 +565,31 @@ final class S3NicSetWorkloadTest {
 			new RunImpl("NIC-set scenario canary", scenario, engine, 778L).run();
 		}
 		return outcomes;
+	}
+
+	private static Path nicPathsFile(final String stepId) throws IOException {
+		return Path.of(FileManager.INSTANCE.logFileName(Loggers.NIC_PATHS.getName(), stepId));
+	}
+
+	/** The file's records by column; no field of these files is quoted. */
+	private static List<Map<String, String>> csv(final Path file) throws IOException {
+		final var lines = Files.readAllLines(file);
+		assertEquals(NicPathsArtifact.HEADER, lines.get(0));
+		final var header = lines.get(0).split(",", -1);
+		final List<Map<String, String>> records = new ArrayList<>();
+		for (final var line : lines.subList(1, lines.size())) {
+			final var fields = line.split(",", -1);
+			assertEquals(header.length, fields.length, line);
+			final Map<String, String> record = new HashMap<>();
+			IntStream.range(0, header.length).forEach(i -> record.put(header[i], fields[i]));
+			records.add(record);
+		}
+		return records;
+	}
+
+	private static long sum(final List<Map<String, String>> rows, final String context, final String column) {
+		return rows.stream().filter(row -> context.equals(row.get("context_index")))
+						.mapToLong(row -> Long.parseLong(row.get(column))).sum();
 	}
 
 	/**

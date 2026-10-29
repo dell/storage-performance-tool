@@ -38,6 +38,7 @@ public interface Loggers {
 	Logger RANGE_READ = LogManager.getLogger(BASE + "RangeRead");
 	Logger OPERATION_LIFECYCLE = LogManager.getLogger(BASE + "OperationLifecycle");
 	Logger MULTIPART_LIFECYCLE = LogManager.getLogger(BASE + "MultipartLifecycle");
+	Logger NIC_PATHS = LogManager.getLogger(BASE + "NicPaths");
 	Logger TABLES_METRICS = LogManager.getLogger(BASE + "TablesMetrics");
 	Logger SCENARIO = LogManager.getLogger(BASE + "Scenario");
 	Logger TEST = LogManager.getLogger(BASE + "Test");
@@ -78,6 +79,7 @@ public interface Loggers {
 					Map.entry(RANGE_READ.getName().substring(BASE.length()), "Terminal Partial READ v1"),
 					Map.entry(OPERATION_LIFECYCLE.getName().substring(BASE.length()), "Terminal Operation Lifecycle v1"),
 					Map.entry(MULTIPART_LIFECYCLE.getName().substring(BASE.length()), "Multipart Upload Lifecycle"),
+					Map.entry(NIC_PATHS.getName().substring(BASE.length()), "Terminal NIC Paths v1"),
 					Map.entry(SCENARIO.getName().substring(BASE.length()), "Scenario"),
 					Map.entry(TABLES_METRICS.getName().substring(BASE.length()), "S3 Tables Metrics"));
 }
