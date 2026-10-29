@@ -61,6 +61,7 @@ type StepData struct {
 	Delete            *deletemetrics.Metrics
 	DeleteEvidence    *DeleteArtifactEvidence
 	DriverStats       *driverstats.Stats
+	NicPaths          *NicPathsEvidence
 	Status            StepStatus
 	MetricsSuppressed bool
 	MissingRequired   []string
@@ -239,6 +240,11 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 			default:
 				step.Steady = steady
 			}
+		}
+
+		step.NicPaths = nicPathsEvidence(sm, params.NicNodes, step.Metrics)
+		if step.NicPaths != nil && step.NicPaths.Distributed {
+			step.MissingOptional = removeString(step.MissingOptional, constants.ResultsArtifactSuffixNicPaths)
 		}
 
 		rangeEvidence, rangeErr := loadRangeRead(runDir, sm)
@@ -529,6 +535,7 @@ type RunParams struct {
 	DeleteArtifactStepIDs  []string                          `json:"deleteArtifactStepIds,omitempty"`
 	DriverStats            map[string]*driverstats.Stats     `json:"driverStats,omitempty"`
 	DriverStatsError       string                            `json:"driverStatsError,omitempty"`
+	NicNodes               []results.NicNode                 `json:"nicNodes,omitempty"`
 	ResultsOptions         RunResultsOptions                 `json:"resultsOptions"`
 	CLI                    RunCLI                            `json:"cli"`
 	MultiHost              RunMultiHost                      `json:"multiHost"`

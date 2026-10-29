@@ -77,6 +77,7 @@ func (r *Renderer) FullReport(summary *RunSummary) string {
 	r.renderDeleteDetails(b, summary)
 	r.renderIntegrity(b, summary)
 	r.renderRangeRead(b, summary)
+	r.renderNicPaths(b, summary, 0)
 	r.renderMixedBreakdowns(b, summary)
 	r.renderTotals(b, summary)
 	r.renderArtifactsAndWarnings(b, summary)
@@ -213,6 +214,7 @@ func (r *Renderer) CompactSnippet(summary *RunSummary) string {
 	r.renderRDMADataPath(sb, summary, wrapWidth)
 	r.renderIntegrity(sb, summary)
 	r.renderRangeRead(sb, summary)
+	r.renderNicPaths(sb, summary, wrapWidth)
 	r.renderCompactMixedBreakdowns(sb, summary)
 	fmt.Fprintf(sb, "Totals: duration %s, data moved %s\n", summary.Totals.DurationHuman, formatBytesHuman(summary.Totals.DataBytes))
 	if len(summary.Warnings) > 0 {
@@ -905,6 +907,10 @@ func collectIncompleteSteps(summary *RunSummary) []string {
 	for _, step := range summary.Steps {
 		if len(step.MissingRequired) > 0 {
 			out = append(out, fmt.Sprintf("%s missing required artifacts: %s", step.StepID, strings.Join(step.MissingRequired, ", ")))
+		}
+		if step.NicPaths != nil && len(step.NicPaths.Missing) > 0 {
+			out = append(out, fmt.Sprintf("%s missing NIC paths files: %s", step.StepID,
+				strings.Join(missingNicPathsNodes(step.NicPaths, ", "), "; ")))
 		}
 	}
 	return out

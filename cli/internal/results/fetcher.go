@@ -28,7 +28,7 @@ const (
 	fileStatusOK      = "ok"
 )
 
-var integrityNodeSourcePattern = regexp.MustCompile(`^(written|verify-input|verified|integrity\.failures|integrity\.performance|multipart\.lifecycle|operation\.lifecycle|range\.read|delete\.metrics\.total|delete\.requests|delete\.objects|delete\.verification|items)\.node-[0-9]{3}\.csv$`)
+var integrityNodeSourcePattern = regexp.MustCompile(`^(written|verify-input|verified|integrity\.failures|integrity\.performance|multipart\.lifecycle|operation\.lifecycle|range\.read|nic\.paths|delete\.metrics\.total|delete\.requests|delete\.objects|delete\.verification|items)\.node-[0-9]{3}\.csv$`)
 
 // ArtifactSpec defines a log endpoint and its output filename suffix.
 type ArtifactSpec struct {
@@ -41,6 +41,8 @@ type ArtifactSpec struct {
 var DefaultArtifacts = []ArtifactSpec{
 	{Loggers: []string{"RangeRead"}, Suffix: constants.ResultsArtifactSuffixRangeRead, Required: false},
 	{Loggers: []string{"OperationLifecycle"}, Suffix: constants.ResultsArtifactSuffixOperationLifecycle, Required: false},
+	// Per-path CSV of a single engine with a NIC set; distributed steps keep one copy per node.
+	{Loggers: []string{"NicPaths"}, Suffix: constants.ResultsArtifactSuffixNicPaths, Required: false},
 	{Loggers: []string{"metrics.FileTotal"}, Suffix: constants.ResultsArtifactSuffixMetricsTotal, Required: true},
 	{Loggers: []string{"Config"}, Suffix: constants.ResultsArtifactSuffixConfig, Required: true},
 	{Loggers: []string{"Cli"}, Suffix: constants.ResultsArtifactSuffixCLIArgs, Required: false},
@@ -186,9 +188,15 @@ func (f *Fetcher) FetchArtifactsForSteps(ctx context.Context, stepIDs []string) 
 		Steps:       make([]StepManifest, 0, len(stepIDs)),
 	}
 
+	nicNodes, err := readNicNodes(f.OutputDir)
+	if err != nil {
+		logging.LogWarn("results", "cannot read the NIC nodes from run metadata",
+			"file", constants.ResultsMetadataFileName, "error", err)
+	}
 	haveAnyTotals := false
 	for _, stepID := range stepIDs {
 		sm := f.fetchStep(ctx, stepID)
+		f.recordMissingNicPaths(&sm, nicNodes)
 		man.Steps = append(man.Steps, sm)
 		haveAnyTotals = haveAnyTotals || hasSuccessfulGenericTotals(sm)
 	}
