@@ -495,6 +495,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 							if (standaloneDeleteDurationMode()) {
 								throw standaloneDeleteEarlyExhaustionFailure();
 							}
+							contextDone(stepCtx);
 							stepContextsCopy[i] = null; // exclude
 							countDown--;
 							break;
@@ -519,6 +520,12 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 		return 0 == countDown;
 	}
+
+	/**
+	 * Called by {@link #await(long, TimeUnit)} each time it finds {@code context} done, before the
+	 * step stops its contexts. Does nothing by default.
+	 */
+	protected void contextDone(final LoadStepContext context) {}
 
 	private boolean awaitDurationContexts(final long timeout, final TimeUnit timeUnit) {
 		final boolean pollBounded = timeout > 0;

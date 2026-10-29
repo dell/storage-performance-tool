@@ -24,6 +24,10 @@ package com.dell.spt.base.load.generator;
  * <p>Not used for the recycle wait: recycled operations return at request-latency cadence
  * (hundreds of microseconds at low concurrency), where a growing park would sit directly on
  * the re-admission path.
+ *
+ * <p>A second instance paces a pipeline reader whose handoff is empty. There a wake takes every
+ * item waiting, so the longer park delays the reader's next items by at most the cap without
+ * limiting its rate.
  */
 final class OutputBackoff {
 
