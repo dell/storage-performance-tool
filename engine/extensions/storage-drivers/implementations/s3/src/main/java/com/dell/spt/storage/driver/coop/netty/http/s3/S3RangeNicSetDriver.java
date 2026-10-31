@@ -108,7 +108,7 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver implements NicPathC
 
 	@Override
 	public NicSetResources nicSetResources() {
-		return nicSet.resources();
+		return nicSet.resources(ioEventLoopCount());
 	}
 
 	/**

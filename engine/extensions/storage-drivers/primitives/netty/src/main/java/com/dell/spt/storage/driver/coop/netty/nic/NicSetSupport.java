@@ -143,11 +143,16 @@ public final class NicSetSupport {
 		return layout;
 	}
 
-	/** The driver's event loops, with the layout's NICs once open succeeded and none before. */
-	public NicSetResources resources() {
+	/**
+	 * The driver's event loops, with the layout's NICs once open succeeded and none before.
+	 *
+	 * @param baseEventLoops the size of the driver's base group, as it was created
+	 */
+	public NicSetResources resources(final int baseEventLoops) {
 		final var current = layout;
 		return new NicSetResources(settings.driverThreads(), settings.threadsPerNic(),
-						current == null ? List.of() : current.nics().stream().map(NicSetLayout.Nic::name).toList());
+						current == null ? List.of() : current.nics().stream().map(NicSetLayout.Nic::name).toList(),
+						baseEventLoops);
 	}
 
 	/** The per-path counters in the layout's order, or {@code null} before a successful open. */

@@ -9,15 +9,21 @@ import java.util.List;
  * @param eventLoopsPerNic each NIC's group size: {@code driverThreads} when set, otherwise
  *     {@code max(4, hardware threads / 8)} (D49)
  * @param nics the NICs that opened, in layout order; empty when the NIC set never opened
+ * @param baseEventLoops the driver's base group, which carries its control requests, as created
  */
-public record NicSetResources(int driverThreads, int eventLoopsPerNic, List<String> nics) {
+public record NicSetResources(int driverThreads, int eventLoopsPerNic, List<String> nics, int baseEventLoops) {
 
 	public NicSetResources {
 		nics = List.copyOf(nics);
 	}
 
-	/** The driver's event loops over all its NICs. */
+	/** The event loops of the driver's per-NIC groups, over all its NICs. */
 	public int eventLoops() {
 		return eventLoopsPerNic * nics.size();
+	}
+
+	/** Every event loop the driver owns: its per-NIC groups and its base group. */
+	public int totalEventLoops() {
+		return eventLoops() + baseEventLoops;
 	}
 }

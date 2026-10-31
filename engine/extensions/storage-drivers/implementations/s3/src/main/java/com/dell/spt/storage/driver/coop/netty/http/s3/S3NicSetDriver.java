@@ -144,7 +144,7 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 
 	@Override
 	public NicSetResources nicSetResources() {
-		return nicSet.resources();
+		return nicSet.resources(ioEventLoopCount());
 	}
 
 	/** Runs as the request is sent: a submitted or a directly dispatched attempt is admitted on its Path. */

@@ -672,6 +672,18 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	}
 
 	/**
+	 * The event loops of this driver's base I/O group, counted from the group as created. A NIC-set
+	 * driver reports it beside its per-NIC groups; it is read once per step report, not per operation.
+	 */
+	protected final int ioEventLoopCount() {
+		var count = 0;
+		for (final var ignored : ioExecutor) {
+			count++;
+		}
+		return count;
+	}
+
+	/**
 	* Note that the particular implementation should also invoke the {@link #sendRequestData(Channel,
 	* Operation)} method to send the actual payload (if any).
 	*

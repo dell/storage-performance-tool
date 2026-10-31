@@ -380,14 +380,19 @@ exposes a single engine's report as `NicSet`. Schema version 1 is one JSON objec
 ```json
 {"schema_version":1,"engine_run_id":7,"step_id":"read1","worker_id":"worker-a",
  "hardware_threads":64,"driver_threads":0,"event_loops_per_nic":8,
- "nics":["ens1f0","ens1f1"],"event_loops":16}
+ "nics":["ens1f0","ens1f1"],"event_loops":16,"base_event_loops":2,
+ "total_event_loops":18}
 ```
 
 `driver_threads` is the configured `storage.driver.threads`, with 0 for the default.
 `event_loops_per_nic` is each NIC's group size: `driver_threads` when set, otherwise
 `max(4, hardware_threads / 8)`. `nics` lists the NICs that opened, in plan order, and
-is empty when the NIC set never opened, so `event_loops` is then 0. A step with
-several NIC-set drivers (a weighted or pipeline step) adds `contexts`, one object per
-NIC-set context with `context_index`, `driver_threads`, `event_loops_per_nic`, `nics`
-and `event_loops`. Its top-level fields are then those every context agrees on, and
-`event_loops` is the engine's total. Added fields keep schema version 1.
+is empty when the NIC set never opened, so `event_loops`, the loops of the per-NIC
+groups, is then 0. `base_event_loops` is the driver's base group, which carries its
+control requests, counted from the group as created, and `total_event_loops` is every
+loop the driver owns, the two summed. A step with several NIC-set drivers (a weighted
+or pipeline step) adds `contexts`, one object per NIC-set context with
+`context_index`, `driver_threads`, `event_loops_per_nic`, `nics`, `event_loops`,
+`base_event_loops` and `total_event_loops`. Its top-level fields are then those every
+context agrees on, and the three event-loop counts are the engine's totals. Added
+fields keep schema version 1.

@@ -64,6 +64,8 @@ public final class NicSetArtifact {
 			}
 		}
 		root.put("event_loops", contexts.stream().mapToInt(context -> context.resources().eventLoops()).sum());
+		root.put("base_event_loops", contexts.stream().mapToInt(context -> context.resources().baseEventLoops()).sum());
+		root.put("total_event_loops", contexts.stream().mapToInt(context -> context.resources().totalEventLoops()).sum());
 		if (contexts.size() > 1) {
 			final var array = root.putArray("contexts");
 			for (final var context : contexts) {
@@ -74,6 +76,8 @@ public final class NicSetArtifact {
 				node.put("event_loops_per_nic", resources.eventLoopsPerNic());
 				nics(node, resources);
 				node.put("event_loops", resources.eventLoops());
+				node.put("base_event_loops", resources.baseEventLoops());
+				node.put("total_event_loops", resources.totalEventLoops());
 			}
 		}
 		try {

@@ -171,7 +171,9 @@ final class S3NicSetNamespaceTest {
 
 		assertEquals(Map.of(NIC_A, List.of(ENDPOINTS.get(0), ENDPOINTS.get(2)), NIC_B, List.of(ENDPOINTS.get(1), ENDPOINTS.get(3))),
 						paths(run.pool()));
-		assertEquals(new NicSetResources(1, 1, List.of(NIC_A, NIC_B)), run.driver().nicSetResources(), "the step's NIC set report");
+		final var resources = run.driver().nicSetResources();
+		assertEquals(new NicSetResources(1, 1, List.of(NIC_A, NIC_B), 2), resources, "the step's NIC set report");
+		assertEquals(4, resources.totalEventLoops(), "a loop per NIC and the two-loop base group");
 		final var opened = bound();
 		assertEquals(8, opened.size(), () -> "pre-opened before the first operation: " + opened);
 		for (final var connection : opened) {
