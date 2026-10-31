@@ -16,10 +16,11 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Pattern;
 import org.openjdk.nashorn.api.scripting.JSObject;
 
@@ -256,21 +257,28 @@ public interface ConfigUtil {
 	 * Sets each list value that {@link #flatten} recorded once more, as a list, on the settings the
 	 * schema types as lists, so such a setting gets exactly the elements it was given. The
 	 * comma-separated string alone reads an empty list back as one empty element, splits an element
-	 * that holds a comma, and drops trailing empty elements. A value that aliasing renamed or replaced
-	 * keeps its string.
+	 * that holds a comma, and drops trailing empty elements. A setting that an aliasing entry names
+	 * keeps the string aliasing gave it, whether aliasing renamed it or replaced its value, even with
+	 * the same text.
 	 *
-	 * @param flatArgs the flattened values before aliasing
 	 * @param appliedArgs the values after aliasing, already set on the configuration
+	 * @param aliasingConfig the aliasing entries that produced them
 	 */
 	static void applyListValues(
 					final Config config,
 					final Map<String, List<String>> listVals,
-					final Map<String, String> flatArgs,
-					final Map<String, String> appliedArgs) {
+					final Map<String, String> appliedArgs,
+					final List<Map<String, Object>> aliasingConfig) {
+		final Set<Object> aliased = new HashSet<>();
+		if (aliasingConfig != null) {
+			for (final var entry : aliasingConfig) {
+				aliased.add(entry.get(AliasingUtil.NAME));
+			}
+		}
 		for (final var listVal : listVals.entrySet()) {
 			final var path = listVal.getKey();
 			if (appliedArgs.containsKey(path)
-							&& Objects.equals(flatArgs.get(path), appliedArgs.get(path))
+							&& !aliased.contains(path)
 							&& isListSetting(config.schema(), path, config.pathSep())) {
 				config.val(path, new ArrayList<>(listVal.getValue()));
 			}

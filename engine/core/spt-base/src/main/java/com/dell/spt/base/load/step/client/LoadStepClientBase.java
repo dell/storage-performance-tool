@@ -2652,7 +2652,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			aliasedArgs.forEach(configCopy::val); // merge
-			applyListValues(configCopy, listVals, argValPairs, aliasedArgs);
+			applyListValues(configCopy, listVals, aliasedArgs, aliasingConfig);
 			EngineBuildInfoProvider.global().projectVersion(configCopy, aliasedArgs.containsKey("run-version"));
 		} catch (final Exception e) {
 			LogUtil.exception(Level.FATAL, e, "Scenario syntax error");
@@ -2677,7 +2677,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		try {
 			final var aliasedArgs = AliasingUtil.apply(argValPairs, aliasingConfig);
 			aliasedArgs.forEach(ctxConfig::val); // merge
-			applyListValues(ctxConfig, listVals, argValPairs, aliasedArgs);
+			applyListValues(ctxConfig, listVals, aliasedArgs, aliasingConfig);
 			EngineBuildInfoProvider.global().projectVersion(ctxConfig, aliasedArgs.containsKey("run-version"));
 		} catch (final Exception e) {
 			LogUtil.exception(Level.FATAL, e, "Scenario syntax error");

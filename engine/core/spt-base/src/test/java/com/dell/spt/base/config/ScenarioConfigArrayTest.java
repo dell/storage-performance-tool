@@ -10,6 +10,7 @@ import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.load.step.client.TestLoadStepClient;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketSet;
 import com.github.akurilov.confuse.Config;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -132,6 +133,24 @@ class ScenarioConfigArrayTest {
 		for (final var malformed : List.of("[\"alpha,beta\"]", "[\"alpha\", \"\"]")) {
 			final var configured = client().config(targetBucket(malformed)).getEffectiveConfig();
 			assertThrows(RunTerminalException.class, () -> TargetBucketSet.count(configured), malformed);
+		}
+	}
+
+	// Aliasing's value stands over the array it replaced, even when its text equals the array's
+	// comma string.
+	@Test
+	void anAliasingReplacementKeepsItsValue() throws Exception {
+		for (final var appendStep : List.of(false, true)) {
+			final var config = TestConfigBuilder.config();
+			final var aliasing = new ArrayList<Map<String, Object>>(config.<Map<String, Object>> listVal("aliasing"));
+			aliasing.add(Map.of("name", "storage-targetBucket-names", "target", "storage-targetBucket-names=alpha,beta"));
+			config.val("aliasing", aliasing);
+			final var client = new TestLoadStepClient(config, List.of(), null, null);
+			final var configured = appendStep
+							? client.append(targetBucket("[\"alpha,beta\"]")).getCtxConfigs().get(0)
+							: client.config(targetBucket("[\"alpha,beta\"]")).getEffectiveConfig();
+
+			assertEquals(List.of("alpha", "beta"), names(configured), appendStep ? "append" : "config");
 		}
 	}
 
