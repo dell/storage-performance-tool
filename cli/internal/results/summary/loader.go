@@ -560,6 +560,8 @@ type ScenarioParams struct {
 	AccessKey      string   `json:"AccessKey"`
 	SecretKey      string   `json:"SecretKey"`
 	Bucket         string   `json:"Bucket"`
+	BucketCount    int      `json:"BucketCount"`
+	BucketNames    []string `json:"BucketNames"`
 	Prefix         string   `json:"Prefix"`
 	Threads        int      `json:"Threads"`
 	S3Driver       string   `json:"S3Driver"`

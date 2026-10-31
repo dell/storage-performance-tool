@@ -99,15 +99,18 @@ type HostSummary struct {
 
 // WorkloadSummary records key scenario parameters.
 type WorkloadSummary struct {
-	Type              string
-	ObjectSizeBytes   int64
-	ObjectSizeMiB     float64
-	ObjectSizeGiB     float64
-	ObjectSizeHuman   string
-	ObjectCount       int64
-	Threads           int
-	Endpoints         []string
-	Bucket            string
+	Type            string
+	ObjectSizeBytes int64
+	ObjectSizeMiB   float64
+	ObjectSizeGiB   float64
+	ObjectSizeHuman string
+	ObjectCount     int64
+	Threads         int
+	Endpoints       []string
+	Bucket          string
+	// BucketSet lists the members of a target bucket set of more than one bucket, in order; nil
+	// for a single bucket. Bucket is then the set's base or the list's placeholder.
+	BucketSet         []string
 	Prefix            string
 	DurationRequest   string
 	CleanupEnabled    bool
@@ -334,6 +337,20 @@ const (
 	objectSizeAverageSuffix = " avg"
 )
 
+// workloadBucketSet returns the members of a run's target bucket set in order when it has more
+// than one bucket: the listed names, or the names generated from the base bucket and the count.
+func workloadBucketSet(params ScenarioParams) []string {
+	if len(params.BucketNames) > 1 {
+		return append([]string(nil), params.BucketNames...)
+	}
+	if params.BucketCount > 1 {
+		if names, err := scenario.TargetBucketMemberNames(params.Bucket, params.BucketCount); err == nil {
+			return names
+		}
+	}
+	return nil
+}
+
 func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 	params := data.Params.ScenarioParams
 	warnings := make([]string, 0, 1)
@@ -360,6 +377,7 @@ func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 		Threads:           params.Threads,
 		Endpoints:         append([]string(nil), params.Endpoints...),
 		Bucket:            params.Bucket,
+		BucketSet:         workloadBucketSet(params),
 		Prefix:            params.Prefix,
 		DurationRequest:   params.Duration,
 		CleanupEnabled:    params.Cleanup,
