@@ -123,7 +123,7 @@ func TestConvertJSONRefusesABucketListItCannotKeepExactly(t *testing.T) {
 		names string
 		want  string
 	}{
-		{`["alpha", 5]`, "element 2 is not a string"},
+		{`["alpha", 5]`, "to a value replay does not know"},
 		{`["alpha", ""]`, `must not be empty`},
 		{`{"a": "b"}`, "to a value replay does not know"},
 		{`"alpha,,beta"`, `must not be empty`},
@@ -213,13 +213,13 @@ Load
 
 func TestJSMentionsTargetBucketDecodesNestedEscapes(t *testing.T) {
 	for _, source := range []string{`targetBucket`, `target\u0042ucket`, `target\\u0042ucket`, `"target\\\\x42ucket"`, `target\u{42}ucket`, `targe\164Bucket`} {
-		if !jsMentionsTargetBucket(source) {
-			t.Fatalf("%s: not detected", source)
+		if mentioned, err := jsMentionsTargetBucket(source); err != nil || !mentioned {
+			t.Fatalf("%s: not detected (err %v)", source, err)
 		}
 	}
 	for _, source := range []string{`target`, `"target" + "Bucket"`, `bucket`, `TargetBucket`} {
-		if jsMentionsTargetBucket(source) {
-			t.Fatalf("%s: detected", source)
+		if mentioned, err := jsMentionsTargetBucket(source); err != nil || mentioned {
+			t.Fatalf("%s: detected (err %v)", source, err)
 		}
 	}
 }
@@ -250,16 +250,16 @@ func TestConvertJSONRefusesATargetBucketOutsideItsPlace(t *testing.T) {
 // A line continuation inside a string, or escapes nested to any depth, still spell targetBucket.
 func TestJSMentionsTargetBucketThroughContinuationsAndDeepNesting(t *testing.T) {
 	for _, terminator := range []string{"\n", "\r", "\r\n", "\u2028", "\u2029"} {
-		if source := `{"target\` + terminator + `Bucket": {"names": ["alpha"]}}`; !jsMentionsTargetBucket(source) {
-			t.Fatalf("continuation %q: not detected", terminator)
+		if mentioned, err := jsMentionsTargetBucket(`{"target\` + terminator + `Bucket": {"names": ["alpha"]}}`); err != nil || !mentioned {
+			t.Fatalf("continuation %q: not detected (err %v)", terminator, err)
 		}
 	}
 	nested := `target\u0042ucket`
 	for depth := 0; depth < 12; depth++ {
 		nested = strings.ReplaceAll(nested, `\`, `\\`)
 	}
-	if !jsMentionsTargetBucket(nested) {
-		t.Fatal("twelve levels of escaping: not detected")
+	if mentioned, err := jsMentionsTargetBucket(nested); err != nil || !mentioned {
+		t.Fatalf("twelve levels of escaping: not detected (err %v)", err)
 	}
 }
 
@@ -323,5 +323,53 @@ func TestConvertJSONComparesTargetBucketPathsMemberByMember(t *testing.T) {
 		if _, err := ConvertJSON(archive(c.config), RunScript{}, opts); err == nil || !strings.Contains(err.Error(), "archived configuration sets") {
 			t.Fatalf("%s: err = %v, want the refusal", c.name, err)
 		}
+	}
+}
+
+// Decoding settles however long the chain of escapes, within a work limit: a harmless chain is
+// read, and a chain built to exceed the limit is refused with the limit named.
+func TestJSMentionsTargetBucketSettlesWithinAWorkLimit(t *testing.T) {
+	harmless := `"\\` + strings.Repeat("u005c", 65) + `"`
+	if mentioned, err := jsMentionsTargetBucket(harmless); err != nil || mentioned {
+		t.Fatalf("a harmless chain of 65 escapes: mentioned %v, err %v", mentioned, err)
+	}
+	if _, err := ConvertJS([]byte("var note = "+harmless+";\nLoad.config({ \"item\" : { \"output\" : { \"path\" : \"/alpha\" } }, \"load\" : { \"step\" : { \"limit\" : { \"time\" : 60 }, \"id\" : \"W\" } } }).run();\n"),
+		RunScript{}, Options{Endpoints: []string{"http://10.0.0.1:9020"}, Bucket: "local", BaseTimestamp: "20260605.121400.000"}); err != nil {
+		t.Fatalf("an archive with a harmless chain converts: %v", err)
+	}
+	if _, err := jsMentionsTargetBucket(`"\\` + strings.Repeat("u005c", 8000) + `"`); err != errJSDecodeLimit {
+		t.Fatalf("a chain built to exceed the work limit: err = %v, want the limit", err)
+	}
+}
+
+// A list resolves with the archived exports, never the replay's rebound ones, so the buckets are
+// the ones the archived run used, in validation, metadata and the generated scenario alike.
+func TestConvertJSONResolvesListNamesWithTheArchivedExports(t *testing.T) {
+	src := []byte(`{"type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}, "targetBucket": {"names": ["${BUCKET}-a", "${BUCKET}-b", "${CLIENT_1}-c"]}}},
+  "steps": [{"type": "load", "config": {"item": {"data": {"size": "10KB"}, "output": {"path": "/placeholder"}}, "test": {"step": {"id": "W", "limit": {"count": 10}}}}}]}`)
+	got, err := ConvertJSON(src, RunScript{ItemOutputPath: "placeholder", Exports: map[string]string{"BUCKET": "archive", "CLIENT_1": "host1"}},
+		Options{Endpoints: []string{"http://10.0.0.1:9020"}, TestHosts: "local-host", BaseTimestamp: "20260605.121400.000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got.ArchivedBucketNames, "|") != "archive-a|archive-b|host1-c" {
+		t.Fatalf("ArchivedBucketNames = %q", got.ArchivedBucketNames)
+	}
+	js := string(got.ScenarioJS)
+	if !strings.Contains(js, `"archive-a"`) || !strings.Contains(js, `"host1-c"`) || strings.Contains(js, "placeholder-a") || strings.Contains(js, "local-host-c") {
+		t.Fatalf("the generated scenario must name the archived buckets:\n%s", js)
+	}
+}
+
+// Every element of names must be a string, in every configuration, even one a step overrides.
+func TestConvertJSONRefusesNamesElementsThatAreNotStrings(t *testing.T) {
+	src := []byte(`{"type": "sequential",
+  "config": {"storage": {"targetBucket": {"names": [{"targetBucket": {"names": ["alpha", "beta"]}}]}}},
+  "steps": [{"type": "load", "config": {"item": {"data": {"size": "10KB"}, "output": {"path": "/alpha"}},
+    "storage": {"targetBucket": {"names": []}}, "test": {"step": {"id": "W", "limit": {"count": 10}}}}}]}`)
+	_, err := ConvertJSON(src, RunScript{}, Options{Endpoints: []string{"http://10.0.0.1:9020"}, Bucket: "local", BaseTimestamp: "20260605.121400.000"})
+	if err == nil || !strings.Contains(err.Error(), "storage.targetBucket.names to a value replay does not know") {
+		t.Fatalf("err = %v, want the refusal", err)
 	}
 }

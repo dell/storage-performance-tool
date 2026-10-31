@@ -118,7 +118,9 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	if len(endpointHosts(opts.Endpoints)) == 0 {
 		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "local endpoints are required for replay"})
 	}
-	archivedBucketNames, listErr := archivedJSONBucketList(legacy, effectiveVars)
+	// Bucket names resolve with the archived exports only: replay rebinds BUCKET, CLIENT and the
+	// node variables to the local target, which would rename the buckets the archived run used.
+	archivedBucketNames, listErr := archivedJSONBucketList(legacy, runScript.Exports)
 	bucket, bucketDiagnostic := replayTargetBucket(opts, runScript, archivedBucketNames, listErr)
 	if bucketDiagnostic != nil {
 		diagnostics = append(diagnostics, *bucketDiagnostic)
@@ -183,7 +185,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 			loadStepNumber++
 			step.Config = mergeConfig(legacy.Config, step.Config)
 			archivedEndpointSelectionFromConfig(step.Config, effectiveVars, archived)
-			converted, err := convertLoadStep(step, i, loadStepNumber, label, baseTS, bucket, opts, effectiveVars, archiveToStepID, itemVars, &itemVarOrder)
+			converted, err := convertLoadStep(step, i, loadStepNumber, label, baseTS, bucket, opts, effectiveVars, runScript.Exports, archiveToStepID, itemVars, &itemVarOrder)
 			if err != nil {
 				diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: err.Error()})
 				continue
@@ -301,7 +303,7 @@ type convertedCommand struct {
 	rewrites []PathRewrite
 }
 
-func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, bucket string, opts Options, vars map[string]string, archiveToStepID map[string]string, itemVars map[string]itemFileExpr, itemVarOrder *[]string) (convertedStep, error) {
+func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, bucket string, opts Options, vars, archivedExports map[string]string, archiveToStepID map[string]string, itemVars map[string]itemFileExpr, itemVarOrder *[]string) (convertedStep, error) {
 	archiveID, opType, opSuffix, loadFactory, err := loadStepIdentity(step, index, vars)
 	if err != nil {
 		return convertedStep{}, err
@@ -428,9 +430,9 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	if bucketCount := int64Value(getPath(step.Config, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyCount), vars); bucketCount > 1 {
 		setPath(config, bucketCount, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyCount)
 	}
-	// A bucket list is kept as archived; item.output.path then only carries its placeholder.
-	// The archive-wide check has already refused a list replay cannot keep exactly.
-	if names, err := jsonBucketNames(getPath(step.Config, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyNames), vars); err == nil && len(names) > 0 {
+	// A bucket list is kept as archived, its names resolved with the archived exports as the
+	// archive-wide check resolved them; item.output.path then only carries its placeholder.
+	if names, err := jsonBucketNames(getPath(step.Config, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyNames), archivedExports); err == nil && len(names) > 0 {
 		setPath(config, names, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyNames)
 	}
 	var rewrites []PathRewrite

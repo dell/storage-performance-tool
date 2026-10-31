@@ -114,10 +114,14 @@ func jsonBucketNames(raw any, vars map[string]string) ([]string, error) {
 // escaped character, which stands for itself.
 var jsLooseEscapeRe = regexp.MustCompile("\\\\(?:\r\n|[\r\n\u2028\u2029]|u\\{[0-9A-Fa-f]{1,6}\\}|u[0-9A-Fa-f]{4}|x[0-9A-Fa-f]{2}|[0-7]{1,3}|.)")
 
-// jsLooseDecodeRounds bounds the decoding of escapes inside escapes, such as a JSON document held
-// in a JavaScript string. Each round that changes the text shortens it, so decoding settles; text
-// that has not settled within the bound counts as a mention.
-const jsLooseDecodeRounds = 64
+// jsLooseDecodeWorkLimit bounds the bytes decoding may scan in total. Each pass that changes the
+// text shortens it, so decoding always settles; the limit only stops an input built to make it
+// settle slowly, which is then refused rather than read.
+const jsLooseDecodeWorkLimit = 128 << 20
+
+// errJSDecodeLimit reports an archive whose escapes did not settle within the decoding work limit.
+var errJSDecodeLimit = fmt.Errorf("archived JavaScript scenario has escapes that replay could not decode within its work "+
+	"limit (%d MiB scanned), so it cannot tell whether the scenario sets storage.targetBucket", jsLooseDecodeWorkLimit>>20)
 
 // refuseJSTargetBucket refuses a JavaScript archive that sets a target bucket set. A JavaScript
 // scenario is a program, so replay cannot read a bucket count or list from it exactly; it refuses
@@ -127,7 +131,11 @@ const jsLooseDecodeRounds = 64
 // toward refusing. A name assembled at run time, such as "target" + "Bucket", is outside replay's
 // model.
 func refuseJSTargetBucket(source string) error {
-	if !jsMentionsTargetBucket(source) {
+	mentioned, err := jsMentionsTargetBucket(source)
+	if err != nil {
+		return err
+	}
+	if !mentioned {
 		return nil
 	}
 	return fmt.Errorf("archived JavaScript scenario sets storage.targetBucket (a bucket count or list), which replay " +
@@ -135,20 +143,23 @@ func refuseJSTargetBucket(source string) error {
 }
 
 // jsMentionsTargetBucket reports whether targetBucket appears anywhere in the source once every
-// escape is decoded, repeatedly, so that escapes inside escaped strings are decoded too.
-func jsMentionsTargetBucket(source string) bool {
+// escape is decoded, repeatedly until the text settles, so that escapes inside escaped strings are
+// decoded too. It returns errJSDecodeLimit when the text has not settled within the work limit.
+func jsMentionsTargetBucket(source string) (bool, error) {
 	text := source
-	for round := 0; round < jsLooseDecodeRounds; round++ {
+	for scanned := 0; ; {
 		if strings.Contains(text, legacyKeyTargetBucket) {
-			return true
+			return true, nil
+		}
+		if scanned += len(text); scanned > jsLooseDecodeWorkLimit {
+			return false, errJSDecodeLimit
 		}
 		decoded := jsLooseEscapeRe.ReplaceAllStringFunc(text, decodeLooseJSEscape)
 		if decoded == text {
-			return false
+			return false, nil
 		}
 		text = decoded
 	}
-	return true
 }
 
 // jsLineTerminators are the JavaScript line terminators, CR LF counted as one.
@@ -229,8 +240,8 @@ func checkJSONTargetBucketObject(path []string, value any) error {
 }
 
 // jsonTargetBucketMemberValid reports whether a storage.targetBucket member is one replay knows,
-// with a value of its type: a number or string count, a string or array names, a boolean or string
-// provision.
+// with a value of its type: a number or string count, a string or an array of strings names, a
+// boolean or string provision.
 func jsonTargetBucketMemberValid(key string, member any) bool {
 	switch key {
 	case legacyKeyCount:
@@ -239,8 +250,15 @@ func jsonTargetBucketMemberValid(key string, member any) bool {
 			return true
 		}
 	case legacyKeyNames:
-		switch member.(type) {
-		case string, []any:
+		switch names := member.(type) {
+		case string:
+			return true
+		case []any:
+			for _, name := range names {
+				if _, ok := name.(string); !ok {
+					return false
+				}
+			}
 			return true
 		}
 	case "provision":
