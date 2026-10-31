@@ -180,11 +180,6 @@ final class NicPathPool {
 				callback.complete(channel, null);
 				return true;
 			}
-			// A reused connection's Path, so a hand-off that closing cancels counts on the Path it took.
-			final var taken = channel.attr(ATTR_KEY_PATH).get();
-			if (taken != null) {
-				path = taken.index;
-			}
 			if (!state.compareAndSet(WAITING, QUEUED)) {
 				return false;
 			}
@@ -282,6 +277,10 @@ final class NicPathPool {
 				} else {
 					open++;
 				}
+			} else {
+				// The reused connection's Path, published under the monitor that selected it, so an
+				// attempt that closing settles before its hand-off counts on that Path.
+				attempt.chose(reused.attr(ATTR_KEY_PATH).get());
 			}
 		}
 		if (failure != null) {
@@ -322,6 +321,8 @@ final class NicPathPool {
 						idle++;
 						return;
 					}
+					// The waiter takes this connection's Path while the monitor that paired them is held.
+					waiter.chose(path);
 				}
 			}
 			if (waiter == null) {
