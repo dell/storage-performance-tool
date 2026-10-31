@@ -35,7 +35,7 @@ On startup, spt loads environment variables from `$HOME/.env` and then from `./.
 
 You can use these variables to avoid repeating sensitive or commonly used parameters:
 
-- **S3 connection:** `S3_ENDPOINTS` (CSV) or `S3_ENDPOINT` (single), `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`
+- **S3 connection:** `S3_ENDPOINTS` (CSV) or `S3_ENDPOINT` (single), `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKETS` (CSV, as `--buckets`) or `S3_BUCKET` (single)
 - **Authentication:** `S3_AUTH_VERSION` (set to `2` only for legacy targets; default `4`)
 - **Hosts:** `HOSTS` (comma-separated list of `[user@]host`)
 - **Workload:** `THREADS` (parallel client threads)
@@ -50,7 +50,7 @@ You can use these variables to avoid repeating sensitive or commonly used parame
 
 Variable expansion: use `$VAR` or `${VAR}`. Command substitutions like `$(pwd)` are not supported; use `$PWD` instead.
 
-**Precedence:** CLI flags > OS environment > `./.env` > `$HOME/.env` > built-in defaults. For endpoints specifically: `--endpoints` > `S3_ENDPOINTS` > `S3_ENDPOINT`.
+**Precedence:** CLI flags > OS environment > `./.env` > `$HOME/.env` > built-in defaults. For endpoints specifically: `--endpoints` > `S3_ENDPOINTS` > `S3_ENDPOINT`. For target buckets: `--buckets` or `--buckets-file` ignores both variables; `--bucket` or `--bucket-count` ignores `S3_BUCKETS`, and `S3_BUCKET` still supplies a missing `--bucket`; with no bucket flag, `S3_BUCKETS` wins over `S3_BUCKET`, and spt prints a line saying so when both are set. `spt replay` reads only `S3_BUCKET`.
 
 ---
 
@@ -760,7 +760,7 @@ requirements.
 | `--endpoints` | `-e` | from `S3_ENDPOINTS` / `S3_ENDPOINT` | One or more current S3 endpoint URLs |
 | `--access-key` | `-a` | from `S3_ACCESS_KEY` | Current target access key |
 | `--secret-key` | `-s` | from `S3_SECRET_KEY` | Current target secret key |
-| `--bucket` | `-b` | from `S3_BUCKET` or archived bucket | Current target bucket override |
+| `--bucket` | `-b` | from `S3_BUCKET` or archived bucket | Current target bucket override; rejected when the archived run lists its target buckets, which replay keeps (`S3_BUCKET` is then ignored) |
 | `--auth-version` | | `4` | S3 signature version (`2` or `4`) |
 | `--s3-driver` | | from `SPT_S3_DRIVER` or `default` | S3 storage driver backend: `default`, `netty`, `aws`, or `rdma`. RDMA replay launch is not implemented yet; use `rdma` only with `--generate-only` |
 

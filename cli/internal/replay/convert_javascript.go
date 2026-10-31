@@ -26,6 +26,7 @@ var (
 	jsLogPathRe               = regexp.MustCompile(`MONGOOSE_DIR\s*\+\s*"\/log\/([^/"]+)\/([^"]+)"`)
 	jsMongoosePathRe          = regexp.MustCompile(`MONGOOSE_DIR\s*\+\s*"\/([^"]+)"`)
 	jsOutputKeyRe             = regexp.MustCompile(`"output"\s*:\s*\{`)
+	jsTargetBucketKeyRe       = regexp.MustCompile(`"targetBucket"\s*:\s*\{`)
 	jsPathKeyRe               = regexp.MustCompile(`"path"\s*:`)
 	jsIdentifierRe            = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	jsParentConfigAllowedKeys = map[string]struct{}{
@@ -46,6 +47,7 @@ var (
 
 		legacyKeyTargetBucket: {},
 		legacyKeyCount:        {},
+		legacyKeyNames:        {},
 	}
 	jsParentSSLAllowedKeys = map[string]struct{}{
 		legacyKeyEnabled: {},
@@ -69,20 +71,24 @@ func ConvertJS(raw []byte, runScript RunScript, opts Options) (*Generated, error
 	if len(endpointHosts(opts.Endpoints)) == 0 {
 		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "local endpoints are required for replay"})
 	}
-	bucket := effectiveBucket(opts.Bucket, runScript)
-	if bucket == "" {
+	body := string(raw)
+	archivedBucketNames := archivedJSBucketList(body, effectiveVars)
+	bucket, bucketDiagnostic := replayBucket(opts, runScript, archivedBucketNames)
+	if bucketDiagnostic != nil {
+		diagnostics = append(diagnostics, *bucketDiagnostic)
+	} else if bucket == "" {
 		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "bucket is required; set --bucket, S3_BUCKET, or archived BUCKET"})
 	} else {
 		effectiveVars["BUCKET"] = bucket
 	}
 
-	body := string(raw)
 	diagnostics = append(diagnostics, detectUnsupportedJSProtocols(body, effectiveVars)...)
 	diagnostics = normalizeDiagnostics(diagnostics)
 	if hasErrors(diagnostics) {
 		return &Generated{
-			Diagnostics:     diagnostics,
-			EffectiveBucket: bucket,
+			Diagnostics:         diagnostics,
+			EffectiveBucket:     bucket,
+			ArchivedBucketNames: archivedBucketNames,
 		}, diagnosticsError(diagnostics)
 	}
 
@@ -126,11 +132,12 @@ func ConvertJS(raw []byte, runScript RunScript, opts Options) (*Generated, error
 	diagnostics = normalizeDiagnostics(diagnostics)
 	if hasErrors(diagnostics) {
 		return &Generated{
-			Diagnostics:     diagnostics,
-			Steps:           steps,
-			PathRewrites:    pathRewrites,
-			CommandOps:      commandOps,
-			EffectiveBucket: bucket,
+			Diagnostics:         diagnostics,
+			Steps:               steps,
+			PathRewrites:        pathRewrites,
+			CommandOps:          commandOps,
+			EffectiveBucket:     bucket,
+			ArchivedBucketNames: archivedBucketNames,
 		}, diagnosticsError(diagnostics)
 	}
 
@@ -141,12 +148,13 @@ func ConvertJS(raw []byte, runScript RunScript, opts Options) (*Generated, error
 		out.WriteByte('\n')
 	}
 	return &Generated{
-		ScenarioJS:      []byte(out.String()),
-		Diagnostics:     diagnostics,
-		Steps:           steps,
-		PathRewrites:    pathRewrites,
-		CommandOps:      commandOps,
-		EffectiveBucket: bucket,
+		ScenarioJS:          []byte(out.String()),
+		Diagnostics:         diagnostics,
+		Steps:               steps,
+		PathRewrites:        pathRewrites,
+		CommandOps:          commandOps,
+		EffectiveBucket:     bucket,
+		ArchivedBucketNames: archivedBucketNames,
 
 		ArchivedEndpointSelection: *archived,
 	}, nil
@@ -506,7 +514,9 @@ func rewriteJSParentConfigs(source string, opts Options, bucket string, vars map
 		}
 		configText := source[open : closeIdx+1]
 		sslConfig, unsupportedSSLKeys := extractJSParentSSLConfig(configText, vars)
-		bucketCount := intValue(jsFieldValue(jsObjectForKey(jsObjectForKey(configText, "storage"), legacyKeyTargetBucket), legacyKeyCount, vars), vars)
+		targetBucketText := jsObjectForKey(jsObjectForKey(configText, "storage"), legacyKeyTargetBucket)
+		bucketCount := intValue(jsFieldValue(targetBucketText, legacyKeyCount, vars), vars)
+		bucketNames, _ := jsStringListField(targetBucketText, legacyKeyNames, vars)
 		if enabled, ok := sslConfig[legacyKeyEnabled].(bool); ok {
 			if warning, mismatch := archivedSSLMismatchWarning(enabled, opts.Endpoints, name); mismatch {
 				diagnostics = append(diagnostics, Diagnostic{Severity: severityWarning, Message: warning})
@@ -534,7 +544,7 @@ func rewriteJSParentConfigs(source string, opts Options, bucket string, vars map
 		replacements = append(replacements, jsReplacement{
 			start: match[0],
 			end:   end,
-			text:  sanitizedJSParentConfig(name, opts, bucket, sslConfig, bucketCount),
+			text:  sanitizedJSParentConfig(name, opts, bucket, sslConfig, bucketCount, bucketNames),
 		})
 	}
 	return applyJSReplacements(source, replacements), diagnostics
@@ -552,7 +562,7 @@ func parentConfigHasExtraKeys(configText string) bool {
 	return false
 }
 
-func sanitizedJSParentConfig(name string, opts Options, bucket string, sslConfig map[string]any, bucketCount int) string {
+func sanitizedJSParentConfig(name string, opts Options, bucket string, sslConfig map[string]any, bucketCount int, bucketNames []string) string {
 	config := map[string]any{
 		"item": map[string]any{
 			legacyKeyOutput: map[string]any{
@@ -571,6 +581,10 @@ func sanitizedJSParentConfig(name string, opts Options, bucket string, sslConfig
 	// A target bucket set is kept; its base becomes the replay bucket of item.output.path.
 	if bucketCount > 1 {
 		setPath(config, bucketCount, "storage", legacyKeyTargetBucket, legacyKeyCount)
+	}
+	// A bucket list is kept as archived; item.output.path then only carries its placeholder.
+	if len(bucketNames) > 0 {
+		setPath(config, bucketNames, "storage", legacyKeyTargetBucket, legacyKeyNames)
 	}
 	configJS, err := marshalJSConfig(config)
 	if err != nil {
@@ -713,6 +727,22 @@ func detectSensitiveJSConfig(source string) []Diagnostic {
 		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: fmt.Sprintf("generated JavaScript still contains sensitive configuration key %q; inline archived auth is not supported for replay", key)})
 	}
 	return diagnostics
+}
+
+// archivedJSBucketList returns the first non-empty storage.targetBucket.names of an archived
+// JavaScript scenario's configuration objects, or nil.
+func archivedJSBucketList(source string, vars map[string]string) []string {
+	for _, match := range jsTargetBucketKeyRe.FindAllStringIndex(source, -1) {
+		open := match[1] - 1
+		closeIdx := findMatchingJSBrace(source, open)
+		if closeIdx < 0 {
+			continue
+		}
+		if names, ok := jsStringListField(source[open:closeIdx+1], legacyKeyNames, vars); ok {
+			return names
+		}
+	}
+	return nil
 }
 
 func jsObjectForKey(source, key string) string {

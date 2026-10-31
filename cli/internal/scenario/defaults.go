@@ -48,10 +48,12 @@ type StorageConfig struct {
 	Rdma         *RdmaConfig         `yaml:"rdma,omitempty"`     // pointer so omitted when nil
 }
 
-// TargetBucketConfig represents storage.targetBucket. The engine ships count: 1 and provision: true.
+// TargetBucketConfig represents storage.targetBucket. The engine ships count: 1, names: [] and
+// provision: true.
 type TargetBucketConfig struct {
-	Count     int   `yaml:"count,omitempty"`
-	Provision *bool `yaml:"provision,omitempty"`
+	Count     int      `yaml:"count,omitempty"`
+	Names     []string `yaml:"names,omitempty"`
+	Provision *bool    `yaml:"provision,omitempty"`
 }
 
 // ItemConfig represents item-level configuration knobs.
@@ -416,14 +418,8 @@ func GenerateDefaults(params Params) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		// An override that replaces storage.targetBucket or storage as a whole, such as
-		// storage.targetBucket={provision: false}, would drop the bucket count the CLI validated.
-		// Overrides that set the count itself are rejected earlier, so the flag's count is final.
-		if params.BucketCount > 1 {
-			data, err = applyEngineOverrides(data, []string{fmt.Sprintf("storage.targetBucket.count=%d", params.BucketCount)})
-			if err != nil {
-				return nil, err
-			}
+		if data, err = restoreTargetBucketSet(data, params); err != nil {
+			return nil, err
 		}
 	}
 
@@ -434,6 +430,25 @@ func GenerateDefaults(params Params) ([]byte, error) {
 	return data, nil
 }
 
+// restoreTargetBucketSet writes the validated bucket set back after engine overrides. An override
+// that replaces storage.targetBucket or storage as a whole, such as
+// storage.targetBucket={provision: false}, would drop the count or names the CLI validated.
+// Overrides that set them are rejected earlier, so the flags' values are final.
+func restoreTargetBucketSet(data []byte, params Params) ([]byte, error) {
+	var err error
+	if params.BucketCount > 1 {
+		if data, err = applyEngineOverrides(data, []string{fmt.Sprintf("storage.targetBucket.count=%d", params.BucketCount)}); err != nil {
+			return nil, err
+		}
+	}
+	// Names are set as a value, not parsed from an override string, because a name used as written
+	// may hold characters that YAML would interpret.
+	if len(params.BucketNames) > 1 {
+		return setDefaultsValue(data, append([]string(nil), params.BucketNames...), "storage", "targetBucket", "names")
+	}
+	return data, nil
+}
+
 // targetBucketConfig returns the storage.targetBucket defaults only for a bucket set or a
 // provisioning opt-out, so the generated defaults are unchanged for one bucket with provisioning on.
 func targetBucketConfig(params Params) *TargetBucketConfig {
@@ -441,14 +456,50 @@ func targetBucketConfig(params Params) *TargetBucketConfig {
 	if params.BucketCount > 1 {
 		config.Count = params.BucketCount
 	}
+	if len(params.BucketNames) > 1 {
+		config.Names = params.BucketNames
+	}
 	if params.TargetBucketProvisionDisabled {
 		provision := false
 		config.Provision = &provision
 	}
-	if config.Count == 0 && config.Provision == nil {
+	if config.Count == 0 && config.Names == nil && config.Provision == nil {
 		return nil
 	}
 	return &config
+}
+
+// setDefaultsValue sets one path of generated defaults to a value, creating missing maps. It fails
+// when an ancestor holds a scalar, as an engine override of that path would.
+func setDefaultsValue(data []byte, value any, path ...string) ([]byte, error) {
+	var root map[string]any
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, fmt.Errorf("failed to parse defaults before setting %s: %w", strings.Join(path, "."), err)
+	}
+	if root == nil {
+		root = map[string]any{}
+	}
+	node := root
+	for _, part := range path[:len(path)-1] {
+		next, ok := node[part]
+		if !ok || next == nil {
+			child := map[string]any{}
+			node[part] = child
+			node = child
+			continue
+		}
+		child, ok := next.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("cannot set %s: %s already contains a scalar value", strings.Join(path, "."), part)
+		}
+		node = child
+	}
+	node[path[len(path)-1]] = value
+	merged, err := yaml.Marshal(root)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal defaults after setting %s: %w", strings.Join(path, "."), err)
+	}
+	return merged, nil
 }
 
 func applyEngineOverrides(data []byte, overrides []string) ([]byte, error) {

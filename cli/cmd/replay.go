@@ -84,16 +84,17 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	out := cmd.OutOrStdout()
 
 	generated, err := replay.Generate(cmd.Context(), replay.Options{
-		SourceURL:   sourceURL,
-		RunID:       newReplayRunID(),
-		Endpoints:   endpoints,
-		AccessKey:   accessKey,
-		SecretKey:   secretKey,
-		Bucket:      bucket,
-		AuthVersion: authVersion,
-		TestHosts:   testHosts,
-		Label:       label,
-		S3Driver:    s3Driver,
+		SourceURL:     sourceURL,
+		RunID:         newReplayRunID(),
+		Endpoints:     endpoints,
+		AccessKey:     accessKey,
+		SecretKey:     secretKey,
+		Bucket:        bucket,
+		BucketFromEnv: flagFromEnv(cmd, "bucket"),
+		AuthVersion:   authVersion,
+		TestHosts:     testHosts,
+		Label:         label,
+		S3Driver:      s3Driver,
 
 		EndpointSelection: endpointSelection,
 	})
@@ -550,7 +551,7 @@ func init() {
 	_ = replayCmd.Flags().MarkHidden("endpoint")
 	replayCmd.Flags().StringP("access-key", "a", "", "The local S3 access key credential")
 	replayCmd.Flags().StringP("secret-key", "s", "", "The local S3 secret key credential")
-	replayCmd.Flags().StringP("bucket", "b", "", "The local bucket override (default: S3_BUCKET or archived bucket)")
+	replayCmd.Flags().StringP("bucket", "b", "", "The local bucket override (default: S3_BUCKET or archived bucket); rejected when the archived run lists its target buckets, which replay keeps")
 	replayCmd.Flags().Int("auth-version", 4, "S3 authentication signature version (2 or 4; default 4)")
 	replayCmd.Flags().String("test-hosts", "127.0.0.1", "Comma-separated local test host list for replay variable remapping")
 	replayCmd.Flags().String("label", "replay", "Label prefix for generated canonical step IDs")

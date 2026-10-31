@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // MaxBucketCount is the largest target bucket set, storage.targetBucket.count.
@@ -42,6 +43,59 @@ func TargetBucketMemberNames(bucket string, count int) ([]string, error) {
 		names[i] = name
 	}
 	return names, nil
+}
+
+// listedBucketExpressionMarkers are the engine's expression markers, which a listed name must not
+// contain because the engine would evaluate them in a path.
+var listedBucketExpressionMarkers = []string{"${", "#{", "%{"}
+
+// ValidateBucketList checks a list of target bucket names (storage.targetBucket.names) by the
+// engine's rules (TargetBucketSet): 1 to MaxBucketCount names, each non-empty, without '/', ',',
+// whitespace, control characters or an expression marker, and no name twice by exact, case-sensitive
+// comparison. Listed names are used as written, so the AWS naming rules of generated names do not
+// apply.
+func ValidateBucketList(names []string) error {
+	if len(names) == 0 {
+		return fmt.Errorf("no bucket names are listed")
+	}
+	if len(names) > MaxBucketCount {
+		return fmt.Errorf("%d bucket names are listed, at most %d", len(names), MaxBucketCount)
+	}
+	seen := make(map[string]int, len(names))
+	for i, name := range names {
+		if problem := listedBucketNameProblem(name); problem != "" {
+			return fmt.Errorf("bucket name %d %q %s", i+1, name, problem)
+		}
+		if first, ok := seen[name]; ok {
+			return fmt.Errorf("bucket name %d %q repeats bucket name %d", i+1, name, first)
+		}
+		seen[name] = i + 1
+	}
+	return nil
+}
+
+// listedBucketNameProblem reports why the engine would refuse a listed name, or "" when it would
+// use it as written.
+func listedBucketNameProblem(name string) string {
+	if name == "" {
+		return "must not be empty"
+	}
+	for _, c := range name {
+		switch {
+		case c == '/' || c == ',':
+			return fmt.Sprintf("must not contain '%c'", c)
+		case unicode.IsSpace(c):
+			return "must not contain whitespace"
+		case unicode.IsControl(c):
+			return "must not contain a control character"
+		}
+	}
+	for _, marker := range listedBucketExpressionMarkers {
+		if strings.Contains(name, marker) {
+			return "must not contain the expression marker " + marker
+		}
+	}
+	return ""
 }
 
 // bucketNameProblem reports why a generated name breaks the AWS general-purpose bucket naming

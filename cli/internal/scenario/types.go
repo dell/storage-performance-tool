@@ -36,6 +36,10 @@ type Params struct {
 	BucketCount     int      // storage.targetBucket.count when greater than 1; 0 or 1 targets the bucket alone
 	RMIRegistryPort int      // Single-host engine RMI registry port (0 = engine default 1099)
 
+	// BucketNames is storage.targetBucket.names when two or more buckets are listed; Bucket is then the
+	// first name, which item.output.path carries as a placeholder. A one-name list is Bucket alone.
+	BucketNames []string `json:",omitempty"`
+
 	// Multi-endpoint controls
 	SliceEndpoints bool // Partition endpoint list across nodes in distributed runs
 
@@ -170,4 +174,16 @@ func resolveStorageDriverType(s3Driver string) string {
 	default:
 		return storageDriverTypeS3
 	}
+}
+
+// BucketSetSize returns the number of buckets in the target bucket set: the listed names, the
+// generated count, or 1.
+func (p Params) BucketSetSize() int {
+	if len(p.BucketNames) > 0 {
+		return len(p.BucketNames)
+	}
+	if p.BucketCount > 1 {
+		return p.BucketCount
+	}
+	return 1
 }

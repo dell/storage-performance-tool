@@ -15,16 +15,18 @@ const (
 
 // Options contains user/local runtime inputs for importing and generating a replay.
 type Options struct {
-	SourceURL   string
-	RunID       int64
-	Endpoints   []string
-	AccessKey   string
-	SecretKey   string
-	Bucket      string
-	AuthVersion int
-	TestHosts   string
-	Label       string
-	S3Driver    string
+	SourceURL string
+	RunID     int64
+	Endpoints []string
+	AccessKey string
+	SecretKey string
+	Bucket    string
+	// BucketFromEnv marks a Bucket that came from S3_BUCKET rather than --bucket.
+	BucketFromEnv bool
+	AuthVersion   int
+	TestHosts     string
+	Label         string
+	S3Driver      string
 	// EndpointSelection applies opt-in endpoint selection to the local replay target.
 	EndpointSelection scenario.EndpointSelection
 	BaseTimestamp     string
@@ -97,6 +99,9 @@ type Generated struct {
 	PathRewrites    []PathRewrite
 	CommandOps      []CommandOperation
 	EffectiveBucket string
+	// ArchivedBucketNames is the archived run's bucket list, which replay keeps; EffectiveBucket is
+	// then only the output path's placeholder.
+	ArchivedBucketNames []string
 	// ArchivedEndpointSelection lists the endpoint-selection declarations the archive contains.
 	ArchivedEndpointSelection ArchivedEndpointSelection
 }

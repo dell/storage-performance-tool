@@ -193,7 +193,11 @@ func BuildPreflight(g *Generated, opts Options) string {
 	if archivedClients := splitCSV(g.Artifacts.RunScript.ClientAddrs); len(archivedClients) > 0 {
 		fmt.Fprintf(&b, "  Archived clients: %d\n", len(archivedClients))
 	}
-	fmt.Fprintf(&b, "  Bucket: %s\n", g.EffectiveBucket)
+	if names := g.ArchivedBucketNames; len(names) > 0 {
+		fmt.Fprintf(&b, "  Buckets: %d (%s ... %s), kept from the archive\n", len(names), names[0], names[len(names)-1])
+	} else {
+		fmt.Fprintf(&b, "  Bucket: %s\n", g.EffectiveBucket)
+	}
 	b.WriteString("  Auth: local environment\n")
 	b.WriteString("\nWorkload\n")
 	for _, step := range g.Steps {
@@ -369,6 +373,7 @@ func buildMetadata(g *Generated) []byte {
 		Scenario        string             `json:"scenario"`
 		ScenarioFormat  string             `json:"scenarioFormat"`
 		EffectiveBucket string             `json:"effectiveBucket"`
+		BucketNames     []string           `json:"bucketNames,omitempty"`
 		Steps           []StepSummary      `json:"steps"`
 		PathRewrites    []PathRewrite      `json:"pathRewrites,omitempty"`
 		CommandOps      []CommandOperation `json:"commandOperations,omitempty"`
@@ -382,6 +387,7 @@ func buildMetadata(g *Generated) []byte {
 		Scenario:        g.Artifacts.ScenarioName,
 		ScenarioFormat:  g.Artifacts.ScenarioFormat,
 		EffectiveBucket: g.EffectiveBucket,
+		BucketNames:     g.ArchivedBucketNames,
 		Steps:           g.Steps,
 		PathRewrites:    g.PathRewrites,
 		CommandOps:      g.CommandOps,

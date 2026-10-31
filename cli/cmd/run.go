@@ -2296,10 +2296,7 @@ func init() {
 	runCmd.Flags().Bool("slice-endpoints", false, "Partition endpoints across nodes in distributed runs")
 	runCmd.Flags().StringP("access-key", "a", "", "The S3 access key credential")
 	runCmd.Flags().StringP("secret-key", "s", "", "The S3 secret key credential")
-	runCmd.Flags().StringP("bucket", "b", "", "Target bucket; for DELETE --items-file it is an optional assertion applied to every manifest row")
-	runCmd.Flags().Int(flagBucketCount, 1, fmt.Sprintf("Spread new objects over N buckets <bucket>-0 ... <bucket>-<N-1> (1-%d); "+
-		"existing objects keep the bucket their items file records; write, write-verify, seeded read and delete, mixed",
-		scenario.MaxBucketCount))
+	registerBucketSetFlags(runCmd.Flags())
 	runCmd.Flags().String("prefix", "", "Write/write-verify: generated-key prefix (literal, include trailing / for a directory); seeded DELETE: owned namespace root; guarded existing DELETE: exact S3 prefix without a leading slash; list/read-verify: listing constraint")
 	runCmd.Flags().String("region", "", "AWS region for S3 requests (env S3_REGION); empty uses the region of a standard AWS endpoint, else us-east-1")
 	runCmd.Flags().Bool(flagProvisionTargetBucket, true, "Create a missing target bucket before the phase that writes the run's objects; false still checks that every target bucket exists and is accessible. Never clears or deletes a bucket")
@@ -2463,6 +2460,10 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		WorkloadType:        workloadType,
 		ObjectDataDedupable: true,
 	}
+	targetBuckets, err := resolveBucketSet(cmd)
+	if err != nil {
+		return scenario.Params{}, err
+	}
 
 	rawLabel, _ := cmd.Flags().GetString("label")
 	params.Label = sanitizeLabel(rawLabel)
@@ -2524,8 +2525,7 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		secretKey, _ := cmd.Flags().GetString("secret-key")
 		params.SecretKey = secretKey
 
-		bucket, _ := cmd.Flags().GetString("bucket")
-		params.Bucket = bucket
+		params.Bucket = targetBuckets.Bucket
 
 		prefixFlag := cmd.Flags().Lookup("prefix")
 		if prefixFlag != nil {
@@ -2650,6 +2650,9 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		return scenario.Params{}, err
 	}
 	if err := applyBucketCount(cmd, &params); err != nil {
+		return scenario.Params{}, err
+	}
+	if err := applyBucketList(cmd, &params, targetBuckets); err != nil {
 		return scenario.Params{}, err
 	}
 
@@ -2944,11 +2947,7 @@ func applyBucketCount(cmd *cobra.Command, params *scenario.Params) error {
 	if params.WorkloadType == WorkloadTypeDelete {
 		// Seeded DELETE then deletes from a multi-bucket manifest, and standalone DELETE does not batch
 		// across buckets, the same rule as a multi-bucket --items-file.
-		batchSize := scenario.DefaultDeleteBatchSize
-		if cmd.Flags().Lookup(flagDeleteBatchSize) != nil {
-			batchSize, _ = cmd.Flags().GetInt(flagDeleteBatchSize)
-		}
-		if batchSize > scenario.MinDeleteBatchSize {
+		if seededDeleteBatchSize(cmd) > scenario.MinDeleteBatchSize {
 			return fmt.Errorf("--%s %d with seeded delete requires --%s=1: each DELETE request covers one bucket, "+
 				"and batching across buckets is not supported", flagBucketCount, count, flagDeleteBatchSize)
 		}
@@ -3246,7 +3245,10 @@ func appendS3DisplayLines(lines []string, params scenario.Params) []string {
 		}
 	}
 
-	if params.Bucket != "" {
+	if len(params.BucketNames) > 1 {
+		lines = append(lines, fmt.Sprintf("Buckets: %d (%s ... %s)",
+			len(params.BucketNames), params.BucketNames[0], params.BucketNames[len(params.BucketNames)-1]))
+	} else if params.Bucket != "" {
 		lines = append(lines, fmt.Sprintf("Bucket: %s", params.Bucket))
 	} else {
 		lines = append(lines, "Bucket: (not set)")

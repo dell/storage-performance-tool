@@ -64,6 +64,7 @@ const (
 	legacyKeyType        = "type"
 
 	legacyKeyTargetBucket = "targetBucket"
+	legacyKeyNames        = "names"
 
 	opTypeCreate = "create"
 	opTypeDelete = "delete"
@@ -117,8 +118,11 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	if len(endpointHosts(opts.Endpoints)) == 0 {
 		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "local endpoints are required for replay"})
 	}
-	bucket := effectiveBucket(opts.Bucket, runScript)
-	if bucket == "" {
+	archivedBucketNames := archivedJSONBucketList(legacy, effectiveVars)
+	bucket, bucketDiagnostic := replayBucket(opts, runScript, archivedBucketNames)
+	if bucketDiagnostic != nil {
+		diagnostics = append(diagnostics, *bucketDiagnostic)
+	} else if bucket == "" {
 		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "bucket is required; set --bucket, S3_BUCKET, or archived BUCKET"})
 	} else {
 		effectiveVars["BUCKET"] = bucket
@@ -140,8 +144,9 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	diagnostics = normalizeDiagnostics(diagnostics)
 	if hasErrors(diagnostics) {
 		return &Generated{
-			Diagnostics:     diagnostics,
-			EffectiveBucket: bucket,
+			Diagnostics:         diagnostics,
+			EffectiveBucket:     bucket,
+			ArchivedBucketNames: archivedBucketNames,
 		}, diagnosticsError(diagnostics)
 	}
 
@@ -243,11 +248,12 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	diagnostics = normalizeDiagnostics(diagnostics)
 	if hasErrors(diagnostics) {
 		return &Generated{
-			Diagnostics:     diagnostics,
-			Steps:           stepsOut,
-			PathRewrites:    pathRewrites,
-			CommandOps:      commandOps,
-			EffectiveBucket: bucket,
+			Diagnostics:         diagnostics,
+			Steps:               stepsOut,
+			PathRewrites:        pathRewrites,
+			CommandOps:          commandOps,
+			EffectiveBucket:     bucket,
+			ArchivedBucketNames: archivedBucketNames,
 		}, diagnosticsError(diagnostics)
 	}
 
@@ -273,12 +279,13 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	}
 
 	return &Generated{
-		ScenarioJS:      []byte(js),
-		Diagnostics:     diagnostics,
-		Steps:           stepsOut,
-		PathRewrites:    pathRewrites,
-		CommandOps:      commandOps,
-		EffectiveBucket: bucket,
+		ScenarioJS:          []byte(js),
+		Diagnostics:         diagnostics,
+		Steps:               stepsOut,
+		PathRewrites:        pathRewrites,
+		CommandOps:          commandOps,
+		EffectiveBucket:     bucket,
+		ArchivedBucketNames: archivedBucketNames,
 
 		ArchivedEndpointSelection: *archived,
 	}, nil
@@ -422,6 +429,10 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	// A target bucket set is kept; its base becomes the replay bucket of item.output.path.
 	if bucketCount := int64Value(getPath(step.Config, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyCount), vars); bucketCount > 1 {
 		setPath(config, bucketCount, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyCount)
+	}
+	// A bucket list is kept as archived; item.output.path then only carries its placeholder.
+	if names, ok := stringListValue(getPath(step.Config, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyNames), vars); ok && len(names) > 0 {
+		setPath(config, names, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyNames)
 	}
 	var rewrites []PathRewrite
 	if rawOutput := itemPathString(getPath(step.Config, "item", legacyKeyOutput, "file"), vars); rawOutput != "" {
@@ -665,6 +676,7 @@ func isModeledJSONConfigPath(path string) bool {
 		"storage.net.endpoint.dns.timeoutMilliSec",
 		"storage.net.endpoint.connect.timeoutMilliSec",
 		"storage.targetBucket.count",
+		"storage.targetBucket.names",
 		"test.step.id",
 		"test.step.limit.fail.count",
 		"test.step.limit.count",
@@ -1420,6 +1432,61 @@ func localEndpointSSLEnabled(endpoints []string) (bool, bool) {
 	default:
 		return false, false
 	}
+}
+
+// replayBucket returns the bucket replay writes to, or an error diagnostic. An archived bucket list
+// is kept and item.output.path only carries its placeholder, so --bucket would change nothing: it is
+// rejected, and S3_BUCKET from the environment is ignored.
+func replayBucket(opts Options, runScript RunScript, archivedNames []string) (string, *Diagnostic) {
+	if len(archivedNames) == 0 {
+		return effectiveBucket(opts.Bucket, runScript), nil
+	}
+	if strings.TrimSpace(opts.Bucket) != "" && !opts.BucketFromEnv {
+		listed := archivedNames[0]
+		if len(archivedNames) > 1 {
+			listed += " ... " + archivedNames[len(archivedNames)-1]
+		}
+		return "", &Diagnostic{Severity: severityError, Message: fmt.Sprintf(
+			"--bucket cannot be used: the archived run lists its target buckets (%d: %s), and replay keeps them",
+			len(archivedNames), listed)}
+	}
+	if bucket := effectiveBucket("", runScript); bucket != "" {
+		return bucket, nil
+	}
+	return archivedNames[0], nil
+}
+
+// archivedJSONBucketList returns the first non-empty storage.targetBucket.names of an archived JSON
+// scenario's configurations, or nil.
+func archivedJSONBucketList(legacy legacyScenario, vars map[string]string) []string {
+	if names := configBucketList(legacy.Config, vars); len(names) > 0 {
+		return names
+	}
+	for _, steps := range [][]legacyStep{legacy.Steps, legacy.Jobs} {
+		if names := stepsBucketList(steps, vars); len(names) > 0 {
+			return names
+		}
+	}
+	return nil
+}
+
+func stepsBucketList(steps []legacyStep, vars map[string]string) []string {
+	for _, step := range steps {
+		if names := configBucketList(step.Config, vars); len(names) > 0 {
+			return names
+		}
+		for _, nested := range [][]legacyStep{step.Steps, step.Jobs} {
+			if names := stepsBucketList(nested, vars); len(names) > 0 {
+				return names
+			}
+		}
+	}
+	return nil
+}
+
+func configBucketList(config map[string]any, vars map[string]string) []string {
+	names, _ := stringListValue(getPath(config, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyNames), vars)
+	return names
 }
 
 func effectiveBucket(localBucket string, runScript RunScript) string {

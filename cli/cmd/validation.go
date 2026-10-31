@@ -53,19 +53,27 @@ func ValidateS3Flags(cmd *cobra.Command, workloadType string) error {
 		return fmt.Errorf(ErrMissingSecretKey, workloadType)
 	}
 
+	return validateTargetBucketRequired(cmd, workloadType)
+}
+
+// validateTargetBucketRequired resolves the run's bucket set and requires a bucket where the
+// workload needs one. The bucket list flags and S3_BUCKETS meet the requirement, so the set is
+// resolved here, before the scenario parameters, and nothing writes a listed name into --bucket.
+func validateTargetBucketRequired(cmd *cobra.Command, workloadType string) error {
+	targetBuckets, err := resolveBucketSet(cmd)
+	if err != nil {
+		return err
+	}
 	// Tables workload uses --table-bucket instead of --bucket
 	itemsFile := ""
 	if flag := cmd.Flags().Lookup("items-file"); flag != nil {
 		itemsFile, _ = cmd.Flags().GetString("items-file")
 	}
 	if workloadType != WorkloadTypeTables &&
-		(workloadType != WorkloadTypeDelete || strings.TrimSpace(itemsFile) == "") {
-		bucket, _ := cmd.Flags().GetString("bucket")
-		if bucket == "" {
-			return fmt.Errorf(ErrMissingBucket, workloadType)
-		}
+		(workloadType != WorkloadTypeDelete || strings.TrimSpace(itemsFile) == "") &&
+		targetBuckets.Bucket == "" {
+		return fmt.Errorf(ErrMissingBucket, workloadType)
 	}
-
 	return nil
 }
 

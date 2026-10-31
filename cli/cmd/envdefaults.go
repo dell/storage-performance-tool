@@ -35,7 +35,7 @@ func markEnvApplied(cmd *cobra.Command, flag, value string) {
 // Env variables honored:
 //
 //	S3_ENDPOINTS (CSV) or S3_ENDPOINT (single)
-//	S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET, S3_REGION
+//	S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKETS (CSV) or S3_BUCKET, S3_REGION
 //	HOSTS (equivalent to --test-hosts)
 func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 	// setFromEnv sets a flag's value and records that it came from env, not
@@ -78,7 +78,9 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 	// S3 auth/bucket
 	_ = setIf("access-key", "S3_ACCESS_KEY")
 	_ = setIf("secret-key", "S3_SECRET_KEY")
-	_ = setIf("bucket", "S3_BUCKET")
+	if err := applyBucketEnvDefaults(cmd, setIf, setFromEnv); err != nil {
+		return err
+	}
 	_ = setIf("region", constants.EnvS3Region)
 
 	if f := cmd.Flags().Lookup("auth-version"); f != nil && !cmd.Flags().Changed("auth-version") {
@@ -252,6 +254,32 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 		}
 	}
 
+	return nil
+}
+
+// applyBucketEnvDefaults applies S3_BUCKETS and S3_BUCKET. An explicit --buckets or --buckets-file
+// suppresses both. An explicit --bucket or --bucket-count suppresses S3_BUCKETS, and S3_BUCKET then
+// still supplies a missing --bucket, the generated set's base. When only the environment names
+// buckets, S3_BUCKETS wins over S3_BUCKET, with one line saying so. A command without --buckets,
+// such as replay, reads S3_BUCKET alone.
+func applyBucketEnvDefaults(cmd *cobra.Command, setIf func(flag, envKey string) error,
+	setFromEnv func(flag, value string) error) error {
+	flags := cmd.Flags()
+	if flags.Changed(flagBuckets) || flags.Changed(flagBucketsFile) {
+		return nil
+	}
+	buckets := strings.TrimSpace(os.Getenv(constants.EnvS3Buckets))
+	if buckets == "" || flags.Lookup(flagBuckets) == nil || flags.Changed("bucket") || flags.Changed(flagBucketCount) {
+		_ = setIf("bucket", constants.EnvS3Bucket)
+		return nil
+	}
+	if err := setFromEnv(flagBuckets, buckets); err != nil {
+		return fmt.Errorf("invalid %s value %q: %w", constants.EnvS3Buckets, buckets, err)
+	}
+	if strings.TrimSpace(os.Getenv(constants.EnvS3Bucket)) != "" {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Using %s for the target buckets; %s is ignored\n",
+			constants.EnvS3Buckets, constants.EnvS3Bucket)
+	}
 	return nil
 }
 
