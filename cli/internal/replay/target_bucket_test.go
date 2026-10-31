@@ -46,39 +46,6 @@ func TestConvertJSONKeepsAnArchivedBucketCountWithTheReplayBucketAsBase(t *testi
 	}
 }
 
-func TestConvertJSKeepsStepAndParentBucketCounts(t *testing.T) {
-	src := `var parentConfig_1 = {
-  "storage" : { "driver" : { "type" : "s3" }, "targetBucket" : { "count" : 3 } }
-};
-Load
-    .config(parentConfig_1)
-    .config({
-      "item" : { "data" : { "size" : "10KB" }, "output" : { "path" : "/archive" } },
-      "storage" : { "targetBucket" : { "count" : 4 } },
-      "load" : { "step" : { "limit" : { "time" : 60 }, "id" : "W" } }
-    })
-    .run();
-`
-	got, err := ConvertJS([]byte(src), RunScript{ItemOutputPath: "archive"}, Options{
-		Endpoints: []string{"http://10.0.0.1:9020"}, Bucket: "local", BaseTimestamp: "20260605.121400.000"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	js := string(got.ScenarioJS)
-	parent, step, _ := strings.Cut(js[strings.Index(js, "var parentConfig_1"):], "Load\n")
-	if !strings.Contains(parent, `"count": 3`) || !strings.Contains(parent, `"path": "/local"`) {
-		t.Fatalf("parent config must keep its set:\n%s", parent)
-	}
-	if !strings.Contains(step, `"targetBucket" : { "count" : 4 }`) || !strings.Contains(step, `"path" : "/local"`) {
-		t.Fatalf("step config must keep its set:\n%s", step)
-	}
-	for _, d := range got.Diagnostics {
-		if strings.Contains(d.Message, "outside replay's modeled parent-config subset") {
-			t.Fatalf("the count is modeled, not stripped: %s", d.Message)
-		}
-	}
-}
-
 // Replay keeps an archived bucket list. --bucket would replace only its placeholder, so it is
 // rejected, and S3_BUCKET from the environment is ignored.
 
@@ -92,19 +59,6 @@ const jsonArchiveWithBucketList = `{
     }}
   ]
 }`
-
-const jsArchiveWithBucketList = `var parentConfig_1 = {
-  "storage" : { "driver" : { "type" : "s3" }, "targetBucket" : { "names" : [ "ps-eu", "PS_US" ] } }
-};
-Load
-    .config(parentConfig_1)
-    .config({
-      "item" : { "data" : { "size" : "10KB" }, "output" : { "path" : "/ps-eu" } },
-      "storage" : { "targetBucket" : { "names" : [ "ps-eu", "PS_US", "ab" ] } },
-      "load" : { "step" : { "limit" : { "time" : 60 }, "id" : "W" } }
-    })
-    .run();
-`
 
 func TestConvertJSONKeepsAnArchivedBucketList(t *testing.T) {
 	for _, opts := range []Options{
@@ -133,42 +87,11 @@ func TestConvertJSONKeepsAnArchivedBucketList(t *testing.T) {
 	}
 }
 
-func TestConvertJSKeepsStepAndParentBucketLists(t *testing.T) {
-	for _, opts := range []Options{
-		{Endpoints: []string{"http://10.0.0.1:9020"}, BaseTimestamp: "20260605.121400.000"},
-		{Endpoints: []string{"http://10.0.0.1:9020"}, Bucket: "from-env", BucketFromEnv: true, BaseTimestamp: "20260605.121400.000"},
-	} {
-		got, err := ConvertJS([]byte(jsArchiveWithBucketList), RunScript{}, opts)
-		if err != nil {
-			t.Fatalf("bucket %q: %v", opts.Bucket, err)
-		}
-		js := string(got.ScenarioJS)
-		parent, step, _ := strings.Cut(js[strings.Index(js, "var parentConfig_1"):], "Load\n")
-		if !strings.Contains(parent, `"names": [`) || !strings.Contains(parent, `"PS_US"`) {
-			t.Fatalf("bucket %q: parent config must keep its list:\n%s", opts.Bucket, parent)
-		}
-		if !strings.Contains(step, `"names" : [ "ps-eu", "PS_US", "ab" ]`) {
-			t.Fatalf("bucket %q: step config must keep its list:\n%s", opts.Bucket, step)
-		}
-		if strings.Contains(js, "from-env") || got.EffectiveBucket != "ps-eu" {
-			t.Fatalf("bucket %q: S3_BUCKET must not replace the placeholder (effective %q):\n%s", opts.Bucket, got.EffectiveBucket, js)
-		}
-		for _, d := range got.Diagnostics {
-			if strings.Contains(d.Message, "outside replay's modeled parent-config subset") {
-				t.Fatalf("the list is modeled, not stripped: %s", d.Message)
-			}
-		}
-	}
-}
-
 func TestReplayRejectsAnExplicitBucketForAnArchivedList(t *testing.T) {
 	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, Bucket: "local", BaseTimestamp: "20260605.121400.000"}
-	_, jsonErr := ConvertJSON([]byte(jsonArchiveWithBucketList), RunScript{Exports: map[string]string{"MONGOOSE_DIR": "/opt/m"}}, opts)
-	_, jsErr := ConvertJS([]byte(jsArchiveWithBucketList), RunScript{}, opts)
-	for kind, err := range map[string]error{"JSON": jsonErr, "JavaScript": jsErr} {
-		if err == nil || !strings.Contains(err.Error(), "--bucket cannot be used") || !strings.Contains(err.Error(), "ps-eu ...") {
-			t.Fatalf("%s: err = %v, want the --bucket rejection naming the list", kind, err)
-		}
+	_, err := ConvertJSON([]byte(jsonArchiveWithBucketList), RunScript{Exports: map[string]string{"MONGOOSE_DIR": "/opt/m"}}, opts)
+	if err == nil || !strings.Contains(err.Error(), "--bucket cannot be used") || !strings.Contains(err.Error(), "ps-eu ...") {
+		t.Fatalf("err = %v, want the --bucket rejection naming the list", err)
 	}
 }
 
@@ -188,115 +111,6 @@ func TestReplayPreflightShowsAKeptList(t *testing.T) {
 
 // Replay keeps a list only when it can keep it exactly; anything else stops the replay before it
 // runs, never turning unreadable JavaScript into bucket names or dropping the list.
-
-func jsArchiveWithParentNames(names string) string {
-	return `var buckets = ["alpha", "beta"];
-var parentConfig_1 = {
-  "storage" : { "driver" : { "type" : "s3" }, "targetBucket" : { "names" : ` + names + ` } }
-};
-Load
-    .config(parentConfig_1)
-    .config({
-      "item" : { "data" : { "size" : "10KB" }, "output" : { "path" : "/alpha" } },
-      "load" : { "step" : { "limit" : { "time" : 60 }, "id" : "W" } }
-    })
-    .run();
-`
-}
-
-func TestConvertJSRefusesABucketListItCannotKeepExactly(t *testing.T) {
-	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, BaseTimestamp: "20260605.121400.000"}
-	for _, c := range []struct {
-		names string
-		want  string
-	}{
-		{`buckets`, "not a reference or expression"},
-		{`buckets.concat(["gamma"])`, "not a reference or expression"},
-		{`["alpha", buckets[1]]`, "element 2 is not a string literal"},
-		{`["alpha", 5]`, "element 2 is not a string literal"},
-		{`["al" + "pha", "beta"]`, "element 1 is followed by an expression"},
-		{`["alpha"].concat(["beta"])`, "names is an expression"},
-		{`"alpha" + ",beta"`, "names is an expression"},
-		{`["\8"]`, "an escape replay does not decode"},
-		{`["\uD83D\uDE00"]`, "a surrogate"},
-		{`["\x4"]`, "a malformed \\x escape"},
-		{`["\u{}"]`, "braced"},
-		{`""`, `bucket name 1 "" must not be empty`},
-		{`["alpha", ""]`, `bucket name 2 "" must not be empty`},
-		{`["alpha,beta"]`, `must not contain ','`},
-		{`["alpha", "alpha"]`, "repeats bucket name 1"},
-		{`["a/b"]`, "must not contain '/'"},
-	} {
-		got, err := ConvertJS([]byte(jsArchiveWithParentNames(c.names)), RunScript{}, opts)
-		if err == nil || !strings.Contains(err.Error(), "storage.targetBucket") || !strings.Contains(err.Error(), c.want) {
-			t.Fatalf("names %s: err = %v, want %q", c.names, err, c.want)
-		}
-		if got != nil && len(got.ScenarioJS) > 0 {
-			t.Fatalf("names %s: no scenario may be generated", c.names)
-		}
-	}
-}
-
-func TestConvertJSKeepsLiteralListsWhateverTheKeyQuoting(t *testing.T) {
-	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, BaseTimestamp: "20260605.121400.000"}
-	for _, c := range []struct {
-		names string
-		want  []string
-	}{
-		{`["alpha", "beta"]`, []string{"alpha", "beta"}},
-		{`['alpha', "PS_US"]`, []string{"alpha", "PS_US"}},
-		{`"alpha,beta"`, []string{"alpha", "beta"}},
-	} {
-		got, err := ConvertJS([]byte(jsArchiveWithParentNames(c.names)), RunScript{}, opts)
-		if err != nil {
-			t.Fatalf("names %s: %v", c.names, err)
-		}
-		if strings.Join(got.ArchivedBucketNames, "|") != strings.Join(c.want, "|") {
-			t.Fatalf("names %s: ArchivedBucketNames = %q, want %q", c.names, got.ArchivedBucketNames, c.want)
-		}
-		parent, _, _ := strings.Cut(string(got.ScenarioJS)[strings.Index(string(got.ScenarioJS), "var parentConfig_1"):], "Load\n")
-		for _, name := range c.want {
-			if !strings.Contains(parent, `"`+name+`"`) {
-				t.Fatalf("names %s: parent config must keep %q:\n%s", c.names, name, parent)
-			}
-		}
-	}
-
-	// Unquoted keys, in a step configuration and in a parent configuration.
-	unquoted := `var parentConfig_1 = {
-  storage : { driver : { type : "s3" }, targetBucket : { names : [ "ps-eu", "PS_US" ] } }
-};
-Load
-    .config(parentConfig_1)
-    .config({
-      "item" : { "data" : { "size" : "10KB" }, "output" : { "path" : "/ps-eu" } },
-      "storage" : { targetBucket : { names : [ "ps-eu", "PS_US" ] } },
-      "load" : { "step" : { "limit" : { "time" : 60 }, "id" : "W" } }
-    })
-    .run();
-`
-	got, err := ConvertJS([]byte(unquoted), RunScript{}, opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(got.ArchivedBucketNames, "|") != "ps-eu|PS_US" {
-		t.Fatalf("unquoted keys: ArchivedBucketNames = %q", got.ArchivedBucketNames)
-	}
-	if parent := string(got.ScenarioJS); !strings.Contains(parent, `"names": [`) {
-		t.Fatalf("unquoted keys: the parent config must keep the list:\n%s", parent)
-	}
-	explicit := opts
-	explicit.Bucket = "local"
-	if _, err := ConvertJS([]byte(unquoted), RunScript{}, explicit); err == nil || !strings.Contains(err.Error(), "--bucket cannot be used") {
-		t.Fatalf("unquoted keys: an explicit --bucket must be rejected, err = %v", err)
-	}
-
-	// An empty list is no list: the replay bucket applies as for one bucket.
-	empty, err := ConvertJS([]byte(jsArchiveWithParentNames(`[]`)), RunScript{}, explicit)
-	if err != nil || empty.ArchivedBucketNames != nil || empty.EffectiveBucket != "local" {
-		t.Fatalf("empty list: err = %v, names = %q, bucket = %q", err, empty.ArchivedBucketNames, empty.EffectiveBucket)
-	}
-}
 
 func TestConvertJSONRefusesABucketListItCannotKeepExactly(t *testing.T) {
 	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, BaseTimestamp: "20260605.121400.000"}
@@ -330,100 +144,6 @@ func TestConvertJSONRefusesABucketListItCannotKeepExactly(t *testing.T) {
 	}
 }
 
-func jsArchiveWithParentStorage(storage string) string {
-	return `var parentConfig_1 = {
-  "storage" : ` + storage + `
-};
-Load
-    .config(parentConfig_1)
-    .config({
-      "item" : { "data" : { "size" : "10KB" }, "output" : { "path" : "/alpha" } },
-      "load" : { "step" : { "limit" : { "time" : 60 }, "id" : "W" } }
-    })
-    .run();
-`
-}
-
-// Comments and string contents never count, and a list is read only where JavaScript would read it.
-func TestConvertJSReadsBucketListsAsTokens(t *testing.T) {
-	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, BaseTimestamp: "20260605.121400.000"}
-	for _, c := range []struct {
-		name    string
-		storage string
-		want    []string
-	}{
-		{"line comment decoy", "{ targetBucket: {\n  // names: [\"decoy\"],\n  names: [\"alpha\", \"beta\"]\n} }", []string{"alpha", "beta"}},
-		{"block comment decoy", "{ targetBucket: { /* names: [\"decoy\"], */ names: [\"alpha\", \"beta\"] } }", []string{"alpha", "beta"}},
-		{"comment before a colon", "{ targetBucket /* note */ : { names /* note */ : [\"alpha\", \"beta\"] } }", []string{"alpha", "beta"}},
-		{"escapes", "{ targetBucket: { names: ['\\u0061lpha', \"\\x62eta\"] } }", []string{"alpha", "beta"}},
-		{"escaped keys", "{ \"target\\u0042ucket\": { \"na\\u006des\": [\"alpha\", \"beta\"] } }", []string{"alpha", "beta"}},
-		{"a bucket named targetBucket", "{ targetBucket: { names: [\"targetBucket\", \"beta\"] } }", []string{"targetBucket", "beta"}},
-		{"carriage return ends a line comment", "{ targetBucket: {\r  // note\r  names: [\"alpha\", \"beta\"] } }", []string{"alpha", "beta"}},
-		{"braces in a comment", "{ targetBucket: {/* } */ names: [\"alpha\", \"beta\"]} }", []string{"alpha", "beta"}},
-		{"trailing comma in array", "{ targetBucket: { names: [\"alpha\", \"beta\",] } }", []string{"alpha", "beta"}},
-		{"comma string with a trailing comma", "{ targetBucket: { names: \"alpha,beta,\" } }", []string{"alpha", "beta"}},
-		{"only commas", "{ targetBucket: { names: \",\" } }", nil},
-		{"key text inside a string", "{ driver: { type: \"s3\" }, note: 'targetBucket: { names: buckets }' }", nil},
-	} {
-		caseOpts := opts
-		if c.want == nil {
-			caseOpts.Bucket = "local" // no list, so the replay needs a bucket
-		}
-		got, err := ConvertJS([]byte(jsArchiveWithParentStorage(c.storage)), RunScript{}, caseOpts)
-		if err != nil {
-			t.Fatalf("%s: %v", c.name, err)
-		}
-		if strings.Join(got.ArchivedBucketNames, "|") != strings.Join(c.want, "|") {
-			t.Fatalf("%s: ArchivedBucketNames = %q, want %q", c.name, got.ArchivedBucketNames, c.want)
-		}
-		js := string(got.ScenarioJS)
-		if strings.Contains(js, "decoy") && strings.Contains(js[strings.Index(js, "var parentConfig_1"):strings.Index(js, "Load\n")], `"decoy"`) {
-			t.Fatalf("%s: the rewritten parent config must not carry the commented-out list:\n%s", c.name, js)
-		}
-		if c.want != nil {
-			explicit := opts
-			explicit.Bucket = "local"
-			if _, err := ConvertJS([]byte(jsArchiveWithParentStorage(c.storage)), RunScript{}, explicit); err == nil || !strings.Contains(err.Error(), "--bucket cannot be used") {
-				t.Fatalf("%s: an explicit --bucket must be rejected, err = %v", c.name, err)
-			}
-		}
-	}
-	for _, c := range []struct {
-		name    string
-		storage string
-		want    string
-	}{
-		{"variable as the targetBucket value", "tb", ""},
-		{"targetBucket as a variable", "{ targetBucket: tb }", "is not an object literal"},
-		{"member access", "{ driver: { type: \"s3\" } };\nparentConfig_1.storage.targetBucket = { names: [\"alpha\"] }", "outside an object literal key"},
-		{"string index", "{ driver: { type: \"s3\" } };\nparentConfig_1.storage[\"targetBucket\"] = { names: [\"alpha\"] }", "outside an object literal key"},
-	} {
-		_, err := ConvertJS([]byte(jsArchiveWithParentStorage(c.storage)), RunScript{}, opts)
-		if c.want == "" {
-			continue // no targetBucket token at all: nothing for the list check to read
-		}
-		if err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Fatalf("%s: err = %v, want %q", c.name, err, c.want)
-		}
-	}
-}
-
-func TestConvertJSReadsAParentBucketCountAsTokens(t *testing.T) {
-	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, Bucket: "local", BaseTimestamp: "20260605.121400.000"}
-	got, err := ConvertJS([]byte(jsArchiveWithParentStorage("{ targetBucket: {\n  // count: 8,\n  count: 4\n} }")), RunScript{}, opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parent := string(got.ScenarioJS)
-	parent = parent[strings.Index(parent, "var parentConfig_1"):strings.Index(parent, "Load\n")]
-	if !strings.Contains(parent, `"count": 4`) || strings.Contains(parent, `"count": 8`) {
-		t.Fatalf("the parent config must keep the real count:\n%s", parent)
-	}
-	if _, err := ConvertJS([]byte(jsArchiveWithParentStorage("{ targetBucket: { count: 2 * 2 } }")), RunScript{}, opts); err == nil || !strings.Contains(err.Error(), "count is an expression") {
-		t.Fatalf("a count expression must be refused, err = %v", err)
-	}
-}
-
 func TestConvertJSONSplitsCommaStringsAsTheEngine(t *testing.T) {
 	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, BaseTimestamp: "20260605.121400.000"}
 	archive := func(names string) []byte {
@@ -440,54 +160,84 @@ func TestConvertJSONSplitsCommaStringsAsTheEngine(t *testing.T) {
 	}
 }
 
-// JavaScript replay cannot read exactly is refused before anything runs.
-func TestConvertJSRefusesBucketSetsItCannotReadExactly(t *testing.T) {
-	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, Bucket: "local", BaseTimestamp: "20260605.121400.000"}
-	for _, c := range []struct {
-		name    string
-		storage string
-		want    string
-	}{
-		{"regular expression", "{ driver: {type: /[/*]/.test(\"x\") ? \"mock\" : \"s3\"}, targetBucket: {names: [\"alpha\", \"beta\"]} /* end */ }", "outside strings and comments"},
-		{"regular expression decoy", "{ driver: {type: /targetBucket: { names: [\"decoy\"] }/.test(\"x\") ? \"mock\" : \"s3\"} }", "outside strings and comments"},
-		{"division", "{ targetBucket: { count: 8 / 2 } }", "outside strings and comments"},
-		{"escaped identifier", "{ target\\u0042ucket: { names: [\"alpha\"] } }", "outside strings and comments"},
-		{"template literal", "{ targetBucket: { names: [`alpha`] } }", "outside strings and comments"},
-		{"conditional value", "{ targetBucket: {names:[\"alpha\",\"beta\"]} ? {names:[\"gamma\",\"delta\"]} : {names:[\"epsilon\",\"zeta\"]} }", "not an object literal"},
-		{"duplicate names", "{ targetBucket: { names: [\"decoy\"], names: [\"alpha\", \"beta\"] } }", "names is set twice"},
-		{"duplicate targetBucket", "{ targetBucket: { names: [\"decoy\"] }, targetBucket: { names: [\"alpha\"] } }", "sets targetBucket twice in one object"},
-		{"unknown member", "{ targetBucket: { names: [\"alpha\"], extra: 1 } }", "does not know this targetBucket setting"},
-		{"spread", "{ targetBucket: { ...more } }", "spread or computed key"},
-		{"braced escape", "{ targetBucket: { names: ['\\u{61}lpha'] } }", "braced"},
-		{"computed member access", "{ driver: { type: \"s3\" } };\nparentConfig_1.storage[\"targetBucket\"] = { names: [\"alpha\"] }", "outside an object literal key"},
-		{"provision expression", "{ targetBucket: { provision: !0 } }", "provision"},
-		{"U+2028 after a line comment", "{ targetBucket: { // note\u2028 names: [\"alpha\", \"beta\"] } }", "outside strings and comments"},
-		{"no-break space between tokens", "{ targetBucket:\u00a0{ names: [\"alpha\"] } }", "outside strings and comments"},
+// A JavaScript scenario is a program, so replay refuses any JavaScript archive that sets a bucket
+// set, however it spells targetBucket, rather than replay into other buckets.
+func TestConvertJSRefusesAnArchiveThatSetsABucketSet(t *testing.T) {
+	archive := func(storage string) []byte {
+		return []byte(`var parentConfig_1 = {
+  "storage" : ` + storage + `
+};
+Load
+    .config(parentConfig_1)
+    .config({
+      "item" : { "data" : { "size" : "10KB" }, "output" : { "path" : "/alpha" } },
+      "load" : { "step" : { "limit" : { "time" : 60 }, "id" : "W" } }
+    })
+    .run();
+`)
+	}
+	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, BaseTimestamp: "20260605.121400.000"}
+	for _, c := range []struct{ name, storage string }{
+		{"list", `{ "targetBucket" : { "names" : [ "ps-eu", "PS_US" ] } }`},
+		{"count", `{ "targetBucket" : { "count" : 4 } }`},
+		{"unquoted keys", `{ targetBucket: { names: ["alpha", "beta"] } }`},
+		{"dashed path", `{ "driver" : { "type" : "s3" } }, "storage-targetBucket-names" : ["alpha", "beta"]`},
+		{"unicode escape", `{ "target\u0042ucket" : { "names" : ["alpha"] } }`},
+		{"hex escape", `{ "target\x42ucket" : { "names" : ["alpha"] } }`},
+		{"octal escape", `{ "target\102ucket" : { "names" : ["alpha"] } }`},
+		{"identity escape", `{ "target\Bucket" : { "names" : ["alpha"] } }`},
+		{"escaped identifier", `{ target\u0042ucket : { names : ["alpha"] } }`},
+		{"JSON in a string", `JSON.parse("{\"target\\u0042ucket\": {\"names\": [\"alpha\"]}}")`},
+		{"only a comment", `{ "driver" : { "type" : "s3" } } // targetBucket is not set here`},
 	} {
-		if _, err := ConvertJS([]byte(jsArchiveWithParentStorage(c.storage)), RunScript{}, opts); err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Fatalf("%s: err = %v, want %q", c.name, err, c.want)
+		got, err := ConvertJS(archive(c.storage), RunScript{}, opts)
+		if err == nil || !strings.Contains(err.Error(), "sets storage.targetBucket") {
+			t.Fatalf("%s: err = %v, want the refusal", c.name, err)
+		}
+		if got != nil && len(got.ScenarioJS) > 0 {
+			t.Fatalf("%s: no scenario may be generated", c.name)
 		}
 	}
-	// Without targetBucket anywhere, the same constructs are no concern of the bucket set.
-	if _, err := ConvertJS([]byte(jsArchiveWithParentStorage("{ driver: { type: \"s3\" }, note: 8 / 2 }")), RunScript{}, opts); err != nil {
-		t.Fatalf("a scenario without a bucket set is not checked: %v", err)
+	explicit := opts
+	explicit.Bucket = "local"
+	got, err := ConvertJS(archive(`{ "driver" : { "type" : "s3" } }`), RunScript{}, explicit)
+	if err != nil || got.EffectiveBucket != "local" || got.ArchivedBucketNames != nil {
+		t.Fatalf("an archive without a bucket set replays as before: err = %v, bucket = %q", err, got.EffectiveBucket)
 	}
 }
 
-// A parent config with braces in its comments is rebuilt as valid JavaScript.
-func TestConvertJSRebuildsAParentConfigWhoseCommentsHoldBraces(t *testing.T) {
-	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, BaseTimestamp: "20260605.121400.000"}
-	for _, storage := range []string{
-		"{ targetBucket: {/* } */ names: [\"alpha\", \"beta\"]} }",
-		"{ targetBucket: {/* { */ names: [\"alpha\", \"beta\"]} }",
+func TestJSMentionsTargetBucketDecodesNestedEscapes(t *testing.T) {
+	for _, source := range []string{`targetBucket`, `target\u0042ucket`, `target\\u0042ucket`, `"target\\\\x42ucket"`, `target\u{42}ucket`, `targe\164Bucket`} {
+		if !jsMentionsTargetBucket(source) {
+			t.Fatalf("%s: not detected", source)
+		}
+	}
+	for _, source := range []string{`target`, `"target" + "Bucket"`, `bucket`, `TargetBucket`} {
+		if jsMentionsTargetBucket(source) {
+			t.Fatalf("%s: detected", source)
+		}
+	}
+}
+
+// A JSON configuration sets a bucket set only as storage.targetBucket; any other spelling would be
+// dropped, so it is refused.
+func TestConvertJSONRefusesATargetBucketOutsideItsPlace(t *testing.T) {
+	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, Bucket: "local", BaseTimestamp: "20260605.121400.000"}
+	archive := func(config string) []byte {
+		return []byte(`{"type": "sequential", "config": ` + config + `,
+  "steps": [{"type": "load", "config": {"item": {"data": {"size": "10KB"}, "output": {"path": "/alpha"}}, "test": {"step": {"id": "W", "limit": {"count": 10}}}}}]}`)
+	}
+	for _, c := range []struct{ name, config, want string }{
+		{"dashed path", `{"storage-targetBucket-names": ["alpha", "beta"]}`, "sets storage-targetBucket-names"},
+		{"partly dashed", `{"storage": {"targetBucket-count": 4}}`, "sets storage.targetBucket-count"},
+		{"elsewhere", `{"item": {"targetBucket": {"count": 4}}}`, "sets item.targetBucket"},
+		{"unknown member", `{"storage": {"targetBucket": {"count": 4, "extra": 1}}}`, "storage.targetBucket.extra"},
 	} {
-		got, err := ConvertJS([]byte(jsArchiveWithParentStorage(storage)), RunScript{}, opts)
-		if err != nil {
-			t.Fatalf("%s: %v", storage, err)
+		if _, err := ConvertJSON(archive(c.config), RunScript{}, opts); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("%s: err = %v, want %q", c.name, err, c.want)
 		}
-		js := string(got.ScenarioJS)
-		if strings.Contains(js, "};};") || strings.Count(js, "var parentConfig_1") != 1 || !strings.Contains(js, `"PS_US"`) && !strings.Contains(js, `"beta"`) {
-			t.Fatalf("%s: the parent config must be rebuilt once, with its list:\n%s", storage, js)
-		}
+	}
+	if _, err := ConvertJSON(archive(`{"storage": {"targetBucket": {"count": 4, "provision": false}}}`), RunScript{}, opts); err != nil {
+		t.Fatalf("storage.targetBucket with known members replays: %v", err)
 	}
 }

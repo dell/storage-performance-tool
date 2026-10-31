@@ -69,6 +69,10 @@ func ConvertJS(raw []byte, runScript RunScript, opts Options) (*Generated, error
 	if len(endpointHosts(opts.Endpoints)) == 0 {
 		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "local endpoints are required for replay"})
 	}
+	body := string(raw)
+	if err := refuseJSTargetBucket(body); err != nil {
+		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: err.Error()})
+	}
 	bucket := effectiveBucket(opts.Bucket, runScript)
 	if bucket == "" {
 		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "bucket is required; set --bucket, S3_BUCKET, or archived BUCKET"})
@@ -76,7 +80,6 @@ func ConvertJS(raw []byte, runScript RunScript, opts Options) (*Generated, error
 		effectiveVars["BUCKET"] = bucket
 	}
 
-	body := string(raw)
 	diagnostics = append(diagnostics, detectUnsupportedJSProtocols(body, effectiveVars)...)
 	diagnostics = normalizeDiagnostics(diagnostics)
 	if hasErrors(diagnostics) {
