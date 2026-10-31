@@ -180,6 +180,11 @@ final class NicPathPool {
 				callback.complete(channel, null);
 				return true;
 			}
+			// A reused connection's Path, so a hand-off that closing cancels counts on the Path it took.
+			final var taken = channel.attr(ATTR_KEY_PATH).get();
+			if (taken != null) {
+				path = taken.index;
+			}
 			if (!state.compareAndSet(WAITING, QUEUED)) {
 				return false;
 			}

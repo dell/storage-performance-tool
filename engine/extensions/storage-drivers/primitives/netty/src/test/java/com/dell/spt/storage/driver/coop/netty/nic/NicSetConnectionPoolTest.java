@@ -34,6 +34,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -321,6 +322,45 @@ class NicSetConnectionPoolTest {
 		groupB.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
 		pool.close();
 		assertEquals(0, pool.pendingCount(), "close is idempotent, also after the loops terminated");
+	}
+
+	@Test
+	void aCancelledHandOffOfAReusedConnectionNamesThePathItTook() throws Exception {
+		final var a = listener();
+		final var group = group("lo-a");
+		final var pool = open(1, new OpenNic(nic("lo-a", NIC_A, List.of(path("s3-a.example:9000", a))), group));
+		final var idle = acquire(pool).get(5, TimeUnit.SECONDS);
+		pool.release(idle);
+		// Hold the connection's loop, so the hand-off of the reused connection stays queued there.
+		final var unblock = new CountDownLatch(1);
+		final var blocked = new CountDownLatch(1);
+		idle.eventLoop().execute(() -> {
+			blocked.countDown();
+			try {
+				unblock.await(5, TimeUnit.SECONDS);
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		});
+		assertTrue(blocked.await(5, TimeUnit.SECONDS));
+		final var failedPath = new CompletableFuture<Integer>();
+		pool.pools().get(0).acquire(new NicSetConnectionPool.Acquisition() {
+			@Override
+			public void complete(final Channel channel, final Throwable failure) {
+				failedPath.completeExceptionally(new AssertionError("delivered after close: " + channel + ", " + failure));
+			}
+
+			@Override
+			public void failed(final int path, final Throwable failure) {
+				failedPath.complete(path);
+			}
+		});
+
+		pool.close();
+		unblock.countDown();
+
+		assertEquals(0, failedPath.get(5, TimeUnit.SECONDS), "the cancelled hand-off counts on the Path of the connection it took");
+		assertEquals(0, pool.pendingCount());
 	}
 
 	@Test
