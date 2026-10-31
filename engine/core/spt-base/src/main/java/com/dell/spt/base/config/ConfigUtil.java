@@ -270,13 +270,17 @@ public interface ConfigUtil {
 					final Config config,
 					final Map<String, List<String>> listVals,
 					final List<Map<String, Object>> aliasingConfig) {
+		// The first entry for a name decides, as AliasingUtil.apply applies it: a target path renames
+		// the value, and a replacement value or a missing target (which fails the scenario) leaves
+		// nothing to check.
 		final Map<String, String> renamed = new HashMap<>();
 		if (aliasingConfig != null) {
 			for (final var entry : aliasingConfig) {
-				if (entry.get(AliasingUtil.NAME) instanceof String name
-								&& entry.get(AliasingUtil.TARGET) instanceof String target) {
-					final var parts = target.split(AliasingUtil.ARG_VAL_SEP, 2);
-					renamed.put(name, parts.length == 2 ? null : parts[0]);
+				if (entry.get(AliasingUtil.NAME) instanceof String name && !renamed.containsKey(name)) {
+					final var parts = entry.get(AliasingUtil.TARGET) instanceof String target
+									? target.split(AliasingUtil.ARG_VAL_SEP, 2)
+									: new String[0];
+					renamed.put(name, parts.length == 1 ? parts[0] : null);
 				}
 			}
 		}

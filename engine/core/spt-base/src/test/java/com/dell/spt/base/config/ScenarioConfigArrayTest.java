@@ -158,6 +158,27 @@ class ScenarioConfigArrayTest {
 		assertEquals(List.of("ps-eu", "PS_US"), names(client.config(js("{\"fixed-names\": [\"x,y\"]}")).getEffectiveConfig()));
 	}
 
+	// With two entries for one name, the first decides the check, as it decides the aliasing.
+	@Test
+	void theFirstAliasingEntryForANameDecidesTheCheck() throws Exception {
+		final var toList = Map.<String, Object> of("name", "old", "target", "storage-targetBucket-names");
+		final var toScalar = Map.<String, Object> of("name", "old", "target", "item-output-path");
+		for (final var listFirst : List.of(true, false)) {
+			final var config = TestConfigBuilder.config();
+			final var aliasing = new ArrayList<Map<String, Object>>(config.<Map<String, Object>> listVal("aliasing"));
+			aliasing.addAll(listFirst ? List.of(toList, toScalar) : List.of(toScalar, toList));
+			config.val("aliasing", aliasing);
+			final var client = new TestLoadStepClient(config, List.of(), null, null);
+			final var input = js("{\"old\": [\"alpha,beta\"]}");
+			if (listFirst) {
+				assertThrows(Exception.class, () -> client.config(input), "config");
+				assertThrows(Exception.class, () -> client.append(input), "append");
+			} else {
+				assertEquals("alpha,beta", client.config(input).getEffectiveConfig().stringVal("item-output-path"));
+			}
+		}
+	}
+
 	// Aliasing works on the strings, as it always has; an alias never meets a restored list.
 	@Test
 	void aliasingStillDecidesWhatItWrites() throws Exception {
