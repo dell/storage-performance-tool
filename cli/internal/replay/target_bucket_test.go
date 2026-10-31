@@ -185,3 +185,139 @@ func TestReplayPreflightShowsAKeptList(t *testing.T) {
 		t.Fatal("a replay without a list adds no bucketNames")
 	}
 }
+
+// Replay keeps a list only when it can keep it exactly; anything else stops the replay before it
+// runs, never turning unreadable JavaScript into bucket names or dropping the list.
+
+func jsArchiveWithParentNames(names string) string {
+	return `var buckets = ["alpha", "beta"];
+var parentConfig_1 = {
+  "storage" : { "driver" : { "type" : "s3" }, "targetBucket" : { "names" : ` + names + ` } }
+};
+Load
+    .config(parentConfig_1)
+    .config({
+      "item" : { "data" : { "size" : "10KB" }, "output" : { "path" : "/alpha" } },
+      "load" : { "step" : { "limit" : { "time" : 60 }, "id" : "W" } }
+    })
+    .run();
+`
+}
+
+func TestConvertJSRefusesABucketListItCannotKeepExactly(t *testing.T) {
+	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, BaseTimestamp: "20260605.121400.000"}
+	for _, c := range []struct {
+		names string
+		want  string
+	}{
+		{`buckets`, "not a reference or expression"},
+		{`buckets.concat(["gamma"])`, "not a reference or expression"},
+		{`["alpha", buckets[1]]`, "element 2 is not a quoted name"},
+		{`["alpha", 5]`, "element 2 is not a quoted name"},
+		{`["alpha", ""]`, `bucket name 2 "" must not be empty`},
+		{`["alpha,beta"]`, `must not contain ','`},
+		{`["alpha", "alpha"]`, "repeats bucket name 1"},
+		{`["a/b"]`, "must not contain '/'"},
+	} {
+		got, err := ConvertJS([]byte(jsArchiveWithParentNames(c.names)), RunScript{}, opts)
+		if err == nil || !strings.Contains(err.Error(), "storage.targetBucket.names") || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("names %s: err = %v, want %q", c.names, err, c.want)
+		}
+		if got != nil && len(got.ScenarioJS) > 0 {
+			t.Fatalf("names %s: no scenario may be generated", c.names)
+		}
+	}
+}
+
+func TestConvertJSKeepsLiteralListsWhateverTheKeyQuoting(t *testing.T) {
+	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, BaseTimestamp: "20260605.121400.000"}
+	for _, c := range []struct {
+		names string
+		want  []string
+	}{
+		{`["alpha", "beta"]`, []string{"alpha", "beta"}},
+		{`['alpha', "PS_US"]`, []string{"alpha", "PS_US"}},
+		{`"alpha,beta"`, []string{"alpha", "beta"}},
+	} {
+		got, err := ConvertJS([]byte(jsArchiveWithParentNames(c.names)), RunScript{}, opts)
+		if err != nil {
+			t.Fatalf("names %s: %v", c.names, err)
+		}
+		if strings.Join(got.ArchivedBucketNames, "|") != strings.Join(c.want, "|") {
+			t.Fatalf("names %s: ArchivedBucketNames = %q, want %q", c.names, got.ArchivedBucketNames, c.want)
+		}
+		parent, _, _ := strings.Cut(string(got.ScenarioJS)[strings.Index(string(got.ScenarioJS), "var parentConfig_1"):], "Load\n")
+		for _, name := range c.want {
+			if !strings.Contains(parent, `"`+name+`"`) {
+				t.Fatalf("names %s: parent config must keep %q:\n%s", c.names, name, parent)
+			}
+		}
+	}
+
+	// Unquoted keys, in a step configuration and in a parent configuration.
+	unquoted := `var parentConfig_1 = {
+  storage : { driver : { type : "s3" }, targetBucket : { names : [ "ps-eu", "PS_US" ] } }
+};
+Load
+    .config(parentConfig_1)
+    .config({
+      "item" : { "data" : { "size" : "10KB" }, "output" : { "path" : "/ps-eu" } },
+      "storage" : { targetBucket : { names : [ "ps-eu", "PS_US" ] } },
+      "load" : { "step" : { "limit" : { "time" : 60 }, "id" : "W" } }
+    })
+    .run();
+`
+	got, err := ConvertJS([]byte(unquoted), RunScript{}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got.ArchivedBucketNames, "|") != "ps-eu|PS_US" {
+		t.Fatalf("unquoted keys: ArchivedBucketNames = %q", got.ArchivedBucketNames)
+	}
+	if parent := string(got.ScenarioJS); !strings.Contains(parent, `"names": [`) {
+		t.Fatalf("unquoted keys: the parent config must keep the list:\n%s", parent)
+	}
+	explicit := opts
+	explicit.Bucket = "local"
+	if _, err := ConvertJS([]byte(unquoted), RunScript{}, explicit); err == nil || !strings.Contains(err.Error(), "--bucket cannot be used") {
+		t.Fatalf("unquoted keys: an explicit --bucket must be rejected, err = %v", err)
+	}
+
+	// An empty list is no list: the replay bucket applies as for one bucket.
+	empty, err := ConvertJS([]byte(jsArchiveWithParentNames(`[]`)), RunScript{}, explicit)
+	if err != nil || empty.ArchivedBucketNames != nil || empty.EffectiveBucket != "local" {
+		t.Fatalf("empty list: err = %v, names = %q, bucket = %q", err, empty.ArchivedBucketNames, empty.EffectiveBucket)
+	}
+}
+
+func TestConvertJSONRefusesABucketListItCannotKeepExactly(t *testing.T) {
+	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, BaseTimestamp: "20260605.121400.000"}
+	archive := func(names string) []byte {
+		return []byte(`{"type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}, "targetBucket": {"names": ` + names + `}}},
+  "steps": [{"type": "load", "config": {"item": {"data": {"size": "10KB"}, "output": {"path": "/alpha"}}, "test": {"step": {"id": "W", "limit": {"count": 10}}}}}]}`)
+	}
+	for _, c := range []struct {
+		names string
+		want  string
+	}{
+		{`["alpha", 5]`, "element 2 is not a string"},
+		{`["alpha", ""]`, `must not be empty`},
+		{`{"a": "b"}`, "not a list of names"},
+		{`"alpha,,beta"`, `must not be empty`},
+	} {
+		if _, err := ConvertJSON(archive(c.names), RunScript{}, opts); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("names %s: err = %v, want %q", c.names, err, c.want)
+		}
+	}
+	got, err := ConvertJSON(archive(`"alpha,beta"`), RunScript{}, opts)
+	if err != nil || strings.Join(got.ArchivedBucketNames, "|") != "alpha|beta" {
+		t.Fatalf("comma string: err = %v, names = %q", err, got.ArchivedBucketNames)
+	}
+	explicit := opts
+	explicit.Bucket = "local"
+	empty, err := ConvertJSON(archive(`[]`), RunScript{}, explicit)
+	if err != nil || empty.ArchivedBucketNames != nil || empty.EffectiveBucket != "local" {
+		t.Fatalf("empty list: err = %v, names = %q, bucket = %q", err, empty.ArchivedBucketNames, empty.EffectiveBucket)
+	}
+}
