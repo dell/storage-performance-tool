@@ -110,8 +110,8 @@ func extractJSEndpointSelections(source string, vars map[string]string, archived
 	return applyJSReplacements(source, replacements), diagnostics
 }
 
-// jsEndpointOccurrence is an object key named endpoint and the object that contains it.
-type jsEndpointOccurrence struct {
+// jsKeyOccurrence is an object key and the object that contains it.
+type jsKeyOccurrence struct {
 	keyStart    int    // offset of the key
 	valueStart  int    // offset of the value after the colon
 	parentKey   string // key whose value is the containing object; empty if there is none
@@ -119,25 +119,34 @@ type jsEndpointOccurrence struct {
 	parentClose int    // offset of the containing object's closing brace; -1 if it never closes
 }
 
-// jsEndpointOccurrences walks code, which must have its comments masked, as tokens and reports
-// every key named endpoint with its containing object. Strings are skipped as whole tokens, so
-// their contents never count as keys.
-func jsEndpointOccurrences(code string) []jsEndpointOccurrence {
+// jsEndpointOccurrences reports every key named endpoint in code, which must have its comments
+// masked, with its containing object.
+func jsEndpointOccurrences(code string) []jsKeyOccurrence {
+	occurrences, _ := jsKeyOccurrences(code, "endpoint")
+	return occurrences
+}
+
+// jsKeyOccurrences walks code, which must have its comments masked, as tokens and reports every
+// object key named want with its containing object, and the offset of every other identifier or
+// whole string equal to want, such as a member access or a shorthand property. Strings are skipped
+// as whole tokens, so their contents never count as keys.
+func jsKeyOccurrences(code, want string) ([]jsKeyOccurrence, []int) {
 	type frame struct {
 		key         string
 		open        int
-		occurrences []int // indexes of the endpoint keys directly inside this object
+		occurrences []int // indexes of the wanted keys directly inside this object
 	}
 	var stack []frame
-	var occurrences []jsEndpointOccurrence
+	var occurrences []jsKeyOccurrence
+	var otherUses []int
 	pendingKey := "" // a key whose colon was just read, until its value starts
 	colonAfter := func(end int) (int, bool) {
 		j := skipJSWhitespace(code, end)
 		return j, j < len(code) && code[j] == ':'
 	}
 	keyRead := func(name string, start, colon int) {
-		if name == "endpoint" {
-			occurrence := jsEndpointOccurrence{keyStart: start, valueStart: skipJSWhitespace(code, colon+1), parentOpen: -1, parentClose: -1}
+		if name == want {
+			occurrence := jsKeyOccurrence{keyStart: start, valueStart: skipJSWhitespace(code, colon+1), parentOpen: -1, parentClose: -1}
 			if len(stack) > 0 {
 				parent := &stack[len(stack)-1]
 				occurrence.parentKey, occurrence.parentOpen = parent.key, parent.open
@@ -158,6 +167,9 @@ func jsEndpointOccurrences(code string) []jsEndpointOccurrence {
 				i = colon
 				continue
 			}
+			if end > i && code[i+1:end] == want {
+				otherUses = append(otherUses, i)
+			}
 			pendingKey = ""
 			i = end
 		case isJSIdentifierStart(c):
@@ -169,6 +181,9 @@ func jsEndpointOccurrences(code string) []jsEndpointOccurrence {
 				keyRead(code[start:i+1], start, colon)
 				i = colon
 				continue
+			}
+			if code[start:i+1] == want {
+				otherUses = append(otherUses, start)
 			}
 			pendingKey = ""
 		case c == '{':
@@ -186,7 +201,7 @@ func jsEndpointOccurrences(code string) []jsEndpointOccurrence {
 			pendingKey = ""
 		}
 	}
-	return occurrences
+	return occurrences, otherUses
 }
 
 type jsEndpointDeclaration struct {
@@ -197,7 +212,7 @@ type jsEndpointDeclaration struct {
 }
 
 // parseJSEndpointValue evaluates one endpoint declaration and returns the offset after its value.
-func parseJSEndpointValue(code string, occurrence jsEndpointOccurrence, vars map[string]string) (jsEndpointDeclaration, int, error) {
+func parseJSEndpointValue(code string, occurrence jsKeyOccurrence, vars map[string]string) (jsEndpointDeclaration, int, error) {
 	if occurrence.parentKey != "net" || occurrence.parentClose < 0 || occurrence.valueStart >= len(code) || code[occurrence.valueStart] != '{' {
 		return jsEndpointDeclaration{}, 0, fmt.Errorf("declares storage.net.endpoint in a form replay cannot evaluate, " +
 			"such as a variable reference or a key outside a \"net\" object; write it as an object literal inside " +

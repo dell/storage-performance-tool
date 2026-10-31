@@ -26,8 +26,6 @@ var (
 	jsLogPathRe               = regexp.MustCompile(`MONGOOSE_DIR\s*\+\s*"\/log\/([^/"]+)\/([^"]+)"`)
 	jsMongoosePathRe          = regexp.MustCompile(`MONGOOSE_DIR\s*\+\s*"\/([^"]+)"`)
 	jsOutputKeyRe             = regexp.MustCompile(`"output"\s*:\s*\{`)
-	jsTargetBucketKeyRe       = regexp.MustCompile(`(?:"targetBucket"|'targetBucket'|\btargetBucket)\s*:\s*\{`)
-	jsNamesKeyRe              = regexp.MustCompile(`(?:"names"|'names'|\bnames)\s*:`)
 	jsPathKeyRe               = regexp.MustCompile(`"path"\s*:`)
 	jsIdentifierRe            = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	jsParentConfigAllowedKeys = map[string]struct{}{
@@ -513,10 +511,8 @@ func rewriteJSParentConfigs(source string, opts Options, bucket string, vars map
 		}
 		configText := source[open : closeIdx+1]
 		sslConfig, unsupportedSSLKeys := extractJSParentSSLConfig(configText, vars)
-		targetBucketText := jsObjectForKey(jsObjectForKey(configText, "storage"), legacyKeyTargetBucket)
-		bucketCount := intValue(jsFieldValue(targetBucketText, legacyKeyCount, vars), vars)
-		// Found whatever the keys' quoting; the archive-wide check has refused a list it cannot keep.
-		bucketNames, _ := archivedJSBucketList(configText, vars)
+		bucketCount, bucketNames, bucketDiagnostics := jsParentTargetBucket(name, configText, vars)
+		diagnostics = append(diagnostics, bucketDiagnostics...)
 		if enabled, ok := sslConfig[legacyKeyEnabled].(bool); ok {
 			if warning, mismatch := archivedSSLMismatchWarning(enabled, opts.Endpoints, name); mismatch {
 				diagnostics = append(diagnostics, Diagnostic{Severity: severityWarning, Message: warning})
@@ -548,6 +544,17 @@ func rewriteJSParentConfigs(source string, opts Options, bucket string, vars map
 		})
 	}
 	return applyJSReplacements(source, replacements), diagnostics
+}
+
+// jsParentTargetBucket reads a parent config's target bucket set as tokens, comments masked,
+// whatever the keys' quoting. The archive-wide check has already refused a list replay cannot keep.
+func jsParentTargetBucket(name, configText string, vars map[string]string) (int, []string, []Diagnostic) {
+	count, err := jsTargetBucketCount(configText, vars)
+	if err != nil {
+		return 0, nil, []Diagnostic{{Severity: severityError, Message: name + " " + err.Error()}}
+	}
+	names, _ := archivedJSBucketList(configText, vars)
+	return count, names, nil
 }
 
 func parentConfigHasExtraKeys(configText string) bool {
