@@ -212,22 +212,30 @@ export default function App() {
   };
 
   return (
-    <div className="app">
-      <aside className="sidebar">
-        <a className="brand" href="#dashboard" onClick={showDashboard}>
-          <span>SPT</span>
-          <div>
+    <div data-spt-legacy="" className="app">
+      <aside data-spt-legacy="" className="sidebar">
+        <a
+          data-spt-legacy=""
+          className="brand"
+          href="#dashboard"
+          onClick={showDashboard}
+        >
+          <span data-spt-legacy="">SPT</span>
+          <div data-spt-legacy="">
             {state?.branding?.product_name ?? "Storage Performance Tool"}
-            <small>
+            <small data-spt-legacy="">
               {(
                 state?.branding?.environment_label ?? "BENCHMARK CONSOLE"
               ).toUpperCase()}
             </small>
           </div>
         </a>
-        <div className="sidebar-label">WORKSPACE</div>
-        <nav aria-label="Main navigation">
+        <div data-spt-legacy="" className="sidebar-label">
+          WORKSPACE
+        </div>
+        <nav data-spt-legacy="" aria-label="Main navigation">
           <button
+            data-spt-legacy=""
             className={page === "configure" ? "selected" : ""}
             aria-current={page === "configure" ? "page" : undefined}
             onClick={() => {
@@ -235,16 +243,18 @@ export default function App() {
               setPage("configure");
             }}
           >
-            ＋ <span>Configure run</span>
+            ＋ <span data-spt-legacy="">Configure run</span>
           </button>
           <button
+            data-spt-legacy=""
             className={page === "dashboard" ? "selected" : ""}
             aria-current={page === "dashboard" ? "page" : undefined}
             onClick={showDashboard}
           >
-            ◫ <span>Live dashboard</span>
+            ◫ <span data-spt-legacy="">Live dashboard</span>
           </button>
           <button
+            data-spt-legacy=""
             className={page === "history" ? "selected" : ""}
             aria-current={page === "history" ? "page" : undefined}
             onClick={() => {
@@ -252,40 +262,50 @@ export default function App() {
               showHistory();
             }}
           >
-            ◷ <span>Run history</span>
+            ◷ <span data-spt-legacy="">Run history</span>
           </button>
           <button
+            data-spt-legacy=""
             className={page === "catalog" ? "selected" : ""}
             aria-current={page === "catalog" ? "page" : undefined}
             onClick={() => setPage("catalog")}
           >
-            ☰ <span>Results catalog</span>
+            ☰ <span data-spt-legacy="">Results catalog</span>
           </button>
           <button
+            data-spt-legacy=""
             className={page === "compare" ? "selected" : ""}
             aria-current={page === "compare" ? "page" : undefined}
             onClick={() => setPage("compare")}
           >
-            ⇄ <span>Compare runs</span>
+            ⇄ <span data-spt-legacy="">Compare runs</span>
           </button>
           <button
+            data-spt-legacy=""
             className={page === "connect" ? "selected" : ""}
             aria-current={page === "connect" ? "page" : undefined}
             onClick={() => setPage("connect")}
           >
-            ↗ <span>Connect to active run</span>
+            ↗ <span data-spt-legacy="">Connect to active run</span>
           </button>
         </nav>
-        <div className="sidebar-target">
-          <span className="eyebrow">STORAGE TARGET</span>
-          <strong>{state?.target.endpoint_label || "Awaiting server"}</strong>
-          <p>{state?.target.bucket || "No bucket reported"}</p>
+        <div data-spt-legacy="" className="sidebar-target">
+          <span data-spt-legacy="" className="eyebrow">
+            STORAGE TARGET
+          </span>
+          <strong data-spt-legacy="">
+            {state?.target.endpoint_label || "Awaiting server"}
+          </strong>
+          <p data-spt-legacy="">
+            {state?.target.bucket || "No bucket reported"}
+          </p>
           {state && (
             <Status status={state.target.ready ? "ready" : "needs setup"} />
           )}
         </div>
-        <div className="sidebar-footer">
+        <div data-spt-legacy="" className="sidebar-footer">
           <span
+            data-spt-legacy=""
             className={`source-dot ${state && !error ? "connected" : ""}`}
           />
           {error
@@ -293,17 +313,20 @@ export default function App() {
             : state
               ? "SPT server connected"
               : "Connecting to server"}
-          <p>
+          <p data-spt-legacy="">
             {clients} client machine{clients === 1 ? "" : "s"} ·{" "}
             {workloadLabel(runWorkloadType(state?.metrics, state?.job))}
           </p>
         </div>
       </aside>
-      <div className="workspace">
-        <header className="topbar">
-          <span>Benchmark workspace</span>
-          <div className="topbar-actions">
-            <span className={`source-badge ${error ? "offline" : ""}`}>
+      <div data-spt-legacy="" className="workspace">
+        <header data-spt-legacy="" className="topbar">
+          <span data-spt-legacy="">Benchmark workspace</span>
+          <div data-spt-legacy="" className="topbar-actions">
+            <span
+              data-spt-legacy=""
+              className={`source-badge ${error ? "offline" : ""}`}
+            >
               {error
                 ? "OFFLINE"
                 : state?.connection?.mode === "attached"
@@ -312,9 +335,15 @@ export default function App() {
                     ? "SPT API"
                     : "CONNECTING"}
             </span>
-            <div className="mode-switch" role="group" aria-label="Display mode">
+            <div
+              data-spt-legacy=""
+              className="mode-switch"
+              role="group"
+              aria-label="Display mode"
+            >
               {(["guided", "expert"] as const).map((m) => (
                 <button
+                  data-spt-legacy=""
                   key={m}
                   className={mode === m ? "active" : ""}
                   aria-pressed={mode === m}
@@ -331,13 +360,13 @@ export default function App() {
             </div>
           </div>
         </header>
-        <main>
+        <main data-spt-legacy="">
           {error && (
-            <div className="error" role="alert">
-              <strong>Connection unavailable. </strong>
+            <div data-spt-legacy="" className="error" role="alert">
+              <strong data-spt-legacy="">Connection unavailable. </strong>
               {error}
               {received && (
-                <p>
+                <p data-spt-legacy="">
                   Showing the last received state from {utc(received)}. Run
                   controls are disabled until the connection returns.
                 </p>
@@ -390,8 +419,12 @@ export default function App() {
           ) : (
             <>
               {mode === "expert" && (
-                <div className="expert-edit">
-                  <button type="button" onClick={() => setCustomizing(true)}>
+                <div data-spt-legacy="" className="expert-edit">
+                  <button
+                    data-spt-legacy=""
+                    type="button"
+                    onClick={() => setCustomizing(true)}
+                  >
                     Customize view
                   </button>
                 </div>
@@ -414,31 +447,40 @@ export default function App() {
               />
               {mode === "expert" && customizing && (
                 <div
+                  data-spt-legacy=""
                   className="expert-view-overlay"
                   onKeyDown={(event) => {
                     if (event.key === "Escape") setCustomizing(false);
                   }}
                 >
                   <button
+                    data-spt-legacy=""
                     className="expert-view-backdrop"
                     type="button"
                     aria-label="Close dashboard customization"
                     onClick={() => setCustomizing(false)}
                   />
                   <aside
+                    data-spt-legacy=""
                     className="expert-view-drawer"
                     role="dialog"
                     aria-modal="true"
                     aria-labelledby="expert-view-drawer-title"
                   >
-                    <div className="expert-view-drawer-heading">
-                      <div>
-                        <span className="eyebrow">EXPERT VIEW</span>
-                        <h2 id="expert-view-drawer-title">
+                    <div
+                      data-spt-legacy=""
+                      className="expert-view-drawer-heading"
+                    >
+                      <div data-spt-legacy="">
+                        <span data-spt-legacy="" className="eyebrow">
+                          EXPERT VIEW
+                        </span>
+                        <h2 data-spt-legacy="" id="expert-view-drawer-title">
                           Customize dashboard
                         </h2>
                       </div>
                       <button
+                        data-spt-legacy=""
                         type="button"
                         autoFocus
                         aria-label="Close customization"
@@ -447,25 +489,38 @@ export default function App() {
                         ✕
                       </button>
                     </div>
-                    <p>
+                    <p data-spt-legacy="">
                       Show or hide sections. This only changes your display, not
                       the benchmark or its data.
                     </p>
-                    <div className="expert-view-drawer-actions">
+                    <div
+                      data-spt-legacy=""
+                      className="expert-view-drawer-actions"
+                    >
                       <button
+                        data-spt-legacy=""
                         type="button"
                         onClick={() => setSelection(allSectionKeys())}
                       >
                         Show all
                       </button>
-                      <button type="button" onClick={() => setSelection([])}>
+                      <button
+                        data-spt-legacy=""
+                        type="button"
+                        onClick={() => setSelection([])}
+                      >
                         Hide all
                       </button>
                     </div>
-                    <div className="expert-view-drawer-list">
+                    <div data-spt-legacy="" className="expert-view-drawer-list">
                       {fields.map((field) => (
-                        <label className="check-label" key={field.key}>
+                        <label
+                          data-spt-legacy=""
+                          className="check-label"
+                          key={field.key}
+                        >
                           <input
+                            data-spt-legacy=""
                             type="checkbox"
                             checked={selection.includes(field.key)}
                             onChange={(event) =>
@@ -476,18 +531,22 @@ export default function App() {
                               )
                             }
                           />
-                          <span>
-                            <strong>{field.title}</strong>
-                            <small>{field.detail}</small>
+                          <span data-spt-legacy="">
+                            <strong data-spt-legacy="">{field.title}</strong>
+                            <small data-spt-legacy="">{field.detail}</small>
                           </span>
                         </label>
                       ))}
                     </div>
-                    <div className="expert-view-drawer-footer">
-                      <span>
+                    <div
+                      data-spt-legacy=""
+                      className="expert-view-drawer-footer"
+                    >
+                      <span data-spt-legacy="">
                         {selection.length} of {fields.length} sections shown
                       </span>
                       <button
+                        data-spt-legacy=""
                         className="primary"
                         type="button"
                         onClick={() => setCustomizing(false)}
@@ -501,7 +560,7 @@ export default function App() {
             </>
           )}
         </main>
-        <footer>
+        <footer data-spt-legacy="">
           {state?.branding?.product_name ?? "Storage Performance Tool"} ·{" "}
           {received
             ? `State received ${utc(received)}`
@@ -619,28 +678,31 @@ function Dashboard({
   const has = (key: string) => selected.includes(key);
   return (
     <>
-      <div className="page-heading">
-        <div>
-          <span className="eyebrow">
+      <div data-spt-legacy="" className="page-heading">
+        <div data-spt-legacy="">
+          <span data-spt-legacy="" className="eyebrow">
             {job?.status === "running" ? "LIVE BENCHMARK" : "BENCHMARK RESULTS"}
           </span>
-          <h1>
+          <h1 data-spt-legacy="">
             {job?.status === "running"
               ? "Run in progress"
               : "Storage performance"}
           </h1>
-          <p>
+          <p data-spt-legacy="">
             {job?.run_id ||
               m?.run_id ||
               "Configure a run to measure your storage target."}
           </p>
         </div>
-        <div className="actions">
+        <div data-spt-legacy="" className="actions">
           {historical && (
-            <button onClick={onBackHistory}>Back to run history</button>
+            <button data-spt-legacy="" onClick={onBackHistory}>
+              Back to run history
+            </button>
           )}
           {job?.status === "completed" && summaries.length > 0 && m && (
             <a
+              data-spt-legacy=""
               className="button-link"
               href={`/api/runs/${encodeURIComponent(m.run_id)}/csv?kind=summary`}
               download
@@ -649,64 +711,77 @@ function Dashboard({
             </a>
           )}
           {canStop && (
-            <button onClick={stop} disabled={stopPending}>
+            <button data-spt-legacy="" onClick={stop} disabled={stopPending}>
               {stopPending ? "Stopping…" : "Stop run"}
             </button>
           )}
-          <button className="primary" onClick={onConfigure}>
+          <button data-spt-legacy="" className="primary" onClick={onConfigure}>
             ＋ Configure run
           </button>
         </div>
       </div>
       {stopError && (
-        <div className="error" role="alert">
+        <div data-spt-legacy="" className="error" role="alert">
           {stopError}
         </div>
       )}
       {!job && !m ? (
-        <section className="panel empty-state">
-          <div className="empty-icon">◫</div>
-          <h2>
+        <section data-spt-legacy="" className="panel empty-state">
+          <div data-spt-legacy="" className="empty-icon">
+            ◫
+          </div>
+          <h2 data-spt-legacy="">
             {state
               ? "No benchmark results yet"
               : "Waiting for dashboard server"}
           </h2>
-          <p>
+          <p data-spt-legacy="">
             Configure a write and verify benchmark. Measured results will appear
             here as SPT runs.
           </p>
-          <button className="primary" onClick={onConfigure}>
+          <button data-spt-legacy="" className="primary" onClick={onConfigure}>
             Configure a run
           </button>
         </section>
       ) : (
         <>
-          <section className="run-strip" aria-label="Run status">
-            <div>
-              <span>Status</span>
+          <section
+            data-spt-legacy=""
+            className="run-strip"
+            aria-label="Run status"
+          >
+            <div data-spt-legacy="">
+              <span data-spt-legacy="">Status</span>
               <Status status={job?.status ?? "recorded"} />
             </div>
-            <div>
-              <span>Elapsed</span>
-              <strong>{elapsed(job?.elapsed_seconds)}</strong>
+            <div data-spt-legacy="">
+              <span data-spt-legacy="">Elapsed</span>
+              <strong data-spt-legacy="">
+                {elapsed(job?.elapsed_seconds)}
+              </strong>
             </div>
-            <div>
-              <span>Current phase</span>
-              <strong>{job?.phase || phaseName(m?.phase)}</strong>
+            <div data-spt-legacy="">
+              <span data-spt-legacy="">Current phase</span>
+              <strong data-spt-legacy="">
+                {job?.phase || phaseName(m?.phase)}
+              </strong>
             </div>
-            <div>
-              <span>Workload</span>
-              <strong>{workloadLabel(runWorkloadType(m, job))}</strong>
+            <div data-spt-legacy="">
+              <span data-spt-legacy="">Workload</span>
+              <strong data-spt-legacy="">
+                {workloadLabel(runWorkloadType(m, job))}
+              </strong>
             </div>
-            <div className="progress">
-              <div>
-                <span>Reported phase progress</span>
-                <strong>
+            <div data-spt-legacy="" className="progress">
+              <div data-spt-legacy="">
+                <span data-spt-legacy="">Reported phase progress</span>
+                <strong data-spt-legacy="">
                   {progress === null ? "Not reported" : `${fmt(progress, 1)}%`}
                 </strong>
               </div>
               {progress !== null && (
                 <progress
+                  data-spt-legacy=""
                   max="100"
                   value={Math.max(0, Math.min(100, progress))}
                   aria-label="Reported phase progress"
@@ -714,48 +789,53 @@ function Dashboard({
               )}
             </div>
           </section>
-          <section className="panel outcome">
-            <div>
-              <span className="eyebrow">RUN OUTCOME</span>
-              <h2>{outcome}</h2>
-              <p>
+          <section data-spt-legacy="" className="panel outcome">
+            <div data-spt-legacy="">
+              <span data-spt-legacy="" className="eyebrow">
+                RUN OUTCOME
+              </span>
+              <h2 data-spt-legacy="">{outcome}</h2>
+              <p data-spt-legacy="">
                 {job?.message ||
                   "SPT measurements from the configured storage target."}
               </p>
             </div>
-            <div className="outcome-facts">
-              <span>
-                Failed operations<strong>{fmt(failureCount)}</strong>
-                <small>
+            <div data-spt-legacy="" className="outcome-facts">
+              <span data-spt-legacy="">
+                Failed operations
+                <strong data-spt-legacy="">{fmt(failureCount)}</strong>
+                <small data-spt-legacy="">
                   {numeric(m?.total_failed) !== null
                     ? "Across all recorded phases"
                     : `In ${phaseName(selectedPhase).toLowerCase()} phase`}
                 </small>
               </span>
-              <span>
-                History captured<strong>{history.length} samples</strong>
-                <small>Reported interval measurements</small>
+              <span data-spt-legacy="">
+                History captured
+                <strong data-spt-legacy="">{history.length} samples</strong>
+                <small data-spt-legacy="">Reported interval measurements</small>
               </span>
             </div>
           </section>
           <RunWarnings warnings={m?.warnings} />
           {m && (
             <>
-              <div className="scope-bar">
-                <label>
+              <div data-spt-legacy="" className="scope-bar">
+                <label data-spt-legacy="">
                   Inspect phase
                   <select
+                    data-spt-legacy=""
                     value={selectedPhase}
                     onChange={(e) => setPhase(e.target.value)}
                   >
                     {available.map((p) => (
-                      <option key={p} value={p}>
+                      <option data-spt-legacy="" key={p} value={p}>
                         {phaseName(p)}
                       </option>
                     ))}
                   </select>
                 </label>
-                <p>
+                <p data-spt-legacy="">
                   {!m.is_active && final
                     ? "Final phase averages"
                     : "Latest measured phase snapshot"}{" "}
@@ -763,7 +843,7 @@ function Dashboard({
                 </p>
               </div>
               {has("cards") && (
-                <div className="metrics-grid">
+                <div data-spt-legacy="" className="metrics-grid">
                   <MetricCard
                     label={`${phaseName(selectedPhase)} IOPS`}
                     value={formatMetric(
@@ -849,37 +929,43 @@ function Dashboard({
             />
           )}
           {has("record") && (
-            <details className="panel">
-              <summary>Run record and settings</summary>
-              <div className="detail-strip">
-                <span>Started: {utc(job?.started_at)}</span>
-                <span>Finished: {utc(job?.finished_at)}</span>
-                <span>Exit code: {fmt(job?.returncode)}</span>
+            <details data-spt-legacy="" className="panel">
+              <summary data-spt-legacy="">Run record and settings</summary>
+              <div data-spt-legacy="" className="detail-strip">
+                <span data-spt-legacy="">Started: {utc(job?.started_at)}</span>
+                <span data-spt-legacy="">
+                  Finished: {utc(job?.finished_at)}
+                </span>
+                <span data-spt-legacy="">
+                  Exit code: {fmt(job?.returncode)}
+                </span>
               </div>
-              <dl className="record-grid">
-                <div>
-                  <dt>Objects</dt>
-                  <dd>{fmt(job?.options?.object_count)}</dd>
+              <dl data-spt-legacy="" className="record-grid">
+                <div data-spt-legacy="">
+                  <dt data-spt-legacy="">Objects</dt>
+                  <dd data-spt-legacy="">{fmt(job?.options?.object_count)}</dd>
                 </div>
-                <div>
-                  <dt>Object size</dt>
-                  <dd>{job?.options?.object_size ?? "—"}</dd>
+                <div data-spt-legacy="">
+                  <dt data-spt-legacy="">Object size</dt>
+                  <dd data-spt-legacy="">{job?.options?.object_size ?? "—"}</dd>
                 </div>
-                <div>
-                  <dt>Threads</dt>
-                  <dd>{fmt(job?.options?.threads)}</dd>
+                <div data-spt-legacy="">
+                  <dt data-spt-legacy="">Threads</dt>
+                  <dd data-spt-legacy="">{fmt(job?.options?.threads)}</dd>
                 </div>
-                <div>
-                  <dt>Safety time limit</dt>
-                  <dd>{elapsed(job?.options?.max_runtime_seconds)}</dd>
+                <div data-spt-legacy="">
+                  <dt data-spt-legacy="">Safety time limit</dt>
+                  <dd data-spt-legacy="">
+                    {elapsed(job?.options?.max_runtime_seconds)}
+                  </dd>
                 </div>
-                <div>
-                  <dt>Run prefix</dt>
-                  <dd>{job?.prefix ?? "—"}</dd>
+                <div data-spt-legacy="">
+                  <dt data-spt-legacy="">Run prefix</dt>
+                  <dd data-spt-legacy="">{job?.prefix ?? "—"}</dd>
                 </div>
-                <div>
-                  <dt>Source</dt>
-                  <dd>{m?.source_file ?? "—"}</dd>
+                <div data-spt-legacy="">
+                  <dt data-spt-legacy="">Source</dt>
+                  <dd data-spt-legacy="">{m?.source_file ?? "—"}</dd>
                 </div>
               </dl>
             </details>

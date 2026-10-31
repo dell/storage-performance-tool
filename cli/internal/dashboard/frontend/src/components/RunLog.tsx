@@ -65,11 +65,17 @@ export function RunLog({
   const files = [...new Set(data?.lines.map((l) => l.file) ?? [])];
   const body = (
     <>
-      <div className="run-log-heading">
-        {!collapsed && <h3>{title}</h3>}
-        <div className="mode-switch" role="group" aria-label="Log level">
+      <div data-spt-legacy="" className="run-log-heading">
+        {!collapsed && <h3 data-spt-legacy="">{title}</h3>}
+        <div
+          data-spt-legacy=""
+          className="mode-switch"
+          role="group"
+          aria-label="Log level"
+        >
           {levels.map((l) => (
             <button
+              data-spt-legacy=""
               key={l.value}
               className={level === l.value ? "active" : ""}
               aria-pressed={level === l.value}
@@ -80,9 +86,15 @@ export function RunLog({
           ))}
         </div>
         {sources && sources.length > 1 && (
-          <div className="mode-switch" role="group" aria-label="Log source">
+          <div
+            data-spt-legacy=""
+            className="mode-switch"
+            role="group"
+            aria-label="Log source"
+          >
             {sources.map((s) => (
               <button
+                data-spt-legacy=""
                 key={s}
                 className={source === s ? "active" : ""}
                 aria-pressed={source === s}
@@ -93,28 +105,38 @@ export function RunLog({
             ))}
           </div>
         )}
-        <button onClick={() => setVersion((v) => v + 1)}>Reload</button>
+        <button data-spt-legacy="" onClick={() => setVersion((v) => v + 1)}>
+          Reload
+        </button>
       </div>
       {data?.interim && (
-        <p className="form-help">
+        <p data-spt-legacy="" className="form-help">
           Interim console output captured by the dashboard. The engine’s results
           logs are the record once the run finishes.
         </p>
       )}
       {error ? (
-        <p className="subtle">{error}</p>
+        <p data-spt-legacy="" className="subtle">
+          {error}
+        </p>
       ) : !data ? (
-        <p className="subtle">Loading log…</p>
+        <p data-spt-legacy="" className="subtle">
+          Loading log…
+        </p>
       ) : data.lines.length === 0 ? (
-        <p className="subtle">
+        <p data-spt-legacy="" className="subtle">
           {level === "all"
             ? "No log lines recorded."
             : `No ${level === "warn" ? "warning or error" : "error"} lines recorded.`}
         </p>
       ) : (
-        <pre className="log-lines" tabIndex={0}>
+        <pre data-spt-legacy="" className="log-lines" tabIndex={0}>
           {data.lines.map((l, i) => (
-            <span key={i} className={`log-line log-${l.level}`}>
+            <span
+              data-spt-legacy=""
+              key={i}
+              className={`log-line log-${l.level}`}
+            >
               {l.text}
               {"\n"}
             </span>
@@ -122,14 +144,16 @@ export function RunLog({
         </pre>
       )}
       {data?.truncated && (
-        <p className="form-help">
+        <p data-spt-legacy="" className="form-help">
           Showing the end of a large log; older lines were not read.
         </p>
       )}
       {files.length > 0 && (
-        <p className="form-help">From: {files.join(", ")}</p>
+        <p data-spt-legacy="" className="form-help">
+          From: {files.join(", ")}
+        </p>
       )}
-      <p className="form-help">
+      <p data-spt-legacy="" className="form-help">
         Credential-looking values are redacted. Showing up to the last 200
         matching lines.
       </p>
@@ -137,15 +161,16 @@ export function RunLog({
   );
   return collapsed ? (
     <details
+      data-spt-legacy=""
       className="panel run-log"
       aria-label={title}
       onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
     >
-      <summary>{title}</summary>
+      <summary data-spt-legacy="">{title}</summary>
       {open && body}
     </details>
   ) : (
-    <section className="panel run-log" aria-label={title}>
+    <section data-spt-legacy="" className="panel run-log" aria-label={title}>
       {body}
     </section>
   );

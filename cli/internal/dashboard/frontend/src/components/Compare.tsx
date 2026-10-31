@@ -79,10 +79,14 @@ export function Compare({
   };
   if (ids.length < 2)
     return (
-      <div className="history-empty">
-        <h2>Select runs to compare</h2>
-        <p>Choose at least two runs in the results catalog.</p>
-        <button onClick={onBack}>Open results catalog</button>
+      <div data-spt-legacy="" className="history-empty">
+        <h2 data-spt-legacy="">Select runs to compare</h2>
+        <p data-spt-legacy="">
+          Choose at least two runs in the results catalog.
+        </p>
+        <button data-spt-legacy="" onClick={onBack}>
+          Open results catalog
+        </button>
       </div>
     );
   const runIDs = data?.runs.map((r) => r.id) ?? ids;
@@ -91,49 +95,65 @@ export function Compare({
   const regressions = data ? regressionCount(data.deltas) : 0;
   return (
     <>
-      <div className="page-heading">
-        <div>
-          <span className="eyebrow">COMPARE · {ids.length} RUNS</span>
-          <h1>Compare runs</h1>
-          <p>
+      <div data-spt-legacy="" className="page-heading">
+        <div data-spt-legacy="">
+          <span data-spt-legacy="" className="eyebrow">
+            COMPARE · {ids.length} RUNS
+          </span>
+          <h1 data-spt-legacy="">Compare runs</h1>
+          <p data-spt-legacy="">
             Overlaid per-phase time series and totals, checked against the
             baseline run.
           </p>
         </div>
-        <div className="actions">
-          <button onClick={onBack}>Back to catalog</button>
+        <div data-spt-legacy="" className="actions">
+          <button data-spt-legacy="" onClick={onBack}>
+            Back to catalog
+          </button>
         </div>
       </div>
       {error && (
-        <div className="error" role="alert">
+        <div data-spt-legacy="" className="error" role="alert">
           {error}
         </div>
       )}
       {!data ? (
-        !error && <p className="subtle">Loading comparison…</p>
+        !error && (
+          <p data-spt-legacy="" className="subtle">
+            Loading comparison…
+          </p>
+        )
       ) : (
         <>
-          <section className="panel compare-rule" aria-label="Regression rule">
-            <div>
-              <strong>{data.rule.label}</strong>
-              <p className="form-help">{data.rule.description}</p>
+          <section
+            data-spt-legacy=""
+            className="panel compare-rule"
+            aria-label="Regression rule"
+          >
+            <div data-spt-legacy="">
+              <strong data-spt-legacy="">{data.rule.label}</strong>
+              <p data-spt-legacy="" className="form-help">
+                {data.rule.description}
+              </p>
             </div>
-            <label>
+            <label data-spt-legacy="">
               Baseline
               <select
+                data-spt-legacy=""
                 value={data.baseline}
                 onChange={(e) => setBase(e.target.value)}
               >
                 {data.runs.map((r) => (
-                  <option key={r.id} value={r.id}>
+                  <option data-spt-legacy="" key={r.id} value={r.id}>
                     {r.id}
                   </option>
                 ))}
               </select>
             </label>
-            <label>
+            <label data-spt-legacy="">
               Threshold %
               <input
+                data-spt-legacy=""
                 type="number"
                 min={0}
                 step={1}
@@ -143,9 +163,10 @@ export function Compare({
                 }
               />
             </label>
-            <label>
+            <label data-spt-legacy="">
               Latency floor µs
               <input
+                data-spt-legacy=""
                 type="number"
                 min={0}
                 value={draft.latency_floor_us ?? ""}
@@ -154,9 +175,10 @@ export function Compare({
                 }
               />
             </label>
-            <label>
+            <label data-spt-legacy="">
               Min operations
               <input
+                data-spt-legacy=""
                 type="number"
                 min={0}
                 value={draft.min_ops ?? ""}
@@ -165,10 +187,11 @@ export function Compare({
                 }
               />
             </label>
-            <button className="primary" onClick={apply}>
+            <button data-spt-legacy="" className="primary" onClick={apply}>
               Apply
             </button>
             <p
+              data-spt-legacy=""
               className={`compare-summary ${regressions ? "bad" : "good"}`}
               role="status"
             >
@@ -182,17 +205,18 @@ export function Compare({
             ([, d]) => d.length,
           ) && (
             <section
+              data-spt-legacy=""
               className="notice notice-warn"
               aria-label="Settings differences"
             >
-              <strong>
+              <strong data-spt-legacy="">
                 Settings differ from the baseline; deltas may reflect
                 configuration, not storage.
               </strong>
-              <ul>
+              <ul data-spt-legacy="">
                 {Object.entries(data.settings_differences).map(([id, diffs]) =>
                   diffs.map((d) => (
-                    <li key={id + d}>
+                    <li data-spt-legacy="" key={id + d}>
                       {id}: {d}
                     </li>
                   )),
@@ -200,12 +224,18 @@ export function Compare({
               </ul>
             </section>
           )}
-          <section className="panel">
-            <div className="run-log-heading">
-              <h2>Time series</h2>
-              <div className="mode-switch" role="group" aria-label="Metric">
+          <section data-spt-legacy="" className="panel">
+            <div data-spt-legacy="" className="run-log-heading">
+              <h2 data-spt-legacy="">Time series</h2>
+              <div
+                data-spt-legacy=""
+                className="mode-switch"
+                role="group"
+                aria-label="Metric"
+              >
                 {metrics.map((m) => (
                   <button
+                    data-spt-legacy=""
                     key={m.key}
                     className={metric === m.key ? "active" : ""}
                     aria-pressed={metric === m.key}
@@ -216,16 +246,16 @@ export function Compare({
                 ))}
               </div>
             </div>
-            <ul className="compare-legend">
+            <ul data-spt-legacy="" className="compare-legend">
               {data.runs.map((r) => (
-                <li key={r.id}>
-                  <i style={{ background: color(r.id) }} />
+                <li data-spt-legacy="" key={r.id}>
+                  <i data-spt-legacy="" style={{ background: color(r.id) }} />
                   {r.id}
                   {r.id === data.baseline ? " (baseline)" : ""}
                 </li>
               ))}
             </ul>
-            <div className="compare-charts">
+            <div data-spt-legacy="" className="compare-charts">
               {phasesOf(data.series).map((phase) => (
                 <OverlayChart
                   key={phase}
@@ -240,7 +270,7 @@ export function Compare({
                 />
               ))}
               {phasesOf(data.series).length === 0 && (
-                <p className="subtle">
+                <p data-spt-legacy="" className="subtle">
                   None of the selected runs recorded interval metrics.
                 </p>
               )}
@@ -279,39 +309,69 @@ export function OverlayChart({
   const yMax = (maxV || 1) * 1.1;
   const y = (v: number) => H - bottom - (v / yMax) * (H - top - bottom);
   return (
-    <figure className="overlay-chart">
-      <figcaption>
+    <figure data-spt-legacy="" className="overlay-chart">
+      <figcaption data-spt-legacy="">
         {phase} · {unit}
       </figcaption>
       {count === 0 ? (
-        <p className="subtle">No samples for this metric.</p>
+        <p data-spt-legacy="" className="subtle">
+          No samples for this metric.
+        </p>
       ) : (
         <svg
+          data-spt-legacy=""
           viewBox={`0 0 ${W} ${H}`}
           role="img"
           aria-label={`${phase} ${unit} over elapsed seconds for ${lines.length} runs`}
         >
           <line
+            data-spt-legacy=""
             x1={left}
             y1={H - bottom}
             x2={W - right}
             y2={H - bottom}
             className="axis"
           />
-          <line x1={left} y1={top} x2={left} y2={H - bottom} className="axis" />
-          <text x={left - 6} y={top + 8} textAnchor="end" className="tick">
+          <line
+            data-spt-legacy=""
+            x1={left}
+            y1={top}
+            x2={left}
+            y2={H - bottom}
+            className="axis"
+          />
+          <text
+            data-spt-legacy=""
+            x={left - 6}
+            y={top + 8}
+            textAnchor="end"
+            className="tick"
+          >
             {fmt(yMax, yMax < 10 ? 1 : 0)}
           </text>
-          <text x={left - 6} y={H - bottom} textAnchor="end" className="tick">
+          <text
+            data-spt-legacy=""
+            x={left - 6}
+            y={H - bottom}
+            textAnchor="end"
+            className="tick"
+          >
             0
           </text>
-          <text x={W - right} y={H - 8} textAnchor="end" className="tick">
+          <text
+            data-spt-legacy=""
+            x={W - right}
+            y={H - 8}
+            textAnchor="end"
+            className="tick"
+          >
             {fmt(maxT, 0)} s
           </text>
           {lines.map((l) =>
             segments(l.points, metric).map((seg, i) =>
               seg.length === 1 ? (
                 <circle
+                  data-spt-legacy=""
                   key={l.id + i}
                   cx={x(seg[0].t)}
                   cy={y(seg[0][metric] as number)}
@@ -320,6 +380,7 @@ export function OverlayChart({
                 />
               ) : (
                 <polyline
+                  data-spt-legacy=""
                   key={l.id + i}
                   fill="none"
                   stroke={l.color}
@@ -346,46 +407,58 @@ export function DeltaTable({
 }) {
   const grouped = groupDeltas(deltas);
   return (
-    <section className="panel run-history-panel" aria-label="Delta table">
-      <h2>Deltas vs {baseline}</h2>
+    <section
+      data-spt-legacy=""
+      className="panel run-history-panel"
+      aria-label="Delta table"
+    >
+      <h2 data-spt-legacy="">Deltas vs {baseline}</h2>
       {deltas.length === 0 ? (
-        <p className="subtle">No shared phases to compare.</p>
+        <p data-spt-legacy="" className="subtle">
+          No shared phases to compare.
+        </p>
       ) : (
-        <div className="table-wrap">
-          <table className="run-history-table delta-table">
-            <thead>
-              <tr>
-                <th>Phase</th>
-                <th>Metric</th>
-                <th>Run</th>
-                <th>Baseline</th>
-                <th>Value</th>
-                <th>Δ</th>
-                <th>Flag</th>
+        <div data-spt-legacy="" className="table-wrap">
+          <table data-spt-legacy="" className="run-history-table delta-table">
+            <thead data-spt-legacy="">
+              <tr data-spt-legacy="">
+                <th data-spt-legacy="">Phase</th>
+                <th data-spt-legacy="">Metric</th>
+                <th data-spt-legacy="">Run</th>
+                <th data-spt-legacy="">Baseline</th>
+                <th data-spt-legacy="">Value</th>
+                <th data-spt-legacy="">Δ</th>
+                <th data-spt-legacy="">Flag</th>
               </tr>
             </thead>
-            <tbody>
+            <tbody data-spt-legacy="">
               {[...grouped].flatMap(([phase, byMetric]) =>
                 [...byMetric].flatMap(([, rows]) =>
                   rows.map((d) => (
                     <tr
+                      data-spt-legacy=""
                       key={`${phase}-${d.metric}-${d.run_id}`}
                       className={`flag-${d.flag}`}
                     >
-                      <td>{phase}</td>
-                      <td>{d.label}</td>
-                      <td className="history-run-id">{d.run_id}</td>
-                      <td>{fmt(d.baseline, 2)}</td>
-                      <td>{fmt(d.value, 2)}</td>
-                      <td>{deltaText(d)}</td>
-                      <td>
+                      <td data-spt-legacy="">{phase}</td>
+                      <td data-spt-legacy="">{d.label}</td>
+                      <td data-spt-legacy="" className="history-run-id">
+                        {d.run_id}
+                      </td>
+                      <td data-spt-legacy="">{fmt(d.baseline, 2)}</td>
+                      <td data-spt-legacy="">{fmt(d.value, 2)}</td>
+                      <td data-spt-legacy="">{deltaText(d)}</td>
+                      <td data-spt-legacy="">
                         <span
+                          data-spt-legacy=""
                           className={`flag flag-${d.flag}`}
                           title={d.reason}
                         >
                           {flagText[d.flag] ?? d.flag}
                         </span>
-                        {d.reason && <small>{d.reason}</small>}
+                        {d.reason && (
+                          <small data-spt-legacy="">{d.reason}</small>
+                        )}
                       </td>
                     </tr>
                   )),
@@ -395,7 +468,7 @@ export function DeltaTable({
           </table>
         </div>
       )}
-      <p className="history-footnote">
+      <p data-spt-legacy="" className="history-footnote">
         Flags are a threshold check, not statistical significance. One run per
         side cannot show variance; repeat runs before drawing conclusions.
       </p>

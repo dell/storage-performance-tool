@@ -25,9 +25,10 @@ function Node({
   status: CheckStatus;
 }) {
   return (
-    <g>
-      <title>{`${label}: ${word[status]}`}</title>
+    <g data-spt-legacy="">
+      <title data-spt-legacy="">{`${label}: ${word[status]}`}</title>
       <circle
+        data-spt-legacy=""
         cx={x}
         cy={y}
         r="13"
@@ -36,14 +37,32 @@ function Node({
         strokeWidth="2"
       />
       {status !== "pending" && (
-        <text x={x} y={y + 4} textAnchor="middle" className="graph-mark">
+        <text
+          data-spt-legacy=""
+          x={x}
+          y={y + 4}
+          textAnchor="middle"
+          className="graph-mark"
+        >
           {status === "passed" ? "✓" : "✕"}
         </text>
       )}
-      <text x={x} y={y + 30} textAnchor="middle" className="graph-label">
+      <text
+        data-spt-legacy=""
+        x={x}
+        y={y + 30}
+        textAnchor="middle"
+        className="graph-label"
+      >
         {short(label)}
       </text>
-      <text x={x} y={y + 43} textAnchor="middle" className="graph-status">
+      <text
+        data-spt-legacy=""
+        x={x}
+        y={y + 43}
+        textAnchor="middle"
+        className="graph-status"
+      >
         {word[status]}
       </text>
     </g>
@@ -64,21 +83,35 @@ export function ConnectionGraph({
   const y = (i: number) => 24 + i * row;
   const passed = v.nodes.filter((n) => n.status === "passed").length;
   return (
-    <figure className="connection-graph">
+    <figure data-spt-legacy="" className="connection-graph">
       <svg
+        data-spt-legacy=""
         viewBox={`0 0 720 ${height}`}
         role="img"
         aria-label={`Connection check: ${passed} of ${v.nodes.length} client machines passed; S3 endpoint ${word[v.endpoint.status].toLowerCase()}`}
       >
         {v.nodes.map((n, i) => (
-          <g key={n.host} className="graph-line">
-            <line x1={left} y1={middle} x2={center} y2={y(i)} />
-            <line x1={center} y1={y(i)} x2={right} y2={middle} />
+          <g data-spt-legacy="" key={n.host} className="graph-line">
+            <line
+              data-spt-legacy=""
+              x1={left}
+              y1={middle}
+              x2={center}
+              y2={y(i)}
+            />
+            <line
+              data-spt-legacy=""
+              x1={center}
+              y1={y(i)}
+              x2={right}
+              y2={middle}
+            />
           </g>
         ))}
-        <g>
-          <title>Dashboard host</title>
+        <g data-spt-legacy="">
+          <title data-spt-legacy="">Dashboard host</title>
           <circle
+            data-spt-legacy=""
             cx={left}
             cy={middle}
             r="13"
@@ -87,6 +120,7 @@ export function ConnectionGraph({
             strokeWidth="2"
           />
           <text
+            data-spt-legacy=""
             x={left}
             y={middle + 30}
             textAnchor="middle"
@@ -111,7 +145,7 @@ export function ConnectionGraph({
           status={v.endpoint.status}
         />
       </svg>
-      <figcaption>
+      <figcaption data-spt-legacy="">
         Client machines are checked by SPT. The S3 endpoint is checked for
         reachability from the dashboard host.
       </figcaption>

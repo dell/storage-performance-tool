@@ -40,27 +40,30 @@ export function TrendChart({
         ? `${formatNumber(v / 1e3, 1)}k`
         : formatNumber(v, 1);
   return (
-    <article className="chart">
-      <div className="chart-heading">
-        <h3>{title}</h3>
-        <span>{unit}</span>
+    <article data-spt-legacy="" className="chart">
+      <div data-spt-legacy="" className="chart-heading">
+        <h3 data-spt-legacy="">{title}</h3>
+        <span data-spt-legacy="">{unit}</span>
       </div>
-      <div className="legend">
+      <div data-spt-legacy="" className="legend">
         {series.map((l) => (
-          <span key={l.key}>
-            <i style={{ background: l.color }} />
+          <span data-spt-legacy="" key={l.key}>
+            <i data-spt-legacy="" style={{ background: l.color }} />
             {l.label}
-            <strong>{formatNumber(inspected?.[l.key], 2)}</strong>
+            <strong data-spt-legacy="">
+              {formatNumber(inspected?.[l.key], 2)}
+            </strong>
           </span>
         ))}
       </div>
       {!values.length ? (
-        <div className="empty-chart">
+        <div data-spt-legacy="" className="empty-chart">
           No measured {title.toLowerCase()} in this window
         </div>
       ) : (
         <>
           <svg
+            data-spt-legacy=""
             viewBox="0 0 780 190"
             role="img"
             aria-label={`${title} over elapsed time`}
@@ -92,15 +95,21 @@ export function TrendChart({
             }}
           >
             {[0, 0.5, 1].map((f) => (
-              <g key={f}>
+              <g data-spt-legacy="" key={f}>
                 <line
+                  data-spt-legacy=""
                   x1="60"
                   x2="752"
                   y1={y(max * f)}
                   y2={y(max * f)}
-                  className="grid"
+                  className="chart-grid-line"
                 />
-                <text x="50" y={y(max * f) + 4} textAnchor="end">
+                <text
+                  data-spt-legacy=""
+                  x="50"
+                  y={y(max * f) + 4}
+                  textAnchor="end"
+                >
                   {tick(max * f)}
                 </text>
               </g>
@@ -116,10 +125,11 @@ export function TrendChart({
               }
               if (part.length) segments.push(part);
               return (
-                <g key={l.key}>
+                <g data-spt-legacy="" key={l.key}>
                   {segments.map((ss, i) => (
-                    <g key={i}>
+                    <g data-spt-legacy="" key={i}>
                       <polyline
+                        data-spt-legacy=""
                         fill="none"
                         stroke={l.color}
                         strokeWidth="2.5"
@@ -129,6 +139,7 @@ export function TrendChart({
                       />
                       {ss.length === 1 && (
                         <circle
+                          data-spt-legacy=""
                           cx={x(ss[0])}
                           cy={y(ss[0][l.key]!)}
                           r="4"
@@ -142,6 +153,7 @@ export function TrendChart({
             })}
             {(samples.length === 1 ? [0.5] : [0, 0.5, 1]).map((f) => (
               <text
+                data-spt-legacy=""
                 key={f}
                 x={60 + 692 * f}
                 y="179"
@@ -154,6 +166,7 @@ export function TrendChart({
             ))}
             {active !== null && samples[active] && (
               <line
+                data-spt-legacy=""
                 x1={x(samples[active])}
                 x2={x(samples[active])}
                 y1="24"
@@ -163,9 +176,10 @@ export function TrendChart({
               />
             )}
           </svg>
-          <label className="chart-inspector">
+          <label data-spt-legacy="" className="chart-inspector">
             Inspect time
             <input
+              data-spt-legacy=""
               aria-label={`Inspect ${title} sample`}
               type="range"
               min="0"
