@@ -16,6 +16,7 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -259,14 +260,29 @@ public interface ConfigUtil {
 	 * Refuses a list value that its comma-separated string cannot carry, on the settings the schema
 	 * types as lists: an element that is empty or holds a comma. The configuration reads the string
 	 * back by splitting it at commas, so such an element would otherwise be split or dropped without a
-	 * word. An empty list passes; it reads back as one empty element.
+	 * word. An empty list passes; it reads back as one empty element. Each value is checked at the
+	 * setting it reaches: an aliasing entry that renames its path checks it at the target, and one
+	 * that replaces its value leaves nothing to check.
 	 *
 	 * @throws IllegalArgumentException naming the setting and the element
 	 */
-	static void validateListValues(final Config config, final Map<String, List<String>> listVals) {
+	static void validateListValues(
+					final Config config,
+					final Map<String, List<String>> listVals,
+					final List<Map<String, Object>> aliasingConfig) {
+		final Map<String, String> renamed = new HashMap<>();
+		if (aliasingConfig != null) {
+			for (final var entry : aliasingConfig) {
+				if (entry.get(AliasingUtil.NAME) instanceof String name
+								&& entry.get(AliasingUtil.TARGET) instanceof String target) {
+					final var parts = target.split(AliasingUtil.ARG_VAL_SEP, 2);
+					renamed.put(name, parts.length == 2 ? null : parts[0]);
+				}
+			}
+		}
 		for (final var listVal : listVals.entrySet()) {
-			final var path = listVal.getKey();
-			if (!isListSetting(config.schema(), path, config.pathSep())) {
+			final var path = renamed.containsKey(listVal.getKey()) ? renamed.get(listVal.getKey()) : listVal.getKey();
+			if (path == null || !isListSetting(config.schema(), path, config.pathSep())) {
 				continue;
 			}
 			final var elements = listVal.getValue();

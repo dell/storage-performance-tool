@@ -140,6 +140,24 @@ class ScenarioConfigArrayTest {
 		assertEquals(List.of("ps-eu", "PS_US"), TargetBucketSet.names(listed));
 	}
 
+	// A value is checked at the setting aliasing takes it to: a list renamed onto a list setting is
+	// checked there, one renamed away from it or replaced by an alias's own value is not.
+	@Test
+	void aListIsCheckedWhereAliasingTakesIt() throws Exception {
+		final var config = TestConfigBuilder.config();
+		final var aliasing = new ArrayList<Map<String, Object>>(config.<Map<String, Object>> listVal("aliasing"));
+		aliasing.add(Map.of("name", "old-names", "target", "storage-targetBucket-names"));
+		aliasing.add(Map.of("name", "storage-targetBucket-names", "target", "item-output-path"));
+		aliasing.add(Map.of("name", "fixed-names", "target", "storage-targetBucket-names=ps-eu,PS_US"));
+		config.val("aliasing", aliasing);
+		final var client = new TestLoadStepClient(config, List.of(), null, null);
+
+		assertThrows(Exception.class, () -> client.config(js("{\"old-names\": [\"alpha,beta\"]}")), "renamed onto a list");
+		assertThrows(Exception.class, () -> client.append(js("{\"old-names\": [\"alpha\", \"\"]}")), "renamed onto a list");
+		client.config(js("{\"storage-targetBucket-names\": [\"a,b\"]}"));
+		assertEquals(List.of("ps-eu", "PS_US"), names(client.config(js("{\"fixed-names\": [\"x,y\"]}")).getEffectiveConfig()));
+	}
+
 	// Aliasing works on the strings, as it always has; an alias never meets a restored list.
 	@Test
 	void aliasingStillDecidesWhatItWrites() throws Exception {
