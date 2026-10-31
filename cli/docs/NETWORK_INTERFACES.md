@@ -108,7 +108,7 @@ With `--slice-endpoints`, each engine pairs its own slice of the endpoints. A ch
 ## Concurrency and event loops
 
 - **Permits:** the concurrency limit (`--threads`) is split over the engine's NICs. With 64 threads and 2 NICs, each NIC carries at most 32 operations; with 10 threads and 4 NICs, 3, 3, 2 and 2. With fewer threads than NICs, each NIC carries one operation at a time. Each operation takes the next NIC with room, and waits in the driver's queue while none has room.
-- **Event loops:** each NIC gets its own event loops. `storage.driver.threads` therefore counts loops per NIC with a NIC set, not per driver. Without it, each NIC gets `max(4, hardware threads / 8)`: on a client with 64 hardware threads and 2 NICs, 8 per NIC and 16 in all. Set it with `--engine-override storage.driver.threads=6`.
+- **Event loops:** each NIC gets its own event loops. `storage.driver.threads` therefore counts loops per NIC with a NIC set, not per driver. Without it, each NIC gets `max(4, hardware threads / 8)`: on a client with 64 hardware threads and 2 NICs, 8 per NIC and 16 in all. Each NIC-set driver also has a base group of 2 loops for its control requests. Set it with `--engine-override storage.driver.threads=6`.
 
 ## Start of a step
 
@@ -118,7 +118,7 @@ Before the first operation, each engine connects once on every Path. A failure f
 
 - **Per-Path counts:** each step writes `<step>.nic.paths.csv`, and the run summary names the files in one line, such as `NIC paths: read1.nic.paths.csv`. See the engine's [per-path NIC evidence](../../engine/core/spt-base/README.md#per-path-nic-evidence).
 - **NIC-set report:** each step writes `<step>.nic.set.json`, each engine's NICs and event loops. See the engine's [NIC-set report](../../engine/core/spt-base/README.md#nic-set-report).
-- **Distributed steps:** the Entry Node keeps each node's files as `<step>.nic.paths.node-NNN.csv` and `<step>.nic.set.node-NNN.json`. `node-000` is the Entry Node, followed by the workers in `--test-hosts` order. An expected file that is absent is recorded as `missing` in `index.json`, and the run does not fail.
+- **Distributed steps:** the Entry Node keeps each node's files as `<step>.nic.paths.node-NNN.csv` and `<step>.nic.set.node-NNN.json`. `node-000` is the Entry Node, followed by the workers that started, in `--test-hosts` order; a worker that fails to start under `--min-hosts` gets no slice. An expected file that is absent is recorded as `missing` in `index.json`, and the run does not fail.
 - **Run metadata** in `spt_run_params.json`:
   - `scenarioParams.Interfaces`: the requested entries;
   - `nicNodes`: each node with its host and the value it received;
@@ -139,7 +139,7 @@ Before the first operation, each engine connects once on every Path. A failure f
 
   ```text
     • Interfaces         auto
-    • Event loops        16 per engine (2 NICs × 8, default)
+    • Event loops        16 per engine (2 NICs × 8, default) + 2 base = 18
   ```
 
   `storage.driver.threads` replaces `default` when it is set. When engines differ, the line gives each node's value, such as `node-000 16 (2 NICs × 8, default); node-001 8 (1 NIC × 8, default)`; when an engine changed between steps, it reads `vary by step; see nicEngines in spt_run_params.json`. Without reports, only the `Interfaces` line appears.
