@@ -134,3 +134,20 @@ func writeNicSetFixture(t *testing.T, dir, name, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestReadNicEnginesCarriesTheBaseAndTotalEventLoops(t *testing.T) {
+	dir := t.TempDir()
+	writeNicSetFixture(t, dir, "read1."+constants.ResultsArtifactSuffixMetricsTotal, "OpType,NodeCount\nREAD,1\n")
+	writeNicSetFixture(t, dir, "read1.nic.set.json", `{"schema_version":1,"step_id":"read1","hardware_threads":192,
+		"driver_threads":0,"event_loops_per_nic":24,"nics":["ens1f0","ens1f1","ens2f0","ens2f1"],"event_loops":96,
+		"base_event_loops":2,"total_event_loops":98}`)
+	engines, err := ReadNicEngines(dir, []string{"read1"}, threeNicNodes[:1])
+	if err != nil || len(engines["read1"]) != 1 {
+		t.Fatalf("engines = %+v, err = %v", engines, err)
+	}
+	got := engines["read1"][0]
+	if got.EventLoops != 96 || got.BaseEventLoops == nil || *got.BaseEventLoops != 2 ||
+		got.TotalEventLoops == nil || *got.TotalEventLoops != 98 {
+		t.Fatalf("engine = %+v", got)
+	}
+}

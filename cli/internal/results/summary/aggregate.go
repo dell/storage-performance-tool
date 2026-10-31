@@ -142,6 +142,7 @@ type StepSummary struct {
 	DeleteEvidence     *DeleteArtifactEvidence
 	DriverStats        *driverstats.Stats
 	NicPaths           *NicPathsEvidence
+	NicSetMissing      []results.NicNodeFile
 }
 
 // MixedDistribution stores the configured mixed-workload share for each known operation.
@@ -405,6 +406,7 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 			DeleteEvidence:  stepData.DeleteEvidence,
 			DriverStats:     stepData.DriverStats,
 			NicPaths:        stepData.NicPaths,
+			NicSetMissing:   append([]results.NicNodeFile(nil), stepData.NicSetMissing...),
 		}
 
 		var metrics *PhaseMetrics

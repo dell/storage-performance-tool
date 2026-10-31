@@ -3,6 +3,7 @@ package summary
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -44,18 +45,9 @@ func nicPathsEvidence(sm *results.StepManifest, nicNodes []results.NicNode, metr
 		fetched[file.Name] = true
 		evidence.Files = append(evidence.Files, file.Name)
 	}
-	participants := 0
-	if metrics != nil {
-		for _, row := range metrics.Rows {
-			participants = max(participants, int(row.NodeCount))
-		}
-	}
+	participants := nicStepParticipants(metrics)
 	expected := results.ExpectedNicPathsFiles(sm.StepID, nicNodes, participants)
-	for _, file := range expected {
-		if !fetched[file.Name] {
-			evidence.Missing = append(evidence.Missing, file)
-		}
-	}
+	evidence.Missing = missingNicFiles(sm, expected)
 	if len(evidence.Files) == 0 && len(evidence.Missing) == 0 {
 		return nil
 	}
@@ -87,15 +79,40 @@ func nicPathsLine(stepID string, evidence *NicPathsEvidence) string {
 	}
 	counts := fmt.Sprintf("%d of %d nodes", len(evidence.Files), evidence.Nodes)
 	if len(evidence.Missing) > 0 {
-		counts += "; missing " + strings.Join(missingNicPathsNodes(evidence, ", "), "; ")
+		counts += "; missing " + strings.Join(missingNicNodes(evidence.Missing, ", "), "; ")
 	}
 	return fmt.Sprintf("NIC paths: %s.nic.paths.node-NNN.csv (%s)", stepID, counts)
 }
 
-// missingNicPathsNodes names each missing file's node and host, joined by sep.
-func missingNicPathsNodes(evidence *NicPathsEvidence, sep string) []string {
-	out := make([]string, 0, len(evidence.Missing))
-	for _, file := range evidence.Missing {
+// nicStepParticipants is the step's participating nodes: the largest NodeCount of its metrics
+// totals, or none without them.
+func nicStepParticipants(metrics *MetricsTotals) int {
+	participants := 0
+	if metrics != nil {
+		for _, row := range metrics.Rows {
+			participants = max(participants, int(row.NodeCount))
+		}
+	}
+	return participants
+}
+
+// missingNicFiles returns the expected files that the step's index does not list as fetched.
+func missingNicFiles(sm *results.StepManifest, expected []results.NicNodeFile) []results.NicNodeFile {
+	var missing []results.NicNodeFile
+	for _, file := range expected {
+		if !slices.ContainsFunc(sm.Files, func(status results.FileStatus) bool {
+			return status.Name == file.Name && status.Status == fileStatusOK
+		}) {
+			missing = append(missing, file)
+		}
+	}
+	return missing
+}
+
+// missingNicNodes names each missing file's node and host, joined by sep.
+func missingNicNodes(missing []results.NicNodeFile, sep string) []string {
+	out := make([]string, 0, len(missing))
+	for _, file := range missing {
 		label := fmt.Sprintf("node-%03d", file.Node)
 		if file.Host != "" {
 			label += sep + file.Host

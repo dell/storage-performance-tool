@@ -16,7 +16,9 @@ const nicSetSchemaVersion = 1
 
 // NicEngine is one engine's NIC-set report for a step (D64), as spt_run_params.json
 // nicEngines stores it. A field the step's drivers disagree on is absent, and Contexts then
-// has each driver's values. Nics is empty for a NIC set that never opened.
+// has each driver's values. Nics is empty for a NIC set that never opened. EventLoops counts
+// the per-NIC groups; BaseEventLoops (each driver's base group) and TotalEventLoops (every
+// loop the drivers own) are absent in reports that predate them.
 type NicEngine struct {
 	Node             int          `json:"node"`
 	Host             string       `json:"host"`
@@ -26,6 +28,8 @@ type NicEngine struct {
 	EventLoopsPerNic *int         `json:"eventLoopsPerNic,omitempty"`
 	Nics             []string     `json:"nics,omitzero"`
 	EventLoops       int          `json:"eventLoops"`
+	BaseEventLoops   *int         `json:"baseEventLoops,omitempty"`
+	TotalEventLoops  *int         `json:"totalEventLoops,omitempty"`
 	Contexts         []NicContext `json:"contexts,omitempty"`
 }
 
@@ -36,6 +40,8 @@ type NicContext struct {
 	EventLoopsPerNic int      `json:"eventLoopsPerNic"`
 	Nics             []string `json:"nics"`
 	EventLoops       int      `json:"eventLoops"`
+	BaseEventLoops   *int     `json:"baseEventLoops,omitempty"`
+	TotalEventLoops  *int     `json:"totalEventLoops,omitempty"`
 }
 
 type nicSetReport struct {
@@ -46,6 +52,8 @@ type nicSetReport struct {
 	EventLoopsPerNic *int               `json:"event_loops_per_nic"`
 	Nics             []string           `json:"nics"`
 	EventLoops       int                `json:"event_loops"`
+	BaseEventLoops   *int               `json:"base_event_loops"`
+	TotalEventLoops  *int               `json:"total_event_loops"`
 	Contexts         []nicSetReportPart `json:"contexts"`
 }
 
@@ -55,6 +63,8 @@ type nicSetReportPart struct {
 	EventLoopsPerNic int      `json:"event_loops_per_nic"`
 	Nics             []string `json:"nics"`
 	EventLoops       int      `json:"event_loops"`
+	BaseEventLoops   *int     `json:"base_event_loops"`
+	TotalEventLoops  *int     `json:"total_event_loops"`
 }
 
 // ReadNicEngines reads the NIC-set reports fetched into dir, per step in node order. A step
@@ -114,6 +124,8 @@ func readNicSetReport(path, stepID string) (NicEngine, error) {
 		EventLoopsPerNic: report.EventLoopsPerNic,
 		Nics:             report.Nics,
 		EventLoops:       report.EventLoops,
+		BaseEventLoops:   report.BaseEventLoops,
+		TotalEventLoops:  report.TotalEventLoops,
 	}
 	for _, part := range report.Contexts {
 		engine.Contexts = append(engine.Contexts, NicContext(part))

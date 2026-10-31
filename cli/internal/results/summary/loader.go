@@ -62,6 +62,7 @@ type StepData struct {
 	DeleteEvidence    *DeleteArtifactEvidence
 	DriverStats       *driverstats.Stats
 	NicPaths          *NicPathsEvidence
+	NicSetMissing     []results.NicNodeFile
 	Status            StepStatus
 	MetricsSuppressed bool
 	MissingRequired   []string
@@ -243,6 +244,7 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 		}
 
 		step.NicPaths = nicPathsEvidence(sm, params.NicNodes, step.Metrics)
+		step.NicSetMissing = missingNicSetReports(sm, params.NicNodes, step.Metrics)
 		if step.NicPaths != nil && step.NicPaths.Distributed {
 			step.MissingOptional = removeString(step.MissingOptional, constants.ResultsArtifactSuffixNicPaths)
 			step.MissingOptional = removeString(step.MissingOptional, constants.ResultsArtifactSuffixNicSet)

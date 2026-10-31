@@ -54,7 +54,11 @@ func TestNicEventLoopsDescribesTheRunsEngines(t *testing.T) {
 // nicEngines in its metadata.
 func nicSetRun(t *testing.T, interfaces []string, engines map[string][]results.NicEngine) string {
 	t.Helper()
-	runDir := nicPathsRun(t, 1, nicPathsNodes[:1], nicPathsFetched("nic.paths.csv"))
+	files := []results.FileStatus{nicPathsFetched("nic.paths.csv")}
+	if engines != nil {
+		files = append(files, nicPathsFetched("nic.set.json"))
+	}
+	runDir := nicPathsRun(t, 1, nicPathsNodes[:1], files...)
 	storeNicSetMetadata(t, runDir, interfaces, nicPathsNodes[:1], engines)
 	return runDir
 }
@@ -90,7 +94,8 @@ func storeNicSetMetadata(t *testing.T, runDir string, interfaces []string, nodes
 func TestDistributedAutoRunWhoseHostsHaveDifferentNicSetsShowsEachEngine(t *testing.T) {
 	nodes := nicPathsNodes[:2]
 	runDir := nicPathsRun(t, 2, nodes,
-		nicPathsFetched("nic.paths.node-000.csv"), nicPathsFetched("nic.paths.node-001.csv"))
+		nicPathsFetched("nic.paths.node-000.csv"), nicPathsFetched("nic.paths.node-001.csv"),
+		nicPathsFetched("nic.set.node-000.json"), nicPathsFetched("nic.set.node-001.json"))
 	for node, nics := range map[string]string{
 		"node-000": `["ens1f0","ens1f1"],"event_loops":16`,
 		"node-001": `["ens2f0"],"event_loops":8`,
@@ -113,6 +118,27 @@ func TestDistributedAutoRunWhoseHostsHaveDifferentNicSetsShowsEachEngine(t *test
 		"  • Event loops        node-000 16 (2 NICs × 8, default); node-001 8 (1 NIC × 8, default)\n")
 }
 
+func TestNicEventLoopsAddsTheBaseGroupsAndTheTotalWhenTheReportHasThem(t *testing.T) {
+	base, total := 2, 18
+	withBase := nicEngine(0, 16, 8, 0, "ens1f0", "ens1f1")
+	withBase.BaseEventLoops, withBase.TotalEventLoops = &base, &total
+	if got := nicEventLoops(map[string][]results.NicEngine{"step": {withBase}}, []string{"step"}); got !=
+		"16 per engine (2 NICs × 8, default) + 2 base = 18" {
+		t.Fatalf("got %q", got)
+	}
+	// One NIC per engine, as four one-NIC engines run: 24 per-NIC loops and the base group of 2.
+	oneBase, oneTotal := 2, 26
+	one := nicEngine(0, 24, 24, 0, "ens1f0")
+	one.BaseEventLoops, one.TotalEventLoops = &oneBase, &oneTotal
+	if got := nicEngineEventLoops(one); got != "24 (1 NIC × 24, default) + 2 base = 26" {
+		t.Fatalf("got %q", got)
+	}
+	// A report that predates the fields describes the per-NIC loops alone.
+	if got := nicEngineEventLoops(nicEngine(0, 16, 8, 0, "ens1f0", "ens1f1")); got != "16 (2 NICs × 8, default)" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestStoredRunShowsItsInterfacesAndEventLoopsAfterTheEndpoints(t *testing.T) {
 	engines := map[string][]results.NicEngine{nicPathsStepID: {nicEngine(0, 16, 8, 0, "ens1f0", "ens1f1")}}
 	full := nicPathsReports(t, aggregateStoredRun(t, nicSetRun(t, []string{"auto"}, engines)))["full"]
@@ -123,6 +149,52 @@ func TestStoredRunShowsItsInterfacesAndEventLoopsAfterTheEndpoints(t *testing.T)
 	list := nicPathsReports(t, aggregateStoredRun(t, nicSetRun(t, []string{"ens1f0", "192.0.2.21"}, nil)))["full"]
 	mustContain(t, list, "  • Interfaces         ens1f0,192.0.2.21\n")
 	mustNotContain(t, list, "Event loops")
+}
+
+func TestStoredRunNamesTheNodeOfAMissingNicSetReportUnderArtifactHealth(t *testing.T) {
+	// A single engine wrote its per-path CSV but no report; the fetch recorded the report as missing.
+	single := nicPathsReports(t, aggregateStoredRun(t, nicPathsRun(t, 1, nicPathsNodes[:1], nicPathsFetched("nic.paths.csv"),
+		results.FileStatus{Name: nicPathsStepID + ".nic.set.json", Status: "missing",
+			Error: "expected from node-000 (worker-a); not listed in index.json"})))["full"]
+	mustContain(t, single, "NIC paths: "+nicPathsStepID+".nic.paths.csv\n")
+	mustContain(t, single, "Artifact Health\n  • "+nicPathsStepID+" missing NIC-set reports: node-000, worker-a\n")
+	mustNotContain(t, single, "missing NIC paths")
+
+	// A distributed step whose every CSV arrived and whose node-001 report did not.
+	distributed := nicPathsReports(t, aggregateStoredRun(t, nicPathsRun(t, 3, nicPathsNodes, nicPathsCanonicalAbsent,
+		nicPathsFetched("nic.paths.node-000.csv"), nicPathsFetched("nic.paths.node-001.csv"),
+		nicPathsFetched("nic.paths.node-002.csv"), nicPathsFetched("nic.set.node-000.json"),
+		nicPathsFetched("nic.set.node-002.json"))))["full"]
+	mustContain(t, distributed, "NIC paths: "+nicPathsStepID+".nic.paths.node-NNN.csv (3 of 3 nodes)\n")
+	mustContain(t, distributed, "Artifact Health\n  • "+nicPathsStepID+" missing NIC-set reports: node-001, worker-b\n")
+	mustNotContain(t, distributed, "missing NIC paths")
+
+	// Both files missing: each has its own line.
+	both := nicPathsReports(t, aggregateStoredRun(t, nicPathsRun(t, 2, nicPathsNodes, nicPathsCanonicalAbsent,
+		nicPathsFetched("nic.paths.node-000.csv"), nicPathsFetched("nic.set.node-000.json"))))["full"]
+	mustContain(t, both, "Artifact Health\n"+
+		"  • "+nicPathsStepID+" missing NIC paths files: node-001, worker-b\n"+
+		"  • "+nicPathsStepID+" missing NIC-set reports: node-001, worker-b\n")
+}
+
+func TestStoredRunsWithEveryNicSetReportOrNoneExpectedHaveNoMissingReport(t *testing.T) {
+	none := []results.NicNode{{Node: 0, Host: "worker-a", Interfaces: "none"}, {Node: 1, Host: "worker-b", Interfaces: "none"}}
+	tests := map[string]string{
+		"every report fetched": nicPathsRun(t, 2, nicPathsNodes, nicPathsCanonicalAbsent,
+			nicPathsFetched("nic.paths.node-000.csv"), nicPathsFetched("nic.paths.node-001.csv"),
+			nicPathsFetched("nic.set.node-000.json"), nicPathsFetched("nic.set.node-001.json")),
+		"results of an older CLI": nicPathsRun(t, 2, nil, nicPathsCanonicalAbsent),
+		"no node with a value":    nicPathsRun(t, 2, none, nicPathsCanonicalAbsent),
+	}
+	for name, runDir := range tests {
+		t.Run(name, func(t *testing.T) {
+			summary := aggregateStoredRun(t, runDir)
+			if missing := summary.Steps[0].NicSetMissing; len(missing) != 0 {
+				t.Fatalf("missing NIC-set reports = %+v, want none", missing)
+			}
+			mustNotContain(t, nicPathsReports(t, summary)["full"], "Artifact Health")
+		})
+	}
 }
 
 func TestStoredRunWithoutInterfacesShowsNoNicSetBullets(t *testing.T) {

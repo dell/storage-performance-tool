@@ -914,7 +914,11 @@ func collectIncompleteSteps(summary *RunSummary) []string {
 		}
 		if step.NicPaths != nil && len(step.NicPaths.Missing) > 0 {
 			out = append(out, fmt.Sprintf("%s missing NIC paths files: %s", step.StepID,
-				strings.Join(missingNicPathsNodes(step.NicPaths, ", "), "; ")))
+				strings.Join(missingNicNodes(step.NicPaths.Missing, ", "), "; ")))
+		}
+		if len(step.NicSetMissing) > 0 {
+			out = append(out, fmt.Sprintf("%s missing NIC-set reports: %s", step.StepID,
+				strings.Join(missingNicNodes(step.NicSetMissing, ", "), "; ")))
 		}
 	}
 	return out

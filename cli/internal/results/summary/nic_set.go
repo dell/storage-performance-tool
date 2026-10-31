@@ -46,6 +46,12 @@ func nicEventLoops(engines map[string][]results.NicEngine, stepOrder []string) s
 	return strings.Join(parts, "; ")
 }
 
+// missingNicSetReports returns the NIC-set reports the step was expected to write, by the rules
+// of its per-path CSVs, that its index does not list as fetched.
+func missingNicSetReports(sm *results.StepManifest, nicNodes []results.NicNode, metrics *MetricsTotals) []results.NicNodeFile {
+	return missingNicFiles(sm, results.ExpectedNicSetFiles(sm.StepID, nicNodes, nicStepParticipants(metrics)))
+}
+
 // orderedNicSteps lists the steps with reports: the run's step order, then any others sorted.
 func orderedNicSteps(engines map[string][]results.NicEngine, stepOrder []string) []string {
 	out := make([]string, 0, len(engines))
@@ -64,9 +70,22 @@ func orderedNicSteps(engines map[string][]results.NicEngine, stepOrder []string)
 	return append(out, rest...)
 }
 
-// nicEngineEventLoops is one engine's total and how it is made up, such as
-// "16 (2 NICs × 8, default)". Drivers that disagree point to the metadata instead.
+// nicEngineEventLoops is one engine's per-NIC event loops and how they are made up, such as
+// "16 (2 NICs × 8, default)", followed by its base groups and the total it owns when the report
+// has them: "16 (2 NICs × 8, default) + 2 base = 18". Drivers that disagree point to the
+// metadata instead.
 func nicEngineEventLoops(engine results.NicEngine) string {
+	return nicEngineNicLoops(engine) + nicEngineBaseLoops(engine)
+}
+
+func nicEngineBaseLoops(engine results.NicEngine) string {
+	if engine.BaseEventLoops == nil || engine.TotalEventLoops == nil {
+		return ""
+	}
+	return fmt.Sprintf(" + %d base = %d", *engine.BaseEventLoops, *engine.TotalEventLoops)
+}
+
+func nicEngineNicLoops(engine results.NicEngine) string {
 	if engine.DriverThreads == nil || engine.EventLoopsPerNic == nil || engine.Nics == nil {
 		return fmt.Sprintf("%d (%d drivers; see nicEngines in spt_run_params.json)", engine.EventLoops, engine.Drivers)
 	}
