@@ -102,6 +102,8 @@ type Generated struct {
 	// ArchivedBucketNames is the archived run's bucket list, which replay keeps; EffectiveBucket is
 	// then only the output path's placeholder.
 	ArchivedBucketNames []string
+	// ArchivedBucketLists is every distinct bucket list the archive's steps use, with those steps.
+	ArchivedBucketLists []ArchivedBucketList
 	// ArchivedEndpointSelection lists the endpoint-selection declarations the archive contains.
 	ArchivedEndpointSelection ArchivedEndpointSelection
 }

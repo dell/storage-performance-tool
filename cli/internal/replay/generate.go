@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -193,7 +194,13 @@ func BuildPreflight(g *Generated, opts Options) string {
 	if archivedClients := splitCSV(g.Artifacts.RunScript.ClientAddrs); len(archivedClients) > 0 {
 		fmt.Fprintf(&b, "  Archived clients: %d\n", len(archivedClients))
 	}
-	if names := g.ArchivedBucketNames; len(names) > 0 {
+	if len(g.ArchivedBucketLists) > 0 {
+		for _, list := range g.ArchivedBucketLists {
+			names := list.Names
+			fmt.Fprintf(&b, "  Buckets: %d (%s ... %s), kept from the archive, %s\n",
+				len(names), names[0], names[len(names)-1], archivedStepsText(list.Steps))
+		}
+	} else if names := g.ArchivedBucketNames; len(names) > 0 {
 		fmt.Fprintf(&b, "  Buckets: %d (%s ... %s), kept from the archive\n", len(names), names[0], names[len(names)-1])
 	} else {
 		fmt.Fprintf(&b, "  Bucket: %s\n", g.EffectiveBucket)
@@ -366,18 +373,18 @@ func commonReplayCount(steps []StepSummary) (int, bool) {
 
 func buildMetadata(g *Generated) []byte {
 	type metadata struct {
-		GeneratedAt     string             `json:"generatedAt"`
-		RunID           int64              `json:"runId"`
-		SourceURL       string             `json:"sourceUrl"`
-		RunScript       string             `json:"runScript"`
-		Scenario        string             `json:"scenario"`
-		ScenarioFormat  string             `json:"scenarioFormat"`
-		EffectiveBucket string             `json:"effectiveBucket"`
-		BucketNames     []string           `json:"bucketNames,omitempty"`
-		Steps           []StepSummary      `json:"steps"`
-		PathRewrites    []PathRewrite      `json:"pathRewrites,omitempty"`
-		CommandOps      []CommandOperation `json:"commandOperations,omitempty"`
-		Diagnostics     []Diagnostic       `json:"diagnostics,omitempty"`
+		GeneratedAt     string               `json:"generatedAt"`
+		RunID           int64                `json:"runId"`
+		SourceURL       string               `json:"sourceUrl"`
+		RunScript       string               `json:"runScript"`
+		Scenario        string               `json:"scenario"`
+		ScenarioFormat  string               `json:"scenarioFormat"`
+		EffectiveBucket string               `json:"effectiveBucket"`
+		BucketLists     []ArchivedBucketList `json:"bucketLists,omitempty"`
+		Steps           []StepSummary        `json:"steps"`
+		PathRewrites    []PathRewrite        `json:"pathRewrites,omitempty"`
+		CommandOps      []CommandOperation   `json:"commandOperations,omitempty"`
+		Diagnostics     []Diagnostic         `json:"diagnostics,omitempty"`
 	}
 	data, _ := json.MarshalIndent(metadata{
 		GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
@@ -387,11 +394,23 @@ func buildMetadata(g *Generated) []byte {
 		Scenario:        g.Artifacts.ScenarioName,
 		ScenarioFormat:  g.Artifacts.ScenarioFormat,
 		EffectiveBucket: g.EffectiveBucket,
-		BucketNames:     g.ArchivedBucketNames,
+		BucketLists:     g.ArchivedBucketLists,
 		Steps:           g.Steps,
 		PathRewrites:    g.PathRewrites,
 		CommandOps:      g.CommandOps,
 		Diagnostics:     g.Diagnostics,
 	}, "", "  ")
 	return data
+}
+
+// archivedStepsText names the archived steps that use a bucket list.
+func archivedStepsText(steps []int) string {
+	parts := make([]string, len(steps))
+	for i, step := range steps {
+		parts[i] = strconv.Itoa(step)
+	}
+	if len(steps) == 1 {
+		return "step " + parts[0]
+	}
+	return "steps " + strings.Join(parts, ", ")
 }

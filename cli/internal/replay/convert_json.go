@@ -120,7 +120,8 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	}
 	// Bucket names resolve with the archived exports only: replay rebinds BUCKET, CLIENT and the
 	// node variables to the local target, which would rename the buckets the archived run used.
-	archivedBucketNames, listErr := archivedJSONBucketList(legacy, runScript.Exports)
+	archivedBucketLists, listErr := archivedJSONBucketList(legacy, runScript.Exports)
+	archivedBucketNames := firstArchivedBucketNames(archivedBucketLists)
 	bucket, bucketDiagnostic := replayTargetBucket(opts, runScript, archivedBucketNames, listErr)
 	if bucketDiagnostic != nil {
 		diagnostics = append(diagnostics, *bucketDiagnostic)
@@ -147,6 +148,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 			Diagnostics:         diagnostics,
 			EffectiveBucket:     bucket,
 			ArchivedBucketNames: archivedBucketNames,
+			ArchivedBucketLists: archivedBucketLists,
 		}, diagnosticsError(diagnostics)
 	}
 
@@ -254,6 +256,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 			CommandOps:          commandOps,
 			EffectiveBucket:     bucket,
 			ArchivedBucketNames: archivedBucketNames,
+			ArchivedBucketLists: archivedBucketLists,
 		}, diagnosticsError(diagnostics)
 	}
 
@@ -286,6 +289,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 		CommandOps:          commandOps,
 		EffectiveBucket:     bucket,
 		ArchivedBucketNames: archivedBucketNames,
+		ArchivedBucketLists: archivedBucketLists,
 
 		ArchivedEndpointSelection: *archived,
 	}, nil
@@ -426,8 +430,10 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	if pqcMode := resolveString(getPath(step.Config, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "pqcMode"), vars); pqcMode != "" {
 		setPath(config, pqcMode, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "pqcMode")
 	}
-	// A target bucket set is kept; its base becomes the replay bucket of item.output.path.
-	if bucketCount := int64Value(getPath(step.Config, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyCount), vars); bucketCount > 1 {
+	// A target bucket set is kept; its base becomes the replay bucket of item.output.path. The
+	// count resolves with the archived exports, so retargeting the base never changes it; the
+	// archive-wide check has already refused a count replay cannot read.
+	if bucketCount, err := jsonBucketCount(getPath(step.Config, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyCount), archivedExports); err == nil && bucketCount > 1 {
 		setPath(config, bucketCount, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyCount)
 	}
 	// A bucket list is kept as archived, its names resolved with the archived exports as the

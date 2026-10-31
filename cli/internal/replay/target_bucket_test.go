@@ -96,16 +96,19 @@ func TestReplayRejectsAnExplicitBucketForAnArchivedList(t *testing.T) {
 }
 
 func TestReplayPreflightShowsAKeptList(t *testing.T) {
-	g := &Generated{EffectiveBucket: "ps-eu", ArchivedBucketNames: []string{"ps-eu", "PS_US", "ab"}}
+	g := &Generated{EffectiveBucket: "ps-eu", ArchivedBucketNames: []string{"ps-eu", "PS_US", "ab"},
+		ArchivedBucketLists: []ArchivedBucketList{{Steps: []int{1, 3}, Names: []string{"ps-eu", "PS_US", "ab"}}, {Steps: []int{2}, Names: []string{"g", "h"}}}}
 	preflight := BuildPreflight(g, Options{})
-	if !strings.Contains(preflight, "Buckets: 3 (ps-eu ... ab), kept from the archive") || strings.Contains(preflight, "Bucket: ps-eu") {
+	if !strings.Contains(preflight, "Buckets: 3 (ps-eu ... ab), kept from the archive, steps 1, 3") ||
+		!strings.Contains(preflight, "Buckets: 2 (g ... h), kept from the archive, step 2") || strings.Contains(preflight, "Bucket: ps-eu") {
 		t.Fatalf("preflight:\n%s", preflight)
 	}
-	if !strings.Contains(string(buildMetadata(g)), `"bucketNames": [`) {
-		t.Fatal("replay metadata must keep the list")
+	metadata := string(buildMetadata(g))
+	if !strings.Contains(metadata, `"bucketLists": [`) || !strings.Contains(metadata, `"h"`) {
+		t.Fatalf("replay metadata must keep every list:\n%s", metadata)
 	}
-	if strings.Contains(string(buildMetadata(&Generated{EffectiveBucket: "b"})), "bucketNames") {
-		t.Fatal("a replay without a list adds no bucketNames")
+	if strings.Contains(string(buildMetadata(&Generated{EffectiveBucket: "b"})), "bucketLists") {
+		t.Fatal("a replay without a list adds no bucketLists")
 	}
 }
 
@@ -371,5 +374,57 @@ func TestConvertJSONRefusesNamesElementsThatAreNotStrings(t *testing.T) {
 	_, err := ConvertJSON(src, RunScript{}, Options{Endpoints: []string{"http://10.0.0.1:9020"}, Bucket: "local", BaseTimestamp: "20260605.121400.000"})
 	if err == nil || !strings.Contains(err.Error(), "storage.targetBucket.names to a value replay does not know") {
 		t.Fatalf("err = %v, want the refusal", err)
+	}
+}
+
+// A list or count resolves only with the archived exports: a variable the archive does not
+// export stops the replay, and retargeting the base never changes a count.
+func TestConvertJSONResolvesBucketSetsOnlyWithArchivedExports(t *testing.T) {
+	archive := func(targetBucket string) []byte {
+		return []byte(`{"type": "sequential", "config": {"storage": {"driver": {"type": "s3"}, "targetBucket": ` + targetBucket + `}},
+  "steps": [{"type": "load", "config": {"item": {"data": {"size": "10KB"}, "output": {"path": "/archive"}}, "test": {"step": {"id": "W", "limit": {"count": 10}}}}}]}`)
+	}
+	exports := map[string]string{"BUCKET": "4", "MONGOOSE_DIR": "/opt/m"}
+	for _, c := range []struct{ name, targetBucket, want string }{
+		{"missing export in a name", `{"names": ["${PREFIX}-a", "${PREFIX}-b"]}`, "uses $PREFIX"},
+		{"missing export as the list", `{"names": "${BUCKETS}"}`, "uses $BUCKETS"},
+		{"missing export in a count", `{"count": "${COUNT}"}`, "uses $COUNT"},
+		{"count that is not a number", `{"count": "four"}`, "not a whole number"},
+		{"count of zero", `{"count": 0}`, "not a whole number of at least 1"},
+		{"fractional count", `{"count": 2.5}`, "not a whole number"},
+	} {
+		_, err := ConvertJSON(archive(c.targetBucket), RunScript{Exports: exports}, Options{Endpoints: []string{"http://10.0.0.1:9020"}, Bucket: "local", BaseTimestamp: "20260605.121400.000"})
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("%s: err = %v, want %q", c.name, err, c.want)
+		}
+	}
+	for _, replayBucket := range []string{"local", "2"} {
+		got, err := ConvertJSON(archive(`{"count": "${BUCKET}"}`), RunScript{Exports: exports}, Options{Endpoints: []string{"http://10.0.0.1:9020"}, Bucket: replayBucket, BaseTimestamp: "20260605.121400.000"})
+		if err != nil {
+			t.Fatalf("replay bucket %q: %v", replayBucket, err)
+		}
+		if js := string(got.ScenarioJS); !strings.Contains(js, `"count": 4`) {
+			t.Fatalf("replay bucket %q: the archived count of 4 must stay:\n%s", replayBucket, js)
+		}
+	}
+}
+
+func TestConvertJSONReportsEveryStepsList(t *testing.T) {
+	step := func(id, names string) string {
+		return `{"type": "load", "config": {"item": {"data": {"size": "10KB"}, "output": {"path": "/alpha"}},
+      "storage": {"targetBucket": {"names": ` + names + `}}, "test": {"step": {"id": "` + id + `", "limit": {"count": 10}}}}}`
+	}
+	src := []byte(`{"type": "sequential", "config": {"storage": {"driver": {"type": "s3"}}}, "steps": [` +
+		step("W", `["alpha", "beta"]`) + "," + step("R", `["gamma", "delta", "epsilon"]`) + "," + step("D", `["alpha", "beta"]`) + `]}`)
+	got, err := ConvertJSON(src, RunScript{}, Options{Endpoints: []string{"http://10.0.0.1:9020"}, BaseTimestamp: "20260605.121400.000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.ArchivedBucketLists) != 2 || strings.Join(got.ArchivedBucketLists[1].Names, "|") != "gamma|delta|epsilon" ||
+		len(got.ArchivedBucketLists[0].Steps) != 2 {
+		t.Fatalf("ArchivedBucketLists = %+v", got.ArchivedBucketLists)
+	}
+	if preflight := BuildPreflight(got, Options{}); !strings.Contains(preflight, "Buckets: 3 (gamma ... epsilon), kept from the archive, step 2") {
+		t.Fatalf("preflight:\n%s", preflight)
 	}
 }
