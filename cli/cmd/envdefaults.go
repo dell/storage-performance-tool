@@ -297,15 +297,23 @@ func splitEngineOverridesEnv(value string) []string {
 	return overrides
 }
 
-// applyEnvDefaultsToVerifyFlags injects HOSTS env into verify flags when not provided, and
-// SPT_INTERFACES. With a NIC set it also injects the run's S3_ENDPOINTS or S3_ENDPOINT, and THREADS.
-func applyEnvDefaultsToVerifyFlags(cmd *cobra.Command) error {
+// applyEnvHostsDefault injects HOSTS env into a command's --test-hosts when not provided.
+func applyEnvHostsDefault(cmd *cobra.Command) error {
 	if !cmd.Flags().Changed("test-hosts") {
 		if v := strings.TrimSpace(os.Getenv("HOSTS")); v != "" {
 			if err := cmd.Flags().Set("test-hosts", v); err != nil {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+// applyEnvDefaultsToVerifyFlags injects HOSTS env into verify flags when not provided, and
+// SPT_INTERFACES. With a NIC set it also injects the run's S3_ENDPOINTS or S3_ENDPOINT, and THREADS.
+func applyEnvDefaultsToVerifyFlags(cmd *cobra.Command) error {
+	if err := applyEnvHostsDefault(cmd); err != nil {
+		return err
 	}
 
 	if !cmd.Flags().Changed(flagInterfaces) {

@@ -65,7 +65,9 @@ Load
     .config({
         "load": {
             "op": {
-                "type": "read",
+                "type": "read"
+            },
+            "step": {
                 "limit": {
                     "time": "30s"
                 }

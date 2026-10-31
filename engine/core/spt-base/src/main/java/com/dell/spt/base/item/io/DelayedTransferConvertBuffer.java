@@ -86,20 +86,24 @@ public final class DelayedTransferConvertBuffer<I extends Item, O extends Operat
 		}
 		int n;
 		O ioResult;
-		for (int i = from; i < to; i++) {
+		int i = from;
+		while (i < to) {
 			if (lock.tryLock()) {
 				try {
+					final var ioResultsBuffSize = this.ioResultsBuffSize;
 					n = Math.min(to - i, ioResultsBuffLimit - ioResultsBuffSize);
 					if (n > 0) {
 						for (int j = 0; j < n; j++) {
 							ioResult = ioResults.get(i + j);
 							if (ioResult == null) {
 								Loggers.MSG.debug("{}: poisoned", this);
+								this.ioResultsBuffSize = ioResultsBuffSize + j;
 								poisonedFlag = true;
-								return to - i - j;
+								return i + j + 1 - from;
 							}
 							ioResultsBuff.addLast(ioResult);
 						}
+						this.ioResultsBuffSize = ioResultsBuffSize + n;
 						i += n;
 						// avoid blocking, there's a chance to exit the outer loop
 						continue;
@@ -157,7 +161,7 @@ public final class DelayedTransferConvertBuffer<I extends Item, O extends Operat
 								markBuffer.addLast(nextIoResult);
 							}
 							ioResultsIter.remove();
-							this.ioResultsBuffSize = ioResultsBuffSize + 1;
+							this.ioResultsBuffSize = ioResultsBuffSize - 1;
 							break;
 						}
 					} else {
@@ -166,7 +170,7 @@ public final class DelayedTransferConvertBuffer<I extends Item, O extends Operat
 							markBuffer.addLast(nextIoResult);
 						}
 						ioResultsIter.remove();
-						this.ioResultsBuffSize = ioResultsBuffSize + 1;
+						this.ioResultsBuffSize = ioResultsBuffSize - 1;
 						break;
 					}
 				}
@@ -205,7 +209,6 @@ public final class DelayedTransferConvertBuffer<I extends Item, O extends Operat
 								markBuffer.addLast(nextIoResult);
 							}
 							ioResultsIter.remove();
-							this.ioResultsBuffSize = ioResultsBuffSize + 1;
 							n++;
 						}
 					}
@@ -217,9 +220,11 @@ public final class DelayedTransferConvertBuffer<I extends Item, O extends Operat
 							markBuffer.addLast(nextIoResult);
 						}
 						ioResultsIter.remove();
-						this.ioResultsBuffSize = ioResultsBuffSize + 1;
 						n++;
 					}
+				}
+				if (n > 0) {
+					this.ioResultsBuffSize = ioResultsBuffSize - n;
 				}
 			} finally {
 				lock.unlock();
@@ -234,11 +239,15 @@ public final class DelayedTransferConvertBuffer<I extends Item, O extends Operat
 		long n = 0;
 		if (lock.tryLock()) {
 			try {
+				final var ioResultsBuffSize = this.ioResultsBuffSize;
 				final Iterator<O> ioResultsIter = ioResultsBuff.iterator();
 				while (n < count && ioResultsIter.hasNext()) {
 					ioResultsIter.next();
 					ioResultsIter.remove();
 					n++;
+				}
+				if (n > 0) {
+					this.ioResultsBuffSize = ioResultsBuffSize - (int) n;
 				}
 			} finally {
 				lock.unlock();

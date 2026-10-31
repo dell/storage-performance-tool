@@ -14,11 +14,13 @@ import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.impl.BasicConfig;
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import org.openjdk.nashorn.api.scripting.JSObject;
 
 import static com.dell.spt.base.config.ConfigFormat.JSON;
 import static com.dell.spt.base.config.ConfigFormat.YAML;
@@ -217,7 +219,7 @@ public interface ConfigUtil {
 					final String sep,
 					final String prefix) {
 		for (final var k : configMap.keySet()) {
-			final var v = configMap.get(k);
+			final var v = scriptArrayAsList(configMap.get(k));
 			if (v instanceof Map) {
 				flatten((Map<String, Object>) v, argValPairs, sep, prefix == null ? k : (prefix + sep + k));
 			} else if (v instanceof List) {
@@ -230,5 +232,21 @@ public interface ConfigUtil {
 				argValPairs.put(prefix == null ? k : (prefix + sep + k), v == null ? null : v.toString());
 			}
 		}
+	}
+
+	/**
+	 * A scenario's JavaScript array reaches Java as a Nashorn mirror, which is a {@link Map} keyed by
+	 * its indexes; it stands for the list of its elements.
+	 */
+	private static Object scriptArrayAsList(final Object value) {
+		if (value instanceof JSObject array && array.isArray()) {
+			final var length = ((Number) array.getMember("length")).intValue();
+			final var elements = new ArrayList<Object>(length);
+			for (var i = 0; i < length; i++) {
+				elements.add(array.getSlot(i));
+			}
+			return elements;
+		}
+		return value;
 	}
 }
