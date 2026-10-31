@@ -257,9 +257,9 @@ public interface ConfigUtil {
 	 * Sets each list value that {@link #flatten} recorded once more, as a list, on the settings the
 	 * schema types as lists, so such a setting gets exactly the elements it was given. The
 	 * comma-separated string alone reads an empty list back as one empty element, splits an element
-	 * that holds a comma, and drops trailing empty elements. A setting that an aliasing entry names
-	 * keeps the string aliasing gave it, whether aliasing renamed it or replaced its value, even with
-	 * the same text.
+	 * that holds a comma, and drops trailing empty elements. A setting that an aliasing entry names or
+	 * writes keeps the string aliasing gave it, whichever input won: aliasing may rename it, replace
+	 * its value (even with the same text) or write another input into it.
 	 *
 	 * @param appliedArgs the values after aliasing, already set on the configuration
 	 * @param aliasingConfig the aliasing entries that produced them
@@ -273,6 +273,9 @@ public interface ConfigUtil {
 		if (aliasingConfig != null) {
 			for (final var entry : aliasingConfig) {
 				aliased.add(entry.get(AliasingUtil.NAME));
+				if (entry.get(AliasingUtil.TARGET) instanceof String target) {
+					aliased.add(target.split(AliasingUtil.ARG_VAL_SEP, 2)[0]);
+				}
 			}
 		}
 		for (final var listVal : listVals.entrySet()) {

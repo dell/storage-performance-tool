@@ -154,6 +154,24 @@ class ScenarioConfigArrayTest {
 		}
 	}
 
+	// An alias that writes another input into a list setting decides its value as aliasing alone
+	// would, so the array given directly is never restored over it.
+	@Test
+	void anAliasWritingIntoAListSettingDecidesItsValue() throws Exception {
+		final var input = js("{\"storage-targetBucket-names\": [\"alpha\", \"beta\"], \"x\": \"unused\"}");
+		final var config = TestConfigBuilder.config();
+		final var aliasing = new ArrayList<Map<String, Object>>(config.<Map<String, Object>> listVal("aliasing"));
+		aliasing.add(Map.of("name", "x", "target", "storage-targetBucket-names=gamma,delta"));
+		config.val("aliasing", aliasing);
+		final var flat = new HashMap<String, String>();
+		ConfigUtil.flatten(input, flat, "-", null);
+		final var aliasedOnly = List.of(AliasingUtil.apply(flat, aliasing).get("storage-targetBucket-names").split(","));
+
+		final var client = new TestLoadStepClient(config, List.of(), null, null);
+		assertEquals(aliasedOnly, names(client.config(input).getEffectiveConfig()), "config");
+		assertEquals(aliasedOnly, names(client.append(input).getCtxConfigs().get(0)), "append");
+	}
+
 	private static Map<String, Object> targetBucket(final String namesArray) throws Exception {
 		return js("{\"storage\": {\"targetBucket\": {\"names\": " + namesArray + "}}}");
 	}
