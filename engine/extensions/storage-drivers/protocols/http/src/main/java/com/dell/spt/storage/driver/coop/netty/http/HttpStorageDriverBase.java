@@ -485,59 +485,33 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			final var httpRequest = httpRequest(op, nodeAddr);
 			if (channel == null) {
 				return;
+			} else {
+				channel.write(httpRequest).addListener(httpReqSentCallback);
+				onRequestDispatched(channel, op);
+				if (op.integrityMetadata() != null) {
+					markIntegrityRequestDispatched();
+				}
+				if (Loggers.MSG.isTraceEnabled()) {
+					Loggers.MSG.trace(
+									"{} >>>> {} {}", op.hashCode(), httpRequest.method(), httpRequest.uri());
+				}
 			}
-			writeRequest(channel, op, httpRequest);
+			if (!(httpRequest instanceof FullHttpRequest)) {
+				sendRequestData(channel, op);
+			}
 		} catch (final IOException e) {
 			LogUtil.exception(Level.WARN, e, "Failed to write the data");
 		} catch (final URISyntaxException e) {
 			LogUtil.exception(Level.WARN, e, "Failed to build the request URI");
 		} catch (final Throwable e) {
-			if (requestFailureCompletedOperation(channel, op, e)) {
+			throwUncheckedIfInterrupted(e);
+			if (completeReconciledDeleteAfterRequestBuildFailure(channel, op, e)) {
 				return;
 			}
+			logRequestBuildFailure(e);
 		}
-		writeLastContent(channel);
-		channel.flush();
-	}
-
-	/**
-	 * Queues a built request on the channel, with its payload when it streams one, without its last
-	 * content and without a flush: {@link #sendRequest}'s write step. A driver that defers custody to
-	 * the write (spec item 9c) queues the request under the admission lock and flushes after it.
-	 */
-	protected final void writeRequest(final Channel channel, final O op, final HttpRequest httpRequest)
-					throws IOException {
-		channel.write(httpRequest).addListener(httpReqSentCallback);
-		onRequestDispatched(channel, op);
-		if (op.integrityMetadata() != null) {
-			markIntegrityRequestDispatched();
-		}
-		if (Loggers.MSG.isTraceEnabled()) {
-			Loggers.MSG.trace("{} >>>> {} {}", op.hashCode(), httpRequest.method(), httpRequest.uri());
-		}
-		if (!(httpRequest instanceof FullHttpRequest)) {
-			sendRequestData(channel, op);
-		}
-	}
-
-	/** Queues the empty last content that ends every request, sent or failed. */
-	protected final void writeLastContent(final Channel channel) {
 		channel.write(LastHttpContent.EMPTY_LAST_CONTENT).addListener(reqSentCallback);
-	}
-
-	/**
-	 * {@link #sendRequest}'s handling of a failure, other than an I/O or URI one, to build or write a
-	 * request: completes a reconciled DELETE and returns true, or logs the failure and returns false,
-	 * after which the request still ends with its last content. Completion publishes the result, so
-	 * this never runs under the admission lock.
-	 */
-	protected final boolean requestFailureCompletedOperation(final Channel channel, final O op, final Throwable failure) {
-		throwUncheckedIfInterrupted(failure);
-		if (completeReconciledDeleteAfterRequestBuildFailure(channel, op, failure)) {
-			return true;
-		}
-		logRequestBuildFailure(failure);
-		return false;
+		channel.flush();
 	}
 
 	private boolean completeReconciledDeleteAfterRequestBuildFailure(

@@ -29,11 +29,7 @@ import com.dell.spt.storage.driver.coop.netty.nic.NicSetSupport;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.netty.connection.pool.NonBlockingConnPool;
 import io.netty.channel.Channel;
-import io.netty.handler.codec.http.HttpRequest;
-import io.netty.util.ReferenceCountUtil;
 import io.netty.util.AttributeKey;
-import java.io.IOException;
-import java.net.URISyntaxException;
 import java.util.List;
 import org.apache.logging.log4j.Level;
 
@@ -74,12 +70,6 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 	private NicSetConnectionPool nicPool;
 	// Assigned at start before the dispatch task and the NICs' event loops run.
 	private NicPathCounters counters;
-
-	/**
-	 * Test seam: runs on the event loop after a request is built and before custody passes at its
-	 * write. Set before the driver dispatches; null in production.
-	 */
-	Runnable afterRequestBuilt;
 
 	static <I extends Item, O extends Operation<I>> S3NicSetDriver<I, O> create(
 					final String stepId,
@@ -299,63 +289,14 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 						|| (op instanceof CompositeDataOperation && OpType.READ.equals(op.type()));
 	}
 
-	/**
-	 * Runs on the channel's event loop. Custody passes at the write (spec item 9c): the request is
-	 * built first, outside the admission lock, since its headers and signature are the costly part
-	 * and building reads the operation without changing it. Then, under the lock, the captured token
-	 * is checked, the operation marked dispatched, its attempt admitted on its Path and its request
-	 * queued on the channel, so nothing is queued once admission closes. The flush follows outside
-	 * the lock. A failure is handled as {@code sendRequest} handles it, never under the lock.
-	 */
+	/** Runs on the channel's event loop. */
 	private void onAcquired(final O op, final DispatchToken<O> token, final int nic, final Channel channel) {
 		final var admission = nicPool.admission();
 		if (admission.waitEnded(nic)) {
 			signalDispatchCapacityAvailable();
 		}
-		final var nodeAddr = channel.attr(ATTR_KEY_NODE).get();
-		HttpRequest built = null;
-		Throwable buildFailure = null;
-		try {
-			built = httpRequest(op, nodeAddr);
-		} catch (final Throwable thrown) {
-			throwUncheckedIfInterrupted(thrown);
-			buildFailure = thrown;
-		}
-		final var request = built;
-		final var hook = afterRequestBuilt;
-		if (hook != null) {
-			hook.run();
-		}
-		// [0]: a failure after the claim; queued[0]: whether any part of the request was queued.
-		final var failure = new Throwable[1];
-		final var queued = new boolean[1];
-		final boolean claimed = withDispatchAdmission(() -> {
-			if (!claimCapturedDispatch(op, token)) {
-				return false;
-			}
-			try {
-				channel.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
-				channel.attr(ATTR_KEY_OPERATION).set(op);
-				op.nodeAddr(nodeAddr);
-				bindRequestChannel(channel, op);
-				op.startRequest();
-				if (request != null) {
-					queued[0] = true;
-					try {
-						writeRequest(channel, op, request);
-					} catch (final IOException e) {
-						LogUtil.exception(Level.WARN, e, "Failed to write the data");
-					}
-					writeLastContent(channel);
-				}
-			} catch (final Throwable thrown) {
-				failure[0] = thrown;
-			}
-			return true;
-		});
-		if (!claimed) {
+		if (!withDispatchAdmission(() -> claimCapturedDispatch(op, token))) {
 			// Stopped, or the circulation is stale: nothing is written and queue recovery owns the operation.
-			ReferenceCountUtil.release(request);
 			final var row = counters.path(channel);
 			row.attempted();
 			row.interrupted();
@@ -365,37 +306,24 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 			signalDispatchCapacityAvailable();
 			return;
 		}
-		if (failure[0] == null && request != null) {
-			channel.flush();
-			return;
-		}
-		final var cause = failure[0] != null ? failure[0] : buildFailure;
-		throwUncheckedIfInterrupted(cause);
-		if (queued[0]) {
-			// Part of the request is queued: as sendRequest, a reconciled DELETE completes, and any
-			// other request still ends with its last content.
-			if (!requestFailureCompletedOperation(channel, op, cause)) {
-				writeLastContent(channel);
-				channel.flush();
+		try {
+			channel.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
+			channel.attr(ATTR_KEY_OPERATION).set(op);
+			op.nodeAddr(channel.attr(ATTR_KEY_NODE).get());
+			op.startRequest();
+			sendRequest(channel, op);
+		} catch (final Throwable thrown) {
+			throwUncheckedIfInterrupted(thrown);
+			nicSet.logSetupFailure(thrown, false);
+			if (channel.attr(ATTR_KEY_ROW).get() == null) {
+				// Failed before its request was bound: admit the attempt here, so completion ends it.
+				final var row = counters.path(channel);
+				row.attempted();
+				channel.attr(ATTR_KEY_ROW).set(row);
 			}
-			return;
+			op.status(Operation.Status.FAIL_UNKNOWN);
+			completeQuietly(channel, op);
 		}
-		// Nothing was queued: the request could not be built, or the claim's bookkeeping failed.
-		ReferenceCountUtil.release(request);
-		if (cause instanceof URISyntaxException) {
-			nicSet.logSetupFailure(cause, false);
-		} else if (requestFailureCompletedOperation(channel, op, cause)) {
-			// A reconciled DELETE; otherwise the failure is logged there.
-			return;
-		}
-		if (channel.attr(ATTR_KEY_ROW).get() == null) {
-			// Failed before its request was bound: admit the attempt here, so completion ends it.
-			final var row = counters.path(channel);
-			row.attempted();
-			channel.attr(ATTR_KEY_ROW).set(row);
-		}
-		op.status(Operation.Status.FAIL_UNKNOWN);
-		completeQuietly(channel, op);
 	}
 
 	/**
