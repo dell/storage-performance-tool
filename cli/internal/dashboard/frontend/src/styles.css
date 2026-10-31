@@ -1,3 +1,24 @@
+@layer theme, base, mantine, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "@mantine/core/styles.layer.css";
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@theme inline {
+  --font-sans: var(--mantine-font-family);
+  --color-primary: var(--mantine-primary-color-filled);
+  --color-primary-hover: var(--mantine-primary-color-filled-hover);
+
+  --spacing-xs: var(--mantine-spacing-xs);
+  --spacing-sm: var(--mantine-spacing-sm);
+  --spacing-md: var(--mantine-spacing-md);
+  --spacing-lg: var(--mantine-spacing-lg);
+  --spacing-xl: var(--mantine-spacing-xl);
+
+  --radius-md: var(--mantine-radius-md);
+  --text-base: var(--mantine-font-size-md);
+}
+
 :root {
   font-family:
     Inter,
