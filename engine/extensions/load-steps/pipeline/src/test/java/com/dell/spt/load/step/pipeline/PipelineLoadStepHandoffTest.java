@@ -36,9 +36,10 @@ import org.junit.jupiter.api.io.TempDir;
 class PipelineLoadStepHandoffTest {
 
 	/**
-	 * Each run takes a step ID of its own, unique across test runs: the engine's threads do not see
-	 * this test's home_dir, so a step's files land under a shared directory by step ID, and a node
-	 * source left by an earlier run with the same ID fails the step's artifact aggregation.
+	 * Each run takes a step ID of its own, unique across test runs. Logging configured before this
+	 * test sets home_dir keeps the literal ${ctx:home_dir} in its file paths, so a step's files land
+	 * under a directory shared by every run, by step ID; a node source left there by an earlier run
+	 * with the same ID fails the step's artifact aggregation, which refuses to overwrite one.
 	 */
 	private static String newStepId() {
 		return "pipeline-handoff-" + UUID.randomUUID();

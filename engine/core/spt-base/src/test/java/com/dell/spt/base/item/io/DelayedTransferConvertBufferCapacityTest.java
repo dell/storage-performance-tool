@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
@@ -59,7 +60,12 @@ class DelayedTransferConvertBufferCapacityTest {
 		final var buffer = buffer(1);
 		buffer.put(op("first"));
 
-		final var second = CompletableFuture.runAsync(() -> buffer.put(op("second")));
+		final var putStarted = new CountDownLatch(1);
+		final var second = CompletableFuture.runAsync(() -> {
+			putStarted.countDown();
+			buffer.put(op("second"));
+		});
+		assertTrue(putStarted.await(BOUND.toMillis(), TimeUnit.MILLISECONDS), "the put started");
 		TimeUnit.MILLISECONDS.sleep(100);
 		assertTrue(!second.isDone(), "a full buffer holds the put back");
 
@@ -132,6 +138,9 @@ class DelayedTransferConvertBufferCapacityTest {
 		return assertTimeoutPreemptively(BOUND, () -> {
 			DataItem item;
 			while ((item = buffer.get()) == null) {
+				if (Thread.currentThread().isInterrupted()) {
+					throw new InterruptedException("no item within the bound");
+				}
 				Thread.onSpinWait();
 			}
 			return item;
