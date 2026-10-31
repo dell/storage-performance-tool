@@ -772,7 +772,7 @@ requirements.
 | `--endpoints` | `-e` | from `S3_ENDPOINTS` / `S3_ENDPOINT` | One or more current S3 endpoint URLs |
 | `--access-key` | `-a` | from `S3_ACCESS_KEY` | Current target access key |
 | `--secret-key` | `-s` | from `S3_SECRET_KEY` | Current target secret key |
-| `--bucket` | `-b` | from `S3_BUCKET` or archived bucket | Current target bucket override; rejected when the archived run lists its target buckets, which replay keeps (`S3_BUCKET` is then ignored) |
+| `--bucket` | `-b` | from `S3_BUCKET` or archived bucket | Current target bucket override |
 | `--auth-version` | | `4` | S3 signature version (`2` or `4`) |
 | `--s3-driver` | | from `SPT_S3_DRIVER` or `default` | S3 storage driver backend: `default`, `netty`, `aws`, or `rdma`. RDMA replay launch is not implemented yet; use `rdma` only with `--generate-only` |
 
