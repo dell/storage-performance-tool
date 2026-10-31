@@ -509,6 +509,11 @@ var (
 	connectMultiHostOrchestratorFunc = func(ctx context.Context, orchestrator *tui.MultiHostOrchestrator) error {
 		return orchestrator.ConnectHosts(ctx)
 	}
+	// executionParticipantHostsFunc reads a distributed run's locked execution participants. It is
+	// a test seam: command tests cannot start the RMI topology that locks them.
+	executionParticipantHostsFunc = func(orchestrator *tui.MultiHostOrchestrator) ([]*tui.HostConnection, bool, error) {
+		return orchestrator.GetExecutionParticipantHosts()
+	}
 	prepareDistributedIntegrityRuntimeIdentityFunc = func(
 		ctx context.Context, orchestrator *tui.MultiHostOrchestrator, image string,
 	) (tui.DistributedRuntimeIdentityEvidence, error) {
@@ -2038,6 +2043,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			})
 			multiHostOrchestrator.SetIntegrityRuntimeIdentityTier(integrityIdentityTier)
 			metadata.metricContributors = multiHostOrchestrator.MetricContributorIDs
+			metadata.executionHosts = lockedExecutionHosts(multiHostOrchestrator)
 		}
 		var runSession *runcontrol.Session
 		if resultsOpts.AutoResults {

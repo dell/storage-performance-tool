@@ -269,6 +269,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	metadata.TraceAuto = traceOpts.Auto
 	if replayOrchestrator != nil {
 		metadata.metricContributors = replayOrchestrator.MetricContributorIDs
+		metadata.executionHosts = lockedExecutionHosts(replayOrchestrator)
 	}
 	if plannedResultsRoot != "" {
 		metadata.ResultsRoot = plannedResultsRoot
