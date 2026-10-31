@@ -129,6 +129,20 @@ class TargetBucketListTest {
 		assertTrue(failure.getMessage().contains(reason), failure.getMessage());
 	}
 
+	// The engine refuses what the CLI refuses: every Unicode space and every control character.
+	@Test
+	void unicodeSpacesAndControlCharactersAreRejectedAsTheCliRejectsThem() throws Exception {
+		for (final var space : List.of("\u00a0", "\u2007", "\u202f", "\u0085", "\u2028", "\u3000")) {
+			final var failure = assertThrows(RunTerminalException.class, () -> TargetBucketSet.count(config("good", "a" + space + "b")));
+			assertTrue(failure.getMessage().contains("must not contain whitespace")
+							|| failure.getMessage().contains("must not contain a control character"), failure.getMessage());
+		}
+		for (final var control : List.of("\u0000", "\u0007", "\u007f", "\u009f")) {
+			final var failure = assertThrows(RunTerminalException.class, () -> TargetBucketSet.count(config("good", "a" + control + "b")));
+			assertTrue(failure.getMessage().contains("must not contain a control character"), failure.getMessage());
+		}
+	}
+
 	@Test
 	void anExactDuplicateIsRejectedAndNamesThatDifferByCaseAreDistinct() throws Exception {
 		final var failure = assertThrows(RunTerminalException.class,

@@ -134,8 +134,13 @@ public final class TargetBucketSet {
 			if (c == '/' || c == ',') {
 				return "must not contain '" + c + "'";
 			}
-			if (Character.isWhitespace(c)) {
+			// Java's isWhitespace leaves out the no-break spaces; isSpaceChar adds every Unicode space
+			// and line separator, matching the CLI's check
+			if (Character.isWhitespace(c) || Character.isSpaceChar(c)) {
 				return "must not contain whitespace";
+			}
+			if (Character.isISOControl(c)) {
+				return "must not contain a control character";
 			}
 		}
 		for (final var marker : EXPRESSION_MARKERS) {
