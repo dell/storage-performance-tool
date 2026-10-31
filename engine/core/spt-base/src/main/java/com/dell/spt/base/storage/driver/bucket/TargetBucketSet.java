@@ -89,7 +89,7 @@ public final class TargetBucketSet {
 			// A configuration without the setting, as built by an embedding test or tool, has no list.
 			return List.of();
 		}
-		if (configured == null || configured.isEmpty()) {
+		if (configured == null || configured.isEmpty() || isOneEmptyName(configured)) {
 			return List.of();
 		}
 		if (configured.size() > MAX_COUNT) {
@@ -109,6 +109,15 @@ public final class TargetBucketSet {
 			names.add(name);
 		}
 		return List.copyOf(names);
+	}
+
+	/**
+	 * Returns whether a configured list is one empty name, which stands for no list: an empty
+	 * JavaScript array and an empty command-line value both reach the engine as an empty comma string,
+	 * which reads back as one empty element.
+	 */
+	private static boolean isOneEmptyName(final List<?> configured) {
+		return configured.size() == 1 && (configured.get(0) == null || String.valueOf(configured.get(0)).isEmpty());
 	}
 
 	/**

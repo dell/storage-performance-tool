@@ -16,11 +16,9 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.regex.Pattern;
 import org.openjdk.nashorn.api.scripting.JSObject;
 
@@ -226,7 +224,8 @@ public interface ConfigUtil {
 	/**
 	 * Flattens a scenario's configuration map into paths and string values. A list value becomes the
 	 * comma-separated string of its elements and, when {@code listVals} is not null, is also recorded
-	 * there as the list of those strings, for {@link #applyListValues}.
+	 * there as the list of those strings, for {@link #validateListValues}; a later value at the same
+	 * path replaces it.
 	 */
 	static void flatten(
 					final Map<String, Object> configMap,
@@ -249,41 +248,34 @@ public interface ConfigUtil {
 				}
 			} else {
 				argValPairs.put(path, v == null ? null : v.toString());
+				if (listVals != null) {
+					listVals.remove(path);
+				}
 			}
 		}
 	}
 
 	/**
-	 * Sets each list value that {@link #flatten} recorded once more, as a list, on the settings the
-	 * schema types as lists, so such a setting gets exactly the elements it was given. The
-	 * comma-separated string alone reads an empty list back as one empty element, splits an element
-	 * that holds a comma, and drops trailing empty elements. A setting that an aliasing entry names or
-	 * writes keeps the string aliasing gave it, whichever input won: aliasing may rename it, replace
-	 * its value (even with the same text) or write another input into it.
+	 * Refuses a list value that its comma-separated string cannot carry, on the settings the schema
+	 * types as lists: an element that is empty or holds a comma. The configuration reads the string
+	 * back by splitting it at commas, so such an element would otherwise be split or dropped without a
+	 * word. An empty list passes; it reads back as one empty element.
 	 *
-	 * @param appliedArgs the values after aliasing, already set on the configuration
-	 * @param aliasingConfig the aliasing entries that produced them
+	 * @throws IllegalArgumentException naming the setting and the element
 	 */
-	static void applyListValues(
-					final Config config,
-					final Map<String, List<String>> listVals,
-					final Map<String, String> appliedArgs,
-					final List<Map<String, Object>> aliasingConfig) {
-		final Set<Object> aliased = new HashSet<>();
-		if (aliasingConfig != null) {
-			for (final var entry : aliasingConfig) {
-				aliased.add(entry.get(AliasingUtil.NAME));
-				if (entry.get(AliasingUtil.TARGET) instanceof String target) {
-					aliased.add(target.split(AliasingUtil.ARG_VAL_SEP, 2)[0]);
-				}
-			}
-		}
+	static void validateListValues(final Config config, final Map<String, List<String>> listVals) {
 		for (final var listVal : listVals.entrySet()) {
 			final var path = listVal.getKey();
-			if (appliedArgs.containsKey(path)
-							&& !aliased.contains(path)
-							&& isListSetting(config.schema(), path, config.pathSep())) {
-				config.val(path, new ArrayList<>(listVal.getValue()));
+			if (!isListSetting(config.schema(), path, config.pathSep())) {
+				continue;
+			}
+			final var elements = listVal.getValue();
+			for (int i = 0; i < elements.size(); i++) {
+				final var element = elements.get(i);
+				if (element.isEmpty() || element.contains(",")) {
+					throw new IllegalArgumentException(path + ": element " + (i + 1) + " \"" + element
+									+ "\" is empty or holds a comma, which a list in a scenario's configuration cannot carry");
+				}
 			}
 		}
 	}

@@ -6,7 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.load.step.client.TestLoadStepClient;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketSet;
 import com.github.akurilov.confuse.Config;
@@ -82,16 +81,17 @@ class ScenarioConfigArrayTest {
 		assertEquals(addrs(javaEmpty), addrs(js("{\"load\": {\"step\": {\"node\": {\"addrs\": []}}}}")));
 	}
 
-	// A list setting keeps exactly the elements of its array, which a comma string cannot carry: an
-	// empty array, an element with a comma and a trailing empty element.
+	// An array passes as its comma string, so an element that string cannot carry, empty or holding
+	// a comma, fails the scenario instead of being split or dropped.
 	@Test
-	void aListSettingKeepsExactlyTheElementsOfItsArray() throws Exception {
-		assertEquals(List.of(), names(client().config(targetBucket("[]")).getEffectiveConfig()));
-		assertEquals(List.of("alpha,beta"), names(client().config(targetBucket("[\"alpha,beta\"]")).getEffectiveConfig()));
-		assertEquals(List.of("alpha", ""), names(client().config(targetBucket("[\"alpha\", \"\"]")).getEffectiveConfig()));
+	void aListElementTheCommaStringCannotCarryFailsTheScenario() throws Exception {
+		for (final var names : List.of("[\"alpha,beta\"]", "[\"alpha\", \"\"]", "[\"\"]")) {
+			assertThrows(Exception.class, () -> client().config(targetBucket(names)), "config " + names);
+			assertThrows(Exception.class, () -> client().append(targetBucket(names)), "append " + names);
+		}
+		assertEquals(List.of("ps-eu", "PS_US"), names(client().config(targetBucket("[\"ps-eu\", \"PS_US\"]")).getEffectiveConfig()));
 		assertEquals(List.of("ps-eu", "PS_US"),
 						names(client().append(targetBucket("[\"ps-eu\", \"PS_US\"]")).getCtxConfigs().get(0)));
-		assertEquals(List.of(), names(client().append(targetBucket("[]")).getCtxConfigs().get(0)));
 	}
 
 	@Test
@@ -101,10 +101,10 @@ class ScenarioConfigArrayTest {
 	}
 
 	@Test
-	void aSettingThatIsNotAListStillGetsTheCommaString() throws Exception {
-		final var configured = client().config(js("{\"item\": {\"output\": {\"path\": [\"a\", \"b\"]}}}")).getEffectiveConfig();
+	void aSettingThatIsNotAListIsNotChecked() throws Exception {
+		final var configured = client().config(js("{\"item\": {\"output\": {\"path\": [\"a,b\", \"\"]}}}")).getEffectiveConfig();
 
-		assertEquals("a,b", configured.stringVal("item-output-path"));
+		assertEquals("a,b,", configured.stringVal("item-output-path"));
 	}
 
 	@Test
@@ -119,45 +119,30 @@ class ScenarioConfigArrayTest {
 		assertFalse(ConfigUtil.isListSetting(schema, "no-such-setting", "-"));
 	}
 
-	// The target bucket set reads what the scenario wrote: an empty list falls back to the count, and
-	// names the engine cannot use fail instead of being split or dropped.
+	// A later scalar at the same path replaces an array, so the array is not checked.
 	@Test
-	void aScenarioBucketListReachesTheTargetBucketSetExactly() throws Exception {
+	void aLaterScalarAtTheSamePathReplacesTheArray() throws Exception {
+		final var configured = client().config(js("{\"storage-targetBucket-names\": [\"alpha,beta\"], "
+						+ "\"storage\": {\"targetBucket\": {\"names\": \"gamma,delta\"}}}")).getEffectiveConfig();
+
+		assertEquals(List.of("gamma", "delta"), names(configured));
+	}
+
+	// The target bucket set reads what the scenario wrote: an empty array falls back to the count.
+	@Test
+	void aScenarioBucketListReachesTheTargetBucketSet() throws Exception {
 		final var emptyList = client().config(js("{\"storage\": {\"targetBucket\": {\"count\": 4, \"names\": []}}}")).getEffectiveConfig();
 		assertEquals(4, TargetBucketSet.count(emptyList));
+		assertEquals(List.of(), TargetBucketSet.names(emptyList));
 
 		final var listed = client().config(targetBucket("[\"ps-eu\", \"PS_US\"]")).getEffectiveConfig();
 		assertEquals(2, TargetBucketSet.count(listed));
 		assertEquals(List.of("ps-eu", "PS_US"), TargetBucketSet.names(listed));
-
-		for (final var malformed : List.of("[\"alpha,beta\"]", "[\"alpha\", \"\"]")) {
-			final var configured = client().config(targetBucket(malformed)).getEffectiveConfig();
-			assertThrows(RunTerminalException.class, () -> TargetBucketSet.count(configured), malformed);
-		}
 	}
 
-	// Aliasing's value stands over the array it replaced, even when its text equals the array's
-	// comma string.
+	// Aliasing works on the strings, as it always has; an alias never meets a restored list.
 	@Test
-	void anAliasingReplacementKeepsItsValue() throws Exception {
-		for (final var appendStep : List.of(false, true)) {
-			final var config = TestConfigBuilder.config();
-			final var aliasing = new ArrayList<Map<String, Object>>(config.<Map<String, Object>> listVal("aliasing"));
-			aliasing.add(Map.of("name", "storage-targetBucket-names", "target", "storage-targetBucket-names=alpha,beta"));
-			config.val("aliasing", aliasing);
-			final var client = new TestLoadStepClient(config, List.of(), null, null);
-			final var configured = appendStep
-							? client.append(targetBucket("[\"alpha,beta\"]")).getCtxConfigs().get(0)
-							: client.config(targetBucket("[\"alpha,beta\"]")).getEffectiveConfig();
-
-			assertEquals(List.of("alpha", "beta"), names(configured), appendStep ? "append" : "config");
-		}
-	}
-
-	// An alias that writes another input into a list setting decides its value as aliasing alone
-	// would, so the array given directly is never restored over it.
-	@Test
-	void anAliasWritingIntoAListSettingDecidesItsValue() throws Exception {
+	void aliasingStillDecidesWhatItWrites() throws Exception {
 		final var input = js("{\"storage-targetBucket-names\": [\"alpha\", \"beta\"], \"x\": \"unused\"}");
 		final var config = TestConfigBuilder.config();
 		final var aliasing = new ArrayList<Map<String, Object>>(config.<Map<String, Object>> listVal("aliasing"));

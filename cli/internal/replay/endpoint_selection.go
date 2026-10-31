@@ -110,8 +110,8 @@ func extractJSEndpointSelections(source string, vars map[string]string, archived
 	return applyJSReplacements(source, replacements), diagnostics
 }
 
-// jsKeyOccurrence is an object key and the object that contains it.
-type jsKeyOccurrence struct {
+// jsEndpointOccurrence is an object key named endpoint and the object that contains it.
+type jsEndpointOccurrence struct {
 	keyStart    int    // offset of the key
 	valueStart  int    // offset of the value after the colon
 	parentKey   string // key whose value is the containing object; empty if there is none
@@ -119,35 +119,25 @@ type jsKeyOccurrence struct {
 	parentClose int    // offset of the containing object's closing brace; -1 if it never closes
 }
 
-// jsEndpointOccurrences reports every key named endpoint in code, which must have its comments
-// masked, with its containing object.
-func jsEndpointOccurrences(code string) []jsKeyOccurrence {
-	occurrences, _ := jsKeyOccurrences(code, "endpoint")
-	return occurrences
-}
-
-// jsKeyOccurrences walks code, which must have its comments masked, as tokens and reports every
-// object key named want with its containing object, and the offset of every other use of the name:
-// an identifier that is not a key, such as a member access or a shorthand property, or a string
-// used as a computed member access. Strings are skipped as whole tokens, so their contents never
-// count as keys, and a string key is compared once its escapes are decoded.
-func jsKeyOccurrences(code, want string) ([]jsKeyOccurrence, []int) {
+// jsEndpointOccurrences walks code, which must have its comments masked, as tokens and reports
+// every key named endpoint with its containing object. Strings are skipped as whole tokens, so
+// their contents never count as keys.
+func jsEndpointOccurrences(code string) []jsEndpointOccurrence {
 	type frame struct {
 		key         string
 		open        int
-		occurrences []int // indexes of the wanted keys directly inside this object
+		occurrences []int // indexes of the endpoint keys directly inside this object
 	}
 	var stack []frame
-	var occurrences []jsKeyOccurrence
-	var otherUses []int
+	var occurrences []jsEndpointOccurrence
 	pendingKey := "" // a key whose colon was just read, until its value starts
 	colonAfter := func(end int) (int, bool) {
 		j := skipJSWhitespace(code, end)
 		return j, j < len(code) && code[j] == ':'
 	}
 	keyRead := func(name string, start, colon int) {
-		if name == want {
-			occurrence := jsKeyOccurrence{keyStart: start, valueStart: skipJSWhitespace(code, colon+1), parentOpen: -1, parentClose: -1}
+		if name == "endpoint" {
+			occurrence := jsEndpointOccurrence{keyStart: start, valueStart: skipJSWhitespace(code, colon+1), parentOpen: -1, parentClose: -1}
 			if len(stack) > 0 {
 				parent := &stack[len(stack)-1]
 				occurrence.parentKey, occurrence.parentOpen = parent.key, parent.open
@@ -163,14 +153,10 @@ func jsKeyOccurrences(code, want string) ([]jsKeyOccurrence, []int) {
 		case isJSWhitespace(c):
 		case c == '"' || c == '\'' || c == '`':
 			end := jsStringEnd(code, i)
-			text := jsDecodedStringText(code, i, end)
 			if colon, ok := colonAfter(end + 1); ok && c != '`' && end > i {
-				keyRead(text, i, colon)
+				keyRead(code[i+1:end], i, colon)
 				i = colon
 				continue
-			}
-			if end > i && text == want && jsComputedMemberAt(code, i) {
-				otherUses = append(otherUses, i)
 			}
 			pendingKey = ""
 			i = end
@@ -183,9 +169,6 @@ func jsKeyOccurrences(code, want string) ([]jsKeyOccurrence, []int) {
 				keyRead(code[start:i+1], start, colon)
 				i = colon
 				continue
-			}
-			if code[start:i+1] == want {
-				otherUses = append(otherUses, start)
 			}
 			pendingKey = ""
 		case c == '{':
@@ -203,7 +186,7 @@ func jsKeyOccurrences(code, want string) ([]jsKeyOccurrence, []int) {
 			pendingKey = ""
 		}
 	}
-	return occurrences, otherUses
+	return occurrences
 }
 
 type jsEndpointDeclaration struct {
@@ -214,7 +197,7 @@ type jsEndpointDeclaration struct {
 }
 
 // parseJSEndpointValue evaluates one endpoint declaration and returns the offset after its value.
-func parseJSEndpointValue(code string, occurrence jsKeyOccurrence, vars map[string]string) (jsEndpointDeclaration, int, error) {
+func parseJSEndpointValue(code string, occurrence jsEndpointOccurrence, vars map[string]string) (jsEndpointDeclaration, int, error) {
 	if occurrence.parentKey != "net" || occurrence.parentClose < 0 || occurrence.valueStart >= len(code) || code[occurrence.valueStart] != '{' {
 		return jsEndpointDeclaration{}, 0, fmt.Errorf("declares storage.net.endpoint in a form replay cannot evaluate, " +
 			"such as a variable reference or a key outside a \"net\" object; write it as an object literal inside " +
@@ -429,7 +412,7 @@ func jsCodeMask(source string) string {
 		case out[i] == '"' || out[i] == '\'' || out[i] == '`':
 			i = jsStringEnd(source, i)
 		case out[i] == '/' && i+1 < len(out) && out[i+1] == '/':
-			for ; i < len(out) && !isJSLineTerminatorAt(source, i); i++ {
+			for ; i < len(out) && out[i] != '\n'; i++ {
 				out[i] = ' '
 			}
 		case out[i] == '/' && i+1 < len(out) && out[i+1] == '*':
@@ -449,13 +432,6 @@ func jsCodeMask(source string) string {
 	return string(out)
 }
 
-// isJSLineTerminatorAt reports whether a JavaScript line terminator starts at i: a line feed, a
-// carriage return, or U+2028 or U+2029, any of which ends a line comment.
-func isJSLineTerminatorAt(source string, i int) bool {
-	return source[i] == '\n' || source[i] == '\r' ||
-		strings.HasPrefix(source[i:], "\u2028") || strings.HasPrefix(source[i:], "\u2029")
-}
-
 // jsStringEnd returns the index of the quote closing the string that opens at open.
 func jsStringEnd(source string, open int) int {
 	quote := source[open]
@@ -468,40 +444,6 @@ func jsStringEnd(source string, open int) int {
 		}
 	}
 	return len(source) - 1
-}
-
-// jsDecodedStringText returns the text of the string literal between open and end, decoded when its
-// escapes decode exactly and as written otherwise.
-func jsDecodedStringText(code string, open, end int) string {
-	if end <= open {
-		return ""
-	}
-	if decoded, err := decodeJSString(code[open+1 : end]); err == nil {
-		return decoded
-	}
-	return code[open+1 : end]
-}
-
-// jsComputedMemberAt reports whether the string at i is a computed member access such as
-// config["name"]: it follows an opening bracket that follows a name, a closing bracket or a
-// closing parenthesis, unlike an array element.
-func jsComputedMemberAt(code string, i int) bool {
-	bracket := jsPreviousToken(code, i)
-	if bracket < 0 || code[bracket] != '[' {
-		return false
-	}
-	before := jsPreviousToken(code, bracket)
-	return before >= 0 && (isJSIdentifierPart(code[before]) || code[before] == ']' || code[before] == ')')
-}
-
-// jsPreviousToken returns the index of the last non-whitespace byte before i, or -1.
-func jsPreviousToken(code string, i int) int {
-	for j := i - 1; j >= 0; j-- {
-		if !isJSWhitespace(code[j]) {
-			return j
-		}
-	}
-	return -1
 }
 
 func isJSIdentifierStart(c byte) bool {

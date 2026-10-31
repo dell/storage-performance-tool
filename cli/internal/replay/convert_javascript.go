@@ -46,7 +46,6 @@ var (
 
 		legacyKeyTargetBucket: {},
 		legacyKeyCount:        {},
-		legacyKeyNames:        {},
 	}
 	jsParentSSLAllowedKeys = map[string]struct{}{
 		legacyKeyEnabled: {},
@@ -70,22 +69,20 @@ func ConvertJS(raw []byte, runScript RunScript, opts Options) (*Generated, error
 	if len(endpointHosts(opts.Endpoints)) == 0 {
 		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "local endpoints are required for replay"})
 	}
-	body := string(raw)
-	archivedBucketNames, listErr := archivedJSBucketList(body, effectiveVars)
-	bucket, bucketDiagnostic := replayTargetBucket(opts, runScript, archivedBucketNames, listErr)
-	if bucketDiagnostic != nil {
-		diagnostics = append(diagnostics, *bucketDiagnostic)
+	bucket := effectiveBucket(opts.Bucket, runScript)
+	if bucket == "" {
+		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "bucket is required; set --bucket, S3_BUCKET, or archived BUCKET"})
 	} else {
 		effectiveVars["BUCKET"] = bucket
 	}
 
+	body := string(raw)
 	diagnostics = append(diagnostics, detectUnsupportedJSProtocols(body, effectiveVars)...)
 	diagnostics = normalizeDiagnostics(diagnostics)
 	if hasErrors(diagnostics) {
 		return &Generated{
-			Diagnostics:         diagnostics,
-			EffectiveBucket:     bucket,
-			ArchivedBucketNames: archivedBucketNames,
+			Diagnostics:     diagnostics,
+			EffectiveBucket: bucket,
 		}, diagnosticsError(diagnostics)
 	}
 
@@ -129,12 +126,11 @@ func ConvertJS(raw []byte, runScript RunScript, opts Options) (*Generated, error
 	diagnostics = normalizeDiagnostics(diagnostics)
 	if hasErrors(diagnostics) {
 		return &Generated{
-			Diagnostics:         diagnostics,
-			Steps:               steps,
-			PathRewrites:        pathRewrites,
-			CommandOps:          commandOps,
-			EffectiveBucket:     bucket,
-			ArchivedBucketNames: archivedBucketNames,
+			Diagnostics:     diagnostics,
+			Steps:           steps,
+			PathRewrites:    pathRewrites,
+			CommandOps:      commandOps,
+			EffectiveBucket: bucket,
 		}, diagnosticsError(diagnostics)
 	}
 
@@ -145,13 +141,12 @@ func ConvertJS(raw []byte, runScript RunScript, opts Options) (*Generated, error
 		out.WriteByte('\n')
 	}
 	return &Generated{
-		ScenarioJS:          []byte(out.String()),
-		Diagnostics:         diagnostics,
-		Steps:               steps,
-		PathRewrites:        pathRewrites,
-		CommandOps:          commandOps,
-		EffectiveBucket:     bucket,
-		ArchivedBucketNames: archivedBucketNames,
+		ScenarioJS:      []byte(out.String()),
+		Diagnostics:     diagnostics,
+		Steps:           steps,
+		PathRewrites:    pathRewrites,
+		CommandOps:      commandOps,
+		EffectiveBucket: bucket,
 
 		ArchivedEndpointSelection: *archived,
 	}, nil
@@ -497,25 +492,21 @@ func rewriteJSMongoosePaths(source string, archiveToStepID map[string]string) (s
 func rewriteJSParentConfigs(source string, opts Options, bucket string, vars map[string]string) (string, []Diagnostic) {
 	var diagnostics []Diagnostic
 	var replacements []jsReplacement
-	// Comments are masked at unchanged offsets, so a brace or declaration in a comment counts for
-	// nothing.
-	masked := jsCodeMask(source)
-	matches := jsParentConfigRe.FindAllStringSubmatchIndex(masked, -1)
+	matches := jsParentConfigRe.FindAllStringSubmatchIndex(source, -1)
 	for _, match := range matches {
 		if len(match) != 4 {
 			continue
 		}
 		name := source[match[2]:match[3]]
 		open := match[1] - 1
-		closeIdx := findMatchingJSBrace(masked, open)
+		closeIdx := findMatchingJSBrace(source, open)
 		if closeIdx < 0 {
 			diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: fmt.Sprintf("%s has an unterminated config object", name)})
 			continue
 		}
 		configText := source[open : closeIdx+1]
 		sslConfig, unsupportedSSLKeys := extractJSParentSSLConfig(configText, vars)
-		bucketCount, bucketNames, bucketDiagnostics := jsParentTargetBucket(name, configText, vars)
-		diagnostics = append(diagnostics, bucketDiagnostics...)
+		bucketCount := intValue(jsFieldValue(jsObjectForKey(jsObjectForKey(configText, "storage"), legacyKeyTargetBucket), legacyKeyCount, vars), vars)
 		if enabled, ok := sslConfig[legacyKeyEnabled].(bool); ok {
 			if warning, mismatch := archivedSSLMismatchWarning(enabled, opts.Endpoints, name); mismatch {
 				diagnostics = append(diagnostics, Diagnostic{Severity: severityWarning, Message: warning})
@@ -543,23 +534,10 @@ func rewriteJSParentConfigs(source string, opts Options, bucket string, vars map
 		replacements = append(replacements, jsReplacement{
 			start: match[0],
 			end:   end,
-			text:  sanitizedJSParentConfig(name, opts, bucket, sslConfig, bucketCount, bucketNames),
+			text:  sanitizedJSParentConfig(name, opts, bucket, sslConfig, bucketCount),
 		})
 	}
 	return applyJSReplacements(source, replacements), diagnostics
-}
-
-// jsParentTargetBucket reads a parent config's target bucket set as tokens, comments masked,
-// whatever the keys' quoting. The archive-wide check has already refused a list replay cannot keep.
-func jsParentTargetBucket(name, configText string, vars map[string]string) (int, []string, []Diagnostic) {
-	sets, err := jsTargetBuckets(configText, vars)
-	if err != nil {
-		return 0, nil, []Diagnostic{{Severity: severityError, Message: name + " " + err.Error()}}
-	}
-	if len(sets) == 0 {
-		return 0, nil, nil
-	}
-	return sets[0].count, sets[0].names, nil
 }
 
 func parentConfigHasExtraKeys(configText string) bool {
@@ -574,7 +552,7 @@ func parentConfigHasExtraKeys(configText string) bool {
 	return false
 }
 
-func sanitizedJSParentConfig(name string, opts Options, bucket string, sslConfig map[string]any, bucketCount int, bucketNames []string) string {
+func sanitizedJSParentConfig(name string, opts Options, bucket string, sslConfig map[string]any, bucketCount int) string {
 	config := map[string]any{
 		"item": map[string]any{
 			legacyKeyOutput: map[string]any{
@@ -593,10 +571,6 @@ func sanitizedJSParentConfig(name string, opts Options, bucket string, sslConfig
 	// A target bucket set is kept; its base becomes the replay bucket of item.output.path.
 	if bucketCount > 1 {
 		setPath(config, bucketCount, "storage", legacyKeyTargetBucket, legacyKeyCount)
-	}
-	// A bucket list is kept as archived; item.output.path then only carries its placeholder.
-	if len(bucketNames) > 0 {
-		setPath(config, bucketNames, "storage", legacyKeyTargetBucket, legacyKeyNames)
 	}
 	configJS, err := marshalJSConfig(config)
 	if err != nil {

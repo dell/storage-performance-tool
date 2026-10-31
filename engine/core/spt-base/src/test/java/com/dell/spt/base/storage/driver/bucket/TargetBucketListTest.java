@@ -87,6 +87,16 @@ class TargetBucketListTest {
 		assertEquals(size, TargetBucketSet.memberPaths("/placeholder", size, List.of(names)).size());
 	}
 
+	// An empty JavaScript array and an empty command-line value reach the engine as one empty name.
+	@Test
+	void aListOfOneEmptyNameIsNoList() throws Exception {
+		final var config = config("");
+		config.val(TargetBucketSet.COUNT, 4);
+
+		assertEquals(List.of(), TargetBucketSet.names(config));
+		assertEquals(4, TargetBucketSet.count(config), "one empty name falls back to the generated count");
+	}
+
 	@Test
 	void aListOfAThousandAndOneNamesIsRejected() throws Exception {
 		final var names = IntStream.range(0, 1001).mapToObj(i -> "bucket-" + i).toArray(String[]::new);
