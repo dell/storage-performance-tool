@@ -215,12 +215,12 @@ func TestConvertJSRefusesABucketListItCannotKeepExactly(t *testing.T) {
 		{`["alpha", buckets[1]]`, "element 2 is not a string literal"},
 		{`["alpha", 5]`, "element 2 is not a string literal"},
 		{`["al" + "pha", "beta"]`, "element 1 is followed by an expression"},
-		{`["alpha"].concat(["beta"])`, "the value is an expression"},
-		{`"alpha" + ",beta"`, "the value is an expression"},
+		{`["alpha"].concat(["beta"])`, "names is an expression"},
+		{`"alpha" + ",beta"`, "names is an expression"},
 		{`["\8"]`, "an escape replay does not decode"},
 		{`["\uD83D\uDE00"]`, "a surrogate"},
 		{`["\x4"]`, "a malformed \\x escape"},
-		{`["\u{}"]`, "a malformed \\u escape"},
+		{`["\u{}"]`, "braced"},
 		{`""`, `bucket name 1 "" must not be empty`},
 		{`["alpha", ""]`, `bucket name 2 "" must not be empty`},
 		{`["alpha,beta"]`, `must not contain ','`},
@@ -228,7 +228,7 @@ func TestConvertJSRefusesABucketListItCannotKeepExactly(t *testing.T) {
 		{`["a/b"]`, "must not contain '/'"},
 	} {
 		got, err := ConvertJS([]byte(jsArchiveWithParentNames(c.names)), RunScript{}, opts)
-		if err == nil || !strings.Contains(err.Error(), "storage.targetBucket.names") || !strings.Contains(err.Error(), c.want) {
+		if err == nil || !strings.Contains(err.Error(), "storage.targetBucket") || !strings.Contains(err.Error(), c.want) {
 			t.Fatalf("names %s: err = %v, want %q", c.names, err, c.want)
 		}
 		if got != nil && len(got.ScenarioJS) > 0 {
@@ -355,7 +355,11 @@ func TestConvertJSReadsBucketListsAsTokens(t *testing.T) {
 		{"line comment decoy", "{ targetBucket: {\n  // names: [\"decoy\"],\n  names: [\"alpha\", \"beta\"]\n} }", []string{"alpha", "beta"}},
 		{"block comment decoy", "{ targetBucket: { /* names: [\"decoy\"], */ names: [\"alpha\", \"beta\"] } }", []string{"alpha", "beta"}},
 		{"comment before a colon", "{ targetBucket /* note */ : { names /* note */ : [\"alpha\", \"beta\"] } }", []string{"alpha", "beta"}},
-		{"escapes", "{ targetBucket: { names: ['\\u0061lpha', \"\\x62eta\", '\\u{67}amma'] } }", []string{"alpha", "beta", "gamma"}},
+		{"escapes", "{ targetBucket: { names: ['\\u0061lpha', \"\\x62eta\"] } }", []string{"alpha", "beta"}},
+		{"escaped keys", "{ \"target\\u0042ucket\": { \"na\\u006des\": [\"alpha\", \"beta\"] } }", []string{"alpha", "beta"}},
+		{"a bucket named targetBucket", "{ targetBucket: { names: [\"targetBucket\", \"beta\"] } }", []string{"targetBucket", "beta"}},
+		{"carriage return ends a line comment", "{ targetBucket: {\r  // note\r  names: [\"alpha\", \"beta\"] } }", []string{"alpha", "beta"}},
+		{"braces in a comment", "{ targetBucket: {/* } */ names: [\"alpha\", \"beta\"]} }", []string{"alpha", "beta"}},
 		{"trailing comma in array", "{ targetBucket: { names: [\"alpha\", \"beta\",] } }", []string{"alpha", "beta"}},
 		{"comma string with a trailing comma", "{ targetBucket: { names: \"alpha,beta,\" } }", []string{"alpha", "beta"}},
 		{"only commas", "{ targetBucket: { names: \",\" } }", nil},
@@ -415,7 +419,7 @@ func TestConvertJSReadsAParentBucketCountAsTokens(t *testing.T) {
 	if !strings.Contains(parent, `"count": 4`) || strings.Contains(parent, `"count": 8`) {
 		t.Fatalf("the parent config must keep the real count:\n%s", parent)
 	}
-	if _, err := ConvertJS([]byte(jsArchiveWithParentStorage("{ targetBucket: { count: 2 * 2 } }")), RunScript{}, opts); err == nil || !strings.Contains(err.Error(), "storage.targetBucket.count") {
+	if _, err := ConvertJS([]byte(jsArchiveWithParentStorage("{ targetBucket: { count: 2 * 2 } }")), RunScript{}, opts); err == nil || !strings.Contains(err.Error(), "count is an expression") {
 		t.Fatalf("a count expression must be refused, err = %v", err)
 	}
 }
@@ -433,5 +437,57 @@ func TestConvertJSONSplitsCommaStringsAsTheEngine(t *testing.T) {
 	}
 	if _, err := ConvertJSON(archive(`""`), RunScript{}, opts); err == nil || !strings.Contains(err.Error(), "must not be empty") {
 		t.Fatalf("an empty string is one empty name, err = %v", err)
+	}
+}
+
+// JavaScript replay cannot read exactly is refused before anything runs.
+func TestConvertJSRefusesBucketSetsItCannotReadExactly(t *testing.T) {
+	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, Bucket: "local", BaseTimestamp: "20260605.121400.000"}
+	for _, c := range []struct {
+		name    string
+		storage string
+		want    string
+	}{
+		{"regular expression", "{ driver: {type: /[/*]/.test(\"x\") ? \"mock\" : \"s3\"}, targetBucket: {names: [\"alpha\", \"beta\"]} /* end */ }", "outside strings and comments"},
+		{"regular expression decoy", "{ driver: {type: /targetBucket: { names: [\"decoy\"] }/.test(\"x\") ? \"mock\" : \"s3\"} }", "outside strings and comments"},
+		{"division", "{ targetBucket: { count: 8 / 2 } }", "outside strings and comments"},
+		{"escaped identifier", "{ target\\u0042ucket: { names: [\"alpha\"] } }", "outside strings and comments"},
+		{"template literal", "{ targetBucket: { names: [`alpha`] } }", "outside strings and comments"},
+		{"conditional value", "{ targetBucket: {names:[\"alpha\",\"beta\"]} ? {names:[\"gamma\",\"delta\"]} : {names:[\"epsilon\",\"zeta\"]} }", "not an object literal"},
+		{"duplicate names", "{ targetBucket: { names: [\"decoy\"], names: [\"alpha\", \"beta\"] } }", "names is set twice"},
+		{"duplicate targetBucket", "{ targetBucket: { names: [\"decoy\"] }, targetBucket: { names: [\"alpha\"] } }", "sets targetBucket twice in one object"},
+		{"unknown member", "{ targetBucket: { names: [\"alpha\"], extra: 1 } }", "does not know this targetBucket setting"},
+		{"spread", "{ targetBucket: { ...more } }", "spread or computed key"},
+		{"braced escape", "{ targetBucket: { names: ['\\u{61}lpha'] } }", "braced"},
+		{"computed member access", "{ driver: { type: \"s3\" } };\nparentConfig_1.storage[\"targetBucket\"] = { names: [\"alpha\"] }", "outside an object literal key"},
+		{"provision expression", "{ targetBucket: { provision: !0 } }", "provision"},
+		{"U+2028 after a line comment", "{ targetBucket: { // note\u2028 names: [\"alpha\", \"beta\"] } }", "outside strings and comments"},
+		{"no-break space between tokens", "{ targetBucket:\u00a0{ names: [\"alpha\"] } }", "outside strings and comments"},
+	} {
+		if _, err := ConvertJS([]byte(jsArchiveWithParentStorage(c.storage)), RunScript{}, opts); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("%s: err = %v, want %q", c.name, err, c.want)
+		}
+	}
+	// Without targetBucket anywhere, the same constructs are no concern of the bucket set.
+	if _, err := ConvertJS([]byte(jsArchiveWithParentStorage("{ driver: { type: \"s3\" }, note: 8 / 2 }")), RunScript{}, opts); err != nil {
+		t.Fatalf("a scenario without a bucket set is not checked: %v", err)
+	}
+}
+
+// A parent config with braces in its comments is rebuilt as valid JavaScript.
+func TestConvertJSRebuildsAParentConfigWhoseCommentsHoldBraces(t *testing.T) {
+	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, BaseTimestamp: "20260605.121400.000"}
+	for _, storage := range []string{
+		"{ targetBucket: {/* } */ names: [\"alpha\", \"beta\"]} }",
+		"{ targetBucket: {/* { */ names: [\"alpha\", \"beta\"]} }",
+	} {
+		got, err := ConvertJS([]byte(jsArchiveWithParentStorage(storage)), RunScript{}, opts)
+		if err != nil {
+			t.Fatalf("%s: %v", storage, err)
+		}
+		js := string(got.ScenarioJS)
+		if strings.Contains(js, "};};") || strings.Count(js, "var parentConfig_1") != 1 || !strings.Contains(js, `"PS_US"`) && !strings.Contains(js, `"beta"`) {
+			t.Fatalf("%s: the parent config must be rebuilt once, with its list:\n%s", storage, js)
+		}
 	}
 }

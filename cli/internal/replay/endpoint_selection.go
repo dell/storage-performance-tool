@@ -127,9 +127,10 @@ func jsEndpointOccurrences(code string) []jsKeyOccurrence {
 }
 
 // jsKeyOccurrences walks code, which must have its comments masked, as tokens and reports every
-// object key named want with its containing object, and the offset of every other identifier or
-// whole string equal to want, such as a member access or a shorthand property. Strings are skipped
-// as whole tokens, so their contents never count as keys.
+// object key named want with its containing object, and the offset of every other use of the name:
+// an identifier that is not a key, such as a member access or a shorthand property, or a string
+// used as a computed member access. Strings are skipped as whole tokens, so their contents never
+// count as keys, and a string key is compared once its escapes are decoded.
 func jsKeyOccurrences(code, want string) ([]jsKeyOccurrence, []int) {
 	type frame struct {
 		key         string
@@ -162,12 +163,13 @@ func jsKeyOccurrences(code, want string) ([]jsKeyOccurrence, []int) {
 		case isJSWhitespace(c):
 		case c == '"' || c == '\'' || c == '`':
 			end := jsStringEnd(code, i)
+			text := jsDecodedStringText(code, i, end)
 			if colon, ok := colonAfter(end + 1); ok && c != '`' && end > i {
-				keyRead(code[i+1:end], i, colon)
+				keyRead(text, i, colon)
 				i = colon
 				continue
 			}
-			if end > i && code[i+1:end] == want {
+			if end > i && text == want && jsComputedMemberAt(code, i) {
 				otherUses = append(otherUses, i)
 			}
 			pendingKey = ""
@@ -427,7 +429,7 @@ func jsCodeMask(source string) string {
 		case out[i] == '"' || out[i] == '\'' || out[i] == '`':
 			i = jsStringEnd(source, i)
 		case out[i] == '/' && i+1 < len(out) && out[i+1] == '/':
-			for ; i < len(out) && out[i] != '\n'; i++ {
+			for ; i < len(out) && !isJSLineTerminatorAt(source, i); i++ {
 				out[i] = ' '
 			}
 		case out[i] == '/' && i+1 < len(out) && out[i+1] == '*':
@@ -447,6 +449,13 @@ func jsCodeMask(source string) string {
 	return string(out)
 }
 
+// isJSLineTerminatorAt reports whether a JavaScript line terminator starts at i: a line feed, a
+// carriage return, or U+2028 or U+2029, any of which ends a line comment.
+func isJSLineTerminatorAt(source string, i int) bool {
+	return source[i] == '\n' || source[i] == '\r' ||
+		strings.HasPrefix(source[i:], "\u2028") || strings.HasPrefix(source[i:], "\u2029")
+}
+
 // jsStringEnd returns the index of the quote closing the string that opens at open.
 func jsStringEnd(source string, open int) int {
 	quote := source[open]
@@ -459,6 +468,40 @@ func jsStringEnd(source string, open int) int {
 		}
 	}
 	return len(source) - 1
+}
+
+// jsDecodedStringText returns the text of the string literal between open and end, decoded when its
+// escapes decode exactly and as written otherwise.
+func jsDecodedStringText(code string, open, end int) string {
+	if end <= open {
+		return ""
+	}
+	if decoded, err := decodeJSString(code[open+1 : end]); err == nil {
+		return decoded
+	}
+	return code[open+1 : end]
+}
+
+// jsComputedMemberAt reports whether the string at i is a computed member access such as
+// config["name"]: it follows an opening bracket that follows a name, a closing bracket or a
+// closing parenthesis, unlike an array element.
+func jsComputedMemberAt(code string, i int) bool {
+	bracket := jsPreviousToken(code, i)
+	if bracket < 0 || code[bracket] != '[' {
+		return false
+	}
+	before := jsPreviousToken(code, bracket)
+	return before >= 0 && (isJSIdentifierPart(code[before]) || code[before] == ']' || code[before] == ')')
+}
+
+// jsPreviousToken returns the index of the last non-whitespace byte before i, or -1.
+func jsPreviousToken(code string, i int) int {
+	for j := i - 1; j >= 0; j-- {
+		if !isJSWhitespace(code[j]) {
+			return j
+		}
+	}
+	return -1
 }
 
 func isJSIdentifierStart(c byte) bool {

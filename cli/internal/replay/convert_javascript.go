@@ -497,14 +497,17 @@ func rewriteJSMongoosePaths(source string, archiveToStepID map[string]string) (s
 func rewriteJSParentConfigs(source string, opts Options, bucket string, vars map[string]string) (string, []Diagnostic) {
 	var diagnostics []Diagnostic
 	var replacements []jsReplacement
-	matches := jsParentConfigRe.FindAllStringSubmatchIndex(source, -1)
+	// Comments are masked at unchanged offsets, so a brace or declaration in a comment counts for
+	// nothing.
+	masked := jsCodeMask(source)
+	matches := jsParentConfigRe.FindAllStringSubmatchIndex(masked, -1)
 	for _, match := range matches {
 		if len(match) != 4 {
 			continue
 		}
 		name := source[match[2]:match[3]]
 		open := match[1] - 1
-		closeIdx := findMatchingJSBrace(source, open)
+		closeIdx := findMatchingJSBrace(masked, open)
 		if closeIdx < 0 {
 			diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: fmt.Sprintf("%s has an unterminated config object", name)})
 			continue
@@ -549,12 +552,14 @@ func rewriteJSParentConfigs(source string, opts Options, bucket string, vars map
 // jsParentTargetBucket reads a parent config's target bucket set as tokens, comments masked,
 // whatever the keys' quoting. The archive-wide check has already refused a list replay cannot keep.
 func jsParentTargetBucket(name, configText string, vars map[string]string) (int, []string, []Diagnostic) {
-	count, err := jsTargetBucketCount(configText, vars)
+	sets, err := jsTargetBuckets(configText, vars)
 	if err != nil {
 		return 0, nil, []Diagnostic{{Severity: severityError, Message: name + " " + err.Error()}}
 	}
-	names, _ := archivedJSBucketList(configText, vars)
-	return count, names, nil
+	if len(sets) == 0 {
+		return 0, nil, nil
+	}
+	return sets[0].count, sets[0].names, nil
 }
 
 func parentConfigHasExtraKeys(configText string) bool {
