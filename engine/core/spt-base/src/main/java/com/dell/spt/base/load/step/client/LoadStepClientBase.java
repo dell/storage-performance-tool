@@ -3,6 +3,7 @@ package com.dell.spt.base.load.step.client;
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
+import static com.dell.spt.base.config.ConfigUtil.applyListValues;
 import static com.dell.spt.base.config.ConfigUtil.flatten;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
@@ -2640,7 +2641,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 		final var configCopy = (Config) new BasicConfig(config);
 		final var argValPairs = (Map<String, String>) new HashMap<String, String>();
-		flatten(configMap, argValPairs, config.pathSep(), null);
+		final var listVals = (Map<String, List<String>>) new HashMap<String, List<String>>();
+		flatten(configMap, argValPairs, listVals, config.pathSep(), null);
 		final var aliasingConfig = config.<Map<String, Object>> listVal("aliasing");
 		try {
 			final var aliasedArgs = AliasingUtil.apply(argValPairs, aliasingConfig);
@@ -2650,6 +2652,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			aliasedArgs.forEach(configCopy::val); // merge
+			applyListValues(configCopy, listVals, argValPairs, aliasedArgs);
 			EngineBuildInfoProvider.global().projectVersion(configCopy, aliasedArgs.containsKey("run-version"));
 		} catch (final Exception e) {
 			LogUtil.exception(Level.FATAL, e, "Scenario syntax error");
@@ -2667,12 +2670,14 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			ctxConfigsCopy = ctxConfigs.stream().map(BasicConfig::new).collect(Collectors.toList());
 		}
 		final var argValPairs = (Map<String, String>) new HashMap<String, String>();
-		flatten(context, argValPairs, config.pathSep(), null);
+		final var listVals = (Map<String, List<String>>) new HashMap<String, List<String>>();
+		flatten(context, argValPairs, listVals, config.pathSep(), null);
 		final var aliasingConfig = config.<Map<String, Object>> listVal("aliasing");
 		final var ctxConfig = (Config) new BasicConfig(config);
 		try {
 			final var aliasedArgs = AliasingUtil.apply(argValPairs, aliasingConfig);
 			aliasedArgs.forEach(ctxConfig::val); // merge
+			applyListValues(ctxConfig, listVals, argValPairs, aliasedArgs);
 			EngineBuildInfoProvider.global().projectVersion(ctxConfig, aliasedArgs.containsKey("run-version"));
 		} catch (final Exception e) {
 			LogUtil.exception(Level.FATAL, e, "Scenario syntax error");

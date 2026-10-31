@@ -1,9 +1,15 @@
 package com.dell.spt.base.config;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.load.step.client.TestLoadStepClient;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketSet;
+import com.github.akurilov.confuse.Config;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -73,6 +79,68 @@ class ScenarioConfigArrayTest {
 		final var javaEmpty = new HashMap<String, Object>(Map.of("load", Map.of("step", Map.of("node", Map.of("addrs", List.of())))));
 
 		assertEquals(addrs(javaEmpty), addrs(js("{\"load\": {\"step\": {\"node\": {\"addrs\": []}}}}")));
+	}
+
+	// A list setting keeps exactly the elements of its array, which a comma string cannot carry: an
+	// empty array, an element with a comma and a trailing empty element.
+	@Test
+	void aListSettingKeepsExactlyTheElementsOfItsArray() throws Exception {
+		assertEquals(List.of(), names(client().config(targetBucket("[]")).getEffectiveConfig()));
+		assertEquals(List.of("alpha,beta"), names(client().config(targetBucket("[\"alpha,beta\"]")).getEffectiveConfig()));
+		assertEquals(List.of("alpha", ""), names(client().config(targetBucket("[\"alpha\", \"\"]")).getEffectiveConfig()));
+		assertEquals(List.of("ps-eu", "PS_US"),
+						names(client().append(targetBucket("[\"ps-eu\", \"PS_US\"]")).getCtxConfigs().get(0)));
+		assertEquals(List.of(), names(client().append(targetBucket("[]")).getCtxConfigs().get(0)));
+	}
+
+	@Test
+	void aCommaStringStillSetsItsElements() throws Exception {
+		assertEquals(List.of("ps-eu", "PS_US"),
+						names(client().config(js("{\"storage\": {\"targetBucket\": {\"names\": \"ps-eu,PS_US\"}}}")).getEffectiveConfig()));
+	}
+
+	@Test
+	void aSettingThatIsNotAListStillGetsTheCommaString() throws Exception {
+		final var configured = client().config(js("{\"item\": {\"output\": {\"path\": [\"a\", \"b\"]}}}")).getEffectiveConfig();
+
+		assertEquals("a,b", configured.stringVal("item-output-path"));
+	}
+
+	@Test
+	void theSchemaDecidesWhichSettingsAreLists() {
+		final var schema = TestConfigBuilder.config().schema();
+
+		assertTrue(ConfigUtil.isListSetting(schema, "storage-targetBucket-names", "-"));
+		assertTrue(ConfigUtil.isListSetting(schema, "load-step-node-addrs", "-"));
+		assertFalse(ConfigUtil.isListSetting(schema, "storage-targetBucket-count", "-"));
+		assertFalse(ConfigUtil.isListSetting(schema, "storage-targetBucket", "-"));
+		assertFalse(ConfigUtil.isListSetting(schema, "storage-targetBucket-names-x", "-"));
+		assertFalse(ConfigUtil.isListSetting(schema, "no-such-setting", "-"));
+	}
+
+	// The target bucket set reads what the scenario wrote: an empty list falls back to the count, and
+	// names the engine cannot use fail instead of being split or dropped.
+	@Test
+	void aScenarioBucketListReachesTheTargetBucketSetExactly() throws Exception {
+		final var emptyList = client().config(js("{\"storage\": {\"targetBucket\": {\"count\": 4, \"names\": []}}}")).getEffectiveConfig();
+		assertEquals(4, TargetBucketSet.count(emptyList));
+
+		final var listed = client().config(targetBucket("[\"ps-eu\", \"PS_US\"]")).getEffectiveConfig();
+		assertEquals(2, TargetBucketSet.count(listed));
+		assertEquals(List.of("ps-eu", "PS_US"), TargetBucketSet.names(listed));
+
+		for (final var malformed : List.of("[\"alpha,beta\"]", "[\"alpha\", \"\"]")) {
+			final var configured = client().config(targetBucket(malformed)).getEffectiveConfig();
+			assertThrows(RunTerminalException.class, () -> TargetBucketSet.count(configured), malformed);
+		}
+	}
+
+	private static Map<String, Object> targetBucket(final String namesArray) throws Exception {
+		return js("{\"storage\": {\"targetBucket\": {\"names\": " + namesArray + "}}}");
+	}
+
+	private static List<String> names(final Config config) {
+		return config.listVal("storage-targetBucket-names");
 	}
 
 	@Test

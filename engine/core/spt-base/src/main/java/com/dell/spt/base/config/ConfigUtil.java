@@ -19,7 +19,8 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
+import java.util.Objects;
+import java.util.regex.Pattern;
 import org.openjdk.nashorn.api.scripting.JSObject;
 
 import static com.dell.spt.base.config.ConfigFormat.JSON;
@@ -218,20 +219,74 @@ public interface ConfigUtil {
 					final Map<String, String> argValPairs,
 					final String sep,
 					final String prefix) {
+		flatten(configMap, argValPairs, null, sep, prefix);
+	}
+
+	/**
+	 * Flattens a scenario's configuration map into paths and string values. A list value becomes the
+	 * comma-separated string of its elements and, when {@code listVals} is not null, is also recorded
+	 * there as the list of those strings, for {@link #applyListValues}.
+	 */
+	static void flatten(
+					final Map<String, Object> configMap,
+					final Map<String, String> argValPairs,
+					final Map<String, List<String>> listVals,
+					final String sep,
+					final String prefix) {
 		for (final var k : configMap.keySet()) {
 			final var v = scriptArrayAsList(configMap.get(k));
+			final var path = prefix == null ? k : (prefix + sep + k);
 			if (v instanceof Map) {
-				flatten((Map<String, Object>) v, argValPairs, sep, prefix == null ? k : (prefix + sep + k));
+				flatten((Map<String, Object>) v, argValPairs, listVals, sep, path);
 			} else if (v instanceof List) {
-				final var s = (String) ((List) v)
-								.stream()
+				final var elements = ((List<?>) v).stream()
 								.map(e -> e == null ? ":" : e.toString())
-								.collect(Collectors.joining(","));
-				argValPairs.put(prefix == null ? k : (prefix + sep + k), s);
+								.toList();
+				argValPairs.put(path, String.join(",", elements));
+				if (listVals != null) {
+					listVals.put(path, elements);
+				}
 			} else {
-				argValPairs.put(prefix == null ? k : (prefix + sep + k), v == null ? null : v.toString());
+				argValPairs.put(path, v == null ? null : v.toString());
 			}
 		}
+	}
+
+	/**
+	 * Sets each list value that {@link #flatten} recorded once more, as a list, on the settings the
+	 * schema types as lists, so such a setting gets exactly the elements it was given. The
+	 * comma-separated string alone reads an empty list back as one empty element, splits an element
+	 * that holds a comma, and drops trailing empty elements. A value that aliasing renamed or replaced
+	 * keeps its string.
+	 *
+	 * @param flatArgs the flattened values before aliasing
+	 * @param appliedArgs the values after aliasing, already set on the configuration
+	 */
+	static void applyListValues(
+					final Config config,
+					final Map<String, List<String>> listVals,
+					final Map<String, String> flatArgs,
+					final Map<String, String> appliedArgs) {
+		for (final var listVal : listVals.entrySet()) {
+			final var path = listVal.getKey();
+			if (appliedArgs.containsKey(path)
+							&& Objects.equals(flatArgs.get(path), appliedArgs.get(path))
+							&& isListSetting(config.schema(), path, config.pathSep())) {
+				config.val(path, new ArrayList<>(listVal.getValue()));
+			}
+		}
+	}
+
+	/** Returns whether the schema types the setting at the path as a list. */
+	static boolean isListSetting(final Map<String, Object> schema, final String path, final String sep) {
+		Object node = schema;
+		for (final var part : path.split(Pattern.quote(sep), -1)) {
+			if (!(node instanceof Map<?, ?> branch)) {
+				return false;
+			}
+			node = branch.get(part);
+		}
+		return node instanceof Class<?> type && List.class.isAssignableFrom(type);
 	}
 
 	/**
