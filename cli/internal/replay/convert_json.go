@@ -118,13 +118,12 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	if len(endpointHosts(opts.Endpoints)) == 0 {
 		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "local endpoints are required for replay"})
 	}
-	// Bucket names resolve with the archived exports only: replay rebinds BUCKET, CLIENT and the
-	// node variables to the local target, which would rename the buckets the archived run used.
-	archivedBucketLists, listErr := archivedJSONBucketList(legacy, runScript.Exports)
-	archivedBucketNames := firstArchivedBucketNames(archivedBucketLists)
-	bucket, bucketDiagnostic := replayTargetBucket(opts, runScript, archivedBucketNames, listErr)
-	if bucketDiagnostic != nil {
-		diagnostics = append(diagnostics, *bucketDiagnostic)
+	if err := checkArchivedJSONBucketSets(legacy, runScript.Exports); err != nil {
+		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: err.Error()})
+	}
+	bucket := effectiveBucket(opts.Bucket, runScript)
+	if bucket == "" {
+		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "bucket is required; set --bucket, S3_BUCKET, or archived BUCKET"})
 	} else {
 		effectiveVars["BUCKET"] = bucket
 	}
@@ -145,10 +144,8 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	diagnostics = normalizeDiagnostics(diagnostics)
 	if hasErrors(diagnostics) {
 		return &Generated{
-			Diagnostics:         diagnostics,
-			EffectiveBucket:     bucket,
-			ArchivedBucketNames: archivedBucketNames,
-			ArchivedBucketLists: archivedBucketLists,
+			Diagnostics:     diagnostics,
+			EffectiveBucket: bucket,
 		}, diagnosticsError(diagnostics)
 	}
 
@@ -250,13 +247,11 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	diagnostics = normalizeDiagnostics(diagnostics)
 	if hasErrors(diagnostics) {
 		return &Generated{
-			Diagnostics:         diagnostics,
-			Steps:               stepsOut,
-			PathRewrites:        pathRewrites,
-			CommandOps:          commandOps,
-			EffectiveBucket:     bucket,
-			ArchivedBucketNames: archivedBucketNames,
-			ArchivedBucketLists: archivedBucketLists,
+			Diagnostics:     diagnostics,
+			Steps:           stepsOut,
+			PathRewrites:    pathRewrites,
+			CommandOps:      commandOps,
+			EffectiveBucket: bucket,
 		}, diagnosticsError(diagnostics)
 	}
 
@@ -282,14 +277,12 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	}
 
 	return &Generated{
-		ScenarioJS:          []byte(js),
-		Diagnostics:         diagnostics,
-		Steps:               stepsOut,
-		PathRewrites:        pathRewrites,
-		CommandOps:          commandOps,
-		EffectiveBucket:     bucket,
-		ArchivedBucketNames: archivedBucketNames,
-		ArchivedBucketLists: archivedBucketLists,
+		ScenarioJS:      []byte(js),
+		Diagnostics:     diagnostics,
+		Steps:           stepsOut,
+		PathRewrites:    pathRewrites,
+		CommandOps:      commandOps,
+		EffectiveBucket: bucket,
 
 		ArchivedEndpointSelection: *archived,
 	}, nil
@@ -432,14 +425,9 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	}
 	// A target bucket set is kept; its base becomes the replay bucket of item.output.path. The
 	// count resolves with the archived exports, so retargeting the base never changes it; the
-	// archive-wide check has already refused a count replay cannot read.
+	// archive-wide check has already refused a count replay cannot read and any bucket list.
 	if bucketCount, err := jsonBucketCount(getPath(step.Config, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyCount), archivedExports); err == nil && bucketCount > 1 {
 		setPath(config, bucketCount, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyCount)
-	}
-	// A bucket list is kept as archived, its names resolved with the archived exports as the
-	// archive-wide check resolved them; item.output.path then only carries its placeholder.
-	if names, err := jsonBucketNames(getPath(step.Config, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyNames), archivedExports); err == nil && len(names) > 0 {
-		setPath(config, names, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyNames)
 	}
 	var rewrites []PathRewrite
 	if rawOutput := itemPathString(getPath(step.Config, "item", legacyKeyOutput, "file"), vars); rawOutput != "" {
@@ -1439,42 +1427,6 @@ func localEndpointSSLEnabled(endpoints []string) (bool, bool) {
 	default:
 		return false, false
 	}
-}
-
-// replayTargetBucket returns the bucket replay writes to, or the error diagnostic that stops the
-// replay: an archived list replay cannot keep, an explicit --bucket for an archived list, or no
-// bucket at all.
-func replayTargetBucket(opts Options, runScript RunScript, archivedNames []string, listErr error) (string, *Diagnostic) {
-	if listErr != nil {
-		return "", &Diagnostic{Severity: severityError, Message: listErr.Error()}
-	}
-	bucket, diagnostic := replayBucket(opts, runScript, archivedNames)
-	if diagnostic == nil && bucket == "" {
-		diagnostic = &Diagnostic{Severity: severityError, Message: "bucket is required; set --bucket, S3_BUCKET, or archived BUCKET"}
-	}
-	return bucket, diagnostic
-}
-
-// replayBucket returns the bucket replay writes to, or an error diagnostic. An archived bucket list
-// is kept and item.output.path only carries its placeholder, so --bucket would change nothing: it is
-// rejected, and S3_BUCKET from the environment is ignored.
-func replayBucket(opts Options, runScript RunScript, archivedNames []string) (string, *Diagnostic) {
-	if len(archivedNames) == 0 {
-		return effectiveBucket(opts.Bucket, runScript), nil
-	}
-	if strings.TrimSpace(opts.Bucket) != "" && !opts.BucketFromEnv {
-		listed := archivedNames[0]
-		if len(archivedNames) > 1 {
-			listed += " ... " + archivedNames[len(archivedNames)-1]
-		}
-		return "", &Diagnostic{Severity: severityError, Message: fmt.Sprintf(
-			"--bucket cannot be used: the archived run lists its target buckets (%d: %s), and replay keeps them",
-			len(archivedNames), listed)}
-	}
-	if bucket := effectiveBucket("", runScript); bucket != "" {
-		return bucket, nil
-	}
-	return archivedNames[0], nil
 }
 
 func effectiveBucket(localBucket string, runScript RunScript) string {

@@ -3,68 +3,41 @@ package replay
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
-
-	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
-// Replay keeps an archived bucket set exactly as the archived run used it, or refuses the replay
-// before anything runs. It reads a set only from a JSON archive's data; a JavaScript archive that
-// sets one is refused.
+// Replay keeps an archived bucket count, with the replay bucket as its base, and refuses an archive
+// whose bucket set it cannot keep exactly before anything runs: any bucket list, any bucket set in
+// a JavaScript archive, and a JSON count it cannot read with the archived exports.
 
-// archivedJSONBucketList returns the bucket list replay keeps from an archived JSON scenario: the
-// first non-empty list among its load steps' effective configurations, each step merged over the
-// scenario configuration as conversion merges it. It returns an error when a configuration sets
-// targetBucket anywhere but storage.targetBucket or a list names a bucket the engine would refuse.
-func archivedJSONBucketList(legacy legacyScenario, exports map[string]string) ([]ArchivedBucketList, error) {
+// checkArchivedJSONBucketSets refuses a JSON archive that sets a bucket list, sets targetBucket
+// anywhere but storage.targetBucket, or gives a load step a count replay cannot read with the
+// archived exports. A list cannot be kept: replay targets every step at one bucket and reads the run
+// script's exports as text, so a listed set could reach other buckets.
+func checkArchivedJSONBucketSets(legacy legacyScenario, exports map[string]string) error {
 	if err := checkArchivedJSONTargetBucketKeys(legacy); err != nil {
-		return nil, err
+		return err
 	}
 	steps := legacy.Steps
 	if len(steps) == 0 {
 		steps = legacy.Jobs
 	}
-	var lists []ArchivedBucketList
 	for i, step := range steps {
-		names, err := effectiveJSONBucketNames(legacy.Config, step, exports)
-		if err != nil {
-			return nil, fmt.Errorf("archived storage.targetBucket of step %d: %w", i+1, err)
+		stepType := strings.ToLower(strings.TrimSpace(step.Type))
+		if stepType != legacyStepTypeLoad && stepType != legacyStepTypePrecondition {
+			continue
 		}
-		lists = addArchivedBucketList(lists, i+1, names)
-	}
-	return lists, nil
-}
-
-// ArchivedBucketList is one distinct bucket list an archive's steps use, and the steps using it.
-type ArchivedBucketList struct {
-	Steps []int    `json:"steps"`
-	Names []string `json:"names"`
-}
-
-// addArchivedBucketList records that a step uses names, joining an equal list already recorded.
-func addArchivedBucketList(lists []ArchivedBucketList, step int, names []string) []ArchivedBucketList {
-	if len(names) == 0 {
-		return lists
-	}
-	for i := range lists {
-		if strings.Join(lists[i].Names, "\x00") == strings.Join(names, "\x00") {
-			lists[i].Steps = append(lists[i].Steps, step)
-			return lists
+		effective := mergeConfig(legacy.Config, step.Config)
+		if _, err := jsonBucketCount(getPath(effective, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyCount), exports); err != nil {
+			return fmt.Errorf("archived storage.targetBucket.count of step %d: %w", i+1, err)
 		}
 	}
-	return append(lists, ArchivedBucketList{Steps: []int{step}, Names: names})
-}
-
-// firstArchivedBucketNames returns the first list an archive's steps use, or nil.
-func firstArchivedBucketNames(lists []ArchivedBucketList) []string {
-	if len(lists) == 0 {
-		return nil
-	}
-	return lists[0].Names
+	return nil
 }
 
 // checkArchivedJSONTargetBucketKeys checks the scenario configuration and every step's own.
@@ -78,42 +51,33 @@ func checkArchivedJSONTargetBucketKeys(legacy legacyScenario) error {
 	return checkJSONStepTargetBuckets(legacy.Jobs, "job")
 }
 
-// effectiveJSONBucketNames returns the bucket list a load step uses, its configuration merged over
-// the scenario's as conversion merges it, or nil for a step that is not converted as a load.
-func effectiveJSONBucketNames(base map[string]any, step legacyStep, exports map[string]string) ([]string, error) {
-	stepType := strings.ToLower(strings.TrimSpace(step.Type))
-	if stepType != legacyStepTypeLoad && stepType != legacyStepTypePrecondition {
-		return nil, nil
+// checkJSONStepTargetBuckets checks every step's own configuration, nested steps included.
+func checkJSONStepTargetBuckets(steps []legacyStep, kind string) error {
+	for i, step := range steps {
+		if err := checkJSONTargetBucketKeys(step.Config, nil); err != nil {
+			return fmt.Errorf("%s %d: %w", kind, i+1, err)
+		}
+		for _, nested := range [][]legacyStep{step.Steps, step.Jobs} {
+			if err := checkJSONStepTargetBuckets(nested, kind+" "+strconv.Itoa(i+1)+"."); err != nil {
+				return err
+			}
+		}
 	}
-	effective := mergeConfig(base, step.Config)
-	if _, err := jsonBucketCount(getPath(effective, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyCount), exports); err != nil {
-		return nil, fmt.Errorf("count: %w", err)
-	}
-	names, err := jsonBucketNames(getPath(effective, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyNames), exports)
-	if err == nil {
-		err = validArchivedBucketList(names)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("names: %w", err)
-	}
-	return names, nil
+	return nil
 }
 
-// jsonBucketNameArray resolves each element of a JSON names array, which must be a string.
-func jsonBucketNameArray(value []any, exports map[string]string) ([]string, error) {
-	names := make([]string, 0, len(value))
-	for i, element := range value {
-		name, ok := element.(string)
-		if !ok {
-			return nil, fmt.Errorf("element %d is not a string", i+1)
-		}
-		resolved, err := resolveArchivedString(name, exports)
-		if err != nil {
-			return nil, fmt.Errorf("element %d: %w", i+1, err)
-		}
-		names = append(names, resolved)
+// jsonSetsBucketList reports whether a JSON storage.targetBucket.names value names any bucket. The
+// forms the engine reads as no list (an empty array, an empty string, one empty name) do not.
+func jsonSetsBucketList(raw any) bool {
+	switch value := raw.(type) {
+	case nil:
+		return false
+	case string:
+		return value != ""
+	case []any:
+		return len(value) > 1 || (len(value) == 1 && value[0] != "")
 	}
-	return names, nil
+	return true
 }
 
 // resolveArchivedString expands the exports in an archived value, and refuses a value that uses a
@@ -135,74 +99,47 @@ func resolveArchivedString(value string, exports map[string]string) (string, err
 }
 
 // jsonBucketCount reads a JSON storage.targetBucket.count with the archived exports: a whole
-// number of at least 1, or 0 when it is not set.
+// number of at least 1, or 0 when it is not set. A JSON number counts by its value, so 4.0 and
+// 1e1 are whole; a string must be a whole number as written, as the engine parses it.
 func jsonBucketCount(raw any, exports map[string]string) (int64, error) {
-	var text string
-	switch value := raw.(type) {
-	case nil:
+	if raw == nil {
 		return 0, nil
+	}
+	count, err := jsonCountValue(raw, exports)
+	if err == nil && count < 1 {
+		err = fmt.Errorf("%d is not a whole number of at least 1", count)
+	}
+	return count, err
+}
+
+// jsonCountValue reads a count's value: a JSON number by its value, a string as written.
+func jsonCountValue(raw any, exports map[string]string) (int64, error) {
+	switch value := raw.(type) {
 	case json.Number:
-		text = value.String()
+		return wholeNumber(value.String())
 	case float64:
-		text = strconv.FormatFloat(value, 'f', -1, 64)
+		return wholeNumber(strconv.FormatFloat(value, 'g', -1, 64))
 	case string:
 		resolved, err := resolveArchivedString(value, exports)
 		if err != nil {
 			return 0, err
 		}
-		text = strings.TrimSpace(resolved)
-	default:
-		return 0, fmt.Errorf("the value is not a number")
-	}
-	count, err := strconv.ParseInt(text, 10, 64)
-	if err != nil || count < 1 {
-		return 0, fmt.Errorf("%q is not a whole number of at least 1", text)
-	}
-	return count, nil
-}
-
-// checkJSONStepTargetBuckets checks every step's own configuration, nested steps included.
-func checkJSONStepTargetBuckets(steps []legacyStep, kind string) error {
-	for i, step := range steps {
-		if err := checkJSONTargetBucketKeys(step.Config, nil); err != nil {
-			return fmt.Errorf("%s %d: %w", kind, i+1, err)
-		}
-		for _, nested := range [][]legacyStep{step.Steps, step.Jobs} {
-			if err := checkJSONStepTargetBuckets(nested, kind+" "+strconv.Itoa(i+1)+"."); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// jsonBucketNames reads a JSON bucket list with the archived exports: an array of strings, kept
-// element by element, or a comma-separated string, split as the engine splits it. A list of one
-// empty name is no list, as the engine reads it; a name that uses a variable the archive does not
-// export is refused.
-func jsonBucketNames(raw any, exports map[string]string) ([]string, error) {
-	var names []string
-	switch value := raw.(type) {
-	case nil:
-		return nil, nil
-	case string:
-		resolved, err := resolveArchivedString(value, exports)
+		count, err := strconv.ParseInt(resolved, 10, 64)
 		if err != nil {
-			return nil, err
+			return 0, fmt.Errorf("%q is not a whole number of at least 1", resolved)
 		}
-		names = splitBucketNames(resolved)
-	case []any:
-		var err error
-		if names, err = jsonBucketNameArray(value, exports); err != nil {
-			return nil, err
-		}
-	default:
-		return nil, fmt.Errorf("the value is not a list of names")
+		return count, nil
 	}
-	if len(names) == 1 && names[0] == "" {
-		return nil, nil
+	return 0, fmt.Errorf("the value is not a number")
+}
+
+// wholeNumber returns the integer a JSON number denotes, refusing a fraction or one too large.
+func wholeNumber(text string) (int64, error) {
+	value, ok := new(big.Rat).SetString(text)
+	if !ok || !value.IsInt() || !value.Num().IsInt64() {
+		return 0, fmt.Errorf("%s is not a whole number of at least 1", text)
 	}
-	return names, nil
+	return value.Num().Int64(), nil
 }
 
 // jsLooseEscapeRe matches every JavaScript escape: a line continuation (a backslash before a line
@@ -331,6 +268,11 @@ func checkJSONTargetBucketObject(path []string, value any) error {
 		if !jsonTargetBucketMemberValid(key, member) {
 			return fmt.Errorf("archived configuration sets %s.%s to a value replay does not know", where, key)
 		}
+		if key == legacyKeyNames && jsonSetsBucketList(member) {
+			return fmt.Errorf("archived configuration sets a bucket list (%s.names), which replay cannot keep: it targets "+
+				"every step at one bucket and reads the run script's exports as text, so a listed set could reach other "+
+				"buckets; replay the workload without its list", where)
+		}
 	}
 	return nil
 }
@@ -364,25 +306,4 @@ func jsonTargetBucketMemberValid(key string, member any) bool {
 		}
 	}
 	return false
-}
-
-// splitBucketNames splits a comma-separated list as the engine does (Java's String.split(",")):
-// an empty string is one empty name, and trailing empty names are dropped.
-func splitBucketNames(value string) []string {
-	if value == "" {
-		return []string{""}
-	}
-	names := strings.Split(value, ",")
-	for len(names) > 0 && names[len(names)-1] == "" {
-		names = names[:len(names)-1]
-	}
-	return names
-}
-
-// validArchivedBucketList checks a non-empty archived list by the rules the engine applies.
-func validArchivedBucketList(names []string) error {
-	if len(names) == 0 {
-		return nil
-	}
-	return scenario.ValidateBucketList(names)
 }
