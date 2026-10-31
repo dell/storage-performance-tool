@@ -1,8 +1,84 @@
 import { createTheme } from "@mantine/core";
+import type { CSSVariablesResolver } from "@mantine/core";
+
+const fontFamily =
+  'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+
+export const dashboardTokens = {
+  text: {
+    primary: "#203047",
+    secondary: "#30435d",
+    muted: "#65768c",
+    description: "#64738a",
+    subtle: "#7a8799",
+  },
+  surfaces: {
+    page: "#f4f6fa",
+    panel: "#ffffff",
+    subtle: "#f7f9fc",
+    hover: "#f0f5fb",
+    selected: "#eaf2fd",
+    review: "#f0f5fc",
+    code: "#f6f8fb",
+  },
+  borders: {
+    panel: "#e0e7f0",
+    control: "#dce3ed",
+    divider: "#e3e9f1",
+    subtle: "#edf1f6",
+  },
+  actions: {
+    primary: "#176aca",
+    primaryHover: "#125bb1",
+  },
+  focus: {
+    color: "#78a9ee",
+    width: "3px",
+    offset: "3px",
+  },
+  status: {
+    success: { text: "#267a60", background: "#eaf6f1" },
+    warning: {
+      text: "#a76a1a",
+      background: "#fff1df",
+      border: "#f2dfbb",
+    },
+    error: {
+      text: "#8b4c2c",
+      background: "#fff0e8",
+      border: "#edcfbe",
+    },
+  },
+  validation: {
+    text: "#a3401c",
+    border: "#c9623a",
+    thresholdFailure: "#ad4635",
+  },
+  charts: {
+    throughput: "#347bd1",
+    bandwidth: "#188a82",
+    latencyP50: "#7a63ce",
+    latencyP99: "#b096e7",
+    grid: "#eaf0f6",
+    axis: "#78899e",
+    inspector: "#8393a8",
+  },
+  connectionGraph: {
+    pending: "#ffffff",
+    pendingBorder: "#b7c3d3",
+    passed: "#2a9d74",
+    failed: "#d0503c",
+    link: "#cfd8e4",
+    dashboardFill: "#eaf2fd",
+    dashboardBorder: "#176aca",
+  },
+};
+
+export type DashboardTokens = typeof dashboardTokens;
 
 export const theme = createTheme({
-  fontFamily:
-    'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+  fontFamily,
+  fontFamilyMonospace: "ui-monospace, SFMono-Regular, Menlo, monospace",
   primaryColor: "spt",
   primaryShade: 6,
   colors: {
@@ -19,15 +95,122 @@ export const theme = createTheme({
       "#125bb1",
     ],
   },
-  fontSizes: { md: "14px" },
-  radius: { md: "8px" },
+  fontSizes: {
+    xxs: "9px",
+    xs: "10px",
+    caption: "11px",
+    sm: "12px",
+    control: "13px",
+    md: "14px",
+    emphasis: "15px",
+    lg: "16px",
+    xl: "20px",
+  },
+  fontWeights: {
+    regular: "400",
+    medium: "500",
+    semibold: "600",
+    heading: "650",
+    bold: "700",
+  },
+  headings: {
+    fontFamily,
+    fontWeight: "650",
+    sizes: {
+      h1: { fontSize: "27px", lineHeight: "normal" },
+      h2: { fontSize: "17px", lineHeight: "normal" },
+      h3: { fontSize: "13px", lineHeight: "normal" },
+    },
+  },
+  lineHeights: {
+    body: "1.65",
+    help: "1.5",
+    code: "1.7",
+  },
+  radius: {
+    xs: "3px",
+    sm: "5px",
+    chip: "6px",
+    control: "7px",
+    md: "8px",
+    lg: "10px",
+    xl: "14px",
+  },
   defaultRadius: "md",
   spacing: {
+    xxs: "4px",
     xs: "8px",
+    compact: "10px",
     sm: "12px",
     md: "16px",
+    comfortable: "18px",
     lg: "20px",
+    panel: "22px",
+    section: "24px",
+    wide: "28px",
     xl: "30px",
+    xxl: "36px",
+    xxxl: "48px",
   },
   cursorType: "pointer",
+  other: { dashboard: dashboardTokens },
 });
+
+export const cssVariablesResolver: CSSVariablesResolver = (theme) => {
+  const tokens = theme.other.dashboard;
+
+  return {
+    variables: {
+      "--spt-focus-width": tokens.focus.width,
+      "--spt-focus-offset": tokens.focus.offset,
+    },
+    light: {
+      "--spt-text-primary": tokens.text.primary,
+      "--spt-text-secondary": tokens.text.secondary,
+      "--spt-text-muted": tokens.text.muted,
+      "--spt-text-description": tokens.text.description,
+      "--spt-text-subtle": tokens.text.subtle,
+      "--spt-surface-page": tokens.surfaces.page,
+      "--spt-surface-panel": tokens.surfaces.panel,
+      "--spt-surface-subtle": tokens.surfaces.subtle,
+      "--spt-surface-hover": tokens.surfaces.hover,
+      "--spt-surface-selected": tokens.surfaces.selected,
+      "--spt-surface-review": tokens.surfaces.review,
+      "--spt-surface-code": tokens.surfaces.code,
+      "--spt-border-panel": tokens.borders.panel,
+      "--spt-border-control": tokens.borders.control,
+      "--spt-border-divider": tokens.borders.divider,
+      "--spt-border-subtle": tokens.borders.subtle,
+      "--spt-action-primary": tokens.actions.primary,
+      "--spt-action-primary-hover": tokens.actions.primaryHover,
+      "--spt-focus-color": tokens.focus.color,
+      "--spt-status-success-text": tokens.status.success.text,
+      "--spt-status-success-background": tokens.status.success.background,
+      "--spt-status-warning-text": tokens.status.warning.text,
+      "--spt-status-warning-background": tokens.status.warning.background,
+      "--spt-status-warning-border": tokens.status.warning.border,
+      "--spt-status-error-text": tokens.status.error.text,
+      "--spt-status-error-background": tokens.status.error.background,
+      "--spt-status-error-border": tokens.status.error.border,
+      "--spt-validation-text": tokens.validation.text,
+      "--spt-validation-border": tokens.validation.border,
+      "--spt-threshold-failure": tokens.validation.thresholdFailure,
+      "--spt-chart-throughput": tokens.charts.throughput,
+      "--spt-chart-bandwidth": tokens.charts.bandwidth,
+      "--spt-chart-latency-p50": tokens.charts.latencyP50,
+      "--spt-chart-latency-p99": tokens.charts.latencyP99,
+      "--spt-chart-grid": tokens.charts.grid,
+      "--spt-chart-axis": tokens.charts.axis,
+      "--spt-chart-inspector": tokens.charts.inspector,
+      "--spt-connection-pending": tokens.connectionGraph.pending,
+      "--spt-connection-pending-border": tokens.connectionGraph.pendingBorder,
+      "--spt-connection-passed": tokens.connectionGraph.passed,
+      "--spt-connection-failed": tokens.connectionGraph.failed,
+      "--spt-connection-link": tokens.connectionGraph.link,
+      "--spt-connection-dashboard-fill": tokens.connectionGraph.dashboardFill,
+      "--spt-connection-dashboard-border":
+        tokens.connectionGraph.dashboardBorder,
+    },
+    dark: {},
+  };
+};

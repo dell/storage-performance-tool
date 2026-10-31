@@ -14,6 +14,7 @@ import { NodeTable } from "./components/NodeTable";
 import { RunWarnings } from "./components/RunWarnings";
 import { RunLog } from "./components/RunLog";
 import { runWorkloadType, workloadLabel } from "./utils/catalog";
+import { readJSON } from "./utils/validation";
 import {
   elapsed,
   formatMetric,

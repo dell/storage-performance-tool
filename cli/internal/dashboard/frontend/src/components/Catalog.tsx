@@ -393,7 +393,7 @@ function CatalogRow({
                 </table>
               </div>
             )}
-            <RunArtifacts runId={run.id} />
+            <RunArtifacts key={run.id} runId={run.id} />
             {run.status !== "malformed" && (
               <RunLog
                 base={`/api/catalog/log?id=${encodeURIComponent(run.id)}`}
@@ -418,8 +418,6 @@ function RunArtifacts({ runId }: { runId: string }) {
   const [items, setItems] = useState<Artifact[] | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
-    setItems(null);
-    setError("");
     const controller = new AbortController();
     fetch(`/api/catalog/artifacts?id=${encodeURIComponent(runId)}`, {
       cache: "no-store",

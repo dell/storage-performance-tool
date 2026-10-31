@@ -6,17 +6,114 @@
 
 @theme inline {
   --font-sans: var(--mantine-font-family);
+  --font-mono: var(--mantine-font-family-monospace);
+
   --color-primary: var(--mantine-primary-color-filled);
   --color-primary-hover: var(--mantine-primary-color-filled-hover);
+  --color-foreground: var(--spt-text-primary);
+  --color-secondary: var(--spt-text-secondary);
+  --color-muted: var(--spt-text-muted);
+  --color-description: var(--spt-text-description);
+  --color-subtle: var(--spt-text-subtle);
+  --color-page: var(--spt-surface-page);
+  --color-panel: var(--spt-surface-panel);
+  --color-surface-subtle: var(--spt-surface-subtle);
+  --color-surface-hover: var(--spt-surface-hover);
+  --color-surface-selected: var(--spt-surface-selected);
+  --color-surface-review: var(--spt-surface-review);
+  --color-surface-code: var(--spt-surface-code);
+  --color-border: var(--spt-border-panel);
+  --color-control-border: var(--spt-border-control);
+  --color-divider: var(--spt-border-divider);
+  --color-subtle-border: var(--spt-border-subtle);
+  --color-action-primary: var(--spt-action-primary);
+  --color-action-primary-hover: var(--spt-action-primary-hover);
+  --color-focus: var(--spt-focus-color);
+  --color-success: var(--spt-status-success-text);
+  --color-success-surface: var(--spt-status-success-background);
+  --color-warning: var(--spt-status-warning-text);
+  --color-warning-surface: var(--spt-status-warning-background);
+  --color-warning-border: var(--spt-status-warning-border);
+  --color-error: var(--spt-status-error-text);
+  --color-error-surface: var(--spt-status-error-background);
+  --color-error-border: var(--spt-status-error-border);
+  --color-invalid: var(--spt-validation-text);
+  --color-invalid-border: var(--spt-validation-border);
+  --color-threshold-failure: var(--spt-threshold-failure);
+  --color-chart-throughput: var(--spt-chart-throughput);
+  --color-chart-bandwidth: var(--spt-chart-bandwidth);
+  --color-chart-latency-p50: var(--spt-chart-latency-p50);
+  --color-chart-latency-p99: var(--spt-chart-latency-p99);
+  --color-chart-grid: var(--spt-chart-grid);
+  --color-chart-axis: var(--spt-chart-axis);
+  --color-chart-inspector: var(--spt-chart-inspector);
+  --color-connection-pending: var(--spt-connection-pending);
+  --color-connection-pending-border: var(--spt-connection-pending-border);
+  --color-connection-passed: var(--spt-connection-passed);
+  --color-connection-failed: var(--spt-connection-failed);
+  --color-connection-link: var(--spt-connection-link);
+  --color-connection-dashboard-fill: var(--spt-connection-dashboard-fill);
+  --color-connection-dashboard-border: var(--spt-connection-dashboard-border);
 
+  --spacing-xxs: var(--mantine-spacing-xxs);
   --spacing-xs: var(--mantine-spacing-xs);
+  --spacing-compact: var(--mantine-spacing-compact);
   --spacing-sm: var(--mantine-spacing-sm);
   --spacing-md: var(--mantine-spacing-md);
+  --spacing-comfortable: var(--mantine-spacing-comfortable);
   --spacing-lg: var(--mantine-spacing-lg);
+  --spacing-panel: var(--mantine-spacing-panel);
+  --spacing-section: var(--mantine-spacing-section);
+  --spacing-wide: var(--mantine-spacing-wide);
   --spacing-xl: var(--mantine-spacing-xl);
+  --spacing-xxl: var(--mantine-spacing-xxl);
+  --spacing-xxxl: var(--mantine-spacing-xxxl);
 
+  --radius-xs: var(--mantine-radius-xs);
+  --radius-sm: var(--mantine-radius-sm);
+  --radius-chip: var(--mantine-radius-chip);
+  --radius-control: var(--mantine-radius-control);
   --radius-md: var(--mantine-radius-md);
+  --radius-lg: var(--mantine-radius-lg);
+  --radius-xl: var(--mantine-radius-xl);
+
+  --text-xxs: var(--mantine-font-size-xxs);
+  --text-xxs--line-height: var(--mantine-line-height);
+  --text-xs: var(--mantine-font-size-xs);
+  --text-xs--line-height: var(--mantine-line-height-xs);
+  --text-caption: var(--mantine-font-size-caption);
+  --text-caption--line-height: var(--mantine-line-height);
+  --text-sm: var(--mantine-font-size-sm);
+  --text-sm--line-height: var(--mantine-line-height-sm);
+  --text-control: var(--mantine-font-size-control);
+  --text-control--line-height: var(--mantine-line-height);
   --text-base: var(--mantine-font-size-md);
+  --text-base--line-height: var(--mantine-line-height-md);
+  --text-emphasis: var(--mantine-font-size-emphasis);
+  --text-emphasis--line-height: var(--mantine-line-height);
+  --text-lg: var(--mantine-font-size-lg);
+  --text-lg--line-height: var(--mantine-line-height-lg);
+  --text-xl: var(--mantine-font-size-xl);
+  --text-xl--line-height: var(--mantine-line-height-xl);
+  --text-h1: var(--mantine-h1-font-size);
+  --text-h1--line-height: var(--mantine-h1-line-height);
+  --text-h1--font-weight: var(--mantine-h1-font-weight);
+  --text-h2: var(--mantine-h2-font-size);
+  --text-h2--line-height: var(--mantine-h2-line-height);
+  --text-h2--font-weight: var(--mantine-h2-font-weight);
+  --text-h3: var(--mantine-h3-font-size);
+  --text-h3--line-height: var(--mantine-h3-line-height);
+  --text-h3--font-weight: var(--mantine-h3-font-weight);
+
+  --font-weight-normal: var(--mantine-font-weight-regular);
+  --font-weight-medium: var(--mantine-font-weight-medium);
+  --font-weight-semibold: var(--mantine-font-weight-semibold);
+  --font-weight-heading: var(--mantine-font-weight-heading);
+  --font-weight-bold: var(--mantine-font-weight-bold);
+
+  --leading-body: var(--mantine-line-height-body);
+  --leading-help: var(--mantine-line-height-help);
+  --leading-code: var(--mantine-line-height-code);
 }
 
 :root {
