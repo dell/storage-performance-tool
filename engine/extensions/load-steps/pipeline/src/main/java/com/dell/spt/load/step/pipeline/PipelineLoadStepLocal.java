@@ -46,13 +46,19 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 public class PipelineLoadStepLocal
 				extends LoadStepLocalBase {
+
+	/** The contexts whose results are the next context's items. */
+	private final Set<LoadStepContext> handoffWriters = Collections.newSetFromMap(new IdentityHashMap<>());
 
 	public PipelineLoadStepLocal(
 					final Config baseConfig, final List<Extension> extensions, final List<Config> contextConfigs,
@@ -178,6 +184,7 @@ public class PipelineLoadStepLocal
 							nextItemBuff = new DelayedTransferConvertBuffer<>(
 											outputQueueLimit, itemOutputDelay, TimeUnit.SECONDS);
 							stepCtx.operationsResultsOutput(nextItemBuff);
+							handoffWriters.add(stepCtx);
 						} else {
 							final String itemOutputFile = itemOutputConfig.stringVal("file");
 							if (itemOutputFile != null && itemOutputFile.length() > 0) {
@@ -208,6 +215,18 @@ public class PipelineLoadStepLocal
 			} catch (final IOException e) {
 				throw new IllegalStateException("Failed to initialize the data input", e);
 			}
+		}
+	}
+
+	/**
+	 * Stops a done context whose results feed the next context. Its stop hands over its last results
+	 * and then ends the handoff, so the next context reads what is left and reaches the end of its
+	 * input instead of waiting for the step to stop.
+	 */
+	@Override
+	protected void contextDone(final LoadStepContext context) {
+		if (handoffWriters.contains(context)) {
+			context.stop();
 		}
 	}
 
