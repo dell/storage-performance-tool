@@ -2,6 +2,8 @@ package replay
 
 import (
 	"context"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -70,6 +72,70 @@ func TestConvertJSDropsAnInlineNicSetAndKeepsTheRestOfTheConfig(t *testing.T) {
 	only := string(convertJSWith(t, withInlineNet(t, `{ "interfaces" : "auto" }`)).ScenarioJS)
 	if strings.Contains(only, "interfaces") || !strings.Contains(only, `"net" : {  }`) {
 		t.Fatalf("a net object with only the NIC set stays as an empty object\n%s", only)
+	}
+}
+
+func TestExtractJSNicSettingsRemovesAdjacentSettingsAndKeepsTheCodeValid(t *testing.T) {
+	const (
+		interfaces = `"interfaces":["auto"]`
+		nodes      = `"nodeInterfaces":{"client-a.example":["ens1f0","ens1f1"]}`
+	)
+	declared := map[string]string{
+		interfaces: "storage.net.interfaces=auto",
+		nodes:      `storage.net.nodeInterfaces={"client-a.example":["ens1f0","ens1f1"]}`,
+	}
+	positions := map[string]struct{ net, want string }{
+		"alone in net":     {`{%s,%s}`, `{}`},
+		"at the beginning": {`{%s,%s,"port":9020}`, `{"port":9020}`},
+		"in the middle":    {`{"ssl":true,%s,%s,"port":9020}`, `{"ssl":true,"port":9020}`},
+		"at the end":       {`{"ssl":true,%s,%s}`, `{"ssl":true}`},
+	}
+	orders := map[string][2]string{"interfaces first": {interfaces, nodes}, "nodeInterfaces first": {nodes, interfaces}}
+	for position, test := range positions {
+		for order, keys := range orders {
+			t.Run(position+", "+order, func(t *testing.T) {
+				source := `({"net":` + fmt.Sprintf(test.net, keys[0], keys[1]) + `,"keep":7})`
+				archived := &archivedNicSettings{}
+				if got, want := extractJSNicSettings(source, archived), `({"net":`+test.want+`,"keep":7})`; got != want {
+					t.Fatalf("extractJSNicSettings(%s)\n got %s\nwant %s", source, got, want)
+				}
+				if want := []string{declared[keys[0]], declared[keys[1]]}; !slices.Equal(archived.declared, want) {
+					t.Fatalf("recorded %q, want %q in source order", archived.declared, want)
+				}
+			})
+		}
+	}
+
+	// The reported case: both settings end the object, and each took the comma between them.
+	reported := `({"net":{"interfaces":["auto"],"nodeInterfaces":{}},"keep":7})`
+	if got := extractJSNicSettings(reported, &archivedNicSettings{}); got != `({"net":{},"keep":7})` {
+		t.Fatalf("extractJSNicSettings(%s) = %s, want an empty net object", reported, got)
+	}
+
+	// Archived scenarios are indented, and comments may sit between the entries.
+	indented := "({\n  \"net\" : {\n    \"port\" : 9020,\n    \"interfaces\" : [ \"auto\" ], // archived\n" +
+		"    \"nodeInterfaces\" : { }\n  },\n  \"keep\" : 7\n})"
+	want := "({\n  \"net\" : {\n    \"port\" : 9020\n  },\n  \"keep\" : 7\n})"
+	if got := extractJSNicSettings(indented, &archivedNicSettings{}); got != want {
+		t.Fatalf("extractJSNicSettings(indented)\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestConvertJSDropsAdjacentInlineNicSettingsAndKeepsTheRestOfTheConfig(t *testing.T) {
+	got := convertJSWith(t, withInlineNet(t, `{ "ssl" : { "enabled" : false }, "interfaces" : [ "auto" ], "nodeInterfaces" : { } }`))
+	want := "the source run used storage.net.interfaces=auto and storage.net.nodeInterfaces={ }; " +
+		"replay ignores them, pass --interfaces to use NICs"
+	if warnings := nicSettingWarnings(t, got.Diagnostics); len(warnings) != 1 || warnings[0] != want {
+		t.Fatalf("NIC-set warnings = %q, want [%q]", warnings, want)
+	}
+	js := string(got.ScenarioJS)
+	if strings.Contains(js, "nterfaces") {
+		t.Fatalf("the inline step config keeps an archived NIC set\n%s", js)
+	}
+	for _, kept := range []string{`"net" : { "ssl" : { "enabled" : false } },`, `"concurrency" : 70`} {
+		if !strings.Contains(js, kept) {
+			t.Fatalf("dropping the NIC set must keep %s\n%s", kept, js)
+		}
 	}
 }
 

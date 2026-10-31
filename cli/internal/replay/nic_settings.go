@@ -85,19 +85,33 @@ func compactJSON(value any) string {
 // extractJSNicSettings removes every NIC-set setting from the "net" objects of a JavaScript
 // scenario, inline step configs included, and records its value. A value is any expression up to
 // the comma or brace that ends its entry, so a variable reference is dropped as well.
+//
+// Settings are removed one at a time, in source order, and the scenario is scanned again after
+// each removal. Two settings that end an object would otherwise both take the comma between them,
+// and removing both ranges at the original offsets would cut into the surrounding code.
 func extractJSNicSettings(source string, archived *archivedNicSettings) string {
-	code := jsCodeMask(source)
-	var replacements []jsReplacement
-	for _, occurrence := range jsKeyOccurrences(code, archivedNicSettingKeys...) {
-		if occurrence.parentKey != legacyKeyNet || occurrence.parentClose < 0 {
-			continue
+	for {
+		code := jsCodeMask(source)
+		occurrence, ok := firstJSNicSetting(code)
+		if !ok {
+			return source
 		}
 		end := jsEntryValueEnd(code, occurrence.valueStart, occurrence.parentClose)
 		archived.add(occurrence.key, jsSettingValue(code[occurrence.valueStart:end]))
+		// The range always holds the key, so each pass shortens the source and the loop ends.
 		start, stop := widenToAdjacentComma(code, occurrence.keyStart, end, occurrence.parentOpen, occurrence.parentClose)
-		replacements = append(replacements, jsReplacement{start: start, end: stop, text: ""})
+		source = source[:start] + source[stop:]
 	}
-	return applyJSReplacements(source, replacements)
+}
+
+// firstJSNicSetting returns the first NIC-set key directly inside a closed "net" object.
+func firstJSNicSetting(code string) (jsKeyOccurrence, bool) {
+	for _, occurrence := range jsKeyOccurrences(code, archivedNicSettingKeys...) {
+		if occurrence.parentKey == legacyKeyNet && occurrence.parentClose >= 0 {
+			return occurrence, true
+		}
+	}
+	return jsKeyOccurrence{}, false
 }
 
 // jsEntryValueEnd returns the offset after the value starting at start: the last non-space
