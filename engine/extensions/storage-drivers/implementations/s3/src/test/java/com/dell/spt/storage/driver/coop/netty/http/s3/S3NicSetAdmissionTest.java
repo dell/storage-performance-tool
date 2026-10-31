@@ -212,6 +212,50 @@ final class S3NicSetAdmissionTest {
 	}
 
 	@Test
+	void aStopBetweenBuildingTheRequestAndItsWriteWritesNothingAndRecoversTheOperation() throws Exception {
+		final var run = started(stub.listeners(1), nics(1), 1);
+		final var admission = run.pool().admission();
+		final var built = new CountDownLatch(1);
+		final var resume = new CountDownLatch(1);
+		blocks.add(resume);
+		run.driver().afterRequestBuilt = () -> {
+			built.countDown();
+			awaitQuietly(resume);
+		};
+		final Operation<DataItem> op = dataOp(OpType.CREATE, "built");
+
+		assertTrue(run.driver().put(op));
+		assertTrue(built.await(5, TimeUnit.SECONDS), "the request was built on the event loop");
+		run.driver().closeAdmission();
+		assertEquals(List.of(op), run.driver().recoverQueuedOperations(), "a built but unwritten operation stays queued");
+		resume.countDown();
+
+		waitFor(() -> admission.count(0) == 0 && run.driver().activeOpCount() == 0, "the fenced attempt released its NIC and permit");
+		assertTrue(stub.objectRequests().isEmpty(), () -> "nothing is written after admission closes: " + stub.objectRequests());
+		assertNull(run.results().poll(QUIET_MILLIS), "a recovered operation publishes no result");
+		assertRecoveredUnattempted(run, op, 0);
+		final var rows = stoppedRows(run.driver(), run.driver());
+		assertEquals(List.of(1L, 0L, 0L, 1L, 0L, 0L), totals(rows), "interrupted on its Path: " + rows);
+		assertEquals(1, rowsOf(rows, NicPathRows.Kind.PATH).get(0).interrupted());
+	}
+
+	@Test
+	void anOpenAdmissionWritesTheBuiltRequestUnderTheLockAndFlushesIt() throws Exception {
+		final var run = started(stub.listeners(1), nics(1), 1);
+		final var built = new CountDownLatch(1);
+		run.driver().afterRequestBuilt = built::countDown;
+		final Operation<DataItem> op = dataOp(OpType.CREATE, "flushed");
+
+		assertTrue(run.driver().put(op));
+		assertTrue(built.await(5, TimeUnit.SECONDS));
+		assertEquals(Operation.Status.SUCC, run.results().await().status());
+		assertEquals(1, stub.objectRequests().size());
+		awaitIdle(run);
+		assertEquals(List.of(1L, 1L, 0L, 0L, 0L, (long) EndpointSelectionTestSupport.ITEM_SIZE),
+						totals(stoppedRows(run.driver(), run.driver())));
+	}
+
+	@Test
 	void aConnectFailingAfterTheStopIsNoIoFailure() throws Exception {
 		final var endpoints = stub.listeners(1);
 		final var run = started(endpoints, nics(1), 1);
