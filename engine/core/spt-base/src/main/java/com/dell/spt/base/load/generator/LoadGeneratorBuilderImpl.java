@@ -256,11 +256,15 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 			itemInputPath = '/' + itemInputPath;
 		}
 		opsBuilder.inputPath(itemInputPath);
-		// determine the output path
+		// determine the output path; a list is the whole set: its length is the member count, whatever
+		// count the caller passed
+		final int memberCount = targetBucketNames.isEmpty() ? targetBucketCount : targetBucketNames.size();
 		final Input<String> outputPathSupplier;
-		if (OpType.CREATE.equals(opType) && ItemType.DATA.equals(itemType)) {
+		if (OpType.CREATE.equals(opType) && ItemType.DATA.equals(itemType) && memberCount <= 1) {
 			outputPathSupplier = getOutputPathSupplier();
 		} else {
+			// with several members the precomputed member paths decide every destination, so the
+			// configured path, a list's placeholder included, is never built into an input or evaluated
 			outputPathSupplier = null;
 		}
 		opsBuilder.outputPathInput(outputPathSupplier);
@@ -438,8 +442,6 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 				itemInput = newItemInput();
 			}
 		}
-		// a list is the whole set: its length is the member count, whatever count the caller passed
-		final int memberCount = targetBucketNames.isEmpty() ? targetBucketCount : targetBucketNames.size();
 		if (memberCount > 1 && OpType.CREATE.equals(opType) && ItemType.DATA.equals(itemType)) {
 			if (!(itemInput instanceof NewItemInput)) {
 				throw new IllegalConfigurationException((targetBucketNames.isEmpty()

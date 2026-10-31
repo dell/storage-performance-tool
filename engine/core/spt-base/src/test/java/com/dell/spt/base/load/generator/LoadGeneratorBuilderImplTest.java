@@ -246,6 +246,17 @@ public class LoadGeneratorBuilderImplTest {
 		assertEquals(Set.of("/alpha/prefix", "/beta/prefix"), new HashSet<>(destinations));
 	}
 
+	// A list's placeholder is never evaluated: with two or more members the builder must not build an
+	// output path input from it, so an expression there starts no evaluator and cannot fail the build.
+	@Test
+	public void aBucketListNeverEvaluatesThePlaceholderExpression() throws Exception {
+		for (final var placeholder : List.of("/#{noSuchFunction()}/prefix", "/${noSuchFunction()}/prefix")) {
+			final var destinations = targetBucketDestinations(2, List.of("alpha", "beta"), placeholder);
+
+			assertEquals(Set.of("/alpha/prefix", "/beta/prefix"), new HashSet<>(destinations), placeholder);
+		}
+	}
+
 	@Test
 	public void aOneNameBucketListReplacesOnlyTheBucketSegmentOfTheOutputPath() throws Exception {
 		assertEquals(List.of("/ps-eu/prefix"),
