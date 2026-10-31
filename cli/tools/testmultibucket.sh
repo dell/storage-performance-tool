@@ -70,7 +70,10 @@ only the objects the run created.
 Buckets and workload:
   BUCKETS, --bucket-count N    Bucket count, 1 to 1000 (default: $BUCKET_COUNT)
   --buckets CSV                Bucket names instead of a count, used as written
-                               (repeatable; env S3_BUCKETS when no bucket option is given)
+                               (repeatable; env S3_BUCKETS when no bucket option is given).
+                               A value of digits alone is refused, because --buckets N
+                               used to be the count; list such names with --buckets-file
+                               or next to another name (--buckets 123,other)
   --buckets-file PATH          Bucket names from a file, one per line
   --workload TYPE              write, write-verify, read (seeded), delete (seeded)
                                or mixed (seeded) (default: $WORKLOAD)
@@ -128,7 +131,7 @@ while (( $# > 0 )); do
 		--buckets)
 			require_value "$@"
 			if [[ "$2" =~ ^[0-9]+$ ]]; then
-				echo "error: --buckets takes bucket names; for a bucket count use BUCKETS or --bucket-count $2" >&2
+				echo "error: --buckets takes bucket names; for a bucket count use BUCKETS or --bucket-count $2, and for buckets named with digits alone use --buckets-file" >&2
 				exit 2
 			fi
 			BUCKET_LIST=${BUCKET_LIST:+$BUCKET_LIST,}$2
