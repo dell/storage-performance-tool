@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import type { Metrics, Sample } from "../types";
 import { TrendChart } from "./TrendChart";
 import {
@@ -33,12 +33,6 @@ const graphs = [
     color: "#7a63ce",
   },
 ];
-type Limits = {
-  iops: number | null;
-  bandwidth: number | null;
-  latency: number | null;
-};
-const noLimits: Limits = { iops: null, bandwidth: null, latency: null };
 
 export function Charts({
   metrics: m,
@@ -49,8 +43,9 @@ export function Charts({
   phase: string;
   startedAt?: string;
 }) {
-  const history = m.chart_samples ?? (m.is_aggregate ? [] : (m.samples ?? []));
   const samples = useMemo(() => {
+    const history =
+      m.chart_samples ?? (m.is_aggregate ? [] : (m.samples ?? []));
     const rows = history
       .filter(
         (r) =>
@@ -71,7 +66,7 @@ export function Charts({
       p50: numeric(r.p50_latency_us),
       p99: numeric(r.latency_p99_us),
     }));
-  }, [history, phase, startedAt]);
+  }, [m.chart_samples, m.is_aggregate, m.samples, phase, startedAt]);
   const [mode, setMode] = useState<"timeline" | "summary">("timeline"),
     [cleanup, setCleanup] = useState(false),
     [active, setActive] = useState<number | null>(null);
@@ -86,9 +81,12 @@ export function Charts({
   const display =
     !samples.length && (m.phase_summaries?.length ?? 0) > 0 ? "summary" : mode;
   const inspected = shown[active ?? shown.length - 1];
-  useEffect(() => {
+  const inspectionWindow = `${phase}:${start}:${end}:${shown.length}`;
+  const [previousWindow, setPreviousWindow] = useState(inspectionWindow);
+  if (inspectionWindow !== previousWindow) {
+    setPreviousWindow(inspectionWindow);
     setActive(null);
-  }, [phase, start, end, shown.length]);
+  }
   const summaries = (m.phase_summaries ?? []).filter(
     (r) => cleanup || phaseCode(r.phase) !== "DELETE",
   );

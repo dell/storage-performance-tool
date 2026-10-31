@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { State } from "../types";
 import { readJSON } from "../utils/validation";
 
@@ -16,10 +16,13 @@ export function ConnectRun({
   const [host, setHost] = useState(hosts[0] ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  useEffect(() => {
-    if (attached && state?.connection?.host) setHost(state.connection.host);
-    else if (!hosts.includes(host) && hosts.length) setHost(hosts[0]);
-  }, [attached, hosts, host, state?.connection?.host]);
+  const nextHost =
+    attached && state?.connection?.host
+      ? state.connection.host
+      : !hosts.includes(host) && hosts.length
+        ? hosts[0]
+        : host;
+  if (host !== nextHost) setHost(nextHost);
 
   const connect = async () => {
     setError("");

@@ -7,9 +7,11 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build && node scripts/inline.mjs",
     "preview": "vite preview",
-    "format": "prettier --write src scripts README.md",
+    "format": "prettier --write src scripts README.md eslint.config.mjs vite.config.ts package.json",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "format:check": "prettier --check src scripts README.md eslint.config.mjs vite.config.ts package.json",
+    "lint": "eslint . --max-warnings 0"
   },
   "dependencies": {
     "@mantine/core": "9.7.4",

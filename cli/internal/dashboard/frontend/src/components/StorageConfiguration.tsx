@@ -21,10 +21,9 @@ export function StorageConfiguration({
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
   // Copy the saved settings once; later polls must not overwrite what is being typed.
-  useEffect(() => {
-    if (saved && !form)
-      setForm({ hosts: [...saved.hosts], endpoint: saved.endpoint });
-  }, [saved, form]);
+  if (saved && !form) {
+    setForm({ hosts: [...saved.hosts], endpoint: saved.endpoint });
+  }
 
   const entered = (form?.hosts ?? []).map((h) => h.trim()).filter(Boolean);
   const dirty =

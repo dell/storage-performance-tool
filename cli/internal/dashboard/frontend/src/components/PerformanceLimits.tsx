@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { Row, State } from "../types";
 import { defaults } from "../config";
 import { formatNumber as fmt, numeric, phaseName } from "../utils/metrics";
@@ -10,15 +10,27 @@ type Limits = {
 };
 const noLimits: Limits = { iops: null, bandwidth: null, latency: null };
 
-export function PerformanceLimits({
-  state,
-  row,
-  phase,
-}: {
+type Props = {
   state: State;
   row?: Row;
   phase: string;
-}) {
+};
+
+function loadLimits(key: string): Limits {
+  try {
+    const saved = JSON.parse(localStorage.getItem(key) ?? "null") ?? noLimits;
+    return {
+      iops: numeric(saved.iops),
+      bandwidth: numeric(saved.bandwidth),
+      latency: numeric(saved.latency),
+    };
+  } catch {
+    return noLimits;
+  }
+}
+
+export function PerformanceLimits(props: Props) {
+  const { state } = props;
   const o = state.job?.options ?? defaults;
   const key = [
     "spt-performance-limits-v1",
@@ -26,29 +38,27 @@ export function PerformanceLimits({
     o.object_size,
     o.threads,
   ].join(":");
-  const [limits, setLimits] = useState<Limits>(noLimits),
-    [draft, setDraft] = useState({ iops: "", bandwidth: "", latency: "" }),
+  return (
+    <details className="panel limits">
+      <LimitsForm key={key} {...props} storageKey={key} />
+    </details>
+  );
+}
+
+function LimitsForm({
+  state,
+  row,
+  phase,
+  storageKey: key,
+}: Props & { storageKey: string }) {
+  const o = state.job?.options ?? defaults;
+  const [limits, setLimits] = useState<Limits>(() => loadLimits(key)),
+    [draft, setDraft] = useState(() => ({
+      iops: limits.iops === null ? "" : String(limits.iops),
+      bandwidth: limits.bandwidth === null ? "" : String(limits.bandwidth),
+      latency: limits.latency === null ? "" : String(limits.latency),
+    })),
     [message, setMessage] = useState("");
-  useEffect(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(key) ?? "null") ?? noLimits;
-      const safe = {
-        iops: numeric(saved.iops),
-        bandwidth: numeric(saved.bandwidth),
-        latency: numeric(saved.latency),
-      };
-      setLimits(safe);
-      setDraft({
-        iops: safe.iops === null ? "" : String(safe.iops),
-        bandwidth: safe.bandwidth === null ? "" : String(safe.bandwidth),
-        latency: safe.latency === null ? "" : String(safe.latency),
-      });
-    } catch {
-      setLimits(noLimits);
-      setDraft({ iops: "", bandwidth: "", latency: "" });
-    }
-    setMessage("");
-  }, [key]);
   const checks = [
     {
       key: "iops" as const,
@@ -93,7 +103,7 @@ export function PerformanceLimits({
     }
   }
   return (
-    <details className="panel limits">
+    <>
       <summary>
         Performance limits{" "}
         <span className="summary-note">
@@ -169,6 +179,6 @@ export function PerformanceLimits({
           {message}
         </span>
       </div>
-    </details>
+    </>
   );
 }
