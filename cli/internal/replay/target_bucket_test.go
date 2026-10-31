@@ -125,7 +125,7 @@ func TestConvertJSONRefusesABucketListItCannotKeepExactly(t *testing.T) {
 	}{
 		{`["alpha", 5]`, "element 2 is not a string"},
 		{`["alpha", ""]`, `must not be empty`},
-		{`{"a": "b"}`, "not a list of names"},
+		{`{"a": "b"}`, "to a value replay does not know"},
 		{`"alpha,,beta"`, `must not be empty`},
 	} {
 		if _, err := ConvertJSON(archive(c.names), RunScript{}, opts); err == nil || !strings.Contains(err.Error(), c.want) {
@@ -155,8 +155,13 @@ func TestConvertJSONSplitsCommaStringsAsTheEngine(t *testing.T) {
 	if err != nil || strings.Join(got.ArchivedBucketNames, "|") != "alpha|beta" {
 		t.Fatalf("trailing comma: err = %v, names = %q", err, got.ArchivedBucketNames)
 	}
-	if _, err := ConvertJSON(archive(`""`), RunScript{}, opts); err == nil || !strings.Contains(err.Error(), "must not be empty") {
-		t.Fatalf("an empty string is one empty name, err = %v", err)
+	explicit := opts
+	explicit.Bucket = "local"
+	for _, empty := range []string{`""`, `[""]`} {
+		got, err := ConvertJSON(archive(empty), RunScript{}, explicit)
+		if err != nil || got.ArchivedBucketNames != nil || got.EffectiveBucket != "local" {
+			t.Fatalf("names %s is no list, as the engine reads it: err = %v, names = %q", empty, err, got.ArchivedBucketNames)
+		}
 	}
 }
 
@@ -239,5 +244,84 @@ func TestConvertJSONRefusesATargetBucketOutsideItsPlace(t *testing.T) {
 	}
 	if _, err := ConvertJSON(archive(`{"storage": {"targetBucket": {"count": 4, "provision": false}}}`), RunScript{}, opts); err != nil {
 		t.Fatalf("storage.targetBucket with known members replays: %v", err)
+	}
+}
+
+// A line continuation inside a string, or escapes nested to any depth, still spell targetBucket.
+func TestJSMentionsTargetBucketThroughContinuationsAndDeepNesting(t *testing.T) {
+	for _, terminator := range []string{"\n", "\r", "\r\n", "\u2028", "\u2029"} {
+		if source := `{"target\` + terminator + `Bucket": {"names": ["alpha"]}}`; !jsMentionsTargetBucket(source) {
+			t.Fatalf("continuation %q: not detected", terminator)
+		}
+	}
+	nested := `target\u0042ucket`
+	for depth := 0; depth < 12; depth++ {
+		nested = strings.ReplaceAll(nested, `\`, `\\`)
+	}
+	if !jsMentionsTargetBucket(nested) {
+		t.Fatal("twelve levels of escaping: not detected")
+	}
+}
+
+func TestConvertJSRefusesAContinuedTargetBucketKey(t *testing.T) {
+	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, Bucket: "local", BaseTimestamp: "20260605.121400.000"}
+	for _, terminator := range []string{"\n", "\r\n", "\u2028"} {
+		archive := "var parentConfig_1 = {\n  \"storage\" : { \"target\\" + terminator + "Bucket\" : { \"names\" : [\"alpha\", \"beta\"] } }\n};\n" +
+			"Load\n    .config(parentConfig_1)\n    .config({ \"item\" : { \"output\" : { \"path\" : \"/alpha\" } }, \"load\" : { \"step\" : { \"limit\" : { \"time\" : 60 }, \"id\" : \"W\" } } })\n    .run();\n"
+		if _, err := ConvertJS([]byte(archive), RunScript{}, opts); err == nil || !strings.Contains(err.Error(), "sets storage.targetBucket") {
+			t.Fatalf("continuation %q: err = %v, want the refusal", terminator, err)
+		}
+	}
+}
+
+// Replay keeps what each load step uses: its own configuration merged over the scenario's.
+func TestConvertJSONTakesTheBucketSetEachStepUses(t *testing.T) {
+	archive := func(steps string) []byte {
+		return []byte(`{"type": "sequential",
+  "config": {"storage": {"driver": {"type": "s3"}, "targetBucket": {"names": ["unused-a", "unused-b"]}}},
+  "steps": [` + steps + `]}`)
+	}
+	step := func(id, targetBucket string) string {
+		return `{"type": "load", "config": {"item": {"data": {"size": "10KB"}, "output": {"path": "/alpha"}},
+      "storage": {"targetBucket": ` + targetBucket + `}, "test": {"step": {"id": "` + id + `", "limit": {"count": 10}}}}}`
+	}
+	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, Bucket: "local", BaseTimestamp: "20260605.121400.000"}
+
+	overridden, err := ConvertJSON(archive(step("W", `{"names": [], "count": 4}`)+","+step("R", `{"names": [], "count": 4}`)), RunScript{}, opts)
+	if err != nil {
+		t.Fatalf("every step overrides the list: %v", err)
+	}
+	js := string(overridden.ScenarioJS)
+	if overridden.ArchivedBucketNames != nil || overridden.EffectiveBucket != "local" || strings.Contains(js, "unused-a") ||
+		!strings.Contains(js, `"count": 4`) || !strings.Contains(js, `"/local`) {
+		t.Fatalf("the steps' own count over the replay bucket must be used (names %q):\n%s", overridden.ArchivedBucketNames, js)
+	}
+
+	opts.Bucket = ""
+	replaced, err := ConvertJSON(archive(step("W", `{"names": ["ps-eu", "PS_US"]}`)), RunScript{}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(replaced.ArchivedBucketNames, "|") != "ps-eu|PS_US" || strings.Contains(string(replaced.ScenarioJS), "unused-a") {
+		t.Fatalf("the step's list replaces the scenario's: names = %q", replaced.ArchivedBucketNames)
+	}
+}
+
+func TestConvertJSONComparesTargetBucketPathsMemberByMember(t *testing.T) {
+	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, Bucket: "local", BaseTimestamp: "20260605.121400.000"}
+	archive := func(config string) []byte {
+		return []byte(`{"type": "sequential", "config": ` + config + `,
+  "steps": [{"type": "load", "config": {"item": {"data": {"size": "10KB"}, "output": {"path": "/alpha"}}, "test": {"step": {"id": "W", "limit": {"count": 10}}}}}]}`)
+	}
+	for _, c := range []struct{ name, config string }{
+		{"in an array", `{"storage": [{"targetBucket": {"names": ["alpha", "beta"]}}]}`},
+		{"dotted key", `{"storage.targetBucket": {"names": ["alpha", "beta"]}}`},
+		{"nested in a member", `{"storage": {"targetBucket": {"count": {"targetBucket": {"names": ["alpha"]}}}}}`},
+		{"names of the wrong type", `{"storage": {"targetBucket": {"names": {"a": "b"}}}}`},
+		{"provision of the wrong type", `{"storage": {"targetBucket": {"provision": 1}}}`},
+	} {
+		if _, err := ConvertJSON(archive(c.config), RunScript{}, opts); err == nil || !strings.Contains(err.Error(), "archived configuration sets") {
+			t.Fatalf("%s: err = %v, want the refusal", c.name, err)
+		}
 	}
 }
