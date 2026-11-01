@@ -173,6 +173,22 @@ class NicSetConnectionPoolTest {
 	}
 
 	@Test
+	void theConnectRotationTurnsOverItsPathsWithItsCursorBelowTheirCount() throws Exception {
+		final var a = listener();
+		final var b = listener();
+		final var paths = List.of(path("s3-a.example:9000", a), path("s3-b.example:9000", b));
+		final var pool = open(0, new OpenNic(nic("lo-a", NIC_A, paths), group("lo-a")));
+		final var nicPool = pool.pools().get(0);
+
+		final var endpoints = new ArrayList<String>();
+		for (var i = 0; i < 5; i++) {
+			endpoints.add(acquire(pool).get(5, TimeUnit.SECONDS).attr(ATTR_KEY_NODE).get());
+			assertEquals((i + 1) % 2, nicPool.nextConnectPathIndex());
+		}
+		assertEquals(List.of("s3-a.example:9000", "s3-b.example:9000", "s3-a.example:9000", "s3-b.example:9000", "s3-a.example:9000"), endpoints);
+	}
+
+	@Test
 	void aFailedConnectBacksThePathOffWhileIdleConnectionsStillServe() throws Exception {
 		final var a = listener();
 		final var pool = open(0, new OpenNic(nic("lo-a", NIC_A, List.of(path("s3-a.example:9000", a))), group("lo-a")));

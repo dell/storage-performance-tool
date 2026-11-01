@@ -269,7 +269,7 @@ final class NicPathPool {
 					waiters.addLast(attempt);
 					return;
 				}
-				connectPath = paths.get(nextPath++ % paths.size());
+				connectPath = nextConnectPath();
 				attempt.chose(connectPath);
 				epoch = connectPath.backoff.tryConnect();
 				if (epoch == PathBackoff.REJECTED) {
@@ -457,6 +457,11 @@ final class NicPathPool {
 		return admissionClosed;
 	}
 
+	/** The index of the Path the next connect takes. */
+	synchronized int nextConnectPathIndex() {
+		return nextPath;
+	}
+
 	/** Connections open, idle or connecting. */
 	synchronized int openCount() {
 		return open;
@@ -540,7 +545,7 @@ final class NicPathPool {
 					return;
 				}
 				waiter = waiters.pollFirst();
-				path = paths.get(nextPath++ % paths.size());
+				path = nextConnectPath();
 				waiter.chose(path);
 				epoch = path.backoff.tryConnect();
 				open++;
@@ -552,6 +557,13 @@ final class NicPathPool {
 			waiter.fail(new PathBackoffException(path));
 			// The slot is still free for the next waiter; open-- runs again at the loop's start.
 		}
+	}
+
+	/** The next Path in rotation. Runs under the monitor; the cursor stays below the Path count, so it cannot wrap. */
+	private NicPath nextConnectPath() {
+		final var path = paths.get(nextPath);
+		nextPath = (nextPath + 1) % paths.size();
+		return path;
 	}
 
 	private Channel pollIdle() {
