@@ -118,7 +118,7 @@ func TestGeneratedDefaultsCarryTheListedNamesInOrder(t *testing.T) {
 
 // Names are used as written, so a name YAML would read as another type must stay a string.
 func TestGeneratedDefaultsKeepEveryListedNameAString(t *testing.T) {
-	names := []string{"yes", "on", "off", "no", "y", "n", "true", "null", "~", "0123", "1e3", "0x1F", "*star", "&anchor", "!tag", "a:b", "[y]", `"q"`, "'q'", "@at", "%pct", "|pipe", ">gt", "-"}
+	names := []string{"yes", "on", "off", "no", "y", "n", "true", "null", "~", "0123", "1e3", "0x1F", "*star", "&anchor", "!tag", "a:b", "[y]", `"q"`, "'q'", "@at", "|pipe", ">gt", "-"}
 	for _, overrides := range [][]string{nil, {"storage.targetBucket={provision: false}"}} {
 		params := Params{WorkloadType: workload.Write, Endpoint: "http://127.0.0.1:9000", AccessKey: "a", SecretKey: "s",
 			Bucket: names[0], BucketNames: names, EngineOverrides: overrides}

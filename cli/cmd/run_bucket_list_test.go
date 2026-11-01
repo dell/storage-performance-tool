@@ -660,7 +660,15 @@ func TestEnvListOnAWorkloadWithoutListsNamesTheWayOut(t *testing.T) {
 	clearEnvDefaultsTestEnv(t)
 	t.Setenv(constants.EnvS3Buckets, "ps-eu,ps-us")
 	run := prepareBucketRun(t, WorkloadTypeList)
-	if run.err == nil || !strings.Contains(run.err.Error(), "S3_BUCKETS= spt run") || !strings.Contains(run.err.Error(), "--bucket") {
-		t.Fatalf("err = %v, want it to name both ways out", run.err)
+	if run.err == nil || !strings.Contains(run.err.Error(), "choose one bucket with --bucket") {
+		t.Fatalf("list: err = %v, want it to suggest --bucket", run.err)
+	}
+	manifest := filepath.Join(t.TempDir(), "manifest.csv")
+	if err := os.WriteFile(manifest, []byte("bucket,key,size,version_id\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run = prepareBucketRun(t, WorkloadTypeDelete, "--items-file", manifest)
+	if run.err == nil || !strings.Contains(run.err.Error(), "S3_BUCKET= S3_BUCKETS= spt run") {
+		t.Fatalf("delete --items-file: err = %v, want it to suggest clearing both variables", run.err)
 	}
 }

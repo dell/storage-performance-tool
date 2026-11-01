@@ -172,8 +172,8 @@ func applyBucketList(cmd *cobra.Command, params *scenario.Params, set bucketSet)
 	}
 	if reason := bucketCountUnsupportedReason(*params); reason != "" {
 		if set.Source == constants.EnvS3Buckets {
-			return fmt.Errorf("%s with %d buckets is not supported for %s; clear it for this run (%s= spt run ...) "+
-				"or choose one bucket with --bucket", set.Source, len(set.Names), reason, constants.EnvS3Buckets)
+			return fmt.Errorf("%s with %d buckets is not supported for %s; %s", set.Source, len(set.Names), reason,
+				envBucketListWayOut(*params))
 		}
 		return fmt.Errorf("%s with %d buckets is not supported for %s", set.Source, len(set.Names), reason)
 	}
@@ -183,6 +183,17 @@ func applyBucketList(cmd *cobra.Command, params *scenario.Params, set bucketSet)
 	}
 	params.BucketNames = set.Names
 	return nil
+}
+
+// envBucketListWayOut says how to run a workload that cannot use the list a profile's S3_BUCKETS
+// holds. A delete from a manifest takes its buckets from the manifest, and any --bucket or S3_BUCKET
+// would be asserted against each of its rows; every other such workload needs one bucket.
+func envBucketListWayOut(params scenario.Params) string {
+	if params.WorkloadType == WorkloadTypeDelete && strings.TrimSpace(params.ItemsFile) != "" {
+		return fmt.Sprintf("the manifest names its own buckets, so clear both variables for this run (%s= %s= spt run ...)",
+			constants.EnvS3Bucket, constants.EnvS3Buckets)
+	}
+	return "choose one bucket with --bucket"
 }
 
 // seededDeleteBatchSize returns the DELETE batch size a seeded delete step uses.
