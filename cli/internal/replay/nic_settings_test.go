@@ -210,6 +210,7 @@ func TestConvertJSAcceptsCodeThatOnlyLooksLikeANicSetting(t *testing.T) {
 			withInlineNet(t, `{}`),
 		"unrelated data with a literal net": "var stats = {\"totals\" : {\"net-interfaces\" : 1}};\nvar listed = {\"interfaces\" : 2};\n" +
 			withInlineNet(t, `{}`),
+		"a non-ASCII key prefix": "var labels = {\u670d\u52a1interfaces : 1};\n" + withInlineNet(t, `{}`),
 		"a shared net and unrelated data": "var sharedNet = {\"ssl\" : {\"enabled\" : false}};\nvar inventory = {\"host\" : {\"interfaces\" : 2}};\n" +
 			withInlineNet(t, `sharedNet`),
 	}
@@ -223,6 +224,28 @@ func TestConvertJSAcceptsCodeThatOnlyLooksLikeANicSetting(t *testing.T) {
 				t.Fatalf("the scenario's own code stays\n%s", got.ScenarioJS)
 			}
 		})
+	}
+}
+
+func TestUnremovableJSNicSettingsFollowsAStorageGivenByReference(t *testing.T) {
+	const profile = `var profiles = {"fast":{"net-interfaces":"auto"}};`
+	if _, rejected := extractJSNicSettings(profile+`Load.config({"storage":profiles.fast});`, &archivedNicSettings{}); rejected == nil {
+		t.Fatal("a flat key in the object storage refers to must be rejected")
+	}
+	if _, rejected := extractJSNicSettings(profile+`Load.config({"storage":{"driver":{}}});`, &archivedNicSettings{}); rejected != nil {
+		t.Fatalf("a flat key in an object nothing refers to is not a NIC setting: %v", rejected)
+	}
+	if _, rejected := extractJSNicSettings(`var shared = {"net-nodeInterfaces":{}};cfg.storage = shared;`, &archivedNicSettings{}); rejected == nil {
+		t.Fatal("a flat key in an object with no key must be rejected when storage is assigned")
+	}
+}
+
+func TestConvertJSFindsANicSettingAfterADivision(t *testing.T) {
+	raw := "var count = 4; var half = count++ / 2; var unit = \"ops/s\";\n" + withInlineNet(t, `{ "interfaces" : "auto" }`)
+	got := convertJSWith(t, raw)
+	want := "the source run used storage.net.interfaces=auto; replay ignores it, pass --interfaces to use NICs"
+	if warnings := nicSettingWarnings(t, got.Diagnostics); len(warnings) != 1 || warnings[0] != want {
+		t.Fatalf("NIC-set warnings = %q, want [%q]", warnings, want)
 	}
 }
 
@@ -248,6 +271,10 @@ func TestJSCodeMaskTellsADivisionFromARegularExpression(t *testing.T) {
 	for source, want := range map[string]string{
 		`a = b / 2; c = d / 3; // note`: `a = b / 2; c = d / 3;        `,
 		`a = (b) / 2 / 3;`:              `a = (b) / 2 / 3;`,
+		`a = n++ / 2; b = "c/d";`:       `a = n++ / 2; b = "c/d";`,
+		`a = n-- / 2; b = "c/d";`:       `a = n-- / 2; b = "c/d";`,
+		`a = s.return / 2; b = "c/d";`:  `a = s.return / 2; b = "c/d";`,
+		`a = [1][0] / 2; b = "c/d";`:    `a = [1][0] / 2; b = "c/d";`,
 		`a = /x\/y/g;`:                  `a =       g;`,
 		`return /"/.test(a);`:           `return    .test(a);`,
 		`a = /no end`:                   `a = /no end`,

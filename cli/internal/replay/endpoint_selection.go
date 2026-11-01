@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
@@ -122,13 +124,16 @@ type jsKeyOccurrence struct {
 	parentClose int    // offset of the containing object's closing brace; -1 if it never closes
 }
 
-// jsPrecededBy reports whether the last token byte before offset is one of chars. Control bytes
-// and non-ASCII bytes count as space: JavaScript allows a form feed or a no-break space there.
+// jsPrecededBy reports whether the last token character before offset is one of chars, which are
+// ASCII. Control characters and Unicode spaces count as space: JavaScript allows a form feed or a
+// no-break space there. Any other non-ASCII character is part of a token.
 func jsPrecededBy(code string, offset int, chars string) bool {
-	for i := offset - 1; i >= 0; i-- {
-		if code[i] > ' ' && code[i] < 0x80 {
-			return strings.IndexByte(chars, code[i]) >= 0
+	for rest := code[:offset]; rest != ""; {
+		r, size := utf8.DecodeLastRuneInString(rest)
+		if r >= ' ' && r != '\uFEFF' && !unicode.IsSpace(r) {
+			return r < utf8.RuneSelf && strings.ContainsRune(chars, r)
 		}
+		rest = rest[:len(rest)-size]
 	}
 	return false
 }
@@ -459,21 +464,23 @@ func jsCodeMask(source string) string {
 }
 
 // jsRegexCanStart reports whether a slash at offset opens a regular expression and is no division,
-// by the token before it: a division follows a value.
+// by the token before it: a division follows a value. It answers yes only where scenario code
+// plausibly has one, because masking a division would hide real code: not after an arithmetic
+// operator, which x++ / 2 ends with. A keyword counts unless it is a member, such as stats.return.
 func jsRegexCanStart(code []byte, offset int) bool {
 	i := offset - 1
 	for i >= 0 && isJSWhitespace(code[i]) {
 		i--
 	}
-	if i < 0 {
-		return true
-	}
-	if strings.IndexByte("(,=:[!&|?{};+-*%<>~^", code[i]) >= 0 {
+	if i < 0 || strings.IndexByte("(,=:[!&|?{;", code[i]) >= 0 {
 		return true
 	}
 	end := i + 1
 	for i >= 0 && isJSIdentifierPart(code[i]) {
 		i--
+	}
+	if i >= 0 && code[i] == '.' {
+		return false
 	}
 	return slices.Contains([]string{"return", "typeof", "case", "delete", "void", "in", "instanceof", "new", "throw"}, string(code[i+1:end]))
 }

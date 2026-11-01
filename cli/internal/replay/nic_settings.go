@@ -14,7 +14,7 @@ var archivedNicSettingKeys = []string{"interfaces", "nodeInterfaces"}
 
 // The same settings in the engine's dash-joined spellings, which it also accepts in a scenario's
 // config maps. Replay removes only the nested form, so it rejects these: the full path wherever it
-// appears, and the shorter one in "storage" or an object with no key of its own.
+// appears, and the shorter one where it may be the storage config.
 var (
 	flatNicSettingKeys        = []string{"storage-net-interfaces", "storage-net-nodeInterfaces"}
 	storageFlatNicSettingKeys = []string{"net-interfaces", "net-nodeInterfaces"}
@@ -137,9 +137,9 @@ func firstJSNicSetting(code string) (jsKeyOccurrence, bool) {
 
 // unremovableJSNicSettings rejects what is left once the literal storage.net settings are gone,
 // where it may reach storage.net: a key in a "net" object outside "storage", a key in the engine's
-// flat spelling, an assignment to one of the names and, when storage.net is given by reference, a
-// key in an object with no key of its own or in the named object the reference mentions. Any other
-// key, such as one under storage.driver.limit, is not a NIC setting.
+// flat spelling, an assignment to one of the names and, when storage.net or storage is given by
+// reference, a key in an object with no key of its own or in the named object the reference
+// mentions. Any other key, such as one under storage.driver.limit, is not a NIC setting.
 func unremovableJSNicSettings(code string) []Diagnostic {
 	name := firstUnremovableJSNicSetting(code)
 	if name == "" {
@@ -151,37 +151,40 @@ func unremovableJSNicSettings(code string) []Diagnostic {
 }
 
 func firstUnremovableJSNicSetting(code string) string {
-	references, byReference := jsNetReferences(code)
+	netNames, netByReference := jsReferences(code, legacyKeyNet)
 	for _, occurrence := range jsKeyOccurrences(code, archivedNicSettingKeys...) {
 		switch {
 		case occurrence.parentKey == legacyKeyNet, occurrence.parentKey == legacyKeyFlatNet,
-			occurrence.parentKey == "" && byReference, occurrence.parentKey != "" && slices.Contains(references, occurrence.parentKey):
+			occurrence.parentKey == "" && netByReference, occurrence.parentKey != "" && slices.Contains(netNames, occurrence.parentKey):
 			return occurrence.key
 		}
 	}
 	if flat := jsKeyOccurrences(code, flatNicSettingKeys...); len(flat) > 0 {
 		return flat[0].key
 	}
+	storageNames, storageByReference := jsReferences(code, legacyKeyStorage)
 	for _, occurrence := range jsKeyOccurrences(code, storageFlatNicSettingKeys...) {
-		if occurrence.parentKey == legacyKeyStorage || occurrence.parentKey == "" {
+		switch {
+		case occurrence.parentKey == legacyKeyStorage, occurrence.parentKey == "" && storageByReference,
+			occurrence.parentKey != "" && slices.Contains(storageNames, occurrence.parentKey):
 			return occurrence.key
 		}
 	}
 	return firstJSMemberAssignment(code, archivedNicSettingKeys...)
 }
 
-// jsNetReferences returns the names in every "net" value that is not an object literal, and
-// whether a "net" object is given by reference at all, through such a value or an assignment.
-func jsNetReferences(code string) ([]string, bool) {
+// jsReferences returns the names in every value of key that is not an object literal, and whether
+// that object is given by reference at all, through such a value or an assignment.
+func jsReferences(code, key string) ([]string, bool) {
 	var names []string
-	byReference := firstJSMemberAssignment(code, legacyKeyNet) != ""
-	for _, net := range jsKeyOccurrences(code, legacyKeyNet) {
-		if net.valueStart >= len(code) || code[net.valueStart] == '{' {
+	byReference := firstJSMemberAssignment(code, key) != ""
+	for _, occurrence := range jsKeyOccurrences(code, key) {
+		if occurrence.valueStart >= len(code) || code[occurrence.valueStart] == '{' {
 			continue
 		}
 		byReference = true
-		if net.parentClose >= 0 {
-			names = append(names, jsIdentifierPattern.FindAllString(code[net.valueStart:jsEntryValueEnd(code, net.valueStart, net.parentClose)], -1)...)
+		if occurrence.parentClose >= 0 {
+			names = append(names, jsIdentifierPattern.FindAllString(code[occurrence.valueStart:jsEntryValueEnd(code, occurrence.valueStart, occurrence.parentClose)], -1)...)
 		}
 	}
 	return names, byReference
