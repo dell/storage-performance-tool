@@ -122,7 +122,7 @@ Before the first operation, each engine connects once on every Path. A failure f
 - **Run metadata** in `spt_run_params.json`:
   - `scenarioParams.Interfaces`: the requested entries;
   - `nicNodes`: each node with its host and the value it received;
-  - `nicEngines`: per step, each engine's report, with its node, host, number of NIC-set drivers, `driverThreads` (0 for the default), `hardwareThreads`, `eventLoopsPerNic`, `nics` and `eventLoops`. A step with several NIC-set drivers, such as a `mixed` step, adds `contexts` with each driver's values, and a field the drivers disagree on is left out at the top;
+  - `nicEngines`: per step, each engine's report, with its node, host, number of NIC-set drivers, `driverThreads` (0 for the default), `hardwareThreads`, `eventLoopsPerNic`, `nics` and `eventLoops`. A step with several NIC-set drivers, such as a `pipeline` or `weighted` step, adds `contexts` with each driver's values, and a field the drivers disagree on is left out at the top;
   - `nicEnginesError`: why a report could not be read. The run does not fail.
 
 ```json
@@ -142,8 +142,8 @@ Before the first operation, each engine connects once on every Path. A failure f
     • Event loops        16 per engine (2 NICs × 8, default) + 2 base = 18
   ```
 
-  `storage.driver.threads` replaces `default` when it is set. When engines differ, the line gives each node's value, such as `node-000 16 (2 NICs × 8, default); node-001 8 (1 NIC × 8, default)`; when an engine changed between steps, it reads `vary by step; see nicEngines in spt_run_params.json`. Without reports, only the `Interfaces` line appears.
+  `storage.driver.threads` replaces `default` when it is set. When engines differ, the line gives each node's value, such as `node-000 16 (2 NICs × 8, default); node-001 8 (1 NIC × 8, default)`; when an engine changed between steps, it reads `vary by step; see nicEngines in spt_run_params.json`. When an expected report is missing or could not be read, the line gives each node that reported and ends `no readable report from the other engines`, since those engines may differ; Artifact Health names a missing report, and Warnings one that could not be read. A step that also has drivers without a NIC set adds `, not counting 1 driver without a NIC set`. Without reports, only the `Interfaces` line appears.
 
 ## Replay
 
-`spt replay` takes `--interfaces` and `SPT_INTERFACES` as `spt run` does, with the same checks; a value that fails them fails the replay as `invalid_interfaces`. Replay never keeps a source run's NIC set: an archived `storage.net.interfaces` or `storage.net.nodeInterfaces` is dropped with one warning, such as `the source run used storage.net.interfaces=auto; replay ignores it, pass --interfaces to use NICs`.
+`spt replay` takes `--interfaces` and `SPT_INTERFACES` as `spt run` does, with the same checks; a value that fails them fails the replay as `invalid_interfaces`. Replay never keeps a source run's NIC set: an archived `storage.net.interfaces` or `storage.net.nodeInterfaces` is dropped with one warning, such as `the source run used storage.net.interfaces=auto; replay ignores it, pass --interfaces to use NICs`. In a JavaScript archive, a setting replay cannot remove from a literal `storage.net` object (one in a variable, an assignment, or a `net` object outside `storage`) fails the replay as `invalid_interfaces`, because left in place it could override the replay's NIC set past these checks. Replay does not run scenario code, so a name the code computes is not detected.
