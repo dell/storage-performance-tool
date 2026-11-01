@@ -123,8 +123,8 @@ func TestExtractJSNicSettingsRemovesAdjacentSettingsAndKeepsTheCodeValid(t *test
 }
 
 func TestConvertJSDropsAdjacentInlineNicSettingsAndKeepsTheRestOfTheConfig(t *testing.T) {
-	got := convertJSWith(t, withInlineNet(t, `{ "ssl" : { "enabled" : false }, "interfaces" : [ "auto" ], "nodeInterfaces" : { } }`))
-	want := "the source run used storage.net.interfaces=auto and storage.net.nodeInterfaces={ }; " +
+	got := convertJSWith(t, withInlineNet(t, `{ "ssl" : { "enabled" : false }, "interfaces" : [ "auto" ], "nodeInterfaces" : { "a" : 1 } }`))
+	want := `the source run used storage.net.interfaces=auto and storage.net.nodeInterfaces={ "a" : 1 }; ` +
 		"replay ignores them, pass --interfaces to use NICs"
 	if warnings := nicSettingWarnings(t, got.Diagnostics); len(warnings) != 1 || warnings[0] != want {
 		t.Fatalf("NIC-set warnings = %q, want [%q]", warnings, want)
@@ -147,6 +147,11 @@ func TestConvertJSRejectsNicSettingsItCannotRemove(t *testing.T) {
 		"a member assignment":            "var oldNet = {};\noldNet.interfaces = [\"old-nic\"];\n" + withInlineNet(t, `oldNet`),
 		"a bracket assignment":           "var oldNet = {};\noldNet[\"nodeInterfaces\"] = {};\n" + withInlineNet(t, `oldNet`),
 		"an object passed to a function": "var oldNet = Object.assign({}, {\"interfaces\" : \"auto\"});\n" + withInlineNet(t, `oldNet`),
+		"a named object by reference":    "var saved = {\"oldNetwork\" : {\"interfaces\" : \"ens1f0\"}};\n" + withInlineNet(t, `saved.oldNetwork`),
+		"an escaped key in a variable":   "var oldNet = {\"interf\\u0061ces\" : \"ens1f0\"};\n" + withInlineNet(t, `oldNet`),
+		"a flat key beside storage":      strings.Replace(withInlineNet(t, `{}`), `"storage" : {`, `"storage-net-interfaces" : "old-nic", "storage" : {`, 1),
+		"a flat key in storage":          strings.Replace(withInlineNet(t, `{}`), `"storage" : {`, `"storage" : { "net-nodeInterfaces" : {},`, 1),
+		"a flat parent key":              strings.Replace(withInlineNet(t, `{}`), `"storage" : {`, `"storage-net" : { "interfaces" : "old-nic" }, "storage" : {`, 1),
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -158,6 +163,38 @@ func TestConvertJSRejectsNicSettingsItCannotRemove(t *testing.T) {
 				t.Fatalf("a rejected archive must not produce a scenario:\n%s", got.ScenarioJS)
 			}
 		})
+	}
+}
+
+func TestConvertJSDropsEmptyNicSettingsWithoutAWarning(t *testing.T) {
+	got := convertJSWith(t, withInlineNet(t, `{ "interfaces" : [ ], "nodeInterfaces" : { }, "ssl" : { "enabled" : false } }`))
+	if warnings := nicSettingWarnings(t, got.Diagnostics); len(warnings) != 0 {
+		t.Fatalf("an empty value is the default, so NIC-set warnings = %q, want none", warnings)
+	}
+	if js := string(got.ScenarioJS); strings.Contains(js, "nterfaces") {
+		t.Fatalf("the empty settings stay\n%s", js)
+	}
+}
+
+func TestConvertJSDropsAnEscapedLiteralNicSetting(t *testing.T) {
+	got := convertJSWith(t, withInlineNet(t, `{ "interf\u0061ces" : "auto" }`))
+	want := "the source run used storage.net.interfaces=auto; replay ignores it, pass --interfaces to use NICs"
+	if warnings := nicSettingWarnings(t, got.Diagnostics); len(warnings) != 1 || warnings[0] != want {
+		t.Fatalf("NIC-set warnings = %q, want [%q]", warnings, want)
+	}
+	if js := string(got.ScenarioJS); strings.Contains(js, "u0061") {
+		t.Fatalf("the escaped setting stays\n%s", js)
+	}
+}
+
+func TestConvertJSAcceptsCodeThatOnlyLooksLikeANicSetting(t *testing.T) {
+	raw := "var interfaces = 1;\nvar chosen = true ? interfaces : 0;\ninterfaces: while (false) {}\n" + withInlineNet(t, `{}`)
+	got := convertJSWith(t, raw)
+	if warnings := nicSettingWarnings(t, got.Diagnostics); len(warnings) != 0 {
+		t.Fatalf("NIC-set warnings = %q, want none", warnings)
+	}
+	if !strings.Contains(string(got.ScenarioJS), "? interfaces : 0") {
+		t.Fatalf("the scenario's own code stays\n%s", got.ScenarioJS)
 	}
 }
 

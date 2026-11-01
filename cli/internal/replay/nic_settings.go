@@ -11,12 +11,23 @@ import (
 // value (D61): only --interfaces sets a replay's NIC set, so its rejections always see it.
 var archivedNicSettingKeys = []string{"interfaces", "nodeInterfaces"}
 
+// flatNicSettingKeys are the same settings in the engine's dash-joined spellings, which it also
+// accepts in a scenario's config maps. Replay removes only the nested form, so it rejects these.
+var flatNicSettingKeys = []string{"storage-net-interfaces", "storage-net-nodeInterfaces", "net-interfaces", "net-nodeInterfaces"}
+
+// legacyKeyFlatNet is the parent key of the settings in the engine's dash-joined spelling.
+const legacyKeyFlatNet = legacyKeyStorage + "-" + legacyKeyNet
+
 // archivedNicSettings records, in order, the distinct NIC-set values an archive declared.
 type archivedNicSettings struct {
 	declared []string
 }
 
 func (a *archivedNicSettings) add(key, value string) {
+	// An empty value is the default, which sets no NIC set, so there is nothing to warn about.
+	if compact := strings.Join(strings.Fields(value), ""); compact == "" || compact == "{}" || compact == "[]" {
+		return
+	}
 	declared := legacyKeyStorage + "." + legacyKeyNet + "." + key + "=" + value
 	if !slices.Contains(a.declared, declared) {
 		a.declared = append(a.declared, declared)
@@ -119,15 +130,22 @@ func firstJSNicSetting(code string) (jsKeyOccurrence, bool) {
 
 // unremovableJSNicSettings rejects what is left once the literal storage.net settings are gone: a
 // key in a "net" object outside "storage", or in an object with no key of its own, which may reach
-// storage.net through a variable, and an assignment to one of the names. A key under another
-// named object, such as storage.driver.limit, is not a NIC setting.
+// storage.net through a variable, a key in the engine's flat spelling, and an assignment to one of
+// the names. A key under another named object, such as storage.driver.limit, is not a NIC setting,
+// unless some "net" value is a reference, which may lead to that object.
 func unremovableJSNicSettings(code string) []Diagnostic {
+	netByReference := slices.ContainsFunc(jsKeyOccurrences(code, legacyKeyNet), func(net jsKeyOccurrence) bool {
+		return net.valueStart < len(code) && code[net.valueStart] != '{'
+	})
 	name := ""
 	for _, occurrence := range jsKeyOccurrences(code, archivedNicSettingKeys...) {
-		if occurrence.parentKey == legacyKeyNet || occurrence.parentKey == "" {
+		if occurrence.parentKey == legacyKeyNet || occurrence.parentKey == legacyKeyFlatNet || occurrence.parentKey == "" || netByReference {
 			name = occurrence.key
 			break
 		}
+	}
+	if flat := jsKeyOccurrences(code, flatNicSettingKeys...); name == "" && len(flat) > 0 {
+		name = flat[0].key
 	}
 	if name == "" {
 		name = firstJSMemberAssignment(code, archivedNicSettingKeys...)
@@ -154,7 +172,7 @@ func firstJSMemberAssignment(code string, names ...string) string {
 			if end >= len(code) {
 				return ""
 			}
-			if next := skipJSWhitespace(code, end+1); c != '`' && precededByJSBracket(code, i) && next < len(code) && code[next] == ']' &&
+			if next := skipJSWhitespace(code, end+1); c != '`' && jsPrecededBy(code, i, "[") && next < len(code) && code[next] == ']' &&
 				slices.Contains(names, code[i+1:end]) && assigned(next+1) {
 				return code[i+1 : end]
 			}
@@ -171,15 +189,6 @@ func firstJSMemberAssignment(code string, names ...string) string {
 		}
 	}
 	return ""
-}
-
-func precededByJSBracket(code string, offset int) bool {
-	for i := offset - 1; i >= 0; i-- {
-		if !isJSWhitespace(code[i]) {
-			return code[i] == '['
-		}
-	}
-	return false
 }
 
 // jsEntryValueEnd returns the offset after the value starting at start: the last non-space

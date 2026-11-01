@@ -122,6 +122,16 @@ type jsKeyOccurrence struct {
 	parentClose int    // offset of the containing object's closing brace; -1 if it never closes
 }
 
+// jsPrecededBy reports whether the last non-space before offset is one of chars.
+func jsPrecededBy(code string, offset int, chars string) bool {
+	for i := offset - 1; i >= 0; i-- {
+		if !isJSWhitespace(code[i]) {
+			return strings.IndexByte(chars, code[i]) >= 0
+		}
+	}
+	return false
+}
+
 // jsKeyOccurrences walks code, which must have its comments masked, as tokens and reports every
 // key with one of the names, with its containing object. Strings are skipped as whole tokens, so
 // their contents never count as keys.
@@ -139,7 +149,8 @@ func jsKeyOccurrences(code string, names ...string) []jsKeyOccurrence {
 		return j, j < len(code) && code[j] == ':'
 	}
 	keyRead := func(name string, start, colon int) {
-		if slices.Contains(names, name) {
+		// An object key follows a brace or a comma; a ternary's branch or a label does not.
+		if slices.Contains(names, name) && jsPrecededBy(code, start, "{,") {
 			occurrence := jsKeyOccurrence{key: name, keyStart: start, valueStart: skipJSWhitespace(code, colon+1), parentOpen: -1, parentClose: -1}
 			if len(stack) > 0 {
 				parent := &stack[len(stack)-1]
@@ -160,7 +171,7 @@ func jsKeyOccurrences(code string, names ...string) []jsKeyOccurrence {
 		case c == '"' || c == '\'' || c == '`':
 			end := jsStringEnd(code, i)
 			if colon, ok := colonAfter(end + 1); ok && c != '`' && end > i {
-				keyRead(code[i+1:end], i, colon)
+				keyRead(unquoteJSString(code[i+1:end]), i, colon)
 				i = colon
 				continue
 			}
