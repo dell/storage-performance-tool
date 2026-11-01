@@ -53,15 +53,15 @@ func nicEventLoops(engines map[string][]results.NicEngine, stepOrder []string, i
 	return strings.Join(parts, "; ")
 }
 
-// nicReportsIncomplete reports whether an expected NIC-set report is missing or could not be read,
-// or whether a step's reports were not looked for: without its metrics totals, a step's
-// participants are unknown.
+// nicReportsIncomplete reports whether an expected NIC-set report is missing or could not be read.
+// A step without metrics totals has no expected reports: a read's seed step suppresses its totals
+// by design, so its absence says nothing about the engines.
 func nicReportsIncomplete(data *RunData) bool {
 	if data.Params.NicEnginesError != "" {
 		return true
 	}
 	for _, step := range data.Steps {
-		if step != nil && (len(step.NicSetMissing) > 0 || step.Metrics == nil) {
+		if step != nil && len(step.NicSetMissing) > 0 {
 			return true
 		}
 	}

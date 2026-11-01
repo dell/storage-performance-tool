@@ -234,14 +234,17 @@ func TestStoredRunDoesNotGeneralizeEventLoopsFromAnUnreadableReport(t *testing.T
 	mustNotContain(t, full, "per engine")
 }
 
-func TestNicReportsAreIncompleteWithoutAStepsMetricsTotals(t *testing.T) {
+func TestASeedStepWithoutMetricsTotalsLeavesTheReportsComplete(t *testing.T) {
 	params := &RunParams{}
-	complete := &StepData{Metrics: &MetricsTotals{}}
-	if nicReportsIncomplete(&RunData{Params: params, Steps: map[string]*StepData{"s1": complete}}) {
-		t.Fatal("a step with its metrics totals and no missing report is complete")
+	read := &StepData{Metrics: &MetricsTotals{}}
+	// A read's seed step suppresses its metrics totals by design.
+	seed := &StepData{}
+	if nicReportsIncomplete(&RunData{Params: params, Steps: map[string]*StepData{"seed": seed, "read": read}}) {
+		t.Fatal("a seed step without metrics totals must not make a healthy read's event loops read as incomplete")
 	}
-	if !nicReportsIncomplete(&RunData{Params: params, Steps: map[string]*StepData{"s1": complete, "s2": {}}}) {
-		t.Fatal("a step without metrics totals has unknown participants, so its reports were not looked for")
+	missing := &StepData{Metrics: &MetricsTotals{}, NicSetMissing: []results.NicNodeFile{{Node: 1}}}
+	if !nicReportsIncomplete(&RunData{Params: params, Steps: map[string]*StepData{"seed": seed, "read": missing}}) {
+		t.Fatal("a missing report still makes them incomplete")
 	}
 }
 
