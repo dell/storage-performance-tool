@@ -544,7 +544,8 @@ flag; an `--engine-override` of `storage.targetBucket.count` is rejected.
 **`--buckets` and `--buckets-file` behavior:** a list of two or more names
 places new objects exactly as a count does, with member `i` the `i`-th name, and
 allows the same workloads. The names are used as written: the AWS naming rules of
-generated names do not apply. With `--provision-target-bucket=false` the listed
+generated names do not apply, except that `--s3-driver aws` cannot create a name the
+AWS SDK's bucket name check rejects. With `--provision-target-bucket=false` the listed
 buckets must already exist. SPT never lists, reads or deletes an object it did
 not write, except those an items file you supply names. The names are set only
 by these flags or `S3_BUCKETS`; an `--engine-override` of

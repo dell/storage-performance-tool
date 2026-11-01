@@ -102,28 +102,31 @@ class S3AwsTargetBucketControlTest {
 	}
 
 	@Test
-	void everyNamingRuleIsReportedAndNothingIsSent() throws Exception {
+	void namingRulesAreReportedAndNothingIsSent() throws Exception {
 		final var requests = new CopyOnWriteArrayList<String>();
 		final var server = bucketStub(requests, 404);
-		final var timeouts = new S3AwsClientTimeouts(Duration.ofSeconds(5), Duration.ofSeconds(10));
-		final var port = server.getAddress().getPort();
-		final var control = new S3AwsTargetBucketControl(S3AwsRawClients.exactVersion(port, timeouts), "us-east-1",
-						"http://127.0.0.1:" + port, Duration.ofSeconds(10));
 		try {
-			final Map<String, String> rules = Map.of(
-							"PS-US", "Bucket name should not contain uppercase characters",
-							"ps_us", "Bucket name should not contain '_'",
-							"ps..us", "Bucket name should not contain two adjacent periods",
-							"ab", "Bucket name should be between 3 and 63 characters long",
-							"ps-us-", "Bucket name should not end with '-' or '.'");
-			for (final var rule : rules.entrySet()) {
-				final var response = control.create(rule.getKey(), null);
-				assertEquals(Kind.FAILED, response.kind(), rule.getKey());
-				assertEquals("the AWS SDK refused the name: " + rule.getValue(), response.detail());
+			final var timeouts = new S3AwsClientTimeouts(Duration.ofSeconds(5), Duration.ofSeconds(10));
+			final var port = server.getAddress().getPort();
+			final var control = new S3AwsTargetBucketControl(S3AwsRawClients.exactVersion(port, timeouts), "us-east-1",
+							"http://127.0.0.1:" + port, Duration.ofSeconds(10));
+			try {
+				final Map<String, String> rules = Map.of(
+								"PS-US", "Bucket name should not contain uppercase characters",
+								"ps_us", "Bucket name should not contain '_'",
+								"ps..us", "Bucket name should not contain two adjacent periods",
+								"ab", "Bucket name should be between 3 and 63 characters long",
+								"ps-us-", "Bucket name should not end with '-' or '.'");
+				for (final var rule : rules.entrySet()) {
+					final var response = control.create(rule.getKey(), null);
+					assertEquals(Kind.FAILED, response.kind(), rule.getKey());
+					assertEquals("the AWS SDK refused the name: " + rule.getValue(), response.detail());
+				}
+				assertEquals(List.of(), requests);
+			} finally {
+				control.close();
 			}
-			assertEquals(List.of(), requests);
 		} finally {
-			control.close();
 			server.stop(0);
 		}
 	}
