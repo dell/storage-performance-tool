@@ -588,7 +588,7 @@ Load
             "batch": {
                 "size": 1
             },
-            "step": {
+            "op": {
                 "limit": {
                     "count": 100
                 }

@@ -83,4 +83,8 @@ public class TestLoadStepClient extends LoadStepClientBase<TestLoadStepClient> {
 	public int getCtxConfigsCount() {
 		return this.ctxConfigs == null ? 0 : this.ctxConfigs.size();
 	}
+
+	public List<Config> getCtxConfigs() {
+		return this.ctxConfigs;
+	}
 }
