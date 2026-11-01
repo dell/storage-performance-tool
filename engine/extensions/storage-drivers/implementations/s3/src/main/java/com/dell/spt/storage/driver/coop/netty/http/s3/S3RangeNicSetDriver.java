@@ -82,6 +82,12 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver implements NicPathC
 		}
 	}
 
+	/** No connect starts during the drain, and waiting attempts give back their NIC and permit at once. */
+	@Override
+	protected void onAdmissionClosed() {
+		nicPool.closeAdmission();
+	}
+
 	@Override
 	protected void beforeIoShutdown() {
 		nicPool.closeAdmission();

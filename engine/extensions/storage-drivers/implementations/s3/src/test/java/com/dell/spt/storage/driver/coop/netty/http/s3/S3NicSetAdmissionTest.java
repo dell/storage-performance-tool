@@ -212,6 +212,33 @@ final class S3NicSetAdmissionTest {
 	}
 
 	@Test
+	void closingAdmissionSettlesAWaitingAttemptWhileARequestStillDrains() throws Exception {
+		final var run = started(stub.listeners(1), nics(1), 2);
+		final var admission = run.pool().admission();
+		stub.hold();
+		final Operation<DataItem> sent = dataOp(OpType.CREATE, "sent");
+		assertTrue(run.driver().put(sent));
+		waitFor(() -> stub.objectRequests().size() == 1, "the request reaches the stub");
+		// The other pre-opened connection's event loop, so the next attempt's hand-off stays held.
+		final var unblock = blockEventLoop(run.pool(), 0);
+		final Operation<DataItem> waiting = dataOp(OpType.CREATE, "waiting");
+		assertTrue(run.driver().put(waiting));
+		waitFor(() -> admission.count(0) == 2, "the attempt took the NIC and waits for its connection");
+
+		run.driver().closeAdmission();
+
+		assertEquals(1, admission.count(0), "the waiting attempt gave back its NIC at the close, before the drain");
+		assertEquals(0, run.pool().pendingCount(), "nothing waits for a connection during the drain");
+		assertEquals(List.of(waiting), run.driver().recoverQueuedOperations());
+		assertEquals(OperationLifecycleState.DISPATCHED, run.driver().operationLifecycle().stateOf(sent), "the sent request keeps draining");
+		unblock.countDown();
+		stub.release();
+		assertEquals(Operation.Status.SUCC, run.results().await().status());
+		awaitIdle(run);
+		assertEquals(1, stub.objectRequests().size(), () -> "requests: " + stub.objectRequests());
+	}
+
+	@Test
 	void aConnectFailingAfterTheStopIsNoIoFailure() throws Exception {
 		final var endpoints = stub.listeners(1);
 		final var run = started(endpoints, nics(1), 1);
@@ -360,6 +387,8 @@ final class S3NicSetAdmissionTest {
 		waitFor(() -> admission.count(0) == 1, "the read took the NIC and waits for its connection");
 		run.runtime.closeAdmission();
 		run.driver.closeAdmission();
+		assertEquals(0, admission.count(0), "the waiting attempt gave back its NIC at the close, before the drain");
+		assertEquals(0, run.pool().pendingCount(), "nothing waits for a connection during the drain");
 		run.driver.recoverQueuedOperations();
 		unblock.countDown();
 

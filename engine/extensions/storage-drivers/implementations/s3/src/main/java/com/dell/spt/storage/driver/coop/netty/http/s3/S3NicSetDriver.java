@@ -129,6 +129,12 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 		}
 	}
 
+	/** No connect starts during the drain, and waiting attempts give back their NIC and permit at once. */
+	@Override
+	protected void onAdmissionClosed() {
+		nicPool.closeAdmission();
+	}
+
 	@Override
 	protected void beforeIoShutdown() {
 		nicPool.closeAdmission();
