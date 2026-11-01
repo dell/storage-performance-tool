@@ -82,11 +82,13 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	// Replay never keeps an archived NIC set; only this flag sets one (D61).
+	out := cmd.OutOrStdout()
 	interfaces, interfacesSource, err := readInterfaces(cmd)
 	if err != nil {
+		err = replay.InvalidInterfacesError(err)
+		_, _ = fmt.Fprintf(out, "Replay failure class: %s\n", replay.ErrorClass(err))
 		return err
 	}
-	out := cmd.OutOrStdout()
 
 	generated, err := replay.Generate(cmd.Context(), replay.Options{
 		SourceURL:   sourceURL,

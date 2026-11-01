@@ -1113,3 +1113,24 @@ func newReplayCommandForTest(t *testing.T) *cobra.Command {
 	cmd.Flags().Int("shutdown-linger", 5, "")
 	return cmd
 }
+
+func TestReplayCommandPrintsTheFailureClassOfARejectedInterfacesValue(t *testing.T) {
+	for name, args := range map[string][]string{
+		"a value that does not parse":   {"--interfaces", "auto,eth0"},
+		"a NIC set on a bridge network": {"--interfaces", "eth0", "--network-mode", "bridge"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var out bytes.Buffer
+			cmd := newReplayCommandForTest(t)
+			cmd.Flags().String(flagInterfaces, "", "")
+			cmd.SetOut(&out)
+			cmd.SetArgs(append([]string{"--from", "http://192.0.2.1/", "--generate-only", "--endpoints", "http://192.0.2.1:9020"}, args...))
+			if err := cmd.Execute(); err == nil {
+				t.Fatal("Execute() error = nil, want a rejected --interfaces value")
+			}
+			if want := "Replay failure class: invalid_interfaces\n"; !strings.Contains(out.String(), want) {
+				t.Fatalf("output missing %q\n%s", want, out.String())
+			}
+		})
+	}
+}

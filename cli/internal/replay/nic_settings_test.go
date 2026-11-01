@@ -94,9 +94,10 @@ func TestExtractJSNicSettingsRemovesAdjacentSettingsAndKeepsTheCodeValid(t *test
 	for position, test := range positions {
 		for order, keys := range orders {
 			t.Run(position+", "+order, func(t *testing.T) {
-				source := `({"net":` + fmt.Sprintf(test.net, keys[0], keys[1]) + `,"keep":7})`
+				source := `({"storage":{"net":` + fmt.Sprintf(test.net, keys[0], keys[1]) + `},"keep":7})`
 				archived := &archivedNicSettings{}
-				if got, want := extractJSNicSettings(source, archived), `({"net":`+test.want+`,"keep":7})`; got != want {
+				got, rejected := extractJSNicSettings(source, archived)
+				if want := `({"storage":{"net":` + test.want + `},"keep":7})`; got != want || rejected != nil {
 					t.Fatalf("extractJSNicSettings(%s)\n got %s\nwant %s", source, got, want)
 				}
 				if want := []string{declared[keys[0]], declared[keys[1]]}; !slices.Equal(archived.declared, want) {
@@ -107,16 +108,16 @@ func TestExtractJSNicSettingsRemovesAdjacentSettingsAndKeepsTheCodeValid(t *test
 	}
 
 	// The reported case: both settings end the object, and each took the comma between them.
-	reported := `({"net":{"interfaces":["auto"],"nodeInterfaces":{}},"keep":7})`
-	if got := extractJSNicSettings(reported, &archivedNicSettings{}); got != `({"net":{},"keep":7})` {
+	reported := `({"storage":{"net":{"interfaces":["auto"],"nodeInterfaces":{}}},"keep":7})`
+	if got, _ := extractJSNicSettings(reported, &archivedNicSettings{}); got != `({"storage":{"net":{}},"keep":7})` {
 		t.Fatalf("extractJSNicSettings(%s) = %s, want an empty net object", reported, got)
 	}
 
 	// Archived scenarios are indented, and comments may sit between the entries.
-	indented := "({\n  \"net\" : {\n    \"port\" : 9020,\n    \"interfaces\" : [ \"auto\" ], // archived\n" +
-		"    \"nodeInterfaces\" : { }\n  },\n  \"keep\" : 7\n})"
-	want := "({\n  \"net\" : {\n    \"port\" : 9020\n  },\n  \"keep\" : 7\n})"
-	if got := extractJSNicSettings(indented, &archivedNicSettings{}); got != want {
+	indented := "({\"storage\" : {\n  \"net\" : {\n    \"port\" : 9020,\n    \"interfaces\" : [ \"auto\" ], // archived\n" +
+		"    \"nodeInterfaces\" : { }\n  }},\n  \"keep\" : 7\n})"
+	want := "({\"storage\" : {\n  \"net\" : {\n    \"port\" : 9020\n  }},\n  \"keep\" : 7\n})"
+	if got, _ := extractJSNicSettings(indented, &archivedNicSettings{}); got != want {
 		t.Fatalf("extractJSNicSettings(indented)\n got %q\nwant %q", got, want)
 	}
 }
@@ -135,6 +136,48 @@ func TestConvertJSDropsAdjacentInlineNicSettingsAndKeepsTheRestOfTheConfig(t *te
 	for _, kept := range []string{`"net" : { "ssl" : { "enabled" : false } },`, `"concurrency" : 70`} {
 		if !strings.Contains(js, kept) {
 			t.Fatalf("dropping the NIC set must keep %s\n%s", kept, js)
+		}
+	}
+}
+
+func TestConvertJSRejectsNicSettingsItCannotRemove(t *testing.T) {
+	cases := map[string]string{
+		"an object held in a variable":   "var oldNet = {\"interfaces\" : [\"old-nic\"]};\n" + withInlineNet(t, `oldNet`),
+		"a net object outside storage":   "var unrelated = {\"net\" : {\"nodeInterfaces\" : {}}};\n" + withInlineNet(t, `{}`),
+		"a member assignment":            "var oldNet = {};\noldNet.interfaces = [\"old-nic\"];\n" + withInlineNet(t, `oldNet`),
+		"a bracket assignment":           "var oldNet = {};\noldNet[\"nodeInterfaces\"] = {};\n" + withInlineNet(t, `oldNet`),
+		"an object passed to a function": "var oldNet = Object.assign({}, {\"interfaces\" : \"auto\"});\n" + withInlineNet(t, `oldNet`),
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			got, err := convertJSResult(raw, nil)
+			if ErrorClass(err) != failureInvalidInterfaces || !strings.Contains(err.Error(), "a form replay cannot remove") {
+				t.Fatalf("want an invalid_interfaces rejection, got %v", err)
+			}
+			if got != nil && len(got.ScenarioJS) != 0 {
+				t.Fatalf("a rejected archive must not produce a scenario:\n%s", got.ScenarioJS)
+			}
+		})
+	}
+}
+
+func TestFirstJSMemberAssignmentFindsOnlyAssignmentsOutsideStrings(t *testing.T) {
+	found := map[string]string{
+		`a.interfaces = 1`:            "interfaces",
+		`a . nodeInterfaces=1`:        "nodeInterfaces",
+		`a["interfaces"] = 1`:         "interfaces",
+		`a[ 'nodeInterfaces' ]  =  1`: "nodeInterfaces",
+		`a.interfaces == 1`:           "",
+		`b = a.interfaces`:            "",
+		`a.interfaces => 1`:           "",
+		`a.networkInterfaces = 1`:     "",
+		`"a.interfaces = 1"`:          "",
+		`b = ["interfaces"]`:          "",
+		`"unterminated`:               "",
+	}
+	for code, want := range found {
+		if got := firstJSMemberAssignment(code, archivedNicSettingKeys...); got != want {
+			t.Fatalf("firstJSMemberAssignment(%s) = %q, want %q", code, got, want)
 		}
 	}
 }

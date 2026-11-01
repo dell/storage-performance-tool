@@ -39,6 +39,12 @@ const (
 	failureInvalidInterfaces         = "invalid_interfaces"
 )
 
+// InvalidInterfacesError classifies a rejected --interfaces value, for the checks that run before
+// Generate.
+func InvalidInterfacesError(err error) error {
+	return newClassifiedError(failureInvalidInterfaces, err.Error(), err)
+}
+
 // ClassifiedError wraps replay errors with a stable failure class.
 type ClassifiedError struct {
 	Class string

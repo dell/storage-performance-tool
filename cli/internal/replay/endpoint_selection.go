@@ -117,6 +117,7 @@ type jsKeyOccurrence struct {
 	keyStart    int    // offset of the key
 	valueStart  int    // offset of the value after the colon
 	parentKey   string // key whose value is the containing object; empty if there is none
+	grandparent string // key whose value holds the containing object; empty if there is none
 	parentOpen  int    // offset of the containing object's opening brace; -1 if there is none
 	parentClose int    // offset of the containing object's closing brace; -1 if it never closes
 }
@@ -143,6 +144,9 @@ func jsKeyOccurrences(code string, names ...string) []jsKeyOccurrence {
 			if len(stack) > 0 {
 				parent := &stack[len(stack)-1]
 				occurrence.parentKey, occurrence.parentOpen = parent.key, parent.open
+				if len(stack) > 1 {
+					occurrence.grandparent = stack[len(stack)-2].key
+				}
 				parent.occurrences = append(parent.occurrences, len(occurrences))
 			}
 			occurrences = append(occurrences, occurrence)

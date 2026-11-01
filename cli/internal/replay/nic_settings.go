@@ -82,19 +82,22 @@ func compactJSON(value any) string {
 	return string(encoded)
 }
 
-// extractJSNicSettings removes every NIC-set setting from the "net" objects of a JavaScript
-// scenario, inline step configs included, and records its value. A value is any expression up to
-// the comma or brace that ends its entry, so a variable reference is dropped as well.
+// extractJSNicSettings removes every NIC-set setting from the literal storage.net objects of a
+// JavaScript scenario, inline step configs included, and records its value. A value is any
+// expression up to the comma or brace that ends its entry, so a variable reference is dropped as
+// well. A setting replay cannot place in a literal storage.net object is rejected, since left in
+// place it could override the replay's own NIC set past its checks. Replay does not run scenario
+// code, so a name the code computes stays out of reach.
 //
 // Settings are removed one at a time, in source order, and the scenario is scanned again after
 // each removal. Two settings that end an object would otherwise both take the comma between them,
 // and removing both ranges at the original offsets would cut into the surrounding code.
-func extractJSNicSettings(source string, archived *archivedNicSettings) string {
+func extractJSNicSettings(source string, archived *archivedNicSettings) (string, []Diagnostic) {
 	for {
 		code := jsCodeMask(source)
 		occurrence, ok := firstJSNicSetting(code)
 		if !ok {
-			return source
+			return source, unremovableJSNicSettings(code)
 		}
 		end := jsEntryValueEnd(code, occurrence.valueStart, occurrence.parentClose)
 		archived.add(occurrence.key, jsSettingValue(code[occurrence.valueStart:end]))
@@ -104,14 +107,79 @@ func extractJSNicSettings(source string, archived *archivedNicSettings) string {
 	}
 }
 
-// firstJSNicSetting returns the first NIC-set key directly inside a closed "net" object.
+// firstJSNicSetting returns the first NIC-set key directly inside a closed storage.net object.
 func firstJSNicSetting(code string) (jsKeyOccurrence, bool) {
 	for _, occurrence := range jsKeyOccurrences(code, archivedNicSettingKeys...) {
-		if occurrence.parentKey == legacyKeyNet && occurrence.parentClose >= 0 {
+		if occurrence.parentKey == legacyKeyNet && occurrence.grandparent == legacyKeyStorage && occurrence.parentClose >= 0 {
 			return occurrence, true
 		}
 	}
 	return jsKeyOccurrence{}, false
+}
+
+// unremovableJSNicSettings rejects what is left once the literal storage.net settings are gone: a
+// key in a "net" object outside "storage", or in an object with no key of its own, which may reach
+// storage.net through a variable, and an assignment to one of the names. A key under another
+// named object, such as storage.driver.limit, is not a NIC setting.
+func unremovableJSNicSettings(code string) []Diagnostic {
+	name := ""
+	for _, occurrence := range jsKeyOccurrences(code, archivedNicSettingKeys...) {
+		if occurrence.parentKey == legacyKeyNet || occurrence.parentKey == "" {
+			name = occurrence.key
+			break
+		}
+	}
+	if name == "" {
+		name = firstJSMemberAssignment(code, archivedNicSettingKeys...)
+	}
+	if name == "" {
+		return nil
+	}
+	return []Diagnostic{{Severity: severityError, Code: failureInvalidInterfaces, Message: fmt.Sprintf(
+		"archived scenario sets %q in a form replay cannot remove, such as a variable, an assignment or a \"net\" object "+
+			"outside \"storage\"; write it in the literal storage.net object, or remove it; replay sets NICs with --interfaces", name)}}
+}
+
+// firstJSMemberAssignment returns the first of names assigned as a member, x.name = or
+// x["name"] =, outside strings.
+func firstJSMemberAssignment(code string, names ...string) string {
+	assigned := func(end int) bool {
+		next := skipJSWhitespace(code, end)
+		return next < len(code) && code[next] == '=' && (next+1 >= len(code) || (code[next+1] != '=' && code[next+1] != '>'))
+	}
+	for i := 0; i < len(code); i++ {
+		switch c := code[i]; c {
+		case '"', '\'', '`':
+			end := jsStringEnd(code, i)
+			if end >= len(code) {
+				return ""
+			}
+			if next := skipJSWhitespace(code, end+1); c != '`' && precededByJSBracket(code, i) && next < len(code) && code[next] == ']' &&
+				slices.Contains(names, code[i+1:end]) && assigned(next+1) {
+				return code[i+1 : end]
+			}
+			i = end
+		case '.':
+			start := skipJSWhitespace(code, i+1)
+			stop := start
+			for stop < len(code) && isJSIdentifierPart(code[stop]) {
+				stop++
+			}
+			if slices.Contains(names, code[start:stop]) && assigned(stop) {
+				return code[start:stop]
+			}
+		}
+	}
+	return ""
+}
+
+func precededByJSBracket(code string, offset int) bool {
+	for i := offset - 1; i >= 0; i-- {
+		if !isJSWhitespace(code[i]) {
+			return code[i] == '['
+		}
+	}
+	return false
 }
 
 // jsEntryValueEnd returns the offset after the value starting at start: the last non-space
