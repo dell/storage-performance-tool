@@ -394,5 +394,7 @@ loop the driver owns, the two summed. A step with several NIC-set drivers (a wei
 or pipeline step) adds `contexts`, one object per NIC-set context with
 `context_index`, `driver_threads`, `event_loops_per_nic`, `nics`, `event_loops`,
 `base_event_loops` and `total_event_loops`. Its top-level fields are then those every
-context agrees on, and the three event-loop counts are the engine's totals. Added
+context agrees on, and the three event-loop counts are the engine's totals over its
+NIC-set drivers. A step that also has driver contexts without a NIC set adds
+`contexts_without_nic_set`, how many, because the counts leave out their loops. Added
 fields keep schema version 1.

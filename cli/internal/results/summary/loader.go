@@ -540,6 +540,7 @@ type RunParams struct {
 	DriverStatsError       string                            `json:"driverStatsError,omitempty"`
 	NicNodes               []results.NicNode                 `json:"nicNodes,omitempty"`
 	NicEngines             map[string][]results.NicEngine    `json:"nicEngines,omitempty"`
+	NicEnginesError        string                            `json:"nicEnginesError,omitempty"`
 	ResultsOptions         RunResultsOptions                 `json:"resultsOptions"`
 	CLI                    RunCLI                            `json:"cli"`
 	MultiHost              RunMultiHost                      `json:"multiHost"`

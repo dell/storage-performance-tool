@@ -97,7 +97,7 @@ class NicPathsCollectorTest {
 	}
 
 	private static String setBody(final String worker) {
-		return NicSetArtifact.json(1, "step", worker, 8, List.of()) + "\n";
+		return NicSetArtifact.json(1, "step", worker, 8, List.of(), 0) + "\n";
 	}
 
 	private static String body(final String worker) {

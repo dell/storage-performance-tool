@@ -15,7 +15,7 @@ class NicSetArtifactTest {
 	private static final ObjectMapper MAPPER = new ObjectMapper();
 
 	private static JsonNode report(final List<NicSetArtifact.Context> contexts) throws Exception {
-		return MAPPER.readTree(NicSetArtifact.json(7, "step,1", "worker", 64, contexts));
+		return MAPPER.readTree(NicSetArtifact.json(7, "step,1", "worker", 64, contexts, 0));
 	}
 
 	private static List<String> names(final JsonNode array) {
@@ -41,6 +41,17 @@ class NicSetArtifactTest {
 		assertEquals(16, report.get("event_loops").asInt(), "the per-NIC groups");
 		assertEquals(2, report.get("base_event_loops").asInt(), "the base group");
 		assertEquals(18, report.get("total_event_loops").asInt(), "every loop the driver owns");
+	}
+
+	@Test
+	void contextsWithoutANicSetAreCountedOnlyWhenThereAreAny() throws Exception {
+		final var contexts = List.of(new NicSetArtifact.Context(0, new NicSetResources(0, 8, List.of("ens1f0"), 2)));
+
+		final var report = MAPPER.readTree(NicSetArtifact.json(7, "step", "worker", 64, contexts, 2));
+
+		assertEquals(2, report.get("contexts_without_nic_set").asInt());
+		assertEquals(10, report.get("total_event_loops").asInt(), "the NIC-set driver's loops only");
+		assertFalse(report(contexts).has("contexts_without_nic_set"));
 	}
 
 	@Test

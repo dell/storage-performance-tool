@@ -11,11 +11,15 @@ import (
 // nicEventLoopsVaryByStep is the Event loops bullet of a run whose engines changed between steps.
 const nicEventLoopsVaryByStep = "vary by step; see nicEngines in spt_run_params.json"
 
+// nicEventLoopsOtherReports ends the Event loops bullet of a run with a report that was not read.
+const nicEventLoopsOtherReports = "no readable report from the other engines"
+
 // nicEventLoops describes the event loops of a run's NIC-set reports (D64): one value when every
-// report of every step agrees, one per node when only the engines differ, and a pointer to the
-// metadata when an engine changed between steps. A run without reports has none, and a missing
-// report adds nothing, since Artifact Health names its node.
-func nicEventLoops(engines map[string][]results.NicEngine, stepOrder []string) string {
+// expected report was read and every step agrees, one per node when the engines differ or some
+// reports were not read, since those engines may differ, and a pointer to the metadata when an
+// engine changed between steps. A run without reports has none. Artifact Health and the warnings
+// name the reports that were not read.
+func nicEventLoops(engines map[string][]results.NicEngine, stepOrder []string, incomplete bool) string {
 	byNode := map[int]string{}
 	var nodes []int
 	for _, stepID := range orderedNicSteps(engines, stepOrder) {
@@ -36,14 +40,39 @@ func nicEventLoops(engines map[string][]results.NicEngine, stepOrder []string) s
 	}
 	slices.Sort(nodes)
 	first := byNode[nodes[0]]
-	if !slices.ContainsFunc(nodes, func(node int) bool { return byNode[node] != first }) {
+	if !incomplete && !slices.ContainsFunc(nodes, func(node int) bool { return byNode[node] != first }) {
 		return strings.Replace(first, " ", " per engine ", 1)
 	}
 	parts := make([]string, 0, len(nodes))
 	for _, node := range nodes {
 		parts = append(parts, fmt.Sprintf("node-%03d %s", node, byNode[node]))
 	}
+	if incomplete {
+		parts = append(parts, nicEventLoopsOtherReports)
+	}
 	return strings.Join(parts, "; ")
+}
+
+// nicReportsIncomplete reports whether an expected NIC-set report is missing or could not be read.
+func nicReportsIncomplete(data *RunData) bool {
+	if data.Params.NicEnginesError != "" {
+		return true
+	}
+	for _, step := range data.Steps {
+		if step != nil && len(step.NicSetMissing) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// nicEnginesWarnings names the NIC-set reports that were fetched but could not be read; the fetch
+// records absent ones under Artifact Health.
+func nicEnginesWarnings(reason string) []string {
+	if reason == "" {
+		return nil
+	}
+	return []string{"NIC-set reports not read: " + strings.ReplaceAll(reason, "\n", "; ")}
 }
 
 // missingNicSetReports returns the NIC-set reports the step was expected to write, by the rules
@@ -75,7 +104,19 @@ func orderedNicSteps(engines map[string][]results.NicEngine, stepOrder []string)
 // has them: "16 (2 NICs × 8, default) + 2 base = 18". Drivers that disagree point to the
 // metadata instead.
 func nicEngineEventLoops(engine results.NicEngine) string {
-	return nicEngineNicLoops(engine) + nicEngineBaseLoops(engine)
+	return nicEngineNicLoops(engine) + nicEngineBaseLoops(engine) + nicEngineOtherContexts(engine)
+}
+
+// nicEngineOtherContexts says that the step's drivers without a NIC set are not counted.
+func nicEngineOtherContexts(engine results.NicEngine) string {
+	switch engine.ContextsWithoutNicSet {
+	case 0:
+		return ""
+	case 1:
+		return ", not counting 1 driver without a NIC set"
+	default:
+		return fmt.Sprintf(", not counting %d drivers without a NIC set", engine.ContextsWithoutNicSet)
+	}
 }
 
 func nicEngineBaseLoops(engine results.NicEngine) string {

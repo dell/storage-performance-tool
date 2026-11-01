@@ -263,6 +263,7 @@ func Aggregate(data *RunData) (*RunSummary, error) {
 		// A rejected run submitted no scenario: no driver ran, so nothing is missing.
 		summary.Warnings = append(summary.Warnings, rdmaDataPathWarnings(steps, workload, data.Params.DriverStatsError)...)
 	}
+	summary.Warnings = append(summary.Warnings, nicEnginesWarnings(data.Params.NicEnginesError)...)
 
 	if len(summary.MissingExpected) > 1 {
 		sort.Strings(summary.MissingExpected)
@@ -371,7 +372,7 @@ func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 		KeepScenario:      params.KeepScenario,
 		SliceEndpoints:    params.SliceEndpoints,
 		Interfaces:        append([]string(nil), params.Interfaces...),
-		EventLoops:        nicEventLoops(data.Params.NicEngines, data.StepOrder),
+		EventLoops:        nicEventLoops(data.Params.NicEngines, data.StepOrder, nicReportsIncomplete(data)),
 		MixedDistribution: mixedDistributionFromParams(workloadType, params),
 		S3Driver:          params.S3Driver,
 	}

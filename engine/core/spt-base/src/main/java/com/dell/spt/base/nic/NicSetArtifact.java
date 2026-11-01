@@ -38,13 +38,14 @@ public final class NicSetArtifact {
 	private NicSetArtifact() {}
 
 	/** Publish synchronously after stop; async logging plus flush does not drain its queue. */
-	public static void publish(final long runId, final String stepId, final String workerId, final List<Context> contexts) {
+	public static void publish(final long runId, final String stepId, final String workerId, final List<Context> contexts,
+					final int contextsWithoutNicSet) {
 		NicStepFile.publish(Loggers.NIC_SET, stepId, "NIC set",
-						json(runId, stepId, workerId, ThreadUtil.getHardwareThreadCount(), contexts) + "\n");
+						json(runId, stepId, workerId, ThreadUtil.getHardwareThreadCount(), contexts, contextsWithoutNicSet) + "\n");
 	}
 
 	public static String json(final long runId, final String stepId, final String workerId, final int hardwareThreads,
-					final List<Context> contexts) {
+					final List<Context> contexts, final int contextsWithoutNicSet) {
 		final ObjectNode root = MAPPER.createObjectNode();
 		root.put("schema_version", SCHEMA_VERSION);
 		root.put("engine_run_id", runId);
@@ -66,6 +67,10 @@ public final class NicSetArtifact {
 		root.put("event_loops", contexts.stream().mapToInt(context -> context.resources().eventLoops()).sum());
 		root.put("base_event_loops", contexts.stream().mapToInt(context -> context.resources().baseEventLoops()).sum());
 		root.put("total_event_loops", contexts.stream().mapToInt(context -> context.resources().totalEventLoops()).sum());
+		if (contextsWithoutNicSet > 0) {
+			// Their drivers' loops are not in the totals, so the report says what it leaves out.
+			root.put("contexts_without_nic_set", contextsWithoutNicSet);
+		}
 		if (contexts.size() > 1) {
 			final var array = root.putArray("contexts");
 			for (final var context : contexts) {

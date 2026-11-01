@@ -18,7 +18,8 @@ const nicSetSchemaVersion = 1
 // nicEngines stores it. A field the step's drivers disagree on is absent, and Contexts then
 // has each driver's values. Nics is empty for a NIC set that never opened. EventLoops counts
 // the per-NIC groups; BaseEventLoops (each driver's base group) and TotalEventLoops (every
-// loop the drivers own) are absent in reports that predate them.
+// loop the drivers own) are absent in reports that predate them. ContextsWithoutNicSet counts
+// the step's other driver contexts, whose loops none of these include.
 type NicEngine struct {
 	Node             int          `json:"node"`
 	Host             string       `json:"host"`
@@ -31,6 +32,8 @@ type NicEngine struct {
 	BaseEventLoops   *int         `json:"baseEventLoops,omitempty"`
 	TotalEventLoops  *int         `json:"totalEventLoops,omitempty"`
 	Contexts         []NicContext `json:"contexts,omitempty"`
+
+	ContextsWithoutNicSet int `json:"contextsWithoutNicSet,omitempty"`
 }
 
 // NicContext is one NIC-set driver of a step with several.
@@ -55,6 +58,8 @@ type nicSetReport struct {
 	BaseEventLoops   *int               `json:"base_event_loops"`
 	TotalEventLoops  *int               `json:"total_event_loops"`
 	Contexts         []nicSetReportPart `json:"contexts"`
+
+	ContextsWithoutNicSet int `json:"contexts_without_nic_set"`
 }
 
 type nicSetReportPart struct {
@@ -126,6 +131,8 @@ func readNicSetReport(path, stepID string) (NicEngine, error) {
 		EventLoops:       report.EventLoops,
 		BaseEventLoops:   report.BaseEventLoops,
 		TotalEventLoops:  report.TotalEventLoops,
+
+		ContextsWithoutNicSet: report.ContextsWithoutNicSet,
 	}
 	for _, part := range report.Contexts {
 		engine.Contexts = append(engine.Contexts, NicContext(part))

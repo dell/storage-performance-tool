@@ -463,6 +463,32 @@ final class S3NicSetWorkloadTest {
 		Files.delete(setFile);
 	}
 
+	/** The report's event-loop counts cover the NIC-set drivers, and it says how many drivers they leave out. */
+	@Test
+	void aPipelineContextWithoutANicSetIsCountedAsLeftOutOfTheReport() throws Exception {
+		final var endpoints = stub.listeners(1);
+		final var stepId = "nic-set-other-context-" + System.nanoTime();
+		runScenario(endpoints, new NicSetLoopback.Factory(), List.of(), stepId, """
+						PipelineLoad
+							.config({"load": {"step": {"limit": {"time": "30s"}}}})
+							.append({"storage": {"net": {"interfaces": "lo-a,lo-b"}, "driver": {"limit": {"concurrency": 2}}}})
+							.append({
+								"load": {"op": {"type": "read"}},
+								"storage": {"driver": {"type": "s3", "limit": {"concurrency": 2}}}
+							})
+							.run();
+						""");
+
+		final var setFile = nicSetFile(stepId);
+		final var report = MAPPER.readTree(setFile.toFile());
+		assertEquals(1, report.get("contexts_without_nic_set").asInt(), () -> "report: " + report);
+		assertEquals(List.of("lo-a", "lo-b"), names(report.get("nics")), "one NIC-set driver reports at the top level");
+		assertEquals(2, report.get("event_loops").asInt(), () -> "report: " + report);
+		assertFalse(report.has("contexts"), () -> "report: " + report);
+		Files.delete(setFile);
+		Files.delete(nicPathsFile(stepId));
+	}
+
 	/**
 	 * A step whose NIC set cannot be planned still writes its file: the end record alone, naming the
 	 * context that never handed over its counts (item 18).
@@ -558,7 +584,13 @@ final class S3NicSetWorkloadTest {
 	/** As above with step id {@code stepId}; without a {@code factory}, on the shipped {@code s3} driver and no NIC set. */
 	private static Map<String, List<Long>> runScenario(final List<String> endpoints, final NicSetLoopback.Factory factory,
 					final String stepId, final String scenario) throws Exception {
-		final var root = NicSetLoopback.root(endpoints, factory == null ? List.of() : nics(2), 1);
+		return runScenario(endpoints, factory, factory == null ? List.of() : nics(2), stepId, scenario);
+	}
+
+	/** As above with {@code interfaces} as the base config's NIC set, which a sub-load's own value replaces. */
+	private static Map<String, List<Long>> runScenario(final List<String> endpoints, final NicSetLoopback.Factory factory,
+					final List<String> interfaces, final String stepId, final String scenario) throws Exception {
+		final var root = NicSetLoopback.root(endpoints, interfaces, 1);
 		final Config config = ConfigUtil.merge("-", List.of(new BundledDefaultsProvider().config("-", root.schema()), root));
 		config.val("run-id", 778L);
 		config.val("load-step-id", stepId);

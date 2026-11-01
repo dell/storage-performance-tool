@@ -675,11 +675,14 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		nicPathsPublished = true;
 		final var paths = new ArrayList<NicPathsArtifact.Context>();
 		final var sets = new ArrayList<NicSetArtifact.Context>();
+		var contextsWithoutNicSet = 0;
 		for (var i = 0; i < expectedOperationLifecycleContexts.size(); i++) {
 			final var context = expectedOperationLifecycleContexts.get(i);
 			if (context != null && context.hasNicSet()) {
 				paths.add(new NicPathsArtifact.Context(i, context.nicPathRows()));
 				sets.add(new NicSetArtifact.Context(i, context.nicSetResources()));
+			} else if (context != null) {
+				contextsWithoutNicSet++;
 			}
 		}
 		if (paths.isEmpty()) {
@@ -691,7 +694,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			LogUtil.exception(Level.WARN, e, "{}: failed to write the NIC paths file", loadStepId());
 		}
 		try (final var logContext = put(KEY_STEP_ID, loadStepId())) {
-			NicSetArtifact.publish(runId(), loadStepId(), operationLifecycleWorkerId, sets);
+			NicSetArtifact.publish(runId(), loadStepId(), operationLifecycleWorkerId, sets, contextsWithoutNicSet);
 		} catch (final RuntimeException e) {
 			LogUtil.exception(Level.WARN, e, "{}: failed to write the NIC set file", loadStepId());
 		}

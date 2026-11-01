@@ -31,14 +31,14 @@ func TestNicSetReportsAreOptionalArtifactsWithDiscoverableNodeCopies(t *testing.
 func TestExpectedNicSetFilesFollowThePerPathRules(t *testing.T) {
 	got := ExpectedNicSetFiles("read1", threeNicNodes, 2)
 	want := []NicNodeFile{
-		{Name: "read1.nic.set.node-000.json", Node: 0, Host: "worker-a"},
-		{Name: "read1.nic.set.node-001.json", Node: 1, Host: "worker-b"},
+		{Name: "read1.nic.set.node-000.json", Node: 0, Host: "worker-a.example"},
+		{Name: "read1.nic.set.node-001.json", Node: 1, Host: "worker-b.example"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("expected reports = %+v, want %+v", got, want)
 	}
 	single := ExpectedNicSetFiles("read1", threeNicNodes, 1)
-	if !reflect.DeepEqual(single, []NicNodeFile{{Name: "read1.nic.set.json", Node: 0, Host: "worker-a"}}) {
+	if !reflect.DeepEqual(single, []NicNodeFile{{Name: "read1.nic.set.json", Node: 0, Host: "worker-a.example"}}) {
 		t.Fatalf("a single participant writes the canonical report, got %+v", single)
 	}
 }
@@ -51,12 +51,12 @@ func TestFetcherRecordsAnExpectedNicSetReportThatIsMissing(t *testing.T) {
 		t.Fatalf("node 000's report = %+v, want ok", status)
 	}
 	missing := files[step+".nic.set.node-001.json"]
-	if missing.Status != fileStatusMissing || !strings.Contains(missing.Error, "node-001 (worker-b)") {
+	if missing.Status != fileStatusMissing || !strings.Contains(missing.Error, "node-001 (worker-b.example)") {
 		t.Fatalf("the participating node's absent report = %+v, want missing with its node", missing)
 	}
 
 	single := filesByName(fetchNicPathsStep(t, step, "1", threeNicNodes[:1], "NicPaths"))[step+".nic.set.json"]
-	if single.Status != fileStatusMissing || !strings.Contains(single.Error, "node-000 (worker-a)") {
+	if single.Status != fileStatusMissing || !strings.Contains(single.Error, "node-000 (worker-a.example)") {
 		t.Fatalf("a single engine's absent report = %+v, want missing with its node", single)
 	}
 	present := filesByName(fetchNicPathsStep(t, step, "1", threeNicNodes[:1], "NicPaths", "NicSet"))[step+".nic.set.json"]
@@ -87,15 +87,15 @@ func TestReadNicEnginesReadsEachParticipantsReportInNodeOrder(t *testing.T) {
 	zero, four, two := 0, 4, 2
 	want := map[string][]NicEngine{
 		"s1": {
-			{Node: 0, Host: "worker-a", Drivers: 2, DriverThreads: &zero, HardwareThreads: 64, Nics: []string{"ens1f0"}, EventLoops: 14,
+			{Node: 0, Host: "worker-a.example", Drivers: 2, DriverThreads: &zero, HardwareThreads: 64, Nics: []string{"ens1f0"}, EventLoops: 14,
 				Contexts: []NicContext{
 					{ContextIndex: 0, DriverThreads: 0, EventLoopsPerNic: 8, Nics: []string{"ens1f0"}, EventLoops: 8},
 					{ContextIndex: 1, DriverThreads: 6, EventLoopsPerNic: 6, Nics: []string{"ens1f0"}, EventLoops: 6},
 				}},
-			{Node: 1, Host: "worker-b", Drivers: 1, DriverThreads: &zero, HardwareThreads: 32, EventLoopsPerNic: &four,
+			{Node: 1, Host: "worker-b.example", Drivers: 1, DriverThreads: &zero, HardwareThreads: 32, EventLoopsPerNic: &four,
 				Nics: []string{"ens1f0", "ens1f1", "ens2f0"}, EventLoops: 12},
 		},
-		"s2": {{Node: 0, Host: "worker-a", Drivers: 1, DriverThreads: &two, HardwareThreads: 8, EventLoopsPerNic: &two,
+		"s2": {{Node: 0, Host: "worker-a.example", Drivers: 1, DriverThreads: &two, HardwareThreads: 8, EventLoopsPerNic: &two,
 			Nics: []string{}, EventLoops: 0}},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -132,6 +132,17 @@ func writeNicSetFixture(t *testing.T, dir, name, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReadNicEnginesCarriesTheContextsWithoutANicSet(t *testing.T) {
+	dir := t.TempDir()
+	writeNicSetFixture(t, dir, "read1."+constants.ResultsArtifactSuffixMetricsTotal, "OpType,NodeCount\nREAD,1\n")
+	writeNicSetFixture(t, dir, "read1.nic.set.json", `{"schema_version":1,"step_id":"read1","hardware_threads":192,
+		"driver_threads":0,"event_loops_per_nic":24,"nics":["ens1f0"],"event_loops":24,"contexts_without_nic_set":1}`)
+	engines, err := ReadNicEngines(dir, []string{"read1"}, threeNicNodes[:1])
+	if err != nil || len(engines["read1"]) != 1 || engines["read1"][0].ContextsWithoutNicSet != 1 {
+		t.Fatalf("engines = %+v, err = %v", engines, err)
 	}
 }
 
