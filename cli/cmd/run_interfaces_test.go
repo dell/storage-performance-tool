@@ -151,15 +151,15 @@ func TestInterfacesAcceptTheRDMADefaultsAndOtherSettingsWithoutANicSet(t *testin
 }
 
 func TestRunMetadataGivesEverySliceTheRunsNicSet(t *testing.T) {
-	hosts := []*hostparse.HostInfo{{Host: "worker-a", IsLocal: true}, nil, {Original: "worker-b.example"}, {Host: " worker-c "}}
+	hosts := []*hostparse.HostInfo{{Host: "worker-a.example", IsLocal: true}, nil, {Original: "worker-b.example.example"}, {Host: " worker-c.example "}}
 	metadata := buildRunMetadata(runMetadataInput{
 		HostInfos: hosts,
 		Params:    scenario.Params{Interfaces: []string{"ens1f0", "192.0.2.21"}},
 	})
 	want := []results.NicNode{
-		{Node: 0, Host: "worker-a", Interfaces: "ens1f0,192.0.2.21"},
-		{Node: 1, Host: "worker-b.example", Interfaces: "ens1f0,192.0.2.21"},
-		{Node: 2, Host: "worker-c", Interfaces: "ens1f0,192.0.2.21"},
+		{Node: 0, Host: "worker-a.example", Interfaces: "ens1f0,192.0.2.21"},
+		{Node: 1, Host: "worker-b.example.example", Interfaces: "ens1f0,192.0.2.21"},
+		{Node: 2, Host: "worker-c.example", Interfaces: "ens1f0,192.0.2.21"},
 	}
 	if !reflect.DeepEqual(metadata.NicNodes, want) {
 		t.Fatalf("nicNodes = %+v, want %+v", metadata.NicNodes, want)
@@ -168,7 +168,7 @@ func TestRunMetadataGivesEverySliceTheRunsNicSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{`"nicNodes":[{"node":0,"host":"worker-a","interfaces":"ens1f0,192.0.2.21"}`,
+	for _, field := range []string{`"nicNodes":[{"node":0,"host":"worker-a.example","interfaces":"ens1f0,192.0.2.21"}`,
 		`"Interfaces":["ens1f0","192.0.2.21"]`} {
 		if !strings.Contains(string(encoded), field) {
 			t.Fatalf("metadata lacks %s:\n%s", field, encoded)
@@ -245,7 +245,7 @@ func TestCaptureNicEnginesStoresTheFetchedReports(t *testing.T) {
 		}
 	}
 	metadata := buildRunMetadata(runMetadataInput{
-		HostInfos: []*hostparse.HostInfo{{Host: "worker-a"}},
+		HostInfos: []*hostparse.HostInfo{{Host: "worker-a.example"}},
 		Params:    scenario.Params{Interfaces: []string{"auto"}},
 	})
 	captureNicEngines(root, []string{"s1", "s2"}, metadata)
@@ -253,14 +253,14 @@ func TestCaptureNicEnginesStoresTheFetchedReports(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `"nicEngines":{"s1":[{"node":0,"host":"worker-a","drivers":1,"driverThreads":0,"hardwareThreads":64,` +
+	want := `"nicEngines":{"s1":[{"node":0,"host":"worker-a.example","drivers":1,"driverThreads":0,"hardwareThreads":64,` +
 		`"eventLoopsPerNic":8,"nics":["ens1f0","ens1f1"],"eventLoops":16}]},` +
 		`"nicEnginesError":"s2.nic.set.json: schema_version 9, want 1"`
 	if !strings.Contains(string(encoded), want) {
 		t.Fatalf("metadata lacks %s:\n%s", want, encoded)
 	}
 
-	none := buildRunMetadata(runMetadataInput{HostInfos: []*hostparse.HostInfo{{Host: "worker-a"}}})
+	none := buildRunMetadata(runMetadataInput{HostInfos: []*hostparse.HostInfo{{Host: "worker-a.example"}}})
 	captureNicEngines(root, []string{"s1"}, none)
 	if none.NicEngines != nil || none.NicEnginesError != "" {
 		t.Fatalf("a run without a NIC set reads no report, got %+v %q", none.NicEngines, none.NicEnginesError)

@@ -15,9 +15,9 @@ import (
 const nicPathsStepID = "mt-001-create"
 
 var nicPathsNodes = []results.NicNode{
-	{Node: 0, Host: "worker-a", Interfaces: "auto"},
-	{Node: 1, Host: "worker-b", Interfaces: "auto"},
-	{Node: 2, Host: "worker-c", Interfaces: "ens1f0,ens1f1"},
+	{Node: 0, Host: "worker-a.example", Interfaces: "auto"},
+	{Node: 1, Host: "worker-b.example", Interfaces: "auto"},
+	{Node: 2, Host: "worker-c.example", Interfaces: "ens1f0,ens1f1"},
 }
 
 // nicPathsRun writes a one-step run whose metrics report nodeCount participants, with
@@ -100,33 +100,33 @@ func TestStoredRunCountsEachNodesNicPathsCopy(t *testing.T) {
 func TestStoredRunNamesTheNodeOfAMissingNicPathsCopy(t *testing.T) {
 	summary := aggregateStoredRun(t, nicPathsRun(t, 3, nicPathsNodes, nicPathsCanonicalAbsent,
 		nicPathsFetched("nic.paths.node-000.csv"), nicPathsFetched("nic.paths.node-001.csv"),
-		results.FileStatus{Name: nicPathsStepID + ".nic.paths.node-002.csv", Status: "missing", Error: "expected from node-002 (worker-c)"}))
+		results.FileStatus{Name: nicPathsStepID + ".nic.paths.node-002.csv", Status: "missing", Error: "expected from node-002 (worker-c.example)"}))
 	reports := nicPathsReports(t, summary)
 	for form, report := range reports {
-		want := "NIC paths: " + nicPathsStepID + ".nic.paths.node-NNN.csv (2 of 3 nodes; missing node-002, worker-c)\n"
+		want := "NIC paths: " + nicPathsStepID + ".nic.paths.node-NNN.csv (2 of 3 nodes; missing node-002, worker-c.example)\n"
 		if !strings.Contains(report, want) {
 			t.Fatalf("%s report lacks %q:\n%s", form, want, report)
 		}
 	}
-	mustContain(t, reports["full"], "Artifact Health\n  • "+nicPathsStepID+" missing NIC paths files: node-002, worker-c\n")
+	mustContain(t, reports["full"], "Artifact Health\n  • "+nicPathsStepID+" missing NIC paths files: node-002, worker-c.example\n")
 }
 
 func TestStoredRunWithoutAnyNicPathsFileListsTheMissingNodesOnly(t *testing.T) {
 	single := nicPathsReports(t, aggregateStoredRun(t, nicPathsRun(t, 1, nicPathsNodes[:1], nicPathsCanonicalAbsent)))
 	mustNotContain(t, single["full"], "NIC paths:")
-	mustContain(t, single["full"], nicPathsStepID+" missing NIC paths files: node-000, worker-a\n")
+	mustContain(t, single["full"], nicPathsStepID+" missing NIC paths files: node-000, worker-a.example\n")
 
 	nodes := nicPathsReports(t, aggregateStoredRun(t, nicPathsRun(t, 2, nicPathsNodes, nicPathsCanonicalAbsent)))
 	mustNotContain(t, nodes["full"], "NIC paths:")
-	mustContain(t, nodes["full"], nicPathsStepID+" missing NIC paths files: node-000, worker-a; node-001, worker-b\n")
+	mustContain(t, nodes["full"], nicPathsStepID+" missing NIC paths files: node-000, worker-a.example; node-001, worker-b.example\n")
 }
 
 func TestStoredRunsWithoutNicPathsRenderAsBefore(t *testing.T) {
-	none := []results.NicNode{{Node: 0, Host: "worker-a", Interfaces: "none"}, {Node: 1, Host: "worker-b", Interfaces: "none"}}
+	none := []results.NicNode{{Node: 0, Host: "worker-a.example", Interfaces: "none"}, {Node: 1, Host: "worker-b.example", Interfaces: "none"}}
 	tests := map[string][]results.NicNode{
 		"results of an older CLI": nil,
 		"no node with a value":    none,
-		"an empty value":          {{Node: 0, Host: "worker-a"}},
+		"an empty value":          {{Node: 0, Host: "worker-a.example"}},
 	}
 	for name, nicNodes := range tests {
 		t.Run(name, func(t *testing.T) {

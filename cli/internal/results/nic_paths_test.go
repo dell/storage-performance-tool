@@ -15,9 +15,9 @@ import (
 )
 
 var threeNicNodes = []NicNode{
-	{Node: 0, Host: "worker-a", Interfaces: "auto"},
-	{Node: 1, Host: "worker-b", Interfaces: "ens1f0,ens1f1"},
-	{Node: 2, Host: "worker-c", Interfaces: "auto"},
+	{Node: 0, Host: "worker-a.example", Interfaces: "auto"},
+	{Node: 1, Host: "worker-b.example", Interfaces: "ens1f0,ens1f1"},
+	{Node: 2, Host: "worker-c.example", Interfaces: "auto"},
 }
 
 func TestNicPathsNodeSourcesAreDiscovered(t *testing.T) {
@@ -35,22 +35,22 @@ func TestNicPathsNodeSourcesAreDiscovered(t *testing.T) {
 
 func TestExpectedNicPathsFilesNameEachParticipatingNodeWithAValue(t *testing.T) {
 	nodes := []NicNode{
-		{Node: 0, Host: "worker-a", Interfaces: "auto"},
-		{Node: 1, Host: "worker-b", Interfaces: "none"},
-		{Node: 2, Host: "worker-c", Interfaces: "ens1f0"},
+		{Node: 0, Host: "worker-a.example", Interfaces: "auto"},
+		{Node: 1, Host: "worker-b.example", Interfaces: "none"},
+		{Node: 2, Host: "worker-c.example", Interfaces: "ens1f0"},
 		{Node: 3, Host: "worker-d", Interfaces: ""},
 		{Node: 4, Host: "worker-e", Interfaces: "auto"},
 	}
 	got := ExpectedNicPathsFiles("read1", nodes, 4)
 	want := []NicNodeFile{
-		{Name: "read1.nic.paths.node-000.csv", Node: 0, Host: "worker-a"},
-		{Name: "read1.nic.paths.node-002.csv", Node: 2, Host: "worker-c"},
+		{Name: "read1.nic.paths.node-000.csv", Node: 0, Host: "worker-a.example"},
+		{Name: "read1.nic.paths.node-002.csv", Node: 2, Host: "worker-c.example"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("expected files = %+v, want %+v", got, want)
 	}
 	single := ExpectedNicPathsFiles("read1", nodes, 1)
-	if !reflect.DeepEqual(single, []NicNodeFile{{Name: "read1.nic.paths.csv", Node: 0, Host: "worker-a"}}) {
+	if !reflect.DeepEqual(single, []NicNodeFile{{Name: "read1.nic.paths.csv", Node: 0, Host: "worker-a.example"}}) {
 		t.Fatalf("a single participant writes the canonical file, got %+v", single)
 	}
 	if got := ExpectedNicPathsFiles("read1", nil, 3); got != nil {
@@ -70,7 +70,7 @@ func TestFetcherRecordsAnExpectedNodeFileThatIsMissing(t *testing.T) {
 		}
 	}
 	missing := files[step+".nic.paths.node-002.csv"]
-	if missing.Status != fileStatusMissing || !strings.Contains(missing.Error, "node-002 (worker-c)") {
+	if missing.Status != fileStatusMissing || !strings.Contains(missing.Error, "node-002 (worker-c.example)") {
 		t.Fatalf("the participating node's absent copy = %+v, want missing with its node", missing)
 	}
 	if _, ok := files[step+".nic.paths.node-003.csv"]; ok {
@@ -85,7 +85,7 @@ func TestFetcherRecordsASingleEnginesMissingFileAndNothingForANodeWithoutAValue(
 	step := "nic-002-read"
 	single := fetchNicPathsStep(t, step, "1", threeNicNodes[:1])
 	if canonical := filesByName(single)[step+".nic.paths.csv"]; canonical.Status != fileStatusMissing ||
-		!strings.Contains(canonical.Error, "node-000 (worker-a)") {
+		!strings.Contains(canonical.Error, "node-000 (worker-a.example)") {
 		t.Fatalf("a single engine's absent file = %+v, want missing with its node", canonical)
 	}
 
@@ -94,7 +94,7 @@ func TestFetcherRecordsASingleEnginesMissingFileAndNothingForANodeWithoutAValue(
 		t.Fatalf("a single engine's file = %+v, want ok", present)
 	}
 
-	none := []NicNode{{Node: 0, Host: "worker-a", Interfaces: "none"}, {Node: 1, Host: "worker-b", Interfaces: "none"}}
+	none := []NicNode{{Node: 0, Host: "worker-a.example", Interfaces: "none"}, {Node: 1, Host: "worker-b.example", Interfaces: "none"}}
 	for name, status := range filesByName(fetchNicPathsStep(t, step, "2", none)) {
 		if strings.Contains(name, "nic.paths") && (status.Error != "" || name != step+".nic.paths.csv") {
 			t.Fatalf("a node without a value gets no entry, got %s %+v", name, status)
