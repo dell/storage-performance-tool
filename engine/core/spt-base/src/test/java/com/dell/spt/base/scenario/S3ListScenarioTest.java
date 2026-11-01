@@ -10,8 +10,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import javax.script.ScriptEngine;
 import org.junit.jupiter.api.Test;
 
@@ -30,8 +28,7 @@ class S3ListScenarioTest {
 		assertEquals("object", engine.eval("typeof Load"));
 
 		final String source = new String(Files.readAllBytes(scenarioPath), StandardCharsets.UTF_8);
-		final String processed = resolveEnvDefaults(source);
-		try (Reader reader = new StringReader(processed)) {
+		try (Reader reader = new StringReader(source)) {
 			engine.eval(reader);
 		}
 
@@ -81,19 +78,5 @@ class S3ListScenarioTest {
 		public void await() {}
 
 		public void close() {}
-	}
-
-	private static final Pattern ENV_PATTERN = Pattern.compile("%\\{env:[^:=}]+:=([^}]*)}");
-
-	private static String resolveEnvDefaults(final String script) {
-		final Matcher matcher = ENV_PATTERN.matcher(script);
-		final StringBuffer buff = new StringBuffer();
-		while (matcher.find()) {
-			final String defaultValue = matcher.group(1);
-			final String replacement = defaultValue.isEmpty() ? "0" : defaultValue;
-			matcher.appendReplacement(buff, Matcher.quoteReplacement(replacement));
-		}
-		matcher.appendTail(buff);
-		return buff.toString();
 	}
 }

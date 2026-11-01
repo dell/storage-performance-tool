@@ -8,11 +8,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 )
 
-func TestStatusCommand_SingleHostReady(t *testing.T) {
+// newReadyEntryServer serves a ready entry node running a test at 42% completion.
+func newReadyEntryServer(t *testing.T) *httptest.Server {
 	t.Helper()
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/ready":
@@ -41,8 +43,14 @@ func TestStatusCommand_SingleHostReady(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
+	return server
+}
 
+func TestStatusCommand_SingleHostReady(t *testing.T) {
+	t.Helper()
+
+	server := newReadyEntryServer(t)
 	port := extractPort(t, server.URL)
 
 	logFile = filepath.Join(t.TempDir(), "status.log")
@@ -68,6 +76,32 @@ func TestStatusCommand_SingleHostReady(t *testing.T) {
 	}
 	if !strings.Contains(output, "throughput=5.0MiB/s") {
 		t.Fatalf("expected binary throughput label in output, got: %s", output)
+	}
+}
+
+// Status takes its hosts from HOSTS and ignores the run's other environment, such as
+// SPT_INTERFACES, which spt verify reads.
+func TestStatusCommand_HostsFromEnvWithInterfacesSet(t *testing.T) {
+	clearEnvDefaultsTestEnv(t)
+	t.Setenv("HOSTS", "127.0.0.1")
+	t.Setenv(constants.EnvInterfaces, "auto")
+
+	server := newReadyEntryServer(t)
+	port := extractPort(t, server.URL)
+
+	logFile = filepath.Join(t.TempDir(), "status.log")
+	logAppend = false
+	logLevel = "info"
+
+	root := GetTestRootCmd()
+	helper := NewTestHelper(t)
+
+	_, output, err := helper.ExecuteCommand(root, "status", "--api-port", port)
+	if err != nil {
+		t.Fatalf("status command returned error: %v\noutput: %s", err, output)
+	}
+	if !strings.Contains(output, "✅ [entry]") {
+		t.Fatalf("expected the HOSTS entry to be reported ready, got: %s", output)
 	}
 }
 
