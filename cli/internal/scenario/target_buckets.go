@@ -74,25 +74,29 @@ func ValidateBucketList(names []string) error {
 	return nil
 }
 
+// listedBucketForbiddenCharacters have a meaning in a request path or an engine expression, so a
+// name holding one would not address the bucket it names. The engine refuses the same characters.
+const listedBucketForbiddenCharacters = `/,%\?#{}`
+
 // listedBucketNameProblem reports why the engine would refuse a listed name, or "" when it would
 // use it as written.
 func listedBucketNameProblem(name string) string {
 	if name == "" {
 		return "must not be empty"
 	}
+	for _, marker := range listedBucketExpressionMarkers {
+		if strings.Contains(name, marker) {
+			return "must not contain the expression marker " + marker
+		}
+	}
 	for _, c := range name {
 		switch {
-		case c == '/' || c == ',':
+		case strings.ContainsRune(listedBucketForbiddenCharacters, c):
 			return fmt.Sprintf("must not contain '%c'", c)
 		case unicode.IsSpace(c):
 			return "must not contain whitespace"
 		case unicode.IsControl(c):
 			return "must not contain a control character"
-		}
-	}
-	for _, marker := range listedBucketExpressionMarkers {
-		if strings.Contains(name, marker) {
-			return "must not contain the expression marker " + marker
 		}
 	}
 	return ""

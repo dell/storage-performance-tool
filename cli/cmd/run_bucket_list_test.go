@@ -372,6 +372,7 @@ func TestBucketsFileParsing(t *testing.T) {
 		{"case differs", "ps\nPS\n", []string{"ps", "PS"}, ""},
 		{"whitespace inside", "ps eu\n", nil, "must not contain whitespace"},
 		{"expression", "ps-${x}\n", nil, "expression marker ${"},
+		{"byte order mark", "\ufeffps-eu\nPS_US\n", []string{"ps-eu", "PS_US"}, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			clearEnvDefaultsTestEnv(t)
@@ -641,5 +642,25 @@ func TestReplayBucketEnvironmentDefaults(t *testing.T) {
 	}
 	if bucket, _ := explicit.Flags().GetString("bucket"); bucket != "local" || flagFromEnv(explicit, "bucket") {
 		t.Fatalf("replay explicit --bucket = %q, from env %v", bucket, flagFromEnv(explicit, "bucket"))
+	}
+}
+
+// A run reads a buckets file more than once, so what can only be read once fails at the start.
+func TestBucketsFileMustBeARegularFile(t *testing.T) {
+	clearEnvDefaultsTestEnv(t)
+	dir := t.TempDir()
+	run := prepareBucketRun(t, WorkloadTypeWrite, "--buckets-file", dir)
+	if run.err == nil || !strings.Contains(run.err.Error(), "is not a regular file") {
+		t.Fatalf("err = %v, want it to say the path is not a regular file", run.err)
+	}
+}
+
+// A profile's list on a workload that cannot use one says how to run that workload anyway.
+func TestEnvListOnAWorkloadWithoutListsNamesTheWayOut(t *testing.T) {
+	clearEnvDefaultsTestEnv(t)
+	t.Setenv(constants.EnvS3Buckets, "ps-eu,ps-us")
+	run := prepareBucketRun(t, WorkloadTypeList)
+	if run.err == nil || !strings.Contains(run.err.Error(), "S3_BUCKETS= spt run") || !strings.Contains(run.err.Error(), "--bucket") {
+		t.Fatalf("err = %v, want it to name both ways out", run.err)
 	}
 }

@@ -30,7 +30,7 @@ func registerBucketSetFlags(flags *pflag.FlagSet) {
 		"unless --%s=false. SPT never lists, reads or deletes an object it did not write, except those an items file "+
 		"you supply names, and one credential set covers every bucket. Excludes --bucket, --%s and --%s",
 		scenario.MaxBucketCount, constants.EnvS3Buckets, flagProvisionTargetBucket, flagBucketCount, flagBucketsFile))
-	flags.String(flagBucketsFile, "", fmt.Sprintf("Read the --%s names from a file, one per line; blank lines and "+
+	flags.String(flagBucketsFile, "", fmt.Sprintf("Read the --%s names from a regular file, one per line; blank lines and "+
 		"lines starting with # are ignored. Excludes --bucket, --%s and --%s", flagBuckets, flagBucketCount, flagBuckets))
 }
 
@@ -116,6 +116,14 @@ func readBucketsFile(path string) ([]string, error) {
 	if path == "" {
 		return nil, fmt.Errorf("--%s needs a file path", flagBucketsFile)
 	}
+	info, err := os.Stat(path) // #nosec G304 -- the user names the file to read
+	if err != nil {
+		return nil, fmt.Errorf("--%s %s cannot be read: %w", flagBucketsFile, path, err)
+	}
+	if !info.Mode().IsRegular() {
+		// A run reads the file more than once, which a pipe or process substitution cannot serve.
+		return nil, fmt.Errorf("--%s %s is not a regular file", flagBucketsFile, path)
+	}
 	file, err := os.Open(path) // #nosec G304 -- the user names the file to read
 	if err != nil {
 		return nil, fmt.Errorf("--%s %s cannot be read: %w", flagBucketsFile, path, err)
@@ -124,7 +132,8 @@ func readBucketsFile(path string) ([]string, error) {
 	var names []string
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+		// Some editors begin a saved file with a byte order mark, which is not part of the name.
+		line := strings.TrimSpace(strings.TrimPrefix(scanner.Text(), "\ufeff"))
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -162,6 +171,10 @@ func applyBucketList(cmd *cobra.Command, params *scenario.Params, set bucketSet)
 		return nil
 	}
 	if reason := bucketCountUnsupportedReason(*params); reason != "" {
+		if set.Source == constants.EnvS3Buckets {
+			return fmt.Errorf("%s with %d buckets is not supported for %s; clear it for this run (%s= spt run ...) "+
+				"or choose one bucket with --bucket", set.Source, len(set.Names), reason, constants.EnvS3Buckets)
+		}
 		return fmt.Errorf("%s with %d buckets is not supported for %s", set.Source, len(set.Names), reason)
 	}
 	if params.WorkloadType == WorkloadTypeDelete && seededDeleteBatchSize(cmd) > scenario.MinDeleteBatchSize {

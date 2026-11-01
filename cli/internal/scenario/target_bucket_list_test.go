@@ -14,7 +14,7 @@ func TestValidateBucketListAcceptsNamesAsWritten(t *testing.T) {
 		{"ps-eu", "PS_US"},
 		{"ab", "a..b", "-lead", "UPPER", "under_score", "x.y", "192.168.1.1", "xn--name", "name-s3alias"},
 		{"Case", "case"},
-		{"yes", "on", "null", "0123", "~", "*star", "&anchor", "!tag", "a:b", "a#b", "{x}", "[y]", `"q"`, "'q'"},
+		{"yes", "on", "null", "0123", "~", "*star", "&anchor", "!tag", "a:b", "[y]", `"q"`, "'q'"},
 	} {
 		if err := ValidateBucketList(names); err != nil {
 			t.Fatalf("%q: %v", names, err)
@@ -44,6 +44,12 @@ func TestValidateBucketListRejectsWhatTheEngineRejects(t *testing.T) {
 		{[]string{"a", ""}, `bucket name 2 "" must not be empty`},
 		{[]string{"a/b"}, "must not contain '/'"},
 		{[]string{"a,b"}, "must not contain ','"},
+		{[]string{"%66oo"}, "must not contain '%'"},
+		{[]string{`a\b`}, `must not contain '\'`},
+		{[]string{"a?b"}, "must not contain '?'"},
+		{[]string{"a#b"}, "must not contain '#'"},
+		{[]string{"a{b"}, "must not contain '{'"},
+		{[]string{"a}b"}, "must not contain '}'"},
 		{[]string{"a b"}, "must not contain whitespace"},
 		{[]string{"a\tb"}, "must not contain whitespace"},
 		{[]string{"a b"}, "must not contain whitespace"},
@@ -112,7 +118,7 @@ func TestGeneratedDefaultsCarryTheListedNamesInOrder(t *testing.T) {
 
 // Names are used as written, so a name YAML would read as another type must stay a string.
 func TestGeneratedDefaultsKeepEveryListedNameAString(t *testing.T) {
-	names := []string{"yes", "on", "off", "no", "y", "n", "true", "null", "~", "0123", "1e3", "0x1F", "*star", "&anchor", "!tag", "a:b", "a#b", "{x}", "[y]", `"q"`, "'q'", "@at", "%pct", "|pipe", ">gt", "-"}
+	names := []string{"yes", "on", "off", "no", "y", "n", "true", "null", "~", "0123", "1e3", "0x1F", "*star", "&anchor", "!tag", "a:b", "[y]", `"q"`, "'q'", "@at", "%pct", "|pipe", ">gt", "-"}
 	for _, overrides := range [][]string{nil, {"storage.targetBucket={provision: false}"}} {
 		params := Params{WorkloadType: workload.Write, Endpoint: "http://127.0.0.1:9000", AccessKey: "a", SecretKey: "s",
 			Bucket: names[0], BucketNames: names, EngineOverrides: overrides}
