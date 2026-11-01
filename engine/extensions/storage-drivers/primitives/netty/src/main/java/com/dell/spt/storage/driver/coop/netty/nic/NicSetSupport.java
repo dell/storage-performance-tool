@@ -136,6 +136,7 @@ public final class NicSetSupport {
 							state.openLimit() > 0 ? state.openLimit() : "unlimited",
 							nic.paths().stream().map(NicSetLayout.PathSpec::endpoint).collect(Collectors.joining(", ")));
 		}
+		Loggers.MSG.info("{}: {} per-NIC I/O workers on {} NIC(s)", driver, settings.threadsPerNic() * layout.nics().size(), layout.nics().size());
 	}
 
 	/** The layout the driver started with, or {@code null} before a successful open. */
