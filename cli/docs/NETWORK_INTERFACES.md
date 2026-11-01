@@ -88,7 +88,7 @@ Interfaces on one Layer 2 segment but in different subnets can still answer ARP 
 
 - **Transport:** binding a connection to a device needs the `epoll` transport, the shipped default of `storage.net.transport`. Its native library is bundled for x86_64 only, so on arm64, or with `nio` or `kqueue`, a NIC set is a configuration error that names the transport.
 - **Containers:** the engine needs host networking, the `--network-mode` default.
-- **Custom scenarios** that set `storage.net.interfaces` directly also need `storage.net.node.connAttemptsLimit` at 0, the default, and no copy steps or NOOP operations.
+- **Custom scenarios** that set `storage.net.interfaces` directly also need `storage.net.node.connAttemptsLimit` at 0, the default, and no copy steps or NOOP operations. In JavaScript, give the value as a comma-separated string, as with other list settings, and `""` to turn off a NIC set a sub-load inherits. A JavaScript array does not reach the engine as a list: `[]` leaves the inherited value in place, and a non-empty array is a configuration error.
 
 ## Paths and pairing
 
@@ -146,4 +146,4 @@ Before the first operation, each engine connects once on every Path. A failure f
 
 ## Replay
 
-`spt replay` takes `--interfaces` and `SPT_INTERFACES` as `spt run` does, with the same checks; a value that fails them fails the replay as `invalid_interfaces`. Replay never keeps a source run's NIC set: an archived `storage.net.interfaces` or `storage.net.nodeInterfaces` is dropped with one warning, such as `the source run used storage.net.interfaces=auto; replay ignores it, pass --interfaces to use NICs`. In a JavaScript archive, a setting replay cannot remove from a literal `storage.net` object (one in a variable, an assignment, or a `net` object outside `storage`) fails the replay as `invalid_interfaces`, because left in place it could override the replay's NIC set past these checks. Replay does not run scenario code, so a name the code computes is not detected.
+`spt replay` takes `--interfaces` and `SPT_INTERFACES` as `spt run` does, with the same checks; a value that fails them fails the replay as `invalid_interfaces`. Replay never keeps a source run's NIC set: an archived `storage.net.interfaces` or `storage.net.nodeInterfaces` is dropped with one warning, such as `the source run used storage.net.interfaces=auto; replay ignores it, pass --interfaces to use NICs`. In a JavaScript archive, a setting replay cannot remove from a literal `storage.net` object (one in a variable, an assignment, a flat key such as `storage-net-interfaces`, or a `net` object outside `storage`) fails the replay as `invalid_interfaces`, because left in place it could override the replay's NIC set past these checks. Replay does not run scenario code, so a name the code computes is not detected.
