@@ -176,6 +176,23 @@ func TestConvertJSDropsEmptyNicSettingsWithoutAWarning(t *testing.T) {
 	}
 }
 
+func TestExtractJSNicSettingsFindsAKeyAfterUnusualWhitespace(t *testing.T) {
+	for name, space := range map[string]string{"no-break space": "\u00a0", "form feed": "\f", "vertical tab": "\v"} {
+		for position, source := range map[string]string{
+			"first in net": `{"storage":{"net":{` + space + `"interfaces":"x"}}}`,
+			"after a key":  `{"storage":{"net":{"port":9020,` + space + `"interfaces":"x"}}}`,
+		} {
+			t.Run(name+", "+position, func(t *testing.T) {
+				archived := &archivedNicSettings{}
+				got, rejected := extractJSNicSettings(source, archived)
+				if strings.Contains(got, "interfaces") || rejected != nil || len(archived.declared) != 1 {
+					t.Fatalf("extractJSNicSettings(%q) = %q, rejected %v, declared %q", source, got, rejected, archived.declared)
+				}
+			})
+		}
+	}
+}
+
 func TestConvertJSDropsAnEscapedLiteralNicSetting(t *testing.T) {
 	got := convertJSWith(t, withInlineNet(t, `{ "interf\u0061ces" : "auto" }`))
 	want := "the source run used storage.net.interfaces=auto; replay ignores it, pass --interfaces to use NICs"
@@ -188,13 +205,57 @@ func TestConvertJSDropsAnEscapedLiteralNicSetting(t *testing.T) {
 }
 
 func TestConvertJSAcceptsCodeThatOnlyLooksLikeANicSetting(t *testing.T) {
-	raw := "var interfaces = 1;\nvar chosen = true ? interfaces : 0;\ninterfaces: while (false) {}\n" + withInlineNet(t, `{}`)
-	got := convertJSWith(t, raw)
-	if warnings := nicSettingWarnings(t, got.Diagnostics); len(warnings) != 0 {
-		t.Fatalf("NIC-set warnings = %q, want none", warnings)
+	cases := map[string]string{
+		"a ternary and a label": "var interfaces = 1;\nvar chosen = true ? interfaces : 0;\ninterfaces: while (false) {}\n" +
+			withInlineNet(t, `{}`),
+		"unrelated data with a literal net": "var stats = {\"totals\" : {\"net-interfaces\" : 1}};\nvar listed = {\"interfaces\" : 2};\n" +
+			withInlineNet(t, `{}`),
+		"a shared net and unrelated data": "var sharedNet = {\"ssl\" : {\"enabled\" : false}};\nvar inventory = {\"host\" : {\"interfaces\" : 2}};\n" +
+			withInlineNet(t, `sharedNet`),
 	}
-	if !strings.Contains(string(got.ScenarioJS), "? interfaces : 0") {
-		t.Fatalf("the scenario's own code stays\n%s", got.ScenarioJS)
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := convertJSWith(t, raw)
+			if warnings := nicSettingWarnings(t, got.Diagnostics); len(warnings) != 0 {
+				t.Fatalf("NIC-set warnings = %q, want none", warnings)
+			}
+			if !strings.Contains(string(got.ScenarioJS), "nterfaces") {
+				t.Fatalf("the scenario's own code stays\n%s", got.ScenarioJS)
+			}
+		})
+	}
+}
+
+func TestConvertJSFindsANicSettingAfterARegularExpression(t *testing.T) {
+	for name, net := range map[string]string{
+		"slashes that read as a comment": `{ "ssl" : { "note" : "a/b".replace(/\//g, "") }, "interfaces" : "auto" }`,
+		"a slash in a character class":   `{ "ssl" : { "note" : "a/b".replace(/[/]/g, "") }, "interfaces" : "auto" }`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := convertJSWith(t, withInlineNet(t, net))
+			want := "the source run used storage.net.interfaces=auto; replay ignores it, pass --interfaces to use NICs"
+			if warnings := nicSettingWarnings(t, got.Diagnostics); len(warnings) != 1 || warnings[0] != want {
+				t.Fatalf("NIC-set warnings = %q, want [%q]", warnings, want)
+			}
+			if js := string(got.ScenarioJS); strings.Contains(js, "interfaces") || !strings.Contains(js, "replace(/") {
+				t.Fatalf("want the setting gone and the expression kept\n%s", js)
+			}
+		})
+	}
+}
+
+func TestJSCodeMaskTellsADivisionFromARegularExpression(t *testing.T) {
+	for source, want := range map[string]string{
+		`a = b / 2; c = d / 3; // note`: `a = b / 2; c = d / 3;        `,
+		`a = (b) / 2 / 3;`:              `a = (b) / 2 / 3;`,
+		`a = /x\/y/g;`:                  `a =       g;`,
+		`return /"/.test(a);`:           `return    .test(a);`,
+		`a = /no end`:                   `a = /no end`,
+		"a = /no end\nb = 1 / 2;":       "a = /no end\nb = 1 / 2;",
+	} {
+		if got := jsCodeMask(source); got != want {
+			t.Fatalf("jsCodeMask(%q) = %q, want %q", source, got, want)
+		}
 	}
 }
 

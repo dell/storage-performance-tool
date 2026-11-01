@@ -122,10 +122,11 @@ type jsKeyOccurrence struct {
 	parentClose int    // offset of the containing object's closing brace; -1 if it never closes
 }
 
-// jsPrecededBy reports whether the last non-space before offset is one of chars.
+// jsPrecededBy reports whether the last token byte before offset is one of chars. Control bytes
+// and non-ASCII bytes count as space: JavaScript allows a form feed or a no-break space there.
 func jsPrecededBy(code string, offset int, chars string) bool {
 	for i := offset - 1; i >= 0; i-- {
-		if !isJSWhitespace(code[i]) {
+		if code[i] > ' ' && code[i] < 0x80 {
 			return strings.IndexByte(chars, code[i]) >= 0
 		}
 	}
@@ -420,8 +421,9 @@ func endpointSelectionError(message string) Diagnostic {
 	return Diagnostic{Severity: severityError, Code: failureInvalidEndpointSelection, Message: message}
 }
 
-// jsCodeMask returns source with comment text replaced by spaces (line breaks kept), so scans
-// see only executable code at unchanged offsets.
+// jsCodeMask returns source with comments and regular expression literals replaced by spaces
+// (line breaks kept), so scans see only code outside them at unchanged offsets: a regular
+// expression can hold slashes and quotes that would read as a comment or a string.
 func jsCodeMask(source string) string {
 	out := []byte(source)
 	for i := 0; i < len(out); i++ {
@@ -444,9 +446,59 @@ func jsCodeMask(source string) string {
 				}
 			}
 			i = stop - 1
+		case out[i] == '/' && jsRegexCanStart(out, i):
+			if end := jsRegexEnd(source, i); end >= 0 {
+				for j := i; j <= end; j++ {
+					out[j] = ' '
+				}
+				i = end
+			}
 		}
 	}
 	return string(out)
+}
+
+// jsRegexCanStart reports whether a slash at offset opens a regular expression and is no division,
+// by the token before it: a division follows a value.
+func jsRegexCanStart(code []byte, offset int) bool {
+	i := offset - 1
+	for i >= 0 && isJSWhitespace(code[i]) {
+		i--
+	}
+	if i < 0 {
+		return true
+	}
+	if strings.IndexByte("(,=:[!&|?{};+-*%<>~^", code[i]) >= 0 {
+		return true
+	}
+	end := i + 1
+	for i >= 0 && isJSIdentifierPart(code[i]) {
+		i--
+	}
+	return slices.Contains([]string{"return", "typeof", "case", "delete", "void", "in", "instanceof", "new", "throw"}, string(code[i+1:end]))
+}
+
+// jsRegexEnd returns the offset of the slash that closes the regular expression opening at open,
+// or -1 when none does on its line.
+func jsRegexEnd(source string, open int) int {
+	inClass := false
+	for i := open + 1; i < len(source); i++ {
+		switch source[i] {
+		case '\\':
+			i++
+		case '\n':
+			return -1
+		case '[':
+			inClass = true
+		case ']':
+			inClass = false
+		case '/':
+			if !inClass {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // jsStringEnd returns the index of the quote closing the string that opens at open.

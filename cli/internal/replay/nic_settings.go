@@ -3,6 +3,7 @@ package replay
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -11,9 +12,15 @@ import (
 // value (D61): only --interfaces sets a replay's NIC set, so its rejections always see it.
 var archivedNicSettingKeys = []string{"interfaces", "nodeInterfaces"}
 
-// flatNicSettingKeys are the same settings in the engine's dash-joined spellings, which it also
-// accepts in a scenario's config maps. Replay removes only the nested form, so it rejects these.
-var flatNicSettingKeys = []string{"storage-net-interfaces", "storage-net-nodeInterfaces", "net-interfaces", "net-nodeInterfaces"}
+// The same settings in the engine's dash-joined spellings, which it also accepts in a scenario's
+// config maps. Replay removes only the nested form, so it rejects these: the full path wherever it
+// appears, and the shorter one in "storage" or an object with no key of its own.
+var (
+	flatNicSettingKeys        = []string{"storage-net-interfaces", "storage-net-nodeInterfaces"}
+	storageFlatNicSettingKeys = []string{"net-interfaces", "net-nodeInterfaces"}
+)
+
+var jsIdentifierPattern = regexp.MustCompile(`[A-Za-z_$][A-Za-z0-9_$]*`)
 
 // legacyKeyFlatNet is the parent key of the settings in the engine's dash-joined spelling.
 const legacyKeyFlatNet = legacyKeyStorage + "-" + legacyKeyNet
@@ -128,34 +135,56 @@ func firstJSNicSetting(code string) (jsKeyOccurrence, bool) {
 	return jsKeyOccurrence{}, false
 }
 
-// unremovableJSNicSettings rejects what is left once the literal storage.net settings are gone: a
-// key in a "net" object outside "storage", or in an object with no key of its own, which may reach
-// storage.net through a variable, a key in the engine's flat spelling, and an assignment to one of
-// the names. A key under another named object, such as storage.driver.limit, is not a NIC setting,
-// unless some "net" value is a reference, which may lead to that object.
+// unremovableJSNicSettings rejects what is left once the literal storage.net settings are gone,
+// where it may reach storage.net: a key in a "net" object outside "storage", a key in the engine's
+// flat spelling, an assignment to one of the names and, when storage.net is given by reference, a
+// key in an object with no key of its own or in the named object the reference mentions. Any other
+// key, such as one under storage.driver.limit, is not a NIC setting.
 func unremovableJSNicSettings(code string) []Diagnostic {
-	netByReference := slices.ContainsFunc(jsKeyOccurrences(code, legacyKeyNet), func(net jsKeyOccurrence) bool {
-		return net.valueStart < len(code) && code[net.valueStart] != '{'
-	})
-	name := ""
-	for _, occurrence := range jsKeyOccurrences(code, archivedNicSettingKeys...) {
-		if occurrence.parentKey == legacyKeyNet || occurrence.parentKey == legacyKeyFlatNet || occurrence.parentKey == "" || netByReference {
-			name = occurrence.key
-			break
-		}
-	}
-	if flat := jsKeyOccurrences(code, flatNicSettingKeys...); name == "" && len(flat) > 0 {
-		name = flat[0].key
-	}
-	if name == "" {
-		name = firstJSMemberAssignment(code, archivedNicSettingKeys...)
-	}
+	name := firstUnremovableJSNicSetting(code)
 	if name == "" {
 		return nil
 	}
 	return []Diagnostic{{Severity: severityError, Code: failureInvalidInterfaces, Message: fmt.Sprintf(
 		"archived scenario sets %q in a form replay cannot remove, such as a variable, an assignment or a \"net\" object "+
 			"outside \"storage\"; write it in the literal storage.net object, or remove it; replay sets NICs with --interfaces", name)}}
+}
+
+func firstUnremovableJSNicSetting(code string) string {
+	references, byReference := jsNetReferences(code)
+	for _, occurrence := range jsKeyOccurrences(code, archivedNicSettingKeys...) {
+		switch {
+		case occurrence.parentKey == legacyKeyNet, occurrence.parentKey == legacyKeyFlatNet,
+			occurrence.parentKey == "" && byReference, occurrence.parentKey != "" && slices.Contains(references, occurrence.parentKey):
+			return occurrence.key
+		}
+	}
+	if flat := jsKeyOccurrences(code, flatNicSettingKeys...); len(flat) > 0 {
+		return flat[0].key
+	}
+	for _, occurrence := range jsKeyOccurrences(code, storageFlatNicSettingKeys...) {
+		if occurrence.parentKey == legacyKeyStorage || occurrence.parentKey == "" {
+			return occurrence.key
+		}
+	}
+	return firstJSMemberAssignment(code, archivedNicSettingKeys...)
+}
+
+// jsNetReferences returns the names in every "net" value that is not an object literal, and
+// whether a "net" object is given by reference at all, through such a value or an assignment.
+func jsNetReferences(code string) ([]string, bool) {
+	var names []string
+	byReference := firstJSMemberAssignment(code, legacyKeyNet) != ""
+	for _, net := range jsKeyOccurrences(code, legacyKeyNet) {
+		if net.valueStart >= len(code) || code[net.valueStart] == '{' {
+			continue
+		}
+		byReference = true
+		if net.parentClose >= 0 {
+			names = append(names, jsIdentifierPattern.FindAllString(code[net.valueStart:jsEntryValueEnd(code, net.valueStart, net.parentClose)], -1)...)
+		}
+	}
+	return names, byReference
 }
 
 // firstJSMemberAssignment returns the first of names assigned as a member, x.name = or
