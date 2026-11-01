@@ -234,6 +234,17 @@ func TestStoredRunDoesNotGeneralizeEventLoopsFromAnUnreadableReport(t *testing.T
 	mustNotContain(t, full, "per engine")
 }
 
+func TestNicReportsAreIncompleteWithoutAStepsMetricsTotals(t *testing.T) {
+	params := &RunParams{}
+	complete := &StepData{Metrics: &MetricsTotals{}}
+	if nicReportsIncomplete(&RunData{Params: params, Steps: map[string]*StepData{"s1": complete}}) {
+		t.Fatal("a step with its metrics totals and no missing report is complete")
+	}
+	if !nicReportsIncomplete(&RunData{Params: params, Steps: map[string]*StepData{"s1": complete, "s2": {}}}) {
+		t.Fatal("a step without metrics totals has unknown participants, so its reports were not looked for")
+	}
+}
+
 func TestDistributedRunDoesNotGeneralizeEventLoopsPastAMissingReport(t *testing.T) {
 	runDir := nicPathsRun(t, 3, nicPathsNodes, nicPathsCanonicalAbsent,
 		nicPathsFetched("nic.paths.node-000.csv"), nicPathsFetched("nic.paths.node-001.csv"),
