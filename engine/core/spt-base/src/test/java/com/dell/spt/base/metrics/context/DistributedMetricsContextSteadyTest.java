@@ -6,7 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.dell.spt.base.concurrent.ServiceTaskExecutor;
+import com.dell.spt.base.concurrent.ThreadTaskExecutor;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
@@ -82,7 +82,7 @@ class DistributedMetricsContextSteadyTest {
 							.quantileValues(List.of(0.5)).nodeAddrs(List.of("a:1099", "b:1099"))
 							.build();
 			ctx.metadata().put(MetricsConstants.METADATA_LIMIT_OP_COUNT, 0L);
-			final MetricsManagerImpl manager = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+			final MetricsManagerImpl manager = managerWithoutSweep();
 			manager.register(ctx);
 			ctx.refreshLastSnapshot(true);
 			assertEquals(SteadyStatus.VALID, ctx.steadyResult().status(), "every slice has reported its window");
@@ -97,6 +97,18 @@ class DistributedMetricsContextSteadyTest {
 			assertEquals(SteadyStatus.INCOMPLETE, entry.steady.status(), stepId + ": the final read decides");
 			assertNull(entry.steady.statistics(), stepId);
 		}
+	}
+
+	/**
+	 * The manager's sweep reads the same slices as often as every 10 ms. Once it sees that no slice
+	 * answers, it drops the last good snapshot, and unregister then has nothing to build the entry
+	 * from. Without the sweep, the final read alone decides what this test checks.
+	 */
+	private static MetricsManagerImpl managerWithoutSweep() {
+		return new MetricsManagerImpl(new ThreadTaskExecutor(Thread.ofVirtual().factory()) {
+			@Override
+			public void submit(final Runnable task) {}
+		});
 	}
 
 	private static SteadyResult valid(final long succeeded) {
