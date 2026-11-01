@@ -63,9 +63,9 @@ class DelayedTransferConvertBufferCapacityTest {
 		TimeUnit.MILLISECONDS.sleep(100);
 		assertTrue(!second.isDone(), "a full buffer holds the put back");
 
-		assertEquals("first", buffer.get().name());
+		assertEquals("first", takeOne(buffer).name());
 		second.get(BOUND.toMillis(), TimeUnit.MILLISECONDS);
-		assertEquals("second", buffer.get().name());
+		assertEquals("second", takeOne(buffer).name());
 	}
 
 	@Test
@@ -122,6 +122,20 @@ class DelayedTransferConvertBufferCapacityTest {
 		final List<DataItem> taken = new ArrayList<>();
 		assertEquals(2, buffer.get(taken, 10));
 		assertThrows(EOFException.class, () -> buffer.get(taken, 10));
+	}
+
+	/**
+	 * Takes one item as a reader does. get() never blocks: it returns null when the lock is busy, as
+	 * it is while a put waits for room, and a reader polls again, so one attempt alone may miss it.
+	 */
+	private static DataItem takeOne(final DelayedTransferConvertBuffer<DataItem, Operation<DataItem>> buffer) {
+		return assertTimeoutPreemptively(BOUND, () -> {
+			DataItem item;
+			while ((item = buffer.get()) == null) {
+				Thread.onSpinWait();
+			}
+			return item;
+		});
 	}
 
 	private static DelayedTransferConvertBuffer<DataItem, Operation<DataItem>> buffer(final int limit) {
