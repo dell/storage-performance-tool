@@ -88,7 +88,7 @@ Interfaces on one Layer 2 segment but in different subnets can still answer ARP 
 
 - **Transport:** binding a connection to a device needs the `epoll` transport, the shipped default of `storage.net.transport`. Its native library is bundled for x86_64 only, so on arm64, or with `nio` or `kqueue`, a NIC set is a configuration error that names the transport.
 - **Containers:** the engine needs host networking, the `--network-mode` default.
-- **Custom scenarios** that set `storage.net.interfaces` directly also need `storage.net.node.connAttemptsLimit` at 0, the default, and no copy steps or NOOP operations. In JavaScript, give the value as a comma-separated string, as with other list settings, and `""` to turn off a NIC set a sub-load inherits. A JavaScript array does not reach the engine as a list: `[]` leaves the inherited value in place, and a non-empty array is a configuration error.
+- **Custom scenarios** that set `storage.net.interfaces` directly also need `storage.net.node.connAttemptsLimit` at 0, the default, and no copy steps or NOOP operations. In JavaScript, give the value as an array or a comma-separated string; `[]` or `""` turns off a NIC set a sub-load inherits.
 
 ## Paths and pairing
 

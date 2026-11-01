@@ -489,6 +489,30 @@ final class S3NicSetWorkloadTest {
 		Files.delete(nicPathsFile(stepId));
 	}
 
+	/** An empty array in a sub-load turns off the NIC set it inherits from the step's config. */
+	@Test
+	void anEmptyArrayTurnsOffAnInheritedNicSet() throws Exception {
+		final var endpoints = stub.listeners(1);
+		final var stepId = "nic-set-empty-array-" + System.nanoTime();
+		runScenario(endpoints, new NicSetLoopback.Factory(), stepId, """
+						PipelineLoad
+							.config({"load": {"step": {"limit": {"time": "30s"}}}})
+							.append({"storage": {"driver": {"limit": {"concurrency": 2}}}})
+							.append({
+								"load": {"op": {"type": "read"}},
+								"storage": {"net": {"interfaces": []}, "driver": {"type": "s3", "limit": {"concurrency": 2}}}
+							})
+							.run();
+						""");
+
+		final var setFile = nicSetFile(stepId);
+		final var report = MAPPER.readTree(setFile.toFile());
+		assertEquals(1, report.get("contexts_without_nic_set").asInt(), () -> "report: " + report);
+		assertEquals(nics(2), names(report.get("nics")), "the first sub-load keeps the inherited NIC set");
+		Files.delete(setFile);
+		Files.delete(nicPathsFile(stepId));
+	}
+
 	/**
 	 * A step whose NIC set cannot be planned still writes its file: the end record alone, naming the
 	 * context that never handed over its counts (item 18).
