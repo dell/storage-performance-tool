@@ -141,13 +141,13 @@ final class NicPathPool {
 		private static final int WAITING = 0;
 		private static final int QUEUED = 1;
 		private static final int DONE = 2;
+		// Settled by a failure, so a channel still connecting for it has no owner.
+		private static final int FAILED = 3;
 
 		private final Acquisition callback;
 		private final AtomicInteger state = new AtomicInteger(WAITING);
 		// The Path chosen for a new connection, set before the connect or its rejection; -1 before.
 		private volatile int path = -1;
-		// A failure settled this attempt, so a channel still connecting for it has no owner.
-		private volatile boolean failed;
 
 		private Pending(final Acquisition callback) {
 			this.callback = callback;
@@ -160,11 +160,10 @@ final class NicPathPool {
 		boolean fail(final Throwable failure) {
 			while (true) {
 				final var current = state.get();
-				if (current == DONE) {
+				if (current >= DONE) {
 					return false;
 				}
-				if (state.compareAndSet(current, DONE)) {
-					failed = true;
+				if (state.compareAndSet(current, FAILED)) {
 					pending.remove(this);
 					callback.failed(path, failure);
 					return true;
@@ -173,7 +172,7 @@ final class NicPathPool {
 		}
 
 		boolean failed() {
-			return failed;
+			return state.get() == FAILED;
 		}
 
 		/** Hands an active channel over on its own loop; false if already settled. */
@@ -412,9 +411,9 @@ final class NicPathPool {
 	}
 
 	/**
-	 * Closes admission: no connect starts any more, every waiting or connecting acquisition fails,
-	 * and every pending connect is cancelled with its channel closed. Idle and leased connections
-	 * stay until {@link #close()}.
+	 * Closes admission: every waiting or connecting acquisition fails, and every pending connect is
+	 * cancelled with its channel closed, including one starting as this runs. Idle and leased
+	 * connections stay until {@link #close()}.
 	 */
 	void closeAdmission() {
 		final List<Pending> settled;

@@ -215,8 +215,8 @@ public final class NicSetConnectionPool implements NonBlockingConnPool {
 	}
 
 	/**
-	 * Closes admission on every NIC: no connect starts any more, and every waiting or connecting
-	 * acquisition fails at once, its pending connect cancelled.
+	 * Closes admission on every NIC: every waiting or connecting acquisition fails at once, its
+	 * pending connect cancelled.
 	 */
 	public void closeAdmission() {
 		for (final var pool : pools) {
