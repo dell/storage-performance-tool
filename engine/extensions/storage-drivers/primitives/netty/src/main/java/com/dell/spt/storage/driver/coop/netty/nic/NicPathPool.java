@@ -146,6 +146,8 @@ final class NicPathPool {
 		private final AtomicInteger state = new AtomicInteger(WAITING);
 		// The Path chosen for a new connection, set before the connect or its rejection; -1 before.
 		private volatile int path = -1;
+		// A failure settled this attempt, so a channel still connecting for it has no owner.
+		private volatile boolean failed;
 
 		private Pending(final Acquisition callback) {
 			this.callback = callback;
@@ -162,11 +164,16 @@ final class NicPathPool {
 					return false;
 				}
 				if (state.compareAndSet(current, DONE)) {
+					failed = true;
 					pending.remove(this);
 					callback.failed(path, failure);
 					return true;
 				}
 			}
+		}
+
+		boolean failed() {
+			return failed;
 		}
 
 		/** Hands an active channel over on its own loop; false if already settled. */
@@ -527,6 +534,10 @@ final class NicPathPool {
 				release(channel);
 			}
 		});
+		// A close that scanned before this registration failed the attempt and missed the connect.
+		if (attempt.failed() && isAdmissionClosed()) {
+			final var unusedClose = channel.close();
+		}
 	}
 
 	/**

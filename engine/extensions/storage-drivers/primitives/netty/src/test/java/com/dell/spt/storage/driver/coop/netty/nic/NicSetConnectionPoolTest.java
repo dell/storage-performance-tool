@@ -40,6 +40,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -170,6 +171,26 @@ class NicSetConnectionPoolTest {
 		assertEquals(List.of(List.of(1L, 0L), List.of(1L, 0L)), preOpened(1, paths));
 		// Unlimited: one connection per Path.
 		assertEquals(List.of(List.of(1L, 1L), List.of(1L, 1L)), preOpened(0, paths));
+	}
+
+	@Test
+	void aCloseBetweenChoosingAPathAndConnectingLeavesNoConnection() throws Exception {
+		final var created = new AtomicReference<NicPathPool>();
+		final NicBinding closesFirst = (connecting, iface, address) -> {
+			created.get().closeAdmission();
+			NicBinding.SOURCE_ADDRESS.apply(connecting, iface, address);
+		};
+		final var pool = new NicPathPool(0, "lo-a", NIC_A, group("lo-a"), template(), handler, closesFirst,
+						CONNECT_TIMEOUT_MILLIS, 0, List.of(path("s3-a.example:9000", listener())), now::get);
+		created.set(pool);
+		resources.add(pool::close);
+
+		final var attempt = acquire(pool);
+
+		assertThrows(ExecutionException.class, () -> attempt.get(5, TimeUnit.SECONDS), "the close failed the attempt");
+		waitFor(() -> pool.openCount() == 0);
+		assertEquals(0, pool.idleCount(), "the connection has no owner and does not stay for the drain");
+		assertEquals(0, pool.pendingCount());
 	}
 
 	@Test
