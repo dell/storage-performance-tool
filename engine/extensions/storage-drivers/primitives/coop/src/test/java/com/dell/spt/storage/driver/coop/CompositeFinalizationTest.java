@@ -56,6 +56,20 @@ final class CompositeFinalizationTest {
 	}
 
 	@Test
+	void aFailedPartOneRetryShortOfTheLimitStillHoldsFinalization() {
+		settle(parts.get(0), Operation.Status.FAIL_IO);
+		useEveryRetry(parts.get(0));
+		recordFailure();
+		settle(parts.get(1), Operation.Status.FAIL_IO);
+		for (var i = 0; i < CoopStorageDriverBase.MAX_PART_RETRIES - 1; i++) {
+			parts.get(1).incrementRetryCount();
+		}
+		settle(parts.get(2), Operation.Status.SUCC);
+
+		assertFalse(CoopStorageDriverBase.shouldEnqueueFinalization(read));
+	}
+
+	@Test
 	void theLastPartToEndFinalizesOnceAnotherRanOutOfRetries() {
 		settle(parts.get(0), Operation.Status.FAIL_IO);
 		useEveryRetry(parts.get(0));
