@@ -16,6 +16,7 @@ import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.ArgumentMatchers.any;
@@ -395,6 +396,48 @@ class LoadStepLocalBaseTest {
 		step.startPreparation(7, TimeUnit.MILLISECONDS.toNanos(50));
 		awaitState(step, PreparationStatus.State.FENCED);
 		assertFalse(step.releasePreparedAdmission(7));
+	}
+
+	@Test
+	void aFenceBeforeTheContextsStartedStillStopsThem() throws Exception {
+		final LoadStepContext context = mockContext();
+		final var step = barrierStep(context);
+		step.startPreparation(7, TimeUnit.MILLISECONDS.toNanos(1));
+		awaitState(step, PreparationStatus.State.FENCED);
+		clearInvocations(context);
+
+		step.startContextsForTest();
+
+		verify(context, timeout(20_000)).stop();
+		verify(context, never()).prepareForAdmission(any());
+	}
+
+	@Test
+	void aStopWaitsOutAReleaseInProgressAndThenDoesNotFence() throws Exception {
+		final LoadStepContext context = mockContext();
+		final var releasing = new CountDownLatch(1);
+		final var finish = new CountDownLatch(1);
+		doAnswer(call -> {
+			releasing.countDown();
+			finish.await();
+			return null;
+		}).when(context).releaseAdmissionBarrier();
+		final var step = barrierStep(context);
+		step.startPreparation(7, TimeUnit.MINUTES.toNanos(1));
+		step.startContextsForTest();
+		awaitState(step, PreparationStatus.State.READY);
+		final var release = Thread.ofPlatform().start(() -> step.releasePreparedAdmission(7));
+		assertTrue(releasing.await(20, TimeUnit.SECONDS));
+
+		final var fence = Thread.ofPlatform().start(() -> step.fencePreparation(7));
+		fence.join(200);
+		assertTrue(fence.isAlive(), "the fence waits for the release to finish");
+		finish.countDown();
+		release.join(20_000);
+		fence.join(20_000);
+
+		assertEquals(PreparationStatus.State.READY, step.preparationStatus(7).state());
+		verify(context, never()).stop();
 	}
 
 	@Test

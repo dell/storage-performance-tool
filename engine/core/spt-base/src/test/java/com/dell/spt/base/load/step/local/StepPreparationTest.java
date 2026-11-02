@@ -85,6 +85,18 @@ class StepPreparationTest {
 	}
 
 	@Test
+	void onlyAReleaseThatNoOtherSliceUndidCountsAsAdmitted() {
+		final var preparation = new StepPreparation(1, 100, 0);
+		assertFalse(preparation.admitted());
+		preparation.ready(1);
+		preparation.release(1);
+		assertTrue(preparation.admitted());
+		preparation.markStepFailed();
+		assertFalse(preparation.admitted());
+		assertTrue(preparation.released());
+	}
+
+	@Test
 	void theBudgetMustBePositive() {
 		assertThrows(IllegalArgumentException.class, () -> new StepPreparation(1, 0, 0));
 	}

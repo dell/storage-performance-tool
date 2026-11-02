@@ -260,6 +260,8 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		final StepPreparation barrier = preparation;
 		if (barrier != null && barrier.id() == preparationId) {
 			fence(barrier, "the entry node stopped the preparation");
+			// Another slice failed to release, so this step failed even if this slice had opened.
+			barrier.markStepFailed();
 		}
 	}
 
@@ -268,8 +270,12 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	 * start, such as in a DNS lookup, holds its lifecycle lock, and the caller may be an RMI call.
 	 */
 	private void fence(final StepPreparation barrier, final String why) {
-		if (!barrier.fence(why, System.nanoTime())) {
-			return;
+		// The monitor makes this atomic with a release: one in progress finishes first, and then this
+		// fence does nothing and the caller's own stop handles what the release opened.
+		synchronized (this) {
+			if (!barrier.fence(why, System.nanoTime())) {
+				return;
+			}
 		}
 		final String stepId = safeStepIdForPreparation();
 		Loggers.MSG.info("{}: preparation fenced: {}", stepId, why);
@@ -277,6 +283,10 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		if (guard != null && guard != Thread.currentThread()) {
 			guard.interrupt();
 		}
+		stopContextsOfFence(stepId);
+	}
+
+	private void stopContextsOfFence(final String stepId) {
 		final var contexts = List.copyOf(stepContexts);
 		Thread.ofPlatform().daemon().name("spt-preparation-fence-" + stepId).start(() -> {
 			for (final LoadStepContext stepContext : contexts) {
@@ -295,6 +305,12 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	private void startPreparationThread(final StepPreparation barrier) {
 		final String stepId = safeStepIdForPreparation();
+		// A fence that came before the contexts existed could not stop them. One that comes after this
+		// check sees them, as they were added before it.
+		if (barrier.fenced()) {
+			stopContextsOfFence(stepId);
+			return;
+		}
 		final Thread preparing = Thread.ofPlatform().daemon().name("spt-preparation-" + stepId).unstarted(() -> {
 			try (final var logCtx = put(KEY_STEP_ID, stepId).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 				AdmissionPhase.current(barrier);
@@ -579,14 +595,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	protected final void doShutdown() {
 		final StepPreparation barrier = preparation;
 		if (barrier != null) {
-			// The monitor waits out a release in progress, so the contexts it opens stop below.
-			final boolean pending;
-			synchronized (this) {
-				pending = !barrier.released();
-			}
-			if (pending) {
-				fence(barrier, "the step stopped during preparation");
-			}
+			fence(barrier, "the step stopped during preparation");
 		}
 		closeSteadyWindows("shutdown");
 		if (standaloneDeleteDurationMode()) {
@@ -839,7 +848,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		try (final var logContext = put(KEY_STEP_ID, loadStepId())) {
 			final StepPreparation barrier = preparation;
 			NicPathsArtifact.publish(
-							runId(), loadStepId(), operationLifecycleWorkerId, paths, barrier == null || barrier.released());
+							runId(), loadStepId(), operationLifecycleWorkerId, paths, barrier == null || barrier.admitted());
 		} catch (final RuntimeException e) {
 			LogUtil.exception(Level.WARN, e, "{}: failed to write the NIC paths file", loadStepId());
 		}

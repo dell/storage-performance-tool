@@ -119,14 +119,18 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 			Loggers.MSG.info("{}: scatter the items from the input \"{}\"...", loadStepId, itemInput);
 			scatterItems(itemInput, batchSize);
 		} catch (final IOException e) {
+			if (Thread.currentThread().isInterrupted()) {
+				// A local write on an interrupted thread fails with an I/O error.
+				removeSlicesAfterInterrupt();
+				stopWritingIfInterrupted();
+			}
 			if (strictMode) {
 				throw terminal("failed to parse or scatter canonical integrity input", e);
 			}
 			LogUtil.exception(Level.WARN, e, "{}: failed to use the item input", loadStepId);
 		} catch (final Throwable cause) {
 			if (cause instanceof InterruptedException) {
-				// The step never holds this slicer, so it must remove its own files.
-				close();
+				removeSlicesAfterInterrupt();
 			}
 			throwUncheckedIfInterrupted(cause);
 			if (strictMode) {
@@ -169,6 +173,22 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 							loadStepId,
 							"failed to remove one or more distributed integrity input slices",
 							cleanupFailure);
+		}
+	}
+
+	/** A stop or the admission barrier's deadline interrupts: no further batch is written. */
+	private void stopWritingIfInterrupted() {
+		if (Thread.currentThread().isInterrupted()) {
+			throwUncheckedIfInterrupted(new InterruptedException(loadStepId + ": item distribution was interrupted"));
+		}
+	}
+
+	/** The step never holds a slicer whose constructor failed, so it removes its own files. */
+	private void removeSlicesAfterInterrupt() {
+		try {
+			close();
+		} catch (final RuntimeException e) {
+			LogUtil.exception(Level.WARN, e, "{}: failed to remove the item input slices", loadStepId);
 		}
 	}
 
@@ -246,6 +266,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 			long count = 0;
 			long nextSliceIndex = 0;
 			while (true) {
+				stopWritingIfInterrupted();
 				final int itemCount;
 				try {
 					itemCount = itemInput.get(items, batchSize);
@@ -393,10 +414,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 
 		while (true) {
 
-			// A stop or the admission barrier's deadline interrupts: no further batch is written.
-			if (Thread.currentThread().isInterrupted()) {
-				throwUncheckedIfInterrupted(new InterruptedException(loadStepId + ": item distribution was interrupted"));
-			}
+			stopWritingIfInterrupted();
 
 			// get the next batch of items
 			try {

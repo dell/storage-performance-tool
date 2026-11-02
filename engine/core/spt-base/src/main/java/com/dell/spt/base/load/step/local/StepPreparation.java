@@ -20,6 +20,7 @@ final class StepPreparation implements AdmissionPreparable.Preparation {
 	private String message = "";
 	private long endNanos;
 	private boolean released;
+	private boolean stepFailed;
 
 	StepPreparation(final long id, final long budgetNanos, final long nowNanos) {
 		if (budgetNanos <= 0) {
@@ -112,6 +113,16 @@ final class StepPreparation implements AdmissionPreparable.Preparation {
 
 	synchronized boolean released() {
 		return released;
+	}
+
+	/** Records that the step failed at the barrier, also when this slice had already opened. */
+	synchronized void markStepFailed() {
+		stepFailed = true;
+	}
+
+	/** Returns whether the step got past the barrier, so its evidence can be complete. */
+	synchronized boolean admitted() {
+		return released && !stepFailed;
 	}
 
 	synchronized PreparationStatus status(final long nowNanos) {
