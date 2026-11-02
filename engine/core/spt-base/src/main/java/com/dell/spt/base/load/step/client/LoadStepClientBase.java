@@ -1148,7 +1148,12 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		try {
 			final List<Callable<BucketMetricsReply>> fetches = new ArrayList<>(slices.size());
 			for (final LoadStep slice : slices) {
-				fetches.add(() -> slice == null ? null : slice.bucketMetrics(BucketMetricsRange.ALL));
+				fetches.add(() -> {
+					if (slice == null) {
+						throw new IllegalStateException("this node's step slice never started");
+					}
+					return slice.bucketMetrics(BucketMetricsRange.ALL);
+				});
 			}
 			final List<Future<BucketMetricsReply>> results = pool.invokeAll(fetches, BUCKET_METRICS_FETCH_SECONDS, TimeUnit.SECONDS);
 			for (int i = 0; i < results.size(); i++) {

@@ -573,8 +573,8 @@ engine version.
 ## 2.6. Bucket Metrics
 
 A step with more than one target bucket and `output-metrics-bucket-enabled` true, the default, writes two more files
-beside `metrics.total.csv`. No other file, endpoint or console output changes. A single bucket or a one-name list
-records and writes neither, so a missing file means bucket metrics were off.
+beside `metrics.total.csv`. No other file, endpoint or console output changes. A single bucket, a one-name list or a
+phase with `output-metrics-summary-persist` false records and writes neither, so a missing file means bucket metrics were off.
 
 ### 2.6.1. Files
 

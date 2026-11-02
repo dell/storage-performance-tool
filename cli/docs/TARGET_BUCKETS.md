@@ -77,7 +77,7 @@ A step with more than one target bucket also records its counts and timings per 
 | `metrics.bucket.total.csv` | The whole step |
 | `metrics.bucket.steady.total.csv` | Each bucket's own window, shifted from the aggregate's Steady-State Window |
 
-A single bucket, a one-name list and `--bucket-metrics=false` record none of this and write neither file, so a missing file means it was off. Existing files, the terminal output and the live endpoints are unchanged, and they still report totals across the set. An `--engine-override` of `output.metrics.bucket.enabled` wins over the flag.
+A single bucket, a one-name list, a phase that persists no totals such as the seed of a `read`, and `--bucket-metrics=false` record none of this and write neither file, so a missing file means it was off. Existing files, the terminal output and the live endpoints are unchanged, and they still report totals across the set. An `--engine-override` of `output.metrics.bucket.enabled` wins over the flag.
 
 **Rows.** A row is identified by `BucketKind`, `MemberIndex` and `OpType`. `BucketKind` is `member` or `catch-all`. `MemberIndex` is the bucket's place in the set, from 0, and `Bucket` is its exact name. A step has one `catch-all` row per operation type, written even when empty, for results whose bucket is not in the set, such as an items file that names another bucket. A bucket that is really named `other` is still a `member`. Rows are ordered by operation type, then member index, with the catch-all last.
 

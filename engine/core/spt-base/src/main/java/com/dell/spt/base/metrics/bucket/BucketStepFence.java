@@ -25,11 +25,13 @@ import java.util.function.LongSupplier;
  *
  * <p>An aggregate's start and end events only queue work here, so no aggregate window ever waits for
  * a bucket cut, and the metrics manager thread never copies a bucket histogram or waits. A closer
- * closes every aggregate first and then calls {@link #await}, which waits for the end passes it
- * queued under one absolute deadline, fixed when the first end pass is queued. Closers may race or
- * repeat, and all see the same outcomes. After a miss the fence is marked: late work checks that
- * mark before and between bucket sets and publishes nothing, and the closer returns without waiting
- * for the pool. Only {@link #close()}, after drain, waits for the pool, and it waits a bounded time.
+ * closes every aggregate first and then calls {@link #await}, which waits for the end passes queued
+ * for them. Each context's pass has its own absolute deadline, fixed when its window closes: contexts
+ * closed in one sweep share about the same instant, so the sweep waits once, and a sub-step that ends
+ * a minute later is not lost to an earlier one's deadline. Closers may race or repeat, and all see
+ * the same outcomes. A context past its deadline is marked: its late work checks that mark before and
+ * between bucket sets and publishes nothing, and the closer returns without waiting for the pool. Only
+ * {@link #close()}, after drain, waits for the pool, and it waits a bounded time.
  *
  * <p>A bucket window is tied to its aggregate's by those events, and is shifted later by each cut's
  * delay. Each record states its own interval and delays.
@@ -40,7 +42,7 @@ public final class BucketStepFence implements AutoCloseable {
 	public static final long DEFAULT_DEADLINE_NANOS = TimeUnit.SECONDS.toNanos(5);
 	private static final long POOL_WAIT_MILLIS = 1_000;
 	private static final int MAX_CUT_THREADS = 4;
-	private static final long UNSET = Long.MIN_VALUE;
+	private static final String DEADLINE_PASSED = "the fence deadline passed";
 	private static final ThreadLocal<ByteBuffer> ENCODE_BUFFER = new ThreadLocal<>();
 
 	private final String stepId;
@@ -51,8 +53,6 @@ public final class BucketStepFence implements AutoCloseable {
 	private final Object lock = new Object();
 	private ExecutorService pool;
 	private boolean closed;
-	private long deadlineNanos = UNSET;
-	private volatile boolean fenced;
 	private volatile IntConsumer beforeSetPass = slot -> {};
 
 	public BucketStepFence(final String stepId) {
@@ -105,46 +105,36 @@ public final class BucketStepFence implements AutoCloseable {
 	 * to call from any closer, any number of times.
 	 */
 	public void await(final Collection<ContextCuts> waitedFor) {
-		final List<CompletableFuture<BucketSteadyOutcome>> pending = new ArrayList<>();
+		final List<ContextCuts> pending = new ArrayList<>();
+		long latest = 0L;
 		for (final ContextCuts context : waitedFor) {
 			if (context.endQueued.get() && !context.outcome.isDone()) {
-				pending.add(context.outcome);
+				final long remaining = context.endDeadlineNanos - clock.getAsLong();
+				latest = Math.max(latest, remaining);
+				pending.add(context);
 			}
 		}
 		if (pending.isEmpty()) {
 			return;
 		}
-		final long deadline;
-		synchronized (lock) {
-			deadline = deadlineNanos;
-		}
 		try {
-			CompletableFuture.allOf(pending.toArray(new CompletableFuture<?>[0]))
-							.get(Math.max(0L, deadline - clock.getAsLong()), TimeUnit.NANOSECONDS);
+			CompletableFuture.allOf(pending.stream().map(context -> context.outcome).toArray(CompletableFuture<?>[]::new))
+							.get(latest, TimeUnit.NANOSECONDS);
 		} catch (final TimeoutException e) {
-			miss("the fence deadline passed");
+			expire(pending, DEADLINE_PASSED);
 		} catch (final InterruptedException e) {
 			Thread.currentThread().interrupt();
-			miss("the step was interrupted");
+			expire(pending, "the step was interrupted");
 		} catch (final ExecutionException e) {
 			// A pass's failure reaches its own outcome as unmeasured, not as an exception.
-			miss("a cut pass failed: " + e.getCause());
+			expire(pending, "a cut pass failed: " + e.getCause());
 		}
 	}
 
-	private void miss(final String reason) {
-		fenced = true;
-		final List<ContextCuts> all;
-		synchronized (lock) {
-			all = List.copyOf(contexts);
-			if (pool != null) {
-				pool.shutdownNow();
-			}
-		}
-		for (final ContextCuts context : all) {
-			if (context.startQueued.get()) {
-				context.finish(BucketSteadyOutcome.unmeasured(reason));
-			}
+	private static void expire(final List<ContextCuts> pending, final String reason) {
+		for (final ContextCuts context : pending) {
+			context.expired = true;
+			context.finish(BucketSteadyOutcome.unmeasured(reason));
 		}
 	}
 
@@ -174,7 +164,7 @@ public final class BucketStepFence implements AutoCloseable {
 	private void execute(final Runnable task) {
 		final ExecutorService executor;
 		synchronized (lock) {
-			if (closed || fenced) {
+			if (closed) {
 				throw new RejectedExecutionException("the bucket metrics cut pool has ended");
 			}
 			if (pool == null) {
@@ -188,21 +178,6 @@ public final class BucketStepFence implements AutoCloseable {
 			executor = pool;
 		}
 		executor.execute(task);
-	}
-
-	private void markDeadline() {
-		synchronized (lock) {
-			if (deadlineNanos == UNSET) {
-				deadlineNanos = clock.getAsLong() + deadlineBudgetNanos;
-			}
-		}
-	}
-
-	/** Whether the step's one deadline has passed, whether or not any closer is waiting for it. */
-	private boolean deadlinePassed() {
-		synchronized (lock) {
-			return deadlineNanos != UNSET && clock.getAsLong() - deadlineNanos > 0;
-		}
 	}
 
 	private static ByteBuffer encodeBuffer(final int capacity) {
@@ -225,6 +200,8 @@ public final class BucketStepFence implements AutoCloseable {
 		private final AtomicReferenceArray<BucketCut> startCuts;
 		private volatile long aggregateStartNanos;
 		private volatile long aggregateEndNanos;
+		private volatile long endDeadlineNanos;
+		private volatile boolean expired;
 
 		private ContextCuts(final BucketMeters meters) {
 			this.meters = meters;
@@ -258,7 +235,7 @@ public final class BucketStepFence implements AutoCloseable {
 				finish(BucketSteadyOutcome.notReached());
 				return;
 			}
-			markDeadline();
+			endDeadlineNanos = clock.getAsLong() + deadlineBudgetNanos;
 			endQueued.set(true);
 			// An end never precedes its start: it is queued when the start pass ends.
 			startDone.whenComplete((ignored, failure) -> {
@@ -270,8 +247,9 @@ public final class BucketStepFence implements AutoCloseable {
 				runPass(
 								slot -> endPass(slot, records),
 								() -> {
-									if (fenced || deadlinePassed()) {
-										finish(BucketSteadyOutcome.unmeasured("the fence deadline passed"));
+									// Whether or not a closer is waiting, as at scheduling exhaustion.
+									if (expired || clock.getAsLong() - endDeadlineNanos > 0) {
+										finish(BucketSteadyOutcome.unmeasured(DEADLINE_PASSED));
 									} else {
 										finish(BucketSteadyOutcome.measured(records.inOrder()));
 									}
@@ -308,8 +286,8 @@ public final class BucketStepFence implements AutoCloseable {
 				try {
 					int slot;
 					while ((slot = cursor.getAndIncrement()) < sets) {
-						if (fenced) {
-							throw new IllegalStateException("the fence deadline passed");
+						if (expired) {
+							throw new IllegalStateException(DEADLINE_PASSED);
 						}
 						beforeSetPass.accept(slot);
 						perSet.accept(slot);
@@ -350,8 +328,8 @@ public final class BucketStepFence implements AutoCloseable {
 							start,
 							end,
 							capacity -> encodeBuffer(capacity));
-			if (fenced) {
-				throw new IllegalStateException("the fence deadline passed");
+			if (expired) {
+				throw new IllegalStateException(DEADLINE_PASSED);
 			}
 			records.set(slot, new BucketSteadyRecord(
 							values,

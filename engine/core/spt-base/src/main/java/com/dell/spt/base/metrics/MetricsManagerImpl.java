@@ -366,7 +366,6 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		}
 	}
 
-	/** The {@code metrics.steady.total.csv} row beside the total row, with the same quantile columns. */
 	/**
 	 * Writes one operation type's rows of the step's bucket files, beside its totals, with each
 	 * file's contributor record. A failure here costs only these files, never the step's totals.
@@ -458,6 +457,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		}
 	}
 
+	/** The {@code metrics.steady.total.csv} row beside the total row, with the same quantile columns. */
 	private void writeSteadyTotalRow(
 					final MetricsContext<?> metricsCtx,
 					final SteadyResult steady,

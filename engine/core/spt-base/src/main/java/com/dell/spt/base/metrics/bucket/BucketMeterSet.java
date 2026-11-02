@@ -112,6 +112,14 @@ public final class BucketMeterSet {
 	}
 
 	BucketTerminalRecord terminalRecord(final OpType opType, final BucketKind kind, final String bucket) {
+		return terminalRecord(opType, kind, bucket, capacity -> ByteBuffer.allocate(capacity));
+	}
+
+	BucketTerminalRecord terminalRecord(
+					final OpType opType,
+					final BucketKind kind,
+					final String bucket,
+					final IntFunction<ByteBuffer> encodeBuffer) {
 		return new BucketTerminalRecord(
 						opType,
 						kind,
@@ -120,8 +128,8 @@ public final class BucketMeterSet {
 						failed.sum(),
 						corrupt.sum(),
 						bytes.sum(),
-						duration.snapshot(),
-						latency.snapshot(),
-						timeToFirstByte.snapshot());
+						duration.snapshot(encodeBuffer),
+						latency.snapshot(encodeBuffer),
+						timeToFirstByte.snapshot(encodeBuffer));
 	}
 }

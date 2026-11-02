@@ -1,8 +1,10 @@
 package com.dell.spt.base.metrics.bucket;
 
 import com.dell.spt.base.item.op.OpType;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.IntFunction;
 
 /** Every member's meter set, plus the catch-all's, for one metrics context of a step. */
 public final class BucketMeters {
@@ -49,10 +51,17 @@ public final class BucketMeters {
 	 */
 	public List<BucketTerminalRecord> terminalRecords() {
 		final List<BucketTerminalRecord> records = new ArrayList<>(sets.length);
+		final ByteBuffer[] buffer = new ByteBuffer[1];
+		final IntFunction<ByteBuffer> encodeBuffer = capacity -> {
+			if (buffer[0] == null || buffer[0].capacity() < capacity) {
+				buffer[0] = ByteBuffer.allocate(capacity);
+			}
+			return buffer[0];
+		};
 		for (int slot = 0; slot < members.size(); slot++) {
-			records.add(sets[slot].terminalRecord(opType, BucketKind.MEMBER, members.get(slot)));
+			records.add(sets[slot].terminalRecord(opType, BucketKind.MEMBER, members.get(slot), encodeBuffer));
 		}
-		records.add(sets[members.size()].terminalRecord(opType, BucketKind.CATCH_ALL, null));
+		records.add(sets[members.size()].terminalRecord(opType, BucketKind.CATCH_ALL, null, encodeBuffer));
 		return records;
 	}
 }

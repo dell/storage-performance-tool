@@ -4,8 +4,10 @@ import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshotImpl;
 import com.dell.spt.base.metrics.type.LongMeter;
 import com.dell.spt.base.metrics.type.TimingMeterImpl;
+import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.IntFunction;
 import org.HdrHistogram.AtomicHistogram;
 import org.HdrHistogram.Histogram;
 
@@ -58,6 +60,11 @@ public final class BucketTimingMeter implements LongMeter<TimingMetricSnapshot> 
 
 	@Override
 	public TimingMetricSnapshot snapshot() {
+		return snapshot(capacity -> ByteBuffer.allocate(capacity));
+	}
+
+	/** A snapshot encoded with a buffer the caller reuses, because a step reads thousands of them. */
+	TimingMetricSnapshot snapshot(final IntFunction<ByteBuffer> encodeBuffer) {
 		final long countSum = count.sum();
 		if (countSum == 0) {
 			return new TimingMetricSnapshotImpl(0, 0, 0, 0, 0, metricName);
@@ -71,6 +78,6 @@ public final class BucketTimingMeter implements LongMeter<TimingMetricSnapshot> 
 						((double) sumSum) / countSum,
 						metricName,
 						overflowCount.sum(),
-						TimingMetricSnapshotImpl.encodeHistogram(histogramCopy()));
+						TimingMetricSnapshotImpl.encodeHistogram(histogramCopy(), encodeBuffer));
 	}
 }

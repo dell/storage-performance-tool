@@ -243,6 +243,17 @@ public class TimingMetricSnapshotImpl extends NamedCountMetricSnapshotImpl
 		return Arrays.copyOf(buffer.array(), length);
 	}
 
+	/** Encodes a histogram with a buffer the caller reuses. */
+	public static byte[] encodeHistogram(final Histogram histogram, final IntFunction<ByteBuffer> encodeBuffer) {
+		if (histogram == null || histogram.getTotalCount() == 0) {
+			return new byte[0];
+		}
+		final ByteBuffer buffer = encodeBuffer.apply(histogram.getNeededByteBufferCapacity());
+		buffer.clear();
+		final int length = histogram.encodeIntoCompressedByteBuffer(buffer);
+		return Arrays.copyOf(buffer.array(), length);
+	}
+
 	/**
 	 * The statistics of the population between two copies of one histogram, encoded with a buffer
 	 * the caller reuses, because a step can encode thousands of them. Subtracts in place from

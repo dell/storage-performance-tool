@@ -397,6 +397,26 @@ class BucketRowsTest {
 	}
 
 	@Test
+	void aReplySurvivesJavaSerialization() throws Exception {
+		final var meters = meters(OpType.CREATE, 100, 200);
+		final var reply = new BucketMetricsReply(
+						STEP, "a", List.of(context(meters, measured(meters, 30_000_000_000L, 1, 2))));
+		final var bytes = new java.io.ByteArrayOutputStream();
+		try (var out = new java.io.ObjectOutputStream(bytes)) {
+			out.writeObject(reply);
+		}
+		final BucketMetricsReply back;
+		try (var in = new java.io.ObjectInputStream(new java.io.ByteArrayInputStream(bytes.toByteArray()))) {
+			back = (BucketMetricsReply) in.readObject();
+		}
+		final var rows = wholeStep(List.of(new BucketRows.Contribution("a", back, null)), new ArrayList<>());
+		assertEquals(meters.terminalRecords().get(0).succeeded(), rows.get(0).succeeded());
+		assertEquals(
+						meters.terminalRecords().get(0).duration().percentile(0.5), rows.get(0).duration().percentile(0.5));
+		assertEquals(BucketSteadyOutcome.Kind.MEASURED, back.contexts().get(0).steady().kind());
+	}
+
+	@Test
 	void aRangeSelectsTheSameMembersFromEachWorkerAndOneType() {
 		final var meters = meters(OpType.CREATE, 1, 2);
 		final var reply = new BucketMetricsReply(

@@ -356,6 +356,55 @@ class BucketStepFenceTest {
 		return context;
 	}
 
+	/** A weighted or pipeline sub-step can end long after another. Its own pass decides its rows. */
+	@Test
+	void aLaterContextIsNotLostToAnEarlierContextsDeadline() throws Exception {
+		final var stepFence = fence(SHORT_BUDGET);
+		final var first = context(stepFence);
+		final var later = context(stepFence);
+		first.onWindowStart(System.nanoTime());
+		later.onWindowStart(System.nanoTime());
+		awaitStarted(first);
+		awaitStarted(later);
+		first.onWindowClose(System.nanoTime(), true, NO_RESULT);
+		stepFence.await();
+		assertEquals(BucketSteadyOutcome.Kind.MEASURED, first.outcome().kind());
+		Thread.sleep(TimeUnit.NANOSECONDS.toMillis(SHORT_BUDGET) * 2);
+		later.onWindowClose(System.nanoTime(), true, NO_RESULT);
+		stepFence.await();
+		assertEquals(BucketSteadyOutcome.Kind.MEASURED, later.outcome().kind());
+	}
+
+	/** A miss costs the context that missed, and the pool stays usable for the ones after it. */
+	@Test
+	void aMissLeavesThePoolForLaterContexts() throws Exception {
+		final var stepFence = fence(SHORT_BUDGET);
+		final var slow = context(stepFence);
+		final CountDownLatch go = new CountDownLatch(1);
+		final AtomicInteger held = new AtomicInteger();
+		stepFence.beforeSetPass(slot -> {
+			if (held.getAndIncrement() == 0) {
+				try {
+					go.await();
+				} catch (final InterruptedException e) {
+					throw new IllegalStateException(e);
+				}
+			}
+		});
+		slow.onWindowStart(System.nanoTime());
+		slow.onWindowClose(System.nanoTime(), true, NO_RESULT);
+		stepFence.await();
+		assertEquals(BucketSteadyOutcome.Kind.UNMEASURED, slow.outcome().kind());
+		go.countDown();
+		stepFence.beforeSetPass(slot -> {});
+		final var later = context(stepFence);
+		later.onWindowStart(System.nanoTime());
+		awaitStarted(later);
+		later.onWindowClose(System.nanoTime(), true, NO_RESULT);
+		stepFence.await();
+		assertEquals(BucketSteadyOutcome.Kind.MEASURED, later.outcome().kind());
+	}
+
 	/** A closer that takes the window's fast path must find the end pass already queued. */
 	@Test
 	void aRacingCloserCannotPassTheFenceBeforeTheEndIsQueued() throws Exception {
