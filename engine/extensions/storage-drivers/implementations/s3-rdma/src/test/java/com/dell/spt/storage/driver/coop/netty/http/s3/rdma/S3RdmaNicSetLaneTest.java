@@ -37,6 +37,7 @@ import com.dell.spt.storage.driver.coop.netty.nic.NicSetSettings;
 import com.github.akurilov.confuse.Config;
 import io.netty.channel.Channel;
 import io.netty.channel.epoll.Epoll;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -47,6 +48,7 @@ import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -591,6 +593,30 @@ final class S3RdmaNicSetLaneTest {
 		run.driver().close();
 
 		assertEquals(0, transport.getCloseCount(), "the reaper is still in a native call");
+	}
+
+	/** The interrupt arrives between the stop and the close; a reaper that ends at once is not late. */
+	@Test
+	void aCloseOnAnInterruptedThreadAfterTheStopStillClosesTheNics() throws Exception {
+		final var run = started(RdmaNicLoopback.root(rdma(false, true, 1, 30_000), stub.listeners(1), NICS.subList(0, 1), 2));
+		final var transport = stub.transport(0);
+		run.driver().stop();
+		final var failure = new AtomicReference<Throwable>();
+		final var closer = new Thread(() -> {
+			Thread.currentThread().interrupt();
+			try {
+				run.driver().close();
+			} catch (final IOException | RuntimeException e) {
+				failure.set(e);
+			}
+		});
+		closer.start();
+		closer.join(TimeUnit.SECONDS.toMillis(30));
+
+		assertFalse(closer.isAlive());
+		assertNull(failure.get());
+		assertEquals(1, transport.getCloseCount());
+		assertFalse(run.driver().reaperLate);
 	}
 
 	@Test
