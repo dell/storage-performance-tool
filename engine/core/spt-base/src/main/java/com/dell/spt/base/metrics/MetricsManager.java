@@ -4,6 +4,7 @@ import com.dell.spt.base.concurrent.Task;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -31,6 +32,17 @@ public interface MetricsManager extends Task {
 	default void setTerminalRetentionMillis(long millis) {}
 
 	/** Get retained finished step entries (filtered by retention). */
+																		/**
+																		 * Records how long a step's preparation took, for its metrics rows: the Entry Node's item
+																		 * distribution, and each engine by {@code entry} or node address.
+																		 */
+	default void recordPreparation(final String stepId, final long distributionMillis, final Map<String, Long> engineMillis) {}
+
+	/** Returns the step's preparation times as a metrics row shows them, or null without a barrier. */
+	default Map<String, Object> preparation(final String stepId) {
+		return null;
+	}
+
 	default List<TerminalStepEntry> getTerminalSteps() {
 		return List.of();
 	}

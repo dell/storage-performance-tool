@@ -1022,6 +1022,20 @@
         "steady": {
           "$ref": "#/$defs/steady"
         },
+        "preparation": {
+          "type": "object",
+          "description": "How long a step with an admission barrier took to reach admission, outside its Load Interval. Present once admission has opened, on the Entry Node's rows.",
+          "required": ["distribution_ms", "engines"],
+          "properties": {
+            "distribution_ms": { "type": "integer", "minimum": 0, "description": "The Entry Node's item distribution." },
+            "engines": {
+              "type": "object",
+              "description": "Each engine's preparation, by entry or node address.",
+              "additionalProperties": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "additionalProperties": false
+        },
         "driver_stats": {
           "$ref": "#/$defs/driverStats"
         },

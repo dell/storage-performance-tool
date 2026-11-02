@@ -159,6 +159,7 @@ A step in which any engine has a NIC set, from `--interfaces` or a host override
   - `scenarioParams.Interfaces`: the requested entries;
   - `nicNodes`: each node with its host, the value it received, and `source`: `host` for a host override, `run` otherwise. A node whose value is `none` writes no NIC files, and the fetcher does not report them as missing;
   - `hostInterfaces`: the `--host-interfaces` values by host, as given;
+  - `preparation`: by step, the entry node's item distribution and each engine's preparation in milliseconds, which lie outside the Load Interval;
   - `nicEngines`: per step, each engine's report, with its node, host, number of NIC-set drivers, `driverThreads` (0 for the default), `hardwareThreads`, `eventLoopsPerNic`, `nics` and `eventLoops`. A step with several NIC-set drivers, such as a `pipeline` or `weighted` step, adds `contexts` with each driver's values, and a field the drivers disagree on is left out at the top;
   - `nicEnginesError`: why a report could not be read. The run does not fail.
 

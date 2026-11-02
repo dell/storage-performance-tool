@@ -323,6 +323,7 @@ func captureStoredDriverStats(
 			ctx, baseURL, expectedRunID, stepIDs, expectedContributorIDs,
 			len(expectedContributorIDs) == 1)
 	}
+	metadata.Preparation = preparationMetadata(observed.preparationsWith(captured), expectedContributorIDs, metadata.NicNodes)
 	if err == nil {
 		stored, err = observed.withFinal(captured, rdma)
 	}

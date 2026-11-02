@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
@@ -766,5 +767,44 @@ func TestRunMetadataWithOnlyHostInterfacesGivesTheOtherSlicesNone(t *testing.T) 
 	}
 	if !reflect.DeepEqual(metadata.NicNodes, want) {
 		t.Fatalf("nicNodes = %+v, want %+v", metadata.NicNodes, want)
+	}
+}
+
+func TestPreparationMetadataGivesEachEngineItsSliceAndHost(t *testing.T) {
+	nodes := []results.NicNode{{Node: 0, Host: "wrk1"}, {Node: 1, Host: "wrk2"}, {Node: 2, Host: "wrk3"}}
+	contributors := []string{"local", "198.51.100.12:1099", "198.51.100.13:1099"}
+	got := preparationMetadata(map[string]*results.Preparation{
+		"read1": {DistributionMillis: 3120, Engines: map[string]int64{
+			"198.51.100.13:1099": 8000, "entry": 4210, "198.51.100.12:1099": 9050, "203.0.113.9:1099": 1,
+		}},
+	}, contributors, nodes)
+	want := map[string]stepPreparation{"read1": {DistributionMillis: 3120, Engines: []preparationEngine{
+		{Node: -1, Contributor: "203.0.113.9:1099", Millis: 1},
+		{Node: 0, Host: "wrk1", Contributor: "entry", Millis: 4210},
+		{Node: 1, Host: "wrk2", Contributor: "198.51.100.12:1099", Millis: 9050},
+		{Node: 2, Host: "wrk3", Contributor: "198.51.100.13:1099", Millis: 8000},
+	}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("preparation = %+v, want %+v", got, want)
+	}
+	if got := preparationMetadata(nil, contributors, nodes); got != nil {
+		t.Fatalf("a run without a barrier records none, got %+v", got)
+	}
+}
+
+func TestDriverStatsCollectorKeepsPreparationsWhateverHappensToTheStatistics(t *testing.T) {
+	var none *driverStatsCollector
+	if got := none.preparationsWith(nil); got != nil {
+		t.Fatalf("a nil collector observed nothing, got %+v", got)
+	}
+	collector := newDriverStatsCollector(time.Now)
+	seen := &results.Preparation{DistributionMillis: 1}
+	collector.keepPreparations(map[string]*results.Preparation{"read1": seen})
+	final := &results.Preparation{DistributionMillis: 2}
+	got := collector.preparationsWith(&results.DriverStatsCapture{
+		Preparations: map[string]*results.Preparation{"write1": final},
+	})
+	if got["read1"] != seen || got["write1"] != final || len(got) != 2 {
+		t.Fatalf("preparations = %+v", got)
 	}
 }

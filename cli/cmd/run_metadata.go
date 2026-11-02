@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -60,6 +62,7 @@ type runMetadata struct {
 	DriverStatsError        string                                                  `json:"driverStatsError,omitempty"`
 	NicNodes                []results.NicNode                                       `json:"nicNodes,omitempty"`
 	HostInterfaces          map[string]string                                       `json:"hostInterfaces,omitempty"`
+	Preparation             map[string]stepPreparation                              `json:"preparation,omitempty"`
 	NicEngines              map[string][]results.NicEngine                          `json:"nicEngines,omitempty"`
 	NicEnginesError         string                                                  `json:"nicEnginesError,omitempty"`
 	StepLifecycles          map[string]string                                       `json:"stepLifecycles,omitempty"`
@@ -248,6 +251,9 @@ const (
 	nicNodeSourceHost = "host"
 )
 
+// nicEntryContributor is how the engine names the Entry Node among a step's engines.
+const nicEntryContributor = "entry"
+
 // nicNodesMetadata gives every slice its effective NIC set, in slice order: the Entry Node, then
 // the workers in the order the Entry Node was given them. A host override replaces the run's value;
 // without either, the slice's value is none, and the fetcher expects no NIC files from it. A run
@@ -276,6 +282,55 @@ func nicNodesMetadata(hostInfos []*hostparse.HostInfo, interfaces []string, over
 		nodes = append(nodes, node)
 	}
 	return nodes
+}
+
+// stepPreparation is how long a step with an admission barrier took to reach admission, which lies
+// outside its Load Interval.
+type stepPreparation struct {
+	DistributionMillis int64               `json:"distributionMillis"`
+	Engines            []preparationEngine `json:"engines"`
+}
+
+// preparationEngine is one engine's time. Node is its slice, -1 when the engine's address is not
+// one the run expected; Host is empty when the run recorded no host for that slice.
+type preparationEngine struct {
+	Node        int    `json:"node"`
+	Host        string `json:"host,omitempty"`
+	Contributor string `json:"contributor"`
+	Millis      int64  `json:"millis"`
+}
+
+// preparationMetadata gives each step's engines their slice and host, in slice order. The engine
+// names its own node entry and a worker by its address; contributorIDs lists the slices in order.
+func preparationMetadata(
+	preparations map[string]*results.Preparation, contributorIDs []string, nodes []results.NicNode,
+) map[string]stepPreparation {
+	if len(preparations) == 0 {
+		return nil
+	}
+	out := make(map[string]stepPreparation, len(preparations))
+	for stepID, preparation := range preparations {
+		if preparation == nil {
+			continue
+		}
+		engines := make([]preparationEngine, 0, len(preparation.Engines))
+		for contributor, millis := range preparation.Engines {
+			node := slices.Index(contributorIDs, contributor)
+			if contributor == nicEntryContributor {
+				node = 0
+			}
+			engine := preparationEngine{Node: node, Contributor: contributor, Millis: millis}
+			if node >= 0 && node < len(nodes) {
+				engine.Host = nodes[node].Host
+			}
+			engines = append(engines, engine)
+		}
+		slices.SortFunc(engines, func(a, b preparationEngine) int {
+			return cmp.Or(cmp.Compare(a.Node, b.Node), cmp.Compare(a.Contributor, b.Contributor))
+		})
+		out[stepID] = stepPreparation{DistributionMillis: preparation.DistributionMillis, Engines: engines}
+	}
+	return out
 }
 
 // hostInterfacesMetadata records the requested --host-interfaces values by host, as given.

@@ -118,8 +118,6 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private final List<AutoCloseable> itemOutputFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> operationLifecycleAggregators = new ArrayList<>();
 	private NicPathsCollector nicPathsCollector;
-	private volatile Map<String, Long> preparationEngineMillis;
-	private volatile long preparationDistributionMillis;
 	private final List<AutoCloseable> integrityLogFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> itemTimingMetricsOutputFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> opTraceLogFileAggregators = new ArrayList<>();
@@ -313,8 +311,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	private void openAdmissionBarrier(final AdmissionBarrier barrier) throws InterruptedException {
 		final Map<String, Long> engineMillis = barrier.awaitAndRelease();
-		preparationEngineMillis = Map.copyOf(engineMillis);
-		preparationDistributionMillis = barrier.distributionMillis();
+		metricsMgr.recordPreparation(loadStepId(), barrier.distributionMillis(), engineMillis);
 		final var slowest = engineMillis.entrySet().stream().max(Map.Entry.comparingByValue()).orElseThrow();
 		Loggers.MSG.info(
 						"Step {}: admission opened after {} s of preparation (item distribution {} s; slowest {}, {} s)",
