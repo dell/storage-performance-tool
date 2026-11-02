@@ -48,6 +48,7 @@ import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import org.apache.logging.log4j.Level;
 
@@ -105,6 +106,8 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 	long laneStopBudgetMillis = LANE_STOP_BUDGET_MILLIS;
 	/** The JVM's direct-memory limit; replaced only by tests of a short pool. */
 	long directMemoryLimitBytes = RdmaBufferPool.directMemoryLimitBytes();
+	/** Replaced only by tests of a lane that cannot start. */
+	Consumer<RdmaPreparationLane> laneStarter = RdmaPreparationLane::start;
 
 	static <I extends Item, O extends Operation<I>> S3RdmaNicSetDriver<I, O> create(
 					final String stepId,
@@ -220,17 +223,43 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		}
 		final var admission = nicPool.admission();
 		final var lanes = new ArrayList<RdmaPreparationLane>(nics.size());
+		final var startedLanes = new ArrayList<RdmaPreparationLane>(nics.size());
+		try {
+			for (var i = 0; i < nics.size(); i++) {
+				final var nic = nics.get(i);
+				lanes.add(new RdmaPreparationLane(stepId, nic, admission.limit(i), cause -> laneDied(nic, cause)));
+			}
+			for (final var lane : lanes) {
+				laneStarter.accept(lane);
+				startedLanes.add(lane);
+			}
+		} catch (final RuntimeException | Error e) {
+			abandonOpening(nics, startedLanes);
+			throw e;
+		}
 		for (var i = 0; i < nics.size(); i++) {
 			final var nic = nics.get(i);
 			final var limit = limits.get(i);
-			lanes.add(new RdmaPreparationLane(stepId, nic, admission.limit(i), cause -> laneDied(nic, cause)));
 			Loggers.MSG.info("{}: NIC {}: RDMA context on {}; pool budget {} bytes; per size class, minimum {} and headroom {} "
 							+ "of cap {} buffers; {} copy thread(s); lane queue {}",
 							stepId, nic.name, nicSet.rdmaDevice(nic.name), limit.budgetBytes(), limit.minimum(), limit.headroom(), limit.cap(),
 							rdmaConfig().getCopyThreads(), admission.limit(i));
 		}
-		lanes.forEach(RdmaPreparationLane::start);
 		return new OpenRdma(List.copyOf(nics), List.copyOf(lanes));
+	}
+
+	/** Undoes an opening whose lanes did not all start. Lanes start in NIC order, so the started ones are the first NICs'. */
+	private void abandonOpening(final List<RdmaNic> nics, final List<RdmaPreparationLane> started) {
+		started.forEach(RdmaPreparationLane::cancel);
+		final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(laneStopBudgetMillis);
+		started.forEach(lane -> lane.awaitExit(deadline));
+		for (var i = 0; i < nics.size(); i++) {
+			if (i < started.size() && !started.get(i).exited()) {
+				started.get(i).closeWhenDone();
+			} else {
+				nics.get(i).close();
+			}
+		}
 	}
 
 	private RdmaNic openNic(final int index, final NicSetLayout.Nic nic, final RdmaNicPoolLimits limits) {
@@ -388,17 +417,22 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 	}
 
 	private void stopAdmittedWork() {
-		nicPool.closeAdmission();
+		// Lanes first: closing admission fails waiting attempts on this thread, and without a pool each one
+		// deregisters its buffer, a native call that cannot be interrupted.
 		final var open = rdma;
 		if (open != null) {
 			open.lanes().forEach(RdmaPreparationLane::cancel);
 		}
+		nicPool.closeAdmission();
 	}
 
 	/**
 	 * Item 12b: admission is closed; every lane is cancelled at once and waited for against one budget;
 	 * then per NIC, the pool and the context close. A lane past the budget is in a call that cannot be
-	 * interrupted: it keeps its NIC open and closes it when the call returns.
+	 * interrupted: it keeps its NIC open and closes it when the call returns. If an I/O worker or the
+	 * reaper outlasted the stop, it can still be in a native call or building a request, so every NIC
+	 * and every unfinished attempt's buffer stay as they are until the process ends: a leak in a rare
+	 * case, rather than a closed context or a deregistered buffer in use.
 	 */
 	@Override
 	void closeRdmaResources() {
@@ -417,13 +451,23 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		open.lanes().forEach(RdmaPreparationLane::cancel);
 		final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(laneStopBudgetMillis);
 		open.lanes().forEach(lane -> lane.awaitExit(deadline));
-		releaseLeakedContexts();
+		final boolean workersLate = reaperLate || Boolean.FALSE.equals(ioStoppedInTime());
+		if (!workersLate) {
+			releaseLeakedContexts();
+		}
 		for (var i = 0; i < open.nics().size(); i++) {
 			final var nic = open.nics().get(i);
 			final var lane = open.lanes().get(i);
 			Loggers.MSG.info("{}: nic={}: RDMA data path summary (transport {}): {}{}", stepId, nic.name,
 							nic.transport.isAvailable() ? "available" : "unavailable", nic.stats.summary(), nic.poolSummary());
-			if (lane.exited()) {
+			if (workersLate) {
+				if (lane.exited()) {
+					lane.drain();
+				}
+				Loggers.MSG.warn("{}: NIC {}: an I/O worker or the RDMA reaper did not stop in time and may still use this NIC's RDMA "
+								+ "resources; its pool, its context and its unfinished attempts' buffers stay open until the process ends",
+								stepId, nic.name);
+			} else if (lane.exited()) {
 				lane.drain();
 				nic.close();
 			} else {

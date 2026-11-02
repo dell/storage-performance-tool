@@ -14,6 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -544,6 +545,72 @@ final class S3RdmaNicSetLaneTest {
 		assertEquals(0, stub.transport(0).getActiveRegistrationsAtClose(), "nothing stayed registered");
 		assertEquals(0, run.driver().activeOpCount());
 		assertTrue(stub.objectRequests().isEmpty());
+	}
+
+	/**
+	 * Without a pool a completion deregisters on the event loop; one held there outlasts the stop's wait.
+	 * It may still use its NIC, and another worker may be building a request from an unfinished attempt's
+	 * token, so neither the context nor that attempt's buffer goes away.
+	 */
+	@Test
+	void aNicAndItsUnfinishedAttemptsStayWhileAnEventLoopOutlastsTheStop() throws Exception {
+		final var run = started(RdmaNicLoopback.root(rdma(false, false, 1), stub.listeners(1), NICS.subList(0, 1), 2));
+		final var transport = stub.transport(0);
+		stub.hold(request -> request.path().contains("unfinished"));
+		assertTrue(run.driver().put(op(OpType.READ, "unfinished")));
+		waitFor(() -> stub.objectRequests().size() == 1, "the unfinished attempt reaches the stub");
+		final var entered = new CountDownLatch(1);
+		final var release = hold();
+		final var first = new AtomicBoolean(true);
+		transport.setBeforeDeregister(() -> {
+			if (first.getAndSet(false)) {
+				enterAndAwait(entered, release);
+			}
+		});
+		assertTrue(run.driver().put(op(OpType.READ, "held-on-the-event-loop")));
+		assertTrue(entered.await(10, TimeUnit.SECONDS));
+
+		run.driver().close();
+
+		assertEquals(0, transport.getCloseCount(), "the event loop is still in a native call");
+		assertEquals(0, transport.getDeregisterCount(), "the unfinished attempt's buffer stays registered");
+	}
+
+	/** The reaper deregisters a timed-out attempt's buffer; one held there outlasts its own wait. */
+	@Test
+	void aNicStaysOpenWhileTheReaperOutlastsItsWait() throws Exception {
+		final var run = started(RdmaNicLoopback.root(rdma(false, false, 1, 300), stub.listeners(1), NICS.subList(0, 1), 2));
+		final var transport = stub.transport(0);
+		stub.hold();
+		final var entered = new CountDownLatch(1);
+		final var release = hold();
+		transport.setBeforeDeregister(() -> enterAndAwait(entered, release));
+		assertTrue(run.driver().put(op(OpType.READ, "timed-out")));
+		assertTrue(entered.await(10, TimeUnit.SECONDS));
+
+		run.driver().close();
+
+		assertEquals(0, transport.getCloseCount(), "the reaper is still in a native call");
+	}
+
+	@Test
+	void aLaneThatCannotStartClosesEveryContextAndEndsTheLanesStarted() throws Exception {
+		final var run = started(stub.listeners(2), 2, 4);
+		final var attempted = new ArrayList<RdmaPreparationLane>();
+		run.driver().laneStarter = lane -> {
+			attempted.add(lane);
+			if (attempted.size() == 2) {
+				throw new OutOfMemoryError("unable to create native thread");
+			}
+			lane.start();
+		};
+
+		assertThrows(OutOfMemoryError.class, () -> run.driver().openRdma());
+
+		assertEquals(2, attempted.size());
+		assertTrue(attempted.get(0).exited(), "the lane that started has ended");
+		assertEquals(1, stub.transport(0).getCloseCount());
+		assertEquals(1, stub.transport(1).getCloseCount());
 	}
 
 	@Test
