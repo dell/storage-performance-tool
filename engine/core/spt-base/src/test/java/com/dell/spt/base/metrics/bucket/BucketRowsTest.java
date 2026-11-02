@@ -84,7 +84,7 @@ class BucketRowsTest {
 		assertEquals(all.getTotalCount(), duration.count());
 		assertEquals(all.getValueAtPercentile(50), duration.percentile(0.5));
 		assertEquals(all.getValueAtPercentile(99), duration.percentile(0.99));
-		assertEquals(all.getMaxValue(), duration.max());
+		assertEquals(1_020_000, duration.max(), "the exact maximum, not the histogram's rounded one");
 	}
 
 	@Test
@@ -244,6 +244,8 @@ class BucketRowsTest {
 	}
 
 	private static final List<Double> QUANTILES = List.of(0.25, 0.5, 0.75);
+	/** Commas outside quotes: the date cell is quoted and holds one, as in the total file. */
+	private static final String CELL_SEPARATOR = ",(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)";
 
 	@Test
 	void theHeadersAreTheAuthoritativeOnes() {
@@ -265,7 +267,7 @@ class BucketRowsTest {
 		final int wholeColumns = MetricsBucketCsvLogMessage.header(QUANTILES, false).split(",").length;
 		final int steadyColumns = MetricsBucketCsvLogMessage.header(QUANTILES, true).split(",").length;
 		for (final var row : wholeStep(List.of(node("a", context(meters, null))), new ArrayList<>())) {
-			assertEquals(wholeColumns, MetricsBucketCsvLogMessage.row(row, QUANTILES).split(",", -1).length);
+			assertEquals(wholeColumns, MetricsBucketCsvLogMessage.row(row, QUANTILES).split(CELL_SEPARATOR, -1).length);
 		}
 		final List<List<BucketRows.Row>> steadySets = List.of(
 						steady(List.of(node("a", context(meters, measured(meters, 30_000_000_000L, 0, 0)))), aggregate(100.0)),
@@ -273,7 +275,7 @@ class BucketRowsTest {
 						steady(List.of(node("a", context(meters, BucketSteadyOutcome.notReached()))), aggregate(100.0)));
 		for (final var rows : steadySets) {
 			for (final var row : rows) {
-				assertEquals(steadyColumns, MetricsBucketCsvLogMessage.row(row, QUANTILES).split(",", -1).length);
+				assertEquals(steadyColumns, MetricsBucketCsvLogMessage.row(row, QUANTILES).split(CELL_SEPARATOR, -1).length);
 			}
 		}
 	}
@@ -281,8 +283,8 @@ class BucketRowsTest {
 	@Test
 	void aMemberAndTheCatchAllRoundTripAsDistinctIdentities() {
 		final var rows = wholeStep(List.of(node("a", context(meters(OpType.CREATE, 1), null))), new ArrayList<>());
-		final String[] member = MetricsBucketCsvLogMessage.row(rows.get(0), QUANTILES).split(",", -1);
-		final String[] catchAll = MetricsBucketCsvLogMessage.row(rows.get(2), QUANTILES).split(",", -1);
+		final String[] member = MetricsBucketCsvLogMessage.row(rows.get(0), QUANTILES).split(CELL_SEPARATOR, -1);
+		final String[] catchAll = MetricsBucketCsvLogMessage.row(rows.get(2), QUANTILES).split(CELL_SEPARATOR, -1);
 		assertEquals("member", member[1]);
 		assertEquals("0", member[2]);
 		assertEquals("other", member[3]);
