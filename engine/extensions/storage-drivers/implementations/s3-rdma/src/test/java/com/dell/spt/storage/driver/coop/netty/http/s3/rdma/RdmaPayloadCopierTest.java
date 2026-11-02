@@ -623,4 +623,13 @@ class RdmaPayloadCopierTest {
 		}
 		assertTrue(copier.shutdown(), "a copy on the calling thread alone is not tracked");
 	}
+
+	@Test
+	void aChunksLimitCannotOverflowNearTheLargestBuffer() {
+		assertEquals(Integer.MAX_VALUE,
+						RdmaPayloadCopier.chunkLimit(Integer.MAX_VALUE - 10, Integer.MAX_VALUE));
+		assertEquals(RdmaPayloadCopier.PART_BYTES,
+						RdmaPayloadCopier.chunkLimit(0, Integer.MAX_VALUE));
+		assertEquals(10, RdmaPayloadCopier.chunkLimit(5, 10));
+	}
 }

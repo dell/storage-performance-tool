@@ -207,6 +207,11 @@ final class RdmaPayloadCopier implements AutoCloseable {
 		}
 	}
 
+	/** The end of the next chunk. It stays within {@code limit}, so it cannot overflow near the largest buffer. */
+	static int chunkLimit(final int position, final int limit) {
+		return position + Math.min(limit - position, PART_BYTES);
+	}
+
 	/** Fills one part of a split copy; unlike {@link #fill}, it gives up once the copier is shut down. */
 	private void fillPart(final DataItem part, final ByteBuffer window, final int size) throws IOException {
 		final int limit = window.limit();
@@ -216,7 +221,7 @@ final class RdmaPayloadCopier implements AutoCloseable {
 				throw new StoppedException();
 			}
 			if (stoppable) {
-				window.limit(Math.min(limit, window.position() + PART_BYTES));
+				window.limit(chunkLimit(window.position(), limit));
 			}
 			final int bytesRead = part.read(window);
 			if (bytesRead < 0) {

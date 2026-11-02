@@ -58,9 +58,10 @@ public class FakeRdmaTransport extends RdmaTransport {
 	/** The DC target number tokens carry; a NIC's fake sets its own. */
 	private volatile int dctn = 0x00133f;
 
-	/** Runs inside registerBuffer() and generateToken(), to hold a caller there. */
+	/** Runs inside registerBuffer(), generateToken() and deregisterBuffer(), to hold a caller there. */
 	private volatile Runnable beforeRegister = () -> {};
 	private volatile Runnable beforeToken = () -> {};
+	private volatile Runnable beforeDeregister = () -> {};
 	private final AtomicInteger callsInFlight = new AtomicInteger();
 	private final AtomicInteger closes = new AtomicInteger();
 	private volatile boolean closedDuringCall;
@@ -138,15 +139,21 @@ public class FakeRdmaTransport extends RdmaTransport {
 
 	@Override
 	public void deregisterBuffer(final ByteBuffer buffer, final long mrHandle) {
-		if (mrHandle != 0 && !deregisteredHandles.add(mrHandle)) {
-			// Handle was already deregistered — this is a double-free bug
-			if (strictDeregister) {
-				throw new IllegalStateException(
-								"Double deregister detected for handle " + mrHandle);
+		callsInFlight.incrementAndGet();
+		try {
+			beforeDeregister.run();
+			if (mrHandle != 0 && !deregisteredHandles.add(mrHandle)) {
+				// Handle was already deregistered — this is a double-free bug
+				if (strictDeregister) {
+					throw new IllegalStateException(
+									"Double deregister detected for handle " + mrHandle);
+				}
 			}
+			activeRegistrations.remove(mrHandle);
+			deregisterCount.incrementAndGet();
+		} finally {
+			callsInFlight.decrementAndGet();
 		}
-		activeRegistrations.remove(mrHandle);
-		deregisterCount.incrementAndGet();
 	}
 
 	@Override
@@ -227,6 +234,10 @@ public class FakeRdmaTransport extends RdmaTransport {
 	}
 
 	/** Runs in each generateToken() call, before it makes the token. */
+	public void setBeforeDeregister(final Runnable action) {
+		this.beforeDeregister = action;
+	}
+
 	public void setBeforeToken(final Runnable action) {
 		this.beforeToken = action;
 	}
