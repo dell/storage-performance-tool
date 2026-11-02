@@ -187,6 +187,17 @@ class S3TargetBucketControlTest {
 	}
 
 	@Test
+	void controlRequestsPlanNoNicSet() throws Exception {
+		final Config config = S3StorageDriverTest.baseConfig(false, 4, false, null, "127.0.0.1");
+		config.val("storage-net-interfaces", List.of("ens2np0", "ens2np1"));
+		final var control = S3TargetBucketControl.controlConfig(config.configVal("storage"));
+
+		assertEquals(List.of(), control.listVal("net-interfaces"), "control requests take the kernel route");
+		assertEquals(List.of("ens2np0", "ens2np1"), config.listVal("storage-net-interfaces"),
+						"the step configuration is not modified");
+	}
+
+	@Test
 	void roundRobinControlRequestsUseTheLogicalHostname() throws Exception {
 		final var hosts = new CopyOnWriteArrayList<String>();
 		final var server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);

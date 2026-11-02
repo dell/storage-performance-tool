@@ -441,7 +441,7 @@ class NettyStorageDriverBaseTest {
 		}
 	}
 
-	private static Config storageConfig(final int concurrencyLimit) {
+	static Config storageConfig(final int concurrencyLimit) {
 		final var storageConfig = mock(Config.class);
 		final var driverConfig = mock(Config.class);
 		final var limitConfig = mock(Config.class);

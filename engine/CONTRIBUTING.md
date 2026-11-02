@@ -137,6 +137,29 @@ We follow conventional commits format:
 ./gradlew test -d  # debug level
 ```
 
+#### Network-namespace tests
+
+The S3 driver's NIC-set tests (JUnit tag `netns`) bind connections to real NICs: two veth
+pairs on one subnet in a network namespace, with stub S3 endpoints in a second one. They need
+`NET_ADMIN` and `SYS_ADMIN` over their namespace, so `./gradlew test` leaves them out. Run
+them without root through an unprivileged user namespace:
+
+```bash
+tools/netns-test.sh
+tools/netns-test.sh aBlackHoledPathLeavesTheHealthyPathsServing   # chosen test methods
+```
+
+The script needs unprivileged user namespaces, `iproute2`, `util-linux` and JDK 21. It drops
+`CAP_NET_RAW`, as a non-root process lacks it. Gradle only compiles the tests: it cannot run
+inside the namespace beside other Gradle processes, so one JVM runs them there and prints a
+summary instead of a Gradle report. Where unprivileged user namespaces are
+restricted (Ubuntu 24.04 restricts them through AppArmor), run the `netnsTest` task as root in
+a container, as the `engine-netns` job in `.github/workflows/ci.yml` does: the container needs
+`--cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-drop NET_RAW` and that job's three `--sysctl`
+settings, because its `/proc/sys` is read-only.
+
+A missing capability or tool fails the tests with what to change; they never skip.
+
 ### Writing Tests
 
 - All new features should include tests

@@ -77,6 +77,7 @@ func (r *Renderer) FullReport(summary *RunSummary) string {
 	r.renderDeleteDetails(b, summary)
 	r.renderIntegrity(b, summary)
 	r.renderRangeRead(b, summary)
+	r.renderNicPaths(b, summary, 0)
 	r.renderMixedBreakdowns(b, summary)
 	r.renderTotals(b, summary)
 	r.renderArtifactsAndWarnings(b, summary)
@@ -213,6 +214,7 @@ func (r *Renderer) CompactSnippet(summary *RunSummary) string {
 	r.renderRDMADataPath(sb, summary, wrapWidth)
 	r.renderIntegrity(sb, summary)
 	r.renderRangeRead(sb, summary)
+	r.renderNicPaths(sb, summary, wrapWidth)
 	r.renderCompactMixedBreakdowns(sb, summary)
 	fmt.Fprintf(sb, "Totals: duration %s, data moved %s\n", summary.Totals.DurationHuman, formatBytesHuman(summary.Totals.DataBytes))
 	if len(summary.Warnings) > 0 {
@@ -434,6 +436,10 @@ func (r *Renderer) renderWorkload(b *strings.Builder, summary *RunSummary) {
 	}
 	if len(work.Endpoints) > 0 {
 		r.writeBullet(b, "Endpoints", strings.Join(work.Endpoints, ", "))
+	}
+	if len(work.Interfaces) > 0 {
+		r.writeBullet(b, "Interfaces", strings.Join(work.Interfaces, ","))
+		r.writeBullet(b, "Event loops", work.EventLoops)
 	}
 	if n := len(work.BucketSet); n > 1 {
 		r.writeBullet(b, "Buckets", fmt.Sprintf("%d (%s ... %s)", n, work.BucketSet[0], work.BucketSet[n-1]))
@@ -907,6 +913,14 @@ func collectIncompleteSteps(summary *RunSummary) []string {
 	for _, step := range summary.Steps {
 		if len(step.MissingRequired) > 0 {
 			out = append(out, fmt.Sprintf("%s missing required artifacts: %s", step.StepID, strings.Join(step.MissingRequired, ", ")))
+		}
+		if step.NicPaths != nil && len(step.NicPaths.Missing) > 0 {
+			out = append(out, fmt.Sprintf("%s missing NIC paths files: %s", step.StepID,
+				strings.Join(missingNicNodes(step.NicPaths.Missing, ", "), "; ")))
+		}
+		if len(step.NicSetMissing) > 0 {
+			out = append(out, fmt.Sprintf("%s missing NIC-set reports: %s", step.StepID,
+				strings.Join(missingNicNodes(step.NicSetMissing, ", "), "; ")))
 		}
 	}
 	return out

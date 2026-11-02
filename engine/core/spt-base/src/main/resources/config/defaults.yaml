@@ -205,6 +205,10 @@ storage:
     endpoint:
       # default, round-robin or per-request-dns; non-default modes require the Netty s3 driver
       selection: default
+    # Client NICs the s3 driver binds its connections to: [] keeps the kernel's route, [auto] picks
+    # them, or list interface names, their IPv4 addresses or RDMA devices. Each engine resolves the
+    # value on its own host when the step starts.
+    interfaces: []
     node:
       slice: false
   # Before a step starts, the controller engine checks its S3 target buckets and creates a missing

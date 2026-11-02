@@ -36,7 +36,14 @@ const (
 	failureInvalidArtifactLink       = "invalid_artifact_link"
 	failureReplayDefaultsGeneration  = "replay_defaults_generation_error"
 	failureInvalidEndpointSelection  = "invalid_endpoint_selection"
+	failureInvalidInterfaces         = "invalid_interfaces"
 )
+
+// InvalidInterfacesError classifies a rejected --interfaces value, for the checks that run before
+// Generate.
+func InvalidInterfacesError(err error) error {
+	return newClassifiedError(failureInvalidInterfaces, err.Error(), err)
+}
 
 // ClassifiedError wraps replay errors with a stable failure class.
 type ClassifiedError struct {

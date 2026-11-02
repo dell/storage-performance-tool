@@ -177,6 +177,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	loadStepNumber := 0
 	waitNumber := 0
 	archived := &ArchivedEndpointSelection{}
+	nicSettings := &archivedNicSettings{}
 	for i, step := range legacySteps {
 		stepType := strings.ToLower(strings.TrimSpace(step.Type))
 		switch stepType {
@@ -184,6 +185,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 			loadStepNumber++
 			step.Config = mergeConfig(legacy.Config, step.Config)
 			archivedEndpointSelectionFromConfig(step.Config, effectiveVars, archived)
+			nicSettings.fromJSONConfig(step.Config)
 			converted, err := convertLoadStep(step, i, loadStepNumber, label, baseTS, bucket, opts, effectiveVars, runScript.Exports, archiveToStepID, itemVars, &itemVarOrder)
 			if err != nil {
 				diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: err.Error()})
@@ -243,6 +245,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	if len(stepsOut) == 0 {
 		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "scenario contains no load steps"})
 	}
+	diagnostics = append(diagnostics, nicSettings.diagnostics()...)
 	pathRewrites = uniquePathRewrites(pathRewrites)
 	diagnostics = normalizeDiagnostics(diagnostics)
 	if hasErrors(diagnostics) {
@@ -592,7 +595,7 @@ func ignoredJSONConfigPaths(config map[string]any) []string {
 	ignored := map[string]struct{}{}
 	for _, path := range leaves {
 		switch {
-		case isModeledJSONConfigPath(path):
+		case isModeledJSONConfigPath(path), isArchivedNicSettingPath(path):
 			continue
 		case hasJSONConfigPathPrefix(path, "item.naming"):
 			ignored["item.naming"] = struct{}{}

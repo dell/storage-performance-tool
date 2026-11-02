@@ -59,7 +59,7 @@ test {
     exclude "com/dell/spt/perf/*"
     exclude "**/*PerfTest.*"
     useJUnitPlatform {
-        excludeTags 'integration', 'perf', 'slow'
+        excludeTags 'integration', 'perf', 'slow', 'netns'
         if (project.hasProperty('includeTags')) {
             includeTags project.property('includeTags').toString().split(',') as String[]
         }
