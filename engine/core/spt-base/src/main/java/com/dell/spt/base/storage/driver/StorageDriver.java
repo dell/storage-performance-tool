@@ -222,7 +222,7 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 				if (!(selectedFactory instanceof NicSetDriverFactory<?, ?, ?>)) {
 					throw new IllegalConfigurationException(
 									"storage.net.interfaces is not supported by the storage driver type \"" + driverType
-													+ "\"; use the Netty s3 driver");
+													+ "\"; use the Netty s3 or s3-rdma driver");
 				}
 				NicSetConfig.requireNoRdmaAddress(storageConfig);
 			}
