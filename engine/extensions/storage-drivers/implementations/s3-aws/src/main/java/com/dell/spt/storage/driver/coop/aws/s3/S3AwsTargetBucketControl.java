@@ -35,6 +35,9 @@ final class S3AwsTargetBucketControl implements TargetBucketControl {
 	/** The wait bound when {@code storage.crt.requestTimeoutMs} is 0. */
 	static final Duration UNBOUNDED_REQUEST_REPLACEMENT = Duration.ofSeconds(30);
 
+	/** How every message of the SDK's client-side bucket naming check begins. */
+	private static final String SDK_NAMING_RULE_PREFIX = "Bucket name ";
+
 	private final S3AsyncClient client;
 	private final String region;
 	private final String endpoint;
@@ -86,10 +89,19 @@ final class S3AwsTargetBucketControl implements TargetBucketControl {
 		}
 	}
 
-	/** Classifies a failed request without exposing SDK messages, which may name the endpoint. */
+	/**
+	 * Classifies a failed request without exposing SDK messages, which may name the endpoint. The one
+	 * exception is the SDK's client-side bucket naming check: it refuses a CreateBucket for a name
+	 * that breaks the AWS naming rules before sending anything, whatever the target accepts, and its
+	 * message states only the rule.
+	 */
 	static TargetBucketResponse classify(final Throwable failure) {
 		if (failure instanceof NoSuchBucketException) {
 			return TargetBucketResponse.notFound();
+		}
+		if (failure instanceof IllegalArgumentException && failure.getMessage() != null
+						&& failure.getMessage().startsWith(SDK_NAMING_RULE_PREFIX)) {
+			return TargetBucketResponse.failed("the AWS SDK refused the name: " + failure.getMessage());
 		}
 		if (failure instanceof S3Exception s3Failure && s3Failure.statusCode() > 0) {
 			return TargetBucketResponse.ofHttpStatus(s3Failure.statusCode());

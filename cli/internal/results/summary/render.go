@@ -441,7 +441,9 @@ func (r *Renderer) renderWorkload(b *strings.Builder, summary *RunSummary) {
 		r.writeBullet(b, "Interfaces", strings.Join(work.Interfaces, ","))
 		r.writeBullet(b, "Event loops", work.EventLoops)
 	}
-	if work.Bucket != "" {
+	if n := len(work.BucketSet); n > 1 {
+		r.writeBullet(b, "Buckets", fmt.Sprintf("%d (%s ... %s)", n, work.BucketSet[0], work.BucketSet[n-1]))
+	} else if work.Bucket != "" {
 		r.writeBullet(b, "Bucket", work.Bucket)
 	}
 	if isList {

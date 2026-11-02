@@ -214,6 +214,13 @@ step with `item.input.path` or `item.input.file`, a pipeline CREATE sub-step aft
 mixed step with `item.input.path`, and expressions after the bucket in `item.output.path`; an initialization expression in the
 bucket segment is evaluated once before the suffix is added.
 
+`storage.targetBucket.names` (default empty, at most `1000`) names the members instead of
+generating them, for buckets configured in advance. Member `i` is the `i`-th name, the bucket
+segment of `item.output.path` is a placeholder, and placement, checks, creation and the rejections
+above are the same. Names are used as written. Each must be unique and must not be empty or contain
+`/`, `,`, `%`, `\`, `?`, `#`, `{`, `}`, whitespace or a control character. A list cannot be combined
+with a count above `1`, and a list of one name is that single bucket.
+
 ```bash
 java -jar spt-base-<VERSION>.jar \
     --storage-driver-type=s3 \

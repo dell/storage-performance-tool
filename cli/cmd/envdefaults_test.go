@@ -54,6 +54,7 @@ func clearEnvDefaultsTestEnv(t *testing.T) {
 		"S3_ACCESS_KEY",
 		"S3_SECRET_KEY",
 		"S3_BUCKET",
+		constants.EnvS3Buckets,
 		"HOSTS",
 		"THREADS",
 		constants.EnvInterfaces,

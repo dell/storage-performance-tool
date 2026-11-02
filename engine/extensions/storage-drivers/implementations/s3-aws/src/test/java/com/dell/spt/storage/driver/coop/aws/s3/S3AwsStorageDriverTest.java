@@ -3554,19 +3554,79 @@ public class S3AwsStorageDriverTest {
 	@Nested
 	class TargetBucketSetRoutingTest {
 
+		/** A listed set, whose names no generated set could contain. */
+		private final List<String> listed = com.dell.spt.base.storage.driver.bucket.TargetBucketSet.memberPaths(
+						"/placeholder/prefix", 4, List.of("ps-eu", "PS_US", "ps-ap", "ps-sa"));
+
+		private Operation<Item> build(final OpType opType, final DataItem item, final long sizeThreshold) throws Exception {
+			return build(opType, item, sizeThreshold,
+							com.dell.spt.base.storage.driver.bucket.TargetBucketSet.memberPaths("/bench/prefix", 4));
+		}
+
 		@SuppressWarnings({"rawtypes", "unchecked"
 		})
-		private Operation<Item> build(final OpType opType, final DataItem item, final long sizeThreshold) throws Exception {
+		private Operation<Item> build(
+						final OpType opType, final DataItem item, final long sizeThreshold, final List<String> members)
+						throws Exception {
 			final var builder = new com.dell.spt.base.item.op.data.DataOperationsBuilderImpl(0);
 			builder.opType(opType);
 			builder.credentialInput(null);
 			builder.sizeThreshold(sizeThreshold);
 			if (OpType.CREATE.equals(opType)) {
 				builder.outputPathInput(new com.dell.spt.base.config.ConstantValueInputImpl<>("/bench/prefix"));
-				builder.targetBucketMembers(
-								com.dell.spt.base.storage.driver.bucket.TargetBucketSet.memberPaths("/bench/prefix", 4), 0);
+				builder.targetBucketMembers(members, 0);
 			}
 			return (Operation<Item>) builder.buildOp(item);
+		}
+
+		@Test
+		void objectAndMultipartRequestsResolveTheListedBucketAsWritten() throws Exception {
+			final var create = build(OpType.CREATE, new DataItemImpl("k5", 5, 1024), Long.MAX_VALUE, listed);
+			assertArrayEquals(new String[]{"PS_US", "prefix/k5"
+			}, drv.resolveBucketAndKey(create));
+			final var recorded = (DataItem) create.result().item();
+			assertEquals("/PS_US/prefix/k5", recorded.name());
+			for (final var opType : List.of(OpType.READ, OpType.UPDATE, OpType.DELETE)) {
+				final var existing = build(opType, new DataItemImpl(recorded.name(), recorded.offset(), 1024),
+								Long.MAX_VALUE, listed);
+				assertArrayEquals(new String[]{"PS_US", "prefix/k5"
+				}, drv.resolveBucketAndKey(existing), opType.name());
+			}
+			final var multipart = build(OpType.CREATE, new DataItemImpl("big", 6, 3000), 1024, listed);
+			final var composite = assertInstanceOf(CompositeDataOperation.class, multipart);
+			assertArrayEquals(new String[]{"ps-ap", "prefix/big"
+			}, drv.resolveBucketAndKey(multipart));
+			for (final Object part : composite.subOperations()) {
+				final var partial = (PartialDataOperation) part;
+				assertArrayEquals(new String[]{"ps-ap", "prefix/big"
+				}, drv.resolveBucketAndKey((Operation<Item>) partial.parent()));
+				assertEquals("/ps-ap/prefix", partial.dstPath(), "a part keeps its parent's listed bucket");
+			}
+		}
+
+		@Test
+		@SuppressWarnings("unchecked")
+		void putAndDeleteRequestsCarryTheListedBucketAsWritten() throws Exception {
+			when(mockS3Client.putObject(any(PutObjectRequest.class), any(AsyncRequestBody.class)))
+							.thenReturn(CompletableFuture.completedFuture(PutObjectResponse.builder().build()));
+			when(mockS3Client.deleteObject(any(DeleteObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(
+											software.amazon.awssdk.services.s3.model.DeleteObjectResponse.builder().build()));
+			final DataItem item = new DataItemImpl("k5", 5, 4);
+			item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4MB"), 1, false));
+			final var create = build(OpType.CREATE, item, Long.MAX_VALUE, listed);
+
+			drv.execute(create).join();
+			drv.execute(build(OpType.DELETE, new DataItemImpl("/PS_US/prefix/k5", 5, 4), Long.MAX_VALUE)).join();
+
+			final ArgumentCaptor<PutObjectRequest> put = ArgumentCaptor.forClass(PutObjectRequest.class);
+			verify(mockS3Client).putObject(put.capture(), any(AsyncRequestBody.class));
+			assertEquals("PS_US", put.getValue().bucket());
+			assertEquals("prefix/k5", put.getValue().key());
+			final ArgumentCaptor<DeleteObjectRequest> delete = ArgumentCaptor.forClass(DeleteObjectRequest.class);
+			verify(mockS3Client).deleteObject(delete.capture());
+			assertEquals("PS_US", delete.getValue().bucket());
+			assertEquals("prefix/k5", delete.getValue().key());
 		}
 
 		@Test

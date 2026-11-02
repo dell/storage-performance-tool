@@ -35,7 +35,7 @@ On startup, spt loads environment variables from `$HOME/.env` and then from `./.
 
 You can use these variables to avoid repeating sensitive or commonly used parameters:
 
-- **S3 connection:** `S3_ENDPOINTS` (CSV) or `S3_ENDPOINT` (single), `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`
+- **S3 connection:** `S3_ENDPOINTS` (CSV) or `S3_ENDPOINT` (single), `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKETS` (CSV, as `--buckets`) or `S3_BUCKET` (single)
 - **Authentication:** `S3_AUTH_VERSION` (set to `2` only for legacy targets; default `4`)
 - **Hosts:** `HOSTS` (comma-separated list of `[user@]host`)
 - **NICs:** `SPT_INTERFACES` (each engine's NIC set, as `--interfaces`)
@@ -51,7 +51,7 @@ You can use these variables to avoid repeating sensitive or commonly used parame
 
 Variable expansion: use `$VAR` or `${VAR}`. Command substitutions like `$(pwd)` are not supported; use `$PWD` instead.
 
-**Precedence:** CLI flags > OS environment > `./.env` > `$HOME/.env` > built-in defaults. For endpoints specifically: `--endpoints` > `S3_ENDPOINTS` > `S3_ENDPOINT`.
+**Precedence:** CLI flags > OS environment > `./.env` > `$HOME/.env` > built-in defaults. For endpoints specifically: `--endpoints` > `S3_ENDPOINTS` > `S3_ENDPOINT`. For target buckets: `--buckets` or `--buckets-file` ignores both variables; `--bucket` or `--bucket-count` ignores `S3_BUCKETS`, and `S3_BUCKET` still supplies a missing `--bucket`; with no bucket flag, `S3_BUCKETS` wins over `S3_BUCKET`, and spt prints a line saying so when both are set. `spt replay` reads only `S3_BUCKET`.
 
 ---
 
@@ -88,8 +88,10 @@ Required for S3 workloads, optional/ignored for `mock`.
 | `--provision-target-bucket` | | `true` | Create a missing target bucket before the phase that writes the run's objects. `false` still checks that every target bucket exists and is accessible. Never clears or deletes a bucket. See [Target Buckets](TARGET_BUCKETS.md) |
 | `--access-key` | `-a` | *(required)* | S3 access key credential |
 | `--secret-key` | `-s` | *(required)* | S3 secret key credential |
-| `--bucket` | `-b` | *(required)* | Target bucket to use for the test. In explicit-manifest DELETE mode it is an optional safety assertion checked against every source row; omit it to permit multiple buckets |
+| `--bucket` | `-b` | *(required unless a list names the buckets)* | Target bucket to use for the test. In explicit-manifest DELETE mode it is an optional safety assertion checked against every source row; omit it to permit multiple buckets |
 | `--bucket-count` | | `1` | Spread the run's new objects over `N` buckets `<bucket>-0` ... `<bucket>-<N-1>` (1 to 1000). Existing objects keep the bucket their items file records. For `write`, `write-verify`, seeded `read`, seeded `delete` (with `--delete-batch-size=1`) and `mixed`. See [Target Buckets](TARGET_BUCKETS.md#bucket-sets) |
+| `--buckets` | | from `S3_BUCKETS` | Spread the run's new objects over these buckets, comma-separated or repeated (1 to 1000), used as written and in this order. Missing ones are created unless `--provision-target-bucket=false`. Excludes `--bucket`, `--bucket-count` (even `1`) and `--buckets-file`. One name is the same as `--bucket NAME`; two or more allow the workloads of `--bucket-count`. See [Bucket lists](TARGET_BUCKETS.md#bucket-lists) |
+| `--buckets-file` | | | Read the `--buckets` names from a regular file, one per line; blank lines and lines starting with `#` are ignored. Same rules and exclusions as `--buckets` |
 | `--prefix` | | `""` | Literal generated-key prefix for `write` and `write-verify`; owned namespace root for seeded DELETE; listing constraint for `list` and LIST-based `read-verify`; rejected for `read`, `mixed`, `mock`, and `tables` |
 | `--auth-version` | | `4` | S3 signature version (`2` or `4`) |
 | `--slice-endpoints` | | `false` | Partition endpoints across nodes in distributed runs |
@@ -539,6 +541,17 @@ earlier objects. With `--prefix-shards`, each bucket gets every shard directory.
 Phase setup checks and creates the buckets of the set as described in
 [Target Buckets](TARGET_BUCKETS.md#bucket-sets). The count is set only by this
 flag; an `--engine-override` of `storage.targetBucket.count` is rejected.
+
+**`--buckets` and `--buckets-file` behavior:** a list of two or more names
+places new objects exactly as a count does, with member `i` the `i`-th name, and
+allows the same workloads. The names are used as written: the AWS naming rules of
+generated names do not apply, except that `--s3-driver aws` cannot create a name the
+AWS SDK's bucket name check rejects. With `--provision-target-bucket=false` the listed
+buckets must already exist. SPT never lists, reads or deletes an object it did
+not write, except those an items file you supply names. The names are set only
+by these flags or `S3_BUCKETS`; an `--engine-override` of
+`storage.targetBucket.names` is rejected. See
+[Bucket lists](TARGET_BUCKETS.md#bucket-lists).
 
 ```bash
 # Automatic: three workers x 16 threads creates 48 prefix directories.

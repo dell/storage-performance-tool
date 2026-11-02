@@ -256,7 +256,7 @@ func GenerateMixedScenario(params Params) (string, error) {
 
 		// Without a seed phase, the measured phase is the first to write the generated members of
 		// a bucket set, so its setup may create them; items-file buckets stay check-only.
-		"MixedPhaseCreatesMembers": !hasSeedPhase && params.BucketCount > 1,
+		"MixedPhaseCreatesMembers": !hasSeedPhase && params.BucketSetSize() > 1,
 	}
 
 	tmpl, err := template.New("mixedScenario").Parse(mixedWorkloadTemplate)

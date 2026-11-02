@@ -16,10 +16,11 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
+import java.util.regex.Pattern;
 import org.openjdk.nashorn.api.scripting.JSObject;
 
 import static com.dell.spt.base.config.ConfigFormat.JSON;
@@ -218,20 +219,97 @@ public interface ConfigUtil {
 					final Map<String, String> argValPairs,
 					final String sep,
 					final String prefix) {
+		flatten(configMap, argValPairs, null, sep, prefix);
+	}
+
+	/**
+	 * Flattens a scenario's configuration map into paths and string values. A list value becomes the
+	 * comma-separated string of its elements and, when {@code listVals} is not null, is also recorded
+	 * there as the list of those strings, for {@link #validateListValues}; a later value at the same
+	 * path replaces it.
+	 */
+	static void flatten(
+					final Map<String, Object> configMap,
+					final Map<String, String> argValPairs,
+					final Map<String, List<String>> listVals,
+					final String sep,
+					final String prefix) {
 		for (final var k : configMap.keySet()) {
 			final var v = scriptArrayAsList(configMap.get(k));
+			final var path = prefix == null ? k : (prefix + sep + k);
 			if (v instanceof Map) {
-				flatten((Map<String, Object>) v, argValPairs, sep, prefix == null ? k : (prefix + sep + k));
+				flatten((Map<String, Object>) v, argValPairs, listVals, sep, path);
 			} else if (v instanceof List) {
-				final var s = (String) ((List) v)
-								.stream()
+				final var elements = ((List<?>) v).stream()
 								.map(e -> e == null ? ":" : e.toString())
-								.collect(Collectors.joining(","));
-				argValPairs.put(prefix == null ? k : (prefix + sep + k), s);
+								.toList();
+				argValPairs.put(path, String.join(",", elements));
+				if (listVals != null) {
+					listVals.put(path, elements);
+				}
 			} else {
-				argValPairs.put(prefix == null ? k : (prefix + sep + k), v == null ? null : v.toString());
+				argValPairs.put(path, v == null ? null : v.toString());
+				if (listVals != null) {
+					listVals.remove(path);
+				}
 			}
 		}
+	}
+
+	/**
+	 * Refuses a list value that its comma-separated string cannot carry, on the settings the schema
+	 * types as lists: an element that is empty or holds a comma. The configuration reads the string
+	 * back by splitting it at commas, so such an element would otherwise be split or dropped without a
+	 * word. An empty list passes; it reads back as one empty element. Each value is checked at the
+	 * setting it reaches: an aliasing entry that renames its path checks it at the target, and one
+	 * that replaces its value leaves nothing to check.
+	 *
+	 * @throws IllegalArgumentException naming the setting and the element
+	 */
+	static void validateListValues(
+					final Config config,
+					final Map<String, List<String>> listVals,
+					final List<Map<String, Object>> aliasingConfig) {
+		// The first entry for a name decides, as AliasingUtil.apply applies it: a target path renames
+		// the value, and a replacement value or a missing target (which fails the scenario) leaves
+		// nothing to check.
+		final Map<String, String> renamed = new HashMap<>();
+		if (aliasingConfig != null) {
+			for (final var entry : aliasingConfig) {
+				if (entry.get(AliasingUtil.NAME) instanceof String name && !renamed.containsKey(name)) {
+					final var parts = entry.get(AliasingUtil.TARGET) instanceof String target
+									? target.split(AliasingUtil.ARG_VAL_SEP, 2)
+									: new String[0];
+					renamed.put(name, parts.length == 1 ? parts[0] : null);
+				}
+			}
+		}
+		for (final var listVal : listVals.entrySet()) {
+			final var path = renamed.containsKey(listVal.getKey()) ? renamed.get(listVal.getKey()) : listVal.getKey();
+			if (path == null || !isListSetting(config.schema(), path, config.pathSep())) {
+				continue;
+			}
+			final var elements = listVal.getValue();
+			for (int i = 0; i < elements.size(); i++) {
+				final var element = elements.get(i);
+				if (element.isEmpty() || element.contains(",")) {
+					throw new IllegalArgumentException(path + ": element " + (i + 1) + " \"" + element
+									+ "\" is empty or holds a comma, which a list in a scenario's configuration cannot carry");
+				}
+			}
+		}
+	}
+
+	/** Returns whether the schema types the setting at the path as a list. */
+	static boolean isListSetting(final Map<String, Object> schema, final String path, final String sep) {
+		Object node = schema;
+		for (final var part : path.split(Pattern.quote(sep), -1)) {
+			if (!(node instanceof Map<?, ?> branch)) {
+				return false;
+			}
+			node = branch.get(part);
+		}
+		return node instanceof Class<?> type && List.class.isAssignableFrom(type);
 	}
 
 	/**

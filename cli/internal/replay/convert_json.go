@@ -64,6 +64,7 @@ const (
 	legacyKeyType        = "type"
 
 	legacyKeyTargetBucket = "targetBucket"
+	legacyKeyNames        = "names"
 
 	opTypeCreate = "create"
 	opTypeDelete = "delete"
@@ -116,6 +117,9 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 	diagnostics = append(diagnostics, variableDiagnostics...)
 	if len(endpointHosts(opts.Endpoints)) == 0 {
 		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: "local endpoints are required for replay"})
+	}
+	if err := checkArchivedJSONBucketSets(legacy, runScript.Exports); err != nil {
+		diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: err.Error()})
 	}
 	bucket := effectiveBucket(opts.Bucket, runScript)
 	if bucket == "" {
@@ -182,7 +186,7 @@ func ConvertJSON(raw []byte, runScript RunScript, opts Options) (*Generated, err
 			step.Config = mergeConfig(legacy.Config, step.Config)
 			archivedEndpointSelectionFromConfig(step.Config, effectiveVars, archived)
 			nicSettings.fromJSONConfig(step.Config)
-			converted, err := convertLoadStep(step, i, loadStepNumber, label, baseTS, bucket, opts, effectiveVars, archiveToStepID, itemVars, &itemVarOrder)
+			converted, err := convertLoadStep(step, i, loadStepNumber, label, baseTS, bucket, opts, effectiveVars, runScript.Exports, archiveToStepID, itemVars, &itemVarOrder)
 			if err != nil {
 				diagnostics = append(diagnostics, Diagnostic{Severity: severityError, Message: err.Error()})
 				continue
@@ -299,7 +303,7 @@ type convertedCommand struct {
 	rewrites []PathRewrite
 }
 
-func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, bucket string, opts Options, vars map[string]string, archiveToStepID map[string]string, itemVars map[string]itemFileExpr, itemVarOrder *[]string) (convertedStep, error) {
+func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, bucket string, opts Options, vars, archivedExports map[string]string, archiveToStepID map[string]string, itemVars map[string]itemFileExpr, itemVarOrder *[]string) (convertedStep, error) {
 	archiveID, opType, opSuffix, loadFactory, err := loadStepIdentity(step, index, vars)
 	if err != nil {
 		return convertedStep{}, err
@@ -422,8 +426,10 @@ func convertLoadStep(step legacyStep, index, stepNumber int, label, baseTS, buck
 	if pqcMode := resolveString(getPath(step.Config, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "pqcMode"), vars); pqcMode != "" {
 		setPath(config, pqcMode, legacyKeyStorage, legacyKeyNet, legacyKeySSL, "pqcMode")
 	}
-	// A target bucket set is kept; its base becomes the replay bucket of item.output.path.
-	if bucketCount := int64Value(getPath(step.Config, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyCount), vars); bucketCount > 1 {
+	// A target bucket set is kept; its base becomes the replay bucket of item.output.path. The
+	// count resolves with the archived exports, so retargeting the base never changes it; the
+	// archive-wide check has already refused a count replay cannot read and any bucket list.
+	if bucketCount, err := jsonBucketCount(getPath(step.Config, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyCount), archivedExports); err == nil && bucketCount > 1 {
 		setPath(config, bucketCount, legacyKeyStorage, legacyKeyTargetBucket, legacyKeyCount)
 	}
 	var rewrites []PathRewrite
@@ -668,6 +674,7 @@ func isModeledJSONConfigPath(path string) bool {
 		"storage.net.endpoint.dns.timeoutMilliSec",
 		"storage.net.endpoint.connect.timeoutMilliSec",
 		"storage.targetBucket.count",
+		"storage.targetBucket.names",
 		"test.step.id",
 		"test.step.limit.fail.count",
 		"test.step.limit.count",

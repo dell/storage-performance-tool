@@ -62,6 +62,96 @@ class S3AwsTargetBucketControlTest {
 		assertEquals("connection failed",
 						S3AwsTargetBucketControl.classify(SdkClientException.create("Unable to connect to 192.0.2.3")).detail());
 		assertEquals("request failed", S3AwsTargetBucketControl.classify(new IllegalStateException("x")).detail());
+		assertEquals("request failed", S3AwsTargetBucketControl.classify(new IllegalArgumentException()).detail());
+		assertEquals("request failed",
+						S3AwsTargetBucketControl.classify(new IllegalArgumentException("Invalid endpoint 192.0.2.3")).detail(),
+						"only the SDK's naming rules are shown");
+		assertEquals("request failed",
+						S3AwsTargetBucketControl.classify(new IllegalStateException("Bucket name should not contain '_'")).detail(),
+						"a naming rule is an IllegalArgumentException");
+	}
+
+	@Test
+	void aNameTheSdkRefusesFailsProvisioningWithTheRuleAndIsNeverSent() throws Exception {
+		final var requests = new CopyOnWriteArrayList<String>();
+		final var server = bucketStub(requests, 404);
+		try {
+			final var failure = assertThrows(RunTerminalException.class, () -> provisionPsUs(server));
+
+			assertEquals("failed to create target bucket \"PS_US\" (the AWS SDK refused the name: "
+							+ "Bucket name should not contain uppercase characters); it is still not accessible (not found)",
+							failure.getMessage());
+			assertEquals(List.of("HEAD /PS_US signed", "HEAD /PS_US signed"), requests,
+							"the stub would accept the name, so the refusal can only be the SDK's");
+		} finally {
+			server.stop(0);
+		}
+	}
+
+	@Test
+	void anExistingBucketTheSdkCouldNotCreateIsUsedWithProvisioningOn() throws Exception {
+		final var requests = new CopyOnWriteArrayList<String>();
+		final var server = bucketStub(requests, 200);
+		try {
+			provisionPsUs(server);
+
+			assertEquals(List.of("HEAD /PS_US signed"), requests);
+		} finally {
+			server.stop(0);
+		}
+	}
+
+	@Test
+	void namingRulesAreReportedAndNothingIsSent() throws Exception {
+		final var requests = new CopyOnWriteArrayList<String>();
+		final var server = bucketStub(requests, 404);
+		try {
+			final var timeouts = new S3AwsClientTimeouts(Duration.ofSeconds(5), Duration.ofSeconds(10));
+			final var port = server.getAddress().getPort();
+			final var control = new S3AwsTargetBucketControl(S3AwsRawClients.exactVersion(port, timeouts), "us-east-1",
+							"http://127.0.0.1:" + port, Duration.ofSeconds(10));
+			try {
+				final Map<String, String> rules = Map.of(
+								"PS-US", "Bucket name should not contain uppercase characters",
+								"ps_us", "Bucket name should not contain '_'",
+								"ps..us", "Bucket name should not contain two adjacent periods",
+								"ab", "Bucket name should be between 3 and 63 characters long",
+								"ps-us-", "Bucket name should not end with '-' or '.'");
+				for (final var rule : rules.entrySet()) {
+					final var response = control.create(rule.getKey(), null);
+					assertEquals(Kind.FAILED, response.kind(), rule.getKey());
+					assertEquals("the AWS SDK refused the name: " + rule.getValue(), response.detail());
+				}
+				assertEquals(List.of(), requests);
+			} finally {
+				control.close();
+			}
+		} finally {
+			server.stop(0);
+		}
+	}
+
+	/** Runs the phase's setup through the real SDK client, for a bucket the generated rules reject. */
+	private void provisionPsUs(final HttpServer server) throws Exception {
+		final Config config = S3AwsMergedConfig.create(home, server.getAddress().getPort(), Map.of());
+		config.val("storage-region", "");
+		config.val("load-op-type", "create");
+		config.val("item-output-path", "/PS_US/prefix");
+		TargetBucketProvisioning.provision("aws-names", config, null, Extension.load(Thread.currentThread().getContextClassLoader()));
+	}
+
+	/** A target that accepts any name: a CreateBucket would succeed, and a check answers headCode. */
+	private static HttpServer bucketStub(final List<String> requests, final int headCode) throws Exception {
+		final var server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+		server.createContext("/", exchange -> {
+			final var method = exchange.getRequestMethod();
+			requests.add(method + " " + exchange.getRequestURI().getRawPath()
+							+ (exchange.getRequestHeaders().containsKey("Authorization") ? " signed" : ""));
+			exchange.sendResponseHeaders("HEAD".equals(method) ? headCode : 200, -1);
+			exchange.close();
+		});
+		server.start();
+		return server;
 	}
 
 	@Test

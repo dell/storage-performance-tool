@@ -191,5 +191,6 @@ storage:
       slice: boolean
   targetBucket:
     count: int
+    names: list
     provision: boolean
 aliasing: list

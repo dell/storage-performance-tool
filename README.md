@@ -92,6 +92,8 @@ S3_ENDPOINT=https://s3.example.com
 S3_ACCESS_KEY=your-access-key
 S3_SECRET_KEY=your-secret-key
 S3_BUCKET=test-bucket
+# Optional instead: several target buckets, used as written; new objects are spread over them
+# S3_BUCKETS=bucket-a,bucket-b
 
 # Optional: comma-separated user@host entries for distributed runs
 HOSTS=user@node1,user@node2,user@node3

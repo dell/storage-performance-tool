@@ -29,6 +29,13 @@ class MixedTargetBucketPlacementTest {
 		return config;
 	}
 
+	private static Config listConfig(final String outputPath, final String... names) throws Exception {
+		final Config config = defaultConfig();
+		config.val("storage-targetBucket-names", List.of(names));
+		config.val("item-output-path", outputPath);
+		return config;
+	}
+
 	@SuppressWarnings({"rawtypes", "unchecked"
 	})
 	private static List<String> putDestinations(final Config config, final long... ids) throws Exception {
@@ -68,6 +75,38 @@ class MixedTargetBucketPlacementTest {
 	@Test
 	void oneBucketKeepsTheOutputPath() throws Exception {
 		assertEquals(List.of("/bench", "/bench", "/bench"), putDestinations(config(1), 0, 1));
+	}
+
+	@Test
+	void putsGoToTheListedBucketsInListOrder() throws Exception {
+		assertEquals(List.of("/ps-eu/p", "/PS_US/p", "/ps-ap/p", "/ps-eu/p", "/PS_US/p", "/ps-eu/p"),
+						putDestinations(listConfig("/placeholder/p", "ps-eu", "PS_US", "ps-ap"), 0, 1, 2, 3, 4));
+	}
+
+	@Test
+	void listedPutsKeepShardLabelsIndependentOfTheirBucket() throws Exception {
+		final var config = listConfig("/placeholder", "ps-eu", "PS_US", "ps-ap");
+		config.val("item-naming-shards", 64);
+
+		assertEquals(List.of("/ps-eu", "/ps-eu", "/PS_US", "/ps-ap", "/ps-eu"), putDestinations(config, 0, 63, 64, 191));
+	}
+
+	@Test
+	void aOneNameListWritesToTheListedNameAtThePlaceholdersPath() throws Exception {
+		assertEquals(List.of("/ps-eu/p", "/ps-eu/p", "/ps-eu/p"),
+						putDestinations(listConfig("/placeholder/p", "ps-eu"), 0, 1));
+		assertEquals(List.of("/bench", "/bench", "/bench"),
+						putDestinations(listConfig("/bench", "bench"), 0, 1),
+						"a placeholder equal to the name is today's single bucket");
+	}
+
+	@Test
+	void anEmptyListKeepsTheGeneratedSetOfTheCount() throws Exception {
+		final var config = config(4);
+		config.val("storage-targetBucket-names", List.of());
+
+		assertEquals(List.of("/bench-0", "/bench-1", "/bench-2", "/bench-3", "/bench-1", "/bench-0"),
+						putDestinations(config, 0, 1, 2, 3, 5));
 	}
 
 	/** The shipped defaults of the engine and of this extension, as the engine merges them. */
