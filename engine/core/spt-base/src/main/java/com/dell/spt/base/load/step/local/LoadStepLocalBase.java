@@ -277,19 +277,20 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				return;
 			}
 		}
-		barrier.runFenceActions();
 		final String stepId = safeStepIdForPreparation();
 		Loggers.MSG.info("{}: preparation fenced: {}", stepId, why);
 		final Thread guard = preparationDeadlineGuard;
 		if (guard != null && guard != Thread.currentThread()) {
 			guard.interrupt();
 		}
-		stopContextsOfFence(stepId);
+		stopContextsOfFence(stepId, barrier);
 	}
 
-	private void stopContextsOfFence(final String stepId) {
+	/** On a thread of its own: neither a driver's fence action nor a stuck context holds up the caller. */
+	private void stopContextsOfFence(final String stepId, final StepPreparation barrier) {
 		final var contexts = List.copyOf(stepContexts);
 		Thread.ofPlatform().daemon().name("spt-preparation-fence-" + stepId).start(() -> {
+			barrier.runFenceActions();
 			for (final LoadStepContext stepContext : contexts) {
 				try {
 					stepContext.stop();
@@ -309,7 +310,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		// A fence that came before the contexts existed could not stop them. One that comes after this
 		// check sees them, as they were added before it.
 		if (barrier.fenced()) {
-			stopContextsOfFence(stepId);
+			stopContextsOfFence(stepId, barrier);
 			return;
 		}
 		final Thread preparing = Thread.ofPlatform().daemon().name("spt-preparation-" + stepId).unstarted(() -> {
@@ -323,9 +324,11 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				}
 				barrier.ready(System.nanoTime());
 			} catch (final Throwable failure) {
-				// A fence interrupts blocked work; that is not a failure of its own.
-				if (!barrier.fenced()) {
-					final String message = preparationFailureMessage(failure);
+				final String message = preparationFailureMessage(failure);
+				if (barrier.fenced()) {
+					// A fence interrupts blocked work; that is not a failure of its own.
+					Loggers.MSG.debug("{}: preparation ended by its fence: {}", stepId, message);
+				} else {
 					Loggers.ERR.error("{}: preparation failed: {}", stepId, message);
 					barrier.fail(message, System.nanoTime());
 				}

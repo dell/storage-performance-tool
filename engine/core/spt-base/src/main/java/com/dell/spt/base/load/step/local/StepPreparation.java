@@ -1,9 +1,11 @@
 package com.dell.spt.base.load.step.local;
 
 import com.dell.spt.base.load.step.PreparationStatus;
+import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.storage.driver.AdmissionPreparable;
 import java.util.ArrayList;
 import java.util.List;
+import org.apache.logging.log4j.Level;
 
 /**
  * One slice's preparation, which ends READY, FAILED or FENCED. Only a READY preparation can be
@@ -113,7 +115,13 @@ final class StepPreparation implements AdmissionPreparable.Preparation {
 			actions = List.copyOf(fenceActions);
 			fenceActions.clear();
 		}
-		actions.forEach(Runnable::run);
+		for (final Runnable action : actions) {
+			try {
+				action.run();
+			} catch (final RuntimeException e) {
+				LogUtil.exception(Level.WARN, e, "A preparation's fence action failed");
+			}
+		}
 	}
 
 	/**

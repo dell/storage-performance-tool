@@ -110,6 +110,18 @@ class StepPreparationTest {
 	}
 
 	@Test
+	void aFailingFenceActionDoesNotStopTheOthers() {
+		final var preparation = new StepPreparation(1, 100, 0);
+		final var actions = new AtomicInteger();
+		preparation.onFence(() -> {
+			throw new IllegalStateException("broken action");
+		});
+		preparation.onFence(actions::incrementAndGet);
+		assertTrue(preparation.fence("stopped", 1));
+		assertEquals(1, actions.get());
+	}
+
+	@Test
 	void theBudgetMustBePositive() {
 		assertThrows(IllegalArgumentException.class, () -> new StepPreparation(1, 0, 0));
 	}

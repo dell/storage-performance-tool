@@ -478,6 +478,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 				}
 
 			} else {
+				stopWritingIfInterrupted();
 				break;
 			}
 		}
