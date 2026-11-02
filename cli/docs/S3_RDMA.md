@@ -309,7 +309,7 @@ The native layer uses Mellanox DC (Dynamically Connected) transport for scalable
 
 `spt verify --use-rdma` previews this for a host: see [`spt verify`](SPT_SYNTAX.md#rdma-pools).
 
-The per-path CSV's RDMA columns are not in this version yet.
+`nic.paths.csv` adds, for this driver, the successful attempts whose payload moved over RDMA and over HTTP on every row, and each NIC Pool's counters on its NIC's row: see [per-path NIC evidence](../../engine/core/spt-base/README.md#per-path-nic-evidence).
 
 ---
 

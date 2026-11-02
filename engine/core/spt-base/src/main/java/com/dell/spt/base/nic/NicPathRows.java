@@ -38,14 +38,34 @@ public enum Kind {
 	public record Endpoint(String endpoint, String ip, int port) {}
 
 	/**
+	 * A NIC Pool's counts for the step, the ones the flat driver statistics total for the driver.
+	 *
+	 * @param created buffers created and registered ({@code registrations_pooled})
+	 * @param hits acquires served by an idle buffer ({@code pool_hits})
+	 * @param exhausted acquires the class cap or the budget refused ({@code pool_exhausted})
+	 * @param unpooled acquires above the largest size class ({@code pool_oversize})
+	 * @param prewarmed buffers Pool Pre-warm left in the pool
+	 */
+	public record PoolCounts(long created, long hits, long exhausted, long unpooled, long prewarmed) {}
+
+	/**
 	 * One row's counts.
 	 *
 	 * @param nic null on the {@link Kind#NONE} row
 	 * @param endpoint null except on a {@link Kind#PATH} row
 	 * @param bytes the payload bytes of the succeeded attempts
+	 * @param rdmaSucceeded succeeded attempts whose payload moved over RDMA; null for a driver without RDMA
+	 * @param httpSucceeded succeeded attempts whose payload went over HTTP; null for a driver without RDMA
+	 * @param pool its NIC Pool's counts, on an RDMA driver's {@link Kind#NIC} row only; null elsewhere
 	 */
 	public record Row(Kind kind, Nic nic, Endpoint endpoint, long attempts, long succeeded, long failed,
-					long interrupted, long bytes) {
+					long interrupted, long bytes, Long rdmaSucceeded, Long httpSucceeded, PoolCounts pool) {
+
+	/** A row with no RDMA or pool columns. */
+	public Row(final Kind kind, final Nic nic, final Endpoint endpoint, final long attempts, final long succeeded, final long failed,
+					final long interrupted, final long bytes) {
+		this(kind, nic, endpoint, attempts, succeeded, failed, interrupted, bytes, null, null, null);
+	}
 
 	/** Attempts sent with no outcome at the step's end. */
 	public long unresolved() {

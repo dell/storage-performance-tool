@@ -36,7 +36,7 @@ class NicPathsArtifactTest {
 		assertEquals(List.of("path", "nic", "none", "path", "end"), records.stream().map(r -> r.get("row")).toList());
 		assertEquals(List.of("0", "0", "0", "2", ""), records.stream().map(r -> r.get("context_index")).toList());
 		final var path = records.get(0);
-		assertEquals("1", path.get("schema_version"));
+		assertEquals("2", path.get("schema_version"));
 		assertEquals("7", path.get("engine_run_id"));
 		assertEquals("step,1", path.get("step_id"));
 		assertEquals("ens1", path.get("interface"));
@@ -60,6 +60,49 @@ class NicPathsArtifactTest {
 						end.get("failed"), end.get("interrupted"), end.get("unresolved"), end.get("bytes")));
 		assertEquals("true", end.get("complete"));
 		assertEquals("", end.get("missing_contexts"));
+	}
+
+	@Test
+	void aDriverWithoutRdmaLeavesTheNewColumnsEmpty() throws Exception {
+		final var rows = new NicPathRows(List.of(
+						new NicPathRows.Row(NicPathRows.Kind.PATH, NIC_A, ENDPOINT, 10, 7, 1, 1, 700),
+						new NicPathRows.Row(NicPathRows.Kind.NIC, NIC_A, null, 2, 0, 2, 0, 0),
+						new NicPathRows.Row(NicPathRows.Kind.NONE, null, null, 1, 0, 0, 1, 0)), true);
+		for (final var record : records(List.of(new NicPathsArtifact.Context(0, rows)))) {
+			for (final var column : List.of("rdma_succeeded", "http_succeeded", "pool_created", "pool_hits", "pool_exhausted", "pool_unpooled", "pool_prewarmed")) {
+				assertEquals("", record.get(column), record.get("row") + " " + column);
+			}
+			assertEquals("2", record.get("schema_version"));
+		}
+	}
+
+	@Test
+	void anRdmaDriverHasItsRdmaColumnsOnEveryRowAndItsPoolColumnsOnNicRowsOnly() throws Exception {
+		final var pool = new NicPathRows.PoolCounts(24, 100, 3, 2, 24);
+		final var rows = new NicPathRows(List.of(
+						new NicPathRows.Row(NicPathRows.Kind.PATH, NIC_A, ENDPOINT, 10, 7, 1, 1, 700, 5L, 1L, null),
+						new NicPathRows.Row(NicPathRows.Kind.NIC, NIC_A, null, 2, 0, 2, 0, 0, 0L, 0L, pool),
+						new NicPathRows.Row(NicPathRows.Kind.NONE, null, null, 0, 0, 0, 0, 0, 0L, 0L, null)), true);
+		final var records = records(List.of(new NicPathsArtifact.Context(0, rows)));
+		final var path = records.get(0);
+		assertEquals(List.of("5", "1"), List.of(path.get("rdma_succeeded"), path.get("http_succeeded")));
+		assertEquals("", path.get("pool_created"));
+		final var nic = records.get(1);
+		assertEquals(List.of("0", "0"), List.of(nic.get("rdma_succeeded"), nic.get("http_succeeded")), "zero, not absent");
+		assertEquals(List.of("24", "100", "3", "2", "24"), List.of(nic.get("pool_created"), nic.get("pool_hits"), nic.get("pool_exhausted"),
+						nic.get("pool_unpooled"), nic.get("pool_prewarmed")));
+		final var none = records.get(2);
+		assertEquals("0", none.get("rdma_succeeded"));
+		assertEquals("", none.get("pool_hits"));
+		final var end = records.get(3);
+		assertEquals(List.of("5", "1"), List.of(end.get("rdma_succeeded"), end.get("http_succeeded")), "the totals");
+		assertEquals("", end.get("pool_hits"), "per NIC; the end record has no pool");
+	}
+
+	@Test
+	void schemaTwoOnlyAppendsToSchemaOnesColumns() {
+		final var schemaOne = "schema_version,engine_run_id,step_id,worker_id,context_index,row,interface,ipv4,rdma_device,rdma_port,gid_index,numa_node,shared_port,permit_share,endpoint,endpoint_ip,endpoint_port,attempts,succeeded,failed,interrupted,unresolved,bytes,complete,missing_contexts";
+		assertTrue(NicPathsArtifact.HEADER.startsWith(schemaOne + ","), NicPathsArtifact.HEADER);
 	}
 
 	@Test

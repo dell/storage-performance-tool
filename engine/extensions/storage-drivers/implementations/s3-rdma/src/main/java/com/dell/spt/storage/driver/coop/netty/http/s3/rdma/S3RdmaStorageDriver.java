@@ -1053,6 +1053,11 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		return true;
 	}
 
+	/** The context of the request a channel carries, or {@code null}, for a NIC-set row; no default-route path calls it. */
+	final RdmaContext sentContext(final Channel channel) {
+		return channel.attr(RDMA_CONTEXT_ATTR_KEY).get();
+	}
+
 	/** The S3 driver's completion: it reports the result and releases the transport. */
 	final void completeTransport(final Channel channel, final O op) {
 		super.complete(channel, op);

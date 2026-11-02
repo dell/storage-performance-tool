@@ -516,7 +516,18 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		// The stop's flag first: it was written after start assigned the counters.
 		final var ioStopped = ioStoppedInTime();
 		final var table = counters;
-		return table == null || ioStopped == null ? null : table.snapshot(ioStopped && dispatchStoppedInTime());
+		return table == null || ioStopped == null ? null : table.snapshot(ioStopped && dispatchStoppedInTime(), this::poolCounts);
+	}
+
+	/** NIC {@code index}'s pool counts, from this driver's own pools: all zero without a pool, as nothing was pooled. */
+	private NicPathRows.PoolCounts poolCounts(final int index) {
+		final var open = rdma;
+		final var nic = open == null ? null : open.nics().get(index);
+		if (nic == null || nic.pool == null) {
+			return new NicPathRows.PoolCounts(0, 0, 0, 0, 0);
+		}
+		return new NicPathRows.PoolCounts(nic.pool.created.sum(), nic.pool.hits.sum(), nic.pool.exhausted.sum(), nic.pool.unpooled.sum(),
+						nic.prewarmedBuffers);
 	}
 
 	@Override
@@ -548,6 +559,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		}
 		// Read before completion, which may hand the operation on.
 		final var lifecycle = op.lifecycle();
+		final var sent = sentContext(channel);
 		if (!classifyRdmaReply(channel, op)) {
 			// The reaper claimed this request and ends it, finding the row taken.
 			row.failed();
@@ -555,14 +567,27 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		}
 		final var succeeded = op.status() == Operation.Status.SUCC;
 		final long bytes = succeeded ? payloadBytes(op) : 0;
+		final boolean carries = carriesPayload(op);
+		final boolean overRdma = succeeded && carries && sent != null && transferred(sent);
 		completeTransport(channel, op);
 		if (terminal(lifecycle)) {
 			if (succeeded) {
 				row.succeeded(bytes);
+				if (overRdma) {
+					row.payloadOverRdma();
+				} else if (carries) {
+					row.payloadOverHttp();
+				}
 			} else {
 				row.failed();
 			}
 		}
+	}
+
+	/** Whether the server moved this attempt's payload over RDMA: not declined, whatever came back over HTTP. */
+	private boolean transferred(final RdmaContext sent) {
+		return RdmaReplyContract.classify(sent.opType, sent.reply, sent.bytesTransferred, sent.bodyBytes(), sent.size,
+						rdmaConfig().isAllowMissingBytesHeader()).outcome() == RdmaReplyContract.Outcome.TRANSFERRED;
 	}
 
 	@Override

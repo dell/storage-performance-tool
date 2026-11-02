@@ -344,11 +344,14 @@ copied is logged at WARN and does not fail the step. The logs API exposes a sing
 engine's file as `NicPaths` and the node copies by file name; the CLI fetches them
 with the step ID prefixed, and the run summary names them in one line.
 
-Schema version 1 has the columns `schema_version`, `engine_run_id`, `step_id`,
+Schema version 2 has the columns `schema_version`, `engine_run_id`, `step_id`,
 `worker_id`, `context_index`, `row`, `interface`, `ipv4`, `rdma_device`, `rdma_port`,
 `gid_index`, `numa_node`, `shared_port`, `permit_share`, `endpoint`, `endpoint_ip`,
 `endpoint_port`, `attempts`, `succeeded`, `failed`, `interrupted`, `unresolved`,
-`bytes`, `complete`, and `missing_contexts`. Each NIC-set context of the step adds,
+`bytes`, `complete`, `missing_contexts`, `rdma_succeeded`, `http_succeeded`,
+`pool_created`, `pool_hits`, `pool_exhausted`, `pool_unpooled`, and `pool_prewarmed`.
+Version 1, from earlier builds, ends at `missing_contexts`, so a reader that goes by
+column name reads both. Each NIC-set context of the step adds,
 in plan order, a `path` row per Path (one NIC and one endpoint), a `nic` row per NIC
 for attempts that ended before their Path was chosen, and a `none` row for attempts
 that ended before a NIC was. One `end` record follows with the totals of every row;
@@ -370,6 +373,24 @@ stopped without handing over its counts, named by index in `missing_contexts`
 (separated by `;`), or its dispatch task or I/O event loops did not stop in time, so
 a late update may be absent. The rows carry no operation identities, and the
 per-attempt route takes no lock: the counts are read once every update has stopped.
+
+The last seven columns are empty for a driver without RDMA, such as `s3`, and numbers for
+`s3-rdma`, so a reader tells absent from zero by the version and the driver:
+
+- `rdma_succeeded` and `http_succeeded`, on every row, count the successful attempts whose
+  payload moved over RDMA and over HTTP, a declined GET served over HTTP included. A
+  successful attempt with no payload, such as a DELETE or a multipart initiate or complete,
+  counts in neither, so the two can sum to less than `succeeded`. The `end` record has their
+  totals.
+- `pool_created`, `pool_hits`, `pool_exhausted` and `pool_unpooled`, on `nic` rows only, are
+  that NIC Pool's counters for the step. Summed over one context's NICs, they equal its
+  driver's flat statistics `registrations_pooled`, `pool_hits`, `pool_exhausted` and
+  `pool_oversize`. `pool_prewarmed` is the buffers Pool Pre-warm left in the pool, part of
+  `pool_created`. Each context takes them from its own driver, so two RDMA drivers with the
+  same NIC names never merge.
+
+An RDMA preparation failure counts as a failed attempt on its NIC's `nic` row, with the
+endpoint columns empty.
 
 ### NIC-set report
 

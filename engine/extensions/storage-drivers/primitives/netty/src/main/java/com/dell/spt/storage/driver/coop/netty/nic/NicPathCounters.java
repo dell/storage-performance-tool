@@ -7,6 +7,7 @@ import io.netty.channel.Channel;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.IntFunction;
 
 /**
  * A NIC-set driver's per-attempt counters (item 18, D59): one row per Path, one per NIC for
@@ -28,6 +29,8 @@ public final class NicPathCounters {
 		private final LongAdder failed = new LongAdder();
 		private final LongAdder interrupted = new LongAdder();
 		private final LongAdder bytes = new LongAdder();
+		private final LongAdder rdmaSucceeded = new LongAdder();
+		private final LongAdder httpSucceeded = new LongAdder();
 
 		private Row(final NicPathRows.Kind kind, final NicPathRows.Nic nic, final NicPathRows.Endpoint endpoint) {
 			this.kind = kind;
@@ -48,6 +51,16 @@ public final class NicPathCounters {
 			}
 		}
 
+		/** A succeeded attempt's payload moved over RDMA. */
+		public void payloadOverRdma() {
+			rdmaSucceeded.increment();
+		}
+
+		/** A succeeded attempt's payload went over HTTP. */
+		public void payloadOverHttp() {
+			httpSucceeded.increment();
+		}
+
 		/** An admitted attempt failed: a response failure, or a setup failure that ended its operation. */
 		public void failed() {
 			failed.increment();
@@ -61,6 +74,11 @@ public final class NicPathCounters {
 		private NicPathRows.Row snapshot() {
 			return new NicPathRows.Row(kind, nic, endpoint, attempts.sum(), succeeded.sum(), failed.sum(),
 							interrupted.sum(), bytes.sum());
+		}
+
+		private NicPathRows.Row snapshot(final NicPathRows.PoolCounts pool) {
+			return new NicPathRows.Row(kind, nic, endpoint, attempts.sum(), succeeded.sum(), failed.sum(),
+							interrupted.sum(), bytes.sum(), rdmaSucceeded.sum(), httpSucceeded.sum(), pool);
 		}
 	}
 
@@ -136,6 +154,26 @@ public final class NicPathCounters {
 			rows.add(row.snapshot());
 		}
 		rows.add(none.snapshot());
+		return new NicPathRows(List.copyOf(rows), complete);
+	}
+
+	/**
+	 * The same rows for a driver with RDMA, with the RDMA columns on every row and each NIC's pool
+	 * counts on its row, taken from that context's own driver.
+	 *
+	 * @param pools the counts of NIC {@code index} in layout order
+	 */
+	public NicPathRows snapshot(final boolean complete, final IntFunction<NicPathRows.PoolCounts> pools) {
+		final var rows = new ArrayList<NicPathRows.Row>();
+		for (final var nicPaths : paths) {
+			for (final var row : nicPaths) {
+				rows.add(row.snapshot(null));
+			}
+		}
+		for (var i = 0; i < nics.length; i++) {
+			rows.add(nics[i].snapshot(pools.apply(i)));
+		}
+		rows.add(none.snapshot(null));
 		return new NicPathRows(List.copyOf(rows), complete);
 	}
 }
