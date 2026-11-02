@@ -43,6 +43,8 @@ import io.netty.channel.epoll.Epoll;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
@@ -161,7 +163,7 @@ final class S3RdmaNicSetDriverTest {
 		stub.transports.forEach(transport -> assertTrue(transport.getCloseCount() >= 1, "every context is closed"));
 		assertFalse(stub.transports.get(0).isAvailable());
 		assertTrue(stub.objectRequests().isEmpty());
-		assertTrue(laneThreads("rdma-nic-test").isEmpty());
+		waitFor(() -> laneThreads("rdma-nic-test").isEmpty(), "no lane thread is left");
 	}
 
 	@Test
@@ -312,34 +314,36 @@ final class S3RdmaNicSetDriverTest {
 	}
 
 	@Test
-	void aPartWhoseConnectFailsIsSettledAndRetried() throws Exception {
-		final var listeners = stub.listeners(2);
-		final var run = started(listeners, 2, 2);
-		assertEquals(Operation.Status.SUCC, run.executeAlone(op(OpType.CREATE, "before-0")).status());
-		assertEquals(Operation.Status.SUCC, run.executeAlone(op(OpType.CREATE, "before-1")).status());
-		// One Path's connections go; the next acquisition on it fails its connect.
-		stub.stop(1);
-		waitFor(() -> run.pool().state().get(1).open() == 0, "the closed idle connection is dropped");
-
-		final var upload = upload("failed-connect", 2048, 1);
-		assertTrue(run.driver().put(upload));
-
-		// The upload ends either way: its one part fails on the stopped Path or succeeds on the other,
-		// and the parent's count of parts stays balanced, so it is never left waiting.
-		final var results = new ArrayList<Operation<DataItem>>();
-		waitFor(() -> {
-			try {
-				final var result = run.results().poll(50);
-				if (result != null) {
-					results.add(result);
-				}
-			} catch (final InterruptedException e) {
-				Thread.currentThread().interrupt();
+	void aPartWhoseConnectFailsOnceIsRetriedAndTheUploadCompletes() throws Exception {
+		final var run = started(stub.listeners(1), 1, 1);
+		// The initiation's connection closes, so the part connects, and that connect fails once.
+		stub.closeConnections = true;
+		final var failOnce = new AtomicBoolean(true);
+		stub.transport(0).setBeforeToken(() -> {
+			stub.closeConnections = false;
+			final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+			while (run.pool().state().get(0).open() > 0 && System.nanoTime() < deadline) {
+				Thread.onSpinWait();
 			}
-			return results.stream().anyMatch(result -> result instanceof com.dell.spt.base.item.op.composite.CompositeOperation<?> composite
-							&& (composite.allSubOperationsDone() || composite.status() != Operation.Status.SUCC));
-		}, "the upload reaches its end");
+		});
+		stub.beforeConnect = () -> {
+			if (!stub.objectRequests().isEmpty() && failOnce.compareAndSet(true, false)) {
+				throw new IllegalStateException("injected connect failure");
+			}
+		};
+
+		assertTrue(run.driver().put(upload("connect-fails-once", 2048, 1)));
+		// A part failed before its response counts no response, so it must be settled apart, or its
+		// retry leaves the parent waiting for ever and the upload never completes.
+		awaitUpload(run);
+
+		assertFalse(failOnce.get(), "the connect failed once");
+		final var requests = stub.objectRequests();
+		assertEquals(3, requests.size(), () -> "the initiation, the part's retry and the completion: " + requests);
+		assertEquals("POST", requests.get(2).method());
+		assertEquals(2048, stub.object(BUCKET + "/connect-fails-once").length);
 		run.awaitIdle();
+		assertEquals(0, run.nic(0).pool.invalidReturns.sum());
 	}
 
 	// ---------- NIC pools ----------
@@ -513,7 +517,8 @@ final class S3RdmaNicSetDriverTest {
 			assertFalse(transport.wasClosedDuringACall());
 			assertEquals(0, transport.getActiveRegistrationCount());
 		});
-		assertFalse(Thread.getAllStackTraces().keySet().stream().anyMatch(thread -> thread.isAlive() && thread.getName().contains("-rdma-copy-")),
+		assertFalse(Thread.getAllStackTraces().keySet().stream()
+						.anyMatch(thread -> thread.isAlive() && thread.getName().startsWith("rdma-nic-test-") && thread.getName().contains("-rdma-copy-")),
 						"no copy thread is left");
 	}
 

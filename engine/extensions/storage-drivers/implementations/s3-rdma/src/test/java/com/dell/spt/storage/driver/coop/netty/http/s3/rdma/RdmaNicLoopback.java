@@ -82,8 +82,6 @@ final class RdmaNicLoopback implements AutoCloseable {
 					DEVICES.stream().map(RdmaNicLoopback::device).toList(),
 					NICS.stream().map(RdmaNicLoopback::route).toList(),
 					SYSCTLS);
-	static final NicSetSupport.Environment ENVIRONMENT = new NicSetSupport.Environment(
-					() -> INVENTORY, host -> Ipv4.parse(host), NicBinding.SOURCE_ADDRESS);
 
 	/** One request as the stub received it; {@code tokenNic} is -1 without a token. */
 	record Request(int listener, String method, String path, String query, String host, String source, int port,
@@ -125,6 +123,15 @@ final class RdmaNicLoopback implements AutoCloseable {
 	volatile Map<String, String> objectResponseHeaders = Map.of();
 	/** The device whose open fails. */
 	volatile String failOpen;
+	/** Runs as each connection binds, to fail a connect. */
+	volatile Runnable beforeConnect = () -> {};
+	/** Makes the stub close each connection after its response, so the next request connects. */
+	volatile boolean closeConnections;
+	private final NicSetSupport.Environment environment = new NicSetSupport.Environment(
+					() -> INVENTORY, host -> Ipv4.parse(host), (connecting, iface, address) -> {
+						beforeConnect.run();
+						NicBinding.SOURCE_ADDRESS.apply(connecting, iface, address);
+					});
 
 	/** A device's fake: its token names its DC target; the fixture finds it by that number. */
 	final class NicTransport extends FakeRdmaTransport {
@@ -186,7 +193,7 @@ final class RdmaNicLoopback implements AutoCloseable {
 	S3RdmaNicSetDriver<DataItem, Operation<DataItem>> driver(final Config root) throws Exception {
 		final Config storage = root.configVal("storage");
 		return S3RdmaNicSetDriver.create("rdma-nic-test", dataInput(), storage, false, root.intVal("load-batch-size"),
-						NicSetSettings.fromStorage(storage).orElseThrow(), ENVIRONMENT, recording());
+						NicSetSettings.fromStorage(storage).orElseThrow(), environment, recording());
 	}
 
 	/** Starts {@code driver} with a result collector. */
@@ -246,7 +253,7 @@ final class RdmaNicLoopback implements AutoCloseable {
 						final Config storageConfig, final boolean verifyFlag, final int batchSize)
 						throws IllegalConfigurationException, InterruptedException {
 			final S3RdmaNicSetDriver<DataItem, Operation<DataItem>> driver = S3RdmaNicSetDriver.create(stepId, dataInput, storageConfig,
-							verifyFlag, batchSize, NicSetSettings.fromStorage(storageConfig).orElseThrow(), ENVIRONMENT, recording());
+							verifyFlag, batchSize, NicSetSettings.fromStorage(storageConfig).orElseThrow(), environment, recording());
 			drivers.add(driver);
 			return driver;
 		}
@@ -411,6 +418,9 @@ final class RdmaNicLoopback implements AutoCloseable {
 			final var request = new Request(listener, exchange.getRequestMethod(), uri.getRawPath(), uri.getRawQuery(),
 							exchange.getRequestHeaders().getFirst("Host"), source, remote.getPort(),
 							exchange.getRequestHeaders().getFirst("Range"), token, tokenNic(token), body.length);
+			if (closeConnections) {
+				exchange.getResponseHeaders().set("Connection", "close");
+			}
 			final var concurrent = active.computeIfAbsent(source, unused -> new AtomicInteger()).incrementAndGet();
 			peaks.computeIfAbsent(source, unused -> new AtomicInteger()).accumulateAndGet(concurrent, Math::max);
 			try {

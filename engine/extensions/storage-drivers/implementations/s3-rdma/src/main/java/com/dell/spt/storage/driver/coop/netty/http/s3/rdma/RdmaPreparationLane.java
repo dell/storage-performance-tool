@@ -3,10 +3,12 @@ package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
 
+import com.dell.spt.base.logging.LogUtil;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
 
 /**
@@ -184,7 +186,9 @@ final class RdmaPreparationLane {
 				onDeath.accept(e);
 			}
 		} catch (final Throwable thrown) {
-			if (!cancelled) {
+			if (cancelled) {
+				LogUtil.exception(Level.DEBUG, thrown, "{}: NIC {}: a cancelled preparation lane ended with a failure", stepId, nic.name);
+			} else {
 				onDeath.accept(thrown);
 			}
 		} finally {

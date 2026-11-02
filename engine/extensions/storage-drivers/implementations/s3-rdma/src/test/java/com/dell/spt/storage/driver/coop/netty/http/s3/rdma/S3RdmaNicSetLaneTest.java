@@ -497,13 +497,13 @@ final class S3RdmaNicSetLaneTest {
 			assertTrue(run.driver().put(op(OpType.READ, "held-" + i)));
 		}
 		assertTrue(entered.await(10, TimeUnit.SECONDS), "every lane is held");
-		run.driver().laneStopBudgetMillis = 1_000;
+		run.driver().laneStopBudgetMillis = 2_000;
 
 		final long start = System.nanoTime();
 		run.driver().close();
 		final long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
 
-		assertTrue(elapsedMillis < 3_500, () -> "one budget, not one per NIC: " + elapsedMillis + " ms");
+		assertTrue(elapsedMillis < 6_000, () -> "one budget, not one per NIC: " + elapsedMillis + " ms");
 		IntStream.range(0, 4).forEach(i -> {
 			assertTrue(run.lane(i).cancelled());
 			assertEquals(0, stub.transport(i).getCloseCount(), "a held lane keeps its context open");
