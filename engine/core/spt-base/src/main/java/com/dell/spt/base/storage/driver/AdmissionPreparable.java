@@ -7,6 +7,8 @@ package com.dell.spt.base.storage.driver;
 public interface AdmissionPreparable {
 
 	/**
+	 * Does the driver's work for the step, within the preparation's deadline.
+	 *
 	 * @throws Exception when the driver cannot serve the step, which fails the step with this
 	 *     exception's message on every engine
 	 */

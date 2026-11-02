@@ -31,7 +31,6 @@ final class AdmissionBarrier {
 
 	private final String stepId;
 	private final long id;
-	private final long budgetNanos;
 	private final String timeoutText;
 	private final LongSupplier nanoTime;
 	private final long pollMillis;
@@ -39,7 +38,6 @@ final class AdmissionBarrier {
 	private final long deadlineNanos;
 	private final List<Slice> slices = new ArrayList<>();
 	private long distributionNanos;
-	private volatile String entryPhase;
 
 	AdmissionBarrier(final String stepId, final long budgetNanos, final String timeoutText) {
 		this(stepId, budgetNanos, timeoutText, System::nanoTime, 250);
@@ -53,7 +51,6 @@ final class AdmissionBarrier {
 					final long pollMillis) {
 		this.stepId = stepId;
 		this.id = ThreadLocalRandom.current().nextLong();
-		this.budgetNanos = budgetNanos;
 		this.timeoutText = timeoutText;
 		this.nanoTime = nanoTime;
 		this.pollMillis = pollMillis;
@@ -67,7 +64,6 @@ final class AdmissionBarrier {
 
 	/** Runs the Entry Node's item distribution within the deadline, and fences it at the deadline. */
 	void distribute(final Runnable distribution) throws InterruptedException {
-		entryPhase = ENTRY_DISTRIBUTING;
 		final var task = new FutureTask<Void>(distribution, null);
 		final var thread = Thread.ofPlatform().daemon().name("spt-item-distribution-" + stepId).start(task);
 		try {
@@ -93,7 +89,6 @@ final class AdmissionBarrier {
 			throw new IllegalStateException(cause);
 		}
 		distributionNanos = nanoTime.getAsLong() - startNanos;
-		entryPhase = null;
 	}
 
 	/** Arms the slice's next start as a barrier start. A worker without the methods fails the step. */
