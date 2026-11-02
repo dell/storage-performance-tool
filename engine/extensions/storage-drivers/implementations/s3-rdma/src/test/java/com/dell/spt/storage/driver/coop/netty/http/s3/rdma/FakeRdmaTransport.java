@@ -55,6 +55,18 @@ public class FakeRdmaTransport extends RdmaTransport {
 	/** Buffers still registered when the transport was closed; negative until then. */
 	private volatile int activeRegistrationsAtClose = -1;
 
+	/** The DC target number tokens carry; a NIC's fake sets its own. */
+	private volatile int dctn = 0x00133f;
+
+	/** Runs inside registerBuffer() and generateToken(), to hold a caller there. */
+	private volatile Runnable beforeRegister = () -> {};
+	private volatile Runnable beforeToken = () -> {};
+	private final AtomicInteger callsInFlight = new AtomicInteger();
+	private final AtomicInteger closes = new AtomicInteger();
+	private volatile boolean closedDuringCall;
+	private volatile String strictDevice;
+	private volatile String strictAddress;
+
 	public FakeRdmaTransport(final RdmaConfig config) {
 		super(config);
 	}
@@ -70,6 +82,16 @@ public class FakeRdmaTransport extends RdmaTransport {
 	}
 
 	@Override
+	public void initStrict(final String device, final String localIp) {
+		if (failInit) {
+			throw new RdmaException("injected open failure of " + device + " at " + localIp, 5, "EIO");
+		}
+		strictDevice = device;
+		strictAddress = localIp;
+		available = true;
+	}
+
+	@Override
 	public boolean isAvailable() {
 		return available;
 	}
@@ -79,16 +101,22 @@ public class FakeRdmaTransport extends RdmaTransport {
 		if (!available || buffer == null) {
 			return 0;
 		}
-		final long count = registerCount.incrementAndGet();
-		if (failAfterNRegistrations >= 0 && count > failAfterNRegistrations) {
-			return 0; // simulate registration failure
+		callsInFlight.incrementAndGet();
+		try {
+			beforeRegister.run();
+			final long count = registerCount.incrementAndGet();
+			if (failAfterNRegistrations >= 0 && count > failAfterNRegistrations) {
+				return 0; // simulate registration failure
+			}
+			if (failNextRegistrations.getAndUpdate(left -> Math.max(0, left - 1)) > 0) {
+				return 0; // simulate a registration failure that does not last
+			}
+			final long handle = handleCounter.incrementAndGet();
+			activeRegistrations.put(handle, buffer);
+			return handle;
+		} finally {
+			callsInFlight.decrementAndGet();
 		}
-		if (failNextRegistrations.getAndUpdate(left -> Math.max(0, left - 1)) > 0) {
-			return 0; // simulate a registration failure that does not last
-		}
-		final long handle = handleCounter.incrementAndGet();
-		activeRegistrations.put(handle, buffer);
-		return handle;
 	}
 
 	@Override
@@ -96,10 +124,16 @@ public class FakeRdmaTransport extends RdmaTransport {
 		if (!available || mrHandle == 0 || failTokenGeneration) {
 			return null;
 		}
-		// Return a valid-format token: addr:size:rkey:lid:dctn:g:gid
-		return String.format("%016x:%08x:%08x:%04x:%06x:%d:%032x",
-						0x7fffc3200000L + mrHandle, size, mrHandle & 0xFFFFFFFFL,
-						0, 0x00133f, 1, 0xfe80000000000000L);
+		callsInFlight.incrementAndGet();
+		try {
+			beforeToken.run();
+			// Return a valid-format token: addr:size:rkey:lid:dctn:g:gid
+			return String.format("%016x:%08x:%08x:%04x:%06x:%d:%032x",
+							0x7fffc3200000L + mrHandle, size, mrHandle & 0xFFFFFFFFL,
+							0, dctn, 1, 0xfe80000000000000L);
+		} finally {
+			callsInFlight.decrementAndGet();
+		}
 	}
 
 	@Override
@@ -117,6 +151,10 @@ public class FakeRdmaTransport extends RdmaTransport {
 
 	@Override
 	public void close() {
+		closes.incrementAndGet();
+		if (callsInFlight.get() > 0) {
+			closedDuringCall = true;
+		}
 		available = false;
 		if (activeRegistrationsAtClose < 0) {
 			activeRegistrationsAtClose = activeRegistrations.size();
@@ -125,6 +163,26 @@ public class FakeRdmaTransport extends RdmaTransport {
 	}
 
 	// ==================== Test verification helpers ====================
+
+	/** How many times close() ran. */
+	public int getCloseCount() {
+		return closes.get();
+	}
+
+	/** True if close() ran while registerBuffer() or generateToken() was running. */
+	public boolean wasClosedDuringACall() {
+		return closedDuringCall;
+	}
+
+	/** The device of the strict open; null without one. */
+	public String getStrictDevice() {
+		return strictDevice;
+	}
+
+	/** The address of the strict open; null without one. */
+	public String getStrictAddress() {
+		return strictAddress;
+	}
 
 	/** Total number of registerBuffer() calls (including failed ones). */
 	public long getRegisterCount() {
@@ -157,6 +215,21 @@ public class FakeRdmaTransport extends RdmaTransport {
 	}
 
 	// ==================== Failure injection ====================
+
+	/** Tokens carry this DC target number from now on. */
+	public void setDctn(final int dctn) {
+		this.dctn = dctn;
+	}
+
+	/** Runs in each registerBuffer() call, before it registers. */
+	public void setBeforeRegister(final Runnable action) {
+		this.beforeRegister = action;
+	}
+
+	/** Runs in each generateToken() call, before it makes the token. */
+	public void setBeforeToken(final Runnable action) {
+		this.beforeToken = action;
+	}
 
 	/** After n successful registrations, subsequent calls return 0 (failure). Set -1 to disable. */
 	public void setFailAfterNRegistrations(final int n) {

@@ -79,6 +79,8 @@ public class RdmaTransport implements AutoCloseable {
 	// Native methods - only called when NATIVE_AVAILABLE is true
 	private native long nativeInit(String deviceName, String localIp);
 
+	private native long nativeInitStrict(String deviceName, String localIp);
+
 	private native void nativeClose(long handle);
 
 	private native long nativeRegisterBuffer(long handle, ByteBuffer buffer, int size);
@@ -179,6 +181,25 @@ public class RdmaTransport implements AutoCloseable {
 			initialized = false;
 			return false;
 		}
+	}
+
+	/**
+	 * Opens one NIC's context with no fallback: exactly this {@code mlx5} device, the RoCE v2 GID on
+	 * port 1 that holds exactly this address, and a PD and a DC target. The default route's
+	 * {@link #init} and its fallbacks are not involved.
+	 *
+	 * @param device the RDMA device's exact name
+	 * @param localIp the NIC's IPv4 address
+	 * @throws RuntimeException when the context does not open, naming the device and the address
+	 */
+	public void initStrict(final String device, final String localIp) {
+		if (!NATIVE_AVAILABLE) {
+			throw new IllegalStateException(
+							"RDMA device " + device + " at " + localIp + ": the S3-RDMA native library is not available");
+		}
+		nativeHandle = nativeInitStrict(device, localIp);
+		initialized = true;
+		Loggers.MSG.info("S3-RDMA transport initialized: device={}, localIp={}, strict", device, localIp);
 	}
 
 	/**

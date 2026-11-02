@@ -32,6 +32,14 @@ public class RdmaTransportTest {
 	}
 
 	@Test
+	void testInitStrictFailureNamesTheDeviceAndAddress() {
+		final var failure = assertThrows(RuntimeException.class, () -> transport.initStrict("mlx5_2", "192.0.2.7"));
+		assertTrue(failure.getMessage().contains("mlx5_2"), failure.getMessage());
+		assertTrue(failure.getMessage().contains("192.0.2.7"), failure.getMessage());
+		assertFalse(transport.isAvailable());
+	}
+
+	@Test
 	void testIsAvailableFalseAfterFailedInit() {
 		transport.init("http://localhost:9020", "access", "secret");
 		assertFalse(transport.isAvailable());
