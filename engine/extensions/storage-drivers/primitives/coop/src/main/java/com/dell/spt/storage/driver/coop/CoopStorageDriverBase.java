@@ -955,26 +955,27 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			signalDispatch();
 	}
 
-	private boolean shouldEnqueueFinalization(final CompositeOperation parentOp) {
+	static boolean shouldEnqueueFinalization(final CompositeOperation parentOp) {
 		if (parentOp.get("mpuAbort") != null) {
 			return markFinalizationEnqueued(parentOp);
 		}
 		if (!parentOp.allSubOperationsDone()) {
 			return false;
 		}
-		if (parentOp.get("mpuFailure") != null) {
-			return markFinalizationEnqueued(parentOp);
-		}
+		// A part settles before its completion takes the parent's lock, so a count of zero can include a
+		// failed part that is about to retry. Once a part has recorded a failure, the only failed parts
+		// that can end the operation are those out of retries.
+		final boolean failed = parentOp.get("mpuFailure") != null;
 		for (final var rawSubOp : parentOp.subOperations()) {
 			final var subOp = (PartialOperation) rawSubOp;
-			if (subOp.status() != Operation.Status.SUCC) {
+			if (subOp.status() != Operation.Status.SUCC && !(failed && subOp.retryCount() >= MAX_PART_RETRIES)) {
 				return false;
 			}
 		}
 		return markFinalizationEnqueued(parentOp);
 	}
 
-	private boolean markFinalizationEnqueued(final CompositeOperation parentOp) {
+	private static boolean markFinalizationEnqueued(final CompositeOperation parentOp) {
 		synchronized (parentOp) {
 			if (parentOp.get(KEY_FINALIZATION_ENQUEUED) != null) {
 				return false;
