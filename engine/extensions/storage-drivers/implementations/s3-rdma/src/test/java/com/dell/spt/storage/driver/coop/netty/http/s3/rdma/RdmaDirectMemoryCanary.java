@@ -23,6 +23,7 @@ public final class RdmaDirectMemoryCanary {
 		fillWithIdleBuffers(pool, budget);
 		final String result = switch (args[0]) {
 		case "plain" -> plainAllocation(request);
+		case "nics" -> repeatedUnpooled(pool, budget, request);
 		case "reclaim" -> RdmaBufferPool.allocateUnpooled(request, pool, ByteBuffer::allocateDirect) == null
 						? "exhausted"
 						: "allocated idle=" + pool.idleBuffers();
@@ -43,6 +44,27 @@ public final class RdmaDirectMemoryCanary {
 		if (pool.idleBuffers() != 2 || pool.liveBytes() != budget) {
 			throw new IllegalStateException("pool not filled: " + pool.summary());
 		}
+	}
+
+	/**
+	 * Two NICs' pools, the second also full of idle buffers, and more per-operation buffers than the
+	 * limit holds, dropped without a collection between them: each attempt reclaims from its own NIC's
+	 * pool only, and the JVM's limit holds throughout.
+	 */
+	private static String repeatedUnpooled(final RdmaBufferPool first, final long budget, final int request) {
+		final var transport = new FakeRdmaTransport(new RdmaConfig(true, 0, false, "auto", "", "WARN"));
+		transport.init("http://192.0.2.1:9020", "key", "secret");
+		final var second = new RdmaBufferPool(transport, 4, MIB);
+		second.release(second.acquire(MIB));
+		// Well past the limit of 48 MiB in total, with no explicit collection.
+		final int rounds = 8;
+		for (int i = 0; i < rounds; i++) {
+			final var buffer = RdmaBufferPool.allocateUnpooled(request, first, ByteBuffer::allocateDirect);
+			if (buffer == null) {
+				return "exhausted at " + i;
+			}
+		}
+		return "allocated rounds=" + rounds + " idle=" + first.idleBuffers() + " other=" + second.idleBuffers();
 	}
 
 	private static String plainAllocation(final int request) {

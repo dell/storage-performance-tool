@@ -22,6 +22,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>{@link #shutdown} stops the split copies that still run and waits until their buffers are
  * released. A copy made by the calling thread alone is not tracked and not stopped: it ends with
  * its caller.
+ *
+ * <p>A preparation lane's copier is {@linkplain #stoppable stoppable}: every copy is tracked, one-part
+ * copies included, and it checks the stop between chunks of {@link #PART_BYTES}, so a lane cancelled
+ * in a large copy gives up at its next chunk.
  */
 final class RdmaPayloadCopier implements AutoCloseable {
 
@@ -46,6 +50,8 @@ final class RdmaPayloadCopier implements AutoCloseable {
 
 	private final int threads;
 	private final long closeWaitMillis;
+	/** Whether every copy is tracked and checks the stop per chunk; only on a preparation lane. */
+	private final boolean stoppable;
 	/** Copies every part but the first; {@code null} when the calling thread copies alone. */
 	private final ExecutorService helpers;
 	/** Split copies still in {@link #copy}, and stopped ones whose buffer was not released yet. */
@@ -63,8 +69,14 @@ final class RdmaPayloadCopier implements AutoCloseable {
 
 	/** @param closeWaitMillis how long {@link #shutdown} waits; shortened by tests */
 	RdmaPayloadCopier(final int threads, final String threadNamePrefix, final long closeWaitMillis) {
+		this(threads, threadNamePrefix, closeWaitMillis, false);
+	}
+
+	private RdmaPayloadCopier(
+					final int threads, final String threadNamePrefix, final long closeWaitMillis, final boolean stoppable) {
 		this.threads = threads;
 		this.closeWaitMillis = closeWaitMillis;
+		this.stoppable = stoppable;
 		if (threads < 2) {
 			helpers = null;
 		} else {
@@ -75,6 +87,11 @@ final class RdmaPayloadCopier implements AutoCloseable {
 				return thread;
 			});
 		}
+	}
+
+	/** A preparation lane's copier: every copy is tracked and checks the stop between chunks. */
+	static RdmaPayloadCopier stoppable(final int threads, final String threadNamePrefix) {
+		return new RdmaPayloadCopier(threads, threadNamePrefix, CLOSE_WAIT_MILLIS, true);
 	}
 
 	/**
@@ -89,13 +106,20 @@ final class RdmaPayloadCopier implements AutoCloseable {
 		dst.limit(size);
 		// A slice restarts the item's stamp chunks, so only a copy from the item's start is split.
 		final int parts = helpers == null || item.position() != 0 ? 1 : Math.min(threads, size / PART_BYTES);
-		if (parts < 2) {
+		if (parts < 2 && !stoppable) {
 			fill(item, dst, size);
 		} else {
 			activeSplitCopies.incrementAndGet();
 			boolean awaitsRelease = false;
 			try {
-				copyInParts(item, dst, size, parts);
+				if (parts < 2) {
+					// The item stays at its own position: a stoppable copy reads it as fill does.
+					fillPart(item, dst, size);
+				} else {
+					copyInParts(item, dst, size, parts);
+					item.position(size);
+					dst.position(size);
+				}
 			} catch (final StoppedException e) {
 				awaitsRelease = true;
 				throw e;
@@ -104,8 +128,6 @@ final class RdmaPayloadCopier implements AutoCloseable {
 					activeSplitCopies.decrementAndGet();
 				}
 			}
-			item.position(size);
-			dst.position(size);
 		}
 		dst.flip();
 	}
@@ -187,10 +209,14 @@ final class RdmaPayloadCopier implements AutoCloseable {
 
 	/** Fills one part of a split copy; unlike {@link #fill}, it gives up once the copier is shut down. */
 	private void fillPart(final DataItem part, final ByteBuffer window, final int size) throws IOException {
+		final int limit = window.limit();
 		int totalRead = 0;
 		while (totalRead < size) {
 			if (stopped) {
 				throw new StoppedException();
+			}
+			if (stoppable) {
+				window.limit(Math.min(limit, window.position() + PART_BYTES));
 			}
 			final int bytesRead = part.read(window);
 			if (bytesRead < 0) {
@@ -198,6 +224,7 @@ final class RdmaPayloadCopier implements AutoCloseable {
 			}
 			totalRead += bytesRead;
 		}
+		window.limit(limit);
 		if (totalRead < size) {
 			throw new IOException("RDMA short read: expected " + size + " bytes but got " + totalRead);
 		}
@@ -231,22 +258,34 @@ final class RdmaPayloadCopier implements AutoCloseable {
 	 * @return whether all of that happened within the wait
 	 */
 	boolean shutdown() {
+		signalStop();
+		if (helpers == null && !stoppable) {
+			return true;
+		}
+		return awaitStop(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(closeWaitMillis));
+	}
+
+	/** The first half of {@link #shutdown}, which does not wait: every lane is stopped at once. */
+	void signalStop() {
 		stopped = true;
 		if (helpers == null) {
-			return true;
+			return;
 		}
 		// A part still queued is run here: it sees the stopped copier and fails at once, which
 		// ends the wait of the copy that submitted it.
 		for (final Runnable queued : helpers.shutdownNow()) {
 			queued.run();
 		}
-		final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(closeWaitMillis);
+	}
+
+	/** The second half of {@link #shutdown}, against the caller's deadline ({@link System#nanoTime}). */
+	boolean awaitStop(final long deadline) {
 		boolean interrupted = false;
 		boolean ended = false;
 		while (!ended) {
 			final long remainingNanos = deadline - System.nanoTime();
 			try {
-				ended = helpers.awaitTermination(Math.max(remainingNanos, 0), TimeUnit.NANOSECONDS)
+				ended = (helpers == null || helpers.awaitTermination(Math.max(remainingNanos, 0), TimeUnit.NANOSECONDS))
 								&& activeSplitCopies.get() == 0;
 				if (ended || remainingNanos <= 0) {
 					break;

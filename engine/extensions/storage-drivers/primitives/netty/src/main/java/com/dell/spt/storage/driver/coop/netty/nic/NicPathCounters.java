@@ -64,6 +64,9 @@ public final class NicPathCounters {
 		}
 	}
 
+	/** The one RDMA port a NIC set uses (item 19). */
+	private static final Integer RDMA_PORT = 1;
+
 	private final Row[][] paths;
 	private final Row[] nics;
 	private final Row none = new Row(NicPathRows.Kind.NONE, null, null);
@@ -87,7 +90,9 @@ public final class NicPathCounters {
 			final var nic = layout.nics().get(i);
 			final var planned = plan.nics().stream().filter(n -> n.name().equals(nic.name())).findFirst().orElse(null);
 			final var port = plan.ports().stream().filter(p -> p.nics().contains(nic.name())).findFirst().orElse(null);
-			final var columns = new NicPathRows.Nic(nic.name(), nic.address().getHostAddress(), null, null,
+			final var device = plan.rdma() ? inventory.nic(nic.name()).map(NicInventory.Nic::rdmaDevice).orElse(null) : null;
+			final var columns = new NicPathRows.Nic(nic.name(), nic.address().getHostAddress(), device,
+							device == null ? null : RDMA_PORT,
 							planned == null ? null : planned.gidIndex(),
 							inventory.nic(nic.name()).map(NicInventory.Nic::numaNode).orElse(null),
 							port == null ? null : port.id(),

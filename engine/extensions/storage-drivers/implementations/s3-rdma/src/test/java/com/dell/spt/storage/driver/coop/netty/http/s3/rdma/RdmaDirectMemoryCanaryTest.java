@@ -32,6 +32,11 @@ class RdmaDirectMemoryCanaryTest {
 		assertEquals("allocated idle=0", run("reclaim"));
 	}
 
+	@Test
+	void repeatedLargeUnpooledRequestsStayWithinTheLimitAndReclaimOnlyTheirNicsPool() throws Exception {
+		assertEquals("allocated rounds=8 idle=0 other=1", run("nics"));
+	}
+
 	private static String run(final String mode) throws IOException, InterruptedException {
 		final String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
 		final Process process = new ProcessBuilder(java, DIRECT_LIMIT, "-cp", System.getProperty("java.class.path"),

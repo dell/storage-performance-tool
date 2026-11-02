@@ -11,6 +11,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.IntFunction;
 
 /**
@@ -98,6 +100,9 @@ final class RdmaBufferPool {
 
 	/** Allocates pool buffers; replaced only by tests to simulate exhausted direct memory. */
 	IntFunction<ByteBuffer> allocator = ByteBuffer::allocateDirect;
+
+	/** Told of each new buffer as it is registered; only a NIC Pool has one, for its diagnostics. */
+	Consumer<PooledBuffer> registrationListener;
 
 	final LongAdder hits = new LongAdder();
 	final LongAdder created = new LongAdder();
@@ -191,6 +196,10 @@ final class RdmaBufferPool {
 		final PooledBuffer pooled = new PooledBuffer(buffer, mrHandle, capacity);
 		pooled.leased = true;
 		created.increment();
+		final Consumer<PooledBuffer> listener = registrationListener;
+		if (listener != null) {
+			listener.accept(pooled);
+		}
 		return pooled;
 	}
 
@@ -281,6 +290,11 @@ final class RdmaBufferPool {
 		deregisterAfterUnlock(drained);
 	}
 
+	/** The most buffers one size class holds. */
+	int maxBuffersPerClass() {
+		return maxBuffersPerClass;
+	}
+
 	/** Buffers created and not yet discarded, evicted, or drained, across all classes. */
 	synchronized int liveBuffers() {
 		return live.values().stream().mapToInt(Integer::intValue).sum();
@@ -313,9 +327,26 @@ final class RdmaBufferPool {
 	}
 
 	String summary() {
-		return "poolHits=" + hits.sum() + ", poolCreated=" + created.sum() + ", poolExhausted=" + exhausted.sum()
-						+ ", poolUnpooled=" + unpooled.sum() + ", poolEvicted=" + evicted.sum()
-						+ ", poolDiscarded=" + discarded.sum() + ", poolInvalidReturns=" + invalidReturns.sum();
+		return summary(List.of(this));
+	}
+
+	/** The form of {@link #summary()} with each count summed over {@code pools}. */
+	static String summary(final List<RdmaBufferPool> pools) {
+		return "poolHits=" + sum(pools, pool -> pool.hits) + ", poolCreated=" + sum(pools, pool -> pool.created)
+						+ ", poolExhausted=" + sum(pools, pool -> pool.exhausted)
+						+ ", poolUnpooled=" + sum(pools, pool -> pool.unpooled)
+						+ ", poolEvicted=" + sum(pools, pool -> pool.evicted)
+						+ ", poolDiscarded=" + sum(pools, pool -> pool.discarded)
+						+ ", poolInvalidReturns=" + sum(pools, pool -> pool.invalidReturns);
+	}
+
+	/** One of the counts, summed over {@code pools}. */
+	static long sum(final List<RdmaBufferPool> pools, final Function<RdmaBufferPool, LongAdder> count) {
+		long total = 0;
+		for (final RdmaBufferPool pool : pools) {
+			total += count.apply(pool).sum();
+		}
+		return total;
 	}
 
 	/** Ends a lease; a buffer that is not leased was already returned and is left alone. */
