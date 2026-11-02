@@ -37,6 +37,22 @@ public class FileIoHelperTest {
 	}
 
 	@Test
+	public void openSrcFileDoesNotTakeASiblingDirectoryForTheSourcePath() throws Exception {
+		final Path dir = Files.createTempDirectory("fs-open-src-boundary-");
+		final Path source = Files.createDirectories(dir.resolve("abc"));
+		final Path sibling = Files.createDirectories(dir.resolve("abcdef"));
+		Files.write(sibling.resolve("file.bin"), new byte[]{1
+		});
+
+		// The name starts with the source path's letters, not with the source path.
+		final DataItemImpl item = new DataItemImpl(sibling.resolve("file.bin").toString(), 0, 1);
+		final DataOperationImpl<DataItemImpl> op = new DataOperationImpl<>(0, OpType.CREATE, item, source.toString(), null, null, null, 0);
+
+		assertNull(FileIoHelper.openSrcFile(op));
+		assertEquals(Operation.Status.FAIL_IO, op.status());
+	}
+
+	@Test
 	public void openSrcFileReturnsNullWhenSrcPathEmpty() {
 		final DataItemImpl item = new DataItemImpl("file.bin", 0, 0);
 		final DataOperationImpl<DataItemImpl> op = new DataOperationImpl<>(0, OpType.READ, item, null, null, null, null, 0);

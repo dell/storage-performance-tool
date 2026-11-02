@@ -2453,4 +2453,12 @@ public class S3StorageDriverTest {
 						IntegrityMetadataCodec.HTTP_PREFIX + IntegrityMetadataCodec.KEY_DIGEST).length());
 	}
 
+	@Test
+	void multipartKeyIsTheKeyTheRequestAddressed() {
+		assertEquals("abc/s0/k", S3StorageDriver.multipartKey("/abc/abc/s0/k", "abc"));
+		assertEquals("abcdef/s0/k", S3StorageDriver.multipartKey("/abc/abcdef/s0/k", "abc"));
+		assertEquals("pre/k", S3StorageDriver.multipartKey("/abc/pre/k", "abc"));
+		assertEquals("k", S3StorageDriver.multipartKey("/abc/k", "abc"));
+		assertEquals("abc/k", S3StorageDriver.multipartKey("/abc/k", ""));
+	}
 }

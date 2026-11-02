@@ -3,6 +3,7 @@ package com.dell.spt.storage.driver.coop.nio.fs;
 import com.dell.spt.base.data.DataCorruptionException;
 import com.dell.spt.base.data.DataSizeException;
 import com.dell.spt.base.item.DataItem;
+import com.dell.spt.base.item.ItemNamePaths;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.logging.LogUtil;
@@ -493,7 +494,9 @@ public interface FileIoHelper {
 			return null;
 		}
 		final String fileItemName = op.item().name();
-		final Path srcFilePath = fileItemName.startsWith(srcPath) ? FS.getPath(fileItemName) : FS.getPath(srcPath, fileItemName);
+		final Path srcFilePath = ItemNamePaths.startsWithPath(fileItemName, srcPath)
+						? FS.getPath(fileItemName)
+						: FS.getPath(srcPath, fileItemName);
 		try {
 			return FS_PROVIDER.newFileChannel(srcFilePath, READ_OPEN_OPT);
 		} catch (final IOException e) {

@@ -2035,7 +2035,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			return;
 		}
 		final String bucket = multipartBucket(op);
-		final String key = multipartKey(op, bucket);
+		final String key = multipartKey(
+						dataUriPath((I) op.item(), op.srcPath(), op.dstPath(), op.type()), bucket);
 		IntegrityCsvArtifacts.logMultipartLifecycleOnce(
 						op,
 						IntegrityCsvArtifacts.nodeIdentity(),
@@ -2063,15 +2064,10 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		return slash < 0 ? relative : relative.substring(0, slash);
 	}
 
-	private static String multipartKey(final CompositeDataOperation op, final String bucket) {
-		String key = op.item().name();
-		if (key.startsWith(SLASH)) {
-			key = key.substring(1);
-		}
-		if (!bucket.isEmpty() && key.startsWith(bucket + SLASH)) {
-			key = key.substring(bucket.length() + 1);
-		}
-		return key;
+	/** The object key of a request URI, the same before and after the item's name is recorded. */
+	static String multipartKey(final String objectUri, final String bucket) {
+		final String key = objectUri.startsWith(SLASH) ? objectUri.substring(1) : objectUri;
+		return !bucket.isEmpty() && key.startsWith(bucket + SLASH) ? key.substring(bucket.length() + 1) : key;
 	}
 
 	private static String mpuFailure(final CompositeDataOperation op) {

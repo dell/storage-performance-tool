@@ -57,6 +57,9 @@ func GenerateWriteScenario(params Params) (string, error) {
 	// Determine storage driver type
 	driverType := resolveStorageDriverType(params.S3Driver)
 
+	// A naming prefix is part of the object key, so it never starts with a slash.
+	namingPrefix := strings.TrimLeft(params.Prefix, "/")
+
 	// Format strings as quoted JavaScript literals
 	data := map[string]interface{}{
 		templateKeyConcurrency:       params.Threads,
@@ -69,8 +72,8 @@ func GenerateWriteScenario(params Params) (string, error) {
 		templateKeyTimestamp:         time.Now().Unix(),
 		templateKeyStorageDriverType: fmt.Sprintf(`"%s"`, driverType),
 		templateKeySaveItems:         params.SaveItems,
-		templateKeyHasPrefix:         params.Prefix != "",
-		templateKeyPrefix:            quoteJS(params.Prefix),
+		templateKeyHasPrefix:         namingPrefix != "",
+		templateKeyPrefix:            quoteJS(namingPrefix),
 		// Step IDs using shared timestamp and ordered numbers
 		templateKeyStepID:       formatStepID(params.Label, 1, ts, stepOpCreate),
 		templateKeyStepIDCreate: formatStepID(params.Label, 1, ts, stepOpCreate),
@@ -268,7 +271,8 @@ func GenerateListScenario(params Params) (string, error) {
 		durationValue = fmt.Sprintf(`"%s"`, escapeJSONString(trimmedDuration))
 	}
 
-	trimmedPrefix := strings.TrimSpace(params.Prefix)
+	// An S3 LIST prefix is part of the object key, so it never starts with a slash.
+	trimmedPrefix := strings.TrimLeft(strings.TrimSpace(params.Prefix), "/")
 	hasPrefix := trimmedPrefix != ""
 	prefixValue := ""
 	if hasPrefix {

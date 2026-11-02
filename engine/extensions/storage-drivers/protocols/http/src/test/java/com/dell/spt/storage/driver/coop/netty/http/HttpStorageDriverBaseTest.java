@@ -34,6 +34,8 @@ import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 /** Tests for HttpStorageDriverBase that do not require any real network. */
 class HttpStorageDriverBaseTest {
@@ -394,6 +396,86 @@ class HttpStorageDriverBaseTest {
 		assertEquals(
 						"/streaming/20MB/109/ldypc1g3fjmr",
 						drv.exposeDataUriPath(item, null, "streaming/20MB/109/", OpType.CREATE));
+	}
+
+	@Test
+	void dataUriPath_generatedNameRepeatingTheBucket_keepsThePrefix() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final var item = new DataItemImpl("abc/s0/k", 0, 64);
+		assertEquals("/abc/abc/s0/k", drv.exposeDataUriPath(item, null, "/abc", OpType.CREATE));
+	}
+
+	@Test
+	void dataUriPath_generatedNameStartingWithTheBucketLetters_staysInTheBucket() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final var item = new DataItemImpl("abcdef/s0/k", 0, 64);
+		assertEquals("/abc/abcdef/s0/k", drv.exposeDataUriPath(item, null, "/abc", OpType.CREATE));
+	}
+
+	@Test
+	void dataUriPath_rootedNameNamingAnotherBucket_staysInTheBucket() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final var item = new DataItemImpl("/abcdef", 0, 64);
+		assertEquals("/abc/abcdef", drv.exposeDataUriPath(item, "/abc", null, OpType.READ));
+	}
+
+	@Test
+	void dataUriPath_shortBucketWithoutShards_keepsTheBucket() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final var item = new DataItemImpl("a1b2c3", 0, 64);
+		assertEquals("/a/a1b2c3", drv.exposeDataUriPath(item, null, "/a", OpType.CREATE));
+	}
+
+	/** The first request and every later use of the recorded name address the same object. */
+	@ParameterizedTest
+	@CsvSource({
+			"abc/s0/k, /abc, /abc/abc/s0/k",
+			"abcdef/s0/k, /abc, /abc/abcdef/s0/k",
+			"zzz/s0/k, /abc, /abc/zzz/s0/k",
+			"s0/k, /s00, /s00/s0/k",
+			"k, /abc/, /abc/k",
+			"/k, /abc, /abc/k",
+			"/k, /abc/, /abc/k",
+			"k, abc, /abc/k",
+			"abc/k, abc, /abc/k",
+	})
+	void dataUriPath_agreesWithTheRecordedName(
+					final String name, final String path, final String expected) throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final var item = new DataItemImpl(name, 0, 64);
+		assertEquals(expected, drv.exposeDataUriPath(item, null, path, OpType.CREATE));
+
+		final var create = new DataOperationImpl<>(
+						0, OpType.CREATE, item, null, path, null, null, 0);
+		final var recorded = create.result().item();
+		assertEquals(expected, drv.exposeDataUriPath(recorded, null, path, OpType.CREATE));
+
+		final var read = new DataOperationImpl<>(0, OpType.READ, recorded, null, null, null, null, 0);
+		assertEquals(expected, drv.exposeDataUriPath(read.item(), read.srcPath(), read.dstPath(), OpType.READ));
+	}
+
+	@Test
+	void dataUriPath_rootedNameHoldsAPathWrittenWithoutASlash() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final var item = new DataItemImpl("/abc/k", 0, 64);
+		assertEquals("/abc/k", drv.exposeDataUriPath(item, "abc", null, OpType.CREATE));
+	}
+
+	@Test
+	void dataUriPath_usesOneSeparatorForEveryForm() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		assertEquals("/abc/k", drv.exposeDataUriPath(new DataItemImpl("k", 0, 1), null, "abc", OpType.CREATE));
+		assertEquals("/abc/k", drv.exposeDataUriPath(new DataItemImpl("/k", 0, 1), null, "abc/", OpType.CREATE));
+		assertEquals("/abc/k", drv.exposeDataUriPath(new DataItemImpl("/k", 0, 1), null, "/abc", OpType.CREATE));
+		assertEquals("/k", drv.exposeDataUriPath(new DataItemImpl("k", 0, 1), null, "/", OpType.CREATE));
+		assertEquals("/k", drv.exposeDataUriPath(new DataItemImpl("k", 0, 1), null, "", OpType.CREATE));
+	}
+
+	@Test
+	void dataUriPath_manifestKeyRepeatingTheBucket_addressesTheKey() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final var item = new DataItemImpl("abc/x", 0, 64);
+		assertEquals("/abc/abc/x", drv.exposeDataUriPath(item, "/abc", null, OpType.READ));
 	}
 
 	// --- applyRangesHeaders + rangeListToStringBuff tests ---
