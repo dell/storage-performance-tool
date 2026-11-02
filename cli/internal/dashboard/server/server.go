@@ -162,6 +162,8 @@ func (a *app) httpServer() *http.Server {
 	mux.HandleFunc("GET /api/catalog/run", a.handleCatalogRun)
 	mux.HandleFunc("GET /api/catalog/compare", a.handleCatalogCompare)
 	mux.HandleFunc("GET /api/catalog/log", a.handleCatalogLog)
+	mux.HandleFunc("GET /api/catalog/artifacts", a.handleCatalogArtifacts)
+	mux.HandleFunc("GET /api/catalog/artifact", a.handleCatalogArtifact)
 	mux.HandleFunc("GET /api/runs/{runID}", a.handleSavedRun)
 	mux.HandleFunc("POST /api/runs", a.handleRun)
 	mux.HandleFunc("POST /api/storage/verify", a.handleVerify)

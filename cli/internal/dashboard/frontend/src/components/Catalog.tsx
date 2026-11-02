@@ -348,6 +348,7 @@ function CatalogRow({
                 </table>
               </div>
             )}
+            <RunArtifacts runId={run.id} />
             {run.status !== "malformed" && (
               <RunLog
                 base={`/api/catalog/log?id=${encodeURIComponent(run.id)}`}
@@ -359,4 +360,89 @@ function CatalogRow({
       )}
     </>
   );
+}
+
+type Artifact = {
+  name: string;
+  kind: string;
+  type: string;
+  size: number;
+};
+
+function RunArtifacts({ runId }: { runId: string }) {
+  const [items, setItems] = useState<Artifact[] | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    setItems(null);
+    setError("");
+    const controller = new AbortController();
+    fetch(`/api/catalog/artifacts?id=${encodeURIComponent(runId)}`, {
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (r) => {
+        const body = await r.json();
+        if (!r.ok) throw new Error(body.error ?? "Could not list artifacts.");
+        if (controller.signal.aborted) return;
+        setItems((body.artifacts as Artifact[]) ?? []);
+        setError("");
+      })
+      .catch((e) => {
+        if (!controller.signal.aborted)
+          setError(
+            e instanceof Error ? e.message : "Could not list artifacts.",
+          );
+      });
+    return () => controller.abort();
+  }, [runId]);
+  return (
+    <section className="catalog-artifacts" aria-label="Run artifacts">
+      <h3>Artifacts</h3>
+      <p className="form-help">
+        CSV, XML, and log files SPT left in this run folder. Only files the
+        dashboard recognizes are listed.
+      </p>
+      {error && (
+        <div className="error" role="alert">
+          {error}
+        </div>
+      )}
+      {items === null && !error ? (
+        <p className="subtle">Loading artifacts…</p>
+      ) : items && items.length === 0 ? (
+        <div className="history-empty catalog-artifacts-empty">
+          <h4>No downloadable artifacts</h4>
+          <p>
+            This run folder has no CSV, XML, or log files the dashboard can
+            offer. Engine log text may also be unavailable for the same reason.
+          </p>
+        </div>
+      ) : (
+        <ul className="artifact-list">
+          {(items ?? []).map((a) => (
+            <li key={a.name}>
+              <a
+                className="button-link"
+                href={`/api/catalog/artifact?id=${encodeURIComponent(runId)}&file=${encodeURIComponent(a.name)}`}
+                download={a.name}
+              >
+                Download {a.type}
+              </a>
+              <span className="artifact-meta">
+                <span className="artifact-kind">{a.kind.toUpperCase()}</span>
+                <span className="subtle">{a.name}</span>
+                <span className="subtle">{formatBytes(a.size)}</span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MiB`;
 }

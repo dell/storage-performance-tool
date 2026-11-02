@@ -2351,3 +2351,42 @@ details.run-log[open] > summary {
   font-size: 12px;
   color: #64738a;
 }
+
+.catalog-artifacts {
+  margin-top: 1.25rem;
+}
+.catalog-artifacts h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+}
+.catalog-artifacts-empty {
+  padding: 0.75rem 0;
+}
+.artifact-list {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.65rem;
+}
+.artifact-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+}
+.artifact-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  align-items: baseline;
+}
+.artifact-kind {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.25rem;
+  background: #e8eef9;
+  color: #1e3a8a;
+}
