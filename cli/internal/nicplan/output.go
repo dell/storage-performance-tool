@@ -30,6 +30,77 @@ type Output struct {
 	Inventory Inventory `json:"inventory"`
 	// Plan is present only when the command was given --interfaces.
 	Plan *Plan `json:"plan"`
+	// PoolDemand is present only when the command was given --pool-request and the plan holds.
+	PoolDemand *PoolDemand `json:"poolDemand"`
+	// Capacity is present only when the command was given --capacity.
+	Capacity *Capacity `json:"capacity"`
+}
+
+// PoolDemand is the engine's RDMA Pool Demand estimate for a request, on this host's planned NICs.
+// The engine owns the arithmetic: the CLI compares the limits it gives and takes the largest.
+type PoolDemand struct {
+	HeadroomBytes int64      `json:"headroomBytes"`
+	Steps         []PoolStep `json:"steps"`
+}
+
+// PoolStep is one step's demand: the drivers that run at once. LimitBytes is the smallest
+// MaxDirectMemorySize that passes both checks, LimitForPoolsBytes and LimitForProcessBytes each
+// check's own, so a value below either fails that check alone. A step's known contributions decide
+// them; Unknown names the rest. Known is false when no contribution is known.
+type PoolStep struct {
+	ID                   string       `json:"id"`
+	LimitBytes           int64        `json:"limitBytes"`
+	LimitForPoolsBytes   int64        `json:"limitForPoolsBytes"`
+	LimitForProcessBytes int64        `json:"limitForProcessBytes"`
+	PoolsNeedBytes       int64        `json:"poolsNeedBytes"`
+	Known                bool         `json:"known"`
+	Partial              bool         `json:"partial"`
+	Unknown              []string     `json:"unknown"`
+	PrewarmResidentBytes int64        `json:"prewarmResidentBytes"`
+	Drivers              []PoolDriver `json:"drivers"`
+}
+
+// PoolDriver is one driver's demand.
+type PoolDriver struct {
+	Demand      string          `json:"demand"`
+	Operations  []PoolOperation `json:"operations"`
+	Prewarm     bool            `json:"prewarm"`
+	PrewarmSkip string          `json:"prewarmSkip"`
+	Nics        []PoolNic       `json:"nics"`
+}
+
+// PoolOperation is what one operation type adds: zero, known or unknown, and where its sizes came
+// from: the setting, the file, or the step that writes the file.
+type PoolOperation struct {
+	Op        string `json:"op"`
+	Demand    string `json:"demand"`
+	Source    string `json:"source"`
+	Reason    string `json:"reason"`
+	Smallest  int64  `json:"smallest_bytes"`
+	Largest   int64  `json:"largest_bytes"`
+	SizeClass int64  `json:"size_class_bytes"`
+}
+
+// PoolNic is one NIC's demand: Count buffers of SizeClassBytes.
+type PoolNic struct {
+	Nic            string `json:"nic"`
+	Demand         string `json:"demand"`
+	Minimum        int    `json:"minimum"`
+	Cap            int    `json:"cap"`
+	Count          int    `json:"count"`
+	SizeClassBytes int64  `json:"sizeClassBytes"`
+	NeedBytes      int64  `json:"needBytes"`
+}
+
+// Capacity is an engine's effective memory: the smaller of the host's MemTotal and the memory.max of
+// its cgroup, ancestors included. Bytes is negative when neither could be read.
+type Capacity struct {
+	Bytes            int64  `json:"bytes"`
+	Source           string `json:"source"`
+	MemTotalBytes    int64  `json:"memTotalBytes"`
+	CgroupLimitBytes int64  `json:"cgroupLimitBytes"`
+	Cgroup           string `json:"cgroup"`
+	Note             string `json:"note"`
 }
 
 // Engine is the engine build that produced the output.

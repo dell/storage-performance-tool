@@ -612,7 +612,7 @@ spt run write \
 | `--attach-existing` | `false` | Attach to pre-started worker nodes; spt still launches the entry node. Unsupported for verification workloads |
 | `--integrity-runtime-identity-tier` | `image` | Distributed verification and guarded existing-prefix DELETE only. `image` proves one immutable image ID across participants; `payload` additionally proves identical canonical `/opt/spt` content (env: `SPT_INTEGRITY_RUNTIME_IDENTITY_TIER`) |
 | `--network-mode` | `host` | Docker network mode: `host` (required for RMI) or `bridge` |
-| `--interfaces` | from `SPT_INTERFACES` or none | Spread each engine's S3 connections over a NIC set: `auto`, or a comma-separated list of interface names, IPv4 addresses or RDMA devices, resolved on each host. Default Netty S3 driver, host networking and `--endpoint-selection default` only; rejected with `tables`, `mock`, an `--rdma-device` other than `auto`, `--rdma-local-ip`, and an `--engine-override` of `storage.net.interfaces` or `storage.net.nodeInterfaces`. See [Network Interfaces](NETWORK_INTERFACES.md) |
+| `--interfaces` | from `SPT_INTERFACES` or none | Spread each engine's S3 connections over a NIC set: `auto`, or a comma-separated list of interface names, IPv4 addresses or RDMA devices, resolved on each host. Default Netty S3 driver or `s3-rdma`, host networking and `--endpoint-selection default` only; rejected with `--s3-driver aws`, `tables`, `mock`, an `--rdma-device` other than `auto`, `--rdma-local-ip`, and an `--engine-override` of `storage.net.interfaces` or `storage.net.nodeInterfaces`. See [Network Interfaces](NETWORK_INTERFACES.md) |
 | `--host-interfaces` | from `SPT_HOST_INTERFACES` or none | Replace `--interfaces` on one host: `<host>=<value>`, with `<value>` `auto`, a comma-separated list, or `none` to turn NICs off there. Repeat for more hosts. See [Host overrides](NETWORK_INTERFACES.md#host-overrides). With either flag, `--duration` and the rates count from the moment every engine is prepared; see [Start of a step](NETWORK_INTERFACES.md#start-of-a-step). |
 | `--rmi-port-start` | `40000` | Starting port for RMI range |
 | `--rmi-port-count` | `10` | Number of RMI ports to allocate |
@@ -653,7 +653,8 @@ See [S3_RDMA.md](S3_RDMA.md) for detailed documentation, architecture, and troub
 | `--rdma-timeout-ms` | `30000` | RDMA operation timeout in milliseconds |
 | `--rdma-allow-missing-bytes-header` | `false` | Legacy servers only: accept an RDMA GET success without `x-amz-rdma-bytes-transferred` and count the requested size. By default such a response fails as corrupt |
 | `--rdma-buffer-pool` | `true` | Reuse registered RDMA buffers across operations. `false` allocates and registers a buffer for every operation (the previous behavior) |
-| `--rdma-copy-threads` | `1` | Threads that copy one PUT payload into its RDMA buffer. `1` copies on the driver's dispatcher thread alone. A higher value splits each payload of 2 MiB or more across that many threads; each worker then keeps that many threads less one for the copy |
+| `--rdma-pool-shortfall` | `fail` | With a NIC set, what a short RDMA pool does: `fail` stops the run before any object operation, `warn` runs on with per-operation buffers. Also from `RDMA_POOL_SHORTFALL`. See [S3-RDMA with a NIC set](S3_RDMA.md#nic-sets) |
+| `--rdma-copy-threads` | `1` | Threads that copy one PUT payload into its RDMA buffer, per NIC with a NIC set. `1` copies on the driver's dispatcher thread alone. A higher value splits each payload of 2 MiB or more across that many threads; each worker then keeps that many threads less one for the copy |
 
 #### 8. S3 Tables Options
 
@@ -1337,6 +1338,15 @@ spt verify [--test-hosts <hosts>] [options]
 | `--endpoints`, `-e` | `[]` | S3 endpoint URLs to plan Paths for with `--interfaces`. With a NIC set, reads `S3_ENDPOINTS`, then `S3_ENDPOINT`, when not given |
 | `--slice-endpoints` | `false` | Plan each node's slice of the endpoints, as a distributed run with `--slice-endpoints` |
 | `--threads`, `-t` | `1` | Concurrency limit whose per-NIC permit shares the plan shows. With a NIC set, reads `THREADS` when not given |
+| `--workload` | `write` | With `--use-rdma` and a NIC set, the run's workload for the [RDMA pool lines](#rdma-pools): `write`, `read`, `mixed` or `delete` |
+| `--object-size` | `""` | The run's object size, which turns the RDMA pool lines on |
+| `--part-size` | `""` | The run's multipart part size |
+| `--mpu-concurrent-objects`, `--mpu-concurrent-parts` | `0` | The run's multipart limits |
+| `--items-file`, `--read-items-file` | `""` | The read or mixed run's item file, read on this host, which also turns the RDMA pool lines on |
+| `--rdma-threshold` | `1MB` | The run's minimum object size for RDMA |
+| `--rdma-buffer-pool` | `true` | `false` turns the pool off, which has nothing to preview |
+| `--rdma-pool-shortfall` | `fail` | What a short pool does: `fail` fails the check, `warn` warns. Also from `RDMA_POOL_SHORTFALL` |
+| `--attach-existing` | `false` | The run attaches to its workers, which the CLI cannot size |
 
 ### Verification Process
 
@@ -1409,7 +1419,33 @@ spt verify --test-hosts "rdma1,rdma2" --use-rdma
 # Preview each node's NICs and Paths for a run's endpoints
 spt verify --test-hosts "rdma1,rdma2" --use-rdma --interfaces auto \
   -e http://192.0.2.101:9000,http://192.0.2.102:9000 --slice-endpoints --threads 64
+
+# Preview the RDMA pools and direct memory of a read run on those NICs
+spt verify --test-hosts "rdma1,rdma2" --use-rdma --interfaces auto \
+  -e http://192.0.2.101:9000,http://192.0.2.102:9000 --threads 96 --workload read --object-size 1GiB
 ```
+
+### RDMA pools
+
+With `--use-rdma`, a NIC set and the run's workload flags (`--object-size`, or an item file), verify previews the estimate `spt run` makes, from the same planner, run on each node in a short-lived container:
+
+```text
+RDMA pools on rdma1 (shortfall: fail):
+  Step seed: needs 192GiB
+    Driver 1 PUT: 1GiB in the 1GiB class, from --object-size
+      NIC ens1f0np0: minimum 24, cap 25, need 24GiB (24 x 1GiB)
+      NIC ens2f0np0: minimum 24, cap 25, need 24GiB (24 x 1GiB)
+  Step read: needs 192GiB
+    Driver 1 GET: 1GiB in the 1GiB class, from seed
+      NIC ens1f0np0: minimum 24, cap 25, need 24GiB (24 x 1GiB)
+      NIC ens2f0np0: minimum 24, cap 25, need 24GiB (24 x 1GiB)
+  Checks at 192g: each pool within its budget: passes (needs 192GiB); the process limit: passes (needs 104GiB); the steps need 192GiB
+  Capacity: 1016GiB from host memory of 1024GiB, less 4GiB heap and a 4GiB reserve
+  MaxDirectMemorySize: the CLI would set 192g
+  Pre-warm: makes 96GiB resident
+```
+
+Each step shows each driver's demand: zero, known or unknown, with where its sizes came from: the setting, the file, or the step that writes the file. The checks are given at the value the engine would run with: the one the CLI would set, the one in `SPT_JAVA_OPTS`, or the shipped default. With `--attach-existing`, a worker's limit is its own, so verify says only its engine can check it. A short pool fails verification under `--rdma-pool-shortfall=fail`, the default, and warns under `warn`. Without a NIC set, without `--use-rdma` or without those flags, verify shows none of these lines. See [S3-RDMA with a NIC set](S3_RDMA.md#nic-sets) for the rules.
 
 ### Output Interpretation
 

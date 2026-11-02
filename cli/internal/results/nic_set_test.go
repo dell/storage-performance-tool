@@ -162,3 +162,43 @@ func TestReadNicEnginesCarriesTheBaseAndTotalEventLoops(t *testing.T) {
 		t.Fatalf("engine = %+v", got)
 	}
 }
+
+func TestReadNicEnginesKeepsTheEnginesPoolReportAndEffectiveLimit(t *testing.T) {
+	dir := t.TempDir()
+	stepID := "s1"
+	writeMetricsTotals := filepath.Join(dir, stepID+"."+constants.ResultsArtifactSuffixMetricsTotal)
+	if err := os.WriteFile(writeMetricsTotals, []byte("Nodes\n1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report := `{"schema_version":1,"step_id":"s1","hardware_threads":8,"event_loops":8,` +
+		`"pool":{"max_direct_memory_bytes":206158430208,"required_limit_bytes":206158430208,"prewarm_ms":50}}`
+	if err := os.WriteFile(filepath.Join(dir, stepID+".nic.set.json"), []byte(report), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := readNicSetReport(filepath.Join(dir, stepID+".nic.set.json"), stepID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if engine.MaxDirectMemoryBytes == nil || *engine.MaxDirectMemoryBytes != 206158430208 {
+		t.Fatalf("effective limit = %v", engine.MaxDirectMemoryBytes)
+	}
+	if !strings.Contains(string(engine.Pool), "prewarm_ms") {
+		t.Fatalf("pool = %s", engine.Pool)
+	}
+	plain, err := readNicSetReport(writeNicSetFile(t, dir, `{"schema_version":1,"step_id":"s1","hardware_threads":8,"event_loops":8}`), stepID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.MaxDirectMemoryBytes != nil || plain.Pool != nil {
+		t.Fatalf("a report without NIC Pools has neither: %+v", plain)
+	}
+}
+
+func writeNicSetFile(t *testing.T, dir, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, "plain.nic.set.json")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}

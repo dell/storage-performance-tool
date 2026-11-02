@@ -9,12 +9,31 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/nicplan"
+	"github.com/dell/storage-performance-tool/cli/internal/poolsizing"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/spf13/cobra"
 )
 
 // rdmaDeviceAuto is --rdma-device's default, which leaves each NIC's device to the NIC set.
 const rdmaDeviceAuto = "auto"
+
+// flagRdmaPoolShortfall is what a short RDMA pool does with a NIC set.
+const flagRdmaPoolShortfall = "rdma-pool-shortfall"
+
+// readRdmaPoolShortfall returns --rdma-pool-shortfall, empty when it was not given, and rejects any
+// other value than fail or warn, naming where the value came from.
+func readRdmaPoolShortfall(cmd *cobra.Command) (string, error) {
+	if cmd.Flags().Lookup(flagRdmaPoolShortfall) == nil || !cmd.Flags().Changed(flagRdmaPoolShortfall) {
+		return "", nil
+	}
+	value, _ := cmd.Flags().GetString(flagRdmaPoolShortfall)
+	value = strings.TrimSpace(value)
+	if value != poolsizing.ShortfallFail && value != poolsizing.ShortfallWarn {
+		return "", fmt.Errorf("%s must be %s or %s, not %q", flagSource(cmd, flagRdmaPoolShortfall, constants.EnvRdmaPoolShortfall),
+			poolsizing.ShortfallFail, poolsizing.ShortfallWarn, value)
+	}
+	return value, nil
+}
 
 // flagSource names where a flag's value came from, for messages: the flag, or its environment
 // variable, which cli/.env also sets.

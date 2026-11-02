@@ -32,13 +32,11 @@ func TestValidateInterfacesRejectsWhatANicSetCannotServe(t *testing.T) {
 		"mock": {InterfacesTarget{WorkloadType: workload.Mock},
 			"--interfaces does not support the mock workload"},
 		"aws": {InterfacesTarget{S3Driver: S3DriverAws, WorkloadType: workload.Write},
-			"--interfaces requires the default Netty S3 driver, not --s3-driver aws"},
-		"rdma": {InterfacesTarget{S3Driver: S3DriverRdma, WorkloadType: workload.Write},
-			"--interfaces requires the default Netty S3 driver, not --s3-driver rdma"},
+			"--interfaces requires the default Netty S3 driver or --s3-driver rdma, not --s3-driver aws"},
 		"round-robin": {InterfacesTarget{WorkloadType: workload.Mixed, EndpointSelection: roundRobin},
 			"--interfaces supports only --endpoint-selection default, not round-robin"},
 		"the environment's value": {InterfacesTarget{Source: "SPT_INTERFACES (environment or .env)", S3Driver: S3DriverAws},
-			"SPT_INTERFACES (environment or .env) requires the default Netty S3 driver, not --s3-driver aws"},
+			"SPT_INTERFACES (environment or .env) requires the default Netty S3 driver or --s3-driver rdma, not --s3-driver aws"},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {

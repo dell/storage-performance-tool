@@ -85,6 +85,8 @@ type Report struct {
 	Config   Config
 	Ready    bool
 	Summary  string
+	// PoolPreview holds the RDMA pool lines, which report on the engines rather than one check.
+	PoolPreview string
 }
 
 // Verifier performs verification checks on multiple hosts

@@ -14,6 +14,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/nicplan"
+	"github.com/dell/storage-performance-tool/cli/internal/poolsizing"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/internal/verification"
 	"github.com/spf13/cobra"
@@ -80,6 +81,18 @@ func registerVerifyFlags(flags *pflag.FlagSet) {
 	flags.StringSliceP("endpoints", "e", []string{}, "S3 endpoint URLs to plan Paths for with --interfaces (comma-separated or repeatable)")
 	flags.Bool("slice-endpoints", false, "Plan each node's slice of the endpoints, as a distributed run with --slice-endpoints")
 	flags.IntP("threads", "t", 1, "Concurrency limit whose per-NIC permit shares --interfaces shows")
+	// The run's workload flags, for the RDMA pool lines of --use-rdma with a NIC set.
+	flags.String("workload", "write", "With --use-rdma and a NIC set: the run's workload, write, read, mixed or delete")
+	flags.String("object-size", "", "With --use-rdma and a NIC set: the run's object size, which previews its RDMA pools")
+	flags.String("part-size", "", "With --use-rdma and a NIC set: the run's multipart part size")
+	flags.Int("mpu-concurrent-objects", 0, "With --use-rdma and a NIC set: the run's multipart objects in flight (0 = unlimited)")
+	flags.Int("mpu-concurrent-parts", 0, "With --use-rdma and a NIC set: the run's parts in flight per object (0 = unlimited)")
+	flags.String("items-file", "", "With --use-rdma and a NIC set: the read run's item file, read on this host")
+	flags.String("read-items-file", "", "With --use-rdma and a NIC set: the mixed run's item file, read on this host")
+	flags.String("rdma-threshold", "1MB", "With --use-rdma and a NIC set: the run's minimum object size for RDMA")
+	flags.Bool("rdma-buffer-pool", true, "With --use-rdma and a NIC set: false turns the pool off, which has nothing to preview")
+	flags.String(flagRdmaPoolShortfall, poolsizing.ShortfallFail, "With --use-rdma and a NIC set: what a short pool does, fail or warn (env: RDMA_POOL_SHORTFALL)")
+	flags.Bool(flagAttachExistingWorkers, false, "With --use-rdma and a NIC set: the run attaches to its workers, which the CLI cannot size")
 }
 
 func runVerify(cmd *cobra.Command, _ []string) error {
@@ -177,6 +190,13 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 
 	verifier := verification.NewVerifier(hosts, config)
 	report := verifier.VerifyAll()
+	attached, _ := cmd.Flags().GetBool(flagAttachExistingWorkers)
+	if err := verifyPoolPreview(commandContext(cmd), cmd, verifyPoolInput{
+		hosts: hosts, interfaces: interfaces, hostInterfaces: hostInterfaces, endpoints: endpoints,
+		slice: sliceEndpoints, threads: threads, attached: attached,
+	}, report); err != nil {
+		return err
+	}
 
 	// Display results
 	report.Print()

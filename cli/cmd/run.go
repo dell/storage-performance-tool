@@ -30,6 +30,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/integrityplan"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/nicplan"
+	"github.com/dell/storage-performance-tool/cli/internal/poolsizing"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/preflight"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
@@ -1957,6 +1958,10 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 		if err != nil {
 			return err
 		}
+		poolSizing, err := planPoolSizing(commandContext(cmd), params, prepared.Plan().Steps, hostInfos, sptImage, attachExisting)
+		if err != nil {
+			return err
+		}
 		metadata := buildRunMetadata(runMetadataInput{
 			WorkloadType:         workloadType,
 			Params:               params,
@@ -1976,6 +1981,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			Command:              cmd,
 			AutoTerminateSeconds: autoTerminate,
 		})
+		metadata.PoolSizing = poolSizing
 		metadata.preparedInputs = true
 		metadata.preparedCleanup = prepared.Cleanup
 		metadata.preparedScenarioJS = prepared.ScenarioJS()
@@ -2432,7 +2438,9 @@ Shorthand: --use-rdma is equivalent to --s3-driver rdma. (env: SPT_S3_DRIVER)`)
 	runCmd.Flags().Bool("rdma-buffer-pool", true,
 		"Reuse registered RDMA buffers across operations; false registers a buffer per operation (env: RDMA_BUFFER_POOL)")
 	runCmd.Flags().Int("rdma-copy-threads", 1,
-		"Threads copying one RDMA PUT payload into its buffer; 1 copies on the dispatcher thread alone (env: RDMA_COPY_THREADS)")
+		"Threads copying one RDMA PUT payload into its buffer, per NIC with --interfaces; 1 copies on the dispatcher thread alone (env: RDMA_COPY_THREADS)")
+	runCmd.Flags().String(flagRdmaPoolShortfall, poolsizing.ShortfallFail,
+		"With --interfaces, what a short RDMA pool does: fail stops the run, warn runs on with per-operation buffers (env: RDMA_POOL_SHORTFALL)")
 
 	// Checksum Options
 	runCmd.Flags().String("checksum", "",
@@ -2887,6 +2895,11 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		}
 	}
 	params.HostInterfaces = overrides
+	shortfall, err := readRdmaPoolShortfall(cmd)
+	if err != nil {
+		return params, err
+	}
+	params.RdmaPoolShortfall = shortfall
 	return params, nil
 }
 

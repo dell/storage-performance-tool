@@ -67,8 +67,8 @@ func ValidateInterfaces(interfaces []string, target InterfacesTarget) error {
 	if target.WorkloadType == workload.Tables || target.WorkloadType == workload.Mock {
 		return fmt.Errorf("%s does not support the %s workload", source, target.WorkloadType)
 	}
-	if driver := resolveStorageDriverType(target.S3Driver); driver != storageDriverTypeS3 {
-		return fmt.Errorf("%s requires the default Netty S3 driver, not --s3-driver %s", source, target.S3Driver)
+	if driver := resolveStorageDriverType(target.S3Driver); driver != storageDriverTypeS3 && driver != storageDriverTypeS3Rdma {
+		return fmt.Errorf("%s requires the default Netty S3 driver or --s3-driver %s, not --s3-driver %s", source, S3DriverRdma, target.S3Driver)
 	}
 	if target.EndpointSelection.Active() {
 		return fmt.Errorf("%s supports only --endpoint-selection %s, not %s",

@@ -621,6 +621,7 @@ func (dm *DockerManager) StartContainerContext(ctx context.Context, image string
 	if v := os.Getenv(constants.EnvSptJavaOpts); v != "" {
 		envVars = append(envVars, constants.EnvSptJavaOpts+"="+v)
 	}
+	envVars = withEngineOptions(envVars)
 	diagnosticBinds := dm.prepareDiagnosticsCapture(constants.DockerRoleNode)
 
 	// Create container
@@ -689,6 +690,7 @@ func (dm *DockerManager) StartContainerWithScenarioContext(
 	if v := os.Getenv(constants.EnvSptJavaOpts); v != "" {
 		envVars = append(envVars, constants.EnvSptJavaOpts+"="+v)
 	}
+	envVars = withEngineOptions(envVars)
 	diagnosticBinds := dm.prepareDiagnosticsCapture(constants.DockerRoleNode)
 
 	// Create container with volume mount
@@ -775,6 +777,7 @@ func (dm *DockerManager) StartContainerInNodeModeContext(
 	if v := os.Getenv(constants.EnvSptJavaOpts); v != "" {
 		envVars = append(envVars, constants.EnvSptJavaOpts+"="+v)
 	}
+	envVars = withEngineOptions(envVars)
 	logBinds, logEnv := dm.prepareNodeLogCapture()
 	diagnosticBinds := dm.prepareDiagnosticsCapture(constants.DockerRoleNode)
 	envVars = append(envVars, logEnv...)
@@ -922,6 +925,7 @@ func (dm *DockerManager) StartWorkerNodeContainerContext(ctx context.Context, im
 	if v := os.Getenv(constants.EnvSptJavaOpts); v != "" {
 		workerEnv = append(workerEnv, constants.EnvSptJavaOpts+"="+v)
 	}
+	workerEnv = withEngineOptions(workerEnv)
 	diagnosticBinds := dm.prepareDiagnosticsCapture(constants.DockerRoleWorker)
 	containerConfig := &container.Config{
 		Image:        image,
@@ -1023,6 +1027,7 @@ func (dm *DockerManager) StartEntryNodeContainerContext(ctx context.Context, ima
 	if v := os.Getenv(constants.EnvSptJavaOpts); v != "" {
 		envVars = append(envVars, constants.EnvSptJavaOpts+"="+v)
 	}
+	envVars = withEngineOptions(envVars)
 	diagnosticBinds := dm.prepareDiagnosticsCapture(constants.DockerRoleEntry)
 	containerConfig := &container.Config{
 		Image:        image,

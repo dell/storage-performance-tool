@@ -23,6 +23,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/nicplan"
+	"github.com/dell/storage-performance-tool/cli/internal/poolsizing"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
@@ -65,6 +66,7 @@ type runMetadata struct {
 	Preparation             map[string]stepPreparation                              `json:"preparation,omitempty"`
 	NicEngines              map[string][]results.NicEngine                          `json:"nicEngines,omitempty"`
 	NicEnginesError         string                                                  `json:"nicEnginesError,omitempty"`
+	PoolSizing              []poolsizing.Engine                                     `json:"poolSizing,omitempty"`
 	StepLifecycles          map[string]string                                       `json:"stepLifecycles,omitempty"`
 	ResultsOptions          resultsOptionsSnapshot                                  `json:"resultsOptions"`
 	CLI                     runCLIInfo                                              `json:"cli"`

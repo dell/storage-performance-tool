@@ -2,7 +2,7 @@
 
 By default an engine's S3 connections leave the client by the kernel's route to each endpoint, so one engine uses one NIC per destination. `--interfaces` gives each engine a NIC set instead: it spreads the engine's connections over several client NICs, each connection bound to its NIC's device and source address. One engine can then drive every port of a multi-port client.
 
-This applies to the default Netty `s3` driver. Preview a host's plan with [`spt verify --interfaces`](SPT_SYNTAX.md#nics-and-the-nic-plan) before a run.
+This applies to the default Netty `s3` driver and to `s3-rdma`, which also gets one RDMA context, buffer pool and preparation thread per NIC: see [S3-RDMA with a NIC set](S3_RDMA.md#nic-sets). Preview a host's plan with [`spt verify --interfaces`](SPT_SYNTAX.md#nics-and-the-nic-plan) before a run.
 
 ## Options
 
@@ -18,7 +18,7 @@ This applies to the default Netty `s3` driver. Preview a host's plan with [`spt 
 
 `spt run` rejects `--interfaces` with:
 
-- a driver other than the default Netty `s3` driver: `--s3-driver aws`, `--s3-driver rdma` or `--use-rdma`;
+- `--s3-driver aws`, the driver that cannot bind to a NIC;
 - the `tables` or `mock` workload;
 - `--network-mode bridge`, where a container sees only its own interface;
 - an `--endpoint-selection` other than `default`;
