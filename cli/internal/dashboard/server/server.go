@@ -23,6 +23,9 @@ type Options struct {
 	ConfigFile  string
 	Output      io.Writer
 	OpenBrowser bool
+	// ResultsRoot is the read-only tree the results catalog scans. Defaults to
+	// DASHBOARD_RESULTS_ROOT, then ~/results.
+	ResultsRoot string
 }
 
 // Run serves the dashboard on 127.0.0.1 until ctx is cancelled, then stops
@@ -127,6 +130,15 @@ func newApp(opts Options) (*app, error) {
 	a := &app{root: root, home: home, results: filepath.Join(home, "results"), stateDir: stateDir,
 		stateFile: filepath.Join(stateDir, "latest-job.json"), lockFile: filepath.Join(stateDir, "job.lock"), port: strconv.Itoa(n), sptBin: sptBin,
 		storageFile: filepath.Join(stateDir, "storage-config.json"), verifyFile: filepath.Join(stateDir, "storage-verification.json")}
+	a.catalogRoot = opts.ResultsRoot
+	if a.catalogRoot == "" {
+		a.catalogRoot = os.Getenv("DASHBOARD_RESULTS_ROOT")
+	}
+	if a.catalogRoot != "" {
+		if a.catalogRoot, err = filepath.Abs(a.catalogRoot); err != nil {
+			return nil, err
+		}
+	}
 	a.settings, err = loadSettings(opts.ConfigFile)
 	if err != nil {
 		return nil, err
@@ -145,6 +157,11 @@ func (a *app) httpServer() *http.Server {
 	mux.HandleFunc("DELETE /api/attach", a.handleDetach)
 	mux.HandleFunc("GET /api/runs", a.handleRunHistory)
 	mux.HandleFunc("GET /api/runs/{runID}/csv", a.handleRunCSV)
+	mux.HandleFunc("GET /api/runs/{runID}/log", a.handleRunLog)
+	mux.HandleFunc("GET /api/catalog", a.handleCatalog)
+	mux.HandleFunc("GET /api/catalog/run", a.handleCatalogRun)
+	mux.HandleFunc("GET /api/catalog/compare", a.handleCatalogCompare)
+	mux.HandleFunc("GET /api/catalog/log", a.handleCatalogLog)
 	mux.HandleFunc("GET /api/runs/{runID}", a.handleSavedRun)
 	mux.HandleFunc("POST /api/runs", a.handleRun)
 	mux.HandleFunc("POST /api/storage/verify", a.handleVerify)

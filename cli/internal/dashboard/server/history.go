@@ -247,6 +247,7 @@ func (a *app) savedRun(runID string, latest map[string]any, includeMetrics bool)
 		"object_size":        scenario["ObjectSize"],
 		keyThreads:           scenario["Threads"],
 		keyMaxRuntimeSeconds: params["autoTerminateSeconds"],
+		"driver":             savedRunDriver(params),
 	}
 	status := savedRunStatus(dir, paramsDir, params, metricsSummaries(metrics))
 	job := map[string]any{keyRunID: runID, keyStatus: status, keyStartedAt: startedAt, keyOptions: options}
@@ -283,9 +284,10 @@ func (a *app) savedRun(runID string, latest map[string]any, includeMetrics bool)
 
 // savedRunStatus classifies a saved run from its files when the dashboard holds no
 // record of how it ended (runs from older builds). SPT writes
-// spt_<label>-<stamp>_results_summary.txt when a run finishes; a write-verify run
-// has create, verify and delete phases.
-func savedRunStatus(dir, paramsDir string, _ map[string]any, phases []map[string]any) string {
+// spt_<label>-<stamp>_results_summary.txt when a run finishes. A write-verify run
+// has create, verify and delete phases; a mock run has only the create phase, so
+// it is complete once that phase stored every object.
+func savedRunStatus(dir, paramsDir string, params map[string]any, phases []map[string]any) string {
 	for _, d := range []string{dir, paramsDir} {
 		if regularFile(filepath.Join(d, "results_summary.txt")) {
 			return jobCompleted
@@ -299,6 +301,16 @@ func savedRunStatus(dir, paramsDir string, _ map[string]any, phases []map[string
 	}
 	if len(phases) >= 3 {
 		return jobCompleted
+	}
+	scenario, _ := params["scenarioParams"].(map[string]any)
+	if str(params["workloadType"]) == driverMock && len(phases) >= 1 {
+		want := numberValue(scenario, "ObjectCount")
+		for _, row := range phases {
+			if phaseCodeForBackend(str(row[keyPhase])) == phaseCreate && want > 0 &&
+				numberValue(row, keySuccessfulOps) >= want && numberValue(row, "failed_ops") == 0 {
+				return jobCompleted
+			}
+		}
 	}
 	return jobPartial
 }
@@ -331,6 +343,14 @@ func traceLogOutcome(dir string) string {
 		_ = f.Close()
 	}
 	return outcome
+}
+
+// savedRunDriver is the storage driver a saved run used, from its run parameters.
+func savedRunDriver(params map[string]any) string {
+	if str(params["workloadType"]) == driverMock {
+		return driverMock
+	}
+	return driverS3
 }
 
 func metricsSummaries(metrics map[string]any) []map[string]any {

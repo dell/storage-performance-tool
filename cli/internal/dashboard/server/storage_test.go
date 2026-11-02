@@ -73,7 +73,7 @@ func TestRunsRequireMatchingVerification(t *testing.T) {
 func TestRunUsesConfiguredHosts(t *testing.T) {
 	a := &app{sptBin: "spt"}
 	target := map[string]any{"hosts": []string{"127.0.0.1", "root@node2"}, "endpoint": "https://s3.example", "bucket": "bench"}
-	argv := a.buildArgv("/results/run", "mt-dashboard-test", options{"", 10, "64KiB", 1, 60}, target)
+	argv := a.buildArgv("/results/run", "mt-dashboard-test", options{"", 10, "64KiB", 1, 60, ""}, target)
 	found := false
 	for i, arg := range argv {
 		if arg == "--test-hosts" && i+1 < len(argv) {

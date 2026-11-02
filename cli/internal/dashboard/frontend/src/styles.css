@@ -1768,6 +1768,212 @@ button:disabled {
   flex-basis: 100%;
   font-size: 11px;
 }
+/* Results catalog, compare, logs, and per-node table. */
+.driver-switch {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+  margin: 18px 0;
+}
+.driver-switch p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #65768c;
+}
+.catalog-filters,
+.compare-rule {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: end;
+  margin-bottom: 18px;
+}
+.catalog-filters label,
+.compare-rule label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.catalog-filters input[type="search"] {
+  min-width: 280px;
+}
+.catalog-filters input,
+.catalog-filters select,
+.compare-rule input,
+.compare-rule select {
+  border: 1px solid #dce3ed;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: white;
+}
+.compare-rule input {
+  width: 110px;
+}
+.compare-rule > div {
+  flex: 1 1 100%;
+}
+.compare-rule > div p {
+  margin: 4px 0 0;
+}
+.catalog-filters .form-help {
+  margin: 0;
+  flex: 1 1 100%;
+}
+.catalog-table td small,
+.delta-table td small {
+  display: block;
+  color: #65768c;
+  font-size: 11px;
+  margin-top: 3px;
+}
+.catalog-table td.history-run-id {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 180px;
+  max-width: 300px;
+}
+.catalog-table td.catalog-settings {
+  white-space: normal;
+  min-width: 160px;
+}
+.catalog-malformed {
+  background: #fff7ec;
+}
+.catalog-detail > td {
+  background: #f7f9fc;
+  padding: 16px;
+  /* tables default to nowrap; long file names and log text must wrap here */
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.catalog-issues {
+  margin: 0 0 12px;
+  color: #9a4b16;
+  font-size: 12px;
+}
+.compare-summary {
+  flex: 1 1 100%;
+  margin: 0;
+  font-weight: 600;
+}
+.compare-summary.bad {
+  color: #b42318;
+}
+.compare-summary.good {
+  color: #1f7a4d;
+}
+.compare-legend {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 0;
+  margin: 12px 0;
+  font-size: 12px;
+}
+.compare-legend i {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  margin-right: 6px;
+  vertical-align: -1px;
+}
+.compare-charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  gap: 16px;
+}
+.overlay-chart {
+  margin: 0;
+  border: 1px solid #e0e7f0;
+  border-radius: 8px;
+  padding: 10px;
+  background: white;
+}
+.overlay-chart figcaption {
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.overlay-chart svg {
+  width: 100%;
+  height: auto;
+}
+.overlay-chart .axis {
+  stroke: #c7d1de;
+}
+.overlay-chart .tick {
+  font-size: 10px;
+  fill: #65768c;
+}
+.flag {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #eef2f7;
+  color: #30435d;
+}
+.flag-regressed .flag,
+.flag.flag-regressed {
+  background: #fde8e7;
+  color: #b42318;
+}
+.flag.flag-improved {
+  background: #e6f4ec;
+  color: #1f7a4d;
+}
+.flag.flag-not_comparable,
+.flag.flag-insufficient,
+.flag.flag-no_data {
+  background: #fff7ec;
+  color: #9a4b16;
+}
+.run-log {
+  margin-top: 18px;
+}
+.run-log-heading {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+.run-log-heading h2,
+.run-log-heading h3 {
+  margin: 0;
+  flex: 1 1 auto;
+}
+.log-lines {
+  max-height: 360px;
+  overflow: auto;
+  background: #101827;
+  color: #dbe4f0;
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.log-warn {
+  color: #f5c46b;
+}
+.log-error {
+  color: #ff8a80;
+}
+.node-table td:nth-child(n + 4) {
+  font-variant-numeric: tabular-nums;
+}
+details.run-log > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+details.run-log[open] > summary {
+  margin-bottom: 12px;
+}
 
 /* Expert configuration: progressive disclosure without changing the run API. */
 .configure--expert {

@@ -272,6 +272,21 @@ func (a *app) verified(target map[string]any) bool {
 	return a.currentVerification(target).Status == verifyPassed
 }
 
+// nodesVerified reports whether every client machine passed the last verification
+// of the current configuration, ignoring the S3 endpoint check (mock runs need no S3).
+func (a *app) nodesVerified(target map[string]any) bool {
+	v := a.currentVerification(target)
+	if v.Status == "idle" || v.Status == verifyRunning || len(v.Nodes) == 0 {
+		return false
+	}
+	for _, n := range v.Nodes {
+		if n.Status != verifyPassed {
+			return false
+		}
+	}
+	return true
+}
+
 func (a *app) storageState(target map[string]any) map[string]any {
 	cfg := a.storageSnapshot()
 	return map[string]any{"hosts": cfg.Hosts, "endpoint": cfg.Endpoint, "max_hosts": maxHosts, "verification": a.currentVerification(target)}

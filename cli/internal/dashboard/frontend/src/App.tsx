@@ -8,6 +8,11 @@ import { MeasuredDetails, PhaseResults } from "./components/RunMetrics";
 import { Charts } from "./components/RunCharts";
 import { RunHistory } from "./components/RunHistory";
 import { ConnectRun } from "./components/ConnectRun";
+import { Catalog } from "./components/Catalog";
+import { Compare } from "./components/Compare";
+import { NodeTable } from "./components/NodeTable";
+import { RunLog } from "./components/RunLog";
+import { runWorkloadType, workloadLabel } from "./utils/catalog";
 import {
   elapsed,
   formatNumber as fmt,
@@ -113,8 +118,10 @@ function useServer() {
 export default function App() {
   const { state, error, received, refresh } = useServer();
   const [page, setPage] = useState<
-    "dashboard" | "configure" | "history" | "connect"
+    "dashboard" | "configure" | "history" | "connect" | "catalog" | "compare"
   >("configure");
+  const [compareIDs, setCompareIDs] = useState<string[]>([]),
+    [compareBaseline, setCompareBaseline] = useState("");
   const landed = useRef(false);
   // Open on the live view only when a run is already in progress at first load.
   useEffect(() => {
@@ -235,6 +242,20 @@ export default function App() {
             ◷ <span>Run history</span>
           </button>
           <button
+            className={page === "catalog" ? "selected" : ""}
+            aria-current={page === "catalog" ? "page" : undefined}
+            onClick={() => setPage("catalog")}
+          >
+            ☰ <span>Results catalog</span>
+          </button>
+          <button
+            className={page === "compare" ? "selected" : ""}
+            aria-current={page === "compare" ? "page" : undefined}
+            onClick={() => setPage("compare")}
+          >
+            ⇄ <span>Compare runs</span>
+          </button>
+          <button
             className={page === "connect" ? "selected" : ""}
             aria-current={page === "connect" ? "page" : undefined}
             onClick={() => setPage("connect")}
@@ -260,7 +281,8 @@ export default function App() {
               ? "SPT server connected"
               : "Connecting to server"}
           <p>
-            {clients} client machine{clients === 1 ? "" : "s"} · Write + verify
+            {clients} client machine{clients === 1 ? "" : "s"} ·{" "}
+            {workloadLabel(runWorkloadType(state?.metrics, state?.job))}
           </p>
         </div>
       </aside>
@@ -317,6 +339,21 @@ export default function App() {
                 await refresh();
                 setPage("dashboard");
               }}
+            />
+          ) : page === "catalog" ? (
+            <Catalog
+              onCompare={(ids, baseline) => {
+                setCompareIDs(ids);
+                setCompareBaseline(baseline);
+                setPage("compare");
+              }}
+            />
+          ) : page === "compare" ? (
+            <Compare
+              key={compareIDs.join(",") + compareBaseline}
+              ids={compareIDs}
+              baseline={compareBaseline}
+              onBack={() => setPage("catalog")}
             />
           ) : page === "history" ? (
             <RunHistory
@@ -601,7 +638,7 @@ function Dashboard({
             </div>
             <div>
               <span>Workload</span>
-              <strong>Write + verify</strong>
+              <strong>{workloadLabel(runWorkloadType(m, job))}</strong>
             </div>
             <div className="progress">
               <div>
@@ -721,7 +758,18 @@ function Dashboard({
               {has("details") && (
                 <MeasuredDetails row={row} phase={selectedPhase} metrics={m} />
               )}
+              {!historical && m?.nodes && <NodeTable nodes={m.nodes} />}
             </>
+          )}
+          {job?.run_id && (
+            <RunLog
+              key={job.run_id}
+              base={`/api/runs/${encodeURIComponent(job.run_id)}/log`}
+              sources={["console", "results"]}
+              title="Errors and logs"
+              collapsed
+              refreshMs={job.status === "running" ? 3000 : 0}
+            />
           )}
           {has("record") && (
             <details className="panel">
