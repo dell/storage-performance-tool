@@ -292,6 +292,9 @@ public class TestConfigBuilder {
 		outputSection.put("color", true);
 
 		Map<String, Object> metrics = new HashMap<>();
+		Map<String, Object> metricsBucket = new HashMap<>();
+		metricsBucket.put("enabled", true);
+		metrics.put("bucket", metricsBucket);
 		Map<String, Object> metricsAverage = new HashMap<>();
 		Map<String, Object> metricsAverageAggregation = new HashMap<>();
 		metricsAverageAggregation.put("period", 10);

@@ -25,6 +25,11 @@ import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.MetricsConstants;
+import com.dell.spt.base.metrics.bucket.BucketMeters;
+import com.dell.spt.base.metrics.bucket.BucketMetricsBudget;
+import com.dell.spt.base.metrics.bucket.BucketRecorder;
+import com.dell.spt.base.metrics.context.MetricsContext;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketSet;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.metrics.steady.SteadySettings;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -34,6 +39,9 @@ import java.io.IOException;
 import java.rmi.RemoteException;
 import java.util.NoSuchElementException;
 import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.IdentityHashMap;
+import java.util.Map;
 import java.util.List;
 import java.util.Objects;
 import java.util.OptionalLong;
@@ -48,6 +56,11 @@ import java.util.function.IntSupplier;
 import org.apache.logging.log4j.Level;
 
 public abstract class LoadStepLocalBase extends LoadStepBase {
+
+	private static final String BUCKET_METRICS_ENABLED = "output-metrics-bucket-enabled";
+
+	private final List<BucketMeters> bucketMeters = new ArrayList<>();
+	private long bucketMeterSets;
 
 	private static final long STEP_CONTEXT_POLL_NANOS = 10_000_000L; // 10ms
 
@@ -373,6 +386,44 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	protected final synchronized void cancelDurationRunCleanupResourcesAfterExhaustion() {
 		cancelDurationDeadlineGuard();
 		cancelDurationDrainDeadlineGuard();
+	}
+
+	/**
+	 * Builds the bucket meters of one step context, in one block before its load starts: for its
+	 * primary metrics context and, in a mixed step, each per-type context.
+	 *
+	 * @param config the context's configuration
+	 * @param primary the context's primary metrics context
+	 * @param byOpType its per-type metrics contexts, or null when it has none
+	 * @return the recorder for the context's results, or null when bucket metrics are off for it: a
+	 *     step with one target bucket, or the off switch
+	 */
+	protected final BucketRecorder initBucketMetrics(
+					final Config config,
+					final MetricsContext primary,
+					final Map<OpType, MetricsContext> byOpType) {
+		if (TargetBucketSet.count(config) <= 1 || !config.boolVal(BUCKET_METRICS_ENABLED)) {
+			return null;
+		}
+		final List<String> members = TargetBucketSet.memberNames(config);
+		final int contexts = byOpType == null || byOpType.isEmpty() ? 1 : byOpType.size();
+		bucketMeterSets += contexts * (members.size() + 1L);
+		BucketMetricsBudget.check(bucketMeterSets, Runtime.getRuntime().maxMemory());
+		final Map<MetricsContext, BucketMeters> metersOfContext = new IdentityHashMap<>();
+		final BucketMeters primaryMeters = new BucketMeters(primary.opType(), members);
+		metersOfContext.put(primary, primaryMeters);
+		final Map<OpType, BucketMeters> metersOfType = new EnumMap<>(OpType.class);
+		if (byOpType != null) {
+			byOpType.forEach((type, context) -> metersOfType.put(
+							type, metersOfContext.computeIfAbsent(context, c -> new BucketMeters(c.opType(), members))));
+		}
+		bucketMeters.addAll(metersOfContext.values());
+		return new BucketRecorder(members, primaryMeters, metersOfType);
+	}
+
+	/** The bucket meters this step built, which are empty when bucket metrics are off. */
+	protected final List<BucketMeters> bucketMeters() {
+		return List.copyOf(bucketMeters);
 	}
 
 	@Override

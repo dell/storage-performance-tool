@@ -198,6 +198,36 @@ public final class TargetBucketSet {
 	}
 
 	/**
+	 * Returns the names of a step's Target Bucket Set: the listed names, or the generated members of
+	 * the step's output path, or of its input path for a step that only reads. Empty for a single
+	 * bucket, and for a generated set whose base path is missing or not a literal, because no name
+	 * can then be known.
+	 */
+	public static List<String> memberNames(final Config config) {
+		final int count = count(config);
+		final List<String> names = names(config);
+		if (count <= 1) {
+			return List.of();
+		}
+		if (!names.isEmpty()) {
+			return names;
+		}
+		final String outputPath = config.stringVal(TargetBuckets.OUTPUT_PATH);
+		final String base = outputPath == null || outputPath.isEmpty()
+						? config.stringVal(TargetBuckets.INPUT_PATH)
+						: outputPath;
+		if (base == null || base.isEmpty() || EXPRESSION_MARKERS.stream().anyMatch(base::contains)) {
+			return List.of();
+		}
+		final List<String> paths = memberPaths(base, count, names);
+		final List<String> members = new ArrayList<>(paths.size());
+		for (final String path : paths) {
+			members.add(TargetBuckets.bucketSegment(path));
+		}
+		return List.copyOf(members);
+	}
+
+	/**
 	 * Returns the member paths of a base path for a set of {@code count} buckets: from the list when
 	 * {@code names} is not empty, otherwise generated from the base. This is the one resolution that
 	 * setup and the operation builders share.

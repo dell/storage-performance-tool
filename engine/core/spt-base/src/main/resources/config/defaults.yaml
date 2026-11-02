@@ -124,6 +124,9 @@ load:
 output:
   color: true
   metrics:
+    # Per-bucket counters and timings for a step with more than one target bucket.
+    bucket:
+      enabled: true
     average:
       aggregation:
         period: 100

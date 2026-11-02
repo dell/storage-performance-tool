@@ -45,6 +45,28 @@ public class TimingMeterImpl implements LongMeter<TimingMetricSnapshot> {
 	}
 
 	/**
+	 * The one rule for which timings a request records: nothing without a duration, a latency when
+	 * it has one, and a time to first byte when it falls within the duration.
+	 */
+	public static void updateRequestTimings(
+					final TimingMeterImpl duration,
+					final TimingMeterImpl latency,
+					final TimingMeterImpl timeToFirstByte,
+					final long latencyMicros,
+					final long durationMicros,
+					final long ttfbMicros) {
+		if (durationMicros > 0) {
+			duration.update(durationMicros);
+			if (latencyMicros > 0) {
+				latency.update(latencyMicros);
+			}
+			if (ttfbMicros > 0 && ttfbMicros <= durationMicros) {
+				timeToFirstByte.update(ttfbMicros);
+			}
+		}
+	}
+
+	/**
 	 * A plain copy of the histogram, consistent with itself: every recorded value is in exactly
 	 * one bucket of the copy, and its total count is the sum of the buckets it read. A plain
 	 * {@link Histogram} holds one count array, half the size of a concurrent copy.
