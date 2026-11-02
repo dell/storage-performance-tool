@@ -200,6 +200,20 @@ Configuration:
         DirectWriteRolloverStrategy: {}
         PatternLayout:
           pattern: "%m%n"
+      - name: nicPathsFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}nic.paths.csv"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          pattern: "%m%n"
+      - name: nicSetFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}nic.set.json"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          pattern: "%m%n"
       - name: operationLifecycleFile
         filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}operation.lifecycle.csv"
         Policies:
@@ -389,6 +403,16 @@ Configuration:
         level: INFO
         AppenderRef:
           ref: rangeReadFile
+        additivity: false
+      - name: com.dell.spt.base.logging.NicPaths
+        level: INFO
+        AppenderRef:
+          ref: nicPathsFile
+        additivity: false
+      - name: com.dell.spt.base.logging.NicSet
+        level: INFO
+        AppenderRef:
+          ref: nicSetFile
         additivity: false
       - name: com.dell.spt.base.logging.OperationLifecycle
         level: INFO

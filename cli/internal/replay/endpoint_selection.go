@@ -3,9 +3,12 @@ package replay
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
@@ -92,7 +95,7 @@ func extractJSEndpointSelections(source string, vars map[string]string, archived
 	code := jsCodeMask(source)
 	var diagnostics []Diagnostic
 	var replacements []jsReplacement
-	for _, occurrence := range jsEndpointOccurrences(code) {
+	for _, occurrence := range jsKeyOccurrences(code, legacyKeyEndpoint) {
 		declaration, valueEnd, err := parseJSEndpointValue(code, occurrence, vars)
 		if err != nil {
 			diagnostics = append(diagnostics, endpointSelectionError("archived scenario "+err.Error()))
@@ -110,37 +113,57 @@ func extractJSEndpointSelections(source string, vars map[string]string, archived
 	return applyJSReplacements(source, replacements), diagnostics
 }
 
-// jsEndpointOccurrence is an object key named endpoint and the object that contains it.
-type jsEndpointOccurrence struct {
+// jsKeyOccurrence is an object key and the object that contains it.
+type jsKeyOccurrence struct {
+	key         string // the key's name
 	keyStart    int    // offset of the key
 	valueStart  int    // offset of the value after the colon
 	parentKey   string // key whose value is the containing object; empty if there is none
+	grandparent string // key whose value holds the containing object; empty if there is none
 	parentOpen  int    // offset of the containing object's opening brace; -1 if there is none
 	parentClose int    // offset of the containing object's closing brace; -1 if it never closes
 }
 
-// jsEndpointOccurrences walks code, which must have its comments masked, as tokens and reports
-// every key named endpoint with its containing object. Strings are skipped as whole tokens, so
+// jsPrecededBy reports whether the last token character before offset is one of chars, which are
+// ASCII. Control characters and Unicode spaces count as space: JavaScript allows a form feed or a
+// no-break space there. Any other non-ASCII character is part of a token.
+func jsPrecededBy(code string, offset int, chars string) bool {
+	for rest := code[:offset]; rest != ""; {
+		r, size := utf8.DecodeLastRuneInString(rest)
+		if r >= ' ' && r != '\uFEFF' && !unicode.IsSpace(r) {
+			return r < utf8.RuneSelf && strings.ContainsRune(chars, r)
+		}
+		rest = rest[:len(rest)-size]
+	}
+	return false
+}
+
+// jsKeyOccurrences walks code, which must have its comments masked, as tokens and reports every
+// key with one of the names, with its containing object. Strings are skipped as whole tokens, so
 // their contents never count as keys.
-func jsEndpointOccurrences(code string) []jsEndpointOccurrence {
+func jsKeyOccurrences(code string, names ...string) []jsKeyOccurrence {
 	type frame struct {
 		key         string
 		open        int
-		occurrences []int // indexes of the endpoint keys directly inside this object
+		occurrences []int // indexes of the reported keys directly inside this object
 	}
 	var stack []frame
-	var occurrences []jsEndpointOccurrence
+	var occurrences []jsKeyOccurrence
 	pendingKey := "" // a key whose colon was just read, until its value starts
 	colonAfter := func(end int) (int, bool) {
 		j := skipJSWhitespace(code, end)
 		return j, j < len(code) && code[j] == ':'
 	}
 	keyRead := func(name string, start, colon int) {
-		if name == "endpoint" {
-			occurrence := jsEndpointOccurrence{keyStart: start, valueStart: skipJSWhitespace(code, colon+1), parentOpen: -1, parentClose: -1}
+		// An object key follows a brace or a comma; a ternary's branch or a label does not.
+		if slices.Contains(names, name) && jsPrecededBy(code, start, "{,") {
+			occurrence := jsKeyOccurrence{key: name, keyStart: start, valueStart: skipJSWhitespace(code, colon+1), parentOpen: -1, parentClose: -1}
 			if len(stack) > 0 {
 				parent := &stack[len(stack)-1]
 				occurrence.parentKey, occurrence.parentOpen = parent.key, parent.open
+				if len(stack) > 1 {
+					occurrence.grandparent = stack[len(stack)-2].key
+				}
 				parent.occurrences = append(parent.occurrences, len(occurrences))
 			}
 			occurrences = append(occurrences, occurrence)
@@ -154,7 +177,7 @@ func jsEndpointOccurrences(code string) []jsEndpointOccurrence {
 		case c == '"' || c == '\'' || c == '`':
 			end := jsStringEnd(code, i)
 			if colon, ok := colonAfter(end + 1); ok && c != '`' && end > i {
-				keyRead(code[i+1:end], i, colon)
+				keyRead(unquoteJSString(code[i+1:end]), i, colon)
 				i = colon
 				continue
 			}
@@ -197,7 +220,7 @@ type jsEndpointDeclaration struct {
 }
 
 // parseJSEndpointValue evaluates one endpoint declaration and returns the offset after its value.
-func parseJSEndpointValue(code string, occurrence jsEndpointOccurrence, vars map[string]string) (jsEndpointDeclaration, int, error) {
+func parseJSEndpointValue(code string, occurrence jsKeyOccurrence, vars map[string]string) (jsEndpointDeclaration, int, error) {
 	if occurrence.parentKey != "net" || occurrence.parentClose < 0 || occurrence.valueStart >= len(code) || code[occurrence.valueStart] != '{' {
 		return jsEndpointDeclaration{}, 0, fmt.Errorf("declares storage.net.endpoint in a form replay cannot evaluate, " +
 			"such as a variable reference or a key outside a \"net\" object; write it as an object literal inside " +
@@ -403,8 +426,9 @@ func endpointSelectionError(message string) Diagnostic {
 	return Diagnostic{Severity: severityError, Code: failureInvalidEndpointSelection, Message: message}
 }
 
-// jsCodeMask returns source with comment text replaced by spaces (line breaks kept), so scans
-// see only executable code at unchanged offsets.
+// jsCodeMask returns source with comments and regular expression literals replaced by spaces
+// (line breaks kept), so scans see only code outside them at unchanged offsets: a regular
+// expression can hold slashes and quotes that would read as a comment or a string.
 func jsCodeMask(source string) string {
 	out := []byte(source)
 	for i := 0; i < len(out); i++ {
@@ -427,9 +451,61 @@ func jsCodeMask(source string) string {
 				}
 			}
 			i = stop - 1
+		case out[i] == '/' && jsRegexCanStart(out, i):
+			if end := jsRegexEnd(source, i); end >= 0 {
+				for j := i; j <= end; j++ {
+					out[j] = ' '
+				}
+				i = end
+			}
 		}
 	}
 	return string(out)
+}
+
+// jsRegexCanStart reports whether a slash at offset opens a regular expression and is no division,
+// by the token before it: a division follows a value. It answers yes only where scenario code
+// plausibly has one, because masking a division would hide real code: not after an arithmetic
+// operator, which x++ / 2 ends with. A keyword counts unless it is a member, such as stats.return.
+func jsRegexCanStart(code []byte, offset int) bool {
+	i := offset - 1
+	for i >= 0 && isJSWhitespace(code[i]) {
+		i--
+	}
+	if i < 0 || strings.IndexByte("(,=:[!&|?{;", code[i]) >= 0 {
+		return true
+	}
+	end := i + 1
+	for i >= 0 && isJSIdentifierPart(code[i]) {
+		i--
+	}
+	if i >= 0 && code[i] == '.' {
+		return false
+	}
+	return slices.Contains([]string{"return", "typeof", "case", "delete", "void", "in", "instanceof", "new", "throw"}, string(code[i+1:end]))
+}
+
+// jsRegexEnd returns the offset of the slash that closes the regular expression opening at open,
+// or -1 when none does on its line.
+func jsRegexEnd(source string, open int) int {
+	inClass := false
+	for i := open + 1; i < len(source); i++ {
+		switch source[i] {
+		case '\\':
+			i++
+		case '\n':
+			return -1
+		case '[':
+			inClass = true
+		case ']':
+			inClass = false
+		case '/':
+			if !inClass {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // jsStringEnd returns the index of the quote closing the string that opens at open.

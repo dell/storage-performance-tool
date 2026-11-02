@@ -15,6 +15,7 @@ import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.StorageDriverBase;
@@ -59,12 +60,14 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	// Admission and dispatch intentionally share one lock to preserve their shutdown boundary.
 	private final ReentrantLock admissionLock = dispatchLock;
 	private final OperationDispatchTask<I, O> opDispatchTask;
+	private volatile boolean dispatchStoppedInTime = true;
 	private final Object mpuSchedulingLock = new Object();
 	private final int configuredMpuObjectLimit;
 	private final int configuredMpuPartLimit;
-	// Evaluated once so the per-operation path reads one final field. supportsDirectDispatch()
-	// must therefore be a constant for the subclass, which is all the capability declaration is.
-	private final boolean directDispatchEnabled = Boolean.parseBoolean(System.getProperty(DIRECT_DISPATCH_PROPERTY, "true"))
+	// Evaluated once so the per-operation path reads one field. supportsDirectDispatch() must
+	// therefore be a constant for the subclass, which is all the capability declaration is. Only
+	// disableDirectDispatch() writes it afterwards, before the first operation.
+	private boolean directDispatchEnabled = Boolean.parseBoolean(System.getProperty(DIRECT_DISPATCH_PROPERTY, "true"))
 					&& supportsDirectDispatch();
 	private volatile boolean mpuSchedulingInitialized = false;
 	/**
@@ -274,9 +277,13 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		}
 	}
 
-	/** Check if the concurrency throttle has available permits. Package-private —
-	 *  used by OperationDispatchTask to double-check before entering backpressure await. */
-	boolean hasAvailableDispatchCapacity() {
+	/**
+	 * Check if the concurrency throttle has available permits. Used by OperationDispatchTask to
+	 * double-check before entering backpressure await. A driver with transport capacity beyond
+	 * the throttle overrides it, so that the task parks instead of spinning while that capacity
+	 * is exhausted; whatever frees it must then call {@link #signalDispatchCapacityAvailable()}.
+	 */
+	protected boolean hasAvailableDispatchCapacity() {
 		return concurrencyThrottle.availablePermits() > 0;
 	}
 
@@ -285,7 +292,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	 * The dispatch task uses the same bound for its shutdown-recovery snapshot, avoiding work
 	 * proportional to a much larger queued batch on every small permit release.
 	 */
-	int dispatchAttemptLimit(final int bufferedOperationCount) {
+	protected int dispatchAttemptLimit(final int bufferedOperationCount) {
 		return Math.max(
 						0,
 						Math.min(bufferedOperationCount, concurrencyThrottle.availablePermits()));
@@ -299,6 +306,16 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	 */
 	protected final boolean directDispatchEnabled() {
 		return directDispatchEnabled;
+	}
+
+	/**
+	 * Turns direct dispatch off for a driver that declares the capability but learns only as it
+	 * starts that its transport cannot use it. Call it in {@code doStart()} before
+	 * {@code super.doStart()} of the first start: that start, which starts the dispatch task,
+	 * publishes the change to the task and to the event loops of every later completion.
+	 */
+	protected final void disableDirectDispatch() {
+		directDispatchEnabled = false;
 	}
 
 	/**
@@ -398,8 +415,20 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	 * transport handoff and must fence stale/duplicate attempt tokens themselves.
 	 */
 
-	@SuppressWarnings("unchecked")
 	protected boolean claimDispatchOwnership(final O op) {
+		return claimCapturedDispatch(op, null);
+	}
+
+	/**
+	 * The compatibility claim for a circulation captured earlier, which a driver deferring custody
+	 * from admission to its request write makes at the write, under the admission lock. With a
+	 * {@code token} from {@code queuedDispatchToken}, the operation is marked dispatched only if the
+	 * token still names its queued circulation; a {@code null} token marks the current one. A
+	 * composite's finalization continues its dispatched attempt and a part's parent is claimed
+	 * first, as at admission.
+	 */
+	@SuppressWarnings("unchecked")
+	protected final boolean claimCapturedDispatch(final O op, final OperationLifecycleTracker.DispatchToken<O> token) {
 		final var lifecycle = operationLifecycle();
 		final var state = lifecycle.stateOf(op);
 		if (op instanceof CompositeOperation && state == OperationLifecycleState.DISPATCHED) {
@@ -419,7 +448,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				return false;
 			}
 		}
-		return markOperationDispatched(op);
+		return token == null ? markOperationDispatched(op) : lifecycle.explicitlyDispatched(token);
 	}
 
 	/**
@@ -1034,7 +1063,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		signalDispatch();
 		if (taskWasRunning || taskWasAlreadyStopped) {
 			try {
-				if (!opDispatchTask.await(TASK_STOP_WAIT_SECONDS, TimeUnit.SECONDS)) {
+				dispatchStoppedInTime = opDispatchTask.await(TASK_STOP_WAIT_SECONDS, TimeUnit.SECONDS);
+				if (!dispatchStoppedInTime) {
 					Loggers.MSG.warn(
 									"{}: dispatch task did not stop within {} second(s); "
 													+ "queued lifecycle ownership will be recovered without touching task buffers",
@@ -1099,6 +1129,11 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	/** Extension hook for cooperative drivers with an additional pre-dispatch queue. */
 	protected List<O> recoverAdditionalQueuedOperations() {
 		return List.of();
+	}
+
+	/** False when the last {@link #closeAdmission()} gave up waiting for the dispatch task. */
+	protected final boolean dispatchStoppedInTime() {
+		return dispatchStoppedInTime;
 	}
 
 	@Override

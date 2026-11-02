@@ -81,7 +81,14 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	// Replay never keeps an archived NIC set; only this flag sets one (D61).
 	out := cmd.OutOrStdout()
+	interfaces, interfacesSource, err := readInterfaces(cmd)
+	if err != nil {
+		err = replay.InvalidInterfacesError(err)
+		_, _ = fmt.Fprintf(out, "Replay failure class: %s\n", replay.ErrorClass(err))
+		return err
+	}
 
 	generated, err := replay.Generate(cmd.Context(), replay.Options{
 		SourceURL:   sourceURL,
@@ -96,6 +103,8 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		S3Driver:    s3Driver,
 
 		EndpointSelection: endpointSelection,
+		Interfaces:        interfaces,
+		InterfacesSource:  interfacesSource,
 	})
 	if err != nil {
 		if generated != nil && strings.TrimSpace(generated.Preflight) != "" {
@@ -262,6 +271,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	metadata.TraceAuto = traceOpts.Auto
 	if replayOrchestrator != nil {
 		metadata.metricContributors = replayOrchestrator.MetricContributorIDs
+		metadata.executionHosts = lockedExecutionHosts(replayOrchestrator)
 	}
 	if plannedResultsRoot != "" {
 		metadata.ResultsRoot = plannedResultsRoot
@@ -564,6 +574,7 @@ func init() {
 	replayCmd.Flags().Int("min-hosts", 0, "Minimum number of replay hosts that must connect (default: all hosts)")
 	replayCmd.Flags().Bool(flagAttachExistingWorkers, false, "Attach to prestarted worker nodes; replay still launches the entry node")
 	replayCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
+	replayCmd.Flags().String(flagInterfaces, "", "Spread each engine's connections over a NIC set: auto, or interface names, IPv4 addresses or RDMA devices (comma-separated; default S3 driver, host networking; env: SPT_INTERFACES); archived NIC sets are ignored")
 	replayCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
 	replayCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
 	replayCmd.Flags().Bool(flagSkipImagePull, false, "Use the locally cached Docker image without pulling the latest tag (env: SPT_SKIP_IMAGE_PULL)")

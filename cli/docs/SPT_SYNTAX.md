@@ -38,6 +38,7 @@ You can use these variables to avoid repeating sensitive or commonly used parame
 - **S3 connection:** `S3_ENDPOINTS` (CSV) or `S3_ENDPOINT` (single), `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`
 - **Authentication:** `S3_AUTH_VERSION` (set to `2` only for legacy targets; default `4`)
 - **Hosts:** `HOSTS` (comma-separated list of `[user@]host`)
+- **NICs:** `SPT_INTERFACES` (each engine's NIC set, as `--interfaces`)
 - **Workload:** `THREADS` (parallel client threads)
 - **Docker:** `SPT_SKIP_IMAGE_PULL` (skip pulling the engine image)
 - **Engine tuning:** `SPT_SERVICE_THREADS` (virtual-thread carrier parallelism)
@@ -598,6 +599,7 @@ spt run write \
 | `--attach-existing` | `false` | Attach to pre-started worker nodes; spt still launches the entry node. Unsupported for verification workloads |
 | `--integrity-runtime-identity-tier` | `image` | Distributed verification and guarded existing-prefix DELETE only. `image` proves one immutable image ID across participants; `payload` additionally proves identical canonical `/opt/spt` content (env: `SPT_INTEGRITY_RUNTIME_IDENTITY_TIER`) |
 | `--network-mode` | `host` | Docker network mode: `host` (required for RMI) or `bridge` |
+| `--interfaces` | from `SPT_INTERFACES` or none | Spread each engine's S3 connections over a NIC set: `auto`, or a comma-separated list of interface names, IPv4 addresses or RDMA devices, resolved on each host. Default Netty S3 driver, host networking and `--endpoint-selection default` only; rejected with `tables`, `mock`, an `--rdma-device` other than `auto`, `--rdma-local-ip`, and an `--engine-override` of `storage.net.interfaces` or `storage.net.nodeInterfaces`. See [Network Interfaces](NETWORK_INTERFACES.md) |
 | `--rmi-port-start` | `40000` | Starting port for RMI range |
 | `--rmi-port-count` | `10` | Number of RMI ports to allocate |
 
@@ -629,10 +631,10 @@ See [S3_RDMA.md](S3_RDMA.md) for detailed documentation, architecture, and troub
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--use-rdma` | `false` | Use the S3-RDMA driver. Standalone DELETE requests use HTTP, but driver startup still requires RDMA access unless `--rdma-fallback` is enabled |
-| `--rdma-local-ip` | `""` | Local RDMA interface IP address. When unset and `--rdma-device` is `auto`, each worker uses the local address it routes toward the first S3 endpoint; leave it unset for multi-host runs |
+| `--rdma-local-ip` | `""` | Local RDMA interface IP address. When unset and `--rdma-device` is `auto`, each worker uses the local address it routes toward the first S3 endpoint; leave it unset for multi-host runs. Rejected with `--interfaces` |
 | `--rdma-threshold` | `1MB` | Minimum object size for RDMA transfer (e.g., `0`, `256KB`, `4MB`) |
 | `--rdma-fallback` | `false` | Use HTTP when RDMA initialization or per-operation buffer preparation fails, and count GET bodies returned by a server that declines RDMA. When disabled, those operations fail |
-| `--rdma-device` | `auto` | RDMA device name or `auto` for auto-detection. A named device disables automatic local address selection |
+| `--rdma-device` | `auto` | RDMA device name or `auto` for auto-detection. A named device disables automatic local address selection. A named device is rejected with `--interfaces` |
 | `--rdma-log-level` | `WARN` | RDMA native library log level |
 | `--rdma-timeout-ms` | `30000` | RDMA operation timeout in milliseconds |
 | `--rdma-allow-missing-bytes-header` | `false` | Legacy servers only: accept an RDMA GET success without `x-amz-rdma-bytes-transferred` and count the requested size. By default such a response fails as corrupt |
@@ -801,6 +803,7 @@ environment variables.
 | `--min-hosts` | `0` (all) | Minimum replay hosts that must connect |
 | `--attach-existing` | `false` | Attach to prestarted worker nodes; replay still launches the entry node |
 | `--network-mode` | `host` | Docker network mode: `host` or `bridge` |
+| `--interfaces` | from `SPT_INTERFACES` or none | Spread each engine's S3 connections over a NIC set, with the checks of `spt run --interfaces`. An archived NIC set is never reused; replay drops it with a warning. See [Network Interfaces](NETWORK_INTERFACES.md#replay) |
 | `--rmi-port-start` | `40000` | Starting port for RMI range |
 | `--rmi-port-count` | `10` | Number of RMI ports to verify |
 
@@ -1367,7 +1370,7 @@ A node whose plan has a failure fails verification; warnings do not. With `--sli
       ens10np0 → 192.0.2.102:9000
 ```
 
-The plan uses the same rules as the run step for the same endpoints, NICs and slices. It does not reproduce exact-output participation: a step that must write an exact object count smaller than the node count runs only on the first nodes, and slices the endpoints over those nodes alone, so verify's slices can differ from that step's.
+The plan uses the same rules as a run with `--interfaces` for the same endpoints, NICs and slices; [Network Interfaces](NETWORK_INTERFACES.md) describes them and the host settings they check. It does not reproduce exact-output participation: a step that must write an exact object count smaller than the node count runs only on the first nodes, and slices the endpoints over those nodes alone, so verify's slices can differ from that step's.
 
 ### Examples
 

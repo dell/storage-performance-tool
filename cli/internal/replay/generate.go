@@ -79,6 +79,15 @@ func Generate(ctx context.Context, opts Options) (*Generated, error) {
 	}); err != nil {
 		return generated, newClassifiedError(failureInvalidEndpointSelection, err.Error(), err)
 	}
+	if err := scenario.ValidateInterfaces(opts.Interfaces, scenario.InterfacesTarget{
+		Source:            opts.InterfacesSource,
+		S3Driver:          opts.S3Driver,
+		WorkloadType:      params.WorkloadType,
+		EndpointSelection: params.EndpointSelection,
+	}); err != nil {
+		return generated, newClassifiedError(failureInvalidInterfaces, err.Error(), err)
+	}
+	params.Interfaces = opts.Interfaces
 	defaults, err := scenario.GenerateDefaults(params)
 	if err != nil {
 		return generated, newClassifiedError(failureReplayDefaultsGeneration, fmt.Sprintf("generate replay defaults: %v", err), err)

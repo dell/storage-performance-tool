@@ -1,6 +1,7 @@
 package com.dell.spt.base.load.step.linear;
 
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.config.NicSetConfig;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.Item;
@@ -111,6 +112,8 @@ public class LinearLoadStepLocal
 
 			try {
 
+				NicSetConfig.requireSupportedWorkload(
+								storageConfig, opType, itemConfig.configVal("input").stringVal("path"));
 				final StorageDriver driver = StorageDriver.instance(
 								extensions, storageConfig, dataInput, effectiveVerifyFlag, batchSize, testStepId,
 								com.dell.spt.base.config.RangeReadConfig.fromLoad(loadConfig));

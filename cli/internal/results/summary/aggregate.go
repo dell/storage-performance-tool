@@ -99,20 +99,23 @@ type HostSummary struct {
 
 // WorkloadSummary records key scenario parameters.
 type WorkloadSummary struct {
-	Type              string
-	ObjectSizeBytes   int64
-	ObjectSizeMiB     float64
-	ObjectSizeGiB     float64
-	ObjectSizeHuman   string
-	ObjectCount       int64
-	Threads           int
-	Endpoints         []string
-	Bucket            string
-	Prefix            string
-	DurationRequest   string
-	CleanupEnabled    bool
-	KeepScenario      bool
-	SliceEndpoints    bool
+	Type            string
+	ObjectSizeBytes int64
+	ObjectSizeMiB   float64
+	ObjectSizeGiB   float64
+	ObjectSizeHuman string
+	ObjectCount     int64
+	Threads         int
+	Endpoints       []string
+	Bucket          string
+	Prefix          string
+	DurationRequest string
+	CleanupEnabled  bool
+	KeepScenario    bool
+	SliceEndpoints  bool
+	// Interfaces is the run's --interfaces value; EventLoops describes its NIC-set reports.
+	Interfaces        []string
+	EventLoops        string
 	MixedDistribution MixedDistribution
 	// S3Driver is the stored S3 driver selection; empty for a custom scenario and for results
 	// stored before the selection was kept.
@@ -138,6 +141,8 @@ type StepSummary struct {
 	Delete             *deletemetrics.Metrics
 	DeleteEvidence     *DeleteArtifactEvidence
 	DriverStats        *driverstats.Stats
+	NicPaths           *NicPathsEvidence
+	NicSetMissing      []results.NicNodeFile
 }
 
 // MixedDistribution stores the configured mixed-workload share for each known operation.
@@ -258,6 +263,7 @@ func Aggregate(data *RunData) (*RunSummary, error) {
 		// A rejected run submitted no scenario: no driver ran, so nothing is missing.
 		summary.Warnings = append(summary.Warnings, rdmaDataPathWarnings(steps, workload, data.Params.DriverStatsError)...)
 	}
+	summary.Warnings = append(summary.Warnings, nicEnginesWarnings(data.Params.NicEnginesError)...)
 
 	if len(summary.MissingExpected) > 1 {
 		sort.Strings(summary.MissingExpected)
@@ -365,6 +371,8 @@ func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 		CleanupEnabled:    params.Cleanup,
 		KeepScenario:      params.KeepScenario,
 		SliceEndpoints:    params.SliceEndpoints,
+		Interfaces:        append([]string(nil), params.Interfaces...),
+		EventLoops:        nicEventLoops(data.Params.NicEngines, data.StepOrder, nicReportsIncomplete(data)),
 		MixedDistribution: mixedDistributionFromParams(workloadType, params),
 		S3Driver:          params.S3Driver,
 	}
@@ -398,6 +406,8 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 			Delete:          stepData.Delete,
 			DeleteEvidence:  stepData.DeleteEvidence,
 			DriverStats:     stepData.DriverStats,
+			NicPaths:        stepData.NicPaths,
+			NicSetMissing:   append([]results.NicNodeFile(nil), stepData.NicSetMissing...),
 		}
 
 		var metrics *PhaseMetrics

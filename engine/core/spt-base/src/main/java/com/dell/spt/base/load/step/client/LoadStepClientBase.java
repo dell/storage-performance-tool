@@ -15,6 +15,7 @@ import com.dell.spt.base.config.AliasingUtil;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.config.NicSetConfig;
 import com.dell.spt.base.integrity.IntegrityConfig;
 import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
 import com.dell.spt.base.integrity.IntegrityInputProvenance;
@@ -113,6 +114,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private final List<AutoCloseable> itemInputFileSlicers = new ArrayList<>();
 	private final List<AutoCloseable> itemOutputFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> operationLifecycleAggregators = new ArrayList<>();
+	private NicPathsCollector nicPathsCollector;
 	private final List<AutoCloseable> integrityLogFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> itemTimingMetricsOutputFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> opTraceLogFileAggregators = new ArrayList<>();
@@ -240,6 +242,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			initAndStartStepSlices(nodeAddrs, configSlices, ctxConfigsSlices, metricsMgr);
+			initNicPathsCollector(nodeAddrs, configSlices, ctxConfigsSlices);
 			validateDeleteInventoriesBeforeAdmission();
 			initAndStartMetricsAggregator(config.configVal("output-metrics"));
 			if (standaloneDeleteEnabled() && !standaloneDeleteDurationMode()) {
@@ -250,6 +253,22 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			Loggers.MSG.info(
 							"{}: load step client started, additional nodes: {}", loadStepId(),
 							Arrays.toString(nodeAddrs.toArray()));
+		}
+	}
+
+	private void initNicPathsCollector(
+					final List<String> nodeAddrs, final List<Config> configSlices, final List<List<Config>> ctxConfigsSlices) {
+		if (fileMgrs.size() < 2 || nicPathsCollector != null) {
+			return;
+		}
+		final var expected = new ArrayList<Boolean>(configSlices.size());
+		for (var i = 0; i < configSlices.size(); i++) {
+			expected.add(NicSetConfig.isSet(configSlices.get(i).configVal("storage"))
+							|| ctxConfigsSlices.get(i).stream().anyMatch(ctx -> NicSetConfig.isSet(ctx.configVal("storage"))));
+		}
+		if (expected.contains(true)) {
+			nicPathsCollector = new NicPathsCollector(loadStepId(), fileMgrs, NicPathsCollector.nodeNames(nodeAddrs),
+							expected);
 		}
 	}
 
@@ -2293,6 +2312,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			operationLifecycleAggregators.clear();
+			if (nicPathsCollector != null && (!durationMode || (durationAdmissionBarrierSatisfied && durationSlicesClosed))) {
+				nicPathsCollector.close();
+				nicPathsCollector = null;
+			}
 			for (final var integrityLogFileAggregator : integrityLogFileAggregators) {
 				try {
 					integrityLogFileAggregator.close();

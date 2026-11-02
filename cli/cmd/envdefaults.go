@@ -37,6 +37,7 @@ func markEnvApplied(cmd *cobra.Command, flag, value string) {
 //	S3_ENDPOINTS (CSV) or S3_ENDPOINT (single)
 //	S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET, S3_REGION
 //	HOSTS (equivalent to --test-hosts)
+//	SPT_INTERFACES (equivalent to --interfaces)
 func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 	// setFromEnv sets a flag's value and records that it came from env, not
 	// an explicit CLI argument (see markEnvApplied).
@@ -166,6 +167,8 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 			}
 		}
 	}
+
+	_ = setIf(flagInterfaces, constants.EnvInterfaces)
 
 	// RDMA string settings
 	_ = setIf("rdma-local-ip", constants.EnvRdmaLocalIP)

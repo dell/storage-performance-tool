@@ -114,6 +114,11 @@ func ConvertJS(raw []byte, runScript RunScript, opts Options) (*Generated, error
 	var endpointDiagnostics []Diagnostic
 	body, endpointDiagnostics = extractJSEndpointSelections(body, effectiveVars, archived)
 	diagnostics = append(diagnostics, endpointDiagnostics...)
+	nicSettings := &archivedNicSettings{}
+	var nicDiagnostics []Diagnostic
+	body, nicDiagnostics = extractJSNicSettings(body, nicSettings)
+	diagnostics = append(diagnostics, nicSettings.diagnostics()...)
+	diagnostics = append(diagnostics, nicDiagnostics...)
 	var parentDiagnostics []Diagnostic
 	body, parentDiagnostics = rewriteJSParentConfigs(body, opts, bucket, effectiveVars)
 	diagnostics = append(diagnostics, parentDiagnostics...)

@@ -1,6 +1,7 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3;
 
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.config.NicSetConfig;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.logging.LogUtil;
@@ -11,6 +12,7 @@ import com.dell.spt.storage.driver.coop.netty.endpoint.EndpointSelectionSettings
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.impl.BasicConfig;
 import java.io.IOException;
+import java.util.List;
 import org.apache.logging.log4j.Level;
 
 /**
@@ -43,12 +45,17 @@ public final class S3TargetBucketControl implements TargetBucketControl {
 		return new S3TargetBucketControl(driver);
 	}
 
-	/** A copy of the storage configuration whose network timeout is bounded. */
+	/**
+	 * A copy of the storage configuration whose network timeout is bounded and that has no NIC set:
+	 * control requests take the kernel route (item 11), so the control driver plans no NICs and
+	 * keeps today's event-loop group.
+	 */
 	static Config controlConfig(final Config storageConfig) {
 		final var config = new BasicConfig(storageConfig);
 		if (config.intVal("net-timeoutMilliSec") <= 0) {
 			config.val("net-timeoutMilliSec", UNBOUNDED_TIMEOUT_REPLACEMENT_MILLIS);
 		}
+		config.val(NicSetConfig.INTERFACES_PATH, List.of());
 		return config;
 	}
 

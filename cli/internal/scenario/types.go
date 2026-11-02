@@ -39,6 +39,10 @@ type Params struct {
 	// Multi-endpoint controls
 	SliceEndpoints bool // Partition endpoint list across nodes in distributed runs
 
+	// Interfaces is the run's NIC set (--interfaces): auto, or interface names, IPv4 addresses or
+	// RDMA devices. Empty writes no storage.net.interfaces, so the shipped empty default applies.
+	Interfaces []string
+
 	// Read workload
 	RangeSize             string // Empty disables partial reads.
 	RangeOffset           string // Empty selects random offsets; explicit "0" selects fixed zero.

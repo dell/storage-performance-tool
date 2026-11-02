@@ -10,6 +10,7 @@ import com.dell.spt.base.config.RunIdentityConfig;
 import com.github.akurilov.confuse.impl.BasicConfig;
 import com.github.akurilov.commons.collection.TreeUtil;
 import com.dell.spt.base.load.step.client.LoadStepClient;
+import com.dell.spt.base.config.NicSetConfig;
 import com.dell.spt.base.config.RangeReadConfig;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.concurrent.DaemonBase;
@@ -86,8 +87,10 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		this.metricsMgr = metricsMgr;
 		// Script bindings eagerly construct dormant client prototypes for every operation/step type.
 		// Validate local steps immediately, and clients only when selected for execution.
-		if (!(this instanceof LoadStepClient<?>))
+		if (!(this instanceof LoadStepClient<?>)) {
 			validateRangeConfiguration();
+			validateNicSetConfiguration();
+		}
 		try {
 			this.integrityModeEnabled = IntegrityConfig.validateLoadStep(this.config).enabled();
 		} catch (final RuntimeException e) {
@@ -114,6 +117,19 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 								List.of(Config.deepToMap(this.config), Config.deepToMap(context)));
 				validateRangeConfig(new BasicConfig(
 								this.config.pathSep(), this.config.schema(), merged));
+			});
+		}
+	}
+
+	/** Checks the requested NIC set's entries before any bucket or engine work starts. */
+	private void validateNicSetConfiguration() {
+		NicSetConfig.interfaces(this.config.configVal("storage"));
+		if (this.ctxConfigs != null) {
+			this.ctxConfigs.forEach(context -> {
+				final var merged = TreeUtil.reduceForest(
+								List.of(Config.deepToMap(this.config), Config.deepToMap(context)));
+				NicSetConfig.interfaces(
+								new BasicConfig(this.config.pathSep(), this.config.schema(), merged).configVal("storage"));
 			});
 		}
 	}
@@ -328,6 +344,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	protected void doStart() throws IllegalStateException {
 
 		validateRangeConfiguration();
+		validateNicSetConfiguration();
 		provisionTargetBuckets();
 		init();
 		EngineBuildInfoPublisher.global().publishForStep(loadStepId());
