@@ -98,17 +98,32 @@ final class AdmissionBarrier {
 
 	/** Arms the slice's next start as a barrier start. A worker without the methods fails the step. */
 	void arm(final String node, final LoadStep slice) {
-		slices.add(new Slice(node, slice));
 		try {
 			slice.startPreparation(id, Math.max(1, remainingNanos()));
-		} catch (final UnmarshalException e) {
-			throw unsupported(node, e);
 		} catch (final RemoteException e) {
-			if (e.getMessage() != null && e.getMessage().contains(LoadStep.NO_ADMISSION_BARRIER)) {
+			if (lacksTheMethods(e)) {
 				throw unsupported(node, e);
 			}
 			throw failure("Step " + stepId + " did not start: " + node + ": " + e.getMessage(), e);
 		}
+		slices.add(new Slice(node, slice));
+	}
+
+	/**
+	 * A worker's server wraps its own failure, so an unknown method reaches this side as a
+	 * {@code ServerException} around an {@code UnmarshalException}.
+	 */
+	private static boolean lacksTheMethods(final RemoteException failure) {
+		for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+			final String message = cause.getMessage();
+			if (message != null && message.contains(LoadStep.NO_ADMISSION_BARRIER)) {
+				return true;
+			}
+			if (cause instanceof UnmarshalException && message != null && message.contains("unrecognized method hash")) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -122,14 +137,19 @@ final class AdmissionBarrier {
 			while (true) {
 				final var failures = new ArrayList<String>();
 				final var waiting = new ArrayList<String>();
+				var deadlinePassed = false;
 				millis.clear();
 				for (final var slice : slices) {
 					final PreparationStatus status = status(slice);
 					millis.put(slice.node(), TimeUnit.NANOSECONDS.toMillis(status.elapsedNanos()));
-					switch (status.state()) {
-					case READY -> {}
-					case RUNNING -> waiting.add(slice.node() + ": still " + status.phase());
-					default -> failures.add(slice.node() + ": " + status.message());
+					if (status.state() == PreparationStatus.State.RUNNING) {
+						waiting.add(slice.node() + ": still " + status.phase());
+					} else if (status.deadlinePassed()) {
+						// A worker's own deadline ends a moment before this side's next poll.
+						deadlinePassed = true;
+						waiting.add(slice.node() + ": still " + status.phase());
+					} else if (status.state() != PreparationStatus.State.READY) {
+						failures.add(slice.node() + ": " + status.message());
 					}
 				}
 				if (!failures.isEmpty()) {
@@ -138,7 +158,7 @@ final class AdmissionBarrier {
 													+ " engines failed preparation — " + String.join("\n", failures),
 									null);
 				}
-				if (remainingNanos() <= 0) {
+				if (deadlinePassed || remainingNanos() <= 0) {
 					throw deadlineFailure(waiting.isEmpty() ? "every engine became ready only after it" : String.join("; ", waiting));
 				}
 				if (waiting.isEmpty()) {

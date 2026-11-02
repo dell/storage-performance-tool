@@ -1395,20 +1395,25 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	public final void releaseAdmissionBarrier() {
-		admissionBarrierHeld.set(false);
-		// A step that is already stopping must not open admission or restart its generator.
-		if (stepShuttingDown.get() || operationAdmissionClosed.get()
-						|| standaloneDeleteDurationMode || objectFailureBudgetAdmissionHeld.get()) {
-			return;
-		}
-		if (standaloneDeleteEnabled) {
-			deleteScheduledStartedNanos.set(System.nanoTime());
-		}
-		generator.openAdmission();
+		operationAdmissionCloseLock.lock();
 		try {
-			generator.start();
-		} catch (final IllegalStateException e) {
-			LogUtil.exception(Level.WARN, e, "{}: failed to start the load generator \"{}\"", id, generator);
+			admissionBarrierHeld.set(false);
+			// A step that is already stopping must not open admission or restart its generator.
+			if (stepShuttingDown.get() || operationAdmissionClosed.get()
+							|| standaloneDeleteDurationMode || objectFailureBudgetAdmissionHeld.get()) {
+				return;
+			}
+			if (standaloneDeleteEnabled) {
+				deleteScheduledStartedNanos.set(System.nanoTime());
+			}
+			generator.openAdmission();
+			try {
+				generator.start();
+			} catch (final IllegalStateException e) {
+				LogUtil.exception(Level.WARN, e, "{}: failed to start the load generator \"{}\"", id, generator);
+			}
+		} finally {
+			operationAdmissionCloseLock.unlock();
 		}
 	}
 

@@ -221,7 +221,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				if (remaining > 0) {
 					TimeUnit.NANOSECONDS.sleep(remaining);
 				}
-				fence(barrier, "preparation did not finish before its deadline");
+				fence(barrier, PreparationStatus.DEADLINE_MESSAGE);
 			} catch (final InterruptedException e) {
 				Thread.currentThread().interrupt();
 			}

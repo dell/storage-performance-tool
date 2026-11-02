@@ -21,6 +21,7 @@ import com.dell.spt.base.load.step.service.LoadStepServiceImpl;
 import com.dell.spt.base.svc.ServiceUtil;
 import java.net.ServerSocket;
 import java.rmi.RemoteException;
+import java.rmi.ServerException;
 import java.rmi.UnmarshalException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -119,12 +120,40 @@ class AdmissionBarrierTest {
 		final String want = "Step read1 did not start: the engine on 198.51.100.12:1099 does not support the admission "
 						+ "barrier, which a step with a NIC set needs; run the same SPT image on every host";
 		final LoadStep oldBuild = mock(LoadStep.class);
-		doThrow(new UnmarshalException("unrecognized method hash")).when(oldBuild).startPreparation(anyLong(), anyLong());
+		doThrow(new ServerException(
+						"RemoteException occurred in server thread",
+						new UnmarshalException("unrecognized method hash: method not supported by remote object")))
+						.when(oldBuild).startPreparation(anyLong(), anyLong());
 		assertEquals(want, assertThrows(RunTerminalException.class, () -> barrier.arm("198.51.100.12:1099", oldBuild)).getMessage());
 
 		final LoadStep defaultMethod = mock(LoadStep.class);
 		doThrow(new RemoteException(LoadStep.NO_ADMISSION_BARRIER)).when(defaultMethod).startPreparation(anyLong(), anyLong());
 		assertEquals(want, assertThrows(RunTerminalException.class, () -> barrier.arm("198.51.100.12:1099", defaultMethod)).getMessage());
+
+		barrier.fenceAll();
+		verify(oldBuild, never()).fencePreparation(anyLong());
+		verify(defaultMethod, never()).fencePreparation(anyLong());
+	}
+
+	@Test
+	void anotherRemoteFailureWhileArmingIsNotCalledAnOldWorker() throws Exception {
+		final LoadStep unreachable = mock(LoadStep.class);
+		doThrow(new RemoteException("connection refused")).when(unreachable).startPreparation(anyLong(), anyLong());
+		final var failure = assertThrows(RunTerminalException.class, () -> barrier.arm("198.51.100.12:1099", unreachable));
+		assertTrue(failure.getMessage().startsWith("Step read1 did not start: 198.51.100.12:1099: connection refused"), failure.getMessage());
+	}
+
+	@Test
+	void aWorkerFencedAtItsOwnDeadlineIsReportedAsTheDeadlineWithItsPhase() throws Exception {
+		final LoadStep worker = slice(status(State.FENCED, "probing paths", PreparationStatus.DEADLINE_MESSAGE));
+		barrier.arm("198.51.100.12:1099", worker);
+
+		final var failure = assertThrows(RunTerminalException.class, barrier::awaitAndRelease);
+
+		assertEquals(
+						"Step read1 did not start: preparation did not finish within 10m (load.step.preparation.timeout) — "
+										+ "198.51.100.12:1099: still probing paths",
+						failure.getMessage());
 	}
 
 	@Test

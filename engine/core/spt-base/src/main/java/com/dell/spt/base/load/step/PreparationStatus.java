@@ -15,6 +15,14 @@ public record PreparationStatus(State state, String phase, String message, long 
 
 	private static final long serialVersionUID = 1L;
 
+	/** The message of a preparation fenced at its own deadline. */
+	public static final String DEADLINE_MESSAGE = "preparation did not finish before its deadline";
+
+	/** Returns whether this preparation was fenced at its own deadline. */
+	public boolean deadlinePassed() {
+		return state == State.FENCED && DEADLINE_MESSAGE.equals(message);
+	}
+
 	/** A preparation is fenced for good: nothing later can open admission for it. */
 	public enum State {
 		RUNNING, READY, FAILED, FENCED
