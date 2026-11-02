@@ -1098,7 +1098,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		// As a worker decides in initBucketMetrics, so that a file exists exactly when workers record.
 		if (TargetBucketSet.count(effectiveConfig) <= 1
 						|| !effectiveConfig.boolVal("output-metrics-bucket-enabled")
-						|| !metricsConfig.boolVal("summary-persist")) {
+						|| !effectiveConfig.boolVal("output-metrics-summary-persist")) {
 			return null;
 		}
 		final SteadySettings steadySettings = SteadySettings.fromMetricsConfig(metricsConfig);
@@ -1175,9 +1175,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		return bucketContributions;
 	}
 
-	/** Lets go of every worker's payload. The step's rows are written, so nothing fetches again. */
+	/** Lets go of every worker's payload. A step that runs again fetches afresh. */
 	private synchronized void releaseBucketMetrics() {
-		bucketContributions = List.of();
+		bucketContributions = null;
 	}
 
 	private static BucketRows.Contribution bucketContribution(
@@ -2250,6 +2250,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	@Override
 	protected final void doClose()
 					throws IOException {
+		releaseBucketMetrics();
 		stopFailureBudgetMonitor();
 		final boolean durationMode = standaloneDeleteDurationMode();
 		if (durationMode) {

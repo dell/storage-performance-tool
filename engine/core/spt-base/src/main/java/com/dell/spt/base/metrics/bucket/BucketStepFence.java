@@ -110,8 +110,13 @@ public final class BucketStepFence implements AutoCloseable {
 		for (final ContextCuts context : waitedFor) {
 			if (context.endQueued.get() && !context.outcome.isDone()) {
 				final long remaining = context.endDeadlineNanos - clock.getAsLong();
-				latest = Math.max(latest, remaining);
-				pending.add(context);
+				if (remaining <= 0) {
+					// Already overdue: it gets no share of a later context's wait.
+					expire(List.of(context), DEADLINE_PASSED);
+				} else {
+					latest = Math.max(latest, remaining);
+					pending.add(context);
+				}
 			}
 		}
 		if (pending.isEmpty()) {
@@ -248,7 +253,7 @@ public final class BucketStepFence implements AutoCloseable {
 								slot -> endPass(slot, records),
 								() -> {
 									// Whether or not a closer is waiting, as at scheduling exhaustion.
-									if (expired || clock.getAsLong() - endDeadlineNanos > 0) {
+									if (overdue()) {
 										finish(BucketSteadyOutcome.unmeasured(DEADLINE_PASSED));
 									} else {
 										finish(BucketSteadyOutcome.measured(records.inOrder()));
@@ -256,6 +261,11 @@ public final class BucketStepFence implements AutoCloseable {
 								},
 								error -> finish(BucketSteadyOutcome.unmeasured("the end cut failed: " + error)));
 			});
+		}
+
+		/** Past its deadline with or without a closer waiting, so its pass gives up the pool between sets. */
+		private boolean overdue() {
+			return expired || (endQueued.get() && clock.getAsLong() - endDeadlineNanos > 0);
 		}
 
 		private void finish(final BucketSteadyOutcome result) {
@@ -286,7 +296,7 @@ public final class BucketStepFence implements AutoCloseable {
 				try {
 					int slot;
 					while ((slot = cursor.getAndIncrement()) < sets) {
-						if (expired) {
+						if (overdue()) {
 							throw new IllegalStateException(DEADLINE_PASSED);
 						}
 						beforeSetPass.accept(slot);
@@ -328,7 +338,7 @@ public final class BucketStepFence implements AutoCloseable {
 							start,
 							end,
 							capacity -> encodeBuffer(capacity));
-			if (expired) {
+			if (overdue()) {
 				throw new IllegalStateException(DEADLINE_PASSED);
 			}
 			records.set(slot, new BucketSteadyRecord(

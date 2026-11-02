@@ -382,6 +382,41 @@ class BucketStepFenceTest {
 		assertEquals(BucketSteadyOutcome.Kind.MEASURED, later.outcome().kind());
 	}
 
+	/** With nobody waiting for it, an overdue pass still gives up the only cut thread between sets. */
+	@Test
+	void anOverduePassLeavesThePoolForALaterContextWithNoCloserWaiting() throws Exception {
+		fence = new BucketStepFence("fence-test", SHORT_BUDGET, 1, System::nanoTime);
+		final var old = context(fence);
+		final var later = context(fence);
+		old.onWindowStart(System.nanoTime());
+		later.onWindowStart(System.nanoTime());
+		awaitStarted(old);
+		awaitStarted(later);
+		final CountDownLatch go = new CountDownLatch(1);
+		final AtomicInteger held = new AtomicInteger();
+		fence.beforeSetPass(slot -> {
+			if (held.getAndIncrement() == 0) {
+				try {
+					go.await();
+				} catch (final InterruptedException e) {
+					throw new IllegalStateException(e);
+				}
+			}
+		});
+		old.onWindowClose(System.nanoTime(), true, NO_RESULT);
+		Thread.sleep(TimeUnit.NANOSECONDS.toMillis(SHORT_BUDGET) + 100);
+		go.countDown();
+		later.onWindowClose(System.nanoTime(), true, NO_RESULT);
+		fence.await();
+		assertEquals(BucketSteadyOutcome.Kind.MEASURED, later.outcome().kind());
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		while (old.outcome() == null) {
+			assertTrue(System.nanoTime() < deadline);
+			Thread.sleep(1);
+		}
+		assertEquals(BucketSteadyOutcome.Kind.UNMEASURED, old.outcome().kind());
+	}
+
 	/** A miss costs the context that missed, and the pool stays usable for the ones after it. */
 	@Test
 	void aMissLeavesThePoolForLaterContexts() throws Exception {

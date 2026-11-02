@@ -176,6 +176,10 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	protected void doStartWrapped() {
+		// A step that runs again reads its meters afresh.
+		synchronized (this) {
+			bucketMetricsReply = null;
+		}
 		resetDurationLifecycleForStart();
 		expectedOperationLifecycleContexts = List.copyOf(stepContexts);
 		operationLifecycleWorkerId = UUID.randomUUID().toString();
