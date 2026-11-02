@@ -65,6 +65,7 @@ import io.netty.channel.epoll.Epoll;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -240,6 +241,55 @@ final class S3NicSetWorkloadTest {
 		// Initiations and completions carry no payload; the failed completion fails; the abort is not counted.
 		final var rows = stoppedRows(run.driver(), run.driver());
 		assertEquals(List.of(14L, 13L, 1L, 0L, 0L, 10L * ITEM_SIZE), totals(rows), rows::toString);
+	}
+
+	/**
+	 * A part loses its connection before any response and its retry succeeds. Nothing had settled it when
+	 * the retry undid the settlement, so the upload's count never reached zero: every part arrived, but no
+	 * completion or abort was sent, nothing was active and the step never counted the upload.
+	 */
+	@Test
+	void aPartDroppedBeforeAnyResponseStillCompletesItsUpload() throws Exception {
+		final var endpoints = stub.listeners(2);
+		final var run = started(endpoints, nics(2), 2, false);
+		// Object request 1 starts the upload and 2 is its first part.
+		stub.dropObjectRequest = n -> n == 2;
+
+		final var upload = multipart("dropped", 5);
+		assertTrue(run.driver().put(upload));
+
+		assertEquals(SUCC, awaitUpload(run, upload).status());
+		assertEquals(5L * ITEM_SIZE, stub.object("/bucket/dropped").length);
+		assertEquals(List.of("POST init", "PUT part", "PUT part", "PUT part", "PUT part", "PUT part", "PUT part", "POST complete"),
+						stub.objectRequests().stream().map(S3NicSetWorkloadTest::phase).toList());
+	}
+
+	/** The same in a step, without a NIC set and with one: the step counts the upload and ends. */
+	@Test
+	void aStepWithADroppedPartCountsItsUploadAndEnds() throws Exception {
+		assertAStepWithADroppedPartEnds(null);
+	}
+
+	@Test
+	void aStepOnANicSetWithADroppedPartCountsItsUploadAndEnds() throws Exception {
+		assertAStepWithADroppedPartEnds(new NicSetLoopback.Factory());
+	}
+
+	private void assertAStepWithADroppedPartEnds(final NicSetLoopback.Factory factory) throws Exception {
+		stub.dropObjectRequest = n -> n == 2;
+		final var began = System.nanoTime();
+		final var outcomes = runScenario(stub.listeners(1), factory, "nic-set-dropped-" + System.nanoTime(), """
+						Load.config({
+							"load": {"step": {"limit": {"time": "30s"}}, "op": {"limit": {"count": 4}}},
+							"item": {"data": {"size": "5KB", "ranges": {"threshold": "1KB"}}}
+						}).run();
+						""");
+
+		final var elapsed = Duration.ofNanos(System.nanoTime() - began);
+		assertTrue(elapsed.compareTo(Duration.ofSeconds(20)) < 0, () -> "the step ran to its time limit: " + outcomes);
+		// The failed attempt counts toward the limit, so the step can stop before its last upload ends.
+		final var completions = stub.objectRequests().stream().filter(request -> phase(request).equals("POST complete")).count();
+		assertTrue(completions >= 3, () -> completions + " uploads completed: " + outcomes);
 	}
 
 	@Test

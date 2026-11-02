@@ -117,6 +117,8 @@ final class NicSetLoopback implements AutoCloseable {
 	volatile long absentObjectSize = EndpointSelectionTestSupport.ITEM_SIZE;
 	/** Which object requests, counted from 1, the stub answers with 503. */
 	volatile IntPredicate failObjectRequest = n -> false;
+	/** Which object requests, counted from 1, the stub drops without answering: the connection closes. */
+	volatile IntPredicate dropObjectRequest = n -> false;
 
 	/** The storage configuration of a driver with these endpoints and NICs. */
 	static Config storage(final List<String> endpoints, final List<String> interfaces, final int concurrency) {
@@ -393,7 +395,12 @@ final class NicSetLoopback implements AutoCloseable {
 			peaks.computeIfAbsent(source, unused -> new AtomicInteger()).accumulateAndGet(concurrent, Math::max);
 			try {
 				requests.add(request);
-				if (request.isObjectRequest() && failObjectRequest.test(objectRequestCount.incrementAndGet())) {
+				final var objectRequest = request.isObjectRequest() ? objectRequestCount.incrementAndGet() : 0;
+				if (objectRequest > 0 && dropObjectRequest.test(objectRequest)) {
+					exchange.close();
+					return;
+				}
+				if (objectRequest > 0 && failObjectRequest.test(objectRequest)) {
 					final var error = "error".getBytes(StandardCharsets.US_ASCII);
 					exchange.sendResponseHeaders(503, error.length);
 					exchange.getResponseBody().write(error);

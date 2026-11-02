@@ -50,6 +50,7 @@ final class S3EndpointSelectionRoundRobinTest {
 	private final List<Captured> requests = new CopyOnWriteArrayList<>();
 	private final List<AutoCloseable> resources = new ArrayList<>();
 	private volatile boolean failFirstPart;
+	private volatile boolean dropFirstPart;
 	private volatile int completeStatus = 200;
 
 	private record Captured(int listener, String method, String path, String query, String host, int clientPort) {}
@@ -308,6 +309,28 @@ final class S3EndpointSelectionRoundRobinTest {
 		assertEquals(List.of(0, 1, 2, 0, 1, 2, 0), listenerSequence());
 	}
 
+	/**
+	 * A part loses its connection before any response and its retry succeeds. Nothing had settled it when
+	 * the retry undid the settlement, so the upload's count never reached zero: every part arrived, but no
+	 * completion or abort was sent, nothing was active and the step never counted the upload.
+	 */
+	@Test
+	void aPartDroppedBeforeAnyResponseStillCompletesItsUpload() throws Exception {
+		dropFirstPart = true;
+		final var run = driver(listeners(3), null, 1);
+		final var item = new DataItemImpl("dropped", 7, 3L * ITEM_SIZE);
+		final var upload = new CompositeDataOperationImpl<DataItem>(
+						0, OpType.CREATE, item, null, "/bucket", CREDENTIAL, null, 0, ITEM_SIZE);
+
+		assertTrue(run.driver().put(upload));
+		final var result = awaitMultipart(run);
+
+		assertEquals(Operation.Status.SUCC, result.status());
+		final var parts = requests.stream().filter(r -> r.query() != null && r.query().contains("partNumber="))
+						.map(r -> r.query().replaceAll(".*partNumber=(\\d+).*", "$1")).toList();
+		assertEquals(List.of("1", "1", "2", "3"), parts);
+	}
+
 	@Test
 	void abortAfterFailedCompletionFollowsTheRotation() throws Exception {
 		completeStatus = 500;
@@ -473,6 +496,11 @@ final class S3EndpointSelectionRoundRobinTest {
 							exchange.getRequestHeaders().getFirst("Host"), exchange.getRemoteAddress().getPort()));
 			byte[] body = new byte[0];
 			final var range = exchange.getRequestHeaders().getFirst("Range");
+			if ("PUT".equals(method) && query != null && query.contains("partNumber=1&") && dropFirstPart) {
+				// Closing the exchange unanswered closes the connection.
+				dropFirstPart = false;
+				return;
+			}
 			if ("PUT".equals(method) && query != null && query.contains("partNumber=1&") && failFirstPart) {
 				failFirstPart = false;
 				exchange.sendResponseHeaders(500, -1);
