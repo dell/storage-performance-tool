@@ -139,23 +139,23 @@ func (a *app) handleRun(w http.ResponseWriter, r *http.Request) {
 	go func() { defer close(drained); drainOutput(stdout, logPath) }()
 	started := time.Now().UTC()
 	job := map[string]any{keyRunID: runID, keyStatus: jobRunning, "created_at": started.Format(time.RFC3339Nano), keyStartedAt: started.Format(time.RFC3339Nano), "started_epoch": float64(started.UnixNano()) / 1e9, "pid": cmd.Process.Pid, "returncode": nil, keyOptions: opts, "prefix": "dashboard/" + runID + "/", "results_dir": runDir, "log_file": logPath, keyMessage: "SPT workload started on the configured environment.", keyPhase: "SPT setup"}
+	if err := a.writeState(job); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		unlockClose(lock)
+		_ = os.RemoveAll(runDir)
+		a.mu.Unlock()
+		writeJSON(w, 500, map[string]any{keyError: "Could not save dashboard run state."})
+		return
+	}
+	// Publish the new run only after saving it. A failed save must preserve
+	// the previous job and its live history rather than leave a phantom run.
 	a.activeJob = job
 	a.activeCmd = cmd
 	a.activeLock = lock
 	a.liveRunID = ""
 	a.liveSamples = nil
 	a.liveSignature = ""
-	if err := a.writeState(job); err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		unlockClose(lock)
-		a.activeCmd = nil
-		a.activeLock = nil
-		_ = os.RemoveAll(runDir)
-		a.mu.Unlock()
-		writeJSON(w, 500, map[string]any{keyError: "Could not save dashboard run state."})
-		return
-	}
 	a.processes.Add(2)
 	a.mu.Unlock()
 	go a.watchProcess(runID, cmd, lock, drained)

@@ -43,6 +43,14 @@ type storageConfig struct {
 	Endpoint string   `json:"endpoint"`
 }
 
+// verificationRunner keeps the dashboard's report handling independent of how
+// node checks are executed. A nil app runner uses the real CLI verifier.
+type verificationRunner func([]*hostparse.HostInfo, verifyapi.Config) *verifyapi.Report
+
+func runHostVerification(hosts []*hostparse.HostInfo, cfg verifyapi.Config) *verifyapi.Report {
+	return verifyapi.NewVerifier(hosts, cfg).VerifyAll()
+}
+
 type verifyCheck struct {
 	Name    string `json:"name"`
 	Status  string `json:"status"`
@@ -435,14 +443,18 @@ func (a *app) runVerificationAPI(hosts []string) (string, error) {
 	if stopping {
 		return "", context.Canceled
 	}
-	report := verifyapi.NewVerifier(parsed, verifyapi.Config{
+	run := a.verifyNodes
+	if run == nil {
+		run = runHostVerification
+	}
+	report := run(parsed, verifyapi.Config{
 		NetworkMode:  constants.DefaultNetworkMode,
 		APIPort:      constants.SptAPIPortInt,
 		RMIPortStart: constants.DefaultRMIPortStart,
 		RMIPortCount: constants.DefaultRMIPortCount,
 		MinHosts:     len(parsed),
 		ShowProgress: false,
-	}).VerifyAll()
+	})
 	index := make(map[string]int, len(hosts))
 	for i, host := range hosts {
 		index[strings.ToLower(hostAddress(host))] = i

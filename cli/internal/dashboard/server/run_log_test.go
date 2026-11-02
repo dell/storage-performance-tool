@@ -112,3 +112,21 @@ func TestLogEndpointsRejectForeignHost(t *testing.T) {
 		}
 	}
 }
+
+func TestRedactLineCLIFlagAndBareSecret(t *testing.T) {
+	cases := []struct {
+		in, wantSub, mustGone string
+	}{
+		{"flag --storage-auth-secret=abc123 done", "--storage-auth-secret=[redacted]", "abc123"},
+		{"cfg secret: abc123 trailing", "secret: [redacted]", "abc123"},
+		{"cfg secret=abc123 trailing", "secret=[redacted]", "abc123"},
+		{"still secretKey=hunter2", "secretKey=[redacted]", "hunter2"},
+		{"Error: failed --secret-key hunter2", "--secret-key [redacted]", "hunter2"},
+	}
+	for _, tc := range cases {
+		got := redactLine(tc.in)
+		if !strings.Contains(got, tc.wantSub) || strings.Contains(got, tc.mustGone) {
+			t.Fatalf("in=%q got=%q want substring %q without %q", tc.in, got, tc.wantSub, tc.mustGone)
+		}
+	}
+}
