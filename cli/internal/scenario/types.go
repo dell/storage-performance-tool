@@ -12,6 +12,8 @@ type Params struct {
 	// TargetBucketProvisionDisabled forbids creating a missing target bucket
 	// (--provision-target-bucket=false); target buckets are still checked.
 	TargetBucketProvisionDisabled bool
+	// BucketMetricsDisabled turns off per-bucket counts and timings (--bucket-metrics=false).
+	BucketMetricsDisabled bool
 
 	// EndpointSelection is the opt-in per-request endpoint selection; the zero value keeps the default.
 	EndpointSelection EndpointSelection

@@ -167,7 +167,14 @@ type OutputConfig struct {
 
 // MetricsConfig represents metrics configuration
 type MetricsConfig struct {
-	Average AverageConfig `yaml:"average"`
+	Average AverageConfig        `yaml:"average"`
+	Bucket  *MetricsBucketConfig `yaml:"bucket,omitempty"` // emitted only to turn bucket metrics off
+}
+
+// MetricsBucketConfig represents output.metrics.bucket. The engine ships enabled: true, so the
+// generated defaults are unchanged unless a run turns them off.
+type MetricsBucketConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // AverageConfig represents average metrics configuration
@@ -195,6 +202,9 @@ func GenerateDefaults(params Params) ([]byte, error) {
 				},
 			},
 		},
+	}
+	if params.BucketMetricsDisabled {
+		config.Output.Metrics.Bucket = &MetricsBucketConfig{Enabled: false}
 	}
 	if params.RunID > 0 {
 		config.Run = &RunConfig{

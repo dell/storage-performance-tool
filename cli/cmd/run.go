@@ -54,6 +54,7 @@ const (
 	flagBucketCount           = "bucket-count"
 	targetBucketCountPath     = "storage.targetBucket.count"
 	flagProvisionTargetBucket = "provision-target-bucket"
+	flagBucketMetrics         = "bucket-metrics"
 	flagCreatePrefix          = "create-prefix"
 	flagRMIRegistryPort       = "rmi-registry-port"
 	flagInterfaces            = "interfaces"
@@ -2307,6 +2308,7 @@ func init() {
 	runCmd.Flags().String("prefix", "", "Write/write-verify: generated-key prefix (literal, include trailing / for a directory); seeded DELETE: owned namespace root; guarded existing DELETE: exact S3 prefix without a leading slash; list/read-verify: listing constraint")
 	runCmd.Flags().String("region", "", "AWS region for S3 requests (env S3_REGION); empty uses the region of a standard AWS endpoint, else us-east-1")
 	runCmd.Flags().Bool(flagProvisionTargetBucket, true, "Create a missing target bucket before the phase that writes the run's objects; false still checks that every target bucket exists and is accessible. Never clears or deletes a bucket")
+	runCmd.Flags().Bool(flagBucketMetrics, true, "Record per-bucket counts and timings for a step with more than one target bucket, in metrics.bucket.total.csv and metrics.bucket.steady.total.csv; false records and writes none of them")
 	registerEndpointSelectionFlags(runCmd.Flags())
 	runCmd.Flags().Int("auth-version", 4, "S3 authentication signature version (2 or 4; default 4)")
 
@@ -2523,6 +2525,10 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		if cmd.Flags().Lookup(flagProvisionTargetBucket) != nil {
 			provision, _ := cmd.Flags().GetBool(flagProvisionTargetBucket)
 			params.TargetBucketProvisionDisabled = !provision
+		}
+		if cmd.Flags().Lookup(flagBucketMetrics) != nil {
+			bucketMetrics, _ := cmd.Flags().GetBool(flagBucketMetrics)
+			params.BucketMetricsDisabled = !bucketMetrics
 		}
 		selection, err := endpointSelectionFromFlags(cmd)
 		if err != nil {
