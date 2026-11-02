@@ -347,7 +347,7 @@ final class MetricsJsonResponder {
 	/** Adds the step's preparation times; a step without an admission barrier adds no field. */
 	private void addPreparation(final ObjectNode jsonObj, final String stepId) {
 		final Map<String, Object> preparation = metricsManager.preparation(stepId);
-		if (preparation != null) {
+		if (preparation != null && !preparation.isEmpty()) {
 			jsonObj.set(MetricsConstants.METRIC_NAME_PREPARATION, objectMapper.valueToTree(preparation));
 		}
 	}
