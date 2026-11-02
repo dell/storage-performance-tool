@@ -671,6 +671,61 @@ public class S3AwsStorageDriverTest {
 			assertEquals("mybucket", second[0], "bucket on recycled call");
 			assertEquals("somekey", second[1], "key on recycled call");
 		}
+
+		/** A key that repeats the bucket keeps it, on the first call and after a recycle. */
+		@SuppressWarnings("unchecked")
+		@Test
+		void generatedNameRepeatingTheBucket_keepsThePrefix() {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.dstPath()).thenReturn("/abc");
+			when(item.name()).thenReturn("abc/s0/k");
+			when(op.item()).thenReturn(item);
+
+			assertArrayEquals(new String[]{"abc", "abc/s0/k"}, drv.resolveBucketAndKey(op));
+
+			when(item.name()).thenReturn("/abc/abc/s0/k");
+			assertArrayEquals(new String[]{"abc", "abc/s0/k"}, drv.resolveBucketAndKey(op));
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void generatedNameRepeatingTheNestedPrefix_keepsIt() {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.dstPath()).thenReturn("/abc/pre");
+			when(item.name()).thenReturn("pre/k");
+			when(op.item()).thenReturn(item);
+
+			assertArrayEquals(new String[]{"abc", "pre/pre/k"}, drv.resolveBucketAndKey(op));
+
+			when(item.name()).thenReturn("/abc/pre/pre/k");
+			assertArrayEquals(new String[]{"abc", "pre/pre/k"}, drv.resolveBucketAndKey(op));
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void nameStartingWithTheBucketLetters_isTheKey() {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.dstPath()).thenReturn("/abc");
+			when(item.name()).thenReturn("abcdef/k");
+			when(op.item()).thenReturn(item);
+
+			assertArrayEquals(new String[]{"abc", "abcdef/k"}, drv.resolveBucketAndKey(op));
+		}
+
+		@SuppressWarnings("unchecked")
+		@Test
+		void pathWithoutLeadingSlash_rootedRecordedName_resolvesToTheKey() {
+			Operation<Item> op = mock(Operation.class);
+			Item item = mock(Item.class);
+			when(op.dstPath()).thenReturn("abc");
+			when(item.name()).thenReturn("/abc/k");
+			when(op.item()).thenReturn(item);
+
+			assertArrayEquals(new String[]{"abc", "k"}, drv.resolveBucketAndKey(op));
+		}
 	}
 
 	// -----------------------------------------------------------------------

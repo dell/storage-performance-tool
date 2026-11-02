@@ -7,6 +7,7 @@ import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
+import com.dell.spt.base.item.ItemNamePaths;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperation;
@@ -63,7 +64,7 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 		final var dstPath = dataOp.dstPath();
 		final Path itemPath;
 		try {
-			if (dstPath == null || dstPath.isEmpty() || fileItemName.startsWith(dstPath)) {
+			if (dstPath == null || dstPath.isEmpty() || ItemNamePaths.startsWithPath(fileItemName, dstPath)) {
 				itemPath = FsConstants.FS.getPath(fileItemName);
 			} else {
 				dstParentDirs.computeIfAbsent(dstPath, DirIoHelper::createParentDir);

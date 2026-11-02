@@ -18,6 +18,7 @@ import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.ItemNamePaths;
 import com.dell.spt.base.item.PathItem;
 import com.dell.spt.base.item.TokenItem;
 import com.dell.spt.base.item.op.OpType;
@@ -329,19 +330,13 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 
 	protected String dataUriPath(
 					final I item, final String srcPath, final String dstPath, final OpType opType) {
-		final String itemPath;
-		if (dstPath != null) {
-			itemPath = dstPath.startsWith(SLASH) ? dstPath : SLASH + dstPath;
-		} else if (srcPath != null) {
-			itemPath = srcPath.startsWith(SLASH) ? srcPath : SLASH + srcPath;
-		} else {
-			itemPath = null;
-		}
+		final String path = dstPath != null ? dstPath : srcPath;
 		final String itemNameRaw = item.name();
 		final String itemName = itemNameRaw.startsWith(SLASH) ? itemNameRaw : SLASH + itemNameRaw;
-		if (itemPath == null || itemName.startsWith(itemPath)) {
+		if (path == null || ItemNamePaths.holdsPath(itemNameRaw, path)) {
 			return itemName;
 		}
+		final String itemPath = path.startsWith(SLASH) ? path : SLASH + path;
 		return itemPath.endsWith(SLASH) ? itemPath + itemName.substring(1) : itemPath + itemName;
 	}
 

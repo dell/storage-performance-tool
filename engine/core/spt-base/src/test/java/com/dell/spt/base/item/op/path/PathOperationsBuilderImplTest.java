@@ -10,6 +10,8 @@ import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.ListOptions;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 final class PathOperationsBuilderImplTest {
 
@@ -59,6 +61,32 @@ final class PathOperationsBuilderImplTest {
 		assertEquals("prefix/object", listOp.item().name());
 		assertEquals("/", listOp.options().delimiter());
 		assertEquals(123, listOp.options().maxKeys());
+	}
+
+	@ParameterizedTest
+	@CsvSource(value = {
+		"/abc | abc/ | abc/",
+		"/abc | abcdef/ | abcdef/",
+		"/abc | abc | abc",
+		"/abc | zzz/ | zzz/",
+		"/abc | /abc/zzz/ | zzz/",
+		"/abc | /abc/ | ''",
+		"/abc | /abc | ''",
+		"/abc | /abcdef/ | abcdef/",
+		"/abc | /zzz/ | zzz/",
+		"abc | abc/zzz/ | zzz/",
+		"abc | abc | ''",
+		"abc | /abc/zzz/ | zzz/",
+	}, delimiter = '|')
+	void listSeedKeepsAPrefixThatRepeatsTheBucket(
+					final String path, final String seed, final String expected) throws Exception {
+		final var builder = new PathOperationsBuilderImpl<PathItemImpl, PathOperation<PathItemImpl>>(5);
+		builder.opType(OpType.LIST);
+		builder.inputPath(path);
+
+		final var op = builder.buildOp(new PathItemImpl(seed));
+
+		assertEquals(expected, ((ListOperation<PathItemImpl>) op).item().name());
 	}
 
 	@Test

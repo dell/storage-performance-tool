@@ -1,5 +1,6 @@
 package com.dell.spt.base.item.op.path;
 
+import com.dell.spt.base.item.ItemNamePaths;
 import com.dell.spt.base.item.PathItem;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.OperationsBuilderImpl;
@@ -59,7 +60,7 @@ public class PathOperationsBuilderImpl<I extends PathItem, O extends PathOperati
 				listOp.srcPath(bucketPath);
 			}
 			if (originalName != null && item != null) {
-				item.name(relativizeKey(bucketPath, originalName));
+				item.name(relativizeKey(inputPath, originalName));
 			}
 			ListShard shard = null;
 			if (shardingContext != null && item != null) {
@@ -110,21 +111,18 @@ public class PathOperationsBuilderImpl<I extends PathItem, O extends PathOperati
 		return path.startsWith("/") ? path : "/" + path;
 	}
 
-	private static String relativizeKey(final String bucketPath, final String fullPath) {
+	private static String relativizeKey(final String path, final String fullPath) {
 		if (fullPath == null || fullPath.isEmpty()) {
 			return fullPath;
 		}
-		final String normalizedFull = fullPath.startsWith("/") ? fullPath : "/" + fullPath;
-		if (bucketPath != null && !bucketPath.isEmpty()) {
-			final var normalizedBucket = bucketPath.startsWith("/") ? bucketPath : "/" + bucketPath;
-			if (normalizedFull.startsWith(normalizedBucket)) {
-				var relative = normalizedFull.substring(normalizedBucket.length());
-				if (relative.startsWith("/")) {
-					relative = relative.substring(1);
-				}
-				return relative;
+		if (path != null) {
+			if (ItemNamePaths.holdsPath(fullPath, path)) {
+				return ItemNamePaths.relativeToPath(fullPath, path);
+			}
+			if (fullPath.equals(path) || fullPath.equals(normalizePath(path))) {
+				return "";
 			}
 		}
-		return normalizedFull.startsWith("/") ? normalizedFull.substring(1) : normalizedFull;
+		return fullPath.startsWith("/") ? fullPath.substring(1) : fullPath;
 	}
 }
