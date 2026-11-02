@@ -53,6 +53,8 @@ public final class BucketMetricsBudget {
 	}
 
 	/**
+	 * Refuses a step whose bucket meters would take too much of the heap, before any is allocated.
+	 *
 	 * @param sets the step's meter sets: for each metrics context, its members plus the catch-all
 	 * @param maxHeapBytes the JVM's maximum heap
 	 * @throws RunTerminalException when the footprint is above {@value #MAX_HEAP_SHARE} of the heap

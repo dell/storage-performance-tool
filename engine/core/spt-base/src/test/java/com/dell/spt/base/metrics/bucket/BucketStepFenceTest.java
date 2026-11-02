@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
@@ -23,6 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.HdrHistogram.Histogram;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 class BucketStepFenceTest {
@@ -34,6 +36,12 @@ class BucketStepFenceTest {
 
 	private BucketStepFence fence;
 	private final CountDownLatch release = new CountDownLatch(1);
+
+	/** A miss logs a warning, and the logger's first use would otherwise count towards the timed waits. */
+	@BeforeAll
+	static void initLogging() {
+		Loggers.MSG.warn("BucketStepFenceTest: logging ready");
+	}
 
 	@AfterEach
 	void tearDown() {
@@ -229,13 +237,12 @@ class BucketStepFenceTest {
 	void aStopWhileTheStartIsPendingNeverEndsBeforeItsStart() throws Exception {
 		final var stepFence = fence(SHORT_BUDGET);
 		final var cuts = context(stepFence);
-		final AtomicInteger passed = new AtomicInteger();
+
 		holdEveryPass(stepFence);
 		cuts.onWindowStart(System.nanoTime());
 		cuts.onWindowClose(System.nanoTime(), true, NO_RESULT);
 		assertNull(cuts.outcome(), "the end waits for its start");
 		stepFence.await();
-		assertEquals(0, passed.get());
 		assertEquals(BucketSteadyOutcome.Kind.UNMEASURED, cuts.outcome().kind());
 	}
 

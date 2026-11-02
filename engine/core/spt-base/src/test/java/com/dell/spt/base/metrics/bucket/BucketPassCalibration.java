@@ -76,7 +76,7 @@ public final class BucketPassCalibration {
 				while (!stop.get()) {
 					final var context = contexts.get(random.nextInt(contexts.size()));
 					final var sets = context.meters().sets();
-					final long duration = 100 + random.nextInt(100_000);
+					final long duration = 100L + random.nextInt(100_000);
 					sets[random.nextInt(sets.length)].markSucc(1024, duration, duration / 2, duration / 3);
 				}
 			}, "calibration-writer-" + w);

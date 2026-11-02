@@ -238,7 +238,7 @@ public final class BucketStepFence implements AutoCloseable {
 			endDeadlineNanos = clock.getAsLong() + deadlineBudgetNanos;
 			endQueued.set(true);
 			// An end never precedes its start: it is queued when the start pass ends.
-			startDone.whenComplete((ignored, failure) -> {
+			final var unused = startDone.whenComplete((ignored, failure) -> {
 				if (failure != null) {
 					finish(BucketSteadyOutcome.unmeasured("the start cut failed: " + failure));
 					return;

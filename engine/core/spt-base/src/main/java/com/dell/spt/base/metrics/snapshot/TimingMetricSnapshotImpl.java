@@ -250,8 +250,10 @@ public class TimingMetricSnapshotImpl extends NamedCountMetricSnapshotImpl
 		}
 		final ByteBuffer buffer = encodeBuffer.apply(histogram.getNeededByteBufferCapacity());
 		buffer.clear();
-		final int length = histogram.encodeIntoCompressedByteBuffer(buffer);
-		return Arrays.copyOf(buffer.array(), length);
+		final byte[] encoded = new byte[histogram.encodeIntoCompressedByteBuffer(buffer)];
+		buffer.flip();
+		buffer.get(encoded);
+		return encoded;
 	}
 
 	/**
@@ -271,9 +273,7 @@ public class TimingMetricSnapshotImpl extends NamedCountMetricSnapshotImpl
 			return new TimingMetricSnapshotImpl(0, 0, 0, 0, 0.0, metricName);
 		}
 		final double mean = end.getMean();
-		final ByteBuffer buffer = encodeBuffer.apply(end.getNeededByteBufferCapacity());
-		buffer.clear();
-		final int length = end.encodeIntoCompressedByteBuffer(buffer);
+		final byte[] encoded = encodeHistogram(end, encodeBuffer);
 		return new TimingMetricSnapshotImpl(
 						Math.round(mean * count),
 						count,
@@ -282,7 +282,7 @@ public class TimingMetricSnapshotImpl extends NamedCountMetricSnapshotImpl
 						mean,
 						metricName,
 						end.getCountAtValue(TimingMeterImpl.HIGHEST_TRACKABLE_VALUE_MICROS),
-						Arrays.copyOf(buffer.array(), length));
+						encoded);
 	}
 
 	private static Histogram decodeHistogram(final byte[] compressedHistogram) {

@@ -355,12 +355,10 @@ public final class BucketMetricsBench {
 
 	private static final class FakeOp {
 		final String dstPath;
-		final String srcPath;
 		final int slot;
 
-		FakeOp(final String dstPath, final String srcPath, final int slot) {
+		FakeOp(final String dstPath, final int slot) {
 			this.dstPath = dstPath;
-			this.srcPath = srcPath;
 			this.slot = slot;
 		}
 	}
@@ -388,10 +386,10 @@ public final class BucketMetricsBench {
 			final FakeOp[] existing = new FakeOp[SAMPLES];
 			for (int i = 0; i < SAMPLES; i++) {
 				final int member = random.nextInt(buckets);
-				newObjects[i] = new FakeOp(memberPaths[member], null, member);
+				newObjects[i] = new FakeOp(memberPaths[member], member);
 				// Reads, deletes and stats: the source path is split from each recorded name.
 				final String split = new String(memberPaths[member] + "/s000000" + (i % 8));
-				existing[i] = new FakeOp(split, split, -1);
+				existing[i] = new FakeOp(split, -1);
 			}
 			final Map<String, LookupArm> candidates = new java.util.LinkedHashMap<>();
 			candidates.put("field-read-baseline", op -> op.slot);

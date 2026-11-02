@@ -21,6 +21,8 @@ public final class BucketContextReply implements Serializable {
 	private final BucketSteadyOutcome steady;
 
 	/**
+	 * Creates one worker's reply for one metrics context.
+	 *
 	 * @param contextIndex the metrics context's place in its step, which an entry node's contexts share
 	 * @param elapsedMillis this worker's own elapsed time for the context, as its aggregate rates use
 	 * @param aggregateStartOffsetMillis when this worker's aggregate window started after step start,

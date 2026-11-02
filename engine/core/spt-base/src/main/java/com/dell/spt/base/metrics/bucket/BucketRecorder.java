@@ -2,6 +2,7 @@ package com.dell.spt.base.metrics.bucket;
 
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 
@@ -12,14 +13,14 @@ import java.util.Map;
  */
 public final class BucketRecorder {
 
-	private static final OpType[] OP_TYPES = OpType.values();
-
 	private final BucketSlotTable table;
 	private final BucketMeterSet[] primary;
-	private final BucketMeterSet[][] byOpType;
+	private final EnumMap<OpType, BucketMeterSet[]> byOpType;
 	private final Runnable awaitFence;
 
 	/**
+	 * Creates a recorder with no fence to join.
+	 *
 	 * @param members the step's Target Bucket Set, by name
 	 * @param primary the meters of the step context's primary metrics context
 	 * @param byOpType the meters of its per-type metrics contexts, or null when it has none
@@ -29,7 +30,11 @@ public final class BucketRecorder {
 		this(members, primary, byOpType, () -> {});
 	}
 
-	/** @param awaitFence joins the step's fence for this context's windows */
+	/**
+	 * Creates a recorder that joins the step's fence.
+	 *
+	 * @param awaitFence joins the step's fence for this context's windows
+	 */
 	public BucketRecorder(
 					final List<String> members,
 					final BucketMeters primary,
@@ -41,8 +46,8 @@ public final class BucketRecorder {
 		if (byOpType == null || byOpType.isEmpty()) {
 			this.byOpType = null;
 		} else {
-			this.byOpType = new BucketMeterSet[OP_TYPES.length][];
-			byOpType.forEach((type, meters) -> this.byOpType[type.ordinal()] = meters.sets());
+			this.byOpType = new EnumMap<>(OpType.class);
+			byOpType.forEach((type, meters) -> this.byOpType.put(type, meters.sets()));
 		}
 	}
 
@@ -68,7 +73,7 @@ public final class BucketRecorder {
 
 	private BucketMeterSet[] setsOf(final OpType type) {
 		if (byOpType != null) {
-			final BucketMeterSet[] sets = byOpType[type.ordinal()];
+			final BucketMeterSet[] sets = byOpType.get(type);
 			if (sets != null) {
 				return sets;
 			}
