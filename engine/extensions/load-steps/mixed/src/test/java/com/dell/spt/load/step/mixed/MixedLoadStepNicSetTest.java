@@ -56,6 +56,7 @@ class MixedLoadStepNicSetTest {
 		when(factory.id()).thenReturn("s3");
 		final var step = new MixedLoadStepLocal(config, List.of(factory), List.of(), mock(MetricsManager.class));
 		try {
+			assertTrue(step.mixesOperations(), "Pool Demand reads this step by its weights");
 			final var failure = assertThrows(IllegalStateException.class, step::init);
 			assertInstanceOf(IllegalConfigurationException.class, failure.getCause());
 			assertTrue(failure.getCause().getMessage().contains("storage.net.interfaces"), failure.getCause().getMessage());

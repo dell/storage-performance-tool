@@ -12,6 +12,7 @@ import (
 	"io"
 	"math/bits"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -98,7 +99,8 @@ func (r *sizeRecorder) sorted() [][2]int64 {
 func ReadItemSizes(path string, budget time.Duration) ItemSizes {
 	start := time.Now()
 	deadline := start.Add(budget)
-	result := ItemSizes{Source: path}
+	// The name alone: this goes on command lines and into shared run metadata.
+	result := ItemSizes{Source: filepath.Base(path)}
 	finish := func(recorder *sizeRecorder, reason, detail string) ItemSizes {
 		result.Millis = time.Since(start).Milliseconds()
 		if recorder != nil {
@@ -180,7 +182,7 @@ func readManifest(file io.Reader, recorder *sizeRecorder, deadline time.Time) (s
 		}
 		size, err := manifestSize(record)
 		if err != nil {
-			return reasonMalformed, strings.Join(record, ",")
+			return reasonMalformed, fmt.Sprintf("record %d", recorder.items+1)
 		}
 		recorder.record(size)
 	}
@@ -226,7 +228,7 @@ func readItemList(file io.Reader, recorder *sizeRecorder, deadline time.Time) (s
 		line = strings.TrimRight(line, "\r\n")
 		size, parseErr := itemLineSize(line)
 		if parseErr != nil {
-			return reasonMalformed, truncate(line)
+			return reasonMalformed, fmt.Sprintf("line %d", recorder.items+1)
 		}
 		recorder.record(size)
 		if atEnd {
@@ -262,12 +264,4 @@ func itemLineSize(line string) (int64, error) {
 		}
 	}
 	return size, nil
-}
-
-func truncate(line string) string {
-	const longest = 120
-	if len(line) > longest {
-		return line[:longest] + "..."
-	}
-	return line
 }

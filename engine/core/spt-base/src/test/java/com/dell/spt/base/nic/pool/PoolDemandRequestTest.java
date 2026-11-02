@@ -41,6 +41,28 @@ final class PoolDemandRequestTest {
 	}
 
 	@Test
+	void capacityReadsACgroupV1MemoryController(@TempDir final Path root) throws Exception {
+		write(root, "proc/meminfo", "MemTotal:       1048576 kB\n");
+		write(root, "proc/self/cgroup", "12:cpu,cpuacct:/docker/id\n4:memory:/docker/id\n");
+		final var unlimited = MemoryCapacity.read(root);
+		assertEquals(MemoryCapacity.SOURCE_MEM_TOTAL, unlimited.source(), "no file names a limit");
+
+		write(root, "sys/fs/cgroup/memory/memory.limit_in_bytes", "9223372036854771712\n");
+		assertEquals(MemoryCapacity.SOURCE_MEM_TOTAL, MemoryCapacity.read(root).source(), "v1's value for no limit");
+
+		write(root, "sys/fs/cgroup/memory/memory.limit_in_bytes", "536870912\n");
+		final var mounted = MemoryCapacity.read(root);
+		assertEquals(1L << 29, mounted.bytes(), "a container's mount is its own cgroup");
+		assertEquals(MemoryCapacity.SOURCE_CGROUP, mounted.source());
+
+		write(root, "sys/fs/cgroup/memory/docker/memory.limit_in_bytes", "268435456\n");
+		assertEquals(1L << 28, MemoryCapacity.read(root).bytes(), "an ancestor the host's view shows");
+
+		write(root, "proc/self/cgroup", "0::/\n4:memory:/docker/id\n");
+		assertEquals(1L << 28, MemoryCapacity.read(root).bytes(), "beside an unified hierarchy without memory");
+	}
+
+	@Test
 	void capacityIsTheSmallerOfMemTotalAndTheCgroupChainAndNamesItsSource(@TempDir final Path root) throws Exception {
 		write(root, "proc/meminfo", "MemTotal:       1048576 kB\nMemFree: 10 kB\n");
 		write(root, "proc/self/cgroup", "0::/lxc/payload/docker.scope\n");

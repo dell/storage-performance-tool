@@ -42,7 +42,11 @@ final class PoolPreparationTest {
 		boolean stop;
 
 		StubDriver(final int concurrency, final long limit, final boolean fail, final String... nics) {
-			layout = new Layout("host-a", limit, concurrency, MIB, 0, 0, fail, List.of(nics));
+			this(MIB, concurrency, limit, fail, nics);
+		}
+
+		StubDriver(final long threshold, final int concurrency, final long limit, final boolean fail, final String... nics) {
+			layout = new Layout("host-a", limit, concurrency, threshold, 0, 0, fail, List.of(nics));
 		}
 
 		@Override
@@ -138,6 +142,14 @@ final class PoolPreparationTest {
 
 	private static PoolPreparation.Report run(final StubDriver driver, final Config config) throws Exception {
 		return PoolPreparation.run("step-1", List.of(new Participant(0, driver, config)), new StubPreparation(), NO_ESTIMATE);
+	}
+
+	@Test
+	void aZeroByteTransferUsesTheSmallestClassAsThePoolDoes() throws Exception {
+		final var driver = new StubDriver(0, 96, 192 * GIB, true, "a", "b");
+		run(driver, root("create", "0"));
+		assertEquals(2, driver.orders.size());
+		driver.orders.forEach(order -> assertEquals(PoolSizeClass.MIN_BYTES, order.sizeClass()));
 	}
 
 	@Test
@@ -279,7 +291,8 @@ final class PoolPreparationTest {
 		try (final var log = new MessageLog()) {
 			final var report = run(second, listing);
 			assertEquals(0, report.requiredLimitBytes(), "nothing known in this step");
-			assertEquals(1, log.count("cannot check the RDMA pool budget"), log.captured::toString);
+			// Narrowed to this step's reason: the engine's loggers are asynchronous, so another test's line can land here.
+			assertEquals(1, log.count("cannot check the RDMA pool budget on host-a: GET: its"), log.captured::toString);
 		}
 	}
 

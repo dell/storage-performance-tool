@@ -360,10 +360,15 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			final var driver = context.poolDemandDriver();
 			if (driver != null) {
 				final int index = expectedOperationLifecycleContexts.indexOf(context);
-				participants.add(new PoolPreparation.Participant(index, driver, effectiveConfig(index)));
+				participants.add(new PoolPreparation.Participant(index, driver, effectiveConfig(index), mixesOperations()));
 			}
 		}
 		return participants;
+	}
+
+	/** Whether this step's one driver mixes operations by weight, which only the mixed step type does. */
+	protected boolean mixesOperations() {
+		return false;
 	}
 
 	/**

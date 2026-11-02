@@ -97,11 +97,11 @@ public final class PoolDemand {
 	public record Contribution(OpKind kind, State state, long smallest, long largest, int countLimit, String source, String reason) {
 
 		public int smallestClass() {
-			return state == State.ZERO || largest == 0 ? 0 : PoolSizeClass.of(smallest);
+			return state == State.KNOWN ? PoolSizeClass.of(smallest) : 0;
 		}
 
 		public int largestClass() {
-			return state == State.ZERO || largest == 0 ? 0 : PoolSizeClass.of(largest);
+			return state == State.KNOWN ? PoolSizeClass.of(largest) : 0;
 		}
 	}
 

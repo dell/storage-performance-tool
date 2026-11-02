@@ -131,7 +131,9 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 				final var configSlice = configSlices.get(i);
 				configsByFileManager.put(fileMgr, configSlice);
 				configSlice.val("item-input-file", itemInputFileName);
-				if (sizeRecording != null && PoolDemandConfig.recordsItemSizes(configSlice)) {
+				if (sizeRecording != null && (sizeRecording.mixed()
+								? PoolDemandConfig.mixedRecordsItemSizes(configSlice)
+								: PoolDemandConfig.recordsItemSizes(configSlice))) {
 					sizeRecorders.put(fileMgr, new ItemSizeSummary.Recorder(itemInput.toString()));
 				}
 			} catch (final Exception e) {
@@ -150,6 +152,8 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 		try {
 			Loggers.MSG.info("{}: scatter the items from the input \"{}\"...", loadStepId, itemInput);
 			scatterItems(itemInput, batchSize);
+			// The last write can cross the budget, and a summary past it is never used.
+			checkItemSizeBudget();
 			sizeRecorders.values().forEach(recorder -> ItemSizeScan.finish(itemInput, recorder));
 		} catch (final IOException e) {
 			if (Thread.currentThread().isInterrupted()) {

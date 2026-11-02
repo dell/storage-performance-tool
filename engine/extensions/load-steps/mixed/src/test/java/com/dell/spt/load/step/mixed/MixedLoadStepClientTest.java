@@ -274,6 +274,14 @@ class MixedLoadStepClientTest {
 	}
 
 	@Test
+	@DisplayName("a mixed step's slices record item sizes by its weights, not by its op type")
+	void testMixesOperations() {
+		final MixedLoadStepClient client = new MixedLoadStepClient(
+						newBaseConfig(), Collections.<Extension> emptyList(), Collections.emptyList(), null);
+		assertTrue(client.mixesOperations());
+	}
+
+	@Test
 	@DisplayName("config(Map) returns a new MixedLoadStepClient with updated step ID")
 	void testCopyViaConfig() {
 		final Config cfg = newBaseConfig();

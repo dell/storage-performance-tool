@@ -158,7 +158,7 @@ func Decide(in DecideInput) Engine {
 		return engine
 	}
 	explicit := explicitBytes(in.SptJavaOpts)
-	if explicit > 0 {
+	if HasExplicitLimit(in.SptJavaOpts) {
 		engine.Mode = ModeExplicit
 		engine.ExplicitBytes = explicit
 		engine.PassedBytes = explicit
@@ -303,7 +303,7 @@ func describeCapacity(capacity *CapacityRecord) string {
 
 var (
 	explicitOption = regexp.MustCompile(`(?:^|\s)` + regexp.QuoteMeta(directMemoryOption) + `(\S+)`)
-	heapOption     = regexp.MustCompile(`(?:^|\s)-Xmx(\S+)`)
+	heapOption     = regexp.MustCompile(`(?:^|\s)(?:-Xmx|-XX:MaxHeapSize=)(\S+)`)
 )
 
 // HasExplicitLimit reports whether SPT_JAVA_OPTS sets -XX:MaxDirectMemorySize, the last of which wins.

@@ -21,6 +21,7 @@ func rdmaParams(workloadType string) scenario.Params {
 		Threads:            96,
 		ObjectSize:         "1GiB",
 		RdmaThresholdBytes: mib,
+		Endpoints:          []string{"http://192.0.2.1:9000"},
 	}
 }
 
@@ -194,11 +195,9 @@ func TestAFileThatCannotBeReadInFullIsSentAsUnknownAndThePutsStay(t *testing.T) 
 	}
 }
 
-func TestEngineOverridesApply(t *testing.T) {
+func TestEngineOverridesOfWhatTheDefaultsHoldApply(t *testing.T) {
 	params := rdmaParams("write")
 	params.EngineOverrides = []string{
-		"storage.driver.limit.concurrency=48",
-		"item.data.size=4MiB",
 		"item.data.ranges.threshold=1MiB",
 		"storage.rdma.thresholdBytes=4096",
 		"storage.driver.limit.multipart.objects=3",
@@ -206,12 +205,57 @@ func TestEngineOverridesApply(t *testing.T) {
 	}
 	request := BuildRequest(params, stepsOf("create"), noFiles)
 	driver := request.Steps[0].Drivers[0]
-	if driver.Concurrency != 48 || driver.ThresholdBytes != 4096 || driver.MultipartObjects != 3 || driver.MultipartParts != 2 {
+	if driver.ThresholdBytes != 4096 || driver.MultipartObjects != 3 || driver.MultipartParts != 2 {
 		t.Fatalf("%+v", driver)
 	}
-	operation := driver.Operations[0]
-	if operation.PartBytes != mib || operation.Sizes.Range[0] != 4*mib || operation.Sizes.Source != "item.data.size" {
+	if operation := driver.Operations[0]; operation.PartBytes != mib {
 		t.Fatalf("%+v", operation)
+	}
+}
+
+// A generated step sets its own concurrency and object size after the defaults load.
+func TestEngineOverridesOfWhatAStepSetsLose(t *testing.T) {
+	params := rdmaParams("write")
+	params.EngineOverrides = []string{"storage.driver.limit.concurrency=1", "item.data.size=4MiB"}
+	driver := BuildRequest(params, stepsOf("create"), noFiles).Steps[0].Drivers[0]
+	if driver.Concurrency != 96 {
+		t.Fatalf("the step sets --threads: %+v", driver)
+	}
+	if operation := driver.Operations[0]; operation.Sizes.Range[0] != 1024*mib || operation.Sizes.Source != "--object-size" {
+		t.Fatalf("the step sets --object-size: %+v", operation)
+	}
+}
+
+func TestADashedEngineOverrideAppliesToo(t *testing.T) {
+	params := rdmaParams("write")
+	params.EngineOverrides = []string{"storage-rdma-bufferPool=false"}
+	if Applies(params) {
+		t.Fatal("with the pool off in a dashed engine override")
+	}
+}
+
+func TestAnExplicitZeroThresholdStaysZero(t *testing.T) {
+	params := rdmaParams("write")
+	params.RdmaThresholdBytes = 0
+	if driver := BuildRequest(params, stepsOf("create"), noFiles).Steps[0].Drivers[0]; driver.ThresholdBytes != 0 {
+		t.Fatalf("%+v", driver)
+	}
+}
+
+func TestAWriteVerifyReadIsSizedForWholeObjects(t *testing.T) {
+	params := rdmaParams("write-verify")
+	params.PartSize = "64MiB"
+	request := BuildRequest(params, stepsOf("create", "read"), noFiles)
+	if create := request.Steps[0].Drivers[0].Operations[0]; create.PartBytes != 64*mib {
+		t.Fatalf("the seed writes parts: %+v", create)
+	}
+	if read := request.Steps[1].Drivers[0].Operations[0]; read.PartBytes != 0 {
+		t.Fatalf("the verification read sets no threshold: %+v", read)
+	}
+	params.EngineOverrides = []string{"item.data.ranges.threshold=1MiB"}
+	request = BuildRequest(params, stepsOf("create", "read"), noFiles)
+	if read := request.Steps[1].Drivers[0].Operations[0]; read.PartBytes != mib {
+		t.Fatalf("a threshold in the defaults reaches it: %+v", read)
 	}
 }
 

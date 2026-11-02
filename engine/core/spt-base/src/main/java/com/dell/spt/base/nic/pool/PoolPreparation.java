@@ -35,7 +35,12 @@ public final class PoolPreparation {
 	public static final String ESTIMATE_ENV = "SPT_RDMA_POOL_ESTIMATE";
 
 	/** One context with NIC Pools. */
-	public record Participant(int contextIndex, PoolDemandDriver driver, Config config) {}
+	public record Participant(int contextIndex, PoolDemandDriver driver, Config config, boolean mixed) {
+
+		public Participant(final int contextIndex, final PoolDemandDriver driver, final Config config) {
+			this(contextIndex, driver, config, false);
+		}
+	}
 
 	/** Where this runs: the clock, and the environment holding the CLI's estimate. */
 	public record Environment(LongSupplier nanoTime, Function<String, String> env) {
@@ -130,7 +135,10 @@ public final class PoolPreparation {
 		final long now = environment.nanoTime().getAsLong();
 		final long remaining = Math.max(0, preparation.deadlineNanos() - now);
 		final long budgetEnd = now + remaining / ItemSizeRecording.BUDGET_DIVISOR;
-		final var operations = PoolDemandConfig.operations(config, file -> scan(stepId, file, config, budgetEnd, environment));
+		final Function<String, ItemSizeSummary> reader = file -> scan(stepId, file, config, budgetEnd, environment);
+		final var operations = participant.mixed()
+						? PoolDemandConfig.mixedOperations(config, reader)
+						: PoolDemandConfig.operations(config, reader);
 		final var workload = new PoolDemand.Workload(
 						layout.concurrency(), layout.thresholdBytes(), layout.multipartObjects(), layout.multipartParts(), operations);
 		return new Active(participant, layout, PoolDemand.estimate(workload, layout.nics()));

@@ -107,6 +107,26 @@ final class ItemSizeScanTest {
 	}
 
 	@Test
+	void aFileThatEndsPastTheBudgetIsStillIncomplete() {
+		final var file = FIXTURES.resolve("item-files/one-class.csv");
+		final long now = System.nanoTime();
+		final var calls = new java.util.concurrent.atomic.AtomicInteger();
+		// Every check inside the read passes; only the one at the end of the file sees the budget gone.
+		final int checksInTheRead = checksOf(file);
+		final var summary = ItemSizeScan.scan(file.toString(), ITEMS, now + 1,
+						() -> calls.getAndIncrement() < checksInTheRead ? now : now + 2);
+		assertFalse(summary.complete());
+		assertEquals(ItemSizeSummary.Reason.BUDGET_EXPIRED, summary.reason());
+	}
+
+	/** How many times a read of the file checks the clock before its last check. */
+	private static int checksOf(final Path file) {
+		final var calls = new java.util.concurrent.atomic.AtomicInteger();
+		ItemSizeScan.scan(file.toString(), ITEMS, Long.MAX_VALUE, calls::getAndIncrement);
+		return calls.get() - 1;
+	}
+
+	@Test
 	void aSummarySurvivesItsJsonForm() {
 		final var recorder = new ItemSizeSummary.Recorder("items.csv");
 		recorder.record(3 << 20);

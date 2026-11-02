@@ -99,6 +99,11 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		return MixedLoadStepExtension.TYPE;
 	}
 
+	@Override
+	protected boolean mixesOperations() {
+		return true;
+	}
+
 	/** Every sub-load's configuration over the base, as this step builds its one context. */
 	@Override
 	protected Config effectiveConfig(final int contextIndex) {

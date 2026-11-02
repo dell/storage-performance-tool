@@ -71,12 +71,12 @@ public final class ItemSizeScan {
 					throw e;
 				}
 				recordEach(batch, recorder);
-				finish(input, recorder);
+				finishWithinBudget(input, recorder, deadlineNanos, nanoTime);
 				return;
 			}
 			recordEach(batch, recorder);
 			if (count <= 0) {
-				finish(input, recorder);
+				finishWithinBudget(input, recorder, deadlineNanos, nanoTime);
 				return;
 			}
 		}
@@ -100,6 +100,16 @@ public final class ItemSizeScan {
 	 * CSV input returns no items at a malformed line as it does at its end, and the status tells them
 	 * apart.
 	 */
+	/** A summary that took longer than its budget is never used, even if the file ended. */
+	private static void finishWithinBudget(
+					final Object input, final ItemSizeSummary.Recorder recorder, final long deadlineNanos, final LongSupplier nanoTime) {
+		if (nanoTime.getAsLong() - deadlineNanos >= 0) {
+			recorder.fail(ItemSizeSummary.Reason.BUDGET_EXPIRED, null);
+			return;
+		}
+		finish(input, recorder);
+	}
+
 	public static void finish(final Object input, final ItemSizeSummary.Recorder recorder) {
 		if (input instanceof ItemInputStatus status && status.malformedItems() > 0) {
 			recorder.fail(ItemSizeSummary.Reason.MALFORMED_ITEM, firstLine(status.firstMalformedItem()));

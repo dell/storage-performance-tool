@@ -94,8 +94,15 @@ func poolSizingSteps(params scenario.Params) []scenario.StepInfo {
 		if params.ReadItemsFile == "" {
 			ops = []string{"seed", "mixed"}
 		}
+	case WorkloadTypeWriteVerify:
+		ops = []string{"create", "read"}
+	case WorkloadTypeReadVerify:
+		ops = []string{"read"}
 	case WorkloadTypeDelete:
 		ops = []string{"delete"}
+		if params.ItemsFile == "" && !params.DeleteExisting {
+			ops = []string{"seed", "delete"}
+		}
 	}
 	steps := make([]scenario.StepInfo, 0, len(ops))
 	for i, op := range ops {

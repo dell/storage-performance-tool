@@ -37,42 +37,43 @@ public final class PoolDemandConfig {
 						&& flag(root, "storage-rdma-bufferPool");
 	}
 
-	/** Whether a slice of this configuration gets a size summary: only its CREATE and READ operations can use RDMA. */
+	/** Whether a slice of this configuration gets a size summary: only CREATE and READ operations can use RDMA. */
 	public static boolean recordsItemSizes(final Config root) {
-		return applies(root)
-						&& isData(root)
-						&& (weight(root, "get") > 0
-										|| (noWeights(root) && (isOpType(root, OpType.CREATE) || isOpType(root, OpType.READ))));
+		return applies(root) && isData(root) && (isOpType(root, OpType.CREATE) || isOpType(root, OpType.READ));
+	}
+
+	/** {@link #recordsItemSizes} for a mixed step, whose GETs read the item input. */
+	public static boolean mixedRecordsItemSizes(final Config root) {
+		return applies(root) && isData(root) && weight(root, "get") > 0;
 	}
 
 	/**
-	 * The operations of the driver this configuration describes.
+	 * The operations of a plain step's driver. {@code load.op.weights} says nothing here: the mixed
+	 * extension's shipped defaults set them for every step of a run.
 	 *
 	 * @param scan reads an item file this engine reads itself, for a configuration that holds no summary
 	 */
 	public static List<Operation> operations(final Config root, final Function<String, ItemSizeSummary> scan) {
-		if (!isData(root)) {
-			return List.of(new Operation(OpKind.OTHER, 0, false, new PoolDemand.NotKnown("")));
+		if (isData(root) && isOpType(root, OpType.CREATE)) {
+			return List.of(new Operation(OpKind.CREATE, partBytes(root), false, itemSizes(root, scan)));
 		}
-		final long part = partBytes(root);
-		final boolean ranged = ranged(root);
+		if (isData(root) && isOpType(root, OpType.READ)) {
+			return List.of(new Operation(OpKind.READ, partBytes(root), ranged(root), itemSizes(root, scan)));
+		}
+		return List.of(new Operation(OpKind.OTHER, 0, false, new PoolDemand.NotKnown("")));
+	}
+
+	/** The operations of a mixed step's one driver: its GETs read the item input, and its PUTs write objects of item.data.size. */
+	public static List<Operation> mixedOperations(final Config root, final Function<String, ItemSizeSummary> scan) {
 		final var operations = new ArrayList<Operation>(2);
-		if (noWeights(root)) {
-			if (isOpType(root, OpType.CREATE)) {
-				operations.add(new Operation(OpKind.CREATE, part, false, itemSizes(root, scan)));
-			} else if (isOpType(root, OpType.READ)) {
-				operations.add(new Operation(OpKind.READ, part, ranged, itemSizes(root, scan)));
-			} else {
-				operations.add(new Operation(OpKind.OTHER, 0, false, new PoolDemand.NotKnown("")));
+		if (isData(root)) {
+			final long part = partBytes(root);
+			if (weight(root, "get") > 0) {
+				operations.add(new Operation(OpKind.READ, part, ranged(root), itemSizes(root, scan)));
 			}
-			return operations;
-		}
-		// A mixed step: its GETs read the item input, and its PUTs write objects of item.data.size.
-		if (weight(root, "get") > 0) {
-			operations.add(new Operation(OpKind.READ, part, ranged, itemSizes(root, scan)));
-		}
-		if (weight(root, "put") > 0) {
-			operations.add(new Operation(OpKind.CREATE, part, false, configuredSize(root)));
+			if (weight(root, "put") > 0) {
+				operations.add(new Operation(OpKind.CREATE, part, false, configuredSize(root)));
+			}
 		}
 		if (operations.isEmpty()) {
 			operations.add(new Operation(OpKind.OTHER, 0, false, new PoolDemand.NotKnown("")));
@@ -142,10 +143,6 @@ public final class PoolDemandConfig {
 
 	private static boolean isOpType(final Config root, final OpType type) {
 		return type.equals(OpType.valueOf(root.stringVal("load-op-type").toUpperCase(Locale.ROOT)));
-	}
-
-	private static boolean noWeights(final Config root) {
-		return weight(root, "get") <= 0 && weight(root, "put") <= 0 && weight(root, "delete") <= 0 && weight(root, "stat") <= 0;
 	}
 
 	/** A mixed step's weight; the schema entry belongs to the mixed extension, so it may not exist. */

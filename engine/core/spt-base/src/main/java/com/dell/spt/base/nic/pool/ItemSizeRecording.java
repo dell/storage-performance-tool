@@ -8,8 +8,17 @@ import java.util.function.LongSupplier;
  * unknown, while the distribution goes on, within the deadline, to its end.
  *
  * @param deadlineNanos the end of the summary's budget, on {@code nanoTime}
+ * @param mixed whether the step is a mixed step, whose GETs read its item input
  */
-public record ItemSizeRecording(long deadlineNanos, LongSupplier nanoTime) {
+public record ItemSizeRecording(long deadlineNanos, LongSupplier nanoTime, boolean mixed) {
+
+	public ItemSizeRecording(final long deadlineNanos, final LongSupplier nanoTime) {
+		this(deadlineNanos, nanoTime, false);
+	}
+
+	public ItemSizeRecording asMixed() {
+		return new ItemSizeRecording(deadlineNanos, nanoTime, true);
+	}
 
 	/** The summary's budget is this fraction of the preparation deadline. */
 	public static final int BUDGET_DIVISOR = 4;

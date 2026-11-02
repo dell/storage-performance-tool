@@ -72,7 +72,10 @@ func TestPlanAsksEachHostsImageForItsPlanAndCapacity(t *testing.T) {
 		t.Fatalf("a none host is not asked: %v", fake.commands["wrk2"])
 	}
 	worker := strings.Join(fake.commands["wrk1"][0], " ")
-	for _, want := range []string{"docker run --rm --network host --cgroupns=host --entrypoint /opt/spt/spt-nic-plan",
+	if strings.Contains(worker, "--cgroupns") {
+		t.Errorf("only the capacity probe needs the host's cgroup namespace: %q", worker)
+	}
+	for _, want := range []string{"docker run --rm --network host", "--entrypoint /opt/spt/spt-nic-plan",
 		"--device /dev/infiniband/ --cap-add IPC_LOCK --ulimit memlock=-1:-1", "spt:test", "--rdma", "--interfaces ens9", "--pool-request "} {
 		if !strings.Contains(worker, want) {
 			t.Errorf("%q is missing %q", worker, want)
@@ -101,6 +104,27 @@ func TestPlanLeavesAHostItCannotAskToItsEngine(t *testing.T) {
 	}
 	if plan.Engines[0].Mode != ModeUnprobed || plan.Failure() != nil {
 		t.Fatalf("%+v", plan.Engines[0])
+	}
+}
+
+// The command runs through a remote shell, so an endpoint it could expand never reaches one.
+func TestAnEndpointWithShellCharactersIsNeverSentToAHost(t *testing.T) {
+	for _, endpoint := range []string{"http://$(uname):9000", "http://`uname`:9000", "http://a;b:9000"} {
+		fake := &fakeHosts{reply: func(string, []string) (string, error) { return "", errors.New("unexpected") }}
+		params := rdmaParams("write")
+		params.Endpoints = []string{endpoint}
+		plan, err := BuildPlan(context.Background(), Input{
+			Params: params, Steps: stepsOf("create"), Hosts: []*hostparse.HostInfo{{Host: "wrk1"}}, Executor: fake,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(fake.commands) != 0 {
+			t.Fatalf("%s: %v", endpoint, fake.commands)
+		}
+		if plan.Engines[0].Mode != ModeUnprobed {
+			t.Fatalf("%s: %+v", endpoint, plan.Engines[0])
+		}
 	}
 }
 

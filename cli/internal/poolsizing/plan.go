@@ -95,10 +95,17 @@ func planHost(ctx context.Context, in Input, slice int, host *hostparse.HostInfo
 		SptJavaOpts: in.SptJavaOpts,
 		Shortfall:   in.Shortfall,
 	}
-	if decide.NoNicSet {
+	// An attached worker is not sized, so it is not asked either: it may not be reachable at all.
+	if decide.NoNicSet || decide.Attached {
 		return Decide(decide), nil
 	}
-	askHost(ctx, in, host, PlanArgs(interfaces, hostEndpoints(in, slice), encoded), &decide)
+	endpoints := hostEndpoints(in, slice)
+	// The command passes through a remote shell, so nothing unchecked goes on its line.
+	if err := nicplan.ValidateEndpoints(endpoints); err != nil {
+		decide.ProbeError = err
+		return Decide(decide), nil
+	}
+	askHost(ctx, in, host, PlanArgs(interfaces, endpoints, encoded), &decide)
 	return Decide(decide), decide.Output
 }
 
@@ -157,10 +164,10 @@ func PlanArgs(interfaces, endpoints []string, encoded string) []string {
 	return append(args, "--pool-request", encoded)
 }
 
-// probe runs the image's command in a short-lived container on the host. It runs in the host's
-// cgroup namespace, so /proc/self/cgroup names the whole chain the engine's own container would sit
-// on, ancestors included, such as an LXC container's limit (N6). Without that, a container's own
-// namespace hides them.
+// probe runs the image's command in a short-lived container on the host. The capacity probe runs in
+// the host's cgroup namespace, so /proc/self/cgroup names the whole chain the engine's own container
+// would sit on, ancestors included, such as an LXC container's limit (N6). Without that, a
+// container's own namespace hides them.
 func probe(ctx context.Context, in Input, host *hostparse.HostInfo, args []string) (*nicplan.Output, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
@@ -177,12 +184,17 @@ func probe(ctx context.Context, in Input, host *hostparse.HostInfo, args []strin
 
 // ProbeCommand is the docker run that asks the image on one host.
 func ProbeCommand(image string, skipPull, rdma bool, args []string) []string {
-	command := []string{constants.DockerCommand, "run", "--rm", "--network", "host", "--cgroupns=host", "--entrypoint", constants.SptNicPlanCommand}
-	if skipPull {
-		command = append(command, "--pull", "never")
-	}
+	command := []string{constants.DockerCommand, "run", "--rm", "--network", "host"}
 	if rdma {
 		command = append(command, "--device", constants.RdmaDevicePath, "--cap-add", constants.RdmaCapIpcLock, "--ulimit", constants.RdmaUlimitMemlock)
+	} else {
+		// Only the capacity probe needs the host's view of the cgroups, and a daemon that refuses the
+		// flag then loses only that answer.
+		command = append(command, "--cgroupns=host")
+	}
+	command = append(command, "--entrypoint", constants.SptNicPlanCommand)
+	if skipPull {
+		command = append(command, "--pull", "never")
 	}
 	command = append(command, image)
 	return append(command, args...)

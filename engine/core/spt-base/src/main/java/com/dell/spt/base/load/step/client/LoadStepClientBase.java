@@ -257,6 +257,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			// The barrier's deadline starts before the items are distributed (D54-R2).
 			final AdmissionBarrier barrier = anyNicSet(configSlices, ctxConfigsSlices) ? newAdmissionBarrier() : null;
 			itemSizeRecording = barrier == null ? null : barrier.itemSizeRecording();
+			if (itemSizeRecording != null && mixesOperations()) {
+				itemSizeRecording = itemSizeRecording.asMixed();
+			}
 			try {
 				if (barrier == null) {
 					distribution.run();
@@ -2794,6 +2797,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 		ctxConfigsCopy.add(ctxConfig);
 		return copyInstance(config, ctxConfigsCopy);
+	}
+
+	/** Whether this step's one driver mixes operations by weight, which only the mixed step type does. */
+	protected boolean mixesOperations() {
+		return false;
 	}
 
 	protected abstract T copyInstance(final Config config, final List<Config> ctxConfigs);

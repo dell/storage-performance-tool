@@ -91,6 +91,21 @@ func TestTheHeapComesFromSptJavaOptsOrTheEntrypoint(t *testing.T) {
 	}
 }
 
+func TestMaxHeapSizeIsTheHeapToo(t *testing.T) {
+	engine := Decide(DecideInput{Host: "h", Shortfall: ShortfallWarn, SptJavaOpts: "-Xmx2g -XX:MaxHeapSize=16g", Output: output(capacityOf(100*gib, "MemTotal"), step("read", 192*gib))})
+	if engine.Capacity.HeapBytes != 16*gib {
+		t.Fatalf("the JVM takes the last of either: %+v", engine.Capacity)
+	}
+}
+
+// Zero is a value the JVM accepts: the limit then follows the heap. The engine checks it.
+func TestAnExplicitZeroDirectLimitIsStillTheUsersChoice(t *testing.T) {
+	engine := Decide(DecideInput{Host: "h", Shortfall: ShortfallFail, SptJavaOpts: "-XX:MaxDirectMemorySize=0", Output: output(capacityOf(100*gib, "MemTotal"), step("read", 192*gib))})
+	if engine.Mode != ModeExplicit || engine.Failure != "" {
+		t.Fatalf("%+v", engine)
+	}
+}
+
 func TestAnExplicitValueStaysAndItsDemandIsStillRecorded(t *testing.T) {
 	engine := Decide(DecideInput{Host: "h", SptJavaOpts: "-XX:+UseZGC -XX:MaxDirectMemorySize=128g", Output: output(capacityOf(1024*gib, "MemTotal"), step("read", 192*gib))})
 	if engine.Mode != ModeExplicit || engine.ExplicitBytes != 128*gib || engine.CalculatedBytes != 0 || engine.NeedBytes != 192*gib {

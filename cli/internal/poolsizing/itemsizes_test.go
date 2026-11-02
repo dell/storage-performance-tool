@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -57,6 +58,30 @@ func TestEverySharedFixtureGivesTheEnginesSummary(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The summary goes on command lines and into shared run metadata.
+func TestAMalformedItemsContentAndTheHostPathStayOutOfTheSummary(t *testing.T) {
+	for name, content := range map[string]string{
+		"list.csv":     "ok-item,0,1024\nsecret-key,not-a-number\n",
+		"manifest.csv": manifestHeaderLine() + "\nbucket,secret-key,bad-size,x\n",
+	} {
+		path := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		sizes := ReadItemSizes(path, time.Minute)
+		if sizes.Complete || sizes.Reason != reasonMalformed {
+			t.Fatalf("%s: %+v", name, sizes)
+		}
+		if strings.Contains(sizes.Detail, "secret-key") || sizes.Source != name {
+			t.Fatalf("%s: %+v", name, sizes)
+		}
+	}
+}
+
+func manifestHeaderLine() string {
+	return strings.Join(manifestHeader, ",")
 }
 
 func TestAMissingFileIsAReadFailure(t *testing.T) {

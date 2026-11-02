@@ -18,79 +18,57 @@ import java.util.List;
  * @param cgroup the cgroup that sets that limit, or empty
  * @param note what could not be read, or empty
  */
-public record MemoryCapacity(long memTotalBytes, long cgroupLimitBytes, String cgroup, String note) {
+public record MemoryCapacity(long memTotalBytes,long cgroupLimitBytes,String cgroup,String note){
 
-	public static final String SOURCE_MEM_TOTAL = "MemTotal";
-	public static final String SOURCE_CGROUP = "cgroup";
+public static final String SOURCE_MEM_TOTAL="MemTotal";public static final String SOURCE_CGROUP="cgroup";
 
-	private static final String NO_LIMIT = "max";
+private static final String NO_LIMIT="max";
 
-	/** The smaller of the two, or -1 when neither was read. */
-	public long bytes() {
-		if (cgroupLimitBytes >= 0 && (memTotalBytes < 0 || cgroupLimitBytes < memTotalBytes)) {
-			return cgroupLimitBytes;
+/** The smaller of the two, or -1 when neither was read. */
+public long bytes(){if(cgroupLimitBytes>=0&&(memTotalBytes<0||cgroupLimitBytes<memTotalBytes)){return cgroupLimitBytes;}return memTotalBytes;}
+
+/** Which of the two bounds it. */
+public String source(){return cgroupLimitBytes>=0&&(memTotalBytes<0||cgroupLimitBytes<memTotalBytes)?SOURCE_CGROUP:SOURCE_MEM_TOTAL;}
+
+public void write(final ObjectNode node){node.put("bytes",bytes());node.put("source",source());node.put("memTotalBytes",memTotalBytes);node.put("cgroupLimitBytes",cgroupLimitBytes);if(!cgroup.isEmpty()){node.put("cgroup",cgroup);}if(!note.isEmpty()){node.put("note",note);}}
+
+public static MemoryCapacity ofThisHost(){return read(Path.of("/"));}
+
+/** Reads below {@code root}, which tests replace. */
+static MemoryCapacity read(final Path root){final var notes=new StringBuilder();long memTotal=-1;try{memTotal=memTotal(Files.readAllLines(root.resolve("proc/meminfo"),StandardCharsets.UTF_8));}catch(final IOException|NumberFormatException e){notes.append("cannot read MemTotal: ").append(e);}final var limit=new Limit();try{final var lines=Files.readAllLines(root.resolve("proc/self/cgroup"),StandardCharsets.UTF_8);final var unified=unifiedCgroup(lines);if(unified!=null){limit.readChain(root.resolve("sys/fs/cgroup"),unified,"memory.max");}
+// A cgroup v1 memory controller, alone or beside an unified hierarchy that lacks it. In a
+// container its mount is the container's own cgroup, so the mount's root counts too.
+final var v1=memoryController(lines);if(v1!=null){final var mount=root.resolve("sys/fs/cgroup/memory");limit.readChain(mount,v1,"memory.limit_in_bytes");limit.readFile(mount.resolve("memory.limit_in_bytes"),v1);if(notes.length()>0){notes.append("; ");}notes.append("cgroup v1: a container sees only its own limit, not its ancestors'");}}catch(final IOException|NumberFormatException e){if(notes.length()>0){notes.append("; ");}notes.append("cannot read the cgroup chain: ").append(e);}return new MemoryCapacity(memTotal,limit.bytes,limit.cgroup,notes.toString());}
+
+/** The smallest limit found on a cgroup chain, and the cgroup that sets it. */
+private static final class Limit {
+	/** What cgroup v1 reports for no limit is a page-aligned {@code Long.MAX_VALUE}. */
+	private static final long NO_V1_LIMIT = 1L << 60;
+
+	long bytes = -1;
+	String cgroup = "";
+
+	/** The cgroup itself, then each ancestor; the root has no memory.max. */
+	void readChain(final Path mount, final String cgroupPath, final String fileName) throws IOException {
+		for (String path = cgroupPath; path != null; path = parent(path)) {
+			readFile(mount.resolve(path.startsWith("/") ? path.substring(1) : path).resolve(fileName), path);
 		}
-		return memTotalBytes;
 	}
 
-	/** Which of the two bounds it. */
-	public String source() {
-		return cgroupLimitBytes >= 0 && (memTotalBytes < 0 || cgroupLimitBytes < memTotalBytes) ? SOURCE_CGROUP : SOURCE_MEM_TOTAL;
-	}
-
-	public void write(final ObjectNode node) {
-		node.put("bytes", bytes());
-		node.put("source", source());
-		node.put("memTotalBytes", memTotalBytes);
-		node.put("cgroupLimitBytes", cgroupLimitBytes);
-		if (!cgroup.isEmpty()) {
-			node.put("cgroup", cgroup);
+	void readFile(final Path file, final String path) throws IOException {
+		if (!Files.isReadable(file)) {
+			return;
 		}
-		if (!note.isEmpty()) {
-			node.put("note", note);
-		}
-	}
-
-	public static MemoryCapacity ofThisHost() {
-		return read(Path.of("/"));
-	}
-
-	/** Reads below {@code root}, which tests replace. */
-	static MemoryCapacity read(final Path root) {
-		final var notes = new StringBuilder();
-		long memTotal = -1;
-		try {
-			memTotal = memTotal(Files.readAllLines(root.resolve("proc/meminfo"), StandardCharsets.UTF_8));
-		} catch (final IOException | NumberFormatException e) {
-			notes.append("cannot read MemTotal: ").append(e);
-		}
-		long limit = -1;
-		String limiting = "";
-		try {
-			final var cgroup = unifiedCgroup(Files.readAllLines(root.resolve("proc/self/cgroup"), StandardCharsets.UTF_8));
-			if (cgroup != null) {
-				// The cgroup itself, then each ancestor; the root has no memory.max.
-				for (String path = cgroup; path != null; path = parent(path)) {
-					final var file = root.resolve("sys/fs/cgroup" + path).resolve("memory.max");
-					if (Files.isReadable(file)) {
-						final var text = Files.readString(file, StandardCharsets.UTF_8).trim();
-						if (!NO_LIMIT.equals(text)) {
-							final long value = Long.parseLong(text);
-							if (limit < 0 || value < limit) {
-								limit = value;
-								limiting = path;
-							}
-						}
-					}
-				}
+		final var text = Files.readString(file, StandardCharsets.UTF_8).trim();
+		if (!NO_LIMIT.equals(text)) {
+			final long value = Long.parseLong(text);
+			if (value < NO_V1_LIMIT && (bytes < 0 || value < bytes)) {
+				bytes = value;
+				cgroup = path;
 			}
-		} catch (final IOException | NumberFormatException e) {
-			if (notes.length() > 0) {
-				notes.append("; ");
-			}
-			notes.append("cannot read the cgroup chain: ").append(e);
 		}
-		return new MemoryCapacity(memTotal, limit, limiting, notes.toString());
+	}
+
 	}
 
 	private static long memTotal(final List<String> lines) {
@@ -109,6 +87,17 @@ public record MemoryCapacity(long memTotalBytes, long cgroupLimitBytes, String c
 			if (line.startsWith("0::")) {
 				final var path = line.substring(3).trim();
 				return path.isEmpty() ? "/" : path;
+			}
+		}
+		return null;
+	}
+
+	/** The cgroup v1 memory controller's path, from a line such as {@code 4:memory:/docker/id}; {@code null} without one. */
+	private static String memoryController(final List<String> lines) {
+		for (final String line : lines) {
+			final var fields = line.split(":", 3);
+			if (fields.length == 3 && List.of(fields[1].split(",", -1)).contains("memory")) {
+				return fields[2].trim().isEmpty() ? "/" : fields[2].trim();
 			}
 		}
 		return null;

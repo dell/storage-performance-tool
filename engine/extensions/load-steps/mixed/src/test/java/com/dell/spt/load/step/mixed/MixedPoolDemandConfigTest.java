@@ -51,9 +51,25 @@ final class MixedPoolDemandConfigTest {
 		return recorder.summary();
 	}
 
+	/** The mixed extension's shipped defaults set its weights on every step of a run, so they cannot mark a mixed step. */
+	@Test
+	void plainStepsIgnoreTheWeightsTheMixedDefaultsGiveEveryStep() throws Exception {
+		try (final var shipped = getClass().getResourceAsStream("/config/defaults-load-op-mixed.yaml")) {
+			final var text = new String(shipped.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+			assertTrue(text.contains("get: 45"), "the premise of this test: " + text);
+		}
+		for (final var plain : Map.of("create", OpKind.CREATE, "read", OpKind.READ, "delete", OpKind.OTHER).entrySet()) {
+			final var config = config();
+			config.val("load-op-type", plain.getKey());
+			final var operations = PoolDemandConfig.operations(config, file -> summary(4L << 20));
+			assertEquals(List.of(plain.getValue()), operations.stream().map(PoolDemand.Operation::kind).toList(), plain.getKey());
+			assertEquals(plain.getValue() != OpKind.OTHER, PoolDemandConfig.recordsItemSizes(config), plain.getKey());
+		}
+	}
+
 	@Test
 	void aMixedDriverHasItsListedGetsAndItsPuts() throws Exception {
-		final var operations = PoolDemandConfig.operations(config(), file -> summary(4L << 20));
+		final var operations = PoolDemandConfig.mixedOperations(config(), file -> summary(4L << 20));
 		assertEquals(List.of(OpKind.READ, OpKind.CREATE), operations.stream().map(PoolDemand.Operation::kind).toList());
 		assertInstanceOf(PoolDemand.Listed.class, operations.get(0).sizes());
 		assertInstanceOf(PoolDemand.Range.class, operations.get(1).sizes());
@@ -66,7 +82,7 @@ final class MixedPoolDemandConfigTest {
 	void aMixedDriverWhoseItemFileIsUnreadKeepsItsPuts() throws Exception {
 		final var recorder = new ItemSizeSummary.Recorder("items.csv");
 		recorder.fail(ItemSizeSummary.Reason.MALFORMED_ITEM, "bad");
-		final var operations = PoolDemandConfig.operations(config(), file -> recorder.summary());
+		final var operations = PoolDemandConfig.mixedOperations(config(), file -> recorder.summary());
 		final var demand = PoolDemand.estimate(new PoolDemand.Workload(4, 1L << 20, 0, 0, operations), List.of("a", "b"));
 		assertEquals(PoolDemand.State.KNOWN, demand.state());
 		assertTrue(demand.hasUnknown());
@@ -76,8 +92,8 @@ final class MixedPoolDemandConfigTest {
 	@Test
 	void aMixedStepRecordsItemSizesOnlyForItsGets() throws Exception {
 		final var config = config();
-		assertTrue(PoolDemandConfig.recordsItemSizes(config));
+		assertTrue(PoolDemandConfig.mixedRecordsItemSizes(config));
 		config.val("load-op-weights-get", 0);
-		assertFalse(PoolDemandConfig.recordsItemSizes(config), "its PUTs take the configured size, and a DELETE needs none");
+		assertFalse(PoolDemandConfig.mixedRecordsItemSizes(config), "its PUTs take the configured size, and a DELETE needs none");
 	}
 }

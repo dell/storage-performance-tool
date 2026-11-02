@@ -453,6 +453,20 @@ func GenerateDefaults(params Params) ([]byte, error) {
 // that replaces storage.targetBucket or storage as a whole, such as
 // storage.targetBucket={provision: false}, would drop the count or names the CLI validated.
 // Overrides that set them are rejected earlier, so the flags' values are final.
+// EffectiveDefaults gives the defaults a run's engines load, as a tree, engine overrides included.
+// A generated step's own configuration can still override them.
+func EffectiveDefaults(params Params) (map[string]any, error) {
+	data, err := GenerateDefaults(params)
+	if err != nil {
+		return nil, err
+	}
+	var root map[string]any
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, fmt.Errorf("failed to parse the generated defaults: %w", err)
+	}
+	return root, nil
+}
+
 func restoreTargetBucketSet(data []byte, params Params) ([]byte, error) {
 	var err error
 	if params.BucketCount > 1 {

@@ -286,7 +286,11 @@ func TestVerifyStepsFollowTheRunsWorkload(t *testing.T) {
 		{scenario.Params{WorkloadType: "read", ItemsFile: "x.csv"}, "read"},
 		{scenario.Params{WorkloadType: "mixed"}, "seed,mixed"},
 		{scenario.Params{WorkloadType: "mixed", ReadItemsFile: "x.csv"}, "mixed"},
-		{scenario.Params{WorkloadType: "delete"}, "delete"},
+		{scenario.Params{WorkloadType: "delete"}, "seed,delete"},
+		{scenario.Params{WorkloadType: "delete", ItemsFile: "x.csv"}, "delete"},
+		{scenario.Params{WorkloadType: "delete", DeleteExisting: true}, "delete"},
+		{scenario.Params{WorkloadType: "write-verify"}, "create,read"},
+		{scenario.Params{WorkloadType: "read-verify"}, "read"},
 	} {
 		if got := ops(tc.params); got != tc.want {
 			t.Errorf("%+v: %q, want %q", tc.params, got, tc.want)
