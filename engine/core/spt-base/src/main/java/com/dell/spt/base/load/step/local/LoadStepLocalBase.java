@@ -25,7 +25,11 @@ import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.MetricsConstants;
+import com.dell.spt.base.metrics.bucket.BucketContextReply;
 import com.dell.spt.base.metrics.bucket.BucketMeters;
+import com.dell.spt.base.metrics.bucket.BucketMetricsRange;
+import com.dell.spt.base.metrics.bucket.BucketMetricsReply;
+import com.dell.spt.base.metrics.bucket.BucketSteadyOutcome;
 import com.dell.spt.base.metrics.bucket.BucketMetricsBudget;
 import com.dell.spt.base.metrics.bucket.BucketRecorder;
 import com.dell.spt.base.metrics.bucket.BucketStepFence;
@@ -61,7 +65,9 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private static final String BUCKET_METRICS_ENABLED = "output-metrics-bucket-enabled";
 
 	private final List<BucketMeters> bucketMeters = new ArrayList<>();
-	private final Map<MetricsContext, BucketStepFence.ContextCuts> bucketCuts = new IdentityHashMap<>();
+	private final List<BucketContext> bucketContexts = new ArrayList<>();
+	private final String bucketMetricsInstanceId = UUID.randomUUID().toString();
+	private BucketMetricsReply bucketMetricsReply;
 	private BucketStepFence bucketFence;
 	private long bucketMeterSets;
 
@@ -427,13 +433,51 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				bucketFence = new BucketStepFence(loadStepId());
 			}
 			final BucketStepFence.ContextCuts cuts = bucketFence.register(meters);
-			if (context.steadyWindowListener(cuts)) {
+			final boolean measuresWindow = context.steadyWindowListener(cuts);
+			if (measuresWindow) {
 				ownCuts.add(cuts);
 			}
-			bucketCuts.put(context, cuts);
+			bucketContexts.add(new BucketContext(meters, cuts, measuresWindow, members));
 		});
 		final BucketStepFence fence = bucketFence;
 		return new BucketRecorder(members, primaryMeters, metersOfType, () -> fence.await(ownCuts));
+	}
+
+	private record BucketContext(
+					BucketMeters meters,
+					BucketStepFence.ContextCuts cuts,
+					boolean measuresWindow,
+					List<String> members) {}
+
+	/**
+	 * Reads the quiescent meters once, encoding each set before reading the next, and holds the
+	 * result until this step closes.
+	 */
+	@Override
+	public final synchronized BucketMetricsReply bucketMetrics(final BucketMetricsRange range) {
+		if (bucketContexts.isEmpty()) {
+			return null;
+		}
+		if (bucketMetricsReply == null) {
+			if (bucketFence != null) {
+				bucketFence.await();
+			}
+			final List<BucketContextReply> replies = new ArrayList<>(bucketContexts.size());
+			for (final BucketContext context : bucketContexts) {
+				final BucketSteadyOutcome outcome = context.measuresWindow() ? context.cuts().outcome() : null;
+				replies.add(new BucketContextReply(
+								context.meters().opType(),
+								context.members(),
+								context.meters().terminalRecords(),
+								context.measuresWindow() && outcome == null
+												? BucketSteadyOutcome.unmeasured("the bucket window never closed")
+												: outcome));
+			}
+			bucketMetricsReply = new BucketMetricsReply(loadStepId(), bucketMetricsInstanceId, replies);
+		}
+		return range == null || BucketMetricsRange.ALL.equals(range)
+						? bucketMetricsReply
+						: bucketMetricsReply.within(range);
 	}
 
 	@Override

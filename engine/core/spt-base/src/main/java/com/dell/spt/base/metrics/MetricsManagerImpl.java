@@ -14,11 +14,15 @@ import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.logging.MetricsAsciiTableLogMessage;
+import com.dell.spt.base.logging.MetricsBucketCsvLogMessage;
 import com.dell.spt.base.logging.ExtResultsXmlLogMessage;
 import com.dell.spt.base.logging.MetricsCsvLogMessage;
 import com.dell.spt.base.logging.MetricsSteadyTotalCsvLogMessage;
 import com.dell.spt.base.logging.MetricsTotalCsvLogMessage;
 import com.dell.spt.base.logging.StepResultsMetricsLogMessage;
+import com.dell.spt.base.metrics.bucket.BucketData;
+import com.dell.spt.base.metrics.bucket.BucketRows;
+import com.dell.spt.base.metrics.context.BucketMetricsSource;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
@@ -57,6 +61,8 @@ import org.apache.logging.log4j.ThreadContext;
 public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 
 	private static final String CLS_NAME = MetricsManagerImpl.class.getSimpleName();
+	private static final String METRICS_BUCKET_TOTAL_FILE = "metrics.bucket.total.csv";
+	private static final String METRICS_BUCKET_STEADY_TOTAL_FILE = "metrics.bucket.steady.total.csv";
 	private static final long LOCK_TIMEOUT_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
 	private final Set<MetricsContext> allMetrics = new ConcurrentSkipListSet<>();
 	private final Map<DistributedMetricsContext, PrometheusMetricsExporter> distributedMetrics = new ConcurrentHashMap<>();
@@ -68,6 +74,8 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	// CLI and jar-only users get well-formed XML (log4j2 header/footer had async timing issues).
 	private final Set<String> openResultXmlSteps = ConcurrentHashMap.newKeySet();
 	private final Set<String> openMetricsTotalCsvSteps = ConcurrentHashMap.newKeySet();
+	private final Set<String> openBucketCsvSteps = ConcurrentHashMap.newKeySet();
+	private final Set<String> openBucketSteadyCsvSteps = ConcurrentHashMap.newKeySet();
 	private final Set<String> openMetricsSteadyTotalCsvSteps = ConcurrentHashMap.newKeySet();
 
 	// Terminal entries retention for /metrics/json when idle
@@ -261,6 +269,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 								message.formatTo(csvOutput, includeHeader);
 								Loggers.METRICS_FILE_TOTAL.info(csvOutput.toString());
 								writeSteadyTotalRow(metricsCtx, steady, aggregSnapshot.nodeCount(), quantileValues);
+								writeBucketRows(distributedMetricsCtx, aggregSnapshot, steady, quantileValues);
 							}
 						}
 						// console output
@@ -297,6 +306,8 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 							openResultXmlSteps.remove(metricsCtx.loadStepId());
 							openMetricsTotalCsvSteps.remove(metricsCtx.loadStepId());
 							openMetricsSteadyTotalCsvSteps.remove(metricsCtx.loadStepId());
+							openBucketCsvSteps.remove(metricsCtx.loadStepId());
+							openBucketSteadyCsvSteps.remove(metricsCtx.loadStepId());
 						}
 
 						final PrometheusMetricsExporter exporter = distributedMetrics.remove(distributedMetricsCtx);
@@ -351,6 +362,82 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	}
 
 	/** The {@code metrics.steady.total.csv} row beside the total row, with the same quantile columns. */
+	/**
+	 * Writes one operation type's rows of the step's bucket files, beside its totals, with each
+	 * file's contributor record. A failure here costs only these files, never the step's totals.
+	 */
+	private void writeBucketRows(
+					final DistributedMetricsContext<?> metricsCtx,
+					final DistributedAllMetricsSnapshot aggregate,
+					final SteadyResult steady,
+					final List<Double> quantiles) {
+		final BucketMetricsSource source = metricsCtx.bucketMetricsSource();
+		if (source == null) {
+			return;
+		}
+		final String stepId = metricsCtx.loadStepId();
+		try {
+			final List<BucketRows.Contribution> contributions = source.contributions();
+			final double stepSeconds = aggregate.elapsedTimeMillis() / 1e3;
+			if (openBucketCsvSteps.add(stepId)) {
+				Loggers.METRICS_BUCKET_FILE_TOTAL.info(MetricsBucketCsvLogMessage.header(quantiles, false));
+			}
+			logBucketCohort(
+							METRICS_BUCKET_TOTAL_FILE,
+							stepId,
+							BucketRows.wholeStep(
+											stepId,
+											metricsCtx.opType(),
+											contributions,
+											stepSeconds,
+											row -> Loggers.METRICS_BUCKET_FILE_TOTAL.info(MetricsBucketCsvLogMessage.row(row, quantiles))),
+							false);
+			if (source.steadySettings() != null) {
+				if (openBucketSteadyCsvSteps.add(stepId)) {
+					Loggers.METRICS_BUCKET_STEADY_FILE_TOTAL.info(MetricsBucketCsvLogMessage.header(quantiles, true));
+				}
+				logBucketCohort(
+								METRICS_BUCKET_STEADY_TOTAL_FILE,
+								stepId,
+								BucketRows.steady(
+												stepId,
+												metricsCtx.opType(),
+												contributions,
+												steady,
+												source.steadySettings(),
+												row -> Loggers.METRICS_BUCKET_STEADY_FILE_TOTAL.info(MetricsBucketCsvLogMessage.row(row, quantiles))),
+								true);
+			}
+		} catch (final RuntimeException e) {
+			LogUtil.exception(Level.WARN, e, "{}: failed to write the bucket metrics files", stepId);
+		}
+	}
+
+	/** The fixed key=value record of who each file's rows merge, at INFO only when all answered. */
+	private static void logBucketCohort(
+					final String file, final String stepId, final BucketRows.Cohort cohort, final boolean steady) {
+		final BucketData data = steady ? cohort.steadyData() : cohort.wholeStepData();
+		final StringBuilder missing = new StringBuilder();
+		cohort.missing().forEach((node, reason) -> {
+			if (missing.length() > 0) {
+				missing.append(';');
+			}
+			missing.append(node).append(':').append(reason);
+		});
+		final String record = "bucket-metrics file=" + file
+						+ " step=" + stepId
+						+ " opType=" + cohort.opType()
+						+ " expected=" + cohort.expected()
+						+ " received=" + cohort.received()
+						+ " missing=[" + missing + "]"
+						+ " data=" + data.label();
+		if (data == BucketData.COMPLETE) {
+			Loggers.MSG.info(record);
+		} else {
+			Loggers.MSG.warn(record);
+		}
+	}
+
 	private void writeSteadyTotalRow(
 					final MetricsContext<?> metricsCtx,
 					final SteadyResult steady,

@@ -39,7 +39,7 @@ public final class BucketSteadyOutcome implements Serializable {
 		return new BucketSteadyOutcome(Kind.MEASURED, null, records);
 	}
 
-	static BucketSteadyOutcome unmeasured(final String reason) {
+	public static BucketSteadyOutcome unmeasured(final String reason) {
 		return new BucketSteadyOutcome(Kind.UNMEASURED, reason, List.of());
 	}
 

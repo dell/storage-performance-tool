@@ -12,6 +12,10 @@ public interface DistributedContextBuilder
 
 	DistributedContextBuilder quantileValues(final List<Double> quantileValues);
 
+	default DistributedContextBuilder bucketMetricsSource(final BucketMetricsSource source) {
+		return this;
+	}
+
 	DistributedContextBuilder nodeAddrs(final List<String> nodeAddrs);
 
 	default DistributedContextBuilder contributorIds(final List<String> contributorIds) {

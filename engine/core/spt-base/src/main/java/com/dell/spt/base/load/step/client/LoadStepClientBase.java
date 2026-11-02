@@ -1,5 +1,17 @@
 package com.dell.spt.base.load.step.client;
 
+import com.dell.spt.base.metrics.bucket.BucketMetricsRange;
+import com.dell.spt.base.metrics.bucket.BucketMetricsReply;
+import com.dell.spt.base.metrics.bucket.BucketRows;
+import com.dell.spt.base.metrics.context.BucketMetricsSource;
+import com.dell.spt.base.metrics.steady.SteadySettings;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketSet;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
@@ -95,6 +107,10 @@ import org.apache.logging.log4j.Level;
 public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				extends LoadStepBase
 				implements LoadStepClient<T> {
+
+	/** Proposed in the spec, until the payload's measurement says otherwise. */
+	private static final long BUCKET_METRICS_FETCH_SECONDS = 30;
+
 	private static final long DURATION_DRAIN_POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(10);
 	private static final long DURATION_REMOTE_AWAIT_POLL_NANOS = TimeUnit.SECONDS.toNanos(1);
 	private static final long FAILURE_BUDGET_POLL_MILLIS = 100;
@@ -109,6 +125,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private static final AtomicInteger ACTIVE_FAILURE_BUDGET_SNAPSHOT_PROBE_TASKS = new AtomicInteger();
 
 	private final List<LoadStep> stepSlices = new ArrayList<>();
+	private List<BucketRows.Contribution> bucketContributions;
 	private final List<FileManager> fileMgrs = new ArrayList<>();
 	// for the core configuration options which are using the files
 	private final List<AutoCloseable> itemDataInputFileSlicers = new ArrayList<>();
@@ -1064,6 +1081,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						.timingPersistFlag(metricsTimingPersistFlag)
 						.snapshotsSupplier(() -> metricsSnapshotsByIndex(originIndex))
 						.quantileValues(quantiles(metricsConfig))
+						.bucketMetricsSource(bucketMetricsSource(effectiveConfig, metricsConfig))
 						.nodeAddrs(remoteNodeAddrs(config))
 						.contributorIds(distributedContributorIds(config, remoteNodeAddrs(config)))
 						.deleteDetailsExpected(standaloneDeleteEnabled())
@@ -1073,6 +1091,82 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						.timeLimitSec(timeLimitSec)
 						.build();
 		metricsContexts.add(metricsCtx);
+	}
+
+	private BucketMetricsSource bucketMetricsSource(final Config effectiveConfig, final Config metricsConfig) {
+		if (TargetBucketSet.count(effectiveConfig) <= 1 || !effectiveConfig.boolVal("output-metrics-bucket-enabled")) {
+			return null;
+		}
+		final SteadySettings steadySettings = SteadySettings.fromMetricsConfig(metricsConfig);
+		return new BucketMetricsSource() {
+			@Override
+			public List<BucketRows.Contribution> contributions() {
+				return fetchBucketMetrics();
+			}
+
+			@Override
+			public SteadySettings steadySettings() {
+				return steadySettings;
+			}
+		};
+	}
+
+	/**
+	 * Fetches every worker's bucket records in parallel, once, separately from the periodic
+	 * snapshots, with a bounded deadline. A worker that does not answer leaves a labeled subtotal.
+	 */
+	private synchronized List<BucketRows.Contribution> fetchBucketMetrics() {
+		if (bucketContributions != null) {
+			return bucketContributions;
+		}
+		final List<LoadStep> slices = new ArrayList<>(stepSlices);
+		final List<String> contributorIds = distributedContributorIds(config, remoteNodeAddrs(config));
+		final List<BucketRows.Contribution> contributions = new ArrayList<>(slices.size());
+		if (slices.isEmpty()) {
+			bucketContributions = contributions;
+			return contributions;
+		}
+		final ExecutorService pool = Executors.newFixedThreadPool(slices.size(), runnable -> {
+			final Thread thread = new Thread(runnable, "bucket-metrics-fetch-" + loadStepId());
+			thread.setDaemon(true);
+			return thread;
+		});
+		try {
+			final List<Callable<BucketMetricsReply>> fetches = new ArrayList<>(slices.size());
+			for (final LoadStep slice : slices) {
+				fetches.add(() -> slice == null ? null : slice.bucketMetrics(BucketMetricsRange.ALL));
+			}
+			final List<Future<BucketMetricsReply>> results = pool.invokeAll(fetches, BUCKET_METRICS_FETCH_SECONDS, TimeUnit.SECONDS);
+			for (int i = 0; i < results.size(); i++) {
+				final String node = i < contributorIds.size() && contributorIds.size() == slices.size()
+								? contributorIds.get(i)
+								: "slice-" + i;
+				contributions.add(bucketContribution(node, results.get(i)));
+			}
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
+			contributions.clear();
+			for (int i = 0; i < slices.size(); i++) {
+				contributions.add(new BucketRows.Contribution("slice-" + i, null, "interrupted"));
+			}
+		} finally {
+			pool.shutdownNow();
+		}
+		bucketContributions = List.copyOf(contributions);
+		return bucketContributions;
+	}
+
+	private static BucketRows.Contribution bucketContribution(
+					final String node, final Future<BucketMetricsReply> result) throws InterruptedException {
+		if (result.isCancelled()) {
+			return new BucketRows.Contribution(node, null, "timeout");
+		}
+		try {
+			final BucketMetricsReply reply = result.get();
+			return new BucketRows.Contribution(node, reply, reply == null ? "unsupported call" : null);
+		} catch (final ExecutionException e) {
+			return new BucketRows.Contribution(node, null, "no reply: " + e.getCause());
+		}
 	}
 
 	private List<Double> quantiles(final Config metricsConfig) {

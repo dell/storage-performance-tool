@@ -85,6 +85,22 @@ Configuration:
         PatternLayout:
           # the header is written with the first row, from the step's configured quantiles
           pattern: "%m%n"
+      - name: metricsBucketFileTotal
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}metrics.bucket.total.csv"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          # the header is written with the first row, from the step's configured quantiles
+          pattern: "%m%n"
+      - name: metricsBucketSteadyFileTotal
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}metrics.bucket.steady.total.csv"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          # the header is written with the first row, from the step's configured quantiles
+          pattern: "%m%n"
       - name: metricsThresholdFileTotal
         filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}metrics.threshold.total.csv"
         Policies:
@@ -367,6 +383,16 @@ Configuration:
         level: INFO
         AppenderRef:
           ref: metricsSteadyFileTotal
+        additivity: false
+      - name: com.dell.spt.base.logging.metrics.bucket.FileTotal
+        level: INFO
+        AppenderRef:
+          ref: metricsBucketFileTotal
+        additivity: false
+      - name: com.dell.spt.base.logging.metrics.bucket.steady.FileTotal
+        level: INFO
+        AppenderRef:
+          ref: metricsBucketSteadyFileTotal
         additivity: false
       - name: com.dell.spt.base.logging.metrics.ExtResultsFile
         level: INFO

@@ -9,6 +9,11 @@ public interface DistributedMetricsContext<S extends DistributedAllMetricsSnapsh
 
 	int nodeCount();
 
+	/** Supplies this context's bucket rows for its files, or null when bucket metrics are off. */
+	default BucketMetricsSource bucketMetricsSource() {
+		return null;
+	}
+
 	List<String> nodeAddrs();
 
 	/**
