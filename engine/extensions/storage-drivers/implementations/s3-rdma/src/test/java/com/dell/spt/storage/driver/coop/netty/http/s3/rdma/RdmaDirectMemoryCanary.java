@@ -23,7 +23,7 @@ public final class RdmaDirectMemoryCanary {
 		fillWithIdleBuffers(pool, budget);
 		final String result = switch (args[0]) {
 		case "plain" -> plainAllocation(request);
-		case "nics" -> repeatedUnpooled(pool, budget, request);
+		case "nics" -> repeatedUnpooled(pool, request);
 		case "reclaim" -> RdmaBufferPool.allocateUnpooled(request, pool, ByteBuffer::allocateDirect) == null
 						? "exhausted"
 						: "allocated idle=" + pool.idleBuffers();
@@ -51,7 +51,7 @@ public final class RdmaDirectMemoryCanary {
 	 * limit holds, dropped without a collection between them: each attempt reclaims from its own NIC's
 	 * pool only, and the JVM's limit holds throughout.
 	 */
-	private static String repeatedUnpooled(final RdmaBufferPool first, final long budget, final int request) {
+	private static String repeatedUnpooled(final RdmaBufferPool first, final int request) {
 		final var transport = new FakeRdmaTransport(new RdmaConfig(true, 0, false, "auto", "", "WARN"));
 		transport.init("http://192.0.2.1:9020", "key", "secret");
 		final var second = new RdmaBufferPool(transport, 4, MIB);
