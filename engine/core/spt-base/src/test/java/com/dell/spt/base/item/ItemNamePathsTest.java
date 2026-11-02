@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.data.DataOperationImpl;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -87,6 +89,23 @@ class ItemNamePathsTest {
 	})
 	void join_usesExactlyOneSeparator(final String path, final String name, final String expected) {
 		assertEquals(expected, ItemNamePaths.join(path, name));
+	}
+
+	/** A filesystem driver opens data/data/key here, so the record must not name /data/key. */
+	@ParameterizedTest
+	@CsvSource({
+			"/data/key, data, data/data/key",
+			"data/key, data, data/key",
+			"/data/key, /data, /data/key",
+			"data/key, /data, /data/data/key",
+			"/key, data, data/key",
+			"/key, /data/, /data/key",
+			"/datakey, /data, /data/datakey",
+	})
+	void aResultRecordsTheNameComparedAsWritten(final String name, final String path, final String recorded) {
+		final var create = new DataOperationImpl<>(
+						0, OpType.CREATE, new DataItemImpl(name, 0, 1), null, path, null, null, 0);
+		assertEquals(recorded, create.result().item().name());
 	}
 
 	@Test

@@ -331,13 +331,11 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 	protected String dataUriPath(
 					final I item, final String srcPath, final String dstPath, final OpType opType) {
 		final String path = dstPath != null ? dstPath : srcPath;
-		final String itemNameRaw = item.name();
-		final String itemName = itemNameRaw.startsWith(SLASH) ? itemNameRaw : SLASH + itemNameRaw;
-		if (path == null || ItemNamePaths.holdsPath(itemNameRaw, path)) {
-			return itemName;
+		final String itemName = item.name();
+		if (path == null || ItemNamePaths.holdsPath(itemName, path)) {
+			return itemName.startsWith(SLASH) ? itemName : SLASH + itemName;
 		}
-		final String itemPath = path.startsWith(SLASH) ? path : SLASH + path;
-		return itemPath.endsWith(SLASH) ? itemPath + itemName.substring(1) : itemPath + itemName;
+		return ItemNamePaths.join(path.startsWith(SLASH) ? path : SLASH + path, itemName);
 	}
 
 	protected abstract String tokenUriPath(

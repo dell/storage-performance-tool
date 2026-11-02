@@ -99,7 +99,9 @@ public interface Operation<I extends Item> {
 			if (!itemName.startsWith("/")) {
 				item.name("/" + itemName);
 			}
-		} else if (!ItemNamePaths.holdsPath(itemName, itemPath)) {
+		} else if (!ItemNamePaths.startsWithPath(itemName, itemPath)) {
+			// Compared as written, because not every driver treats a relative path as rooted: to a
+			// filesystem driver, /data/key is not under the relative directory data.
 			item.name(ItemNamePaths.join(itemPath, itemName));
 		}
 	}

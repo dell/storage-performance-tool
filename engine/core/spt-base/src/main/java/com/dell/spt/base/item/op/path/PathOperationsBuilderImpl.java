@@ -112,17 +112,19 @@ public class PathOperationsBuilderImpl<I extends PathItem, O extends PathOperati
 	}
 
 	private static String relativizeKey(final String path, final String fullPath) {
-		if (fullPath == null || fullPath.isEmpty()) {
+		// A relative seed is a key prefix as it stands, whatever the bucket is called.
+		if (fullPath == null || fullPath.isEmpty() || !fullPath.startsWith("/")) {
 			return fullPath;
 		}
-		if (path != null) {
-			if (ItemNamePaths.holdsPath(fullPath, path)) {
-				return ItemNamePaths.relativeToPath(fullPath, path);
-			}
-			if (fullPath.equals(path) || fullPath.equals(normalizePath(path))) {
+		final String rootedPath = normalizePath(path);
+		if (rootedPath != null) {
+			if (fullPath.equals(rootedPath)) {
 				return "";
 			}
+			if (ItemNamePaths.holdsPath(fullPath, rootedPath)) {
+				return ItemNamePaths.relativeToPath(fullPath, rootedPath);
+			}
 		}
-		return fullPath.startsWith("/") ? fullPath.substring(1) : fullPath;
+		return fullPath.substring(1);
 	}
 }

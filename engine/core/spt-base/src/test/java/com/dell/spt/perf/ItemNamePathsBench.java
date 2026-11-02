@@ -52,15 +52,20 @@ public final class ItemNamePathsBench {
 		final long roundMillis = args.length > 1 ? Long.parseLong(args[1]) : 500;
 		final String[] generated = new String[BATCH];
 		final String[] recorded = new String[BATCH];
+		final String[] repeating = new String[BATCH];
 		for (int i = 0; i < BATCH; i++) {
 			final String id = Long.toString(0x3fffffffL * i + 12345, 36);
 			generated[i] = "s000000" + (i % 8) + SLASH + id;
 			recorded[i] = PATH + SLASH + generated[i];
+			// A generated key that repeats the bucket: before the fix, the request lost the prefix.
+			repeating[i] = PATH.substring(1) + SLASH + generated[i];
 		}
 		final List<Case> cases = List.of(
 						new Case("uri/generated", generated,
 										ItemNamePathsBench::uriBefore, ItemNamePathsBench::uriAfter),
 						new Case("uri/recorded", recorded,
+										ItemNamePathsBench::uriBefore, ItemNamePathsBench::uriAfter),
+						new Case("uri/repeating", repeating,
 										ItemNamePathsBench::uriBefore, ItemNamePathsBench::uriAfter),
 						new Case("record/generated", generated,
 										ItemNamePathsBench::recordBefore, ItemNamePathsBench::recordAfter),
@@ -126,12 +131,10 @@ public final class ItemNamePathsBench {
 	}
 
 	private static String uriAfter(final String nameRaw, final String path) {
-		final String itemName = nameRaw.startsWith(SLASH) ? nameRaw : SLASH + nameRaw;
 		if (ItemNamePaths.holdsPath(nameRaw, path)) {
-			return itemName;
+			return nameRaw.startsWith(SLASH) ? nameRaw : SLASH + nameRaw;
 		}
-		final String itemPath = path.startsWith(SLASH) ? path : SLASH + path;
-		return itemPath.endsWith(SLASH) ? itemPath + itemName.substring(1) : itemPath + itemName;
+		return ItemNamePaths.join(path.startsWith(SLASH) ? path : SLASH + path, nameRaw);
 	}
 
 	private static String recordBefore(final String name, final String path) {
@@ -142,6 +145,6 @@ public final class ItemNamePathsBench {
 	}
 
 	private static String recordAfter(final String name, final String path) {
-		return ItemNamePaths.holdsPath(name, path) ? name : ItemNamePaths.join(path, name);
+		return ItemNamePaths.startsWithPath(name, path) ? name : ItemNamePaths.join(path, name);
 	}
 }

@@ -438,7 +438,6 @@ class HttpStorageDriverBaseTest {
 			"/k, /abc/, /abc/k",
 			"k, abc, /abc/k",
 			"abc/k, abc, /abc/k",
-			"/abc/k, abc, /abc/k",
 	})
 	void dataUriPath_agreesWithTheRecordedName(
 					final String name, final String path, final String expected) throws Exception {
@@ -453,6 +452,23 @@ class HttpStorageDriverBaseTest {
 
 		final var read = new DataOperationImpl<>(0, OpType.READ, recorded, null, null, null, null, 0);
 		assertEquals(expected, drv.exposeDataUriPath(read.item(), read.srcPath(), read.dstPath(), OpType.READ));
+	}
+
+	@Test
+	void dataUriPath_rootedNameHoldsAPathWrittenWithoutASlash() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		final var item = new DataItemImpl("/abc/k", 0, 64);
+		assertEquals("/abc/k", drv.exposeDataUriPath(item, "abc", null, OpType.CREATE));
+	}
+
+	@Test
+	void dataUriPath_usesOneSeparatorForEveryForm() throws Exception {
+		final var drv = new TestHttpDriver(baseConfig());
+		assertEquals("/abc/k", drv.exposeDataUriPath(new DataItemImpl("k", 0, 1), null, "abc", OpType.CREATE));
+		assertEquals("/abc/k", drv.exposeDataUriPath(new DataItemImpl("/k", 0, 1), null, "abc/", OpType.CREATE));
+		assertEquals("/abc/k", drv.exposeDataUriPath(new DataItemImpl("/k", 0, 1), null, "/abc", OpType.CREATE));
+		assertEquals("/k", drv.exposeDataUriPath(new DataItemImpl("k", 0, 1), null, "/", OpType.CREATE));
+		assertEquals("/k", drv.exposeDataUriPath(new DataItemImpl("k", 0, 1), null, "", OpType.CREATE));
 	}
 
 	@Test

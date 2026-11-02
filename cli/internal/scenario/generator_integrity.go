@@ -125,7 +125,7 @@ func GenerateReadVerifyScenario(params Params) (string, error) {
 			},
 		},
 		BucketPath:      bucketPath,
-		Prefix:          params.Prefix,
+		Prefix:          strings.TrimLeft(params.Prefix, "/"),
 		ItemsFile:       params.ItemsFile,
 		IncludeVersions: versions == VersionsAll,
 	})

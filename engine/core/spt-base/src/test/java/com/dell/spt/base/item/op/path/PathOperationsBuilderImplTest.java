@@ -74,8 +74,8 @@ final class PathOperationsBuilderImplTest {
 			"/abc | /abc | ''",
 			"/abc | /abcdef/ | abcdef/",
 			"/abc | /zzz/ | zzz/",
-			"abc | abc/zzz/ | zzz/",
-			"abc | abc | ''",
+			"abc | abc/zzz/ | abc/zzz/",
+			"abc | abc | abc",
 			"abc | /abc/zzz/ | zzz/",
 	}, delimiter = '|')
 	void listSeedKeepsAPrefixThatRepeatsTheBucket(
@@ -87,6 +87,19 @@ final class PathOperationsBuilderImplTest {
 		final var op = builder.buildOp(new PathItemImpl(seed));
 
 		assertEquals(expected, ((ListOperation<PathItemImpl>) op).item().name());
+	}
+
+	@Test
+	void aRelativeShardSeedKeepsItsMetadataWhenItRepeatsTheBucket() throws Exception {
+		final var builder = new PathOperationsBuilderImpl<PathItemImpl, PathOperation<PathItemImpl>>(1);
+		builder.opType(OpType.LIST);
+		builder.inputPath("abc");
+		final var shard = new com.dell.spt.base.item.op.list.shard.ListShard("abc/shard", null, null, null);
+		builder.listShardingContext(new com.dell.spt.base.item.op.list.shard.ListShardingContext(List.of(shard)));
+		final var listOp = (com.dell.spt.base.item.op.list.ListOperationImpl<PathItemImpl>) builder.buildOp(
+						new PathItemImpl("abc/shard"));
+		assertEquals("abc/shard", listOp.item().name());
+		assertEquals(shard, listOp.shard());
 	}
 
 	@Test
