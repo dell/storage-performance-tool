@@ -31,7 +31,19 @@ public final class ItemNamePathsBench {
 		String apply(String name, String path);
 	}
 
-	private record Case(String name, String[] names, Arm before, Arm after) {}
+	private static final class Case {
+		final String name;
+		final String[] names;
+		final Arm before;
+		final Arm after;
+
+		Case(final String name, final String[] names, final Arm before, final Arm after) {
+			this.name = name;
+			this.names = names;
+			this.before = before;
+			this.after = after;
+		}
+	}
 
 	private ItemNamePathsBench() {}
 
