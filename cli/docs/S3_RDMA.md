@@ -288,6 +288,21 @@ The native layer uses Mellanox DC (Dynamically Connected) transport for scalable
 
 ---
 
+## NIC sets in the engine
+
+The engine setting `storage.net.interfaces` gives the `s3-rdma` driver several client NICs, as it gives the `s3` driver ([Network Interfaces](NETWORK_INTERFACES.md)). `spt run --interfaces` still rejects `--s3-driver rdma` and `--use-rdma`, so for now it is set in an engine scenario or with `--storage-net-interfaces` on a direct engine run.
+
+- **One RDMA context per NIC.** Each NIC opens exactly its own `mlx5` device, on port 1, at the RoCE v2 GID of its address, with no fallback to another device or GID. A context that does not open fails the step, whatever `storage.rdma.fallback` says. `storage.rdma.device` other than `auto` and a non-empty `storage.rdma.localIp` are rejected.
+- **One NIC per attempt.** An attempt keeps its NIC until it ends: its token names that NIC's DC target, and all of its requests use that NIC's Paths, payloads sent over HTTP included. A retry chooses again. Control requests keep the kernel's route.
+- **One buffer pool per NIC.** Each pool takes an equal share of the driver's budget, half of `MaxDirectMemorySize` (or of the heap limit). Per size class it holds at most the NIC's share of the concurrency limit plus one buffer, the limit plus one with fewer threads than NICs, or 256 with no limit. It reuses buffers by the same rules as without a NIC set.
+- **One preparation thread per NIC.** It allocates and registers buffers, copies PUT payloads and makes tokens, so a slow NIC delays only itself. `--rdma-copy-threads` and `storage.rdma.copyThreads` count per NIC here, each NIC's copier having its own threads. Waiting operations per NIC are bounded: its share of the concurrency limit, one with fewer threads than NICs, or 8 with no limit.
+- **Stopping.** An operation still waiting for its preparation or its connection writes nothing, gives back its buffer and its NIC, and is reported as unattempted. At close, the driver waits at most 5 s in all for the preparation threads. One still in a call that cannot be interrupted, such as an allocation or a registration, logs a warning naming the NIC and the call, and its NIC's pool and context close when the call returns.
+- **Logs.** `RDMA data path summary` is written once per NIC, as `<step>: nic=<name>: RDMA data path summary ...`, and then once for the driver, in its usual form, which is the line to read for the whole step. With the message log at DEBUG, each pool buffer's address and capacity are logged when it is registered, for checking where its pages landed.
+
+Pool sizing checks, pre-warming and the per-path CSV's RDMA columns are not in this version yet.
+
+---
+
 ## Troubleshooting
 
 ### RDMA not available
