@@ -19,7 +19,7 @@ class BucketRecordingSitesTest {
 	private static final Pattern AGGREGATE_CALL = Pattern.compile(
 					"(?:metrics|metricsCtx|resolveMetrics\\([^;]*?\\))\\.mark(Succ|PartSucc|Fail|Corrupt)\\(");
 	private static final Pattern BUCKET_CALL = Pattern.compile(
-					"(?:bucketMeters|bucketRecorder\\.(?:meterSet|primaryMeterSet)\\([^)]*\\))\\.mark(Succ|PartSucc|Fail|Corrupt)\\(");
+					"(?:bucketMeters|recorder\\.(?:meterSet|primaryMeterSet)\\([^)]*\\))\\.mark(Succ|PartSucc|Fail|Corrupt)\\(");
 
 	@Test
 	void everyAggregateUpdateHasABucketUpdate() throws Exception {

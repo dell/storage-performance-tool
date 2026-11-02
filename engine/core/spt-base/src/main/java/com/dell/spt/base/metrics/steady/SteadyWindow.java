@@ -187,11 +187,13 @@ public final class SteadyWindow {
 					Loggers.MSG.warn("Steady-state window closed by {} could not be measured: {}", cause, e.toString());
 					computed = SteadyResult.notReached(cause + "; measurement failed", SteadyResult.NONE);
 				}
-				result = computed;
 				startCut = null;
 				sampleTimes = sampleSucceeded = sampleFailed = null;
 				state = State.CLOSED;
+				// Before the result is visible: a closer that takes the fast path must find this
+				// window's bucket work already queued, or it would return from the fence without it.
 				notifyClose(endNanos == Long.MIN_VALUE ? nanoClock.getAsLong() : endNanos, started, computed);
+				result = computed;
 				if (Loggers.MSG.isDebugEnabled()) {
 					Loggers.MSG.debug(
 									"Steady-state window closed by {}: {}, cut acquisition {} ns (start) and {} ns (end)",

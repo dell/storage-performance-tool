@@ -1081,7 +1081,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						.timingPersistFlag(metricsTimingPersistFlag)
 						.snapshotsSupplier(() -> metricsSnapshotsByIndex(originIndex))
 						.quantileValues(quantiles(metricsConfig))
-						.bucketMetricsSource(bucketMetricsSource(effectiveConfig, metricsConfig))
+						.bucketMetricsSource(bucketMetricsSource(effectiveConfig, metricsConfig, originIndex))
 						.nodeAddrs(remoteNodeAddrs(config))
 						.contributorIds(distributedContributorIds(config, remoteNodeAddrs(config)))
 						.deleteDetailsExpected(standaloneDeleteEnabled())
@@ -1093,8 +1093,12 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		metricsContexts.add(metricsCtx);
 	}
 
-	private BucketMetricsSource bucketMetricsSource(final Config effectiveConfig, final Config metricsConfig) {
-		if (TargetBucketSet.count(effectiveConfig) <= 1 || !effectiveConfig.boolVal("output-metrics-bucket-enabled")) {
+	private BucketMetricsSource bucketMetricsSource(
+					final Config effectiveConfig, final Config metricsConfig, final int contextIndex) {
+		// As a worker decides in initBucketMetrics, so that a file exists exactly when workers record.
+		if (TargetBucketSet.count(effectiveConfig) <= 1
+						|| !effectiveConfig.boolVal("output-metrics-bucket-enabled")
+						|| !metricsConfig.boolVal("summary-persist")) {
 			return null;
 		}
 		final SteadySettings steadySettings = SteadySettings.fromMetricsConfig(metricsConfig);
@@ -1107,6 +1111,16 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			@Override
 			public SteadySettings steadySettings() {
 				return steadySettings;
+			}
+
+			@Override
+			public int contextIndex() {
+				return contextIndex;
+			}
+
+			@Override
+			public void release() {
+				releaseBucketMetrics();
 			}
 		};
 	}
@@ -1154,6 +1168,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 		bucketContributions = List.copyOf(contributions);
 		return bucketContributions;
+	}
+
+	/** Lets go of every worker's payload. The step's rows are written, so nothing fetches again. */
+	private synchronized void releaseBucketMetrics() {
+		bucketContributions = List.of();
 	}
 
 	private static BucketRows.Contribution bucketContribution(

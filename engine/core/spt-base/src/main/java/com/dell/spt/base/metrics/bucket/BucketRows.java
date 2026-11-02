@@ -6,6 +6,7 @@ import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshotImpl;
 import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.steady.SteadyResult;
 import com.dell.spt.base.metrics.steady.SteadySettings;
+import com.dell.spt.base.metrics.steady.SteadyStatus;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -46,6 +47,8 @@ public final class BucketRows {
 					long corrupt,
 					long bytes,
 					double stepSeconds,
+					double succeededPerSecond,
+					double bytesPerSecond,
 					TimingMetricSnapshot duration,
 					TimingMetricSnapshot latency,
 					TimingMetricSnapshot timeToFirstByte,
@@ -80,7 +83,11 @@ public final class BucketRows {
 	}
 
 	/** Validates each contributor for one operation type, which can differ between types. */
-	private static Usable usable(final String stepId, final OpType opType, final List<Contribution> contributions) {
+	private static Usable usable(
+					final String stepId,
+					final int contextIndex,
+					final OpType opType,
+					final List<Contribution> contributions) {
 		final Usable usable = new Usable();
 		final List<String> instances = new ArrayList<>();
 		for (final Contribution contribution : contributions) {
@@ -99,14 +106,14 @@ public final class BucketRows {
 				continue;
 			}
 			final BucketContextReply context = reply.contexts().stream()
-							.filter(candidate -> candidate.opType() == opType)
+							.filter(candidate -> candidate.contextIndex() == contextIndex)
 							.findFirst()
 							.orElse(null);
-			if (context == null) {
+			if (context == null || context.opType() != opType) {
 				usable.missing.put(node, "mismatched type");
 				continue;
 			}
-			if (context.wholeStep().size() != context.members().size() + 1) {
+			if (!wellFormed(context)) {
 				usable.missing.put(node, "unusable payload for this type");
 				continue;
 			}
@@ -122,6 +129,45 @@ public final class BucketRows {
 		return usable;
 	}
 
+	/** Every record says what it is, so none can be written under another bucket's name. */
+	private static boolean wellFormed(final BucketContextReply context) {
+		final List<String> members = context.members();
+		final List<BucketTerminalRecord> wholeStep = context.wholeStep();
+		if (wholeStep.size() != members.size() + 1) {
+			return false;
+		}
+		for (int slot = 0; slot < wholeStep.size(); slot++) {
+			if (!recordAtSlot(wholeStep.get(slot), context.opType(), members, slot)) {
+				return false;
+			}
+		}
+		final BucketSteadyOutcome steady = context.steady();
+		if (steady != null && steady.kind() == BucketSteadyOutcome.Kind.MEASURED) {
+			final List<BucketSteadyRecord> records = steady.records();
+			if (records.size() != wholeStep.size()) {
+				return false;
+			}
+			for (int slot = 0; slot < records.size(); slot++) {
+				if (!recordAtSlot(records.get(slot).values(), context.opType(), members, slot)) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	private static boolean recordAtSlot(
+					final BucketTerminalRecord record,
+					final OpType opType,
+					final List<String> members,
+					final int slot) {
+		final boolean member = slot < members.size();
+		return record != null
+						&& record.opType() == opType
+						&& record.kind() == (member ? BucketKind.MEMBER : BucketKind.CATCH_ALL)
+						&& Objects.equals(record.bucket(), member ? members.get(slot) : null);
+	}
+
 	/**
 	 * Builds one operation type's whole-step rows.
 	 *
@@ -131,11 +177,12 @@ public final class BucketRows {
 	 */
 	public static Cohort wholeStep(
 					final String stepId,
+					final int contextIndex,
 					final OpType opType,
 					final List<Contribution> contributions,
 					final double stepSeconds,
 					final Consumer<Row> sink) {
-		final Usable usable = usable(stepId, opType, contributions);
+		final Usable usable = usable(stepId, contextIndex, opType, contributions);
 		final int expected = contributions.size();
 		final BucketData data = usable.missing.isEmpty() && !usable.replies.isEmpty()
 						? BucketData.COMPLETE
@@ -144,11 +191,15 @@ public final class BucketRows {
 			final int slots = usable.members.size() + 1;
 			for (int slot = 0; slot < slots; slot++) {
 				final List<BucketTerminalRecord> records = new ArrayList<>(usable.replies.size());
-				for (final BucketContextReply reply : usable.replies) {
+				final double[] seconds = new double[usable.replies.size()];
+				for (int i = 0; i < seconds.length; i++) {
+					final BucketContextReply reply = usable.replies.get(i);
 					records.add(reply.wholeStep().get(slot));
+					// A rate sums each worker's own, as the aggregate's does.
+					seconds[i] = reply.elapsedMillis() > 0 ? reply.elapsedMillis() / 1e3 : stepSeconds;
 				}
 				sink.accept(row(
-								slot, usable.members, opType, expected, usable.replies.size(), data, records, stepSeconds, null));
+								slot, usable.members, opType, expected, usable.replies.size(), data, records, seconds, stepSeconds));
 			}
 		}
 		return cohort(opType, contributions, usable, data, data);
@@ -164,18 +215,20 @@ public final class BucketRows {
 	 */
 	public static Cohort steady(
 					final String stepId,
+					final int contextIndex,
 					final OpType opType,
 					final List<Contribution> contributions,
 					final SteadyResult aggregate,
 					final SteadySettings settings,
 					final Consumer<Row> sink) {
-		final Usable usable = usable(stepId, opType, contributions);
+		final Usable usable = usable(stepId, contextIndex, opType, contributions);
 		final int expected = contributions.size();
 		final List<BucketContextReply> measuring = new ArrayList<>(usable.replies.size());
-		boolean unmeasured = false;
-		boolean notReached = aggregate != null && !aggregate.status().hasStatistics()
-						&& STATUS_NOT_REACHED.equals(aggregate.status().label());
-		String unmeasuredReason = null;
+		boolean notReached = aggregate != null && aggregate.status() == SteadyStatus.NOT_REACHED;
+		// A row's status inherits the aggregate's turnovers, so with no aggregate to inherit from
+		// there is no trustworthy way to label its window.
+		boolean unmeasured = !notReached && (aggregate == null || aggregate.status() == SteadyStatus.INCOMPLETE);
+		String unmeasuredReason = unmeasured ? "the aggregate window is incomplete" : null;
 		for (final BucketContextReply reply : usable.replies) {
 			final BucketSteadyOutcome outcome = reply.steady();
 			if (outcome == null) {
@@ -206,23 +259,32 @@ public final class BucketRows {
 			final boolean statistics = data == BucketData.COMPLETE && !notReached;
 			for (int slot = 0; slot < slots; slot++) {
 				final List<BucketTerminalRecord> records = new ArrayList<>(measuring.size());
+				final double[] windows = new double[statistics ? measuring.size() : 0];
 				long shortestWindow = Long.MAX_VALUE;
 				long startDelay = 0;
 				long endDelay = 0;
 				long pass = 0;
+				double latestStart = Double.NEGATIVE_INFINITY;
 				if (statistics) {
-					for (final BucketContextReply reply : measuring) {
+					for (int i = 0; i < windows.length; i++) {
+						final BucketContextReply reply = measuring.get(i);
 						final BucketSteadyRecord record = reply.steady().records().get(slot);
 						records.add(record.values());
+						windows[i] = record.windowNanos() / NANOS_PER_SECOND;
 						shortestWindow = Math.min(shortestWindow, record.windowNanos());
 						startDelay = Math.max(startDelay, record.startDelayNanos());
 						endDelay = Math.max(endDelay, record.endDelayNanos());
 						pass = Math.max(pass, record.passNanos());
+						if (reply.aggregateStartOffsetMillis() != SteadyResult.NONE) {
+							latestStart = Math.max(
+											latestStart,
+											reply.aggregateStartOffsetMillis() / 1e3 + record.startDelayNanos() / NANOS_PER_SECOND);
+						}
 					}
 				}
 				final double windowSeconds = statistics ? shortestWindow / NANOS_PER_SECOND : 0.0;
 				final Row merged = row(
-								slot, usable.members, opType, expected, usable.replies.size(), data, records, windowSeconds, null);
+								slot, usable.members, opType, expected, usable.replies.size(), data, records, windows, windowSeconds);
 				final String status;
 				if (data != BucketData.COMPLETE) {
 					status = STATUS_INCOMPLETE;
@@ -244,11 +306,13 @@ public final class BucketRows {
 								merged.corrupt(),
 								merged.bytes(),
 								merged.stepSeconds(),
+								merged.succeededPerSecond(),
+								merged.bytesPerSecond(),
 								merged.duration(),
 								merged.latency(),
 								merged.timeToFirstByte(),
 								new Steady(
-												statistics ? startSeconds(aggregate, startDelay) : null,
+												statistics && latestStart != Double.NEGATIVE_INFINITY ? latestStart : null,
 												aggregate == null || !statistics ? null : aggregate.turnovers(),
 												aggregate == null || !statistics ? null : aggregate.trendPercent(),
 												aggregate == null || !statistics ? null : aggregate.cv(),
@@ -264,13 +328,6 @@ public final class BucketRows {
 			cohort.missing().putIfAbsent("(window)", unmeasuredReason);
 		}
 		return cohort;
-	}
-
-	private static Double startSeconds(final SteadyResult aggregate, final long startDelayNanos) {
-		if (aggregate == null || aggregate.startOffsetMillis() == SteadyResult.NONE) {
-			return null;
-		}
-		return aggregate.startOffsetMillis() / 1e3 + startDelayNanos / NANOS_PER_SECOND;
 	}
 
 	/** The aggregate's rule with its turnovers inherited, on this row's own window and completions. */
@@ -296,12 +353,20 @@ public final class BucketRows {
 					final int received,
 					final BucketData data,
 					final List<BucketTerminalRecord> records,
-					final double seconds,
-					final Steady steady) {
+					final double[] secondsOfRecord,
+					final double seconds) {
 		long succeeded = 0;
 		long failed = 0;
 		long corrupt = 0;
 		long bytes = 0;
+		double succeededPerSecond = 0.0;
+		double bytesPerSecond = 0.0;
+		for (int i = 0; i < secondsOfRecord.length; i++) {
+			if (secondsOfRecord[i] > 0) {
+				succeededPerSecond += records.get(i).succeeded() / secondsOfRecord[i];
+				bytesPerSecond += records.get(i).bytes() / secondsOfRecord[i];
+			}
+		}
 		final List<TimingMetricSnapshot> durations = new ArrayList<>(records.size());
 		final List<TimingMetricSnapshot> latencies = new ArrayList<>(records.size());
 		final List<TimingMetricSnapshot> ttfbs = new ArrayList<>(records.size());
@@ -328,10 +393,12 @@ public final class BucketRows {
 						corrupt,
 						bytes,
 						seconds,
+						succeededPerSecond,
+						bytesPerSecond,
 						TimingMetricSnapshotImpl.aggregate(durations, MetricsConstants.METRIC_NAME_DUR),
 						TimingMetricSnapshotImpl.aggregate(latencies, MetricsConstants.METRIC_NAME_LAT),
 						TimingMetricSnapshotImpl.aggregate(ttfbs, MetricsConstants.METRIC_NAME_TTFB),
-						steady);
+						null);
 	}
 
 	private static Cohort cohort(

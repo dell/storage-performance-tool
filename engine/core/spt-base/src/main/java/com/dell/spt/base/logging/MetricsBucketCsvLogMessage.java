@@ -8,6 +8,7 @@ import com.dell.spt.base.env.DateUtil;
 import com.dell.spt.base.metrics.bucket.BucketKind;
 import com.dell.spt.base.metrics.bucket.BucketRows;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
+import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshotImpl;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -61,7 +62,7 @@ public final class MetricsBucketCsvLogMessage {
 		final boolean member = row.kind() == BucketKind.MEMBER;
 		cells.add(member ? "member" : "catch-all");
 		cells.add(member ? String.valueOf(row.memberIndex()) : "");
-		cells.add(member ? row.bucket() : "");
+		cells.add(member ? csvCell(row.bucket()) : "");
 		cells.add(row.opType().name());
 		cells.add(String.valueOf(row.nodesExpected()));
 		cells.add(String.valueOf(row.nodesReceived()));
@@ -70,15 +71,14 @@ public final class MetricsBucketCsvLogMessage {
 		if (steady != null && !steady.hasStatistics()) {
 			empty(cells, SCALAR_COLUMNS + 3 * (TIMING_FIXED_COLUMNS + quantiles.size()));
 		} else {
-			final double seconds = row.stepSeconds();
 			cells.add(String.valueOf(row.succeeded()));
 			cells.add(String.valueOf(row.failed()));
 			cells.add(String.valueOf(row.corrupt()));
 			cells.add(String.valueOf(row.bytes()));
-			cells.add(String.valueOf(seconds));
+			cells.add(String.valueOf(row.stepSeconds()));
 			cells.add(observed(row.duration()) ? String.valueOf(row.duration().sum() / M) : "");
-			cells.add(String.valueOf(seconds > 0 ? row.succeeded() / seconds : 0.0));
-			cells.add(String.valueOf(seconds > 0 ? row.bytes() / seconds / MIB : 0.0));
+			cells.add(String.valueOf(row.succeededPerSecond()));
+			cells.add(String.valueOf(row.bytesPerSecond() / MIB));
 			timing(cells, row.duration(), quantiles);
 			timing(cells, row.latency(), quantiles);
 			timing(cells, row.timeToFirstByte(), quantiles);
@@ -94,6 +94,14 @@ public final class MetricsBucketCsvLogMessage {
 			cells.add(text(steady.passMillis()));
 		}
 		return String.join(",", cells);
+	}
+
+	/** A listed bucket name can hold a quote, which a CSV reader would otherwise strip. */
+	private static String csvCell(final String value) {
+		if (value.indexOf('"') < 0 && value.indexOf(',') < 0) {
+			return value;
+		}
+		return '"' + value.replace("\"", "\"\"") + '"';
 	}
 
 	private static String text(final Double value) {
@@ -112,8 +120,8 @@ public final class MetricsBucketCsvLogMessage {
 		}
 		cells.add(String.valueOf(timing.mean()));
 		cells.add(String.valueOf(timing.min()));
-		for (final Double quantile : quantiles) {
-			cells.add(String.valueOf(timing.percentile(quantile)));
+		for (final long value : TimingMetricSnapshotImpl.percentiles(timing, quantiles)) {
+			cells.add(String.valueOf(value));
 		}
 		cells.add(String.valueOf(timing.max()));
 	}

@@ -198,6 +198,13 @@ public final class BucketStepFence implements AutoCloseable {
 		}
 	}
 
+	/** Whether the step's one deadline has passed, whether or not any closer is waiting for it. */
+	private boolean deadlinePassed() {
+		synchronized (lock) {
+			return deadlineNanos != UNSET && clock.getAsLong() - deadlineNanos > 0;
+		}
+	}
+
 	private static ByteBuffer encodeBuffer(final int capacity) {
 		ByteBuffer buffer = ENCODE_BUFFER.get();
 		if (buffer == null || buffer.capacity() < capacity) {
@@ -263,7 +270,7 @@ public final class BucketStepFence implements AutoCloseable {
 				runPass(
 								slot -> endPass(slot, records),
 								() -> {
-									if (fenced) {
+									if (fenced || deadlinePassed()) {
 										finish(BucketSteadyOutcome.unmeasured("the fence deadline passed"));
 									} else {
 										finish(BucketSteadyOutcome.measured(records.inOrder()));

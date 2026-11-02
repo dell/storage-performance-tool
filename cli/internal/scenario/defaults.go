@@ -584,6 +584,32 @@ func applyEngineOverride(root map[string]any, override string) error {
 	return nil
 }
 
+// BucketMetricsDisabledAfterOverrides returns whether bucket metrics are off for this run. An engine
+// override of output.metrics.bucket.enabled wins over --bucket-metrics, so the run's recorded
+// settings say what the engine will do.
+func BucketMetricsDisabledAfterOverrides(params Params) bool {
+	disabled := params.BucketMetricsDisabled
+	for _, override := range params.EngineOverrides {
+		root := map[string]any{}
+		if err := applyEngineOverride(root, override); err != nil {
+			continue
+		}
+		var node any = root
+		for _, part := range []string{"output", "metrics", "bucket", "enabled"} {
+			children, ok := node.(map[string]any)
+			if !ok {
+				node = nil
+				break
+			}
+			node = children[part]
+		}
+		if enabled, ok := node.(bool); ok {
+			disabled = !enabled
+		}
+	}
+	return disabled
+}
+
 // EngineOverrideSets reports whether an engine override sets the configuration path, directly or
 // through a map value of one of its ancestors, such as storage.targetBucket={count: 4}. An
 // override that does not parse sets nothing; GenerateDefaults reports it.

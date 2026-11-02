@@ -36,6 +36,8 @@ import com.dell.spt.base.metrics.bucket.BucketStepFence;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketSet;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
+import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import com.dell.spt.base.metrics.steady.SteadyResult;
 import com.dell.spt.base.metrics.steady.SteadySettings;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
@@ -63,12 +65,12 @@ import org.apache.logging.log4j.Level;
 public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	private static final String BUCKET_METRICS_ENABLED = "output-metrics-bucket-enabled";
+	private static final String METRICS_SUMMARY_PERSIST = "output-metrics-summary-persist";
 
 	private final List<BucketMeters> bucketMeters = new ArrayList<>();
 	private final List<BucketContext> bucketContexts = new ArrayList<>();
-	private final String bucketMetricsInstanceId = UUID.randomUUID().toString();
 	private BucketMetricsReply bucketMetricsReply;
-	private BucketStepFence bucketFence;
+	private volatile BucketStepFence bucketFence;
 	private long bucketMeterSets;
 
 	private static final long STEP_CONTEXT_POLL_NANOS = 10_000_000L; // 10ms
@@ -411,7 +413,10 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 					final Config config,
 					final MetricsContext primary,
 					final Map<OpType, MetricsContext> byOpType) {
-		if (TargetBucketSet.count(config) <= 1 || !config.boolVal(BUCKET_METRICS_ENABLED)) {
+		// A phase that persists no totals, such as a seed, has no files for these to go beside.
+		if (TargetBucketSet.count(config) <= 1
+						|| !config.boolVal(BUCKET_METRICS_ENABLED)
+						|| !config.boolVal(METRICS_SUMMARY_PERSIST)) {
 			return null;
 		}
 		final List<String> members = TargetBucketSet.memberNames(config);
@@ -437,13 +442,14 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			if (measuresWindow) {
 				ownCuts.add(cuts);
 			}
-			bucketContexts.add(new BucketContext(meters, cuts, measuresWindow, members));
+			bucketContexts.add(new BucketContext(context, meters, cuts, measuresWindow, members));
 		});
 		final BucketStepFence fence = bucketFence;
 		return new BucketRecorder(members, primaryMeters, metersOfType, () -> fence.await(ownCuts));
 	}
 
 	private record BucketContext(
+					MetricsContext context,
 					BucketMeters meters,
 					BucketStepFence.ContextCuts cuts,
 					boolean measuresWindow,
@@ -465,25 +471,42 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			final List<BucketContextReply> replies = new ArrayList<>(bucketContexts.size());
 			for (final BucketContext context : bucketContexts) {
 				final BucketSteadyOutcome outcome = context.measuresWindow() ? context.cuts().outcome() : null;
+				final SteadyResult aggregateWindow = context.context().steadyResult();
+				final AllMetricsSnapshot lastSnapshot = context.context().lastSnapshot();
 				replies.add(new BucketContextReply(
+								metricsContexts.indexOf(context.context()),
 								context.meters().opType(),
+								lastSnapshot == null ? 0L : lastSnapshot.elapsedTimeMillis(),
+								aggregateWindow == null ? SteadyResult.NONE : aggregateWindow.startOffsetMillis(),
 								context.members(),
 								context.meters().terminalRecords(),
 								context.measuresWindow() && outcome == null
 												? BucketSteadyOutcome.unmeasured("the bucket window never closed")
 												: outcome));
 			}
-			bucketMetricsReply = new BucketMetricsReply(loadStepId(), bucketMetricsInstanceId, replies);
+			bucketMetricsReply = new BucketMetricsReply(loadStepId(), UUID.randomUUID().toString(), replies);
 		}
 		return range == null || BucketMetricsRange.ALL.equals(range)
 						? bucketMetricsReply
 						: bucketMetricsReply.within(range);
 	}
 
+	/** A worker holds its bucket data until its step closes: a closed service can outlive its step. */
+	private synchronized void releaseBucketMetrics() {
+		if (bucketFence != null) {
+			bucketFence.close();
+			bucketFence = null;
+		}
+		bucketContexts.clear();
+		bucketMeters.clear();
+		bucketMetricsReply = null;
+	}
+
 	@Override
 	protected final void afterSteadyWindowsClosed() {
-		if (bucketFence != null) {
-			bucketFence.await();
+		final BucketStepFence fence = bucketFence;
+		if (fence != null) {
+			fence.await();
 		}
 	}
 
@@ -1203,9 +1226,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	protected final void doClose() throws IOException {
-		if (bucketFence != null) {
-			bucketFence.close();
-		}
+		releaseBucketMetrics();
 		if (standaloneDeleteDurationMode()) {
 			try {
 				closeDurationContexts();

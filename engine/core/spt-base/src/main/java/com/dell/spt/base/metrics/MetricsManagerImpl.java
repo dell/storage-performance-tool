@@ -218,6 +218,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		try (final Instance logCtx = put(KEY_STEP_ID, metricsCtx.loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			if (allMetrics.remove(metricsCtx)) {
 				boolean lockAcquired = false;
+				Runnable bucketWrite = null;
 				try {
 					lockAcquired = outputLock.tryLock(LOCK_TIMEOUT_NANOS, TimeUnit.NANOSECONDS);
 					if (!lockAcquired) {
@@ -269,7 +270,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 								message.formatTo(csvOutput, includeHeader);
 								Loggers.METRICS_FILE_TOTAL.info(csvOutput.toString());
 								writeSteadyTotalRow(metricsCtx, steady, aggregSnapshot.nodeCount(), quantileValues);
-								writeBucketRows(distributedMetricsCtx, aggregSnapshot, steady, quantileValues);
+								bucketWrite = () -> writeBucketRows(distributedMetricsCtx, aggregSnapshot, steady, quantileValues);
 							}
 						}
 						// console output
@@ -306,8 +307,6 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 							openResultXmlSteps.remove(metricsCtx.loadStepId());
 							openMetricsTotalCsvSteps.remove(metricsCtx.loadStepId());
 							openMetricsSteadyTotalCsvSteps.remove(metricsCtx.loadStepId());
-							openBucketCsvSteps.remove(metricsCtx.loadStepId());
-							openBucketSteadyCsvSteps.remove(metricsCtx.loadStepId());
 						}
 
 						final PrometheusMetricsExporter exporter = distributedMetrics.remove(distributedMetricsCtx);
@@ -349,6 +348,12 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 						outputLock.unlock();
 					}
 				}
+				// Off the lock: fetching from workers and merging rows can take seconds, and the
+				// manager's sweep over other running steps needs that lock.
+				if (bucketWrite != null) {
+					bucketWrite.run();
+				}
+				finishBucketFiles(metricsCtx);
 			} else {
 				Loggers.ERR.debug("Metrics context \"{}\" has not been registered", metricsCtx);
 			}
@@ -387,6 +392,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 							stepId,
 							BucketRows.wholeStep(
 											stepId,
+											source.contextIndex(),
 											metricsCtx.opType(),
 											contributions,
 											stepSeconds,
@@ -401,6 +407,7 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 								stepId,
 								BucketRows.steady(
 												stepId,
+												source.contextIndex(),
 												metricsCtx.opType(),
 												contributions,
 												steady,
@@ -410,6 +417,19 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 			}
 		} catch (final RuntimeException e) {
 			LogUtil.exception(Level.WARN, e, "{}: failed to write the bucket metrics files", stepId);
+		}
+	}
+
+	/** Once a step's last context has written, forgets its files and lets go of its workers' data. */
+	private void finishBucketFiles(final MetricsContext<?> metricsCtx) {
+		final String stepId = metricsCtx.loadStepId();
+		if (allMetrics.stream().anyMatch(other -> stepId.equals(other.loadStepId()))) {
+			return;
+		}
+		openBucketCsvSteps.remove(stepId);
+		openBucketSteadyCsvSteps.remove(stepId);
+		if (metricsCtx instanceof DistributedMetricsContext<?> distributed && distributed.bucketMetricsSource() != null) {
+			distributed.bucketMetricsSource().release();
 		}
 	}
 

@@ -31,7 +31,8 @@ class BucketRowsTest {
 	}
 
 	private static BucketContextReply context(final BucketMeters meters, final BucketSteadyOutcome steady) {
-		return new BucketContextReply(meters.opType(), MEMBERS, meters.terminalRecords(), steady);
+		return new BucketContextReply(
+						0, meters.opType(), 10_000L, 5_000L, MEMBERS, meters.terminalRecords(), steady);
 	}
 
 	private static BucketRows.Contribution node(final String name, final BucketContextReply... contexts) {
@@ -54,13 +55,13 @@ class BucketRowsTest {
 
 	private static List<BucketRows.Row> wholeStep(final List<BucketRows.Contribution> nodes, final List<BucketRows.Cohort> cohort) {
 		final List<BucketRows.Row> rows = new ArrayList<>();
-		cohort.add(BucketRows.wholeStep(STEP, OpType.CREATE, nodes, 10.0, rows::add));
+		cohort.add(BucketRows.wholeStep(STEP, 0, OpType.CREATE, nodes, 10.0, rows::add));
 		return rows;
 	}
 
 	private static List<BucketRows.Row> steady(final List<BucketRows.Contribution> nodes, final SteadyResult aggregate) {
 		final List<BucketRows.Row> rows = new ArrayList<>();
-		BucketRows.steady(STEP, OpType.CREATE, nodes, aggregate, SETTINGS, rows::add);
+		BucketRows.steady(STEP, 0, OpType.CREATE, nodes, aggregate, SETTINGS, rows::add);
 		return rows;
 	}
 
@@ -153,12 +154,12 @@ class BucketRowsTest {
 						new BucketRows.Contribution("dup", new BucketMetricsReply(STEP, "same", List.of(put)), null),
 						new BucketRows.Contribution("wrong", new BucketMetricsReply("other-step", "x", List.of(put)), null),
 						new BucketRows.Contribution("reads-only", new BucketMetricsReply(STEP, "r", List.of(get)), null));
-		final var createCohort = BucketRows.wholeStep(STEP, OpType.CREATE, nodes, 1.0, row -> {});
+		final var createCohort = BucketRows.wholeStep(STEP, 0, OpType.CREATE, nodes, 1.0, row -> {});
 		assertEquals(List.of("a"), createCohort.received());
 		assertEquals("duplicate", createCohort.missing().get("dup"));
 		assertEquals("mismatched step", createCohort.missing().get("wrong"));
 		assertEquals("mismatched type", createCohort.missing().get("reads-only"));
-		final var readCohort = BucketRows.wholeStep(STEP, OpType.READ, nodes, 1.0, row -> {});
+		final var readCohort = BucketRows.wholeStep(STEP, 0, OpType.READ, nodes, 1.0, row -> {});
 		assertEquals(List.of("reads-only"), readCohort.received(), "each type has its own contributors");
 	}
 
@@ -241,6 +242,108 @@ class BucketRowsTest {
 						aggregate(100.0));
 		assertEquals(BucketData.INCOMPLETE, missing.get(0).data(), "incomplete wins over unmeasured");
 		assertEquals("incomplete", missing.get(0).steady().status());
+	}
+
+	@Test
+	void ratesSumEachWorkersOwnNotTheSumOverTheShortestWindow() {
+		final var a = new BucketMeters(OpType.CREATE, MEMBERS);
+		final var b = new BucketMeters(OpType.CREATE, MEMBERS);
+		for (int i = 0; i < 100; i++) {
+			a.sets()[0].markSucc(1, 100, 50, 25);
+			b.sets()[0].markSucc(1, 100, 50, 25);
+		}
+		final var rows = steady(
+						List.of(
+										node("a", context(a, measured(a, 10_000_000_000L, 0, 0))),
+										node("b", context(b, measured(b, 5_000_000_000L, 0, 0)))),
+						aggregate(100.0));
+		assertEquals(30.0, rows.get(0).succeededPerSecond(), 1e-9, "100/10 + 100/5, not 200/5");
+		assertEquals(30.0, rows.get(0).bytesPerSecond(), 1e-9);
+		assertEquals(5.0, rows.get(0).stepSeconds());
+	}
+
+	@Test
+	void wholeStepRatesUseEachWorkersOwnElapsedTime() {
+		final var meters = meters(OpType.CREATE, 1, 2, 3, 4);
+		final var reply = new BucketContextReply(
+						0, OpType.CREATE, 4_000L, 0L, MEMBERS, meters.terminalRecords(), null);
+		final var rows = wholeStep(List.of(node("a", reply)), new ArrayList<>());
+		assertEquals(0.5, rows.get(0).succeededPerSecond(), 1e-9, "2 over this worker's 4 s");
+		assertEquals(10.0, rows.get(0).stepSeconds(), "the row's duration stays the step's");
+	}
+
+	@Test
+	void sameTypeContextsOfOneStepKeepTheirOwnCounts() {
+		final var first = meters(OpType.CREATE, 1);
+		final var second = meters(OpType.CREATE, 1, 2, 3, 4, 5, 6, 7);
+		final var reply = new BucketMetricsReply(STEP, "a", List.of(
+						new BucketContextReply(0, OpType.CREATE, 1L, 0L, MEMBERS, first.terminalRecords(), null),
+						new BucketContextReply(1, OpType.CREATE, 1L, 0L, MEMBERS, second.terminalRecords(), null)));
+		final List<BucketRows.Contribution> nodes = List.of(new BucketRows.Contribution("a", reply, null));
+		final List<BucketRows.Row> rows = new ArrayList<>();
+		BucketRows.wholeStep(STEP, 1, OpType.CREATE, nodes, 1.0, rows::add);
+		assertEquals(4, rows.get(0).succeeded(), "the second context's, not the first's");
+		rows.clear();
+		BucketRows.wholeStep(STEP, 0, OpType.CREATE, nodes, 1.0, rows::add);
+		assertEquals(1, rows.get(0).succeeded());
+	}
+
+	@Test
+	void anIncompleteAggregateCannotLabelABucketWindow() {
+		final var meters = meters(OpType.CREATE, 100);
+		final var incomplete = new SteadyResult(
+						SteadyStatus.INCOMPLETE, "test", SteadyResult.NONE, 0, 0, null, null, 0, 0, null);
+		final var rows = steady(
+						List.of(node("a", context(meters, measured(meters, 30_000_000_000L, 0, 0)))), incomplete);
+		assertEquals(BucketData.UNMEASURED, rows.get(0).data());
+		assertEquals("incomplete", rows.get(0).steady().status());
+		assertFalse(rows.get(0).steady().hasStatistics());
+	}
+
+	@Test
+	void aSteadyStartBelongsToOneSlice() {
+		final var a = meters(OpType.CREATE, 100);
+		final var b = meters(OpType.CREATE, 200);
+		final var replyA = new BucketContextReply(
+						0, OpType.CREATE, 1L, 0L, MEMBERS, a.terminalRecords(), measured(a, 30_000_000_000L, 3_000_000_000L, 0));
+		final var replyB = new BucketContextReply(
+						0, OpType.CREATE, 1L, 4_000L, MEMBERS, b.terminalRecords(), measured(b, 30_000_000_000L, 100_000_000L, 0));
+		final var rows = steady(List.of(node("a", replyA), node("b", replyB)), aggregate(100.0));
+		assertEquals(4.1, rows.get(0).steady().startSeconds(), 1e-9, "the latest real start, not 4 s + 3 s");
+	}
+
+	@Test
+	void aRecordInTheWrongSlotIsAnUnusablePayload() {
+		final var meters = meters(OpType.CREATE, 1, 2);
+		final var records = new ArrayList<>(meters.terminalRecords());
+		java.util.Collections.swap(records, 0, 1);
+		final var reply = new BucketContextReply(0, OpType.CREATE, 1L, 0L, MEMBERS, records, null);
+		final List<BucketRows.Cohort> cohorts = new ArrayList<>();
+		final var rows = wholeStep(List.of(node("a", reply)), cohorts);
+		assertTrue(rows.isEmpty());
+		assertEquals("unusable payload for this type", cohorts.get(0).missing().get("a"));
+		assertEquals(BucketData.INCOMPLETE, cohorts.get(0).wholeStepData());
+	}
+
+	@Test
+	void aNameWithAQuoteRoundTripsThroughACsvReader() {
+		final List<String> members = List.of("\"odd\"", "beta");
+		final var meters = new BucketMeters(OpType.CREATE, members);
+		final var reply = new BucketContextReply(0, OpType.CREATE, 1L, 0L, members, meters.terminalRecords(), null);
+		final var rows = wholeStep(List.of(node("a", reply)), new ArrayList<>());
+		final String cell = MetricsBucketCsvLogMessage.row(rows.get(0), QUANTILES).split(CELL_SEPARATOR, -1)[3];
+		assertEquals("\"\"\"odd\"\"\"", cell);
+	}
+
+	@Test
+	void formattingARowLeavesNoDecodedHistogramOnTheHeldRecord() throws Exception {
+		final var meters = meters(OpType.CREATE, 100, 200);
+		final var rows = wholeStep(List.of(node("a", context(meters, null))), new ArrayList<>());
+		final var duration = rows.get(0).duration();
+		MetricsBucketCsvLogMessage.row(rows.get(0), QUANTILES);
+		final var field = com.dell.spt.base.metrics.snapshot.TimingMetricSnapshotImpl.class.getDeclaredField("decodedHistogram");
+		field.setAccessible(true);
+		assertNull(field.get(duration));
 	}
 
 	private static final List<Double> QUANTILES = List.of(0.25, 0.5, 0.75);

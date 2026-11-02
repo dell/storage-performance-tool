@@ -208,6 +208,23 @@ public class TimingMetricSnapshotImpl extends NamedCountMetricSnapshotImpl
 		return Arrays.copyOf(compressedHistogram, compressedHistogram.length);
 	}
 
+	/**
+	 * The given quantiles of a snapshot, decoding its histogram once and keeping nothing, for a
+	 * caller that reads thousands of snapshots it goes on holding.
+	 */
+	public static long[] percentiles(final TimingMetricSnapshot snapshot, final List<Double> quantiles) {
+		final long[] values = new long[quantiles.size()];
+		final byte[] compressed = snapshot.compressedHistogram();
+		final Histogram histogram = compressed.length == 0 ? null : decodeHistogram(compressed);
+		for (int i = 0; i < values.length; i++) {
+			final double quantile = quantiles.get(i);
+			values[i] = histogram == null || quantile <= 0.0
+							? 0L
+							: Math.min(snapshot.max(), histogram.getValueAtPercentile(Math.min(100.0, quantile * 100.0)));
+		}
+		return values;
+	}
+
 	private Histogram decodedHistogram() {
 		Histogram histogram = decodedHistogram;
 		if (histogram == null && compressedHistogram.length > 0) {

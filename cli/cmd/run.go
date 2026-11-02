@@ -2671,6 +2671,7 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	if err := applyBucketCount(cmd, &params); err != nil {
 		return scenario.Params{}, err
 	}
+	params.BucketMetricsDisabled = scenario.BucketMetricsDisabledAfterOverrides(params)
 	if err := applyBucketList(cmd, &params, targetBuckets); err != nil {
 		return scenario.Params{}, err
 	}

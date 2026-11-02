@@ -104,6 +104,15 @@ class LoadStepBucketMetricsSetupTest {
 	}
 
 	@Test
+	void aPhaseThatPersistsNoTotalsAllocatesNothing() {
+		final Config config = config(4);
+		config.val("output-metrics-summary-persist", false);
+		final var step = new SetupStep(config, mock(MetricsManager.class));
+		assertNull(step.recorder(config, null));
+		assertEquals(0, step.metersBuilt());
+	}
+
+	@Test
 	void aSetBuildsOneBlockForEachContext() {
 		final Config config = config(4);
 		final var step = new SetupStep(config, mock(MetricsManager.class));

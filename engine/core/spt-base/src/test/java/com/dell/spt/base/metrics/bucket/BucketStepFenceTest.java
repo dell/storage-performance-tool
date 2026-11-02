@@ -356,6 +356,72 @@ class BucketStepFenceTest {
 		return context;
 	}
 
+	/** A closer that takes the window's fast path must find the end pass already queued. */
+	@Test
+	void aRacingCloserCannotPassTheFenceBeforeTheEndIsQueued() throws Exception {
+		final var stepFence = fence(LONG_BUDGET);
+		final var context = steadyContext(OpType.CREATE);
+		final var cuts = stepFence.register(new BucketMeters(OpType.CREATE, MEMBERS));
+		final CountDownLatch inListener = new CountDownLatch(1);
+		final CountDownLatch go = new CountDownLatch(1);
+		assertTrue(context.steadyWindowListener(new com.dell.spt.base.metrics.steady.SteadyWindow.Listener() {
+			@Override
+			public void onWindowStart(final long startNanos) {
+				cuts.onWindowStart(startNanos);
+			}
+
+			@Override
+			public void onWindowClose(final long endNanos, final boolean started, final SteadyResult result) {
+				inListener.countDown();
+				try {
+					go.await();
+				} catch (final InterruptedException e) {
+					throw new IllegalStateException(e);
+				}
+				cuts.onWindowClose(endNanos, started, result);
+			}
+		}));
+		context.markSucc(1, 100, 50, 25);
+		context.observeSteadyWindow();
+		awaitStarted(cuts);
+		final Thread first = new Thread(() -> context.closeSteadyWindow("first"));
+		first.start();
+		inListener.await();
+		final CountDownLatch secondDone = new CountDownLatch(1);
+		final Thread second = new Thread(() -> {
+			context.closeSteadyWindow("second");
+			stepFence.await();
+			secondDone.countDown();
+		});
+		second.start();
+		assertFalse(secondDone.await(200, TimeUnit.MILLISECONDS), "the second closer must not pass yet");
+		go.countDown();
+		assertTrue(secondDone.await(10, TimeUnit.SECONDS));
+		assertEquals(BucketSteadyOutcome.Kind.MEASURED, cuts.outcome().kind(), "and it waited for the end pass");
+		first.join();
+		second.join();
+		context.close();
+	}
+
+	/** At scheduling exhaustion nobody may be waiting, and the deadline still holds. */
+	@Test
+	void aPassThatEndsAfterTheDeadlineIsUnmeasuredWithNoCloserWaiting() throws Exception {
+		final var stepFence = fence(SHORT_BUDGET);
+		final var cuts = context(stepFence);
+		cuts.onWindowStart(System.nanoTime());
+		awaitStarted(cuts);
+		holdEveryPass(stepFence);
+		cuts.onWindowClose(System.nanoTime(), true, NO_RESULT);
+		Thread.sleep(TimeUnit.NANOSECONDS.toMillis(SHORT_BUDGET) + 100);
+		release.countDown();
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		while (cuts.outcome() == null) {
+			assertTrue(System.nanoTime() < deadline);
+			Thread.sleep(1);
+		}
+		assertEquals(BucketSteadyOutcome.Kind.UNMEASURED, cuts.outcome().kind());
+	}
+
 	/** R3-1: every aggregate window is closed while the first bucket end pass is still held. */
 	@Test
 	void everyAggregateClosesWhileABucketEndPassIsHeld() throws Exception {

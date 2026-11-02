@@ -12,4 +12,10 @@ public interface BucketMetricsSource {
 
 	/** What makes a window {@code valid}, or null when this step measures no window. */
 	SteadySettings steadySettings();
+
+	/** This context's place in its step, as workers number theirs. */
+	int contextIndex();
+
+	/** Lets go of the workers' payloads, once the step's last context has written its rows. */
+	default void release() {}
 }

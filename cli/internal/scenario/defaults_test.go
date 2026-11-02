@@ -1614,3 +1614,28 @@ func TestBucketMetricsSetting(t *testing.T) {
 		t.Errorf("the override did not win over the flag: %v", node)
 	}
 }
+
+func TestBucketMetricsDisabledAfterOverrides(t *testing.T) {
+	cases := []struct {
+		name      string
+		disabled  bool
+		overrides []string
+		want      bool
+	}{
+		{"flag default", false, nil, false},
+		{"flag off", true, nil, true},
+		{"override turns it on", true, []string{"output.metrics.bucket.enabled=true"}, false},
+		{"override turns it off", false, []string{"output.metrics.bucket.enabled=false"}, true},
+		{"map form", false, []string{"output.metrics.bucket={enabled: false}"}, true},
+		{"the last override wins", false, []string{"output.metrics.bucket.enabled=false", "output.metrics.bucket.enabled=true"}, false},
+		{"unrelated override", true, []string{"load.op.limit.rate=10"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := BucketMetricsDisabledAfterOverrides(Params{BucketMetricsDisabled: tc.disabled, EngineOverrides: tc.overrides})
+			if got != tc.want {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
