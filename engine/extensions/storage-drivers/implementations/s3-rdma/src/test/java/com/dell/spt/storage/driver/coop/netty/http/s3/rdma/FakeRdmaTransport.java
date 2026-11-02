@@ -234,12 +234,13 @@ public class FakeRdmaTransport extends RdmaTransport {
 	}
 
 	/** Runs in each generateToken() call, before it makes the token. */
-	public void setBeforeDeregister(final Runnable action) {
-		this.beforeDeregister = action;
-	}
-
 	public void setBeforeToken(final Runnable action) {
 		this.beforeToken = action;
+	}
+
+	/** Runs the action inside deregisterBuffer(), to hold a caller there. */
+	public void setBeforeDeregister(final Runnable action) {
+		this.beforeDeregister = action;
 	}
 
 	/** After n successful registrations, subsequent calls return 0 (failure). Set -1 to disable. */

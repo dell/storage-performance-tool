@@ -308,9 +308,10 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 	/**
 	 * Item 12b: admission is closed; every lane is cancelled at once and waited for against one budget;
 	 * then per NIC, the pool and the context close. A lane past the budget is in a call that cannot be
-	 * interrupted: it keeps its NIC open and closes it when the call returns. If an I/O worker outlasted
-	 * the stop, it can still be in a native call or building a request, so every NIC stays open until
-	 * the process ends: a leak in a rare case, rather than a closed context in use.
+	 * interrupted: it keeps its NIC open and closes it when the call returns. If an I/O worker or the
+	 * reaper outlasted the stop, it can still be in a native call or building a request, so every NIC
+	 * and every unfinished attempt's buffer stay as they are until the process ends: a leak in a rare
+	 * case, rather than a closed context or a deregistered buffer in use.
 	 */
 	@Override
 	void closeRdmaResources() {
@@ -329,19 +330,22 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		open.lanes().forEach(RdmaPreparationLane::cancel);
 		final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(laneStopBudgetMillis);
 		open.lanes().forEach(lane -> lane.awaitExit(deadline));
-		releaseLeakedContexts();
-		final boolean ioLate = Boolean.FALSE.equals(ioStoppedInTime());
+		final boolean workersLate = reaperLate || Boolean.FALSE.equals(ioStoppedInTime());
+		if (!workersLate) {
+			releaseLeakedContexts();
+		}
 		for (var i = 0; i < open.nics().size(); i++) {
 			final var nic = open.nics().get(i);
 			final var lane = open.lanes().get(i);
 			Loggers.MSG.info("{}: nic={}: RDMA data path summary (transport {}): {}{}", stepId, nic.name,
 							nic.transport.isAvailable() ? "available" : "unavailable", nic.stats.summary(), nic.poolSummary());
-			if (ioLate) {
+			if (workersLate) {
 				if (lane.exited()) {
 					lane.drain();
 				}
-				Loggers.MSG.warn("{}: NIC {}: an I/O worker did not stop in time and may still use this NIC's RDMA resources; its "
-								+ "pool and context stay open until the process ends", stepId, nic.name);
+				Loggers.MSG.warn("{}: NIC {}: an I/O worker or the RDMA reaper did not stop in time and may still use this NIC's RDMA "
+								+ "resources; its pool, its context and its unfinished attempts' buffers stay open until the process ends",
+								stepId, nic.name);
 			} else if (lane.exited()) {
 				lane.drain();
 				nic.close();

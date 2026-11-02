@@ -284,6 +284,8 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	private final RdmaTransport rdmaTransport;
 	private final String endpointAddrs;
 	private final ScheduledExecutorService rdmaReaper;
+	/** Whether the reaper may still run as {@link #doClose()} goes on. Only the NIC route acts on it. */
+	boolean reaperLate;
 
 	public S3RdmaStorageDriver(
 					final String stepId,
@@ -1195,9 +1197,11 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			rdmaReaper.shutdownNow();
 			try {
 				if (!rdmaReaper.awaitTermination(5, TimeUnit.SECONDS)) {
+					reaperLate = true;
 					Loggers.MSG.warn("{}: RDMA reaper did not terminate within 5s", stepId);
 				}
 			} catch (final InterruptedException e) {
+				reaperLate = true;
 				Thread.currentThread().interrupt();
 			}
 		}

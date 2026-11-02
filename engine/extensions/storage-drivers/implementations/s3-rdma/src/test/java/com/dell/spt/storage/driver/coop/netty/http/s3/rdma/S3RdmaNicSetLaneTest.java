@@ -547,22 +547,50 @@ final class S3RdmaNicSetLaneTest {
 		assertTrue(stub.objectRequests().isEmpty());
 	}
 
-	/** Without a pool a completion deregisters on the event loop; one held there outlasts the stop's wait. */
+	/**
+	 * Without a pool a completion deregisters on the event loop; one held there outlasts the stop's wait.
+	 * It may still use its NIC, and another worker may be building a request from an unfinished attempt's
+	 * token, so neither the context nor that attempt's buffer goes away.
+	 */
 	@Test
-	void aNicStaysOpenWhileAnEventLoopOutlastsTheStop() throws Exception {
+	void aNicAndItsUnfinishedAttemptsStayWhileAnEventLoopOutlastsTheStop() throws Exception {
 		final var run = started(RdmaNicLoopback.root(rdma(false, false, 1), stub.listeners(1), NICS.subList(0, 1), 2));
 		final var transport = stub.transport(0);
+		stub.hold(request -> request.path().contains("unfinished"));
+		assertTrue(run.driver().put(op(OpType.READ, "unfinished")));
+		waitFor(() -> stub.objectRequests().size() == 1, "the unfinished attempt reaches the stub");
 		final var entered = new CountDownLatch(1);
 		final var release = hold();
-		transport.setBeforeDeregister(() -> enterAndAwait(entered, release));
+		final var first = new AtomicBoolean(true);
+		transport.setBeforeDeregister(() -> {
+			if (first.getAndSet(false)) {
+				enterAndAwait(entered, release);
+			}
+		});
 		assertTrue(run.driver().put(op(OpType.READ, "held-on-the-event-loop")));
 		assertTrue(entered.await(10, TimeUnit.SECONDS));
 
 		run.driver().close();
 
 		assertEquals(0, transport.getCloseCount(), "the event loop is still in a native call");
-		release.countDown();
-		assertFalse(transport.wasClosedDuringACall());
+		assertEquals(0, transport.getDeregisterCount(), "the unfinished attempt's buffer stays registered");
+	}
+
+	/** The reaper deregisters a timed-out attempt's buffer; one held there outlasts its own wait. */
+	@Test
+	void aNicStaysOpenWhileTheReaperOutlastsItsWait() throws Exception {
+		final var run = started(RdmaNicLoopback.root(rdma(false, false, 1, 300), stub.listeners(1), NICS.subList(0, 1), 2));
+		final var transport = stub.transport(0);
+		stub.hold();
+		final var entered = new CountDownLatch(1);
+		final var release = hold();
+		transport.setBeforeDeregister(() -> enterAndAwait(entered, release));
+		assertTrue(run.driver().put(op(OpType.READ, "timed-out")));
+		assertTrue(entered.await(10, TimeUnit.SECONDS));
+
+		run.driver().close();
+
+		assertEquals(0, transport.getCloseCount(), "the reaper is still in a native call");
 	}
 
 	@Test
