@@ -379,7 +379,7 @@ func TestGenerateRejectsANicSetTheReplayCannotServe(t *testing.T) {
 	if got := ErrorClass(err); got != failureInvalidInterfaces {
 		t.Fatalf("ErrorClass() = %q, want %q (err=%v)", got, failureInvalidInterfaces, err)
 	}
-	if want := "SPT_INTERFACES (environment or .env) requires the default Netty S3 driver, not --s3-driver aws"; !strings.Contains(err.Error(), want) {
+	if want := "SPT_INTERFACES (environment or .env) requires the default Netty S3 driver or --s3-driver rdma, not --s3-driver aws"; !strings.Contains(err.Error(), want) {
 		t.Fatalf("err = %v, want %q", err, want)
 	}
 }
