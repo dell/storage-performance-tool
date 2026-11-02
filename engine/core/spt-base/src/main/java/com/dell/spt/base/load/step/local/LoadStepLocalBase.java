@@ -423,7 +423,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		final int contexts = byOpType == null || byOpType.isEmpty() ? 1 : byOpType.size();
 		bucketMeterSets += contexts * (members.size() + 1L);
 		BucketMetricsBudget.check(bucketMeterSets, Runtime.getRuntime().maxMemory());
-		final Map<MetricsContext, BucketMeters> metersOfContext = new IdentityHashMap<>();
+		final IdentityHashMap<MetricsContext, BucketMeters> metersOfContext = new IdentityHashMap<>();
 		final BucketMeters primaryMeters = new BucketMeters(primary.opType(), members);
 		metersOfContext.put(primary, primaryMeters);
 		final Map<OpType, BucketMeters> metersOfType = new EnumMap<>(OpType.class);
