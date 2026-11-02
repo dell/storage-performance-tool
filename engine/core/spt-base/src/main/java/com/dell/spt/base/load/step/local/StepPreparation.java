@@ -99,9 +99,12 @@ final class StepPreparation implements AdmissionPreparable.Preparation {
 		return true;
 	}
 
-	/** Returns whether admission may open: true once this preparation has been released. */
-	synchronized boolean release() {
-		if (state == PreparationStatus.State.READY) {
+	/**
+	 * Returns whether admission may open: true once this preparation has been released. A preparation
+	 * past its deadline is not released, even if the fence has not happened yet.
+	 */
+	synchronized boolean release(final long nowNanos) {
+		if (state == PreparationStatus.State.READY && nowNanos - deadlineNanos < 0) {
 			released = true;
 		}
 		return released;

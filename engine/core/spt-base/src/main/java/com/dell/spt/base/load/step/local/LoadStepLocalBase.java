@@ -60,6 +60,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private boolean operationLifecyclePublished;
 	private boolean nicPathsPublished;
 	private volatile StepPreparation preparation;
+	private volatile Thread preparationDeadlineGuard;
 	private volatile IntegrityTerminalException durationStopFailure;
 	private volatile IntegrityTerminalException durationValidityFailure;
 	private volatile boolean durationAdmissionBarrierSatisfied;
@@ -199,7 +200,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			throw new IllegalStateException(loadStepId() + ": failed to start any load step contexts");
 		}
 		if (barrier != null) {
-			startPreparationThreads(barrier);
+			startPreparationThread(barrier);
 		}
 	}
 
@@ -210,7 +211,21 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	public final synchronized void startPreparation(final long preparationId, final long budgetNanos) {
-		preparation = new StepPreparation(preparationId, budgetNanos, System.nanoTime());
+		final var barrier = new StepPreparation(preparationId, budgetNanos, System.nanoTime());
+		preparation = barrier;
+		// The deadline runs from here: an Entry Node that dies before start() still leaves it fenced.
+		final String stepId = safeStepIdForPreparation();
+		preparationDeadlineGuard = Thread.ofPlatform().daemon().name("spt-preparation-deadline-" + stepId).start(() -> {
+			try {
+				final long remaining = barrier.deadlineNanos() - System.nanoTime();
+				if (remaining > 0) {
+					TimeUnit.NANOSECONDS.sleep(remaining);
+				}
+				fence(barrier, "preparation did not finish before its deadline");
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		});
 	}
 
 	@Override
@@ -231,9 +246,10 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		if (barrier.released()) {
 			return true;
 		}
-		if (!barrier.release()) {
+		if (!barrier.release(System.nanoTime())) {
 			return false;
 		}
+		preparationDeadlineGuard.interrupt();
 		startLoadInterval();
 		stepContexts.forEach(LoadStepContext::releaseAdmissionBarrier);
 		return true;
@@ -247,24 +263,37 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		}
 	}
 
+	/**
+	 * Fences the preparation and stops the contexts on a thread of their own: a driver blocked in its
+	 * start, such as in a DNS lookup, holds its lifecycle lock, and the caller may be an RMI call.
+	 */
 	private void fence(final StepPreparation barrier, final String why) {
-		if (barrier.fence(why, System.nanoTime())) {
-			Loggers.MSG.info("{}: preparation fenced: {}", safeStepIdForPreparation(), why);
-			for (final LoadStepContext stepContext : List.copyOf(stepContexts)) {
+		if (!barrier.fence(why, System.nanoTime())) {
+			return;
+		}
+		final String stepId = safeStepIdForPreparation();
+		Loggers.MSG.info("{}: preparation fenced: {}", stepId, why);
+		final Thread guard = preparationDeadlineGuard;
+		if (guard != null && guard != Thread.currentThread()) {
+			guard.interrupt();
+		}
+		final var contexts = List.copyOf(stepContexts);
+		Thread.ofPlatform().daemon().name("spt-preparation-fence-" + stepId).start(() -> {
+			for (final LoadStepContext stepContext : contexts) {
 				try {
 					stepContext.stop();
 				} catch (final Exception e) {
-					LogUtil.exception(Level.WARN, e, "{}: failed to stop a fenced context", safeStepIdForPreparation());
+					LogUtil.exception(Level.WARN, e, "{}: failed to stop a fenced context", stepId);
 				}
 			}
-		}
+		});
 	}
 
 	private String safeStepIdForPreparation() {
 		return config.stringVal("load-step-id");
 	}
 
-	private void startPreparationThreads(final StepPreparation barrier) {
+	private void startPreparationThread(final StepPreparation barrier) {
 		final String stepId = safeStepIdForPreparation();
 		final Thread preparing = Thread.ofPlatform().daemon().name("spt-preparation-" + stepId).unstarted(() -> {
 			try (final var logCtx = put(KEY_STEP_ID, stepId).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
@@ -286,17 +315,6 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		});
 		barrier.onFence(preparing::interrupt);
 		preparing.start();
-		Thread.ofPlatform().daemon().name("spt-preparation-deadline-" + stepId).start(() -> {
-			final long remaining = barrier.deadlineNanos() - System.nanoTime();
-			try {
-				if (remaining > 0) {
-					TimeUnit.NANOSECONDS.sleep(remaining);
-				}
-				fence(barrier, "preparation did not finish before its deadline");
-			} catch (final InterruptedException e) {
-				Thread.currentThread().interrupt();
-			}
-		});
 	}
 
 	private static String preparationFailureMessage(final Throwable failure) {
@@ -560,8 +578,15 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	@Override
 	protected final void doShutdown() {
 		final StepPreparation barrier = preparation;
-		if (barrier != null && !barrier.released()) {
-			fence(barrier, "the step stopped during preparation");
+		if (barrier != null) {
+			// The monitor waits out a release in progress, so the contexts it opens stop below.
+			final boolean pending;
+			synchronized (this) {
+				pending = !barrier.released();
+			}
+			if (pending) {
+				fence(barrier, "the step stopped during preparation");
+			}
 		}
 		closeSteadyWindows("shutdown");
 		if (standaloneDeleteDurationMode()) {
@@ -812,7 +837,9 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			return;
 		}
 		try (final var logContext = put(KEY_STEP_ID, loadStepId())) {
-			NicPathsArtifact.publish(runId(), loadStepId(), operationLifecycleWorkerId, paths);
+			final StepPreparation barrier = preparation;
+			NicPathsArtifact.publish(
+							runId(), loadStepId(), operationLifecycleWorkerId, paths, barrier == null || barrier.released());
 		} catch (final RuntimeException e) {
 			LogUtil.exception(Level.WARN, e, "{}: failed to write the NIC paths file", loadStepId());
 		}

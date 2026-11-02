@@ -337,7 +337,7 @@ class LoadStepLocalBaseTest {
 
 		step.fencePreparation(7);
 		step.fencePreparation(7);
-		verify(context, times(1)).stop();
+		verify(context, timeout(20_000).times(1)).stop();
 		verify(context, never()).releaseAdmissionBarrier();
 		assertEquals(PreparationStatus.State.FENCED, step.preparationStatus(7).state());
 		assertFalse(step.releasePreparedAdmission(7), "a late release changes nothing");
@@ -364,6 +364,58 @@ class LoadStepLocalBaseTest {
 		assertTrue(interrupted.await(20, TimeUnit.SECONDS), "a fence interrupts blocked work");
 		verify(context, timeout(20_000)).stop();
 		assertFalse(step.releasePreparedAdmission(7));
+	}
+
+	private static boolean deadlineGuardAlive(final String stepId) {
+		return Thread.getAllStackTraces().keySet().stream()
+						.anyMatch(thread -> thread.isAlive() && thread.getName().equals("spt-preparation-deadline-" + stepId));
+	}
+
+	@Test
+	void aReleaseEndsTheDeadlineGuard() throws Exception {
+		final LoadStepContext context = mockContext();
+		final var step = barrierStep(context);
+		step.startPreparation(7, TimeUnit.MINUTES.toNanos(10));
+		assertTrue(deadlineGuardAlive("barrier-step"), "the guard runs from the arming");
+		step.startContextsForTest();
+		awaitState(step, PreparationStatus.State.READY);
+
+		assertTrue(step.releasePreparedAdmission(7));
+
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+		while (deadlineGuardAlive("barrier-step")) {
+			assertTrue(System.nanoTime() < deadline, "a released step keeps no sleeping thread");
+			TimeUnit.MILLISECONDS.sleep(5);
+		}
+	}
+
+	@Test
+	void anArmedWorkerWhoseEntryNodeDiesBeforeStartIsStillFenced() throws Exception {
+		final var step = barrierStep(mockContext());
+		step.startPreparation(7, TimeUnit.MILLISECONDS.toNanos(50));
+		awaitState(step, PreparationStatus.State.FENCED);
+		assertFalse(step.releasePreparedAdmission(7));
+	}
+
+	@Test
+	void aFenceReturnsWhileAContextIsBlockedStopping() throws Exception {
+		final LoadStepContext context = mockContext();
+		final var stopping = new CountDownLatch(1);
+		final var finish = new CountDownLatch(1);
+		when(context.stop()).thenAnswer(call -> {
+			stopping.countDown();
+			finish.await();
+			return null;
+		});
+		final var step = barrierStep(context);
+		step.startPreparation(7, TimeUnit.MINUTES.toNanos(1));
+		step.startContextsForTest();
+		try {
+			step.fencePreparation(7);
+			assertTrue(stopping.await(20, TimeUnit.SECONDS));
+		} finally {
+			finish.countDown();
+		}
 	}
 
 	@Test

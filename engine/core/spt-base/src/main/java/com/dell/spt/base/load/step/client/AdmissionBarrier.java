@@ -75,6 +75,8 @@ final class AdmissionBarrier {
 		} catch (final java.util.concurrent.TimeoutException e) {
 			task.cancel(true);
 			thread.interrupt();
+			// A write in progress cannot be interrupted, but the slicers write no further batch.
+			thread.join(TimeUnit.SECONDS.toMillis(5));
 			throw deadlineFailure("entry: still " + ENTRY_DISTRIBUTING);
 		} catch (final InterruptedException e) {
 			task.cancel(true);
@@ -136,11 +138,11 @@ final class AdmissionBarrier {
 													+ " engines failed preparation — " + String.join("\n", failures),
 									null);
 				}
+				if (remainingNanos() <= 0) {
+					throw deadlineFailure(waiting.isEmpty() ? "every engine became ready only after it" : String.join("; ", waiting));
+				}
 				if (waiting.isEmpty()) {
 					break;
-				}
-				if (remainingNanos() <= 0) {
-					throw deadlineFailure(String.join("; ", waiting));
 				}
 				TimeUnit.MILLISECONDS.sleep(pollMillis);
 			}

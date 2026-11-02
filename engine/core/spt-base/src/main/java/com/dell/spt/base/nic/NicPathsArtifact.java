@@ -25,15 +25,25 @@ public final class NicPathsArtifact {
 	private NicPathsArtifact() {}
 
 	/** Publish synchronously after stop; async logging plus flush does not drain its queue. */
-	public static void publish(final long runId, final String stepId, final String workerId, final List<Context> contexts) {
-		NicStepFile.publish(Loggers.NIC_PATHS, stepId, "NIC paths", HEADER + "\n" + rows(runId, stepId, workerId, contexts) + "\n");
+	/**
+	 * @param admitted false when the step failed at the admission barrier: its end record then says
+	 *     incomplete, even on an engine that was ready and whose contexts handed over complete rows
+	 */
+	public static void publish(
+					final long runId, final String stepId, final String workerId, final List<Context> contexts, final boolean admitted) {
+		NicStepFile.publish(Loggers.NIC_PATHS, stepId, "NIC paths", HEADER + "\n" + rows(runId, stepId, workerId, contexts, admitted) + "\n");
 	}
 
 	public static String rows(final long runId, final String stepId, final String workerId, final List<Context> contexts) {
+		return rows(runId, stepId, workerId, contexts, true);
+	}
+
+	public static String rows(
+					final long runId, final String stepId, final String workerId, final List<Context> contexts, final boolean admitted) {
 		final var lines = new ArrayList<String>();
 		final var missing = new ArrayList<String>();
 		long attempts = 0, succeeded = 0, failed = 0, interrupted = 0, unresolved = 0, bytes = 0;
-		var complete = true;
+		var complete = admitted;
 		for (final var context : contexts) {
 			final var rows = context.rows();
 			if (rows == null) {

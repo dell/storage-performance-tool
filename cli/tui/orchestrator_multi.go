@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -2624,7 +2625,9 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 
 	m.multiHost.scenarioContent = string(scenarioContent)
 
-	if err := m.multiHost.StartContainers(ctx, runtimeImage, startupArgs); err != nil {
+	// This host is the Entry Node whichever --test-hosts entry it is.
+	engineArgs := slices.Concat(startupArgs, scenario.NodeInterfacesArgs(params.HostInterfaces, host.Info.Host, nil))
+	if err := m.multiHost.StartContainers(ctx, runtimeImage, engineArgs); err != nil {
 		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 	}
 	if err := m.waitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {

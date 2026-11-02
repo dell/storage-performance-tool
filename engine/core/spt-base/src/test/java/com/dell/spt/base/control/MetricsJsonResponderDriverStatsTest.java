@@ -80,7 +80,7 @@ class MetricsJsonResponderDriverStatsTest {
 		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, config());
 		assertFalse(onlyRow(responder.buildNodeMetrics(false)).has(MetricsConstants.METRIC_NAME_PREPARATION));
 
-		when(mgr.preparation("stats-step")).thenReturn(Map.of(
+		when(mgr.preparation(ctx.runId(), "stats-step")).thenReturn(Map.of(
 						"distribution_ms", 3120L, "engines", Map.of("entry", 4210L, "198.51.100.12:1099", 9050L)));
 		final JsonNode withPreparation = onlyRow(responder.buildNodeMetrics(false));
 		final JsonNode preparation = withPreparation.get(MetricsConstants.METRIC_NAME_PREPARATION);

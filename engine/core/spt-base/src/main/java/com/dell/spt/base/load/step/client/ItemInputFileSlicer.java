@@ -124,6 +124,10 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 			}
 			LogUtil.exception(Level.WARN, e, "{}: failed to use the item input", loadStepId);
 		} catch (final Throwable cause) {
+			if (cause instanceof InterruptedException) {
+				// The step never holds this slicer, so it must remove its own files.
+				close();
+			}
 			throwUncheckedIfInterrupted(cause);
 			if (strictMode) {
 				throw terminal("unexpected canonical integrity input failure", cause);
@@ -388,6 +392,11 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 						sliceCount);
 
 		while (true) {
+
+			// A stop or the admission barrier's deadline interrupts: no further batch is written.
+			if (Thread.currentThread().isInterrupted()) {
+				throwUncheckedIfInterrupted(new InterruptedException(loadStepId + ": item distribution was interrupted"));
+			}
 
 			// get the next batch of items
 			try {

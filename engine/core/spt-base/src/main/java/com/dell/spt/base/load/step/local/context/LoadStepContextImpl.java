@@ -1396,7 +1396,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	@Override
 	public final void releaseAdmissionBarrier() {
 		admissionBarrierHeld.set(false);
-		if (standaloneDeleteDurationMode || objectFailureBudgetAdmissionHeld.get()) {
+		// A step that is already stopping must not open admission or restart its generator.
+		if (stepShuttingDown.get() || operationAdmissionClosed.get()
+						|| standaloneDeleteDurationMode || objectFailureBudgetAdmissionHeld.get()) {
 			return;
 		}
 		if (standaloneDeleteEnabled) {

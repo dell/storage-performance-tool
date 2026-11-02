@@ -552,19 +552,20 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	}
 
 	@Override
-	public void recordPreparation(final String stepId, final long distributionMillis, final Map<String, Long> engineMillis) {
+	public void recordPreparation(
+					final long runId, final String stepId, final long distributionMillis, final Map<String, Long> engineMillis) {
 		final var row = new LinkedHashMap<String, Object>();
 		row.put("distribution_ms", distributionMillis);
 		row.put("engines", new LinkedHashMap<>(engineMillis));
 		synchronized (preparations) {
-			preparations.put(stepId, Map.copyOf(row));
+			preparations.put(runId + "/" + stepId, Map.copyOf(row));
 		}
 	}
 
 	@Override
-	public Map<String, Object> preparation(final String stepId) {
+	public Map<String, Object> preparation(final long runId, final String stepId) {
 		synchronized (preparations) {
-			return preparations.get(stepId);
+			return preparations.get(runId + "/" + stepId);
 		}
 	}
 

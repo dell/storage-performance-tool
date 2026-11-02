@@ -167,7 +167,7 @@ final class MetricsJsonResponder {
 		jsonObj.put(MetricsConstants.METRIC_NAME_COMPLETION, completionPercent);
 
 		addLimitFields(jsonObj, ctx.metadata());
-		addPreparation(jsonObj, ctx.loadStepId());
+		addPreparation(jsonObj, ctx.runId(), ctx.loadStepId());
 		addMetrics(jsonObj, snapshot, successCount, failCount, corruptCount, bytesTotal, latencyMean, durationMean);
 		addSteady(jsonObj, snapshot.steadyResult());
 		addDeleteDetailExpectation(jsonObj, ctx.metadata());
@@ -240,7 +240,7 @@ final class MetricsJsonResponder {
 		jsonObj.put(MetricsConstants.METRIC_NAME_COMPLETION, completionPercent);
 
 		addLimitFields(jsonObj, ctx.metadata());
-		addPreparation(jsonObj, ctx.loadStepId());
+		addPreparation(jsonObj, ctx.runId(), ctx.loadStepId());
 		addMetrics(jsonObj, snapshot, successCount, failCount, corruptCount, bytesTotal, latencyMean, durationMean);
 		addSteady(jsonObj, snapshot.steadyResult());
 		if (snapshot instanceof DistributedAllMetricsSnapshot fleet) {
@@ -345,8 +345,8 @@ final class MetricsJsonResponder {
 	}
 
 	/** Adds the step's preparation times; a step without an admission barrier adds no field. */
-	private void addPreparation(final ObjectNode jsonObj, final String stepId) {
-		final Map<String, Object> preparation = metricsManager.preparation(stepId);
+	private void addPreparation(final ObjectNode jsonObj, final long runId, final String stepId) {
+		final Map<String, Object> preparation = metricsManager.preparation(runId, stepId);
 		if (preparation != null && !preparation.isEmpty()) {
 			jsonObj.set(MetricsConstants.METRIC_NAME_PREPARATION, objectMapper.valueToTree(preparation));
 		}
@@ -808,7 +808,7 @@ final class MetricsJsonResponder {
 			jsonObj.put("timestamp", entry.recordedAtMillis);
 			jsonObj.put("elapsed_time_seconds", entry.elapsedTimeMillis / 1000.0);
 			jsonObj.put("test_state", 2);
-			addPreparation(jsonObj, entry.stepId);
+			addPreparation(jsonObj, entry.runId, entry.stepId);
 
 			final boolean hasCountLimit = entry.countLimit > 0L;
 			final boolean hasTimeLimit = entry.timeLimitSec > 0L;
@@ -902,7 +902,7 @@ final class MetricsJsonResponder {
 			jsonObj.put("timestamp", entry.recordedAtMillis);
 			jsonObj.put("elapsed_time_seconds", entry.elapsedTimeMillis / 1000.0);
 			jsonObj.put("test_state", 2);
-			addPreparation(jsonObj, entry.stepId);
+			addPreparation(jsonObj, entry.runId, entry.stepId);
 
 			final boolean hasCountLimit = entry.countLimit > 0L;
 			final boolean hasTimeLimit = entry.timeLimitSec > 0L;

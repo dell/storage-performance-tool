@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3687,5 +3688,36 @@ func TestStartEntryNodePassesHostOverridesForTheWorkersThatStarted(t *testing.T)
 	}
 	if !reflect.DeepEqual(calls[0].AdditionalArgs, want) {
 		t.Fatalf("entry args = %q, want %q", calls[0].AdditionalArgs, want)
+	}
+}
+
+func TestSingleRemoteRunPassesItsHostOverrideAsTheEntryKey(t *testing.T) {
+	var postedScenario, postedDefaults string
+	srv := newSingleHostReplayAPIServer(t, &postedScenario, &postedDefaults)
+	defer srv.Close()
+	host, port := splitServerHostPort(t, srv.URL)
+	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{{Host: host, Original: "lone.example"}}, 1)
+	orchestrator.SetAPIPort(port)
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	mockDocker := NewMockDockerManager()
+	orchestrator.hosts[0].DockerManager = mockDocker
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	wrapper.SetCallbacks(func(*TestStatus) {}, func(*MultiNodeMetricsUpdate) {}, func(string) {}, func(string) {})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	params := scenario.ScenarioParams{
+		WorkloadType:   "replay",
+		Threads:        1,
+		HostInterfaces: []nicplan.HostInterfaces{{Host: host, Value: "mlx5_0,mlx5_1", Entries: []string{"mlx5_0", "mlx5_1"}}},
+	}
+	if err := wrapper.StartTestWithContent(ctx, "test-image", params, []byte(`Load.config({}).run();`), []byte("storage: {}\n")); err != nil {
+		t.Fatalf("StartTestWithContent() error = %v", err)
+	}
+	defer func() { _ = wrapper.StopTest() }()
+
+	calls := mockDocker.GetContainerCalls()
+	if len(calls) != 1 || !slices.Contains(calls[0].Cmd, "--storage-net-nodeInterfaces-entry=mlx5_0,mlx5_1") {
+		t.Fatalf("node-mode container calls = %+v", calls)
 	}
 }

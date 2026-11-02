@@ -311,7 +311,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	private void openAdmissionBarrier(final AdmissionBarrier barrier) throws InterruptedException {
 		final Map<String, Long> engineMillis = barrier.awaitAndRelease();
-		metricsMgr.recordPreparation(loadStepId(), barrier.distributionMillis(), engineMillis);
+		metricsMgr.recordPreparation(runId(), loadStepId(), barrier.distributionMillis(), engineMillis);
 		final var slowest = engineMillis.entrySet().stream().max(Map.Entry.comparingByValue()).orElseThrow();
 		Loggers.MSG.info(
 						"Step {}: admission opened after {} s of preparation (item distribution {} s; slowest {}, {} s)",

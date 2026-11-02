@@ -102,6 +102,19 @@ class AdmissionBarrierTest {
 	}
 
 	@Test
+	void everyEngineBecomingReadyOnlyAfterTheDeadlineStillFails() throws Exception {
+		final LoadStep worker = slice(status(State.READY, "ready", ""));
+		barrier.arm("198.51.100.12:1099", worker);
+		now.addAndGet(TimeUnit.MINUTES.toNanos(11));
+
+		final var failure = assertThrows(RunTerminalException.class, barrier::awaitAndRelease);
+
+		assertTrue(failure.getMessage().endsWith("every engine became ready only after it"), failure.getMessage());
+		verify(worker, never()).releasePreparedAdmission(anyLong());
+		verify(worker).fencePreparation(barrier.id());
+	}
+
+	@Test
 	void aWorkerWithoutTheMethodsIsNamed() throws Exception {
 		final String want = "Step read1 did not start: the engine on 198.51.100.12:1099 does not support the admission "
 						+ "barrier, which a step with a NIC set needs; run the same SPT image on every host";

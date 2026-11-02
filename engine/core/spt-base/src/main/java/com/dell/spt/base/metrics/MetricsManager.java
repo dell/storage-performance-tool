@@ -36,10 +36,11 @@ public interface MetricsManager extends Task {
 																		 * Records how long a step's preparation took, for its metrics rows: the Entry Node's item
 																		 * distribution, and each engine by {@code entry} or node address.
 																		 */
-	default void recordPreparation(final String stepId, final long distributionMillis, final Map<String, Long> engineMillis) {}
+	default void recordPreparation(
+					final long runId, final String stepId, final long distributionMillis, final Map<String, Long> engineMillis) {}
 
 	/** Returns the step's preparation times as a metrics row shows them, or null without a barrier. */
-	default Map<String, Object> preparation(final String stepId) {
+	default Map<String, Object> preparation(final long runId, final String stepId) {
 		return null;
 	}
 

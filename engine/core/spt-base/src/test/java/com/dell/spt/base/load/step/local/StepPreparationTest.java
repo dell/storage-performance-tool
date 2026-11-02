@@ -31,10 +31,10 @@ class StepPreparationTest {
 	@Test
 	void onlyAReadyPreparationCanBeReleasedAndReleaseIsIdempotent() {
 		final var preparation = new StepPreparation(1, 100, 0);
-		assertFalse(preparation.release(), "still running");
+		assertFalse(preparation.release(0), "still running");
 		preparation.ready(1);
-		assertTrue(preparation.release());
-		assertTrue(preparation.release());
+		assertTrue(preparation.release(2));
+		assertTrue(preparation.release(3));
 		assertTrue(preparation.released());
 	}
 
@@ -45,7 +45,7 @@ class StepPreparationTest {
 		preparation.ready(6);
 		assertEquals(State.FAILED, preparation.status(7).state());
 		assertEquals("no route", preparation.status(7).message());
-		assertFalse(preparation.release());
+		assertFalse(preparation.release(7));
 		assertTrue(preparation.fence("stopped", 8));
 		assertEquals(State.FENCED, preparation.status(9).state());
 		assertEquals("no route", preparation.status(9).message(), "the first reason stays");
@@ -62,7 +62,7 @@ class StepPreparationTest {
 		assertTrue(preparation.fenced());
 		preparation.ready(12);
 		assertEquals(State.FENCED, preparation.status(13).state());
-		assertFalse(preparation.release());
+		assertFalse(preparation.release(14));
 		preparation.onFence(actions::incrementAndGet);
 		assertEquals(2, actions.get(), "an action registered after the fence runs at once");
 	}
@@ -71,9 +71,17 @@ class StepPreparationTest {
 	void aReleasedPreparationCannotBeFenced() {
 		final var preparation = new StepPreparation(1, 100, 0);
 		preparation.ready(1);
-		preparation.release();
+		preparation.release(1);
 		assertFalse(preparation.fence("too late", 2));
 		assertEquals(State.READY, preparation.status(3).state());
+	}
+
+	@Test
+	void aPreparationPastItsDeadlineIsNotReleasedEvenBeforeItsFence() {
+		final var preparation = new StepPreparation(1, 100, 0);
+		preparation.ready(99);
+		assertFalse(preparation.release(100));
+		assertFalse(preparation.released());
 	}
 
 	@Test

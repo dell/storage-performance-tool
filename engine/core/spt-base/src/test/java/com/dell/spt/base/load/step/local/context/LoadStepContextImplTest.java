@@ -237,6 +237,28 @@ public class LoadStepContextImplTest {
 	}
 
 	@Test
+	void aReleaseAfterTheStepClosedAdmissionDoesNotRestartTheGenerator() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final var driver = barrierDriver();
+		final var generator = barrierGenerator();
+		final var context = new LoadStepContextImpl<>(
+						"barrier-late-release", generator, driver, null, testConfig.configVal("load"), false);
+		try {
+			context.holdForAdmissionBarrier();
+			context.start();
+			context.prepareForAdmission(mock(AdmissionPreparable.Preparation.class));
+			context.closeOperationAdmissionForStepStop();
+
+			context.releaseAdmissionBarrier();
+
+			verify(generator, never()).openAdmission();
+			verify(generator, never()).start();
+		} finally {
+			context.close();
+		}
+	}
+
+	@Test
 	void theAdmissionBarrierPassesADriverStartFailureToItsCaller() throws Exception {
 		testConfig.val("load-op-retry", false);
 		final var driver = barrierDriver();
