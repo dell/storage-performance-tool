@@ -16,6 +16,10 @@ import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.PreparationStatus;
 import com.dell.spt.base.load.step.PreparationStatus.State;
+import com.dell.spt.base.load.step.service.LoadStepService;
+import com.dell.spt.base.load.step.service.LoadStepServiceImpl;
+import com.dell.spt.base.svc.ServiceUtil;
+import java.net.ServerSocket;
 import java.rmi.RemoteException;
 import java.rmi.UnmarshalException;
 import java.util.concurrent.CountDownLatch;
@@ -186,5 +190,82 @@ class AdmissionBarrierTest {
 			throw boom;
 		})));
 		assertFalse(Thread.currentThread().isInterrupted());
+	}
+
+	/** The barrier's four calls and their record cross real RMI, as they do to a worker. */
+	@Test
+	void theBarrierReachesAWorkerThroughRealRmi() throws Exception {
+		final LoadStep worker = mock(LoadStep.class);
+		when(worker.loadStepId()).thenReturn("real-rmi-barrier");
+		final var barrierOverRmi = new AdmissionBarrier("read1", TimeUnit.MINUTES.toNanos(10), "10m", System::nanoTime, 1);
+		when(worker.preparationStatus(barrierOverRmi.id()))
+						.thenReturn(new PreparationStatus(State.RUNNING, "probing paths", "", 5))
+						.thenReturn(new PreparationStatus(State.READY, "ready", "", TimeUnit.SECONDS.toNanos(2)));
+		when(worker.releasePreparedAdmission(barrierOverRmi.id())).thenReturn(true);
+		withRealService(worker, remote -> {
+			barrierOverRmi.arm("127.0.0.1:1099", remote);
+			final var millis = barrierOverRmi.awaitAndRelease();
+			assertEquals(2_000L, millis.get("127.0.0.1:1099"));
+			verify(worker).startPreparation(eq(barrierOverRmi.id()), anyLong());
+			verify(worker).releasePreparedAdmission(barrierOverRmi.id());
+		});
+	}
+
+	@Test
+	void aFailureAndItsFenceCrossRealRmi() throws Exception {
+		final LoadStep worker = mock(LoadStep.class);
+		when(worker.loadStepId()).thenReturn("real-rmi-barrier-failure");
+		final var barrierOverRmi = new AdmissionBarrier("read1", TimeUnit.MINUTES.toNanos(10), "10m", System::nanoTime, 1);
+		when(worker.preparationStatus(barrierOverRmi.id()))
+						.thenReturn(new PreparationStatus(State.FAILED, "probing paths", "no route", 5));
+		withRealService(worker, remote -> {
+			barrierOverRmi.arm("127.0.0.1:1099", remote);
+			final var failure = assertThrows(RunTerminalException.class, barrierOverRmi::awaitAndRelease);
+			assertEquals(
+							"Step read1 did not start: 1 of 1 engines failed preparation — 127.0.0.1:1099: no route",
+							failure.getMessage());
+			verify(worker).fencePreparation(barrierOverRmi.id());
+		});
+	}
+
+	@Test
+	void aWorkerStepWithoutTheMethodsIsNamedThroughRealRmi() throws Exception {
+		final LoadStep worker = mock(LoadStep.class);
+		when(worker.loadStepId()).thenReturn("real-rmi-barrier-old");
+		doThrow(new RemoteException(LoadStep.NO_ADMISSION_BARRIER)).when(worker).startPreparation(anyLong(), anyLong());
+		withRealService(worker, remote -> {
+			final var failure = assertThrows(RunTerminalException.class, () -> barrier.arm("127.0.0.1:1099", remote));
+			assertTrue(failure.getMessage().contains("does not support the admission barrier"), failure.getMessage());
+		});
+	}
+
+	@FunctionalInterface
+	private interface RemoteAction {
+		void run(LoadStepService remote) throws Exception;
+	}
+
+	private static void withRealService(final LoadStep local, final RemoteAction action) throws Exception {
+		final String originalHost = System.getProperty("java.rmi.server.hostname");
+		System.setProperty("java.rmi.server.hostname", "127.0.0.1");
+		LoadStepServiceImpl service = null;
+		try {
+			final int port;
+			try (ServerSocket socket = new ServerSocket(0)) {
+				socket.setReuseAddress(true);
+				port = socket.getLocalPort();
+			}
+			service = LoadStepClientBaseTest.newRealDurationService(local, port);
+			action.run(ServiceUtil.resolve("127.0.0.1", port, service.name(), LoadStepService.class));
+		} finally {
+			if (service != null && !service.isClosed()) {
+				service.close();
+			}
+			ServiceUtil.shutdown();
+			if (originalHost == null) {
+				System.clearProperty("java.rmi.server.hostname");
+			} else {
+				System.setProperty("java.rmi.server.hostname", originalHost);
+			}
+		}
 	}
 }

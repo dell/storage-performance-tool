@@ -3701,7 +3701,7 @@ class LoadStepClientBaseTest {
 		}
 	}
 
-	private static LoadStepServiceImpl newRealDurationService(
+	static LoadStepServiceImpl newRealDurationService(
 					final LoadStep localLoadStep, final int port) {
 		final Config serviceConfig = TestConfigBuilder.config();
 		serviceConfig.val("load-step-id", "real-rmi-duration");
