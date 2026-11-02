@@ -12,6 +12,7 @@ import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import java.io.IOException;
 import com.dell.spt.base.storage.driver.AdmissionPreparable;
+import com.dell.spt.base.storage.driver.PoolDemandDriver;
 import java.util.OptionalLong;
 
 /** Created on 11.07.16. */
@@ -100,7 +101,15 @@ public interface LoadStepContext<I extends Item, O extends Operation<I>> extends
 	/** Makes the next start hold admission and leave the driver to {@link #prepareForAdmission}. */
 	default void holdForAdmissionBarrier() {}
 
-	/** Starts the driver and runs its preparation, on the step's preparation thread. */
+	/** Starts the driver, on the step's preparation thread, before the step checks its concurrent drivers together. */
+	default void startDriverForAdmission() throws Exception {}
+
+	/** The context's driver when it has NIC Pools, or {@code null}. */
+	default PoolDemandDriver poolDemandDriver() {
+		return null;
+	}
+
+	/** Starts the driver if it has not, and runs its preparation, on the step's preparation thread. */
 	default void prepareForAdmission(final AdmissionPreparable.Preparation preparation) throws Exception {}
 
 	/** Ends the barrier's hold; admission opens now unless another hold still applies. */

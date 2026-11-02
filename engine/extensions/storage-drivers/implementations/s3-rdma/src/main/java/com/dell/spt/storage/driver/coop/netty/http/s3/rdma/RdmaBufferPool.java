@@ -124,6 +124,11 @@ final class RdmaBufferPool {
 
 	/** Byte budget for a pool in this JVM: a share of the direct-memory limit. */
 	static long defaultMaxPooledBytes() {
+		return directMemoryLimitBytes() / DIRECT_MEMORY_SHARE_DIVISOR;
+	}
+
+	/** This JVM's direct-memory limit: {@code MaxDirectMemorySize}, or the heap limit when it is unset. */
+	static long directMemoryLimitBytes() {
 		long limit = 0;
 		try {
 			limit = Long.parseLong(ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean.class)
@@ -135,7 +140,7 @@ final class RdmaBufferPool {
 		if (limit <= 0) {
 			limit = Runtime.getRuntime().maxMemory();
 		}
-		return limit / DIRECT_MEMORY_SHARE_DIVISOR;
+		return limit;
 	}
 
 	/** Size class for a transfer of {@code size} bytes, at most {@link #MAX_CLASS_BYTES}. */

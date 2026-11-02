@@ -15,7 +15,13 @@ import com.dell.spt.base.load.step.service.file.FileManagerService;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.snapshot.DeleteMetricsSnapshot;
+import com.dell.spt.base.nic.pool.ItemSizeRecording;
+import com.dell.spt.base.nic.pool.ItemSizeScan;
+import com.dell.spt.base.nic.pool.ItemSizeSummary;
+import com.dell.spt.base.nic.pool.PoolDemandConfig;
+import com.dell.spt.base.util.BinarySizeFormat;
 import com.github.akurilov.commons.io.Input;
+import com.github.akurilov.commons.io.file.FileInput;
 import com.github.akurilov.confuse.Config;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
@@ -46,6 +52,9 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 	private final List<FileManager> fileMgrs;
 	private final Map<FileManager, Config> configsByFileManager;
 	private final boolean strictMode;
+	// Empty unless the step has a NIC set: only a slice that gets a size summary has a recorder.
+	private final Map<FileManager, ItemSizeSummary.Recorder> sizeRecorders = new HashMap<>();
+	private final ItemSizeRecording sizeRecording;
 
 	private static final class DeleteSelectionStats {
 		private final Set<String> retainedBuckets;
@@ -87,8 +96,25 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 					final Input<I> itemInput,
 					final int batchSize,
 					final boolean strictMode) {
+		this(loadStepId, fileMgrs, configSlices, itemInput, batchSize, strictMode, null);
+	}
+
+	/**
+	 * @param sizeRecording records each slice's item sizes as it writes the slice and passes them in
+	 *     the slice's configuration (D54), for a slice whose engine has NIC Pools; {@code null} in a
+	 *     step without a NIC set on any engine, which reads and slices as in 5.16
+	 */
+	public <I extends Item> ItemInputFileSlicer(
+					final String loadStepId,
+					final List<FileManager> fileMgrs,
+					final List<Config> configSlices,
+					final Input<I> itemInput,
+					final int batchSize,
+					final boolean strictMode,
+					final ItemSizeRecording sizeRecording) {
 		this.loadStepId = loadStepId;
 		this.strictMode = strictMode;
+		this.sizeRecording = sizeRecording;
 		final var sliceCount = configSlices.size();
 		itemInputFileSlices = new HashMap<>(sliceCount);
 		configsByFileManager = new HashMap<>(sliceCount);
@@ -105,6 +131,9 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 				final var configSlice = configSlices.get(i);
 				configsByFileManager.put(fileMgr, configSlice);
 				configSlice.val("item-input-file", itemInputFileName);
+				if (sizeRecording != null && PoolDemandConfig.recordsItemSizes(configSlice)) {
+					sizeRecorders.put(fileMgr, new ItemSizeSummary.Recorder(itemInput.toString()));
+				}
 			} catch (final Exception e) {
 				throwUncheckedIfInterrupted(e);
 				if (strictMode) {
@@ -115,9 +144,13 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 			}
 		}
 
+		if (!(itemInput instanceof FileInput<?>)) {
+			failItemSizes(ItemSizeSummary.Reason.NOT_A_FILE, itemInput.toString());
+		}
 		try {
 			Loggers.MSG.info("{}: scatter the items from the input \"{}\"...", loadStepId, itemInput);
 			scatterItems(itemInput, batchSize);
+			sizeRecorders.values().forEach(recorder -> ItemSizeScan.finish(itemInput, recorder));
 		} catch (final IOException e) {
 			if (Thread.currentThread().isInterrupted()) {
 				// A local write on an interrupted thread fails with an I/O error.
@@ -127,6 +160,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 			if (strictMode) {
 				throw terminal("failed to parse or scatter canonical integrity input", e);
 			}
+			failItemSizes(ItemSizeSummary.Reason.READ_FAILED, e.toString());
 			LogUtil.exception(Level.WARN, e, "{}: failed to use the item input", loadStepId);
 		} catch (final Throwable cause) {
 			if (cause instanceof InterruptedException) {
@@ -136,7 +170,67 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 			if (strictMode) {
 				throw terminal("unexpected canonical integrity input failure", cause);
 			}
+			failItemSizes(
+							cause instanceof IllegalArgumentException || cause instanceof IndexOutOfBoundsException
+											? ItemSizeSummary.Reason.MALFORMED_ITEM
+											: ItemSizeSummary.Reason.READ_FAILED,
+							cause.toString());
 			LogUtil.exception(Level.ERROR, cause, "{}: unexpected failure", loadStepId);
+		}
+		publishItemSizes(itemInput);
+	}
+
+	private void failItemSizes(final ItemSizeSummary.Reason reason, final String detail) {
+		sizeRecorders.values().forEach(recorder -> recorder.fail(reason, detail));
+	}
+
+	private void recordItemSize(final FileManager fileMgr, final Item item) throws IOException {
+		if (!sizeRecorders.isEmpty()) {
+			final ItemSizeSummary.Recorder recorder = sizeRecorders.get(fileMgr);
+			if (recorder != null) {
+				ItemSizeScan.recordItem(item, recorder);
+			}
+		}
+	}
+
+	/** Between batches: an expired budget leaves the summaries unknown, and the writes go on. */
+	private void checkItemSizeBudget() {
+		if (sizeRecording != null && !sizeRecorders.isEmpty() && sizeRecording.expired()) {
+			failItemSizes(ItemSizeSummary.Reason.BUDGET_EXPIRED, null);
+		}
+	}
+
+	/**
+	 * Passes each summary with its slice's configuration, once the slices are written. This runs only
+	 * after the scatter ended on its own, so a distribution fenced by the deadline publishes nothing.
+	 */
+	private <I extends Item> void publishItemSizes(final Input<I> itemInput) {
+		if (sizeRecorders.isEmpty()) {
+			return;
+		}
+		long items = 0;
+		long smallest = Long.MAX_VALUE;
+		long largest = -1;
+		long millis = 0;
+		ItemSizeSummary incomplete = null;
+		for (final var entry : sizeRecorders.entrySet()) {
+			final var summary = entry.getValue().summary();
+			configsByFileManager.get(entry.getKey()).val(ItemSizeSummary.CONFIG_PATH, summary.encode());
+			items += summary.items();
+			millis = Math.max(millis, summary.millis());
+			if (summary.largest() >= 0) {
+				smallest = Math.min(smallest, summary.smallest());
+				largest = Math.max(largest, summary.largest());
+			}
+			if (!summary.complete() && incomplete == null) {
+				incomplete = summary;
+			}
+		}
+		if (incomplete == null) {
+			Loggers.MSG.info("{}: recorded the sizes in \"{}\" for {} slice(s) in {} ms: {} items, {} to {}", loadStepId, itemInput, sizeRecorders.size(),
+							millis, items, BinarySizeFormat.formatFixedSize(largest < 0 ? 0 : smallest), BinarySizeFormat.formatFixedSize(Math.max(0, largest)));
+		} else {
+			Loggers.MSG.warn("{}: could not record the sizes in \"{}\" in {} ms: {}", loadStepId, itemInput, millis, incomplete.why());
 		}
 	}
 
@@ -290,9 +384,11 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 					printers.get(fileMgr).printRecord(
 									item.bucket(), item.name(), item.size(), item.versionId() == null ? "" : item.versionId());
 					deleteStats.get(fileMgr).record(item);
+					recordItemSize(fileMgr, item);
 					nextSliceIndex++;
 				}
 				items.clear();
+				checkItemSizeBudget();
 				for (final FileManager fileMgr : sliceFileMgrs) {
 					final CSVPrinter printer = printers.get(fileMgr);
 					final ByteArrayOutputStream buffer = buffers.get(fileMgr);
@@ -437,10 +533,12 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 				for (int i = 0; i < n; i++) {
 					final int sliceIndex = (int) (nextSliceIndex % sliceCount);
 					itemsOutputs.get(sliceFileMgrs.get(sliceIndex)).writeUnshared(itemsBuff.get(i));
+					recordItemSize(sliceFileMgrs.get(sliceIndex), itemsBuff.get(i));
 					nextSliceIndex++;
 				}
 
 				itemsBuff.clear();
+				checkItemSizeBudget();
 
 				// write the text items data to the remote input files
 				final var writeFailure = new AtomicReference<IOException>();
@@ -458,6 +556,10 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 														buff.reset();
 													} catch (final IOException e) {
 														writeFailure.compareAndSet(null, e);
+														final var recorder = sizeRecorders.get(fileMgr);
+														if (recorder != null) {
+															recorder.fail(ItemSizeSummary.Reason.WRITE_FAILED, e.toString());
+														}
 														LogUtil.exception(
 																		Level.WARN,
 																		e,

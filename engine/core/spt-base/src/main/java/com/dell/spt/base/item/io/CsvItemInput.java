@@ -20,10 +20,13 @@ import org.apache.logging.log4j.Level;
 /**
 * The data item input using CSV file containing the human-readable data item records as the source
 */
-public class CsvItemInput<I extends Item> implements Input<I> {
+public class CsvItemInput<I extends Item> implements Input<I>, ItemInputStatus {
 
 	protected BufferedReader itemsSrc;
 	protected final ItemFactory<I> itemFactory;
+	// Touched only where a malformed item is caught, so a good line costs nothing more.
+	private long malformedItems;
+	private String firstMalformedItem;
 
 	/**
 	* @param in the input stream to get the data item records from
@@ -64,6 +67,7 @@ public class CsvItemInput<I extends Item> implements Input<I> {
 			try {
 				return nextLine == null ? null : itemFactory.getItem(nextLine);
 			} catch (final IllegalArgumentException e) {
+				noteMalformed(nextLine);
 				LogUtil.trace(
 								Loggers.ERR,
 								Level.WARN,
@@ -95,12 +99,30 @@ public class CsvItemInput<I extends Item> implements Input<I> {
 				i++;
 			}
 		} catch (final IllegalArgumentException e) {
+			noteMalformed(nextLine);
 			LogUtil.trace(
 							Loggers.ERR, Level.WARN, e, "Failed to build the item from the string \"{}\"", nextLine);
 		} catch (final IOException e) {
 			throwUnchecked(e);
 		}
 		return i;
+	}
+
+	private void noteMalformed(final String line) {
+		malformedItems++;
+		if (firstMalformedItem == null) {
+			firstMalformedItem = line;
+		}
+	}
+
+	@Override
+	public final long malformedItems() {
+		return malformedItems;
+	}
+
+	@Override
+	public final String firstMalformedItem() {
+		return firstMalformedItem;
 	}
 
 	/**

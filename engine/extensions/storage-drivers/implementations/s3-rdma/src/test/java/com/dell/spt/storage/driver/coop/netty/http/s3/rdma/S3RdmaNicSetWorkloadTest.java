@@ -371,7 +371,7 @@ final class S3RdmaNicSetWorkloadTest {
 		assertNotSame(writer.nics().get(0).pool, reader.nics().get(0).pool);
 		assertEquals(2, writer.nics().get(0).pool.maxBuffersPerClass(), "the writer's share of 1, and one more");
 		assertEquals(3, reader.nics().get(0).pool.maxBuffersPerClass(), "the reader's share of 2, and one more");
-		assertEquals(RdmaBufferPool.defaultMaxPooledBytes() / 2, reader.nics().get(0).pool.levels().budgetBytes(), "each driver splits its own budget");
+		assertEquals(factory.directMemoryLimitBytes / 2 / 2, reader.nics().get(0).pool.levels().budgetBytes(), "each driver splits its own budget");
 
 		final var puts = stub.objectRequests().stream().filter(request -> "PUT".equals(request.method())).toList();
 		assertEquals(8, puts.size(), () -> "requests: " + stub.objectRequests());

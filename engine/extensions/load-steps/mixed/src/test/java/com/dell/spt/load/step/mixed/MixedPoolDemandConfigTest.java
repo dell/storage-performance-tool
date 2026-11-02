@@ -1,0 +1,83 @@
+package com.dell.spt.load.step.mixed;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import com.dell.spt.base.config.InitialConfigSchemaProvider;
+import com.dell.spt.base.nic.pool.ItemSizeSummary;
+import com.dell.spt.base.nic.pool.PoolDemand;
+import com.dell.spt.base.nic.pool.PoolDemand.OpKind;
+import com.dell.spt.base.nic.pool.PoolDemandConfig;
+import com.github.akurilov.commons.collection.TreeUtil;
+import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.SchemaProvider;
+import com.github.akurilov.confuse.impl.BasicConfig;
+import java.util.List;
+import java.util.Map;
+import org.junit.jupiter.api.Test;
+
+/** A mixed step's one driver: its GETs read the item input, and its PUTs write objects of its configured size. */
+final class MixedPoolDemandConfigTest {
+
+	private static final long GIB = 1L << 30;
+
+	private Config config() throws Exception {
+		final List<Map<String, Object>> schemas = new java.util.ArrayList<>();
+		schemas.add(InitialConfigSchemaProvider.provider().schema());
+		SchemaProvider.resolve(com.dell.spt.base.Constants.APP_NAME, getClass().getClassLoader()).forEach(schemas::add);
+		schemas.add(new MixedLoadStepExtension().schemaProvider().schema());
+		final Config config = new BasicConfig("-", TreeUtil.reduceForest(schemas));
+		config.val("load-op-type", "create");
+		config.val("item-type", "data");
+		config.val("item-data-size", "1GiB");
+		config.val("item-data-ranges-threshold", 0);
+		config.val("item-data-ranges-random", 0);
+		config.val("load-op-weights-get", 50);
+		config.val("load-op-weights-put", 30);
+		config.val("load-op-weights-delete", 20);
+		config.val("load-op-weights-stat", 0);
+		config.val("item-input-file", "/spt-input/items/mixed-read-items.csv");
+		config.val("storage-driver-type", "s3-rdma");
+		config.val("storage-net-interfaces", List.of("ens1"));
+		return config;
+	}
+
+	private static ItemSizeSummary summary(final long size) {
+		final var recorder = new ItemSizeSummary.Recorder("items.csv");
+		recorder.record(size);
+		recorder.finish();
+		return recorder.summary();
+	}
+
+	@Test
+	void aMixedDriverHasItsListedGetsAndItsPuts() throws Exception {
+		final var operations = PoolDemandConfig.operations(config(), file -> summary(4L << 20));
+		assertEquals(List.of(OpKind.READ, OpKind.CREATE), operations.stream().map(PoolDemand.Operation::kind).toList());
+		assertInstanceOf(PoolDemand.Listed.class, operations.get(0).sizes());
+		assertInstanceOf(PoolDemand.Range.class, operations.get(1).sizes());
+		final var demand = PoolDemand.estimate(new PoolDemand.Workload(4, 1L << 20, 0, 0, operations), List.of("a", "b"));
+		assertEquals(GIB, demand.nics().get(0).sizeClass(), "the larger of its PUTs and its listed GETs");
+		assertTrue(demand.spansClasses());
+	}
+
+	@Test
+	void aMixedDriverWhoseItemFileIsUnreadKeepsItsPuts() throws Exception {
+		final var recorder = new ItemSizeSummary.Recorder("items.csv");
+		recorder.fail(ItemSizeSummary.Reason.MALFORMED_ITEM, "bad");
+		final var operations = PoolDemandConfig.operations(config(), file -> recorder.summary());
+		final var demand = PoolDemand.estimate(new PoolDemand.Workload(4, 1L << 20, 0, 0, operations), List.of("a", "b"));
+		assertEquals(PoolDemand.State.KNOWN, demand.state());
+		assertTrue(demand.hasUnknown());
+		assertEquals(2 * GIB, demand.maxNeedBytes());
+	}
+
+	@Test
+	void aMixedStepRecordsItemSizesOnlyForItsGets() throws Exception {
+		final var config = config();
+		assertTrue(PoolDemandConfig.recordsItemSizes(config));
+		config.val("load-op-weights-get", 0);
+		assertFalse(PoolDemandConfig.recordsItemSizes(config), "its PUTs take the configured size, and a DELETE needs none");
+	}
+}

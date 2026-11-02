@@ -26,8 +26,11 @@ import com.dell.spt.base.nic.EndpointResolver;
 import com.dell.spt.base.nic.NicPathCounting;
 import com.dell.spt.base.nic.NicPathRows;
 import com.dell.spt.base.nic.NicSetResources;
+import com.dell.spt.base.nic.RdmaDeviceProbe;
 import com.dell.spt.base.nic.SysfsInventoryReader;
+import com.dell.spt.base.nic.pool.PoolDemandConfig;
 import com.dell.spt.base.storage.driver.AdmissionPhase;
+import com.dell.spt.base.storage.driver.PoolDemandDriver;
 import com.dell.spt.storage.driver.coop.netty.nic.NicBinding;
 import com.dell.spt.storage.driver.coop.netty.nic.NicPathCounters;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetConnectionPool;
@@ -42,6 +45,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Function;
@@ -71,7 +75,7 @@ import org.apache.logging.log4j.Level;
  * one. The driver's state lock serializes it with a stop, so no context opens while the driver closes.
  */
 final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S3RdmaStorageDriver<I, O>
-				implements NicPathCounting {
+				implements NicPathCounting, PoolDemandDriver {
 
 	/**
 	 * How long close waits for every lane together, against one budget (item 12b). Filling a 1 GiB
@@ -88,6 +92,8 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 
 	private final NicSetSupport nicSet;
 	private final Function<RdmaConfig, RdmaTransport> transportFactory;
+	private final int multipartObjects;
+	private final int multipartParts;
 	// Assigned by createConnectionPool() while the superclass constructor runs; no initializer, so
 	// the assignment survives this class's own field initialization.
 	private NicSetConnectionPool nicPool;
@@ -97,6 +103,8 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 	private volatile boolean laneDied;
 	/** Replaced only by tests of a lane past the budget. */
 	long laneStopBudgetMillis = LANE_STOP_BUDGET_MILLIS;
+	/** The JVM's direct-memory limit; replaced only by tests of a short pool. */
+	long directMemoryLimitBytes = RdmaBufferPool.directMemoryLimitBytes();
 
 	static <I extends Item, O extends Operation<I>> S3RdmaNicSetDriver<I, O> create(
 					final String stepId,
@@ -137,7 +145,22 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 					throws IllegalConfigurationException, InterruptedException {
 		super(stepId, itemDataInput, storageConfig, verifyFlag, batchSize, null, true);
 		this.nicSet = new NicSetSupport(toString(), settings, environment);
+		final var shortfall = rdmaConfig().getPoolShortfall();
+		if (!PoolDemandConfig.SHORTFALL_FAIL.equals(shortfall) && !PoolDemandConfig.SHORTFALL_WARN.equals(shortfall)) {
+			throw new IllegalConfigurationException(PoolDemandConfig.SHORTFALL_SETTING + " must be " + PoolDemandConfig.SHORTFALL_FAIL
+							+ " or " + PoolDemandConfig.SHORTFALL_WARN + ", not \"" + shortfall + "\"");
+		}
+		this.multipartObjects = limitOf(storageConfig, "driver-limit-multipart-objects");
+		this.multipartParts = limitOf(storageConfig, "driver-limit-multipart-parts");
 		this.transportFactory = Objects.requireNonNull(transportFactory, "RDMA transport factory");
+	}
+
+	private static int limitOf(final Config storageConfig, final String path) {
+		try {
+			return Math.max(0, storageConfig.intVal(path));
+		} catch (final RuntimeException absent) {
+			return 0;
+		}
 	}
 
 	/** Empty until start opens it; the bootstrap snapshot gives every Path the release's socket options. */
@@ -182,7 +205,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		final var layout = nicSet.layout().nics();
 		final var nics = new ArrayList<RdmaNic>(layout.size());
 		final var limits = new ArrayList<RdmaNicPoolLimits>(layout.size());
-		final long driverBudget = RdmaBufferPool.defaultMaxPooledBytes();
+		final long driverBudget = directMemoryLimitBytes / RdmaBufferPool.DIRECT_MEMORY_SHARE_DIVISOR;
 		try {
 			for (var i = 0; i < layout.size(); i++) {
 				if (Thread.currentThread().isInterrupted()) {
@@ -202,7 +225,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 			final var limit = limits.get(i);
 			lanes.add(new RdmaPreparationLane(stepId, nic, admission.limit(i), cause -> laneDied(nic, cause)));
 			Loggers.MSG.info("{}: NIC {}: RDMA context on {}; pool budget {} bytes; per size class, minimum {} and headroom {} "
-							+ "of cap {} buffers, pre-warmed 0; {} copy thread(s); lane queue {}",
+							+ "of cap {} buffers; {} copy thread(s); lane queue {}",
 							stepId, nic.name, nicSet.rdmaDevice(nic.name), limit.budgetBytes(), limit.minimum(), limit.headroom(), limit.cap(),
 							rdmaConfig().getCopyThreads(), admission.limit(i));
 		}
@@ -232,6 +255,104 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 			pool.registrationListener = buffer -> logPoolBuffer(opened, buffer);
 		}
 		return opened;
+	}
+
+	@Override
+	public Layout poolLayout() {
+		final var open = rdma;
+		if (open == null || !rdmaConfig().isBufferPoolEnabled()) {
+			return null;
+		}
+		return new Layout(hostName(), directMemoryLimitBytes, concurrencyLimit, rdmaConfig().getThresholdBytes(), multipartObjects,
+						multipartParts, PoolDemandConfig.failsOnShortfall(rdmaConfig().getPoolShortfall()),
+						open.nics().stream().map(nic -> nic.name).toList());
+	}
+
+	private static String hostName() {
+		final var name = SysfsInventoryReader.system(RdmaDeviceProbe.NONE).hostname();
+		return name == null ? "unknown" : name;
+	}
+
+	@Override
+	public List<CompletableFuture<PrewarmResult>> startPrewarm(final List<PrewarmOrder> orders) {
+		final var open = rdma;
+		final var running = new ArrayList<CompletableFuture<PrewarmResult>>(orders.size());
+		for (final var order : orders) {
+			final var future = new CompletableFuture<PrewarmResult>();
+			running.add(future);
+			if (open == null) {
+				future.complete(new PrewarmResult(order.nic(), 0, 0, null, true));
+				continue;
+			}
+			for (var i = 0; i < open.nics().size(); i++) {
+				if (open.nics().get(i).name.equals(order.nic())) {
+					final var lane = open.lanes().get(i);
+					if (!lane.offer(new Prewarm(order, open.nics().get(i), lane, future))) {
+						future.complete(new PrewarmResult(order.nic(), 0, 0, null, true));
+					}
+				}
+			}
+		}
+		return running;
+	}
+
+	/**
+	 * One NIC's Pool Pre-warm, on its lane, so the lane first touches its buffers as it does on a miss.
+	 * It holds every buffer until the last, or a later acquire would reuse the first instead of making
+	 * one. A cancel stops it between buffers, and whatever it holds goes back to the pool, which close
+	 * then drains in ticket 11's order.
+	 */
+	private static final class Prewarm implements RdmaPreparationLane.Task {
+
+		private final PrewarmOrder order;
+		private final RdmaNic nic;
+		private final RdmaPreparationLane lane;
+		private final CompletableFuture<PrewarmResult> future;
+
+		Prewarm(final PrewarmOrder order, final RdmaNic nic, final RdmaPreparationLane lane, final CompletableFuture<PrewarmResult> future) {
+			this.order = order;
+			this.nic = nic;
+			this.lane = lane;
+			this.future = future;
+		}
+
+		@Override
+		public void prepare() {
+			final long start = System.nanoTime();
+			final var held = new ArrayList<RdmaBufferPool.PooledBuffer>(order.buffers());
+			String failure = null;
+			boolean stopped = false;
+			try {
+				while (held.size() < order.buffers()) {
+					if (lane.cancelled()) {
+						stopped = true;
+						break;
+					}
+					final long allocationFailures = nic.pool.allocationFailed.sum();
+					final long registrationFailures = nic.pool.registrationFailed.sum();
+					final var buffer = nic.pool.acquire(order.sizeClass());
+					if (buffer == null) {
+						failure = nic.pool.allocationFailed.sum() > allocationFailures
+										? "direct memory exhausted"
+										: nic.pool.registrationFailed.sum() > registrationFailures
+														? "buffer registration failed"
+														: "its pool refused another buffer";
+						break;
+					}
+					held.add(buffer);
+				}
+			} finally {
+				held.forEach(nic.pool::release);
+				nic.prewarmedBuffers = held.size();
+				final long millis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+				future.complete(new PrewarmResult(order.nic(), held.size(), millis, failure, stopped));
+			}
+		}
+
+		@Override
+		public void interrupted() {
+			future.complete(new PrewarmResult(order.nic(), 0, 0, null, true));
+		}
 	}
 
 	/**

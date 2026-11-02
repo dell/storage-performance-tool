@@ -1,0 +1,58 @@
+{
+  "steps": [
+    {
+      "id": "seed",
+      "drivers": [
+        {
+          "concurrency": 96,
+          "thresholdBytes": 1048576,
+          "multipartObjects": 0,
+          "multipartParts": 0,
+          "operations": [
+            {"kind": "create", "partBytes": 67108864, "ranged": false, "sizes": {"range": [8589934592, 8589934592], "source": "--object-size"}}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "read",
+      "drivers": [
+        {
+          "concurrency": 96,
+          "thresholdBytes": 1048576,
+          "multipartObjects": 0,
+          "multipartParts": 0,
+          "operations": [
+            {
+              "kind": "read",
+              "partBytes": 0,
+              "ranged": false,
+              "sizes": {"listed": {"source": "seed", "complete": true, "items": 1, "millis": 0, "bounds": [[8589934592, 8589934592]]}}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "delete",
+      "drivers": [
+        {"concurrency": 96, "thresholdBytes": 1048576, "multipartObjects": 0, "multipartParts": 0, "operations": [{"kind": "other"}]}
+      ]
+    },
+    {
+      "id": "mixed-partial",
+      "drivers": [
+        {
+          "concurrency": 96,
+          "thresholdBytes": 1048576,
+          "multipartObjects": 0,
+          "multipartParts": 0,
+          "operations": [
+            {"kind": "read", "sizes": {"listed": {"source": "items.csv", "complete": false, "reason": "MALFORMED_ITEM", "detail": "bad,0,oops", "items": 0, "millis": 0, "bounds": []}}},
+            {"kind": "create", "sizes": {"range": [4194304, 4194304], "source": "--object-size"}}
+          ]
+        }
+      ]
+    }
+  ]
+}

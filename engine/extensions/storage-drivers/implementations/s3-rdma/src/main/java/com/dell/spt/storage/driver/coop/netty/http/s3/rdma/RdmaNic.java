@@ -18,6 +18,8 @@ final class RdmaNic {
 	final RdmaBufferPool pool;
 	final RdmaPayloadCopier copier;
 	final RdmaPathStats stats;
+	/** The buffers Pool Pre-warm left in the pool; written once by the lane, before admission opens. */
+	volatile int prewarmedBuffers;
 	private final AtomicBoolean closed = new AtomicBoolean();
 
 	RdmaNic(final int index, final String name, final RdmaTransport transport, final RdmaBufferPool pool,

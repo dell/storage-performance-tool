@@ -1,0 +1,124 @@
+package com.dell.spt.base.nic.pool;
+
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+
+/**
+ * This engine's effective memory (N6): the smaller of the host's {@code MemTotal} and the
+ * {@code memory.max} of its cgroup, ancestors included, such as an LXC container's. The CLI takes off
+ * the heap and a reserve. A probe sees its whole chain only when it runs in the host's cgroup
+ * namespace, which is how the CLI starts it.
+ *
+ * @param memTotalBytes {@code MemTotal}, or -1 when it cannot be read
+ * @param cgroupLimitBytes the smallest limit on the chain, or -1 without one
+ * @param cgroup the cgroup that sets that limit, or empty
+ * @param note what could not be read, or empty
+ */
+public record MemoryCapacity(long memTotalBytes, long cgroupLimitBytes, String cgroup, String note) {
+
+	public static final String SOURCE_MEM_TOTAL = "MemTotal";
+	public static final String SOURCE_CGROUP = "cgroup";
+
+	private static final String NO_LIMIT = "max";
+
+	/** The smaller of the two, or -1 when neither was read. */
+	public long bytes() {
+		if (cgroupLimitBytes >= 0 && (memTotalBytes < 0 || cgroupLimitBytes < memTotalBytes)) {
+			return cgroupLimitBytes;
+		}
+		return memTotalBytes;
+	}
+
+	/** Which of the two bounds it. */
+	public String source() {
+		return cgroupLimitBytes >= 0 && (memTotalBytes < 0 || cgroupLimitBytes < memTotalBytes) ? SOURCE_CGROUP : SOURCE_MEM_TOTAL;
+	}
+
+	public void write(final ObjectNode node) {
+		node.put("bytes", bytes());
+		node.put("source", source());
+		node.put("memTotalBytes", memTotalBytes);
+		node.put("cgroupLimitBytes", cgroupLimitBytes);
+		if (!cgroup.isEmpty()) {
+			node.put("cgroup", cgroup);
+		}
+		if (!note.isEmpty()) {
+			node.put("note", note);
+		}
+	}
+
+	public static MemoryCapacity ofThisHost() {
+		return read(Path.of("/"));
+	}
+
+	/** Reads below {@code root}, which tests replace. */
+	static MemoryCapacity read(final Path root) {
+		final var notes = new StringBuilder();
+		long memTotal = -1;
+		try {
+			memTotal = memTotal(Files.readAllLines(root.resolve("proc/meminfo"), StandardCharsets.UTF_8));
+		} catch (final IOException | NumberFormatException e) {
+			notes.append("cannot read MemTotal: ").append(e);
+		}
+		long limit = -1;
+		String limiting = "";
+		try {
+			final var cgroup = unifiedCgroup(Files.readAllLines(root.resolve("proc/self/cgroup"), StandardCharsets.UTF_8));
+			if (cgroup != null) {
+				// The cgroup itself, then each ancestor; the root has no memory.max.
+				for (String path = cgroup; path != null; path = parent(path)) {
+					final var file = root.resolve("sys/fs/cgroup" + path).resolve("memory.max");
+					if (Files.isReadable(file)) {
+						final var text = Files.readString(file, StandardCharsets.UTF_8).trim();
+						if (!NO_LIMIT.equals(text)) {
+							final long value = Long.parseLong(text);
+							if (limit < 0 || value < limit) {
+								limit = value;
+								limiting = path;
+							}
+						}
+					}
+				}
+			}
+		} catch (final IOException | NumberFormatException e) {
+			if (notes.length() > 0) {
+				notes.append("; ");
+			}
+			notes.append("cannot read the cgroup chain: ").append(e);
+		}
+		return new MemoryCapacity(memTotal, limit, limiting, notes.toString());
+	}
+
+	private static long memTotal(final List<String> lines) {
+		for (final String line : lines) {
+			if (line.startsWith("MemTotal:")) {
+				final var fields = line.trim().split("\\s+", -1);
+				return Long.parseLong(fields[1]) * 1024;
+			}
+		}
+		throw new NumberFormatException("no MemTotal line");
+	}
+
+	/** The cgroup v2 path, from the {@code 0::} line; {@code null} on a host with cgroup v1 alone. */
+	private static String unifiedCgroup(final List<String> lines) {
+		for (final String line : lines) {
+			if (line.startsWith("0::")) {
+				final var path = line.substring(3).trim();
+				return path.isEmpty() ? "/" : path;
+			}
+		}
+		return null;
+	}
+
+	private static String parent(final String path) {
+		if ("/".equals(path) || path.isEmpty()) {
+			return null;
+		}
+		final int separator = path.lastIndexOf('/');
+		return separator <= 0 ? "/" : path.substring(0, separator);
+	}
+}

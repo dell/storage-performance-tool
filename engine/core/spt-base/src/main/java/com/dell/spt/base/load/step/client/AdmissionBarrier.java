@@ -4,6 +4,7 @@ import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.PreparationStatus;
+import com.dell.spt.base.nic.pool.ItemSizeRecording;
 import java.rmi.RemoteException;
 import java.rmi.UnmarshalException;
 import java.util.ArrayList;
@@ -36,6 +37,7 @@ final class AdmissionBarrier {
 	private final long pollMillis;
 	private final long startNanos;
 	private final long deadlineNanos;
+	private final long sizeSummaryDeadlineNanos;
 	private final List<Slice> slices = new ArrayList<>();
 	private long distributionNanos;
 
@@ -56,6 +58,12 @@ final class AdmissionBarrier {
 		this.pollMillis = pollMillis;
 		this.startNanos = nanoTime.getAsLong();
 		this.deadlineNanos = startNanos + budgetNanos;
+		this.sizeSummaryDeadlineNanos = startNanos + budgetNanos / ItemSizeRecording.BUDGET_DIVISOR;
+	}
+
+	/** The item-size summary's budget, which is smaller than this deadline and only ever makes a summary unknown. */
+	ItemSizeRecording itemSizeRecording() {
+		return new ItemSizeRecording(sizeSummaryDeadlineNanos, nanoTime);
 	}
 
 	long id() {

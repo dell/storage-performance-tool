@@ -38,6 +38,50 @@ class NicPlanCommandTest {
 	}
 
 	@Test
+	void aPoolRequestAddsItsDemandOnThePlannedNics() throws Exception {
+		final var request = java.util.Base64.getEncoder().encodeToString("""
+						{"steps":[{"id":"main","drivers":[{"concurrency":4,"thresholdBytes":1048576,
+						"operations":[{"kind":"create","sizes":{"range":[1073741824,1073741824],"source":"--object-size"}}]}]}]}
+						""".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+		assertEquals(NicPlanCommand.EXIT_OK, run("--interfaces=auto", "--endpoint", "192.0.2.101:9000", "--pool-request", request));
+
+		final var demand = MAPPER.readTree(stdout()).get("poolDemand");
+		final var step = demand.get("steps").get(0);
+		assertEquals("main", step.get("id").asText());
+		assertEquals(4L << 30, step.get("poolsNeedBytes").asLong());
+		assertEquals(8L << 30, step.get("limitForPoolsBytes").asLong());
+		assertEquals(12L << 30, step.get("limitBytes").asLong(), "its pools and the headroom");
+		assertEquals("ens2np0", step.at("/drivers/0/nics/0/nic").asText());
+		assertEquals(4L << 30, step.get("prewarmResidentBytes").asLong());
+	}
+
+	@Test
+	void aPoolRequestThatCannotBeReadIsAUsageError() {
+		assertEquals(NicPlanCommand.EXIT_USAGE, run("--pool-request", "not base64!"));
+		assertTrue(stderr().contains("--pool-request"), stderr());
+	}
+
+	@Test
+	void aPlanThatFailsHasNoDemandAndTheCapacityStillShows() throws Exception {
+		final var request = java.util.Base64.getEncoder().encodeToString("{\"steps\":[]}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+		final var command = new NicPlanCommand(rdma -> {
+			readerRequests.add(rdma);
+			return host.reader(rdma);
+		}, NicPlannerTest.RESOLVER, new NicPlanJson.Engine("1.0", "abc"),
+						() -> new com.dell.spt.base.nic.pool.MemoryCapacity(1L << 30, 1L << 29, "/lxc/payload", ""));
+		final int status = command.run(new String[]{"--interfaces=nosuch0", "--rdma", "--endpoint", "192.0.2.101:9000", "--pool-request", request, "--capacity"
+		},
+						new java.io.PrintStream(out), new java.io.PrintStream(err));
+		assertEquals(NicPlanCommand.EXIT_OK, status);
+		final var document = MAPPER.readTree(stdout());
+		assertTrue(document.at("/poolDemand").isMissingNode(), "no plan, no demand");
+		assertEquals(1L << 29, document.at("/capacity/bytes").asLong());
+		assertEquals("cgroup", document.at("/capacity/source").asText());
+		assertEquals("/lxc/payload", document.at("/capacity/cgroup").asText());
+		assertEquals(1L << 30, document.at("/capacity/memTotalBytes").asLong());
+	}
+
+	@Test
 	void inventoryAloneIsOneJsonLineOnStdout() throws Exception {
 		assertEquals(NicPlanCommand.EXIT_OK, run());
 

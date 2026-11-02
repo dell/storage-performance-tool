@@ -123,6 +123,8 @@ final class RdmaNicLoopback implements AutoCloseable {
 	volatile Map<String, String> objectResponseHeaders = Map.of();
 	/** The device whose open fails. */
 	volatile String failOpen;
+	/** Runs before each registration, on every transport: a test's way into a pre-warm. */
+	volatile Runnable beforeRegistration = () -> {};
 	/** Runs as each connection binds, to fail a connect. */
 	volatile Runnable beforeConnect = () -> {};
 	/** Makes the stub close each connection after its response, so the next request connects. */
@@ -138,6 +140,7 @@ final class RdmaNicLoopback implements AutoCloseable {
 
 		NicTransport(final RdmaConfig config) {
 			super(config);
+			setBeforeRegister(() -> beforeRegistration.run());
 		}
 
 		@Override
@@ -242,6 +245,8 @@ final class RdmaNicLoopback implements AutoCloseable {
 	final class Factory implements NicSetDriverFactory<DataItem, Operation<DataItem>, S3RdmaNicSetDriver<DataItem, Operation<DataItem>>> {
 
 		final List<S3RdmaNicSetDriver<DataItem, Operation<DataItem>>> drivers = new CopyOnWriteArrayList<>();
+		/** The direct-memory limit the drivers see; a default well above any fixture's need. */
+		volatile long directMemoryLimitBytes = 64L << 30;
 
 		@Override
 		public String id() {
@@ -254,6 +259,7 @@ final class RdmaNicLoopback implements AutoCloseable {
 						throws IllegalConfigurationException, InterruptedException {
 			final S3RdmaNicSetDriver<DataItem, Operation<DataItem>> driver = S3RdmaNicSetDriver.create(stepId, dataInput, storageConfig,
 							verifyFlag, batchSize, NicSetSettings.fromStorage(storageConfig).orElseThrow(), environment, recording());
+			driver.directMemoryLimitBytes = directMemoryLimitBytes;
 			drivers.add(driver);
 			return driver;
 		}

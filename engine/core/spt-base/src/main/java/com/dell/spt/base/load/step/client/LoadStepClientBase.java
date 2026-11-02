@@ -44,6 +44,7 @@ import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.nic.pool.ItemSizeRecording;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.DistributedMetricsContextImpl;
 import com.dell.spt.base.metrics.context.MetricsContext;
@@ -175,6 +176,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	private MetricsAggregator metricsAggregator = null;
+	// Set for a step with a NIC set on any engine, before its items are distributed.
+	private ItemSizeRecording itemSizeRecording;
 
 	private boolean hasRangeReadPolicy() {
 		if (ctxConfigs == null || ctxConfigs.isEmpty())
@@ -253,6 +256,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			};
 			// The barrier's deadline starts before the items are distributed (D54-R2).
 			final AdmissionBarrier barrier = anyNicSet(configSlices, ctxConfigsSlices) ? newAdmissionBarrier() : null;
+			itemSizeRecording = barrier == null ? null : barrier.itemSizeRecording();
 			try {
 				if (barrier == null) {
 					distribution.run();
@@ -580,7 +584,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			if (!skipScatter && itemInput != null) {
 				itemInputFileSlicers.add(
 								new ItemInputFileSlicer(
-												loadStepId(), fileMgrs, configSlices, itemInput, batchSize, integrityConfig.enabled()));
+												loadStepId(), fileMgrs, configSlices, itemInput, batchSize, integrityConfig.enabled(), itemSizeRecording));
 				Loggers.MSG.debug("{}: item input file slicer initialized", loadStepId());
 			}
 		} catch (final IllegalConfigurationException e) {

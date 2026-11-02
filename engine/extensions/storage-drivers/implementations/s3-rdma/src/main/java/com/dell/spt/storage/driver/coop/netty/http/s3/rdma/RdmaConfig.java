@@ -1,5 +1,6 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 
+import com.dell.spt.base.nic.pool.PoolDemandConfig;
 import com.github.akurilov.confuse.Config;
 
 public final class RdmaConfig {
@@ -20,6 +21,7 @@ public final class RdmaConfig {
 	private final boolean allowMissingBytesHeader;
 	private final boolean bufferPool;
 	private final int copyThreads;
+	private final String poolShortfall;
 
 	public RdmaConfig(final Config rdmaConfig) {
 		if (rdmaConfig == null) {
@@ -34,6 +36,7 @@ public final class RdmaConfig {
 			this.allowMissingBytesHeader = false;
 			this.bufferPool = true;
 			this.copyThreads = DEFAULT_COPY_THREADS;
+			this.poolShortfall = PoolDemandConfig.SHORTFALL_FAIL;
 		} else {
 			this.enabled = getBoolean(rdmaConfig, "enabled", true);
 			this.thresholdBytes = getLong(rdmaConfig, "thresholdBytes", DEFAULT_THRESHOLD_BYTES);
@@ -45,6 +48,7 @@ public final class RdmaConfig {
 			this.allowMissingBytesHeader = getBoolean(rdmaConfig, "allowMissingBytesHeader", false);
 			this.bufferPool = getBoolean(rdmaConfig, "bufferPool", true);
 			this.copyThreads = getInt(rdmaConfig, "copyThreads", DEFAULT_COPY_THREADS);
+			this.poolShortfall = getString(rdmaConfig, "poolShortfall", PoolDemandConfig.SHORTFALL_FAIL);
 		}
 	}
 
@@ -156,6 +160,7 @@ public final class RdmaConfig {
 		this.allowMissingBytesHeader = allowMissingBytesHeader;
 		this.bufferPool = bufferPool;
 		this.copyThreads = copyThreads;
+		this.poolShortfall = PoolDemandConfig.SHORTFALL_FAIL;
 	}
 
 	/** Returns a copy with {@code localIp} replaced. */
@@ -206,6 +211,11 @@ public final class RdmaConfig {
 	/** Threads copying one PUT payload into its buffer, the dispatcher included; 1 copies on the dispatcher alone. */
 	public int getCopyThreads() {
 		return copyThreads;
+	}
+
+	/** {@code storage.rdma.poolShortfall}, as configured; it acts only with a NIC set. */
+	public String getPoolShortfall() {
+		return poolShortfall;
 	}
 
 	/** Whether {@code device} names a specific RDMA device rather than requesting auto-detection. */
