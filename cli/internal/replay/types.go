@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"github.com/dell/storage-performance-tool/cli/internal/nicplan"
 	"net/http"
 
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
@@ -31,8 +32,12 @@ type Options struct {
 	// came from. An archived NIC set is never replayed.
 	Interfaces       []string
 	InterfacesSource string
-	BaseTimestamp    string
-	HTTPClient       *http.Client
+	// HostInterfaces are the --host-interfaces values, already checked against --test-hosts, and
+	// HostInterfacesSource names where they came from.
+	HostInterfaces       []nicplan.HostInterfaces
+	HostInterfacesSource string
+	BaseTimestamp        string
+	HTTPClient           *http.Client
 }
 
 // Diagnostic describes a conversion/import issue surfaced during replay planning.

@@ -20,6 +20,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
+	"github.com/dell/storage-performance-tool/cli/internal/nicplan"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
@@ -58,6 +59,7 @@ type runMetadata struct {
 	DriverStats             map[string]*driverstats.Stats                           `json:"driverStats,omitempty"`
 	DriverStatsError        string                                                  `json:"driverStatsError,omitempty"`
 	NicNodes                []results.NicNode                                       `json:"nicNodes,omitempty"`
+	HostInterfaces          map[string]string                                       `json:"hostInterfaces,omitempty"`
 	NicEngines              map[string][]results.NicEngine                          `json:"nicEngines,omitempty"`
 	NicEnginesError         string                                                  `json:"nicEnginesError,omitempty"`
 	StepLifecycles          map[string]string                                       `json:"stepLifecycles,omitempty"`
@@ -211,7 +213,8 @@ func buildRunMetadata(in runMetadataInput) *runMetadata {
 		AutoTerminateSeconds: in.AutoTerminateSeconds,
 		runID:                in.Params.RunID,
 	}
-	meta.NicNodes = nicNodesMetadata(in.HostInfos, in.Params.Interfaces)
+	meta.NicNodes = nicNodesMetadata(in.HostInfos, in.Params.Interfaces, in.Params.HostInterfaces)
+	meta.HostInterfaces = hostInterfacesMetadata(in.Params.HostInterfaces)
 	if in.WorkloadType == scenario.WorkloadTypeDelete {
 		meta.DeleteArtifactsVersion = constants.ResultsDeleteArtifactsVersion
 		meta.DeleteArtifactStepIDs = plannedDeleteArtifactStepIDs(expected)
@@ -239,13 +242,24 @@ func buildRunMetadata(in runMetadataInput) *runMetadata {
 	return meta
 }
 
-// nicNodesMetadata gives every slice the run's NIC set, in slice order: the Entry Node, then the
-// workers in the order the Entry Node was given them. A run without a NIC set has none.
-func nicNodesMetadata(hostInfos []*hostparse.HostInfo, interfaces []string) []results.NicNode {
-	if len(interfaces) == 0 {
+// Where a slice's NIC set came from, in nicNodes.
+const (
+	nicNodeSourceRun  = "run"
+	nicNodeSourceHost = "host"
+)
+
+// nicNodesMetadata gives every slice its effective NIC set, in slice order: the Entry Node, then
+// the workers in the order the Entry Node was given them. A host override replaces the run's value;
+// without either, the slice's value is none, and the fetcher expects no NIC files from it. A run
+// without a NIC set or a host override has no entries.
+func nicNodesMetadata(hostInfos []*hostparse.HostInfo, interfaces []string, overrides []nicplan.HostInterfaces) []results.NicNode {
+	if len(interfaces) == 0 && len(overrides) == 0 {
 		return nil
 	}
 	value := strings.Join(interfaces, ",")
+	if value == "" {
+		value = nicplan.None
+	}
 	nodes := make([]results.NicNode, 0, len(hostInfos))
 	for _, h := range hostInfos {
 		if h == nil {
@@ -255,9 +269,25 @@ func nicNodesMetadata(hostInfos []*hostparse.HostInfo, interfaces []string) []re
 		if host == "" {
 			host = strings.TrimSpace(h.Original)
 		}
-		nodes = append(nodes, results.NicNode{Node: len(nodes), Host: host, Interfaces: value})
+		node := results.NicNode{Node: len(nodes), Host: host, Interfaces: value, Source: nicNodeSourceRun}
+		if override, ok := nicplan.ForHost(overrides, host); ok {
+			node.Interfaces, node.Source = override.Value, nicNodeSourceHost
+		}
+		nodes = append(nodes, node)
 	}
 	return nodes
+}
+
+// hostInterfacesMetadata records the requested --host-interfaces values by host, as given.
+func hostInterfacesMetadata(overrides []nicplan.HostInterfaces) map[string]string {
+	if len(overrides) == 0 {
+		return nil
+	}
+	values := make(map[string]string, len(overrides))
+	for _, override := range overrides {
+		values[override.Host] = override.Value
+	}
+	return values
 }
 
 // refreshNicNodes rebuilds nicNodes from the run's execution participants once a distributed run
@@ -274,7 +304,7 @@ func (meta *runMetadata) refreshNicNodes() {
 		return
 	}
 	if locked {
-		meta.NicNodes = nicNodesMetadata(hosts, meta.ScenarioParams.Interfaces)
+		meta.NicNodes = nicNodesMetadata(hosts, meta.ScenarioParams.Interfaces, meta.ScenarioParams.HostInterfaces)
 	}
 }
 

@@ -114,6 +114,8 @@ public class TestConfigBuilder {
 			return Boolean.class;
 		case "list":
 			return List.class;
+		case "map":
+			return Map.class;
 		case "any":
 			return Object.class;
 		default:
@@ -283,6 +285,7 @@ public class TestConfigBuilder {
 		Map<String, Object> storageNetNode = new HashMap<>();
 		storageNetNode.put("slice", false);
 		storageNet.put("node", storageNetNode);
+		storageNet.put("nodeInterfaces", new HashMap<String, Object>());
 		storage.put("net", storageNet);
 
 		values.put("storage", storage);

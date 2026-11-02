@@ -226,6 +226,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			final var configSlices = sliceConfig(
 							config,
 							sliceCount,
+							nodeAddrs,
 							IntegrityConfig.requiresExactOutputCount(config.configVal("storage")));
 			addFileClients(config, configSlices);
 			// init the config slices for each of the load step context configs
@@ -235,7 +236,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			if (null != ctxConfigs) {
 				for (final var ctxConfig : ctxConfigs) {
-					final var ctxConfigSlices = sliceConfig(ctxConfig, sliceCount, false);
+					final var ctxConfigSlices = sliceConfig(ctxConfig, sliceCount, nodeAddrs, false);
 					addFileClients(ctxConfig, ctxConfigSlices);
 					for (var i = 0; i < sliceCount; i++) {
 						ctxConfigsSlices.get(i).add(ctxConfigSlices.get(i));
@@ -902,7 +903,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	private List<Config> sliceConfig(
-					final Config config, final int sliceCount, final boolean balanceCountLimit) {
+					final Config config, final int sliceCount, final List<String> nodeAddrs, final boolean balanceCountLimit) {
 		final var configSlices = (List<Config>) new ArrayList<Config>(sliceCount);
 		for (var i = 0; i < sliceCount; i++) {
 			final var configSlice = ConfigSliceUtil.initSlice(config);
@@ -912,6 +913,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			configSlices.add(configSlice);
 		}
+		ConfigSliceUtil.sliceNodeInterfaces(config, configSlices, nodeAddrs);
 		if (sliceCount > 1) { // distributed mode
 			//
 			final var countLimit = config.longVal("load-op-limit-count");

@@ -124,12 +124,14 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	/** Checks the requested NIC set's entries before any bucket or engine work starts. */
 	private void validateNicSetConfiguration() {
 		NicSetConfig.interfaces(this.config.configVal("storage"));
+		NicSetConfig.nodeInterfaces(this.config);
 		if (this.ctxConfigs != null) {
 			this.ctxConfigs.forEach(context -> {
 				final var merged = TreeUtil.reduceForest(
 								List.of(Config.deepToMap(this.config), Config.deepToMap(context)));
-				NicSetConfig.interfaces(
-								new BasicConfig(this.config.pathSep(), this.config.schema(), merged).configVal("storage"));
+				final var effective = new BasicConfig(this.config.pathSep(), this.config.schema(), merged);
+				NicSetConfig.interfaces(effective.configVal("storage"));
+				NicSetConfig.nodeInterfaces(effective);
 			});
 		}
 	}

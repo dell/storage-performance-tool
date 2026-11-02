@@ -34,6 +34,9 @@ func ParseInterfaces(value string) ([]string, error) {
 		if entry == "" {
 			return nil, fmt.Errorf("--interfaces %q has an empty entry", value)
 		}
+		if entry == None {
+			return nil, fmt.Errorf("--interfaces entry %q applies only to --host-interfaces", entry)
+		}
 		if !entryPattern.MatchString(entry) {
 			return nil, fmt.Errorf("--interfaces entry %q is not an interface name, IPv4 address or RDMA device", entry)
 		}

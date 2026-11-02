@@ -9,6 +9,7 @@ const (
 	EnvS3Endpoints     = "S3_ENDPOINTS"
 	EnvThreads         = "THREADS"
 	EnvInterfaces      = "SPT_INTERFACES"
+	EnvHostInterfaces  = "SPT_HOST_INTERFACES"
 	EnvS3AccessKey     = "S3_ACCESS_KEY" // #nosec G101 -- env var names only
 	EnvS3SecretKey     = "S3_SECRET_KEY" // #nosec G101 -- env var names only
 	EnvS3Bucket        = "S3_BUCKET"

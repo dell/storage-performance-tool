@@ -211,6 +211,10 @@ storage:
     interfaces: []
     node:
       slice: false
+    # Host overrides: a node's address as load.step.node.addrs lists it, or entry, to that engine's
+    # value for storage.net.interfaces. none turns its NICs off. The entry node applies them when
+    # it slices the step; each slice then holds only its own storage.net.interfaces.
+    nodeInterfaces: {}
   # Before a step starts, the controller engine checks its S3 target buckets and creates a missing
   # one for a step that writes new objects. false still checks them but never creates one.
   targetBucket:

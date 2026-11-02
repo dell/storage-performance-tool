@@ -75,7 +75,7 @@ func TestVerifyNicPlanInputs(t *testing.T) {
 			if err := cmd.Flags().Set("endpoints", tt.endpoints); err != nil {
 				t.Fatal(err)
 			}
-			interfaces, endpoints, err := verifyNicPlanInputs(cmd, tt.interfaces, "host")
+			interfaces, endpoints, err := verifyNicPlanInputs(cmd, tt.interfaces, "host", false)
 			if err != nil {
 				t.Fatalf("verifyNicPlanInputs: %v", err)
 			}

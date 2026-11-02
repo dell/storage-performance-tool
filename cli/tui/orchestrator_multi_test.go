@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	dockerconf "github.com/dell/storage-performance-tool/cli/internal/docker"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/nicplan"
 	"github.com/dell/storage-performance-tool/cli/internal/preflight"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
@@ -3654,5 +3656,36 @@ func TestSingleRemoteRunsPreSubmissionCheckAfterReadinessAndBeforePost(t *testin
 	}
 	if orchestrator.hosts[0].IsManaged() {
 		t.Fatal("single-remote rejected launch retained managed resources")
+	}
+}
+
+func TestStartEntryNodePassesHostOverridesForTheWorkersThatStarted(t *testing.T) {
+	o := NewMultiHostOrchestrator([]*hostparse.HostInfo{
+		{Host: "entry.example", Original: "entry.example"},
+		{Host: "wrk2.example", Original: "wrk2.example"},
+	}, 1)
+	primary, worker := o.hosts[0], o.hosts[1]
+	primary.DockerManager = NewMockDockerManager()
+	worker.DockerManager = NewMockDockerManager()
+	worker.SetStatus(HostStatusRunning)
+	worker.AdvertisedIP = "198.51.100.12"
+	params := scenario.ScenarioParams{WorkloadType: "write", Threads: 1, ObjectSize: "1MB", ObjectCount: 1, HostInterfaces: []nicplan.HostInterfaces{
+		{Host: "entry.example", Value: "none"},
+		{Host: "wrk2.example", Value: "mlx5_0,mlx5_1", Entries: []string{"mlx5_0", "mlx5_1"}},
+		{Host: "dropped.example", Value: "auto", Entries: []string{"auto"}},
+	}}
+	if err := o.startEntryNodeContext(context.Background(), primary, []*HostConnection{worker}, params, nil); err != nil {
+		t.Fatalf("startEntryNode error: %v", err)
+	}
+	calls := primary.DockerManager.(*MockDockerManager).GetEntryNodeCalls()
+	if len(calls) != 1 {
+		t.Fatalf("entry calls = %d", len(calls))
+	}
+	want := []string{
+		"--storage-net-nodeInterfaces-entry=none",
+		"--storage-net-nodeInterfaces-198.51.100.12:" + constants.RMIRegistryPort + "=mlx5_0,mlx5_1",
+	}
+	if !reflect.DeepEqual(calls[0].AdditionalArgs, want) {
+		t.Fatalf("entry args = %q, want %q", calls[0].AdditionalArgs, want)
 	}
 }

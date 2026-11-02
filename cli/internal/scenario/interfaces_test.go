@@ -1,6 +1,7 @@
 package scenario
 
 import (
+	"github.com/dell/storage-performance-tool/cli/internal/nicplan"
 	"reflect"
 	"strings"
 	"testing"
@@ -55,11 +56,21 @@ func TestRejectInterfacesOverrideCoversEverySpelling(t *testing.T) {
 		" storage.net.interfaces = [] ",
 		"storage.net={interfaces: [auto]}",
 		"storage={net: {interfaces: auto}}",
-		"storage.net.nodeInterfaces=[auto, none]",
-		"storage-net-nodeInterfaces=[auto]",
 	} {
 		err := RejectInterfacesOverride(override)
 		if err == nil || !strings.Contains(err.Error(), "which is not supported; use --interfaces") {
+			t.Fatalf("override %q: err = %v", override, err)
+		}
+	}
+	for _, override := range []string{
+		"storage.net.nodeInterfaces=[auto, none]",
+		"storage-net-nodeInterfaces=[auto]",
+		"storage.net.nodeInterfaces.entry=none",
+		"storage-net-nodeInterfaces-entry=none",
+		"storage.net={nodeInterfaces: {entry: none}}",
+	} {
+		err := RejectInterfacesOverride(override)
+		if err == nil || !strings.Contains(err.Error(), "which is not supported; use --host-interfaces") {
 			t.Fatalf("override %q: err = %v", override, err)
 		}
 	}
@@ -133,5 +144,27 @@ func TestTheNicSetSurvivesOverridesThatReplaceItsAncestors(t *testing.T) {
 	}
 	if _, ok := generatedNet(t, interfacesTestParams(nil, "storage.net={ssl: {enabled: false}}"))["interfaces"]; ok {
 		t.Fatal("an override never adds a NIC set the run did not ask for")
+	}
+}
+
+func TestNodeInterfacesArgs(t *testing.T) {
+	overrides := []nicplan.HostInterfaces{
+		{Host: "entry.example", Value: "none"},
+		{Host: "wrk2", Value: "mlx5_0,mlx5_1", Entries: []string{"mlx5_0", "mlx5_1"}},
+		{Host: "wrk-dropped", Value: "auto", Entries: []string{"auto"}},
+	}
+	got := NodeInterfacesArgs(overrides, "entry.example", []WorkerNode{
+		{Host: "wrk2", Addr: "198.51.100.12:1099"},
+		{Host: "wrk3", Addr: "198.51.100.13:1099"},
+	})
+	want := []string{
+		"--storage-net-nodeInterfaces-entry=none",
+		"--storage-net-nodeInterfaces-198.51.100.12:1099=mlx5_0,mlx5_1",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %q, want %q", got, want)
+	}
+	if got := NodeInterfacesArgs(nil, "entry.example", []WorkerNode{{Host: "wrk2", Addr: "a:1099"}}); len(got) != 0 {
+		t.Fatalf("no overrides, args = %q", got)
 	}
 }

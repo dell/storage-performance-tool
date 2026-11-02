@@ -9,6 +9,7 @@ This applies to the default Netty `s3` driver. Preview a host's plan with [`spt 
 | Flag | Environment | Engine setting | Default |
 |------|-------------|----------------|---------|
 | `--interfaces` | `SPT_INTERFACES` | `storage.net.interfaces` | none: the kernel's route |
+| `--host-interfaces` | `SPT_HOST_INTERFACES` | `storage.net.nodeInterfaces` | none: every host follows `--interfaces` |
 
 - **Values:** `auto`, or a comma-separated list of entries. An entry is an interface name (`ens1f0`), an IPv4 address held by an interface (`192.0.2.11`), or an RDMA device (`mlx5_0`), which names the interface that holds it. `auto` must be the only entry.
 - **Sources:** the flag wins over `SPT_INTERFACES`, which `cli/.env` can also set. An error about the value names its source, for example `SPT_INTERFACES (environment or .env)`.
@@ -22,12 +23,32 @@ This applies to the default Netty `s3` driver. Preview a host's plan with [`spt 
 - `--network-mode bridge`, where a container sees only its own interface;
 - an `--endpoint-selection` other than `default`;
 - an `--rdma-device` other than `auto`, or an `--rdma-local-ip`, from a flag, `RDMA_DEVICE`, `RDMA_LOCAL_IP` or `cli/.env`;
-- an `--engine-override` of `storage.net.interfaces` or `storage.net.nodeInterfaces`, in either spelling. Set the NIC set with `--interfaces` only.
+- an `--engine-override` of `storage.net.interfaces` or `storage.net.nodeInterfaces`, in either spelling. Set them with `--interfaces` and `--host-interfaces` only.
 
 ```bash
 spt run read --interfaces auto --threads 64 \
   -e http://192.0.2.101:9000,http://192.0.2.102:9000
 ```
+
+## Host overrides
+
+Hosts whose NICs differ can each have their own value. `--host-interfaces <host>=<value>` replaces `--interfaces` on that host, and is repeatable; hosts without one follow `--interfaces`, or keep the kernel's route without it.
+
+- **`<host>`** matches a `--test-hosts` entry by its host part, so `root@wrk2` and `wrk2` name the same host.
+- **`<value>`** is `auto`, a list as for `--interfaces`, or `none`, which turns NICs off on that host. `none` is valid only here, and only alone.
+- **Environment:** `SPT_HOST_INTERFACES`, with `;` between hosts: `wrk1=none;wrk2=mlx5_0,mlx5_1`. The flag replaces the whole variable.
+- **Rejected:** a host not in `--test-hosts`, a host given twice, an empty value, and a value `--interfaces` would reject. A value that asks for NICs also has the rejections listed above; a run whose values are all `none` has none of them.
+- **A single local host** is the entry node, so its override applies to it as to any other host.
+- **A worker that does not start** (`--min-hosts`) has no slice, so its override is simply unused.
+
+The usual case is a virtual entry node, which coordinates the run and has no NICs worth choosing, so it keeps its route while the workers use theirs:
+
+```bash
+spt run read --test-hosts entry,wrk2,wrk3 --interfaces auto --host-interfaces entry=none \
+  --threads 64 -e http://192.0.2.101:9000,http://192.0.2.102:9000
+```
+
+The CLI passes the entry node one engine setting per host in `storage.net.nodeInterfaces`, keyed by `entry` or the worker's address as `load.step.node.addrs` lists it. The entry node applies each value to that node's `storage.net.interfaces` when it slices a step, so drivers see only that setting. A key that names no configured node is a configuration error. `config.yaml` on the entry node keeps the map; each slice's `config.yaml` shows its effective `interfaces` and an empty map.
 
 ## How each engine chooses its NICs
 
@@ -121,7 +142,8 @@ Before the first operation, each engine connects once on every Path. A failure f
 - **Distributed steps:** the Entry Node keeps each node's files as `<step>.nic.paths.node-NNN.csv` and `<step>.nic.set.node-NNN.json`. `node-000` is the Entry Node, followed by the workers that started, in `--test-hosts` order; a worker that fails to start under `--min-hosts` gets no slice. An expected file that is absent is recorded as `missing` in `index.json`, and the run does not fail.
 - **Run metadata** in `spt_run_params.json`:
   - `scenarioParams.Interfaces`: the requested entries;
-  - `nicNodes`: each node with its host and the value it received;
+  - `nicNodes`: each node with its host, the value it received, and `source`: `host` for a host override, `run` otherwise. A node whose value is `none` writes no NIC files, and the fetcher does not report them as missing;
+  - `hostInterfaces`: the `--host-interfaces` values by host, as given;
   - `nicEngines`: per step, each engine's report, with its node, host, number of NIC-set drivers, `driverThreads` (0 for the default), `hardwareThreads`, `eventLoopsPerNic`, `nics` and `eventLoops`. A step with several NIC-set drivers, such as a `pipeline` or `weighted` step, adds `contexts` with each driver's values, and a field the drivers disagree on is left out at the top;
   - `nicEnginesError`: why a report could not be read. The run does not fail.
 
@@ -135,10 +157,11 @@ Before the first operation, each engine connects once on every Path. A failure f
 }
 ```
 
-- **Run summary:** Workload Configuration adds two lines after `Endpoints`:
+- **Run summary:** Workload Configuration adds these lines after `Endpoints`; each of the first two appears only with its flag:
 
   ```text
     • Interfaces         auto
+    • Host interfaces    wrk1=none; wrk2=mlx5_0,mlx5_1
     • Event loops        16 per engine (2 NICs × 8, default) + 2 base = 18
   ```
 
@@ -146,4 +169,4 @@ Before the first operation, each engine connects once on every Path. A failure f
 
 ## Replay
 
-`spt replay` takes `--interfaces` and `SPT_INTERFACES` as `spt run` does, with the same checks; a value that fails them fails the replay as `invalid_interfaces`. Replay never keeps a source run's NIC set: an archived `storage.net.interfaces` or `storage.net.nodeInterfaces` is dropped with one warning, such as `the source run used storage.net.interfaces=auto; replay ignores it, pass --interfaces to use NICs`. In a JavaScript archive, a setting replay cannot remove from a literal `storage.net` object (one in a variable that `net` or `storage` refers to, an assignment, a flat key such as `storage-net-interfaces`, or a `net` object outside `storage`) fails the replay as `invalid_interfaces`, because left in place it could override the replay's NIC set past these checks. Replay does not run scenario code, so a name the code computes is not detected.
+`spt replay` takes `--interfaces`, `--host-interfaces` and their environment variables as `spt run` does, with the same checks; a value that fails them fails the replay as `invalid_interfaces`. The CLI builds the per-node map from the current workers at every run, so a replay that changes `--test-hosts` gets new keys, and an override whose host is not in `--test-hosts` is rejected, naming the host. Replay never keeps a source run's NIC set: an archived `storage.net.interfaces` or `storage.net.nodeInterfaces` is dropped with one warning, such as `the source run used storage.net.interfaces=auto; replay ignores it, pass --interfaces to use NICs`. In a JavaScript archive, a setting replay cannot remove from a literal `storage.net` object (one in a variable that `net` or `storage` refers to, an assignment, a flat key such as `storage-net-interfaces`, or a `net` object outside `storage`) fails the replay as `invalid_interfaces`, because left in place it could override the replay's NIC set past these checks. Replay does not run scenario code, so a name the code computes is not detected.

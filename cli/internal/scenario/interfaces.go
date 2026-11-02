@@ -4,16 +4,44 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dell/storage-performance-tool/cli/internal/nicplan"
 	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
 	"github.com/dell/storage-performance-tool/cli/internal/workload"
 )
 
-// The NIC-set engine settings. The CLI writes storage.net.interfaces from --interfaces only, and
-// rejects engine overrides of either setting so its checks cannot be bypassed.
+// The NIC-set engine settings. The CLI writes storage.net.interfaces from --interfaces and
+// storage.net.nodeInterfaces from --host-interfaces only, and rejects engine overrides of either
+// setting so its checks cannot be bypassed.
 const (
 	InterfacesPath     = "storage.net.interfaces"
 	NodeInterfacesPath = "storage.net.nodeInterfaces"
+
+	nodeInterfacesArgPrefix = "--storage-net-nodeInterfaces-"
+	nodeInterfacesEntryKey  = "entry"
 )
+
+// WorkerNode is a started worker: its host as in --test-hosts, and the address the Entry Node has
+// for it in load.step.node.addrs.
+type WorkerNode struct {
+	Host string
+	Addr string
+}
+
+// NodeInterfacesArgs returns the Entry Node's arguments for the host overrides, one per host with a
+// value: the entry host's key is entry, and a worker's is its address. A host that did not start
+// has no key, since the engine would reject one.
+func NodeInterfacesArgs(overrides []nicplan.HostInterfaces, entryHost string, workers []WorkerNode) []string {
+	args := make([]string, 0, len(overrides))
+	if override, ok := nicplan.ForHost(overrides, entryHost); ok {
+		args = append(args, nodeInterfacesArgPrefix+nodeInterfacesEntryKey+"="+override.Value)
+	}
+	for _, worker := range workers {
+		if override, ok := nicplan.ForHost(overrides, worker.Host); ok {
+			args = append(args, nodeInterfacesArgPrefix+worker.Addr+"="+override.Value)
+		}
+	}
+	return args
+}
 
 // InterfacesTarget is the rest of the run configuration a NIC set is validated against. Source
 // names where the --interfaces value came from, such as "--interfaces" or "SPT_INTERFACES".
@@ -52,10 +80,13 @@ func ValidateInterfaces(interfaces []string, target InterfacesTarget) error {
 // RejectInterfacesOverride rejects an engine override of either NIC-set setting, in either
 // spelling, and points to the flag that sets it.
 func RejectInterfacesOverride(override string) error {
-	for _, path := range []string{InterfacesPath, NodeInterfacesPath} {
-		if EngineOverrideSets(override, strings.Split(path, ".")...) {
-			return fmt.Errorf("engine override %q sets %s, which is not supported; use --interfaces",
-				secretmask.EngineOverride(override), path)
+	for _, setting := range []struct{ path, flag string }{
+		{InterfacesPath, "--interfaces"},
+		{NodeInterfacesPath, "--host-interfaces"},
+	} {
+		if EngineOverrideSets(override, strings.Split(setting.path, ".")...) {
+			return fmt.Errorf("engine override %q sets %s, which is not supported; use %s",
+				secretmask.EngineOverride(override), setting.path, setting.flag)
 		}
 	}
 	return nil

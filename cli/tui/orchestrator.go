@@ -270,7 +270,7 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 	// Start container in node mode
 	logging.LogInfo("orchestrator", "starting container in node mode", "image", image, "port", o.apiPort, "network_mode", o.networkMode)
 	containerID, err := startContainerInNodeModeContext(
-		ctx, o.dockerManager, image, o.apiPort, o.networkMode, startupArgs)
+		ctx, o.dockerManager, image, o.apiPort, o.networkMode, append(startupArgs, singleHostInterfacesArgs(params)...))
 	if err != nil {
 		return errors.Join(
 			fmt.Errorf("failed to start container in node mode: %w", err),
@@ -951,4 +951,13 @@ func (o *TestOrchestrator) StopTest() error {
 // Wait waits for the orchestrator to finish
 func (o *TestOrchestrator) Wait() {
 	<-o.stoppedCh
+}
+
+// singleHostInterfacesArgs returns the engine arguments of a single-host run's host override. Its
+// flag accepts only a host in --test-hosts, so a value here is this host's.
+func singleHostInterfacesArgs(params scenario.Params) []string {
+	if len(params.HostInterfaces) == 0 {
+		return nil
+	}
+	return scenario.NodeInterfacesArgs(params.HostInterfaces, params.HostInterfaces[0].Host, nil)
 }

@@ -189,6 +189,7 @@ storage:
     interfaces: list
     node:
       slice: boolean
+    nodeInterfaces: map
   targetBucket:
     count: int
     names: list
