@@ -32,6 +32,10 @@
 &nbsp;&nbsp;2.5. [Steady-State Window](#25-steady-state-window)<br/>
 &nbsp;&nbsp;&nbsp;&nbsp;2.5.1. [File](#251-file)<br/>
 &nbsp;&nbsp;&nbsp;&nbsp;2.5.2. [Accuracy and limits](#252-accuracy-and-limits)<br/>
+&nbsp;&nbsp;2.6. [Bucket Metrics](#26-bucket-metrics)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;2.6.1. [Files](#261-files)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;2.6.2. [Steady rows](#262-steady-rows)<br/>
+&nbsp;&nbsp;&nbsp;&nbsp;2.6.3. [Memory](#263-memory)<br/>
 
 # 1. General
 
@@ -565,3 +569,67 @@ engine version.
   `valid` with a large `SteadyTrend[%]`.
 * **Mixed and weighted steps:** the JSON API keeps one entry per step, so `metrics.steady.total.csv` is the
   authoritative per-operation-type record for those steps.
+
+## 2.6. Bucket Metrics
+
+A step with more than one target bucket and `output-metrics-bucket-enabled` true, the default, writes two more files
+beside `metrics.total.csv`. No other file, endpoint or console output changes. A single bucket or a one-name list
+records and writes neither, so a missing file means bucket metrics were off.
+
+### 2.6.1. Files
+
+`metrics.bucket.total.csv` holds whole-step values:
+
+```text
+DateTimeISO8601,BucketKind,MemberIndex,Bucket,OpType,NodesExpected,NodesReceived,BucketData,CountSucc,CountFail,CountCorrupt,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],BWAvg[MiB/s],DurationAvg[us],DurationMin[us],DurationQ_0.25[us],DurationQ_0.5[us],DurationQ_0.75[us],DurationQ_0.9[us],DurationQ_0.99[us],DurationQ_0.999[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyQ_0.25[us],LatencyQ_0.5[us],LatencyQ_0.75[us],LatencyQ_0.9[us],LatencyQ_0.99[us],LatencyQ_0.999[us],LatencyMax[us],TtfbAvg[us],TtfbMin[us],TtfbQ_0.25[us],TtfbQ_0.5[us],TtfbQ_0.75[us],TtfbQ_0.9[us],TtfbQ_0.99[us],TtfbQ_0.999[us],TtfbMax[us]
+```
+
+`metrics.bucket.steady.total.csv` holds the same columns over each bucket's own window, then these:
+
+```text
+SteadyStart[s],SteadyTurnovers,SteadyTrend[%],SteadyCV,SteadyStatus,StartDelay[ms],EndDelay[ms],PassDuration[ms]
+```
+
+The quantile columns are the ones `metrics.total.csv` has. Against that file, `BucketKind`, `MemberIndex` and `Bucket`
+are added, `Concurrency`, `ConcurrencyCurr`, `ConcurrencyMean`, `TPLast[op/s]` and `BWLast[MiB/s]` are absent because
+bucket rows have no concurrency meter or last-interval rate, and `NodeCount` is replaced by `NodesExpected`,
+`NodesReceived` and `BucketData`.
+
+| Column | Meaning |
+|--------|---------|
+| `BucketKind` | `member`, or `catch-all` for results whose bucket is not in the set |
+| `MemberIndex` | The bucket's place in the set, from 0; empty for the catch-all |
+| `Bucket` | The bucket's exact name; empty for the catch-all |
+| `NodesExpected` | The step's nodes |
+| `NodesReceived` | The nodes whose data this row merges |
+| `BucketData` | `complete`, `incomplete` or, in the steady file, `unmeasured` |
+
+`incomplete` means some node did not answer, and the row is the subtotal of `NodesReceived` nodes. Compare it only with
+a subtotal of the same nodes, never with `metrics.total.csv`. `unmeasured` means a node's bucket window could not be
+obtained. A steady row with either label leaves its statistics empty and says `SteadyStatus` `incomplete`. If no node
+answers, the file holds only its header. `messages.log` has one `bucket-metrics` record per file and operation type,
+with `expected`, `received` and `missing` nodes, a reason for each missing one, and the `data` outcome; it is INFO when
+every node answered and WARN otherwise.
+
+### 2.6.2. Steady rows
+
+Each bucket window runs between that bucket's own two cuts, which an aggregate's start and end events queue, so a
+row's window is shifted later than the aggregate's and is not contained in it. It leaves out what completed before its
+start cut and includes what completed before its end cut, so it is an estimate over its own interval and does not sum
+to the aggregate's steady row. Only complete whole-step rows sum to the totals.
+
+| Column | Source |
+|--------|--------|
+| Counts, `Size`, `StepDuration[s]`, `TPAvg[op/s]`, `BWAvg[MiB/s]`, timings | The row's own window; across nodes counts and bytes are summed, timing populations merged, and `StepDuration[s]` is the shortest window |
+| `SteadyStart[s]` | The row's start cut as an offset from step start, the largest across nodes |
+| `SteadyTurnovers`, `SteadyTrend[%]`, `SteadyCV` | The aggregate's values, repeated, because turnover needs an in-flight mean that bucket rows lack |
+| `SteadyStatus` | The aggregate's rule with its turnovers, on the row's own window and completions: a row can be `short` while the aggregate is `valid`, and a bucket with no completions in its window is `short` with empty timing cells |
+| `StartDelay[ms]`, `EndDelay[ms]` | How much later the row's cuts were than the aggregate's, queueing included; the largest across nodes |
+| `PassDuration[ms]` | The cut thread's time for this row's end pass; the largest across nodes |
+
+### 2.6.3. Memory
+
+Each node holds a meter set per bucket and operation type and, while a steady window is open, a start cut of each:
+about 160 KiB per set, or about 640 MiB for 1,000 buckets and four operation types. Before it allocates them, a step
+compares this with the maximum heap and refuses to start above 40%. The message names both ways out:
+`--bucket-metrics=false` or `output-metrics-bucket-enabled=false`, or a larger engine maximum heap.
