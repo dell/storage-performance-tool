@@ -1195,18 +1195,31 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		// calls deregisterBuffer() on a transport that close() has already destroyed
 		if (rdmaReaper != null) {
 			rdmaReaper.shutdownNow();
-			try {
-				if (!rdmaReaper.awaitTermination(5, TimeUnit.SECONDS)) {
-					reaperLate = true;
-					Loggers.MSG.warn("{}: RDMA reaper did not terminate within 5s", stepId);
-				}
-			} catch (final InterruptedException e) {
+			if (!awaitReaper()) {
 				reaperLate = true;
-				Thread.currentThread().interrupt();
+				Loggers.MSG.warn("{}: RDMA reaper did not terminate within 5s", stepId);
 			}
 		}
 		closeRdmaResources();
 		super.doClose();
+	}
+
+	/**
+	 * Waits for the reaper even on an interrupted thread: a step's stop can reach close as an interrupt,
+	 * and the reaper, just told to stop, is normally about to end.
+	 */
+	private boolean awaitReaper() {
+		boolean interrupted = Thread.interrupted();
+		try {
+			return rdmaReaper.awaitTermination(5, TimeUnit.SECONDS);
+		} catch (final InterruptedException e) {
+			interrupted = true;
+			return rdmaReaper.isTerminated();
+		} finally {
+			if (interrupted) {
+				Thread.currentThread().interrupt();
+			}
+		}
 	}
 
 	/** Runs in {@link #doClose()} once the reaper has stopped: every RDMA resource goes away here. */
