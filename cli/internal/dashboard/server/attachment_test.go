@@ -6,18 +6,21 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
 )
+
+// engineRunningStatus is GET /status from the engine on the Dev VM during
+// `spt run mock` (Oct 24, 2026). run_id is a JSON number.
+const engineRunningStatus = `{"state":"RUNNING","since":"2026-10-24T22:57:41.187Z","run_id":1792882655698,"step_id":"none-20261024.225738.837"}`
 
 func TestAttachReadsAnExistingRunAndCanDisconnect(t *testing.T) {
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/status":
-			_, _ = fmt.Fprint(w, `{"runId":"run-42","state":"running","message":"Existing CLI run","progress":37.5}`)
+			_, _ = fmt.Fprint(w, engineRunningStatus)
 		case "/metrics/json":
 			_, _ = fmt.Fprintf(w, `[{"sample_ts":%q,"test_state":1,"step_id":"create","op_type":"CREATE","scope":"node","role":"entry","elapsed_time_seconds":2,"operations":{"success_count":10,"failed_count":1,"success_rate_last":8},"bandwidth":{"bytes_total":10485760,"bytes_rate_last":8388608},"timing":{"latency":{"count":10,"p50_us":42}}}]`, stamp)
 		default:
@@ -47,7 +50,7 @@ func TestAttachReadsAnExistingRunAndCanDisconnect(t *testing.T) {
 	connection := state["connection"].(map[string]any)
 	job := state["job"].(map[string]any)
 	metrics := state["metrics"].(map[string]any)
-	if connection["status"] != "connected" || connection["read_only"] != true || job["run_id"] != "run-42" {
+	if connection["status"] != "connected" || connection["read_only"] != true || job["run_id"] != "1792882655698" || connection["run_id"] != "1792882655698" {
 		t.Fatalf("unexpected attached state: %#v", state)
 	}
 	if got := len(metrics["samples"].([]any)); got != 1 {
@@ -58,7 +61,7 @@ func TestAttachReadsAnExistingRunAndCanDisconnect(t *testing.T) {
 	get.Host = "localhost:8000"
 	getResponse := httptest.NewRecorder()
 	handler.ServeHTTP(getResponse, get)
-	if getResponse.Code != http.StatusOK || !strings.Contains(getResponse.Body.String(), `"run_id":"run-42"`) {
+	if getResponse.Code != http.StatusOK || !strings.Contains(getResponse.Body.String(), `"run_id":"1792882655698"`) {
 		t.Fatalf("attached poll status=%d body=%s", getResponse.Code, getResponse.Body.String())
 	}
 
@@ -112,21 +115,67 @@ func TestAttachRequiresSameOrigin(t *testing.T) {
 	}
 }
 
-func TestFetchAttachedStatusUsesConfiguredSPTStatusContract(t *testing.T) {
-	want := attachedStatus{RunID: "run-9", State: "running", Message: "Run active", Progress: 12.5}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/status" || r.Method != http.MethodGet {
-			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
-		}
-		_ = json.NewEncoder(w).Encode(want)
-	}))
-	defer server.Close()
-	u, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatal(err)
+func TestFetchAttachedStatusReadsTheEngineStatusShape(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+		want attachedStatus
+	}{
+		{name: "engine running", body: engineRunningStatus, want: attachedStatus{RunID: "1792882655698", State: "RUNNING", StepID: "none-20261024.225738.837"}},
+		{name: "id above 2^53", body: `{"state":"RUNNING","run_id":9007199254740993}`, want: attachedStatus{RunID: "9007199254740993", State: "RUNNING"}},
+		{name: "engine idle", body: `{"state":"IDLE","since":"2026-10-24T22:50:00Z"}`, want: attachedStatus{State: "IDLE"}},
+		{name: "engine failed", body: `{"state":"FAILED","run_id":7,"category":"engine","message":"boom"}`, want: attachedStatus{RunID: "7", State: "FAILED", Message: "boom"}},
+		{name: "string run_id", body: `{"state":"RUNNING","run_id":" 42 "}`, want: attachedStatus{RunID: "42", State: "RUNNING"}},
+		{name: "legacy runId", body: `{"runId":"run-9","state":"running","message":"Run active","progress":12.5}`, want: attachedStatus{RunID: "run-9", State: "running", Message: "Run active", Progress: 12.5}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/status" || r.Method != http.MethodGet {
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+				_, _ = fmt.Fprint(w, test.body)
+			}))
+			defer server.Close()
+			got, err := fetchAttachedStatus(server.URL)
+			if err != nil || got != test.want {
+				t.Fatalf("status=%+v error=%v; want %+v", got, err, test.want)
+			}
+		})
 	}
-	got, err := fetchAttachedStatus(u.String())
-	if err != nil || got != want {
-		t.Fatalf("status=%+v error=%v; want %+v", got, err, want)
+}
+
+func TestFetchAttachedStatusRejectsBadRunIDs(t *testing.T) {
+	for _, body := range []string{`{"state":"RUNNING","run_id":1.5}`, `{"state":"RUNNING","run_id":{"id":1}}`, `{"state":"RUNNING","run_id":true}`} {
+		var status attachedStatus
+		if err := json.Unmarshal([]byte(body), &status); err == nil {
+			t.Fatalf("%s decoded as %+v; want an error", body, status)
+		}
+	}
+}
+
+func TestAttachRefusesAnEngineWithoutARunningRun(t *testing.T) {
+	for _, body := range []string{
+		`{"state":"IDLE","since":"2026-10-24T22:50:00Z"}`,
+		`{"state":"COMPLETED","since":"2026-10-24T23:00:00Z","run_id":1792882655698,"step_id":"none-20261024.225738.837"}`,
+		`{"state":"RUNNING","since":"2026-10-24T22:57:41.187Z"}`,
+	} {
+		api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = fmt.Fprint(w, body)
+		}))
+		_, port, err := net.SplitHostPort(strings.TrimPrefix(api.URL, "http://"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := &app{port: "8000", sptAPIPort: port, storage: storageConfig{Hosts: []string{"127.0.0.1"}}, settings: defaultSettings()}
+		request := httptest.NewRequest(http.MethodPost, "/api/attach", strings.NewReader(`{"host":"127.0.0.1"}`))
+		request.Host = "localhost:8000"
+		request.Header.Set("Origin", "http://localhost:8000")
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		a.httpServer().Handler.ServeHTTP(response, request)
+		api.Close()
+		if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "not reporting an active run") || a.attachedHost != "" {
+			t.Fatalf("%s: status=%d body=%s attached=%q", body, response.Code, response.Body.String(), a.attachedHost)
+		}
 	}
 }
