@@ -476,3 +476,14 @@ func TestReadVerifyPrefixHasNoLeadingSlash(t *testing.T) {
 		}
 	}
 }
+
+func TestReadVerifyPrefixOfSlashesStaysAsWritten(t *testing.T) {
+	for _, prefix := range []string{"/", "//"} {
+		if got := readVerifyListPrefix(prefix); got != prefix {
+			t.Errorf("readVerifyListPrefix(%q) = %q", prefix, got)
+		}
+	}
+	if got := readVerifyListPrefix(""); got != "" {
+		t.Errorf("readVerifyListPrefix(\"\") = %q", got)
+	}
+}
