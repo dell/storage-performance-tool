@@ -120,6 +120,11 @@ load:
     node:
       addrs: []
       port: 1099
+    # How long a step in which any engine has a NIC set may take to reach admission: seconds or a
+    # duration such as 10m. It covers the entry node's item distribution and each engine's
+    # preparation, and counts in neither the step's duration nor its rates.
+    preparation:
+      timeout: 10m
 
 output:
   color: true

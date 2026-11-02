@@ -191,6 +191,9 @@ public class TestConfigBuilder {
 		stepLimit.put("size", "100MB");
 		stepLimit.put("time", "60s");
 		step.put("limit", stepLimit);
+		Map<String, Object> stepPreparation = new HashMap<>();
+		stepPreparation.put("timeout", "10m");
+		step.put("preparation", stepPreparation);
 		Map<String, Object> stepNode = new HashMap<>();
 		stepNode.put("addrs", List.of());
 		stepNode.put("port", 9020);

@@ -45,6 +45,8 @@ load:
     node:
       addrs: list
       port: int
+    preparation:
+      timeout: any
   service:
     threads: int
   op:

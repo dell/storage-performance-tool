@@ -20,6 +20,8 @@ import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
 import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.LoadStepBase;
+import com.dell.spt.base.load.step.PreparationStatus;
+import com.dell.spt.base.storage.driver.AdmissionPhase;
 import com.dell.spt.base.load.step.local.context.LoadStepContext;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
@@ -57,6 +59,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private String operationLifecycleWorkerId;
 	private boolean operationLifecyclePublished;
 	private boolean nicPathsPublished;
+	private volatile StepPreparation preparation;
 	private volatile IntegrityTerminalException durationStopFailure;
 	private volatile IntegrityTerminalException durationValidityFailure;
 	private volatile boolean durationAdmissionBarrierSatisfied;
@@ -167,6 +170,10 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				}
 			}
 		}
+		final StepPreparation barrier = preparation;
+		if (barrier != null) {
+			stepContexts.forEach(LoadStepContext::holdForAdmissionBarrier);
+		}
 		boolean anyStarted = false;
 		final var iterator = stepContexts.iterator();
 		while (iterator.hasNext()) {
@@ -191,6 +198,111 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		if (!anyStarted) {
 			throw new IllegalStateException(loadStepId() + ": failed to start any load step contexts");
 		}
+		if (barrier != null) {
+			startPreparationThreads(barrier);
+		}
+	}
+
+	@Override
+	protected final boolean loadIntervalDeferred() {
+		return preparation != null;
+	}
+
+	@Override
+	public final synchronized void startPreparation(final long preparationId, final long budgetNanos) {
+		preparation = new StepPreparation(preparationId, budgetNanos, System.nanoTime());
+	}
+
+	@Override
+	public final PreparationStatus preparationStatus(final long preparationId) {
+		final StepPreparation barrier = preparation;
+		if (barrier == null || barrier.id() != preparationId) {
+			return new PreparationStatus(PreparationStatus.State.FENCED, "", "a stale preparation", 0);
+		}
+		return barrier.status(System.nanoTime());
+	}
+
+	@Override
+	public final synchronized boolean releasePreparedAdmission(final long preparationId) {
+		final StepPreparation barrier = preparation;
+		if (barrier == null || barrier.id() != preparationId) {
+			return false;
+		}
+		if (barrier.released()) {
+			return true;
+		}
+		if (!barrier.release()) {
+			return false;
+		}
+		startLoadInterval();
+		stepContexts.forEach(LoadStepContext::releaseAdmissionBarrier);
+		return true;
+	}
+
+	@Override
+	public final void fencePreparation(final long preparationId) {
+		final StepPreparation barrier = preparation;
+		if (barrier != null && barrier.id() == preparationId) {
+			fence(barrier, "the entry node stopped the preparation");
+		}
+	}
+
+	private void fence(final StepPreparation barrier, final String why) {
+		if (barrier.fence(why, System.nanoTime())) {
+			Loggers.MSG.info("{}: preparation fenced: {}", safeStepIdForPreparation(), why);
+			for (final LoadStepContext stepContext : List.copyOf(stepContexts)) {
+				try {
+					stepContext.stop();
+				} catch (final Exception e) {
+					LogUtil.exception(Level.WARN, e, "{}: failed to stop a fenced context", safeStepIdForPreparation());
+				}
+			}
+		}
+	}
+
+	private String safeStepIdForPreparation() {
+		return config.stringVal("load-step-id");
+	}
+
+	private void startPreparationThreads(final StepPreparation barrier) {
+		final String stepId = safeStepIdForPreparation();
+		final Thread preparing = Thread.ofPlatform().daemon().name("spt-preparation-" + stepId).unstarted(() -> {
+			try (final var logCtx = put(KEY_STEP_ID, stepId).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
+				AdmissionPhase.current(barrier);
+				for (final LoadStepContext stepContext : List.copyOf(stepContexts)) {
+					if (barrier.fenced()) {
+						return;
+					}
+					stepContext.prepareForAdmission(barrier);
+				}
+				barrier.ready(System.nanoTime());
+			} catch (final Throwable failure) {
+				final String message = preparationFailureMessage(failure);
+				Loggers.ERR.error("{}: preparation failed: {}", stepId, message);
+				barrier.fail(message, System.nanoTime());
+			} finally {
+				AdmissionPhase.current(null);
+			}
+		});
+		barrier.onFence(preparing::interrupt);
+		preparing.start();
+		Thread.ofPlatform().daemon().name("spt-preparation-deadline-" + stepId).start(() -> {
+			final long remaining = barrier.deadlineNanos() - System.nanoTime();
+			try {
+				if (remaining > 0) {
+					TimeUnit.NANOSECONDS.sleep(remaining);
+				}
+				fence(barrier, "preparation did not finish before its deadline");
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		});
+	}
+
+	private static String preparationFailureMessage(final Throwable failure) {
+		final RunTerminalException terminal = RunTerminalException.find(failure);
+		final Throwable source = terminal != null ? terminal : failure;
+		return source.getMessage() != null ? source.getMessage() : source.toString();
 	}
 
 	@Override
@@ -447,6 +559,10 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	protected final void doShutdown() {
+		final StepPreparation barrier = preparation;
+		if (barrier != null && !barrier.released()) {
+			fence(barrier, "the step stopped during preparation");
+		}
 		closeSteadyWindows("shutdown");
 		if (standaloneDeleteDurationMode()) {
 			prepareDurationStop();

@@ -11,6 +11,7 @@ import com.dell.spt.base.nic.RdmaDeviceProbe;
 import com.dell.spt.base.nic.SysfsInventoryReader;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.control.run.RunTerminalException;
+import com.dell.spt.base.storage.driver.AdmissionPhase;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetConnectionPool.OpenNic;
 import io.netty.channel.EventLoopGroup;
 import java.io.IOException;
@@ -80,6 +81,7 @@ public final class NicSetSupport {
 	 */
 	public void open(final NicSetConnectionPool pool, final List<String> endpoints, final int concurrencyLimit,
 					final IoGroupFactory groups, final Runnable shutdownGroups) throws InterruptedException {
+		AdmissionPhase.report("resolving NICs");
 		final NicInventory inventory;
 		try {
 			inventory = environment.inventory().read();
@@ -104,6 +106,7 @@ public final class NicSetSupport {
 				nics.add(new OpenNic(nic, groups.create(settings.threadsPerNic(), nic.name())));
 			}
 			pool.open(nics, environment.binding(), settings.connectTimeoutMillis(), concurrencyLimit);
+			AdmissionPhase.report("probing paths");
 			final var failures = pool.probe(settings.probeTimeoutMillis(), (nic, destination) -> {
 				final int address = Ipv4.parse(destination.getHostAddress());
 				return inventory.routes().stream().anyMatch(route -> route.iface().equals(nic) && route.covers(address));
@@ -127,6 +130,7 @@ public final class NicSetSupport {
 	 */
 	public void started(final NicSetConnectionPool pool, final int concurrencyLimit) throws InterruptedException {
 		if (concurrencyLimit <= 0) {
+			AdmissionPhase.report("connecting");
 			pool.preOpen(concurrencyLimit, settings.probeTimeoutMillis());
 		}
 		for (final var state : pool.state()) {
