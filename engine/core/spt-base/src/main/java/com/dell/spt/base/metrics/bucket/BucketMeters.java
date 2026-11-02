@@ -28,6 +28,15 @@ public final class BucketMeters {
 		return members.size();
 	}
 
+	BucketKind kindOf(final int slot) {
+		return slot < members.size() ? BucketKind.MEMBER : BucketKind.CATCH_ALL;
+	}
+
+	/** The member's name at a slot, or null for the catch-all's. */
+	String nameOf(final int slot) {
+		return slot < members.size() ? members.get(slot) : null;
+	}
+
 	/** The sets by slot, the members in set order and then the catch-all. */
 	BucketMeterSet[] sets() {
 		return sets;

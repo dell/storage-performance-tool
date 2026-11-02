@@ -2,8 +2,12 @@ package com.dell.spt.base.metrics.bucket;
 
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.MetricsConstants;
+import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshotImpl;
 import com.dell.spt.base.metrics.type.TimingMeterImpl;
+import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.IntFunction;
+import java.util.function.LongSupplier;
 
 /**
  * The meters of one bucket and operation type. It has the aggregate's method set and records what
@@ -16,9 +20,9 @@ public final class BucketMeterSet {
 	private final LongAdder failed = new LongAdder();
 	private final LongAdder corrupt = new LongAdder();
 	private final LongAdder bytes = new LongAdder();
-	private final TimingMeterImpl duration = new TimingMeterImpl(MetricsConstants.METRIC_NAME_DUR);
-	private final TimingMeterImpl latency = new TimingMeterImpl(MetricsConstants.METRIC_NAME_LAT);
-	private final TimingMeterImpl timeToFirstByte = new TimingMeterImpl(MetricsConstants.METRIC_NAME_TTFB);
+	private final BucketTimingMeter duration = new BucketTimingMeter(MetricsConstants.METRIC_NAME_DUR);
+	private final BucketTimingMeter latency = new BucketTimingMeter(MetricsConstants.METRIC_NAME_LAT);
+	private final BucketTimingMeter timeToFirstByte = new BucketTimingMeter(MetricsConstants.METRIC_NAME_TTFB);
 
 	public void markSucc(final long byteCount, final long durationMicros, final long latencyMicros, final long ttfbMicros) {
 		succeeded.increment();
@@ -63,6 +67,48 @@ public final class BucketMeterSet {
 	private void updateTimings(final long latencyMicros, final long durationMicros, final long ttfbMicros) {
 		TimingMeterImpl.updateRequestTimings(
 						duration, latency, timeToFirstByte, latencyMicros, durationMicros, ttfbMicros);
+	}
+
+	/** Copies this set's readings at this instant. */
+	BucketCut cut(final LongSupplier clock) {
+		final long time = clock.getAsLong();
+		return new BucketCut(
+						time,
+						succeeded.sum(),
+						failed.sum(),
+						corrupt.sum(),
+						bytes.sum(),
+						duration.histogramCopy(),
+						latency.histogramCopy(),
+						timeToFirstByte.histogramCopy());
+	}
+
+	/**
+	 * The values between two cuts of this set, with each timing's population encoded so that the
+	 * record stays mergeable once the cuts are released. The end cut is differenced in place, so
+	 * the pass holds no third copy.
+	 */
+	BucketTerminalRecord windowRecord(
+					final OpType opType,
+					final BucketKind kind,
+					final String bucket,
+					final BucketCut start,
+					final BucketCut end,
+					final IntFunction<ByteBuffer> encodeBuffer) {
+		return new BucketTerminalRecord(
+						opType,
+						kind,
+						bucket,
+						end.succeeded - start.succeeded,
+						end.failed - start.failed,
+						end.corrupt - start.corrupt,
+						end.bytes - start.bytes,
+						TimingMetricSnapshotImpl.ofWindow(
+										MetricsConstants.METRIC_NAME_DUR, end.duration, start.duration, encodeBuffer),
+						TimingMetricSnapshotImpl.ofWindow(
+										MetricsConstants.METRIC_NAME_LAT, end.latency, start.latency, encodeBuffer),
+						TimingMetricSnapshotImpl.ofWindow(
+										MetricsConstants.METRIC_NAME_TTFB, end.timeToFirstByte, start.timeToFirstByte, encodeBuffer));
 	}
 
 	BucketTerminalRecord terminalRecord(final OpType opType, final BucketKind kind, final String bucket) {

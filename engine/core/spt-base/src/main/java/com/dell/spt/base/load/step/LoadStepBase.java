@@ -282,7 +282,11 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 				LogUtil.exception(Level.WARN, e, "{}: failed to close the steady-state window", loadStepId());
 			}
 		}
+		afterSteadyWindowsClosed();
 	}
+
+	/** Called once every aggregate window of this step has closed, before the stop-path action. */
+	protected void afterSteadyWindowsClosed() {}
 
 	private void recordRunFailure(final Throwable failure) {
 		if (failure == null || failure == runFailure) {

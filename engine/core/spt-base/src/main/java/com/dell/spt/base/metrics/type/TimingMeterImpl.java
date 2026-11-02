@@ -49,9 +49,9 @@ public class TimingMeterImpl implements LongMeter<TimingMetricSnapshot> {
 	 * it has one, and a time to first byte when it falls within the duration.
 	 */
 	public static void updateRequestTimings(
-					final TimingMeterImpl duration,
-					final TimingMeterImpl latency,
-					final TimingMeterImpl timeToFirstByte,
+					final LongMeter<?> duration,
+					final LongMeter<?> latency,
+					final LongMeter<?> timeToFirstByte,
 					final long latencyMicros,
 					final long durationMicros,
 					final long ttfbMicros) {

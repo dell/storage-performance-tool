@@ -28,6 +28,7 @@ import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.bucket.BucketMeters;
 import com.dell.spt.base.metrics.bucket.BucketMetricsBudget;
 import com.dell.spt.base.metrics.bucket.BucketRecorder;
+import com.dell.spt.base.metrics.bucket.BucketStepFence;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketSet;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
@@ -60,6 +61,8 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private static final String BUCKET_METRICS_ENABLED = "output-metrics-bucket-enabled";
 
 	private final List<BucketMeters> bucketMeters = new ArrayList<>();
+	private final Map<MetricsContext, BucketStepFence.ContextCuts> bucketCuts = new IdentityHashMap<>();
+	private BucketStepFence bucketFence;
 	private long bucketMeterSets;
 
 	private static final long STEP_CONTEXT_POLL_NANOS = 10_000_000L; // 10ms
@@ -418,7 +421,26 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 							type, metersOfContext.computeIfAbsent(context, c -> new BucketMeters(c.opType(), members))));
 		}
 		bucketMeters.addAll(metersOfContext.values());
-		return new BucketRecorder(members, primaryMeters, metersOfType);
+		final List<BucketStepFence.ContextCuts> ownCuts = new ArrayList<>(metersOfContext.size());
+		metersOfContext.forEach((context, meters) -> {
+			if (bucketFence == null) {
+				bucketFence = new BucketStepFence(loadStepId());
+			}
+			final BucketStepFence.ContextCuts cuts = bucketFence.register(meters);
+			if (context.steadyWindowListener(cuts)) {
+				ownCuts.add(cuts);
+			}
+			bucketCuts.put(context, cuts);
+		});
+		final BucketStepFence fence = bucketFence;
+		return new BucketRecorder(members, primaryMeters, metersOfType, () -> fence.await(ownCuts));
+	}
+
+	@Override
+	protected final void afterSteadyWindowsClosed() {
+		if (bucketFence != null) {
+			bucketFence.await();
+		}
 	}
 
 	/** The bucket meters this step built, which are empty when bucket metrics are off. */
@@ -1137,6 +1159,9 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	protected final void doClose() throws IOException {
+		if (bucketFence != null) {
+			bucketFence.close();
+		}
 		if (standaloneDeleteDurationMode()) {
 			try {
 				closeDurationContexts();

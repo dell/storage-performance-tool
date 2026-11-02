@@ -2178,6 +2178,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				opTypeCtx.closeSteadyWindow(cause);
 			}
 		}
+		if (bucketRecorder != null) {
+			bucketRecorder.awaitFence();
+		}
 	}
 
 	/** Closes both admission gates without recovering or draining queued work. */

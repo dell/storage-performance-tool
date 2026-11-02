@@ -17,6 +17,7 @@ public final class BucketRecorder {
 	private final BucketSlotTable table;
 	private final BucketMeterSet[] primary;
 	private final BucketMeterSet[][] byOpType;
+	private final Runnable awaitFence;
 
 	/**
 	 * @param members the step's Target Bucket Set, by name
@@ -25,6 +26,16 @@ public final class BucketRecorder {
 	 */
 	public BucketRecorder(
 					final List<String> members, final BucketMeters primary, final Map<OpType, BucketMeters> byOpType) {
+		this(members, primary, byOpType, () -> {});
+	}
+
+	/** @param awaitFence joins the step's fence for this context's windows */
+	public BucketRecorder(
+					final List<String> members,
+					final BucketMeters primary,
+					final Map<OpType, BucketMeters> byOpType,
+					final Runnable awaitFence) {
+		this.awaitFence = awaitFence;
 		table = new BucketSlotTable(members);
 		this.primary = primary.sets();
 		if (byOpType == null || byOpType.isEmpty()) {
@@ -33,6 +44,11 @@ public final class BucketRecorder {
 			this.byOpType = new BucketMeterSet[OP_TYPES.length][];
 			byOpType.forEach((type, meters) -> this.byOpType[type.ordinal()] = meters.sets());
 		}
+	}
+
+	/** Joins the step's fence, after this context has closed its aggregate windows. */
+	public void awaitFence() {
+		awaitFence.run();
 	}
 
 	/** The set the operation's result belongs to, for a site that routes through its type. */

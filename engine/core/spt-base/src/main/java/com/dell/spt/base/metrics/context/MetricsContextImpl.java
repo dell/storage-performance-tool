@@ -124,6 +124,15 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 	}
 
 	@Override
+	public final boolean steadyWindowListener(final SteadyWindow.Listener listener) {
+		if (steadyWindow == null) {
+			return false;
+		}
+		steadyWindow.listener(listener);
+		return true;
+	}
+
+	@Override
 	public final void observeSteadyWindow() {
 		if (steadyWindow != null) {
 			steadyWindow.observe();

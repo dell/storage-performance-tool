@@ -4,7 +4,7 @@ import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException.Category;
 import com.dell.spt.base.metrics.type.TimingMeterImpl;
 import java.util.Locale;
-import org.HdrHistogram.ConcurrentHistogram;
+import org.HdrHistogram.AtomicHistogram;
 import org.HdrHistogram.Histogram;
 
 /**
@@ -33,7 +33,7 @@ public final class BucketMetricsBudget {
 		private Footprint() {}
 
 		private static long live() {
-			return new ConcurrentHistogram(
+			return new AtomicHistogram(
 							1L,
 							TimingMeterImpl.HIGHEST_TRACKABLE_VALUE_MICROS,
 							TimingMeterImpl.SIGNIFICANT_VALUE_DIGITS).getEstimatedFootprintInBytes();
