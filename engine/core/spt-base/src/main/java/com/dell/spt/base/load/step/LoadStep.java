@@ -125,7 +125,7 @@ public interface LoadStep extends Daemon {
 		throw new RemoteException(NO_ADMISSION_BARRIER);
 	}
 
-	/** Fences the preparation for good and stops the contexts. Idempotent. */
+	/** Fences the preparation for good and starts stopping the contexts, without waiting. Idempotent. */
 	default void fencePreparation(final long preparationId) throws RemoteException {
 		throw new RemoteException(NO_ADMISSION_BARRIER);
 	}

@@ -24,9 +24,8 @@ public final class NicPathsArtifact {
 
 	private NicPathsArtifact() {}
 
-	/** Publish synchronously after stop; async logging plus flush does not drain its queue. */
 	/**
-	 * Writes the step's per-path file.
+	 * Writes the step's per-path file. Publish synchronously after stop; async logging plus flush does not drain its queue.
 	 *
 	 * @param admitted false when the step failed at the admission barrier: its end record then says
 	 *     incomplete, even on an engine that was ready and whose contexts handed over complete rows
