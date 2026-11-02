@@ -913,9 +913,15 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 						nextChildOps = List.of(op);
 						childFailureContext = "part retry";
 					} else {
-						// retries exhausted — abort the MPU
 						parentOp.put("mpuFailure", op.status().name());
-						parentOp.put("mpuAbort", "true");
+						if (OpType.READ.equals(op.type())) {
+							// Range reads are stateless, so there is nothing to abort: the other
+							// ranges finish, and finalization reports this failure.
+							nextChildOps = (List<O>) parentOp.nextSubOperations(1);
+						} else {
+							// retries exhausted — abort the MPU
+							parentOp.put("mpuAbort", "true");
+						}
 					}
 				} else if (parentOp.get("mpuAbort") == null) {
 					// Part succeeded, fetch next part if any
@@ -955,6 +961,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		}
 		if (!parentOp.allSubOperationsDone()) {
 			return false;
+		}
+		if (parentOp.get("mpuFailure") != null) {
+			return markFinalizationEnqueued(parentOp);
 		}
 		for (final var rawSubOp : parentOp.subOperations()) {
 			final var subOp = (PartialOperation) rawSubOp;

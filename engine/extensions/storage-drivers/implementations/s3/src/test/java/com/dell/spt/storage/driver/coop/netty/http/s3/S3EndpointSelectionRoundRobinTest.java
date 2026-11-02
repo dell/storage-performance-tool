@@ -51,6 +51,9 @@ final class S3EndpointSelectionRoundRobinTest {
 	private final List<AutoCloseable> resources = new ArrayList<>();
 	private volatile boolean failFirstPart;
 	private volatile boolean dropFirstPart;
+	/** Answers a range starting at this byte with {@link #failedRangeStatus}, or drops it if that is 0. */
+	private volatile long failedRangeStart = -1;
+	private volatile int failedRangeStatus;
 	private volatile int completeStatus = 200;
 
 	private record Captured(int listener, String method, String path, String query, String host, int clientPort) {}
@@ -289,6 +292,45 @@ final class S3EndpointSelectionRoundRobinTest {
 	}
 
 	@Test
+	void aCompositeReadWhoseLastRangeLosesEveryConnectionFails() throws Exception {
+		assertEquals(Operation.Status.FAIL_IO, compositeReadWithAFailedRange(2 * ITEM_SIZE, 0).status());
+	}
+
+	@Test
+	void aCompositeReadWhoseFirstRangeLosesEveryConnectionFails() throws Exception {
+		assertEquals(Operation.Status.FAIL_IO, compositeReadWithAFailedRange(0, 0).status());
+	}
+
+	@Test
+	void aCompositeReadWhoseRangeAlwaysGetsAnErrorFails() throws Exception {
+		assertEquals(Operation.Status.RESP_FAIL_SVC, compositeReadWithAFailedRange(2 * ITEM_SIZE, 500).status());
+	}
+
+	/** Other ranges are in flight when one runs out of retries: they finish, and then the read fails, once. */
+	@Test
+	void aCompositeReadFailsOnceItsOtherRangesEnd() throws Exception {
+		failedRangeStart = 0;
+		final var run = driver(listeners(3), null, 4);
+		final var item = new DataItemImpl("ranged", 9, 12L * ITEM_SIZE);
+		assertTrue(run.driver().put(new CompositeDataOperationImpl<DataItem>(
+						0, OpType.READ, item, null, "/bucket", CREDENTIAL, null, 0, ITEM_SIZE)));
+
+		assertEquals(Operation.Status.FAIL_IO, awaitComposite(run).status());
+		assertEquals(15, requests.stream().filter(r -> "GET".equals(r.method())).count(), "four tries of one range, and the other 11");
+		assertEquals(0, run.driver().activeOpCount());
+	}
+
+	private Operation<?> compositeReadWithAFailedRange(final long start, final int status) throws Exception {
+		failedRangeStart = start;
+		failedRangeStatus = status;
+		final var run = driver(listeners(3), null, 1);
+		final var item = new DataItemImpl("ranged", 9, 3L * ITEM_SIZE);
+		assertTrue(run.driver().put(new CompositeDataOperationImpl<DataItem>(
+						0, OpType.READ, item, null, "/bucket", CREDENTIAL, null, 0, ITEM_SIZE)));
+		return awaitComposite(run);
+	}
+
+	@Test
 	void retriedPartTakesALaterTurn() throws Exception {
 		failFirstPart = true;
 		final var endpoints = listeners(3);
@@ -496,6 +538,12 @@ final class S3EndpointSelectionRoundRobinTest {
 							exchange.getRequestHeaders().getFirst("Host"), exchange.getRemoteAddress().getPort()));
 			byte[] body = new byte[0];
 			final var range = exchange.getRequestHeaders().getFirst("Range");
+			if ("GET".equals(method) && range != null && range.startsWith("bytes=" + failedRangeStart + "-")) {
+				if (failedRangeStatus != 0) {
+					exchange.sendResponseHeaders(failedRangeStatus, -1);
+				}
+				return;
+			}
 			if ("PUT".equals(method) && query != null && query.contains("partNumber=1&") && dropFirstPart) {
 				// Closing the exchange unanswered closes the connection.
 				dropFirstPart = false;
