@@ -306,7 +306,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			throw new IllegalConfigurationException(
 							AdmissionBarrier.TIMEOUT_SETTING + " must be greater than 0, not " + raw);
 		}
-		return new AdmissionBarrier(loadStepId(), TimeUnit.SECONDS.toNanos(seconds), String.valueOf(raw));
+		final String timeoutText = raw instanceof Number || String.valueOf(raw).matches("\\d+") ? raw + " s" : String.valueOf(raw);
+		return new AdmissionBarrier(loadStepId(), TimeUnit.SECONDS.toNanos(seconds), timeoutText);
 	}
 
 	private void openAdmissionBarrier(final AdmissionBarrier barrier) throws InterruptedException {

@@ -323,9 +323,12 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				}
 				barrier.ready(System.nanoTime());
 			} catch (final Throwable failure) {
-				final String message = preparationFailureMessage(failure);
-				Loggers.ERR.error("{}: preparation failed: {}", stepId, message);
-				barrier.fail(message, System.nanoTime());
+				// A fence interrupts blocked work; that is not a failure of its own.
+				if (!barrier.fenced()) {
+					final String message = preparationFailureMessage(failure);
+					Loggers.ERR.error("{}: preparation failed: {}", stepId, message);
+					barrier.fail(message, System.nanoTime());
+				}
 			} finally {
 				AdmissionPhase.current(null);
 			}
