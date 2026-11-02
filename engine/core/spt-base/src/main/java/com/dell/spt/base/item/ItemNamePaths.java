@@ -17,8 +17,7 @@ public final class ItemNamePaths {
 	private static final char SEPARATOR = '/';
 	private static final int DIFFERENT_FORM = -1;
 
-	private ItemNamePaths() {
-	}
+	private ItemNamePaths() {}
 
 	/** Returns whether the name already holds the path, under the rule in the class comment. */
 	public static boolean holdsPath(final String name, final String path) {

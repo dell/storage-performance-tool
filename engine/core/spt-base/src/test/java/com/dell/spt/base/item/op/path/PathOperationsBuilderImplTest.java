@@ -65,18 +65,18 @@ final class PathOperationsBuilderImplTest {
 
 	@ParameterizedTest
 	@CsvSource(value = {
-		"/abc | abc/ | abc/",
-		"/abc | abcdef/ | abcdef/",
-		"/abc | abc | abc",
-		"/abc | zzz/ | zzz/",
-		"/abc | /abc/zzz/ | zzz/",
-		"/abc | /abc/ | ''",
-		"/abc | /abc | ''",
-		"/abc | /abcdef/ | abcdef/",
-		"/abc | /zzz/ | zzz/",
-		"abc | abc/zzz/ | zzz/",
-		"abc | abc | ''",
-		"abc | /abc/zzz/ | zzz/",
+			"/abc | abc/ | abc/",
+			"/abc | abcdef/ | abcdef/",
+			"/abc | abc | abc",
+			"/abc | zzz/ | zzz/",
+			"/abc | /abc/zzz/ | zzz/",
+			"/abc | /abc/ | ''",
+			"/abc | /abc | ''",
+			"/abc | /abcdef/ | abcdef/",
+			"/abc | /zzz/ | zzz/",
+			"abc | abc/zzz/ | zzz/",
+			"abc | abc | ''",
+			"abc | /abc/zzz/ | zzz/",
 	}, delimiter = '|')
 	void listSeedKeepsAPrefixThatRepeatsTheBucket(
 					final String path, final String seed, final String expected) throws Exception {

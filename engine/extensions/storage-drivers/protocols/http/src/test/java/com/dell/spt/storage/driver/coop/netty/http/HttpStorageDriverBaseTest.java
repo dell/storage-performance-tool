@@ -429,16 +429,16 @@ class HttpStorageDriverBaseTest {
 	/** The first request and every later use of the recorded name address the same object. */
 	@ParameterizedTest
 	@CsvSource({
-		"abc/s0/k, /abc, /abc/abc/s0/k",
-		"abcdef/s0/k, /abc, /abc/abcdef/s0/k",
-		"zzz/s0/k, /abc, /abc/zzz/s0/k",
-		"s0/k, /s00, /s00/s0/k",
-		"k, /abc/, /abc/k",
-		"/k, /abc, /abc/k",
-		"/k, /abc/, /abc/k",
-		"k, abc, /abc/k",
-		"abc/k, abc, /abc/k",
-		"/abc/k, abc, /abc/k",
+			"abc/s0/k, /abc, /abc/abc/s0/k",
+			"abcdef/s0/k, /abc, /abc/abcdef/s0/k",
+			"zzz/s0/k, /abc, /abc/zzz/s0/k",
+			"s0/k, /s00, /s00/s0/k",
+			"k, /abc/, /abc/k",
+			"/k, /abc, /abc/k",
+			"/k, /abc/, /abc/k",
+			"k, abc, /abc/k",
+			"abc/k, abc, /abc/k",
+			"/abc/k, abc, /abc/k",
 	})
 	void dataUriPath_agreesWithTheRecordedName(
 					final String name, final String path, final String expected) throws Exception {

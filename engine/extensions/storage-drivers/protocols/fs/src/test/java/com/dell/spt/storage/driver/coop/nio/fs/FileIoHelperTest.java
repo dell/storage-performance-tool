@@ -41,7 +41,8 @@ public class FileIoHelperTest {
 		final Path dir = Files.createTempDirectory("fs-open-src-boundary-");
 		final Path source = Files.createDirectories(dir.resolve("abc"));
 		final Path sibling = Files.createDirectories(dir.resolve("abcdef"));
-		Files.write(sibling.resolve("file.bin"), new byte[]{1});
+		Files.write(sibling.resolve("file.bin"), new byte[]{1
+		});
 
 		// The name starts with the source path's letters, not with the source path.
 		final DataItemImpl item = new DataItemImpl(sibling.resolve("file.bin").toString(), 0, 1);

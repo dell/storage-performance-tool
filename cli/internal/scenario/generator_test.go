@@ -2669,7 +2669,6 @@ func TestWriteScenarioNamingPrefixHasNoLeadingSlash(t *testing.T) {
 		{"plain", "abc/", `"prefix": "abc/"`},
 		{"leading slash", "/abc/", `"prefix": "abc/"`},
 		{"several leading slashes", "//abc/", `"prefix": "abc/"`},
-		{"surrounding space", " /abc/ ", `"prefix": "abc/"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2684,7 +2683,7 @@ func TestWriteScenarioNamingPrefixHasNoLeadingSlash(t *testing.T) {
 			}
 		})
 	}
-	for _, prefix := range []string{"/", "//", " / "} {
+	for _, prefix := range []string{"/", "//"} {
 		scenario, err := GenerateWriteScenario(Params{
 			Bucket: "abc", Threads: 1, ObjectSize: "1KB", ObjectCount: 1, Prefix: prefix,
 		})

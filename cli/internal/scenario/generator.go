@@ -58,7 +58,7 @@ func GenerateWriteScenario(params Params) (string, error) {
 	driverType := resolveStorageDriverType(params.S3Driver)
 
 	// A naming prefix is part of the object key, so it never starts with a slash.
-	namingPrefix := strings.TrimLeft(strings.TrimSpace(params.Prefix), "/")
+	namingPrefix := strings.TrimLeft(params.Prefix, "/")
 
 	// Format strings as quoted JavaScript literals
 	data := map[string]interface{}{

@@ -682,10 +682,12 @@ public class S3AwsStorageDriverTest {
 			when(item.name()).thenReturn("abc/s0/k");
 			when(op.item()).thenReturn(item);
 
-			assertArrayEquals(new String[]{"abc", "abc/s0/k"}, drv.resolveBucketAndKey(op));
+			assertArrayEquals(new String[]{"abc", "abc/s0/k"
+			}, drv.resolveBucketAndKey(op));
 
 			when(item.name()).thenReturn("/abc/abc/s0/k");
-			assertArrayEquals(new String[]{"abc", "abc/s0/k"}, drv.resolveBucketAndKey(op));
+			assertArrayEquals(new String[]{"abc", "abc/s0/k"
+			}, drv.resolveBucketAndKey(op));
 		}
 
 		@SuppressWarnings("unchecked")
@@ -697,10 +699,12 @@ public class S3AwsStorageDriverTest {
 			when(item.name()).thenReturn("pre/k");
 			when(op.item()).thenReturn(item);
 
-			assertArrayEquals(new String[]{"abc", "pre/pre/k"}, drv.resolveBucketAndKey(op));
+			assertArrayEquals(new String[]{"abc", "pre/pre/k"
+			}, drv.resolveBucketAndKey(op));
 
 			when(item.name()).thenReturn("/abc/pre/pre/k");
-			assertArrayEquals(new String[]{"abc", "pre/pre/k"}, drv.resolveBucketAndKey(op));
+			assertArrayEquals(new String[]{"abc", "pre/pre/k"
+			}, drv.resolveBucketAndKey(op));
 		}
 
 		@SuppressWarnings("unchecked")
@@ -712,7 +716,8 @@ public class S3AwsStorageDriverTest {
 			when(item.name()).thenReturn("abcdef/k");
 			when(op.item()).thenReturn(item);
 
-			assertArrayEquals(new String[]{"abc", "abcdef/k"}, drv.resolveBucketAndKey(op));
+			assertArrayEquals(new String[]{"abc", "abcdef/k"
+			}, drv.resolveBucketAndKey(op));
 		}
 
 		@SuppressWarnings("unchecked")
@@ -724,7 +729,8 @@ public class S3AwsStorageDriverTest {
 			when(item.name()).thenReturn("/abc/k");
 			when(op.item()).thenReturn(item);
 
-			assertArrayEquals(new String[]{"abc", "k"}, drv.resolveBucketAndKey(op));
+			assertArrayEquals(new String[]{"abc", "k"
+			}, drv.resolveBucketAndKey(op));
 		}
 	}
 

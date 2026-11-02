@@ -31,11 +31,9 @@ public final class ItemNamePathsBench {
 		String apply(String name, String path);
 	}
 
-	private record Case(String name, String[] names, Arm before, Arm after) {
-	}
+	private record Case(String name, String[] names, Arm before, Arm after) {}
 
-	private ItemNamePathsBench() {
-	}
+	private ItemNamePathsBench() {}
 
 	public static void main(final String... args) {
 		final int rounds = args.length > 0 ? Integer.parseInt(args[0]) : 31;
