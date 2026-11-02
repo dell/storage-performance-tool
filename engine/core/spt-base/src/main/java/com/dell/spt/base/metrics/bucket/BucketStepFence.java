@@ -259,7 +259,8 @@ public final class BucketStepFence implements AutoCloseable {
 										finish(BucketSteadyOutcome.measured(records.inOrder()));
 									}
 								},
-								error -> finish(BucketSteadyOutcome.unmeasured("the end cut failed: " + error)));
+								error -> finish(BucketSteadyOutcome.unmeasured(
+												overdue() ? DEADLINE_PASSED : "the end cut failed: " + error)));
 			});
 		}
 

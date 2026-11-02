@@ -382,30 +382,32 @@ class BucketStepFenceTest {
 		assertEquals(BucketSteadyOutcome.Kind.MEASURED, later.outcome().kind());
 	}
 
-	/** With nobody waiting for it, an overdue pass still gives up the only cut thread between sets. */
+	/**
+	 * With nobody waiting for it, an overdue pass still gives up the only cut thread between sets. Its
+	 * pass would take five budgets, so without that the later context spends its own budget queued.
+	 */
 	@Test
 	void anOverduePassLeavesThePoolForALaterContextWithNoCloserWaiting() throws Exception {
 		fence = new BucketStepFence("fence-test", SHORT_BUDGET, 1, System::nanoTime);
-		final var old = context(fence);
+		final List<String> many = new java.util.ArrayList<>();
+		for (int i = 0; i < 100; i++) {
+			many.add("member-" + i);
+		}
+		final var old = fence.register(new BucketMeters(OpType.CREATE, many));
 		final var later = context(fence);
 		old.onWindowStart(System.nanoTime());
 		later.onWindowStart(System.nanoTime());
 		awaitStarted(old);
 		awaitStarted(later);
-		final CountDownLatch go = new CountDownLatch(1);
-		final AtomicInteger held = new AtomicInteger();
 		fence.beforeSetPass(slot -> {
-			if (held.getAndIncrement() == 0) {
-				try {
-					go.await();
-				} catch (final InterruptedException e) {
-					throw new IllegalStateException(e);
-				}
+			try {
+				Thread.sleep(15);
+			} catch (final InterruptedException e) {
+				throw new IllegalStateException(e);
 			}
 		});
 		old.onWindowClose(System.nanoTime(), true, NO_RESULT);
-		Thread.sleep(TimeUnit.NANOSECONDS.toMillis(SHORT_BUDGET) + 100);
-		go.countDown();
+		Thread.sleep(TimeUnit.NANOSECONDS.toMillis(SHORT_BUDGET) + 50);
 		later.onWindowClose(System.nanoTime(), true, NO_RESULT);
 		fence.await();
 		assertEquals(BucketSteadyOutcome.Kind.MEASURED, later.outcome().kind());
@@ -415,6 +417,29 @@ class BucketStepFenceTest {
 			Thread.sleep(1);
 		}
 		assertEquals(BucketSteadyOutcome.Kind.UNMEASURED, old.outcome().kind());
+		assertEquals("the fence deadline passed", old.outcome().reason());
+	}
+
+	/** A later closer finds the result the first one computed, even when the listener threw an Error. */
+	@Test
+	void aListenerErrorStillLeavesTheWindowsResult() throws Exception {
+		final var context = steadyContext(OpType.CREATE);
+		assertTrue(context.steadyWindowListener(new com.dell.spt.base.metrics.steady.SteadyWindow.Listener() {
+			@Override
+			public void onWindowStart(final long startNanos) {}
+
+			@Override
+			public void onWindowClose(final long endNanos, final boolean started, final SteadyResult result) {
+				throw new AssertionError("listener");
+			}
+		}));
+		context.markSucc(1, 100, 50, 25);
+		context.observeSteadyWindow();
+		org.junit.jupiter.api.Assertions.assertThrows(AssertionError.class, () -> context.closeSteadyWindow("first"));
+		final SteadyResult second = context.closeSteadyWindow("second");
+		assertNotNull(second);
+		assertEquals("first", second.cause());
+		context.close();
 	}
 
 	/** A miss costs the context that missed, and the pool stays usable for the ones after it. */
