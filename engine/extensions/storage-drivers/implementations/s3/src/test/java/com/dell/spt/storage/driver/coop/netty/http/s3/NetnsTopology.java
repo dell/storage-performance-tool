@@ -19,6 +19,7 @@ import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -47,6 +48,7 @@ final class NetnsTopology implements AutoCloseable {
 	private static final String BRIDGE = "sptbr";
 	private static final String PREFIX = "/24";
 	private static final long COMMAND_TIMEOUT_SECONDS = 10;
+	private static final Pattern MAPPED_IPV4 = Pattern.compile("\\[::ffff:([0-9.]+)]");
 	private static final String REQUIREMENTS = "The network-namespace tests need NET_ADMIN and SYS_ADMIN over their network "
 					+ "namespace and a sysfs mounted in it: run engine/tools/netns-test.sh, or a container started with "
 					+ "--cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-drop NET_RAW";
@@ -224,7 +226,7 @@ final class NetnsTopology implements AutoCloseable {
 	static List<Connection> established() throws Exception {
 		final List<Connection> connections = new ArrayList<>();
 		for (final var line : run("ss", "-Htn", "state", "established").split("\n", -1)) {
-			final var fields = line.trim().split("\\s+", -1);
+			final var fields = socketFields(line);
 			if (fields.length < 4 || !ENDPOINTS.contains(fields[3])) {
 				continue;
 			}
@@ -242,12 +244,20 @@ final class NetnsTopology implements AutoCloseable {
 	static List<String> synSent() throws Exception {
 		final List<String> peers = new ArrayList<>();
 		for (final var line : run("ss", "-Htn", "state", "syn-sent").split("\n", -1)) {
-			final var fields = line.trim().split("\\s+", -1);
+			final var fields = socketFields(line);
 			if (fields.length >= 4 && ENDPOINTS.contains(fields[3])) {
 				peers.add(fields[3]);
 			}
 		}
 		return peers;
+	}
+
+	/**
+	 * The fields of one {@code ss} line, with IPv4 addresses as IPv4. Netty's sockets are dual-stack
+	 * where the kernel has IPv6, and {@code ss} shows their addresses as {@code [::ffff:a.b.c.d]}.
+	 */
+	private static String[] socketFields(final String line) {
+		return MAPPED_IPV4.matcher(line.trim()).replaceAll("$1").split("\\s+", -1);
 	}
 
 	/** Runs {@code ip} with {@code args} in this JVM's namespace, the client's. */

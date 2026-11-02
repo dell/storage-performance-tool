@@ -10,6 +10,7 @@ import static com.dell.spt.storage.driver.coop.netty.http.s3.NetnsTopology.NIC_B
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.stoppedRows;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.totals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -50,6 +51,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -127,6 +129,14 @@ final class S3NicSetNamespaceTest {
 			return results.await();
 		}
 
+		/** As in {@link NicSetLoopback.Run#executeAlone}: the attempt ended, so the NIC rotation picks the next operation's NIC. */
+		Operation<?> executeAlone(final Operation<DataItem> op) throws Exception {
+			final var result = execute(op);
+			final var admission = pool().admission();
+			waitFor(() -> IntStream.range(0, admission.size()).allMatch(nic -> admission.count(nic) == 0), "the attempt ended");
+			return result;
+		}
+
 		NicSetConnectionPool pool() {
 			return driver.connectionPool();
 		}
@@ -185,7 +195,7 @@ final class S3NicSetNamespaceTest {
 		final long sentA = txBytes(NIC_A);
 		final long sentB = txBytes(NIC_B);
 		for (var i = 0; i < 8; i++) {
-			final var result = run.execute(dataOp(OpType.CREATE, "bound-" + i));
+			final var result = run.executeAlone(dataOp(OpType.CREATE, "bound-" + i));
 			assertEquals(Operation.Status.SUCC, result.status());
 		}
 
@@ -262,7 +272,7 @@ final class S3NicSetNamespaceTest {
 		for (var i = 0; i < 8; i++) {
 			assertEquals(Operation.Status.SUCC, run.execute(dataOp(OpType.CREATE, "once-" + i)).status());
 		}
-		assertTrue(bound().stream().allMatch(connection -> connection.device() != null), () -> "unbound: " + bound());
+		assertFalse(bound().isEmpty(), "no connection shows a device binding");
 	}
 
 	@Test

@@ -123,7 +123,7 @@ final class S3NicSetDriverTest {
 
 		final List<String> recorded = new ArrayList<>();
 		for (var i = 0; i < 6; i++) {
-			final var result = run.execute(dataOp(OpType.CREATE, "nic-" + i));
+			final var result = run.executeAlone(dataOp(OpType.CREATE, "nic-" + i));
 			assertEquals(Operation.Status.SUCC, result.status());
 			recorded.add(result.nodeAddr());
 		}
@@ -157,8 +157,8 @@ final class S3NicSetDriverTest {
 	void aRefusedConnectFailsTheOperationAsAnIoFailureAndTheRotationGoesOn() throws Exception {
 		final var listeners = listeners(2);
 		final var run = started(listeners, List.of(NIC_A, NIC_B), 2);
-		assertEquals(Operation.Status.SUCC, run.execute(dataOp(OpType.CREATE, "before-0")).status());
-		assertEquals(Operation.Status.SUCC, run.execute(dataOp(OpType.CREATE, "before-1")).status());
+		assertEquals(Operation.Status.SUCC, run.executeAlone(dataOp(OpType.CREATE, "before-0")).status());
+		assertEquals(Operation.Status.SUCC, run.executeAlone(dataOp(OpType.CREATE, "before-1")).status());
 
 		stub.stop(1);
 		awaitRefused(listeners.get(1));
@@ -167,7 +167,7 @@ final class S3NicSetDriverTest {
 
 		final List<Operation.Status> statuses = new ArrayList<>();
 		for (var i = 0; i < 4; i++) {
-			statuses.add(run.execute(dataOp(OpType.CREATE, "after-" + i)).status());
+			statuses.add(run.executeAlone(dataOp(OpType.CREATE, "after-" + i)).status());
 		}
 
 		final var ok = Operation.Status.SUCC;

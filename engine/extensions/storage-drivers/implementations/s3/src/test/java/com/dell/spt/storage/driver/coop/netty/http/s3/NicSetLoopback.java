@@ -61,6 +61,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.IntPredicate;
 import java.util.regex.Pattern;
+import java.util.stream.IntStream;
 
 /**
  * Loopback NICs and an in-memory S3 stub for tests of the real S3 drivers with a NIC set. Four
@@ -141,6 +142,17 @@ final class NicSetLoopback implements AutoCloseable {
 		Operation<?> execute(final Operation<DataItem> op) throws Exception {
 			assertTrue(driver.put(op));
 			return results.await();
+		}
+
+		/**
+		 * Runs the operation and waits for its attempt to end, for tests of the NIC rotation. The result
+		 * comes first, and an operation queued before the attempt ends continues on its connection.
+		 */
+		Operation<?> executeAlone(final Operation<DataItem> op) throws Exception {
+			final var result = execute(op);
+			final var admission = pool().admission();
+			waitFor(() -> IntStream.range(0, admission.size()).allMatch(nic -> admission.count(nic) == 0), "the attempt ended");
+			return result;
 		}
 
 		NicSetConnectionPool pool() {

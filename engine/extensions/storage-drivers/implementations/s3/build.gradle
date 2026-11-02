@@ -89,6 +89,10 @@ tasks.register('netnsTest', Test) {
 	}
 	// The topology is shared; nothing else may run in this JVM's namespace meanwhile.
 	maxParallelForks = 1
+	// CI keeps no test reports, so a failure's message has to reach the log.
+	testLogging {
+		exceptionFormat = 'full'
+	}
 }
 
 // engine/tools/netns-test.sh runs NetnsTestMain inside its namespace on this class path.
