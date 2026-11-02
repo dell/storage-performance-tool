@@ -273,11 +273,13 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
 					if (e instanceof EOFException) {
+						stopWritingIfInterrupted();
 						break;
 					}
 					throw e;
 				}
 				if (itemCount <= 0) {
+					stopWritingIfInterrupted();
 					break;
 				}
 				for (int i = 0; i < itemCount; i++) {
@@ -422,6 +424,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 			} catch (final Exception e) {
 				throwUncheckedIfInterrupted(e);
 				if (e instanceof EOFException) {
+					stopWritingIfInterrupted();
 					break;
 				} else {
 					throw e;

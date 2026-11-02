@@ -14,6 +14,7 @@ import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.load.step.file.FileManager;
 import com.github.akurilov.commons.io.Input;
+import java.io.EOFException;
 import java.io.IOException;
 import java.nio.channels.ClosedByInterruptException;
 import java.util.List;
@@ -102,5 +103,27 @@ class ItemInputFileSlicerInterruptTest {
 		} finally {
 			Thread.interrupted();
 		}
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void anInterruptDuringTheLastReadStillRemovesTheSlices() throws Exception {
+		final FileManager fileManager = mock(FileManager.class);
+		when(fileManager.newTmpFileName()).thenReturn("slice-0");
+		final Input<Item> items = mock(Input.class);
+		when(items.get(any(), anyInt())).thenAnswer(call -> {
+			Thread.currentThread().interrupt();
+			throw new EOFException();
+		});
+
+		try {
+			assertThrows(
+							InterruptedException.class,
+							() -> new ItemInputFileSlicer("step", List.of(fileManager), List.of(TestConfigBuilder.config()), items, 1));
+		} finally {
+			Thread.interrupted();
+		}
+
+		verify(fileManager).deleteFile("slice-0");
 	}
 }

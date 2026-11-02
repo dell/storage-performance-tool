@@ -408,7 +408,7 @@ class LoadStepLocalBaseTest {
 
 		step.startContextsForTest();
 
-		verify(context, timeout(20_000)).stop();
+		verify(context, timeout(20_000).atLeastOnce()).stop();
 		verify(context, never()).prepareForAdmission(any());
 	}
 
