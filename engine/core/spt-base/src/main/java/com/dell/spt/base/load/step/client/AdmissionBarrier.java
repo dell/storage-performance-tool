@@ -125,10 +125,9 @@ final class AdmissionBarrier {
 					final PreparationStatus status = status(slice);
 					millis.put(slice.node(), TimeUnit.NANOSECONDS.toMillis(status.elapsedNanos()));
 					switch (status.state()) {
-						case READY -> {
-						}
-						case RUNNING -> waiting.add(slice.node() + ": still " + status.phase());
-						default -> failures.add(slice.node() + ": " + status.message());
+					case READY -> {}
+					case RUNNING -> waiting.add(slice.node() + ": still " + status.phase());
+					default -> failures.add(slice.node() + ": " + status.message());
 					}
 				}
 				if (!failures.isEmpty()) {

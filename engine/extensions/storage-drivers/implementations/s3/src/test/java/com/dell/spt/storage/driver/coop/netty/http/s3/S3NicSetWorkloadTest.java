@@ -19,9 +19,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.BundledDefaultsProvider;
 import com.dell.spt.base.config.ConfigUtil;
@@ -520,12 +522,17 @@ final class S3NicSetWorkloadTest {
 	@Test
 	void aStepThatFailsToResolveAnEndpointWritesOnlyTheEndRecord() throws Exception {
 		final var stepId = "nic-set-unresolved-" + System.nanoTime();
-		final var outcomes = runScenario(List.of(stub.listeners(1).get(0), "nic-paths.invalid:9000"),
+		final var failure = assertThrows(RunTerminalException.class, () -> runScenario(
+						List.of(stub.listeners(1).get(0), "nic-paths.invalid:9000"),
 						new NicSetLoopback.Factory(), stepId, """
 										Load.config({"load": {"step": {"limit": {"time": "30s"}}}}).run();
-										""");
+										"""));
+		assertEquals(
+						"Step " + stepId + " did not start: 1 of 1 engines failed preparation — entry: storage.net.interfaces=lo-a,lo-b "
+										+ "has no plan on this host: endpoint nic-paths.invalid:9000 has no IPv4 address",
+						failure.getMessage());
 
-		assertTrue(stub.objectRequests().isEmpty(), () -> "outcomes: " + outcomes + ", requests: " + stub.objectRequests());
+		assertTrue(stub.objectRequests().isEmpty(), () -> "requests: " + stub.objectRequests());
 		final var file = nicPathsFile(stepId);
 		final var rows = csv(file);
 		assertEquals(1, rows.size(), () -> "rows: " + rows);

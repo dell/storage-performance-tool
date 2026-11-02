@@ -613,7 +613,7 @@ spt run write \
 | `--integrity-runtime-identity-tier` | `image` | Distributed verification and guarded existing-prefix DELETE only. `image` proves one immutable image ID across participants; `payload` additionally proves identical canonical `/opt/spt` content (env: `SPT_INTEGRITY_RUNTIME_IDENTITY_TIER`) |
 | `--network-mode` | `host` | Docker network mode: `host` (required for RMI) or `bridge` |
 | `--interfaces` | from `SPT_INTERFACES` or none | Spread each engine's S3 connections over a NIC set: `auto`, or a comma-separated list of interface names, IPv4 addresses or RDMA devices, resolved on each host. Default Netty S3 driver, host networking and `--endpoint-selection default` only; rejected with `tables`, `mock`, an `--rdma-device` other than `auto`, `--rdma-local-ip`, and an `--engine-override` of `storage.net.interfaces` or `storage.net.nodeInterfaces`. See [Network Interfaces](NETWORK_INTERFACES.md) |
-| `--host-interfaces` | from `SPT_HOST_INTERFACES` or none | Replace `--interfaces` on one host: `<host>=<value>`, with `<value>` `auto`, a comma-separated list, or `none` to turn NICs off there. Repeat for more hosts. See [Host overrides](NETWORK_INTERFACES.md#host-overrides). |
+| `--host-interfaces` | from `SPT_HOST_INTERFACES` or none | Replace `--interfaces` on one host: `<host>=<value>`, with `<value>` `auto`, a comma-separated list, or `none` to turn NICs off there. Repeat for more hosts. See [Host overrides](NETWORK_INTERFACES.md#host-overrides). With either flag, `--duration` and the rates count from the moment every engine is prepared; see [Start of a step](NETWORK_INTERFACES.md#start-of-a-step). |
 | `--rmi-port-start` | `40000` | Starting port for RMI range |
 | `--rmi-port-count` | `10` | Number of RMI ports to allocate |
 

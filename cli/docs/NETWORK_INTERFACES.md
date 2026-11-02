@@ -133,7 +133,22 @@ With `--slice-endpoints`, each engine pairs its own slice of the endpoints. A ch
 
 ## Start of a step
 
-Before the first operation, each engine connects once on every Path. A failure fails the step and names the host, the NIC, the endpoint and the cause, as do the plan's other failures. After a failed connect during the step, that NIC's connects to that endpoint back off from 100 ms, doubling to 5 s; an operation that needs a new connection there fails at once until the next trial, while open connections keep serving. Control requests keep the kernel's route: bucket checks, listing a bucket as a step's item input, and multipart abort.
+A step in which any engine has a NIC set, from `--interfaces` or a host override, starts behind an admission barrier. Without one, a step starts as it did before.
+
+1. **Preparation.** The entry node distributes any item list, then every engine resolves its endpoints and NICs, runs the checks above, builds its Path Pools and probes every Path, with operation admission held. A failed connect on any Path names the host, the NIC, the endpoint and the cause, as do the plan's other failures. An engine without a NIC set in such a step reports ready as soon as its driver has started, and keeps the kernel's route.
+2. **Release.** The entry node opens admission on every engine only when all are ready. One INFO line gives the time: `Step read1: admission opened after 12.4 s of preparation (item distribution 3.1 s; slowest 198.51.100.12:1099, 9.1 s)`.
+3. **Failure.** If any engine fails, or the deadline passes, every engine is fenced, so nothing later can open admission for that step. The step fails, naming each engine:
+   - `Step read1 did not start: 1 of 3 engines failed preparation — 198.51.100.12:1099: <its message>`
+   - `Step read1 did not start: preparation did not finish within 10m (load.step.preparation.timeout) — 198.51.100.12:1099: still probing paths`
+   - `Step read1 did not start: the engine on 198.51.100.12:1099 does not support the admission barrier, which a step with a NIC set needs; run the same SPT image on every host`
+
+   A slice that cannot be released stops the step: `Step read1 stopped: admission could not be released on 198.51.100.12:1099: <cause>`. Each engine still writes its per-path file, with the rows it reached and an `end` row with `complete=false`.
+
+**The Load Interval starts at the release.** With a barrier, a step's duration, time limit, elapsed time and rates count from the moment admission opens, so preparation counts in none of them; the Steady-State Window lies inside the interval. A run with a NIC set therefore takes longer on the clock than its `--duration` by its preparation time.
+
+**The deadline** is the engine setting `load.step.preparation.timeout`, default `10m`, set with `--engine-override load.step.preparation.timeout=15m`. It covers item distribution and every engine's preparation, and each worker also enforces it on its own clock, so a worker fences itself even if the entry node is gone. A timeout message names the setting.
+
+**During the step,** after a failed connect, that NIC's connects to that endpoint back off from 100 ms, doubling to 5 s; an operation that needs a new connection there fails at once until the next trial, while open connections keep serving. Control requests keep the kernel's route: bucket checks, listing a bucket as a step's item input, and multipart abort.
 
 ## Results
 
