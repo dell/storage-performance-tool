@@ -81,23 +81,39 @@ final class StepPreparation implements AdmissionPreparable.Preparation {
 
 	/** Fences this preparation unless it has been released; returns whether this call fenced it. */
 	boolean fence(final String why, final long nowNanos) {
+		final boolean fenced = markFenced(why, nowNanos);
+		if (fenced) {
+			runFenceActions();
+		}
+		return fenced;
+	}
+
+	/**
+	 * The state change of {@link #fence}, for a caller that must make it atomic with a release under
+	 * its own lock and then call {@link #runFenceActions()} outside that lock: a driver's action may
+	 * close a channel or wait on an event loop.
+	 */
+	synchronized boolean markFenced(final String why, final long nowNanos) {
+		if (released || state == PreparationStatus.State.FENCED) {
+			return false;
+		}
+		if (state == PreparationStatus.State.RUNNING) {
+			endNanos = nowNanos;
+		}
+		state = PreparationStatus.State.FENCED;
+		if (message.isEmpty()) {
+			message = why;
+		}
+		return true;
+	}
+
+	void runFenceActions() {
 		final List<Runnable> actions;
 		synchronized (this) {
-			if (released || state == PreparationStatus.State.FENCED) {
-				return false;
-			}
-			if (state == PreparationStatus.State.RUNNING) {
-				endNanos = nowNanos;
-			}
-			state = PreparationStatus.State.FENCED;
-			if (message.isEmpty()) {
-				message = why;
-			}
 			actions = List.copyOf(fenceActions);
 			fenceActions.clear();
 		}
 		actions.forEach(Runnable::run);
-		return true;
 	}
 
 	/**

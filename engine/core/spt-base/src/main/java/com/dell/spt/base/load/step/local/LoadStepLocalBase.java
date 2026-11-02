@@ -259,9 +259,9 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	public final void fencePreparation(final long preparationId) {
 		final StepPreparation barrier = preparation;
 		if (barrier != null && barrier.id() == preparationId) {
-			fence(barrier, "the entry node stopped the preparation");
 			// Another slice failed to release, so this step failed even if this slice had opened.
 			barrier.markStepFailed();
+			fence(barrier, "the entry node stopped the preparation");
 		}
 	}
 
@@ -273,10 +273,11 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		// The monitor makes this atomic with a release: one in progress finishes first, and then this
 		// fence does nothing and the caller's own stop handles what the release opened.
 		synchronized (this) {
-			if (!barrier.fence(why, System.nanoTime())) {
+			if (!barrier.markFenced(why, System.nanoTime())) {
 				return;
 			}
 		}
+		barrier.runFenceActions();
 		final String stepId = safeStepIdForPreparation();
 		Loggers.MSG.info("{}: preparation fenced: {}", stepId, why);
 		final Thread guard = preparationDeadlineGuard;

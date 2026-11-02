@@ -97,6 +97,19 @@ class StepPreparationTest {
 	}
 
 	@Test
+	void aFencesActionsRunApartFromItsStateChange() {
+		final var preparation = new StepPreparation(1, 100, 0);
+		final var actions = new AtomicInteger();
+		preparation.onFence(actions::incrementAndGet);
+		assertTrue(preparation.markFenced("stopped", 1));
+		assertEquals(0, actions.get(), "the caller runs them outside its lock");
+		assertTrue(preparation.fenced());
+		preparation.runFenceActions();
+		preparation.runFenceActions();
+		assertEquals(1, actions.get());
+	}
+
+	@Test
 	void theBudgetMustBePositive() {
 		assertThrows(IllegalArgumentException.class, () -> new StepPreparation(1, 0, 0));
 	}
