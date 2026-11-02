@@ -459,6 +459,32 @@ class StandaloneDeleteEngineStepTest {
 	}
 
 	@Test
+	void bucketMetersGetEachDeleteRequestOnceUnderTheRequestsBucket() throws Exception {
+		final var config = config(1, 10);
+		final var driver = new DeterministicDeleteDriver(DriverMode.DEFAULT);
+		final var generator = generator(config, driver, new ManifestInput(2));
+		final var metrics = metrics();
+		final var step = new LoadStepContextImpl<>(
+						"standalone-delete-bucket-meters", generator, driver, metrics, config.configVal("load"), false);
+		final var members = List.of("bucket");
+		final var meters = new com.dell.spt.base.metrics.bucket.BucketMeters(OpType.DELETE, members);
+		step.bucketRecorder(new com.dell.spt.base.metrics.bucket.BucketRecorder(members, meters, null));
+		try {
+			step.start();
+			awaitDone(step);
+			metrics.refreshLastSnapshot(true);
+			final var records = meters.terminalRecords();
+			assertEquals(metrics.lastSnapshot().successSnapshot().count(), records.get(0).succeeded());
+			assertEquals(2, records.get(0).succeeded());
+			assertEquals(metrics.lastSnapshot().durationSnapshot().count(), records.get(0).duration().count());
+			assertEquals(0, records.get(1).succeeded(), "nothing reaches the catch-all");
+		} finally {
+			step.close();
+			metrics.close();
+		}
+	}
+
+	@Test
 	void batchSizeOneExecutesOneRequestAndOnePermitPerSelectedIdentity() throws Exception {
 		final var config = config(1, 10);
 		final var driver = new DeterministicDeleteDriver(DriverMode.DEFAULT);

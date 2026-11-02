@@ -1,6 +1,8 @@
 package com.dell.spt.perf;
 
+import com.dell.spt.base.metrics.bucket.BucketMeterSet;
 import com.dell.spt.base.metrics.bucket.BucketSlotTable;
+import com.dell.spt.base.metrics.bucket.BucketTimingMeter;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.item.op.OpType;
@@ -16,15 +18,14 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.CyclicBarrier;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import org.HdrHistogram.AtomicHistogram;
 import org.HdrHistogram.Histogram;
 
 /**
  * Hand-written microbenchmark for ticket 01 of bucket metrics: the aggregate's recording alone,
- * against the aggregate plus per-bucket meters built from {@link TimingMeterImpl} unchanged or from
- * a leaner {@link AtomicHistogram}, plus the lookup candidates and the histogram copy check. It runs
+ * against the aggregate plus per-bucket meters built from {@link TimingMeterImpl} unchanged or the
+ * shipped {@link BucketMeterSet}, plus the lookup candidates and the histogram copy check. It runs
  * as a plain program on the test classpath, not as part of the test suite:
  *
  * <pre>
@@ -106,36 +107,6 @@ public final class BucketMetricsBench {
 
 	// --- recording ---
 
-	/** Same update rules as {@link TimingMeterImpl}, on a histogram with one count array. */
-	private static final class AtomicTimingMeter {
-		private final LongAdder count = new LongAdder();
-		private final LongAdder sum = new LongAdder();
-		private final LongAdder overflowCount = new LongAdder();
-		private final AtomicLong min = new AtomicLong(Long.MAX_VALUE);
-		private final AtomicLong max = new AtomicLong(Long.MIN_VALUE);
-		private final AtomicHistogram histogram = new AtomicHistogram(
-						1L, TimingMeterImpl.HIGHEST_TRACKABLE_VALUE_MICROS, TimingMeterImpl.SIGNIFICANT_VALUE_DIGITS);
-
-		void update(final long value) {
-			final long recordedValue;
-			if (value > TimingMeterImpl.HIGHEST_TRACKABLE_VALUE_MICROS) {
-				recordedValue = TimingMeterImpl.HIGHEST_TRACKABLE_VALUE_MICROS;
-				overflowCount.increment();
-			} else {
-				recordedValue = Math.max(0L, value);
-			}
-			sum.add(recordedValue);
-			min.accumulateAndGet(recordedValue, Math::min);
-			max.accumulateAndGet(recordedValue, Math::max);
-			histogram.recordValue(recordedValue);
-			count.increment();
-		}
-
-		long total() {
-			return count.sum();
-		}
-	}
-
 	private static final class TimingSet {
 		final LongAdder succ = new LongAdder();
 		final LongAdder fail = new LongAdder();
@@ -160,36 +131,12 @@ public final class BucketMetricsBench {
 		}
 	}
 
-	private static final class AtomicSet {
-		final LongAdder succ = new LongAdder();
-		final LongAdder fail = new LongAdder();
-		final LongAdder corrupt = new LongAdder();
-		final LongAdder bytes = new LongAdder();
-		final AtomicTimingMeter duration = new AtomicTimingMeter();
-		final AtomicTimingMeter latency = new AtomicTimingMeter();
-		final AtomicTimingMeter ttfb = new AtomicTimingMeter();
-
-		void markSucc(final long byteCount, final long dur, final long lat, final long first) {
-			succ.increment();
-			bytes.add(byteCount);
-			if (dur > 0) {
-				duration.update(dur);
-				if (lat > 0) {
-					latency.update(lat);
-				}
-				if (first > 0 && first <= dur) {
-					ttfb.update(first);
-				}
-			}
-		}
-	}
-
 	private static final class Workload {
 		final MetricsContext<?> aggregate;
 		final BucketSlotTable table;
 		final String[] paths;
 		final TimingSet[] timingSets;
-		final AtomicSet[] atomicSets;
+		final BucketMeterSet[] atomicSets;
 		final long[] durations = new long[SAMPLES];
 		final long[] latencies = new long[SAMPLES];
 		final long[] ttfbs = new long[SAMPLES];
@@ -206,10 +153,10 @@ public final class BucketMetricsBench {
 			}
 			table = new BucketSlotTable(members);
 			timingSets = new TimingSet[buckets + 1];
-			atomicSets = new AtomicSet[buckets + 1];
+			atomicSets = new BucketMeterSet[buckets + 1];
 			for (int i = 0; i <= buckets; i++) {
 				timingSets[i] = new TimingSet();
-				atomicSets[i] = new AtomicSet();
+				atomicSets[i] = new BucketMeterSet();
 			}
 			final Random random = new Random(42);
 			for (int i = 0; i < SAMPLES; i++) {
@@ -285,7 +232,7 @@ public final class BucketMetricsBench {
 		final long[] latencies = w.latencies;
 		final long[] ttfbs = w.ttfbs;
 		final String[] paths = w.paths;
-		final AtomicSet[] sets = w.atomicSets;
+		final BucketMeterSet[] sets = w.atomicSets;
 		long state = seed;
 		while (true) {
 			state ^= state << 13;
@@ -400,9 +347,6 @@ public final class BucketMetricsBench {
 		for (final TimingSet set : w.timingSets) {
 			recorded += set.succ.sum() + set.fail.sum() + set.corrupt.sum();
 		}
-		for (final AtomicSet set : w.atomicSets) {
-			recorded += set.duration.total() + set.fail.sum() + set.corrupt.sum();
-		}
 		sink += recorded;
 		w.aggregate.close();
 	}
@@ -503,7 +447,7 @@ public final class BucketMetricsBench {
 		final long high = 100_000;
 		final double tolerance = 0.015;
 		final int writers = Math.max(4, Runtime.getRuntime().availableProcessors());
-		final AtomicTimingMeter atomic = new AtomicTimingMeter();
+		final BucketTimingMeter atomic = new BucketTimingMeter("copy");
 		final TimingMeterImpl concurrent = new TimingMeterImpl("copy");
 		final LongAdder written = new LongAdder();
 		final java.util.concurrent.atomic.AtomicBoolean stop = new java.util.concurrent.atomic.AtomicBoolean();
@@ -533,9 +477,7 @@ public final class BucketMetricsBench {
 			Thread.sleep(round < coldRounds ? 100 : 500);
 			final boolean checked = round >= coldRounds;
 			final long atomicStart = System.nanoTime();
-			final Histogram fromAtomic = new Histogram(
-							1L, TimingMeterImpl.HIGHEST_TRACKABLE_VALUE_MICROS, TimingMeterImpl.SIGNIFICANT_VALUE_DIGITS);
-			fromAtomic.add(atomic.histogram);
+			final Histogram fromAtomic = atomic.histogramCopy();
 			final long concurrentStart = System.nanoTime();
 			final Histogram fromConcurrent = concurrent.histogramCopy();
 			final long concurrentEnd = System.nanoTime();
@@ -555,9 +497,7 @@ public final class BucketMetricsBench {
 		for (final Thread thread : threads) {
 			thread.join();
 		}
-		final Histogram finalAtomic = new Histogram(
-						1L, TimingMeterImpl.HIGHEST_TRACKABLE_VALUE_MICROS, TimingMeterImpl.SIGNIFICANT_VALUE_DIGITS);
-		finalAtomic.add(atomic.histogram);
+		final Histogram finalAtomic = atomic.histogramCopy();
 		final boolean exact = finalAtomic.getTotalCount() == written.sum()
 						&& concurrent.histogramCopy().getTotalCount() == written.sum();
 		pass &= exact && checkCopy("atomic-final", finalAtomic, low, high, tolerance, true);
