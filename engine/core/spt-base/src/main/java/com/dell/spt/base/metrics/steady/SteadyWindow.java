@@ -192,8 +192,12 @@ public final class SteadyWindow {
 				state = State.CLOSED;
 				// Before the result is visible: a closer that takes the fast path must find this
 				// window's bucket work already queued, or it would return from the fence without it.
-				notifyClose(endNanos == Long.MIN_VALUE ? nanoClock.getAsLong() : endNanos, started, computed);
-				result = computed;
+				try {
+					notifyClose(endNanos == Long.MIN_VALUE ? nanoClock.getAsLong() : endNanos, started, computed);
+				} finally {
+					// Even if the listener throws an Error: a later closer must never take a third cut.
+					result = computed;
+				}
 				if (Loggers.MSG.isDebugEnabled()) {
 					Loggers.MSG.debug(
 									"Steady-state window closed by {}: {}, cut acquisition {} ns (start) and {} ns (end)",

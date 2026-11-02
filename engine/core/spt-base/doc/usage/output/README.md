@@ -620,7 +620,7 @@ to the aggregate's steady row. Only complete whole-step rows sum to the totals.
 
 | Column | Source |
 |--------|--------|
-| Counts, `Size`, `StepDuration[s]`, `TPAvg[op/s]`, `BWAvg[MiB/s]`, timings | The row's own window; across nodes counts and bytes are summed, timing populations merged, and `StepDuration[s]` is the shortest window |
+| Counts, `Size`, `StepDuration[s]`, `TPAvg[op/s]`, `BWAvg[MiB/s]`, timings | The row's own window; across nodes counts and bytes are summed, timing populations merged, rates are the sum of each node's own rate, and `StepDuration[s]` is the shortest window, so on a multi-node row `CountSucc / StepDuration[s]` is not `TPAvg[op/s]` |
 | `SteadyStart[s]` | The row's start cut as an offset from step start, the largest across nodes |
 | `SteadyTurnovers`, `SteadyTrend[%]`, `SteadyCV` | The aggregate's values, repeated, because turnover needs an in-flight mean that bucket rows lack |
 | `SteadyStatus` | The aggregate's rule with its turnovers, on the row's own window and completions: a row can be `short` while the aggregate is `valid`, and a bucket with no completions in its window is `short` with empty timing cells |

@@ -101,7 +101,7 @@ public final class BucketStepFence implements AutoCloseable {
 	}
 
 	/**
-	 * Waits for the given contexts' passes, until the step's one deadline at the latest. It is safe
+	 * Waits for the given contexts' passes, until the latest of their deadlines at most. It is safe
 	 * to call from any closer, any number of times.
 	 */
 	public void await(final Collection<ContextCuts> waitedFor) {
