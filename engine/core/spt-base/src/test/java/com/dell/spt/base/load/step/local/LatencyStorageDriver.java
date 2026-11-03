@@ -20,6 +20,9 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Set;
+import java.util.IdentityHashMap;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -444,7 +447,9 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	public List<O> recoverQueuedOperations() {
-		final List<O> recovered = new ArrayList<>();
+		// Also from the lifecycle, as the real driver recovers: a refused dispatch holds its operation
+		// in neither collection for a moment, and recovery must not miss it.
+		final Set<O> recovered = Collections.newSetFromMap(new IdentityHashMap<>());
 		synchronized (inputQueue) {
 			recovered.addAll(inputQueue);
 			inputQueue.clear();
@@ -453,7 +458,8 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 			recovered.addAll(queuedUndispatched);
 			queuedUndispatched.clear();
 		}
-		return recovered;
+		recovered.addAll(lifecycle.driverQueuedOperations());
+		return new ArrayList<>(recovered);
 	}
 
 	@Override
