@@ -7,6 +7,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
+	"github.com/dell/storage-performance-tool/cli/internal/integrityplan"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
@@ -62,6 +63,44 @@ func TestResolveVerificationRunErrorCleanEmptyReadRequiresExplicitAllowance(t *t
 	outcome.Finalization.EmptyAllowed = true
 	if err = resolveVerificationRunError(nil, outcome, true, params); err != nil {
 		t.Fatalf("explicit clean empty selection should pass: %v", err)
+	}
+}
+
+func TestVerifierMayBeMissingOnlyWhenNotStartedOrAnEmptySelectionIsAllowed(t *testing.T) {
+	if !verifierMayBeMissing(integrityplan.Plan{}, portcheck.StepLifecycleNotStarted) {
+		t.Fatal("a READ step that never started has no live evidence")
+	}
+	if !verifierMayBeMissing(integrityplan.Plan{AllowEmpty: true}, portcheck.StepLifecycleCompleted) {
+		t.Fatal("--allow-empty-selection says a READ step may publish nothing")
+	}
+	if verifierMayBeMissing(integrityplan.Plan{}, portcheck.StepLifecycleCompleted) {
+		t.Fatal("without the flag a completed READ step must appear")
+	}
+}
+
+func TestStepsToFetchAddsOnlyAnUnseenReadStepOfAnEmptySelection(t *testing.T) {
+	list, read := "mt-001-x-list", "mt-002-x-verify"
+	allowed := integrityplan.Plan{AllowEmpty: true, Verifier: integrityplan.PlannedStep{ID: read}}
+	strict := integrityplan.Plan{Verifier: integrityplan.PlannedStep{ID: read}}
+	tests := []struct {
+		name      string
+		plan      integrityplan.Plan
+		observed  string
+		lifecycle portcheck.StepLifecycle
+		want      int
+	}{
+		{"allowed and unseen", allowed, "", portcheck.StepLifecycleCompleted, 2},
+		{"already seen", allowed, read, portcheck.StepLifecycleCompleted, 1},
+		{"never started", allowed, "", portcheck.StepLifecycleNotStarted, 1},
+		{"not allowed", strict, "", portcheck.StepLifecycleCompleted, 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := stepsToFetch([]string{list}, test.plan, test.observed, test.lifecycle)
+			if len(got) != test.want || got[0] != list {
+				t.Fatalf("stepsToFetch() = %v, want %d steps from %q", got, test.want, list)
+			}
+		})
 	}
 }
 

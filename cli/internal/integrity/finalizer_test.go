@@ -633,6 +633,37 @@ func TestFinalizeStillRequiresALiveReadRowAfterAnyRead(t *testing.T) {
 	}
 }
 
+// Objects selected but none read must never pass as an empty selection.
+func TestFinalizeNothingReadOfANonEmptySelectionIsNotEmpty(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "input.csv")
+	writeCSVFixture(t, source, [][]string{canonicalHeader, {"b", "k", "1", ""}})
+	staging, stagedManifest, stagedCompletion, err := StageInputManifest(source, 202)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(staging) }()
+	root := t.TempDir()
+	readStep := "mt-001-test-verify"
+	writeResultsIndex(t, root, readStep)
+	writeCommittedFixture(t, root, readStep, VerifiedName, 202, readStep, [][]string{canonicalHeader})
+	writeCSVFixture(t, filepath.Join(root, readStep+"."+IntegrityFailuresName), [][]string{failureHeader})
+	writeCSVFixture(t, filepath.Join(root, readStep+"."+IntegrityPerformanceName), [][]string{performanceHeader})
+	writeCSVFixture(t, filepath.Join(root, readStep+".metrics.total.csv"), [][]string{
+		{"OpType", "CountSucc", "CountFail", "CountCorrupt"}, {"READ", "0", "0", "0"},
+	})
+	outcome, finalizeErr := FinalizeResults(FinalizeOptions{
+		ResultsRoot: root, Workload: workload.ReadVerify, RunID: 202, StepIDs: []string{readStep},
+		StagedManifest: stagedManifest, StagedCompletion: stagedCompletion, AllowEmptySelection: true,
+		BaseURL: metricsWithoutReadRows(t),
+	})
+	if outcome.EmptySelection || outcome.EmptyAllowed || outcome.SelectionCount != 1 {
+		t.Fatalf("unexpected outcome: %+v", outcome)
+	}
+	if finalizeErr == nil && outcome.Complete && outcome.RemainingCount == 0 {
+		t.Fatalf("one selected object went unread and nothing noticed: %+v", outcome)
+	}
+}
+
 func TestObserveJSONCorruptCountHonorsCanceledContext(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("canceled corruption-metrics request reached the server")
