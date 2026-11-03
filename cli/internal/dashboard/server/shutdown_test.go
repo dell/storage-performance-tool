@@ -80,3 +80,57 @@ func TestDashboardShutdownInterruptsRun(t *testing.T) {
 		t.Fatalf("child did not finish and release its lock: active=%v status=%v", active, status)
 	}
 }
+
+func TestStopRunGracefully(t *testing.T) {
+	a, marker, _ := prepareShutdownTest(t)
+	stop := func(origin string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/api/runs/stop", nil)
+		request.Host = "localhost:8000"
+		request.Header.Set("Origin", origin)
+		response := httptest.NewRecorder()
+		a.handleStop(response, request)
+		return response
+	}
+	if response := stop("http://evil.example"); response.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin stop: %d", response.Code)
+	}
+	if response := stop("http://localhost:8000"); response.Code != http.StatusConflict {
+		t.Fatalf("stop without a run: %d", response.Code)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/runs", strings.NewReader(validRunRequest))
+	request.Host = "localhost:8000"
+	request.Header.Set("Origin", "http://localhost:8000")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	a.handleRun(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("start run: %d %s", response.Code, response.Body.String())
+	}
+	waitForChild(t, a.root)
+	if response := stop("http://localhost:8000"); response.Code != http.StatusAccepted {
+		t.Fatalf("stop run: %d %s", response.Code, response.Body.String())
+	}
+	if response := stop("http://localhost:8000"); response.Code != http.StatusAccepted && response.Code != http.StatusConflict {
+		t.Fatalf("repeated stop: %d %s", response.Code, response.Body.String())
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		a.mu.Lock()
+		status := a.activeJob[keyStatus]
+		active := a.activeCmd != nil
+		a.mu.Unlock()
+		if !active && status == jobStopped && !a.lockBusy() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run did not finish as stopped: active=%v status=%v", active, status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "stopped" {
+		t.Fatalf("child was not gracefully interrupted: %q, %v", data, err)
+	}
+	if response := stop("http://localhost:8000"); response.Code != http.StatusConflict {
+		t.Fatalf("stop after the run ended: %d", response.Code)
+	}
+}
