@@ -170,6 +170,39 @@ func (a *app) handleRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 202, map[string]any{keyJob: publicJob(job), keyMessage: "SPT run started on the VM."})
 }
 
+// handleStop asks the running SPT process to shut down gracefully. SPT handles
+// the interrupt by stopping the engine test, removing its containers and
+// finalizing results, so the dashboard never force-kills it.
+func (a *app) handleStop(w http.ResponseWriter, r *http.Request) {
+	if r.URL.RawQuery != "" {
+		writeJSON(w, 404, map[string]any{keyError: msgEndpointNotFound})
+		return
+	}
+	if !a.sameOrigin(r) {
+		writeJSON(w, 403, map[string]any{keyError: "Stop requests must come from this dashboard through its SSH tunnel."})
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.activeCmd == nil || a.activeCmd.Process == nil || a.activeJob == nil || a.activeJob[keyStatus] != jobRunning {
+		writeJSON(w, 409, map[string]any{keyError: "No dashboard run is in progress."})
+		return
+	}
+	if a.activeJob[keyStopRequested] == true {
+		writeJSON(w, 202, map[string]any{keyJob: publicJob(a.activeJob), keyMessage: "Stop already requested."})
+		return
+	}
+	if err := interruptProcess(a.activeCmd.Process); err != nil {
+		writeJSON(w, 500, map[string]any{keyError: "Could not ask SPT to stop: " + err.Error()})
+		return
+	}
+	a.activeJob = cloneMap(a.activeJob)
+	a.activeJob[keyStopRequested] = true
+	a.activeJob[keyMessage] = "Stopping SPT gracefully…"
+	_ = a.writeState(a.activeJob)
+	writeJSON(w, 202, map[string]any{keyJob: publicJob(a.activeJob), keyMessage: "Stop requested."})
+}
+
 func ensureEOF(dec *json.Decoder) error {
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
