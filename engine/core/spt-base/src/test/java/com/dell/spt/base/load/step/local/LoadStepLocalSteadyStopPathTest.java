@@ -343,8 +343,8 @@ class LoadStepLocalSteadyStopPathTest {
 	}
 
 	/**
-	 * No poll runs before the deadline here, as when one falls on the wrong side of the last dispatch.
-	 * The final counts still show the inventory ran out, so the run must not pass.
+	 * No poll runs at all here, as if every one missed the last dispatch. The final counts still show
+	 * the inventory ran out, so the run must not pass.
 	 */
 	@Test
 	void anInventoryThatRanOutUnseenStillFailsOnItsFinalCounts() throws Exception {
@@ -356,7 +356,6 @@ class LoadStepLocalSteadyStopPathTest {
 			awaitCondition(() -> driver.completedCount() == 2L * C, "the whole inventory completed");
 			sleepUntil(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(900));
 
-			step.await(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
 			final var failure = assertThrows(IntegrityTerminalException.class, step::close);
 			assertTrue(failure.getMessage().contains("exhausted before the requested duration"), failure.getMessage());
 		}
@@ -378,6 +377,29 @@ class LoadStepLocalSteadyStopPathTest {
 				step.drainDispatchedOperationsForStepStop(TimeUnit.SECONDS.toNanos(5));
 
 				final var failure = assertThrows(IntegrityTerminalException.class, step::validateTerminalStateForStepStop);
+				assertTrue(failure.getMessage().contains("exhausted before the requested duration"), failure.getMessage());
+				assertEquals(DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE, step.durationAwaitStatus());
+			} finally {
+				step.close();
+			}
+		}
+	}
+
+	/** An await that starts after the deadline still sees that every request was dispatched. */
+	@Test
+	void aLateAwaitReportsAnInventoryAllDispatched() throws Exception {
+		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.standaloneDelete(C, L_MILLIS).inputQueue(2 * C);
+		try (final var metricsMgr = new RecordingMetricsManager()) {
+			final var step = new DurationDeleteStep(durationDeleteConfig("duration-late-await"), driver, metricsMgr, 2 * C);
+			try {
+				step.start();
+				step.startDurationInterval(TimeUnit.MILLISECONDS.toNanos(700));
+				awaitCondition(() -> driver.completedCount() == 2L * C, "the whole inventory completed");
+				sleepUntil(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(900));
+
+				final var failure = assertThrows(
+								IntegrityTerminalException.class,
+								() -> step.await(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS));
 				assertTrue(failure.getMessage().contains("exhausted before the requested duration"), failure.getMessage());
 				assertEquals(DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE, step.durationAwaitStatus());
 			} finally {

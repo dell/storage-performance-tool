@@ -238,8 +238,8 @@ coordinator gives each slice the remaining part of one step-wide drain budget, s
 multiplied by input count. It owns at most one active lifecycle invocation per frozen input, offers
 every input each phase, and retains incomplete invocations across cleanup retries. A slice that
 attempted every object in its frozen input ran out, which invalidates duration mode; each worker
-decides that from its final counts after the drain, and handing the inventory to the driver's input
-queue doesn't count. Each worker retains a semantic verdict; after admission closes, the controller
+decides that from its final counts after the drain, or earlier once every request has been
+dispatched, and handing the inventory to the driver's input queue doesn't count. Each worker retains a semantic verdict; after admission closes, the controller
 requires every slice to report that it reached its deadline. Monotonic timestamps are never
 compared across hosts, and delayed, missing, or failed evidence fails closed. Monotonic
 scheduled and drain intervals are reported separately. `storage-driver-limit-concurrency` (the

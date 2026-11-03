@@ -654,9 +654,8 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		if (!transition(op, lifecycle(op), OperationLifecycleState.UNATTEMPTED)) {
 			return false;
 		}
-		// Counted first, so a reader that finds custody empty also sees why.
-		unattempted.increment();
 		outstanding.remove(identityKey(op));
+		unattempted.increment();
 		synchronized (unattemptedOperations) {
 			unattemptedOperations.add(op);
 		}
@@ -841,9 +840,9 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		return enabled ? inFlight.get() : 0;
 	}
 
-	/** Operations settled as unattempted so far. Counter-only, so a poll can read it without a traversal. */
-	public long unattemptedCount() {
-		return enabled ? unattempted.sum() : 0;
+	/** Operations dispatched so far. Counter-only, so a poll can read it without a traversal. */
+	public long dispatchedCount() {
+		return enabled ? dispatched.sum() : 0;
 	}
 
 	/**

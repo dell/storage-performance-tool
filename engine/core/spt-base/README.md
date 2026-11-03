@@ -259,7 +259,7 @@ RMI response timeout even when the configured drain bound is longer. A slice ran
 if it attempted every object in its frozen input, which each worker decides from its final counts
 after the drain, and that invalidates the run. Handing the inventory to the driver's input queue is
 not running out. A worker ends the run early once the generator has handed over everything and
-nothing awaits dispatch, comparing the handoff's source-monotonic time with its own deadline. Each
+every request has been dispatched, comparing the handoff's source-monotonic time with its own deadline. Each
 worker retains a semantic verdict; after admission closes, the controller requires every slice to
 report that it reached its deadline. Remote monotonic timestamps are never compared, and delayed,
 missing, or failed evidence fails closed. The lifecycle invariant must reconcile after normal completion, deadline stop,

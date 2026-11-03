@@ -27,29 +27,23 @@ import org.mockito.Answers;
 
 final class OperationLifecycleTrackerTest {
 
-	/** A duration DELETE's poll reads custody and then this count, and must not see custody empty without it. */
+	/** A duration DELETE's poll compares this with what was generated, so a refusal must never count. */
 	@Test
-	void anUnattemptedOperationIsCountedBeforeItLeavesCustody() throws Exception {
+	void aRefusedDispatchIsNotCountedAsDispatched() {
 		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
-		final var queued = operation("queued");
-		assertTrue(tracker.generatorBuffered(queued));
-		assertTrue(tracker.driverQueued(queued));
-		final var inCustodyWhenCounted = new java.util.concurrent.atomic.AtomicBoolean();
-		final var counter = OperationLifecycleTracker.class.getDeclaredField("unattempted");
-		counter.setAccessible(true);
-		counter.set(tracker, new java.util.concurrent.atomic.LongAdder() {
-			@Override
-			public void increment() {
-				inCustodyWhenCounted.set(tracker.hasOutstandingOperations());
-				super.increment();
-			}
-		});
+		final var sent = operation("sent");
+		final var refused = operation("refused");
+		assertTrue(tracker.driverQueued(sent));
+		assertTrue(tracker.driverQueued(refused));
+		assertTrue(tracker.explicitlyDispatched(sent));
+		assertEquals(1, tracker.dispatchedCount());
 
-		assertTrue(tracker.unattempted(queued));
+		tracker.enforceDispatchDeadline(System.nanoTime() - 1);
 
-		assertTrue(inCustodyWhenCounted.get());
-		assertEquals(1, tracker.unattemptedCount());
-		assertFalse(tracker.hasOutstandingOperations());
+		assertFalse(tracker.explicitlyDispatched(refused));
+		assertEquals(1, tracker.dispatchedCount());
+		assertTrue(tracker.unattempted(refused));
+		assertEquals(1, tracker.dispatchedCount());
 	}
 
 	@Test

@@ -145,11 +145,12 @@ identity still lacking a terminal result after the bound is unresolved and inval
 All slices then drain through a bounded coordinator against one step-wide remaining-time budget,
 so the wait bound is not multiplied by the input count. The coordinator retains at most one
 lifecycle call per frozen input, offers every input each phase, and never duplicates a still-running
-call on cleanup retry. A slice that attempted every object in its inventory ran out, which invalidates
-the run; each worker decides that from its final counts after the drain, and handing the inventory
-to the driver's input queue doesn't count. Each worker retains a semantic verdict; after admission
-closes, the controller requires a reached-deadline verdict from every slice, so delayed, missing, or
-failed evidence cannot validate a run. The scheduled interval and subsequent drain interval are reported separately. `--threads`
+call on cleanup retry. A slice that attempted every object in its inventory ran out, which
+invalidates the run; each worker decides that from its final counts after the drain, or earlier
+once every request has been dispatched, and handing the inventory to the driver's input queue doesn't
+count. Each worker retains a semantic verdict; after admission closes, the controller requires a
+reached-deadline verdict from every slice, so delayed, missing, or failed evidence cannot validate a
+run. The scheduled interval and subsequent drain interval are reported separately. `--threads`
 bounds concurrent logical DELETE requests, so a request may contain as many as
 `--delete-batch-size` object targets.
 

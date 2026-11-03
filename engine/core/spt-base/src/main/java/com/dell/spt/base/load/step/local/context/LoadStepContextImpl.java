@@ -666,19 +666,17 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	/**
 	 * Whether a duration slice has visibly run out of inventory, so a run with too few objects can end
-	 * without waiting for its deadline. The generator's handoff alone doesn't show that, because the
-	 * driver's input queue can hold the whole inventory within moments of the start.
+	 * without waiting for its deadline: the generator has handed over everything, and every request it
+	 * generated has been dispatched. The handoff alone doesn't show that, because the driver's input
+	 * queue can hold the whole inventory within moments of the start.
 	 *
-	 * <p>This is only an early exit, and a poll can miss. {@link #durationInventoryRanOut()} decides from
-	 * the final counts. It must never report a slice with work left, so it reads the queue first: work
-	 * leaves it unsent only by being counted as unattempted first, and recovery only after admission closes.
+	 * <p>A refused or recovered request is never counted as dispatched and DELETE has no retries, so this
+	 * can't report a slice with work left, however its threads interleave. It can be late, or miss, so
+	 * {@link #durationInventoryRanOut()} decides from the final counts.
 	 */
 	private OptionalLong durationInventoryExhaustionNanos() {
 		final OptionalLong handoff = generator.schedulingExhaustionNanos();
-		if (handoff.isEmpty()
-						|| !nothingAwaitsDispatch()
-						|| operationLifecycle.unattemptedCount() > 0
-						|| operationAdmissionClosed.get()) {
+		if (handoff.isEmpty() || operationLifecycle.dispatchedCount() < generator.generatedOpCount()) {
 			return OptionalLong.empty();
 		}
 		return handoff;
