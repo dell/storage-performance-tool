@@ -146,8 +146,9 @@ func askHost(ctx context.Context, in Input, host *hostparse.HostInfo, planArgs [
 // Without the probe's answer the host's figure is only an upper bound, and its note says so.
 func boundedByHostMemory(capacity *nicplan.Capacity, hostBytes int64) *nicplan.Capacity {
 	if hostBytes <= 0 {
-		if capacity == nil {
-			return nil
+		// With no figure from the image either, there is nothing to call an upper bound.
+		if capacity == nil || capacity.Bytes < 0 {
+			return capacity
 		}
 		// An LXC's limit shows nowhere else, so what the image reports is only an upper bound.
 		unbounded := *capacity

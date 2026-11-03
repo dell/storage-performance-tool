@@ -165,6 +165,8 @@ func TestAnLXCsOwnMemInfoBoundsWhatAContainerOnItReports(t *testing.T) {
 		{"no answer from the host", capacityOf(264*gib, "MemTotal"), "not a meminfo line", 264 * gib, "MemTotal", "was not checked"},
 		{"an image that could not read its memory", &nicplan.Capacity{Bytes: -1, Source: "MemTotal", MemTotalBytes: -1, CgroupLimitBytes: -1}, "MemTotal:    8388608 kB\n", 8 * gib, "MemTotal", "could not read its memory"},
 		{"no answer from the image", nil, "MemTotal:    8388608 kB\n", 8 * gib, "MemTotal", "no cgroup limit was checked"},
+		{"no figure from either", &nicplan.Capacity{Bytes: -1, Source: "MemTotal", MemTotalBytes: -1, CgroupLimitBytes: -1}, "not a meminfo line", -1, "MemTotal", ""},
+		{"an image's note and no answer from the host", &nicplan.Capacity{Bytes: 264 * gib, Source: "MemTotal", MemTotalBytes: 264 * gib, CgroupLimitBytes: -1, Note: "no hierarchical figure"}, "not a meminfo line", 264 * gib, "MemTotal", "no hierarchical figure; the host's own MemTotal could not be read"},
 		{"a login banner before the line", capacityOf(264*gib, "MemTotal"), "Welcome to wrk1\nMemTotal:    8388608 kB\n", 8 * gib, "MemTotal", "reports less"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

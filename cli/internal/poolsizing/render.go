@@ -128,7 +128,7 @@ func passOrShort(passed bool) string {
 }
 
 func renderCapacity(w io.Writer, capacity *CapacityRecord) {
-	if capacity == nil {
+	if capacity == nil || capacity.MemoryBytes < 0 {
 		_, _ = fmt.Fprintln(w, "  Capacity: not read")
 		return
 	}

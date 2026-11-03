@@ -332,6 +332,14 @@ func TestTheSharedResponseComposesAsTheEngineMeant(t *testing.T) {
 	}
 }
 
+func TestRenderSaysSoWhenNoCapacityWasRead(t *testing.T) {
+	var text strings.Builder
+	renderCapacity(&text, &CapacityRecord{EffectiveBytes: -1, MemoryBytes: -1, Source: "MemTotal", HeapBytes: 4 * gib, ReserveBytes: 4 * gib})
+	if text.String() != "  Capacity: not read\n" {
+		t.Fatalf("%q", text.String())
+	}
+}
+
 func TestRenderGivesTheVerifyLines(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join(fixtures, "multipart-seed-response.json"))
 	if err != nil {
