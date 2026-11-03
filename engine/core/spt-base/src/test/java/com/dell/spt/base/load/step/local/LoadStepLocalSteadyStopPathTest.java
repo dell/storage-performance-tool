@@ -343,23 +343,41 @@ class LoadStepLocalSteadyStopPathTest {
 	}
 
 	/**
-	 * No poll sees the queue empty before the deadline here, as when the last request leaves it between
-	 * two polls. The inventory still ran out early, and must not pass as having lasted to the deadline.
+	 * No poll runs before the deadline here, as when one falls on the wrong side of the last dispatch.
+	 * The final counts still show the inventory ran out, so the run must not pass.
 	 */
 	@Test
-	void anInventoryThatRanOutUnseenBeforeTheDeadlineIsStillExhausted() throws Exception {
-		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.standaloneDelete(C, L_MILLIS).inputQueue(100_000);
+	void anInventoryThatRanOutUnseenStillFailsOnItsFinalCounts() throws Exception {
+		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.standaloneDelete(C, L_MILLIS).inputQueue(2 * C);
 		try (final var metricsMgr = new RecordingMetricsManager()) {
 			final var step = new DurationDeleteStep(durationDeleteConfig("duration-unseen"), driver, metricsMgr, 2 * C);
+			step.start();
+			step.startDurationInterval(TimeUnit.MILLISECONDS.toNanos(700));
+			awaitCondition(() -> driver.completedCount() == 2L * C, "the whole inventory completed");
+			sleepUntil(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(900));
+
+			step.await(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+			final var failure = assertThrows(IntegrityTerminalException.class, step::close);
+			assertTrue(failure.getMessage().contains("exhausted before the requested duration"), failure.getMessage());
+		}
+	}
+
+	/** A controller reads the verdict before the drain, so a worker's final counts must still reach it. */
+	@Test
+	void aDelegatedValidationReportsAnInventoryThatRanOutUnseen() throws Exception {
+		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.standaloneDelete(C, L_MILLIS).inputQueue(2 * C);
+		try (final var metricsMgr = new RecordingMetricsManager()) {
+			final var step = new DurationDeleteStep(durationDeleteConfig("duration-delegated"), driver, metricsMgr, 2 * C);
 			try {
 				step.start();
 				step.startDurationInterval(TimeUnit.MILLISECONDS.toNanos(700));
 				awaitCondition(() -> driver.completedCount() == 2L * C, "the whole inventory completed");
 				sleepUntil(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(900));
+				step.closeOperationAdmissionForStepStop();
+				step.recoverQueuedOperationsForStepStop();
+				step.drainDispatchedOperationsForStepStop(TimeUnit.SECONDS.toNanos(5));
 
-				final var failure = assertThrows(
-								IntegrityTerminalException.class,
-								() -> step.await(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS));
+				final var failure = assertThrows(IntegrityTerminalException.class, step::validateTerminalStateForStepStop);
 				assertTrue(failure.getMessage().contains("exhausted before the requested duration"), failure.getMessage());
 				assertEquals(DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE, step.durationAwaitStatus());
 			} finally {
@@ -384,6 +402,7 @@ class LoadStepLocalSteadyStopPathTest {
 				step.drainDispatchedOperationsForStepStop(TimeUnit.SECONDS.toNanos(5));
 
 				assertEquals(DurationAwaitStatus.RUNNING, step.durationAwaitStatus());
+				step.validateTerminalStateForStepStop();
 			} finally {
 				step.close();
 			}

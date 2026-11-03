@@ -161,7 +161,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final AtomicBoolean stepShuttingDown = new AtomicBoolean(false);
 	private final AtomicBoolean retryTrackingWarningLogged = new AtomicBoolean(false);
 	private final AtomicBoolean operationAdmissionClosed = new AtomicBoolean(false);
-	private final AtomicLong durationInventoryExhaustedNanos = new AtomicLong(Long.MAX_VALUE);
 	private final ReentrantLock operationAdmissionCloseLock = new ReentrantLock();
 	private final AtomicBoolean generatorQueueRecovered = new AtomicBoolean(false);
 	private final AtomicBoolean driverQueueRecovered = new AtomicBoolean(false);
@@ -666,26 +665,23 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	/**
-	 * Whether a duration slice ran out of inventory: whether nothing it handed over still waits for
-	 * dispatch. The generator's handoff alone doesn't show that, because the driver's input queue can
-	 * hold the whole inventory within moments of the start. A slice whose queue still held work when
-	 * its admission closed did not run out; it was stopped.
+	 * Whether a duration slice has visibly run out of inventory, so a run with too few objects can end
+	 * without waiting for its deadline. The generator's handoff alone doesn't show that, because the
+	 * driver's input queue can hold the whole inventory within moments of the start.
 	 *
-	 * <p>The result carries the handoff's time, not the time this was noticed. A poll can see an empty
-	 * queue only after it emptied, even after the deadline, and that must not pass as having lasted to
-	 * the deadline. So an inventory that runs out within a poll of the deadline counts as exhausted.
+	 * <p>This is only an early exit, and a poll can miss. {@link #durationInventoryRanOut()} decides from
+	 * the final counts. It must never report a slice with work left, so it reads the queue first:
+	 * recovery empties the queue only after admission closes and counts what it takes as unattempted.
 	 */
 	private OptionalLong durationInventoryExhaustionNanos() {
-		final long recorded = durationInventoryExhaustedNanos.get();
-		if (recorded != Long.MAX_VALUE) {
-			return OptionalLong.of(recorded);
-		}
 		final OptionalLong handoff = generator.schedulingExhaustionNanos();
-		if (handoff.isEmpty() || operationAdmissionClosed.get() || !nothingAwaitsDispatch()) {
+		if (handoff.isEmpty()
+						|| !nothingAwaitsDispatch()
+						|| operationLifecycle.counters().unattempted() > 0
+						|| operationAdmissionClosed.get()) {
 			return OptionalLong.empty();
 		}
-		durationInventoryExhaustedNanos.compareAndSet(Long.MAX_VALUE, handoff.getAsLong());
-		return OptionalLong.of(durationInventoryExhaustedNanos.get());
+		return handoff;
 	}
 
 	/** Whether everything handed to the driver has left its queue. The scan runs only once the count is zero. */
@@ -1378,7 +1374,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		}
 		stepShuttingDown.set(false);
 		operationAdmissionClosed.set(false);
-		durationInventoryExhaustedNanos.set(Long.MAX_VALUE);
 		generatorQueueRecovered.set(false);
 		driverQueueRecovered.set(false);
 		generatorRecoveryPending = null;
@@ -1977,6 +1972,13 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		}
 	}
 
+	@Override
+	public final boolean durationInventoryRanOut() {
+		return standaloneDeleteDurationMode
+						&& durationIntervalStarted.get()
+						&& deleteObjectLifecycle().unattempted() == 0;
+	}
+
 	private boolean acceptStandaloneDeleteResult(final O operation) {
 		if (!(operation instanceof DeleteRequestOperation)) {
 			throw new IllegalStateException(
@@ -2279,11 +2281,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		try {
 			if (operationAdmissionClosed.get()) {
 				return;
-			}
-			if (standaloneDeleteDurationMode) {
-				// The last look, while a queue that emptied since the last poll can still be told from
-				// one this close and its recovery are about to empty.
-				durationInventoryExhaustionNanos();
 			}
 			try {
 				// Close the downstream gate first. A generator handoff which already started
