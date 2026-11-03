@@ -16,9 +16,11 @@ const (
 	jobFailed      = "failed"
 	jobInterrupted = "interrupted"
 	jobPartial     = "partial"
+	jobStopped     = "stopped"
 
 	msgInterruptedShutdown = "Interrupted: the dashboard was stopped (Ctrl+C) while SPT was running, so the run did not finish."
 	msgInterruptedRestart  = "Interrupted: the dashboard stopped before SPT finished, so SPT's final exit status was not recorded."
+	msgStoppedOnRequest    = "Run stopped on request before it finished."
 )
 
 func drainOutput(src io.Reader, path string) {
@@ -49,6 +51,11 @@ func (a *app) watchProcess(runID string, cmd *exec.Cmd, lock *os.File, drained <
 	defer a.mu.Unlock()
 	status, message := finalStatus(err, a.stopping)
 	if a.activeJob != nil && a.activeJob[keyRunID] == runID {
+		if a.activeJob[keyStopRequested] == true {
+			// The user asked for this stop, so the run neither completed nor
+			// failed. SPT's exit code is still kept in returncode.
+			status, message = jobStopped, msgStoppedOnRequest
+		}
 		a.activeJob = cloneMap(a.activeJob)
 		a.activeJob[keyStatus] = status
 		a.activeJob["returncode"] = code
@@ -195,7 +202,7 @@ func (a *app) writeState(state map[string]any) error {
 }
 
 func publicJob(state map[string]any) map[string]any {
-	keys := []string{keyRunID, keyStatus, "created_at", keyStartedAt, "finished_at", keyElapsedSeconds, "returncode", keyMessage, keyOptions, "prefix", keyPhase}
+	keys := []string{keyRunID, keyStatus, "created_at", keyStartedAt, "finished_at", keyElapsedSeconds, "returncode", keyMessage, keyOptions, "prefix", keyPhase, keyStopRequested}
 	out := map[string]any{}
 	for _, k := range keys {
 		if v, ok := state[k]; ok {
