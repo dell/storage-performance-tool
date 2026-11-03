@@ -2183,6 +2183,48 @@ public class LoadStepContextImplTest {
 		}
 	}
 
+	@Test
+	public void bucketMetersReceiveWhatTheAggregateReceivesOnEachResultRoute() throws Exception {
+		testConfig.val("load-op-retry", false);
+		@SuppressWarnings("unchecked")
+		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
+		final MetricsContext<AllMetricsSnapshot> metrics = buildMetricsCtx("bucketRoutes");
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"step-bucket-routes", generatorMock, mockDriver, metrics, testConfig.configVal("load"), false);
+		final var meters = new com.dell.spt.base.metrics.bucket.BucketMeters(OpType.CREATE, List.of("another-bucket"));
+		stepCtx.bucketRecorder(new com.dell.spt.base.metrics.bucket.BucketRecorder(List.of("another-bucket"), meters, null));
+
+		assertTrue(stepCtx.put((Operation<DataItem>) newSuccDataOp("single", 1024)));
+		final List<Operation<DataItem>> batch = new ArrayList<>();
+		batch.add(newSuccDataOp("batch-1", 10));
+		batch.add(newSuccDataOp("batch-2", 20));
+		assertEquals(2, stepCtx.put(batch, 0, 2));
+		final DataOperation<DataItem> failed = baseDataOp("failed", 1);
+		((Operation<DataItem>) failed).status(Operation.Status.FAIL_IO);
+		assertTrue(stepCtx.put((Operation<DataItem>) failed));
+		final DataOperation<DataItem> corrupt = baseDataOp("corrupt", 1);
+		((Operation<DataItem>) corrupt).status(Operation.Status.RESP_FAIL_CORRUPT);
+		assertTrue(stepCtx.put((Operation<DataItem>) corrupt));
+
+		metrics.refreshLastSnapshot();
+		final AllMetricsSnapshot aggregate = metrics.lastSnapshot();
+		final var records = meters.terminalRecords();
+		assertEquals(aggregate.successSnapshot().count(), records.stream()
+						.mapToLong(com.dell.spt.base.metrics.bucket.BucketTerminalRecord::succeeded).sum());
+		assertEquals(aggregate.failsSnapshot().count(), records.stream()
+						.mapToLong(com.dell.spt.base.metrics.bucket.BucketTerminalRecord::failed).sum());
+		assertEquals(aggregate.corruptSnapshot().count(), records.stream()
+						.mapToLong(com.dell.spt.base.metrics.bucket.BucketTerminalRecord::corrupt).sum());
+		assertEquals(aggregate.byteSnapshot().count(), records.stream()
+						.mapToLong(com.dell.spt.base.metrics.bucket.BucketTerminalRecord::bytes).sum());
+		assertEquals(3, aggregate.successSnapshot().count());
+		assertEquals(2, aggregate.failsSnapshot().count());
+		assertEquals(1, aggregate.corruptSnapshot().count());
+		assertEquals(aggregate.durationSnapshot().count(), records.stream()
+						.mapToLong(record -> record.duration().count()).sum());
+		metrics.close();
+	}
+
 	/* Helpers for tests */
 	private MetricsContext<AllMetricsSnapshot> buildMetricsCtx(final String id) {
 		final MetricsContext<AllMetricsSnapshot> ctx = MetricsContextImpl.builder()

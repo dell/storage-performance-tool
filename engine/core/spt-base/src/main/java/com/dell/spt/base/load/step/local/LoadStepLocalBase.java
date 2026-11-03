@@ -23,11 +23,24 @@ import com.dell.spt.base.load.step.LoadStepBase;
 import com.dell.spt.base.load.step.PreparationStatus;
 import com.dell.spt.base.storage.driver.AdmissionPhase;
 import com.dell.spt.base.load.step.local.context.LoadStepContext;
+import com.dell.spt.base.load.step.local.context.LoadStepContextImpl;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.MetricsConstants;
+import com.dell.spt.base.metrics.bucket.BucketContextReply;
+import com.dell.spt.base.metrics.bucket.BucketMeters;
+import com.dell.spt.base.metrics.bucket.BucketMetricsRange;
+import com.dell.spt.base.metrics.bucket.BucketMetricsReply;
+import com.dell.spt.base.metrics.bucket.BucketSteadyOutcome;
+import com.dell.spt.base.metrics.bucket.BucketMetricsBudget;
+import com.dell.spt.base.metrics.bucket.BucketRecorder;
+import com.dell.spt.base.metrics.bucket.BucketStepFence;
+import com.dell.spt.base.metrics.context.MetricsContext;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketSet;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
+import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import com.dell.spt.base.metrics.steady.SteadyResult;
 import com.dell.spt.base.metrics.steady.SteadySettings;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
@@ -36,6 +49,9 @@ import java.io.IOException;
 import java.rmi.RemoteException;
 import java.util.NoSuchElementException;
 import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.IdentityHashMap;
+import java.util.Map;
 import java.util.List;
 import java.util.Objects;
 import java.util.OptionalLong;
@@ -50,6 +66,15 @@ import java.util.function.IntSupplier;
 import org.apache.logging.log4j.Level;
 
 public abstract class LoadStepLocalBase extends LoadStepBase {
+
+	private static final String BUCKET_METRICS_ENABLED = "output-metrics-bucket-enabled";
+	private static final String METRICS_SUMMARY_PERSIST = "output-metrics-summary-persist";
+
+	private final List<BucketMeters> bucketMeters = new ArrayList<>();
+	private final List<BucketContext> bucketContexts = new ArrayList<>();
+	private BucketMetricsReply bucketMetricsReply;
+	private volatile BucketStepFence bucketFence;
+	private long bucketMeterSets;
 
 	private static final long STEP_CONTEXT_POLL_NANOS = 10_000_000L; // 10ms
 
@@ -156,6 +181,10 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	protected void doStartWrapped() {
+		// A step that runs again reads its meters afresh.
+		synchronized (this) {
+			bucketMetricsReply = null;
+		}
 		resetDurationLifecycleForStart();
 		expectedOperationLifecycleContexts = List.copyOf(stepContexts);
 		operationLifecycleWorkerId = UUID.randomUUID().toString();
@@ -290,6 +319,11 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private void stopContextsOfFence(final String stepId, final StepPreparation barrier) {
 		final var contexts = List.copyOf(stepContexts);
 		Thread.ofPlatform().daemon().name("spt-preparation-fence-" + stepId).start(() -> {
+			try {
+				dropBucketMetricsOfFence(contexts);
+			} catch (final RuntimeException e) {
+				LogUtil.exception(Level.WARN, e, "{}: failed to free a fenced step's bucket meters", stepId);
+			}
 			barrier.runFenceActions();
 			for (final LoadStepContext stepContext : contexts) {
 				try {
@@ -526,6 +560,145 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	protected final synchronized void cancelDurationRunCleanupResourcesAfterExhaustion() {
 		cancelDurationDeadlineGuard();
 		cancelDurationDrainDeadlineGuard();
+	}
+
+	/**
+	 * Builds the bucket meters of one step context, in one block before its load starts: for its
+	 * primary metrics context and, in a mixed step, each per-type context.
+	 *
+	 * @param config the context's configuration
+	 * @param primary the context's primary metrics context
+	 * @param byOpType its per-type metrics contexts, or null when it has none
+	 * @return the recorder for the context's results, or null when bucket metrics are off for it: a
+	 *     step with one target bucket, the off switch, or a step already fenced
+	 */
+	protected final synchronized BucketRecorder initBucketMetrics(
+					final Config config,
+					final MetricsContext primary,
+					final Map<OpType, MetricsContext> byOpType) {
+		// Under the monitor, either this sees the fence or the fence's drop sees this step's lists. A
+		// context not yet in stepContexts keeps its recorder until the second drop in doStartWrapped.
+		final StepPreparation barrier = preparation;
+		if (barrier != null && barrier.fenced()) {
+			return null;
+		}
+		// A phase that persists no totals, such as a seed, has no files for these to go beside.
+		if (TargetBucketSet.count(config) <= 1
+						|| !config.boolVal(BUCKET_METRICS_ENABLED)
+						|| !config.boolVal(METRICS_SUMMARY_PERSIST)) {
+			return null;
+		}
+		final List<String> members = TargetBucketSet.memberNames(config);
+		final int contexts = byOpType == null || byOpType.isEmpty() ? 1 : byOpType.size();
+		bucketMeterSets += contexts * (members.size() + 1L);
+		BucketMetricsBudget.check(bucketMeterSets, Runtime.getRuntime().maxMemory());
+		final IdentityHashMap<MetricsContext, BucketMeters> metersOfContext = new IdentityHashMap<>();
+		final BucketMeters primaryMeters = new BucketMeters(primary.opType(), members);
+		metersOfContext.put(primary, primaryMeters);
+		final Map<OpType, BucketMeters> metersOfType = new EnumMap<>(OpType.class);
+		if (byOpType != null) {
+			byOpType.forEach((type, context) -> metersOfType.put(
+							type, metersOfContext.computeIfAbsent(context, c -> new BucketMeters(c.opType(), members))));
+		}
+		bucketMeters.addAll(metersOfContext.values());
+		final List<BucketStepFence.ContextCuts> ownCuts = new ArrayList<>(metersOfContext.size());
+		metersOfContext.forEach((context, meters) -> {
+			if (bucketFence == null) {
+				bucketFence = new BucketStepFence(loadStepId());
+			}
+			final BucketStepFence.ContextCuts cuts = bucketFence.register(meters);
+			final boolean measuresWindow = context.steadyWindowListener(cuts);
+			if (measuresWindow) {
+				ownCuts.add(cuts);
+			}
+			bucketContexts.add(new BucketContext(context, meters, cuts, measuresWindow, members));
+		});
+		final BucketStepFence fence = bucketFence;
+		return new BucketRecorder(members, primaryMeters, metersOfType, () -> fence.await(ownCuts));
+	}
+
+	private record BucketContext(
+					MetricsContext context,
+					BucketMeters meters,
+					BucketStepFence.ContextCuts cuts,
+					boolean measuresWindow,
+					List<String> members) {}
+
+	/**
+	 * Reads the quiescent meters once, encoding each set before reading the next, and holds the
+	 * result until this step closes.
+	 */
+	@Override
+	public final synchronized BucketMetricsReply bucketMetrics(final BucketMetricsRange range) {
+		if (bucketContexts.isEmpty()) {
+			return null;
+		}
+		if (bucketMetricsReply == null) {
+			if (bucketFence != null) {
+				bucketFence.await();
+			}
+			final List<BucketContextReply> replies = new ArrayList<>(bucketContexts.size());
+			for (final BucketContext context : bucketContexts) {
+				final BucketSteadyOutcome outcome = context.measuresWindow() ? context.cuts().outcome() : null;
+				final SteadyResult aggregateWindow = context.context().steadyResult();
+				final AllMetricsSnapshot lastSnapshot = context.context().lastSnapshot();
+				replies.add(new BucketContextReply(
+								metricsContexts.indexOf(context.context()),
+								context.meters().opType(),
+								lastSnapshot == null ? 0L : lastSnapshot.elapsedTimeMillis(),
+								aggregateWindow == null ? SteadyResult.NONE : aggregateWindow.startOffsetMillis(),
+								context.members(),
+								context.meters().terminalRecords(),
+								context.measuresWindow() && outcome == null
+												? BucketSteadyOutcome.unmeasured("the bucket window never closed")
+												: outcome));
+			}
+			bucketMetricsReply = new BucketMetricsReply(loadStepId(), UUID.randomUUID().toString(), replies);
+		}
+		return range == null || BucketMetricsRange.ALL.equals(range)
+						? bucketMetricsReply
+						: bucketMetricsReply.within(range);
+	}
+
+	/**
+	 * A fence means nothing was admitted, so the meters hold nothing, and the close that would free them
+	 * may never come: a worker fences itself when its entry node is gone, and the next step replaces this
+	 * one without closing it. First, so that a stuck fence action or context doesn't keep them.
+	 */
+	private synchronized void dropBucketMetricsOfFence(final List<LoadStepContext> contexts) {
+		for (final BucketContext context : bucketContexts) {
+			context.context().steadyWindowListener(null);
+		}
+		for (final LoadStepContext context : contexts) {
+			if (context instanceof LoadStepContextImpl<?, ?> impl) {
+				impl.bucketRecorder(null);
+			}
+		}
+		releaseBucketMetrics();
+	}
+
+	/** A worker holds its bucket data until its step closes: a closed service can outlive its step. */
+	private synchronized void releaseBucketMetrics() {
+		if (bucketFence != null) {
+			bucketFence.close();
+			bucketFence = null;
+		}
+		bucketContexts.clear();
+		bucketMeters.clear();
+		bucketMetricsReply = null;
+	}
+
+	@Override
+	protected final void afterSteadyWindowsClosed() {
+		final BucketStepFence fence = bucketFence;
+		if (fence != null) {
+			fence.await();
+		}
+	}
+
+	/** The bucket meters this step built, which are empty when bucket metrics are off. */
+	protected final List<BucketMeters> bucketMeters() {
+		return List.copyOf(bucketMeters);
 	}
 
 	@Override
@@ -1245,6 +1418,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	protected final void doClose() throws IOException {
+		releaseBucketMetrics();
 		if (standaloneDeleteDurationMode()) {
 			try {
 				closeDurationContexts();

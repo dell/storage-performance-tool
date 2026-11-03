@@ -1575,3 +1575,67 @@ func TestBuildEngineStartupArgsRejectsInvalidServiceThreads(t *testing.T) {
 		})
 	}
 }
+
+func TestBucketMetricsSetting(t *testing.T) {
+	base := Params{WorkloadType: "write", Endpoint: "http://127.0.0.1:9000", Bucket: "bench", BucketCount: 4, Threads: 1, ObjectSize: "1KiB", ObjectCount: 1}
+	generate := func(t *testing.T, params Params) map[string]any {
+		t.Helper()
+		data, err := GenerateDefaults(params)
+		if err != nil {
+			t.Fatalf("GenerateDefaults: %v", err)
+		}
+		var tree map[string]any
+		if err := yaml.Unmarshal(data, &tree); err != nil {
+			t.Fatal(err)
+		}
+		return tree
+	}
+	bucketNode := func(tree map[string]any) (map[string]any, bool) {
+		output, _ := tree["output"].(map[string]any)
+		metrics, _ := output["metrics"].(map[string]any)
+		node, ok := metrics["bucket"].(map[string]any)
+		return node, ok
+	}
+
+	if node, ok := bucketNode(generate(t, base)); ok {
+		t.Errorf("the default run wrote output.metrics.bucket: %v; the engine's shipped default decides", node)
+	}
+	off := base
+	off.BucketMetricsDisabled = true
+	node, ok := bucketNode(generate(t, off))
+	if !ok || node["enabled"] != false {
+		t.Errorf("--bucket-metrics=false wrote %v", node)
+	}
+	// As for --provision-target-bucket, an engine override of the same key wins over the flag.
+	overridden := off
+	overridden.EngineOverrides = []string{"output.metrics.bucket.enabled=true"}
+	node, ok = bucketNode(generate(t, overridden))
+	if !ok || node["enabled"] != true {
+		t.Errorf("the override did not win over the flag: %v", node)
+	}
+}
+
+func TestBucketMetricsDisabledAfterOverrides(t *testing.T) {
+	cases := []struct {
+		name      string
+		disabled  bool
+		overrides []string
+		want      bool
+	}{
+		{"flag default", false, nil, false},
+		{"flag off", true, nil, true},
+		{"override turns it on", true, []string{"output.metrics.bucket.enabled=true"}, false},
+		{"override turns it off", false, []string{"output.metrics.bucket.enabled=false"}, true},
+		{"map form", false, []string{"output.metrics.bucket={enabled: false}"}, true},
+		{"the last override wins", false, []string{"output.metrics.bucket.enabled=false", "output.metrics.bucket.enabled=true"}, false},
+		{"unrelated override", true, []string{"load.op.limit.rate=10"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := BucketMetricsDisabledAfterOverrides(Params{BucketMetricsDisabled: tc.disabled, EngineOverrides: tc.overrides})
+			if got != tc.want {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -359,6 +359,39 @@ class RangeReadStepContextTest {
 	}
 
 	@Test
+	void bucketMetersCountARetriedRangeReadOnceAndAFinalFailureOnce() throws Exception {
+		try (var f = new Fixture(true, false, new RangeReadPolicy(2, 0L, 1))) {
+			var meters = new com.dell.spt.base.metrics.bucket.BucketMeters(com.dell.spt.base.item.op.OpType.READ, List.of("member"));
+			f.context.bucketRecorder(new com.dell.spt.base.metrics.bucket.BucketRecorder(List.of("member"), meters, null));
+			var op = f.admit(10);
+			var first = f.attempt(op);
+			assertTrue(first.transportFailure(Status.FAIL_IO));
+			assertTrue(f.runtime.completed(op, op.circulation(), first));
+			var queued = new AtomicReference<RangeReadAttempt>();
+			when(f.generator.retryRange(any(), any())).thenAnswer(call -> {
+				RangeReadAttempt retry = call.getArgument(1);
+				assertTrue(op.circulation().claimRetryQueue(retry));
+				queued.set(retry);
+				return true;
+			});
+			f.scheduled.getFirst().run();
+			var notYet = meters.terminalRecords();
+			assertEquals(0, notYet.stream().mapToLong(r -> r.succeeded() + r.failed()).sum(), "attempts stay out");
+			var retry = queued.get();
+			assertTrue(f.runtime.metrics().requestHandoff(retry));
+			assertTrue(retry.headers(206, Status.SUCC, List.of("bytes 0-1/10"), List.of("2"), List.of(), false));
+			assertTrue(retry.bodyBytes(2));
+			assertTrue(retry.finish(true));
+			assertTrue(f.runtime.completed(op, op.circulation(), retry));
+			verify(f.metrics, times(1)).markSucc(eq(2L), anyLong(), eq(0L), eq(0L));
+			var records = meters.terminalRecords();
+			assertEquals(1, records.stream().mapToLong(com.dell.spt.base.metrics.bucket.BucketTerminalRecord::succeeded).sum());
+			assertEquals(0, records.stream().mapToLong(com.dell.spt.base.metrics.bucket.BucketTerminalRecord::failed).sum());
+			assertEquals(2, records.stream().mapToLong(com.dell.spt.base.metrics.bucket.BucketTerminalRecord::bytes).sum());
+		}
+	}
+
+	@Test
 	void retrySuccessUpdatesMainMetricsOnlyForTheFinalLogicalRead() throws Exception {
 		try (var f = new Fixture(true, false, new RangeReadPolicy(2, 0L, 1))) {
 			var op = f.admit(10);

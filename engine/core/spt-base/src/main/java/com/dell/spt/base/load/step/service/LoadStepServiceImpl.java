@@ -18,6 +18,8 @@ import com.dell.spt.base.svc.ServiceBase;
 import com.github.akurilov.confuse.Config;
 import java.io.IOException;
 import java.rmi.RemoteException;
+import com.dell.spt.base.metrics.bucket.BucketMetricsRange;
+import com.dell.spt.base.metrics.bucket.BucketMetricsReply;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -254,6 +256,11 @@ public final class LoadStepServiceImpl extends ServiceBase implements LoadStepSe
 	@Override
 	public final boolean isDeleteInventoryVerificationCompleteForStepStop() throws RemoteException {
 		return localLoadStep.isDeleteInventoryVerificationCompleteForStepStop();
+	}
+
+	@Override
+	public final BucketMetricsReply bucketMetrics(final BucketMetricsRange range) throws RemoteException {
+		return localLoadStep.bucketMetrics(range);
 	}
 
 	@Override

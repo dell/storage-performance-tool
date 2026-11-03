@@ -36,6 +36,25 @@ public final class SteadyWindow {
 		SteadyCut.Readings read();
 	}
 
+	/**
+	 * Hears this window's two events, in order and at most once each. Called with the window's
+	 * monitor held and, at scheduling exhaustion, on the metrics manager's thread, so a listener
+	 * only queues work: it never waits and never reads a meter.
+	 */
+	public interface Listener {
+
+		/** The start cut was taken at {@code startNanos}. */
+		void onWindowStart(long startNanos);
+
+		/**
+		 * The end cut was taken at {@code endNanos}, or at the same clock when it failed.
+		 *
+		 * @param started whether the window ever started
+		 * @param result the published result
+		 */
+		void onWindowClose(long endNanos, boolean started, SteadyResult result);
+	}
+
 	/** The stability series holds at most this many samples, about 12 KiB per window. */
 	static final int SERIES_CAPACITY = 512;
 
@@ -51,6 +70,7 @@ public final class SteadyWindow {
 	private volatile BooleanSupplier schedulingDrained;
 	private volatile State state = State.OPEN;
 	private volatile SteadyResult result;
+	private volatile Listener listener;
 	private long stepStartNanos;
 	private SteadyCut startCut;
 	private int cutCount;
@@ -63,6 +83,11 @@ public final class SteadyWindow {
 		this.settings = settings;
 		this.source = source;
 		this.nanoClock = nanoClock;
+	}
+
+	/** Sets the listener of this window's events, before the step starts. */
+	public void listener(final Listener windowListener) {
+		listener = windowListener;
 	}
 
 	/** Marks step start, the origin of the start offset. */
@@ -122,6 +147,7 @@ public final class SteadyWindow {
 				sampleFailed = new long[SERIES_CAPACITY];
 				appendSample(startCut);
 				state = State.STARTED;
+				notifyStart(startCut.timeNanos());
 			}
 		}
 	}
@@ -140,8 +166,11 @@ public final class SteadyWindow {
 		synchronized (lock) {
 			if (result == null) {
 				SteadyResult computed;
+				final boolean started = startCut != null;
+				long endNanos = Long.MIN_VALUE;
 				try {
 					final SteadyCut endCut = cut();
+					endNanos = endCut.timeNanos();
 					computed = SteadyComputation.compute(settings, stepStartNanos, startCut, endCut, cause);
 					if (computed.status().hasStatistics()) {
 						appendSample(endCut);
@@ -158,10 +187,17 @@ public final class SteadyWindow {
 					Loggers.MSG.warn("Steady-state window closed by {} could not be measured: {}", cause, e.toString());
 					computed = SteadyResult.notReached(cause + "; measurement failed", SteadyResult.NONE);
 				}
-				result = computed;
 				startCut = null;
 				sampleTimes = sampleSucceeded = sampleFailed = null;
 				state = State.CLOSED;
+				// Before the result is visible: a closer that takes the fast path must find this
+				// window's bucket work already queued, or it would return from the fence without it.
+				try {
+					notifyClose(endNanos == Long.MIN_VALUE ? nanoClock.getAsLong() : endNanos, started, computed);
+				} finally {
+					// Even if the listener throws an Error: a later closer must never take a third cut.
+					result = computed;
+				}
 				if (Loggers.MSG.isDebugEnabled()) {
 					Loggers.MSG.debug(
 									"Steady-state window closed by {}: {}, cut acquisition {} ns (start) and {} ns (end)",
@@ -172,6 +208,28 @@ public final class SteadyWindow {
 				}
 			}
 			return result;
+		}
+	}
+
+	private void notifyStart(final long startNanos) {
+		final Listener current = listener;
+		if (current != null) {
+			try {
+				current.onWindowStart(startNanos);
+			} catch (final RuntimeException e) {
+				Loggers.MSG.warn("Steady-state window start listener failed: {}", e.toString());
+			}
+		}
+	}
+
+	private void notifyClose(final long endNanos, final boolean started, final SteadyResult closed) {
+		final Listener current = listener;
+		if (current != null) {
+			try {
+				current.onWindowClose(endNanos, started, closed);
+			} catch (final RuntimeException e) {
+				Loggers.MSG.warn("Steady-state window close listener failed: {}", e.toString());
+			}
 		}
 	}
 

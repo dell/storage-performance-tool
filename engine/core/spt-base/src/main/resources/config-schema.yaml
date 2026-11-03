@@ -118,6 +118,8 @@ load:
 output:
   color: boolean
   metrics:
+    bucket:
+      enabled: boolean
     average:
       aggregation:
         period: int

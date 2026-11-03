@@ -334,6 +334,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 						metricsContexts.get(0),
 						metricsCtxByOpType,
 						loadConfig, tracePersist, null);
+		stepCtx.bucketRecorder(initBucketMetrics(mergedConfig, metricsContexts.get(0), metricsCtxByOpType));
 
 		// ── 14b. Wrap the driver result output to release generator permits ──
 		// The LoadStepContextImpl constructor sets itself as the driver's

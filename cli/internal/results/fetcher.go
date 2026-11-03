@@ -56,6 +56,9 @@ var DefaultArtifacts = []ArtifactSpec{
 	{Loggers: []string{"metrics.threshold.FileTotal"}, Suffix: constants.ResultsArtifactSuffixMetricsThreshold, Required: false},
 	// Steady-state window totals; engines before 5.17 do not write them.
 	{Loggers: []string{"metrics.steady.FileTotal"}, Suffix: constants.ResultsArtifactSuffixMetricsSteady, Required: false},
+	// Per-bucket totals: present for a step with more than one target bucket and bucket metrics on.
+	{Loggers: []string{"metrics.bucket.FileTotal"}, Suffix: constants.ResultsArtifactSuffixMetricsBucket, Required: false},
+	{Loggers: []string{"metrics.bucket.steady.FileTotal"}, Suffix: constants.ResultsArtifactSuffixMetricsBucketSteady, Required: false},
 	{Loggers: []string{"OpTraces"}, Suffix: constants.ResultsArtifactSuffixOpTrace, Required: false},
 	{Loggers: []string{"DeleteMetricsTotal"}, Suffix: constants.ResultsArtifactSuffixDeleteMetricsTotal, Required: false},
 	{Loggers: []string{"DeleteRequests"}, Suffix: constants.ResultsArtifactSuffixDeleteRequests, Required: false},

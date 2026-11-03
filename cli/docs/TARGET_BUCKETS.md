@@ -9,6 +9,7 @@ This applies to the `s3` (Netty), `s3-rdma` and `s3-aws` drivers. The `tables` w
 | Flag | Environment | Engine setting | Default |
 |------|-------------|----------------|---------|
 | `--provision-target-bucket` | | `storage.targetBucket.provision` | `true` |
+| `--bucket-metrics` | | `output.metrics.bucket.enabled` | `true` |
 | `--bucket-count` | | `storage.targetBucket.count` | `1` |
 | `--buckets` | `S3_BUCKETS` | `storage.targetBucket.names` | empty: the set is generated from `--bucket-count` |
 | `--buckets-file` | | `storage.targetBucket.names` (the CLI reads the file) | none |
@@ -35,7 +36,7 @@ To try a set, `cli/tools/testmultibucket.sh [BUCKETS]` runs a short headless wri
 - **Setup:** the phase that writes the run's objects checks every bucket of the set and creates the missing ones, as for one bucket. Later phases check them. A `mixed` run from `--read-items-file` (and `--delete-items-file`) has no seed phase, so with more than one bucket its own setup creates missing buckets of the set; the buckets its items files name are only checked.
 - **Workloads:** `write` (with or without `--cleanup`), `write-verify`, seeded `read`, seeded `delete` and `mixed`. Seeded `delete` needs `--delete-batch-size=1`, because a DELETE request covers one bucket. `read --items-file`, `delete --items-file`, `delete --delete-existing`, `read-verify`, `list`, `tables` and `mock` reject a count above 1.
 - **Bucket names:** each generated name must follow the [AWS bucket naming rules](https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html): 3 to 63 lowercase letters, digits, hyphens and periods, no `..`, no reserved prefix or suffix such as `xn--`. With 1000 buckets the base can be at most 59 characters. An invalid name fails the run before anything is sent.
-- **Results:** metrics stay totals across the set. The run's settings record the bucket count. The console's run parameters show `Bucket Count: N (<bucket>-0 ... <bucket>-<N-1>)`, and the results summary shows `Buckets: N (<bucket>-0 ... <bucket>-<N-1>)`.
+- **Results:** the existing metrics stay totals across the set, and [bucket metrics](#bucket-metrics) add per-bucket files. The run's settings record the bucket count. The console's run parameters show `Bucket Count: N (<bucket>-0 ... <bucket>-<N-1>)`, and the results summary shows `Buckets: N (<bucket>-0 ... <bucket>-<N-1>)`.
 - **Storage capacity:** check that the storage system can hold the extra buckets. Some systems give every bucket its own resources: SeaweedFS, for example, allocates volumes per bucket and refuses writes into new buckets once its volume slots run out, while existing buckets stay writable.
 - **First requests:** each worker's `s3` or `s3-rdma` driver checks each bucket once, with one HEAD request on its first operation to that bucket, so a run with many buckets spends its first operations on these checks.
 - **Engine overrides:** set the count with `--bucket-count`; an `--engine-override` that sets `storage.targetBucket.count`, directly or inside a map such as `storage.targetBucket={count: 4}`, is rejected. An override that replaces the `storage.targetBucket` map, such as `storage.targetBucket={provision: false}`, keeps the `--bucket-count` value. In a custom scenario or direct engine run, `storage.targetBucket.count` applies to a step's newly generated objects; with more than one bucket the engine rejects `storage.auth.file`, copy steps, a pipeline CREATE sub-step after the first (it writes the items the previous sub-step passes on) and expressions after the bucket in `item.output.path`.
@@ -66,6 +67,37 @@ spt run write --buckets-file buckets.txt --threads 64 --duration 5m
 - **Engine overrides:** set the names with `--buckets` or `--buckets-file`; an `--engine-override` that sets `storage.targetBucket.names`, directly or inside a map, is rejected. An override that replaces the `storage.targetBucket` map keeps the listed names.
 - **Replay:** `spt replay` refuses an archive that sets a bucket list, before anything runs: replay targets every step at one bucket, so it cannot keep a list's buckets. See [Replay](REPLAY.md).
 - **Custom scenarios:** in a custom scenario or direct engine run, `storage.targetBucket.names` is a list of names, and a non-empty list together with `storage.targetBucket.count` above 1 fails. The bucket segment of `item.output.path` is then a placeholder that is never evaluated, and never contacted unless an input names it; each listed bucket replaces it and keeps the rest of the path. A JavaScript array passes as its comma-separated string: `names: []` becomes one empty name, which counts as no list and falls back to the count, and a name that is empty or holds a comma fails the scenario.
+
+## Bucket metrics
+
+A step with more than one target bucket also records its counts and timings per bucket, and writes them to two files beside `metrics.total.csv`:
+
+| File | Values |
+|------|--------|
+| `metrics.bucket.total.csv` | The whole step |
+| `metrics.bucket.steady.total.csv` | Each bucket's own window, shifted from the aggregate's Steady-State Window |
+
+A single bucket, a one-name list, a phase that persists no totals such as the seed of a `read`, and `--bucket-metrics=false` record none of this and write neither file, so a missing file means it was off. Existing files, the terminal output and the live endpoints are unchanged, and they still report totals across the set. An `--engine-override` of `output.metrics.bucket.enabled` wins over the flag.
+
+**Rows.** A row is identified by `BucketKind`, `MemberIndex` and `OpType`. `BucketKind` is `member` or `catch-all`. `MemberIndex` is the bucket's place in the set, from 0, and `Bucket` is its exact name. A step has one `catch-all` row per operation type, written even when empty, for results whose bucket is not in the set, such as an items file that names another bucket. A bucket that is really named `other` is still a `member`. Rows are ordered by operation type, then member index, with the catch-all last.
+
+**Limit.** A standalone `spt run delete` over a generated `--bucket-count` set has no path to name its members from, so its rows are the catch-all's alone. Its counts are still right, and the `--cleanup` phases of other workloads are not affected.
+
+**Summing.** For each operation type, the member rows and the catch-all row of `metrics.bucket.total.csv` sum to the step's `metrics.total.csv` when every row says `BucketData` `complete`. A steady row does not sum to the aggregate's steady row: it is an estimate over its own interval.
+
+**Steady rows.** Each bucket window starts and ends with its own cuts, taken just after the aggregate's, so it is shifted later: it leaves out what completed before its start cut and includes what completed before its end cut. `StartDelay[ms]` and `EndDelay[ms]` say by how much, and `PassDuration[ms]` is how long the end cut took for that row. `SteadyTurnovers`, `SteadyTrend[%]` and `SteadyCV` are the aggregate's values, repeated. `SteadyStatus` follows the aggregate's rule on the row's own window, so a row can be `short` while the aggregate is `valid`, and a bucket with no completions in its window is `short` with empty timing cells.
+
+**`BucketData`.**
+
+| Value | Meaning | Compare with |
+|-------|---------|--------------|
+| `complete` | Every node in `NodesExpected` answered | The totals, for whole-step rows |
+| `incomplete` | Some node did not answer. The row is the subtotal of `NodesReceived` nodes, and a steady row leaves its statistics empty with `SteadyStatus` `incomplete` | Only a subtotal of the same nodes |
+| `unmeasured` | Steady file only: a node's bucket window could not be obtained, because a cut failed or missed the stop path's deadline. Statistics are empty and `SteadyStatus` is `incomplete` | Nothing |
+
+If no node answers, the file holds only its header. `messages.log` has one `bucket-metrics` record per file and operation type, with the `expected`, `received` and `missing` nodes, a reason for each missing one, and the `data` outcome. It is INFO when every node answered and WARN otherwise. Use it to see which nodes a subtotal covers.
+
+**Memory.** Each worker holds a set of meters per bucket and operation type, plus the copies a steady window needs: about 160 KiB per set, or about 640 MiB for 1,000 buckets and four operation types, and it reads the set size before any load. A step that would need more than 40% of the worker's maximum heap fails before it starts, with a message that says so. Use `--bucket-metrics=false`, or raise the engine's maximum heap.
 
 ## What each phase does
 

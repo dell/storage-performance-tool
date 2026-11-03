@@ -125,4 +125,27 @@ class TargetBucketSetTest {
 		assertEquals(Category.CONFIGURATION, failure.category());
 		assertTrue(failure.getMessage().contains(reason), failure.getMessage());
 	}
+
+	@org.junit.jupiter.api.Test
+	void memberNamesFollowTheOneResolutionForEveryForm() throws Exception {
+		final var single = TargetBucketProvisioningTest.stepConfig("create", "/bench");
+		assertEquals(List.of(), TargetBucketSet.memberNames(single));
+
+		final var generated = TargetBucketProvisioningTest.stepConfig("create", "/bench/a");
+		generated.val(TargetBucketSet.COUNT, 3);
+		assertEquals(List.of("bench-0", "bench-1", "bench-2"), TargetBucketSet.memberNames(generated));
+
+		final var listed = TargetBucketProvisioningTest.stepConfig("create", "/placeholder");
+		listed.val(TargetBucketSet.NAMES, List.of("alpha", "other"));
+		assertEquals(List.of("alpha", "other"), TargetBucketSet.memberNames(listed));
+
+		final var reader = TargetBucketProvisioningTest.stepConfig("read", "");
+		reader.val(TargetBucketSet.COUNT, 2);
+		reader.val("item-input-path", "/bench");
+		assertEquals(List.of("bench-0", "bench-1"), TargetBucketSet.memberNames(reader));
+
+		final var unknown = TargetBucketProvisioningTest.stepConfig("read", "");
+		unknown.val(TargetBucketSet.COUNT, 2);
+		assertEquals(List.of(), TargetBucketSet.memberNames(unknown));
+	}
 }

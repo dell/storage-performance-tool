@@ -55,6 +55,7 @@ import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.logging.OperationTraceCsvBatchLogMessage;
 import com.dell.spt.base.logging.OperationTraceCsvLogMessage;
+import com.dell.spt.base.metrics.bucket.BucketRecorder;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.load.step.local.context.range.RangeReadRuntime;
 import com.dell.spt.base.storage.driver.range.RangeReadDriverSupport;
@@ -123,6 +124,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final MetricsContext metricsCtx;
 	private final RangeReadRuntime<?> rangeRuntime;
 	private final Map<OpType, MetricsContext> metricsCtxByOpType;
+	private BucketRecorder bucketRecorder;
 	private final LongAdder counterResults = new LongAdder();
 	private final boolean tracePersistFlag;
 	private volatile Output<O> opsResultsOutput;
@@ -527,6 +529,33 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		}
 	}
 
+	/**
+	 * Sets the recorder of this context's bucket metrics; null, the default, adds one null check per
+	 * result and nothing else. Set before the step starts, so a driver's result threads see it,
+	 * and dropped at close so that the context no longer holds the step's meters.
+	 */
+	public final void bucketRecorder(final BucketRecorder recorder) {
+		this.bucketRecorder = recorder;
+	}
+
+	private void markSucc(
+					final O opResult, final long bytes, final long duration, final long latency, final long ttfb) {
+		resolveMetrics(opResult.type()).markSucc(bytes, duration, latency, ttfb);
+		final BucketRecorder recorder = bucketRecorder;
+		if (recorder != null) {
+			recorder.meterSet(opResult).markSucc(bytes, duration, latency, ttfb);
+		}
+	}
+
+	private void markPartSucc(
+					final O opResult, final long bytes, final long duration, final long latency, final long ttfb) {
+		resolveMetrics(opResult.type()).markPartSucc(bytes, duration, latency, ttfb);
+		final BucketRecorder recorder = bucketRecorder;
+		if (recorder != null) {
+			recorder.meterSet(opResult).markPartSucc(bytes, duration, latency, ttfb);
+		}
+	}
+
 	/** Resolve the MetricsContext for a given operation type (mixed-mode routing). */
 	private MetricsContext resolveMetrics(final OpType opType) {
 		if (metricsCtxByOpType != null) {
@@ -818,7 +847,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				recycleEligible = recycleFlag;
 			}
 			if (opResult instanceof PartialOperation) {
-				resolveMetrics(opResult.type()).markPartSucc(countBytesDone, reqDuration, respLatency, timeToFirstByte);
+				markPartSucc(opResult, countBytesDone, reqDuration, respLatency, timeToFirstByte);
 			} else {
 				if (!recycleEligible) {
 					// recycled ops should only appear in output.csv only once unless
@@ -853,7 +882,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				if (opResult instanceof ListOperation) {
 					markListSuccess((ListOperation<?>) opResult, reqDuration, respLatency, timeToFirstByte);
 				} else {
-					resolveMetrics(opResult.type()).markSucc(countBytesDone, reqDuration, respLatency, timeToFirstByte);
+					markSucc(opResult, countBytesDone, reqDuration, respLatency, timeToFirstByte);
 				}
 				counterResults.increment();
 			}
@@ -935,7 +964,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				// every terminal success, not just recycle-eligible ones
 				opResult.resetOpRetryCount();
 				if (opResult instanceof PartialOperation) {
-					resolveMetrics(opResult.type()).markPartSucc(countBytesDone, reqDuration, respLatency, timeToFirstByte);
+					markPartSucc(opResult, countBytesDone, reqDuration, respLatency, timeToFirstByte);
 				} else {
 					if (!recycleEligible) {
 						// recycled ops should only appear in output.csv only once unless
@@ -976,7 +1005,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					if (listOpResult != null) {
 						markListSuccess(listOpResult, reqDuration, respLatency, timeToFirstByte);
 					} else {
-						resolveMetrics(opResult.type()).markSucc(countBytesDone, reqDuration, respLatency, timeToFirstByte);
+						markSucc(opResult, countBytesDone, reqDuration, respLatency, timeToFirstByte);
 					}
 					counterResults.increment();
 				}
@@ -1104,8 +1133,13 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			Loggers.ERR.debug("{}: {}", opResult.toString(), status.toString());
 		}
 		final var metrics = resolveMetrics(opResult.type());
+		final BucketRecorder recorder = bucketRecorder;
+		final var bucketMeters = recorder == null ? null : recorder.meterSet(opResult);
 		if (Operation.Status.RESP_FAIL_CORRUPT.equals(status)) {
 			metrics.markCorrupt();
+			if (bucketMeters != null) {
+				bucketMeters.markCorrupt();
+			}
 			if (driver.metadataIntegrityEnabled() && opResult.integrityVerificationResult() != null) {
 				Loggers.INTEGRITY_FAILURES.info(
 								IntegrityCsvArtifacts.failureRecord(
@@ -1113,6 +1147,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			}
 		} else {
 			metrics.markFail();
+			if (bucketMeters != null) {
+				bucketMeters.markFail();
+			}
 		}
 		counterResults.increment();
 	}
@@ -1633,11 +1670,20 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	/** Bounded accounting observer, before retained outcome custody is released. */
 	private void recordRangeTerminal(final O op) {
+		final BucketRecorder recorder = bucketRecorder;
+		final var bucketMeters = recorder == null ? null : recorder.primaryMeterSet(op);
 		if (op.status() == Status.SUCC) {
 			final var data = (DataOperation<?>) op;
-			metricsCtx.markSucc(data.countBytesDone(), op.duration(), op.latency(), timeToFirstByte(op));
+			final long ttfb = timeToFirstByte(op);
+			metricsCtx.markSucc(data.countBytesDone(), op.duration(), op.latency(), ttfb);
+			if (bucketMeters != null) {
+				bucketMeters.markSucc(data.countBytesDone(), op.duration(), op.latency(), ttfb);
+			}
 		} else {
 			metricsCtx.markFail();
+			if (bucketMeters != null) {
+				bucketMeters.markFail();
+			}
 		}
 		counterResults.increment();
 	}
@@ -1928,14 +1974,21 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		final var metrics = resolveMetrics(operation.type());
 		final long requestDuration = standaloneDeleteRequestDuration(deleteOperation);
 		final long requestLatency = standaloneDeleteRequestLatency(deleteOperation);
+		final BucketRecorder recorder = bucketRecorder;
+		final var bucketMeters = recorder == null
+						? null
+						: recorder.meterSet(operation.type(), deleteOperation.deleteRequest().bucket());
 		if (Status.SUCC.equals(result.operationStatus())) {
-			metrics.markSucc(
-							0,
-							requestDuration,
-							requestLatency,
-							timeToFirstByte(operation));
+			final long ttfb = timeToFirstByte(operation);
+			metrics.markSucc(0, requestDuration, requestLatency, ttfb);
+			if (bucketMeters != null) {
+				bucketMeters.markSucc(0, requestDuration, requestLatency, ttfb);
+			}
 		} else {
 			metrics.markFail(requestDuration, requestLatency);
+			if (bucketMeters != null) {
+				bucketMeters.markFail(requestDuration, requestLatency);
+			}
 		}
 		counterResults.increment();
 		if (deleteArtifactRecorder != null) {
@@ -2178,6 +2231,10 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			for (final MetricsContext opTypeCtx : metricsCtxByOpType.values()) {
 				opTypeCtx.closeSteadyWindow(cause);
 			}
+		}
+		final BucketRecorder recorder = bucketRecorder;
+		if (recorder != null) {
+			recorder.awaitFence();
 		}
 	}
 
@@ -2609,15 +2666,17 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		// bytesListed is the logical size of the objects described by the LIST response, not
 		// payload transferred by this operation. Keep it for discovery diagnostics, but do not
 		// feed it into the generic data-transfer and bandwidth meters.
-		metricsCtx.markSucc(
-						objectsListed,
-						0L,
-						new long[]{reqDuration
-						},
-						new long[]{respLatency
-						},
-						new long[]{timeToFirstByte
-						});
+		final long[] durations = {reqDuration
+		};
+		final long[] latencies = {respLatency
+		};
+		final long[] ttfbs = {timeToFirstByte
+		};
+		metricsCtx.markSucc(objectsListed, 0L, durations, latencies, ttfbs);
+		final BucketRecorder recorder = bucketRecorder;
+		if (recorder != null) {
+			recorder.primaryMeterSet(listOp).markSucc(objectsListed, 0L, durations, latencies, ttfbs);
+		}
 	}
 
 	private long timeToFirstByte(final O opResult) {
@@ -2820,6 +2879,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	protected final void doClose() {
+		bucketRecorder = null;
 		try (final Instance logCtx = CloseableThreadContext.put(KEY_STEP_ID, id)
 						.put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			if (listShardMetricsRecorder != null) {

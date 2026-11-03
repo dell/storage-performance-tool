@@ -45,6 +45,7 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 
 	private final IntSupplier nodeCountSupplier;
 	private final Supplier<List<AllMetricsSnapshot>> snapshotsSupplier;
+	private BucketMetricsSource bucketMetricsSource;
 	private final boolean avgPersistFlag;
 	private final boolean sumPersistFlag;
 	private final boolean timingPersistFlag;
@@ -129,6 +130,11 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 
 	@Override
 	public void markFail(final long count) {}
+
+	@Override
+	public BucketMetricsSource bucketMetricsSource() {
+		return bucketMetricsSource;
+	}
 
 	@Override
 	public List<String> nodeAddrs() {
@@ -495,6 +501,7 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 		private Map metaData = new HashMap();
 		private IntSupplier nodeCountSupplier;
 		private Supplier<List<AllMetricsSnapshot>> snapshotsSupplier;
+		private BucketMetricsSource bucketMetricsSource;
 		private boolean avgPersistFlag;
 		private boolean sumPersistFlag;
 		private boolean timingPersistFlag;
@@ -505,7 +512,7 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 
 		@Override
 		public DistributedMetricsContextImpl build() {
-			return new DistributedMetricsContextImpl(
+			final DistributedMetricsContextImpl context = new DistributedMetricsContextImpl(
 							metaData,
 							nodeCountSupplier,
 							concurrencyThreshold,
@@ -516,6 +523,14 @@ public class DistributedMetricsContextImpl<S extends DistributedAllMetricsSnapsh
 							timingPersistFlag,
 							snapshotsSupplier,
 							quantileValues);
+			context.bucketMetricsSource = bucketMetricsSource;
+			return context;
+		}
+
+		@Override
+		public DistributedContextBuilder bucketMetricsSource(final BucketMetricsSource source) {
+			this.bucketMetricsSource = source;
+			return this;
 		}
 
 		@Override

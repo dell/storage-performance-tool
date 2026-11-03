@@ -167,7 +167,14 @@ type OutputConfig struct {
 
 // MetricsConfig represents metrics configuration
 type MetricsConfig struct {
-	Average AverageConfig `yaml:"average"`
+	Average AverageConfig        `yaml:"average"`
+	Bucket  *MetricsBucketConfig `yaml:"bucket,omitempty"` // emitted only to turn bucket metrics off
+}
+
+// MetricsBucketConfig represents output.metrics.bucket. The engine ships enabled: true, so the
+// generated defaults are unchanged unless a run turns them off.
+type MetricsBucketConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // AverageConfig represents average metrics configuration
@@ -195,6 +202,9 @@ func GenerateDefaults(params Params) ([]byte, error) {
 				},
 			},
 		},
+	}
+	if params.BucketMetricsDisabled {
+		config.Output.Metrics.Bucket = &MetricsBucketConfig{Enabled: false}
 	}
 	if params.RunID > 0 {
 		config.Run = &RunConfig{
@@ -572,6 +582,32 @@ func applyEngineOverride(root map[string]any, override string) error {
 
 	node[parts[len(parts)-1]] = value
 	return nil
+}
+
+// BucketMetricsDisabledAfterOverrides returns whether bucket metrics are off for this run. An engine
+// override of output.metrics.bucket.enabled wins over --bucket-metrics, so the run's recorded
+// settings say what the engine will do.
+func BucketMetricsDisabledAfterOverrides(params Params) bool {
+	disabled := params.BucketMetricsDisabled
+	for _, override := range params.EngineOverrides {
+		root := map[string]any{}
+		if err := applyEngineOverride(root, override); err != nil {
+			continue
+		}
+		var node any = root
+		for _, part := range []string{"output", "metrics", "bucket", "enabled"} {
+			children, ok := node.(map[string]any)
+			if !ok {
+				node = nil
+				break
+			}
+			node = children[part]
+		}
+		if enabled, ok := node.(bool); ok {
+			disabled = !enabled
+		}
+	}
+	return disabled
 }
 
 // EngineOverrideSets reports whether an engine override sets the configuration path, directly or
