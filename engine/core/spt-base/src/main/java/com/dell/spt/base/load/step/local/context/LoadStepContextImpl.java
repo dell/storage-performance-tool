@@ -670,14 +670,14 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	 * driver's input queue can hold the whole inventory within moments of the start.
 	 *
 	 * <p>This is only an early exit, and a poll can miss. {@link #durationInventoryRanOut()} decides from
-	 * the final counts. It must never report a slice with work left, so it reads the queue first:
-	 * recovery empties the queue only after admission closes and counts what it takes as unattempted.
+	 * the final counts. It must never report a slice with work left, so it reads the queue first: work
+	 * leaves it unsent only by being counted as unattempted first, and recovery only after admission closes.
 	 */
 	private OptionalLong durationInventoryExhaustionNanos() {
 		final OptionalLong handoff = generator.schedulingExhaustionNanos();
 		if (handoff.isEmpty()
 						|| !nothingAwaitsDispatch()
-						|| operationLifecycle.counters().unattempted() > 0
+						|| operationLifecycle.unattemptedCount() > 0
 						|| operationAdmissionClosed.get()) {
 			return OptionalLong.empty();
 		}

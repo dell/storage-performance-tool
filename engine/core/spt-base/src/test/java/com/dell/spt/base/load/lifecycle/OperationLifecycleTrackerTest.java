@@ -27,6 +27,31 @@ import org.mockito.Answers;
 
 final class OperationLifecycleTrackerTest {
 
+	/** A duration DELETE's poll reads custody and then this count, and must not see custody empty without it. */
+	@Test
+	void anUnattemptedOperationIsCountedBeforeItLeavesCustody() throws Exception {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final var queued = operation("queued");
+		assertTrue(tracker.generatorBuffered(queued));
+		assertTrue(tracker.driverQueued(queued));
+		final var inCustodyWhenCounted = new java.util.concurrent.atomic.AtomicBoolean();
+		final var counter = OperationLifecycleTracker.class.getDeclaredField("unattempted");
+		counter.setAccessible(true);
+		counter.set(tracker, new java.util.concurrent.atomic.LongAdder() {
+			@Override
+			public void increment() {
+				inCustodyWhenCounted.set(tracker.hasOutstandingOperations());
+				super.increment();
+			}
+		});
+
+		assertTrue(tracker.unattempted(queued));
+
+		assertTrue(inCustodyWhenCounted.get());
+		assertEquals(1, tracker.unattemptedCount());
+		assertFalse(tracker.hasOutstandingOperations());
+	}
+
 	@Test
 	void terminalEvidenceCountsSelectionIndependentlyAndClassifiesExactlyOnce() {
 		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
