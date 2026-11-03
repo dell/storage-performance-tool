@@ -162,7 +162,8 @@ func TestAnLXCsOwnMemInfoBoundsWhatAContainerOnItReports(t *testing.T) {
 	}{
 		{"an LXC below the machine", capacityOf(264*gib, "MemTotal"), "MemTotal:    8388608 kB\n", 8 * gib, "MemTotal", "reports less"},
 		{"a cgroup below the host stays", &nicplan.Capacity{Bytes: 2 * gib, Source: "cgroup", Cgroup: "/docker/id", CgroupLimitBytes: 2 * gib}, "MemTotal:    8388608 kB\n", 2 * gib, "cgroup", ""},
-		{"no answer from the host", capacityOf(264*gib, "MemTotal"), "not a meminfo line", 264 * gib, "MemTotal", ""},
+		{"no answer from the host", capacityOf(264*gib, "MemTotal"), "not a meminfo line", 264 * gib, "MemTotal", "was not checked"},
+		{"an image that could not read its memory", &nicplan.Capacity{Bytes: -1, Source: "MemTotal", MemTotalBytes: -1, CgroupLimitBytes: -1}, "MemTotal:    8388608 kB\n", 8 * gib, "MemTotal", "could not read its memory"},
 		{"no answer from the image", nil, "MemTotal:    8388608 kB\n", 8 * gib, "MemTotal", "no cgroup limit was checked"},
 		{"a login banner before the line", capacityOf(264*gib, "MemTotal"), "Welcome to wrk1\nMemTotal:    8388608 kB\n", 8 * gib, "MemTotal", "reports less"},
 	} {
@@ -187,6 +188,9 @@ func TestAnLXCsOwnMemInfoBoundsWhatAContainerOnItReports(t *testing.T) {
 			capacity := plan.Engines[0].Capacity
 			if capacity == nil || capacity.MemoryBytes != tc.want || capacity.Source != tc.source || !strings.Contains(capacity.Note, tc.noteHas) {
 				t.Fatalf("%+v", capacity)
+			}
+			if tc.noteHas == "" && capacity.Note != "" {
+				t.Fatalf("an unchanged figure needs no note: %+v", capacity)
 			}
 		})
 	}
@@ -223,8 +227,9 @@ func TestAHostThatHangsOnItsMemTotalDoesNotHoldUpTheRun(t *testing.T) {
 	}()
 	select {
 	case plan := <-done:
-		if capacity := plan.Engines[0].Capacity; capacity == nil || capacity.MemoryBytes != 32*gib {
-			t.Fatalf("the image's figure stands: %+v", capacity)
+		capacity := plan.Engines[0].Capacity
+		if capacity == nil || capacity.MemoryBytes != 32*gib || !strings.Contains(capacity.Note, "was not checked") {
+			t.Fatalf("the image's figure stands, as an upper bound: %+v", capacity)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the run waited for the hung command")

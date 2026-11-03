@@ -146,7 +146,17 @@ func askHost(ctx context.Context, in Input, host *hostparse.HostInfo, planArgs [
 // Without the probe's answer the host's figure is only an upper bound, and its note says so.
 func boundedByHostMemory(capacity *nicplan.Capacity, hostBytes int64) *nicplan.Capacity {
 	if hostBytes <= 0 {
-		return capacity
+		if capacity == nil {
+			return nil
+		}
+		// An LXC's limit shows nowhere else, so what the image reports is only an upper bound.
+		unbounded := *capacity
+		note := "the host's own MemTotal could not be read, so an LXC's limit was not checked"
+		if unbounded.Note != "" {
+			note = unbounded.Note + "; " + note
+		}
+		unbounded.Note = note
+		return &unbounded
 	}
 	if capacity == nil {
 		return &nicplan.Capacity{
@@ -188,7 +198,12 @@ func hostMemTotal(ctx context.Context, in Input, host *hostparse.HostInfo) int64
 	case value := <-result:
 		return value
 	case <-ctx.Done():
-		return 0
+		select {
+		case value := <-result:
+			return value // It answered in time; only this wait was late.
+		default:
+			return 0
+		}
 	}
 }
 
