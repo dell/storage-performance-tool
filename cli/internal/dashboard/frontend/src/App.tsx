@@ -519,7 +519,11 @@ function Dashboard({
     job = state?.job;
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState("");
-  const canStop = !historical && job?.status === "running";
+  // An attached CLI run is monitored read-only, so it cannot be stopped here.
+  const canStop =
+    !historical &&
+    job?.status === "running" &&
+    state?.connection?.mode !== "attached";
   const stopPending = stopping || !!job?.stop_requested;
   async function stop() {
     if (!canStop || stopPending) return;
