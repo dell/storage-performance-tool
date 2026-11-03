@@ -12,10 +12,10 @@ import (
 )
 
 const (
-	// FloorBytes is 5.16's shipped ceiling, which a ceiling not being a reservation is never lowered (D51).
+	// FloorBytes is 5.16's shipped ceiling. A ceiling is not a reservation, so it is never lowered (D51).
 	FloorBytes int64 = 64 * constants.BytesPerGiB
 	// NonDirectReserveBytes is what capacity keeps for the JVM's metaspace, code cache, thread stacks
-	// and GC structures beyond the heap (N6). It only limits what the CLI adds above the floor.
+	// and GC structures beyond the heap (N6).
 	NonDirectReserveBytes int64 = 4 * constants.BytesPerGiB
 	// DefaultHeapBytes is the entrypoint's -Xmx.
 	DefaultHeapBytes int64 = 4 * constants.BytesPerGiB
@@ -72,6 +72,7 @@ type Engine struct {
 	ShortfallMode   string          `json:"shortfallMode"`
 	ExplicitBytes   int64           `json:"explicitBytes,omitempty"`
 	NeedBytes       int64           `json:"needBytes,omitempty"`
+	PoolsBytes      int64           `json:"poolsNeedBytes,omitempty"`
 	CalculatedBytes int64           `json:"calculatedBytes,omitempty"`
 	PassedBytes     int64           `json:"passedBytes,omitempty"`
 	Threads         int             `json:"threads"`
@@ -111,6 +112,7 @@ type DecideInput struct {
 // composite is a run's steps put together on one engine.
 type composite struct {
 	need     int64
+	pools    int64
 	known    bool
 	steps    []StepLimit
 	unknown  []string
@@ -128,6 +130,9 @@ func compose(steps []nicplan.PoolStep) composite {
 		if step.LimitBytes > c.need {
 			c.need = step.LimitBytes
 		}
+		if step.PoolsNeedBytes > c.pools {
+			c.pools = step.PoolsNeedBytes
+		}
 		if step.PrewarmResidentBytes > c.resident {
 			c.resident = step.PrewarmResidentBytes
 		}
@@ -141,7 +146,8 @@ func compose(steps []nicplan.PoolStep) composite {
 	return c
 }
 
-// Decide applies D51 to one engine: max(64g, min(need, capacity)).
+// Decide applies D51 and D70 to one engine: the value is max(64g, need), unless the memory its pools
+// hold does not fit its capacity.
 func Decide(in DecideInput) Engine {
 	engine := Engine{Host: in.Host, ShortfallMode: shortfallOf(in.Shortfall), Threads: in.Threads}
 	if in.NoNicSet {
@@ -174,6 +180,7 @@ func Decide(in DecideInput) Engine {
 	engine.Unknown = demand.unknown
 	engine.ResidentBytes = demand.resident
 	engine.NeedBytes = demand.need
+	engine.PoolsBytes = demand.pools
 	if engine.Mode == ModeExplicit {
 		engine.Message = fmt.Sprintf("RDMA direct memory: %s keeps %s from %s", in.Host, formatForJVM(explicit), constants.EnvSptJavaOpts)
 		return engine
@@ -211,17 +218,20 @@ func unprobed(engine Engine, in DecideInput) Engine {
 	return engine
 }
 
-// sized sets the value for a known need, and applies the shortfall policy to a need above capacity.
+// sized sets the value for a known need. The need is a ceiling, about twice what the pools hold, as
+// each driver budgets half of the limit, so only what they hold is held against capacity (D70).
 func sized(engine Engine, demand composite) Engine {
 	engine.Mode = ModeSized
 	capacity := int64(-1)
 	if engine.Capacity != nil {
 		capacity = engine.Capacity.EffectiveBytes
 	}
-	engine.CalculatedBytes = value(demand.need, capacity)
+	engine.CalculatedBytes = atLeastTheFloor(demand.need)
 	engine.PassedBytes = engine.CalculatedBytes
-	if capacity >= 0 && demand.need > capacity {
-		short := fmt.Sprintf("%s needs %s of direct memory for its RDMA pools, but has %s: %s", engine.Host, format(demand.need), format(capacity), describeCapacity(engine.Capacity))
+	if capacity >= 0 && demand.pools > capacity {
+		engine.CalculatedBytes = atLeastTheFloor(min(demand.need, capacity))
+		engine.PassedBytes = engine.CalculatedBytes
+		short := fmt.Sprintf("the RDMA pools of %s hold %s, but it has %s: %s", engine.Host, format(demand.pools), format(capacity), describeCapacity(engine.Capacity))
 		if engine.ShortfallMode == ShortfallFail {
 			engine.Failure = short + fmt.Sprintf(". Lower the threads or object size, or set --rdma-pool-shortfall=%s to run with per-operation buffers", ShortfallWarn)
 			return engine
@@ -232,6 +242,11 @@ func sized(engine Engine, demand composite) Engine {
 	}
 	engine.Message = sizedMessage(engine, demand, capacity)
 	engine.Warning = len(demand.unknown) > 0
+	if capacity >= 0 && demand.need > capacity {
+		engine.Warning = true
+		engine.Message += fmt.Sprintf("; this limit is above the capacity: the pools hold %s, which fits, and direct memory past the capacity could run the host out of memory",
+			format(demand.pools))
+	}
 	return engine
 }
 
@@ -255,16 +270,9 @@ func sizedMessage(engine Engine, demand composite, capacity int64) string {
 	return message
 }
 
-// value is max(64g, min(need, capacity)). A capacity that could not be read limits nothing.
-func value(need, capacity int64) int64 {
-	limited := need
-	if capacity >= 0 && capacity < limited {
-		limited = capacity
-	}
-	if limited < FloorBytes {
-		return FloorBytes
-	}
-	return limited
+// atLeastTheFloor is max(64g, bytes).
+func atLeastTheFloor(bytes int64) int64 {
+	return max(FloorBytes, bytes)
 }
 
 func shortfallOf(value string) string {

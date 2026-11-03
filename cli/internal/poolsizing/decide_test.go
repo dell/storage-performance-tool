@@ -14,7 +14,12 @@ import (
 const gib = int64(1) << 30
 
 func step(id string, limit int64) nicplan.PoolStep {
-	return nicplan.PoolStep{ID: id, LimitBytes: limit, LimitForPoolsBytes: limit, LimitForProcessBytes: limit, Known: limit > 0}
+	return holding(id, limit, limit)
+}
+
+// holding is a step whose limit is a ceiling above what its pools hold, as each driver budgets half of the limit.
+func holding(id string, limit, pools int64) nicplan.PoolStep {
+	return nicplan.PoolStep{ID: id, LimitBytes: limit, LimitForPoolsBytes: limit, LimitForProcessBytes: pools, PoolsNeedBytes: pools, Known: limit > 0}
 }
 
 func output(capacity *nicplan.Capacity, steps ...nicplan.PoolStep) *nicplan.Output {
@@ -53,12 +58,75 @@ func TestTheFloorHoldsAboveASmallCapacity(t *testing.T) {
 	}
 }
 
-func TestANeedAboveCapacityFailsBeforeLaunchWithBothAmounts(t *testing.T) {
+func TestPoolsThatFitRunAtTheirCeilingAndWarnWhenItIsAboveCapacity(t *testing.T) {
+	for _, shortfall := range []string{ShortfallFail, ShortfallWarn} {
+		engine := Decide(DecideInput{Host: "h", Shortfall: shortfall, Output: output(capacityOf(128*gib, "MemTotal"), holding("read", 192*gib, 96*gib))})
+		if engine.Failure != "" || engine.PassedBytes != 192*gib || engine.CalculatedBytes != 192*gib || engine.PoolsBytes != 96*gib || !engine.Warning {
+			t.Fatalf("%s: %+v", shortfall, engine)
+		}
+		for _, want := range []string{"-XX:MaxDirectMemorySize=192g", "capacity 120GiB", "above the capacity", "the pools hold 96GiB"} {
+			if !strings.Contains(engine.Message, want) {
+				t.Errorf("%s: %q is missing %q", shortfall, engine.Message, want)
+			}
+		}
+		plan := Plan{Engines: []Engine{engine}}
+		findings := plan.Findings()
+		if plan.Failure() != nil || len(findings) != 1 || findings[0].Failure {
+			t.Fatalf("%s: a warning, which stops nothing: %+v", shortfall, findings)
+		}
+	}
+}
+
+func TestPoolsAtExactlyTheCapacityFit(t *testing.T) {
+	engine := Decide(DecideInput{Host: "h", Output: output(capacityOf(128*gib, "MemTotal"), holding("read", 192*gib, 120*gib))})
+	if engine.Failure != "" || engine.PassedBytes != 192*gib {
+		t.Fatalf("%+v", engine)
+	}
+}
+
+func TestACeilingWithinCapacityNeedsNoWarning(t *testing.T) {
+	engine := Decide(DecideInput{Host: "h", Output: output(capacityOf(1024*gib, "MemTotal"), holding("read", 192*gib, 96*gib))})
+	if engine.Warning || strings.Contains(engine.Message, "above the capacity") {
+		t.Fatalf("%+v", engine)
+	}
+}
+
+func TestThePoolsOfTheLargestStepAreHeldAgainstCapacity(t *testing.T) {
+	engine := Decide(DecideInput{Host: "h", Output: output(capacityOf(64*gib, "MemTotal"), holding("seed", 16*gib, 8*gib), holding("read", 192*gib, 96*gib), step("delete", 0))})
+	if engine.Failure == "" || engine.PoolsBytes != 96*gib {
+		t.Fatalf("%+v", engine)
+	}
+}
+
+func TestPoolsThatSkipPreWarmAreStillHeldAgainstCapacity(t *testing.T) {
+	cold := holding("read", 192*gib, 96*gib)
+	cold.PrewarmResidentBytes = 0
+	engine := Decide(DecideInput{Host: "h", Output: output(capacityOf(64*gib, "MemTotal"), cold)})
+	if engine.Failure == "" {
+		t.Fatalf("cold pools fill on first use to the same size: %+v", engine)
+	}
+}
+
+func TestACapacityNotReadComparesNothing(t *testing.T) {
+	engine := Decide(DecideInput{Host: "h", Output: output(capacityOf(-1, "unknown"), holding("read", 192*gib, 96*gib))})
+	if engine.Failure != "" || engine.Warning || engine.PassedBytes != 192*gib {
+		t.Fatalf("%+v", engine)
+	}
+}
+
+func TestAnLXCWithNoCapacityLeftRefusesAnyPools(t *testing.T) {
+	engine := Decide(DecideInput{Host: "h", Output: output(capacityOf(8*gib, "MemTotal"), holding("read", 16*gib, 1*gib))})
+	if engine.Failure == "" {
+		t.Fatalf("8 GiB less the heap and the reserve leaves nothing: %+v", engine)
+	}
+}
+
+func TestPoolsAboveCapacityFailBeforeLaunchWithBothAmounts(t *testing.T) {
 	engine := Decide(DecideInput{Host: "h", Shortfall: ShortfallFail, Output: output(capacityOf(128*gib, "MemTotal"), step("read", 192*gib))})
 	if engine.Failure == "" {
 		t.Fatalf("no failure: %+v", engine)
 	}
-	for _, want := range []string{"h needs 192GiB", "but has 120GiB", "128GiB", "4GiB heap", "4GiB reserve", "--rdma-pool-shortfall=warn"} {
+	for _, want := range []string{"pools of h hold 192GiB", "but it has 120GiB", "128GiB", "4GiB heap", "4GiB reserve", "--rdma-pool-shortfall=warn"} {
 		if !strings.Contains(engine.Failure, want) {
 			t.Errorf("%q is missing %q", engine.Failure, want)
 		}
@@ -69,7 +137,7 @@ func TestANeedAboveCapacityFailsBeforeLaunchWithBothAmounts(t *testing.T) {
 	}
 }
 
-func TestANeedAboveCapacityUnderWarnLaunchesAtTheCapacity(t *testing.T) {
+func TestPoolsAboveCapacityUnderWarnLaunchAtTheCapacity(t *testing.T) {
 	engine := Decide(DecideInput{Host: "h", Shortfall: ShortfallWarn, Output: output(capacityOf(128*gib, "MemTotal"), step("read", 192*gib))})
 	if engine.Failure != "" || engine.PassedBytes != 120*gib || !engine.Warning {
 		t.Fatalf("%+v", engine)
@@ -247,7 +315,7 @@ func TestTheSharedResponseComposesAsTheEngineMeant(t *testing.T) {
 		t.Fatalf("headroom = %d", demand.HeadroomBytes)
 	}
 	composed := compose(demand.Steps)
-	if !composed.known || composed.need != 14*gib || composed.resident != 6*gib {
+	if !composed.known || composed.need != 14*gib || composed.resident != 6*gib || composed.pools != 6*gib {
 		t.Fatalf("%+v", composed)
 	}
 	seed := demand.Steps[0]
@@ -286,6 +354,7 @@ func TestRenderGivesTheVerifyLines(t *testing.T) {
 		"Driver 1 GET: zero, from seed",
 		"Driver 1 GET: unknown: items.csv: a malformed item",
 		"Checks at 64g: each pool within its budget: passes (needs 12GiB); the process limit: passes (needs 14GiB)",
+		"Pools hold: 6GiB, which is what capacity is compared with",
 		"Capacity: 1016GiB from host memory of 1024GiB, less 4GiB heap and a 4GiB reserve",
 		"MaxDirectMemorySize: the CLI would set 64g",
 		"Pre-warm: makes 6GiB resident",

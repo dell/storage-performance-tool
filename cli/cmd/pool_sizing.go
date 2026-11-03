@@ -43,7 +43,7 @@ func poolPlanInput(
 }
 
 // planPoolSizing sizes -XX:MaxDirectMemorySize for each engine a run launches (spec item 14b), and
-// prints what it set. A need above an engine's capacity under fail stops the run here, before
+// prints what it set. Pools that do not fit an engine's capacity under fail stop the run here, before
 // anything starts. It returns nil when sizing does not apply, which leaves the JVM options as they
 // are: no NIC set, another driver, or the pool off.
 func planPoolSizing(

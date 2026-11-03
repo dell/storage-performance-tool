@@ -1440,6 +1440,7 @@ RDMA pools on rdma1 (shortfall: fail):
       NIC ens1f0np0: minimum 24, cap 25, need 24GiB (24 x 1GiB)
       NIC ens2f0np0: minimum 24, cap 25, need 24GiB (24 x 1GiB)
   Checks at 192g: each pool within its budget: passes (needs 192GiB); the process limit: passes (needs 104GiB); the steps need 192GiB
+  Pools hold: 96GiB, which is what capacity is compared with
   Capacity: 1016GiB from host memory of 1024GiB, less 4GiB heap and a 4GiB reserve
   MaxDirectMemorySize: the CLI would set 192g
   Pre-warm: makes 96GiB resident

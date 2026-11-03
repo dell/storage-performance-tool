@@ -172,7 +172,7 @@ func sizedPlan(host string, limit int64) poolsizing.Plan {
 		Output: &nicplan.Output{
 			Plan:       &nicplan.Plan{OK: true},
 			Capacity:   &nicplan.Capacity{Bytes: 256 * gib, Source: "MemTotal"},
-			PoolDemand: &nicplan.PoolDemand{Steps: []nicplan.PoolStep{{ID: "step", LimitBytes: limit, Known: true}}},
+			PoolDemand: &nicplan.PoolDemand{Steps: []nicplan.PoolStep{{ID: "step", LimitBytes: limit, PoolsNeedBytes: limit, Known: true}}},
 		},
 	})}}
 }
@@ -192,11 +192,11 @@ func TestASizedRunRecordsAndPassesItsValue(t *testing.T) {
 	}
 }
 
-func TestANeedAboveCapacityStopsTheRunBeforeLaunch(t *testing.T) {
+func TestPoolsAboveCapacityStopTheRunBeforeLaunch(t *testing.T) {
 	stubPoolPlan(t, sizedPlan("127.0.0.1", 512*gib), nil)
 	hosts := []*hostparse.HostInfo{{Host: "127.0.0.1", IsLocal: true}}
 	_, err := planPoolSizing(context.Background(), rdmaRunParams(), nil, hosts, "image", false)
-	if err == nil || !strings.Contains(err.Error(), "needs 512GiB") || !strings.Contains(err.Error(), "but has 248GiB") {
+	if err == nil || !strings.Contains(err.Error(), "hold 512GiB") || !strings.Contains(err.Error(), "but it has 248GiB") {
 		t.Fatalf("err = %v", err)
 	}
 	if poolsizing.LaunchOptionsFor(poolsizing.LocalHostKey).JavaOpts != "" {
@@ -216,14 +216,20 @@ func TestVerifyPreviewFailsAShortPoolUnderFailAndWarnsUnderWarn(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		shortfall string
+		pools     int64
 		ready     bool
-	}{{"fail", poolsizing.ShortfallFail, false}, {"warn", poolsizing.ShortfallWarn, true}} {
+		says      string
+	}{
+		{"fail", poolsizing.ShortfallFail, 256 * gib, false, "hold 256GiB"},
+		{"warn", poolsizing.ShortfallWarn, 256 * gib, true, "hold 256GiB"},
+		{"pools that fit, under fail", poolsizing.ShortfallFail, 200 * gib, true, "above the capacity"},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			engine := poolsizing.Decide(poolsizing.DecideInput{
 				Host: "wrk1", Shortfall: tc.shortfall,
 				Output: &nicplan.Output{
 					Capacity:   &nicplan.Capacity{Bytes: 256 * gib, Source: "cgroup", Cgroup: "/lxc/9"},
-					PoolDemand: &nicplan.PoolDemand{Steps: []nicplan.PoolStep{{ID: "create", LimitBytes: 512 * gib, LimitForPoolsBytes: 512 * gib, LimitForProcessBytes: 264 * gib, Known: true}}},
+					PoolDemand: &nicplan.PoolDemand{Steps: []nicplan.PoolStep{{ID: "create", LimitBytes: 512 * gib, LimitForPoolsBytes: 512 * gib, LimitForProcessBytes: tc.pools + 8*gib, PoolsNeedBytes: tc.pools, Known: true}}},
 				},
 			})
 			stubPoolPlan(t, poolsizing.Plan{Engines: []poolsizing.Engine{engine}}, nil)
@@ -240,7 +246,7 @@ func TestVerifyPreviewFailsAShortPoolUnderFailAndWarnsUnderWarn(t *testing.T) {
 			if report.Ready != tc.ready {
 				t.Fatalf("ready = %v: %s", report.Ready, report.PoolPreview)
 			}
-			if !strings.Contains(report.PoolPreview, "RDMA pools on wrk1") || !strings.Contains(report.PoolPreview, "needs 512GiB") {
+			if !strings.Contains(report.PoolPreview, "RDMA pools on wrk1") || !strings.Contains(report.PoolPreview, tc.says) {
 				t.Fatalf("%s", report.PoolPreview)
 			}
 		})

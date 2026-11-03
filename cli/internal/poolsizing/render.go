@@ -103,8 +103,9 @@ func describeOperation(operation nicplan.PoolOperation) string {
 
 // renderChecks gives the two results apart, at the value the engine would run with.
 func renderChecks(w io.Writer, engine Engine, steps []nicplan.PoolStep) {
-	var pools, process, limit int64
+	var pools, process, limit, held int64
 	for _, step := range steps {
+		held = maximum(held, step.PoolsNeedBytes)
 		pools = maximum(pools, step.LimitForPoolsBytes)
 		process = maximum(process, step.LimitForProcessBytes)
 		limit = maximum(limit, step.LimitBytes)
@@ -116,6 +117,7 @@ func renderChecks(w io.Writer, engine Engine, steps []nicplan.PoolStep) {
 	}
 	_, _ = fmt.Fprintf(w, "  Checks at %s: each pool within its budget: %s (needs %s); the process limit: %s (needs %s); the steps need %s\n",
 		formatForJVM(at), passOrShort(at >= pools), format(pools), passOrShort(at >= process), format(process), format(limit))
+	_, _ = fmt.Fprintf(w, "  Pools hold: %s, which is what capacity is compared with\n", format(held))
 }
 
 func passOrShort(passed bool) string {
