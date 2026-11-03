@@ -626,6 +626,9 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				bucketFence.await();
 			}
 			final List<BucketContextReply> replies = new ArrayList<>(bucketContexts.size());
+			// Fenced at the admission barrier, this step's contexts never started, so they have no elapsed time.
+			final StepPreparation barrier = preparation;
+			final boolean neverAdmitted = barrier != null && !barrier.released();
 			for (final BucketContext context : bucketContexts) {
 				final BucketSteadyOutcome outcome = context.measuresWindow() ? context.cuts().outcome() : null;
 				final SteadyResult aggregateWindow = context.context().steadyResult();
@@ -633,7 +636,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				replies.add(new BucketContextReply(
 								metricsContexts.indexOf(context.context()),
 								context.meters().opType(),
-								lastSnapshot == null ? 0L : lastSnapshot.elapsedTimeMillis(),
+								lastSnapshot == null || neverAdmitted ? 0L : lastSnapshot.elapsedTimeMillis(),
 								aggregateWindow == null ? SteadyResult.NONE : aggregateWindow.startOffsetMillis(),
 								context.members(),
 								context.meters().terminalRecords(),
