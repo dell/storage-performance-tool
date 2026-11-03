@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import type { State } from "../types";
+import { verifyStorage } from "../api/requests";
 import { ConnectionGraph } from "./ConnectionGraph";
-import { endpointError, hostErrors, readJSON } from "../utils/validation";
+import { endpointError, hostErrors } from "../utils/validation";
 
 type Form = { hosts: string[]; endpoint: string };
 
@@ -69,12 +70,7 @@ export function StorageConfiguration({
     setError("");
     try {
       const endpoint = form.endpoint.trim();
-      const r = await fetch("/api/storage/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ hosts: entered, endpoint }),
-      });
-      await readJSON(r, "Verification request failed.");
+      await verifyStorage({ hosts: entered, endpoint });
       setForm({ hosts: entered, endpoint });
       await onRefresh();
     } catch (e) {

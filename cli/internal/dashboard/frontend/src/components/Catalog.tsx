@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import type { CatalogList, CatalogRun } from "../types";
+import type { Artifact, CatalogList, CatalogRun } from "../types";
+import { getArtifacts, getCatalog } from "../api/requests";
 import { Status } from "./Status";
 import { RunLog } from "./RunLog";
 import { formatNumber as fmt } from "../utils/metrics";
 import {
-  catalogQuery,
   maxCompare,
   previousRun,
   runSettings,
@@ -41,14 +41,10 @@ export function Catalog({
     const controller = new AbortController();
     const timer = setTimeout(() => {
       setLoading(true);
-      fetch(catalogQuery(filters), {
-        cache: "no-store",
-        signal: controller.signal,
-      })
-        .then(async (r) => {
-          const body = await r.json();
-          if (!r.ok) throw new Error(body.error ?? "Could not read results.");
-          setData(body as CatalogList);
+      getCatalog(filters, controller.signal)
+        .then((body) => {
+          if (controller.signal.aborted) return;
+          setData(body);
           setError("");
         })
         .catch((e) => {
@@ -70,15 +66,10 @@ export function Catalog({
   // cannot hide the next older complete match.
   useEffect(() => {
     const controller = new AbortController();
-    fetch(catalogQuery({ q: "", source: "", status: "" }), {
-      cache: "no-store",
-      signal: controller.signal,
-    })
-      .then(async (r) => {
-        const body = await r.json();
-        if (!r.ok) throw new Error(body.error ?? "Could not read results.");
+    getCatalog({ q: "", source: "", status: "" }, controller.signal)
+      .then((body) => {
         if (controller.signal.aborted) return;
-        setAllRuns((body as CatalogList).runs ?? []);
+        setAllRuns(body.runs ?? []);
       })
       .catch(() => {
         /* filtered list still works; previous-run just falls back below */
@@ -454,27 +445,15 @@ function CatalogRow({
   );
 }
 
-type Artifact = {
-  name: string;
-  kind: string;
-  type: string;
-  size: number;
-};
-
 function RunArtifacts({ runId }: { runId: string }) {
   const [items, setItems] = useState<Artifact[] | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`/api/catalog/artifacts?id=${encodeURIComponent(runId)}`, {
-      cache: "no-store",
-      signal: controller.signal,
-    })
-      .then(async (r) => {
-        const body = await r.json();
-        if (!r.ok) throw new Error(body.error ?? "Could not list artifacts.");
+    getArtifacts(runId, controller.signal)
+      .then((body) => {
         if (controller.signal.aborted) return;
-        setItems((body.artifacts as Artifact[]) ?? []);
+        setItems(body.artifacts ?? []);
         setError("");
       })
       .catch((e) => {

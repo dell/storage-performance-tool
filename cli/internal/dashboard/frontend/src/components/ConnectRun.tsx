@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { State } from "../types";
-import { readJSON } from "../utils/validation";
+import { attachRun, detachRun } from "../api/requests";
 
 export function ConnectRun({
   state,
@@ -28,17 +28,7 @@ export function ConnectRun({
     setError("");
     setBusy(true);
     try {
-      const response = await fetch("/api/attach", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ host }),
-      });
-      const body = await readJSON(
-        response,
-        "Could not connect to the SPT run.",
-      );
-      if (!response.ok)
-        throw new Error(body.error ?? "Could not connect to the SPT run.");
+      await attachRun(host);
       await onConnected();
     } catch (reason) {
       setError(
@@ -55,13 +45,7 @@ export function ConnectRun({
     setError("");
     setBusy(true);
     try {
-      const response = await fetch("/api/attach", { method: "DELETE" });
-      const body = await readJSON(
-        response,
-        "Could not disconnect from the run.",
-      );
-      if (!response.ok)
-        throw new Error(body.error ?? "Could not disconnect from the run.");
+      await detachRun();
       await onConnected();
     } catch (reason) {
       setError(

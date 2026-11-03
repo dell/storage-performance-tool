@@ -149,6 +149,22 @@ export type HistoryRun = {
   options?: Partial<Options>;
   phase_summaries: Row[];
 };
+export type RunHistoryResponse = { runs: HistoryRun[] };
+export type StartRunResponse = { job: Job; message: string };
+export type StopRunResponse = { job: Job; message: string };
+export type VerifyStorageResponse = { storage: Storage };
+export type DetachResponse = { status: "disconnected" };
+export type Artifact = {
+  name: string;
+  kind: string;
+  type: string;
+  size: number;
+};
+export type CatalogArtifactsResponse = {
+  run_id: string;
+  artifacts: Artifact[];
+  read_only: boolean;
+};
 export type Sample = {
   timestamp: string;
   elapsed: number;

@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AxiosError, CanceledError } from "axios";
+import { apiClient } from "../api/client";
 import {
   cleanup,
   fireEvent,
@@ -14,9 +16,11 @@ import { RunLog } from "./RunLog";
 import { NodeTable } from "./NodeTable";
 import { RunWarnings } from "./RunWarnings";
 
+const originalAdapter = apiClient.defaults.adapter;
+
 afterEach(() => {
   cleanup();
-  vi.unstubAllGlobals();
+  apiClient.defaults.adapter = originalAdapter;
 });
 
 const run = (id: string, over: Partial<CatalogRun> = {}): CatalogRun => ({
@@ -50,23 +54,30 @@ const run = (id: string, over: Partial<CatalogRun> = {}): CatalogRun => ({
   ...over,
 });
 
-function stubFetch(handler: (url: string) => unknown, status = 200) {
+function stubRequests(handler: (url: string) => unknown, status = 200) {
   const calls: string[] = [];
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (url: string, init?: RequestInit) => {
-      calls.push(url);
-      const signal = init?.signal;
-      if (signal?.aborted) {
-        throw new DOMException("Aborted", "AbortError");
-      }
-      const body = await handler(url);
-      if (signal?.aborted) {
-        throw new DOMException("Aborted", "AbortError");
-      }
-      return new Response(JSON.stringify(body), { status });
-    }),
-  );
+  apiClient.defaults.adapter = async (config) => {
+    const url = config.url ?? "";
+    calls.push(url);
+    const body = await handler(url);
+    if (config.signal?.aborted) throw new CanceledError();
+    const response = {
+      data: body,
+      status,
+      statusText: "",
+      headers: { "content-type": "application/json" },
+      config,
+    };
+    if (config.validateStatus && !config.validateStatus(status))
+      throw new AxiosError(
+        "Request failed",
+        undefined,
+        config,
+        undefined,
+        response,
+      );
+    return response;
+  };
   return calls;
 }
 
@@ -140,7 +151,7 @@ const compareResult: CompareResult = {
 
 describe("Catalog", () => {
   it("lists typed artifact downloads and an empty state", async () => {
-    stubFetch((url) => {
+    stubRequests((url) => {
       if (url.startsWith("/api/catalog/artifacts")) {
         if (url.includes("id=empty")) return { run_id: "empty", artifacts: [] };
         return {
@@ -203,7 +214,7 @@ describe("Catalog", () => {
     const delayedA = new Promise((resolve) => {
       releaseA = resolve;
     });
-    stubFetch((url) => {
+    stubRequests((url) => {
       if (url.startsWith("/api/catalog/artifacts")) {
         if (url.includes("id=empty")) return { run_id: "empty", artifacts: [] };
         return delayedA.then(() => ({
@@ -262,7 +273,7 @@ describe("Catalog", () => {
   });
 
   it("filters through the API and hands the selection to compare", async () => {
-    const calls = stubFetch(() => ({
+    const calls = stubRequests(() => ({
       root: "/results",
       runs: [
         run("a"),
@@ -302,7 +313,7 @@ describe("Catalog", () => {
 
 describe("Compare", () => {
   it("labels the rule honestly and shows settings differences", async () => {
-    const calls = stubFetch(() => compareResult);
+    const calls = stubRequests(() => compareResult);
     render(
       <Compare ids={["base", "next"]} baseline="base" onBack={() => {}} />,
     );
@@ -369,7 +380,7 @@ describe("RunLog", () => {
         { file: "console", level: "error", text: "ERROR [REDACTED]" },
       ],
     };
-    const calls = stubFetch(() => body);
+    const calls = stubRequests(() => body);
     render(<RunLog base="/api/runs/r/log" sources={["console", "results"]} />);
     await screen.findByText("WARN slow");
     expect(screen.getByText(/Interim console output/)).toBeTruthy();
@@ -383,7 +394,7 @@ describe("RunLog", () => {
     await waitFor(() => expect(calls.at(-1)).toContain("source=results"));
   });
   it("stays closed and does not fetch until opened when collapsed", async () => {
-    const calls = stubFetch(() => ({
+    const calls = stubRequests(() => ({
       run_id: "r",
       source: "results",
       level: "all",
@@ -402,7 +413,7 @@ describe("RunLog", () => {
     expect(screen.getByText("From: write.errors.log")).toBeTruthy();
   });
   it("shows the server error", async () => {
-    stubFetch(() => ({ error: "Saved run not found." }), 404);
+    stubRequests(() => ({ error: "Saved run not found." }), 404);
     render(<RunLog base="/api/catalog/log?id=x" />);
     await screen.findByText("Saved run not found.");
   });
@@ -449,7 +460,7 @@ describe("NodeTable", () => {
 
   it("offers Compare with previous for a complete run with an older match", async () => {
     const onCompare = vi.fn();
-    stubFetch(() => ({
+    stubRequests(() => ({
       root: "/tmp/results",
       runs: [
         run("newer", {

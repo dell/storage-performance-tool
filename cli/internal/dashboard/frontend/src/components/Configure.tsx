@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import type { Driver, HistoryRun, Options, RunMode, State } from "../types";
+import { getRuns, startRun } from "../api/requests";
 import { defaults } from "../config";
 import { StorageConfiguration } from "./StorageConfiguration";
 import { formatNumber as fmt } from "../utils/metrics";
 import { driverReadiness } from "../utils/driver";
 import {
   fallbackLimits,
-  readJSON,
   formatBytes,
   parseSize,
   parseWhole,
@@ -208,11 +208,8 @@ function ExpertWorkspace({
   useEffect(() => {
     if (start !== "previous") return;
     const controller = new AbortController();
-    fetch("/api/runs", { cache: "no-store", signal: controller.signal })
-      .then(async (response) =>
-        readJSON(response, "Could not load saved runs."),
-      )
-      .then((data: { runs?: HistoryRun[] }) => {
+    getRuns(controller.signal)
+      .then((data) => {
         if (controller.signal.aborted) return;
         const available = (Array.isArray(data.runs) ? data.runs : []).filter(
           (r) =>
@@ -705,12 +702,7 @@ export function Configure({
     setBusy(true);
     setError("");
     try {
-      const r = await fetch("/api/runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(config),
-      });
-      await readJSON(r, "Run request failed.");
+      await startRun(config);
       await onStarted();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not start run.");

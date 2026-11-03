@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { LogLevel, LogResponse } from "../types";
-import { logURL } from "../utils/catalog";
+import { getLog } from "../api/requests";
 
 const levels: { value: LogLevel; label: string }[] = [
   { value: "all", label: "All" },
@@ -29,7 +29,9 @@ export function RunLog({
 }) {
   const [open, setOpen] = useState(!collapsed);
   const [level, setLevel] = useState<LogLevel>("all");
-  const [source, setSource] = useState(sources?.[0] ?? "");
+  const [source, setSource] = useState<LogResponse["source"] | "">(
+    sources?.[0] ?? "",
+  );
   const [data, setData] = useState<LogResponse | null>(null);
   const [error, setError] = useState("");
   const [version, setVersion] = useState(0);
@@ -39,13 +41,9 @@ export function RunLog({
     let timer: ReturnType<typeof setTimeout> | undefined;
     const load = async () => {
       try {
-        const r = await fetch(
-          logURL(base, level, 200, source ? { source } : {}),
-          { cache: "no-store", signal: controller.signal },
-        );
-        const body = await r.json();
-        if (!r.ok) throw new Error(body.error ?? "Could not read the log.");
-        setData(body as LogResponse);
+        const body = await getLog(base, level, source, controller.signal);
+        if (controller.signal.aborted) return;
+        setData(body);
         setError("");
       } catch (e) {
         if (!controller.signal.aborted) {

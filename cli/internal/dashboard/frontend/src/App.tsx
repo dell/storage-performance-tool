@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { HistoryRun, Row, RunMode, State } from "./types";
+import { getRuns, getSavedRun, getState, stopRun } from "./api/requests";
 import { MetricCard } from "./components/MetricCard";
 import { Configure } from "./components/Configure";
 import { Status } from "./components/Status";
@@ -14,7 +15,6 @@ import { NodeTable } from "./components/NodeTable";
 import { RunWarnings } from "./components/RunWarnings";
 import { RunLog } from "./components/RunLog";
 import { runWorkloadType, workloadLabel } from "./utils/catalog";
-import { readJSON } from "./utils/validation";
 import {
   elapsed,
   formatMetric,
@@ -77,22 +77,8 @@ function useServer() {
     [received, setReceived] = useState("");
   const refresh = useCallback(async (signal?: AbortSignal) => {
     try {
-      if (location.protocol === "file:")
-        throw new Error(
-          "Open the dashboard through its local server to load SPT results.",
-        );
-      const r = await fetch("/api/state", { cache: "no-store", signal });
-      if (!(r.headers.get("content-type") ?? "").includes("application/json"))
-        throw new Error(
-          "The dashboard server is unavailable. Open the app through the dashboard server or SSH tunnel.",
-        );
-      const s = await r.json();
-      if (!r.ok)
-        throw new Error(s.error ?? `Could not read SPT state (${r.status}).`);
-      if (!s.target || !("job" in s) || !("metrics" in s))
-        throw new Error(
-          "The server returned an unsupported dashboard response.",
-        );
+      const s = await getState(signal);
+      if (signal?.aborted) return;
       setState(s);
       setError("");
       setReceived(new Date().toISOString());
@@ -151,11 +137,9 @@ export default function App() {
   useEffect(() => {
     if (page !== "history") return;
     const controller = new AbortController();
-    fetch("/api/runs", { cache: "no-store", signal: controller.signal })
-      .then(async (response) => {
-        const body = await response.json();
-        if (!response.ok)
-          throw new Error(body.error ?? "Could not load run history.");
+    getRuns(controller.signal)
+      .then((body) => {
+        if (controller.signal.aborted) return;
         setHistoryRuns(Array.isArray(body.runs) ? body.runs : []);
       })
       .catch((reason) => {
@@ -175,13 +159,8 @@ export default function App() {
   const openSavedRun = async (runID: string) => {
     setHistoryError("");
     try {
-      const response = await fetch(`/api/runs/${encodeURIComponent(runID)}`, {
-        cache: "no-store",
-      });
-      const detail = await response.json();
-      if (!response.ok)
-        throw new Error(detail.error ?? "Could not open saved run.");
-      setHistoryState(detail as State);
+      const detail = await getSavedRun(runID);
+      setHistoryState(detail);
       setCustomizing(false);
       setPage("dashboard");
     } catch (reason) {
@@ -608,8 +587,7 @@ function Dashboard({
     setStopping(true);
     setStopError("");
     try {
-      const r = await fetch("/api/runs/stop", { method: "POST" });
-      await readJSON(r, "Stop request failed.");
+      await stopRun();
       await onRefresh?.();
     } catch (e) {
       setStopError(e instanceof Error ? e.message : "Could not stop the run.");

@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import type { CompareDelta, CompareResult, SeriesPoint } from "../types";
+import { compareRuns } from "../api/requests";
 import { formatNumber as fmt } from "../utils/metrics";
 import {
-  compareQuery,
   deltaText,
   flagText,
   groupDeltas,
@@ -47,14 +47,9 @@ export function Compare({
   useEffect(() => {
     if (ids.length < 2) return;
     const controller = new AbortController();
-    fetch(compareQuery(ids, base, rule), {
-      cache: "no-store",
-      signal: controller.signal,
-    })
-      .then(async (r) => {
-        const body = await r.json();
-        if (!r.ok) throw new Error(body.error ?? "Could not compare runs.");
-        const result = body as CompareResult;
+    compareRuns(ids, base, rule, controller.signal)
+      .then((result) => {
+        if (controller.signal.aborted) return;
         setData(result);
         setError("");
         setDraft({

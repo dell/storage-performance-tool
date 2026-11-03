@@ -152,15 +152,3 @@ export function hostErrors(
     return null;
   });
 }
-
-// Reads a JSON API response, turning proxy or HTML error pages into a readable message.
-export async function readJSON(r: Response, fallback: string) {
-  if (!(r.headers.get("content-type") ?? "").includes("application/json"))
-    throw new Error(
-      `${fallback} The dashboard server did not answer (HTTP ${r.status}).`,
-    );
-  const payload = await r.json();
-  if (!r.ok)
-    throw new Error(payload.error ?? `${fallback} (HTTP ${r.status}).`);
-  return payload;
-}
