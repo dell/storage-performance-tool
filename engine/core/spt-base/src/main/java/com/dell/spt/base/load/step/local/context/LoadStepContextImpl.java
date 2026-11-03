@@ -161,6 +161,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final AtomicBoolean stepShuttingDown = new AtomicBoolean(false);
 	private final AtomicBoolean retryTrackingWarningLogged = new AtomicBoolean(false);
 	private final AtomicBoolean operationAdmissionClosed = new AtomicBoolean(false);
+	private final AtomicLong durationInventoryExhaustedNanos = new AtomicLong(Long.MAX_VALUE);
 	private final ReentrantLock operationAdmissionCloseLock = new ReentrantLock();
 	private final AtomicBoolean generatorQueueRecovered = new AtomicBoolean(false);
 	private final AtomicBoolean driverQueueRecovered = new AtomicBoolean(false);
@@ -605,7 +606,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			// counts advance. Do not fall through to generic recycle completion.
 			return isListNamespaceExhausted();
 		}
-		if (standaloneDeleteDurationMode && generator.isStopped()) {
+		if (standaloneDeleteDurationMode && generator.isStopped() && nothingAwaitsDispatch()) {
 			Loggers.MSG.debug(
 							"{}: done because the standalone DELETE inventory can no longer schedule requests",
 							id);
@@ -652,12 +653,41 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	public long schedulingExhaustedAtNanos() {
-		return generator.schedulingExhaustedAtNanos();
+		return standaloneDeleteDurationMode
+						? durationInventoryExhaustionNanos().orElse(Long.MAX_VALUE)
+						: generator.schedulingExhaustedAtNanos();
 	}
 
 	@Override
 	public OptionalLong schedulingExhaustionNanos() {
-		return generator.schedulingExhaustionNanos();
+		return standaloneDeleteDurationMode
+						? durationInventoryExhaustionNanos()
+						: generator.schedulingExhaustionNanos();
+	}
+
+	/**
+	 * When a duration slice ran out of inventory: when nothing it handed over still waits for dispatch.
+	 * The generator's handoff is not that moment, because the driver's input queue can hold the whole
+	 * inventory within moments of the start. A slice whose admission closed first did not run out; it
+	 * was stopped. The poll that first sees it records the time, within a poll of the event.
+	 */
+	private OptionalLong durationInventoryExhaustionNanos() {
+		final long recorded = durationInventoryExhaustedNanos.get();
+		if (recorded != Long.MAX_VALUE) {
+			return OptionalLong.of(recorded);
+		}
+		if (generator.schedulingExhaustionNanos().isEmpty()
+						|| operationAdmissionClosed.get()
+						|| !nothingAwaitsDispatch()) {
+			return OptionalLong.empty();
+		}
+		durationInventoryExhaustedNanos.compareAndSet(Long.MAX_VALUE, System.nanoTime());
+		return OptionalLong.of(durationInventoryExhaustedNanos.get());
+	}
+
+	/** Whether everything handed to the driver has left its queue. The scan runs only once the count is zero. */
+	private boolean nothingAwaitsDispatch() {
+		return operationLifecycle.awaitingDispatchCount() == 0 && !operationLifecycle.hasUndispatchedOperations();
 	}
 
 	private boolean isDoneCountLimit() {
@@ -1345,6 +1375,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		}
 		stepShuttingDown.set(false);
 		operationAdmissionClosed.set(false);
+		durationInventoryExhaustedNanos.set(Long.MAX_VALUE);
 		generatorQueueRecovered.set(false);
 		driverQueueRecovered.set(false);
 		generatorRecoveryPending = null;

@@ -133,11 +133,8 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 		return new LatencyStorageDriver<>(concurrency, TimeUnit.MILLISECONDS.toNanos(latencyMillis), true);
 	}
 
-	/** Accepts up to {@code capacity} data operations into an input queue ahead of dispatch. */
+	/** Accepts up to {@code capacity} operations into an input queue ahead of dispatch. */
 	LatencyStorageDriver<I, O> inputQueue(final int capacity) {
-		if (standaloneDelete) {
-			throw new IllegalStateException("the input queue serves data operations only");
-		}
 		inputQueueCapacity = capacity;
 		return this;
 	}
@@ -321,7 +318,13 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 				}
 				next = inputQueue.poll();
 			}
-			lifecycle.explicitlyDispatched(next);
+			if (!lifecycle.explicitlyDispatched(next)) {
+				inFlight.decrementAndGet();
+				synchronized (queuedUndispatched) {
+					queuedUndispatched.add(next);
+				}
+				continue;
+			}
 			dispatch(next);
 		}
 	}
