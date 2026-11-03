@@ -7,6 +7,7 @@ import com.dell.spt.base.integrity.IntegrityMetadata;
 import com.dell.spt.base.integrity.IntegrityVerificationResult;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.ItemNamePaths;
 import com.dell.spt.base.load.lifecycle.OperationLifecycle;
 import com.dell.spt.base.storage.Credential;
 
@@ -98,12 +99,10 @@ public interface Operation<I extends Item> {
 			if (!itemName.startsWith("/")) {
 				item.name("/" + itemName);
 			}
-		} else if (!itemName.startsWith(itemPath)) {
-			if (itemPath.endsWith("/")) {
-				item.name(itemPath + itemName);
-			} else {
-				item.name(itemPath + "/" + itemName);
-			}
+		} else if (!ItemNamePaths.startsWithPath(itemName, itemPath)) {
+			// Compared as written, because not every driver treats a relative path as rooted: to a
+			// filesystem driver, /data/key is not under the relative directory data.
+			item.name(ItemNamePaths.join(itemPath, itemName));
 		}
 	}
 

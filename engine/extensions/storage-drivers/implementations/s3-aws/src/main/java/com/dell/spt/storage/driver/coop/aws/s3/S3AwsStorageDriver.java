@@ -11,6 +11,7 @@ import com.dell.spt.base.integrity.IntegrityVerificationResult;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
+import com.dell.spt.base.item.ItemNamePaths;
 import com.dell.spt.base.item.PathItem;
 import com.dell.spt.base.item.VersionedItem;
 import com.dell.spt.base.item.io.DataItemInputStream;
@@ -906,9 +907,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			// name, e.g. "mkk0lurmliru" → "/spttest/mkk0lurmliru".  Strip the
 			// prefix so we recover the original key.
 			var key = itemName;
-			final var dstNorm = dstPath.endsWith("/") ? dstPath : dstPath + "/";
-			if (key.startsWith(dstNorm)) {
-				key = key.substring(dstNorm.length());
+			if (ItemNamePaths.holdsPath(key, dstPath)) {
+				key = ItemNamePaths.relativeToPath(key, dstPath);
 			} else if (key.startsWith("/")) {
 				key = key.substring(1);
 			}
@@ -916,16 +916,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			if (slashPos > 0) {
 				final var bucket = rel.substring(0, slashPos);
 				final var prefix = rel.substring(slashPos + 1);
-				// Strip prefix too when buildItemPath already prepended it
-				if (key.startsWith(prefix + "/")) {
-					key = key.substring(prefix.length() + 1);
-				}
 				return new String[]{bucket, prefix + "/" + key
 				};
-			}
-			// Strip bucket name when buildItemPath already prepended it
-			if (key.startsWith(rel + "/")) {
-				key = key.substring(rel.length() + 1);
 			}
 			return new String[]{rel, key
 			};

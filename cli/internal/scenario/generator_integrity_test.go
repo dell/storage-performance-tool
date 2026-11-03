@@ -462,3 +462,28 @@ func generatedConfigValue(t *testing.T, config map[string]any, path ...string) a
 	}
 	return value
 }
+
+func TestReadVerifyPrefixHasNoLeadingSlash(t *testing.T) {
+	for _, prefix := range []string{"abc/", "/abc/", "//abc/"} {
+		scenario, err := GenerateReadVerifyScenario(Params{
+			WorkloadType: "read-verify", Bucket: "abc", Threads: 1, Prefix: prefix, RunID: 1,
+		})
+		if err != nil {
+			t.Fatalf("GenerateReadVerifyScenario(%q): %v", prefix, err)
+		}
+		if strings.Contains(scenario, `"/abc/"`) || !strings.Contains(scenario, `"abc/"`) {
+			t.Errorf("prefix %q did not become abc/:\n%s", prefix, scenario)
+		}
+	}
+}
+
+func TestReadVerifyPrefixOfSlashesStaysAsWritten(t *testing.T) {
+	for _, prefix := range []string{"/", "//"} {
+		if got := readVerifyListPrefix(prefix); got != prefix {
+			t.Errorf("readVerifyListPrefix(%q) = %q", prefix, got)
+		}
+	}
+	if got := readVerifyListPrefix(""); got != "" {
+		t.Errorf("readVerifyListPrefix(\"\") = %q", got)
+	}
+}

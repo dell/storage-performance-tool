@@ -2659,3 +2659,51 @@ func TestResolveStorageDriverType(t *testing.T) {
 		})
 	}
 }
+
+func TestWriteScenarioNamingPrefixHasNoLeadingSlash(t *testing.T) {
+	cases := []struct {
+		name   string
+		prefix string
+		want   string
+	}{
+		{"plain", "abc/", `"prefix": "abc/"`},
+		{"leading slash", "/abc/", `"prefix": "abc/"`},
+		{"several leading slashes", "//abc/", `"prefix": "abc/"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scenario, err := GenerateWriteScenario(Params{
+				Bucket: "abc", Threads: 1, ObjectSize: "1KB", ObjectCount: 1, Prefix: tc.prefix,
+			})
+			if err != nil {
+				t.Fatalf("GenerateWriteScenario: %v", err)
+			}
+			if !strings.Contains(scenario, tc.want) {
+				t.Errorf("scenario lacks %s:\n%s", tc.want, scenario)
+			}
+		})
+	}
+	for _, prefix := range []string{"/", "//"} {
+		scenario, err := GenerateWriteScenario(Params{
+			Bucket: "abc", Threads: 1, ObjectSize: "1KB", ObjectCount: 1, Prefix: prefix,
+		})
+		if err != nil {
+			t.Fatalf("GenerateWriteScenario(%q): %v", prefix, err)
+		}
+		if strings.Contains(scenario, `"prefix"`) {
+			t.Errorf("prefix %q left a naming prefix in the scenario:\n%s", prefix, scenario)
+		}
+	}
+}
+
+func TestListScenarioPrefixHasNoLeadingSlash(t *testing.T) {
+	for _, prefix := range []string{"abc/", "/abc/", "//abc/", " /abc/ "} {
+		scenario, err := GenerateListScenario(Params{Bucket: "abc", Threads: 1, ObjectCount: 1, Prefix: prefix})
+		if err != nil {
+			t.Fatalf("GenerateListScenario(%q): %v", prefix, err)
+		}
+		if strings.Contains(scenario, `"/abc/"`) || !strings.Contains(scenario, `"abc/"`) {
+			t.Errorf("prefix %q did not become abc/:\n%s", prefix, scenario)
+		}
+	}
+}
