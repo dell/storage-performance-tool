@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Driver, Options, RunMode, State } from "../types";
-import { startRun } from "../api/requests";
+import { useStartRun } from "../api/mutations";
 import { useRuns } from "../api/queries";
 import { defaults } from "../config";
 import { StorageConfiguration } from "./StorageConfiguration";
@@ -645,22 +645,21 @@ export function Configure({
   state,
   mode,
   offline,
-  onRefresh,
   onStarted,
 }: {
   state: State | null;
   mode: RunMode;
   offline: boolean;
-  onRefresh: () => Promise<void>;
-  onStarted: () => Promise<void>;
+  onStarted: () => void;
 }) {
   const [guided, setGuided] = useState<Options>({ ...defaults }),
     [draft, setDraft] = useState<ExpertDraft>(() => toDraft(defaults)),
     [review, setReview] = useState(false),
-    [busy, setBusy] = useState(false),
-    [error, setError] = useState(""),
     [storageDirty, setStorageDirty] = useState(false),
     [driver, setDriver] = useState<Driver>("s3");
+  const startMutation = useStartRun();
+  const busy = startMutation.isPending;
+  const error = startMutation.error?.message ?? "";
   const limits = state?.limits ?? fallbackLimits;
   const config: Options = {
     ...(mode === "expert" ? fromDraft(draft) : { ...guided, mode: "guided" }),
@@ -689,18 +688,9 @@ export function Configure({
     state?.job?.status !== "running" &&
     verified &&
     valid;
-  async function start() {
+  function start() {
     if (busy || !ready || !valid) return;
-    setBusy(true);
-    setError("");
-    try {
-      await startRun(config);
-      await onStarted();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not start run.");
-    } finally {
-      setBusy(false);
-    }
+    startMutation.mutate(config, { onSuccess: onStarted });
   }
   return (
     <div
@@ -730,7 +720,6 @@ export function Configure({
           state={state}
           offline={offline}
           onDirty={setStorageDirty}
-          onRefresh={onRefresh}
         />
       </section>
       <section data-spt-legacy="" className="panel">

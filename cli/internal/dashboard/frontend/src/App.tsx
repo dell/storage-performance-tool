@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import type { Row, RunMode, State } from "./types";
-import { stopRun } from "./api/requests";
+import { useStopRun } from "./api/mutations";
 import { useSavedRun, useServerState } from "./api/queries";
 import { MetricCard } from "./components/MetricCard";
 import { Configure } from "./components/Configure";
@@ -79,10 +79,6 @@ export default function App() {
   const received = server.dataUpdatedAt
     ? new Date(server.dataUpdatedAt).toISOString()
     : "";
-  const { refetch } = server;
-  const refresh = useCallback(async () => {
-    await refetch();
-  }, [refetch]);
   const [page, setPage] = useState<
     "dashboard" | "configure" | "history" | "connect" | "catalog" | "compare"
   >("configure");
@@ -304,10 +300,7 @@ export default function App() {
             <ConnectRun
               state={state}
               offline={!!error}
-              onConnected={async () => {
-                await refresh();
-                showDashboard();
-              }}
+              onConnected={showDashboard}
             />
           ) : page === "catalog" ? (
             <Catalog
@@ -336,11 +329,7 @@ export default function App() {
               state={state}
               mode={mode}
               offline={!!error}
-              onRefresh={refresh}
-              onStarted={async () => {
-                await refresh();
-                showDashboard();
-              }}
+              onStarted={showDashboard}
             />
           ) : (
             <>
@@ -369,7 +358,6 @@ export default function App() {
                   mode === "guided" ? fields.map((f) => f.key) : selection
                 }
                 onConfigure={() => setPage("configure")}
-                onRefresh={() => refresh()}
               />
               {mode === "expert" && customizing && (
                 <div
@@ -504,42 +492,31 @@ function Dashboard({
   onConfigure,
   historical = false,
   onBackHistory,
-  onRefresh,
 }: {
   state: State | null;
   selected: string[];
   onConfigure: () => void;
   historical?: boolean;
   onBackHistory?: () => void;
-  onRefresh?: () => Promise<void>;
 }) {
   const m = state?.metrics,
     job = state?.job;
-  const [stopping, setStopping] = useState(false);
-  const [stopError, setStopError] = useState("");
+  const stopping = useStopRun();
+  const stopError = stopping.error?.message;
   // An attached CLI run is monitored read-only, so it cannot be stopped here.
   const canStop =
     !historical &&
     job?.status === "running" &&
     state?.connection?.mode !== "attached";
-  const stopPending = stopping || !!job?.stop_requested;
-  async function stop() {
+  const stopPending = stopping.isPending || !!job?.stop_requested;
+  function stop() {
     if (!canStop || stopPending) return;
     if (
-      !window.confirm(
+      window.confirm(
         "Stop this run? It ends now and won't finish its remaining phases.",
       )
-    )
-      return;
-    setStopping(true);
-    setStopError("");
-    try {
-      await stopRun();
-      await onRefresh?.();
-    } catch (e) {
-      setStopError(e instanceof Error ? e.message : "Could not stop the run.");
-    } finally {
-      setStopping(false);
+    ) {
+      stopping.mutate();
     }
   }
   const summaries = m?.phase_summaries ?? [];

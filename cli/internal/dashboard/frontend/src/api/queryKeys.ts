@@ -5,6 +5,7 @@ export const queryKeys = {
   state: ["state"] as const,
   runs: ["runs", "list"] as const,
   savedRun: (runID: string | null) => ["runs", "detail", runID] as const,
+  catalogRoot: ["catalog"] as const,
   catalog: (filters: CatalogFilters) =>
     ["catalog", "list", { ...filters, q: filters.q.trim() }] as const,
   comparison: (ids: string[], baseline: string, rule: RuleOverrides) =>
