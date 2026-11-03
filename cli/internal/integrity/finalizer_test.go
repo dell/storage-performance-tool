@@ -659,8 +659,8 @@ func TestFinalizeNothingReadOfANonEmptySelectionIsNotEmpty(t *testing.T) {
 	if outcome.EmptySelection || outcome.EmptyAllowed || outcome.SelectionCount != 1 {
 		t.Fatalf("unexpected outcome: %+v", outcome)
 	}
-	if finalizeErr == nil && outcome.Complete && outcome.RemainingCount == 0 {
-		t.Fatalf("one selected object went unread and nothing noticed: %+v", outcome)
+	if finalizeErr == nil {
+		t.Fatalf("one selected object went unread and finalization accepted it: %+v", outcome)
 	}
 }
 

@@ -1144,13 +1144,14 @@ func verifierMayBeMissing(plan integrityplan.Plan, readLifecycle portcheck.StepL
 	return readLifecycle == portcheck.StepLifecycleNotStarted || plan.AllowEmpty
 }
 
-// stepsToFetch adds the planned READ step when --allow-empty-selection expects it may go unseen: with
-// nothing to read it can end between two polls of the live metrics, and its files are still there.
+// stepsToFetch adds the planned READ step when --allow-empty-selection expects it may go unseen and it
+// did complete: with nothing to read it can end between two polls of the live metrics, and its files
+// are still there. A READ that isn't known to have completed is not reported as a step of this run.
 func stepsToFetch(
 	stepIDs []string, plan integrityplan.Plan, observedRead string, readLifecycle portcheck.StepLifecycle,
 ) []string {
 	if !plan.AllowEmpty || observedRead != "" || plan.Verifier.ID == "" ||
-		readLifecycle == portcheck.StepLifecycleNotStarted || slices.Contains(stepIDs, plan.Verifier.ID) {
+		readLifecycle != portcheck.StepLifecycleCompleted || slices.Contains(stepIDs, plan.Verifier.ID) {
 		return stepIDs
 	}
 	return append(slices.Clone(stepIDs), plan.Verifier.ID)
