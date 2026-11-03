@@ -342,6 +342,32 @@ class LoadStepLocalSteadyStopPathTest {
 		}
 	}
 
+	/**
+	 * No poll sees the queue empty before the deadline here, as when the last request leaves it between
+	 * two polls. The inventory still ran out early, and must not pass as having lasted to the deadline.
+	 */
+	@Test
+	void anInventoryThatRanOutUnseenBeforeTheDeadlineIsStillExhausted() throws Exception {
+		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.standaloneDelete(C, L_MILLIS).inputQueue(100_000);
+		try (final var metricsMgr = new RecordingMetricsManager()) {
+			final var step = new DurationDeleteStep(durationDeleteConfig("duration-unseen"), driver, metricsMgr, 2 * C);
+			try {
+				step.start();
+				step.startDurationInterval(TimeUnit.MILLISECONDS.toNanos(700));
+				awaitCondition(() -> driver.completedCount() == 2L * C, "the whole inventory completed");
+				sleepUntil(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(900));
+
+				final var failure = assertThrows(
+								IntegrityTerminalException.class,
+								() -> step.await(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS));
+				assertTrue(failure.getMessage().contains("exhausted before the requested duration"), failure.getMessage());
+				assertEquals(DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE, step.durationAwaitStatus());
+			} finally {
+				step.close();
+			}
+		}
+	}
+
 	/** Closing admission empties the queue. A slice stopped that way did not run out of inventory. */
 	@Test
 	void aSliceStoppedBeforeTheDeadlineIsNotExhausted() throws Exception {

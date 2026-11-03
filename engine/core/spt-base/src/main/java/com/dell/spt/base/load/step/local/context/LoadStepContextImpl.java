@@ -666,22 +666,25 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	/**
-	 * When a duration slice ran out of inventory: when nothing it handed over still waits for dispatch.
-	 * The generator's handoff is not that moment, because the driver's input queue can hold the whole
-	 * inventory within moments of the start. A slice whose admission closed first did not run out; it
-	 * was stopped. The poll that first sees it records the time, within a poll of the event.
+	 * Whether a duration slice ran out of inventory: whether nothing it handed over still waits for
+	 * dispatch. The generator's handoff alone doesn't show that, because the driver's input queue can
+	 * hold the whole inventory within moments of the start. A slice whose queue still held work when
+	 * its admission closed did not run out; it was stopped.
+	 *
+	 * <p>The result carries the handoff's time, not the time this was noticed. A poll can see an empty
+	 * queue only after it emptied, even after the deadline, and that must not pass as having lasted to
+	 * the deadline. So an inventory that runs out within a poll of the deadline counts as exhausted.
 	 */
 	private OptionalLong durationInventoryExhaustionNanos() {
 		final long recorded = durationInventoryExhaustedNanos.get();
 		if (recorded != Long.MAX_VALUE) {
 			return OptionalLong.of(recorded);
 		}
-		if (generator.schedulingExhaustionNanos().isEmpty()
-						|| operationAdmissionClosed.get()
-						|| !nothingAwaitsDispatch()) {
+		final OptionalLong handoff = generator.schedulingExhaustionNanos();
+		if (handoff.isEmpty() || operationAdmissionClosed.get() || !nothingAwaitsDispatch()) {
 			return OptionalLong.empty();
 		}
-		durationInventoryExhaustedNanos.compareAndSet(Long.MAX_VALUE, System.nanoTime());
+		durationInventoryExhaustedNanos.compareAndSet(Long.MAX_VALUE, handoff.getAsLong());
 		return OptionalLong.of(durationInventoryExhaustedNanos.get());
 	}
 
@@ -2276,6 +2279,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		try {
 			if (operationAdmissionClosed.get()) {
 				return;
+			}
+			if (standaloneDeleteDurationMode) {
+				// The last look, while a queue that emptied since the last poll can still be told from
+				// one this close and its recovery are about to empty.
+				durationInventoryExhaustionNanos();
 			}
 			try {
 				// Close the downstream gate first. A generator handoff which already started
