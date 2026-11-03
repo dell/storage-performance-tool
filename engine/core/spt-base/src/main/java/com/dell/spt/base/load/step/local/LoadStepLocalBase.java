@@ -570,13 +570,14 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	 * @param primary the context's primary metrics context
 	 * @param byOpType its per-type metrics contexts, or null when it has none
 	 * @return the recorder for the context's results, or null when bucket metrics are off for it: a
-	 *     step with one target bucket, or the off switch
+	 *     step with one target bucket, the off switch, or a step already fenced
 	 */
 	protected final synchronized BucketRecorder initBucketMetrics(
 					final Config config,
 					final MetricsContext primary,
 					final Map<OpType, MetricsContext> byOpType) {
-		// Under the monitor, either this sees the fence or the fence's drop sees these meters.
+		// Under the monitor, either this sees the fence or the fence's drop sees this step's lists. A
+		// context not yet in stepContexts keeps its recorder until the second drop in doStartWrapped.
 		final StepPreparation barrier = preparation;
 		if (barrier != null && barrier.fenced()) {
 			return null;
