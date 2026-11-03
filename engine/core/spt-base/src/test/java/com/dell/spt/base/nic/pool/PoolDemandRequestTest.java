@@ -72,6 +72,19 @@ final class PoolDemandRequestTest {
 		final var capacity = MemoryCapacity.read(root);
 		assertEquals(1L << 29, capacity.bytes());
 		assertEquals(MemoryCapacity.SOURCE_CGROUP, capacity.source());
+		assertEquals("/lxc/1/docker/id or an ancestor", capacity.cgroup(), "the figure does not say which set it");
+	}
+
+	@Test
+	void withoutAHierarchicalFigureCapacitySaysAnAncestorMayNotBeSeen(@TempDir final Path root) throws Exception {
+		write(root, "proc/meminfo", "MemTotal:       1048576 kB\n");
+		write(root, "proc/self/cgroup", "4:memory:/lxc/1/docker/id\n");
+		write(root, "sys/fs/cgroup/memory/memory.limit_in_bytes", "9223372036854771712\n");
+		final var capacity = MemoryCapacity.read(root);
+		assertEquals(MemoryCapacity.SOURCE_MEM_TOTAL, capacity.source());
+		final var node = com.fasterxml.jackson.databind.json.JsonMapper.builder().build().createObjectNode();
+		capacity.write(node);
+		assertTrue(node.path("note").asText().contains("an ancestor's limit may not be seen"), node::toString);
 	}
 
 	@Test

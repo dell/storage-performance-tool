@@ -109,7 +109,7 @@ func TestAnExplicitZeroDirectLimitIsStillTheUsersChoice(t *testing.T) {
 func TestChecksAtAnExplicitZeroLimitAreNotShownAtTheFloor(t *testing.T) {
 	var text strings.Builder
 	renderChecks(&text, Engine{Mode: ModeExplicit}, nil)
-	if strings.Contains(text.String(), format(FloorBytes)) {
+	if !strings.Contains(text.String(), "Checks at "+formatForJVM(0)) || strings.Contains(text.String(), formatForJVM(FloorBytes)) {
 		t.Fatal(text.String())
 	}
 }

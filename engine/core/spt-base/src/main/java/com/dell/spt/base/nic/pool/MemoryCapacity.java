@@ -74,9 +74,11 @@ public record MemoryCapacity(long memTotalBytes, long cgroupLimitBytes, String c
 			final var v1 = memoryController(lines);
 			if (v1 != null) {
 				final var mount = root.resolve("sys/fs/cgroup/memory");
-				limit.readChain(mount, v1, "memory.limit_in_bytes");
 				limit.readFile(mount.resolve("memory.limit_in_bytes"), v1);
-				limit.readHierarchical(mount.resolve("memory.stat"), v1);
+				limit.readChain(mount, v1, "memory.limit_in_bytes");
+				if (!limit.readHierarchical(mount.resolve("memory.stat"), v1)) {
+					notes.append(notes.length() > 0 ? "; " : "").append("cgroup v1: no hierarchical limit to read, so an ancestor's limit may not be seen");
+				}
 			}
 		} catch (final IOException | NumberFormatException e) {
 			if (notes.length() > 0) {

@@ -16,7 +16,6 @@ import com.github.akurilov.confuse.Config;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -94,7 +93,7 @@ final class PoolPreparationTest {
 	}
 
 	private static final class MessageLog extends AbstractAppender implements AutoCloseable {
-		final List<String> captured = Collections.synchronizedList(new ArrayList<>());
+		final List<String> captured = new java.util.concurrent.CopyOnWriteArrayList<>();
 		private final org.apache.logging.log4j.core.Logger logger = LoggerContext.getContext(false).getLogger(Loggers.MSG.getName());
 		private final Level previous = logger.getLevel();
 
@@ -103,6 +102,18 @@ final class PoolPreparationTest {
 			start();
 			logger.addAppender(this);
 			logger.setLevel(Level.INFO);
+			// The engine's loggers are asynchronous: lines of an earlier test are still arriving until this one does.
+			final var marker = "pool-preparation-test-start-" + System.nanoTime();
+			Loggers.MSG.warn(marker);
+			awaitLine(marker);
+			captured.clear();
+		}
+
+		private void awaitLine(final String text) {
+			final long deadline = System.nanoTime() + 3_000_000_000L;
+			while (System.nanoTime() < deadline && captured.stream().noneMatch(line -> line.contains(text))) {
+				Thread.onSpinWait();
+			}
 		}
 
 		@Override
@@ -110,16 +121,12 @@ final class PoolPreparationTest {
 			captured.add(event.getLevel() + " " + event.getMessage().getFormattedMessage());
 		}
 
-		long count(final String text) throws InterruptedException {
+		long count(final String text) {
 			// The engine's loggers are asynchronous.
-			final long deadline = System.nanoTime() + 3_000_000_000L;
-			Loggers.MSG.warn("pool-preparation-test-marker");
-			while (System.nanoTime() < deadline && captured.stream().noneMatch(line -> line.contains("pool-preparation-test-marker"))) {
-				Thread.sleep(5);
-			}
-			synchronized (captured) {
-				return captured.stream().filter(line -> line.contains(text)).count();
-			}
+			final var marker = "pool-preparation-test-marker-" + System.nanoTime();
+			Loggers.MSG.warn(marker);
+			awaitLine(marker);
+			return captured.stream().filter(line -> line.contains(text)).count();
 		}
 
 		@Override
@@ -291,7 +298,6 @@ final class PoolPreparationTest {
 		try (final var log = new MessageLog()) {
 			final var report = run(second, listing);
 			assertEquals(0, report.requiredLimitBytes(), "nothing known in this step");
-			// Narrowed to this step's reason: the engine's loggers are asynchronous, so another test's line can land here.
 			assertEquals(1, log.count("cannot check the RDMA pool budget on host-a: GET: its"), log.captured::toString);
 		}
 	}

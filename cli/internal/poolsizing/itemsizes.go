@@ -126,7 +126,7 @@ func ReadItemSizes(path string, budget time.Duration) ItemSizes {
 		return finish(nil, reasonRead, withoutPath(err))
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return finish(nil, reasonRead, err.Error())
+		return finish(nil, reasonRead, withoutPath(err))
 	}
 	recorder := &sizeRecorder{}
 	if manifest {
@@ -168,7 +168,7 @@ func readManifest(file io.Reader, recorder *sizeRecorder, deadline time.Time) (s
 	reader := csv.NewReader(file)
 	reader.FieldsPerRecord = -1
 	if _, err := reader.Read(); err != nil {
-		return reasonRead, err.Error()
+		return reasonRead, withoutPath(err)
 	}
 	for {
 		if recorder.items%checkEvery == 0 && time.Now().After(deadline) {
@@ -194,7 +194,7 @@ func manifestReadFailure(err error) (string, string) {
 	if errors.As(err, &parseError) {
 		return reasonMalformed, err.Error()
 	}
-	return reasonRead, err.Error()
+	return reasonRead, withoutPath(err)
 }
 
 // manifestSize reads one manifest record as the engine's IntegrityManifestItemInput does.
@@ -220,7 +220,7 @@ func readItemList(file io.Reader, recorder *sizeRecorder, deadline time.Time) (s
 		}
 		line, err := reader.ReadString('\n')
 		if err != nil && !errors.Is(err, io.EOF) {
-			return reasonRead, err.Error()
+			return reasonRead, withoutPath(err)
 		}
 		atEnd := errors.Is(err, io.EOF)
 		if atEnd && line == "" {

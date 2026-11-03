@@ -150,8 +150,6 @@ func describeValue(engine Engine) string {
 		return "the CLI would set " + engine.Value()
 	case ModeExplicit:
 		return engine.Value() + ", set in SPT_JAVA_OPTS"
-	case ModeAttached:
-		return "an attached worker, which the CLI cannot size"
 	case ModeZero:
 		return "unchanged: no pool needs a buffer"
 	default:

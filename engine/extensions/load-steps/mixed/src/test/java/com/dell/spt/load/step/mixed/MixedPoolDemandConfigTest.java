@@ -69,9 +69,10 @@ final class MixedPoolDemandConfigTest {
 
 	/** The participant's flag decides: a read step's PUTs count only for a mixed step. */
 	@Test
-	void aMixedParticipantsDemandComesFromItsWeights() throws Exception {
+	void aMixedParticipantsDemandComesFromItsWeights(@org.junit.jupiter.api.io.TempDir final java.nio.file.Path dir) throws Exception {
 		final var config = config();
 		config.val("load-op-type", "read");
+		config.val("item-input-file", dir.resolve("missing.csv").toString());
 		assertTrue(requiredLimit(config, true) > 0, "its PUTs have a known size");
 		assertEquals(0, requiredLimit(config, false), "a plain read of a file that cannot be read knows nothing");
 	}

@@ -50,6 +50,7 @@ public final class ItemSizeScan {
 					final Input<I> input, final ItemSizeSummary.Recorder recorder, final long deadlineNanos, final LongSupplier nanoTime) {
 		try (input) {
 			read(input, recorder, deadlineNanos, nanoTime);
+			failIfMalformed(input, recorder);
 		} catch (final IllegalArgumentException | IndexOutOfBoundsException e) {
 			// A manifest throws on a bad record; a CSV line with no comma reaches here too.
 			recorder.fail(ItemSizeSummary.Reason.MALFORMED_ITEM, e.getMessage());
@@ -59,7 +60,7 @@ public final class ItemSizeScan {
 		if (nanoTime.getAsLong() - deadlineNanos >= 0) {
 			recorder.fail(ItemSizeSummary.Reason.BUDGET_EXPIRED, null);
 		}
-		finish(input, recorder);
+		recorder.finish();
 		return recorder.summary();
 	}
 
@@ -109,11 +110,14 @@ public final class ItemSizeScan {
 	 * apart.
 	 */
 	public static void finish(final Object input, final ItemSizeSummary.Recorder recorder) {
+		failIfMalformed(input, recorder);
+		recorder.finish();
+	}
+
+	private static void failIfMalformed(final Object input, final ItemSizeSummary.Recorder recorder) {
 		if (input instanceof ItemInputStatus status && status.malformedItems() > 0) {
 			recorder.fail(ItemSizeSummary.Reason.MALFORMED_ITEM, firstLine(status.firstMalformedItem()));
-			return;
 		}
-		recorder.finish();
 	}
 
 	private static String firstLine(final String line) {

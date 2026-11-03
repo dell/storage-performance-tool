@@ -44,17 +44,22 @@ final class CgroupMemoryLimit {
 
 	/**
 	 * The smallest limit on the whole chain, from cgroup v1's {@code memory.stat}. A container's mount
-	 * is its own cgroup, so it cannot read an ancestor's limit file; this figure includes them.
+	 * is its own cgroup, so it cannot read an ancestor's limit file; this figure includes them, without
+	 * saying which one set it.
+	 *
+	 * @return whether the figure was there
 	 */
-	void readHierarchical(final Path statFile, final String path) throws IOException {
+	boolean readHierarchical(final Path statFile, final String path) throws IOException {
 		if (!Files.isReadable(statFile)) {
-			return;
+			return false;
 		}
 		for (final String line : Files.readAllLines(statFile, StandardCharsets.UTF_8)) {
 			if (line.startsWith(HIERARCHICAL_LIMIT)) {
-				consider(Long.parseLong(line.substring(HIERARCHICAL_LIMIT.length()).trim()), path);
+				consider(Long.parseLong(line.substring(HIERARCHICAL_LIMIT.length()).trim()), path + " or an ancestor");
+				return true;
 			}
 		}
+		return false;
 	}
 
 	private void consider(final long value, final String path) {
