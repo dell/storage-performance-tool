@@ -129,7 +129,7 @@ With `--slice-endpoints`, each engine pairs its own slice of the endpoints. A ch
 ## Concurrency and event loops
 
 - **Permits:** the concurrency limit (`--threads`) is split over the engine's NICs. With 64 threads and 2 NICs, each NIC carries at most 32 operations; with 10 threads and 4 NICs, 3, 3, 2 and 2. With fewer threads than NICs, each NIC carries one operation at a time. Each operation takes the next NIC with room, and waits in the driver's queue while none has room.
-- **Event loops:** each NIC gets its own event loops. `storage.driver.threads` therefore counts loops per NIC with a NIC set, not per driver. Without it, each NIC gets `max(4, hardware threads / 8)`: on a client with 64 hardware threads and 2 NICs, 8 per NIC and 16 in all. Each NIC-set driver also has a base group of 2 loops for its control requests. Set it with `--engine-override storage.driver.threads=6`.
+- **Event loops:** each NIC gets its own event loops. `storage.driver.threads` therefore counts loops per NIC with a NIC set, not per driver. Without it, each NIC gets `max(4, hardware threads / 8)`: on a client with 64 hardware threads and 2 NICs, 8 per NIC and 16 in all. Each NIC-set driver also has a base group of 2 loops for its control requests. Set it with `--engine-override storage.driver.threads=6`. Fewer loops use less client CPU per operation, and can cap peak throughput: on a client with four 400G NICs and 192 hardware threads, 12 loops per NIC instead of the default 24 used 20% less CPU per operation and carried 13% less at GET 4 MiB with 768 threads, and matched it at 192 threads.
 
 ## Start of a step
 

@@ -451,6 +451,10 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 
 		metricsContexts.forEach(metricsMgr::unregister);
 
+		// A step fenced before its deferred Load Interval has no elapsed time to account.
+		if (startTimeSec < 0) {
+			return;
+		}
 		final long t = TimeUnit.MILLISECONDS.toSeconds(System.currentTimeMillis()) - startTimeSec;
 		if (t < 0) {
 			Loggers.ERR.warn("Stopped earlier than started, won't account the elapsed time");
