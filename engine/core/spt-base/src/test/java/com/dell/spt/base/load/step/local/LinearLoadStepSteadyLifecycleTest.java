@@ -1,5 +1,6 @@
 package com.dell.spt.base.load.step.local;
 
+import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.MIN_COMPLETIONS_BEFORE_WINDOW;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.WAIT_TIMEOUT_MILLIS;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.assertWithin;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.awaitCondition;
@@ -115,10 +116,14 @@ class LinearLoadStepSteadyLifecycleTest {
 				assertTrue(drained >= 1, "requests were in flight at the deadline");
 				assertTrue(driver.stopProbeHeldAtAdmissionClose(), "the window closed before the stop reached the context");
 				assertTrue(frozen.successSnapshot().count() + drained <= total.successSnapshot().count());
+				// The slow first wave is published as a group, so here a whole wave precedes the window.
 				assertTrue(
 								window.successSnapshot().count() + C + drained <= total.successSnapshot().count(),
 								"window " + window.successSnapshot().count() + ", total " + total.successSnapshot().count());
-				assertEquals(window.successSnapshot().count(), window.durationSnapshot().count());
+				// A cut reads the two counters one after the other, so a request completing during either
+				// cut can reach one and not the other.
+				final long countSkew = Math.abs(window.successSnapshot().count() - window.durationSnapshot().count());
+				assertTrue(countSkew <= 2L * C, "success and duration counts differ by " + countSkew);
 			} finally {
 				step.close();
 			}
@@ -155,7 +160,7 @@ class LinearLoadStepSteadyLifecycleTest {
 				assertEquals(C, driver.heldTotal());
 				assertTrue(window.durationSnapshot().max() < TimeUnit.MILLISECONDS.toMicros(DRAIN_HOLD_MILLIS), "window max");
 				assertTrue(total.durationSnapshot().max() >= TimeUnit.MILLISECONDS.toMicros(DRAIN_HOLD_MILLIS), "total max");
-				assertTrue(window.successSnapshot().count() + 2L * C <= total.successSnapshot().count());
+				assertTrue(window.successSnapshot().count() + MIN_COMPLETIONS_BEFORE_WINDOW + C <= total.successSnapshot().count());
 			} finally {
 				runner.join(WAIT_TIMEOUT_MILLIS);
 				step.close();
@@ -189,7 +194,7 @@ class LinearLoadStepSteadyLifecycleTest {
 				assertEquals(SteadyStatus.VALID, steady.status(), steady.toString());
 				assertTrue(driver.stopProbeHeldAtAdmissionClose(), "the window closed before the stop reached the context");
 				final AllMetricsSnapshot frozen = step.metricsSnapshots().get(0);
-				assertTrue(window.successSnapshot().count() + C <= frozen.successSnapshot().count());
+				assertTrue(window.successSnapshot().count() + MIN_COMPLETIONS_BEFORE_WINDOW <= frozen.successSnapshot().count());
 			} finally {
 				step.close();
 			}
@@ -285,7 +290,7 @@ class LinearLoadStepSteadyLifecycleTest {
 				final long inFlightAtCut = window.concurrencySnapshot().last();
 				assertTrue(inFlightAtCut >= 1, "requests in flight at the cut: " + inFlightAtCut);
 				final long windowCount = window.successSnapshot().count();
-				assertTrue(windowCount <= countLimit - C - inFlightAtCut, "window " + windowCount);
+				assertTrue(windowCount <= countLimit - MIN_COMPLETIONS_BEFORE_WINDOW - inFlightAtCut, "window " + windowCount);
 				// The cut follows the last dispatch by at most the last wave and a manager tick, and
 				// the start follows the first wave by at most one more.
 				assertTrue(windowCount >= countLimit - 3L * C, "window " + windowCount);

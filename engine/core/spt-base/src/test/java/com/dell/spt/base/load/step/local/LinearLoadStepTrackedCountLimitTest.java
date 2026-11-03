@@ -1,5 +1,6 @@
 package com.dell.spt.base.load.step.local;
 
+import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.MIN_COMPLETIONS_BEFORE_WINDOW;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.createStepConfig;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.statistics;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.steadySettings;
@@ -53,7 +54,7 @@ class LinearLoadStepTrackedCountLimitTest {
 				final AllMetricsSnapshot window = statistics(steady);
 				final long inFlightAtCut = window.concurrencySnapshot().last();
 				assertTrue(
-								window.successSnapshot().count() <= countLimit - C - inFlightAtCut,
+								window.successSnapshot().count() <= countLimit - MIN_COMPLETIONS_BEFORE_WINDOW - inFlightAtCut,
 								"the last wave is outside the window: " + window.successSnapshot().count());
 				assertTrue(window.successSnapshot().count() >= countLimit - 4L * C, "window " + window.successSnapshot().count());
 			} finally {

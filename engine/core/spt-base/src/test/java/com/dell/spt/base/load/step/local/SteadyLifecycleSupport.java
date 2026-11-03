@@ -26,12 +26,20 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 /** Shared fixtures for the Steady-State Window lifecycle tests. */
 final class SteadyLifecycleSupport {
 
 	/** Every wait in these tests is bounded by this, far above any expected latency. */
 	static final long WAIT_TIMEOUT_MILLIS = 5_000;
+
+	/**
+	 * All a test may assume completed before a window. A window opens at warm-up turnovers times the
+	 * operations in flight at that moment, which can be fewer than the concurrency limit, so only
+	 * the floor of one completion is certain.
+	 */
+	static final long MIN_COMPLETIONS_BEFORE_WINDOW = 1;
 
 	private SteadyLifecycleSupport() {}
 
@@ -74,10 +82,16 @@ final class SteadyLifecycleSupport {
 
 	static void awaitCondition(final BooleanSupplier condition, final String description)
 					throws InterruptedException {
+		awaitCondition(condition, () -> description);
+	}
+
+	/** As above, with a description built at the timeout, so that it can report the state then. */
+	static void awaitCondition(final BooleanSupplier condition, final Supplier<String> description)
+					throws InterruptedException {
 		final long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(WAIT_TIMEOUT_MILLIS);
 		while (!condition.getAsBoolean()) {
 			if (System.nanoTime() - deadlineNanos > 0) {
-				throw new AssertionError("timed out waiting for " + description);
+				throw new AssertionError("timed out waiting for " + description.get());
 			}
 			Thread.sleep(2);
 		}
