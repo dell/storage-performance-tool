@@ -148,6 +148,48 @@ func TestAWorkerWithoutAnRdmaDeviceStillShowsItsCapacity(t *testing.T) {
 	}
 }
 
+// A Proxmox LXC's limit is above its cgroup namespace: a container on it reports the machine's memory,
+// and only the LXC's own /proc/meminfo, through lxcfs, shows the limit.
+func TestAnLXCsOwnMemInfoBoundsWhatAContainerOnItReports(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		probe   *nicplan.Capacity
+		host    string
+		want    int64
+		source  string
+		noteHas string
+	}{
+		{"an LXC below the machine", capacityOf(264*gib, "MemTotal"), "MemTotal:    8388608 kB\n", 8 * gib, "MemTotal", "reports less"},
+		{"a cgroup below the host stays", &nicplan.Capacity{Bytes: 2 * gib, Source: "cgroup", Cgroup: "/docker/id", CgroupLimitBytes: 2 * gib}, "MemTotal:    8388608 kB\n", 2 * gib, "cgroup", ""},
+		{"no answer from the host", capacityOf(264*gib, "MemTotal"), "not a meminfo line", 264 * gib, "MemTotal", ""},
+		{"no answer from the image", nil, "MemTotal:    8388608 kB\n", 8 * gib, "MemTotal", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeHosts{}
+			fake.reply = func(_ string, cmd []string) (string, error) {
+				text := strings.Join(cmd, " ")
+				switch {
+				case strings.Contains(text, "/proc/meminfo"):
+					return tc.host, nil
+				case strings.Contains(text, "--capacity") && tc.probe != nil:
+					return nicOutput(t, nicplan.Output{Capacity: tc.probe}), nil
+				}
+				return "", errors.New("no RDMA device")
+			}
+			plan, err := BuildPlan(context.Background(), Input{
+				Params: rdmaParams("write"), Steps: stepsOf("create"), Hosts: []*hostparse.HostInfo{{Host: "wrk1"}}, Executor: fake,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			capacity := plan.Engines[0].Capacity
+			if capacity == nil || capacity.MemoryBytes != tc.want || capacity.Source != tc.source || !strings.Contains(capacity.Note, tc.noteHas) {
+				t.Fatalf("%+v", capacity)
+			}
+		})
+	}
+}
+
 func TestAttachedWorkersAreNotSizedButTheEntryNodeIs(t *testing.T) {
 	fake := &fakeHosts{}
 	fake.reply = func(_ string, cmd []string) (string, error) {

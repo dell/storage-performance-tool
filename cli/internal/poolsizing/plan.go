@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -122,14 +123,62 @@ func askHost(ctx context.Context, in Input, host *hostparse.HostInfo, planArgs [
 	default:
 		decide.Output = output
 	}
-	capacity, err := probe(ctx, in, host, CapacityArgs())
-	if err != nil || capacity == nil || capacity.Capacity == nil {
+	var found *nicplan.Capacity
+	if capacity, err := probe(ctx, in, host, CapacityArgs()); err == nil && capacity != nil {
+		found = capacity.Capacity
+	}
+	found = boundedByHostMemory(found, hostMemTotal(ctx, in, host))
+	if found == nil {
 		return
 	}
 	if decide.Output == nil {
 		decide.Output = &nicplan.Output{}
 	}
-	decide.Output.Capacity = capacity.Capacity
+	decide.Output.Capacity = found
+}
+
+// boundedByHostMemory applies what the host itself reports. A Proxmox LXC's limit sits above its
+// cgroup namespace, where nothing inside can read it, and lxcfs shows it only in the LXC's own
+// /proc/meminfo, which a container on it does not get. So the probe alone reports the machine's.
+func boundedByHostMemory(capacity *nicplan.Capacity, hostBytes int64) *nicplan.Capacity {
+	if hostBytes <= 0 || (capacity != nil && capacity.Bytes >= 0 && capacity.Bytes <= hostBytes) {
+		return capacity
+	}
+	bounded := nicplan.Capacity{Bytes: hostBytes, Source: "MemTotal", MemTotalBytes: hostBytes, CgroupLimitBytes: -1}
+	if capacity != nil {
+		bounded = *capacity
+		bounded.Bytes, bounded.Source, bounded.Cgroup = hostBytes, "MemTotal", ""
+		note := "the host's own /proc/meminfo reports less than a container on it sees"
+		if bounded.Note != "" {
+			note = bounded.Note + "; " + note
+		}
+		bounded.Note = note
+	}
+	return &bounded
+}
+
+// hostMemTotal reads the host's own MemTotal, outside any container; 0 when it cannot.
+func hostMemTotal(ctx context.Context, in Input, host *hostparse.HostInfo) int64 {
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	stdout, _, err := in.Executor.ExecuteCommand(ctx, host, []string{"grep", "MemTotal", "/proc/meminfo"})
+	if err != nil {
+		return 0
+	}
+	return parseMemTotal(stdout)
+}
+
+// parseMemTotal reads a /proc/meminfo line, such as "MemTotal:  8388608 kB"; 0 when it is not one.
+func parseMemTotal(line string) int64 {
+	fields := strings.Fields(line)
+	if len(fields) != 3 || fields[0] != "MemTotal:" || fields[2] != "kB" {
+		return 0
+	}
+	kilobytes, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil || kilobytes <= 0 {
+		return 0
+	}
+	return kilobytes * 1024
 }
 
 // hostEndpoints gives a host its slice of the endpoints, as the engine's drivers name them.
