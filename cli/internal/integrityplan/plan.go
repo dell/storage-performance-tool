@@ -70,7 +70,9 @@ type PlannedStep struct {
 	Role   StepRole
 }
 
-var runtimeStepID = regexp.MustCompile(`^mt-([0-9]{3})-[0-9]{8}\.[0-9]{6}\.[0-9]{3}-[a-z0-9_-]+\z`)
+// runtimeStepID matches a generated step ID under any run label. A label may itself look like an ID,
+// so the greedy prefix leaves the ordinal to the last "-NNN-<timestamp>-<operation>".
+var runtimeStepID = regexp.MustCompile(`^[A-Za-z0-9._-]+-([0-9]{3})-[0-9]{8}\.[0-9]{6}\.[0-9]{3}-[a-z0-9_-]+\z`)
 
 // Plan is the typed verification contract generated once before launch.
 type Plan struct {
