@@ -198,7 +198,7 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 				err := validateJSONCorruptCount(options.BaseURL, readStep, readCounts.corrupt)
 				// A READ step with nothing to read ends before the engine publishes a row for it.
 				nothingRead := readCounts.success == 0 && readCounts.failure == 0 && readCounts.corrupt == 0
-				if err != nil && !(nothingRead && errors.Is(err, errNoReadRow)) {
+				if err != nil && (!nothingRead || !errors.Is(err, errNoReadRow)) {
 					return outcome, err
 				}
 			}
