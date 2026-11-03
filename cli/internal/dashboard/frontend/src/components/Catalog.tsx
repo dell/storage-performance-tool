@@ -1,6 +1,11 @@
-import { useEffect, useState } from "react";
-import type { Artifact, CatalogList, CatalogRun } from "../types";
-import { getArtifacts, getCatalog } from "../api/requests";
+import { useState } from "react";
+import { useDebouncedValue } from "@mantine/hooks";
+import type { CatalogRun } from "../types";
+import {
+  useArtifacts,
+  useCatalog,
+  useLastSuccessfulData,
+} from "../api/queries";
 import { Status } from "./Status";
 import { RunLog } from "./RunLog";
 import { formatNumber as fmt } from "../utils/metrics";
@@ -29,53 +34,16 @@ export function Catalog({
     source: "",
     status: "",
   });
-  const [data, setData] = useState<CatalogList | null>(null);
-  const [allRuns, setAllRuns] = useState<CatalogRun[]>([]);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [debouncedFilters] = useDebouncedValue(filters, 200);
+  const catalog = useCatalog(debouncedFilters);
+  const unfiltered = useCatalog({ q: "", source: "", status: "" });
+  const data = useLastSuccessfulData(catalog.data);
+  const allRuns = unfiltered.data?.runs ?? [];
+  const error = catalog.error?.message ?? "";
+  const loading = catalog.isFetching;
   const [selected, setSelected] = useState<string[]>([]);
   const [baseline, setBaseline] = useState("");
   const [open, setOpen] = useState("");
-  const [version, setVersion] = useState(0);
-  useEffect(() => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => {
-      setLoading(true);
-      getCatalog(filters, controller.signal)
-        .then((body) => {
-          if (controller.signal.aborted) return;
-          setData(body);
-          setError("");
-        })
-        .catch((e) => {
-          if (!controller.signal.aborted)
-            setError(
-              e instanceof Error ? e.message : "Could not read results.",
-            );
-        })
-        .finally(() => {
-          if (!controller.signal.aborted) setLoading(false);
-        });
-    }, 200);
-    return () => {
-      controller.abort();
-      clearTimeout(timer);
-    };
-  }, [filters, version]);
-  // Unfiltered snapshot for "Compare with previous" so a status/source filter
-  // cannot hide the next older complete match.
-  useEffect(() => {
-    const controller = new AbortController();
-    getCatalog({ q: "", source: "", status: "" }, controller.signal)
-      .then((body) => {
-        if (controller.signal.aborted) return;
-        setAllRuns(body.runs ?? []);
-      })
-      .catch(() => {
-        /* filtered list still works; previous-run just falls back below */
-      });
-    return () => controller.abort();
-  }, [version]);
   const effectiveBaseline = selected.includes(baseline)
     ? baseline
     : (selected[0] ?? "");
@@ -97,7 +65,15 @@ export function Catalog({
         <div data-spt-legacy="" className="actions">
           <button
             data-spt-legacy=""
-            onClick={() => setVersion((v) => v + 1)}
+            onClick={() => {
+              void catalog.refetch();
+              if (
+                debouncedFilters.q.trim() ||
+                debouncedFilters.source ||
+                debouncedFilters.status
+              )
+                void unfiltered.refetch();
+            }}
             disabled={loading}
           >
             Rescan
@@ -446,24 +422,9 @@ function CatalogRow({
 }
 
 function RunArtifacts({ runId }: { runId: string }) {
-  const [items, setItems] = useState<Artifact[] | null>(null);
-  const [error, setError] = useState("");
-  useEffect(() => {
-    const controller = new AbortController();
-    getArtifacts(runId, controller.signal)
-      .then((body) => {
-        if (controller.signal.aborted) return;
-        setItems(body.artifacts ?? []);
-        setError("");
-      })
-      .catch((e) => {
-        if (!controller.signal.aborted)
-          setError(
-            e instanceof Error ? e.message : "Could not list artifacts.",
-          );
-      });
-    return () => controller.abort();
-  }, [runId]);
+  const artifacts = useArtifacts(runId);
+  const items = artifacts.data?.artifacts;
+  const error = artifacts.error?.message ?? "";
   return (
     <section
       data-spt-legacy=""
@@ -480,7 +441,7 @@ function RunArtifacts({ runId }: { runId: string }) {
           {error}
         </div>
       )}
-      {items === null && !error ? (
+      {items === undefined && !error ? (
         <p data-spt-legacy="" className="subtle">
           Loading artifacts…
         </p>

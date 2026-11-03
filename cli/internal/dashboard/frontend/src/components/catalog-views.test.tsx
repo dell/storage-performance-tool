@@ -2,10 +2,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AxiosError, CanceledError } from "axios";
 import { apiClient } from "../api/client";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { queryClient } from "../api/queryClient";
+import type { ReactNode } from "react";
 import {
   cleanup,
   fireEvent,
-  render,
+  render as renderComponent,
   screen,
   waitFor,
 } from "@testing-library/react";
@@ -17,9 +20,23 @@ import { NodeTable } from "./NodeTable";
 import { RunWarnings } from "./RunWarnings";
 
 const originalAdapter = apiClient.defaults.adapter;
+const clients: QueryClient[] = [];
+
+function render(ui: ReactNode) {
+  const client = new QueryClient({
+    defaultOptions: queryClient.getDefaultOptions(),
+  });
+  clients.push(client);
+  return renderComponent(ui, {
+    wrapper: ({ children }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    ),
+  });
+}
 
 afterEach(() => {
   cleanup();
+  clients.splice(0).forEach((client) => client.clear());
   apiClient.defaults.adapter = originalAdapter;
 });
 

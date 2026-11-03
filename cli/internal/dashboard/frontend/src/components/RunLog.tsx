@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { LogLevel, LogResponse } from "../types";
-import { getLog } from "../api/requests";
+import { useLog } from "../api/queries";
 
 const levels: { value: LogLevel; label: string }[] = [
   { value: "all", label: "All" },
@@ -32,36 +32,63 @@ export function RunLog({
   const [source, setSource] = useState<LogResponse["source"] | "">(
     sources?.[0] ?? "",
   );
-  const [data, setData] = useState<LogResponse | null>(null);
-  const [error, setError] = useState("");
-  const [version, setVersion] = useState(0);
-  useEffect(() => {
-    if (!open) return;
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const load = async () => {
-      try {
-        const body = await getLog(base, level, source, controller.signal);
-        if (controller.signal.aborted) return;
-        setData(body);
-        setError("");
-      } catch (e) {
-        if (!controller.signal.aborted) {
-          setData(null);
-          setError(e instanceof Error ? e.message : "Could not read the log.");
-        }
-      }
-      if (refreshMs > 0 && !controller.signal.aborted)
-        timer = setTimeout(load, refreshMs);
-    };
-    void load();
-    return () => {
-      controller.abort();
-      clearTimeout(timer);
-    };
-  }, [base, level, source, refreshMs, version, open]);
+  // Unmount the query observer on close so its in-flight request is cancelled.
+  const body = open ? (
+    <LogContents
+      base={base}
+      sources={sources}
+      title={title}
+      refreshMs={refreshMs}
+      collapsed={collapsed}
+      level={level}
+      source={source}
+      setLevel={setLevel}
+      setSource={setSource}
+    />
+  ) : null;
+  return collapsed ? (
+    <details
+      data-spt-legacy=""
+      className="panel run-log"
+      aria-label={title}
+      onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
+    >
+      <summary data-spt-legacy="">{title}</summary>
+      {open && body}
+    </details>
+  ) : (
+    <section data-spt-legacy="" className="panel run-log" aria-label={title}>
+      {body}
+    </section>
+  );
+}
+
+function LogContents({
+  base,
+  sources,
+  title,
+  refreshMs,
+  collapsed,
+  level,
+  source,
+  setLevel,
+  setSource,
+}: {
+  base: string;
+  sources?: LogResponse["source"][];
+  title: string;
+  refreshMs: number;
+  collapsed: boolean;
+  level: LogLevel;
+  source: LogResponse["source"] | "";
+  setLevel: (level: LogLevel) => void;
+  setSource: (source: LogResponse["source"] | "") => void;
+}) {
+  const log = useLog(base, level, source, refreshMs);
+  const data = log.isError ? undefined : log.data;
+  const error = log.error?.message ?? "";
   const files = [...new Set(data?.lines.map((l) => l.file) ?? [])];
-  const body = (
+  return (
     <>
       <div data-spt-legacy="" className="run-log-heading">
         {!collapsed && <h3 data-spt-legacy="">{title}</h3>}
@@ -103,7 +130,7 @@ export function RunLog({
             ))}
           </div>
         )}
-        <button data-spt-legacy="" onClick={() => setVersion((v) => v + 1)}>
+        <button data-spt-legacy="" onClick={() => void log.refetch()}>
           Reload
         </button>
       </div>
@@ -156,20 +183,5 @@ export function RunLog({
         matching lines.
       </p>
     </>
-  );
-  return collapsed ? (
-    <details
-      data-spt-legacy=""
-      className="panel run-log"
-      aria-label={title}
-      onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
-    >
-      <summary data-spt-legacy="">{title}</summary>
-      {open && body}
-    </details>
-  ) : (
-    <section data-spt-legacy="" className="panel run-log" aria-label={title}>
-      {body}
-    </section>
   );
 }

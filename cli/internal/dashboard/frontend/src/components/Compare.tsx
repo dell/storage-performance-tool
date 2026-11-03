@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { CompareDelta, CompareResult, SeriesPoint } from "../types";
-import { compareRuns } from "../api/requests";
+import { useComparison, useLastSuccessfulData } from "../api/queries";
 import { formatNumber as fmt } from "../utils/metrics";
 import {
   deltaText,
@@ -41,29 +41,22 @@ export function Compare({
   const [base, setBase] = useState(baseline);
   const [rule, setRule] = useState<RuleOverrides>({});
   const [draft, setDraft] = useState<Record<string, string>>({});
-  const [data, setData] = useState<CompareResult | null>(null);
-  const [error, setError] = useState("");
+  const comparison = useComparison(ids, base, rule);
+  const data = useLastSuccessfulData(comparison.data);
+  const error = comparison.error?.message ?? "";
   const [metric, setMetric] = useState<OverlayMetric>("iops");
-  useEffect(() => {
-    if (ids.length < 2) return;
-    const controller = new AbortController();
-    compareRuns(ids, base, rule, controller.signal)
-      .then((result) => {
-        if (controller.signal.aborted) return;
-        setData(result);
-        setError("");
-        setDraft({
-          threshold_pct: String(result.rule.threshold_pct),
-          latency_floor_us: String(result.rule.latency_floor_us),
-          min_ops: String(result.rule.min_ops),
-        });
-      })
-      .catch((e) => {
-        if (!controller.signal.aborted)
-          setError(e instanceof Error ? e.message : "Could not compare runs.");
-      });
-    return () => controller.abort();
-  }, [ids, base, rule]);
+  const [draftRule, setDraftRule] = useState<CompareResult["rule"] | null>(
+    null,
+  );
+  // Initialize editable rule fields when a successful response supplies defaults.
+  if (data && data.rule !== draftRule) {
+    setDraftRule(data.rule);
+    setDraft({
+      threshold_pct: String(data.rule.threshold_pct),
+      latency_floor_us: String(data.rule.latency_floor_us),
+      min_ops: String(data.rule.min_ops),
+    });
+  }
   const apply = () => {
     const next: RuleOverrides = {};
     for (const k of ["threshold_pct", "latency_floor_us", "min_ops"] as const) {

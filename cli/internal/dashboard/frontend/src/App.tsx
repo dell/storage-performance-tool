@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import type { HistoryRun, Row, RunMode, State } from "./types";
-import { getRuns, getSavedRun, getState, stopRun } from "./api/requests";
+import type { Row, RunMode, State } from "./types";
+import { stopRun } from "./api/requests";
+import { useSavedRun, useServerState } from "./api/queries";
 import { MetricCard } from "./components/MetricCard";
 import { Configure } from "./components/Configure";
 import { Status } from "./components/Status";
@@ -71,40 +72,17 @@ function loadVisibleSections(): string[] {
   }
 }
 
-function useServer() {
-  const [state, setState] = useState<State | null>(null),
-    [error, setError] = useState(""),
-    [received, setReceived] = useState("");
-  const refresh = useCallback(async (signal?: AbortSignal) => {
-    try {
-      const s = await getState(signal);
-      if (signal?.aborted) return;
-      setState(s);
-      setError("");
-      setReceived(new Date().toISOString());
-    } catch (e) {
-      if (!signal?.aborted)
-        setError(e instanceof Error ? e.message : "Could not read SPT state.");
-    }
-  }, []);
-  useEffect(() => {
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      await refresh(controller.signal);
-      if (!controller.signal.aborted) timer = setTimeout(poll, 2000);
-    };
-    void poll();
-    return () => {
-      controller.abort();
-      clearTimeout(timer);
-    };
-  }, [refresh]);
-  return { state, error, received, refresh };
-}
-
 export default function App() {
-  const { state, error, received, refresh } = useServer();
+  const server = useServerState();
+  const state = server.data ?? null;
+  const error = server.error?.message ?? "";
+  const received = server.dataUpdatedAt
+    ? new Date(server.dataUpdatedAt).toISOString()
+    : "";
+  const { refetch } = server;
+  const refresh = useCallback(async () => {
+    await refetch();
+  }, [refetch]);
   const [page, setPage] = useState<
     "dashboard" | "configure" | "history" | "connect" | "catalog" | "compare"
   >("configure");
@@ -128,66 +106,36 @@ export default function App() {
       // The dashboard still works if browser storage is unavailable.
     }
   }, [selection]);
-  const [historyRuns, setHistoryRuns] = useState<HistoryRun[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyError, setHistoryError] = useState("");
-  const [historyState, setHistoryState] = useState<State | null>(null);
-  const [historyVersion, setHistoryVersion] = useState(0);
+  const [historyRunID, setHistoryRunID] = useState<string | null>(null);
+  const savedRun = useSavedRun(
+    page === "history" || page === "dashboard" ? historyRunID : null,
+  );
+  const historyState = historyRunID ? (savedRun.data ?? null) : null;
+  // Keep the history list visible until the selected run has finished loading.
+  if (
+    page === "history" &&
+    historyRunID &&
+    savedRun.isSuccess &&
+    !savedRun.isFetching
+  ) {
+    setCustomizing(false);
+    setPage("dashboard");
+  }
 
-  useEffect(() => {
-    if (page !== "history") return;
-    const controller = new AbortController();
-    getRuns(controller.signal)
-      .then((body) => {
-        if (controller.signal.aborted) return;
-        setHistoryRuns(Array.isArray(body.runs) ? body.runs : []);
-      })
-      .catch((reason) => {
-        if (!controller.signal.aborted)
-          setHistoryError(
-            reason instanceof Error
-              ? reason.message
-              : "Could not load run history.",
-          );
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setHistoryLoading(false);
-      });
-    return () => controller.abort();
-  }, [page, historyVersion]);
-
-  const openSavedRun = async (runID: string) => {
-    setHistoryError("");
-    try {
-      const detail = await getSavedRun(runID);
-      setHistoryState(detail);
-      setCustomizing(false);
-      setPage("dashboard");
-    } catch (reason) {
-      setHistoryError(
-        reason instanceof Error ? reason.message : "Could not open saved run.",
-      );
-    }
+  const openSavedRun = (runID: string) => {
+    if (historyRunID === runID) void savedRun.refetch();
+    else setHistoryRunID(runID);
   };
 
   const showDashboard = () => {
-    setHistoryState(null);
+    setHistoryRunID(null);
     setCustomizing(false);
     setPage("dashboard");
   };
 
   const showHistory = () => {
-    if (page !== "history") {
-      setHistoryLoading(true);
-      setHistoryError("");
-    }
+    setHistoryRunID(null);
     setPage("history");
-  };
-
-  const refreshHistory = () => {
-    setHistoryLoading(true);
-    setHistoryError("");
-    setHistoryVersion((version) => version + 1);
   };
 
   return (
@@ -218,7 +166,7 @@ export default function App() {
             className={page === "configure" ? "selected" : ""}
             aria-current={page === "configure" ? "page" : undefined}
             onClick={() => {
-              setHistoryState(null);
+              setHistoryRunID(null);
               setPage("configure");
             }}
           >
@@ -237,7 +185,7 @@ export default function App() {
             className={page === "history" ? "selected" : ""}
             aria-current={page === "history" ? "page" : undefined}
             onClick={() => {
-              setHistoryState(null);
+              setHistoryRunID(null);
               showHistory();
             }}
           >
@@ -358,7 +306,7 @@ export default function App() {
               offline={!!error}
               onConnected={async () => {
                 await refresh();
-                setPage("dashboard");
+                showDashboard();
               }}
             />
           ) : page === "catalog" ? (
@@ -378,11 +326,10 @@ export default function App() {
             />
           ) : page === "history" ? (
             <RunHistory
-              runs={historyRuns}
-              loading={historyLoading}
-              error={historyError}
+              opening={!!historyRunID && savedRun.isFetching}
+              error={savedRun.error?.message ?? ""}
               onOpen={openSavedRun}
-              onRefresh={refreshHistory}
+              onRefresh={() => setHistoryRunID(null)}
             />
           ) : page === "configure" ? (
             <Configure

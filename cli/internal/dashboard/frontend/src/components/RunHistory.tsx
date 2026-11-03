@@ -1,20 +1,22 @@
-import type { HistoryRun } from "../types";
+import { useRuns } from "../api/queries";
 import { Status } from "./Status";
 import { formatNumber as fmt, phaseName } from "../utils/metrics";
 
 export function RunHistory({
-  runs,
-  loading,
-  error,
+  opening,
+  error: openingError,
   onOpen,
   onRefresh,
 }: {
-  runs: HistoryRun[];
-  loading: boolean;
+  opening: boolean;
   error: string;
   onOpen: (runID: string) => void;
   onRefresh: () => void;
 }) {
+  const history = useRuns();
+  const runs = history.data?.runs ?? [];
+  const loading = history.isFetching || opening;
+  const error = openingError || history.error?.message || "";
   const localTime = (value?: string) => {
     const date = new Date(value ?? "");
     return Number.isNaN(date.getTime())
@@ -35,7 +37,14 @@ export function RunHistory({
           <p data-spt-legacy="">SPT result folders saved on the project VM.</p>
         </div>
         <div data-spt-legacy="" className="actions">
-          <button data-spt-legacy="" onClick={onRefresh} disabled={loading}>
+          <button
+            data-spt-legacy=""
+            onClick={() => {
+              onRefresh();
+              void history.refetch();
+            }}
+            disabled={loading}
+          >
             Refresh history
           </button>
         </div>
