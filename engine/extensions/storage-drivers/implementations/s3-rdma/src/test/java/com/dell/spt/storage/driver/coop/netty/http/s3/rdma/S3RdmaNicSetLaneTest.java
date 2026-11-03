@@ -47,6 +47,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
@@ -694,6 +695,28 @@ final class S3RdmaNicSetLaneTest {
 			assertTrue(lines.get(1).startsWith("rdma-nic-test: nic=" + NICS.get(1) + ": RDMA data path summary (transport available): rdmaTransferred=1 "), lines.get(1));
 			assertTrue(lines.get(2).startsWith("rdma-nic-test: RDMA data path summary (transport available): rdmaTransferred=2 "), lines.get(2));
 			assertTrue(lines.get(2).contains("poolCreated=2"), lines.get(2));
+		}
+	}
+
+	@Test
+	void everySummaryIsWrittenBeforeAnyNicReleasesItsMemory() throws Exception {
+		final var run = started(stub.listeners(2), 2, 2);
+		assertEquals(Operation.Status.SUCC, run.executeAlone(op(OpType.READ, "summary-0")).status());
+		assertEquals(Operation.Status.SUCC, run.executeAlone(op(OpType.READ, "summary-1")).status());
+
+		try (final var log = new MessageLog()) {
+			final var seen = new AtomicInteger(-1);
+			stub.transports.get(0).setBeforeDeregister(() -> {
+				try {
+					seen.compareAndSet(-1, log.matching("RDMA data path summary").size());
+				} catch (final InterruptedException e) {
+					throw new IllegalStateException(e);
+				}
+			});
+
+			run.driver().close();
+
+			assertEquals(3, seen.get(), "releasing a NIC's memory takes time, and the step's log can be collected meanwhile");
 		}
 	}
 

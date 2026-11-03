@@ -455,25 +455,38 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		if (!workersLate) {
 			releaseLeakedContexts();
 		}
+		// All of this comes before any close: releasing a NIC's registered memory takes time, and the
+		// step's log can be collected while it does.
+		logStopSummaries(open, available, workersLate);
+		for (var i = 0; i < open.nics().size(); i++) {
+			final var nic = open.nics().get(i);
+			final var lane = open.lanes().get(i);
+			if (workersLate) {
+				if (lane.exited()) {
+					lane.drain();
+				}
+			} else if (lane.exited()) {
+				lane.drain();
+				nic.close();
+			} else {
+				lane.closeWhenDone();
+			}
+		}
+	}
+
+	private void logStopSummaries(final OpenRdma open, final boolean available, final boolean workersLate) {
 		for (var i = 0; i < open.nics().size(); i++) {
 			final var nic = open.nics().get(i);
 			final var lane = open.lanes().get(i);
 			Loggers.MSG.info("{}: nic={}: RDMA data path summary (transport {}): {}{}", stepId, nic.name,
 							nic.transport.isAvailable() ? "available" : "unavailable", nic.stats.summary(), nic.poolSummary());
 			if (workersLate) {
-				if (lane.exited()) {
-					lane.drain();
-				}
 				Loggers.MSG.warn("{}: NIC {}: an I/O worker or the RDMA reaper did not stop in time and may still use this NIC's RDMA "
 								+ "resources; its pool, its context and its unfinished attempts' buffers stay open until the process ends",
 								stepId, nic.name);
-			} else if (lane.exited()) {
-				lane.drain();
-				nic.close();
-			} else {
+			} else if (!lane.exited()) {
 				Loggers.MSG.warn("{}: NIC {}: the RDMA preparation lane is still in {} after the {} ms stop budget; it closes this "
 								+ "NIC's pool and context when the call returns", stepId, nic.name, lane.blockedCall(), laneStopBudgetMillis);
-				lane.closeWhenDone();
 			}
 		}
 		final var pools = pools(open);
