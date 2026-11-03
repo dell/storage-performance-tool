@@ -109,6 +109,57 @@ func TestAutoResultsSetupFailureIsArtifactOutcome(t *testing.T) {
 	}
 }
 
+// A failed step is the cause. The incomplete metrics are what follows from it, so they come second.
+func TestResolveRunCompletionErrorLeadsADeleteFailureWithTheFailedStep(t *testing.T) {
+	params := scenario.Params{WorkloadType: scenario.WorkloadTypeDelete}
+	outcome := autoResultsOutcome{
+		Tracker: &portcheck.RunResult{
+			FinalState:      constants.StateFailed,
+			FailureStepID:   "mt-001-delete",
+			FailureCategory: "input",
+			FailureMessage:  "Standalone DELETE strict pre-validation failed for 1 selected identity/identities",
+		},
+		DeleteMetricsErr: errors.New("DELETE terminal failure-budget outcome is unavailable"),
+	}
+	err := resolveRunCompletionError(nil, outcome, true, params)
+	var exitErr *ExitCodeError
+	if !errors.As(err, &exitErr) || exitErr.Code != constants.ExitCodeWorkloadFailure {
+		t.Fatalf("error = %#v, want exit %d", err, constants.ExitCodeWorkloadFailure)
+	}
+	if !strings.HasPrefix(err.Error(), "step mt-001-delete failed (input): Standalone DELETE strict pre-validation") {
+		t.Fatalf("error should lead with the failed step: %v", err)
+	}
+	if !strings.Contains(err.Error(), "terminal DELETE metrics are incomplete") {
+		t.Fatalf("error should still report the metrics: %v", err)
+	}
+}
+
+// A DELETE's final check requires COMPLETED, so its tracker must not stop at "every step looks done".
+func TestAutoResultsTrackerRequiresTheEngineFinalStateOnlyForADelete(t *testing.T) {
+	for _, test := range []struct {
+		workload string
+		want     bool
+	}{{WorkloadTypeDelete, true}, {WorkloadTypeWrite, false}} {
+		t.Run(test.workload, func(t *testing.T) {
+			step := "mt-001-20260823.100000.000-x"
+			installAutoResultsFakes(t, []string{step})
+			tracker := &fakeRunTracker{result: &portcheck.RunResult{FinalState: constants.StateCompleted}}
+			newRunTrackerFunc = func(string) autoResultsRunTracker { return tracker }
+			root := t.TempDir()
+			monitor := startAutoResultsMonitor(
+				context.Background(), "http://127.0.0.1:1", "mt", root, []string{step}, 42, false, nil, "9999",
+				false, 0, "", &runMetadata{ResultsRoot: root, WorkloadType: test.workload},
+				io.Discard, io.Discard, "", nil)
+			monitor.Arm()
+			<-monitor.done
+			if !tracker.requireTerminalCalled || tracker.requireTerminalValue != test.want {
+				t.Fatalf("requireTerminal called=%t value=%t, want %t",
+					tracker.requireTerminalCalled, tracker.requireTerminalValue, test.want)
+			}
+		})
+	}
+}
+
 func TestResolveRunCompletionErrorFailsDeleteOnMissingTerminalMetrics(t *testing.T) {
 	failure := errors.New("authoritative DELETE detail is missing")
 	outcome := autoResultsOutcome{DeleteMetricsErr: failure}
