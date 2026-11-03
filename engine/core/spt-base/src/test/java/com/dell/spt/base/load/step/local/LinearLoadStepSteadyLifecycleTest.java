@@ -1,5 +1,6 @@
 package com.dell.spt.base.load.step.local;
 
+import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.MIN_COMPLETIONS_BEFORE_WINDOW;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.WAIT_TIMEOUT_MILLIS;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.assertWithin;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.awaitCondition;
@@ -116,7 +117,7 @@ class LinearLoadStepSteadyLifecycleTest {
 				assertTrue(driver.stopProbeHeldAtAdmissionClose(), "the window closed before the stop reached the context");
 				assertTrue(frozen.successSnapshot().count() + drained <= total.successSnapshot().count());
 				assertTrue(
-								window.successSnapshot().count() + C + drained <= total.successSnapshot().count(),
+								window.successSnapshot().count() + MIN_COMPLETIONS_BEFORE_WINDOW + drained <= total.successSnapshot().count(),
 								"window " + window.successSnapshot().count() + ", total " + total.successSnapshot().count());
 				assertEquals(window.successSnapshot().count(), window.durationSnapshot().count());
 			} finally {
@@ -155,7 +156,7 @@ class LinearLoadStepSteadyLifecycleTest {
 				assertEquals(C, driver.heldTotal());
 				assertTrue(window.durationSnapshot().max() < TimeUnit.MILLISECONDS.toMicros(DRAIN_HOLD_MILLIS), "window max");
 				assertTrue(total.durationSnapshot().max() >= TimeUnit.MILLISECONDS.toMicros(DRAIN_HOLD_MILLIS), "total max");
-				assertTrue(window.successSnapshot().count() + 2L * C <= total.successSnapshot().count());
+				assertTrue(window.successSnapshot().count() + MIN_COMPLETIONS_BEFORE_WINDOW + C <= total.successSnapshot().count());
 			} finally {
 				runner.join(WAIT_TIMEOUT_MILLIS);
 				step.close();
@@ -189,7 +190,7 @@ class LinearLoadStepSteadyLifecycleTest {
 				assertEquals(SteadyStatus.VALID, steady.status(), steady.toString());
 				assertTrue(driver.stopProbeHeldAtAdmissionClose(), "the window closed before the stop reached the context");
 				final AllMetricsSnapshot frozen = step.metricsSnapshots().get(0);
-				assertTrue(window.successSnapshot().count() + C <= frozen.successSnapshot().count());
+				assertTrue(window.successSnapshot().count() + MIN_COMPLETIONS_BEFORE_WINDOW <= frozen.successSnapshot().count());
 			} finally {
 				step.close();
 			}

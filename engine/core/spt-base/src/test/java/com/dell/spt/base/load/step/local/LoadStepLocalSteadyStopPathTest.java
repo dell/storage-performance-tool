@@ -1,5 +1,6 @@
 package com.dell.spt.base.load.step.local;
 
+import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.MIN_COMPLETIONS_BEFORE_WINDOW;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.WAIT_TIMEOUT_MILLIS;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.awaitCondition;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.createStepConfig;
@@ -114,7 +115,7 @@ class LoadStepLocalSteadyStopPathTest {
 								cutoffSkewMillis < drainMillis / 2,
 								"cutoff skew " + cutoffSkewMillis + " ms vs first drain " + drainMillis + " ms");
 				assertTrue(
-								secondWindow.successSnapshot().count() + C + 4L * C <= secondTotal.successSnapshot().count(),
+								secondWindow.successSnapshot().count() + MIN_COMPLETIONS_BEFORE_WINDOW + 4L * C <= secondTotal.successSnapshot().count(),
 								"the second window excludes its load during the first drain");
 			} finally {
 				slowDrain.releaseHeld();
@@ -185,7 +186,10 @@ class LoadStepLocalSteadyStopPathTest {
 				// Every request in flight at the cut is held; then they complete, before doShutdown.
 				awaitCondition(
 								() -> driver.heldNow() >= 1 && driver.heldNow() == driver.activeOpCount(),
-								"every request in flight held");
+								() -> "every request in flight held: held " + driver.heldNow()
+												+ ", in flight " + driver.activeOpCount()
+												+ ", completed " + driver.completedCount()
+												+ ", window closed " + step.windowsClosed());
 				sleepUntil(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(LATE_HOLD_MILLIS));
 				final int late = driver.heldNow();
 				final long countedBefore = step.metricsSnapshots().get(0).successSnapshot().count();
@@ -212,7 +216,7 @@ class LoadStepLocalSteadyStopPathTest {
 				assertTrue(window.durationSnapshot().max() < TimeUnit.MILLISECONDS.toMicros(LATE_HOLD_MILLIS), "window max");
 				assertTrue(total.durationSnapshot().max() >= TimeUnit.MILLISECONDS.toMicros(LATE_HOLD_MILLIS), "total max");
 				assertTrue(
-								window.successSnapshot().count() + C + late <= total.successSnapshot().count(),
+								window.successSnapshot().count() + MIN_COMPLETIONS_BEFORE_WINDOW + late <= total.successSnapshot().count(),
 								"window " + window.successSnapshot().count() + ", total " + total.successSnapshot().count());
 			} finally {
 				driver.releaseHeld();
@@ -252,7 +256,7 @@ class LoadStepLocalSteadyStopPathTest {
 				assertTrue(drained >= 1, "requests were in flight at the stop");
 				assertTrue(window.durationSnapshot().max() < TimeUnit.MILLISECONDS.toMicros(LATE_HOLD_MILLIS), "window max");
 				assertTrue(total.durationSnapshot().max() >= TimeUnit.MILLISECONDS.toMicros(LATE_HOLD_MILLIS), "total max");
-				assertTrue(window.successSnapshot().count() + C + drained <= total.successSnapshot().count());
+				assertTrue(window.successSnapshot().count() + MIN_COMPLETIONS_BEFORE_WINDOW + drained <= total.successSnapshot().count());
 			} finally {
 				driver.releaseHeld();
 				step.close();
