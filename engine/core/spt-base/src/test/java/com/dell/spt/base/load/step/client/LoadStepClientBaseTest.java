@@ -354,6 +354,43 @@ class LoadStepClientBaseTest {
 		verify(locallyFailing, never()).verifyDeleteInventoryForStepStop();
 	}
 
+	/** A slice closes its verification evidence when it stops, so that has to come after post-verification. */
+	@Test
+	void awaitRunsPostVerificationBeforeItStopsTheSlicesAfterPreValidation() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-delete-preValidation", true);
+		config.val("load-op-delete-postVerification", true);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
+		addStepSlice(client, slice);
+
+		client.validateDeleteInventoriesBeforeAdmission();
+		assertTrue(client.await(30, TimeUnit.SECONDS));
+
+		final var order = org.mockito.Mockito.inOrder(slice);
+		order.verify(slice).verifyDeleteInventoryForStepStop();
+		order.verify(slice).stop();
+	}
+
+	/** Without pre-validation a slice verifies during its own shutdown, as it always has. */
+	@Test
+	void awaitLeavesTheStopOrderAloneWithoutPreValidation() throws Exception {
+		final Config config = countDeleteConfig();
+		config.val("load-op-delete-postVerification", true);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(true);
+		addStepSlice(client, slice);
+
+		assertTrue(client.await(30, TimeUnit.SECONDS));
+
+		verify(slice).stop();
+		verify(slice, never()).verifyDeleteInventoryForStepStop();
+	}
+
 	@Test
 	void globallySuccessfulPreValidationStillRunsConfiguredPostVerification() throws Exception {
 		final Config config = countDeleteConfig();
