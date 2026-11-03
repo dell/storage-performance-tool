@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.ArgumentMatchers.any;
@@ -16,8 +17,10 @@ import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.step.PreparationStatus;
 import com.dell.spt.base.load.step.local.context.LoadStepContext;
+import com.dell.spt.base.load.step.local.context.LoadStepContextImpl;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.bucket.BucketContextReply;
+import com.dell.spt.base.metrics.bucket.BucketMeters;
 import com.dell.spt.base.metrics.bucket.BucketMetricsRange;
 import com.dell.spt.base.metrics.bucket.BucketRecorder;
 import com.dell.spt.base.metrics.bucket.BucketSteadyOutcome;
@@ -26,6 +29,7 @@ import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketSet;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
+import java.lang.ref.WeakReference;
 import java.time.Duration;
 import java.util.EnumMap;
 import java.util.List;
@@ -202,26 +206,33 @@ class LoadStepBucketMetricsSetupTest {
 	}
 
 	/**
-	 * A step fenced before the release never started its contexts or its window. Its fetch must answer
-	 * at once with nothing recorded, and report the window as not reached rather than as a failed cut.
+	 * A step fenced before the release admitted nothing, and a worker that fenced itself may never be
+	 * closed, because its entry node is gone and the next step replaces it without closing it. So the
+	 * fence itself frees the meters, and a later fetch or stop finds nothing to wait for.
 	 */
 	@Test
-	void aStepFencedAtTheBarrierHasNoWindowAndAnswersItsFetchAtOnce() throws Exception {
+	void aFenceBeforeTheReleaseFreesTheBucketMeters() throws Exception {
 		final Config config = config(4);
 		final MetricsManager manager = mock(MetricsManager.class);
 		final var step = new SetupStep(config, manager);
-		step.barrierContext(config, mock(LoadStepContext.class));
+		final LoadStepContextImpl<?, ?> stepContext = mock(LoadStepContextImpl.class);
+		step.barrierContext(config, stepContext);
+		final WeakReference<BucketMeters> meters = new WeakReference<>(step.bucketMeters().get(0));
 		step.startPreparation(7, TimeUnit.MILLISECONDS.toNanos(1));
 		step.startContexts();
 		awaitState(step, PreparationStatus.State.FENCED);
 		verify(manager, never()).register(any());
+		verify(stepContext, timeout(20_000).atLeastOnce()).bucketRecorder(null);
 
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+		while (meters.get() != null) {
+			assertTrue(System.nanoTime() < deadline, "something still holds the fenced step's meters");
+			System.gc();
+			TimeUnit.MILLISECONDS.sleep(20);
+		}
+		assertTrue(step.bucketMeters().isEmpty());
+		assertNull(assertTimeoutPreemptively(Duration.ofSeconds(4), () -> step.bucketMetrics(BucketMetricsRange.ALL)));
 		assertTimeoutPreemptively(Duration.ofSeconds(4), step::closeWindows, "no end pass to wait for");
-		final BucketContextReply reply = onlyReply(step);
-		assertEquals(0L, reply.elapsedMillis(), "the Load Interval never began");
-		assertEquals(5, reply.wholeStep().size(), "4 members and the catch-all");
-		reply.wholeStep().forEach(record -> assertEquals(0L, record.succeeded(), record.bucket()));
-		assertEquals(BucketSteadyOutcome.Kind.NOT_REACHED, reply.steady().kind());
 	}
 
 	@Test

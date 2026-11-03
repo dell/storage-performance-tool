@@ -23,6 +23,7 @@ import com.dell.spt.base.load.step.LoadStepBase;
 import com.dell.spt.base.load.step.PreparationStatus;
 import com.dell.spt.base.storage.driver.AdmissionPhase;
 import com.dell.spt.base.load.step.local.context.LoadStepContext;
+import com.dell.spt.base.load.step.local.context.LoadStepContextImpl;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
@@ -318,6 +319,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private void stopContextsOfFence(final String stepId, final StepPreparation barrier) {
 		final var contexts = List.copyOf(stepContexts);
 		Thread.ofPlatform().daemon().name("spt-preparation-fence-" + stepId).start(() -> {
+			dropBucketMetricsOfFence(contexts);
 			barrier.runFenceActions();
 			for (final LoadStepContext stepContext : contexts) {
 				try {
@@ -649,6 +651,23 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		return range == null || BucketMetricsRange.ALL.equals(range)
 						? bucketMetricsReply
 						: bucketMetricsReply.within(range);
+	}
+
+	/**
+	 * A fence means nothing was admitted, so the meters hold nothing, and the close that would free them
+	 * may never come: a worker fences itself when its entry node is gone, and the next step replaces this
+	 * one without closing it. First, so that a stuck fence action or context doesn't keep them.
+	 */
+	private synchronized void dropBucketMetricsOfFence(final List<LoadStepContext> contexts) {
+		for (final BucketContext context : bucketContexts) {
+			context.context().steadyWindowListener(null);
+		}
+		for (final LoadStepContext context : contexts) {
+			if (context instanceof LoadStepContextImpl<?, ?> impl) {
+				impl.bucketRecorder(null);
+			}
+		}
+		releaseBucketMetrics();
 	}
 
 	/** A worker holds its bucket data until its step closes: a closed service can outlive its step. */
