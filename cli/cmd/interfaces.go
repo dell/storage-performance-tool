@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/nicplan"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
@@ -42,11 +44,74 @@ func readInterfaces(cmd *cobra.Command) ([]string, string, error) {
 	if len(entries) == 0 {
 		return nil, source, nil
 	}
-	if networkMode, _ := cmd.Flags().GetString("network-mode"); networkMode == constants.BridgeNetworkMode {
-		return nil, source, fmt.Errorf("%s needs --network-mode %s: a bridge-network container sees only its own interface",
-			source, constants.HostNetworkMode)
+	if err := requireHostNetwork(cmd, source); err != nil {
+		return nil, source, err
 	}
 	return entries, source, nil
+}
+
+func requireHostNetwork(cmd *cobra.Command, source string) error {
+	if networkMode, _ := cmd.Flags().GetString("network-mode"); networkMode == constants.BridgeNetworkMode {
+		return fmt.Errorf("%s needs --network-mode %s: a bridge-network container sees only its own interface",
+			source, constants.HostNetworkMode)
+	}
+	return nil
+}
+
+// readHostInterfaces returns the command's --host-interfaces values, checked against its
+// --test-hosts, and the name of the values' source. A value that asks for NICs needs host networking.
+func readHostInterfaces(cmd *cobra.Command) ([]nicplan.HostInterfaces, string, error) {
+	if cmd.Flags().Lookup(flagHostInterfaces) == nil {
+		return nil, "", nil
+	}
+	source := flagSource(cmd, flagHostInterfaces, constants.EnvHostInterfaces)
+	values, _ := cmd.Flags().GetStringArray(flagHostInterfaces)
+	if len(values) == 0 {
+		return nil, source, nil
+	}
+	testHosts, _ := cmd.Flags().GetString("test-hosts")
+	hostInfos, err := hostparse.ParseTestHosts(testHosts)
+	if err != nil {
+		return nil, source, fmt.Errorf("%s: --test-hosts: %w", source, err)
+	}
+	hosts := make([]string, 0, len(hostInfos))
+	for _, info := range hostInfos {
+		hosts = append(hosts, info.Host)
+	}
+	overrides, err := nicplan.ParseHostInterfaces(values, hosts)
+	if err != nil {
+		if source != "--"+flagHostInterfaces {
+			return nil, source, fmt.Errorf("%s: %w", source, err)
+		}
+		return nil, source, err
+	}
+	if len(nicplan.AnyNicSet(overrides)) > 0 {
+		if err := requireHostNetwork(cmd, source); err != nil {
+			return nil, source, err
+		}
+	}
+	return overrides, source, nil
+}
+
+// applyHostInterfacesEnv sets --host-interfaces from SPT_HOST_INTERFACES, with ; between hosts.
+func applyHostInterfacesEnv(cmd *cobra.Command) error {
+	if f := cmd.Flags().Lookup(flagHostInterfaces); f == nil || cmd.Flags().Changed(flagHostInterfaces) {
+		return nil
+	}
+	v := strings.TrimSpace(os.Getenv(constants.EnvHostInterfaces))
+	if v == "" {
+		return nil
+	}
+	values := splitEngineOverridesEnv(v)
+	for _, value := range values {
+		if err := cmd.Flags().Set(flagHostInterfaces, value); err != nil {
+			return err
+		}
+	}
+	if len(values) > 0 {
+		markEnvApplied(cmd, flagHostInterfaces, strings.Join(values, "; "))
+	}
+	return nil
 }
 
 // rejectSingleNicRdmaSettings rejects an explicit --rdma-device or --rdma-local-ip with a NIC set,

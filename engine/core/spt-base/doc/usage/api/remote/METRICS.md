@@ -68,7 +68,7 @@ JSON responses use `application/json` and include `Access-Control-Allow-Origin: 
 
 A successful JSON response is an array. Each element represents one load step or a retained terminal step. `/metrics/json` emits a single idle element when no local or retained step is available, so it is never an empty successful response. The cluster endpoint returns 404 instead of an empty successful response.
 
-Schema 5 is additive over schema 4: it adds the optional `steady` object ([Steady-state window](#steady-state-window)) and the optional `driver_stats` object ([Driver statistics](#driver-statistics)), and changes nothing else. Consumers should ignore unknown fields, tolerate optional operation-specific sections, and check `metrics_schema` before applying schema-specific rules.
+Schema 5 is additive over schema 4: it adds the optional `steady` object ([Steady-state window](#steady-state-window)) the optional `preparation` object, and the optional `driver_stats` object ([Driver statistics](#driver-statistics)), and changes nothing else. Consumers should ignore unknown fields, tolerate optional operation-specific sections, and check `metrics_schema` before applying schema-specific rules.
 
 ### Top-level fields
 
@@ -89,6 +89,7 @@ Schema 5 is additive over schema 4: it adds the optional `steady` object ([Stead
 | `terminal` | boolean | Terminal only | `true` for a retained final sample |
 | `delete_detail_expected` | boolean | Non-idle samples | Whether a standalone DELETE detail block is required |
 | `driver_stats` | object | When the step's storage driver reports statistics | The driver's own counters and gauges; see [Driver statistics](#driver-statistics) |
+| `preparation` | object | On the entry node's rows of a step with a NIC set, once admission has opened | How long the step took to reach admission, outside its Load Interval: `distribution_ms`, the entry node's item distribution, and `engines`, each engine's milliseconds by `entry` or node address |
 
 `node_id` names the server that emitted the document. On an aggregate sample it identifies the entry node, not every contributing worker.
 

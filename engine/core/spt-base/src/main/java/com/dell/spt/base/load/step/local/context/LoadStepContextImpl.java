@@ -65,6 +65,7 @@ import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
 import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.base.storage.driver.StorageDriver;
+import com.dell.spt.base.storage.driver.AdmissionPreparable;
 import com.dell.spt.base.storage.driver.StandaloneDeletePreparable;
 import com.dell.spt.base.util.BinarySizeFormat;
 import com.github.akurilov.commons.io.Output;
@@ -169,6 +170,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final AtomicBoolean startedOnce = new AtomicBoolean(false);
 	private final AtomicBoolean durationIntervalStarted = new AtomicBoolean(false);
 	private final AtomicBoolean objectFailureBudgetAdmissionHeld = new AtomicBoolean(false);
+	private final AtomicBoolean admissionBarrierHeld = new AtomicBoolean();
 	private final AtomicBoolean objectFailureBudgetAdmissionReleased = new AtomicBoolean(false);
 	private final OperationLifecycleTracker<O> operationLifecycle;
 	private final boolean standaloneDeleteEnabled;
@@ -1367,6 +1369,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 							standaloneDeleteDurationMode
 											|| objectFailureBudgetAdmissionHeld.get()
 											|| standaloneDeletePreparationRequired
+											|| admissionBarrierHeld.get()
 															? 0
 															: System.nanoTime());
 			deleteScheduledDeadlineNanos.set(0);
@@ -1374,6 +1377,10 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			deleteDrainCompletedNanos.set(0);
 			deleteWorkflowCompletedEpochNanos.set(0);
 			deleteDrainTimestampRecorded.set(false);
+		}
+		if (admissionBarrierHeld.get()) {
+			generator.holdAdmission();
+			return;
 		}
 		if (standaloneDeleteDurationMode
 						|| objectFailureBudgetAdmissionHeld.get()
@@ -1403,6 +1410,47 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				LogUtil.exception(
 								Level.WARN, e, "{}: failed to start the load generator \"{}\"", id, generator);
 			}
+		}
+	}
+
+	@Override
+	public final void holdForAdmissionBarrier() {
+		if (startedOnce.get()) {
+			throw new IllegalStateException(id + ": the admission barrier must hold before start");
+		}
+		admissionBarrierHeld.set(true);
+	}
+
+	@Override
+	public final void prepareForAdmission(final AdmissionPreparable.Preparation preparation) throws Exception {
+		driver.start();
+		if (driver instanceof AdmissionPreparable preparable) {
+			preparable.prepareForAdmission(preparation);
+		}
+		prepareStandaloneDelete();
+	}
+
+	@Override
+	public final void releaseAdmissionBarrier() {
+		operationAdmissionCloseLock.lock();
+		try {
+			admissionBarrierHeld.set(false);
+			// A step that is already stopping must not open admission or restart its generator.
+			if (stepShuttingDown.get() || operationAdmissionClosed.get()
+							|| standaloneDeleteDurationMode || objectFailureBudgetAdmissionHeld.get()) {
+				return;
+			}
+			if (standaloneDeleteEnabled) {
+				deleteScheduledStartedNanos.set(System.nanoTime());
+			}
+			generator.openAdmission();
+			try {
+				generator.start();
+			} catch (final IllegalStateException e) {
+				LogUtil.exception(Level.WARN, e, "{}: failed to start the load generator \"{}\"", id, generator);
+			}
+		} finally {
+			operationAdmissionCloseLock.unlock();
 		}
 	}
 

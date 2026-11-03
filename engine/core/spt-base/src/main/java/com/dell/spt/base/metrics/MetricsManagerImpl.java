@@ -59,6 +59,15 @@ import org.apache.logging.log4j.ThreadContext;
 
 /** Created by kurila on 18.05.17. */
 public class MetricsManagerImpl extends TaskBase implements MetricsManager {
+	/** Enough for the steps whose rows are still kept; a preparation is never read after its row ends. */
+	private static final int PREPARATIONS_KEPT = 1024;
+
+	private final Map<String, Map<String, Object>> preparations = new LinkedHashMap<>() {
+		@Override
+		protected boolean removeEldestEntry(final Map.Entry<String, Map<String, Object>> eldest) {
+			return size() > PREPARATIONS_KEPT;
+		}
+	};
 
 	private static final String CLS_NAME = MetricsManagerImpl.class.getSimpleName();
 	private static final String METRICS_BUCKET_TOTAL_FILE = "metrics.bucket.total.csv";
@@ -647,6 +656,24 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 	 */
 	private void retainTerminal(final ProgressKey progressKey, final TerminalStepEntry entry) {
 		terminalByStepId.merge(progressKey, entry, (earlier, latest) -> latest.withDriverStatsOf(earlier));
+	}
+
+	@Override
+	public void recordPreparation(
+					final long runId, final String stepId, final long distributionMillis, final Map<String, Long> engineMillis) {
+		final var row = new LinkedHashMap<String, Object>();
+		row.put("distribution_ms", distributionMillis);
+		row.put("engines", new LinkedHashMap<>(engineMillis));
+		synchronized (preparations) {
+			preparations.put(runId + "/" + stepId, Map.copyOf(row));
+		}
+	}
+
+	@Override
+	public Map<String, Object> preparation(final long runId, final String stepId) {
+		synchronized (preparations) {
+			return preparations.get(runId + "/" + stepId);
+		}
 	}
 
 	/**

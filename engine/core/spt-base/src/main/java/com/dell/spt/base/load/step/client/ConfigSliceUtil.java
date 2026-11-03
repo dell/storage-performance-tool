@@ -1,5 +1,6 @@
 package com.dell.spt.base.load.step.client;
 
+import com.dell.spt.base.config.NicSetConfig;
 import com.dell.spt.base.item.naming.ItemNameInput.ItemNamingType;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
@@ -14,6 +15,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.NoSuchElementException;
@@ -99,6 +101,38 @@ public interface ConfigSliceUtil {
 					configSlices.get(j).val("storage-net-node-addrs", storageNodeAddrsSlice);
 				}
 			}
+		}
+	}
+
+	/**
+	 * Gives each slice its host override as its {@code storage.net.interfaces}, and removes the map
+	 * from every slice: a slice has no node list to check the keys against. Slice 0 is the Entry
+	 * Node. The selection is by address, so a prefix of the configured nodes changes no other slice.
+	 *
+	 * @param nodeAddrs the participating remote nodes, in slice order, starting with slice 1
+	 */
+	static void sliceNodeInterfaces(
+					final Config config, final List<Config> configSlices, final List<String> nodeAddrs) {
+		final var overrides = NicSetConfig.nodeInterfaces(config);
+		if (overrides.isEmpty()) {
+			return;
+		}
+		final var stepValue = NicSetConfig.interfaces(config.configVal("storage"));
+		for (var i = 0; i < configSlices.size(); i++) {
+			final var configSlice = configSlices.get(i);
+			final var node = i == 0 ? NicSetConfig.ENTRY_KEY : nodeAddrs.get(i - 1);
+			final var override = overrides.get(node);
+			if (override != null) {
+				configSlice.val(NicSetConfig.SLICE_INTERFACES_PATH, new ArrayList<>(override));
+			}
+			configSlice.val(NicSetConfig.SLICE_NODE_INTERFACES_PATH, new HashMap<String, Object>());
+			final var effective = override != null ? override : stepValue;
+			Loggers.MSG.info(
+							"Load step slice #{} ({}) interfaces: {} ({})",
+							i,
+							node,
+							effective.isEmpty() ? NicSetConfig.NONE : String.join(",", effective),
+							override != null ? "host override" : "step");
 		}
 	}
 

@@ -19,6 +19,7 @@ import com.github.akurilov.confuse.exceptions.InvalidValuePathException;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import org.junit.jupiter.api.Test;
 
@@ -158,5 +159,70 @@ class NicSetConfigTest {
 		when(config.stringVal("rdma-device")).thenReturn(device);
 		when(config.stringVal("rdma-localIp")).thenReturn(localIp);
 		return config;
+	}
+
+	private Config withNodes(final String... addrs) throws Exception {
+		final var config = defaults();
+		config.val("load-step-node-addrs", List.of(addrs));
+		config.val("load-step-node-port", 1099);
+		return config;
+	}
+
+	@Test
+	void shippedHostOverridesAreEmpty() throws Exception {
+		final var config = defaults();
+		assertEquals(Map.of(), config.mapVal("storage-net-nodeInterfaces"));
+		assertEquals(Map.of(), NicSetConfig.nodeInterfaces(config));
+	}
+
+	@Test
+	void hostOverridesArriveFromTheEngineCommandLineWithDashesInTheirKeys() throws Exception {
+		final var config = withNodes("my-host.example:1099", "198.51.100.12:1099");
+		config.val("storage-net-nodeInterfaces-entry", "none");
+		config.val("storage-net-nodeInterfaces-my-host.example:1099", "mlx5_0,mlx5_1");
+		config.val("storage-net-nodeInterfaces-198.51.100.12:1099", "auto");
+		assertEquals(
+						Map.of(
+										"entry", List.of(),
+										"my-host.example:1099", List.of("mlx5_0", "mlx5_1"),
+										"198.51.100.12:1099", List.of("auto")),
+						NicSetConfig.nodeInterfaces(config));
+	}
+
+	@Test
+	void hostOverrideValuesMayBeLists() throws Exception {
+		final var config = withNodes("198.51.100.12");
+		config.val("storage-net-nodeInterfaces", Map.of("198.51.100.12:1099", List.of("eth0", "eth1")));
+		assertEquals(Map.of("198.51.100.12:1099", List.of("eth0", "eth1")), NicSetConfig.nodeInterfaces(config));
+	}
+
+	@Test
+	void hostOverrideKeysAreCheckedAgainstTheConfiguredNodes() throws Exception {
+		final var config = withNodes("198.51.100.12:1099");
+		config.val("storage-net-nodeInterfaces-203.0.113.9:1099", "auto");
+		final var e = assertThrows(IllegalConfigurationException.class, () -> NicSetConfig.nodeInterfaces(config));
+		assertEquals(
+						"storage.net.nodeInterfaces names 203.0.113.9:1099, which is neither entry nor in load.step.node.addrs",
+						e.getMessage());
+	}
+
+	@Test
+	void anInvalidHostOverrideValueNamesItsKey() throws Exception {
+		for (final var bad : List.of("", " ", "none,eth0", "auto,eth0", "eth0,eth0", "AUTO", "fe80::1")) {
+			final var config = withNodes();
+			config.val("storage-net-nodeInterfaces-entry", bad);
+			final var e = assertThrows(
+							IllegalConfigurationException.class, () -> NicSetConfig.nodeInterfaces(config), "value \"" + bad + "\"");
+			assertTrue(e.getMessage().startsWith("storage.net.nodeInterfaces[entry]"), e.getMessage());
+		}
+	}
+
+	@Test
+	void noneStaysInvalidInTheStepsOwnSetting() throws Exception {
+		final var config = defaults();
+		config.val("storage-net-interfaces", List.of("none"));
+		final var e = assertThrows(
+						IllegalConfigurationException.class, () -> NicSetConfig.interfaces(config.configVal("storage")));
+		assertEquals("storage.net.interfaces entry \"none\": none applies only to storage.net.nodeInterfaces", e.getMessage());
 	}
 }

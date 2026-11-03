@@ -334,7 +334,8 @@ identity retention.
 
 ## Per-path NIC evidence
 
-A step whose storage driver has a NIC set (`storage.net.interfaces`) publishes
+A step whose storage driver has a NIC set (`storage.net.interfaces`, which a host override in
+`storage.net.nodeInterfaces` sets per node) publishes
 `nic.paths.csv` after its contexts have stopped, through a staging file and an atomic
 move. A step without a NIC set writes no file. In a distributed step the Entry Node
 copies each node's file, unmerged, as `nic.paths.node-NNN.csv`, where NNN is the slice

@@ -33,6 +33,7 @@ import java.net.UnknownHostException;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import com.dell.spt.base.logging.Loggers;
@@ -166,6 +167,7 @@ final class MetricsJsonResponder {
 		jsonObj.put(MetricsConstants.METRIC_NAME_COMPLETION, completionPercent);
 
 		addLimitFields(jsonObj, ctx.metadata());
+		addPreparation(jsonObj, ctx.runId(), ctx.loadStepId());
 		addMetrics(jsonObj, snapshot, successCount, failCount, corruptCount, bytesTotal, latencyMean, durationMean);
 		addSteady(jsonObj, snapshot.steadyResult());
 		addDeleteDetailExpectation(jsonObj, ctx.metadata());
@@ -238,6 +240,7 @@ final class MetricsJsonResponder {
 		jsonObj.put(MetricsConstants.METRIC_NAME_COMPLETION, completionPercent);
 
 		addLimitFields(jsonObj, ctx.metadata());
+		addPreparation(jsonObj, ctx.runId(), ctx.loadStepId());
 		addMetrics(jsonObj, snapshot, successCount, failCount, corruptCount, bytesTotal, latencyMean, durationMean);
 		addSteady(jsonObj, snapshot.steadyResult());
 		if (snapshot instanceof DistributedAllMetricsSnapshot fleet) {
@@ -339,6 +342,14 @@ final class MetricsJsonResponder {
 		jsonObj.set("concurrency", concurrency);
 		addDeleteMetrics(jsonObj, snapshot.deleteMetrics(), snapshot.latencySnapshot(), snapshot.durationSnapshot());
 		addDriverStats(jsonObj, snapshot.driverStats());
+	}
+
+	/** Adds the step's preparation times; a step without an admission barrier adds no field. */
+	private void addPreparation(final ObjectNode jsonObj, final long runId, final String stepId) {
+		final Map<String, Object> preparation = metricsManager.preparation(runId, stepId);
+		if (preparation != null && !preparation.isEmpty()) {
+			jsonObj.set(MetricsConstants.METRIC_NAME_PREPARATION, objectMapper.valueToTree(preparation));
+		}
 	}
 
 	/** Adds the storage driver's own statistics; a driver that reports none adds no field. */
@@ -797,6 +808,7 @@ final class MetricsJsonResponder {
 			jsonObj.put("timestamp", entry.recordedAtMillis);
 			jsonObj.put("elapsed_time_seconds", entry.elapsedTimeMillis / 1000.0);
 			jsonObj.put("test_state", 2);
+			addPreparation(jsonObj, entry.runId, entry.stepId);
 
 			final boolean hasCountLimit = entry.countLimit > 0L;
 			final boolean hasTimeLimit = entry.timeLimitSec > 0L;
@@ -890,6 +902,7 @@ final class MetricsJsonResponder {
 			jsonObj.put("timestamp", entry.recordedAtMillis);
 			jsonObj.put("elapsed_time_seconds", entry.elapsedTimeMillis / 1000.0);
 			jsonObj.put("test_state", 2);
+			addPreparation(jsonObj, entry.runId, entry.stepId);
 
 			final boolean hasCountLimit = entry.countLimit > 0L;
 			final boolean hasTimeLimit = entry.timeLimitSec > 0L;

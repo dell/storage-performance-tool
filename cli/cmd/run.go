@@ -29,6 +29,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/integrityplan"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
+	"github.com/dell/storage-performance-tool/cli/internal/nicplan"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/preflight"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
@@ -58,6 +59,7 @@ const (
 	flagCreatePrefix          = "create-prefix"
 	flagRMIRegistryPort       = "rmi-registry-port"
 	flagInterfaces            = "interfaces"
+	flagHostInterfaces        = "host-interfaces"
 	itemNamingShardsPath      = "item.naming.shards"
 	prefixShardsAuto          = -1
 	deleteAllDiscoveredLabel  = "all discovered identities (unbounded)"
@@ -322,6 +324,7 @@ func captureStoredDriverStats(
 			ctx, baseURL, expectedRunID, stepIDs, expectedContributorIDs,
 			len(expectedContributorIDs) == 1)
 	}
+	metadata.Preparation = preparationMetadata(observed.preparationsWith(captured), expectedContributorIDs, metadata.NicNodes)
 	if err == nil {
 		stored, err = observed.withFinal(captured, rdma)
 	}
@@ -2409,6 +2412,7 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 	// RMI Configuration Options (for distributed testing)
 	runCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
 	runCmd.Flags().String(flagInterfaces, "", "Spread each engine's connections over a NIC set: auto, or interface names, IPv4 addresses or RDMA devices (comma-separated; default S3 driver, host networking; env: SPT_INTERFACES)")
+	runCmd.Flags().StringArray(flagHostInterfaces, nil, "Replace --interfaces on one host: <host>=<value>, with <value> auto, a comma-separated list, or none to turn NICs off there; repeat for more hosts")
 	runCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
 	runCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
 	runCmd.Flags().Int(flagRMIRegistryPort, constants.DefaultRMIRegistryPort,
@@ -2872,6 +2876,24 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		}
 	}
 	params.Interfaces = interfaces
+	overrides, overridesSource, err := readHostInterfaces(cmd)
+	if err != nil {
+		return params, err
+	}
+	if entries := nicplan.AnyNicSet(overrides); len(entries) > 0 {
+		if err := scenario.ValidateInterfaces(entries, scenario.InterfacesTarget{
+			Source:            overridesSource,
+			S3Driver:          params.S3Driver,
+			WorkloadType:      workloadType,
+			EndpointSelection: params.EndpointSelection,
+		}); err != nil {
+			return params, err
+		}
+		if err := rejectSingleNicRdmaSettings(cmd, overridesSource); err != nil {
+			return params, err
+		}
+	}
+	params.HostInterfaces = overrides
 	return params, nil
 }
 

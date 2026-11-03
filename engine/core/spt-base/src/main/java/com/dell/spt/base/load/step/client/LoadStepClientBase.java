@@ -33,6 +33,7 @@ import com.dell.spt.base.integrity.IntegrityConfig;
 import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
 import com.dell.spt.base.integrity.IntegrityInputProvenance;
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
+import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.ItemType;
 import com.dell.spt.base.item.io.ItemInputFactory;
@@ -64,6 +65,7 @@ import com.dell.spt.base.storage.driver.bucket.TargetBucketProvisioning;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketStep;
 import com.dell.spt.base.util.BinarySizeFormat;
 import com.github.akurilov.commons.net.NetUtil;
+import com.dell.spt.base.config.TimeUtil;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
@@ -243,24 +245,52 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			final var configSlices = sliceConfig(
 							config,
 							sliceCount,
+							nodeAddrs,
 							IntegrityConfig.requiresExactOutputCount(config.configVal("storage")));
-			addFileClients(config, configSlices);
 			// init the config slices for each of the load step context configs
 			final var ctxConfigsSlices = (List<List<Config>>) new ArrayList<List<Config>>(sliceCount);
 			for (var i = 0; i < sliceCount; i++) {
 				ctxConfigsSlices.add(new ArrayList<>());
 			}
+			final var slicesByCtxConfig = new ArrayList<List<Config>>();
 			if (null != ctxConfigs) {
 				for (final var ctxConfig : ctxConfigs) {
-					final var ctxConfigSlices = sliceConfig(ctxConfig, sliceCount, false);
-					addFileClients(ctxConfig, ctxConfigSlices);
+					final var ctxConfigSlices = sliceConfig(ctxConfig, sliceCount, nodeAddrs, false);
+					slicesByCtxConfig.add(ctxConfigSlices);
 					for (var i = 0; i < sliceCount; i++) {
 						ctxConfigsSlices.get(i).add(ctxConfigSlices.get(i));
 					}
 				}
 			}
-			initAndStartStepSlices(nodeAddrs, configSlices, ctxConfigsSlices, metricsMgr);
-			initNicPathsCollector(nodeAddrs, configSlices, ctxConfigsSlices);
+			final Runnable distribution = () -> {
+				addFileClients(config, configSlices);
+				for (var i = 0; i < slicesByCtxConfig.size(); i++) {
+					addFileClients(ctxConfigs.get(i), slicesByCtxConfig.get(i));
+				}
+			};
+			// The barrier's deadline starts before the items are distributed (D54-R2).
+			final AdmissionBarrier barrier = anyNicSet(configSlices, ctxConfigsSlices) ? newAdmissionBarrier() : null;
+			try {
+				if (barrier == null) {
+					distribution.run();
+				} else {
+					barrier.distribute(() -> {
+						try (final var distributionCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
+							distribution.run();
+						}
+					});
+				}
+				initAndStartStepSlices(nodeAddrs, configSlices, ctxConfigsSlices, metricsMgr, barrier);
+				initNicPathsCollector(nodeAddrs, configSlices, ctxConfigsSlices);
+				if (barrier != null) {
+					openAdmissionBarrier(barrier);
+				}
+			} catch (final RuntimeException | Error | InterruptedException failure) {
+				if (barrier != null) {
+					barrier.fenceAll();
+				}
+				throwUnchecked(failure);
+			}
 			validateDeleteInventoriesBeforeAdmission();
 			initAndStartMetricsAggregator(config.configVal("output-metrics"));
 			if (standaloneDeleteEnabled() && !standaloneDeleteDurationMode()) {
@@ -272,6 +302,46 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 							"{}: load step client started, additional nodes: {}", loadStepId(),
 							Arrays.toString(nodeAddrs.toArray()));
 		}
+	}
+
+	private static boolean anyNicSet(final List<Config> configSlices, final List<List<Config>> ctxConfigsSlices) {
+		for (var i = 0; i < configSlices.size(); i++) {
+			if (NicSetConfig.isSet(configSlices.get(i).configVal("storage"))
+							|| ctxConfigsSlices.get(i).stream().anyMatch(ctx -> NicSetConfig.isSet(ctx.configVal("storage")))) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private AdmissionBarrier newAdmissionBarrier() {
+		final Object raw = config.val("load-step-preparation-timeout");
+		final long seconds = raw instanceof String text
+						? TimeUtil.getTimeInSeconds(text)
+						: TypeUtil.typeConvert(raw, long.class);
+		if (seconds <= 0) {
+			throw new IllegalConfigurationException(
+							AdmissionBarrier.TIMEOUT_SETTING + " must be greater than 0, not " + raw);
+		}
+		final String timeoutText = raw instanceof Number || String.valueOf(raw).matches("\\d+") ? raw + " s" : String.valueOf(raw);
+		return new AdmissionBarrier(loadStepId(), TimeUnit.SECONDS.toNanos(seconds), timeoutText);
+	}
+
+	private void openAdmissionBarrier(final AdmissionBarrier barrier) throws InterruptedException {
+		final Map<String, Long> engineMillis = barrier.awaitAndRelease();
+		metricsMgr.recordPreparation(runId(), loadStepId(), barrier.distributionMillis(), engineMillis);
+		final var slowest = engineMillis.entrySet().stream().max(Map.Entry.comparingByValue()).orElseThrow();
+		Loggers.MSG.info(
+						"Step {}: admission opened after {} s of preparation (item distribution {} s; slowest {}, {} s)",
+						loadStepId(),
+						seconds(barrier.elapsedMillis()),
+						seconds(barrier.distributionMillis()),
+						slowest.getKey(),
+						seconds(slowest.getValue()));
+	}
+
+	private static String seconds(final long millis) {
+		return String.format(Locale.ROOT, "%.1f", millis / 1000.0);
 	}
 
 	private void initNicPathsCollector(
@@ -667,7 +737,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	private void initAndStartStepSlices(
 					final List<String> nodeAddrs, final List<Config> configSlices, final List<List<Config>> ctxConfigsSlices,
-					final MetricsManager metricsManager) {
+					final MetricsManager metricsManager, final AdmissionBarrier barrier) {
 		final String stepTypeName;
 		try {
 			stepTypeName = getTypeName();
@@ -697,11 +767,22 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			if (validateRunId) {
 				requireMatchingRunId(stepSlice, expectedRunId);
 			}
+			if (barrier != null) {
+				barrier.arm(i == 0 ? NicSetConfig.ENTRY_KEY : nodeAddrs.get(i - 1), stepSlice);
+			}
 			try {
 				stepSlice.start();
 			} catch (final Exception e) {
 				if (e instanceof InterruptedException) {
 					throwUnchecked(e);
+				}
+				if (barrier != null) {
+					throw new RunTerminalException(
+									IntegrityTerminalException.Category.EXECUTION,
+									loadStepId(),
+									"Step " + loadStepId() + " did not start: " + (i == 0 ? NicSetConfig.ENTRY_KEY : nodeAddrs.get(i - 1)) + ": "
+													+ e.getMessage(),
+									e);
 				}
 				if (validateRunId) {
 					throw terminalFailure(
@@ -919,7 +1000,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	private List<Config> sliceConfig(
-					final Config config, final int sliceCount, final boolean balanceCountLimit) {
+					final Config config, final int sliceCount, final List<String> nodeAddrs, final boolean balanceCountLimit) {
 		final var configSlices = (List<Config>) new ArrayList<Config>(sliceCount);
 		for (var i = 0; i < sliceCount; i++) {
 			final var configSlice = ConfigSliceUtil.initSlice(config);
@@ -929,6 +1010,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			configSlices.add(configSlice);
 		}
+		ConfigSliceUtil.sliceNodeInterfaces(config, configSlices, nodeAddrs);
 		if (sliceCount > 1) { // distributed mode
 			//
 			final var countLimit = config.longVal("load-op-limit-count");

@@ -152,4 +152,73 @@ class ConfigSliceUtilTest {
 		assertThrows(NoSuchElementException.class, () -> slices.get(0).val("item-naming-seed"));
 		assertThrows(NoSuchElementException.class, () -> slices.get(1).val("item-naming-step"));
 	}
+
+	private static Config nicConfig(final String... addrs) throws Exception {
+		final var config = TestConfigBuilder.config();
+		config.val("load-step-node-addrs", List.of(addrs));
+		config.val("load-step-node-port", 1099);
+		return config;
+	}
+
+	private static List<Config> nicSlices(final Config config, final int count) {
+		final var slices = new ArrayList<Config>(count);
+		for (var i = 0; i < count; i++) {
+			slices.add(ConfigSliceUtil.initSlice(config));
+		}
+		return slices;
+	}
+
+	@Test
+	@DisplayName("each slice gets its host override, by address, and no slice keeps the map")
+	void hostOverridesBecomeEachSlicesInterfaces() throws Exception {
+		final var config = nicConfig("198.51.100.12:1099", "198.51.100.13:1099", "198.51.100.14:1099");
+		config.val("storage-net-interfaces", List.of("auto"));
+		config.val("storage-net-nodeInterfaces-entry", "none");
+		config.val("storage-net-nodeInterfaces-198.51.100.12:1099", "mlx5_0,mlx5_1");
+		final var slices = nicSlices(config, 4);
+		ConfigSliceUtil.sliceNodeInterfaces(
+						config, slices, List.of("198.51.100.12:1099", "198.51.100.13:1099", "198.51.100.14:1099"));
+		assertEquals(List.of(), slices.get(0).listVal("storage-net-interfaces"));
+		assertEquals(List.of("mlx5_0", "mlx5_1"), slices.get(1).listVal("storage-net-interfaces"));
+		assertEquals(List.of("auto"), slices.get(2).listVal("storage-net-interfaces"));
+		assertEquals(List.of("auto"), slices.get(3).listVal("storage-net-interfaces"));
+		for (final var slice : slices) {
+			assertEquals(Map.of(), slice.mapVal("storage-net-nodeInterfaces"));
+		}
+		assertEquals(2, config.<Object> mapVal("storage-net-nodeInterfaces").size(), "the stored configuration keeps the map");
+	}
+
+	@Test
+	@DisplayName("a prefix of the configured nodes changes no other slice")
+	void participatingPrefixKeepsEachNodesOverride() throws Exception {
+		final var config = nicConfig("198.51.100.12:1099", "198.51.100.13:1099", "198.51.100.14:1099");
+		config.val("storage-net-interfaces", List.of());
+		config.val("storage-net-nodeInterfaces-198.51.100.12:1099", "eth0");
+		config.val("storage-net-nodeInterfaces-198.51.100.14:1099", "eth1");
+		final var slices = nicSlices(config, 2);
+		ConfigSliceUtil.sliceNodeInterfaces(config, slices, List.of("198.51.100.12:1099"));
+		assertEquals(List.of(), slices.get(0).listVal("storage-net-interfaces"));
+		assertEquals(List.of("eth0"), slices.get(1).listVal("storage-net-interfaces"));
+	}
+
+	@Test
+	@DisplayName("a lone engine's override is its entry key")
+	void aLoneEngineUsesTheEntryKey() throws Exception {
+		final var config = nicConfig();
+		config.val("storage-net-nodeInterfaces-entry", "eth0,eth1");
+		final var slices = nicSlices(config, 1);
+		ConfigSliceUtil.sliceNodeInterfaces(config, slices, List.of());
+		assertEquals(List.of("eth0", "eth1"), slices.get(0).listVal("storage-net-interfaces"));
+	}
+
+	@Test
+	@DisplayName("without host overrides the slices keep the step's value")
+	void noHostOverridesLeaveTheStepsValue() throws Exception {
+		final var config = nicConfig("198.51.100.12:1099");
+		config.val("storage-net-interfaces", List.of("auto"));
+		final var slices = nicSlices(config, 2);
+		ConfigSliceUtil.sliceNodeInterfaces(config, slices, List.of("198.51.100.12:1099"));
+		assertEquals(List.of("auto"), slices.get(0).listVal("storage-net-interfaces"));
+		assertEquals(List.of("auto"), slices.get(1).listVal("storage-net-interfaces"));
+	}
 }

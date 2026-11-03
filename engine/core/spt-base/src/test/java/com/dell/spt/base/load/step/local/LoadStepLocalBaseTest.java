@@ -12,9 +12,11 @@ import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.ArgumentMatchers.any;
@@ -23,6 +25,8 @@ import static org.mockito.ArgumentMatchers.eq;
 
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.load.step.PreparationStatus;
+import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
@@ -261,6 +265,211 @@ class LoadStepLocalBaseTest {
 		final LoadStepContext ctx = mock(LoadStepContext.class);
 		when(ctx.activeOpCount()).thenReturn(0);
 		return ctx;
+	}
+
+	private static TestLoadStepLocalBase barrierStep(final LoadStepContext... contexts) {
+		final Config config = baseConfig();
+		config.val("load-step-id", "barrier-step");
+		return new TestLoadStepLocalBase(config, mockMetricsManager(), contexts);
+	}
+
+	private static void awaitState(final TestLoadStepLocalBase step, final PreparationStatus.State state)
+					throws InterruptedException {
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+		while (step.preparationStatus(7).state() != state) {
+			assertTrue(System.nanoTime() < deadline, "preparation state " + step.preparationStatus(7));
+			TimeUnit.MILLISECONDS.sleep(5);
+		}
+	}
+
+	@Test
+	void aBarrierStartHoldsThenPreparesOffTheCallerAndOpensOnlyAtTheRelease() throws Exception {
+		final LoadStepContext first = mockContext();
+		final LoadStepContext second = mockContext();
+		final var step = barrierStep(first, second);
+		final var preparing = new CountDownLatch(1);
+		final var proceed = new CountDownLatch(1);
+		doAnswer(call -> {
+			preparing.countDown();
+			proceed.await();
+			return null;
+		}).when(second).prepareForAdmission(any());
+
+		step.startPreparation(7, TimeUnit.MINUTES.toNanos(1));
+		step.startContextsForTest();
+
+		final InOrder order = inOrder(first, second);
+		order.verify(first).holdForAdmissionBarrier();
+		order.verify(second).holdForAdmissionBarrier();
+		order.verify(first).start();
+		order.verify(second).start();
+		assertTrue(preparing.await(20, TimeUnit.SECONDS), "preparation runs on its own thread");
+		assertEquals(PreparationStatus.State.RUNNING, step.preparationStatus(7).state());
+		assertFalse(step.releasePreparedAdmission(7), "not ready yet");
+		verify(first, never()).releaseAdmissionBarrier();
+
+		proceed.countDown();
+		awaitState(step, PreparationStatus.State.READY);
+		assertFalse(step.releasePreparedAdmission(8), "a stale token");
+		assertEquals(PreparationStatus.State.FENCED, step.preparationStatus(8).state(), "a stale token reads as fenced");
+		verify(first, never()).releaseAdmissionBarrier();
+
+		assertTrue(step.releasePreparedAdmission(7));
+		assertTrue(step.releasePreparedAdmission(7), "idempotent");
+		verify(first, times(1)).releaseAdmissionBarrier();
+		verify(second, times(1)).releaseAdmissionBarrier();
+		step.fencePreparation(7);
+		verify(first, never()).stop();
+	}
+
+	@Test
+	void aFailedPreparationReportsItsMessageAndAFenceStopsTheContexts() throws Exception {
+		final LoadStepContext context = mockContext();
+		doThrow(new RunTerminalException(
+						IntegrityTerminalException.Category.EXECUTION, "storage.net.interfaces: no route", null))
+						.when(context).prepareForAdmission(any());
+		final var step = barrierStep(context);
+		step.startPreparation(7, TimeUnit.MINUTES.toNanos(1));
+		step.startContextsForTest();
+
+		awaitState(step, PreparationStatus.State.FAILED);
+		assertEquals("storage.net.interfaces: no route", step.preparationStatus(7).message());
+		assertFalse(step.releasePreparedAdmission(7));
+
+		step.fencePreparation(7);
+		step.fencePreparation(7);
+		verify(context, timeout(20_000).times(1)).stop();
+		verify(context, never()).releaseAdmissionBarrier();
+		assertEquals(PreparationStatus.State.FENCED, step.preparationStatus(7).state());
+		assertFalse(step.releasePreparedAdmission(7), "a late release changes nothing");
+	}
+
+	@Test
+	void aWorkerFencesItselfAtItsOwnDeadlineEvenIfTheEntryNodeIsGone() throws Exception {
+		final LoadStepContext context = mockContext();
+		final var interrupted = new CountDownLatch(1);
+		doAnswer(call -> {
+			try {
+				TimeUnit.MINUTES.sleep(1);
+			} catch (final InterruptedException e) {
+				interrupted.countDown();
+				throw e;
+			}
+			return null;
+		}).when(context).prepareForAdmission(any());
+		final var step = barrierStep(context);
+		step.startPreparation(7, TimeUnit.MILLISECONDS.toNanos(100));
+		step.startContextsForTest();
+
+		awaitState(step, PreparationStatus.State.FENCED);
+		assertTrue(interrupted.await(20, TimeUnit.SECONDS), "a fence interrupts blocked work");
+		verify(context, timeout(20_000)).stop();
+		assertFalse(step.releasePreparedAdmission(7));
+	}
+
+	private static boolean deadlineGuardAlive(final String stepId) {
+		return Thread.getAllStackTraces().keySet().stream()
+						.anyMatch(thread -> thread.isAlive() && thread.getName().equals("spt-preparation-deadline-" + stepId));
+	}
+
+	@Test
+	void aReleaseEndsTheDeadlineGuard() throws Exception {
+		final LoadStepContext context = mockContext();
+		final var step = barrierStep(context);
+		step.startPreparation(7, TimeUnit.MINUTES.toNanos(10));
+		assertTrue(deadlineGuardAlive("barrier-step"), "the guard runs from the arming");
+		step.startContextsForTest();
+		awaitState(step, PreparationStatus.State.READY);
+
+		assertTrue(step.releasePreparedAdmission(7));
+
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+		while (deadlineGuardAlive("barrier-step")) {
+			assertTrue(System.nanoTime() < deadline, "a released step keeps no sleeping thread");
+			TimeUnit.MILLISECONDS.sleep(5);
+		}
+	}
+
+	@Test
+	void anArmedWorkerWhoseEntryNodeDiesBeforeStartIsStillFenced() throws Exception {
+		final var step = barrierStep(mockContext());
+		step.startPreparation(7, TimeUnit.MILLISECONDS.toNanos(50));
+		awaitState(step, PreparationStatus.State.FENCED);
+		assertFalse(step.releasePreparedAdmission(7));
+	}
+
+	@Test
+	void aFenceBeforeTheContextsStartedStillStopsThem() throws Exception {
+		final LoadStepContext context = mockContext();
+		final var step = barrierStep(context);
+		step.startPreparation(7, TimeUnit.MILLISECONDS.toNanos(1));
+		awaitState(step, PreparationStatus.State.FENCED);
+		clearInvocations(context);
+
+		step.startContextsForTest();
+
+		verify(context, timeout(20_000).atLeastOnce()).stop();
+		verify(context, never()).prepareForAdmission(any());
+	}
+
+	@Test
+	void aStopWaitsOutAReleaseInProgressAndThenDoesNotFence() throws Exception {
+		final LoadStepContext context = mockContext();
+		final var releasing = new CountDownLatch(1);
+		final var finish = new CountDownLatch(1);
+		doAnswer(call -> {
+			releasing.countDown();
+			finish.await();
+			return null;
+		}).when(context).releaseAdmissionBarrier();
+		final var step = barrierStep(context);
+		step.startPreparation(7, TimeUnit.MINUTES.toNanos(1));
+		step.startContextsForTest();
+		awaitState(step, PreparationStatus.State.READY);
+		final var release = Thread.ofPlatform().start(() -> step.releasePreparedAdmission(7));
+		assertTrue(releasing.await(20, TimeUnit.SECONDS));
+
+		final var fence = Thread.ofPlatform().start(() -> step.fencePreparation(7));
+		fence.join(200);
+		assertTrue(fence.isAlive(), "the fence waits for the release to finish");
+		finish.countDown();
+		release.join(20_000);
+		fence.join(20_000);
+
+		assertEquals(PreparationStatus.State.READY, step.preparationStatus(7).state());
+		verify(context, never()).stop();
+	}
+
+	@Test
+	void aFenceReturnsWhileAContextIsBlockedStopping() throws Exception {
+		final LoadStepContext context = mockContext();
+		final var stopping = new CountDownLatch(1);
+		final var finish = new CountDownLatch(1);
+		when(context.stop()).thenAnswer(call -> {
+			stopping.countDown();
+			finish.await();
+			return null;
+		});
+		final var step = barrierStep(context);
+		step.startPreparation(7, TimeUnit.MINUTES.toNanos(1));
+		step.startContextsForTest();
+		try {
+			step.fencePreparation(7);
+			assertTrue(stopping.await(20, TimeUnit.SECONDS));
+		} finally {
+			finish.countDown();
+		}
+	}
+
+	@Test
+	void withoutTheBarrierAStartIsUnchanged() throws Exception {
+		final LoadStepContext context = mockContext();
+		final var step = barrierStep(context);
+		step.startContextsForTest();
+		verify(context).start();
+		verify(context, never()).holdForAdmissionBarrier();
+		verify(context, never()).prepareForAdmission(any());
+		assertEquals(PreparationStatus.State.FENCED, step.preparationStatus(7).state(), "no preparation to poll");
 	}
 
 	@Test

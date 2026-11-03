@@ -14,11 +14,13 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
+	"github.com/dell/storage-performance-tool/cli/internal/nicplan"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
@@ -43,6 +45,7 @@ func newInterfacesCmd(t *testing.T, workloadType string, env map[string]string, 
 	cmd.Flags().String("range-align", "", "")
 	cmd.Flags().String("network-mode", constants.HostNetworkMode, "")
 	cmd.Flags().String(flagInterfaces, "", "")
+	cmd.Flags().StringArray(flagHostInterfaces, nil, "")
 	registerEndpointSelectionFlags(cmd.Flags())
 	if workloadType == WorkloadTypeTables {
 		for _, flag := range []string{"target-file-size", "ingest-file-size", "total-ingest"} {
@@ -119,7 +122,7 @@ func TestInterfacesRejectionsNameTheValuesSource(t *testing.T) {
 		"an engine override": {WorkloadTypeRead, nil, []string{"--engine-override", "storage.net.interfaces=auto"},
 			`engine override "storage.net.interfaces=auto" sets storage.net.interfaces, which is not supported; use --interfaces`},
 		"a nodeInterfaces override": {WorkloadTypeRead, nil, []string{"--interfaces", "auto", "--engine-override", "storage-net-nodeInterfaces=[auto]"},
-			"sets storage.net.nodeInterfaces, which is not supported; use --interfaces"},
+			"sets storage.net.nodeInterfaces, which is not supported; use --host-interfaces"},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -157,9 +160,9 @@ func TestRunMetadataGivesEverySliceTheRunsNicSet(t *testing.T) {
 		Params:    scenario.Params{Interfaces: []string{"ens1f0", "192.0.2.21"}},
 	})
 	want := []results.NicNode{
-		{Node: 0, Host: "worker-a.example", Interfaces: "ens1f0,192.0.2.21"},
-		{Node: 1, Host: "worker-b.example.example", Interfaces: "ens1f0,192.0.2.21"},
-		{Node: 2, Host: "worker-c.example", Interfaces: "ens1f0,192.0.2.21"},
+		{Node: 0, Host: "worker-a.example", Interfaces: "ens1f0,192.0.2.21", Source: "run"},
+		{Node: 1, Host: "worker-b.example.example", Interfaces: "ens1f0,192.0.2.21", Source: "run"},
+		{Node: 2, Host: "worker-c.example", Interfaces: "ens1f0,192.0.2.21", Source: "run"},
 	}
 	if !reflect.DeepEqual(metadata.NicNodes, want) {
 		t.Fatalf("nicNodes = %+v, want %+v", metadata.NicNodes, want)
@@ -168,7 +171,7 @@ func TestRunMetadataGivesEverySliceTheRunsNicSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{`"nicNodes":[{"node":0,"host":"worker-a.example","interfaces":"ens1f0,192.0.2.21"}`,
+	for _, field := range []string{`"nicNodes":[{"node":0,"host":"worker-a.example","interfaces":"ens1f0,192.0.2.21","source":"run"}`,
 		`"Interfaces":["ens1f0","192.0.2.21"]`} {
 		if !strings.Contains(string(encoded), field) {
 			t.Fatalf("metadata lacks %s:\n%s", field, encoded)
@@ -509,8 +512,8 @@ func TestRunCmdNicNodesFollowTheWorkersThatStartedWhenAMiddleWorkerFails(t *test
 		t.Fatal(err)
 	}
 	wantNodes := []results.NicNode{
-		{Node: 0, Host: "entry.example", Interfaces: "auto"},
-		{Node: 1, Host: "c.example", Interfaces: "auto"},
+		{Node: 0, Host: "entry.example", Interfaces: "auto", Source: "run"},
+		{Node: 1, Host: "c.example", Interfaces: "auto", Source: "run"},
 	}
 	if !reflect.DeepEqual(params.NicNodes, wantNodes) {
 		t.Fatalf("stored nicNodes = %+v, want the execution participants %+v", params.NicNodes, wantNodes)
@@ -640,10 +643,168 @@ func TestReplayCmdNicNodesFollowTheWorkersThatStartedWhenAMiddleWorkerFails(t *t
 		t.Fatal(err)
 	}
 	want := []results.NicNode{
-		{Node: 0, Host: "entry.example", Interfaces: "auto"},
-		{Node: 1, Host: "c.example", Interfaces: "auto"},
+		{Node: 0, Host: "entry.example", Interfaces: "auto", Source: "run"},
+		{Node: 1, Host: "c.example", Interfaces: "auto", Source: "run"},
 	}
 	if !reflect.DeepEqual(params.NicNodes, want) {
 		t.Fatalf("stored nicNodes = %+v, want the execution participants %+v", params.NicNodes, want)
+	}
+}
+
+func TestHostInterfacesReachTheParamsFromTheFlagOrTheEnvironment(t *testing.T) {
+	want := []nicplan.HostInterfaces{
+		{Host: "127.0.0.1", Value: "none"},
+		{Host: "wrk2", Value: "ens1f0,ens1f1", Entries: []string{"ens1f0", "ens1f1"}},
+	}
+	hosts := []string{"--test-hosts", "127.0.0.1,wrk2"}
+	params, err := newInterfacesCmd(t, WorkloadTypeRead, nil, append(hosts,
+		"--host-interfaces", "127.0.0.1=none", "--host-interfaces", "root@wrk2=ens1f0,ens1f1")...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want[1].Value = "ens1f0,ens1f1"
+	if !reflect.DeepEqual(params.HostInterfaces, want) {
+		t.Fatalf("flag: %+v, want %+v", params.HostInterfaces, want)
+	}
+	params, err = newInterfacesCmd(t, WorkloadTypeRead,
+		map[string]string{constants.EnvHostInterfaces: "127.0.0.1=none; wrk2=ens1f0,ens1f1"}, hosts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(params.HostInterfaces, want) {
+		t.Fatalf("environment: %+v, want %+v", params.HostInterfaces, want)
+	}
+	params, err = newInterfacesCmd(t, WorkloadTypeRead,
+		map[string]string{constants.EnvHostInterfaces: "127.0.0.1=auto"},
+		append(hosts, "--host-interfaces", "wrk2=none")...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(params.HostInterfaces) != 1 || params.HostInterfaces[0].Host != "wrk2" {
+		t.Fatalf("the flag replaces the environment: %+v", params.HostInterfaces)
+	}
+}
+
+func TestHostInterfacesRejectionsNameTheValuesSource(t *testing.T) {
+	const fromEnv = "SPT_HOST_INTERFACES (environment or .env)"
+	hosts := []string{"--test-hosts", "wrk1,wrk2"}
+	tests := map[string]struct {
+		env  map[string]string
+		args []string
+		want string
+	}{
+		"not in --test-hosts": {nil, []string{"--host-interfaces", "wrk9=auto"},
+			"--host-interfaces wrk9=auto: wrk9 is not in --test-hosts"},
+		"not in --test-hosts, from the environment": {map[string]string{constants.EnvHostInterfaces: "wrk9=auto"}, nil,
+			fromEnv + ": --host-interfaces wrk9=auto: wrk9 is not in --test-hosts"},
+		"a bridge network": {nil, []string{"--host-interfaces", "wrk1=auto", "--network-mode", "bridge"},
+			"--host-interfaces needs --network-mode host: a bridge-network container sees only its own interface"},
+		"another driver": {nil, []string{"--host-interfaces", "wrk1=auto", "--s3-driver", "aws"},
+			"--host-interfaces requires the default Netty S3 driver, not --s3-driver aws"},
+		"an RDMA device": {nil, []string{"--host-interfaces", "wrk1=auto", "--rdma-device", "mlx5_0"},
+			"--host-interfaces cannot be combined with --rdma-device mlx5_0: name each NIC's RDMA device or address in --interfaces"},
+		"an engine override of a key": {nil, []string{"--engine-override", "storage.net.nodeInterfaces.entry=none"},
+			`engine override "storage.net.nodeInterfaces.entry=none" sets storage.net.nodeInterfaces, which is not supported; use --host-interfaces`},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := newInterfacesCmd(t, WorkloadTypeRead, tc.env, append(append([]string{}, hosts...), tc.args...)...)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestHostInterfacesNoneAsksForNothingOfADriver(t *testing.T) {
+	params, err := newInterfacesCmd(t, WorkloadTypeRead, nil,
+		"--test-hosts", "wrk1,wrk2", "--host-interfaces", "wrk1=none", "--s3-driver", "aws", "--network-mode", "bridge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(params.HostInterfaces) != 1 || params.HostInterfaces[0].Value != nicplan.None {
+		t.Fatalf("HostInterfaces = %+v", params.HostInterfaces)
+	}
+}
+
+func TestRunMetadataRecordsHostInterfacesAndEachSlicesValue(t *testing.T) {
+	hosts := []*hostparse.HostInfo{{Host: "wrk1"}, {Host: "wrk2"}, {Host: "wrk3"}}
+	metadata := buildRunMetadata(runMetadataInput{
+		HostInfos: hosts,
+		Params: scenario.Params{Interfaces: []string{"auto"}, HostInterfaces: []nicplan.HostInterfaces{
+			{Host: "wrk1", Value: "none"},
+			{Host: "wrk2", Value: "mlx5_0,mlx5_1", Entries: []string{"mlx5_0", "mlx5_1"}},
+		}},
+	})
+	want := []results.NicNode{
+		{Node: 0, Host: "wrk1", Interfaces: "none", Source: "host"},
+		{Node: 1, Host: "wrk2", Interfaces: "mlx5_0,mlx5_1", Source: "host"},
+		{Node: 2, Host: "wrk3", Interfaces: "auto", Source: "run"},
+	}
+	if !reflect.DeepEqual(metadata.NicNodes, want) {
+		t.Fatalf("nicNodes = %+v, want %+v", metadata.NicNodes, want)
+	}
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"hostInterfaces":{"wrk1":"none","wrk2":"mlx5_0,mlx5_1"}`) {
+		t.Fatalf("metadata lacks hostInterfaces:\n%s", encoded)
+	}
+	if strings.Contains(string(encoded), `"HostInterfaces"`) {
+		t.Fatalf("the scenario params must not repeat them:\n%s", encoded)
+	}
+}
+
+func TestRunMetadataWithOnlyHostInterfacesGivesTheOtherSlicesNone(t *testing.T) {
+	metadata := buildRunMetadata(runMetadataInput{
+		HostInfos: []*hostparse.HostInfo{{Host: "wrk1"}, {Host: "wrk2"}},
+		Params:    scenario.Params{HostInterfaces: []nicplan.HostInterfaces{{Host: "wrk2", Value: "auto", Entries: []string{"auto"}}}},
+	})
+	want := []results.NicNode{
+		{Node: 0, Host: "wrk1", Interfaces: "none", Source: "run"},
+		{Node: 1, Host: "wrk2", Interfaces: "auto", Source: "host"},
+	}
+	if !reflect.DeepEqual(metadata.NicNodes, want) {
+		t.Fatalf("nicNodes = %+v, want %+v", metadata.NicNodes, want)
+	}
+}
+
+func TestPreparationMetadataGivesEachEngineItsSliceAndHost(t *testing.T) {
+	nodes := []results.NicNode{{Node: 0, Host: "wrk1"}, {Node: 1, Host: "wrk2"}, {Node: 2, Host: "wrk3"}}
+	contributors := []string{"local", "198.51.100.12:1099", "198.51.100.13:1099"}
+	got := preparationMetadata(map[string]*results.Preparation{
+		"read1": {DistributionMillis: 3120, Engines: map[string]int64{
+			"198.51.100.13:1099": 8000, "entry": 4210, "198.51.100.12:1099": 9050, "203.0.113.9:1099": 1,
+		}},
+	}, contributors, nodes)
+	want := map[string]stepPreparation{"read1": {DistributionMillis: 3120, Engines: []preparationEngine{
+		{Node: -1, Contributor: "203.0.113.9:1099", Millis: 1},
+		{Node: 0, Host: "wrk1", Contributor: "entry", Millis: 4210},
+		{Node: 1, Host: "wrk2", Contributor: "198.51.100.12:1099", Millis: 9050},
+		{Node: 2, Host: "wrk3", Contributor: "198.51.100.13:1099", Millis: 8000},
+	}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("preparation = %+v, want %+v", got, want)
+	}
+	if got := preparationMetadata(nil, contributors, nodes); got != nil {
+		t.Fatalf("a run without a barrier records none, got %+v", got)
+	}
+}
+
+func TestDriverStatsCollectorKeepsPreparationsWhateverHappensToTheStatistics(t *testing.T) {
+	var none *driverStatsCollector
+	if got := none.preparationsWith(nil); got != nil {
+		t.Fatalf("a nil collector observed nothing, got %+v", got)
+	}
+	collector := newDriverStatsCollector(time.Now)
+	seen := &results.Preparation{DistributionMillis: 1}
+	collector.keepPreparations(map[string]*results.Preparation{"read1": seen})
+	final := &results.Preparation{DistributionMillis: 2}
+	got := collector.preparationsWith(&results.DriverStatsCapture{
+		Preparations: map[string]*results.Preparation{"write1": final},
+	})
+	if got["read1"] != seen || got["write1"] != final || len(got) != 2 {
+		t.Fatalf("preparations = %+v", got)
 	}
 }

@@ -913,9 +913,15 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 						nextChildOps = List.of(op);
 						childFailureContext = "part retry";
 					} else {
-						// retries exhausted — abort the MPU
 						parentOp.put("mpuFailure", op.status().name());
-						parentOp.put("mpuAbort", "true");
+						if (OpType.READ.equals(op.type())) {
+							// Range reads are stateless, so there is nothing to abort: the other
+							// ranges finish, and finalization reports this failure.
+							nextChildOps = (List<O>) parentOp.nextSubOperations(1);
+						} else {
+							// retries exhausted — abort the MPU
+							parentOp.put("mpuAbort", "true");
+						}
 					}
 				} else if (parentOp.get("mpuAbort") == null) {
 					// Part succeeded, fetch next part if any
@@ -949,23 +955,27 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			signalDispatch();
 	}
 
-	private boolean shouldEnqueueFinalization(final CompositeOperation parentOp) {
+	static boolean shouldEnqueueFinalization(final CompositeOperation parentOp) {
 		if (parentOp.get("mpuAbort") != null) {
 			return markFinalizationEnqueued(parentOp);
 		}
 		if (!parentOp.allSubOperationsDone()) {
 			return false;
 		}
+		// A part settles before its completion takes the parent's lock, so a count of zero can include a
+		// failed part that is about to retry. Once a part has recorded a failure, the only failed parts
+		// that can end the operation are those out of retries.
+		final boolean failed = parentOp.get("mpuFailure") != null;
 		for (final var rawSubOp : parentOp.subOperations()) {
 			final var subOp = (PartialOperation) rawSubOp;
-			if (subOp.status() != Operation.Status.SUCC) {
+			if (subOp.status() != Operation.Status.SUCC && !(failed && subOp.retryCount() >= MAX_PART_RETRIES)) {
 				return false;
 			}
 		}
 		return markFinalizationEnqueued(parentOp);
 	}
 
-	private boolean markFinalizationEnqueued(final CompositeOperation parentOp) {
+	private static boolean markFinalizationEnqueued(final CompositeOperation parentOp) {
 		synchronized (parentOp) {
 			if (parentOp.get(KEY_FINALIZATION_ENQUEUED) != null) {
 				return false;

@@ -1,5 +1,7 @@
 package scenario
 
+import "github.com/dell/storage-performance-tool/cli/internal/nicplan"
+
 import "time"
 
 // Params holds all parameters needed to generate a Spt scenario.
@@ -48,6 +50,10 @@ type Params struct {
 	// Interfaces is the run's NIC set (--interfaces): auto, or interface names, IPv4 addresses or
 	// RDMA devices. Empty writes no storage.net.interfaces, so the shipped empty default applies.
 	Interfaces []string
+	// HostInterfaces are the --host-interfaces values. They reach the engine as the Entry Node's
+	// arguments, built from the workers that started (NodeInterfacesArgs), so the defaults never
+	// hold them, and run metadata stores them under its own field.
+	HostInterfaces []nicplan.HostInterfaces `json:"-"`
 
 	// Read workload
 	RangeSize             string // Empty disables partial reads.

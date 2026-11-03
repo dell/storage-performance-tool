@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -2434,6 +2435,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 				return failBeforeSubmission(fmt.Errorf(
 					"primary host %s has no Docker manager configured", primary.Info.Original))
 			}
+			additionalArgs = append(additionalArgs, scenario.NodeInterfacesArgs(params.HostInterfaces, primary.Info.Host, nil)...)
 			primary.SetPhase(NodePhaseContainerStarting)
 			cid, err := startEntryNodeContainerContext(
 				ctx, primary.DockerManager, image, nil, additionalArgs, m.multiHost.networkMode)
@@ -2623,7 +2625,9 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 
 	m.multiHost.scenarioContent = string(scenarioContent)
 
-	if err := m.multiHost.StartContainers(ctx, runtimeImage, startupArgs); err != nil {
+	// This host is the Entry Node whichever --test-hosts entry it is.
+	engineArgs := slices.Concat(startupArgs, scenario.NodeInterfacesArgs(params.HostInterfaces, host.Info.Host, nil))
+	if err := m.multiHost.StartContainers(ctx, runtimeImage, engineArgs); err != nil {
 		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 	}
 	if err := m.waitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
@@ -2990,6 +2994,7 @@ func (o *MultiHostOrchestrator) startEntryNodeContext(
 ) error {
 	// Build worker addresses for RMI using detected advertised IPs where available
 	workerAddresses := make([]string, 0, len(workers))
+	workerNodes := make([]scenario.WorkerNode, 0, len(workers))
 	for _, worker := range workers {
 		hostOrIP := worker.AdvertisedIP
 		if strings.TrimSpace(hostOrIP) == "" {
@@ -2997,6 +3002,7 @@ func (o *MultiHostOrchestrator) startEntryNodeContext(
 		}
 		addr := fmt.Sprintf("%s:%s", hostOrIP, constants.RMIRegistryPort)
 		workerAddresses = append(workerAddresses, addr)
+		workerNodes = append(workerNodes, scenario.WorkerNode{Host: worker.Info.Host, Addr: addr})
 	}
 	logging.LogInfo("orchestrator", "entry worker addresses", "csv", strings.Join(workerAddresses, ","))
 
@@ -3011,6 +3017,7 @@ func (o *MultiHostOrchestrator) startEntryNodeContext(
 		return fmt.Errorf("failed to build endpoint args: %w", err)
 	}
 	additionalArgs = append(additionalArgs, startupArgs...)
+	additionalArgs = append(additionalArgs, scenario.NodeInterfacesArgs(params.HostInterfaces, primary.Info.Host, workerNodes)...)
 
 	containerID, err := startEntryNodeContainerContext(
 		ctx, primary.DockerManager,

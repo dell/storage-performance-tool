@@ -439,6 +439,11 @@ func (r *Renderer) renderWorkload(b *strings.Builder, summary *RunSummary) {
 	}
 	if len(work.Interfaces) > 0 {
 		r.writeBullet(b, "Interfaces", strings.Join(work.Interfaces, ","))
+	}
+	if work.HostInterfaces != "" {
+		r.writeBullet(b, "Host interfaces", work.HostInterfaces)
+	}
+	if len(work.Interfaces) > 0 || work.HostInterfaces != "" {
 		r.writeBullet(b, "Event loops", work.EventLoops)
 	}
 	if n := len(work.BucketSet); n > 1 {

@@ -539,6 +539,7 @@ type RunParams struct {
 	DriverStats            map[string]*driverstats.Stats     `json:"driverStats,omitempty"`
 	DriverStatsError       string                            `json:"driverStatsError,omitempty"`
 	NicNodes               []results.NicNode                 `json:"nicNodes,omitempty"`
+	HostInterfaces         map[string]string                 `json:"hostInterfaces,omitempty"`
 	NicEngines             map[string][]results.NicEngine    `json:"nicEngines,omitempty"`
 	NicEnginesError        string                            `json:"nicEnginesError,omitempty"`
 	ResultsOptions         RunResultsOptions                 `json:"resultsOptions"`

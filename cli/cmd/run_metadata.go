@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
+	"github.com/dell/storage-performance-tool/cli/internal/nicplan"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
@@ -58,6 +61,8 @@ type runMetadata struct {
 	DriverStats             map[string]*driverstats.Stats                           `json:"driverStats,omitempty"`
 	DriverStatsError        string                                                  `json:"driverStatsError,omitempty"`
 	NicNodes                []results.NicNode                                       `json:"nicNodes,omitempty"`
+	HostInterfaces          map[string]string                                       `json:"hostInterfaces,omitempty"`
+	Preparation             map[string]stepPreparation                              `json:"preparation,omitempty"`
 	NicEngines              map[string][]results.NicEngine                          `json:"nicEngines,omitempty"`
 	NicEnginesError         string                                                  `json:"nicEnginesError,omitempty"`
 	StepLifecycles          map[string]string                                       `json:"stepLifecycles,omitempty"`
@@ -211,7 +216,8 @@ func buildRunMetadata(in runMetadataInput) *runMetadata {
 		AutoTerminateSeconds: in.AutoTerminateSeconds,
 		runID:                in.Params.RunID,
 	}
-	meta.NicNodes = nicNodesMetadata(in.HostInfos, in.Params.Interfaces)
+	meta.NicNodes = nicNodesMetadata(in.HostInfos, in.Params.Interfaces, in.Params.HostInterfaces)
+	meta.HostInterfaces = hostInterfacesMetadata(in.Params.HostInterfaces)
 	if in.WorkloadType == scenario.WorkloadTypeDelete {
 		meta.DeleteArtifactsVersion = constants.ResultsDeleteArtifactsVersion
 		meta.DeleteArtifactStepIDs = plannedDeleteArtifactStepIDs(expected)
@@ -239,13 +245,27 @@ func buildRunMetadata(in runMetadataInput) *runMetadata {
 	return meta
 }
 
-// nicNodesMetadata gives every slice the run's NIC set, in slice order: the Entry Node, then the
-// workers in the order the Entry Node was given them. A run without a NIC set has none.
-func nicNodesMetadata(hostInfos []*hostparse.HostInfo, interfaces []string) []results.NicNode {
-	if len(interfaces) == 0 {
+// Where a slice's NIC set came from, in nicNodes.
+const (
+	nicNodeSourceRun  = "run"
+	nicNodeSourceHost = "host"
+)
+
+// nicEntryContributor is how the engine names the Entry Node among a step's engines.
+const nicEntryContributor = "entry"
+
+// nicNodesMetadata gives every slice its effective NIC set, in slice order: the Entry Node, then
+// the workers in the order the Entry Node was given them. A host override replaces the run's value;
+// without either, the slice's value is none, and the fetcher expects no NIC files from it. A run
+// without a NIC set or a host override has no entries.
+func nicNodesMetadata(hostInfos []*hostparse.HostInfo, interfaces []string, overrides []nicplan.HostInterfaces) []results.NicNode {
+	if len(interfaces) == 0 && len(overrides) == 0 {
 		return nil
 	}
 	value := strings.Join(interfaces, ",")
+	if value == "" {
+		value = nicplan.None
+	}
 	nodes := make([]results.NicNode, 0, len(hostInfos))
 	for _, h := range hostInfos {
 		if h == nil {
@@ -255,9 +275,74 @@ func nicNodesMetadata(hostInfos []*hostparse.HostInfo, interfaces []string) []re
 		if host == "" {
 			host = strings.TrimSpace(h.Original)
 		}
-		nodes = append(nodes, results.NicNode{Node: len(nodes), Host: host, Interfaces: value})
+		node := results.NicNode{Node: len(nodes), Host: host, Interfaces: value, Source: nicNodeSourceRun}
+		if override, ok := nicplan.ForHost(overrides, host); ok {
+			node.Interfaces, node.Source = override.Value, nicNodeSourceHost
+		}
+		nodes = append(nodes, node)
 	}
 	return nodes
+}
+
+// stepPreparation is how long a step with an admission barrier took to reach admission, which lies
+// outside its Load Interval.
+type stepPreparation struct {
+	DistributionMillis int64               `json:"distributionMillis"`
+	Engines            []preparationEngine `json:"engines"`
+}
+
+// preparationEngine is one engine's time. Node is its slice, -1 when the engine's address is not
+// one the run expected; Host is empty when the run recorded no host for that slice.
+type preparationEngine struct {
+	Node        int    `json:"node"`
+	Host        string `json:"host,omitempty"`
+	Contributor string `json:"contributor"`
+	Millis      int64  `json:"millis"`
+}
+
+// preparationMetadata gives each step's engines their slice and host, in slice order. The engine
+// names its own node entry and a worker by its address; contributorIDs lists the slices in order.
+func preparationMetadata(
+	preparations map[string]*results.Preparation, contributorIDs []string, nodes []results.NicNode,
+) map[string]stepPreparation {
+	if len(preparations) == 0 {
+		return nil
+	}
+	out := make(map[string]stepPreparation, len(preparations))
+	for stepID, preparation := range preparations {
+		if preparation == nil {
+			continue
+		}
+		engines := make([]preparationEngine, 0, len(preparation.Engines))
+		for contributor, millis := range preparation.Engines {
+			node := slices.Index(contributorIDs, contributor)
+			if contributor == nicEntryContributor {
+				node = 0
+			}
+			engine := preparationEngine{Node: node, Contributor: contributor, Millis: millis}
+			if node >= 0 && node < len(nodes) {
+				engine.Host = nodes[node].Host
+			}
+			engines = append(engines, engine)
+		}
+		slices.SortFunc(engines, func(a, b preparationEngine) int {
+			return cmp.Or(cmp.Compare(a.Node, b.Node), cmp.Compare(a.Contributor, b.Contributor))
+		})
+		out[stepID] = stepPreparation{DistributionMillis: preparation.DistributionMillis, Engines: engines}
+	}
+	return out
+}
+
+// hostInterfacesMetadata records the requested --host-interfaces values by host, as given.
+func hostInterfacesMetadata(overrides []nicplan.HostInterfaces) map[string]string {
+	if len(overrides) == 0 {
+		return nil
+	}
+	values := make(map[string]string, len(overrides))
+	for _, override := range overrides {
+		values[override.Host] = override.Value
+	}
+	return values
 }
 
 // refreshNicNodes rebuilds nicNodes from the run's execution participants once a distributed run
@@ -274,7 +359,7 @@ func (meta *runMetadata) refreshNicNodes() {
 		return
 	}
 	if locked {
-		meta.NicNodes = nicNodesMetadata(hosts, meta.ScenarioParams.Interfaces)
+		meta.NicNodes = nicNodesMetadata(hosts, meta.ScenarioParams.Interfaces, meta.ScenarioParams.HostInterfaces)
 	}
 }
 

@@ -159,6 +159,16 @@ type terminalDriverStatsStep struct {
 		FailedCount  int64 `json:"failed_count"`
 	} `json:"operations"`
 	DriverStats json.RawMessage `json:"driver_stats"`
+	Preparation *Preparation    `json:"preparation"`
+}
+
+// Preparation is the preparation field of a metrics row: how long a step with an admission barrier
+// took to reach admission, outside its Load Interval.
+type Preparation struct {
+	// DistributionMillis is the Entry Node's item distribution.
+	DistributionMillis int64 `json:"distribution_ms"`
+	// Engines holds each engine's time, by entry or node address.
+	Engines map[string]int64 `json:"engines"`
 }
 
 const (
@@ -237,6 +247,8 @@ func CaptureTerminalDeleteMetricsForRunContext(
 type DriverStatsCapture struct {
 	// Steps holds the terminal statistics of the steps that report them, by step.
 	Steps map[string]*driverstats.Stats
+	// Preparations holds the preparation times of the steps with an admission barrier, by step.
+	Preparations map[string]*Preparation
 	// Worked holds the steps whose rows counted completed operations, with statistics or
 	// without. A step whose driver always reports statistics has them when it is in this set.
 	Worked map[string]struct{}
@@ -273,6 +285,9 @@ func CaptureTerminalDriverStatsForRunContext(
 type DriverStatsObservation struct {
 	// Steps holds the terminal statistics that passed every check, by step.
 	Steps map[string]*driverstats.Stats
+	// Preparations holds the preparation times seen so far, by step. A step has them from the
+	// moment admission opens, so a running step's row counts.
+	Preparations map[string]*Preparation
 	// Refused holds the check that the statistics of a step failed, by step.
 	Refused map[string]error
 	// Active holds the steps, running or ended, whose row showed their driver at work. The
@@ -504,8 +519,9 @@ type driverStatsOutcome struct {
 // driverStatsResponse is what one metrics response says about the driver statistics of the
 // expected steps: an outcome for each row with statistics, and the steps that worked.
 type driverStatsResponse struct {
-	rows   []driverStatsOutcome
-	worked map[string]struct{}
+	rows         []driverStatsOutcome
+	worked       map[string]struct{}
+	preparations map[string]*Preparation
 }
 
 // driverStatsRows differs from the DELETE capture in one rule: a step without statistics is
@@ -525,13 +541,17 @@ func driverStatsRows(
 	}
 	checker := target.checker(metricsPath, wantScope)
 	response := &driverStatsResponse{
-		rows:   make([]driverStatsOutcome, 0, len(target.steps)),
-		worked: make(map[string]struct{}),
+		rows:         make([]driverStatsOutcome, 0, len(target.steps)),
+		worked:       make(map[string]struct{}),
+		preparations: make(map[string]*Preparation),
 	}
 	for i := range steps {
 		step := &steps[i]
 		if target.worked(step) {
 			response.worked[step.StepID] = struct{}{}
+		}
+		if step.Preparation != nil && target.expects(step) {
+			response.preparations[strings.TrimSpace(step.StepID)] = step.Preparation
 		}
 		admitted, admitErr := checker.admit(&step.terminalMetricsRow, hasJSONValue(step.DriverStats))
 		if admitErr != nil {
@@ -554,10 +574,14 @@ func driverStatsRows(
 // worked reports whether a row is one of an expected step of the run that counted completed
 // operations, successful or failed.
 func (t *terminalCaptureTarget) worked(step *terminalDriverStatsStep) bool {
+	return t.expects(step) && step.Operations.SuccessCount+step.Operations.FailedCount > 0
+}
+
+// expects reports whether a row is one of an expected step of the run.
+func (t *terminalCaptureTarget) expects(step *terminalDriverStatsStep) bool {
 	runID, err := parseMetricsRunID(step.RunID)
 	_, expected := t.steps[strings.TrimSpace(step.StepID)]
-	return err == nil && runID == t.runID && expected &&
-		step.Operations.SuccessCount+step.Operations.FailedCount > 0
+	return err == nil && runID == t.runID && expected
 }
 
 // driverCounted reports whether the statistics of a row, checked or not, show the driver at work.
@@ -604,8 +628,9 @@ func captureTerminalDriverStatsFromPath(
 		return nil, available, err
 	}
 	captured := &DriverStatsCapture{
-		Steps:  make(map[string]*driverstats.Stats, len(response.rows)),
-		Worked: response.worked,
+		Steps:        make(map[string]*driverstats.Stats, len(response.rows)),
+		Preparations: response.preparations,
+		Worked:       response.worked,
 	}
 	for _, row := range response.rows {
 		if row.err != nil {
@@ -630,10 +655,11 @@ func observeTerminalDriverStatsFromPath(
 		return nil, available, err
 	}
 	observation := &DriverStatsObservation{
-		Steps:   make(map[string]*driverstats.Stats, len(response.rows)),
-		Refused: make(map[string]error),
-		Active:  make(map[string]struct{}),
-		Worked:  response.worked,
+		Steps:        make(map[string]*driverstats.Stats, len(response.rows)),
+		Preparations: response.preparations,
+		Refused:      make(map[string]error),
+		Active:       make(map[string]struct{}),
+		Worked:       response.worked,
 	}
 	for _, row := range response.rows {
 		if row.active {

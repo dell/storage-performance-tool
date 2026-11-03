@@ -26,6 +26,8 @@ type Config struct {
 
 	// Interfaces is the NIC set to plan on each host (--interfaces); empty lists the NICs only.
 	Interfaces []string
+	// HostInterfaces replace Interfaces on their hosts (--host-interfaces); none lists the NICs only.
+	HostInterfaces []nicplan.HostInterfaces
 	// Endpoints are the S3 endpoints as the engine's drivers name them, before slicing.
 	Endpoints []string
 	// SliceEndpoints divides Endpoints among the hosts in run order, the entry node first.
@@ -46,17 +48,19 @@ type Check struct {
 
 // NodeResult holds the verification results for a single node
 type NodeResult struct {
-	Host             string
-	HostInfo         *hostparse.HostInfo
-	SSHConnectivity  Check
-	DockerAvailable  Check
-	DockerImagePull  Check
-	ContainerStart   Check
-	ClockSkew        Check // Clock skew relative to entry node (multi-host)
-	RdmaDevice       Check // /dev/infiniband/ accessible (RDMA only)
-	RdmaDriver       Check // libibverbs loadable in container (RDMA only)
-	RdmaReadiness    Check // RDMA port active inside container (RDMA only)
-	NicPlan          Check // The host's NIC plan (--interfaces only)
+	Host            string
+	HostInfo        *hostparse.HostInfo
+	SSHConnectivity Check
+	DockerAvailable Check
+	DockerImagePull Check
+	ContainerStart  Check
+	ClockSkew       Check // Clock skew relative to entry node (multi-host)
+	RdmaDevice      Check // /dev/infiniband/ accessible (RDMA only)
+	RdmaDriver      Check // libibverbs loadable in container (RDMA only)
+	RdmaReadiness   Check // RDMA port active inside container (RDMA only)
+	NicPlan         Check // The host's NIC plan (--interfaces only)
+	// NicPlanned is whether this host has a NIC set to plan; a none override has none.
+	NicPlanned       bool
 	PortsAccessible  Check
 	MetricsEndpoint  Check
 	ControlEndpoint  Check

@@ -268,3 +268,13 @@ func TestStoredRunWithoutInterfacesShowsNoNicSetBullets(t *testing.T) {
 	mustNotContain(t, full, "Interfaces")
 	mustNotContain(t, full, "Event loops")
 }
+
+func TestHostInterfacesLineListsEachHostInOrder(t *testing.T) {
+	got := hostInterfacesLine(map[string]string{"wrk2": "mlx5_0,mlx5_1", "wrk1": "none"})
+	if want := "wrk1=none; wrk2=mlx5_0,mlx5_1"; got != want {
+		t.Fatalf("line = %q, want %q", got, want)
+	}
+	if got := hostInterfacesLine(nil); got != "" {
+		t.Fatalf("no values, line = %q", got)
+	}
+}

@@ -114,6 +114,8 @@ public class TestConfigBuilder {
 			return Boolean.class;
 		case "list":
 			return List.class;
+		case "map":
+			return Map.class;
 		case "any":
 			return Object.class;
 		default:
@@ -189,6 +191,9 @@ public class TestConfigBuilder {
 		stepLimit.put("size", "100MB");
 		stepLimit.put("time", "60s");
 		step.put("limit", stepLimit);
+		Map<String, Object> stepPreparation = new HashMap<>();
+		stepPreparation.put("timeout", "10m");
+		step.put("preparation", stepPreparation);
 		Map<String, Object> stepNode = new HashMap<>();
 		stepNode.put("addrs", List.of());
 		stepNode.put("port", 9020);
@@ -283,6 +288,7 @@ public class TestConfigBuilder {
 		Map<String, Object> storageNetNode = new HashMap<>();
 		storageNetNode.put("slice", false);
 		storageNet.put("node", storageNetNode);
+		storageNet.put("nodeInterfaces", new HashMap<String, Object>());
 		storage.put("net", storageNet);
 
 		values.put("storage", storage);
