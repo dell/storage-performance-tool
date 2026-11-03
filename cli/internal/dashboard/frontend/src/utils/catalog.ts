@@ -187,3 +187,43 @@ export function runWorkloadType(
   if (metrics?.workload_type) return metrics.workload_type;
   return job?.options?.driver === "mock" ? "mock" : undefined;
 }
+
+/** True when optional shape fields agree (only compared when both sides define them). */
+export function sameRunShape(a: CatalogRun, b: CatalogRun): boolean {
+  if (a.workload !== b.workload) return false;
+  if (a.object_size !== b.object_size) return false;
+  if (a.threads !== b.threads) return false;
+  if (
+    a.object_count !== undefined &&
+    b.object_count !== undefined &&
+    a.object_count !== b.object_count
+  )
+    return false;
+  if (
+    a.host_count !== undefined &&
+    b.host_count !== undefined &&
+    a.host_count !== b.host_count
+  )
+    return false;
+  if (
+    a.s3_driver !== undefined &&
+    b.s3_driver !== undefined &&
+    a.s3_driver !== b.s3_driver
+  )
+    return false;
+  return true;
+}
+
+/**
+ * Prefer the next older complete run with the same shape; else the next older
+ * complete run. `runs` should be the unfiltered catalog (newest first) so a
+ * status/source filter cannot hide the real previous match.
+ */
+export function previousRun(runs: CatalogRun[], id: string): CatalogRun | null {
+  const idx = runs.findIndex((r) => r.id === id);
+  if (idx < 0) return null;
+  const cur = runs[idx];
+  const older = runs.slice(idx + 1).filter((r) => r.status === "complete");
+  const shaped = older.find((r) => sameRunShape(r, cur));
+  return shaped ?? older[0] ?? null;
+}

@@ -6,6 +6,7 @@ import { formatNumber as fmt } from "../utils/metrics";
 import {
   catalogQuery,
   maxCompare,
+  previousRun,
   runSettings,
   toggleSelection,
   type CatalogFilters,
@@ -29,6 +30,7 @@ export function Catalog({
     status: "",
   });
   const [data, setData] = useState<CatalogList | null>(null);
+  const [allRuns, setAllRuns] = useState<CatalogRun[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
@@ -64,6 +66,25 @@ export function Catalog({
       clearTimeout(timer);
     };
   }, [filters, version]);
+  // Unfiltered snapshot for "Compare with previous" so a status/source filter
+  // cannot hide the next older complete match.
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(catalogQuery({ q: "", source: "", status: "" }), {
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (r) => {
+        const body = await r.json();
+        if (!r.ok) throw new Error(body.error ?? "Could not read results.");
+        if (controller.signal.aborted) return;
+        setAllRuns((body as CatalogList).runs ?? []);
+      })
+      .catch(() => {
+        /* filtered list still works; previous-run just falls back below */
+      });
+    return () => controller.abort();
+  }, [version]);
   const effectiveBaseline = selected.includes(baseline)
     ? baseline
     : (selected[0] ?? "");
@@ -139,7 +160,11 @@ export function Catalog({
         </label>
         <p className="form-help">
           Select 2–{maxCompare} runs to compare; the baseline is the run the
-          others are checked against.
+          others are checked against. "Compare with previous" pairs this run
+          with the next older complete run that shares the same workload, object
+          size, threads, and (when recorded) object count, host count, and S3
+          driver — not an SPT product version. Falls back to the next older
+          complete run when no shape match exists.
         </p>
       </section>
       {error && (
@@ -179,11 +204,18 @@ export function Catalog({
                     full={selected.length >= maxCompare}
                     isBaseline={effectiveBaseline === run.id}
                     open={open === run.id}
+                    previous={previousRun(
+                      allRuns.length ? allRuns : runs,
+                      run.id,
+                    )}
                     onToggle={() =>
                       setSelected((s) => toggleSelection(s, run.id))
                     }
                     onBaseline={() => setBaseline(run.id)}
                     onOpen={() => setOpen(open === run.id ? "" : run.id)}
+                    onComparePrevious={(prevId) =>
+                      onCompare([run.id, prevId], prevId)
+                    }
                   />
                 ))}
               </tbody>
@@ -214,18 +246,22 @@ function CatalogRow({
   full,
   isBaseline,
   open,
+  previous,
   onToggle,
   onBaseline,
   onOpen,
+  onComparePrevious,
 }: {
   run: CatalogRun;
   checked: boolean;
   full: boolean;
   isBaseline: boolean;
   open: boolean;
+  previous: CatalogRun | null;
   onToggle: () => void;
   onBaseline: () => void;
   onOpen: () => void;
+  onComparePrevious: (prevId: string) => void;
 }) {
   return (
     <>
@@ -280,10 +316,19 @@ function CatalogRow({
             <span className="subtle">No phase totals</span>
           )}
         </td>
-        <td>
+        <td className="catalog-row-actions">
           <button aria-expanded={open} onClick={onOpen}>
             {open ? "Hide" : "Details"}
           </button>
+          {run.status === "complete" && previous && (
+            <button
+              type="button"
+              title={`Compare with ${previous.name || previous.id}`}
+              onClick={() => onComparePrevious(previous.id)}
+            >
+              Compare with previous
+            </button>
+          )}
         </td>
       </tr>
       {open && (

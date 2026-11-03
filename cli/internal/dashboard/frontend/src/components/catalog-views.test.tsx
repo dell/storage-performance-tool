@@ -429,4 +429,39 @@ describe("NodeTable", () => {
     const { container } = render(<NodeTable nodes={[]} />);
     expect(container.innerHTML).toBe("");
   });
+
+
+  it("offers Compare with previous for a complete run with an older match", async () => {
+    const onCompare = vi.fn();
+    stubFetch(() => ({
+      root: "/tmp/results",
+      runs: [
+        run("newer", {
+          started_at: "2026-10-22T12:00:00Z",
+          workload: "create",
+          object_size: "1MB",
+          threads: 4,
+        }),
+        run("older", {
+          started_at: "2026-10-21T12:00:00Z",
+          workload: "create",
+          object_size: "1MB",
+          threads: 4,
+        }),
+      ],
+      total: 2,
+      truncated: false,
+      read_only: true,
+    }));
+    render(<Catalog onCompare={onCompare} />);
+    expect(
+      await screen.findByRole("button", { name: "Compare with previous" }),
+    ).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Compare with previous" }),
+    );
+    expect(onCompare).toHaveBeenCalledWith(["newer", "older"], "older");
+  });
+
+
 });

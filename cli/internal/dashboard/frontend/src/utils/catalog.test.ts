@@ -9,9 +9,11 @@ import {
   maxCompare,
   overlayExtent,
   phasesOf,
+  previousRun,
   runWorkloadType,
   regressionCount,
   runSettings,
+  sameRunShape,
   segments,
   toggleSelection,
   workloadLabel,
@@ -155,5 +157,74 @@ describe("labels", () => {
       "write-verify · 25 × 1MiB · 1 thread · 2 hosts",
     );
     expect(runSettings({} as CatalogRun)).toBe("Settings not recorded");
+  });
+});
+
+const cat = (id: string, over: Partial<CatalogRun> = {}): CatalogRun => ({
+  id,
+  name: id,
+  source: "cli",
+  status: "complete",
+  integrity: "passed",
+  started_at: "2026-10-16T22:02:30Z",
+  workload: "write-verify",
+  object_size: "1MiB",
+  object_count: 25,
+  threads: 1,
+  host_count: 1,
+  s3_driver: "s3",
+  phases: [],
+  issues: [],
+  modified_at: "2026-10-16T22:03:00Z",
+  ...over,
+});
+
+describe("previousRun", () => {
+  it("prefers the next older complete run with the same shape", () => {
+    const runs = [
+      cat("new"),
+      cat("partial", { status: "partial" }),
+      cat("same-shape"),
+      cat("other-shape", { threads: 4 }),
+    ];
+    expect(previousRun(runs, "new")?.id).toBe("same-shape");
+  });
+  it("falls back to the next older complete run when shapes differ", () => {
+    const runs = [cat("new", { threads: 8 }), cat("only", { threads: 1 })];
+    expect(previousRun(runs, "new")?.id).toBe("only");
+  });
+  it("still finds a match that a status filter would have removed from the view", () => {
+    const all = [
+      cat("visible-partial", { status: "partial" }),
+      cat("hidden-complete"),
+    ];
+    // Filtered UI might only show partial runs; previousRun still sees all.
+    expect(previousRun(all, "visible-partial")?.id).toBe("hidden-complete");
+  });
+  it("treats optional fields as shape only when both sides define them", () => {
+    expect(
+      sameRunShape(
+        cat("a", { object_count: 25 }),
+        cat("b", { object_count: 25 }),
+      ),
+    ).toBe(true);
+    expect(
+      sameRunShape(
+        cat("a", { object_count: 25 }),
+        cat("b", { object_count: 100 }),
+      ),
+    ).toBe(false);
+    expect(
+      sameRunShape(
+        cat("a", { host_count: undefined }),
+        cat("b", { host_count: 2 }),
+      ),
+    ).toBe(true);
+    expect(
+      sameRunShape(
+        cat("a", { s3_driver: "s3" }),
+        cat("b", { s3_driver: "atmos" }),
+      ),
+    ).toBe(false);
   });
 });
