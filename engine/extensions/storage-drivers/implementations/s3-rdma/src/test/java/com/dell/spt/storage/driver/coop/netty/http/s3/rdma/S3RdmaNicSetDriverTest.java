@@ -346,6 +346,22 @@ final class S3RdmaNicSetDriverTest {
 		assertEquals(0, run.nic(0).pool.invalidReturns.sum());
 	}
 
+	@Test
+	void aPartWhosePreparationFailsOnceWithNoFallbackIsRetriedAndTheUploadCompletes() throws Exception {
+		// Per-operation buffers: a pool's DEBUG diagnostic would make a token of its own.
+		final var run = started(RdmaNicLoopback.root(rdma(false, false, 1), stub.listeners(1), NICS.subList(0, 1), 1));
+		stub.transport(0).setFailNextTokens(1);
+
+		assertTrue(run.driver().put(upload("prepare-fails-once", 2048, 1)));
+		// This completion bypasses finishResponse(), so it settles the part itself, or the retry leaves
+		// the parent waiting for ever and the upload never completes.
+		awaitUpload(run);
+
+		assertEquals(1, run.nic(0).stats.prepareFailed.sum());
+		assertEquals(2048, stub.object(BUCKET + "/prepare-fails-once").length);
+		run.awaitIdle();
+	}
+
 	// ---------- NIC pools ----------
 
 	@Test

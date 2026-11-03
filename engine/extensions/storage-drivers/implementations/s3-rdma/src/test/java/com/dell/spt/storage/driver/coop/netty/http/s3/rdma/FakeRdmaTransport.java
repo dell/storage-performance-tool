@@ -48,6 +48,7 @@ public class FakeRdmaTransport extends RdmaTransport {
 
 	/** When true, generateToken() returns null. */
 	private volatile boolean failTokenGeneration;
+	private final AtomicInteger failNextTokens = new AtomicInteger();
 
 	/** When true, init() fails and the transport stays unavailable. */
 	private volatile boolean failInit;
@@ -122,7 +123,7 @@ public class FakeRdmaTransport extends RdmaTransport {
 
 	@Override
 	public String generateToken(final long mrHandle, final int size) {
-		if (!available || mrHandle == 0 || failTokenGeneration) {
+		if (!available || mrHandle == 0 || failTokenGeneration || failNextTokens.getAndUpdate(n -> Math.max(0, n - 1)) > 0) {
 			return null;
 		}
 		callsInFlight.incrementAndGet();
@@ -251,6 +252,11 @@ public class FakeRdmaTransport extends RdmaTransport {
 	/** The next n registerBuffer() calls return 0 (failure); the calls after them succeed. */
 	public void setFailNextRegistrations(final int n) {
 		this.failNextRegistrations.set(n);
+	}
+
+	/** The next n generateToken() calls return null; the calls after them succeed. */
+	public void setFailNextTokens(final int n) {
+		this.failNextTokens.set(n);
 	}
 
 	/** When true, generateToken() always returns null. */

@@ -117,7 +117,10 @@ func renderChecks(w io.Writer, engine Engine, steps []nicplan.PoolStep) {
 	}
 	_, _ = fmt.Fprintf(w, "  Checks at %s: each pool within its budget: %s (needs %s); the process limit: %s (needs %s); the steps need %s\n",
 		formatForJVM(at), passOrShort(at >= pools), format(pools), passOrShort(at >= process), format(process), format(limit))
-	_, _ = fmt.Fprintf(w, "  Pools hold: %s, which is what capacity is compared with\n", format(held))
+	// Only a value the CLI sizes is decided by this comparison.
+	if engine.Mode == ModeSized {
+		_, _ = fmt.Fprintf(w, "  Pools hold: %s, which is what capacity is compared with\n", format(held))
+	}
 }
 
 func passOrShort(passed bool) string {

@@ -1435,10 +1435,14 @@ RDMA pools on rdma1 (shortfall: fail):
     Driver 1 PUT: 1GiB in the 1GiB class, from --object-size
       NIC ens1f0np0: minimum 24, cap 25, need 24GiB (24 x 1GiB)
       NIC ens2f0np0: minimum 24, cap 25, need 24GiB (24 x 1GiB)
+      NIC ens3f0np0: minimum 24, cap 25, need 24GiB (24 x 1GiB)
+      NIC ens4f0np0: minimum 24, cap 25, need 24GiB (24 x 1GiB)
   Step read: needs 192GiB
     Driver 1 GET: 1GiB in the 1GiB class, from seed
       NIC ens1f0np0: minimum 24, cap 25, need 24GiB (24 x 1GiB)
       NIC ens2f0np0: minimum 24, cap 25, need 24GiB (24 x 1GiB)
+      NIC ens3f0np0: minimum 24, cap 25, need 24GiB (24 x 1GiB)
+      NIC ens4f0np0: minimum 24, cap 25, need 24GiB (24 x 1GiB)
   Checks at 192g: each pool within its budget: passes (needs 192GiB); the process limit: passes (needs 104GiB); the steps need 192GiB
   Pools hold: 96GiB, which is what capacity is compared with
   Capacity: 1016GiB from host memory of 1024GiB, less 4GiB heap and a 4GiB reserve
@@ -1446,7 +1450,7 @@ RDMA pools on rdma1 (shortfall: fail):
   Pre-warm: makes 96GiB resident
 ```
 
-Each step shows each driver's demand: zero, known or unknown, with where its sizes came from: the setting, the file, or the step that writes the file. The checks are given at the value the engine would run with: the one the CLI would set, the one in `SPT_JAVA_OPTS`, or the shipped default. With `--attach-existing`, a worker's limit is its own, so verify says only its engine can check it. A short pool fails verification under `--rdma-pool-shortfall=fail`, the default, and warns under `warn`. Without a NIC set, without `--use-rdma` or without those flags, verify shows none of these lines. See [S3-RDMA with a NIC set](S3_RDMA.md#nic-sets) for the rules.
+Each step shows each driver's demand: zero, known or unknown, with where its sizes came from: the setting, the file, or the step that writes the file. The checks are given at the value the engine would run with: the one the CLI would set, the one in `SPT_JAVA_OPTS`, or the shipped default. With `--attach-existing`, a worker's limit is its own, so verify says only its engine can check it. A short pool fails verification under `--rdma-pool-shortfall=fail`, the default, and warns under `warn`. Pools that fit under a limit above the capacity warn under either, and never fail it. Without a NIC set, without `--use-rdma` or without those flags, verify shows none of these lines. See [S3-RDMA with a NIC set](S3_RDMA.md#nic-sets) for the rules.
 
 ### Output Interpretation
 

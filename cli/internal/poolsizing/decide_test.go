@@ -332,6 +332,21 @@ func TestTheSharedResponseComposesAsTheEngineMeant(t *testing.T) {
 	}
 }
 
+func TestOnlyASizedEngineSaysWhatCapacityIsComparedWith(t *testing.T) {
+	out := output(capacityOf(120*gib, "MemTotal"), holding("read", 192*gib, 96*gib))
+	explicit := Decide(DecideInput{Host: "h", SptJavaOpts: "-XX:MaxDirectMemorySize=300g", Output: out})
+	var text strings.Builder
+	renderChecks(&text, explicit, out.PoolDemand.Steps)
+	if strings.Contains(text.String(), "Pools hold") {
+		t.Fatalf("an explicit value is compared with nothing: %q", text.String())
+	}
+	text.Reset()
+	renderChecks(&text, Decide(DecideInput{Host: "h", Output: out}), out.PoolDemand.Steps)
+	if !strings.Contains(text.String(), "Pools hold: 96GiB") {
+		t.Fatalf("%q", text.String())
+	}
+}
+
 func TestRenderSaysSoWhenNoCapacityWasRead(t *testing.T) {
 	var text strings.Builder
 	renderCapacity(&text, &CapacityRecord{EffectiveBytes: -1, MemoryBytes: -1, Source: "MemTotal", HeapBytes: 4 * gib, ReserveBytes: 4 * gib})
