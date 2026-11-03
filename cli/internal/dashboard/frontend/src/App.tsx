@@ -397,6 +397,7 @@ export default function App() {
                   mode === "guided" ? fields.map((f) => f.key) : selection
                 }
                 onConfigure={() => setPage("configure")}
+                onRefresh={() => refresh()}
               />
               {mode === "expert" && customizing && (
                 <div
@@ -505,15 +506,41 @@ function Dashboard({
   onConfigure,
   historical = false,
   onBackHistory,
+  onRefresh,
 }: {
   state: State | null;
   selected: string[];
   onConfigure: () => void;
   historical?: boolean;
   onBackHistory?: () => void;
+  onRefresh?: () => Promise<void>;
 }) {
   const m = state?.metrics,
     job = state?.job;
+  const [stopping, setStopping] = useState(false);
+  const [stopError, setStopError] = useState("");
+  const canStop = !historical && job?.status === "running";
+  const stopPending = stopping || !!job?.stop_requested;
+  async function stop() {
+    if (!canStop || stopPending) return;
+    if (
+      !window.confirm(
+        "Stop this run? It ends now and won't finish its remaining phases.",
+      )
+    )
+      return;
+    setStopping(true);
+    setStopError("");
+    try {
+      const r = await fetch("/api/runs/stop", { method: "POST" });
+      await readJSON(r, "Stop request failed.");
+      await onRefresh?.();
+    } catch (e) {
+      setStopError(e instanceof Error ? e.message : "Could not stop the run.");
+    } finally {
+      setStopping(false);
+    }
+  }
   const summaries = m?.phase_summaries ?? [];
   const history =
     m?.chart_samples ?? (m?.is_aggregate ? [] : (m?.samples ?? []));
@@ -604,11 +631,21 @@ function Dashboard({
               Download CSV report
             </a>
           )}
+          {canStop && (
+            <button onClick={stop} disabled={stopPending}>
+              {stopPending ? "Stopping…" : "Stop run"}
+            </button>
+          )}
           <button className="primary" onClick={onConfigure}>
             ＋ Configure run
           </button>
         </div>
       </div>
+      {stopError && (
+        <div className="error" role="alert">
+          {stopError}
+        </div>
+      )}
       {!job && !m ? (
         <section className="panel empty-state">
           <div className="empty-icon">◫</div>
