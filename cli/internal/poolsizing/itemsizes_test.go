@@ -63,7 +63,7 @@ func TestEverySharedFixtureGivesTheEnginesSummary(t *testing.T) {
 // The summary goes on command lines and into shared run metadata.
 func TestAMalformedItemsContentAndTheHostPathStayOutOfTheSummary(t *testing.T) {
 	for name, content := range map[string]string{
-		"list.csv":     "ok-item,0,1024\nsecret-key,not-a-number\n",
+		"list.csv":     "ok-item,0,1024,0/0\nsecret-key,not-a-number\n",
 		"manifest.csv": manifestHeaderLine() + "\nbucket,secret-key,bad-size,x\n",
 	} {
 		path := filepath.Join(t.TempDir(), name)
@@ -77,6 +77,13 @@ func TestAMalformedItemsContentAndTheHostPathStayOutOfTheSummary(t *testing.T) {
 		if strings.Contains(sizes.Detail, "secret-key") || sizes.Source != name {
 			t.Fatalf("%s: %+v", name, sizes)
 		}
+	}
+}
+
+func TestAFileErrorLeavesOutTheHostPath(t *testing.T) {
+	sizes := ReadItemSizes(filepath.Join(t.TempDir(), "private-directory", "items.csv"), time.Minute)
+	if sizes.Reason != reasonRead || strings.Contains(sizes.Detail, "private-directory") || sizes.Source != "items.csv" {
+		t.Fatalf("%+v", sizes)
 	}
 }
 

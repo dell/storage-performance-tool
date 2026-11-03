@@ -41,6 +41,10 @@ func (p Plan) Render(w io.Writer) {
 		if engine.Mode == ModeNoNicSet {
 			continue
 		}
+		if engine.Mode == ModeAttached {
+			_, _ = fmt.Fprintf(w, "%s\n", engine.Message)
+			continue
+		}
 		_, _ = fmt.Fprintf(w, "RDMA pools on %s (shortfall: %s):\n", engine.Host, engine.ShortfallMode)
 		output := p.Outputs[engine.Host]
 		if output != nil && output.PoolDemand != nil {
@@ -106,12 +110,9 @@ func renderChecks(w io.Writer, engine Engine, steps []nicplan.PoolStep) {
 		limit = maximum(limit, step.LimitBytes)
 	}
 	at := engine.PassedBytes
-	if at == 0 && engine.Mode != ModeAttached {
+	// Only an engine left at the shipped default runs at the floor: zero can be a user's own value.
+	if at == 0 && engine.Mode != ModeExplicit {
 		at = FloorBytes
-	}
-	if engine.Mode == ModeAttached {
-		_, _ = fmt.Fprintf(w, "  Checks: its engine runs them against its own limit; the steps need %s\n", format(limit))
-		return
 	}
 	_, _ = fmt.Fprintf(w, "  Checks at %s: each pool within its budget: %s (needs %s); the process limit: %s (needs %s); the steps need %s\n",
 		formatForJVM(at), passOrShort(at >= pools), format(pools), passOrShort(at >= process), format(process), format(limit))

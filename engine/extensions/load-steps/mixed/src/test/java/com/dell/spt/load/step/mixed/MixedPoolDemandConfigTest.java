@@ -67,6 +67,32 @@ final class MixedPoolDemandConfigTest {
 		}
 	}
 
+	/** The participant's flag decides: a read step's PUTs count only for a mixed step. */
+	@Test
+	void aMixedParticipantsDemandComesFromItsWeights() throws Exception {
+		final var config = config();
+		config.val("load-op-type", "read");
+		assertTrue(requiredLimit(config, true) > 0, "its PUTs have a known size");
+		assertEquals(0, requiredLimit(config, false), "a plain read of a file that cannot be read knows nothing");
+	}
+
+	private static long requiredLimit(final Config config, final boolean mixed) throws Exception {
+		final var driver = org.mockito.Mockito.mock(com.dell.spt.base.storage.driver.PoolDemandDriver.class);
+		org.mockito.Mockito.when(driver.poolLayout()).thenReturn(new com.dell.spt.base.storage.driver.PoolDemandDriver.Layout(
+						"host-a", 512 * GIB, 8, 1L << 20, 0, 0, false, List.of("a", "b")));
+		org.mockito.Mockito.when(driver.startPrewarm(org.mockito.ArgumentMatchers.any())).thenAnswer(call -> {
+			final List<com.dell.spt.base.storage.driver.PoolDemandDriver.PrewarmOrder> orders = call.getArgument(0);
+			return orders.stream().map(order -> java.util.concurrent.CompletableFuture.completedFuture(
+							new com.dell.spt.base.storage.driver.PoolDemandDriver.PrewarmResult(order.nic(), order.buffers(), 1, null, false))).toList();
+		});
+		final var preparation = org.mockito.Mockito.mock(com.dell.spt.base.storage.driver.AdmissionPreparable.Preparation.class);
+		org.mockito.Mockito.when(preparation.deadlineNanos()).thenReturn(System.nanoTime() + 60_000_000_000L);
+		return com.dell.spt.base.nic.pool.PoolPreparation.run("step-1",
+						List.of(new com.dell.spt.base.nic.pool.PoolPreparation.Participant(0, driver, config, mixed)), preparation,
+						new com.dell.spt.base.nic.pool.PoolPreparation.Environment(System::nanoTime, name -> null))
+						.requiredLimitBytes();
+	}
+
 	@Test
 	void aMixedDriverHasItsListedGetsAndItsPuts() throws Exception {
 		final var operations = PoolDemandConfig.mixedOperations(config(), file -> summary(4L << 20));

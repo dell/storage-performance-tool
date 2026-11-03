@@ -166,6 +166,14 @@ func TestAttachedWorkersAreNotSizedButTheEntryNodeIs(t *testing.T) {
 	if plan.Engines[0].Mode != ModeSized || plan.Engines[1].Mode != ModeAttached {
 		t.Fatalf("%+v", plan.Engines)
 	}
+	if len(fake.commands) != 1 || len(fake.commands["entry"]) == 0 {
+		t.Fatalf("an attached worker is not asked, as it may not be reachable: %v", fake.commands)
+	}
+	var text strings.Builder
+	plan.Render(&text)
+	if !strings.Contains(text.String(), "wrk1 is an attached worker") || strings.Contains(text.String(), "No estimate") {
+		t.Fatal(text.String())
+	}
 }
 
 func TestLaunchOptionsAreKeptPerHostAndForTheLocalManager(t *testing.T) {

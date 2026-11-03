@@ -191,6 +191,39 @@ final class ItemInputFileSlicerSizesTest {
 		}
 	}
 
+	/** Only the check after the last write sees this: the file ends without another batch. */
+	@Test
+	void theLastWriteCrossingTheBudgetLeavesTheSummaryUnknown(@TempDir final Path dir) throws Exception {
+		final var slices = new Slices();
+		final var configs = List.of(slice("a"));
+		final var time = new AtomicLong();
+		final var recording = new ItemSizeRecording(1, time::get);
+		final var manager = slices.manager();
+		org.mockito.Mockito.doAnswer(call -> {
+			time.set(10);
+			slices.written.computeIfAbsent(call.getArgument(0), ignored -> new java.io.ByteArrayOutputStream()).writeBytes(call.getArgument(1));
+			return null;
+		}).when(manager).writeToFile(anyString(), any());
+		try (final var input = csv(dir, lines(4 << 20));
+						final var slicer = new ItemInputFileSlicer("step", List.of(manager), configs, input, 1, false, recording)) {
+			final var summary = summaryOf(configs.get(0));
+			assertFalse(summary.complete());
+			assertEquals(ItemSizeSummary.Reason.BUDGET_EXPIRED, summary.reason());
+			assertEquals(1, readItems(slices.written.get("slice-0").toByteArray()), "the workload record was written");
+		}
+	}
+
+	/** A mixed step's slices record by its GET weight, which this schema does not have, whatever its op type. */
+	@Test
+	void aMixedStepsSliceDoesNotRecordByItsOpType(@TempDir final Path dir) throws Exception {
+		final var slices = new Slices();
+		final var configs = List.of(slice("a"));
+		try (final var input = csv(dir, lines(4 << 20));
+						final var slicer = new ItemInputFileSlicer("step", List.of(slices.manager()), configs, input, 1, false, NO_LIMIT.asMixed())) {
+			assertFalse(hasSummary(configs.get(0)));
+		}
+	}
+
 	private static int readItems(final byte[] bytes) throws Exception {
 		final var items = new ArrayList<Object>();
 		try (final var in = new ObjectInputStream(new ByteArrayInputStream(bytes))) {

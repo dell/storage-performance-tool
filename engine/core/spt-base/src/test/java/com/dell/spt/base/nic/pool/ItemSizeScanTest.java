@@ -1,5 +1,9 @@
 package com.dell.spt.base.nic.pool;
 
+import java.util.List;
+import com.github.akurilov.commons.io.Input;
+import com.dell.spt.base.item.Item;
+import java.util.concurrent.atomic.AtomicBoolean;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -106,24 +110,43 @@ final class ItemSizeScanTest {
 		assertEquals(ItemSizeSummary.Reason.BUDGET_EXPIRED, summary.reason());
 	}
 
+	/** A read that crosses the budget only as it ends, or as it closes, which no check inside the read sees. */
 	@Test
-	void aFileThatEndsPastTheBudgetIsStillIncomplete() {
-		final var file = FIXTURES.resolve("item-files/one-class.csv");
-		final long now = System.nanoTime();
-		final var calls = new java.util.concurrent.atomic.AtomicInteger();
-		// Every check inside the read passes; only the one at the end of the file sees the budget gone.
-		final int checksInTheRead = checksOf(file);
-		final var summary = ItemSizeScan.scan(file.toString(), ITEMS, now + 1,
-						() -> calls.getAndIncrement() < checksInTheRead ? now : now + 2);
-		assertFalse(summary.complete());
-		assertEquals(ItemSizeSummary.Reason.BUDGET_EXPIRED, summary.reason());
-	}
+	void aFileThatEndsOrClosesPastTheBudgetIsStillIncomplete() {
+		for (final boolean atClose : new boolean[]{false, true
+		}) {
+			final long now = 1_000;
+			final var late = new AtomicBoolean();
+			final Input<Item> input = new Input<>() {
+				@Override
+				public Item get() {
+					return null;
+				}
 
-	/** How many times a read of the file checks the clock before its last check. */
-	private static int checksOf(final Path file) {
-		final var calls = new java.util.concurrent.atomic.AtomicInteger();
-		ItemSizeScan.scan(file.toString(), ITEMS, Long.MAX_VALUE, calls::getAndIncrement);
-		return calls.get() - 1;
+				@Override
+				public int get(final List<Item> buffer, final int limit) {
+					late.compareAndSet(false, !atClose);
+					return -1;
+				}
+
+				@Override
+				public long skip(final long count) {
+					return 0;
+				}
+
+				@Override
+				public void reset() {}
+
+				@Override
+				public void close() {
+					late.set(true);
+				}
+			};
+			final var summary = ItemSizeScan.scan(
+							input, new ItemSizeSummary.Recorder("items.csv"), now + 1, () -> late.get() ? now + 2 : now);
+			assertFalse(summary.complete(), "at close: " + atClose);
+			assertEquals(ItemSizeSummary.Reason.BUDGET_EXPIRED, summary.reason());
+		}
 	}
 
 	@Test

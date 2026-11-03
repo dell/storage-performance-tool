@@ -259,6 +259,42 @@ func TestAWriteVerifyReadIsSizedForWholeObjects(t *testing.T) {
 	}
 }
 
+func anyFile(path string) ItemSizes {
+	return ItemSizes{Source: path, Complete: true}
+}
+
+func TestADefaultsThresholdReachesEveryStepThatInheritsIt(t *testing.T) {
+	params := rdmaParams("mixed")
+	params.GetDistrib, params.PutDistrib = 1, 1
+	params.EngineOverrides = []string{"item.data.ranges.threshold=64MiB"}
+	request := BuildRequest(params, stepsOf("seed", "mixed"), noFiles)
+	for _, operation := range request.Steps[1].Drivers[0].Operations {
+		if operation.PartBytes != 64*mib {
+			t.Fatalf("a mixed step inherits it: %+v", operation)
+		}
+	}
+	fromFile := rdmaParams("read")
+	fromFile.ItemsFile = "items.csv"
+	fromFile.EngineOverrides = params.EngineOverrides
+	if read := BuildRequest(fromFile, stepsOf("read"), anyFile).Steps[0].Drivers[0].Operations[0]; read.PartBytes != 64*mib {
+		t.Fatalf("a read from a file inherits it: %+v", read)
+	}
+}
+
+func TestTemplatesThatNameNoPartSizeIgnoreTheFlag(t *testing.T) {
+	deleting := rdmaParams("delete")
+	deleting.PartSize = "64MiB"
+	if seed := BuildRequest(deleting, stepsOf("seed", "delete"), noFiles).Steps[0].Drivers[0].Operations[0]; seed.PartBytes != 0 {
+		t.Fatalf("a seeded delete's seed: %+v", seed)
+	}
+	fromFile := rdmaParams("read")
+	fromFile.ItemsFile = "items.csv"
+	fromFile.PartSize = "64MiB"
+	if read := BuildRequest(fromFile, stepsOf("read"), anyFile).Steps[0].Drivers[0].Operations[0]; read.PartBytes != 0 {
+		t.Fatalf("a read from a file: %+v", read)
+	}
+}
+
 func TestASizeRangeAndARangedReadPassThrough(t *testing.T) {
 	params := rdmaParams("write")
 	params.ObjectSize = "1MiB-4MiB"

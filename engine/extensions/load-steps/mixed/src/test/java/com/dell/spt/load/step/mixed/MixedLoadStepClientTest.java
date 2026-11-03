@@ -282,6 +282,19 @@ class MixedLoadStepClientTest {
 	}
 
 	@Test
+	@DisplayName("the client marks its item size recording as a mixed step's")
+	void testItemSizeRecordingIsMarkedMixed() throws Exception {
+		final MixedLoadStepClient client = new MixedLoadStepClient(
+						newBaseConfig(), Collections.<Extension> emptyList(), Collections.emptyList(), null);
+		final var method = com.dell.spt.base.load.step.client.LoadStepClientBase.class.getDeclaredMethod(
+						"stepItemSizeRecording", com.dell.spt.base.nic.pool.ItemSizeRecording.class);
+		method.setAccessible(true);
+		final var marked = (com.dell.spt.base.nic.pool.ItemSizeRecording) method.invoke(
+						client, new com.dell.spt.base.nic.pool.ItemSizeRecording(1, () -> 0L));
+		assertTrue(marked.mixed());
+	}
+
+	@Test
 	@DisplayName("config(Map) returns a new MixedLoadStepClient with updated step ID")
 	void testCopyViaConfig() {
 		final Config cfg = newBaseConfig();

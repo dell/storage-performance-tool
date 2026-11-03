@@ -42,6 +42,12 @@ public final class ItemSizeScan {
 			recorder.fail(ItemSizeSummary.Reason.READ_FAILED, "it cannot be opened");
 			return recorder.summary();
 		}
+		return scan(input, recorder, deadlineNanos, nanoTime);
+	}
+
+	/** Reads and closes {@code input}. The budget is checked last, so a summary past it is never used, even if the file ended. */
+	static <I extends Item> ItemSizeSummary scan(
+					final Input<I> input, final ItemSizeSummary.Recorder recorder, final long deadlineNanos, final LongSupplier nanoTime) {
 		try (input) {
 			read(input, recorder, deadlineNanos, nanoTime);
 		} catch (final IllegalArgumentException | IndexOutOfBoundsException e) {
@@ -50,6 +56,10 @@ public final class ItemSizeScan {
 		} catch (final Exception e) {
 			recorder.fail(ItemSizeSummary.Reason.READ_FAILED, e.toString());
 		}
+		if (nanoTime.getAsLong() - deadlineNanos >= 0) {
+			recorder.fail(ItemSizeSummary.Reason.BUDGET_EXPIRED, null);
+		}
+		finish(input, recorder);
 		return recorder.summary();
 	}
 
@@ -71,12 +81,10 @@ public final class ItemSizeScan {
 					throw e;
 				}
 				recordEach(batch, recorder);
-				finishWithinBudget(input, recorder, deadlineNanos, nanoTime);
 				return;
 			}
 			recordEach(batch, recorder);
 			if (count <= 0) {
-				finishWithinBudget(input, recorder, deadlineNanos, nanoTime);
 				return;
 			}
 		}
@@ -100,16 +108,6 @@ public final class ItemSizeScan {
 	 * CSV input returns no items at a malformed line as it does at its end, and the status tells them
 	 * apart.
 	 */
-	/** A summary that took longer than its budget is never used, even if the file ended. */
-	private static void finishWithinBudget(
-					final Object input, final ItemSizeSummary.Recorder recorder, final long deadlineNanos, final LongSupplier nanoTime) {
-		if (nanoTime.getAsLong() - deadlineNanos >= 0) {
-			recorder.fail(ItemSizeSummary.Reason.BUDGET_EXPIRED, null);
-			return;
-		}
-		finish(input, recorder);
-	}
-
 	public static void finish(final Object input, final ItemSizeSummary.Recorder recorder) {
 		if (input instanceof ItemInputStatus status && status.malformedItems() > 0) {
 			recorder.fail(ItemSizeSummary.Reason.MALFORMED_ITEM, firstLine(status.firstMalformedItem()));

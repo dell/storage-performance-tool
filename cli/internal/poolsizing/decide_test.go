@@ -106,6 +106,14 @@ func TestAnExplicitZeroDirectLimitIsStillTheUsersChoice(t *testing.T) {
 	}
 }
 
+func TestChecksAtAnExplicitZeroLimitAreNotShownAtTheFloor(t *testing.T) {
+	var text strings.Builder
+	renderChecks(&text, Engine{Mode: ModeExplicit}, nil)
+	if strings.Contains(text.String(), format(FloorBytes)) {
+		t.Fatal(text.String())
+	}
+}
+
 func TestAnExplicitValueStaysAndItsDemandIsStillRecorded(t *testing.T) {
 	engine := Decide(DecideInput{Host: "h", SptJavaOpts: "-XX:+UseZGC -XX:MaxDirectMemorySize=128g", Output: output(capacityOf(1024*gib, "MemTotal"), step("read", 192*gib))})
 	if engine.Mode != ModeExplicit || engine.ExplicitBytes != 128*gib || engine.CalculatedBytes != 0 || engine.NeedBytes != 192*gib {

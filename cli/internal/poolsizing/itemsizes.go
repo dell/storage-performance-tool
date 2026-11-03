@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/bits"
 	"os"
 	"path/filepath"
@@ -116,13 +117,13 @@ func ReadItemSizes(path string, budget time.Duration) ItemSizes {
 	}
 	file, err := os.Open(path) // #nosec G304 -- the user's own --items-file, read on the user's own host.
 	if err != nil {
-		return finish(nil, reasonRead, err.Error())
+		return finish(nil, reasonRead, withoutPath(err))
 	}
 	defer func() { _ = file.Close() }()
 
 	manifest, err := hasManifestHeader(file)
 	if err != nil {
-		return finish(nil, reasonRead, err.Error())
+		return finish(nil, reasonRead, withoutPath(err))
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return finish(nil, reasonRead, err.Error())
@@ -264,4 +265,13 @@ func itemLineSize(line string) (int64, error) {
 		}
 	}
 	return size, nil
+}
+
+// withoutPath gives a file error's reason without the host path it names.
+func withoutPath(err error) string {
+	var pathError *fs.PathError
+	if errors.As(err, &pathError) {
+		return pathError.Err.Error()
+	}
+	return err.Error()
 }

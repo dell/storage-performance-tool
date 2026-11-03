@@ -62,6 +62,18 @@ final class PoolDemandRequestTest {
 		assertEquals(1L << 28, MemoryCapacity.read(root).bytes(), "beside an unified hierarchy without memory");
 	}
 
+	/** A container's mount is its own cgroup, so an ancestor's limit shows only in its hierarchical figure. */
+	@Test
+	void capacityReadsACgroupV1AncestorsLimitFromTheHierarchicalFigure(@TempDir final Path root) throws Exception {
+		write(root, "proc/meminfo", "MemTotal:       1048576 kB\n");
+		write(root, "proc/self/cgroup", "4:memory:/lxc/1/docker/id\n");
+		write(root, "sys/fs/cgroup/memory/memory.limit_in_bytes", "9223372036854771712\n");
+		write(root, "sys/fs/cgroup/memory/memory.stat", "cache 0\nhierarchical_memory_limit 536870912\nrss 0\n");
+		final var capacity = MemoryCapacity.read(root);
+		assertEquals(1L << 29, capacity.bytes());
+		assertEquals(MemoryCapacity.SOURCE_CGROUP, capacity.source());
+	}
+
 	@Test
 	void capacityIsTheSmallerOfMemTotalAndTheCgroupChainAndNamesItsSource(@TempDir final Path root) throws Exception {
 		write(root, "proc/meminfo", "MemTotal:       1048576 kB\nMemFree: 10 kB\n");

@@ -449,10 +449,6 @@ func GenerateDefaults(params Params) ([]byte, error) {
 	return data, nil
 }
 
-// restoreTargetBucketSet writes the validated bucket set back after engine overrides. An override
-// that replaces storage.targetBucket or storage as a whole, such as
-// storage.targetBucket={provision: false}, would drop the count or names the CLI validated.
-// Overrides that set them are rejected earlier, so the flags' values are final.
 // EffectiveDefaults gives the defaults a run's engines load, as a tree, engine overrides included.
 // A generated step's own configuration can still override them.
 func EffectiveDefaults(params Params) (map[string]any, error) {
@@ -467,6 +463,10 @@ func EffectiveDefaults(params Params) (map[string]any, error) {
 	return root, nil
 }
 
+// restoreTargetBucketSet writes the validated bucket set back after engine overrides. An override
+// that replaces storage.targetBucket or storage as a whole, such as
+// storage.targetBucket={provision: false}, would drop the count or names the CLI validated.
+// Overrides that set them are rejected earlier, so the flags' values are final.
 func restoreTargetBucketSet(data []byte, params Params) ([]byte, error) {
 	var err error
 	if params.BucketCount > 1 {

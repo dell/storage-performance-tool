@@ -249,8 +249,8 @@ func BuildRequest(params scenario.Params, steps []scenario.StepInfo, listed func
 		switch step.Op {
 		case "create", "seed":
 			part := w.partBytes()
-			if params.WorkloadType == workload.Mixed {
-				part = w.defaultPartBytes // The mixed scenario's shared configuration names no part size.
+			if params.WorkloadType == workload.Mixed || params.WorkloadType == workload.Delete {
+				part = w.defaultPartBytes // These templates' seeds name no part size.
 			}
 			writer = step.ID
 			driver = w.driver(Operation{Kind: kindCreate, PartBytes: part, Sizes: w.sizes("")})
@@ -262,7 +262,7 @@ func BuildRequest(params scenario.Params, steps []scenario.StepInfo, listed func
 				operations = append(operations, mixedRead(params, w, writer, listed))
 			}
 			if params.PutDistrib > 0 {
-				operations = append(operations, Operation{Kind: kindCreate, Sizes: w.sizes("")})
+				operations = append(operations, Operation{Kind: kindCreate, PartBytes: w.defaultPartBytes, Sizes: w.sizes("")})
 			}
 			if len(operations) > 0 {
 				driver = w.driver(operations...)
@@ -278,6 +278,7 @@ func readOperation(params scenario.Params, w effectiveWorkload, writer string, l
 	switch {
 	case params.ItemsFile != "":
 		sizes := listed(params.ItemsFile)
+		operation.PartBytes = w.defaultPartBytes // The read-from-file templates name no part size.
 		operation.Sizes = &Sizes{Listed: &sizes}
 	case writer != "":
 		operation.PartBytes = w.partBytes()
@@ -293,7 +294,7 @@ func readOperation(params scenario.Params, w effectiveWorkload, writer string, l
 }
 
 func mixedRead(params scenario.Params, w effectiveWorkload, writer string, listed func(string) ItemSizes) Operation {
-	operation := Operation{Kind: kindRead}
+	operation := Operation{Kind: kindRead, PartBytes: w.defaultPartBytes}
 	switch {
 	case params.ReadItemsFile != "":
 		sizes := listed(params.ReadItemsFile)

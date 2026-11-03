@@ -57,6 +57,12 @@ class MixedLoadStepNicSetTest {
 		final var step = new MixedLoadStepLocal(config, List.of(factory), List.of(), mock(MetricsManager.class));
 		try {
 			assertTrue(step.mixesOperations(), "Pool Demand reads this step by its weights");
+			final var context = mock(com.dell.spt.base.load.step.local.context.LoadStepContext.class);
+			when(context.poolDemandDriver()).thenReturn(mock(com.dell.spt.base.storage.driver.PoolDemandDriver.class));
+			final var participants = com.dell.spt.base.load.step.local.LoadStepLocalBase.class.getDeclaredMethod("poolParticipants", List.class);
+			participants.setAccessible(true);
+			final var list = (List<?>) participants.invoke(step, List.of(context));
+			assertTrue(((com.dell.spt.base.nic.pool.PoolPreparation.Participant) list.get(0)).mixed(), "and its participant says so");
 			final var failure = assertThrows(IllegalStateException.class, step::init);
 			assertInstanceOf(IllegalConfigurationException.class, failure.getCause());
 			assertTrue(failure.getCause().getMessage().contains("storage.net.interfaces"), failure.getCause().getMessage());
