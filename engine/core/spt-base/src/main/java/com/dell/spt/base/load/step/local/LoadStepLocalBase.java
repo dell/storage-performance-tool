@@ -319,7 +319,11 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private void stopContextsOfFence(final String stepId, final StepPreparation barrier) {
 		final var contexts = List.copyOf(stepContexts);
 		Thread.ofPlatform().daemon().name("spt-preparation-fence-" + stepId).start(() -> {
-			dropBucketMetricsOfFence(contexts);
+			try {
+				dropBucketMetricsOfFence(contexts);
+			} catch (final RuntimeException e) {
+				LogUtil.exception(Level.WARN, e, "{}: failed to free a fenced step's bucket meters", stepId);
+			}
 			barrier.runFenceActions();
 			for (final LoadStepContext stepContext : contexts) {
 				try {
@@ -568,10 +572,15 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	 * @return the recorder for the context's results, or null when bucket metrics are off for it: a
 	 *     step with one target bucket, or the off switch
 	 */
-	protected final BucketRecorder initBucketMetrics(
+	protected final synchronized BucketRecorder initBucketMetrics(
 					final Config config,
 					final MetricsContext primary,
 					final Map<OpType, MetricsContext> byOpType) {
+		// Under the monitor, either this sees the fence or the fence's drop sees these meters.
+		final StepPreparation barrier = preparation;
+		if (barrier != null && barrier.fenced()) {
+			return null;
+		}
 		// A phase that persists no totals, such as a seed, has no files for these to go beside.
 		if (TargetBucketSet.count(config) <= 1
 						|| !config.boolVal(BUCKET_METRICS_ENABLED)
@@ -628,9 +637,6 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				bucketFence.await();
 			}
 			final List<BucketContextReply> replies = new ArrayList<>(bucketContexts.size());
-			// Fenced at the admission barrier, this step's contexts never started, so they have no elapsed time.
-			final StepPreparation barrier = preparation;
-			final boolean neverAdmitted = barrier != null && !barrier.released();
 			for (final BucketContext context : bucketContexts) {
 				final BucketSteadyOutcome outcome = context.measuresWindow() ? context.cuts().outcome() : null;
 				final SteadyResult aggregateWindow = context.context().steadyResult();
@@ -638,7 +644,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				replies.add(new BucketContextReply(
 								metricsContexts.indexOf(context.context()),
 								context.meters().opType(),
-								lastSnapshot == null || neverAdmitted ? 0L : lastSnapshot.elapsedTimeMillis(),
+								lastSnapshot == null ? 0L : lastSnapshot.elapsedTimeMillis(),
 								aggregateWindow == null ? SteadyResult.NONE : aggregateWindow.startOffsetMillis(),
 								context.members(),
 								context.meters().terminalRecords(),

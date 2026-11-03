@@ -69,6 +69,11 @@ class LoadStepBucketMetricsSetupTest {
 			return context;
 		}
 
+		BucketRecorder recorderOfNewContext(final Config stepConfig) {
+			initMetrics(0, OpType.CREATE, 1, stepConfig.configVal("output").configVal("metrics"), new SizeInBytes(1), false);
+			return initBucketMetrics(stepConfig, metricsContexts.get(0), null);
+		}
+
 		void startContexts() {
 			doStartWrapped();
 		}
@@ -198,7 +203,10 @@ class LoadStepBucketMetricsSetupTest {
 		assertTrue(step.releasePreparedAdmission(7));
 		verify(manager, times(1)).register(context);
 
+		// Another slice failing to release fences this one too, but this one opened, so it keeps its data.
+		step.fencePreparation(7);
 		step.closeWindows();
+		assertEquals(1, step.metersBuilt());
 		final BucketContextReply reply = onlyReply(step);
 		assertEquals(5, reply.wholeStep().size(), "4 members and the catch-all");
 		reply.wholeStep().forEach(record -> assertEquals(0L, record.succeeded(), record.bucket()));
@@ -233,6 +241,18 @@ class LoadStepBucketMetricsSetupTest {
 		assertTrue(step.bucketMeters().isEmpty());
 		assertNull(assertTimeoutPreemptively(Duration.ofSeconds(4), () -> step.bucketMetrics(BucketMetricsRange.ALL)));
 		assertTimeoutPreemptively(Duration.ofSeconds(4), step::closeWindows, "no end pass to wait for");
+	}
+
+	/** A fence that comes first leaves no later cleanup to rely on, so setup builds nothing at all. */
+	@Test
+	void aStepAlreadyFencedBuildsNoBucketMeters() throws Exception {
+		final Config config = config(4);
+		final var step = new SetupStep(config, mock(MetricsManager.class));
+		step.startPreparation(7, TimeUnit.MILLISECONDS.toNanos(1));
+		awaitState(step, PreparationStatus.State.FENCED);
+
+		assertNull(step.recorderOfNewContext(config));
+		assertEquals(0, step.metersBuilt());
 	}
 
 	@Test
