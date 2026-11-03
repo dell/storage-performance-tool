@@ -1628,6 +1628,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			} finally {
 				stopFailureBudgetMonitor();
 				Loggers.MSG.info("{}: await for {} step slices done", loadStepId(), stepSliceCount);
+				// After pre-validation, post-verification is this client's to start, in its shutdown. A
+				// slice stopped before that has already closed its verification evidence.
+				if (standaloneDeletePreValidationEnabled() && standaloneDeletePostVerificationEnabled()) {
+					shutdown();
+				}
 				doStop();
 			}
 		}
