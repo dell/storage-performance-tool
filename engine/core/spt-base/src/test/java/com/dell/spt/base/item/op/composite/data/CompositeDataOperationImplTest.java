@@ -241,6 +241,27 @@ class CompositeDataOperationImplTest {
 		assertTrue(op.allSubOperationsDone());
 	}
 
+	/**
+	 * A part whose connection drops before any response: its completion throws, and the driver's part
+	 * retry then undoes the settlement. The count must still balance, or the upload never finishes.
+	 */
+	@Test
+	void aPartWhoseResponseNeverStartedIsStillSettled() throws Exception {
+		var op = newCompositeOp(OpType.CREATE, 2048, 1024);
+		var parts = op.subOperations();
+		assertEquals(2, parts.size());
+		var dropped = parts.get(0);
+		assertThrows(IllegalStateException.class, dropped::finishResponse);
+		op.undoMarkSubTaskCompleted(); // the retry
+
+		dropped.startResponse();
+		dropped.finishResponse();
+		assertFalse(op.allSubOperationsDone(), "the second part is still pending");
+		parts.get(1).startResponse();
+		parts.get(1).finishResponse();
+		assertTrue(op.allSubOperationsDone());
+	}
+
 	// ---------- Concurrency tests (Concurrent Map Corruption) ----------
 
 	@Test

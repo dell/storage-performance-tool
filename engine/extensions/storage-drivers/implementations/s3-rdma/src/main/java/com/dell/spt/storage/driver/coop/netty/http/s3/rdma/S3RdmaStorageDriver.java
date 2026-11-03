@@ -763,7 +763,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	 * Marks a multipart part's sub-task complete on its parent.
 	 *
 	 * <p>A part is normally settled by {@code PartialDataOperationImpl.finishResponse()}, and a part
-	 * retry undoes that mark. Completion paths that do not reach that settlement must call this
+	 * retry undoes that mark. Completion paths that bypass {@code finishResponse()} must call this
 	 * exactly once so retries and finalization keep the parent's pending count balanced.
 	 */
 	static void markPartSettled(final Operation<?> op) {
@@ -1174,11 +1174,6 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 						releaseBuffer(nic, ctx.pooled, ctx.buffer, ctx.mrHandle, false);
 						nic.stats.rdmaTimedOut.increment();
 						op.status(Operation.Status.FAIL_IO);
-						// finishResponse() throws before settling a part whose response never
-						// started; it settles it otherwise (timing may carry over from a retry).
-						if (op.respTimeStart() == 0) {
-							markPartSettled(op);
-						}
 						discardOutOfBandIntegrityRead(ctx.channel);
 						completeTimedOut(ctx.channel, (O) op);
 						reaped++;

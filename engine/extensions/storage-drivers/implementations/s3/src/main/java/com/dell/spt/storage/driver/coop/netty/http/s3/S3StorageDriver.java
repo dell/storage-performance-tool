@@ -1762,10 +1762,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				if (!beginDispatch(op)) {
 					return false;
 				}
-				// Finalization pass: all range-GETs completed. Mark the parent SUCC and
-				// propagate to the metrics/output pipeline. Duration will be measured
-				// from the initial startRequest() to this finishResponse().
-				op.status(Operation.Status.SUCC);
+				// Finalization pass: all range-GETs ended. The parent is SUCC unless a range ran
+				// out of retries, then propagate to the metrics/output pipeline. Duration will be
+				// measured from the initial startRequest() to this finishResponse().
+				final String rangeFailure = compositeReadOp.get("mpuFailure");
+				op.status(rangeFailure == null ? Operation.Status.SUCC : Operation.Status.valueOf(rangeFailure));
 				complete(null, op);
 				return true;
 			}

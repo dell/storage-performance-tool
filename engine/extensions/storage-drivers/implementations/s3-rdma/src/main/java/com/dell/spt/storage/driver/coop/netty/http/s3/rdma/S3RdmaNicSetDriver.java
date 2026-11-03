@@ -897,10 +897,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 			}
 			final var lifecycle = op.lifecycle();
 			op.status(Operation.Status.FAIL_IO);
-			// finishResponse() throws before settling a part whose response never started.
-			if (op.respTimeStart() == 0) {
-				markPartSettled(op);
-			}
+			// finishResponse() settles a part, with or without a response.
 			completeQuietly(null, op);
 			if (terminal(lifecycle)) {
 				row.failed();

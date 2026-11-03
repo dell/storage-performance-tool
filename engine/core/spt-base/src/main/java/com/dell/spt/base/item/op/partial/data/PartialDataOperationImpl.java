@@ -67,7 +67,11 @@ public class PartialDataOperationImpl<I extends DataItem> extends DataOperationI
 
 	@Override
 	public final void finishResponse() {
-		super.finishResponse();
-		parent.markSubTaskCompleted();
+		try {
+			super.finishResponse();
+		} finally {
+			// A part retry undoes this mark, so a part whose response never started is settled too.
+			parent.markSubTaskCompleted();
+		}
 	}
 }
