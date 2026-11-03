@@ -184,6 +184,12 @@ func (a *app) handleStop(w http.ResponseWriter, r *http.Request) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.activeCmd == nil && a.attachedRunID != "" {
+		// An attached CLI run is monitored read-only; the dashboard never
+		// signals a process it did not start.
+		writeJSON(w, 409, map[string]any{keyError: "This dashboard is only monitoring the attached SPT run and will not stop it. Stop it from the terminal that started it."})
+		return
+	}
 	if a.activeCmd == nil || a.activeCmd.Process == nil || a.activeJob == nil || a.activeJob[keyStatus] != jobRunning {
 		writeJSON(w, 409, map[string]any{keyError: "No dashboard run is in progress."})
 		return

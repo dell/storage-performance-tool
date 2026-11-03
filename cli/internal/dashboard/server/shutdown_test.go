@@ -134,3 +134,19 @@ func TestStopRunGracefully(t *testing.T) {
 		t.Fatalf("stop after the run ended: %d", response.Code)
 	}
 }
+
+func TestStopRefusesAttachedRun(t *testing.T) {
+	a, _ := newRunHandlerTestApp(t)
+	a.mu.Lock()
+	a.attachedHost = "127.0.0.1"
+	a.attachedRunID = "42"
+	a.mu.Unlock()
+	request := httptest.NewRequest(http.MethodPost, "/api/runs/stop", nil)
+	request.Host = "localhost:8000"
+	request.Header.Set("Origin", "http://localhost:8000")
+	response := httptest.NewRecorder()
+	a.handleStop(response, request)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "only monitoring") {
+		t.Fatalf("stop of an attached run: %d %s", response.Code, response.Body.String())
+	}
+}
