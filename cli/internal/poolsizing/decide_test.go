@@ -114,6 +114,18 @@ func TestChecksAtAnExplicitZeroLimitAreNotShownAtTheFloor(t *testing.T) {
 	}
 }
 
+// Without the image's answer, the run must say that no cgroup limit was checked.
+func TestACapacityNoteReachesWhatARunPrints(t *testing.T) {
+	bounded := capacityOf(100*gib, "MemTotal")
+	bounded.Note = "no cgroup limit was checked"
+	if engine := Decide(DecideInput{Host: "h", Shortfall: ShortfallFail, Output: output(bounded, step("read", 10*gib))}); !strings.Contains(engine.Message, bounded.Note) {
+		t.Fatalf("sized: %+v", engine)
+	}
+	if engine := Decide(DecideInput{Host: "h", Shortfall: ShortfallFail, Output: output(bounded, step("read", 192*gib))}); !strings.Contains(engine.Failure, bounded.Note) {
+		t.Fatalf("refused: %+v", engine)
+	}
+}
+
 func TestAnExplicitValueStaysAndItsDemandIsStillRecorded(t *testing.T) {
 	engine := Decide(DecideInput{Host: "h", SptJavaOpts: "-XX:+UseZGC -XX:MaxDirectMemorySize=128g", Output: output(capacityOf(1024*gib, "MemTotal"), step("read", 192*gib))})
 	if engine.Mode != ModeExplicit || engine.ExplicitBytes != 128*gib || engine.CalculatedBytes != 0 || engine.NeedBytes != 192*gib {

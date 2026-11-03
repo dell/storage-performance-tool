@@ -239,6 +239,9 @@ func sizedMessage(engine Engine, demand composite, capacity int64) string {
 	message := fmt.Sprintf("RDMA direct memory: %s: -XX:MaxDirectMemorySize=%s (its steps need %s", engine.Host, engine.Value(), format(demand.need))
 	if engine.Capacity != nil && capacity >= 0 {
 		message += ", capacity " + format(capacity) + " from " + engine.Capacity.Source
+		if engine.Capacity.Note != "" {
+			message += " (" + engine.Capacity.Note + ")"
+		}
 	} else {
 		message += ", capacity not read"
 	}
@@ -298,7 +301,11 @@ func describeCapacity(capacity *CapacityRecord) string {
 			source += " on " + capacity.Cgroup
 		}
 	}
-	return fmt.Sprintf("%s of %s, less %s heap and a %s reserve", source, format(capacity.MemoryBytes), format(capacity.HeapBytes), format(capacity.ReserveBytes))
+	described := fmt.Sprintf("%s of %s, less %s heap and a %s reserve", source, format(capacity.MemoryBytes), format(capacity.HeapBytes), format(capacity.ReserveBytes))
+	if capacity.Note != "" {
+		described += " (" + capacity.Note + ")"
+	}
+	return described
 }
 
 var (

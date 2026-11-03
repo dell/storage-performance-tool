@@ -148,7 +148,7 @@ A step in which any engine has a NIC set, from `--interfaces` or a host override
 
 **The deadline** is the engine setting `load.step.preparation.timeout`, default `10m`, set with `--engine-override load.step.preparation.timeout=15m`. It covers item distribution and every engine's preparation, and each worker also enforces it on its own clock, so a worker fences itself even if the entry node is gone. A timeout message names the setting.
 
-Item distribution rarely decides this. On the lab, three workers took a create step's item list at about 1.1 million items per second (5 million in 4.5 s), so the default covers several hundred million items. An `--items-file` on the CLI's host has a tighter limit first: each host's copy of it must finish within 30 s.
+Item distribution takes little of this on a fast network. On the lab, three workers took a list of 5 million items in 4.5 s, about 1.1 million items per second; at that rate the default would cover several hundred million, though that is an extrapolation from one network and from lists no larger than 5 million. Item files on the CLI's host have a tighter limit first: on each remote host, staging them, all files together, must finish within 30 s.
 
 **During the step,** after a failed connect, that NIC's connects to that endpoint back off from 100 ms, doubling to 5 s; an operation that needs a new connection there fails at once until the next trial, while open connections keep serving. Control requests keep the kernel's route: bucket checks, listing a bucket as a step's item input, and multipart abort.
 

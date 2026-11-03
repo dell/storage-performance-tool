@@ -24,6 +24,9 @@ const EstimateEnv = "SPT_RDMA_POOL_ESTIMATE"
 // probeTimeout bounds one host's planner and capacity commands.
 const probeTimeout = 2 * time.Minute
 
+// hostMemoryTimeout bounds reading a host's own MemTotal; a variable for a test of a host that hangs.
+var hostMemoryTimeout = 20 * time.Second
+
 // Input is what a run or a verify gives the plan.
 type Input struct {
 	Params    scenario.Params
@@ -140,45 +143,68 @@ func askHost(ctx context.Context, in Input, host *hostparse.HostInfo, planArgs [
 // boundedByHostMemory applies what the host itself reports. A Proxmox LXC's limit sits above its
 // cgroup namespace, where nothing inside can read it, and lxcfs shows it only in the LXC's own
 // /proc/meminfo, which a container on it does not get. So the probe alone reports the machine's.
+// Without the probe's answer the host's figure is only an upper bound, and its note says so.
 func boundedByHostMemory(capacity *nicplan.Capacity, hostBytes int64) *nicplan.Capacity {
-	if hostBytes <= 0 || (capacity != nil && capacity.Bytes >= 0 && capacity.Bytes <= hostBytes) {
+	if hostBytes <= 0 {
 		return capacity
 	}
-	bounded := nicplan.Capacity{Bytes: hostBytes, Source: "MemTotal", MemTotalBytes: hostBytes, CgroupLimitBytes: -1}
-	if capacity != nil {
-		bounded = *capacity
-		bounded.Bytes, bounded.Source, bounded.Cgroup = hostBytes, "MemTotal", ""
-		note := "the host's own /proc/meminfo reports less than a container on it sees"
-		if bounded.Note != "" {
-			note = bounded.Note + "; " + note
+	if capacity == nil {
+		return &nicplan.Capacity{
+			Bytes: hostBytes, Source: "MemTotal", MemTotalBytes: hostBytes, CgroupLimitBytes: -1,
+			Note: "the image's capacity probe gave no answer, so this is the host's MemTotal alone and no cgroup limit was checked",
 		}
-		bounded.Note = note
 	}
+	if capacity.Bytes >= 0 && capacity.Bytes <= hostBytes {
+		return capacity
+	}
+	note := "the host's own /proc/meminfo reports less than a container on it sees"
+	if capacity.Bytes < 0 {
+		note = "the image could not read its memory, so this is the host's MemTotal alone"
+	}
+	if capacity.Note != "" {
+		note = capacity.Note + "; " + note
+	}
+	bounded := *capacity
+	bounded.Bytes, bounded.Source, bounded.MemTotalBytes, bounded.Cgroup, bounded.Note = hostBytes, "MemTotal", hostBytes, "", note
 	return &bounded
 }
 
-// hostMemTotal reads the host's own MemTotal, outside any container; 0 when it cannot.
+// hostMemTotal reads the host's own MemTotal, outside any container; 0 when it cannot. Waiting is
+// bounded here, as a command can outlive its context while a proxy holds its output open: without
+// this figure the probe's stands, so nothing is worth holding up a run for.
 func hostMemTotal(ctx context.Context, in Input, host *hostparse.HostInfo) int64 {
-	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	ctx, cancel := context.WithTimeout(ctx, hostMemoryTimeout)
 	defer cancel()
-	stdout, _, err := in.Executor.ExecuteCommand(ctx, host, []string{"grep", "MemTotal", "/proc/meminfo"})
-	if err != nil {
+	result := make(chan int64, 1)
+	go func() {
+		stdout, _, err := in.Executor.ExecuteCommand(ctx, host, []string{"grep", "MemTotal", "/proc/meminfo"})
+		if err != nil {
+			result <- 0
+			return
+		}
+		result <- parseMemTotal(stdout)
+	}()
+	select {
+	case value := <-result:
+		return value
+	case <-ctx.Done():
 		return 0
 	}
-	return parseMemTotal(stdout)
 }
 
-// parseMemTotal reads a /proc/meminfo line, such as "MemTotal:  8388608 kB"; 0 when it is not one.
-func parseMemTotal(line string) int64 {
-	fields := strings.Fields(line)
-	if len(fields) != 3 || fields[0] != "MemTotal:" || fields[2] != "kB" {
-		return 0
+// parseMemTotal finds a /proc/meminfo line, such as "MemTotal:  8388608 kB", in a command's output,
+// which a remote login banner can precede; 0 when there is none.
+func parseMemTotal(output string) int64 {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 3 || fields[0] != "MemTotal:" || fields[2] != "kB" {
+			continue
+		}
+		if kilobytes, err := strconv.ParseInt(fields[1], 10, 64); err == nil && kilobytes > 0 {
+			return kilobytes * 1024
+		}
 	}
-	kilobytes, err := strconv.ParseInt(fields[1], 10, 64)
-	if err != nil || kilobytes <= 0 {
-		return 0
-	}
-	return kilobytes * 1024
+	return 0
 }
 
 // hostEndpoints gives a host its slice of the endpoints, as the engine's drivers name them.

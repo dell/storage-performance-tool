@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
@@ -162,7 +163,8 @@ func TestAnLXCsOwnMemInfoBoundsWhatAContainerOnItReports(t *testing.T) {
 		{"an LXC below the machine", capacityOf(264*gib, "MemTotal"), "MemTotal:    8388608 kB\n", 8 * gib, "MemTotal", "reports less"},
 		{"a cgroup below the host stays", &nicplan.Capacity{Bytes: 2 * gib, Source: "cgroup", Cgroup: "/docker/id", CgroupLimitBytes: 2 * gib}, "MemTotal:    8388608 kB\n", 2 * gib, "cgroup", ""},
 		{"no answer from the host", capacityOf(264*gib, "MemTotal"), "not a meminfo line", 264 * gib, "MemTotal", ""},
-		{"no answer from the image", nil, "MemTotal:    8388608 kB\n", 8 * gib, "MemTotal", ""},
+		{"no answer from the image", nil, "MemTotal:    8388608 kB\n", 8 * gib, "MemTotal", "no cgroup limit was checked"},
+		{"a login banner before the line", capacityOf(264*gib, "MemTotal"), "Welcome to wrk1\nMemTotal:    8388608 kB\n", 8 * gib, "MemTotal", "reports less"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeHosts{}
@@ -187,6 +189,45 @@ func TestAnLXCsOwnMemInfoBoundsWhatAContainerOnItReports(t *testing.T) {
 				t.Fatalf("%+v", capacity)
 			}
 		})
+	}
+}
+
+// A command can outlive its context while a proxy holds its output open.
+func TestAHostThatHangsOnItsMemTotalDoesNotHoldUpTheRun(t *testing.T) {
+	previous := hostMemoryTimeout
+	hostMemoryTimeout = 50 * time.Millisecond
+	defer func() { hostMemoryTimeout = previous }()
+	release := make(chan struct{})
+	defer close(release)
+	fake := &fakeHosts{}
+	fake.reply = func(_ string, cmd []string) (string, error) {
+		text := strings.Join(cmd, " ")
+		if strings.Contains(text, "/proc/meminfo") {
+			<-release
+			return "", nil
+		}
+		if strings.Contains(text, "--capacity") {
+			return nicOutput(t, nicplan.Output{Capacity: capacityOf(32*gib, "MemTotal")}), nil
+		}
+		return "", errors.New("no RDMA device")
+	}
+	done := make(chan Plan, 1)
+	go func() {
+		plan, err := BuildPlan(context.Background(), Input{
+			Params: rdmaParams("write"), Steps: stepsOf("create"), Hosts: []*hostparse.HostInfo{{Host: "wrk1"}}, Executor: fake,
+		})
+		if err != nil {
+			t.Error(err)
+		}
+		done <- plan
+	}()
+	select {
+	case plan := <-done:
+		if capacity := plan.Engines[0].Capacity; capacity == nil || capacity.MemoryBytes != 32*gib {
+			t.Fatalf("the image's figure stands: %+v", capacity)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the run waited for the hung command")
 	}
 }
 
