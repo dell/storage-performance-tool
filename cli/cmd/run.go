@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -906,13 +907,14 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 
 			var observedRuntimeRoles integrity.StepRoles
 			var plannedRoles integrity.StepRoles
+			fetchStepIDs := stepIDs
 			if verificationRun {
 				plan := integrityOptions[0].Plan
 				deferredVerification := plan.Valid() && plan.VerificationDeferred()
 				plannedRoles = integrity.PlannedStepRoles(plan)
 				if plan.Valid() {
-					allowMissingVerifier := stepRoleLifecycle(
-						outcome.Tracker, "", plannedRoles.Read) == portcheck.StepLifecycleNotStarted
+					allowMissingVerifier := verifierMayBeMissing(plan, stepRoleLifecycle(
+						outcome.Tracker, "", plannedRoles.Read))
 					binding, bindErr := integrity.BindObservedStepRoles(plan, runtimeStepIDs, allowMissingVerifier)
 					if bindErr != nil {
 						outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, bindErr)
@@ -922,6 +924,8 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 						artifactsReady = false
 					} else {
 						observedRuntimeRoles = binding.Roles
+						fetchStepIDs = stepsToFetch(stepIDs, plan, binding.Roles.Read, stepRoleLifecycle(
+							outcome.Tracker, binding.Roles.Read, plannedRoles.Read))
 					}
 				} else {
 					observedRuntimeRoles = integrity.ResolveStepRoles(stepIDs, nil)
@@ -969,7 +973,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			integrityFinalizationReady := artifactsReady
 			if artifactsReady {
 				fetch := newResultsFetcherFunc(baseURL, root)
-				if _, ferr := fetch.FetchArtifactsForSteps(artifactCtx, stepIDs); ferr != nil {
+				if _, ferr := fetch.FetchArtifactsForSteps(artifactCtx, fetchStepIDs); ferr != nil {
 					outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, ferr)
 					logging.LogError("auto-results", "artifact fetch failed", ferr, "base_url", baseURL, "out", root)
 					writeProgress("Results fetch encountered errors; preserving available evidence and continuing shutdown. Output: %s\n", root)
@@ -990,12 +994,13 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				options.PlannedStepIDs = append([]string(nil), expectedStepIDs...)
 				options.ObservedStepIDs = append([]string(nil), runtimeStepIDs...)
 				options.AllowPlannedRoleFallback = len(runtimeStepIDs) == 0
-				options.AllowMissingRuntimeVerifier = stepRoleLifecycle(
-					outcome.Tracker, observedRuntimeRoles.Read, plannedRoles.Read) == portcheck.StepLifecycleNotStarted
+				options.AllowMissingRuntimeVerifier = verifierMayBeMissing(options.Plan, stepRoleLifecycle(
+					outcome.Tracker, observedRuntimeRoles.Read, plannedRoles.Read))
 				options.Context = artifactCtx
 				finalized, finalizeErr := integrity.FinalizeResults(options)
 				outcome.Finalization = &finalized
 				outcome.FinalizationErr = finalizeErr
+				dropLiveCorruptionErrorOfEmptySelection(&outcome)
 				if finalizeErr != nil {
 					logging.LogError("auto-results", "integrity result finalization failed", finalizeErr, "out", root)
 					writeProgress("Integrity result finalization failed; preserved evidence under %s\n", root)
@@ -1130,6 +1135,36 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		}
 	}()
 	return monitor
+}
+
+// verifierMayBeMissing reports whether a run's READ step can be absent from the live step list. One
+// that never started publishes nothing, and neither does the READ step of an empty selection, which
+// --allow-empty-selection says to expect. Finalization still decides from the counts on file.
+func verifierMayBeMissing(plan integrityplan.Plan, readLifecycle portcheck.StepLifecycle) bool {
+	return readLifecycle == portcheck.StepLifecycleNotStarted || plan.AllowEmpty
+}
+
+// stepsToFetch adds the planned READ step when --allow-empty-selection expects it may go unseen and it
+// did complete: with nothing to read it can end between two polls of the live metrics, and its files
+// are still there. A READ that isn't known to have completed is not reported as a step of this run.
+func stepsToFetch(
+	stepIDs []string, plan integrityplan.Plan, observedRead string, readLifecycle portcheck.StepLifecycle,
+) []string {
+	if !plan.AllowEmpty || observedRead != "" || plan.Verifier.ID == "" ||
+		readLifecycle != portcheck.StepLifecycleCompleted || slices.Contains(stepIDs, plan.Verifier.ID) {
+		return stepIDs
+	}
+	return append(slices.Clone(stepIDs), plan.Verifier.ID)
+}
+
+// dropLiveCorruptionErrorOfEmptySelection forgives a missing live corruption count when finalization
+// proved that nothing was selected or read. The READ step of an empty selection ends before the
+// engine publishes it, so there is no live count to read, and its files already say zero.
+func dropLiveCorruptionErrorOfEmptySelection(outcome *autoResultsOutcome) {
+	final := outcome.Finalization
+	if outcome.FinalizationErr == nil && final != nil && final.EmptySelection && final.VerificationAttemptedCount == 0 {
+		outcome.CorruptionMetricsErr = nil
+	}
 }
 
 func buildIntegrityFinalizeOptions(params scenario.Params, plan integrityplan.Plan) *integrity.FinalizeOptions {
