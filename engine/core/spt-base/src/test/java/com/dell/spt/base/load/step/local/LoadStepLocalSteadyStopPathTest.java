@@ -13,6 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
@@ -182,6 +183,14 @@ class LoadStepLocalSteadyStopPathTest {
 				if (stop != EarlyStop.FAILURE_BUDGET_DEADLINE) {
 					assertTrue(driver.awaitAdmissionClosed(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS));
 					assertTrue(driver.stopProbeHeldAtAdmissionClose(), "the window closed before admission closed");
+				}
+				if (stop == EarlyStop.WORKER_DEADLINE_GUARD) {
+					// The guard fires at a fixed time and requests travel in waves, so its cut can fall
+					// between two waves. With admission closed, nothing else will come to be held.
+					awaitCondition(
+									() -> driver.heldNow() == driver.activeOpCount(),
+									"the requests in flight at the cut to complete or be held");
+					assumeTrue(driver.heldNow() >= 1, "the deadline fell between two waves, so no request is late");
 				}
 				// Every request in flight at the cut is held; then they complete, before doShutdown.
 				awaitCondition(
