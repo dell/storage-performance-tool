@@ -246,6 +246,23 @@ func TestBindRuntimeDeleteStepsRejectsContradictoryRuntimeEvidence(t *testing.T)
 	}
 }
 
+// A run label replaces the default in every step ID, so a DELETE run with --label must still bind.
+func TestBindRuntimeDeleteStepsUnderARunLabel(t *testing.T) {
+	for _, label := range []string{"X", "a-b.c_D", "x-001-20260101.000000.000-y"} {
+		t.Run(label, func(t *testing.T) {
+			planned := []string{label + "-001-20260823.100000.000-create", label + "-002-20260823.100000.000-delete"}
+			runtime := []string{label + "-001-20260823.100000.001-create", label + "-002-20260823.100000.001-delete"}
+			bound, err := bindRuntimeDeleteSteps(planned, runtime)
+			if err != nil {
+				t.Fatalf("bind: %v", err)
+			}
+			if len(bound) != 1 || bound[0] != runtime[1] {
+				t.Fatalf("bound %v, want the runtime DELETE step %q", bound, runtime[1])
+			}
+		})
+	}
+}
+
 func TestCaptureStoredDeleteMetricsRejectsEmptyTerminalModel(t *testing.T) {
 	originalCapture := captureDeleteMetricsFunc
 	t.Cleanup(func() { captureDeleteMetricsFunc = originalCapture })
