@@ -30,7 +30,7 @@ public final class ShardedListPathItemInput<I extends PathItem> implements Input
 							"LIST shard seed emitted prefix={} kind={} delimiter={}",
 							shard.prefix(), shard.kind(), shard.delimiter());
 		}
-		return itemFactory.getItem(shard.prefix(), 0, 0);
+		return seedItem(shard);
 	}
 
 	@Override
@@ -46,7 +46,7 @@ public final class ShardedListPathItemInput<I extends PathItem> implements Input
 								"LIST shard seed emitted prefix={} (batch) kind={} delimiter={}",
 								shard.prefix(), shard.kind(), shard.delimiter());
 			}
-			buffer.add(itemFactory.getItem(shard.prefix(), 0, 0));
+			buffer.add(seedItem(shard));
 		}
 		return count;
 	}
@@ -71,5 +71,11 @@ public final class ShardedListPathItemInput<I extends PathItem> implements Input
 
 	public List<ListShard> shards() {
 		return shards;
+	}
+
+	/** A shard with an empty prefix is the whole bucket. An item cannot have an empty name, so it seeds as the root. */
+	private I seedItem(final ListShard shard) {
+		final String prefix = shard.prefix();
+		return itemFactory.getItem(prefix == null || prefix.isEmpty() ? "/" : prefix, 0, 0);
 	}
 }

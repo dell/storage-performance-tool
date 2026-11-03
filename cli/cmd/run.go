@@ -996,6 +996,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				finalized, finalizeErr := integrity.FinalizeResults(options)
 				outcome.Finalization = &finalized
 				outcome.FinalizationErr = finalizeErr
+				dropLiveCorruptionErrorOfEmptySelection(&outcome)
 				if finalizeErr != nil {
 					logging.LogError("auto-results", "integrity result finalization failed", finalizeErr, "out", root)
 					writeProgress("Integrity result finalization failed; preserved evidence under %s\n", root)
@@ -1130,6 +1131,16 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		}
 	}()
 	return monitor
+}
+
+// dropLiveCorruptionErrorOfEmptySelection forgives a missing live corruption count when finalization
+// proved that nothing was selected or read. The READ step of an empty selection ends before the
+// engine publishes it, so there is no live count to read, and its files already say zero.
+func dropLiveCorruptionErrorOfEmptySelection(outcome *autoResultsOutcome) {
+	final := outcome.Finalization
+	if outcome.FinalizationErr == nil && final != nil && final.EmptySelection && final.VerificationAttemptedCount == 0 {
+		outcome.CorruptionMetricsErr = nil
+	}
 }
 
 func buildIntegrityFinalizeOptions(params scenario.Params, plan integrityplan.Plan) *integrity.FinalizeOptions {

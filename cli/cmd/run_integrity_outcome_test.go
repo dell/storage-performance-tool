@@ -65,6 +65,33 @@ func TestResolveVerificationRunErrorCleanEmptyReadRequiresExplicitAllowance(t *t
 	}
 }
 
+func TestEmptySelectionForgivesOnlyAMissingLiveCountWhenNothingWasRead(t *testing.T) {
+	liveErr := errors.New("verification READ step could not be identified")
+	tests := []struct {
+		name         string
+		finalization *integrity.FinalizeOutcome
+		finalizeErr  error
+		wantDropped  bool
+	}{
+		{"empty and nothing read", &integrity.FinalizeOutcome{Complete: true, EmptySelection: true}, nil, true},
+		{"objects selected", &integrity.FinalizeOutcome{Complete: true, SelectionCount: 1}, nil, false},
+		{"empty but something read", &integrity.FinalizeOutcome{EmptySelection: true, VerificationAttemptedCount: 1}, nil, false},
+		{"finalization failed", &integrity.FinalizeOutcome{EmptySelection: true}, errors.New("broken"), false},
+		{"no finalization", nil, nil, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			outcome := autoResultsOutcome{
+				Finalization: test.finalization, FinalizationErr: test.finalizeErr, CorruptionMetricsErr: liveErr,
+			}
+			dropLiveCorruptionErrorOfEmptySelection(&outcome)
+			if dropped := outcome.CorruptionMetricsErr == nil; dropped != test.wantDropped {
+				t.Fatalf("dropped = %t, want %t", dropped, test.wantDropped)
+			}
+		})
+	}
+}
+
 func TestResolveVerificationRunErrorEmptySelectionDiagnosticNamesWorkload(t *testing.T) {
 	base := autoResultsOutcome{
 		Tracker: &portcheck.RunResult{FinalState: constants.StateCompleted},

@@ -195,7 +195,10 @@ func FinalizeResults(options FinalizeOptions) (outcome FinalizeOutcome, finalErr
 			outcome.VerificationAttemptedCount = readCounts.success + readCounts.failure
 			outcome.CorruptCount = readCounts.corrupt
 			if options.BaseURL != "" {
-				if err := validateJSONCorruptCount(options.BaseURL, readStep, readCounts.corrupt); err != nil {
+				err := validateJSONCorruptCount(options.BaseURL, readStep, readCounts.corrupt)
+				// A READ step with nothing to read ends before the engine publishes a row for it.
+				nothingRead := readCounts.success == 0 && readCounts.failure == 0 && readCounts.corrupt == 0
+				if err != nil && !(nothingRead && errors.Is(err, errNoReadRow)) {
 					return outcome, err
 				}
 			}
@@ -959,6 +962,8 @@ func readOperationMetrics(root, step, opType string) (operationCounts, error) {
 	return counts, nil
 }
 
+var errNoReadRow = errors.New("verification JSON metrics contain no READ row")
+
 // ObserveJSONCorruptCount reads the required corruption count from an engine metrics endpoint.
 func ObserveJSONCorruptCount(baseURL, readStep string) (int64, error) {
 	return ObserveJSONCorruptCountContext(context.Background(), baseURL, readStep)
@@ -1013,7 +1018,7 @@ func ObserveJSONCorruptCountContext(ctx context.Context, baseURL, readStep strin
 			if endpoint == "/metrics/fleet/json" {
 				continue
 			}
-			return 0, fmt.Errorf("verification JSON metrics contain no READ row for step %s", readStep)
+			return 0, fmt.Errorf("%w for step %s", errNoReadRow, readStep)
 		}
 		if observed < 0 {
 			return 0, fmt.Errorf("verification JSON metrics contain a negative corruption count")
