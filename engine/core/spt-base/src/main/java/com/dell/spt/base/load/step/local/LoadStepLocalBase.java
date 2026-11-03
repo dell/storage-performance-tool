@@ -20,6 +20,8 @@ import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
 import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.LoadStepBase;
+import com.dell.spt.base.load.step.PreparationStatus;
+import com.dell.spt.base.storage.driver.AdmissionPhase;
 import com.dell.spt.base.load.step.local.context.LoadStepContext;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
@@ -57,6 +59,8 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private String operationLifecycleWorkerId;
 	private boolean operationLifecyclePublished;
 	private boolean nicPathsPublished;
+	private volatile StepPreparation preparation;
+	private volatile Thread preparationDeadlineGuard;
 	private volatile IntegrityTerminalException durationStopFailure;
 	private volatile IntegrityTerminalException durationValidityFailure;
 	private volatile boolean durationAdmissionBarrierSatisfied;
@@ -167,6 +171,10 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				}
 			}
 		}
+		final StepPreparation barrier = preparation;
+		if (barrier != null) {
+			stepContexts.forEach(LoadStepContext::holdForAdmissionBarrier);
+		}
 		boolean anyStarted = false;
 		final var iterator = stepContexts.iterator();
 		while (iterator.hasNext()) {
@@ -191,6 +199,151 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		if (!anyStarted) {
 			throw new IllegalStateException(loadStepId() + ": failed to start any load step contexts");
 		}
+		if (barrier != null) {
+			startPreparationThread(barrier);
+		}
+	}
+
+	@Override
+	protected final boolean loadIntervalDeferred() {
+		return preparation != null;
+	}
+
+	@Override
+	public final synchronized void startPreparation(final long preparationId, final long budgetNanos) {
+		final var barrier = new StepPreparation(preparationId, budgetNanos, System.nanoTime());
+		preparation = barrier;
+		// The deadline runs from here: an Entry Node that dies before start() still leaves it fenced.
+		final String stepId = safeStepIdForPreparation();
+		preparationDeadlineGuard = Thread.ofPlatform().daemon().name("spt-preparation-deadline-" + stepId).start(() -> {
+			try {
+				final long remaining = barrier.deadlineNanos() - System.nanoTime();
+				if (remaining > 0) {
+					TimeUnit.NANOSECONDS.sleep(remaining);
+				}
+				fence(barrier, PreparationStatus.DEADLINE_MESSAGE);
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		});
+	}
+
+	@Override
+	public final PreparationStatus preparationStatus(final long preparationId) {
+		final StepPreparation barrier = preparation;
+		if (barrier == null || barrier.id() != preparationId) {
+			return new PreparationStatus(PreparationStatus.State.FENCED, "", "a stale preparation", 0);
+		}
+		return barrier.status(System.nanoTime());
+	}
+
+	@Override
+	public final synchronized boolean releasePreparedAdmission(final long preparationId) {
+		final StepPreparation barrier = preparation;
+		if (barrier == null || barrier.id() != preparationId) {
+			return false;
+		}
+		if (barrier.released()) {
+			return true;
+		}
+		if (!barrier.release(System.nanoTime())) {
+			return false;
+		}
+		preparationDeadlineGuard.interrupt();
+		startLoadInterval();
+		stepContexts.forEach(LoadStepContext::releaseAdmissionBarrier);
+		return true;
+	}
+
+	@Override
+	public final void fencePreparation(final long preparationId) {
+		final StepPreparation barrier = preparation;
+		if (barrier != null && barrier.id() == preparationId) {
+			// Another slice failed to release, so this step failed even if this slice had opened.
+			barrier.markStepFailed();
+			fence(barrier, "the entry node stopped the preparation");
+		}
+	}
+
+	/**
+	 * Fences the preparation and stops the contexts on a thread of their own: a driver blocked in its
+	 * start, such as in a DNS lookup, holds its lifecycle lock, and the caller may be an RMI call.
+	 */
+	private void fence(final StepPreparation barrier, final String why) {
+		// The monitor makes this atomic with a release: one in progress finishes first, and then this
+		// fence does nothing and the caller's own stop handles what the release opened.
+		synchronized (this) {
+			if (!barrier.markFenced(why, System.nanoTime())) {
+				return;
+			}
+		}
+		final String stepId = safeStepIdForPreparation();
+		Loggers.MSG.info("{}: preparation fenced: {}", stepId, why);
+		final Thread guard = preparationDeadlineGuard;
+		if (guard != null && guard != Thread.currentThread()) {
+			guard.interrupt();
+		}
+		stopContextsOfFence(stepId, barrier);
+	}
+
+	/** On a thread of its own: neither a driver's fence action nor a stuck context holds up the caller. */
+	private void stopContextsOfFence(final String stepId, final StepPreparation barrier) {
+		final var contexts = List.copyOf(stepContexts);
+		Thread.ofPlatform().daemon().name("spt-preparation-fence-" + stepId).start(() -> {
+			barrier.runFenceActions();
+			for (final LoadStepContext stepContext : contexts) {
+				try {
+					stepContext.stop();
+				} catch (final Exception e) {
+					LogUtil.exception(Level.WARN, e, "{}: failed to stop a fenced context", stepId);
+				}
+			}
+		});
+	}
+
+	private String safeStepIdForPreparation() {
+		return config.stringVal("load-step-id");
+	}
+
+	private void startPreparationThread(final StepPreparation barrier) {
+		final String stepId = safeStepIdForPreparation();
+		// A fence that came before the contexts existed could not stop them. One that comes after this
+		// check sees them, as they were added before it.
+		if (barrier.fenced()) {
+			stopContextsOfFence(stepId, barrier);
+			return;
+		}
+		final Thread preparing = Thread.ofPlatform().daemon().name("spt-preparation-" + stepId).unstarted(() -> {
+			try (final var logCtx = put(KEY_STEP_ID, stepId).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
+				AdmissionPhase.current(barrier);
+				for (final LoadStepContext stepContext : List.copyOf(stepContexts)) {
+					if (barrier.fenced()) {
+						return;
+					}
+					stepContext.prepareForAdmission(barrier);
+				}
+				barrier.ready(System.nanoTime());
+			} catch (final Throwable failure) {
+				final String message = preparationFailureMessage(failure);
+				if (barrier.fenced()) {
+					// A fence interrupts blocked work; that is not a failure of its own.
+					Loggers.MSG.debug("{}: preparation ended by its fence: {}", stepId, message);
+				} else {
+					Loggers.ERR.error("{}: preparation failed: {}", stepId, message);
+					barrier.fail(message, System.nanoTime());
+				}
+			} finally {
+				AdmissionPhase.current(null);
+			}
+		});
+		barrier.onFence(preparing::interrupt);
+		preparing.start();
+	}
+
+	private static String preparationFailureMessage(final Throwable failure) {
+		final RunTerminalException terminal = RunTerminalException.find(failure);
+		final Throwable source = terminal != null ? terminal : failure;
+		return source.getMessage() != null ? source.getMessage() : source.toString();
 	}
 
 	@Override
@@ -447,6 +600,10 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	protected final void doShutdown() {
+		final StepPreparation barrier = preparation;
+		if (barrier != null) {
+			fence(barrier, "the step stopped during preparation");
+		}
 		closeSteadyWindows("shutdown");
 		if (standaloneDeleteDurationMode()) {
 			prepareDurationStop();
@@ -696,7 +853,9 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			return;
 		}
 		try (final var logContext = put(KEY_STEP_ID, loadStepId())) {
-			NicPathsArtifact.publish(runId(), loadStepId(), operationLifecycleWorkerId, paths);
+			final StepPreparation barrier = preparation;
+			NicPathsArtifact.publish(
+							runId(), loadStepId(), operationLifecycleWorkerId, paths, barrier == null || barrier.admitted());
 		} catch (final RuntimeException e) {
 			LogUtil.exception(Level.WARN, e, "{}: failed to write the NIC paths file", loadStepId());
 		}

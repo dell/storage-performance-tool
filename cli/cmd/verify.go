@@ -47,7 +47,8 @@ Examples:
   spt verify                                           # Verify localhost (127.0.0.1)
   spt verify --test-hosts "node1,node2,node3"         # Verify multiple nodes
   spt verify --test-hosts "root@server1,root@server2" --min-hosts 1
-  spt verify --test-hosts "node1,node2" --interfaces auto -e http://192.0.2.101:9000,http://192.0.2.102:9000 --threads 64`,
+  spt verify --test-hosts "node1,node2" --interfaces auto -e http://192.0.2.101:9000,http://192.0.2.102:9000 --threads 64
+  spt verify --test-hosts "node1,node2" --interfaces auto --host-interfaces node1=none -e http://192.0.2.101:9000`,
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 		// Ensure .env and logger are initialized at the subcommand level.
 		_ = config.LoadDotEnv()
@@ -74,6 +75,7 @@ func registerVerifyFlags(flags *pflag.FlagSet) {
 	flags.Int("rmi-port-count", 10, "Number of RMI ports to verify")
 	flags.Bool("force-cleanup", false, "Automatically clean up conflicting containers without prompting")
 	flags.Bool("use-rdma", false, "Include RDMA hardware and configuration checks")
+	flags.StringArray(flagHostInterfaces, nil, "Replace --interfaces on one host: <host>=<value>, with <value> auto, a comma-separated list, or none to only list its NICs; repeat for more hosts")
 	flags.String(flagInterfaces, "", "Plan each node's NIC set: auto, or interface names, IPv4 addresses or RDMA devices (comma-separated)")
 	flags.StringSliceP("endpoints", "e", []string{}, "S3 endpoint URLs to plan Paths for with --interfaces (comma-separated or repeatable)")
 	flags.Bool("slice-endpoints", false, "Plan each node's slice of the endpoints, as a distributed run with --slice-endpoints")
@@ -130,7 +132,11 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("network-mode must be '%s' or '%s', got: %s", constants.BridgeNetworkMode, constants.HostNetworkMode, networkMode)
 	}
 
-	interfaces, endpoints, err := verifyNicPlanInputs(cmd, interfacesValue, networkMode)
+	hostInterfaces, _, err := readHostInterfaces(cmd)
+	if err != nil {
+		return err
+	}
+	interfaces, endpoints, err := verifyNicPlanInputs(cmd, interfacesValue, networkMode, len(nicplan.AnyNicSet(hostInterfaces)) > 0)
 	if err != nil {
 		return err
 	}
@@ -163,6 +169,7 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 		UseRdma:      useRdma,
 
 		Interfaces:     interfaces,
+		HostInterfaces: hostInterfaces,
 		Endpoints:      endpoints,
 		SliceEndpoints: sliceEndpoints,
 		Threads:        threads,
@@ -186,11 +193,12 @@ func init() {
 	rootCmd.AddCommand(verifyCmd)
 }
 
-// verifyNicPlanInputs returns the --interfaces entries and, with them, the S3 endpoints as the
-// engine's drivers name them. Without --interfaces, verify lists NICs only and reads no endpoints.
-func verifyNicPlanInputs(cmd *cobra.Command, value, networkMode string) ([]string, []string, error) {
+// verifyNicPlanInputs returns the --interfaces entries and, when any host has a NIC set, the S3
+// endpoints as the engine's drivers name them. Without one, verify lists NICs only and reads no
+// endpoints. hostNicSet is whether a --host-interfaces value asks for NICs.
+func verifyNicPlanInputs(cmd *cobra.Command, value, networkMode string, hostNicSet bool) ([]string, []string, error) {
 	interfaces, err := nicplan.ParseInterfaces(value)
-	if err != nil || len(interfaces) == 0 {
+	if err != nil || (len(interfaces) == 0 && !hostNicSet) {
 		return nil, nil, err
 	}
 	if networkMode == constants.BridgeNetworkMode {

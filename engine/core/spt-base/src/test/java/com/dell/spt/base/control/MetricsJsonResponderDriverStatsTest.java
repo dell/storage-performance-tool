@@ -32,6 +32,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.AfterEach;
@@ -67,6 +68,26 @@ class MetricsJsonResponderDriverStatsTest {
 		assertEquals(List.of(StatsReportingDriverMock.GAUGE_SHELF), fieldNames(stats.get("gauges")));
 		assertEquals(7, stats.get("gauges").get(StatsReportingDriverMock.GAUGE_SHELF).asLong());
 		assertSchema5Accepts(row);
+	}
+
+	@Test
+	void rowsShowAStepsPreparationOnlyWhenItHasOne() throws Exception {
+		final MetricsContext<AllMetricsSnapshotImpl> ctx = context("stats-step", () -> StatsReportingDriverMock.stats(1, 0, 0));
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of());
+		when(mgr.getAllContexts()).thenReturn(Set.of(ctx));
+		when(mgr.getTerminalSteps()).thenReturn(List.of());
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, config());
+		assertFalse(onlyRow(responder.buildNodeMetrics(false)).has(MetricsConstants.METRIC_NAME_PREPARATION));
+
+		when(mgr.preparation(ctx.runId(), "stats-step")).thenReturn(Map.of(
+						"distribution_ms", 3120L, "engines", Map.of("entry", 4210L, "198.51.100.12:1099", 9050L)));
+		final JsonNode withPreparation = onlyRow(responder.buildNodeMetrics(false));
+		final JsonNode preparation = withPreparation.get(MetricsConstants.METRIC_NAME_PREPARATION);
+		assertEquals(3120L, preparation.get("distribution_ms").asLong());
+		assertEquals(4210L, preparation.get("engines").get("entry").asLong());
+		assertEquals(9050L, preparation.get("engines").get("198.51.100.12:1099").asLong());
+		assertSchema5Accepts(withPreparation);
 	}
 
 	@Test

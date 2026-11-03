@@ -38,7 +38,7 @@ You can use these variables to avoid repeating sensitive or commonly used parame
 - **S3 connection:** `S3_ENDPOINTS` (CSV) or `S3_ENDPOINT` (single), `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKETS` (CSV, as `--buckets`) or `S3_BUCKET` (single)
 - **Authentication:** `S3_AUTH_VERSION` (set to `2` only for legacy targets; default `4`)
 - **Hosts:** `HOSTS` (comma-separated list of `[user@]host`)
-- **NICs:** `SPT_INTERFACES` (each engine's NIC set, as `--interfaces`)
+- **NICs:** `SPT_INTERFACES` (each engine's NIC set, as `--interfaces`), `SPT_HOST_INTERFACES` (a host's own value, as `--host-interfaces`, with `;` between hosts)
 - **Workload:** `THREADS` (parallel client threads)
 - **Docker:** `SPT_SKIP_IMAGE_PULL` (skip pulling the engine image)
 - **Engine tuning:** `SPT_SERVICE_THREADS` (virtual-thread carrier parallelism)
@@ -613,6 +613,7 @@ spt run write \
 | `--integrity-runtime-identity-tier` | `image` | Distributed verification and guarded existing-prefix DELETE only. `image` proves one immutable image ID across participants; `payload` additionally proves identical canonical `/opt/spt` content (env: `SPT_INTEGRITY_RUNTIME_IDENTITY_TIER`) |
 | `--network-mode` | `host` | Docker network mode: `host` (required for RMI) or `bridge` |
 | `--interfaces` | from `SPT_INTERFACES` or none | Spread each engine's S3 connections over a NIC set: `auto`, or a comma-separated list of interface names, IPv4 addresses or RDMA devices, resolved on each host. Default Netty S3 driver, host networking and `--endpoint-selection default` only; rejected with `tables`, `mock`, an `--rdma-device` other than `auto`, `--rdma-local-ip`, and an `--engine-override` of `storage.net.interfaces` or `storage.net.nodeInterfaces`. See [Network Interfaces](NETWORK_INTERFACES.md) |
+| `--host-interfaces` | from `SPT_HOST_INTERFACES` or none | Replace `--interfaces` on one host: `<host>=<value>`, with `<value>` `auto`, a comma-separated list, or `none` to turn NICs off there. Repeat for more hosts. See [Host overrides](NETWORK_INTERFACES.md#host-overrides). With either flag, `--duration` and the rates count from the moment every engine is prepared; see [Start of a step](NETWORK_INTERFACES.md#start-of-a-step). |
 | `--rmi-port-start` | `40000` | Starting port for RMI range |
 | `--rmi-port-count` | `10` | Number of RMI ports to allocate |
 
@@ -817,6 +818,7 @@ environment variables.
 | `--attach-existing` | `false` | Attach to prestarted worker nodes; replay still launches the entry node |
 | `--network-mode` | `host` | Docker network mode: `host` or `bridge` |
 | `--interfaces` | from `SPT_INTERFACES` or none | Spread each engine's S3 connections over a NIC set, with the checks of `spt run --interfaces`. An archived NIC set is never reused; replay drops it with a warning. See [Network Interfaces](NETWORK_INTERFACES.md#replay) |
+| `--host-interfaces` | from `SPT_HOST_INTERFACES` or none | Replace `--interfaces` on one host, with the checks of `spt run --host-interfaces`. The host must be in `--test-hosts`. |
 | `--rmi-port-start` | `40000` | Starting port for RMI range |
 | `--rmi-port-count` | `10` | Number of RMI ports to verify |
 
@@ -1331,6 +1333,7 @@ spt verify [--test-hosts <hosts>] [options]
 | `--force-cleanup` | `false` | Automatically clean up conflicting containers without prompting |
 | `--use-rdma` | `false` | Include RDMA hardware and configuration checks |
 | `--interfaces` | `""` (none) | Plan each node's NIC set: `auto`, or a comma-separated list of interface names, IPv4 addresses or RDMA devices. Reads `SPT_INTERFACES` when not given |
+| `--host-interfaces` | `[]` | Replace `--interfaces` on one host: `<host>=<value>`, repeatable, also from `SPT_HOST_INTERFACES`. `none` lists that node's NICs without a plan. |
 | `--endpoints`, `-e` | `[]` | S3 endpoint URLs to plan Paths for with `--interfaces`. With a NIC set, reads `S3_ENDPOINTS`, then `S3_ENDPOINT`, when not given |
 | `--slice-endpoints` | `false` | Plan each node's slice of the endpoints, as a distributed run with `--slice-endpoints` |
 | `--threads`, `-t` | `1` | Concurrency limit whose per-NIC permit shares the plan shows. With a NIC set, reads `THREADS` when not given |
@@ -1361,7 +1364,7 @@ With `--interfaces`, verify plans the node's NIC set for the S3 endpoints as a r
 - the failures, each with its fix when there is one, and the warnings;
 - the node's policy routing rules other than the defaults, which the NIC choice does not follow: it uses connected subnets and the main routing table only.
 
-A node whose plan has a failure fails verification; warnings do not. With `--slice-endpoints`, each node plans its own slice of the endpoints, the entry node first and the workers in `--test-hosts` order, as a distributed run slices them. `--interfaces` needs the S3 endpoints and `--network-mode host`: a container on a bridge network sees only its own interface, and verify says so in the NIC list.
+With `--host-interfaces`, each node plans with its own value, and a `none` node only lists its NICs. A node whose plan has a failure fails verification; warnings do not. With `--slice-endpoints`, each node plans its own slice of the endpoints, the entry node first and the workers in `--test-hosts` order, as a distributed run slices them. `--interfaces` needs the S3 endpoints and `--network-mode host`: a container on a bridge network sees only its own interface, and verify says so in the NIC list.
 
 ```text
   NICs (engine 5.17.0):

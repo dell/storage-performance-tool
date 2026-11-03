@@ -433,3 +433,44 @@ func TestRdmaReadinessCoversEveryDevice(t *testing.T) {
 		t.Fatalf("check = %+v", check)
 	}
 }
+
+func TestHostInterfacesPlanEachHostWithItsOwnValue(t *testing.T) {
+	config := planConfig()
+	config.HostInterfaces = []nicplan.HostInterfaces{
+		{Host: "lists.example", Value: nicplan.None},
+		{Host: "plans.example", Value: "ens1f0", Entries: []string{"ens1f0"}},
+	}
+	lists := &hostparse.HostInfo{Host: "lists.example", Original: "lists.example"}
+	plans := &hostparse.HostInfo{Host: "plans.example", Original: "plans.example"}
+	follows := &hostparse.HostInfo{Host: "follows.example", Original: "follows.example"}
+	v, _ := nicVerifier(config, nil, lists, plans, follows)
+
+	if got := v.interfacesFor(lists); len(got) != 0 {
+		t.Fatalf("a none host plans nothing, got %v", got)
+	}
+	if got := v.interfacesFor(plans); len(got) != 1 || got[0] != "ens1f0" {
+		t.Fatalf("an override replaces --interfaces, got %v", got)
+	}
+	if got := v.interfacesFor(follows); len(got) != 1 || got[0] != "auto" {
+		t.Fatalf("a host without a value keeps --interfaces, got %v", got)
+	}
+}
+
+func TestANoneHostListsItsNicsOnlyAndItsFailureIsNotAPlanFailure(t *testing.T) {
+	config := planConfig()
+	config.HostInterfaces = []nicplan.HostInterfaces{{Host: "127.0.0.1", Value: nicplan.None}}
+	v, mockCmd := nicVerifier(config, map[string]MockCommandResponse{
+		nicInventoryCmd: {Stdout: nicFixture(t, "sc26-inventory.json")},
+	})
+	result := readyResult()
+	v.stepListNics(v.hosts[0], result)
+	if result.NicPlanned || result.NICs == nil || result.NICs.Output == nil || result.NICs.Output.Plan != nil {
+		t.Fatalf("result = %+v", result)
+	}
+	if executed(mockCmd, nicPolicyRuleCmd) {
+		t.Fatal("policy rules are read only for a plan")
+	}
+	if overall := v.assessNode(result); !overall.Passed {
+		t.Fatalf("Overall = %+v", overall)
+	}
+}

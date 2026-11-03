@@ -116,8 +116,10 @@ type WorkloadSummary struct {
 	CleanupEnabled  bool
 	KeepScenario    bool
 	SliceEndpoints  bool
-	// Interfaces is the run's --interfaces value; EventLoops describes its NIC-set reports.
+	// Interfaces is the run's --interfaces value; HostInterfaces its --host-interfaces values;
+	// EventLoops describes its NIC-set reports.
 	Interfaces        []string
+	HostInterfaces    string
 	EventLoops        string
 	MixedDistribution MixedDistribution
 	// S3Driver is the stored S3 driver selection; empty for a custom scenario and for results
@@ -390,6 +392,7 @@ func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 		KeepScenario:      params.KeepScenario,
 		SliceEndpoints:    params.SliceEndpoints,
 		Interfaces:        append([]string(nil), params.Interfaces...),
+		HostInterfaces:    hostInterfacesLine(data.Params.HostInterfaces),
 		EventLoops:        nicEventLoops(data.Params.NicEngines, data.StepOrder, nicReportsIncomplete(data)),
 		MixedDistribution: mixedDistributionFromParams(workloadType, params),
 		S3Driver:          params.S3Driver,

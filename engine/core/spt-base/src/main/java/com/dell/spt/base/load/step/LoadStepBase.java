@@ -124,12 +124,14 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	/** Checks the requested NIC set's entries before any bucket or engine work starts. */
 	private void validateNicSetConfiguration() {
 		NicSetConfig.interfaces(this.config.configVal("storage"));
+		NicSetConfig.nodeInterfaces(this.config);
 		if (this.ctxConfigs != null) {
 			this.ctxConfigs.forEach(context -> {
 				final var merged = TreeUtil.reduceForest(
 								List.of(Config.deepToMap(this.config), Config.deepToMap(context)));
-				NicSetConfig.interfaces(
-								new BasicConfig(this.config.pathSep(), this.config.schema(), merged).configVal("storage"));
+				final var effective = new BasicConfig(this.config.pathSep(), this.config.schema(), merged);
+				NicSetConfig.interfaces(effective.configVal("storage"));
+				NicSetConfig.nodeInterfaces(effective);
 			});
 		}
 	}
@@ -364,7 +366,9 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			if (t > 0) {
 				timeLimitSec.set(t);
 			}
-			startTimeSec = TimeUnit.MILLISECONDS.toSeconds(System.currentTimeMillis());
+			if (!loadIntervalDeferred()) {
+				startTimeSec = TimeUnit.MILLISECONDS.toSeconds(System.currentTimeMillis());
+			}
 
 		} catch (final Throwable cause) {
 			throwUncheckedIfInterrupted(cause);
@@ -379,6 +383,23 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			LogUtil.exception(Level.WARN, cause, "{} step failed to start", loadStepId());
 		}
 
+		if (!loadIntervalDeferred()) {
+			startMetricsContexts();
+		}
+	}
+
+	/** Whether the Load Interval starts later than {@link #doStart()}, at the admission barrier's release. */
+	protected boolean loadIntervalDeferred() {
+		return false;
+	}
+
+	/** Starts a deferred Load Interval: the elapsed time and the metrics contexts, with their steady cuts. */
+	protected final void startLoadInterval() {
+		startTimeSec = TimeUnit.MILLISECONDS.toSeconds(System.currentTimeMillis());
+		startMetricsContexts();
+	}
+
+	private void startMetricsContexts() {
 		// The API is initialized before /run defaults arrive. Bind identity to the
 		// effective step configuration so reused APIs and remote workers report it.
 		final String clusterId = RunIdentityConfig.clusterId(config);

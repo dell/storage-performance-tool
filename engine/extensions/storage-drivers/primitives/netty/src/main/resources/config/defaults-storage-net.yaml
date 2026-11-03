@@ -58,4 +58,6 @@ storage:
       connAttemptsLimit: 0
       port: 7
       slice: false
+    # Host overrides by node address or entry (see the base defaults).
+    nodeInterfaces: {}
     writeSpinCount: 1

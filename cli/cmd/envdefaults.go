@@ -38,6 +38,7 @@ func markEnvApplied(cmd *cobra.Command, flag, value string) {
 //	S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKETS (CSV) or S3_BUCKET, S3_REGION
 //	HOSTS (equivalent to --test-hosts)
 //	SPT_INTERFACES (equivalent to --interfaces)
+//	SPT_HOST_INTERFACES (equivalent to --host-interfaces, with ; between hosts)
 func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 	// setFromEnv sets a flag's value and records that it came from env, not
 	// an explicit CLI argument (see markEnvApplied).
@@ -171,6 +172,9 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 	}
 
 	_ = setIf(flagInterfaces, constants.EnvInterfaces)
+	if err := applyHostInterfacesEnv(cmd); err != nil {
+		return err
+	}
 
 	// RDMA string settings
 	_ = setIf("rdma-local-ip", constants.EnvRdmaLocalIP)
@@ -326,8 +330,13 @@ func applyEnvDefaultsToVerifyFlags(cmd *cobra.Command) error {
 			}
 		}
 	}
+	if err := applyHostInterfacesEnv(cmd); err != nil {
+		return err
+	}
 	// Listing NICs needs no endpoints or concurrency, so their variables are read only for a plan.
-	if interfaces, _ := cmd.Flags().GetString(flagInterfaces); strings.TrimSpace(interfaces) != "" {
+	interfaces, _ := cmd.Flags().GetString(flagInterfaces)
+	hostOverrides, _ := cmd.Flags().GetStringArray(flagHostInterfaces)
+	if strings.TrimSpace(interfaces) != "" || len(hostOverrides) > 0 {
 		if err := applyNicPlanEnvDefaults(cmd); err != nil {
 			return err
 		}

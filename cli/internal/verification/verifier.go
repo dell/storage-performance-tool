@@ -1067,7 +1067,7 @@ func (v *Verifier) assessNode(result *NodeResult) Check {
 	}
 
 	// With --interfaces, a host where the step would fail fails; warnings do not.
-	if len(v.config.Interfaces) > 0 && !result.NicPlan.Passed && !result.NicPlan.Warning {
+	if result.NicPlanned && !result.NicPlan.Passed && !result.NicPlan.Warning {
 		return Check{
 			Passed:  false,
 			Message: "NIC plan: " + result.NicPlan.Message,

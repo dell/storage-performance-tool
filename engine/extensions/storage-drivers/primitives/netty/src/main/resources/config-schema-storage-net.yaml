@@ -34,4 +34,5 @@ storage:
       connAttemptsLimit: int
       port: int
       slice: boolean
+    nodeInterfaces: map
     writeSpinCount: int

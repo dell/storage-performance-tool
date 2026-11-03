@@ -22,12 +22,15 @@ import (
 // went unread. A row the engine keeps for its retention period cannot fall between two reads
 // that are closer together than that.
 type driverStatsCollector struct {
-	mu      sync.Mutex
-	now     func() time.Time
-	steps   map[string]*driverstats.Stats
-	refused map[string]error
-	active  map[string]struct{}
-	worked  map[string]struct{}
+	mu    sync.Mutex
+	now   func() time.Time
+	steps map[string]*driverstats.Stats
+	// preparations holds the preparation times seen, by step. They are not statistics: a refusal
+	// of a step's statistics or a gap in the reads says nothing about them.
+	preparations map[string]*results.Preparation
+	refused      map[string]error
+	active       map[string]struct{}
+	worked       map[string]struct{}
 	// lastRead is when the latest successful read began; zero before the first one when the
 	// collector was not started with newDriverStatsCollector.
 	lastRead   time.Time
@@ -58,6 +61,7 @@ func (c *driverStatsCollector) observe(
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.read(start)
+	c.keepPreparations(observation.Preparations)
 	for stepID, stats := range observation.Steps {
 		c.keep(stepID, stats)
 	}
@@ -145,6 +149,30 @@ func (c *driverStatsCollector) read(start time.Time) {
 		}
 	}
 	c.lastRead = start
+}
+
+func (c *driverStatsCollector) keepPreparations(preparations map[string]*results.Preparation) {
+	if len(preparations) == 0 {
+		return
+	}
+	if c.preparations == nil {
+		c.preparations = make(map[string]*results.Preparation, len(preparations))
+	}
+	maps.Copy(c.preparations, preparations)
+}
+
+// preparationsWith returns the preparation times observed during the run and those of the capture
+// at its end. A nil collector observed nothing.
+func (c *driverStatsCollector) preparationsWith(final *results.DriverStatsCapture) map[string]*results.Preparation {
+	if c == nil {
+		c = &driverStatsCollector{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if final != nil {
+		c.keepPreparations(final.Preparations)
+	}
+	return maps.Clone(c.preparations)
 }
 
 func (c *driverStatsCollector) keep(stepID string, stats *driverstats.Stats) {

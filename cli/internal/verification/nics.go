@@ -17,7 +17,7 @@ import (
 // stepListNics lists the host's NICs in the verify container and, with --interfaces, checks
 // the host's NIC plan. Without --interfaces the listing is information only.
 func (v *Verifier) stepListNics(host *hostparse.HostInfo, result *NodeResult) {
-	planning := len(v.config.Interfaces) > 0
+	planning := len(v.interfacesFor(host)) > 0
 	if v.config.ShowProgress {
 		if planning {
 			fmt.Print("  ⏳ Planning NICs in container...")
@@ -29,6 +29,7 @@ func (v *Verifier) stepListNics(host *hostparse.HostInfo, result *NodeResult) {
 	result.NICs = listing
 	if planning {
 		result.NicPlan = check
+		result.NicPlanned = true
 	}
 	if v.config.ShowProgress {
 		switch {
@@ -50,7 +51,7 @@ func (v *Verifier) listNics(host *hostparse.HostInfo, containerID string) (*NicL
 		return &NicListing{Note: message}, Check{Passed: false, Message: message, Duration: v.timeProvider.Since(start)}
 	}
 
-	planning := len(v.config.Interfaces) > 0
+	planning := len(v.interfacesFor(host)) > 0
 	options := nicplan.RenderOptions{
 		Bridge:  v.config.NetworkMode == constants.BridgeNetworkMode,
 		Threads: v.config.Threads,
@@ -94,8 +95,9 @@ func (v *Verifier) listNics(host *hostparse.HostInfo, containerID string) (*NicL
 func (v *Verifier) runNicPlan(host *hostparse.HostInfo, containerID string, endpoints []string) (*nicplan.Output, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), constants.NicPlanTimeoutSecs*time.Second)
 	defer cancel()
+	interfaces := v.interfacesFor(host)
 	command := append([]string{constants.DockerCommand, dockerExecCommand, containerID},
-		nicplan.Args(v.config.Interfaces, endpoints, v.config.UseRdma)...)
+		nicplan.Args(interfaces, endpoints, v.config.UseRdma)...)
 	stdout, stderr, err := v.cmdExecutor.ExecuteCommand(ctx, host, command)
 	if err != nil {
 		// docker exec can write the runtime's diagnostic to stdout, leaving stderr empty.
@@ -109,10 +111,18 @@ func (v *Verifier) runNicPlan(host *hostparse.HostInfo, containerID string, endp
 		return nil, fmt.Errorf("spt-nic-plan failed: %w%s", err, detail)
 	}
 	output, err := nicplan.Parse([]byte(stdout))
-	if err == nil && len(v.config.Interfaces) > 0 && output.Plan == nil {
+	if err == nil && len(interfaces) > 0 && output.Plan == nil {
 		return nil, errors.New("spt-nic-plan returned no plan")
 	}
 	return output, err
+}
+
+// interfacesFor returns the NIC set to plan on the host: its --host-interfaces value, or --interfaces.
+func (v *Verifier) interfacesFor(host *hostparse.HostInfo) []string {
+	if override, ok := nicplan.ForHost(v.config.HostInterfaces, host.Host); ok {
+		return override.Entries
+	}
+	return v.config.Interfaces
 }
 
 // sliceOf returns the host's slice and the slice count: run order, the entry node first.

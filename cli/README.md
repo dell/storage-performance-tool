@@ -608,6 +608,7 @@ Multi-endpoint options:
 - `--endpoints`: Comma-separated list (or repeat the flag) to target multiple S3 endpoints.
 - `--slice-endpoints`: In distributed runs, partition the endpoint list across Spt nodes instead of having every node target all endpoints.
 - `--interfaces`: Spread each engine's S3 connections over a NIC set: `auto`, or a comma-separated list of interface names, IPv4 addresses or RDMA devices (env: `SPT_INTERFACES`; default Netty S3 driver and host networking). See [Network Interfaces](docs/NETWORK_INTERFACES.md)
+- `--host-interfaces`: Replace `--interfaces` on one host: `<host>=<value>`, with `<value>` `auto`, a list, or `none` to turn NICs off there. Repeatable, also from `SPT_HOST_INTERFACES`; see [Host overrides](docs/NETWORK_INTERFACES.md#host-overrides).
 
 **Headless Mode Flags:**
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/nicplan"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
@@ -88,6 +89,17 @@ func Generate(ctx context.Context, opts Options) (*Generated, error) {
 		return generated, newClassifiedError(failureInvalidInterfaces, err.Error(), err)
 	}
 	params.Interfaces = opts.Interfaces
+	if entries := nicplan.AnyNicSet(opts.HostInterfaces); len(entries) > 0 {
+		if err := scenario.ValidateInterfaces(entries, scenario.InterfacesTarget{
+			Source:            opts.HostInterfacesSource,
+			S3Driver:          opts.S3Driver,
+			WorkloadType:      params.WorkloadType,
+			EndpointSelection: params.EndpointSelection,
+		}); err != nil {
+			return generated, newClassifiedError(failureInvalidInterfaces, err.Error(), err)
+		}
+	}
+	params.HostInterfaces = opts.HostInterfaces
 	defaults, err := scenario.GenerateDefaults(params)
 	if err != nil {
 		return generated, newClassifiedError(failureReplayDefaultsGeneration, fmt.Sprintf("generate replay defaults: %v", err), err)

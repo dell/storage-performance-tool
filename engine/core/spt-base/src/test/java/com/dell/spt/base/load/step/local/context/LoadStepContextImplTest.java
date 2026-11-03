@@ -37,6 +37,7 @@ import com.dell.spt.base.item.op.list.ListedObject;
 import com.dell.spt.base.item.op.list.shard.ListShard;
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder;
 import com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorderImpl;
+import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilder;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilderImpl;
@@ -48,6 +49,7 @@ import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.logging.LogUtil;
+import com.dell.spt.base.storage.driver.AdmissionPreparable;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.StandaloneDeletePreparable;
 import com.dell.spt.base.storage.driver.ListOptions;
@@ -185,6 +187,94 @@ public class LoadStepContextImplTest {
 			verify((StandaloneDeletePreparable) driver, never()).prepareStandaloneDelete();
 			verify(generator).openAdmission();
 			verify(generator).start();
+		} finally {
+			context.close();
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private static StorageDriver<DataItem, Operation<DataItem>> barrierDriver() throws Exception {
+		final StorageDriver<DataItem, Operation<DataItem>> driver = mock(StorageDriver.class);
+		when(driver.operationLifecycle()).thenReturn(new OperationLifecycleTracker<>());
+		doNothing().when(driver).operationResultOutput(any());
+		return driver;
+	}
+
+	@SuppressWarnings("unchecked")
+	private static LoadGenerator<DataItem, Operation<DataItem>> barrierGenerator() throws Exception {
+		final LoadGenerator<DataItem, Operation<DataItem>> generator = mock(LoadGenerator.class);
+		when(generator.isNothingPendingRetry()).thenReturn(true);
+		return generator;
+	}
+
+	@Test
+	void theAdmissionBarrierHoldsTheDriverAndGeneratorUntilItsSteps() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final var driver = barrierDriver();
+		final var generator = barrierGenerator();
+		final var context = new LoadStepContextImpl<>(
+						"barrier-context", generator, driver, null, testConfig.configVal("load"), false);
+		try {
+			context.holdForAdmissionBarrier();
+			context.start();
+			verify(generator).holdAdmission();
+			verify(driver, never()).start();
+			verify(generator, never()).start();
+			verify(generator, never()).openAdmission();
+
+			context.prepareForAdmission(mock(AdmissionPreparable.Preparation.class));
+			verify(driver).start();
+			verify(generator, never()).start();
+			verify(generator, never()).openAdmission();
+
+			context.releaseAdmissionBarrier();
+			final var order = org.mockito.Mockito.inOrder(generator);
+			order.verify(generator).openAdmission();
+			order.verify(generator).start();
+		} finally {
+			context.close();
+		}
+	}
+
+	@Test
+	void aReleaseAfterTheStepClosedAdmissionDoesNotRestartTheGenerator() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final var driver = barrierDriver();
+		final var generator = barrierGenerator();
+		final var context = new LoadStepContextImpl<>(
+						"barrier-late-release", generator, driver, null, testConfig.configVal("load"), false);
+		try {
+			context.holdForAdmissionBarrier();
+			context.start();
+			context.prepareForAdmission(mock(AdmissionPreparable.Preparation.class));
+			context.closeOperationAdmissionForStepStop();
+
+			context.releaseAdmissionBarrier();
+
+			verify(generator, never()).openAdmission();
+			verify(generator, never()).start();
+		} finally {
+			context.close();
+		}
+	}
+
+	@Test
+	void theAdmissionBarrierPassesADriverStartFailureToItsCaller() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final var driver = barrierDriver();
+		final var failure = new RunTerminalException(
+						IntegrityTerminalException.Category.EXECUTION, "storage.net.interfaces: no route", null);
+		when(driver.start()).thenThrow(failure);
+		final var context = new LoadStepContextImpl<>(
+						"barrier-failure", barrierGenerator(), driver, null, testConfig.configVal("load"), false);
+		try {
+			context.holdForAdmissionBarrier();
+			context.start();
+			assertEquals(
+							failure,
+							assertThrows(
+											RunTerminalException.class,
+											() -> context.prepareForAdmission(mock(AdmissionPreparable.Preparation.class))));
 		} finally {
 			context.close();
 		}

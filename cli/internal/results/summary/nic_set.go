@@ -145,3 +145,18 @@ func nicEngineNicLoops(engine results.NicEngine) string {
 	}
 	return fmt.Sprintf("%d (%s × %d, %s)", engine.EventLoops, nics, *engine.EventLoopsPerNic, source)
 }
+
+// hostInterfacesLine is the Host interfaces bullet: each host's value as given, in host order, with
+// the separator SPT_HOST_INTERFACES uses.
+func hostInterfacesLine(values map[string]string) string {
+	hosts := make([]string, 0, len(values))
+	for host := range values {
+		hosts = append(hosts, host)
+	}
+	slices.Sort(hosts)
+	parts := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		parts = append(parts, host+"="+values[host])
+	}
+	return strings.Join(parts, "; ")
+}

@@ -91,7 +91,7 @@ final class NicAdmissionTest {
 	void concurrentEndsNeverLetANicPassItsLimit() throws Exception {
 		final var admission = NicAdmission.of(8, 4);
 		final var taken = new java.util.concurrent.LinkedBlockingQueue<Integer>();
-		final var over = new AtomicInteger();
+		var over = 0;
 		final var ended = new AtomicInteger();
 		final int attempts = 200_000;
 		final var releasers = Executors.newFixedThreadPool(4);
@@ -121,7 +121,7 @@ final class NicAdmissionTest {
 					continue;
 				}
 				if (admission.count(nic) > admission.limit(nic)) {
-					over.incrementAndGet();
+					over++;
 				}
 				taken.add(nic);
 				i++;
@@ -130,7 +130,7 @@ final class NicAdmissionTest {
 		} finally {
 			releasers.shutdownNow();
 		}
-		assertEquals(0, over.get());
+		assertEquals(0, over);
 		for (var nic = 0; nic < admission.size(); nic++) {
 			assertEquals(0, admission.count(nic));
 		}

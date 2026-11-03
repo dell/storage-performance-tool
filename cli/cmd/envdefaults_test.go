@@ -58,6 +58,7 @@ func clearEnvDefaultsTestEnv(t *testing.T) {
 		"HOSTS",
 		"THREADS",
 		constants.EnvInterfaces,
+		constants.EnvHostInterfaces,
 		constants.EnvSkipImagePull,
 		constants.EnvS3AuthVersion,
 		constants.EnvS3Region,

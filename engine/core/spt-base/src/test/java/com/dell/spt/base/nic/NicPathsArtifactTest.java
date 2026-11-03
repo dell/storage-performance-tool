@@ -1,6 +1,7 @@
 package com.dell.spt.base.nic;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.StringReader;
 import java.util.Arrays;
@@ -59,6 +60,13 @@ class NicPathsArtifactTest {
 						end.get("failed"), end.get("interrupted"), end.get("unresolved"), end.get("bytes")));
 		assertEquals("true", end.get("complete"));
 		assertEquals("", end.get("missing_contexts"));
+	}
+
+	@Test
+	void aStepThatFailedAtTheBarrierIsIncompleteEvenWithCompleteRows() {
+		final String rows = NicPathsArtifact.rows(7, "step", "worker", List.of(), false);
+		assertTrue(rows.contains(",false,"), rows);
+		assertTrue(NicPathsArtifact.rows(7, "step", "worker", List.of(), true).contains(",true,"));
 	}
 
 	@Test
