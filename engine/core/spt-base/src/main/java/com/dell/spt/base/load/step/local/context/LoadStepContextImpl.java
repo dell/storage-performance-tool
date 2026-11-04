@@ -605,7 +605,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			// counts advance. Do not fall through to generic recycle completion.
 			return isListNamespaceExhausted();
 		}
-		if (standaloneDeleteDurationMode && generator.isStopped()) {
+		if (standaloneDeleteDurationMode && generator.isStopped() && nothingAwaitsDispatch()) {
 			Loggers.MSG.debug(
 							"{}: done because the standalone DELETE inventory can no longer schedule requests",
 							id);
@@ -652,12 +652,40 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	public long schedulingExhaustedAtNanos() {
-		return generator.schedulingExhaustedAtNanos();
+		return standaloneDeleteDurationMode
+						? durationInventoryExhaustionNanos().orElse(Long.MAX_VALUE)
+						: generator.schedulingExhaustedAtNanos();
 	}
 
 	@Override
 	public OptionalLong schedulingExhaustionNanos() {
-		return generator.schedulingExhaustionNanos();
+		return standaloneDeleteDurationMode
+						? durationInventoryExhaustionNanos()
+						: generator.schedulingExhaustionNanos();
+	}
+
+	/**
+	 * Whether a duration slice has visibly run out of inventory, so a run with too few objects can end
+	 * without waiting for its deadline: the generator has handed over everything, and every request it
+	 * generated has been dispatched. The handoff alone doesn't show that, because the driver's input
+	 * queue can hold the whole inventory within moments of the start.
+	 *
+	 * <p>A refused or recovered request is never counted as dispatched, DELETE has no retries or recycling,
+	 * and the tracker belongs to this context's driver alone, so each generated request counts at most
+	 * once. So this can't report a slice with work left, however its threads interleave. It can be late,
+	 * or miss, so {@link #durationInventoryRanOut()} decides from the final counts.
+	 */
+	private OptionalLong durationInventoryExhaustionNanos() {
+		final OptionalLong handoff = generator.schedulingExhaustionNanos();
+		if (handoff.isEmpty() || operationLifecycle.dispatchedCount() < generator.generatedOpCount()) {
+			return OptionalLong.empty();
+		}
+		return handoff;
+	}
+
+	/** Whether everything handed to the driver has left its queue. The scan runs only once the count is zero. */
+	private boolean nothingAwaitsDispatch() {
+		return operationLifecycle.awaitingDispatchCount() == 0 && !operationLifecycle.hasUndispatchedOperations();
 	}
 
 	private boolean isDoneCountLimit() {
@@ -1941,6 +1969,13 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 							"Standalone DELETE terminal object lifecycle does not reconcile",
 							null);
 		}
+	}
+
+	@Override
+	public final boolean durationInventoryRanOut() {
+		return standaloneDeleteDurationMode
+						&& durationIntervalStarted.get()
+						&& deleteObjectLifecycle().unattempted() == 0;
 	}
 
 	private boolean acceptStandaloneDeleteResult(final O operation) {

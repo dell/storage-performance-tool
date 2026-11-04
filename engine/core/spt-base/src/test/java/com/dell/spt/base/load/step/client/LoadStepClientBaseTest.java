@@ -528,6 +528,29 @@ class LoadStepClientBaseTest {
 		assertTrue(abortFailure.getMessage().contains("does not support"));
 	}
 
+	/** A worker's final counts overrule the deadline verdict the controller already holds, and keep their message. */
+	@Test
+	void finalCountsFoundExhaustedOverruleAReachedDeadlineVerdict() throws Exception {
+		final TestLoadStepClient client = new TestLoadStepClient(
+						durationConfig(), extensions, ctxConfigs, mockMetricsManager);
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenReturn(false);
+		when(slice.durationAwaitStatus()).thenReturn(DurationAwaitStatus.REACHED_DEADLINE);
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		doThrow(new IntegrityTerminalException(
+						IntegrityTerminalException.Category.EXECUTION,
+						"Standalone DELETE inventory slice exhausted before the requested duration"))
+						.when(slice).validateTerminalStateForStepStop();
+		addStepSlice(client, slice);
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> client.await(1, TimeUnit.MILLISECONDS));
+
+		assertTrue(failure.getMessage().contains("exhausted before the requested duration"), failure.getMessage());
+		assertDoesNotThrow(client::close);
+	}
+
 	@Test
 	void terminalValidationFailureInvalidatesButStillClosesEveryReachableSlice() throws Exception {
 		final Config config = durationConfig();

@@ -840,6 +840,11 @@ public final class OperationLifecycleTracker<O extends Operation<? extends Item>
 		return enabled ? inFlight.get() : 0;
 	}
 
+	/** Operations dispatched so far. Counter-only, so a poll can read it without a traversal. */
+	public long dispatchedCount() {
+		return enabled ? dispatched.sum() : 0;
+	}
+
 	/**
 	 * Operations in custody that have not been dispatched (generator-buffered or driver-queued), or
 	 * -1 when tracking is disabled. Queued child requests of a composite operation count; children
