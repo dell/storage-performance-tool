@@ -102,6 +102,9 @@ func (a *app) writeRunRecord(job map[string]any) error {
 	if err = os.WriteFile(tmp, b, 0600); err != nil {
 		return err
 	}
+	if err = os.Chmod(tmp, 0600); err != nil {
+		return err
+	}
 	return os.Rename(tmp, path)
 }
 

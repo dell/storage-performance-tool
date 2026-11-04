@@ -59,6 +59,12 @@ The server listens on `127.0.0.1:8000` by default. For remote access, use SSH po
 
 The dashboard enforces bounded workload choices and allows one dashboard-managed run at a time. Run results are stored on the host in SPT's results directory.
 
+### Saved history and console logs
+
+The dashboard retains the newest live measurements within both a 1,500-sample limit and a 4,000,000-byte JSON limit. It reloads usable saved rows after a restart without duplicating the last measurement. Damaged rows are skipped; malformed or oversized snapshot files are ignored. If a history save fails, measurements remain available in memory and saving is retried on later polls, including polls with no new measurements. History saving is best-effort and depends on the state directory remaining writable.
+
+Each dashboard console log keeps the first 2,000,000 bytes. Output beyond that limit is consumed without being stored, so a full log does not block SPT from finishing. New logs, latest-job state, and per-run outcome records use owner-only file permissions on Unix.
+
 ## Monitor an existing SPT run
 
 Use **Connect to active run** to monitor a run started separately with the SPT CLI. Choose its entry machine from the client machines saved under Storage configuration. The dashboard reads the documented SPT `GET /status` and `GET /metrics/json` APIs on port `9999`, refreshes them while attached, and keeps a bounded sample history for the charts. The connection is read only: it does not launch or stop an SPT process. If SPT is not running or its API cannot be reached, the page shows the endpoint error and offers a retry. Disconnect returns the dashboard to its local state.
