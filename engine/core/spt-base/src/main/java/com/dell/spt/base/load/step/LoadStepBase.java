@@ -294,8 +294,14 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	protected void afterSteadyWindowsClosed() {}
 
 	private void recordRunFailure(final Throwable failure) {
-		// A terminal failure wrapping the recorded one adds nothing, and suppressing it would make a cycle.
-		if (failure == null || failure == runFailure || (runFailure != null && failure.getCause() == runFailure)) {
+		if (failure == null || failure == runFailure) {
+			return;
+		}
+		// A terminal failure wrapping the recorded one adds only what it suppressed, and keeping it would make a cycle.
+		if (runFailure != null && failure.getCause() == runFailure) {
+			for (final Throwable suppressed : failure.getSuppressed()) {
+				recordRunFailure(suppressed);
+			}
 			return;
 		}
 		if (runFailure == null) {

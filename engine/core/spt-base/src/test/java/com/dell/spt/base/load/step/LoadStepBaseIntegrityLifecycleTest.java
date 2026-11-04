@@ -90,6 +90,24 @@ class LoadStepBaseIntegrityLifecycleTest {
 	}
 
 	@Test
+	void aTypedCleanupFailureBehindAStartFailureStaysOnTheRecord() {
+		final Config config = metadataConfig();
+		config.val("storage-integrity-mode", "none");
+		final var startFailure = new IllegalStateException("start failed");
+		final var cleanup = new RunTerminalException(
+						IntegrityTerminalException.Category.CLEANUP, "cleanup failed", null);
+		final var step = new TestStep(config, startFailure, false, true, cleanup);
+
+		final var failure = assertThrows(RunTerminalException.class, step::run);
+
+		assertEquals(1, failure.getSuppressed().length);
+		assertEquals("cleanup failed", failure.getSuppressed()[0].getMessage());
+		assertSame(startFailure, step.runFailure());
+		assertEquals(1, step.runFailure().getSuppressed().length);
+		assertEquals("cleanup failed", step.runFailure().getSuppressed()[0].getMessage());
+	}
+
+	@Test
 	void genericTerminalStartFailureEscapesOrdinaryStepWithStepIdentity() {
 		final Config config = metadataConfig();
 		config.val("storage-integrity-mode", "none");

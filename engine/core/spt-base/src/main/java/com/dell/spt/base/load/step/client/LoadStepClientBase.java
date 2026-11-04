@@ -613,10 +613,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 		} catch (final RunTerminalException e) {
 			if (integrityConfig.enabled()) {
-				throw terminalFailure(
-								IntegrityTerminalException.Category.INPUT,
-								"failed to validate or distribute integrity input",
-								e);
+				// This message is already public, and names what's wrong with the input.
+				throw terminalFailure(IntegrityTerminalException.Category.INPUT, e.getMessage(), e);
 			}
 			throw e;
 		} catch (final IllegalConfigurationException e) {
@@ -804,6 +802,22 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		return file == null || file.isEmpty() ? null : file;
 	}
 
+	/** This message is public, so it counts the engine and leaves its address and the cause to the log. */
+	RunTerminalException sliceStartFailure(final Exception cause, final int slice, final int sliceCount) {
+		final var engine = "engine " + (slice + 1) + " of " + sliceCount;
+		final var typed = RunTerminalException.find(cause);
+		if (typed == null) {
+			return new RunTerminalException(
+							IntegrityTerminalException.Category.EXECUTION,
+							loadStepId(),
+							engine + " did not start; see the engine log",
+							cause);
+		}
+		return sliceCount == 1
+						? typed.withStepId(loadStepId())
+						: new RunTerminalException(typed.category(), loadStepId(), engine + ": " + typed.getMessage(), cause);
+	}
+
 	private void initAndStartStepSlices(
 					final List<String> nodeAddrs, final List<Config> configSlices, final List<List<Config>> ctxConfigsSlices,
 					final MetricsManager metricsManager, final AdmissionBarrier barrier) {
@@ -866,16 +880,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 									e);
 				}
 				// One engine missing would leave a lower load reported as the one asked for.
-				final var typed = RunTerminalException.find(e);
-				if (typed != null) {
-					throw typed.withStepId(loadStepId());
-				}
-				// This message is public, so it counts the engine and leaves its address and the cause to the log.
-				throw new RunTerminalException(
-								IntegrityTerminalException.Category.EXECUTION,
-								loadStepId(),
-								"engine " + (i + 1) + " of " + sliceCount + " did not start; see the engine log",
-								e);
+				throw sliceStartFailure(e, i, sliceCount);
 			}
 		}
 	}

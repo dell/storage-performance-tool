@@ -142,6 +142,21 @@ class LoadStepClientBaseTest {
 	}
 
 	@Test
+	void aFailureOnOneEngineOfSeveralSaysWhichEngine() throws Exception {
+		final var client = new TestLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
+		final var typed = new RunTerminalException(
+						IntegrityTerminalException.Category.INPUT, "items file line 7 is blank", null);
+		final var failure = client.sliceStartFailure(new IllegalStateException("wrapped", typed), 1, 2);
+		assertEquals(IntegrityTerminalException.Category.INPUT, failure.category());
+		assertEquals("engine 2 of 2: items file line 7 is blank", failure.getMessage());
+		assertEquals(client.loadStepId(), failure.stepId());
+
+		final var untyped = client.sliceStartFailure(new IllegalStateException("host:1099 refused"), 1, 3);
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, untyped.category());
+		assertEquals("engine 2 of 3 did not start; see the engine log", untyped.getMessage());
+	}
+
+	@Test
 	void aStopThatCutsASliceStartShortStaysAStop() throws Exception {
 		final LoadStep slice = mock(LoadStep.class);
 		when(slice.start()).thenAnswer(call -> {
