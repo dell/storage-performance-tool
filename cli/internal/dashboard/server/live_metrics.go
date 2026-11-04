@@ -231,7 +231,7 @@ func boundedHistory(samples []map[string]any) []map[string]any {
 }
 
 func historySampleSignature(sample map[string]any) string {
-	keys := []string{"step_id", keyCumulativeOps, keyCountFailed, keyIntervalIOPS, metricBandwidth, metricP50Latency}
+	keys := []string{keyStepID, keyCumulativeOps, keyCountFailed, keyIntervalIOPS, metricBandwidth, metricP50Latency}
 	values := make([]any, 0, len(keys))
 	for _, key := range keys {
 		values = append(values, sample[key])
@@ -255,10 +255,6 @@ func (a *app) rememberLive(metrics map[string]any) map[string]any {
 	for _, raw := range metrics[keySamples].([]map[string]any) {
 		if _, ok := encodeHistorySample(raw); !ok {
 			continue
-		keys := []string{keyStepID, keyCumulativeOps, keyCountFailed, keyIntervalIOPS, metricBandwidth, metricP50Latency}
-		vals := make([]any, 0, len(keys))
-		for _, k := range keys {
-			vals = append(vals, raw[k])
 		}
 		sig := historySampleSignature(raw)
 		if sig != a.liveSignature {
