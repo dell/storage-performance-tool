@@ -22,6 +22,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.spy;
 
+import com.dell.spt.base.storage.driver.PoolDemandDriver;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
@@ -46,6 +47,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -121,58 +123,78 @@ final class S3RdmaNicSetLaneTest {
 	}
 
 	@Test
-	void eachLaneKeepsToItsNicsNodeBeforeItsFirstTask(@TempDir final Path nodes) throws Exception {
+	void eachPoolIsAllocatedOnItsNicsNodeAndTheLaneThenGoesBack(@TempDir final Path nodes) throws Exception {
 		writeNode(nodes, 0, "0-3");
 		writeNode(nodes, 1, "4,6");
 		final var driver = stub.driver(RdmaNicLoopback.root(rdma(false, true, 1), stub.listeners(2), NICS.subList(0, 2), 2));
 		resources.add(driver);
 		driver.numaNodes = nodes;
-		final var placedBeforeRegistering = new CopyOnWriteArraySet<Boolean>();
-		stub.transportSetup = transport -> transport.setBeforeRegister(
-						() -> placedBeforeRegistering.add(Thread.currentThread().equals(transport.getConfinedThread())));
+		final var cpusWhenRegistering = new CopyOnWriteArrayList<int[]>();
+		stub.transportSetup = transport -> transport.setBeforeRegister(() -> cpusWhenRegistering.add(transport.currentThreadCpus()));
+		final int[] all = {0, 1, 2, 3, 4, 5, 6, 7
+		};
 
 		try (final var log = new MessageLog()) {
 			final var run = RdmaNicLoopback.started(driver);
-			waitFor(() -> stub.transport(0).getConfinedThread() != null && stub.transport(1).getConfinedThread() != null, "both lanes placed");
-			assertEquals(RdmaPreparationLane.threadName("rdma-nic-test", NICS.get(0)), stub.transport(0).getConfinedThread().getName());
-			assertEquals(RdmaPreparationLane.threadName("rdma-nic-test", NICS.get(1)), stub.transport(1).getConfinedThread().getName());
-			assertArrayEquals(new int[]{0, 1, 2, 3
-			}, stub.transport(0).getConfinedCpus());
-			assertArrayEquals(new int[]{4, 6
-			}, stub.transport(1).getConfinedCpus());
-
 			final int size = 4 << 20;
 			assertEquals(Operation.Status.SUCC, run.executeAlone(op(OpType.CREATE, "placed-0", size)).status());
 			assertEquals(Operation.Status.SUCC, run.executeAlone(op(OpType.CREATE, "placed-1", size)).status());
 
-			assertEquals(Set.of(true), placedBeforeRegistering, "every registration ran on the placed lane");
-			assertEquals(2, log.matching("preparation lane placed on NUMA node").size());
+			assertArrayEquals(new int[][]{{0, 1, 2, 3
+					}, all
+			}, stub.transport(0).getCpusSet().toArray(new int[0][]));
+			assertArrayEquals(new int[][]{{4, 6
+					}, all
+			}, stub.transport(1).getCpusSet().toArray(new int[0][]));
+			assertArrayEquals(new int[][]{all, all
+			}, cpusWhenRegistering.toArray(new int[0][]), "back before it registers");
+			assertEquals(1, log.matching("NIC " + NICS.get(0) + ": pool buffers are allocated on the CPUs of NUMA node 0").size());
+			assertEquals(1, log.matching("NIC " + NICS.get(1) + ": pool buffers are allocated on the CPUs of NUMA node 1").size());
 		}
 	}
 
 	@Test
-	void aRefusedPlacementWarnsAndTheLaneStillPrepares(@TempDir final Path nodes) throws Exception {
+	void aPrewarmedPoolIsPlaced(@TempDir final Path nodes) throws Exception {
 		writeNode(nodes, 0, "0-3");
 		writeNode(nodes, 1, "4-7");
-		assertPlacementFailureLeavesTheLaneWorking(nodes, transport -> transport.setConfineResult(1), "the kernel refused, errno 1");
+		final var driver = stub.driver(RdmaNicLoopback.root(rdma(false, true, 1), stub.listeners(1), NICS.subList(0, 1), 2));
+		resources.add(driver);
+		driver.numaNodes = nodes;
+		final var run = RdmaNicLoopback.started(driver);
+		final int[] all = {0, 1, 2, 3, 4, 5, 6, 7
+		};
+
+		final var results = run.driver().startPrewarm(List.of(new PoolDemandDriver.PrewarmOrder(NICS.get(0), 2, 4 << 20)));
+		assertEquals(2, results.get(0).get(10, TimeUnit.SECONDS).buffers());
+
+		assertArrayEquals(new int[][]{{0, 1, 2, 3
+				}, all, {0, 1, 2, 3
+				}, all
+		}, stub.transport(0).getCpusSet().toArray(new int[0][]));
 	}
 
 	@Test
-	void aNodeWithNoCpuOpenToTheProcessWarnsAndTheLaneStillPrepares(@TempDir final Path nodes) throws Exception {
-		writeNode(nodes, 0, "0-3");
-		writeNode(nodes, 1, "4-7");
-		assertPlacementFailureLeavesTheLaneWorking(nodes, transport -> transport.setConfineResult(RdmaLanePlacement.NO_CPU_ALLOWED), "may use none of its CPUs");
+	void aRefusedPlacementWarnsOnceAndThePoolStillWorks(@TempDir final Path nodes) throws Exception {
+		assertPlacementFailureLeavesThePoolWorking(nodes, transport -> transport.setSetCpusResults(1), "the kernel refused, errno 1");
 	}
 
 	@Test
-	void aFailingPlacementCallWarnsAndTheLaneStillPrepares(@TempDir final Path nodes) throws Exception {
-		writeNode(nodes, 0, "0-3");
-		writeNode(nodes, 1, "4-7");
-		assertPlacementFailureLeavesTheLaneWorking(nodes, transport -> transport.setConfineFailure(new IllegalStateException("no library")), "no library");
+	void aNodeWithNoCpuOpenToTheThreadWarnsOnceAndThePoolStillWorks(@TempDir final Path nodes) throws Exception {
+		assertPlacementFailureLeavesThePoolWorking(nodes, transport -> transport.setThreadCpus(8, 9), "may use none of its CPUs");
 	}
 
 	@Test
-	void anUnreadableCpuListWarnsAndTheLaneIsNotPlaced(@TempDir final Path nodes) throws Exception {
+	void aFailingPlacementCallWarnsOnceAndThePoolStillWorks(@TempDir final Path nodes) throws Exception {
+		assertPlacementFailureLeavesThePoolWorking(nodes, transport -> transport.setCpusFailure(new IllegalStateException("no library")), "no library");
+	}
+
+	@Test
+	void aRestorationRefusedWarnsOnceAndThePoolStillWorks(@TempDir final Path nodes) throws Exception {
+		assertPlacementFailureLeavesThePoolWorking(nodes, transport -> transport.setSetCpusResults(0, 22), "restoration, errno 22");
+	}
+
+	@Test
+	void anUnreadableCpuListWarnsAndThePoolIsNotPlaced(@TempDir final Path nodes) throws Exception {
 		writeNode(nodes, 0, "not a list");
 		writeNode(nodes, 1, "4-7");
 		final var driver = stub.driver(RdmaNicLoopback.root(rdma(false, true, 1), stub.listeners(1), NICS.subList(0, 1), 1));
@@ -184,7 +206,7 @@ final class S3RdmaNicSetLaneTest {
 			assertEquals(Operation.Status.SUCC, run.executeAlone(op(OpType.CREATE, "unread", 4 << 20)).status());
 			assertEquals(1, log.matching("could not be placed on NUMA node 0").size());
 		}
-		assertEquals(null, stub.transport(0).getConfinedThread());
+		assertEquals(List.of(), stub.transport(0).getCpusSet());
 	}
 
 	@Test
@@ -199,19 +221,25 @@ final class S3RdmaNicSetLaneTest {
 			assertEquals(Operation.Status.SUCC, run.executeAlone(op(OpType.CREATE, "one-node", 4 << 20)).status());
 			assertEquals(List.of(), log.matching("NUMA node"));
 		}
-		assertEquals(null, stub.transport(0).getConfinedThread());
+		assertEquals(List.of(), stub.transport(0).getCpusSet());
 	}
 
-	private void assertPlacementFailureLeavesTheLaneWorking(final Path nodes, final java.util.function.Consumer<FakeRdmaTransport> failure,
+	private void assertPlacementFailureLeavesThePoolWorking(final Path nodes, final java.util.function.Consumer<FakeRdmaTransport> failure,
 					final String why) throws Exception {
-		final var driver = stub.driver(RdmaNicLoopback.root(rdma(false, true, 1), stub.listeners(1), NICS.subList(0, 1), 1));
+		writeNode(nodes, 0, "0-3");
+		writeNode(nodes, 1, "4-7");
+		final var driver = stub.driver(RdmaNicLoopback.root(rdma(false, true, 2), stub.listeners(1), NICS.subList(0, 1), 2));
 		resources.add(driver);
 		driver.numaNodes = nodes;
 		stub.transportSetup = failure;
 
 		try (final var log = new MessageLog()) {
 			final var run = RdmaNicLoopback.started(driver);
-			assertEquals(Operation.Status.SUCC, run.executeAlone(op(OpType.CREATE, "unplaced", 4 << 20)).status());
+			final int size = 4 << 20;
+			run.nic(0).pool.acquire(size);
+			final var second = run.nic(0).pool.acquire(size);
+			assertTrue(second != null, "the pool went on allocating");
+			run.nic(0).pool.release(second);
 			final var warning = log.only("could not be placed on NUMA node 0");
 			assertTrue(warning.contains(why), warning);
 			assertTrue(warning.contains("NIC " + NICS.get(0)), warning);

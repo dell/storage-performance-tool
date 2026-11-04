@@ -1,6 +1,7 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 
 import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -69,10 +70,12 @@ public class FakeRdmaTransport extends RdmaTransport {
 	private volatile String strictDevice;
 	private volatile String strictAddress;
 
-	private volatile Thread confinedThread;
-	private volatile int[] confinedCpus;
-	private volatile int confineResult;
-	private volatile RuntimeException confineFailure;
+	private volatile int[] startingCpus = {0, 1, 2, 3, 4, 5, 6, 7
+	};
+	private final ThreadLocal<int[]> threadCpus = ThreadLocal.withInitial(() -> startingCpus.clone());
+	private final List<int[]> cpusSet = new java.util.concurrent.CopyOnWriteArrayList<>();
+	private final List<Integer> setCpusResults = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+	private volatile RuntimeException cpusFailure;
 
 	public FakeRdmaTransport(final RdmaConfig config) {
 		super(config);
@@ -99,29 +102,44 @@ public class FakeRdmaTransport extends RdmaTransport {
 	}
 
 	@Override
-	public int confineCurrentThread(final int[] cpus) {
-		confinedThread = Thread.currentThread();
-		confinedCpus = cpus.clone();
-		if (confineFailure != null) {
-			throw confineFailure;
+	public int[] currentThreadCpus() {
+		if (cpusFailure != null) {
+			throw cpusFailure;
 		}
-		return confineResult;
+		return threadCpus.get().clone();
 	}
 
-	public Thread getConfinedThread() {
-		return confinedThread;
+	@Override
+	public int setCurrentThreadCpus(final int[] cpus) {
+		if (cpusFailure != null) {
+			throw cpusFailure;
+		}
+		final int result = setCpusResults.isEmpty() ? 0 : setCpusResults.remove(0);
+		if (result == 0) {
+			threadCpus.set(cpus.clone());
+			cpusSet.add(cpus.clone());
+		}
+		return result;
 	}
 
-	public int[] getConfinedCpus() {
-		return confinedCpus;
+	/** Every mask set on this transport's threads, in order. */
+	public List<int[]> getCpusSet() {
+		return cpusSet;
 	}
 
-	public void setConfineResult(final int result) {
-		confineResult = result;
+	/** What the next calls to set a mask return, then 0. */
+	public void setSetCpusResults(final Integer... results) {
+		setCpusResults.addAll(List.of(results));
 	}
 
-	public void setConfineFailure(final RuntimeException failure) {
-		confineFailure = failure;
+	public void setCpusFailure(final RuntimeException failure) {
+		cpusFailure = failure;
+	}
+
+	/** The mask a thread starts with here. */
+	public void setThreadCpus(final int... cpus) {
+		threadCpus.set(cpus.clone());
+		startingCpus = cpus.clone();
 	}
 
 	@Override

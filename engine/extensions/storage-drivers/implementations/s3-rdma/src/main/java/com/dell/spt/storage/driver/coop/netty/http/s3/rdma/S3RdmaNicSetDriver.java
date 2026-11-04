@@ -109,8 +109,8 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 	long directMemoryLimitBytes = RdmaBufferPool.directMemoryLimitBytes();
 	/** Replaced only by tests of a lane that cannot start. */
 	Consumer<RdmaPreparationLane> laneStarter = RdmaPreparationLane::start;
-	/** Replaced only by tests of lane placement. */
-	Path numaNodes = RdmaLanePlacement.SYSFS_NODES;
+	/** Replaced only by tests of pool placement. */
+	Path numaNodes = RdmaPoolPlacement.SYSFS_NODES;
 
 	static <I extends Item, O extends Operation<I>> S3RdmaNicSetDriver<I, O> create(
 					final String stepId,
@@ -230,10 +230,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		try {
 			for (var i = 0; i < nics.size(); i++) {
 				final var nic = nics.get(i);
-				final var node = nicSet.numaNode(nic.name);
-				final var cpus = RdmaLanePlacement.cpusFor(stepId, nic.name, node, numaNodes);
-				lanes.add(new RdmaPreparationLane(stepId, nic, admission.limit(i), cause -> laneDied(nic, cause),
-								() -> RdmaLanePlacement.confine(stepId, nic, node, cpus)));
+				lanes.add(new RdmaPreparationLane(stepId, nic, admission.limit(i), cause -> laneDied(nic, cause)));
 			}
 			for (final var lane : lanes) {
 				laneStarter.accept(lane);
@@ -284,6 +281,9 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		final var pool = rdmaConfig().isBufferPoolEnabled()
 						? new RdmaBufferPool(transport, limits.cap(), limits.budgetBytes())
 						: null;
+		if (pool != null) {
+			pool.allocator = RdmaPoolPlacement.allocator(stepId, nic.name(), nicSet.numaNode(nic.name()), numaNodes, transport, pool.allocator);
+		}
 		final var copier = RdmaPayloadCopier.stoppable(rdmaConfig().getCopyThreads(), stepId + "-" + nic.name() + "-rdma-copy-");
 		final var opened = new RdmaNic(index, nic.name(), transport, pool, copier, new RdmaPathStats());
 		if (pool != null) {

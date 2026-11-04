@@ -16,7 +16,7 @@ import org.apache.logging.log4j.ThreadContext;
  * NIC's attempts one at a time. It allocates and first touches its NIC's buffers, copies PUT payloads
  * with its NIC's copier, makes the tokens and hands each attempt to its NIC's Path Pool. So a slow
  * allocation, registration or copy delays only this NIC, and the dispatch task keeps admitting for
- * the others. It keeps to its NIC's NUMA node, so its NIC's pool is first touched there (D77).
+ * the others.
  *
  * <p>The dispatch task only hands attempts over. The queue's capacity is the NIC's admission limit,
  * which holds every waiting attempt, so a hand-off never finds it full and the driver's queue is
@@ -43,7 +43,6 @@ final class RdmaPreparationLane {
 	private final String stepId;
 	private final BlockingQueue<Task> queue;
 	private final Consumer<Throwable> onDeath;
-	private final Runnable onStart;
 	private final Thread thread;
 	private volatile boolean cancelled;
 	private volatile boolean exited;
@@ -52,14 +51,12 @@ final class RdmaPreparationLane {
 	/**
 	 * @param capacity the attempts the NIC admits at once
 	 * @param onDeath told of a failure that ended the lane before it was cancelled
-	 * @param onStart runs on the lane before its first task; it places the lane on its NIC's NUMA node (D77)
 	 */
-	RdmaPreparationLane(final String stepId, final RdmaNic nic, final int capacity, final Consumer<Throwable> onDeath, final Runnable onStart) {
+	RdmaPreparationLane(final String stepId, final RdmaNic nic, final int capacity, final Consumer<Throwable> onDeath) {
 		this.nic = nic;
 		this.stepId = stepId;
 		this.queue = new ArrayBlockingQueue<>(capacity);
 		this.onDeath = onDeath;
-		this.onStart = onStart;
 		this.thread = Thread.ofPlatform().daemon().name(threadName(stepId, nic.name)).unstarted(this::run);
 	}
 
@@ -176,9 +173,6 @@ final class RdmaPreparationLane {
 		ThreadContext.put(KEY_STEP_ID, stepId);
 		ThreadContext.put(KEY_CLASS_NAME, RdmaPreparationLane.class.getSimpleName());
 		try {
-			if (!cancelled) {
-				onStart.run();
-			}
 			while (!cancelled) {
 				final Task task = queue.take();
 				if (cancelled) {

@@ -76,6 +76,8 @@ final class RdmaNicLoopback implements AutoCloseable {
 	private static final int DCTN_BASE = 0x100;
 	private static final long HOLD_SECONDS = 30;
 
+	/** Leaves pool placement out unless a test asks for it, whatever this host has. */
+	private static final Path NO_NUMA_NODES = Path.of("no-numa-nodes-in-this-fixture");
 	private static final NicInventory.Sysctls SYSCTLS = new NicInventory.Sysctls(1, 2, 2);
 	private static final NicInventory INVENTORY = new NicInventory(
 					IntStream.range(0, NICS.size()).mapToObj(RdmaNicLoopback::nic).toList(),
@@ -195,8 +197,10 @@ final class RdmaNicLoopback implements AutoCloseable {
 	/** A driver on the fixture environment and this fixture's transports; the caller starts and closes it. */
 	S3RdmaNicSetDriver<DataItem, Operation<DataItem>> driver(final Config root) throws Exception {
 		final Config storage = root.configVal("storage");
-		return S3RdmaNicSetDriver.create("rdma-nic-test", dataInput(), storage, false, root.intVal("load-batch-size"),
-						NicSetSettings.fromStorage(storage).orElseThrow(), environment, recording());
+		final S3RdmaNicSetDriver<DataItem, Operation<DataItem>> driver = S3RdmaNicSetDriver.create("rdma-nic-test", dataInput(), storage, false,
+						root.intVal("load-batch-size"), NicSetSettings.fromStorage(storage).orElseThrow(), environment, recording());
+		driver.numaNodes = NO_NUMA_NODES;
+		return driver;
 	}
 
 	/** Starts {@code driver} with a result collector. */
@@ -260,6 +264,7 @@ final class RdmaNicLoopback implements AutoCloseable {
 			final S3RdmaNicSetDriver<DataItem, Operation<DataItem>> driver = S3RdmaNicSetDriver.create(stepId, dataInput, storageConfig,
 							verifyFlag, batchSize, NicSetSettings.fromStorage(storageConfig).orElseThrow(), environment, recording());
 			driver.directMemoryLimitBytes = directMemoryLimitBytes;
+			driver.numaNodes = NO_NUMA_NODES;
 			drivers.add(driver);
 			return driver;
 		}

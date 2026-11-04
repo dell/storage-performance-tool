@@ -966,73 +966,94 @@ Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeQue
  * JNI Lifecycle
  * ============================================================================ */
 
-/*
- * Keeps the calling thread to the given CPUs, within those it may already use: 0, -1 when it may use
- * none of them, or an errno. No capability is needed, as a thread only narrows its own affinity.
- */
+/* Reads the calling thread's mask. The kernel refuses a mask shorter than its own, so this grows until it fits. */
+static cpu_set_t *current_cpus(int *ncpus) {
+    for (int n = 1024; n <= (1 << 20); n *= 2) {
+        cpu_set_t *set = CPU_ALLOC(n);
+        if (set == NULL) {
+            return NULL;
+        }
+        if (sched_getaffinity(0, CPU_ALLOC_SIZE(n), set) == 0) {
+            *ncpus = n;
+            return set;
+        }
+        const int cause = errno;
+        CPU_FREE(set);
+        if (cause != EINVAL) {
+            return NULL;
+        }
+    }
+    return NULL;
+}
+
+/* The CPUs the calling thread may use, in order, or NULL when they cannot be read. */
+JNIEXPORT jintArray JNICALL
+Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeCurrentThreadCpus(
+        JNIEnv *env, jclass cls) {
+
+    int ncpus = 0;
+    cpu_set_t *set = current_cpus(&ncpus);
+    if (set == NULL) {
+        return NULL;
+    }
+    const size_t size = CPU_ALLOC_SIZE(ncpus);
+    const int count = CPU_COUNT_S(size, set);
+    jintArray result = (*env)->NewIntArray(env, count);
+    if (result != NULL) {
+        jint *out = (*env)->GetIntArrayElements(env, result, NULL);
+        if (out == NULL) {
+            result = NULL;
+        } else {
+            int k = 0;
+            for (int cpu = 0; cpu < ncpus && k < count; cpu++) {
+                if (CPU_ISSET_S(cpu, size, set)) {
+                    out[k++] = cpu;
+                }
+            }
+            (*env)->ReleaseIntArrayElements(env, result, out, 0);
+        }
+    }
+    CPU_FREE(set);
+    return result;
+}
+
+/* Sets the calling thread's CPUs: 0, or an errno. No capability is needed for a thread's own mask. */
 JNIEXPORT jint JNICALL
-Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeConfineCurrentThread(
+Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeSetCurrentThreadCpus(
         JNIEnv *env, jclass cls, jintArray cpus) {
 
+    if (cpus == NULL) {
+        return EINVAL;
+    }
     const jsize count = (*env)->GetArrayLength(env, cpus);
     jint *list = (*env)->GetIntArrayElements(env, cpus, NULL);
     if (list == NULL) {
         return ENOMEM;
     }
-
-    /* The kernel refuses a mask shorter than its own, so grow until the read fits. */
-    int ncpus = 1024;
+    int ncpus = 1;
     for (jsize i = 0; i < count; i++) {
+        if (list[i] < 0 || list[i] >= (1 << 24)) {
+            (*env)->ReleaseIntArrayElements(env, cpus, list, JNI_ABORT);
+            return EINVAL;
+        }
         if (list[i] >= ncpus) {
             ncpus = list[i] + 1;
         }
     }
-    cpu_set_t *allowed = NULL;
-    cpu_set_t *wanted = NULL;
-    size_t size = 0;
     int result = 0;
-    for (;;) {
-        allowed = CPU_ALLOC(ncpus);
-        if (allowed == NULL) {
-            result = ENOMEM;
-            break;
+    cpu_set_t *set = CPU_ALLOC(ncpus);
+    if (set == NULL) {
+        result = ENOMEM;
+    } else {
+        const size_t size = CPU_ALLOC_SIZE(ncpus);
+        CPU_ZERO_S(size, set);
+        for (jsize i = 0; i < count; i++) {
+            CPU_SET_S(list[i], size, set);
         }
-        size = CPU_ALLOC_SIZE(ncpus);
-        CPU_ZERO_S(size, allowed);
-        if (sched_getaffinity(0, size, allowed) == 0) {
-            break;
+        if (sched_setaffinity(0, size, set) != 0) {
+            result = errno;
         }
-        result = errno;
-        CPU_FREE(allowed);
-        allowed = NULL;
-        if (result != EINVAL || ncpus > (1 << 20)) {
-            break;
-        }
-        result = 0;
-        ncpus *= 2;
-    }
-
-    if (result == 0) {
-        wanted = CPU_ALLOC(ncpus);
-        if (wanted == NULL) {
-            result = ENOMEM;
-        } else {
-            CPU_ZERO_S(size, wanted);
-            for (jsize i = 0; i < count; i++) {
-                if (list[i] >= 0 && list[i] < ncpus && CPU_ISSET_S(list[i], size, allowed)) {
-                    CPU_SET_S(list[i], size, wanted);
-                }
-            }
-            if (CPU_COUNT_S(size, wanted) == 0) {
-                result = -1;
-            } else if (sched_setaffinity(0, size, wanted) != 0) {
-                result = errno;
-            }
-            CPU_FREE(wanted);
-        }
-    }
-    if (allowed != NULL) {
-        CPU_FREE(allowed);
+        CPU_FREE(set);
     }
     (*env)->ReleaseIntArrayElements(env, cpus, list, JNI_ABORT);
     return result;

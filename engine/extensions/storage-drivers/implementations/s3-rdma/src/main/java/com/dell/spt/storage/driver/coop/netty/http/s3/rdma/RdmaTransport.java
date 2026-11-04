@@ -4,6 +4,7 @@ import com.dell.spt.base.logging.Loggers;
 
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -93,7 +94,9 @@ public class RdmaTransport implements AutoCloseable {
 
 	private static native int[] nativeQueryDevice(String deviceName);
 
-	private static native int nativeConfineCurrentThread(int[] cpus);
+	private static native int[] nativeCurrentThreadCpus();
+
+	private static native int nativeSetCurrentThreadCpus(int[] cpus);
 
 	private final RdmaConfig config;
 	private volatile boolean initialized;
@@ -205,15 +208,31 @@ public class RdmaTransport implements AutoCloseable {
 	}
 
 	/**
-	 * Keeps the calling thread to {@code cpus}, within the CPUs it may already use.
+	 * The CPUs the calling thread may use now.
 	 *
-	 * @return 0; {@link RdmaLanePlacement#NO_CPU_ALLOWED} when it may use none of them; or the errno the kernel gave
+	 * @throws IllegalStateException when they cannot be read
 	 */
-	public int confineCurrentThread(final int[] cpus) {
+	public int[] currentThreadCpus() {
 		if (!NATIVE_AVAILABLE) {
 			throw new IllegalStateException("the S3-RDMA native library is not available");
 		}
-		return nativeConfineCurrentThread(cpus);
+		final int[] cpus = nativeCurrentThreadCpus();
+		if (cpus == null) {
+			throw new IllegalStateException("cannot read this thread's CPUs");
+		}
+		return cpus;
+	}
+
+	/**
+	 * Sets the CPUs the calling thread may use. Other threads are not affected; a thread it starts later inherits them.
+	 *
+	 * @return 0, or the errno the kernel gave
+	 */
+	public int setCurrentThreadCpus(final int[] cpus) {
+		if (!NATIVE_AVAILABLE) {
+			throw new IllegalStateException("the S3-RDMA native library is not available");
+		}
+		return nativeSetCurrentThreadCpus(Objects.requireNonNull(cpus, "cpus"));
 	}
 
 	/**
