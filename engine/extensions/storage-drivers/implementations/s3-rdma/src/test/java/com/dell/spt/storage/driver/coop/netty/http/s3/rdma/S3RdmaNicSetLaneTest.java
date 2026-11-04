@@ -180,7 +180,7 @@ final class S3RdmaNicSetLaneTest {
 
 	@Test
 	void aNodeWithNoCpuOpenToTheThreadWarnsOnceAndThePoolStillWorks(@TempDir final Path nodes) throws Exception {
-		assertPlacementFailureLeavesThePoolWorking(nodes, transport -> transport.setThreadCpus(8, 9), "may use none of its CPUs");
+		assertPlacementFailureLeavesThePoolWorking(nodes, transport -> transport.setThreadCpus(8, 9), "may use none of the node's CPUs");
 	}
 
 	@Test
@@ -243,6 +243,7 @@ final class S3RdmaNicSetLaneTest {
 			final var warning = log.only("could not be placed on NUMA node 0");
 			assertTrue(warning.contains(why), warning);
 			assertTrue(warning.contains("NIC " + NICS.get(0)), warning);
+			assertEquals(List.of(), log.matching("pool buffers are allocated on the CPUs"), "a failed placement is not reported as placed");
 		}
 	}
 

@@ -109,6 +109,11 @@ final class RdmaPoolPlacementTest {
 				}, transport.currentThreadCpus());
 				assertEquals(0, transport.setCurrentThreadCpus(before));
 				assertArrayEquals(before, transport.currentThreadCpus());
+				final var started = new AtomicReference<int[]>();
+				final var later = new Thread(() -> started.set(transport.currentThreadCpus()));
+				later.start();
+				later.join();
+				assertArrayEquals(before, started.get(), "a thread started after the restore has the whole mask");
 			} catch (final Throwable t) {
 				failure.set(t);
 			}

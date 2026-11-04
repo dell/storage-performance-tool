@@ -26,7 +26,9 @@ import org.apache.logging.log4j.Level;
  *
  * <p>A host with one node has nothing to choose. A placement that cannot be made is one warning per NIC,
  * and its buffers land where they did before: a load never fails over this. This asks for CPUs and does
- * not bind memory, so a cgroup's {@code cpuset.mems} still has the last word.
+ * not bind memory, so a cgroup's {@code cpuset.mems} still has the last word, and a buffer that reuses
+ * memory the process freed earlier keeps those pages where they are. Per-operation buffers are not
+ * placed. If the kernel refuses to restore the mask, the thread stays on the node, with a warning.
  */
 final class RdmaPoolPlacement {
 
@@ -76,7 +78,7 @@ final class RdmaPoolPlacement {
 			before = transport.currentThreadCpus();
 			wanted = intersection(before, nodeCpus);
 			if (wanted.length == 0) {
-				giveUp("this process may use none of its CPUs");
+				giveUp("this thread may use none of the node's CPUs");
 				return allocator.apply(size);
 			}
 			final int result = transport.setCurrentThreadCpus(wanted);
@@ -89,15 +91,17 @@ final class RdmaPoolPlacement {
 			giveUp(e.toString());
 			return allocator.apply(size);
 		}
+		final ByteBuffer buffer;
 		try {
-			return allocator.apply(size);
+			buffer = allocator.apply(size);
 		} finally {
 			restore(before);
-			if (!reported) {
-				reported = true;
-				Loggers.MSG.info("{}: NIC {}: pool buffers are allocated on the CPUs of NUMA node {}", stepId, nic, node);
-			}
 		}
+		if (!reported && !gaveUp) {
+			reported = true;
+			Loggers.MSG.info("{}: NIC {}: pool buffers are allocated on the CPUs of NUMA node {}", stepId, nic, node);
+		}
+		return buffer;
 	}
 
 	private void restore(final int[] before) {
