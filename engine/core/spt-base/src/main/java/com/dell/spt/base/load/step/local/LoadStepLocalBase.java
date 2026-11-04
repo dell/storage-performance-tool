@@ -1194,6 +1194,20 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		durationTerminalValidationDelegated = true;
 		invokeDurationContextPhase(
 						"validate terminal state", LoadStepContext::validateTerminalState);
+		if (durationInventoryRanOut()) {
+			// Even when a poll found it: a controller can hold a verdict read before that.
+			durationAwaitStatus = DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE;
+			throw standaloneDeleteEarlyExhaustionFailure();
+		}
+	}
+
+	private boolean durationInventoryRanOut() {
+		for (final LoadStepContext context : List.copyOf(stepContexts)) {
+			if (context != null && context.durationInventoryRanOut()) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	@Override
@@ -1328,6 +1342,12 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		try {
 			invokeDurationContextPhase(
 							"validate terminal state", LoadStepContext::validateTerminalState);
+			// await has already reported an exhaustion a poll found.
+			if (durationAwaitStatus != DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE
+							&& durationInventoryRanOut()) {
+				durationAwaitStatus = DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE;
+				durationValidityFailure = standaloneDeleteEarlyExhaustionFailure();
+			}
 		} catch (final RuntimeException cause) {
 			durationValidityFailure = appendTerminalFailure(
 							durationValidityFailure,

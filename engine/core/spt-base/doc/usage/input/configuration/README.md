@@ -236,13 +236,14 @@ default); their terminal outcomes and latency remain part of the measured DELETE
 targets without terminal results after the bound are unresolved and invalidate the run. A bounded
 coordinator gives each slice the remaining part of one step-wide drain budget, so the bound is not
 multiplied by input count. It owns at most one active lifecycle invocation per frozen input, offers
-every input each phase, and retains incomplete invocations across cleanup retries. Finite generators
-record the source-monotonic scheduling-exhaustion transition. Each worker compares that transition
-with its own deadline and retains a semantic verdict; after admission closes, the controller
-requires every slice to report that it reached its deadline. Monotonic timestamps are never
-compared across hosts, and delayed, missing, or failed evidence fails closed. Only a transition
-strictly before the scheduled deadline invalidates duration mode. Monotonic
-scheduled and drain intervals are reported separately. `storage-driver-limit-concurrency` (the
+every input each phase, and retains incomplete invocations across cleanup retries. A slice that
+attempted every object in its frozen input ran out, which invalidates duration mode; each worker
+decides that from its final counts after the drain, or earlier once every request has been
+dispatched, and handing the inventory to the driver's input queue doesn't count. Each worker
+retains a semantic verdict; after admission closes, the controller requires every slice to report
+that it reached its deadline. Monotonic timestamps are never compared across hosts, and delayed,
+missing, or failed evidence fails closed. Monotonic scheduled and drain intervals
+are reported separately. `storage-driver-limit-concurrency` (the
 CLI's `--threads`) bounds logical DELETE requests, not the object targets inside a batch.
 
 For standalone DELETE, workers publish lifecycle counters and only the controller aggregates them

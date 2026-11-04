@@ -255,11 +255,14 @@ admission while its driver initializes; after every slice is ready, the controll
 the same requested interval everywhere and then releases scheduling in a separate concurrent phase
 on each worker's local monotonic clock.
 Remote drains start once and expose a short status-poll RPC, keeping control calls below the shipped
-RMI response timeout even when the configured drain bound is longer. The generator records source-monotonic scheduling
-exhaustion. Each worker compares that timestamp with its own deadline and retains a semantic
-verdict; after admission closes, the controller requires every slice to report that it reached its
-deadline. Remote monotonic timestamps are never compared, and delayed, missing, or failed evidence
-fails closed. Exhaustion is invalid only when it is strictly earlier than the scheduled deadline. The lifecycle invariant must reconcile after normal completion, deadline stop,
+RMI response timeout even when the configured drain bound is longer. A slice ran out of inventory
+if it attempted every object in its frozen input, which each worker decides from its final counts
+after the drain, and that invalidates the run. Handing the inventory to the driver's input queue is
+not running out. A worker ends the run early once the generator has handed over everything and
+every request has been dispatched, comparing the handoff's source-monotonic time with its own
+deadline. Each worker retains a semantic verdict; after admission closes, the controller requires every slice to
+report that it reached its deadline. Remote monotonic timestamps are never compared, and delayed,
+missing, or failed evidence fails closed. The lifecycle invariant must reconcile after normal completion, deadline stop,
 cancellation, and bounded drain. Monotonic scheduled and drain intervals are observable separately.
 Storage concurrency (`--threads` in CLI-generated scenarios) limits logical DELETE requests rather
 than the number of object targets held by those requests.

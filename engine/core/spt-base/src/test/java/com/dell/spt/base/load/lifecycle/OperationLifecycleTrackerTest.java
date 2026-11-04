@@ -27,6 +27,25 @@ import org.mockito.Answers;
 
 final class OperationLifecycleTrackerTest {
 
+	/** A duration DELETE's poll compares this with what was generated, so a refusal must never count. */
+	@Test
+	void aRefusedDispatchIsNotCountedAsDispatched() {
+		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
+		final var sent = operation("sent");
+		final var refused = operation("refused");
+		assertTrue(tracker.driverQueued(sent));
+		assertTrue(tracker.driverQueued(refused));
+		assertTrue(tracker.explicitlyDispatched(sent));
+		assertEquals(1, tracker.dispatchedCount());
+
+		tracker.enforceDispatchDeadline(System.nanoTime() - 1);
+
+		assertFalse(tracker.explicitlyDispatched(refused));
+		assertEquals(1, tracker.dispatchedCount());
+		assertTrue(tracker.unattempted(refused));
+		assertEquals(1, tracker.dispatchedCount());
+	}
+
 	@Test
 	void terminalEvidenceCountsSelectionIndependentlyAndClassifiesExactlyOnce() {
 		final var tracker = new OperationLifecycleTracker<DataOperationImpl<DataItemImpl>>();
