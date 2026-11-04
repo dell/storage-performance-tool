@@ -5,7 +5,10 @@ export type Options = {
   object_size: string;
   threads: number;
   max_runtime_seconds: number;
+  // "s3" (default): write + verify on the configured bucket. "mock": SPT's mock driver, no S3.
+  driver?: Driver;
 };
+export type Driver = "s3" | "mock";
 export type Row = {
   timestamp?: string;
   op_type?: string;
@@ -48,6 +51,7 @@ export type Metrics = {
   phase_summaries?: Row[];
   total_failed?: number | null;
   spt_summary_report?: string;
+  nodes?: NodeRow[];
 };
 export type Job = {
   run_id: string;
@@ -72,6 +76,8 @@ export type State = {
   target: {
     ready: boolean;
     reasons?: string[];
+    mock_ready?: boolean;
+    mock_reasons?: string[];
     endpoint?: string;
     endpoint_label?: string;
     bucket?: string;
@@ -138,4 +144,116 @@ export type Sample = {
   p50: number | null;
   p99: number | null;
   row: Row;
+};
+export type NodeRow = {
+  host: string;
+  node_id?: string;
+  role?: string;
+  status: "reporting" | "unavailable" | string;
+  op_type?: string;
+  sample_ts?: string;
+  successful_ops?: number | null;
+  failed_ops?: number | null;
+  corrupt_ops?: number | null;
+  iops?: number | null;
+  bandwidth_mib_s?: number | null;
+  p50_latency_us?: number | null;
+  p99_latency_us?: number | null;
+};
+export type CatalogPhase = {
+  key: string;
+  step: string;
+  op_type: string;
+  source_file: string;
+  successful_ops: number;
+  failed_ops: number;
+  corrupt_ops: number | null;
+  iops: number | null;
+  bandwidth_mib_s: number | null;
+  p50_latency_us: number | null;
+  p99_latency_us: number | null;
+  latency_mean_us?: number | null;
+  latency_max_us?: number | null;
+  duration_seconds?: number | null;
+  bytes_processed?: number | null;
+  node_count?: number | null;
+};
+export type CatalogRun = {
+  id: string;
+  name: string;
+  source: "dashboard" | "cli";
+  status: "complete" | "partial" | "malformed";
+  integrity: "passed" | "failed" | "incomplete" | "not_recorded";
+  started_at?: string;
+  workload?: string;
+  label?: string;
+  object_size?: string;
+  object_count?: number;
+  threads?: number;
+  duration?: string;
+  s3_driver?: string;
+  host_count?: number;
+  endpoint_host?: string;
+  cli_version?: string;
+  engine_version?: string;
+  phases: CatalogPhase[];
+  issues: string[];
+  summary_file?: string;
+  modified_at: string;
+};
+export type CatalogList = {
+  root: string;
+  runs: CatalogRun[];
+  total: number;
+  truncated: boolean;
+  read_only: boolean;
+};
+export type SeriesPoint = {
+  t: number;
+  iops: number | null;
+  bandwidth_mib_s: number | null;
+  p50_latency_us: number | null;
+  p99_latency_us: number | null;
+};
+export type CompareFlag =
+  | "regressed"
+  | "improved"
+  | "within"
+  | "insufficient"
+  | "no_data"
+  | "not_comparable";
+export type CompareDelta = {
+  run_id: string;
+  phase: string;
+  metric: string;
+  label: string;
+  baseline: number | null;
+  value: number | null;
+  delta_pct: number | null;
+  flag: CompareFlag;
+  reason?: string;
+};
+export type CompareResult = {
+  baseline: string;
+  runs: CatalogRun[];
+  series: Record<string, Record<string, SeriesPoint[]>>;
+  deltas: CompareDelta[];
+  settings_differences: Record<string, string[]>;
+  rule: {
+    label: string;
+    threshold_pct: number;
+    latency_floor_us: number;
+    min_ops: number;
+    description: string;
+  };
+};
+export type LogLevel = "all" | "warn" | "error";
+export type LogLine = { file: string; level: string; text: string };
+export type LogResponse = {
+  run_id: string;
+  source: "console" | "results";
+  level: LogLevel;
+  interim: boolean;
+  truncated: boolean;
+  lines: LogLine[];
 };

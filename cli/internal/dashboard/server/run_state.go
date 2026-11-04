@@ -63,7 +63,7 @@ func (a *app) currentState() (map[string]any, error) {
 			}
 			_ = a.writeState(state)
 		} else {
-			retained := retainedLiveMetrics(str(state[keyRunID]), a.liveRunID, a.liveSamples)
+			retained := retainedLiveMetrics(str(state[keyRunID]), a.liveRunID, jobWorkload(state), a.liveSamples)
 			if result == nil {
 				if retained != nil {
 					result = retained
@@ -72,7 +72,7 @@ func (a *app) currentState() (map[string]any, error) {
 					state[keyMessage] = "SPT is moving between phases; the last recorded measurements remain visible."
 					_ = a.writeState(state)
 				} else {
-					result = map[string]any{keyRunID: state[keyRunID], keyWorkloadType: driverWriteVerify, keySourceFile: "Waiting for SPT live metrics", keyUpdatedAt: utcNow(), keyIsActive: true, keyIsAggregate: false, keySamples: []map[string]any{}, keyChartSamples: []map[string]any{}}
+					result = map[string]any{keyRunID: state[keyRunID], keyWorkloadType: jobWorkload(state), keySourceFile: "Waiting for SPT live metrics", keyUpdatedAt: utcNow(), keyIsActive: true, keyIsAggregate: false, keySamples: []map[string]any{}, keyChartSamples: []map[string]any{}}
 				}
 			} else {
 				result[keyIsActive] = true
@@ -113,13 +113,15 @@ func (a *app) stateResponse(job, metrics map[string]any) map[string]any {
 	return map[string]any{keyJob: job, "metrics": metrics, "target": target, "storage": a.storageState(target), "limits": a.limitsPayload(), "branding": a.effectiveSettings().Branding}
 }
 
-func retainedLiveMetrics(runID, liveRunID string, samples []map[string]any) map[string]any {
+// retainedLiveMetrics keeps the last live samples visible between phases, labelled
+// with the job's own workload (mock runs must not read as write + verify).
+func retainedLiveMetrics(runID, liveRunID, workload string, samples []map[string]any) map[string]any {
 	if runID == "" || runID != liveRunID || len(samples) == 0 {
 		return nil
 	}
 	kept := append([]map[string]any(nil), samples...)
 	return map[string]any{
-		keyRunID: runID, keyWorkloadType: driverWriteVerify, keyUpdatedAt: kept[len(kept)-1][keyTimestamp],
+		keyRunID: runID, keyWorkloadType: workload, keyUpdatedAt: kept[len(kept)-1][keyTimestamp],
 		keyIsActive: true, keyIsAggregate: false, keySamples: latestSample(kept),
 		keyChartSamples: kept,
 	}

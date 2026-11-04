@@ -1,5 +1,6 @@
 // Package server is the local web dashboard behind "spt dashboard": it
-// serves the embedded browser UI and starts and stops SPT runs.
+// serves the embedded browser UI, starts and stops SPT runs, and reads the
+// results catalog.
 package server
 
 import (
@@ -58,7 +59,15 @@ type options struct {
 	ObjectSize        string `json:"object_size"`
 	Threads           int    `json:"threads"`
 	MaxRuntimeSeconds int    `json:"max_runtime_seconds"`
+	// Driver is "s3" (default, write + verify against the configured bucket) or
+	// "mock" (SPT's dummy-mock storage driver; no S3 endpoint or credentials).
+	Driver string `json:"driver,omitempty"`
 }
+
+const (
+	driverS3   = "s3"
+	driverMock = "mock"
+)
 
 type app struct {
 	root       string
@@ -71,7 +80,12 @@ type app struct {
 	sptAPIPort string
 	sptBin     string
 	metricsURL string
-	settings   dashboardSettings
+	// nodeMetricsURL overrides each client machine's /metrics/json address (tests only).
+	nodeMetricsURL func(host string) string
+	// catalogRoot is the read-only results tree the catalog scans (dashboard and CLI runs).
+	catalogRoot string
+	catalog     catalogCache
+	settings    dashboardSettings
 
 	storageFile    string
 	verifyFile     string

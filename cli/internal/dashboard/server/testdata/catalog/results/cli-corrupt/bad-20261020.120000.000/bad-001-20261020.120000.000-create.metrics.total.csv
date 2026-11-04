@@ -1,0 +1,2 @@
+DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,CountCorrupt,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MiB/s],BWLast[MiB/s],LatencyAvg[us],LatencyMin[us],LatencyQ_0.25[us],LatencyQ_0.5[us],LatencyQ_0.75[us],LatencyQ_0.9[us],LatencyQ_0.99[us],LatencyQ_0.999[us],LatencyMax[us]
+"2026-10-20T10:00:10,000",CREATE,2,2,0,2.0,25,0,0,26214400,10.0,1.0,101.0,0.0,101.0,0.0,2200.0,1000.0,1600.0,2000,2600.0,7200.0,9000,10800.0,18000

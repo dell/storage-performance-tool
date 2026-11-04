@@ -15,33 +15,33 @@ import (
 func TestValidateOptionsBounds(t *testing.T) {
 	a := &app{} // no settings file: the built-in default limits apply
 	for _, good := range []options{
-		{"", 100, "1MiB", 1, 60},
-		{"guided", 320, "16MiB", 2, 600},
-		{"expert", 1, "1KiB", 1, 10},
-		{"expert", 777, "3MiB", 13, 1234},
-		{"expert", 100_000, "1MiB", 64, 3600},
-		{"expert", 100, "1GiB", 1, 60},
+		{"", 100, "1MiB", 1, 60, ""},
+		{"guided", 320, "16MiB", 2, 600, ""},
+		{"expert", 1, "1KiB", 1, 10, ""},
+		{"expert", 777, "3MiB", 13, 1234, ""},
+		{"expert", 100_000, "1MiB", 64, 3600, ""},
+		{"expert", 100, "1GiB", 1, 60, ""},
 	} {
 		if err := a.validateOptions(good); err != nil {
 			t.Errorf("rejected %+v: %v", good, err)
 		}
 	}
 	bad := []options{
-		{"", 1000, "1MiB", 1, 60},
-		{"guided", 100, "100MiB", 1, 60},
-		{"guided", 100, "1MiB", 20, 60},
-		{"guided", 100, "1MiB", 1, 999},
-		{"guided", 777, "3MiB", 13, 1234},
-		{"admin", 100, "1MiB", 1, 60},
-		{"expert", 0, "1MiB", 1, 60},
-		{"expert", 100_001, "1KiB", 1, 60},
-		{"expert", 100, "1MiB", 0, 60},
-		{"expert", 100, "1MiB", 65, 60},
-		{"expert", 100, "1MiB", 1, 9},
-		{"expert", 100, "1MiB", 1, 3601},
-		{"expert", 100, "2GiB", 1, 60},
-		{"expert", 101, "1GiB", 1, 60},
-		{"expert", 100, "--help", 1, 60},
+		{"", 1000, "1MiB", 1, 60, ""},
+		{"guided", 100, "100MiB", 1, 60, ""},
+		{"guided", 100, "1MiB", 20, 60, ""},
+		{"guided", 100, "1MiB", 1, 999, ""},
+		{"guided", 777, "3MiB", 13, 1234, ""},
+		{"admin", 100, "1MiB", 1, 60, ""},
+		{"expert", 0, "1MiB", 1, 60, ""},
+		{"expert", 100_001, "1KiB", 1, 60, ""},
+		{"expert", 100, "1MiB", 0, 60, ""},
+		{"expert", 100, "1MiB", 65, 60, ""},
+		{"expert", 100, "1MiB", 1, 9, ""},
+		{"expert", 100, "1MiB", 1, 3601, ""},
+		{"expert", 100, "2GiB", 1, 60, ""},
+		{"expert", 101, "1GiB", 1, 60, ""},
+		{"expert", 100, "--help", 1, 60, ""},
 	}
 	for _, got := range bad {
 		if a.validateOptions(got) == nil {
@@ -136,12 +136,21 @@ func TestLiveHistoryPersistenceAndDeduplication(t *testing.T) {
 
 func TestRetainedLiveMetricsRemainAvailableBetweenPhases(t *testing.T) {
 	sample := map[string]any{"timestamp": "2026-10-07T17:02:15Z", "op_type": "CREATE", "cumulative_ops": float64(100)}
-	retained := retainedLiveMetrics("mt-dashboard-run-123", "mt-dashboard-run-123", []map[string]any{sample})
+	retained := retainedLiveMetrics("mt-dashboard-run-123", "mt-dashboard-run-123", driverWriteVerify, []map[string]any{sample})
 	if retained == nil || len(retained["chart_samples"].([]map[string]any)) != 1 {
 		t.Fatalf("live chart history was not retained: %#v", retained)
 	}
-	if got := retainedLiveMetrics("mt-dashboard-other-456", "mt-dashboard-run-123", []map[string]any{sample}); got != nil {
+	if got := retainedLiveMetrics("mt-dashboard-other-456", "mt-dashboard-run-123", driverWriteVerify, []map[string]any{sample}); got != nil {
 		t.Fatalf("returned samples from a different run: %#v", got)
+	}
+}
+
+func TestRetainedLiveMetricsKeepMockWorkload(t *testing.T) {
+	sample := map[string]any{"timestamp": "2026-10-07T17:02:15Z", "op_type": "CREATE", "cumulative_ops": float64(5)}
+	job := map[string]any{"run_id": "mt-dashboard-run-123", "options": map[string]any{"driver": "mock"}}
+	retained := retainedLiveMetrics("mt-dashboard-run-123", "mt-dashboard-run-123", jobWorkload(job), []map[string]any{sample})
+	if retained == nil || retained["workload_type"] != "mock" {
+		t.Fatalf("a mock run's retained live metrics must keep the mock workload: %#v", retained)
 	}
 }
 

@@ -1,0 +1,37 @@
+{
+  "generatedAt": "2026-10-20T13:00:00Z",
+  "workloadType": "write-verify",
+  "sptImage": "example/spt:test",
+  "apiPort": 9999,
+  "label": "partial",
+  "resultsDir": "/home/user/results",
+  "scenarioParams": {
+    "WorkloadType": "write-verify",
+    "Endpoint": "https://s3.example.test:9000/some/path?x=1",
+    "Endpoints": [
+      "https://s3.example.test:9000"
+    ],
+    "Bucket": "fixture-bucket",
+    "Prefix": "dashboard/x/",
+    "Threads": 2,
+    "ObjectSize": "1MiB",
+    "ObjectCount": 25,
+    "Duration": "60s",
+    "S3Driver": "default",
+    "AccessKey": "CANARY-ACCESS-KEY-DO-NOT-LEAK",
+    "SecretKey": "CANARY-SECRET-KEY-DO-NOT-LEAK"
+  },
+  "expectedStepIds": [
+    "partial-001-20261020.130000.000-create"
+  ],
+  "stepLifecycles": {
+    "partial-001-20261020.130000.000-create": "failed"
+  },
+  "cli": {
+    "version": "5.16.1-test"
+  },
+  "multiHost": {
+    "enabled": true,
+    "hostCount": 2
+  }
+}

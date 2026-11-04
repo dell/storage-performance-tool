@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -134,6 +135,24 @@ func validateEndpoint(candidate string) (endpoint, label string, ok bool) {
 	u, err := url.Parse(candidate)
 	if err != nil || (strings.ToLower(u.Scheme) != "http" && strings.ToLower(u.Scheme) != "https") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.ContainsAny(candidate, " \t\r\n") {
 		return "", "", false
+	}
+	// url.Parse accepts out-of-range ports and malformed DNS names. Reject
+	// those before saving settings or starting node verification.
+	if addr, err := netip.ParseAddr(u.Hostname()); err == nil {
+		if addr.Is6() && !strings.HasPrefix(u.Host, "[") {
+			return "", "", false
+		}
+	} else if validateHostEntry(u.Hostname()) != nil {
+		return "", "", false
+	}
+	if strings.HasSuffix(u.Host, ":") {
+		return "", "", false
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return "", "", false
+		}
 	}
 	return candidate, u.Host, true
 }
@@ -272,6 +291,21 @@ func (a *app) verified(target map[string]any) bool {
 	return a.currentVerification(target).Status == verifyPassed
 }
 
+// nodesVerified reports whether every client machine passed the last verification
+// of the current configuration, ignoring the S3 endpoint check (mock runs need no S3).
+func (a *app) nodesVerified(target map[string]any) bool {
+	v := a.currentVerification(target)
+	if v.Status == "idle" || v.Status == verifyRunning || len(v.Nodes) == 0 {
+		return false
+	}
+	for _, n := range v.Nodes {
+		if n.Status != verifyPassed {
+			return false
+		}
+	}
+	return true
+}
+
 func (a *app) storageState(target map[string]any) map[string]any {
 	cfg := a.storageSnapshot()
 	return map[string]any{"hosts": cfg.Hosts, "endpoint": cfg.Endpoint, "max_hosts": maxHosts, "verification": a.currentVerification(target)}
@@ -300,7 +334,7 @@ func (a *app) handleVerify(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 403, map[string]any{keyError: "Verification requests must come from this dashboard through its SSH tunnel."})
 		return
 	}
-	if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
+	if !isJSONRequest(r) {
 		writeJSON(w, 415, map[string]any{keyError: "Send JSON storage settings."})
 		return
 	}
@@ -328,12 +362,19 @@ func (a *app) handleVerify(w http.ResponseWriter, r *http.Request) {
 	// Verification starts SPT containers on the ports a run uses, so the two never overlap.
 	a.mu.Lock()
 	busy := a.stopping || a.verifying
+	var operation *os.File
+	if !busy {
+		var lockErr error
+		operation, lockErr = a.lockOperation()
+		busy = lockErr != nil
+	}
 	if !busy {
 		lock, lockErr := a.lockRun()
 		busy = lockErr != nil
 		unlockClose(lock)
 	}
 	if busy {
+		unlockClose(operation)
 		a.mu.Unlock()
 		writeJSON(w, 409, map[string]any{keyError: "A run or verification is already in progress. Wait for it to finish first."})
 		return
@@ -343,10 +384,11 @@ func (a *app) handleVerify(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 
 	if err := writeFileAtomic(a.storageFile, cfg); err != nil {
-		a.processes.Done()
 		a.mu.Lock()
 		a.verifying = false
 		a.mu.Unlock()
+		unlockClose(operation)
+		a.processes.Done()
 		writeJSON(w, 500, map[string]any{keyError: "Could not save the storage configuration."})
 		return
 	}
@@ -364,12 +406,13 @@ func (a *app) handleVerify(w http.ResponseWriter, r *http.Request) {
 		*v = verification{Status: verifyRunning, Signature: configSignature(cfg.Hosts, endpoint), StartedAt: utcNow(), Nodes: nodes,
 			Endpoint: verifyEndpoint{Label: str(target["endpoint_label"]), Status: verifyPending}}
 	})
-	go a.runVerification(cfg.Hosts, endpoint)
+	go a.runVerification(cfg.Hosts, endpoint, operation)
 	writeJSON(w, 202, map[string]any{"storage": a.storageState(target)})
 }
 
-func (a *app) runVerification(hosts []string, endpoint string) {
+func (a *app) runVerification(hosts []string, endpoint string, operation *os.File) {
 	defer a.processes.Done()
+	defer unlockClose(operation)
 	defer func() {
 		a.mu.Lock()
 		a.verifying = false
