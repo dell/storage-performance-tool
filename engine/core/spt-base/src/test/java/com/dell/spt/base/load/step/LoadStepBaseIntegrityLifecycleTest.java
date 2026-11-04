@@ -69,18 +69,42 @@ class LoadStepBaseIntegrityLifecycleTest {
 	}
 
 	@Test
-	void ordinaryStartAndCleanupFailuresRetainLegacyNonThrowingBehavior() {
+	void anOrdinaryStartFailureEndsTheRunAndKeepsTheCleanupFailureBehindIt() {
 		final Config config = metadataConfig();
 		config.val("storage-integrity-mode", "none");
 		final var startFailure = new IllegalStateException("start failed");
 		final var step = new TestStep(config, startFailure, true);
 
-		assertDoesNotThrow(step::run);
+		final var failure = assertThrows(RunTerminalException.class, step::run);
+
+		assertFalse(failure instanceof IntegrityTerminalException);
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertEquals("step failed to start; see the engine log", failure.getMessage());
+		assertEquals("integrity-step", failure.stepId());
+		assertSame(startFailure, failure.getCause());
 		assertTrue(step.closeCalled);
 		assertSame(startFailure, step.runFailure(),
-						"best-effort callers need the real swallowed lifecycle outcome");
+						"best-effort callers need the real lifecycle outcome");
 		assertEquals(1, step.runFailure().getSuppressed().length,
 						"cleanup failure should remain distinguishable behind the first failure");
+	}
+
+	@Test
+	void aTypedCleanupFailureBehindAStartFailureStaysOnTheRecord() {
+		final Config config = metadataConfig();
+		config.val("storage-integrity-mode", "none");
+		final var startFailure = new IllegalStateException("start failed");
+		final var cleanup = new RunTerminalException(
+						IntegrityTerminalException.Category.CLEANUP, "cleanup failed", null);
+		final var step = new TestStep(config, startFailure, false, true, cleanup);
+
+		final var failure = assertThrows(RunTerminalException.class, step::run);
+
+		assertEquals(1, failure.getSuppressed().length);
+		assertEquals("cleanup failed", failure.getSuppressed()[0].getMessage());
+		assertSame(startFailure, step.runFailure());
+		assertEquals(1, step.runFailure().getSuppressed().length);
+		assertEquals("cleanup failed", step.runFailure().getSuppressed()[0].getMessage());
 	}
 
 	@Test

@@ -3,10 +3,10 @@ package com.dell.spt.base.item.io;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 
 import com.dell.spt.base.Constants;
+import com.dell.spt.base.control.run.RunTerminalException;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
-import com.dell.spt.base.logging.LogUtil;
-import com.dell.spt.base.logging.Loggers;
 import com.github.akurilov.commons.io.Input;
 import java.io.BufferedReader;
 import java.io.EOFException;
@@ -15,7 +15,6 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import org.apache.logging.log4j.Level;
 
 /**
 * The data item input using CSV file containing the human-readable data item records as the source
@@ -24,6 +23,7 @@ public class CsvItemInput<I extends Item> implements Input<I> {
 
 	protected BufferedReader itemsSrc;
 	protected final ItemFactory<I> itemFactory;
+	private long linesRead;
 
 	/**
 	* @param in the input stream to get the data item records from
@@ -42,6 +42,7 @@ public class CsvItemInput<I extends Item> implements Input<I> {
 
 	protected final void setItemsSrc(final BufferedReader itemsSrc) {
 		this.itemsSrc = itemsSrc;
+		linesRead = 0;
 	}
 
 	@Override
@@ -50,6 +51,7 @@ public class CsvItemInput<I extends Item> implements Input<I> {
 		try {
 			while (i < itemsCount && null != itemsSrc.readLine()) {
 				i++;
+				linesRead++;
 			}
 		} catch (final IOException e) {
 			throwUnchecked(e);
@@ -61,16 +63,7 @@ public class CsvItemInput<I extends Item> implements Input<I> {
 	public I get() {
 		try {
 			final String nextLine = itemsSrc.readLine();
-			try {
-				return nextLine == null ? null : itemFactory.getItem(nextLine);
-			} catch (final IllegalArgumentException e) {
-				LogUtil.trace(
-								Loggers.ERR,
-								Level.WARN,
-								e,
-								"Failed to build the item from the string \"{}\"",
-								nextLine);
-			}
+			return nextLine == null ? null : item(nextLine);
 		} catch (final IOException e) {
 			throwUnchecked(e);
 		}
@@ -80,10 +73,9 @@ public class CsvItemInput<I extends Item> implements Input<I> {
 	@Override
 	public int get(final List<I> buffer, final int limit) {
 		int i = 0;
-		String nextLine = null;
 		try {
 			while (i < limit) {
-				nextLine = itemsSrc.readLine();
+				final String nextLine = itemsSrc.readLine();
 				if (nextLine == null) {
 					if (i == 0) {
 						throw new EOFException();
@@ -91,16 +83,38 @@ public class CsvItemInput<I extends Item> implements Input<I> {
 						break;
 					}
 				}
-				buffer.add(itemFactory.getItem(nextLine));
+				buffer.add(item(nextLine));
 				i++;
 			}
-		} catch (final IllegalArgumentException e) {
-			LogUtil.trace(
-							Loggers.ERR, Level.WARN, e, "Failed to build the item from the string \"{}\"", nextLine);
 		} catch (final IOException e) {
 			throwUnchecked(e);
 		}
 		return i;
+	}
+
+	/** A bad line ends the run: skipping it, or reading it as the end of the input, loses items silently. */
+	private I item(final String line) {
+		linesRead++;
+		// Checked first: a path or token item factory would accept a line of spaces as an item.
+		if (line.isBlank()) {
+			throw badLine("is blank", null);
+		}
+		try {
+			return itemFactory.getItem(line);
+		} catch (final IllegalArgumentException | IndexOutOfBoundsException e) {
+			throw badLine("is not a valid item", e);
+		}
+	}
+
+	/** The public message names the line, not its content: the cause stays in the engine's log. */
+	private RunTerminalException badLine(final String problem, final Throwable cause) {
+		return new RunTerminalException(
+						IntegrityTerminalException.Category.INPUT, sourceName() + " line " + linesRead + " " + problem, cause);
+	}
+
+	/** What a failure calls this input. It's public, so it must not carry a directory or an endpoint. */
+	protected String sourceName() {
+		return "items file";
 	}
 
 	/**

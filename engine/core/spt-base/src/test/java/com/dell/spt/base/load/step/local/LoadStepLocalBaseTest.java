@@ -171,9 +171,10 @@ class LoadStepLocalBaseTest {
 		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(
 						config, mockMetricsManager(), failing, healthy);
 
-		assertDoesNotThrow(loadStep::startContextsForTest);
+		final var failure = assertThrows(RunTerminalException.class, loadStep::startContextsForTest);
 
-		assertNull(loadStep.deleteObjectLifecycle());
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		verify(healthy, never()).releaseObjectFailureBudgetAdmission();
 	}
 
 	@Test
@@ -473,21 +474,21 @@ class LoadStepLocalBaseTest {
 	}
 
 	@Test
-	void doStartWrappedRemovesFailingContext() throws RemoteException {
+	void doStartWrappedFailsTheStepWhenOneContextFails() throws RemoteException {
 		final Config config = baseConfig();
 		config.val("load-step-id", "step-start");
 
-		final LoadStepContext failing = mock(LoadStepContext.class);
 		final LoadStepContext healthy = mock(LoadStepContext.class);
+		final LoadStepContext failing = mock(LoadStepContext.class);
 		when(failing.start()).thenThrow(new RemoteException("boom"));
 
-		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(config, mockMetricsManager(), failing, healthy);
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(config, mockMetricsManager(), healthy, failing);
 
-		assertDoesNotThrow(loadStep::startContextsForTest);
-		assertEquals(1, loadStep.contextCount());
-		assertSame(healthy, loadStep.contextAt(0));
-		verify(failing).start();
+		final var failure = assertThrows(RunTerminalException.class, loadStep::startContextsForTest);
+		assertEquals("step-start", failure.stepId());
+		assertTrue(failure.getMessage().startsWith("failed to start a load step context"));
 		verify(healthy).start();
+		verify(failing).start();
 	}
 
 	@Test
@@ -500,8 +501,7 @@ class LoadStepLocalBaseTest {
 
 		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(config, mockMetricsManager(), failing);
 
-		assertThrows(IllegalStateException.class, loadStep::startContextsForTest);
-		assertEquals(0, loadStep.contextCount());
+		assertThrows(RunTerminalException.class, loadStep::startContextsForTest);
 		verify(failing).start();
 	}
 

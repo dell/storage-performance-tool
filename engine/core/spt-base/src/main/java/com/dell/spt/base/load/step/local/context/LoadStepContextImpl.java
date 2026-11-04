@@ -1425,6 +1425,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 							e);
 		} catch (final IllegalStateException e) {
 			LogUtil.exception(Level.WARN, e, "{}: failed to start the storage driver \"{}\"", id, driver);
+			if (!stepShuttingDown.get()) {
+				throw e;
+			}
 		}
 		prepareStandaloneDelete();
 		if (!standaloneDeleteDurationMode && !objectFailureBudgetAdmissionHeld.get()) {
@@ -1437,6 +1440,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			} catch (final IllegalStateException e) {
 				LogUtil.exception(
 								Level.WARN, e, "{}: failed to start the load generator \"{}\"", id, generator);
+				if (!stepShuttingDown.get()) {
+					throw e;
+				}
 			}
 		}
 	}
