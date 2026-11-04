@@ -1214,11 +1214,13 @@ func stepRoleLifecycle(result *portcheck.RunResult, runtimeStepID, plannedStepID
 // reported none, and missing metrics or artifacts never replace that cause. A run that finished
 // cleanly also exits 1 if every request of a phase failed, since its numbers measured nothing. The
 // tracker of an ordinary run returns once its step files are stable, so a finished run can still
-// read RUNNING, and only a stop keeps it from being judged: the stop already says why it ended.
+// read RUNNING, and only a stop it saw keeps a run from being judged: the stop says why it ended. A
+// stop after the tracker returned only cut the last pause, so those phases had finished and are
+// judged. A tracker that failed can't say a phase finished, so its summary isn't judged.
 func resolveOrdinaryRunError(runErr error, outcome autoResultsOutcome) error {
 	stopped := outcome.Tracker != nil && outcome.Tracker.FinalState == constants.StateStopped
 	failed := outcome.Tracker != nil && outcome.Tracker.FinalState == constants.StateFailed
-	if !stopped && !failed && runErr == nil && len(outcome.AllFailedPhases) > 0 {
+	if !stopped && !failed && runErr == nil && outcome.TrackerErr == nil && len(outcome.AllFailedPhases) > 0 {
 		return &ExitCodeError{Code: constants.ExitCodeWorkloadFailure, Msg: allFailedPhasesReason(outcome.AllFailedPhases)}
 	}
 	if !failed {

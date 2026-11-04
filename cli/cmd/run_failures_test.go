@@ -146,6 +146,14 @@ func TestASavedSummaryOfAPhaseThatAllFailedReachesTheExitCode(t *testing.T) {
 	}
 }
 
+func TestATrackerThatFailedCantShowAPhaseFinished(t *testing.T) {
+	outcome := allFailedOutcome(constants.StateRunning)
+	outcome.TrackerErr = errors.New("status polling failed")
+	if err := resolveOrdinaryRunError(nil, outcome); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestAnErrorAlreadyEndingTheRunIsNotReplaced(t *testing.T) {
 	stopped := errors.New("interrupted by signal")
 	if err := resolveOrdinaryRunError(stopped, allFailedOutcome(constants.StateCompleted)); !errors.Is(err, stopped) {
