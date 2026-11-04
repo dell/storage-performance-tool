@@ -64,6 +64,7 @@ export type Job = {
   returncode?: number | null;
   prefix?: string;
   options?: Options;
+  stop_requested?: boolean;
 };
 export type State = {
   connection?: {
