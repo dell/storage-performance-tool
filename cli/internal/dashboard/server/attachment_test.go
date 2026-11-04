@@ -56,6 +56,9 @@ func TestAttachReadsAnExistingRunAndCanDisconnect(t *testing.T) {
 	if got := len(metrics["samples"].([]any)); got != 1 {
 		t.Fatalf("attached live samples=%d; want 1", got)
 	}
+	if _, ok := metrics["warnings"]; !ok {
+		t.Fatalf("attached state missing warnings key: %#v", metrics)
+	}
 
 	get := httptest.NewRequest(http.MethodGet, "/api/state", nil)
 	get.Host = "localhost:8000"

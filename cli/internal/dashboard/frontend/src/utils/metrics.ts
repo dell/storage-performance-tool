@@ -1,4 +1,4 @@
-import type { Row } from "../types";
+import type { DataStatus, Row } from "../types";
 export function numeric(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -9,6 +9,19 @@ export function formatNumber(value: unknown, digits = 0): string {
     : new Intl.NumberFormat("en-US", { maximumFractionDigits: digits }).format(
         n,
       );
+}
+/** AC1: missing/delayed telemetry must not look like a measured zero. */
+export function formatMetric(
+  value: unknown,
+  digits = 0,
+  status?: DataStatus,
+): string {
+  if (status === "no_data") return "No data";
+  if (status === "delayed" && numeric(value) === null) return "Delayed";
+  if (status === "delayed" && numeric(value) !== null) {
+    return `${formatNumber(value, digits)} (delayed)`;
+  }
+  return formatNumber(value, digits);
 }
 export function elapsed(value: unknown): string {
   const n = numeric(value);

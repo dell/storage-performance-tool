@@ -79,6 +79,13 @@ const (
 	// sourceDashboard is the --label of every dashboard run.
 	sourceDashboard = "dashboard"
 
+	// Per-node live status values and warning source labels.
+	nodeStatusReporting   = "reporting"
+	nodeStatusUnavailable = "unavailable"
+	sourceNodeMetrics     = "node_metrics"
+	sourceLiveMetrics     = "live_metrics"
+	sourceFleetMetrics    = "fleet_metrics"
+
 	flagRegressed = "regressed"
 	flagWithin    = "within"
 

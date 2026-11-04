@@ -37,6 +37,15 @@ export type Row = {
   latency_max_us?: number | null;
   latency_p99_us?: number | null;
 };
+export type DataStatus = "present" | "no_data" | "delayed";
+export type RunWarning = {
+  code: string;
+  severity: string;
+  observed: string;
+  host?: string;
+  metric?: string;
+  source: string;
+};
 export type Metrics = {
   run_id: string;
   updated_at?: string;
@@ -52,6 +61,9 @@ export type Metrics = {
   total_failed?: number | null;
   spt_summary_report?: string;
   nodes?: NodeRow[];
+  warnings?: RunWarning[];
+  data_status?: DataStatus;
+  fleet_partial?: boolean;
 };
 export type Job = {
   run_id: string;
@@ -160,6 +172,7 @@ export type NodeRow = {
   bandwidth_mib_s?: number | null;
   p50_latency_us?: number | null;
   p99_latency_us?: number | null;
+  data_status?: DataStatus;
 };
 export type CatalogPhase = {
   key: string;

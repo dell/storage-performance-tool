@@ -299,21 +299,25 @@ func latestSample(samples []map[string]any) []map[string]any {
 }
 
 func (a *app) liveMetrics(state map[string]any) map[string]any {
-	if a.metricsURL != "" {
-		return a.liveMetricsAt(state, a.metricsURL)
-	}
-	hosts := a.storageSnapshot().Hosts
 	var out map[string]any
-	if len(hosts) > 1 {
-		// With several client machines the entry's /metrics/json is only its own slice;
-		// /metrics/cluster/json is SPT's merged fleet view (see METRICS.md).
-		out = a.liveMetricsAt(state, a.clusterMetricsEndpoint())
+	if a.metricsURL != "" {
+		out = a.liveMetricsAt(state, a.metricsURL)
+	} else {
+		hosts := a.storageSnapshot().Hosts
+		if len(hosts) > 1 {
+			// With several client machines the entry's /metrics/json is only its own slice;
+			// /metrics/cluster/json is SPT's merged fleet view (see METRICS.md).
+			out = a.liveMetricsAt(state, a.clusterMetricsEndpoint())
+		}
+		if out == nil {
+			out = a.liveMetricsAt(state, a.metricsEndpoint())
+		}
+		if out != nil && len(hosts) > 1 {
+			out["nodes"] = a.liveNodes(state, hosts)
+		}
 	}
-	if out == nil {
-		out = a.liveMetricsAt(state, a.metricsEndpoint())
-	}
-	if out != nil && len(hosts) > 1 {
-		out["nodes"] = a.liveNodes(state, hosts)
+	if out != nil {
+		out = a.attachWarnings(out, time.Now())
 	}
 	return out
 }
@@ -449,6 +453,7 @@ func (a *app) liveMetricsAt(state map[string]any, metricsURL string) map[string]
 	if partial, ok := entry["partial"].(bool); ok {
 		out["fleet_partial"] = partial
 	}
+	copyFleetCompleteness(entry, out)
 	if !has {
 		return out
 	}
@@ -459,6 +464,19 @@ func (a *app) liveMetricsAt(state map[string]any, metricsURL string) map[string]
 // clusterMetricsEndpoint is the entry node's merged fleet view.
 func (a *app) clusterMetricsEndpoint() string {
 	return strings.TrimSuffix(a.metricsEndpoint(), "/metrics/json") + "/metrics/cluster/json"
+}
+
+// copyFleetCompleteness copies METRICS.md completeness fields used by SCRUM-21 warnings.
+func copyFleetCompleteness(entry, out map[string]any) {
+	if n, ok := num(entry, keyNodesCount); ok {
+		out[keyNodesCount] = n
+	}
+	if present := stringList(entry[keyNodesPresent]); len(present) > 0 {
+		out[keyNodesPresent] = present
+	}
+	if contrib := stringList(entry[keyContributors]); len(contrib) > 0 {
+		out[keyContributors] = contrib
+	}
 }
 
 // liveNodes reads each client machine's own /metrics/json so the UI can show per-node
@@ -478,7 +496,7 @@ func (a *app) liveNodes(state map[string]any, hosts []string) []map[string]any {
 			} else {
 				url = "http://" + net.JoinHostPort(hostAddress(host), strconv.Itoa(constants.SptAPIPortInt)) + "/metrics/json"
 			}
-			row := map[string]any{keyHost: hostAddress(host), keyStatus: "unavailable"}
+			row := map[string]any{keyHost: hostAddress(host), keyStatus: nodeStatusUnavailable}
 			entries, ok := fetchMetricEntries(client, url)
 			if ok {
 				for _, m := range freshEntries(entries, started) {
@@ -486,10 +504,11 @@ func (a *app) liveNodes(state map[string]any, hosts []string) []map[string]any {
 						continue
 					}
 					r := entryRates(m)
-					row = map[string]any{keyHost: hostAddress(host), "node_id": str(m["node_id"]), "role": str(m["role"]), keyStatus: "reporting", keyOpType: str(m[keyOpType]), keySampleTS: str(m[keySampleTS]), keySuccessfulOps: r["success"], metricFailed: r[keyFailed], metricCorrupt: r["corrupt"], metricIOPS: r[metricIOPS], metricBandwidth: r[metricBandwidth], metricP50Latency: r[metricP50Latency], metricP99Latency: r[metricP99Latency]}
+					row = map[string]any{keyHost: hostAddress(host), "node_id": str(m["node_id"]), "role": str(m["role"]), keyStatus: nodeStatusReporting, keyOpType: str(m[keyOpType]), keySampleTS: str(m[keySampleTS]), keySuccessfulOps: r["success"], metricFailed: r[keyFailed], metricCorrupt: r["corrupt"], metricIOPS: r[metricIOPS], metricBandwidth: r[metricBandwidth], metricP50Latency: r[metricP50Latency], metricP99Latency: r[metricP99Latency]}
 					break
 				}
 			}
+			annotateNodeDataStatus(row, time.Now())
 			rows[i] = row
 		}(i, host)
 	}
