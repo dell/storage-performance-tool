@@ -672,7 +672,13 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 								e);
 			}
 			LogUtil.exception(Level.WARN, e, "Failed to read the next load-generator items");
-			return null;
+			if (!isStarted()) {
+				// A stop closes the input under a read in progress: that read finds no more items.
+				return null;
+			}
+			// Reading this as the end of the input would end the run early, with no failure.
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.INPUT, "failed to read the next items", e);
 		}
 		return items;
 	}

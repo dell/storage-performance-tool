@@ -159,6 +159,9 @@ public final class IntegrityManifestItemInput
 				count = Math.addExact(count, 1);
 			}
 			return count;
+		} catch (final IllegalArgumentException e) {
+			// A record's own message names the record, not its content.
+			throw new TerminalItemInputException(e.getMessage(), e);
 		} catch (final RuntimeException e) {
 			throw new IOException("failed to count canonical integrity manifest rows", e);
 		}

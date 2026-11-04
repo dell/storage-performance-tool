@@ -7,6 +7,7 @@ import static com.dell.spt.base.Constants.PATH_DEFAULTS;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.dell.spt.base.config.CliArgUtil.allCliArgs;
 
+import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.buildinfo.EngineBuildInfoPublisher;
 import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
@@ -145,6 +146,10 @@ public final class Main {
 			Loggers.MSG.debug("Interrupted", e);
 		} catch (final Exception e) {
 			LogUtil.trace(Loggers.ERR, Level.FATAL, e, "Unexpected failure");
+			if (RunTerminalException.find(e) != null) {
+				// A scenario run directly has only its exit status to tell its caller that it failed.
+				System.exit(1);
+			}
 		}
 	}
 
