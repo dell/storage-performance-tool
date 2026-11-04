@@ -42,6 +42,7 @@ public class CsvItemInput<I extends Item> implements Input<I> {
 
 	protected final void setItemsSrc(final BufferedReader itemsSrc) {
 		this.itemsSrc = itemsSrc;
+		linesRead = 0;
 	}
 
 	@Override
@@ -100,9 +101,14 @@ public class CsvItemInput<I extends Item> implements Input<I> {
 			// The public message names the line, not its content: the cause stays in the engine's log.
 			throw new RunTerminalException(
 							IntegrityTerminalException.Category.INPUT,
-							"items file line " + linesRead + (line.isBlank() ? " is blank" : " is not a valid item"),
+							sourceName() + " line " + linesRead + (line.isBlank() ? " is blank" : " is not a valid item"),
 							e);
 		}
+	}
+
+	/** What a failure calls this input. It's public, so it must not carry a directory or an endpoint. */
+	protected String sourceName() {
+		return "items file";
 	}
 
 	/**

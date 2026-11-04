@@ -62,8 +62,8 @@ class MixedItemsFileFailureTest {
 
 	@Test
 	void aBadSeedLineIsNamed() throws Exception {
-		assertEquals("items file line 2 is blank", seedFailure(file(GOOD + "\n" + GOOD)));
-		assertEquals("items file line 2 is not a valid item", seedFailure(file(GOOD + "/b/x,zz,400,0/0\n" + GOOD)));
+		assertEquals("items file \"items.csv\" line 2 is blank", seedFailure(file(GOOD + "\n" + GOOD)));
+		assertEquals("items file \"items.csv\" line 2 is not a valid item", seedFailure(file(GOOD + "/b/x,zz,400,0/0\n" + GOOD)));
 	}
 
 	@Test
@@ -79,7 +79,7 @@ class MixedItemsFileFailureTest {
 
 	@Test
 	void aBadDeleteLineIsNamed() throws Exception {
-		assertEquals("items file line 2 is blank", deleteFailure(file(GOOD + "\n" + GOOD)));
+		assertEquals("items file \"items.csv\" line 2 is blank", deleteFailure(file(GOOD + "\n" + GOOD)));
 	}
 
 	@Test

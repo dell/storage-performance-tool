@@ -37,6 +37,12 @@ public class CsvFileItemInput<I extends Item> extends CsvItemInput<I> implements
 
 	//
 	@Override
+	protected String sourceName() {
+		return "items file \"" + itemsFilePath.getFileName() + "\"";
+	}
+
+	//
+	@Override
 	public final Path filePath() {
 		return itemsFilePath;
 	}

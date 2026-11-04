@@ -13,9 +13,12 @@ import com.dell.spt.base.item.DataItemFactoryImpl;
 import java.io.ByteArrayInputStream;
 import java.io.EOFException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -79,6 +82,27 @@ class CsvItemInputBadLineTest {
 		try (var input = input(GOOD)) {
 			input.get();
 			assertNull(input.get());
+		}
+	}
+
+	@Test
+	void aFileIsNamedWithoutItsDirectory(@TempDir final Path dir) throws Exception {
+		final Path file = Files.writeString(dir.resolve("items.csv"), GOOD + "\n");
+		try (var input = new CsvFileItemInput<DataItem>(file, new DataItemFactoryImpl<>())) {
+			final var failure = assertThrows(RunTerminalException.class, () -> input.get(new ArrayList<>(), 8));
+			assertEquals("items file \"items.csv\" line 2 is blank", failure.getMessage());
+		}
+	}
+
+	@Test
+	void aFileReadAgainCountsItsLinesAgain(@TempDir final Path dir) throws Exception {
+		final Path file = Files.writeString(dir.resolve("items.csv"), GOOD + "\n");
+		try (var input = new CsvFileItemInput<DataItem>(file, new DataItemFactoryImpl<>())) {
+			input.get();
+			input.reset();
+			input.get();
+			final var failure = assertThrows(RunTerminalException.class, () -> input.get(new ArrayList<>(), 8));
+			assertTrue(failure.getMessage().contains("line 2 "), failure.getMessage());
 		}
 	}
 
