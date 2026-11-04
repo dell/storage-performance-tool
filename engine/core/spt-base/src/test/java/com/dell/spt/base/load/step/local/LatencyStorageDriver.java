@@ -20,7 +20,10 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -133,11 +136,8 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 		return new LatencyStorageDriver<>(concurrency, TimeUnit.MILLISECONDS.toNanos(latencyMillis), true);
 	}
 
-	/** Accepts up to {@code capacity} data operations into an input queue ahead of dispatch. */
+	/** Accepts up to {@code capacity} operations into an input queue ahead of dispatch. */
 	LatencyStorageDriver<I, O> inputQueue(final int capacity) {
-		if (standaloneDelete) {
-			throw new IllegalStateException("the input queue serves data operations only");
-		}
 		inputQueueCapacity = capacity;
 		return this;
 	}
@@ -321,7 +321,13 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 				}
 				next = inputQueue.poll();
 			}
-			lifecycle.explicitlyDispatched(next);
+			if (!lifecycle.explicitlyDispatched(next)) {
+				inFlight.decrementAndGet();
+				synchronized (queuedUndispatched) {
+					queuedUndispatched.add(next);
+				}
+				continue;
+			}
 			dispatch(next);
 		}
 	}
@@ -441,7 +447,9 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	public List<O> recoverQueuedOperations() {
-		final List<O> recovered = new ArrayList<>();
+		// Also from the lifecycle, as the real driver recovers: a refused dispatch holds its operation
+		// in neither collection for a moment, and recovery must not miss it.
+		final Set<O> recovered = Collections.newSetFromMap(new IdentityHashMap<>());
 		synchronized (inputQueue) {
 			recovered.addAll(inputQueue);
 			inputQueue.clear();
@@ -450,7 +458,8 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 			recovered.addAll(queuedUndispatched);
 			queuedUndispatched.clear();
 		}
-		return recovered;
+		recovered.addAll(lifecycle.driverQueuedOperations());
+		return new ArrayList<>(recovered);
 	}
 
 	@Override
