@@ -90,6 +90,8 @@ func (a *app) currentState() (map[string]any, error) {
 					_ = a.writeState(state)
 				}
 			}
+			// Live poll returned nothing: still surface gap/delayed warnings from retained state.
+			result = a.attachWarnings(result, time.Now())
 		}
 		a.activeJob = state
 		return a.stateResponse(publicJob(state), result), nil
@@ -104,9 +106,24 @@ func (a *app) currentState() (map[string]any, error) {
 		}
 	}
 	if state != nil {
-		return a.stateResponse(publicJob(state), a.readRealRun(str(state["results_dir"]), str(state[keyRunID]), false)), nil
+		metrics := a.readRealRun(str(state["results_dir"]), str(state[keyRunID]), false)
+		metrics = a.withSavedWarnings(str(state[keyRunID]), metrics)
+		return a.stateResponse(publicJob(state), metrics), nil
 	}
 	return a.stateResponse(nil, a.latestSavedRun()), nil
+}
+
+// withSavedWarnings copies persisted run warnings onto a finished metrics payload.
+func (a *app) withSavedWarnings(runID string, metrics map[string]any) map[string]any {
+	list := a.loadRunWarnings(runID)
+	if len(list) == 0 {
+		return metrics
+	}
+	if metrics == nil {
+		metrics = map[string]any{keyRunID: runID, keyIsActive: false, keyIsAggregate: false, keySamples: []map[string]any{}}
+	}
+	metrics[keyWarnings] = list
+	return metrics
 }
 
 func (a *app) stateResponse(job, metrics map[string]any) map[string]any {

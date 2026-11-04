@@ -2352,6 +2352,45 @@ details.run-log[open] > summary {
   color: #64738a;
 }
 
+.run-warnings .section-heading p {
+  margin: 0.25rem 0 0;
+  color: #7a5a2b;
+}
+.run-warnings-list {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+.run-warnings-list li {
+  border: 1px solid #edd3b0;
+  border-radius: 8px;
+  background: #fffdf8;
+  padding: 0.75rem 0.9rem;
+}
+.run-warnings-list strong {
+  display: inline-block;
+  margin-right: 0.5rem;
+}
+.run-warnings-list .warn-host,
+.run-warnings-list .warn-metric {
+  display: inline-block;
+  margin-right: 0.4rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: #f3e2c7;
+  color: #6b4e1f;
+  font-size: 0.78rem;
+}
+.run-warnings-list p {
+  margin: 0.35rem 0 0;
+  color: #4d3a1f;
+}
+.node-table td {
+  white-space: nowrap;
+}
+
 .catalog-row-actions {
   display: flex;
   flex-direction: column;

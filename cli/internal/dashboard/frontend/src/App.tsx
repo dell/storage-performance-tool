@@ -11,10 +11,12 @@ import { ConnectRun } from "./components/ConnectRun";
 import { Catalog } from "./components/Catalog";
 import { Compare } from "./components/Compare";
 import { NodeTable } from "./components/NodeTable";
+import { RunWarnings } from "./components/RunWarnings";
 import { RunLog } from "./components/RunLog";
 import { runWorkloadType, workloadLabel } from "./utils/catalog";
 import {
   elapsed,
+  formatMetric,
   formatNumber as fmt,
   numeric,
   phaseCode,
@@ -725,6 +727,7 @@ function Dashboard({
               </span>
             </div>
           </section>
+          <RunWarnings warnings={m?.warnings} />
           {m && (
             <>
               <div className="scope-bar">
@@ -752,32 +755,50 @@ function Dashboard({
                 <div className="metrics-grid">
                   <MetricCard
                     label={`${phaseName(selectedPhase)} IOPS`}
-                    value={fmt(row?.interval_iops, 2)}
+                    value={formatMetric(
+                      row?.interval_iops,
+                      2,
+                      m.is_active ? m.data_status : undefined,
+                    )}
                     unit="ops/s"
                     detail={
                       !m.is_active && final
                         ? "Average successful operations per second"
-                        : "Latest reported rate of successful operations"
+                        : !row && m.data_status === "no_data"
+                          ? "No live sample yet — not a measured zero"
+                          : "Latest reported rate of successful operations"
                     }
                   />
                   <MetricCard
                     label="Bandwidth"
-                    value={fmt(row?.bandwidth_mib_s, 2)}
+                    value={formatMetric(
+                      row?.bandwidth_mib_s,
+                      2,
+                      m.is_active ? m.data_status : undefined,
+                    )}
                     unit="MiB/s"
                     detail="Data transferred per second"
                     accent="teal"
                   />
                   <MetricCard
                     label="P50 latency"
-                    value={fmt(row?.p50_latency_us, 1)}
+                    value={formatMetric(
+                      row?.p50_latency_us,
+                      1,
+                      m.is_active ? m.data_status : undefined,
+                    )}
                     unit="µs"
                     detail="Half of measured operations were faster"
                     accent="purple"
                   />
                   <MetricCard
                     label="Successful operations"
-                    value={fmt(row?.cumulative_ops)}
-                    detail={`In ${phaseName(selectedPhase).toLowerCase()} phase · ${fmt(row?.count_failed)} failed`}
+                    value={formatMetric(
+                      row?.cumulative_ops,
+                      0,
+                      m.is_active ? m.data_status : undefined,
+                    )}
+                    detail={`In ${phaseName(selectedPhase).toLowerCase()} phase · ${formatMetric(row?.count_failed, 0, m.is_active ? m.data_status : undefined)} failed`}
                     accent="orange"
                   />
                 </div>

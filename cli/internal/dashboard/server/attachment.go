@@ -216,6 +216,7 @@ func (a *app) attachedState() (map[string]any, error) {
 		metrics[keySamples] = rows
 	}
 	metrics["progress_percent"] = status.Progress
+	metrics = a.attachWarnings(metrics, time.Now())
 	phase := "Waiting for first SPT measurement"
 	if len(rows) > 0 {
 		phase = firstNonempty(str(rows[0]["op_type"]), str(rows[0]["step_id"]), phase)
