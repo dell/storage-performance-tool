@@ -1,4 +1,12 @@
-import { Button, Text, Title } from "@mantine/core";
+import {
+  Button,
+  Checkbox,
+  Paper,
+  Radio,
+  Table,
+  Text,
+  Title,
+} from "@mantine/core";
 import { useState } from "react";
 import { useDebouncedValue } from "@mantine/hooks";
 import type { CatalogRun } from "../types";
@@ -173,30 +181,34 @@ export function Catalog({
           The results folder is large; only part of it was scanned.
         </div>
       )}
-      <section data-spt-legacy="" className="panel run-history-panel">
+      <Paper component="section" className="mb-panel">
         {loading && !data ? (
           <Text className="px-section py-xxl text-center">
             Scanning results…
           </Text>
         ) : runs.length ? (
-          <div data-spt-legacy="" className="table-wrap">
-            <table
-              data-spt-legacy=""
-              className="run-history-table catalog-table"
-            >
-              <thead data-spt-legacy="">
-                <tr data-spt-legacy="">
-                  <th data-spt-legacy="">Compare</th>
-                  <th data-spt-legacy="">Baseline</th>
-                  <th data-spt-legacy="">Run</th>
-                  <th data-spt-legacy="">Started · UTC</th>
-                  <th data-spt-legacy="">Settings</th>
-                  <th data-spt-legacy="">Status</th>
-                  <th data-spt-legacy="">Phases · IOPS</th>
-                  <th data-spt-legacy=""></th>
-                </tr>
-              </thead>
-              <tbody data-spt-legacy="">
+          <Table.ScrollContainer
+            minWidth="var(--spt-table-min-width)"
+            aria-label="Results catalog scroll area"
+          >
+            <Table aria-label="Results catalog" stickyHeader>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th scope="col" ta="center">
+                    Compare
+                  </Table.Th>
+                  <Table.Th scope="col" ta="center">
+                    Baseline
+                  </Table.Th>
+                  <Table.Th scope="col">Run</Table.Th>
+                  <Table.Th scope="col">Started · UTC</Table.Th>
+                  <Table.Th scope="col">Settings</Table.Th>
+                  <Table.Th scope="col">Status</Table.Th>
+                  <Table.Th scope="col">Phases · IOPS</Table.Th>
+                  <Table.Th scope="col" aria-label="Actions"></Table.Th>
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
                 {runs.map((run) => (
                   <CatalogRow
                     key={run.id}
@@ -219,9 +231,9 @@ export function Catalog({
                     }
                   />
                 ))}
-              </tbody>
-            </table>
-          </div>
+              </Table.Tbody>
+            </Table>
+          </Table.ScrollContainer>
         ) : (
           <div data-spt-legacy="" className="history-empty">
             <Title order={2}>No runs found</Title>
@@ -236,7 +248,7 @@ export function Catalog({
           {data ? `${runs.length} shown of ${data.total} found.` : ""} Malformed
           or partial folders are listed with what is missing.
         </Text>
-      </section>
+      </Paper>
     </>
   );
 }
@@ -266,89 +278,127 @@ function CatalogRow({
 }) {
   return (
     <>
-      <tr
-        data-spt-legacy=""
-        className={run.status === "malformed" ? "catalog-malformed" : ""}
+      <Table.Tr
+        bg={
+          run.status === "malformed"
+            ? "var(--spt-status-warning-background)"
+            : undefined
+        }
       >
-        <td data-spt-legacy="">
-          <input
-            data-spt-legacy=""
-            type="checkbox"
+        <Table.Td ta="center">
+          <Checkbox
+            className="inline-flex"
             aria-label={`Compare ${run.id}`}
             checked={checked}
             disabled={!checked && (full || run.status === "malformed")}
             onChange={onToggle}
           />
-        </td>
-        <td data-spt-legacy="">
-          <input
-            data-spt-legacy=""
-            type="radio"
+        </Table.Td>
+        <Table.Td ta="center">
+          <Radio
+            className="inline-flex"
             name="baseline"
             aria-label={`Use ${run.id} as baseline`}
             checked={isBaseline}
             disabled={!checked}
             onChange={onBaseline}
           />
-        </td>
-        <td data-spt-legacy="" className="history-run-id">
+        </Table.Td>
+        <Table.Td
+          ff="monospace"
+          fz="caption"
+          className="min-w-[180px] max-w-[300px] whitespace-normal wrap-anywhere"
+        >
           {run.id}
-          <small data-spt-legacy="">
+          <Text
+            component="small"
+            size="caption"
+            c="var(--spt-text-muted)"
+            lh="normal"
+            className="mt-[3px] block"
+          >
             {run.source === "dashboard" ? "Dashboard" : "CLI"}
             {run.label ? ` · ${run.label}` : ""}
-          </small>
-        </td>
-        <td data-spt-legacy="">
+          </Text>
+        </Table.Td>
+        <Table.Td>
           {run.started_at
             ? run.started_at
                 .replace("T", " ")
                 .replace(/\.\d+/, "")
                 .replace("Z", "")
             : "—"}
-        </td>
-        <td data-spt-legacy="" className="catalog-settings">
+        </Table.Td>
+        <Table.Td className="min-w-[160px] whitespace-normal">
           {runSettings(run)}
-        </td>
-        <td data-spt-legacy="">
+        </Table.Td>
+        <Table.Td>
           <Status status={run.status} />
-          <small data-spt-legacy="">{integrityText[run.integrity]}</small>
-        </td>
-        <td data-spt-legacy="">
+          <Text
+            component="small"
+            size="caption"
+            c="var(--spt-text-muted)"
+            lh="normal"
+            className="mt-[3px] block"
+          >
+            {integrityText[run.integrity]}
+          </Text>
+        </Table.Td>
+        <Table.Td>
           {run.phases.length ? (
             run.phases.map((p) => (
-              <span data-spt-legacy="" className="history-phase" key={p.key}>
+              <Text
+                component="span"
+                size="caption"
+                c="var(--spt-text-secondary)"
+                lh="normal"
+                className="my-[3px] mr-compact inline-block"
+                key={p.key}
+              >
                 {p.key} {fmt(p.iops, 1)}
-              </span>
+              </Text>
             ))
           ) : (
-            <span data-spt-legacy="" className="subtle">
+            <Text
+              component="span"
+              size="xs"
+              c="var(--spt-text-subtle)"
+              lh="normal"
+            >
               No phase totals
-            </span>
+            </Text>
           )}
-        </td>
-        <td data-spt-legacy="" className="catalog-row-actions">
-          <Button
-            className="whitespace-nowrap"
-            aria-expanded={open}
-            onClick={onOpen}
-          >
-            {open ? "Hide" : "Details"}
-          </Button>
-          {run.status === "complete" && previous && (
+        </Table.Td>
+        <Table.Td>
+          <div className="flex flex-col items-stretch gap-[0.35rem]">
             <Button
               className="whitespace-nowrap"
-              type="button"
-              title={`Compare with ${previous.name || previous.id}`}
-              onClick={() => onComparePrevious(previous.id)}
+              aria-expanded={open}
+              onClick={onOpen}
             >
-              Compare with previous
+              {open ? "Hide" : "Details"}
             </Button>
-          )}
-        </td>
-      </tr>
+            {run.status === "complete" && previous && (
+              <Button
+                className="whitespace-nowrap"
+                type="button"
+                title={`Compare with ${previous.name || previous.id}`}
+                onClick={() => onComparePrevious(previous.id)}
+              >
+                Compare with previous
+              </Button>
+            )}
+          </div>
+        </Table.Td>
+      </Table.Tr>
       {open && (
-        <tr data-spt-legacy="" className="catalog-detail">
-          <td data-spt-legacy="" colSpan={8}>
+        <Table.Tr>
+          <Table.Td
+            bg="var(--spt-surface-subtle)"
+            p="md"
+            className="whitespace-normal wrap-anywhere"
+            colSpan={8}
+          >
             {run.issues.length > 0 && (
               <ul data-spt-legacy="" className="catalog-issues">
                 {run.issues.map((i) => (
@@ -379,36 +429,59 @@ function CatalogRow({
               </div>
             </dl>
             {run.phases.length > 0 && (
-              <div data-spt-legacy="" className="table-wrap">
-                <table data-spt-legacy="" className="run-history-table">
-                  <thead data-spt-legacy="">
-                    <tr data-spt-legacy="">
-                      <th data-spt-legacy="">Phase</th>
-                      <th data-spt-legacy="">Successful</th>
-                      <th data-spt-legacy="">Failed</th>
-                      <th data-spt-legacy="">Corrupt</th>
-                      <th data-spt-legacy="">IOPS</th>
-                      <th data-spt-legacy="">MiB/s</th>
-                      <th data-spt-legacy="">P50 µs</th>
-                      <th data-spt-legacy="">P99 µs</th>
-                    </tr>
-                  </thead>
-                  <tbody data-spt-legacy="">
+              <Table.ScrollContainer
+                minWidth="var(--spt-table-min-width)"
+                aria-label="Catalog phase details scroll area"
+              >
+                <Table aria-label="Catalog phase details" stickyHeader>
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th scope="col">Phase</Table.Th>
+                      <Table.Th scope="col" ta="right">
+                        Successful
+                      </Table.Th>
+                      <Table.Th scope="col" ta="right">
+                        Failed
+                      </Table.Th>
+                      <Table.Th scope="col" ta="right">
+                        Corrupt
+                      </Table.Th>
+                      <Table.Th scope="col" ta="right">
+                        IOPS
+                      </Table.Th>
+                      <Table.Th scope="col" ta="right">
+                        MiB/s
+                      </Table.Th>
+                      <Table.Th scope="col" ta="right">
+                        P50 µs
+                      </Table.Th>
+                      <Table.Th scope="col" ta="right">
+                        P99 µs
+                      </Table.Th>
+                    </Table.Tr>
+                  </Table.Thead>
+                  <Table.Tbody>
                     {run.phases.map((p) => (
-                      <tr data-spt-legacy="" key={p.key}>
-                        <td data-spt-legacy="">{p.key}</td>
-                        <td data-spt-legacy="">{fmt(p.successful_ops)}</td>
-                        <td data-spt-legacy="">{fmt(p.failed_ops)}</td>
-                        <td data-spt-legacy="">{fmt(p.corrupt_ops)}</td>
-                        <td data-spt-legacy="">{fmt(p.iops, 2)}</td>
-                        <td data-spt-legacy="">{fmt(p.bandwidth_mib_s, 2)}</td>
-                        <td data-spt-legacy="">{fmt(p.p50_latency_us, 1)}</td>
-                        <td data-spt-legacy="">{fmt(p.p99_latency_us, 1)}</td>
-                      </tr>
+                      <Table.Tr key={p.key}>
+                        <Table.Td>{p.key}</Table.Td>
+                        <Table.Td ta="right">{fmt(p.successful_ops)}</Table.Td>
+                        <Table.Td ta="right">{fmt(p.failed_ops)}</Table.Td>
+                        <Table.Td ta="right">{fmt(p.corrupt_ops)}</Table.Td>
+                        <Table.Td ta="right">{fmt(p.iops, 2)}</Table.Td>
+                        <Table.Td ta="right">
+                          {fmt(p.bandwidth_mib_s, 2)}
+                        </Table.Td>
+                        <Table.Td ta="right">
+                          {fmt(p.p50_latency_us, 1)}
+                        </Table.Td>
+                        <Table.Td ta="right">
+                          {fmt(p.p99_latency_us, 1)}
+                        </Table.Td>
+                      </Table.Tr>
                     ))}
-                  </tbody>
-                </table>
-              </div>
+                  </Table.Tbody>
+                </Table>
+              </Table.ScrollContainer>
             )}
             <RunArtifacts key={run.id} runId={run.id} />
             {run.status !== "malformed" && (
@@ -417,8 +490,8 @@ function CatalogRow({
                 title="Engine logs"
               />
             )}
-          </td>
-        </tr>
+          </Table.Td>
+        </Table.Tr>
       )}
     </>
   );

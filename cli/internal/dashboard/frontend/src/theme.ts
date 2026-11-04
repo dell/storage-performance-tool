@@ -7,6 +7,7 @@ import {
   Paper,
   Radio,
   SegmentedControl,
+  Table,
   Text,
   Title,
   createTheme,
@@ -51,6 +52,7 @@ export const dashboardTokens = {
     width: "3px",
     offset: "3px",
   },
+  layout: { tableMinWidth: "980px" },
   status: {
     success: { text: "#267a60", background: "#eaf6f1" },
     warning: {
@@ -173,6 +175,33 @@ export const theme = createTheme({
   },
   cursorType: "pointer",
   components: {
+    Table: Table.extend({
+      defaultProps: {
+        horizontalSpacing: "sm",
+        verticalSpacing: "sm",
+        withRowBorders: true,
+        tabularNums: true,
+        borderColor: "var(--spt-border-subtle)",
+      },
+      classNames: { td: "not-first:text-muted" },
+      styles: {
+        table: { whiteSpace: "nowrap", lineHeight: "normal" },
+        th: {
+          backgroundColor: "var(--spt-surface-subtle)",
+          color: "var(--spt-text-subtle)",
+          fontSize: "var(--mantine-font-size-xs)",
+          fontWeight: "var(--mantine-font-weight-medium)",
+        },
+        td: { verticalAlign: "middle" },
+      },
+    }),
+    TableScrollContainer: Table.ScrollContainer.extend({
+      defaultProps: { type: "native", tabIndex: 0, role: "region" },
+      classNames: {
+        scrollContainer:
+          "focus-visible:outline-solid focus-visible:outline-[length:var(--spt-focus-width)] focus-visible:outline-focus focus-visible:outline-offset-[var(--spt-focus-offset)]",
+      },
+    }),
     Input: Input.extend({
       defaultProps: { size: "sm", radius: "control" },
       vars: (_theme, { size }) => ({
@@ -372,6 +401,7 @@ export const cssVariablesResolver: CSSVariablesResolver = (theme) => {
     variables: {
       "--spt-focus-width": tokens.focus.width,
       "--spt-focus-offset": tokens.focus.offset,
+      "--spt-table-min-width": tokens.layout.tableMinWidth,
     },
     light: {
       "--spt-text-primary": tokens.text.primary,

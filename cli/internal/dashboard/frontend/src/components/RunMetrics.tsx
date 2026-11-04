@@ -1,4 +1,4 @@
-import { Button, Text, Title } from "@mantine/core";
+import { Button, Paper, Table, Text, Title } from "@mantine/core";
 import type { Metrics, Row } from "../types";
 import {
   elapsed,
@@ -16,7 +16,10 @@ export function PhaseResults({
   onSelect: (phase: string) => void;
 }) {
   return (
-    <section data-spt-legacy="" className="panel">
+    <Paper
+      component="section"
+      className="mb-panel p-panel [@media(max-width:760px)]:p-[17px]"
+    >
       <div data-spt-legacy="" className="section-heading">
         <div data-spt-legacy="">
           <Title order={2}>Phase results</Title>
@@ -26,10 +29,13 @@ export function PhaseResults({
         </div>
       </div>
       {m.phase_summaries?.length ? (
-        <div data-spt-legacy="" className="table-wrap">
-          <table data-spt-legacy="">
-            <thead data-spt-legacy="">
-              <tr data-spt-legacy="">
+        <Table.ScrollContainer
+          minWidth={0}
+          aria-label="Phase results scroll area"
+        >
+          <Table aria-label="Phase results" verticalSpacing="md">
+            <Table.Thead>
+              <Table.Tr>
                 {[
                   "Phase",
                   "Successful",
@@ -39,17 +45,21 @@ export function PhaseResults({
                   "IOPS",
                   "MiB/s",
                   "P50 (µs)",
-                ].map((h) => (
-                  <th data-spt-legacy="" key={h} scope="col">
+                ].map((h, index) => (
+                  <Table.Th
+                    key={h}
+                    scope="col"
+                    ta={index === 0 ? "left" : "right"}
+                  >
                     {h}
-                  </th>
+                  </Table.Th>
                 ))}
-              </tr>
-            </thead>
-            <tbody data-spt-legacy="">
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
               {m.phase_summaries.map((r) => (
-                <tr data-spt-legacy="" key={r.phase}>
-                  <td data-spt-legacy="">
+                <Table.Tr key={r.phase}>
+                  <Table.Td>
                     <Button
                       variant="subtle"
                       size="compact-xs"
@@ -57,25 +67,25 @@ export function PhaseResults({
                     >
                       {phaseName(r.phase)}
                     </Button>
-                  </td>
-                  <td data-spt-legacy="">{fmt(r.successful_ops)}</td>
-                  <td data-spt-legacy="">{fmt(r.failed_ops)}</td>
-                  <td data-spt-legacy="">{fmt(r.corrupt_ops)}</td>
-                  <td data-spt-legacy="">{elapsed(r.duration_seconds)}</td>
-                  <td data-spt-legacy="">{fmt(r.iops, 2)}</td>
-                  <td data-spt-legacy="">{fmt(r.bandwidth_mib_s, 2)}</td>
-                  <td data-spt-legacy="">{fmt(r.p50_latency_us, 1)}</td>
-                </tr>
+                  </Table.Td>
+                  <Table.Td ta="right">{fmt(r.successful_ops)}</Table.Td>
+                  <Table.Td ta="right">{fmt(r.failed_ops)}</Table.Td>
+                  <Table.Td ta="right">{fmt(r.corrupt_ops)}</Table.Td>
+                  <Table.Td ta="right">{elapsed(r.duration_seconds)}</Table.Td>
+                  <Table.Td ta="right">{fmt(r.iops, 2)}</Table.Td>
+                  <Table.Td ta="right">{fmt(r.bandwidth_mib_s, 2)}</Table.Td>
+                  <Table.Td ta="right">{fmt(r.p50_latency_us, 1)}</Table.Td>
+                </Table.Tr>
               ))}
-            </tbody>
-          </table>
-        </div>
+            </Table.Tbody>
+          </Table>
+        </Table.ScrollContainer>
       ) : (
         <Text size="sm" className="my-comfortable">
           Final phase results will appear as SPT writes its output.
         </Text>
       )}
-    </section>
+    </Paper>
   );
 }
 

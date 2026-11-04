@@ -358,34 +358,6 @@ progress:where([data-spt-legacy])::-moz-progress-bar {
   color: var(--spt-text-subtle);
   font-size: var(--mantine-font-size-xs);
 }
-.table-wrap:where([data-spt-legacy]) {
-  overflow: auto;
-}
-table:where([data-spt-legacy]) {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--mantine-font-size-sm);
-  white-space: nowrap;
-}
-th:where([data-spt-legacy]) {
-  text-align: left;
-  color: #8390a2;
-  font-size: var(--mantine-font-size-xs);
-  font-weight: var(--mantine-font-weight-medium);
-  padding: var(--mantine-spacing-sm) 14px;
-  background: var(--spt-surface-subtle);
-}
-td:where([data-spt-legacy]) {
-  padding: var(--mantine-spacing-md) 14px;
-  border-bottom: 1px solid var(--spt-border-subtle);
-  font-variant-numeric: tabular-nums;
-}
-tr:last-child td:where([data-spt-legacy]) {
-  border-bottom: 0;
-}
-td:not(:first-child):where([data-spt-legacy]) {
-  color: var(--spt-text-muted);
-}
 summary:where([data-spt-legacy]) {
   cursor: pointer;
   font-size: var(--mantine-font-size-control);
@@ -497,7 +469,6 @@ pre:where([data-spt-legacy]) {
   }
 }
 @media (max-width: 760px) {
-
   .metrics-grid:where([data-spt-legacy]) {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--mantine-spacing-sm);
@@ -610,37 +581,6 @@ pre:where([data-spt-legacy]) {
   background: var(--mantine-color-spt-1);
   color: var(--mantine-color-spt-7);
   font-size: 26px;
-}
-.run-history-panel:where([data-spt-legacy]) {
-  padding: 0;
-}
-.run-history-table:where([data-spt-legacy]) {
-  min-width: 980px;
-}
-.run-history-table th:where([data-spt-legacy]) {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-}
-.run-history-table td:where([data-spt-legacy]) {
-  vertical-align: middle;
-  padding-top: var(--mantine-spacing-sm);
-  padding-bottom: var(--mantine-spacing-sm);
-}
-.run-history-table td small:where([data-spt-legacy]) {
-  display: block;
-  color: #8290a2;
-  margin-top: 5px;
-}
-.history-run-id:where([data-spt-legacy]) {
-  font-family: var(--mantine-font-family-monospace);
-  font-size: var(--mantine-font-size-caption);
-}
-.history-phase:where([data-spt-legacy]) {
-  display: inline-block;
-  margin: 3px var(--mantine-spacing-compact) 3px 0;
-  color: #465b74;
-  font-size: var(--mantine-font-size-caption);
 }
 .history-empty:where([data-spt-legacy]) {
   padding: var(--mantine-spacing-xxl) var(--mantine-spacing-section);
@@ -991,33 +931,6 @@ button:disabled:where([data-spt-legacy]) {
   flex: 1 1 100%;
 }
 
-.catalog-table td small:where([data-spt-legacy]),
-.delta-table td small:where([data-spt-legacy]) {
-  display: block;
-  color: #65768c;
-  font-size: 11px;
-  margin-top: 3px;
-}
-.catalog-table td.history-run-id:where([data-spt-legacy]) {
-  white-space: normal;
-  overflow-wrap: anywhere;
-  min-width: 180px;
-  max-width: 300px;
-}
-.catalog-table td.catalog-settings:where([data-spt-legacy]) {
-  white-space: normal;
-  min-width: 160px;
-}
-.catalog-malformed:where([data-spt-legacy]) {
-  background: #fff7ec;
-}
-.catalog-detail > td:where([data-spt-legacy]) {
-  background: #f7f9fc;
-  padding: 16px;
-  /* tables default to nowrap; long file names and log text must wrap here */
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
 .catalog-issues:where([data-spt-legacy]) {
   margin: 0 0 12px;
   color: #9a4b16;
@@ -1096,9 +1009,6 @@ button:disabled:where([data-spt-legacy]) {
 }
 .log-error:where([data-spt-legacy]) {
   color: #ff8a80;
-}
-.node-table td:nth-child(n + 4):where([data-spt-legacy]) {
-  font-variant-numeric: tabular-nums;
 }
 details.run-log > summary:where([data-spt-legacy]) {
   cursor: pointer;
@@ -1426,16 +1336,6 @@ details.run-log[open] > summary:where([data-spt-legacy]) {
   background: #f3e2c7;
   color: #6b4e1f;
   font-size: 0.78rem;
-}
-.node-table td:where([data-spt-legacy]) {
-  white-space: nowrap;
-}
-
-.catalog-row-actions:where([data-spt-legacy]) {
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-  align-items: stretch;
 }
 
 .catalog-artifacts:where([data-spt-legacy]) {

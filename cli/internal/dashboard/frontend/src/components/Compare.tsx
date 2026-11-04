@@ -1,4 +1,4 @@
-import { Badge, Button, Text, Title } from "@mantine/core";
+import { Badge, Button, Paper, Table, Text, Title } from "@mantine/core";
 import { useState } from "react";
 import type { CompareDelta, CompareResult, SeriesPoint } from "../types";
 import { useComparison, useLastSuccessfulData } from "../api/queries";
@@ -400,47 +400,49 @@ export function DeltaTable({
 }) {
   const grouped = groupDeltas(deltas);
   return (
-    <section
-      data-spt-legacy=""
-      className="panel run-history-panel"
-      aria-label="Delta table"
-    >
+    <Paper component="section" className="mb-panel" aria-label="Delta table">
       <Title order={2}>Deltas vs {baseline}</Title>
       {deltas.length === 0 ? (
         <Text size="xs" c="var(--spt-text-subtle)">
           No shared phases to compare.
         </Text>
       ) : (
-        <div data-spt-legacy="" className="table-wrap">
-          <table data-spt-legacy="" className="run-history-table delta-table">
-            <thead data-spt-legacy="">
-              <tr data-spt-legacy="">
-                <th data-spt-legacy="">Phase</th>
-                <th data-spt-legacy="">Metric</th>
-                <th data-spt-legacy="">Run</th>
-                <th data-spt-legacy="">Baseline</th>
-                <th data-spt-legacy="">Value</th>
-                <th data-spt-legacy="">Δ</th>
-                <th data-spt-legacy="">Flag</th>
-              </tr>
-            </thead>
-            <tbody data-spt-legacy="">
+        <Table.ScrollContainer
+          minWidth="var(--spt-table-min-width)"
+          aria-label="Comparison deltas scroll area"
+        >
+          <Table aria-label="Comparison deltas" stickyHeader>
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th scope="col">Phase</Table.Th>
+                <Table.Th scope="col">Metric</Table.Th>
+                <Table.Th scope="col">Run</Table.Th>
+                <Table.Th scope="col" ta="right">
+                  Baseline
+                </Table.Th>
+                <Table.Th scope="col" ta="right">
+                  Value
+                </Table.Th>
+                <Table.Th scope="col" ta="right">
+                  Δ
+                </Table.Th>
+                <Table.Th scope="col">Flag</Table.Th>
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
               {[...grouped].flatMap(([phase, byMetric]) =>
                 [...byMetric].flatMap(([, rows]) =>
                   rows.map((d) => (
-                    <tr
-                      data-spt-legacy=""
-                      key={`${phase}-${d.metric}-${d.run_id}`}
-                    >
-                      <td data-spt-legacy="">{phase}</td>
-                      <td data-spt-legacy="">{d.label}</td>
-                      <td data-spt-legacy="" className="history-run-id">
+                    <Table.Tr key={`${phase}-${d.metric}-${d.run_id}`}>
+                      <Table.Td>{phase}</Table.Td>
+                      <Table.Td>{d.label}</Table.Td>
+                      <Table.Td ff="monospace" fz="caption">
                         {d.run_id}
-                      </td>
-                      <td data-spt-legacy="">{fmt(d.baseline, 2)}</td>
-                      <td data-spt-legacy="">{fmt(d.value, 2)}</td>
-                      <td data-spt-legacy="">{deltaText(d)}</td>
-                      <td data-spt-legacy="">
+                      </Table.Td>
+                      <Table.Td ta="right">{fmt(d.baseline, 2)}</Table.Td>
+                      <Table.Td ta="right">{fmt(d.value, 2)}</Table.Td>
+                      <Table.Td ta="right">{deltaText(d)}</Table.Td>
+                      <Table.Td>
                         <Badge
                           color={
                             d.flag === "regressed"
@@ -461,21 +463,29 @@ export function DeltaTable({
                           {flagText[d.flag] ?? d.flag}
                         </Badge>
                         {d.reason && (
-                          <small data-spt-legacy="">{d.reason}</small>
+                          <Text
+                            component="small"
+                            size="caption"
+                            c="var(--spt-text-muted)"
+                            lh="normal"
+                            className="mt-[3px] block"
+                          >
+                            {d.reason}
+                          </Text>
                         )}
-                      </td>
-                    </tr>
+                      </Table.Td>
+                    </Table.Tr>
                   )),
                 ),
               )}
-            </tbody>
-          </table>
-        </div>
+            </Table.Tbody>
+          </Table>
+        </Table.ScrollContainer>
       )}
       <Text size="caption" className="px-comfortable pb-md">
         Flags are a threshold check, not statistical significance. One run per
         side cannot show variance; repeat runs before drawing conclusions.
       </Text>
-    </section>
+    </Paper>
   );
 }
