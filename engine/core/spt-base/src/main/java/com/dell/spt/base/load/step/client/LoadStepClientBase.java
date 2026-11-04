@@ -1,5 +1,17 @@
 package com.dell.spt.base.load.step.client;
 
+import com.dell.spt.base.metrics.bucket.BucketMetricsRange;
+import com.dell.spt.base.metrics.bucket.BucketMetricsReply;
+import com.dell.spt.base.metrics.bucket.BucketRows;
+import com.dell.spt.base.metrics.context.BucketMetricsSource;
+import com.dell.spt.base.metrics.steady.SteadySettings;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketSet;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
@@ -23,7 +35,10 @@ import com.dell.spt.base.integrity.IntegrityInputProvenance;
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.ItemType;
+import com.dell.spt.base.item.io.CsvItemInput;
 import com.dell.spt.base.item.io.ItemInputFactory;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
@@ -62,6 +77,9 @@ import com.github.akurilov.confuse.exceptions.InvalidValueTypeException;
 import com.github.akurilov.confuse.impl.BasicConfig;
 
 import java.io.IOException;
+import java.nio.file.Path;
+import java.nio.file.Files;
+import java.io.InputStream;
 import java.rmi.ConnectException;
 import java.rmi.RemoteException;
 import java.rmi.UnknownHostException;
@@ -98,6 +116,10 @@ import org.apache.logging.log4j.Level;
 public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				extends LoadStepBase
 				implements LoadStepClient<T> {
+
+	/** Proposed in the spec, until the payload's measurement says otherwise. */
+	private static final long BUCKET_METRICS_FETCH_SECONDS = 30;
+
 	private static final long DURATION_DRAIN_POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(10);
 	private static final long DURATION_REMOTE_AWAIT_POLL_NANOS = TimeUnit.SECONDS.toNanos(1);
 	private static final long FAILURE_BUDGET_POLL_MILLIS = 100;
@@ -112,6 +134,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private static final AtomicInteger ACTIVE_FAILURE_BUDGET_SNAPSHOT_PROBE_TASKS = new AtomicInteger();
 
 	private final List<LoadStep> stepSlices = new ArrayList<>();
+	private List<BucketRows.Contribution> bucketContributions;
 	private final List<FileManager> fileMgrs = new ArrayList<>();
 	// for the core configuration options which are using the files
 	private final List<AutoCloseable> itemDataInputFileSlicers = new ArrayList<>();
@@ -582,11 +605,22 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				Loggers.MSG.debug("{}: item data input file slicer initialized", loadStepId());
 			}
 			if (!skipScatter && itemInput != null) {
-				itemInputFileSlicers.add(
-								new ItemInputFileSlicer(
-												loadStepId(), fileMgrs, configSlices, itemInput, batchSize, integrityConfig.enabled(), itemSizeRecording));
+				final var slicer = new ItemInputFileSlicer(
+								loadStepId(), fileMgrs, configSlices, itemInput, batchSize, integrityConfig.enabled(), itemSizeRecording);
+				itemInputFileSlicers.add(slicer);
 				Loggers.MSG.debug("{}: item input file slicer initialized", loadStepId());
+				if (!integrityConfig.enabled() && slicer.distributedItems() == 0) {
+					requireAnItemFromAFile(itemConfig, opType);
+				}
+			} else if (!skipScatter && !integrityConfig.enabled()) {
+				distributeNoItemsIfNothingToDelete(itemConfig, opType, itemType, configSlices, batchSize);
 			}
+		} catch (final RunTerminalException e) {
+			if (integrityConfig.enabled()) {
+				// This message is already public, and names what's wrong with the input.
+				throw terminalFailure(IntegrityTerminalException.Category.INPUT, e.getMessage(), e);
+			}
+			throw e;
 		} catch (final IllegalConfigurationException e) {
 			if (integrityConfig.enabled()) {
 				throw terminalFailure(
@@ -722,6 +756,72 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 	}
 
+	/**
+	 * An empty items file ends the run, except for a DELETE: the cleanup of a step that created
+	 * nothing has nothing to do. An empty listing isn't a file, and stays a run with no items.
+	 */
+	void requireAnItemFromAFile(final Config itemConfig, final OpType opType) {
+		if (itemInputFile(itemConfig) != null && !OpType.DELETE.equals(opType)) {
+			throw new RunTerminalException(
+							IntegrityTerminalException.Category.INPUT, loadStepId(), "the items file has no items", null);
+		}
+	}
+
+	/**
+	 * Configured items that couldn't be opened end the run. A DELETE whose file doesn't exist is the
+	 * cleanup of a step that wrote nothing, so its slices get no items and it finishes at once.
+	 */
+	void distributeNoItemsIfNothingToDelete(
+					final Config itemConfig,
+					final OpType opType,
+					final ItemType itemType,
+					final List<Config> configSlices,
+					final int batchSize) {
+		final String file = itemInputFile(itemConfig);
+		final String path = itemConfig.configVal("input").stringVal("path");
+		if (file == null && (path == null || path.isEmpty())) {
+			return;
+		}
+		if (file == null || !OpType.DELETE.equals(opType) || !Files.notExists(Path.of(file))) {
+			throw new RunTerminalException(
+							IntegrityTerminalException.Category.INPUT,
+							loadStepId(),
+							file == null
+											? "the items input path could not be used"
+											: "the items file \"" + Path.of(file).getFileName() + "\" could not be opened",
+							null);
+		}
+		@SuppressWarnings("unchecked")
+		final ItemFactory<Item> factory = (ItemFactory<Item>) ItemType.getItemFactory(itemType);
+		itemInputFileSlicers.add(new ItemInputFileSlicer(
+						loadStepId(),
+						fileMgrs,
+						configSlices,
+						new CsvItemInput<>(InputStream.nullInputStream(), factory),
+						batchSize));
+	}
+
+	private static String itemInputFile(final Config itemConfig) {
+		final String file = itemConfig.configVal("input").stringVal("file");
+		return file == null || file.isEmpty() ? null : file;
+	}
+
+	/** This message is public, so it counts the engine and leaves its address and the cause to the log. */
+	RunTerminalException sliceStartFailure(final Exception cause, final int slice, final int sliceCount) {
+		final var engine = "engine " + (slice + 1) + " of " + sliceCount;
+		final var typed = RunTerminalException.find(cause);
+		if (typed == null) {
+			return new RunTerminalException(
+							IntegrityTerminalException.Category.EXECUTION,
+							loadStepId(),
+							engine + " did not start; see the engine log",
+							cause);
+		}
+		return sliceCount == 1
+						? typed.withStepId(loadStepId())
+						: new RunTerminalException(typed.category(), loadStepId(), engine + ": " + typed.getMessage(), cause);
+	}
+
 	private void initAndStartStepSlices(
 					final List<String> nodeAddrs, final List<Config> configSlices, final List<List<Config>> ctxConfigsSlices,
 					final MetricsManager metricsManager, final AdmissionBarrier barrier) {
@@ -763,6 +863,18 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				if (e instanceof InterruptedException) {
 					throwUnchecked(e);
 				}
+				if (barrier == null && Thread.currentThread().isInterrupted()) {
+					// A stop interrupts this thread, and a start it cut short is that stop, not a failure.
+					throwUnchecked(new InterruptedException(loadStepId() + ": stopped while starting a step slice"));
+				}
+				if (barrier == null && validateRunId) {
+					throw terminalFailure(
+									IntegrityTerminalException.Category.EXECUTION,
+									"failed to start metadata-mode step slice " + i,
+									e);
+				}
+				LogUtil.exception(
+								Level.ERROR, e, "{}: failed to start the step slice \"{}\"", loadStepId(), stepSlice);
 				if (barrier != null) {
 					throw new RunTerminalException(
 									IntegrityTerminalException.Category.EXECUTION,
@@ -771,14 +883,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 													+ e.getMessage(),
 									e);
 				}
-				if (validateRunId) {
-					throw terminalFailure(
-									IntegrityTerminalException.Category.EXECUTION,
-									"failed to start metadata-mode step slice " + i,
-									e);
-				}
-				LogUtil.exception(
-								Level.ERROR, e, "{}: failed to start the step slice \"{}\"", loadStepId(), stepSlice);
+				// One engine missing would leave a lower load reported as the one asked for.
+				throw sliceStartFailure(e, i, sliceCount);
 			}
 		}
 	}
@@ -1150,6 +1256,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						.timingPersistFlag(metricsTimingPersistFlag)
 						.snapshotsSupplier(() -> metricsSnapshotsByIndex(originIndex))
 						.quantileValues(quantiles(metricsConfig))
+						.bucketMetricsSource(bucketMetricsSource(effectiveConfig, metricsConfig, originIndex))
 						.nodeAddrs(remoteNodeAddrs(config))
 						.contributorIds(distributedContributorIds(config, remoteNodeAddrs(config)))
 						.deleteDetailsExpected(standaloneDeleteEnabled())
@@ -1159,6 +1266,106 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						.timeLimitSec(timeLimitSec)
 						.build();
 		metricsContexts.add(metricsCtx);
+	}
+
+	private BucketMetricsSource bucketMetricsSource(
+					final Config effectiveConfig, final Config metricsConfig, final int contextIndex) {
+		// As a worker decides in initBucketMetrics, so that a file exists exactly when workers record.
+		if (TargetBucketSet.count(effectiveConfig) <= 1
+						|| !effectiveConfig.boolVal("output-metrics-bucket-enabled")
+						|| !effectiveConfig.boolVal("output-metrics-summary-persist")) {
+			return null;
+		}
+		final SteadySettings steadySettings = SteadySettings.fromMetricsConfig(metricsConfig);
+		return new BucketMetricsSource() {
+			@Override
+			public List<BucketRows.Contribution> contributions() {
+				return fetchBucketMetrics();
+			}
+
+			@Override
+			public SteadySettings steadySettings() {
+				return steadySettings;
+			}
+
+			@Override
+			public int contextIndex() {
+				return contextIndex;
+			}
+
+			@Override
+			public void release() {
+				releaseBucketMetrics();
+			}
+		};
+	}
+
+	/**
+	 * Fetches every worker's bucket records in parallel, once, separately from the periodic
+	 * snapshots, with a bounded deadline. A worker that does not answer leaves a labeled subtotal.
+	 */
+	private synchronized List<BucketRows.Contribution> fetchBucketMetrics() {
+		if (bucketContributions != null) {
+			return bucketContributions;
+		}
+		final List<LoadStep> slices = new ArrayList<>(stepSlices);
+		final List<String> contributorIds = distributedContributorIds(config, remoteNodeAddrs(config));
+		final List<BucketRows.Contribution> contributions = new ArrayList<>(slices.size());
+		if (slices.isEmpty()) {
+			bucketContributions = contributions;
+			return contributions;
+		}
+		final ExecutorService pool = Executors.newFixedThreadPool(slices.size(), runnable -> {
+			final Thread thread = new Thread(runnable, "bucket-metrics-fetch-" + loadStepId());
+			thread.setDaemon(true);
+			return thread;
+		});
+		try {
+			final List<Callable<BucketMetricsReply>> fetches = new ArrayList<>(slices.size());
+			for (final LoadStep slice : slices) {
+				fetches.add(() -> {
+					if (slice == null) {
+						throw new IllegalStateException("this node's step slice never started");
+					}
+					return slice.bucketMetrics(BucketMetricsRange.ALL);
+				});
+			}
+			final List<Future<BucketMetricsReply>> results = pool.invokeAll(fetches, BUCKET_METRICS_FETCH_SECONDS, TimeUnit.SECONDS);
+			for (int i = 0; i < results.size(); i++) {
+				final String node = i < contributorIds.size() && contributorIds.size() == slices.size()
+								? contributorIds.get(i)
+								: "slice-" + i;
+				contributions.add(bucketContribution(node, results.get(i)));
+			}
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
+			contributions.clear();
+			for (int i = 0; i < slices.size(); i++) {
+				contributions.add(new BucketRows.Contribution("slice-" + i, null, "interrupted"));
+			}
+		} finally {
+			pool.shutdownNow();
+		}
+		bucketContributions = List.copyOf(contributions);
+		return bucketContributions;
+	}
+
+	/** Lets go of every worker's payload. A step that runs again fetches afresh. */
+	private synchronized void releaseBucketMetrics() {
+		bucketContributions = null;
+	}
+
+	private static BucketRows.Contribution bucketContribution(
+					final String node, final Future<BucketMetricsReply> result) throws InterruptedException {
+		if (result.isCancelled()) {
+			return new BucketRows.Contribution(node, null, "timeout");
+		}
+		try {
+			final BucketMetricsReply reply = result.get();
+			return new BucketRows.Contribution(node, reply, reply == null ? "unsupported call" : null);
+		} catch (final ExecutionException e) {
+			return new BucketRows.Contribution(node, null, "no reply: " + e.getCause());
+		}
 	}
 
 	private List<Double> quantiles(final Config metricsConfig) {
@@ -1514,6 +1721,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			} finally {
 				stopFailureBudgetMonitor();
 				Loggers.MSG.info("{}: await for {} step slices done", loadStepId(), stepSliceCount);
+				// After pre-validation, post-verification is this client's to start, in its shutdown. A
+				// slice stopped before that has already closed its verification evidence.
+				if (standaloneDeletePreValidationEnabled() && standaloneDeletePostVerificationEnabled()) {
+					shutdown();
+				}
 				doStop();
 			}
 		}
@@ -2218,6 +2430,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	@Override
 	protected final void doClose()
 					throws IOException {
+		releaseBucketMetrics();
 		stopFailureBudgetMonitor();
 		final boolean durationMode = standaloneDeleteDurationMode();
 		if (durationMode) {

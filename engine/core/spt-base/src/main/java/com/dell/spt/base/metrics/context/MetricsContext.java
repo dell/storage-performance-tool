@@ -100,6 +100,15 @@ public interface MetricsContext<S extends AllMetricsSnapshot>
 	default void observeSteadyWindow() {}
 
 	/**
+	 * Sets the listener of this context's Steady-State Window; a context that measures none ignores it.
+	 *
+	 * @return whether this context measures a window
+	 */
+	default boolean steadyWindowListener(final com.dell.spt.base.metrics.steady.SteadyWindow.Listener listener) {
+		return false;
+	}
+
+	/**
 	 * Closes the Steady-State Window on the calling thread at an end event, if it is not already
 	 * closed, and returns its result. Every caller gets the first closer's result.
 	 *

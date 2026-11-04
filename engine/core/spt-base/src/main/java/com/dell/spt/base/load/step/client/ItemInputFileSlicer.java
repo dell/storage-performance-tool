@@ -4,9 +4,11 @@ import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.dell.spt.base.load.step.client.LoadStepClient.OUTPUT_PROGRESS_PERIOD_MILLIS;
 import static com.dell.spt.base.metrics.MetricsConstants.DELETE_SELECTION_ORDER_CANONICAL;
 
+import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.integrity.IntegrityCsvFormat;
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.io.TerminalItemInputException;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.io.IntegrityManifestItemInput;
 import com.dell.spt.base.item.op.deletion.StandaloneDeleteSelection;
@@ -55,6 +57,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 	// Empty unless the step has a NIC set: only a slice that gets a size summary has a recorder.
 	private final Map<FileManager, ItemSizeSummary.Recorder> sizeRecorders = new HashMap<>();
 	private final ItemSizeRecording sizeRecording;
+	private long distributedItems;
 
 	private static final class DeleteSelectionStats {
 		private final Set<String> retainedBuckets;
@@ -138,11 +141,8 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 				}
 			} catch (final Exception e) {
 				throwUncheckedIfInterrupted(e);
-				if (strictMode) {
-					throw terminal("failed to allocate item input file for slice " + i, e);
-				}
-				LogUtil.exception(
-								Level.ERROR, e, "Failed to get the item input file name for the step slice #" + i);
+				removeSlicesOfThisFailure();
+				throw terminal("failed to allocate item input file for slice " + i, e);
 			}
 		}
 
@@ -154,32 +154,18 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 			scatterItems(itemInput, batchSize);
 			// The last write can cross the budget, and a summary past it is never used.
 			checkItemSizeBudget();
-			sizeRecorders.values().forEach(recorder -> ItemSizeScan.finish(itemInput, recorder));
+			sizeRecorders.values().forEach(ItemSizeSummary.Recorder::finish);
 		} catch (final IOException e) {
+			removeSlicesOfThisFailure();
 			if (Thread.currentThread().isInterrupted()) {
 				// A local write on an interrupted thread fails with an I/O error.
-				removeSlicesAfterInterrupt();
 				stopWritingIfInterrupted();
 			}
-			if (strictMode) {
-				throw terminal("failed to parse or scatter canonical integrity input", e);
-			}
-			failItemSizes(ItemSizeSummary.Reason.READ_FAILED, e.toString());
-			LogUtil.exception(Level.WARN, e, "{}: failed to use the item input", loadStepId);
+			throw inputFailure(e, "failed to read or distribute the items input");
 		} catch (final Throwable cause) {
-			if (cause instanceof InterruptedException) {
-				removeSlicesAfterInterrupt();
-			}
+			removeSlicesOfThisFailure();
 			throwUncheckedIfInterrupted(cause);
-			if (strictMode) {
-				throw terminal("unexpected canonical integrity input failure", cause);
-			}
-			failItemSizes(
-							cause instanceof IllegalArgumentException || cause instanceof IndexOutOfBoundsException
-											? ItemSizeSummary.Reason.MALFORMED_ITEM
-											: ItemSizeSummary.Reason.READ_FAILED,
-							cause.toString());
-			LogUtil.exception(Level.ERROR, cause, "{}: unexpected failure", loadStepId);
+			throw inputFailure(cause, "unexpected items input failure");
 		}
 		publishItemSizes(itemInput);
 	}
@@ -238,6 +224,27 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 		}
 	}
 
+	/** The number of items distributed. Zero means every slice is header-only and immediately exhausted. */
+	public long distributedItems() {
+		return distributedItems;
+	}
+
+	private RuntimeException inputFailure(final Throwable cause, final String message) {
+		if (strictMode) {
+			return terminal(
+							cause instanceof IOException
+											? "failed to parse or scatter canonical integrity input"
+											: "unexpected canonical integrity input failure",
+							cause);
+		}
+		final var typed = RunTerminalException.find(cause);
+		if (typed != null) {
+			return typed.withStepId(loadStepId);
+		}
+		// This input's own message is written to be public; another I/O error's may name an endpoint.
+		return terminal(cause instanceof TerminalItemInputException ? cause.getMessage() : message, cause);
+	}
+
 	@Override
 	public final void close() {
 		Throwable cleanupFailure = null;
@@ -282,7 +289,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 	}
 
 	/** The step never holds a slicer whose constructor failed, so it removes its own files. */
-	private void removeSlicesAfterInterrupt() {
+	private void removeSlicesOfThisFailure() {
 		try {
 			close();
 		} catch (final RuntimeException e) {
@@ -405,6 +412,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 				}
 				count += itemCount;
 			}
+			distributedItems = count;
 			Loggers.MSG.info(
 							"Canonical items input \"{}\": {} items was distributed among the {} load step slices",
 							itemInput,
@@ -504,6 +512,15 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 						.toList();
 		final List<I> itemsBuff = new ArrayList<>(batchSize);
 
+		stopWritingIfInterrupted();
+		// Every slice starts with a stream header, so one given no items opens and is simply exhausted.
+		for (final FileManager fileMgr : sliceFileMgrs) {
+			itemsOutputs.get(fileMgr).flush();
+			final ByteArrayOutputStream buff = itemsOutByteBuffs.get(fileMgr);
+			fileMgr.writeToFile(itemInputFileSlices.get(fileMgr), buff.toByteArray());
+			buff.reset();
+		}
+
 		int n;
 		long count = 0;
 		long nextSliceIndex = 0;
@@ -560,10 +577,6 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 														buff.reset();
 													} catch (final IOException e) {
 														writeFailure.compareAndSet(null, e);
-														final var recorder = sizeRecorders.get(fileMgr);
-														if (recorder != null) {
-															recorder.fail(ItemSizeSummary.Reason.WRITE_FAILED, e.toString());
-														}
 														LogUtil.exception(
 																		Level.WARN,
 																		e,
@@ -572,11 +585,12 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 																		(fileMgr instanceof FileManagerService ? "remote" : "local"));
 													}
 												});
-				if (strictMode && writeFailure.get() != null) {
+				if (writeFailure.get() != null) {
 					throw writeFailure.get();
 				}
 
 				count += n;
+				distributedItems = count;
 
 				if (System.currentTimeMillis() - lastProgressOutputTimeMillis > OUTPUT_PROGRESS_PERIOD_MILLIS) {
 					Loggers.MSG.info("Transferred {} items from the input \"{}\"...", count, itemInput);
@@ -607,9 +621,10 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 		}
 	}
 
-	private IntegrityTerminalException terminal(final String message, final Throwable cause) {
-		return new IntegrityTerminalException(
-						IntegrityTerminalException.Category.INPUT, loadStepId, message, cause);
+	private RunTerminalException terminal(final String message, final Throwable cause) {
+		return strictMode
+						? new IntegrityTerminalException(IntegrityTerminalException.Category.INPUT, loadStepId, message, cause)
+						: new RunTerminalException(IntegrityTerminalException.Category.INPUT, loadStepId, message, cause);
 	}
 
 	@FunctionalInterface

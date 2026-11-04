@@ -184,6 +184,8 @@ public class PipelineLoadStepLocal
 										loadConfig,
 										outputConfig.boolVal("metrics-trace-persist"),
 										shardMetrics);
+						((LoadStepContextImpl<?, ?>) stepCtx).bucketRecorder(
+										initBucketMetrics(subConfig, metricsContexts.get(originIndex), null));
 						stepContexts.add(stepCtx);
 
 						final var itemOutputConfig = itemConfig.configVal("output");

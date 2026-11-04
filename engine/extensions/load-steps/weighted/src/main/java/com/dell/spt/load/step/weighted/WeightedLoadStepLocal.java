@@ -189,6 +189,8 @@ public class WeightedLoadStepLocal extends LoadStepLocalBase {
 										loadConfig,
 										outputConfig.boolVal("metrics-trace-persist"),
 										shardMetrics);
+						((LoadStepContextImpl<?, ?>) stepCtx).bucketRecorder(
+										initBucketMetrics(subConfig, metricsContexts.get(originIndex), null));
 						stepContexts.add(stepCtx);
 
 						final String itemOutputFile = itemConfig.stringVal("output-file");

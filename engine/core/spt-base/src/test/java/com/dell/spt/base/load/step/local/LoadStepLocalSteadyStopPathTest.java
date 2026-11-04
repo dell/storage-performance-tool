@@ -1,5 +1,6 @@
 package com.dell.spt.base.load.step.local;
 
+import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.MIN_COMPLETIONS_BEFORE_WINDOW;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.WAIT_TIMEOUT_MILLIS;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.awaitCondition;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.createStepConfig;
@@ -11,8 +12,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import com.dell.spt.base.load.step.DurationAwaitStatus;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.DataItemFactoryImpl;
@@ -114,7 +119,7 @@ class LoadStepLocalSteadyStopPathTest {
 								cutoffSkewMillis < drainMillis / 2,
 								"cutoff skew " + cutoffSkewMillis + " ms vs first drain " + drainMillis + " ms");
 				assertTrue(
-								secondWindow.successSnapshot().count() + C + 4L * C <= secondTotal.successSnapshot().count(),
+								secondWindow.successSnapshot().count() + MIN_COMPLETIONS_BEFORE_WINDOW + 4L * C <= secondTotal.successSnapshot().count(),
 								"the second window excludes its load during the first drain");
 			} finally {
 				slowDrain.releaseHeld();
@@ -182,10 +187,21 @@ class LoadStepLocalSteadyStopPathTest {
 					assertTrue(driver.awaitAdmissionClosed(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS));
 					assertTrue(driver.stopProbeHeldAtAdmissionClose(), "the window closed before admission closed");
 				}
+				if (stop == EarlyStop.WORKER_DEADLINE_GUARD) {
+					// The guard fires at a fixed time and requests travel in waves, so its cut can fall
+					// between two waves. With admission closed, nothing else will come to be held.
+					awaitCondition(
+									() -> driver.heldNow() == driver.activeOpCount(),
+									"the requests in flight at the cut to complete or be held");
+					assumeTrue(driver.heldNow() >= 1, "the deadline fell between two waves, so no request is late");
+				}
 				// Every request in flight at the cut is held; then they complete, before doShutdown.
 				awaitCondition(
 								() -> driver.heldNow() >= 1 && driver.heldNow() == driver.activeOpCount(),
-								"every request in flight held");
+								() -> "every request in flight held: held " + driver.heldNow()
+												+ ", in flight " + driver.activeOpCount()
+												+ ", completed " + driver.completedCount()
+												+ ", window closed " + step.windowsClosed());
 				sleepUntil(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(LATE_HOLD_MILLIS));
 				final int late = driver.heldNow();
 				final long countedBefore = step.metricsSnapshots().get(0).successSnapshot().count();
@@ -212,7 +228,7 @@ class LoadStepLocalSteadyStopPathTest {
 				assertTrue(window.durationSnapshot().max() < TimeUnit.MILLISECONDS.toMicros(LATE_HOLD_MILLIS), "window max");
 				assertTrue(total.durationSnapshot().max() >= TimeUnit.MILLISECONDS.toMicros(LATE_HOLD_MILLIS), "total max");
 				assertTrue(
-								window.successSnapshot().count() + C + late <= total.successSnapshot().count(),
+								window.successSnapshot().count() + MIN_COMPLETIONS_BEFORE_WINDOW + late <= total.successSnapshot().count(),
 								"window " + window.successSnapshot().count() + ", total " + total.successSnapshot().count());
 			} finally {
 				driver.releaseHeld();
@@ -252,7 +268,7 @@ class LoadStepLocalSteadyStopPathTest {
 				assertTrue(drained >= 1, "requests were in flight at the stop");
 				assertTrue(window.durationSnapshot().max() < TimeUnit.MILLISECONDS.toMicros(LATE_HOLD_MILLIS), "window max");
 				assertTrue(total.durationSnapshot().max() >= TimeUnit.MILLISECONDS.toMicros(LATE_HOLD_MILLIS), "total max");
-				assertTrue(window.successSnapshot().count() + C + drained <= total.successSnapshot().count());
+				assertTrue(window.successSnapshot().count() + MIN_COMPLETIONS_BEFORE_WINDOW + drained <= total.successSnapshot().count());
 			} finally {
 				driver.releaseHeld();
 				step.close();
@@ -279,6 +295,159 @@ class LoadStepLocalSteadyStopPathTest {
 		config.val("output-metrics-trace-persist", false);
 		steadySettings(config, 1.0, 5.0, 0.2);
 		return config;
+	}
+
+	/**
+	 * The generator hands a whole finite inventory to the driver's input queue within moments of the
+	 * start. That is not running out: the slice still has work for far longer than its duration.
+	 */
+	@Test
+	void anInventoryWaitingInTheInputQueueIsNotExhaustedAndReachesTheDeadline() throws Exception {
+		final int inventory = 5_000;
+		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.standaloneDelete(C, L_MILLIS).inputQueue(100_000);
+		try (final var metricsMgr = new RecordingMetricsManager()) {
+			final var step = new DurationDeleteStep(durationDeleteConfig("duration-queued"), driver, metricsMgr, inventory);
+			try {
+				step.start();
+				step.startDurationInterval(TimeUnit.MILLISECONDS.toNanos(1_000));
+				awaitCondition(() -> driver.scheduledOpCount() == inventory, "the whole inventory handed to the queue");
+				assertTrue(driver.queuedNow() > 0, "the rest is still queued");
+				assertEquals(DurationAwaitStatus.RUNNING, step.durationAwaitStatus(), "a handoff is not exhaustion");
+
+				step.await(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+				assertEquals(DurationAwaitStatus.REACHED_DEADLINE, step.durationAwaitStatus());
+			} finally {
+				step.close();
+			}
+		}
+	}
+
+	/** An inventory that really is sent before the deadline still ends the run as exhausted. */
+	@Test
+	void anInventoryAllDispatchedBeforeTheDeadlineIsExhausted() throws Exception {
+		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.standaloneDelete(C, L_MILLIS).inputQueue(100_000);
+		try (final var metricsMgr = new RecordingMetricsManager()) {
+			final var step = new DurationDeleteStep(durationDeleteConfig("duration-drained"), driver, metricsMgr, 2 * C);
+			try {
+				step.start();
+				step.startDurationInterval(TimeUnit.SECONDS.toNanos(30));
+				final var failure = assertThrows(
+								IntegrityTerminalException.class,
+								() -> step.await(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS));
+				assertTrue(failure.getMessage().contains("exhausted before the requested duration"), failure.getMessage());
+				assertEquals(DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE, step.durationAwaitStatus());
+			} finally {
+				step.close();
+			}
+		}
+	}
+
+	/**
+	 * No poll runs at all here, as if every one missed the last dispatch. The final counts still show
+	 * the inventory ran out, so the run must not pass.
+	 */
+	@Test
+	void anInventoryThatRanOutUnseenStillFailsOnItsFinalCounts() throws Exception {
+		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.standaloneDelete(C, L_MILLIS).inputQueue(2 * C);
+		try (final var metricsMgr = new RecordingMetricsManager()) {
+			final var step = new DurationDeleteStep(durationDeleteConfig("duration-unseen"), driver, metricsMgr, 2 * C);
+			step.start();
+			step.startDurationInterval(TimeUnit.MILLISECONDS.toNanos(700));
+			awaitCondition(() -> driver.completedCount() == 2L * C, "the whole inventory completed");
+			sleepUntil(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(900));
+
+			final var failure = assertThrows(IntegrityTerminalException.class, step::close);
+			assertTrue(failure.getMessage().contains("exhausted before the requested duration"), failure.getMessage());
+		}
+	}
+
+	/** A controller reads the verdict before the drain, so a worker's final counts must still reach it. */
+	@Test
+	void aDelegatedValidationReportsAnInventoryThatRanOutUnseen() throws Exception {
+		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.standaloneDelete(C, L_MILLIS).inputQueue(2 * C);
+		try (final var metricsMgr = new RecordingMetricsManager()) {
+			final var step = new DurationDeleteStep(durationDeleteConfig("duration-delegated"), driver, metricsMgr, 2 * C);
+			try {
+				step.start();
+				step.startDurationInterval(TimeUnit.MILLISECONDS.toNanos(700));
+				awaitCondition(() -> driver.completedCount() == 2L * C, "the whole inventory completed");
+				sleepUntil(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(900));
+				step.closeOperationAdmissionForStepStop();
+				step.recoverQueuedOperationsForStepStop();
+				step.drainDispatchedOperationsForStepStop(TimeUnit.SECONDS.toNanos(5));
+
+				final var failure = assertThrows(IntegrityTerminalException.class, step::validateTerminalStateForStepStop);
+				assertTrue(failure.getMessage().contains("exhausted before the requested duration"), failure.getMessage());
+				assertEquals(DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE, step.durationAwaitStatus());
+			} finally {
+				step.close();
+			}
+		}
+	}
+
+	/** One request still queued at the deadline means an object was left, so the run reached it. */
+	@Test
+	void oneRequestLeftInTheQueueIsNotExhausted() throws Exception {
+		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.standaloneDelete(C, 1_500).inputQueue(100);
+		try (final var metricsMgr = new RecordingMetricsManager()) {
+			final var step = new DurationDeleteStep(durationDeleteConfig("duration-one-left"), driver, metricsMgr, C + 1);
+			try {
+				step.start();
+				step.startDurationInterval(TimeUnit.MILLISECONDS.toNanos(500));
+				awaitCondition(() -> driver.dispatchedCount() == C, "every slot holding a request");
+
+				step.await(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+				assertEquals(DurationAwaitStatus.REACHED_DEADLINE, step.durationAwaitStatus());
+			} finally {
+				step.close();
+			}
+		}
+	}
+
+	/** An await that starts after the deadline still sees that every request was dispatched. */
+	@Test
+	void aLateAwaitReportsAnInventoryAllDispatched() throws Exception {
+		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.standaloneDelete(C, L_MILLIS).inputQueue(2 * C);
+		try (final var metricsMgr = new RecordingMetricsManager()) {
+			final var step = new DurationDeleteStep(durationDeleteConfig("duration-late-await"), driver, metricsMgr, 2 * C);
+			try {
+				step.start();
+				step.startDurationInterval(TimeUnit.MILLISECONDS.toNanos(700));
+				awaitCondition(() -> driver.completedCount() == 2L * C, "the whole inventory completed");
+				sleepUntil(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(900));
+
+				final var failure = assertThrows(
+								IntegrityTerminalException.class,
+								() -> step.await(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS));
+				assertTrue(failure.getMessage().contains("exhausted before the requested duration"), failure.getMessage());
+				assertEquals(DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE, step.durationAwaitStatus());
+			} finally {
+				step.close();
+			}
+		}
+	}
+
+	/** Closing admission empties the queue. A slice stopped that way did not run out of inventory. */
+	@Test
+	void aSliceStoppedBeforeTheDeadlineIsNotExhausted() throws Exception {
+		final int inventory = 5_000;
+		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.standaloneDelete(C, L_MILLIS).inputQueue(100_000);
+		try (final var metricsMgr = new RecordingMetricsManager()) {
+			final var step = new DurationDeleteStep(durationDeleteConfig("duration-stopped"), driver, metricsMgr, inventory);
+			try {
+				step.start();
+				step.startDurationInterval(TimeUnit.SECONDS.toNanos(30));
+				awaitCondition(() -> driver.scheduledOpCount() == inventory, "the whole inventory handed to the queue");
+				step.closeOperationAdmissionForStepStop();
+				step.recoverQueuedOperationsForStepStop();
+				step.drainDispatchedOperationsForStepStop(TimeUnit.SECONDS.toNanos(5));
+
+				assertEquals(DurationAwaitStatus.RUNNING, step.durationAwaitStatus());
+				step.validateTerminalStateForStepStop();
+			} finally {
+				step.close();
+			}
+		}
 	}
 
 	/** A local step with one real context per driver, as a mixed or weighted step builds them. */
@@ -335,12 +504,22 @@ class LoadStepLocalSteadyStopPathTest {
 	/** A standalone DELETE duration slice over an inventory it cannot exhaust in a test. */
 	private static final class DurationDeleteStep extends LoadStepLocalBase {
 		private final LatencyStorageDriver<?, ?> driver;
+		private final int inventory;
 		private volatile List<MetricsContext<? extends AllMetricsSnapshot>> contexts = List.of();
 
 		private DurationDeleteStep(
 						final Config config, final LatencyStorageDriver<?, ?> driver, final MetricsManager metricsManager) {
+			this(config, driver, metricsManager, 1_000_000_000);
+		}
+
+		private DurationDeleteStep(
+						final Config config,
+						final LatencyStorageDriver<?, ?> driver,
+						final MetricsManager metricsManager,
+						final int inventory) {
 			super(config, List.<Extension> of(), List.<Config> of(), metricsManager);
 			this.driver = driver;
+			this.inventory = inventory;
 		}
 
 		@Override
@@ -360,7 +539,7 @@ class LoadStepLocalSteadyStopPathTest {
 							.itemFactory((ItemFactory) new DataItemFactoryImpl<>())
 							.itemType(ItemType.DATA)
 							.loadConfig(loadConfig)
-							.itemInput(new LargeManifestInput())
+							.itemInput(new LargeManifestInput(inventory))
 							.loadOperationsOutput((LatencyStorageDriver) driver)
 							.originIndex(0)
 							.build();
@@ -381,21 +560,25 @@ class LoadStepLocalSteadyStopPathTest {
 
 	/** A frozen DELETE inventory far larger than a test consumes. */
 	private static final class LargeManifestInput implements RemainingItemCountInput<IntegrityManifestDataItem> {
-		private static final int COUNT = 1_000_000_000;
+		private final int count;
 		private int next;
+
+		private LargeManifestInput(final int count) {
+			this.count = count;
+		}
 
 		@Override
 		public IntegrityManifestDataItem get() {
-			return next < COUNT ? item(next++) : null;
+			return next < count ? item(next++) : null;
 		}
 
 		@Override
 		public int get(final List<IntegrityManifestDataItem> buffer, final int limit) {
-			if (next >= COUNT) {
+			if (next >= count) {
 				com.github.akurilov.commons.lang.Exceptions.throwUnchecked(new EOFException());
 			}
 			final int start = next;
-			while (next < COUNT && next - start < limit) {
+			while (next < count && next - start < limit) {
 				buffer.add(item(next++));
 			}
 			return next - start;
@@ -412,7 +595,7 @@ class LoadStepLocalSteadyStopPathTest {
 
 		@Override
 		public long remainingItemCount() {
-			return (long) COUNT - next;
+			return (long) count - next;
 		}
 
 		@Override

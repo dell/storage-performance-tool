@@ -99,10 +99,16 @@ func TestDeferredPlanExposesOnlyProducerStep(t *testing.T) {
 }
 func TestRuntimeStepNumber(t *testing.T) {
 	tests := map[string]int{
-		"mt-001-20260802.190000.000-list":   1,
-		"mt-023-20260802.190000.000-verify": 23,
-		"mt-1-20260802.190000.000-list":     0,
-		"mt-001-runtime-list":               0,
+		"mt-001-20260802.190000.000-list":                            1,
+		"mt-023-20260802.190000.000-verify":                          23,
+		"mt-1-20260802.190000.000-list":                              0,
+		"mt-001-runtime-list":                                        0,
+		"X-002-20260802.190000.000-delete":                           2,
+		"a-b.c_D-003-20260802.190000.000-delete":                     3,
+		"x-001-20260101.000000.000-y-002-20260802.190000.000-delete": 2,
+		"-001-20260802.190000.000-list":                              0,
+		"x y-001-20260802.190000.000-list":                           0,
+		"x-000-20260802.190000.000-list":                             0,
 	}
 	for stepID, want := range tests {
 		got, ok := RuntimeStepNumber(stepID)

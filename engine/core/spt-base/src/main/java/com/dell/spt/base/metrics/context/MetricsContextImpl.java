@@ -124,6 +124,15 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 	}
 
 	@Override
+	public final boolean steadyWindowListener(final SteadyWindow.Listener listener) {
+		if (steadyWindow == null) {
+			return false;
+		}
+		steadyWindow.listener(listener);
+		return true;
+	}
+
+	@Override
 	public final void observeSteadyWindow() {
 		if (steadyWindow != null) {
 			steadyWindow.observe();
@@ -277,15 +286,8 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 	}
 
 	private void updateTimings(final long latencyMicros, final long durationMicros, final long ttfbMicros) {
-		if (durationMicros > 0) {
-			reqDuration.update(durationMicros);
-			if (latencyMicros > 0) {
-				respLatency.update(latencyMicros);
-			}
-			if (ttfbMicros > 0 && ttfbMicros <= durationMicros) {
-				timeToFirstByte.update(ttfbMicros);
-			}
-		}
+		TimingMeterImpl.updateRequestTimings(
+						reqDuration, respLatency, timeToFirstByte, latencyMicros, durationMicros, ttfbMicros);
 	}
 
 	@Override

@@ -153,6 +153,8 @@ public class LinearLoadStepLocal
 									shardMetrics,
 									immutableListRootPrefix,
 									itemConfig);
+					((LoadStepContextImpl<?, ?>) stepCtx).bucketRecorder(
+									initBucketMetrics(config, metricsContexts.get(0), null));
 					stepContexts.add(stepCtx);
 
 					final String itemOutputFile = itemConfig.stringVal("output-file");

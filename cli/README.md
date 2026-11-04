@@ -91,8 +91,10 @@ neither `--items-file` nor `--delete-existing`, a count run creates exactly
 run-unique `spt-delete-<run-id>/` namespace, freezes the successful PUT identities,
 then times DELETE against only that canonical manifest. `--prefix` changes the
 owned namespace root by itself; it never discovers or selects existing objects. A
-duration run instead seeds `--seed-objects`, default 2,500. Omitting both count and
-duration also selects 2,500 objects. Omitting `--object-size` selects 1 KiB rather than
+duration run instead seeds `--seed-objects`, default 2,500. That default lasts well under
+a second on most targets, and a run that attempts every object fails as exhausted, so set
+it to at least the DELETE rate you expect times the duration, with margin. Omitting both
+count and duration also selects 2,500 objects. Omitting `--object-size` selects 1 KiB rather than
 the shared 1 MiB write default. PUT-returned versions are preserved for exact-version
 DELETE; objects without a returned version use current-key semantics.
 
@@ -145,9 +147,10 @@ identity still lacking a terminal result after the bound is unresolved and inval
 All slices then drain through a bounded coordinator against one step-wide remaining-time budget,
 so the wait bound is not multiplied by the input count. The coordinator retains at most one
 lifecycle call per frozen input, offers every input each phase, and never duplicates a still-running
-call on cleanup retry. Inventory exhaustion is timestamped at its source and invalidates only when
-it occurs strictly before the scheduled deadline. Each worker makes that comparison on its own
-monotonic clock and retains a semantic verdict; after admission closes, the controller requires a
+call on cleanup retry. A slice that attempted every object in its inventory ran out, which
+invalidates the run; each worker decides that from its final counts after the drain, or earlier
+once every request has been dispatched, and handing the inventory to the driver's input queue doesn't
+count. Each worker retains a semantic verdict; after admission closes, the controller requires a
 reached-deadline verdict from every slice, so delayed, missing, or failed evidence cannot validate a
 run. The scheduled interval and subsequent drain interval are reported separately. `--threads`
 bounds concurrent logical DELETE requests, so a request may contain as many as
@@ -552,7 +555,7 @@ Executes a benchmark test with the specified workload type.
 - `--range-align`: Alignment in bytes or binary units; omitted, `0`, and `1` mean byte alignment. A fixed offset must be divisible by the effective alignment. Offset/alignment require `--range-size`. A positive `--part-size` conflicts with partial reads.
 
 - `--seed-objects`: Objects to pre-create for `read` benchmarks and duration-based standalone DELETE (default: 2500)
-- `--items-file`: Path to a saved `items.csv` for `read`, or a canonical manifest for `read-verify` and explicit-manifest DELETE. Mutually exclusive with `--delete-existing`
+- `--items-file`: Path to a saved `items.csv` for `read`, or a canonical manifest for `read-verify` and explicit-manifest DELETE. Mutually exclusive with `--delete-existing`. A file that can't be opened, has no items, or has a blank or invalid line ends the run with an error naming the file or line, before any requests from it
 - `--delete-batch-size`: Standalone DELETE request size, from 1 through 1000 canonical identities (default 100). Multi-bucket manifests require 1
 - `--delete-existing`: Destructive DELETE opt-in that discovers and freezes current keys beneath the exact bucket/prefix before timing
 - `--allow-empty-prefix`: Second destructive opt-in required with `--delete-existing --prefix=''` for intentional whole-bucket selection

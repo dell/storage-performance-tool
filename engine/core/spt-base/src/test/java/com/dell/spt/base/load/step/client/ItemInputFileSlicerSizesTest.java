@@ -10,6 +10,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
@@ -114,7 +115,7 @@ final class ItemInputFileSlicerSizesTest {
 	}
 
 	@Test
-	void aMalformedRecordAtTheStartWithinABatchOrAtABatchBoundaryLeavesItUnknownWithItsReason(@TempDir final Path dir) throws Exception {
+	void aMalformedRecordAtTheStartWithinABatchOrAtABatchBoundaryEndsTheRunNamingItsLine(@TempDir final Path dir) throws Exception {
 		final String good = "good,0,4194304,0/0\n";
 		for (final var content : List.of(
 						"bad,0,oops,0/0\n" + good + good,
@@ -122,19 +123,17 @@ final class ItemInputFileSlicerSizesTest {
 						good + good + "bad,0,oops,0/0\n" + good)) {
 			final var slices = new Slices();
 			final var configs = List.of(slice("a"));
-			try (final var input = csv(dir, content);
-							final var slicer = new ItemInputFileSlicer("step", List.of(slices.manager()), configs, input, 2, false, NO_LIMIT)) {
-				final var summary = summaryOf(configs.get(0));
-				assertFalse(summary.complete(), content);
-				assertEquals(ItemSizeSummary.Reason.MALFORMED_ITEM, summary.reason(), content);
-				assertTrue(summary.why().contains("bad,0,oops"), summary.why());
+			try (final var input = csv(dir, content)) {
+				final var failure = assertThrows(RunTerminalException.class,
+								() -> new ItemInputFileSlicer("step", List.of(slices.manager()), configs, input, 2, false, NO_LIMIT));
+				assertTrue(failure.getMessage().contains("is not a valid item"), failure.getMessage());
 			}
 		}
 	}
 
 	@Test
 	@SuppressWarnings("unchecked")
-	void aReadFailureAfterAValidPrefixLeavesItUnknown() throws Exception {
+	void aReadFailureAfterAValidPrefixEndsTheRun() throws Exception {
 		final var slices = new Slices();
 		final var configs = List.of(slice("a"));
 		final Input<DataItem> input = mock(Input.class, org.mockito.Mockito.withSettings().extraInterfaces(com.github.akurilov.commons.io.file.FileInput.class));
@@ -146,26 +145,18 @@ final class ItemInputFileSlicerSizesTest {
 			}
 			throw new IOException("disk gone");
 		});
-		try (final var slicer = new ItemInputFileSlicer("step", List.of(slices.manager()), configs, input, 1, false, NO_LIMIT)) {
-			final var summary = summaryOf(configs.get(0));
-			assertFalse(summary.complete());
-			assertEquals(ItemSizeSummary.Reason.READ_FAILED, summary.reason());
-			assertTrue(summary.why().contains("disk gone"), summary.why());
-		}
+		assertThrows(RunTerminalException.class, () -> new ItemInputFileSlicer("step", List.of(slices.manager()), configs, input, 1, false, NO_LIMIT));
 	}
 
 	@Test
-	void aFailedSliceWriteLeavesOnlyThatSliceUnknown(@TempDir final Path dir) throws Exception {
+	void aFailedSliceWriteEndsTheRun(@TempDir final Path dir) throws Exception {
 		final var slices = new Slices();
 		final var failing = slices.manager();
 		doThrow(new IOException("worker gone")).when(failing).writeToFile(anyString(), any());
 		final var configs = List.of(slice("a"), slice("b"));
-		try (final var input = csv(dir, lines(4 << 20, 4 << 20));
-						final var slicer = new ItemInputFileSlicer("step", List.of(failing, slices.manager()), configs, input, 2, false, NO_LIMIT)) {
-			final var failed = summaryOf(configs.get(0));
-			assertFalse(failed.complete());
-			assertEquals(ItemSizeSummary.Reason.WRITE_FAILED, failed.reason());
-			assertTrue(summaryOf(configs.get(1)).complete());
+		try (final var input = csv(dir, lines(4 << 20, 4 << 20))) {
+			assertThrows(RunTerminalException.class,
+							() -> new ItemInputFileSlicer("step", List.of(failing, slices.manager()), configs, input, 2, false, NO_LIMIT));
 		}
 	}
 
@@ -296,11 +287,8 @@ final class ItemInputFileSlicerSizesTest {
 		final var slices = new Slices();
 		final var configs = List.of(slice("a"));
 		final Input<DataItem> listing = mock(Input.class);
-		when(listing.get(any(), org.mockito.ArgumentMatchers.anyInt())).thenThrow(new RuntimeException("end of list") {
-			@Override
-			public synchronized Throwable getCause() {
-				return null;
-			}
+		when(listing.get(any(), org.mockito.ArgumentMatchers.anyInt())).thenAnswer(call -> {
+			throw new java.io.EOFException();
 		});
 		try (final var slicer = new ItemInputFileSlicer("step", List.of(slices.manager()), configs, listing, 1, false, NO_LIMIT)) {
 			final var summary = summaryOf(configs.get(0));

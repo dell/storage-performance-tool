@@ -76,7 +76,7 @@ final class ItemSizeScanTest {
 		final var summary = scan(file);
 		assertFalse(summary.complete());
 		assertEquals(ItemSizeSummary.Reason.MALFORMED_ITEM, summary.reason());
-		assertTrue(summary.why().contains("obj-x"), summary.why());
+		assertTrue(summary.why().contains("line 4097"), summary.why());
 	}
 
 	@Test
@@ -164,10 +164,10 @@ final class ItemSizeScanTest {
 
 		final var failed = new ItemSizeSummary.Recorder("items.csv");
 		failed.record(1 << 20);
-		failed.fail(ItemSizeSummary.Reason.WRITE_FAILED, "gone");
+		failed.fail(ItemSizeSummary.Reason.READ_FAILED, "gone");
 		final var incomplete = ItemSizeSummary.decode(failed.summary().encode());
 		assertFalse(incomplete.complete());
-		assertEquals(ItemSizeSummary.Reason.WRITE_FAILED, incomplete.reason());
+		assertEquals(ItemSizeSummary.Reason.READ_FAILED, incomplete.reason());
 		assertEquals("gone", incomplete.detail());
 		assertTrue(incomplete.bounds().isEmpty());
 	}

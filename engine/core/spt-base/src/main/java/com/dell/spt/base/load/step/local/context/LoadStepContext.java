@@ -87,6 +87,15 @@ public interface LoadStepContext<I extends Item, O extends Operation<I>> extends
 	}
 
 	/**
+	 * Whether a standalone DELETE duration slice attempted every object in its frozen input, read from
+	 * its counts once it has recovered its queues and drained. Nothing was left for the rest of the
+	 * duration, so the slice ran out, whatever any earlier poll saw.
+	 */
+	default boolean durationInventoryRanOut() {
+		return false;
+	}
+
+	/**
 	 * Returns the scheduling-exhaustion transition with explicit presence.
 	 *
 	 * <p>The compatibility default adapts the historical {@link Long#MAX_VALUE} sentinel.

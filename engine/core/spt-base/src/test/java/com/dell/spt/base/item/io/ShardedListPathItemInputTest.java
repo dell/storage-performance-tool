@@ -23,6 +23,18 @@ class ShardedListPathItemInputTest {
 		assertNull(input.get());
 	}
 
+	/** An exact-prefix shard over a whole bucket has no prefix, and an item cannot have an empty name. */
+	@Test
+	void anEmptyPrefixSeedsTheRootOfTheBucket() {
+		final var shards = List.of(new ListShard("", null, null, null));
+		final var input = new ShardedListPathItemInput<PathItem>(new PathItemFactoryImpl<>(), shards);
+		assertEquals("/", input.get().name());
+		input.reset();
+		final List<PathItem> batch = new java.util.ArrayList<>();
+		assertEquals(1, input.get(batch, 1));
+		assertEquals("/", batch.get(0).name());
+	}
+
 	@Test
 	void resetAllowsReiteration() {
 		final var shards = List.of(new ListShard("x", null, null, null));

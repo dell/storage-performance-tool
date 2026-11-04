@@ -577,6 +577,93 @@ func TestValidateJSONCorruptCountRequiresFieldAndMatchesCSV(t *testing.T) {
 	}
 }
 
+// metricsWithoutReadRows is an engine that has published nothing for the READ step.
+func metricsWithoutReadRows(t *testing.T) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("[]"))
+	}))
+	t.Cleanup(server.Close)
+	return server.URL
+}
+
+func emptySelectionResults(t *testing.T, readRow []string) (FinalizeOptions, func()) {
+	t.Helper()
+	source := filepath.Join(t.TempDir(), "input.csv")
+	writeCSVFixture(t, source, [][]string{canonicalHeader})
+	staging, stagedManifest, stagedCompletion, err := StageInputManifest(source, 202)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	readStep := "mt-001-test-verify"
+	writeResultsIndex(t, root, readStep)
+	writeCommittedFixture(t, root, readStep, VerifiedName, 202, readStep, [][]string{canonicalHeader})
+	writeCSVFixture(t, filepath.Join(root, readStep+"."+IntegrityFailuresName), [][]string{failureHeader})
+	writeCSVFixture(t, filepath.Join(root, readStep+"."+IntegrityPerformanceName), [][]string{performanceHeader})
+	writeCSVFixture(t, filepath.Join(root, readStep+".metrics.total.csv"), [][]string{
+		{"OpType", "CountSucc", "CountFail", "CountCorrupt"}, readRow,
+	})
+	return FinalizeOptions{
+		ResultsRoot: root, Workload: workload.ReadVerify, RunID: 202, StepIDs: []string{readStep},
+		StagedManifest: stagedManifest, StagedCompletion: stagedCompletion, AllowEmptySelection: true,
+		BaseURL: metricsWithoutReadRows(t),
+	}, func() { _ = os.RemoveAll(staging) }
+}
+
+// A READ step with nothing to read ends before the engine publishes a row for it.
+func TestFinalizeEmptySelectionNeedsNoLiveReadRow(t *testing.T) {
+	options, cleanup := emptySelectionResults(t, []string{"READ", "0", "0", "0"})
+	defer cleanup()
+	outcome, err := FinalizeResults(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.EmptySelection || !outcome.EmptyAllowed || outcome.VerificationAttemptedCount != 0 {
+		t.Fatalf("unexpected empty outcome: %+v", outcome)
+	}
+}
+
+// The cross-check stays strict once anything was read.
+func TestFinalizeStillRequiresALiveReadRowAfterAnyRead(t *testing.T) {
+	options, cleanup := emptySelectionResults(t, []string{"READ", "0", "1", "0"})
+	defer cleanup()
+	if _, err := FinalizeResults(options); err == nil || !errors.Is(err, errNoReadRow) {
+		t.Fatalf("FinalizeResults() error = %v, want the missing READ row", err)
+	}
+}
+
+// Objects selected but none read must never pass as an empty selection.
+func TestFinalizeNothingReadOfANonEmptySelectionIsNotEmpty(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "input.csv")
+	writeCSVFixture(t, source, [][]string{canonicalHeader, {"b", "k", "1", ""}})
+	staging, stagedManifest, stagedCompletion, err := StageInputManifest(source, 202)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(staging) }()
+	root := t.TempDir()
+	readStep := "mt-001-test-verify"
+	writeResultsIndex(t, root, readStep)
+	writeCommittedFixture(t, root, readStep, VerifiedName, 202, readStep, [][]string{canonicalHeader})
+	writeCSVFixture(t, filepath.Join(root, readStep+"."+IntegrityFailuresName), [][]string{failureHeader})
+	writeCSVFixture(t, filepath.Join(root, readStep+"."+IntegrityPerformanceName), [][]string{performanceHeader})
+	writeCSVFixture(t, filepath.Join(root, readStep+".metrics.total.csv"), [][]string{
+		{"OpType", "CountSucc", "CountFail", "CountCorrupt"}, {"READ", "0", "0", "0"},
+	})
+	outcome, finalizeErr := FinalizeResults(FinalizeOptions{
+		ResultsRoot: root, Workload: workload.ReadVerify, RunID: 202, StepIDs: []string{readStep},
+		StagedManifest: stagedManifest, StagedCompletion: stagedCompletion, AllowEmptySelection: true,
+		BaseURL: metricsWithoutReadRows(t),
+	})
+	if outcome.EmptySelection || outcome.EmptyAllowed || outcome.SelectionCount != 1 {
+		t.Fatalf("unexpected outcome: %+v", outcome)
+	}
+	if finalizeErr == nil {
+		t.Fatalf("one selected object went unread and finalization accepted it: %+v", outcome)
+	}
+}
+
 func TestObserveJSONCorruptCountHonorsCanceledContext(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("canceled corruption-metrics request reached the server")

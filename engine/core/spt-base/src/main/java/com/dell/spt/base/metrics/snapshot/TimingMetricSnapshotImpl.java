@@ -3,6 +3,7 @@ package com.dell.spt.base.metrics.snapshot;
 import com.dell.spt.base.metrics.type.TimingMeterImpl;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.function.IntFunction;
 import java.util.List;
 import java.util.zip.DataFormatException;
 import org.HdrHistogram.Histogram;
@@ -207,6 +208,23 @@ public class TimingMetricSnapshotImpl extends NamedCountMetricSnapshotImpl
 		return Arrays.copyOf(compressedHistogram, compressedHistogram.length);
 	}
 
+	/**
+	 * The given quantiles of a snapshot, decoding its histogram once and keeping nothing, for a
+	 * caller that reads thousands of snapshots it goes on holding.
+	 */
+	public static long[] percentiles(final TimingMetricSnapshot snapshot, final List<Double> quantiles) {
+		final long[] values = new long[quantiles.size()];
+		final byte[] compressed = snapshot.compressedHistogram();
+		final Histogram histogram = compressed.length == 0 ? null : decodeHistogram(compressed);
+		for (int i = 0; i < values.length; i++) {
+			final double quantile = quantiles.get(i);
+			values[i] = histogram == null || quantile <= 0.0
+							? 0L
+							: Math.min(snapshot.max(), histogram.getValueAtPercentile(Math.min(100.0, quantile * 100.0)));
+		}
+		return values;
+	}
+
 	private Histogram decodedHistogram() {
 		Histogram histogram = decodedHistogram;
 		if (histogram == null && compressedHistogram.length > 0) {
@@ -223,6 +241,48 @@ public class TimingMetricSnapshotImpl extends NamedCountMetricSnapshotImpl
 		final ByteBuffer buffer = ByteBuffer.allocate(histogram.getNeededByteBufferCapacity());
 		final int length = histogram.encodeIntoCompressedByteBuffer(buffer);
 		return Arrays.copyOf(buffer.array(), length);
+	}
+
+	/** Encodes a histogram with a buffer the caller reuses. */
+	public static byte[] encodeHistogram(final Histogram histogram, final IntFunction<ByteBuffer> encodeBuffer) {
+		if (histogram == null || histogram.getTotalCount() == 0) {
+			return new byte[0];
+		}
+		final ByteBuffer buffer = encodeBuffer.apply(histogram.getNeededByteBufferCapacity());
+		buffer.clear();
+		final byte[] encoded = new byte[histogram.encodeIntoCompressedByteBuffer(buffer)];
+		buffer.flip();
+		buffer.get(encoded);
+		return encoded;
+	}
+
+	/**
+	 * The statistics of the population between two copies of one histogram, encoded with a buffer
+	 * the caller reuses, because a step can encode thousands of them. Subtracts in place from
+	 * {@code end}. The end copy starts after the start copy ends and bucket counts only grow, so the
+	 * difference has no negative bucket.
+	 */
+	public static TimingMetricSnapshot ofWindow(
+					final String metricName,
+					final Histogram end,
+					final Histogram start,
+					final IntFunction<ByteBuffer> encodeBuffer) {
+		end.subtract(start);
+		final long count = end.getTotalCount();
+		if (count == 0) {
+			return new TimingMetricSnapshotImpl(0, 0, 0, 0, 0.0, metricName);
+		}
+		final double mean = end.getMean();
+		final byte[] encoded = encodeHistogram(end, encodeBuffer);
+		return new TimingMetricSnapshotImpl(
+						Math.round(mean * count),
+						count,
+						end.getMinValue(),
+						end.getMaxValue(),
+						mean,
+						metricName,
+						end.getCountAtValue(TimingMeterImpl.HIGHEST_TRACKABLE_VALUE_MICROS),
+						encoded);
 	}
 
 	private static Histogram decodeHistogram(final byte[] compressedHistogram) {

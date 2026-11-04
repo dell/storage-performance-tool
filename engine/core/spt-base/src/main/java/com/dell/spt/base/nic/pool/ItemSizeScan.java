@@ -1,10 +1,10 @@
 package com.dell.spt.base.nic.pool;
 
+import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.io.ItemInputFactory;
-import com.dell.spt.base.item.io.ItemInputStatus;
 import com.github.akurilov.commons.io.Input;
 import java.io.EOFException;
 import java.io.IOException;
@@ -15,8 +15,8 @@ import java.util.function.LongSupplier;
 /**
  * Reads one engine's own item file once before the load, keeping only its sizes (D54). It goes
  * through the parser {@link ItemInputFactory} chooses for the file, so an item-list CSV, a canonical
- * integrity manifest and the binary item format are read as the workload reads them, and asks
- * {@link ItemInputStatus} whether the end it saw was the real one (D54-R1).
+ * integrity manifest and the binary item format are read as the workload reads them. A bad line
+ * makes the summary incomplete (D54-R1), and the workload's own read then ends the run.
  */
 public final class ItemSizeScan {
 
@@ -50,9 +50,8 @@ public final class ItemSizeScan {
 					final Input<I> input, final ItemSizeSummary.Recorder recorder, final long deadlineNanos, final LongSupplier nanoTime) {
 		try (input) {
 			read(input, recorder, deadlineNanos, nanoTime);
-			failIfMalformed(input, recorder);
-		} catch (final IllegalArgumentException | IndexOutOfBoundsException e) {
-			// A manifest throws on a bad record; a CSV line with no comma reaches here too.
+		} catch (final RunTerminalException | IllegalArgumentException | IndexOutOfBoundsException e) {
+			// A CSV input ends the run at a bad line, and a manifest throws on a bad record. The scan only records it: the workload's own read ends the run.
 			recorder.fail(ItemSizeSummary.Reason.MALFORMED_ITEM, e.getMessage());
 		} catch (final Exception e) {
 			recorder.fail(ItemSizeSummary.Reason.READ_FAILED, e.toString());
@@ -102,28 +101,5 @@ public final class ItemSizeScan {
 		if (item instanceof DataItem data) {
 			recorder.record(data.size());
 		}
-	}
-
-	/**
-	 * Closes the record of an input that reported no more items: its end if nothing was malformed. A
-	 * CSV input returns no items at a malformed line as it does at its end, and the status tells them
-	 * apart.
-	 */
-	public static void finish(final Object input, final ItemSizeSummary.Recorder recorder) {
-		failIfMalformed(input, recorder);
-		recorder.finish();
-	}
-
-	private static void failIfMalformed(final Object input, final ItemSizeSummary.Recorder recorder) {
-		if (input instanceof ItemInputStatus status && status.malformedItems() > 0) {
-			recorder.fail(ItemSizeSummary.Reason.MALFORMED_ITEM, firstLine(status.firstMalformedItem()));
-		}
-	}
-
-	private static String firstLine(final String line) {
-		if (line == null) {
-			return "";
-		}
-		return line.length() > 120 ? line.substring(0, 120) + "..." : line;
 	}
 }

@@ -79,29 +79,36 @@ func printPoolPlan(plan poolsizing.Plan) {
 	}
 }
 
+// The step roles a run's pool sizing reads, as a generated scenario names them.
+const (
+	poolStepRead   = "read"
+	poolStepSeed   = "seed"
+	poolStepDelete = "delete"
+)
+
 // poolSizingSteps gives verify a seed-then-load run's steps by role, with no scenario to read IDs
 // from: the same steps BuildRequest takes from a generated scenario.
 func poolSizingSteps(params scenario.Params) []scenario.StepInfo {
 	ops := []string{"create"}
 	switch params.WorkloadType {
 	case WorkloadTypeRead:
-		ops = []string{"read"}
+		ops = []string{poolStepRead}
 		if params.ItemsFile == "" {
-			ops = []string{"seed", "read"}
+			ops = []string{poolStepSeed, poolStepRead}
 		}
 	case WorkloadTypeMixed:
 		ops = []string{"mixed"}
 		if params.ReadItemsFile == "" {
-			ops = []string{"seed", "mixed"}
+			ops = []string{poolStepSeed, "mixed"}
 		}
 	case WorkloadTypeWriteVerify:
-		ops = []string{"create", "read"}
+		ops = []string{"create", poolStepRead}
 	case WorkloadTypeReadVerify:
-		ops = []string{"read"}
+		ops = []string{poolStepRead}
 	case WorkloadTypeDelete:
-		ops = []string{"delete"}
+		ops = []string{poolStepDelete}
 		if params.ItemsFile == "" && !params.DeleteExisting {
-			ops = []string{"seed", "delete"}
+			ops = []string{poolStepSeed, poolStepDelete}
 		}
 	}
 	steps := make([]scenario.StepInfo, 0, len(ops))

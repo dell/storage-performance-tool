@@ -1386,6 +1386,55 @@ public class LoadStepContextImplTest {
 	}
 
 	@Test
+	public void aDriverThatFailsToStartFailsTheContext() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final var driver = barrierDriver();
+		final var generator = barrierGenerator();
+		when(driver.start()).thenThrow(new IllegalStateException("driver-start"));
+		final var ctx = new LoadStepContextImpl<>(
+						"ctx-driver-fails", generator, driver, null, testConfig.configVal("load"), false);
+		try {
+			assertEquals("driver-start", assertThrows(IllegalStateException.class, ctx::doStart).getMessage());
+			verify(generator, never()).start();
+		} finally {
+			ctx.doStop();
+		}
+	}
+
+	@Test
+	public void aGeneratorThatFailsToStartFailsTheContext() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final var generator = barrierGenerator();
+		doThrow(new IllegalStateException("generator-start")).when(generator).start();
+		final var ctx = new LoadStepContextImpl<>(
+						"ctx-generator-fails", generator, barrierDriver(), null, testConfig.configVal("load"), false);
+		try {
+			assertEquals("generator-start", assertThrows(IllegalStateException.class, ctx::doStart).getMessage());
+		} finally {
+			ctx.doStop();
+		}
+	}
+
+	@Test
+	public void aStartThatLosesToAStopIsNotAFailure() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final var generator = barrierGenerator();
+		final var ctx = new LoadStepContextImpl<>(
+						"ctx-stopped", generator, barrierDriver(), null, testConfig.configVal("load"), false);
+		final var shuttingDown = LoadStepContextImpl.class.getDeclaredField("stepShuttingDown");
+		shuttingDown.setAccessible(true);
+		doAnswer(call -> {
+			((java.util.concurrent.atomic.AtomicBoolean) shuttingDown.get(ctx)).set(true);
+			throw new IllegalStateException("generator-stopped");
+		}).when(generator).start();
+		try {
+			assertDoesNotThrow(ctx::doStart);
+		} finally {
+			ctx.doStop();
+		}
+	}
+
+	@Test
 	public void stoppedContextRejectsSameInstanceRestartInsteadOfStartingWithoutItsGenerator() throws Exception {
 		testConfig.val("load-op-retry", false);
 		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
@@ -2181,6 +2230,48 @@ public class LoadStepContextImplTest {
 			assertEquals(1123, trackingMetrics.successCount.get());
 			assertEquals(0, trackingMetrics.byteCount.get());
 		}
+	}
+
+	@Test
+	public void bucketMetersReceiveWhatTheAggregateReceivesOnEachResultRoute() throws Exception {
+		testConfig.val("load-op-retry", false);
+		@SuppressWarnings("unchecked")
+		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);
+		final MetricsContext<AllMetricsSnapshot> metrics = buildMetricsCtx("bucketRoutes");
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"step-bucket-routes", generatorMock, mockDriver, metrics, testConfig.configVal("load"), false);
+		final var meters = new com.dell.spt.base.metrics.bucket.BucketMeters(OpType.CREATE, List.of("another-bucket"));
+		stepCtx.bucketRecorder(new com.dell.spt.base.metrics.bucket.BucketRecorder(List.of("another-bucket"), meters, null));
+
+		assertTrue(stepCtx.put((Operation<DataItem>) newSuccDataOp("single", 1024)));
+		final List<Operation<DataItem>> batch = new ArrayList<>();
+		batch.add(newSuccDataOp("batch-1", 10));
+		batch.add(newSuccDataOp("batch-2", 20));
+		assertEquals(2, stepCtx.put(batch, 0, 2));
+		final DataOperation<DataItem> failed = baseDataOp("failed", 1);
+		((Operation<DataItem>) failed).status(Operation.Status.FAIL_IO);
+		assertTrue(stepCtx.put((Operation<DataItem>) failed));
+		final DataOperation<DataItem> corrupt = baseDataOp("corrupt", 1);
+		((Operation<DataItem>) corrupt).status(Operation.Status.RESP_FAIL_CORRUPT);
+		assertTrue(stepCtx.put((Operation<DataItem>) corrupt));
+
+		metrics.refreshLastSnapshot();
+		final AllMetricsSnapshot aggregate = metrics.lastSnapshot();
+		final var records = meters.terminalRecords();
+		assertEquals(aggregate.successSnapshot().count(), records.stream()
+						.mapToLong(com.dell.spt.base.metrics.bucket.BucketTerminalRecord::succeeded).sum());
+		assertEquals(aggregate.failsSnapshot().count(), records.stream()
+						.mapToLong(com.dell.spt.base.metrics.bucket.BucketTerminalRecord::failed).sum());
+		assertEquals(aggregate.corruptSnapshot().count(), records.stream()
+						.mapToLong(com.dell.spt.base.metrics.bucket.BucketTerminalRecord::corrupt).sum());
+		assertEquals(aggregate.byteSnapshot().count(), records.stream()
+						.mapToLong(com.dell.spt.base.metrics.bucket.BucketTerminalRecord::bytes).sum());
+		assertEquals(3, aggregate.successSnapshot().count());
+		assertEquals(2, aggregate.failsSnapshot().count());
+		assertEquals(1, aggregate.corruptSnapshot().count());
+		assertEquals(aggregate.durationSnapshot().count(), records.stream()
+						.mapToLong(record -> record.duration().count()).sum());
+		metrics.close();
 	}
 
 	/* Helpers for tests */

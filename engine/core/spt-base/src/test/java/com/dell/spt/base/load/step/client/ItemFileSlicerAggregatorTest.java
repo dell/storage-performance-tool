@@ -1,6 +1,7 @@
 package com.dell.spt.base.load.step.client;
 
 import com.dell.spt.base.config.TestConfigBuilder;
+import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.config.ConstantValueInputImpl;
 import com.dell.spt.base.integrity.IntegrityCsvFormat;
 import com.dell.spt.base.integrity.IntegrityInputProvenance;
@@ -526,7 +527,7 @@ class ItemFileSlicerAggregatorTest {
 	}
 
 	@Test
-	@DisplayName("ItemInputFileSlicer logs and skips when stream initialization fails")
+	@DisplayName("ItemInputFileSlicer ends the run and removes its slice when stream initialization fails")
 	void itemInputFileSlicerHandlesStreamFactoryFailure() throws Exception {
 		final FileManager mockMgr = mock(FileManager.class);
 		final Path tmp = Files.createTempFile("spt-slicer", ".input");
@@ -548,11 +549,12 @@ class ItemFileSlicerAggregatorTest {
 			throw new IOException("stream header failure");
 		});
 		try {
-			final ItemInputFileSlicer slicer = new ItemInputFileSlicer(
-							"test-step-stream-failure", List.of(mockMgr), slices, itemInput, 1);
-			assertEquals(tmp.toString(), slices.get(0).stringVal("item-input-file"));
+			final var failure = assertThrows(
+							RunTerminalException.class,
+							() -> new ItemInputFileSlicer("test-step-stream-failure", List.of(mockMgr), slices, itemInput, 1));
+			assertEquals("failed to read or distribute the items input", failure.getMessage());
 			verify(mockMgr, never()).writeToFile(anyString(), any(byte[].class));
-			slicer.close();
+			assertFalse(Files.exists(tmp), "the slice must be removed");
 		} finally {
 			ItemInputFileSlicer.resetObjectOutputStreamFactoryForTesting();
 		}

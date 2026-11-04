@@ -33,6 +33,8 @@ public interface Loggers {
 	Logger METRICS_THRESHOLD_EXT_RESULTS_FILE = LogManager.getLogger(BASE_METRICS_THRESHOLD + "ExtResultsFile");
 	Logger METRICS_THRESHOLD_FILE_TOTAL = LogManager.getLogger(BASE_METRICS_THRESHOLD + "FileTotal");
 	Logger METRICS_STEADY_FILE_TOTAL = LogManager.getLogger(BASE_METRICS_STEADY + "FileTotal");
+	Logger METRICS_BUCKET_FILE_TOTAL = LogManager.getLogger(BASE_METRICS + "bucket.FileTotal");
+	Logger METRICS_BUCKET_STEADY_FILE_TOTAL = LogManager.getLogger(BASE_METRICS + "bucket.steady.FileTotal");
 	Logger MSG = LogManager.getLogger(BASE + "Messages");
 	Logger MULTIPART = LogManager.getLogger(BASE + "Multipart");
 	Logger RANGE_READ = LogManager.getLogger(BASE + "RangeRead");
@@ -75,6 +77,10 @@ public interface Loggers {
 					Map.entry(
 									METRICS_STEADY_FILE_TOTAL.getName().substring(BASE.length()),
 									"Steady-State Metrics Total"),
+					Map.entry(METRICS_BUCKET_FILE_TOTAL.getName().substring(BASE.length()), "Bucket Metrics Total"),
+					Map.entry(
+									METRICS_BUCKET_STEADY_FILE_TOTAL.getName().substring(BASE.length()),
+									"Steady-State Bucket Metrics Total"),
 					Map.entry(MSG.getName().substring(BASE.length()), "Messages"),
 					Map.entry(MULTIPART.getName().substring(BASE.length()), "Multipart Upload Phases"),
 					Map.entry(RANGE_READ.getName().substring(BASE.length()), "Terminal Partial READ v1"),

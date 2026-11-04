@@ -38,6 +38,8 @@ const (
 	ResultsArtifactSuffixScenario              = "scenario.txt"
 	ResultsArtifactSuffixMetricsThreshold      = "metrics.threshold.total.csv"
 	ResultsArtifactSuffixMetricsSteady         = "metrics.steady.total.csv"
+	ResultsArtifactSuffixMetricsBucket         = "metrics.bucket.total.csv"
+	ResultsArtifactSuffixMetricsBucketSteady   = "metrics.bucket.steady.total.csv"
 	ResultsArtifactSuffixOpTrace               = "op.trace.csv"
 	ResultsArtifactSuffixDeleteMetricsTotal    = "delete.metrics.total.csv"
 	ResultsArtifactSuffixDeleteRequests        = "delete.requests.csv"

@@ -1,5 +1,7 @@
 package com.dell.spt.base.load.step;
 
+import com.dell.spt.base.metrics.bucket.BucketMetricsRange;
+import com.dell.spt.base.metrics.bucket.BucketMetricsReply;
 import com.dell.spt.base.concurrent.Daemon;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
@@ -24,6 +26,18 @@ public interface LoadStep extends Daemon {
 
 	/** Publishes worker object counters for the controller; compatibility workers provide no evidence. */
 	default DeleteObjectLifecycleSnapshot deleteObjectLifecycle() throws RemoteException {
+		return null;
+	}
+
+	/**
+	 * Returns this worker's terminal bucket metrics, separately from the periodic snapshots. The
+	 * worker holds them until its step service closes, so an entry node may ask again.
+	 *
+	 * @param range the records to return; {@link BucketMetricsRange#ALL} for every record
+	 * @return the records, or null when this worker has none: bucket metrics are off, or this is
+	 *     an older or third-party implementation
+	 */
+	default BucketMetricsReply bucketMetrics(final BucketMetricsRange range) throws RemoteException {
 		return null;
 	}
 

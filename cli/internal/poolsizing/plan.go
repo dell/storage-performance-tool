@@ -49,6 +49,9 @@ type Plan struct {
 }
 
 // Failure returns the failures that stop a run before launch, or nil.
+// memTotalField is the host memory's name in /proc/meminfo, and a capacity's source when it is that alone.
+const memTotalField = "MemTotal"
+
 func (p Plan) Failure() error {
 	var failures []error
 	for _, engine := range p.Engines {
@@ -161,7 +164,7 @@ func boundedByHostMemory(capacity *nicplan.Capacity, hostBytes int64) *nicplan.C
 	}
 	if capacity == nil {
 		return &nicplan.Capacity{
-			Bytes: hostBytes, Source: "MemTotal", MemTotalBytes: hostBytes, CgroupLimitBytes: -1,
+			Bytes: hostBytes, Source: memTotalField, MemTotalBytes: hostBytes, CgroupLimitBytes: -1,
 			Note: "the image's capacity probe gave no answer, so this is the host's MemTotal alone and no cgroup limit was checked",
 		}
 	}
@@ -176,7 +179,7 @@ func boundedByHostMemory(capacity *nicplan.Capacity, hostBytes int64) *nicplan.C
 		note = capacity.Note + "; " + note
 	}
 	bounded := *capacity
-	bounded.Bytes, bounded.Source, bounded.MemTotalBytes, bounded.Cgroup, bounded.Note = hostBytes, "MemTotal", hostBytes, "", note
+	bounded.Bytes, bounded.Source, bounded.MemTotalBytes, bounded.Cgroup, bounded.Note = hostBytes, memTotalField, hostBytes, "", note
 	return &bounded
 }
 
@@ -188,7 +191,7 @@ func hostMemTotal(ctx context.Context, in Input, host *hostparse.HostInfo) int64
 	defer cancel()
 	result := make(chan int64, 1)
 	go func() {
-		stdout, _, err := in.Executor.ExecuteCommand(ctx, host, []string{"grep", "MemTotal", "/proc/meminfo"})
+		stdout, _, err := in.Executor.ExecuteCommand(ctx, host, []string{"grep", memTotalField, "/proc/meminfo"})
 		if err != nil {
 			result <- 0
 			return

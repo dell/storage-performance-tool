@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -56,6 +57,7 @@ const (
 	flagBucketCount           = "bucket-count"
 	targetBucketCountPath     = "storage.targetBucket.count"
 	flagProvisionTargetBucket = "provision-target-bucket"
+	flagBucketMetrics         = "bucket-metrics"
 	flagCreatePrefix          = "create-prefix"
 	flagRMIRegistryPort       = "rmi-registry-port"
 	flagInterfaces            = "interfaces"
@@ -734,7 +736,10 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		} else {
 			writeProgress("Auto-results: launch armed for run %d\n", expectedRunID)
 			tracker := newRunTrackerFunc(baseURL)
-			configureAutoResultsTracker(tracker, expectedRunID, debug, verificationRun)
+			// A DELETE's outcome requires the engine's final state too, and a large step can look done
+			// well before the engine reports it.
+			requireTerminal := verificationRun || (metadata != nil && metadata.WorkloadType == WorkloadTypeDelete)
+			configureAutoResultsTracker(tracker, expectedRunID, debug, requireTerminal)
 			// Wait for terminal run state; step IDs discovered later via metrics/json
 			if len(expectedStepIDs) > 0 {
 				writeProgress("Auto-results: expecting %d step(s)\n", len(expectedStepIDs))
@@ -906,13 +911,14 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 
 			var observedRuntimeRoles integrity.StepRoles
 			var plannedRoles integrity.StepRoles
+			fetchStepIDs := stepIDs
 			if verificationRun {
 				plan := integrityOptions[0].Plan
 				deferredVerification := plan.Valid() && plan.VerificationDeferred()
 				plannedRoles = integrity.PlannedStepRoles(plan)
 				if plan.Valid() {
-					allowMissingVerifier := stepRoleLifecycle(
-						outcome.Tracker, "", plannedRoles.Read) == portcheck.StepLifecycleNotStarted
+					allowMissingVerifier := verifierMayBeMissing(plan, stepRoleLifecycle(
+						outcome.Tracker, "", plannedRoles.Read))
 					binding, bindErr := integrity.BindObservedStepRoles(plan, runtimeStepIDs, allowMissingVerifier)
 					if bindErr != nil {
 						outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, bindErr)
@@ -922,6 +928,8 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 						artifactsReady = false
 					} else {
 						observedRuntimeRoles = binding.Roles
+						fetchStepIDs = stepsToFetch(stepIDs, plan, binding.Roles.Read, stepRoleLifecycle(
+							outcome.Tracker, binding.Roles.Read, plannedRoles.Read))
 					}
 				} else {
 					observedRuntimeRoles = integrity.ResolveStepRoles(stepIDs, nil)
@@ -969,7 +977,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			integrityFinalizationReady := artifactsReady
 			if artifactsReady {
 				fetch := newResultsFetcherFunc(baseURL, root)
-				if _, ferr := fetch.FetchArtifactsForSteps(artifactCtx, stepIDs); ferr != nil {
+				if _, ferr := fetch.FetchArtifactsForSteps(artifactCtx, fetchStepIDs); ferr != nil {
 					outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, ferr)
 					logging.LogError("auto-results", "artifact fetch failed", ferr, "base_url", baseURL, "out", root)
 					writeProgress("Results fetch encountered errors; preserving available evidence and continuing shutdown. Output: %s\n", root)
@@ -990,12 +998,13 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				options.PlannedStepIDs = append([]string(nil), expectedStepIDs...)
 				options.ObservedStepIDs = append([]string(nil), runtimeStepIDs...)
 				options.AllowPlannedRoleFallback = len(runtimeStepIDs) == 0
-				options.AllowMissingRuntimeVerifier = stepRoleLifecycle(
-					outcome.Tracker, observedRuntimeRoles.Read, plannedRoles.Read) == portcheck.StepLifecycleNotStarted
+				options.AllowMissingRuntimeVerifier = verifierMayBeMissing(options.Plan, stepRoleLifecycle(
+					outcome.Tracker, observedRuntimeRoles.Read, plannedRoles.Read))
 				options.Context = artifactCtx
 				finalized, finalizeErr := integrity.FinalizeResults(options)
 				outcome.Finalization = &finalized
 				outcome.FinalizationErr = finalizeErr
+				dropLiveCorruptionErrorOfEmptySelection(&outcome)
 				if finalizeErr != nil {
 					logging.LogError("auto-results", "integrity result finalization failed", finalizeErr, "out", root)
 					writeProgress("Integrity result finalization failed; preserved evidence under %s\n", root)
@@ -1130,6 +1139,36 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		}
 	}()
 	return monitor
+}
+
+// verifierMayBeMissing reports whether a run's READ step can be absent from the live step list. One
+// that never started publishes nothing, and neither does the READ step of an empty selection, which
+// --allow-empty-selection says to expect. Finalization still decides from the counts on file.
+func verifierMayBeMissing(plan integrityplan.Plan, readLifecycle portcheck.StepLifecycle) bool {
+	return readLifecycle == portcheck.StepLifecycleNotStarted || plan.AllowEmpty
+}
+
+// stepsToFetch adds the planned READ step when --allow-empty-selection expects it may go unseen and it
+// did complete: with nothing to read it can end between two polls of the live metrics, and its files
+// are still there. A READ that isn't known to have completed is not reported as a step of this run.
+func stepsToFetch(
+	stepIDs []string, plan integrityplan.Plan, observedRead string, readLifecycle portcheck.StepLifecycle,
+) []string {
+	if !plan.AllowEmpty || observedRead != "" || plan.Verifier.ID == "" ||
+		readLifecycle != portcheck.StepLifecycleCompleted || slices.Contains(stepIDs, plan.Verifier.ID) {
+		return stepIDs
+	}
+	return append(slices.Clone(stepIDs), plan.Verifier.ID)
+}
+
+// dropLiveCorruptionErrorOfEmptySelection forgives a missing live corruption count when finalization
+// proved that nothing was selected or read. The READ step of an empty selection ends before the
+// engine publishes it, so there is no live count to read, and its files already say zero.
+func dropLiveCorruptionErrorOfEmptySelection(outcome *autoResultsOutcome) {
+	final := outcome.Finalization
+	if outcome.FinalizationErr == nil && final != nil && final.EmptySelection && final.VerificationAttemptedCount == 0 {
+		outcome.CorruptionMetricsErr = nil
+	}
 }
 
 func buildIntegrityFinalizeOptions(params scenario.Params, plan integrityplan.Plan) *integrity.FinalizeOptions {
@@ -1317,6 +1356,18 @@ func resolveRunCompletionError(
 	if params.WorkloadType == scenario.WorkloadTypeDelete {
 		var reasons []string
 		var causes []error
+		cleanupOnlyFailure := outcome.Tracker != nil &&
+			params.Cleanup &&
+			outcome.Tracker.FinalState == constants.StateFailed &&
+			scenario.IsSeededDeleteCleanupStepID(outcome.Tracker.FailureStepID)
+		// A failed step is the cause, and the incomplete metrics below are usually its consequence.
+		if outcome.Tracker != nil && outcome.Tracker.FinalState == constants.StateFailed && !cleanupOnlyFailure {
+			reasons = append(reasons, fmt.Sprintf(
+				"step %s failed (%s): %s",
+				outcome.Tracker.FailureStepID,
+				outcome.Tracker.FailureCategory,
+				outcome.Tracker.FailureMessage))
+		}
 		if outcome.DeleteMetricsErr != nil {
 			reasons = append(reasons, "terminal DELETE metrics are incomplete: "+outcome.DeleteMetricsErr.Error())
 			causes = append(causes, outcome.DeleteMetricsErr)
@@ -1329,21 +1380,10 @@ func resolveRunCompletionError(
 			reasons = append(reasons, "completion tracking: "+outcome.TrackerErr.Error())
 			causes = append(causes, outcome.TrackerErr)
 		}
-		cleanupOnlyFailure := outcome.Tracker != nil &&
-			params.Cleanup &&
-			outcome.Tracker.FinalState == constants.StateFailed &&
-			scenario.IsSeededDeleteCleanupStepID(outcome.Tracker.FailureStepID)
-		if outcome.Tracker != nil && outcome.Tracker.FinalState != constants.StateCompleted && !cleanupOnlyFailure {
-			if outcome.Tracker.FinalState == constants.StateFailed {
-				reasons = append(reasons, fmt.Sprintf(
-					"step %s failed (%s): %s",
-					outcome.Tracker.FailureStepID,
-					outcome.Tracker.FailureCategory,
-					outcome.Tracker.FailureMessage))
-			} else {
-				reasons = append(reasons, fmt.Sprintf(
-					"engine terminal state is %s", outcome.Tracker.FinalState))
-			}
+		if outcome.Tracker != nil && outcome.Tracker.FinalState != constants.StateCompleted &&
+			outcome.Tracker.FinalState != constants.StateFailed {
+			reasons = append(reasons, fmt.Sprintf(
+				"engine terminal state is %s", outcome.Tracker.FinalState))
 		} else if received && outcome.Tracker == nil {
 			reasons = append(reasons, "terminal engine status was not captured")
 		}
@@ -2316,6 +2356,7 @@ func init() {
 	runCmd.Flags().String("prefix", "", "Write/write-verify: generated-key prefix (literal, include trailing / for a directory); seeded DELETE: owned namespace root; guarded existing DELETE: exact S3 prefix without a leading slash; list/read-verify: listing constraint")
 	runCmd.Flags().String("region", "", "AWS region for S3 requests (env S3_REGION); empty uses the region of a standard AWS endpoint, else us-east-1")
 	runCmd.Flags().Bool(flagProvisionTargetBucket, true, "Create a missing target bucket before the phase that writes the run's objects; false still checks that every target bucket exists and is accessible. Never clears or deletes a bucket")
+	runCmd.Flags().Bool(flagBucketMetrics, true, "Record per-bucket counts and timings for a step with more than one target bucket, in metrics.bucket.total.csv and metrics.bucket.steady.total.csv; false records and writes none of them")
 	registerEndpointSelectionFlags(runCmd.Flags())
 	runCmd.Flags().Int("auth-version", 4, "S3 authentication signature version (2 or 4; default 4)")
 
@@ -2536,6 +2577,10 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 			provision, _ := cmd.Flags().GetBool(flagProvisionTargetBucket)
 			params.TargetBucketProvisionDisabled = !provision
 		}
+		if cmd.Flags().Lookup(flagBucketMetrics) != nil {
+			bucketMetrics, _ := cmd.Flags().GetBool(flagBucketMetrics)
+			params.BucketMetricsDisabled = !bucketMetrics
+		}
 		selection, err := endpointSelectionFromFlags(cmd)
 		if err != nil {
 			return params, err
@@ -2677,6 +2722,7 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	if err := applyBucketCount(cmd, &params); err != nil {
 		return scenario.Params{}, err
 	}
+	params.BucketMetricsDisabled = scenario.BucketMetricsDisabledAfterOverrides(params)
 	if err := applyBucketList(cmd, &params, targetBuckets); err != nil {
 		return scenario.Params{}, err
 	}

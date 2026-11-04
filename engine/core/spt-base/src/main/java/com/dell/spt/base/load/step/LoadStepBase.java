@@ -190,7 +190,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 
 	/**
 	 * Returns the first failure observed by the most recent {@link #run()} call, including failures
-	 * swallowed to preserve the legacy behavior of ordinary load steps.
+	 * swallowed to preserve the legacy behavior of ordinary load steps. A failure to start isn't one
+	 * of those: it ends the run.
 	 */
 	public final Throwable runFailure() {
 		return runFailure;
@@ -234,6 +235,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 				} else {
 					LogUtil.exception(Level.ERROR, cause, "Load step execution failure \"{}\"", toString());
 				}
+				// Every runtime failure of the await is handled above, so this is a failure to start.
+				terminalCause = startFailure(cause);
 			}
 		} finally {
 			// The window ends where the run does, before the freeze, on normal and exceptional exits.
@@ -284,10 +287,21 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 				LogUtil.exception(Level.WARN, e, "{}: failed to close the steady-state window", loadStepId());
 			}
 		}
+		afterSteadyWindowsClosed();
 	}
+
+	/** Called once every aggregate window of this step has closed, before the stop-path action. */
+	protected void afterSteadyWindowsClosed() {}
 
 	private void recordRunFailure(final Throwable failure) {
 		if (failure == null || failure == runFailure) {
+			return;
+		}
+		// A terminal failure wrapping the recorded one adds only what it suppressed, and keeping it would make a cycle.
+		if (runFailure != null && failure.getCause() == runFailure) {
+			for (final Throwable suppressed : failure.getSuppressed()) {
+				recordRunFailure(suppressed);
+			}
 			return;
 		}
 		if (runFailure == null) {
@@ -381,6 +395,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			}
 			recordRunFailure(cause);
 			LogUtil.exception(Level.WARN, cause, "{} step failed to start", loadStepId());
+			throw startFailure(cause);
 		}
 
 		if (!loadIntervalDeferred()) {
@@ -711,6 +726,18 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 						"Standalone DELETE inventory slice exhausted before the requested duration; "
 										+ "increase --seed-objects for a seeded run or provide/select a larger frozen inventory",
 						null);
+	}
+
+	/** A step that didn't start ends the run, unless a stop interrupted it, which is that stop. */
+	private RunTerminalException startFailure(final Throwable cause) {
+		if (Thread.currentThread().isInterrupted()) {
+			throwUnchecked(new InterruptedException(loadStepId() + ": stopped while starting"));
+		}
+		return new RunTerminalException(
+						IntegrityTerminalException.Category.EXECUTION,
+						loadStepId(),
+						"step failed to start; see the engine log",
+						cause);
 	}
 
 	/**

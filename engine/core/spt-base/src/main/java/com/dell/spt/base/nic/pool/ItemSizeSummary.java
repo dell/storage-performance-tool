@@ -36,7 +36,7 @@ public static final String CONFIG_PATH="item-input-sizeSummary";
 
 /** Why a summary is incomplete. */
 public enum Reason {
-	MALFORMED_ITEM("a malformed item"), READ_FAILED("a read failure"), WRITE_FAILED("a failed slice write"), BUDGET_EXPIRED("its read budget expired"), NOT_A_FILE("the items do not come from a file");
+	MALFORMED_ITEM("a malformed item"), READ_FAILED("a read failure"), BUDGET_EXPIRED("its read budget expired"), NOT_A_FILE("the items do not come from a file");
 
 	private final String text;
 

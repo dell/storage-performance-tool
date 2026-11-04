@@ -33,8 +33,8 @@ reference.
 | item-data-ranges-threshold                     | Size | 0                        | The size threshold to enable multipart upload (also used as the part size). When set to a value like `"64MiB"`, objects larger than this are split into parts of this size and uploaded via the S3 MPU API. Exposed by the CLI as `--part-size`. Accepts human-readable size strings (e.g., `"5MiB"`, `"64MiB"`) or raw byte counts. 0 disables MPU. |
 | item-data-size                                 | Size | 1MB                      | The size of the data items to process. IEC suffixes such as `KiB` and `MiB` are accepted; legacy `KB` and `MB` suffixes remain binary aliases. Doesn't have any effect if item.type=container. |
 | item-data-verify                               | Flag | false                    | Specifies whether to verify the content while reading the data items or not. Doesn't have any effect if load-op-type != read |
-| item-input-file                                | Path | null                     | The source file for the items to process. If null the behavior depends on the load type. |
-| item-input-path                                | String | null                   | The source path which may be used as items input if not "item-input-file" is specified. Also used for the copy mode as the path containing the items to be copied into the output path. |
+| item-input-file                                | Path | null                     | The source file for the items to process. If null the behavior depends on the load type. A file that can't be opened, or a blank or invalid line, ends the run and names the file or line. So does a file with no items, except for a DELETE: the cleanup of a step that created nothing finishes with nothing to do. |
+| item-input-path                                | String | null                   | The source path which may be used as items input if not "item-input-file" is specified. Also used for the copy mode as the path containing the items to be copied into the output path. A listing that fails part-way ends the run. An empty listing is a run with no items. |
 | item-naming-length                             | Integer > 0 | 12                | The name length for the new items. Has effect only in the case of create (if not partial) load
 | item-naming-seed                               | Integer or Expression | %{math:xor(<br/>int64:reverse(time:millisSinceEpoch()),<br/>int64:reverseBytes(time:nanos())<br/>)} | The initial id for the new item ids
 | item-naming-prefix                             | String or Expression | null     | The name prefix for the processed items. A correct value is neccessary to pass the content verification in the case of read load.
@@ -236,13 +236,14 @@ default); their terminal outcomes and latency remain part of the measured DELETE
 targets without terminal results after the bound are unresolved and invalidate the run. A bounded
 coordinator gives each slice the remaining part of one step-wide drain budget, so the bound is not
 multiplied by input count. It owns at most one active lifecycle invocation per frozen input, offers
-every input each phase, and retains incomplete invocations across cleanup retries. Finite generators
-record the source-monotonic scheduling-exhaustion transition. Each worker compares that transition
-with its own deadline and retains a semantic verdict; after admission closes, the controller
-requires every slice to report that it reached its deadline. Monotonic timestamps are never
-compared across hosts, and delayed, missing, or failed evidence fails closed. Only a transition
-strictly before the scheduled deadline invalidates duration mode. Monotonic
-scheduled and drain intervals are reported separately. `storage-driver-limit-concurrency` (the
+every input each phase, and retains incomplete invocations across cleanup retries. A slice that
+attempted every object in its frozen input ran out, which invalidates duration mode; each worker
+decides that from its final counts after the drain, or earlier once every request has been
+dispatched, and handing the inventory to the driver's input queue doesn't count. Each worker
+retains a semantic verdict; after admission closes, the controller requires every slice to report
+that it reached its deadline. Monotonic timestamps are never compared across hosts, and delayed,
+missing, or failed evidence fails closed. Monotonic scheduled and drain intervals
+are reported separately. `storage-driver-limit-concurrency` (the
 CLI's `--threads`) bounds logical DELETE requests, not the object targets inside a batch.
 
 For standalone DELETE, workers publish lifecycle counters and only the controller aggregates them
