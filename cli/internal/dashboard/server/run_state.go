@@ -63,8 +63,15 @@ func (a *app) currentState() (map[string]any, error) {
 			}
 			_ = a.writeState(state)
 		} else {
-			a.savePendingLiveHistory(str(state[keyRunID]))
-			retained := retainedLiveMetrics(str(state[keyRunID]), a.liveRunID, jobWorkload(state), a.liveSamples)
+			runID := str(state[keyRunID])
+			workload := jobWorkload(state)
+			a.savePendingLiveHistory(runID)
+			retained := retainedLiveMetrics(runID, a.liveRunID, workload, a.liveSamples)
+			if retained == nil {
+				// A restarted dashboard has no in-memory samples. Keep this run's
+				// saved measurements visible while its live endpoint is unavailable.
+				retained = retainedLiveMetrics(runID, runID, workload, a.savedLiveSamples(runID))
+			}
 			if result == nil {
 				if retained != nil {
 					result = retained
