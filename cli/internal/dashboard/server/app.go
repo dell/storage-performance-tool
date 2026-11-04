@@ -108,6 +108,7 @@ type app struct {
 	liveRunID     string
 	liveSamples   []map[string]any
 	liveSignature string
+	liveDirty     bool
 }
 
 func executable(path string) bool {
