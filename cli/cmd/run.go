@@ -735,7 +735,10 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		} else {
 			writeProgress("Auto-results: launch armed for run %d\n", expectedRunID)
 			tracker := newRunTrackerFunc(baseURL)
-			configureAutoResultsTracker(tracker, expectedRunID, debug, verificationRun)
+			// A DELETE's outcome requires the engine's final state too, and a large step can look done
+			// well before the engine reports it.
+			requireTerminal := verificationRun || (metadata != nil && metadata.WorkloadType == WorkloadTypeDelete)
+			configureAutoResultsTracker(tracker, expectedRunID, debug, requireTerminal)
 			// Wait for terminal run state; step IDs discovered later via metrics/json
 			if len(expectedStepIDs) > 0 {
 				writeProgress("Auto-results: expecting %d step(s)\n", len(expectedStepIDs))
@@ -1352,6 +1355,18 @@ func resolveRunCompletionError(
 	if params.WorkloadType == scenario.WorkloadTypeDelete {
 		var reasons []string
 		var causes []error
+		cleanupOnlyFailure := outcome.Tracker != nil &&
+			params.Cleanup &&
+			outcome.Tracker.FinalState == constants.StateFailed &&
+			scenario.IsSeededDeleteCleanupStepID(outcome.Tracker.FailureStepID)
+		// A failed step is the cause, and the incomplete metrics below are usually its consequence.
+		if outcome.Tracker != nil && outcome.Tracker.FinalState == constants.StateFailed && !cleanupOnlyFailure {
+			reasons = append(reasons, fmt.Sprintf(
+				"step %s failed (%s): %s",
+				outcome.Tracker.FailureStepID,
+				outcome.Tracker.FailureCategory,
+				outcome.Tracker.FailureMessage))
+		}
 		if outcome.DeleteMetricsErr != nil {
 			reasons = append(reasons, "terminal DELETE metrics are incomplete: "+outcome.DeleteMetricsErr.Error())
 			causes = append(causes, outcome.DeleteMetricsErr)
@@ -1364,21 +1379,10 @@ func resolveRunCompletionError(
 			reasons = append(reasons, "completion tracking: "+outcome.TrackerErr.Error())
 			causes = append(causes, outcome.TrackerErr)
 		}
-		cleanupOnlyFailure := outcome.Tracker != nil &&
-			params.Cleanup &&
-			outcome.Tracker.FinalState == constants.StateFailed &&
-			scenario.IsSeededDeleteCleanupStepID(outcome.Tracker.FailureStepID)
-		if outcome.Tracker != nil && outcome.Tracker.FinalState != constants.StateCompleted && !cleanupOnlyFailure {
-			if outcome.Tracker.FinalState == constants.StateFailed {
-				reasons = append(reasons, fmt.Sprintf(
-					"step %s failed (%s): %s",
-					outcome.Tracker.FailureStepID,
-					outcome.Tracker.FailureCategory,
-					outcome.Tracker.FailureMessage))
-			} else {
-				reasons = append(reasons, fmt.Sprintf(
-					"engine terminal state is %s", outcome.Tracker.FinalState))
-			}
+		if outcome.Tracker != nil && outcome.Tracker.FinalState != constants.StateCompleted &&
+			outcome.Tracker.FinalState != constants.StateFailed {
+			reasons = append(reasons, fmt.Sprintf(
+				"engine terminal state is %s", outcome.Tracker.FinalState))
 		} else if received && outcome.Tracker == nil {
 			reasons = append(reasons, "terminal engine status was not captured")
 		}
