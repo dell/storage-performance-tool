@@ -22,6 +22,11 @@ func TestAPIGuardRejectsForeignHostOnEveryRoute(t *testing.T) {
 		{http.MethodGet, "/api/runs"},
 		{http.MethodGet, "/api/runs/" + guardRunID},
 		{http.MethodGet, "/api/runs/" + guardRunID + "/csv"},
+		{http.MethodGet, "/api/runs/" + guardRunID + "/log"},
+		{http.MethodGet, "/api/catalog"},
+		{http.MethodGet, "/api/catalog/run?id=x"},
+		{http.MethodGet, "/api/catalog/compare?baseline=x&candidate=y"},
+		{http.MethodGet, "/api/catalog/log?id=x"},
 		{http.MethodPost, "/api/runs"},
 		{http.MethodPost, "/api/attach"},
 		{http.MethodDelete, "/api/attach"},
@@ -47,7 +52,7 @@ func TestAPIGuardRejectsForeignOriginOnLoopbackHost(t *testing.T) {
 	a, marker := newRunHandlerTestApp(t)
 	handler := a.httpServer().Handler
 	for _, origin := range []string{"http://evil.example", "null", "https://127.0.0.1:8000", "http://127.0.0.1:8001"} {
-		for _, path := range []string{"/api/state", "/api/runs"} {
+		for _, path := range []string{"/api/state", "/api/runs", "/api/catalog"} {
 			req := httptest.NewRequest(http.MethodGet, path, nil)
 			req.Host = "127.0.0.1:8000"
 			req.Header.Set("Origin", origin)
@@ -68,7 +73,7 @@ func TestAPIGuardAllowsTunnelHosts(t *testing.T) {
 	handler := a.httpServer().Handler
 	for _, host := range []string{"127.0.0.1:8000", "localhost:8000", "LOCALHOST:8000"} {
 		for _, origin := range []string{"", "http://" + strings.ToLower(host)} {
-			for _, path := range []string{"/api/state", "/api/runs"} {
+			for _, path := range []string{"/api/state", "/api/runs", "/api/catalog"} {
 				req := httptest.NewRequest(http.MethodGet, path, nil)
 				req.Host = host
 				if origin != "" {

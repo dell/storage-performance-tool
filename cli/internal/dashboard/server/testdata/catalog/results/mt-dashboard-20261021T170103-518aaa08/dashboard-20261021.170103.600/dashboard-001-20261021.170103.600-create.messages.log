@@ -1,0 +1,5 @@
+2026-10-21T17:01:01 | INFO | Logger | thread-1 | load step started
+2026-10-21T17:01:02 | WARN | Logger | thread-1 | slow response from node
+2026-10-21T17:01:03 | ERROR | Logger | thread-1 | request failed: HTTP 503
+    at com.example.Frame(Frame.java:1)
+2026-10-21T17:01:04 | INFO | Logger | thread-1 | config secretKey=abc123 accessKey: AKIAEXAMPLE

@@ -13,6 +13,14 @@ import (
 type dashboardSettings struct {
 	Branding dashboardBranding `json:"branding"`
 	Limits   workloadLimits    `json:"limits"`
+	Compare  compareSettings   `json:"compare"`
+}
+
+// compareSettings are the defaults for the catalog's regression threshold check.
+type compareSettings struct {
+	ThresholdPct   float64 `json:"threshold_pct"`
+	LatencyFloorUS float64 `json:"latency_floor_us"`
+	MinOps         float64 `json:"min_ops"`
 }
 
 type dashboardBranding struct {
@@ -51,6 +59,7 @@ func defaultSettings() dashboardSettings {
 			Guided: guidedLimits{ObjectCounts: []int{10, 25, 50, 100, 250, 320}, ObjectSizes: []string{"64KiB", "256KiB", "1MiB", "4MiB", "16MiB"}, Threads: []int{1, 2}, Runtimes: []int{60, 120, 300, 600}},
 			Expert: expertLimits{ObjectCountMin: expertMinObjects, ObjectCountMax: expertMaxObjects, ObjectSizeMin: expertMinObjectBytes, ObjectSizeMax: expertMaxObjectBytes, ThreadsMin: expertMinThreads, ThreadsMax: expertMaxThreads, RuntimeMin: expertMinRuntime, RuntimeMax: expertMaxRuntime, MaxTotalBytes: expertMaxTotalBytes},
 		},
+		Compare: defaultCompareSettings(),
 	}
 }
 
@@ -117,6 +126,9 @@ func (s dashboardSettings) validate() error {
 	}
 	if hasDuplicates(g.ObjectCounts) || hasDuplicates(g.ObjectSizes) || hasDuplicates(g.Threads) || hasDuplicates(g.Runtimes) {
 		return errors.New("dashboard guided limits must not contain duplicate choices")
+	}
+	if err := s.Compare.validate(); err != nil {
+		return err
 	}
 	e := s.Limits.Expert
 	if e.ObjectCountMin < 1 || e.ObjectCountMax < e.ObjectCountMin || e.ObjectCountMax > 1_000_000 || e.ObjectSizeMin < 1 || e.ObjectSizeMax < e.ObjectSizeMin || e.ObjectSizeMax > 9_999_999<<30 || e.ThreadsMin < 1 || e.ThreadsMax < e.ThreadsMin || e.ThreadsMax > 4096 || e.RuntimeMin < 1 || e.RuntimeMax < e.RuntimeMin || e.RuntimeMax > 31*24*60*60 || e.MaxTotalBytes < e.ObjectSizeMin {

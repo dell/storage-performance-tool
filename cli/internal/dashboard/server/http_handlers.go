@@ -2,10 +2,16 @@ package server
 
 import (
 	"encoding/json"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
 )
+
+func isJSONRequest(r *http.Request) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return err == nil && mediaType == "application/json"
+}
 
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -34,8 +40,9 @@ func (a *app) loopbackHost(r *http.Request) bool {
 
 // apiGuard applies loopbackHost to every /api route, so a page served
 // from another origin (for example after DNS rebinding) cannot read run state,
-// history or saved results. A browser sends Origin on cross-origin reads and
-// on every state-changing request; when it is present it must name this dashboard.
+// history, run logs or the results catalog. A browser sends Origin on
+// cross-origin reads and on every state-changing request; when it is present it
+// must name this dashboard.
 // The SSH tunnel case works because the browser's Host is 127.0.0.1:<port> or
 // localhost:<port>, the same port the dashboard listens on.
 func (a *app) apiGuard(next http.Handler) http.Handler {

@@ -40,6 +40,12 @@ jobs:
         working-directory: cli/internal/dashboard/frontend
         run: npm ci
 
+      - name: Typecheck and test frontend
+        working-directory: cli/internal/dashboard/frontend
+        run: |
+          npm run typecheck
+          npm test
+
       - name: Build frontend and embedded page
         working-directory: cli/internal/dashboard/frontend
         run: npm run build

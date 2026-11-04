@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,11 +20,63 @@ type attachRequest struct {
 	Host string `json:"host"`
 }
 
+// attachedStatus is the engine's GET /status reply (StatusServlet.java), e.g.
+// {"state":"RUNNING","since":"…","run_id":1792882655698,"step_id":"…"}.
+// run_id is a JSON number there. RunID keeps it as decimal text, so large ids
+// do not lose precision. A string run_id and the older runId key also work.
 type attachedStatus struct {
-	RunID    string  `json:"runId"`
-	State    string  `json:"state"`
-	Message  string  `json:"message"`
-	Progress float64 `json:"progress"`
+	RunID    string
+	State    string
+	StepID   string
+	Message  string
+	Progress float64
+}
+
+func (s *attachedStatus) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		RunID       json.RawMessage `json:"run_id"`
+		LegacyRunID json.RawMessage `json:"runId"`
+		State       string          `json:"state"`
+		StepID      string          `json:"step_id"`
+		Message     string          `json:"message"`
+		Progress    float64         `json:"progress"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	runID, err := statusRunID(raw.RunID)
+	if err == nil && runID == "" {
+		runID, err = statusRunID(raw.LegacyRunID)
+	}
+	if err != nil {
+		return err
+	}
+	*s = attachedStatus{RunID: runID, State: raw.State, StepID: raw.StepID, Message: raw.Message, Progress: raw.Progress}
+	return nil
+}
+
+// statusRunID returns a run id sent as a JSON integer or string as text.
+func statusRunID(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var value any
+	if err := dec.Decode(&value); err != nil {
+		return "", err
+	}
+	switch v := value.(type) {
+	case json.Number:
+		if _, err := strconv.ParseInt(v.String(), 10, 64); err != nil {
+			return "", fmt.Errorf("invalid run_id %s", v)
+		}
+		return v.String(), nil
+	case string:
+		return strings.TrimSpace(v), nil
+	default:
+		return "", fmt.Errorf("invalid run_id %s", raw)
+	}
 }
 
 func (a *app) handleAttach(w http.ResponseWriter, r *http.Request) {
