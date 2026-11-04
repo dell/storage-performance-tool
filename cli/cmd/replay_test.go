@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/dell/storage-performance-tool/cli/internal/results/summary"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -983,7 +984,7 @@ func TestReplayCommandReleasesLaunchersOnAuthoritativeWorkloadTerminal(t *testin
 			}
 			discoverFleetStepIDsFunc = func(context.Context, string, int64) ([]string, error) { return nil, nil }
 			newResultsFetcherFunc = func(_, output string) autoResultsFetcher { return &fakeFetcher{output: output} }
-			generateRunSummaryFunc = func(context.Context, string, io.Writer) error { return nil }
+			generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) { return nil, nil }
 
 			// Mirror the real runners: never complete on our own, only on the
 			// authoritative session signal.

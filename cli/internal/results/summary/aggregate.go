@@ -211,6 +211,7 @@ type RunTotals struct {
 	DataBytes       int64
 	DataMiB         float64
 	DataGiB         float64
+	FailureCount    int64
 }
 
 const (
@@ -447,6 +448,9 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 		summary.SuccessUnit = successUnitForOperation(summary.Operation)
 		if metrics != nil {
 			metrics.Steady = deriveSteadyRates(stepData, summary.IsMixed, steadyAbsent)
+			if warning := steadyInstabilityWarning(summary.PhaseLabel, metrics.Steady.Unsteady); warning != "" {
+				warnings = append(warnings, warning)
+			}
 		}
 		if metrics != nil && strings.EqualFold(summary.Operation, workloadreg.List) {
 			normalizeListMetrics(metrics, integrity)
@@ -455,6 +459,11 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 			summary.Metrics = metrics
 			totals.DurationSeconds += metrics.DurationSeconds
 			totals.DataBytes += metrics.DataBytes
+			totals.FailureCount += metrics.FailureCount
+			// A warning wraps in the narrow TUI, which clips the Failed column.
+			if metrics.FailureCount > 0 {
+				warnings = append(warnings, fmt.Sprintf("%s: %s %s failed", summary.PhaseLabel, formatInt(metrics.FailureCount), requestWord(metrics.FailureCount)))
+			}
 		} else if !stepData.MetricsSuppressed {
 			statusLabel := string(stepData.Status)
 			if statusLabel == "" {
@@ -475,6 +484,68 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 	totals.DataMiB = bytesToMiB(totals.DataBytes)
 	totals.DataGiB = bytesToGiB(totals.DataBytes)
 	return steps, totals, warnings
+}
+
+// AllFailedPhase is a phase, or one operation of a mixed phase, that measured nothing because its
+// requests failed.
+type AllFailedPhase struct {
+	Label        string
+	Operation    string
+	FailureCount int64
+	// EmptyListing marks a LIST phase, which counts objects as successes rather than requests.
+	EmptyListing bool
+}
+
+func requestWord(count int64) string {
+	if count == 1 {
+		return "request"
+	}
+	return "requests"
+}
+
+// String gives the reason a run exits 1.
+func (p AllFailedPhase) String() string {
+	switch {
+	case p.EmptyListing:
+		return fmt.Sprintf("phase %s found no objects and %d %s failed", p.Label, p.FailureCount, requestWord(p.FailureCount))
+	case p.Operation != "":
+		return fmt.Sprintf("every %s request of phase %s failed (%d failed, 0 succeeded)", p.Operation, p.Label, p.FailureCount)
+	}
+	return fmt.Sprintf("every request of phase %s failed (%d failed, 0 succeeded)", p.Label, p.FailureCount)
+}
+
+// AllFailedPhases lists what has failures and no successes: each ordinary phase, and each operation
+// of a mixed phase. In an ordinary workload a DELETE phase is its --cleanup, which is best-effort.
+// A LIST phase with no objects and a failed request can't show that a listing was empty, so it's here.
+func (s *RunSummary) AllFailedPhases() []AllFailedPhase {
+	if s == nil {
+		return nil
+	}
+	var phases []AllFailedPhase
+	for _, step := range s.Steps {
+		label := step.PhaseLabel
+		if label == "" {
+			label = step.StepID
+		}
+		if step.IsMixed {
+			for _, op := range step.OperationBreakdown {
+				if op.Metrics.SuccessCount == 0 && op.Metrics.FailureCount > 0 {
+					phases = append(phases, AllFailedPhase{Label: label, Operation: op.Operation, FailureCount: op.Metrics.FailureCount})
+				}
+			}
+			continue
+		}
+		if step.Metrics == nil || step.Metrics.SuccessCount != 0 || step.Metrics.FailureCount <= 0 ||
+			strings.EqualFold(step.Operation, reportOperationDelete) {
+			continue
+		}
+		phases = append(phases, AllFailedPhase{
+			Label:        label,
+			FailureCount: step.Metrics.FailureCount,
+			EmptyListing: strings.EqualFold(step.Operation, workloadTypeList),
+		})
+	}
+	return phases
 }
 
 func successUnitForOperation(operation string) string {

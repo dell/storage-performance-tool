@@ -576,8 +576,8 @@ func TestAggregateBuildsMixedSummary(t *testing.T) {
 	if mixed.Metrics.LatencyMedianMs != 0 {
 		t.Fatalf("expected no combined latency median, got %.3f", mixed.Metrics.LatencyMedianMs)
 	}
-	if len(summary.Warnings) != 0 {
-		t.Fatalf("expected no warnings, got %v", summary.Warnings)
+	if len(summary.Warnings) != 1 || summary.Warnings[0] != "Mixed: 12 requests failed" {
+		t.Fatalf("expected only the failed requests warning, got %v", summary.Warnings)
 	}
 }
 
