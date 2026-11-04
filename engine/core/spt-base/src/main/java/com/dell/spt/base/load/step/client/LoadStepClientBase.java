@@ -845,7 +845,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				if (e instanceof InterruptedException) {
 					throwUnchecked(e);
 				}
-				if (Thread.currentThread().isInterrupted()) {
+				if (barrier == null && Thread.currentThread().isInterrupted()) {
 					// A stop interrupts this thread, and a start it cut short is that stop, not a failure.
 					throwUnchecked(new InterruptedException(loadStepId() + ": stopped while starting a step slice"));
 				}
