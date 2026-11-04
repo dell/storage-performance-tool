@@ -462,8 +462,7 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 			totals.FailureCount += metrics.FailureCount
 			// A warning wraps in the narrow TUI, which clips the Failed column.
 			if metrics.FailureCount > 0 {
-				warnings = append(warnings, fmt.Sprintf("%s: %s %s failed", summary.PhaseLabel, formatInt(metrics.FailureCount),
-					pluralizeSummary(int(metrics.FailureCount), "request", "requests")))
+				warnings = append(warnings, fmt.Sprintf("%s: %s %s failed", summary.PhaseLabel, formatInt(metrics.FailureCount), requestWord(metrics.FailureCount)))
 			}
 		} else if !stepData.MetricsSuppressed {
 			statusLabel := string(stepData.Status)
@@ -497,11 +496,18 @@ type AllFailedPhase struct {
 	EmptyListing bool
 }
 
+func requestWord(count int64) string {
+	if count == 1 {
+		return "request"
+	}
+	return "requests"
+}
+
 // String gives the reason a run exits 1.
 func (p AllFailedPhase) String() string {
 	switch {
 	case p.EmptyListing:
-		return fmt.Sprintf("phase %s found no objects and %d %s failed", p.Label, p.FailureCount, pluralizeSummary(int(p.FailureCount), "request", "requests"))
+		return fmt.Sprintf("phase %s found no objects and %d %s failed", p.Label, p.FailureCount, requestWord(p.FailureCount))
 	case p.Operation != "":
 		return fmt.Sprintf("every %s request of phase %s failed (%d failed, 0 succeeded)", p.Operation, p.Label, p.FailureCount)
 	}

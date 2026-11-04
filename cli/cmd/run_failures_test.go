@@ -34,7 +34,7 @@ func writeAllFailedRunDir(t *testing.T) string {
 		t.Fatalf("write metrics csv: %v", err)
 	}
 	manifest := &results.Manifest{
-		BaseURL:     "http://spt-test-1.cec.delllabs.net:9999",
+		BaseURL:     "http://engine.example:9999",
 		OutputDir:   runDir,
 		GeneratedAt: time.Now().UTC(),
 		Steps: []results.StepManifest{{
