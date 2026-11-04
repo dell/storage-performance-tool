@@ -2,10 +2,16 @@ package server
 
 import (
 	"encoding/json"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
 )
+
+func isJSONRequest(r *http.Request) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return err == nil && mediaType == "application/json"
+}
 
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

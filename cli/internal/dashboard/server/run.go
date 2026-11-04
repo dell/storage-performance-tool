@@ -39,7 +39,7 @@ func (a *app) handleRun(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 403, map[string]any{keyError: "Run requests must come from this dashboard through its SSH tunnel."})
 		return
 	}
-	if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
+	if !isJSONRequest(r) {
 		writeJSON(w, 415, map[string]any{keyError: "Send JSON dashboard settings."})
 		return
 	}
@@ -87,6 +87,13 @@ func (a *app) handleRun(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 409, map[string]any{keyError: "Storage verification is in progress. Wait for it to finish before starting a run."})
 		return
 	}
+	operation, err := a.lockOperation()
+	if err != nil {
+		a.mu.Unlock()
+		writeJSON(w, 409, map[string]any{keyError: "An SPT run or storage verification is already in progress. Wait for it to finish before starting a run."})
+		return
+	}
+	defer unlockClose(operation)
 	lock, err := a.lockRun()
 	if err != nil {
 		a.mu.Unlock()
@@ -249,7 +256,18 @@ func randomHex4() string {
 }
 
 func (a *app) lockRun() (*os.File, error) {
-	f, err := os.OpenFile(a.lockFile, os.O_CREATE|os.O_RDWR, 0600)
+	return acquireFileLock(a.lockFile)
+}
+
+// The operation guard covers all of verification and only run startup. Once
+// started, a child holds the existing job lock, including if its dashboard exits.
+// Keeping these separate lets state polling identify running jobs correctly.
+func (a *app) lockOperation() (*os.File, error) {
+	return acquireFileLock(a.lockFile + ".operation")
+}
+
+func acquireFileLock(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600) // #nosec G304 -- server-selected lock paths under the dashboard state directory
 	if err != nil {
 		return nil, err
 	}
