@@ -1,3 +1,4 @@
+import { Button, Text, Title } from "@mantine/core";
 import { useRuns } from "../api/queries";
 import { Status } from "./Status";
 import { formatNumber as fmt, phaseName } from "../utils/metrics";
@@ -33,12 +34,13 @@ export function RunHistory({
           <span data-spt-legacy="" className="eyebrow">
             SAVED BENCHMARKS
           </span>
-          <h1 data-spt-legacy="">Run history</h1>
-          <p data-spt-legacy="">SPT result folders saved on the project VM.</p>
+          <Title order={1}>Run history</Title>
+          <Text size="sm" className="mt-xs wrap-anywhere">
+            SPT result folders saved on the project VM.
+          </Text>
         </div>
         <div data-spt-legacy="" className="actions">
-          <button
-            data-spt-legacy=""
+          <Button
             onClick={() => {
               onRefresh();
               void history.refetch();
@@ -46,7 +48,7 @@ export function RunHistory({
             disabled={loading}
           >
             Refresh history
-          </button>
+          </Button>
         </div>
       </div>
       {error && (
@@ -56,9 +58,9 @@ export function RunHistory({
       )}
       <section data-spt-legacy="" className="panel run-history-panel">
         {loading && !runs.length ? (
-          <p data-spt-legacy="" className="history-empty">
+          <Text className="px-section py-xxl text-center">
             Loading saved runs…
-          </p>
+          </Text>
         ) : runs.length ? (
           <div data-spt-legacy="" className="table-wrap">
             <table data-spt-legacy="" className="run-history-table">
@@ -110,12 +112,9 @@ export function RunHistory({
                       )}
                     </td>
                     <td data-spt-legacy="">
-                      <button
-                        data-spt-legacy=""
-                        onClick={() => onOpen(run.run_id)}
-                      >
+                      <Button onClick={() => onOpen(run.run_id)}>
                         View results
-                      </button>
+                      </Button>
                     </td>
                   </tr>
                 ))}
@@ -124,16 +123,16 @@ export function RunHistory({
           </div>
         ) : (
           <div data-spt-legacy="" className="history-empty">
-            <h2 data-spt-legacy="">No saved benchmark runs</h2>
-            <p data-spt-legacy="">
+            <Title order={2}>No saved benchmark runs</Title>
+            <Text className="mt-xs">
               Completed and partial SPT results will appear here.
-            </p>
+            </Text>
           </div>
         )}
-        <p data-spt-legacy="" className="history-footnote">
+        <Text size="caption" className="px-comfortable pb-md">
           Times are shown in this computer’s local time. Older runs may have
           partial results if SPT stopped before writing its final summaries.
-        </p>
+        </Text>
       </section>
     </>
   );

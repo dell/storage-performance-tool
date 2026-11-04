@@ -1,3 +1,4 @@
+import { Button, Text, Title } from "@mantine/core";
 import { useState } from "react";
 import type { Driver, Options, RunMode, State } from "../types";
 import { useStartRun } from "../api/mutations";
@@ -214,8 +215,8 @@ function PreviousRunPicker({
           )}
         </select>
       </label>
-      <button
-        data-spt-legacy=""
+      <Button
+        size="xs"
         type="button"
         disabled={!previousID}
         onClick={() => {
@@ -229,7 +230,7 @@ function PreviousRunPicker({
         }}
       >
         Duplicate settings
-      </button>
+      </Button>
       {historyMessage && (
         <span data-spt-legacy="" role="status" className="expert-muted">
           {historyMessage}
@@ -408,8 +409,8 @@ function ExpertWorkspace({
                   ))}
                 </select>
               </label>
-              <button
-                data-spt-legacy=""
+              <Button
+                size="xs"
                 type="button"
                 disabled={!chosenProfile}
                 onClick={() => {
@@ -420,7 +421,7 @@ function ExpertWorkspace({
                 }}
               >
                 Load profile
-              </button>
+              </Button>
               {!profiles.length && (
                 <span data-spt-legacy="" className="expert-muted">
                   No saved profiles yet. Save one in the summary panel.
@@ -444,30 +445,23 @@ function ExpertWorkspace({
                 onChange={(e) => setCommandText(e.target.value)}
               />
               <div data-spt-legacy="" className="expert-inline">
-                <button
-                  data-spt-legacy=""
-                  type="button"
-                  onClick={importCommand}
-                >
+                <Button size="xs" type="button" onClick={importCommand}>
                   Import supported settings
-                </button>
+                </Button>
                 <span data-spt-legacy="" className="expert-muted">
                   Import only; commands are never executed. Four flags
                   supported.
                 </span>
               </div>
               {commandMessage && (
-                <p
-                  data-spt-legacy=""
-                  className={
-                    importError
-                      ? "expert-feedback-error"
-                      : "expert-feedback-good"
-                  }
+                <Text
+                  c={importError ? "#b73a2b" : "#23754e"}
+                  size="caption"
+                  className="mt-[9px]"
                   role="status"
                 >
                   {commandMessage}
-                </p>
+                </Text>
               )}
             </div>
           )}
@@ -496,10 +490,10 @@ function ExpertWorkspace({
           <summary data-spt-legacy="">
             Host limits &amp; advanced settings
           </summary>
-          <p data-spt-legacy="">
+          <Text size="caption" className="pt-sm">
             Other SPT CLI flags are not available through this version of the
             Dashboard API. Defaults are enforced by the Go server.
-          </p>
+          </Text>
           <dl data-spt-legacy="">
             <div data-spt-legacy="">
               <dt data-spt-legacy="">Maximum objects</dt>
@@ -540,7 +534,9 @@ function ExpertWorkspace({
         <span data-spt-legacy="" className="eyebrow">
           CONFIGURATION SUMMARY
         </span>
-        <h3 data-spt-legacy="">{workloadName}</h3>
+        <Title order={3} size="lg" className="mb-[3px]">
+          {workloadName}
+        </Title>
         <span data-spt-legacy="" className="expert-summary-sub">
           {clients} client machine{clients === 1 ? "" : "s"} ·{" "}
           {driver === "mock"
@@ -622,14 +618,14 @@ function ExpertWorkspace({
             maxLength={60}
             onChange={(e) => setProfileName(e.target.value)}
           />
-          <button
-            data-spt-legacy=""
+          <Button
+            size="xs"
             type="button"
             disabled={!valid}
             onClick={saveProfile}
           >
             Save profile
-          </button>
+          </Button>
           {saveMessage && (
             <small data-spt-legacy="" role="status">
               {saveMessage}
@@ -700,11 +696,11 @@ export function Configure({
       <span data-spt-legacy="" className="eyebrow">
         NEW BENCHMARK
       </span>
-      <h1 data-spt-legacy="">Configure a run</h1>
-      <p data-spt-legacy="">
+      <Title order={1}>Configure a run</Title>
+      <Text className="mt-compact mb-section">
         Write test objects, read them back to verify integrity, then clean up
         the run’s objects.
-      </p>
+      </Text>
       {state?.job?.status === "running" && (
         <div data-spt-legacy="" className="notice">
           A run is already in progress. Its results are available in Live
@@ -715,7 +711,7 @@ export function Configure({
         <span data-spt-legacy="" className="eyebrow">
           STEP 1
         </span>
-        <h2 data-spt-legacy="">Storage configuration</h2>
+        <Title order={2}>Storage configuration</Title>
         <StorageConfiguration
           state={state}
           offline={offline}
@@ -726,9 +722,9 @@ export function Configure({
         <span data-spt-legacy="" className="eyebrow">
           STEP 2
         </span>
-        <h2 data-spt-legacy="">
+        <Title order={2}>
           {review ? "Review your run" : "Workload configuration"}
-        </h2>
+        </Title>
         <div
           data-spt-legacy=""
           className="driver-switch"
@@ -764,7 +760,9 @@ export function Configure({
               />
               <div data-spt-legacy="">
                 <strong data-spt-legacy="">{label}</strong>
-                <p data-spt-legacy="">{help}</p>
+                <Text size="sm" c="var(--spt-text-muted)" className="mt-xxs">
+                  {help}
+                </Text>
               </div>
             </label>
           ))}
@@ -789,12 +787,12 @@ export function Configure({
           {review ? (
             <>
               <div data-spt-legacy="" className="review">
-                <h2 data-spt-legacy="">
+                <Title order={2}>
                   {driver === "mock" ? "Mock driver" : "Write + verify"} ·{" "}
                   {mode === "expert" ? "Expert" : "Guided"} · {clients} client
                   machine
                   {clients === 1 ? "" : "s"}
-                </h2>
+                </Title>
                 <dl data-spt-legacy="" className="review-grid">
                   <div data-spt-legacy="">
                     <dt data-spt-legacy="">Maximum objects</dt>
@@ -814,15 +812,15 @@ export function Configure({
                   </div>
                 </dl>
                 {driver === "mock" ? (
-                  <p data-spt-legacy="">
+                  <Text size="sm" className="mt-xs">
                     Mock run: no data is written to S3. Results show SPT's mock
                     driver, not storage performance.
-                  </p>
+                  </Text>
                 ) : (
-                  <p data-spt-legacy="">
+                  <Text size="sm" className="mt-xs">
                     Up to {fmt(totalBytes / 1048576, 2)} MiB of test data. A
                     unique prefix isolates this run. Cleanup is best effort.
-                  </p>
+                  </Text>
                 )}
                 {mode === "expert" && (
                   <div data-spt-legacy="" className="expert-reviewed-command">
@@ -836,27 +834,23 @@ export function Configure({
                 )}
               </div>
               <div data-spt-legacy="" className="actions">
-                <button
-                  data-spt-legacy=""
-                  disabled={busy}
-                  onClick={() => setReview(false)}
-                >
+                <Button disabled={busy} onClick={() => setReview(false)}>
                   Edit settings
-                </button>
-                <button
-                  data-spt-legacy=""
-                  className="primary"
+                </Button>
+                <Button
+                  variant="filled"
+                  loading={busy}
                   disabled={busy || !ready}
                   onClick={() => void start()}
                 >
                   {busy ? "Starting…" : "Start run"}
-                </button>
+                </Button>
               </div>
-              <p data-spt-legacy="" className="form-help">
+              <Text size="sm" className="my-comfortable">
                 {driver === "mock"
                   ? "Starting runs SPT with the mock driver on the verified client machines."
                   : "Starting runs a real benchmark on the configured storage target."}
-              </p>
+              </Text>
             </>
           ) : (
             <form
@@ -867,11 +861,11 @@ export function Configure({
                 if (valid) setReview(true);
               }}
             >
-              <p data-spt-legacy="" className="form-help">
+              <Text size="sm" className="my-comfortable">
                 {mode === "expert"
                   ? "Expert mode: enter any values within the server's limits."
                   : "Guided mode: choose from preset sizes for short, safe runs. Switch to Expert in the top bar for custom values."}
-              </p>
+              </Text>
               {mode === "expert" ? (
                 <ExpertWorkspace
                   draft={draft}
@@ -902,14 +896,9 @@ export function Configure({
                   ` of ${formatBytes(limits.expert.max_total_bytes)} allowed`}{" "}
                 · Unique prefix · Best effort cleanup
               </div>
-              <button
-                data-spt-legacy=""
-                className="primary"
-                type="submit"
-                disabled={!valid}
-              >
+              <Button variant="filled" type="submit" disabled={!valid}>
                 Review run
-              </button>
+              </Button>
             </form>
           )}
         </fieldset>

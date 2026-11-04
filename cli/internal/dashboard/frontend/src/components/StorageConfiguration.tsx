@@ -1,7 +1,9 @@
+import { Button, Text } from "@mantine/core";
 import { useEffect, useState } from "react";
 import type { State } from "../types";
 import { useVerifyStorage } from "../api/mutations";
 import { ConnectionGraph } from "./ConnectionGraph";
+import { Status } from "./Status";
 import { endpointError, hostErrors } from "../utils/validation";
 
 type Form = { hosts: string[]; endpoint: string };
@@ -38,9 +40,9 @@ export function StorageConfiguration({
 
   if (!saved || !form)
     return (
-      <p data-spt-legacy="" className="form-help">
+      <Text size="sm" className="my-comfortable">
         Waiting for the dashboard server…
-      </p>
+      </Text>
     );
 
   const v = saved.verification,
@@ -86,13 +88,7 @@ export function StorageConfiguration({
           <span data-spt-legacy="">Bucket</span>
           <strong data-spt-legacy="">{target.bucket || "Not reported"}</strong>
         </div>
-        <span
-          data-spt-legacy=""
-          className={`status ${target.ready ? "good" : "warn"}`}
-        >
-          <i data-spt-legacy="" />
-          {target.ready ? "ready" : "needs setup"}
-        </span>
+        <Status status={target.ready ? "ready" : "needs setup"} />
       </div>
       {!!target.reasons?.length && (
         <div data-spt-legacy="" className="notice">
@@ -112,13 +108,13 @@ export function StorageConfiguration({
           disabled={locked}
         >
           <legend data-spt-legacy="">Client machines</legend>
-          <p data-spt-legacy="" className="form-help">
+          <Text size="sm" className="my-comfortable">
             The machines that generate load. Each needs Docker and key-based SSH
             access from the dashboard host. Enter{" "}
             <code data-spt-legacy="">user@host</code>, or{" "}
             <code data-spt-legacy="">127.0.0.1</code> for the dashboard host
             itself.
-          </p>
+          </Text>
           <ul data-spt-legacy="" className="host-list">
             {form.hosts.map((host, i) => (
               <li data-spt-legacy="" key={i}>
@@ -145,8 +141,7 @@ export function StorageConfiguration({
                     {rowErrors[i]}
                   </small>
                 )}
-                <button
-                  data-spt-legacy=""
+                <Button
                   type="button"
                   disabled={form.hosts.length === 1}
                   aria-label={`Remove client machine ${i + 1}`}
@@ -158,18 +153,17 @@ export function StorageConfiguration({
                   }
                 >
                   Remove
-                </button>
+                </Button>
               </li>
             ))}
           </ul>
-          <button
-            data-spt-legacy=""
+          <Button
             type="button"
             disabled={form.hosts.length >= saved.max_hosts}
             onClick={() => setForm({ ...form, hosts: [...form.hosts, ""] })}
           >
             ＋ Add machine
-          </button>
+          </Button>
           <span data-spt-legacy="" className="subtle host-count">
             {form.hosts.length} of {saved.max_hosts}
           </span>
@@ -209,16 +203,16 @@ export function StorageConfiguration({
           </label>
         </fieldset>
         <div data-spt-legacy="" className="actions">
-          <button
-            data-spt-legacy=""
-            className="primary"
+          <Button
+            variant="filled"
+            loading={locked}
             type="submit"
             disabled={
               locked || offline || invalid || state?.job?.status === "running"
             }
           >
             {locked ? "Verifying…" : "Verify connection"}
-          </button>
+          </Button>
           <span data-spt-legacy="" className="subtle" role="status">
             {running
               ? "Checking each machine. This can take a few minutes."

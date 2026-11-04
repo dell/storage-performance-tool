@@ -1,4 +1,4 @@
-import { createTheme } from "@mantine/core";
+import { Badge, Button, Paper, Text, Title, createTheme } from "@mantine/core";
 import type { CSSVariablesResolver } from "@mantine/core";
 
 const fontFamily =
@@ -108,6 +108,10 @@ export const theme = createTheme({
     emphasis: "15px",
     lg: "16px",
     xl: "20px",
+    metricMobile: "23px",
+    metricCompact: "24px",
+    metric: "29px",
+    metricWide: "34px",
   },
   fontWeights: {
     regular: "400",
@@ -156,6 +160,91 @@ export const theme = createTheme({
     xxxl: "48px",
   },
   cursorType: "pointer",
+  components: {
+    Button: Button.extend({
+      defaultProps: {
+        variant: "default",
+        size: "sm",
+        radius: "md",
+        fw: "var(--mantine-font-weight-semibold)",
+      },
+      classNames: {
+        root: "focus-visible:outline-solid focus-visible:outline-[length:var(--spt-focus-width)] focus-visible:outline-focus focus-visible:outline-offset-[var(--spt-focus-offset)]",
+      },
+      vars: (_theme, { variant, color, size }) => ({
+        root: {
+          ...(size === "sm"
+            ? { "--button-height": "38px", "--button-padding-x": "14px" }
+            : size === "compact-sm"
+              ? { "--button-height": "29px", "--button-padding-x": "9px" }
+              : {}),
+          ...(color
+            ? {}
+            : variant === "default"
+              ? {
+                  "--button-bg": "var(--spt-surface-control)",
+                  "--button-hover": "var(--spt-surface-hover)",
+                  "--button-color": "var(--spt-text-secondary)",
+                  "--button-bd": "1px solid var(--spt-border-control)",
+                }
+              : variant === "filled"
+                ? {
+                    "--button-bg": "var(--spt-action-primary)",
+                    "--button-hover": "var(--spt-action-primary-hover)",
+                    "--button-color": "var(--spt-text-inverse)",
+                  }
+                : {}),
+        },
+      }),
+    }),
+    Paper: Paper.extend({
+      defaultProps: {
+        withBorder: true,
+        radius: "lg",
+        bg: "var(--spt-surface-panel)",
+      },
+      styles: { root: { borderColor: "var(--spt-border-panel)" } },
+    }),
+    Badge: Badge.extend({
+      defaultProps: {
+        variant: "light",
+        size: "sm",
+        radius: "sm",
+        h: "auto",
+        py: "xxs",
+        px: "7px",
+        fz: "xs",
+        lh: 1.5,
+        fw: "var(--mantine-font-weight-regular)",
+        tt: "capitalize",
+      },
+      styles: { root: { letterSpacing: "normal" } },
+      vars: (_theme, { color, variant }) => ({
+        root:
+          variant === "light" && (color === "teal" || color === "yellow")
+            ? {
+                "--badge-bg": `var(--spt-status-${color === "teal" ? "success" : "warning"}-background)`,
+                "--badge-color": `var(--spt-status-${color === "teal" ? "success" : "warning"}-text)`,
+              }
+            : {},
+      }),
+    }),
+    Text: Text.extend({
+      defaultProps: {
+        size: "md",
+        c: "var(--spt-text-description)",
+        lh: "var(--mantine-line-height-body)",
+      },
+    }),
+    Title: Title.extend({
+      classNames: {
+        root: "data-[order=1]:[@media(max-width:760px)]:text-[23px]",
+      },
+      styles: (_theme, { order }) => ({
+        root: { letterSpacing: order === 1 ? "-0.7px" : undefined },
+      }),
+    }),
+  },
   other: { dashboard: dashboardTokens },
 });
 

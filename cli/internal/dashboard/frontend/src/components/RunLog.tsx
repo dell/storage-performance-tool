@@ -1,3 +1,4 @@
+import { Button, Text, Title } from "@mantine/core";
 import { useState } from "react";
 import type { LogLevel, LogResponse } from "../types";
 import { useLog } from "../api/queries";
@@ -91,7 +92,11 @@ function LogContents({
   return (
     <>
       <div data-spt-legacy="" className="run-log-heading">
-        {!collapsed && <h3 data-spt-legacy="">{title}</h3>}
+        {!collapsed && (
+          <Title order={3} className="flex-auto">
+            {title}
+          </Title>
+        )}
         <div
           data-spt-legacy=""
           className="mode-switch"
@@ -130,30 +135,28 @@ function LogContents({
             ))}
           </div>
         )}
-        <button data-spt-legacy="" onClick={() => void log.refetch()}>
-          Reload
-        </button>
+        <Button onClick={() => void log.refetch()}>Reload</Button>
       </div>
       {data?.interim && (
-        <p data-spt-legacy="" className="form-help">
+        <Text size="sm" className="my-comfortable">
           Interim console output captured by the dashboard. The engine’s results
           logs are the record once the run finishes.
-        </p>
+        </Text>
       )}
       {error ? (
-        <p data-spt-legacy="" className="subtle">
+        <Text size="xs" c="var(--spt-text-subtle)">
           {error}
-        </p>
+        </Text>
       ) : !data ? (
-        <p data-spt-legacy="" className="subtle">
+        <Text size="xs" c="var(--spt-text-subtle)">
           Loading log…
-        </p>
+        </Text>
       ) : data.lines.length === 0 ? (
-        <p data-spt-legacy="" className="subtle">
+        <Text size="xs" c="var(--spt-text-subtle)">
           {level === "all"
             ? "No log lines recorded."
             : `No ${level === "warn" ? "warning or error" : "error"} lines recorded.`}
-        </p>
+        </Text>
       ) : (
         <pre data-spt-legacy="" className="log-lines" tabIndex={0}>
           {data.lines.map((l, i) => (
@@ -169,19 +172,19 @@ function LogContents({
         </pre>
       )}
       {data?.truncated && (
-        <p data-spt-legacy="" className="form-help">
+        <Text size="sm" className="my-comfortable">
           Showing the end of a large log; older lines were not read.
-        </p>
+        </Text>
       )}
       {files.length > 0 && (
-        <p data-spt-legacy="" className="form-help">
+        <Text size="sm" className="my-comfortable">
           From: {files.join(", ")}
-        </p>
+        </Text>
       )}
-      <p data-spt-legacy="" className="form-help">
+      <Text size="sm" className="my-comfortable">
         Credential-looking values are redacted. Showing up to the last 200
         matching lines.
-      </p>
+      </Text>
     </>
   );
 }

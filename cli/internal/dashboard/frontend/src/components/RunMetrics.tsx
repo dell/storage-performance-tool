@@ -1,3 +1,4 @@
+import { Button, Text, Title } from "@mantine/core";
 import type { Metrics, Row } from "../types";
 import {
   elapsed,
@@ -18,8 +19,10 @@ export function PhaseResults({
     <section data-spt-legacy="" className="panel">
       <div data-spt-legacy="" className="section-heading">
         <div data-spt-legacy="">
-          <h2 data-spt-legacy="">Phase results</h2>
-          <p data-spt-legacy="">Each phase has its own counters and timing.</p>
+          <Title order={2}>Phase results</Title>
+          <Text size="caption" className="mt-[5px] max-[760px]:max-w-[250px]">
+            Each phase has its own counters and timing.
+          </Text>
         </div>
       </div>
       {m.phase_summaries?.length ? (
@@ -47,13 +50,13 @@ export function PhaseResults({
               {m.phase_summaries.map((r) => (
                 <tr data-spt-legacy="" key={r.phase}>
                   <td data-spt-legacy="">
-                    <button
-                      data-spt-legacy=""
-                      className="table-link"
+                    <Button
+                      variant="subtle"
+                      size="compact-xs"
                       onClick={() => onSelect(phaseCode(r.phase))}
                     >
                       {phaseName(r.phase)}
-                    </button>
+                    </Button>
                   </td>
                   <td data-spt-legacy="">{fmt(r.successful_ops)}</td>
                   <td data-spt-legacy="">{fmt(r.failed_ops)}</td>
@@ -68,9 +71,9 @@ export function PhaseResults({
           </table>
         </div>
       ) : (
-        <p data-spt-legacy="" className="form-help">
+        <Text size="sm" className="my-comfortable">
           Final phase results will appear as SPT writes its output.
-        </p>
+        </Text>
       )}
     </section>
   );
@@ -132,10 +135,10 @@ export function MeasuredDetails({
           {phaseName(phase)} phase
         </span>
       </summary>
-      <p data-spt-legacy="" className="form-help">
+      <Text size="sm" className="my-comfortable">
         All fields available from the dashboard API are retained below. A dash
         means SPT did not report a value.
-      </p>
+      </Text>
       {m.spt_summary_report && (
         <details data-spt-legacy="" className="raw-details">
           <summary data-spt-legacy="">SPT run summary</summary>
@@ -145,7 +148,7 @@ export function MeasuredDetails({
       <div data-spt-legacy="" className="guided-core-grid">
         {groups.map((g) => (
           <section data-spt-legacy="" className="timing" key={g.title}>
-            <h3 data-spt-legacy="">{g.title}</h3>
+            <Title order={3}>{g.title}</Title>
             <dl data-spt-legacy="">
               {g.values.map(([name, value]) => (
                 <div data-spt-legacy="" key={name}>
@@ -160,14 +163,13 @@ export function MeasuredDetails({
       <details data-spt-legacy="" className="raw-details">
         <summary data-spt-legacy="">Source measurements and metadata</summary>
         <div data-spt-legacy="" className="actions">
-          <a
-            data-spt-legacy=""
-            className="button-link"
+          <Button
+            component="a"
             href={`/api/runs/${encodeURIComponent(m.run_id)}/csv?kind=samples`}
             download
           >
             Export all samples CSV
-          </a>
+          </Button>
         </div>
         <pre data-spt-legacy="">{JSON.stringify(raw, null, 2)}</pre>
       </details>

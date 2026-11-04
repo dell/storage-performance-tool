@@ -1,9 +1,19 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { AxiosError, CanceledError } from "axios";
 import { apiClient } from "../api/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { queryClient } from "../api/queryClient";
+import { MantineProvider } from "@mantine/core";
+import { theme } from "../theme";
 import type { ReactNode } from "react";
 import {
   cleanup,
@@ -22,6 +32,24 @@ import { RunWarnings } from "./RunWarnings";
 const originalAdapter = apiClient.defaults.adapter;
 const clients: QueryClient[] = [];
 
+beforeAll(() => {
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  );
+});
+
+afterAll(() => vi.unstubAllGlobals());
+
 function render(ui: ReactNode) {
   const client = new QueryClient({
     defaultOptions: queryClient.getDefaultOptions(),
@@ -29,7 +57,15 @@ function render(ui: ReactNode) {
   clients.push(client);
   return renderComponent(ui, {
     wrapper: ({ children }) => (
-      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      <MantineProvider
+        theme={theme}
+        forceColorScheme="light"
+        env="test"
+        withCssVariables={false}
+        withGlobalClasses={false}
+      >
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      </MantineProvider>
     ),
   });
 }

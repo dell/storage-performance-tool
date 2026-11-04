@@ -1,3 +1,4 @@
+import { Button, Text, Title } from "@mantine/core";
 import { useState } from "react";
 import type { State } from "../types";
 import { useAttachRun, useDetachRun } from "../api/mutations";
@@ -45,11 +46,11 @@ export function ConnectRun({
           <span data-spt-legacy="" className="eyebrow">
             READ ONLY MONITORING
           </span>
-          <h1 data-spt-legacy="">Connect to an active run</h1>
-          <p data-spt-legacy="">
+          <Title order={1}>Connect to an active run</Title>
+          <Text size="sm" className="mt-xs wrap-anywhere">
             Follow a run started from the SPT CLI. This connection reads live
             status and measurements and does not start or stop the benchmark.
-          </p>
+          </Text>
         </div>
       </div>
       {error && (
@@ -62,13 +63,9 @@ export function ConnectRun({
               className="actions"
               style={{ marginTop: 12 }}
             >
-              <button
-                data-spt-legacy=""
-                onClick={() => void connect()}
-                disabled={busy || offline}
-              >
+              <Button onClick={() => void connect()} disabled={busy || offline}>
                 Retry connection
-              </button>
+              </Button>
             </div>
           )}
         </div>
@@ -79,11 +76,13 @@ export function ConnectRun({
             <span data-spt-legacy="" className="eyebrow">
               CURRENT CONNECTION
             </span>
-            <h2 data-spt-legacy="">Monitoring {state?.connection?.host}</h2>
-            <p data-spt-legacy="">
+            <Title order={2} className="mt-compact">
+              Monitoring {state?.connection?.host}
+            </Title>
+            <Text className="mt-xs max-w-[650px]">
               Run {state?.connection?.run_id ?? "—"} · Updates with the SPT
               status API and live metrics endpoint on port 9999.
-            </p>
+            </Text>
             <div data-spt-legacy="" className="connect-actions">
               <span data-spt-legacy="" className="connection-state">
                 <i data-spt-legacy="" className="source-dot connected" />{" "}
@@ -91,21 +90,13 @@ export function ConnectRun({
               </span>
               <div data-spt-legacy="" className="actions">
                 {offline && (
-                  <button
-                    data-spt-legacy=""
-                    onClick={() => void connect()}
-                    disabled={busy}
-                  >
+                  <Button onClick={() => void connect()} disabled={busy}>
                     Retry connection
-                  </button>
+                  </Button>
                 )}
-                <button
-                  data-spt-legacy=""
-                  onClick={() => void disconnect()}
-                  disabled={busy}
-                >
+                <Button onClick={() => void disconnect()} disabled={busy}>
                   Disconnect
-                </button>
+                </Button>
               </div>
             </div>
           </>
@@ -114,12 +105,14 @@ export function ConnectRun({
             <span data-spt-legacy="" className="eyebrow">
               EXISTING SPT RUN
             </span>
-            <h2 data-spt-legacy="">Choose its entry machine</h2>
-            <p data-spt-legacy="">
+            <Title order={2} className="mt-compact">
+              Choose its entry machine
+            </Title>
+            <Text className="mt-xs max-w-[650px]">
               SPT’s entry machine serves the documented /status and
               /metrics/json APIs. Choose a client machine already saved in
               Storage configuration.
-            </p>
+            </Text>
             {hosts.length ? (
               <label data-spt-legacy="" className="connect-host">
                 Entry machine
@@ -141,24 +134,24 @@ export function ConnectRun({
                 <strong data-spt-legacy="">
                   No client machines are configured yet.
                 </strong>
-                <p data-spt-legacy="">
+                <Text size="sm" className="mt-xs">
                   Add the SPT entry machine in Configure run → Storage
                   configuration, then return here.
-                </p>
+                </Text>
               </div>
             )}
             <div data-spt-legacy="" className="connect-actions">
               <span data-spt-legacy="" className="subtle">
                 The run must already be active on the selected machine.
               </span>
-              <button
-                data-spt-legacy=""
-                className="primary"
+              <Button
+                variant="filled"
+                loading={busy}
                 onClick={() => void connect()}
                 disabled={!hosts.includes(host) || busy || offline}
               >
                 {busy ? "Connecting…" : "Connect to active run"}
-              </button>
+              </Button>
             </div>
           </>
         )}

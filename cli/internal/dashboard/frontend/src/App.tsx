@@ -1,3 +1,4 @@
+import { Button, Text, Title } from "@mantine/core";
 import { useEffect, useState } from "react";
 import type { Row, RunMode, State } from "./types";
 import { useStopRun } from "./api/mutations";
@@ -219,9 +220,9 @@ export default function App() {
           <strong data-spt-legacy="">
             {state?.target.endpoint_label || "Awaiting server"}
           </strong>
-          <p data-spt-legacy="">
+          <Text size="caption" className="mt-xs mb-sm">
             {state?.target.bucket || "No bucket reported"}
-          </p>
+          </Text>
           {state && (
             <Status status={state.target.ready ? "ready" : "needs setup"} />
           )}
@@ -236,10 +237,10 @@ export default function App() {
             : state
               ? "SPT server connected"
               : "Connecting to server"}
-          <p data-spt-legacy="">
+          <Text size="xs" className="my-xs">
             {clients} client machine{clients === 1 ? "" : "s"} ·{" "}
             {workloadLabel(runWorkloadType(state?.metrics, state?.job))}
-          </p>
+          </Text>
         </div>
       </aside>
       <div data-spt-legacy="" className="workspace">
@@ -289,10 +290,10 @@ export default function App() {
               <strong data-spt-legacy="">Connection unavailable. </strong>
               {error}
               {received && (
-                <p data-spt-legacy="">
+                <Text>
                   Showing the last received state from {utc(received)}. Run
                   controls are disabled until the connection returns.
-                </p>
+                </Text>
               )}
             </div>
           )}
@@ -335,13 +336,9 @@ export default function App() {
             <>
               {mode === "expert" && (
                 <div data-spt-legacy="" className="expert-edit">
-                  <button
-                    data-spt-legacy=""
-                    type="button"
-                    onClick={() => setCustomizing(true)}
-                  >
+                  <Button type="button" onClick={() => setCustomizing(true)}>
                     Customize view
-                  </button>
+                  </Button>
                 </div>
               )}
               <Dashboard
@@ -389,9 +386,14 @@ export default function App() {
                         <span data-spt-legacy="" className="eyebrow">
                           EXPERT VIEW
                         </span>
-                        <h2 data-spt-legacy="" id="expert-view-drawer-title">
+                        <Title
+                          order={2}
+                          size="xl"
+                          className="mt-[3px]"
+                          id="expert-view-drawer-title"
+                        >
                           Customize dashboard
-                        </h2>
+                        </Title>
                       </div>
                       <button
                         data-spt-legacy=""
@@ -403,28 +405,23 @@ export default function App() {
                         ✕
                       </button>
                     </div>
-                    <p data-spt-legacy="">
+                    <Text size="sm">
                       Show or hide sections. This only changes your display, not
                       the benchmark or its data.
-                    </p>
+                    </Text>
                     <div
                       data-spt-legacy=""
                       className="expert-view-drawer-actions"
                     >
-                      <button
-                        data-spt-legacy=""
+                      <Button
                         type="button"
                         onClick={() => setSelection(allSectionKeys())}
                       >
                         Show all
-                      </button>
-                      <button
-                        data-spt-legacy=""
-                        type="button"
-                        onClick={() => setSelection([])}
-                      >
+                      </Button>
+                      <Button type="button" onClick={() => setSelection([])}>
                         Hide all
-                      </button>
+                      </Button>
                     </div>
                     <div data-spt-legacy="" className="expert-view-drawer-list">
                       {fields.map((field) => (
@@ -459,14 +456,13 @@ export default function App() {
                       <span data-spt-legacy="">
                         {selection.length} of {fields.length} sections shown
                       </span>
-                      <button
-                        data-spt-legacy=""
-                        className="primary"
+                      <Button
+                        variant="filled"
                         type="button"
                         onClick={() => setCustomizing(false)}
                       >
                         Done
-                      </button>
+                      </Button>
                     </div>
                   </aside>
                 </div>
@@ -585,41 +581,38 @@ function Dashboard({
           <span data-spt-legacy="" className="eyebrow">
             {job?.status === "running" ? "LIVE BENCHMARK" : "BENCHMARK RESULTS"}
           </span>
-          <h1 data-spt-legacy="">
+          <Title order={1}>
             {job?.status === "running"
               ? "Run in progress"
               : "Storage performance"}
-          </h1>
-          <p data-spt-legacy="">
+          </Title>
+          <Text size="sm" className="mt-xs wrap-anywhere">
             {job?.run_id ||
               m?.run_id ||
               "Configure a run to measure your storage target."}
-          </p>
+          </Text>
         </div>
         <div data-spt-legacy="" className="actions">
           {historical && (
-            <button data-spt-legacy="" onClick={onBackHistory}>
-              Back to run history
-            </button>
+            <Button onClick={onBackHistory}>Back to run history</Button>
           )}
           {job?.status === "completed" && summaries.length > 0 && m && (
-            <a
-              data-spt-legacy=""
-              className="button-link"
+            <Button
+              component="a"
               href={`/api/runs/${encodeURIComponent(m.run_id)}/csv?kind=summary`}
               download
             >
               Download CSV report
-            </a>
+            </Button>
           )}
           {canStop && (
-            <button data-spt-legacy="" onClick={stop} disabled={stopPending}>
+            <Button onClick={stop} disabled={stopPending}>
               {stopPending ? "Stopping…" : "Stop run"}
-            </button>
+            </Button>
           )}
-          <button data-spt-legacy="" className="primary" onClick={onConfigure}>
+          <Button variant="filled" onClick={onConfigure}>
             ＋ Configure run
-          </button>
+          </Button>
         </div>
       </div>
       {stopError && (
@@ -632,18 +625,18 @@ function Dashboard({
           <div data-spt-legacy="" className="empty-icon">
             ◫
           </div>
-          <h2 data-spt-legacy="">
+          <Title order={2}>
             {state
               ? "No benchmark results yet"
               : "Waiting for dashboard server"}
-          </h2>
-          <p data-spt-legacy="">
+          </Title>
+          <Text className="mt-[14px] mx-auto mb-section max-w-[450px]">
             Configure a write and verify benchmark. Measured results will appear
             here as SPT runs.
-          </p>
-          <button data-spt-legacy="" className="primary" onClick={onConfigure}>
+          </Text>
+          <Button variant="filled" onClick={onConfigure}>
             Configure a run
-          </button>
+          </Button>
         </section>
       ) : (
         <>
@@ -696,11 +689,11 @@ function Dashboard({
               <span data-spt-legacy="" className="eyebrow">
                 RUN OUTCOME
               </span>
-              <h2 data-spt-legacy="">{outcome}</h2>
-              <p data-spt-legacy="">
+              <Title order={2}>{outcome}</Title>
+              <Text size="sm" className="mt-[7px]">
                 {job?.message ||
                   "SPT measurements from the configured storage target."}
-              </p>
+              </Text>
             </div>
             <div data-spt-legacy="" className="outcome-facts">
               <span data-spt-legacy="">
@@ -737,12 +730,12 @@ function Dashboard({
                     ))}
                   </select>
                 </label>
-                <p data-spt-legacy="">
+                <Text size="caption">
                   {!m.is_active && final
                     ? "Final phase averages"
                     : "Latest measured phase snapshot"}{" "}
                   · Missing values appear as —
-                </p>
+                </Text>
               </div>
               {has("cards") && (
                 <div data-spt-legacy="" className="metrics-grid">

@@ -1,3 +1,4 @@
+import { Badge, Button, Text, Title } from "@mantine/core";
 import { useState } from "react";
 import type { CompareDelta, CompareResult, SeriesPoint } from "../types";
 import { useComparison, useLastSuccessfulData } from "../api/queries";
@@ -73,13 +74,11 @@ export function Compare({
   if (ids.length < 2)
     return (
       <div data-spt-legacy="" className="history-empty">
-        <h2 data-spt-legacy="">Select runs to compare</h2>
-        <p data-spt-legacy="">
+        <Title order={2}>Select runs to compare</Title>
+        <Text className="mt-xs">
           Choose at least two runs in the results catalog.
-        </p>
-        <button data-spt-legacy="" onClick={onBack}>
-          Open results catalog
-        </button>
+        </Text>
+        <Button onClick={onBack}>Open results catalog</Button>
       </div>
     );
   const runIDs = data?.runs.map((r) => r.id) ?? ids;
@@ -93,16 +92,14 @@ export function Compare({
           <span data-spt-legacy="" className="eyebrow">
             COMPARE · {ids.length} RUNS
           </span>
-          <h1 data-spt-legacy="">Compare runs</h1>
-          <p data-spt-legacy="">
+          <Title order={1}>Compare runs</Title>
+          <Text size="sm" className="mt-xs wrap-anywhere">
             Overlaid per-phase time series and totals, checked against the
             baseline run.
-          </p>
+          </Text>
         </div>
         <div data-spt-legacy="" className="actions">
-          <button data-spt-legacy="" onClick={onBack}>
-            Back to catalog
-          </button>
+          <Button onClick={onBack}>Back to catalog</Button>
         </div>
       </div>
       {error && (
@@ -112,9 +109,9 @@ export function Compare({
       )}
       {!data ? (
         !error && (
-          <p data-spt-legacy="" className="subtle">
+          <Text size="xs" c="var(--spt-text-subtle)">
             Loading comparison…
-          </p>
+          </Text>
         )
       ) : (
         <>
@@ -125,9 +122,9 @@ export function Compare({
           >
             <div data-spt-legacy="">
               <strong data-spt-legacy="">{data.rule.label}</strong>
-              <p data-spt-legacy="" className="form-help">
+              <Text size="sm" className="mt-xxs">
                 {data.rule.description}
-              </p>
+              </Text>
             </div>
             <label data-spt-legacy="">
               Baseline
@@ -180,19 +177,20 @@ export function Compare({
                 }
               />
             </label>
-            <button data-spt-legacy="" className="primary" onClick={apply}>
+            <Button variant="filled" onClick={apply}>
               Apply
-            </button>
-            <p
-              data-spt-legacy=""
-              className={`compare-summary ${regressions ? "bad" : "good"}`}
+            </Button>
+            <Text
+              fw="var(--mantine-font-weight-semibold)"
+              c={regressions ? "#b42318" : "#1f7a4d"}
+              className="basis-full"
               role="status"
             >
               {regressions
                 ? `${regressions} metric${regressions === 1 ? "" : "s"} past the threshold vs ${data.baseline}.`
                 : `No metric past the threshold vs ${data.baseline}.`}{" "}
               Threshold check, not statistical significance.
-            </p>
+            </Text>
           </section>
           {Object.entries(data.settings_differences ?? {}).some(
             ([, d]) => d.length,
@@ -219,7 +217,9 @@ export function Compare({
           )}
           <section data-spt-legacy="" className="panel">
             <div data-spt-legacy="" className="run-log-heading">
-              <h2 data-spt-legacy="">Time series</h2>
+              <Title order={2} className="flex-auto">
+                Time series
+              </Title>
               <div
                 data-spt-legacy=""
                 className="mode-switch"
@@ -263,9 +263,9 @@ export function Compare({
                 />
               ))}
               {phasesOf(data.series).length === 0 && (
-                <p data-spt-legacy="" className="subtle">
+                <Text size="xs" c="var(--spt-text-subtle)">
                   None of the selected runs recorded interval metrics.
-                </p>
+                </Text>
               )}
             </div>
           </section>
@@ -307,9 +307,9 @@ export function OverlayChart({
         {phase} · {unit}
       </figcaption>
       {count === 0 ? (
-        <p data-spt-legacy="" className="subtle">
+        <Text size="xs" c="var(--spt-text-subtle)">
           No samples for this metric.
-        </p>
+        </Text>
       ) : (
         <svg
           data-spt-legacy=""
@@ -405,11 +405,11 @@ export function DeltaTable({
       className="panel run-history-panel"
       aria-label="Delta table"
     >
-      <h2 data-spt-legacy="">Deltas vs {baseline}</h2>
+      <Title order={2}>Deltas vs {baseline}</Title>
       {deltas.length === 0 ? (
-        <p data-spt-legacy="" className="subtle">
+        <Text size="xs" c="var(--spt-text-subtle)">
           No shared phases to compare.
-        </p>
+        </Text>
       ) : (
         <div data-spt-legacy="" className="table-wrap">
           <table data-spt-legacy="" className="run-history-table delta-table">
@@ -431,7 +431,6 @@ export function DeltaTable({
                     <tr
                       data-spt-legacy=""
                       key={`${phase}-${d.metric}-${d.run_id}`}
-                      className={`flag-${d.flag}`}
                     >
                       <td data-spt-legacy="">{phase}</td>
                       <td data-spt-legacy="">{d.label}</td>
@@ -442,13 +441,25 @@ export function DeltaTable({
                       <td data-spt-legacy="">{fmt(d.value, 2)}</td>
                       <td data-spt-legacy="">{deltaText(d)}</td>
                       <td data-spt-legacy="">
-                        <span
-                          data-spt-legacy=""
-                          className={`flag flag-${d.flag}`}
+                        <Badge
+                          color={
+                            d.flag === "regressed"
+                              ? "red"
+                              : d.flag === "improved"
+                                ? "teal"
+                                : [
+                                      "not_comparable",
+                                      "insufficient",
+                                      "no_data",
+                                    ].includes(d.flag)
+                                  ? "yellow"
+                                  : "gray"
+                          }
+                          radius="xl"
                           title={d.reason}
                         >
                           {flagText[d.flag] ?? d.flag}
-                        </span>
+                        </Badge>
                         {d.reason && (
                           <small data-spt-legacy="">{d.reason}</small>
                         )}
@@ -461,10 +472,10 @@ export function DeltaTable({
           </table>
         </div>
       )}
-      <p data-spt-legacy="" className="history-footnote">
+      <Text size="caption" className="px-comfortable pb-md">
         Flags are a threshold check, not statistical significance. One run per
         side cannot show variance; repeat runs before drawing conclusions.
-      </p>
+      </Text>
     </section>
   );
 }

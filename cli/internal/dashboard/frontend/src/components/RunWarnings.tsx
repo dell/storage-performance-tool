@@ -1,3 +1,4 @@
+import { Text, Title } from "@mantine/core";
 import type { RunWarning } from "../types";
 
 /** Live observations about unreliable telemetry. Text is what was observed only. */
@@ -11,11 +12,11 @@ export function RunWarnings({ warnings }: { warnings?: RunWarning[] }) {
     >
       <div data-spt-legacy="" className="section-heading">
         <div data-spt-legacy="">
-          <h2 data-spt-legacy="">Run warnings</h2>
-          <p data-spt-legacy="">
+          <Title order={2}>Run warnings</Title>
+          <Text c="#7a5a2b" className="mt-1">
             Observations from SPT metrics and reachability. These describe what
             was seen; they do not claim a root cause.
-          </p>
+          </Text>
         </div>
       </div>
       <ul data-spt-legacy="" className="run-warnings-list">
@@ -35,7 +36,9 @@ export function RunWarnings({ warnings }: { warnings?: RunWarning[] }) {
                 {w.metric}
               </span>
             ) : null}
-            <p data-spt-legacy="">{w.observed}</p>
+            <Text c="#4d3a1f" className="mt-[0.35rem]">
+              {w.observed}
+            </Text>
           </li>
         ))}
       </ul>

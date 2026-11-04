@@ -1,3 +1,4 @@
+import { Button, Text, Title } from "@mantine/core";
 import { useState } from "react";
 import { useDebouncedValue } from "@mantine/hooks";
 import type { CatalogRun } from "../types";
@@ -55,16 +56,15 @@ export function Catalog({
           <span data-spt-legacy="" className="eyebrow">
             RESULTS CATALOG · READ ONLY
           </span>
-          <h1 data-spt-legacy="">Results catalog</h1>
-          <p data-spt-legacy="">
+          <Title order={1}>Results catalog</Title>
+          <Text size="sm" className="mt-xs wrap-anywhere">
             Dashboard and CLI runs found under{" "}
             {data?.root ?? "the results folder"}. Nothing here changes or
             deletes results.
-          </p>
+          </Text>
         </div>
         <div data-spt-legacy="" className="actions">
-          <button
-            data-spt-legacy=""
+          <Button
             onClick={() => {
               void catalog.refetch();
               if (
@@ -77,15 +77,14 @@ export function Catalog({
             disabled={loading}
           >
             Rescan
-          </button>
-          <button
-            data-spt-legacy=""
-            className="primary"
+          </Button>
+          <Button
+            variant="filled"
             disabled={selected.length < 2}
             onClick={() => onCompare(selected, effectiveBaseline)}
           >
             Compare {selected.length || ""} selected
-          </button>
+          </Button>
         </div>
       </div>
       <section
@@ -155,14 +154,14 @@ export function Catalog({
             </option>
           </select>
         </label>
-        <p data-spt-legacy="" className="form-help">
+        <Text size="sm" className="basis-full">
           Select 2–{maxCompare} runs to compare; the baseline is the run the
           others are checked against. "Compare with previous" pairs this run
           with the next older complete run that shares the same workload, object
           size, threads, and (when recorded) object count, host count, and S3
           driver — not an SPT product version. Falls back to the next older
           complete run when no shape match exists.
-        </p>
+        </Text>
       </section>
       {error && (
         <div data-spt-legacy="" className="error" role="alert">
@@ -176,9 +175,9 @@ export function Catalog({
       )}
       <section data-spt-legacy="" className="panel run-history-panel">
         {loading && !data ? (
-          <p data-spt-legacy="" className="history-empty">
+          <Text className="px-section py-xxl text-center">
             Scanning results…
-          </p>
+          </Text>
         ) : runs.length ? (
           <div data-spt-legacy="" className="table-wrap">
             <table
@@ -225,18 +224,18 @@ export function Catalog({
           </div>
         ) : (
           <div data-spt-legacy="" className="history-empty">
-            <h2 data-spt-legacy="">No runs found</h2>
-            <p data-spt-legacy="">
+            <Title order={2}>No runs found</Title>
+            <Text className="mt-xs">
               {filters.q || filters.source || filters.status
                 ? "No runs match these filters."
                 : "SPT result folders will appear here after a run."}
-            </p>
+            </Text>
           </div>
         )}
-        <p data-spt-legacy="" className="history-footnote">
+        <Text size="caption" className="px-comfortable pb-md">
           {data ? `${runs.length} shown of ${data.total} found.` : ""} Malformed
           or partial folders are listed with what is missing.
-        </p>
+        </Text>
       </section>
     </>
   );
@@ -328,18 +327,22 @@ function CatalogRow({
           )}
         </td>
         <td data-spt-legacy="" className="catalog-row-actions">
-          <button data-spt-legacy="" aria-expanded={open} onClick={onOpen}>
+          <Button
+            className="whitespace-nowrap"
+            aria-expanded={open}
+            onClick={onOpen}
+          >
             {open ? "Hide" : "Details"}
-          </button>
+          </Button>
           {run.status === "complete" && previous && (
-            <button
-              data-spt-legacy=""
+            <Button
+              className="whitespace-nowrap"
               type="button"
               title={`Compare with ${previous.name || previous.id}`}
               onClick={() => onComparePrevious(previous.id)}
             >
               Compare with previous
-            </button>
+            </Button>
           )}
         </td>
       </tr>
@@ -431,43 +434,46 @@ function RunArtifacts({ runId }: { runId: string }) {
       className="catalog-artifacts"
       aria-label="Run artifacts"
     >
-      <h3 data-spt-legacy="">Artifacts</h3>
-      <p data-spt-legacy="" className="form-help">
+      <Title order={3} size="md" className="mb-[5px]">
+        Artifacts
+      </Title>
+      <Text size="sm" className="my-comfortable">
         CSV, XML, and log files SPT left in this run folder. Only files the
         dashboard recognizes are listed.
-      </p>
+      </Text>
       {error && (
         <div data-spt-legacy="" className="error" role="alert">
           {error}
         </div>
       )}
       {items === undefined && !error ? (
-        <p data-spt-legacy="" className="subtle">
+        <Text size="xs" c="var(--spt-text-subtle)">
           Loading artifacts…
-        </p>
+        </Text>
       ) : items && items.length === 0 ? (
         <div
           data-spt-legacy=""
           className="history-empty catalog-artifacts-empty"
         >
-          <h4 data-spt-legacy="">No downloadable artifacts</h4>
-          <p data-spt-legacy="">
+          <Title order={4} size="md">
+            No downloadable artifacts
+          </Title>
+          <Text className="mt-xs">
             This run folder has no CSV, XML, or log files the dashboard can
             offer. Engine log text may also be unavailable for the same reason.
-          </p>
+          </Text>
         </div>
       ) : (
         <ul data-spt-legacy="" className="artifact-list">
           {(items ?? []).map((a) => (
             <li data-spt-legacy="" key={a.name}>
-              <a
-                data-spt-legacy=""
-                className="button-link"
+              <Button
+                component="a"
                 href={`/api/catalog/artifact?id=${encodeURIComponent(runId)}&file=${encodeURIComponent(a.name)}`}
                 download={a.name}
               >
                 Download {a.type}
-              </a>
+              </Button>
               <span data-spt-legacy="" className="artifact-meta">
                 <span data-spt-legacy="" className="artifact-kind">
                   {a.kind.toUpperCase()}

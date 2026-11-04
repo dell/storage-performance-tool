@@ -1,3 +1,4 @@
+import { Title } from "@mantine/core";
 // Adapted from the upstream TrendChart (MIT). Keep nulls as gaps and show isolated measurements.
 import { useState } from "react";
 import type { Sample } from "../types";
@@ -42,7 +43,7 @@ export function TrendChart({
   return (
     <article data-spt-legacy="" className="chart">
       <div data-spt-legacy="" className="chart-heading">
-        <h3 data-spt-legacy="">{title}</h3>
+        <Title order={3}>{title}</Title>
         <span data-spt-legacy="">{unit}</span>
       </div>
       <div data-spt-legacy="" className="legend">

@@ -1,3 +1,4 @@
+import { Button, Text, Title } from "@mantine/core";
 import { useMemo, useState } from "react";
 import type { Metrics, Sample } from "../types";
 import { TrendChart } from "./TrendChart";
@@ -94,12 +95,12 @@ export function Charts({
     <section data-spt-legacy="" className="panel fleet">
       <div data-spt-legacy="" className="section-heading">
         <div data-spt-legacy="">
-          <h2 data-spt-legacy="">Measured performance</h2>
-          <p data-spt-legacy="">
+          <Title order={2}>Measured performance</Title>
+          <Text size="caption" className="mt-[5px] max-[760px]:max-w-[250px]">
             {display === "timeline"
               ? `${phaseName(phase)} phase · ${samples.length} recorded samples`
               : "Final averages by phase"}
-          </p>
+          </Text>
         </div>
         <select
           data-spt-legacy=""
@@ -162,48 +163,51 @@ export function Charts({
               </select>
             </label>
             <div data-spt-legacy="" className="button-group">
-              <button
-                data-spt-legacy=""
+              <Button
+                size="compact-sm"
+                fz="caption"
                 disabled={samples.length < 2}
                 onClick={() => setWindowSize(Math.max(1, width / 2))}
               >
                 Zoom in
-              </button>
-              <button
-                data-spt-legacy=""
+              </Button>
+              <Button
+                size="compact-sm"
+                fz="caption"
                 disabled={windowSize === null}
                 onClick={() =>
                   setWindowSize(width * 2 >= last - first ? null : width * 2)
                 }
               >
                 Zoom out
-              </button>
-              <button
-                data-spt-legacy=""
+              </Button>
+              <Button
+                size="compact-sm"
+                fz="caption"
                 onClick={() => {
                   setWindowSize(null);
                   setPosition(null);
                 }}
               >
                 Fit phase
-              </button>
-              <button
-                data-spt-legacy=""
+              </Button>
+              <Button
+                size="compact-sm"
+                fz="caption"
                 disabled={position === null}
                 onClick={() => setPosition(null)}
               >
                 Follow latest
-              </button>
+              </Button>
             </div>
             {!m.is_active && shown.length > 0 && (
-              <a
-                data-spt-legacy=""
-                className="button-link"
+              <Button
+                component="a"
                 href={`/api/runs/${encodeURIComponent(m.run_id)}/csv?kind=window&phase=${phase}&start=${start}&end=${end}`}
                 download
               >
                 Export window CSV
-              </a>
+              </Button>
             )}
           </div>
           {samples.length > 1 && (
@@ -254,15 +258,19 @@ export function Charts({
               onInspect={setActive}
             />
           ))}
-          <p data-spt-legacy="" className="chart-readout" aria-live="polite">
+          <Text
+            size="caption"
+            className="mt-comfortable mb-xs border-t border-subtle-border pt-[14px] tabular-nums"
+            aria-live="polite"
+          >
             {inspected
               ? `${elapsed(inspected.elapsed)} · ${utc(inspected.timestamp)} · IOPS ${fmt(inspected.throughput, 2)} ops/s · bandwidth ${fmt(inspected.bandwidth, 2)} MiB/s · P50 ${fmt(inspected.p50, 1)} µs`
               : "Waiting for measured samples in this time window."}
-          </p>
-          <p data-spt-legacy="" className="subtle">
+          </Text>
+          <Text size="xs" c="var(--spt-text-subtle)" className="tabular-nums">
             All three graphs share the time window and inspector. Each uses its
             own scale. Missing measurements are shown as gaps.
-          </p>
+          </Text>
         </>
       ) : (
         <>
@@ -284,9 +292,9 @@ export function Charts({
               );
               return (
                 <article data-spt-legacy="" className="comparison" key={g.key}>
-                  <h3 data-spt-legacy="">
+                  <Title order={3}>
                     {g.label} <span data-spt-legacy="">{g.unit}</span>
-                  </h3>
+                  </Title>
                   {summaries.map((r) => {
                     const v = numeric(r[field]);
                     return (
@@ -315,10 +323,10 @@ export function Charts({
               );
             })}
           </div>
-          <p data-spt-legacy="" className="subtle">
+          <Text size="xs" c="var(--spt-text-subtle)" className="tabular-nums">
             These bars are final phase averages. They do not represent interval
             history. Cleanup normally transfers no object payload.
-          </p>
+          </Text>
         </>
       )}
     </section>

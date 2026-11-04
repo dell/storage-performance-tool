@@ -1,3 +1,4 @@
+import { Button, Text } from "@mantine/core";
 import { useState } from "react";
 import type { Row, State } from "../types";
 import { defaults } from "../config";
@@ -111,12 +112,12 @@ function LimitsForm({
           {checks.filter((c) => limits[c.key] !== null).length}/3 set
         </span>
       </summary>
-      <p data-spt-legacy="" className="form-help">
+      <Text size="sm" className="my-comfortable">
         Set your team’s expectations for {state.target.endpoint_label},{" "}
         {o.object_size} objects, and {o.threads} thread
         {o.threads === 1 ? "" : "s"}. These limits stay in this browser and
         apply to the selected phase.
-      </p>
+      </Text>
       <div data-spt-legacy="" className="form-grid limits-grid">
         {checks.map((c) => {
           const limit = limits[c.key],
@@ -160,11 +161,10 @@ function LimitsForm({
         })}
       </div>
       <div data-spt-legacy="" className="actions">
-        <button data-spt-legacy="" className="primary" onClick={save}>
+        <Button variant="filled" onClick={save}>
           Save limits
-        </button>
-        <button
-          data-spt-legacy=""
+        </Button>
+        <Button
           onClick={() => {
             try {
               localStorage.removeItem(key);
@@ -177,7 +177,7 @@ function LimitsForm({
           }}
         >
           Clear limits
-        </button>
+        </Button>
         <span data-spt-legacy="" className="subtle" role="status">
           {message}
         </span>
