@@ -522,7 +522,8 @@ func (r *Renderer) performanceTable(summary *RunSummary) string {
 }
 
 func (r *Renderer) phaseTable(summary *RunSummary) string {
-	headers := []string{"Phase", "Object Size", "Success", "Data Moved", headerLatencyP50, headerTTFBP50}
+	// Failed stays last: tools read Success beside Data Moved, and Success as the third column.
+	headers := []string{"Phase", "Object Size", "Success", "Data Moved", headerLatencyP50, headerTTFBP50, "Failed"}
 	rows := make([][]string, 0, len(summary.Steps))
 	for _, step := range summary.Steps {
 		if step.Metrics == nil {
@@ -544,12 +545,13 @@ func (r *Renderer) phaseTable(summary *RunSummary) string {
 			dataCell,
 			mixedLatencyCell(step, m),
 			mixedTTFBCell(step, m),
+			formatInt(m.FailureCount),
 		})
 	}
 	if len(rows) == 0 {
 		rows = append(rows, notApplicableRow(len(headers)))
 	}
-	return renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight})
+	return renderUnicodeTable(headers, rows, []Alignment{AlignLeft, AlignLeft, AlignRight, AlignRight, AlignRight, AlignRight, AlignRight})
 }
 
 func (r *Renderer) rateTable(summary *RunSummary) string {
@@ -703,6 +705,9 @@ func (r *Renderer) renderTotals(b *strings.Builder, summary *RunSummary) {
 	fmt.Fprintf(b, "Run Totals\n")
 	r.writeBullet(b, "Duration", totals.DurationHuman)
 	r.writeBullet(b, "Data moved", formatBytesHuman(totals.DataBytes))
+	if totals.FailureCount > 0 {
+		r.writeBullet(b, "Failed requests", formatInt(totals.FailureCount))
+	}
 	if len(summary.MissingExpected) > 0 {
 		r.writeBullet(b, "Missing steps", strings.Join(summary.MissingExpected, ", "))
 	}

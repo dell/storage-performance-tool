@@ -19,7 +19,9 @@ type SteadyTotals struct {
 // computed over the window, followed by the window status.
 type SteadyTotalsRow struct {
 	MetricsTotalsRow
-	Status string
+	Status       string
+	TrendPercent *float64
+	CV           *float64
 }
 
 // SteadyRates holds a phase's steady-window rates when every window of the phase is valid,
@@ -29,6 +31,15 @@ type SteadyRates struct {
 	ThroughputOps  float64
 	BandwidthMiBps float64
 	Reason         string
+	// Unsteady holds the worst Trend and CV of the phase's valid windows past the warning cutoffs, and
+	// is nil otherwise. It can be set when another window leaves the phase with no steady rate to show.
+	Unsteady *SteadyInstability
+}
+
+// SteadyInstability is a phase's worst Trend and CV. A cell the engine left empty stays nil.
+type SteadyInstability struct {
+	TrendPercent *float64
+	CV           *float64
 }
 
 const (
@@ -45,6 +56,14 @@ const (
 	steadyStatusShort      = "short"
 	steadyStatusNotReached = "not-reached"
 	steadyStatusIncomplete = "incomplete"
+)
+
+// A valid window covers enough turnovers and says nothing about whether the rate held (ADR 0007
+// D6), so the CLI warns past these cutoffs. They are uncalibrated: 594 recorded valid windows, nearly
+// all healthy lab runs, reached no worse than a Trend of -11% or a CV of 0.25, apart from one outage.
+const (
+	steadyWarnTrendPercent = -50.0
+	steadyWarnCV           = 0.5
 )
 
 // Reasons shown after "n/a" when a phase has no valid steady rates.
@@ -94,7 +113,22 @@ func parseSteadyTotalsRow(record []string, index map[string]int) (SteadyTotalsRo
 	default:
 		return SteadyTotalsRow{}, fmt.Errorf("unknown %s %q", columnSteadyStatus, status)
 	}
-	return SteadyTotalsRow{MetricsTotalsRow: totals, Status: status}, nil
+	return SteadyTotalsRow{
+		MetricsTotalsRow: totals,
+		Status:           status,
+		TrendPercent:     optionalSteadyFloat(record, index, columnSteadyTrend),
+		CV:               optionalSteadyFloat(record, index, columnSteadyCV),
+	}, nil
+}
+
+// optionalSteadyFloat reads a cell only a warning uses: the engine leaves it empty when a window has
+// too few samples, and a cell it can't read costs that warning, not the phase's rates.
+func optionalSteadyFloat(record []string, index map[string]int, column string) *float64 {
+	parsed, err := strconv.ParseFloat(strings.TrimSpace(valueAt(record, index, column)), 64)
+	if err != nil {
+		return nil
+	}
+	return &parsed
 }
 
 // deriveSteadyRates covers the total rows a phase reports: every row of a mixed phase,
@@ -135,11 +169,51 @@ func deriveSteadyRates(stepData *StepData, mixed bool, absentReason string) Stea
 		}
 		rates.ThroughputOps += row.ThroughputAvgOps
 		rates.BandwidthMiBps += row.BandwidthAvgMiBps
+		rates.Unsteady = worseSteadyInstability(rates.Unsteady, row)
 	}
 	if worst != "" {
-		return SteadyRates{Reason: steadyStatusReason(worst)}
+		// Another context's window has no rate to show, and this one's still didn't hold.
+		return SteadyRates{Reason: steadyStatusReason(worst), Unsteady: rates.Unsteady}
 	}
 	return rates
+}
+
+// worseSteadyInstability keeps the lowest Trend and highest CV of the rows past a warning cutoff.
+func worseSteadyInstability(current *SteadyInstability, row SteadyTotalsRow) *SteadyInstability {
+	trendPast := row.TrendPercent != nil && *row.TrendPercent <= steadyWarnTrendPercent
+	cvPast := row.CV != nil && *row.CV >= steadyWarnCV
+	if !trendPast && !cvPast {
+		return current
+	}
+	if current == nil {
+		return &SteadyInstability{TrendPercent: row.TrendPercent, CV: row.CV}
+	}
+	if row.TrendPercent != nil && (current.TrendPercent == nil || *row.TrendPercent < *current.TrendPercent) {
+		current.TrendPercent = row.TrendPercent
+	}
+	if row.CV != nil && (current.CV == nil || *row.CV > *current.CV) {
+		current.CV = row.CV
+	}
+	return current
+}
+
+// steadyInstabilityWarning words a valid window whose rate didn't hold. The window stays valid, and
+// any rate stays in the table: this tells the reader what that rate may be hiding.
+func steadyInstabilityWarning(phase string, unsteady *SteadyInstability) string {
+	if unsteady == nil {
+		return ""
+	}
+	var readings []string
+	if unsteady.TrendPercent != nil {
+		readings = append(readings, fmt.Sprintf("trend %+.1f%%", *unsteady.TrendPercent))
+	}
+	if unsteady.CV != nil {
+		readings = append(readings, fmt.Sprintf("CV %.2f", *unsteady.CV))
+	}
+	return fmt.Sprintf(
+		"%s: a valid steady window's rate didn't hold (%s), so a steady rate may hide a fall such as an outage "+
+			"(uncalibrated cutoffs: trend <= %.0f%%, CV >= %.1f)",
+		phase, strings.Join(readings, ", "), steadyWarnTrendPercent, steadyWarnCV)
 }
 
 // pairSteadyRows matches each total row with the steady row of the same metrics context: the

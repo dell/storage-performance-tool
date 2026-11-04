@@ -24,6 +24,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
+	"github.com/dell/storage-performance-tool/cli/internal/results/summary"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/tui/headless"
@@ -160,7 +161,7 @@ func TestWriteVerifyZeroSuccessfulCreateStopsReadAndExitsOne(t *testing.T) {
 			return os.WriteFile(filepath.Join(root, constants.ResultsManifestFileName), data, 0o600)
 		}}
 	}
-	generateRunSummaryFunc = func(context.Context, string, io.Writer) error { return nil }
+	generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) { return nil, nil }
 
 	metadata := &runMetadata{ResultsRoot: resultsRoot}
 	monitor := startAutoResultsMonitor(
@@ -368,7 +369,7 @@ func TestReadVerifyFailedListStopsReadAndRunEExitsOne(t *testing.T) {
 				return os.WriteFile(filepath.Join(root, constants.ResultsManifestFileName), indexData, 0o600)
 			}}
 		}
-		generateRunSummaryFunc = func(context.Context, string, io.Writer) error { return nil }
+		generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) { return nil, nil }
 		capturedMetadata = metadata
 		return startAutoResultsMonitor(
 			parentCtx, baseURL, label, resultsDir, plannedStepIDs, runID, debug, hosts, port,

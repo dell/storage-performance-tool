@@ -22,6 +22,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/driverstats"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
+	"github.com/dell/storage-performance-tool/cli/internal/results/summary"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
@@ -671,7 +672,7 @@ func installAutoResultsFakes(t *testing.T, runtimeStepIDs []string) {
 	newResultsFetcherFunc = func(_, output string) autoResultsFetcher {
 		return &fakeFetcher{output: output, manifest: &results.Manifest{}}
 	}
-	generateRunSummaryFunc = func(context.Context, string, io.Writer) error { return nil }
+	generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) { return nil, nil }
 }
 
 type storedDriverStats struct {
