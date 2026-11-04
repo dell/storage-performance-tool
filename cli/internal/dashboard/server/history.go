@@ -119,7 +119,7 @@ func (a *app) handleRunCSV(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			for _, row := range all {
-				if phaseCodeForBackend(str(row["op_type"])) != phase {
+				if phaseCodeForBackend(str(row["op_type"])) != phaseCodeForBackend(phase) {
 					continue
 				}
 				if kind == kindWindow {
