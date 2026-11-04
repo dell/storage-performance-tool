@@ -822,6 +822,16 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						: new RunTerminalException(typed.category(), loadStepId(), engine + ": " + typed.getMessage(), cause);
 	}
 
+	/** A slice that didn't start under the admission barrier: its engine named, and the category of a cause that has one, such as a bad items line. */
+	RunTerminalException barrierStartFailure(final Exception cause, final String engine) {
+		final var typed = RunTerminalException.find(cause);
+		return new RunTerminalException(
+						typed != null ? typed.category() : IntegrityTerminalException.Category.EXECUTION,
+						loadStepId(),
+						"Step " + loadStepId() + " did not start: " + engine + ": " + cause.getMessage(),
+						cause);
+	}
+
 	private void initAndStartStepSlices(
 					final List<String> nodeAddrs, final List<Config> configSlices, final List<List<Config>> ctxConfigsSlices,
 					final MetricsManager metricsManager, final AdmissionBarrier barrier) {
@@ -876,12 +886,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				LogUtil.exception(
 								Level.ERROR, e, "{}: failed to start the step slice \"{}\"", loadStepId(), stepSlice);
 				if (barrier != null) {
-					throw new RunTerminalException(
-									IntegrityTerminalException.Category.EXECUTION,
-									loadStepId(),
-									"Step " + loadStepId() + " did not start: " + (i == 0 ? NicSetConfig.ENTRY_KEY : nodeAddrs.get(i - 1)) + ": "
-													+ e.getMessage(),
-									e);
+					throw barrierStartFailure(e, i == 0 ? NicSetConfig.ENTRY_KEY : nodeAddrs.get(i - 1));
 				}
 				// One engine missing would leave a lower load reported as the one asked for.
 				throw sliceStartFailure(e, i, sliceCount);

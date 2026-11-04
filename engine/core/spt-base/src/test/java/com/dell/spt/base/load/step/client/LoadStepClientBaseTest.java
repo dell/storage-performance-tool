@@ -157,6 +157,21 @@ class LoadStepClientBaseTest {
 	}
 
 	@Test
+	void aSliceFailureUnderTheBarrierKeepsItsCategoryAndNamesItsEngine() throws Exception {
+		final var client = new TestLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
+		final var typed = new RunTerminalException(
+						IntegrityTerminalException.Category.INPUT, "items file line 7 is blank", null);
+		final var input = client.barrierStartFailure(new IllegalStateException("wrapped", typed), "entry");
+		assertEquals(IntegrityTerminalException.Category.INPUT, input.category());
+		assertEquals(client.loadStepId(), input.stepId());
+		assertTrue(input.getMessage().contains("did not start: entry:"), input.getMessage());
+
+		final var other = client.barrierStartFailure(new IllegalStateException("refused"), "198.51.100.12:1099");
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, other.category());
+		assertTrue(other.getMessage().contains("198.51.100.12:1099: refused"), other.getMessage());
+	}
+
+	@Test
 	void aStopThatCutsASliceStartShortStaysAStop() throws Exception {
 		final LoadStep slice = mock(LoadStep.class);
 		when(slice.start()).thenAnswer(call -> {
