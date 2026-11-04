@@ -399,9 +399,13 @@ final class RdmaNicLoopback implements AutoCloseable {
 		throw new AssertionError("no transport of NIC " + index);
 	}
 
+	/** Applied to each transport as it is made, for what must hold before a lane starts. */
+	java.util.function.Consumer<FakeRdmaTransport> transportSetup = transport -> {};
+
 	Function<RdmaConfig, RdmaTransport> recording() {
 		return config -> {
 			final var transport = new NicTransport(config);
+			transportSetup.accept(transport);
 			transports.add(transport);
 			return transport;
 		};
@@ -642,7 +646,7 @@ final class RdmaNicLoopback implements AutoCloseable {
 	private static NicInventory.Nic nic(final int index) {
 		final var address = Ipv4.parse(ADDRESSES.get(index));
 		return new NicInventory.Nic(NICS.get(index), NicInventory.Kind.PHYSICAL, null, true,
-						List.of(Ipv4Prefix.parse(ADDRESSES.get(index) + "/8")), 25_000, 1_500, 0, "0000:01:00." + index, List.of(),
+						List.of(Ipv4Prefix.parse(ADDRESSES.get(index) + "/8")), 25_000, 1_500, index % 2, "0000:01:00." + index, List.of(),
 						null, null, DEVICES.get(index), List.of(new NicInventory.RoceGid(DEVICES.get(index), 1, 3, address, true)),
 						SYSCTLS);
 	}

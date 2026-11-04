@@ -8,7 +8,10 @@
  * Dependencies: libibverbs, libmlx5, librdmacm (from rdma-core)
  */
 
+#define _GNU_SOURCE /* CPU_ALLOC and the affinity calls */
+
 #include <jni.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -962,6 +965,78 @@ Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeQue
 /* ============================================================================
  * JNI Lifecycle
  * ============================================================================ */
+
+/*
+ * Keeps the calling thread to the given CPUs, within those it may already use: 0, -1 when it may use
+ * none of them, or an errno. No capability is needed, as a thread only narrows its own affinity.
+ */
+JNIEXPORT jint JNICALL
+Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeConfineCurrentThread(
+        JNIEnv *env, jclass cls, jintArray cpus) {
+
+    const jsize count = (*env)->GetArrayLength(env, cpus);
+    jint *list = (*env)->GetIntArrayElements(env, cpus, NULL);
+    if (list == NULL) {
+        return ENOMEM;
+    }
+
+    /* The kernel refuses a mask shorter than its own, so grow until the read fits. */
+    int ncpus = 1024;
+    for (jsize i = 0; i < count; i++) {
+        if (list[i] >= ncpus) {
+            ncpus = list[i] + 1;
+        }
+    }
+    cpu_set_t *allowed = NULL;
+    cpu_set_t *wanted = NULL;
+    size_t size = 0;
+    int result = 0;
+    for (;;) {
+        allowed = CPU_ALLOC(ncpus);
+        if (allowed == NULL) {
+            result = ENOMEM;
+            break;
+        }
+        size = CPU_ALLOC_SIZE(ncpus);
+        CPU_ZERO_S(size, allowed);
+        if (sched_getaffinity(0, size, allowed) == 0) {
+            break;
+        }
+        result = errno;
+        CPU_FREE(allowed);
+        allowed = NULL;
+        if (result != EINVAL || ncpus > (1 << 20)) {
+            break;
+        }
+        result = 0;
+        ncpus *= 2;
+    }
+
+    if (result == 0) {
+        wanted = CPU_ALLOC(ncpus);
+        if (wanted == NULL) {
+            result = ENOMEM;
+        } else {
+            CPU_ZERO_S(size, wanted);
+            for (jsize i = 0; i < count; i++) {
+                if (list[i] >= 0 && list[i] < ncpus && CPU_ISSET_S(list[i], size, allowed)) {
+                    CPU_SET_S(list[i], size, wanted);
+                }
+            }
+            if (CPU_COUNT_S(size, wanted) == 0) {
+                result = -1;
+            } else if (sched_setaffinity(0, size, wanted) != 0) {
+                result = errno;
+            }
+            CPU_FREE(wanted);
+        }
+    }
+    if (allowed != NULL) {
+        CPU_FREE(allowed);
+    }
+    (*env)->ReleaseIntArrayElements(env, cpus, list, JNI_ABORT);
+    return result;
+}
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     JNIEnv *env;

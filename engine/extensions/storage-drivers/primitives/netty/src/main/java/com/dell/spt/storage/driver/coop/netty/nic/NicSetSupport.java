@@ -141,6 +141,12 @@ public final class NicSetSupport {
 		return read == null ? null : read.nic(nic).map(NicInventory.Nic::rdmaDevice).orElse(null);
 	}
 
+	/** The NUMA node of chosen NIC {@code nic}, or {@code null} when it has none or before a successful open. */
+	public Integer numaNode(final String nic) {
+		final var read = inventory;
+		return read == null ? null : read.nic(nic).map(NicInventory.Nic::numaNode).orElse(null);
+	}
+
 	/**
 	 * Pre-opens connections when the concurrency limit is unlimited, one per Path, which the base
 	 * start does not (it pre-opens only a positive limit), and logs each NIC.

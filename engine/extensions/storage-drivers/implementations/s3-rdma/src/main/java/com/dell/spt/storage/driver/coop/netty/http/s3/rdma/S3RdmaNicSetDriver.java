@@ -42,6 +42,7 @@ import com.github.akurilov.netty.connection.pool.NonBlockingConnPool;
 import io.netty.channel.Channel;
 import io.netty.util.AttributeKey;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -108,6 +109,8 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 	long directMemoryLimitBytes = RdmaBufferPool.directMemoryLimitBytes();
 	/** Replaced only by tests of a lane that cannot start. */
 	Consumer<RdmaPreparationLane> laneStarter = RdmaPreparationLane::start;
+	/** Replaced only by tests of lane placement. */
+	Path numaNodes = RdmaLanePlacement.SYSFS_NODES;
 
 	static <I extends Item, O extends Operation<I>> S3RdmaNicSetDriver<I, O> create(
 					final String stepId,
@@ -227,7 +230,10 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		try {
 			for (var i = 0; i < nics.size(); i++) {
 				final var nic = nics.get(i);
-				lanes.add(new RdmaPreparationLane(stepId, nic, admission.limit(i), cause -> laneDied(nic, cause)));
+				final var node = nicSet.numaNode(nic.name);
+				final var cpus = RdmaLanePlacement.cpusFor(stepId, nic.name, node, numaNodes);
+				lanes.add(new RdmaPreparationLane(stepId, nic, admission.limit(i), cause -> laneDied(nic, cause),
+								() -> RdmaLanePlacement.confine(stepId, nic, node, cpus)));
 			}
 			for (final var lane : lanes) {
 				laneStarter.accept(lane);

@@ -39,6 +39,8 @@ import io.netty.channel.Channel;
 import io.netty.channel.epoll.Epoll;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.file.Path;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -61,6 +63,7 @@ import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.Timeout;
 
 /**
@@ -115,6 +118,109 @@ final class S3RdmaNicSetLaneTest {
 		}
 		assertArrayEquals(RdmaNicLoopback.expected("split-0", size), stub.object(BUCKET + "/split-0"));
 		assertArrayEquals(RdmaNicLoopback.expected("split-1", size), stub.object(BUCKET + "/split-1"));
+	}
+
+	@Test
+	void eachLaneKeepsToItsNicsNodeBeforeItsFirstTask(@TempDir final Path nodes) throws Exception {
+		writeNode(nodes, 0, "0-3");
+		writeNode(nodes, 1, "4,6");
+		final var driver = stub.driver(RdmaNicLoopback.root(rdma(false, true, 1), stub.listeners(2), NICS.subList(0, 2), 2));
+		resources.add(driver);
+		driver.numaNodes = nodes;
+		final var placedBeforeRegistering = new CopyOnWriteArraySet<Boolean>();
+		stub.transportSetup = transport -> transport.setBeforeRegister(
+						() -> placedBeforeRegistering.add(Thread.currentThread().equals(transport.getConfinedThread())));
+
+		try (final var log = new MessageLog()) {
+			final var run = RdmaNicLoopback.started(driver);
+			waitFor(() -> stub.transport(0).getConfinedThread() != null && stub.transport(1).getConfinedThread() != null, "both lanes placed");
+			assertEquals(RdmaPreparationLane.threadName("rdma-nic-test", NICS.get(0)), stub.transport(0).getConfinedThread().getName());
+			assertEquals(RdmaPreparationLane.threadName("rdma-nic-test", NICS.get(1)), stub.transport(1).getConfinedThread().getName());
+			assertArrayEquals(new int[]{0, 1, 2, 3
+			}, stub.transport(0).getConfinedCpus());
+			assertArrayEquals(new int[]{4, 6
+			}, stub.transport(1).getConfinedCpus());
+
+			final int size = 4 << 20;
+			assertEquals(Operation.Status.SUCC, run.executeAlone(op(OpType.CREATE, "placed-0", size)).status());
+			assertEquals(Operation.Status.SUCC, run.executeAlone(op(OpType.CREATE, "placed-1", size)).status());
+
+			assertEquals(Set.of(true), placedBeforeRegistering, "every registration ran on the placed lane");
+			assertEquals(2, log.matching("preparation lane placed on NUMA node").size());
+		}
+	}
+
+	@Test
+	void aRefusedPlacementWarnsAndTheLaneStillPrepares(@TempDir final Path nodes) throws Exception {
+		writeNode(nodes, 0, "0-3");
+		writeNode(nodes, 1, "4-7");
+		assertPlacementFailureLeavesTheLaneWorking(nodes, transport -> transport.setConfineResult(1), "the kernel refused, errno 1");
+	}
+
+	@Test
+	void aNodeWithNoCpuOpenToTheProcessWarnsAndTheLaneStillPrepares(@TempDir final Path nodes) throws Exception {
+		writeNode(nodes, 0, "0-3");
+		writeNode(nodes, 1, "4-7");
+		assertPlacementFailureLeavesTheLaneWorking(nodes, transport -> transport.setConfineResult(RdmaLanePlacement.NO_CPU_ALLOWED), "may use none of its CPUs");
+	}
+
+	@Test
+	void aFailingPlacementCallWarnsAndTheLaneStillPrepares(@TempDir final Path nodes) throws Exception {
+		writeNode(nodes, 0, "0-3");
+		writeNode(nodes, 1, "4-7");
+		assertPlacementFailureLeavesTheLaneWorking(nodes, transport -> transport.setConfineFailure(new IllegalStateException("no library")), "no library");
+	}
+
+	@Test
+	void anUnreadableCpuListWarnsAndTheLaneIsNotPlaced(@TempDir final Path nodes) throws Exception {
+		writeNode(nodes, 0, "not a list");
+		writeNode(nodes, 1, "4-7");
+		final var driver = stub.driver(RdmaNicLoopback.root(rdma(false, true, 1), stub.listeners(1), NICS.subList(0, 1), 1));
+		resources.add(driver);
+		driver.numaNodes = nodes;
+
+		try (final var log = new MessageLog()) {
+			final var run = RdmaNicLoopback.started(driver);
+			assertEquals(Operation.Status.SUCC, run.executeAlone(op(OpType.CREATE, "unread", 4 << 20)).status());
+			assertEquals(1, log.matching("could not be placed on NUMA node 0").size());
+		}
+		assertEquals(null, stub.transport(0).getConfinedThread());
+	}
+
+	@Test
+	void aHostWithOneNodePlacesNothing(@TempDir final Path nodes) throws Exception {
+		writeNode(nodes, 0, "0-3");
+		final var driver = stub.driver(RdmaNicLoopback.root(rdma(false, true, 1), stub.listeners(1), NICS.subList(0, 1), 1));
+		resources.add(driver);
+		driver.numaNodes = nodes;
+
+		try (final var log = new MessageLog()) {
+			final var run = RdmaNicLoopback.started(driver);
+			assertEquals(Operation.Status.SUCC, run.executeAlone(op(OpType.CREATE, "one-node", 4 << 20)).status());
+			assertEquals(List.of(), log.matching("NUMA node"));
+		}
+		assertEquals(null, stub.transport(0).getConfinedThread());
+	}
+
+	private void assertPlacementFailureLeavesTheLaneWorking(final Path nodes, final java.util.function.Consumer<FakeRdmaTransport> failure,
+					final String why) throws Exception {
+		final var driver = stub.driver(RdmaNicLoopback.root(rdma(false, true, 1), stub.listeners(1), NICS.subList(0, 1), 1));
+		resources.add(driver);
+		driver.numaNodes = nodes;
+		stub.transportSetup = failure;
+
+		try (final var log = new MessageLog()) {
+			final var run = RdmaNicLoopback.started(driver);
+			assertEquals(Operation.Status.SUCC, run.executeAlone(op(OpType.CREATE, "unplaced", 4 << 20)).status());
+			final var warning = log.only("could not be placed on NUMA node 0");
+			assertTrue(warning.contains(why), warning);
+			assertTrue(warning.contains("NIC " + NICS.get(0)), warning);
+		}
+	}
+
+	private static void writeNode(final Path nodes, final int node, final String cpus) throws IOException {
+		final var directory = Files.createDirectories(nodes.resolve("node" + node));
+		Files.writeString(directory.resolve("cpulist"), cpus + "\n");
 	}
 
 	@Test

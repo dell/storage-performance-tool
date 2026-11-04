@@ -69,6 +69,11 @@ public class FakeRdmaTransport extends RdmaTransport {
 	private volatile String strictDevice;
 	private volatile String strictAddress;
 
+	private volatile Thread confinedThread;
+	private volatile int[] confinedCpus;
+	private volatile int confineResult;
+	private volatile RuntimeException confineFailure;
+
 	public FakeRdmaTransport(final RdmaConfig config) {
 		super(config);
 	}
@@ -91,6 +96,32 @@ public class FakeRdmaTransport extends RdmaTransport {
 		strictDevice = device;
 		strictAddress = localIp;
 		available = true;
+	}
+
+	@Override
+	public int confineCurrentThread(final int[] cpus) {
+		confinedThread = Thread.currentThread();
+		confinedCpus = cpus.clone();
+		if (confineFailure != null) {
+			throw confineFailure;
+		}
+		return confineResult;
+	}
+
+	public Thread getConfinedThread() {
+		return confinedThread;
+	}
+
+	public int[] getConfinedCpus() {
+		return confinedCpus;
+	}
+
+	public void setConfineResult(final int result) {
+		confineResult = result;
+	}
+
+	public void setConfineFailure(final RuntimeException failure) {
+		confineFailure = failure;
 	}
 
 	@Override

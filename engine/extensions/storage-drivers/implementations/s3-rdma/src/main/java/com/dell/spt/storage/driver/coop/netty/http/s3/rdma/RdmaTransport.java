@@ -93,6 +93,8 @@ public class RdmaTransport implements AutoCloseable {
 
 	private static native int[] nativeQueryDevice(String deviceName);
 
+	private static native int nativeConfineCurrentThread(int[] cpus);
+
 	private final RdmaConfig config;
 	private volatile boolean initialized;
 	private volatile long nativeHandle;
@@ -200,6 +202,18 @@ public class RdmaTransport implements AutoCloseable {
 		nativeHandle = nativeInitStrict(device, localIp);
 		initialized = true;
 		Loggers.MSG.info("S3-RDMA transport initialized: device={}, localIp={}, strict", device, localIp);
+	}
+
+	/**
+	 * Keeps the calling thread to {@code cpus}, within the CPUs it may already use.
+	 *
+	 * @return 0; {@link RdmaLanePlacement#NO_CPU_ALLOWED} when it may use none of them; or the errno the kernel gave
+	 */
+	public int confineCurrentThread(final int[] cpus) {
+		if (!NATIVE_AVAILABLE) {
+			throw new IllegalStateException("the S3-RDMA native library is not available");
+		}
+		return nativeConfineCurrentThread(cpus);
 	}
 
 	/**
