@@ -63,6 +63,7 @@ func (a *app) currentState() (map[string]any, error) {
 			}
 			_ = a.writeState(state)
 		} else {
+			a.savePendingLiveHistory(str(state[keyRunID]))
 			retained := retainedLiveMetrics(str(state[keyRunID]), a.liveRunID, jobWorkload(state), a.liveSamples)
 			if result == nil {
 				if retained != nil {

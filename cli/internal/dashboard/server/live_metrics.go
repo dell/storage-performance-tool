@@ -267,20 +267,27 @@ func (a *app) rememberLive(metrics map[string]any) map[string]any {
 	if changed {
 		a.liveSamples = boundedHistory(a.liveSamples)
 	}
-	if a.liveDirty && runPattern.MatchString(runID) {
-		b, _ := json.Marshal(a.liveSamples)
-		tmp := filepath.Join(a.stateDir, runID+".samples.tmp")
-		path := filepath.Join(a.stateDir, runID+".samples.json")
-		if os.WriteFile(tmp, b, 0600) == nil {
-			if os.Chmod(tmp, 0600) == nil && os.Rename(tmp, path) == nil {
-				a.liveDirty = false
-			}
-		}
-	}
+	a.savePendingLiveHistory(runID)
 	out := cloneMap(metrics)
 	out[keySamples] = latestSample(a.liveSamples)
 	out[keyChartSamples] = append([]map[string]any(nil), a.liveSamples...)
 	return out
+}
+
+// savePendingLiveHistory retries a snapshot write even without fresh metrics.
+// Callers hold a.mu; only the requested run's buffered history may be saved.
+func (a *app) savePendingLiveHistory(runID string) {
+	if !a.liveDirty || a.liveRunID != runID || !runPattern.MatchString(runID) {
+		return
+	}
+	b, _ := json.Marshal(a.liveSamples)
+	tmp := filepath.Join(a.stateDir, runID+".samples.tmp")
+	path := filepath.Join(a.stateDir, runID+".samples.json")
+	if os.WriteFile(tmp, b, 0600) == nil {
+		if os.Chmod(tmp, 0600) == nil && os.Rename(tmp, path) == nil {
+			a.liveDirty = false
+		}
+	}
 }
 
 // latestSample keeps the full live history out of "samples"; "chart_samples" already carries it.
@@ -518,13 +525,16 @@ func (a *app) collectLiveHistory(runID string) {
 		}
 		state := cloneMap(a.activeJob)
 		a.mu.Unlock()
-		if metrics := a.liveMetrics(state); metrics != nil {
-			a.mu.Lock()
-			if a.activeJob != nil && a.activeJob[keyRunID] == runID {
+		metrics := a.liveMetrics(state)
+		a.mu.Lock()
+		if a.activeJob != nil && a.activeJob[keyRunID] == runID {
+			if metrics != nil {
 				_ = a.rememberLive(metrics)
+			} else {
+				a.savePendingLiveHistory(runID)
 			}
-			a.mu.Unlock()
 		}
+		a.mu.Unlock()
 		<-ticker.C
 	}
 }
