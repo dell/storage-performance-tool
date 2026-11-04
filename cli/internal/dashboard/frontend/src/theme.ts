@@ -1,4 +1,13 @@
-import { Badge, Button, Paper, Text, Title, createTheme } from "@mantine/core";
+import {
+  Badge,
+  Button,
+  NavLink,
+  Paper,
+  SegmentedControl,
+  Text,
+  Title,
+  createTheme,
+} from "@mantine/core";
 import type { CSSVariablesResolver } from "@mantine/core";
 
 const fontFamily =
@@ -161,6 +170,46 @@ export const theme = createTheme({
   },
   cursorType: "pointer",
   components: {
+    NavLink: NavLink.extend({
+      defaultProps: { variant: "light", bdrs: "md" },
+      classNames: {
+        root: "min-h-[45px] p-[13px] focus-visible:outline-solid focus-visible:outline-[length:var(--spt-focus-width)] focus-visible:outline-focus focus-visible:outline-offset-[var(--spt-focus-offset)] [@media(max-width:760px)]:min-h-[37px] [@media(max-width:760px)]:w-auto [@media(max-width:760px)]:px-sm [@media(max-width:760px)]:py-[9px]",
+      },
+      styles: (_theme, { active }) => ({
+        root: {
+          color: active
+            ? "var(--mantine-color-spt-7)"
+            : "var(--spt-text-secondary)",
+        },
+        label: {
+          fontSize: "var(--mantine-font-size-control)",
+          fontWeight: "var(--mantine-font-weight-semibold)",
+        },
+      }),
+    }),
+    SegmentedControl: SegmentedControl.extend({
+      defaultProps: {
+        size: "sm",
+        radius: "md",
+        withItemsBorders: false,
+        bg: "var(--spt-surface-track)",
+      },
+      classNames: { label: "text-secondary data-[active]:text-primary" },
+      vars: () => ({
+        root: {
+          "--sc-padding": "7px 13px",
+          "--sc-shadow": "0 1px 4px #20304716",
+        },
+      }),
+      styles: {
+        root: { padding: "3px" },
+        label: {
+          fontWeight: "var(--mantine-font-weight-semibold)",
+          borderRadius: "var(--mantine-radius-md)",
+        },
+        indicator: { borderRadius: "var(--mantine-radius-md)" },
+      },
+    }),
     Button: Button.extend({
       defaultProps: {
         variant: "default",

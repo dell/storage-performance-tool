@@ -1,4 +1,21 @@
-import { Button, Text, Title } from "@mantine/core";
+import {
+  Badge,
+  Box,
+  Button,
+  NavLink,
+  SegmentedControl,
+  Text,
+  Title,
+  UnstyledButton,
+} from "@mantine/core";
+import {
+  ArrowLeftRight,
+  ExternalLink,
+  History,
+  LayoutDashboard,
+  ListFilter,
+  Plus,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import type { Row, RunMode, State } from "./types";
 import { useStopRun } from "./api/mutations";
@@ -136,90 +153,144 @@ export default function App() {
   };
 
   return (
-    <div data-spt-legacy="" className="app">
-      <aside data-spt-legacy="" className="sidebar">
-        <a
-          data-spt-legacy=""
-          className="brand"
+    <div className="flex min-h-screen [@media(max-width:760px)]:block">
+      <Box
+        component="aside"
+        bg="var(--spt-surface-panel)"
+        className="sticky top-0 flex h-screen w-[235px] shrink-0 flex-col border-r border-divider px-lg py-xl [@media(max-width:1150px)]:w-[195px] [@media(max-width:1150px)]:px-[14px] [@media(max-width:1150px)]:py-[25px] [@media(max-width:760px)]:static [@media(max-width:760px)]:h-auto [@media(max-width:760px)]:w-full [@media(max-width:760px)]:border-r-0 [@media(max-width:760px)]:border-b [@media(max-width:760px)]:px-comfortable [@media(max-width:760px)]:py-[15px]"
+      >
+        <UnstyledButton
+          component="a"
           href="#dashboard"
+          className="flex items-center gap-sm"
           onClick={showDashboard}
         >
-          <span data-spt-legacy="">SPT</span>
-          <div data-spt-legacy="">
-            {state?.branding?.product_name ?? "Storage Performance Tool"}
-            <small data-spt-legacy="">
+          <Text
+            component="span"
+            bg="var(--mantine-primary-color-filled)"
+            c="var(--spt-text-inverse)"
+            bdrs="lg"
+            size="emphasis"
+            fw="var(--mantine-font-weight-heading)"
+            lh="normal"
+            className="grid size-[42px] shrink-0 place-items-center"
+          >
+            SPT
+          </Text>
+          <div className="min-w-0">
+            <Text
+              size="sm"
+              c="var(--spt-text-primary)"
+              fw="var(--mantine-font-weight-heading)"
+              lh="normal"
+            >
+              {state?.branding?.product_name ?? "Storage Performance Tool"}
+            </Text>
+            <Text
+              component="small"
+              size="xxs"
+              c="var(--spt-text-subtle)"
+              lh="normal"
+              className="mt-[6px] block tracking-[1px] [@media(max-width:760px)]:hidden"
+            >
               {(
                 state?.branding?.environment_label ?? "BENCHMARK CONSOLE"
               ).toUpperCase()}
-            </small>
+            </Text>
           </div>
-        </a>
-        <div data-spt-legacy="" className="sidebar-label">
+        </UnstyledButton>
+        <Text
+          size="xs"
+          c="var(--spt-text-subtle)"
+          lh="normal"
+          className="mx-sm mt-xxxl mb-[14px] tracking-[1.5px] [@media(max-width:760px)]:hidden"
+        >
           WORKSPACE
-        </div>
-        <nav data-spt-legacy="" aria-label="Main navigation">
-          <button
-            data-spt-legacy=""
-            className={page === "configure" ? "selected" : ""}
+        </Text>
+        <nav
+          aria-label="Main navigation"
+          className="grid gap-xs [@media(max-width:760px)]:mt-[15px] [@media(max-width:760px)]:flex [@media(max-width:760px)]:flex-wrap"
+        >
+          <NavLink
+            component="button"
+            type="button"
+            label="Configure run"
+            leftSection={<Plus size={16} aria-hidden="true" />}
+            active={page === "configure"}
             aria-current={page === "configure" ? "page" : undefined}
             onClick={() => {
               setHistoryRunID(null);
               setPage("configure");
             }}
-          >
-            ＋ <span data-spt-legacy="">Configure run</span>
-          </button>
-          <button
-            data-spt-legacy=""
-            className={page === "dashboard" ? "selected" : ""}
+          />
+          <NavLink
+            component="button"
+            type="button"
+            label="Live dashboard"
+            leftSection={<LayoutDashboard size={16} aria-hidden="true" />}
+            active={page === "dashboard"}
             aria-current={page === "dashboard" ? "page" : undefined}
             onClick={showDashboard}
-          >
-            ◫ <span data-spt-legacy="">Live dashboard</span>
-          </button>
-          <button
-            data-spt-legacy=""
-            className={page === "history" ? "selected" : ""}
+          />
+          <NavLink
+            component="button"
+            type="button"
+            label="Run history"
+            leftSection={<History size={16} aria-hidden="true" />}
+            active={page === "history"}
             aria-current={page === "history" ? "page" : undefined}
             onClick={() => {
               setHistoryRunID(null);
               showHistory();
             }}
-          >
-            ◷ <span data-spt-legacy="">Run history</span>
-          </button>
-          <button
-            data-spt-legacy=""
-            className={page === "catalog" ? "selected" : ""}
+          />
+          <NavLink
+            component="button"
+            type="button"
+            label="Results catalog"
+            leftSection={<ListFilter size={16} aria-hidden="true" />}
+            active={page === "catalog"}
             aria-current={page === "catalog" ? "page" : undefined}
             onClick={() => setPage("catalog")}
-          >
-            ☰ <span data-spt-legacy="">Results catalog</span>
-          </button>
-          <button
-            data-spt-legacy=""
-            className={page === "compare" ? "selected" : ""}
+          />
+          <NavLink
+            component="button"
+            type="button"
+            label="Compare runs"
+            leftSection={<ArrowLeftRight size={16} aria-hidden="true" />}
+            active={page === "compare"}
             aria-current={page === "compare" ? "page" : undefined}
             onClick={() => setPage("compare")}
-          >
-            ⇄ <span data-spt-legacy="">Compare runs</span>
-          </button>
-          <button
-            data-spt-legacy=""
-            className={page === "connect" ? "selected" : ""}
+          />
+          <NavLink
+            component="button"
+            type="button"
+            label="Connect to active run"
+            leftSection={<ExternalLink size={16} aria-hidden="true" />}
+            active={page === "connect"}
             aria-current={page === "connect" ? "page" : undefined}
             onClick={() => setPage("connect")}
-          >
-            ↗ <span data-spt-legacy="">Connect to active run</span>
-          </button>
+          />
         </nav>
-        <div data-spt-legacy="" className="sidebar-target">
-          <span data-spt-legacy="" className="eyebrow">
+        <div className="mx-sm mt-xxl mb-section border-t border-divider pt-section wrap-anywhere [@media(max-width:760px)]:hidden">
+          <Text
+            size="xxs"
+            c="var(--spt-text-muted)"
+            fw="var(--mantine-font-weight-heading)"
+            lh="normal"
+            className="mb-compact tracking-[1.3px]"
+          >
             STORAGE TARGET
-          </span>
-          <strong data-spt-legacy="">
+          </Text>
+          <Text
+            component="strong"
+            size="sm"
+            c="var(--spt-text-primary)"
+            fw="var(--mantine-font-weight-bold)"
+            lh="normal"
+          >
             {state?.target.endpoint_label || "Awaiting server"}
-          </strong>
+          </Text>
           <Text size="caption" className="mt-xs mb-sm">
             {state?.target.bucket || "No bucket reported"}
           </Text>
@@ -227,10 +298,19 @@ export default function App() {
             <Status status={state.target.ready ? "ready" : "needs setup"} />
           )}
         </div>
-        <div data-spt-legacy="" className="sidebar-footer">
-          <span
-            data-spt-legacy=""
-            className={`source-dot ${state && !error ? "connected" : ""}`}
+        <Text
+          component="div"
+          size="caption"
+          c="var(--spt-text-muted)"
+          lh="normal"
+          className="mt-auto [@media(max-width:760px)]:hidden"
+        >
+          <Box
+            component="span"
+            aria-hidden="true"
+            bg={state && !error ? "var(--spt-chart-bandwidth)" : "#e2a243"}
+            bdrs="50%"
+            className="mr-xs inline-block size-[7px]"
           />
           {error
             ? "Connection unavailable"
@@ -241,15 +321,43 @@ export default function App() {
             {clients} client machine{clients === 1 ? "" : "s"} ·{" "}
             {workloadLabel(runWorkloadType(state?.metrics, state?.job))}
           </Text>
-        </div>
-      </aside>
-      <div data-spt-legacy="" className="workspace">
-        <header data-spt-legacy="" className="topbar">
-          <span data-spt-legacy="">Benchmark workspace</span>
-          <div data-spt-legacy="" className="topbar-actions">
-            <span
-              data-spt-legacy=""
-              className={`source-badge ${error ? "offline" : ""}`}
+        </Text>
+      </Box>
+      <div className="min-w-0 flex-1">
+        <Box
+          component="header"
+          bg="#ffffffc9"
+          className="flex h-[76px] items-center justify-between border-b border-divider px-xxl [@media(max-width:1150px)]:px-section [@media(max-width:760px)]:h-auto [@media(max-width:760px)]:min-h-[76px] [@media(max-width:760px)]:flex-wrap [@media(max-width:760px)]:gap-xs [@media(max-width:760px)]:p-md"
+        >
+          <Text
+            component="span"
+            size="sm"
+            c="var(--spt-text-muted)"
+            lh="normal"
+          >
+            Benchmark workspace
+          </Text>
+          <div className="flex items-center gap-lg [@media(max-width:760px)]:gap-compact">
+            <Badge
+              color={error ? "yellow" : "spt"}
+              c={
+                error
+                  ? "var(--spt-status-warning-text)"
+                  : "var(--mantine-color-spt-7)"
+              }
+              fz="xxs"
+              tt="uppercase"
+              lh="normal"
+              px="xs"
+              styles={{
+                root: {
+                  paddingBlock: "5px",
+                  borderColor: error
+                    ? "var(--spt-status-warning-border)"
+                    : "var(--mantine-color-spt-2)",
+                  letterSpacing: "0.8px",
+                },
+              }}
             >
               {error
                 ? "OFFLINE"
@@ -258,33 +366,25 @@ export default function App() {
                   : state
                     ? "SPT API"
                     : "CONNECTING"}
-            </span>
-            <div
-              data-spt-legacy=""
-              className="mode-switch"
-              role="group"
+            </Badge>
+            <SegmentedControl<RunMode>
               aria-label="Display mode"
-            >
-              {(["guided", "expert"] as const).map((m) => (
-                <button
-                  data-spt-legacy=""
-                  key={m}
-                  className={mode === m ? "active" : ""}
-                  aria-pressed={mode === m}
-                  onClick={() => {
-                    setMode(m);
-                    setCustomizing(false);
-                    // On Configure, the mode switches the workload form in place.
-                    if (page !== "configure") showDashboard();
-                  }}
-                >
-                  {m === "guided" ? "Guided" : "Expert"}
-                </button>
-              ))}
-            </div>
+              name="display-mode"
+              value={mode}
+              data={[
+                { value: "guided", label: "Guided" },
+                { value: "expert", label: "Expert" },
+              ]}
+              onChange={(nextMode) => {
+                setMode(nextMode);
+                setCustomizing(false);
+                // On Configure, the mode switches the workload form in place.
+                if (page !== "configure") showDashboard();
+              }}
+            />
           </div>
-        </header>
-        <main data-spt-legacy="">
+        </Box>
+        <main className="mx-auto max-w-[1550px] px-xxl py-[32px] [@media(min-width:1500px)]:pt-[40px] [@media(max-width:1150px)]:p-section [@media(max-width:760px)]:px-md [@media(max-width:760px)]:py-panel">
           {error && (
             <div data-spt-legacy="" className="error" role="alert">
               <strong data-spt-legacy="">Connection unavailable. </strong>
@@ -470,13 +570,19 @@ export default function App() {
             </>
           )}
         </main>
-        <footer data-spt-legacy="">
+        <Text
+          component="footer"
+          size="xs"
+          c="var(--spt-text-subtle)"
+          lh="normal"
+          className="px-xxl pb-[25px] [@media(max-width:760px)]:px-md [@media(max-width:760px)]:pb-lg"
+        >
           {state?.branding?.product_name ?? "Storage Performance Tool"} ·{" "}
           {received
             ? `State received ${utc(received)}`
             : "Waiting for server state"}{" "}
           · Refreshes every 2 seconds
-        </footer>
+        </Text>
       </div>
     </div>
   );
