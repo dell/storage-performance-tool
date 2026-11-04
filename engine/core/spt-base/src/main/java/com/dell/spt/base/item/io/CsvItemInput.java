@@ -95,15 +95,21 @@ public class CsvItemInput<I extends Item> implements Input<I> {
 	/** A bad line ends the run: skipping it, or reading it as the end of the input, loses items silently. */
 	private I item(final String line) {
 		linesRead++;
+		// Checked first: a path or token item factory would accept a line of spaces as an item.
+		if (line.isBlank()) {
+			throw badLine("is blank", null);
+		}
 		try {
 			return itemFactory.getItem(line);
 		} catch (final IllegalArgumentException | IndexOutOfBoundsException e) {
-			// The public message names the line, not its content: the cause stays in the engine's log.
-			throw new RunTerminalException(
-							IntegrityTerminalException.Category.INPUT,
-							sourceName() + " line " + linesRead + (line.isBlank() ? " is blank" : " is not a valid item"),
-							e);
+			throw badLine("is not a valid item", e);
 		}
+	}
+
+	/** The public message names the line, not its content: the cause stays in the engine's log. */
+	private RunTerminalException badLine(final String problem, final Throwable cause) {
+		return new RunTerminalException(
+						IntegrityTerminalException.Category.INPUT, sourceName() + " line " + linesRead + " " + problem, cause);
 	}
 
 	/** What a failure calls this input. It's public, so it must not carry a directory or an endpoint. */

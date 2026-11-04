@@ -71,7 +71,7 @@ class LoadStepLocalStartFailureTest {
 		final var step = new Step(null, List.of(context(null), context(new IllegalStateException("no driver"))));
 		final var failure = assertThrows(RunTerminalException.class, step::run);
 		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
-		assertEquals("failed to start a load step context: no driver", failure.getMessage());
+		assertEquals("failed to start a load step context; see the engine log", failure.getMessage());
 		assertTrue(failure.stepId().startsWith("start-failure-"));
 		assertNotNull(step.runFailure());
 	}
@@ -80,7 +80,7 @@ class LoadStepLocalStartFailureTest {
 	void aContextUnreachableAtStartFailsTheRun() throws Exception {
 		final var step = new Step(null, List.of(context(new RemoteException("gone"))));
 		final var failure = assertThrows(RunTerminalException.class, step::run);
-		assertTrue(failure.getMessage().startsWith("failed to start a load step context: "));
+		assertTrue(failure.getMessage().startsWith("failed to start a load step context"));
 	}
 
 	@Test
@@ -97,7 +97,7 @@ class LoadStepLocalStartFailureTest {
 		final var step = new Step(new IllegalStateException("No item input available"), List.of());
 		final var failure = assertThrows(RunTerminalException.class, step::run);
 		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
-		assertEquals("step failed to start: No item input available", failure.getMessage());
+		assertEquals("step failed to start; see the engine log", failure.getMessage());
 	}
 
 	@Test

@@ -127,8 +127,7 @@ class LoadStepClientBaseTest {
 		final var client = clientWithLocalSlice(slice);
 		final var failure = assertThrows(RunTerminalException.class, client::run);
 		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
-		assertTrue(failure.getMessage().contains("did not start"), failure.getMessage());
-		assertTrue(failure.getMessage().contains("No item input available"), failure.getMessage());
+		assertEquals("engine 1 of 1 did not start; see the engine log", failure.getMessage());
 	}
 
 	@Test
@@ -3812,14 +3811,14 @@ class LoadStepClientBaseTest {
 
 			TestLoadStepClient client = new TestLoadStepClient(complexConfig, extensions, ctxConfigs, mockMetricsManager);
 			// This fixture's extension builds no local step, so its start fails, with the reason.
-			assertTrue(assertThrows(RunTerminalException.class, client::start).getMessage().contains("createLocal"));
+			assertTrue(assertThrows(RunTerminalException.class, client::start).getCause().getMessage().contains("createLocal"));
 			assertDoesNotThrow(() -> client.doShutdown());
 			// It also has no real worker, so terminal evidence fails closed at collection.
 			assertThrows(IntegrityTerminalException.class, client::doClose);
 			assertDoesNotThrow(() -> client.doStop());
 
 			LinearLoadStepClient linearClient = new LinearLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
-			assertTrue(assertThrows(RunTerminalException.class, linearClient::start).getMessage().startsWith("step failed to start: "));
+			assertEquals("step failed to start; see the engine log", assertThrows(RunTerminalException.class, linearClient::start).getMessage());
 			assertDoesNotThrow(() -> linearClient.doShutdown());
 			assertThrows(IntegrityTerminalException.class, linearClient::doClose);
 			assertDoesNotThrow(() -> linearClient.doStop());

@@ -486,7 +486,7 @@ class LoadStepLocalBaseTest {
 
 		final var failure = assertThrows(RunTerminalException.class, loadStep::startContextsForTest);
 		assertEquals("step-start", failure.stepId());
-		assertTrue(failure.getMessage().startsWith("failed to start a load step context: "));
+		assertTrue(failure.getMessage().startsWith("failed to start a load step context"));
 		verify(healthy).start();
 		verify(failing).start();
 	}

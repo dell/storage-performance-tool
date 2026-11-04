@@ -79,7 +79,7 @@ class LoadStepBaseIntegrityLifecycleTest {
 
 		assertFalse(failure instanceof IntegrityTerminalException);
 		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
-		assertEquals("step failed to start: start failed", failure.getMessage());
+		assertEquals("step failed to start; see the engine log", failure.getMessage());
 		assertEquals("integrity-step", failure.stepId());
 		assertSame(startFailure, failure.getCause());
 		assertTrue(step.closeCalled);

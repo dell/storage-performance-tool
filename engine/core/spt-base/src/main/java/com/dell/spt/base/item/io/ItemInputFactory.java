@@ -1,5 +1,7 @@
 package com.dell.spt.base.item.io;
 
+import com.dell.spt.base.control.run.RunTerminalException;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.ItemType;
@@ -64,6 +66,8 @@ public interface ItemInputFactory {
 			} else {
 				fileItemInput = new BinFileInput<>(itemInputFilePath);
 			}
+		} catch (final TerminalItemInputException e) {
+			throw new RunTerminalException(IntegrityTerminalException.Category.INPUT, e.getMessage(), e);
 		} catch (final IOException e) {
 			LogUtil.exception(Level.WARN, e, "Failed to open the item input file \"{}\"", itemInputFile);
 		}

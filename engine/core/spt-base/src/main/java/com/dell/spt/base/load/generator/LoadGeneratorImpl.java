@@ -665,9 +665,6 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 				throw new IntegrityTerminalException(
 								IntegrityTerminalException.Category.INPUT, e.getMessage(), e);
 			}
-			if (e instanceof ConcurrentModificationException cme) {
-				throw cme;
-			}
 			if (opAssembler instanceof DeleteRequestAssembler) {
 				throw new IntegrityTerminalException(
 								IntegrityTerminalException.Category.INPUT,

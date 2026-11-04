@@ -236,7 +236,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		return new RunTerminalException(
 						IntegrityTerminalException.Category.EXECUTION,
 						loadStepId(),
-						"failed to start a load step context: " + cause.getMessage(),
+						"failed to start a load step context; see the engine log",
 						cause);
 	}
 

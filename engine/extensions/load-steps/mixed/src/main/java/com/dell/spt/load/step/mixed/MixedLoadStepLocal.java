@@ -184,10 +184,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		if (itemInputFile != null && !itemInputFile.isEmpty()) {
 			loadSeedItems(itemInputFile, seedItems, itemFactory);
 		}
-		if (seedItems.isEmpty() && (getWeight > 0 || statWeight > 0)) {
-			throw new IllegalStateException(
-							"MixedLoad: GET/STAT weights are non-zero but no seed items loaded from item.input.file");
-		}
+		requireSeedItems(seedItems, getWeight, statWeight);
 		final PoolItemInput pool = new PoolItemInput(seedItems);
 
 		// Pre-populate delete queue from explicit file if provided
@@ -539,6 +536,14 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 					final ItemFactory factory) {
 		loadItems("seed items file", filePath, factory, items::add);
 		Loggers.MSG.info("MixedLoad: loaded {} seed items from {}", items.size(), filePath);
+	}
+
+	/** Each engine reads from its own share of the items, so it needs at least one of them. */
+	static void requireSeedItems(final List seedItems, final int getWeight, final int statWeight) {
+		if (seedItems.isEmpty() && (getWeight > 0 || statWeight > 0)) {
+			throw itemsFileFailure(
+							"GET/STAT weights are non-zero but an engine has no seed items; each engine needs at least one", null);
+		}
 	}
 
 	/** Loads items from a file into the PoolItemInput's delete queue. */

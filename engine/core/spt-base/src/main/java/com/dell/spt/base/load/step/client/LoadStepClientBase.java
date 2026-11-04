@@ -857,16 +857,24 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 				LogUtil.exception(
 								Level.ERROR, e, "{}: failed to start the step slice \"{}\"", loadStepId(), stepSlice);
+				if (barrier != null) {
+					throw new RunTerminalException(
+									IntegrityTerminalException.Category.EXECUTION,
+									loadStepId(),
+									"Step " + loadStepId() + " did not start: " + (i == 0 ? NicSetConfig.ENTRY_KEY : nodeAddrs.get(i - 1)) + ": "
+													+ e.getMessage(),
+									e);
+				}
 				// One engine missing would leave a lower load reported as the one asked for.
-				final var typed = barrier == null ? RunTerminalException.find(e) : null;
+				final var typed = RunTerminalException.find(e);
 				if (typed != null) {
 					throw typed.withStepId(loadStepId());
 				}
+				// This message is public, so it counts the engine and leaves its address and the cause to the log.
 				throw new RunTerminalException(
 								IntegrityTerminalException.Category.EXECUTION,
 								loadStepId(),
-								"Step " + loadStepId() + " did not start: " + (i == 0 ? NicSetConfig.ENTRY_KEY : nodeAddrs.get(i - 1)) + ": "
-												+ e.getMessage(),
+								"engine " + (i + 1) + " of " + sliceCount + " did not start; see the engine log",
 								e);
 			}
 		}

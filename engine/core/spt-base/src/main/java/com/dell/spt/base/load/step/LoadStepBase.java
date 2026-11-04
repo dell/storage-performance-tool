@@ -731,7 +731,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		return new RunTerminalException(
 						IntegrityTerminalException.Category.EXECUTION,
 						loadStepId(),
-						"step failed to start: " + cause.getMessage(),
+						"step failed to start; see the engine log",
 						cause);
 	}
 

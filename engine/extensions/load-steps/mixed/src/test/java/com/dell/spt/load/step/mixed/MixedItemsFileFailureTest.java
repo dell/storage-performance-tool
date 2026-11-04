@@ -78,6 +78,19 @@ class MixedItemsFileFailureTest {
 	}
 
 	@Test
+	void anEngineWithNoSeedItemsNeedsThemOnlyForGetOrStat() {
+		final var failure = assertThrows(
+						RunTerminalException.class, () -> MixedLoadStepLocal.requireSeedItems(List.of(), 50, 0));
+		assertEquals(IntegrityTerminalException.Category.INPUT, failure.category());
+		assertEquals(
+						"MixedLoad: GET/STAT weights are non-zero but an engine has no seed items; each engine needs at least one",
+						failure.getMessage());
+		assertThrows(RunTerminalException.class, () -> MixedLoadStepLocal.requireSeedItems(List.of(), 0, 50));
+		MixedLoadStepLocal.requireSeedItems(List.of(), 0, 0);
+		MixedLoadStepLocal.requireSeedItems(List.of(new Object()), 50, 50);
+	}
+
+	@Test
 	void aBadDeleteLineIsNamed() throws Exception {
 		assertEquals("items file \"items.csv\" line 2 is blank", deleteFailure(file(GOOD + "\n" + GOOD)));
 	}

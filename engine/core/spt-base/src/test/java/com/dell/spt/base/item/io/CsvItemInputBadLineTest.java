@@ -10,6 +10,8 @@ import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemFactoryImpl;
+import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.ItemFactoryImpl;
 import java.io.ByteArrayInputStream;
 import java.io.EOFException;
 import java.nio.charset.StandardCharsets;
@@ -57,6 +59,18 @@ class CsvItemInputBadLineTest {
 	})
 	void aBlankLineIsNamedAsBlank(final String blank) throws Exception {
 		try (var input = input(GOOD + blank + "\n" + GOOD)) {
+			final var failure = assertThrows(RunTerminalException.class, () -> input.get(new ArrayList<>(), 8));
+			assertEquals("items file line 2 is blank", failure.getMessage());
+		}
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"   ", "\t", ""
+	})
+	void aLineOfSpacesIsNotAPathItem(final String blank) throws Exception {
+		final String content = "/b/a\n" + blank + "\n/b/c\n";
+		try (var input = new CsvItemInput<Item>(
+						new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8)), new ItemFactoryImpl<>())) {
 			final var failure = assertThrows(RunTerminalException.class, () -> input.get(new ArrayList<>(), 8));
 			assertEquals("items file line 2 is blank", failure.getMessage());
 		}

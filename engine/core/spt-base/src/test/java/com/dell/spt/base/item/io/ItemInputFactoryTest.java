@@ -1,6 +1,9 @@
 package com.dell.spt.base.item.io;
 
+import com.dell.spt.base.control.run.RunTerminalException;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.ItemFactoryImpl;
 import com.dell.spt.base.logging.LogUtil;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.file.BinFileInput;
@@ -10,6 +13,7 @@ import org.apache.logging.log4j.Level;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
@@ -120,6 +124,17 @@ public class ItemInputFactoryTest {
 			3. Let ItemInputFactory create a StorageItemInput
 			4. Assert that it is an actual StorageItemInput
 	 */
+	@Test
+	void aManifestWithABadRecordNamesThatRecord(@TempDir final Path dir) throws IOException {
+		final Path manifest = dir.resolve("manifest.csv");
+		java.nio.file.Files.writeString(manifest, "bucket,key,size,version_id\r\nb,k,1,\r\n\r\nb,k2,1,\r\n");
+		final var failure = org.junit.jupiter.api.Assertions.assertThrows(
+						RunTerminalException.class,
+						() -> ItemInputFactory.createFileItemInput(new ItemFactoryImpl<>(), manifest.toString()));
+		org.junit.jupiter.api.Assertions.assertEquals(IntegrityTerminalException.Category.INPUT, failure.category());
+		org.junit.jupiter.api.Assertions.assertTrue(failure.getMessage().contains("record 3"), failure.getMessage());
+	}
+
 	@Test
 	void testCreatePathItemInput() throws InterruptedException {
 		testConfig.val("item-input-file", null); // We need a path, not file
