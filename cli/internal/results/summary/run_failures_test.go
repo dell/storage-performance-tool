@@ -24,6 +24,7 @@ func TestAllFailedPhasesNamesOnlyPhasesWhereNothingSucceeded(t *testing.T) {
 		{"every request failed", []StepSummary{phaseStep("Create", "CREATE", 0, 5301)}, []AllFailedPhase{{"Create", 5301}}},
 		{"one succeeded", []StepSummary{phaseStep("Create", "CREATE", 1, 5301)}, nil},
 		{"an empty listing has neither", []StepSummary{phaseStep("List", "LIST", 0, 0)}, nil},
+		{"a listing counts identities, not requests", []StepSummary{phaseStep("List", "LIST", 0, 47)}, nil},
 		{"a seed that worked doesn't hide a read that didn't", []StepSummary{
 			phaseStep("Seed", "CREATE", 1000, 0), phaseStep("Read", "READ", 0, 42),
 		}, []AllFailedPhase{{"Read", 42}}},
@@ -75,10 +76,6 @@ func TestSummaryShowsFailedRequests(t *testing.T) {
 	if !strings.Contains(full, "Failed requests") || !strings.Contains(full, "545") {
 		t.Fatalf("full report hides the failures:\n%s", full)
 	}
-	compact := NewRenderer(RenderOptions{MaxWidth: 72}).CompactSnippet(summary)
-	if !strings.Contains(compact, "failed requests 545") {
-		t.Fatalf("compact report hides the failures:\n%s", compact)
-	}
 }
 
 func TestSummaryOfAHealthyRunAddsNoFailureLine(t *testing.T) {
@@ -86,8 +83,24 @@ func TestSummaryOfAHealthyRunAddsNoFailureLine(t *testing.T) {
 	if full := NewRenderer(RenderOptions{}).FullReport(summary); strings.Contains(full, "Failed requests") {
 		t.Fatalf("healthy full report:\n%s", full)
 	}
-	if compact := NewRenderer(RenderOptions{MaxWidth: 72}).CompactSnippet(summary); strings.Contains(compact, "failed requests") {
-		t.Fatalf("healthy compact report:\n%s", compact)
+}
+
+func TestFailedRequestsAreAWarningThatWrapsInTheNarrowReport(t *testing.T) {
+	const readStep = "spt-001-20261024.120000.000-read"
+	row := steadyTestRow{op: "READ", tp: 340, bw: 340, steadyTP: 350, steadyBW: 350, status: steadyStatusValid, failed: 54321}
+	steps := []steadyTestStep{{id: readStep, rows: []steadyTestRow{row}, steadyListed: fileStatusOK}}
+	summary := loadSteadyTestSummary(t, writeSteadyTestRun(t, "read", releaseEngineIdentity("5.17.0", false), steps))
+	compact := NewRenderer(RenderOptions{MaxWidth: 72}).CompactSnippet(summary)
+	if !strings.Contains(compact, "Read: 54321 requests failed") {
+		t.Fatalf("compact report hides the failures:\n%s", compact)
+	}
+	row.failed = 0
+	steps[0].rows = []steadyTestRow{row}
+	healthy := loadSteadyTestSummary(t, writeSteadyTestRun(t, "read", releaseEngineIdentity("5.17.0", false), steps))
+	for _, warning := range healthy.Warnings {
+		if strings.Contains(warning, "requests failed") {
+			t.Fatalf("healthy run warned: %q", warning)
+		}
 	}
 }
 
@@ -160,6 +173,25 @@ func TestSteadyWarningCoversAValidWindowWhoseRateDidNotHold(t *testing.T) {
 				t.Fatalf("the warning must not carry a rate: %q", found[0])
 			}
 		})
+	}
+}
+
+func TestAShortWindowDoesNotHideAValidWindowThatDidNotHold(t *testing.T) {
+	const mixedStep = "spt-001-20261024.120000.000-mixed"
+	steps := []steadyTestStep{{id: mixedStep, rows: []steadyTestRow{
+		{op: "READ", tp: 340, bw: 340, steadyTP: 350, steadyBW: 350, status: steadyStatusValid, trend: "-90", cv: "1.2"},
+		{op: "CREATE", tp: 40, bw: 40, steadyTP: 50, steadyBW: 50, status: steadyStatusShort},
+	}, steadyListed: fileStatusOK}}
+	summary := loadSteadyTestSummary(t, writeSteadyTestRun(t, "mixed", releaseEngineIdentity("5.17.0", false), steps))
+	if summary.Steps[0].Metrics.Steady.Valid {
+		t.Fatalf("a phase with a short window must show no steady rate")
+	}
+	found := false
+	for _, warning := range summary.Warnings {
+		found = found || strings.Contains(warning, "trend -90.0%, CV 1.20")
+	}
+	if !found {
+		t.Fatalf("warnings = %v", summary.Warnings)
 	}
 }
 

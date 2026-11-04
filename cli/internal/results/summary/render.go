@@ -216,11 +216,7 @@ func (r *Renderer) CompactSnippet(summary *RunSummary) string {
 	r.renderRangeRead(sb, summary)
 	r.renderNicPaths(sb, summary, wrapWidth)
 	r.renderCompactMixedBreakdowns(sb, summary)
-	fmt.Fprintf(sb, "Totals: duration %s, data moved %s", summary.Totals.DurationHuman, formatBytesHuman(summary.Totals.DataBytes))
-	if summary.Totals.FailureCount > 0 {
-		fmt.Fprintf(sb, ", failed requests %s", formatInt(summary.Totals.FailureCount))
-	}
-	sb.WriteByte('\n')
+	fmt.Fprintf(sb, "Totals: duration %s, data moved %s\n", summary.Totals.DurationHuman, formatBytesHuman(summary.Totals.DataBytes))
 	if len(summary.Warnings) > 0 {
 		sb.WriteString("Warnings:\n")
 		sorted := append([]string(nil), summary.Warnings...)

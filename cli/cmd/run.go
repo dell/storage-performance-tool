@@ -1211,13 +1211,15 @@ func stepRoleLifecycle(result *portcheck.RunResult, runtimeStepID, plannedStepID
 
 // resolveOrdinaryRunError makes an engine FAILED status authoritative for workloads outside the
 // integrity and DELETE contracts: the run exits 1 with the engine's cause even when the presenter
-// reported none, and missing metrics or artifacts never replace that cause. A run that finished
-// cleanly also exits 1 if every request of a phase failed, since its numbers measured nothing.
+// reported none, and missing metrics or artifacts never replace that cause. A run that completed
+// cleanly also exits 1 if every request of a phase failed, since its numbers measured nothing. A
+// stopped run isn't one: the stop already says why it ended.
 func resolveOrdinaryRunError(runErr error, outcome autoResultsOutcome) error {
+	if outcome.Tracker != nil && outcome.Tracker.FinalState == constants.StateCompleted &&
+		runErr == nil && len(outcome.AllFailedPhases) > 0 {
+		return &ExitCodeError{Code: constants.ExitCodeWorkloadFailure, Msg: allFailedPhasesReason(outcome.AllFailedPhases)}
+	}
 	if outcome.Tracker == nil || outcome.Tracker.FinalState != constants.StateFailed {
-		if runErr == nil && len(outcome.AllFailedPhases) > 0 {
-			return &ExitCodeError{Code: constants.ExitCodeWorkloadFailure, Msg: allFailedPhasesReason(outcome.AllFailedPhases)}
-		}
 		return runErr
 	}
 	message := trackedFailureReason(outcome.Tracker)

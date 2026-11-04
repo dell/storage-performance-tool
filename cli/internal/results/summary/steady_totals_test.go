@@ -36,6 +36,7 @@ type steadyTestRow struct {
 	status   string
 	// trend and cv override the fixture's steady indicators; "-" writes an empty cell.
 	trend, cv string
+	failed    int64
 }
 
 type steadyTestStep struct {
@@ -50,7 +51,7 @@ func (row steadyTestRow) totalsValues() map[string]string {
 	values := map[string]string{
 		"DateTimeISO8601": `"2026-10-24T12:01:00Z"`, "OpType": row.op, "Concurrency": "8", "NodeCount": "2",
 		"ConcurrencyCurr": "0", "ConcurrencyMean": "7.9", "CountSucc": fmt.Sprint(int64(row.tp * 60)),
-		"CountFail": "0", "CountCorrupt": "0", "Size": fmt.Sprint(int64(row.bw * 60 * float64(constants.BytesPerMiB))),
+		"CountFail": fmt.Sprint(row.failed), "CountCorrupt": "0", "Size": fmt.Sprint(int64(row.bw * 60 * float64(constants.BytesPerMiB))),
 		"StepDuration[s]": "60.2", "DurationSum[s]": "480.0", "TPAvg[op/s]": fmt.Sprint(row.tp),
 		"TPLast[op/s]": fmt.Sprint(row.tp), "BWAvg[MiB/s]": fmt.Sprint(row.bw), "BWLast[MiB/s]": fmt.Sprint(row.bw),
 		"DurationAvg[us]": "24000", "DurationMin[us]": "9000", "DurationQ_0.5[us]": "23000",

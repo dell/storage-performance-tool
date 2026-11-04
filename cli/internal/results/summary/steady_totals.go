@@ -171,7 +171,8 @@ func deriveSteadyRates(stepData *StepData, mixed bool, absentReason string) Stea
 		rates.Unsteady = worseSteadyInstability(rates.Unsteady, row)
 	}
 	if worst != "" {
-		return SteadyRates{Reason: steadyStatusReason(worst)}
+		// Another context's window has no rate to show, and this one's still didn't hold.
+		return SteadyRates{Reason: steadyStatusReason(worst), Unsteady: rates.Unsteady}
 	}
 	return rates
 }
@@ -196,7 +197,7 @@ func worseSteadyInstability(current *SteadyInstability, row SteadyTotalsRow) *St
 }
 
 // steadyInstabilityWarning words a valid window whose rate didn't hold. The window stays valid, and
-// its rate stays in the table: this tells the reader what that rate may be hiding.
+// any rate stays in the table: this tells the reader what that rate may be hiding.
 func steadyInstabilityWarning(phase string, unsteady *SteadyInstability) string {
 	if unsteady == nil {
 		return ""
@@ -209,7 +210,7 @@ func steadyInstabilityWarning(phase string, unsteady *SteadyInstability) string 
 		readings = append(readings, fmt.Sprintf("CV %.2f", *unsteady.CV))
 	}
 	return fmt.Sprintf(
-		"%s: the steady window is valid but its rate didn't hold (%s), so the steady rate may hide a fall such as an outage. "+
+		"%s: a valid steady window's rate didn't hold (%s), so a steady rate may hide a fall such as an outage. "+
 			"This warns at a trend of %.0f%% or lower or a CV of %.1f or higher, which are uncalibrated cutoffs",
 		phase, strings.Join(readings, ", "), steadyWarnTrendPercent, steadyWarnCV)
 }

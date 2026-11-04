@@ -460,6 +460,10 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 			totals.DurationSeconds += metrics.DurationSeconds
 			totals.DataBytes += metrics.DataBytes
 			totals.FailureCount += metrics.FailureCount
+			// A warning wraps in the narrow TUI, which clips the Failed column.
+			if metrics.FailureCount > 0 {
+				warnings = append(warnings, fmt.Sprintf("%s: %s requests failed", summary.PhaseLabel, formatInt(metrics.FailureCount)))
+			}
 		} else if !stepData.MetricsSuppressed {
 			statusLabel := string(stepData.Status)
 			if statusLabel == "" {
@@ -488,8 +492,9 @@ type AllFailedPhase struct {
 	FailureCount int64
 }
 
-// AllFailedPhases lists the phases with failures and no successes. An empty listing has neither, so
-// it isn't one. In an ordinary workload a DELETE phase is its --cleanup, which is best-effort.
+// AllFailedPhases lists the phases with failures and no successes. In an ordinary workload a DELETE
+// phase is its --cleanup, which is best-effort. A LIST phase counts object identities as successes,
+// not requests, so an empty listing with some failed requests looks the same as one that all failed.
 func (s *RunSummary) AllFailedPhases() []AllFailedPhase {
 	if s == nil {
 		return nil
@@ -497,7 +502,7 @@ func (s *RunSummary) AllFailedPhases() []AllFailedPhase {
 	var phases []AllFailedPhase
 	for _, step := range s.Steps {
 		if step.Metrics == nil || step.Metrics.SuccessCount != 0 || step.Metrics.FailureCount <= 0 ||
-			strings.EqualFold(step.Operation, reportOperationDelete) {
+			strings.EqualFold(step.Operation, reportOperationDelete) || strings.EqualFold(step.Operation, workloadTypeList) {
 			continue
 		}
 		label := step.PhaseLabel

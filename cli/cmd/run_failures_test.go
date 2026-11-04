@@ -53,6 +53,19 @@ func TestARunWithNoPhaseThatAllFailedKeepsItsResult(t *testing.T) {
 	}
 }
 
+func TestOnlyACompletedRunIsJudged(t *testing.T) {
+	for _, state := range []string{constants.StateStopped, constants.StateRunning, ""} {
+		if err := resolveOrdinaryRunError(nil, allFailedOutcome(state)); err != nil {
+			t.Fatalf("state %q: err = %v", state, err)
+		}
+	}
+	outcome := allFailedOutcome(constants.StateCompleted)
+	outcome.Tracker = nil
+	if err := resolveOrdinaryRunError(nil, outcome); err != nil {
+		t.Fatalf("no tracker: err = %v", err)
+	}
+}
+
 func TestAnErrorAlreadyEndingTheRunIsNotReplaced(t *testing.T) {
 	stopped := errors.New("interrupted by signal")
 	if err := resolveOrdinaryRunError(stopped, allFailedOutcome(constants.StateCompleted)); !errors.Is(err, stopped) {
