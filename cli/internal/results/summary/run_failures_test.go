@@ -27,6 +27,7 @@ func TestAllFailedPhaseSaysWhatFailed(t *testing.T) {
 		"every request of phase Create failed (5 failed, 0 succeeded)":     {Label: "Create", FailureCount: 5},
 		"every READ request of phase Mixed failed (5 failed, 0 succeeded)": {Label: "Mixed", Operation: "READ", FailureCount: 5},
 		"phase List found no objects and 5 requests failed":                {Label: "List", FailureCount: 5, EmptyListing: true},
+		"phase List found no objects and 1 request failed":                 {Label: "List", FailureCount: 1, EmptyListing: true},
 	}
 	for want, phase := range tests {
 		if got := phase.String(); got != want {
