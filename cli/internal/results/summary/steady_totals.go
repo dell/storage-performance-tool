@@ -31,7 +31,8 @@ type SteadyRates struct {
 	ThroughputOps  float64
 	BandwidthMiBps float64
 	Reason         string
-	// Unsteady holds the worst Trend and CV of a valid phase past the warning cutoffs, and is nil otherwise.
+	// Unsteady holds the worst Trend and CV of the phase's valid windows past the warning cutoffs, and
+	// is nil otherwise. It can be set when another window leaves the phase with no steady rate to show.
 	Unsteady *SteadyInstability
 }
 

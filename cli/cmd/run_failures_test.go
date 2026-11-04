@@ -106,16 +106,26 @@ func TestARunWithNoPhaseThatAllFailedKeepsItsResult(t *testing.T) {
 	}
 }
 
-func TestOnlyACompletedRunIsJudged(t *testing.T) {
-	for _, state := range []string{constants.StateStopped, constants.StateRunning, ""} {
-		if err := resolveOrdinaryRunError(nil, allFailedOutcome(state)); err != nil {
+func TestAStoppedRunIsNotJudged(t *testing.T) {
+	if err := resolveOrdinaryRunError(nil, allFailedOutcome(constants.StateStopped)); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// The tracker of an ordinary run returns once its step files are stable, so a finished `write
+// --cleanup` or `read --items-file` usually still reads RUNNING, during the scenario's last pause.
+func TestAFinishedRunIsJudgedInWhateverStateTheTrackerLastSaw(t *testing.T) {
+	for _, state := range []string{constants.StateRunning, constants.StateIdle, constants.StateCompleted, ""} {
+		var exit *ExitCodeError
+		if err := resolveOrdinaryRunError(nil, allFailedOutcome(state)); !errors.As(err, &exit) ||
+			exit.Code != constants.ExitCodeWorkloadFailure {
 			t.Fatalf("state %q: err = %v", state, err)
 		}
 	}
-	outcome := allFailedOutcome(constants.StateCompleted)
+	outcome := allFailedOutcome(constants.StateRunning)
 	outcome.Tracker = nil
-	if err := resolveOrdinaryRunError(nil, outcome); err != nil {
-		t.Fatalf("no tracker: err = %v", err)
+	if err := resolveOrdinaryRunError(nil, outcome); err == nil {
+		t.Fatalf("no tracker, but a summary with a phase that all failed: want an error")
 	}
 }
 
