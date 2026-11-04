@@ -91,8 +91,10 @@ neither `--items-file` nor `--delete-existing`, a count run creates exactly
 run-unique `spt-delete-<run-id>/` namespace, freezes the successful PUT identities,
 then times DELETE against only that canonical manifest. `--prefix` changes the
 owned namespace root by itself; it never discovers or selects existing objects. A
-duration run instead seeds `--seed-objects`, default 2,500. Omitting both count and
-duration also selects 2,500 objects. Omitting `--object-size` selects 1 KiB rather than
+duration run instead seeds `--seed-objects`, default 2,500. That default lasts well under
+a second on most targets, and a run that attempts every object fails as exhausted, so set
+it to at least the DELETE rate you expect times the duration, with margin. Omitting both
+count and duration also selects 2,500 objects. Omitting `--object-size` selects 1 KiB rather than
 the shared 1 MiB write default. PUT-returned versions are preserved for exact-version
 DELETE; objects without a returned version use current-key semantics.
 
