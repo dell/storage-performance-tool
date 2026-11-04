@@ -190,7 +190,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 
 	/**
 	 * Returns the first failure observed by the most recent {@link #run()} call, including failures
-	 * swallowed to preserve the legacy behavior of ordinary load steps.
+	 * swallowed to preserve the legacy behavior of ordinary load steps. A failure to start isn't one
+	 * of those: it ends the run.
 	 */
 	public final Throwable runFailure() {
 		return runFailure;
@@ -234,6 +235,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 				} else {
 					LogUtil.exception(Level.ERROR, cause, "Load step execution failure \"{}\"", toString());
 				}
+				// Every runtime failure of the await is handled above, so this is a failure to start.
+				terminalCause = startFailure(cause);
 			}
 		} finally {
 			// The window ends where the run does, before the freeze, on normal and exceptional exits.
@@ -385,6 +388,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			}
 			recordRunFailure(cause);
 			LogUtil.exception(Level.WARN, cause, "{} step failed to start", loadStepId());
+			throw startFailure(cause);
 		}
 
 		if (!loadIntervalDeferred()) {
@@ -719,6 +723,18 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	 * message, also in metadata mode; any other failure of a metadata-mode step becomes the given
 	 * integrity failure.
 	 */
+	/** A step that didn't start ends the run, unless a stop interrupted it, which is that stop. */
+	private RunTerminalException startFailure(final Throwable cause) {
+		if (Thread.currentThread().isInterrupted()) {
+			throwUnchecked(new InterruptedException(loadStepId() + ": stopped while starting"));
+		}
+		return new RunTerminalException(
+						IntegrityTerminalException.Category.EXECUTION,
+						loadStepId(),
+						"step failed to start: " + cause.getMessage(),
+						cause);
+	}
+
 	private RunTerminalException lifecycleTerminalFailure(
 					final IntegrityTerminalException.Category category,
 					final String integrityMessage,

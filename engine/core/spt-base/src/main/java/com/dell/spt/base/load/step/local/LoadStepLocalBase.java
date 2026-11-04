@@ -216,13 +216,9 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				if (terminal != null) {
 					throw terminal;
 				}
-				LogUtil.exception(
-								Level.WARN, e, "{}: failed to start the load step context \"{}\"", loadStepId(), stepCtx);
-				iterator.remove();
+				throw contextStartFailure(stepCtx, e);
 			} catch (final RemoteException e) {
-				LogUtil.exception(
-								Level.WARN, e, "{}: failed to start the load step context \"{}\"", loadStepId(), stepCtx);
-				iterator.remove();
+				throw contextStartFailure(stepCtx, e);
 			}
 		}
 		if (!anyStarted) {
@@ -231,6 +227,17 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		if (barrier != null) {
 			startPreparationThread(barrier);
 		}
+	}
+
+	/** The contexts left would run less of the load than was asked for, under the same numbers. */
+	private RunTerminalException contextStartFailure(final LoadStepContext stepCtx, final Exception cause) {
+		LogUtil.exception(
+						Level.WARN, cause, "{}: failed to start the load step context \"{}\"", loadStepId(), stepCtx);
+		return new RunTerminalException(
+						IntegrityTerminalException.Category.EXECUTION,
+						loadStepId(),
+						"failed to start a load step context: " + cause.getMessage(),
+						cause);
 	}
 
 	@Override

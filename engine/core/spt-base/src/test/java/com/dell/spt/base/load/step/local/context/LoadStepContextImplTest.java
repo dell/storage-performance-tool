@@ -1386,6 +1386,55 @@ public class LoadStepContextImplTest {
 	}
 
 	@Test
+	public void aDriverThatFailsToStartFailsTheContext() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final var driver = barrierDriver();
+		final var generator = barrierGenerator();
+		when(driver.start()).thenThrow(new IllegalStateException("driver-start"));
+		final var ctx = new LoadStepContextImpl<>(
+						"ctx-driver-fails", generator, driver, null, testConfig.configVal("load"), false);
+		try {
+			assertEquals("driver-start", assertThrows(IllegalStateException.class, ctx::doStart).getMessage());
+			verify(generator, never()).start();
+		} finally {
+			ctx.doStop();
+		}
+	}
+
+	@Test
+	public void aGeneratorThatFailsToStartFailsTheContext() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final var generator = barrierGenerator();
+		doThrow(new IllegalStateException("generator-start")).when(generator).start();
+		final var ctx = new LoadStepContextImpl<>(
+						"ctx-generator-fails", generator, barrierDriver(), null, testConfig.configVal("load"), false);
+		try {
+			assertEquals("generator-start", assertThrows(IllegalStateException.class, ctx::doStart).getMessage());
+		} finally {
+			ctx.doStop();
+		}
+	}
+
+	@Test
+	public void aStartThatLosesToAStopIsNotAFailure() throws Exception {
+		testConfig.val("load-op-retry", false);
+		final var generator = barrierGenerator();
+		final var ctx = new LoadStepContextImpl<>(
+						"ctx-stopped", generator, barrierDriver(), null, testConfig.configVal("load"), false);
+		final var shuttingDown = LoadStepContextImpl.class.getDeclaredField("stepShuttingDown");
+		shuttingDown.setAccessible(true);
+		doAnswer(call -> {
+			((java.util.concurrent.atomic.AtomicBoolean) shuttingDown.get(ctx)).set(true);
+			throw new IllegalStateException("generator-stopped");
+		}).when(generator).start();
+		try {
+			assertDoesNotThrow(ctx::doStart);
+		} finally {
+			ctx.doStop();
+		}
+	}
+
+	@Test
 	public void stoppedContextRejectsSameInstanceRestartInsteadOfStartingWithoutItsGenerator() throws Exception {
 		testConfig.val("load-op-retry", false);
 		final LoadGenerator<DataItem, Operation<DataItem>> generatorMock = mock(LoadGenerator.class);

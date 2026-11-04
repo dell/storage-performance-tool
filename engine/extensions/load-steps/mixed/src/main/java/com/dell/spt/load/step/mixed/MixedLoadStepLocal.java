@@ -1,5 +1,7 @@
 package com.dell.spt.load.step.mixed;
 
+import com.dell.spt.base.control.run.RunTerminalException;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.ConstantValueInputImpl;
 import com.dell.spt.base.config.NicSetConfig;
@@ -531,59 +533,58 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 
 	/** Loads seed items from a file into the given list. Uses {@link ItemInputFactory} to handle
 	 *  both CSV (.csv) and binary (temp slicer) formats automatically. */
-	private static void loadSeedItems(
+	static void loadSeedItems(
 					final String filePath,
 					final List items,
 					final ItemFactory factory) {
-		final Path path = Paths.get(filePath);
-		if (!Files.exists(path)) {
-			Loggers.ERR.warn("MixedLoad: seed items file not found: {}", filePath);
-			return;
-		}
-		try (final Input fileInput = ItemInputFactory.createFileItemInput(factory, filePath)) {
-			if (fileInput == null) {
-				Loggers.ERR.warn("MixedLoad: failed to open seed items file: {}", filePath);
-				return;
-			}
-			Object item;
-			while ((item = fileInput.get()) != null) {
-				items.add(item);
-			}
-		} catch (final java.io.EOFException eof) {
-			// BinFileInput throws EOFException at end of stream — normal termination
-		} catch (final Exception e) {
-			LogUtil.exception(Level.WARN, e, "MixedLoad: failed to load seed items from {}", filePath);
-		}
+		loadItems("seed items file", filePath, factory, items::add);
 		Loggers.MSG.info("MixedLoad: loaded {} seed items from {}", items.size(), filePath);
 	}
 
 	/** Loads items from a file into the PoolItemInput's delete queue. */
-	private static void loadDeleteItems(
+	static void loadDeleteItems(
 					final String filePath,
 					final PoolItemInput pool,
 					final ItemFactory factory) {
-		final Path path = Paths.get(filePath);
-		if (!Files.exists(path)) {
-			Loggers.ERR.warn("MixedLoad: delete-items-file not found: {}", filePath);
-			return;
+		final long count = loadItems("delete items file", filePath, factory, item -> pool.addDeleteItem((Item) item));
+		if (count == 0) {
+			throw itemsFileFailure("delete items file has no items", null);
 		}
+		Loggers.MSG.info("MixedLoad: pre-populated DELETE queue with {} items from {}", count, filePath);
+	}
+
+	/** A file that can't be read in full ends the run: the mix it would leave isn't the one asked for. */
+	private static long loadItems(
+					final String label,
+					final String filePath,
+					final ItemFactory factory,
+					final java.util.function.Consumer<Object> items) {
+		if (!Files.exists(Paths.get(filePath))) {
+			throw itemsFileFailure(label + " was not found", null);
+		}
+		long count = 0;
 		try (final Input fileInput = ItemInputFactory.createFileItemInput(factory, filePath)) {
 			if (fileInput == null) {
-				Loggers.ERR.warn("MixedLoad: failed to open delete-items-file: {}", filePath);
-				return;
+				throw itemsFileFailure(label + " could not be opened", null);
 			}
 			Object item;
-			int count = 0;
 			while ((item = fileInput.get()) != null) {
-				pool.addDeleteItem((Item) item);
+				items.accept(item);
 				count++;
 			}
-			Loggers.MSG.info("MixedLoad: pre-populated DELETE queue with {} items from {}", count, filePath);
 		} catch (final java.io.EOFException eof) {
 			// BinFileInput throws EOFException at end of stream — normal termination
+		} catch (final RunTerminalException e) {
+			throw e;
 		} catch (final Exception e) {
-			LogUtil.exception(Level.WARN, e, "MixedLoad: failed to populate DELETE queue from {}", filePath);
+			LogUtil.exception(Level.WARN, e, "MixedLoad: failed to load the items from {}", filePath);
+			throw itemsFileFailure(label + " could not be read", e);
 		}
+		return count;
+	}
+
+	private static RunTerminalException itemsFileFailure(final String message, final Throwable cause) {
+		return new RunTerminalException(IntegrityTerminalException.Category.INPUT, "MixedLoad: " + message, cause);
 	}
 
 	/** Reads {@code load.op.delete.input.file} from the merged config. */

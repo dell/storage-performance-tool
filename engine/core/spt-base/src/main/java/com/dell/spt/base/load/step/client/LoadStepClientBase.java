@@ -35,7 +35,10 @@ import com.dell.spt.base.integrity.IntegrityInputProvenance;
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.ItemType;
+import com.dell.spt.base.item.io.CsvItemInput;
 import com.dell.spt.base.item.io.ItemInputFactory;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
@@ -73,6 +76,9 @@ import com.github.akurilov.confuse.exceptions.InvalidValueTypeException;
 import com.github.akurilov.confuse.impl.BasicConfig;
 
 import java.io.IOException;
+import java.nio.file.Path;
+import java.nio.file.Files;
+import java.io.InputStream;
 import java.rmi.ConnectException;
 import java.rmi.RemoteException;
 import java.rmi.UnknownHostException;
@@ -595,11 +601,24 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				Loggers.MSG.debug("{}: item data input file slicer initialized", loadStepId());
 			}
 			if (!skipScatter && itemInput != null) {
-				itemInputFileSlicers.add(
-								new ItemInputFileSlicer(
-												loadStepId(), fileMgrs, configSlices, itemInput, batchSize, integrityConfig.enabled()));
+				final var slicer = new ItemInputFileSlicer(
+								loadStepId(), fileMgrs, configSlices, itemInput, batchSize, integrityConfig.enabled());
+				itemInputFileSlicers.add(slicer);
 				Loggers.MSG.debug("{}: item input file slicer initialized", loadStepId());
+				if (!integrityConfig.enabled() && slicer.distributedItems() == 0) {
+					requireAnItemFromAFile(itemConfig, opType);
+				}
+			} else if (!skipScatter && !integrityConfig.enabled()) {
+				distributeNoItemsIfNothingToDelete(itemConfig, opType, itemType, configSlices, batchSize);
 			}
+		} catch (final RunTerminalException e) {
+			if (integrityConfig.enabled()) {
+				throw terminalFailure(
+								IntegrityTerminalException.Category.INPUT,
+								"failed to validate or distribute integrity input",
+								e);
+			}
+			throw e;
 		} catch (final IllegalConfigurationException e) {
 			if (integrityConfig.enabled()) {
 				throw terminalFailure(
@@ -735,6 +754,56 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 	}
 
+	/**
+	 * An empty items file ends the run, except for a DELETE: the cleanup of a step that created
+	 * nothing has nothing to do. An empty listing isn't a file, and stays a run with no items.
+	 */
+	void requireAnItemFromAFile(final Config itemConfig, final OpType opType) {
+		if (itemInputFile(itemConfig) != null && !OpType.DELETE.equals(opType)) {
+			throw new RunTerminalException(
+							IntegrityTerminalException.Category.INPUT, loadStepId(), "the items file has no items", null);
+		}
+	}
+
+	/**
+	 * Configured items that couldn't be opened end the run. A DELETE whose file doesn't exist is the
+	 * cleanup of a step that wrote nothing, so its slices get no items and it finishes at once.
+	 */
+	void distributeNoItemsIfNothingToDelete(
+					final Config itemConfig,
+					final OpType opType,
+					final ItemType itemType,
+					final List<Config> configSlices,
+					final int batchSize) {
+		final String file = itemInputFile(itemConfig);
+		final String path = itemConfig.configVal("input").stringVal("path");
+		if (file == null && (path == null || path.isEmpty())) {
+			return;
+		}
+		if (file == null || !OpType.DELETE.equals(opType) || !Files.notExists(Path.of(file))) {
+			throw new RunTerminalException(
+							IntegrityTerminalException.Category.INPUT,
+							loadStepId(),
+							file == null
+											? "the items input path could not be used"
+											: "the items file \"" + Path.of(file).getFileName() + "\" could not be opened",
+							null);
+		}
+		@SuppressWarnings("unchecked")
+		final ItemFactory<Item> factory = (ItemFactory<Item>) ItemType.getItemFactory(itemType);
+		itemInputFileSlicers.add(new ItemInputFileSlicer(
+						loadStepId(),
+						fileMgrs,
+						configSlices,
+						new CsvItemInput<>(InputStream.nullInputStream(), factory),
+						batchSize));
+	}
+
+	private static String itemInputFile(final Config itemConfig) {
+		final String file = itemConfig.configVal("input").stringVal("file");
+		return file == null || file.isEmpty() ? null : file;
+	}
+
 	private void initAndStartStepSlices(
 					final List<String> nodeAddrs, final List<Config> configSlices, final List<List<Config>> ctxConfigsSlices,
 					final MetricsManager metricsManager, final AdmissionBarrier barrier) {
@@ -776,15 +845,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				if (e instanceof InterruptedException) {
 					throwUnchecked(e);
 				}
-				if (barrier != null) {
-					throw new RunTerminalException(
-									IntegrityTerminalException.Category.EXECUTION,
-									loadStepId(),
-									"Step " + loadStepId() + " did not start: " + (i == 0 ? NicSetConfig.ENTRY_KEY : nodeAddrs.get(i - 1)) + ": "
-													+ e.getMessage(),
-									e);
+				if (Thread.currentThread().isInterrupted()) {
+					// A stop interrupts this thread, and a start it cut short is that stop, not a failure.
+					throwUnchecked(new InterruptedException(loadStepId() + ": stopped while starting a step slice"));
 				}
-				if (validateRunId) {
+				if (barrier == null && validateRunId) {
 					throw terminalFailure(
 									IntegrityTerminalException.Category.EXECUTION,
 									"failed to start metadata-mode step slice " + i,
@@ -792,6 +857,17 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 				LogUtil.exception(
 								Level.ERROR, e, "{}: failed to start the step slice \"{}\"", loadStepId(), stepSlice);
+				// One engine missing would leave a lower load reported as the one asked for.
+				final var typed = barrier == null ? RunTerminalException.find(e) : null;
+				if (typed != null) {
+					throw typed.withStepId(loadStepId());
+				}
+				throw new RunTerminalException(
+								IntegrityTerminalException.Category.EXECUTION,
+								loadStepId(),
+								"Step " + loadStepId() + " did not start: " + (i == 0 ? NicSetConfig.ENTRY_KEY : nodeAddrs.get(i - 1)) + ": "
+												+ e.getMessage(),
+								e);
 			}
 		}
 	}

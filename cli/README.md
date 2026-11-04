@@ -552,7 +552,7 @@ Executes a benchmark test with the specified workload type.
 - `--range-align`: Alignment in bytes or binary units; omitted, `0`, and `1` mean byte alignment. A fixed offset must be divisible by the effective alignment. Offset/alignment require `--range-size`. A positive `--part-size` conflicts with partial reads.
 
 - `--seed-objects`: Objects to pre-create for `read` benchmarks and duration-based standalone DELETE (default: 2500)
-- `--items-file`: Path to a saved `items.csv` for `read`, or a canonical manifest for `read-verify` and explicit-manifest DELETE. Mutually exclusive with `--delete-existing`
+- `--items-file`: Path to a saved `items.csv` for `read`, or a canonical manifest for `read-verify` and explicit-manifest DELETE. Mutually exclusive with `--delete-existing`. A file that can't be opened, has no items, or has a blank or invalid line ends the run with an error naming the file or line, before any requests from it
 - `--delete-batch-size`: Standalone DELETE request size, from 1 through 1000 canonical identities (default 100). Multi-bucket manifests require 1
 - `--delete-existing`: Destructive DELETE opt-in that discovers and freezes current keys beneath the exact bucket/prefix before timing
 - `--allow-empty-prefix`: Second destructive opt-in required with `--delete-existing --prefix=''` for intentional whole-bucket selection

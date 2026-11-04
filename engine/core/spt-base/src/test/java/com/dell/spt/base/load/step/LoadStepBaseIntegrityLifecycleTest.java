@@ -69,17 +69,23 @@ class LoadStepBaseIntegrityLifecycleTest {
 	}
 
 	@Test
-	void ordinaryStartAndCleanupFailuresRetainLegacyNonThrowingBehavior() {
+	void anOrdinaryStartFailureEndsTheRunAndKeepsTheCleanupFailureBehindIt() {
 		final Config config = metadataConfig();
 		config.val("storage-integrity-mode", "none");
 		final var startFailure = new IllegalStateException("start failed");
 		final var step = new TestStep(config, startFailure, true);
 
-		assertDoesNotThrow(step::run);
+		final var failure = assertThrows(RunTerminalException.class, step::run);
+
+		assertFalse(failure instanceof IntegrityTerminalException);
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertEquals("step failed to start: start failed", failure.getMessage());
+		assertEquals("integrity-step", failure.stepId());
+		assertSame(startFailure, failure.getCause());
 		assertTrue(step.closeCalled);
 		assertSame(startFailure, step.runFailure(),
-						"best-effort callers need the real swallowed lifecycle outcome");
-		assertEquals(1, step.runFailure().getSuppressed().length,
+						"best-effort callers need the real lifecycle outcome");
+		assertTrue(step.runFailure().getSuppressed().length >= 1,
 						"cleanup failure should remain distinguishable behind the first failure");
 	}
 

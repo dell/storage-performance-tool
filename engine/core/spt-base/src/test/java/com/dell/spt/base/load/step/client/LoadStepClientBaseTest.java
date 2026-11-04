@@ -1,10 +1,12 @@
 package com.dell.spt.base.load.step.client;
 
 import com.dell.spt.base.config.TestConfigBuilder;
+import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.item.ItemType;
 import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepFactory;
@@ -105,6 +107,141 @@ class LoadStepClientBaseTest {
 		extensions = Collections.emptyList();
 		ctxConfigs = Collections.emptyList();
 		mockMetricsManager = mock(MetricsManager.class);
+	}
+
+	@SuppressWarnings("unchecked")
+	private TestLoadStepClient clientWithLocalSlice(final LoadStep slice) {
+		final LoadStepFactory<LoadStep, ?> factory = mock(LoadStepFactory.class);
+		when(factory.id()).thenReturn("test-load-step");
+		when(factory.createLocal(any(), anyList(), anyList(), any())).thenReturn(slice);
+		testConfig.val("item-data-input-compressibility", 0.0);
+		testConfig.val("item-data-dedupable", false);
+		testConfig.val("item-data-verify", false);
+		return new TestLoadStepClient(testConfig, List.of(factory), ctxConfigs, mockMetricsManager);
+	}
+
+	@Test
+	void aSliceThatFailsToStartFailsTheRun() throws Exception {
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.start()).thenThrow(new IllegalStateException("No item input available"));
+		final var client = clientWithLocalSlice(slice);
+		final var failure = assertThrows(RunTerminalException.class, client::run);
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertTrue(failure.getMessage().contains("did not start"), failure.getMessage());
+		assertTrue(failure.getMessage().contains("No item input available"), failure.getMessage());
+	}
+
+	@Test
+	void aSliceFailureThatAlreadyHasACauseKeepsIt() throws Exception {
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.start()).thenThrow(new RunTerminalException(
+						IntegrityTerminalException.Category.INPUT, "items file line 7 is blank", null));
+		final var client = clientWithLocalSlice(slice);
+		final var failure = assertThrows(RunTerminalException.class, client::run);
+		assertEquals(IntegrityTerminalException.Category.INPUT, failure.category());
+		assertEquals("items file line 7 is blank", failure.getMessage());
+	}
+
+	@Test
+	void aStopThatCutsASliceStartShortStaysAStop() throws Exception {
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.start()).thenAnswer(call -> {
+			Thread.currentThread().interrupt();
+			throw new IllegalStateException("closed by the stop");
+		});
+		final var client = clientWithLocalSlice(slice);
+		try {
+			assertThrows(InterruptedException.class, client::run);
+		} finally {
+			Thread.interrupted();
+		}
+	}
+
+	@Test
+	void anEmptyItemsFileFailsAnyStepExceptADelete() throws Exception {
+		final var client = new TestLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
+		final Config items = TestConfigBuilder.config().configVal("item");
+		items.configVal("input").val("file", tempDir.resolve("empty.csv").toString());
+		final var failure = assertThrows(
+						RunTerminalException.class, () -> client.requireAnItemFromAFile(items, OpType.READ));
+		assertEquals(IntegrityTerminalException.Category.INPUT, failure.category());
+		assertEquals("the items file has no items", failure.getMessage());
+		assertDoesNotThrow(() -> client.requireAnItemFromAFile(items, OpType.DELETE));
+	}
+
+	@Test
+	void anEmptyListingIsNotAnEmptyItemsFile() throws Exception {
+		final var client = new TestLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
+		final Config items = TestConfigBuilder.config().configVal("item");
+		items.configVal("input").val("file", null);
+		items.configVal("input").val("path", "/bucket");
+		assertDoesNotThrow(() -> client.requireAnItemFromAFile(items, OpType.READ));
+	}
+
+	@Test
+	void aMissingItemsFileFailsAnyStepExceptADelete() throws Exception {
+		final var client = new TestLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
+		final Config items = TestConfigBuilder.config().configVal("item");
+		items.configVal("input").val("file", tempDir.resolve("missing.csv").toString());
+		final Config slice = TestConfigBuilder.config();
+		final var failure = assertThrows(
+						RunTerminalException.class,
+						() -> client.distributeNoItemsIfNothingToDelete(items, OpType.READ, ItemType.DATA, List.of(slice), 1));
+		assertEquals("the items file \"missing.csv\" could not be opened", failure.getMessage());
+	}
+
+	@Test
+	void aDeleteOfAFileThatExistsButCantBeOpenedFails() throws Exception {
+		final var client = new TestLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
+		final Config items = TestConfigBuilder.config().configVal("item");
+		final Path present = java.nio.file.Files.createFile(tempDir.resolve("unreadable.bin"));
+		items.configVal("input").val("file", present.toString());
+		final var failure = assertThrows(
+						RunTerminalException.class,
+						() -> client.distributeNoItemsIfNothingToDelete(
+										items, OpType.DELETE, ItemType.DATA, List.of(TestConfigBuilder.config()), 1));
+		assertTrue(failure.getMessage().contains("could not be opened"));
+	}
+
+	@Test
+	void anItemsPathThatCantBeUsedFailsEvenADelete() throws Exception {
+		final var client = new TestLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
+		final Config items = TestConfigBuilder.config().configVal("item");
+		items.configVal("input").val("file", null);
+		items.configVal("input").val("path", "/bucket");
+		final var failure = assertThrows(
+						RunTerminalException.class,
+						() -> client.distributeNoItemsIfNothingToDelete(
+										items, OpType.DELETE, ItemType.DATA, List.of(TestConfigBuilder.config()), 1));
+		assertEquals("the items input path could not be used", failure.getMessage());
+	}
+
+	@Test
+	void noConfiguredItemsNeedNoInput() throws Exception {
+		final var client = new TestLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
+		final Config items = TestConfigBuilder.config().configVal("item");
+		items.configVal("input").val("file", null);
+		items.configVal("input").val("path", null);
+		assertDoesNotThrow(() -> client.distributeNoItemsIfNothingToDelete(
+						items, OpType.READ, ItemType.DATA, List.of(TestConfigBuilder.config()), 1));
+	}
+
+	@Test
+	void theCleanupOfAFileNeverWrittenGivesEverySliceNoItems() throws Exception {
+		final var client = new TestLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
+		final Config items = TestConfigBuilder.config().configVal("item");
+		items.configVal("input").val("file", tempDir.resolve("never-written.csv").toString());
+		final Path slicePath = tempDir.resolve("slice");
+		final com.dell.spt.base.load.step.file.FileManager fileManager = mock(com.dell.spt.base.load.step.file.FileManager.class);
+		when(fileManager.newTmpFileName()).thenReturn(slicePath.toString());
+		final Field fileMgrs = LoadStepClientBase.class.getDeclaredField("fileMgrs");
+		fileMgrs.setAccessible(true);
+		@SuppressWarnings("unchecked")
+		final var managers = (List<com.dell.spt.base.load.step.file.FileManager>) fileMgrs.get(client);
+		managers.add(fileManager);
+		final Config slice = TestConfigBuilder.config();
+		client.distributeNoItemsIfNothingToDelete(items, OpType.DELETE, ItemType.DATA, List.of(slice), 1);
+		assertEquals(slicePath.toString(), slice.stringVal("item-input-file"));
 	}
 
 	@Test
@@ -3018,7 +3155,11 @@ class LoadStepClientBaseTest {
 			cfg.val("item-data-input-compressibility", 0.0);
 			cfg.val("item-data-dedupable", false);
 			cfg.val("item-data-verify", false);
-			TestLoadStepClient client = new TestLoadStepClient(cfg, extensions, ctxConfigs, mockMetricsManager);
+			@SuppressWarnings("unchecked")
+			final LoadStepFactory<LoadStep, ?> factory = mock(LoadStepFactory.class);
+			when(factory.id()).thenReturn("test-load-step");
+			when(factory.createLocal(any(), anyList(), anyList(), any())).thenReturn(mock(LoadStep.class));
+			TestLoadStepClient client = new TestLoadStepClient(cfg, List.of(factory), ctxConfigs, mockMetricsManager);
 
 			assertDoesNotThrow(client::start);
 
@@ -3039,28 +3180,23 @@ class LoadStepClientBaseTest {
 			// Use real extensions from classpath: LinearLoadStepExtension + DummyStorageDriverMockExtension
 			List<Extension> classpathExts = Extension.load(LoadStepClientBaseTest.class.getClassLoader());
 			Config cfg = TestConfigBuilder.config();
-			cfg.val("load-step-id", "linear-client-test");
+			// Its artifacts stay under the test directory, so a rerun must not find them as stale.
+			cfg.val("load-step-id", "linear-client-test-" + java.util.UUID.randomUUID());
 			cfg.val("item-data-size", "10KiB");
 			cfg.val("item-output-file", ""); // avoid writing
 			// Ensure no remote nodes to avoid retries
 			cfg.val("load-step-node-addrs", java.util.Collections.emptyList());
+			cfg.val("item-data-input-compressibility", 0.0);
+			cfg.val("item-data-dedupable", false);
+			cfg.val("item-data-verify", false);
 			LinearLoadStepClient client = new LinearLoadStepClient(cfg, classpathExts, null, mockMetricsManager);
-			assertDoesNotThrow(client::start);
-			// Await briefly; we only assert it returns a boolean and does not throw
-			boolean result = false;
-			try {
-				result = client.await(5, java.util.concurrent.TimeUnit.MILLISECONDS);
-			} catch (IllegalStateException ise) {
-				// If no slices were created due to environment, method may throw; that's acceptable
-			}
+			// This fixture configures no items, so it reaches its slice and fails there with the reason.
+			final var failure = assertThrows(RunTerminalException.class, client::start);
+			assertTrue(failure.getMessage().contains("did not start"), failure.getMessage());
 			// Stop/close regardless
 			assertDoesNotThrow(client::doStop);
 			assertDoesNotThrow(client::doShutdown);
 			assertDoesNotThrow(client::doClose);
-			// Just touch the result to avoid unused warning
-			if (result) {
-				assertTrue(result);
-			}
 			// Restore default log levels for other tests
 			Configurator.setLevel("com.dell.spt.base.logging.Messages", Level.INFO);
 			Configurator.setLevel("com.dell.spt.base.logging.Errors", Level.ERROR);
@@ -3656,11 +3792,18 @@ class LoadStepClientBaseTest {
 			// Local-only config: no remote node addrs to avoid 10-minute retry hang
 			// against a nonexistent FileManager (exponential backoff up to 120s per retry)
 			Config complexConfig = TestConfigBuilder.config();
-			complexConfig.val("load-step-id", "complex-integration-test");
+			// Its artifacts stay under the test directory, so a rerun must not find them as stale.
+			complexConfig.val("load-step-id", "complex-integration-test-" + java.util.UUID.randomUUID());
+			testConfig.val("load-step-id", "complex-integration-linear-" + java.util.UUID.randomUUID());
 			complexConfig.val("load-op-type", "create");
 			complexConfig.val("storage-driver-limit-concurrency", 75);
 			complexConfig.val("load-batch-size", 250);
 			complexConfig.val("storage-driver-type", "s3");
+			for (final Config config : List.of(complexConfig, testConfig)) {
+				config.val("item-data-input-compressibility", 0.0);
+				config.val("item-data-dedupable", false);
+				config.val("item-data-verify", false);
+			}
 
 			TestLoadStepExtension newExt = new TestLoadStepExtension();
 
@@ -3668,15 +3811,17 @@ class LoadStepClientBaseTest {
 			extensions.add(newExt);
 
 			TestLoadStepClient client = new TestLoadStepClient(complexConfig, extensions, ctxConfigs, mockMetricsManager);
-			assertDoesNotThrow(() -> client.start());
+			// This fixture's extension builds no local step, so its start fails, with the reason.
+			assertTrue(assertThrows(RunTerminalException.class, client::start).getMessage().contains("createLocal"));
 			assertDoesNotThrow(() -> client.doShutdown());
-			assertDoesNotThrow(() -> client.doClose());
+			// It also has no real worker, so terminal evidence fails closed at collection.
+			assertThrows(IntegrityTerminalException.class, client::doClose);
 			assertDoesNotThrow(() -> client.doStop());
 
 			LinearLoadStepClient linearClient = new LinearLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
-			assertDoesNotThrow(() -> linearClient.start());
+			assertTrue(assertThrows(RunTerminalException.class, linearClient::start).getMessage().startsWith("step failed to start: "));
 			assertDoesNotThrow(() -> linearClient.doShutdown());
-			assertDoesNotThrow(() -> linearClient.doClose());
+			assertThrows(IntegrityTerminalException.class, linearClient::doClose);
 			assertDoesNotThrow(() -> linearClient.doStop());
 		}
 	}
