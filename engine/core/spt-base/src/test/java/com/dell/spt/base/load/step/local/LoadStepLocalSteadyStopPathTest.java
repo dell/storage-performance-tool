@@ -385,6 +385,25 @@ class LoadStepLocalSteadyStopPathTest {
 		}
 	}
 
+	/** One request still queued at the deadline means an object was left, so the run reached it. */
+	@Test
+	void oneRequestLeftInTheQueueIsNotExhausted() throws Exception {
+		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.standaloneDelete(C, 1_500).inputQueue(100);
+		try (final var metricsMgr = new RecordingMetricsManager()) {
+			final var step = new DurationDeleteStep(durationDeleteConfig("duration-one-left"), driver, metricsMgr, C + 1);
+			try {
+				step.start();
+				step.startDurationInterval(TimeUnit.MILLISECONDS.toNanos(500));
+				awaitCondition(() -> driver.dispatchedCount() == C, "every slot holding a request");
+
+				step.await(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+				assertEquals(DurationAwaitStatus.REACHED_DEADLINE, step.durationAwaitStatus());
+			} finally {
+				step.close();
+			}
+		}
+	}
+
 	/** An await that starts after the deadline still sees that every request was dispatched. */
 	@Test
 	void aLateAwaitReportsAnInventoryAllDispatched() throws Exception {

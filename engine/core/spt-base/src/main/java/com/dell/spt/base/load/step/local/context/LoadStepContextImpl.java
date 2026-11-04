@@ -670,9 +670,10 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	 * generated has been dispatched. The handoff alone doesn't show that, because the driver's input
 	 * queue can hold the whole inventory within moments of the start.
 	 *
-	 * <p>A refused or recovered request is never counted as dispatched and DELETE has no retries, so this
-	 * can't report a slice with work left, however its threads interleave. It can be late, or miss, so
-	 * {@link #durationInventoryRanOut()} decides from the final counts.
+	 * <p>A refused or recovered request is never counted as dispatched, DELETE has no retries or recycling,
+	 * and the tracker belongs to this context's driver alone, so each generated request counts at most
+	 * once. So this can't report a slice with work left, however its threads interleave. It can be late,
+	 * or miss, so {@link #durationInventoryRanOut()} decides from the final counts.
 	 */
 	private OptionalLong durationInventoryExhaustionNanos() {
 		final OptionalLong handoff = generator.schedulingExhaustionNanos();
