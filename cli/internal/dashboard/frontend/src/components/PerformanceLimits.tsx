@@ -1,4 +1,4 @@
-import { Button, Text } from "@mantine/core";
+import { Button, Text, TextInput } from "@mantine/core";
 import { useState } from "react";
 import type { Row, State } from "../types";
 import { defaults } from "../config";
@@ -118,7 +118,7 @@ function LimitsForm({
         {o.threads === 1 ? "" : "s"}. These limits stay in this browser and
         apply to the selected phase.
       </Text>
-      <div data-spt-legacy="" className="form-grid limits-grid">
+      <div className="my-lg grid grid-cols-3 gap-panel [@media(max-width:760px)]:grid-cols-1">
         {checks.map((c) => {
           const limit = limits[c.key],
             value = c.value;
@@ -131,32 +131,30 @@ function LimitsForm({
                   ? "Within limit"
                   : "Outside limit";
           return (
-            <label data-spt-legacy="" key={c.key}>
-              {c.minimum ? "Minimum" : "Maximum"} {c.label} (
-              {c.key === "iops"
-                ? "ops/s"
-                : c.key === "bandwidth"
-                  ? "MiB/s"
-                  : "µs"}
-              )
-              <input
-                data-spt-legacy=""
-                type="number"
-                min="0"
-                step="any"
-                placeholder="No limit set"
-                value={draft[c.key]}
-                onChange={(e) =>
-                  setDraft({ ...draft, [c.key]: e.target.value })
-                }
-              />
-              <span
-                data-spt-legacy=""
-                className={result === "Outside limit" ? "limit-bad" : "subtle"}
-              >
-                {result} · measured {fmt(value, 2)}
-              </span>
-            </label>
+            <TextInput
+              key={c.key}
+              className="min-w-0"
+              label={`${c.minimum ? "Minimum" : "Maximum"} ${c.label} (${
+                c.key === "iops"
+                  ? "ops/s"
+                  : c.key === "bandwidth"
+                    ? "MiB/s"
+                    : "µs"
+              })`}
+              description={`${result} · measured ${fmt(value, 2)}`}
+              descriptionProps={{
+                c:
+                  result === "Outside limit"
+                    ? "var(--spt-threshold-failure)"
+                    : "var(--spt-text-subtle)",
+              }}
+              type="number"
+              min="0"
+              step="any"
+              placeholder="No limit set"
+              value={draft[c.key]}
+              onChange={(e) => setDraft({ ...draft, [c.key]: e.target.value })}
+            />
           );
         })}
       </div>

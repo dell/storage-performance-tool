@@ -1,8 +1,11 @@
 import {
   Badge,
   Button,
+  Fieldset,
+  Input,
   NavLink,
   Paper,
+  Radio,
   SegmentedControl,
   Text,
   Title,
@@ -170,6 +173,71 @@ export const theme = createTheme({
   },
   cursorType: "pointer",
   components: {
+    Input: Input.extend({
+      defaultProps: { size: "sm", radius: "control" },
+      vars: (_theme, { size }) => ({
+        wrapper: size === "sm" ? { "--input-height": "38px" } : {},
+      }),
+      classNames: {
+        input:
+          "focus-visible:outline-solid focus-visible:outline-[length:var(--spt-focus-width)] focus-visible:outline-focus focus-visible:outline-offset-[var(--spt-focus-offset)]",
+      },
+      styles: (_theme, { error }) => ({
+        input: {
+          color: "var(--spt-text-secondary)",
+          backgroundColor: "var(--spt-surface-control)",
+          borderColor: error
+            ? "var(--spt-validation-border)"
+            : "var(--spt-border-control)",
+        },
+      }),
+    }),
+    InputWrapper: Input.Wrapper.extend({
+      defaultProps: {
+        inputWrapperOrder: ["label", "input", "description", "error"],
+        errorProps: { role: "alert" },
+      },
+      styles: {
+        label: { color: "var(--spt-text-muted)", marginBottom: "9px" },
+        description: {
+          fontSize: "var(--mantine-font-size-caption)",
+          lineHeight: "var(--mantine-line-height-help)",
+          marginTop: "9px",
+        },
+        error: {
+          color: "var(--spt-validation-text)",
+          fontSize: "var(--mantine-font-size-caption)",
+          lineHeight: "var(--mantine-line-height-help)",
+          marginTop: "9px",
+        },
+      },
+    }),
+    Fieldset: Fieldset.extend({
+      defaultProps: { variant: "unstyled" },
+      styles: (_theme, { disabled }) => ({
+        root: { minWidth: 0, margin: 0, opacity: disabled ? 0.55 : undefined },
+        legend: {
+          fontSize: "var(--mantine-font-size-control)",
+          fontWeight: "var(--mantine-font-weight-heading)",
+          marginTop: "6px",
+          marginBottom: 0,
+        },
+      }),
+    }),
+    Radio: Radio.extend({
+      defaultProps: { size: "sm" },
+      styles: {
+        label: {
+          fontSize: "var(--mantine-font-size-md)",
+          fontWeight: "var(--mantine-font-weight-bold)",
+        },
+        description: {
+          color: "var(--spt-text-muted)",
+          fontSize: "var(--mantine-font-size-sm)",
+          lineHeight: "var(--mantine-line-height-body)",
+        },
+      },
+    }),
     NavLink: NavLink.extend({
       defaultProps: { variant: "light", bdrs: "md" },
       classNames: {

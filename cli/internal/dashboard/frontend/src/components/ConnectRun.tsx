@@ -1,4 +1,4 @@
-import { Button, Text, Title } from "@mantine/core";
+import { Button, NativeSelect, Text, Title } from "@mantine/core";
 import { useState } from "react";
 import type { State } from "../types";
 import { useAttachRun, useDetachRun } from "../api/mutations";
@@ -114,21 +114,19 @@ export function ConnectRun({
               Storage configuration.
             </Text>
             {hosts.length ? (
-              <label data-spt-legacy="" className="connect-host">
-                Entry machine
-                <select
-                  data-spt-legacy=""
-                  value={host}
-                  onChange={(event) => setHost(event.target.value)}
-                  disabled={busy || offline}
-                >
-                  {hosts.map((item) => (
-                    <option data-spt-legacy="" key={item} value={item}>
-                      {item}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <NativeSelect
+                label="Entry machine"
+                className="my-[26px] max-w-[420px]"
+                value={host}
+                onChange={(event) => setHost(event.target.value)}
+                disabled={busy || offline}
+              >
+                {hosts.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </NativeSelect>
             ) : (
               <div data-spt-legacy="" className="review">
                 <strong data-spt-legacy="">
