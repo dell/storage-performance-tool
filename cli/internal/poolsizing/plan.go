@@ -48,10 +48,10 @@ type Plan struct {
 	Outputs map[string]*nicplan.Output `json:"-"`
 }
 
-// Failure returns the failures that stop a run before launch, or nil.
 // memTotalField is the host memory's name in /proc/meminfo, and a capacity's source when it is that alone.
 const memTotalField = "MemTotal"
 
+// Failure returns the failures that stop a run before launch, or nil.
 func (p Plan) Failure() error {
 	var failures []error
 	for _, engine := range p.Engines {
