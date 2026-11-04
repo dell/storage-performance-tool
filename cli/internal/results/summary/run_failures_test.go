@@ -15,33 +15,66 @@ func phaseStep(label, operation string, success, failure int64) StepSummary {
 	}
 }
 
+func mixedStep(ops ...OperationBreakdown) StepSummary {
+	step := phaseStep("Mixed", "MIXED", 1, 1)
+	step.IsMixed = true
+	step.OperationBreakdown = ops
+	return step
+}
+
+func TestAllFailedPhaseSaysWhatFailed(t *testing.T) {
+	tests := map[string]AllFailedPhase{
+		"every request of phase Create failed (5 failed, 0 succeeded)":     {Label: "Create", FailureCount: 5},
+		"every READ request of phase Mixed failed (5 failed, 0 succeeded)": {Label: "Mixed", Operation: "READ", FailureCount: 5},
+		"phase List found no objects and 5 requests failed":                {Label: "List", FailureCount: 5, EmptyListing: true},
+	}
+	for want, phase := range tests {
+		if got := phase.String(); got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	}
+}
+
 func TestAllFailedPhasesNamesOnlyPhasesWhereNothingSucceeded(t *testing.T) {
 	tests := []struct {
 		name  string
 		steps []StepSummary
 		want  []AllFailedPhase
 	}{
-		{"every request failed", []StepSummary{phaseStep("Create", "CREATE", 0, 5301)}, []AllFailedPhase{{"Create", 5301}}},
+		{"every request failed", []StepSummary{phaseStep("Create", "CREATE", 0, 5301)}, []AllFailedPhase{{Label: "Create", FailureCount: 5301}}},
 		{"one succeeded", []StepSummary{phaseStep("Create", "CREATE", 1, 5301)}, nil},
 		{"an empty listing has neither", []StepSummary{phaseStep("List", "LIST", 0, 0)}, nil},
-		{"a listing counts identities, not requests", []StepSummary{phaseStep("List", "LIST", 0, 47)}, nil},
+		{"a listing with no objects and failures can't show it was empty", []StepSummary{phaseStep("List", "LIST", 0, 47)},
+			[]AllFailedPhase{{Label: "List", FailureCount: 47, EmptyListing: true}}},
+		{"a listing that found objects is a partial failure", []StepSummary{phaseStep("List", "LIST", 150, 1)}, nil},
 		{"a seed that worked doesn't hide a read that didn't", []StepSummary{
 			phaseStep("Seed", "CREATE", 1000, 0), phaseStep("Read", "READ", 0, 42),
-		}, []AllFailedPhase{{"Read", 42}}},
+		}, []AllFailedPhase{{Label: "Read", FailureCount: 42}}},
 		{"a seed that failed counts", []StepSummary{
 			phaseStep("Seed", "CREATE", 0, 9), phaseStep("Read", "READ", 5, 0),
-		}, []AllFailedPhase{{"Seed", 9}}},
+		}, []AllFailedPhase{{Label: "Seed", FailureCount: 9}}},
 		{"both phases", []StepSummary{
 			phaseStep("Seed", "CREATE", 0, 9), phaseStep("Read", "READ", 0, 3),
-		}, []AllFailedPhase{{"Seed", 9}, {"Read", 3}}},
+		}, []AllFailedPhase{{Label: "Seed", FailureCount: 9}, {Label: "Read", FailureCount: 3}}},
 		{"a cleanup is best-effort", []StepSummary{
 			phaseStep("Create", "CREATE", 500, 0), phaseStep("Delete", "DELETE", 0, 500),
 		}, nil},
-		{"a mixed phase is judged whole", []StepSummary{phaseStep("Mixed", "MIXED", 7, 90)}, nil},
+		{"one operation of a mix", []StepSummary{mixedStep(
+			OperationBreakdown{Operation: "READ", Metrics: PhaseMetrics{FailureCount: 1364}},
+			OperationBreakdown{Operation: "CREATE", Metrics: PhaseMetrics{SuccessCount: 1678}},
+		)}, []AllFailedPhase{{Label: "Mixed", Operation: "READ", FailureCount: 1364}}},
+		{"a mix's DELETE is measured, not a cleanup", []StepSummary{mixedStep(
+			OperationBreakdown{Operation: "DELETE", Metrics: PhaseMetrics{FailureCount: 5}},
+			OperationBreakdown{Operation: "READ", Metrics: PhaseMetrics{SuccessCount: 5}},
+		)}, []AllFailedPhase{{Label: "Mixed", Operation: "DELETE", FailureCount: 5}}},
+		{"a mix with partial failures and an idle operation", []StepSummary{mixedStep(
+			OperationBreakdown{Operation: "READ", Metrics: PhaseMetrics{SuccessCount: 7, FailureCount: 90}},
+			OperationBreakdown{Operation: "STAT"},
+		)}, nil},
 		{"no metrics say nothing", []StepSummary{{PhaseLabel: "Read", Operation: "READ"}}, nil},
 		{"an unlabeled phase uses its step", []StepSummary{{
 			StepID: "s-read", Operation: "READ", Metrics: &PhaseMetrics{FailureCount: 1},
-		}}, []AllFailedPhase{{"s-read", 1}}},
+		}}, []AllFailedPhase{{Label: "s-read", FailureCount: 1}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

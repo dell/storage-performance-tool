@@ -486,30 +486,57 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 	return steps, totals, warnings
 }
 
-// AllFailedPhase is a phase whose every request failed.
+// AllFailedPhase is a phase, or one operation of a mixed phase, that measured nothing because its
+// requests failed.
 type AllFailedPhase struct {
 	Label        string
+	Operation    string
 	FailureCount int64
+	// EmptyListing marks a LIST phase, which counts objects as successes rather than requests.
+	EmptyListing bool
 }
 
-// AllFailedPhases lists the phases with failures and no successes. In an ordinary workload a DELETE
-// phase is its --cleanup, which is best-effort. A LIST phase counts object identities as successes,
-// not requests, so an empty listing with some failed requests looks the same as one that all failed.
+// String gives the reason a run exits 1.
+func (p AllFailedPhase) String() string {
+	switch {
+	case p.EmptyListing:
+		return fmt.Sprintf("phase %s found no objects and %d requests failed", p.Label, p.FailureCount)
+	case p.Operation != "":
+		return fmt.Sprintf("every %s request of phase %s failed (%d failed, 0 succeeded)", p.Operation, p.Label, p.FailureCount)
+	}
+	return fmt.Sprintf("every request of phase %s failed (%d failed, 0 succeeded)", p.Label, p.FailureCount)
+}
+
+// AllFailedPhases lists what has failures and no successes: each ordinary phase, and each operation
+// of a mixed phase. In an ordinary workload a DELETE phase is its --cleanup, which is best-effort.
+// A LIST phase with no objects and a failed request can't show that a listing was empty, so it's here.
 func (s *RunSummary) AllFailedPhases() []AllFailedPhase {
 	if s == nil {
 		return nil
 	}
 	var phases []AllFailedPhase
 	for _, step := range s.Steps {
-		if step.Metrics == nil || step.Metrics.SuccessCount != 0 || step.Metrics.FailureCount <= 0 ||
-			strings.EqualFold(step.Operation, reportOperationDelete) || strings.EqualFold(step.Operation, workloadTypeList) {
-			continue
-		}
 		label := step.PhaseLabel
 		if label == "" {
 			label = step.StepID
 		}
-		phases = append(phases, AllFailedPhase{Label: label, FailureCount: step.Metrics.FailureCount})
+		if step.IsMixed {
+			for _, op := range step.OperationBreakdown {
+				if op.Metrics.SuccessCount == 0 && op.Metrics.FailureCount > 0 {
+					phases = append(phases, AllFailedPhase{Label: label, Operation: op.Operation, FailureCount: op.Metrics.FailureCount})
+				}
+			}
+			continue
+		}
+		if step.Metrics == nil || step.Metrics.SuccessCount != 0 || step.Metrics.FailureCount <= 0 ||
+			strings.EqualFold(step.Operation, reportOperationDelete) {
+			continue
+		}
+		phases = append(phases, AllFailedPhase{
+			Label:        label,
+			FailureCount: step.Metrics.FailureCount,
+			EmptyListing: strings.EqualFold(step.Operation, workloadTypeList),
+		})
 	}
 	return phases
 }

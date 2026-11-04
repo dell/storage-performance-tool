@@ -1,15 +1,68 @@
 package cmd
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
+	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/results/summary"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
+
+// writeAllFailedRunDir writes the artifacts of one write phase whose requests all failed.
+func writeAllFailedRunDir(t *testing.T) string {
+	t.Helper()
+	runDir := filepath.Join(t.TempDir(), "mt-20250926.172619.540")
+	if err := os.Mkdir(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	stepID := "mt-001-20250926.172621.307-create"
+	metricsName := fmt.Sprintf("%s.%s", stepID, constants.ResultsArtifactSuffixMetricsTotal)
+	metricsCSV := "DateTimeISO8601,OpType,Concurrency,NodeCount,ConcurrencyCurr,ConcurrencyMean,CountSucc,CountFail,Size,StepDuration[s],DurationSum[s],TPAvg[op/s],TPLast[op/s],BWAvg[MiB/s],BWLast[MiB/s],DurationAvg[us],DurationMin[us],DurationQ_0.5[us],DurationAvg[us],DurationQ_0.99[us],DurationMax[us],LatencyAvg[us],LatencyMin[us],LatencyQ_0.5[us],LatencyAvg[us],LatencyQ_0.99[us],LatencyMax[us]\n" +
+		"\"2025-09-26T17:27:00Z\",CREATE,8,4,8,8,0,2499,0,7.554,244.988254,0,0,0,0,79900,28000,59000,79876,108000,623000,79900,28000,59000,79876,108000,623000\n"
+	if err := os.WriteFile(filepath.Join(runDir, metricsName), []byte(metricsCSV), 0o644); err != nil {
+		t.Fatalf("write metrics csv: %v", err)
+	}
+	manifest := &results.Manifest{
+		BaseURL:     "http://spt-test-1.cec.delllabs.net:9999",
+		OutputDir:   runDir,
+		GeneratedAt: time.Now().UTC(),
+		Steps: []results.StepManifest{{
+			StepID:      stepID,
+			CompletedAt: time.Now().UTC(),
+			Files:       []results.FileStatus{{Name: metricsName, Size: int64(len(metricsCSV)), Status: "ok"}},
+		}},
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, constants.ResultsManifestFileName), data, 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	meta := &runMetadata{
+		GeneratedAt:     time.Date(2025, 9, 26, 17, 27, 28, 0, time.UTC),
+		WorkloadType:    "write",
+		ResultsRoot:     filepath.Base(runDir),
+		ScenarioParams:  scenario.Params{ObjectSize: "1MB", ObjectCount: 2500, Threads: 8},
+		ExpectedStepIDs: []string{stepID},
+		ActualStepIDs:   []string{stepID},
+	}
+	if err := writeRunMetadata(meta, runDir); err != nil {
+		t.Fatalf("write run metadata: %v", err)
+	}
+	return runDir
+}
 
 func allFailedOutcome(state string) autoResultsOutcome {
 	return autoResultsOutcome{
@@ -63,6 +116,23 @@ func TestOnlyACompletedRunIsJudged(t *testing.T) {
 	outcome.Tracker = nil
 	if err := resolveOrdinaryRunError(nil, outcome); err != nil {
 		t.Fatalf("no tracker: err = %v", err)
+	}
+}
+
+func TestASavedSummaryOfAPhaseThatAllFailedReachesTheExitCode(t *testing.T) {
+	runDir := writeAllFailedRunDir(t)
+	runSummary, err := generateRunSummary(context.Background(), runDir, io.Discard)
+	if err != nil {
+		t.Fatalf("generate summary: %v", err)
+	}
+	outcome := autoResultsOutcome{
+		Tracker:         &portcheck.RunResult{FinalState: constants.StateCompleted},
+		AllFailedPhases: runSummary.AllFailedPhases(),
+	}
+	got := resolveOrdinaryRunError(nil, outcome)
+	var exit *ExitCodeError
+	if !errors.As(got, &exit) || !strings.Contains(exit.Msg, "every request of phase Create failed (2499 failed, 0 succeeded)") {
+		t.Fatalf("err = %v", got)
 	}
 }
 

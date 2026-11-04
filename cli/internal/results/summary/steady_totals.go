@@ -210,8 +210,8 @@ func steadyInstabilityWarning(phase string, unsteady *SteadyInstability) string 
 		readings = append(readings, fmt.Sprintf("CV %.2f", *unsteady.CV))
 	}
 	return fmt.Sprintf(
-		"%s: a valid steady window's rate didn't hold (%s), so a steady rate may hide a fall such as an outage. "+
-			"This warns at a trend of %.0f%% or lower or a CV of %.1f or higher, which are uncalibrated cutoffs",
+		"%s: a valid steady window's rate didn't hold (%s), so a steady rate may hide a fall such as an outage "+
+			"(uncalibrated cutoffs: trend <= %.0f%%, CV >= %.1f)",
 		phase, strings.Join(readings, ", "), steadyWarnTrendPercent, steadyWarnCV)
 }
 

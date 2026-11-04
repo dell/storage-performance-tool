@@ -1232,7 +1232,7 @@ func resolveOrdinaryRunError(runErr error, outcome autoResultsOutcome) error {
 func allFailedPhasesReason(phases []summary.AllFailedPhase) string {
 	reasons := make([]string, 0, len(phases))
 	for _, phase := range phases {
-		reasons = append(reasons, fmt.Sprintf("every request of phase %s failed (%d failed, 0 succeeded)", phase.Label, phase.FailureCount))
+		reasons = append(reasons, phase.String())
 	}
 	return strings.Join(reasons, "; ")
 }
