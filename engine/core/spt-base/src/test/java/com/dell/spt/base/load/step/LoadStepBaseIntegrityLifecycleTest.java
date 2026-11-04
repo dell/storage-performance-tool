@@ -85,7 +85,7 @@ class LoadStepBaseIntegrityLifecycleTest {
 		assertTrue(step.closeCalled);
 		assertSame(startFailure, step.runFailure(),
 						"best-effort callers need the real lifecycle outcome");
-		assertTrue(step.runFailure().getSuppressed().length >= 1,
+		assertEquals(1, step.runFailure().getSuppressed().length,
 						"cleanup failure should remain distinguishable behind the first failure");
 	}
 

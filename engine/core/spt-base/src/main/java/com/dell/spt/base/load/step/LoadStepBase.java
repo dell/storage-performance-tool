@@ -294,7 +294,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	protected void afterSteadyWindowsClosed() {}
 
 	private void recordRunFailure(final Throwable failure) {
-		if (failure == null || failure == runFailure) {
+		// A terminal failure wrapping the recorded one adds nothing, and suppressing it would make a cycle.
+		if (failure == null || failure == runFailure || (runFailure != null && failure.getCause() == runFailure)) {
 			return;
 		}
 		if (runFailure == null) {
@@ -717,12 +718,6 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 						null);
 	}
 
-	/**
-	 * Returns the terminal failure a lifecycle phase ends with, or null when the cause is ordinary
-	 * and keeps the legacy non-throwing behavior. A generic typed cause keeps its own category and
-	 * message, also in metadata mode; any other failure of a metadata-mode step becomes the given
-	 * integrity failure.
-	 */
 	/** A step that didn't start ends the run, unless a stop interrupted it, which is that stop. */
 	private RunTerminalException startFailure(final Throwable cause) {
 		if (Thread.currentThread().isInterrupted()) {
@@ -735,6 +730,12 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 						cause);
 	}
 
+	/**
+	 * Returns the terminal failure a lifecycle phase ends with, or null when the cause is ordinary
+	 * and keeps the legacy non-throwing behavior. A generic typed cause keeps its own category and
+	 * message, also in metadata mode; any other failure of a metadata-mode step becomes the given
+	 * integrity failure.
+	 */
 	private RunTerminalException lifecycleTerminalFailure(
 					final IntegrityTerminalException.Category category,
 					final String integrityMessage,
