@@ -34,6 +34,8 @@ type steadyTestRow struct {
 	steadyTP float64
 	steadyBW float64
 	status   string
+	// trend and cv override the fixture's steady indicators; "-" writes an empty cell.
+	trend, cv string
 }
 
 type steadyTestStep struct {
@@ -77,10 +79,20 @@ func (row steadyTestRow) steadyValues() map[string]string {
 	values["StepDuration[s]"] = "57.4"
 	values[columnSteadyStart] = "1.3"
 	values[columnSteadyTurnovers] = "412.6"
-	values[columnSteadyTrend] = "-0.8"
-	values[columnSteadyCV] = "0.02"
+	values[columnSteadyTrend] = steadyIndicator(row.trend, "-0.8")
+	values[columnSteadyCV] = steadyIndicator(row.cv, "0.02")
 	values[columnSteadyStatus] = row.status
 	return values
+}
+
+func steadyIndicator(value, healthy string) string {
+	switch value {
+	case "":
+		return healthy
+	case "-":
+		return ""
+	}
+	return value
 }
 
 func steadyTestCSV(header []string, rows []map[string]string) string {

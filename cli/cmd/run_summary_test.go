@@ -91,7 +91,7 @@ func TestGenerateRunSummaryCreatesFileAndSnippet(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	if err := generateRunSummary(context.Background(), runDir, &buf); err != nil {
+	if _, err := generateRunSummary(context.Background(), runDir, &buf); err != nil {
 		t.Fatalf("generateRunSummary error: %v", err)
 	}
 
@@ -180,7 +180,7 @@ func TestGenerateRunSummaryHandlesListWorkload(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	if err := generateRunSummary(context.Background(), runDir, &buf); err != nil {
+	if _, err := generateRunSummary(context.Background(), runDir, &buf); err != nil {
 		t.Fatalf("generateRunSummary error: %v", err)
 	}
 
@@ -264,7 +264,7 @@ func TestGenerateRunSummaryMixedWorkloadIncludesBreakdown(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	if err := generateRunSummary(context.Background(), runDir, &buf); err != nil {
+	if _, err := generateRunSummary(context.Background(), runDir, &buf); err != nil {
 		t.Fatalf("generateRunSummary error: %v", err)
 	}
 
@@ -364,7 +364,7 @@ func TestGenerateRunSummaryMixedWorkloadPropagatesDistributionWarning(t *testing
 	}
 
 	var buf strings.Builder
-	if err := generateRunSummary(context.Background(), runDir, &buf); err != nil {
+	if _, err := generateRunSummary(context.Background(), runDir, &buf); err != nil {
 		t.Fatalf("generateRunSummary error: %v", err)
 	}
 
@@ -391,7 +391,7 @@ func TestGenerateRunSummaryErrorOnMissingManifest(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "empty"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	err := generateRunSummary(context.Background(), filepath.Join(dir, "empty"), &strings.Builder{})
+	_, err := generateRunSummary(context.Background(), filepath.Join(dir, "empty"), &strings.Builder{})
 	if err == nil {
 		t.Fatalf("expected error when manifest missing")
 	}

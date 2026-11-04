@@ -80,15 +80,15 @@ func usesCompactSummaryOutput(out io.Writer) bool {
 // generateRunSummary loads run artifacts from runDir, produces a summary report file,
 // and writes a console-friendly snippet to out. Non-fatal errors are logged and
 // returned so callers can surface warnings without aborting the workflow.
-func generateRunSummary(ctx context.Context, runDir string, out io.Writer) error {
+func generateRunSummary(ctx context.Context, runDir string, out io.Writer) (*summary.RunSummary, error) {
 	loader := summary.NewLoader()
 	runData, err := loader.Load(ctx, runDir)
 	if err != nil {
-		return fmt.Errorf("load results: %w", err)
+		return nil, fmt.Errorf("load results: %w", err)
 	}
 	agg, err := summary.Aggregate(runData)
 	if err != nil {
-		return fmt.Errorf("aggregate summary: %w", err)
+		return nil, fmt.Errorf("aggregate summary: %w", err)
 	}
 	fullRenderer := summary.NewRenderer(summary.RenderOptions{MaxWidth: 110})
 	fullReport := fullRenderer.FullReport(agg)
@@ -108,7 +108,7 @@ func generateRunSummary(ctx context.Context, runDir string, out io.Writer) error
 	fileName := fmt.Sprintf(constants.ResultsSummaryFilePattern, agg.RunID)
 	filePath := filepath.Join(runDir, fileName)
 	if err := writeAtomic(filePath, []byte(fullReport), 0o644); err != nil {
-		return fmt.Errorf("write report: %w", err)
+		return agg, fmt.Errorf("write report: %w", err)
 	}
 	if out != nil {
 		if _, writeErr := fmt.Fprintf(out, "Auto-results: summary saved to %s\n", filePath); writeErr != nil {
@@ -118,7 +118,7 @@ func generateRunSummary(ctx context.Context, runDir string, out io.Writer) error
 	if flusher, ok := out.(interface{ Flush() }); ok {
 		flusher.Flush()
 	}
-	return nil
+	return agg, nil
 }
 
 func writeAtomic(path string, data []byte, perm os.FileMode) error {

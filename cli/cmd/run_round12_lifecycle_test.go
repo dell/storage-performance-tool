@@ -13,6 +13,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
+	"github.com/dell/storage-performance-tool/cli/internal/results/summary"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
@@ -47,7 +48,7 @@ func TestAutoResultsSetupFailureIsArtifactOutcome(t *testing.T) {
 	newResultsFetcherFunc = func(_, output string) autoResultsFetcher {
 		return &fakeFetcher{output: output, manifest: &results.Manifest{}}
 	}
-	generateRunSummaryFunc = func(context.Context, string, io.Writer) error { return nil }
+	generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) { return nil, nil }
 
 	for _, test := range []struct {
 		name  string

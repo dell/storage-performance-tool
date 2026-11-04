@@ -34,6 +34,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/preflight"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
+	"github.com/dell/storage-performance-tool/cli/internal/results/summary"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
@@ -120,6 +121,7 @@ type autoResultsOutcome struct {
 	SummaryErr           error
 	ShutdownErr          error
 	StepIDs              []string
+	AllFailedPhases      []summary.AllFailedPhase
 }
 
 type postRunBudgets struct {
@@ -1105,9 +1107,11 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				writer = traceOutput
 			}
 		}
-		if err := generateRunSummaryFunc(summaryCtx, root, writer); err != nil {
+		runSummary, err := generateRunSummaryFunc(summaryCtx, root, writer)
+		if err != nil {
 			outcome.SummaryErr = errors.Join(outcome.SummaryErr, err)
 		}
+		outcome.AllFailedPhases = runSummary.AllFailedPhases()
 		if traceOutput != nil {
 			if closeErr := traceOutput.Close(); closeErr != nil {
 				outcome.SummaryErr = errors.Join(
@@ -1207,9 +1211,13 @@ func stepRoleLifecycle(result *portcheck.RunResult, runtimeStepID, plannedStepID
 
 // resolveOrdinaryRunError makes an engine FAILED status authoritative for workloads outside the
 // integrity and DELETE contracts: the run exits 1 with the engine's cause even when the presenter
-// reported none, and missing metrics or artifacts never replace that cause.
+// reported none, and missing metrics or artifacts never replace that cause. A run that finished
+// cleanly also exits 1 if every request of a phase failed, since its numbers measured nothing.
 func resolveOrdinaryRunError(runErr error, outcome autoResultsOutcome) error {
 	if outcome.Tracker == nil || outcome.Tracker.FinalState != constants.StateFailed {
+		if runErr == nil && len(outcome.AllFailedPhases) > 0 {
+			return &ExitCodeError{Code: constants.ExitCodeWorkloadFailure, Msg: allFailedPhasesReason(outcome.AllFailedPhases)}
+		}
 		return runErr
 	}
 	message := trackedFailureReason(outcome.Tracker)
@@ -1217,6 +1225,14 @@ func resolveOrdinaryRunError(runErr error, outcome autoResultsOutcome) error {
 		message += "; run also failed: " + runErr.Error()
 	}
 	return &ExitCodeError{Code: constants.ExitCodeWorkloadFailure, Msg: message, Cause: runErr}
+}
+
+func allFailedPhasesReason(phases []summary.AllFailedPhase) string {
+	reasons := make([]string, 0, len(phases))
+	for _, phase := range phases {
+		reasons = append(reasons, fmt.Sprintf("every request of phase %s failed (%d failed, 0 succeeded)", phase.Label, phase.FailureCount))
+	}
+	return strings.Join(reasons, "; ")
 }
 
 // trackedFailureReason describes a FAILED terminal status, omitting attribution the engine did not report.

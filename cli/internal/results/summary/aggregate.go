@@ -211,6 +211,7 @@ type RunTotals struct {
 	DataBytes       int64
 	DataMiB         float64
 	DataGiB         float64
+	FailureCount    int64
 }
 
 const (
@@ -447,6 +448,9 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 		summary.SuccessUnit = successUnitForOperation(summary.Operation)
 		if metrics != nil {
 			metrics.Steady = deriveSteadyRates(stepData, summary.IsMixed, steadyAbsent)
+			if warning := steadyInstabilityWarning(summary.PhaseLabel, metrics.Steady.Unsteady); warning != "" {
+				warnings = append(warnings, warning)
+			}
 		}
 		if metrics != nil && strings.EqualFold(summary.Operation, workloadreg.List) {
 			normalizeListMetrics(metrics, integrity)
@@ -455,6 +459,7 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 			summary.Metrics = metrics
 			totals.DurationSeconds += metrics.DurationSeconds
 			totals.DataBytes += metrics.DataBytes
+			totals.FailureCount += metrics.FailureCount
 		} else if !stepData.MetricsSuppressed {
 			statusLabel := string(stepData.Status)
 			if statusLabel == "" {
@@ -475,6 +480,33 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 	totals.DataMiB = bytesToMiB(totals.DataBytes)
 	totals.DataGiB = bytesToGiB(totals.DataBytes)
 	return steps, totals, warnings
+}
+
+// AllFailedPhase is a phase whose every request failed.
+type AllFailedPhase struct {
+	Label        string
+	FailureCount int64
+}
+
+// AllFailedPhases lists the phases with failures and no successes. An empty listing has neither, so
+// it isn't one. In an ordinary workload a DELETE phase is its --cleanup, which is best-effort.
+func (s *RunSummary) AllFailedPhases() []AllFailedPhase {
+	if s == nil {
+		return nil
+	}
+	var phases []AllFailedPhase
+	for _, step := range s.Steps {
+		if step.Metrics == nil || step.Metrics.SuccessCount != 0 || step.Metrics.FailureCount <= 0 ||
+			strings.EqualFold(step.Operation, reportOperationDelete) {
+			continue
+		}
+		label := step.PhaseLabel
+		if label == "" {
+			label = step.StepID
+		}
+		phases = append(phases, AllFailedPhase{Label: label, FailureCount: step.Metrics.FailureCount})
+	}
+	return phases
 }
 
 func successUnitForOperation(operation string) string {
