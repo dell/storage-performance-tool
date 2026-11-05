@@ -631,10 +631,24 @@ tasks.register('verifyEngineBuildInfoCanary') {
 	}
 }
 
+tasks.register('verifyImageMallocTunable') {
+	group = 'verification'
+	description = 'Checks that the image keeps the malloc setting RDMA pre-warm depends on'
+	def dockerfile = layout.projectDirectory.file('Dockerfile')
+	inputs.file(dockerfile)
+	doLast {
+		def expected = 'ENV GLIBC_TUNABLES=glibc.malloc.hugetlb=1'
+		if (!dockerfile.asFile.readLines().any { it.trim() == expected }) {
+			throw new GradleException("engine/bundle/Dockerfile no longer sets '${expected}'; see cli/docs/S3_RDMA.md, Pre-warm")
+		}
+	}
+}
+
 tasks.register('test') {
 	group = 'verification'
 	description = 'Runs bundle-level tests'
 	dependsOn tasks.named('verifyDirectJarScenarioConfigs'),
+		tasks.named('verifyImageMallocTunable'),
 		tasks.named('verifyEngineBuildInfoCanary'),
 		tasks.named('verifyEngineBuildInfoDocumentation')
 }

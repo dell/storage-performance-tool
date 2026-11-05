@@ -28,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Changed
 
+- **Huge pages in the image** — The SPT image now sets `GLIBC_TUNABLES=glibc.malloc.hugetlb=1`. Where the host's transparent huge pages mode is `madvise`, malloc asks for huge pages on mappings of 2 MiB or more, in every engine the image runs, HTTP included. At 1 GiB and 96 threads on four NICs, one engine's RDMA pre-warm per NIC fell from about 12.8 s to 5.5 s, with no change measured under load. With `always` or `never` it changes nothing.
 - **Driver extension methods** — `NettyStorageDriverBase.releaseTransport(Channel)`, `CoopStorageDriverBase.hasAvailableDispatchCapacity()` and `CoopStorageDriverBase.dispatchAttemptLimit(int)` are now protected, so that a driver can hold capacity beyond the concurrency permit. A driver extension that already declares a method with one of these signatures now overrides it, even if it is already compiled, or no longer compiles if it declares it with weaker access; rename that method.
 - **Dependency updates** — The CLI is now built with Go 1.26.0 (previously 1.25.14), and building it from source needs Go 1.26 or later. Updated `golang.org/x/sys` to 0.49.0.
 
