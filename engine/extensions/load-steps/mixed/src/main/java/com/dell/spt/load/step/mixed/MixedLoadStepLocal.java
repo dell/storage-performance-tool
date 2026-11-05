@@ -8,6 +8,8 @@ import com.dell.spt.base.config.NicSetConfig;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.item.DataItemImpl;
+import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.ItemType;
@@ -74,6 +76,8 @@ import static com.github.akurilov.confuse.Config.deepToMap;
 @SuppressWarnings({"unchecked", "rawtypes"
 })
 public final class MixedLoadStepLocal extends LoadStepLocalBase {
+
+	static final String DELETE_ITEMS_FILE = "load-op-delete-input-file";
 
 	private volatile MixedLoadGenerator mixedGenerator;
 
@@ -552,8 +556,27 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 					final String filePath,
 					final List items,
 					final ItemFactory factory) {
-		loadItems("seed items file", filePath, factory, items::add);
+		loadItems("seed items file", filePath, factory, item -> items.add(readPoolItem(item)));
 		Loggers.MSG.info("MixedLoad: loaded {} seed items from {}", items.size(), filePath);
+	}
+
+	/**
+	 * The read pool copies each item it hands out by name, so a manifest row's bucket has to be in
+	 * the name, as it is in an engine-format row. This keeps that copy, which runs per operation, as it is.
+	 * The request path built from that name has no empty segments, so a key with one would address another
+	 * object: it fails here, before any request.
+	 */
+	private static Object readPoolItem(final Object item) {
+		if (item instanceof IntegrityManifestDataItem manifestItem) {
+			final String key = manifestItem.name();
+			if (key.startsWith("/") || key.endsWith("/") || key.contains("//")) {
+				throw itemsFileFailure(
+								"a key in the items file starts or ends with \"/\" or contains \"//\", which a mixed READ does not support",
+								null);
+			}
+			return new DataItemImpl("/" + manifestItem.bucket() + "/" + key, 0, manifestItem.size());
+		}
+		return item;
 	}
 
 	/** Each engine reads from its own share of the items, so it needs at least one of them. */
@@ -570,7 +593,8 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 					final PoolItemInput pool,
 					final ItemFactory factory) {
 		final long count = loadItems("delete items file", filePath, factory, item -> pool.addDeleteItem((Item) item));
-		if (count == 0) {
+		// A slice isn't a .csv, and can be empty: the step's client checked the file it came from.
+		if (count == 0 && filePath.endsWith(".csv")) {
 			throw itemsFileFailure("delete items file has no items", null);
 		}
 		Loggers.MSG.info("MixedLoad: pre-populated DELETE queue with {} items from {}", count, filePath);
@@ -606,14 +630,14 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		return count;
 	}
 
-	private static RunTerminalException itemsFileFailure(final String message, final Throwable cause) {
+	static RunTerminalException itemsFileFailure(final String message, final Throwable cause) {
 		return new RunTerminalException(IntegrityTerminalException.Category.INPUT, "MixedLoad: " + message, cause);
 	}
 
 	/** Reads {@code load.op.delete.input.file} from the merged config. */
-	private static String resolveDeleteItemsFile(final Config cfg) {
+	static String resolveDeleteItemsFile(final Config cfg) {
 		try {
-			return cfg.stringVal("load-op-delete-input-file");
+			return cfg.stringVal(DELETE_ITEMS_FILE);
 		} catch (final Exception e) {
 			return null;
 		}
