@@ -860,3 +860,42 @@ func configPath(config map[string]any, path ...string) (any, bool) {
 	}
 	return value, true
 }
+
+// A seeded DELETE reads its objects from a manifest, so the engine has no path to name a generated
+// set's buckets from unless the phase carries one. Without it every result lands in the catch-all row.
+func TestGenerateSeededDeleteScenarioNamesAGeneratedBucketSet(t *testing.T) {
+	params := Params{
+		WorkloadType:    workload.Delete,
+		RunID:           881,
+		Bucket:          "bucket-a",
+		ObjectCount:     8,
+		Threads:         2,
+		Cleanup:         true,
+		BucketCount:     4,
+		DeleteBatchSize: 1,
+		BaseTimestamp:   "20261105.120000.000",
+	}
+	generated, err := GenerateDeleteScenario(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configs := parseGeneratedScenarioConfigs(t, generated)
+	if len(configs) != 3 {
+		t.Fatalf("seeded DELETE configs = %d, want seed, DELETE and cleanup", len(configs))
+	}
+	for i, name := range []string{"seed", "DELETE", "cleanup"} {
+		if got := generatedConfigValue(t, configs[i], "item", "output", "path"); got != "/bucket-a" {
+			t.Errorf("%s item.output.path = %#v, want /bucket-a", name, got)
+		}
+	}
+
+	params.BucketCount = 1
+	single, err := GenerateDeleteScenario(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(single, `"item": {"type": "data", "input": {"file": writtenFile}},`) ||
+		!strings.Contains(single, `"item": {"type": "data", "input": {"file": residualFile}},`) {
+		t.Errorf("a single bucket's DELETE and cleanup items changed:\n%s", single)
+	}
+}
