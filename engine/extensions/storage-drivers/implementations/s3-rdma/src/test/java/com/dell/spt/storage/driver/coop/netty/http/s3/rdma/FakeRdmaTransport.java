@@ -1,6 +1,7 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 
 import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -48,12 +49,33 @@ public class FakeRdmaTransport extends RdmaTransport {
 
 	/** When true, generateToken() returns null. */
 	private volatile boolean failTokenGeneration;
+	private final AtomicInteger failNextTokens = new AtomicInteger();
 
 	/** When true, init() fails and the transport stays unavailable. */
 	private volatile boolean failInit;
 
 	/** Buffers still registered when the transport was closed; negative until then. */
 	private volatile int activeRegistrationsAtClose = -1;
+
+	/** The DC target number tokens carry; a NIC's fake sets its own. */
+	private volatile int dctn = 0x00133f;
+
+	/** Runs inside registerBuffer(), generateToken() and deregisterBuffer(), to hold a caller there. */
+	private volatile Runnable beforeRegister = () -> {};
+	private volatile Runnable beforeToken = () -> {};
+	private volatile Runnable beforeDeregister = () -> {};
+	private final AtomicInteger callsInFlight = new AtomicInteger();
+	private final AtomicInteger closes = new AtomicInteger();
+	private volatile boolean closedDuringCall;
+	private volatile String strictDevice;
+	private volatile String strictAddress;
+
+	private volatile int[] startingCpus = {0, 1, 2, 3, 4, 5, 6, 7
+	};
+	private final ThreadLocal<int[]> threadCpus = ThreadLocal.withInitial(() -> startingCpus.clone());
+	private final List<int[]> cpusSet = new java.util.concurrent.CopyOnWriteArrayList<>();
+	private final List<Integer> setCpusResults = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+	private volatile RuntimeException cpusFailure;
 
 	public FakeRdmaTransport(final RdmaConfig config) {
 		super(config);
@@ -70,6 +92,57 @@ public class FakeRdmaTransport extends RdmaTransport {
 	}
 
 	@Override
+	public void initStrict(final String device, final String localIp) {
+		if (failInit) {
+			throw new RdmaException("injected open failure of " + device + " at " + localIp, 5, "EIO");
+		}
+		strictDevice = device;
+		strictAddress = localIp;
+		available = true;
+	}
+
+	@Override
+	public int[] currentThreadCpus() {
+		if (cpusFailure != null) {
+			throw cpusFailure;
+		}
+		return threadCpus.get().clone();
+	}
+
+	@Override
+	public int setCurrentThreadCpus(final int[] cpus) {
+		if (cpusFailure != null) {
+			throw cpusFailure;
+		}
+		final int result = setCpusResults.isEmpty() ? 0 : setCpusResults.remove(0);
+		if (result == 0) {
+			threadCpus.set(cpus.clone());
+			cpusSet.add(cpus.clone());
+		}
+		return result;
+	}
+
+	/** Every mask set on this transport's threads, in order. */
+	public List<int[]> getCpusSet() {
+		return cpusSet;
+	}
+
+	/** What the next calls to set a mask return, then 0. */
+	public void setSetCpusResults(final Integer... results) {
+		setCpusResults.addAll(List.of(results));
+	}
+
+	public void setCpusFailure(final RuntimeException failure) {
+		cpusFailure = failure;
+	}
+
+	/** The mask a thread starts with here. */
+	public void setThreadCpus(final int... cpus) {
+		threadCpus.set(cpus.clone());
+		startingCpus = cpus.clone();
+	}
+
+	@Override
 	public boolean isAvailable() {
 		return available;
 	}
@@ -79,44 +152,66 @@ public class FakeRdmaTransport extends RdmaTransport {
 		if (!available || buffer == null) {
 			return 0;
 		}
-		final long count = registerCount.incrementAndGet();
-		if (failAfterNRegistrations >= 0 && count > failAfterNRegistrations) {
-			return 0; // simulate registration failure
+		callsInFlight.incrementAndGet();
+		try {
+			beforeRegister.run();
+			final long count = registerCount.incrementAndGet();
+			if (failAfterNRegistrations >= 0 && count > failAfterNRegistrations) {
+				return 0; // simulate registration failure
+			}
+			if (failNextRegistrations.getAndUpdate(left -> Math.max(0, left - 1)) > 0) {
+				return 0; // simulate a registration failure that does not last
+			}
+			final long handle = handleCounter.incrementAndGet();
+			activeRegistrations.put(handle, buffer);
+			return handle;
+		} finally {
+			callsInFlight.decrementAndGet();
 		}
-		if (failNextRegistrations.getAndUpdate(left -> Math.max(0, left - 1)) > 0) {
-			return 0; // simulate a registration failure that does not last
-		}
-		final long handle = handleCounter.incrementAndGet();
-		activeRegistrations.put(handle, buffer);
-		return handle;
 	}
 
 	@Override
 	public String generateToken(final long mrHandle, final int size) {
-		if (!available || mrHandle == 0 || failTokenGeneration) {
+		if (!available || mrHandle == 0 || failTokenGeneration || failNextTokens.getAndUpdate(n -> Math.max(0, n - 1)) > 0) {
 			return null;
 		}
-		// Return a valid-format token: addr:size:rkey:lid:dctn:g:gid
-		return String.format("%016x:%08x:%08x:%04x:%06x:%d:%032x",
-						0x7fffc3200000L + mrHandle, size, mrHandle & 0xFFFFFFFFL,
-						0, 0x00133f, 1, 0xfe80000000000000L);
+		callsInFlight.incrementAndGet();
+		try {
+			beforeToken.run();
+			// Return a valid-format token: addr:size:rkey:lid:dctn:g:gid
+			return String.format("%016x:%08x:%08x:%04x:%06x:%d:%032x",
+							0x7fffc3200000L + mrHandle, size, mrHandle & 0xFFFFFFFFL,
+							0, dctn, 1, 0xfe80000000000000L);
+		} finally {
+			callsInFlight.decrementAndGet();
+		}
 	}
 
 	@Override
 	public void deregisterBuffer(final ByteBuffer buffer, final long mrHandle) {
-		if (mrHandle != 0 && !deregisteredHandles.add(mrHandle)) {
-			// Handle was already deregistered — this is a double-free bug
-			if (strictDeregister) {
-				throw new IllegalStateException(
-								"Double deregister detected for handle " + mrHandle);
+		callsInFlight.incrementAndGet();
+		try {
+			beforeDeregister.run();
+			if (mrHandle != 0 && !deregisteredHandles.add(mrHandle)) {
+				// Handle was already deregistered — this is a double-free bug
+				if (strictDeregister) {
+					throw new IllegalStateException(
+									"Double deregister detected for handle " + mrHandle);
+				}
 			}
+			activeRegistrations.remove(mrHandle);
+			deregisterCount.incrementAndGet();
+		} finally {
+			callsInFlight.decrementAndGet();
 		}
-		activeRegistrations.remove(mrHandle);
-		deregisterCount.incrementAndGet();
 	}
 
 	@Override
 	public void close() {
+		closes.incrementAndGet();
+		if (callsInFlight.get() > 0) {
+			closedDuringCall = true;
+		}
 		available = false;
 		if (activeRegistrationsAtClose < 0) {
 			activeRegistrationsAtClose = activeRegistrations.size();
@@ -125,6 +220,26 @@ public class FakeRdmaTransport extends RdmaTransport {
 	}
 
 	// ==================== Test verification helpers ====================
+
+	/** How many times close() ran. */
+	public int getCloseCount() {
+		return closes.get();
+	}
+
+	/** True if close() ran while registerBuffer() or generateToken() was running. */
+	public boolean wasClosedDuringACall() {
+		return closedDuringCall;
+	}
+
+	/** The device of the strict open; null without one. */
+	public String getStrictDevice() {
+		return strictDevice;
+	}
+
+	/** The address of the strict open; null without one. */
+	public String getStrictAddress() {
+		return strictAddress;
+	}
 
 	/** Total number of registerBuffer() calls (including failed ones). */
 	public long getRegisterCount() {
@@ -158,6 +273,26 @@ public class FakeRdmaTransport extends RdmaTransport {
 
 	// ==================== Failure injection ====================
 
+	/** Tokens carry this DC target number from now on. */
+	public void setDctn(final int dctn) {
+		this.dctn = dctn;
+	}
+
+	/** Runs in each registerBuffer() call, before it registers. */
+	public void setBeforeRegister(final Runnable action) {
+		this.beforeRegister = action;
+	}
+
+	/** Runs in each generateToken() call, before it makes the token. */
+	public void setBeforeToken(final Runnable action) {
+		this.beforeToken = action;
+	}
+
+	/** Runs the action inside deregisterBuffer(), to hold a caller there. */
+	public void setBeforeDeregister(final Runnable action) {
+		this.beforeDeregister = action;
+	}
+
 	/** After n successful registrations, subsequent calls return 0 (failure). Set -1 to disable. */
 	public void setFailAfterNRegistrations(final int n) {
 		this.failAfterNRegistrations = n;
@@ -166,6 +301,11 @@ public class FakeRdmaTransport extends RdmaTransport {
 	/** The next n registerBuffer() calls return 0 (failure); the calls after them succeed. */
 	public void setFailNextRegistrations(final int n) {
 		this.failNextRegistrations.set(n);
+	}
+
+	/** The next n generateToken() calls return null; the calls after them succeed. */
+	public void setFailNextTokens(final int n) {
+		this.failNextTokens.set(n);
 	}
 
 	/** When true, generateToken() always returns null. */

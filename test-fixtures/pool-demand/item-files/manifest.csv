@@ -1,0 +1,3 @@
+bucket,key,size,version_id
+b1,k1,3145728,
+b1,"k,2",4194304,v2

@@ -1,0 +1,16 @@
+{
+  "comment": "What the engine's scan and the CLI's reader must each report for the files beside this one.",
+  "files": {
+    "one-class.csv": {"complete": true, "items": 3, "bounds": [[3145728, 4194304]]},
+    "spanning.csv": {"complete": true, "items": 3, "bounds": [[2097152, 2097152], [67108864, 67108864], [1073741824, 1073741824]]},
+    "large-objects.csv": {"complete": true, "items": 2, "bounds": [[8589934592, 8589934592]]},
+    "below-threshold.csv": {"complete": true, "items": 2, "bounds": [[1024, 1024], [4096, 4096]]},
+    "empty.csv": {"complete": true, "items": 0, "bounds": []},
+    "manifest.csv": {"complete": true, "items": 2, "bounds": [[3145728, 4194304]]},
+    "manifest-empty.csv": {"complete": true, "items": 0, "bounds": []},
+    "malformed-first.csv": {"complete": false, "reason": "MALFORMED_ITEM"},
+    "malformed-size.csv": {"complete": false, "reason": "MALFORMED_ITEM"},
+    "malformed-last.csv": {"complete": false, "reason": "MALFORMED_ITEM"},
+    "manifest-malformed.csv": {"complete": false}
+  }
+}

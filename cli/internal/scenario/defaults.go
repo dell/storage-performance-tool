@@ -93,6 +93,8 @@ type RdmaConfig struct {
 	BufferPool *bool `yaml:"bufferPool,omitempty"`
 	// Emitted only above 1; the engine default copies a PUT payload on the dispatcher alone.
 	CopyThreads int `yaml:"copyThreads,omitempty"`
+	// Emitted only when given; the engine default is fail, which acts only with a NIC set.
+	PoolShortfall string `yaml:"poolShortfall,omitempty"`
 }
 
 // DriverConfig represents storage driver configuration
@@ -375,6 +377,7 @@ func GenerateDefaults(params Params) ([]byte, error) {
 				bufferPool := false
 				config.Storage.Rdma.BufferPool = &bufferPool
 			}
+			config.Storage.Rdma.PoolShortfall = params.RdmaPoolShortfall
 			if params.RdmaCopyThreads > 1 {
 				config.Storage.Rdma.CopyThreads = params.RdmaCopyThreads
 			}
@@ -454,6 +457,20 @@ func GenerateDefaults(params Params) ([]byte, error) {
 	}
 
 	return data, nil
+}
+
+// EffectiveDefaults gives the defaults a run's engines load, as a tree, engine overrides included.
+// A generated step's own configuration can still override them.
+func EffectiveDefaults(params Params) (map[string]any, error) {
+	data, err := GenerateDefaults(params)
+	if err != nil {
+		return nil, err
+	}
+	var root map[string]any
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, fmt.Errorf("failed to parse the generated defaults: %w", err)
+	}
+	return root, nil
 }
 
 // restoreTargetBucketSet writes the validated bucket set back after engine overrides. An override

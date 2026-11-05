@@ -16,9 +16,23 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
 class LoadStepBaseIntegrityLifecycleTest {
+
+	@Test
+	void aStepStoppedBeforeItsLoadIntervalKeepsItsTimeLimit() throws Exception {
+		final var step = new TestStep(metadataConfig(), null, false);
+		final var field = LoadStepBase.class.getDeclaredField("timeLimitSec");
+		field.setAccessible(true);
+		final var limit = (AtomicLong) field.get(step);
+		limit.set(60);
+
+		step.doStop();
+
+		assertEquals(60, limit.get(), "nothing ran, so nothing counts against the limit");
+	}
 
 	@Test
 	void metadataStartFailureCleansUpThenEscapesWithStepIdentity() {

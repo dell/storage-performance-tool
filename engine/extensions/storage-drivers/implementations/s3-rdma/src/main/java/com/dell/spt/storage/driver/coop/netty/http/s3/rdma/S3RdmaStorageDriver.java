@@ -49,6 +49,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Function;
 import java.util.function.IntFunction;
 
@@ -87,7 +88,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	 * Per-operation RDMA state tracked across the request/response lifecycle.
 	 * Created in submitRdma(), read in httpRequest(), cleaned up in complete().
 	 */
-	private static final class RdmaContext {
+	static final class RdmaContext {
 		final String token;
 		final ByteBuffer buffer;
 		final long mrHandle;
@@ -109,6 +110,8 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		RdmaBufferPool.PooledBuffer pooled;
 		/** Stale content was invalidated; the buffer is reusable only after a verified fill. */
 		boolean contentInvalidated;
+		/** The attempt's NIC with a NIC set; {@code null} on the default route, which has one. */
+		RdmaNic nic;
 
 		RdmaContext(final String token, final ByteBuffer buffer, final long mrHandle,
 						final OpType opType, final int size) {
@@ -186,13 +189,85 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	static final int STALE_CONTENT_STRIDE_BYTES = 4096;
 
 	/** Bound used when the driver's concurrency is unlimited. */
-	private static final int UNLIMITED_CONCURRENCY_POOL_LIMIT = 256;
+	static final int UNLIMITED_CONCURRENCY_POOL_LIMIT = 256;
 
-	/** Reused registered buffers, or {@code null} when storage.rdma.bufferPool is disabled. */
+	/**
+	 * Reused registered buffers, or {@code null} when storage.rdma.bufferPool is disabled and on the
+	 * NIC-set route, where each NIC has its own.
+	 */
 	private final RdmaBufferPool bufferPool;
 
-	/** Copies PUT payloads into their buffers, on storage.rdma.copyThreads threads. */
+	/** Copies PUT payloads into their buffers, on storage.rdma.copyThreads threads; {@code null} with a NIC set. */
 	private final RdmaPayloadCopier payloadCopier;
+
+	/** The default route's one NIC, over the fields above; {@code null} with a NIC set. */
+	private final RdmaNic defaultNic;
+
+	/** How the default route sends a prepared attempt: the 5.16 submit, on the dispatch task. */
+	private final AttemptRoute<O> defaultRoute = new AttemptRoute<>() {
+		@Override
+		public boolean sendRdma(final O op, final RdmaContext ctx) {
+			// httpRequest() adds the header, complete() cleans up.
+			rdmaOps.put(op, ctx);
+			final boolean submitted = submitInherited(op);
+			// A refused submission whose context is still here was not sent (the throttle is
+			// exhausted), and complete() won't be called. A context that is gone was claimed by a
+			// completion: that request was sent and failed while the parent was still submitting it.
+			if (submitted || !cleanupRdmaContext(op, true)) {
+				pathStats.rdmaRequestsSent.increment();
+			}
+			return submitted;
+		}
+
+		@Override
+		public boolean sendHttp(final O op, final LongAdder sentCounter) {
+			final boolean sent = submitInherited(op);
+			if (sent) {
+				sentCounter.increment();
+			}
+			return sent;
+		}
+
+		@Override
+		public boolean fail(final O op, final boolean settlePart) {
+			op.status(Operation.Status.FAIL_IO);
+			if (settlePart) {
+				markPartSettled(op);
+			}
+			handleCompleted(op);
+			return true;
+		}
+	};
+
+	/**
+	 * How one attempt goes on from its preparation. The default route sends it at once, on the
+	 * dispatch task; on the NIC-set route the attempt is its own route, on its NIC's Paths.
+	 */
+	interface AttemptRoute<O> {
+
+		/**
+		 * Sends a prepared attempt's RDMA request, and owns {@code ctx} from here on.
+		 *
+		 * @return false when nothing was sent and {@code ctx} was released
+		 */
+		boolean sendRdma(O op, RdmaContext ctx);
+
+		/**
+		 * Sends the attempt over HTTP.
+		 *
+		 * @param sentCounter counted when the request is sent
+		 * @return false when nothing was sent
+		 */
+		boolean sendHttp(O op, LongAdder sentCounter);
+
+		/**
+		 * Ends the attempt as a failed operation: its preparation failed and it goes no further.
+		 *
+		 * @param settlePart whether the failure comes after the part could count on its response
+		 * @return true, as the attempt was consumed
+		 */
+		boolean fail(O op, boolean settlePart);
+	}
 
 	/** Allocates per-operation buffers; replaced only by tests to simulate exhausted direct memory. */
 	IntFunction<ByteBuffer> directAllocator = ByteBuffer::allocateDirect;
@@ -205,9 +280,12 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	private static final ThreadLocal<String> CURRENT_RDMA_TOKEN = new ThreadLocal<>();
 
 	private final RdmaConfig rdmaConfig;
+	/** {@code null} on the NIC-set route, where each NIC has its own. */
 	private final RdmaTransport rdmaTransport;
 	private final String endpointAddrs;
 	private final ScheduledExecutorService rdmaReaper;
+	/** Whether the reaper may still run as {@link #doClose()} goes on. Only the NIC route acts on it. */
+	boolean reaperLate;
 
 	public S3RdmaStorageDriver(
 					final String stepId,
@@ -233,6 +311,22 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 					final int batchSize,
 					final Function<RdmaConfig, RdmaTransport> transportFactory)
 					throws IllegalConfigurationException, InterruptedException {
+		this(stepId, itemDataInput, storageConfig, verifyFlag, batchSize, transportFactory, false);
+	}
+
+	/**
+	 * @param nicSetRoute the subclass with a NIC set: it opens one context per NIC at start, so here
+	 *        no device opens and the default route's resources stay {@code null}
+	 */
+	S3RdmaStorageDriver(
+					final String stepId,
+					final DataInput itemDataInput,
+					final Config storageConfig,
+					final boolean verifyFlag,
+					final int batchSize,
+					final Function<RdmaConfig, RdmaTransport> transportFactory,
+					final boolean nicSetRoute)
+					throws IllegalConfigurationException, InterruptedException {
 		super(stepId, itemDataInput, storageConfig, verifyFlag, batchSize);
 
 		// Build endpoint address summary from storage node config
@@ -243,10 +337,18 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		// An explicit device keeps native device selection authoritative: the native layer binds
 		// by address first and would otherwise use whichever NIC carries the routed address.
 		final RdmaConfig configured = new RdmaConfig(storageConfig.configVal("rdma"));
-		rdmaConfig = configured.isEnabled() && configured.getLocalIp().isEmpty() && !configured.hasExplicitDevice()
+		rdmaConfig = !nicSetRoute && configured.isEnabled() && configured.getLocalIp().isEmpty() && !configured.hasExplicitDevice()
 						? withRoutedLocalIp(configured)
 						: configured;
 		Loggers.MSG.info("{}: RDMA config: {}", stepId, rdmaConfig);
+		if (nicSetRoute) {
+			payloadCopier = null;
+			rdmaTransport = null;
+			bufferPool = null;
+			defaultNic = null;
+			rdmaReaper = rdmaConfig.isEnabled() && rdmaConfig.getTimeoutMs() > 0 ? startReaper() : null;
+			return;
+		}
 		payloadCopier = new RdmaPayloadCopier(rdmaConfig.getCopyThreads(), stepId + "-rdma-copy-");
 
 		// Initialize RDMA transport
@@ -260,6 +362,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 										concurrencyLimit > 0 ? concurrencyLimit + 1 : UNLIMITED_CONCURRENCY_POOL_LIMIT,
 										RdmaBufferPool.defaultMaxPooledBytes())
 						: null;
+		defaultNic = new RdmaNic(0, "default", rdmaTransport, bufferPool, payloadCopier, pathStats);
 		boolean transportInitialized = false;
 		try {
 			if (rdmaConfig.isEnabled()) {
@@ -280,27 +383,28 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			}
 
 			// Start the RDMA operation timeout reaper
-			if (rdmaTransport.isAvailable() && rdmaConfig.getTimeoutMs() > 0) {
-				rdmaReaper = Executors.newSingleThreadScheduledExecutor(r -> {
-					final Thread t = new Thread(r, stepId + "-rdma-reaper");
-					t.setDaemon(true);
-					return t;
-				});
-				final long intervalMs = Math.max(rdmaConfig.getTimeoutMs() / 2, 1000);
-				// The task handles its own exceptions and ends with shutdownNow() in doClose().
-				final ScheduledFuture<?> unused = rdmaReaper.scheduleAtFixedRate(
-								this::reapTimedOutOps, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
-				Loggers.MSG.info("{}: RDMA operation timeout reaper started (timeoutMs={}, intervalMs={})",
-								stepId, rdmaConfig.getTimeoutMs(), intervalMs);
-			} else {
-				rdmaReaper = null;
-			}
+			rdmaReaper = rdmaTransport.isAvailable() && rdmaConfig.getTimeoutMs() > 0 ? startReaper() : null;
 			transportInitialized = true;
 		} finally {
 			if (!transportInitialized) {
 				rdmaTransport.close();
 			}
 		}
+	}
+
+	private ScheduledExecutorService startReaper() {
+		final ScheduledExecutorService reaper = Executors.newSingleThreadScheduledExecutor(r -> {
+			final Thread t = new Thread(r, stepId + "-rdma-reaper");
+			t.setDaemon(true);
+			return t;
+		});
+		final long intervalMs = Math.max(rdmaConfig.getTimeoutMs() / 2, 1000);
+		// The task handles its own exceptions and ends with shutdownNow() in doClose().
+		final ScheduledFuture<?> unused = reaper.scheduleAtFixedRate(
+						this::reapTimedOutOps, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
+		Loggers.MSG.info("{}: RDMA operation timeout reaper started (timeoutMs={}, intervalMs={})",
+						stepId, rdmaConfig.getTimeoutMs(), intervalMs);
+		return reaper;
 	}
 
 	/**
@@ -330,12 +434,20 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 	/** Counts a request sent over HTTP under the reason it was not proposed for RDMA. */
 	private void countHttpRequest(final PathSelection selection) {
-		switch (selection) {
-		case HTTP_RDMA_UNAVAILABLE -> pathStats.httpRdmaUnavailable.increment();
-		case HTTP_INELIGIBLE -> pathStats.httpIneligible.increment();
-		case HTTP_BELOW_THRESHOLD -> pathStats.httpBelowThreshold.increment();
-		case RDMA, HTTP_UNCOUNTED -> {}
+		final LongAdder counter = httpCounter(selection, pathStats);
+		if (counter != null) {
+			counter.increment();
 		}
+	}
+
+	/** The count of a request sent over HTTP for this reason, or {@code null} when none counts it. */
+	static LongAdder httpCounter(final PathSelection selection, final RdmaPathStats stats) {
+		return switch (selection) {
+		case HTTP_RDMA_UNAVAILABLE -> stats.httpRdmaUnavailable;
+		case HTTP_INELIGIBLE -> stats.httpIneligible;
+		case HTTP_BELOW_THRESHOLD -> stats.httpBelowThreshold;
+		case RDMA, HTTP_UNCOUNTED -> null;
+		};
 	}
 
 	/**
@@ -394,7 +506,12 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	 * - The data item size meets or exceeds the configured threshold
 	 */
 	PathSelection selectPath(final O op) {
-		if (!rdmaTransport.isAvailable()) {
+		return selectPath(op, rdmaTransport.isAvailable());
+	}
+
+	/** {@link #selectPath(Operation)} for a driver whose transport availability is its own. */
+	final PathSelection selectPath(final O op, final boolean rdmaAvailable) {
+		if (!rdmaAvailable) {
 			// TRACE level - checked on every operation in high-throughput workloads
 			Loggers.MSG.trace("{}: RDMA skip: transport not available", stepId);
 			return carriesPayload(op) ? PathSelection.HTTP_RDMA_UNAVAILABLE : PathSelection.HTTP_UNCOUNTED;
@@ -437,7 +554,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/** Whether the operation is one the data-path summary counts: a CREATE or READ with a payload. */
-	private static boolean carriesPayload(final Operation<?> op) {
+	static boolean carriesPayload(final Operation<?> op) {
 		if (!(op instanceof DataOperation) || op instanceof CompositeOperation) {
 			return false;
 		}
@@ -463,7 +580,19 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		if (!isStarted()) {
 			throw new IllegalStateException();
 		}
+		return prepareAndSend(op, defaultNic, defaultRoute);
+	}
 
+	/**
+	 * Prepares one attempt on {@code nic}: its buffer, a PUT's copy and the token. Then it goes on
+	 * through {@code route}, as an RDMA request or, for an oversize payload or a failed preparation
+	 * under {@code storage.rdma.fallback}, over HTTP. The default route calls this on the dispatch
+	 * task, the NIC-set route on the NIC's lane.
+	 *
+	 * @return false when nothing was sent and the attempt was not consumed: the route refused it, or
+	 *         the copier stopped it because the driver is closing
+	 */
+	final boolean prepareAndSend(final O op, final RdmaNic nic, final AttemptRoute<O> route) {
 		final var dataOp = (DataOperation) op;
 		final var item = dataOp.item();
 		final var opType = op.type();
@@ -471,24 +600,15 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		try {
 			final long rawSize = item.size();
 			if (rawSize > Integer.MAX_VALUE) {
-				if (oversizeWarned.compareAndSet(false, true)) {
-					Loggers.MSG.warn("{}: object size ({}) exceeds the largest RDMA buffer ({}); using HTTP path",
-									stepId, rawSize, Integer.MAX_VALUE);
-				}
-				final boolean sent = super.submit(op);
-				if (sent) {
-					pathStats.httpOversize.increment();
-				}
-				return sent;
+				warnOversize(rawSize);
+				return route.sendHttp(op, nic.stats.httpOversize);
 			}
 			size = (int) rawSize;
 		} catch (final IOException e) {
-			op.status(Operation.Status.FAIL_IO);
-			handleCompleted(op);
-			return true;
+			return route.fail(op, false);
 		}
 
-		// Until the context is stored, this method owns the buffer; afterwards the context does.
+		// Until the context is handed to the route, this method owns the buffer; afterwards the route does.
 		ByteBuffer buf = null;
 		long mrHandle = 0;
 		RdmaBufferPool.PooledBuffer pooled = null;
@@ -496,7 +616,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		// The item's position before its payload was copied; negative while nothing was copied.
 		long payloadStart = -1;
 		try {
-			pooled = bufferPool == null ? null : bufferPool.acquire(size);
+			pooled = nic.pool == null ? null : nic.pool.acquire(size);
 			if (pooled != null) {
 				buf = pooled.buffer();
 				mrHandle = pooled.mrHandle();
@@ -506,90 +626,89 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 					invalidated = true;
 				}
 			} else {
-				buf = RdmaBufferPool.allocateUnpooled(size, bufferPool, directAllocator);
+				buf = RdmaBufferPool.allocateUnpooled(size, nic.pool, directAllocator);
 				if (buf == null) {
-					pathStats.allocationFailedOnDemand.increment();
-					return prepareFailed(op, "direct memory exhausted");
+					nic.stats.allocationFailedOnDemand.increment();
+					return prepareFailed(op, "direct memory exhausted", nic, route);
 				}
-				mrHandle = rdmaTransport.registerBuffer(buf, size);
+				mrHandle = nic.transport.registerBuffer(buf, size);
 				if (mrHandle == 0) {
-					pathStats.registrationFailedOnDemand.increment();
-					return prepareFailed(op, "buffer registration failed");
+					nic.stats.registrationFailedOnDemand.increment();
+					return prepareFailed(op, "buffer registration failed", nic, route);
 				}
-				pathStats.registrationsOnDemand.increment();
+				nic.stats.registrationsOnDemand.increment();
 			}
 
 			// For PUT: copy data into the registered buffer
 			if (opType == OpType.CREATE) {
 				payloadStart = ((DataItem) item).position();
 				try {
-					payloadCopier.copy((DataItem) item, buf, size);
+					nic.copier.copy((DataItem) item, buf, size);
 				} catch (final OutOfMemoryError e) {
 					// The copy could not allocate the data it reads from: for an item above layer 0,
 					// every thread that reads it caches that layer for itself. Handled as an
 					// exhausted destination buffer is; the buffer is dropped so that its memory
 					// can be reclaimed.
-					releaseBuffer(pooled, buf, mrHandle, false);
+					releaseBuffer(nic, pooled, buf, mrHandle, false);
 					pooled = null;
 					mrHandle = 0;
 					rewindPayload(dataOp, payloadStart);
-					return prepareFailed(op, "out of memory copying the payload");
+					return prepareFailed(op, "out of memory copying the payload", nic, route);
 				}
 				// Mark bytes as done — sendRequestData() will be skipped for RDMA PUT
 				// because httpRequest() returns a FullHttpRequest with empty body
 				dataOp.countBytesDone(size);
 			}
 
-			final String token = rdmaTransport.generateToken(mrHandle, size);
+			final String token = nic.transport.generateToken(mrHandle, size);
 			if (token == null) {
-				pathStats.tokenGenerationFailed.increment();
+				nic.stats.tokenGenerationFailed.increment();
 				// Nothing was sent, so the buffer is reusable unless its content was invalidated.
-				releaseBuffer(pooled, buf, mrHandle, !invalidated);
+				releaseBuffer(nic, pooled, buf, mrHandle, !invalidated);
 				pooled = null;
 				mrHandle = 0;
 				rewindPayload(dataOp, payloadStart);
-				return prepareFailed(op, "token generation failed");
+				return prepareFailed(op, "token generation failed", nic, route);
 			}
 
-			// Store RDMA context — httpRequest() adds the header, complete() cleans up
 			final RdmaContext ctx = new RdmaContext(token, buf, mrHandle, opType, size);
 			ctx.pooled = pooled;
 			ctx.contentInvalidated = invalidated;
-			rdmaOps.put(op, ctx);
 			pooled = null;
 			mrHandle = 0;
 
 			Loggers.MSG.debug("{}: RDMA submit: type={} size={} token={}", stepId, opType, size, token);
 
-			final boolean submitted = super.submit(op);
-			// A refused submission whose context is still here was not sent (the throttle is
-			// exhausted), and complete() won't be called. A context that is gone was claimed by a
-			// completion: that request was sent and failed while the parent was still submitting it.
-			if (submitted || !cleanupRdmaContext(op, true)) {
-				pathStats.rdmaRequestsSent.increment();
-			}
-			return submitted;
+			return route.sendRdma(op, ctx);
 
 		} catch (final RdmaPayloadCopier.StoppedException e) {
 			// The driver is closing. Nothing was sent, so the operation stays undispatched and
 			// is recovered with the other queued operations.
 			try {
-				abandonPreparation(op, pooled, buf, mrHandle, dataOp, payloadStart);
+				abandonPreparation(op, nic, pooled, buf, mrHandle, dataOp, payloadStart);
 			} finally {
 				// doClose() waits for this before it closes the buffer pool and the transport.
-				payloadCopier.stoppedCopyReleased();
+				nic.copier.stoppedCopyReleased();
 			}
 			return false;
 		} catch (final Exception e) {
 			LogUtil.exception(Level.DEBUG, e, "{}: RDMA submit failed for {}",
 							stepId, item.name());
-			abandonPreparation(op, pooled, buf, mrHandle, dataOp, payloadStart);
-			return prepareFailed(op, e.getClass().getSimpleName());
+			abandonPreparation(op, nic, pooled, buf, mrHandle, dataOp, payloadStart);
+			return prepareFailed(op, e.getClass().getSimpleName(), nic, route);
 		} catch (final Error e) {
 			// Not handled here. Only what this method still owns is released: a stored context
 			// keeps its buffer until the response, the reaper or close.
-			releaseBuffer(pooled, buf, mrHandle, false);
+			releaseBuffer(nic, pooled, buf, mrHandle, false);
 			throw e;
+		}
+	}
+
+	/** Warns once that an object does not fit one RDMA buffer and goes over HTTP. */
+	final void warnOversize(final long rawSize) {
+		if (oversizeWarned.compareAndSet(false, true)) {
+			Loggers.MSG.warn("{}: object size ({}) exceeds the largest RDMA buffer ({}); using HTTP path",
+							stepId, rawSize, Integer.MAX_VALUE);
 		}
 	}
 
@@ -599,10 +718,10 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	 * buffer; if it was already completed, there is nothing left to release.
 	 */
 	private void abandonPreparation(
-					final O op, final RdmaBufferPool.PooledBuffer pooled, final ByteBuffer buf, final long mrHandle,
-					final DataOperation<?> dataOp, final long payloadStart) {
+					final O op, final RdmaNic nic, final RdmaBufferPool.PooledBuffer pooled, final ByteBuffer buf,
+					final long mrHandle, final DataOperation<?> dataOp, final long payloadStart) {
 		if (!cleanupRdmaContext(op, false)) {
-			releaseBuffer(pooled, buf, mrHandle, false);
+			releaseBuffer(nic, pooled, buf, mrHandle, false);
 		}
 		rewindPayload(dataOp, payloadStart);
 	}
@@ -625,7 +744,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	 * Handles an RDMA preparation failure: with fallback enabled the operation is sent over HTTP,
 	 * otherwise it fails rather than being reported as an RDMA transfer.
 	 */
-	private boolean prepareFailed(final O op, final String reason) {
+	private boolean prepareFailed(final O op, final String reason, final RdmaNic nic, final AttemptRoute<O> route) {
 		final boolean fallback = rdmaConfig.isFallbackEnabled();
 		if (prepareFailureWarned.compareAndSet(false, true)) {
 			Loggers.MSG.warn("{}: RDMA preparation failed ({}); {}", stepId, reason,
@@ -633,18 +752,11 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 											: "failing the operation (storage.rdma.fallback=false)");
 		}
 		if (fallback) {
-			final boolean sent = super.submit(op);
-			if (sent) {
-				pathStats.httpFallback.increment();
-			}
-			return sent;
+			return route.sendHttp(op, nic.stats.httpFallback);
 		}
-		pathStats.prepareFailed.increment();
-		op.status(Operation.Status.FAIL_IO);
+		nic.stats.prepareFailed.increment();
 		// This completion bypasses finishResponse(), so the part is settled here.
-		markPartSettled(op);
-		handleCompleted(op);
-		return true;
+		return route.fail(op, true);
 	}
 
 	/**
@@ -667,10 +779,16 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			ctx = rdmaOps.remove(op);
 		}
 		if (ctx != null) {
-			releaseBuffer(ctx.pooled, ctx.buffer, ctx.mrHandle, reusable && !ctx.contentInvalidated);
+			releaseBuffer(nicOf(ctx), ctx.pooled, ctx.buffer, ctx.mrHandle, reusable && !ctx.contentInvalidated);
 			return true;
 		}
 		return false;
+	}
+
+	/** The NIC of an attempt's context: its own with a NIC set, otherwise the driver's one. */
+	private RdmaNic nicOf(final RdmaContext ctx) {
+		final RdmaNic nic = ctx.nic;
+		return nic == null ? defaultNic : nic;
 	}
 
 	/**
@@ -678,18 +796,45 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	 * the request was never sent, or the server's response was received. Otherwise the server
 	 * might still access it, so it is deregistered and dropped.
 	 */
-	private void releaseBuffer(
-					final RdmaBufferPool.PooledBuffer pooled, final ByteBuffer buffer, final long mrHandle,
+	private static void releaseBuffer(
+					final RdmaNic nic, final RdmaBufferPool.PooledBuffer pooled, final ByteBuffer buffer, final long mrHandle,
 					final boolean reusable) {
 		if (pooled != null) {
 			if (reusable) {
-				bufferPool.release(pooled);
+				nic.pool.release(pooled);
 			} else {
-				bufferPool.discard(pooled);
+				nic.pool.discard(pooled);
 			}
 		} else if (mrHandle != 0) {
-			rdmaTransport.deregisterBuffer(buffer, mrHandle);
+			nic.transport.deregisterBuffer(buffer, mrHandle);
 		}
+	}
+
+	/** Releases the buffer of a context no map holds, as {@link #cleanupRdmaContext} would. */
+	final void releaseContext(final RdmaContext ctx, final boolean reusable) {
+		releaseBuffer(ctx.nic, ctx.pooled, ctx.buffer, ctx.mrHandle, reusable && !ctx.contentInvalidated);
+	}
+
+	/** Makes {@code ctx} the context of {@code op}'s request, for a route that holds it until the write. */
+	final void storeContext(final O op, final RdmaContext ctx) {
+		rdmaOps.put(op, ctx);
+	}
+
+	/** Takes {@code op}'s context back and releases it, if its request was not bound to a channel. */
+	final void dropUnboundContext(final O op, final RdmaContext ctx, final boolean reusable) {
+		if (ctx.channel == null) {
+			final boolean claimed;
+			synchronized (op) {
+				claimed = rdmaOps.remove(op, ctx);
+			}
+			if (claimed) {
+				releaseContext(ctx, reusable);
+			}
+		}
+	}
+
+	final RdmaConfig rdmaConfig() {
+		return rdmaConfig;
 	}
 
 	/**
@@ -878,12 +1023,23 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	 */
 	@Override
 	public void complete(final Channel channel, final O op) {
+		if (classifyRdmaReply(channel, op)) {
+			super.complete(channel, op);
+		}
+	}
+
+	/**
+	 * Classifies the reply of the RDMA request {@code channel} carries, if it does, which settles the
+	 * status and a GET's bytes.
+	 *
+	 * @return false when another path claimed that request, so nothing more is done for it
+	 */
+	final boolean classifyRdmaReply(final Channel channel, final O op) {
 		final RdmaContext responseContext = channel == null
 						? null
 						: channel.attr(RDMA_CONTEXT_ATTR_KEY).getAndSet(null);
 		if (responseContext == null) {
-			super.complete(channel, op);
-			return;
+			return true;
 		}
 		final boolean claimed;
 		synchronized (op) {
@@ -891,17 +1047,39 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		}
 		if (!claimed) {
 			discardOutOfBandIntegrityRead(channel);
-			return;
+			return false;
 		}
 		completeRdmaContext(channel, op, responseContext);
+		return true;
+	}
+
+	/** The context of the request a channel carries, or {@code null}, for a NIC-set row; no default-route path calls it. */
+	final RdmaContext sentContext(final Channel channel) {
+		return channel.attr(RDMA_CONTEXT_ATTR_KEY).get();
+	}
+
+	/** The S3 driver's completion: it reports the result and releases the transport. */
+	final void completeTransport(final Channel channel, final O op) {
 		super.complete(channel, op);
 	}
 
+	/** The reaper's completion of a timed-out request, whose context the reaper already claimed. */
+	void completeTimedOut(final Channel channel, final O op) {
+		completeTransport(channel, op);
+	}
+
+	/** The {@code S3StorageDriver} submit, past this class's path choice. */
+	final boolean submitInherited(final O op) {
+		return super.submit(op);
+	}
+
 	private void completeRdmaContext(final Channel channel, final O op, final RdmaContext ctx) {
+		final RdmaNic nic = nicOf(ctx);
+		final RdmaPathStats stats = nic.stats;
 		boolean verifiedFill = false;
 		try {
 			if (op.status() != Operation.Status.SUCC) {
-				pathStats.rdmaHttpError.increment();
+				stats.rdmaHttpError.increment();
 				return;
 			}
 			final RdmaReplyContract.Result result = RdmaReplyContract.classify(
@@ -910,9 +1088,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			final var dataOp = (DataOperation) op;
 			switch (result.outcome()) {
 			case TRANSFERRED -> {
-				pathStats.rdmaTransferred.increment();
+				stats.rdmaTransferred.increment();
 				if (result.bytesAssumed()) {
-					pathStats.rdmaBytesAssumed.increment();
+					stats.rdmaBytesAssumed.increment();
 					if (bytesAssumedWarned.compareAndSet(false, true)) {
 						Loggers.MSG.warn("{}: RDMA GET success without x-amz-rdma-bytes-transferred; counting the "
 										+ "requested size (storage.rdma.allowMissingBytesHeader=true)", stepId);
@@ -938,7 +1116,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 				// A declined PUT stored nothing. A declined GET delivered its body over HTTP,
 				// which counts only when HTTP fallback is allowed.
 				final boolean fail = ctx.opType == OpType.CREATE || !rdmaConfig.isFallbackEnabled();
-				(fail ? pathStats.rdmaDeclinedFailed : pathStats.rdmaDeclinedServedOverHttp).increment();
+				(fail ? stats.rdmaDeclinedFailed : stats.rdmaDeclinedServedOverHttp).increment();
 				if (declinedWarned.compareAndSet(false, true)) {
 					Loggers.MSG.warn("{}: server declined RDMA ({}) for {}; {}", stepId, result.reason(),
 									ctx.opType, fail ? "operations fail"
@@ -950,7 +1128,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 				}
 			}
 			case PROTOCOL_ERROR -> {
-				pathStats.rdmaProtocolError.increment();
+				stats.rdmaProtocolError.increment();
 				if (protocolErrorWarned.compareAndSet(false, true)) {
 					Loggers.MSG.warn("{}: RDMA reply contract violated for {}: {}",
 									stepId, ctx.opType, result.reason());
@@ -963,7 +1141,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		} finally {
 			// An invalidated buffer holds altered stale content unless the server wrote a payload
 			// that verified; reusing it otherwise would let a second invalidation restore the content.
-			releaseBuffer(ctx.pooled, ctx.buffer, ctx.mrHandle,
+			releaseBuffer(nic, ctx.pooled, ctx.buffer, ctx.mrHandle,
 							ctx.finalResponseObserved && (!ctx.contentInvalidated || verifiedFill));
 		}
 	}
@@ -992,11 +1170,12 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 										stepId, ctx.opType, ctx.size, elapsedMs, op.status(),
 										(op instanceof DataOperation ? ((DataOperation) op).item().name() : "?"));
 						// The server may still access a timed-out request's buffer.
-						releaseBuffer(ctx.pooled, ctx.buffer, ctx.mrHandle, false);
-						pathStats.rdmaTimedOut.increment();
+						final RdmaNic nic = nicOf(ctx);
+						releaseBuffer(nic, ctx.pooled, ctx.buffer, ctx.mrHandle, false);
+						nic.stats.rdmaTimedOut.increment();
 						op.status(Operation.Status.FAIL_IO);
 						discardOutOfBandIntegrityRead(ctx.channel);
-						super.complete(ctx.channel, (O) op);
+						completeTimedOut(ctx.channel, (O) op);
 						reaped++;
 					}
 				}
@@ -1016,14 +1195,35 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		// calls deregisterBuffer() on a transport that close() has already destroyed
 		if (rdmaReaper != null) {
 			rdmaReaper.shutdownNow();
-			try {
-				if (!rdmaReaper.awaitTermination(5, TimeUnit.SECONDS)) {
-					Loggers.MSG.warn("{}: RDMA reaper did not terminate within 5s", stepId);
-				}
-			} catch (final InterruptedException e) {
+			if (!awaitReaper()) {
+				reaperLate = true;
+				Loggers.MSG.warn("{}: RDMA reaper did not terminate within 5s", stepId);
+			}
+		}
+		closeRdmaResources();
+		super.doClose();
+	}
+
+	/**
+	 * Waits for the reaper even on an interrupted thread: a step's stop can reach close as an interrupt,
+	 * and the reaper, just told to stop, is normally about to end.
+	 */
+	private boolean awaitReaper() {
+		boolean interrupted = Thread.interrupted();
+		try {
+			return rdmaReaper.awaitTermination(5, TimeUnit.SECONDS);
+		} catch (final InterruptedException e) {
+			interrupted = true;
+			return rdmaReaper.isTerminated();
+		} finally {
+			if (interrupted) {
 				Thread.currentThread().interrupt();
 			}
 		}
+	}
+
+	/** Runs in {@link #doClose()} once the reaper has stopped: every RDMA resource goes away here. */
+	void closeRdmaResources() {
 		// close() closed admission before this point, so no new preparation starts. A split copy
 		// that still runs is stopped here, and its buffer released, before the pool and the
 		// transport go away.
@@ -1031,16 +1231,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			Loggers.MSG.warn("{}: RDMA payload copy did not stop within {} ms", stepId,
 							RdmaPayloadCopier.CLOSE_WAIT_MILLIS);
 		}
-		// Drain any leaked RDMA contexts (e.g. from interrupted operations).
-		// Use remove(op, ctx) to atomically claim each entry — prevents double-free
-		// if a concurrent complete() is still draining the last in-flight operations.
-		for (final var it = rdmaOps.entrySet().iterator(); it.hasNext();) {
-			final var entry = it.next();
-			final var ctx = entry.getValue();
-			if (rdmaOps.remove(entry.getKey(), ctx)) {
-				releaseBuffer(ctx.pooled, ctx.buffer, ctx.mrHandle, false);
-			}
-		}
+		releaseLeakedContexts();
 		if (bufferPool != null) {
 			bufferPool.close();
 		}
@@ -1048,7 +1239,21 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 						rdmaTransport.isAvailable() ? "available" : "unavailable", pathStats.summary(),
 						bufferPool == null ? ", bufferPool=disabled" : ", " + bufferPool.summary());
 		rdmaTransport.close();
-		super.doClose();
+	}
+
+	/**
+	 * Drain any leaked RDMA contexts (e.g. from interrupted operations).
+	 * Use remove(op, ctx) to atomically claim each entry — prevents double-free
+	 * if a concurrent complete() is still draining the last in-flight operations.
+	 */
+	final void releaseLeakedContexts() {
+		for (final var it = rdmaOps.entrySet().iterator(); it.hasNext();) {
+			final var entry = it.next();
+			final var ctx = entry.getValue();
+			if (rdmaOps.remove(entry.getKey(), ctx)) {
+				releaseBuffer(nicOf(ctx), ctx.pooled, ctx.buffer, ctx.mrHandle, false);
+			}
+		}
 	}
 
 	/**

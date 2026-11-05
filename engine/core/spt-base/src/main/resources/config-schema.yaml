@@ -21,6 +21,8 @@ item:
   input:
     file: string
     path: string
+    # Internal, with no shipped default: a slice's item sizes, from the Entry Node, with a NIC set only.
+    sizeSummary: string
   naming:
     type: string
     prefix: string

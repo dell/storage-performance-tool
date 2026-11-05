@@ -1,0 +1,270 @@
+{
+  "headroomBytes": 8589934592,
+  "steps": [
+    {
+      "id": "seed",
+      "limitBytes": 15032385536,
+      "limitForPoolsBytes": 12884901888,
+      "limitForProcessBytes": 15032385536,
+      "poolsNeedBytes": 6442450944,
+      "known": true,
+      "partial": false,
+      "unknown": [],
+      "drivers": [
+        {
+          "demand": "known",
+          "operations": [
+            {
+              "op": "PUT",
+              "demand": "known",
+              "source": "--object-size",
+              "smallest_bytes": 67108864,
+              "largest_bytes": 67108864,
+              "size_class_bytes": 67108864
+            }
+          ],
+          "prewarm": true,
+          "nics": [
+            {
+              "nic": "nic-a",
+              "demand": "known",
+              "minimum": 24,
+              "cap": 25,
+              "count": 24,
+              "sizeClassBytes": 67108864,
+              "needBytes": 1610612736
+            },
+            {
+              "nic": "nic-b",
+              "demand": "known",
+              "minimum": 24,
+              "cap": 25,
+              "count": 24,
+              "sizeClassBytes": 67108864,
+              "needBytes": 1610612736
+            },
+            {
+              "nic": "nic-c",
+              "demand": "known",
+              "minimum": 24,
+              "cap": 25,
+              "count": 24,
+              "sizeClassBytes": 67108864,
+              "needBytes": 1610612736
+            },
+            {
+              "nic": "nic-d",
+              "demand": "known",
+              "minimum": 24,
+              "cap": 25,
+              "count": 24,
+              "sizeClassBytes": 67108864,
+              "needBytes": 1610612736
+            }
+          ]
+        }
+      ],
+      "prewarmResidentBytes": 6442450944
+    },
+    {
+      "id": "read",
+      "limitBytes": 0,
+      "limitForPoolsBytes": 0,
+      "limitForProcessBytes": 0,
+      "poolsNeedBytes": 0,
+      "known": false,
+      "partial": false,
+      "unknown": [],
+      "drivers": [
+        {
+          "demand": "zero",
+          "operations": [
+            {
+              "op": "GET",
+              "demand": "zero",
+              "source": "seed"
+            }
+          ],
+          "prewarm": false,
+          "prewarmSkip": "no demand",
+          "nics": [
+            {
+              "nic": "nic-a",
+              "demand": "zero",
+              "minimum": 24,
+              "cap": 25,
+              "count": 0,
+              "sizeClassBytes": 0,
+              "needBytes": 0
+            },
+            {
+              "nic": "nic-b",
+              "demand": "zero",
+              "minimum": 24,
+              "cap": 25,
+              "count": 0,
+              "sizeClassBytes": 0,
+              "needBytes": 0
+            },
+            {
+              "nic": "nic-c",
+              "demand": "zero",
+              "minimum": 24,
+              "cap": 25,
+              "count": 0,
+              "sizeClassBytes": 0,
+              "needBytes": 0
+            },
+            {
+              "nic": "nic-d",
+              "demand": "zero",
+              "minimum": 24,
+              "cap": 25,
+              "count": 0,
+              "sizeClassBytes": 0,
+              "needBytes": 0
+            }
+          ]
+        }
+      ],
+      "prewarmResidentBytes": 0
+    },
+    {
+      "id": "delete",
+      "limitBytes": 0,
+      "limitForPoolsBytes": 0,
+      "limitForProcessBytes": 0,
+      "poolsNeedBytes": 0,
+      "known": false,
+      "partial": false,
+      "unknown": [],
+      "drivers": [
+        {
+          "demand": "zero",
+          "operations": [
+            {
+              "op": "other",
+              "demand": "zero",
+              "source": ""
+            }
+          ],
+          "prewarm": false,
+          "prewarmSkip": "no demand",
+          "nics": [
+            {
+              "nic": "nic-a",
+              "demand": "zero",
+              "minimum": 24,
+              "cap": 25,
+              "count": 0,
+              "sizeClassBytes": 0,
+              "needBytes": 0
+            },
+            {
+              "nic": "nic-b",
+              "demand": "zero",
+              "minimum": 24,
+              "cap": 25,
+              "count": 0,
+              "sizeClassBytes": 0,
+              "needBytes": 0
+            },
+            {
+              "nic": "nic-c",
+              "demand": "zero",
+              "minimum": 24,
+              "cap": 25,
+              "count": 0,
+              "sizeClassBytes": 0,
+              "needBytes": 0
+            },
+            {
+              "nic": "nic-d",
+              "demand": "zero",
+              "minimum": 24,
+              "cap": 25,
+              "count": 0,
+              "sizeClassBytes": 0,
+              "needBytes": 0
+            }
+          ]
+        }
+      ],
+      "prewarmResidentBytes": 0
+    },
+    {
+      "id": "mixed-partial",
+      "limitBytes": 8992587776,
+      "limitForPoolsBytes": 805306368,
+      "limitForProcessBytes": 8992587776,
+      "poolsNeedBytes": 402653184,
+      "known": true,
+      "partial": true,
+      "unknown": [
+        "GET: items.csv: a malformed item (bad,0,oops)"
+      ],
+      "drivers": [
+        {
+          "demand": "known",
+          "operations": [
+            {
+              "op": "GET",
+              "demand": "unknown",
+              "source": "items.csv",
+              "reason": "items.csv: a malformed item (bad,0,oops)"
+            },
+            {
+              "op": "PUT",
+              "demand": "known",
+              "source": "--object-size",
+              "smallest_bytes": 4194304,
+              "largest_bytes": 4194304,
+              "size_class_bytes": 4194304
+            }
+          ],
+          "prewarm": false,
+          "prewarmSkip": "its demand is unknown",
+          "nics": [
+            {
+              "nic": "nic-a",
+              "demand": "known",
+              "minimum": 24,
+              "cap": 25,
+              "count": 24,
+              "sizeClassBytes": 4194304,
+              "needBytes": 100663296
+            },
+            {
+              "nic": "nic-b",
+              "demand": "known",
+              "minimum": 24,
+              "cap": 25,
+              "count": 24,
+              "sizeClassBytes": 4194304,
+              "needBytes": 100663296
+            },
+            {
+              "nic": "nic-c",
+              "demand": "known",
+              "minimum": 24,
+              "cap": 25,
+              "count": 24,
+              "sizeClassBytes": 4194304,
+              "needBytes": 100663296
+            },
+            {
+              "nic": "nic-d",
+              "demand": "known",
+              "minimum": 24,
+              "cap": 25,
+              "count": 24,
+              "sizeClassBytes": 4194304,
+              "needBytes": 100663296
+            }
+          ]
+        }
+      ],
+      "prewarmResidentBytes": 0
+    }
+  ]
+}

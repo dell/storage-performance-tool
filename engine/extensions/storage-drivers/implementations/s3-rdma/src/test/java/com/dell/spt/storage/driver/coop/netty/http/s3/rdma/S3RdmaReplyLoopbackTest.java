@@ -183,6 +183,23 @@ final class S3RdmaReplyLoopbackTest {
 	}
 
 	@Test
+	void withoutANicSetPreparationRunsOnTheDispatchTaskWithNoLane() throws Exception {
+		reply = new Reply(200, "200", null, null, true);
+		try (final var driver = newDriver(true)) {
+			final Set<String> preparing = Collections.synchronizedSet(new java.util.HashSet<>());
+			transport.setBeforeRegister(() -> preparing.add(Thread.currentThread().getName()));
+			transport.setBeforeToken(() -> preparing.add(Thread.currentThread().getName()));
+
+			assertEquals(Operation.Status.SUCC, execute(driver, op(OpType.CREATE, SIZE)).status());
+
+			assertEquals(1, preparing.size(), preparing::toString);
+			assertFalse(preparing.iterator().next().contains("-rdma-lane-"), preparing::toString);
+			assertTrue(Thread.getAllStackTraces().keySet().stream().noneMatch(thread -> thread.getName().startsWith(STEP_ID + "-rdma-lane-")));
+			assertEquals(1, driver.pathStats().rdmaRequestsSent.sum());
+		}
+	}
+
+	@Test
 	void aTargetBucketSetMemberIsTheBucketOfRdmaPutAndGet() throws Exception {
 		memberIsTheBucketOfRdmaPutAndGet(
 						com.dell.spt.base.storage.driver.bucket.TargetBucketSet.memberPaths("/bench/prefix", 4),

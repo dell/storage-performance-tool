@@ -1,6 +1,7 @@
 package com.dell.spt.base.nic;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -8,6 +9,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.List;
+import com.dell.spt.base.nic.pool.PoolDemand;
+import com.dell.spt.base.nic.pool.PoolPreparation;
 import org.junit.jupiter.api.Test;
 
 class NicSetArtifactTest {
@@ -108,5 +111,42 @@ class NicSetArtifactTest {
 		final var out = new ArrayList<String>();
 		node.fieldNames().forEachRemaining(out::add);
 		return out;
+	}
+
+	@Test
+	void aStepWithNicPoolsAddsItsChecksAndPreWarmWithoutChangingTheOtherFields() throws Exception {
+		final var demand = PoolDemand.estimate(
+						new PoolDemand.Workload(4, 1L << 20, 0, 0, List.of(new PoolDemand.Operation(
+										PoolDemand.OpKind.CREATE, 0, false, new PoolDemand.Range(1L << 30, 1L << 30, "item.data.size")))),
+						List.of("ens1", "ens2"));
+		final var step = new PoolDemand.StepDemand(List.of(demand));
+		final var check = PoolDemand.check(step, 64L << 30, 8L << 30);
+		final var nics = List.of(
+						new PoolPreparation.NicReport("ens1", PoolDemand.State.KNOWN, 2, 3, 1, 16L << 30, 2, 1 << 30, 2L << 30, 2, 40, ""),
+						new PoolPreparation.NicReport("ens2", PoolDemand.State.KNOWN, 2, 3, 1, 16L << 30, 2, 1 << 30, 2L << 30, 1, 50, "buffer registration failed"));
+		final var pool = new PoolPreparation.Report(
+						List.of(new PoolPreparation.DriverReport(0, "warn", demand, nics)), check, 12L << 30, false, List.of(), 12L << 30, 50);
+		final var resources = new NicSetResources(0, 8, List.of("ens1", "ens2"), 4);
+		final var without = NicSetArtifact.json(1, "step", "worker", 16, List.of(new NicSetArtifact.Context(0, resources)), 0);
+		final var with = NicSetArtifact.json(1, "step", "worker", 16, List.of(new NicSetArtifact.Context(0, resources)), 0, pool);
+
+		final var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+		final var document = mapper.readTree(with);
+		final var stripped = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(with);
+		stripped.remove("pool");
+		assertEquals(mapper.readTree(without), stripped);
+		final var section = document.get("pool");
+		assertEquals(12L << 30, section.get("required_limit_bytes").asLong());
+		assertEquals(64L << 30, section.get("max_direct_memory_bytes").asLong());
+		assertEquals(12L << 30, section.get("cli_estimate_bytes").asLong());
+		assertEquals(50, section.get("prewarm_ms").asLong());
+		assertTrue(section.at("/checks/per_pool/passed").asBoolean());
+		assertTrue(section.at("/checks/process/passed").asBoolean());
+		assertEquals("warn", section.at("/drivers/0/shortfall").asText());
+		assertEquals("ens1", section.at("/drivers/0/nics/0/nic").asText());
+		assertEquals(2, section.at("/drivers/0/nics/0/prewarmed_buffers").asInt());
+		assertEquals(40, section.at("/drivers/0/nics/0/prewarm_ms").asInt());
+		assertEquals("buffer registration failed", section.at("/drivers/0/nics/1/prewarm_note").asText());
+		assertEquals("PUT", section.at("/drivers/0/operations/0/op").asText());
 	}
 }

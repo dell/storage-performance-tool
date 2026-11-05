@@ -2,7 +2,7 @@
 
 By default an engine's S3 connections leave the client by the kernel's route to each endpoint, so one engine uses one NIC per destination. `--interfaces` gives each engine a NIC set instead: it spreads the engine's connections over several client NICs, each connection bound to its NIC's device and source address. One engine can then drive every port of a multi-port client.
 
-This applies to the default Netty `s3` driver. Preview a host's plan with [`spt verify --interfaces`](SPT_SYNTAX.md#nics-and-the-nic-plan) before a run.
+This applies to the default Netty `s3` driver and to `s3-rdma`, which also gets one RDMA context, buffer pool and preparation thread per NIC: see [S3-RDMA with a NIC set](S3_RDMA.md#nic-sets). Preview a host's plan with [`spt verify --interfaces`](SPT_SYNTAX.md#nics-and-the-nic-plan) before a run.
 
 ## Options
 
@@ -18,7 +18,7 @@ This applies to the default Netty `s3` driver. Preview a host's plan with [`spt 
 
 `spt run` rejects `--interfaces` with:
 
-- a driver other than the default Netty `s3` driver: `--s3-driver aws`, `--s3-driver rdma` or `--use-rdma`;
+- `--s3-driver aws`, the driver that cannot bind to a NIC;
 - the `tables` or `mock` workload;
 - `--network-mode bridge`, where a container sees only its own interface;
 - an `--endpoint-selection` other than `default`;
@@ -129,7 +129,7 @@ With `--slice-endpoints`, each engine pairs its own slice of the endpoints. A ch
 ## Concurrency and event loops
 
 - **Permits:** the concurrency limit (`--threads`) is split over the engine's NICs. With 64 threads and 2 NICs, each NIC carries at most 32 operations; with 10 threads and 4 NICs, 3, 3, 2 and 2. With fewer threads than NICs, each NIC carries one operation at a time. Each operation takes the next NIC with room, and waits in the driver's queue while none has room.
-- **Event loops:** each NIC gets its own event loops. `storage.driver.threads` therefore counts loops per NIC with a NIC set, not per driver. Without it, each NIC gets `max(4, hardware threads / 8)`: on a client with 64 hardware threads and 2 NICs, 8 per NIC and 16 in all. Each NIC-set driver also has a base group of 2 loops for its control requests. Set it with `--engine-override storage.driver.threads=6`.
+- **Event loops:** each NIC gets its own event loops. `storage.driver.threads` therefore counts loops per NIC with a NIC set, not per driver. Without it, each NIC gets `max(4, hardware threads / 8)`: on a client with 64 hardware threads and 2 NICs, 8 per NIC and 16 in all. Each NIC-set driver also has a base group of 2 loops for its control requests. Set it with `--engine-override storage.driver.threads=6`. Fewer loops use less client CPU per operation, and can cap peak throughput: on a client with four 400G NICs and 192 hardware threads, 12 loops per NIC instead of the default 24 used 20% less CPU per operation and carried 13% less at GET 4 MiB with 768 threads, and matched it at 192 threads.
 
 ## Start of a step
 
@@ -147,6 +147,8 @@ A step in which any engine has a NIC set, from `--interfaces` or a host override
 **The Load Interval starts at the release.** With a barrier, a step's duration, time limit, elapsed time and rates count from the moment admission opens, so preparation counts in none of them; the Steady-State Window lies inside the interval. A run with a NIC set therefore takes longer on the clock than its `--duration` by its preparation time.
 
 **The deadline** is the engine setting `load.step.preparation.timeout`, default `10m`, set with `--engine-override load.step.preparation.timeout=15m`. It covers item distribution and every engine's preparation, and each worker also enforces it on its own clock, so a worker fences itself even if the entry node is gone. A timeout message names the setting.
+
+Item distribution takes little of this on a fast network. On the lab, three workers took a list of 5 million items in 4.5 s, about 1.1 million items per second; at that rate the default would cover several hundred million, though that is an extrapolation from one network and from lists no larger than 5 million. Item files on the CLI's host have a tighter limit first: on each remote host, staging them, all files together, must finish within 30 s.
 
 **During the step,** after a failed connect, that NIC's connects to that endpoint back off from 100 ms, doubling to 5 s; an operation that needs a new connection there fails at once until the next trial, while open connections keep serving. Control requests keep the kernel's route: bucket checks, listing a bucket as a step's item input, and multipart abort.
 

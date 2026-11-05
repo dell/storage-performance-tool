@@ -59,6 +59,7 @@ import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsConstants;
 import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.nic.pool.ItemSizeRecording;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.DistributedMetricsContextImpl;
 import com.dell.spt.base.metrics.context.MetricsContext;
@@ -198,6 +199,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	private MetricsAggregator metricsAggregator = null;
+	// Set for a step with a NIC set on any engine, before its items are distributed.
+	private ItemSizeRecording itemSizeRecording;
 
 	private boolean hasRangeReadPolicy() {
 		if (ctxConfigs == null || ctxConfigs.isEmpty())
@@ -276,6 +279,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			};
 			// The barrier's deadline starts before the items are distributed (D54-R2).
 			final AdmissionBarrier barrier = anyNicSet(configSlices, ctxConfigsSlices) ? newAdmissionBarrier() : null;
+			itemSizeRecording = stepItemSizeRecording(barrier == null ? null : barrier.itemSizeRecording());
 			try {
 				if (barrier == null) {
 					distribution.run();
@@ -602,7 +606,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			if (!skipScatter && itemInput != null) {
 				final var slicer = new ItemInputFileSlicer(
-								loadStepId(), fileMgrs, configSlices, itemInput, batchSize, integrityConfig.enabled());
+								loadStepId(), fileMgrs, configSlices, itemInput, batchSize, integrityConfig.enabled(), itemSizeRecording);
 				itemInputFileSlicers.add(slicer);
 				Loggers.MSG.debug("{}: item input file slicer initialized", loadStepId());
 				if (!integrityConfig.enabled() && slicer.distributedItems() == 0) {
@@ -818,6 +822,16 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						: new RunTerminalException(typed.category(), loadStepId(), engine + ": " + typed.getMessage(), cause);
 	}
 
+	/** A slice that didn't start under the admission barrier: its engine named, and the category of a cause that has one, such as a bad items line. */
+	RunTerminalException barrierStartFailure(final Exception cause, final String engine) {
+		final var typed = RunTerminalException.find(cause);
+		return new RunTerminalException(
+						typed != null ? typed.category() : IntegrityTerminalException.Category.EXECUTION,
+						loadStepId(),
+						"Step " + loadStepId() + " did not start: " + engine + ": " + cause.getMessage(),
+						cause);
+	}
+
 	private void initAndStartStepSlices(
 					final List<String> nodeAddrs, final List<Config> configSlices, final List<List<Config>> ctxConfigsSlices,
 					final MetricsManager metricsManager, final AdmissionBarrier barrier) {
@@ -872,12 +886,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				LogUtil.exception(
 								Level.ERROR, e, "{}: failed to start the step slice \"{}\"", loadStepId(), stepSlice);
 				if (barrier != null) {
-					throw new RunTerminalException(
-									IntegrityTerminalException.Category.EXECUTION,
-									loadStepId(),
-									"Step " + loadStepId() + " did not start: " + (i == 0 ? NicSetConfig.ENTRY_KEY : nodeAddrs.get(i - 1)) + ": "
-													+ e.getMessage(),
-									e);
+					throw barrierStartFailure(e, i == 0 ? NicSetConfig.ENTRY_KEY : nodeAddrs.get(i - 1));
 				}
 				// One engine missing would leave a lower load reported as the one asked for.
 				throw sliceStartFailure(e, i, sliceCount);
@@ -3003,6 +3012,15 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 		ctxConfigsCopy.add(ctxConfig);
 		return copyInstance(config, ctxConfigsCopy);
+	}
+
+	/** Whether this step's one driver mixes operations by weight, which only the mixed step type does. */
+	protected boolean mixesOperations() {
+		return false;
+	}
+
+	private ItemSizeRecording stepItemSizeRecording(final ItemSizeRecording recording) {
+		return recording != null && mixesOperations() ? recording.asMixed() : recording;
 	}
 
 	protected abstract T copyInstance(final Config config, final List<Config> ctxConfigs);

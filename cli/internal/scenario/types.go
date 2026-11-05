@@ -105,8 +105,10 @@ type Params struct {
 	// buffers (default: false, so the pool is used).
 	RdmaDisableBufferPool bool
 	// RdmaCopyThreads is the number of threads copying one PUT payload into its buffer, the
-	// dispatcher included (default: 1; 0 leaves the engine default).
+	// dispatcher included (default: 1; 0 leaves the engine default). With a NIC set it counts per NIC.
 	RdmaCopyThreads int
+	// RdmaPoolShortfall is storage.rdma.poolShortfall, fail or warn; empty leaves the engine default.
+	RdmaPoolShortfall string
 
 	// Checksum validation
 	Checksum string // Checksum algorithm: crc32, crc32c, sha1, sha256, crc64-nvme (empty = disabled)

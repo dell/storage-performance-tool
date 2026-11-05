@@ -70,6 +70,11 @@ func (r *Report) Print() {
 		r.printNodeResult(host, result, color)
 	}
 
+	if r.PoolPreview != "" {
+		fmt.Print(r.PoolPreview)
+		fmt.Println()
+	}
+
 	// Summary
 	fmt.Println("═══ Summary ═══")
 	if r.Ready {
@@ -78,6 +83,22 @@ func (r *Report) Print() {
 	} else {
 		fmt.Printf("❌ NOT READY: %s\n", r.Summary)
 		fmt.Println("Please address the issues above before running tests.")
+	}
+}
+
+// AddPoolPreview adds the RDMA pool lines. A short pool under fail makes the report not ready;
+// under warn it only says so.
+func (r *Report) AddPoolPreview(text string, failures, warnings []string) {
+	r.PoolPreview = text
+	for _, warning := range warnings {
+		r.PoolPreview += "  ⚠️  " + warning + "\n"
+	}
+	for _, failure := range failures {
+		r.PoolPreview += "  ❌ " + failure + "\n"
+	}
+	if len(failures) > 0 {
+		r.Ready = false
+		r.Summary = strings.TrimSpace(r.Summary + " " + strings.Join(failures, "; "))
 	}
 }
 

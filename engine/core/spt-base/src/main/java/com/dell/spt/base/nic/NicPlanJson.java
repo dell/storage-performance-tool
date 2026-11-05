@@ -4,6 +4,8 @@ import com.dell.spt.base.nic.NicInventory.Nic;
 import com.dell.spt.base.nic.NicInventory.RdmaDevice;
 import com.dell.spt.base.nic.NicInventory.Sysctls;
 import com.dell.spt.base.nic.NicPlan.Finding;
+import com.dell.spt.base.nic.pool.MemoryCapacity;
+import com.dell.spt.base.nic.pool.PoolDemandRequest;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -32,6 +34,18 @@ public final class NicPlanJson {
 	 * @param plan {@code null} without {@code --interfaces}
 	 */
 	public static String serialize(final Engine engine, final String host, final NicInventory inventory, final NicPlan plan, final boolean pretty) {
+		return serialize(engine, host, inventory, plan, null, null, pretty);
+	}
+
+	/**
+	 * As above, with the additions the CLI's sizing asks for.
+	 *
+	 * @param poolSteps the workload to estimate on this plan's NICs, or {@code null}
+	 * @param capacity this engine's memory capacity, or {@code null}
+	 */
+	public static String serialize(
+					final Engine engine, final String host, final NicInventory inventory, final NicPlan plan,
+					final List<PoolDemandRequest.Step> poolSteps, final MemoryCapacity capacity, final boolean pretty) {
 		final ObjectNode root = MAPPER.createObjectNode();
 		root.put("format", FORMAT);
 		root.put("version", VERSION);
@@ -42,6 +56,12 @@ public final class NicPlanJson {
 		root.set("inventory", inventory(inventory));
 		if (plan != null) {
 			root.set("plan", plan(plan));
+		}
+		if (poolSteps != null && plan != null && plan.ok()) {
+			PoolDemandRequest.write(root.putObject("poolDemand"), poolSteps, plan.nicSet());
+		}
+		if (capacity != null) {
+			capacity.write(root.putObject("capacity"));
 		}
 		try {
 			return pretty ? MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(root) : MAPPER.writeValueAsString(root);

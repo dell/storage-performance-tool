@@ -1,6 +1,7 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 
 import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
+import java.util.List;
 
 /**
  * The statistics the S3-RDMA driver reports through {@link DriverStatsSnapshot}.
@@ -73,7 +74,28 @@ final class RdmaDriverStats {
 	 */
 	static DriverStatsSnapshot snapshot(
 					final RdmaPathStats path, final RdmaBufferPool pool, final boolean transportAvailable) {
-		final RdmaBufferPool.Levels levels = pool == null ? NO_POOL : pool.levels();
+		return snapshot(path, pool == null ? List.of() : List.of(pool), transportAvailable);
+	}
+
+	/**
+	 * The same names over a driver's NIC Pools: counts and levels are summed, and each pool's levels
+	 * are one read under its own lock. The peak is the sum of each pool's peak, so it bounds the
+	 * driver's peak from above.
+	 *
+	 * @param pools the driver's pools; empty when the buffer pool is disabled
+	 */
+	static DriverStatsSnapshot snapshot(
+					final RdmaPathStats path, final List<RdmaBufferPool> pools, final boolean transportAvailable) {
+		RdmaBufferPool.Levels levels = NO_POOL;
+		for (final RdmaBufferPool pool : pools) {
+			final RdmaBufferPool.Levels one = pool.levels();
+			levels = new RdmaBufferPool.Levels(
+							levels.reservedBytes() + one.reservedBytes(),
+							levels.budgetBytes() + one.budgetBytes(),
+							levels.buffers() + one.buffers(),
+							levels.idleBuffers() + one.idleBuffers(),
+							levels.peakReservedBytes() + one.peakReservedBytes());
+		}
 		return DriverStatsSnapshot.builder(DRIVER)
 						.counter(RDMA_REQUESTS_SENT, path.rdmaRequestsSent.sum())
 						.counter(RDMA_TRANSFERRED, path.rdmaTransferred.sum())
@@ -89,19 +111,19 @@ final class RdmaDriverStats {
 						.counter(HTTP_OVERSIZE, path.httpOversize.sum())
 						.counter(HTTP_FALLBACK, path.httpFallback.sum())
 						.counter(PREPARE_FAILED, path.prepareFailed.sum())
-						.counter(REGISTRATIONS_POOLED, pool == null ? 0 : pool.created.sum())
+						.counter(REGISTRATIONS_POOLED, RdmaBufferPool.sum(pools, pool -> pool.created))
 						.counter(REGISTRATIONS_ON_DEMAND, path.registrationsOnDemand.sum())
-						.counter(REGISTRATION_FAILED_POOLED, pool == null ? 0 : pool.registrationFailed.sum())
+						.counter(REGISTRATION_FAILED_POOLED, RdmaBufferPool.sum(pools, pool -> pool.registrationFailed))
 						.counter(REGISTRATION_FAILED_ON_DEMAND, path.registrationFailedOnDemand.sum())
-						.counter(ALLOCATION_FAILED_POOLED, pool == null ? 0 : pool.allocationFailed.sum())
+						.counter(ALLOCATION_FAILED_POOLED, RdmaBufferPool.sum(pools, pool -> pool.allocationFailed))
 						.counter(ALLOCATION_FAILED_ON_DEMAND, path.allocationFailedOnDemand.sum())
 						.counter(TOKEN_GENERATION_FAILED, path.tokenGenerationFailed.sum())
-						.counter(POOL_HITS, pool == null ? 0 : pool.hits.sum())
-						.counter(POOL_EXHAUSTED, pool == null ? 0 : pool.exhausted.sum())
-						.counter(POOL_OVERSIZE, pool == null ? 0 : pool.unpooled.sum())
-						.counter(POOL_EVICTED, pool == null ? 0 : pool.evicted.sum())
-						.counter(POOL_DISCARDED, pool == null ? 0 : pool.discarded.sum())
-						.counter(POOL_INVALID_RETURNS, pool == null ? 0 : pool.invalidReturns.sum())
+						.counter(POOL_HITS, RdmaBufferPool.sum(pools, pool -> pool.hits))
+						.counter(POOL_EXHAUSTED, RdmaBufferPool.sum(pools, pool -> pool.exhausted))
+						.counter(POOL_OVERSIZE, RdmaBufferPool.sum(pools, pool -> pool.unpooled))
+						.counter(POOL_EVICTED, RdmaBufferPool.sum(pools, pool -> pool.evicted))
+						.counter(POOL_DISCARDED, RdmaBufferPool.sum(pools, pool -> pool.discarded))
+						.counter(POOL_INVALID_RETURNS, RdmaBufferPool.sum(pools, pool -> pool.invalidReturns))
 						.gauge(DRIVERS, 1)
 						.gauge(TRANSPORT_AVAILABLE, transportAvailable ? 1 : 0)
 						.gauge(POOL_RESERVED_BYTES, levels.reservedBytes())

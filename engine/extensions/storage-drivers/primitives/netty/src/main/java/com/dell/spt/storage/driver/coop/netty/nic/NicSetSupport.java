@@ -63,6 +63,7 @@ public final class NicSetSupport {
 	private final AtomicBoolean setupFailureLogged = new AtomicBoolean();
 	private volatile NicSetLayout layout;
 	private volatile NicPathCounters counters;
+	private volatile NicInventory inventory;
 
 	/** @param driver the driver's name in log lines */
 	public NicSetSupport(final String driver, final NicSetSettings settings, final Environment environment) {
@@ -81,6 +82,15 @@ public final class NicSetSupport {
 	 */
 	public void open(final NicSetConnectionPool pool, final List<String> endpoints, final int concurrencyLimit,
 					final IoGroupFactory groups, final Runnable shutdownGroups) throws InterruptedException {
+		open(pool, endpoints, concurrencyLimit, groups, shutdownGroups, false);
+	}
+
+	/**
+	 * As above; with {@code rdma}, the plan is the RDMA plan: every NIC must have an {@code mlx5}
+	 * device with DC and a RoCE v2 GID for its address, and {@link #rdmaDevice} names the device.
+	 */
+	public void open(final NicSetConnectionPool pool, final List<String> endpoints, final int concurrencyLimit,
+					final IoGroupFactory groups, final Runnable shutdownGroups, final boolean rdma) throws InterruptedException {
 		AdmissionPhase.report("resolving NICs");
 		final NicInventory inventory;
 		try {
@@ -89,7 +99,7 @@ public final class NicSetSupport {
 			throw new RunTerminalException(IntegrityTerminalException.Category.EXECUTION,
 							"Cannot read this host's network interfaces for storage.net.interfaces: " + e.getMessage(), e);
 		}
-		final var plan = new NicPlanner(environment.resolver()).plan(inventory, settings.interfaces(), endpoints, false);
+		final var plan = new NicPlanner(environment.resolver()).plan(inventory, settings.interfaces(), endpoints, rdma);
 		plan.warnings().forEach(warning -> Loggers.MSG.warn("{}: {}", driver, warning.fix() == null
 						? warning.text()
 						: warning.text() + " (" + warning.fix() + ")"));
@@ -121,7 +131,20 @@ public final class NicSetSupport {
 			throw e;
 		}
 		this.counters = NicPathCounters.of(planned, plan, inventory, concurrencyLimit);
+		this.inventory = inventory;
 		this.layout = planned;
+	}
+
+	/** The RDMA device of chosen NIC {@code nic}, or {@code null} when it has none or before a successful open. */
+	public String rdmaDevice(final String nic) {
+		final var read = inventory;
+		return read == null ? null : read.nic(nic).map(NicInventory.Nic::rdmaDevice).orElse(null);
+	}
+
+	/** The NUMA node of chosen NIC {@code nic}, or {@code null} when it has none or before a successful open. */
+	public Integer numaNode(final String nic) {
+		final var read = inventory;
+		return read == null ? null : read.nic(nic).map(NicInventory.Nic::numaNode).orElse(null);
 	}
 
 	/**

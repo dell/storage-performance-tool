@@ -51,4 +51,6 @@ const (
 	EnvRdmaBufferPool = "RDMA_BUFFER_POOL"
 	// EnvRdmaCopyThreads sets how many threads copy one RDMA PUT payload into its buffer.
 	EnvRdmaCopyThreads = "RDMA_COPY_THREADS"
+	// EnvRdmaPoolShortfall sets what a short RDMA pool does with a NIC set: fail or warn.
+	EnvRdmaPoolShortfall = "RDMA_POOL_SHORTFALL"
 )

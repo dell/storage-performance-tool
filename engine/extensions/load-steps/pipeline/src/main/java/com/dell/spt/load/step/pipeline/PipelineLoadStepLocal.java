@@ -67,6 +67,17 @@ public class PipelineLoadStepLocal
 		super(baseConfig, extensions, contextConfigs, metricsManager);
 	}
 
+	/** Each sub-load's configuration over the base, as this step builds its context. */
+	@Override
+	protected Config effectiveConfig(final int contextIndex) {
+		final Map<String, Object> merged = reduceForest(Arrays.asList(deepToMap(config), deepToMap(ctxConfigs.get(contextIndex))));
+		try {
+			return new BasicConfig(config.pathSep(), config.schema(), merged);
+		} catch (final InvalidValueTypeException | InvalidValuePathException e) {
+			throw new IllegalStateException("Scenario syntax error", e);
+		}
+	}
+
 	@Override
 	protected void init() {
 

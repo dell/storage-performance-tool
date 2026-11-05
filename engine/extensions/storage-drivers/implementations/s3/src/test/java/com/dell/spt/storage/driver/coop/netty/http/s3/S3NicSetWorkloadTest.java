@@ -484,7 +484,11 @@ final class S3NicSetWorkloadTest {
 		assertEquals("", end.get("missing_contexts"));
 		assertEquals("0", end.get("unresolved"));
 		final var body = rows.subList(0, rows.size() - 1);
-		assertTrue(body.stream().allMatch(row -> stepId.equals(row.get("step_id")) && "1".equals(row.get("schema_version"))));
+		assertTrue(body.stream().allMatch(row -> stepId.equals(row.get("step_id")) && "2".equals(row.get("schema_version"))));
+		// Schema 2's RDMA and pool columns are empty for s3, which a reader tells by the driver.
+		for (final var column : List.of("rdma_succeeded", "http_succeeded", "pool_created", "pool_hits", "pool_exhausted", "pool_unpooled", "pool_prewarmed")) {
+			assertTrue(rows.stream().allMatch(row -> row.get(column).isEmpty()), column);
+		}
 		assertEquals(Map.of("0", Set.of("lo-a", "lo-b"), "1", Set.of("lo-c", "lo-d")), body.stream()
 						.filter(row -> !"none".equals(row.get("row")))
 						.collect(Collectors.groupingBy(row -> row.get("context_index"),

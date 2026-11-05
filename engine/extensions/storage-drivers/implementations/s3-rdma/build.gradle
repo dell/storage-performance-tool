@@ -122,6 +122,7 @@ dependencies {
 	compileOnly(
 		libs.netty.handler,
 		libs.netty.codec.http,
+		libs.netty.connection.pool,
 	)
 
 	testImplementation(libs.mockito.core)
@@ -132,6 +133,8 @@ dependencies {
 		libs.disruptor,
 		libs.netty.transport.native.epoll,
 	)
+	// S3RdmaNicSetWorkloadTest runs a pipeline step as an engine scenario on the NIC-set route.
+	testRuntimeOnly(project(':extensions:load-steps:pipeline'))
 }
 
 // Configure shadowJar to include native library if built

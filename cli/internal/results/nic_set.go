@@ -34,6 +34,11 @@ type NicEngine struct {
 	Contexts         []NicContext `json:"contexts,omitempty"`
 
 	ContextsWithoutNicSet int `json:"contextsWithoutNicSet,omitempty"`
+
+	// MaxDirectMemoryBytes is the limit the engine reports it runs with, for a step with NIC Pools.
+	MaxDirectMemoryBytes *int64 `json:"maxDirectMemoryBytes,omitempty"`
+	// Pool is the engine's pool checks and pre-warm for the step, as nic.set.json has it.
+	Pool json.RawMessage `json:"pool,omitempty"`
 }
 
 // NicContext is one NIC-set driver of a step with several.
@@ -60,6 +65,8 @@ type nicSetReport struct {
 	Contexts         []nicSetReportPart `json:"contexts"`
 
 	ContextsWithoutNicSet int `json:"contexts_without_nic_set"`
+
+	Pool json.RawMessage `json:"pool"`
 }
 
 type nicSetReportPart struct {
@@ -133,6 +140,17 @@ func readNicSetReport(path, stepID string) (NicEngine, error) {
 		TotalEventLoops:  report.TotalEventLoops,
 
 		ContextsWithoutNicSet: report.ContextsWithoutNicSet,
+
+		Pool: report.Pool,
+	}
+	if len(report.Pool) > 0 {
+		var pool struct {
+			MaxDirectMemoryBytes *int64 `json:"max_direct_memory_bytes"`
+		}
+		if err := json.Unmarshal(report.Pool, &pool); err != nil {
+			return NicEngine{}, fmt.Errorf("pool: %w", err)
+		}
+		engine.MaxDirectMemoryBytes = pool.MaxDirectMemoryBytes
 	}
 	for _, part := range report.Contexts {
 		engine.Contexts = append(engine.Contexts, NicContext(part))

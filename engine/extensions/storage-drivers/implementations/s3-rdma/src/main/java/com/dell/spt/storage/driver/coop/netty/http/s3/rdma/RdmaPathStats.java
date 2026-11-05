@@ -1,5 +1,6 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3.rdma;
 
+import java.util.List;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -52,6 +53,32 @@ final class RdmaPathStats {
 	final LongAdder allocationFailedOnDemand = new LongAdder();
 	/** The transport gave no token for a registered buffer. */
 	final LongAdder tokenGenerationFailed = new LongAdder();
+
+	/** A new set of counts: each count summed over {@code stats}, one driver's NICs. */
+	static RdmaPathStats sum(final List<RdmaPathStats> stats) {
+		final RdmaPathStats total = new RdmaPathStats();
+		for (final RdmaPathStats one : stats) {
+			total.rdmaRequestsSent.add(one.rdmaRequestsSent.sum());
+			total.rdmaTransferred.add(one.rdmaTransferred.sum());
+			total.rdmaBytesAssumed.add(one.rdmaBytesAssumed.sum());
+			total.rdmaDeclinedServedOverHttp.add(one.rdmaDeclinedServedOverHttp.sum());
+			total.rdmaDeclinedFailed.add(one.rdmaDeclinedFailed.sum());
+			total.rdmaHttpError.add(one.rdmaHttpError.sum());
+			total.rdmaProtocolError.add(one.rdmaProtocolError.sum());
+			total.rdmaTimedOut.add(one.rdmaTimedOut.sum());
+			total.httpRdmaUnavailable.add(one.httpRdmaUnavailable.sum());
+			total.httpBelowThreshold.add(one.httpBelowThreshold.sum());
+			total.httpIneligible.add(one.httpIneligible.sum());
+			total.httpOversize.add(one.httpOversize.sum());
+			total.httpFallback.add(one.httpFallback.sum());
+			total.prepareFailed.add(one.prepareFailed.sum());
+			total.registrationsOnDemand.add(one.registrationsOnDemand.sum());
+			total.registrationFailedOnDemand.add(one.registrationFailedOnDemand.sum());
+			total.allocationFailedOnDemand.add(one.allocationFailedOnDemand.sum());
+			total.tokenGenerationFailed.add(one.tokenGenerationFailed.sum());
+		}
+		return total;
+	}
 
 	String summary() {
 		return "rdmaTransferred=" + rdmaTransferred.sum()

@@ -24,6 +24,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -531,5 +532,104 @@ class RdmaPayloadCopierTest {
 			slices++;
 			return super.slice(from, partSize);
 		}
+	}
+
+	// ---------- a preparation lane's copier ----------
+
+	@Test
+	void aStoppableCopierCopiesTheSameBytesInChunks() throws Exception {
+		final int[] sizes = {PART - 1, PART, 3 * PART + 7
+		};
+		for (final int threads : new int[]{1, 2, 4
+		}) {
+			for (final int size : sizes) {
+				try (final DataInput input = input(false);
+								final var plain = new RdmaPayloadCopier(1, "unused-");
+								final var stoppable = RdmaPayloadCopier.stoppable(threads, "rdma-lane-copy-")) {
+					final ByteBuffer expected = ByteBuffer.allocateDirect(size);
+					plain.copy(item(input, size), expected, size);
+					final ByteBuffer actual = ByteBuffer.allocateDirect(size);
+					final DataItem item = item(input, size);
+					stoppable.copy(item, actual, size);
+					assertEquals(size, actual.remaining());
+					assertEquals(size, item.position(), "the item advanced by the copy");
+					assertEquals(expected, actual, "threads=" + threads + " size=" + size);
+				}
+			}
+		}
+	}
+
+	@Test
+	void aStoppableOnePartCopyStopsAtItsNextChunkAndShutdownWaitsForItsRelease() throws Exception {
+		final var reading = new CountDownLatch(1);
+		final var proceed = new CountDownLatch(1);
+		final AtomicInteger reads = new AtomicInteger();
+		final DataItem item = Mockito.mock(DataItem.class);
+		Mockito.when(item.read(Mockito.any(ByteBuffer.class))).thenAnswer(call -> {
+			final ByteBuffer dst = call.getArgument(0);
+			assertTrue(dst.remaining() <= PART, "a read asks for one chunk at most");
+			reads.incrementAndGet();
+			reading.countDown();
+			proceed.await();
+			final int count = dst.remaining();
+			dst.position(dst.limit());
+			return count;
+		});
+		final var copier = RdmaPayloadCopier.stoppable(1, "rdma-lane-copy-");
+		final ByteBuffer dst = ByteBuffer.allocateDirect(3 * PART);
+		final var thrown = new AtomicReference<Throwable>();
+		final Thread caller = new Thread(() -> {
+			try {
+				copier.copy(item, dst, 3 * PART);
+			} catch (final Throwable e) {
+				thrown.set(e);
+			}
+		});
+		caller.start();
+		assertTrue(reading.await(10, TimeUnit.SECONDS));
+
+		copier.signalStop();
+		proceed.countDown();
+		caller.join(TimeUnit.SECONDS.toMillis(10));
+
+		assertInstanceOf(RdmaPayloadCopier.StoppedException.class, thrown.get());
+		assertEquals(1, reads.get(), "it stopped at the first chunk's end");
+		assertFalse(copier.awaitStop(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(50)), "the copy is counted until its buffer is released");
+		copier.stoppedCopyReleased();
+		assertTrue(copier.shutdown(), "released, so the stop ends");
+	}
+
+	@Test
+	void aStoppedCopierRefusesAOnePartCopyAtOnce() throws Exception {
+		final var copier = RdmaPayloadCopier.stoppable(1, "rdma-lane-copy-");
+		copier.signalStop();
+		final DataItem item = Mockito.mock(DataItem.class);
+
+		assertThrows(RdmaPayloadCopier.StoppedException.class, () -> copier.copy(item, ByteBuffer.allocateDirect(PART), PART));
+
+		Mockito.verify(item, Mockito.never()).read(Mockito.any(ByteBuffer.class));
+		copier.stoppedCopyReleased();
+		assertTrue(copier.shutdown());
+	}
+
+	@Test
+	void theDefaultRoutesCopierStillIgnoresAStopInAOnePartCopy() throws Exception {
+		final var copier = new RdmaPayloadCopier(1, "unused-");
+		copier.signalStop();
+		try (final DataInput input = input(false)) {
+			final ByteBuffer dst = ByteBuffer.allocateDirect(PART);
+			copier.copy(item(input, PART), dst, PART);
+			assertEquals(PART, dst.remaining());
+		}
+		assertTrue(copier.shutdown(), "a copy on the calling thread alone is not tracked");
+	}
+
+	@Test
+	void aChunksLimitCannotOverflowNearTheLargestBuffer() {
+		assertEquals(Integer.MAX_VALUE,
+						RdmaPayloadCopier.chunkLimit(Integer.MAX_VALUE - 10, Integer.MAX_VALUE));
+		assertEquals(RdmaPayloadCopier.PART_BYTES,
+						RdmaPayloadCopier.chunkLimit(0, Integer.MAX_VALUE));
+		assertEquals(10, RdmaPayloadCopier.chunkLimit(5, 10));
 	}
 }

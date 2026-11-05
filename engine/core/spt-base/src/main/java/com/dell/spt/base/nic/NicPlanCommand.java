@@ -2,11 +2,14 @@ package com.dell.spt.base.nic;
 
 import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.nic.pool.MemoryCapacity;
+import com.dell.spt.base.nic.pool.PoolDemandRequest;
 import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * The engine image's {@code /opt/spt/spt-nic-plan} command: prints this host's NIC inventory and,
@@ -22,10 +25,13 @@ public final class NicPlanCommand {
 
 	static final String USAGE = """
 					Usage: spt-nic-plan [--interfaces auto|<entry>[,<entry>...]] [--endpoint <host:port>]... [--rdma] [--pretty]
-					  --interfaces  the NIC set to plan: auto, or interface names, IPv4 addresses or RDMA devices
-					  --endpoint    one of the engine's endpoints after slicing, in configured order; repeatable
-					  --rdma        apply the RDMA checks, and query DC support and the RoCE active MTU
-					  --pretty      indent the JSON
+					                    [--pool-request <base64>] [--capacity]
+					  --interfaces    the NIC set to plan: auto, or interface names, IPv4 addresses or RDMA devices
+					  --endpoint      one of the engine's endpoints after slicing, in configured order; repeatable
+					  --rdma          apply the RDMA checks, and query DC support and the RoCE active MTU
+					  --pool-request  a workload as base64 JSON: adds its RDMA Pool Demand on the planned NICs
+					  --capacity      adds this engine's memory capacity and its source
+					  --pretty        indent the JSON
 					Prints the inventory, and with --interfaces the plan, as JSON on stdout.""";
 
 	private static final String LOG_CONFIG = "nic-plan-log4j2.yaml";
@@ -34,6 +40,7 @@ public final class NicPlanCommand {
 	private final Function<Boolean, SysfsInventoryReader> readers;
 	private final EndpointResolver resolver;
 	private final NicPlanJson.Engine engine;
+	private final Supplier<MemoryCapacity> capacity;
 
 	/**
 	 * Creates the command with its host dependencies.
@@ -41,9 +48,16 @@ public final class NicPlanCommand {
 	 * @param readers the inventory reader for an RDMA ({@code true}) or a plain run
 	 */
 	NicPlanCommand(final Function<Boolean, SysfsInventoryReader> readers, final EndpointResolver resolver, final NicPlanJson.Engine engine) {
+		this(readers, resolver, engine, MemoryCapacity::ofThisHost);
+	}
+
+	NicPlanCommand(
+					final Function<Boolean, SysfsInventoryReader> readers, final EndpointResolver resolver, final NicPlanJson.Engine engine,
+					final Supplier<MemoryCapacity> capacity) {
 		this.readers = readers;
 		this.resolver = resolver;
 		this.engine = engine;
+		this.capacity = capacity;
 	}
 
 	public static void main(final String... args) {
@@ -91,7 +105,8 @@ public final class NicPlanCommand {
 			final var plan = arguments.interfaces() == null
 							? null
 							: new NicPlanner(resolver).plan(inventory, arguments.interfaces(), arguments.endpoints(), arguments.rdma());
-			out.println(NicPlanJson.serialize(engine, reader.hostname(), inventory, plan, arguments.pretty()));
+			final var memory = arguments.capacity() ? capacity.get() : null;
+			out.println(NicPlanJson.serialize(engine, reader.hostname(), inventory, plan, arguments.poolSteps(), memory, arguments.pretty()));
 			out.flush();
 			return EXIT_OK;
 		} catch (final Exception e) {
@@ -101,24 +116,29 @@ public final class NicPlanCommand {
 	}
 
 	/** The parsed command line; {@code interfaces} is {@code null} without {@code --interfaces}. */
-	record Arguments(List<String> interfaces, List<String> endpoints, boolean rdma, boolean pretty, boolean help) {
+	record Arguments(
+					List<String> interfaces, List<String> endpoints, boolean rdma, boolean pretty, boolean help,
+					List<PoolDemandRequest.Step> poolSteps, boolean capacity) {
 
 		static Arguments parse(final String[] args) {
 			List<String> interfaces = null;
 			final var endpoints = new ArrayList<String>();
 			boolean rdma = false;
 			boolean pretty = false;
+			boolean capacity = false;
+			List<PoolDemandRequest.Step> poolSteps = null;
 			for (int i = 0; i < args.length; i++) {
 				final var arg = args[i];
 				switch (arg) {
 					case "--help", "-h" -> {
-						return new Arguments(null, List.of(), false, false, true);
+						return new Arguments(null, List.of(), false, false, true, null, false);
 					}
 					case "--rdma" -> rdma = true;
 					case "--pretty" -> pretty = true;
+					case "--capacity" -> capacity = true;
 					default -> {
 						final var option = arg.contains("=") ? arg.substring(0, arg.indexOf('=')) : arg;
-						if (!option.equals("--interfaces") && !option.equals("--endpoint")) {
+						if (!option.equals("--interfaces") && !option.equals("--endpoint") && !option.equals("--pool-request")) {
 							throw new IllegalArgumentException("unknown argument " + arg);
 						}
 						final String value;
@@ -134,6 +154,8 @@ public final class NicPlanCommand {
 						}
 						if (option.equals("--endpoint")) {
 							endpoints.add(value.trim());
+						} else if (option.equals("--pool-request")) {
+							poolSteps = PoolDemandRequest.parse(value.trim());
 						} else if (interfaces != null) {
 							throw new IllegalArgumentException("--interfaces is given twice");
 						} else {
@@ -142,7 +164,7 @@ public final class NicPlanCommand {
 					}
 				}
 			}
-			return new Arguments(interfaces, endpoints, rdma, pretty, false);
+			return new Arguments(interfaces, endpoints, rdma, pretty, false, poolSteps, capacity);
 		}
 	}
 }

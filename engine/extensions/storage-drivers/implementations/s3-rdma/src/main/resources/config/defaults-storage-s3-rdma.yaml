@@ -24,3 +24,6 @@ storage:
     allowMissingBytesHeader: false
     bufferPool: true
     copyThreads: 1
+    # With a NIC set, what a short NIC Pool does: fail stops the step before any object operation,
+    # warn runs on with per-operation buffers. Without a NIC set nothing reads it.
+    poolShortfall: fail

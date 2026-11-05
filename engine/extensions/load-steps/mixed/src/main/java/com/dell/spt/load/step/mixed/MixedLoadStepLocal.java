@@ -102,6 +102,24 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 	}
 
 	@Override
+	protected boolean mixesOperations() {
+		return true;
+	}
+
+	/** Every sub-load's configuration over the base, as this step builds its one context. */
+	@Override
+	protected Config effectiveConfig(final int contextIndex) {
+		final List<Map<String, Object>> trees = new ArrayList<>(1 + ctxConfigs.size());
+		trees.add(deepToMap(config));
+		ctxConfigs.forEach(context -> trees.add(deepToMap(context)));
+		try {
+			return new BasicConfig(config.pathSep(), config.schema(), reduceForest(trees));
+		} catch (final InvalidValuePathException | InvalidValueTypeException e) {
+			throw new IllegalStateException("Mixed workload scenario syntax error", e);
+		}
+	}
+
+	@Override
 	protected void init() {
 
 		// ── 1. Merge base config with all context configs ──────────────────

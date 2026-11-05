@@ -10,6 +10,7 @@ import com.dell.spt.base.metrics.range.RangeReadSnapshot;
 import com.dell.spt.base.metrics.range.RangeReadArtifact;
 import com.dell.spt.base.nic.NicPathsArtifact;
 import com.dell.spt.base.nic.NicSetArtifact;
+import com.dell.spt.base.nic.pool.PoolPreparation;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleCounters;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.control.run.RunTerminalException;
@@ -86,6 +87,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private boolean nicPathsPublished;
 	private volatile StepPreparation preparation;
 	private volatile Thread preparationDeadlineGuard;
+	private volatile PoolPreparation.Report poolReport;
 	private volatile IntegrityTerminalException durationStopFailure;
 	private volatile IntegrityTerminalException durationValidityFailure;
 	private volatile boolean durationAdmissionBarrierSatisfied;
@@ -357,7 +359,19 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		final Thread preparing = Thread.ofPlatform().daemon().name("spt-preparation-" + stepId).unstarted(() -> {
 			try (final var logCtx = put(KEY_STEP_ID, stepId).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 				AdmissionPhase.current(barrier);
-				for (final LoadStepContext stepContext : List.copyOf(stepContexts)) {
+				final var contexts = List.copyOf(stepContexts);
+				for (final LoadStepContext stepContext : contexts) {
+					if (barrier.fenced()) {
+						return;
+					}
+					stepContext.startDriverForAdmission();
+				}
+				if (barrier.fenced()) {
+					return;
+				}
+				// Every driver has resolved its NICs, so the concurrent drivers are checked together.
+				poolReport = PoolPreparation.run(stepId, poolParticipants(contexts), barrier, PoolPreparation.Environment.system());
+				for (final LoadStepContext stepContext : contexts) {
 					if (barrier.fenced()) {
 						return;
 					}
@@ -379,6 +393,31 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		});
 		barrier.onFence(preparing::interrupt);
 		preparing.start();
+	}
+
+	private List<PoolPreparation.Participant> poolParticipants(final List<LoadStepContext> contexts) {
+		final var participants = new ArrayList<PoolPreparation.Participant>();
+		for (final var context : contexts) {
+			final var driver = context.poolDemandDriver();
+			if (driver != null) {
+				final int index = expectedOperationLifecycleContexts.indexOf(context);
+				participants.add(new PoolPreparation.Participant(index, driver, effectiveConfig(index), mixesOperations()));
+			}
+		}
+		return participants;
+	}
+
+	/** Whether this step's one driver mixes operations by weight, which only the mixed step type does. */
+	protected boolean mixesOperations() {
+		return false;
+	}
+
+	/**
+	 * The effective configuration of the context at {@code contextIndex}, which Pool Demand reads. A
+	 * step with one context per sub-load merges each sub-load's configuration over the base.
+	 */
+	protected Config effectiveConfig(final int contextIndex) {
+		return config;
 	}
 
 	private static String preparationFailureMessage(final Throwable failure) {
@@ -1040,7 +1079,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			LogUtil.exception(Level.WARN, e, "{}: failed to write the NIC paths file", loadStepId());
 		}
 		try (final var logContext = put(KEY_STEP_ID, loadStepId())) {
-			NicSetArtifact.publish(runId(), loadStepId(), operationLifecycleWorkerId, sets, contextsWithoutNicSet);
+			NicSetArtifact.publish(runId(), loadStepId(), operationLifecycleWorkerId, sets, contextsWithoutNicSet, poolReport);
 		} catch (final RuntimeException e) {
 			LogUtil.exception(Level.WARN, e, "{}: failed to write the NIC set file", loadStepId());
 		}

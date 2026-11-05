@@ -180,6 +180,7 @@ func applyEnvDefaultsToRunFlags(cmd *cobra.Command) error {
 	_ = setIf("rdma-local-ip", constants.EnvRdmaLocalIP)
 	_ = setIf("rdma-device", constants.EnvRdmaDevice)
 	_ = setIf("rdma-log-level", constants.EnvRdmaLogLevel)
+	_ = setIf(flagRdmaPoolShortfall, constants.EnvRdmaPoolShortfall)
 
 	// RDMA threshold (accepts humanized sizes like "1MB" or plain bytes "1048576")
 	if f := cmd.Flags().Lookup("rdma-threshold"); f != nil && !cmd.Flags().Changed("rdma-threshold") {

@@ -8,7 +8,10 @@
  * Dependencies: libibverbs, libmlx5, librdmacm (from rdma-core)
  */
 
+#define _GNU_SOURCE /* CPU_ALLOC and the affinity calls */
+
 #include <jni.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -157,27 +160,14 @@ static struct ibv_context *open_device_direct(const char *deviceName) {
  * ============================================================================ */
 
 /**
- * Find the RoCE v2 GID index for a given local IP address.
- * For RoCE (Ethernet), we need to use the correct GID type.
- * IPv4 addresses are stored as IPv4-mapped IPv6 addresses in GID table.
+ * The index of the RoCE v2 GID that holds exactly this IPv4 address, or -1 when none does.
+ * IPv4 addresses are stored as IPv4-mapped IPv6 addresses in the GID table.
  */
-static int find_roce_v2_gid_index(JNIEnv *env, struct ibv_context *ctx, uint8_t port,
-                                   const char *local_ip, union ibv_gid *out_gid) {
-    struct in_addr ip;
+static int scan_roce_v2_gid(struct ibv_context *ctx, uint8_t port,
+                            const struct in_addr *ip, union ibv_gid *out_gid) {
     uint8_t ipv4_mapped[16] = {0,0,0,0,0,0,0,0,0,0,0xff,0xff,0,0,0,0};
 
-    if (local_ip == NULL || strlen(local_ip) == 0) {
-        /* No IP specified, try default GID index 3 (common for RoCE v2) */
-        if (ibv_query_gid(ctx, port, 3, out_gid) == 0) {
-            log_warn(env, "no local_ip specified, using default GID index 3");
-            return 3;
-        }
-        log_warn(env, "no local_ip specified and GID index 3 unavailable, falling back to GID 0");
-        return 0;  /* Fallback to GID 0 */
-    }
-
-    inet_aton(local_ip, &ip);
-    memcpy(&ipv4_mapped[12], &ip.s_addr, 4);
+    memcpy(&ipv4_mapped[12], &ip->s_addr, 4);
 
     for (int i = 0; i < 128; i++) {
         union ibv_gid gid;
@@ -211,6 +201,34 @@ static int find_roce_v2_gid_index(JNIEnv *env, struct ibv_context *ctx, uint8_t 
                 fclose(f);
             }
         }
+    }
+    return -1;
+}
+
+/**
+ * Find the RoCE v2 GID index for a given local IP address.
+ * For RoCE (Ethernet), we need to use the correct GID type.
+ * Without a match it falls back to well-known indexes, which only the default route accepts.
+ */
+static int find_roce_v2_gid_index(JNIEnv *env, struct ibv_context *ctx, uint8_t port,
+                                   const char *local_ip, union ibv_gid *out_gid) {
+    struct in_addr ip;
+
+    if (local_ip == NULL || strlen(local_ip) == 0) {
+        /* No IP specified, try default GID index 3 (common for RoCE v2) */
+        if (ibv_query_gid(ctx, port, 3, out_gid) == 0) {
+            log_warn(env, "no local_ip specified, using default GID index 3");
+            return 3;
+        }
+        log_warn(env, "no local_ip specified and GID index 3 unavailable, falling back to GID 0");
+        return 0;  /* Fallback to GID 0 */
+    }
+
+    inet_aton(local_ip, &ip);
+
+    const int matched = scan_roce_v2_gid(ctx, port, &ip, out_gid);
+    if (matched >= 0) {
+        return matched;
     }
 
     /* Fallback: try GID index 3 (common default for RoCE v2) */
@@ -419,11 +437,13 @@ static int cache_exception_class(JNIEnv *env) {
 }
 
 /**
- * Cache RdmaTransport.nativeLogWarn(String) for native-to-Java log routing.
- * Called once during nativeInit(). Best-effort: if caching fails, log_warn()
- * silently does nothing.
+ * Cache RdmaTransport.nativeLogWarn(String) for native-to-Java log routing, once however many
+ * contexts open. Best-effort: if caching fails, log_warn() silently does nothing.
  */
 static void cache_logger_callback(JNIEnv *env) {
+    if (rdmaTransportClass != NULL) {
+        return;
+    }
     jclass localClass = (*env)->FindClass(env,
         "com/dell/spt/storage/driver/coop/netty/http/s3/rdma/RdmaTransport");
     if (localClass == NULL) {
@@ -484,6 +504,104 @@ static void throw_rdma_exception(JNIEnv *env, const char *message) {
             (*env)->ThrowNew(env, rtExClass, buf);
         }
     }
+}
+
+/* ============================================================================
+ * Context Teardown and the Strict Open
+ * ============================================================================ */
+
+static void destroy_rdma_context(struct rdma_context *rctx) {
+    if (rctx == NULL) return;
+
+    if (rctx->dct_qp) {
+        /* Transition QP to RESET before destroy for portability across
+         * verbs providers. mlx5 tolerates skipping this, but the verbs
+         * spec recommends it and other providers may require it. */
+        struct ibv_qp_attr attr = { .qp_state = IBV_QPS_RESET };
+        ibv_modify_qp(rctx->dct_qp, &attr, IBV_QP_STATE);  /* best-effort */
+        ibv_destroy_qp(rctx->dct_qp);
+    }
+    if (rctx->srq) ibv_destroy_srq(rctx->srq);
+    if (rctx->cq) ibv_destroy_cq(rctx->cq);
+    if (rctx->pd) ibv_dealloc_pd(rctx->pd);
+
+    if (rctx->use_cm && rctx->cm_id) {
+        rdma_destroy_id(rctx->cm_id);
+    } else if (rctx->ctx) {
+        ibv_close_device(rctx->ctx);
+    }
+
+    free(rctx);
+}
+
+/*
+ * Fills rctx as nativeInit does, without its fallbacks. Returns 0, or -1 with errbuf set; the caller
+ * destroys rctx on a failure, and create_dc_target leaves nothing half made.
+ */
+static int open_strict_context(struct rdma_context *rctx, const char *device, const char *local_ip,
+                               char *errbuf, size_t errlen) {
+    struct in_addr ip;
+    struct ibv_port_attr port_attr;
+    struct ibv_device **dev_list;
+    int num_devices = 0;
+
+    if (inet_aton(local_ip, &ip) == 0) {
+        snprintf(errbuf, errlen, "the address is not IPv4");
+        return -1;
+    }
+
+    dev_list = ibv_get_device_list(&num_devices);
+    if (dev_list == NULL) {
+        snprintf(errbuf, errlen, "cannot list RDMA devices (errno=%d: %s)", errno, strerror(errno));
+        return -1;
+    }
+    for (int i = 0; i < num_devices; i++) {
+        if (strcmp(ibv_get_device_name(dev_list[i]), device) == 0) {
+            if (!mlx5dv_is_supported(dev_list[i])) {
+                ibv_free_device_list(dev_list);
+                snprintf(errbuf, errlen, "the device is not an mlx5 device");
+                return -1;
+            }
+            rctx->ctx = ibv_open_device(dev_list[i]);
+            if (rctx->ctx == NULL) {
+                snprintf(errbuf, errlen, "open failed (errno=%d: %s)", errno, strerror(errno));
+            }
+            break;
+        }
+    }
+    ibv_free_device_list(dev_list);
+    if (rctx->ctx == NULL) {
+        if (errbuf[0] == '\0') {
+            snprintf(errbuf, errlen, "the device does not exist");
+        }
+        return -1;
+    }
+
+    rctx->pd = ibv_alloc_pd(rctx->ctx);
+    if (rctx->pd == NULL) {
+        snprintf(errbuf, errlen, "Protection Domain allocation failed (errno=%d: %s)", errno, strerror(errno));
+        return -1;
+    }
+
+    rctx->port_num = 1;
+    if (ibv_query_port(rctx->ctx, rctx->port_num, &port_attr) != 0) {
+        snprintf(errbuf, errlen, "port 1 query failed (errno=%d: %s)", errno, strerror(errno));
+        return -1;
+    }
+    if (port_attr.state != IBV_PORT_ACTIVE || port_attr.link_layer != IBV_LINK_LAYER_ETHERNET) {
+        snprintf(errbuf, errlen, "port 1 is not active on Ethernet");
+        return -1;
+    }
+    rctx->lid = port_attr.lid;
+    rctx->active_mtu = port_attr.active_mtu;
+
+    rctx->gid_index = scan_roce_v2_gid(rctx->ctx, rctx->port_num, &ip, &rctx->gid);
+    if (rctx->gid_index < 0) {
+        snprintf(errbuf, errlen, "port 1 has no RoCE v2 GID for the address");
+        return -1;
+    }
+
+    return create_dc_target(rctx, errbuf, errlen);
 }
 
 /* ============================================================================
@@ -592,32 +710,53 @@ Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeIni
     return (jlong)(uintptr_t)rctx;
 }
 
+/*
+ * Opens one NIC's context with no fallback: exactly this mlx5 device, port 1 active on Ethernet, and
+ * the RoCE v2 GID that holds exactly this address; then the PD and the DC target. Any failure closes
+ * what it opened and throws, naming the device and the address. The default route's nativeInit keeps
+ * its fallbacks.
+ */
+JNIEXPORT jlong JNICALL
+Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeInitStrict(
+        JNIEnv *env, jobject self, jstring deviceName, jstring localIp) {
+
+    char errbuf[256] = {0};
+    char message[512] = {0};
+    struct rdma_context *rctx = calloc(1, sizeof(struct rdma_context));
+    const char *device = deviceName != NULL ? (*env)->GetStringUTFChars(env, deviceName, NULL) : NULL;
+    const char *ip = localIp != NULL ? (*env)->GetStringUTFChars(env, localIp, NULL) : NULL;
+
+    cache_logger_callback(env);
+
+    if (rctx == NULL || device == NULL || ip == NULL) {
+        snprintf(errbuf, sizeof(errbuf), "cannot allocate the RDMA context");
+    } else {
+        open_strict_context(rctx, device, ip, errbuf, sizeof(errbuf));
+    }
+    if (errbuf[0] != '\0') {
+        snprintf(message, sizeof(message), "RDMA device %s at %s: %s",
+                 device != NULL ? device : "?", ip != NULL ? ip : "?", errbuf);
+    }
+
+    if (device != NULL) {
+        (*env)->ReleaseStringUTFChars(env, deviceName, device);
+    }
+    if (ip != NULL) {
+        (*env)->ReleaseStringUTFChars(env, localIp, ip);
+    }
+    if (message[0] != '\0') {
+        destroy_rdma_context(rctx);
+        throw_rdma_exception(env, message);
+        return 0;
+    }
+    return (jlong)(uintptr_t)rctx;
+}
+
 JNIEXPORT void JNICALL
 Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeClose(
         JNIEnv *env, jobject self, jlong handle) {
 
-    struct rdma_context *rctx = (struct rdma_context *)(uintptr_t)handle;
-    if (rctx == NULL) return;
-
-    if (rctx->dct_qp) {
-        /* Transition QP to RESET before destroy for portability across
-         * verbs providers. mlx5 tolerates skipping this, but the verbs
-         * spec recommends it and other providers may require it. */
-        struct ibv_qp_attr attr = { .qp_state = IBV_QPS_RESET };
-        ibv_modify_qp(rctx->dct_qp, &attr, IBV_QP_STATE);  /* best-effort */
-        ibv_destroy_qp(rctx->dct_qp);
-    }
-    if (rctx->srq) ibv_destroy_srq(rctx->srq);
-    if (rctx->cq) ibv_destroy_cq(rctx->cq);
-    if (rctx->pd) ibv_dealloc_pd(rctx->pd);
-
-    if (rctx->use_cm && rctx->cm_id) {
-        rdma_destroy_id(rctx->cm_id);
-    } else if (rctx->ctx) {
-        ibv_close_device(rctx->ctx);
-    }
-
-    free(rctx);
+    destroy_rdma_context((struct rdma_context *)(uintptr_t)handle);
 }
 
 JNIEXPORT jlong JNICALL
@@ -826,6 +965,99 @@ Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeQue
 /* ============================================================================
  * JNI Lifecycle
  * ============================================================================ */
+
+/* Reads the calling thread's mask. The kernel refuses a mask shorter than its own, so this grows until it fits. */
+static cpu_set_t *current_cpus(int *ncpus) {
+    for (int n = 1024; n <= (1 << 20); n *= 2) {
+        cpu_set_t *set = CPU_ALLOC(n);
+        if (set == NULL) {
+            return NULL;
+        }
+        if (sched_getaffinity(0, CPU_ALLOC_SIZE(n), set) == 0) {
+            *ncpus = n;
+            return set;
+        }
+        const int cause = errno;
+        CPU_FREE(set);
+        if (cause != EINVAL) {
+            return NULL;
+        }
+    }
+    return NULL;
+}
+
+/* The CPUs the calling thread may use, in order, or NULL when they cannot be read. */
+JNIEXPORT jintArray JNICALL
+Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeCurrentThreadCpus(
+        JNIEnv *env, jclass cls) {
+
+    int ncpus = 0;
+    cpu_set_t *set = current_cpus(&ncpus);
+    if (set == NULL) {
+        return NULL;
+    }
+    const size_t size = CPU_ALLOC_SIZE(ncpus);
+    const int count = CPU_COUNT_S(size, set);
+    jintArray result = (*env)->NewIntArray(env, count);
+    if (result != NULL) {
+        jint *out = (*env)->GetIntArrayElements(env, result, NULL);
+        if (out == NULL) {
+            result = NULL;
+        } else {
+            int k = 0;
+            for (int cpu = 0; cpu < ncpus && k < count; cpu++) {
+                if (CPU_ISSET_S(cpu, size, set)) {
+                    out[k++] = cpu;
+                }
+            }
+            (*env)->ReleaseIntArrayElements(env, result, out, 0);
+        }
+    }
+    CPU_FREE(set);
+    return result;
+}
+
+/* Sets the calling thread's CPUs: 0, or an errno. No capability is needed for a thread's own mask. */
+JNIEXPORT jint JNICALL
+Java_com_dell_spt_storage_driver_coop_netty_http_s3_rdma_RdmaTransport_nativeSetCurrentThreadCpus(
+        JNIEnv *env, jclass cls, jintArray cpus) {
+
+    if (cpus == NULL) {
+        return EINVAL;
+    }
+    const jsize count = (*env)->GetArrayLength(env, cpus);
+    jint *list = (*env)->GetIntArrayElements(env, cpus, NULL);
+    if (list == NULL) {
+        return ENOMEM;
+    }
+    int ncpus = 1;
+    for (jsize i = 0; i < count; i++) {
+        if (list[i] < 0 || list[i] >= (1 << 24)) {
+            (*env)->ReleaseIntArrayElements(env, cpus, list, JNI_ABORT);
+            return EINVAL;
+        }
+        if (list[i] >= ncpus) {
+            ncpus = list[i] + 1;
+        }
+    }
+    int result = 0;
+    cpu_set_t *set = CPU_ALLOC(ncpus);
+    if (set == NULL) {
+        result = ENOMEM;
+    } else {
+        const size_t size = CPU_ALLOC_SIZE(ncpus);
+        CPU_ZERO_S(size, set);
+        for (jsize i = 0; i < count; i++) {
+            CPU_SET_S(list[i], size, set);
+        }
+        if (sched_setaffinity(0, size, set) != 0) {
+            result = errno;
+        }
+        CPU_FREE(set);
+    }
+    (*env)->ReleaseIntArrayElements(env, cpus, list, JNI_ABORT);
+    return result;
+}
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     JNIEnv *env;

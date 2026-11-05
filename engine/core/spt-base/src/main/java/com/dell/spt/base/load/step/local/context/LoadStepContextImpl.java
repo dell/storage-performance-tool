@@ -66,6 +66,7 @@ import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.AdmissionPreparable;
+import com.dell.spt.base.storage.driver.PoolDemandDriver;
 import com.dell.spt.base.storage.driver.StandaloneDeletePreparable;
 import com.dell.spt.base.util.BinarySizeFormat;
 import com.github.akurilov.commons.io.Output;
@@ -171,6 +172,8 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private final AtomicBoolean durationIntervalStarted = new AtomicBoolean(false);
 	private final AtomicBoolean objectFailureBudgetAdmissionHeld = new AtomicBoolean(false);
 	private final AtomicBoolean admissionBarrierHeld = new AtomicBoolean();
+	// Written and read on the step's preparation thread only.
+	private boolean driverStartedForAdmission;
 	private final AtomicBoolean objectFailureBudgetAdmissionReleased = new AtomicBoolean(false);
 	private final OperationLifecycleTracker<O> operationLifecycle;
 	private final boolean standaloneDeleteEnabled;
@@ -1456,8 +1459,21 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	@Override
+	public final void startDriverForAdmission() throws Exception {
+		if (!driverStartedForAdmission) {
+			driverStartedForAdmission = true;
+			driver.start();
+		}
+	}
+
+	@Override
+	public final PoolDemandDriver poolDemandDriver() {
+		return driver instanceof PoolDemandDriver demand ? demand : null;
+	}
+
+	@Override
 	public final void prepareForAdmission(final AdmissionPreparable.Preparation preparation) throws Exception {
-		driver.start();
+		startDriverForAdmission();
 		if (driver instanceof AdmissionPreparable preparable) {
 			preparable.prepareForAdmission(preparation);
 		}

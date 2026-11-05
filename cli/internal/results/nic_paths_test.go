@@ -161,3 +161,53 @@ func filesByName(manifest *Manifest) map[string]FileStatus {
 	}
 	return files
 }
+
+// The CLI never parses the file: it fetches, indexes and names either schema version as it comes.
+func TestFetcherTakesEitherSchemaVersionUnchanged(t *testing.T) {
+	const schemaOneHeader = "schema_version,engine_run_id,step_id,worker_id,context_index,row,interface,ipv4,rdma_device,rdma_port," +
+		"gid_index,numa_node,shared_port,permit_share,endpoint,endpoint_ip,endpoint_port,attempts,succeeded,failed,interrupted," +
+		"unresolved,bytes,complete,missing_contexts"
+	versions := map[string]string{
+		"1": schemaOneHeader + "\n1,7,read1,w,,end,,,,,,,,,,,,0,0,0,0,0,0,true,\n",
+		"2": schemaOneHeader + ",rdma_succeeded,http_succeeded,pool_created,pool_hits,pool_exhausted,pool_unpooled,pool_prewarmed\n" +
+			"2,7,read1,w,,end,,,,,,,,,,,,0,0,0,0,0,0,true,,,,,,,,\n",
+	}
+	for version, content := range versions {
+		t.Run("schema "+version, func(t *testing.T) {
+			const step = "read1"
+			totals := "OpType,NodeCount,CountSucc\nREAD,1,10\n"
+			items := []map[string]any{
+				{"logger": "metrics.FileTotal", "size": len(totals)},
+				{"logger": "NicPaths", "size": len(content)},
+			}
+			srv := newTestServer(t, map[string]http.HandlerFunc{
+				"/logs/" + step + "/metrics.FileTotal": func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(totals)) },
+				"/logs/" + step + "/NicPaths":          func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(content)) },
+				"/logs/" + step + "/index.json": func(w http.ResponseWriter, _ *http.Request) {
+					_ = json.NewEncoder(w).Encode(map[string]any{"items": items})
+				},
+			})
+			defer srv.Close()
+			out := t.TempDir()
+			fetcher := NewFetcher(srv.URL, out)
+			fetcher.Artifacts = []ArtifactSpec{
+				{Loggers: []string{"metrics.FileTotal"}, Suffix: constants.ResultsArtifactSuffixMetricsTotal, Required: true},
+				{Loggers: []string{"NicPaths"}, Suffix: constants.ResultsArtifactSuffixNicPaths},
+			}
+			manifest, err := fetcher.FetchArtifactsForSteps(context.Background(), []string{step})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status := filesByName(manifest)[step+".nic.paths.csv"]; status.Status != fileStatusOK {
+				t.Fatalf("status = %+v", status)
+			}
+			fetched, err := os.ReadFile(filepath.Join(out, step+".nic.paths.csv"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(fetched) != content {
+				t.Fatalf("fetched %q, want %q", fetched, content)
+			}
+		})
+	}
+}

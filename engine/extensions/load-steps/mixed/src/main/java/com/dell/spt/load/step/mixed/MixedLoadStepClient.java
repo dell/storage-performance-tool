@@ -42,6 +42,11 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 		return MixedLoadStepExtension.TYPE;
 	}
 
+	@Override
+	protected boolean mixesOperations() {
+		return true;
+	}
+
 	/** A mixed step writes new objects only through PUTs; its item input file is its GET/STAT pool. */
 	@Override
 	protected TargetBucketStep targetBucketStep() {

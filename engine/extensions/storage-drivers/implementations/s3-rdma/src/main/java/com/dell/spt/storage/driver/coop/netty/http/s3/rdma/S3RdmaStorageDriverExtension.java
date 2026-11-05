@@ -5,10 +5,11 @@ import com.dell.spt.base.env.ExtensionBase;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
-import com.dell.spt.base.storage.driver.StorageDriverFactory;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketControl;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketControlFactory;
+import com.dell.spt.base.storage.driver.nic.NicSetDriverFactory;
 import com.dell.spt.storage.driver.coop.netty.http.s3.S3TargetBucketControl;
+import com.dell.spt.storage.driver.coop.netty.nic.NicSetSettings;
 import static com.dell.spt.base.Constants.APP_NAME;
 
 import com.github.akurilov.confuse.Config;
@@ -22,7 +23,7 @@ import java.util.List;
 
 public final class S3RdmaStorageDriverExtension<I extends Item, O extends Operation<I>, T extends S3RdmaStorageDriver<I, O>>
 				extends ExtensionBase
-				implements StorageDriverFactory<I, O, T>, TargetBucketControlFactory {
+				implements NicSetDriverFactory<I, O, T>, TargetBucketControlFactory {
 
 	static final String NAME = "s3-rdma";
 	private static final String DEFAULTS_FILE_NAME = "defaults-storage-s3-rdma.yaml";
@@ -39,6 +40,10 @@ public final class S3RdmaStorageDriverExtension<I extends Item, O extends Operat
 	public T create(
 					final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
 					final int batchSize) throws IllegalConfigurationException, InterruptedException {
+		final var nicSet = NicSetSettings.fromStorage(storageConfig);
+		if (nicSet.isPresent()) {
+			return (T) S3RdmaNicSetDriver.create(stepId, dataInput, storageConfig, verifyFlag, batchSize, nicSet.get());
+		}
 		return (T) new S3RdmaStorageDriver<>(stepId, dataInput, storageConfig, verifyFlag, batchSize);
 	}
 
