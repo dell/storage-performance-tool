@@ -24,7 +24,7 @@ const (
 	AutoResultsArtifactTimeout      = 5 * time.Minute        // Bounded artifact and integrity finalization budget
 	AutoResultsCancelCleanupTimeout = 15 * time.Second       // Best-effort artifact salvage budget after cancellation
 	AutoResultsDiscoveryInterval    = 500 * time.Millisecond // Step discovery polling interval
-	AutoResultsDriverStatsInterval  = 2 * time.Second        // Driver-statistics collection interval, well within EngineTerminalRowRetention
+	AutoResultsDriverStatsInterval  = 2 * time.Second        // Interval of the reads that keep finished steps' driver statistics and DELETE metrics, well within EngineTerminalRowRetention
 	EngineTerminalRowRetention      = 20 * time.Second       // How long the engine keeps a finished step's metrics row: its api.linger.sec default, which the CLI never sets
 	AutoResultsShutdownTimeout      = 30 * time.Second       // Graceful API shutdown request budget
 	AutoResultsEntryTerminalTimeout = 12 * time.Second       // Entry-node terminal barrier before distributed worker shutdown

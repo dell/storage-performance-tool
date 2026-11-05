@@ -453,6 +453,10 @@ remains available for recovery and is never silently promoted to a complete resu
 the conservative measured-phase inventory before optional cleanup, not the seed inventory, and is
 safe to reuse as idempotent retry input. Capture accepts only the exact run cluster and expected
 DELETE steps after their units, counters, timing populations, and terminal reconciliation validate.
+A seeded run's cleanup step is not one of them. The engine drops a finished step's row about 20
+seconds after the step ends, so the CLI also reads each DELETE step's final row while the run goes
+on, under the same checks, and uses it when a long cleanup outlasts the row; a row still present at
+the end is judged as it is then.
 Distributed runs require the authoritative fleet view; only a declared single-node run may fall back
 to its node view. Missing, duplicate, partial, stale, or malformed terminal rows fail the results
 artifact and the DELETE command with the workload-failure exit code instead of silently storing

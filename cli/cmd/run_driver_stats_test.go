@@ -774,7 +774,7 @@ func TestAutoResultsDriverStatsFailureDoesNotFailTheRunOrTheDeleteCapture(t *tes
 	t.Cleanup(func() { captureDeleteMetricsFunc = originalDelete })
 	deleteModel := &deletemetrics.Metrics{Objects: deletemetrics.Objects{Selected: 2, Attempted: 2, Accepted: 2}}
 	captureDeleteMetricsFunc = func(
-		context.Context, string, int64, []string, []string, bool,
+		context.Context, string, int64, []string, []string, bool, map[string]*deletemetrics.Metrics,
 	) (map[string]*deletemetrics.Metrics, error) {
 		return map[string]*deletemetrics.Metrics{deleteStep: deleteModel}, nil
 	}
@@ -822,7 +822,7 @@ func TestAutoResultsDeleteCaptureFailureDoesNotDropDriverStats(t *testing.T) {
 	t.Cleanup(func() { captureDeleteMetricsFunc = originalDelete })
 	deleteFailure := errors.New("authoritative DELETE detail is missing")
 	captureDeleteMetricsFunc = func(
-		context.Context, string, int64, []string, []string, bool,
+		context.Context, string, int64, []string, []string, bool, map[string]*deletemetrics.Metrics,
 	) (map[string]*deletemetrics.Metrics, error) {
 		return nil, deleteFailure
 	}
@@ -973,6 +973,33 @@ func stagedStatistics(unavailable int64) *driverstats.Stats {
 // lasts until the monitor has read the engine's metrics in every stage.
 func monitorStagedDriverStats(t *testing.T, steps []string, stages [][]any) (storedDriverStats, string) {
 	t.Helper()
+	stubCapture, stubObserve := captureDriverStatsFunc, observeDriverStatsFunc
+	t.Cleanup(func() { captureDriverStatsFunc, observeDriverStatsFunc = stubCapture, stubObserve })
+	captureDriverStatsFunc = engineCaptureDriverStats
+	observeDriverStatsFunc = engineObserveDriverStats
+
+	resultsRoot := t.TempDir()
+	metadata := &runMetadata{
+		ResultsRoot:    resultsRoot,
+		WorkloadType:   WorkloadTypeRead,
+		Hosts:          []runHostMetadata{{Host: "local", IsLocal: true}},
+		ScenarioParams: scenario.Params{S3Driver: scenario.S3DriverRdma},
+	}
+	outcome := monitorStagedRun(t, steps,
+		[]string{"mt-001-20260823.100000.000-seed", "mt-002-20260823.100000.000-read"}, metadata, stages)
+	if outcome.ArtifactErr != nil {
+		t.Fatalf("ArtifactErr = %v", outcome.ArtifactErr)
+	}
+	return readStoredDriverStats(t, resultsRoot)
+}
+
+// monitorStagedRun monitors run 42 of the given runtime and planned steps, whose engine reports
+// the given fleet rows stage by stage, and returns its outcome. The run lasts until the monitor
+// has read the engine's metrics in every stage; its end reads the last stage.
+func monitorStagedRun(
+	t *testing.T, steps, plannedSteps []string, metadata *runMetadata, stages [][]any,
+) autoResultsOutcome {
+	t.Helper()
 	const runID = int64(42)
 	var stage atomic.Int32
 	served := make([]chan struct{}, len(stages))
@@ -1003,30 +1030,13 @@ func monitorStagedDriverStats(t *testing.T, steps []string, stages [][]any) (sto
 			}
 		}}
 	}
-	stubCapture, stubObserve, interval := captureDriverStatsFunc, observeDriverStatsFunc, driverStatsCollectInterval
-	t.Cleanup(func() {
-		captureDriverStatsFunc, observeDriverStatsFunc, driverStatsCollectInterval = stubCapture, stubObserve, interval
-	})
-	captureDriverStatsFunc = engineCaptureDriverStats
-	observeDriverStatsFunc = engineObserveDriverStats
+	interval := driverStatsCollectInterval
+	t.Cleanup(func() { driverStatsCollectInterval = interval })
 	driverStatsCollectInterval = 5 * time.Millisecond
 
-	resultsRoot := t.TempDir()
-	metadata := &runMetadata{
-		ResultsRoot:    resultsRoot,
-		WorkloadType:   WorkloadTypeRead,
-		Hosts:          []runHostMetadata{{Host: "local", IsLocal: true}},
-		ScenarioParams: scenario.Params{S3Driver: scenario.S3DriverRdma},
-	}
 	monitor := startAutoResultsMonitor(
-		context.Background(), server.URL, "mt", resultsRoot,
-		[]string{"mt-001-20260823.100000.000-seed", "mt-002-20260823.100000.000-read"}, runID,
+		context.Background(), server.URL, "mt", metadata.ResultsRoot, plannedSteps, runID,
 		false, nil, "9999", false, 0, "", metadata, io.Discard, io.Discard, "", nil)
 	monitor.Arm()
-	outcome := <-monitor.done
-
-	if outcome.ArtifactErr != nil {
-		t.Fatalf("ArtifactErr = %v", outcome.ArtifactErr)
-	}
-	return readStoredDriverStats(t, resultsRoot)
+	return <-monitor.done
 }

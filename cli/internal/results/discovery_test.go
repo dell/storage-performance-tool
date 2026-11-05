@@ -198,7 +198,7 @@ func TestCaptureTerminalDeleteMetricsPrefersCompleteFleetV4ForCurrentRun(t *test
 
 	metrics, err := CaptureTerminalDeleteMetricsForRunContext(
 		context.Background(), server.URL, 17, []string{"delete-current"},
-		[]string{"local", "node-a"}, false)
+		[]string{"local", "node-a"}, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestCaptureTerminalDeleteMetricsLeavesOutACleanupThatDidWork(t *testing.T) 
 
 	metrics, err := CaptureTerminalDeleteMetricsForRunContext(
 		context.Background(), server.URL, 17, []string{"delete-current"},
-		[]string{"local", "node-a"}, false)
+		[]string{"local", "node-a"}, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,9 +236,99 @@ func TestCaptureTerminalDeleteMetricsStillRefusesAnotherUnexpectedDeleteStep(t *
 
 	_, err := CaptureTerminalDeleteMetricsForRunContext(
 		context.Background(), server.URL, 17, []string{"delete-current"},
-		[]string{"local", "node-a"}, false)
+		[]string{"local", "node-a"}, false, nil)
 	if err == nil || !strings.Contains(err.Error(), "unexpected current-run DELETE step") {
 		t.Fatalf("capture error = %v, want the unexpected step refused", err)
+	}
+}
+
+// The engine drops a finished step's row after a retention period. A step without a row at the
+// end takes the metrics observed while it ran; without them it is missing.
+func TestCaptureTerminalDeleteMetricsTakesAnExpiredStepFromTheObservation(t *testing.T) {
+	const cleanup = "label-003-20250101.000000.000-cleanup"
+	server := httptest.NewServer(metricsRows(
+		capturedDeleteStep(17, "spt-run-17", cleanup, "fleet", "aggregate", nil),
+	))
+	defer server.Close()
+	observed := validTerminalDeleteMetrics()
+
+	metrics, err := CaptureTerminalDeleteMetricsForRunContext(
+		context.Background(), server.URL, 17, []string{"delete-current"},
+		[]string{"local", "node-a"}, false, map[string]*deletemetrics.Metrics{"delete-current": observed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metrics) != 1 || metrics["delete-current"] != observed {
+		t.Fatalf("captured DELETE metrics = %+v, want the observed ones", metrics)
+	}
+
+	_, err = CaptureTerminalDeleteMetricsForRunContext(
+		context.Background(), server.URL, 17, []string{"delete-current"},
+		[]string{"local", "node-a"}, false, map[string]*deletemetrics.Metrics{"delete-other": observed})
+	if err == nil || !strings.Contains(err.Error(), `missing authoritative terminal DELETE step "delete-current"`) {
+		t.Fatalf("capture error = %v, want the step missing", err)
+	}
+}
+
+func TestCaptureTerminalDeleteMetricsJudgesAStepStillReportedOnItsRow(t *testing.T) {
+	row := capturedDeleteStep(17, "spt-run-17", "delete-current", "fleet", "aggregate", validTerminalDeleteMetrics())
+	row["contributors_present"] = []string{"local"}
+	server := httptest.NewServer(metricsRows(row))
+	defer server.Close()
+
+	_, err := CaptureTerminalDeleteMetricsForRunContext(
+		context.Background(), server.URL, 17, []string{"delete-current"}, []string{"local", "node-a"}, false,
+		map[string]*deletemetrics.Metrics{"delete-current": validTerminalDeleteMetrics()})
+	if err == nil || !strings.Contains(err.Error(), "incomplete contributor evidence") {
+		t.Fatalf("capture error = %v, want the row at the end refused", err)
+	}
+}
+
+func TestObserveTerminalDeleteMetricsJudgesOnlySettledRows(t *testing.T) {
+	running := capturedDeleteStep(17, "spt-run-17", "delete-running", "fleet", "aggregate", nil)
+	running["terminal"] = false
+	undecided := validTerminalDeleteMetrics()
+	undecided.FailurePolicy.Outcome = deletemetrics.OutcomeRunning
+	incomplete := capturedDeleteStep(17, "spt-run-17", "delete-incomplete", "fleet", "aggregate", validTerminalDeleteMetrics())
+	incomplete["contributors_present"] = []string{"local"}
+	server := httptest.NewServer(metricsRows(
+		running,
+		capturedDeleteStep(17, "spt-run-17", "delete-undecided", "fleet", "aggregate", undecided),
+		capturedDeleteStep(17, "spt-run-17", "delete-settled", "fleet", "aggregate", validTerminalDeleteMetrics()),
+		incomplete,
+		capturedDeleteStep(17, "spt-run-17", "label-005-20250101.000000.000-cleanup", "fleet", "aggregate", nil),
+	))
+	defer server.Close()
+
+	observation, err := ObserveTerminalDeleteMetricsForRunContext(
+		context.Background(), server.URL, 17,
+		[]string{"delete-running", "delete-undecided", "delete-settled", "delete-incomplete", "delete-unseen"},
+		[]string{"local", "node-a"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observation.Steps) != 1 || observation.Steps["delete-settled"] == nil {
+		t.Fatalf("observed steps = %+v, want only the settled one", observation.Steps)
+	}
+	if len(observation.Refused) != 1 || observation.Refused["delete-incomplete"] == nil {
+		t.Fatalf("refused steps = %+v, want only the incomplete one", observation.Refused)
+	}
+}
+
+func TestObserveTerminalDeleteMetricsLetsARefusalDecideOverAnEarlierRow(t *testing.T) {
+	server := httptest.NewServer(metricsRows(
+		capturedDeleteStep(17, "spt-run-17", "delete-current", "fleet", "aggregate", validTerminalDeleteMetrics()),
+		capturedDeleteStep(17, "spt-run-17", "delete-current", "fleet", "aggregate", validTerminalDeleteMetrics()),
+	))
+	defer server.Close()
+
+	observation, err := ObserveTerminalDeleteMetricsForRunContext(
+		context.Background(), server.URL, 17, []string{"delete-current"}, []string{"local", "node-a"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observation.Steps) != 0 || observation.Refused["delete-current"] == nil {
+		t.Fatalf("observation = %+v, want the repeated step refused", observation)
 	}
 }
 
@@ -257,7 +347,7 @@ func TestCaptureTerminalDeleteMetricsFallsBackToNodeWhenFleetIsUnavailable(t *te
 
 	metrics, err := CaptureTerminalDeleteMetricsForRunContext(
 		context.Background(), server.URL, 17, []string{"delete-current"},
-		[]string{"local"}, true)
+		[]string{"local"}, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +371,7 @@ func TestCaptureTerminalDeleteMetricsRejectsInvalidNodeFallbackRole(t *testing.T
 
 	if _, err := CaptureTerminalDeleteMetricsForRunContext(
 		context.Background(), server.URL, 17, []string{"delete-current"},
-		[]string{"local"}, true); err == nil {
+		[]string{"local"}, true, nil); err == nil {
 		t.Fatal("single-node fallback accepted an aggregate role on the node endpoint")
 	}
 }
@@ -296,7 +386,7 @@ func TestCaptureTerminalDeleteMetricsRejectsNodeFallbackForMultiNodeRun(t *testi
 
 	if _, err := CaptureTerminalDeleteMetricsForRunContext(
 		context.Background(), server.URL, 17, []string{"delete-current"},
-		[]string{"local", "node-a"}, false); err == nil {
+		[]string{"local", "node-a"}, false, nil); err == nil {
 		t.Fatal("multi-node run accepted an unproven node fallback")
 	}
 }
@@ -310,7 +400,7 @@ func TestCaptureTerminalDeleteMetricsRequiresExactExpectedContributorIdentitySet
 		t.Run(name, func(t *testing.T) {
 			if _, err := CaptureTerminalDeleteMetricsForRunContext(
 				context.Background(), "http://127.0.0.1:1", 17,
-				[]string{"delete-current"}, contributors, false); err == nil {
+				[]string{"delete-current"}, contributors, false, nil); err == nil {
 				t.Fatal("invalid expected contributor identity set was accepted")
 			}
 		})
@@ -396,7 +486,7 @@ func TestCaptureTerminalDeleteMetricsFailsClosedOnInvalidAuthoritativeModel(t *t
 			defer server.Close()
 			if _, err := CaptureTerminalDeleteMetricsForRunContext(
 				context.Background(), server.URL, 17, []string{"delete-current"},
-				[]string{"local", "node-a"}, false); err == nil {
+				[]string{"local", "node-a"}, false, nil); err == nil {
 				t.Fatal("invalid authoritative terminal model was accepted")
 			}
 		})

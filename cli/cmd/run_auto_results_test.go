@@ -157,7 +157,7 @@ func TestCaptureStoredDeleteMetricsAssignsTerminalModelWithoutRawArtifact(t *tes
 	}
 	captureDeleteMetricsFunc = func(
 		_ context.Context, baseURL string, runID int64, stepIDs, contributorIDs []string,
-		allowNodeFallback bool,
+		allowNodeFallback bool, _ map[string]*deletemetrics.Metrics,
 	) (map[string]*deletemetrics.Metrics, error) {
 		if baseURL != "http://engine" || runID != 77 ||
 			len(stepIDs) != 1 || stepIDs[0] != "mt-002-20260823.100000.001-delete" ||
@@ -180,7 +180,7 @@ func TestCaptureStoredDeleteMetricsAssignsTerminalModelWithoutRawArtifact(t *tes
 		[]string{
 			"mt-001-20260823.100000.001-seed",
 			"mt-002-20260823.100000.001-delete",
-		}, metadata,
+		}, metadata, nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestCaptureStoredDeleteMetricsBindsFleetRuntimeDeleteIdentity(t *testing.T)
 	t.Cleanup(func() { captureDeleteMetricsFunc = originalCapture })
 	captureDeleteMetricsFunc = func(
 		_ context.Context, _ string, _ int64, stepIDs, contributorIDs []string,
-		allowNodeFallback bool,
+		allowNodeFallback bool, _ map[string]*deletemetrics.Metrics,
 	) (map[string]*deletemetrics.Metrics, error) {
 		if allowNodeFallback || len(stepIDs) != 1 || stepIDs[0] != "mt-001-20260823.100000.001-delete" ||
 			len(contributorIDs) != 2 || contributorIDs[0] != "local" ||
@@ -219,7 +219,7 @@ func TestCaptureStoredDeleteMetricsBindsFleetRuntimeDeleteIdentity(t *testing.T)
 	}
 	if err := captureStoredDeleteMetrics(
 		context.Background(), "http://engine", 77,
-		[]string{"mt-001-20260823.100000.001-delete"}, metadata,
+		[]string{"mt-001-20260823.100000.001-delete"}, metadata, nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestCaptureStoredDeleteMetricsRejectsEmptyTerminalModel(t *testing.T) {
 	originalCapture := captureDeleteMetricsFunc
 	t.Cleanup(func() { captureDeleteMetricsFunc = originalCapture })
 	captureDeleteMetricsFunc = func(
-		context.Context, string, int64, []string, []string, bool,
+		context.Context, string, int64, []string, []string, bool, map[string]*deletemetrics.Metrics,
 	) (map[string]*deletemetrics.Metrics, error) {
 		return nil, nil
 	}
@@ -279,7 +279,7 @@ func TestCaptureStoredDeleteMetricsRejectsEmptyTerminalModel(t *testing.T) {
 	}
 	if err := captureStoredDeleteMetrics(
 		context.Background(), "http://engine", 77,
-		[]string{"mt-001-20260823.100000.000-delete"}, metadata,
+		[]string{"mt-001-20260823.100000.000-delete"}, metadata, nil,
 	); err == nil {
 		t.Fatal("empty terminal DELETE model was accepted")
 	}
@@ -297,7 +297,7 @@ func TestCaptureStoredDeleteMetricsRejectsFleetWithoutRuntimeContributorIdentity
 	}
 	if err := captureStoredDeleteMetrics(
 		context.Background(), "http://engine", 77,
-		[]string{"mt-001-20260823.100000.001-delete"}, metadata,
+		[]string{"mt-001-20260823.100000.001-delete"}, metadata, nil,
 	); err == nil || !strings.Contains(err.Error(), "contributor identity") {
 		t.Fatalf("missing runtime contributor identity error = %v", err)
 	}
