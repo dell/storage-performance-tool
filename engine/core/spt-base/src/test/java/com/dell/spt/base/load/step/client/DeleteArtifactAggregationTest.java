@@ -10,6 +10,7 @@ import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -42,6 +43,27 @@ class DeleteArtifactAggregationTest {
 		assertTrue(Files.isRegularFile(output.resolve(DeleteArtifacts.COMPLETION_FILE_NAME)));
 		assertTrue(Files.isRegularFile(output.resolve(DeleteArtifacts.SELECTION_FILE_NAME)));
 		assertTrue(Files.isRegularFile(output.resolve(DeleteArtifacts.SELECTION_COMPLETION_FILE_NAME)));
+	}
+
+	@Test
+	void retainsAReadOnlySelectionWithTheModeOfItsCompletion() throws Exception {
+		final Path output = temp.resolve("retained");
+		final Path selection = temp.resolve("mounted-input.csv");
+		final String rows = "bucket,key,size,version_id\nb,a,1,\n";
+		Files.writeString(selection, rows);
+		IntegrityManifestCompletion.create(
+						selection, 1, IntegrityManifestCompletion.PRODUCER_CLI_STAGER,
+						"delete-selection", 1, 1, 1).publish(selection);
+		final Path marker = IntegrityManifestCompletion.completionPath(selection);
+		Files.setPosixFilePermissions(selection, PosixFilePermissions.fromString("r--r--r--"));
+
+		DeleteArtifactAggregation.retainSelection("delete-step", output, selection, marker);
+
+		final Path retained = output.resolve(DeleteArtifacts.SELECTION_FILE_NAME);
+		assertEquals(rows, Files.readString(retained));
+		assertEquals(
+						Files.getPosixFilePermissions(output.resolve(DeleteArtifacts.SELECTION_COMPLETION_FILE_NAME)),
+						Files.getPosixFilePermissions(retained));
 	}
 
 	@Test
