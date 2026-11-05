@@ -10,22 +10,27 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.concurrent.AsyncRunnableBase;
+import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.config.TestConfigBuilder;
+import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItemFactoryImpl;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.ItemType;
+import com.dell.spt.base.item.io.IntegrityManifestItemInput;
 import com.dell.spt.base.item.io.RemainingItemCountInput;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.deletion.DeleteFailureClassification;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOutcome;
+import com.dell.spt.base.item.op.deletion.DeleteArtifacts;
 import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.deletion.DeleteTransportResult;
 import com.dell.spt.base.item.op.deletion.DeleteTransportTargetResult;
@@ -50,6 +55,7 @@ import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.commons.system.SizeInBytes;
 import java.io.EOFException;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -1274,6 +1280,206 @@ class StandaloneDeleteEngineStepTest {
 			step.close();
 			metrics.close();
 		}
+	}
+
+	@Test
+	void deleteAcrossBucketsTakesBucketsInTurnAndRecordsEachTargetAtItsManifestPosition(
+					@TempDir final Path temp) throws Exception {
+		final String stepId = "standalone-delete-across-buckets-" + System.nanoTime();
+		final var driver = new DeterministicDeleteDriver(DriverMode.DEFAULT);
+
+		final var rows = runDeleteAcrossBuckets(stepId, temp, driver, 0, byPosition -> {
+			assertEquals(
+							List.of("a0", "b0", "c0", "a1", "b1", "a2"),
+							driver.completed.stream()
+											.map(operation -> operation.deleteRequest().targets().get(0).key())
+											.toList());
+			assertEquals(ACROSS_BUCKETS_ROWS.size(), byPosition.size());
+			for (int i = 0; i < ACROSS_BUCKETS_ROWS.size(); i++) {
+				assertEquals(ACROSS_BUCKETS_ROWS.get(i), byPosition.get(i).get(5));
+				assertEquals("accepted", byPosition.get(i).get(8));
+			}
+		});
+
+		assertEquals(6, rows);
+	}
+
+	@Test
+	void deleteAcrossBucketsThatStopsEarlyLeavesTheRowsItNeverReachedAtTheirOwnPositions(
+					@TempDir final Path temp) throws Exception {
+		final String stepId = "standalone-delete-across-buckets-stopped-" + System.nanoTime();
+		final var driver = new DeterministicDeleteDriver(DriverMode.DEFAULT);
+
+		runDeleteAcrossBuckets(stepId, temp, driver, 3, byPosition -> {
+			assertEquals(ACROSS_BUCKETS_ROWS.size(), byPosition.size());
+			assertEquals(
+							List.of("accepted", "unattempted", "unattempted", "accepted", "unattempted", "accepted"),
+							byPosition.stream().map(row -> row.get(8)).toList());
+			assertEquals(
+							ACROSS_BUCKETS_ROWS,
+							byPosition.stream().map(row -> row.get(5)).toList());
+		});
+	}
+
+	@Test
+	void batchedDeleteKeepsManifestOrderEvenWithSeveralBucketsSelected(@TempDir final Path temp)
+					throws Exception {
+		final String stepId = "standalone-delete-batched-keeps-order-" + System.nanoTime();
+		final var driver = new DeterministicDeleteDriver(DriverMode.DEFAULT);
+
+		runDeleteAcrossBuckets(stepId, temp, driver, 0, 2, ignored -> assertEquals(
+						List.of(List.of("a0", "a1"), List.of("a2"), List.of("b0", "b1"), List.of("c0")),
+						driver.completed.stream()
+										.map(operation -> operation.deleteRequest().targets().stream()
+														.map(DeleteTarget::key)
+														.toList())
+										.toList()));
+	}
+
+	@Test
+	void aRejectedRecycleLimitLeavesNoBucketReaderOpen(@TempDir final Path temp) throws Exception {
+		assumeTrue(Files.isDirectory(OPEN_FILES), "needs " + OPEN_FILES);
+		final Path selection = acrossBucketsManifest(temp);
+		final var config = acrossBucketsConfig(selection, 1, 0);
+		config.val("load-op-limit-recycle", 0);
+		final var input = new IntegrityManifestItemInput(selection);
+		try {
+			final var failure = assertThrows(
+							IllegalConfigurationException.class,
+							() -> generator(config, new DeterministicDeleteDriver(DriverMode.DEFAULT), input));
+			assertEquals("Recycle limit should be > 0", failure.getMessage());
+			assertEquals(1, openReaders(selection), "only the caller's own reader");
+		} finally {
+			input.close();
+		}
+	}
+
+	@Test
+	void aBucketScanThatFailsClosesTheManifestAndFailsTheRunOnItsInput(@TempDir final Path temp)
+					throws Exception {
+		assumeTrue(Files.isDirectory(OPEN_FILES), "needs " + OPEN_FILES);
+		final Path selection = acrossBucketsManifest(temp);
+		final var config = acrossBucketsConfig(selection, 1, 0);
+		final var input = new IntegrityManifestItemInput(selection);
+		assertEquals(1, openReaders(selection));
+		// The file changes after the step opened it: the scan meets a quoted field that never ends.
+		Files.writeString(selection, "bucket,key,size,version_id\n" + "a,a0,0,\n" + "b,\"b0,1,\n");
+
+		final var failure = assertThrows(
+						RunTerminalException.class,
+						() -> generator(config, new DeterministicDeleteDriver(DriverMode.DEFAULT), input));
+
+		assertEquals(IntegrityTerminalException.Category.INPUT, failure.category());
+		assertTrue(failure.getMessage().startsWith("failed to read the buckets of the DELETE items file"));
+		assertEquals(0, openReaders(selection));
+	}
+
+	private static final List<String> ACROSS_BUCKETS_ROWS = List.of("a0", "a1", "a2", "b0", "b1", "c0");
+
+	private static int runDeleteAcrossBuckets(
+					final String stepId,
+					final Path temp,
+					final DeterministicDeleteDriver driver,
+					final long countLimit,
+					final ThrowingConsumer<List<List<String>>> check)
+					throws Exception {
+		return runDeleteAcrossBuckets(stepId, temp, driver, countLimit, 1, check);
+	}
+
+	/** Runs a real step over three buckets and checks its object rows, read in manifest position order. */
+	private static int runDeleteAcrossBuckets(
+					final String stepId,
+					final Path temp,
+					final DeterministicDeleteDriver driver,
+					final long countLimit,
+					final int batchSize,
+					final ThrowingConsumer<List<List<String>>> check)
+					throws Exception {
+		final Path selection = acrossBucketsManifest(temp);
+		final var config = acrossBucketsConfig(selection, batchSize, countLimit);
+		final Path objects = Path.of(FileManager.INSTANCE.logFileName(Loggers.DELETE_OBJECTS.getName(), stepId));
+		Files.deleteIfExists(objects);
+		final var metrics = metrics();
+		final var step = new LoadStepContextImpl<>(
+						stepId,
+						generator(config, driver, new IntegrityManifestItemInput(selection)),
+						driver,
+						metrics,
+						null,
+						config.configVal("load"),
+						false,
+						com.dell.spt.base.item.op.list.shard.ListShardMetricsRecorder.NO_OP,
+						null,
+						config.configVal("item"));
+		try {
+			step.start();
+			awaitDone(step);
+			step.stop();
+			LogUtil.flushAll();
+			final var rows = Files.readAllLines(objects).stream()
+							.skip(1)
+							.map(line -> List.of(line.split(",", -1)))
+							.sorted(java.util.Comparator.comparingLong(row -> Long.parseLong(row.get(3))))
+							.toList();
+			for (int i = 0; i < rows.size(); i++) {
+				final var row = rows.get(i);
+				assertEquals(i, Long.parseLong(row.get(3)));
+				assertEquals(
+								DeleteArtifacts.targetId(new DeleteTarget(
+												new IntegrityManifestDataItem(row.get(4), row.get(5), Long.parseLong(row.get(6)), ""),
+												i)),
+								row.get(2));
+			}
+			check.accept(rows);
+			return rows.size();
+		} finally {
+			step.close();
+			metrics.close();
+			Files.deleteIfExists(objects);
+		}
+	}
+
+	/** Writes the manifest of the across-buckets runs: three buckets of three, two and one rows. */
+	private static Path acrossBucketsManifest(final Path temp) throws Exception {
+		final Path selection = temp.resolve("across-buckets.csv");
+		Files.writeString(
+						selection,
+						"bucket,key,size,version_id\n"
+										+ "a,a0,0,\n" + "a,a1,1,\n" + "a,a2,2,\n"
+										+ "b,b0,3,\n" + "b,b1,4,\n"
+										+ "c,c0,5,\n");
+		return selection.toRealPath();
+	}
+
+	private static Config acrossBucketsConfig(final Path selection, final int batchSize, final long countLimit) {
+		final var config = config(batchSize, 10);
+		config.val("item-input-file", selection.toString());
+		config.val("load-op-limit-count", countLimit);
+		config.val("load-op-delete-selected", 6L);
+		config.val("load-op-delete-selectedCurrentKey", 6L);
+		config.val("load-op-delete-selectedExactVersion", 0L);
+		config.val("load-op-delete-selectedBuckets", List.of("a=3", "b=2", "c=1"));
+		return config;
+	}
+
+	private static final Path OPEN_FILES = Path.of("/proc/self/fd");
+
+	/** Counts this process's open descriptors of the file. */
+	private static long openReaders(final Path file) throws Exception {
+		try (final var descriptors = Files.list(OPEN_FILES)) {
+			return descriptors.filter(descriptor -> {
+				try {
+					return Files.readSymbolicLink(descriptor).equals(file);
+				} catch (final IOException e) {
+					return false; // closed while listing
+				}
+			}).count();
+		}
+	}
+
+	@FunctionalInterface
+	private interface ThrowingConsumer<T> {
+		void accept(T value) throws Exception;
 	}
 
 	@Test

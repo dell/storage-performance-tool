@@ -43,6 +43,31 @@ class DeleteRequestAssemblerTest {
 	}
 
 	@Test
+	void numbersTargetsInArrivalOrderWhenRowsCarryNoPosition() throws Exception {
+		final var assembler = assembler(1);
+		final var operations = new ArrayList<DeleteRequestOperation>();
+
+		assembler.assemble(List.of(item("a"), item("b")), operations);
+		assembler.assemble(List.of(item("c")), operations);
+
+		assertEquals(List.of(0L, 1L, 2L), selectionIndexes(operations));
+	}
+
+	@Test
+	void aRowThatCarriesItsPositionKeepsIt() throws Exception {
+		final var assembler = assembler(1);
+		final var operations = new ArrayList<DeleteRequestOperation>();
+		final var first = item("a");
+		first.selectionIndex(7);
+		final var second = item("b");
+		second.selectionIndex(0);
+
+		assembler.assemble(List.of(first, second), operations);
+
+		assertEquals(List.of(7L, 0L), selectionIndexes(operations));
+	}
+
+	@Test
 	void carriesOnePartialBatchAcrossReadsAndFlushesOneTailOnlyAtNormalCompletion()
 					throws Exception {
 		final var assembler = assembler(3);
@@ -258,6 +283,13 @@ class DeleteRequestAssemblerTest {
 
 	private static IntegrityManifestDataItem item(final String bucket, final String key) {
 		return new IntegrityManifestDataItem(bucket, key, 1, null);
+	}
+
+	private static List<Long> selectionIndexes(final List<DeleteRequestOperation> operations) {
+		return operations.stream()
+						.flatMap(operation -> operation.deleteRequest().targets().stream())
+						.map(DeleteTarget::selectionIndex)
+						.toList();
 	}
 
 	private static List<String> keys(final DeleteRequestOperation operation) {

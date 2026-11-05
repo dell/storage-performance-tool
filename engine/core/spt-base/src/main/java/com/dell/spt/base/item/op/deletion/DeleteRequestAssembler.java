@@ -82,7 +82,8 @@ public final class DeleteRequestAssembler
 		RuntimeException targetFailure = null;
 		for (final var item : items) {
 			try {
-				inputTargets.add(new DeleteTarget(item, nextSelectionIndex));
+				final long carriedIndex = item.selectionIndex();
+				inputTargets.add(new DeleteTarget(item, carriedIndex >= 0 ? carriedIndex : nextSelectionIndex));
 				nextSelectionIndex = Math.addExact(nextSelectionIndex, 1);
 			} catch (final RuntimeException e) {
 				unrecoverableIdentityCount++;

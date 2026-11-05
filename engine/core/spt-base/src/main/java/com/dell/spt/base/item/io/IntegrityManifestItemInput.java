@@ -22,7 +22,7 @@ public final class IntegrityManifestItemInput
 
 	public static final List<String> HEADER = List.of("bucket", "key", "size", "version_id");
 
-	private static final CSVFormat FORMAT = CSVFormat.RFC4180.builder()
+	static final CSVFormat FORMAT = CSVFormat.RFC4180.builder()
 					.setHeader(HEADER.toArray(String[]::new))
 					.setSkipHeaderRecord(true)
 					.get();
@@ -167,7 +167,7 @@ public final class IntegrityManifestItemInput
 		}
 	}
 
-	private static IntegrityManifestDataItem item(final CSVRecord record) {
+	static IntegrityManifestDataItem item(final CSVRecord record) {
 		final long size = validateRecord(record);
 		return new IntegrityManifestDataItem(
 						record.get(0), record.get(1), size, record.get(3));
