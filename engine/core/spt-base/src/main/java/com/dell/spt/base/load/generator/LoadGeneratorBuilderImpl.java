@@ -470,15 +470,16 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 		final var standaloneDelete = StandaloneDeleteConfig.from(loadConfig);
 		standaloneDelete.validateSettings(opType, itemType, recycleFlag, retryFlag);
 		standaloneDelete.validateTopology(itemConfig, itemInput, opOutput);
+		final var recycleLimit = opConfig.intVal("limit-recycle");
+		if (recycleLimit < 1) {
+			throw new IllegalConfigurationException("Recycle limit should be > 0");
+		}
+		// Last before the generator, so that no configuration check fails with the bucket readers open.
 		if (standaloneDelete.enabled()
 						&& standaloneDelete.batchSize() == 1
 						&& standaloneDelete.selectedBuckets().size() > 1
 						&& itemInput instanceof IntegrityManifestItemInput manifestInput) {
 			itemInput = rotateAcrossBuckets(manifestInput);
-		}
-		final var recycleLimit = opConfig.intVal("limit-recycle");
-		if (recycleLimit < 1) {
-			throw new IllegalConfigurationException("Recycle limit should be > 0");
 		}
 		// Note: load-op-retry is deliberately *not* OR'd into recycleFlag here (it used to
 		// be, to make the generator keep polling for late-arriving retries after item input
@@ -745,12 +746,17 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 	private Input<I> rotateAcrossBuckets(final IntegrityManifestItemInput manifestInput) {
 		try {
 			return (Input<I>) BucketRotatingManifestInput.across(manifestInput);
-		} catch (final IOException e) {
-			manifestInput.close();
-			throw new RunTerminalException(
+		} catch (final IOException | RuntimeException e) {
+			final var failure = new RunTerminalException(
 							IntegrityTerminalException.Category.INPUT,
 							"failed to read the buckets of the DELETE items file " + manifestInput.filePath(),
 							e);
+			try {
+				manifestInput.close();
+			} catch (final Exception closeFailure) {
+				failure.addSuppressed(closeFailure);
+			}
+			throw failure;
 		}
 	}
 

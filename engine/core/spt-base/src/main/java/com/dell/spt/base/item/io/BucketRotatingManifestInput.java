@@ -106,9 +106,10 @@ public final class BucketRotatingManifestInput
 							MAX_BUCKETS);
 			return source;
 		}
-		final var rotating = new BucketRotatingManifestInput(manifest, buckets);
+		// The source closes first: a failure to close it, or to open the bucket readers, then leaves
+		// nothing open that the caller cannot close.
 		source.close();
-		return rotating;
+		return new BucketRotatingManifestInput(manifest, buckets);
 	}
 
 	/**

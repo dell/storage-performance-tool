@@ -5,9 +5,11 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.dell.spt.base.item.IntegrityManifestDataItem;
 import java.io.EOFException;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -140,6 +142,20 @@ class BucketRotatingManifestInputTest {
 	}
 
 	@Test
+	void theRotationClosesTheSourceAndItsCloseLeavesNoReaderOpen() throws Exception {
+		assumeTrue(Files.isDirectory(OPEN_FILES), "needs " + OPEN_FILES);
+		final var source = source(HEADER + "a,a0,0,\n" + "b,b0,1,\n" + "c,c0,2,\n");
+		final Path manifest = temp.resolve("manifest.csv").toRealPath();
+		assertEquals(1, openReaders(manifest));
+
+		final var input = BucketRotatingManifestInput.across(source);
+
+		assertEquals(3, openReaders(manifest), "one reader for each bucket, and the source's closed");
+		input.close();
+		assertEquals(0, openReaders(manifest));
+	}
+
+	@Test
 	void oneBucketKeepsTheManifestInput() throws Exception {
 		final var source = source(HEADER + "a,a0,0,\n" + "a,a1,1,\n");
 
@@ -206,6 +222,21 @@ class BucketRotatingManifestInputTest {
 		assertEquals(true, failure.getMessage().contains(manifest.toString()));
 
 		input.close();
+	}
+
+	private static final Path OPEN_FILES = Path.of("/proc/self/fd");
+
+	/** Counts this process's open descriptors on the given file. */
+	private static long openReaders(final Path file) throws IOException {
+		try (final var descriptors = Files.list(OPEN_FILES)) {
+			return descriptors.filter(descriptor -> {
+				try {
+					return Files.readSymbolicLink(descriptor).equals(file);
+				} catch (final IOException e) {
+					return false; // closed while listing
+				}
+			}).count();
+		}
 	}
 
 	private BucketRotatingManifestInput rotating(final String manifest) throws Exception {
