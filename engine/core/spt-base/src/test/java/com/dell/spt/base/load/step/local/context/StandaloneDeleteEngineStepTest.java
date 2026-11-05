@@ -10,11 +10,14 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.concurrent.AsyncRunnableBase;
+import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.config.TestConfigBuilder;
+import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItemFactoryImpl;
@@ -1332,6 +1335,42 @@ class StandaloneDeleteEngineStepTest {
 										.toList()));
 	}
 
+	@Test
+	void aRejectedRecycleLimitLeavesNoBucketReaderOpen(@TempDir final Path temp) throws Exception {
+		assumeTrue(Files.isDirectory(OPEN_FILES), "needs " + OPEN_FILES);
+		final Path selection = acrossBucketsManifest(temp);
+		final var config = acrossBucketsConfig(selection, 1, 0);
+		config.val("load-op-limit-recycle", 0);
+		final var input = new IntegrityManifestItemInput(selection);
+		try {
+			assertThrows(
+							IllegalConfigurationException.class,
+							() -> generator(config, new DeterministicDeleteDriver(DriverMode.DEFAULT), input));
+			assertEquals(1, openReaders(selection), "only the caller's own reader");
+		} finally {
+			input.close();
+		}
+	}
+
+	@Test
+	void aBucketScanThatFailsClosesTheManifestAndFailsTheRunOnItsInput(@TempDir final Path temp)
+					throws Exception {
+		assumeTrue(Files.isDirectory(OPEN_FILES), "needs " + OPEN_FILES);
+		final Path selection = acrossBucketsManifest(temp);
+		final var config = acrossBucketsConfig(selection, 1, 0);
+		final var input = new IntegrityManifestItemInput(selection);
+		// The file changes after the step opened it: the scan meets a quoted field that never ends.
+		Files.writeString(selection, "bucket,key,size,version_id\n" + "a,a0,0,\n" + "b,\"b0,1,\n");
+
+		final var failure = assertThrows(
+						RunTerminalException.class,
+						() -> generator(config, new DeterministicDeleteDriver(DriverMode.DEFAULT), input));
+
+		assertEquals(IntegrityTerminalException.Category.INPUT, failure.category());
+		assertTrue(failure.getMessage().startsWith("failed to read the buckets of the DELETE items file"));
+		assertEquals(0, openReaders(selection));
+	}
+
 	private static final List<String> ACROSS_BUCKETS_ROWS = List.of("a0", "a1", "a2", "b0", "b1", "c0");
 
 	private static int runDeleteAcrossBuckets(
@@ -1353,20 +1392,8 @@ class StandaloneDeleteEngineStepTest {
 					final int batchSize,
 					final ThrowingConsumer<List<List<String>>> check)
 					throws Exception {
-		final Path selection = temp.resolve("across-buckets.csv");
-		Files.writeString(
-						selection,
-						"bucket,key,size,version_id\n"
-										+ "a,a0,0,\n" + "a,a1,1,\n" + "a,a2,2,\n"
-										+ "b,b0,3,\n" + "b,b1,4,\n"
-										+ "c,c0,5,\n");
-		final var config = config(batchSize, 10);
-		config.val("item-input-file", selection.toString());
-		config.val("load-op-limit-count", countLimit);
-		config.val("load-op-delete-selected", 6L);
-		config.val("load-op-delete-selectedCurrentKey", 6L);
-		config.val("load-op-delete-selectedExactVersion", 0L);
-		config.val("load-op-delete-selectedBuckets", List.of("a=3", "b=2", "c=1"));
+		final Path selection = acrossBucketsManifest(temp);
+		final var config = acrossBucketsConfig(selection, batchSize, countLimit);
 		final Path objects = Path.of(FileManager.INSTANCE.logFileName(Loggers.DELETE_OBJECTS.getName(), stepId));
 		Files.deleteIfExists(objects);
 		final var metrics = metrics();
@@ -1406,6 +1433,44 @@ class StandaloneDeleteEngineStepTest {
 			step.close();
 			metrics.close();
 			Files.deleteIfExists(objects);
+		}
+	}
+
+	/** Writes the manifest of the across-buckets runs: three buckets of three, two and one rows. */
+	private static Path acrossBucketsManifest(final Path temp) throws Exception {
+		final Path selection = temp.resolve("across-buckets.csv");
+		Files.writeString(
+						selection,
+						"bucket,key,size,version_id\n"
+										+ "a,a0,0,\n" + "a,a1,1,\n" + "a,a2,2,\n"
+										+ "b,b0,3,\n" + "b,b1,4,\n"
+										+ "c,c0,5,\n");
+		return selection.toRealPath();
+	}
+
+	private static Config acrossBucketsConfig(final Path selection, final int batchSize, final long countLimit) {
+		final var config = config(batchSize, 10);
+		config.val("item-input-file", selection.toString());
+		config.val("load-op-limit-count", countLimit);
+		config.val("load-op-delete-selected", 6L);
+		config.val("load-op-delete-selectedCurrentKey", 6L);
+		config.val("load-op-delete-selectedExactVersion", 0L);
+		config.val("load-op-delete-selectedBuckets", List.of("a=3", "b=2", "c=1"));
+		return config;
+	}
+
+	private static final Path OPEN_FILES = Path.of("/proc/self/fd");
+
+	/** Counts this process's open descriptors of the file. */
+	private static long openReaders(final Path file) throws Exception {
+		try (final var descriptors = Files.list(OPEN_FILES)) {
+			return descriptors.filter(descriptor -> {
+				try {
+					return Files.readSymbolicLink(descriptor).equals(file);
+				} catch (final java.io.IOException e) {
+					return false; // closed while listing
+				}
+			}).count();
 		}
 	}
 

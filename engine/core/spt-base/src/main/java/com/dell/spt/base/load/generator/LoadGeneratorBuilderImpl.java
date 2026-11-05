@@ -474,7 +474,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 		if (recycleLimit < 1) {
 			throw new IllegalConfigurationException("Recycle limit should be > 0");
 		}
-		// Last before the generator, so that no configuration check fails with the bucket readers open.
+		// Last before the generator, so that none of this builder's checks fails with the bucket readers open.
 		if (standaloneDelete.enabled()
 						&& standaloneDelete.batchSize() == 1
 						&& standaloneDelete.selectedBuckets().size() > 1
