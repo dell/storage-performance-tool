@@ -81,7 +81,7 @@ class MixedItemsFileFailureTest {
 							dir.resolve("written.csv"), "bucket,key,size,version_id\nb1,fine,10,\nb1," + key + ",20,\n")
 							.toString();
 			assertEquals(
-							"MixedLoad: a key in the items file starts or ends with \"/\" or contains \"//\", which a mixed READ cannot address",
+							"MixedLoad: a key in the items file starts or ends with \"/\" or contains \"//\", which a mixed READ does not support",
 							seedFailure(manifest));
 		}
 	}

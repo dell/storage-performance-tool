@@ -569,7 +569,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 			final String key = manifestItem.name();
 			if (key.startsWith("/") || key.endsWith("/") || key.contains("//")) {
 				throw itemsFileFailure(
-								"a key in the items file starts or ends with \"/\" or contains \"//\", which a mixed READ cannot address",
+								"a key in the items file starts or ends with \"/\" or contains \"//\", which a mixed READ does not support",
 								null);
 			}
 			return new DataItemImpl("/" + manifestItem.bucket() + "/" + key, 0, manifestItem.size());
