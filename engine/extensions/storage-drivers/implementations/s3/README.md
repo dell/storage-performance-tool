@@ -283,7 +283,7 @@ Behavior, limits and log output are described in the CLI's
 | storage-object-fsAccess                        | Flag | false | Specifies whether filesystem access is enabled or not
 | storage-object-tagging-enabled                 | Flag | false | Work (PUT/GET/DELETE) with object tagging or not (default)
 | storage-object-tagging-tags                    | Map  | {}    | Map of name-value tags, effective only for the `UPDATE` operation when tagging is enabled
-| storage-object-versioning                      | Flag | false | Specifies whether the versioning storage feature is used or not
+| storage-object-versioning                      | Flag | false | Specifies whether the versioning storage feature is used or not. When on, the driver checks each bucket at first use and enables versioning on it if it isn't enabled
 | storage-checksum-enabled                       | Flag | false | Compute and send a checksum header on write requests. Applies to both simple PUTs and individual multipart upload parts.
 | storage-checksum-algorithm                     | String | md5 | S3 checksum algorithm: [md5, crc32, crc32c, sha1, sha256]. When multipart upload is active, the selected algorithm is applied per part.
 
