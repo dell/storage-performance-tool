@@ -487,3 +487,41 @@ func TestReadVerifyPrefixOfSlashesStaysAsWritten(t *testing.T) {
 		t.Errorf("readVerifyListPrefix(\"\") = %q", got)
 	}
 }
+
+// The verify and cleanup phases read their objects from a manifest, so the engine has no path to name
+// a generated set's buckets from unless the phase carries one. Without it every result lands in the
+// catch-all row.
+func TestGenerateWriteVerifyScenarioNamesAGeneratedBucketSet(t *testing.T) {
+	params := Params{
+		RunID:         882,
+		Bucket:        "bucket-a",
+		ObjectCount:   8,
+		Threads:       2,
+		Cleanup:       true,
+		BucketCount:   4,
+		BaseTimestamp: "20261105.120000.000",
+	}
+	generated, err := GenerateWriteVerifyScenario(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configs := parseGeneratedScenarioConfigs(t, generated)
+	if len(configs) != 3 {
+		t.Fatalf("write-verify configs = %d, want CREATE, verify and cleanup", len(configs))
+	}
+	for i, name := range []string{"CREATE", "verify", "cleanup"} {
+		if got := generatedConfigValue(t, configs[i], "item", "output", "path"); got != "/bucket-a" {
+			t.Errorf("%s item.output.path = %#v, want /bucket-a", name, got)
+		}
+	}
+
+	params.BucketCount = 1
+	single, err := GenerateWriteVerifyScenario(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(single, `"item": {"type": "data", "input": {"file": writtenFile}, "output": {"file": verifiedFile}},`) ||
+		!strings.Contains(single, `"item": {"type": "data", "input": {"file": verifiedFile}},`) {
+		t.Errorf("a single bucket's verify and cleanup items changed:\n%s", single)
+	}
+}
