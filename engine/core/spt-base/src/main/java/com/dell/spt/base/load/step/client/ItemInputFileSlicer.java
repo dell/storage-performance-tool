@@ -54,7 +54,6 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 	private final List<FileManager> fileMgrs;
 	private final Map<FileManager, Config> configsByFileManager;
 	private final boolean strictMode;
-	private final String fileSetting;
 	// Empty unless the step has a NIC set: only a slice that gets a size summary has a recorder.
 	private final Map<FileManager, ItemSizeSummary.Recorder> sizeRecorders = new HashMap<>();
 	private final ItemSizeRecording sizeRecording;
@@ -141,7 +140,6 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 					final String fileSetting) {
 		this.loadStepId = loadStepId;
 		this.strictMode = strictMode;
-		this.fileSetting = fileSetting;
 		this.sizeRecording = sizeRecording;
 		final var sliceCount = configSlices.size();
 		itemInputFileSlices = new HashMap<>(sliceCount);
