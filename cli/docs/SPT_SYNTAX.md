@@ -703,7 +703,7 @@ These flags apply only to the `mixed` workload type.
 - `--read-items-file` supplies only the mixed READ pool; prefix sharding still
   applies to object names generated for mixed PUT operations.
 
-**Note for distributed runs:** The DELETE queue is node-local. Each node only deletes objects that it created via PUT during the benchmark, plus its own share of any `--delete-items-file` rows. In a 3-node cluster, Node 1 will never delete objects written by Node 2 or 3. This means per-node DELETE throughput is bounded by that node's PUT throughput, and cross-node deletion is not supported.
+**Note for distributed runs:** The DELETE queue is node-local. Each node only deletes objects that it created via PUT during the benchmark, plus its own share of any `--delete-items-file` rows. In a 3-node cluster, Node 1 will never delete objects written by Node 2 or 3. This means that once a node has used up its share of any `--delete-items-file` rows, its DELETE throughput is bounded by its PUT throughput. Cross-node deletion is not supported.
 
 Set any operation weight to `0` to exclude it. For example, `--get-distrib 60 --put-distrib 40 --delete-distrib 0 --stat-distrib 0` runs a GET/PUT-only mix.
 

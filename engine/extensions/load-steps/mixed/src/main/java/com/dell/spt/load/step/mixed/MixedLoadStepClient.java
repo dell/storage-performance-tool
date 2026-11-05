@@ -1,5 +1,7 @@
 package com.dell.spt.load.step.mixed;
 
+import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
+
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.ItemType;
@@ -119,7 +121,10 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 	/** Each engine deletes its own share of a DELETE queue file, as it reads its share of the GET/STAT pool's. */
 	@Override
 	protected List<AutoCloseable> sliceOwnItemFiles(
-					final List<FileManager> fileMgrs, final List<Config> configSlices, final int batchSize) {
+					final Config config,
+					final List<FileManager> fileMgrs,
+					final List<Config> configSlices,
+					final int batchSize) {
 		final String file = MixedLoadStepLocal.resolveDeleteItemsFile(config);
 		if (file == null || file.isEmpty()) {
 			return List.of();
@@ -157,6 +162,7 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 		} catch (final RuntimeException e) {
 			throw e;
 		} catch (final Exception e) {
+			throwUncheckedIfInterrupted(e);
 			throw MixedLoadStepLocal.itemsFileFailure("delete items file could not be read", e);
 		}
 	}

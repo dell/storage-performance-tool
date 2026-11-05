@@ -126,6 +126,45 @@ class MixedDeleteItemsSliceTest {
 	}
 
 	@Test
+	void theConfigurationBeingDistributedNamesTheFile() throws Exception {
+		final Path file = dir.resolve("appended.csv");
+		Files.writeString(file, "/b/appended,0,10,0/0\n/b/other,0,10,0/0\n");
+		final Config distributed = mock(Config.class);
+		when(distributed.stringVal(MixedLoadStepLocal.DELETE_ITEMS_FILE)).thenReturn(file.toString());
+		when(distributed.stringVal("item-type")).thenReturn("data");
+		final var client = new MixedLoadStepClient(
+						MixedLoadStepClientTest.newBaseConfig(), List.of(), List.of(), null);
+
+		final var slicers = client.sliceOwnItemFiles(distributed, fileManagers(), configSlices(), BATCH);
+
+		try {
+			assertEquals(List.of("/b/appended"), deleteQueue(0));
+			assertEquals(List.of("/b/other"), deleteQueue(1));
+		} finally {
+			for (final var slicer : slicers) {
+				slicer.close();
+			}
+		}
+	}
+
+	@Test
+	void anInterruptWhileSlicingStaysAnInterrupt() throws Exception {
+		final Path file = dir.resolve("delete-items.csv");
+		Files.writeString(file, "/b/a,0,10,0/0\n/b/b,0,10,0/0\n");
+		final List<FileManager> managers = fileManagers();
+		for (final FileManager manager : managers) {
+			doAnswer(call -> {
+				throw new InterruptedException();
+			}).when(manager).writeToFile(anyString(), any());
+		}
+
+		assertThrows(
+						InterruptedException.class,
+						() -> MixedLoadStepClient.sliceDeleteItems(
+										"step", file.toString(), new DataItemFactoryImpl<>(), managers, configSlices(), BATCH));
+	}
+
+	@Test
 	void aManifestRowKeepsItsBucketAndVersionInItsSlice() throws Exception {
 		final var manifest = "bucket,key,size,version_id\nb1,p/k1,10,\nb2,k2,20,v1\n";
 		try (final var slicer = slice(manifest)) {
