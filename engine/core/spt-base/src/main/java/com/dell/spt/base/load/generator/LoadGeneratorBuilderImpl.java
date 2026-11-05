@@ -12,6 +12,8 @@ import com.dell.spt.base.config.RangeReadConfig;
 import com.dell.spt.base.config.ConstantValueInputImpl;
 import com.dell.spt.base.config.el.CompositeExpressionInputBuilder;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.control.run.RunTerminalException;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemFactoryImpl;
 import com.dell.spt.base.item.Item;
@@ -19,6 +21,8 @@ import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.ItemType;
 import com.dell.spt.base.item.PathItem;
 import com.dell.spt.base.item.TransferConvertBuffer;
+import com.dell.spt.base.item.io.BucketRotatingManifestInput;
+import com.dell.spt.base.item.io.IntegrityManifestItemInput;
 import com.dell.spt.base.item.io.ItemInputFactory;
 import com.dell.spt.base.item.io.ListPathItemInput;
 import com.dell.spt.base.item.io.ShardedListPathItemInput;
@@ -466,6 +470,12 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 		final var standaloneDelete = StandaloneDeleteConfig.from(loadConfig);
 		standaloneDelete.validateSettings(opType, itemType, recycleFlag, retryFlag);
 		standaloneDelete.validateTopology(itemConfig, itemInput, opOutput);
+		if (standaloneDelete.enabled()
+						&& standaloneDelete.batchSize() == 1
+						&& standaloneDelete.selectedBuckets().size() > 1
+						&& itemInput instanceof IntegrityManifestItemInput manifestInput) {
+			itemInput = rotateAcrossBuckets(manifestInput);
+		}
 		final var recycleLimit = opConfig.intVal("limit-recycle");
 		if (recycleLimit < 1) {
 			throw new IllegalConfigurationException("Recycle limit should be > 0");
@@ -729,6 +739,19 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 			pathInput = new ConstantValueInputImpl<>(path);
 		}
 		return pathInput;
+	}
+
+	@SuppressWarnings("unchecked")
+	private Input<I> rotateAcrossBuckets(final IntegrityManifestItemInput manifestInput) {
+		try {
+			return (Input<I>) BucketRotatingManifestInput.across(manifestInput);
+		} catch (final IOException e) {
+			manifestInput.close();
+			throw new RunTerminalException(
+							IntegrityTerminalException.Category.INPUT,
+							"failed to read the buckets of the DELETE items file " + manifestInput.filePath(),
+							e);
+		}
 	}
 
 	private Input<I> newItemInput() throws IllegalConfigurationException {

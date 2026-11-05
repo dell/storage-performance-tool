@@ -201,6 +201,12 @@ exist. Object latency is never invented. Object size, data moved, bandwidth, and
 Result identity includes `single`/`batch`, configured batch size, and `canonical` selection order;
 unlike identities are not merged. Canonical order may differ from tools that shuffle input.
 
+`canonical` names how targets are selected and recorded, not the order requests are sent. With
+`--delete-batch-size=1` over more than one bucket, each engine takes one object per bucket in turn, so
+all the buckets are deleted from at once and a bucket with fewer objects finishes first. A single-bucket
+DELETE or a batched DELETE sends its requests in manifest order. Up to 1,000 buckets are taken in turn;
+a manifest whose rows change bucket more often than that keeps manifest order.
+
 The engine publishes additive JSON metrics schema v4. Standalone DELETE rows set
 `delete_detail_expected=true` and include the DELETE detail block; older/generic DELETE remains
 compatible. The existing `metrics.total.csv` stays request-based. A complete stored DELETE step also

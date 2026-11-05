@@ -7,8 +7,11 @@ import java.io.ObjectOutput;
 /** Data item reconstructed from the canonical integrity manifest without numeric key parsing. */
 public final class IntegrityManifestDataItem extends DataItemImpl implements VersionedItem {
 
+	private static final long NO_SELECTION_INDEX = -1;
+
 	private String bucket;
 	private String versionId;
+	private long selectionIndex = NO_SELECTION_INDEX;
 
 	public IntegrityManifestDataItem() {
 		super();
@@ -27,6 +30,18 @@ public final class IntegrityManifestDataItem extends DataItemImpl implements Ver
 
 	public void bucket(final String bucket) {
 		this.bucket = requireBucket(bucket);
+	}
+
+	/**
+	 * Returns this row's position in its manifest, or a negative value when the reader hands rows out in
+	 * manifest order and the position is simply their count. Local to one engine, so not serialized.
+	 */
+	public long selectionIndex() {
+		return selectionIndex;
+	}
+
+	public void selectionIndex(final long selectionIndex) {
+		this.selectionIndex = selectionIndex;
 	}
 
 	@Override

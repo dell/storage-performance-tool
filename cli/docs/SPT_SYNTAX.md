@@ -221,7 +221,8 @@ Identical canonical identities with the same size collapse to one record.
 The private staged manifest is sorted by canonical identity, then `--object-count` selects the
 global prefix (`0` means all). The CLI records source, unique, and selected counts plus the staged
 SHA-256 completion evidence, and reports that canonical order may differ from another tool's input
-order. A multi-bucket input must use `--delete-batch-size=1`; same-bucket input may use batching or
+order. A multi-bucket input must use `--delete-batch-size=1`, and each engine then takes one object per
+bucket in turn, so all the buckets are deleted from at once; same-bucket input may use batching or
 single-object requests. Duration mode consumes this frozen inventory without recycling and is invalid
 if the inventory exhausts before the requested deadline. Explicit-manifest mode rejects `--prefix`
 and `--cleanup`. A failed
