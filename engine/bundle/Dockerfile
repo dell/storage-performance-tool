@@ -81,6 +81,11 @@ ENV JAVA_HOME=/opt/java/openjdk
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 ENV SPT_VERSION=${SPT_RELEASE_VERSION}
 ENV SPT_SCENARIOS=/opt/spt/scenarios
+# Ask glibc's malloc for transparent huge pages on mappings of at least the huge
+# page size. allocateDirect zero-fills inside its call, so this is what shortens
+# an RDMA pool's pre-warm. glibc applies it only when the host's THP mode is
+# madvise; with always or never it changes nothing.
+ENV GLIBC_TUNABLES=glibc.malloc.hugetlb=1
 
 # Expose typical Spt ports
 # 9999 - default Spt REST API port
