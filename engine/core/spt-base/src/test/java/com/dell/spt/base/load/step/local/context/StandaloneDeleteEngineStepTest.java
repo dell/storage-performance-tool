@@ -55,6 +55,7 @@ import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.commons.system.SizeInBytes;
 import java.io.EOFException;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -1343,9 +1344,10 @@ class StandaloneDeleteEngineStepTest {
 		config.val("load-op-limit-recycle", 0);
 		final var input = new IntegrityManifestItemInput(selection);
 		try {
-			assertThrows(
+			final var failure = assertThrows(
 							IllegalConfigurationException.class,
 							() -> generator(config, new DeterministicDeleteDriver(DriverMode.DEFAULT), input));
+			assertEquals("Recycle limit should be > 0", failure.getMessage());
 			assertEquals(1, openReaders(selection), "only the caller's own reader");
 		} finally {
 			input.close();
@@ -1359,6 +1361,7 @@ class StandaloneDeleteEngineStepTest {
 		final Path selection = acrossBucketsManifest(temp);
 		final var config = acrossBucketsConfig(selection, 1, 0);
 		final var input = new IntegrityManifestItemInput(selection);
+		assertEquals(1, openReaders(selection));
 		// The file changes after the step opened it: the scan meets a quoted field that never ends.
 		Files.writeString(selection, "bucket,key,size,version_id\n" + "a,a0,0,\n" + "b,\"b0,1,\n");
 
@@ -1467,7 +1470,7 @@ class StandaloneDeleteEngineStepTest {
 			return descriptors.filter(descriptor -> {
 				try {
 					return Files.readSymbolicLink(descriptor).equals(file);
-				} catch (final java.io.IOException e) {
+				} catch (final IOException e) {
 					return false; // closed while listing
 				}
 			}).count();
