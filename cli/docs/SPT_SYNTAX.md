@@ -689,7 +689,7 @@ These flags apply only to the `mixed` workload type.
 | `--put-distrib` | `15` | Percentage of PUT (write) operations |
 | `--delete-distrib` | `10` | Percentage of DELETE operations |
 | `--seed-objects` | `2500` | Objects to pre-create before the mixed benchmark |
-| `--read-items-file` | `""` | Items file for the READ pool (skips seed phase): an engine-format items file or a `written.csv` manifest |
+| `--read-items-file` | `""` | Items file for the READ pool (skips seed phase) |
 | `--delete-items-file` | `""` | Items file to pre-populate the DELETE queue |
 
 **Distribution rules:**
