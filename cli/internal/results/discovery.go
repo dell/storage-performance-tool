@@ -501,12 +501,12 @@ func (c *terminalRowChecker) fleet() bool {
 }
 
 // deleteMetricsOutcome is what one metrics row says about the DELETE metrics of a step: the
-// metrics, or the check they failed. settled marks a terminal row whose failure-budget outcome
-// is published: the engine changes nothing in it after that.
+// metrics, or the check they failed. decides marks a row that an observation of a run in progress
+// judges: a row that fails the identity checks, whatever its state, or a settled row.
 type deleteMetricsOutcome struct {
 	stepID  string
 	metrics *deletemetrics.Metrics
-	settled bool
+	decides bool
 	err     error
 }
 
@@ -532,21 +532,23 @@ func deleteMetricsRows(
 			!constants.IsSeededDeleteCleanupStepID(step.StepID)
 		admitted, admitErr := checker.admit(&step.terminalMetricsRow, carriesDelete)
 		if admitErr != nil {
-			rows = append(rows, deleteMetricsOutcome{stepID: step.StepID, settled: settledDelete(step), err: admitErr})
+			rows = append(rows, deleteMetricsOutcome{stepID: step.StepID, decides: true, err: admitErr})
 			continue
 		}
 		if !admitted {
 			continue
 		}
 		rows = append(rows, deleteMetricsOutcome{
-			stepID: step.StepID, metrics: step.Delete, settled: settledDelete(step), err: checker.deleteMetrics(step),
+			stepID: step.StepID, metrics: step.Delete, decides: settledDelete(step), err: checker.deleteMetrics(step),
 		})
 	}
 	return rows, true, nil
 }
 
 // settledDelete reports whether a row is terminal with its failure-budget outcome published. The
-// engine records a DELETE step's terminal row first and publishes the outcome into it after.
+// engine records a DELETE step's terminal row first and publishes the outcome into it after. A
+// duration stop that fails and recovers on a retried close publishes a later outcome into the
+// same row, so an observation keeps the latest row it reads.
 func settledDelete(step *terminalDeleteMetricsStep) bool {
 	return step.Terminal && (step.Delete == nil || step.Delete.FailurePolicy.Outcome != deletemetrics.OutcomeRunning)
 }
@@ -601,8 +603,8 @@ func captureTerminalDeleteMetricsFromPath(
 	return metrics, true, nil
 }
 
-// observeTerminalDeleteMetricsFromPath judges each step on its own and leaves out the steps that
-// have not settled: their metrics are not final.
+// observeTerminalDeleteMetricsFromPath judges each step on its own and leaves out the rows that
+// have not settled, whose metrics are not final, unless they fail the identity checks.
 func observeTerminalDeleteMetricsFromPath(
 	ctx context.Context,
 	baseURL string,
@@ -620,13 +622,16 @@ func observeTerminalDeleteMetricsFromPath(
 	}
 	for _, row := range rows {
 		switch {
-		case !row.settled:
+		case !row.decides:
 		case row.err != nil:
-			// A refusal decides for the step, also over metrics an earlier row gave it.
+			// A refusal decides for the step in this response, also over metrics another row gave it,
+			// as the capture refuses the whole response.
 			delete(observation.Steps, row.stepID)
 			observation.Refused[row.stepID] = row.err
 		default:
-			observation.Steps[row.stepID] = row.metrics
+			if _, refused := observation.Refused[row.stepID]; !refused {
+				observation.Steps[row.stepID] = row.metrics
+			}
 		}
 	}
 	return observation, true, nil

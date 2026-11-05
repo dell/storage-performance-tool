@@ -315,20 +315,39 @@ func TestObserveTerminalDeleteMetricsJudgesOnlySettledRows(t *testing.T) {
 	}
 }
 
-func TestObserveTerminalDeleteMetricsLetsARefusalDecideOverAnEarlierRow(t *testing.T) {
-	server := httptest.NewServer(metricsRows(
-		capturedDeleteStep(17, "spt-run-17", "delete-current", "fleet", "aggregate", validTerminalDeleteMetrics()),
-		capturedDeleteStep(17, "spt-run-17", "delete-current", "fleet", "aggregate", validTerminalDeleteMetrics()),
-	))
-	defer server.Close()
-
-	observation, err := ObserveTerminalDeleteMetricsForRunContext(
-		context.Background(), server.URL, 17, []string{"delete-current"}, []string{"local", "node-a"}, false)
-	if err != nil {
-		t.Fatal(err)
+// A response the capture refuses for a step's identity gives the observation nothing for that
+// step, in whatever order its rows come and whether or not the refused row has settled.
+func TestObserveTerminalDeleteMetricsRefusesAStepTheCaptureWouldRefuse(t *testing.T) {
+	settled := func() map[string]any {
+		return capturedDeleteStep(17, "spt-run-17", "delete-current", "fleet", "aggregate", validTerminalDeleteMetrics())
 	}
-	if len(observation.Steps) != 0 || observation.Refused["delete-current"] == nil {
-		t.Fatalf("observation = %+v, want the repeated step refused", observation)
+	running := settled()
+	running["terminal"] = false
+	malformed := settled()
+	malformed["run_id"] = true
+	for name, rows := range map[string][]any{
+		"repeated settled row":             {settled(), settled()},
+		"repeated row that has not ended":  {settled(), running},
+		"malformed identity before a good": {malformed, settled()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(metricsRows(rows...))
+			defer server.Close()
+
+			observation, err := ObserveTerminalDeleteMetricsForRunContext(
+				context.Background(), server.URL, 17, []string{"delete-current"}, []string{"local", "node-a"}, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(observation.Steps) != 0 || observation.Refused["delete-current"] == nil {
+				t.Fatalf("observation = %+v, want the step refused", observation)
+			}
+			_, err = CaptureTerminalDeleteMetricsForRunContext(
+				context.Background(), server.URL, 17, []string{"delete-current"}, []string{"local", "node-a"}, false, nil)
+			if err == nil {
+				t.Fatal("the capture accepted the response")
+			}
+		})
 	}
 }
 
