@@ -54,6 +54,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 	private final List<FileManager> fileMgrs;
 	private final Map<FileManager, Config> configsByFileManager;
 	private final boolean strictMode;
+	private final String fileSetting;
 	// Empty unless the step has a NIC set: only a slice that gets a size summary has a recorder.
 	private final Map<FileManager, ItemSizeSummary.Recorder> sizeRecorders = new HashMap<>();
 	private final ItemSizeRecording sizeRecording;
@@ -115,8 +116,32 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 					final int batchSize,
 					final boolean strictMode,
 					final ItemSizeRecording sizeRecording) {
+		this(loadStepId, fileMgrs, configSlices, itemInput, batchSize, strictMode, sizeRecording, "item-input-file");
+	}
+
+	/** Slices a second items file of a step, named by its own setting: each slice's setting names that slice. */
+	public <I extends Item> ItemInputFileSlicer(
+					final String loadStepId,
+					final List<FileManager> fileMgrs,
+					final List<Config> configSlices,
+					final Input<I> itemInput,
+					final int batchSize,
+					final String fileSetting) {
+		this(loadStepId, fileMgrs, configSlices, itemInput, batchSize, false, null, fileSetting);
+	}
+
+	private <I extends Item> ItemInputFileSlicer(
+					final String loadStepId,
+					final List<FileManager> fileMgrs,
+					final List<Config> configSlices,
+					final Input<I> itemInput,
+					final int batchSize,
+					final boolean strictMode,
+					final ItemSizeRecording sizeRecording,
+					final String fileSetting) {
 		this.loadStepId = loadStepId;
 		this.strictMode = strictMode;
+		this.fileSetting = fileSetting;
 		this.sizeRecording = sizeRecording;
 		final var sliceCount = configSlices.size();
 		itemInputFileSlices = new HashMap<>(sliceCount);
@@ -133,7 +158,7 @@ public final class ItemInputFileSlicer implements AutoCloseable {
 				itemInputFileSlices.put(fileMgr, itemInputFileName);
 				final var configSlice = configSlices.get(i);
 				configsByFileManager.put(fileMgr, configSlice);
-				configSlice.val("item-input-file", itemInputFileName);
+				configSlice.val(fileSetting, itemInputFileName);
 				if (sizeRecording != null && (sizeRecording.mixed()
 								? PoolDemandConfig.mixedRecordsItemSizes(configSlice)
 								: PoolDemandConfig.recordsItemSizes(configSlice))) {
