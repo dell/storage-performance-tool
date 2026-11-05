@@ -75,6 +75,18 @@ class MixedItemsFileFailureTest {
 	}
 
 	@Test
+	void aManifestKeyWithAnEmptyPathSegmentFailsBeforeAnyRequest() throws Exception {
+		for (final String key : List.of("/k", "p//k", "k/", "/")) {
+			final String manifest = Files.writeString(
+							dir.resolve("written.csv"), "bucket,key,size,version_id\nb1,fine,10,\nb1," + key + ",20,\n")
+							.toString();
+			assertEquals(
+							"MixedLoad: a key in the items file starts or ends with \"/\" or contains \"//\", which a mixed READ cannot address",
+							seedFailure(manifest));
+		}
+	}
+
+	@Test
 	void seedItemsLoadInFull() throws Exception {
 		final List<Object> items = new ArrayList<>();
 		MixedLoadStepLocal.loadSeedItems(file(GOOD + GOOD), items, new DataItemFactoryImpl<>());

@@ -561,10 +561,18 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 	/**
 	 * The read pool copies each item it hands out by name, so a manifest row's bucket has to be in
 	 * the name, as it is in an engine-format row. This keeps that copy, which runs per operation, as it is.
+	 * The request path built from that name has no empty segments, so a key with one would address another
+	 * object: it fails here, before any request.
 	 */
 	private static Object readPoolItem(final Object item) {
 		if (item instanceof IntegrityManifestDataItem manifestItem) {
-			return new DataItemImpl("/" + manifestItem.bucket() + "/" + manifestItem.name(), 0, manifestItem.size());
+			final String key = manifestItem.name();
+			if (key.startsWith("/") || key.endsWith("/") || key.contains("//")) {
+				throw itemsFileFailure(
+								"a key in the items file starts or ends with \"/\" or contains \"//\", which a mixed READ cannot address",
+								null);
+			}
+			return new DataItemImpl("/" + manifestItem.bucket() + "/" + key, 0, manifestItem.size());
 		}
 		return item;
 	}
