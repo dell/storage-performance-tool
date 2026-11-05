@@ -273,6 +273,7 @@ docker run --rm \
 | `SPT_HOME` | (ephemeral temp dir) | Override the engine's app-home directory. Set this to a persistent path if you need to preserve extracted config/resources across runs. |
 | `SPT_JAVA_OPTS` | `-Xshare:off -XX:UseAVX=2` | Additional JVM options appended to the default JAVA_OPTS. |
 | `JAVA_OPTS` | (see entrypoint.sh) | Full JVM options override. Default includes ZGC, 4GB heap, NUMA, and NFS compatibility flags. |
+| `GLIBC_TUNABLES` | `glibc.malloc.hugetlb=1` | Set by the image, for every engine, HTTP included, and for other programs in the image. Where the host's transparent huge pages mode is `madvise`, malloc asks for huge pages on its large mappings; with `always` or `never` it changes nothing. Setting it on a container replaces the whole value, so keep `glibc.malloc.hugetlb=1` in any value of your own. `spt run` doesn't forward it from the CLI's environment. Another `BASE_IMAGE` needs its own check, as glibc tunables aren't a stable interface. |
 
 #### Docker Compose
 
