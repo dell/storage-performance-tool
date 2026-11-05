@@ -222,6 +222,19 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	/**
+	 * Slices any items file of the step's own, beyond the item input, for the base or appended
+	 * configuration being distributed. A file every engine read whole would have each of them process
+	 * every row. The step closes what this returns with the other slicers.
+	 */
+	protected List<AutoCloseable> sliceOwnItemFiles(
+					final Config config,
+					final List<FileManager> fileMgrs,
+					final List<Config> configSlices,
+					final int batchSize) {
+		return List.of();
+	}
+
+	/**
 	 * What target-bucket setup must know about this step beyond its configuration. A step whose
 	 * operation type does not tell whether it writes new objects overrides this.
 	 */
@@ -615,6 +628,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			} else if (!skipScatter && !integrityConfig.enabled()) {
 				distributeNoItemsIfNothingToDelete(itemConfig, opType, itemType, configSlices, batchSize);
 			}
+			itemInputFileSlicers.addAll(sliceOwnItemFiles(config, fileMgrs, configSlices, batchSize));
 		} catch (final RunTerminalException e) {
 			if (integrityConfig.enabled()) {
 				// This message is already public, and names what's wrong with the input.

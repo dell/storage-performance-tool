@@ -20,6 +20,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
@@ -126,7 +127,11 @@ final class DeleteArtifactAggregation {
 			final Path stagedCompletion = Files.createTempFile(
 							outputDirectory, "." + DeleteArtifacts.SELECTION_COMPLETION_FILE_NAME + ".", ".staging");
 			FailurePreservingCleanup.always(() -> {
-				Files.copy(selection, stagedSelection, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+				// Into the staged file as created: a copy that replaced it would take the source's mode,
+				// and a CLI-staged items file is mounted read-only, which publication cannot sync.
+				try (final OutputStream staged = Files.newOutputStream(stagedSelection)) {
+					Files.copy(selection, staged);
+				}
 				JSON.writerWithDefaultPrettyPrinter().writeValue(
 								stagedCompletion.toFile(), retainedSelectionProvenance(provenance, selection));
 				publishRetrySafe(

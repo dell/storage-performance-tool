@@ -123,6 +123,8 @@ type autoResultsOutcome struct {
 	ShutdownErr          error
 	StepIDs              []string
 	AllFailedPhases      []summary.AllFailedPhase
+	SummaryRead          bool
+	StepsWithResults     int
 }
 
 type postRunBudgets struct {
@@ -1113,6 +1115,10 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			outcome.SummaryErr = errors.Join(outcome.SummaryErr, err)
 		}
 		outcome.AllFailedPhases = runSummary.AllFailedPhases()
+		if runSummary != nil {
+			outcome.SummaryRead = true
+			outcome.StepsWithResults = len(runSummary.Steps)
+		}
 		if traceOutput != nil {
 			if closeErr := traceOutput.Close(); closeErr != nil {
 				outcome.SummaryErr = errors.Join(

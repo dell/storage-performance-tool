@@ -384,9 +384,9 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 				return nil
 			}
 			err = normalizedErr
-			waitForReplayAutoResults(replayMonitor, err, launchHooks)
+			outcome := waitForReplayAutoResults(replayMonitor, err, launchHooks)
 			finalizeTraceArtifact()
-			return err
+			return resolveReplayRunError(err, autoTerminated, len(replayStepIDs(generated)), outcome)
 		}
 
 		if multiHostReplay {
@@ -408,9 +408,9 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 				DefaultsContent:      generated.DefaultsYAML,
 				LaunchHooks:          launchHooks,
 			})
-		waitForReplayAutoResults(replayMonitor, err, launchHooks)
+		outcome := waitForReplayAutoResults(replayMonitor, err, launchHooks)
 		finalizeTraceArtifact()
-		return err
+		return resolveReplayRunError(err, false, len(replayStepIDs(generated)), outcome)
 	}
 
 	startReplayAutoResults()
@@ -424,9 +424,9 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
 		}
 		err := startReplayLocalHeadless(sptImage, paths.Scenario, params, options, generated.ScenarioJS, generated.DefaultsYAML)
-		waitForReplayAutoResults(replayMonitor, err, launchHooks)
+		outcome := waitForReplayAutoResults(replayMonitor, err, launchHooks)
 		finalizeTraceArtifact()
-		return err
+		return resolveReplayRunError(err, false, len(replayStepIDs(generated)), outcome)
 	}
 
 	_, _ = fmt.Fprintln(out, "Starting TUI...")
@@ -447,16 +447,36 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			DefaultsContent:      generated.DefaultsYAML,
 			LaunchHooks:          launchHooks,
 		})
-	waitForReplayAutoResults(replayMonitor, err, launchHooks)
+	outcome := waitForReplayAutoResults(replayMonitor, err, launchHooks)
 	finalizeTraceArtifact()
-	return err
+	return resolveReplayRunError(err, false, len(replayStepIDs(generated)), outcome)
+}
+
+// resolveReplayRunError exits 1 when a replay that ended on its own has fewer steps with results
+// than its scenario runs. A scenario error after the first step ends the engine's run as COMPLETED,
+// so nothing else shows it. It counts steps rather than matching names, because a step the archive
+// didn't name runs under an ID the engine chose. A stop or an auto-terminate explains its own missing
+// steps, and neither a tracker that failed nor a run with no summary can say how the replay ended.
+func resolveReplayRunError(runErr error, autoTerminated bool, expectedSteps int, outcome autoResultsOutcome) error {
+	if runErr != nil || autoTerminated || outcome.TrackerErr != nil || !outcome.SummaryRead ||
+		outcome.StepsWithResults >= expectedSteps {
+		return runErr
+	}
+	if outcome.Tracker != nil && outcome.Tracker.FinalState == constants.StateStopped {
+		return runErr
+	}
+	return &ExitCodeError{
+		Code: constants.ExitCodeWorkloadFailure,
+		Msg: fmt.Sprintf("only %d of the scenario's %d steps have results; the others never ran or left none, and the engine log says why",
+			outcome.StepsWithResults, expectedSteps),
+	}
 }
 
 func waitForReplayAutoResults(
 	monitor *autoResultsMonitor, launchErr error, hooks tui.LaunchHooks,
-) {
+) autoResultsOutcome {
 	if monitor == nil {
-		return
+		return autoResultsOutcome{}
 	}
 	if launchErr != nil && !hooks.NormalEvidencePermitted() {
 		// Untrusted accepted, unsubmitted, and unresolved launches must enter
@@ -465,7 +485,7 @@ func waitForReplayAutoResults(
 	}
 	// Each coordinator phase owns its own timeout, so this join cannot let one
 	// phase consume another phase's cleanup budget.
-	<-monitor.done
+	return <-monitor.done
 }
 
 type replayContainerCleaner interface {

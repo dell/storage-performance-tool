@@ -203,6 +203,103 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 	}
 }
 
+func TestResolveReplayRunError(t *testing.T) {
+	launchErr := errors.New("launch failed")
+	ended := func(steps int) autoResultsOutcome {
+		return autoResultsOutcome{SummaryRead: true, StepsWithResults: steps}
+	}
+	stopped := ended(1)
+	stopped.Tracker = &portcheck.RunResult{FinalState: constants.StateStopped}
+	untracked := ended(1)
+	untracked.TrackerErr = errors.New("tracking failed")
+
+	cases := []struct {
+		name           string
+		runErr         error
+		autoTerminated bool
+		outcome        autoResultsOutcome
+		wantExitOne    bool
+		wantErr        error
+	}{
+		{name: "steps never ran", outcome: ended(1), wantExitOne: true},
+		{name: "every step has results", outcome: ended(3)},
+		{name: "a scenario loop runs more steps than it names", outcome: ended(5)},
+		{name: "launch error stays the cause", runErr: launchErr, outcome: ended(1), wantErr: launchErr},
+		{name: "auto-terminate explains its missing steps", autoTerminated: true, outcome: ended(1)},
+		{name: "a stop explains its missing steps", outcome: stopped},
+		{name: "a failed tracker can't judge", outcome: untracked},
+		{name: "no summary can't judge", outcome: autoResultsOutcome{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := resolveReplayRunError(tc.runErr, tc.autoTerminated, 3, tc.outcome)
+			if !tc.wantExitOne {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("error = %v, want %v", err, tc.wantErr)
+				}
+				return
+			}
+			var exit *ExitCodeError
+			if !errors.As(err, &exit) || exit.Code != constants.ExitCodeWorkloadFailure {
+				t.Fatalf("error = %v, want exit code %d", err, constants.ExitCodeWorkloadFailure)
+			}
+			if !strings.Contains(exit.Msg, "only 1 of the scenario's 3 steps have results") {
+				t.Fatalf("message = %q", exit.Msg)
+			}
+		})
+	}
+}
+
+func TestReplayCommandExitsOneWhenAScenarioStepHasNoResults(t *testing.T) {
+	server := newReplayArchiveServer(t)
+	defer server.Close()
+
+	origPort := resolvePortConflictFunc
+	origStartLocalHeadless := startReplayLocalHeadless
+	origStartAutoResults := startReplayAutoResultsMonitor
+	origShouldHeadless := shouldReplayRunHeadless
+	t.Cleanup(func() {
+		resolvePortConflictFunc = origPort
+		startReplayLocalHeadless = origStartLocalHeadless
+		startReplayAutoResultsMonitor = origStartAutoResults
+		shouldReplayRunHeadless = origShouldHeadless
+	})
+	resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+		return &portcheck.ResolutionResult{Success: true}, nil
+	}
+	shouldReplayRunHeadless = func(*cobra.Command) bool { return true }
+	startReplayLocalHeadless = func(
+		_ string, _ string, _ scenario.Params, options headless.HeadlessOptions, _ []byte, _ []byte,
+	) error {
+		options.LaunchHooks.NotifySubmitted()
+		return nil
+	}
+	startReplayAutoResultsMonitor = func(
+		context.Context, string, string, string, []string, int64,
+		bool, []*hostparse.HostInfo, string, bool, int, string,
+		*runMetadata, io.Writer, io.Writer, string, func(context.Context),
+		...*integrity.FinalizeOptions,
+	) *autoResultsMonitor {
+		done := make(chan autoResultsOutcome, 1)
+		done <- autoResultsOutcome{SummaryRead: true}
+		return &autoResultsMonitor{done: done, armed: make(chan struct{})}
+	}
+
+	cmd := newReplayCommandForTest(t)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{
+		"--from", server.URL,
+		"--endpoints", "http://s3.example",
+		"--headless",
+		"--results-dir", t.TempDir(),
+	})
+	var exit *ExitCodeError
+	if err := cmd.Execute(); !errors.As(err, &exit) || exit.Code != constants.ExitCodeWorkloadFailure {
+		t.Fatalf("Execute() error = %v, want exit code %d", err, constants.ExitCodeWorkloadFailure)
+	}
+}
+
 func TestReplayCommandSharesPositiveRunIdentityWithLaunchAndCompletionMonitor(t *testing.T) {
 	server := newReplayArchiveServer(t)
 	defer server.Close()
