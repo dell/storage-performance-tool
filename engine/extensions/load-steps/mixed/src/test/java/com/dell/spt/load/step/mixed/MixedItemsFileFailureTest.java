@@ -6,12 +6,15 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemFactoryImpl;
 import com.dell.spt.base.logging.Loggers;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -51,6 +54,24 @@ class MixedItemsFileFailureTest {
 						() -> MixedLoadStepLocal.loadDeleteItems(path, pool(), new DataItemFactoryImpl<>()));
 		assertEquals(IntegrityTerminalException.Category.INPUT, failure.category());
 		return failure.getMessage();
+	}
+
+	@Test
+	void aManifestRowKeepsItsBucketInTheReadPool() throws Exception {
+		final String manifest = Files.writeString(
+						dir.resolve("written.csv"), "bucket,key,size,version_id\nb1,p/k1,10,\nb2,k2,20,v1\n").toString();
+		final List<Object> items = new ArrayList<>();
+		MixedLoadStepLocal.loadSeedItems(manifest, items, new DataItemFactoryImpl<>());
+		assertEquals(2, items.size());
+
+		final var names = new HashSet<String>();
+		final var pool = new PoolItemInput(items);
+		for (int i = 0; i < 200; i++) {
+			final var item = (DataItem) pool.randomItem();
+			assertEquals(item.name().endsWith("k1") ? 10 : 20, item.size());
+			names.add(item.name());
+		}
+		assertEquals(Set.of("/b1/p/k1", "/b2/k2"), names);
 	}
 
 	@Test

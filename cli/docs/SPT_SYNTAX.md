@@ -689,7 +689,7 @@ These flags apply only to the `mixed` workload type.
 | `--put-distrib` | `15` | Percentage of PUT (write) operations |
 | `--delete-distrib` | `10` | Percentage of DELETE operations |
 | `--seed-objects` | `2500` | Objects to pre-create before the mixed benchmark |
-| `--read-items-file` | `""` | Items file for the READ pool (skips seed phase) |
+| `--read-items-file` | `""` | Items file for the READ pool (skips seed phase): an engine-format items file or a `written.csv` manifest |
 | `--delete-items-file` | `""` | Items file to pre-populate the DELETE queue |
 
 **Distribution rules:**
@@ -702,6 +702,7 @@ These flags apply only to the `mixed` workload type.
 - `--cleanup` cannot be combined with `--read-items-file` or `--delete-items-file`.
 - `--read-items-file` supplies only the mixed READ pool; prefix sharding still
   applies to object names generated for mixed PUT operations.
+- With a `written.csv` manifest as `--read-items-file`, reads use each row's bucket and the object's current version. The manifest has no data offset, so use an engine-format items file if you turn on `item.data.verify`.
 
 **Note for distributed runs:** The DELETE queue is node-local. Each node only deletes objects that it created via PUT during the benchmark. In a 3-node cluster, Node 1 will never delete objects written by Node 2 or 3. This means per-node DELETE throughput is bounded by that node's PUT throughput, and cross-node deletion is not supported.
 
