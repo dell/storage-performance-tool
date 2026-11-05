@@ -220,7 +220,9 @@ func newTerminalCaptureTarget(
 // stored summaries. expectedContributorIDs must contain the exact engine contributor identities
 // ("local" plus every remote node address). Fleet metrics are authoritative when that endpoint
 // exists; node metrics are only a single-node compatibility fallback when fleet metrics are
-// unavailable.
+// unavailable. The engine keeps the row of a finished step for a limited time, so an expected
+// step without a row at the end of the run takes the metrics observed while it ran, in
+// observed; a step still reported is judged on its row.
 func CaptureTerminalDeleteMetricsForRunContext(
 	ctx context.Context,
 	baseURL string,
@@ -228,6 +230,7 @@ func CaptureTerminalDeleteMetricsForRunContext(
 	expectedStepIDs []string,
 	expectedContributorIDs []string,
 	allowNodeFallback bool,
+	observed map[string]*deletemetrics.Metrics,
 ) (map[string]*deletemetrics.Metrics, error) {
 	const capture = "capture terminal DELETE metrics"
 	target, err := newTerminalCaptureTarget(
@@ -238,7 +241,45 @@ func CaptureTerminalDeleteMetricsForRunContext(
 	return captureFromAuthoritativeEndpoint(
 		capture, target, allowNodeFallback,
 		func(metricsPath, wantScope string) (map[string]*deletemetrics.Metrics, bool, error) {
-			return captureTerminalDeleteMetricsFromPath(ctx, baseURL, metricsPath, wantScope, target)
+			return captureTerminalDeleteMetricsFromPath(ctx, baseURL, metricsPath, wantScope, target, observed)
+		})
+}
+
+// DeleteMetricsObservation is what one metrics response says about the terminal DELETE metrics
+// of the expected steps that have ended. A step that is still running, or whose failure-budget
+// outcome the engine has not published yet, is in neither field, unless a row of it fails the
+// identity checks, as a repeated or malformed row does.
+type DeleteMetricsObservation struct {
+	// Steps holds the terminal metrics that passed every check, by step.
+	Steps map[string]*deletemetrics.Metrics
+	// Refused holds the check that a row of a step failed, by step: the identity checks on any
+	// row, the others on a settled row.
+	Refused map[string]error
+}
+
+// ObserveTerminalDeleteMetricsForRunContext reads the terminal DELETE metrics of the expected
+// steps that have ended, while the run may still be in progress, under the checks of
+// CaptureTerminalDeleteMetricsForRunContext. A DELETE step that a long step follows, such as a
+// seeded run's cleanup, has no row left when the run ends, so the run is observed repeatedly.
+// An error means that the response could not be read and says nothing about any step.
+func ObserveTerminalDeleteMetricsForRunContext(
+	ctx context.Context,
+	baseURL string,
+	expectedRunID int64,
+	expectedStepIDs []string,
+	expectedContributorIDs []string,
+	allowNodeFallback bool,
+) (*DeleteMetricsObservation, error) {
+	const capture = "observe terminal DELETE metrics"
+	target, err := newTerminalCaptureTarget(
+		captureKindDelete, expectedRunID, expectedStepIDs, expectedContributorIDs)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", capture, err)
+	}
+	return captureFromAuthoritativeEndpoint(
+		capture, target, allowNodeFallback,
+		func(metricsPath, wantScope string) (*DeleteMetricsObservation, bool, error) {
+			return observeTerminalDeleteMetricsFromPath(ctx, baseURL, metricsPath, wantScope, target)
 		})
 }
 
@@ -461,47 +502,141 @@ func (c *terminalRowChecker) fleet() bool {
 	return strings.EqualFold(c.wantScope, metricsScopeFleet)
 }
 
+// deleteMetricsOutcome is what one metrics row says about the DELETE metrics of a step: the
+// metrics, or the check they failed. decides marks a row that an observation of a run in progress
+// judges: a row that fails the identity checks, whatever its state, or a settled row.
+type deleteMetricsOutcome struct {
+	stepID  string
+	metrics *deletemetrics.Metrics
+	decides bool
+	err     error
+}
+
+// deleteMetricsRows returns an outcome for each row of the response that carries DELETE metrics
+// of the expected run, in the order of the response.
+func deleteMetricsRows(
+	ctx context.Context,
+	baseURL string,
+	metricsPath string,
+	wantScope string,
+	target *terminalCaptureTarget,
+) ([]deleteMetricsOutcome, bool, error) {
+	steps, available, err := fetchMetricsRows[terminalDeleteMetricsStep](ctx, baseURL, metricsPath)
+	if err != nil || !available {
+		return nil, available, err
+	}
+	checker := target.checker(metricsPath, wantScope)
+	rows := make([]deleteMetricsOutcome, 0, len(target.steps))
+	for i := range steps {
+		step := &steps[i]
+		// A seeded run's cleanup is a DELETE step too, but it is not the measured step's evidence.
+		carriesDelete := strings.EqualFold(step.OpType, metricsOpTypeDelete) &&
+			!constants.IsSeededDeleteCleanupStepID(step.StepID)
+		admitted, admitErr := checker.admit(&step.terminalMetricsRow, carriesDelete)
+		if admitErr != nil {
+			rows = append(rows, deleteMetricsOutcome{stepID: step.StepID, decides: true, err: admitErr})
+			continue
+		}
+		if !admitted {
+			continue
+		}
+		rows = append(rows, deleteMetricsOutcome{
+			stepID: step.StepID, metrics: step.Delete, decides: settledDelete(step), err: checker.deleteMetrics(step),
+		})
+	}
+	return rows, true, nil
+}
+
+// settledDelete reports whether a row is terminal with its failure-budget outcome published. The
+// engine records a DELETE step's terminal row first and publishes the outcome into it after. A
+// duration stop that fails and recovers on a retried close publishes a later outcome into the
+// same row, so an observation keeps the latest row it reads.
+func settledDelete(step *terminalDeleteMetricsStep) bool {
+	return step.Terminal && (step.Delete == nil || step.Delete.FailurePolicy.Outcome != deletemetrics.OutcomeRunning)
+}
+
+// deleteMetrics returns the check that an admitted DELETE row fails, or nil.
+func (c *terminalRowChecker) deleteMetrics(step *terminalDeleteMetricsStep) error {
+	if step.MetricsSchema < deletemetrics.SchemaVersion ||
+		!c.authoritative(&step.terminalMetricsRow) || !step.DeleteDetailExpected {
+		return fmt.Errorf("%s returned incomplete authoritative DELETE step %q", c.metricsPath, step.StepID)
+	}
+	if !c.contributorsComplete(&step.terminalMetricsRow) {
+		return fmt.Errorf("%s returned incomplete contributor evidence for DELETE step %q", c.metricsPath, step.StepID)
+	}
+	if validateErr := deletemetrics.ValidateTerminal(step.Delete); validateErr != nil {
+		return fmt.Errorf("%s DELETE step %q: %w", c.metricsPath, step.StepID, validateErr)
+	}
+	return nil
+}
+
+// captureTerminalDeleteMetricsFromPath refuses the whole response when a row fails a check: at
+// the end of a run every step has ended. An expected step without a row takes its metrics from
+// observed.
 func captureTerminalDeleteMetricsFromPath(
 	ctx context.Context,
 	baseURL string,
 	metricsPath string,
 	wantScope string,
 	target *terminalCaptureTarget,
+	observed map[string]*deletemetrics.Metrics,
 ) (map[string]*deletemetrics.Metrics, bool, error) {
-	steps, available, err := fetchMetricsRows[terminalDeleteMetricsStep](ctx, baseURL, metricsPath)
+	rows, available, err := deleteMetricsRows(ctx, baseURL, metricsPath, wantScope, target)
 	if err != nil || !available {
 		return nil, available, err
 	}
-	checker := target.checker(metricsPath, wantScope)
-	metrics := make(map[string]*deletemetrics.Metrics)
-	for i := range steps {
-		step := &steps[i]
-		admitted, admitErr := checker.admit(
-			&step.terminalMetricsRow, strings.EqualFold(step.OpType, metricsOpTypeDelete))
-		if admitErr != nil {
-			return nil, true, admitErr
+	metrics := make(map[string]*deletemetrics.Metrics, len(target.steps))
+	for _, row := range rows {
+		if row.err != nil {
+			return nil, true, row.err
 		}
-		if !admitted {
-			continue
-		}
-		if step.MetricsSchema < deletemetrics.SchemaVersion ||
-			!checker.authoritative(&step.terminalMetricsRow) || !step.DeleteDetailExpected {
-			return nil, true, fmt.Errorf("%s returned incomplete authoritative DELETE step %q", metricsPath, step.StepID)
-		}
-		if !checker.contributorsComplete(&step.terminalMetricsRow) {
-			return nil, true, fmt.Errorf("%s returned incomplete contributor evidence for DELETE step %q", metricsPath, step.StepID)
-		}
-		if validateErr := deletemetrics.ValidateTerminal(step.Delete); validateErr != nil {
-			return nil, true, fmt.Errorf("%s DELETE step %q: %w", metricsPath, step.StepID, validateErr)
-		}
-		metrics[step.StepID] = step.Delete
+		metrics[row.stepID] = row.metrics
 	}
 	for stepID := range target.steps {
-		if _, ok := metrics[stepID]; !ok {
-			return nil, true, fmt.Errorf("%s is missing authoritative terminal DELETE step %q", metricsPath, stepID)
+		if _, ok := metrics[stepID]; ok {
+			continue
 		}
+		if earlier := observed[stepID]; earlier != nil {
+			metrics[stepID] = earlier
+			continue
+		}
+		return nil, true, fmt.Errorf("%s is missing authoritative terminal DELETE step %q", metricsPath, stepID)
 	}
 	return metrics, true, nil
+}
+
+// observeTerminalDeleteMetricsFromPath judges each step on its own and leaves out the rows that
+// have not settled, whose metrics are not final, unless they fail the identity checks.
+func observeTerminalDeleteMetricsFromPath(
+	ctx context.Context,
+	baseURL string,
+	metricsPath string,
+	wantScope string,
+	target *terminalCaptureTarget,
+) (*DeleteMetricsObservation, bool, error) {
+	rows, available, err := deleteMetricsRows(ctx, baseURL, metricsPath, wantScope, target)
+	if err != nil || !available {
+		return nil, available, err
+	}
+	observation := &DeleteMetricsObservation{
+		Steps:   make(map[string]*deletemetrics.Metrics, len(rows)),
+		Refused: make(map[string]error),
+	}
+	for _, row := range rows {
+		switch {
+		case !row.decides:
+		case row.err != nil:
+			// A refusal decides for the step in this response, also over metrics another row gave it,
+			// as the capture refuses the whole response.
+			delete(observation.Steps, row.stepID)
+			observation.Refused[row.stepID] = row.err
+		default:
+			if _, refused := observation.Refused[row.stepID]; !refused {
+				observation.Steps[row.stepID] = row.metrics
+			}
+		}
+	}
+	return observation, true, nil
 }
 
 // driverStatsOutcome is what one metrics row says about the driver statistics of a step: the

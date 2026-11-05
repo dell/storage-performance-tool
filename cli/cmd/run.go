@@ -228,6 +228,7 @@ func captureStoredDeleteMetrics(
 	expectedRunID int64,
 	runtimeStepIDs []string,
 	metadata *runMetadata,
+	observed map[string]*deletemetrics.Metrics,
 ) (captureErr error) {
 	if metadata == nil || metadata.WorkloadType != WorkloadTypeDelete {
 		return nil
@@ -251,7 +252,7 @@ func captureStoredDeleteMetrics(
 	}
 	captured, err := captureDeleteMetricsFunc(
 		ctx, baseURL, expectedRunID, expectedDeleteSteps, expectedContributorIDs,
-		len(expectedContributorIDs) == 1)
+		len(expectedContributorIDs) == 1, observed)
 	if err != nil {
 		return fmt.Errorf("capture terminal DELETE metrics: %w", err)
 	}
@@ -537,6 +538,7 @@ var (
 	discoverStepIDsFunc           = results.DiscoverStepIDsForRunContext
 	discoverFleetStepIDsFunc      = results.DiscoverFleetStepIDsForRunContext
 	captureDeleteMetricsFunc      = results.CaptureTerminalDeleteMetricsForRunContext
+	observeDeleteMetricsFunc      = results.ObserveTerminalDeleteMetricsForRunContext
 	captureDriverStatsFunc        = results.CaptureTerminalDriverStatsForRunContext
 	observeDriverStatsFunc        = results.ObserveTerminalDriverStatsForRunContext
 	driverStatsCollectInterval    = constants.AutoResultsDriverStatsInterval
@@ -755,6 +757,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			seen := make(map[string]struct{})
 			fleetSeen := make(map[string]struct{})
 			driverStats := newDriverStatsCollector(time.Now)
+			deleteMetrics := &deleteMetricsCollector{}
 			stopCh := make(chan struct{})
 			var pollWG sync.WaitGroup
 			pollWG.Add(1)
@@ -762,15 +765,16 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				defer pollWG.Done()
 				ticker := time.NewTicker(constants.AutoResultsDiscoveryInterval)
 				defer ticker.Stop()
-				driverStatsTicker := time.NewTicker(driverStatsCollectInterval)
-				defer driverStatsTicker.Stop()
+				// Keeps the terminal rows the engine drops a while after their step ends.
+				terminalRowsTicker := time.NewTicker(driverStatsCollectInterval)
+				defer terminalRowsTicker.Stop()
 				for {
 					select {
 					case <-stopCh:
 						return
 					case <-parentCtx.Done():
 						return
-					case <-driverStatsTicker.C:
+					case <-terminalRowsTicker.C:
 						mu.Lock()
 						_, runtimeStepIDs := selectResultStepIDs(expectedStepIDs, fleetDiscovered, discovered)
 						mu.Unlock()
@@ -778,6 +782,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 						// ones an observation would refuse a finished step as unexpected.
 						if len(runtimeStepIDs) > 0 {
 							driverStats.observe(parentCtx, baseURL, expectedRunID, runtimeStepIDs, metadata)
+							deleteMetrics.observe(parentCtx, baseURL, expectedRunID, runtimeStepIDs, metadata)
 						}
 					case <-ticker.C:
 						discoveryStart := time.Now()
@@ -963,7 +968,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				metadata.ActualStepIDs = append([]string(nil), stepIDs...)
 				metadata.DiscoveredStepIDs = uniqueStepIDs(metadata.DiscoveredStepIDs, runtimeStepIDs)
 				if captureErr := captureStoredDeleteMetrics(
-					artifactCtx, baseURL, expectedRunID, runtimeStepIDs, metadata,
+					artifactCtx, baseURL, expectedRunID, runtimeStepIDs, metadata, deleteMetrics.observed(),
 				); captureErr != nil {
 					outcome.DeleteMetricsErr = captureErr
 					outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, captureErr)

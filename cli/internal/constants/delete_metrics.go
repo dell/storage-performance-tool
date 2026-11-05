@@ -1,5 +1,7 @@
 package constants
 
+import "strings"
+
 const (
 	// DeleteIdentityModeSingle identifies one target per logical DELETE request.
 	DeleteIdentityModeSingle = "single"
@@ -11,4 +13,12 @@ const (
 	DeleteFailurePolicyModeFixed = "fixed"
 	// DeleteFailurePolicyModePercentage selects a cumulative object-outcome percentage.
 	DeleteFailurePolicyModePercentage = "percentage"
+	// StepOpCleanup is the operation word that ends the step identity of a seeded DELETE's cleanup.
+	StepOpCleanup = "cleanup"
 )
+
+// IsSeededDeleteCleanupStepID reports whether stepID identifies the cleanup phase of a seeded
+// DELETE scenario.
+func IsSeededDeleteCleanupStepID(stepID string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(stepID)), "-"+StepOpCleanup)
+}
