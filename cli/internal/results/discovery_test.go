@@ -207,6 +207,41 @@ func TestCaptureTerminalDeleteMetricsPrefersCompleteFleetV4ForCurrentRun(t *test
 	}
 }
 
+func TestCaptureTerminalDeleteMetricsLeavesOutACleanupThatDidWork(t *testing.T) {
+	const cleanup = "label-003-20250101.000000.000-cleanup"
+	server := httptest.NewServer(metricsRows(
+		capturedDeleteStep(17, "spt-run-17", "delete-current", "fleet", "aggregate", validTerminalDeleteMetrics()),
+		capturedDeleteStep(17, "spt-run-17", cleanup, "fleet", "aggregate", nil),
+	))
+	defer server.Close()
+
+	metrics, err := CaptureTerminalDeleteMetricsForRunContext(
+		context.Background(), server.URL, 17, []string{"delete-current"},
+		[]string{"local", "node-a"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metrics) != 1 || metrics["delete-current"] == nil {
+		t.Fatalf("captured DELETE metrics = %+v", metrics)
+	}
+}
+
+func TestCaptureTerminalDeleteMetricsStillRefusesAnotherUnexpectedDeleteStep(t *testing.T) {
+	const other = "label-002-20250101.000000.000-delete"
+	server := httptest.NewServer(metricsRows(
+		capturedDeleteStep(17, "spt-run-17", "delete-current", "fleet", "aggregate", validTerminalDeleteMetrics()),
+		capturedDeleteStep(17, "spt-run-17", other, "fleet", "aggregate", validTerminalDeleteMetrics()),
+	))
+	defer server.Close()
+
+	_, err := CaptureTerminalDeleteMetricsForRunContext(
+		context.Background(), server.URL, 17, []string{"delete-current"},
+		[]string{"local", "node-a"}, false)
+	if err == nil || !strings.Contains(err.Error(), "unexpected current-run DELETE step") {
+		t.Fatalf("capture error = %v, want the unexpected step refused", err)
+	}
+}
+
 func TestCaptureTerminalDeleteMetricsFallsBackToNodeWhenFleetIsUnavailable(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics/fleet/json", func(w http.ResponseWriter, _ *http.Request) {

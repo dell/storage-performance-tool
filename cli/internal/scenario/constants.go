@@ -1,7 +1,6 @@
 package scenario
 
 import (
-	"strings"
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -108,7 +107,7 @@ const (
 	stepOpRead    = "read"
 	stepOpSeed    = "seed"
 	stepOpDelete  = "delete"
-	stepOpCleanup = "cleanup"
+	stepOpCleanup = constants.StepOpCleanup
 	stepOpList    = "list"
 	stepOpMixed   = "mixed"
 )
@@ -135,7 +134,7 @@ const (
 // IsSeededDeleteCleanupStepID reports whether stepID identifies the cleanup phase of a
 // seeded DELETE scenario.
 func IsSeededDeleteCleanupStepID(stepID string) bool {
-	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(stepID)), "-"+stepOpCleanup)
+	return constants.IsSeededDeleteCleanupStepID(stepID)
 }
 
 // DefaultFailureBudgetGrace delays positive percentage evaluation during the measured phase.

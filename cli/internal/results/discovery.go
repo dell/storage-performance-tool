@@ -476,8 +476,10 @@ func captureTerminalDeleteMetricsFromPath(
 	metrics := make(map[string]*deletemetrics.Metrics)
 	for i := range steps {
 		step := &steps[i]
-		admitted, admitErr := checker.admit(
-			&step.terminalMetricsRow, strings.EqualFold(step.OpType, metricsOpTypeDelete))
+		// A seeded run's cleanup is a DELETE step too, but it is not the measured step's evidence.
+		carriesDelete := strings.EqualFold(step.OpType, metricsOpTypeDelete) &&
+			!constants.IsSeededDeleteCleanupStepID(step.StepID)
+		admitted, admitErr := checker.admit(&step.terminalMetricsRow, carriesDelete)
 		if admitErr != nil {
 			return nil, true, admitErr
 		}
