@@ -702,6 +702,7 @@ These flags apply only to the `mixed` workload type.
 - `--cleanup` cannot be combined with `--read-items-file` or `--delete-items-file`.
 - `--read-items-file` supplies only the mixed READ pool; prefix sharding still
   applies to object names generated for mixed PUT operations.
+- With a `written.csv` manifest as `--read-items-file`, reads use each row's bucket and the object's current version. A key that starts or ends with `/` or contains `//` fails the run, because a request for some of these keys would reach a different object. The manifest has no data offset, so use an engine-format items file if you turn on `item.data.verify`.
 
 **Note for distributed runs:** The DELETE queue is node-local. Each node only deletes objects that it created via PUT during the benchmark, plus its own share of any `--delete-items-file` rows. In a 3-node cluster, Node 1 will never delete objects written by Node 2 or 3. This means that once a node has used up its share of any `--delete-items-file` rows, its DELETE throughput is bounded by its PUT throughput. Cross-node deletion is not supported.
 

@@ -8,6 +8,8 @@ import com.dell.spt.base.config.NicSetConfig;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.item.DataItemImpl;
+import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.ItemType;
@@ -554,8 +556,27 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 					final String filePath,
 					final List items,
 					final ItemFactory factory) {
-		loadItems("seed items file", filePath, factory, items::add);
+		loadItems("seed items file", filePath, factory, item -> items.add(readPoolItem(item)));
 		Loggers.MSG.info("MixedLoad: loaded {} seed items from {}", items.size(), filePath);
+	}
+
+	/**
+	 * The read pool copies each item it hands out by name, so a manifest row's bucket has to be in
+	 * the name, as it is in an engine-format row. This keeps that copy, which runs per operation, as it is.
+	 * The request path built from that name has no empty segments, so a key with one would address another
+	 * object: it fails here, before any request.
+	 */
+	private static Object readPoolItem(final Object item) {
+		if (item instanceof IntegrityManifestDataItem manifestItem) {
+			final String key = manifestItem.name();
+			if (key.startsWith("/") || key.endsWith("/") || key.contains("//")) {
+				throw itemsFileFailure(
+								"a key in the items file starts or ends with \"/\" or contains \"//\", which a mixed READ does not support",
+								null);
+			}
+			return new DataItemImpl("/" + manifestItem.bucket() + "/" + key, 0, manifestItem.size());
+		}
+		return item;
 	}
 
 	/** Each engine reads from its own share of the items, so it needs at least one of them. */
