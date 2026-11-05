@@ -186,6 +186,18 @@ class S3TargetBucketControlTest {
 		assertEquals(0, config.intVal("storage-net-timeoutMilliSec"), "the step configuration is not modified");
 	}
 
+	/** A driver with no data input must reach the end of its close, or a step's errors log gets the exception. */
+	@Test
+	void aControlDriverFinishesItsClose() throws Exception {
+		final Config config = S3StorageDriverTest.baseConfig(false, 4, false, null, "127.0.0.1");
+		final var driver = new S3StorageDriver<>(
+						"control-close", null, S3TargetBucketControl.controlConfig(config.configVal("storage")), false, 1);
+
+		driver.close();
+
+		assertTrue(driver.isClosed());
+	}
+
 	@Test
 	void controlRequestsPlanNoNicSet() throws Exception {
 		final Config config = S3StorageDriverTest.baseConfig(false, 4, false, null, "127.0.0.1");

@@ -423,7 +423,10 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 			if (integrityHasher != null) {
 				integrityHasher.close();
 			}
-			itemDataInput.close();
+			// A target-bucket control driver has no data input: it sends no object data.
+			if (itemDataInput != null) {
+				itemDataInput.close();
+			}
 			authTokens.clear();
 			pathToCredMap.clear();
 			pathMap.clear();
