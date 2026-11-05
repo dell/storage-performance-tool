@@ -1,13 +1,21 @@
 package com.dell.spt.load.step.mixed;
 
+import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
+
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.item.ItemFactory;
+import com.dell.spt.base.item.ItemType;
+import com.dell.spt.base.item.io.ItemInputFactory;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.load.step.client.ItemInputFileSlicer;
 import com.dell.spt.base.load.step.client.LoadStepClientBase;
+import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketStep;
 import com.dell.spt.base.util.BinarySizeFormat;
+import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.reflection.TypeUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
@@ -17,6 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Stream;
 
@@ -106,6 +115,55 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 		}
 		if (statWeight > 0) {
 			initMetrics(originIndex++, OpType.STAT, concurrencyLimit, metricsConfig, itemDataSize, colorFlag);
+		}
+	}
+
+	/** Each engine deletes its own share of a DELETE queue file, as it reads its share of the GET/STAT pool's. */
+	@Override
+	protected List<AutoCloseable> sliceOwnItemFiles(
+					final Config config,
+					final List<FileManager> fileMgrs,
+					final List<Config> configSlices,
+					final int batchSize) {
+		final String file = MixedLoadStepLocal.resolveDeleteItemsFile(config);
+		if (file == null || file.isEmpty()) {
+			return List.of();
+		}
+		final var itemType = ItemType.valueOf(config.stringVal("item-type").toUpperCase(Locale.ROOT));
+		return List.of(sliceDeleteItems(
+						loadStepId(), file, (ItemFactory) ItemType.getItemFactory(itemType), fileMgrs, configSlices, batchSize));
+	}
+
+	/**
+	 * An engine gets no rows when the file has fewer rows than there are engines, which is fine: its
+	 * queue is just empty, as any queue becomes. A file with no rows at all still ends the run.
+	 */
+	static ItemInputFileSlicer sliceDeleteItems(
+					final String stepId,
+					final String file,
+					final ItemFactory factory,
+					final List<FileManager> fileMgrs,
+					final List<Config> configSlices,
+					final int batchSize) {
+		if (!Files.exists(Path.of(file))) {
+			throw MixedLoadStepLocal.itemsFileFailure("delete items file was not found", null);
+		}
+		try (final Input input = ItemInputFactory.createFileItemInput(factory, file)) {
+			if (input == null) {
+				throw MixedLoadStepLocal.itemsFileFailure("delete items file could not be opened", null);
+			}
+			final var slicer = new ItemInputFileSlicer(
+							stepId, fileMgrs, configSlices, input, batchSize, MixedLoadStepLocal.DELETE_ITEMS_FILE);
+			if (slicer.distributedItems() == 0) {
+				slicer.close();
+				throw MixedLoadStepLocal.itemsFileFailure("delete items file has no items", null);
+			}
+			return slicer;
+		} catch (final RuntimeException e) {
+			throw e;
+		} catch (final Exception e) {
+			throwUncheckedIfInterrupted(e);
+			throw MixedLoadStepLocal.itemsFileFailure("delete items file could not be read", e);
 		}
 	}
 

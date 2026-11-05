@@ -75,6 +75,8 @@ import static com.github.akurilov.confuse.Config.deepToMap;
 })
 public final class MixedLoadStepLocal extends LoadStepLocalBase {
 
+	static final String DELETE_ITEMS_FILE = "load-op-delete-input-file";
+
 	private volatile MixedLoadGenerator mixedGenerator;
 
 	public MixedLoadStepLocal(
@@ -570,7 +572,8 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 					final PoolItemInput pool,
 					final ItemFactory factory) {
 		final long count = loadItems("delete items file", filePath, factory, item -> pool.addDeleteItem((Item) item));
-		if (count == 0) {
+		// A slice isn't a .csv, and can be empty: the step's client checked the file it came from.
+		if (count == 0 && filePath.endsWith(".csv")) {
 			throw itemsFileFailure("delete items file has no items", null);
 		}
 		Loggers.MSG.info("MixedLoad: pre-populated DELETE queue with {} items from {}", count, filePath);
@@ -606,14 +609,14 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		return count;
 	}
 
-	private static RunTerminalException itemsFileFailure(final String message, final Throwable cause) {
+	static RunTerminalException itemsFileFailure(final String message, final Throwable cause) {
 		return new RunTerminalException(IntegrityTerminalException.Category.INPUT, "MixedLoad: " + message, cause);
 	}
 
 	/** Reads {@code load.op.delete.input.file} from the merged config. */
-	private static String resolveDeleteItemsFile(final Config cfg) {
+	static String resolveDeleteItemsFile(final Config cfg) {
 		try {
-			return cfg.stringVal("load-op-delete-input-file");
+			return cfg.stringVal(DELETE_ITEMS_FILE);
 		} catch (final Exception e) {
 			return null;
 		}

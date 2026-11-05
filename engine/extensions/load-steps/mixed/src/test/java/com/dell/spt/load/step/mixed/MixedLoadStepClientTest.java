@@ -260,7 +260,7 @@ class MixedLoadStepClientTest {
 		return values;
 	}
 
-	private static Config newBaseConfig() {
+	static Config newBaseConfig() {
 		return new BasicConfig(PS, minimalSchema(), baseValues());
 	}
 
