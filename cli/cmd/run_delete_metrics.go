@@ -18,7 +18,7 @@ type deleteMetricsCollector struct {
 }
 
 // observe reads the DELETE metrics of the run's DELETE steps that have ended so far. For each
-// step, the latest response that holds its settled row decides. Nothing is read for a run that
+// step, the latest response that keeps or refuses it decides. Nothing is read for a run that
 // is not a DELETE workload or whose planned DELETE steps have not all started, and a response
 // that cannot be read says nothing about any step.
 func (c *deleteMetricsCollector) observe(

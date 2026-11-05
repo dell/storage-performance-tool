@@ -247,11 +247,13 @@ func CaptureTerminalDeleteMetricsForRunContext(
 
 // DeleteMetricsObservation is what one metrics response says about the terminal DELETE metrics
 // of the expected steps that have ended. A step that is still running, or whose failure-budget
-// outcome the engine has not published yet, is in neither field.
+// outcome the engine has not published yet, is in neither field, unless a row of it fails the
+// identity checks, as a repeated or malformed row does.
 type DeleteMetricsObservation struct {
 	// Steps holds the terminal metrics that passed every check, by step.
 	Steps map[string]*deletemetrics.Metrics
-	// Refused holds the check that the terminal row of a step failed, by step.
+	// Refused holds the check that a row of a step failed, by step: the identity checks on any
+	// row, the others on a settled row.
 	Refused map[string]error
 }
 
