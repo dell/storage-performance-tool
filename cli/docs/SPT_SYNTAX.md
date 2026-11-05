@@ -798,6 +798,8 @@ environment variables.
 | `--trace-file` | `""` | Save all output to a trace file |
 | `--trace-append` | `false` | Append to an existing trace file |
 | `--verbose` | `false` | Show detailed Docker API calls, debug information, and textual live metrics |
+
+A replay that ends on its own with fewer steps with results than its scenario runs exits 1, for example when the scenario fails after its first step. The check needs results, so it doesn't run with `--auto-results=false`. A JavaScript `.run()` in a branch that isn't taken counts as a step.
 | `--skip-image-pull` | from `SPT_SKIP_IMAGE_PULL` or `false` | Use locally cached Docker image without pulling |
 | `--spt-image` | from `SPT_IMAGE` or release/dev default | Override the engine image ref |
 
