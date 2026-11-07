@@ -2,7 +2,12 @@
 
 @import "tailwindcss/theme.css" layer(theme);
 @import "@mantine/core/styles.layer.css";
-@import "tailwindcss/utilities.css" layer(utilities);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+
+@source "./**/*.{ts,tsx}";
+@source "../index.html";
+@source not "./**/*.{test,spec}.{ts,tsx}";
+@source not "./**/__tests__/**";
 
 @theme inline {
   --font-sans: var(--mantine-font-family);
