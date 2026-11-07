@@ -5,47 +5,63 @@ import { formatMetric } from "../utils/metrics";
 export function NodeTable({ nodes }: { nodes: NodeRow[] }) {
   if (!nodes.length) return null;
   return (
-    <section className="panel run-history-panel" aria-label="Client machines">
-      <h2>Client machines</h2>
-      <div className="table-wrap">
-        <table className="run-history-table node-table">
-          <thead>
-            <tr>
-              <th>Host</th>
-              <th>Status</th>
-              <th>Phase</th>
-              <th>Successful</th>
-              <th>Failed</th>
-              <th>IOPS</th>
-              <th>MiB/s</th>
-              <th>P50 µs</th>
-              <th>P99 µs</th>
+    <section
+      data-spt-legacy=""
+      className="panel run-history-panel"
+      aria-label="Client machines"
+    >
+      <h2 data-spt-legacy="">Client machines</h2>
+      <div data-spt-legacy="" className="table-wrap">
+        <table data-spt-legacy="" className="run-history-table node-table">
+          <thead data-spt-legacy="">
+            <tr data-spt-legacy="">
+              <th data-spt-legacy="">Host</th>
+              <th data-spt-legacy="">Status</th>
+              <th data-spt-legacy="">Phase</th>
+              <th data-spt-legacy="">Successful</th>
+              <th data-spt-legacy="">Failed</th>
+              <th data-spt-legacy="">IOPS</th>
+              <th data-spt-legacy="">MiB/s</th>
+              <th data-spt-legacy="">P50 µs</th>
+              <th data-spt-legacy="">P99 µs</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody data-spt-legacy="">
             {nodes.map((n) => {
               const status = n.data_status;
               return (
-                <tr key={n.host + (n.node_id ?? "")}>
-                  <td className="history-run-id">
+                <tr data-spt-legacy="" key={n.host + (n.node_id ?? "")}>
+                  <td data-spt-legacy="" className="history-run-id">
                     {n.host}
-                    {n.node_id && <small>{n.node_id}</small>}
+                    {n.node_id && <small data-spt-legacy="">{n.node_id}</small>}
                   </td>
-                  <td>{statusLabel(n)}</td>
-                  <td>{status === "no_data" ? "No data" : n.op_type || "—"}</td>
-                  <td>{formatMetric(n.successful_ops, 0, status)}</td>
-                  <td>{formatMetric(n.failed_ops, 0, status)}</td>
-                  <td>{formatMetric(n.iops, 1, status)}</td>
-                  <td>{formatMetric(n.bandwidth_mib_s, 2, status)}</td>
-                  <td>{formatMetric(n.p50_latency_us, 1, status)}</td>
-                  <td>{formatMetric(n.p99_latency_us, 1, status)}</td>
+                  <td data-spt-legacy="">{statusLabel(n)}</td>
+                  <td data-spt-legacy="">
+                    {status === "no_data" ? "No data" : n.op_type || "—"}
+                  </td>
+                  <td data-spt-legacy="">
+                    {formatMetric(n.successful_ops, 0, status)}
+                  </td>
+                  <td data-spt-legacy="">
+                    {formatMetric(n.failed_ops, 0, status)}
+                  </td>
+                  <td data-spt-legacy="">{formatMetric(n.iops, 1, status)}</td>
+                  <td data-spt-legacy="">
+                    {formatMetric(n.bandwidth_mib_s, 2, status)}
+                  </td>
+                  <td data-spt-legacy="">
+                    {formatMetric(n.p50_latency_us, 1, status)}
+                  </td>
+                  <td data-spt-legacy="">
+                    {formatMetric(n.p99_latency_us, 1, status)}
+                  </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
       </div>
-      <p className="history-footnote">
+      <p data-spt-legacy="" className="history-footnote">
         Live values from each machine’s SPT API. “No data” means this poll had
         no usable sample (not a measured zero). “Delayed” means the sample is
         older than the freshness window. Unavailable means the API could not be

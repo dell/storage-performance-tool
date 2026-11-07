@@ -12,13 +12,15 @@ export function MetricCard({
   accent?: string;
 }) {
   return (
-    <article className={`metric-card ${accent}`}>
-      <span className="metric-label">{label}</span>
-      <div className="metric-value">
+    <article data-spt-legacy="" className={`metric-card ${accent}`}>
+      <span data-spt-legacy="" className="metric-label">
+        {label}
+      </span>
+      <div data-spt-legacy="" className="metric-value">
         {value}
-        <small>{unit}</small>
+        <small data-spt-legacy="">{unit}</small>
       </div>
-      <p>{detail}</p>
+      <p data-spt-legacy="">{detail}</p>
     </article>
   );
 }

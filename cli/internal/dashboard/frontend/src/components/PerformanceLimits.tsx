@@ -39,7 +39,7 @@ export function PerformanceLimits(props: Props) {
     o.threads,
   ].join(":");
   return (
-    <details className="panel limits">
+    <details data-spt-legacy="" className="panel limits">
       <LimitsForm key={key} {...props} storageKey={key} />
     </details>
   );
@@ -104,20 +104,20 @@ function LimitsForm({
   }
   return (
     <>
-      <summary>
+      <summary data-spt-legacy="">
         Performance limits{" "}
-        <span className="summary-note">
+        <span data-spt-legacy="" className="summary-note">
           {phaseName(phase)} ·{" "}
           {checks.filter((c) => limits[c.key] !== null).length}/3 set
         </span>
       </summary>
-      <p className="form-help">
+      <p data-spt-legacy="" className="form-help">
         Set your team’s expectations for {state.target.endpoint_label},{" "}
         {o.object_size} objects, and {o.threads} thread
         {o.threads === 1 ? "" : "s"}. These limits stay in this browser and
         apply to the selected phase.
       </p>
-      <div className="form-grid limits-grid">
+      <div data-spt-legacy="" className="form-grid limits-grid">
         {checks.map((c) => {
           const limit = limits[c.key],
             value = c.value;
@@ -130,7 +130,7 @@ function LimitsForm({
                   ? "Within limit"
                   : "Outside limit";
           return (
-            <label key={c.key}>
+            <label data-spt-legacy="" key={c.key}>
               {c.minimum ? "Minimum" : "Maximum"} {c.label} (
               {c.key === "iops"
                 ? "ops/s"
@@ -139,6 +139,7 @@ function LimitsForm({
                   : "µs"}
               )
               <input
+                data-spt-legacy=""
                 type="number"
                 min="0"
                 step="any"
@@ -149,6 +150,7 @@ function LimitsForm({
                 }
               />
               <span
+                data-spt-legacy=""
                 className={result === "Outside limit" ? "limit-bad" : "subtle"}
               >
                 {result} · measured {fmt(value, 2)}
@@ -157,11 +159,12 @@ function LimitsForm({
           );
         })}
       </div>
-      <div className="actions">
-        <button className="primary" onClick={save}>
+      <div data-spt-legacy="" className="actions">
+        <button data-spt-legacy="" className="primary" onClick={save}>
           Save limits
         </button>
         <button
+          data-spt-legacy=""
           onClick={() => {
             try {
               localStorage.removeItem(key);
@@ -175,7 +178,7 @@ function LimitsForm({
         >
           Clear limits
         </button>
-        <span className="subtle" role="status">
+        <span data-spt-legacy="" className="subtle" role="status">
           {message}
         </span>
       </div>

@@ -91,17 +91,18 @@ export function Charts({
     (r) => cleanup || phaseCode(r.phase) !== "DELETE",
   );
   return (
-    <section className="panel fleet">
-      <div className="section-heading">
-        <div>
-          <h2>Measured performance</h2>
-          <p>
+    <section data-spt-legacy="" className="panel fleet">
+      <div data-spt-legacy="" className="section-heading">
+        <div data-spt-legacy="">
+          <h2 data-spt-legacy="">Measured performance</h2>
+          <p data-spt-legacy="">
             {display === "timeline"
               ? `${phaseName(phase)} phase · ${samples.length} recorded samples`
               : "Final averages by phase"}
           </p>
         </div>
         <select
+          data-spt-legacy=""
           aria-label="Chart view"
           value={display}
           onChange={(e) => {
@@ -109,20 +110,29 @@ export function Charts({
             setActive(null);
           }}
         >
-          <option value="timeline" disabled={!samples.length}>
+          <option
+            data-spt-legacy=""
+            value="timeline"
+            disabled={!samples.length}
+          >
             Over time
           </option>
-          <option value="summary" disabled={!m.phase_summaries?.length}>
+          <option
+            data-spt-legacy=""
+            value="summary"
+            disabled={!m.phase_summaries?.length}
+          >
             Phase comparison
           </option>
         </select>
       </div>
       {display === "timeline" ? (
         <>
-          <div className="fleet-toolbar">
-            <label className="check-label">
+          <div data-spt-legacy="" className="fleet-toolbar">
+            <label data-spt-legacy="" className="check-label">
               Time window
               <select
+                data-spt-legacy=""
                 aria-label="Time window"
                 value={windowSize ?? "all"}
                 onChange={(e) => {
@@ -139,26 +149,28 @@ export function Charts({
                   ["3600", "1 hour"],
                   ["86400", "1 day"],
                 ].map(([v, label]) => (
-                  <option key={v} value={v}>
+                  <option data-spt-legacy="" key={v} value={v}>
                     {label}
                   </option>
                 ))}
                 {windowSize !== null &&
                   ![60, 300, 3600, 86400].includes(windowSize) && (
-                    <option value={windowSize}>
+                    <option data-spt-legacy="" value={windowSize}>
                       Custom · {elapsed(windowSize)}
                     </option>
                   )}
               </select>
             </label>
-            <div className="button-group">
+            <div data-spt-legacy="" className="button-group">
               <button
+                data-spt-legacy=""
                 disabled={samples.length < 2}
                 onClick={() => setWindowSize(Math.max(1, width / 2))}
               >
                 Zoom in
               </button>
               <button
+                data-spt-legacy=""
                 disabled={windowSize === null}
                 onClick={() =>
                   setWindowSize(width * 2 >= last - first ? null : width * 2)
@@ -167,6 +179,7 @@ export function Charts({
                 Zoom out
               </button>
               <button
+                data-spt-legacy=""
                 onClick={() => {
                   setWindowSize(null);
                   setPosition(null);
@@ -175,6 +188,7 @@ export function Charts({
                 Fit phase
               </button>
               <button
+                data-spt-legacy=""
                 disabled={position === null}
                 onClick={() => setPosition(null)}
               >
@@ -183,6 +197,7 @@ export function Charts({
             </div>
             {!m.is_active && shown.length > 0 && (
               <a
+                data-spt-legacy=""
                 className="button-link"
                 href={`/api/runs/${encodeURIComponent(m.run_id)}/csv?kind=window&phase=${phase}&start=${start}&end=${end}`}
                 download
@@ -192,9 +207,10 @@ export function Charts({
             )}
           </div>
           {samples.length > 1 && (
-            <label className="timeline-pan">
+            <label data-spt-legacy="" className="timeline-pan">
               Move time window
               <input
+                data-spt-legacy=""
                 aria-label="Move time window"
                 type="range"
                 min={Math.min(last, first + width)}
@@ -204,19 +220,19 @@ export function Charts({
                 value={end}
                 onChange={(e) => setPosition(Number(e.target.value))}
               />
-              <span>
+              <span data-spt-legacy="">
                 {elapsed(start)} – {elapsed(end)} from run start
               </span>
             </label>
           )}
           {!samples.length && (
-            <div className="notice">
+            <div data-spt-legacy="" className="notice">
               No interval history recorded for this phase. Final phase averages
               appear once SPT reports them.
             </div>
           )}
           {samples.length === 1 && (
-            <div className="notice">
+            <div data-spt-legacy="" className="notice">
               One measured point is available. It cannot establish a trend.
             </div>
           )}
@@ -238,27 +254,28 @@ export function Charts({
               onInspect={setActive}
             />
           ))}
-          <p className="chart-readout" aria-live="polite">
+          <p data-spt-legacy="" className="chart-readout" aria-live="polite">
             {inspected
               ? `${elapsed(inspected.elapsed)} · ${utc(inspected.timestamp)} · IOPS ${fmt(inspected.throughput, 2)} ops/s · bandwidth ${fmt(inspected.bandwidth, 2)} MiB/s · P50 ${fmt(inspected.p50, 1)} µs`
               : "Waiting for measured samples in this time window."}
           </p>
-          <p className="subtle">
+          <p data-spt-legacy="" className="subtle">
             All three graphs share the time window and inspector. Each uses its
             own scale. Missing measurements are shown as gaps.
           </p>
         </>
       ) : (
         <>
-          <label className="check-label">
+          <label data-spt-legacy="" className="check-label">
             <input
+              data-spt-legacy=""
               type="checkbox"
               checked={cleanup}
               onChange={(e) => setCleanup(e.target.checked)}
             />
             Include cleanup in comparison
           </label>
-          <div className="comparison-grid">
+          <div data-spt-legacy="" className="comparison-grid">
             {graphs.map((g) => {
               const field = g.key === "throughput" ? "iops" : g.field;
               const max = Math.max(
@@ -266,18 +283,23 @@ export function Charts({
                 ...summaries.map((r) => numeric(r[field]) ?? 0),
               );
               return (
-                <article className="comparison" key={g.key}>
-                  <h3>
-                    {g.label} <span>{g.unit}</span>
+                <article data-spt-legacy="" className="comparison" key={g.key}>
+                  <h3 data-spt-legacy="">
+                    {g.label} <span data-spt-legacy="">{g.unit}</span>
                   </h3>
                   {summaries.map((r) => {
                     const v = numeric(r[field]);
                     return (
-                      <div className="comparison-row" key={r.phase}>
-                        <span>{phaseName(r.phase)}</span>
-                        <div>
+                      <div
+                        data-spt-legacy=""
+                        className="comparison-row"
+                        key={r.phase}
+                      >
+                        <span data-spt-legacy="">{phaseName(r.phase)}</span>
+                        <div data-spt-legacy="">
                           {v !== null && (
                             <i
+                              data-spt-legacy=""
                               style={{
                                 width: `${(v / max) * 100}%`,
                                 background: g.color,
@@ -285,7 +307,7 @@ export function Charts({
                             />
                           )}
                         </div>
-                        <strong>{fmt(v, 2)}</strong>
+                        <strong data-spt-legacy="">{fmt(v, 2)}</strong>
                       </div>
                     );
                   })}
@@ -293,7 +315,7 @@ export function Charts({
               );
             })}
           </div>
-          <p className="subtle">
+          <p data-spt-legacy="" className="subtle">
             These bars are final phase averages. They do not represent interval
             history. Cleanup normally transfers no object payload.
           </p>

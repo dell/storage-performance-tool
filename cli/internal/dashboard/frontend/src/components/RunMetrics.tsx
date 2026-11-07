@@ -15,18 +15,18 @@ export function PhaseResults({
   onSelect: (phase: string) => void;
 }) {
   return (
-    <section className="panel">
-      <div className="section-heading">
-        <div>
-          <h2>Phase results</h2>
-          <p>Each phase has its own counters and timing.</p>
+    <section data-spt-legacy="" className="panel">
+      <div data-spt-legacy="" className="section-heading">
+        <div data-spt-legacy="">
+          <h2 data-spt-legacy="">Phase results</h2>
+          <p data-spt-legacy="">Each phase has its own counters and timing.</p>
         </div>
       </div>
       {m.phase_summaries?.length ? (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
+        <div data-spt-legacy="" className="table-wrap">
+          <table data-spt-legacy="">
+            <thead data-spt-legacy="">
+              <tr data-spt-legacy="">
                 {[
                   "Phase",
                   "Successful",
@@ -37,37 +37,38 @@ export function PhaseResults({
                   "MiB/s",
                   "P50 (µs)",
                 ].map((h) => (
-                  <th key={h} scope="col">
+                  <th data-spt-legacy="" key={h} scope="col">
                     {h}
                   </th>
                 ))}
               </tr>
             </thead>
-            <tbody>
+            <tbody data-spt-legacy="">
               {m.phase_summaries.map((r) => (
-                <tr key={r.phase}>
-                  <td>
+                <tr data-spt-legacy="" key={r.phase}>
+                  <td data-spt-legacy="">
                     <button
+                      data-spt-legacy=""
                       className="table-link"
                       onClick={() => onSelect(phaseCode(r.phase))}
                     >
                       {phaseName(r.phase)}
                     </button>
                   </td>
-                  <td>{fmt(r.successful_ops)}</td>
-                  <td>{fmt(r.failed_ops)}</td>
-                  <td>{fmt(r.corrupt_ops)}</td>
-                  <td>{elapsed(r.duration_seconds)}</td>
-                  <td>{fmt(r.iops, 2)}</td>
-                  <td>{fmt(r.bandwidth_mib_s, 2)}</td>
-                  <td>{fmt(r.p50_latency_us, 1)}</td>
+                  <td data-spt-legacy="">{fmt(r.successful_ops)}</td>
+                  <td data-spt-legacy="">{fmt(r.failed_ops)}</td>
+                  <td data-spt-legacy="">{fmt(r.corrupt_ops)}</td>
+                  <td data-spt-legacy="">{elapsed(r.duration_seconds)}</td>
+                  <td data-spt-legacy="">{fmt(r.iops, 2)}</td>
+                  <td data-spt-legacy="">{fmt(r.bandwidth_mib_s, 2)}</td>
+                  <td data-spt-legacy="">{fmt(r.p50_latency_us, 1)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       ) : (
-        <p className="form-help">
+        <p data-spt-legacy="" className="form-help">
           Final phase results will appear as SPT writes its output.
         </p>
       )}
@@ -124,40 +125,43 @@ export function MeasuredDetails({
     sample_count: (chart_samples ?? samples ?? []).length,
   };
   return (
-    <details className="panel">
-      <summary>
+    <details data-spt-legacy="" className="panel">
+      <summary data-spt-legacy="">
         SPT measured details{" "}
-        <span className="summary-note">{phaseName(phase)} phase</span>
+        <span data-spt-legacy="" className="summary-note">
+          {phaseName(phase)} phase
+        </span>
       </summary>
-      <p className="form-help">
+      <p data-spt-legacy="" className="form-help">
         All fields available from the dashboard API are retained below. A dash
         means SPT did not report a value.
       </p>
       {m.spt_summary_report && (
-        <details className="raw-details">
-          <summary>SPT run summary</summary>
-          <pre>{m.spt_summary_report}</pre>
+        <details data-spt-legacy="" className="raw-details">
+          <summary data-spt-legacy="">SPT run summary</summary>
+          <pre data-spt-legacy="">{m.spt_summary_report}</pre>
         </details>
       )}
-      <div className="guided-core-grid">
+      <div data-spt-legacy="" className="guided-core-grid">
         {groups.map((g) => (
-          <section className="timing" key={g.title}>
-            <h3>{g.title}</h3>
-            <dl>
+          <section data-spt-legacy="" className="timing" key={g.title}>
+            <h3 data-spt-legacy="">{g.title}</h3>
+            <dl data-spt-legacy="">
               {g.values.map(([name, value]) => (
-                <div key={name}>
-                  <dt>{name}</dt>
-                  <dd>{value}</dd>
+                <div data-spt-legacy="" key={name}>
+                  <dt data-spt-legacy="">{name}</dt>
+                  <dd data-spt-legacy="">{value}</dd>
                 </div>
               ))}
             </dl>
           </section>
         ))}
       </div>
-      <details className="raw-details">
-        <summary>Source measurements and metadata</summary>
-        <div className="actions">
+      <details data-spt-legacy="" className="raw-details">
+        <summary data-spt-legacy="">Source measurements and metadata</summary>
+        <div data-spt-legacy="" className="actions">
           <a
+            data-spt-legacy=""
             className="button-link"
             href={`/api/runs/${encodeURIComponent(m.run_id)}/csv?kind=samples`}
             download
@@ -165,7 +169,7 @@ export function MeasuredDetails({
             Export all samples CSV
           </a>
         </div>
-        <pre>{JSON.stringify(raw, null, 2)}</pre>
+        <pre data-spt-legacy="">{JSON.stringify(raw, null, 2)}</pre>
       </details>
     </details>
   );

@@ -74,49 +74,70 @@ export function ConnectRun({
 
   return (
     <>
-      <div className="page-heading">
-        <div>
-          <span className="eyebrow">READ ONLY MONITORING</span>
-          <h1>Connect to an active run</h1>
-          <p>
+      <div data-spt-legacy="" className="page-heading">
+        <div data-spt-legacy="">
+          <span data-spt-legacy="" className="eyebrow">
+            READ ONLY MONITORING
+          </span>
+          <h1 data-spt-legacy="">Connect to an active run</h1>
+          <p data-spt-legacy="">
             Follow a run started from the SPT CLI. This connection reads live
             status and measurements and does not start or stop the benchmark.
           </p>
         </div>
       </div>
       {error && (
-        <div className="error" role="alert">
-          <strong>Could not connect. </strong>
+        <div data-spt-legacy="" className="error" role="alert">
+          <strong data-spt-legacy="">Could not connect. </strong>
           {error}
           {hosts.includes(host) && (
-            <div className="actions" style={{ marginTop: 12 }}>
-              <button onClick={() => void connect()} disabled={busy || offline}>
+            <div
+              data-spt-legacy=""
+              className="actions"
+              style={{ marginTop: 12 }}
+            >
+              <button
+                data-spt-legacy=""
+                onClick={() => void connect()}
+                disabled={busy || offline}
+              >
                 Retry connection
               </button>
             </div>
           )}
         </div>
       )}
-      <section className="panel connect-panel">
+      <section data-spt-legacy="" className="panel connect-panel">
         {attached ? (
           <>
-            <span className="eyebrow">CURRENT CONNECTION</span>
-            <h2>Monitoring {state?.connection?.host}</h2>
-            <p>
+            <span data-spt-legacy="" className="eyebrow">
+              CURRENT CONNECTION
+            </span>
+            <h2 data-spt-legacy="">Monitoring {state?.connection?.host}</h2>
+            <p data-spt-legacy="">
               Run {state?.connection?.run_id ?? "—"} · Updates with the SPT
               status API and live metrics endpoint on port 9999.
             </p>
-            <div className="connect-actions">
-              <span className="connection-state">
-                <i className="source-dot connected" /> Connected · read only
+            <div data-spt-legacy="" className="connect-actions">
+              <span data-spt-legacy="" className="connection-state">
+                <i data-spt-legacy="" className="source-dot connected" />{" "}
+                Connected · read only
               </span>
-              <div className="actions">
+              <div data-spt-legacy="" className="actions">
                 {offline && (
-                  <button onClick={() => void connect()} disabled={busy}>
+                  <button
+                    data-spt-legacy=""
+                    onClick={() => void connect()}
+                    disabled={busy}
+                  >
                     Retry connection
                   </button>
                 )}
-                <button onClick={() => void disconnect()} disabled={busy}>
+                <button
+                  data-spt-legacy=""
+                  onClick={() => void disconnect()}
+                  disabled={busy}
+                >
                   Disconnect
                 </button>
               </div>
@@ -124,42 +145,48 @@ export function ConnectRun({
           </>
         ) : (
           <>
-            <span className="eyebrow">EXISTING SPT RUN</span>
-            <h2>Choose its entry machine</h2>
-            <p>
+            <span data-spt-legacy="" className="eyebrow">
+              EXISTING SPT RUN
+            </span>
+            <h2 data-spt-legacy="">Choose its entry machine</h2>
+            <p data-spt-legacy="">
               SPT’s entry machine serves the documented /status and
               /metrics/json APIs. Choose a client machine already saved in
               Storage configuration.
             </p>
             {hosts.length ? (
-              <label className="connect-host">
+              <label data-spt-legacy="" className="connect-host">
                 Entry machine
                 <select
+                  data-spt-legacy=""
                   value={host}
                   onChange={(event) => setHost(event.target.value)}
                   disabled={busy || offline}
                 >
                   {hosts.map((item) => (
-                    <option key={item} value={item}>
+                    <option data-spt-legacy="" key={item} value={item}>
                       {item}
                     </option>
                   ))}
                 </select>
               </label>
             ) : (
-              <div className="review">
-                <strong>No client machines are configured yet.</strong>
-                <p>
+              <div data-spt-legacy="" className="review">
+                <strong data-spt-legacy="">
+                  No client machines are configured yet.
+                </strong>
+                <p data-spt-legacy="">
                   Add the SPT entry machine in Configure run → Storage
                   configuration, then return here.
                 </p>
               </div>
             )}
-            <div className="connect-actions">
-              <span className="subtle">
+            <div data-spt-legacy="" className="connect-actions">
+              <span data-spt-legacy="" className="subtle">
                 The run must already be active on the selected machine.
               </span>
               <button
+                data-spt-legacy=""
                 className="primary"
                 onClick={() => void connect()}
                 disabled={!hosts.includes(host) || busy || offline}

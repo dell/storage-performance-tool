@@ -36,7 +36,11 @@ export function StorageConfiguration({
   }, [dirty, onDirty]);
 
   if (!saved || !form)
-    return <p className="form-help">Waiting for the dashboard server…</p>;
+    return (
+      <p data-spt-legacy="" className="form-help">
+        Waiting for the dashboard server…
+      </p>
+    );
 
   const v = saved.verification,
     running = v.status === "running",
@@ -84,40 +88,55 @@ export function StorageConfiguration({
 
   return (
     <>
-      <div className="target-summary">
-        <div>
-          <span>S3 endpoint in use</span>
-          <strong>{target.endpoint_label || "Not configured"}</strong>
+      <div data-spt-legacy="" className="target-summary">
+        <div data-spt-legacy="">
+          <span data-spt-legacy="">S3 endpoint in use</span>
+          <strong data-spt-legacy="">
+            {target.endpoint_label || "Not configured"}
+          </strong>
         </div>
-        <div>
-          <span>Bucket</span>
-          <strong>{target.bucket || "Not reported"}</strong>
+        <div data-spt-legacy="">
+          <span data-spt-legacy="">Bucket</span>
+          <strong data-spt-legacy="">{target.bucket || "Not reported"}</strong>
         </div>
-        <span className={`status ${target.ready ? "good" : "warn"}`}>
-          <i />
+        <span
+          data-spt-legacy=""
+          className={`status ${target.ready ? "good" : "warn"}`}
+        >
+          <i data-spt-legacy="" />
           {target.ready ? "ready" : "needs setup"}
         </span>
       </div>
       {!!target.reasons?.length && (
-        <div className="notice">{target.reasons.join(" ")}</div>
+        <div data-spt-legacy="" className="notice">
+          {target.reasons.join(" ")}
+        </div>
       )}
       <form
+        data-spt-legacy=""
         onSubmit={(e) => {
           e.preventDefault();
           void verify();
         }}
       >
-        <fieldset className="plain-fieldset" disabled={locked}>
-          <legend>Client machines</legend>
-          <p className="form-help">
+        <fieldset
+          data-spt-legacy=""
+          className="plain-fieldset"
+          disabled={locked}
+        >
+          <legend data-spt-legacy="">Client machines</legend>
+          <p data-spt-legacy="" className="form-help">
             The machines that generate load. Each needs Docker and key-based SSH
-            access from the dashboard host. Enter <code>user@host</code>, or{" "}
-            <code>127.0.0.1</code> for the dashboard host itself.
+            access from the dashboard host. Enter{" "}
+            <code data-spt-legacy="">user@host</code>, or{" "}
+            <code data-spt-legacy="">127.0.0.1</code> for the dashboard host
+            itself.
           </p>
-          <ul className="host-list">
+          <ul data-spt-legacy="" className="host-list">
             {form.hosts.map((host, i) => (
-              <li key={i}>
+              <li data-spt-legacy="" key={i}>
                 <input
+                  data-spt-legacy=""
                   aria-label={`Client machine ${i + 1}`}
                   placeholder="user@hostname"
                   autoComplete="off"
@@ -132,6 +151,7 @@ export function StorageConfiguration({
                 />
                 {rowErrors[i] && (
                   <small
+                    data-spt-legacy=""
                     id={`host-error-${i}`}
                     className="field-error host-error"
                   >
@@ -139,6 +159,7 @@ export function StorageConfiguration({
                   </small>
                 )}
                 <button
+                  data-spt-legacy=""
                   type="button"
                   disabled={form.hosts.length === 1}
                   aria-label={`Remove client machine ${i + 1}`}
@@ -155,18 +176,20 @@ export function StorageConfiguration({
             ))}
           </ul>
           <button
+            data-spt-legacy=""
             type="button"
             disabled={form.hosts.length >= saved.max_hosts}
             onClick={() => setForm({ ...form, hosts: [...form.hosts, ""] })}
           >
             ＋ Add machine
           </button>
-          <span className="subtle host-count">
+          <span data-spt-legacy="" className="subtle host-count">
             {form.hosts.length} of {saved.max_hosts}
           </span>
-          <label className="endpoint-field">
+          <label data-spt-legacy="" className="endpoint-field">
             S3 endpoint (optional)
             <input
+              data-spt-legacy=""
               type="url"
               placeholder={
                 target.endpoint_source === "env" && target.endpoint
@@ -182,11 +205,15 @@ export function StorageConfiguration({
               onChange={(e) => setForm({ ...form, endpoint: e.target.value })}
             />
             {urlError && (
-              <small id="endpoint-error" className="field-error">
+              <small
+                data-spt-legacy=""
+                id="endpoint-error"
+                className="field-error"
+              >
                 {urlError}
               </small>
             )}
-            <small>
+            <small data-spt-legacy="">
               Use HTTP or HTTPS. Prefer HTTPS when the endpoint is outside a
               trusted private network. Leave blank to use the endpoint
               configured on the host. The bucket and access keys always come
@@ -194,8 +221,9 @@ export function StorageConfiguration({
             </small>
           </label>
         </fieldset>
-        <div className="actions">
+        <div data-spt-legacy="" className="actions">
           <button
+            data-spt-legacy=""
             className="primary"
             type="submit"
             disabled={
@@ -204,7 +232,7 @@ export function StorageConfiguration({
           >
             {locked ? "Verifying…" : "Verify connection"}
           </button>
-          <span className="subtle" role="status">
+          <span data-spt-legacy="" className="subtle" role="status">
             {running
               ? "Checking each machine. This can take a few minutes."
               : dirty
@@ -216,7 +244,7 @@ export function StorageConfiguration({
         </div>
       </form>
       {error && (
-        <div className="error run-error" role="alert">
+        <div data-spt-legacy="" className="error run-error" role="alert">
           {error}
         </div>
       )}
@@ -234,16 +262,25 @@ export function StorageConfiguration({
           ]
             .filter((n) => n.status === "failed")
             .map((n) => (
-              <details className="verify-failure" key={n.host} open>
-                <summary>
+              <details
+                data-spt-legacy=""
+                className="verify-failure"
+                key={n.host}
+                open
+              >
+                <summary data-spt-legacy="">
                   {n.host} failed{n.message ? `: ${n.message}` : ""}
                 </summary>
                 {n.checks.length > 0 && (
-                  <ul>
+                  <ul data-spt-legacy="">
                     {n.checks.map((c) => (
-                      <li key={c.name} className={`check-${c.status}`}>
-                        <strong>{c.name}</strong> {c.status.toUpperCase()} ·{" "}
-                        {c.message}
+                      <li
+                        data-spt-legacy=""
+                        key={c.name}
+                        className={`check-${c.status}`}
+                      >
+                        <strong data-spt-legacy="">{c.name}</strong>{" "}
+                        {c.status.toUpperCase()} · {c.message}
                       </li>
                     ))}
                   </ul>

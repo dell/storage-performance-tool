@@ -5,25 +5,37 @@ export function RunWarnings({ warnings }: { warnings?: RunWarning[] }) {
   if (!warnings?.length) return null;
   return (
     <section
+      data-spt-legacy=""
       className="panel notice-warn run-warnings"
       aria-label="Run warnings"
     >
-      <div className="section-heading">
-        <div>
-          <h2>Run warnings</h2>
-          <p>
+      <div data-spt-legacy="" className="section-heading">
+        <div data-spt-legacy="">
+          <h2 data-spt-legacy="">Run warnings</h2>
+          <p data-spt-legacy="">
             Observations from SPT metrics and reachability. These describe what
             was seen; they do not claim a root cause.
           </p>
         </div>
       </div>
-      <ul className="run-warnings-list">
+      <ul data-spt-legacy="" className="run-warnings-list">
         {warnings.map((w, i) => (
-          <li key={`${w.code}-${w.host ?? ""}-${w.metric ?? ""}-${i}`}>
-            <strong>{label(w.code)}</strong>
-            {w.host ? <span className="warn-host">{w.host}</span> : null}
-            {w.metric ? <span className="warn-metric">{w.metric}</span> : null}
-            <p>{w.observed}</p>
+          <li
+            data-spt-legacy=""
+            key={`${w.code}-${w.host ?? ""}-${w.metric ?? ""}-${i}`}
+          >
+            <strong data-spt-legacy="">{label(w.code)}</strong>
+            {w.host ? (
+              <span data-spt-legacy="" className="warn-host">
+                {w.host}
+              </span>
+            ) : null}
+            {w.metric ? (
+              <span data-spt-legacy="" className="warn-metric">
+                {w.metric}
+              </span>
+            ) : null}
+            <p data-spt-legacy="">{w.observed}</p>
           </li>
         ))}
       </ul>
