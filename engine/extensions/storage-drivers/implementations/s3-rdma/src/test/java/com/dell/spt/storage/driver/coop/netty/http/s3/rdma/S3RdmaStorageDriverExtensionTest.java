@@ -57,6 +57,18 @@ public class S3RdmaStorageDriverExtensionTest {
 	}
 
 	@Test
+	void theRdmaSwitchPicksTheDefaultOnHostsWhereTheTwoDiffer() {
+		assumeTrue(Epoll.isAvailable());
+		// 192 hardware threads: the SC26 client. 288: above 240, where the RDMA default leaves 4.
+		assertEquals(4, threadsPerNic(192, true));
+		assertEquals(24, threadsPerNic(192, false));
+		assertEquals(6, threadsPerNic(288, true));
+		assertEquals(36, threadsPerNic(288, false));
+		assertEquals(4, threadsPerNic(16, true), "never below 4");
+		assertEquals(4, threadsPerNic(16, false), "never below 4");
+	}
+
+	@Test
 	void configuredDriverThreadsOverrideEitherDefault() {
 		assumeTrue(Epoll.isAvailable());
 		for (final var enabled : List.of(true, false)) {
@@ -67,6 +79,11 @@ public class S3RdmaStorageDriverExtensionTest {
 	@Test
 	void noNicSetMeansNoSettings() {
 		assertTrue(S3RdmaStorageDriverExtension.nicSetSettings(storage(List.of(), 0, true)).isEmpty());
+	}
+
+	private static int threadsPerNic(final int hardwareThreads, final boolean rdmaEnabled) {
+		return S3RdmaStorageDriverExtension.nicSetSettings(storage(List.of("ens2np0"), 0, rdmaEnabled), hardwareThreads)
+						.orElseThrow().threadsPerNic();
 	}
 
 	@SuppressWarnings({"rawtypes", "unchecked"

@@ -105,16 +105,27 @@ public record NicSetSettings(
 	 * Their loops carry every payload.
 	 */
 	public static int defaultThreadsPerNic() {
-		return Math.max(4, ThreadUtil.getHardwareThreadCount() / 8);
+		return defaultThreadsPerNic(ThreadUtil.getHardwareThreadCount());
+	}
+
+	/** {@link #defaultThreadsPerNic()} on a host with {@code hardwareThreads}. */
+	public static int defaultThreadsPerNic(final int hardwareThreads) {
+		return Math.max(4, hardwareThreads / 8);
 	}
 
 	/**
 	 * The default group size for each NIC while payloads move over RDMA, {@code max(4, hardware
 	 * threads / 48)} (D83): 4 below 240 hardware threads. The loops then carry the HTTP exchange of
-	 * each request, and payloads only below the threshold or after a fallback.
+	 * each request, and only the payloads that stay on HTTP: below the threshold, declined, after a
+	 * fallback, ranged or partial reads, and payloads too large for one RDMA transfer.
 	 */
 	public static int defaultRdmaThreadsPerNic() {
-		return Math.max(4, ThreadUtil.getHardwareThreadCount() / 48);
+		return defaultRdmaThreadsPerNic(ThreadUtil.getHardwareThreadCount());
+	}
+
+	/** {@link #defaultRdmaThreadsPerNic()} on a host with {@code hardwareThreads}. */
+	public static int defaultRdmaThreadsPerNic(final int hardwareThreads) {
+		return Math.max(4, hardwareThreads / 48);
 	}
 
 	/**

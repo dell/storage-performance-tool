@@ -12,6 +12,7 @@ import com.dell.spt.storage.driver.coop.netty.http.s3.S3TargetBucketControl;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetSettings;
 import static com.dell.spt.base.Constants.APP_NAME;
 
+import com.github.akurilov.commons.concurrent.ThreadUtil;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.SchemaProvider;
 import com.github.akurilov.confuse.io.yaml.YamlSchemaProviderBase;
@@ -54,9 +55,14 @@ public final class S3RdmaStorageDriverExtension<I extends Item, O extends Operat
 	 * HTTP, so the HTTP drivers' default applies.
 	 */
 	static Optional<NicSetSettings> nicSetSettings(final Config storageConfig) {
+		return nicSetSettings(storageConfig, ThreadUtil.getHardwareThreadCount());
+	}
+
+	/** {@link #nicSetSettings(Config)} on a host with {@code hardwareThreads}. */
+	static Optional<NicSetSettings> nicSetSettings(final Config storageConfig, final int hardwareThreads) {
 		return NicSetSettings.fromStorage(storageConfig, () -> new RdmaConfig(storageConfig.configVal("rdma")).isEnabled()
-						? NicSetSettings.defaultRdmaThreadsPerNic()
-						: NicSetSettings.defaultThreadsPerNic());
+						? NicSetSettings.defaultRdmaThreadsPerNic(hardwareThreads)
+						: NicSetSettings.defaultThreadsPerNic(hardwareThreads));
 	}
 
 	/** Bucket control requests are plain HTTP, so the controller needs no RDMA device. */

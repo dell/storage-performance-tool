@@ -86,6 +86,8 @@ class NicSetSettingsTest {
 		assertEquals(Math.max(4, hardwareThreads / 48), NicSetSettings.defaultRdmaThreadsPerNic());
 		assertEquals(Math.max(4, hardwareThreads / 8), NicSetSettings.defaultThreadsPerNic());
 		assertTrue(NicSetSettings.defaultRdmaThreadsPerNic() <= NicSetSettings.defaultThreadsPerNic());
+		assertEquals(List.of(4, 4, 4, 5, 6), List.of(16, 192, 239, 240, 288).stream().map(NicSetSettings::defaultRdmaThreadsPerNic).toList());
+		assertEquals(List.of(4, 24, 29, 30, 36), List.of(16, 192, 239, 240, 288).stream().map(NicSetSettings::defaultThreadsPerNic).toList());
 	}
 
 	@Test
