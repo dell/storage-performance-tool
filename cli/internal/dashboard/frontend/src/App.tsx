@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { HistoryRun, Metrics, Row, RunMode, State } from "./types";
+import { useCallback, useEffect, useState } from "react";
+import type { HistoryRun, Row, RunMode, State } from "./types";
 import { MetricCard } from "./components/MetricCard";
 import { Configure } from "./components/Configure";
 import { Status } from "./components/Status";
@@ -14,6 +14,7 @@ import { NodeTable } from "./components/NodeTable";
 import { RunWarnings } from "./components/RunWarnings";
 import { RunLog } from "./components/RunLog";
 import { runWorkloadType, workloadLabel } from "./utils/catalog";
+import { readJSON } from "./utils/validation";
 import {
   elapsed,
   formatMetric,
@@ -23,7 +24,6 @@ import {
   phaseName,
   utc,
 } from "./utils/metrics";
-import { fallbackLimits, readJSON } from "./utils/validation";
 
 const fields = [
   {
@@ -124,13 +124,12 @@ export default function App() {
   >("configure");
   const [compareIDs, setCompareIDs] = useState<string[]>([]),
     [compareBaseline, setCompareBaseline] = useState("");
-  const landed = useRef(false);
+  const [landed, setLanded] = useState(false);
   // Open on the live view only when a run is already in progress at first load.
-  useEffect(() => {
-    if (!state || landed.current) return;
-    landed.current = true;
+  if (state && !landed) {
+    setLanded(true);
     if (state.job?.status === "running") setPage("dashboard");
-  }, [state]);
+  }
   const clients = state?.storage?.hosts.length ?? 1;
   const [mode, setMode] = useState<RunMode>("guided");
   const [selection, setSelection] = useState<string[]>(loadVisibleSections);
@@ -152,8 +151,6 @@ export default function App() {
   useEffect(() => {
     if (page !== "history") return;
     const controller = new AbortController();
-    setHistoryLoading(true);
-    setHistoryError("");
     fetch("/api/runs", { cache: "no-store", signal: controller.signal })
       .then(async (response) => {
         const body = await response.json();
@@ -200,6 +197,20 @@ export default function App() {
     setPage("dashboard");
   };
 
+  const showHistory = () => {
+    if (page !== "history") {
+      setHistoryLoading(true);
+      setHistoryError("");
+    }
+    setPage("history");
+  };
+
+  const refreshHistory = () => {
+    setHistoryLoading(true);
+    setHistoryError("");
+    setHistoryVersion((version) => version + 1);
+  };
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -238,7 +249,7 @@ export default function App() {
             aria-current={page === "history" ? "page" : undefined}
             onClick={() => {
               setHistoryState(null);
-              setPage("history");
+              showHistory();
             }}
           >
             ◷ <span>Run history</span>
@@ -363,7 +374,7 @@ export default function App() {
               loading={historyLoading}
               error={historyError}
               onOpen={openSavedRun}
-              onRefresh={() => setHistoryVersion((version) => version + 1)}
+              onRefresh={refreshHistory}
             />
           ) : page === "configure" ? (
             <Configure
@@ -394,7 +405,7 @@ export default function App() {
                 }
                 state={historyState ?? state}
                 historical={!!historyState}
-                onBackHistory={() => setPage("history")}
+                onBackHistory={showHistory}
                 selected={
                   mode === "guided" ? fields.map((f) => f.key) : selection
                 }

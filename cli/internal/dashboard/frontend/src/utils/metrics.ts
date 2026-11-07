@@ -1,4 +1,4 @@
-import type { DataStatus, Row } from "../types";
+import type { DataStatus } from "../types";
 export function numeric(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }

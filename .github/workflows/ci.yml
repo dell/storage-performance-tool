@@ -46,6 +46,14 @@ jobs:
           npm run typecheck
           npm test
 
+      - name: Lint frontend
+        working-directory: cli/internal/dashboard/frontend
+        run: npm run lint
+
+      - name: Check frontend formatting
+        working-directory: cli/internal/dashboard/frontend
+        run: npm run format:check
+
       - name: Build frontend and embedded page
         working-directory: cli/internal/dashboard/frontend
         run: npm run build

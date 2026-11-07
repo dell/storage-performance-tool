@@ -447,7 +447,6 @@ describe("NodeTable", () => {
     expect(container.innerHTML).toBe("");
   });
 
-
   it("offers Compare with previous for a complete run with an older match", async () => {
     const onCompare = vi.fn();
     stubFetch(() => ({
@@ -479,8 +478,6 @@ describe("NodeTable", () => {
     );
     expect(onCompare).toHaveBeenCalledWith(["newer", "older"], "older");
   });
-
-
 });
 
 describe("RunWarnings", () => {
