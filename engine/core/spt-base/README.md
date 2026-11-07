@@ -411,7 +411,8 @@ exposes a single engine's report as `NicSet`. Schema version 1 is one JSON objec
 
 `driver_threads` is the configured `storage.driver.threads`, with 0 for the default.
 `event_loops_per_nic` is each NIC's group size: `driver_threads` when set, otherwise
-`max(4, hardware_threads / 8)`. `nics` lists the NICs that opened, in plan order, and
+`max(4, hardware_threads / 8)` for the `s3` driver and `max(4, hardware_threads / 48)` for
+the `s3-rdma` driver while RDMA is enabled. `nics` lists the NICs that opened, in plan order, and
 is empty when the NIC set never opened, so `event_loops`, the loops of the per-NIC
 groups, is then 0. `base_event_loops` is the driver's base group, which carries its
 control requests, counted from the group as created, and `total_event_loops` is every

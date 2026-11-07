@@ -10,10 +10,12 @@ import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.config.NicSetConfig;
+import com.github.akurilov.commons.concurrent.ThreadUtil;
 import com.github.akurilov.confuse.Config;
 import io.netty.channel.epoll.Epoll;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.IntSupplier;
 import org.junit.jupiter.api.Test;
 
 @SuppressWarnings({"rawtypes", "unchecked"
@@ -61,6 +63,31 @@ class NicSetSettingsTest {
 			assertEquals(0, settings.driverThreads());
 			assertEquals(NicSetSettings.defaultThreadsPerNic(), settings.threadsPerNic());
 		}
+	}
+
+	@Test
+	void aDriversDefaultAppliesOnlyWithoutConfiguredDriverThreads() {
+		assumeTrue(Epoll.isAvailable());
+		final var asked = new int[1];
+		final IntSupplier five = () -> {
+			asked[0]++;
+			return 5;
+		};
+		assertEquals(5, NicSetSettings.fromStorage(storage(List.of("ens2np0"), "epoll", "default", 0, 1, 0), five).orElseThrow().threadsPerNic());
+		assertEquals(1, asked[0]);
+		assertEquals(3, NicSetSettings.fromStorage(storage(List.of("ens2np0"), "epoll", "default", 0, 1, 3), five).orElseThrow().threadsPerNic());
+		assertFalse(NicSetSettings.fromStorage(storage(List.of(), "epoll", "default", 0, 1, 0), five).isPresent());
+		assertEquals(1, asked[0], "the default is asked only when it is used");
+	}
+
+	@Test
+	void theRdmaDefaultIsAFortyEighthOfTheHardwareThreadsAndNeverBelowFour() {
+		final var hardwareThreads = ThreadUtil.getHardwareThreadCount();
+		assertEquals(Math.max(4, hardwareThreads / 48), NicSetSettings.defaultRdmaThreadsPerNic());
+		assertEquals(Math.max(4, hardwareThreads / 8), NicSetSettings.defaultThreadsPerNic());
+		assertTrue(NicSetSettings.defaultRdmaThreadsPerNic() <= NicSetSettings.defaultThreadsPerNic());
+		assertEquals(List.of(4, 4, 4, 5, 6), List.of(16, 192, 239, 240, 288).stream().map(NicSetSettings::defaultRdmaThreadsPerNic).toList());
+		assertEquals(List.of(4, 24, 29, 30, 36), List.of(16, 192, 239, 240, 288).stream().map(NicSetSettings::defaultThreadsPerNic).toList());
 	}
 
 	@Test
