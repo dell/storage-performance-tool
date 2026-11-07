@@ -20,6 +20,7 @@ import java.io.InputStream;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 
 public final class S3RdmaStorageDriverExtension<I extends Item, O extends Operation<I>, T extends S3RdmaStorageDriver<I, O>>
 				extends ExtensionBase
@@ -40,11 +41,22 @@ public final class S3RdmaStorageDriverExtension<I extends Item, O extends Operat
 	public T create(
 					final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
 					final int batchSize) throws IllegalConfigurationException, InterruptedException {
-		final var nicSet = NicSetSettings.fromStorage(storageConfig);
+		final var nicSet = nicSetSettings(storageConfig);
 		if (nicSet.isPresent()) {
 			return (T) S3RdmaNicSetDriver.create(stepId, dataInput, storageConfig, verifyFlag, batchSize, nicSet.get());
 		}
 		return (T) new S3RdmaStorageDriver<>(stepId, dataInput, storageConfig, verifyFlag, batchSize);
+	}
+
+	/**
+	 * The NIC set's settings, with fewer default event loops per NIC while RDMA is enabled (D83),
+	 * since payloads then bypass the loops. With {@code storage.rdma.enabled=false} every payload is
+	 * HTTP, so the HTTP drivers' default applies.
+	 */
+	static Optional<NicSetSettings> nicSetSettings(final Config storageConfig) {
+		return NicSetSettings.fromStorage(storageConfig, () -> new RdmaConfig(storageConfig.configVal("rdma")).isEnabled()
+						? NicSetSettings.defaultRdmaThreadsPerNic()
+						: NicSetSettings.defaultThreadsPerNic());
 	}
 
 	/** Bucket control requests are plain HTTP, so the controller needs no RDMA device. */

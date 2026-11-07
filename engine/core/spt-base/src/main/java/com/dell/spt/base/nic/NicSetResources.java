@@ -6,8 +6,9 @@ import java.util.List;
  * One NIC-set driver's event loops (D64), fixed when its NIC set opens.
  *
  * @param driverThreads the configured {@code storage.driver.threads}, or 0 for the default
- * @param eventLoopsPerNic each NIC's group size: {@code driverThreads} when set, otherwise
- *     {@code max(4, hardware threads / 8)} (D49)
+ * @param eventLoopsPerNic each NIC's group size: {@code driverThreads} when set, otherwise the
+ *     driver's default: {@code max(4, hardware threads / 8)} (D49), or {@code max(4, hardware
+ *     threads / 48)} for {@code s3-rdma} while RDMA is enabled (D83)
  * @param nics the NICs that opened, in layout order; empty when the NIC set never opened
  * @param baseEventLoops the driver's base group, which carries its control requests, as created
  */

@@ -11,6 +11,7 @@ import io.netty.channel.epoll.Epoll;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.function.IntSupplier;
 
 /**
  * Validated NIC-set settings of one driver, parsed before its construction. Without a NIC set
@@ -44,12 +45,26 @@ public record NicSetSettings(
 	}
 
 	/**
-	 * Parses the settings, or returns empty without a NIC set.
+	 * Parses the settings with the HTTP drivers' default event loops per NIC, or returns empty without
+	 * a NIC set.
 	 *
 	 * @throws IllegalConfigurationException for a transport that cannot bind to a device (D31), a
 	 *     non-default endpoint mode (D14) or {@code storage.net.node.connAttemptsLimit} above 0
 	 */
 	public static Optional<NicSetSettings> fromStorage(final Config storageConfig) {
+		return fromStorage(storageConfig, NicSetSettings::defaultThreadsPerNic);
+	}
+
+	/**
+	 * Parses the settings, or returns empty without a NIC set.
+	 *
+	 * @param defaultThreadsPerNic the driver's group size for each NIC, asked only when a NIC set is
+	 *     configured and {@code storage.driver.threads} is not
+	 * @throws IllegalConfigurationException for a transport that cannot bind to a device (D31), a
+	 *     non-default endpoint mode (D14) or {@code storage.net.node.connAttemptsLimit} above 0
+	 */
+	public static Optional<NicSetSettings> fromStorage(
+					final Config storageConfig, final IntSupplier defaultThreadsPerNic) {
 		final var interfaces = NicSetConfig.interfaces(storageConfig);
 		if (interfaces.isEmpty()) {
 			return Optional.empty();
@@ -82,12 +97,24 @@ public record NicSetSettings(
 						connectTimeout,
 						Math.min(connectTimeout, MAX_PROBE_TIMEOUT_MILLIS),
 						threads,
-						threads >= 1 ? threads : defaultThreadsPerNic()));
+						threads >= 1 ? threads : defaultThreadsPerNic.getAsInt()));
 	}
 
-	/** Today's default group size, {@code max(4, hardware threads / 8)}, for each NIC (D49). */
-	static int defaultThreadsPerNic() {
+	/**
+	 * The HTTP drivers' default group size, {@code max(4, hardware threads / 8)}, for each NIC (D49).
+	 * Their loops carry every payload.
+	 */
+	public static int defaultThreadsPerNic() {
 		return Math.max(4, ThreadUtil.getHardwareThreadCount() / 8);
+	}
+
+	/**
+	 * The default group size for each NIC while payloads move over RDMA, {@code max(4, hardware
+	 * threads / 48)} (D83): 4 below 240 hardware threads. The loops then carry the HTTP exchange of
+	 * each request, and payloads only below the threshold or after a fallback.
+	 */
+	public static int defaultRdmaThreadsPerNic() {
+		return Math.max(4, ThreadUtil.getHardwareThreadCount() / 48);
 	}
 
 	/**
