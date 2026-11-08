@@ -83,8 +83,8 @@ func (b *DockerCommandBuilderImpl) BuildRunCommand(config ContainerConfig) []str
 	}
 
 	// Linux capabilities
-	for _, cap := range config.CapAdd {
-		dockerArgs = append(dockerArgs, "--cap-add", cap)
+	for _, capability := range config.CapAdd {
+		dockerArgs = append(dockerArgs, "--cap-add", capability)
 	}
 
 	// Resource limits
