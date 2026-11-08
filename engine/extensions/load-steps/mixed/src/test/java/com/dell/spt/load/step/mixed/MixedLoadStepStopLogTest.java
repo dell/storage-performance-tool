@@ -140,6 +140,7 @@ class MixedLoadStepStopLogTest {
 	}
 
 	private void assertNoGeneratorError() throws InterruptedException {
+		assertTrue(drivers.refused.sum() > 0, "the driver refused an operation with EOF at the stop");
 		final List<String> errors = log.errorsContaining("MixedLoadGenerator");
 		assertTrue(errors.isEmpty(), errors.toString());
 	}
@@ -186,14 +187,20 @@ class MixedLoadStepStopLogTest {
 		}
 	}
 
-	/** The dummy driver, which after its admission closes throws {@link EOFException} from put. */
+	/**
+	 * The dummy driver, which after its admission closes throws {@link EOFException} from put. Its
+	 * admission close waits up to a second for that refusal, so a step test always reaches it.
+	 */
 	@SuppressWarnings({"rawtypes", "unchecked"
 	})
 	static final class EofAtCloseDriverFactory implements StorageDriverFactory {
 
 		static final String TYPE = "eof-at-close-mock";
 
+		private static final long REFUSAL_WAIT_NANOS = TimeUnit.SECONDS.toNanos(1);
+
 		final LongAdder accepted = new LongAdder();
+		final LongAdder refused = new LongAdder();
 
 		@Override
 		public String id() {
@@ -223,11 +230,17 @@ class MixedLoadStepStopLogTest {
 				synchronized (closed) {
 					closed[0] = true;
 				}
-				return call.callRealMethod();
+				final Object result = call.callRealMethod();
+				final long deadline = System.nanoTime() + REFUSAL_WAIT_NANOS;
+				while (refused.sum() == 0 && System.nanoTime() < deadline) {
+					Thread.sleep(1);
+				}
+				return result;
 			}).when(driver).closeAdmission();
 			doAnswer(call -> {
 				synchronized (closed) {
 					if (closed[0]) {
+						refused.increment();
 						throw new EOFException();
 					}
 				}
