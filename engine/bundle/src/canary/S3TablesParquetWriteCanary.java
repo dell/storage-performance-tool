@@ -69,7 +69,8 @@ public final class S3TablesParquetWriteCanary {
 				}
 			} catch (final InvocationTargetException e) {
 				problem.set(String.valueOf(e.getCause()));
-			} catch (final ReflectiveOperationException | LinkageError e) {
+			} catch (final Throwable e) {
+				// Anything else, a NullPointerException included, must fail the canary too.
 				problem.set(String.valueOf(e));
 			}
 		});
