@@ -644,10 +644,55 @@ tasks.register('verifyImageMallocTunable') {
 	}
 }
 
+// Extension JARs load through ParentLastURLClassLoader, which looks in them before the engine.
+// A library bundled in one is what extension code gets at run time, so a stale copy is live.
+tasks.register('verifyExtensionJarContents') {
+	group = 'verification'
+	description = 'Checks that load-step JARs carry only SPT classes and that bundled Jackson matches the engine'
+	dependsOn assembleDist
+	def extDir = file("${distDir}/ext")
+	inputs.dir(extDir)
+	def jacksonVersion = libs.versions.jacksonCore.get()
+	doLast {
+		def problems = []
+		def jars = (extDir.listFiles() ?: []).findAll { it.name.endsWith('.jar') }.sort { it.name }
+		if (jars.isEmpty()) {
+			throw new GradleException("No extension JARs under ${extDir}")
+		}
+		jars.each { jar ->
+			new java.util.zip.ZipFile(jar).withCloseable { zip ->
+				if (jar.name ==~ /(mixed|pipeline|weighted)-.+-all\.jar/) {
+					def foreign = new TreeSet<String>()
+					zip.entries().each { entry ->
+						if (entry.name.endsWith('.class') && !entry.name.startsWith('com/dell/spt/')
+								&& !entry.name.startsWith('META-INF/')) {
+							foreign << entry.name.substring(0, entry.name.lastIndexOf('/')).tokenize('/').take(3).join('/')
+						}
+					}
+					if (foreign) {
+						problems << "${jar.name} bundles classes the engine provides: ${foreign.take(6).join(', ')}"
+					}
+				}
+				['com/fasterxml/jackson/core/json/PackageVersion.class',
+					'com/fasterxml/jackson/databind/cfg/PackageVersion.class'].each { name ->
+					def entry = zip.getEntry(name)
+					if (entry != null && !new String(zip.getInputStream(entry).bytes, 'ISO-8859-1').contains(jacksonVersion)) {
+						problems << "${jar.name} bundles a Jackson other than the engine's ${jacksonVersion} (${name})"
+					}
+				}
+			}
+		}
+		if (problems) {
+			throw new GradleException('Extension JAR contents:\n  ' + problems.join('\n  '))
+		}
+	}
+}
+
 tasks.register('test') {
 	group = 'verification'
 	description = 'Runs bundle-level tests'
 	dependsOn tasks.named('verifyDirectJarScenarioConfigs'),
+		tasks.named('verifyExtensionJarContents'),
 		tasks.named('verifyImageMallocTunable'),
 		tasks.named('verifyEngineBuildInfoCanary'),
 		tasks.named('verifyEngineBuildInfoDocumentation')
