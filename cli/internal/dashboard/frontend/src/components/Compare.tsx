@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { CompareDelta, CompareResult, SeriesPoint } from "../types";
+import { useComparison, useLastSuccessfulData } from "../api/queries";
 import { formatNumber as fmt } from "../utils/metrics";
 import {
-  compareQuery,
   deltaText,
   flagText,
   groupDeltas,
@@ -41,41 +41,34 @@ export function Compare({
   const [base, setBase] = useState(baseline);
   const [rule, setRule] = useState<RuleOverrides>({});
   const [draft, setDraft] = useState<Record<string, string>>({});
-  const [data, setData] = useState<CompareResult | null>(null);
-  const [error, setError] = useState("");
+  const comparison = useComparison(ids, base, rule);
+  const data = useLastSuccessfulData(comparison.data);
+  const error = comparison.error?.message ?? "";
   const [metric, setMetric] = useState<OverlayMetric>("iops");
-  useEffect(() => {
-    if (ids.length < 2) return;
-    const controller = new AbortController();
-    fetch(compareQuery(ids, base, rule), {
-      cache: "no-store",
-      signal: controller.signal,
-    })
-      .then(async (r) => {
-        const body = await r.json();
-        if (!r.ok) throw new Error(body.error ?? "Could not compare runs.");
-        const result = body as CompareResult;
-        setData(result);
-        setError("");
-        setDraft({
-          threshold_pct: String(result.rule.threshold_pct),
-          latency_floor_us: String(result.rule.latency_floor_us),
-          min_ops: String(result.rule.min_ops),
-        });
-      })
-      .catch((e) => {
-        if (!controller.signal.aborted)
-          setError(e instanceof Error ? e.message : "Could not compare runs.");
-      });
-    return () => controller.abort();
-  }, [ids, base, rule]);
+  const [draftRule, setDraftRule] = useState<CompareResult["rule"] | null>(
+    null,
+  );
+  // Initialize editable rule fields when a successful response supplies defaults.
+  if (data && data.rule !== draftRule) {
+    setDraftRule(data.rule);
+    setDraft({
+      threshold_pct: String(data.rule.threshold_pct),
+      latency_floor_us: String(data.rule.latency_floor_us),
+      min_ops: String(data.rule.min_ops),
+    });
+  }
   const apply = () => {
     const next: RuleOverrides = {};
-    for (const k of ["threshold_pct", "latency_floor_us", "min_ops"] as const) {
+    const fields = ["threshold_pct", "latency_floor_us", "min_ops"] as const;
+    for (const k of fields) {
       const v = Number(draft[k]);
       if (draft[k]?.trim() !== "" && Number.isFinite(v) && v >= 0) next[k] = v;
     }
-    setRule(next);
+    if (fields.every((field) => next[field] === rule[field])) {
+      void comparison.refetch();
+    } else {
+      setRule(next);
+    }
   };
   if (ids.length < 2)
     return (

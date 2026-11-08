@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { State } from "../types";
-import { readJSON } from "../utils/validation";
+import { useAttachRun, useDetachRun } from "../api/mutations";
 
 export function ConnectRun({
   state,
@@ -9,13 +9,15 @@ export function ConnectRun({
 }: {
   state: State | null;
   offline: boolean;
-  onConnected: () => Promise<void>;
+  onConnected: () => void;
 }) {
   const hosts = state?.storage?.hosts ?? [];
   const attached = state?.connection?.mode === "attached";
   const [host, setHost] = useState(hosts[0] ?? "");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+  const attach = useAttachRun();
+  const detach = useDetachRun();
+  const busy = attach.isPending || detach.isPending;
+  const error = attach.error?.message || detach.error?.message || "";
   const nextHost =
     attached && state?.connection?.host
       ? state.connection.host
@@ -24,52 +26,16 @@ export function ConnectRun({
         : host;
   if (host !== nextHost) setHost(nextHost);
 
-  const connect = async () => {
-    setError("");
-    setBusy(true);
-    try {
-      const response = await fetch("/api/attach", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ host }),
-      });
-      const body = await readJSON(
-        response,
-        "Could not connect to the SPT run.",
-      );
-      if (!response.ok)
-        throw new Error(body.error ?? "Could not connect to the SPT run.");
-      await onConnected();
-    } catch (reason) {
-      setError(
-        reason instanceof Error
-          ? reason.message
-          : "Could not connect to the SPT run. Check the API and retry.",
-      );
-    } finally {
-      setBusy(false);
-    }
+  const connect = () => {
+    if (busy || !hosts.includes(host)) return;
+    detach.reset();
+    attach.mutate(host, { onSuccess: onConnected });
   };
 
-  const disconnect = async () => {
-    setError("");
-    setBusy(true);
-    try {
-      const response = await fetch("/api/attach", { method: "DELETE" });
-      const body = await readJSON(
-        response,
-        "Could not disconnect from the run.",
-      );
-      if (!response.ok)
-        throw new Error(body.error ?? "Could not disconnect from the run.");
-      await onConnected();
-    } catch (reason) {
-      setError(
-        reason instanceof Error ? reason.message : "Could not disconnect.",
-      );
-    } finally {
-      setBusy(false);
-    }
+  const disconnect = () => {
+    if (busy) return;
+    attach.reset();
+    detach.mutate(undefined, { onSuccess: onConnected });
   };
 
   return (

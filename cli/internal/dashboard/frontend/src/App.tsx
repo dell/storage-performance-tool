@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
-import type { HistoryRun, Row, RunMode, State } from "./types";
+import { useEffect, useState } from "react";
+import type { Row, RunMode, State } from "./types";
+import { useStopRun } from "./api/mutations";
+import { useSavedRun, useServerState } from "./api/queries";
 import { MetricCard } from "./components/MetricCard";
 import { Configure } from "./components/Configure";
 import { Status } from "./components/Status";
@@ -14,7 +16,6 @@ import { NodeTable } from "./components/NodeTable";
 import { RunWarnings } from "./components/RunWarnings";
 import { RunLog } from "./components/RunLog";
 import { runWorkloadType, workloadLabel } from "./utils/catalog";
-import { readJSON } from "./utils/validation";
 import {
   elapsed,
   formatMetric,
@@ -71,54 +72,13 @@ function loadVisibleSections(): string[] {
   }
 }
 
-function useServer() {
-  const [state, setState] = useState<State | null>(null),
-    [error, setError] = useState(""),
-    [received, setReceived] = useState("");
-  const refresh = useCallback(async (signal?: AbortSignal) => {
-    try {
-      if (location.protocol === "file:")
-        throw new Error(
-          "Open the dashboard through its local server to load SPT results.",
-        );
-      const r = await fetch("/api/state", { cache: "no-store", signal });
-      if (!(r.headers.get("content-type") ?? "").includes("application/json"))
-        throw new Error(
-          "The dashboard server is unavailable. Open the app through the dashboard server or SSH tunnel.",
-        );
-      const s = await r.json();
-      if (!r.ok)
-        throw new Error(s.error ?? `Could not read SPT state (${r.status}).`);
-      if (!s.target || !("job" in s) || !("metrics" in s))
-        throw new Error(
-          "The server returned an unsupported dashboard response.",
-        );
-      setState(s);
-      setError("");
-      setReceived(new Date().toISOString());
-    } catch (e) {
-      if (!signal?.aborted)
-        setError(e instanceof Error ? e.message : "Could not read SPT state.");
-    }
-  }, []);
-  useEffect(() => {
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      await refresh(controller.signal);
-      if (!controller.signal.aborted) timer = setTimeout(poll, 2000);
-    };
-    void poll();
-    return () => {
-      controller.abort();
-      clearTimeout(timer);
-    };
-  }, [refresh]);
-  return { state, error, received, refresh };
-}
-
 export default function App() {
-  const { state, error, received, refresh } = useServer();
+  const server = useServerState();
+  const state = server.data ?? null;
+  const error = server.error?.message ?? "";
+  const received = server.dataUpdatedAt
+    ? new Date(server.dataUpdatedAt).toISOString()
+    : "";
   const [page, setPage] = useState<
     "dashboard" | "configure" | "history" | "connect" | "catalog" | "compare"
   >("configure");
@@ -142,73 +102,36 @@ export default function App() {
       // The dashboard still works if browser storage is unavailable.
     }
   }, [selection]);
-  const [historyRuns, setHistoryRuns] = useState<HistoryRun[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyError, setHistoryError] = useState("");
-  const [historyState, setHistoryState] = useState<State | null>(null);
-  const [historyVersion, setHistoryVersion] = useState(0);
+  const [historyRunID, setHistoryRunID] = useState<string | null>(null);
+  const savedRun = useSavedRun(
+    page === "history" || page === "dashboard" ? historyRunID : null,
+  );
+  const historyState = historyRunID ? (savedRun.data ?? null) : null;
+  // Keep the history list visible until the selected run has finished loading.
+  if (
+    page === "history" &&
+    historyRunID &&
+    savedRun.isSuccess &&
+    !savedRun.isFetching
+  ) {
+    setCustomizing(false);
+    setPage("dashboard");
+  }
 
-  useEffect(() => {
-    if (page !== "history") return;
-    const controller = new AbortController();
-    fetch("/api/runs", { cache: "no-store", signal: controller.signal })
-      .then(async (response) => {
-        const body = await response.json();
-        if (!response.ok)
-          throw new Error(body.error ?? "Could not load run history.");
-        setHistoryRuns(Array.isArray(body.runs) ? body.runs : []);
-      })
-      .catch((reason) => {
-        if (!controller.signal.aborted)
-          setHistoryError(
-            reason instanceof Error
-              ? reason.message
-              : "Could not load run history.",
-          );
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setHistoryLoading(false);
-      });
-    return () => controller.abort();
-  }, [page, historyVersion]);
-
-  const openSavedRun = async (runID: string) => {
-    setHistoryError("");
-    try {
-      const response = await fetch(`/api/runs/${encodeURIComponent(runID)}`, {
-        cache: "no-store",
-      });
-      const detail = await response.json();
-      if (!response.ok)
-        throw new Error(detail.error ?? "Could not open saved run.");
-      setHistoryState(detail as State);
-      setCustomizing(false);
-      setPage("dashboard");
-    } catch (reason) {
-      setHistoryError(
-        reason instanceof Error ? reason.message : "Could not open saved run.",
-      );
-    }
+  const openSavedRun = (runID: string) => {
+    if (historyRunID === runID) void savedRun.refetch();
+    else setHistoryRunID(runID);
   };
 
   const showDashboard = () => {
-    setHistoryState(null);
+    setHistoryRunID(null);
     setCustomizing(false);
     setPage("dashboard");
   };
 
   const showHistory = () => {
-    if (page !== "history") {
-      setHistoryLoading(true);
-      setHistoryError("");
-    }
+    setHistoryRunID(null);
     setPage("history");
-  };
-
-  const refreshHistory = () => {
-    setHistoryLoading(true);
-    setHistoryError("");
-    setHistoryVersion((version) => version + 1);
   };
 
   return (
@@ -239,7 +162,7 @@ export default function App() {
             className={page === "configure" ? "selected" : ""}
             aria-current={page === "configure" ? "page" : undefined}
             onClick={() => {
-              setHistoryState(null);
+              setHistoryRunID(null);
               setPage("configure");
             }}
           >
@@ -258,7 +181,7 @@ export default function App() {
             className={page === "history" ? "selected" : ""}
             aria-current={page === "history" ? "page" : undefined}
             onClick={() => {
-              setHistoryState(null);
+              setHistoryRunID(null);
               showHistory();
             }}
           >
@@ -377,10 +300,7 @@ export default function App() {
             <ConnectRun
               state={state}
               offline={!!error}
-              onConnected={async () => {
-                await refresh();
-                setPage("dashboard");
-              }}
+              onConnected={showDashboard}
             />
           ) : page === "catalog" ? (
             <Catalog
@@ -399,22 +319,17 @@ export default function App() {
             />
           ) : page === "history" ? (
             <RunHistory
-              runs={historyRuns}
-              loading={historyLoading}
-              error={historyError}
+              opening={!!historyRunID && savedRun.isFetching}
+              error={savedRun.error?.message ?? ""}
               onOpen={openSavedRun}
-              onRefresh={refreshHistory}
+              onRefresh={() => setHistoryRunID(null)}
             />
           ) : page === "configure" ? (
             <Configure
               state={state}
               mode={mode}
               offline={!!error}
-              onRefresh={refresh}
-              onStarted={async () => {
-                await refresh();
-                showDashboard();
-              }}
+              onStarted={showDashboard}
             />
           ) : (
             <>
@@ -443,7 +358,6 @@ export default function App() {
                   mode === "guided" ? fields.map((f) => f.key) : selection
                 }
                 onConfigure={() => setPage("configure")}
-                onRefresh={() => refresh()}
               />
               {mode === "expert" && customizing && (
                 <div
@@ -578,43 +492,31 @@ function Dashboard({
   onConfigure,
   historical = false,
   onBackHistory,
-  onRefresh,
 }: {
   state: State | null;
   selected: string[];
   onConfigure: () => void;
   historical?: boolean;
   onBackHistory?: () => void;
-  onRefresh?: () => Promise<void>;
 }) {
   const m = state?.metrics,
     job = state?.job;
-  const [stopping, setStopping] = useState(false);
-  const [stopError, setStopError] = useState("");
+  const stopping = useStopRun();
+  const stopError = stopping.error?.message;
   // An attached CLI run is monitored read-only, so it cannot be stopped here.
   const canStop =
     !historical &&
     job?.status === "running" &&
     state?.connection?.mode !== "attached";
-  const stopPending = stopping || !!job?.stop_requested;
-  async function stop() {
+  const stopPending = stopping.isPending || !!job?.stop_requested;
+  function stop() {
     if (!canStop || stopPending) return;
     if (
-      !window.confirm(
+      window.confirm(
         "Stop this run? It ends now and won't finish its remaining phases.",
       )
-    )
-      return;
-    setStopping(true);
-    setStopError("");
-    try {
-      const r = await fetch("/api/runs/stop", { method: "POST" });
-      await readJSON(r, "Stop request failed.");
-      await onRefresh?.();
-    } catch (e) {
-      setStopError(e instanceof Error ? e.message : "Could not stop the run.");
-    } finally {
-      setStopping(false);
+    ) {
+      stopping.mutate();
     }
   }
   const summaries = m?.phase_summaries ?? [];

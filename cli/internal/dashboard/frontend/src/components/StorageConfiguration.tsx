@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import type { State } from "../types";
+import { useVerifyStorage } from "../api/mutations";
 import { ConnectionGraph } from "./ConnectionGraph";
-import { endpointError, hostErrors, readJSON } from "../utils/validation";
+import { endpointError, hostErrors } from "../utils/validation";
 
 type Form = { hosts: string[]; endpoint: string };
 
@@ -9,17 +10,17 @@ export function StorageConfiguration({
   state,
   offline,
   onDirty,
-  onRefresh,
 }: {
   state: State | null;
   offline: boolean;
   onDirty: (dirty: boolean) => void;
-  onRefresh: () => Promise<void>;
 }) {
   const saved = state?.storage;
-  const [form, setForm] = useState<Form | null>(null),
-    [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
+  const [form, setForm] = useState<Form | null>(null);
+  const [validationError, setValidationError] = useState("");
+  const verification = useVerifyStorage();
+  const busy = verification.isPending;
+  const error = validationError || verification.error?.message || "";
   // Copy the saved settings once; later polls must not overwrite what is being typed.
   if (saved && !form) {
     setForm({ hosts: [...saved.hosts], endpoint: saved.endpoint });
@@ -55,35 +56,21 @@ export function StorageConfiguration({
       hosts: form.hosts.map((h, i) => (i === index ? value : h)),
     });
 
-  async function verify() {
-    if (locked || !form) return;
+  function verify() {
+    if (locked || !form || offline || state?.job?.status === "running") return;
     if (!entered.length) {
-      setError("Add at least one client machine.");
+      setValidationError("Add at least one client machine.");
       return;
     }
     if (invalid) {
-      setError("Fix the highlighted fields before verifying.");
+      setValidationError("Fix the highlighted fields before verifying.");
       return;
     }
-    setBusy(true);
-    setError("");
-    try {
-      const endpoint = form.endpoint.trim();
-      const r = await fetch("/api/storage/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ hosts: entered, endpoint }),
-      });
-      await readJSON(r, "Verification request failed.");
-      setForm({ hosts: entered, endpoint });
-      await onRefresh();
-    } catch (e) {
-      setError(
-        e instanceof Error ? e.message : "Could not start verification.",
-      );
-    } finally {
-      setBusy(false);
-    }
+    setValidationError("");
+    verification.mutate(
+      { hosts: entered, endpoint: form.endpoint.trim() },
+      { onSuccess: (_response, settings) => setForm(settings) },
+    );
   }
 
   return (

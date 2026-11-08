@@ -1,12 +1,13 @@
-import { useEffect, useState } from "react";
-import type { Driver, HistoryRun, Options, RunMode, State } from "../types";
+import { useState } from "react";
+import type { Driver, Options, RunMode, State } from "../types";
+import { useStartRun } from "../api/mutations";
+import { useRuns } from "../api/queries";
 import { defaults } from "../config";
 import { StorageConfiguration } from "./StorageConfiguration";
 import { formatNumber as fmt } from "../utils/metrics";
 import { driverReadiness } from "../utils/driver";
 import {
   fallbackLimits,
-  readJSON,
   formatBytes,
   parseSize,
   parseWhole,
@@ -162,6 +163,82 @@ function expertCommand(draft: ExpertDraft, driver: Driver): string {
   return `spt run ${workload} --object-count ${opts.object_count} --object-size ${opts.object_size} --threads ${opts.threads} --auto-terminate-seconds ${opts.max_runtime_seconds}`;
 }
 
+function PreviousRunPicker({
+  setDraft,
+}: {
+  setDraft: (draft: ExpertDraft) => void;
+}) {
+  const history = useRuns();
+  const previousRuns = (
+    Array.isArray(history.data?.runs) ? history.data.runs : []
+  ).filter(
+    (run) =>
+      run.options &&
+      run.status === "completed" &&
+      typeof run.options.object_count === "number" &&
+      typeof run.options.object_size === "string" &&
+      typeof run.options.threads === "number" &&
+      typeof run.options.max_runtime_seconds === "number",
+  );
+  const [chosenID, setChosenID] = useState("");
+  const [message, setMessage] = useState("");
+  const previousID = previousRuns.some((run) => run.run_id === chosenID)
+    ? chosenID
+    : (previousRuns[0]?.run_id ?? "");
+  const historyMessage =
+    history.error?.message ||
+    message ||
+    (history.isPending
+      ? "Loading saved runs…"
+      : previousRuns.length
+        ? ""
+        : "No completed runs with reusable settings found.");
+  return (
+    <div data-spt-legacy="" className="expert-inline">
+      <label data-spt-legacy="">
+        Completed benchmark
+        <select
+          data-spt-legacy=""
+          value={previousID}
+          onChange={(e) => setChosenID(e.target.value)}
+        >
+          {previousRuns.map((r) => (
+            <option data-spt-legacy="" key={r.run_id} value={r.run_id}>
+              {r.run_id}
+            </option>
+          ))}
+          {!previousRuns.length && (
+            <option data-spt-legacy="" value="">
+              No runs available
+            </option>
+          )}
+        </select>
+      </label>
+      <button
+        data-spt-legacy=""
+        type="button"
+        disabled={!previousID}
+        onClick={() => {
+          const selected = previousRuns.find((r) => r.run_id === previousID);
+          if (selected?.options) {
+            setDraft(toDraft(selected.options as Options));
+            setMessage(
+              "Previous run settings loaded. Review them before running.",
+            );
+          }
+        }}
+      >
+        Duplicate settings
+      </button>
+      {historyMessage && (
+        <span data-spt-legacy="" role="status" className="expert-muted">
+          {historyMessage}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function ExpertWorkspace({
   draft,
   setDraft,
@@ -185,9 +262,6 @@ function ExpertWorkspace({
   const [chosenProfile, setChosenProfile] = useState("");
   const [profileName, setProfileName] = useState("");
   const [saveMessage, setSaveMessage] = useState("");
-  const [previousRuns, setPreviousRuns] = useState<HistoryRun[]>([]);
-  const [previousID, setPreviousID] = useState("");
-  const [historyMessage, setHistoryMessage] = useState("");
   const [commandText, setCommandText] = useState("");
   const [commandMessage, setCommandMessage] = useState("");
   const [importError, setImportError] = useState(false);
@@ -204,41 +278,6 @@ function ExpertWorkspace({
   const volume =
     (parseSize(options.object_size) ?? 0) *
     (Number.isFinite(options.object_count) ? options.object_count : 0);
-
-  useEffect(() => {
-    if (start !== "previous") return;
-    const controller = new AbortController();
-    fetch("/api/runs", { cache: "no-store", signal: controller.signal })
-      .then(async (response) =>
-        readJSON(response, "Could not load saved runs."),
-      )
-      .then((data: { runs?: HistoryRun[] }) => {
-        if (controller.signal.aborted) return;
-        const available = (Array.isArray(data.runs) ? data.runs : []).filter(
-          (r) =>
-            r.options &&
-            r.status === "completed" &&
-            typeof r.options.object_count === "number" &&
-            typeof r.options.object_size === "string" &&
-            typeof r.options.threads === "number" &&
-            typeof r.options.max_runtime_seconds === "number",
-        );
-        setPreviousRuns(available);
-        setPreviousID(available[0]?.run_id ?? "");
-        setHistoryMessage(
-          available.length
-            ? ""
-            : "No completed runs with reusable settings found.",
-        );
-      })
-      .catch((e) => {
-        if (!controller.signal.aborted)
-          setHistoryMessage(
-            e instanceof Error ? e.message : "Unable to load run history.",
-          );
-      });
-    return () => controller.abort();
-  }, [start]);
 
   function saveProfile() {
     const name = profileName.trim().slice(0, 60);
@@ -313,12 +352,7 @@ function ExpertWorkspace({
               key={key}
               className={`expert-start-option ${start === key ? "active" : ""}`}
               aria-pressed={start === key}
-              onClick={() => {
-                if (key === "previous" && start !== "previous") {
-                  setHistoryMessage("Loading saved runs…");
-                }
-                setStart(key);
-              }}
+              onClick={() => setStart(key)}
             >
               <strong data-spt-legacy="">{name}</strong>
               <small data-spt-legacy="">{detail}</small>
@@ -394,52 +428,7 @@ function ExpertWorkspace({
               )}
             </div>
           )}
-          {start === "previous" && (
-            <div data-spt-legacy="" className="expert-inline">
-              <label data-spt-legacy="">
-                Completed benchmark
-                <select
-                  data-spt-legacy=""
-                  value={previousID}
-                  onChange={(e) => setPreviousID(e.target.value)}
-                >
-                  {previousRuns.map((r) => (
-                    <option data-spt-legacy="" key={r.run_id} value={r.run_id}>
-                      {r.run_id}
-                    </option>
-                  ))}
-                  {!previousRuns.length && (
-                    <option data-spt-legacy="" value="">
-                      No runs available
-                    </option>
-                  )}
-                </select>
-              </label>
-              <button
-                data-spt-legacy=""
-                type="button"
-                disabled={!previousID}
-                onClick={() => {
-                  const selected = previousRuns.find(
-                    (r) => r.run_id === previousID,
-                  );
-                  if (selected?.options) {
-                    setDraft(toDraft(selected.options as Options));
-                    setHistoryMessage(
-                      "Previous run settings loaded. Review them before running.",
-                    );
-                  }
-                }}
-              >
-                Duplicate settings
-              </button>
-              {historyMessage && (
-                <span data-spt-legacy="" role="status" className="expert-muted">
-                  {historyMessage}
-                </span>
-              )}
-            </div>
-          )}
+          {start === "previous" && <PreviousRunPicker setDraft={setDraft} />}
           {start === "command" && (
             <div data-spt-legacy="" className="expert-command-import">
               <label data-spt-legacy="" htmlFor="expert-cli-input">
@@ -656,22 +645,21 @@ export function Configure({
   state,
   mode,
   offline,
-  onRefresh,
   onStarted,
 }: {
   state: State | null;
   mode: RunMode;
   offline: boolean;
-  onRefresh: () => Promise<void>;
-  onStarted: () => Promise<void>;
+  onStarted: () => void;
 }) {
   const [guided, setGuided] = useState<Options>({ ...defaults }),
     [draft, setDraft] = useState<ExpertDraft>(() => toDraft(defaults)),
     [review, setReview] = useState(false),
-    [busy, setBusy] = useState(false),
-    [error, setError] = useState(""),
     [storageDirty, setStorageDirty] = useState(false),
     [driver, setDriver] = useState<Driver>("s3");
+  const startMutation = useStartRun();
+  const busy = startMutation.isPending;
+  const error = startMutation.error?.message ?? "";
   const limits = state?.limits ?? fallbackLimits;
   const config: Options = {
     ...(mode === "expert" ? fromDraft(draft) : { ...guided, mode: "guided" }),
@@ -700,23 +688,9 @@ export function Configure({
     state?.job?.status !== "running" &&
     verified &&
     valid;
-  async function start() {
+  function start() {
     if (busy || !ready || !valid) return;
-    setBusy(true);
-    setError("");
-    try {
-      const r = await fetch("/api/runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(config),
-      });
-      await readJSON(r, "Run request failed.");
-      await onStarted();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not start run.");
-    } finally {
-      setBusy(false);
-    }
+    startMutation.mutate(config, { onSuccess: onStarted });
   }
   return (
     <div
@@ -746,7 +720,6 @@ export function Configure({
           state={state}
           offline={offline}
           onDirty={setStorageDirty}
-          onRefresh={onRefresh}
         />
       </section>
       <section data-spt-legacy="" className="panel">
