@@ -8,7 +8,7 @@
 # Allow overriding the base image (default pins Eclipse Temurin JRE 25 LTS)
 # Pinned to digest for reproducibility - update via Dependabot/Renovate
 # To find latest digest: docker buildx imagetools inspect eclipse-temurin:25-jre-jammy
-ARG BASE_IMAGE=eclipse-temurin:25-jre-jammy@sha256:305fb0c3e5f47ea70ed6670845deb8bddbc362ad4c42354e85273ec9a31bd064
+ARG BASE_IMAGE=eclipse-temurin:25-jre-jammy@sha256:659b528cca74a0edc5c25315ec5819f35bce40bbcec645c4c534987e4c6be7c1
 ARG SPT_VERSION=0.0.0-dev
 ARG SPT_RELEASE_VERSION=${SPT_VERSION}
 FROM ${BASE_IMAGE}
