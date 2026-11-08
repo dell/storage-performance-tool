@@ -10,8 +10,10 @@ ext {
 }
 
 dependencies {
-	// Extension-specific dependencies
-	implementation(
+	// Provided by the engine's spt.jar, and ParentLastURLClassLoader sends these packages to it.
+	// compileOnly keeps them out of the shadow JAR, together with the Jackson and SnakeYAML they
+	// bring transitively, which the extension class loader would otherwise load ahead of the engine's.
+	compileOnly(
 		libs.confuse,
 		libs.confuse.io.yaml,
 		libs.java.commons,

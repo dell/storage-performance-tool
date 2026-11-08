@@ -33,7 +33,8 @@ dependencies {
 		libs.netty.codec.http,
 	)
 
-	// Jackson from parent classloader (already in spt-base)
+	// Jackson API for compilation. Avro also brings Jackson into the shadow JAR, and the platform
+	// below pins that copy to the engine's version.
 	compileOnly(
 		libs.jackson.databind,
 		libs.jackson.core,
@@ -42,6 +43,14 @@ dependencies {
 	// Parquet / Avro bundled into shadow JAR (new dependencies)
 	implementation(libs.parquet.avro)
 	implementation(libs.avro)
+
+	// ParentLastURLClassLoader loads the libraries bundled here ahead of the engine's own, so
+	// keep the ones Avro and Parquet pull in at the engine's versions.
+	implementation(platform("com.fasterxml.jackson:jackson-bom:${libs.versions.jacksonCore.get()}"))
+	constraints {
+		implementation(libs.commons.lang)
+		implementation(libs.commons.codec)
+	}
 
 	// Hadoop stubs: parquet-hadoop imports Hadoop classes at class-load time even when
 	// no Hadoop FileSystem I/O is performed. Bring in the minimum jars needed to satisfy
