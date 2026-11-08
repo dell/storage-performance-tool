@@ -14,7 +14,7 @@ export function RunHistory({
   onRefresh: () => void;
 }) {
   const history = useRuns();
-  const runs = history.data?.runs ?? [];
+  const runs = Array.isArray(history.data?.runs) ? history.data.runs : [];
   const loading = history.isFetching || opening;
   const error = openingError || history.error?.message || "";
   const localTime = (value?: string) => {

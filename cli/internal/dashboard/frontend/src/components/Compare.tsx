@@ -59,11 +59,16 @@ export function Compare({
   }
   const apply = () => {
     const next: RuleOverrides = {};
-    for (const k of ["threshold_pct", "latency_floor_us", "min_ops"] as const) {
+    const fields = ["threshold_pct", "latency_floor_us", "min_ops"] as const;
+    for (const k of fields) {
       const v = Number(draft[k]);
       if (draft[k]?.trim() !== "" && Number.isFinite(v) && v >= 0) next[k] = v;
     }
-    setRule(next);
+    if (fields.every((field) => next[field] === rule[field])) {
+      void comparison.refetch();
+    } else {
+      setRule(next);
+    }
   };
   if (ids.length < 2)
     return (
