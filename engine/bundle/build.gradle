@@ -694,11 +694,41 @@ tasks.register('verifyExtensionJarContents') {
 	}
 }
 
+// Hadoop's Configuration, created for every s3-tables Parquet file, parses core-default.xml when the
+// thread's context loader can see it, and that needs Hadoop's shaded Guava. Write through the
+// packaged JARs and the engine's extension loader, with the engine's and then the extension
+// loader as context loader.
+tasks.register('verifyS3TablesParquetWrite') {
+	group = 'verification'
+	description = 'Writes a Parquet file through the packaged s3-tables extension'
+	dependsOn assembleDist
+	def canarySource = layout.projectDirectory.file('src/canary/S3TablesParquetWriteCanary.java')
+	inputs.file(canarySource)
+	inputs.file(file("${distDir}/${sptJar}"))
+	inputs.dir(file("${distDir}/ext"))
+	doLast {
+		def javaExecutable = new File(
+			System.getProperty('java.home'),
+			'bin/java' + (System.getProperty('os.name').toLowerCase().contains('win') ? '.exe' : '')
+		).absolutePath
+		def execution = providers.exec {
+			commandLine javaExecutable, '-cp', "${distDir}/${sptJar}", canarySource.asFile.absolutePath, "${distDir}/ext"
+			ignoreExitValue = true
+		}
+		def result = execution.result.get()
+		def output = execution.standardOutput.asText.get() + execution.standardError.asText.get()
+		if (result.exitValue != 0 || !output.contains('S3_TABLES_PARQUET_WRITE_OK')) {
+			throw new GradleException("Packaged s3-tables Parquet write failed (exit ${result.exitValue}):\n${output}")
+		}
+	}
+}
+
 tasks.register('test') {
 	group = 'verification'
 	description = 'Runs bundle-level tests'
 	dependsOn tasks.named('verifyDirectJarScenarioConfigs'),
 		tasks.named('verifyExtensionJarContents'),
+		tasks.named('verifyS3TablesParquetWrite'),
 		tasks.named('verifyImageMallocTunable'),
 		tasks.named('verifyEngineBuildInfoCanary'),
 		tasks.named('verifyEngineBuildInfoDocumentation')

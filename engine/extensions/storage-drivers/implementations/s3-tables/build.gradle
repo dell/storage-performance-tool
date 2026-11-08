@@ -57,6 +57,10 @@ dependencies {
 	// the import graph, excluding all transitive Hadoop dependencies.
 	implementation(libs.hadoop.common) { transitive = false }
 	implementation(libs.hadoop.mapreduce.client.core) { transitive = false }
+	// Hadoop's Configuration, which the Parquet writer sets up for every file, needs Hadoop's shaded
+	// Guava once the thread's context loader can see core-default.xml in this JAR. Engine threads
+	// don't today; bundling it keeps the writer working if one does.
+	implementation(libs.hadoop.thirdparty) { transitive = false }
 	implementation(libs.woodstox.core) { transitive = false }
 	implementation(libs.stax2.api) { transitive = false }
 	implementation(libs.commons.collections) { transitive = false }
@@ -68,7 +72,6 @@ dependencies {
 		libs.confuse.io.yaml,
 		libs.disruptor,
 		libs.netty.transport.native.epoll,
-		libs.hadoop.thirdparty,
 	)
 }
 
