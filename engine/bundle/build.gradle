@@ -654,6 +654,10 @@ tasks.register('verifyExtensionJarContents') {
 	inputs.dir(extDir)
 	def jacksonVersion = libs.versions.jacksonCore.get()
 	doLast {
+		// PackageVersion holds its version as one constant-pool string: tag 1, a two-byte length, then the
+		// bytes. Matching all three keeps 2.22.30 or 2.22.3-SNAPSHOT from passing for 2.22.3.
+		def versionConstant = new String(
+			[1, jacksonVersion.length() >> 8, jacksonVersion.length() & 0xff] as byte[], 'ISO-8859-1') + jacksonVersion
 		def problems = []
 		def jars = (extDir.listFiles() ?: []).findAll { it.name.endsWith('.jar') }.sort { it.name }
 		if (jars.isEmpty()) {
@@ -664,9 +668,11 @@ tasks.register('verifyExtensionJarContents') {
 				if (jar.name ==~ /(mixed|pipeline|weighted)-.+-all\.jar/) {
 					def foreign = new TreeSet<String>()
 					zip.entries().each { entry ->
-						if (entry.name.endsWith('.class') && !entry.name.startsWith('com/dell/spt/')
-								&& !entry.name.startsWith('META-INF/')) {
-							foreign << entry.name.substring(0, entry.name.lastIndexOf('/')).tokenize('/').take(3).join('/')
+						// A multi-release JAR's META-INF/versions/<n>/ classes load like top-level ones.
+						def name = entry.name.replaceFirst('^META-INF/versions/[0-9]+/', '')
+						if (name.endsWith('.class') && !name.startsWith('com/dell/spt/') && !name.startsWith('META-INF/')) {
+							def slash = name.lastIndexOf('/')
+							foreign << (slash < 0 ? name : name.substring(0, slash).tokenize('/').take(3).join('/'))
 						}
 					}
 					if (foreign) {
@@ -676,7 +682,7 @@ tasks.register('verifyExtensionJarContents') {
 				['com/fasterxml/jackson/core/json/PackageVersion.class',
 					'com/fasterxml/jackson/databind/cfg/PackageVersion.class'].each { name ->
 					def entry = zip.getEntry(name)
-					if (entry != null && !new String(zip.getInputStream(entry).bytes, 'ISO-8859-1').contains(jacksonVersion)) {
+					if (entry != null && !new String(zip.getInputStream(entry).bytes, 'ISO-8859-1').contains(versionConstant)) {
 						problems << "${jar.name} bundles a Jackson other than the engine's ${jacksonVersion} (${name})"
 					}
 				}
