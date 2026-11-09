@@ -1956,8 +1956,25 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 								0);
 			}
 		} else {
+			if (channel == null && completionFailedWithoutAConnection(op)) {
+				// Nothing was sent, so the upload is still open: abort it as after a failed response.
+				scheduleFailedCompletionAbort((CompositeDataOperation) op, op.status());
+			}
 			super.complete(channel, op);
 		}
+	}
+
+	/**
+	 * Whether {@code op} is a multipart upload's completion that failed before it had a connection: a
+	 * failed lease or connect, on the default route or a NIC set (FAIL_IO, no channel).
+	 */
+	static boolean completionFailedWithoutAConnection(final Operation<?> op) {
+		return op instanceof CompositeDataOperation compositeOp
+						&& OpType.CREATE.equals(op.type())
+						&& Operation.Status.FAIL_IO.equals(op.status())
+						&& compositeOp.get(S3Api.KEY_MPU_ABORT) == null
+						&& compositeOp.get(S3Api.KEY_UPLOAD_ID) != null
+						&& compositeOp.allSubOperationsDone();
 	}
 
 	private static Operation.Status deleteFailureStatus(final Operation.Status status) {

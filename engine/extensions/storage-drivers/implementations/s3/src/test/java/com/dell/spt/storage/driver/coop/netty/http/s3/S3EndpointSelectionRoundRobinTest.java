@@ -393,6 +393,27 @@ final class S3EndpointSelectionRoundRobinTest {
 		assertEquals(HOSTNAME + ":" + endpoints.get(0).split(":", -1)[1], abort.host());
 	}
 
+	/** A completion that never connects sent nothing, so its upload is still open and is aborted all the same. */
+	@Test
+	void aCompletionThatCannotConnectStillAbortsItsUpload() throws Exception {
+		final var endpoints = new ArrayList<>(listeners(5));
+		endpoints.add("127.0.0.1:" + unusedPort());
+		final var run = driver(endpoints, null, 1);
+		final var item = new DataItemImpl("unsent", 5, 3L * ITEM_SIZE);
+		final var upload = new CompositeDataOperationImpl<DataItem>(
+						0, OpType.CREATE, item, null, "/bucket", CREDENTIAL, null, 0, ITEM_SIZE);
+
+		assertTrue(run.driver().put(upload));
+		awaitRequests(6);
+
+		final var abort = requests.get(5);
+		assertEquals("DELETE", abort.method());
+		assertTrue(abort.query().contains("uploadId=upload-1"), abort.query());
+		// HEAD, INIT, three parts; the completion's turn is the refused endpoint; the abort takes the next.
+		assertEquals(List.of(0, 1, 2, 3, 4, 0), listenerSequence());
+		assertEquals(Operation.Status.FAIL_IO, awaitComposite(run).status());
+	}
+
 	@Test
 	void everyDriverInstanceStartsAtTheFirstEndpoint() throws Exception {
 		final var endpoints = listeners(3);
