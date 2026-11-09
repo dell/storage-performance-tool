@@ -397,23 +397,18 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	}
 
 	/**
-	 * Starts the connection {@link #getUnpooledConnection} makes, on the base event-loop group,
-	 * without waiting for it: the event loop resolves the address and connects, and completes the
-	 * future, failing it after {@code connectTimeoutMillis}. The caller owns the connection once it
-	 * connects, and closes it.
+	 * Starts a connection like the one {@link #getUnpooledConnection} makes, on the base event-loop
+	 * group, to {@code destination}, an address already resolved, without waiting for it: the
+	 * future completes on the event loop, failing after {@code connectTimeoutMillis}. The caller
+	 * owns the connection once it connects, and closes it.
 	 */
-	protected final ChannelFuture connectUnpooled(
-					final String storageNodeAddr, final int storageNodePort, final int connectTimeoutMillis) {
-		final InetSocketAddress socketAddr;
-		if (storageNodeAddr.contains(":")) {
-			final String addrParts[] = storageNodeAddr.split(":", 0);
-			socketAddr = InetSocketAddress.createUnresolved(addrParts[0], Integer.parseInt(addrParts[1]));
-		} else {
-			socketAddr = InetSocketAddress.createUnresolved(storageNodeAddr, storageNodePort);
+	protected final ChannelFuture connectUnpooled(final InetSocketAddress destination, final int connectTimeoutMillis) {
+		if (destination.isUnresolved()) {
+			throw new IllegalArgumentException("Not a resolved address: " + destination);
 		}
 		return unpooledBootstrap()
 						.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, connectTimeoutMillis)
-						.connect(socketAddr);
+						.connect(destination);
 	}
 
 	private Bootstrap unpooledBootstrap() {

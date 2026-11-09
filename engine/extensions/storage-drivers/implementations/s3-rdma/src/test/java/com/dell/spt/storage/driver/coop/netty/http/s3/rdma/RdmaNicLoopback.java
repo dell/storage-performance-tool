@@ -448,8 +448,8 @@ final class RdmaNicLoopback implements AutoCloseable {
 			try {
 				requests.add(request);
 				if (request.isObjectRequest() && (failObjectRequest.test(objectRequestCount.incrementAndGet())
-								|| failParts && "PUT".equals(request.method()) && request.query() != null
-												&& request.query().contains("partNumber="))) {
+								|| (failParts && "PUT".equals(request.method()) && request.query() != null
+												&& request.query().contains("partNumber=")))) {
 					exchange.sendResponseHeaders(503, -1);
 					return;
 				}

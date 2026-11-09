@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -65,6 +66,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.akurilov.confuse.Config;
 import io.netty.channel.epoll.Epoll;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -76,12 +78,14 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.function.Executable;
 
 /**
  * Workload canaries of the NIC-set route (item 19, K2): each workload that ticket 03's matrix
@@ -242,76 +246,6 @@ final class S3NicSetWorkloadTest {
 		// Initiations and completions carry no payload; the failed completion fails; the abort is not counted.
 		final var rows = stoppedRows(run.driver(), run.driver());
 		assertEquals(List.of(14L, 13L, 1L, 0L, 0L, 10L * ITEM_SIZE), totals(rows), rows::toString);
-	}
-
-	/**
-	 * Every part fails and NIC 1's endpoint refuses connections. The abort after a part runs out of
-	 * retries goes out on the kernel route, so it reaches the target whichever NIC is dead (D87),
-	 * and the upload is not left open there.
-	 */
-	@Test
-	void anAbortAfterAPartRunsOutOfRetriesTakesTheKernelRoutePastADeadNic() throws Exception {
-		final var endpoints = stub.listeners(2);
-		final var run = started(endpoints, nics(2), 2, false);
-		stub.stop(1);
-		stub.failParts = true;
-
-		// One part, so the upload's result is the last one.
-		final var upload = multipart("dead-nic", 1);
-		assertTrue(run.driver().put(upload));
-		assertNotEquals(SUCC, awaitUpload(run, upload).status());
-
-		final var aborts = stub.requests().stream().filter(S3NicSetWorkloadTest::isAbort).toList();
-		assertEquals(1, aborts.size(), () -> "requests: " + stub.requests());
-		final var abort = aborts.get(0);
-		assertEquals(KERNEL_SOURCE, abort.source(), "the abort takes the kernel route");
-		assertEquals(0, abort.listener(), "to the first endpoint");
-		assertEquals(endpoints.get(0), abort.host());
-		assertEquals("/bucket/dead-nic", abort.path());
-		assertEquals(0, stub.openUploads(), "the target has no open upload");
-		assertTrue(stub.objectRequests().stream().filter(request -> !isAbort(request))
-						.noneMatch(request -> KERNEL_SOURCE.equals(request.source())), "only the abort took the kernel route");
-		assertReleased(run);
-	}
-
-	/**
-	 * The abort's kernel route refuses it: the first endpoint stopped once the upload began. The
-	 * upload fails with {@code FAIL_IO}, nothing is sent, and the abort gives its permit back.
-	 */
-	@Test
-	void anAbortWhoseKernelRouteRefusesFailsTheUploadAndGivesBackItsPermit() throws Exception {
-		final var endpoints = stub.listeners(2);
-		final var run = started(endpoints, nics(2), 1, false);
-		// Object request 1 starts the upload; the first part's request stops endpoint 0 and fails.
-		stub.failParts = true;
-		stub.failObjectRequest = n -> {
-			if (n == 2) {
-				final var stopper = new Thread(() -> stub.stop(0));
-				stopper.start();
-				try {
-					stopper.join();
-				} catch (final InterruptedException e) {
-					Thread.currentThread().interrupt();
-				}
-			}
-			return false;
-		};
-
-		final var upload = multipart("refused", 1);
-		assertTrue(run.driver().put(upload));
-		assertEquals(Operation.Status.FAIL_IO, awaitUpload(run, upload).status());
-
-		assertTrue(stub.requests().stream().noneMatch(S3NicSetWorkloadTest::isAbort), () -> "requests: " + stub.requests());
-		assertEquals(1, stub.openUploads(), "the upload stays open");
-		assertReleased(run);
-		// The one permit came back: the next request goes out, on NIC 1, whose endpoint still answers.
-		stub.failParts = false;
-		stub.failObjectRequest = n -> false;
-		Operation<?> result = null;
-		for (var attempt = 0; attempt < 4 && (result == null || result.status() != SUCC); attempt++) {
-			result = run.execute(dataOp(OpType.READ, "later"));
-		}
-		assertEquals(SUCC, result.status(), "a read after the abort");
 	}
 
 	/**
@@ -728,6 +662,132 @@ final class S3NicSetWorkloadTest {
 	 * type and concurrency limit, such as {@code CREATE-2}. A step keeps one terminal entry, of the
 	 * context that ended last, so the counts are taken as each context unregisters.
 	 */
+	/**
+	 * Every part fails and NIC 1's endpoint refuses connections. The abort after a part runs out of
+	 * retries goes out on the kernel route, so it reaches the target whichever NIC is dead (D87),
+	 * and the upload is not left open there. It counts on no NIC or Path row.
+	 */
+	@Test
+	void anAbortAfterAPartRunsOutOfRetriesTakesTheKernelRoutePastADeadNic() throws Exception {
+		final var endpoints = stub.listeners(2);
+		final var run = started(endpoints, nics(2), 2, false);
+		stub.stop(1);
+		stub.failParts = true;
+
+		// One part, so the upload's result is the last one.
+		final var upload = multipart("dead-nic", 1);
+		assertTrue(run.driver().put(upload));
+		final var result = awaitUpload(run, upload);
+		assertNotEquals(SUCC, result.status());
+
+		final var aborts = stub.requests().stream().filter(S3NicSetWorkloadTest::isAbort).toList();
+		assertEquals(1, aborts.size(), () -> "requests: " + stub.requests());
+		final var abort = aborts.get(0);
+		assertEquals(KERNEL_SOURCE, abort.source(), "the abort takes the kernel route");
+		assertEquals(0, abort.listener(), "to the first endpoint");
+		assertEquals(endpoints.get(0), abort.host());
+		assertEquals("/bucket/dead-nic", abort.path());
+		assertEquals(endpoints.get(0), result.nodeAddr(), "the upload's last request was the abort");
+		assertEquals(0, stub.openUploads(), "the target has no open upload");
+		final var attempts = stub.objectRequests().stream().filter(request -> !isAbort(request)).toList();
+		assertTrue(attempts.stream().noneMatch(request -> KERNEL_SOURCE.equals(request.source())),
+						"only the abort took the kernel route");
+		assertReleased(run);
+		// NIC 0's rows count each request the stub received but the abort; NIC 1's, the refused attempts.
+		final var rows = stoppedRows(run.driver(), run.driver());
+		assertEquals(attempts.size(), attempts(rows, 0), rows::toString);
+		assertEquals(attempts(rows, 1), rows.rows().stream().filter(row -> onNic(row, 1)).mapToLong(NicPathRows.Row::failed).sum(),
+						rows::toString);
+		assertEquals(attempts(rows, 0) + attempts(rows, 1), totals(rows).get(0), "no row without a NIC: " + rows);
+	}
+
+	/**
+	 * The abort's kernel route refuses it: the first endpoint stopped once the upload began. The
+	 * upload fails with {@code FAIL_IO} at the first endpoint, nothing is sent, the lifecycle record
+	 * names it orphaned, and the abort gives its permit back.
+	 */
+	@Test
+	void anAbortWhoseKernelRouteRefusesFailsTheUploadAndGivesBackItsPermit() throws Exception {
+		final var endpoints = stub.listeners(2);
+		final var storage = storage(endpoints, nics(2), 1);
+		// Metadata mode writes the multipart lifecycle records.
+		storage.val("integrity-mode", "metadata");
+		final var driver = NicSetLoopback.driver(storage, false);
+		resources.add(driver);
+		final var run = NicSetLoopback.started(driver);
+		// The rotation then starts the upload on NIC 1, so its init went to the second endpoint.
+		assertEquals(SUCC, run.executeAlone(dataOp(OpType.CREATE, "warm-up")).status());
+		// Object request 2 starts the upload; the first part's request stops endpoint 0 and fails.
+		stub.failParts = true;
+		stub.failObjectRequest = n -> {
+			if (n == 3) {
+				onAnotherThread(() -> stub.stop(0));
+			}
+			return false;
+		};
+
+		// A key of its own: the lifecycle file keeps the records of earlier runs in this directory.
+		final var key = "refused-" + System.nanoTime();
+		final var upload = multipart(key, 1);
+		assertTrue(run.driver().put(upload));
+		final var result = awaitUpload(run, upload);
+		assertEquals(Operation.Status.FAIL_IO, result.status());
+
+		final var init = stub.objectRequests().get(1);
+		assertEquals("POST init", phase(init));
+		assertEquals(1, init.listener(), () -> "the init went to the second endpoint: " + init);
+		assertEquals(endpoints.get(0), result.nodeAddr(), "the failed abort names the kernel route's endpoint");
+		assertTrue(stub.requests().stream().noneMatch(S3NicSetWorkloadTest::isAbort), () -> "requests: " + stub.requests());
+		assertEquals(1, stub.openUploads(), "the upload stays open");
+		final var lifecycle = Path.of(FileManager.INSTANCE.logFileName(Loggers.MULTIPART_LIFECYCLE.getName(), "nic-set-test"));
+		waitFor(() -> orphaned(lifecycle, key).size() == 1, "one lifecycle record for the upload");
+		assertTrue(orphaned(lifecycle, key).get(0).contains("abort failed: FAIL_IO"), () -> orphaned(lifecycle, key).toString());
+		assertReleased(run);
+		// The one permit came back: the next request goes out, on NIC 1, whose endpoint still answers.
+		stub.failParts = false;
+		stub.failObjectRequest = n -> false;
+		Operation<?> later = null;
+		for (var attempt = 0; attempt < 4 && (later == null || later.status() != SUCC); attempt++) {
+			later = run.execute(dataOp(OpType.CREATE, "later"));
+		}
+		assertEquals(SUCC, later.status(), "a write after the abort");
+	}
+
+	/**
+	 * The abort's kernel route is silent: the first endpoint stops answering once the upload began,
+	 * and its port drops every connect. The step's stop settles the pending connect at once: its
+	 * permit comes back without waiting for the connect timeout, and nothing reaches the target.
+	 */
+	@Test
+	void aStopSettlesAnAbortWhoseKernelRouteConnectIsPending() throws Exception {
+		final var endpoints = stub.listeners(2);
+		final var run = started(endpoints, nics(2), 2, false);
+		stub.failParts = true;
+		stub.failObjectRequest = n -> {
+			if (n == 2) {
+				onAnotherThread(() -> resources.add(stub.blackhole(0)));
+			}
+			return false;
+		};
+
+		final var upload = multipart("pending", 1);
+		assertTrue(run.driver().put(upload));
+		waitFor(() -> run.driver().kernelRouteAbortsPending() == 1, "the abort's connect is pending");
+		assertEquals(1, run.driver().activeOpCount(), "the abort holds its permit");
+		// The init's and the part attempts' results are out; the upload's own would follow the abort.
+		while (run.results().poll() != null) {
+			// drained
+		}
+
+		run.driver().closeAdmission();
+
+		assertEquals(0, run.driver().kernelRouteAbortsPending(), "the stop settled the connect");
+		assertEquals(0, run.driver().activeOpCount(), "its permit came back before the connect timeout");
+		assertTrue(stub.requests().stream().noneMatch(S3NicSetWorkloadTest::isAbort), () -> "requests: " + stub.requests());
+		assertEquals(1, stub.openUploads(), "nothing aborted the upload");
+		assertNull(run.results().poll(300), "queue recovery owns the upload, which publishes no result");
+	}
+
 	private static Map<String, List<Long>> runScenario(final List<String> endpoints, final NicSetLoopback.Factory factory,
 					final String scenario) throws Exception {
 		return runScenario(endpoints, factory, "nic-set-scenario-" + System.nanoTime(), scenario);
@@ -950,6 +1010,48 @@ final class S3NicSetWorkloadTest {
 						"released: " + pool.state() + ", counts " + counts(pool));
 		for (final var nic : pool.state()) {
 			assertTrue(nic.open() <= nic.openLimit(), nic::toString);
+		}
+	}
+
+	/** The lifecycle records in {@code file} that name the upload of {@code key} orphaned. */
+	private static List<String> orphaned(final Path file, final String key) {
+		try {
+			return Files.exists(file)
+							? Files.readAllLines(file).stream().filter(line -> line.contains("," + key + ",") && line.contains("failed_orphaned"))
+											.toList()
+							: List.of();
+		} catch (final IOException e) {
+			throw new UncheckedIOException(e);
+		}
+	}
+
+	/** The attempts on NIC {@code nic}'s rows, its own and its Paths'. */
+	private static long attempts(final NicPathRows rows, final int nic) {
+		return rows.rows().stream().filter(row -> onNic(row, nic)).mapToLong(NicPathRows.Row::attempts).sum();
+	}
+
+	private static boolean onNic(final NicPathRows.Row row, final int nic) {
+		return row.nic() != null && row.nic().iface().equals(nics(2).get(nic));
+	}
+
+	/** Runs {@code action} on a thread of its own and waits for it, as the stub's handler may not stop its server. */
+	private static void onAnotherThread(final Executable action) {
+		final var failure = new AtomicReference<Throwable>();
+		final var thread = new Thread(() -> {
+			try {
+				action.execute();
+			} catch (final Throwable e) {
+				failure.set(e);
+			}
+		});
+		thread.start();
+		try {
+			thread.join();
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
+		}
+		if (failure.get() != null) {
+			throw new IllegalStateException(failure.get());
 		}
 	}
 

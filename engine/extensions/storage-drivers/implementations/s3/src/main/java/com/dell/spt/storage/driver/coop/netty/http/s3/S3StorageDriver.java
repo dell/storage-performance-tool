@@ -73,6 +73,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.ConnectException;
+import java.net.InetSocketAddress;
 import java.net.URISyntaxException;
 import java.net.URLDecoder;
 import java.nio.ByteBuffer;
@@ -86,9 +87,11 @@ import java.util.Collections;
 import java.util.Set;
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -334,6 +337,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	private final Set<CompletableFuture<Void>> multipartCleanupTasks = ConcurrentHashMap.newKeySet();
 	// One WARN for a multipart abort the kernel route could not connect; the rest go to DEBUG.
 	private final AtomicBoolean kernelRouteAbortWarned = new AtomicBoolean();
+	private final KernelRouteAborts<KernelRouteAbort> kernelRouteAborts = new KernelRouteAborts<>();
 	// Host of driver-built helper requests (bucket setup, listing, verification, abort).
 	private String helperAuthority;
 
@@ -2042,38 +2046,86 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	/**
 	 * Sends a NIC-set driver's multipart abort over the kernel route, as the abort after a failed
-	 * completion goes (D87): a connection of its own on the base event-loop group to the first
-	 * endpoint, started without blocking the dispatch task, so a dead NIC cannot leave the upload
-	 * open. It takes no NIC and counts on no Path row. The caller holds the operation's concurrency
-	 * permit, and its {@code releaseTransport} closes a connection with no Path and gives the permit
-	 * back, so the abort completes as any request does.
+	 * completion goes (D87): a connection of its own on the base event-loop group to {@code
+	 * destination}, the address the step resolved for the first endpoint, started without blocking
+	 * the dispatch task, so a dead NIC cannot leave the upload open. It takes no NIC and counts on
+	 * no Path row. The caller holds the operation's concurrency permit, and its {@code
+	 * releaseTransport} closes a connection with no Path and gives the permit back, so the abort
+	 * completes as any request does.
 	 *
 	 * <p>Custody passes at the write, as for an attempt on a NIC: after a stop, or for a stale
 	 * circulation, the connection closes, nothing is written and queue recovery owns the operation.
-	 * A connect that fails fails the operation with {@code FAIL_IO} and records the upload as
-	 * orphaned.
+	 * {@link #closeKernelRoute} settles a connect still pending at the stop the same way. A connect
+	 * that fails, or a {@code null} destination, fails the operation with {@code FAIL_IO} and
+	 * records the upload as orphaned.
 	 */
-	protected final void submitOnKernelRoute(
-					final O op, final DispatchToken<O> token, final int connectTimeoutMillis) {
+	protected final void submitOnKernelRoute(final O op, final DispatchToken<O> token,
+					final InetSocketAddress destination, final int connectTimeoutMillis) {
+		final var abort = new KernelRouteAbort(op, token);
+		if (!kernelRouteAborts.register(abort)) {
+			// Stopped: nothing starts, and queue recovery owns the operation.
+			concurrencyThrottle.release();
+			signalDispatchCapacityAvailable();
+			return;
+		}
+		if (destination == null) {
+			kernelRouteFailed(abort, new ConnectException("No address was resolved for " + storageNodeAddrs[0]));
+			return;
+		}
 		final ChannelFuture connect;
 		try {
-			connect = connectUnpooled(storageNodeAddrs[0], storageNodePort, connectTimeoutMillis);
+			connect = connectUnpooled(destination, connectTimeoutMillis);
 		} catch (final RuntimeException e) {
-			kernelRouteFailed(op, token, e);
+			kernelRouteFailed(abort, e);
 			return;
+		}
+		abort.connect = connect;
+		if (abort.settled()) {
+			// A stop settled it before it saw this connect.
+			final var unusedClose = connect.channel().close();
 		}
 		connect.addListener((ChannelFutureListener) future -> {
 			if (future.isSuccess()) {
-				kernelRouteConnected(op, token, future.channel());
+				kernelRouteConnected(abort, future.channel());
 			} else {
-				kernelRouteFailed(op, token, future.cause());
+				kernelRouteFailed(abort, future.cause());
 			}
 		});
 	}
 
+	/**
+	 * Settles every kernel-route abort whose connect is still pending, and starts no more: each
+	 * connection closes, its permit comes back and queue recovery owns its operation. NIC-set
+	 * drivers call it when admission closes and before their I/O shuts down, so no permit waits on
+	 * a connect timeout or on a listener an event loop that terminated would never run.
+	 */
+	protected final void closeKernelRoute() {
+		for (final var abort : kernelRouteAborts.close()) {
+			if (abort.settle()) {
+				final var connect = abort.connect;
+				if (connect != null) {
+					final var unusedClose = connect.channel().close();
+				}
+				concurrencyThrottle.release();
+				signalDispatchCapacityAvailable();
+			}
+		}
+	}
+
+	/** The kernel-route aborts whose connect has not settled. */
+	final int kernelRouteAbortsPending() {
+		return kernelRouteAborts.pending();
+	}
+
 	/** Runs on the connection's event loop. */
-	private void kernelRouteConnected(final O op, final DispatchToken<O> token, final Channel channel) {
-		if (!withDispatchAdmission(() -> claimCapturedDispatch(op, token))) {
+	private void kernelRouteConnected(final KernelRouteAbort abort, final Channel channel) {
+		if (!abort.settle()) {
+			// The stop settled it first.
+			final var unusedClose = channel.close();
+			return;
+		}
+		final var op = abort.op;
+		if (!withDispatchAdmission(() -> claimCapturedDispatch(op, abort.token))) {
 			final var unusedClose = channel.close();
 			concurrencyThrottle.release();
 			signalDispatchCapacityAvailable();
@@ -2093,22 +2145,33 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 	}
 
-	private void kernelRouteFailed(final O op, final DispatchToken<O> token, final Throwable cause) {
-		final boolean claimed = withDispatchAdmission(() -> claimCapturedDispatch(op, token));
+	private void kernelRouteFailed(final KernelRouteAbort abort, final Throwable cause) {
+		if (!abort.settle()) {
+			// The stop settled it first.
+			return;
+		}
+		final var op = abort.op;
+		final boolean claimed = withDispatchAdmission(() -> claimCapturedDispatch(op, abort.token));
 		concurrencyThrottle.release();
 		signalDispatchCapacityAvailable();
 		if (!claimed) {
 			LogUtil.exception(Level.DEBUG, cause, "{}: multipart abort connect ended after the stop", stepId);
 			return;
 		}
-		final var level = kernelRouteAbortWarned.compareAndSet(false, true) ? Level.WARN : Level.DEBUG;
-		LogUtil.exception(level, cause, "{}: a multipart abort could not connect to {}; the upload stays open"
-						+ " (further failures are logged at DEBUG)", stepId, storageNodeAddrs[0]);
-		final var compositeOp = (CompositeDataOperation) op;
-		emitMultipartLifecycle(compositeOp, "failed_orphaned", true, false,
-						mpuFailure(compositeOp) + "; abort failed: " + Operation.Status.FAIL_IO);
+		op.nodeAddr(helperAuthority);
 		op.status(Operation.Status.FAIL_IO);
-		completeAfterKernelRoute(null, op);
+		try {
+			final var level = kernelRouteAbortWarned.compareAndSet(false, true) ? Level.WARN : Level.DEBUG;
+			LogUtil.exception(level, cause, "{}: a multipart abort could not connect to {}; the upload stays open"
+							+ " (further failures are logged at DEBUG)", stepId, storageNodeAddrs[0]);
+			final var compositeOp = (CompositeDataOperation) op;
+			emitMultipartLifecycle(compositeOp, "failed_orphaned", true, false,
+							mpuFailure(compositeOp) + "; abort failed: " + Operation.Status.FAIL_IO);
+		} catch (final RuntimeException e) {
+			LogUtil.exception(Level.DEBUG, e, "{}: failed to record an orphaned multipart upload", stepId);
+		} finally {
+			completeAfterKernelRoute(null, op);
+		}
 	}
 
 	private void completeAfterKernelRoute(final Channel channel, final O op) {
@@ -2117,6 +2180,79 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		} catch (final Throwable cause) {
 			throwUncheckedIfInterrupted(cause);
 			LogUtil.exception(Level.DEBUG, cause, "Load operation result publication failure");
+		}
+	}
+
+	/** A kernel-route abort from its submit until its connect settles, by its listener or by the stop. */
+	private final class KernelRouteAbort {
+
+		final O op;
+		final DispatchToken<O> token;
+		private final AtomicBoolean settled = new AtomicBoolean();
+		// Written after registration: a stop that finds it null leaves closing the channel to the submit.
+		volatile ChannelFuture connect;
+
+		KernelRouteAbort(final O op, final DispatchToken<O> token) {
+			this.op = op;
+			this.token = token;
+		}
+
+		boolean settled() {
+			return settled.get();
+		}
+
+		/** Whether this call settled it: exactly one of the listener, a failure and the stop does. */
+		boolean settle() {
+			if (!settled.compareAndSet(false, true)) {
+				return false;
+			}
+			kernelRouteAborts.remove(this);
+			return true;
+		}
+	}
+
+	/** The pending kernel-route aborts, closed for good at the stop. */
+	private static final class KernelRouteAborts<A> {
+
+		private final ReentrantLock lock = new ReentrantLock();
+		private final Set<A> pending = new HashSet<>();
+		private boolean closed;
+
+		boolean register(final A abort) {
+			lock.lock();
+			try {
+				return !closed && pending.add(abort);
+			} finally {
+				lock.unlock();
+			}
+		}
+
+		void remove(final A abort) {
+			lock.lock();
+			try {
+				pending.remove(abort);
+			} finally {
+				lock.unlock();
+			}
+		}
+
+		List<A> close() {
+			lock.lock();
+			try {
+				closed = true;
+				return List.copyOf(pending);
+			} finally {
+				lock.unlock();
+			}
+		}
+
+		int pending() {
+			lock.lock();
+			try {
+				return pending.size();
+			} finally {
+				lock.unlock();
+			}
 		}
 	}
 

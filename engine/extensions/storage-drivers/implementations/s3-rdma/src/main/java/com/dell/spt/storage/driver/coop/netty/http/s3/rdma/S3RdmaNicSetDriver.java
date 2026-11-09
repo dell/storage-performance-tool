@@ -411,7 +411,10 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 						"The RDMA preparation lane of NIC " + nic.name + " died: " + cause, cause));
 	}
 
-	/** No connect or preparation starts during the drain, and waiting attempts give back their NIC and permit. */
+	/**
+	 * No connect or preparation starts during the drain, and waiting attempts and pending
+	 * kernel-route aborts give back their NIC and permit.
+	 */
 	@Override
 	protected void onAdmissionClosed() {
 		stopAdmittedWork();
@@ -430,6 +433,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 			open.lanes().forEach(RdmaPreparationLane::cancel);
 		}
 		nicPool.closeAdmission();
+		closeKernelRoute();
 	}
 
 	/**
@@ -680,7 +684,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		}
 		if (abortsMultipartUpload(op)) {
 			// No NIC and no lane: a dead NIC must not keep the upload open (D87).
-			submitOnKernelRoute(op, token, nicSet.connectTimeoutMillis());
+			submitOnKernelRoute(op, token, nicSet.destination(storageNodeAddrs[0]), nicSet.connectTimeoutMillis());
 			return true;
 		}
 		final var admission = nicPool.admission();

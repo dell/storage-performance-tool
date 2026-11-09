@@ -293,6 +293,8 @@ final class S3RdmaNicSetWorkloadTest {
 		assertEquals(0, stub.openUploads(), "the target has no open upload");
 		assertTrue(stub.objectRequests().stream().filter(request -> !isAbort(request))
 						.noneMatch(request -> KERNEL_SOURCE.equals(request.source())), "only the abort took the kernel route");
+		run.awaitIdle();
+		assertEquals(0, run.pool().pendingCount());
 	}
 
 	private static boolean isPart(final Request request) {

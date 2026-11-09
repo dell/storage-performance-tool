@@ -36,11 +36,15 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.BindException;
 import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.StandardSocketOptions;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -98,6 +102,11 @@ final class NicSetLoopback implements AutoCloseable {
 		/** A request on an object key in any bucket; the bucket check and listings are on the bucket itself. */
 		boolean isObjectRequest() {
 			return path.indexOf('/', 1) > 0;
+		}
+
+		/** A multipart upload's part. */
+		boolean isPart() {
+			return "PUT".equals(method) && query != null && query.contains("partNumber=");
 		}
 	}
 
@@ -335,6 +344,69 @@ final class NicSetLoopback implements AutoCloseable {
 		servers.get(index).stop(0);
 	}
 
+	/**
+	 * Stops listener {@code index} and leaves its port silent: a listening socket whose accept queue
+	 * is full, so the kernel drops each new SYN and a connect waits for its timeout. Closing the
+	 * result frees the port.
+	 */
+	AutoCloseable blackhole(final int index) throws IOException, InterruptedException {
+		final var address = servers.get(index).getAddress();
+		servers.get(index).stop(0);
+		final var listener = ServerSocketChannel.open();
+		final List<SocketChannel> queued = new ArrayList<>();
+		final AutoCloseable silence = () -> {
+			for (final var channel : queued) {
+				channel.close();
+			}
+			listener.close();
+		};
+		try {
+			listener.setOption(StandardSocketOptions.SO_REUSEADDR, true);
+			final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+			while (true) {
+				try {
+					// A backlog of 1 queues two connections; the kernel drops the SYNs of any more.
+					listener.bind(address, 1);
+					break;
+				} catch (final BindException e) {
+					// The stopped server closes its socket on its own thread.
+					if (System.nanoTime() > deadline) {
+						throw e;
+					}
+					Thread.sleep(10);
+				}
+			}
+			while (queued.size() < 8) {
+				final var channel = SocketChannel.open();
+				queued.add(channel);
+				channel.configureBlocking(false);
+				if (!channel.connect(address) && !finishesWithin(channel, 200)) {
+					return silence;
+				}
+			}
+			throw new IOException("the accept queue of " + address + " never filled");
+		} catch (final IOException | InterruptedException | RuntimeException e) {
+			try {
+				silence.close();
+			} catch (final Exception closing) {
+				e.addSuppressed(closing);
+			}
+			throw e;
+		}
+	}
+
+	private static boolean finishesWithin(final SocketChannel channel, final long millis)
+					throws IOException, InterruptedException {
+		final var deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+		while (System.nanoTime() < deadline) {
+			if (channel.finishConnect()) {
+				return true;
+			}
+			Thread.sleep(5);
+		}
+		return false;
+	}
+
 	List<Request> requests() {
 		return List.copyOf(requests);
 	}
@@ -407,9 +479,7 @@ final class NicSetLoopback implements AutoCloseable {
 					exchange.close();
 					return;
 				}
-				if (objectRequest > 0 && (failObjectRequest.test(objectRequest)
-								|| failParts && "PUT".equals(request.method()) && request.query() != null
-												&& request.query().contains("partNumber="))) {
+				if (objectRequest > 0 && (failObjectRequest.test(objectRequest) || (failParts && request.isPart()))) {
 					final var error = "error".getBytes(StandardCharsets.US_ASCII);
 					exchange.sendResponseHeaders(503, error.length);
 					exchange.getResponseBody().write(error);
