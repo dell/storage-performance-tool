@@ -15,6 +15,7 @@ import com.github.akurilov.commons.io.Output;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.util.EnumMap;
 import java.util.Map;
@@ -59,6 +60,8 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 	private final Queue<O> recycleQueue = new ConcurrentLinkedQueue<>();
 	private final LongAdder generatedCount = new LongAdder();
 	private volatile boolean itemInputFinished = false;
+	// Set on the task thread when the driver refuses an operation with EOF, read by handleError.
+	private boolean outputClosed = false;
 
 	// Active op types excluding DELETE (for re-roll)
 	private final OpType[] rerollTargets;
@@ -125,6 +128,7 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 
 	@Override
 	protected void doInit() {
+		outputClosed = false;
 		ThreadContext.put("generator", "mixed");
 	}
 
@@ -173,7 +177,17 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 		}
 
 		final O op = builders.get(opType).buildOp(item);
-		if (!opOutput.put(op)) {
+		final boolean accepted;
+		try {
+			accepted = opOutput.put(op);
+		} catch (final Exception e) {
+			// The coop drivers throw EOFException, unchecked, once their admission is closed.
+			if (e instanceof EOFException) {
+				outputClosed = true;
+			}
+			throw e;
+		}
+		if (!accepted) {
 			Thread.yield();
 			return false;
 		}
@@ -187,7 +201,18 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 
 	private boolean dispatchDelete(final I item) throws IOException {
 		final O op = builders.get(OpType.DELETE).buildOp(item);
-		if (!opOutput.put(op)) {
+		final boolean accepted;
+		try {
+			accepted = opOutput.put(op);
+		} catch (final Exception e) {
+			if (e instanceof EOFException) {
+				// The driver refused the item, so it stays in the delete queue.
+				pool.addDeleteItem(item);
+				outputClosed = true;
+			}
+			throw e;
+		}
+		if (!accepted) {
 			// Put item back if driver rejected — avoid item loss
 			pool.addDeleteItem(item);
 			Thread.yield();
@@ -222,6 +247,11 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 
 	@Override
 	protected void handleError(final Exception e) {
+		if (outputClosed && e instanceof EOFException) {
+			// The driver closes its admission when the step stops, as LoadGeneratorImpl expects.
+			Loggers.MSG.debug("MixedLoadGenerator: finish due to the driver's EOF");
+			return;
+		}
 		LogUtil.exception(Level.ERROR, e, "MixedLoadGenerator error in doWork");
 	}
 
