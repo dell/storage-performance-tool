@@ -330,6 +330,45 @@ final class S3NicSetWorkloadTest {
 	}
 
 	/**
+	 * D87 for range reads: a NIC whose ranges get no response takes trials only, each ending as its
+	 * flight's connection is released, until one gets a response.
+	 */
+	@Test
+	void aNicWhoseRangeReadsGetNoResponseTakesTrialsUntilOneGetsAResponse() throws Exception {
+		final var endpoints = stub.listeners(2);
+		stub.absentObjectSize = OBJECT_SIZE;
+		final var run = rangeRun(endpoints, new RangeReadPolicy(3, 2L, 1));
+		run.read("before");
+		assertEquals(SUCC, run.outcome().status());
+		final var admission = run.pool().admission();
+		stub.dropOnListener = listener -> listener == 1;
+		for (var i = 0; !admission.isFailing(1); i++) {
+			assertTrue(i < 20, "NIC 1 never failed");
+			run.read("dropped-" + i);
+			run.outcome();
+		}
+		// Two trials that get no response: the first one's end lets the second start.
+		final long failedWith = requestsOn(1);
+		final var trials = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+		for (var i = 0; requestsOn(1) < failedWith + 2; i++) {
+			assertTrue(System.nanoTime() < trials, "no second trial range read on the failing NIC");
+			run.read("trial-" + i);
+			run.outcome();
+			Thread.sleep(10);
+		}
+		assertTrue(admission.isFailing(1));
+		stub.dropOnListener = listener -> false;
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+		for (var i = 0; admission.isFailing(1); i++) {
+			assertTrue(System.nanoTime() < deadline, "no trial range read on the recovered NIC got a response");
+			run.read("recovering-" + i);
+			assertEquals(SUCC, run.outcome().status());
+			Thread.sleep(10);
+		}
+		assertFalse(admission.trialRunning(1));
+	}
+
+	/**
 	 * D87: a NIC whose connections open but whose requests get no response is failing too, so it
 	 * takes only paced trials; once a trial gets a response, it carries its full share again.
 	 */
@@ -385,6 +424,52 @@ final class S3NicSetWorkloadTest {
 		for (var i = 0; i < 4; i++) {
 			assertEquals(SUCC, run.results().await().status());
 		}
+	}
+
+	/**
+	 * D87: with the working NIC full of held requests, so nothing completes, and a queue no put
+	 * signals any more, only the admission's re-check wakes the dispatch task when the failing NIC's
+	 * trial becomes due: well before the held requests' 2 s timeout would.
+	 */
+	@Test
+	void aFailingNicsTrialStartsWhileTheWorkingNicIsHeldAndNothingCompletes() throws Exception {
+		final var endpoints = stub.listeners(2);
+		final var run = started(endpoints, nics(2), 4, false);
+		assertEquals(SUCC, run.execute(dataOp(OpType.CREATE, "before")).status());
+		final var admission = run.pool().admission();
+		final long earlier = requestsOn(1);
+		stub.dropOnListener = listener -> listener == 1;
+		stub.hold();
+		final int writes = 8;
+		for (var i = 0; i < writes; i++) {
+			assertTrue(run.driver().put(dataOp(OpType.CREATE, "held-" + i)));
+		}
+		waitFor(() -> admission.isFailing(1) && admission.count(0) == admission.limit(0) && !admission.trialRunning(1),
+						"NIC 0 is full of held writes and NIC 1 failed");
+		final long failedFirst = requestsOn(1) - earlier;
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+		while (requestsOn(1) - earlier == failedFirst) {
+			assertTrue(System.nanoTime() < deadline, "no trial on NIC 1 within 1 s while NIC 0 is held and nothing completes");
+			Thread.sleep(10);
+		}
+		assertEquals(admission.limit(0), admission.count(0), "NIC 0 still holds its share");
+
+		stub.release();
+		var failed = 0;
+		for (var i = 0; i < writes; i++) {
+			final var result = run.results().await();
+			if (endpoints.get(1).equals(result.nodeAddr())) {
+				assertEquals(Operation.Status.FAIL_IO, result.status(), result::toString);
+				failed++;
+			} else {
+				assertEquals(SUCC, result.status(), result::toString);
+			}
+		}
+		assertEquals(requestsOn(1) - earlier, failed, "each request on the failing NIC failed its write, and only those");
+	}
+
+	private long requestsOn(final int listener) {
+		return stub.objectRequests().stream().filter(request -> request.listener() == listener).count();
 	}
 
 	/**

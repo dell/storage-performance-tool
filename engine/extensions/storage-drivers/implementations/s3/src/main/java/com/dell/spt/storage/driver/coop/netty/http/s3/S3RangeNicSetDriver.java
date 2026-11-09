@@ -21,6 +21,7 @@ import com.github.akurilov.confuse.Config;
 import com.github.akurilov.netty.connection.pool.NonBlockingConnPool;
 import io.netty.channel.Channel;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 
 /**
  * Partial-object Reads with a NIC set. Every range attempt, retries included, takes its
@@ -44,6 +45,8 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver implements NicPathC
 	private NicSetConnectionPool nicPool;
 	// Assigned at start before the dispatch task and the NICs' event loops run.
 	private NicPathCounters counters;
+	// Per NIC, the flight attempt that carries its trial (D87); assigned with the counters.
+	private AtomicReferenceArray<RangeReadAttempt> trialAttempts;
 
 	static S3RangeNicSetDriver create(final String stepId, final DataInput input, final Config storage, final int batchSize,
 					final RangeReadPolicy policy, final NicSetSettings settings) throws InterruptedException {
@@ -76,6 +79,7 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver implements NicPathC
 		try {
 			nicSet.open(nicPool, List.of(storageNodeAddrs), concurrencyLimit, this::createIoGroup, this::shutdownExtraIoGroups);
 			counters = nicSet.counters();
+			trialAttempts = new AtomicReferenceArray<>(nicPool.nicCount());
 			super.doStart();
 			nicSet.started(nicPool, concurrencyLimit);
 		} catch (final InterruptedException e) {
@@ -142,7 +146,9 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver implements NicPathC
 				}
 				}
 			}
-			nicPool.admission().attemptEnded(nic);
+			// A trial's attempt is looked for only while a trial of the NIC runs.
+			final boolean trial = nicPool.admission().trialRunning(nic) && trialAttempts.compareAndSet(nic, attempt, null);
+			nicPool.admission().attemptEnded(nic, trial);
 		}
 		final var row = counters.path(channel);
 		if (row == null) {
@@ -173,9 +179,10 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver implements NicPathC
 			concurrencyThrottle.release();
 			return false;
 		}
+		final boolean trial = admission.tookTrial();
 		final var attempt = ranges.capture(op);
 		if (attempt == null) {
-			admission.cancelled(nic);
+			admission.cancelled(nic, trial);
 			concurrencyThrottle.release();
 			return true;
 		}
@@ -185,36 +192,43 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver implements NicPathC
 				@Override
 				public void complete(final Channel channel, final Throwable failure) {
 					if (failure == null)
-						start(op, attempt, nic, channel);
+						start(op, attempt, nic, trial, channel);
 					else
-						failSetup(op, attempt, nic, -1, failure);
+						failSetup(op, attempt, nic, trial, -1, failure);
 				}
 
 				@Override
 				public void failed(final int path, final Throwable failure) {
-					failSetup(op, attempt, nic, path, failure);
+					failSetup(op, attempt, nic, trial, path, failure);
 				}
 			});
 		} catch (final RuntimeException e) {
-			failSetup(op, attempt, nic, -1, e);
+			failSetup(op, attempt, nic, trial, -1, e);
 		}
 		return true;
 	}
 
-	/** Runs on the channel's event loop, as the default route's handoff task does. */
+	/**
+	 * Runs on the channel's event loop, as the default route's handoff task does. A {@code trial} is
+	 * recorded for the flight, whose release ends it.
+	 */
 	private void start(final RangeReadOperation<DataItem> op, final RangeReadAttempt attempt, final int nic,
-					final Channel channel) {
+					final boolean trial, final Channel channel) {
 		final var admission = nicPool.admission();
 		if (admission.waitEnded(nic))
 			signalDispatchCapacityAvailable();
 		final var flight = new Flight(op, op.circulation(), attempt, channel);
 		final var row = counters.path(channel);
 		row.attempted();
+		if (trial) {
+			// Before the flight is visible, so its release always finds the trial.
+			trialAttempts.set(nic, attempt);
+		}
 		if (flights.putIfAbsent(attempt, flight) != null) {
 			row.interrupted();
 			final var unusedClose = channel.close();
 			nicPool.release(channel);
-			admission.attemptEnded(nic);
+			admission.attemptEnded(nic, trial && trialAttempts.compareAndSet(nic, attempt, null));
 			concurrencyThrottle.release();
 			signalDispatchCapacityAvailable();
 			return;
@@ -230,7 +244,7 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver implements NicPathC
 	 * was ({@code path} -1).
 	 */
 	private void failSetup(final RangeReadOperation<DataItem> op, final RangeReadAttempt attempt, final int nic,
-					final int path, final Throwable failure) {
+					final boolean trial, final int path, final Throwable failure) {
 		// False after a stop, or when shutdown recovery already settled the attempt.
 		final boolean counted = withDispatchAdmission(() -> attempt.transportFailure(Operation.Status.FAIL_IO));
 		final var row = counters.path(nic, path);
@@ -247,7 +261,7 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver implements NicPathC
 			admission.failed(nic);
 		}
 		admission.waitEnded(nic);
-		admission.attemptEnded(nic);
+		admission.attemptEnded(nic, trial);
 		concurrencyThrottle.release();
 		signalDispatchCapacityAvailable();
 		if (counted) {

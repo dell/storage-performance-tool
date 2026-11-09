@@ -243,6 +243,39 @@ class NicSetConnectionPoolTest {
 		assertEquals(4, path.connectsStarted());
 	}
 
+	/**
+	 * F8: a trial connect that throws before it starts ends the trial, so the Path does not reject
+	 * every connect after it.
+	 */
+	@Test
+	void aTrialConnectThatCannotStartLetsTheNextOneTry() throws Exception {
+		final var a = listener();
+		final var throwing = new AtomicInteger();
+		final NicBinding binding = (connecting, iface, address) -> {
+			if (throwing.getAndUpdate(left -> left > 0 ? left - 1 : 0) > 0) {
+				throw new IllegalStateException("no socket for the trial");
+			}
+			NicBinding.SOURCE_ADDRESS.apply(connecting, iface, address);
+		};
+		final var pool = new NicSetConnectionPool(template(), handler, now::get);
+		pool.open(List.of(new OpenNic(nic("lo-a", NIC_A, List.of(path("s3-a.example:9000", a))), group("lo-a"))), binding,
+						CONNECT_TIMEOUT_MILLIS, 0);
+		resources.add(pool);
+		final var path = pool.pools().get(0).paths().get(0);
+		a.stopListening();
+		assertFalse(failure(acquire(pool)) instanceof PathBackoffException, "refused");
+		assertTrue(path.inBackoff());
+
+		advanceMillis(100);
+		throwing.set(1);
+		final var thrown = failure(acquire(pool));
+		assertInstanceOf(IllegalStateException.class, thrown, "the trial could not start: " + thrown);
+		assertTrue(path.inBackoff(), "it proves nothing about the route");
+		final var next = failure(acquire(pool));
+		assertFalse(next instanceof PathBackoffException, "the next connect is the trial: " + next);
+		assertEquals(2, path.connectsStarted(), "the refused connect and the next trial; the one that threw never started");
+	}
+
 	@Test
 	void aPoolServesAFailingNicOnlyWithAnIdleConnectionOrAConnectItWouldStart() throws Exception {
 		final var a = listener();

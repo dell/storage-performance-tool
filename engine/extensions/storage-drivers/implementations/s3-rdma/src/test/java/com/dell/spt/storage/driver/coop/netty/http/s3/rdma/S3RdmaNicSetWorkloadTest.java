@@ -56,6 +56,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
@@ -484,6 +485,45 @@ final class S3RdmaNicSetWorkloadTest {
 		assertTrue(dead >= 1 && dead <= 16, () -> "attempts on the dead NIC: " + dead + ", rows: " + rows);
 		final int failed = writes - succeeded;
 		assertTrue(failed <= dead, () -> "failed writes: " + failed + ", rows: " + rows);
+	}
+
+	/**
+	 * D87: a NIC whose requests get no response takes trials only; the trial that gets a response
+	 * gives it its share again. Each trial's end, on its connection's release, lets the next start.
+	 */
+	@Test
+	void aNicWhoseRequestsGetNoResponseTakesTrialsUntilOneGetsAResponse() throws Exception {
+		final var endpoints = stub.listeners(2);
+		final var run = started(endpoints, 2, 4);
+		assertEquals(Operation.Status.SUCC, run.executeAlone(op(OpType.CREATE, "before")).status());
+		final var admission = run.pool().admission();
+		stub.dropOnListener = listener -> listener == 1;
+		for (var i = 0; !admission.isFailing(1); i++) {
+			assertTrue(i < 20, "NIC 1 never failed");
+			run.executeAlone(op(OpType.CREATE, "dropped-" + i));
+		}
+		// Two trials that get no response: the first one's end lets the second start.
+		final long failedWith = requestsOn(1);
+		final var trials = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+		for (var i = 0; requestsOn(1) < failedWith + 2; i++) {
+			assertTrue(System.nanoTime() < trials, "no second trial on the failing NIC");
+			run.executeAlone(op(OpType.CREATE, "trial-" + i));
+			Thread.sleep(10);
+		}
+		assertTrue(admission.isFailing(1));
+		stub.dropOnListener = listener -> false;
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+		for (var i = 0; admission.isFailing(1); i++) {
+			assertTrue(System.nanoTime() < deadline, "no trial on the recovered NIC got a response");
+			assertEquals(Operation.Status.SUCC, run.executeAlone(op(OpType.CREATE, "recovering-" + i)).status());
+			Thread.sleep(10);
+		}
+		run.awaitIdle();
+		assertFalse(admission.trialRunning(1));
+	}
+
+	private long requestsOn(final int listener) {
+		return stub.objectRequests().stream().filter(request -> request.listener() == listener).count();
 	}
 
 	private Run started(final List<String> endpoints, final int nics, final int concurrency) throws Exception {

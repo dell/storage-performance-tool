@@ -133,6 +133,8 @@ final class RdmaNicLoopback implements AutoCloseable {
 	volatile Runnable beforeConnect = () -> {};
 	/** Makes the stub close each connection after its response, so the next request connects. */
 	volatile boolean closeConnections;
+	/** Which listeners drop every object request without answering: the connection closes. */
+	volatile IntPredicate dropOnListener = listener -> false;
 	private final NicSetSupport.Environment environment = new NicSetSupport.Environment(
 					() -> INVENTORY, host -> Ipv4.parse(host), (connecting, iface, address) -> {
 						beforeConnect.run();
@@ -461,6 +463,10 @@ final class RdmaNicLoopback implements AutoCloseable {
 				requests.add(request);
 				if (request.isObjectRequest() && failObjectRequest.test(objectRequestCount.incrementAndGet())) {
 					exchange.sendResponseHeaders(503, -1);
+					return;
+				}
+				if (request.isObjectRequest() && dropOnListener.test(listener)) {
+					exchange.close();
 					return;
 				}
 				final var currentGate = gate;

@@ -663,9 +663,12 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 	@Override
 	protected void releaseTransport(final Channel channel) {
 		final int nic = NicSetConnectionPool.nicIndex(channel);
+		final var admission = nicPool.admission();
+		// Before the pool can hand the channel on; a trial mark is looked for only while a trial runs.
+		final boolean trial = nic >= 0 && admission.trialRunning(nic) && NicSetConnectionPool.endsTrial(channel);
 		nicPool.release(channel);
 		if (nic >= 0) {
-			nicPool.admission().attemptEnded(nic);
+			admission.attemptEnded(nic, trial);
 		}
 		concurrencyThrottle.release();
 		signalDispatchCapacityAvailable();
@@ -697,8 +700,9 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 			concurrencyThrottle.release();
 			return false;
 		}
+		final boolean trial = admission.tookTrial();
 		final var open = rdma;
-		final var attempt = new Attempt(op, token, nicIndex, open);
+		final var attempt = new Attempt(op, token, nicIndex, trial, open);
 		final var selection = selectPath(op, open != null);
 		if (selection != PathSelection.RDMA) {
 			return attempt.sendHttp(op, httpCounter(selection, statsOf(open, nicIndex)));
@@ -710,7 +714,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 			return true;
 		}
 		// The lane has stopped: the operation stays with the dispatch task, for queue recovery.
-		admission.cancelled(nicIndex);
+		admission.cancelled(nicIndex, trial);
 		concurrencyThrottle.release();
 		return false;
 	}
@@ -784,13 +788,15 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 	 * One admitted attempt, from its NIC's permit to its request. An attempt the lane prepared owns its
 	 * context until the claim; before then, nothing outside it can reach the buffer. It holds a permit
 	 * and its NIC's place until the pool reports its connection or its failure, and the pool reports
-	 * once; an attempt that never asked the pool gives both back itself.
+	 * once; an attempt that never asked the pool gives both back itself. A trial (D87) marks its
+	 * channel, whose release ends it, or ends with the attempt when no channel carries it.
 	 */
 	private final class Attempt implements RdmaPreparationLane.Task, NicSetConnectionPool.Acquisition, AttemptRoute<O> {
 
 		private final O op;
 		private final DispatchToken<O> token;
 		private final int nicIndex;
+		private final boolean trial;
 		/** {@code null} when RDMA is disabled. */
 		private final RdmaNic nic;
 		private final RdmaPreparationLane lane;
@@ -799,10 +805,11 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		// Lane-confined until the attempt asks the pool, which then owns its ending.
 		private boolean askedPool;
 
-		Attempt(final O op, final DispatchToken<O> token, final int nicIndex, final OpenRdma open) {
+		Attempt(final O op, final DispatchToken<O> token, final int nicIndex, final boolean trial, final OpenRdma open) {
 			this.op = op;
 			this.token = token;
 			this.nicIndex = nicIndex;
+			this.trial = trial;
 			this.nic = open == null ? null : open.nics().get(nicIndex);
 			this.lane = open == null ? null : open.lanes().get(nicIndex);
 		}
@@ -825,7 +832,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 			final var row = counters.path(nicIndex, -1);
 			row.attempted();
 			row.interrupted();
-			nicPool.admission().cancelled(nicIndex);
+			nicPool.admission().cancelled(nicIndex, trial);
 			concurrencyThrottle.release();
 			signalDispatchCapacityAvailable();
 		}
@@ -868,7 +875,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 			final var row = counters.path(nicIndex, -1);
 			row.attempted();
 			final boolean claimed = withDispatchAdmission(this::claim);
-			nicPool.admission().cancelled(nicIndex);
+			nicPool.admission().cancelled(nicIndex, trial);
 			concurrencyThrottle.release();
 			signalDispatchCapacityAvailable();
 			if (!claimed) {
@@ -924,7 +931,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 				admission.failed(nicIndex);
 			}
 			admission.waitEnded(nicIndex);
-			admission.attemptEnded(nicIndex);
+			admission.attemptEnded(nicIndex, trial);
 			concurrencyThrottle.release();
 			signalDispatchCapacityAvailable();
 			if (!claimed) {
@@ -957,7 +964,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 					releaseContext(context, true);
 				}
 				nicPool.release(channel);
-				admission.attemptEnded(nicIndex);
+				admission.attemptEnded(nicIndex, trial);
 				concurrencyThrottle.release();
 				signalDispatchCapacityAvailable();
 				return;
@@ -968,6 +975,9 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 				sentCounter.increment();
 			}
 			try {
+				if (trial) {
+					NicSetConnectionPool.markTrial(channel);
+				}
 				if (context != null) {
 					storeContext(op, context);
 				}

@@ -225,9 +225,12 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 	@Override
 	protected void releaseTransport(final Channel channel) {
 		final int nic = NicSetConnectionPool.nicIndex(channel);
+		final var admission = nicPool.admission();
+		// Before the pool can hand the channel on; a trial mark is looked for only while a trial runs.
+		final boolean trial = nic >= 0 && admission.trialRunning(nic) && NicSetConnectionPool.endsTrial(channel);
 		nicPool.release(channel);
 		if (nic >= 0) {
-			nicPool.admission().attemptEnded(nic);
+			admission.attemptEnded(nic, trial);
 		}
 		concurrencyThrottle.release();
 		signalDispatchCapacityAvailable();
@@ -259,25 +262,26 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 			concurrencyThrottle.release();
 			return false;
 		}
+		final boolean trial = admission.tookTrial();
 		try {
 			// The pool reports exactly once, even when the event loops terminate first (close settles it).
 			nicPool.acquire(nic, new NicSetConnectionPool.Acquisition() {
 				@Override
 				public void complete(final Channel channel, final Throwable failure) {
 					if (failure == null) {
-						onAcquired(op, token, nic, channel);
+						onAcquired(op, token, nic, trial, channel);
 					} else {
-						failSetup(op, token, nic, -1, failure);
+						failSetup(op, token, nic, trial, -1, failure);
 					}
 				}
 
 				@Override
 				public void failed(final int path, final Throwable failure) {
-					failSetup(op, token, nic, path, failure);
+					failSetup(op, token, nic, trial, path, failure);
 				}
 			});
 		} catch (final RuntimeException e) {
-			failSetup(op, token, nic, -1, e);
+			failSetup(op, token, nic, trial, -1, e);
 		}
 		return true;
 	}
@@ -303,8 +307,9 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 						|| (op instanceof CompositeDataOperation && OpType.READ.equals(op.type()));
 	}
 
-	/** Runs on the channel's event loop. */
-	private void onAcquired(final O op, final DispatchToken<O> token, final int nic, final Channel channel) {
+	/** Runs on the channel's event loop. A {@code trial} marks the channel, whose release ends it. */
+	private void onAcquired(final O op, final DispatchToken<O> token, final int nic, final boolean trial,
+					final Channel channel) {
 		final var admission = nicPool.admission();
 		if (admission.waitEnded(nic)) {
 			signalDispatchCapacityAvailable();
@@ -315,12 +320,15 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 			row.attempted();
 			row.interrupted();
 			nicPool.release(channel);
-			admission.attemptEnded(nic);
+			admission.attemptEnded(nic, trial);
 			concurrencyThrottle.release();
 			signalDispatchCapacityAvailable();
 			return;
 		}
 		try {
+			if (trial) {
+				NicSetConnectionPool.markTrial(channel);
+			}
 			channel.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
 			channel.attr(ATTR_KEY_OPERATION).set(op);
 			op.nodeAddr(channel.attr(ATTR_KEY_NODE).get());
@@ -346,7 +354,8 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 	 * The attempt counts on the Path chosen for it, or on its NIC when none was ({@code path} -1):
 	 * failed when the operation ended so, interrupted when nothing ended it.
 	 */
-	private void failSetup(final O op, final DispatchToken<O> token, final int nic, final int path, final Throwable cause) {
+	private void failSetup(final O op, final DispatchToken<O> token, final int nic, final boolean trial, final int path,
+					final Throwable cause) {
 		final var row = counters.path(nic, path);
 		row.attempted();
 		final boolean claimed = withDispatchAdmission(() -> claimCapturedDispatch(op, token));
@@ -357,7 +366,7 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 			admission.failed(nic);
 		}
 		admission.waitEnded(nic);
-		admission.attemptEnded(nic);
+		admission.attemptEnded(nic, trial);
 		concurrencyThrottle.release();
 		signalDispatchCapacityAvailable();
 		if (!claimed) {
