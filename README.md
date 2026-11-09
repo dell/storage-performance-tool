@@ -214,6 +214,8 @@ read data paths; see the [S3-RDMA guide](cli/docs/S3_RDMA.md).
   examples.
 - [Engine Build Information](cli/docs/ENGINE_BUILD_INFO.md) - build identity,
   consistency gates, and result provenance.
+- [Event loops](cli/docs/EVENT_LOOPS.md) - each engine's Netty event loops per
+  step, in results, run metadata, and the run summary.
 - [S3 integrity testing](cli/docs/S3_INTEGRITY.md) - persisted-object write/read
   verification, artifacts, and automation contracts.
 - [Partial-object READs](cli/docs/PARTIAL_READS.md) - fixed or random aligned S3

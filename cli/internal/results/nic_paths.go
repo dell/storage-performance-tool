@@ -75,22 +75,31 @@ func expectedNicFiles(stepID string, nodes []NicNode, participants int, suffix s
 	return out
 }
 
-// readNicNodes returns the run metadata's nicNodes, or nil when the run has none.
-func readNicNodes(dir string) ([]NicNode, error) {
+// RunNodes is what the run metadata says about the run's slices: nicNodes, and the configured
+// hosts in the order the Entry Node was given them.
+type RunNodes struct {
+	NicNodes []NicNode
+	Hosts    []string
+}
+
+// readRunNodes returns the run metadata's nicNodes and configured hosts, or neither when the run
+// has no metadata.
+func readRunNodes(dir string) (RunNodes, error) {
 	data, err := os.ReadFile(filepath.Join(dir, constants.ResultsMetadataFileName)) // #nosec G304 -- path is under the selected results directory
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return RunNodes{}, nil
 		}
-		return nil, err
+		return RunNodes{}, err
 	}
 	var params struct {
-		NicNodes []NicNode `json:"nicNodes"`
+		NicNodes []NicNode       `json:"nicNodes"`
+		Hosts    []RunHostRecord `json:"hosts"`
 	}
 	if err := json.Unmarshal(data, &params); err != nil {
-		return nil, err
+		return RunNodes{}, err
 	}
-	return params.NicNodes, nil
+	return RunNodes{NicNodes: params.NicNodes, Hosts: RunHostNames(params.Hosts)}, nil
 }
 
 // metricsTotalsNodeCount reads the largest NodeCount of a metrics totals CSV, the

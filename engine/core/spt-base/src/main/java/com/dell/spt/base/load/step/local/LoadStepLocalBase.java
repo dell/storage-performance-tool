@@ -8,6 +8,7 @@ import static org.apache.logging.log4j.CloseableThreadContext.put;
 
 import com.dell.spt.base.metrics.range.RangeReadSnapshot;
 import com.dell.spt.base.metrics.range.RangeReadArtifact;
+import com.dell.spt.base.nic.EventLoopsArtifact;
 import com.dell.spt.base.nic.NicPathsArtifact;
 import com.dell.spt.base.nic.NicSetArtifact;
 import com.dell.spt.base.nic.pool.PoolPreparation;
@@ -1046,16 +1047,17 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	}
 
 	/**
-	 * Writes the step's per-path CSV and NIC-set report once, when an expected context has a NIC
-	 * set: after the contexts stopped, or at close for a step whose start failed. A context without
-	 * its rows is named missing in the CSV. A failure to write either file warns; they are evidence,
-	 * not a step outcome.
+	 * Writes the step's event-loop report once, and its per-path CSV and NIC-set report when an
+	 * expected context has a NIC set: after the contexts stopped, or at close for a step whose start
+	 * failed. A context without its rows is named missing in the CSV. A failure to write any of them
+	 * warns; they are evidence, not a step outcome.
 	 */
 	private void publishNicPaths() {
 		if (nicPathsPublished) {
 			return;
 		}
 		nicPathsPublished = true;
+		publishEventLoops();
 		final var paths = new ArrayList<NicPathsArtifact.Context>();
 		final var sets = new ArrayList<NicSetArtifact.Context>();
 		var contextsWithoutNicSet = 0;
@@ -1082,6 +1084,23 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			NicSetArtifact.publish(runId(), loadStepId(), operationLifecycleWorkerId, sets, contextsWithoutNicSet, poolReport);
 		} catch (final RuntimeException e) {
 			LogUtil.exception(Level.WARN, e, "{}: failed to write the NIC set file", loadStepId());
+		}
+	}
+
+	/** Each expected context's driver loops, in context order; contexts that own none are left out. */
+	private void publishEventLoops() {
+		try (final var logContext = put(KEY_STEP_ID, loadStepId())) {
+			final var loops = new ArrayList<EventLoopsArtifact.Context>();
+			for (var i = 0; i < expectedOperationLifecycleContexts.size(); i++) {
+				final var context = expectedOperationLifecycleContexts.get(i);
+				final var contextLoops = context == null ? null : context.eventLoops();
+				if (contextLoops != null) {
+					loops.add(new EventLoopsArtifact.Context(i, contextLoops));
+				}
+			}
+			EventLoopsArtifact.publish(runId(), loadStepId(), operationLifecycleWorkerId, loops);
+		} catch (final RuntimeException e) {
+			LogUtil.exception(Level.WARN, e, "{}: failed to write the event loops file", loadStepId());
 		}
 	}
 

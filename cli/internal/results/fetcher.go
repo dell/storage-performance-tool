@@ -28,7 +28,7 @@ const (
 	fileStatusOK      = "ok"
 )
 
-var integrityNodeSourcePattern = regexp.MustCompile(`^(?:(written|verify-input|verified|integrity\.failures|integrity\.performance|multipart\.lifecycle|operation\.lifecycle|range\.read|nic\.paths|delete\.metrics\.total|delete\.requests|delete\.objects|delete\.verification|items)\.node-[0-9]{3}\.csv|nic\.set\.node-[0-9]{3}\.json)$`)
+var integrityNodeSourcePattern = regexp.MustCompile(`^(?:(written|verify-input|verified|integrity\.failures|integrity\.performance|multipart\.lifecycle|operation\.lifecycle|range\.read|nic\.paths|delete\.metrics\.total|delete\.requests|delete\.objects|delete\.verification|items)\.node-[0-9]{3}\.csv|(?:nic\.set|event\.loops)\.node-[0-9]{3}\.json)$`)
 
 // ArtifactSpec defines a log endpoint and its output filename suffix.
 type ArtifactSpec struct {
@@ -45,6 +45,9 @@ var DefaultArtifacts = []ArtifactSpec{
 	{Loggers: []string{"NicPaths"}, Suffix: constants.ResultsArtifactSuffixNicPaths, Required: false},
 	// NIC-set report of a single engine (D64); distributed steps keep one copy per node.
 	{Loggers: []string{"NicSet"}, Suffix: constants.ResultsArtifactSuffixNicSet, Required: false},
+	// Event-loop report of a single engine, for every step (D88); distributed steps keep one copy
+	// per node. Engines before it do not write it.
+	{Loggers: []string{"EventLoops"}, Suffix: constants.ResultsArtifactSuffixEventLoops, Required: false},
 	{Loggers: []string{"metrics.FileTotal"}, Suffix: constants.ResultsArtifactSuffixMetricsTotal, Required: true},
 	{Loggers: []string{"Config"}, Suffix: constants.ResultsArtifactSuffixConfig, Required: true},
 	{Loggers: []string{"Cli"}, Suffix: constants.ResultsArtifactSuffixCLIArgs, Required: false},
@@ -193,15 +196,17 @@ func (f *Fetcher) FetchArtifactsForSteps(ctx context.Context, stepIDs []string) 
 		Steps:       make([]StepManifest, 0, len(stepIDs)),
 	}
 
-	nicNodes, err := readNicNodes(f.OutputDir)
+	nodes, err := readRunNodes(f.OutputDir)
 	if err != nil {
 		logging.LogWarn("results", "cannot read the NIC nodes from run metadata",
 			"file", constants.ResultsMetadataFileName, "error", err)
 	}
+	nicNodes := nodes.NicNodes
 	haveAnyTotals := false
 	for _, stepID := range stepIDs {
 		sm := f.fetchStep(ctx, stepID)
 		f.recordMissingNicFiles(&sm, nicNodes)
+		f.recordMissingEventLoopFiles(&sm, nodes)
 		man.Steps = append(man.Steps, sm)
 		haveAnyTotals = haveAnyTotals || hasSuccessfulGenericTotals(sm)
 	}

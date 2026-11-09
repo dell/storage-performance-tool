@@ -992,6 +992,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 					writeProgress("Results fetch encountered errors; preserving available evidence and continuing shutdown. Output: %s\n", root)
 				}
 				captureNicEngines(root, stepIDs, metadata)
+				captureEventLoopEngines(root, stepIDs, metadata)
 			}
 			if integrityFinalizationReady && verificationRun {
 				options := *integrityOptions[0]

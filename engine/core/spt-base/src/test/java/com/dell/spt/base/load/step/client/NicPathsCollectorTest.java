@@ -3,8 +3,6 @@ package com.dell.spt.base.load.step.client;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -12,6 +10,9 @@ import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.nic.EventLoopRoute;
+import com.dell.spt.base.nic.EventLoops;
+import com.dell.spt.base.nic.EventLoopsArtifact;
 import com.dell.spt.base.nic.NicPathsArtifact;
 import com.dell.spt.base.nic.NicSetArtifact;
 import java.io.EOFException;
@@ -28,6 +29,7 @@ class NicPathsCollectorTest {
 
 	private static final String LOGGER = Loggers.NIC_PATHS.getName();
 	private static final String SET_LOGGER = Loggers.NIC_SET.getName();
+	private static final String LOOPS_LOGGER = Loggers.EVENT_LOOPS.getName();
 
 	@TempDir
 	Path dir;
@@ -67,7 +69,8 @@ class NicPathsCollectorTest {
 		assertEquals(setBody("node-1"), Files.readString(dir.resolve("nic.set.node-001.json")));
 		assertFalse(Files.exists(dir.resolve("nic.set.node-002.json")));
 		assertFalse(Files.exists(dir.resolve("nic.set.node-003.json")));
-		verify(managers.get(3), never()).readFromFile(anyString(), anyLong());
+		verify(managers.get(3), never()).readFromFile("/node-3/nic.paths.csv", 0);
+		verify(managers.get(3), never()).readFromFile("/node-3/nic.set.json", 0);
 		try (final var files = Files.list(dir)) {
 			assertTrue(files.noneMatch(file -> file.getFileName().toString().endsWith(".tmp")), "no staging file is left");
 		}
@@ -91,9 +94,78 @@ class NicPathsCollectorTest {
 	}
 
 	@Test
+	void everySliceGivesItsEventLoopsWhetherOrNotItHasANicSet() throws Exception {
+		final Path canonical = dir.resolve(EventLoopsArtifact.FILE_NAME);
+		final var managers = new ArrayList<FileManager>();
+		for (int i = 0; i < 3; i++) {
+			final var manager = mock(FileManager.class);
+			when(manager.logFileName(LOOPS_LOGGER, "step"))
+							.thenReturn(i == 0 ? canonical.toString() : "/node-" + i + "/event.loops.json");
+			managers.add(manager);
+		}
+		Files.writeString(canonical, loopsBody("entry"));
+		final byte[] remote = loopsBody("node-1").getBytes(StandardCharsets.UTF_8);
+		when(managers.get(1).readFromFile("/node-1/event.loops.json", 0)).thenReturn(remote);
+		when(managers.get(1).readFromFile("/node-1/event.loops.json", remote.length)).thenThrow(new EOFException());
+		when(managers.get(2).readFromFile("/node-2/event.loops.json", 0))
+						.thenThrow(new NoSuchFileException("/node-2/event.loops.json"));
+
+		new NicPathsCollector("step", managers, NicPathsCollector.nodeNames(List.of("node-b.example:1099", "node-c.example:1099")),
+						List.of(false, false, false)).close();
+
+		assertFalse(Files.exists(canonical), "the Entry Node's report moved to node-000");
+		assertEquals(loopsBody("entry"), Files.readString(dir.resolve("event.loops.node-000.json")));
+		assertEquals(loopsBody("node-1"), Files.readString(dir.resolve("event.loops.node-001.json")));
+		assertFalse(Files.exists(dir.resolve("event.loops.node-002.json")), "a missing node file is not fatal");
+		for (final var manager : managers) {
+			verify(manager, never()).logFileName(LOGGER, "step");
+			verify(manager, never()).logFileName(SET_LOGGER, "step");
+		}
+		try (final var files = Files.list(dir)) {
+			assertTrue(files.noneMatch(file -> file.getFileName().toString().endsWith(".tmp")), "no staging file is left");
+		}
+	}
+
+	@Test
+	void aReusedStepIdReplacesItsEventLoopCopiesAndKeepsItsNicCopies() throws Exception {
+		final Path canonical = dir.resolve(EventLoopsArtifact.FILE_NAME);
+		final Path canonicalPaths = dir.resolve(NicPathsArtifact.FILE_NAME);
+		final var entry = mock(FileManager.class);
+		when(entry.logFileName(LOOPS_LOGGER, "step")).thenReturn(canonical.toString());
+		when(entry.logFileName(LOGGER, "step")).thenReturn(canonicalPaths.toString());
+		when(entry.logFileName(SET_LOGGER, "step")).thenReturn(dir.resolve(NicSetArtifact.FILE_NAME).toString());
+		final var node = mock(FileManager.class);
+		when(node.logFileName(LOOPS_LOGGER, "step")).thenReturn("/node-1/event.loops.json");
+		final byte[] remote = loopsBody("node-1").getBytes(StandardCharsets.UTF_8);
+		when(node.readFromFile("/node-1/event.loops.json", 0)).thenReturn(remote);
+		when(node.readFromFile("/node-1/event.loops.json", remote.length)).thenThrow(new EOFException());
+		Files.writeString(canonical, loopsBody("entry"));
+		Files.writeString(canonicalPaths, body("entry"));
+		Files.writeString(dir.resolve("event.loops.node-000.json"), "earlier");
+		Files.writeString(dir.resolve("event.loops.node-001.json"), "earlier");
+		Files.writeString(dir.resolve("nic.paths.node-000.csv"), "earlier");
+
+		new NicPathsCollector("step", List.of(entry, node), NicPathsCollector.nodeNames(List.of("node-b.example:1099")),
+						List.of(true, false)).close();
+
+		assertEquals(loopsBody("entry"), Files.readString(dir.resolve("event.loops.node-000.json")));
+		assertEquals(loopsBody("node-1"), Files.readString(dir.resolve("event.loops.node-001.json")));
+		assertFalse(Files.exists(canonical));
+		assertEquals("earlier", Files.readString(dir.resolve("nic.paths.node-000.csv")));
+		assertTrue(Files.exists(canonicalPaths));
+	}
+
+	@Test
 	void aNodeCopyCarriesTheSliceIndexBeforeTheExtension() {
 		assertEquals(dir.resolve("nic.paths.node-007.csv"), NicPathsCollector.nodeCopyPath(dir.resolve("nic.paths.csv"), 7));
 		assertEquals(dir.resolve("nic.set.node-012.json"), NicPathsCollector.nodeCopyPath(dir.resolve("nic.set.json"), 12));
+		assertEquals(dir.resolve("event.loops.node-003.json"),
+						NicPathsCollector.nodeCopyPath(dir.resolve("event.loops.json"), 3));
+	}
+
+	private static String loopsBody(final String worker) {
+		return EventLoopsArtifact.json(1, "step", worker, 8,
+						List.of(new EventLoopsArtifact.Context(0, new EventLoops(EventLoopRoute.DEFAULT, 0, 4)))) + "\n";
 	}
 
 	private static String setBody(final String worker) {

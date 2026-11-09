@@ -20,15 +20,25 @@ final class NicStepFile {
 	 * @throws IllegalStateException when the file already exists or cannot be written
 	 */
 	static void publish(final Logger logger, final String stepId, final String what, final String content) {
+		publish(logger, stepId, what, content, false);
+	}
+
+	/**
+	 * As {@link #publish(Logger, String, String, String)}, but with {@code replace} an existing file,
+	 * left by an earlier step with the same id, is replaced instead of refused.
+	 */
+	static void publish(
+					final Logger logger, final String stepId, final String what, final String content, final boolean replace) {
 		Path staging = null;
 		try {
 			final var path = Path.of(FileManager.INSTANCE.logFileName(logger.getName(), stepId));
 			Files.createDirectories(path.toAbsolutePath().getParent());
-			if (Files.exists(path)) {
+			if (!replace && Files.exists(path)) {
 				throw new IOException("stale " + what + " artifact exists");
 			}
 			staging = Files.createTempFile(path.toAbsolutePath().getParent(), ".nic-", ".tmp");
 			Files.writeString(staging, content);
+			// An atomic rename replaces an existing target.
 			Files.move(staging, path, StandardCopyOption.ATOMIC_MOVE);
 		} catch (final IOException e) {
 			throw new IllegalStateException("failed to publish the terminal " + what + " evidence", e);
