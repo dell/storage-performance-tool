@@ -183,6 +183,11 @@ public final class NicSetSupport {
 						baseEventLoops);
 	}
 
+	/** The Path Pools' connect timeout, which a kernel-route request of the driver also takes. */
+	public int connectTimeoutMillis() {
+		return settings.connectTimeoutMillis();
+	}
+
 	/** The per-path counters in the layout's order, or {@code null} before a successful open. */
 	public NicPathCounters counters() {
 		return counters;

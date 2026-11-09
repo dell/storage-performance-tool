@@ -119,6 +119,8 @@ final class NicSetLoopback implements AutoCloseable {
 	volatile IntPredicate failObjectRequest = n -> false;
 	/** Which object requests, counted from 1, the stub drops without answering: the connection closes. */
 	volatile IntPredicate dropObjectRequest = n -> false;
+	/** Whether the stub answers every part upload with 503, whatever its count. */
+	volatile boolean failParts;
 
 	/** The storage configuration of a driver with these endpoints and NICs. */
 	static Config storage(final List<String> endpoints, final List<String> interfaces, final int concurrency) {
@@ -347,6 +349,11 @@ final class NicSetLoopback implements AutoCloseable {
 		return objects.get(path);
 	}
 
+	/** The multipart uploads started and neither completed nor aborted. */
+	int openUploads() {
+		return uploads.size();
+	}
+
 	/** The tagging document last written to {@code path}. */
 	String tags(final String path) {
 		return tags.get(path);
@@ -400,7 +407,9 @@ final class NicSetLoopback implements AutoCloseable {
 					exchange.close();
 					return;
 				}
-				if (objectRequest > 0 && failObjectRequest.test(objectRequest)) {
+				if (objectRequest > 0 && (failObjectRequest.test(objectRequest)
+								|| failParts && "PUT".equals(request.method()) && request.query() != null
+												&& request.query().contains("partNumber="))) {
 					final var error = "error".getBytes(StandardCharsets.US_ASCII);
 					exchange.sendResponseHeaders(503, error.length);
 					exchange.getResponseBody().write(error);

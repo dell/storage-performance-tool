@@ -268,6 +268,33 @@ final class S3RdmaNicSetWorkloadTest {
 		assertEquals(BUCKET + "/aborted", abort.path());
 	}
 
+	/**
+	 * Every part fails and NIC 1's endpoint refuses connections. The abort after a part runs out of
+	 * retries goes out on the kernel route, with no NIC and no lane, so it reaches the target whichever
+	 * NIC is dead (D87), and the upload is not left open there.
+	 */
+	@Test
+	void anAbortAfterAPartRunsOutOfRetriesTakesTheKernelRoutePastADeadNic() throws Exception {
+		final var endpoints = stub.listeners(2);
+		final var run = started(endpoints, 2, 2);
+		stub.stop(1);
+		stub.failParts = true;
+
+		assertTrue(run.driver().put(S3RdmaNicSetDriverTest.upload("dead-nic", 2048, 1)));
+		assertNotEquals(Operation.Status.SUCC, awaitUpload(run).status());
+
+		final var aborts = stub.requests().stream().filter(S3RdmaNicSetWorkloadTest::isAbort).toList();
+		assertEquals(1, aborts.size(), () -> "requests: " + stub.requests());
+		final var abort = aborts.get(0);
+		assertEquals(KERNEL_SOURCE, abort.source(), "the abort takes the kernel route");
+		assertEquals(0, abort.listener(), "to the first endpoint");
+		assertNull(abort.token(), "over HTTP");
+		assertEquals(BUCKET + "/dead-nic", abort.path());
+		assertEquals(0, stub.openUploads(), "the target has no open upload");
+		assertTrue(stub.objectRequests().stream().filter(request -> !isAbort(request))
+						.noneMatch(request -> KERNEL_SOURCE.equals(request.source())), "only the abort took the kernel route");
+	}
+
 	private static boolean isPart(final Request request) {
 		return request.query() != null && request.query().contains("partNumber=");
 	}

@@ -678,6 +678,11 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		if (!concurrencyThrottle.tryAcquire()) {
 			return false;
 		}
+		if (abortsMultipartUpload(op)) {
+			// No NIC and no lane: a dead NIC must not keep the upload open (D87).
+			submitOnKernelRoute(op, token, nicSet.connectTimeoutMillis());
+			return true;
+		}
 		final var admission = nicPool.admission();
 		final int nicIndex = admission.take();
 		if (nicIndex < 0) {

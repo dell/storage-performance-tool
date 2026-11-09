@@ -382,7 +382,42 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			socketAddr = new InetSocketAddress(storageNodeAddr, storageNodePort);
 		}
 
-		final Bootstrap bootstrap = new Bootstrap()
+		final Channel conn;
+		final var connFuture = unpooledBootstrap().connect(socketAddr);
+		if (netTimeoutMilliSec > 0) {
+			if (connFuture.await(netTimeoutMilliSec, TimeUnit.MILLISECONDS)) {
+				conn = connFuture.channel();
+			} else {
+				throw new ConnectTimeoutException();
+			}
+		} else {
+			conn = connFuture.sync().channel();
+		}
+		return conn;
+	}
+
+	/**
+	 * Starts the connection {@link #getUnpooledConnection} makes, on the base event-loop group,
+	 * without waiting for it: the event loop resolves the address and connects, and completes the
+	 * future, failing it after {@code connectTimeoutMillis}. The caller owns the connection once it
+	 * connects, and closes it.
+	 */
+	protected final ChannelFuture connectUnpooled(
+					final String storageNodeAddr, final int storageNodePort, final int connectTimeoutMillis) {
+		final InetSocketAddress socketAddr;
+		if (storageNodeAddr.contains(":")) {
+			final String addrParts[] = storageNodeAddr.split(":", 0);
+			socketAddr = InetSocketAddress.createUnresolved(addrParts[0], Integer.parseInt(addrParts[1]));
+		} else {
+			socketAddr = InetSocketAddress.createUnresolved(storageNodeAddr, storageNodePort);
+		}
+		return unpooledBootstrap()
+						.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, connectTimeoutMillis)
+						.connect(socketAddr);
+	}
+
+	private Bootstrap unpooledBootstrap() {
+		return new Bootstrap()
 						.group(ioExecutor)
 						.channel(socketChannelCls)
 						.handler(
@@ -400,19 +435,6 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 												}
 											}
 										});
-
-		final Channel conn;
-		final var connFuture = bootstrap.connect(socketAddr);
-		if (netTimeoutMilliSec > 0) {
-			if (connFuture.await(netTimeoutMilliSec, TimeUnit.MILLISECONDS)) {
-				conn = connFuture.channel();
-			} else {
-				throw new ConnectTimeoutException();
-			}
-		} else {
-			conn = connFuture.sync().channel();
-		}
-		return conn;
 	}
 
 	@Override

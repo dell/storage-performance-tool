@@ -245,6 +245,11 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 		if (!concurrencyThrottle.tryAcquire()) {
 			return false;
 		}
+		if (abortsMultipartUpload(op)) {
+			// No NIC: a dead one must not keep the upload open (D87).
+			submitOnKernelRoute(op, token, nicSet.connectTimeoutMillis());
+			return true;
+		}
 		final var admission = nicPool.admission();
 		final int nic = admission.take();
 		if (nic < 0) {

@@ -245,6 +245,76 @@ final class S3NicSetWorkloadTest {
 	}
 
 	/**
+	 * Every part fails and NIC 1's endpoint refuses connections. The abort after a part runs out of
+	 * retries goes out on the kernel route, so it reaches the target whichever NIC is dead (D87),
+	 * and the upload is not left open there.
+	 */
+	@Test
+	void anAbortAfterAPartRunsOutOfRetriesTakesTheKernelRoutePastADeadNic() throws Exception {
+		final var endpoints = stub.listeners(2);
+		final var run = started(endpoints, nics(2), 2, false);
+		stub.stop(1);
+		stub.failParts = true;
+
+		// One part, so the upload's result is the last one.
+		final var upload = multipart("dead-nic", 1);
+		assertTrue(run.driver().put(upload));
+		assertNotEquals(SUCC, awaitUpload(run, upload).status());
+
+		final var aborts = stub.requests().stream().filter(S3NicSetWorkloadTest::isAbort).toList();
+		assertEquals(1, aborts.size(), () -> "requests: " + stub.requests());
+		final var abort = aborts.get(0);
+		assertEquals(KERNEL_SOURCE, abort.source(), "the abort takes the kernel route");
+		assertEquals(0, abort.listener(), "to the first endpoint");
+		assertEquals(endpoints.get(0), abort.host());
+		assertEquals("/bucket/dead-nic", abort.path());
+		assertEquals(0, stub.openUploads(), "the target has no open upload");
+		assertTrue(stub.objectRequests().stream().filter(request -> !isAbort(request))
+						.noneMatch(request -> KERNEL_SOURCE.equals(request.source())), "only the abort took the kernel route");
+		assertReleased(run);
+	}
+
+	/**
+	 * The abort's kernel route refuses it: the first endpoint stopped once the upload began. The
+	 * upload fails with {@code FAIL_IO}, nothing is sent, and the abort gives its permit back.
+	 */
+	@Test
+	void anAbortWhoseKernelRouteRefusesFailsTheUploadAndGivesBackItsPermit() throws Exception {
+		final var endpoints = stub.listeners(2);
+		final var run = started(endpoints, nics(2), 1, false);
+		// Object request 1 starts the upload; the first part's request stops endpoint 0 and fails.
+		stub.failParts = true;
+		stub.failObjectRequest = n -> {
+			if (n == 2) {
+				final var stopper = new Thread(() -> stub.stop(0));
+				stopper.start();
+				try {
+					stopper.join();
+				} catch (final InterruptedException e) {
+					Thread.currentThread().interrupt();
+				}
+			}
+			return false;
+		};
+
+		final var upload = multipart("refused", 1);
+		assertTrue(run.driver().put(upload));
+		assertEquals(Operation.Status.FAIL_IO, awaitUpload(run, upload).status());
+
+		assertTrue(stub.requests().stream().noneMatch(S3NicSetWorkloadTest::isAbort), () -> "requests: " + stub.requests());
+		assertEquals(1, stub.openUploads(), "the upload stays open");
+		assertReleased(run);
+		// The one permit came back: the next request goes out, on NIC 1, whose endpoint still answers.
+		stub.failParts = false;
+		stub.failObjectRequest = n -> false;
+		Operation<?> result = null;
+		for (var attempt = 0; attempt < 4 && (result == null || result.status() != SUCC); attempt++) {
+			result = run.execute(dataOp(OpType.READ, "later"));
+		}
+		assertEquals(SUCC, result.status(), "a read after the abort");
+	}
+
+	/**
 	 * A part loses its connection before any response and its retry succeeds. Nothing had settled it when
 	 * the retry undid the settlement, so the upload's count never reached zero: every part arrived, but no
 	 * completion or abort was sent, nothing was active and the step never counted the upload.

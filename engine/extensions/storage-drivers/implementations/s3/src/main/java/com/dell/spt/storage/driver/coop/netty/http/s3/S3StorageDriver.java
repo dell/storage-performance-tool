@@ -1,6 +1,7 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3;
 
 import static com.dell.spt.base.item.op.Operation.SLASH;
+import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.S3Api.TAGGING_ENTRY_END;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.S3Api.TAGGING_ENTRY_MIDDLE;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.S3Api.TAGGING_ENTRY_START;
@@ -39,6 +40,7 @@ import com.dell.spt.base.item.op.deletion.DeleteTransportResult;
 import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.list.ListOperation;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker.DispatchToken;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.Credential;
@@ -51,6 +53,8 @@ import com.github.akurilov.confuse.Config;
 import io.netty.buffer.ByteBufInputStream;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelFutureListener;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.handler.codec.http.DefaultHttpRequest;
@@ -84,6 +88,7 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -327,6 +332,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	protected final ChecksumStrategy checksumStrategy;
 	protected final String sigV4ServiceName;
 	private final Set<CompletableFuture<Void>> multipartCleanupTasks = ConcurrentHashMap.newKeySet();
+	// One WARN for a multipart abort the kernel route could not connect; the rest go to DEBUG.
+	private final AtomicBoolean kernelRouteAbortWarned = new AtomicBoolean();
 	// Host of driver-built helper requests (bucket setup, listing, verification, abort).
 	private String helperAuthority;
 
@@ -2023,6 +2030,93 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			if (response != null) {
 				response.release();
 			}
+		}
+	}
+
+	/** Whether {@code op} is a multipart upload's abort: its parent's request once a part ran out of retries. */
+	protected static boolean abortsMultipartUpload(final Operation<?> op) {
+		return op instanceof CompositeDataOperation compositeOp
+						&& OpType.CREATE.equals(op.type())
+						&& compositeOp.get(S3Api.KEY_MPU_ABORT) != null;
+	}
+
+	/**
+	 * Sends a NIC-set driver's multipart abort over the kernel route, as the abort after a failed
+	 * completion goes (D87): a connection of its own on the base event-loop group to the first
+	 * endpoint, started without blocking the dispatch task, so a dead NIC cannot leave the upload
+	 * open. It takes no NIC and counts on no Path row. The caller holds the operation's concurrency
+	 * permit, and its {@code releaseTransport} closes a connection with no Path and gives the permit
+	 * back, so the abort completes as any request does.
+	 *
+	 * <p>Custody passes at the write, as for an attempt on a NIC: after a stop, or for a stale
+	 * circulation, the connection closes, nothing is written and queue recovery owns the operation.
+	 * A connect that fails fails the operation with {@code FAIL_IO} and records the upload as
+	 * orphaned.
+	 */
+	protected final void submitOnKernelRoute(
+					final O op, final DispatchToken<O> token, final int connectTimeoutMillis) {
+		final ChannelFuture connect;
+		try {
+			connect = connectUnpooled(storageNodeAddrs[0], storageNodePort, connectTimeoutMillis);
+		} catch (final RuntimeException e) {
+			kernelRouteFailed(op, token, e);
+			return;
+		}
+		connect.addListener((ChannelFutureListener) future -> {
+			if (future.isSuccess()) {
+				kernelRouteConnected(op, token, future.channel());
+			} else {
+				kernelRouteFailed(op, token, future.cause());
+			}
+		});
+	}
+
+	/** Runs on the connection's event loop. */
+	private void kernelRouteConnected(final O op, final DispatchToken<O> token, final Channel channel) {
+		if (!withDispatchAdmission(() -> claimCapturedDispatch(op, token))) {
+			final var unusedClose = channel.close();
+			concurrencyThrottle.release();
+			signalDispatchCapacityAvailable();
+			return;
+		}
+		try {
+			channel.attr(ATTR_KEY_RELEASED).set(Boolean.FALSE);
+			channel.attr(ATTR_KEY_OPERATION).set(op);
+			op.nodeAddr(helperAuthority);
+			op.startRequest();
+			sendRequest(channel, op);
+		} catch (final Throwable thrown) {
+			throwUncheckedIfInterrupted(thrown);
+			LogUtil.exception(Level.DEBUG, thrown, "{}: failed to send a multipart abort", stepId);
+			op.status(Operation.Status.FAIL_UNKNOWN);
+			completeAfterKernelRoute(channel, op);
+		}
+	}
+
+	private void kernelRouteFailed(final O op, final DispatchToken<O> token, final Throwable cause) {
+		final boolean claimed = withDispatchAdmission(() -> claimCapturedDispatch(op, token));
+		concurrencyThrottle.release();
+		signalDispatchCapacityAvailable();
+		if (!claimed) {
+			LogUtil.exception(Level.DEBUG, cause, "{}: multipart abort connect ended after the stop", stepId);
+			return;
+		}
+		final var level = kernelRouteAbortWarned.compareAndSet(false, true) ? Level.WARN : Level.DEBUG;
+		LogUtil.exception(level, cause, "{}: a multipart abort could not connect to {}; the upload stays open"
+						+ " (further failures are logged at DEBUG)", stepId, storageNodeAddrs[0]);
+		final var compositeOp = (CompositeDataOperation) op;
+		emitMultipartLifecycle(compositeOp, "failed_orphaned", true, false,
+						mpuFailure(compositeOp) + "; abort failed: " + Operation.Status.FAIL_IO);
+		op.status(Operation.Status.FAIL_IO);
+		completeAfterKernelRoute(null, op);
+	}
+
+	private void completeAfterKernelRoute(final Channel channel, final O op) {
+		try {
+			complete(channel, op);
+		} catch (final Throwable cause) {
+			throwUncheckedIfInterrupted(cause);
+			LogUtil.exception(Level.DEBUG, cause, "Load operation result publication failure");
 		}
 	}
 

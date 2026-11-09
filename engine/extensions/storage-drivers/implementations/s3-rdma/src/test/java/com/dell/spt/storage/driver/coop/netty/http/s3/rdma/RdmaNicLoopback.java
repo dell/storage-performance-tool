@@ -116,6 +116,8 @@ final class RdmaNicLoopback implements AutoCloseable {
 	volatile boolean opensOverlapped;
 	/** Which object requests, counted from 1, the stub answers with 503. */
 	volatile IntPredicate failObjectRequest = n -> false;
+	/** Whether the stub answers every part upload with 503, over HTTP or RDMA. */
+	volatile boolean failParts;
 	/** Which requests with a token the stub declines (reply 501): a GET body then comes over HTTP. */
 	volatile Predicate<Request> decline = request -> false;
 	/** The object requests that wait for {@link #release()}. */
@@ -364,6 +366,11 @@ final class RdmaNicLoopback implements AutoCloseable {
 		return requests.stream().filter(Request::isObjectRequest).toList();
 	}
 
+	/** The multipart uploads started and neither completed nor aborted. */
+	int openUploads() {
+		return uploads.size();
+	}
+
 	byte[] object(final String path) {
 		return objects.get(path);
 	}
@@ -440,7 +447,9 @@ final class RdmaNicLoopback implements AutoCloseable {
 			peaks.computeIfAbsent(source, unused -> new AtomicInteger()).accumulateAndGet(concurrent, Math::max);
 			try {
 				requests.add(request);
-				if (request.isObjectRequest() && failObjectRequest.test(objectRequestCount.incrementAndGet())) {
+				if (request.isObjectRequest() && (failObjectRequest.test(objectRequestCount.incrementAndGet())
+								|| failParts && "PUT".equals(request.method()) && request.query() != null
+												&& request.query().contains("partNumber="))) {
 					exchange.sendResponseHeaders(503, -1);
 					return;
 				}
