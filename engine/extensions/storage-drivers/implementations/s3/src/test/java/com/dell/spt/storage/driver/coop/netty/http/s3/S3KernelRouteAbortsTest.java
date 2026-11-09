@@ -6,8 +6,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 /** The registry of pending kernel-route aborts, and closing their channels at the stop (D87). */
@@ -45,5 +47,33 @@ class S3KernelRouteAbortsTest {
 		assertDoesNotThrow(() -> S3StorageDriver.closeKernelRouteChannel(channel));
 		assertFalse(channel.isOpen(), "closed forcibly");
 		unregistered.unsafe().closeForcibly();
+	}
+
+	/** A settled abort's permit comes back once whatever its channel's close does, and with no channel at all. */
+	@Test
+	void aSettledAbortGivesItsPermitBackWhateverItsCloseDoes() {
+		final var givenBack = new AtomicInteger();
+		final Runnable giveBack = givenBack::incrementAndGet;
+
+		final var unregistered = new NioSocketChannel();
+		assertDoesNotThrow(() -> S3StorageDriver.settleKernelRouteChannel("step", unregistered, giveBack));
+		assertFalse(unregistered.isOpen(), "closed forcibly");
+		assertEquals(1, givenBack.get());
+
+		final var refusing = new NioSocketChannel() {
+			@Override
+			public ChannelFuture close() {
+				throw new IllegalArgumentException("refused");
+			}
+		};
+		try {
+			assertDoesNotThrow(() -> S3StorageDriver.settleKernelRouteChannel("step", refusing, giveBack));
+			assertEquals(2, givenBack.get(), "a close that throws still gives the permit back");
+		} finally {
+			refusing.unsafe().closeForcibly();
+		}
+
+		assertDoesNotThrow(() -> S3StorageDriver.settleKernelRouteChannel("step", null, giveBack));
+		assertEquals(3, givenBack.get(), "an abort whose connect never started gives its permit back too");
 	}
 }

@@ -307,7 +307,10 @@ final class S3RdmaNicSetWorkloadTest {
 	void aStopSettlesAnAbortWhoseKernelRouteConnectIsPending() throws Exception {
 		assumeTrue(RdmaNicLoopback.dropsSynsOnAFullAcceptQueue(), "the blackhole needs tcp_abort_on_overflow at 0");
 		final var endpoints = stub.listeners(2);
-		final var run = started(endpoints, 2, 2);
+		final var root = RdmaNicLoopback.root(rdma(false, true, 1), endpoints, NICS.subList(0, 2), 2);
+		// As in the s3 fixture: a part retry that connects to the blackholed port waits 2 s, not 10.
+		root.val("storage-net-timeoutMilliSec", 2_000);
+		final var run = started(root);
 		stub.failParts = true;
 		final var blackholed = new AtomicReference<Throwable>();
 		stub.failObjectRequest = n -> {

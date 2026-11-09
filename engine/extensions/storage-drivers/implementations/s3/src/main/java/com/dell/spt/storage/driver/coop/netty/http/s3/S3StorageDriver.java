@@ -2081,8 +2081,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 		abort.connect = connect;
 		if (abort.settled()) {
-			// A stop settled it before it saw this connect.
-			closeKernelRouteChannel(connect.channel());
+			// A stop settled it, and gave its permit back, before it saw this connect.
+			settleKernelRouteChannel(stepId, connect.channel(), () -> {});
 		}
 		connect.addListener((ChannelFutureListener) future -> {
 			if (future.isSuccess()) {
@@ -2102,19 +2102,31 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	protected final void closeKernelRoute() {
 		for (final var abort : kernelRouteAborts.close()) {
 			if (abort.settle()) {
-				try {
-					final var connect = abort.connect;
-					if (connect != null) {
-						closeKernelRouteChannel(connect.channel());
-					}
-				} catch (final RuntimeException e) {
-					LogUtil.exception(Level.DEBUG, e, "{}: failed to close a pending multipart abort's connection", stepId);
-				} finally {
-					// Settled is for good: nothing else gives this permit back.
-					concurrencyThrottle.release();
-					signalDispatchCapacityAvailable();
-				}
+				final var connect = abort.connect;
+				// Settled is for good: nothing else gives this permit back.
+				settleKernelRouteChannel(stepId, connect == null ? null : connect.channel(), this::giveBackKernelRoutePermit);
 			}
+		}
+	}
+
+	private void giveBackKernelRoutePermit() {
+		concurrencyThrottle.release();
+		signalDispatchCapacityAvailable();
+	}
+
+	/**
+	 * Closes the channel of a kernel-route abort the stop settled, when it has one, and then runs
+	 * {@code giveBack} whatever the close does: a failure to close is logged, never thrown.
+	 */
+	static void settleKernelRouteChannel(final String stepId, final Channel channel, final Runnable giveBack) {
+		try {
+			if (channel != null) {
+				closeKernelRouteChannel(channel);
+			}
+		} catch (final RuntimeException e) {
+			LogUtil.exception(Level.DEBUG, e, "{}: failed to close a pending multipart abort's connection", stepId);
+		} finally {
+			giveBack.run();
 		}
 	}
 
