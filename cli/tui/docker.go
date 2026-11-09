@@ -692,6 +692,15 @@ func (dm *DockerManager) StartContainerWithScenarioContext(
 	}
 	envVars = withEngineOptions(envVars)
 	diagnosticBinds := dm.prepareDiagnosticsCapture(constants.DockerRoleNode)
+	scenarioHostConfig := &container.HostConfig{
+		Binds: append(append([]string{
+			fmt.Sprintf("%s:/tmp/scenario.js:ro", absScenarioPath),
+		}, diagnosticBinds...), dm.itemFileBindSpecs()...),
+	}
+	if err := applyEnginePlacement(scenarioHostConfig); err != nil {
+		dm.cleanupDiagnosticsDir()
+		return "", err
+	}
 
 	// Create container with volume mount
 	resp, err := dm.client.ContainerCreate(ctx, &container.Config{
@@ -701,11 +710,7 @@ func (dm *DockerManager) StartContainerWithScenarioContext(
 		AttachStdout: true,
 		AttachStderr: true,
 		Env:          envVars,
-	}, &container.HostConfig{
-		Binds: append(append([]string{
-			fmt.Sprintf("%s:/tmp/scenario.js:ro", absScenarioPath),
-		}, diagnosticBinds...), dm.itemFileBindSpecs()...),
-	}, nil, nil, "")
+	}, scenarioHostConfig, nil, nil, "")
 
 	if err != nil {
 		logging.LogError("docker", "failed to create container", err, "image", image)
@@ -821,6 +826,12 @@ func (dm *DockerManager) StartContainerInNodeModeContext(
 	}
 	if !useHostNetwork {
 		containerConfig.ExposedPorts = nat.PortSet{hostPort: struct{}{}}
+	}
+
+	if err := applyEnginePlacement(hostConfig); err != nil {
+		dm.cleanupNodeLogDir()
+		dm.cleanupDiagnosticsDir()
+		return "", err
 	}
 
 	// Create container with the selected network mode.
@@ -959,6 +970,11 @@ func (dm *DockerManager) StartWorkerNodeContainerContext(ctx context.Context, im
 			"device", constants.RdmaDevicePath, "cap_add", constants.RdmaCapIpcLock)
 	}
 
+	if err := applyEnginePlacement(hostConfig); err != nil {
+		dm.cleanupDiagnosticsDir()
+		return "", err
+	}
+
 	// Create container
 	resp, err := dm.client.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, "")
 	if err != nil {
@@ -1072,6 +1088,11 @@ func (dm *DockerManager) StartEntryNodeContainerContext(ctx context.Context, ima
 		})
 		logging.LogInfo("docker", "RDMA device passthrough enabled for entry node",
 			"device", constants.RdmaDevicePath, "cap_add", constants.RdmaCapIpcLock)
+	}
+
+	if err := applyEnginePlacement(hostConfig); err != nil {
+		dm.cleanupDiagnosticsDir()
+		return "", err
 	}
 
 	// Create container

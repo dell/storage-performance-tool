@@ -23,6 +23,8 @@ const (
 	EnvS3Driver        = "SPT_S3_DRIVER"
 	EnvServiceThreads  = "SPT_SERVICE_THREADS"
 	EnvEngineOverrides = "SPT_ENGINE_OVERRIDES"
+	// EnvSptEngineNumaNode holds a local engine container to one NUMA node (prototype, .scratch/engine-numa-placement).
+	EnvSptEngineNumaNode = "SPT_ENGINE_NUMA_NODE"
 
 	// Multipart upload configuration
 	EnvPartSize = "SPT_PART_SIZE"
