@@ -25,6 +25,8 @@ import org.junit.jupiter.api.Test;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.impl.BasicConfig;
 
+import java.io.EOFException;
+import java.io.IOException;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -37,6 +39,7 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -446,6 +449,114 @@ class MixedLoadGeneratorTest {
 						"generator must release permit even when builder throws Error");
 	}
 
+	// ── The driver's EOF at stop ──────────────────────────────────────────
+
+	@Test
+	@DisplayName("A DELETE the driver refuses with EOF keeps its item and releases its permit")
+	void driverEofKeepsTheDeleteItemAndReleasesItsPermit() throws Exception {
+		final Map<OpType, Integer> weights = new EnumMap<>(OpType.class);
+		weights.put(OpType.READ, 50);
+		weights.put(OpType.DELETE, 50);
+		final OpSchedule schedule = new OpSchedule(weights);
+		final PoolItemInput<Item> pool = new PoolItemInput<>(makeItems(10));
+		pool.addDeleteItem(new ItemImpl("to-delete"));
+
+		final Map<OpType, OperationsBuilder> builders = new EnumMap<>(OpType.class);
+		builders.put(OpType.READ, testBuilder(OpType.READ, null));
+		builders.put(OpType.DELETE, testBuilder(OpType.DELETE, null));
+
+		final int limit = schedule.size();
+		final MixedLoadGenerator gen = new MixedLoadGenerator(executor, schedule, pool, builders,
+						refusingOutput(OpType.DELETE, new EOFException()), limit, mockNewItemSupplier());
+
+		EOFException refused = null;
+		for (int i = 0; i < schedule.size() && refused == null; i++) {
+			try {
+				gen.doWork();
+			} catch (final EOFException e) {
+				refused = e;
+			}
+		}
+
+		assertNotNull(refused, "precondition: the schedule reaches a DELETE");
+		assertEquals(1, pool.deleteQueueSize(), "the refused DELETE's item is back in the queue");
+		assertEquals(limit - gen.generatedOpCount(), availablePermits(gen),
+						"only the accepted operations hold permits");
+		assertEquals(0, gen.inFlightCount(OpType.DELETE));
+	}
+
+	@Test
+	@DisplayName("The driver's EOF ends the generator without an ERROR")
+	void driverEofEndsTheGeneratorWithoutAnError() throws Exception {
+		try (ErrorLogCapture log = new ErrorLogCapture()) {
+			final MixedLoadGenerator gen = startReadCreateGenerator(
+							refusingOutput(null, new EOFException()), mockNewItemSupplier());
+
+			assertTrue(gen.await(5, TimeUnit.SECONDS), "the generator ends");
+			assertTrue(gen.isStopped());
+			assertEquals(4, availablePermits(gen), "the refused operation's permit is released");
+			assertEquals(List.of(), log.errorsContaining("MixedLoadGenerator"));
+		}
+	}
+
+	@Test
+	@DisplayName("Another driver failure is still an ERROR")
+	void anotherDriverFailureIsStillAnError() throws Exception {
+		try (ErrorLogCapture log = new ErrorLogCapture()) {
+			final MixedLoadGenerator gen = startReadCreateGenerator(
+							refusingOutput(null, new IOException("synthetic driver failure")), mockNewItemSupplier());
+
+			assertTrue(gen.await(5, TimeUnit.SECONDS), "the generator ends");
+			final List<String> errors = log.errorsContaining("MixedLoadGenerator error in doWork");
+			assertEquals(1, errors.size(), errors.toString());
+			assertTrue(errors.get(0).contains("synthetic driver failure"), errors.toString());
+		}
+	}
+
+	@Test
+	@DisplayName("An EOF from the CREATE item input, not the driver, is still an ERROR")
+	void anItemInputEofIsStillAnError() throws Exception {
+		// The delete queue stays empty, so every DELETE re-rolls to CREATE.
+		final Map<OpType, Integer> weights = new EnumMap<>(OpType.class);
+		weights.put(OpType.CREATE, 50);
+		weights.put(OpType.DELETE, 50);
+		final Input<Item> failingInput = new Input<>() {
+			@Override
+			public Item get() {
+				throwUnchecked(new EOFException("synthetic item input end"));
+				return null;
+			}
+
+			@Override
+			public int get(final List<Item> buffer, final int limit) {
+				return 0;
+			}
+
+			@Override
+			public long skip(final long count) {
+				return 0;
+			}
+
+			@Override
+			public void reset() {}
+
+			@Override
+			public void close() {}
+		};
+		try (ErrorLogCapture log = new ErrorLogCapture()) {
+			final Map<OpType, OperationsBuilder> builders = new EnumMap<>(OpType.class);
+			builders.put(OpType.CREATE, testBuilder(OpType.CREATE, null));
+			builders.put(OpType.DELETE, testBuilder(OpType.DELETE, null));
+			final MixedLoadGenerator gen = new MixedLoadGenerator(executor, new OpSchedule(weights),
+							new PoolItemInput<>(makeItems(5)), builders, noopOutput(), 4, failingInput);
+			gen.start();
+
+			assertTrue(gen.await(5, TimeUnit.SECONDS), "the generator ends");
+			final List<String> errors = log.errorsContaining("MixedLoadGenerator error in doWork");
+			assertEquals(1, errors.size(), errors.toString());
+		}
+	}
+
 	@Test
 	@DisplayName("Per-op in-flight counters increment on dispatch and decrement on completion")
 	void perOpInFlightCountersTrackDispatchAndCompletion() throws Exception {
@@ -583,6 +694,54 @@ class MixedLoadGeneratorTest {
 				} catch (final InterruptedException e) {
 					Thread.currentThread().interrupt();
 					return false;
+				}
+				return true;
+			}
+
+			@Override
+			public int put(final List<Operation> ops, final int from, final int to) {
+				return to - from;
+			}
+
+			@Override
+			public int put(final List<Operation> ops) {
+				return ops.size();
+			}
+
+			@Override
+			public Input<Operation> getInput() {
+				return null;
+			}
+
+			@Override
+			public void close() {}
+		};
+	}
+
+	/** Starts a READ and CREATE generator with 4 permits on {@code driver}. */
+	private MixedLoadGenerator startReadCreateGenerator(final Output<Operation> driver, final Input<Item> newItems) {
+		final Map<OpType, Integer> weights = new EnumMap<>(OpType.class);
+		weights.put(OpType.READ, 50);
+		weights.put(OpType.CREATE, 50);
+		final Map<OpType, OperationsBuilder> builders = new EnumMap<>(OpType.class);
+		builders.put(OpType.READ, testBuilder(OpType.READ, null));
+		builders.put(OpType.CREATE, testBuilder(OpType.CREATE, null));
+		final MixedLoadGenerator gen = new MixedLoadGenerator(executor, new OpSchedule(weights),
+						new PoolItemInput<>(makeItems(5)), builders, driver, 4, newItems);
+		gen.start();
+		return gen;
+	}
+
+	/**
+	 * An Output that throws {@code failure} from put() for operations of {@code refused}, or for
+	 * every operation when it is null, and accepts the others.
+	 */
+	private static Output<Operation> refusingOutput(final OpType refused, final IOException failure) {
+		return new Output<>() {
+			@Override
+			public boolean put(final Operation op) {
+				if (refused == null || op.type() == refused) {
+					throwUnchecked(failure);
 				}
 				return true;
 			}
