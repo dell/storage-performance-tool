@@ -14,11 +14,15 @@ sized them. The CLI fetches each report with the step's other files, stores them
   `<step>.event.loops.node-NNN.json`, numbered as the
   [NIC files](NETWORK_INTERFACES.md#results) are: `node-000` is the Entry Node, followed by the
   workers that started, in `--test-hosts` order.
-- **Missing reports:** once one node's report of a step arrives, a node copy that is absent is
-  recorded as `missing` in `index.json`, such as
+- **Missing reports:** once a step's index lists one node's report, even one whose download
+  failed, a node copy that is absent is recorded as `missing` in `index.json`, such as
   `expected from node-001 (worker-b.example); not listed in index.json`, and Artifact Health
-  names it. The run does not fail. Engines that predate the report write none, so a step
+  names every copy that was not fetched. When only the Entry Node's own
+  `<step>.event.loops.json` is listed, the copies were never made, and every node copy is
+  missing. The run does not fail. Engines that predate the report write none, so a step
   without any report records nothing missing.
+- **Steps without metrics totals,** such as a read's seed step, keep the reports they have:
+  the single engine's report, or the node copies that arrived.
 
 ## Run metadata
 
@@ -32,8 +36,9 @@ sized them. The CLI fetches each report with the step's other files, stores them
   the default), `source` (`storage.driver.threads` when that setting is above 0, otherwise
   `default`) and `eventLoops`. It is left out when the step's drivers own none.
 
-`eventLoopEnginesError` names each report that could not be read, and why. The run does not
-fail.
+`eventLoopEnginesError` names each report that could not be read, and why, including one whose
+`engine_run_id` is not the run's: a report an earlier run left under the same step id. The run
+does not fail.
 
 ```json
 "eventLoopEngines": {

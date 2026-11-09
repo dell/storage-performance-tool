@@ -12,7 +12,27 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 	"github.com/dell/storage-performance-tool/cli/internal/results/summary"
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
+
+func TestCaptureEventLoopEnginesKeepsOnlyThisRunsReports(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"s1." + constants.ResultsArtifactSuffixMetricsTotal: "OpType,NodeCount\nREAD,1\n",
+		"s1.event.loops.json": `{"schema_version":1,"engine_run_id":101,"step_id":"s1","hardware_threads":192,
+			"event_loops":24,"contexts":[{"context_index":0,"route":"default","driver_threads":0,"source":"default","event_loops":24}]}`,
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	metadata := buildRunMetadata(runMetadataInput{Params: scenario.Params{RunID: 102}})
+	captureEventLoopEngines(root, []string{"s1"}, metadata)
+	if metadata.EventLoopEngines != nil ||
+		metadata.EventLoopEnginesError != "s1.event.loops.json: engine_run_id 101, want 102: a report from another run" {
+		t.Fatalf("an earlier run's report was stored: %+v %q", metadata.EventLoopEngines, metadata.EventLoopEnginesError)
+	}
+}
 
 func TestCaptureEventLoopEnginesStoresTheFetchedReportsForEveryRun(t *testing.T) {
 	root := t.TempDir()

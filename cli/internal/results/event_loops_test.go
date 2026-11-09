@@ -179,9 +179,28 @@ func TestMissingEventLoopsFilesNeedsAFetchedCopy(t *testing.T) {
 	if got := MissingEventLoopsFiles(&StepManifest{StepID: "s1"}, threeHosts, 1); got != nil {
 		t.Fatalf("one engine = %+v, want none", got)
 	}
-	failed := &StepManifest{StepID: "s1", Files: []FileStatus{{Name: "s1.event.loops.node-000.json", Status: "error"}}}
-	if got := MissingEventLoopsFiles(failed, threeHosts, 2); got != nil {
-		t.Fatalf("a copy that failed to download is not a fetched one, got %+v", got)
+	// A copy the index listed but that failed to download shows the engines write the report: it
+	// and the unlisted copy are both missing.
+	failed := &StepManifest{StepID: "s1", Files: []FileStatus{{Name: "s1.event.loops.node-000.json", Status: fileStatusError}}}
+	wantFailed := []NicNodeFile{
+		{Name: "s1.event.loops.node-000.json", Node: 0, Host: "worker-a.example"},
+		{Name: "s1.event.loops.node-001.json", Node: 1},
+	}
+	if got := MissingEventLoopsFiles(failed, threeHosts, 2); !reflect.DeepEqual(got, wantFailed) {
+		t.Fatalf("a listed copy that failed to download: missing = %+v, want %+v", got, wantFailed)
+	}
+	optional := &StepManifest{StepID: "s1", Files: []FileStatus{{Name: "s1.event.loops.json", Status: fileStatusMissing}}}
+	if got := MissingEventLoopsFiles(optional, threeHosts, 2); got != nil {
+		t.Fatalf("an unlisted optional report is no evidence, got %+v", got)
+	}
+	uncopied := &StepManifest{StepID: "s1", Files: []FileStatus{ok("s1.event.loops.json")}}
+	wantAll := []NicNodeFile{
+		{Name: "s1.event.loops.node-000.json", Node: 0, Host: "worker-a.example"},
+		// Two of three hosts took part, so the worker's host is not guessed.
+		{Name: "s1.event.loops.node-001.json", Node: 1},
+	}
+	if got := MissingEventLoopsFiles(uncopied, threeHosts, 2); !reflect.DeepEqual(got, wantAll) {
+		t.Fatalf("the Entry Node's own report without copies: missing = %+v, want %+v", got, wantAll)
 	}
 }
 
@@ -198,12 +217,14 @@ func TestReadEventLoopEnginesReadsEachParticipantsReportInNodeOrder(t *testing.T
 	writeNicSetFixture(t, dir, "s2."+constants.ResultsArtifactSuffixMetricsTotal, "OpType,NodeCount\nREAD,1\n")
 	writeNicSetFixture(t, dir, "s2.event.loops.json", `{"schema_version":1,"step_id":"s2","hardware_threads":8,
 		"event_loops":0,"contexts":[]}`)
-	// A step without metrics totals expects no report.
-	writeNicSetFixture(t, dir, "s3.event.loops.json", `{"schema_version":1,"step_id":"s3"}`)
+	// A step without metrics totals, such as a read's seed step, keeps the report it has.
+	writeNicSetFixture(t, dir, "s3.event.loops.json", `{"schema_version":1,"engine_run_id":7,"step_id":"s3",
+		"hardware_threads":6,"event_loops":4,"contexts":[
+		{"context_index":0,"route":"default","driver_threads":0,"source":"default","event_loops":4}]}`)
 	// A step whose engines predate the report.
 	writeNicSetFixture(t, dir, "s4."+constants.ResultsArtifactSuffixMetricsTotal, "OpType,NodeCount\nREAD,1\n")
 
-	engines, err := ReadEventLoopEngines(dir, []string{"s1", "s2", "s3", "s4"}, threeHosts)
+	engines, err := ReadEventLoopEngines(dir, []string{"s1", "s2", "s3", "s4"}, threeHosts, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,11 +239,14 @@ func TestReadEventLoopEnginesReadsEachParticipantsReportInNodeOrder(t *testing.T
 			}},
 		},
 		"s2": {{Node: 0, Host: "worker-a.example", HardwareThreads: 8}},
+		"s3": {{Node: 0, Host: "worker-a.example", HardwareThreads: 6, EventLoops: 4, Contexts: []EventLoopContext{
+			{Route: EventLoopRouteDefault, Source: EventLoopSourceDefault, EventLoops: 4},
+		}}},
 	}
 	if !reflect.DeepEqual(engines, want) {
 		t.Fatalf("engines = %+v\nwant %+v", engines, want)
 	}
-	if got, _ := ReadEventLoopEngines(dir, []string{"s4"}, threeHosts); got != nil {
+	if got, _ := ReadEventLoopEngines(dir, []string{"s4"}, threeHosts, 0); got != nil {
 		t.Fatalf("results without the report = %+v, want none", got)
 	}
 }
@@ -237,7 +261,7 @@ func TestReadEventLoopEnginesNamesAReportItCannotRead(t *testing.T) {
 	writeNicSetFixture(t, dir, "step.event.loops.json", `{"schema_version":1,"step_id":"other"}`)
 	writeNicSetFixture(t, dir, "good.event.loops.json", `{"schema_version":1,"step_id":"good","hardware_threads":6,
 		"event_loops":4,"contexts":[{"context_index":0,"route":"default","driver_threads":0,"source":"default","event_loops":4}]}`)
-	engines, err := ReadEventLoopEngines(dir, []string{"bad", "schema", "step", "good"}, RunNodes{})
+	engines, err := ReadEventLoopEngines(dir, []string{"bad", "schema", "step", "good"}, RunNodes{}, 0)
 	if err == nil {
 		t.Fatal("unreadable reports were not named")
 	}
@@ -248,5 +272,44 @@ func TestReadEventLoopEnginesNamesAReportItCannotRead(t *testing.T) {
 	}
 	if len(engines) != 1 || len(engines["good"]) != 1 || engines["good"][0].EventLoops != 4 {
 		t.Fatalf("the readable report was not kept: %+v", engines)
+	}
+}
+
+func TestReadEventLoopEnginesRefusesAReportFromAnotherRun(t *testing.T) {
+	dir := t.TempDir()
+	for _, step := range []string{"old", "now"} {
+		writeNicSetFixture(t, dir, step+"."+constants.ResultsArtifactSuffixMetricsTotal, "OpType,NodeCount\nREAD,1\n")
+	}
+	report := `{"schema_version":1,"engine_run_id":%d,"step_id":"%s","hardware_threads":192,"event_loops":24,
+		"contexts":[{"context_index":0,"route":"default","driver_threads":0,"source":"default","event_loops":24}]}`
+	writeNicSetFixture(t, dir, "old.event.loops.json", fmt.Sprintf(report, 101, "old"))
+	writeNicSetFixture(t, dir, "now.event.loops.json", fmt.Sprintf(report, 102, "now"))
+
+	engines, err := ReadEventLoopEngines(dir, []string{"old", "now"}, RunNodes{}, 102)
+	if err == nil || !strings.Contains(err.Error(), "old.event.loops.json: engine_run_id 101, want 102") {
+		t.Fatalf("an earlier run's report was not refused: %v", err)
+	}
+	if _, kept := engines["old"]; kept || len(engines["now"]) != 1 {
+		t.Fatalf("engines = %+v, want only this run's report", engines)
+	}
+}
+
+func TestReadEventLoopEnginesReadsTheNodeCopiesOfAStepWithoutTotals(t *testing.T) {
+	dir := t.TempDir()
+	report := `{"schema_version":1,"step_id":"seed","hardware_threads":%d,"event_loops":4,
+		"contexts":[{"context_index":0,"route":"default","driver_threads":0,"source":"default","event_loops":4}]}`
+	writeNicSetFixture(t, dir, "seed.event.loops.node-002.json", fmt.Sprintf(report, 32))
+	writeNicSetFixture(t, dir, "seed.event.loops.node-000.json", fmt.Sprintf(report, 6))
+	writeNicSetFixture(t, dir, "seed.event.loops.node-1.json", fmt.Sprintf(report, 1))
+	writeNicSetFixture(t, dir, "seed2.event.loops.node-001.json", fmt.Sprintf(report, 1))
+
+	engines, err := ReadEventLoopEngines(dir, []string{"seed"}, threeHosts, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := engines["seed"]
+	if len(got) != 2 || got[0].Node != 0 || got[0].Host != "worker-a.example" || got[0].HardwareThreads != 6 ||
+		got[1].Node != 2 || got[1].Host != "" || got[1].HardwareThreads != 32 {
+		t.Fatalf("seed = %+v, want node-000 and node-002 in order, a worker's host unguessed", got)
 	}
 }

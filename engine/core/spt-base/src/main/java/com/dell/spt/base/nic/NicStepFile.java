@@ -50,4 +50,17 @@ final class NicStepFile {
 			}
 		}
 	}
+
+	/**
+	 * Removes {@code logger}'s file of the step if an earlier step with the same id left one.
+	 *
+	 * @throws IllegalStateException when it cannot be removed
+	 */
+	static void discard(final Logger logger, final String stepId, final String what) {
+		try {
+			Files.deleteIfExists(Path.of(FileManager.INSTANCE.logFileName(logger.getName(), stepId)));
+		} catch (final IOException e) {
+			throw new IllegalStateException("failed to remove an earlier " + what + " file", e);
+		}
+	}
 }

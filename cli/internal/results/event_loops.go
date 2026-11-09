@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -47,6 +49,7 @@ type EventLoopContext struct {
 
 type eventLoopsReport struct {
 	SchemaVersion   int                     `json:"schema_version"`
+	EngineRunID     int64                   `json:"engine_run_id"`
 	StepID          string                  `json:"step_id"`
 	HardwareThreads int                     `json:"hardware_threads"`
 	EventLoops      int                     `json:"event_loops"`
@@ -123,23 +126,23 @@ func ExpectedEventLoopsFiles(stepID string, nodes RunNodes, participants int) []
 }
 
 // MissingEventLoopsFiles returns the node copies of a distributed step's event-loop reports that
-// its index does not list as fetched, once at least one is. A step with one participant, or with
-// no copy at all, came from engines that may predate the report, so nothing is missing.
+// were not fetched, once the step's engines are shown to write them: its index listed one of the
+// copies, even one whose download failed, or the Entry Node's own report, which shows its copies
+// were never made. A step with one participant, or whose index lists no report at all, came from
+// engines that may predate the report, so nothing is missing.
 func MissingEventLoopsFiles(sm *StepManifest, nodes RunNodes, participants int) []NicNodeFile {
 	if sm == nil || participants < 2 {
 		return nil
 	}
-	expected := ExpectedEventLoopsFiles(sm.StepID, nodes, participants)
+	written := stepFileListed(sm, sm.StepID+"."+constants.ResultsArtifactSuffixEventLoops)
 	var missing []NicNodeFile
-	fetched := 0
-	for _, file := range expected {
-		if stepFileFetched(sm, file.Name) {
-			fetched++
-		} else {
+	for _, file := range ExpectedEventLoopsFiles(sm.StepID, nodes, participants) {
+		written = written || stepFileListed(sm, file.Name)
+		if !stepFileFetched(sm, file.Name) {
 			missing = append(missing, file)
 		}
 	}
-	if fetched == 0 {
+	if !written {
 		return nil
 	}
 	return missing
@@ -148,6 +151,17 @@ func MissingEventLoopsFiles(sm *StepManifest, nodes RunNodes, participants int) 
 func stepFileFetched(sm *StepManifest, name string) bool {
 	for _, status := range sm.Files {
 		if status.Name == name && status.Status == fileStatusOK {
+			return true
+		}
+	}
+	return false
+}
+
+// stepFileListed reports whether the step's index listed the file, whether or not its download
+// succeeded.
+func stepFileListed(sm *StepManifest, name string) bool {
+	for _, status := range sm.Files {
+		if status.Name == name && status.Status != fileStatusMissing {
 			return true
 		}
 	}
@@ -188,19 +202,21 @@ func (f *Fetcher) recordMissingEventLoopFiles(sm *StepManifest, nodes RunNodes) 
 }
 
 // ReadEventLoopEngines reads the event-loop reports fetched into dir, per step in node order,
-// for each step's participants. A step without metrics totals or a report that is absent adds
-// nothing; a report that cannot be read is skipped and named in the returned error. A step whose
-// engines all report no contexts is kept, with empty contexts.
-func ReadEventLoopEngines(dir string, stepIDs []string, nodes RunNodes) (map[string][]EventLoopEngine, error) {
+// for each step's participants, or for a step without metrics totals, such as a read's seed step,
+// the reports it has. A report that is absent adds nothing; one that cannot be read, or that
+// belongs to another run than runID when runID is above 0, is skipped and named in the returned
+// error. A step whose engines all report no contexts is kept, with empty contexts.
+func ReadEventLoopEngines(dir string, stepIDs []string, nodes RunNodes, runID int64) (map[string][]EventLoopEngine, error) {
 	var out map[string][]EventLoopEngine
 	var errs []error
 	for _, stepID := range stepIDs {
-		participants, err := metricsTotalsNodeCount(filepath.Join(dir, stepID+"."+constants.ResultsArtifactSuffixMetricsTotal))
+		files, err := eventLoopsFilesOf(dir, stepID, nodes)
 		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", stepID, err))
 			continue
 		}
-		for _, expected := range ExpectedEventLoopsFiles(stepID, nodes, participants) {
-			engine, err := readEventLoopsReport(filepath.Join(dir, expected.Name), stepID)
+		for _, expected := range files {
+			engine, err := readEventLoopsReport(filepath.Join(dir, expected.Name), stepID, runID)
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
@@ -219,7 +235,45 @@ func ReadEventLoopEngines(dir string, stepIDs []string, nodes RunNodes) (map[str
 	return out, errors.Join(errs...)
 }
 
-func readEventLoopsReport(path, stepID string) (EventLoopEngine, error) {
+// eventLoopsFilesOf lists the reports to read for a step: one per participant in its metrics
+// totals, or, for a step without totals, its single engine's report if there is one, otherwise
+// the node copies that were fetched.
+func eventLoopsFilesOf(dir, stepID string, nodes RunNodes) ([]NicNodeFile, error) {
+	participants, err := metricsTotalsNodeCount(filepath.Join(dir, stepID+"."+constants.ResultsArtifactSuffixMetricsTotal))
+	switch {
+	case err == nil && participants > 0:
+		return ExpectedEventLoopsFiles(stepID, nodes, participants), nil
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		return nil, nil // The totals' own reader reports a broken file.
+	}
+	single := stepID + "." + constants.ResultsArtifactSuffixEventLoops
+	if _, err := os.Stat(filepath.Join(dir, single)); err == nil {
+		return []NicNodeFile{{Name: single, Node: 0, Host: sliceHost(nodes, 0, 1)}}, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	prefix := stepID + ".event.loops.node-"
+	var out []NicNodeFile
+	for _, entry := range entries {
+		name := entry.Name()
+		digits, ok := strings.CutSuffix(strings.TrimPrefix(name, prefix), ".json")
+		if !ok || len(digits) != 3 || !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		node, err := strconv.Atoi(digits)
+		if err != nil || node < 0 || EventLoopsNodeFileName(stepID, node) != name {
+			continue
+		}
+		// The participants are unknown, so only nicNodes or the Entry Node name a host.
+		out = append(out, NicNodeFile{Name: name, Node: node, Host: sliceHost(nodes, node, 0)})
+	}
+	slices.SortFunc(out, func(a, b NicNodeFile) int { return a.Node - b.Node })
+	return out, nil
+}
+
+func readEventLoopsReport(path, stepID string, runID int64) (EventLoopEngine, error) {
 	data, err := os.ReadFile(path) // #nosec G304 -- path is under the selected results directory
 	if err != nil {
 		return EventLoopEngine{}, err
@@ -233,6 +287,9 @@ func readEventLoopsReport(path, stepID string) (EventLoopEngine, error) {
 	}
 	if report.StepID != stepID {
 		return EventLoopEngine{}, fmt.Errorf("step_id %q, want %q", report.StepID, stepID)
+	}
+	if runID > 0 && report.EngineRunID != runID {
+		return EventLoopEngine{}, fmt.Errorf("engine_run_id %d, want %d: a report from another run", report.EngineRunID, runID)
 	}
 	engine := EventLoopEngine{HardwareThreads: report.HardwareThreads, EventLoops: report.EventLoops}
 	for _, entry := range report.Contexts {

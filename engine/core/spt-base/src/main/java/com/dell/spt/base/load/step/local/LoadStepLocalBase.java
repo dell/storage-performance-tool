@@ -193,6 +193,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		operationLifecycleWorkerId = UUID.randomUUID().toString();
 		operationLifecyclePublished = false;
 		nicPathsPublished = false;
+		discardEarlierEventLoops();
 		if (standaloneDeleteEnabled()) {
 			expectedDeleteObjectLifecycleContexts = List.copyOf(stepContexts);
 		}
@@ -1088,6 +1089,15 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	}
 
 	/** Each expected context's driver loops, in context order; contexts that own none are left out. */
+	/** A report an earlier step with this id left must not pass for this one's (see publishEventLoops). */
+	private void discardEarlierEventLoops() {
+		try (final var logContext = put(KEY_STEP_ID, loadStepId())) {
+			EventLoopsArtifact.discardEarlier(loadStepId());
+		} catch (final RuntimeException e) {
+			LogUtil.exception(Level.WARN, e, "{}: failed to remove an earlier event loops file", loadStepId());
+		}
+	}
+
 	private void publishEventLoops() {
 		try (final var logContext = put(KEY_STEP_ID, loadStepId())) {
 			final var loops = new ArrayList<EventLoopsArtifact.Context>();

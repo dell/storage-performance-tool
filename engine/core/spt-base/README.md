@@ -448,6 +448,8 @@ empty when none does (a driver that is not Netty-based). `route` is `default` or
 as created: on the default route its one group, `max(4, hardware_threads / 8)` by default;
 on a NIC set its per-NIC groups and its base group, the NIC-set report's
 `total_event_loops`. The top-level `event_loops` is the engine's total over its contexts.
-Unlike the NIC files, a report or node copy left by an earlier step with the same id is
-replaced, so the file describes the step that ran last.
+Unlike the NIC files, a report an earlier step with the same id left is removed when the step
+starts, and its node copies are replaced, so the file describes the step that ran last and a
+step that fails to write its own has none. Only the driver's I/O groups count: a resolver's
+own loop does not.
 Added fields keep schema version 1.

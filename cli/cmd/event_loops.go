@@ -6,13 +6,14 @@ import (
 )
 
 // captureEventLoopEngines stores the event-loop reports fetched into root (D88), for every run.
-// The pre-summary metadata write keeps them. A report that cannot be read is recorded and never
-// fails the run; results from engines without the report store nothing.
+// The pre-summary metadata write keeps them. A report that cannot be read, or that another run
+// left, is recorded and never fails the run; results from engines without the report store
+// nothing.
 func captureEventLoopEngines(root string, stepIDs []string, metadata *runMetadata) {
 	if metadata == nil {
 		return
 	}
-	engines, err := results.ReadEventLoopEngines(root, stepIDs, metadata.runNodes())
+	engines, err := results.ReadEventLoopEngines(root, stepIDs, metadata.runNodes(), metadata.runID)
 	metadata.EventLoopEngines = engines
 	metadata.EventLoopEnginesError = ""
 	if err != nil {

@@ -44,6 +44,14 @@ public final class EventLoopsArtifact {
 						json(runId, stepId, workerId, ThreadUtil.getHardwareThreadCount(), contexts) + "\n", true);
 	}
 
+	/**
+	 * Removes a report an earlier step with the same id left, at the step's start, so a step that
+	 * never publishes its own has none rather than an older one.
+	 */
+	public static void discardEarlier(final String stepId) {
+		NicStepFile.discard(Loggers.EVENT_LOOPS, stepId, "event loops");
+	}
+
 	public static String json(final long runId, final String stepId, final String workerId, final int hardwareThreads,
 					final List<Context> contexts) {
 		final ObjectNode root = MAPPER.createObjectNode();

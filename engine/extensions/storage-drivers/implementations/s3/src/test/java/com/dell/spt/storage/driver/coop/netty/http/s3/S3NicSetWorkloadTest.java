@@ -616,6 +616,20 @@ final class S3NicSetWorkloadTest {
 		assertEquals(0, report.get("event_loops").asInt());
 		assertFalse(report.has("contexts"));
 		Files.delete(setFile);
+
+		// The failed start still writes its event-loop report at close: a NIC set that never opened
+		// owns only its base group of two loops.
+		final var loopsFile = eventLoopsFile(stepId);
+		final var loops = MAPPER.readTree(loopsFile.toFile());
+		assertEquals(stepId, loops.get("step_id").asText());
+		assertEquals(1, loops.get("contexts").size(), () -> "report: " + loops);
+		final var context = loops.get("contexts").get(0);
+		assertEquals("nic_set", context.get("route").asText());
+		assertEquals(1, context.get("driver_threads").asInt());
+		assertEquals("storage.driver.threads", context.get("source").asText());
+		assertEquals(2, context.get("event_loops").asInt());
+		assertEquals(2, loops.get("event_loops").asInt());
+		Files.delete(loopsFile);
 	}
 
 	/**

@@ -59,5 +59,6 @@ class LogServletEventLoopsArtifactTest {
 		new LogServlet().doHead(req, resp);
 
 		verify(resp, never()).setStatus(HttpStatus.OK_200);
+		verify(resp).sendError(HttpStatus.NOT_FOUND_404);
 	}
 }
