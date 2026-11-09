@@ -70,13 +70,11 @@ func engineEventLoops(engine results.EventLoopEngine) string {
 	if len(engine.Contexts) == 0 {
 		return ""
 	}
-	first := engine.Contexts[0]
-	for _, context := range engine.Contexts[1:] {
-		if context.Route != first.Route || context.Source != first.Source || context.EventLoops != first.EventLoops {
-			return fmt.Sprintf("%d (%d drivers; see eventLoopEngines in spt_run_params.json)",
-				engine.EventLoops, len(engine.Contexts))
-		}
+	if !contextsAgree(engine.Contexts) {
+		return fmt.Sprintf("%d (%d drivers; see eventLoopEngines in spt_run_params.json)",
+			engine.EventLoops, len(engine.Contexts))
 	}
+	first := engine.Contexts[0]
 	var parts []string
 	if n := len(engine.Contexts); n > 1 {
 		parts = append(parts, fmt.Sprintf("%d drivers × %d", n, first.EventLoops))
@@ -84,13 +82,30 @@ func engineEventLoops(engine results.EventLoopEngine) string {
 	if first.Route == results.EventLoopRouteNicSet {
 		parts = append(parts, "NIC set")
 	}
-	switch first.Source {
-	case results.EventLoopSourceDefault:
-		parts = append(parts, "default", fmt.Sprintf("%d hardware threads", engine.HardwareThreads))
-	case "":
-		parts = append(parts, "source not reported")
-	default:
-		parts = append(parts, first.Source)
-	}
+	parts = append(parts, eventLoopsSource(first.Source, engine.HardwareThreads)...)
 	return fmt.Sprintf("%d (%s)", engine.EventLoops, strings.Join(parts, ", "))
+}
+
+// contextsAgree reports whether every context has the first one's route, source and loops.
+func contextsAgree(contexts []results.EventLoopContext) bool {
+	first := contexts[0]
+	for _, context := range contexts[1:] {
+		if context.Route != first.Route || context.Source != first.Source || context.EventLoops != first.EventLoops {
+			return false
+		}
+	}
+	return true
+}
+
+// eventLoopsSource describes what sized the loops: the default, with the host's hardware
+// threads it divides, or the setting that replaced it.
+func eventLoopsSource(source string, hardwareThreads int) []string {
+	switch source {
+	case results.EventLoopSourceDefault:
+		return []string{"default", fmt.Sprintf("%d hardware threads", hardwareThreads)}
+	case "":
+		return []string{"source not reported"}
+	default:
+		return []string{source}
+	}
 }

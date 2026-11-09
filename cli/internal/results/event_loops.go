@@ -251,27 +251,39 @@ func eventLoopsFilesOf(dir, stepID string, nodes RunNodes) ([]NicNodeFile, error
 	if _, err := os.Stat(filepath.Join(dir, single)); err == nil {
 		return []NicNodeFile{{Name: single, Node: 0, Host: sliceHost(nodes, 0, 1)}}, nil
 	}
+	return eventLoopsNodeFilesIn(dir, stepID, nodes)
+}
+
+// eventLoopsNodeFilesIn lists the step's node copies of its report in dir, in node order.
+func eventLoopsNodeFilesIn(dir, stepID string, nodes RunNodes) ([]NicNodeFile, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	prefix := stepID + ".event.loops.node-"
 	var out []NicNodeFile
 	for _, entry := range entries {
-		name := entry.Name()
-		digits, ok := strings.CutSuffix(strings.TrimPrefix(name, prefix), ".json")
-		if !ok || len(digits) != 3 || !strings.HasPrefix(name, prefix) {
-			continue
+		if node, ok := eventLoopsNodeOf(entry.Name(), stepID); ok {
+			// The participants are unknown, so only nicNodes or the Entry Node name a host.
+			out = append(out, NicNodeFile{Name: entry.Name(), Node: node, Host: sliceHost(nodes, node, 0)})
 		}
-		node, err := strconv.Atoi(digits)
-		if err != nil || node < 0 || EventLoopsNodeFileName(stepID, node) != name {
-			continue
-		}
-		// The participants are unknown, so only nicNodes or the Entry Node name a host.
-		out = append(out, NicNodeFile{Name: name, Node: node, Host: sliceHost(nodes, node, 0)})
 	}
 	slices.SortFunc(out, func(a, b NicNodeFile) int { return a.Node - b.Node })
 	return out, nil
+}
+
+// eventLoopsNodeOf is the node whose copy of the step's report name is, if it is one exactly
+// as EventLoopsNodeFileName names it.
+func eventLoopsNodeOf(name, stepID string) (int, bool) {
+	prefix := stepID + ".event.loops.node-"
+	digits, ok := strings.CutSuffix(strings.TrimPrefix(name, prefix), ".json")
+	if !ok || len(digits) != 3 || !strings.HasPrefix(name, prefix) {
+		return 0, false
+	}
+	node, err := strconv.Atoi(digits)
+	if err != nil || node < 0 || EventLoopsNodeFileName(stepID, node) != name {
+		return 0, false
+	}
+	return node, true
 }
 
 func readEventLoopsReport(path, stepID string, runID int64) (EventLoopEngine, error) {
