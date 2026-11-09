@@ -18,6 +18,7 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.epoll.Epoll;
 import io.netty.channel.epoll.EpollEventLoopGroup;
 import io.netty.channel.epoll.EpollSocketChannel;
+import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.pool.AbstractChannelPoolHandler;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import io.netty.util.concurrent.EventExecutor;
@@ -80,6 +81,20 @@ class NicSetConnectionPoolTest {
 		}
 		for (final var group : groups) {
 			group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
+		}
+	}
+
+	/** A trial's mark ends with the attempt that gives the channel back, so a later attempt on the channel ends no trial. */
+	@Test
+	void aTrialMarkEndsOnceSoTheChannelsNextAttemptEndsNoTrial() {
+		final var channel = new EmbeddedChannel();
+		try {
+			assertFalse(NicSetConnectionPool.endsTrial(channel), "an unmarked channel carried no trial");
+			NicSetConnectionPool.markTrial(channel);
+			assertTrue(NicSetConnectionPool.endsTrial(channel), "the trial's own attempt ends it");
+			assertFalse(NicSetConnectionPool.endsTrial(channel), "the channel's next attempt ends no trial");
+		} finally {
+			channel.finishAndReleaseAll();
 		}
 	}
 

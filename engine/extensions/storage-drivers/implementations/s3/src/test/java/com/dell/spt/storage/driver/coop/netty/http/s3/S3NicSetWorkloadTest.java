@@ -79,6 +79,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
@@ -479,7 +480,13 @@ final class S3NicSetWorkloadTest {
 	void withoutALimitAnOlderAttemptsEndLetsNoSecondTrialStart() throws Exception {
 		final var endpoints = stub.listeners(2);
 		final var run = started(endpoints, nics(2), 0, false);
-		assertEquals(SUCC, run.execute(dataOp(OpType.CREATE, "before")).status());
+		// One write on each NIC: a connection's 2 s timeout counts from its last read, so NIC 1's
+		// connection must have read a response just before the older write uses it.
+		final long warm1 = requestsOn(1);
+		for (var i = 0; requestsOn(1) == warm1; i++) {
+			assertTrue(i < 4, "no warm-up write reached NIC 1");
+			assertEquals(SUCC, run.execute(dataOp(OpType.CREATE, "before-" + i)).status());
+		}
 		final var admission = run.pool().admission();
 		stub.holdOnListener = listener -> listener == 1;
 		stub.hold();
@@ -490,7 +497,7 @@ final class S3NicSetWorkloadTest {
 			assertTrue(run.driver().put(dataOp(OpType.CREATE, "older-" + submitted)));
 		}
 		waitFor(() -> requestsOn(0) - earlier0 == 1 && requestsOn(1) - earlier1 == 1, "one write on each NIC, NIC 1's held");
-		// The held write times out 2 s after it started; the trial starts at least 1 s after it.
+		// The held write times out about 2 s after it started; the trial starts at least 1 s after it.
 		Thread.sleep(1_000);
 
 		final var dropped = new AtomicBoolean();
@@ -501,6 +508,7 @@ final class S3NicSetWorkloadTest {
 			assertTrue(run.driver().put(dataOp(OpType.CREATE, "failing-" + submitted++)));
 			Thread.sleep(20);
 		}
+		assertTrue(dropped.get(), "the drop failed NIC 1, not the older write's timeout before it");
 		final long beforeTrial = requestsOn(1);
 		while (requestsOn(1) == beforeTrial) {
 			assertTrue(System.nanoTime() < deadline, "no trial on NIC 1");
@@ -509,12 +517,17 @@ final class S3NicSetWorkloadTest {
 		}
 		assertTrue(admission.trialRunning(1), "NIC 1's trial runs, held");
 
+		final Predicate<Operation<?>> olderOnNic1 = result -> result.item().name().startsWith("/bucket/older-")
+						&& endpoints.get(1).equals(result.nodeAddr());
 		var consumed = 0;
+		for (Operation<?> result; (result = run.results().poll(0)) != null; consumed++) {
+			assertFalse(olderOnNic1.test(result), "the older write ended before the trial started");
+		}
 		Operation<?> older = null;
 		while (older == null) {
 			final var result = run.results().await();
 			consumed++;
-			if (result.item().name().startsWith("/bucket/older-") && endpoints.get(1).equals(result.nodeAddr())) {
+			if (olderOnNic1.test(result)) {
 				older = result;
 			}
 		}
