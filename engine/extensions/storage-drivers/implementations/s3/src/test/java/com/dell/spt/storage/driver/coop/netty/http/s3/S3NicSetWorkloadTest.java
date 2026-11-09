@@ -54,6 +54,7 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
+import com.dell.spt.base.nic.EventLoopsArtifact;
 import com.dell.spt.base.nic.NicPathRows;
 import com.dell.spt.base.nic.NicPathsArtifact;
 import com.dell.spt.storage.driver.coop.netty.EventLoopDefaults;
@@ -633,6 +634,34 @@ final class S3NicSetWorkloadTest {
 	}
 
 	/**
+	 * A step's start removes the event-loop report and node copies an earlier step with its id left,
+	 * so a step that never writes its own has none, and keeps another step's.
+	 */
+	@Test
+	void aStepStartRemovesTheEventLoopReportsAnEarlierStepWithItsIdLeft() throws Exception {
+		final var stepId = "event-loops-earlier-" + System.nanoTime();
+		final var earlier = eventLoopsFile(stepId);
+		final var dir = earlier.toAbsolutePath().getParent();
+		Files.createDirectories(dir);
+		final var copy = dir.resolve("event.loops.node-002.json");
+		final var other = dir.resolve("event.loops.node-2.json");
+		final var nicCopy = dir.resolve("nic.set.node-002.json");
+		for (final var file : List.of(earlier, copy, other, nicCopy)) {
+			Files.writeString(file, "earlier\n");
+		}
+
+		EventLoopsArtifact.discardEarlier(stepId);
+		EventLoopsArtifact.discardEarlier(stepId);
+
+		assertFalse(Files.exists(earlier));
+		assertFalse(Files.exists(copy));
+		assertTrue(Files.exists(other), "only node-NNN copies of the report are removed");
+		assertTrue(Files.exists(nicCopy), "the NIC files keep their own rule");
+		Files.delete(other);
+		Files.delete(nicCopy);
+	}
+
+	/**
 	 * A step without a NIC set writes no per-path file (item 18), and its event-loop report replaces
 	 * one an earlier step with the same id left.
 	 */
@@ -642,6 +671,9 @@ final class S3NicSetWorkloadTest {
 		final var earlier = eventLoopsFile(stepId);
 		Files.createDirectories(earlier.toAbsolutePath().getParent());
 		Files.writeString(earlier, "earlier\n");
+		// Only the step's start removes a node copy: a single engine publishes none.
+		final var earlierCopy = earlier.resolveSibling("event.loops.node-001.json");
+		Files.writeString(earlierCopy, "earlier\n");
 		final var outcomes = runScenario(stub.listeners(1), null, stepId, """
 						Load.config({"load": {"step": {"limit": {"time": "30s"}}}}).run();
 						""");
@@ -652,6 +684,8 @@ final class S3NicSetWorkloadTest {
 		// It still reports its default-route loops, as built.
 		final var loopsFile = eventLoopsFile(stepId);
 		final var loops = MAPPER.readTree(loopsFile.toFile());
+		assertEquals(778L, loops.get("engine_run_id").asLong(), "the CLI refuses a report from another run");
+		assertFalse(Files.exists(earlierCopy), "the step's start removed the earlier node copy");
 		assertEquals(ThreadUtil.getHardwareThreadCount(), loops.get("hardware_threads").asInt());
 		final var context = loops.get("contexts").get(0);
 		assertEquals("default", context.get("route").asText());

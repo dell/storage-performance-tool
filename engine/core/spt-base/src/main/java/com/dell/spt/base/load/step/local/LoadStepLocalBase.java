@@ -1088,7 +1088,6 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		}
 	}
 
-	/** Each expected context's driver loops, in context order; contexts that own none are left out. */
 	/** A report an earlier step with this id left must not pass for this one's (see publishEventLoops). */
 	private void discardEarlierEventLoops() {
 		try (final var logContext = put(KEY_STEP_ID, loadStepId())) {
@@ -1098,6 +1097,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		}
 	}
 
+	/** Each expected context's driver loops, in context order; contexts that own none are left out. */
 	private void publishEventLoops() {
 		try (final var logContext = put(KEY_STEP_ID, loadStepId())) {
 			final var loops = new ArrayList<EventLoopsArtifact.Context>();

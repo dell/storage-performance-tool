@@ -193,6 +193,12 @@ func TestMissingEventLoopsFilesNeedsAFetchedCopy(t *testing.T) {
 	if got := MissingEventLoopsFiles(optional, threeHosts, 2); got != nil {
 		t.Fatalf("an unlisted optional report is no evidence, got %+v", got)
 	}
+	// The collector moved the Entry Node's report between the index and its download.
+	moved := &StepManifest{StepID: "s1", Files: []FileStatus{
+		{Name: "s1.event.loops.json", Status: fileStatusMissing, Error: "not found"}}}
+	if got := MissingEventLoopsFiles(moved, threeHosts, 2); !reflect.DeepEqual(got, wantFailed) {
+		t.Fatalf("a listed report gone by its download: missing = %+v, want %+v", got, wantFailed)
+	}
 	uncopied := &StepManifest{StepID: "s1", Files: []FileStatus{ok("s1.event.loops.json")}}
 	wantAll := []NicNodeFile{
 		{Name: "s1.event.loops.node-000.json", Node: 0, Host: "worker-a.example"},

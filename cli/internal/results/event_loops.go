@@ -158,10 +158,11 @@ func stepFileFetched(sm *StepManifest, name string) bool {
 }
 
 // stepFileListed reports whether the step's index listed the file, whether or not its download
-// succeeded.
+// succeeded: a listed file that was gone by its download is missing with a reason, where an
+// unlisted optional file is missing without one.
 func stepFileListed(sm *StepManifest, name string) bool {
 	for _, status := range sm.Files {
-		if status.Name == name && status.Status != fileStatusMissing {
+		if status.Name == name && (status.Status != fileStatusMissing || status.Error != "") {
 			return true
 		}
 	}

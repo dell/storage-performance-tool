@@ -45,8 +45,8 @@ public final class EventLoopsArtifact {
 	}
 
 	/**
-	 * Removes a report an earlier step with the same id left, at the step's start, so a step that
-	 * never publishes its own has none rather than an older one.
+	 * Removes a report an earlier step with the same id left, and its node copies, at the step's
+	 * start, so a step that never publishes its own has none rather than an older one.
 	 */
 	public static void discardEarlier(final String stepId) {
 		NicStepFile.discard(Loggers.EVENT_LOOPS, stepId, "event loops");
