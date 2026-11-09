@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
@@ -85,6 +86,86 @@ final class NicAdmissionTest {
 		assertEquals(-1, admission.take());
 		assertFalse(admission.hasRoom());
 		assertEquals(0, admission.room());
+	}
+
+	@Test
+	void aFailingNicTakesNoAttemptWhileItsPoolWouldFailItAndAnotherNicServes() {
+		final var serves = new AtomicBoolean(false);
+		final var admission = NicAdmission.of(4, List.of(() -> true, serves::get));
+		admission.failed(1);
+		assertTrue(admission.isFailing(1));
+		assertFalse(admission.isFailing(0));
+
+		assertEquals(List.of(0, 0), takeAll(admission), "NIC 1 is skipped while its Path backs off");
+		assertFalse(admission.hasRoom());
+		assertEquals(0, admission.room());
+		admission.attemptEnded(0);
+		assertTrue(admission.hasRoom());
+		assertEquals(1, admission.room());
+		assertEquals(List.of(0), takeAll(admission), "the working NIC takes every attempt");
+	}
+
+	@Test
+	void aFailingNicTakesOneTrialAtATimeOnceItsPoolWouldServe() {
+		final var serves = new AtomicBoolean(false);
+		final var admission = NicAdmission.of(4, List.of(() -> true, serves::get));
+		admission.failed(1);
+		assertEquals(0, admission.take());
+		serves.set(true);
+		assertEquals(2, admission.room(), "the working NIC's room and one trial");
+		assertEquals(List.of(1, 0), takeAll(admission), "the trial keeps its place in the rotation");
+		assertFalse(admission.hasRoom(), "no second trial while one is counted");
+		assertEquals(0, admission.room());
+
+		admission.attemptEnded(0);
+		assertEquals(List.of(0), takeAll(admission));
+		admission.failed(1);
+		admission.attemptEnded(1);
+		assertTrue(admission.isFailing(1), "a failed trial keeps the NIC failing");
+		assertEquals(List.of(1), takeAll(admission), "the next trial waits only for the gate");
+	}
+
+	@Test
+	void aTrialThatSucceedsGivesTheNicItsShareAgain() {
+		final var admission = NicAdmission.of(4, List.of(() -> true, () -> true));
+		admission.failed(1);
+		assertEquals(List.of(0, 1, 0), takeAll(admission));
+		admission.succeeded(1);
+		admission.attemptEnded(1);
+		assertFalse(admission.isFailing(1));
+		assertEquals(2, admission.room());
+		assertEquals(List.of(1, 1), takeAll(admission));
+	}
+
+	@Test
+	void whenEveryNicIsFailingTheRotationTakesAnyNicWithRoom() {
+		final var admission = NicAdmission.of(4, List.of(() -> false, () -> false));
+		admission.failed(0);
+		admission.failed(1);
+		assertTrue(admission.hasRoom());
+		assertEquals(4, admission.room());
+		assertEquals(List.of(0, 1, 0, 1), takeAll(admission), "as without failures, so the step fails at the rate of its attempts");
+		assertFalse(admission.hasRoom());
+
+		admission.succeeded(0);
+		admission.attemptEnded(0);
+		admission.attemptEnded(1);
+		assertEquals(1, admission.room(), "a working NIC again: NIC 1 waits for its gate");
+		assertEquals(List.of(0), takeAll(admission));
+	}
+
+	@Test
+	void withoutALimitAFailingNicStillTakesOneWaitingTrialAtATime() {
+		final var serves = new AtomicBoolean(true);
+		final var admission = NicAdmission.of(0, List.of(() -> true, serves::get));
+		admission.failed(1);
+		final var taken = takeAll(admission);
+		assertEquals(1, taken.stream().filter(nic -> nic == 1).count(), taken.toString());
+		admission.waitEnded(1);
+		assertEquals(1, admission.room(), "the trial's wait ended: another may start");
+		serves.set(false);
+		assertEquals(0, admission.room());
+		assertFalse(admission.hasRoom());
 	}
 
 	@Test

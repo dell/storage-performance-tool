@@ -56,6 +56,21 @@ class PathBackoffTest {
 	}
 
 	@Test
+	void rejectsNowAnswersWhatTryConnectWouldDoWithoutStartingATrial() {
+		assertFalse(backoff.rejectsNow(), "a healthy Path");
+		backoff.failed(backoff.tryConnect());
+		assertTrue(backoff.rejectsNow(), "during the interval");
+		advanceMillis(100);
+		assertFalse(backoff.rejectsNow(), "the trial may start");
+		assertFalse(backoff.rejectsNow(), "asking twice starts nothing");
+		final var trial = backoff.tryConnect();
+		assertNotEquals(PathBackoff.REJECTED, trial);
+		assertTrue(backoff.rejectsNow(), "while the trial is pending");
+		backoff.connected();
+		assertFalse(backoff.rejectsNow());
+	}
+
+	@Test
 	void aSuccessfulConnectResetsThePath() {
 		backoff.failed(backoff.tryConnect());
 		advanceMillis(100);

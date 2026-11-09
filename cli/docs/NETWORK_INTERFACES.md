@@ -150,7 +150,7 @@ A step in which any engine has a NIC set, from `--interfaces` or a host override
 
 Item distribution takes little of this on a fast network. On the lab, three workers took a list of 5 million items in 4.5 s, about 1.1 million items per second; at that rate the default would cover several hundred million, though that is an extrapolation from one network and from lists no larger than 5 million. Item files on the CLI's host have a tighter limit first: on each remote host, staging them, all files together, must finish within 30 s.
 
-**During the step,** after a failed connect, that NIC's connects to that endpoint back off from 100 ms, doubling to 5 s; an operation that needs a new connection there fails at once until the next trial, while open connections keep serving. Control requests keep the kernel's route: bucket checks, listing a bucket as a step's item input, and multipart abort.
+**During the step,** after a failed connect, that NIC's connects to that endpoint back off from 100 ms, doubling to 5 s; an operation that needs a new connection there fails at once until the next trial, while open connections keep serving. A NIC whose last attempt got no response (a failed or refused connect, a connect in back-off, a lost connection or a request timeout) is skipped while another NIC is working: it takes one trial operation at a time, none while its connects back off, and its full share again once an attempt on it succeeds. Its share is not given to the other NICs, so the step runs at their shares. When every NIC is failing, operations take the next NIC with room, and the step fails at its failure limit. Control requests keep the kernel's route: bucket checks, listing a bucket as a step's item input, and multipart abort.
 
 ## Results
 

@@ -70,6 +70,11 @@ final class PathBackoff {
 		untilNanos = nanoClock.getAsLong() + TimeUnit.MILLISECONDS.toNanos(intervalMillis(failures));
 	}
 
+	/** Whether {@link #tryConnect()} would reject a connect now; starts no trial. */
+	synchronized boolean rejectsNow() {
+		return failures != 0 && (trialPending || nanoClock.getAsLong() - untilNanos < 0);
+	}
+
 	synchronized boolean inBackoff() {
 		return failures != 0;
 	}

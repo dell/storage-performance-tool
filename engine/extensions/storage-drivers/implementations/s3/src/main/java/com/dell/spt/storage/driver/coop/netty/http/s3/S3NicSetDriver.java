@@ -174,8 +174,15 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 		}
 		// Read before completion, which may hand the operation on.
 		final var lifecycle = op.lifecycle();
-		final var succeeded = op.status() == Operation.Status.SUCC;
+		final var status = op.status();
+		final var succeeded = status == Operation.Status.SUCC;
 		final long bytes = succeeded ? payloadBytes(op) : 0;
+		// Before completion gives back the NIC, so the next choice already sees the outcome (D87).
+		if (succeeded) {
+			nicPool.admission().succeeded(row.nicIndex());
+		} else if (status == Operation.Status.FAIL_IO) {
+			nicPool.admission().failed(row.nicIndex());
+		}
 		super.complete(channel, op);
 		if (terminal(lifecycle)) {
 			if (succeeded) {
@@ -344,6 +351,10 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 		final boolean claimed = withDispatchAdmission(() -> claimCapturedDispatch(op, token));
 		nicSet.logSetupFailure(cause, !claimed);
 		final var admission = nicPool.admission();
+		if (claimed) {
+			// The operation ends FAIL_IO: the NIC is failing (D87), before it is given back.
+			admission.failed(nic);
+		}
 		admission.waitEnded(nic);
 		admission.attemptEnded(nic);
 		concurrencyThrottle.release();

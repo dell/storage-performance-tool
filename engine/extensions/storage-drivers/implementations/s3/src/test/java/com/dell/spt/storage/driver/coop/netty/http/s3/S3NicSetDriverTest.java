@@ -154,7 +154,7 @@ final class S3NicSetDriverTest {
 	}
 
 	@Test
-	void aRefusedConnectFailsTheOperationAsAnIoFailureAndTheRotationGoesOn() throws Exception {
+	void aRefusedConnectFailsTheOperationAsAnIoFailureAndTheNextOperationsSkipThatNic() throws Exception {
 		final var listeners = listeners(2);
 		final var run = started(listeners, List.of(NIC_A, NIC_B), 2);
 		assertEquals(Operation.Status.SUCC, run.executeAlone(dataOp(OpType.CREATE, "before-0")).status());
@@ -166,22 +166,26 @@ final class S3NicSetDriverTest {
 		waitFor(() -> pool.state().get(1).open() == 0, "the closed idle connection is dropped");
 
 		final List<Operation.Status> statuses = new ArrayList<>();
-		for (var i = 0; i < 4; i++) {
+		for (var i = 0; i < 6; i++) {
 			statuses.add(run.executeAlone(dataOp(OpType.CREATE, "after-" + i)).status());
 		}
 
 		final var ok = Operation.Status.SUCC;
 		final var failed = Operation.Status.FAIL_IO;
-		// The failing NIC keeps its turns: no rotation skip (P1).
-		assertEquals(List.of(ok, failed, ok, failed), statuses);
+		assertEquals(List.of(ok, failed), statuses.subList(0, 2), statuses::toString);
+		assertTrue(pool.admission().isFailing(1));
+		// The failing NIC takes no turn while its Path backs off (D87): at most one trial, 100 ms after the refusal.
+		final long later = statuses.subList(2, statuses.size()).stream().filter(failed::equals).count();
+		assertTrue(later <= 1, statuses::toString);
 		assertEquals(0, run.driver().activeOpCount(), "every failed setup released its permit");
 		assertEquals(0, pool.pendingCount());
 		// A refused connect fails on the Path chosen for it.
 		final var rows = stoppedRows(run.driver(), run.driver());
-		assertEquals(List.of(6L, 4L, 2L, 0L, 0L, 4L * ITEM_SIZE), totals(rows), rows::toString);
+		final long refusals = 1 + later;
+		assertEquals(List.of(8L, 8 - refusals, refusals, 0L, 0L, (8 - refusals) * ITEM_SIZE), totals(rows), rows::toString);
 		final var refused = rowsOf(rows, NicPathRows.Kind.PATH).stream().filter(row -> NIC_B.equals(row.nic().iface()))
 						.findFirst().orElseThrow();
-		assertEquals(2, refused.failed(), refused::toString);
+		assertEquals(refusals, refused.failed(), refused::toString);
 	}
 
 	@Test

@@ -111,7 +111,7 @@ public final class NicSetConnectionPool implements NonBlockingConnPool {
 							nanoClock));
 		}
 		this.connectTimeoutMillis = connectTimeoutMillis;
-		this.admission = NicAdmission.of(concurrencyLimit, nics.size());
+		this.admission = NicAdmission.of(concurrencyLimit, built);
 		this.pools = List.copyOf(built);
 	}
 

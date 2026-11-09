@@ -29,8 +29,10 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -354,6 +356,23 @@ final class RdmaNicLoopback implements AutoCloseable {
 
 	void stop(final int index) {
 		servers.get(index).stop(0);
+	}
+
+	/** Waits until {@code endpoint}, a stopped listener's, refuses connections. */
+	static void awaitRefused(final String endpoint) throws InterruptedException {
+		final int port = Integer.parseInt(endpoint.substring(endpoint.lastIndexOf(':') + 1));
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		while (System.nanoTime() < deadline) {
+			try (final var socket = new Socket()) {
+				socket.connect(new InetSocketAddress(InetAddress.getLoopbackAddress(), port), 1_000);
+			} catch (final ConnectException e) {
+				return;
+			} catch (final IOException e) {
+				// retry
+			}
+			Thread.sleep(10);
+		}
+		throw new AssertionError(endpoint + " still accepts connections");
 	}
 
 	List<Request> requests() {

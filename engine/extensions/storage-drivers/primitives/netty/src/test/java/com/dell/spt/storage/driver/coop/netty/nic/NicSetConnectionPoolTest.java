@@ -244,6 +244,38 @@ class NicSetConnectionPoolTest {
 	}
 
 	@Test
+	void aPoolServesAFailingNicOnlyWithAnIdleConnectionOrAConnectItWouldStart() throws Exception {
+		final var a = listener();
+		// No limit, so a connect never waits for a slot.
+		final var pool = open(0, new OpenNic(nic("lo-a", NIC_A, List.of(path("s3-a.example:9000", a))), group("lo-a")),
+						new OpenNic(nic("lo-b", NIC_B, List.of(path("s3-a.example:9000", a))), group("lo-b")));
+		final var nicPool = pool.pools().get(0);
+		assertTrue(nicPool.servesNow(), "a healthy Path");
+		final var held = acquire(nicPool).get(5, TimeUnit.SECONDS);
+		a.stopListening();
+		failure(acquire(nicPool));
+		assertFalse(nicPool.servesNow(), "its only Path backs off");
+
+		nicPool.release(held);
+		assertTrue(nicPool.servesNow(), "an idle connection serves during back-off");
+		assertSame(held, acquire(nicPool).get(5, TimeUnit.SECONDS));
+		assertFalse(nicPool.servesNow());
+
+		final var admission = pool.admission();
+		admission.failed(0);
+		assertEquals(1, admission.take(), "the admission asks the pool: NIC 0 is skipped");
+		advanceMillis(100);
+		assertTrue(nicPool.servesNow(), "the trial may start");
+		assertEquals(0, admission.take(), "and NIC 0 takes it");
+		assertFalse(failure(acquire(nicPool)) instanceof PathBackoffException, "the trial connects and is refused");
+		assertFalse(nicPool.servesNow(), "the failed trial doubles the interval");
+
+		pool.closeAdmission();
+		advanceMillis(10_000);
+		assertFalse(nicPool.servesNow(), "a closed pool serves nothing");
+	}
+
+	@Test
 	void aWaiterWhoseConnectFailsHearsTheFailure() throws Exception {
 		final var a = listener();
 		final var pool = open(1, new OpenNic(nic("lo-a", NIC_A, List.of(path("s3-a.example:9000", a))), group("lo-a")));

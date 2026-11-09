@@ -124,14 +124,24 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver implements NicPathC
 	@Override
 	void transportReleased(final Channel channel, final RangeReadAttempt attempt) {
 		final int nic = NicSetConnectionPool.nicIndex(channel);
+		final var outcome = attempt.outcome();
 		if (nic >= 0) {
+			// Before the NIC is given back, so the next choice already sees the outcome (D87).
+			if (outcome != null) {
+				switch (outcome.category()) {
+				case SUCCESS -> nicPool.admission().succeeded(nic);
+				case TRANSPORT -> nicPool.admission().failed(nic);
+				case HTTP, VALIDATION, UNRESOLVED -> {
+					// The target answered, or the attempt has no outcome yet.
+				}
+				}
+			}
 			nicPool.admission().attemptEnded(nic);
 		}
 		final var row = counters.path(channel);
 		if (row == null) {
 			return;
 		}
-		final var outcome = attempt.outcome();
 		if (outcome == null) {
 			if (!attempt.wasHandedOff()) {
 				row.interrupted();
@@ -226,6 +236,10 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver implements NicPathC
 		}
 		nicSet.logSetupFailure(failure, !counted);
 		final var admission = nicPool.admission();
+		if (counted) {
+			// The attempt ends FAIL_IO: the NIC is failing (D87), before it is given back.
+			admission.failed(nic);
+		}
 		admission.waitEnded(nic);
 		admission.attemptEnded(nic);
 		concurrencyThrottle.release();

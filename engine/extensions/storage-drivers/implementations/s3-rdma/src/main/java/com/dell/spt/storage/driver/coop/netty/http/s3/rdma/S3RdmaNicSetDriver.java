@@ -588,6 +588,12 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		final long bytes = succeeded ? payloadBytes(op) : 0;
 		final boolean carries = carriesPayload(op);
 		final boolean overRdma = succeeded && carries && sent != null && transferred(sent);
+		// Before the NIC is given back, so the next choice already sees the outcome (D87).
+		if (succeeded) {
+			nicPool.admission().succeeded(row.nicIndex());
+		} else if (op.status() == Operation.Status.FAIL_IO) {
+			nicPool.admission().failed(row.nicIndex());
+		}
 		completeTransport(channel, op);
 		if (terminal(lifecycle)) {
 			if (succeeded) {
@@ -613,6 +619,11 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 	void completeTimedOut(final Channel channel, final O op) {
 		final var row = channel == null ? null : channel.attr(ATTR_KEY_ROW).getAndSet(null);
 		final var lifecycle = op.lifecycle();
+		// A timed-out request had no reply: its NIC is failing (D87), even when completion took the row first.
+		final int nic = channel == null ? -1 : NicSetConnectionPool.nicIndex(channel);
+		if (nic >= 0) {
+			nicPool.admission().failed(nic);
+		}
 		completeTransport(channel, op);
 		if (row != null && terminal(lifecycle)) {
 			row.failed();
@@ -906,6 +917,10 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 				releaseContext(context, true);
 			}
 			final var admission = nicPool.admission();
+			if (claimed) {
+				// A failed connect or a Path in back-off: the NIC is failing (D87).
+				admission.failed(nicIndex);
+			}
 			admission.waitEnded(nicIndex);
 			admission.attemptEnded(nicIndex);
 			concurrencyThrottle.release();

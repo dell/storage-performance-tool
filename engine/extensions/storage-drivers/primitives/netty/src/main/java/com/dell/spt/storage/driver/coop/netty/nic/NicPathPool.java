@@ -46,7 +46,7 @@ import java.util.function.LongSupplier;
  * the thread that observes it. {@link #closeAdmission()} and {@link #close()} settle every
  * outstanding acquisition and cancel every pending connect, also after the loops have terminated.
  */
-final class NicPathPool {
+final class NicPathPool implements NicAdmission.Gate {
 
 	static final AttributeKey<NicPath> ATTR_KEY_PATH = AttributeKey.valueOf("nicPath");
 
@@ -298,6 +298,16 @@ final class NicPathPool {
 		} else {
 			connect(connectPath, epoch, attempt);
 		}
+	}
+
+	/**
+	 * Whether an acquisition now would not fail at once: admission is open, and it would take an
+	 * idle connection or connect on the next Path in rotation, which is not in back-off or may start
+	 * its trial. It may still wait for a slot. Asked by the admission only of a failing NIC (D87).
+	 */
+	@Override
+	public synchronized boolean servesNow() {
+		return !admissionClosed && (idle > 0 || !paths.get(nextPath).backoff.rejectsNow());
 	}
 
 	/** Whether an acquisition now would not wait: an idle connection or a free slot. */
