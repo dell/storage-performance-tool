@@ -78,6 +78,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
@@ -466,6 +467,72 @@ final class S3NicSetWorkloadTest {
 			}
 		}
 		assertEquals(requestsOn(1) - earlier, failed, "each request on the failing NIC failed its write, and only those");
+	}
+
+	/**
+	 * D87, without a concurrency limit: an attempt admitted on NIC 1 before it failed is still in
+	 * flight when NIC 1's trial starts, as a NIC counts no attempt past its connection here. That
+	 * older attempt's end, a request timeout, is not the trial's, so it lets no second trial start
+	 * while the first one runs. Only NIC 1's requests are held, so NIC 0 keeps working.
+	 */
+	@Test
+	void withoutALimitAnOlderAttemptsEndLetsNoSecondTrialStart() throws Exception {
+		final var endpoints = stub.listeners(2);
+		final var run = started(endpoints, nics(2), 0, false);
+		assertEquals(SUCC, run.execute(dataOp(OpType.CREATE, "before")).status());
+		final var admission = run.pool().admission();
+		stub.holdOnListener = listener -> listener == 1;
+		stub.hold();
+		final long earlier0 = requestsOn(0);
+		final long earlier1 = requestsOn(1);
+		var submitted = 0;
+		for (; submitted < 2; submitted++) {
+			assertTrue(run.driver().put(dataOp(OpType.CREATE, "older-" + submitted)));
+		}
+		waitFor(() -> requestsOn(0) - earlier0 == 1 && requestsOn(1) - earlier1 == 1, "one write on each NIC, NIC 1's held");
+		// The held write times out 2 s after it started; the trial starts at least 1 s after it.
+		Thread.sleep(1_000);
+
+		final var dropped = new AtomicBoolean();
+		stub.dropOnListener = listener -> listener == 1 && dropped.compareAndSet(false, true);
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		while (!admission.isFailing(1)) {
+			assertTrue(System.nanoTime() < deadline, "NIC 1 never failed");
+			assertTrue(run.driver().put(dataOp(OpType.CREATE, "failing-" + submitted++)));
+			Thread.sleep(20);
+		}
+		final long beforeTrial = requestsOn(1);
+		while (requestsOn(1) == beforeTrial) {
+			assertTrue(System.nanoTime() < deadline, "no trial on NIC 1");
+			assertTrue(run.driver().put(dataOp(OpType.CREATE, "trial-" + submitted++)));
+			Thread.sleep(20);
+		}
+		assertTrue(admission.trialRunning(1), "NIC 1's trial runs, held");
+
+		var consumed = 0;
+		Operation<?> older = null;
+		while (older == null) {
+			final var result = run.results().await();
+			consumed++;
+			if (result.item().name().startsWith("/bucket/older-") && endpoints.get(1).equals(result.nodeAddr())) {
+				older = result;
+			}
+		}
+		assertEquals(Operation.Status.FAIL_IO, older.status(), older::toString);
+		final long trialOnly = requestsOn(1);
+		final var window = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(500);
+		while (System.nanoTime() < window) {
+			assertTrue(run.driver().put(dataOp(OpType.CREATE, "after-" + submitted++)));
+			Thread.sleep(20);
+		}
+		assertEquals(trialOnly, requestsOn(1), "no second trial on NIC 1 while its trial runs");
+		assertTrue(admission.trialRunning(1), "the trial still holds NIC 1");
+
+		stub.release();
+		waitFor(() -> !admission.isFailing(1), "the trial's response ends NIC 1's failing");
+		for (; consumed < submitted; consumed++) {
+			run.results().await();
+		}
 	}
 
 	private long requestsOn(final int listener) {

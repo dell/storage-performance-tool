@@ -121,6 +121,8 @@ final class NicSetLoopback implements AutoCloseable {
 	volatile IntPredicate failObjectRequest = n -> false;
 	/** Which object requests, counted from 1, the stub drops without answering: the connection closes. */
 	volatile IntPredicate dropObjectRequest = n -> false;
+	/** Which listeners' object requests {@link #hold()} holds; every listener's by default. */
+	volatile IntPredicate holdOnListener = listener -> true;
 
 	/** The storage configuration of a driver with these endpoints and NICs. */
 	static Config storage(final List<String> endpoints, final List<String> interfaces, final int concurrency) {
@@ -413,7 +415,8 @@ final class NicSetLoopback implements AutoCloseable {
 					return;
 				}
 				final var held = gate;
-				if (held != null && request.isObjectRequest() && !held.await(HOLD_SECONDS, TimeUnit.SECONDS)) {
+				if (held != null && request.isObjectRequest() && holdOnListener.test(listener)
+								&& !held.await(HOLD_SECONDS, TimeUnit.SECONDS)) {
 					exchange.sendResponseHeaders(503, -1);
 					return;
 				}
