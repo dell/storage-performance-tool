@@ -201,7 +201,7 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		if (NicSetConfig.isSet(storageConfig)) {
 			workerCount = NIC_SET_BASE_IO_WORKERS;
 		} else if (confWorkerCount < 1) {
-			workerCount = Math.max(4, ThreadUtil.getHardwareThreadCount() / 8);
+			workerCount = EventLoopDefaults.defaultRoute(ThreadUtil.getHardwareThreadCount());
 		} else {
 			workerCount = confWorkerCount;
 		}

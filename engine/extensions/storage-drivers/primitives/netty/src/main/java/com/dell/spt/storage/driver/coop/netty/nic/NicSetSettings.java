@@ -3,6 +3,7 @@ package com.dell.spt.storage.driver.coop.netty.nic;
 import com.dell.spt.base.config.EndpointSelectionConfig;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.config.NicSetConfig;
+import com.dell.spt.storage.driver.coop.netty.EventLoopDefaults;
 import com.dell.spt.storage.driver.coop.netty.NettyStorageDriver.Transport;
 import com.dell.spt.storage.driver.coop.netty.NettyStorageDriverBase;
 import com.github.akurilov.commons.concurrent.ThreadUtil;
@@ -110,7 +111,7 @@ public record NicSetSettings(
 
 	/** {@link #defaultThreadsPerNic()} on a host with {@code hardwareThreads}. */
 	public static int defaultThreadsPerNic(final int hardwareThreads) {
-		return Math.max(4, hardwareThreads / 8);
+		return EventLoopDefaults.httpPerNic(hardwareThreads);
 	}
 
 	/**
@@ -125,7 +126,7 @@ public record NicSetSettings(
 
 	/** {@link #defaultRdmaThreadsPerNic()} on a host with {@code hardwareThreads}. */
 	public static int defaultRdmaThreadsPerNic(final int hardwareThreads) {
-		return Math.max(4, hardwareThreads / 48);
+		return EventLoopDefaults.rdmaPerNic(hardwareThreads);
 	}
 
 	/**
