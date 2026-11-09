@@ -644,9 +644,10 @@ final class S3NicSetWorkloadTest {
 		final var dir = earlier.toAbsolutePath().getParent();
 		Files.createDirectories(dir);
 		final var copy = dir.resolve("event.loops.node-002.json");
+		final var wideCopy = dir.resolve("event.loops.node-1000.json");
 		final var other = dir.resolve("event.loops.node-2.json");
 		final var nicCopy = dir.resolve("nic.set.node-002.json");
-		for (final var file : List.of(earlier, copy, other, nicCopy)) {
+		for (final var file : List.of(earlier, copy, wideCopy, other, nicCopy)) {
 			Files.writeString(file, "earlier\n");
 		}
 
@@ -655,10 +656,24 @@ final class S3NicSetWorkloadTest {
 
 		assertFalse(Files.exists(earlier));
 		assertFalse(Files.exists(copy));
+		assertFalse(Files.exists(wideCopy));
 		assertTrue(Files.exists(other), "only node-NNN copies of the report are removed");
 		assertTrue(Files.exists(nicCopy), "the NIC files keep their own rule");
 		Files.delete(other);
 		Files.delete(nicCopy);
+	}
+
+	/** A report that cannot be removed fails the discard, which the step's start warns about. */
+	@Test
+	void anEarlierReportThatCannotBeRemovedFailsTheDiscard() throws Exception {
+		final var stepId = "event-loops-stuck-" + System.nanoTime();
+		final var stuck = eventLoopsFile(stepId);
+		Files.createDirectories(stuck.resolve("entry"));
+
+		assertThrows(IllegalStateException.class, () -> EventLoopsArtifact.discardEarlier(stepId));
+
+		Files.delete(stuck.resolve("entry"));
+		Files.delete(stuck);
 	}
 
 	/**

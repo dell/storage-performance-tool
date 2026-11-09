@@ -68,12 +68,15 @@ final class NicStepFile {
 		}
 		final var name = path.getFileName().toString();
 		final var dot = name.lastIndexOf('.');
-		final var copies = Pattern.compile(
-						Pattern.quote(name.substring(0, dot)) + "\\.node-[0-9]{3}" + Pattern.quote(name.substring(dot)));
+		// The Entry Node names its copies with the slice index before the extension.
+		final var copies = dot <= 0
+						? null
+						: Pattern.compile(Pattern.quote(name.substring(0, dot)) + "\\.node-[0-9]{3,}"
+										+ Pattern.quote(name.substring(dot)));
 		try {
 			Files.deleteIfExists(path);
 			final var dir = path.getParent();
-			if (dir != null && Files.isDirectory(dir)) {
+			if (copies != null && dir != null && Files.isDirectory(dir)) {
 				try (final var files = Files.list(dir)) {
 					for (final var file : files.filter(file -> copies.matcher(file.getFileName().toString()).matches()).toList()) {
 						Files.deleteIfExists(file);
