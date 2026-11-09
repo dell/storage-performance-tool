@@ -54,6 +54,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
@@ -295,6 +296,56 @@ final class S3RdmaNicSetWorkloadTest {
 						.noneMatch(request -> KERNEL_SOURCE.equals(request.source())), "only the abort took the kernel route");
 		run.awaitIdle();
 		assertEquals(0, run.pool().pendingCount());
+	}
+
+	/**
+	 * Every part fails, and once the upload began the first endpoint's port drops every connect, so
+	 * the abort's kernel-route connect is pending. The step's stop settles it at once: the permit
+	 * comes back without waiting for the connect timeout, and nothing reaches the target.
+	 */
+	@Test
+	void aStopSettlesAnAbortWhoseKernelRouteConnectIsPending() throws Exception {
+		assumeTrue(RdmaNicLoopback.dropsSynsOnAFullAcceptQueue(), "the blackhole needs tcp_abort_on_overflow at 0");
+		final var endpoints = stub.listeners(2);
+		final var run = started(endpoints, 2, 2);
+		stub.failParts = true;
+		final var blackholed = new AtomicReference<Throwable>();
+		stub.failObjectRequest = n -> {
+			if (n == 2) {
+				// Not on the stub's own thread, which stopping its server would wait for.
+				final var thread = new Thread(() -> {
+					try {
+						resources.add(stub.blackhole(0));
+					} catch (final Throwable e) {
+						blackholed.set(e);
+					}
+				});
+				thread.start();
+				try {
+					thread.join();
+				} catch (final InterruptedException e) {
+					Thread.currentThread().interrupt();
+				}
+			}
+			return false;
+		};
+
+		assertTrue(run.driver().put(S3RdmaNicSetDriverTest.upload("pending", 2048, 1)));
+		waitFor(() -> run.driver().pendingKernelRouteAborts() == 1 || blackholed.get() != null, "the abort's connect is pending");
+		assertNull(blackholed.get(), "the blackhole");
+		assertEquals(1, run.driver().activeOpCount(), "the abort holds its permit");
+		// The init's and the part attempts' results are out; the upload's own would follow the abort.
+		while (run.results().poll(0) != null) {
+			// drained
+		}
+
+		run.driver().closeAdmission();
+
+		assertEquals(0, run.driver().pendingKernelRouteAborts(), "the stop settled the connect");
+		assertEquals(0, run.driver().activeOpCount(), "its permit came back before the connect timeout");
+		assertTrue(stub.requests().stream().noneMatch(S3RdmaNicSetWorkloadTest::isAbort), () -> "requests: " + stub.requests());
+		assertEquals(1, stub.openUploads(), "nothing aborted the upload");
+		assertNull(run.results().poll(300), "queue recovery owns the upload, which publishes no result");
 	}
 
 	private static boolean isPart(final Request request) {

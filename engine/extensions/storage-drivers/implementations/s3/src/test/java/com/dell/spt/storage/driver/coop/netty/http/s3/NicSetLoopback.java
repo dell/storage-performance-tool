@@ -46,6 +46,7 @@ import java.net.StandardSocketOptions;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -344,6 +345,15 @@ final class NicSetLoopback implements AutoCloseable {
 		servers.get(index).stop(0);
 	}
 
+	/** Whether this host drops a SYN that finds the accept queue full, which {@link #blackhole} needs, rather than resetting it. */
+	static boolean dropsSynsOnAFullAcceptQueue() {
+		try {
+			return "0".equals(Files.readString(Path.of("/proc/sys/net/ipv4/tcp_abort_on_overflow")).trim());
+		} catch (final IOException e) {
+			return false;
+		}
+	}
+
 	/**
 	 * Stops listener {@code index} and leaves its port silent: a listening socket whose accept queue
 	 * is full, so the kernel drops each new SYN and a connect waits for its timeout. Closing the
@@ -636,7 +646,12 @@ final class NicSetLoopback implements AutoCloseable {
 	}
 
 	static void waitFor(final BooleanSupplier condition, final String what) throws InterruptedException {
-		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		waitFor(condition, what, 5);
+	}
+
+	/** As above, for up to {@code seconds}. */
+	static void waitFor(final BooleanSupplier condition, final String what, final int seconds) throws InterruptedException {
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds);
 		while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
 			Thread.sleep(10);
 		}

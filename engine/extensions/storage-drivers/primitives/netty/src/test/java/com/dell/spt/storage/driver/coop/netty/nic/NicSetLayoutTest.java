@@ -2,6 +2,8 @@ package com.dell.spt.storage.driver.coop.netty.nic;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -34,6 +36,20 @@ class NicSetLayoutTest {
 		assertEquals("192.0.2.21", hostname.getAddress().getHostAddress(), "resolved once, at plan time");
 		assertEquals(9000, hostname.getPort());
 		assertFalse(hostname.isUnresolved());
+	}
+
+	/** The kernel route's abort connects to the first endpoint's frozen destination, never resolving it again (D87). */
+	@Test
+	void anEndpointsDestinationIsTheOneItsPathsFroze() {
+		final var layout = NicSetLayout.from(plan(List.of()));
+
+		assertEquals(new InetSocketAddress("198.51.100.20", 9000), layout.destination("198.51.100.20:9000"));
+		final var hostname = layout.destination(HOSTNAME_ENDPOINT);
+		assertEquals("192.0.2.21", hostname.getAddress().getHostAddress(), "the plan's address, not a new lookup");
+		assertEquals(9000, hostname.getPort());
+		assertFalse(hostname.isUnresolved());
+		assertSame(layout.nics().get(1).paths().get(1).destination(), hostname, "the Path's own frozen address");
+		assertNull(layout.destination("203.0.113.9:9000"), "an endpoint no Path goes to has none");
 	}
 
 	@Test

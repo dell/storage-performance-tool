@@ -657,12 +657,6 @@ final class S3NicSetWorkloadTest {
 	}
 
 	/**
-	 * Runs {@code scenario} as the engine runs one, with 8 operations of 1 KB per context on the
-	 * fixture's driver type, and returns each local context's successes and failures by operation
-	 * type and concurrency limit, such as {@code CREATE-2}. A step keeps one terminal entry, of the
-	 * context that ended last, so the counts are taken as each context unregisters.
-	 */
-	/**
 	 * Every part fails and NIC 1's endpoint refuses connections. The abort after a part runs out of
 	 * retries goes out on the kernel route, so it reaches the target whichever NIC is dead (D87),
 	 * and the upload is not left open there. It counts on no NIC or Path row.
@@ -760,6 +754,7 @@ final class S3NicSetWorkloadTest {
 	 */
 	@Test
 	void aStopSettlesAnAbortWhoseKernelRouteConnectIsPending() throws Exception {
+		assumeTrue(NicSetLoopback.dropsSynsOnAFullAcceptQueue(), "the blackhole needs tcp_abort_on_overflow at 0");
 		final var endpoints = stub.listeners(2);
 		final var run = started(endpoints, nics(2), 2, false);
 		stub.failParts = true;
@@ -772,7 +767,8 @@ final class S3NicSetWorkloadTest {
 
 		final var upload = multipart("pending", 1);
 		assertTrue(run.driver().put(upload));
-		waitFor(() -> run.driver().kernelRouteAbortsPending() == 1, "the abort's connect is pending");
+		// The part's retries run out first, each after its back-off.
+		waitFor(() -> run.driver().kernelRouteAbortsPending() == 1, "the abort's connect is pending", 15);
 		assertEquals(1, run.driver().activeOpCount(), "the abort holds its permit");
 		// The init's and the part attempts' results are out; the upload's own would follow the abort.
 		while (run.results().poll() != null) {
@@ -788,6 +784,12 @@ final class S3NicSetWorkloadTest {
 		assertNull(run.results().poll(300), "queue recovery owns the upload, which publishes no result");
 	}
 
+	/**
+	 * Runs {@code scenario} as the engine runs one, with 8 operations of 1 KB per context on the
+	 * fixture's driver type, and returns each local context's successes and failures by operation
+	 * type and concurrency limit, such as {@code CREATE-2}. A step keeps one terminal entry, of the
+	 * context that ended last, so the counts are taken as each context unregisters.
+	 */
 	private static Map<String, List<Long>> runScenario(final List<String> endpoints, final NicSetLoopback.Factory factory,
 					final String scenario) throws Exception {
 		return runScenario(endpoints, factory, "nic-set-scenario-" + System.nanoTime(), scenario);

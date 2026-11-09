@@ -425,6 +425,11 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		stopAdmittedWork();
 	}
 
+	/** The kernel-route aborts whose connect has not settled. */
+	int pendingKernelRouteAborts() {
+		return kernelRouteAbortsPending();
+	}
+
 	private void stopAdmittedWork() {
 		// Lanes first: closing admission fails waiting attempts on this thread, and without a pool each one
 		// deregisters its buffer, a native call that cannot be interrupted.

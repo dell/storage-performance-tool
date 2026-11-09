@@ -2082,7 +2082,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		abort.connect = connect;
 		if (abort.settled()) {
 			// A stop settled it before it saw this connect.
-			final var unusedClose = connect.channel().close();
+			closeKernelRouteChannel(connect.channel());
 		}
 		connect.addListener((ChannelFutureListener) future -> {
 			if (future.isSuccess()) {
@@ -2102,18 +2102,37 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	protected final void closeKernelRoute() {
 		for (final var abort : kernelRouteAborts.close()) {
 			if (abort.settle()) {
-				final var connect = abort.connect;
-				if (connect != null) {
-					final var unusedClose = connect.channel().close();
+				try {
+					final var connect = abort.connect;
+					if (connect != null) {
+						closeKernelRouteChannel(connect.channel());
+					}
+				} catch (final RuntimeException e) {
+					LogUtil.exception(Level.DEBUG, e, "{}: failed to close a pending multipart abort's connection", stepId);
+				} finally {
+					// Settled is for good: nothing else gives this permit back.
+					concurrencyThrottle.release();
+					signalDispatchCapacityAvailable();
 				}
-				concurrencyThrottle.release();
-				signalDispatchCapacityAvailable();
 			}
 		}
 	}
 
+	/**
+	 * Closes a kernel-route connect's channel. One whose creation or initialisation failed never
+	 * registered with an event loop, so its {@code close()} would throw; it is closed forcibly, as
+	 * Netty closes a channel whose registration failed. Nothing can run on it.
+	 */
+	static void closeKernelRouteChannel(final Channel channel) {
+		try {
+			final var unusedClose = channel.close();
+		} catch (final IllegalStateException notRegistered) {
+			channel.unsafe().closeForcibly();
+		}
+	}
+
 	/** The kernel-route aborts whose connect has not settled. */
-	final int kernelRouteAbortsPending() {
+	protected final int kernelRouteAbortsPending() {
 		return kernelRouteAborts.pending();
 	}
 
@@ -2212,7 +2231,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/** The pending kernel-route aborts, closed for good at the stop. */
-	private static final class KernelRouteAborts<A> {
+	static final class KernelRouteAborts<A> {
 
 		private final ReentrantLock lock = new ReentrantLock();
 		private final Set<A> pending = new HashSet<>();
