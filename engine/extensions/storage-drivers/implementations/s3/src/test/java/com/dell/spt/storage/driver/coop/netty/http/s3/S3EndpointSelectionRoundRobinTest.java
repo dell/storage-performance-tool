@@ -451,6 +451,7 @@ final class S3EndpointSelectionRoundRobinTest {
 		assertTrue(records.get(0).contains("abort failed: FAIL_IO"), records::toString);
 		// HEAD, INIT, part 1 and its three retries; the abort's turn is the refused endpoint.
 		assertEquals(List.of(0, 1, 2, 3, 4, 5), listenerSequence());
+		assertEquals(Operation.Status.FAIL_IO, awaitFailedUpload(run, key).status());
 		assertNoMoreRequests(6);
 		awaitNoActiveOperation(run);
 	}
@@ -460,8 +461,9 @@ final class S3EndpointSelectionRoundRobinTest {
 	void anInitiateThatCannotConnectSendsNothingMore() throws Exception {
 		final var endpoints = new ArrayList<>(listeners(1));
 		endpoints.add("127.0.0.1:" + unusedPort());
-		final var run = driver(endpoints, null, 1);
-		final var item = new DataItemImpl("uninitiated", 5, 3L * ITEM_SIZE);
+		final var run = driver(endpoints, null, 1, S3EndpointSelectionRoundRobinTest::metadataMode);
+		final var key = "uninitiated-" + System.nanoTime();
+		final var item = new DataItemImpl(key, 5, 3L * ITEM_SIZE);
 		final var upload = new CompositeDataOperationImpl<DataItem>(
 						0, OpType.CREATE, item, null, "/bucket", CREDENTIAL, null, 0, ITEM_SIZE);
 
@@ -472,6 +474,8 @@ final class S3EndpointSelectionRoundRobinTest {
 		assertEquals("HEAD", requests.get(0).method());
 		assertNoMoreRequests(1);
 		awaitNoActiveOperation(run);
+		// No upload began, so there is no lifecycle record to write.
+		assertEquals(List.of(), lifecycle(key));
 	}
 
 	@Test
@@ -732,20 +736,38 @@ final class S3EndpointSelectionRoundRobinTest {
 
 	/** The multipart lifecycle records of {@code key}'s upload, once there is one. */
 	private static List<String> awaitLifecycle(final String key) throws IOException, InterruptedException {
-		final var file = Path.of(FileManager.INSTANCE.logFileName(Loggers.MULTIPART_LIFECYCLE.getName(), "round-robin-test"));
 		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
 		List<String> records = List.of();
 		while (records.isEmpty() && System.nanoTime() < deadline) {
 			Thread.sleep(10);
-			try {
-				records = Files.exists(file)
-								? Files.readAllLines(file).stream().filter(line -> line.contains("," + key + ",")).toList()
-								: List.of();
-			} catch (final IOException e) {
-				throw new UncheckedIOException(e);
-			}
+			records = lifecycle(key);
 		}
 		return records;
+	}
+
+	/** The multipart lifecycle records of {@code key}'s upload so far. */
+	private static List<String> lifecycle(final String key) throws IOException {
+		final var file = Path.of(FileManager.INSTANCE.logFileName(Loggers.MULTIPART_LIFECYCLE.getName(), "round-robin-test"));
+		try {
+			return Files.exists(file)
+							? Files.readAllLines(file).stream().filter(line -> line.contains("," + key + ",")).toList()
+							: List.of();
+		} catch (final IOException e) {
+			throw new UncheckedIOException(e);
+		}
+	}
+
+	/** The first failed result of {@code key}'s upload (its name carries the path): its initiate succeeded, so this is its end. */
+	private static Operation<?> awaitFailedUpload(final Run run, final String key) throws InterruptedException {
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+		while (System.nanoTime() < deadline) {
+			final var result = run.results().poll();
+			if (result instanceof CompositeDataOperationImpl<?> && result.item().name().endsWith("/" + key)
+							&& result.status() != Operation.Status.SUCC) {
+				return result;
+			}
+		}
+		throw new AssertionError("the upload of " + key + " did not fail");
 	}
 
 	private List<Integer> listenerSequence() {
