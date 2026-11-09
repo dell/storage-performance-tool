@@ -75,5 +75,18 @@ class S3KernelRouteAbortsTest {
 
 		assertDoesNotThrow(() -> S3StorageDriver.settleKernelRouteChannel("step", null, giveBack));
 		assertEquals(3, givenBack.get(), "an abort whose connect never started gives its permit back too");
+
+		final var failing = new NioSocketChannel() {
+			@Override
+			public ChannelFuture close() {
+				throw new AssertionError("broken");
+			}
+		};
+		try {
+			assertThrows(AssertionError.class, () -> S3StorageDriver.settleKernelRouteChannel("step", failing, giveBack));
+			assertEquals(4, givenBack.get(), "an Error from the close still gives the permit back first");
+		} finally {
+			failing.unsafe().closeForcibly();
+		}
 	}
 }
