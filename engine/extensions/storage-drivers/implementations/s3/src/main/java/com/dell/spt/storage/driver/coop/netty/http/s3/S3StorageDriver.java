@@ -1956,17 +1956,38 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 								0);
 			}
 		} else {
-			if (channel == null && completionFailedWithoutAConnection(op)) {
-				// Nothing was sent, so the upload is still open: abort it as after a failed response.
-				scheduleFailedCompletionAbort((CompositeDataOperation) op, op.status());
+			if (channel == null) {
+				settleUnsentMultipartRequest(op);
 			}
 			super.complete(channel, op);
 		}
 	}
 
 	/**
+	 * A multipart completion or abort that failed before it had a connection sent nothing, so its
+	 * upload is still open: the completion's upload is aborted as after a failed response, and the
+	 * abort's is recorded as orphaned (a kernel-route abort has recorded it already, and a second
+	 * record is dropped). On the default route an operation the stop owns can get here too; the abort
+	 * or the record is then cleanup only.
+	 */
+	private void settleUnsentMultipartRequest(final O op) {
+		if (completionFailedWithoutAConnection(op)) {
+			scheduleFailedCompletionAbort((CompositeDataOperation) op, op.status());
+		} else if (abortsMultipartUpload(op) && Operation.Status.FAIL_IO.equals(op.status())) {
+			final var compositeOp = (CompositeDataOperation) op;
+			try {
+				emitMultipartLifecycle(compositeOp, "failed_orphaned", true, false,
+								mpuFailure(compositeOp) + "; abort failed: " + Operation.Status.FAIL_IO);
+			} catch (final RuntimeException e) {
+				LogUtil.exception(Level.DEBUG, e, "{}: failed to record an orphaned multipart upload", stepId);
+			}
+		}
+	}
+
+	/**
 	 * Whether {@code op} is a multipart upload's completion that failed before it had a connection: a
-	 * failed lease or connect, on the default route or a NIC set (FAIL_IO, no channel).
+	 * failed lease or connect, on the default route, with endpoint selection or on a NIC set (every
+	 * such failure is FAIL_IO with no channel).
 	 */
 	static boolean completionFailedWithoutAConnection(final Operation<?> op) {
 		return op instanceof CompositeDataOperation compositeOp
