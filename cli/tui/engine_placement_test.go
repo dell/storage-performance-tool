@@ -80,15 +80,36 @@ func TestTheLocalNodeContainerIsCreatedOnTheNumaNode(t *testing.T) {
 	}
 }
 
+func TestTheGenericLocalContainerIsCreatedOnTheNumaNode(t *testing.T) {
+	fakeNumaNodes(t)
+	t.Setenv(constants.EnvSptEngineNumaNode, "1")
+	f := &fakeDockerClient{}
+	dm := &DockerManager{client: f, ctx: context.Background()}
+	if _, err := dm.StartContainer("test-image", nil); err != nil {
+		t.Fatal(err)
+	}
+	if f.createHostConfig.CpusetCpus != "1,3,5" || f.createHostConfig.CpusetMems != "1" {
+		t.Fatalf("got %q %q", f.createHostConfig.CpusetCpus, f.createHostConfig.CpusetMems)
+	}
+}
+
 func TestABadNumaNodeCreatesNoContainer(t *testing.T) {
 	fakeNumaNodes(t)
 	t.Setenv(constants.EnvSptEngineNumaNode, "7")
-	f := &fakeDockerClient{}
-	dm := &DockerManager{client: f, ctx: context.Background()}
-	if _, err := dm.StartContainerInNodeMode("test-image", "10080", constants.HostNetworkMode, nil); err == nil {
-		t.Fatal("started on a node the host does not have")
-	}
-	if f.createHostConfig != nil {
-		t.Fatalf("created a container: %+v", f.createHostConfig)
+	for name, start := range map[string]func(*DockerManager) error{
+		"node mode": func(dm *DockerManager) error {
+			_, err := dm.StartContainerInNodeMode("test-image", "10080", constants.HostNetworkMode, nil)
+			return err
+		},
+		"generic": func(dm *DockerManager) error { _, err := dm.StartContainer("test-image", nil); return err },
+	} {
+		f := &fakeDockerClient{}
+		dm := &DockerManager{client: f, ctx: context.Background()}
+		if err := start(dm); err == nil {
+			t.Fatalf("%s: started on a node the host does not have", name)
+		}
+		if f.createHostConfig != nil {
+			t.Fatalf("%s: created a container: %+v", name, f.createHostConfig)
+		}
 	}
 }

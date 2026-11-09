@@ -623,6 +623,11 @@ func (dm *DockerManager) StartContainerContext(ctx context.Context, image string
 	}
 	envVars = withEngineOptions(envVars)
 	diagnosticBinds := dm.prepareDiagnosticsCapture(constants.DockerRoleNode)
+	hostConfig := &container.HostConfig{Binds: diagnosticBinds}
+	if err := applyEnginePlacement(hostConfig); err != nil {
+		dm.cleanupDiagnosticsDir()
+		return "", err
+	}
 
 	// Create container
 	resp, err := dm.client.ContainerCreate(ctx, &container.Config{
@@ -632,7 +637,7 @@ func (dm *DockerManager) StartContainerContext(ctx context.Context, image string
 		AttachStdout: true,
 		AttachStderr: true,
 		Env:          envVars,
-	}, &container.HostConfig{Binds: diagnosticBinds}, nil, nil, "")
+	}, hostConfig, nil, nil, "")
 
 	if err != nil {
 		logging.LogError("docker", "failed to create container", err, "image", image)
