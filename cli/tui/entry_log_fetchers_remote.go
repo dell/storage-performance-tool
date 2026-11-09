@@ -32,7 +32,7 @@ func newRemoteLogFetcher(ops command.DockerOperations, containerID string) *remo
 	return &remoteLogFetcher{
 		ops:          ops,
 		containerID:  containerID,
-		reconnectMin: constants.EntryLogRelayReconnectMin,
+		reconnectMin: constants.EntryLogRelayReconnectInitial,
 		reconnectMax: constants.EntryLogRelayReconnectMax,
 	}
 }
