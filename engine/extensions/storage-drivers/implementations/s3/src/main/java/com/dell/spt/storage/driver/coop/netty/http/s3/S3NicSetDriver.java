@@ -111,6 +111,7 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 	@Override
 	protected NonBlockingConnPool createConnectionPool() {
 		nicPool = new NicSetConnectionPool(bootstrap.clone(), this);
+		nicPool.recheckDispatchWith(this::signalDispatchCapacityAvailable);
 		return nicPool;
 	}
 
@@ -178,8 +179,8 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 		final var succeeded = status == Operation.Status.SUCC;
 		final long bytes = succeeded ? payloadBytes(op) : 0;
 		// Before completion gives back the NIC, so the next choice already sees the outcome (D87).
-		if (succeeded) {
-			nicPool.admission().succeeded(row.nicIndex());
+		if (NicAdmission.isAnswer(status)) {
+			nicPool.admission().answered(row.nicIndex());
 		} else if (status == Operation.Status.FAIL_IO) {
 			nicPool.admission().failed(row.nicIndex());
 		}

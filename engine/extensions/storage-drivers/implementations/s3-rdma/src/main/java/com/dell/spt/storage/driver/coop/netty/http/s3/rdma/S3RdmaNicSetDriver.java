@@ -31,6 +31,7 @@ import com.dell.spt.base.nic.SysfsInventoryReader;
 import com.dell.spt.base.nic.pool.PoolDemandConfig;
 import com.dell.spt.base.storage.driver.AdmissionPhase;
 import com.dell.spt.base.storage.driver.PoolDemandDriver;
+import com.dell.spt.storage.driver.coop.netty.nic.NicAdmission;
 import com.dell.spt.storage.driver.coop.netty.nic.NicBinding;
 import com.dell.spt.storage.driver.coop.netty.nic.NicPathCounters;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetConnectionPool;
@@ -173,6 +174,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 	@Override
 	protected NonBlockingConnPool createConnectionPool() {
 		nicPool = new NicSetConnectionPool(bootstrap.clone(), this);
+		nicPool.recheckDispatchWith(this::signalDispatchCapacityAvailable);
 		return nicPool;
 	}
 
@@ -589,8 +591,8 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		final boolean carries = carriesPayload(op);
 		final boolean overRdma = succeeded && carries && sent != null && transferred(sent);
 		// Before the NIC is given back, so the next choice already sees the outcome (D87).
-		if (succeeded) {
-			nicPool.admission().succeeded(row.nicIndex());
+		if (NicAdmission.isAnswer(op.status())) {
+			nicPool.admission().answered(row.nicIndex());
 		} else if (op.status() == Operation.Status.FAIL_IO) {
 			nicPool.admission().failed(row.nicIndex());
 		}

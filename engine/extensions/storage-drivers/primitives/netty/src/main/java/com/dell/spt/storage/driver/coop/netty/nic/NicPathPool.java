@@ -517,6 +517,8 @@ final class NicPathPool implements NicAdmission.Gate {
 			path.connectsStarted.incrementAndGet();
 			connect = connecting.connect(path.destination);
 		} catch (final RuntimeException e) {
+			// A trial that never connected must not hold the Path in back-off for good.
+			path.backoff.abandoned(epoch);
 			slotFreed();
 			attempt.fail(e);
 			return;

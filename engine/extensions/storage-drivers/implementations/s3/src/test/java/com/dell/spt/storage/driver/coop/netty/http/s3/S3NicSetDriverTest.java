@@ -13,6 +13,7 @@ import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.stop
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.storage;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.totals;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.unusedPort;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.trialsWithin;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.waitFor;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -39,6 +40,7 @@ import io.netty.channel.epoll.Epoll;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -166,17 +168,19 @@ final class S3NicSetDriverTest {
 		waitFor(() -> pool.state().get(1).open() == 0, "the closed idle connection is dropped");
 
 		final List<Operation.Status> statuses = new ArrayList<>();
+		final var start = System.nanoTime();
 		for (var i = 0; i < 6; i++) {
 			statuses.add(run.executeAlone(dataOp(OpType.CREATE, "after-" + i)).status());
 		}
+		final var elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
 
 		final var ok = Operation.Status.SUCC;
 		final var failed = Operation.Status.FAIL_IO;
 		assertEquals(List.of(ok, failed), statuses.subList(0, 2), statuses::toString);
 		assertTrue(pool.admission().isFailing(1));
-		// The failing NIC takes no turn while its Path backs off (D87): at most one trial, 100 ms after the refusal.
+		// The failing NIC takes no turn but its paced trials (D87), however slowly the operations ran.
 		final long later = statuses.subList(2, statuses.size()).stream().filter(failed::equals).count();
-		assertTrue(later <= 1, statuses::toString);
+		assertTrue(later <= trialsWithin(elapsedMillis), () -> statuses + " in " + elapsedMillis + " ms");
 		assertEquals(0, run.driver().activeOpCount(), "every failed setup released its permit");
 		assertEquals(0, pool.pendingCount());
 		// A refused connect fails on the Path chosen for it.

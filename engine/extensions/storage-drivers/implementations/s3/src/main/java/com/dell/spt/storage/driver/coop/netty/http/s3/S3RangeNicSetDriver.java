@@ -67,6 +67,7 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver implements NicPathC
 	@Override
 	NonBlockingConnPool createRangePool() {
 		nicPool = new NicSetConnectionPool(bootstrap.clone(), this);
+		nicPool.recheckDispatchWith(this::signalDispatchCapacityAvailable);
 		return nicPool;
 	}
 
@@ -129,10 +130,15 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver implements NicPathC
 			// Before the NIC is given back, so the next choice already sees the outcome (D87).
 			if (outcome != null) {
 				switch (outcome.category()) {
-				case SUCCESS -> nicPool.admission().succeeded(nic);
-				case TRANSPORT -> nicPool.admission().failed(nic);
-				case HTTP, VALIDATION, UNRESOLVED -> {
-					// The target answered, or the attempt has no outcome yet.
+				case SUCCESS, HTTP, VALIDATION -> nicPool.admission().answered(nic);
+				case TRANSPORT -> {
+					// No response: lost, reset or timed out. FAIL_UNKNOWN is the engine's own failure.
+					if (outcome.status() != Operation.Status.FAIL_UNKNOWN) {
+						nicPool.admission().failed(nic);
+					}
+				}
+				case UNRESOLVED -> {
+					// The attempt has no outcome yet.
 				}
 				}
 			}

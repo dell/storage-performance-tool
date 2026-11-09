@@ -14,6 +14,7 @@ import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.rows
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.stoppedRows;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.storage;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.totals;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.trialsWithin;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.waitFor;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -326,6 +327,64 @@ final class S3NicSetWorkloadTest {
 		assertTrue(dead >= 1 && dead <= 12, () -> "attempts on the dead NIC: " + dead + ", rows: " + rows);
 		final int failed = reads - succeeded;
 		assertTrue(failed <= dead, () -> "failed reads: " + failed + ", rows: " + rows);
+	}
+
+	/**
+	 * D87: a NIC whose connections open but whose requests get no response is failing too, so it
+	 * takes only paced trials; once a trial gets a response, it carries its full share again.
+	 */
+	@Test
+	void aNicWhoseRequestsGetNoResponseTakesOnlyTrialsAndThenItsShareAgain() throws Exception {
+		final var endpoints = stub.listeners(2);
+		final var run = started(endpoints, nics(2), 4, false);
+		assertEquals(SUCC, run.execute(dataOp(OpType.CREATE, "before")).status());
+		final var admission = run.pool().admission();
+		final long earlier = stub.objectRequests().stream().filter(request -> request.listener() == 1).count();
+		stub.dropOnListener = listener -> listener == 1;
+
+		final int writes = 40;
+		final int window = 4;
+		final var start = System.nanoTime();
+		var submitted = 0;
+		for (; submitted < window; submitted++) {
+			assertTrue(run.driver().put(dataOp(OpType.CREATE, "dropped-" + submitted)));
+		}
+		var failed = 0;
+		for (var done = 0; done < writes; done++) {
+			final var result = run.results().await();
+			if (result.status() != SUCC) {
+				assertEquals(Operation.Status.FAIL_IO, result.status(), result::toString);
+				failed++;
+			}
+			if (submitted < writes) {
+				assertTrue(run.driver().put(dataOp(OpType.CREATE, "dropped-" + submitted++)));
+			}
+		}
+		final var elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+		assertTrue(admission.isFailing(1));
+		assertFalse(admission.isFailing(0));
+		final long dropped = stub.objectRequests().stream().filter(request -> request.listener() == 1).count() - earlier;
+		// Its share in flight when it failed, then paced trials only; the rotation alone would send it half.
+		final int bound = admission.limit(1) + trialsWithin(elapsedMillis);
+		assertTrue(dropped >= 1 && dropped <= bound, () -> dropped + " requests on the failing NIC in " + elapsedMillis + " ms");
+		assertEquals(dropped, failed, "each request without a response failed its write, and only those");
+
+		stub.dropOnListener = listener -> false;
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+		for (var i = 0; admission.isFailing(1); i++) {
+			assertTrue(System.nanoTime() < deadline, "no trial on the recovered NIC got a response");
+			assertEquals(SUCC, run.execute(dataOp(OpType.CREATE, "recovering-" + i)).status());
+			Thread.sleep(10);
+		}
+		stub.hold();
+		for (var i = 0; i < 4; i++) {
+			assertTrue(run.driver().put(dataOp(OpType.CREATE, "shared-" + i)));
+		}
+		waitFor(() -> admission.count(0) == 2 && admission.count(1) == 2, "each NIC carries its share of 4 at once");
+		stub.release();
+		for (var i = 0; i < 4; i++) {
+			assertEquals(SUCC, run.results().await().status());
+		}
 	}
 
 	/**

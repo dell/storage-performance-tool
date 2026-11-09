@@ -73,6 +73,7 @@ public final class NicSetConnectionPool implements NonBlockingConnPool {
 	private final AtomicInteger next = new AtomicInteger();
 	private volatile List<NicPathPool> pools = List.of();
 	private volatile NicAdmission admission = NicAdmission.none();
+	private volatile Runnable dispatchRecheck;
 	private volatile int connectTimeoutMillis;
 	private volatile boolean closed;
 
@@ -88,6 +89,14 @@ public final class NicSetConnectionPool implements NonBlockingConnPool {
 		this.template = template;
 		this.channelHandler = channelHandler;
 		this.nanoClock = nanoClock;
+	}
+
+	/**
+	 * The driver's wake-up of its dispatch task, which the admission runs on the NIC set's event loops
+	 * while only a failing NIC's later trial could take an attempt (D87). Before {@link #open}.
+	 */
+	public void recheckDispatchWith(final Runnable signal) {
+		this.dispatchRecheck = signal;
 	}
 
 	/**
@@ -111,8 +120,18 @@ public final class NicSetConnectionPool implements NonBlockingConnPool {
 							nanoClock));
 		}
 		this.connectTimeoutMillis = connectTimeoutMillis;
-		this.admission = NicAdmission.of(concurrencyLimit, built);
+		final var recheck = dispatchRecheck;
+		final var loops = nics.isEmpty() ? null : nics.get(0).group();
+		this.admission = NicAdmission.of(concurrencyLimit, built, nanoClock,
+						recheck == null || loops == null ? null : timerOn(loops), recheck);
 		this.pools = List.copyOf(built);
+	}
+
+	// No result is needed: the admission catches a rejected schedule, and a re-check clears its flag first, so
+	// one that fails is followed by the next.
+	@SuppressWarnings("FutureReturnValueIgnored")
+	private static NicAdmission.Timer timerOn(final EventLoopGroup loops) {
+		return (task, delayMillis) -> loops.schedule(task, delayMillis, TimeUnit.MILLISECONDS);
 	}
 
 	/** The NICs' admission; it has no NIC until {@link #open}. */

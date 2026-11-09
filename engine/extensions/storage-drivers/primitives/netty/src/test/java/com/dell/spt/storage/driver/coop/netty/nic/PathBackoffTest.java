@@ -71,6 +71,24 @@ class PathBackoffTest {
 	}
 
 	@Test
+	void aTrialThatNeverConnectedEndsWithoutAFailureSoTheNextConnectMayTry() {
+		backoff.failed(backoff.tryConnect());
+		advanceMillis(100);
+		final var trial = backoff.tryConnect();
+		assertNotEquals(PathBackoff.REJECTED, trial);
+		assertTrue(backoff.rejectsNow());
+		backoff.abandoned(trial);
+		assertFalse(backoff.rejectsNow(), "no trial pending, and the interval has run");
+		assertEquals(1, backoff.failures(), "it counted as no failure");
+		backoff.abandoned(trial - 1);
+		final var next = backoff.tryConnect();
+		assertEquals(trial, next, "the same epoch: nothing failed or connected since");
+		backoff.connected();
+		backoff.abandoned(next);
+		assertFalse(backoff.inBackoff(), "a stale epoch changes nothing");
+	}
+
+	@Test
 	void aSuccessfulConnectResetsThePath() {
 		backoff.failed(backoff.tryConnect());
 		advanceMillis(100);
