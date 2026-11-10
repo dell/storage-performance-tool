@@ -127,7 +127,14 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 		throughputCorrupt.resetStartTime();
 		reqBytes.resetStartTime();
 		if (steadyWindow != null) {
-			steadyWindow.markStepStart();
+			// Under the refresh lock, so no sample whose gauge was read before step start is published
+			// after the start rule's baseline. Nothing holding the window's lock takes this one.
+			refreshLock.lock();
+			try {
+				steadyWindow.markStepStart();
+			} finally {
+				refreshLock.unlock();
+			}
 		}
 	}
 

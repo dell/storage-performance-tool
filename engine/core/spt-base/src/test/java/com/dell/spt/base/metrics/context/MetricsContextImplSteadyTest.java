@@ -33,7 +33,13 @@ class MetricsContextImplSteadyTest {
 	}
 
 	private MetricsContextImpl<?> context(final SteadySettings settings) {
-		final var ctx = (MetricsContextImpl<?>) MetricsContextImpl.builder()
+		final var ctx = unstarted(settings);
+		ctx.start();
+		return ctx;
+	}
+
+	private MetricsContextImpl<?> unstarted(final SteadySettings settings) {
+		return (MetricsContextImpl<?>) MetricsContextImpl.builder()
 						.loadStepId("steady-" + System.nanoTime())
 						.opType(OpType.CREATE)
 						.actualConcurrencyGauge(gauge::get)
@@ -45,8 +51,6 @@ class MetricsContextImplSteadyTest {
 						.runId(1L)
 						.steadySettings(settings)
 						.build();
-		ctx.start();
-		return ctx;
 	}
 
 	@Test
@@ -102,6 +106,26 @@ class MetricsContextImplSteadyTest {
 		}
 		final SteadyResult result = ctx.closeSteadyWindow("t");
 		assertEquals(5, result.statistics().successSnapshot().count(), "a start at the dip would count 35");
+	}
+
+	@Test
+	void theStartRuleIgnoresSamplesPublishedBeforeTheContextStarts() {
+		final var ctx = unstarted(new SteadySettings(10, 0, 0));
+		gauge.set(64);
+		for (int i = 0; i < 20; i++) {
+			ctx.refreshLastSnapshot(true); // a high gauge before step start
+		}
+		ctx.start();
+		gauge.set(4);
+		ctx.refreshLastSnapshot(true); // the only sample since step start
+		for (int i = 0; i < 40; i++) {
+			ctx.markSucc(1, 1_000, 500);
+		}
+		ctx.observeSteadyWindow(); // 40 completions reach 10 x 4; with the earlier samples the mean would be about 61
+		for (int i = 0; i < 5; i++) {
+			ctx.markSucc(1, 1_000, 500);
+		}
+		assertEquals(5, ctx.closeSteadyWindow("t").statistics().successSnapshot().count());
 	}
 
 	@Test
