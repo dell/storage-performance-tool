@@ -114,7 +114,11 @@ public final class SteadyWindow {
 		listener = windowListener;
 	}
 
-	/** Marks step start, the origin of the start offset and of the start rule's sampled mean. */
+	/**
+	 * Marks step start, the origin of the start offset and of the start rule's sampled mean. The
+	 * metrics context calls this holding its refresh lock, so neither a {@link Source} nor a
+	 * {@link Listener} may take that lock.
+	 */
 	public void markStepStart() {
 		synchronized (lock) {
 			stepStartNanos = nanoClock.getAsLong();
