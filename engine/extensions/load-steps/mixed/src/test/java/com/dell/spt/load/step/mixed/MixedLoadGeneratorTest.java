@@ -38,6 +38,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.junit.jupiter.api.Assertions.*;
@@ -660,6 +661,74 @@ class MixedLoadGeneratorTest {
 	}
 
 	@Test
+	@DisplayName("An operation the driver completes before put returns does not stay counted in flight")
+	void aCompletionBeforePutReturnsLeavesNothingInFlight() throws Exception {
+		final PoolItemInput<Item> pool = new PoolItemInput<>(makeItems(20));
+		for (int i = 0; i < 100; i++) {
+			pool.addDeleteItem(new ItemImpl("to-delete-" + i));
+		}
+		final AtomicReference<MixedLoadGenerator> generator = new AtomicReference<>();
+		final Map<OpType, Integer> countedDuringPut = new EnumMap<>(OpType.class);
+		// A driver that completes each operation on the calling thread, before put returns.
+		final Output<Operation> completesInsidePut = new AcceptingOutput() {
+			@Override
+			public boolean put(final Operation op) {
+				final MixedLoadGenerator gen = generator.get();
+				countedDuringPut.merge(op.type(), gen.inFlightCount(op.type()), Math::min);
+				gen.onOperationCompleted(op);
+				gen.releasePermit();
+				return true;
+			}
+		};
+		final MixedLoadGenerator gen = readCreateDeleteGenerator(pool, completesInsidePut, 4);
+		generator.set(gen);
+
+		dispatch(gen, 300);
+
+		assertEquals(300, gen.generatedOpCount(), "sanity: every operation was accepted");
+		for (final OpType type : List.of(OpType.READ, OpType.CREATE, OpType.DELETE)) {
+			assertEquals(1, countedDuringPut.get(type), type + " is counted in flight while the driver holds it");
+			assertEquals(0, gen.inFlightCount(type), type + " completed inside put must not stay counted");
+		}
+	}
+
+	@Test
+	@DisplayName("Operations the driver refuses or fails to accept are not counted in flight")
+	void refusedAndFailedPutsLeaveNothingInFlight() throws Exception {
+		final PoolItemInput<Item> pool = new PoolItemInput<>(makeItems(20));
+		for (int i = 0; i < 100; i++) {
+			pool.addDeleteItem(new ItemImpl("to-delete-" + i));
+		}
+		final Output<Operation> refusing = new AcceptingOutput() {
+			@Override
+			public boolean put(final Operation op) {
+				return false;
+			}
+		};
+		final MixedLoadGenerator refusedGen = readCreateDeleteGenerator(pool, refusing, 4);
+		dispatch(refusedGen, 300);
+		assertEquals(0, refusedGen.generatedOpCount());
+		assertEquals(4, availablePermits(refusedGen), "every refused operation's permit is released");
+		assertEquals(100, pool.deleteQueueSize(), "every refused DELETE's item is back in the queue");
+
+		final MixedLoadGenerator failedGen = readCreateDeleteGenerator(
+						pool, refusingOutput(null, new IOException("synthetic driver failure")), 4);
+		int failures = 0;
+		for (int i = 0; i < 300; i++) {
+			try {
+				failedGen.doWork();
+			} catch (final IOException e) {
+				failures++;
+			}
+		}
+		assertEquals(300, failures, "precondition: every put failed");
+		for (final OpType type : List.of(OpType.READ, OpType.CREATE, OpType.DELETE)) {
+			assertEquals(0, refusedGen.inFlightCount(type), "refused " + type);
+			assertEquals(0, failedGen.inFlightCount(type), "failed " + type);
+		}
+	}
+
+	@Test
 	@DisplayName("Legacy PUT completion hook is removed from MixedLoadGenerator")
 	void legacyPutCompletionHookRemoved() {
 		assertThrows(NoSuchMethodException.class,
@@ -716,6 +785,43 @@ class MixedLoadGeneratorTest {
 			@Override
 			public void close() {}
 		};
+	}
+
+	/** A READ, CREATE and DELETE generator with {@code permits} permits on {@code driver}, not started. */
+	private MixedLoadGenerator readCreateDeleteGenerator(
+					final PoolItemInput<Item> pool, final Output<Operation> driver, final int permits) {
+		final Map<OpType, Integer> weights = new EnumMap<>(OpType.class);
+		weights.put(OpType.READ, 40);
+		weights.put(OpType.CREATE, 30);
+		weights.put(OpType.DELETE, 30);
+		final Map<OpType, OperationsBuilder> builders = new EnumMap<>(OpType.class);
+		for (final OpType type : weights.keySet()) {
+			builders.put(type, testBuilder(type, null));
+		}
+		return new MixedLoadGenerator(
+						executor, new OpSchedule(weights), pool, builders, driver, permits, mockNewItemSupplier());
+	}
+
+	/** An Output that accepts everything; tests override {@code put(Operation)}. */
+	private abstract static class AcceptingOutput implements Output<Operation> {
+
+		@Override
+		public int put(final List<Operation> ops, final int from, final int to) {
+			return to - from;
+		}
+
+		@Override
+		public int put(final List<Operation> ops) {
+			return ops.size();
+		}
+
+		@Override
+		public Input<Operation> getInput() {
+			return null;
+		}
+
+		@Override
+		public void close() {}
 	}
 
 	/** Starts a READ and CREATE generator with 4 permits on {@code driver}. */
