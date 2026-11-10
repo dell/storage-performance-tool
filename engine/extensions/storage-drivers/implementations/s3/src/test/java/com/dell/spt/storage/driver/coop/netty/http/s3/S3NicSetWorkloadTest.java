@@ -6,6 +6,7 @@ import static com.dell.spt.storage.driver.coop.netty.http.s3.EndpointSelectionTe
 import static com.dell.spt.storage.driver.coop.netty.http.s3.EndpointSelectionTestSupport.dataOp;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.KERNEL_SOURCE;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.address;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.awaitRefused;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.awaitNoNicIoThreads;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.nics;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.port;
@@ -13,6 +14,7 @@ import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.rows
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.stoppedRows;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.storage;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.totals;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.trialsWithin;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.waitFor;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -55,14 +57,17 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
+import com.dell.spt.base.nic.EventLoopsArtifact;
 import com.dell.spt.base.nic.NicPathRows;
 import com.dell.spt.base.nic.NicPathsArtifact;
+import com.dell.spt.storage.driver.coop.netty.EventLoopDefaults;
 import com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.RangeRun;
 import com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.Request;
 import com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.Run;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetConnectionPool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.akurilov.commons.concurrent.ThreadUtil;
 import com.github.akurilov.confuse.Config;
 import io.netty.channel.epoll.Epoll;
 import java.io.IOException;
@@ -78,7 +83,9 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
@@ -246,6 +253,310 @@ final class S3NicSetWorkloadTest {
 		// Initiations and completions carry no payload; the failed completion fails; the abort is not counted.
 		final var rows = stoppedRows(run.driver(), run.driver());
 		assertEquals(List.of(14L, 13L, 1L, 0L, 0L, 10L * ITEM_SIZE), totals(rows), rows::toString);
+	}
+
+	/**
+	 * D87: once the only Path of a NIC refuses connections, NIC choice gives that NIC one trial at a
+	 * time and none while its Path backs off, so the other NIC carries the writes and a part's retry
+	 * finds a working NIC. Before the fix, the rotation sent about half of every attempt to the dead NIC.
+	 */
+	@Test
+	void aNicWhosePathRefusesTakesOnlyTrialsAndTheOtherNicCarriesTheWrites() throws Exception {
+		final var endpoints = stub.listeners(2);
+		final var run = started(endpoints, nics(2), 4, false);
+		assertEquals(SUCC, run.execute(dataOp(OpType.CREATE, "before")).status());
+		stub.stop(1);
+		awaitRefused(endpoints.get(1));
+		waitFor(() -> run.pool().state().get(1).open() == 0, "the dead NIC's idle connections are dropped");
+
+		final int writes = 100;
+		final int window = 8;
+		var submitted = 0;
+		var succeeded = 0;
+		for (; submitted < window; submitted++) {
+			assertTrue(run.driver().put(dataOp(OpType.CREATE, "single-" + submitted)));
+		}
+		for (var done = 0; done < writes; done++) {
+			if (run.results().await().status() == SUCC) {
+				succeeded++;
+			}
+			if (submitted < writes) {
+				assertTrue(run.driver().put(dataOp(OpType.CREATE, "single-" + submitted++)));
+			}
+		}
+		final int uploads = 10;
+		var uploaded = 0;
+		for (var i = 0; i < uploads; i++) {
+			final var upload = multipart("upload-" + i, 5);
+			assertTrue(run.driver().put(upload));
+			if (awaitUploadOutcome(run, upload).status() == SUCC) {
+				assertEquals(5L * ITEM_SIZE, stub.object("/bucket/upload-" + i).length);
+				uploaded++;
+			}
+		}
+		assertTrue(run.pool().admission().isFailing(1));
+		assertFalse(run.pool().admission().isFailing(0));
+
+		final var rows = stoppedRows(run.driver(), run.driver());
+		final long dead = rows.rows().stream().filter(row -> row.nic() != null && row.nic().iface().equals(nics(2).get(1)))
+						.mapToLong(NicPathRows.Row::attempts).sum();
+		// Its share in flight when it failed, then a trial per back-off interval of at least 100 ms.
+		assertTrue(dead >= 1 && dead <= 16, () -> "attempts on the dead NIC: " + dead + ", rows: " + rows);
+		// A trial fails a write, or an upload's initiation or completion, which are not retried; a
+		// failed part is retried on the working NIC.
+		final int failed = writes - succeeded + uploads - uploaded;
+		assertTrue(failed <= dead, () -> "failed writes and uploads: " + failed + ", rows: " + rows);
+	}
+
+	/** The same for range reads: the dead NIC gets trials only, so nearly every read succeeds on the other. */
+	@Test
+	void aNicWhosePathRefusesTakesOnlyTrialRangeReads() throws Exception {
+		final var endpoints = stub.listeners(2);
+		stub.absentObjectSize = OBJECT_SIZE;
+		final var run = rangeRun(endpoints, new RangeReadPolicy(3, 2L, 1));
+		run.read("before");
+		assertEquals(SUCC, run.outcome().status());
+		stub.stop(1);
+		awaitRefused(endpoints.get(1));
+		waitFor(() -> run.pool().state().get(1).open() == 0, "the dead NIC's idle connections are dropped");
+
+		final int reads = 40;
+		var succeeded = 0;
+		for (var i = 0; i < reads; i++) {
+			run.read("read-" + i);
+			if (run.outcome().status() == SUCC) {
+				succeeded++;
+			}
+		}
+		assertTrue(run.pool().admission().isFailing(1));
+
+		final var rows = stoppedRows(run.driver, run);
+		final long dead = rows.rows().stream().filter(row -> row.nic() != null && row.nic().iface().equals(nics(2).get(1)))
+						.mapToLong(NicPathRows.Row::attempts).sum();
+		assertTrue(dead >= 1 && dead <= 12, () -> "attempts on the dead NIC: " + dead + ", rows: " + rows);
+		final int failed = reads - succeeded;
+		assertTrue(failed <= dead, () -> "failed reads: " + failed + ", rows: " + rows);
+	}
+
+	/**
+	 * D87 for range reads: a NIC whose ranges get no response takes trials only, each ending as its
+	 * flight's connection is released, until one gets a response.
+	 */
+	@Test
+	void aNicWhoseRangeReadsGetNoResponseTakesTrialsUntilOneGetsAResponse() throws Exception {
+		final var endpoints = stub.listeners(2);
+		stub.absentObjectSize = OBJECT_SIZE;
+		final var run = rangeRun(endpoints, new RangeReadPolicy(3, 2L, 1));
+		run.read("before");
+		assertEquals(SUCC, run.outcome().status());
+		final var admission = run.pool().admission();
+		stub.dropOnListener = listener -> listener == 1;
+		for (var i = 0; !admission.isFailing(1); i++) {
+			assertTrue(i < 20, "NIC 1 never failed");
+			run.read("dropped-" + i);
+			run.outcome();
+		}
+		// Two trials that get no response: the first one's end lets the second start.
+		final long failedWith = requestsOn(1);
+		final var trials = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+		for (var i = 0; requestsOn(1) < failedWith + 2; i++) {
+			assertTrue(System.nanoTime() < trials, "no second trial range read on the failing NIC");
+			run.read("trial-" + i);
+			run.outcome();
+			Thread.sleep(10);
+		}
+		assertTrue(admission.isFailing(1));
+		stub.dropOnListener = listener -> false;
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+		for (var i = 0; admission.isFailing(1); i++) {
+			assertTrue(System.nanoTime() < deadline, "no trial range read on the recovered NIC got a response");
+			run.read("recovering-" + i);
+			assertEquals(SUCC, run.outcome().status());
+			Thread.sleep(10);
+		}
+		assertFalse(admission.trialRunning(1));
+	}
+
+	/**
+	 * D87: a NIC whose connections open but whose requests get no response is failing too, so it
+	 * takes only paced trials; once a trial gets a response, it carries its full share again.
+	 */
+	@Test
+	void aNicWhoseRequestsGetNoResponseTakesOnlyTrialsAndThenItsShareAgain() throws Exception {
+		final var endpoints = stub.listeners(2);
+		final var run = started(endpoints, nics(2), 4, false);
+		assertEquals(SUCC, run.execute(dataOp(OpType.CREATE, "before")).status());
+		final var admission = run.pool().admission();
+		final long earlier = stub.objectRequests().stream().filter(request -> request.listener() == 1).count();
+		stub.dropOnListener = listener -> listener == 1;
+
+		final int writes = 40;
+		final int window = 4;
+		final var start = System.nanoTime();
+		var submitted = 0;
+		for (; submitted < window; submitted++) {
+			assertTrue(run.driver().put(dataOp(OpType.CREATE, "dropped-" + submitted)));
+		}
+		var failed = 0;
+		for (var done = 0; done < writes; done++) {
+			final var result = run.results().await();
+			if (result.status() != SUCC) {
+				assertEquals(Operation.Status.FAIL_IO, result.status(), result::toString);
+				failed++;
+			}
+			if (submitted < writes) {
+				assertTrue(run.driver().put(dataOp(OpType.CREATE, "dropped-" + submitted++)));
+			}
+		}
+		final var elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+		assertTrue(admission.isFailing(1));
+		assertFalse(admission.isFailing(0));
+		final long dropped = stub.objectRequests().stream().filter(request -> request.listener() == 1).count() - earlier;
+		// Its share in flight when it failed, then paced trials only; the rotation alone would send it half.
+		final int bound = admission.limit(1) + trialsWithin(elapsedMillis);
+		assertTrue(dropped >= 1 && dropped <= bound, () -> dropped + " requests on the failing NIC in " + elapsedMillis + " ms");
+		assertEquals(dropped, failed, "each request without a response failed its write, and only those");
+
+		stub.dropOnListener = listener -> false;
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+		for (var i = 0; admission.isFailing(1); i++) {
+			assertTrue(System.nanoTime() < deadline, "no trial on the recovered NIC got a response");
+			assertEquals(SUCC, run.execute(dataOp(OpType.CREATE, "recovering-" + i)).status());
+			Thread.sleep(10);
+		}
+		stub.hold();
+		for (var i = 0; i < 4; i++) {
+			assertTrue(run.driver().put(dataOp(OpType.CREATE, "shared-" + i)));
+		}
+		waitFor(() -> admission.count(0) == 2 && admission.count(1) == 2, "each NIC carries its share of 4 at once");
+		stub.release();
+		for (var i = 0; i < 4; i++) {
+			assertEquals(SUCC, run.results().await().status());
+		}
+	}
+
+	/**
+	 * D87: with the working NIC full of held requests, so nothing completes, and a queue no put
+	 * signals any more, only the admission's re-check wakes the dispatch task when the failing NIC's
+	 * trial becomes due: well before the held requests' 2 s timeout would.
+	 */
+	@Test
+	void aFailingNicsTrialStartsWhileTheWorkingNicIsHeldAndNothingCompletes() throws Exception {
+		final var endpoints = stub.listeners(2);
+		final var run = started(endpoints, nics(2), 4, false);
+		assertEquals(SUCC, run.execute(dataOp(OpType.CREATE, "before")).status());
+		final var admission = run.pool().admission();
+		final long earlier = requestsOn(1);
+		stub.dropOnListener = listener -> listener == 1;
+		stub.hold();
+		final int writes = 8;
+		for (var i = 0; i < writes; i++) {
+			assertTrue(run.driver().put(dataOp(OpType.CREATE, "held-" + i)));
+		}
+		waitFor(() -> admission.isFailing(1) && admission.count(0) == admission.limit(0) && !admission.trialRunning(1),
+						"NIC 0 is full of held writes and NIC 1 failed");
+		final long failedFirst = requestsOn(1) - earlier;
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+		while (requestsOn(1) - earlier == failedFirst) {
+			assertTrue(System.nanoTime() < deadline, "no trial on NIC 1 within 1 s while NIC 0 is held and nothing completes");
+			Thread.sleep(10);
+		}
+		assertEquals(admission.limit(0), admission.count(0), "NIC 0 still holds its share");
+
+		stub.release();
+		var failed = 0;
+		for (var i = 0; i < writes; i++) {
+			final var result = run.results().await();
+			if (endpoints.get(1).equals(result.nodeAddr())) {
+				assertEquals(Operation.Status.FAIL_IO, result.status(), result::toString);
+				failed++;
+			} else {
+				assertEquals(SUCC, result.status(), result::toString);
+			}
+		}
+		assertEquals(requestsOn(1) - earlier, failed, "each request on the failing NIC failed its write, and only those");
+	}
+
+	/**
+	 * D87, without a concurrency limit: an attempt admitted on NIC 1 before it failed is still in
+	 * flight when NIC 1's trial starts, as a NIC counts no attempt past its connection here. That
+	 * older attempt's end, a request timeout, is not the trial's, so it lets no second trial start
+	 * while the first one runs. Only NIC 1's requests are held, so NIC 0 keeps working.
+	 */
+	@Test
+	void withoutALimitAnOlderAttemptsEndLetsNoSecondTrialStart() throws Exception {
+		final var endpoints = stub.listeners(2);
+		final var run = started(endpoints, nics(2), 0, false);
+		// One write on each NIC: a connection's 2 s timeout counts from its last read, so NIC 1's
+		// connection must have read a response just before the older write uses it.
+		final long warm1 = requestsOn(1);
+		for (var i = 0; requestsOn(1) == warm1; i++) {
+			assertTrue(i < 4, "no warm-up write reached NIC 1");
+			assertEquals(SUCC, run.execute(dataOp(OpType.CREATE, "before-" + i)).status());
+		}
+		final var admission = run.pool().admission();
+		stub.holdOnListener = listener -> listener == 1;
+		stub.hold();
+		final long earlier0 = requestsOn(0);
+		final long earlier1 = requestsOn(1);
+		var submitted = 0;
+		for (; submitted < 2; submitted++) {
+			assertTrue(run.driver().put(dataOp(OpType.CREATE, "older-" + submitted)));
+		}
+		waitFor(() -> requestsOn(0) - earlier0 == 1 && requestsOn(1) - earlier1 == 1, "one write on each NIC, NIC 1's held");
+		// The held write times out about 2 s after it started; the trial starts at least 1 s after it.
+		Thread.sleep(1_000);
+
+		final var dropped = new AtomicBoolean();
+		stub.dropOnListener = listener -> listener == 1 && dropped.compareAndSet(false, true);
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		while (!admission.isFailing(1)) {
+			assertTrue(System.nanoTime() < deadline, "NIC 1 never failed");
+			assertTrue(run.driver().put(dataOp(OpType.CREATE, "failing-" + submitted++)));
+			Thread.sleep(20);
+		}
+		assertTrue(dropped.get(), "the drop failed NIC 1, not the older write's timeout before it");
+		final long beforeTrial = requestsOn(1);
+		while (requestsOn(1) == beforeTrial) {
+			assertTrue(System.nanoTime() < deadline, "no trial on NIC 1");
+			assertTrue(run.driver().put(dataOp(OpType.CREATE, "trial-" + submitted++)));
+			Thread.sleep(20);
+		}
+		assertTrue(admission.trialRunning(1), "NIC 1's trial runs, held");
+
+		final Predicate<Operation<?>> olderOnNic1 = result -> result.item().name().startsWith("/bucket/older-")
+						&& endpoints.get(1).equals(result.nodeAddr());
+		var consumed = 0;
+		for (Operation<?> result; (result = run.results().poll(0)) != null; consumed++) {
+			assertFalse(olderOnNic1.test(result), "the older write ended before the trial started");
+		}
+		Operation<?> older = null;
+		while (older == null) {
+			final var result = run.results().await();
+			consumed++;
+			if (olderOnNic1.test(result)) {
+				older = result;
+			}
+		}
+		assertEquals(Operation.Status.FAIL_IO, older.status(), older::toString);
+		final long trialOnly = requestsOn(1);
+		final var window = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(500);
+		while (System.nanoTime() < window) {
+			assertTrue(run.driver().put(dataOp(OpType.CREATE, "after-" + submitted++)));
+			Thread.sleep(20);
+		}
+		assertEquals(trialOnly, requestsOn(1), "no second trial on NIC 1 while its trial runs");
+		assertTrue(admission.trialRunning(1), "the trial still holds NIC 1");
+
+		stub.release();
+		waitFor(() -> !admission.isFailing(1), "the trial's response ends NIC 1's failing");
+		for (; consumed < submitted; consumed++) {
+			run.results().await();
+		}
+	}
+
+	private long requestsOn(final int listener) {
+		return stub.objectRequests().stream().filter(request -> request.listener() == listener).count();
 	}
 
 	/**
@@ -542,6 +853,19 @@ final class S3NicSetWorkloadTest {
 		assertEquals(List.of("lo-a", "lo-b"), names(report.get("nics")), "one NIC-set driver reports at the top level");
 		assertEquals(2, report.get("event_loops").asInt(), () -> "report: " + report);
 		assertFalse(report.has("contexts"), () -> "report: " + report);
+		// The event-loop report counts both drivers: the NIC set's every loop, and the default route's group.
+		final var loopsFile = eventLoopsFile(stepId);
+		final var loops = MAPPER.readTree(loopsFile.toFile());
+		assertEquals(stepId, loops.get("step_id").asText());
+		final var loopContexts = loops.get("contexts");
+		assertEquals(2, loopContexts.size(), () -> "report: " + loops);
+		assertEquals("nic_set", loopContexts.get(0).get("route").asText());
+		assertEquals(report.get("total_event_loops").asInt(), loopContexts.get(0).get("event_loops").asInt());
+		assertEquals("default", loopContexts.get(1).get("route").asText());
+		assertEquals(1, loopContexts.get(1).get("context_index").asInt());
+		assertEquals(loopContexts.get(0).get("event_loops").asInt() + loopContexts.get(1).get("event_loops").asInt(),
+						loops.get("event_loops").asInt());
+		Files.delete(loopsFile);
 		Files.delete(setFile);
 		Files.delete(nicPathsFile(stepId));
 	}
@@ -605,12 +929,78 @@ final class S3NicSetWorkloadTest {
 		assertEquals(0, report.get("event_loops").asInt());
 		assertFalse(report.has("contexts"));
 		Files.delete(setFile);
+
+		// The failed start still writes its event-loop report at close: a NIC set that never opened
+		// owns only its base group of two loops.
+		final var loopsFile = eventLoopsFile(stepId);
+		final var loops = MAPPER.readTree(loopsFile.toFile());
+		assertEquals(stepId, loops.get("step_id").asText());
+		assertEquals(1, loops.get("contexts").size(), () -> "report: " + loops);
+		final var context = loops.get("contexts").get(0);
+		assertEquals("nic_set", context.get("route").asText());
+		assertEquals(1, context.get("driver_threads").asInt());
+		assertEquals("storage.driver.threads", context.get("source").asText());
+		assertEquals(2, context.get("event_loops").asInt());
+		assertEquals(2, loops.get("event_loops").asInt());
+		Files.delete(loopsFile);
 	}
 
-	/** A step without a NIC set writes no per-path file (item 18). */
+	/**
+	 * A step's start removes the event-loop report and node copies an earlier step with its id left,
+	 * so a step that never writes its own has none, and keeps another step's.
+	 */
+	@Test
+	void aStepStartRemovesTheEventLoopReportsAnEarlierStepWithItsIdLeft() throws Exception {
+		final var stepId = "event-loops-earlier-" + System.nanoTime();
+		final var earlier = eventLoopsFile(stepId);
+		final var dir = earlier.toAbsolutePath().getParent();
+		Files.createDirectories(dir);
+		final var copy = dir.resolve("event.loops.node-002.json");
+		final var wideCopy = dir.resolve("event.loops.node-1000.json");
+		final var other = dir.resolve("event.loops.node-2.json");
+		final var nicCopy = dir.resolve("nic.set.node-002.json");
+		for (final var file : List.of(earlier, copy, wideCopy, other, nicCopy)) {
+			Files.writeString(file, "earlier\n");
+		}
+
+		EventLoopsArtifact.discardEarlier(stepId);
+		EventLoopsArtifact.discardEarlier(stepId);
+
+		assertFalse(Files.exists(earlier));
+		assertFalse(Files.exists(copy));
+		assertFalse(Files.exists(wideCopy));
+		assertTrue(Files.exists(other), "only node-NNN copies of the report are removed");
+		assertTrue(Files.exists(nicCopy), "the NIC files keep their own rule");
+		Files.delete(other);
+		Files.delete(nicCopy);
+	}
+
+	/** A report that cannot be removed fails the discard, which the step's start warns about. */
+	@Test
+	void anEarlierReportThatCannotBeRemovedFailsTheDiscard() throws Exception {
+		final var stepId = "event-loops-stuck-" + System.nanoTime();
+		final var stuck = eventLoopsFile(stepId);
+		Files.createDirectories(stuck.resolve("entry"));
+
+		assertThrows(IllegalStateException.class, () -> EventLoopsArtifact.discardEarlier(stepId));
+
+		Files.delete(stuck.resolve("entry"));
+		Files.delete(stuck);
+	}
+
+	/**
+	 * A step without a NIC set writes no per-path file (item 18), and its event-loop report replaces
+	 * one an earlier step with the same id left.
+	 */
 	@Test
 	void aStepWithoutANicSetWritesNoNicPathsFile() throws Exception {
 		final var stepId = "nic-set-none-" + System.nanoTime();
+		final var earlier = eventLoopsFile(stepId);
+		Files.createDirectories(earlier.toAbsolutePath().getParent());
+		Files.writeString(earlier, "earlier\n");
+		// Only the step's start removes a node copy: a single engine publishes none.
+		final var earlierCopy = earlier.resolveSibling("event.loops.node-001.json");
+		Files.writeString(earlierCopy, "earlier\n");
 		final var outcomes = runScenario(stub.listeners(1), null, stepId, """
 						Load.config({"load": {"step": {"limit": {"time": "30s"}}}}).run();
 						""");
@@ -618,6 +1008,20 @@ final class S3NicSetWorkloadTest {
 		assertEquals(Map.of("CREATE-1", List.of(8L, 0L)), outcomes);
 		assertFalse(Files.exists(nicPathsFile(stepId)));
 		assertFalse(Files.exists(nicSetFile(stepId)));
+		// It still reports its default-route loops, as built.
+		final var loopsFile = eventLoopsFile(stepId);
+		final var loops = MAPPER.readTree(loopsFile.toFile());
+		assertEquals(778L, loops.get("engine_run_id").asLong(), "the CLI refuses a report from another run");
+		assertFalse(Files.exists(earlierCopy), "the step's start removed the earlier node copy");
+		assertEquals(ThreadUtil.getHardwareThreadCount(), loops.get("hardware_threads").asInt());
+		final var context = loops.get("contexts").get(0);
+		assertEquals("default", context.get("route").asText());
+		final var threads = context.get("driver_threads").asInt();
+		assertEquals(threads > 0 ? "storage.driver.threads" : "default", context.get("source").asText());
+		assertEquals(threads > 0 ? threads : EventLoopDefaults.defaultRoute(ThreadUtil.getHardwareThreadCount()),
+						context.get("event_loops").asInt());
+		assertEquals(context.get("event_loops").asInt(), loops.get("event_loops").asInt());
+		Files.delete(loopsFile);
 	}
 
 	/**
@@ -850,6 +1254,10 @@ final class S3NicSetWorkloadTest {
 		return Path.of(FileManager.INSTANCE.logFileName(Loggers.NIC_SET.getName(), stepId));
 	}
 
+	private static Path eventLoopsFile(final String stepId) throws IOException {
+		return Path.of(FileManager.INSTANCE.logFileName(Loggers.EVENT_LOOPS.getName(), stepId));
+	}
+
 	private static List<String> names(final JsonNode array) {
 		final List<String> out = new ArrayList<>();
 		array.forEach(node -> out.add(node.asText()));
@@ -950,6 +1358,26 @@ final class S3NicSetWorkloadTest {
 	private static CompositeDataOperation<DataItem> multipart(final String name, final int parts) {
 		return new CompositeDataOperationImpl<>(0, OpType.CREATE, new DataItemImpl(name, 7, (long) parts * ITEM_SIZE), null,
 						"/bucket", CREDENTIAL, null, 0, ITEM_SIZE);
+	}
+
+	/**
+	 * The upload's own final result, once nothing is in flight: its completion answered, or its
+	 * initiation failed, which leaves it no parts.
+	 */
+	private static Operation<?> awaitUploadOutcome(final Run run, final CompositeDataOperation<DataItem> upload)
+					throws InterruptedException {
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+		Operation<?> last = null;
+		while (System.nanoTime() < deadline) {
+			final var result = run.results().poll();
+			if (result != null) {
+				last = result;
+			} else if (last instanceof CompositeDataOperation<?> composite && last.item().name().equals(upload.item().name())
+							&& (composite.allSubOperationsDone() || last.status() != SUCC) && run.driver().activeOpCount() == 0) {
+				return last;
+			}
+		}
+		throw new AssertionError("the upload did not finish: " + last + ", status " + (last == null ? null : last.status()));
 	}
 
 	/** The upload's own result, once its completion was answered and nothing is in flight. */

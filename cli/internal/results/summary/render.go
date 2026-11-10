@@ -443,9 +443,7 @@ func (r *Renderer) renderWorkload(b *strings.Builder, summary *RunSummary) {
 	if work.HostInterfaces != "" {
 		r.writeBullet(b, "Host interfaces", work.HostInterfaces)
 	}
-	if len(work.Interfaces) > 0 || work.HostInterfaces != "" {
-		r.writeBullet(b, "Event loops", work.EventLoops)
-	}
+	r.writeBullet(b, "Event loops", work.EventLoops)
 	if n := len(work.BucketSet); n > 1 {
 		r.writeBullet(b, "Buckets", fmt.Sprintf("%d (%s ... %s)", n, work.BucketSet[0], work.BucketSet[n-1]))
 	} else if work.Bucket != "" {
@@ -926,11 +924,15 @@ func collectIncompleteSteps(summary *RunSummary) []string {
 		}
 		if step.NicPaths != nil && len(step.NicPaths.Missing) > 0 {
 			out = append(out, fmt.Sprintf("%s missing NIC paths files: %s", step.StepID,
-				strings.Join(missingNicNodes(step.NicPaths.Missing, ", "), "; ")))
+				strings.Join(missingNicNodes(step.NicPaths.Missing), "; ")))
 		}
 		if len(step.NicSetMissing) > 0 {
 			out = append(out, fmt.Sprintf("%s missing NIC-set reports: %s", step.StepID,
-				strings.Join(missingNicNodes(step.NicSetMissing, ", "), "; ")))
+				strings.Join(missingNicNodes(step.NicSetMissing), "; ")))
+		}
+		if len(step.EventLoopsMissing) > 0 {
+			out = append(out, fmt.Sprintf("%s missing event-loop reports: %s", step.StepID,
+				strings.Join(missingNicNodes(step.EventLoopsMissing), "; ")))
 		}
 	}
 	return out

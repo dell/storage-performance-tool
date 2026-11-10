@@ -20,18 +20,39 @@ const nicEventLoopsOtherReports = "no readable report from the other engines"
 // engine changed between steps. A run without reports has none. Artifact Health and the warnings
 // name the reports that were not read.
 func nicEventLoops(engines map[string][]results.NicEngine, stepOrder []string, incomplete bool) string {
+	ordered := orderedSteps(engines, stepOrder)
+	steps := make([][]nodeEventLoops, 0, len(ordered))
+	for _, stepID := range ordered {
+		var step []nodeEventLoops
+		for _, engine := range engines[stepID] {
+			step = append(step, nodeEventLoops{node: engine.Node, described: nicEngineEventLoops(engine)})
+		}
+		steps = append(steps, step)
+	}
+	return eventLoopsByNode(steps, incomplete, nicEventLoopsVaryByStep)
+}
+
+// nodeEventLoops is one engine's described event loops in one step.
+type nodeEventLoops struct {
+	node      int
+	described string
+}
+
+// eventLoopsByNode is the Event loops bullet for steps of engine descriptions, in step order: one
+// value per engine when every node agrees and nothing is incomplete, otherwise each node's value,
+// and varyByStep when a node's value changed between steps. No descriptions give none.
+func eventLoopsByNode(steps [][]nodeEventLoops, incomplete bool, varyByStep string) string {
 	byNode := map[int]string{}
 	var nodes []int
-	for _, stepID := range orderedNicSteps(engines, stepOrder) {
-		for _, engine := range engines[stepID] {
-			described := nicEngineEventLoops(engine)
-			previous, seen := byNode[engine.Node]
+	for _, step := range steps {
+		for _, engine := range step {
+			previous, seen := byNode[engine.node]
 			switch {
 			case !seen:
-				byNode[engine.Node] = described
-				nodes = append(nodes, engine.Node)
-			case previous != described:
-				return nicEventLoopsVaryByStep
+				byNode[engine.node] = engine.described
+				nodes = append(nodes, engine.node)
+			case previous != engine.described:
+				return varyByStep
 			}
 		}
 	}
@@ -83,8 +104,8 @@ func missingNicSetReports(sm *results.StepManifest, nicNodes []results.NicNode, 
 	return missingNicFiles(sm, results.ExpectedNicSetFiles(sm.StepID, nicNodes, nicStepParticipants(metrics)))
 }
 
-// orderedNicSteps lists the steps with reports: the run's step order, then any others sorted.
-func orderedNicSteps(engines map[string][]results.NicEngine, stepOrder []string) []string {
+// orderedSteps lists the steps with reports: the run's step order, then any others sorted.
+func orderedSteps[E any](engines map[string][]E, stepOrder []string) []string {
 	out := make([]string, 0, len(engines))
 	for _, stepID := range stepOrder {
 		if _, ok := engines[stepID]; ok && !slices.Contains(out, stepID) {

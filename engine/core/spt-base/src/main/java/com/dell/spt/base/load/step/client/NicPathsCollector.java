@@ -5,6 +5,7 @@ import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.nic.EventLoopsArtifact;
 import com.dell.spt.base.nic.NicPathsArtifact;
 import com.dell.spt.base.nic.NicSetArtifact;
 import java.io.EOFException;
@@ -20,17 +21,24 @@ import org.apache.logging.log4j.Logger;
 /**
  * Copies each node's {@link NicPathsArtifact} and {@link NicSetArtifact} into the Entry Node's step
  * folder as {@code nic.paths.node-NNN.csv} and {@code nic.set.node-NNN.json}, where NNN is the
- * slice index (item 18, D64). The files are not merged, and a node's missing file is a WARN rather
- * than a step failure (D60); the CLI reports it.
+ * slice index (item 18, D64), from each slice that requested a NIC set; and every slice's
+ * {@link EventLoopsArtifact} as {@code event.loops.node-NNN.json}. The files are not merged, and a
+ * node's missing file is a WARN rather than a step failure (D60); the CLI reports it. A NIC file's
+ * copy left by an earlier step with the same id is kept and refused; an event-loop copy is replaced,
+ * since every step writes a new report.
  */
 final class NicPathsCollector implements AutoCloseable {
 
-	/** One file each NIC-set node writes, and its name in the messages. */
-	private record Evidence(Logger logger, String fileName, String what) {}
+	/**
+	 * One file a node writes, its name in the messages, whether every slice writes it or only one that
+	 * requested a NIC set, and whether its copy replaces one left by an earlier step with the same id.
+	 */
+	private record Evidence(Logger logger, String fileName, String what, boolean everySlice, boolean replaces) {}
 
 	private static final List<Evidence> EVIDENCE = List.of(
-					new Evidence(Loggers.NIC_PATHS, NicPathsArtifact.FILE_NAME, "NIC paths"),
-					new Evidence(Loggers.NIC_SET, NicSetArtifact.FILE_NAME, "NIC set"));
+					new Evidence(Loggers.NIC_PATHS, NicPathsArtifact.FILE_NAME, "NIC paths", false, false),
+					new Evidence(Loggers.NIC_SET, NicSetArtifact.FILE_NAME, "NIC set", false, false),
+					new Evidence(Loggers.EVENT_LOOPS, EventLoopsArtifact.FILE_NAME, "event loops", true, true));
 
 	private final String loadStepId;
 	private final List<FileManager> fileManagers;
@@ -40,7 +48,8 @@ final class NicPathsCollector implements AutoCloseable {
 	/**
 	 * @param fileManagers one per slice, the Entry Node's first
 	 * @param nodeNames one per slice, for the messages
-	 * @param expected one per slice: whether that slice requested a NIC set
+	 * @param expected one per slice: whether that slice requested a NIC set, and so writes the NIC
+	 *     files
 	 */
 	NicPathsCollector(
 					final String loadStepId,
@@ -59,10 +68,10 @@ final class NicPathsCollector implements AutoCloseable {
 	@Override
 	public void close() {
 		for (int i = 0; i < fileManagers.size(); i++) {
-			if (!expected.get(i)) {
-				continue;
-			}
 			for (final var evidence : EVIDENCE) {
+				if (!evidence.everySlice() && !expected.get(i)) {
+					continue;
+				}
 				try {
 					collect(i, evidence);
 				} catch (final Exception e) {
@@ -85,7 +94,12 @@ final class NicPathsCollector implements AutoCloseable {
 		}
 		final var target = nodeCopyPath(canonical, index);
 		if (Files.exists(target)) {
-			throw new IOException("a stale node file exists: " + target);
+			if (!evidence.replaces()) {
+				throw new IOException("a stale node file exists: " + target);
+			}
+			Files.delete(target);
+			Loggers.MSG.info("{}: replaced the {} file of an earlier step with the same id from node {}", loadStepId,
+							evidence.what(), String.format("%03d", index));
 		}
 		if (index == 0) {
 			if (!Files.isRegularFile(canonical)) {

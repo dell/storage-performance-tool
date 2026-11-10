@@ -112,7 +112,7 @@ reference.
 | storage-driver-limit-multipart-objects         | Integer >= 0 | 0                 | The max concurrent multipart objects in flight at any moment. `0` = unlimited.
 | storage-driver-limit-multipart-parts           | Integer >= 0 | 0                 | The max concurrent parts in flight per multipart object at any moment. `0` = unlimited.
 | storage-driver-limit-queue-input               | Integer > 0 | 1000000            | Storage drivers internal input operations queue size limit
-| storage-driver-threads                         | Integer >= 0 | 0                 | The count of the shared/global I/O executor threads. 0 means automatic value (CPU cores/threads count)
+| storage-driver-threads                         | Integer >= 0 | 0                 | The count of the shared/global I/O executor threads. 0 means automatic value: for the Netty-based drivers, `max(4, hardware threads / 24)` on the default route, and a count per NIC with a NIC set (see [NIC sets](../../../../../../../cli/docs/NETWORK_INTERFACES.md)); for `fs` and the other NIO drivers, the hardware threads, capped at the concurrency limit; for `s3-aws`, one worker per concurrency permit
 | storage-driver-type                            | String | s3                      | The identifier pointing to the one of the registered storage driver implementations to use
 | storage-namespace                              | String | null                    | The storage namespace
 | storage-net-node-slice                         | Boolean | false                  | Try (or not) to distribute the storage endpoints between the Spt nodes using greatest common divisor

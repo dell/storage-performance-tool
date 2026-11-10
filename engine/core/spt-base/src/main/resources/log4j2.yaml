@@ -230,6 +230,13 @@ Configuration:
         DirectWriteRolloverStrategy: {}
         PatternLayout:
           pattern: "%m%n"
+      - name: eventLoopsFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}event.loops.json"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          pattern: "%m%n"
       - name: operationLifecycleFile
         filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}operation.lifecycle.csv"
         Policies:
@@ -439,6 +446,11 @@ Configuration:
         level: INFO
         AppenderRef:
           ref: nicSetFile
+        additivity: false
+      - name: com.dell.spt.base.logging.EventLoops
+        level: INFO
+        AppenderRef:
+          ref: eventLoopsFile
         additivity: false
       - name: com.dell.spt.base.logging.OperationLifecycle
         level: INFO

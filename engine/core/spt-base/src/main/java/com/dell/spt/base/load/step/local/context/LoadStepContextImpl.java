@@ -13,6 +13,8 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 
 import com.dell.spt.base.metrics.range.RangeReadSnapshot;
+import com.dell.spt.base.nic.EventLoopCounting;
+import com.dell.spt.base.nic.EventLoops;
 import com.dell.spt.base.nic.NicPathCounting;
 import com.dell.spt.base.nic.NicPathRows;
 import com.dell.spt.base.nic.NicSetResources;
@@ -1841,6 +1843,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	@Override
 	public final NicSetResources nicSetResources() {
 		return driver instanceof NicPathCounting counting ? counting.nicSetResources() : null;
+	}
+
+	@Override
+	public final EventLoops eventLoops() {
+		return driver instanceof EventLoopCounting counting ? counting.eventLoops() : null;
 	}
 
 	@Override

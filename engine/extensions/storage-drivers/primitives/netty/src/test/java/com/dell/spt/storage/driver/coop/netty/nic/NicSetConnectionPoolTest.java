@@ -18,6 +18,7 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.epoll.Epoll;
 import io.netty.channel.epoll.EpollEventLoopGroup;
 import io.netty.channel.epoll.EpollSocketChannel;
+import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.pool.AbstractChannelPoolHandler;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import io.netty.util.concurrent.EventExecutor;
@@ -80,6 +81,20 @@ class NicSetConnectionPoolTest {
 		}
 		for (final var group : groups) {
 			group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
+		}
+	}
+
+	/** A trial's mark ends with the attempt that gives the channel back, so a later attempt on the channel ends no trial. */
+	@Test
+	void aTrialMarkEndsOnceSoTheChannelsNextAttemptEndsNoTrial() {
+		final var channel = new EmbeddedChannel();
+		try {
+			assertFalse(NicSetConnectionPool.endsTrial(channel), "an unmarked channel carried no trial");
+			NicSetConnectionPool.markTrial(channel);
+			assertTrue(NicSetConnectionPool.endsTrial(channel), "the trial's own attempt ends it");
+			assertFalse(NicSetConnectionPool.endsTrial(channel), "the channel's next attempt ends no trial");
+		} finally {
+			channel.finishAndReleaseAll();
 		}
 	}
 
@@ -241,6 +256,71 @@ class NicSetConnectionPoolTest {
 		assertEquals(4, path.connectsStarted());
 		assertInstanceOf(PathBackoffException.class, failure(acquire(pool)), "the failed trial doubles the interval");
 		assertEquals(4, path.connectsStarted());
+	}
+
+	/**
+	 * F8: a trial connect that throws before it starts ends the trial, so the Path does not reject
+	 * every connect after it.
+	 */
+	@Test
+	void aTrialConnectThatCannotStartLetsTheNextOneTry() throws Exception {
+		final var a = listener();
+		final var throwing = new AtomicInteger();
+		final NicBinding binding = (connecting, iface, address) -> {
+			if (throwing.getAndUpdate(left -> left > 0 ? left - 1 : 0) > 0) {
+				throw new IllegalStateException("no socket for the trial");
+			}
+			NicBinding.SOURCE_ADDRESS.apply(connecting, iface, address);
+		};
+		final var pool = new NicSetConnectionPool(template(), handler, now::get);
+		pool.open(List.of(new OpenNic(nic("lo-a", NIC_A, List.of(path("s3-a.example:9000", a))), group("lo-a"))), binding,
+						CONNECT_TIMEOUT_MILLIS, 0);
+		resources.add(pool);
+		final var path = pool.pools().get(0).paths().get(0);
+		a.stopListening();
+		assertFalse(failure(acquire(pool)) instanceof PathBackoffException, "refused");
+		assertTrue(path.inBackoff());
+
+		advanceMillis(100);
+		throwing.set(1);
+		final var thrown = failure(acquire(pool));
+		assertInstanceOf(IllegalStateException.class, thrown, "the trial could not start: " + thrown);
+		assertTrue(path.inBackoff(), "it proves nothing about the route");
+		final var next = failure(acquire(pool));
+		assertFalse(next instanceof PathBackoffException, "the next connect is the trial: " + next);
+		assertEquals(2, path.connectsStarted(), "the refused connect and the next trial; the one that threw never started");
+	}
+
+	@Test
+	void aPoolServesAFailingNicOnlyWithAnIdleConnectionOrAConnectItWouldStart() throws Exception {
+		final var a = listener();
+		// No limit, so a connect never waits for a slot.
+		final var pool = open(0, new OpenNic(nic("lo-a", NIC_A, List.of(path("s3-a.example:9000", a))), group("lo-a")),
+						new OpenNic(nic("lo-b", NIC_B, List.of(path("s3-a.example:9000", a))), group("lo-b")));
+		final var nicPool = pool.pools().get(0);
+		assertTrue(nicPool.servesNow(), "a healthy Path");
+		final var held = acquire(nicPool).get(5, TimeUnit.SECONDS);
+		a.stopListening();
+		failure(acquire(nicPool));
+		assertFalse(nicPool.servesNow(), "its only Path backs off");
+
+		nicPool.release(held);
+		assertTrue(nicPool.servesNow(), "an idle connection serves during back-off");
+		assertSame(held, acquire(nicPool).get(5, TimeUnit.SECONDS));
+		assertFalse(nicPool.servesNow());
+
+		final var admission = pool.admission();
+		admission.failed(0);
+		assertEquals(1, admission.take(), "the admission asks the pool: NIC 0 is skipped");
+		advanceMillis(100);
+		assertTrue(nicPool.servesNow(), "the trial may start");
+		assertEquals(0, admission.take(), "and NIC 0 takes it");
+		assertFalse(failure(acquire(nicPool)) instanceof PathBackoffException, "the trial connects and is refused");
+		assertFalse(nicPool.servesNow(), "the failed trial doubles the interval");
+
+		pool.closeAdmission();
+		advanceMillis(10_000);
+		assertFalse(nicPool.servesNow(), "a closed pool serves nothing");
 	}
 
 	@Test

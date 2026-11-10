@@ -424,3 +424,32 @@ context agrees on, and the three event-loop counts are the engine's totals over 
 NIC-set drivers. A step that also has driver contexts without a NIC set adds
 `contexts_without_nic_set`, how many, because the counts leave out their loops. Added
 fields keep schema version 1.
+
+### Event-loop report
+
+Every step, with or without a NIC set, publishes `event.loops.json` at stop, through the
+same staging file and atomic move: the Netty event loops of each driver context that owns
+some, and what sized them. The Entry Node copies each node's report as
+`event.loops.node-NNN.json` and warns for a missing one, and the logs API exposes a single
+engine's report as `EventLoops`. Schema version 1 is one JSON object:
+
+```json
+{"schema_version":1,"engine_run_id":7,"step_id":"read1","worker_id":"worker-a",
+ "hardware_threads":192,"event_loops":8,
+ "contexts":[{"context_index":0,"route":"default","driver_threads":0,"source":"default",
+              "event_loops":8}]}
+```
+
+`contexts` lists the step's driver contexts that own event loops, in context order, and is
+empty when none does (a driver that is not Netty-based). `route` is `default` or `nic_set`.
+`driver_threads` is the configured `storage.driver.threads`, with 0 for the default, and
+`source` names what sized the groups: `storage.driver.threads` when it is set, otherwise
+`default`. A context's `event_loops` is every loop its driver owns, counted from its groups
+as created: on the default route its one group, `max(4, hardware_threads / 24)` by default;
+on a NIC set its per-NIC groups and its base group, the NIC-set report's
+`total_event_loops`. The top-level `event_loops` is the engine's total over its contexts.
+Unlike the NIC files, a report an earlier step with the same id left is removed, with its node
+copies, when the step starts, so the file describes the step that ran last and a step that
+fails to write its own has none. Only the driver's I/O groups count: a resolver's
+own loop does not.
+Added fields keep schema version 1.

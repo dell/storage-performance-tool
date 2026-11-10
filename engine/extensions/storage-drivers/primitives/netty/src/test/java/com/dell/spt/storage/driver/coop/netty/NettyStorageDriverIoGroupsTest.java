@@ -13,8 +13,11 @@ import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.nic.EventLoopRoute;
+import com.dell.spt.base.nic.EventLoops;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.storage.driver.coop.netty.NettyStorageDriverBase.NamedIoGroup;
+import com.github.akurilov.commons.concurrent.ThreadUtil;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.netty.connection.pool.NonBlockingConnPool;
@@ -93,6 +96,20 @@ class NettyStorageDriverIoGroupsTest {
 				assertEquals(threads, loops(driver.baseIoGroup()));
 				assertTrue(driver.extraIoGroups().isEmpty());
 			}
+		}
+	}
+
+	@Test
+	void theDefaultRouteReportsItsGroupAndWhatSizedIt() throws Exception {
+		try (final var driver = new GroupsDriver(storageConfig(3, List.of()))) {
+			assertEquals(new EventLoops(EventLoopRoute.DEFAULT, 3, 3), driver.eventLoops());
+			assertEquals(EventLoops.SOURCE_DRIVER_THREADS, driver.eventLoops().source());
+		}
+		try (final var driver = new GroupsDriver(storageConfig(0, List.of()))) {
+			final var expected = EventLoopDefaults.defaultRoute(ThreadUtil.getHardwareThreadCount());
+			assertEquals(new EventLoops(EventLoopRoute.DEFAULT, 0, expected), driver.eventLoops());
+			assertEquals(EventLoops.SOURCE_DEFAULT, driver.eventLoops().source());
+			assertEquals(expected, loops(driver.baseIoGroup()));
 		}
 	}
 

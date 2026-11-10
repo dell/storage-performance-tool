@@ -125,10 +125,14 @@ final class NicSetLoopback implements AutoCloseable {
 	private volatile CountDownLatch gate;
 	/** The size the stub gives an object nobody wrote, whose reads return zeros. */
 	volatile long absentObjectSize = EndpointSelectionTestSupport.ITEM_SIZE;
+	/** Which listeners drop every object request without answering, after accepting its connection. */
+	volatile IntPredicate dropOnListener = listener -> false;
 	/** Which object requests, counted from 1, the stub answers with 503. */
 	volatile IntPredicate failObjectRequest = n -> false;
 	/** Which object requests, counted from 1, the stub drops without answering: the connection closes. */
 	volatile IntPredicate dropObjectRequest = n -> false;
+	/** Which listeners' object requests {@link #hold()} holds; every listener's by default. */
+	volatile IntPredicate holdOnListener = listener -> true;
 	/** Whether the stub answers every part upload with 503, whatever its count. */
 	volatile boolean failParts;
 
@@ -485,6 +489,10 @@ final class NicSetLoopback implements AutoCloseable {
 			try {
 				requests.add(request);
 				final var objectRequest = request.isObjectRequest() ? objectRequestCount.incrementAndGet() : 0;
+				if (objectRequest > 0 && dropOnListener.test(listener)) {
+					exchange.close();
+					return;
+				}
 				if (objectRequest > 0 && dropObjectRequest.test(objectRequest)) {
 					exchange.close();
 					return;
@@ -496,7 +504,8 @@ final class NicSetLoopback implements AutoCloseable {
 					return;
 				}
 				final var held = gate;
-				if (held != null && request.isObjectRequest() && !held.await(HOLD_SECONDS, TimeUnit.SECONDS)) {
+				if (held != null && request.isObjectRequest() && holdOnListener.test(listener)
+								&& !held.await(HOLD_SECONDS, TimeUnit.SECONDS)) {
 					exchange.sendResponseHeaders(503, -1);
 					return;
 				}
@@ -643,6 +652,20 @@ final class NicSetLoopback implements AutoCloseable {
 			Thread.sleep(10);
 		}
 		fail(endpoint + " still accepts connections");
+	}
+
+	/**
+	 * The most trials a failing NIC can take in {@code elapsedMillis}: each waits out an interval from
+	 * the failure before it, 100 ms doubling to 5 s (NETWORK_INTERFACES.md).
+	 */
+	static int trialsWithin(final long elapsedMillis) {
+		var trials = 0;
+		var interval = 100L;
+		for (var due = interval; due <= elapsedMillis; due += interval) {
+			trials++;
+			interval = Math.min(interval * 2, 5_000);
+		}
+		return trials;
 	}
 
 	static void waitFor(final BooleanSupplier condition, final String what) throws InterruptedException {

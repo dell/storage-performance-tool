@@ -79,7 +79,7 @@ func nicPathsLine(stepID string, evidence *NicPathsEvidence) string {
 	}
 	counts := fmt.Sprintf("%d of %d nodes", len(evidence.Files), evidence.Nodes)
 	if len(evidence.Missing) > 0 {
-		counts += "; missing " + strings.Join(missingNicNodes(evidence.Missing, ", "), "; ")
+		counts += "; missing " + strings.Join(missingNicNodes(evidence.Missing), "; ")
 	}
 	return fmt.Sprintf("NIC paths: %s.nic.paths.node-NNN.csv (%s)", stepID, counts)
 }
@@ -109,13 +109,14 @@ func missingNicFiles(sm *results.StepManifest, expected []results.NicNodeFile) [
 	return missing
 }
 
-// missingNicNodes names each missing file's node and host, joined by sep.
-func missingNicNodes(missing []results.NicNodeFile, sep string) []string {
+// missingNicNodes names each missing file's node and, when it is known, its host, such as
+// "node-001, worker-b".
+func missingNicNodes(missing []results.NicNodeFile) []string {
 	out := make([]string, 0, len(missing))
 	for _, file := range missing {
 		label := fmt.Sprintf("node-%03d", file.Node)
 		if file.Host != "" {
-			label += sep + file.Host
+			label += ", " + file.Host
 		}
 		out = append(out, label)
 	}
