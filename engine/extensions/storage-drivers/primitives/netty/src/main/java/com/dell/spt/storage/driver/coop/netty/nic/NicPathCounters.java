@@ -22,6 +22,7 @@ public final class NicPathCounters {
 	public static final class Row {
 
 		private final NicPathRows.Kind kind;
+		private final int nicIndex;
 		private final NicPathRows.Nic nic;
 		private final NicPathRows.Endpoint endpoint;
 		private final LongAdder attempts = new LongAdder();
@@ -32,10 +33,16 @@ public final class NicPathCounters {
 		private final LongAdder rdmaSucceeded = new LongAdder();
 		private final LongAdder httpSucceeded = new LongAdder();
 
-		private Row(final NicPathRows.Kind kind, final NicPathRows.Nic nic, final NicPathRows.Endpoint endpoint) {
+		private Row(final NicPathRows.Kind kind, final int nicIndex, final NicPathRows.Nic nic, final NicPathRows.Endpoint endpoint) {
 			this.kind = kind;
+			this.nicIndex = nicIndex;
 			this.nic = nic;
 			this.endpoint = endpoint;
+		}
+
+		/** The index of the row's NIC in layout order, or -1 for the row of attempts that ended before a NIC was taken. */
+		public int nicIndex() {
+			return nicIndex;
 		}
 
 		/** An attempt was admitted on this row. */
@@ -87,7 +94,7 @@ public final class NicPathCounters {
 
 	private final Row[][] paths;
 	private final Row[] nics;
-	private final Row none = new Row(NicPathRows.Kind.NONE, null, null);
+	private final Row none = new Row(NicPathRows.Kind.NONE, -1, null, null);
 
 	private NicPathCounters(final Row[][] paths, final Row[] nics) {
 		this.paths = paths;
@@ -115,11 +122,11 @@ public final class NicPathCounters {
 							inventory.nic(nic.name()).map(NicInventory.Nic::numaNode).orElse(null),
 							port == null ? null : port.id(),
 							shares ? Integer.toString(NicSetSettings.openLimit(concurrencyLimit, count, i)) : "shared");
-			nics[i] = new Row(NicPathRows.Kind.NIC, columns, null);
+			nics[i] = new Row(NicPathRows.Kind.NIC, i, columns, null);
 			paths[i] = new Row[nic.paths().size()];
 			for (var j = 0; j < paths[i].length; j++) {
 				final var spec = nic.paths().get(j);
-				paths[i][j] = new Row(NicPathRows.Kind.PATH, columns, new NicPathRows.Endpoint(spec.endpoint(),
+				paths[i][j] = new Row(NicPathRows.Kind.PATH, i, columns, new NicPathRows.Endpoint(spec.endpoint(),
 								spec.destination().getAddress().getHostAddress(), spec.destination().getPort()));
 			}
 		}

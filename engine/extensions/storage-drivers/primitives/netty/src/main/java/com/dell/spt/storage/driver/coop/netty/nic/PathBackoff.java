@@ -70,6 +70,21 @@ final class PathBackoff {
 		untilNanos = nanoClock.getAsLong() + TimeUnit.MILLISECONDS.toNanos(intervalMillis(failures));
 	}
 
+	/**
+	 * A connect started in {@code connectEpoch} could not be made at all, before any connect: it
+	 * proves nothing about the route, so only its trial ends, and the next connect may try.
+	 */
+	synchronized void abandoned(final long connectEpoch) {
+		if (connectEpoch == epoch) {
+			trialPending = false;
+		}
+	}
+
+	/** Whether {@link #tryConnect()} would reject a connect now; starts no trial. */
+	synchronized boolean rejectsNow() {
+		return failures != 0 && (trialPending || nanoClock.getAsLong() - untilNanos < 0);
+	}
+
 	synchronized boolean inBackoff() {
 		return failures != 0;
 	}

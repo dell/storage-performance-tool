@@ -8,6 +8,7 @@ import io.netty.channel.Channel;
 import io.netty.channel.ConnectTimeoutException;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.pool.ChannelPoolHandler;
+import io.netty.util.AttributeKey;
 import java.net.ConnectException;
 import java.net.Inet4Address;
 import java.net.NoRouteToHostException;
@@ -35,6 +36,8 @@ import java.util.function.LongSupplier;
  * {@link #lease()} waits on the calling thread, never on an event loop of this pool.
  */
 public final class NicSetConnectionPool implements NonBlockingConnPool {
+
+	private static final AttributeKey<Boolean> ATTR_KEY_TRIAL = AttributeKey.valueOf("nicTrial");
 
 	/** Receives the outcome of one acquisition exactly once: an active channel, or the failure. */
 	@FunctionalInterface
@@ -73,6 +76,7 @@ public final class NicSetConnectionPool implements NonBlockingConnPool {
 	private final AtomicInteger next = new AtomicInteger();
 	private volatile List<NicPathPool> pools = List.of();
 	private volatile NicAdmission admission = NicAdmission.none();
+	private volatile Runnable dispatchRecheck;
 	private volatile int connectTimeoutMillis;
 	private volatile boolean closed;
 
@@ -88,6 +92,14 @@ public final class NicSetConnectionPool implements NonBlockingConnPool {
 		this.template = template;
 		this.channelHandler = channelHandler;
 		this.nanoClock = nanoClock;
+	}
+
+	/**
+	 * The driver's wake-up of its dispatch task, which the admission runs on the NIC set's event loops
+	 * while only a failing NIC's later trial could take an attempt (D87). Before {@link #open}.
+	 */
+	public void recheckDispatchWith(final Runnable signal) {
+		this.dispatchRecheck = signal;
 	}
 
 	/**
@@ -111,8 +123,18 @@ public final class NicSetConnectionPool implements NonBlockingConnPool {
 							nanoClock));
 		}
 		this.connectTimeoutMillis = connectTimeoutMillis;
-		this.admission = NicAdmission.of(concurrencyLimit, nics.size());
+		final var recheck = dispatchRecheck;
+		final var loops = nics.isEmpty() ? null : nics.get(0).group();
+		this.admission = NicAdmission.of(concurrencyLimit, built, nanoClock,
+						recheck == null || loops == null ? null : timerOn(loops), recheck);
 		this.pools = List.copyOf(built);
+	}
+
+	// No result is needed: the admission catches a rejected schedule, and a re-check clears its flag first, so
+	// one that fails is followed by the next.
+	@SuppressWarnings("FutureReturnValueIgnored")
+	private static NicAdmission.Timer timerOn(final EventLoopGroup loops) {
+		return (task, delayMillis) -> loops.schedule(task, delayMillis, TimeUnit.MILLISECONDS);
 	}
 
 	/** The NICs' admission; it has no NIC until {@link #open}. */
@@ -129,6 +151,22 @@ public final class NicSetConnectionPool implements NonBlockingConnPool {
 	public static int nicIndex(final Channel channel) {
 		final var path = channel.attr(NicPathPool.ATTR_KEY_PATH).get();
 		return path == null ? -1 : path.pool().index();
+	}
+
+	/**
+	 * Marks {@code channel} as carrying its NIC's trial (D87), which ends when the attempt gives the
+	 * channel back. Set by the attempt that took the trial, before its request.
+	 */
+	public static void markTrial(final Channel channel) {
+		channel.attr(ATTR_KEY_TRIAL).set(Boolean.TRUE);
+	}
+
+	/**
+	 * Whether {@code channel} carried its NIC's trial, clearing the mark: asked once, as the attempt
+	 * gives the channel back, while {@link NicAdmission#trialRunning} says a trial runs.
+	 */
+	public static boolean endsTrial(final Channel channel) {
+		return channel.attr(ATTR_KEY_TRIAL).getAndSet(null) != null;
 	}
 
 	/**

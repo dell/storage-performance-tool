@@ -29,8 +29,10 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -131,6 +133,8 @@ final class RdmaNicLoopback implements AutoCloseable {
 	volatile Runnable beforeConnect = () -> {};
 	/** Makes the stub close each connection after its response, so the next request connects. */
 	volatile boolean closeConnections;
+	/** Which listeners drop every object request without answering: the connection closes. */
+	volatile IntPredicate dropOnListener = listener -> false;
 	private final NicSetSupport.Environment environment = new NicSetSupport.Environment(
 					() -> INVENTORY, host -> Ipv4.parse(host), (connecting, iface, address) -> {
 						beforeConnect.run();
@@ -356,6 +360,23 @@ final class RdmaNicLoopback implements AutoCloseable {
 		servers.get(index).stop(0);
 	}
 
+	/** Waits until {@code endpoint}, a stopped listener's, refuses connections. */
+	static void awaitRefused(final String endpoint) throws InterruptedException {
+		final int port = Integer.parseInt(endpoint.substring(endpoint.lastIndexOf(':') + 1));
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		while (System.nanoTime() < deadline) {
+			try (final var socket = new Socket()) {
+				socket.connect(new InetSocketAddress(InetAddress.getLoopbackAddress(), port), 1_000);
+			} catch (final ConnectException e) {
+				return;
+			} catch (final IOException e) {
+				// retry
+			}
+			Thread.sleep(10);
+		}
+		throw new AssertionError(endpoint + " still accepts connections");
+	}
+
 	List<Request> requests() {
 		return List.copyOf(requests);
 	}
@@ -442,6 +463,10 @@ final class RdmaNicLoopback implements AutoCloseable {
 				requests.add(request);
 				if (request.isObjectRequest() && failObjectRequest.test(objectRequestCount.incrementAndGet())) {
 					exchange.sendResponseHeaders(503, -1);
+					return;
+				}
+				if (request.isObjectRequest() && dropOnListener.test(listener)) {
+					exchange.close();
 					return;
 				}
 				final var currentGate = gate;

@@ -7,6 +7,7 @@ import static com.dell.spt.storage.driver.coop.netty.http.s3.rdma.RdmaNicLoopbac
 import static com.dell.spt.storage.driver.coop.netty.http.s3.rdma.RdmaNicLoopback.NICS;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.rdma.RdmaNicLoopback.SERVER_GET_FILL;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.rdma.RdmaNicLoopback.SIZE;
+import static com.dell.spt.storage.driver.coop.netty.http.s3.rdma.RdmaNicLoopback.awaitRefused;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.rdma.RdmaNicLoopback.THRESHOLD;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.rdma.RdmaNicLoopback.closedRows;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.rdma.RdmaNicLoopback.op;
@@ -40,6 +41,7 @@ import com.dell.spt.base.load.step.ScenarioUtil;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
+import com.dell.spt.base.nic.NicPathRows;
 import com.dell.spt.storage.driver.coop.netty.http.s3.rdma.RdmaNicLoopback.Request;
 import com.dell.spt.storage.driver.coop.netty.http.s3.rdma.RdmaNicLoopback.Run;
 import com.github.akurilov.commons.collection.Range;
@@ -54,6 +56,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
@@ -441,6 +444,86 @@ final class S3RdmaNicSetWorkloadTest {
 	private static Operation<DataItem> rangedRead(final String name, final List<Range> fixed, final int randomRanges) {
 		return (Operation<DataItem>) (Operation<?>) new DataOperationImpl<>(0, OpType.READ, new DataItemImpl(name, 0, SIZE), null, BUCKET, CREDENTIAL,
 						fixed, randomRanges);
+	}
+
+	/**
+	 * D87 on RDMA: once the only Path of a NIC refuses connections, that NIC takes one trial at a
+	 * time and none while its Path backs off, so the other NIC carries the writes.
+	 */
+	@Test
+	void aNicWhosePathRefusesTakesOnlyTrialsAndTheOtherNicCarriesTheWrites() throws Exception {
+		final var endpoints = stub.listeners(2);
+		final var run = started(endpoints, 2, 4);
+		assertEquals(Operation.Status.SUCC, run.executeAlone(op(OpType.CREATE, "before")).status());
+		stub.stop(1);
+		awaitRefused(endpoints.get(1));
+		waitFor(() -> run.pool().state().get(1).open() == 0, "the dead NIC's idle connections are dropped");
+
+		final int writes = 100;
+		final int window = 8;
+		var submitted = 0;
+		var succeeded = 0;
+		for (; submitted < window; submitted++) {
+			assertTrue(run.driver().put(op(OpType.CREATE, "write-" + submitted)));
+		}
+		for (var done = 0; done < writes; done++) {
+			if (run.results().await().status() == Operation.Status.SUCC) {
+				succeeded++;
+			}
+			if (submitted < writes) {
+				assertTrue(run.driver().put(op(OpType.CREATE, "write-" + submitted++)));
+			}
+		}
+		run.awaitIdle();
+		assertTrue(run.pool().admission().isFailing(1));
+		assertFalse(run.pool().admission().isFailing(0));
+
+		final var rows = closedRows(run.driver());
+		final long dead = rows.rows().stream().filter(row -> row.nic() != null && row.nic().iface().equals(NICS.get(1)))
+						.mapToLong(NicPathRows.Row::attempts).sum();
+		// Its share in flight when it failed, then a trial per back-off interval of at least 100 ms.
+		assertTrue(dead >= 1 && dead <= 16, () -> "attempts on the dead NIC: " + dead + ", rows: " + rows);
+		final int failed = writes - succeeded;
+		assertTrue(failed <= dead, () -> "failed writes: " + failed + ", rows: " + rows);
+	}
+
+	/**
+	 * D87: a NIC whose requests get no response takes trials only; the trial that gets a response
+	 * gives it its share again. Each trial's end, on its connection's release, lets the next start.
+	 */
+	@Test
+	void aNicWhoseRequestsGetNoResponseTakesTrialsUntilOneGetsAResponse() throws Exception {
+		final var endpoints = stub.listeners(2);
+		final var run = started(endpoints, 2, 4);
+		assertEquals(Operation.Status.SUCC, run.executeAlone(op(OpType.CREATE, "before")).status());
+		final var admission = run.pool().admission();
+		stub.dropOnListener = listener -> listener == 1;
+		for (var i = 0; !admission.isFailing(1); i++) {
+			assertTrue(i < 20, "NIC 1 never failed");
+			run.executeAlone(op(OpType.CREATE, "dropped-" + i));
+		}
+		// Two trials that get no response: the first one's end lets the second start.
+		final long failedWith = requestsOn(1);
+		final var trials = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+		for (var i = 0; requestsOn(1) < failedWith + 2; i++) {
+			assertTrue(System.nanoTime() < trials, "no second trial on the failing NIC");
+			run.executeAlone(op(OpType.CREATE, "trial-" + i));
+			Thread.sleep(10);
+		}
+		assertTrue(admission.isFailing(1));
+		stub.dropOnListener = listener -> false;
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+		for (var i = 0; admission.isFailing(1); i++) {
+			assertTrue(System.nanoTime() < deadline, "no trial on the recovered NIC got a response");
+			assertEquals(Operation.Status.SUCC, run.executeAlone(op(OpType.CREATE, "recovering-" + i)).status());
+			Thread.sleep(10);
+		}
+		run.awaitIdle();
+		assertFalse(admission.trialRunning(1));
+	}
+
+	private long requestsOn(final int listener) {
+		return stub.objectRequests().stream().filter(request -> request.listener() == listener).count();
 	}
 
 	private Run started(final List<String> endpoints, final int nics, final int concurrency) throws Exception {
