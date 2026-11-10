@@ -23,14 +23,18 @@ import org.apache.logging.log4j.core.config.Property;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.LogManager;
+import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.logging.Loggers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -50,6 +54,7 @@ final class S3EndpointSelectionRoundRobinTest {
 	private final List<Captured> requests = new CopyOnWriteArrayList<>();
 	private final List<AutoCloseable> resources = new ArrayList<>();
 	private volatile boolean failFirstPart;
+	private volatile boolean failEveryFirstPart;
 	private volatile boolean dropFirstPart;
 	/** Answers a range starting at this byte with {@link #failedRangeStatus}, or drops it if that is 0. */
 	private volatile long failedRangeStart = -1;
@@ -393,6 +398,86 @@ final class S3EndpointSelectionRoundRobinTest {
 		assertEquals(HOSTNAME + ":" + endpoints.get(0).split(":", -1)[1], abort.host());
 	}
 
+	/**
+	 * A completion that never connects sent nothing, so its upload is still open: it is aborted all the
+	 * same, once, and recorded aborted.
+	 */
+	@Test
+	void aCompletionThatCannotConnectStillAbortsItsUpload() throws Exception {
+		final var endpoints = new ArrayList<>(listeners(5));
+		endpoints.add("127.0.0.1:" + unusedPort());
+		final var run = driver(endpoints, null, 1, S3EndpointSelectionRoundRobinTest::metadataMode);
+		// A key of its own: the lifecycle file keeps the records of earlier runs in this directory.
+		final var key = "unsent-" + System.nanoTime();
+		final var item = new DataItemImpl(key, 5, 3L * ITEM_SIZE);
+		final var upload = new CompositeDataOperationImpl<DataItem>(
+						0, OpType.CREATE, item, null, "/bucket", CREDENTIAL, null, 0, ITEM_SIZE);
+
+		assertTrue(run.driver().put(upload));
+		awaitRequests(6);
+
+		final var abort = requests.get(5);
+		assertEquals("DELETE", abort.method());
+		assertTrue(abort.query().contains("uploadId=upload-1"), abort.query());
+		// HEAD, INIT, three parts; the completion's turn is the refused endpoint; the abort takes the next.
+		assertEquals(List.of(0, 1, 2, 3, 4, 0), listenerSequence());
+		assertEquals(Operation.Status.FAIL_IO, awaitComposite(run).status());
+		final var records = awaitLifecycle(key);
+		assertEquals(1, records.size(), records::toString);
+		assertTrue(records.get(0).contains("failed_aborted"), records::toString);
+		assertNoMoreRequests(6);
+	}
+
+	/**
+	 * A part runs out of retries and its upload's abort never connects: nothing was sent, so the upload
+	 * stays open and is recorded orphaned, and the operation ends.
+	 */
+	@Test
+	void anAbortThatCannotConnectRecordsItsUploadOrphaned() throws Exception {
+		failEveryFirstPart = true;
+		final var endpoints = new ArrayList<>(listeners(6));
+		endpoints.add("127.0.0.1:" + unusedPort());
+		final var run = driver(endpoints, null, 1, S3EndpointSelectionRoundRobinTest::metadataMode);
+		final var key = "unaborted-" + System.nanoTime();
+		final var item = new DataItemImpl(key, 5, 3L * ITEM_SIZE);
+		final var upload = new CompositeDataOperationImpl<DataItem>(
+						0, OpType.CREATE, item, null, "/bucket", CREDENTIAL, null, 0, ITEM_SIZE);
+
+		assertTrue(run.driver().put(upload));
+		final var records = awaitLifecycle(key);
+
+		assertEquals(1, records.size(), records::toString);
+		assertTrue(records.get(0).contains("failed_orphaned"), records::toString);
+		assertTrue(records.get(0).contains("abort failed: FAIL_IO"), records::toString);
+		// HEAD, INIT, part 1 and its three retries; the abort's turn is the refused endpoint.
+		assertEquals(List.of(0, 1, 2, 3, 4, 5), listenerSequence());
+		assertEquals(Operation.Status.FAIL_IO, awaitFailedUpload(run, key).status());
+		assertNoMoreRequests(6);
+		awaitNoActiveOperation(run);
+	}
+
+	/** An initiate that never connects has no upload to abort, so nothing more is sent. */
+	@Test
+	void anInitiateThatCannotConnectSendsNothingMore() throws Exception {
+		final var endpoints = new ArrayList<>(listeners(1));
+		endpoints.add("127.0.0.1:" + unusedPort());
+		final var run = driver(endpoints, null, 1, S3EndpointSelectionRoundRobinTest::metadataMode);
+		final var key = "uninitiated-" + System.nanoTime();
+		final var item = new DataItemImpl(key, 5, 3L * ITEM_SIZE);
+		final var upload = new CompositeDataOperationImpl<DataItem>(
+						0, OpType.CREATE, item, null, "/bucket", CREDENTIAL, null, 0, ITEM_SIZE);
+
+		assertTrue(run.driver().put(upload));
+
+		// The HEAD took the live endpoint; the initiate's turn is the refused one.
+		assertEquals(Operation.Status.FAIL_IO, run.results().await().status());
+		assertEquals("HEAD", requests.get(0).method());
+		assertNoMoreRequests(1);
+		awaitNoActiveOperation(run);
+		// No upload began, so there is no lifecycle record to write.
+		assertEquals(List.of(), lifecycle(key));
+	}
+
 	@Test
 	void everyDriverInstanceStartsAtTheFirstEndpoint() throws Exception {
 		final var endpoints = listeners(3);
@@ -554,6 +639,10 @@ final class S3EndpointSelectionRoundRobinTest {
 				exchange.sendResponseHeaders(500, -1);
 				return;
 			}
+			if ("PUT".equals(method) && query != null && query.contains("partNumber=1&") && failEveryFirstPart) {
+				exchange.sendResponseHeaders(500, -1);
+				return;
+			}
 			if ("POST".equals(method) && query != null && !query.contains("uploads") && completeStatus != 200) {
 				exchange.sendResponseHeaders(completeStatus, -1);
 				return;
@@ -624,6 +713,61 @@ final class S3EndpointSelectionRoundRobinTest {
 			}
 		}
 		throw new AssertionError("multipart upload did not finish: " + requests);
+	}
+
+	/** Nothing more arrives after the {@code count} requests already recorded. */
+	private void assertNoMoreRequests(final int count) throws InterruptedException {
+		Thread.sleep(500);
+		assertEquals(count, requests.size(), () -> "requests: " + requests);
+	}
+
+	private static void awaitNoActiveOperation(final Run run) throws InterruptedException {
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+		while (run.driver().activeOpCount() != 0 && System.nanoTime() < deadline) {
+			Thread.sleep(10);
+		}
+		assertEquals(0, run.driver().activeOpCount());
+	}
+
+	private static void metadataMode(final Config config) {
+		// Metadata mode writes the multipart lifecycle records.
+		config.val("storage-integrity-mode", "metadata");
+	}
+
+	/** The multipart lifecycle records of {@code key}'s upload, once there is one. */
+	private static List<String> awaitLifecycle(final String key) throws IOException, InterruptedException {
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+		List<String> records = List.of();
+		while (records.isEmpty() && System.nanoTime() < deadline) {
+			Thread.sleep(10);
+			records = lifecycle(key);
+		}
+		return records;
+	}
+
+	/** The multipart lifecycle records of {@code key}'s upload so far. */
+	private static List<String> lifecycle(final String key) throws IOException {
+		final var file = Path.of(FileManager.INSTANCE.logFileName(Loggers.MULTIPART_LIFECYCLE.getName(), "round-robin-test"));
+		try {
+			return Files.exists(file)
+							? Files.readAllLines(file).stream().filter(line -> line.contains("," + key + ",")).toList()
+							: List.of();
+		} catch (final IOException e) {
+			throw new UncheckedIOException(e);
+		}
+	}
+
+	/** The first failed result of {@code key}'s upload (its name carries the path): its initiate succeeded, so this is its end. */
+	private static Operation<?> awaitFailedUpload(final Run run, final String key) throws InterruptedException {
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
+		while (System.nanoTime() < deadline) {
+			final var result = run.results().poll();
+			if (result instanceof CompositeDataOperationImpl<?> && result.item().name().endsWith("/" + key)
+							&& result.status() != Operation.Status.SUCC) {
+				return result;
+			}
+		}
+		throw new AssertionError("the upload of " + key + " did not fail");
 	}
 
 	private List<Integer> listenerSequence() {

@@ -15,6 +15,7 @@ import com.dell.spt.base.storage.driver.AdmissionPhase;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetConnectionPool.OpenNic;
 import io.netty.channel.EventLoopGroup;
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -181,6 +182,20 @@ public final class NicSetSupport {
 		return new NicSetResources(settings.driverThreads(), settings.threadsPerNic(),
 						current == null ? List.of() : current.nics().stream().map(NicSetLayout.Nic::name).toList(),
 						baseEventLoops);
+	}
+
+	/** The Path Pools' connect timeout, which a kernel-route request of the driver also takes. */
+	public int connectTimeoutMillis() {
+		return settings.connectTimeoutMillis();
+	}
+
+	/**
+	 * The address the step resolved {@code endpoint} to, which a kernel-route request of the
+	 * driver connects to, or {@code null} before a successful open or when no Path goes to it.
+	 */
+	public InetSocketAddress destination(final String endpoint) {
+		final var current = layout;
+		return current == null ? null : current.destination(endpoint);
 	}
 
 	/** The per-path counters in the layout's order, or {@code null} before a successful open. */

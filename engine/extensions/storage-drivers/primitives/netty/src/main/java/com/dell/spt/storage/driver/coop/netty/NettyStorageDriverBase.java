@@ -389,7 +389,37 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			socketAddr = new InetSocketAddress(storageNodeAddr, storageNodePort);
 		}
 
-		final Bootstrap bootstrap = new Bootstrap()
+		final Channel conn;
+		final var connFuture = unpooledBootstrap().connect(socketAddr);
+		if (netTimeoutMilliSec > 0) {
+			if (connFuture.await(netTimeoutMilliSec, TimeUnit.MILLISECONDS)) {
+				conn = connFuture.channel();
+			} else {
+				throw new ConnectTimeoutException();
+			}
+		} else {
+			conn = connFuture.sync().channel();
+		}
+		return conn;
+	}
+
+	/**
+	 * Starts a connection like the one {@link #getUnpooledConnection} makes, on the base event-loop
+	 * group, to {@code destination}, an address already resolved, without waiting for it: the
+	 * future completes on the event loop, failing after {@code connectTimeoutMillis}. The caller
+	 * owns the connection once it connects, and closes it.
+	 */
+	protected final ChannelFuture connectUnpooled(final InetSocketAddress destination, final int connectTimeoutMillis) {
+		if (destination.isUnresolved()) {
+			throw new IllegalArgumentException("Not a resolved address: " + destination);
+		}
+		return unpooledBootstrap()
+						.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, connectTimeoutMillis)
+						.connect(destination);
+	}
+
+	private Bootstrap unpooledBootstrap() {
+		return new Bootstrap()
 						.group(ioExecutor)
 						.channel(socketChannelCls)
 						.handler(
@@ -407,19 +437,6 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 												}
 											}
 										});
-
-		final Channel conn;
-		final var connFuture = bootstrap.connect(socketAddr);
-		if (netTimeoutMilliSec > 0) {
-			if (connFuture.await(netTimeoutMilliSec, TimeUnit.MILLISECONDS)) {
-				conn = connFuture.channel();
-			} else {
-				throw new ConnectTimeoutException();
-			}
-		} else {
-			conn = connFuture.sync().channel();
-		}
-		return conn;
 	}
 
 	@Override

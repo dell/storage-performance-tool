@@ -36,6 +36,21 @@ public record NicSetLayout(List<Nic> nics) {
 	public record PathSpec(String endpoint, InetSocketAddress destination) {}
 
 	/**
+	 * The address the step resolved {@code endpoint} to, one of the driver's {@code host:port}
+	 * strings, or {@code null} when no Path goes to it.
+	 */
+	public InetSocketAddress destination(final String endpoint) {
+		for (final var nic : nics) {
+			for (final var path : nic.paths()) {
+				if (path.endpoint().equals(endpoint)) {
+					return path.destination();
+				}
+			}
+		}
+		return null;
+	}
+
+	/**
 	 * Builds the layout from {@code plan}, whose endpoints are the driver's {@code host:port}
 	 * strings.
 	 *

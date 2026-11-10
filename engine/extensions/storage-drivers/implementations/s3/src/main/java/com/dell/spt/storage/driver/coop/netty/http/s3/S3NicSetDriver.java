@@ -130,15 +130,20 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 		}
 	}
 
-	/** No connect starts during the drain, and waiting attempts give back their NIC and permit at once. */
+	/**
+	 * No connect starts during the drain, and waiting attempts and pending kernel-route aborts give
+	 * back their NIC and permit at once.
+	 */
 	@Override
 	protected void onAdmissionClosed() {
 		nicPool.closeAdmission();
+		closeKernelRoute();
 	}
 
 	@Override
 	protected void beforeIoShutdown() {
 		nicPool.closeAdmission();
+		closeKernelRoute();
 	}
 
 	@Override
@@ -255,6 +260,11 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 		}
 		if (!concurrencyThrottle.tryAcquire()) {
 			return false;
+		}
+		if (abortsMultipartUpload(op)) {
+			// No NIC: a dead one must not keep the upload open (D87).
+			submitOnKernelRoute(op, token, nicSet.destination(storageNodeAddrs[0]), nicSet.connectTimeoutMillis());
+			return true;
 		}
 		final var admission = nicPool.admission();
 		final int nic = admission.take();

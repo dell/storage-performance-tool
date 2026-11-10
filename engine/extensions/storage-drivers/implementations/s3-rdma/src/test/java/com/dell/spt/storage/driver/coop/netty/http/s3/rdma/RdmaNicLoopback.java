@@ -29,12 +29,17 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.BindException;
 import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.StandardSocketOptions;
 import java.nio.ByteBuffer;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -118,6 +123,8 @@ final class RdmaNicLoopback implements AutoCloseable {
 	volatile boolean opensOverlapped;
 	/** Which object requests, counted from 1, the stub answers with 503. */
 	volatile IntPredicate failObjectRequest = n -> false;
+	/** Whether the stub answers every part upload with 503, over HTTP or RDMA. */
+	volatile boolean failParts;
 	/** Which requests with a token the stub declines (reply 501): a GET body then comes over HTTP. */
 	volatile Predicate<Request> decline = request -> false;
 	/** The object requests that wait for {@link #release()}. */
@@ -377,12 +384,89 @@ final class RdmaNicLoopback implements AutoCloseable {
 		throw new AssertionError(endpoint + " still accepts connections");
 	}
 
+	/**
+	 * Stops listener {@code index} and leaves its port silent: a listening socket whose accept queue
+	 * is full, so the kernel drops each new SYN and a connect waits for its timeout. Closing the
+	 * result frees the port. As {@code NicSetLoopback.blackhole} in the {@code s3} tests.
+	 */
+	AutoCloseable blackhole(final int index) throws IOException, InterruptedException {
+		final var address = servers.get(index).getAddress();
+		servers.get(index).stop(0);
+		final var listener = ServerSocketChannel.open();
+		final List<SocketChannel> queued = new ArrayList<>();
+		final AutoCloseable silence = () -> {
+			for (final var channel : queued) {
+				channel.close();
+			}
+			listener.close();
+		};
+		try {
+			listener.setOption(StandardSocketOptions.SO_REUSEADDR, true);
+			final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+			while (true) {
+				try {
+					// A backlog of 1 queues two connections; the kernel drops the SYNs of any more.
+					listener.bind(address, 1);
+					break;
+				} catch (final BindException e) {
+					// The stopped server closes its socket on its own thread.
+					if (System.nanoTime() > deadline) {
+						throw e;
+					}
+					Thread.sleep(10);
+				}
+			}
+			while (queued.size() < 8) {
+				final var channel = SocketChannel.open();
+				queued.add(channel);
+				channel.configureBlocking(false);
+				if (!channel.connect(address) && !finishesWithin(channel, 200)) {
+					return silence;
+				}
+			}
+			throw new IOException("the accept queue of " + address + " never filled");
+		} catch (final IOException | InterruptedException | RuntimeException e) {
+			try {
+				silence.close();
+			} catch (final Exception closing) {
+				e.addSuppressed(closing);
+			}
+			throw e;
+		}
+	}
+
+	/** Whether this host drops a SYN that finds the accept queue full, which {@link #blackhole} needs, rather than resetting it. */
+	static boolean dropsSynsOnAFullAcceptQueue() {
+		try {
+			return "0".equals(Files.readString(Path.of("/proc/sys/net/ipv4/tcp_abort_on_overflow")).trim());
+		} catch (final IOException e) {
+			return false;
+		}
+	}
+
+	private static boolean finishesWithin(final SocketChannel channel, final long millis)
+					throws IOException, InterruptedException {
+		final var deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+		while (System.nanoTime() < deadline) {
+			if (channel.finishConnect()) {
+				return true;
+			}
+			Thread.sleep(5);
+		}
+		return false;
+	}
+
 	List<Request> requests() {
 		return List.copyOf(requests);
 	}
 
 	List<Request> objectRequests() {
 		return requests.stream().filter(Request::isObjectRequest).toList();
+	}
+
+	/** The multipart uploads started and neither completed nor aborted. */
+	int openUploads() {
+		return uploads.size();
 	}
 
 	byte[] object(final String path) {
@@ -461,7 +545,9 @@ final class RdmaNicLoopback implements AutoCloseable {
 			peaks.computeIfAbsent(source, unused -> new AtomicInteger()).accumulateAndGet(concurrent, Math::max);
 			try {
 				requests.add(request);
-				if (request.isObjectRequest() && failObjectRequest.test(objectRequestCount.incrementAndGet())) {
+				if (request.isObjectRequest() && (failObjectRequest.test(objectRequestCount.incrementAndGet())
+								|| (failParts && "PUT".equals(request.method()) && request.query() != null
+												&& request.query().contains("partNumber=")))) {
 					exchange.sendResponseHeaders(503, -1);
 					return;
 				}
