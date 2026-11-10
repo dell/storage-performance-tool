@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.dell.spt.base.metrics.type.TimingMeterImpl;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -420,6 +421,141 @@ class SteadyWindowTest {
 		assertEquals(SteadyStatus.NOT_REACHED, window.result().status());
 	}
 
+	@Test
+	void aRaisedWarmupIgnoresAMomentaryDipInFlight() {
+		final var window = window(1_000, 0, 0);
+		for (int i = 0; i < 10; i++) {
+			source.sample(64);
+		}
+		source.inFlight = 3;
+		source.succeeded = 3_000;
+		window.observe();
+		assertFalse(window.isStarted(), "3,000 completions reach 1,000 x 3 in flight, not 1,000 x the mean of 64");
+		source.succeeded = 63_999;
+		window.observe();
+		assertFalse(window.isStarted());
+		source.succeeded = 64_000;
+		window.observe();
+		assertTrue(window.isStarted());
+	}
+
+	@Test
+	void aRaisedWarmupFollowsAGaugeAboveItsMean() {
+		final var window = window(2, 0, 0);
+		source.sample(1);
+		source.sample(2);
+		source.sample(3);
+		source.inFlight = 10;
+		source.succeeded = 19;
+		window.observe();
+		assertFalse(window.isStarted(), "a rising gauge above its mean of 2 sets the bar, as before");
+		source.succeeded = 20;
+		window.observe();
+		assertTrue(window.isStarted());
+	}
+
+	@Test
+	void aRaisedWarmupFollowsANonmonotonicRampAboveItsMean() {
+		final var window = window(3, 0, 0);
+		final int[] gauge = {10, 9, 12, 11, 14
+		};
+		final long[] completions = {20, 26, 30, 32, 41
+		};
+		for (int i = 0; i < gauge.length; i++) {
+			source.sample(gauge[i]);
+			source.inFlight = gauge[i];
+			source.succeeded = completions[i];
+			window.observe();
+			// Neither rule starts: thresholds 30, 28.5 (27 for the old rule), 36, 33 and 42.
+			assertFalse(window.isStarted(), "observation " + i);
+		}
+		source.succeeded = 42;
+		window.observe();
+		assertTrue(window.isStarted(), "the gauge is above its mean of 11.2, so both rules start at 3 x 14");
+	}
+
+	@Test
+	void aRaisedWarmupClosedBeforeAnySampleIsNotReached() {
+		final var window = window(10, 0, 0);
+		source.inFlight = 4;
+		source.succeeded = 1_000;
+		window.observe();
+		assertEquals(SteadyStatus.NOT_REACHED, window.close("t").status());
+		assertEquals(1, window.cutCount(), "a window that never started takes only the end cut");
+	}
+
+	@Test
+	void aRaisedWarmupWaitsForTheFirstSampleSinceStepStart() {
+		source.sample(50); // before step start
+		final var window = window(2, 0, 0);
+		source.inFlight = 4;
+		source.succeeded = 1_000;
+		window.observe();
+		assertFalse(window.isStarted(), "no in-flight sample since step start yet");
+		source.sample(4);
+		window.observe();
+		assertTrue(window.isStarted());
+	}
+
+	@Test
+	void aRaisedWarmupExcludesSamplesFromBeforeStepStart() {
+		for (int i = 0; i < 100; i++) {
+			source.sample(64); // a previous step's load
+		}
+		final var window = window(10, 0, 0);
+		source.sample(8);
+		source.sample(8);
+		source.inFlight = 8;
+		source.succeeded = 80;
+		window.observe();
+		assertTrue(window.isStarted(), "the mean since step start is 8; with the earlier samples it would be about 63");
+	}
+
+	@Test
+	void warmupsOfOneTurnoverOrLessKeepThePreviousRuleAndNeverReadTheSamples() {
+		final var random = new Random(20261110L);
+		for (final double warmup : List.of(0.0, 0.5, 1.0)) {
+			for (int trace = 0; trace < 200; trace++) {
+				final var traceSource = new FakeSource();
+				final var window = new SteadyWindow(new SteadySettings(warmup, 0, 0), traceSource, clock::get);
+				window.markStepStart();
+				int expected = -1, actual = -1;
+				long completions = 0;
+				for (int i = 0; i < 400 && actual < 0; i++) {
+					// Dips to zero, ramps, pauses and bursts, with samples every tenth observation.
+					traceSource.inFlight = random.nextInt(10) == 0 ? random.nextInt(3) : random.nextInt(65);
+					completions += random.nextInt(4) == 0 ? 0 : random.nextInt(20);
+					traceSource.succeeded = completions;
+					if (i % 10 == 0) {
+						traceSource.sample(random.nextInt(65));
+					}
+					if (expected < 0 && completions >= Math.max(1.0, warmup * traceSource.inFlight)) {
+						expected = i;
+					}
+					window.observe();
+					if (window.isStarted()) {
+						actual = i;
+					}
+				}
+				assertEquals(expected, actual, "warm-up " + warmup + ", trace " + trace);
+				assertEquals(0, traceSource.inFlightSampleReads, "warm-up " + warmup + " must not read the samples");
+			}
+		}
+	}
+
+	@Test
+	void aPartialFirstWaveAndAPauseStartTheDefaultWindowAtOnce() {
+		// Eight start, four complete, then dispatch pauses: the default rule starts at C = 4 = inFlight.
+		// A floor at the mean (above 4) would wait for the pause to end and could turn a valid window short.
+		final var window = defaultWindow();
+		source.sample(8);
+		source.sample(8);
+		source.inFlight = 4;
+		source.succeeded = 4;
+		window.observe();
+		assertTrue(window.isStarted());
+	}
+
 	private SteadyWindow startWith(final double warmup, final double minTurnovers, final long minDurationMillis) {
 		final var window = window(warmup, minTurnovers, minDurationMillis);
 		source.inFlight = 1;
@@ -443,6 +579,8 @@ class SteadyWindowTest {
 		long succeeded, failed, corrupt, bytes;
 		double succeededLastRate, bytesLastRate;
 		long concurrencySum, concurrencyCount;
+		long inFlightSampleSum, inFlightSampleCount;
+		int inFlightSampleReads;
 		int inFlight;
 		final Histogram duration = histogram(), latency = histogram(), ttfb = histogram();
 		final List<Integer> readOrder = new ArrayList<>();
@@ -457,6 +595,18 @@ class SteadyWindowTest {
 		void concurrency(final long sum, final long count) {
 			concurrencySum = sum;
 			concurrencyCount = count;
+		}
+
+		/** One periodic in-flight sample. */
+		void sample(final int value) {
+			inFlightSampleSum += value;
+			inFlightSampleCount++;
+		}
+
+		@Override
+		public SteadyWindow.SampleTotals inFlightSamples() {
+			inFlightSampleReads++;
+			return new SteadyWindow.SampleTotals(inFlightSampleSum, inFlightSampleCount);
 		}
 
 		synchronized void pauseNextRead(final CountDownLatch signal, final CountDownLatch release) {

@@ -103,6 +103,11 @@ class SteadyTimingTest {
 			}
 
 			@Override
+			public SteadyWindow.SampleTotals inFlightSamples() {
+				return SteadyWindow.SampleTotals.NONE;
+			}
+
+			@Override
 			public SteadyCut.Readings read() {
 				final long count = succeeded.sum();
 				if (pauseNextRead[0]) {
@@ -175,6 +180,11 @@ class SteadyTimingTest {
 			@Override
 			public int inFlight() {
 				return 1;
+			}
+
+			@Override
+			public SteadyWindow.SampleTotals inFlightSamples() {
+				return SteadyWindow.SampleTotals.NONE;
 			}
 
 			@Override

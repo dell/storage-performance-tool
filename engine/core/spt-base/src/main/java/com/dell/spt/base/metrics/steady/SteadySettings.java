@@ -23,6 +23,15 @@ public record SteadySettings(double warmupTurnovers, double minTurnovers, long m
 		requireNonNegative("output.metrics.steady.min.duration", minDurationMillis);
 	}
 
+	/**
+	 * Whether the start rule floors the in-flight gauge at its mean sampled since step start. Only a
+	 * warm-up above one turnover does, so the default rule and any warm-up of one turnover or less
+	 * stay exactly as they were (ADR 0007 amendment of November 10, 2026).
+	 */
+	public boolean startFloorsInFlightAtItsMean() {
+		return warmupTurnovers > 1;
+	}
+
 	/** Reads the settings from the {@code output.metrics} configuration. */
 	public static SteadySettings fromMetricsConfig(final Config metricsConfig) {
 		return new SteadySettings(

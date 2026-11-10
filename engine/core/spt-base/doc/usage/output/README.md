@@ -488,10 +488,14 @@ ramp-up before every operation slot has completed an operation and the drain aft
 flight finish and no new ones start. Both lower the rates, by an amount that depends on the step's length, object
 size, latency and stop behavior. The engine therefore also measures each step over its *steady-state window*:
 
-* The window **starts** at the first metrics-manager observation (every 10 ms) at which the step's completed
+* The window **starts** at the first metrics-manager observation (about every 10 ms) at which the step's completed
   operations, succeeded plus failed, reach at least one and at least `output-metrics-steady-warmup-turnovers`
-  (default 1) times the operations in flight at that moment. The rule follows the operations actually in flight,
-  not the concurrency limit, so it serves saturated, rate-limited, client-bound and unlimited-concurrency steps.
+  (default 1) times the operations in flight at that moment. With a warm-up above 1, the count is the larger of the
+  operations in flight at that moment and their mean since the step started, from the samples the engine takes
+  about every 100 ms, and the window waits for the first such sample. At tens of thousands of operations per second
+  the count can fall near zero for a few milliseconds, and the mean keeps such a moment from cutting a long warm-up
+  short. The rule follows the operations actually in flight, not the concurrency limit, so it serves saturated,
+  rate-limited, client-bound and unlimited-concurrency steps.
 * The window **ends** at the step's first end event, before any drain: a stop (the time limit, a user stop, a
   failure-budget stop), the end of the step, or the end of scheduling. For a count limit or an exhausted item input,
   the window ends once nothing the step scheduled still waits for dispatch, not when the last operation is queued. For
