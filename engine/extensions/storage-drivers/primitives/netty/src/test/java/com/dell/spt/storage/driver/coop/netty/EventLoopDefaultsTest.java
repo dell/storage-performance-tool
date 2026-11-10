@@ -10,8 +10,8 @@ class EventLoopDefaultsTest {
 	private static final List<Integer> HOSTS = List.of(1, 6, 32, 33, 40, 96, 192, 239, 240, 288);
 
 	@Test
-	void theDefaultRouteKeepsItsCount() {
-		assertEquals(List.of(4, 4, 4, 4, 5, 12, 24, 29, 30, 36), counts(EventLoopDefaults::defaultRoute));
+	void theDefaultRouteHasOneLoopPer24HardwareThreads() {
+		assertEquals(List.of(4, 4, 4, 4, 4, 4, 8, 9, 10, 12), counts(EventLoopDefaults::defaultRoute));
 	}
 
 	@Test

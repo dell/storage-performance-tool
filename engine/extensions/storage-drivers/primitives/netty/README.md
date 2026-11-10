@@ -1,7 +1,7 @@
 # [Netty](https://netty.io/)-based Storage Driver
 
 Netty uses its own I/O worker thread pool. The count of these threads is controlled by the `storage-driver-threads`
-configuration option; without it, the default route uses `max(4, hardware threads / 8)` event loops (see
+configuration option; without it, the default route uses `max(4, hardware threads / 24)` event loops (see
 `EventLoopDefaults`), and each step reports the count in `event.loops.json`. However the connection pool allows to keep much more open connections at any moment of time. The
 count of the open connections may be limited by `storage-driver-limit-concurrency` configuration option.
 

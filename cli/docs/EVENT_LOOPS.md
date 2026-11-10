@@ -5,6 +5,14 @@ sized them. The CLI fetches each report with the step's other files, stores them
 `spt_run_params.json` and names the count in the run summary. A run with a
 [NIC set](NETWORK_INTERFACES.md#results) shows its NIC-set report's line instead.
 
+## Default
+
+Without `storage.driver.threads`, a Netty driver on the default route (the `s3` driver, and
+`s3-rdma` without a NIC set) owns `max(4, hardware threads / 24)` event loops: 4 up to 119
+hardware threads, and 8 at 192. Before 5.17 the divisor was 8, so 192 hardware threads had 24.
+`--engine-override storage.driver.threads=N` sets the count. A NIC set sizes its loops per NIC
+instead; see [Concurrency and event loops](NETWORK_INTERFACES.md#concurrency-and-event-loops).
+
 ## Report
 
 - **Single engine:** each step writes `<step>.event.loops.json`, with or without a NIC set. See
@@ -43,9 +51,9 @@ does not fail.
 ```json
 "eventLoopEngines": {
   "read1": [
-    {"node": 0, "host": "client-a.example", "hardwareThreads": 192, "eventLoops": 24,
+    {"node": 0, "host": "client-a.example", "hardwareThreads": 192, "eventLoops": 8,
      "contexts": [{"contextIndex": 0, "route": "default", "driverThreads": 0,
-                   "source": "default", "eventLoops": 24}]}
+                   "source": "default", "eventLoops": 8}]}
   ]
 }
 ```
@@ -56,15 +64,15 @@ A run without a NIC set adds an `Event loops` line to Workload Configuration, af
 `Endpoints`:
 
 ```text
-  • Event loops        24 per engine (default, 192 hardware threads)
+  • Event loops        8 per engine (default, 192 hardware threads)
 ```
 
 - `--engine-override storage.driver.threads=12` reads `12 per engine (storage.driver.threads)`.
 - Several drivers that agree, such as a `pipeline` or `weighted` step's, read
-  `48 per engine (2 drivers × 24, default, 192 hardware threads)`; drivers that differ read
-  `36 per engine (2 drivers; see eventLoopEngines in spt_run_params.json)`.
+  `16 per engine (2 drivers × 8, default, 192 hardware threads)`; drivers that differ read
+  `20 per engine (2 drivers; see eventLoopEngines in spt_run_params.json)`.
 - When engines differ, the line gives each node's value, such as
-  `node-000 24 (default, 192 hardware threads); node-001 4 (default, 6 hardware threads)`.
+  `node-000 8 (default, 192 hardware threads); node-001 4 (default, 6 hardware threads)`.
 - When an engine changed between steps, it reads
   `vary by step; see eventLoopEngines in spt_run_params.json`.
 - When an expected report is missing or could not be read, the line gives each node that

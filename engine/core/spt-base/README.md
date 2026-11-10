@@ -435,9 +435,9 @@ engine's report as `EventLoops`. Schema version 1 is one JSON object:
 
 ```json
 {"schema_version":1,"engine_run_id":7,"step_id":"read1","worker_id":"worker-a",
- "hardware_threads":192,"event_loops":24,
+ "hardware_threads":192,"event_loops":8,
  "contexts":[{"context_index":0,"route":"default","driver_threads":0,"source":"default",
-              "event_loops":24}]}
+              "event_loops":8}]}
 ```
 
 `contexts` lists the step's driver contexts that own event loops, in context order, and is
@@ -445,7 +445,7 @@ empty when none does (a driver that is not Netty-based). `route` is `default` or
 `driver_threads` is the configured `storage.driver.threads`, with 0 for the default, and
 `source` names what sized the groups: `storage.driver.threads` when it is set, otherwise
 `default`. A context's `event_loops` is every loop its driver owns, counted from its groups
-as created: on the default route its one group, `max(4, hardware_threads / 8)` by default;
+as created: on the default route its one group, `max(4, hardware_threads / 24)` by default;
 on a NIC set its per-NIC groups and its base group, the NIC-set report's
 `total_event_loops`. The top-level `event_loops` is the engine's total over its contexts.
 Unlike the NIC files, a report an earlier step with the same id left is removed, with its node

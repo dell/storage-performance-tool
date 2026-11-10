@@ -10,8 +10,11 @@ public final class EventLoopDefaults {
 	/** No default group has fewer loops. */
 	public static final int FLOOR = 4;
 
-	/** The default route's single group. */
-	public static final int DEFAULT_ROUTE_DIVISOR = 8;
+	/**
+	 * The default route's single group, one loop per 24 hardware threads. It was 8 before 5.17: on a
+	 * large client, a third as many loops carried as much or more for less client CPU per operation.
+	 */
+	public static final int DEFAULT_ROUTE_DIVISOR = 24;
 
 	/** Each NIC's group of an HTTP NIC set, whose loops carry every payload (D49). */
 	public static final int HTTP_PER_NIC_DIVISOR = 8;
