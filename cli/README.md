@@ -812,6 +812,7 @@ Auto Results and Shutdown
 - A phase's steady window can be `valid` with its rate falling inside it, because `valid` tests coverage, not stability. The summary warns when a valid window's `SteadyTrend[%]` is -50 or lower, or its `SteadyCV` is 0.5 or higher. The status and the steady rate don't change. These cutoffs are uncalibrated, and a rising ramp alone won't warn.
 - `--results-dir`: directory where fetched artifacts and a manifest `index.json` are saved.
 - Engine provenance is recorded in one run-level `engine.info.json` and shown with the separate CLI identity in the Environment section. See [`ENGINE_BUILD_INFO.md`](docs/ENGINE_BUILD_INFO.md).
+- Each engine's event loops for every step are fetched as `<step>.event.loops.json`, stored under `eventLoopEngines` in `spt_run_params.json` and named in the summary's `Event loops` line. See [`EVENT_LOOPS.md`](docs/EVENT_LOOPS.md).
 - `--label`: prefix for the output directory name and step ID prefix used in filenames.
 - `--shutdown-on-complete` (default: true): after a successful fetch, POST `/shutdown` to all Spt hosts and wait for `/status` to linger in a terminal state.
 

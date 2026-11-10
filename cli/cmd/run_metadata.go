@@ -66,6 +66,8 @@ type runMetadata struct {
 	Preparation             map[string]stepPreparation                              `json:"preparation,omitempty"`
 	NicEngines              map[string][]results.NicEngine                          `json:"nicEngines,omitempty"`
 	NicEnginesError         string                                                  `json:"nicEnginesError,omitempty"`
+	EventLoopEngines        map[string][]results.EventLoopEngine                    `json:"eventLoopEngines,omitempty"`
+	EventLoopEnginesError   string                                                  `json:"eventLoopEnginesError,omitempty"`
 	PoolSizing              []poolsizing.Engine                                     `json:"poolSizing,omitempty"`
 	StepLifecycles          map[string]string                                       `json:"stepLifecycles,omitempty"`
 	ResultsOptions          resultsOptionsSnapshot                                  `json:"resultsOptions"`

@@ -156,7 +156,7 @@ Item distribution takes little of this on a fast network. On the lab, three work
 
 - **Per-Path counts:** each step writes `<step>.nic.paths.csv`, and the run summary names the files in one line, such as `NIC paths: read1.nic.paths.csv`. See the engine's [per-path NIC evidence](../../engine/core/spt-base/README.md#per-path-nic-evidence).
 - **NIC-set report:** each step writes `<step>.nic.set.json`, each engine's NICs and event loops. See the engine's [NIC-set report](../../engine/core/spt-base/README.md#nic-set-report).
-- **Distributed steps:** the Entry Node keeps each node's files as `<step>.nic.paths.node-NNN.csv` and `<step>.nic.set.node-NNN.json`. `node-000` is the Entry Node, followed by the workers that started, in `--test-hosts` order; a worker that fails to start under `--min-hosts` gets no slice. An expected file that is absent is recorded as `missing` in `index.json`, and the run does not fail.
+- **Distributed steps:** the Entry Node keeps each node's files as `<step>.nic.paths.node-NNN.csv` and `<step>.nic.set.node-NNN.json`, beside the [event-loop reports](EVENT_LOOPS.md) every run keeps. `node-000` is the Entry Node, followed by the workers that started, in `--test-hosts` order; a worker that fails to start under `--min-hosts` gets no slice. An expected file that is absent is recorded as `missing` in `index.json`, and the run does not fail.
 - **Run metadata** in `spt_run_params.json`:
   - `scenarioParams.Interfaces`: the requested entries;
   - `nicNodes`: each node with its host, the value it received, and `source`: `host` for a host override, `run` otherwise. A node whose value is `none` writes no NIC files, and the fetcher does not report them as missing;
@@ -183,7 +183,7 @@ Item distribution takes little of this on a fast network. On the lab, three work
     • Event loops        16 per engine (2 NICs × 8, default) + 2 base = 18
   ```
 
-  `storage.driver.threads` replaces `default` when it is set. When engines differ, the line gives each node's value, such as `node-000 16 (2 NICs × 8, default); node-001 8 (1 NIC × 8, default)`; when an engine changed between steps, it reads `vary by step; see nicEngines in spt_run_params.json`. When an expected report is missing or could not be read, the line gives each node that reported and ends `no readable report from the other engines`, since those engines may differ; Artifact Health names a missing report, and Warnings one that could not be read. A step that also has drivers without a NIC set adds `, not counting 1 driver without a NIC set`. Without reports, only the `Interfaces` line appears.
+  `storage.driver.threads` replaces `default` when it is set. When engines differ, the line gives each node's value, such as `node-000 16 (2 NICs × 8, default); node-001 8 (1 NIC × 8, default)`; when an engine changed between steps, it reads `vary by step; see nicEngines in spt_run_params.json`. When an expected report is missing or could not be read, the line gives each node that reported and ends `no readable report from the other engines`, since those engines may differ; Artifact Health names a missing report, and Warnings one that could not be read. A step that also has drivers without a NIC set adds `, not counting 1 driver without a NIC set`. Without NIC-set reports, the line comes from the run's [event-loop reports](EVENT_LOOPS.md#run-summary), or only the `Interfaces` line appears.
 
 ## Replay
 

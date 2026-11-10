@@ -377,10 +377,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			expected.add(NicSetConfig.isSet(configSlices.get(i).configVal("storage"))
 							|| ctxConfigsSlices.get(i).stream().anyMatch(ctx -> NicSetConfig.isSet(ctx.configVal("storage"))));
 		}
-		if (expected.contains(true)) {
-			nicPathsCollector = new NicPathsCollector(loadStepId(), fileMgrs, NicPathsCollector.nodeNames(nodeAddrs),
-							expected);
-		}
+		// Every slice writes its event-loop report, so a distributed step always collects.
+		nicPathsCollector = new NicPathsCollector(loadStepId(), fileMgrs, NicPathsCollector.nodeNames(nodeAddrs), expected);
 	}
 
 	private void initDeleteArtifactAggregator(final List<String> nodeAddrs) {

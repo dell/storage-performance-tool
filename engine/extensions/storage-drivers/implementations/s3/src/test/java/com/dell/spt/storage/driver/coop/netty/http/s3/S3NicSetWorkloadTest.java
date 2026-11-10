@@ -54,14 +54,17 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.MetricsContext;
+import com.dell.spt.base.nic.EventLoopsArtifact;
 import com.dell.spt.base.nic.NicPathRows;
 import com.dell.spt.base.nic.NicPathsArtifact;
+import com.dell.spt.storage.driver.coop.netty.EventLoopDefaults;
 import com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.RangeRun;
 import com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.Request;
 import com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.Run;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetConnectionPool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.akurilov.commons.concurrent.ThreadUtil;
 import com.github.akurilov.confuse.Config;
 import io.netty.channel.epoll.Epoll;
 import java.io.IOException;
@@ -538,6 +541,19 @@ final class S3NicSetWorkloadTest {
 		assertEquals(List.of("lo-a", "lo-b"), names(report.get("nics")), "one NIC-set driver reports at the top level");
 		assertEquals(2, report.get("event_loops").asInt(), () -> "report: " + report);
 		assertFalse(report.has("contexts"), () -> "report: " + report);
+		// The event-loop report counts both drivers: the NIC set's every loop, and the default route's group.
+		final var loopsFile = eventLoopsFile(stepId);
+		final var loops = MAPPER.readTree(loopsFile.toFile());
+		assertEquals(stepId, loops.get("step_id").asText());
+		final var loopContexts = loops.get("contexts");
+		assertEquals(2, loopContexts.size(), () -> "report: " + loops);
+		assertEquals("nic_set", loopContexts.get(0).get("route").asText());
+		assertEquals(report.get("total_event_loops").asInt(), loopContexts.get(0).get("event_loops").asInt());
+		assertEquals("default", loopContexts.get(1).get("route").asText());
+		assertEquals(1, loopContexts.get(1).get("context_index").asInt());
+		assertEquals(loopContexts.get(0).get("event_loops").asInt() + loopContexts.get(1).get("event_loops").asInt(),
+						loops.get("event_loops").asInt());
+		Files.delete(loopsFile);
 		Files.delete(setFile);
 		Files.delete(nicPathsFile(stepId));
 	}
@@ -601,12 +617,78 @@ final class S3NicSetWorkloadTest {
 		assertEquals(0, report.get("event_loops").asInt());
 		assertFalse(report.has("contexts"));
 		Files.delete(setFile);
+
+		// The failed start still writes its event-loop report at close: a NIC set that never opened
+		// owns only its base group of two loops.
+		final var loopsFile = eventLoopsFile(stepId);
+		final var loops = MAPPER.readTree(loopsFile.toFile());
+		assertEquals(stepId, loops.get("step_id").asText());
+		assertEquals(1, loops.get("contexts").size(), () -> "report: " + loops);
+		final var context = loops.get("contexts").get(0);
+		assertEquals("nic_set", context.get("route").asText());
+		assertEquals(1, context.get("driver_threads").asInt());
+		assertEquals("storage.driver.threads", context.get("source").asText());
+		assertEquals(2, context.get("event_loops").asInt());
+		assertEquals(2, loops.get("event_loops").asInt());
+		Files.delete(loopsFile);
 	}
 
-	/** A step without a NIC set writes no per-path file (item 18). */
+	/**
+	 * A step's start removes the event-loop report and node copies an earlier step with its id left,
+	 * so a step that never writes its own has none, and keeps another step's.
+	 */
+	@Test
+	void aStepStartRemovesTheEventLoopReportsAnEarlierStepWithItsIdLeft() throws Exception {
+		final var stepId = "event-loops-earlier-" + System.nanoTime();
+		final var earlier = eventLoopsFile(stepId);
+		final var dir = earlier.toAbsolutePath().getParent();
+		Files.createDirectories(dir);
+		final var copy = dir.resolve("event.loops.node-002.json");
+		final var wideCopy = dir.resolve("event.loops.node-1000.json");
+		final var other = dir.resolve("event.loops.node-2.json");
+		final var nicCopy = dir.resolve("nic.set.node-002.json");
+		for (final var file : List.of(earlier, copy, wideCopy, other, nicCopy)) {
+			Files.writeString(file, "earlier\n");
+		}
+
+		EventLoopsArtifact.discardEarlier(stepId);
+		EventLoopsArtifact.discardEarlier(stepId);
+
+		assertFalse(Files.exists(earlier));
+		assertFalse(Files.exists(copy));
+		assertFalse(Files.exists(wideCopy));
+		assertTrue(Files.exists(other), "only node-NNN copies of the report are removed");
+		assertTrue(Files.exists(nicCopy), "the NIC files keep their own rule");
+		Files.delete(other);
+		Files.delete(nicCopy);
+	}
+
+	/** A report that cannot be removed fails the discard, which the step's start warns about. */
+	@Test
+	void anEarlierReportThatCannotBeRemovedFailsTheDiscard() throws Exception {
+		final var stepId = "event-loops-stuck-" + System.nanoTime();
+		final var stuck = eventLoopsFile(stepId);
+		Files.createDirectories(stuck.resolve("entry"));
+
+		assertThrows(IllegalStateException.class, () -> EventLoopsArtifact.discardEarlier(stepId));
+
+		Files.delete(stuck.resolve("entry"));
+		Files.delete(stuck);
+	}
+
+	/**
+	 * A step without a NIC set writes no per-path file (item 18), and its event-loop report replaces
+	 * one an earlier step with the same id left.
+	 */
 	@Test
 	void aStepWithoutANicSetWritesNoNicPathsFile() throws Exception {
 		final var stepId = "nic-set-none-" + System.nanoTime();
+		final var earlier = eventLoopsFile(stepId);
+		Files.createDirectories(earlier.toAbsolutePath().getParent());
+		Files.writeString(earlier, "earlier\n");
+		// Only the step's start removes a node copy: a single engine publishes none.
+		final var earlierCopy = earlier.resolveSibling("event.loops.node-001.json");
+		Files.writeString(earlierCopy, "earlier\n");
 		final var outcomes = runScenario(stub.listeners(1), null, stepId, """
 						Load.config({"load": {"step": {"limit": {"time": "30s"}}}}).run();
 						""");
@@ -614,6 +696,20 @@ final class S3NicSetWorkloadTest {
 		assertEquals(Map.of("CREATE-1", List.of(8L, 0L)), outcomes);
 		assertFalse(Files.exists(nicPathsFile(stepId)));
 		assertFalse(Files.exists(nicSetFile(stepId)));
+		// It still reports its default-route loops, as built.
+		final var loopsFile = eventLoopsFile(stepId);
+		final var loops = MAPPER.readTree(loopsFile.toFile());
+		assertEquals(778L, loops.get("engine_run_id").asLong(), "the CLI refuses a report from another run");
+		assertFalse(Files.exists(earlierCopy), "the step's start removed the earlier node copy");
+		assertEquals(ThreadUtil.getHardwareThreadCount(), loops.get("hardware_threads").asInt());
+		final var context = loops.get("contexts").get(0);
+		assertEquals("default", context.get("route").asText());
+		final var threads = context.get("driver_threads").asInt();
+		assertEquals(threads > 0 ? "storage.driver.threads" : "default", context.get("source").asText());
+		assertEquals(threads > 0 ? threads : EventLoopDefaults.defaultRoute(ThreadUtil.getHardwareThreadCount()),
+						context.get("event_loops").asInt());
+		assertEquals(context.get("event_loops").asInt(), loops.get("event_loops").asInt());
+		Files.delete(loopsFile);
 	}
 
 	/**
@@ -716,6 +812,10 @@ final class S3NicSetWorkloadTest {
 
 	private static Path nicSetFile(final String stepId) throws IOException {
 		return Path.of(FileManager.INSTANCE.logFileName(Loggers.NIC_SET.getName(), stepId));
+	}
+
+	private static Path eventLoopsFile(final String stepId) throws IOException {
+		return Path.of(FileManager.INSTANCE.logFileName(Loggers.EVENT_LOOPS.getName(), stepId));
 	}
 
 	private static List<String> names(final JsonNode array) {

@@ -59,6 +59,7 @@ const (
 	ResultsArtifactSuffixOperationLifecycle    = "operation.lifecycle.csv"
 	ResultsArtifactSuffixNicPaths              = "nic.paths.csv"
 	ResultsArtifactSuffixNicSet                = "nic.set.json"
+	ResultsArtifactSuffixEventLoops            = "event.loops.json"
 	ResultsArtifactSuffixMultipartLifecycle    = "multipart.lifecycle.csv"
 	ResultsArtifactSuffixMultipart             = "multipart.csv"
 	ResultsArtifactSuffixTablesMetrics         = "tables.metrics.log"

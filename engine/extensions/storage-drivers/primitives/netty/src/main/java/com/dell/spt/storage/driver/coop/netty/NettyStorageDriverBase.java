@@ -21,6 +21,10 @@ import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.logging.LogContextThreadFactory;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.nic.EventLoopCounting;
+import com.dell.spt.base.nic.EventLoopRoute;
+import com.dell.spt.base.nic.EventLoops;
+import com.dell.spt.base.nic.NicPathCounting;
 import com.dell.spt.base.util.BinarySizeFormat;
 import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
 import com.dell.spt.storage.driver.coop.netty.data.DataItemFileRegion;
@@ -75,7 +79,7 @@ import javax.net.ssl.SSLParameters;
 
 /** Created by kurila on 30.09.16. */
 public abstract class NettyStorageDriverBase<I extends Item, O extends Operation<I>>
-				extends CoopStorageDriverBase<I, O> implements NettyStorageDriver<I, O>, ChannelPoolHandler {
+				extends CoopStorageDriverBase<I, O> implements NettyStorageDriver<I, O>, ChannelPoolHandler, EventLoopCounting {
 
 	private static final String CLS_NAME = NettyStorageDriverBase.class.getSimpleName();
 	private static final String BC_JSSE_PROVIDER_NAME = "BCJSSE";
@@ -97,6 +101,8 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	private final EventLoopGroup ioExecutor;
 	private final Class<EventLoopGroup> ioExecutorCls;
 	private final int ioRatio;
+	// The configured storage.driver.threads, or 0 for the default.
+	private final int configuredDriverThreads;
 	// Groups a NIC-set subclass creates at start; always empty on the default route.
 	private final List<NamedIoGroup> extraIoGroups = new CopyOnWriteArrayList<>();
 	private volatile Boolean ioStoppedInTime;
@@ -198,10 +204,11 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 
 		final int workerCount;
 		final var confWorkerCount = storageConfig.intVal("driver-threads");
+		configuredDriverThreads = Math.max(0, confWorkerCount);
 		if (NicSetConfig.isSet(storageConfig)) {
 			workerCount = NIC_SET_BASE_IO_WORKERS;
 		} else if (confWorkerCount < 1) {
-			workerCount = Math.max(4, ThreadUtil.getHardwareThreadCount() / 8);
+			workerCount = EventLoopDefaults.defaultRoute(ThreadUtil.getHardwareThreadCount());
 		} else {
 			workerCount = confWorkerCount;
 		}
@@ -681,6 +688,19 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			count++;
 		}
 		return count;
+	}
+
+	/**
+	 * The loops this driver owns, for its step's report: a NIC set's per-NIC and base groups, or the
+	 * default route's group as created, with the configured {@code storage.driver.threads}.
+	 */
+	@Override
+	public final EventLoops eventLoops() {
+		if (this instanceof NicPathCounting counting) {
+			final var resources = counting.nicSetResources();
+			return resources == null ? null : EventLoops.of(resources);
+		}
+		return new EventLoops(EventLoopRoute.DEFAULT, configuredDriverThreads, ioEventLoopCount());
 	}
 
 	/**

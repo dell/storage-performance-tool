@@ -117,7 +117,7 @@ type WorkloadSummary struct {
 	KeepScenario    bool
 	SliceEndpoints  bool
 	// Interfaces is the run's --interfaces value; HostInterfaces its --host-interfaces values;
-	// EventLoops describes its NIC-set reports.
+	// EventLoops describes its NIC-set reports, or else its event-loop reports.
 	Interfaces        []string
 	HostInterfaces    string
 	EventLoops        string
@@ -148,6 +148,7 @@ type StepSummary struct {
 	DriverStats        *driverstats.Stats
 	NicPaths           *NicPathsEvidence
 	NicSetMissing      []results.NicNodeFile
+	EventLoopsMissing  []results.NicNodeFile
 }
 
 // MixedDistribution stores the configured mixed-workload share for each known operation.
@@ -270,6 +271,7 @@ func Aggregate(data *RunData) (*RunSummary, error) {
 		summary.Warnings = append(summary.Warnings, rdmaDataPathWarnings(steps, workload, data.Params.DriverStatsError)...)
 	}
 	summary.Warnings = append(summary.Warnings, nicEnginesWarnings(data.Params.NicEnginesError)...)
+	summary.Warnings = append(summary.Warnings, eventLoopEnginesWarnings(data.Params.EventLoopEnginesError)...)
 
 	if len(summary.MissingExpected) > 1 {
 		sort.Strings(summary.MissingExpected)
@@ -394,7 +396,7 @@ func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 		SliceEndpoints:    params.SliceEndpoints,
 		Interfaces:        append([]string(nil), params.Interfaces...),
 		HostInterfaces:    hostInterfacesLine(data.Params.HostInterfaces),
-		EventLoops:        nicEventLoops(data.Params.NicEngines, data.StepOrder, nicReportsIncomplete(data)),
+		EventLoops:        runEventLoops(data),
 		MixedDistribution: mixedDistributionFromParams(workloadType, params),
 		S3Driver:          params.S3Driver,
 	}
@@ -416,20 +418,21 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 			continue
 		}
 		summary := StepSummary{
-			RangeRead:       stepData.RangeRead,
-			Ordinal:         idx + 1,
-			StepID:          stepData.StepID,
-			PhaseLabel:      phaseLabelFromStep(stepData.StepID),
-			Operation:       operationFromStep(stepData.StepID, stepData.Metrics),
-			Status:          stepData.Status,
-			MissingRequired: append([]string(nil), stepData.MissingRequired...),
-			MissingOptional: append([]string(nil), stepData.MissingOptional...),
-			Notes:           append([]string(nil), stepData.Notes...),
-			Delete:          stepData.Delete,
-			DeleteEvidence:  stepData.DeleteEvidence,
-			DriverStats:     stepData.DriverStats,
-			NicPaths:        stepData.NicPaths,
-			NicSetMissing:   append([]results.NicNodeFile(nil), stepData.NicSetMissing...),
+			RangeRead:         stepData.RangeRead,
+			Ordinal:           idx + 1,
+			StepID:            stepData.StepID,
+			PhaseLabel:        phaseLabelFromStep(stepData.StepID),
+			Operation:         operationFromStep(stepData.StepID, stepData.Metrics),
+			Status:            stepData.Status,
+			MissingRequired:   append([]string(nil), stepData.MissingRequired...),
+			MissingOptional:   append([]string(nil), stepData.MissingOptional...),
+			Notes:             append([]string(nil), stepData.Notes...),
+			Delete:            stepData.Delete,
+			DeleteEvidence:    stepData.DeleteEvidence,
+			DriverStats:       stepData.DriverStats,
+			NicPaths:          stepData.NicPaths,
+			NicSetMissing:     append([]results.NicNodeFile(nil), stepData.NicSetMissing...),
+			EventLoopsMissing: append([]results.NicNodeFile(nil), stepData.EventLoopsMissing...),
 		}
 
 		var metrics *PhaseMetrics

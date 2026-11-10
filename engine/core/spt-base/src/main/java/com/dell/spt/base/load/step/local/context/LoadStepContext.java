@@ -54,6 +54,11 @@ public interface LoadStepContext<I extends Item, O extends Operation<I>> extends
 		return null;
 	}
 
+	/** The driver's event loops on any route, for the step's {@code event.loops.json}, or null when it owns none. */
+	default com.dell.spt.base.nic.EventLoops eventLoops() {
+		return null;
+	}
+
 	/** Returns object-level identity accounting, or {@code null} when the context cannot supply it. */
 	default DeleteObjectLifecycleSnapshot deleteObjectLifecycle() {
 		return null;

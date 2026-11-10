@@ -63,6 +63,7 @@ type StepData struct {
 	DriverStats       *driverstats.Stats
 	NicPaths          *NicPathsEvidence
 	NicSetMissing     []results.NicNodeFile
+	EventLoopsMissing []results.NicNodeFile
 	Status            StepStatus
 	MetricsSuppressed bool
 	MissingRequired   []string
@@ -248,6 +249,12 @@ func (l *Loader) Load(ctx context.Context, runDir string) (*RunData, error) {
 		if step.NicPaths != nil && step.NicPaths.Distributed {
 			step.MissingOptional = removeString(step.MissingOptional, constants.ResultsArtifactSuffixNicPaths)
 			step.MissingOptional = removeString(step.MissingOptional, constants.ResultsArtifactSuffixNicSet)
+		}
+		participants := nicStepParticipants(step.Metrics)
+		step.EventLoopsMissing = results.MissingEventLoopsFiles(sm, params.runNodes(), participants)
+		if participants > 1 {
+			// A distributed step keeps one copy per node, never the canonical file.
+			step.MissingOptional = removeString(step.MissingOptional, constants.ResultsArtifactSuffixEventLoops)
 		}
 
 		rangeEvidence, rangeErr := loadRangeRead(runDir, sm)
@@ -515,39 +522,41 @@ func removeString(list []string, value string) []string {
 
 // RunParams mirrors the structure of spt_run_params.json for ingestion purposes.
 type RunParams struct {
-	GeneratedAt            time.Time                         `json:"generatedAt"`
-	WorkloadType           string                            `json:"workloadType"`
-	SptImage               string                            `json:"sptImage"`
-	APIPort                string                            `json:"apiPort"`
-	BaseURL                string                            `json:"baseUrl"`
-	TraceFile              string                            `json:"traceFile"`
-	TraceAuto              bool                              `json:"traceAuto"`
-	Label                  string                            `json:"label"`
-	ResultsDir             string                            `json:"resultsDir"`
-	ResultsRoot            string                            `json:"resultsRoot"`
-	ScenarioFile           string                            `json:"scenarioFile"`
-	ScenarioStoredPath     string                            `json:"scenarioStoredPath"`
-	ScenarioParams         ScenarioParams                    `json:"scenarioParams"`
-	Hosts                  []RunHost                         `json:"hosts"`
-	TestHosts              string                            `json:"testHosts"`
-	ExpectedStepIDs        []string                          `json:"expectedStepIds"`
-	ActualStepIDs          []string                          `json:"actualStepIds"`
-	DiscoveredStepIDs      []string                          `json:"discoveredStepIds"`
-	DeleteMetrics          map[string]*deletemetrics.Metrics `json:"deleteMetrics,omitempty"`
-	DeleteArtifactsVersion int                               `json:"deleteArtifactsVersion,omitempty"`
-	DeleteArtifactStepIDs  []string                          `json:"deleteArtifactStepIds,omitempty"`
-	DriverStats            map[string]*driverstats.Stats     `json:"driverStats,omitempty"`
-	DriverStatsError       string                            `json:"driverStatsError,omitempty"`
-	NicNodes               []results.NicNode                 `json:"nicNodes,omitempty"`
-	HostInterfaces         map[string]string                 `json:"hostInterfaces,omitempty"`
-	NicEngines             map[string][]results.NicEngine    `json:"nicEngines,omitempty"`
-	NicEnginesError        string                            `json:"nicEnginesError,omitempty"`
-	ResultsOptions         RunResultsOptions                 `json:"resultsOptions"`
-	CLI                    RunCLI                            `json:"cli"`
-	MultiHost              RunMultiHost                      `json:"multiHost"`
-	EngineInfoFile         string                            `json:"engineInfoFile,omitempty"`
-	EngineConsistency      engineinfo.ConsistencyStatus      `json:"engineConsistency,omitempty"`
-	Lifecycle              *RunLifecycle                     `json:"lifecycle,omitempty"`
+	GeneratedAt            time.Time                            `json:"generatedAt"`
+	WorkloadType           string                               `json:"workloadType"`
+	SptImage               string                               `json:"sptImage"`
+	APIPort                string                               `json:"apiPort"`
+	BaseURL                string                               `json:"baseUrl"`
+	TraceFile              string                               `json:"traceFile"`
+	TraceAuto              bool                                 `json:"traceAuto"`
+	Label                  string                               `json:"label"`
+	ResultsDir             string                               `json:"resultsDir"`
+	ResultsRoot            string                               `json:"resultsRoot"`
+	ScenarioFile           string                               `json:"scenarioFile"`
+	ScenarioStoredPath     string                               `json:"scenarioStoredPath"`
+	ScenarioParams         ScenarioParams                       `json:"scenarioParams"`
+	Hosts                  []RunHost                            `json:"hosts"`
+	TestHosts              string                               `json:"testHosts"`
+	ExpectedStepIDs        []string                             `json:"expectedStepIds"`
+	ActualStepIDs          []string                             `json:"actualStepIds"`
+	DiscoveredStepIDs      []string                             `json:"discoveredStepIds"`
+	DeleteMetrics          map[string]*deletemetrics.Metrics    `json:"deleteMetrics,omitempty"`
+	DeleteArtifactsVersion int                                  `json:"deleteArtifactsVersion,omitempty"`
+	DeleteArtifactStepIDs  []string                             `json:"deleteArtifactStepIds,omitempty"`
+	DriverStats            map[string]*driverstats.Stats        `json:"driverStats,omitempty"`
+	DriverStatsError       string                               `json:"driverStatsError,omitempty"`
+	NicNodes               []results.NicNode                    `json:"nicNodes,omitempty"`
+	HostInterfaces         map[string]string                    `json:"hostInterfaces,omitempty"`
+	NicEngines             map[string][]results.NicEngine       `json:"nicEngines,omitempty"`
+	NicEnginesError        string                               `json:"nicEnginesError,omitempty"`
+	EventLoopEngines       map[string][]results.EventLoopEngine `json:"eventLoopEngines,omitempty"`
+	EventLoopEnginesError  string                               `json:"eventLoopEnginesError,omitempty"`
+	ResultsOptions         RunResultsOptions                    `json:"resultsOptions"`
+	CLI                    RunCLI                               `json:"cli"`
+	MultiHost              RunMultiHost                         `json:"multiHost"`
+	EngineInfoFile         string                               `json:"engineInfoFile,omitempty"`
+	EngineConsistency      engineinfo.ConsistencyStatus         `json:"engineConsistency,omitempty"`
+	Lifecycle              *RunLifecycle                        `json:"lifecycle,omitempty"`
 }
 
 // RunLifecycle contains the stored phase state needed by human summaries.
@@ -598,6 +607,15 @@ type RunHost struct {
 	IsLocal    bool   `json:"isLocal"`
 	Original   string `json:"original"`
 	DockerHost string `json:"dockerHost"`
+}
+
+// runNodes is what the metadata says about the run's slices, for the reports each one writes.
+func (p *RunParams) runNodes() results.RunNodes {
+	hosts := make([]results.RunHostRecord, 0, len(p.Hosts))
+	for _, host := range p.Hosts {
+		hosts = append(hosts, results.RunHostRecord{Host: host.Host, Original: host.Original})
+	}
+	return results.RunNodes{NicNodes: p.NicNodes, Hosts: results.RunHostNames(hosts)}
 }
 
 // RunCLI captures the command vector and sanitized flag values.
