@@ -722,6 +722,7 @@ class MixedLoadGeneratorTest {
 			}
 		}
 		assertEquals(300, failures, "precondition: every put failed");
+		assertEquals(4, availablePermits(failedGen), "every failed operation's permit is released");
 		for (final OpType type : List.of(OpType.READ, OpType.CREATE, OpType.DELETE)) {
 			assertEquals(0, refusedGen.inFlightCount(type), "refused " + type);
 			assertEquals(0, failedGen.inFlightCount(type), "failed " + type);
