@@ -21,6 +21,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.impl.BasicConfig;
@@ -694,6 +695,7 @@ class MixedLoadGeneratorTest {
 
 	@Test
 	@DisplayName("Operations the driver refuses or fails to accept are not counted in flight")
+	@Timeout(30) // a leaked permit blocks the next doWork() instead of failing an assertion
 	void refusedAndFailedPutsLeaveNothingInFlight() throws Exception {
 		final PoolItemInput<Item> pool = new PoolItemInput<>(makeItems(20));
 		for (int i = 0; i < 100; i++) {
