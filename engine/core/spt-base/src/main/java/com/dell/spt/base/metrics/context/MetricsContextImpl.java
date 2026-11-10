@@ -53,6 +53,13 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 	private boolean terminalTaken = false;
 	private final IntSupplier actualConcurrencyGauge;
 	private final SteadyWindow steadyWindow;
+	/** Whether the window's start rule needs the in-flight sample totals: a warm-up above one turnover. */
+	private final boolean publishInFlightSamples;
+	/**
+	 * The concurrency meter's sample sum and count, published together under {@link #refreshLock},
+	 * the only place the meter is updated, so the start rule never pairs a sum with another count.
+	 */
+	private volatile SteadyWindow.SampleTotals inFlightSamples = SteadyWindow.SampleTotals.NONE;
 
 	public MetricsContextImpl(
 					final Map<String, Object> metadata,
@@ -105,6 +112,7 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 		//
 		reqBytes = new RateMeterImpl(clock, MetricsConstants.METRIC_NAME_BYTE);
 		//
+		publishInFlightSamples = steadySettings != null && steadySettings.startFloorsInFlightAtItsMean();
 		steadyWindow = steadySettings == null
 						? null
 						: new SteadyWindow(steadySettings, new SteadySource(), System::nanoTime);
@@ -130,6 +138,11 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 		}
 		steadyWindow.listener(listener);
 		return true;
+	}
+
+	/** The in-flight sample totals last published for the start rule; NONE unless it needs them. */
+	final SteadyWindow.SampleTotals publishedInFlightSamples() {
+		return inFlightSamples;
 	}
 
 	@Override
@@ -178,6 +191,11 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 		@Override
 		public int inFlight() {
 			return actualConcurrencyGauge.getAsInt();
+		}
+
+		@Override
+		public SteadyWindow.SampleTotals inFlightSamples() {
+			return inFlightSamples;
 		}
 
 		@Override
@@ -388,6 +406,9 @@ public class MetricsContextImpl<S extends AllMetricsSnapshotImpl> extends Metric
 			lastSnapshotsUpdateTs = currentTimeMillis;
 			updateTimingSnapshots();
 			actualConcurrency.update(actualConcurrencyGauge.getAsInt());
+			if (publishInFlightSamples) {
+				inFlightSamples = new SteadyWindow.SampleTotals(actualConcurrency.sampleSum(), actualConcurrency.sampleCount());
+			}
 			actualConcurrencySnapshot = actualConcurrency.snapshot();
 			driverStatsSnapshot = collectDriverStats();
 		}

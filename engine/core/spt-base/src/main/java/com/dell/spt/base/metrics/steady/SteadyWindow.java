@@ -10,15 +10,30 @@ import java.util.function.LongSupplier;
  *
  * <p>The metrics manager calls {@link #observe()} on each iteration; it starts the window at the
  * first observation where completions since step start reach at least one and at least the
- * warm-up turnovers times the operations in flight. The first thread that observes an end event
- * calls {@link #close(String)}, which takes the end cut on that thread and computes the result
- * once. Later closers acquire no cut and wait for that result.
+ * warm-up turnovers times the operations in flight. Above one warm-up turnover, the operations in
+ * flight are the larger of the gauge at that observation and its mean sampled since step start,
+ * and the window waits for the first such sample: at high rates the gauge can fall near zero for a
+ * few milliseconds, and one such observation must not cut a long warm-up short. The first thread
+ * that observes an end event calls {@link #close(String)}, which takes the end cut on that thread
+ * and computes the result once. Later closers acquire no cut and wait for that result.
  *
  * <p>A monitor guards the transitions. Only the manager's start transition and the closers take
  * it, never the operation recording path. A close waits for a start cut in progress, and no start
  * begins after a close, so a context acquires at most two cuts.
  */
 public final class SteadyWindow {
+
+	/**
+	 * Totals of a context's in-flight gauge samples, read together.
+	 *
+	 * @param sum the sum of the samples taken so far
+	 * @param count the number of samples taken so far
+	 */
+	public record SampleTotals(long sum, long count) {
+
+		/** No sample taken yet. */
+		public static final SampleTotals NONE = new SampleTotals(0, 0);
+	}
 
 	/** Reads one metrics context's meters. */
 	public interface Source {
@@ -31,6 +46,12 @@ public final class SteadyWindow {
 
 		/** Operations in flight now, read fresh rather than from a cached snapshot. */
 		int inFlight();
+
+		/**
+		 * The totals of the in-flight gauge's periodic samples, as one coherent pair. Read only when
+		 * {@link SteadySettings#startFloorsInFlightAtItsMean()} holds.
+		 */
+		SampleTotals inFlightSamples();
 
 		/** Reads every meter a cut records. */
 		SteadyCut.Readings read();
@@ -67,6 +88,9 @@ public final class SteadyWindow {
 	private final LongSupplier nanoClock;
 	private final Object lock = new Object();
 	private volatile boolean stepStarted;
+	// The in-flight sample totals at step start, the baseline of the start rule's mean. Set only
+	// when the settings floor the gauge at its mean.
+	private volatile SampleTotals inFlightBaseline = SampleTotals.NONE;
 	private volatile BooleanSupplier schedulingDrained;
 	private volatile State state = State.OPEN;
 	private volatile SteadyResult result;
@@ -90,10 +114,13 @@ public final class SteadyWindow {
 		listener = windowListener;
 	}
 
-	/** Marks step start, the origin of the start offset. */
+	/** Marks step start, the origin of the start offset and of the start rule's sampled mean. */
 	public void markStepStart() {
 		synchronized (lock) {
 			stepStartNanos = nanoClock.getAsLong();
+			if (settings.startFloorsInFlightAtItsMean()) {
+				inFlightBaseline = source.inFlightSamples();
+			}
 			stepStarted = true;
 		}
 	}
@@ -136,7 +163,19 @@ public final class SteadyWindow {
 			return;
 		}
 		final long completions = source.succeeded() + source.failed();
-		if (completions < Math.max(1.0, settings.warmupTurnovers() * source.inFlight())) {
+		final double inFlight;
+		if (settings.startFloorsInFlightAtItsMean()) {
+			final SampleTotals baseline = inFlightBaseline;
+			final SampleTotals samples = source.inFlightSamples();
+			final long count = samples.count() - baseline.count();
+			if (count <= 0) {
+				return; // no sample since step start yet
+			}
+			inFlight = Math.max(source.inFlight(), (double) (samples.sum() - baseline.sum()) / count);
+		} else {
+			inFlight = source.inFlight();
+		}
+		if (completions < Math.max(1.0, settings.warmupTurnovers() * inFlight)) {
 			return;
 		}
 		synchronized (lock) {

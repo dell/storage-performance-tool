@@ -175,7 +175,7 @@ A momentary `current` value of zero does not by itself prove that a bounded run 
 
 ### Steady-state window
 
-Schema 5 adds `steady`: the same measurement as `metrics.steady.total.csv`, over the Steady-State Window instead of the whole step. The window starts once completions reach the in-flight operation count (`output.metrics.steady.warmup.turnovers`, default 1) and ends at the step's first end event, before any drain: a stop or the time limit, or, for a count limit or an exhausted item input, the moment every scheduled operation has been dispatched. `steady` is absent while the window is open, and absent wherever no terminal entry exists. On the cluster endpoint it reads `incomplete` while some slices have closed their windows and others have not.
+Schema 5 adds `steady`: the same measurement as `metrics.steady.total.csv`, over the Steady-State Window instead of the whole step. The window starts once completions reach `output.metrics.steady.warmup.turnovers` (default 1) times the operations in flight, counted above one turnover as the larger of the current count and its mean since step start, and ends at the step's first end event, before any drain: a stop or the time limit, or, for a count limit or an exhausted item input, the moment every scheduled operation has been dispatched. `steady` is absent while the window is open, and absent wherever no terminal entry exists. On the cluster endpoint it reads `incomplete` while some slices have closed their windows and others have not.
 
 | Field | Unit and behavior |
 |:--|:--|

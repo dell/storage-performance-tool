@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.steady.SteadyResult;
 import com.dell.spt.base.metrics.steady.SteadySettings;
+import com.dell.spt.base.metrics.steady.SteadyWindow;
 import com.github.akurilov.commons.system.SizeInBytes;
 import java.util.ArrayList;
 import java.util.List;
@@ -77,6 +78,88 @@ class MetricsContextImplSteadyTest {
 		}
 		final SteadyResult result = ctx.closeSteadyWindow("t");
 		assertEquals(5, result.statistics().successSnapshot().count(), "a start at the cached gauge would count 15");
+	}
+
+	@Test
+	void aRaisedWarmupFloorsTheGaugeAtTheMeanOfThePublishedSamples() {
+		final var ctx = context(new SteadySettings(10, 0, 0));
+		gauge.set(2);
+		for (int i = 0; i < 50; i++) {
+			ctx.markSucc(1, 1_000, 500);
+		}
+		ctx.observeSteadyWindow(); // 50 completions reach 10 x 2, but no sample since step start yet
+		gauge.set(8);
+		ctx.refreshLastSnapshot(true);
+		ctx.refreshLastSnapshot(true); // two samples of 8
+		gauge.set(0); // a momentary dip
+		ctx.observeSteadyWindow(); // 50 completions do not reach 10 x the mean of 8
+		for (int i = 0; i < 30; i++) {
+			ctx.markSucc(1, 1_000, 500);
+		}
+		ctx.observeSteadyWindow(); // 80 completions: the window starts here
+		for (int i = 0; i < 5; i++) {
+			ctx.markSucc(1, 1_000, 500);
+		}
+		final SteadyResult result = ctx.closeSteadyWindow("t");
+		assertEquals(5, result.statistics().successSnapshot().count(), "a start at the dip would count 35");
+	}
+
+	@Test
+	void theDefaultWarmupStillStartsAtTheGaugeDuringADip() {
+		final var ctx = context(new SteadySettings(1, 0, 0));
+		gauge.set(8);
+		ctx.refreshLastSnapshot(true);
+		ctx.refreshLastSnapshot(true);
+		gauge.set(0);
+		ctx.markSucc(1, 1_000, 500);
+		ctx.observeSteadyWindow(); // one completion reaches max(1, 1 x 0): the sampled mean plays no part
+		for (int i = 0; i < 5; i++) {
+			ctx.markSucc(1, 1_000, 500);
+		}
+		assertEquals(5, ctx.closeSteadyWindow("t").statistics().successSnapshot().count());
+	}
+
+	@Test
+	void sampleTotalsArePublishedOnlyForARaisedWarmup() {
+		gauge.set(8);
+		for (final double warmup : List.of(0.0, 1.0)) {
+			final var ctx = context(new SteadySettings(warmup, 0, 0));
+			ctx.refreshLastSnapshot(true);
+			assertSame(SteadyWindow.SampleTotals.NONE, ctx.publishedInFlightSamples(), "warm-up " + warmup);
+		}
+		final var raised = context(new SteadySettings(2, 0, 0));
+		raised.refreshLastSnapshot(true);
+		raised.refreshLastSnapshot(true);
+		assertEquals(new SteadyWindow.SampleTotals(16, 2), raised.publishedInFlightSamples());
+	}
+
+	@Test
+	void publishedSampleTotalsStayCoherentUnderConcurrentRefreshes() throws Exception {
+		final var ctx = context(new SteadySettings(2, 0, 0));
+		final var running = new AtomicBoolean(true);
+		final List<CompletableFuture<Void>> refreshers = new ArrayList<>();
+		for (int i = 0; i < 4; i++) {
+			refreshers.add(CompletableFuture.runAsync(() -> {
+				while (running.get()) {
+					gauge.set(gauge.get() == 4 ? 8 : 4);
+					ctx.refreshLastSnapshot(true);
+				}
+			}, threads));
+		}
+		try {
+			for (int i = 0; i < 200_000; i++) {
+				final SteadyWindow.SampleTotals totals = ctx.publishedInFlightSamples();
+				if (totals.count() > 0) {
+					final double mean = (double) totals.sum() / totals.count();
+					assertTrue(mean >= 4 && mean <= 8, "a mean outside the samples' range pairs a sum with another count: " + totals);
+					assertTrue(totals.sum() >= 4 * totals.count() && totals.sum() <= 8 * totals.count(), totals.toString());
+				}
+			}
+		} finally {
+			running.set(false);
+			CompletableFuture.allOf(refreshers.toArray(CompletableFuture[]::new)).get(10, TimeUnit.SECONDS);
+		}
+		assertTrue(ctx.publishedInFlightSamples().count() > 0, "sanity: the refreshers published samples");
 	}
 
 	@Test
