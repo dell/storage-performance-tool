@@ -62,9 +62,9 @@ func eventLoopEnginesWarnings(reason string) []string {
 }
 
 // engineEventLoops is one engine's event loops and where they came from, such as
-// "24 (default, 192 hardware threads)", "12 (storage.driver.threads)",
+// "8 (default, 192 hardware threads)", "12 (storage.driver.threads)",
 // "98 (NIC set, default, 192 hardware threads)" or, for drivers that agree,
-// "48 (2 drivers × 24, default, 192 hardware threads)". Drivers that differ point to the
+// "16 (2 drivers × 8, default, 192 hardware threads)". Drivers that differ point to the
 // metadata. An engine whose drivers own none has no description.
 func engineEventLoops(engine results.EventLoopEngine) string {
 	if len(engine.Contexts) == 0 {

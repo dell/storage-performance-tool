@@ -7,8 +7,8 @@ sized them. The CLI fetches each report with the step's other files, stores them
 
 ## Default
 
-Without `storage.driver.threads`, a Netty driver on the default route (the `s3` driver, and
-`s3-rdma` without a NIC set) owns `max(4, hardware threads / 24)` event loops: 4 up to 119
+Without `storage.driver.threads`, every Netty-based driver on the default route, such as `s3`,
+and `s3-rdma` without a NIC set, owns `max(4, hardware threads / 24)` event loops: 4 up to 119
 hardware threads, and 8 at 192. Before 5.17 the divisor was 8, so 192 hardware threads had 24.
 `--engine-override storage.driver.threads=N` sets the count. A NIC set sizes its loops per NIC
 instead; see [Concurrency and event loops](NETWORK_INTERFACES.md#concurrency-and-event-loops).
