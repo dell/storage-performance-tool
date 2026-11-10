@@ -177,7 +177,9 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 		}
 
 		final O op = builders.get(opType).buildOp(item);
-		final boolean accepted;
+		final AtomicInteger counter = inFlightByOpType.get(opType);
+		countInFlight(counter);
+		boolean accepted = false;
 		try {
 			accepted = opOutput.put(op);
 		} catch (final Exception e) {
@@ -186,14 +188,14 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 				outputClosed = true;
 			}
 			throw e;
+		} finally {
+			if (!accepted) {
+				countOutOfFlight(counter);
+			}
 		}
 		if (!accepted) {
 			Thread.yield();
 			return false;
-		}
-		final AtomicInteger counter = inFlightByOpType.get(opType);
-		if (counter != null) {
-			counter.incrementAndGet();
 		}
 		generatedCount.increment();
 		return true;
@@ -201,7 +203,9 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 
 	private boolean dispatchDelete(final I item) throws IOException {
 		final O op = builders.get(OpType.DELETE).buildOp(item);
-		final boolean accepted;
+		final AtomicInteger counter = inFlightByOpType.get(OpType.DELETE);
+		countInFlight(counter);
+		boolean accepted = false;
 		try {
 			accepted = opOutput.put(op);
 		} catch (final Exception e) {
@@ -211,6 +215,10 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 				outputClosed = true;
 			}
 			throw e;
+		} finally {
+			if (!accepted) {
+				countOutOfFlight(counter);
+			}
 		}
 		if (!accepted) {
 			// Put item back if driver rejected — avoid item loss
@@ -218,12 +226,26 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 			Thread.yield();
 			return false;
 		}
-		final AtomicInteger counter = inFlightByOpType.get(OpType.DELETE);
+		generatedCount.increment();
+		return true;
+	}
+
+	/**
+	 * Counts an operation in flight before it is handed to the driver, which can complete it
+	 * before {@code put} returns: counted afterwards, that completion would find nothing to
+	 * subtract and the operation would stay counted for the rest of the step.
+	 */
+	private static void countInFlight(final AtomicInteger counter) {
 		if (counter != null) {
 			counter.incrementAndGet();
 		}
-		generatedCount.increment();
-		return true;
+	}
+
+	/** Counts one operation out of flight, at its completion or when the driver did not accept it. */
+	private static void countOutOfFlight(final AtomicInteger counter) {
+		if (counter != null) {
+			counter.getAndUpdate(v -> v > 0 ? v - 1 : 0);
+		}
 	}
 
 	/** Re-roll DELETE to another active op type (weighted by configured non-DELETE weights). */
@@ -319,10 +341,7 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 		if (op == null) {
 			return;
 		}
-		final AtomicInteger counter = inFlightByOpType.get(op.type());
-		if (counter != null) {
-			counter.getAndUpdate(v -> v > 0 ? v - 1 : 0);
-		}
+		countOutOfFlight(inFlightByOpType.get(op.type()));
 	}
 
 	public int inFlightCount(final OpType opType) {
