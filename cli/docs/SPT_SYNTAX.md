@@ -1317,7 +1317,7 @@ The `verify` command validates that distributed testing infrastructure is proper
 Distributed SPT testing requires multiple nodes to be properly configured with:
 - Docker installed and accessible
 - Network connectivity between nodes
-- Required ports available (RMI: 1099, REST API: 9999)
+- Required ports available (RMI registry: 1099 and REST API: 9999 by default)
 - Ability to run SPT containers in node mode
 
 The `verify` command performs comprehensive pre-flight checks to ensure all nodes meet these requirements.
@@ -1337,7 +1337,8 @@ spt verify [--test-hosts <hosts>] [options]
 | `--test-hosts` | `""` (localhost) | Comma-separated list of hosts to verify |
 | `--min-hosts` | `0` (all) | Minimum number of hosts that must pass |
 | `--network-mode` | `host` | Docker network mode: `host` (required for RMI) or `bridge` |
-| `--api-port` | `9999` | SPT API port to verify |
+| `--api-port` | `9999` | REST API port the test engine serves and verify checks |
+| `--rmi-registry-port` | `1099` | RMI registry port the test engine serves and verify checks. `spt run` takes another value only for a local single-host run |
 | `--rmi-port-start` | `40000` | Starting port for RMI range |
 | `--rmi-port-count` | `10` | Number of RMI ports to verify |
 | `--force-cleanup` | `false` | Automatically clean up conflicting containers without prompting |
@@ -1363,9 +1364,9 @@ For each specified host, the verify command:
 
 1. **Checks Connectivity** — local Docker API access or remote SSH connectivity
 2. **Validates Docker** — daemon running, API accessible, version compatibility
-3. **Detects Port Conflicts** — checks ports 1099 and 9999, identifies existing SPT containers
-4. **Starts Test Container** — launches SPT in node mode, validates startup and port mapping
-5. **Verifies Services** — tests RMI Registry (1099) and REST API (9999)
+3. **Detects Port Conflicts** — checks the RMI registry and REST API ports (`--rmi-registry-port` and `--api-port`) and the RMI port range, identifies existing SPT containers
+4. **Starts Test Container** — launches SPT in node mode on those ports, validates startup and port mapping
+5. **Verifies Services** — waits up to 30 seconds for the RMI registry and the REST API on those ports; if they are not all reachable by then, names the ports last seen closed
 6. **Lists NICs** — reads the node's interfaces and RDMA devices in the test container and, with `--interfaces`, plans the node's NIC set
 7. **Performs Cleanup** — removes test container, ensures clean state
 
@@ -1421,6 +1422,9 @@ spt verify --test-hosts "node1,node2,node3,node4" --min-hosts 2
 
 # Automated cleanup of conflicts
 spt verify --test-hosts "test1,test2" --force-cleanup
+
+# Verify beside a running engine that holds ports 1099 and 9999
+spt verify --api-port 19100 --rmi-registry-port 11099
 
 # Include RDMA hardware checks
 spt verify --test-hosts "rdma1,rdma2" --use-rdma
