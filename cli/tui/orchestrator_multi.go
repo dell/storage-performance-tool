@@ -1241,6 +1241,20 @@ func (o *MultiHostOrchestrator) MetricContributorIDs() ([]string, error) {
 	return append([]string(nil), o.executionContributorIDs...), nil
 }
 
+// setExecutionContributorIDs records the contributor topology of the active execution; nil
+// clears it before a new execution starts.
+func (o *MultiHostOrchestrator) setExecutionContributorIDs(contributorIDs []string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.executionContributorIDs = contributorIDs
+}
+
+// standaloneEntryContributorIDs is the contributor topology of an entry engine started without
+// workers, as for one ready host or a primary-only LIST: its own JVM slice is the only one.
+func standaloneEntryContributorIDs() []string {
+	return []string{fleetLocalContributorID}
+}
+
 // GetHostsInfo returns a summary of all hosts and their status
 func (o *MultiHostOrchestrator) GetHostsInfo() []map[string]interface{} {
 	info := make([]map[string]interface{}, len(o.hosts))
@@ -2340,6 +2354,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 		// Behavior: run the workload only on the PRIMARY (first) host; start API-only
 		// containers on remaining hosts so they appear in the live view as idle.
 		if strings.EqualFold(params.WorkloadType, scenario.WorkloadTypeList) {
+			m.multiHost.setExecutionContributorIDs(nil)
 			submitted := false
 			failBeforeSubmission := func(cause error) error {
 				if cause == nil || submitted {
@@ -2447,6 +2462,8 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 			primary.Status = HostStatusRunning
 			primary.mu.Unlock()
 			primary.SetManaged(true)
+			// The idle workers' API-only containers take no part in the run.
+			m.multiHost.setExecutionContributorIDs(standaloneEntryContributorIDs())
 			if err := ctx.Err(); err != nil {
 				return failBeforeSubmission(err)
 			}
@@ -2598,6 +2615,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 			ctx, image, params, scenarioContent, defaultsContent, "Distributed run", hooks)
 	}
 
+	m.multiHost.setExecutionContributorIDs(nil)
 	host := readyHosts[0]
 	if host.DockerManager == nil {
 		return fmt.Errorf("host %s has no Docker manager configured", host.Info.Original)
@@ -2630,6 +2648,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithContentAndLaunchHooks(
 	if err := m.multiHost.StartContainers(ctx, runtimeImage, engineArgs); err != nil {
 		return errors.Join(err, m.multiHost.cleanupManagedContainersAfterStartFailure(ctx))
 	}
+	m.multiHost.setExecutionContributorIDs(standaloneEntryContributorIDs())
 	if err := m.waitForAPIs(ctx, constants.APIReadinessTimeout); err != nil {
 		return errors.Join(
 			fmt.Errorf("failed waiting for single-host API: %w", err),

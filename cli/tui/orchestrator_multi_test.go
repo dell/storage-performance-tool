@@ -2689,6 +2689,11 @@ func TestMultiHostTestOrchestrator_StartTest_List_PrimaryOnly(t *testing.T) {
 	if len(entryCalls[0].WorkerAddresses) != 0 {
 		t.Fatalf("expected zero worker addresses for LIST primary-only, got %v", entryCalls[0].WorkerAddresses)
 	}
+	// The idle workers take no part in the run: the primary's own slice is its only contributor.
+	contributors, err := orchestrator.MetricContributorIDs()
+	if err != nil || !reflect.DeepEqual(contributors, []string{constants.MetricsLocalContributorID}) {
+		t.Fatalf("LIST metric contributors = %v, error %v; want only the primary's own slice", contributors, err)
+	}
 
 	// API-based run should have been initiated
 	if !runStarted.Load() {

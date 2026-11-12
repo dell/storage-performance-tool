@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Fixed
+
+- **Runs on one remote engine** — An `spt run` or `spt replay` on a single remote host (one `--test-hosts` entry) now stores its driver statistics in `spt_run_params.json`; 5.17.0 recorded a `driverStatsError` there instead. A standalone DELETE on one remote host, seeded or from `--items-file`, now exits 0 after a clean delete; from 5.15.0 it exited 1 with "metric contributor identity is unavailable before execution starts". A real failure on one remote host no longer carries that reason as a second cause.
+
 ## [5.17.0] - 2026-11-11
 
 ### Added
