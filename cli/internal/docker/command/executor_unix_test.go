@@ -4,9 +4,11 @@ package command
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/logging"
 )
 
 func TestSSHAcceptsOption_ProbesWithoutUserConfig(t *testing.T) {
@@ -159,5 +162,272 @@ func TestRemoteStreamGuard_ExitsWithCommandWhileSessionStaysOpen(t *testing.T) {
 			t.Fatal("the guard's stdin watcher outlived the command")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// pipeHolderLife is how long a test's background process holds the output
+// pipes it inherited. heldPipeBound is the wide margin a call must return
+// within: far below the holder's life, so a call that waits for the holder
+// fails, and far above deadline plus WaitDelay, so a loaded runner does not.
+const (
+	pipeHolderLife = 10 * time.Second
+	heldPipeBound  = 5 * time.Second
+)
+
+// pipeHolder returns a shell fragment that leaves a background process holding
+// the inherited output pipes after the shell moves on. redirect selects the
+// held pipes: "" holds both, ">/dev/null" only stderr (as an ssh ProxyJump
+// child does), "2>/dev/null" only stdout. The holder is killed at cleanup.
+func pipeHolder(t *testing.T, redirect string) string {
+	t.Helper()
+	pidFile := filepath.Join(t.TempDir(), "holder.pid")
+	t.Cleanup(func() {
+		if data, err := os.ReadFile(pidFile); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+	return "sleep " + strconv.Itoa(int(pipeHolderLife/time.Second)) + " " + redirect + " & echo $! > '" + pidFile + "'"
+}
+
+// fakeOnPath puts an executable shell script called name first on PATH.
+func fakeOnPath(t *testing.T, name, body string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// captureDebugLog routes the shared logger into a buffer until the test ends.
+func captureDebugLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	previous := logging.GetLogger()
+	logging.SetLogger(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { logging.SetLogger(previous) })
+	return &buf
+}
+
+func requireReturnedBeforeHolder(t *testing.T, started time.Time) {
+	t.Helper()
+	if elapsed := time.Since(started); elapsed > heldPipeBound {
+		t.Fatalf("call returned after %v, waiting on the process that held its output pipe (bound %v)", elapsed, heldPipeBound)
+	}
+}
+
+// requireKilled checks that err is the deadline kill of the direct child, not
+// a WaitDelay overrun.
+func requireKilled(t *testing.T, err error) {
+	t.Helper()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected the kill's exit error, got %v", err)
+	}
+	if status, ok := exitErr.Sys().(syscall.WaitStatus); !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+		t.Fatalf("expected signal: killed, got %v", err)
+	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("a deadline kill must not report a WaitDelay overrun: %v", err)
+	}
+}
+
+func TestExecuteCommand_HeldPipeAfterExitZeroIsSuccess(t *testing.T) {
+	for _, tc := range []struct{ name, redirect string }{
+		{"stdout and stderr held", ""},
+		{"stderr held", ">/dev/null"},
+		{"stdout held", "2>/dev/null"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureDebugLog(t)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			started := time.Now()
+			stdout, stderr, err := NewCommandExecutor().ExecuteCommand(ctx, CreateLocalHost(),
+				[]string{"sh", "-c", "echo answer; " + pipeHolder(t, tc.redirect)})
+			requireReturnedBeforeHolder(t, started)
+			if err != nil {
+				t.Fatalf("a command that exited 0 must succeed while a descendant holds its pipe, got %v", err)
+			}
+			if stdout != "answer" || stderr != "" {
+				t.Fatalf("output = %q, %q; want the collected output", stdout, stderr)
+			}
+			if !strings.Contains(logs.String(), "held the output pipe") {
+				t.Fatalf("expected a debug log about the held pipe, got %q", logs.String())
+			}
+		})
+	}
+}
+
+func TestExecuteCommand_RemoteHeldPipeAfterExitZeroIsSuccess(t *testing.T) {
+	// An ssh ControlPersist master started with -v keeps the first call's stderr.
+	fakeOnPath(t, constants.SSHCommand, "echo answer; "+pipeHolder(t, ">/dev/null"))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	started := time.Now()
+	stdout, _, err := NewCommandExecutor().ExecuteCommand(ctx, CreateRemoteHost("remote.example.com"), []string{"docker", "version"})
+	requireReturnedBeforeHolder(t, started)
+	if err != nil || stdout != "answer" {
+		t.Fatalf("got %q, %v; want answer and no error", stdout, err)
+	}
+}
+
+func TestExecuteCommand_HeldPipeKeepsExitError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	started := time.Now()
+	stdout, stderr, err := NewCommandExecutor().ExecuteCommand(ctx, CreateLocalHost(),
+		[]string{"sh", "-c", "echo partial; echo failed >&2; " + pipeHolder(t, "") + "; exit 3"})
+	requireReturnedBeforeHolder(t, started)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 3 {
+		t.Fatalf("expected exit status 3, got %v", err)
+	}
+	if stdout != "partial\n" || stderr != "failed\n" {
+		t.Fatalf("output = %q, %q", stdout, stderr)
+	}
+}
+
+func TestExecuteCommand_NoHeldPipeReturnsAtOnce(t *testing.T) {
+	started := time.Now()
+	stdout, _, err := NewCommandExecutor().ExecuteCommand(context.Background(), CreateLocalHost(), []string{"sh", "-c", "echo answer"})
+	if err != nil || stdout != "answer" {
+		t.Fatalf("got %q, %v", stdout, err)
+	}
+	// A command that closes its pipes on exit never waits for the delay.
+	if elapsed := time.Since(started); elapsed >= constants.CommandWaitDelay {
+		t.Fatalf("call took %v, at least the wait delay", elapsed)
+	}
+}
+
+func TestExecuteCommand_DeadlineKillReturnsDespiteHeldPipe(t *testing.T) {
+	t.Run("local", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		started := time.Now()
+		_, _, err := NewCommandExecutor().ExecuteCommand(ctx, CreateLocalHost(),
+			[]string{"sh", "-c", pipeHolder(t, "") + "; sleep 10"})
+		requireReturnedBeforeHolder(t, started)
+		requireKilled(t, err)
+	})
+	t.Run("ssh with a jump child holding stderr", func(t *testing.T) {
+		// Go kills ssh at the deadline; its ProxyJump child (ssh -W) keeps stderr.
+		fakeOnPath(t, constants.SSHCommand, pipeHolder(t, ">/dev/null")+"; exec sleep 10")
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		started := time.Now()
+		_, _, err := NewCommandExecutor().ExecuteCommand(ctx, CreateRemoteHost("remote.example.com"), []string{"docker", "version"})
+		requireReturnedBeforeHolder(t, started)
+		requireKilled(t, err)
+	})
+}
+
+// copyCalls runs each executor copy against a remote host, so it goes through scp.
+var copyCalls = []struct {
+	name string
+	copy func(ctx context.Context, r *RealCommandExecutor) error
+}{
+	{"CopyFile", func(ctx context.Context, r *RealCommandExecutor) error {
+		return r.CopyFile(ctx, CreateRemoteHost("remote.example.com"), "/local/items.csv", "/tmp/items.csv")
+	}},
+	{"CopyFromHost", func(ctx context.Context, r *RealCommandExecutor) error {
+		return r.CopyFromHost(ctx, CreateRemoteHost("remote.example.com"), "/tmp/diag.tar", "/local/diag.tar")
+	}},
+}
+
+func TestCopy_DeadlineKillReturnsDespiteHeldPipe(t *testing.T) {
+	for _, call := range copyCalls {
+		t.Run(call.name, func(t *testing.T) {
+			// Go kills scp at the deadline; its ssh child keeps the pipe.
+			fakeOnPath(t, constants.SCPCommand, pipeHolder(t, "")+"; exec sleep 10")
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			started := time.Now()
+			err := call.copy(ctx, NewCommandExecutor())
+			requireReturnedBeforeHolder(t, started)
+			requireKilled(t, err)
+		})
+	}
+}
+
+func TestCopy_HeldPipeAfterExitZeroIsSuccess(t *testing.T) {
+	for _, call := range copyCalls {
+		t.Run(call.name, func(t *testing.T) {
+			fakeOnPath(t, constants.SCPCommand, pipeHolder(t, ">/dev/null")+"; exit 0")
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			started := time.Now()
+			err := call.copy(ctx, NewCommandExecutor())
+			requireReturnedBeforeHolder(t, started)
+			if err != nil {
+				t.Fatalf("a copy that exited 0 must succeed while a descendant holds its pipe, got %v", err)
+			}
+		})
+	}
+}
+
+func TestCopy_HeldPipeKeepsExitError(t *testing.T) {
+	for _, call := range copyCalls {
+		t.Run(call.name, func(t *testing.T) {
+			fakeOnPath(t, constants.SCPCommand, "echo 'scp: permission denied' >&2; "+pipeHolder(t, "")+"; exit 1")
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			started := time.Now()
+			err := call.copy(ctx, NewCommandExecutor())
+			requireReturnedBeforeHolder(t, started)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+				t.Fatalf("expected exit status 1, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "scp: permission denied") {
+				t.Fatalf("the error must keep the copy's output, got %v", err)
+			}
+		})
+	}
+}
+
+func TestStreamCommand_HeldPipeAfterExitZeroIsSuccess(t *testing.T) {
+	for _, tc := range []struct{ name, redirect string }{
+		{"stdout and stderr held", ""},
+		{"stderr held", ">/dev/null"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureDebugLog(t)
+			var stdout []string
+			started := time.Now()
+			err := NewCommandExecutor().StreamCommand(context.Background(), CreateLocalHost(),
+				[]string{"sh", "-c", "printf 'first\\nlast'; " + pipeHolder(t, tc.redirect)},
+				func(line string) { stdout = append(stdout, line) }, func(string) {})
+			requireReturnedBeforeHolder(t, started)
+			if err != nil {
+				t.Fatalf("a stream that exited 0 must succeed while a descendant holds its pipe, got %v", err)
+			}
+			// Success flushes the final unterminated line.
+			if strings.Join(stdout, "|") != "first|last" {
+				t.Fatalf("stdout lines = %q", stdout)
+			}
+			if !strings.Contains(logs.String(), "held the output pipe") {
+				t.Fatalf("expected a debug log about the held pipe, got %q", logs.String())
+			}
+		})
+	}
+}
+
+func TestStreamCommand_HeldPipeKeepsExitError(t *testing.T) {
+	var stdout []string
+	started := time.Now()
+	err := NewCommandExecutor().StreamCommand(context.Background(), CreateLocalHost(),
+		[]string{"sh", "-c", "printf 'complete\\ninterrup'; " + pipeHolder(t, "") + "; exit 255"},
+		func(line string) { stdout = append(stdout, line) }, func(string) {})
+	requireReturnedBeforeHolder(t, started)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 255 {
+		t.Fatalf("expected exit status 255, got %v", err)
+	}
+	// A failure still drops the fragment.
+	if strings.Join(stdout, "|") != "complete" {
+		t.Fatalf("stdout lines = %q", stdout)
 	}
 }
