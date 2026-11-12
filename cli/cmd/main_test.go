@@ -4,7 +4,9 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 )
 
@@ -33,6 +35,15 @@ func TestMain(m *testing.M) {
 		context.Context, string, int64, []string, []string, bool,
 	) (*results.DeleteMetricsObservation, error) {
 		return nil, nil
+	}
+	// The shipped request posts /shutdown to every host's API port, which stops any engine
+	// listening there, such as one a developer runs on 127.0.0.1:9999 beside the tests. A test
+	// that checks the shutdown installs its own recorder; the tests of requestShutdownAll call it
+	// directly.
+	requestShutdownAllFunc = func(
+		context.Context, []*hostparse.HostInfo, string, time.Duration, int64, bool,
+	) error {
+		return nil
 	}
 	os.Exit(m.Run())
 }
