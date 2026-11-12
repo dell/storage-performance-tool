@@ -172,8 +172,9 @@ func TestAutoResultsOfALoneRemoteDeleteExitZeroAndStoreDriverStats(t *testing.T)
 	}
 }
 
-// A real step failure on one remote host exits non-zero for that failure alone, exactly as the
-// same failure does on two hosts.
+// A real step failure on one remote host exits non-zero with no contributor-identity cause: the
+// error is the one the same failure gives on two hosts. The fixture reports reconciled DELETE
+// metrics, so a slice that never starts, which also lacks them, is not modelled here.
 func TestAutoResultsOfALoneRemoteDeleteReportAStepFailureLikeTwoHosts(t *testing.T) {
 	const (
 		runID      = int64(42)
