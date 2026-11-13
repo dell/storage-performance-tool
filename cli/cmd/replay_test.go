@@ -917,6 +917,7 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 			origLocalHeadless := startReplayLocalHeadless
 			origLocalTUI := startReplayLocalTUI
 			origShouldHeadless := shouldReplayRunHeadless
+			origShutdown := requestShutdownAllFunc
 			t.Cleanup(func() {
 				resolvePortConflictFunc = origPort
 				connectReplayOrchestrator = origConnect
@@ -926,6 +927,7 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 				startReplayLocalHeadless = origLocalHeadless
 				startReplayLocalTUI = origLocalTUI
 				shouldReplayRunHeadless = origShouldHeadless
+				requestShutdownAllFunc = origShutdown
 			})
 			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
 				return &portcheck.ResolutionResult{Success: true}, nil
@@ -933,6 +935,26 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 			connectReplayOrchestrator = func(context.Context, *tui.MultiHostOrchestrator) error { return nil }
 			confirmReplayLaunchCommand = func(io.Writer) error { return nil }
 			shouldReplayRunHeadless = func(*cobra.Command) bool { return test.headless }
+			// The monitor's cleanup after the failed launch asks every host to shut down. The
+			// recorder runs on the monitor goroutine, so it is read under the mutex after Execute.
+			type shutdownRequest struct {
+				hosts   []string
+				apiPort string
+			}
+			var shutdownMu sync.Mutex
+			var shutdownRequests []shutdownRequest
+			requestShutdownAllFunc = func(
+				_ context.Context, hosts []*hostparse.HostInfo, apiPort string, _ time.Duration, _ int64, _ bool,
+			) error {
+				request := shutdownRequest{apiPort: apiPort}
+				for _, host := range hosts {
+					request.hosts = append(request.hosts, host.Host)
+				}
+				shutdownMu.Lock()
+				defer shutdownMu.Unlock()
+				shutdownRequests = append(shutdownRequests, request)
+				return nil
+			}
 			var pathCalls atomic.Int32
 			var sessionManagedCalls atomic.Int32
 			startReplayRemoteHeadless = func(
@@ -1011,6 +1033,18 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 			}
 			if sessionManagedCalls.Load() != 1 {
 				t.Fatalf("session-managed replay route calls=%d, want 1", sessionManagedCalls.Load())
+			}
+			shutdownMu.Lock()
+			defer shutdownMu.Unlock()
+			if len(shutdownRequests) != 1 {
+				t.Fatalf("shutdown requests = %+v, want exactly one", shutdownRequests)
+			}
+			got := shutdownRequests[0]
+			if len(got.hosts) != 1 || got.hosts[0] != test.hosts {
+				t.Fatalf("shutdown hosts = %q, want [%q]", got.hosts, test.hosts)
+			}
+			if got.apiPort != "9999" {
+				t.Fatalf("shutdown API port = %q, want %q", got.apiPort, "9999")
 			}
 		})
 	}
