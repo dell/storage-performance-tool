@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -61,7 +62,7 @@ const (
 	flagBucketMetrics         = "bucket-metrics"
 	flagCreatePrefix          = "create-prefix"
 	flagRMIRegistryPort       = "rmi-registry-port"
-	rmiRegistryPortUsage      = "Engine RMI registry port for a local single-host run; give each concurrent spt run on one host its own port"
+	rmiRegistryPortUsage      = "Engine RMI registry port on every host; give each concurrent spt run on the same hosts its own port, and its own --rmi-port-start when a run has a local worker"
 	flagInterfaces            = "interfaces"
 	flagHostInterfaces        = "host-interfaces"
 	itemNamingShardsPath      = "item.naming.shards"
@@ -588,16 +589,22 @@ func shouldRunHeadless(cmd *cobra.Command) bool {
 
 // getAPIPort gets the API port from the command flags with default fallback
 func getAPIPort(cmd *cobra.Command) string {
-	apiPort, _ := cmd.Flags().GetString("api-port")
-	if apiPort == "" {
-		apiPort = constants.SptAPIPort // Default to Spt standard port
-	}
+	apiPort := apiPortFlag(cmd)
 
 	// Log deprecation notice if user specifies legacy port
 	if apiPort == constants.SptLegacyAPIPort {
 		fmt.Printf("Note: spt now defaults to port %s (Spt standard). Using legacy port %s.\n", constants.SptAPIPort, constants.SptLegacyAPIPort)
 	}
 
+	return apiPort
+}
+
+// apiPortFlag returns the --api-port value, or the Spt standard port when it is unset.
+func apiPortFlag(cmd *cobra.Command) string {
+	apiPort, _ := cmd.Flags().GetString(flagAPIPort)
+	if apiPort == "" {
+		apiPort = constants.SptAPIPort // Default to Spt standard port
+	}
 	return apiPort
 }
 
@@ -1756,6 +1763,16 @@ func validatePortFlag(flag string, port int) error {
 	return nil
 }
 
+// validateDistinctEnginePorts refuses an API port equal to the RMI registry port. Every engine
+// serves both, so its second bind would fail and the run would end on a readiness timeout.
+func validateDistinctEnginePorts(apiPort, registryPort int) error {
+	if apiPort != registryPort {
+		return nil
+	}
+	return fmt.Errorf("--%s and --%s are both %d; every engine serves both ports, so they must differ",
+		flagAPIPort, flagRMIRegistryPort, apiPort)
+}
+
 // checkPortConflicts checks for and resolves port conflicts before launching Spt
 func checkPortConflicts(cmd *cobra.Command) error {
 	// Get force mode setting
@@ -2009,10 +2026,6 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			"hosts", testHostsStr,
 			"attach_existing", attachExisting)
 		useMultiHostOrchestrator := shouldUseMultiHostOrchestrator(hostInfos)
-		if useMultiHostOrchestrator && params.RMIRegistryPort != 0 {
-			return fmt.Errorf("--%s applies only to local single-host runs; distributed and remote engines use port %d",
-				flagRMIRegistryPort, constants.DefaultRMIRegistryPort)
-		}
 
 		// The local single-host runner owns Docker on the controller, so it
 		// needs the controller port check. Remote and multi-host runs perform
@@ -2126,6 +2139,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			}
 			multiHostOrchestrator = tui.NewMultiHostOrchestratorWithRMI(hostInfos, minHosts, rmiConfig)
 			multiHostOrchestrator.SetAPIPort(apiPort)
+			multiHostOrchestrator.SetRMIRegistryPort(params.RMIRegistryPort)
 			// Provide image to orchestrator for preflight image checks
 			multiHostOrchestrator.SetImage(sptImage)
 			multiHostOrchestrator.SetAttachExistingWorkers(attachExisting)
@@ -2460,7 +2474,7 @@ func init() {
 	runCmd.Flags().String("delete-items-file", "", "Items file to pre-populate mixed workload DELETE queue (relaxes delete<=put constraint; --cleanup not allowed)")
 	runCmd.Flags().Int("service-threads", 0, "Engine virtual-thread carrier parallelism (0 = JVM default, env: SPT_SERVICE_THREADS)")
 	runCmd.Flags().StringArray(flagEngineOverride, []string{}, "Advanced engine defaults override as path=value; repeat for multiple overrides (for example: storage.driver.threads=6, env: SPT_ENGINE_OVERRIDES)")
-	runCmd.Flags().String("api-port", "", "Spt API port (defaults to 9999, legacy: 43234)")
+	runCmd.Flags().String("api-port", "", "Spt API port for every engine in the run (defaults to 9999, legacy: 43234)")
 	runCmd.Flags().Bool(flagSkipImagePull, false, "Use the locally cached Docker image without pulling the latest tag (env: SPT_SKIP_IMAGE_PULL)")
 	runCmd.Flags().String(flagSptImage, "", "Override the engine image ref (default: matches the CLI version, e.g. ...:v5.10.3; dev builds use ...:spt_dev; env: SPT_IMAGE)")
 
@@ -2495,7 +2509,7 @@ Ensure your SSH keys are configured: ssh-add ~/.ssh/id_rsa`)
 Default: All hosts specified in --test-hosts must connect.
 Example: --test-hosts "host1,host2,host3" --min-hosts 2
          (continues if at least 2 hosts connect)`)
-	runCmd.Flags().Bool(flagAttachExistingWorkers, false, "Attach to prestarted worker nodes; spt still launches the entry node")
+	runCmd.Flags().Bool(flagAttachExistingWorkers, false, "Attach to prestarted worker nodes, which must serve the run's --api-port and --rmi-registry-port; spt still launches the entry node")
 
 	// RMI Configuration Options (for distributed testing)
 	runCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
@@ -2738,6 +2752,12 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	if registryPort, err := cmd.Flags().GetInt(flagRMIRegistryPort); err == nil {
 		if err := validatePortFlag(flagRMIRegistryPort, registryPort); err != nil {
 			return scenario.Params{}, err
+		}
+		// An API port that is not a number is left to the checks that report it.
+		if apiPort, err := strconv.Atoi(strings.TrimSpace(apiPortFlag(cmd))); err == nil {
+			if err := validateDistinctEnginePorts(apiPort, registryPort); err != nil {
+				return scenario.Params{}, err
+			}
 		}
 		// The default leaves the engine command line unchanged.
 		if registryPort != constants.DefaultRMIRegistryPort {

@@ -85,6 +85,7 @@ type MultiHostOrchestrator struct {
 	scenarioContent string
 	image           string
 	apiPort         string
+	registryPort    int // RMI registry port every engine serves; 0 means the default (1099)
 	attachWorkers   bool
 	itemFileMounts  []scenario.FileMount
 	resultsRoot     string
@@ -280,6 +281,44 @@ func (o *MultiHostOrchestrator) SetAPIPort(apiPort string) {
 	o.apiPort = apiPort
 }
 
+// SetRMIRegistryPort sets the RMI registry port that every engine in the run serves, which the
+// preflight checks, the entry reaches the workers on, and the RMI readiness wait probes. Zero
+// selects the default (1099).
+func (o *MultiHostOrchestrator) SetRMIRegistryPort(port int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.registryPort = port
+}
+
+// RMIRegistryPort returns the run's RMI registry port. Like the API port, it is set before the
+// hosts connect, so readers do not take the lock.
+func (o *MultiHostOrchestrator) RMIRegistryPort() int {
+	if o.registryPort == 0 {
+		return constants.DefaultRMIRegistryPort
+	}
+	return o.registryPort
+}
+
+// enginePorts returns the API and RMI registry ports that every engine in the run serves. An
+// unset API port is the default, as SetAPIPort treats it.
+func (o *MultiHostOrchestrator) enginePorts() (enginePorts, error) {
+	ports := enginePorts{api: constants.DefaultSptAPIPort, registry: o.RMIRegistryPort()}
+	if apiPort := strings.TrimSpace(o.apiPort); apiPort != "" {
+		port, err := strconv.Atoi(apiPort)
+		if err != nil {
+			return enginePorts{}, fmt.Errorf("invalid API port %q: %w", o.apiPort, err)
+		}
+		ports.api = port
+	}
+	return ports, nil
+}
+
+// nodeModePortArgs returns the RMI registry port argument for a node-mode engine (a lone remote
+// engine, or a LIST run's idle API containers). The default adds nothing.
+func (o *MultiHostOrchestrator) nodeModePortArgs() []string {
+	return nonDefaultNodePortArgs(enginePorts{registry: o.RMIRegistryPort()})
+}
+
 // SetForceCleanup enables stopping conflicting containers during preflight
 func (o *MultiHostOrchestrator) SetForceCleanup(force bool) {
 	o.mu.Lock()
@@ -428,6 +467,7 @@ func (o *MultiHostOrchestrator) ConnectHosts(ctx context.Context) error {
 					}
 				}
 				// 3) Check ports
+				registryPort := o.RMIRegistryPort()
 				apiPort, convErr := strconv.Atoi(o.apiPort)
 				if convErr != nil {
 					h.SetError(fmt.Errorf("invalid API port %q: %w", o.apiPort, convErr))
@@ -436,7 +476,7 @@ func (o *MultiHostOrchestrator) ConnectHosts(ctx context.Context) error {
 					connectErrorsMu.Unlock()
 					return
 				}
-				if cinfo, perr := o.preflight.CheckPorts(ctx, h.Info, constants.DefaultRMIRegistryPort, apiPort, o.rmiPortStart, o.rmiPortCount); perr != nil {
+				if cinfo, perr := o.preflight.CheckPorts(ctx, h.Info, registryPort, apiPort, o.rmiPortStart, o.rmiPortCount); perr != nil {
 					h.SetError(fmt.Errorf("port check failed: %w", perr))
 					connectErrorsMu.Lock()
 					connectErrors = append(connectErrors, fmt.Sprintf("  ❌ %s: Port check failed: %v", h.Info.Original, perr))
@@ -479,7 +519,7 @@ func (o *MultiHostOrchestrator) ConnectHosts(ctx context.Context) error {
 								}
 							}
 							if stopped > 0 {
-								if c2, e2 := o.preflight.CheckPorts(ctx, h.Info, constants.DefaultRMIRegistryPort, apiPort, o.rmiPortStart, o.rmiPortCount); e2 == nil && len(c2.ConflictPorts) == 0 {
+								if c2, e2 := o.preflight.CheckPorts(ctx, h.Info, registryPort, apiPort, o.rmiPortStart, o.rmiPortCount); e2 == nil && len(c2.ConflictPorts) == 0 {
 									logging.LogInfo("docker-multi", "resolved port conflicts via cleanup", "host", h.Info.Original)
 									resolved = true
 								} else {
@@ -672,6 +712,8 @@ func (o *MultiHostOrchestrator) StartContainers(ctx context.Context, image strin
 	}
 
 	o.notifyf("🚀 Starting containers on %d host(s)...", len(readyHosts))
+	// Each node-mode engine serves the run's API port and RMI registry port.
+	engineArgs := slices.Concat(o.nodeModePortArgs(), additionalArgs)
 
 	var wg sync.WaitGroup
 	var startErrors []string
@@ -704,7 +746,7 @@ func (o *MultiHostOrchestrator) StartContainers(ctx context.Context, image strin
 			}
 
 			containerID, err := startContainerInNodeModeContext(
-				ctx, h.DockerManager, image, o.apiPort, o.networkMode, additionalArgs)
+				ctx, h.DockerManager, image, o.apiPort, o.networkMode, engineArgs)
 			if err != nil {
 				h.SetError(fmt.Errorf("failed to start container: %w", err))
 
@@ -1920,10 +1962,12 @@ func (m *MultiHostTestOrchestrator) fleetContributorID(host *HostConnection) str
 	if len(m.multiHost.hosts) > 0 {
 		entry = m.multiHost.hosts[0]
 	}
-	return fleetContributorIDForHost(host, entry)
+	return fleetContributorIDForHost(host, entry, m.multiHost.RMIRegistryPort())
 }
 
-func fleetContributorIDForHost(host, entry *HostConnection) string {
+// fleetContributorIDForHost returns the identity the entry reports a worker's metrics under: the
+// worker address it was given, with the run's RMI registry port.
+func fleetContributorIDForHost(host, entry *HostConnection, registryPort int) string {
 	if host == nil {
 		return ""
 	}
@@ -1937,7 +1981,7 @@ func fleetContributorIDForHost(host, entry *HostConnection) string {
 	if hostOrIP == "" {
 		return ""
 	}
-	return fmt.Sprintf("%s:%s", hostOrIP, constants.RMIRegistryPort)
+	return fmt.Sprintf("%s:%d", hostOrIP, registryPort)
 }
 
 func (m *MultiHostTestOrchestrator) authoritativeFleetDelete(
@@ -2412,7 +2456,8 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 				}
 				w.SetPhase(NodePhaseContainerStarting)
 				cid, err := startContainerInNodeModeContext(
-					ctx, w.DockerManager, image, m.multiHost.apiPort, m.multiHost.networkMode, startupArgs)
+					ctx, w.DockerManager, image, m.multiHost.apiPort, m.multiHost.networkMode,
+					slices.Concat(m.multiHost.nodeModePortArgs(), startupArgs))
 				if err != nil {
 					// Record but continue; non-critical for primary execution
 					w.SetError(err)
@@ -2470,9 +2515,13 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 					"primary host %s has no Docker manager configured", primary.Info.Original))
 			}
 			additionalArgs = append(additionalArgs, scenario.NodeInterfacesArgs(params.HostInterfaces, primary.Info.Host, nil)...)
+			ports, err := m.multiHost.enginePorts()
+			if err != nil {
+				return failBeforeSubmission(err)
+			}
 			primary.SetPhase(NodePhaseContainerStarting)
 			cid, err := startEntryNodeContainerContext(
-				ctx, primary.DockerManager, image, nil, additionalArgs, m.multiHost.networkMode)
+				ctx, primary.DockerManager, image, ports, nil, additionalArgs, m.multiHost.networkMode)
 			if err != nil {
 				return failBeforeSubmission(err)
 			}
@@ -2973,6 +3022,11 @@ func (o *MultiHostOrchestrator) startWorkerNode(ctx context.Context, host *HostC
 		return fmt.Errorf("host %s has no Docker manager configured", host.Info.Original)
 	}
 
+	ports, err := o.enginePorts()
+	if err != nil {
+		return err
+	}
+
 	// Determine advertised IP for java.rmi.server.hostname
 	// Detection has its own budget; container startup and readiness use the caller's context.
 	advIP := ""
@@ -2999,6 +3053,7 @@ func (o *MultiHostOrchestrator) startWorkerNode(ctx context.Context, host *HostC
 		ctx, host.DockerManager,
 		o.image,
 		advIP,
+		ports,
 		o.rmiPortStart,
 		o.rmiPortCount,
 		additionalArgs,
@@ -3030,7 +3085,12 @@ func (o *MultiHostOrchestrator) startEntryNodeContext(
 	params scenario.ScenarioParams,
 	startupArgs []string,
 ) error {
-	// Build worker addresses for RMI using detected advertised IPs where available
+	ports, err := o.enginePorts()
+	if err != nil {
+		return err
+	}
+	// Build worker addresses for RMI using detected advertised IPs where available. Each carries
+	// the run's registry port, which is also the key of a worker's NIC-set override.
 	workerAddresses := make([]string, 0, len(workers))
 	workerNodes := make([]scenario.WorkerNode, 0, len(workers))
 	for _, worker := range workers {
@@ -3038,7 +3098,7 @@ func (o *MultiHostOrchestrator) startEntryNodeContext(
 		if strings.TrimSpace(hostOrIP) == "" {
 			hostOrIP = worker.Info.Host
 		}
-		addr := fmt.Sprintf("%s:%s", hostOrIP, constants.RMIRegistryPort)
+		addr := fmt.Sprintf("%s:%d", hostOrIP, ports.registry)
 		workerAddresses = append(workerAddresses, addr)
 		workerNodes = append(workerNodes, scenario.WorkerNode{Host: worker.Info.Host, Addr: addr})
 	}
@@ -3060,6 +3120,7 @@ func (o *MultiHostOrchestrator) startEntryNodeContext(
 	containerID, err := startEntryNodeContainerContext(
 		ctx, primary.DockerManager,
 		o.image,
+		ports,
 		workerAddresses,
 		additionalArgs,
 		o.networkMode,
@@ -3635,7 +3696,7 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(ctx context.Cont
 	executionContributors = append(executionContributors, fleetLocalContributorID)
 	for _, worker := range activeWorkers {
 		executionParticipants = append(executionParticipants, runtimeIdentityHostKey(worker.Info))
-		contributorID := fleetContributorIDForHost(worker, entryNode)
+		contributorID := fleetContributorIDForHost(worker, entryNode, o.RMIRegistryPort())
 		if contributorID == "" {
 			return fmt.Errorf("active worker %s has no metric contributor identity", worker.Info.Original)
 		}
@@ -3677,7 +3738,7 @@ func (o *MultiHostOrchestrator) checkPortContext(ctx context.Context, host strin
 func (o *MultiHostOrchestrator) waitForRMIReadyContext(ctx context.Context, host *HostConnection, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(normalizeContext(ctx), timeout)
 	defer cancel()
-	rmiRegistryPort := constants.RMIRegistryPortInt
+	rmiRegistryPort := o.RMIRegistryPort()
 	retryInterval := constants.RMIRetryInterval
 	// Use the hostname/IP from the connection info - this is what we used for SSH
 	// and what other containers will use to reach this host via RMI

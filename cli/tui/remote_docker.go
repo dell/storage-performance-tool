@@ -81,7 +81,7 @@ func sanitizeHostComponent(host string) string {
 }
 
 func generateRemoteContainerName(prefix, host string) string {
-	return fmt.Sprintf("spt-%s-%d-%s", prefix, time.Now().Unix(), sanitizeHostComponent(host))
+	return fmt.Sprintf("spt-%s-%d-%s", prefix, time.Now().UnixNano(), sanitizeHostComponent(host))
 }
 
 func (m *RemoteDockerManager) baseLabels(role string) map[string]string {
@@ -411,8 +411,17 @@ func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname
 		context.Background(), image, rmiHostname, rmiPortStart, rmiPortCount, additionalArgs)
 }
 
-// StartWorkerNodeContainerContext starts a remote RMI worker within the caller's context.
-func (m *RemoteDockerManager) StartWorkerNodeContainerContext(ctx context.Context, image string, rmiHostname string, _ int, _ int, additionalArgs []string) (string, error) {
+// StartWorkerNodeContainerContext starts a remote RMI worker on the default engine ports within
+// the caller's context.
+func (m *RemoteDockerManager) StartWorkerNodeContainerContext(ctx context.Context, image string, rmiHostname string, rmiPortStart, rmiPortCount int, additionalArgs []string) (string, error) {
+	return m.startWorkerNodeOnPorts(ctx, image, rmiHostname, defaultEnginePorts(), rmiPortStart, rmiPortCount, additionalArgs)
+}
+
+// startWorkerNodeOnPorts starts a remote RMI worker that serves the run's API and RMI registry
+// ports, and waits for its API on the run's API port.
+func (m *RemoteDockerManager) startWorkerNodeOnPorts(
+	ctx context.Context, image string, rmiHostname string, ports enginePorts, _ int, _ int, additionalArgs []string,
+) (string, error) {
 	ctx = normalizeContext(ctx)
 	// Detect advertised IP on the remote host if not explicitly provided
 	advIP := strings.TrimSpace(rmiHostname)
@@ -435,8 +444,7 @@ func (m *RemoteDockerManager) StartWorkerNodeContainerContext(ctx context.Contex
 	// Host networking with explicit JVM RMI hostname and explicit ports
 	name := generateRemoteContainerName("worker", m.host.Host)
 	cmd := make([]string, 0, 3+len(additionalArgs))
-	cmd = append(cmd, dockerNodeModeArg, "--run-port=9999",
-		fmt.Sprintf("%s%d", constants.EngineNodePortArgPrefix, constants.DefaultRMIRegistryPort))
+	cmd = append(cmd, dockerNodeModeArg, ports.runPortArg(), ports.nodePortArg())
 	cmd = append(cmd, additionalArgs...)
 	cfg := command.ContainerConfig{
 		Image:       image,
@@ -468,7 +476,7 @@ func (m *RemoteDockerManager) StartWorkerNodeContainerContext(ctx context.Contex
 
 	// Readiness probe against remote host over network
 	if m.proberRun != nil {
-		baseURL := fmt.Sprintf("http://%s:%d", m.host.Host, constants.DefaultSptAPIPort)
+		baseURL := fmt.Sprintf("http://%s:%d", m.host.Host, ports.api)
 		rctx, rcancel := context.WithTimeout(ctx, constants.APIReadinessTimeout)
 		defer rcancel()
 		if err := m.proberRun(rctx, baseURL, constants.APIPollingTimeout); err != nil {
@@ -484,15 +492,24 @@ func (m *RemoteDockerManager) StartEntryNodeContainer(image string, workerAddres
 		context.Background(), image, workerAddresses, additionalArgs, networkMode)
 }
 
-// StartEntryNodeContainerContext starts a remote RMI entry node within the caller's context.
+// StartEntryNodeContainerContext starts a remote RMI entry node on the default engine ports within
+// the caller's context.
 func (m *RemoteDockerManager) StartEntryNodeContainerContext(ctx context.Context, image string, workerAddresses []string, additionalArgs []string, networkMode string) (string, error) {
+	return m.startEntryNodeOnPorts(ctx, image, defaultEnginePorts(), workerAddresses, additionalArgs, networkMode)
+}
+
+// startEntryNodeOnPorts starts a remote RMI entry node that serves the run's API and RMI registry
+// ports, and waits for its API on the run's API port.
+func (m *RemoteDockerManager) startEntryNodeOnPorts(
+	ctx context.Context, image string, ports enginePorts, workerAddresses []string, additionalArgs []string, networkMode string,
+) (string, error) {
 	ctx = normalizeContext(ctx)
-	// Build command: [--load-step-node-addrs=<csv>, --run-node, --run-port=9999] + additionalArgs
 	cmd := []string{}
 	if len(workerAddresses) > 0 {
 		cmd = append(cmd, "--load-step-node-addrs="+strings.Join(workerAddresses, ","))
 	}
-	cmd = append(cmd, dockerNodeModeArg, "--run-port="+constants.SptAPIPort)
+	cmd = append(cmd, dockerNodeModeArg, ports.runPortArg())
+	cmd = append(cmd, nonDefaultNodePortArgs(ports)...)
 	cmd = append(cmd, additionalArgs...)
 
 	startCtx, cancel := context.WithTimeout(ctx, time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
@@ -528,7 +545,7 @@ func (m *RemoteDockerManager) StartEntryNodeContainerContext(ctx context.Context
 	}
 	m.containerID = strings.TrimSpace(id)
 	if m.proberRun != nil {
-		baseURL := fmt.Sprintf("http://%s:%d", m.host.Host, constants.DefaultSptAPIPort)
+		baseURL := fmt.Sprintf("http://%s:%d", m.host.Host, ports.api)
 		rctx, rcancel := context.WithTimeout(ctx, constants.APIReadinessTimeout)
 		defer rcancel()
 		if err := m.proberRun(rctx, baseURL, constants.APIPollingTimeout); err != nil {

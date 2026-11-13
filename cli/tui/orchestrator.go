@@ -244,7 +244,8 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 	if err != nil {
 		return fmt.Errorf("resolve engine startup settings: %w", err)
 	}
-	// Only the single-host engine moves its registry; distributed workers keep the default.
+	// The local engine serves the run's registry port; MultiHostOrchestrator.SetRMIRegistryPort
+	// sets it for remote and distributed engines.
 	if params.RMIRegistryPort > 0 {
 		startupArgs = append(startupArgs, fmt.Sprintf("%s%d", constants.EngineNodePortArgPrefix, params.RMIRegistryPort))
 	}

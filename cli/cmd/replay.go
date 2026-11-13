@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,6 +65,11 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	sourceURL, _ := cmd.Flags().GetString("from")
 	if strings.TrimSpace(sourceURL) == "" {
 		return fmt.Errorf("--from URL is required")
+	}
+	// Replay engines serve their RMI registry on the default port, which the API port must not take.
+	if apiPort, err := strconv.Atoi(strings.TrimSpace(apiPortFlag(cmd))); err == nil && apiPort == constants.DefaultRMIRegistryPort {
+		return fmt.Errorf("--%s %d is the engines' RMI registry port; every engine serves both ports, so choose another API port",
+			flagAPIPort, apiPort)
 	}
 	endpoints, _ := cmd.Flags().GetStringSlice("endpoints")
 	if endpoint, _ := cmd.Flags().GetString("endpoint"); strings.TrimSpace(endpoint) != "" && len(endpoints) == 0 {
@@ -600,9 +606,9 @@ func init() {
 	replayCmd.Flags().Bool("minimal", false, "Start TUI with only the live stats panel visible")
 	replayCmd.Flags().Int("auto-terminate-seconds", 0, "Automatically terminate runs after N seconds (0 = unlimited)")
 	replayCmd.Flags().Bool("force", false, "Resolve port conflicts and permit known engine build mismatches; does not override invalid build information or collection failures")
-	replayCmd.Flags().String("api-port", "", "Spt API port (defaults to 9999)")
+	replayCmd.Flags().String("api-port", "", "Spt API port for every engine in the replay (defaults to 9999)")
 	replayCmd.Flags().Int("min-hosts", 0, "Minimum number of replay hosts that must connect (default: all hosts)")
-	replayCmd.Flags().Bool(flagAttachExistingWorkers, false, "Attach to prestarted worker nodes; replay still launches the entry node")
+	replayCmd.Flags().Bool(flagAttachExistingWorkers, false, "Attach to prestarted worker nodes, which must serve --api-port and RMI registry port 1099; replay still launches the entry node")
 	replayCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
 	replayCmd.Flags().StringArray(flagHostInterfaces, nil, "Replace --interfaces on one host: <host>=<value>, with <value> auto, a comma-separated list, or none to turn NICs off there; repeat for more hosts")
 	replayCmd.Flags().String(flagInterfaces, "", "Spread each engine's connections over a NIC set: auto, or interface names, IPv4 addresses or RDMA devices (comma-separated; default S3 driver, host networking; env: SPT_INTERFACES); archived NIC sets are ignored")

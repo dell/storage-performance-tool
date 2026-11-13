@@ -83,6 +83,9 @@ func verifyEnginePorts(cmd *cobra.Command) (int, int, error) {
 	if err := validatePortFlag(flagRMIRegistryPort, registryPort); err != nil {
 		return 0, 0, err
 	}
+	if err := validateDistinctEnginePorts(apiPort, registryPort); err != nil {
+		return 0, 0, err
+	}
 	return apiPort, registryPort, nil
 }
 
