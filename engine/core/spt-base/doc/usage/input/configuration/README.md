@@ -406,10 +406,5 @@ Also there's a shortcut alias for the load operation types:
 | load-op-list-sharding-charset | String    | 0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ | Character set used to build static prefixes when `mode=static`. Defaults to Base62; override when targeting a narrower namespace (e.g., hex). |
 
 The shortcut CLI flag `--list-accel=auto|none|static` maps to `load-op-list-sharding-mode`. When you specify `charset` or `radix` directly they apply only when `mode=static`.
-| load-op-list-sharding-stall-timeout | Duration/String | 30s | Emits WARN logs when a shard sees no progress for this interval; also feeds adaptive heuristics stall counters. |
-| load-op-list-sharding-progress-log-interval | Duration/String | 10s | TRACE logging cadence for shard progress updates when verbose logging is enabled. |
-| load-op-list-sharding-adaptive-full_page_threshold | Integer >= 0 | 4 | Consecutive full pages (objects == max_keys) required before adaptive splitting is considered. 0 disables the check. |
-| load-op-list-sharding-adaptive-stall_warning_threshold | Integer >= 0 | 2 | Number of stall warnings a shard must accumulate before it becomes eligible for splitting. 0 disables the check. |
-| load-op-list-sharding-adaptive-backlog_ratio | Double > 0 | 1.5 | Pending shard depth divided by active leases required to trigger backlog-based splitting. |
-| load-op-list-sharding-adaptive-min_pending_shards | Integer >= 0 | 4 | Minimum queue depth that must be present before backlog-based splitting fires. |
-| load-op-list-sharding-adaptive-cooldown | Duration/String | 0s | Minimum time between splits of the same prefix; prevents thrashing when adaptive heuristics are aggressive. |
+
+The shard stall warning (after 30 s without progress), the TRACE progress log (every 10 s) and the adaptive split heuristics (4 consecutive full pages, 2 stall warnings, a backlog ratio of 1.5, at least 4 pending shards, no cooldown) use built-in values. They have no configuration options: the engine rejects `--load-op-list-sharding-stall-timeout`, `--load-op-list-sharding-progress-log-interval` and `--load-op-list-sharding-adaptive-*` as unknown arguments.
