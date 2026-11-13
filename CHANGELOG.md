@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- **Mongoose versioning flag** — The engine accepts the Mongoose 3.x flag `--storage-net-http-versioning` as a synonym for `storage.object.versioning` with the S3 drivers. **Compatibility:** with `s3` and `s3-rdma`, a command that already passes it now checks the bucket's versioning on first use, enables it if it is off, leaves it on, and writes `key~versionId` names. With `s3-aws` it only splits `key~versionId` input names. With `s3-tables` it has no effect. See the [S3 driver's versioning guide](engine/extensions/storage-drivers/implementations/s3/README.md#434-mongoose-versioning-flag).
+
 ### Fixed
 
 - **Runs on one remote engine** — An `spt run` or `spt replay` that runs on a single remote engine (one `--test-hosts` entry, or several where only the first connects and `--min-hosts` allows it) now stores its driver statistics in `spt_run_params.json`; 5.17.0 recorded a `driverStatsError` there instead. A standalone DELETE there, seeded or from `--items-file`, now exits 0 after a clean delete; from 5.15.0 it exited 1 with "metric contributor identity is unavailable before execution starts". A real failure there no longer carries that reason as an extra cause.

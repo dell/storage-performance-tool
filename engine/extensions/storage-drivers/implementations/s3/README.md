@@ -284,6 +284,7 @@ Behavior, limits and log output are described in the CLI's
 | storage-object-tagging-enabled                 | Flag | false | Work (PUT/GET/DELETE) with object tagging or not (default)
 | storage-object-tagging-tags                    | Map  | {}    | Map of name-value tags, effective only for the `UPDATE` operation when tagging is enabled
 | storage-object-versioning                      | Flag | false | Specifies whether the versioning storage feature is used or not. When on, the driver checks each bucket at first use and enables versioning on it if it isn't enabled
+| storage-net-http-versioning                    | Flag | false | The Mongoose 3.x name for `storage-object-versioning`. Set to true, it turns `storage-object-versioning` on; set to false, it leaves it as it is. See [4.3.4](#434-mongoose-versioning-flag)
 | storage-checksum-enabled                       | Flag | false | Compute and send a checksum header on write requests. Applies to both simple PUTs and individual multipart upload parts.
 | storage-checksum-algorithm                     | String | md5 | S3 checksum algorithm: [md5, crc32, crc32c, sha1, sha256]. When multipart upload is active, the selected algorithm is applied per part.
 
@@ -422,6 +423,8 @@ docker run \
 Create request is the only versioning operation that doesn't require version-id by default. It just creates a new
 version for the same object. We can only retrieve the version-ids by specifying `item-input-file`. To create such file 
 make sure to enable `--storage-object-versioning` flag and specify `item-output-file` path. 
+Commands written for Mongoose 3.x can keep `--storage-net-http-versioning` instead, see
+[4.3.4](#434-mongoose-versioning-flag).
 
 #### 4.3.1. PUT versions
 
@@ -533,6 +536,32 @@ docker run \
     --item-input-file=itemsWithVersionsList.csv \
     --storage-object-versioning=true
 ```
+
+#### 4.3.4. Mongoose versioning flag
+
+Mongoose 3.x turns on S3 versioning with `--storage-net-http-versioning=true`. The engine accepts that flag as a
+synonym with the S3 driver types `s3`, `s3-rdma`, `s3-tables` and `s3-aws`, from the command line, a scenario's
+`.config()` or `.append()`, and posted defaults (`spt run --engine-override storage.net.http.versioning=true`). It sets
+`storage-object-versioning` to true on the step configuration before the step starts, so the step's `config.yaml`
+shows both keys true and every worker in a distributed run gets the setting. The engine logs a notice once:
+
+```
+The argument "storage-net-http-versioning" is the Mongoose name for S3 versioning, use "storage-object-versioning" instead
+```
+
+Either flag set to true turns versioning on. The synonym set to false, or not set, changes nothing: it never turns
+`storage-object-versioning` off. What versioning then does depends on the driver:
+
+* `s3` and `s3-rdma` check each bucket's versioning at first use, enable it if it is off, and leave it on after the
+  run. Written items are named `key~versionId`.
+* `s3-aws` only splits `key~versionId` input names into the key and the version. It sends no bucket versioning
+  request, and written items keep plain names.
+* `s3-tables` manages its own paths, so the setting has no effect.
+
+With `--storage-driver-type=swift` the flag keeps its Swift meaning and doesn't set `storage-object-versioning`.
+
+The synonym is loopback-qualified: it was tested against a local fake S3 target that answers `?versioning`, not a
+real one. The versioned requests it turns on are the ones `storage-object-versioning` already sends.
 
 ### 4.4. Multipart Upload
 
