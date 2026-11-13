@@ -1394,8 +1394,10 @@ func resolveRunCompletionError(
 			params.Cleanup &&
 			outcome.Tracker.FinalState == constants.StateFailed &&
 			scenario.IsSeededDeleteCleanupStepID(outcome.Tracker.FailureStepID)
+		stepFailureReported := outcome.Tracker != nil &&
+			outcome.Tracker.FinalState == constants.StateFailed && !cleanupOnlyFailure
 		// A failed step is the cause, and the incomplete metrics below are usually its consequence.
-		if outcome.Tracker != nil && outcome.Tracker.FinalState == constants.StateFailed && !cleanupOnlyFailure {
+		if stepFailureReported {
 			reasons = append(reasons, fmt.Sprintf(
 				"step %s failed (%s): %s",
 				outcome.Tracker.FailureStepID,
@@ -1429,7 +1431,11 @@ func resolveRunCompletionError(
 			return runErr
 		}
 		if runErr != nil {
-			reasons = append(reasons, "run also failed: "+runErr.Error())
+			if unreported := unreportedDeletePresenterFailures(
+				runErr, stepFailureReported, outcome.DeleteTerminalErr != nil,
+			); unreported != "" {
+				reasons = append(reasons, "run also failed: "+unreported)
+			}
 			causes = append(causes, runErr)
 		}
 		return &ExitCodeError{
@@ -1438,6 +1444,63 @@ func resolveRunCompletionError(
 		}
 	}
 	return resolveVerificationRunError(runErr, outcome, received, params)
+}
+
+// unreportedDeletePresenterFailures returns, on one line, the presenter failures in runErr that a
+// DELETE run's reasons don't already state. Whichever completion signal arrives first, the
+// presenter can restate two of them: its reflection of the engine's FAILED status repeats the
+// failed step the tracker reported, and its live DELETE verdict repeats the verdict auto-results
+// read from the stored DELETE metrics. Only leaves are matched, by exact type, so every other
+// failure a join holds is kept.
+func unreportedDeletePresenterFailures(runErr error, stepFailureReported, verdictReported bool) string {
+	leaves := joinedErrorLeaves(runErr)
+	unreported := make([]string, 0, len(leaves))
+	for _, leaf := range leaves {
+		if stepFailureReported && isExactly[*runcontrol.OwnedEngineTerminalFailure](leaf) ||
+			verdictReported && isExactly[*runcontrol.DeleteTerminalPolicyFailure](leaf) {
+			continue
+		}
+		unreported = append(unreported, leaf.Error())
+	}
+	return strings.Join(unreported, "; ")
+}
+
+// isExactly reports whether err is itself a T. A wrapper's text adds to the T it wraps, and it may
+// wrap other failures with it, so it does not count.
+func isExactly[T error](err error) bool {
+	_, wraps := err.(interface{ Unwrap() error })
+	_, joins := err.(interface{ Unwrap() []error })
+	var target T
+	return !wraps && !joins && errors.As(err, &target)
+}
+
+// joinedErrorLeaves flattens the errors.Join tree in err, in order. Any other error is one leaf,
+// because its text adds to what it wraps; that includes fmt.Errorf with more than one %w, whose
+// text is not just its children's.
+func joinedErrorLeaves(err error) []error {
+	if err == nil {
+		return nil
+	}
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return []error{err}
+	}
+	children := joined.Unwrap()
+	texts := make([]string, 0, len(children))
+	for _, child := range children {
+		if child == nil {
+			return []error{err}
+		}
+		texts = append(texts, child.Error())
+	}
+	if len(children) == 0 || strings.Join(texts, "\n") != err.Error() {
+		return []error{err}
+	}
+	var leaves []error
+	for _, child := range children {
+		leaves = append(leaves, joinedErrorLeaves(child)...)
+	}
+	return leaves
 }
 
 // uniqueStepIDs merges ordered slices of step IDs, removing duplicates and empty entries.
