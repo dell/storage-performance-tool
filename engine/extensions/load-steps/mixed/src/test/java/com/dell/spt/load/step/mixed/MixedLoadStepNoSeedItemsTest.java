@@ -30,9 +30,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.ThreadContext;
 import org.junit.jupiter.api.AfterEach;
@@ -74,9 +76,13 @@ class MixedLoadStepNoSeedItemsTest {
 		new MixedLoadStepClient(stepConfig(stepId, 0, 0), extensions(), null, metrics()).run();
 
 		final long elapsedSec = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - startNanos);
-		final Set<String> created = drivers.names(OpType.CREATE);
-		final Set<String> deleted = drivers.names(OpType.DELETE);
+		final List<String> createCalls = drivers.names(OpType.CREATE);
+		final List<String> deleteCalls = drivers.names(OpType.DELETE);
+		final Set<String> created = Set.copyOf(createCalls);
+		final Set<String> deleted = Set.copyOf(deleteCalls);
 		assertTrue(elapsedSec < TIME_LIMIT_SEC / 2, "the count limit, not the time limit, ended the step: " + elapsedSec + " s");
+		assertEquals(createCalls.size(), created.size(), "each PUT creates a new item");
+		assertEquals(deleteCalls.size(), deleted.size(), "no item is deleted twice");
 		assertTrue(created.size() + deleted.size() >= COUNT_LIMIT, created.size() + " + " + deleted.size() + " reach the count limit");
 		assertTrue(!deleted.isEmpty() && deleted.size() <= created.size(), deleted.size() + " deleted of " + created.size() + " created");
 		assertTrue(created.containsAll(deleted), "a DELETE deletes only an item the step created");
@@ -153,10 +159,11 @@ class MixedLoadStepNoSeedItemsTest {
 
 		static final String TYPE = "counting-mock";
 
-		private final Map<OpType, Set<String>> names = new ConcurrentHashMap<>();
+		private final Map<OpType, Queue<String>> names = new ConcurrentHashMap<>();
 
-		Set<String> names(final OpType type) {
-			return names.getOrDefault(type, Set.of());
+		/** The item names of the accepted operations of a type, one per operation, so a repeat shows. */
+		List<String> names(final OpType type) {
+			return List.copyOf(names.getOrDefault(type, new ConcurrentLinkedQueue<>()));
 		}
 
 		Set<OpType> types() {
@@ -190,7 +197,7 @@ class MixedLoadStepNoSeedItemsTest {
 				final Operation op = call.getArgument(0);
 				final boolean accepted = (boolean) call.callRealMethod();
 				if (accepted) {
-					names.computeIfAbsent(op.type(), type -> ConcurrentHashMap.newKeySet()).add(op.item().name());
+					names.computeIfAbsent(op.type(), type -> new ConcurrentLinkedQueue<>()).add(op.item().name());
 				}
 				return accepted;
 			}).when(driver).put(any(Operation.class));
