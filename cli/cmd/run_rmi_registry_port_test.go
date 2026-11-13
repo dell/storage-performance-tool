@@ -7,6 +7,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/tui"
 	"github.com/dell/storage-performance-tool/cli/tui/headless"
+	"github.com/spf13/cobra"
 )
 
 func TestRunRMIRegistryPortFlagDefaultsToEngineRegistryPort(t *testing.T) {
@@ -66,17 +68,22 @@ func TestBuildScenarioParamsRMIRegistryPort(t *testing.T) {
 	}
 }
 
-func TestRunCmdRMIRegistryPortReachesOnlyTheLocalRoute(t *testing.T) {
+func TestRunCmdRMIRegistryPortReachesEveryRoute(t *testing.T) {
 	tests := []struct {
 		name, hosts, minHosts, port string
-		wantLocal, wantPort         int
+		wantLocal, wantRemote       int
+		wantConnect, wantPort       int
 		wantParamPort               int
-		wantErr                     string
+		wantOrchestratorPort        int
 	}{
 		{name: "local default", hosts: "127.0.0.1", minHosts: "1", port: "1099", wantLocal: 1, wantPort: 1},
 		{name: "local custom", hosts: "127.0.0.1", minHosts: "1", port: "41099", wantLocal: 1, wantPort: 1, wantParamPort: 41099},
-		{name: "lone remote rejected", hosts: "entry.example", minHosts: "1", port: "41099", wantErr: "applies only to local single-host runs"},
-		{name: "distributed rejected", hosts: "entry.example,worker.example", minHosts: "2", port: "41099", wantErr: "applies only to local single-host runs"},
+		{name: "lone remote default", hosts: "entry.example", minHosts: "1", port: "1099",
+			wantRemote: 1, wantConnect: 1, wantOrchestratorPort: 1099},
+		{name: "lone remote custom", hosts: "entry.example", minHosts: "1", port: "11099",
+			wantRemote: 1, wantConnect: 1, wantParamPort: 11099, wantOrchestratorPort: 11099},
+		{name: "distributed custom", hosts: "entry.example,worker.example", minHosts: "2", port: "11099",
+			wantRemote: 1, wantConnect: 1, wantParamPort: 11099, wantOrchestratorPort: 11099},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -99,8 +106,12 @@ func TestRunCmdRMIRegistryPortReachesOnlyTheLocalRoute(t *testing.T) {
 				portCalls++
 				return &portcheck.ResolutionResult{Success: true}, nil
 			}
-			connectMultiHostOrchestratorFunc = func(context.Context, *tui.MultiHostOrchestrator) error {
+			connectMultiHostOrchestratorFunc = func(_ context.Context, orchestrator *tui.MultiHostOrchestrator) error {
 				connectCalls++
+				// The hosts connect, and their ports are checked, on the run's registry port.
+				if got := orchestrator.RMIRegistryPort(); got != test.wantOrchestratorPort {
+					t.Fatalf("orchestrator RMI registry port at connect = %d, want %d", got, test.wantOrchestratorPort)
+				}
 				return nil
 			}
 			errRouteComplete := errors.New("route inspected")
@@ -115,24 +126,74 @@ func TestRunCmdRMIRegistryPortReachesOnlyTheLocalRoute(t *testing.T) {
 				return errRouteComplete
 			}
 			startMultiHostHeadlessRunFunc = func(
-				*tui.MultiHostOrchestrator, string, string, scenario.Params, headless.HeadlessOptions,
+				orchestrator *tui.MultiHostOrchestrator, _ string, _ string, params scenario.Params,
+				options headless.HeadlessOptions,
 			) error {
 				remoteCalls++
-				return errors.New("remote launch must remain unreachable")
+				if params.RMIRegistryPort != test.wantParamPort {
+					t.Fatalf("remote RMIRegistryPort = %d, want %d", params.RMIRegistryPort, test.wantParamPort)
+				}
+				if got := orchestrator.RMIRegistryPort(); got != test.wantOrchestratorPort {
+					t.Fatalf("orchestrator RMI registry port = %d, want %d", got, test.wantOrchestratorPort)
+				}
+				options.LaunchHooks.NotifySubmitted()
+				return errRouteComplete
 			}
 
 			err := runCmd.RunE(runCmd, []string{WorkloadTypeDelete})
-			if test.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
-					t.Fatalf("RunE() error = %v, want %q", err, test.wantErr)
-				}
-			} else if !errors.Is(err, errRouteComplete) {
+			if !errors.Is(err, errRouteComplete) {
 				t.Fatalf("RunE() error = %v, want route sentinel", err)
 			}
-			if localCalls != test.wantLocal || remoteCalls != 0 || connectCalls != 0 || portCalls != test.wantPort {
-				t.Fatalf("route calls local=%d remote=%d connect=%d port=%d, want %d/0/0/%d",
-					localCalls, remoteCalls, connectCalls, portCalls, test.wantLocal, test.wantPort)
+			if localCalls != test.wantLocal || remoteCalls != test.wantRemote ||
+				connectCalls != test.wantConnect || portCalls != test.wantPort {
+				t.Fatalf("route calls local=%d remote=%d connect=%d port=%d, want %d/%d/%d/%d",
+					localCalls, remoteCalls, connectCalls, portCalls,
+					test.wantLocal, test.wantRemote, test.wantConnect, test.wantPort)
 			}
 		})
+	}
+}
+
+// Ticket 01: a distributed run whose engines never serve the requested API port fails its start
+// with the API wait error (TestDistributedRunFailsWhenTheAPIWaitFails), and spt run exits 1.
+func TestRunCmdExitsOneWhenTheDistributedAPIWaitFails(t *testing.T) {
+	t.Chdir(t.TempDir())
+	setDeleteRouteFlags(t, "entry.example,worker.example", "2")
+	setGlobalRunFlagForTest(t, "api-port", "19300")
+
+	previousConnect := connectMultiHostOrchestratorFunc
+	previousRemote := startMultiHostHeadlessRunFunc
+	t.Cleanup(func() {
+		connectMultiHostOrchestratorFunc = previousConnect
+		startMultiHostHeadlessRunFunc = previousRemote
+	})
+	connectMultiHostOrchestratorFunc = func(context.Context, *tui.MultiHostOrchestrator) error { return nil }
+	waitErr := fmt.Errorf("failed waiting for APIs after distributed start: %w",
+		errors.New("insufficient APIs ready: 0/2 (need 2)"))
+	var launches int
+	startMultiHostHeadlessRunFunc = func(
+		*tui.MultiHostOrchestrator, string, string, scenario.Params, headless.HeadlessOptions,
+	) error {
+		launches++
+		// The headless runner returns the start error as it is.
+		return waitErr
+	}
+
+	command := &cobra.Command{
+		Use:           "run",
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		RunE: func(*cobra.Command, []string) error {
+			return runCmd.RunE(runCmd, []string{WorkloadTypeDelete})
+		},
+	}
+	if code := executeCommandCode(command); code != 1 {
+		t.Fatalf("exit status = %d, want 1", code)
+	}
+	if launches != 1 {
+		t.Fatalf("launches = %d, want 1", launches)
+	}
+	if err := runCmd.RunE(runCmd, []string{WorkloadTypeDelete}); !errors.Is(err, waitErr) {
+		t.Fatalf("RunE() error = %v, want the API wait failure", err)
 	}
 }

@@ -2,6 +2,7 @@ package com.dell.spt.storage.driver.coop.nio;
 
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.concurrent.Task;
+import com.dell.spt.base.concurrent.TaskBase;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
@@ -18,6 +19,7 @@ import com.github.akurilov.confuse.impl.BasicConfig;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -285,6 +287,112 @@ public class NioStorageDriverBaseTest {
 				assertEquals(0, drv.operationLifecycle().snapshot().inFlight());
 			}
 		}
+	}
+
+	@Test
+	@Timeout(30)
+	void anInterruptedCloseOfAStartedDriverCompletesAndEndsEveryWorker() throws Exception {
+		assertInterruptedCloseCompletes(false);
+	}
+
+	@Test
+	@Timeout(30)
+	void anInterruptedCloseOfAStoppedDriverCompletesAndEndsEveryWorker() throws Exception {
+		assertInterruptedCloseCompletes(true);
+	}
+
+	/**
+	 * Closes a driver on an interrupted thread: the close runs to the end without throwing, the
+	 * interrupt is still set afterwards and every I/O worker's thread has ended.
+	 */
+	private void assertInterruptedCloseCompletes(final boolean stopFirst) throws Exception {
+		final var drv = newDriver(buildStorageConfig(4, 2));
+		try {
+			drv.start();
+			assertTrue(drv.put(newCreateOp("interrupted-close", 256)));
+			assertNotNull(results.await(2_000));
+			final var workerThreads = workerThreadsOf(drv);
+			assertEquals(2, workerThreads.size());
+			if (stopFirst) {
+				drv.stop();
+			}
+
+			Thread.currentThread().interrupt();
+			final var closeFailure = thrownBy(drv::close);
+			final var stillInterrupted = Thread.interrupted();
+
+			assertNull(closeFailure, () -> "close on an interrupted thread threw " + closeFailure);
+			assertTrue(stillInterrupted, "close must keep the caller's interrupt");
+			assertTrue(drv.isClosed());
+			assertWorkerTaskRegistryCleared(drv);
+			for (final var thread : workerThreads) {
+				thread.join(2_000);
+				assertFalse(thread.isAlive(), "I/O worker " + thread + " still runs after the close");
+			}
+		} finally {
+			Thread.interrupted();
+			drv.close();
+		}
+	}
+
+	@Test
+	@Timeout(30)
+	void aStopOnAnInterruptedThreadKeepsItsBoundForAWorkerThatIgnoresTheStop() throws Exception {
+		final var drv = new StuckInvokeDriver("test-nio-stuck", dataInput, buildStorageConfig(1, 1), false, 16);
+		drv.operationResultOutput(results);
+		try {
+			drv.start();
+			assertTrue(drv.put(newCreateOp("stuck", 256)));
+			assertTrue(drv.invokeEntered.await(2, TimeUnit.SECONDS));
+
+			Thread.currentThread().interrupt();
+			final long startedAt = System.nanoTime();
+			final var stopFailure = thrownBy(drv::stop);
+			final long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+			final var stillInterrupted = Thread.interrupted();
+
+			// A worker that outlives the stop wait still fails the stop, as before.
+			assertInstanceOf(IllegalStateException.class, stopFailure, () -> "the stop threw " + stopFailure);
+			assertTrue(stopFailure.getMessage().contains("NIO worker termination"), stopFailure.getMessage());
+			assertTrue(stillInterrupted, "the stop must keep the caller's interrupt");
+			assertTrue(elapsedMillis >= 900, "the interrupt must not skip the wait, which took " + elapsedMillis + " ms");
+			assertTrue(elapsedMillis < 2500, "the wait keeps its one-second bound but took " + elapsedMillis + " ms");
+		} finally {
+			Thread.interrupted();
+			drv.releaseInvoke.countDown();
+			drv.close();
+		}
+	}
+
+	/** What {@code call} threw, or null; it does not touch the interrupt flag. */
+	private static Throwable thrownBy(final org.junit.jupiter.api.function.Executable call) {
+		try {
+			call.execute();
+			return null;
+		} catch (final Throwable t) {
+			return t;
+		}
+	}
+
+	/** The thread of every I/O worker, once each has started. */
+	@SuppressWarnings("unchecked")
+	private static List<Thread> workerThreadsOf(final NioStorageDriverBase<?, ?> driver) throws Exception {
+		final var workersField = NioStorageDriverBase.class.getDeclaredField("ioWorkers");
+		workersField.setAccessible(true);
+		final var threadField = TaskBase.class.getDeclaredField("taskThread");
+		threadField.setAccessible(true);
+		final var threads = new ArrayList<Thread>();
+		for (final var worker : List.copyOf((List<Task>) workersField.get(driver))) {
+			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+			var thread = (Thread) threadField.get(worker);
+			while (thread == null && System.nanoTime() < deadline) {
+				Thread.sleep(1);
+				thread = (Thread) threadField.get(worker);
+			}
+			assertNotNull(thread, "I/O worker " + worker + " started");
+			threads.add(thread);
+		}
+		return threads;
 	}
 
 	@Test
@@ -1422,6 +1530,34 @@ public class NioStorageDriverBaseTest {
 
 		void releaseInvokes() {
 			releaseInvoke.countDown();
+		}
+	}
+
+	/** Holds its first invocation, ignoring interrupts, until released: a worker that outlives a stop. */
+	static final class StuckInvokeDriver extends NioStorageDriverMock<DataItemImpl, Operation<DataItemImpl>> {
+		private final CountDownLatch invokeEntered = new CountDownLatch(1);
+		private final CountDownLatch releaseInvoke = new CountDownLatch(1);
+
+		StuckInvokeDriver(
+						final String testStepName,
+						final DataInput dataInput,
+						final Config storageConfig,
+						final boolean verifyFlag,
+						final int batchSize) throws Exception {
+			super(testStepName, dataInput, storageConfig, verifyFlag, batchSize);
+		}
+
+		@Override
+		protected void invokeNio(final Operation<DataItemImpl> op) {
+			invokeEntered.countDown();
+			while (releaseInvoke.getCount() > 0) {
+				try {
+					releaseInvoke.await();
+				} catch (final InterruptedException ignored) {
+					// Hold the worker past its stop, as a request that ignores interrupts does.
+				}
+			}
+			super.invokeNio(op);
 		}
 	}
 

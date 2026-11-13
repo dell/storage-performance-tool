@@ -7,7 +7,7 @@ useful to `read` or `update` the same items multiple times each.
 
 **Example**:
 ```bash
-java -jar spt-<VERSION>.jar --read --load-op-recycle --item-input-file=items.csv ...
+java -jar spt-<VERSION>.jar --read --load-op-recycle-mode --item-input-file=items.csv ...
 ```
 
 **Note**:

@@ -122,56 +122,182 @@ task assembleDist {
 	}
 }
 
-// Task to create a runnable script
+// The SPT image defines the engine's default JVM options: the X86_JAVA_OPTS and DEFAULT_JAVA_OPTS
+// lines of docker/entrypoint.sh, and the Dockerfile's GLIBC_TUNABLES. createRunScript generates
+// run.sh and run.bat from them, and verifyLauncherJavaOptions checks the launchers against the image.
+def imageEntrypoint = layout.projectDirectory.file('docker/entrypoint.sh')
+def imageDockerfile = layout.projectDirectory.file('Dockerfile')
+// The image's one Java-version-conditional option. The launchers leave it out: Java 21 refuses it.
+def launcherOmittedJavaOption = '-XX:+UseCompactObjectHeaders'
+// Where DEFAULT_JAVA_OPTS places the x86-only options. The image passes them on x86_64, and the
+// launchers when the java they run accepts them.
+def imageX86JavaOptsReference = '${X86_JAVA_OPTS}'
+
+def readImageJavaOptions = {
+	def entrypoint = imageEntrypoint.asFile
+	def dockerfile = imageDockerfile.asFile
+	// Each value goes into a bash double-quoted string and a cmd "set", so only option characters pass.
+	def optionToken = ~/-[\w:+=.,\/-]+/
+	def oneValue = { File source, String what, String linePattern ->
+		def lines = source.readLines('UTF-8').findAll { it ==~ linePattern }
+		if (lines.size() != 1) {
+			throw new GradleException("${source}: expected one ${what} line, found ${lines.size()}")
+		}
+		return (lines[0] =~ linePattern)[0][1] as String
+	}
+	def tokens = { File source, String what, String value, List<String> references ->
+		def list = value.trim().split(/\s+/).findAll { it } as List<String>
+		def bad = list.findAll { !(it ==~ optionToken) && !references.contains(it) }
+		if (list.isEmpty() || bad) {
+			throw new GradleException("${source}: ${what} must be options separated by spaces; cannot read ${bad}")
+		}
+		return list
+	}
+
+	def entrypointLines = entrypoint.readLines('UTF-8')
+	if (entrypointLines.count { it.trim().startsWith('DEFAULT_JAVA_OPTS=') } != 1) {
+		throw new GradleException("${entrypoint}: DEFAULT_JAVA_OPTS must be assigned on one line")
+	}
+	def x86 = tokens(entrypoint, 'X86_JAVA_OPTS',
+		oneValue(entrypoint, 'x86_64) X86_JAVA_OPTS="..." ;;', /\s*x86_64\)\s+X86_JAVA_OPTS="([^"]*)"\s*;;\s*/), [])
+	def defaults = tokens(entrypoint, 'DEFAULT_JAVA_OPTS',
+		oneValue(entrypoint, 'DEFAULT_JAVA_OPTS="..."', /DEFAULT_JAVA_OPTS="([^"]*)"/), [imageX86JavaOptsReference])
+	[imageX86JavaOptsReference, launcherOmittedJavaOption].each { required ->
+		if (defaults.count(required) != 1) {
+			throw new GradleException("${entrypoint}: DEFAULT_JAVA_OPTS must contain ${required} once")
+		}
+	}
+	if (dockerfile.readLines('UTF-8').count { it ==~ /\s*ENV\s+GLIBC_TUNABLES\b.*/ } != 1) {
+		throw new GradleException("${dockerfile}: GLIBC_TUNABLES must be set on one ENV line")
+	}
+	def glibcTunables = oneValue(dockerfile, 'ENV GLIBC_TUNABLES=...', /ENV GLIBC_TUNABLES=([\w.=:]+)/)
+	return [x86JavaOptions: x86, defaultJavaOptions: defaults, glibcTunables: glibcTunables]
+}
+
+// The image's default options on a machine with (x86 true) or without the x86-only options.
+def imageJavaOptions = { Map image, boolean x86 ->
+	image.defaultJavaOptions.collectMany { it == imageX86JavaOptsReference ? (x86 ? image.x86JavaOptions : []) : [it] }
+}
+
+// The launchers' default options, with x86Reference where the image places the x86-only options.
+def launcherJavaOptions = { Map image, String x86Reference ->
+	image.defaultJavaOptions.findAll { it != launcherOmittedJavaOption }
+		.collect { it == imageX86JavaOptsReference ? x86Reference : it }
+}
+
+// Task to create the run scripts
 task createRunScript {
+	group = 'distribution'
+	description = 'Generates run.sh and run.bat with the default JVM options of the SPT image'
 	dependsOn assembleDist
 	def outputDir = layout.buildDirectory.dir("dist").get().asFile
-	
+	inputs.files(imageEntrypoint, imageDockerfile)
+	outputs.files(new File(outputDir, 'run.sh'), new File(outputDir, 'run.bat'))
+
 	doLast {
+		def image = readImageJavaOptions()
+		def x86Options = image.x86JavaOptions.join(' ')
+
 		def scriptFile = new File(outputDir, "run.sh")
 		scriptFile.text = '''#!/bin/bash
 # Spt run script
-
-# Get the directory where this script is located
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-
-# Default JVM options for Spt (JDK 21+)
+#
+# Starts the engine with the default JVM options of the SPT image, which are listed below, with
+# two differences:
+# - The image also passes -XX:+UseCompactObjectHeaders, which this script leaves out: Java 21
+#   refuses it.
+# - -XX:UseAVX=2 exists only on x86 JVMs, and an arm64 JVM refuses it and doesn't start. This
+#   script passes it only when the java on PATH accepts it.
+# The engine needs Java 21 or later; the image runs Java 25.
+#
+# Default JVM options:
 # - ZGC: sub-millisecond GC pauses; avoids GC jitter in latency measurements
-# - Xmx 4g: bounded heap for Java objects (GC works best with a defined ceiling)
+# - Xms 1g, Xmx 4g: bounded heap for Java objects (GC works best with a defined ceiling)
 # - MaxDirectMemorySize 64g: separate ceiling for off-heap ByteBuffers (RDMA/NIO);
 #   allocated on demand so this limit is safe even on smaller machines
 # - AlwaysPreTouch: pre-fault heap pages at startup to eliminate page faults during runs
 # - UseNUMA: NUMA-aware allocation for multi-socket servers
 # - Xshare:off: disable CDS to prevent SIGBUS when JDK/JAR resides on NFS
-# - UseAVX=2: avoid AVX-512 EVEX glibc code paths with known SIGBUS crashes
+# - UseAVX=2 (x86 JVMs only): avoid AVX-512 EVEX glibc code paths with known SIGBUS crashes
 # - DoJVMTIVirtualThreadTransitions: skip JVMTI mount/unmount notifications on every
 #   VirtualThread context switch; reduces per-op overhead when no debugging agent is attached
 # - sun.rmi.transport.tcp.responseTimeout: bounds how long the entry node's socket read
 #   waits for a reply to a distributed-coordination RMI call. Defaults to 0 (wait forever)
 #   in the JDK; without this, a transient network stall on the RMI connection hangs the
 #   whole run indefinitely instead of failing fast into the existing retry path.
-# Override: SPT_JAVA_OPTS="-Xmx8g" ./run.sh ...
-SPT_JAVA_OPTS="${SPT_JAVA_OPTS:--XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA -Xshare:off -XX:UseAVX=2 -XX:+UnlockExperimentalVMOptions -XX:-DoJVMTIVirtualThreadTransitions -Dsun.rmi.transport.tcp.responseTimeout=10000}"
+#
+# SPT_JAVA_OPTS adds options after the defaults, and when an option is given twice the JVM uses
+# the later one. For example, SPT_JAVA_OPTS="-Xmx8g" ./run.sh ... runs with an 8 GiB heap and
+# every other default. To pick another garbage collector, turn ZGC off first:
+# SPT_JAVA_OPTS="-XX:-UseZGC -XX:+UseG1GC". A maximum heap below 1 GiB needs a matching -Xms.
+# This script reads SPT_JAVA_OPTS, not JAVA_OPTS. To run without the defaults, start
+# java <options> -jar spt.jar yourself.
+#
+# Unless GLIBC_TUNABLES is set, even to empty, this script sets it to @GLIBC_TUNABLES@,
+# as the image does, to ask glibc's malloc for huge pages. glibc before 2.35 and musl ignore it.
+#
+# The script replaces itself with the JVM, so a signal sent to its process reaches the engine.
+
+# Get the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+# Ask the java below, without the caller's JAVA_TOOL_OPTIONS, JDK_JAVA_OPTIONS and _JAVA_OPTIONS,
+# whether it accepts the x86-only options.
+SPT_X86_JAVA_OPTS=""
+if (unset JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS _JAVA_OPTIONS; java @X86_JAVA_OPTS@ -version) >/dev/null 2>&1; then
+	SPT_X86_JAVA_OPTS="@X86_JAVA_OPTS@"
+fi
+SPT_DEFAULT_JAVA_OPTS="@DEFAULT_JAVA_OPTS@"
+
+export GLIBC_TUNABLES="${GLIBC_TUNABLES-@GLIBC_TUNABLES@}"
 
 # Run Spt with all arguments passed to this script
-java $SPT_JAVA_OPTS -jar "$SCRIPT_DIR/spt.jar" "$@"
+# shellcheck disable=SC2086 # the option variables are lists of options
+exec java $SPT_DEFAULT_JAVA_OPTS $SPT_JAVA_OPTS -jar "$SCRIPT_DIR/spt.jar" "$@"
 '''
+			.replace('@DEFAULT_JAVA_OPTS@', launcherJavaOptions(image, '${SPT_X86_JAVA_OPTS}').join(' '))
+			.replace('@X86_JAVA_OPTS@', x86Options)
+			.replace('@GLIBC_TUNABLES@', image.glibcTunables)
 		scriptFile.setExecutable(true)
-		
-		// Also create a Windows batch file
+
+		// Also create a Windows batch file. cmd reads it with CRLF line endings; it has no labels
+		// or blocks, and java is its last command, so java's exit code is the script's.
 		def batchFile = new File(outputDir, "run.bat")
-		batchFile.text = """@echo off
+		def batchText = '''@echo off
 rem Spt run script for Windows
+rem
+rem Starts the engine with the default JVM options of the SPT image, as run.sh does. The image
+rem also passes -XX:+UseCompactObjectHeaders, which this script leaves out: Java 21 refuses it.
+rem -XX:UseAVX=2 exists only on x86 JVMs: this script passes it only when the java on PATH
+rem accepts it. The engine needs Java 21 or later; the image runs Java 25.
+rem
+rem SPT_JAVA_OPTS adds options after the defaults, and when an option is given twice the JVM
+rem uses the later one, for example: set SPT_JAVA_OPTS=-Xmx8g
+rem To pick another garbage collector, turn ZGC off first:
+rem set SPT_JAVA_OPTS=-XX:-UseZGC -XX:+UseG1GC
+setlocal
 
 rem Get the directory where this script is located
-set SCRIPT_DIR=%~dp0
+set "SCRIPT_DIR=%~dp0"
 
-rem Default JVM options for Spt (JDK 21+)
-if not defined SPT_JAVA_OPTS set SPT_JAVA_OPTS=-XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -Xshare:off -XX:UseAVX=2 -XX:+UnlockExperimentalVMOptions -XX:-DoJVMTIVirtualThreadTransitions
+rem Ask the java below, without the caller's JAVA_TOOL_OPTIONS, JDK_JAVA_OPTIONS and
+rem _JAVA_OPTIONS, whether it accepts the x86-only options. call returns here when java is a
+rem batch file, such as a version manager's shim.
+setlocal
+set "JAVA_TOOL_OPTIONS="
+set "JDK_JAVA_OPTIONS="
+set "_JAVA_OPTIONS="
+set "SPT_X86_JAVA_OPTS="
+call java @X86_JAVA_OPTS@ -version >nul 2>&1 && set "SPT_X86_JAVA_OPTS=@X86_JAVA_OPTS@"
+endlocal & set "SPT_X86_JAVA_OPTS=%SPT_X86_JAVA_OPTS%"
+set "SPT_DEFAULT_JAVA_OPTS=@DEFAULT_JAVA_OPTS@"
 
 rem Run Spt with all arguments passed to this script
-java %SPT_JAVA_OPTS% -jar "%SCRIPT_DIR%spt.jar" %*
-"""
+java %SPT_DEFAULT_JAVA_OPTS% %SPT_JAVA_OPTS% -jar "%SCRIPT_DIR%spt.jar" %*
+'''
+			.replace('@DEFAULT_JAVA_OPTS@', launcherJavaOptions(image, '%SPT_X86_JAVA_OPTS%').join(' '))
+			.replace('@X86_JAVA_OPTS@', x86Options)
+		batchFile.setText(batchText.replace('\n', '\r\n'), 'US-ASCII')
 	}
 }
 
@@ -211,7 +337,6 @@ task createVSCodeLaunch {
 			"request": "launch",
 			"mainClass": "com.dell.spt.base.Main",
 			"projectName": "spt-base",
-			"args": "--help",
 			"cwd": "\${workspaceFolder}/bundle/build/dist",
 			"classPaths": [
 				"\${workspaceFolder}/bundle/build/dist/spt.jar",
@@ -631,6 +756,126 @@ tasks.register('verifyEngineBuildInfoCanary') {
 	}
 }
 
+// The netty-mock driver completes each operation inside sendRequest. If that completion ever
+// sends the next queued operation itself (direct dispatch), a long run at concurrency 1 recurses
+// until the stack overflows, strands operations and never reaches its count. The build-info
+// canary's single operation cannot show that; this count can, and the hard timeout turns the
+// hang into a failure.
+tasks.register('verifyNettyMockCountLimitCanary') {
+	group = 'verification'
+	description = 'Runs a count-limited netty-mock Load from the packaged engine under a hard timeout'
+	dependsOn assembleDist
+
+	inputs.file(file("${distDir}/${sptJar}"))
+	inputs.dir(file("${distDir}/ext"))
+	def canaryRootProvider = layout.buildDirectory.dir('netty-mock-count-limit-canary')
+	outputs.dir(canaryRootProvider)
+
+	doLast {
+		def opCount = 300000
+		def timeoutSec = 60
+		def stepId = 'netty-mock-count-limit-canary'
+		def doneMarker = 'NETTY_MOCK_COUNT_LIMIT_CANARY_DONE'
+		def canaryRoot = canaryRootProvider.get().asFile
+		delete canaryRoot
+		canaryRoot.mkdirs()
+		def javaExecutable = new File(
+			System.getProperty('java.home'),
+			'bin/java' + (System.getProperty('os.name').toLowerCase().contains('win') ? '.exe' : '')
+		).absolutePath
+		def reservePort = {
+			def socket = new java.net.ServerSocket(0)
+			try {
+				return socket.localPort
+			} finally {
+				socket.close()
+			}
+		}
+		def runPort = reservePort()
+		def nodePort = reservePort()
+		while (nodePort == runPort) {
+			nodePort = reservePort()
+		}
+		def scenarioFile = new File(canaryRoot, 'count-limit.js')
+		scenarioFile.setText("Load.run();\nprint('${doneMarker}');\n", 'UTF-8')
+		def scenarioHome = new File(canaryRoot, 'home')
+		def scenarioLog = new File(canaryRoot, 'output')
+		def outputFile = new File(canaryRoot, 'engine.out.log')
+		def builder = new ProcessBuilder(
+			javaExecutable,
+			'-jar',
+			file("${distDir}/${sptJar}").absolutePath,
+			"--run-scenario=${scenarioFile.absolutePath}",
+			"--run-port=${runPort}",
+			"--load-step-node-port=${nodePort}",
+			'--storage-driver-type=netty-mock',
+			'--storage-driver-limit-concurrency=1',
+			'--item-data-size=1KiB',
+			"--load-op-limit-count=${opCount}",
+			"--load-step-id=${stepId}")
+		builder.directory(file(distDir))
+		builder.environment().put('SPT_HOME', scenarioHome.absolutePath)
+		builder.environment().put('SPT_LOG_DIR', scenarioLog.absolutePath)
+		builder.redirectErrorStream(true)
+		builder.redirectOutput(outputFile)
+		def process = builder.start()
+		// A Gradle JVM that exits mid-task, such as a daemon told to stop, skips the finally below.
+		def stopOnExit = new Thread({ process.destroyForcibly() } as Runnable, 'netty-mock-canary-stop')
+		Runtime.runtime.addShutdownHook(stopOnExit)
+		try {
+			if (!process.waitFor(timeoutSec, java.util.concurrent.TimeUnit.SECONDS)) {
+				throw new GradleException(
+					"Packaged netty-mock Load of ${opCount} operations did not finish within ${timeoutSec} s:\n"
+						+ outputFile.getText('UTF-8'))
+			}
+		} finally {
+			// Also reached when the build is cancelled: the interrupted wait throws.
+			if (process.isAlive()) {
+				process.destroy()
+				if (!process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
+					process.destroyForcibly()
+					process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+				}
+			}
+			try {
+				Runtime.runtime.removeShutdownHook(stopOnExit)
+			} catch (IllegalStateException ignored) {
+				// The JVM is already exiting, and the hook stops the engine.
+			}
+		}
+		def output = outputFile.getText('UTF-8')
+		if (process.exitValue() != 0 || output.count(doneMarker) != 1 || output.contains('StackOverflowError')) {
+			throw new GradleException(
+				"Packaged netty-mock count-limited Load failed (exit ${process.exitValue()}):\n${output}")
+		}
+
+		// The first column is a quoted timestamp with a comma in it.
+		def csvRows = { File csv ->
+			def splitter = /,(?=(?:[^"]*"[^"]*")*[^"]*$)/
+			def lines = csv.isFile() ? csv.readLines('UTF-8').findAll { !it.isBlank() } : []
+			if (lines.isEmpty()) {
+				throw new GradleException("Packaged netty-mock Load wrote no ${csv}:\n${output}")
+			}
+			def header = lines.head().split(splitter) as List
+			return lines.tail().collect { line -> [header, line.split(splitter) as List].transpose().collectEntries() }
+		}
+		def stepDir = new File(scenarioLog, "log/${stepId}")
+		def totals = csvRows(new File(stepDir, 'metrics.total.csv'))
+		if (totals.size() != 1
+				|| totals[0].OpType != 'CREATE'
+				|| totals[0].CountSucc != opCount.toString()
+				|| totals[0].CountFail != '0') {
+			throw new GradleException(
+				"Packaged netty-mock Load did not complete exactly ${opCount} operations: ${totals}")
+		}
+		// The totals row covers the whole step; metrics.csv has only the row written before the first
+		// completion, since the step ends well inside one metrics period.
+		if ((totals[0].ConcurrencyCurr as long) < 0 || (totals[0].ConcurrencyMean as double) < 0) {
+			throw new GradleException("Packaged netty-mock Load reported negative concurrency: ${totals}")
+		}
+	}
+}
+
 tasks.register('verifyImageMallocTunable') {
 	group = 'verification'
 	description = 'Checks that the image keeps the malloc setting RDMA pre-warm depends on'
@@ -640,6 +885,300 @@ tasks.register('verifyImageMallocTunable') {
 		def expected = 'ENV GLIBC_TUNABLES=glibc.malloc.hugetlb=1'
 		if (!dockerfile.asFile.readLines().any { it.trim() == expected }) {
 			throw new GradleException("engine/bundle/Dockerfile no longer sets '${expected}'; see cli/docs/S3_RDMA.md, Pre-warm")
+		}
+	}
+}
+
+// Runs the generated run.sh and the image's entrypoint with a stub java first on PATH, and compares
+// the options and environment each gives the JVM. run.sh may differ from the image only in leaving
+// out launcherOmittedJavaOption and in passing the x86-only options to a JVM that accepts them.
+// run.bat can't run here, so its option line and shape are read instead.
+tasks.register('verifyLauncherJavaOptions') {
+	group = 'verification'
+	description = 'Checks that run.sh and run.bat start the JVM with the default options of the SPT image'
+	dependsOn createRunScript
+	def runScript = file("${distDir}/run.sh")
+	def batchScript = file("${distDir}/run.bat")
+	inputs.files(runScript, batchScript, imageEntrypoint, imageDockerfile)
+	def workRootProvider = layout.buildDirectory.dir('launcher-java-options')
+	onlyIf('run.sh and the entrypoint need a POSIX shell') {
+		!System.getProperty('os.name').toLowerCase().contains('win')
+	}
+
+	doLast {
+		def image = readImageJavaOptions()
+		def workRoot = workRootProvider.get().asFile
+		delete workRoot
+		def stubDir = new File(workRoot, 'bin')
+		stubDir.mkdirs()
+		def stubJava = new File(stubDir, 'java')
+		stubJava.setText('''#!/bin/sh
+# Stub java: records its arguments and environment. A call ending in -version is the launcher's
+# probe, which succeeds when STUB_JAVA_X86=accept and none of the JVM's option variables is set.
+out="${STUB_JAVA_OUT:?}"
+last=""
+for arg in "$@"; do last="$arg"; done
+if [ "$last" = -version ]; then
+	echo probe >> "$out/probe.calls"
+	env > "$out/probe.env"
+	if [ "${STUB_JAVA_X86:-}" = accept ] && [ -z "${JAVA_TOOL_OPTIONS+x}${JDK_JAVA_OPTIONS+x}${_JAVA_OPTIONS+x}" ]; then
+		exit 0
+	fi
+	echo "Unrecognized VM option '$1'" >&2
+	exit 1
+fi
+printf '%s\\n' "$@" > "$out/launch.args"
+env > "$out/launch.env"
+if [ "${STUB_JAVA_WAIT:-}" = 1 ]; then
+	trap 'echo TERM > "$out/signal"; exit 143' TERM
+	echo "$$" > "$out/launch.pid.tmp" && mv "$out/launch.pid.tmp" "$out/launch.pid"
+	# Waits at most 60 s, so a stub the test can't stop doesn't run on.
+	waited=0
+	while [ "$waited" -lt 60 ]; do
+		sleep 1 </dev/null >/dev/null 2>&1 &
+		wait $!
+		waited=$((waited + 1))
+	done
+	exit 124
+fi
+exit "${STUB_JAVA_EXIT:-0}"
+''', 'UTF-8')
+		stubJava.setExecutable(true)
+		def stubUname = new File(stubDir, 'uname')
+		stubUname.setText('''#!/bin/sh
+# Stub uname: answers -m with STUB_UNAME_M.
+[ "${1:-}" = -m ] && echo "${STUB_UNAME_M:?}"
+''', 'UTF-8')
+		stubUname.setExecutable(true)
+
+		def problems = []
+		def caseNumber = 0
+		def start = { String name, List<String> command, Map<String, String> env, File pathFirst = stubDir ->
+			def out = new File(workRoot, "${++caseNumber}-${name}")
+			out.mkdirs()
+			def builder = new ProcessBuilder(command)
+			builder.directory(out)
+			builder.environment().clear()
+			builder.environment().putAll([
+				PATH: pathFirst.absolutePath + File.pathSeparator + System.getenv('PATH'),
+				STUB_JAVA_OUT: out.absolutePath,
+				STUB_UNAME_M: 'x86_64',
+			])
+			builder.environment().putAll(env)
+			builder.redirectErrorStream(true)
+			builder.redirectOutput(new File(out, 'output.log'))
+			return [name: name, process: builder.start(), out: out, inputEnv: new TreeMap(builder.environment())]
+		}
+		def lines = { File out, String file ->
+			def f = new File(out, file)
+			f.isFile() ? f.readLines('UTF-8') : null
+		}
+		def environment = { File out, String file ->
+			def entries = lines(out, file)
+			entries == null ? null : entries.findAll { it.indexOf('=') > 0 }.collectEntries {
+				[(it.substring(0, it.indexOf('='))): it.substring(it.indexOf('=') + 1)]
+			}
+		}
+		def finish = { Map started ->
+			def process = started.process
+			if (!process.waitFor(60, java.util.concurrent.TimeUnit.SECONDS)) {
+				process.destroyForcibly()
+				throw new GradleException("${started.name}: did not finish in 60 s")
+			}
+			return started + [
+				exit: process.exitValue(),
+				output: new File(started.out, 'output.log').getText('UTF-8'),
+				args: lines(started.out, 'launch.args'),
+				env: environment(started.out, 'launch.env'),
+				probeCalls: lines(started.out, 'probe.calls')?.size() ?: 0,
+				probeEnv: environment(started.out, 'probe.env'),
+			]
+		}
+		def run = { String name, List<String> command, Map<String, String> env ->
+			finish(start(name, command, env))
+		}
+		def options = { Map result, List<String> tail ->
+			def args = result.args
+			if (args == null) {
+				problems << "${result.name}: java was not started (exit ${result.exit}):\n${result.output}"
+				return null
+			}
+			if (args.size() < tail.size() || args.subList(args.size() - tail.size(), args.size()) != tail) {
+				problems << "${result.name}: java's arguments don't end with ${tail}: ${args}"
+				return null
+			}
+			return args.subList(0, args.size() - tail.size())
+		}
+
+		// The image: the entrypoint on x86_64 and on aarch64, against what build.gradle read from it.
+		def imageTail = ['-jar', '/opt/spt/spt.jar', '--version']
+		[x86_64: true, aarch64: false].each { machine, x86 ->
+			def result = run("entrypoint-${machine}", ['sh', imageEntrypoint.asFile.absolutePath, '--version'],
+				[STUB_UNAME_M: machine])
+			def got = options(result, imageTail)
+			if (got != null && got != imageJavaOptions(image, x86)) {
+				problems << "the entrypoint on ${machine} passes ${got}, not the options build.gradle reads from it, " +
+					"${imageJavaOptions(image, x86)}; keep every default option in its DEFAULT_JAVA_OPTS or X86_JAVA_OPTS line"
+			}
+		}
+
+		// run.sh, with a stub java that accepts or refuses the x86-only options.
+		def runScriptTail = ['-jar', runScript.parentFile.absolutePath + '/' + sptJar, '--version']
+		def probeNoise = [
+			JAVA_TOOL_OPTIONS: '-XX:+LauncherProbeNoise',
+			JDK_JAVA_OPTIONS: '-XX:+LauncherProbeNoise',
+			_JAVA_OPTIONS: '-XX:+LauncherProbeNoise',
+		]
+		def shellVariables = ['PWD', 'OLDPWD', 'SHLVL', '_'] as Set
+		def checkRunScript = { String name, Map<String, String> env, List<String> expected, String expectedTunables ->
+			def result = run(name, [runScript.absolutePath, '--version'], env)
+			def got = options(result, runScriptTail)
+			if (got != null && got != expected) {
+				problems << "${name}: run.sh passes ${got}; expected ${expected}"
+			}
+			if (result.env != null) {
+				def tunables = result.env.containsKey('GLIBC_TUNABLES') ? result.env.GLIBC_TUNABLES : null
+				if (tunables != expectedTunables) {
+					problems << "${name}: GLIBC_TUNABLES reaches java as ${tunables == null ? 'unset' : "'${tunables}'"}; " +
+						"expected ${expectedTunables == null ? 'unset' : "'${expectedTunables}'"}"
+				}
+				def changed = result.inputEnv.findAll { key, value -> !shellVariables.contains(key) && result.env[key] != value }
+				def added = result.env.keySet() - result.inputEnv.keySet() - shellVariables - ['GLIBC_TUNABLES']
+				if (changed || added) {
+					problems << "${name}: run.sh changes java's environment: changed ${changed.keySet()}, added ${added}"
+				}
+			}
+			if (result.probeCalls != 1) {
+				problems << "${name}: run.sh probed java ${result.probeCalls} times; expected once"
+			} else {
+				def leaked = probeNoise.keySet().findAll { result.probeEnv.containsKey(it) }
+				if (leaked) {
+					problems << "${name}: run.sh's probe ran with ${leaked} set"
+				}
+			}
+			return result
+		}
+		def accepting = imageJavaOptions(image, true).findAll { it != launcherOmittedJavaOption }
+		def refusing = imageJavaOptions(image, false).findAll { it != launcherOmittedJavaOption }
+		def imageTunables = image.glibcTunables
+		// uname answers aarch64 when the JVM accepts the options and x86_64 when it refuses them:
+		// run.sh asks the JVM, not the machine.
+		checkRunScript('accepting-jvm', probeNoise + [STUB_JAVA_X86: 'accept', STUB_UNAME_M: 'aarch64'], accepting, imageTunables)
+		checkRunScript('refusing-jvm', probeNoise + [STUB_JAVA_X86: 'refuse'], refusing, imageTunables)
+		def accept = [STUB_JAVA_X86: 'accept']
+		checkRunScript('empty-spt-java-opts', accept + [SPT_JAVA_OPTS: ''], accepting, imageTunables)
+		checkRunScript('added-option', accept + [SPT_JAVA_OPTS: '-Xmx8g'], accepting + ['-Xmx8g'], imageTunables)
+		checkRunScript('overridden-defaults', accept + [SPT_JAVA_OPTS: '-XX:MaxDirectMemorySize=128g  -Xms2g'],
+			accepting + ['-XX:MaxDirectMemorySize=128g', '-Xms2g'], imageTunables)
+		checkRunScript('empty-glibc-tunables', accept + [GLIBC_TUNABLES: ''], accepting, '')
+		checkRunScript('callers-glibc-tunables', accept + [GLIBC_TUNABLES: 'glibc.malloc.arena_max=2'], accepting,
+			'glibc.malloc.arena_max=2')
+		def failing = checkRunScript('exit-status', accept + [STUB_JAVA_EXIT: '37'], accepting, imageTunables)
+		if (failing.exit != 37) {
+			problems << "exit-status: run.sh exits ${failing.exit} where java exits 37"
+		}
+
+		// run.sh replaces itself with java: java has its PID, and a SIGTERM sent to it reaches java.
+		def waiting = start('sigterm', [runScript.absolutePath, '--version'], accept + [STUB_JAVA_WAIT: '1'])
+		try {
+			def pidFile = new File(waiting.out, 'launch.pid')
+			def deadline = System.nanoTime() + java.time.Duration.ofSeconds(30).toNanos()
+			while (!pidFile.isFile() && waiting.process.isAlive() && System.nanoTime() < deadline) {
+				Thread.sleep(20)
+			}
+			if (!pidFile.isFile()) {
+				problems << "sigterm: java did not start:\n${new File(waiting.out, 'output.log').getText('UTF-8')}"
+			} else if (pidFile.text.trim() != waiting.process.pid().toString()) {
+				problems << "sigterm: java runs as PID ${pidFile.text.trim()}, not as run.sh's PID ${waiting.process.pid()}"
+			} else {
+				waiting.process.destroy()
+				def stopped = finish(waiting)
+				if (!new File(waiting.out, 'signal').isFile() || stopped.exit != 143) {
+					problems << "sigterm: a SIGTERM sent to run.sh didn't stop java (exit ${stopped.exit})"
+				}
+			}
+		} finally {
+			if (waiting.process.isAlive()) {
+				waiting.process.destroyForcibly()
+			}
+			// Without exec, java is run.sh's child and outlives it, so stop it by the PID it wrote.
+			// The command line check keeps a PID that another process has reused untouched.
+			def pidFile = new File(waiting.out, 'launch.pid')
+			if (pidFile.isFile() && pidFile.text.trim().isLong()) {
+				ProcessHandle.of(pidFile.text.trim() as long)
+					.filter { it.info().commandLine().map { line -> line.contains(stubJava.absolutePath) }.orElse(false) }
+					.ifPresent { it.destroyForcibly() }
+			}
+		}
+
+		// run.sh on the JVM running this build (Java 21 in CI).
+		def buildJavaBin = new File(System.getProperty('java.home'), 'bin')
+		def real = finish(start('build-jvm', [runScript.absolutePath, '--version'],
+			[HOME: System.getProperty('user.home')], buildJavaBin))
+		if (real.exit != 0 || !real.output.contains('Engine version: ')) {
+			problems << "build-jvm: run.sh --version on ${System.getProperty('java.version')} exits ${real.exit}:\n${real.output}"
+		}
+
+		// run.bat: CRLF lines, setlocal, no labels or blocks, the defaults in their own variable,
+		// and the java line last.
+		def batchBytes = batchScript.bytes
+		def batchText = new String(batchBytes, 'US-ASCII')
+		if (batchBytes.any { it < 0 } || batchText.replace('\r\n', '').contains('\n') || batchText.replace('\r\n', '').contains('\r')
+				|| !batchText.endsWith('\r\n')) {
+			problems << "run.bat must be ASCII with CRLF line endings"
+		}
+		def commands = batchText.split('\r\n').collect { it.trim() }.findAll { it && !(it ==~ /(?i)rem(\s.*)?/) }
+		if (commands.take(2) != ['@echo off', 'setlocal']) {
+			problems << "run.bat must start with @echo off and setlocal: ${commands.take(2)}"
+		}
+		def blocked = commands.findAll { it.startsWith(':') || it.contains('(') || it.contains(')') || it ==~ /(?i).*\bgoto\b.*/ }
+		if (blocked) {
+			problems << "run.bat has labels or blocks: ${blocked}"
+		}
+		def assignsUserOptions = commands.findAll { it ==~ /(?i)set\s+"?SPT_JAVA_OPTS=.*/ }
+		if (assignsUserOptions) {
+			problems << "run.bat assigns SPT_JAVA_OPTS: ${assignsUserOptions}"
+		}
+		def defaultsPrefix = 'set "SPT_DEFAULT_JAVA_OPTS='
+		def defaultsLines = commands.findAll { it.startsWith(defaultsPrefix) }
+		def batchDefaults = defaultsLines.size() == 1 && defaultsLines[0].endsWith('"')
+			? defaultsLines[0].substring(defaultsPrefix.length(), defaultsLines[0].length() - 1).split(/\s+/) as List
+			: null
+		def expectedBatchDefaults = launcherJavaOptions(image, '%SPT_X86_JAVA_OPTS%')
+		if (batchDefaults != expectedBatchDefaults) {
+			problems << "run.bat's defaults ${defaultsLines} are not ${expectedBatchDefaults}"
+		}
+		// The probe runs with call, so a java that is a batch file returns, in a nested setlocal
+		// that clears the caller's JVM option variables, and hands only its answer back.
+		def x86 = image.x86JavaOptions.join(' ')
+		def probe = [
+			'setlocal',
+			'set "JAVA_TOOL_OPTIONS="',
+			'set "JDK_JAVA_OPTIONS="',
+			'set "_JAVA_OPTIONS="',
+			'set "SPT_X86_JAVA_OPTS="',
+			"call java ${x86} -version >nul 2>&1 && set \"SPT_X86_JAVA_OPTS=${x86}\"".toString(),
+			'endlocal & set "SPT_X86_JAVA_OPTS=%SPT_X86_JAVA_OPTS%"',
+		]
+		if (Collections.indexOfSubList(commands, probe) < 0) {
+			problems << "run.bat doesn't probe java for ${x86} in its own setlocal: ${probe}"
+		}
+		def launch = 'java %SPT_DEFAULT_JAVA_OPTS% %SPT_JAVA_OPTS% -jar "%SCRIPT_DIR%' + sptJar + '" %*'
+		if (commands.last() != launch) {
+			problems << "run.bat's last command is not ${launch}: ${commands.last()}"
+		}
+		// run.bat is generated whole, so these are all its commands, in this order: the defaults
+		// follow the probe they read, and the outer setlocal keeps the script's variables local.
+		def expectedCommands = ['@echo off', 'setlocal', 'set "SCRIPT_DIR=%~dp0"'] + probe +
+			[defaultsPrefix + expectedBatchDefaults.join(' ') + '"', launch]
+		if (commands != expectedCommands) {
+			problems << "run.bat's commands are not, in order:\n    " + expectedCommands.join('\n    ') +
+				"\n  but:\n    " + commands.join('\n    ')
+		}
+
+		if (problems) {
+			throw new GradleException('The launchers differ from the SPT image (cases under ' + workRoot + '):\n  ' +
+				problems.join('\n  '))
 		}
 	}
 }
@@ -723,6 +1262,290 @@ tasks.register('verifyS3TablesParquetWrite') {
 	}
 }
 
+// The packaged engine's exit statuses, a contract for the scripts that run it: 0 success, 1 a run,
+// start or scenario failure, 2 an argument error. An argument error and a help request start nothing:
+// a loopback listener stands in for the S3 target and must see no connection.
+tasks.register('verifyEngineExitStatusCanary') {
+	group = 'verification'
+	description = 'Verifies the packaged engine exit statuses for help, argument errors and start failures'
+	dependsOn assembleDist
+
+	inputs.file(file("${distDir}/${sptJar}"))
+	inputs.dir(file("${distDir}/ext"))
+	def canaryRootProvider = layout.buildDirectory.dir('engine-exit-status-canary')
+	outputs.dir(canaryRootProvider)
+
+	doLast {
+		def canaryRoot = canaryRootProvider.get().asFile
+		delete canaryRoot
+		canaryRoot.mkdirs()
+		def javaExecutable = new File(
+			System.getProperty('java.home'),
+			'bin/java' + (System.getProperty('os.name').toLowerCase().contains('win') ? '.exe' : '')
+		).absolutePath
+		def jarFile = file("${distDir}/${sptJar}")
+
+		// The kernel queues a connection the engine makes until it is accepted, even after the engine
+		// exits, so draining the queue after each engine has exited counts every connection it made.
+		// The acceptor closes connections meanwhile, so an engine that connects fails fast.
+		def target = java.nio.channels.ServerSocketChannel.open()
+		target.bind(new java.net.InetSocketAddress(java.net.InetAddress.getLoopbackAddress(), 0), 50)
+		target.configureBlocking(false)
+		def targetConnections = new java.util.concurrent.atomic.AtomicInteger()
+		def drainTarget = { ->
+			synchronized (target) {
+				def connection
+				while (target.open && (connection = target.accept()) != null) {
+					targetConnections.incrementAndGet()
+					connection.close()
+				}
+			}
+		}
+		def acceptor = Thread.startDaemon('engine-exit-status-canary-target') {
+			while (target.open) {
+				try {
+					drainTarget()
+					Thread.sleep(20)
+				} catch (IOException | InterruptedException ignored) {
+				}
+			}
+		}
+		def s3Args = [
+			'--storage-driver-type=s3',
+			'--storage-net-node-addrs=127.0.0.1',
+			"--storage-net-node-port=${target.socket().localPort}",
+			'--storage-auth-uid=exit-status-canary',
+			'--storage-auth-secret=exit-status-canary',
+			'--item-output-path=/exit-status-canary',
+			'--load-op-limit-count=5',
+			'--item-data-size=1KiB',
+			'--storage-driver-limit-concurrency=1',
+		]
+		def scenario = { String name, String text ->
+			def scenarioFile = new File(canaryRoot, "${name}.js")
+			scenarioFile.setText(text, 'UTF-8')
+			return "--run-scenario=${scenarioFile.absolutePath}"
+		}
+		def engine = { String name, List<String> args ->
+			def home = new File(canaryRoot, "${name}/home")
+			def logDir = new File(canaryRoot, "${name}/log")
+			def workDir = new File(canaryRoot, "${name}/cwd")
+			workDir.mkdirs()
+			def stdout = new File(canaryRoot, "${name}/stdout.log")
+			def stderr = new File(canaryRoot, "${name}/stderr.log")
+			def builder = new ProcessBuilder([javaExecutable, '-jar', jarFile.absolutePath] + args.collect { it.toString() })
+			builder.directory(workDir)
+			builder.environment().put('SPT_HOME', home.absolutePath)
+			builder.environment().put('SPT_LOG_DIR', logDir.absolutePath)
+			builder.redirectOutput(stdout)
+			builder.redirectError(stderr)
+			def process = builder.start()
+			try {
+				if (!process.waitFor(90, java.util.concurrent.TimeUnit.SECONDS)) {
+					throw new GradleException("Packaged engine '${name}' did not exit within 90 s:\n"
+						+ stdout.getText('UTF-8') + stderr.getText('UTF-8'))
+				}
+			} finally {
+				// Also when the build is cancelled: a node does not end by itself
+				if (process.alive) {
+					process.destroyForcibly()
+				}
+			}
+			// The engine creates its home and log directories; a help request creates neither, and nothing
+			// in the working directory.
+			def written = [home, logDir].count { it.exists() } + workDir.listFiles().length
+			// The JVM announces JAVA_TOOL_OPTIONS and _JAVA_OPTIONS on stderr, and prints its own
+			// warnings there; the rest is the engine's
+			def engineStderr = stderr.readLines('UTF-8').findAll {
+				!(it.startsWith('Picked up ') || it.contains(' VM warning: ') || it.startsWith('WARNING: '))
+			}
+			return [
+				status: process.exitValue(),
+				stdout: stdout.getText('UTF-8'),
+				stderr: engineStderr,
+				output: stdout.getText('UTF-8') + stderr.getText('UTF-8'),
+				written: written,
+			]
+		}
+		def expect = { String name, List<String> args, int status, List<String> messages ->
+			drainTarget()
+			def connectionsBefore = targetConnections.get()
+			def result = engine(name, args)
+			drainTarget()
+			def missing = messages.findAll { !result.output.contains(it) }
+			if (result.status != status || !missing.isEmpty()) {
+				throw new GradleException(
+					"Packaged engine '${name}' exited ${result.status}, expected ${status}"
+						+ (missing ? "; missing ${missing}" : '') + ":\n${result.output}")
+			}
+			if (status != 0 && targetConnections.get() != connectionsBefore) {
+				throw new GradleException("Packaged engine '${name}' connected to the target before it failed:\n${result.output}")
+			}
+			return result
+		}
+
+		try {
+			def usageLines = [
+				'Usage: java -jar spt.jar [--<option>=<value> ...]',
+				'Exit status: 0 success; 1 a run, start or scenario failure; 2 an argument error.',
+				"\t--load-op-limit-count=<long>\n",
+				"\t--run-node=<true|false>\n",
+				"\t--storage-net-nodeInterfaces-<key>=<value>\n",
+				"\t--storage-net-http-headers-<key>=<value>\n",
+				"\t--storage-net-http-uri-args-<key>=<value>\n",
+				"\t--storage-object-tagging-tags-<key>=<value>\n",
+				"\t--read  same as --load-op-type=read\n",
+			]
+			['help': s3Args + ['--help'], 'help-short': ['-h'] + s3Args].each { name, args ->
+				def result = expect(name, args, 0, [])
+				def missing = usageLines.findAll { !result.stdout.contains(it) }
+				if (!missing.isEmpty() || result.written != 0 || !result.stderr.isEmpty()) {
+					throw new GradleException(
+						"Packaged engine '${name}' printed no clean usage (missing ${missing}, ${result.written} files written):\n${result.output}")
+				}
+			}
+			if (targetConnections.get() != 0) {
+				throw new GradleException('A help request connected to the target')
+			}
+
+			def remote = 'The argument "storage-driver-remote" is not supported: SPT has no remote driver services.'
+			expect('unknown-option', ['--bogus'], 2, ['Invalid configuration option: "bogus"'])
+			expect('dry-run-s3', s3Args + ['--dry-run'], 2, ['Invalid configuration option: "dry-run"'])
+			expect('no-prefix', ['load-op-limit-count=10'], 2, ['Invalid first argument, not shown in case it is a value'])
+			// The rest of an unquoted header value
+			def unquoted = expect('unquoted-value', ['--storage-net-http-headers-Authorization=Basic', 'canaryHeaderSecret='], 2,
+				['Invalid argument after "--storage-net-http-headers-Authorization", not shown in case it is a value'])
+			if (unquoted.output.contains('canaryHeaderSecret')) {
+				throw new GradleException("Packaged engine 'unquoted-value' printed the value:\n${unquoted.output}")
+			}
+			def spaced = expect('space-separated-value', ['--storage-auth-secret', 'canary-spaced-secret'], 2,
+				['Invalid argument after "--storage-auth-secret", not shown in case it is a value'])
+			if (spaced.output.contains('canary-spaced-secret')) {
+				throw new GradleException("Packaged engine 'space-separated-value' printed the value:\n${spaced.output}")
+			}
+			// A base64 secret ends in = padding
+			def padded = expect('space-separated-padded-value', ['--storage-auth-secret', 'canaryPaddedSecret='], 2,
+				['Invalid argument after "--storage-auth-secret", not shown in case it is a value'])
+			if (padded.output.contains('canaryPaddedSecret')) {
+				throw new GradleException("Packaged engine 'space-separated-padded-value' printed the value:\n${padded.output}")
+			}
+			expect('unparseable-number-s3', s3Args + ['--load-op-limit-count=5OO'], 2,
+				['Invalid value for the option "load-op-limit-count": For input string: "5OO"'])
+			expect('not-a-boolean', ['--run-node=yes', '--run-port=1'], 2,
+				['Invalid value for the option "run-node": "yes" is not true or false'])
+			expect('storage-driver-remote', ['--storage-driver-remote'], 2, [remote, 'run.sh --run-node=true'])
+			expect('storage-driver-remote-field-report', [
+				'--storage-driver-remote',
+				'--storage-driver-addrs=10.0.0.1,10.0.0.2,10.0.0.3,10.0.0.4',
+				'--load-limit-count=1000',
+				'--storage-driver-type=dummy-mock',
+				'--load-type=create',
+				'--test-step-id=exit-status-canary',
+			], 2, [remote])
+			expect('mongoose-load-limit-count', ['--storage-driver-type=dummy-mock', '--load-limit-count=10'], 2,
+				['Invalid configuration option: "load-limit-count"'])
+			expect('mongoose-http-namespace', ['--storage-driver-type=dummy-mock', '--storage-net-http-namespace=ns1'], 2,
+				['Invalid configuration option: "storage-net-http-namespace"'])
+
+			expect('missing-scenario', ['--run-scenario=' + new File(canaryRoot, 'missing.js').absolutePath], 1,
+				['Failed to read the scenario file'])
+			expect('scenario-syntax-error', [
+				scenario('scenario-syntax-error', 'Load.config({load: {op: {limit: {count: 1}}}}).run(;\n'),
+				'--storage-driver-type=dummy-mock',
+			], 1, ['Scenario failed, line #1'])
+			expect('scenario-config-error', [
+				scenario('scenario-config-error', 'Load.config({load: {step: {limit: {count: 1}}}}).run();\n'),
+				'--storage-driver-type=dummy-mock',
+			], 1, ['Scenario syntax error', 'load-step-limit-count'])
+			expect('scenario-boolean-error', [
+				scenario('scenario-boolean-error', 'Load.config({load: {op: {shuffle: "yes"}}}).run();\n'),
+				'--storage-driver-type=dummy-mock',
+			], 1, ['load-op-shuffle: "yes" is not true or false'])
+			def busyPort = new java.net.ServerSocket(0)
+			try {
+				def servicePort = new java.net.ServerSocket(0)
+				def freePort = servicePort.localPort
+				servicePort.close()
+				expect('run-node-failure', [
+					'--run-node',
+					"--run-port=${busyPort.localPort}",
+					"--load-step-node-port=${freePort}",
+					'--api-linger-sec=0',
+				], 1, ['Run node failure'])
+			} finally {
+				busyPort.close()
+			}
+
+			// A node that starts and is shut down through its API exits 0.
+			// Both probe sockets are open at once, so the two ports differ.
+			def apiSocket = new java.net.ServerSocket(0)
+			def registrySocket = new java.net.ServerSocket(0)
+			def apiPort = apiSocket.localPort
+			def registryPort = registrySocket.localPort
+			apiSocket.close()
+			registrySocket.close()
+			// Set once /ready answered and the shutdown request has connected; the node may stop before its
+			// 202 is read, so the 202 itself is not required. A request that can't connect is tried again.
+			def shutdownSent = new java.util.concurrent.atomic.AtomicBoolean()
+			// Set when the case ends, so a failed case's stopper can't reach a later node on that port.
+			def stopperDone = new java.util.concurrent.atomic.AtomicBoolean()
+			def stopper = Thread.startDaemon('engine-exit-status-canary-node-stopper') {
+				def deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(60)
+				while (System.nanoTime() < deadline && !shutdownSent.get() && !stopperDone.get()) {
+					try {
+						def ready = (HttpURLConnection) URI.create("http://127.0.0.1:${apiPort}/ready").toURL()
+							.openConnection(java.net.Proxy.NO_PROXY)
+						ready.connectTimeout = 1000
+						ready.readTimeout = 1000
+						if (ready.responseCode == 200) {
+							def shutdown = (HttpURLConnection) URI.create("http://127.0.0.1:${apiPort}/shutdown").toURL()
+								.openConnection(java.net.Proxy.NO_PROXY)
+							shutdown.requestMethod = 'POST'
+							shutdown.connectTimeout = 1000
+							shutdown.readTimeout = 5000
+							shutdown.connect()
+							shutdownSent.set(true)
+							shutdown.responseCode
+						}
+					} catch (IOException ignored) {
+					}
+					if (!shutdownSent.get()) {
+						try {
+							Thread.sleep(200)
+						} catch (InterruptedException ignored) {
+							return
+						}
+					}
+				}
+			}
+			try {
+				expect('run-node-shutdown', [
+					'--run-node',
+					"--run-port=${apiPort}",
+					"--load-step-node-port=${registryPort}",
+					'--api-linger-sec=0',
+				], 0, ['Started to serve the remote API'])
+			} finally {
+				stopperDone.set(true)
+				stopper.interrupt()
+				stopper.join(10000)
+			}
+			if (!shutdownSent.get()) {
+				throw new GradleException("Packaged engine 'run-node-shutdown' exited before its shutdown request")
+			}
+
+			expect('default-scenario', ['--storage-driver-type=dummy-mock', '--load-op-limit-count=10', '--load-op-shuffle=TRUE'], 0, [])
+			expect('scenario', [
+				scenario('scenario', 'Load.config({load: {op: {limit: {count: 10}, shuffle: false}}}).run();\n'),
+				'--storage-driver-type=dummy-mock',
+			], 0, [])
+		} finally {
+			target.close()
+			acceptor.join(5000)
+		}
+	}
+}
+
 tasks.register('test') {
 	group = 'verification'
 	description = 'Runs bundle-level tests'
@@ -730,8 +1553,11 @@ tasks.register('test') {
 		tasks.named('verifyExtensionJarContents'),
 		tasks.named('verifyS3TablesParquetWrite'),
 		tasks.named('verifyImageMallocTunable'),
+		tasks.named('verifyLauncherJavaOptions'),
 		tasks.named('verifyEngineBuildInfoCanary'),
-		tasks.named('verifyEngineBuildInfoDocumentation')
+		tasks.named('verifyNettyMockCountLimitCanary'),
+		tasks.named('verifyEngineBuildInfoDocumentation'),
+		tasks.named('verifyEngineExitStatusCanary')
 }
 
 check.dependsOn tasks.named('test')
