@@ -800,10 +800,16 @@ tasks.register('verifyEngineExitStatusCanary') {
 			builder.redirectOutput(stdout)
 			builder.redirectError(stderr)
 			def process = builder.start()
-			if (!process.waitFor(90, java.util.concurrent.TimeUnit.SECONDS)) {
-				process.destroyForcibly()
-				throw new GradleException("Packaged engine '${name}' did not exit within 90 s:\n"
-					+ stdout.getText('UTF-8') + stderr.getText('UTF-8'))
+			try {
+				if (!process.waitFor(90, java.util.concurrent.TimeUnit.SECONDS)) {
+					throw new GradleException("Packaged engine '${name}' did not exit within 90 s:\n"
+						+ stdout.getText('UTF-8') + stderr.getText('UTF-8'))
+				}
+			} finally {
+				// Also when the build is cancelled: a node does not end by itself
+				if (process.alive) {
+					process.destroyForcibly()
+				}
 			}
 			// The engine creates its home and log directories; a help request creates neither, and nothing
 			// in the working directory.
@@ -871,6 +877,12 @@ tasks.register('verifyEngineExitStatusCanary') {
 			if (spaced.output.contains('canary-spaced-secret')) {
 				throw new GradleException("Packaged engine 'space-separated-value' printed the value:\n${spaced.output}")
 			}
+			// A base64 secret ends in = padding
+			def padded = expect('space-separated-padded-value', ['--storage-auth-secret', 'canaryPaddedSecret='], 2,
+				['Invalid argument after "--storage-auth-secret", not shown in case it is a value'])
+			if (padded.output.contains('canaryPaddedSecret')) {
+				throw new GradleException("Packaged engine 'space-separated-padded-value' printed the value:\n${padded.output}")
+			}
 			expect('unparseable-number-s3', s3Args + ['--load-op-limit-count=5OO'], 2,
 				['Invalid value for the option "load-op-limit-count": For input string: "5OO"'])
 			expect('not-a-boolean', ['--run-node=yes', '--run-port=1'], 2,
@@ -919,28 +931,32 @@ tasks.register('verifyEngineExitStatusCanary') {
 			}
 
 			// A node that starts and is shut down through its API exits 0.
+			// Both probe sockets are open at once, so the two ports differ.
 			def apiSocket = new java.net.ServerSocket(0)
-			def apiPort = apiSocket.localPort
-			apiSocket.close()
 			def registrySocket = new java.net.ServerSocket(0)
+			def apiPort = apiSocket.localPort
 			def registryPort = registrySocket.localPort
+			apiSocket.close()
 			registrySocket.close()
+			// Set once /ready answered and the shutdown request goes out; the node may stop before its 202
+			// is read, so the 202 itself is not required.
 			def shutdownSent = new java.util.concurrent.atomic.AtomicBoolean()
 			def stopper = Thread.startDaemon('engine-exit-status-canary-node-stopper') {
 				def deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(60)
 				while (System.nanoTime() < deadline && !shutdownSent.get()) {
 					try {
-						def ready = (HttpURLConnection) URI.create("http://127.0.0.1:${apiPort}/ready").toURL().openConnection()
+						def ready = (HttpURLConnection) URI.create("http://127.0.0.1:${apiPort}/ready").toURL()
+							.openConnection(java.net.Proxy.NO_PROXY)
 						ready.connectTimeout = 1000
 						ready.readTimeout = 1000
 						if (ready.responseCode == 200) {
-							def shutdown = (HttpURLConnection) URI.create("http://127.0.0.1:${apiPort}/shutdown").toURL().openConnection()
+							def shutdown = (HttpURLConnection) URI.create("http://127.0.0.1:${apiPort}/shutdown").toURL()
+								.openConnection(java.net.Proxy.NO_PROXY)
 							shutdown.requestMethod = 'POST'
 							shutdown.connectTimeout = 1000
 							shutdown.readTimeout = 5000
-							if (shutdown.responseCode == 202) {
-								shutdownSent.set(true)
-							}
+							shutdownSent.set(true)
+							shutdown.responseCode
 						}
 					} catch (IOException ignored) {
 					}

@@ -92,6 +92,20 @@ class MainArgumentErrorTest {
 	}
 
 	@Test
+	void aValueWithAnEqualsSignGivenAfterASpaceIsHiddenWhole() {
+		// A base64 secret ends in = padding, and a header value can hold one.
+		final var padded = argumentError("--storage-auth-secret", "pEauABL07ujkF2hJN7r6wA9/HPs=");
+		assertTrue(padded.startsWith("Invalid argument after \"--storage-auth-secret\", not shown"), padded);
+		assertFalse(padded.contains("pEauABL07ujkF2hJN7r6wA9"), padded);
+		final var header = argumentError("--storage-driver-type=s3", "--storage-net-http-headers-x-auth", "token=abc");
+		assertTrue(header.startsWith("Invalid argument after \"--storage-net-http-headers-x-auth\", not shown"), header);
+		assertFalse(header.contains("token"), header);
+		// After an argument that has its value, one with = is still named by the part before it.
+		final var mistyped = argumentError("--storage-driver-type=s3", "storage-auth-secret=s3cr3t-value");
+		assertTrue(mistyped.startsWith("Invalid argument: \"storage-auth-secret\""), mistyped);
+	}
+
+	@Test
 	void aValueOfTheWrongTypeIsAnArgumentError() {
 		final var message = argumentError("--storage-net-nodeInterfaces=lo");
 		assertTrue(
