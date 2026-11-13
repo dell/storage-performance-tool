@@ -661,6 +661,8 @@ Pre-flight verification of distributed testing infrastructure. Ensures all speci
 
 - `--min-hosts`: Minimum number of hosts that must pass verification (default: all)
 - `--network-mode`: Docker network mode - "host" (default) or "bridge". Host networking is required for Java RMI distributed communication.
+- `--api-port`: REST API port the test engine serves and verify checks (default: 9999)
+- `--rmi-registry-port`: RMI registry port the test engine serves and verify checks (default: 1099). `spt run` takes another value only for a local single-host run.
 - `--rmi-port-start`: Starting port for RMI object port range verification (default: 40000)
 - `--rmi-port-count`: Number of RMI ports to verify (default: 10)
 - `--force-cleanup`: Automatically clean up conflicting containers without prompting

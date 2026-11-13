@@ -61,6 +61,7 @@ const (
 	flagBucketMetrics         = "bucket-metrics"
 	flagCreatePrefix          = "create-prefix"
 	flagRMIRegistryPort       = "rmi-registry-port"
+	rmiRegistryPortUsage      = "Engine RMI registry port for a local single-host run; give each concurrent spt run on one host its own port"
 	flagInterfaces            = "interfaces"
 	flagHostInterfaces        = "host-interfaces"
 	itemNamingShardsPath      = "item.naming.shards"
@@ -1747,6 +1748,14 @@ func requestShutdownAll(ctx context.Context, hosts []*hostparse.HostInfo, apiPor
 	return nil
 }
 
+// validatePortFlag rejects a TCP port flag value outside 1-65535.
+func validatePortFlag(flag string, port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("--%s must be between 1 and 65535, got %d", flag, port)
+	}
+	return nil
+}
+
 // checkPortConflicts checks for and resolves port conflicts before launching Spt
 func checkPortConflicts(cmd *cobra.Command) error {
 	// Get force mode setting
@@ -2494,8 +2503,7 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 	runCmd.Flags().StringArray(flagHostInterfaces, nil, "Replace --interfaces on one host: <host>=<value>, with <value> auto, a comma-separated list, or none to turn NICs off there; repeat for more hosts")
 	runCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
 	runCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
-	runCmd.Flags().Int(flagRMIRegistryPort, constants.DefaultRMIRegistryPort,
-		"Engine RMI registry port for a local single-host run; give each concurrent spt run on one host its own port")
+	runCmd.Flags().Int(flagRMIRegistryPort, constants.DefaultRMIRegistryPort, rmiRegistryPortUsage)
 
 	// RDMA Acceleration Options
 	runCmd.Flags().String("s3-driver", "default",
@@ -2728,8 +2736,8 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	params.ServiceThreads = serviceThreads
 
 	if registryPort, err := cmd.Flags().GetInt(flagRMIRegistryPort); err == nil {
-		if registryPort < 1 || registryPort > 65535 {
-			return scenario.Params{}, fmt.Errorf("--%s must be between 1 and 65535, got %d", flagRMIRegistryPort, registryPort)
+		if err := validatePortFlag(flagRMIRegistryPort, registryPort); err != nil {
+			return scenario.Params{}, err
 		}
 		// The default leaves the engine command line unchanged.
 		if registryPort != constants.DefaultRMIRegistryPort {

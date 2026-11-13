@@ -96,6 +96,8 @@ const (
 	SptNicPlanCommand = "/opt/spt/spt-nic-plan"
 	// EngineNodePortArgPrefix sets the engine's RMI registry port (load.step.node.port).
 	EngineNodePortArgPrefix = "--load-step-node-port="
+	// EngineRunPortArgPrefix sets the engine's REST API port (run.port).
+	EngineRunPortArgPrefix = "--run-port="
 
 	DockerLabelManaged = "spt.managed"
 	DockerLabelRole    = "spt.role"
