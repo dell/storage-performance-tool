@@ -32,18 +32,25 @@ import org.junit.jupiter.api.io.TempDir;
  * initiation, then parts 1 to 5, each part's retries right after it, then the completion or abort.
  * Every initiation after a failed upload also shows that the failed upload released its permit.
  */
-@Timeout(120)
+@Timeout(240)
 final class S3MultipartStepCountsTest {
 
-	/** A count-limited step that hangs runs to this limit, or to its 30 s stop wait after it. */
+	/**
+	 * A count-limited step that hangs runs to this limit, then waits up to its {@code load-op-wait-limit}
+	 * for in-flight operations, within the class's 240 s timeout.
+	 */
 	private static final String TIME_LIMIT = "60s";
 	/**
 	 * Below a hang, with room for a cold JVM on a loaded runner: the class's slowest test took 19 s with
 	 * three busy threads per CPU, and CI runs the engine modules' tests in parallel.
 	 */
 	private static final long ENDS_WITHIN_MILLIS = TimeUnit.SECONDS.toMillis(45);
-	/** The shipped {@code load-op-wait-limit}. */
-	private static final int DEFAULT_WAIT_LIMIT_SECONDS = 30;
+	/**
+	 * The {@code load-op-wait-limit} of the other steps, above {@link #ENDS_WITHIN_MILLIS} in place of
+	 * the shipped 30 s: a step that ends its count with an operation unresolved waits out this limit, so
+	 * it fails {@link #assertEnded()} instead of ending inside the bound.
+	 */
+	private static final int LONG_WAIT_LIMIT_SECONDS = 60;
 	/** A short {@code load-op-wait-limit}, for the steps whose end waits for an aborted upload's parts. */
 	private static final int WAIT_LIMIT_SECONDS = 2;
 
@@ -233,10 +240,11 @@ final class S3MultipartStepCountsTest {
 		final var part2Answered = new CountDownLatch(1);
 		stub.failRequest = request -> {
 			if (S3NicSetWorkloadTest.isAbort(request)) {
-				// Hold the abort's answer until 500 ms after the stub fails part 2's last attempt, however
-				// late the stub's thread for that attempt runs.
+				// Hold the abort's answer until 500 ms after the stub takes part 2's last attempt, for at
+				// most 1.5 s in all: the client gives up on a request after 2 s
+				// (storage-net-timeoutMilliSec), and then the upload would stay open on the stub.
 				abortArrived.countDown();
-				await(part2Answered);
+				await(part2Answered, 1);
 				sleep(500);
 				return false;
 			}
@@ -245,7 +253,7 @@ final class S3MultipartStepCountsTest {
 			}
 			if ("2".equals(NicSetLoopback.param(request.query(), "partNumber")) && part2Attempts.incrementAndGet() == 4) {
 				// Part 2's last attempt is answered after the abort reached the target.
-				await(abortArrived);
+				await(abortArrived, 10);
 				stub.failureStatus = 404;
 				part2Answered.countDown();
 			}
@@ -272,9 +280,9 @@ final class S3MultipartStepCountsTest {
 		}
 	}
 
-	private static void await(final CountDownLatch latch) {
+	private static void await(final CountDownLatch latch, final long seconds) {
 		try {
-			latch.await(10, TimeUnit.SECONDS);
+			latch.await(seconds, TimeUnit.SECONDS);
 		} catch (final InterruptedException e) {
 			Thread.currentThread().interrupt();
 		}
@@ -519,7 +527,7 @@ final class S3MultipartStepCountsTest {
 	/** A step of {@code count} 5 KB uploads of five 1 KB parts. */
 	private Map<String, List<Long>> write(final int count, final int concurrency, final boolean retry,
 					final NicSetLoopback.Factory factory) throws Exception {
-		return write(count, concurrency, retry, factory, DEFAULT_WAIT_LIMIT_SECONDS);
+		return write(count, concurrency, retry, factory, LONG_WAIT_LIMIT_SECONDS);
 	}
 
 	private Map<String, List<Long>> write(final int count, final int concurrency, final boolean retry,
@@ -547,12 +555,12 @@ final class S3MultipartStepCountsTest {
 						Load.config({
 							"load": {
 								"step": {"limit": {"time": "%s"}},
-								"op": {"type": "read", "limit": {"count": 4}, "retry": %s, "retryLimit": 1}
+								"op": {"type": "read", "limit": {"count": 4}, "retry": %s, "retryLimit": 1, "wait": {"limit": %d}}
 							},
 							"storage": {"driver": {"limit": {"concurrency": 1}}},
 							"item": {"data": {"ranges": {"threshold": "1KB"}}, "input": {"file": "%s"}}
 						}).run();
-						""".formatted(System.nanoTime(), items, TIME_LIMIT, retry, items));
+						""".formatted(System.nanoTime(), items, TIME_LIMIT, retry, LONG_WAIT_LIMIT_SECONDS, items));
 	}
 
 	private Map<String, List<Long>> timed(final NicSetLoopback.Factory factory, final String scenario) throws Exception {
