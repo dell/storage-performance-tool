@@ -378,54 +378,43 @@ The console output is absent.
 The file output is disabled by default.
 To enable the file output, set the `output-metrics-trace-persist` configuration parameter to "true".
 
-**Note**:
-> Since v4.0.0 the file header (containing the field names) line is not printed for easier aggregation in case of the
-> distributed mode.
+**Output file**: `op.trace.csv` with *dynamic path*. Each line is one operation, with the fields below
+in this order, separated by commas. The file has no header line, so that the files of a distributed run
+can be joined.
 
-**Output file**: `op.trace.csv` with *dynamic path*.
-
-**Available fields**
+**Fields**
 
 | Field Name       | Description
 | ---------------- | -----------------------------------------------------------------
 | StorageNode      | The target storage node address/hostname
-| ItemPath         | The resulting item path
-| OpTypeCode       | The load operation type code
-| StatusCode       | The load operation resulting status code
+| ItemPath         | `/<bucket>/<key>` for a data operation, including one whose step reads its items from a `bucket,key,size,version_id` manifest. A LIST row holds the listed prefix. The path ends at its first comma, since fields are not quoted.
+| OpType           | The load operation type name: `NOOP`, `CREATE`, `READ`, `UPDATE`, `DELETE`, `LIST` or `STAT`
+| Status           | The load operation resulting status name, listed below
 | ReqTimeStart[us] | The load operation start timestamp in microseconds
 | Duration[us]     | The load operation total duration in microseconds
 | RespLatency[us]  | The load operation response latency in microseconds
 | DataLatency[us]  | The load operation response data latency ("1st byte" of the response content) in microseconds
 | TransferSize     | The count of the bytes transferred within the load operation
 
-**OpTypeCode**
+**Status**
 
-| Code | Op Type
-| ---- | --------
-| 0    | NOOP
-| 1    | CREATE
-| 2    | READ
-| 3    | UPDATE
-| 4    | DELETE
+The HTTP response codes are those the HTTP storage drivers, such as `s3`, map to each status.
 
-**StatusCode**
-
-| Code | Description                       | HTTP response codes                    |
-| ---- | --------------------------------- | -------------------------------------- |
-| O    | Pending (internal)                |                                        |
-| 1    | Active (internal)                 |                                        |
-| 2    | Interrupted                       |                                        |
-| 3    | Unknown failure                   | all other codes                        |
-| 4    | Success                           | 2xx                                    |
-| 5    | I/O Failure                       |                                        |
-| 6    | Timeout                           | 504                                    |
-| 7    | Unrecognized storage response     |                                        |
-| 8    | Client failure or invalid request | 100, 400, 405, 409, 411, 414, 416      |
-| 9    | Internal storage failure          | 413, 415, 429, 500, 501, 502, 503, 505 |
-| 10   | Item not found on the storage     | 404                                    |
-| 11   | Authentication/access failure     | 401, 403                               |
-| 12   | Data item corrupted               | 2xx                                    |
-| 13   | Not enough space on the storage   | 507                                    |
+| Name                             | Description                       | HTTP response codes  |
+| -------------------------------- | --------------------------------- | -------------------- |
+| `SUCC`                           | Success                           | 2xx                  |
+| `PENDING`, `ACTIVE`, `OMIT`      | Internal                          |                      |
+| `INTERRUPTED`                    | Interrupted                       |                      |
+| `FAIL_UNKNOWN`                   | Unknown failure                   | an unknown class     |
+| `FAIL_IO`                        | I/O failure                       |                      |
+| `FAIL_TIMEOUT`                   | Timeout                           | 504                  |
+| `RESP_FAIL_UNKNOWN`              | Unrecognized storage response     |                      |
+| `RESP_FAIL_CLIENT`               | Client failure or invalid request | 1xx, 3xx, other 4xx  |
+| `RESP_FAIL_SVC`                  | Internal storage failure          | 413, 414, other 5xx  |
+| `RESP_FAIL_NOT_FOUND`            | Item not found on the storage     | 404                  |
+| `RESP_FAIL_AUTH`                 | Authentication/access failure     | 401, 403             |
+| `RESP_FAIL_CORRUPT`              | Data item corrupted               | 2xx                  |
+| `RESP_FAIL_SPACE`                | Not enough space on the storage   | 507                  |
 
 ## 2.4. Threshold
 
