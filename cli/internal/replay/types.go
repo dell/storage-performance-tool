@@ -54,6 +54,9 @@ type RunScript struct {
 	ItemOutputPath   string
 	StorageNodeAddrs string
 	ClientAddrs      string
+	// IgnoredFlags names the script's --storage-* and --load-* flags that replay does not keep,
+	// without their values.
+	IgnoredFlags []string
 }
 
 // Artifacts contains fetched PDC artifacts required for replay conversion.

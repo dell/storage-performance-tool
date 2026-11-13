@@ -777,6 +777,11 @@ that lets SPT discover the launch script and referenced scenario. Each fetched
 artifact is limited to 16 MiB. See [REPLAY.md](REPLAY.md) for source archive
 requirements.
 
+From the launch script, replay reads its exports, the scenario path,
+`--item-output-path`, `--storage-net-node-addrs` and `--storage-driver-addrs`.
+It keeps no other engine flag there, and its preflight warns once, naming the
+`--storage-*` and `--load-*` flags it drops without their values.
+
 ### Replay Target Options
 
 | Flag | Short | Default | Description |
@@ -801,13 +806,14 @@ environment variables.
 | `--auto-terminate-seconds` | `0` | Automatically terminate runs after N seconds (`0` = unlimited) |
 | `--force` | `false` | Resolve port conflicts and permit known engine build mismatches; invalid build information and collection failures remain non-forceable |
 | `--api-port` | `9999` | SPT engine API port that every engine in the replay serves, the entry and every worker |
+| `--rmi-registry-port` | `1099` | Engine RMI registry port that every engine in the replay serves, a local or remote engine, or the entry and every worker; the entry reaches each worker on it. It must differ from `--api-port`. Give each concurrent replay or `spt run` on the same hosts its own value, with the range caveat of [`spt run --rmi-registry-port`](#3-test-behavior-options) |
 | `--trace-file` | `""` | Save all output to a trace file |
 | `--trace-append` | `false` | Append to an existing trace file |
 | `--verbose` | `false` | Show detailed Docker API calls, debug information, and textual live metrics |
 | `--skip-image-pull` | from `SPT_SKIP_IMAGE_PULL` or `false` | Use locally cached Docker image without pulling |
 | `--spt-image` | from `SPT_IMAGE` or release/dev default | Override the engine image ref |
 
-A replay that ends on its own with fewer steps with results than its scenario runs exits 1, for example when the scenario fails after its first step. The check needs results, so it doesn't run with `--auto-results=false`. A JavaScript `.run()` in a branch that isn't taken counts as a step, and so does a step with nothing to do that finishes without results, such as a DELETE whose items file doesn't exist.
+A replay exits 1, as `spt run` does, when the engine ends its scenario FAILED, whichever step failed, and the error names that step and the engine's cause; this holds with `--auto-terminate-seconds` too. A replay that ends on its own with fewer steps with results than its scenario runs also exits 1, for example when the scenario fails after its first step. The check needs results, so it doesn't run with `--auto-results=false`. A JavaScript `.run()` in a branch that isn't taken counts as a step, and so does a step with nothing to do that finishes without results, such as a DELETE whose items file doesn't exist. A loop around one `.run()` counts once but runs several steps, and a `.start()` doesn't count, so their extra steps can hide a step that never ran, and that replay exits 0.
 
 ### Replay Results Options
 
@@ -825,7 +831,7 @@ A replay that ends on its own with fewer steps with results than its scenario ru
 |------|---------|-------------|
 | `--test-hosts` | from `HOSTS` or `127.0.0.1` | Comma-separated Docker hosts: `[user@]host[,...]` |
 | `--min-hosts` | `0` (all) | Minimum replay hosts that must connect |
-| `--attach-existing` | `false` | Attach to prestarted worker nodes; replay still launches the entry node. The workers must already serve the replay's `--api-port` and RMI registry port 1099 |
+| `--attach-existing` | `false` | Attach to prestarted worker nodes; replay still launches the entry node. The workers must already serve the replay's `--api-port` and `--rmi-registry-port` |
 | `--network-mode` | `host` | Docker network mode: `host` or `bridge` |
 | `--interfaces` | from `SPT_INTERFACES` or none | Spread each engine's S3 connections over a NIC set, with the checks of `spt run --interfaces`. An archived NIC set is never reused; replay drops it with a warning. See [Network Interfaces](NETWORK_INTERFACES.md#replay) |
 | `--host-interfaces` | from `SPT_HOST_INTERFACES` or none | Replace `--interfaces` on one host, with the checks of `spt run --host-interfaces`. The host must be in `--test-hosts`. |

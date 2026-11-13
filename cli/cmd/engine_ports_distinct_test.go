@@ -85,8 +85,8 @@ func TestRunCmdRefusesEqualAPIAndRegistryPortsOnEveryRoute(t *testing.T) {
 	}
 }
 
-// Replay has no --rmi-registry-port: its engines serve the registry on 1099, so an --api-port of
-// 1099 is refused before replay reads its source.
+// Replay refuses an --api-port equal to --rmi-registry-port, as spt run does, before it reads its
+// source: every engine of the replay serves both ports.
 func TestReplayCommandRefusesTheRegistryPortAsItsAPIPort(t *testing.T) {
 	var requests atomic.Int32
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -95,19 +95,31 @@ func TestReplayCommandRefusesTheRegistryPortAsItsAPIPort(t *testing.T) {
 	}))
 	defer source.Close()
 
+	cases := []struct {
+		name  string
+		flags []string
+		port  string
+	}{
+		{"both set", []string{"--" + flagAPIPort, "11099", "--" + flagRMIRegistryPort, "11099"}, "11099"},
+		{"API port on the default registry port", []string{"--" + flagAPIPort, "1099"}, "1099"},
+		{"registry port on the default API port", []string{"--" + flagRMIRegistryPort, "9999"}, "9999"},
+	}
 	for _, hosts := range []string{"127.0.0.1", "entry.example", "entry.example,worker.example"} {
-		t.Run(hosts, func(t *testing.T) {
-			var out bytes.Buffer
-			cmd := newReplayCommandForTest(t)
-			cmd.SetOut(&out)
-			cmd.SetArgs([]string{"--from", source.URL, "--endpoints", "http://192.0.2.1:9020", "--test-hosts", hosts,
-				"--api-port", "1099", "--results-dir", t.TempDir()})
-			err := cmd.Execute()
-			want := "--api-port 1099 is the engines' RMI registry port; every engine serves both ports, so choose another API port"
-			if err == nil || err.Error() != want {
-				t.Fatalf("Execute() error = %v, want %q", err, want)
-			}
-		})
+		for _, tc := range cases {
+			t.Run(hosts+"/"+tc.name, func(t *testing.T) {
+				var out bytes.Buffer
+				cmd := newReplayCommandForTest(t)
+				cmd.SetOut(&out)
+				cmd.SetArgs(append([]string{"--from", source.URL, "--endpoints", "http://192.0.2.1:9020",
+					"--test-hosts", hosts, "--results-dir", t.TempDir()}, tc.flags...))
+				err := cmd.Execute()
+				want := "--api-port and --rmi-registry-port are both " + tc.port +
+					"; every engine serves both ports, so they must differ"
+				if err == nil || err.Error() != want {
+					t.Fatalf("Execute() error = %v, want %q", err, want)
+				}
+			})
+		}
 	}
 	if got := requests.Load(); got != 0 {
 		t.Fatalf("replay read its source %d time(s) before refusing the port", got)
