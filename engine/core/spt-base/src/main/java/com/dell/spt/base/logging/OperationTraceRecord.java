@@ -1,5 +1,6 @@
 package com.dell.spt.base.logging;
 
+import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperation;
@@ -9,6 +10,8 @@ public final class OperationTraceRecord<I extends Item, O extends Operation<I>> 
 
 	private final String storageNode;
 	private final String itemPath;
+	/** The bucket of a manifest item, whose name is the key alone; null for any other item. */
+	private final String manifestBucket;
 	private final String opTypeCode;
 	private final String statusCode;
 	private final long reqTimeStart;
@@ -19,7 +22,8 @@ public final class OperationTraceRecord<I extends Item, O extends Operation<I>> 
 
 	public OperationTraceRecord(final O opResult) {
 		storageNode = opResult.nodeAddr();
-		final String itemInfo = opResult.item().toString();
+		final I item = opResult.item();
+		final String itemInfo = item.toString();
 		if (itemInfo != null) {
 			final int commaPos = itemInfo.indexOf(',', 0);
 			if (commaPos > 0) {
@@ -30,6 +34,8 @@ public final class OperationTraceRecord<I extends Item, O extends Operation<I>> 
 		} else {
 			itemPath = null;
 		}
+		// Captured now, not read in format(): operations and items are reused in recycle mode.
+		manifestBucket = item instanceof IntegrityManifestDataItem manifestItem ? manifestItem.bucket() : null;
 		opTypeCode = opResult.type() != null ? opResult.type().name() : "";
 		statusCode = opResult.status() != null ? opResult.status().name() : "";
 		reqTimeStart = opResult.reqTimeStart();
@@ -52,6 +58,13 @@ public final class OperationTraceRecord<I extends Item, O extends Operation<I>> 
 		}
 		strb.append(',');
 		if (itemPath != null) {
+			if (manifestBucket != null) {
+				// As in the request path, a manifest bucket may already start with a slash.
+				if (!manifestBucket.startsWith(Operation.SLASH)) {
+					strb.append('/');
+				}
+				strb.append(manifestBucket).append('/');
+			}
 			strb.append(itemPath);
 		}
 		strb.append(',');
