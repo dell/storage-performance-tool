@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Fixed
 
 - **Runs on one remote engine** — An `spt run` or `spt replay` that runs on a single remote engine (one `--test-hosts` entry, or several where only the first connects and `--min-hosts` allows it) now stores its driver statistics in `spt_run_params.json`; 5.17.0 recorded a `driverStatsError` there instead. A standalone DELETE there, seeded or from `--items-file`, now exits 0 after a clean delete; from 5.15.0 it exited 1 with "metric contributor identity is unavailable before execution starts". A real failure there no longer carries that reason as an extra cause.
+- **A false error line for every multipart write** — The HTTP-based S3 drivers no longer log "Request is finished (…) after the response is started (…)" in `errors.log` for each multipart upload and each retried part. In `op.trace.csv` and the multipart log (`parts.upload.csv`, fetched as `<step>.multipart.csv`), a multipart completion, abort or part retry that failed without a response is now timed like any request that never got a response, instead of carrying the earlier exchange's response times. Successful requests are timed as before.
+- **`s3-aws` multipart part retries** — When a part of an `s3-aws` multipart upload failed, none of its retries was sent: each failed at once with `FAIL_UNKNOWN`, the step logged an ERROR "I/O operation invocation failure", and the upload was then aborted. The retry is now sent, so an upload whose part fails once can complete.
 
 ## [5.17.0] - 2026-11-11
 

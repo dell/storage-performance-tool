@@ -327,6 +327,18 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return false;
 	}
 
+	/**
+	 * Declares that every submission of an operation starts its request timing again, so the
+	 * completion or abort of a multipart CREATE is timed as an exchange of its own. The parent's
+	 * timing is then reset before that finalization is enqueued: it still holds its initiation's
+	 * response times, which would make the new request look finished after its response started.
+	 * A driver that starts the timing only on an operation's first submission keeps its
+	 * initiation's request times through the finalization, so its timing is left as it is.
+	 */
+	protected boolean timesEverySubmission() {
+		return false;
+	}
+
 	/** Operations the dispatch task has drained but not yet submitted. */
 	protected final int dispatcherBacklog() {
 		final var task = this.opDispatchTask;
@@ -903,6 +915,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 						subOp.incrementRetryCount();
 						parentOp.undoMarkSubTaskCompleted();
 						op.status(Operation.Status.PENDING);
+						// The retry is a new request: the failed attempt's response times would make
+						// it look finished after its response started.
+						op.resetTiming();
 						if (op.item() instanceof DataItem dataItem) {
 							dataItem.reset();
 						}
@@ -934,6 +949,11 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				// Execute once again to finalize the composite operation, for example
 				// completing the multipart upload. The finalization gate prevents
 				// concurrent part completions from enqueueing the same parent twice.
+				// See timesEverySubmission(). A composite READ's finalization sends no request, and its
+				// duration runs from its initial pass, so its timing is kept.
+				if (OpType.CREATE.equals(parentOp.type()) && timesEverySubmission()) {
+					parentOp.resetTiming();
+				}
 				enqueueChildOp((O) parentOp, op, "completion operation");
 			}
 		}

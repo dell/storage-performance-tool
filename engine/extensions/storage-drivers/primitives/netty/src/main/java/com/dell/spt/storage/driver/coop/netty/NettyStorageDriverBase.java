@@ -938,6 +938,12 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		return true;
 	}
 
+	/** {@link #submit(Operation)} and direct dispatch start the request timing of every operation they send. */
+	@Override
+	protected boolean timesEverySubmission() {
+		return true;
+	}
+
 	/**
 	 * Returns a completed operation's permit and channel, once per request attempt. A driver whose
 	 * attempts hold capacity beyond the permit releases it here too, then signals the dispatcher.
