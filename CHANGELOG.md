@@ -6,8 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Changed
+
+- **`SPT_JAVA_OPTS` with the bundle launchers** — `SPT_JAVA_OPTS` now adds to the bundle launchers' default JVM options, as it does in the SPT image, instead of replacing them. Results of `run.sh` and `run.bat` runs that set `SPT_JAVA_OPTS` can differ from 5.17.0. **Compatibility:** to pick another garbage collector, turn ZGC off first: `SPT_JAVA_OPTS="-XX:-UseZGC -XX:+UseG1GC"`; G1 tuning options without `-XX:+UseG1GC` are accepted and do nothing under ZGC. A maximum heap below 1 GiB needs a matching `-Xms`, because the default `-Xms1g` stays: `SPT_JAVA_OPTS="-Xms512m -Xmx512m"`. `-XX:MaxRAMPercentage` has no effect while the default `-Xmx4g` is on the line; give `-Xmx` instead. To run without the defaults, call `java <options> -jar spt.jar` directly.
+
 ### Fixed
 
+- **The `linux/arm64` image and arm64 JDKs** — The `linux/arm64` SPT image, and `run.sh` and `run.bat` with an arm64 JDK, now start: `-XX:UseAVX=2` is passed only to x86 JVMs. From 5.5.0 to 5.17.0 an arm64 JVM refused the option and exited.
+- **Bundle launcher options** — `run.bat` now passes `-XX:+UseNUMA` and the RMI response timeout, as `run.sh` and the SPT image do. `run.sh` sets `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` unless the caller has set `GLIBC_TUNABLES`, as the image does.
+- **Signals sent to `run.sh`** — `run.sh` now replaces itself with the JVM, as the SPT image's entrypoint does, so a signal sent to `run.sh` stops the engine. **Compatibility:** the process now shows as `java ... spt.jar`; match `spt.jar`, not `run.sh`, to find it.
 - **Runs on one remote engine** — An `spt run` or `spt replay` that runs on a single remote engine (one `--test-hosts` entry, or several where only the first connects and `--min-hosts` allows it) now stores its driver statistics in `spt_run_params.json`; 5.17.0 recorded a `driverStatsError` there instead. A standalone DELETE there, seeded or from `--items-file`, now exits 0 after a clean delete; from 5.15.0 it exited 1 with "metric contributor identity is unavailable before execution starts". A real failure there no longer carries that reason as an extra cause.
 
 ## [5.17.0] - 2026-11-11
