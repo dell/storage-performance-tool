@@ -1985,6 +1985,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			} catch (final RuntimeException e) {
 				LogUtil.exception(Level.DEBUG, e, "{}: failed to record an orphaned multipart upload", stepId);
 			}
+			// The upload ends with its part's failure, as after an answered abort.
+			op.status(abortedUploadStatus(compositeOp));
 		}
 	}
 

@@ -2052,6 +2052,56 @@ public class S3AwsStorageDriverTest {
 	@Nested
 	class InvokeNioTest {
 
+		/** A multipart upload aborted after a part was refused for good (403), whose abort is answered or throttled. */
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		private CompositeDataOperation abortAfterARefusedPart(final CompletableFuture<AbortMultipartUploadResponse> answer) {
+			final CompositeDataOperation compositeOp = mock(CompositeDataOperation.class);
+			final DataItem item = mock(DataItem.class);
+			when(compositeOp.type()).thenReturn(OpType.CREATE);
+			when(compositeOp.dstPath()).thenReturn("/bucket");
+			when(compositeOp.item()).thenReturn(item);
+			when(item.name()).thenReturn("key");
+			when(compositeOp.get(KEY_UPLOAD_ID)).thenReturn("upload-id-abort");
+			when(compositeOp.get(KEY_MPU_ABORT)).thenReturn("true");
+			when(compositeOp.get("mpuFailure")).thenReturn(Operation.Status.RESP_FAIL_AUTH.name());
+			when(mockS3Client.abortMultipartUpload(any(AbortMultipartUploadRequest.class))).thenReturn(answer);
+			return compositeOp;
+		}
+
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		private static Operation.Status lastStatus(final CompositeDataOperation compositeOp) {
+			final ArgumentCaptor<Operation.Status> statuses = ArgumentCaptor.forClass(Operation.Status.class);
+			verify(compositeOp, atLeastOnce()).status(statuses.capture());
+			return statuses.getValue();
+		}
+
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		@Test
+		void anAnsweredAbortEndsTheUploadWithItsPartsStatus() {
+			final var compositeOp = abortAfterARefusedPart(
+							CompletableFuture.completedFuture(AbortMultipartUploadResponse.builder().build()));
+
+			drv.invokeNio((Operation) compositeOp);
+
+			assertEquals(Operation.Status.RESP_FAIL_AUTH, lastStatus(compositeOp));
+		}
+
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		@Test
+		void aFailedAbortEndsTheUploadWithItsPartsStatus() {
+			final S3Exception throttled = (S3Exception) S3Exception.builder().statusCode(503).message("Slow Down").build();
+			final var compositeOp = abortAfterARefusedPart(CompletableFuture.failedFuture(throttled));
+
+			drv.invokeNio((Operation) compositeOp);
+
+			assertEquals(Operation.Status.RESP_FAIL_AUTH, lastStatus(compositeOp),
+							"a throttled abort must not make a refused upload retryable");
+		}
+
 		@SuppressWarnings("unchecked")
 		@Test
 		void successfulDelete_callsFinishOperation() {

@@ -1102,8 +1102,9 @@ final class S3NicSetWorkloadTest {
 
 	/**
 	 * The abort's kernel route refuses it: the first endpoint stopped once the upload began. The
-	 * upload fails with {@code FAIL_IO} at the first endpoint, nothing is sent, the lifecycle record
-	 * names it orphaned, and the abort gives its permit back.
+	 * upload fails at the first endpoint with its part's failure, as after an answered abort, nothing
+	 * is sent, the lifecycle record names it orphaned with the abort's {@code FAIL_IO}, and the abort
+	 * gives its permit back.
 	 */
 	@Test
 	void anAbortWhoseKernelRouteRefusesFailsTheUploadAndGivesBackItsPermit() throws Exception {
@@ -1130,7 +1131,8 @@ final class S3NicSetWorkloadTest {
 		final var upload = multipart(key, 1);
 		assertTrue(run.driver().put(upload));
 		final var result = awaitUpload(run, upload);
-		assertEquals(Operation.Status.FAIL_IO, result.status());
+		// The part's 503.
+		assertEquals(Operation.Status.RESP_FAIL_SVC, result.status());
 
 		final var init = stub.objectRequests().get(1);
 		assertEquals("POST init", phase(init));

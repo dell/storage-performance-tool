@@ -913,8 +913,14 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 						nextChildOps = List.of(op);
 						childFailureContext = "part retry";
 					} else {
-						parentOp.put("mpuFailure", op.status().name());
-						if (OpType.READ.equals(op.type())) {
+						final boolean rangeRead = OpType.READ.equals(op.type());
+						// An upload keeps the failure of its first part to run out of retries, the
+						// reason it is aborted: a sibling that fails after the abort, for example with
+						// 404 on the aborted upload, must not replace it.
+						if (rangeRead || parentOp.get("mpuFailure") == null) {
+							parentOp.put("mpuFailure", op.status().name());
+						}
+						if (rangeRead) {
 							// Range reads are stateless, so there is nothing to abort: the other
 							// ranges finish, and finalization reports this failure.
 							nextChildOps = (List<O>) parentOp.nextSubOperations(1);
@@ -956,10 +962,10 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	}
 
 	/**
-	 * The status a multipart upload ends with when it is aborted because a part ran out of retries: that
-	 * part's own failure, so that under {@code load-op-retry} the whole upload is retried only when the
-	 * part's failure is retryable, and an auth or not-found failure is not. {@code FAIL_UNKNOWN} when no
-	 * part failure is recorded.
+	 * The status a multipart upload ends with when it is aborted because a part ran out of retries: the
+	 * failure of the first part that did, whether or not the abort itself succeeds, so that under
+	 * {@code load-op-retry} the whole upload is retried only when that failure is retryable, and an auth
+	 * or not-found failure is not. {@code FAIL_UNKNOWN} when no part failure is recorded.
 	 */
 	protected static Operation.Status abortedUploadStatus(final CompositeOperation<?> parentOp) {
 		final String partFailure = parentOp.get("mpuFailure");

@@ -524,6 +524,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 										originalStatus, DELETE_TRANSPORT_FAILURE));
 					}
 				}
+			} else if (aborting && originalStatus != Status.INTERRUPTED) {
+				// The upload ends with its part's failure, as when the abort succeeds.
+				op.status(abortedUploadStatus(mpuOp));
 			} else {
 				op.status(originalStatus);
 			}

@@ -10,6 +10,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -198,6 +199,73 @@ final class S3MultipartStepCountsTest {
 			assertRequests(8, 7, 1);
 		}
 		assertEnded();
+	}
+
+	/**
+	 * At concurrency 4, part 1 of one upload runs out of retries on 503 and the upload is aborted. Part
+	 * 2's last attempt reaches the target after the abort and is answered 404, as S3 answers a part of
+	 * an aborted upload, before the abort's own answer. The upload still ends with part 1's 503, the
+	 * reason it was aborted, so {@code load-op-retry} retries it.
+	 */
+	@Test
+	void anUploadAbortedOnAThrottledPartKeepsThatStatusWhenASiblingFailsLater() throws Exception {
+		anUploadAbortedOnAThrottledPartKeepsThatStatusWhenASiblingFailsLater(false);
+	}
+
+	@Test
+	void anUploadAbortedOnAThrottledPartKeepsThatStatusWhenASiblingFailsLaterWithRetry() throws Exception {
+		anUploadAbortedOnAThrottledPartKeepsThatStatusWhenASiblingFailsLater(true);
+	}
+
+	private void anUploadAbortedOnAThrottledPartKeepsThatStatusWhenASiblingFailsLater(final boolean retry)
+					throws Exception {
+		final var parts = partsOfOneUpload(Set.of("1", "2"));
+		final var part2Attempts = new AtomicInteger();
+		final var abortArrived = new CountDownLatch(1);
+		stub.failRequest = request -> {
+			if (S3NicSetWorkloadTest.isAbort(request)) {
+				// Hold the abort's answer, so that part 2's last answer comes first.
+				abortArrived.countDown();
+				sleep(500);
+				return false;
+			}
+			if (!parts.test(request)) {
+				return false;
+			}
+			if ("2".equals(NicSetLoopback.param(request.query(), "partNumber")) && part2Attempts.incrementAndGet() == 4) {
+				// Part 2's last attempt is answered after the abort reached the target.
+				await(abortArrived);
+				stub.failureStatus = 404;
+			}
+			return true;
+		};
+
+		final var outcomes = write(4, 4, retry, null, WAIT_LIMIT_SECONDS);
+
+		if (retry) {
+			assertEquals(List.of(4L, 0L), outcomes.get("CREATE-4"), outcomes::toString);
+			assertRequests(5, 4, 1);
+		} else {
+			assertEquals(List.of(3L, 1L), outcomes.get("CREATE-4"), outcomes::toString);
+			assertRequests(4, 3, 1);
+		}
+		assertEnded();
+	}
+
+	private static void sleep(final long millis) {
+		try {
+			Thread.sleep(millis);
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
+		}
+	}
+
+	private static void await(final CountDownLatch latch) {
+		try {
+			latch.await(10, TimeUnit.SECONDS);
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
+		}
 	}
 
 	@Test

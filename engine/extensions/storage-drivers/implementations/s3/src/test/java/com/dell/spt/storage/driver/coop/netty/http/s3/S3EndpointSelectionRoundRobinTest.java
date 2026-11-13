@@ -430,7 +430,8 @@ final class S3EndpointSelectionRoundRobinTest {
 
 	/**
 	 * A part runs out of retries and its upload's abort never connects: nothing was sent, so the upload
-	 * stays open and is recorded orphaned, and the operation ends.
+	 * stays open and is recorded orphaned, and the operation ends with the part's failure, as after an
+	 * answered abort.
 	 */
 	@Test
 	void anAbortThatCannotConnectRecordsItsUploadOrphaned() throws Exception {
@@ -451,7 +452,8 @@ final class S3EndpointSelectionRoundRobinTest {
 		assertTrue(records.get(0).contains("abort failed: FAIL_IO"), records::toString);
 		// HEAD, INIT, part 1 and its three retries; the abort's turn is the refused endpoint.
 		assertEquals(List.of(0, 1, 2, 3, 4, 5), listenerSequence());
-		assertEquals(Operation.Status.FAIL_IO, awaitFailedUpload(run, key).status());
+		// The part's 500.
+		assertEquals(Operation.Status.RESP_FAIL_SVC, awaitFailedUpload(run, key).status());
 		assertNoMoreRequests(6);
 		awaitNoActiveOperation(run);
 	}
