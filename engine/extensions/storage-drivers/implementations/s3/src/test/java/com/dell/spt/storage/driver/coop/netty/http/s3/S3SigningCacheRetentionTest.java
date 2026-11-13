@@ -41,14 +41,17 @@ class S3SigningCacheRetentionTest {
 	}
 
 	@Test
+	@SuppressWarnings("deprecation")
 	void closeOnTheSigningThreadEmptiesItsCachesAndTheCachedFunctionHoldsNoDriver() throws Exception {
 		final var driver = new S3StorageDriver<Item, Operation<Item>>(
 						"signing-retention", null, plainStorage(), false, 1);
 		sign(driver);
 		final var functions = driver.signingKeyCreateFunctionCache.get();
 		assertEquals(1, functions.size(), "one signing function for the one secret");
-		assertEquals(1, driver.signingKeyCache.get().size(), "one signing key for today");
 		assertHoldsNoDriver(functions.get(CREDENTIAL.getSecret()), driver);
+		// SPT no longer fills the date-keyed cache; an extension still might, and close clears it.
+		assertTrue(driver.signingKeyCache.get().isEmpty(), "the date-keyed cache is unused");
+		driver.signingKeyCache.get().put("20261113", new byte[0]);
 
 		driver.close();
 

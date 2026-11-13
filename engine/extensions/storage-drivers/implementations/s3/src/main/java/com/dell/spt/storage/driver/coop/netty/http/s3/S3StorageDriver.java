@@ -134,7 +134,14 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					BUCKET_LIST_QUERY = ThreadLocal.withInitial(StringBuilder::new);
 	//for v4 only
 	// TODO: compare to ConcurrentHashMap
+	// Each thread's signing function per secret; the function keeps that secret's key of the last date.
 	protected final ThreadLocal<Map<String, SigningKeyCreateFunction>> signingKeyCreateFunctionCache = ThreadLocal.withInitial(HashMap::new);
+	/**
+	 * @deprecated retained for binary compatibility only; SPT never reads this field or fills it,
+	 *             and only clears the closing thread's entry in {@link #doClose()}. It kept one key
+	 *             per date, whatever the secret; each secret's signing function now keeps its own.
+	 */
+	@Deprecated
 	protected final ThreadLocal<Map<String, byte[]>> signingKeyCache = ThreadLocal.withInitial(HashMap::new);
 	// for v2 only
 	protected static final ThreadLocal<Map<String, Mac>> MAC_BY_SECRET = ThreadLocal.withInitial(HashMap::new);
@@ -439,15 +446,24 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * Derives the SigV4 signing key of one secret. It is static and copies the driver's region and
-	 * service name, so a signing thread's cache, which outlives the driver, keeps no driver reachable.
+	 * The SigV4 signing key of one secret. It keeps the key of the last date it was asked for, so a
+	 * secret's key is derived once a day on each thread, whatever other secrets the thread signs with.
+	 * Region and service name are the driver's own and never vary, so the secret and the date are
+	 * all the key depends on.
+	 *
+	 * <p>Each instance is reachable only from one thread's {@link #signingKeyCreateFunctionCache}
+	 * map, so only that thread reads or writes its date and key. It is static and copies the
+	 * driver's region and service name, so a signing thread's cache, which outlives the driver,
+	 * keeps no driver reachable.
 	 */
-	private static final class SigningKeyCreateFunctionImpl
+	static class SigningKeyCreateFunctionImpl
 					implements SigningKeyCreateFunction {
 
 		private final String secret;
 		private final String region;
 		private final String service;
+		private String date;
+		private byte[] key;
 
 		SigningKeyCreateFunctionImpl(final String secret, final String region, final String service) {
 			this.secret = secret;
@@ -455,8 +471,18 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			this.service = service;
 		}
 
+		/** The signing key for {@code datestamp}, derived only when the date is not the last one. */
 		@Override
 		public byte[] apply(final String datestamp) {
+			if (!datestamp.equals(date)) {
+				key = derive(datestamp);
+				date = datestamp;
+			}
+			return key;
+		}
+
+		/** Derives the key for {@code datestamp}; tests override it to count derivations. */
+		byte[] derive(final String datestamp) {
 			return getSignatureKey(secret, datestamp, region, service);
 		}
 	}
@@ -2496,7 +2522,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				}
 				final var signingKeyCreateFunction = signingKeyCreateFunctionCache.get().computeIfAbsent(
 								secret, s -> new SigningKeyCreateFunctionImpl(s, awsRegion, sigV4ServiceName));
-				final var signingKey = signingKeyCache.get().computeIfAbsent(date, signingKeyCreateFunction);
+				final var signingKey = signingKeyCreateFunction.apply(date);
 				final Map<String, String> sortedHeaders = getNonCanonicalHeaders(httpHeaders);
 				final var canonicalForm = getCanonicalV4(httpHeaders, sortedHeaders, httpMethod, dstUriPath);
 				byte[] encodedhash = THREAD_LOCAL_SHA256.get().digest(
