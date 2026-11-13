@@ -283,6 +283,12 @@ Host networking is the default and is recommended for distributed replay because
 the engine uses Java RMI between nodes. If you choose another Docker network
 mode, verify that inter-node API and RMI traffic can still connect.
 
+Every engine of a replay, local, remote or distributed, serves the API port
+(`--api-port`, default 9999) and the RMI registry port (`--rmi-registry-port`,
+default 1099), and the entry reaches each worker on the registry port. Give a
+replay that shares its hosts with another replay or `spt run` its own pair of
+ports. With `--attach-existing`, the prestarted workers must already serve both.
+
 ## Limitations
 
 The first replay release does not support:

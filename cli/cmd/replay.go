@@ -66,10 +66,9 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	if strings.TrimSpace(sourceURL) == "" {
 		return fmt.Errorf("--from URL is required")
 	}
-	// Replay engines serve their RMI registry on the default port, which the API port must not take.
-	if apiPort, err := strconv.Atoi(strings.TrimSpace(apiPortFlag(cmd))); err == nil && apiPort == constants.DefaultRMIRegistryPort {
-		return fmt.Errorf("--%s %d is the engines' RMI registry port; every engine serves both ports, so choose another API port",
-			flagAPIPort, apiPort)
+	registryPort, err := replayRMIRegistryPort(cmd)
+	if err != nil {
+		return err
 	}
 	endpoints, _ := cmd.Flags().GetStringSlice("endpoints")
 	if endpoint, _ := cmd.Flags().GetString("endpoint"); strings.TrimSpace(endpoint) != "" && len(endpoints) == 0 {
@@ -194,6 +193,11 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	params := generated.Params
 	minimalTUI, _ := cmd.Flags().GetBool("minimal")
 	params.MinimalTUI = minimalTUI
+	// The local engine takes the registry port from params, and the orchestrator gives it to every
+	// remote and distributed engine. The default leaves every engine command unchanged.
+	if registryPort != constants.DefaultRMIRegistryPort {
+		params.RMIRegistryPort = registryPort
+	}
 
 	switch params.S3Driver {
 	case scenario.S3DriverRdma:
@@ -242,6 +246,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		})
 		replayOrchestrator.SetImage(sptImage)
 		replayOrchestrator.SetAPIPort(apiPort)
+		replayOrchestrator.SetRMIRegistryPort(params.RMIRegistryPort)
 		forceMode, _ := cmd.Flags().GetBool("force")
 		replayOrchestrator.SetForceCleanup(forceMode)
 		if err := connectReplayOrchestrator(context.Background(), replayOrchestrator); err != nil {
@@ -458,6 +463,25 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	return resolveReplayRunError(err, false, len(replayStepIDs(generated)), outcome)
 }
 
+// replayRMIRegistryPort reads --rmi-registry-port and checks it as spt run does: every engine of
+// the replay serves it and the API port, so it must be a TCP port other than the API port.
+func replayRMIRegistryPort(cmd *cobra.Command) (int, error) {
+	registryPort, err := cmd.Flags().GetInt(flagRMIRegistryPort)
+	if err != nil {
+		return 0, err
+	}
+	if err := validatePortFlag(flagRMIRegistryPort, registryPort); err != nil {
+		return 0, err
+	}
+	// An API port that is not a number is left to the checks that report it.
+	if apiPort, err := strconv.Atoi(strings.TrimSpace(apiPortFlag(cmd))); err == nil {
+		if err := validateDistinctEnginePorts(apiPort, registryPort); err != nil {
+			return 0, err
+		}
+	}
+	return registryPort, nil
+}
+
 // resolveReplayRunError exits 1, as spt run does, when the tracker saw the engine end the replay
 // FAILED, whichever step failed: that step can still leave results, so the count below would pass
 // it. Otherwise it exits 1 when a replay that ended on its own has fewer steps with results than
@@ -614,12 +638,13 @@ func init() {
 	replayCmd.Flags().Bool("force", false, "Resolve port conflicts and permit known engine build mismatches; does not override invalid build information or collection failures")
 	replayCmd.Flags().String("api-port", "", "Spt API port for every engine in the replay (defaults to 9999)")
 	replayCmd.Flags().Int("min-hosts", 0, "Minimum number of replay hosts that must connect (default: all hosts)")
-	replayCmd.Flags().Bool(flagAttachExistingWorkers, false, "Attach to prestarted worker nodes, which must serve --api-port and RMI registry port 1099; replay still launches the entry node")
+	replayCmd.Flags().Bool(flagAttachExistingWorkers, false, "Attach to prestarted worker nodes, which must serve the replay's --api-port and --rmi-registry-port; replay still launches the entry node")
 	replayCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
 	replayCmd.Flags().StringArray(flagHostInterfaces, nil, "Replace --interfaces on one host: <host>=<value>, with <value> auto, a comma-separated list, or none to turn NICs off there; repeat for more hosts")
 	replayCmd.Flags().String(flagInterfaces, "", "Spread each engine's connections over a NIC set: auto, or interface names, IPv4 addresses or RDMA devices (comma-separated; default S3 driver, host networking; env: SPT_INTERFACES); archived NIC sets are ignored")
 	replayCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
 	replayCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
+	replayCmd.Flags().Int(flagRMIRegistryPort, constants.DefaultRMIRegistryPort, rmiRegistryPortUsage)
 	replayCmd.Flags().Bool(flagSkipImagePull, false, "Use the locally cached Docker image without pulling the latest tag (env: SPT_SKIP_IMAGE_PULL)")
 	replayCmd.Flags().String(flagSptImage, "", "Override the engine image ref (env: SPT_IMAGE)")
 	replayCmd.Flags().String("trace-file", "", "Save all output to specified trace file")

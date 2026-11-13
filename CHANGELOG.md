@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Added
 
 - **`spt verify --rmi-registry-port`** — `spt verify` now takes `--rmi-registry-port`, with the default (1099), help text and range check of `spt run`'s flag. Verify's test engine serves its RMI registry on that port, and the port conflict check and bridge port mappings use it. With `--api-port` and `--rmi-registry-port`, a host can be verified beside a running engine that holds ports 1099 and 9999. `spt run` takes the same flag for every engine in a run.
+- **`spt replay --rmi-registry-port`** — `spt replay` now takes `--rmi-registry-port`, with the default (1099), help text and range check of `spt run`'s flag. Every engine of the replay serves its RMI registry on that port: the local engine, a lone remote engine, or the entry and every worker of a distributed replay, which the entry reaches on it. Concurrent replays, or a replay beside an `spt run`, can now share hosts, each on its own `--api-port` and `--rmi-registry-port`. Replay now refuses an `--api-port` equal to `--rmi-registry-port`, as `spt run` does, so `--api-port 1099` works with another registry port. At the default port, every engine command is unchanged.
 
 ### Changed
 
