@@ -924,7 +924,8 @@ func (v *Verifier) probePorts(ctx context.Context, host *hostparse.HostInfo, por
 // or probed only by a probe the deadline cut short. A round that failed with every port seen
 // open in some round says so, rather than that the ports are accessible.
 func (v *Verifier) portsMessage(ports []servicePort, seen []portState, passed bool) string {
-	var closed, noResult, all []string
+	var closed, noResult []string
+	all := make([]string, 0, len(ports))
 	for i, port := range ports {
 		label := fmt.Sprintf("%d (%s)", port.number, port.name)
 		all = append(all, label)
