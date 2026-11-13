@@ -282,8 +282,6 @@ func TestWaitForPorts_FirstProbeCutShortHasNoResult(t *testing.T) {
 	}
 }
 
-// Ports seen open in different rounds but never in the same one fail the wait, and the message
-// does not call them accessible.
 // The wait reports a failed round with every port seen open in some round as never all open at
 // once: round 1 sees the registry closed and the API open, round 2 the registry open and an API
 // probe the deadline cuts short, which keeps the API's open state.
@@ -315,6 +313,8 @@ func TestWaitForPorts_OpenAcrossRoundsIsNotAccessible(t *testing.T) {
 	}
 }
 
+// Ports seen open in different rounds but never in the same one fail the wait, and the message
+// does not call them accessible.
 func TestPortsMessage_OpenAcrossRoundsIsNotAccessible(t *testing.T) {
 	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true}
 	v := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{APIPort: 19100}, &MockCommandExecutor{}, &startupNetworkChecker{}, &RealTimeProvider{})
