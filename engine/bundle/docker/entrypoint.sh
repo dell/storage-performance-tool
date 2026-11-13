@@ -67,6 +67,5 @@ if [ "$1" = "sh" ] || [ "$1" = "bash" ] || [ "$1" = "/bin/sh" ] || [ "$1" = "/bi
 fi
 
 # Launch Spt with all provided arguments
-# The default storage driver is set to s3 (instead of dummy-mock) as it's more commonly used
-# Users can override this with --storage-driver-type parameter
+# The default storage driver is dummy-mock; --storage-driver-type selects another, such as s3
 exec java $JAVA_OPTS -jar /opt/spt/spt.jar "$@"

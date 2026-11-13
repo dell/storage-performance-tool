@@ -244,7 +244,8 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 	if err != nil {
 		return fmt.Errorf("resolve engine startup settings: %w", err)
 	}
-	// Only the single-host engine moves its registry; distributed workers keep the default.
+	// The local engine serves the run's registry port; MultiHostOrchestrator.SetRMIRegistryPort
+	// sets it for remote and distributed engines.
 	if params.RMIRegistryPort > 0 {
 		startupArgs = append(startupArgs, fmt.Sprintf("%s%d", constants.EngineNodePortArgPrefix, params.RMIRegistryPort))
 	}
@@ -538,14 +539,10 @@ func terminalDeletePolicyFailure(update *MultiNodeMetricsUpdate) error {
 		metric.Delete.FailurePolicy.Outcome != deletemetrics.OutcomeFailed {
 		return nil
 	}
-	if deletemetrics.HasVerificationFailure(metric.Delete.Verification) {
-		return fmt.Errorf(
-			"DELETE verification failed for step %q",
-			metric.StepID)
+	return &runcontrol.DeleteTerminalPolicyFailure{
+		StepID:       metric.StepID,
+		Verification: deletemetrics.HasVerificationFailure(metric.Delete.Verification),
 	}
-	return fmt.Errorf(
-		"DELETE failure policy rejected the terminal outcome for step %q",
-		metric.StepID)
 }
 
 func (o *TestOrchestrator) observeDetailedDeleteMetrics(update *MultiNodeMetricsUpdate) {
