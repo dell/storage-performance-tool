@@ -4,6 +4,7 @@ import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.MIN_COMPL
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.WAIT_TIMEOUT_MILLIS;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.awaitCondition;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.createStepConfig;
+import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.firstCompletionOr;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.sleepUntil;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.statistics;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.steadySettings;
@@ -14,7 +15,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
@@ -75,7 +75,10 @@ class LoadStepLocalSteadyStopPathTest {
 		try (final var metricsMgr = new RecordingMetricsManager()) {
 			final var step = new TwoContextStep(config, List.of(slowDrain, other), metricsMgr);
 			// The first context's requests in flight at the stop stay there until the test lets go.
-			slowDrain.holdCompletionsWhen(step::windowsClosed).stopProbe(step::windowsClosed);
+			// Its first request is held from its completion, so the stop always finds one and its
+			// drain lasts until the release: otherwise a stop between two waves would drain nothing,
+			// and the stop would reach the second context at once.
+			slowDrain.holdCompletionsWhen(firstCompletionOr(step::windowsClosed)).stopProbe(step::windowsClosed);
 			other.stopProbe(step::windowsClosed);
 			final Thread runner = Thread.ofPlatform().name("steady-two-contexts-run").start(step);
 			final Thread stopper = Thread.ofPlatform().name("steady-two-contexts-stop").unstarted(step::stop);
@@ -159,7 +162,9 @@ class LoadStepLocalSteadyStopPathTest {
 		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.standaloneDelete(C, L_MILLIS);
 		try (final var metricsMgr = new RecordingMetricsManager()) {
 			final var step = new DurationDeleteStep(durationDeleteConfig("steady-early-" + stop), driver, metricsMgr);
-			driver.holdCompletionsWhen(step::windowsClosed).stopProbe(step::windowsClosed);
+			// The first request is held from its completion, so every stop action finds one in flight,
+			// even when its cut falls between two waves.
+			driver.holdCompletionsWhen(firstCompletionOr(step::windowsClosed)).stopProbe(step::windowsClosed);
 			try {
 				step.start();
 				final long durationNanos = stop == EarlyStop.WORKER_DEADLINE_GUARD
@@ -187,15 +192,8 @@ class LoadStepLocalSteadyStopPathTest {
 					assertTrue(driver.awaitAdmissionClosed(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS));
 					assertTrue(driver.stopProbeHeldAtAdmissionClose(), "the window closed before admission closed");
 				}
-				if (stop == EarlyStop.WORKER_DEADLINE_GUARD) {
-					// The guard fires at a fixed time and requests travel in waves, so its cut can fall
-					// between two waves. With admission closed, nothing else will come to be held.
-					awaitCondition(
-									() -> driver.heldNow() == driver.activeOpCount(),
-									"the requests in flight at the cut to complete or be held");
-					assumeTrue(driver.heldNow() >= 1, "the deadline fell between two waves, so no request is late");
-				}
-				// Every request in flight at the cut is held; then they complete, before doShutdown.
+				// Every request in flight at the cut is held, the first one since its completion; then they
+				// complete, before doShutdown.
 				awaitCondition(
 								() -> driver.heldNow() >= 1 && driver.heldNow() == driver.activeOpCount(),
 								() -> "every request in flight held: held " + driver.heldNow()
@@ -247,7 +245,8 @@ class LoadStepLocalSteadyStopPathTest {
 		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.standaloneDelete(C, L_MILLIS);
 		try (final var metricsMgr = new RecordingMetricsManager()) {
 			final var step = new DurationDeleteStep(durationDeleteConfig("steady-duration-stop"), driver, metricsMgr);
-			driver.holdCompletionsWhen(step::windowsClosed)
+			// The first request is held from its completion, so the stop always finds one in flight.
+			driver.holdCompletionsWhen(firstCompletionOr(step::windowsClosed))
 							.releaseHeldAfterAdmissionClose(LATE_HOLD_MILLIS)
 							.stopProbe(step::windowsClosed);
 			try {
