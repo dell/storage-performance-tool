@@ -458,12 +458,18 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	return resolveReplayRunError(err, false, len(replayStepIDs(generated)), outcome)
 }
 
-// resolveReplayRunError exits 1 when a replay that ended on its own has fewer steps with results
-// than its scenario runs. A scenario error after the first step ends the engine's run as COMPLETED,
-// so nothing else shows it. It counts steps rather than matching names, because a step the archive
-// didn't name runs under an ID the engine chose. A stop or an auto-terminate explains its own missing
-// steps, and neither a tracker that failed nor a run with no summary can say how the replay ended.
+// resolveReplayRunError exits 1, as spt run does, when the tracker saw the engine end the replay
+// FAILED, whichever step failed: that step can still leave results, so the count below would pass
+// it. Otherwise it exits 1 when a replay that ended on its own has fewer steps with results than
+// its scenario runs. A scenario error after the first step ends the engine's run as COMPLETED, so
+// nothing else shows it. It counts steps rather than matching names, because a step the archive
+// didn't name runs under an ID the engine chose. A stop or an auto-terminate explains its own
+// missing steps, and neither a tracker that failed nor a run with no summary can say how the
+// replay ended.
 func resolveReplayRunError(runErr error, autoTerminated bool, expectedSteps int, outcome autoResultsOutcome) error {
+	if failure := trackedFailureError(runErr, outcome.Tracker); failure != nil {
+		return failure
+	}
 	if runErr != nil || autoTerminated || outcome.TrackerErr != nil || !outcome.SummaryRead ||
 		outcome.StepsWithResults >= expectedSteps {
 		return runErr

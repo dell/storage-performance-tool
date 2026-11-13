@@ -1244,10 +1244,19 @@ func resolveOrdinaryRunError(runErr error, outcome autoResultsOutcome) error {
 	if !stopped && !failed && runErr == nil && outcome.TrackerErr == nil && len(outcome.AllFailedPhases) > 0 {
 		return &ExitCodeError{Code: constants.ExitCodeWorkloadFailure, Msg: allFailedPhasesReason(outcome.AllFailedPhases)}
 	}
-	if !failed {
-		return runErr
+	if failure := trackedFailureError(runErr, outcome.Tracker); failure != nil {
+		return failure
 	}
-	message := trackedFailureReason(outcome.Tracker)
+	return runErr
+}
+
+// trackedFailureError returns the exit-1 error for a run whose tracker saw the engine's FAILED
+// terminal state, with the engine's cause and any independent run error, or nil when it saw none.
+func trackedFailureError(runErr error, tracker *portcheck.RunResult) error {
+	if tracker == nil || tracker.FinalState != constants.StateFailed {
+		return nil
+	}
+	message := trackedFailureReason(tracker)
 	if runErr != nil && !runcontrol.IsOnlyOwnedEngineTerminalFailure(runErr) {
 		message += "; run also failed: " + runErr.Error()
 	}

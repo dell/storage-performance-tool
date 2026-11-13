@@ -245,6 +245,13 @@ spt replay \
 workloads. It stops the run after the specified time even if the archived
 workload duration is much longer.
 
+A replay exits 1 when the engine ends its scenario as failed, whichever step
+failed, as `spt run` does, and names that step and the engine's cause. It also
+exits 1 when a replay that ended on its own has fewer steps with results than its
+scenario runs. A replay whose steps all finished exits 0, even when the results
+fetch is incomplete. See [SPT_SYNTAX.md](SPT_SYNTAX.md#replay-execution-options)
+for the limits of the step count.
+
 RDMA replay launch is not implemented yet. You may use `--s3-driver rdma` with
 `--generate-only` to inspect generated replay artifacts, but launching that
 replay fails before containers start.
