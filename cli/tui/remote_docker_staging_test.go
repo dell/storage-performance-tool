@@ -356,8 +356,10 @@ func TestItemFileStagingCancelAndRollbackEndWithinTUIJoin(t *testing.T) {
 	result := make(chan tuiLaunchResult, 1)
 	staged := make(chan struct{})
 	go func() {
-		defer close(staged)
 		err := orchestrator.configureItemFileMounts(ctx, orchestrator.hosts, deleteStagingMounts[:1])
+		// Close staged before the join can see the result, so the check
+		// below never races the close.
+		close(staged)
 		result <- tuiLaunchResult{Submission: SubmissionNotSubmitted, Err: err}
 	}()
 	t.Cleanup(func() { <-staged })

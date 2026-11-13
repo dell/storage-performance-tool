@@ -148,7 +148,10 @@ func requireEndedOnKeepalives(t *testing.T, err error, elapsed time.Duration) {
 
 // requireSharedWithoutKeepalives checks that the canary's client config shares
 // connections for alias and sets no keepalives, so only SPT's can end a
-// stalled session.
+// stalled session within the canary's bound. It resolves the config without
+// SPT's options: on Debian and Ubuntu, BatchMode=yes alone sets a 300 s
+// ServerAliveInterval, which still ends a stalled session only long after
+// that bound.
 func (e canarySSHD) requireSharedWithoutKeepalives(t *testing.T, alias string) {
 	t.Helper()
 	out, err := exec.Command("/usr/bin/ssh", "-G", "-F", e.config, alias).Output() // #nosec G204 -- test-only canary
