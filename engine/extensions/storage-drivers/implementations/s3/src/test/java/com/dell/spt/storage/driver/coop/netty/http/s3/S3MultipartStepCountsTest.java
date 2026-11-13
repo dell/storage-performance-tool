@@ -206,6 +206,11 @@ final class S3MultipartStepCountsTest {
 	 * 2's last attempt reaches the target after the abort and is answered 404, as S3 answers a part of
 	 * an aborted upload, before the abort's own answer. The upload still ends with part 1's 503, the
 	 * reason it was aborted, so {@code load-op-retry} retries it.
+	 *
+	 * <p>The stub answers the abort 500 ms after it answers part 2, but the client's handling of the two
+	 * answers is not ordered: if the client takes longer than that over part 2's 404, the test passes
+	 * without the order it is about. {@code CompositeFailureStatusDriverTest} checks the rule in a set
+	 * order; this test checks it end to end through a step.
 	 */
 	@Test
 	void anUploadAbortedOnAThrottledPartKeepsThatStatusWhenASiblingFailsLater() throws Exception {
@@ -222,10 +227,13 @@ final class S3MultipartStepCountsTest {
 		final var parts = partsOfOneUpload(Set.of("1", "2"));
 		final var part2Attempts = new AtomicInteger();
 		final var abortArrived = new CountDownLatch(1);
+		final var part2Answered = new CountDownLatch(1);
 		stub.failRequest = request -> {
 			if (S3NicSetWorkloadTest.isAbort(request)) {
-				// Hold the abort's answer, so that part 2's last answer comes first.
+				// Hold the abort's answer until 500 ms after the stub fails part 2's last attempt, however
+				// late the stub's thread for that attempt runs.
 				abortArrived.countDown();
+				await(part2Answered);
 				sleep(500);
 				return false;
 			}
@@ -236,6 +244,7 @@ final class S3MultipartStepCountsTest {
 				// Part 2's last attempt is answered after the abort reached the target.
 				await(abortArrived);
 				stub.failureStatus = 404;
+				part2Answered.countDown();
 			}
 			return true;
 		};
