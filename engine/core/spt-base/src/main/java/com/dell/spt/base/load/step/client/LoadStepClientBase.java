@@ -650,7 +650,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					requireAnItemFromAFile(itemConfig, opType);
 				}
 				if (suppliesItems) {
-					requireAnItemPerEngine(config, opType, slicer.distributedItems(), configSlices.size());
+					requireAnItemPerEngine(config, slicer.distributedItems(), configSlices.size());
 				}
 			} else if (!skipScatter && !integrityConfig.enabled()) {
 				distributeNoItemsIfNothingToDelete(itemConfig, opType, itemType, configSlices, batchSize);
@@ -815,7 +815,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 * time limit ends a step: a context's is never enforced. No items at all is for
 	 * {@link #requireAnItemFromAFile}.
 	 */
-	void requireAnItemPerEngine(final Config config, final OpType opType, final long items, final int engines) {
+	void requireAnItemPerEngine(final Config config, final long items, final int engines) {
 		if (items == 0
 						|| items >= engines
 						|| !config.boolVal("load-op-recycle-mode")
@@ -828,8 +828,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						IntegrityTerminalException.Category.INPUT,
 						loadStepId(),
 						input + " has " + items + (items == 1 ? " item" : " items") + " for " + engines
-										+ " engines; each engine needs at least one in a count-based "
-										+ opType.name().toLowerCase(Locale.ROOT) + ": add items, or pass fewer --test-hosts",
+										+ " engines; each engine needs at least one in a step limited by count: add items, or pass"
+										+ " fewer --test-hosts",
 						null);
 	}
 

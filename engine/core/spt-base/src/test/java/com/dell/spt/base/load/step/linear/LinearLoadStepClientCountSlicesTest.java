@@ -222,7 +222,7 @@ class LinearLoadStepClientCountSlicesTest {
 						RUN_TIMEOUT, () -> assertThrows(RunTerminalException.class, client::run));
 		assertEquals(IntegrityTerminalException.Category.INPUT, failure.category());
 		assertEquals(
-						"the items file has 1 item for 2 engines; each engine needs at least one in a count-based read: "
+						"the items file has 1 item for 2 engines; each engine needs at least one in a step limited by count: "
 										+ "add items, or pass fewer --test-hosts",
 						failure.getMessage());
 		assertEquals(List.of(), workers.get(0).metrics().getTerminalSteps(), "the worker's slice never started");
