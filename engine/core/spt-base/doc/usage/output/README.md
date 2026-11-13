@@ -387,7 +387,7 @@ can be joined.
 | Field Name       | Description
 | ---------------- | -----------------------------------------------------------------
 | StorageNode      | The target storage node address/hostname
-| ItemPath         | `/<bucket>/<key>` for a data operation, including one whose step reads its items from a `bucket,key,size,version_id` manifest. A LIST row holds the listed prefix. The path ends at its first comma, since fields are not quoted.
+| ItemPath         | `/<bucket>/<key>` for a data operation, with one slash between the bucket and the key, as in the `s3` driver's request path. That holds for a step that reads its items from a `bucket,key,size,version_id` manifest too, and a CREATE from a manifest names the output path it wrote to, not the manifest's bucket. A LIST row holds the listed prefix. The path ends at its first comma, since fields are not quoted.
 | OpType           | The load operation type name: `NOOP`, `CREATE`, `READ`, `UPDATE`, `DELETE`, `LIST` or `STAT`
 | Status           | The load operation resulting status name, listed below
 | ReqTimeStart[us] | The load operation start timestamp in microseconds
@@ -398,7 +398,9 @@ can be joined.
 
 **Status**
 
-The HTTP response codes are those the HTTP storage drivers, such as `s3`, map to each status.
+The HTTP response codes are those the Netty HTTP storage drivers, `s3`, `s3-rdma`, `s3-tables`, `atmos` and `swift`, map to each status.
+The `s3-aws` driver maps an S3 error response itself: there, every 4xx code but 401, 403 and 404 is `RESP_FAIL_CLIENT`, 413 and 414 included, and a 1xx or 3xx code is `FAIL_UNKNOWN`.
+It maps 401, 403, 404, 504, 507 and the other 5xx codes as the table does, and an SDK timeout is `FAIL_TIMEOUT`.
 
 | Name                             | Description                       | HTTP response codes  |
 | -------------------------------- | --------------------------------- | -------------------- |

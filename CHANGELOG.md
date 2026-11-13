@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Changed
 
-- **Bucket in op traces of manifest-driven steps** — The `path` column of `op.trace.csv` now holds `/<bucket>/<key>` for steps that take their objects from a `bucket,key,size,version_id` manifest, as other steps' rows do: write-verify's verify and `--cleanup` steps, `read-verify`, `read --items-file` with a manifest, and a `mixed` DELETE from a manifest `--delete-items-file`. These rows held the key alone, so a run over several buckets couldn't tell which bucket each object was in. Traces are off by default (engine `output.metrics.trace.persist`), and other outputs are unchanged.
+- **Bucket in op traces of manifest-driven steps** — The `ItemPath` column of `op.trace.csv` now holds `/<bucket>/<key>` for steps that take their objects from a `bucket,key,size,version_id` manifest, as other steps' rows do: write-verify's verify and `--cleanup` steps, `read-verify`, `read --items-file` with a manifest, and a `mixed` DELETE from a manifest `--delete-items-file`. The path is the one the `s3` driver requests, with one slash between the bucket and the key whatever slashes the manifest's bucket and key carry. A CREATE that takes its objects from a manifest names its destination, the output path, not the manifest's bucket. These rows held the key alone, so a run over several buckets couldn't tell which bucket each object was in. Traces are off by default (engine `output.metrics.trace.persist`), and other outputs are unchanged.
 
 ### Fixed
 
