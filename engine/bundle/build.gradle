@@ -743,9 +743,10 @@ tasks.register('verifyNettyMockCountLimitCanary') {
 			throw new GradleException(
 				"Packaged netty-mock Load did not complete exactly ${opCount} operations: ${totals}")
 		}
-		def negative = csvRows(new File(stepDir, 'metrics.csv')).findAll { (it.ConcurrencyCurr as long) < 0 }
-		if (negative) {
-			throw new GradleException("Packaged netty-mock Load reported negative concurrency: ${negative}")
+		// The totals row covers the whole step; metrics.csv has only the row written before the first
+		// completion, since the step ends well inside one metrics period.
+		if ((totals[0].ConcurrencyCurr as long) < 0 || (totals[0].ConcurrencyMean as double) < 0) {
+			throw new GradleException("Packaged netty-mock Load reported negative concurrency: ${totals}")
 		}
 	}
 }
