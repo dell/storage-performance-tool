@@ -116,7 +116,7 @@ objects have been removed; those entries therefore no longer refer to readable o
 |------|-------|---------|-------------|
 | `--threads` | `-t` | `1` | Number of parallel client threads |
 | `--object-size` | `-o` | `""` | Size of each generated object (e.g., `1MiB`, `256KiB`, `4GiB`; legacy `MB`, `KB`, and `GB` remain accepted as 1024-based aliases). Seeded DELETE resolves an omitted value explicitly to `1KiB`; ignored for `list` and manifest DELETE |
-| `--part-size` | | `""` | Enable multipart upload with the given part size (e.g., `5MiB`, `64MiB`, `256MiB`; legacy `MB` remains accepted as a 1024-based alias). Applies to `write`, the CREATE phase of `write-verify`, and `read` seed phases |
+| `--part-size` | | `""` | Enable multipart upload with the given part size (e.g., `5MiB`, `64MiB`, `256MiB`; legacy `MB` remains accepted as a 1024-based alias). Applies to `write`, the CREATE phase of `write-verify`, and both phases of a seeded `read`, whose read phase splits each larger object into parallel range GETs ([notes](#multipart-upload-write)) |
 | `--mpu-concurrent-objects` | | `0` | Max concurrent multipart objects in flight (`0` = unlimited). Requires `--part-size` |
 | `--mpu-concurrent-parts` | | `0` | Max concurrent parts in flight per multipart object (`0` = unlimited). Requires `--part-size` |
 | `--object-count` | `-n` | `0` | Fixed number of objects to process. Seeded DELETE creates and selects exactly this many global identities (`0` resolves to 2,500 in finite default mode). With `read-verify --versions=all`, caps canonical version identities rather than distinct keys. In manifest or existing-prefix DELETE, it caps the globally sorted, de-duplicated object selection rather than DELETE requests (`0` means all discovered identities) |
@@ -938,7 +938,9 @@ When multipart uploads are used, the engine produces a `parts.upload.csv` artifa
 - Multipart upload scheduling is handled by the engine. The CLI does not override `load.batch.size` when `--part-size` is set; direct JAR users also do not need `load-batch-size=1` for MPU correctness.
 - Part uploads share the `--threads` concurrency pool with regular operations.
 - If `--part-size` is omitted, objects are uploaded as single PUTs regardless of size.
-- `--part-size` also applies to the seed (precondition) phase of `read` workloads, so large seed objects are written using multipart upload.
+- In a `read` workload, `--part-size` applies to the seed phase and to the read phase. The seed writes each object larger than the part size with a multipart upload. The read phase splits each such object into one range GET per part and sends them in parallel. This works with the default Netty driver and with `--s3-driver rdma`; on `rdma`, these range GETs go over HTTP (see [Threshold-Based Routing](S3_RDMA.md#threshold-based-routing)).
+- With `--s3-driver aws`, a `read` with `--part-size` fails every read of an object larger than the part size: the `s3-aws` driver does not split reads. To seed with multipart uploads on that driver, write with `--part-size --save-items` and read with `--items-file`.
+- A `read` with `--items-file` has no seed phase and does not pass `--part-size` to the read phase, so each object is read with one whole GET.
 
 ### Read Workload
 

@@ -540,7 +540,7 @@ S3 [Multipart Upload](https://docs.aws.amazon.com/AmazonS3/latest/dev/mpuovervie
 
 #### 4.4.1. Enabling MPU
 
-Set `item-data-ranges-threshold` to the desired part size. Any object whose size exceeds this threshold is automatically split into parts and uploaded via the MPU API. The CLI exposes this as `--part-size`.
+Set `item-data-ranges-threshold` to the desired part size. Any object whose size exceeds this threshold is automatically split into parts and uploaded via the MPU API. A read of such an object is split the same way: each part is read with a range GET, in parallel, with no initiate or complete request. The CLI exposes this as `--part-size`.
 
 **Scheduling note:** cooperative storage drivers derive MPU object and part scheduling limits from the configured concurrency and the observed multipart geometry. They also apply bounded child-operation backpressure, so direct JAR users do not need `load-batch-size=1` for MPU correctness. Setting `load-batch-size=1` remains a conservative troubleshooting option for unusually constrained test environments.
 
