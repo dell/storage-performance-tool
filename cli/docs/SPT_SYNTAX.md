@@ -593,7 +593,7 @@ spt run write \
 | `--keep-scenario` | | `false` | Keep the scenario file after test completion |
 | `--force` | | `false` | Resolve port conflicts and permit known engine build mismatches; invalid build information and collection failures remain non-forceable |
 | `--api-port` | | `9999` | SPT engine API port that every engine in the run serves: a local or remote engine, or the entry and every worker of a distributed run |
-| `--rmi-registry-port` | | `1099` | Engine RMI registry port that every engine in the run serves, on local, remote and distributed runs; the entry reaches each worker on it. Give each concurrent `spt run` on the same hosts its own value (and its own `--api-port`) |
+| `--rmi-registry-port` | | `1099` | Engine RMI registry port that every engine in the run serves, on local, remote and distributed runs; the entry reaches each worker on it. Give each concurrent `spt run` on the same hosts its own value (and its own `--api-port`). A run with a local worker (this host in `--test-hosts`, after the first) also publishes its `--rmi-port-start` range, which every run's port check covers, so a concurrent run on the same hosts needs its own range too: otherwise its port check fails, and with `--force` it stops the other run's worker |
 | `--skip-image-pull` | | `false` | Use locally cached Docker image without pulling |
 | `--output-dir` | `-O` | `""` | Local directory to save detailed SPT report files |
 | `--service-threads` | | `0` | Engine virtual-thread carrier parallelism (0 = JVM default `max(2, cpus/4)`) |
@@ -615,7 +615,7 @@ spt run write \
 |------|---------|-------------|
 | `--test-hosts` | from `HOSTS` or `127.0.0.1` | Comma-separated Docker hosts: `[user@]host[,...]` |
 | `--min-hosts` | `0` (all) | Minimum hosts that must connect (0 = all must succeed) |
-| `--attach-existing` | `false` | Attach to pre-started worker nodes; spt still launches the entry node. Unsupported for verification workloads |
+| `--attach-existing` | `false` | Attach to pre-started worker nodes; spt still launches the entry node. The workers must already serve the run's `--api-port` and `--rmi-registry-port`. Unsupported for verification workloads |
 | `--integrity-runtime-identity-tier` | `image` | Distributed verification and guarded existing-prefix DELETE only. `image` proves one immutable image ID across participants; `payload` additionally proves identical canonical `/opt/spt` content (env: `SPT_INTEGRITY_RUNTIME_IDENTITY_TIER`) |
 | `--network-mode` | `host` | Docker network mode: `host` (required for RMI) or `bridge` |
 | `--interfaces` | from `SPT_INTERFACES` or none | Spread each engine's S3 connections over a NIC set: `auto`, or a comma-separated list of interface names, IPv4 addresses or RDMA devices, resolved on each host. Default Netty S3 driver or `s3-rdma`, host networking and `--endpoint-selection default` only; rejected with `--s3-driver aws`, `tables`, `mock`, an `--rdma-device` other than `auto`, `--rdma-local-ip`, and an `--engine-override` of `storage.net.interfaces` or `storage.net.nodeInterfaces`. See [Network Interfaces](NETWORK_INTERFACES.md) |
@@ -825,7 +825,7 @@ A replay that ends on its own with fewer steps with results than its scenario ru
 |------|---------|-------------|
 | `--test-hosts` | from `HOSTS` or `127.0.0.1` | Comma-separated Docker hosts: `[user@]host[,...]` |
 | `--min-hosts` | `0` (all) | Minimum replay hosts that must connect |
-| `--attach-existing` | `false` | Attach to prestarted worker nodes; replay still launches the entry node |
+| `--attach-existing` | `false` | Attach to prestarted worker nodes; replay still launches the entry node. The workers must already serve the replay's `--api-port` and RMI registry port 1099 |
 | `--network-mode` | `host` | Docker network mode: `host` or `bridge` |
 | `--interfaces` | from `SPT_INTERFACES` or none | Spread each engine's S3 connections over a NIC set, with the checks of `spt run --interfaces`. An archived NIC set is never reused; replay drops it with a warning. See [Network Interfaces](NETWORK_INTERFACES.md#replay) |
 | `--host-interfaces` | from `SPT_HOST_INTERFACES` or none | Replace `--interfaces` on one host, with the checks of `spt run --host-interfaces`. The host must be in `--test-hosts`. |
@@ -1276,7 +1276,7 @@ spt run write \
 ```
 
 Notes:
-- Workers must already expose the SPT API on 9999 and the RMI registry range on the standard ports.
+- Workers must already serve the run's API port (`--api-port`, default 9999) and RMI registry port (`--rmi-registry-port`, default 1099), plus the RMI range. `spt` starts no worker, so a worker on other ports fails the run's readiness wait; start one for other ports with the engine options `--run-port=<api-port>` and `--load-step-node-port=<rmi-registry-port>`.
 - `spt` still launches and manages the entry node; worker containers remain untouched during shutdown.
 - The host list must include at least one worker; the tool enforces this when `--attach-existing` is set.
 

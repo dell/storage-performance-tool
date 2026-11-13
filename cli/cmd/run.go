@@ -62,7 +62,7 @@ const (
 	flagBucketMetrics         = "bucket-metrics"
 	flagCreatePrefix          = "create-prefix"
 	flagRMIRegistryPort       = "rmi-registry-port"
-	rmiRegistryPortUsage      = "Engine RMI registry port on every host; give each concurrent spt run on the same hosts its own port"
+	rmiRegistryPortUsage      = "Engine RMI registry port on every host; give each concurrent spt run on the same hosts its own port, and its own --rmi-port-start when a run has a local worker"
 	flagInterfaces            = "interfaces"
 	flagHostInterfaces        = "host-interfaces"
 	itemNamingShardsPath      = "item.naming.shards"
@@ -2509,7 +2509,7 @@ Ensure your SSH keys are configured: ssh-add ~/.ssh/id_rsa`)
 Default: All hosts specified in --test-hosts must connect.
 Example: --test-hosts "host1,host2,host3" --min-hosts 2
          (continues if at least 2 hosts connect)`)
-	runCmd.Flags().Bool(flagAttachExistingWorkers, false, "Attach to prestarted worker nodes; spt still launches the entry node")
+	runCmd.Flags().Bool(flagAttachExistingWorkers, false, "Attach to prestarted worker nodes, which must serve the run's --api-port and --rmi-registry-port; spt still launches the entry node")
 
 	// RMI Configuration Options (for distributed testing)
 	runCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")

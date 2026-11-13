@@ -355,7 +355,7 @@ Some operator workflows pre-launch Spt worker containers (for example with `--ru
 
 Key points:
 - `spt` still launches and manages the entry node container; only the worker nodes are reused.
-- Workers must already be running the Spt API (`--run-node`) and listening on the standard API (9999) and RMI (1099 plus the configured range) ports.
+- Workers must already be running the Spt API (`--run-node`) and listening on the run's API port (`--api-port`, default 9999) and RMI registry port (`--rmi-registry-port`, default 1099), plus the configured RMI range. `spt` starts no worker, so a worker on other ports fails the run's readiness wait; start one for other ports with the engine options `--run-port=<api-port>` and `--load-step-node-port=<rmi-registry-port>`.
 - Preflight checks tolerate expected port usage on worker hosts but continue to flag unknown listeners.
 - Attached workers remain unmanaged during shutdown—`spt` stops the entry node but leaves prestarted workers running.
 - The host list must include at least two entries (entry + worker). `spt` enforces this and fails fast otherwise.
@@ -576,7 +576,7 @@ Executes a benchmark test with the specified workload type.
 - `--generate-only`: Generate scenario file without executing Docker
 - `--force`: Resolve supported port conflicts without interaction and permit a known engine build mismatch. It does not override invalid build information or collection failures
 - `--api-port`: Spt API port that every engine in the run serves, the entry and every worker (defaults to 9999, legacy: 43234)
-- `--rmi-registry-port`: Engine RMI registry port that every engine in the run serves, on local, remote and distributed runs (default 1099); the entry reaches each worker on it. To run several `spt run` instances on the same hosts at once, give each its own `--api-port` and `--rmi-registry-port`
+- `--rmi-registry-port`: Engine RMI registry port that every engine in the run serves, on local, remote and distributed runs (default 1099); the entry reaches each worker on it. To run several `spt run` instances on the same hosts at once, give each its own `--api-port` and `--rmi-registry-port`. A run with a local worker (this host in `--test-hosts`, after the first) also publishes its RMI range (`--rmi-port-start`, 40000-40009 by default), which every run's port check covers on each host, so a concurrent run on the same hosts needs its own `--rmi-port-start` too: otherwise its port check fails, and with `--force` it stops the other run's worker. With `--attach-existing`, the workers must already serve the run's ports ([Attaching Prestarted Worker Nodes](#attaching-prestarted-worker-nodes))
 - `--spt-image`: Override the engine image ref. By default, release builds use an image tag matching the CLI version (for example, `...:v5.10.3`) and local/dev builds use `...:spt_dev`.
 - `--skip-image-pull`: Use the locally cached Spt image instead of pulling before each run. Dev images such as `spt_dev` automatically skip pulls because they are local-only.
 - `--keep-scenario`: Keep the generated JavaScript scenario file after test completes (useful for debugging)
