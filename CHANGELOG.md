@@ -13,7 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Changed
 
-- **`spt run --rmi-registry-port`** — `spt run --rmi-registry-port` now works for remote and distributed runs; it previously applied only to local single-host runs. Every engine in the run serves its RMI registry on that port: a lone remote engine, and the entry and every worker of a distributed run. The entry reaches each worker on it, and the port conflict check covers it on every host. Because every engine serves both ports, `spt run` and `spt verify` now refuse an `--api-port` equal to the registry port, and `spt replay`, whose engines keep 1099, refuses `--api-port 1099`.
+- **`spt run --rmi-registry-port`** — `spt run --rmi-registry-port` now works for remote and distributed runs; it previously applied only to local single-host runs. Every engine in the run serves its RMI registry on that port: a lone remote engine, and the entry and every worker of a distributed run. The entry reaches each worker on it, and the port conflict check covers it on every host. Because every engine serves both ports, `spt run`, `spt verify` and `spt replay` now refuse an `--api-port` equal to the registry port.
 
 ### Fixed
 
