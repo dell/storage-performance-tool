@@ -91,6 +91,9 @@ final class SteadyLifecycleSupport {
 	 * requests travel in waves, so a cut can fall between two waves with nothing in flight; and a
 	 * request that falls due after the end cut but before the window's result is published is not
 	 * held by a condition that reads the result.
+	 *
+	 * <p>The condition is one-shot: its first evaluation returns true and uses up the first
+	 * completion. Only the driver's hold check may evaluate it, which it does under its hold lock.
 	 */
 	static BooleanSupplier firstCompletionOr(final BooleanSupplier condition) {
 		final AtomicBoolean first = new AtomicBoolean();

@@ -172,7 +172,9 @@ class LoadStepLocalSteadyStopPathTest {
 								: TimeUnit.SECONDS.toNanos(30);
 				step.startDurationInterval(durationNanos);
 				assertNull(step.metrics().steadyResult(), "arming the duration interval is not an end event");
-				awaitCondition(() -> driver.completedCount() >= 12L * C, "steady DELETE load");
+				// Twelve waves of the C - 1 requests that cycle while the first is held, as long as twelve
+				// waves of C took before the hold, so the worker deadline guard keeps its margin.
+				awaitCondition(() -> driver.completedCount() >= 12L * (C - 1), "steady DELETE load");
 
 				switch (stop) {
 				case WORKER_DEADLINE_GUARD -> {
