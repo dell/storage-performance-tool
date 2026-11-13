@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,6 +65,11 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	sourceURL, _ := cmd.Flags().GetString("from")
 	if strings.TrimSpace(sourceURL) == "" {
 		return fmt.Errorf("--from URL is required")
+	}
+	// Replay engines serve their RMI registry on the default port, which the API port must not take.
+	if apiPort, err := strconv.Atoi(strings.TrimSpace(apiPortFlag(cmd))); err == nil && apiPort == constants.DefaultRMIRegistryPort {
+		return fmt.Errorf("--%s %d is the engines' RMI registry port; every engine serves both ports, so choose another API port",
+			flagAPIPort, apiPort)
 	}
 	endpoints, _ := cmd.Flags().GetStringSlice("endpoints")
 	if endpoint, _ := cmd.Flags().GetString("endpoint"); strings.TrimSpace(endpoint) != "" && len(endpoints) == 0 {

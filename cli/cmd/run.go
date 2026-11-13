@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -588,16 +589,22 @@ func shouldRunHeadless(cmd *cobra.Command) bool {
 
 // getAPIPort gets the API port from the command flags with default fallback
 func getAPIPort(cmd *cobra.Command) string {
-	apiPort, _ := cmd.Flags().GetString("api-port")
-	if apiPort == "" {
-		apiPort = constants.SptAPIPort // Default to Spt standard port
-	}
+	apiPort := apiPortFlag(cmd)
 
 	// Log deprecation notice if user specifies legacy port
 	if apiPort == constants.SptLegacyAPIPort {
 		fmt.Printf("Note: spt now defaults to port %s (Spt standard). Using legacy port %s.\n", constants.SptAPIPort, constants.SptLegacyAPIPort)
 	}
 
+	return apiPort
+}
+
+// apiPortFlag returns the --api-port value, or the Spt standard port when it is unset.
+func apiPortFlag(cmd *cobra.Command) string {
+	apiPort, _ := cmd.Flags().GetString(flagAPIPort)
+	if apiPort == "" {
+		apiPort = constants.SptAPIPort // Default to Spt standard port
+	}
 	return apiPort
 }
 
@@ -1756,6 +1763,16 @@ func validatePortFlag(flag string, port int) error {
 	return nil
 }
 
+// validateDistinctEnginePorts refuses an API port equal to the RMI registry port. Every engine
+// serves both, so its second bind would fail and the run would end on a readiness timeout.
+func validateDistinctEnginePorts(apiPort, registryPort int) error {
+	if apiPort != registryPort {
+		return nil
+	}
+	return fmt.Errorf("--%s and --%s are both %d; every engine serves both ports, so they must differ",
+		flagAPIPort, flagRMIRegistryPort, apiPort)
+}
+
 // checkPortConflicts checks for and resolves port conflicts before launching Spt
 func checkPortConflicts(cmd *cobra.Command) error {
 	// Get force mode setting
@@ -2735,6 +2752,12 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	if registryPort, err := cmd.Flags().GetInt(flagRMIRegistryPort); err == nil {
 		if err := validatePortFlag(flagRMIRegistryPort, registryPort); err != nil {
 			return scenario.Params{}, err
+		}
+		// An API port that is not a number is left to the checks that report it.
+		if apiPort, err := strconv.Atoi(strings.TrimSpace(apiPortFlag(cmd))); err == nil {
+			if err := validateDistinctEnginePorts(apiPort, registryPort); err != nil {
+				return scenario.Params{}, err
+			}
 		}
 		// The default leaves the engine command line unchanged.
 		if registryPort != constants.DefaultRMIRegistryPort {
