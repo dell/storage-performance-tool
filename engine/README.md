@@ -169,6 +169,11 @@ Note: Extensions are loaded from the `ext/` directory next to `spt.jar`.
 the `/version` endpoint, effective `run.version`, and local `engine.build.json` records. It does not
 derive the engine version from mutable defaults or command-line configuration.
 
+`--help` and `-h` print the options and exit without starting anything. The engine exits 0 when
+its run ends normally, 1 after a run, start or scenario failure, and 2 for an argument error, such
+as an unknown option or a boolean value other than `true` or `false`. An argument error stops the
+engine before any load.
+
 ### Distribution Structure
 
 After building, the distribution contains:

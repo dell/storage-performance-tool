@@ -211,7 +211,6 @@ task createVSCodeLaunch {
 			"request": "launch",
 			"mainClass": "com.dell.spt.base.Main",
 			"projectName": "spt-base",
-			"args": "--help",
 			"cwd": "\${workspaceFolder}/bundle/build/dist",
 			"classPaths": [
 				"\${workspaceFolder}/bundle/build/dist/spt.jar",
@@ -723,6 +722,290 @@ tasks.register('verifyS3TablesParquetWrite') {
 	}
 }
 
+// The packaged engine's exit statuses, a contract for the scripts that run it: 0 success, 1 a run,
+// start or scenario failure, 2 an argument error. An argument error and a help request start nothing:
+// a loopback listener stands in for the S3 target and must see no connection.
+tasks.register('verifyEngineExitStatusCanary') {
+	group = 'verification'
+	description = 'Verifies the packaged engine exit statuses for help, argument errors and start failures'
+	dependsOn assembleDist
+
+	inputs.file(file("${distDir}/${sptJar}"))
+	inputs.dir(file("${distDir}/ext"))
+	def canaryRootProvider = layout.buildDirectory.dir('engine-exit-status-canary')
+	outputs.dir(canaryRootProvider)
+
+	doLast {
+		def canaryRoot = canaryRootProvider.get().asFile
+		delete canaryRoot
+		canaryRoot.mkdirs()
+		def javaExecutable = new File(
+			System.getProperty('java.home'),
+			'bin/java' + (System.getProperty('os.name').toLowerCase().contains('win') ? '.exe' : '')
+		).absolutePath
+		def jarFile = file("${distDir}/${sptJar}")
+
+		// The kernel queues a connection the engine makes until it is accepted, even after the engine
+		// exits, so draining the queue after each engine has exited counts every connection it made.
+		// The acceptor closes connections meanwhile, so an engine that connects fails fast.
+		def target = java.nio.channels.ServerSocketChannel.open()
+		target.bind(new java.net.InetSocketAddress(java.net.InetAddress.getLoopbackAddress(), 0), 50)
+		target.configureBlocking(false)
+		def targetConnections = new java.util.concurrent.atomic.AtomicInteger()
+		def drainTarget = { ->
+			synchronized (target) {
+				def connection
+				while (target.open && (connection = target.accept()) != null) {
+					targetConnections.incrementAndGet()
+					connection.close()
+				}
+			}
+		}
+		def acceptor = Thread.startDaemon('engine-exit-status-canary-target') {
+			while (target.open) {
+				try {
+					drainTarget()
+					Thread.sleep(20)
+				} catch (IOException | InterruptedException ignored) {
+				}
+			}
+		}
+		def s3Args = [
+			'--storage-driver-type=s3',
+			'--storage-net-node-addrs=127.0.0.1',
+			"--storage-net-node-port=${target.socket().localPort}",
+			'--storage-auth-uid=exit-status-canary',
+			'--storage-auth-secret=exit-status-canary',
+			'--item-output-path=/exit-status-canary',
+			'--load-op-limit-count=5',
+			'--item-data-size=1KiB',
+			'--storage-driver-limit-concurrency=1',
+		]
+		def scenario = { String name, String text ->
+			def scenarioFile = new File(canaryRoot, "${name}.js")
+			scenarioFile.setText(text, 'UTF-8')
+			return "--run-scenario=${scenarioFile.absolutePath}"
+		}
+		def engine = { String name, List<String> args ->
+			def home = new File(canaryRoot, "${name}/home")
+			def logDir = new File(canaryRoot, "${name}/log")
+			def workDir = new File(canaryRoot, "${name}/cwd")
+			workDir.mkdirs()
+			def stdout = new File(canaryRoot, "${name}/stdout.log")
+			def stderr = new File(canaryRoot, "${name}/stderr.log")
+			def builder = new ProcessBuilder([javaExecutable, '-jar', jarFile.absolutePath] + args.collect { it.toString() })
+			builder.directory(workDir)
+			builder.environment().put('SPT_HOME', home.absolutePath)
+			builder.environment().put('SPT_LOG_DIR', logDir.absolutePath)
+			builder.redirectOutput(stdout)
+			builder.redirectError(stderr)
+			def process = builder.start()
+			try {
+				if (!process.waitFor(90, java.util.concurrent.TimeUnit.SECONDS)) {
+					throw new GradleException("Packaged engine '${name}' did not exit within 90 s:\n"
+						+ stdout.getText('UTF-8') + stderr.getText('UTF-8'))
+				}
+			} finally {
+				// Also when the build is cancelled: a node does not end by itself
+				if (process.alive) {
+					process.destroyForcibly()
+				}
+			}
+			// The engine creates its home and log directories; a help request creates neither, and nothing
+			// in the working directory.
+			def written = [home, logDir].count { it.exists() } + workDir.listFiles().length
+			// The JVM announces JAVA_TOOL_OPTIONS and _JAVA_OPTIONS on stderr, and prints its own
+			// warnings there; the rest is the engine's
+			def engineStderr = stderr.readLines('UTF-8').findAll {
+				!(it.startsWith('Picked up ') || it.contains(' VM warning: ') || it.startsWith('WARNING: '))
+			}
+			return [
+				status: process.exitValue(),
+				stdout: stdout.getText('UTF-8'),
+				stderr: engineStderr,
+				output: stdout.getText('UTF-8') + stderr.getText('UTF-8'),
+				written: written,
+			]
+		}
+		def expect = { String name, List<String> args, int status, List<String> messages ->
+			drainTarget()
+			def connectionsBefore = targetConnections.get()
+			def result = engine(name, args)
+			drainTarget()
+			def missing = messages.findAll { !result.output.contains(it) }
+			if (result.status != status || !missing.isEmpty()) {
+				throw new GradleException(
+					"Packaged engine '${name}' exited ${result.status}, expected ${status}"
+						+ (missing ? "; missing ${missing}" : '') + ":\n${result.output}")
+			}
+			if (status != 0 && targetConnections.get() != connectionsBefore) {
+				throw new GradleException("Packaged engine '${name}' connected to the target before it failed:\n${result.output}")
+			}
+			return result
+		}
+
+		try {
+			def usageLines = [
+				'Usage: java -jar spt.jar [--<option>=<value> ...]',
+				'Exit status: 0 success; 1 a run, start or scenario failure; 2 an argument error.',
+				"\t--load-op-limit-count=<long>\n",
+				"\t--run-node=<true|false>\n",
+				"\t--storage-net-nodeInterfaces-<key>=<value>\n",
+				"\t--storage-net-http-headers-<key>=<value>\n",
+				"\t--storage-net-http-uri-args-<key>=<value>\n",
+				"\t--storage-object-tagging-tags-<key>=<value>\n",
+				"\t--read  same as --load-op-type=read\n",
+			]
+			['help': s3Args + ['--help'], 'help-short': ['-h'] + s3Args].each { name, args ->
+				def result = expect(name, args, 0, [])
+				def missing = usageLines.findAll { !result.stdout.contains(it) }
+				if (!missing.isEmpty() || result.written != 0 || !result.stderr.isEmpty()) {
+					throw new GradleException(
+						"Packaged engine '${name}' printed no clean usage (missing ${missing}, ${result.written} files written):\n${result.output}")
+				}
+			}
+			if (targetConnections.get() != 0) {
+				throw new GradleException('A help request connected to the target')
+			}
+
+			def remote = 'The argument "storage-driver-remote" is not supported: SPT has no remote driver services.'
+			expect('unknown-option', ['--bogus'], 2, ['Invalid configuration option: "bogus"'])
+			expect('dry-run-s3', s3Args + ['--dry-run'], 2, ['Invalid configuration option: "dry-run"'])
+			expect('no-prefix', ['load-op-limit-count=10'], 2, ['Invalid first argument, not shown in case it is a value'])
+			// The rest of an unquoted header value
+			def unquoted = expect('unquoted-value', ['--storage-net-http-headers-Authorization=Basic', 'canaryHeaderSecret='], 2,
+				['Invalid argument after "--storage-net-http-headers-Authorization", not shown in case it is a value'])
+			if (unquoted.output.contains('canaryHeaderSecret')) {
+				throw new GradleException("Packaged engine 'unquoted-value' printed the value:\n${unquoted.output}")
+			}
+			def spaced = expect('space-separated-value', ['--storage-auth-secret', 'canary-spaced-secret'], 2,
+				['Invalid argument after "--storage-auth-secret", not shown in case it is a value'])
+			if (spaced.output.contains('canary-spaced-secret')) {
+				throw new GradleException("Packaged engine 'space-separated-value' printed the value:\n${spaced.output}")
+			}
+			// A base64 secret ends in = padding
+			def padded = expect('space-separated-padded-value', ['--storage-auth-secret', 'canaryPaddedSecret='], 2,
+				['Invalid argument after "--storage-auth-secret", not shown in case it is a value'])
+			if (padded.output.contains('canaryPaddedSecret')) {
+				throw new GradleException("Packaged engine 'space-separated-padded-value' printed the value:\n${padded.output}")
+			}
+			expect('unparseable-number-s3', s3Args + ['--load-op-limit-count=5OO'], 2,
+				['Invalid value for the option "load-op-limit-count": For input string: "5OO"'])
+			expect('not-a-boolean', ['--run-node=yes', '--run-port=1'], 2,
+				['Invalid value for the option "run-node": "yes" is not true or false'])
+			expect('storage-driver-remote', ['--storage-driver-remote'], 2, [remote, 'run.sh --run-node=true'])
+			expect('storage-driver-remote-field-report', [
+				'--storage-driver-remote',
+				'--storage-driver-addrs=10.0.0.1,10.0.0.2,10.0.0.3,10.0.0.4',
+				'--load-limit-count=1000',
+				'--storage-driver-type=dummy-mock',
+				'--load-type=create',
+				'--test-step-id=exit-status-canary',
+			], 2, [remote])
+			expect('mongoose-load-limit-count', ['--storage-driver-type=dummy-mock', '--load-limit-count=10'], 2,
+				['Invalid configuration option: "load-limit-count"'])
+			expect('mongoose-http-namespace', ['--storage-driver-type=dummy-mock', '--storage-net-http-namespace=ns1'], 2,
+				['Invalid configuration option: "storage-net-http-namespace"'])
+
+			expect('missing-scenario', ['--run-scenario=' + new File(canaryRoot, 'missing.js').absolutePath], 1,
+				['Failed to read the scenario file'])
+			expect('scenario-syntax-error', [
+				scenario('scenario-syntax-error', 'Load.config({load: {op: {limit: {count: 1}}}}).run(;\n'),
+				'--storage-driver-type=dummy-mock',
+			], 1, ['Scenario failed, line #1'])
+			expect('scenario-config-error', [
+				scenario('scenario-config-error', 'Load.config({load: {step: {limit: {count: 1}}}}).run();\n'),
+				'--storage-driver-type=dummy-mock',
+			], 1, ['Scenario syntax error', 'load-step-limit-count'])
+			expect('scenario-boolean-error', [
+				scenario('scenario-boolean-error', 'Load.config({load: {op: {shuffle: "yes"}}}).run();\n'),
+				'--storage-driver-type=dummy-mock',
+			], 1, ['load-op-shuffle: "yes" is not true or false'])
+			def busyPort = new java.net.ServerSocket(0)
+			try {
+				def servicePort = new java.net.ServerSocket(0)
+				def freePort = servicePort.localPort
+				servicePort.close()
+				expect('run-node-failure', [
+					'--run-node',
+					"--run-port=${busyPort.localPort}",
+					"--load-step-node-port=${freePort}",
+					'--api-linger-sec=0',
+				], 1, ['Run node failure'])
+			} finally {
+				busyPort.close()
+			}
+
+			// A node that starts and is shut down through its API exits 0.
+			// Both probe sockets are open at once, so the two ports differ.
+			def apiSocket = new java.net.ServerSocket(0)
+			def registrySocket = new java.net.ServerSocket(0)
+			def apiPort = apiSocket.localPort
+			def registryPort = registrySocket.localPort
+			apiSocket.close()
+			registrySocket.close()
+			// Set once /ready answered and the shutdown request has connected; the node may stop before its
+			// 202 is read, so the 202 itself is not required. A request that can't connect is tried again.
+			def shutdownSent = new java.util.concurrent.atomic.AtomicBoolean()
+			// Set when the case ends, so a failed case's stopper can't reach a later node on that port.
+			def stopperDone = new java.util.concurrent.atomic.AtomicBoolean()
+			def stopper = Thread.startDaemon('engine-exit-status-canary-node-stopper') {
+				def deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(60)
+				while (System.nanoTime() < deadline && !shutdownSent.get() && !stopperDone.get()) {
+					try {
+						def ready = (HttpURLConnection) URI.create("http://127.0.0.1:${apiPort}/ready").toURL()
+							.openConnection(java.net.Proxy.NO_PROXY)
+						ready.connectTimeout = 1000
+						ready.readTimeout = 1000
+						if (ready.responseCode == 200) {
+							def shutdown = (HttpURLConnection) URI.create("http://127.0.0.1:${apiPort}/shutdown").toURL()
+								.openConnection(java.net.Proxy.NO_PROXY)
+							shutdown.requestMethod = 'POST'
+							shutdown.connectTimeout = 1000
+							shutdown.readTimeout = 5000
+							shutdown.connect()
+							shutdownSent.set(true)
+							shutdown.responseCode
+						}
+					} catch (IOException ignored) {
+					}
+					if (!shutdownSent.get()) {
+						try {
+							Thread.sleep(200)
+						} catch (InterruptedException ignored) {
+							return
+						}
+					}
+				}
+			}
+			try {
+				expect('run-node-shutdown', [
+					'--run-node',
+					"--run-port=${apiPort}",
+					"--load-step-node-port=${registryPort}",
+					'--api-linger-sec=0',
+				], 0, ['Started to serve the remote API'])
+			} finally {
+				stopperDone.set(true)
+				stopper.interrupt()
+				stopper.join(10000)
+			}
+			if (!shutdownSent.get()) {
+				throw new GradleException("Packaged engine 'run-node-shutdown' exited before its shutdown request")
+			}
+
+			expect('default-scenario', ['--storage-driver-type=dummy-mock', '--load-op-limit-count=10', '--load-op-shuffle=TRUE'], 0, [])
+			expect('scenario', [
+				scenario('scenario', 'Load.config({load: {op: {limit: {count: 10}, shuffle: false}}}).run();\n'),
+				'--storage-driver-type=dummy-mock',
+			], 0, [])
+		} finally {
+			target.close()
+			acceptor.join(5000)
+		}
+	}
+}
+
 tasks.register('test') {
 	group = 'verification'
 	description = 'Runs bundle-level tests'
@@ -731,7 +1014,8 @@ tasks.register('test') {
 		tasks.named('verifyS3TablesParquetWrite'),
 		tasks.named('verifyImageMallocTunable'),
 		tasks.named('verifyEngineBuildInfoCanary'),
-		tasks.named('verifyEngineBuildInfoDocumentation')
+		tasks.named('verifyEngineBuildInfoDocumentation'),
+		tasks.named('verifyEngineExitStatusCanary')
 }
 
 check.dependsOn tasks.named('test')

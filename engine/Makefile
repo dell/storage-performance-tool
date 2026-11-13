@@ -244,9 +244,9 @@ info:
 	@echo "  Components: 11 (1 core + 10 extensions)"
 	@$(GRADLE) --version
 
-# Run the bundle (for testing)
+# List the options of the built engine (a quick check of the distribution)
 run: $(SPT_JAR)
-	@echo "Running Spt from distribution..."
+	@echo "Listing the options of Spt from the distribution..."
 	cd $(DIST_DIR) && java -jar spt.jar --help
 
 # Gradle wrapper update

@@ -445,7 +445,7 @@ two approaches.
 
 #### 4.3.1.1. Recycle mode
 
-First approach is to use `--load-op-recycle` mode. We pass the list of objects to version and specify the 
+First approach is to use the recycle mode, `--load-op-recycle-mode=true`. We pass the list of objects to version and specify the
 `limit-count=<N*M>` where `N` - is the length of the intial list and `M` is the amount of versions per object. Be aware
 that `recycle-mode` doesn't guarantee the exact amount of versions per object. But the average amount will be `M`.
 
@@ -453,11 +453,12 @@ that `recycle-mode` doesn't guarantee the exact amount of versions per object. B
 docker run \
     --network host \
     ghcr.io/dell/storage-performance-tool \
-    --storage-auth-uid=user1 \ 
+    --storage-auth-uid=user1 \
     --storage-auth-secret=**************************************** \
     --storage-net-node-addrs=<NODE_IP_ADDRS> \
     --item-input-file=itemsInitialList.csv \
     --storage-object-versioning=true \
+    --load-op-recycle-mode=true \
     --load-op-limit-count=<N*M>
 ```
 
