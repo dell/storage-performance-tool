@@ -27,8 +27,6 @@ import com.github.akurilov.confuse.Config;
 
 import org.apache.logging.log4j.CloseableThreadContext;
 
-import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
-
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
 
@@ -448,16 +446,67 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 		}
 		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TASK_STOP_WAIT_SECONDS);
 		for (final var ioWorker : ioWorkers) {
-			final long remaining = deadline - System.nanoTime();
-			if (remaining <= 0) {
+			if (deadline - System.nanoTime() <= 0 || !awaitStopped(ioWorker, deadline)) {
 				throw new IllegalStateException("Timed out waiting for NIO worker termination");
 			}
-			try {
-				if (!ioWorker.await(remaining, TimeUnit.NANOSECONDS)) {
-					throw new IllegalStateException("Timed out waiting for NIO worker termination");
+		}
+	}
+
+	/**
+	 * Waits for an I/O worker to stop by {@code deadline}, also on an interrupted thread: a step's
+	 * stop or a close can arrive as an interrupt, and the rest of the close must still run.
+	 *
+	 * <p>Invariant: the wait ends by the deadline, the one {@link
+	 * com.dell.spt.base.Constants#TASK_STOP_WAIT_SECONDS} budget all workers share, whether or not
+	 * the thread is interrupted, before the call or during the wait, so a stop on an interrupted
+	 * thread takes at most that bound longer and never waits unbounded. An interrupt neither ends
+	 * the wait early nor skips it; the interrupt flag is set again before this returns.
+	 */
+	private static boolean awaitStopped(final Task ioWorker, final long deadline) {
+		var interrupted = Thread.interrupted();
+		try {
+			while (true) {
+				final long remaining = deadline - System.nanoTime();
+				try {
+					return ioWorker.await(Math.max(0L, remaining), TimeUnit.NANOSECONDS);
+				} catch (final InterruptedException e) {
+					interrupted = true;
+					if (remaining <= 0) {
+						// Another interrupt hit the last check at the deadline: count the worker late.
+						return false;
+					}
 				}
-			} catch (final InterruptedException e) {
-				throwUnchecked(e);
+			}
+		} finally {
+			if (interrupted) {
+				Thread.currentThread().interrupt();
+			}
+		}
+	}
+
+	/**
+	 * Takes {@code lock} within {@code timeout}, also on an interrupted thread, as
+	 * {@link #awaitStopped} waits: the same bound with or without an interrupt, and the interrupt
+	 * flag set again before this returns.
+	 */
+	private static boolean tryLockWithin(final Lock lock, final long timeout, final TimeUnit unit) {
+		final long deadline = System.nanoTime() + unit.toNanos(timeout);
+		var interrupted = Thread.interrupted();
+		try {
+			while (true) {
+				final long remaining = deadline - System.nanoTime();
+				try {
+					return lock.tryLock(Math.max(0L, remaining), TimeUnit.NANOSECONDS);
+				} catch (final InterruptedException e) {
+					interrupted = true;
+					if (remaining <= 0) {
+						return false;
+					}
+				}
+			}
+		} finally {
+			if (interrupted) {
+				Thread.currentThread().interrupt();
 			}
 		}
 	}
@@ -624,7 +673,7 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 
 		for (var i = 0; i < nioWorkerCount; i++) {
 			try (final var logCtx = CloseableThreadContext.put(KEY_CLASS_NAME, CLS_NAME)) {
-				if (opBuffLocks[i].tryLock(1, TimeUnit.SECONDS)) {
+				if (tryLockWithin(opBuffLocks[i], 1, TimeUnit.SECONDS)) {
 					try {
 						opBuffs[i].clear();
 					} finally {
@@ -633,8 +682,6 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 				} else if (opBuffs[i].size() > 0) {
 					Loggers.ERR.debug("Failed to obtain the load operations buff lock in time");
 				}
-			} catch (final InterruptedException e) {
-				throwUnchecked(e);
 			}
 			opBuffs[i] = null;
 		}

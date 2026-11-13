@@ -44,6 +44,18 @@ public final class NettyStorageDriverMock<I extends Item, O extends Operation<I>
 						storageNodeAddrs, bootstrap, this, storageNodePort, connAttemptsLimit);
 	}
 
+	/**
+	 * {@link #sendRequest} completes each operation with {@code SUCC} before it returns, on the
+	 * submitting thread. With direct dispatch, that completion would send the next queued operation
+	 * from inside the same call, which completes in turn, until the stack overflows. The mock's
+	 * {@code EmbeddedChannel} runs no tasks unless pumped, so the completion cannot be deferred
+	 * instead: keep the dispatcher path.
+	 */
+	@Override
+	protected boolean supportsDirectDispatch() {
+		return false;
+	}
+
 	@Override
 	protected final void sendRequest(final Channel channel, final O op) {
 

@@ -338,14 +338,25 @@ func normalizeEngineOverridePath(path string) string {
 	return strings.ReplaceAll(strings.TrimSpace(path), "-", ".")
 }
 
+// validateStandaloneDeleteEngineOverrides refuses engine overrides that a standalone DELETE step
+// cannot run with. --engine-override holds SPT_ENGINE_OVERRIDES, from the environment or .env, when
+// the flag is not given.
 func validateStandaloneDeleteEngineOverrides(cmd *cobra.Command) error {
-	for _, override := range mustStringArrayFlag(cmd, flagEngineOverride) {
+	overrides := mustStringArrayFlag(cmd, flagEngineOverride)
+	for _, override := range overrides {
 		path, value, _ := strings.Cut(override, "=")
 		if _, excluded := standaloneDeleteExcludedEngineOverridePaths[normalizeEngineOverridePath(path)]; excluded {
 			return fmt.Errorf(
 				"engine override %q is excluded from standalone DELETE",
 				secretmask.EngineOverride(path+"="+value))
 		}
+	}
+	// The engine refuses it when the DELETE step starts, after a seeded DELETE has written its objects.
+	if scenario.EngineOverridesPersistOpTraces(overrides) {
+		return fmt.Errorf(
+			"operation tracing (%s=true) is not supported for standalone DELETE; "+
+				"remove it from --%s or %s", scenario.OpTracePersistPath, flagEngineOverride,
+			constants.EnvEngineOverrides)
 	}
 	return nil
 }

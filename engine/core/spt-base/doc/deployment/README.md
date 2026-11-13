@@ -71,7 +71,7 @@ docker run -d --network host  \
     --run-scenario=/opt/scenario.js
 ``` 
 
-**Mounting** a volume **is the only right way** to save Spt logs in docker. Don't get confused by [`--output-file` option](../usage/output#127-item-list-files), it's not about docker.
+**Mounting** a volume **is the only right way** to save Spt logs in docker. Don't get confused by [`--item-output-file` option](../usage/output#127-item-list-files), it's not about docker.
 
 ## Distributed Mode
 
