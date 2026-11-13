@@ -445,7 +445,7 @@ two approaches.
 
 #### 4.3.1.1. Recycle mode
 
-First approach is to use `--load-op-recycle` mode. We pass the list of objects to version and specify the 
+First approach is to use the recycle mode, `--load-op-recycle-mode=true`. We pass the list of objects to version and specify the
 `limit-count=<N*M>` where `N` - is the length of the intial list and `M` is the amount of versions per object. Be aware
 that `recycle-mode` doesn't guarantee the exact amount of versions per object. But the average amount will be `M`.
 
@@ -453,11 +453,12 @@ that `recycle-mode` doesn't guarantee the exact amount of versions per object. B
 docker run \
     --network host \
     ghcr.io/dell/storage-performance-tool \
-    --storage-auth-uid=user1 \ 
+    --storage-auth-uid=user1 \
     --storage-auth-secret=**************************************** \
     --storage-net-node-addrs=<NODE_IP_ADDRS> \
     --item-input-file=itemsInitialList.csv \
     --storage-object-versioning=true \
+    --load-op-recycle-mode=true \
     --load-op-limit-count=<N*M>
 ```
 
@@ -540,7 +541,7 @@ S3 [Multipart Upload](https://docs.aws.amazon.com/AmazonS3/latest/dev/mpuovervie
 
 #### 4.4.1. Enabling MPU
 
-Set `item-data-ranges-threshold` to the desired part size. Any object whose size exceeds this threshold is automatically split into parts and uploaded via the MPU API. The CLI exposes this as `--part-size`.
+Set `item-data-ranges-threshold` to the desired part size. Any object whose size exceeds this threshold is automatically split into parts and uploaded via the MPU API. A read of such an object is split the same way: each part is read with a range GET, in parallel, with no initiate or complete request. The CLI exposes this as `--part-size`.
 
 **Scheduling note:** cooperative storage drivers derive MPU object and part scheduling limits from the configured concurrency and the observed multipart geometry. They also apply bounded child-operation backpressure, so direct JAR users do not need `load-batch-size=1` for MPU correctness. Setting `load-batch-size=1` remains a conservative troubleshooting option for unusually constrained test environments.
 

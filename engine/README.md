@@ -22,7 +22,7 @@ endpoint, local build records, combined manifests, and compatibility policy.
 
 ## Prerequisites
 
-- Java 21 or higher
+- Java 21 or higher (the SPT image runs Java 25)
 - Docker (optional, for containerized deployment)
 - Git
 
@@ -169,17 +169,38 @@ Note: Extensions are loaded from the `ext/` directory next to `spt.jar`.
 the `/version` endpoint, effective `run.version`, and local `engine.build.json` records. It does not
 derive the engine version from mutable defaults or command-line configuration.
 
+`--help` and `-h` print the options and exit without starting anything. The engine exits 0 when
+its run ends normally, 1 after a run, start or scenario failure, and 2 for an argument error, such
+as an unknown option or a boolean value other than `true` or `false`. An argument error stops the
+engine before any load.
+
 ### Distribution Structure
 
 After building, the distribution contains:
 
 - **spt.jar** - The main application JAR containing core SPT functionality
 - **ext/** - Directory containing all extension JARs (storage drivers, load patterns)
-- **run.sh/run.bat** - Platform-specific launcher scripts that properly configure the classpath
+- **run.sh/run.bat** - Platform-specific launcher scripts that start the JVM with SPT's default options
 
-The launcher scripts handle:
-- Setting up the correct classpath configuration
-- Launching SPT with extensions loaded from the adjacent `ext/` directory
+The launcher scripts start the `java` on `PATH` with `spt.jar`, which loads the extensions in the adjacent `ext/` directory.
+
+#### Launcher JVM options
+
+`run.sh` and `run.bat` pass the default JVM options of the SPT image: ZGC, `-Xms1g -Xmx4g`, `-XX:MaxDirectMemorySize=64g`, `-XX:+AlwaysPreTouch`, `-XX:+UseNUMA`, `-Xshare:off`, `-XX:+UnlockExperimentalVMOptions -XX:-DoJVMTIVirtualThreadTransitions` and the RMI response timeout `-Dsun.rmi.transport.tcp.responseTimeout=10000`. They differ from the image in two options:
+
+- `-XX:+UseCompactObjectHeaders`: the image passes it, on Java 25. The launchers leave it out, because Java 21 refuses it.
+- `-XX:UseAVX=2`: the option exists only on x86 JVMs, and an arm64 JVM refuses it and doesn't start. The image passes it on `x86_64`, and the launchers when the `java` they run accepts it. They ask that `java` once at start, without `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS` and `_JAVA_OPTIONS`.
+
+`SPT_JAVA_OPTS` adds options after the defaults, and when an option is given twice, the JVM uses the later one: `SPT_JAVA_OPTS="-Xmx8g" ./run.sh ...` runs with an 8 GiB heap and every other default. The launchers read `SPT_JAVA_OPTS`, not `JAVA_OPTS`. In 5.17.0 and earlier, `SPT_JAVA_OPTS` replaced the launchers' whole option line. Because the defaults stay:
+
+- to pick another garbage collector, turn ZGC off first: `SPT_JAVA_OPTS="-XX:-UseZGC -XX:+UseG1GC"`. G1 tuning options without `-XX:+UseG1GC` are accepted and do nothing under ZGC;
+- a maximum heap below 1 GiB needs a matching `-Xms`, because the default `-Xms1g` stays: `SPT_JAVA_OPTS="-Xms512m -Xmx512m"`;
+- `-XX:MaxRAMPercentage` has no effect while the default `-Xmx4g` is on the line; give `-Xmx` instead;
+- to run without the defaults, call `java <options> -jar spt.jar` directly.
+
+Unless `GLIBC_TUNABLES` is set, even to empty, `run.sh` sets it to `glibc.malloc.hugetlb=1`, as the image does, to ask glibc's malloc for huge pages. glibc before 2.35 and musl ignore it. `run.bat` doesn't set it.
+
+`run.sh` replaces itself with the JVM, so a signal sent to the `run.sh` process reaches the engine: after `./run.sh --run-node &`, `kill $!` stops the engine. The process then shows as `java ... spt.jar`; to find it, match `spt.jar`, not `run.sh`. `run.bat` runs `java` as its last command, so its exit code is the engine's.
 
 ### IDE Integration
 
@@ -271,8 +292,8 @@ docker run --rm \
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SPT_HOME` | (ephemeral temp dir) | Override the engine's app-home directory. Set this to a persistent path if you need to preserve extracted config/resources across runs. |
-| `SPT_JAVA_OPTS` | `-Xshare:off -XX:UseAVX=2` | Additional JVM options appended to the default JAVA_OPTS. |
-| `JAVA_OPTS` | (see entrypoint.sh) | Full JVM options override. Default includes ZGC, 4GB heap, NUMA, and NFS compatibility flags. |
+| `SPT_JAVA_OPTS` | (unset) | JVM options added after the image's defaults and `JAVA_OPTS`. When an option is given twice, the JVM uses the later one. |
+| `JAVA_OPTS` | (unset) | JVM options added after the image's defaults (see `entrypoint.sh`: ZGC, a 4 GiB heap, NUMA and NFS compatibility options), and before `SPT_JAVA_OPTS`. It doesn't replace the defaults: to pick another garbage collector, turn ZGC off first, `-XX:-UseZGC -XX:+UseG1GC`. The bundle's `run.sh` and `run.bat` don't read it. |
 | `GLIBC_TUNABLES` | `glibc.malloc.hugetlb=1` | Set by the image, for every engine, HTTP included, and for other programs in the image. Where the host's transparent huge pages mode is `madvise`, malloc asks for huge pages on its large mappings; with `always` or `never` it changes nothing. Setting it on a container replaces the whole value, so keep `glibc.malloc.hugetlb=1` in any value of your own. `spt run` doesn't forward it from the CLI's environment. Another `BASE_IMAGE` needs its own check, as glibc tunables aren't a stable interface. |
 
 #### Docker Compose
@@ -530,11 +551,14 @@ See the [LICENSE](core/spt-base/LICENSE) file for license rights and limitations
 
 Completion-driven direct dispatch is enabled by default for drivers that declare
 support for it. Drivers without that capability retain dispatcher scheduling.
-To disable it when launching an engine container or the SPT CLI, set:
+To disable it when launching an engine container, the SPT CLI or the bundle's
+`run.sh`, set:
 
 ```bash
 export SPT_JAVA_OPTS="${SPT_JAVA_OPTS:+$SPT_JAVA_OPTS }-Dspt.dispatch.direct=false"
 ```
+
+With `run.bat`, add `-Dspt.dispatch.direct=false` to `SPT_JAVA_OPTS` the same way.
 
 For a direct Java launch, place `-Dspt.dispatch.direct=false` before `-jar`.
 The JVM system property is read when each driver is constructed; restart the
