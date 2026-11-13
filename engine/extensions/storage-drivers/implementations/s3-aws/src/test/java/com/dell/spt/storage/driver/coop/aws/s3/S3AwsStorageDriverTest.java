@@ -11,12 +11,14 @@ import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
+import com.dell.spt.base.item.ItemFactoryImpl;
 import com.dell.spt.base.item.PathItem;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
@@ -64,6 +66,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.HexFormat;
@@ -2844,31 +2847,65 @@ public class S3AwsStorageDriverTest {
 	@Nested
 	class CopyOperationTest {
 
-		@SuppressWarnings("unchecked")
-		@Test
-		void copyObject_usesCorrectSourceAndDestination() throws Exception {
-			CopyObjectResponse mockResponse = CopyObjectResponse.builder()
-							.build();
-
+		/**
+		 * Copies an item to /dest-bucket the way a copy step does: a CREATE whose source path is the
+		 * item input path, and returns the copy request the driver sent.
+		 */
+		private CopyObjectRequest copyRequestFor(final Item item, final String srcPath) throws Exception {
 			when(mockS3Client.copyObject(any(CopyObjectRequest.class)))
-							.thenReturn(CompletableFuture.completedFuture(mockResponse));
-
-			@SuppressWarnings("unchecked")
-			Operation<Item> op = mock(Operation.class);
-			Item item = mock(Item.class);
-			when(op.type()).thenReturn(OpType.CREATE);
-			when(op.item()).thenReturn(item);
-			when(op.srcPath()).thenReturn("/source-bucket/source-key");
-			when(op.dstPath()).thenReturn("/dest-bucket");
-			when(item.name()).thenReturn("dest-key");
-
-			drv.execute(op).join();
-
-			ArgumentCaptor<CopyObjectRequest> cap = ArgumentCaptor.forClass(CopyObjectRequest.class);
+							.thenReturn(CompletableFuture.completedFuture(CopyObjectResponse.builder().build()));
+			drv.execute(new OperationImpl<>(0, OpType.CREATE, item, srcPath, "/dest-bucket", TEST_CRED)).join();
+			final ArgumentCaptor<CopyObjectRequest> cap = ArgumentCaptor.forClass(CopyObjectRequest.class);
 			verify(mockS3Client).copyObject(cap.capture());
-			assertEquals("source-bucket", cap.getValue().sourceBucket());
-			assertEquals("source-key", cap.getValue().sourceKey());
-			assertEquals("dest-bucket", cap.getValue().destinationBucket());
+			return cap.getValue();
+		}
+
+		/** Lists the source path the way a path item input does, and copies the last listed item. */
+		private CopyObjectRequest copyOfTheLastListedItem(
+						final String srcPath, final String prefix, final String... keys) throws Exception {
+			final List<S3Object> contents = new ArrayList<>();
+			for (final String key : keys) {
+				contents.add(S3Object.builder().key(key).size(1L).build());
+			}
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(CompletableFuture.completedFuture(
+											ListObjectsV2Response.builder().contents(contents).isTruncated(false).build()));
+			final List<Item> listed = drv.list(
+							new ItemFactoryImpl<>(), srcPath, prefix, 36, null, 100, ListOptions.DEFAULT);
+			return copyRequestFor(listed.get(keys.length - 1), srcPath);
+		}
+
+		@Test
+		void copyObject_readsTheListedItemFromTheSourceBucketAndKeepsItsKey() throws Exception {
+			final CopyObjectRequest copy = copyOfTheLastListedItem("/source-bucket", null, "k0000", "k0001");
+			assertEquals("source-bucket", copy.sourceBucket());
+			assertEquals("k0001", copy.sourceKey());
+			assertEquals("dest-bucket", copy.destinationBucket());
+			assertEquals("k0001", copy.destinationKey());
+		}
+
+		@Test
+		void copyObject_readsTheWholeNestedKeyUnderANamingPrefix() throws Exception {
+			final CopyObjectRequest copy = copyOfTheLastListedItem("/source-bucket", "dir/sub/", "dir/sub/k0001");
+			assertEquals("source-bucket", copy.sourceBucket());
+			assertEquals("dir/sub/k0001", copy.sourceKey());
+			assertEquals("dir/sub/k0001", copy.destinationKey());
+		}
+
+		@Test
+		void copyObject_readsFromASourcePathWithATrailingSlash() throws Exception {
+			final CopyObjectRequest copy = copyOfTheLastListedItem("/source-bucket/", null, "k0001");
+			assertEquals("source-bucket", copy.sourceBucket());
+			assertEquals("k0001", copy.sourceKey());
+		}
+
+		@Test
+		void copyObject_readsAnItemWhoseNameAlreadyHoldsTheSourcePath() throws Exception {
+			// for example, an items file written by the s3 driver, whose names carry the bucket
+			final CopyObjectRequest copy = copyRequestFor(
+							new ItemFactoryImpl<>().getItem("/source-bucket/k0001", 0, 1), "/source-bucket");
+			assertEquals("source-bucket", copy.sourceBucket());
+			assertEquals("k0001", copy.sourceKey());
 		}
 
 		@SuppressWarnings("unchecked")

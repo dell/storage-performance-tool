@@ -2082,7 +2082,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	// -----------------------------------------------------------------------
 
 	/**
-	 * Copy an object from source to destination.
+	 * Copy an object from source to destination. The source is the item under the source path, and
+	 * the copy keeps the item's key in the destination.
 	 */
 	@SuppressWarnings("unchecked")
 	private CompletableFuture<Void> copyObject(final O op) {
@@ -2092,8 +2093,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			return CompletableFuture.failedFuture(new IllegalArgumentException("Source path is required for copy operation"));
 		}
 
-		// Parse source bucket and key from srcPath
-		final String[] srcBk = parseBucketAndKey(srcPath);
+		final String[] srcBk = parseBucketAndKey(copySourcePath(op.item().name(), srcPath));
 
 		var reqBuilder = CopyObjectRequest.builder()
 						.sourceBucket(srcBk[0])
@@ -2103,6 +2103,16 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		awaitRequest(s3AsyncClient.copyObject(reqBuilder.build()));
 		return CompletableFuture.completedFuture(null);
+	}
+
+	/**
+	 * Returns the full path of the object a copy reads: the item's name when it already holds the
+	 * source path, otherwise the item under that path. This is the object the {@code s3} driver
+	 * names in {@code x-amz-copy-source}. This driver lists names as {@code "/" + key}, so the
+	 * source path {@code /src} gives {@code /src/<key>}.
+	 */
+	private static String copySourcePath(final String itemName, final String srcPath) {
+		return ItemNamePaths.holdsPath(itemName, srcPath) ? itemName : ItemNamePaths.join(srcPath, itemName);
 	}
 
 	@Override

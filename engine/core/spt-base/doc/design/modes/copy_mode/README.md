@@ -47,6 +47,13 @@ byte count related metrics are not calculated (remain zero).
 
 The source object path is specified with `x-amz-copy-source` header.
 
+With `--item-input-path`, where a copy lands in the target bucket depends on the driver:
+
+* `s3`: under the source bucket's name. `/src/k0` is copied to `/dst/src/k0`.
+* `s3-aws`: under the same key. `/src/k0` is copied to `/dst/k0`.
+
+So count the copies of an `s3` step under the `<source bucket>/` prefix.
+
 #### 2.3.2. Swift Objects Copying
 
 There are two variants of object copy requests:
