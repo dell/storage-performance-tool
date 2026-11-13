@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Fixed
 
 - **Runs on one remote engine** — An `spt run` or `spt replay` that runs on a single remote engine (one `--test-hosts` entry, or several where only the first connects and `--min-hosts` allows it) now stores its driver statistics in `spt_run_params.json`; 5.17.0 recorded a `driverStatsError` there instead. A standalone DELETE there, seeded or from `--items-file`, now exits 0 after a clean delete; from 5.15.0 it exited 1 with "metric contributor identity is unavailable before execution starts". A real failure there no longer carries that reason as an extra cause.
+- **Paged path item input on the `s3` driver** — A path item input over more than one listing page no longer stops after the first page or repeats it, on the `s3` driver and the drivers built on it, such as `s3-rdma`. Each next page started after the last item's whole name, `<bucket>/<key>`, instead of its key, so a copy-mode step could copy only the first page and exit 0, or list the first page again without end. Only an `item-input-path` engine override or a direct scenario reaches it.
 
 ## [5.17.0] - 2026-11-11
 

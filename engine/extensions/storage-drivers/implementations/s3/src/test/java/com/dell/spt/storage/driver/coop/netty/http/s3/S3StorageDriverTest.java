@@ -330,6 +330,7 @@ public class S3StorageDriverTest {
 		private boolean suppressCompletion;
 		private boolean outOfBandReadBody;
 		private ConnectException requestFailure;
+		private java.util.function.Function<FullHttpRequest, FullHttpResponse> responder;
 
 		TestS3Driver(Config cfg) throws Exception {
 			this(cfg, false);
@@ -341,6 +342,11 @@ public class S3StorageDriverTest {
 
 		void enqueueResponse(FullHttpResponse resp) {
 			stubResponses.add(resp);
+		}
+
+		/** Answers every request from the request itself, ahead of the queued responses. */
+		void respondWith(final java.util.function.Function<FullHttpRequest, FullHttpResponse> responder) {
+			this.responder = responder;
 		}
 
 		Queue<FullHttpRequest> log() {
@@ -401,6 +407,9 @@ public class S3StorageDriverTest {
 			requests.add(httpRequest);
 			if (requestFailure != null) {
 				throw requestFailure;
+			}
+			if (responder != null) {
+				return responder.apply(httpRequest);
 			}
 			FullHttpResponse next = stubResponses.poll();
 			if (next != null) {
@@ -712,6 +721,155 @@ public class S3StorageDriverTest {
 		assertEquals("/bucketL/a1", ((ItemImpl) items.get(0)).name());
 		assertEquals("/bucketL/a2", ((ItemImpl) items.get(1)).name());
 		assertNull(items.get(2));
+	}
+
+	// ---------- list: paging a path item input ----------
+
+	private static FullHttpResponse listPage(final boolean truncated, final List<String> keys) {
+		final var xml = new StringBuilder("<ListBucketResult><IsTruncated>")
+						.append(truncated)
+						.append("</IsTruncated>");
+		for (final String key : keys) {
+			xml.append("<Contents><Key>").append(key).append("</Key><Size>1</Size></Contents>");
+		}
+		xml.append("</ListBucketResult>");
+		return new DefaultFullHttpResponse(
+						HttpVersion.HTTP_1_1,
+						HttpResponseStatus.OK,
+						Unpooled.copiedBuffer(xml.toString(), StandardCharsets.UTF_8));
+	}
+
+	/** Returns a query parameter as sent, still percent-encoded, or null when the URI has none. */
+	private static String rawQueryParam(final String uri, final String name) {
+		final int query = uri.indexOf('?');
+		if (query < 0) {
+			return null;
+		}
+		for (final String pair : uri.substring(query + 1).split("&")) {
+			if (pair.startsWith(name + "=")) {
+				return pair.substring(name.length() + 1);
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Lists a truncated first page of the path, then asks for the next page after its last item,
+	 * the way the path item input does, and returns the next page's start-after as sent.
+	 */
+	private static String startAfterOfTheNextPage(
+					final String path, final String prefix, final ListOptions nextPageOptions,
+					final String... firstPageKeys) throws Exception {
+		final TestS3Driver drv = new TestS3Driver(baseConfig(false, 2, false, null, "127.0.0.1"));
+		try {
+			drv.enqueueResponse(listPage(true, List.of(firstPageKeys)));
+			drv.enqueueResponse(listPage(false, List.of((prefix == null ? "" : prefix) + "kzzzz")));
+			final ItemFactory<Item> factory = new ItemFactoryImpl<>();
+			final List<Item> firstPage = drv.list(factory, path, prefix, 36, null, 100, ListOptions.DEFAULT);
+			assertEquals(firstPageKeys.length, firstPage.size(), "a truncated page ends without poison");
+			drv.list(factory, path, prefix, 36, firstPage.get(firstPage.size() - 1), 100, nextPageOptions);
+			final String firstUri = drv.log().poll().uri();
+			assertNull(rawQueryParam(firstUri, "start-after"), firstUri);
+			return rawQueryParam(drv.log().poll().uri(), "start-after");
+		} finally {
+			drv.close();
+		}
+	}
+
+	@Test
+	void list_pathInputPagesAfterTheLastKeyNotItsName() throws Exception {
+		assertEquals("k0001", startAfterOfTheNextPage("/tb", null, ListOptions.DEFAULT, "k0000", "k0001"));
+	}
+
+	@Test
+	void list_pathInputPagesAfterTheWholeNestedKeyUnderANamingPrefix() throws Exception {
+		assertEquals(
+						"dir%2Fsub%2Fk0001",
+						startAfterOfTheNextPage(
+										"/tb", "dir/sub/", ListOptions.DEFAULT, "dir/sub/k0000", "dir/sub/k0001"));
+	}
+
+	@Test
+	void list_pathInputWithATrailingSlashPagesAfterTheKey() throws Exception {
+		assertEquals("k0001", startAfterOfTheNextPage("/tb/", null, ListOptions.DEFAULT, "k0000", "k0001"));
+	}
+
+	@Test
+	void list_pathInputSendsAKeyThatStartsWithASlashWhole() throws Exception {
+		assertEquals("%2Fk0001", startAfterOfTheNextPage("/tb", null, ListOptions.DEFAULT, "/k0000", "/k0001"));
+	}
+
+	@Test
+	void list_explicitStartAfterIsSentAsBefore() throws Exception {
+		assertEquals(
+						"explicit%2Fk0005",
+						startAfterOfTheNextPage(
+										"/tb", null, ListOptions.builder().startAfter("/explicit/k0005").build(),
+										"k0000", "k0001"));
+	}
+
+	@Test
+	void list_lastItemOutsideThePathIsSentAsBefore() throws Exception {
+		final TestS3Driver drv = new TestS3Driver(baseConfig(false, 2, false, null, "127.0.0.1"));
+		try {
+			drv.enqueueResponse(listPage(false, List.of("k0006")));
+			final ItemFactory<Item> factory = new ItemFactoryImpl<>();
+			drv.list(factory, "/tb", null, 36, factory.getItem("/elsewhere/k0005", 0, 1), 100, ListOptions.DEFAULT);
+			assertEquals("elsewhere%2Fk0005", rawQueryParam(drv.log().poll().uri(), "start-after"));
+		} finally {
+			drv.close();
+		}
+	}
+
+	/**
+	 * A responder that pages in byte order and honours start-after, as S3 does. With the whole name
+	 * as start-after, bucket "tb" sorts after every key, so page 2 comes back empty and the input
+	 * stops at 100; bucket "ab" sorts before every key, so page 2 repeats page 1 until the page cap.
+	 */
+	@Test
+	void pathItemInputListsEveryKeyOnceWhicheverWayTheBucketSorts() throws Exception {
+		final List<String> keys = new ArrayList<>();
+		for (int i = 0; i < 250; i++) {
+			keys.add(String.format("k%04d", i));
+		}
+		for (final String bucket : List.of("tb", "ab")) {
+			final TestS3Driver drv = new TestS3Driver(baseConfig(false, 2, false, null, "127.0.0.1"));
+			final var requests = new java.util.concurrent.atomic.AtomicInteger();
+			drv.respondWith(request -> {
+				if (requests.incrementAndGet() > 10) {
+					throw new AssertionError(bucket + ": more than 10 listing pages for 250 keys");
+				}
+				final String rawStartAfter = rawQueryParam(request.uri(), "start-after");
+				final String startAfter = rawStartAfter == null
+								? ""
+								: java.net.URLDecoder.decode(rawStartAfter, StandardCharsets.UTF_8);
+				final int maxKeys = Integer.parseInt(rawQueryParam(request.uri(), "max-keys"));
+				final List<String> after = keys.stream().filter(key -> key.compareTo(startAfter) > 0).toList();
+				return listPage(after.size() > maxKeys, after.subList(0, Math.min(maxKeys, after.size())));
+			});
+			try {
+				final var input = new com.dell.spt.base.item.io.StorageItemInput<Item>(
+								drv, 100, new ItemFactoryImpl<>(), "/" + bucket, null, 36);
+				final List<String> listed = new ArrayList<>();
+				final List<Item> buffer = new ArrayList<>();
+				try {
+					while (true) {
+						buffer.clear();
+						input.get(buffer, 100);
+						buffer.forEach(item -> listed.add(item.name()));
+					}
+				} catch (final Exception e) {
+					// the input ends after the last page with an EOFException, thrown unchecked
+					if (!(e instanceof java.io.EOFException)) {
+						throw e;
+					}
+				}
+				assertEquals(keys.stream().map(key -> "/" + bucket + "/" + key).toList(), listed, bucket);
+				assertEquals(3, requests.get(), bucket + ": one request per page");
+			} finally {
+				drv.close();
+			}
+		}
 	}
 
 	@Test
