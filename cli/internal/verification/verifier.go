@@ -917,32 +917,38 @@ func (v *Verifier) probePorts(ctx context.Context, host *hostparse.HostInfo, por
 			seen[i] = portClosed
 		}
 	}
-	return Check{Passed: passed, Message: v.portsMessage(ports, seen), Duration: v.timeProvider.Since(start)}
+	return Check{Passed: passed, Message: v.portsMessage(ports, seen, passed), Duration: v.timeProvider.Since(start)}
 }
 
-// portsMessage names the ports last seen closed and the ports not yet probed.
-func (v *Verifier) portsMessage(ports []servicePort, seen []portState) string {
-	var closed, notProbed []string
+// portsMessage names the ports last seen closed and the ports with no result yet: never probed,
+// or probed only by a probe the deadline cut short. A round that failed with every port seen
+// open in some round says so, rather than that the ports are accessible.
+func (v *Verifier) portsMessage(ports []servicePort, seen []portState, passed bool) string {
+	var closed, noResult, all []string
 	for i, port := range ports {
 		label := fmt.Sprintf("%d (%s)", port.number, port.name)
+		all = append(all, label)
 		switch seen[i] {
 		case portClosed:
 			closed = append(closed, label)
 		case portNotProbed:
-			notProbed = append(notProbed, label)
+			noResult = append(noResult, label)
 		}
 	}
 	var problems []string
 	if len(closed) > 0 {
 		problems = append(problems, fmt.Sprintf("Ports not accessible: %v", closed))
 	}
-	if len(notProbed) > 0 {
-		problems = append(problems, fmt.Sprintf("Ports not probed before the wait ended: %v", notProbed))
+	if len(noResult) > 0 {
+		problems = append(problems, fmt.Sprintf("Ports with no result before the wait ended: %v", noResult))
 	}
-	if len(problems) == 0 {
-		return fmt.Sprintf("Essential service ports accessible (%d RMI registry, %d REST API)", v.registryPort(), v.apiPort())
+	if len(problems) > 0 {
+		return strings.Join(problems, "; ")
 	}
-	return strings.Join(problems, "; ")
+	if !passed {
+		return fmt.Sprintf("Ports each seen open, but never all in one round: %v", all)
+	}
+	return fmt.Sprintf("Essential service ports accessible (%d RMI registry, %d REST API)", v.registryPort(), v.apiPort())
 }
 
 // checkMetricsEndpoint verifies the /metrics/json endpoint works

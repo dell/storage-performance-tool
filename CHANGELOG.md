@@ -8,13 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Added
 
-- **`spt verify --rmi-registry-port`** — `spt verify` now takes `--rmi-registry-port`, with the default (1099), help text and range check of `spt run`'s flag. Verify's test engine serves its RMI registry on that port, and the port conflict check and bridge port mappings use it. With `--api-port`, a host can be verified beside a running engine that holds ports 1099 and 9999.
+- **`spt verify --rmi-registry-port`** — `spt verify` now takes `--rmi-registry-port`, with the default (1099), help text and range check of `spt run`'s flag. Verify's test engine serves its RMI registry on that port, and the port conflict check and bridge port mappings use it. As with `spt run`, a value other than 1099 applies only to the local host; with remote hosts, verify refuses it with `spt run`'s message. With `--api-port`, the local host can be verified beside a running engine that holds ports 1099 and 9999.
 
 ### Fixed
 
 - **Runs on one remote engine** — An `spt run` or `spt replay` that runs on a single remote engine (one `--test-hosts` entry, or several where only the first connects and `--min-hosts` allows it) now stores its driver statistics in `spt_run_params.json`; 5.17.0 recorded a `driverStatsError` there instead. A standalone DELETE there, seeded or from `--items-file`, now exits 0 after a clean delete; from 5.15.0 it exited 1 with "metric contributor identity is unavailable before execution starts". A real failure there no longer carries that reason as an extra cause.
 - **`spt verify --api-port`** — `spt verify` now starts its test engine on the `--api-port` port, and publishes that port in bridge mode, so verifying on a port other than 9999 can pass. Verify used to check a port its engine never served, and fail after 30 seconds with `Ports not accessible`. An `--api-port` outside 1-65535 is now rejected.
-- **`spt verify` port wait** — When the port wait times out, verify now names only the ports it last saw closed. It used to report every port closed, including an RMI registry that was open.
+- **`spt verify` port wait** — When the port wait times out, verify now names only the ports it last saw closed, and lists any port it got no result for. It used to report every port closed, including an RMI registry that was open.
 
 ## [5.17.0] - 2026-11-11
 
