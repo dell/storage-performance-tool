@@ -27,7 +27,7 @@ while [[ $# -gt 0 ]]; do
 		--expect-version|--index|--platforms)
 			[[ $# -gt 1 ]] || { echo "error: $1 requires a value" >&2; exit 2; }
 			case "$1" in
-				--expect-version) EXPECTED_VERSION="$2" ;;
+				--expect-version) EXPECTED_VERSION="$2"; EXPECTED_VERSION_GIVEN=1 ;;
 				--index) INDEX_REF="$2" ;;
 				--platforms) PLATFORMS="$2" ;;
 			esac
@@ -48,6 +48,11 @@ while [[ $# -gt 0 ]]; do
 	esac
 	shift
 done
+
+if [[ -v EXPECTED_VERSION_GIVEN && -z "${EXPECTED_VERSION}" ]]; then
+	echo "error: --expect-version needs a version" >&2
+	exit 2
+fi
 
 if [[ -n "${INDEX_REF}" ]]; then
 	if [[ "${INDEX_REF}" != *@sha256:* ]]; then

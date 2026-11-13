@@ -20,7 +20,8 @@ usage() {
 Usage: PORT=9999 tools/nodetest.local.sh [--run-node] [engine arguments...]
 
 --run-node keeps the node running after the tests. Other arguments, such as
---load-step-node-port=<port>, are passed to run.sh.
+--load-step-node-port=<port>, are passed to run.sh. Give the API port as PORT,
+not --run-port.
 
 Environment variables:
   PORT           API port to bind (default: 9999)
@@ -38,6 +39,10 @@ for arg in "$@"; do
   case "$arg" in
     --run-node)
       KEEP_RUNNING=true
+      ;;
+    --run-port|--run-port=*)
+      echo "Give the API port as PORT=<port>, not $arg: the tests use PORT" >&2
+      exit 2
       ;;
     *)
       NODE_ARGS+=("$arg")

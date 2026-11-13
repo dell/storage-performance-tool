@@ -281,13 +281,14 @@ rem Get the directory where this script is located
 set "SCRIPT_DIR=%~dp0"
 
 rem Ask the java below, without the caller's JAVA_TOOL_OPTIONS, JDK_JAVA_OPTIONS and
-rem _JAVA_OPTIONS, whether it accepts the x86-only options.
+rem _JAVA_OPTIONS, whether it accepts the x86-only options. call returns here when java is a
+rem batch file, such as a version manager's shim.
 setlocal
 set "JAVA_TOOL_OPTIONS="
 set "JDK_JAVA_OPTIONS="
 set "_JAVA_OPTIONS="
 set "SPT_X86_JAVA_OPTS="
-java @X86_JAVA_OPTS@ -version >nul 2>&1 && set "SPT_X86_JAVA_OPTS=@X86_JAVA_OPTS@"
+call java @X86_JAVA_OPTS@ -version >nul 2>&1 && set "SPT_X86_JAVA_OPTS=@X86_JAVA_OPTS@"
 endlocal & set "SPT_X86_JAVA_OPTS=%SPT_X86_JAVA_OPTS%"
 set "SPT_DEFAULT_JAVA_OPTS=@DEFAULT_JAVA_OPTS@"
 
@@ -1028,9 +1029,20 @@ exit "${STUB_JAVA_EXIT:-0}"
 		if (batchDefaults != expectedBatchDefaults) {
 			problems << "run.bat's defaults ${defaultsLines} are not ${expectedBatchDefaults}"
 		}
+		// The probe runs with call, so a java that is a batch file returns, in a nested setlocal
+		// that clears the caller's JVM option variables, and hands only its answer back.
 		def x86 = image.x86JavaOptions.join(' ')
-		if (!commands.contains("java ${x86} -version >nul 2>&1 && set \"SPT_X86_JAVA_OPTS=${x86}\"".toString())) {
-			problems << "run.bat doesn't probe java for ${x86}"
+		def probe = [
+			'setlocal',
+			'set "JAVA_TOOL_OPTIONS="',
+			'set "JDK_JAVA_OPTIONS="',
+			'set "_JAVA_OPTIONS="',
+			'set "SPT_X86_JAVA_OPTS="',
+			"call java ${x86} -version >nul 2>&1 && set \"SPT_X86_JAVA_OPTS=${x86}\"".toString(),
+			'endlocal & set "SPT_X86_JAVA_OPTS=%SPT_X86_JAVA_OPTS%"',
+		]
+		if (Collections.indexOfSubList(commands, probe) < 0) {
+			problems << "run.bat doesn't probe java for ${x86} in its own setlocal: ${probe}"
 		}
 		def launch = 'java %SPT_DEFAULT_JAVA_OPTS% %SPT_JAVA_OPTS% -jar "%SCRIPT_DIR%' + sptJar + '" %*'
 		if (commands.last() != launch) {
