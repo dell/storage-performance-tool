@@ -5,8 +5,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
+import com.dell.spt.base.config.HttpVersioningSynonym;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
@@ -308,6 +310,32 @@ public class S3TablesStorageDriverTest {
 		assertEquals(true, submitted, "submit should return true for tableWrite");
 		// Op completes (either SUCC or FAIL_IO depending on whether stubs satisfy the commit)
 		assertNotNull(op.status(), "op status should be set after submit");
+	}
+
+	@Test
+	void versioningSendsNoBucketVersioningRequest() throws Exception {
+		// The Mongoose synonym storage.net.http.versioning turns on storage.object.versioning for every S3 driver
+		// type, but this driver manages its own paths, so it never checks or enables a bucket's versioning.
+		for (final String opMode : List.of("provision", "tableWrite")) {
+			final Config cfg = baseConfig(opMode, "127.0.0.1");
+			cfg.val("storage-driver-type", "s3-tables");
+			cfg.val("storage-net-http-versioning", true);
+			HttpVersioningSynonym.resolve(cfg, null);
+			assertTrue(cfg.boolVal("storage-object-versioning"));
+			final TestDriver drv = new TestDriver(cfg);
+
+			final Operation<Item> op = new com.dell.spt.base.item.op.OperationImpl<>(
+							0, com.dell.spt.base.item.op.OpType.NOOP,
+							new com.dell.spt.base.item.ItemImpl("dummy"), null, null, null);
+			assertTrue(drv.submit(op));
+
+			assertEquals("/test-bucket", drv.requestNewPath("/test-bucket"));
+			assertFalse(drv.log().isEmpty(), opMode);
+			for (final FullHttpRequest request : drv.log()) {
+				assertFalse(request.uri().contains("versioning"), opMode + ": " + request.method() + " " + request.uri());
+			}
+			assertFalse(op.item().name().contains("~"), opMode + ": " + op.item().name());
+		}
 	}
 
 	// --- ControlPlane timeout / HTTP-error branches ---
