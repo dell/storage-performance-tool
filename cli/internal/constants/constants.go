@@ -48,7 +48,8 @@ const (
 	SCPCommand        = "scp"
 	SSHConnectTimeout = "ConnectTimeout=10"
 	SSHBatchMode      = "BatchMode=yes"
-	// Keepalives let a quiet long-lived session detect a dead peer instead of hanging.
+	// Every SSH session SPT opens carries these keepalives, so a quiet or stalled
+	// session detects a dead peer about 60 s after its last reply instead of hanging.
 	SSHServerAliveInterval = "ServerAliveInterval=15"
 	SSHServerAliveCountMax = "ServerAliveCountMax=3"
 	// Streams need stderr kept separate and stdin kept open whatever the client

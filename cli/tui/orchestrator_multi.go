@@ -27,6 +27,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/remoteip"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
+	units "github.com/docker/go-units"
 )
 
 // TestOrchestratorInterface defines the interface that test orchestrators must implement
@@ -616,6 +617,7 @@ func (o *MultiHostOrchestrator) configureItemFileMounts(
 	if len(mounts) == 0 {
 		return nil
 	}
+	copied := itemFileCopySize(mounts)
 	for _, host := range hosts {
 		if host.DockerManager == nil {
 			cause := fmt.Errorf("host %s has no Docker manager configured", host.Info.Original)
@@ -624,12 +626,29 @@ func (o *MultiHostOrchestrator) configureItemFileMounts(
 		// Remote item staging is itself a managed resource. Claim ownership
 		// before staging so a failed remote rm remains reachable by StopAll.
 		host.SetManaged(true)
+		// Hosts are staged one after another with no cap on a copy, so say
+		// what each one waits for.
+		o.notifyf("📦 Copying %sitem files to %s...", copied, host.Info.Original)
 		if err := configureDockerFileMounts(ctx, host.DockerManager, mounts); err != nil {
 			cause := fmt.Errorf("configure item file mounts on %s: %w", host.Info.Original, err)
 			return errors.Join(cause, o.cleanupManagedContainersAfterStartFailure(ctx))
 		}
 	}
 	return nil
+}
+
+// itemFileCopySize returns the total size of the item files as "1.5GiB of ",
+// or "" when a file cannot be read; its copy then reports that.
+func itemFileCopySize(mounts []scenario.FileMount) string {
+	var total int64
+	for _, mount := range mounts {
+		info, err := os.Stat(mount.HostPath)
+		if err != nil {
+			return ""
+		}
+		total += info.Size()
+	}
+	return units.BytesSize(float64(total)) + " of "
 }
 
 // StartContainers starts Spt containers on all ready hosts
