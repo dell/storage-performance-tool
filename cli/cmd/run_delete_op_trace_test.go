@@ -31,8 +31,9 @@ func deleteManifest(t *testing.T, bucket string) string {
 func standaloneDeleteInputs(t *testing.T) map[string][]string {
 	t.Helper()
 	return map[string][]string{
-		"seeded":     {"--bucket", "owned"},
-		"items file": {"--bucket", "owned", "--items-file", deleteManifest(t, "owned")},
+		"seeded":          {"--bucket", "owned"},
+		"items file":      {"--bucket", "owned", "--items-file", deleteManifest(t, "owned")},
+		"delete existing": {"--bucket", "owned", "--delete-existing", "--prefix", "owned/"},
 	}
 }
 
@@ -79,6 +80,8 @@ func TestStandaloneDeleteRefusesOperationTracingFromEveryOverrideRoute(t *testin
 			"output.metrics.trace.persist=false", "output.metrics.trace.persist=true",
 		}},
 		{name: "SPT_ENGINE_OVERRIDES", env: "storage.driver.threads=6; output.metrics.trace.persist=true"},
+		{name: "--engine-override replaces an untraced SPT_ENGINE_OVERRIDES",
+			env: "output.metrics.trace.persist=false", overrides: []string{"output.metrics.trace.persist=true"}},
 	} {
 		for input, args := range standaloneDeleteInputs(t) {
 			t.Run(test.name+"/"+input, func(t *testing.T) {
@@ -102,6 +105,7 @@ func TestStandaloneDeleteKeepsOverridesThatLeaveOperationTracingOff(t *testing.T
 	for _, test := range []struct {
 		name      string
 		overrides []string
+		env       string
 	}{
 		{name: "no override"},
 		{name: "tracing off", overrides: []string{"output.metrics.trace.persist=false"}},
@@ -112,10 +116,15 @@ func TestStandaloneDeleteKeepsOverridesThatLeaveOperationTracingOff(t *testing.T
 			"output.metrics.trace.persist=true", "output.metrics.trace={}",
 		}},
 		{name: "unrelated override", overrides: []string{"storage.driver.threads=6"}},
+		{name: "--engine-override replaces a traced SPT_ENGINE_OVERRIDES",
+			env: "output.metrics.trace.persist=true", overrides: []string{"storage.driver.threads=6"}},
 	} {
 		for input, args := range standaloneDeleteInputs(t) {
 			t.Run(test.name+"/"+input, func(t *testing.T) {
 				clearEnvDefaultsTestEnv(t)
+				if test.env != "" {
+					t.Setenv(constants.EnvEngineOverrides, test.env)
+				}
 				run := prepareBucketRun(t, WorkloadTypeDelete, append(args, overrideArgs(test.overrides...)...)...).
 					mustSucceed(t)
 				if persist := generatedOpTracePersist(t, run.params); persist == true {

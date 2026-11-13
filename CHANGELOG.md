@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Fixed
 
 - **Runs on one remote engine** — An `spt run` or `spt replay` that runs on a single remote engine (one `--test-hosts` entry, or several where only the first connects and `--min-hosts` allows it) now stores its driver statistics in `spt_run_params.json`; 5.17.0 recorded a `driverStatsError` there instead. A standalone DELETE there, seeded or from `--items-file`, now exits 0 after a clean delete; from 5.15.0 it exited 1 with "metric contributor identity is unavailable before execution starts". A real failure there no longer carries that reason as an extra cause.
-- **Failed DELETE error** — The final `Error:` of a failed DELETE run states the failed step and the DELETE verdict once each, on one line. It could repeat the step's reason and the verdict after `run also failed:`, over two lines, when the CLI's status check saw the failure first.
+- **Failed DELETE error** — The final `Error:` of a failed DELETE run states the failed step and the DELETE verdict once each, on one line when auto-results are on (the default). It could repeat the step's reason and the verdict after `run also failed:`, over two lines, when the CLI's status check saw the failure first.
 - **Traced DELETE** — `spt run delete` with op tracing on (`output.metrics.trace.persist=true`, from `--engine-override` or `SPT_ENGINE_OVERRIDES`) now fails before it starts, saying tracing isn't supported for standalone DELETE. It failed with only "failed to start metadata-mode step slice 0", after a seeded DELETE had written its seed objects.
 
 ## [5.17.0] - 2026-11-11
