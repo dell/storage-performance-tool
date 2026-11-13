@@ -62,6 +62,16 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 		return TargetBucketStep.mixed(config.intVal("load-op-weights-put") > 0);
 	}
 
+	/**
+	 * The one context runs on the base merged with every context in turn. A context is the base with
+	 * its own values on top, so the merge takes each value from the last context, or from the base
+	 * when there is none.
+	 */
+	@Override
+	protected boolean controlsOperations(final int contextIndex) {
+		return contextIndex == (ctxConfigs == null || ctxConfigs.isEmpty() ? BASE_CONFIG : ctxConfigs.size() - 1);
+	}
+
 	@Override
 	protected MixedLoadStepClient copyInstance(final Config config, final List<Config> ctxConfigs) {
 		return new MixedLoadStepClient(config, extensions, ctxConfigs, metricsMgr);

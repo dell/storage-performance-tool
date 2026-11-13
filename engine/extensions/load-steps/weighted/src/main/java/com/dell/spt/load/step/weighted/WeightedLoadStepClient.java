@@ -35,6 +35,15 @@ public class WeightedLoadStepClient extends LoadStepClientBase<WeightedLoadStepC
 		return WeightedLoadStepExtension.TYPE;
 	}
 
+	/**
+	 * Each sub-load runs on its context over the base. A context is the base with its own values on
+	 * top, so the count and the items of each sub-load are its context's, and the base's are unused.
+	 */
+	@Override
+	protected boolean controlsOperations(final int contextIndex) {
+		return contextIndex != BASE_CONFIG;
+	}
+
 	@Override
 	protected WeightedLoadStepClient copyInstance(final Config config, final List<Config> ctxConfigs) {
 		return new WeightedLoadStepClient(config, extensions, ctxConfigs, metricsMgr);
