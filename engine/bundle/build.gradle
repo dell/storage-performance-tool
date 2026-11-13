@@ -1048,6 +1048,14 @@ exit "${STUB_JAVA_EXIT:-0}"
 		if (commands.last() != launch) {
 			problems << "run.bat's last command is not ${launch}: ${commands.last()}"
 		}
+		// run.bat is generated whole, so these are all its commands, in this order: the defaults
+		// follow the probe they read, and the outer setlocal keeps the script's variables local.
+		def expectedCommands = ['@echo off', 'setlocal', 'set "SCRIPT_DIR=%~dp0"'] + probe +
+			[defaultsPrefix + expectedBatchDefaults.join(' ') + '"', launch]
+		if (commands != expectedCommands) {
+			problems << "run.bat's commands are not, in order:\n    " + expectedCommands.join('\n    ') +
+				"\n  but:\n    " + commands.join('\n    ')
+		}
 
 		if (problems) {
 			throw new GradleException('The launchers differ from the SPT image (cases under ' + workRoot + '):\n  ' +
