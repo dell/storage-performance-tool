@@ -51,6 +51,9 @@ dependencies {
 	testImplementation project(':extensions:storage-drivers:primitives:nio')
 	// The bundle merges this shared network schema for s3-aws endpoint configuration.
 	testImplementation project(':extensions:storage-drivers:primitives:netty')
+	// The bundle also merges the HTTP protocol schema, which declares the Mongoose synonym
+	// storage.net.http.versioning that turns on storage.object.versioning.
+	testImplementation project(':extensions:storage-drivers:protocols:http')
 	testImplementation project(':core:spt-base')
 }
 
