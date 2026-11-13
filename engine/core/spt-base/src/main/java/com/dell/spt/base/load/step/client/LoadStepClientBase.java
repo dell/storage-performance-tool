@@ -242,6 +242,30 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		return TargetBucketStep.ORDINARY;
 	}
 
+	/** What {@link #controlsOperations} and {@link #suppliesItems} take for the base configuration. */
+	public static final int BASE_CONFIG = -1;
+
+	/**
+	 * Whether this step's operations take their count limit from the configuration of context
+	 * {@code contextIndex}, or from the base configuration at {@link #BASE_CONFIG}. Only such a count
+	 * must give every engine at least 1, and is split evenly where the usual split would leave an
+	 * engine at 0; any other is sliced as it always was, since the step never uses it. A linear step
+	 * runs on its base configuration and ignores its contexts.
+	 */
+	protected boolean controlsOperations(final int contextIndex) {
+		return contextIndex == BASE_CONFIG;
+	}
+
+	/**
+	 * Whether this step's operations read the item input of the configuration of context
+	 * {@code contextIndex}, or of the base configuration at {@link #BASE_CONFIG}. Only such an input
+	 * must give every engine an item in a count-based recycle step. By default, the input of each
+	 * configuration that {@link #controlsOperations controls the operations}.
+	 */
+	protected boolean suppliesItems(final int contextIndex) {
+		return controlsOperations(contextIndex);
+	}
+
 	@Override
 	protected final void doStartWrapped()
 					throws IllegalArgumentException {
@@ -268,7 +292,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 							config,
 							sliceCount,
 							nodeAddrs,
-							IntegrityConfig.requiresExactOutputCount(config.configVal("storage")));
+							IntegrityConfig.requiresExactOutputCount(config.configVal("storage")),
+							controlsOperations(BASE_CONFIG));
 			// init the config slices for each of the load step context configs
 			final var ctxConfigsSlices = (List<List<Config>>) new ArrayList<List<Config>>(sliceCount);
 			for (var i = 0; i < sliceCount; i++) {
@@ -276,8 +301,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			final var slicesByCtxConfig = new ArrayList<List<Config>>();
 			if (null != ctxConfigs) {
-				for (final var ctxConfig : ctxConfigs) {
-					final var ctxConfigSlices = sliceConfig(ctxConfig, sliceCount, nodeAddrs, false);
+				for (var ctxIndex = 0; ctxIndex < ctxConfigs.size(); ctxIndex++) {
+					final var ctxConfigSlices = sliceConfig(
+									ctxConfigs.get(ctxIndex), sliceCount, nodeAddrs, false, controlsOperations(ctxIndex));
 					slicesByCtxConfig.add(ctxConfigSlices);
 					for (var i = 0; i < sliceCount; i++) {
 						ctxConfigsSlices.get(i).add(ctxConfigSlices.get(i));
@@ -285,9 +311,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			final Runnable distribution = () -> {
-				addFileClients(config, configSlices);
+				addFileClients(config, configSlices, suppliesItems(BASE_CONFIG));
 				for (var i = 0; i < slicesByCtxConfig.size(); i++) {
-					addFileClients(ctxConfigs.get(i), slicesByCtxConfig.get(i));
+					addFileClients(ctxConfigs.get(i), slicesByCtxConfig.get(i), suppliesItems(i));
 				}
 			};
 			// The barrier's deadline starts before the items are distributed (D54-R2).
@@ -520,7 +546,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		return fms;
 	}
 
-	private void addFileClients(final Config config, final List<Config> configSlices) {
+	private void addFileClients(final Config config, final List<Config> configSlices, final boolean suppliesItems) {
 		final var loadConfig = config.configVal("load");
 		final var batchSize = loadConfig.intVal("batch-size");
 		final var storageConfig = config.configVal("storage");
@@ -623,7 +649,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				if (!integrityConfig.enabled() && slicer.distributedItems() == 0) {
 					requireAnItemFromAFile(itemConfig, opType);
 				}
-				requireAnItemPerEngine(config, opType, slicer.distributedItems(), configSlices.size());
+				if (suppliesItems) {
+					requireAnItemPerEngine(config, opType, slicer.distributedItems(), configSlices.size());
+				}
 			} else if (!skipScatter && !integrityConfig.enabled()) {
 				distributeNoItemsIfNothingToDelete(itemConfig, opType, itemType, configSlices, batchSize);
 			}
@@ -782,8 +810,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	/**
 	 * A recycle step limited by count ends when each engine reaches its share, which an engine with
-	 * no items never does, so fewer items than engines end the run. A time limit ends the step
-	 * anyway, so a duration run with an idle engine runs as before. No items at all is for
+	 * no items never does, so fewer items than engines end the run. The step's time limit ends the
+	 * step anyway, so a duration run with an idle engine runs as before. Only the base configuration's
+	 * time limit ends a step: a context's is never enforced. No items at all is for
 	 * {@link #requireAnItemFromAFile}.
 	 */
 	void requireAnItemPerEngine(final Config config, final OpType opType, final long items, final int engines) {
@@ -791,8 +820,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						|| items >= engines
 						|| !config.boolVal("load-op-recycle-mode")
 						|| config.longVal("load-op-limit-count") <= 0
-						|| hasTimeLimit(this.config)
-						|| hasTimeLimit(config)) {
+						|| !withoutTimeLimit()) {
 			return;
 		}
 		final String input = itemInputFile(config.configVal("item")) != null ? "the items file" : "the item input";
@@ -805,12 +833,20 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						null);
 	}
 
-	private static boolean hasTimeLimit(final Config config) {
+	/**
+	 * Whether the step's time limit, which {@link LoadStepBase} enforces, is 0. One that can't be read
+	 * counts as a limit, so the step fails where it is read, as it always has.
+	 */
+	private boolean withoutTimeLimit() {
 		final Object raw = config.val("load-step-limit-time");
-		final long seconds = raw instanceof String text
-						? TimeUtil.getTimeInSeconds(text)
-						: TypeUtil.typeConvert(raw, long.class);
-		return seconds > 0;
+		try {
+			final long seconds = raw instanceof String text
+							? TimeUtil.getTimeInSeconds(text)
+							: TypeUtil.typeConvert(raw, long.class);
+			return seconds <= 0;
+		} catch (final RuntimeException e) {
+			return false;
+		}
 	}
 
 	/** A slice reads a count of 0 as no limit, so each engine needs a count of at least 1. */
@@ -819,8 +855,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 						IntegrityTerminalException.Category.CONFIGURATION,
 						loadStepId(),
 						"the count limit (" + countLimit + ") is below the number of engines (" + engines
-										+ "), and each engine needs a count of at least 1: raise --object-count to at least "
-										+ engines + ", or pass fewer --test-hosts",
+										+ "), and each engine needs a count of at least 1: raise the count limit to at least "
+										+ engines + " (--object-count, or --seed-objects for a seed step), or pass fewer --test-hosts",
 						null);
 	}
 
@@ -1154,8 +1190,17 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 	}
 
+	/**
+	 * @param controlsOperations whether the step's operations take their count limit from this
+	 *                           configuration ({@link #controlsOperations}); a count the step never
+	 *                           uses is sliced as it always was, and never refused
+	 */
 	List<Config> sliceConfig(
-					final Config config, final int sliceCount, final List<String> nodeAddrs, final boolean balanceCountLimit) {
+					final Config config,
+					final int sliceCount,
+					final List<String> nodeAddrs,
+					final boolean balanceCountLimit,
+					final boolean controlsOperations) {
 		final var configSlices = (List<Config>) new ArrayList<Config>(sliceCount);
 		for (var i = 0; i < sliceCount; i++) {
 			final var configSlice = ConfigSliceUtil.initSlice(config);
@@ -1169,7 +1214,15 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		if (sliceCount > 1) { // distributed mode
 			//
 			final var countLimit = config.longVal("load-op-limit-count");
-			if (countLimit > 0) {
+			if (countLimit > 0 && !controlsOperations) {
+				if (balanceCountLimit) {
+					ConfigSliceUtil.sliceLongValueBalanced(
+									countLimit, configSlices, "load-op-limit-count");
+				} else {
+					ConfigSliceUtil.sliceLongValue(
+									countLimit, configSlices, "load-op-limit-count");
+				}
+			} else if (countLimit > 0) {
 				// A slice reads a count of 0 as no limit.
 				if (countLimit < sliceCount) {
 					throw countBelowEngineCount(countLimit, sliceCount);
