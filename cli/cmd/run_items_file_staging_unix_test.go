@@ -65,8 +65,8 @@ func readLogLines(t *testing.T, path string) []string {
 
 // A read from --items-file copies the file over scp to every remote host,
 // through the real orchestrator and remote Docker manager, with keepalives on
-// the copy; the local route copies nothing over SSH and hands the file to the
-// local launcher instead.
+// the copy and on every ssh command; the local route copies nothing over SSH
+// and hands the file to the local launcher instead.
 func TestRunCmdItemsFileStagesOverSCPOnlyOnRemoteHosts(t *testing.T) {
 	tests := []struct {
 		name, hosts, minHosts string
@@ -133,12 +133,18 @@ func TestRunCmdItemsFileStagesOverSCPOnlyOnRemoteHosts(t *testing.T) {
 			if err == nil {
 				t.Fatal("RunE() succeeded on a host that cannot start an engine")
 			}
+			const keepalives = "-o ConnectTimeout=10 -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 "
+			for _, call := range sshCalls {
+				if !strings.HasPrefix(call, keepalives) || strings.Count(call, "ServerAlive") != 2 {
+					t.Fatalf("ssh call %q, want the keepalives once at the front", call)
+				}
+			}
 			if len(scpCalls) != len(test.wantCopiedTo) {
 				t.Fatalf("scp calls = %q, want one per remote host %q", scpCalls, test.wantCopiedTo)
 			}
 			for i, host := range test.wantCopiedTo {
-				copyArgs := regexp.MustCompile(`^-o ConnectTimeout=10 -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 ` +
-					regexp.QuoteMeta(itemsFile) + ` \S*` + regexp.QuoteMeta(host) + `:(/tmp/spt-items-\d+)/read-items\.csv$`)
+				copyArgs := regexp.MustCompile(`^` + regexp.QuoteMeta(keepalives+itemsFile) +
+					` \S*` + regexp.QuoteMeta(host) + `:(/tmp/spt-items-\d+)/read-items\.csv$`)
 				match := copyArgs.FindStringSubmatch(scpCalls[i])
 				if match == nil {
 					t.Fatalf("scp call %d = %q, want the items file copied to %s with keepalives", i, scpCalls[i], host)

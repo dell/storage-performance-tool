@@ -170,17 +170,16 @@ const remoteStreamGuard = `exec 3<&0 </dev/null; "$@" & p=$!; ` +
 	`wait "$p"; s=$?; kill "$w" 2>/dev/null; exit "$s"`
 
 // streamHostCommand builds a streamed command: run directly when local, or over
-// SSH under remoteStreamGuard. The SSH session has keepalives, no pty (which
-// would merge stderr into stdout), and, when the client supports the option, an
-// explicit StdinNull=no so client config cannot close the stdin the guard
-// watches. The single-quoted guard reaches sh as one word after the remote
-// login shell parses the command line.
+// SSH under remoteStreamGuard. Besides hostCommand's keepalives, the SSH session
+// has no pty (which would merge stderr into stdout) and, when the client
+// supports the option, an explicit StdinNull=no so client config cannot close
+// the stdin the guard watches. The single-quoted guard reaches sh as one word
+// after the remote login shell parses the command line.
 func streamHostCommand(ctx context.Context, host *hostparse.HostInfo, command []string, supportsStdinNull bool) *exec.Cmd {
 	if host.IsLocal {
 		return hostCommand(ctx, host, command)
 	}
-	sshFlags := []string{constants.SSHFlagNoTTY,
-		"-o", constants.SSHServerAliveInterval, "-o", constants.SSHServerAliveCountMax}
+	sshFlags := []string{constants.SSHFlagNoTTY}
 	if supportsStdinNull {
 		sshFlags = append(sshFlags, "-o", constants.SSHStdinNullNo)
 	}
@@ -205,13 +204,25 @@ func sshAcceptsOption(sshCommand, option string) bool {
 
 // hostCommand builds command for local execution or wraps it in ssh for a
 // remote host. sshFlags go after the default options, before the target.
+//
+// Every remote session carries keepalives, so ssh gives up about 60 s after a
+// peer that keeps the TCP connection up stops answering; see scpCommand for the
+// timing. When the user's config shares connections (ControlMaster auto), the
+// ssh that opens the control process passes them on to it: a client of a
+// shared connection, such as scp's ssh, ignores its own keepalives, and the
+// control process, which owns the connection, decides when it is dead. Ending
+// it ends its clients. A shared connection opened outside SPT follows its own
+// keepalive settings. SPT keeps sharing connections: with BatchMode, a login
+// that needs a password or a second factor works only through a control
+// connection the user opened beforehand.
 func hostCommand(ctx context.Context, host *hostparse.HostInfo, command []string, sshFlags ...string) *exec.Cmd {
 	if host.IsLocal {
 		// #nosec G204: command and arguments originate from trusted spt constructors
 		return exec.CommandContext(ctx, command[0], command[1:]...)
 	}
-	sshArgs := make([]string, 0, 5+len(sshFlags)+len(command))
-	sshArgs = append(sshArgs, "-o", constants.SSHConnectTimeout, "-o", constants.SSHBatchMode)
+	sshArgs := make([]string, 0, 9+len(sshFlags)+len(command))
+	sshArgs = append(sshArgs, "-o", constants.SSHConnectTimeout, "-o", constants.SSHBatchMode,
+		"-o", constants.SSHServerAliveInterval, "-o", constants.SSHServerAliveCountMax)
 	sshArgs = append(sshArgs, sshFlags...)
 	sshArgs = append(sshArgs, host.GetSSHTarget())
 	sshArgs = append(sshArgs, command...)
@@ -274,7 +285,7 @@ func (w *lineWriter) emitLine(line []byte) {
 // CopyFile copies a local file to the target host path. It returns within
 // constants.CommandWaitDelay of the copy exiting or ctx ending, even when
 // scp's ssh child keeps the output pipe open; see endHeldPipeWait. A remote
-// copy whose peer stops answering ends on scp's keepalives; see scpCommand.
+// copy whose peer stops answering ends on SSH keepalives; see scpCommand.
 // When ctx ended, the error says the copy was stopped and why, and wraps
 // ctx.Err().
 func (r *RealCommandExecutor) CopyFile(ctx context.Context, host *hostparse.HostInfo, localPath, remotePath string) error {
@@ -306,8 +317,11 @@ func (r *RealCommandExecutor) CopyFromHost(ctx context.Context, host *hostparse.
 // once constants.SSHServerAliveCountMax probes, one every
 // constants.SSHServerAliveInterval of silence, go unanswered, about 60 s after
 // the peer's last reply (59 s measured), with or without a deadline on ctx.
-// scp runs its ssh with ControlMaster=no, so no ControlPersist process is
-// involved.
+// scp runs its ssh with ControlMaster=no, which stops it from opening a control
+// process but not from joining one that is open: when the user's config shares
+// connections, scp's ssh rides the control process that an earlier SPT command
+// opened, its own keepalives are ignored, and the control process's keepalives
+// from hostCommand end the copy instead, in the same time.
 func scpCommand(ctx context.Context, source, target string) *exec.Cmd {
 	scpArgs := []string{
 		"-o", constants.SSHConnectTimeout,

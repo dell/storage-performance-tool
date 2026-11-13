@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 )
 
 // Bounds for the stalled-copy canary. scp's keepalives give up about 60 s
@@ -48,20 +49,11 @@ func TestSSHStalledCopyCanary(t *testing.T) {
 
 	t.Run("keepalives end a stalled copy with no deadline", func(t *testing.T) {
 		dest := filepath.Join(t.TempDir(), "items.csv")
-		done := startCopy(context.Background(), src, dest)
+		done := startCopy(context.Background(), canaryHost("spt-copy"), src, dest)
 		waitInFlight(t, dest, done)
 		frozenAt := env.freezeSessions(t)
 		err, elapsed := awaitCopy(t, done, frozenAt, stalledCopyKeepaliveMax)
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) || exitErr.ExitCode() <= 0 {
-			t.Fatalf("want scp's own exit status after its keepalives failed, got %v", err)
-		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), " failed: ") {
-			t.Fatalf("a copy that ended on its keepalives must read as failed, not stopped: %v", err)
-		}
-		if elapsed < stalledCopyKeepaliveMin {
-			t.Fatalf("the copy ended %v after the freeze, before its keepalives could fail: %v", elapsed, err)
-		}
+		requireEndedOnKeepalives(t, err, elapsed)
 		t.Logf("returned %v after the freeze: %v", elapsed.Round(100*time.Millisecond), err)
 	})
 
@@ -69,7 +61,7 @@ func TestSSHStalledCopyCanary(t *testing.T) {
 		dest := filepath.Join(t.TempDir(), "items.csv")
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		done := startCopy(ctx, src, dest)
+		done := startCopy(ctx, canaryHost("spt-copy"), src, dest)
 		waitInFlight(t, dest, done)
 		env.freezeSessions(t)
 		time.Sleep(2 * time.Second) // let the client block on the frozen peer
@@ -81,7 +73,7 @@ func TestSSHStalledCopyCanary(t *testing.T) {
 		dest := filepath.Join(t.TempDir(), "items.csv")
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		done := startCopy(ctx, src, dest)
+		done := startCopy(ctx, canaryHost("spt-copy"), src, dest)
 		waitInFlight(t, dest, done)
 		cancel()
 		requireStoppedByCancel(t, done, time.Now())
@@ -89,10 +81,95 @@ func TestSSHStalledCopyCanary(t *testing.T) {
 	})
 }
 
-func startCopy(ctx context.Context, src, dest string) <-chan error {
+// TestSSHSharedConnectionCopyCanary is the keepalive case of
+// TestSSHStalledCopyCanary through a shared connection, as a user's config
+// with ControlMaster auto makes it: spt-mux shares connections through a
+// ControlPersist process and sets no keepalives of its own. An ExecuteCommand
+// opens the control process, the copy rides it (sshd accepts no new
+// connection), and the sessions are frozen mid-copy. scp's ssh, a client of
+// the shared connection, ignores its own keepalives: the copy ends only
+// because the control process carries hostCommand's, and its exit takes the
+// copy down with it.
+//
+//	go test -tags ssh_wait_delay_canary ./internal/docker/command -run SSHSharedConnectionCopyCanary -v
+func TestSSHSharedConnectionCopyCanary(t *testing.T) {
+	const alias = "spt-mux"
+	env := startCanarySSHD(t)
+	env.useLimitedSCP(t, stalledCopyRateKbit)
+	env.requireSharedWithoutKeepalives(t, alias)
+	src := filepath.Join(t.TempDir(), "items.csv")
+	if err := os.WriteFile(src, make([]byte, stalledCopyFileSize), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	host := canaryHost(alias)
+	if stdout, err := runWithin(t, 10*time.Second, host, []string{"echo", "ready"}); err != nil || stdout != "ready" {
+		t.Fatalf("opening the control process = %q, %v", stdout, err)
+	}
+	env.requireControlProcess(t, alias)
+	before := env.acceptedSessions(t)
+
+	dest := filepath.Join(t.TempDir(), "items.csv")
+	done := startCopy(context.Background(), host, src, dest)
+	waitInFlight(t, dest, done)
+	if after := env.acceptedSessions(t); after != before {
+		t.Fatalf("sshd accepted %d connection(s) for the copy; it did not ride the control process", after-before)
+	}
+	frozenAt := env.freezeSessions(t)
+	err, elapsed := awaitCopy(t, done, frozenAt, stalledCopyKeepaliveMax)
+	requireEndedOnKeepalives(t, err, elapsed)
+	if out, checkErr := env.controlCheck(alias); checkErr == nil {
+		t.Fatalf("the control process outlived the copy it should have ended: %s", out)
+	}
+	t.Logf("returned %v after the freeze, with the control process gone: %v", elapsed.Round(100*time.Millisecond), err)
+}
+
+func startCopy(ctx context.Context, host *hostparse.HostInfo, src, dest string) <-chan error {
 	done := make(chan error, 1)
-	go func() { done <- NewCommandExecutor().CopyFile(ctx, canaryHost("spt-copy"), src, dest) }()
+	go func() { done <- NewCommandExecutor().CopyFile(ctx, host, src, dest) }()
 	return done
+}
+
+// requireEndedOnKeepalives checks that a stalled copy failed on its own, with
+// ssh's exit status once the keepalives went unanswered, and not before they
+// could have.
+func requireEndedOnKeepalives(t *testing.T, err error, elapsed time.Duration) {
+	t.Helper()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() <= 0 {
+		t.Fatalf("want scp's own exit status after the keepalives failed, got %v", err)
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), " failed: ") {
+		t.Fatalf("a copy that ended on keepalives must read as failed, not stopped: %v", err)
+	}
+	if elapsed < stalledCopyKeepaliveMin {
+		t.Fatalf("the copy ended %v after the freeze, before the keepalives could fail: %v", elapsed, err)
+	}
+}
+
+// requireSharedWithoutKeepalives checks that the canary's client config shares
+// connections for alias and sets no keepalives, so only SPT's can end a
+// stalled session.
+func (e canarySSHD) requireSharedWithoutKeepalives(t *testing.T, alias string) {
+	t.Helper()
+	out, err := exec.Command("/usr/bin/ssh", "-G", "-F", e.config, alias).Output() // #nosec G204 -- test-only canary
+	if err != nil {
+		t.Fatalf("ssh -G %s: %v", alias, err)
+	}
+	resolved := map[string]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		if key, value, ok := strings.Cut(line, " "); ok {
+			resolved[key] = value
+		}
+	}
+	for key, want := range map[string]string{"controlmaster": "auto", "serveraliveinterval": "0"} {
+		if resolved[key] != want {
+			t.Fatalf("the client config sets %s %q for %s, want %q", key, resolved[key], alias, want)
+		}
+	}
+	if !strings.HasPrefix(resolved["controlpath"], e.dir) || resolved["controlpersist"] == "" || resolved["controlpersist"] == "no" {
+		t.Fatalf("want a ControlPath in %s and ControlPersist for %s, got %q and %q",
+			e.dir, alias, resolved["controlpath"], resolved["controlpersist"])
+	}
 }
 
 // waitInFlight waits until the copy has written stalledCopyInFlight bytes.
