@@ -96,6 +96,9 @@ final class ErrorsLogBurstBudgetTest {
 	 */
 	private List<String> logToErrorsLog(final Consumer<Logger> body) throws Exception {
 		final String stepId = "errors-budget-" + System.nanoTime();
+		// The first use of Loggers starts the JVM's global logger context. Use it before home_dir points
+		// at this test's temp dir, so the global context's files don't go there.
+		final String errorsLogger = Loggers.ERR.getName();
 		final var ctx = new LoggerContext(stepId);
 		final long elapsedNanos;
 		try (final var ignored = CloseableThreadContext.put(KEY_HOME_DIR, homeDir.toString())
@@ -105,9 +108,9 @@ final class ErrorsLogBurstBudgetTest {
 				ctx.start(ConfigurationFactory.getInstance().getConfiguration(ctx, source));
 				// The Errors logger also writes INFO and above to the console. Keep the floods out of
 				// the build output: this test reads errors.log only.
-				ctx.getConfiguration().getLoggerConfig(Loggers.ERR.getName()).removeAppender("stdout");
+				ctx.getConfiguration().getLoggerConfig(errorsLogger).removeAppender("stdout");
 				final long start = System.nanoTime();
-				body.accept(ctx.getLogger(Loggers.ERR.getName()));
+				body.accept(ctx.getLogger(errorsLogger));
 				elapsedNanos = System.nanoTime() - start;
 			} finally {
 				ctx.stop();
