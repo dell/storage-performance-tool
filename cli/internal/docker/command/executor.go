@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
@@ -86,6 +87,8 @@ func (r *RealCommandExecutor) ExecuteCommand(ctx context.Context, host *hostpars
 // process; a remote command runs under remoteStreamGuard, which ends it when
 // the session closes. A descendant that keeps the output pipes open delays
 // the return by at most constants.StreamCommandWaitDelay; see endHeldPipeWait.
+// If a line callback is still running when that delay cuts the pipes, output
+// may have been left unread, so the cut is returned as exec.ErrWaitDelay.
 func (r *RealCommandExecutor) StreamCommand(ctx context.Context, host *hostparse.HostInfo, command []string, stdoutLine, stderrLine func(string)) error {
 	if len(command) == 0 {
 		return fmt.Errorf("empty command")
@@ -106,7 +109,16 @@ func (r *RealCommandExecutor) StreamCommand(ctx context.Context, host *hostparse
 	// Bound the wait if a descendant (for example an ssh ProxyCommand) keeps the
 	// output pipes open after the process exits or is killed.
 	cmd.WaitDelay = constants.StreamCommandWaitDelay
-	if err := endHeldPipeWait(cmd, host, cmd.Run()); err != nil {
+	err := cmd.Run()
+	if errors.Is(err, exec.ErrWaitDelay) && (stdout.cutMidWrite() || stderr.cutMidWrite()) {
+		// The cut caught a callback holding up the copy, so output the command
+		// wrote before it exited may have been left unread: report the cut so the
+		// caller can replay, as it did before held pipes counted as success.
+		logging.LogDebug("command-executor", "output pipes cut while a line callback was still running; reporting the wait delay",
+			"host", host.Host, "command", cmd.Args[0], "wait_delay", cmd.WaitDelay.String())
+		return err
+	}
+	if err := endHeldPipeWait(cmd, host, err); err != nil {
 		// A trailing unterminated line may have been cut off mid-write; callers
 		// that resume replay it whole instead.
 		return err
@@ -115,6 +127,13 @@ func (r *RealCommandExecutor) StreamCommand(ctx context.Context, host *hostparse
 	stderr.flush()
 	return nil
 }
+
+// streamWriteSettle is how soon before Wait returns a lineWriter's last Write
+// may have ended and still count as caught by the pipe cut. Wait closes the
+// pipes and then joins the copy goroutines, so a Write that was running at the
+// cut ends just before Wait returns, while an idle copy's last Write ended about
+// cmd.WaitDelay earlier. Far below the delay, far above scheduling latency.
+const streamWriteSettle = 100 * time.Millisecond
 
 // endHeldPipeWait maps the bare exec.ErrWaitDelay that Wait returns when the
 // process exited 0 on its own but a descendant still held its output pipes
@@ -202,9 +221,13 @@ type lineWriter struct {
 	mu      *sync.Mutex
 	emit    func(string)
 	pending []byte
+	// lastWrite is when the latest Write returned. Only os/exec's copy
+	// goroutine writes it; read it only after Wait has joined that goroutine.
+	lastWrite time.Time
 }
 
 func (w *lineWriter) Write(p []byte) (int, error) {
+	defer func() { w.lastWrite = time.Now() }()
 	w.pending = append(w.pending, p...)
 	for {
 		i := bytes.IndexByte(w.pending, '\n')
@@ -224,6 +247,15 @@ func (w *lineWriter) flush() {
 		w.emitLine(w.pending)
 		w.pending = nil
 	}
+}
+
+// cutMidWrite reports whether the latest Write returned within
+// streamWriteSettle, which after Wait returned exec.ErrWaitDelay means the cut
+// found the copy inside a Write, with output possibly still unread in the pipe.
+// A copy starved of CPU for longer than streamWriteSettle between a Write and
+// its next read goes unseen. Call it only after Wait returns.
+func (w *lineWriter) cutMidWrite() bool {
+	return !w.lastWrite.IsZero() && time.Since(w.lastWrite) < streamWriteSettle
 }
 
 func (w *lineWriter) emitLine(line []byte) {

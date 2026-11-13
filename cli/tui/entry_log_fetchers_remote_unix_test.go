@@ -79,3 +79,44 @@ func TestRemoteLogFetcher_CleanExitWithHeldPipeEndsWithoutWarning(t *testing.T) 
 		t.Fatalf("Stream returned after %v, waiting on the held pipe", elapsed)
 	}
 }
+
+// TestRemoteLogFetcher_SlowRelayAtExitReplaysUnreadOutput blocks the relay on
+// the first line past the stream's wait delay while the fake docker CLI writes
+// its last line and exits 0, with no descendant holding the pipe (a blocked
+// terminal or headless sink). The cut can leave that line unread, so the relay
+// must reconnect and replay it rather than end as if the stream completed.
+func TestRemoteLogFetcher_SlowRelayAtExitReplaysUnreadOutput(t *testing.T) {
+	dir := t.TempDir()
+	ack := filepath.Join(dir, "ack")
+	script := "#!/bin/sh\n" +
+		"if [ ! -f '" + ack + "' ]; then\n" +
+		"echo '2025-09-14T12:00:01.000000000Z first'\n" +
+		"while [ ! -f '" + ack + "' ]; do sleep 0.01; done\n" +
+		"fi\n" +
+		"echo '2025-09-14T12:00:02.000000000Z FINAL-DIAGNOSTIC'\n"
+	if err := os.WriteFile(filepath.Join(dir, constants.DockerCommand), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	host := &hostparse.HostInfo{Host: "localhost", IsLocal: true}
+	ops := command.NewDockerOperations(command.NewCommandExecutor(), host)
+	var relayed []string
+	err := newRemoteLogFetcher(ops, "abc").Stream(ctx, func(s string) {
+		relayed = append(relayed, s)
+		if s == "first" {
+			if err := os.WriteFile(ack, nil, 0o600); err != nil {
+				t.Error(err)
+			}
+			time.Sleep(constants.StreamCommandWaitDelay + 1500*time.Millisecond)
+		}
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if strings.Join(relayed, "|") != "first|FINAL-DIAGNOSTIC" {
+		t.Fatalf("relayed lines = %q; the line written before exit was lost", relayed)
+	}
+}

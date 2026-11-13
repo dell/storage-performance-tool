@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -291,14 +292,15 @@ func TestExecuteCommand_HeldPipeKeepsExitError(t *testing.T) {
 }
 
 func TestExecuteCommand_NoHeldPipeReturnsAtOnce(t *testing.T) {
-	started := time.Now()
+	logs := captureDebugLog(t)
 	stdout, _, err := NewCommandExecutor().ExecuteCommand(context.Background(), CreateLocalHost(), []string{"sh", "-c", "echo answer"})
 	if err != nil || stdout != "answer" {
 		t.Fatalf("got %q, %v", stdout, err)
 	}
-	// A command that closes its pipes on exit never waits for the delay.
-	if elapsed := time.Since(started); elapsed >= constants.CommandWaitDelay {
-		t.Fatalf("call took %v, at least the wait delay", elapsed)
+	// A command that closes its pipes on exit never reaches the delay. The log
+	// shows it without timing the call, which a loaded runner can slow.
+	if strings.Contains(logs.String(), "held the output pipe") {
+		t.Fatalf("a command that closed its pipes reached the wait delay: %q", logs.String())
 	}
 }
 
@@ -429,5 +431,55 @@ func TestStreamCommand_HeldPipeKeepsExitError(t *testing.T) {
 	// A failure still drops the fragment.
 	if strings.Join(stdout, "|") != "complete" {
 		t.Fatalf("stdout lines = %q", stdout)
+	}
+}
+
+// TestStreamCommand_CutDuringCallbackReportsWaitDelay holds the stdout callback
+// past the wait delay while the command writes its last line and exits 0, with
+// no descendant holding the pipe. The cut can leave that line unread, so the
+// stream must report exec.ErrWaitDelay for the caller to replay, not succeed.
+func TestStreamCommand_CutDuringCallbackReportsWaitDelay(t *testing.T) {
+	exited := filepath.Join(t.TempDir(), "exited")
+	var stdout []string
+	err := NewCommandExecutor().StreamCommand(context.Background(), CreateLocalHost(),
+		[]string{"sh", "-c", "echo first; sleep 0.1; echo final; : > '" + exited + "'"},
+		func(line string) {
+			stdout = append(stdout, line)
+			if line != "first" {
+				return
+			}
+			// Model a blocked consumer: hold the copy until the delay has cut it.
+			for deadline := time.Now().Add(heldPipeBound); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+				if _, err := os.Stat(exited); err == nil {
+					break
+				}
+			}
+			time.Sleep(constants.StreamCommandWaitDelay + 500*time.Millisecond)
+		}, func(string) {})
+	switch {
+	case errors.Is(err, exec.ErrWaitDelay):
+	case err == nil && strings.Join(stdout, "|") == "first|final":
+		// The delay fired late enough for the copy to drain: nothing was lost.
+		t.Log("the wait delay did not cut the copy on this run")
+	default:
+		t.Fatalf("a cut during a callback must report exec.ErrWaitDelay, got %v with lines %q", err, stdout)
+	}
+}
+
+func TestLineWriter_CutMidWrite(t *testing.T) {
+	var mu sync.Mutex
+	w := &lineWriter{mu: &mu}
+	if w.cutMidWrite() {
+		t.Fatal("a writer that never wrote cannot be cut mid-write")
+	}
+	if _, err := w.Write([]byte("line\n")); err != nil {
+		t.Fatal(err)
+	}
+	if !w.cutMidWrite() {
+		t.Fatal("a Write that just returned must count as caught by the cut")
+	}
+	w.lastWrite = time.Now().Add(-constants.StreamCommandWaitDelay)
+	if w.cutMidWrite() {
+		t.Fatal("a Write that returned a wait delay ago must count as idle")
 	}
 }
