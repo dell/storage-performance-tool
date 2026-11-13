@@ -13,9 +13,11 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/logging"
 )
 
 // Executor defines the interface for executing commands (SSH/local)
@@ -57,14 +59,18 @@ func NewCommandExecutor() *RealCommandExecutor {
 type CommandExecutor = Executor
 
 // ExecuteCommand runs a command locally or via SSH on the given host and
-// returns stdout, stderr (when available), and an error value.
+// returns stdout, stderr (when available), and an error value. It returns
+// within constants.CommandWaitDelay of the command exiting or ctx ending, even
+// when a descendant keeps the output pipes open; see endHeldPipeWait.
 func (r *RealCommandExecutor) ExecuteCommand(ctx context.Context, host *hostparse.HostInfo, command []string) (stdout, stderr string, err error) {
 	if len(command) == 0 {
 		return "", "", fmt.Errorf("empty command")
 	}
 	cmd := hostCommand(ctx, host, command)
+	cmd.WaitDelay = constants.CommandWaitDelay
 
 	stdoutBytes, err := cmd.Output()
+	err = endHeldPipeWait(cmd, host, err)
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
@@ -79,7 +85,10 @@ func (r *RealCommandExecutor) ExecuteCommand(ctx context.Context, host *hostpars
 // StreamCommand runs a long-lived command locally or over one SSH session and
 // delivers each output line as it arrives. Cancelling ctx kills the local
 // process; a remote command runs under remoteStreamGuard, which ends it when
-// the session closes.
+// the session closes. A descendant that keeps the output pipes open delays
+// the return by at most constants.StreamCommandWaitDelay; see endHeldPipeWait.
+// If a line callback is still running when that delay cuts the pipes, output
+// may have been left unread, so the cut is returned as exec.ErrWaitDelay.
 func (r *RealCommandExecutor) StreamCommand(ctx context.Context, host *hostparse.HostInfo, command []string, stdoutLine, stderrLine func(string)) error {
 	if len(command) == 0 {
 		return fmt.Errorf("empty command")
@@ -100,13 +109,53 @@ func (r *RealCommandExecutor) StreamCommand(ctx context.Context, host *hostparse
 	// Bound the wait if a descendant (for example an ssh ProxyCommand) keeps the
 	// output pipes open after the process exits or is killed.
 	cmd.WaitDelay = constants.StreamCommandWaitDelay
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	if errors.Is(err, exec.ErrWaitDelay) && (stdout.cutMidWrite() || stderr.cutMidWrite()) {
+		// The cut caught a callback holding up the copy, so output the command
+		// wrote before it exited may have been left unread: report the cut so the
+		// caller can replay, as it did before held pipes counted as success.
+		logging.LogDebug("command-executor", "output pipes cut while a line callback was still running; reporting the wait delay",
+			"host", host.Host, "command", cmd.Args[0], "wait_delay", cmd.WaitDelay.String())
+		return err
+	}
+	if err := endHeldPipeWait(cmd, host, err); err != nil {
 		// A trailing unterminated line may have been cut off mid-write; callers
 		// that resume replay it whole instead.
 		return err
 	}
 	stdout.flush()
 	stderr.flush()
+	return nil
+}
+
+// streamWriteSettle is how soon before Wait returns a lineWriter's last Write
+// may have ended and still count as caught by the pipe cut. Wait closes the
+// pipes and then joins the copy goroutines, so a Write that was running at the
+// cut ends just before Wait returns. An idle copy's last Write ended once the
+// callbacks for the last output written had returned: with prompt callbacks,
+// about cmd.WaitDelay before the cut. A descendant that wrote, or a callback
+// that returned, within the window before the cut makes a false cut. Well below
+// the delay and above a CPU-throttling period: a false cut only makes the
+// caller replay, while a missed one loses output.
+const streamWriteSettle = 250 * time.Millisecond
+
+// endHeldPipeWait maps the bare exec.ErrWaitDelay that Wait returns when the
+// process exited 0 on its own but a descendant still held its output pipes
+// once cmd.WaitDelay expired: the command succeeded, so it returns nil, and
+// the caller keeps the output collected so far. Output the descendant writes
+// after the delay is discarded. That is acceptable for SPT's commands: ssh,
+// scp and the docker CLI write their own output before they exit, and the
+// usual holder is an ssh child (a ProxyJump "ssh -W", scp's ssh, or a
+// ControlPersist process started with -v) that writes only diagnostics.
+// Exit errors and the context kill are returned unchanged. The holder itself
+// is left running: killing the process group would change how Ctrl-C reaches
+// ssh.
+func endHeldPipeWait(cmd *exec.Cmd, host *hostparse.HostInfo, err error) error {
+	if !errors.Is(err, exec.ErrWaitDelay) || cmd.ProcessState == nil || !cmd.ProcessState.Success() {
+		return err
+	}
+	logging.LogDebug("command-executor", "command exited 0 but a descendant held the output pipe; stopped reading after the wait delay",
+		"host", host.Host, "command", cmd.Args[0], "wait_delay", cmd.WaitDelay.String())
 	return nil
 }
 
@@ -176,9 +225,13 @@ type lineWriter struct {
 	mu      *sync.Mutex
 	emit    func(string)
 	pending []byte
+	// lastWrite is when the latest Write returned. Only os/exec's copy
+	// goroutine writes it; read it only after Wait has joined that goroutine.
+	lastWrite time.Time
 }
 
 func (w *lineWriter) Write(p []byte) (int, error) {
+	defer func() { w.lastWrite = time.Now() }()
 	w.pending = append(w.pending, p...)
 	for {
 		i := bytes.IndexByte(w.pending, '\n')
@@ -200,6 +253,15 @@ func (w *lineWriter) flush() {
 	}
 }
 
+// cutMidWrite reports whether the latest Write returned within
+// streamWriteSettle, which after Wait returned exec.ErrWaitDelay means the cut
+// found the copy inside a Write, with output possibly still unread in the pipe.
+// A copy starved of CPU for longer than streamWriteSettle between a Write and
+// its next read goes unseen. Call it only after Wait returns.
+func (w *lineWriter) cutMidWrite() bool {
+	return !w.lastWrite.IsZero() && time.Since(w.lastWrite) < streamWriteSettle
+}
+
 func (w *lineWriter) emitLine(line []byte) {
 	if w.emit == nil {
 		return
@@ -209,7 +271,9 @@ func (w *lineWriter) emitLine(line []byte) {
 	w.emit(string(bytes.TrimSuffix(line, []byte{'\r'})))
 }
 
-// CopyFile copies a local file to the target host path.
+// CopyFile copies a local file to the target host path. It returns within
+// constants.CommandWaitDelay of the copy exiting or ctx ending, even when
+// scp's ssh child keeps the output pipe open; see endHeldPipeWait.
 func (r *RealCommandExecutor) CopyFile(ctx context.Context, host *hostparse.HostInfo, localPath, remotePath string) error {
 	var cmd *exec.Cmd
 	if host.IsLocal {
@@ -224,14 +288,17 @@ func (r *RealCommandExecutor) CopyFile(ctx context.Context, host *hostparse.Host
 		}
 		cmd = exec.CommandContext(ctx, constants.SCPCommand, scpArgs...) // #nosec G204 -- SCP target is built from parsed host info.
 	}
+	cmd.WaitDelay = constants.CommandWaitDelay
 	out, err := cmd.CombinedOutput()
-	if err != nil {
+	if err = endHeldPipeWait(cmd, host, err); err != nil {
 		return fmt.Errorf("copy %s to %s:%s failed: %w: %s", localPath, host.Original, remotePath, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-// CopyFromHost copies a file from the target host to a local path.
+// CopyFromHost copies a file from the target host to a local path. It returns
+// within constants.CommandWaitDelay of the copy exiting or ctx ending, even
+// when scp's ssh child keeps the output pipe open; see endHeldPipeWait.
 func (r *RealCommandExecutor) CopyFromHost(ctx context.Context, host *hostparse.HostInfo, remotePath, localPath string) error {
 	var cmd *exec.Cmd
 	if host.IsLocal {
@@ -246,8 +313,9 @@ func (r *RealCommandExecutor) CopyFromHost(ctx context.Context, host *hostparse.
 		}
 		cmd = exec.CommandContext(ctx, constants.SCPCommand, scpArgs...) // #nosec G204 -- SCP source is built from parsed host info.
 	}
+	cmd.WaitDelay = constants.CommandWaitDelay
 	out, err := cmd.CombinedOutput()
-	if err != nil {
+	if err = endHeldPipeWait(cmd, host, err); err != nil {
 		return fmt.Errorf("copy %s:%s to %s failed: %w: %s", host.Original, remotePath, localPath, err, strings.TrimSpace(string(out)))
 	}
 	return nil
