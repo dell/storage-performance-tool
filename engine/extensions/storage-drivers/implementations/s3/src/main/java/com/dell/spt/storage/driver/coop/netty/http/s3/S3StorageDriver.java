@@ -138,7 +138,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	// date itself; a function an extension puts here is memoized by date in signingKeyCache.
 	protected final ThreadLocal<Map<String, SigningKeyCreateFunction>> signingKeyCreateFunctionCache = ThreadLocal.withInitial(HashMap::new);
 	// Each thread's keys by date, for functions an extension puts in signingKeyCreateFunctionCache only.
-	// It keeps one key per date, whatever the secret, as it always has; SPT's own keys are not in it.
+	// It keeps one key per date, whatever the secret, as it always has; SPT's own keys are not in it,
+	// and SPT's own function never reads it, so a key put here is used only by such a function.
 	protected final ThreadLocal<Map<String, byte[]>> signingKeyCache = ThreadLocal.withInitial(HashMap::new);
 	// for v2 only
 	protected static final ThreadLocal<Map<String, Mac>> MAC_BY_SECRET = ThreadLocal.withInitial(HashMap::new);
