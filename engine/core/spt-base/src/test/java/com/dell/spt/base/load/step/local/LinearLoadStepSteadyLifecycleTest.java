@@ -5,6 +5,7 @@ import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.WAIT_TIME
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.assertWithin;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.awaitCondition;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.createStepConfig;
+import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.firstCompletionOr;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.sleepUntil;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.statistics;
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.steadySettings;
@@ -36,7 +37,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 /**
  * Lifecycle tests of the Steady-State Window through the shipped linear step: its own init, its
  * load step context, the real load generator, real metrics contexts and the real metrics manager
- * loop, with a storage driver of fixed latency {@code L} and concurrency {@code C}.
+ * loop, with a storage driver of fixed latency {@code L} and {@code C} requests cycling. The
+ * time-limited test runs at concurrency {@code C + 1}: its extra request is held from its first
+ * completion until the drain, so {@code C} still cycle.
  *
  * <p><b>Tolerance.</b> A closed loop at a fixed latency runs at most at {@code C / L}. The steady
  * {@code TPAvg} is asserted within [0.75, 1.05] of {@code C / L} (measured 0.94–0.96). The low side
@@ -63,18 +66,21 @@ class LinearLoadStepSteadyLifecycleTest {
 	/**
 	 * Rate, slow first wave and drain exclusion at the deadline, in one time-limited step: the
 	 * first {@code C} requests are slow (the ramp), and the requests in flight when the window
-	 * closes at the time limit are held until the drain.
+	 * closes at the time limit are held until the drain. One more request, the first fast one,
+	 * falls due at {@code L}, long before the slow wave, and is held from then until the drain, so
+	 * the time limit always finds a request in flight whatever the scheduling.
 	 */
 	@Test
 	void timeLimitedStepMeasuresCOverLWithoutTheSlowFirstWaveOrTheDrain() throws Exception {
-		final Config config = createStepConfig("steady-rate", C);
+		final int concurrency = C + 1; // C cycling and the request held across the time limit
+		final Config config = createStepConfig("steady-rate", concurrency);
 		config.val("load-step-limit-time", "2s");
 		steadySettings(config, 1.0, 20.0, 1.0);
-		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.data(C, L_MILLIS);
+		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.data(concurrency, L_MILLIS);
 		try (final var metricsMgr = new RecordingMetricsManager()) {
 			final var step = new ProbeLinearStep(config, driver, metricsMgr);
 			driver.slowFirstWave(C, SLOW_FIRST_MILLIS)
-							.holdCompletionsWhen(step::windowsClosed)
+							.holdCompletionsWhen(firstCompletionOr(step::windowsClosed))
 							.releaseHeldAfterAdmissionClose(DRAIN_HOLD_MILLIS)
 							.stopProbe(step::windowsClosed);
 			try {
@@ -99,24 +105,31 @@ class LinearLoadStepSteadyLifecycleTest {
 				assertTrue(
 								totalRate < steadyRate * (1 - rampAndDrainShare / 2),
 								"total TPAvg " + totalRate + " vs steady " + steadyRate + ", share " + rampAndDrainShare);
+				// Nothing completes before the slow wave, the held request included, so the window opens
+				// after it: usually one wave later, at C + 1 completions, one per request in flight.
 				assertTrue(steady.startOffsetMillis() >= SLOW_FIRST_MILLIS - 50, steady.toString());
 
-				// Slow first wave: in the whole-step p99 and max, not in the window's.
+				// Slow first wave: in the whole-step p99, not in the window's timings. The held request
+				// lasts about the whole step, so it alone meets the whole-step maxima; a p99 needs more
+				// than 1% of the completions to be slow, which here only the slow wave gives.
 				final long slowMicros = TimeUnit.MILLISECONDS.toMicros(SLOW_FIRST_MILLIS) * 9 / 10;
 				assertTrue(total.durationSnapshot().max() >= slowMicros, "total max");
 				assertTrue(total.durationSnapshot().percentile(0.99) >= slowMicros, "total p99");
 				assertTrue(total.latencySnapshot().max() >= slowMicros, "total latency max");
+				assertTrue(total.latencySnapshot().percentile(0.99) >= slowMicros, "total latency p99");
 				assertTrue(window.durationSnapshot().max() < WINDOW_TIMING_BOUND_MICROS, "window max");
 				assertTrue(window.durationSnapshot().percentile(0.99) < WINDOW_TIMING_BOUND_MICROS, "window p99");
 				assertTrue(window.latencySnapshot().max() < WINDOW_TIMING_BOUND_MICROS, "window latency max");
 
 				// Drain exclusion at the deadline: the requests in flight at the cut were held until
-				// the drain, completed there and counted in the whole-step total only.
+				// the drain, completed there and counted in the whole-step total only. The request held
+				// since its first completion is always one of them.
 				final int drained = driver.heldTotal();
 				assertTrue(drained >= 1, "requests were in flight at the deadline");
 				assertTrue(driver.stopProbeHeldAtAdmissionClose(), "the window closed before the stop reached the context");
 				assertTrue(frozen.successSnapshot().count() + drained <= total.successSnapshot().count());
-				// The slow first wave is published as a group, so here a whole wave precedes the window.
+				// The slow first wave is published as a group and the window opens after it, so at
+				// least that whole wave precedes the window.
 				assertTrue(
 								window.successSnapshot().count() + C + drained <= total.successSnapshot().count(),
 								"window " + window.successSnapshot().count() + ", total " + total.successSnapshot().count());

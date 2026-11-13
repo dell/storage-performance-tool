@@ -55,6 +55,21 @@ public interface ConfigSliceUtil {
 		}
 	}
 
+	/**
+	 * Slices a count limit, which a slice reads as no limit at 0. The split of
+	 * {@link #sliceLongValue} stays wherever it gives every slice a count, so each of those slices
+	 * keeps the count it had; where it would leave a slice at 0, the count is split as evenly as it
+	 * goes. A count below the slice count leaves a slice at 0 either way, so the caller refuses it.
+	 */
+	static void sliceCountLimit(
+					final long countLimit, final List<Config> configSlices, final String configPath) {
+		sliceLongValue(countLimit, configSlices, configPath);
+		if (configSlices.stream().anyMatch(configSlice -> configSlice.longVal(configPath) == 0)) {
+			Loggers.MSG.debug("{} = {} leaves a slice at 0 when split by ceiling, so it is split evenly", configPath, countLimit);
+			sliceLongValueBalanced(countLimit, configSlices, configPath);
+		}
+	}
+
 	static void sliceLongValueBalanced(
 					final long configVal, final List<Config> configSlices, final String configPath) {
 		final var sliceCount = configSlices.size();
