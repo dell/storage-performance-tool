@@ -745,21 +745,35 @@ tasks.register('verifyEngineExitStatusCanary') {
 		).absolutePath
 		def jarFile = file("${distDir}/${sptJar}")
 
-		def target = new java.net.ServerSocket(0, 50, java.net.InetAddress.getLoopbackAddress())
+		// The kernel queues a connection the engine makes until it is accepted, even after the engine
+		// exits, so draining the queue after each engine has exited counts every connection it made.
+		// The acceptor closes connections meanwhile, so an engine that connects fails fast.
+		def target = java.nio.channels.ServerSocketChannel.open()
+		target.bind(new java.net.InetSocketAddress(java.net.InetAddress.getLoopbackAddress(), 0), 50)
+		target.configureBlocking(false)
 		def targetConnections = new java.util.concurrent.atomic.AtomicInteger()
-		def acceptor = Thread.startDaemon('engine-exit-status-canary-target') {
-			while (!target.closed) {
-				try {
-					target.accept().close()
+		def drainTarget = { ->
+			synchronized (target) {
+				def connection
+				while (target.open && (connection = target.accept()) != null) {
 					targetConnections.incrementAndGet()
-				} catch (IOException ignored) {
+					connection.close()
+				}
+			}
+		}
+		def acceptor = Thread.startDaemon('engine-exit-status-canary-target') {
+			while (target.open) {
+				try {
+					drainTarget()
+					Thread.sleep(20)
+				} catch (IOException | InterruptedException ignored) {
 				}
 			}
 		}
 		def s3Args = [
 			'--storage-driver-type=s3',
 			'--storage-net-node-addrs=127.0.0.1',
-			"--storage-net-node-port=${target.localPort}",
+			"--storage-net-node-port=${target.socket().localPort}",
 			'--storage-auth-uid=exit-status-canary',
 			'--storage-auth-secret=exit-status-canary',
 			'--item-output-path=/exit-status-canary',
@@ -794,8 +808,11 @@ tasks.register('verifyEngineExitStatusCanary') {
 			// The engine creates its home and log directories; a help request creates neither, and nothing
 			// in the working directory.
 			def written = [home, logDir].count { it.exists() } + workDir.listFiles().length
-			// The JVM announces JAVA_TOOL_OPTIONS and _JAVA_OPTIONS on stderr; the rest is the engine's
-			def engineStderr = stderr.readLines('UTF-8').findAll { !it.startsWith('Picked up ') }
+			// The JVM announces JAVA_TOOL_OPTIONS and _JAVA_OPTIONS on stderr, and prints its own
+			// warnings there; the rest is the engine's
+			def engineStderr = stderr.readLines('UTF-8').findAll {
+				!(it.startsWith('Picked up ') || it.contains(' VM warning: ') || it.startsWith('WARNING: '))
+			}
 			return [
 				status: process.exitValue(),
 				stdout: stdout.getText('UTF-8'),
@@ -805,8 +822,10 @@ tasks.register('verifyEngineExitStatusCanary') {
 			]
 		}
 		def expect = { String name, List<String> args, int status, List<String> messages ->
+			drainTarget()
 			def connectionsBefore = targetConnections.get()
 			def result = engine(name, args)
+			drainTarget()
 			def missing = messages.findAll { !result.output.contains(it) }
 			if (result.status != status || !missing.isEmpty()) {
 				throw new GradleException(
@@ -897,6 +916,48 @@ tasks.register('verifyEngineExitStatusCanary') {
 				], 1, ['Run node failure'])
 			} finally {
 				busyPort.close()
+			}
+
+			// A node that starts and is shut down through its API exits 0.
+			def apiSocket = new java.net.ServerSocket(0)
+			def apiPort = apiSocket.localPort
+			apiSocket.close()
+			def registrySocket = new java.net.ServerSocket(0)
+			def registryPort = registrySocket.localPort
+			registrySocket.close()
+			def shutdownSent = new java.util.concurrent.atomic.AtomicBoolean()
+			def stopper = Thread.startDaemon('engine-exit-status-canary-node-stopper') {
+				def deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(60)
+				while (System.nanoTime() < deadline && !shutdownSent.get()) {
+					try {
+						def ready = (HttpURLConnection) URI.create("http://127.0.0.1:${apiPort}/ready").toURL().openConnection()
+						ready.connectTimeout = 1000
+						ready.readTimeout = 1000
+						if (ready.responseCode == 200) {
+							def shutdown = (HttpURLConnection) URI.create("http://127.0.0.1:${apiPort}/shutdown").toURL().openConnection()
+							shutdown.requestMethod = 'POST'
+							shutdown.connectTimeout = 1000
+							shutdown.readTimeout = 5000
+							if (shutdown.responseCode == 202) {
+								shutdownSent.set(true)
+							}
+						}
+					} catch (IOException ignored) {
+					}
+					if (!shutdownSent.get()) {
+						Thread.sleep(200)
+					}
+				}
+			}
+			expect('run-node-shutdown', [
+				'--run-node',
+				"--run-port=${apiPort}",
+				"--load-step-node-port=${registryPort}",
+				'--api-linger-sec=0',
+			], 0, ['Started to serve the remote API'])
+			stopper.join(5000)
+			if (!shutdownSent.get()) {
+				throw new GradleException("Packaged engine 'run-node-shutdown' exited before its shutdown request")
 			}
 
 			expect('default-scenario', ['--storage-driver-type=dummy-mock', '--load-op-limit-count=10', '--load-op-shuffle=TRUE'], 0, [])
