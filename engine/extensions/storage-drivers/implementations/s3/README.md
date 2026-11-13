@@ -543,7 +543,7 @@ Mongoose 3.x turns on S3 versioning with `--storage-net-http-versioning=true`. T
 synonym with the S3 driver types `s3`, `s3-rdma`, `s3-tables` and `s3-aws`, from the command line, a scenario's
 `.config()` or `.append()`, and posted defaults (`spt run --engine-override storage.net.http.versioning=true`). It sets
 `storage-object-versioning` to true on the step configuration before the step starts, so the step's `config.yaml`
-shows both keys true and every worker in a distributed run gets the setting. The engine logs a notice once:
+shows both keys true and every worker in a distributed run gets the setting. Each engine logs this notice once:
 
 ```
 The argument "storage-net-http-versioning" is the Mongoose name for S3 versioning, use "storage-object-versioning" instead
