@@ -75,7 +75,7 @@ func sanitizeHostComponent(host string) string {
 }
 
 func generateRemoteContainerName(prefix, host string) string {
-	return fmt.Sprintf("spt-%s-%d-%s", prefix, time.Now().Unix(), sanitizeHostComponent(host))
+	return fmt.Sprintf("spt-%s-%d-%s", prefix, time.Now().UnixNano(), sanitizeHostComponent(host))
 }
 
 func (m *RemoteDockerManager) baseLabels(role string) map[string]string {
