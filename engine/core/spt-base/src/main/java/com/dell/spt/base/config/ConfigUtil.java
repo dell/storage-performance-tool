@@ -190,6 +190,7 @@ public interface ConfigUtil {
 						.readValue(file, new TypeReference<Map<String, Object>>() {
 							{}
 						});
+		validateBooleanValues(schema, configTree, "-");
 		return new BasicConfig("-", schema, configTree);
 	}
 
@@ -199,6 +200,7 @@ public interface ConfigUtil {
 						.readValue(content, new TypeReference<Map<String, Object>>() {
 							{}
 						});
+		validateBooleanValues(schema, configTree, "-");
 		return new BasicConfig("-", schema, configTree);
 	}
 
@@ -302,14 +304,93 @@ public interface ConfigUtil {
 
 	/** Returns whether the schema types the setting at the path as a list. */
 	static boolean isListSetting(final Map<String, Object> schema, final String path, final String sep) {
+		return settingType(schema, path, sep) instanceof Class<?> type && List.class.isAssignableFrom(type);
+	}
+
+	/** Returns whether the schema types the setting at the path as a boolean. */
+	static boolean isBooleanSetting(final Map<String, Object> schema, final String path, final String sep) {
+		return isBooleanType(settingType(schema, path, sep));
+	}
+
+	/**
+	 * Returns whether a value given as a string can set the setting at the path: any value for a
+	 * setting the schema does not type as a boolean, and {@code true} or {@code false}, in any case, for
+	 * one it does. The configuration reads any other string as false, so {@code yes}, {@code 1} or an
+	 * empty value would otherwise turn the setting off without a word. A null value passes.
+	 */
+	static boolean isAcceptedBooleanValue(
+					final Map<String, Object> schema, final String path, final String sep, final String value) {
+		return value == null || isTrueOrFalse(value) || !isBooleanSetting(schema, path, sep);
+	}
+
+	/**
+	 * Refuses a scenario's value for a boolean setting other than {@code true} or {@code false}; see
+	 * {@link #isAcceptedBooleanValue}. The values are those of {@link #flatten}, after the aliasing.
+	 *
+	 * @throws IllegalArgumentException naming the setting and the value
+	 */
+	static void validateBooleanValues(final Config config, final Map<String, String> argValPairs) {
+		for (final var argValPair : argValPairs.entrySet()) {
+			final var path = argValPair.getKey();
+			final var value = argValPair.getValue();
+			if (!isAcceptedBooleanValue(config.schema(), path, config.pathSep(), value)) {
+				throw notTrueOrFalse(path, value);
+			}
+		}
+	}
+
+	/**
+	 * Refuses a string other than {@code true} or {@code false} at a boolean setting of a configuration
+	 * tree read from a defaults file or a run request. Such a file states a boolean as YAML or JSON
+	 * {@code true} or {@code false}; a quoted {@code "true"} or {@code "false"} passes, as on the
+	 * command line, and any other string would read as false. A value of another type is left to the
+	 * configuration, which refuses it.
+	 *
+	 * @throws IllegalArgumentException naming the setting and the value
+	 */
+	static void validateBooleanValues(
+					final Map<String, Object> schema, final Map<String, Object> configTree, final String sep) {
+		if (schema != null && configTree != null) {
+			validateBooleanValues(schema, configTree, sep, null);
+		}
+	}
+
+	private static void validateBooleanValues(
+					final Map<?, ?> schema, final Map<?, ?> configTree, final String sep, final String prefix) {
+		for (final var node : configTree.entrySet()) {
+			final var key = String.valueOf(node.getKey());
+			final var path = prefix == null ? key : prefix + sep + key;
+			final var type = schema.get(node.getKey());
+			final var value = node.getValue();
+			if (type instanceof Map<?, ?> branchSchema && value instanceof Map<?, ?> branch) {
+				validateBooleanValues(branchSchema, branch, sep, path);
+			} else if (isBooleanType(type) && value instanceof String text && !isTrueOrFalse(text)) {
+				throw notTrueOrFalse(path, text);
+			}
+		}
+	}
+
+	private static Object settingType(final Map<String, Object> schema, final String path, final String sep) {
 		Object node = schema;
 		for (final var part : path.split(Pattern.quote(sep), -1)) {
 			if (!(node instanceof Map<?, ?> branch)) {
-				return false;
+				return null;
 			}
 			node = branch.get(part);
 		}
-		return node instanceof Class<?> type && List.class.isAssignableFrom(type);
+		return node;
+	}
+
+	private static boolean isBooleanType(final Object type) {
+		return type == boolean.class || type == Boolean.class;
+	}
+
+	private static boolean isTrueOrFalse(final String value) {
+		return "true".equalsIgnoreCase(value) || "false".equalsIgnoreCase(value);
+	}
+
+	private static IllegalArgumentException notTrueOrFalse(final String path, final String value) {
+		return new IllegalArgumentException(path + ": \"" + value + "\" is not true or false");
 	}
 
 	/**

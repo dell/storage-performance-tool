@@ -111,4 +111,48 @@ class CliArgUtilTests {
 		Map<String, String> result = CliArgUtil.parseArgs("--connection=host=localhost:5432");
 		assertEquals("host=localhost:5432", result.get("connection"));
 	}
+
+	@Test
+	void usage_listsSortedOptionsWithReadableTypesAndTheAliases() {
+		final Map<String, Object> schema = new LinkedHashMap<>();
+		final Map<String, Object> run = new LinkedHashMap<>();
+		run.put("node", boolean.class);
+		run.put("port", int.class);
+		schema.put("run", run);
+		final Map<String, Object> net = new LinkedHashMap<>();
+		net.put("nodeInterfaces", Map.class);
+		net.put("addrs", List.class);
+		schema.put("net", net);
+		schema.put("count", long.class);
+		schema.put("ratio", double.class);
+		schema.put("name", String.class);
+		schema.put("anything", Object.class);
+		final List<Map<String, Object>> aliasing = List.of(
+						Map.of(AliasingUtil.NAME, "read", AliasingUtil.TARGET, "op=read"),
+						Map.of(AliasingUtil.NAME, "old-count", AliasingUtil.TARGET, "count", AliasingUtil.DEPRECATED, true),
+						Map.of(AliasingUtil.NAME, "gone", AliasingUtil.DEPRECATED, true),
+						Map.of(AliasingUtil.NAME, "remote", AliasingUtil.DEPRECATED, true, AliasingUtil.REASON, "no such model."));
+
+		assertEquals(
+						"Options:\n"
+										+ "\t--anything=<value>\n"
+										+ "\t--count=<long>\n"
+										+ "\t--name=<string>\n"
+										+ "\t--net-addrs=<list>\n"
+										+ "\t--net-nodeInterfaces-<key>=<value>\n"
+										+ "\t--ratio=<double>\n"
+										+ "\t--run-node=<true|false>\n"
+										+ "\t--run-port=<int>\n"
+										+ "\nAliases:\n"
+										+ "\t--read  same as --op=read\n"
+										+ "\t--old-count  same as --count (deprecated)\n"
+										+ "\t--gone  no longer supported\n"
+										+ "\t--remote  not supported: no such model.\n",
+						CliArgUtil.usage(schema, aliasing));
+	}
+
+	@Test
+	void usage_withoutAliasesListsOnlyTheOptions() {
+		assertEquals("Options:\n\t--a=<int>\n", CliArgUtil.usage(Map.of("a", Integer.class), List.of()));
+	}
 }

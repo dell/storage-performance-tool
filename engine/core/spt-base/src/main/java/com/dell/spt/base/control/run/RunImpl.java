@@ -32,8 +32,27 @@ public final class RunImpl implements Run {
 		return comment;
 	}
 
+	/**
+	 * Runs the scenario. A scenario failure is logged and ends the run; a node's run reports it
+	 * through the step status, so it is not thrown, except a typed terminal failure.
+	 */
 	@Override
 	public final void run() {
+		evaluate(false);
+	}
+
+	/**
+	 * Runs the scenario as {@link #run()} does, for an engine started with a scenario, and returns the
+	 * scenario's failure so that the engine exits with a failure status.
+	 *
+	 * @return the logged failure of the scenario, or {@code null} when it ran to its end
+	 * @throws RunTerminalException for a typed terminal failure, as {@link #run()} does
+	 */
+	public Throwable runAndReturnFailure() {
+		return evaluate(true);
+	}
+
+	private Throwable evaluate(final boolean logEveryFailure) {
 		Loggers.SCENARIO.log(Level.INFO, scenario);
 		try (final var scope = RunScope.open()) {
 			scriptEngine.eval(scenario);
@@ -43,6 +62,10 @@ public final class RunImpl implements Run {
 				throwUnchecked(cause);
 			}
 			rethrowRunTerminal(e);
+			if (logEveryFailure) {
+				LogUtil.exception(Level.ERROR, e, "Scenario failed");
+			}
+			return e;
 		} catch (final ScriptException e) {
 			final var terminalCause = RunTerminalException.find(e);
 			LogUtil.trace(
@@ -56,7 +79,9 @@ public final class RunImpl implements Run {
 			if (terminalCause != null) {
 				throw terminalCause;
 			}
+			return e;
 		}
+		return null;
 	}
 
 	private static void rethrowRunTerminal(final Throwable outer) {
