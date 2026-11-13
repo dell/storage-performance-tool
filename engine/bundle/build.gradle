@@ -812,10 +812,14 @@ env > "$out/launch.env"
 if [ "${STUB_JAVA_WAIT:-}" = 1 ]; then
 	trap 'echo TERM > "$out/signal"; exit 143' TERM
 	echo "$$" > "$out/launch.pid.tmp" && mv "$out/launch.pid.tmp" "$out/launch.pid"
-	while :; do
+	# Waits at most 60 s, so a stub the test can't stop doesn't run on.
+	waited=0
+	while [ "$waited" -lt 60 ]; do
 		sleep 1 </dev/null >/dev/null 2>&1 &
 		wait $!
+		waited=$((waited + 1))
 	done
+	exit 124
 fi
 exit "${STUB_JAVA_EXIT:-0}"
 ''', 'UTF-8')
@@ -976,6 +980,14 @@ exit "${STUB_JAVA_EXIT:-0}"
 		} finally {
 			if (waiting.process.isAlive()) {
 				waiting.process.destroyForcibly()
+			}
+			// Without exec, java is run.sh's child and outlives it, so stop it by the PID it wrote.
+			// The command line check keeps a PID that another process has reused untouched.
+			def pidFile = new File(waiting.out, 'launch.pid')
+			if (pidFile.isFile() && pidFile.text.trim().isLong()) {
+				ProcessHandle.of(pidFile.text.trim() as long)
+					.filter { it.info().commandLine().map { line -> line.contains(stubJava.absolutePath) }.orElse(false) }
+					.ifPresent { it.destroyForcibly() }
 			}
 		}
 
