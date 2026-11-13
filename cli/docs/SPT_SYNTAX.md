@@ -807,7 +807,7 @@ environment variables.
 | `--skip-image-pull` | from `SPT_SKIP_IMAGE_PULL` or `false` | Use locally cached Docker image without pulling |
 | `--spt-image` | from `SPT_IMAGE` or release/dev default | Override the engine image ref |
 
-A replay that ends on its own with fewer steps with results than its scenario runs exits 1, for example when the scenario fails after its first step. The check needs results, so it doesn't run with `--auto-results=false`. A JavaScript `.run()` in a branch that isn't taken counts as a step, and so does a step with nothing to do that finishes without results, such as a DELETE whose items file doesn't exist.
+A replay that ends on its own with fewer steps with results than its scenario runs exits 1, for example when the scenario fails after its first step. The check needs results, so it doesn't run with `--auto-results=false`. A JavaScript `.run()` in a branch that isn't taken counts as a step, and so does a step with nothing to do that finishes without results, such as a DELETE whose items file doesn't exist. A loop around one `.run()` counts once but runs several steps, and a `.start()` doesn't count, so their extra steps can hide a step that never ran, and that replay exits 0.
 
 ### Replay Results Options
 
