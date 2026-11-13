@@ -18,6 +18,7 @@ import com.dell.spt.base.buildinfo.EngineBuildInfoPublisher;
 import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
 import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
+import com.dell.spt.base.config.HttpVersioningSynonym;
 import com.dell.spt.base.config.TimeUtil;
 import com.dell.spt.base.util.BinarySizeFormat;
 import com.dell.spt.base.env.Extension;
@@ -84,6 +85,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		this.extensions = extensions;
 		this.ctxConfigs = ctxConfigs == null ? null
 						: ctxConfigs.stream().map(buildInfo::copyWithProjectedVersion).collect(Collectors.toList());
+		// Before anything reads or records the step configuration, so drivers, worker slices and config.yaml agree.
+		HttpVersioningSynonym.resolve(this.config, this.ctxConfigs);
 		this.metricsMgr = metricsMgr;
 		// Script bindings eagerly construct dormant client prototypes for every operation/step type.
 		// Validate local steps immediately, and clients only when selected for execution.
