@@ -220,6 +220,28 @@ func (m *MockDockerManager) StartEntryNodeContainer(image string, workerAddresse
 	return m.containerID, nil
 }
 
+// startWorkerNodeOnPorts simulates starting a worker node on a run's engine ports. The mock serves
+// no port, so it records the call as StartWorkerNodeContainer does.
+func (m *MockDockerManager) startWorkerNodeOnPorts(
+	ctx context.Context, image, rmiHostname string, _ enginePorts, rmiPortStart, rmiPortCount int, additionalArgs []string,
+) (string, error) {
+	if err := normalizeContext(ctx).Err(); err != nil {
+		return "", err
+	}
+	return m.StartWorkerNodeContainer(image, rmiHostname, rmiPortStart, rmiPortCount, additionalArgs)
+}
+
+// startEntryNodeOnPorts simulates starting an entry node on a run's engine ports, and records the
+// call as StartEntryNodeContainer does.
+func (m *MockDockerManager) startEntryNodeOnPorts(
+	ctx context.Context, image string, _ enginePorts, workerAddresses, additionalArgs []string, networkMode string,
+) (string, error) {
+	if err := normalizeContext(ctx).Err(); err != nil {
+		return "", err
+	}
+	return m.StartEntryNodeContainer(image, workerAddresses, additionalArgs, networkMode)
+}
+
 // StreamOutput simulates streaming container output
 func (m *MockDockerManager) StreamOutput(containerID string, stdoutCallback func(string), _ func(string)) {
 	m.mu.Lock()

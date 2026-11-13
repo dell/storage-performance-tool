@@ -600,7 +600,7 @@ func init() {
 	replayCmd.Flags().Bool("minimal", false, "Start TUI with only the live stats panel visible")
 	replayCmd.Flags().Int("auto-terminate-seconds", 0, "Automatically terminate runs after N seconds (0 = unlimited)")
 	replayCmd.Flags().Bool("force", false, "Resolve port conflicts and permit known engine build mismatches; does not override invalid build information or collection failures")
-	replayCmd.Flags().String("api-port", "", "Spt API port (defaults to 9999)")
+	replayCmd.Flags().String("api-port", "", "Spt API port for every engine in the replay (defaults to 9999)")
 	replayCmd.Flags().Int("min-hosts", 0, "Minimum number of replay hosts that must connect (default: all hosts)")
 	replayCmd.Flags().Bool(flagAttachExistingWorkers, false, "Attach to prestarted worker nodes; replay still launches the entry node")
 	replayCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")

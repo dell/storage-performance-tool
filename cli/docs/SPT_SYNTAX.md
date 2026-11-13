@@ -592,8 +592,8 @@ spt run write \
 | `--auto-terminate-seconds` | | `0` | Auto-terminate headless runs after N seconds (0 = unlimited) |
 | `--keep-scenario` | | `false` | Keep the scenario file after test completion |
 | `--force` | | `false` | Resolve port conflicts and permit known engine build mismatches; invalid build information and collection failures remain non-forceable |
-| `--api-port` | | `9999` | SPT engine API port |
-| `--rmi-registry-port` | | `1099` | Engine RMI registry port for a local single-host run. Give each concurrent `spt run` on one host its own value (and its own `--api-port`); remote and distributed runs reject any other value |
+| `--api-port` | | `9999` | SPT engine API port that every engine in the run serves: a local or remote engine, or the entry and every worker of a distributed run |
+| `--rmi-registry-port` | | `1099` | Engine RMI registry port that every engine in the run serves, on local, remote and distributed runs; the entry reaches each worker on it. Give each concurrent `spt run` on the same hosts its own value (and its own `--api-port`) |
 | `--skip-image-pull` | | `false` | Use locally cached Docker image without pulling |
 | `--output-dir` | `-O` | `""` | Local directory to save detailed SPT report files |
 | `--service-threads` | | `0` | Engine virtual-thread carrier parallelism (0 = JVM default `max(2, cpus/4)`) |
@@ -800,7 +800,7 @@ environment variables.
 | `--minimal` | `false` | Start TUI with only live stats panel visible |
 | `--auto-terminate-seconds` | `0` | Automatically terminate runs after N seconds (`0` = unlimited) |
 | `--force` | `false` | Resolve port conflicts and permit known engine build mismatches; invalid build information and collection failures remain non-forceable |
-| `--api-port` | `9999` | SPT engine API port |
+| `--api-port` | `9999` | SPT engine API port that every engine in the replay serves, the entry and every worker |
 | `--trace-file` | `""` | Save all output to a trace file |
 | `--trace-append` | `false` | Append to an existing trace file |
 | `--verbose` | `false` | Show detailed Docker API calls, debug information, and textual live metrics |
@@ -1338,7 +1338,7 @@ spt verify [--test-hosts <hosts>] [options]
 | `--min-hosts` | `0` (all) | Minimum number of hosts that must pass |
 | `--network-mode` | `host` | Docker network mode: `host` (required for RMI) or `bridge` |
 | `--api-port` | `9999` | REST API port the test engine serves and verify checks |
-| `--rmi-registry-port` | `1099` | RMI registry port the test engine serves and verify checks. `spt run` takes another value only for a local single-host run |
+| `--rmi-registry-port` | `1099` | RMI registry port the test engine serves and verify checks. `spt run` takes the same flag for every engine in a run |
 | `--rmi-port-start` | `40000` | Starting port for RMI range |
 | `--rmi-port-count` | `10` | Number of RMI ports to verify |
 | `--force-cleanup` | `false` | Automatically clean up conflicting containers without prompting |
