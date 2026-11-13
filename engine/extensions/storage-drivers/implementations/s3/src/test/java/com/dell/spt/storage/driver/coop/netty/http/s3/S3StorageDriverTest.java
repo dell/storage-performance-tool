@@ -2047,6 +2047,23 @@ public class S3StorageDriverTest {
 		assertTrue(capture.messages.isEmpty(), "No log message should be emitted for missing upload ID");
 	}
 
+	@Test
+	void complete_mpuInit_keepsTheStatusOfAFailedInitiation() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		setOpResultOut(drv);
+
+		var compositeOp = newCompositeOp(OpType.CREATE, 4096, 1024);
+		compositeOp.status(Operation.Status.RESP_FAIL_SVC);
+
+		@SuppressWarnings("unchecked")
+		final var op = (Operation<Item>) (Operation<?>) compositeOp;
+		drv.complete(mockChannelForComplete(null), op);
+
+		assertEquals(Operation.Status.RESP_FAIL_SVC, compositeOp.status(),
+						"A failed initiation should keep its status, so that load-op-retry can retry it");
+	}
+
 	// ========== Per-phase MPU logging: ABORT ==========
 
 	@Test

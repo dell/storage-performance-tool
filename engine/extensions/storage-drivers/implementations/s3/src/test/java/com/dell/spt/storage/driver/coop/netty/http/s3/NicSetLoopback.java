@@ -532,8 +532,13 @@ final class NicSetLoopback implements AutoCloseable {
 			if ("tagging".equals(query)) {
 				tags.put(path, new String(body, StandardCharsets.UTF_8));
 			} else if (query.contains("partNumber=")) {
-				uploads.computeIfAbsent(param(query, "uploadId"), unused -> new ConcurrentSkipListMap<>())
-								.put(Integer.parseInt(param(query, "partNumber")), body);
+				// A part sent after its upload was aborted finds no upload, as on S3.
+				final var parts = uploads.get(param(query, "uploadId"));
+				if (parts == null) {
+					exchange.sendResponseHeaders(404, -1);
+					return;
+				}
+				parts.put(Integer.parseInt(param(query, "partNumber")), body);
 			} else {
 				objects.put(path, body);
 			}
@@ -550,6 +555,10 @@ final class NicSetLoopback implements AutoCloseable {
 								+ uploadId + "</UploadId></InitiateMultipartUploadResult>");
 			} else {
 				final var parts = uploads.remove(param(query, "uploadId"));
+				if (parts == null) {
+					exchange.sendResponseHeaders(404, -1);
+					return;
+				}
 				final var whole = new ByteArrayOutputStream();
 				parts.values().forEach(whole::writeBytes);
 				objects.put(path, whole.toByteArray());
@@ -625,7 +634,7 @@ final class NicSetLoopback implements AutoCloseable {
 		exchange.getResponseBody().write(bytes);
 	}
 
-	private static String param(final String query, final String name) {
+	static String param(final String query, final String name) {
 		for (final var pair : query.split("&", -1)) {
 			if (pair.startsWith(name + "=")) {
 				return pair.substring(name.length() + 1);

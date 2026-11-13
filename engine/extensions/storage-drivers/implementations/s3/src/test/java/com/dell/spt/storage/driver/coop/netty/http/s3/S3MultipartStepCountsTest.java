@@ -9,6 +9,7 @@ import io.netty.channel.epoll.Epoll;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -37,6 +38,10 @@ final class S3MultipartStepCountsTest {
 	private static final String TIME_LIMIT = "30s";
 	/** Well below a hang, with room for a cold JVM on a loaded runner. */
 	private static final long ENDS_WITHIN_MILLIS = TimeUnit.SECONDS.toMillis(20);
+	/** The shipped {@code load-op-wait-limit}. */
+	private static final int DEFAULT_WAIT_LIMIT_SECONDS = 30;
+	/** A short {@code load-op-wait-limit}, for the steps whose end waits for an aborted upload's parts. */
+	private static final int WAIT_LIMIT_SECONDS = 2;
 
 	private final NicSetLoopback stub = new NicSetLoopback();
 	private long stepMillis;
@@ -164,6 +169,58 @@ final class S3MultipartStepCountsTest {
 		assertEnded();
 	}
 
+	/**
+	 * At concurrency 4, two parts of one upload run out of retries while its other parts and other
+	 * uploads are in flight. The step's end waits for the aborted upload's other parts up to
+	 * {@code load-op-wait-limit} (multipart-abort-sibling-drain), set short here; the counts are final
+	 * before it.
+	 */
+	@Test
+	void atConcurrency4AnUploadWhoseTwoPartsRunOutOfRetriesIsOneFailure() throws Exception {
+		atConcurrency4AnUploadWhoseTwoPartsRunOutOfRetriesIsOneFailure(false);
+	}
+
+	@Test
+	void atConcurrency4AnUploadWhoseTwoPartsRunOutOfRetriesIsOneFailureWithRetry() throws Exception {
+		atConcurrency4AnUploadWhoseTwoPartsRunOutOfRetriesIsOneFailure(true);
+	}
+
+	private void atConcurrency4AnUploadWhoseTwoPartsRunOutOfRetriesIsOneFailure(final boolean retry) throws Exception {
+		stub.failRequest = partsOfOneUpload(Set.of("1", "2"));
+
+		final var outcomes = write(8, 4, retry, null, WAIT_LIMIT_SECONDS);
+
+		if (retry) {
+			assertEquals(List.of(8L, 0L), outcomes.get("CREATE-4"), outcomes::toString);
+			assertRequests(9, 8, 1);
+		} else {
+			assertEquals(List.of(7L, 1L), outcomes.get("CREATE-4"), outcomes::toString);
+			assertRequests(8, 7, 1);
+		}
+		assertEnded();
+	}
+
+	@Test
+	void atConcurrency4UploadsWhosePartsRunOutOfRetriesAreEachOneFailure() throws Exception {
+		atConcurrency4UploadsWhosePartsRunOutOfRetriesAreEachOneFailure(false);
+	}
+
+	@Test
+	void atConcurrency4UploadsWhosePartsRunOutOfRetriesAreEachOneFailureWithRetry() throws Exception {
+		atConcurrency4UploadsWhosePartsRunOutOfRetriesAreEachOneFailure(true);
+	}
+
+	private void atConcurrency4UploadsWhosePartsRunOutOfRetriesAreEachOneFailure(final boolean retry) throws Exception {
+		stub.failParts = true;
+
+		final var outcomes = write(4, 4, retry, null, WAIT_LIMIT_SECONDS);
+
+		assertEquals(List.of(0L, 4L), outcomes.get("CREATE-4"), outcomes::toString);
+		final var attempts = retry ? 8 : 4;
+		assertRequests(attempts, 0, attempts);
+		assertEnded();
+	}
+
 	@Test
 	void anUploadWhoseFirstPartRunsOutOfRetriesIsOneFailure() throws Exception {
 		anUploadWhoseFirstPartRunsOutOfRetriesIsOneFailure(false);
@@ -226,7 +283,7 @@ final class S3MultipartStepCountsTest {
 		assertEnded();
 	}
 
-	/** The S3 driver reports a refused initiation as not retryable, so retry changes nothing. */
+	/** A failed initiation keeps its status, so retry starts a 503's upload again from a new initiation. */
 	@Test
 	void aFailedInitiationIsOneFailureAndTheStepEnds() throws Exception {
 		aFailedInitiationIsOneFailureAndTheStepEnds(false);
@@ -239,6 +296,33 @@ final class S3MultipartStepCountsTest {
 
 	private void aFailedInitiationIsOneFailureAndTheStepEnds(final boolean retry) throws Exception {
 		stub.failObjectRequest = n -> n == 1;
+
+		final var outcomes = write(4, 1, retry, null);
+
+		if (retry) {
+			assertEquals(List.of(4L, 0L), outcomes.get("CREATE-1"), outcomes::toString);
+			assertRequests(5, 4, 0);
+		} else {
+			assertEquals(List.of(3L, 1L), outcomes.get("CREATE-1"), outcomes::toString);
+			assertRequests(4, 3, 0);
+		}
+		assertEnded();
+	}
+
+	/** An initiation the target refuses for good is one failure, and retry doesn't start it again. */
+	@Test
+	void aRefusedInitiationIsOneFailure() throws Exception {
+		aRefusedInitiationIsOneFailure(false);
+	}
+
+	@Test
+	void aRefusedInitiationIsOneFailureWithRetry() throws Exception {
+		aRefusedInitiationIsOneFailure(true);
+	}
+
+	private void aRefusedInitiationIsOneFailure(final boolean retry) throws Exception {
+		stub.failObjectRequest = n -> n == 1;
+		stub.failureStatus = 403;
 
 		final var outcomes = write(4, 1, retry, null);
 
@@ -263,7 +347,8 @@ final class S3MultipartStepCountsTest {
 		final var outcomes = write(4, 1, retry, null);
 
 		assertEquals(List.of(0L, 4L), outcomes.get("CREATE-1"), outcomes::toString);
-		assertRequests(4, 0, 0);
+		// With retry, each upload is retried once (the retry limit) from a new initiation.
+		assertRequests(retry ? 8 : 4, 0, 0);
 		assertEnded();
 	}
 
@@ -354,16 +439,21 @@ final class S3MultipartStepCountsTest {
 	/** A step of {@code count} 5 KB uploads of five 1 KB parts. */
 	private Map<String, List<Long>> write(final int count, final int concurrency, final boolean retry,
 					final NicSetLoopback.Factory factory) throws Exception {
+		return write(count, concurrency, retry, factory, DEFAULT_WAIT_LIMIT_SECONDS);
+	}
+
+	private Map<String, List<Long>> write(final int count, final int concurrency, final boolean retry,
+					final NicSetLoopback.Factory factory, final int waitLimitSeconds) throws Exception {
 		return timed(factory, """
 						Load.config({
 							"load": {
 								"step": {"limit": {"time": "%s"}},
-								"op": {"limit": {"count": %d}, "retry": %s, "retryLimit": 1}
+								"op": {"limit": {"count": %d}, "retry": %s, "retryLimit": 1, "wait": {"limit": %d}}
 							},
 							"storage": {"driver": {"limit": {"concurrency": %d}}},
 							"item": {"data": {"size": "5KB", "ranges": {"threshold": "1KB"}}}
 						}).run();
-						""".formatted(TIME_LIMIT, count, retry, concurrency));
+						""".formatted(TIME_LIMIT, count, retry, waitLimitSeconds, concurrency));
 	}
 
 	/** Writes four 5 KB objects whole, then reads each in five 1 KB ranges in a step of its own. */
@@ -391,6 +481,18 @@ final class S3MultipartStepCountsTest {
 						"multipart-counts-" + System.nanoTime(), scenario);
 		stepMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
 		return outcomes;
+	}
+
+	/** The given part numbers of the first upload that sends one of them, on every attempt. */
+	private static Predicate<Request> partsOfOneUpload(final Set<String> partNumbers) {
+		final var upload = new AtomicReference<String>();
+		return request -> {
+			if (!request.isPart() || !partNumbers.contains(NicSetLoopback.param(request.query(), "partNumber"))) {
+				return false;
+			}
+			final var uploadId = NicSetLoopback.param(request.query(), "uploadId");
+			return upload.compareAndSet(null, uploadId) || upload.get().equals(uploadId);
+		};
 	}
 
 	/** The first range GET's object, whose first range fails {@code times} times. */
