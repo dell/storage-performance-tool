@@ -600,10 +600,11 @@ final class S3NicSetWorkloadTest {
 						}).run();
 						""");
 
-		// The failed attempt counts toward the limit, so the step can stop before its last upload ends.
-		assertTrue(outcomes.get("CREATE-1").get(0) >= 3, outcomes::toString);
+		// The failed attempt is part accounting, not an operation: it takes no count-limit slot, so every upload ends.
+		assertEquals(List.of(4L, 0L), outcomes.get("CREATE-1"), outcomes::toString);
 		final var completions = stub.objectRequests().stream().filter(request -> phase(request).equals("POST complete")).count();
-		assertTrue(completions >= 3, () -> completions + " uploads completed: " + outcomes);
+		assertEquals(4, completions, () -> completions + " uploads completed: " + outcomes);
+		assertEquals(0, stub.openUploads(), "no upload stays open");
 	}
 
 	@Test
@@ -1200,7 +1201,7 @@ final class S3NicSetWorkloadTest {
 	}
 
 	/** As above with step id {@code stepId}; without a {@code factory}, on the shipped {@code s3} driver and no NIC set. */
-	private static Map<String, List<Long>> runScenario(final List<String> endpoints, final NicSetLoopback.Factory factory,
+	static Map<String, List<Long>> runScenario(final List<String> endpoints, final NicSetLoopback.Factory factory,
 					final String stepId, final String scenario) throws Exception {
 		return runScenario(endpoints, factory, factory == null ? List.of() : nics(2), stepId, scenario);
 	}
@@ -1405,12 +1406,12 @@ final class S3NicSetWorkloadTest {
 		return new DeleteRequestOperationImpl(0, new DeleteRequest("bucket", CREDENTIAL, targets));
 	}
 
-	private static String phase(final Request request) {
+	static String phase(final Request request) {
 		final var query = request.query() == null ? "" : request.query();
 		return request.method() + (query.contains("uploads") ? " init" : query.contains("partNumber=") ? " part" : " complete");
 	}
 
-	private static boolean isAbort(final Request request) {
+	static boolean isAbort(final Request request) {
 		return "DELETE".equals(request.method()) && request.query() != null && request.query().contains("uploadId=");
 	}
 

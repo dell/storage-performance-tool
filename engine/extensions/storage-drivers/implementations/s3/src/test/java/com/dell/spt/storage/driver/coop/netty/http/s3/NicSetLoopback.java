@@ -65,6 +65,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.IntPredicate;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import java.util.stream.IntStream;
 
@@ -135,6 +136,8 @@ final class NicSetLoopback implements AutoCloseable {
 	volatile IntPredicate holdOnListener = listener -> true;
 	/** Whether the stub answers every part upload with 503, whatever its count. */
 	volatile boolean failParts;
+	/** Which object requests the stub answers with 503, chosen by the request itself. */
+	volatile Predicate<Request> failRequest = request -> false;
 
 	/** The storage configuration of a driver with these endpoints and NICs. */
 	static Config storage(final List<String> endpoints, final List<String> interfaces, final int concurrency) {
@@ -497,7 +500,8 @@ final class NicSetLoopback implements AutoCloseable {
 					exchange.close();
 					return;
 				}
-				if (objectRequest > 0 && (failObjectRequest.test(objectRequest) || (failParts && request.isPart()))) {
+				if (objectRequest > 0 && (failObjectRequest.test(objectRequest) || (failParts && request.isPart())
+								|| failRequest.test(request))) {
 					final var error = "error".getBytes(StandardCharsets.US_ASCII);
 					exchange.sendResponseHeaders(503, error.length);
 					exchange.getResponseBody().write(error);
