@@ -25,6 +25,7 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
@@ -78,6 +79,22 @@ final class SteadyLifecycleSupport {
 		config.val("output-metrics-steady-warmup-turnovers", warmupTurnovers);
 		config.val("output-metrics-steady-min-turnovers", minTurnovers);
 		config.val("output-metrics-steady-min-duration", minDurationSeconds);
+	}
+
+	/**
+	 * A condition for {@link LatencyStorageDriver#holdCompletionsWhen}: the driver holds the first
+	 * completion to fall due, then each completion that falls due while {@code condition} holds.
+	 *
+	 * <p>The first request then stays in flight, holding a permit, from its due time until the held
+	 * requests are released. So a stop or a deadline that closes a window always finds one request
+	 * in flight, which completes after the window's end. Without it a test only hopes for one:
+	 * requests travel in waves, so a cut can fall between two waves with nothing in flight; and a
+	 * request that falls due after the end cut but before the window's result is published is not
+	 * held by a condition that reads the result.
+	 */
+	static BooleanSupplier firstCompletionOr(final BooleanSupplier condition) {
+		final AtomicBoolean first = new AtomicBoolean();
+		return () -> first.compareAndSet(false, true) || condition.getAsBoolean();
 	}
 
 	static void awaitCondition(final BooleanSupplier condition, final String description)
