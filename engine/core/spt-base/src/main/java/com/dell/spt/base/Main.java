@@ -251,26 +251,18 @@ public final class Main {
 	}
 
 	/**
-	 * The message for {@code arg}, the first of {@code args} without the {@code --} prefix. It never
-	 * shows a value. After an argument with no {@code =}, it may be that argument's value given after a
-	 * space, as in {@code --storage-auth-secret s3cr3t}, or {@code --storage-auth-secret pEau...=} with
-	 * base64 padding, so it is named by the argument before it. Otherwise an argument with {@code =} is
-	 * named by the part before it: the value of a mistyped {@code storage-auth-secret=...} is a
-	 * credential.
+	 * The message for {@code arg}, the first of {@code args} without the {@code --} prefix. It shows no
+	 * part of {@code arg}, which may be a value given after a space: {@code --storage-auth-secret s3cr3t},
+	 * base64 with {@code =} padding, or the rest of an unquoted value, as in
+	 * {@code --storage-net-http-headers-Authorization=Basic dXNlcjpw...=}. It is located by the name of
+	 * the argument before it, without that argument's value, or as the first argument.
 	 */
 	static String argumentWithoutPrefixMessage(final String[] args, final String arg) {
 		final String form = ": an argument takes the form --<name>=<value>; --help lists the options";
 		// Every argument before the first one without the prefix has it, so none of them equals arg.
 		final int index = Arrays.asList(args).indexOf(arg);
-		final String before = index > 0 ? args[index - 1] : null;
-		if (before != null && !before.contains(CliArgUtil.ARG_VAL_SEP)) {
-			return "Invalid argument after \"" + before + "\", not shown in case it is a value" + form;
-		}
-		if (arg.contains(CliArgUtil.ARG_VAL_SEP)) {
-			return "Invalid argument: \"" + StringUtils.substringBefore(arg, CliArgUtil.ARG_VAL_SEP) + "\"" + form;
-		}
-		if (before != null) {
-			return "Invalid argument after \"" + StringUtils.substringBefore(before, CliArgUtil.ARG_VAL_SEP)
+		if (index > 0) {
+			return "Invalid argument after \"" + StringUtils.substringBefore(args[index - 1], CliArgUtil.ARG_VAL_SEP)
 							+ "\", not shown in case it is a value" + form;
 		}
 		return "Invalid first argument, not shown in case it is a value" + form;

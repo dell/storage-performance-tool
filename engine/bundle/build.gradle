@@ -871,7 +871,13 @@ tasks.register('verifyEngineExitStatusCanary') {
 			def remote = 'The argument "storage-driver-remote" is not supported: SPT has no remote driver services.'
 			expect('unknown-option', ['--bogus'], 2, ['Invalid configuration option: "bogus"'])
 			expect('dry-run-s3', s3Args + ['--dry-run'], 2, ['Invalid configuration option: "dry-run"'])
-			expect('no-prefix', ['load-op-limit-count=10'], 2, ['Invalid argument: "load-op-limit-count"'])
+			expect('no-prefix', ['load-op-limit-count=10'], 2, ['Invalid first argument, not shown in case it is a value'])
+			// The rest of an unquoted header value
+			def unquoted = expect('unquoted-value', ['--storage-net-http-headers-Authorization=Basic', 'canaryHeaderSecret='], 2,
+				['Invalid argument after "--storage-net-http-headers-Authorization", not shown in case it is a value'])
+			if (unquoted.output.contains('canaryHeaderSecret')) {
+				throw new GradleException("Packaged engine 'unquoted-value' printed the value:\n${unquoted.output}")
+			}
 			def spaced = expect('space-separated-value', ['--storage-auth-secret', 'canary-spaced-secret'], 2,
 				['Invalid argument after "--storage-auth-secret", not shown in case it is a value'])
 			if (spaced.output.contains('canary-spaced-secret')) {
@@ -938,8 +944,8 @@ tasks.register('verifyEngineExitStatusCanary') {
 			def registryPort = registrySocket.localPort
 			apiSocket.close()
 			registrySocket.close()
-			// Set once /ready answered and the shutdown request goes out; the node may stop before its 202
-			// is read, so the 202 itself is not required.
+			// Set once /ready answered and the shutdown request has connected; the node may stop before its
+			// 202 is read, so the 202 itself is not required. A request that can't connect is tried again.
 			def shutdownSent = new java.util.concurrent.atomic.AtomicBoolean()
 			// Set when the case ends, so a failed case's stopper can't reach a later node on that port.
 			def stopperDone = new java.util.concurrent.atomic.AtomicBoolean()
@@ -957,6 +963,7 @@ tasks.register('verifyEngineExitStatusCanary') {
 							shutdown.requestMethod = 'POST'
 							shutdown.connectTimeout = 1000
 							shutdown.readTimeout = 5000
+							shutdown.connect()
 							shutdownSent.set(true)
 							shutdown.responseCode
 						}

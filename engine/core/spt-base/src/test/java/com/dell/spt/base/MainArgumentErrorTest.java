@@ -70,10 +70,12 @@ class MainArgumentErrorTest {
 	@Test
 	void anArgumentWithoutThePrefixIsAnArgumentErrorThatHidesItsValue() {
 		assertEquals(
-						"Invalid argument: \"load-op-limit-count\": an argument takes the form --<name>=<value>; --help lists the options",
+						"Invalid first argument, not shown in case it is a value: an argument takes the form --<name>=<value>;"
+										+ " --help lists the options",
 						argumentError("load-op-limit-count=10"));
+		// A mistyped option is located by the argument before it, and its value is not shown.
 		final var message = argumentError("--storage-driver-type=s3", "storage-auth-secret=s3cr3t-value");
-		assertTrue(message.contains("\"storage-auth-secret\""), message);
+		assertTrue(message.startsWith("Invalid argument after \"--storage-driver-type\", not shown"), message);
 		assertFalse(message.contains("s3cr3t-value"), message);
 	}
 
@@ -100,9 +102,20 @@ class MainArgumentErrorTest {
 		final var header = argumentError("--storage-driver-type=s3", "--storage-net-http-headers-x-auth", "token=abc");
 		assertTrue(header.startsWith("Invalid argument after \"--storage-net-http-headers-x-auth\", not shown"), header);
 		assertFalse(header.contains("token"), header);
-		// After an argument that has its value, one with = is still named by the part before it.
-		final var mistyped = argumentError("--storage-driver-type=s3", "storage-auth-secret=s3cr3t-value");
-		assertTrue(mistyped.startsWith("Invalid argument: \"storage-auth-secret\""), mistyped);
+		// The rest of an unquoted value, after an argument that has the start of it.
+		final var unquoted = argumentError("--storage-net-http-headers-Authorization=Basic", "dXNlcjpwYXNzd29yZDE=");
+		assertTrue(
+						unquoted.startsWith("Invalid argument after \"--storage-net-http-headers-Authorization\", not shown"),
+						unquoted);
+		assertFalse(unquoted.contains("dXNlcjpwYXNzd29yZDE"), unquoted);
+		assertFalse(unquoted.contains("Basic"), unquoted);
+		final var spacedAfterEquals = argumentError("--storage-auth-secret=", "pEauABL07ujkF2hJN7r6wA9/HPs=");
+		assertTrue(spacedAfterEquals.startsWith("Invalid argument after \"--storage-auth-secret\", not shown"),
+						spacedAfterEquals);
+		assertFalse(spacedAfterEquals.contains("pEauABL07ujkF2hJN7r6wA9"), spacedAfterEquals);
+		final var first = argumentError("pEauABL07ujkF2hJN7r6wA9/HPs=", "--storage-driver-type=s3");
+		assertTrue(first.startsWith("Invalid first argument, not shown"), first);
+		assertFalse(first.contains("pEauABL07ujkF2hJN7r6wA9"), first);
 	}
 
 	@Test
