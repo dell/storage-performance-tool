@@ -631,6 +631,125 @@ tasks.register('verifyEngineBuildInfoCanary') {
 	}
 }
 
+// The netty-mock driver completes each operation inside sendRequest. If that completion ever
+// sends the next queued operation itself (direct dispatch), a long run at concurrency 1 recurses
+// until the stack overflows, strands operations and never reaches its count. The build-info
+// canary's single operation cannot show that; this count can, and the hard timeout turns the
+// hang into a failure.
+tasks.register('verifyNettyMockCountLimitCanary') {
+	group = 'verification'
+	description = 'Runs a count-limited netty-mock Load from the packaged engine under a hard timeout'
+	dependsOn assembleDist
+
+	inputs.file(file("${distDir}/${sptJar}"))
+	inputs.dir(file("${distDir}/ext"))
+	def canaryRootProvider = layout.buildDirectory.dir('netty-mock-count-limit-canary')
+	outputs.dir(canaryRootProvider)
+
+	doLast {
+		def opCount = 300000
+		def timeoutSec = 60
+		def stepId = 'netty-mock-count-limit-canary'
+		def doneMarker = 'NETTY_MOCK_COUNT_LIMIT_CANARY_DONE'
+		def canaryRoot = canaryRootProvider.get().asFile
+		delete canaryRoot
+		canaryRoot.mkdirs()
+		def javaExecutable = new File(
+			System.getProperty('java.home'),
+			'bin/java' + (System.getProperty('os.name').toLowerCase().contains('win') ? '.exe' : '')
+		).absolutePath
+		def reservePort = {
+			def socket = new java.net.ServerSocket(0)
+			try {
+				return socket.localPort
+			} finally {
+				socket.close()
+			}
+		}
+		def runPort = reservePort()
+		def nodePort = reservePort()
+		while (nodePort == runPort) {
+			nodePort = reservePort()
+		}
+		def scenarioFile = new File(canaryRoot, 'count-limit.js')
+		scenarioFile.setText("Load.run();\nprint('${doneMarker}');\n", 'UTF-8')
+		def scenarioHome = new File(canaryRoot, 'home')
+		def scenarioLog = new File(canaryRoot, 'output')
+		def outputFile = new File(canaryRoot, 'engine.out.log')
+		def builder = new ProcessBuilder(
+			javaExecutable,
+			'-jar',
+			file("${distDir}/${sptJar}").absolutePath,
+			"--run-scenario=${scenarioFile.absolutePath}",
+			"--run-port=${runPort}",
+			"--load-step-node-port=${nodePort}",
+			'--storage-driver-type=netty-mock',
+			'--storage-driver-limit-concurrency=1',
+			'--item-data-size=1KiB',
+			"--load-op-limit-count=${opCount}",
+			"--load-step-id=${stepId}")
+		builder.directory(file(distDir))
+		builder.environment().put('SPT_HOME', scenarioHome.absolutePath)
+		builder.environment().put('SPT_LOG_DIR', scenarioLog.absolutePath)
+		builder.redirectErrorStream(true)
+		builder.redirectOutput(outputFile)
+		def process = builder.start()
+		// A Gradle JVM that exits mid-task, such as a daemon told to stop, skips the finally below.
+		def stopOnExit = new Thread({ process.destroyForcibly() } as Runnable, 'netty-mock-canary-stop')
+		Runtime.runtime.addShutdownHook(stopOnExit)
+		try {
+			if (!process.waitFor(timeoutSec, java.util.concurrent.TimeUnit.SECONDS)) {
+				throw new GradleException(
+					"Packaged netty-mock Load of ${opCount} operations did not finish within ${timeoutSec} s:\n"
+						+ outputFile.getText('UTF-8'))
+			}
+		} finally {
+			// Also reached when the build is cancelled: the interrupted wait throws.
+			if (process.isAlive()) {
+				process.destroy()
+				if (!process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
+					process.destroyForcibly()
+					process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+				}
+			}
+			try {
+				Runtime.runtime.removeShutdownHook(stopOnExit)
+			} catch (IllegalStateException ignored) {
+				// The JVM is already exiting, and the hook stops the engine.
+			}
+		}
+		def output = outputFile.getText('UTF-8')
+		if (process.exitValue() != 0 || output.count(doneMarker) != 1 || output.contains('StackOverflowError')) {
+			throw new GradleException(
+				"Packaged netty-mock count-limited Load failed (exit ${process.exitValue()}):\n${output}")
+		}
+
+		// The first column is a quoted timestamp with a comma in it.
+		def csvRows = { File csv ->
+			def splitter = /,(?=(?:[^"]*"[^"]*")*[^"]*$)/
+			def lines = csv.isFile() ? csv.readLines('UTF-8').findAll { !it.isBlank() } : []
+			if (lines.isEmpty()) {
+				throw new GradleException("Packaged netty-mock Load wrote no ${csv}:\n${output}")
+			}
+			def header = lines.head().split(splitter) as List
+			return lines.tail().collect { line -> [header, line.split(splitter) as List].transpose().collectEntries() }
+		}
+		def stepDir = new File(scenarioLog, "log/${stepId}")
+		def totals = csvRows(new File(stepDir, 'metrics.total.csv'))
+		if (totals.size() != 1
+				|| totals[0].OpType != 'CREATE'
+				|| totals[0].CountSucc != opCount.toString()
+				|| totals[0].CountFail != '0') {
+			throw new GradleException(
+				"Packaged netty-mock Load did not complete exactly ${opCount} operations: ${totals}")
+		}
+		def negative = csvRows(new File(stepDir, 'metrics.csv')).findAll { (it.ConcurrencyCurr as long) < 0 }
+		if (negative) {
+			throw new GradleException("Packaged netty-mock Load reported negative concurrency: ${negative}")
+		}
+	}
+}
+
 tasks.register('verifyImageMallocTunable') {
 	group = 'verification'
 	description = 'Checks that the image keeps the malloc setting RDMA pre-warm depends on'
@@ -731,6 +850,7 @@ tasks.register('test') {
 		tasks.named('verifyS3TablesParquetWrite'),
 		tasks.named('verifyImageMallocTunable'),
 		tasks.named('verifyEngineBuildInfoCanary'),
+		tasks.named('verifyNettyMockCountLimitCanary'),
 		tasks.named('verifyEngineBuildInfoDocumentation')
 }
 
