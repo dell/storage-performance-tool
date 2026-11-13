@@ -319,9 +319,9 @@ func (r *RealCommandExecutor) CopyFromHost(ctx context.Context, host *hostparse.
 // the peer's last reply (59 s measured), with or without a deadline on ctx.
 // scp runs its ssh with ControlMaster=no, which stops it from opening a control
 // process but not from joining one that is open: when the user's config shares
-// connections, scp's ssh rides the control process that an earlier SPT command
-// opened, its own keepalives are ignored, and the control process's keepalives
-// from hostCommand end the copy instead, in the same time.
+// connections, scp's ssh rides the open control process and its own keepalives
+// are ignored. A control process an SPT command opened carries hostCommand's
+// keepalives and ends the copy in the same time; see hostCommand.
 func scpCommand(ctx context.Context, source, target string) *exec.Cmd {
 	scpArgs := []string{
 		"-o", constants.SSHConnectTimeout,
