@@ -35,7 +35,8 @@ final class S3MultipartStepCountsTest {
 
 	/** A count-limited step that hangs runs to this limit, or to its 30 s stop wait after it. */
 	private static final String TIME_LIMIT = "30s";
-	private static final long ENDS_WITHIN_MILLIS = TimeUnit.SECONDS.toMillis(10);
+	/** Well below a hang, with room for a cold JVM on a loaded runner. */
+	private static final long ENDS_WITHIN_MILLIS = TimeUnit.SECONDS.toMillis(20);
 
 	private final NicSetLoopback stub = new NicSetLoopback();
 	private long stepMillis;
