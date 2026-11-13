@@ -19,7 +19,7 @@ func (m mockPreflight) CheckDocker(context.Context, *hostparse.HostInfo) (string
 	return "24.0.0", nil
 }
 func (m mockPreflight) EnsureImage(context.Context, *hostparse.HostInfo, string) error { return nil }
-func (m mockPreflight) CheckPorts(context.Context, *hostparse.HostInfo, int, int, int) (*dockerconf.ConflictInfo, error) {
+func (m mockPreflight) CheckPorts(context.Context, *hostparse.HostInfo, int, int, int, int) (*dockerconf.ConflictInfo, error) {
 	return m.info, m.err
 }
 

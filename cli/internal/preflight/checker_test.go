@@ -177,7 +177,7 @@ func TestPreflight_CheckPorts_NoConflicts(t *testing.T) {
 	mock.SetCommandSuccess(fmt.Sprintf("%s %s %s %s", constants.DockerCommand, constants.DockerCmdPS, constants.DockerFlagAll, constants.DockerFlagFormat+" "+constants.DockerConflictFormat), "")
 
 	pf := &DefaultChecker{exec: mock}
-	info, err := pf.CheckPorts(context.Background(), testHost(), constants.DefaultSptAPIPort, constants.DefaultRMIPortStart, constants.DefaultRMIPortCount)
+	info, err := pf.CheckPorts(context.Background(), testHost(), constants.DefaultRMIRegistryPort, constants.DefaultSptAPIPort, constants.DefaultRMIPortStart, constants.DefaultRMIPortCount)
 	if err != nil {
 		t.Fatalf("CheckPorts error: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestPreflight_CheckPorts_WithConflictAndContainer(t *testing.T) {
 	mock.SetCommandSuccess(fmt.Sprintf("%s %s %s %s", constants.DockerCommand, constants.DockerCmdPS, constants.DockerFlagAll, constants.DockerFlagFormat+" "+constants.DockerConflictFormat), dockerOut)
 
 	pf := &DefaultChecker{exec: mock}
-	info, err := pf.CheckPorts(context.Background(), testHost(), constants.DefaultSptAPIPort, constants.DefaultRMIPortStart, constants.DefaultRMIPortCount)
+	info, err := pf.CheckPorts(context.Background(), testHost(), constants.DefaultRMIRegistryPort, constants.DefaultSptAPIPort, constants.DefaultRMIPortStart, constants.DefaultRMIPortCount)
 	if err != nil {
 		t.Fatalf("CheckPorts error: %v", err)
 	}
@@ -208,5 +208,26 @@ func TestPreflight_CheckPorts_WithConflictAndContainer(t *testing.T) {
 	}
 	if !info.IsSptHost {
 		t.Fatalf("expected IsSptHost=true when spt image present")
+	}
+}
+
+// A running default engine holds 1099 and 9999; verify on other ports checks only its own.
+func TestPreflight_CheckPorts_NonDefaultRegistryPort(t *testing.T) {
+	mock := command.NewMockCommandExecutor()
+	snapshot := strings.Join([]string{
+		"tcp LISTEN 0 50 *:1099 *:* users:((\"java\",pid=2222,fd=20))",
+		"tcp LISTEN 0 50 *:9999 *:* users:((\"java\",pid=2222,fd=21))",
+		"tcp LISTEN 0 50 *:11099 *:* users:((\"java\",pid=3333,fd=20))",
+	}, "\n")
+	mock.SetCommandSuccess("sh -c "+constants.PortSnapshotCommand, snapshot)
+	mock.SetCommandSuccess(fmt.Sprintf("%s %s %s %s", constants.DockerCommand, constants.DockerCmdPS, constants.DockerFlagAll, constants.DockerFlagFormat+" "+constants.DockerConflictFormat), "")
+
+	pf := &DefaultChecker{exec: mock}
+	info, err := pf.CheckPorts(context.Background(), testHost(), 11099, 19100, constants.DefaultRMIPortStart, constants.DefaultRMIPortCount)
+	if err != nil {
+		t.Fatalf("CheckPorts error: %v", err)
+	}
+	if fmt.Sprint(info.ConflictPorts) != "[11099]" {
+		t.Fatalf("conflict ports = %v, want [11099]", info.ConflictPorts)
 	}
 }
