@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Fixed
 
 - **Runs on one remote engine** — An `spt run` or `spt replay` that runs on a single remote engine (one `--test-hosts` entry, or several where only the first connects and `--min-hosts` allows it) now stores its driver statistics in `spt_run_params.json`; 5.17.0 recorded a `driverStatsError` there instead. A standalone DELETE there, seeded or from `--items-file`, now exits 0 after a clean delete; from 5.15.0 it exited 1 with "metric contributor identity is unavailable before execution starts". A real failure there no longer carries that reason as an extra cause.
-- **Driver close on an interrupted thread** — A storage driver closed on an interrupted thread now completes its close, instead of leaving its event loops or I/O workers running; from 5.15.0 such a close threw an `InterruptedException` partway through. The close still waits no longer than its existing one-second stop bounds, and the thread stays interrupted.
+- **Driver close on an interrupted thread** — A storage driver closed on an interrupted thread now completes its close, instead of leaving its event loops or I/O workers running; from 5.15.0 such a close threw an `InterruptedException` partway through. The close takes no longer than a close on an uninterrupted thread, and the thread stays interrupted.
 
 ## [5.17.0] - 2026-11-11
 
