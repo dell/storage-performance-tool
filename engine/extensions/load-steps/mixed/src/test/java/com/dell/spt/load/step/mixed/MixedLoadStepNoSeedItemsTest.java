@@ -1,0 +1,200 @@
+package com.dell.spt.load.step.mixed;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.spy;
+
+import com.dell.spt.base.concurrent.ServiceTaskExecutor;
+import com.dell.spt.base.config.ConfigFormat;
+import com.dell.spt.base.config.ConfigUtil;
+import com.dell.spt.base.config.InitialConfigSchemaProvider;
+import com.dell.spt.base.control.run.RunTerminalException;
+import com.dell.spt.base.data.DataInput;
+import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.metrics.MetricsManagerImpl;
+import com.dell.spt.base.storage.driver.StorageDriver;
+import com.dell.spt.base.storage.driver.StorageDriverFactory;
+import com.dell.spt.base.storage.driver.mock.DummyStorageDriverMock;
+import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.SchemaProvider;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import org.apache.logging.log4j.ThreadContext;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+/** A mixed step needs seed items only for the operations that read them, GET and STAT. */
+class MixedLoadStepNoSeedItemsTest {
+
+	private static final long COUNT_LIMIT = 4_000L;
+	private static final long TIME_LIMIT_SEC = 60;
+
+	/** A step ID unique across test runs, as in {@link MixedLoadStepStopLogTest}. */
+	private static String newStepId(final String mix) {
+		return "mixed-no-seeds-" + mix + "-" + UUID.randomUUID();
+	}
+
+	@TempDir
+	Path home;
+
+	private final CountingDriverFactory drivers = new CountingDriverFactory();
+
+	@BeforeEach
+	void setHome() {
+		ThreadContext.put("home_dir", home.toString());
+	}
+
+	@AfterEach
+	void clearHome() {
+		ThreadContext.remove("home_dir");
+	}
+
+	@Test
+	void aPutAndDeleteMixWithNoSeedItemsRunsToItsCountLimit() throws Exception {
+		final String stepId = newStepId("put-delete");
+		final long startNanos = System.nanoTime();
+
+		new MixedLoadStepClient(stepConfig(stepId, 0, 0), extensions(), null, metrics()).run();
+
+		final long elapsedSec = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - startNanos);
+		final Set<String> created = drivers.names(OpType.CREATE);
+		final Set<String> deleted = drivers.names(OpType.DELETE);
+		assertTrue(elapsedSec < TIME_LIMIT_SEC / 2, "the count limit, not the time limit, ended the step: " + elapsedSec + " s");
+		assertTrue(created.size() + deleted.size() >= COUNT_LIMIT, created.size() + " + " + deleted.size() + " reach the count limit");
+		assertTrue(!deleted.isEmpty() && deleted.size() <= created.size(), deleted.size() + " deleted of " + created.size() + " created");
+		assertTrue(created.containsAll(deleted), "a DELETE deletes only an item the step created");
+		assertEquals(Set.of(OpType.CREATE, OpType.DELETE), drivers.types(), "no GET or STAT ran");
+		final Path listed = home.resolve("log").resolve(stepId).resolve("put-remaining.csv");
+		assertEquals(created.size(), Files.readAllLines(listed, StandardCharsets.ISO_8859_1).size(), "every created item is listed");
+	}
+
+	@Test
+	void aMixWithGetOrStatAndNoSeedItemsStillFailsAtStart() throws Exception {
+		for (final String drawing : List.of("get", "stat")) {
+			final Config config = stepConfig(newStepId(drawing), drawing.equals("get") ? 1 : 0, drawing.equals("stat") ? 1 : 0);
+
+			final var failure = assertThrows(
+							RunTerminalException.class,
+							() -> new MixedLoadStepClient(config, extensions(), null, metrics()).run(),
+							drawing);
+			assertEquals(IntegrityTerminalException.Category.INPUT, failure.category(), drawing);
+			assertEquals(
+							"MixedLoad: GET/STAT weights are non-zero but an engine has no seed items; each engine needs at least one",
+							failure.getMessage(),
+							drawing);
+		}
+	}
+
+	private List<Extension> extensions() {
+		return List.of(new MixedLoadStepExtension(), drivers);
+	}
+
+	private static MetricsManagerImpl metrics() {
+		return new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+	}
+
+	/** PUT and DELETE, with the given GET and STAT weights, and no items file. */
+	private static Config stepConfig(final String stepId, final int getWeight, final int statWeight) throws Exception {
+		final Config config = defaultConfig();
+		config.val("load-step-id", stepId);
+		config.val("load-step-idAutoGenerated", false);
+		config.val("load-step-limit-time", TIME_LIMIT_SEC + "s");
+		config.val("load-op-limit-count", COUNT_LIMIT);
+		config.val("load-op-weights-get", getWeight);
+		config.val("load-op-weights-put", 50);
+		config.val("load-op-weights-delete", 50);
+		config.val("load-op-weights-stat", statWeight);
+		config.val("storage-driver-type", CountingDriverFactory.TYPE);
+		config.val("storage-driver-limit-concurrency", 4);
+		config.val("storage-targetBucket-provision", false);
+		config.val("item-data-size", "1KB");
+		config.val("item-output-path", "/bucket");
+		return config;
+	}
+
+	/** The shipped defaults of the engine and of this extension, as the engine merges them. */
+	private static Config defaultConfig() throws Exception {
+		final Config core = ConfigUtil.loadConfig(
+						resource("/config/defaults.yaml"), ConfigFormat.YAML, InitialConfigSchemaProvider.provider().schema());
+		final Config mixed = ConfigUtil.loadConfig(
+						resource("/config/defaults-load-op-mixed.yaml"),
+						ConfigFormat.YAML,
+						new MixedLoadStepExtension().schemaProvider().schema());
+		return ConfigUtil.merge(core.pathSep(), List.of(mixed, core));
+	}
+
+	private static String resource(final String name) throws IOException {
+		try (InputStream stream = MixedLoadStepNoSeedItemsTest.class.getResourceAsStream(name)) {
+			return new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+		}
+	}
+
+	/** The dummy driver, which completes each operation in put, recording the item names it was given by type. */
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	static final class CountingDriverFactory implements StorageDriverFactory {
+
+		static final String TYPE = "counting-mock";
+
+		private final Map<OpType, Set<String>> names = new ConcurrentHashMap<>();
+
+		Set<String> names(final OpType type) {
+			return names.getOrDefault(type, Set.of());
+		}
+
+		Set<OpType> types() {
+			return Set.copyOf(names.keySet());
+		}
+
+		@Override
+		public String id() {
+			return TYPE;
+		}
+
+		@Override
+		public SchemaProvider schemaProvider() {
+			return null;
+		}
+
+		@Override
+		public void install(final Path dstPath) {}
+
+		@Override
+		public Config defaults(final Path appHomePath) {
+			return null;
+		}
+
+		@Override
+		public StorageDriver create(
+						final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
+						final int batchSize) {
+			final DummyStorageDriverMock driver = spy(new DummyStorageDriverMock(storageConfig));
+			doAnswer(call -> {
+				final Operation op = call.getArgument(0);
+				final boolean accepted = (boolean) call.callRealMethod();
+				if (accepted) {
+					names.computeIfAbsent(op.type(), type -> ConcurrentHashMap.newKeySet()).add(op.item().name());
+				}
+				return accepted;
+			}).when(driver).put(any(Operation.class));
+			return driver;
+		}
+	}
+}
