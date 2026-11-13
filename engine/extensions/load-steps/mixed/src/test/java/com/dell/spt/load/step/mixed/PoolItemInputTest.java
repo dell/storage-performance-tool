@@ -30,10 +30,16 @@ class PoolItemInputTest {
 	// ── Read pool construction ────────────────────────────────────────────
 
 	@Test
-	@DisplayName("Rejects empty seed list")
-	void rejectsEmptySeedList() {
-		assertThrows(IllegalArgumentException.class,
-						() -> new PoolItemInput<>(List.of()));
+	@DisplayName("An empty seed list, for a mix with no GET or STAT, makes an empty read pool and a working delete queue")
+	void anEmptySeedListMakesAnEmptyReadPool() {
+		final PoolItemInput<Item> pool = new PoolItemInput<>(List.of());
+		assertEquals(0, pool.readPoolSize());
+
+		final Item created = new ItemImpl("created");
+		pool.addDeleteItem(created);
+		assertSame(created, pool.pollDelete());
+		assertNull(pool.pollDelete());
+		assertThrows(IllegalArgumentException.class, pool::randomItem, "an empty read pool has nothing to draw");
 	}
 
 	@Test

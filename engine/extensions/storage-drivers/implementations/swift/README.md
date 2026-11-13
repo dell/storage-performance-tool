@@ -51,7 +51,7 @@ java -jar spt-<VERSION>.jar \
 
 | Name                                           | Type         | Default Value    | Description                                      |
 |:-----------------------------------------------|:-------------|:-----------------|:-------------------------------------------------|
-| storage-net-http-versioning                    | Flag | false | Specifies whether the versioning storage feature is used or not
+| storage-net-http-versioning                    | Flag | false | Specifies whether the versioning storage feature is used or not. With an S3 driver type the engine reads the same key as the Mongoose name for `storage-object-versioning`, see the [S3 driver's README](../s3/README.md#434-mongoose-versioning-flag)
 
 ### 2.2. Notes
 

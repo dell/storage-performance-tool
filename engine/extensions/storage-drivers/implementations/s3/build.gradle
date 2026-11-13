@@ -73,6 +73,10 @@ def wireEncodingTest = tasks.register('wireEncodingTest', Test) {
 }
 tasks.named('test') {
 	dependsOn wireEncodingTest
+	// CI keeps no test reports, so a failure's message has to reach the log.
+	testLogging {
+		exceptionFormat = 'full'
+	}
 }
 
 // The tests tagged netns bind connections to real NICs: veth pairs in a network namespace, with

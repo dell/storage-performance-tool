@@ -9,8 +9,10 @@
 #   cp .env.example .env
 #   # Edit .env with your S3 credentials
 #   docker-compose up spt-basic
-
-version: '3.8'
+#
+# JAVA_OPTS adds JVM options after the image's defaults, and when an option is given twice the
+# JVM uses the later one. The defaults select ZGC; to pick another garbage collector, turn ZGC
+# off first, for example JAVA_OPTS=-XX:-UseZGC -XX:+UseG1GC.
 
 services:
   # Basic Spt service with built-in scenario
@@ -55,7 +57,7 @@ services:
       - ./logs:/opt/spt/log
       - ./data:/data
     environment:
-      - JAVA_OPTS=-Xmx4g -XX:+UseG1GC
+      - JAVA_OPTS=-Xmx8g
 
   # Example: File system storage driver
   spt-filesystem:

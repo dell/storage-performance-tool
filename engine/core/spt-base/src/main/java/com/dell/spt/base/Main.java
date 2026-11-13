@@ -5,15 +5,14 @@ import static com.dell.spt.base.Constants.DIR_EXT;
 import static com.dell.spt.base.Constants.MIB;
 import static com.dell.spt.base.Constants.PATH_DEFAULTS;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
-import static com.dell.spt.base.config.CliArgUtil.allCliArgs;
 
-import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.buildinfo.EngineBuildInfoPublisher;
 import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
 import com.dell.spt.base.buildinfo.EngineBuildInfoRenderer;
 import com.dell.spt.base.config.AliasingUtil;
 import com.dell.spt.base.config.CliArgUtil;
+import com.dell.spt.base.config.CliArgumentException;
 import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.config.IllegalArgumentNameException;
 import com.dell.spt.base.control.AddCorsHeadersRule;
@@ -43,14 +42,19 @@ import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.SchemaProvider;
 import com.github.akurilov.confuse.exceptions.InvalidValuePathException;
 import com.github.akurilov.confuse.exceptions.InvalidValueTypeException;
+import com.github.akurilov.commons.collection.TreeUtil;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 import io.prometheus.client.exporter.MetricsServlet;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
@@ -87,6 +91,17 @@ public final class Main {
 		}
 	}
 
+	/** The engine process's exit statuses, a contract for the scripts that run it. A run that ends normally exits 0. */
+	static final int EXIT_SUCCESS = 0;
+	/** A run, start or scenario failure: the node or the scenario could not start, or the scenario failed. */
+	static final int EXIT_FAILURE = 1;
+	/** An argument error, as {@code spt-nic-plan}'s usage error: nothing was started. */
+	static final int EXIT_ARGUMENT_ERROR = 2;
+
+	static final List<String> HELP_ARGS = List.of("--help", "-h");
+	private static final String LOG4J_CONTEXT_FACTORY_PROPERTY = "log4j2.loggerContextFactory";
+	private static final String LOG4J_SIMPLE_CONTEXT_FACTORY = "org.apache.logging.log4j.simple.SimpleLoggerContextFactory";
+
 	public static void main(final String... args) {
 
 		// Check for version flag early
@@ -96,7 +111,26 @@ public final class Main {
 				return;
 			}
 		}
+		for (final String arg : args) {
+			if (HELP_ARGS.contains(arg)) {
+				// An extension's static logger would load the log configuration, whose file appenders create
+				// their directories under the working directory; the help request writes nothing.
+				System.setProperty(LOG4J_CONTEXT_FACTORY_PROPERTY, LOG4J_SIMPLE_CONTEXT_FACTORY);
+				handleHelpRequest();
+				return;
+			}
+		}
 
+		final int status = start(args);
+		if (status != EXIT_SUCCESS) {
+			// A run started directly has only its exit status to tell its caller that it failed. The log
+			// shutdown hook flushes the asynchronous loggers, so the error is printed before the exit.
+			System.exit(status);
+		}
+	}
+
+	/** Starts the node or the scenario the arguments configure; returns the exit status. */
+	private static int start(final String... args) {
 		final var initialStepId = "none-" + LogUtil.getDateTimeStamp();
 		// Build identity and its fallback warning may initialize logging.
 		LogUtil.init(resolveLogPath(), initialStepId);
@@ -115,17 +149,17 @@ public final class Main {
 				final var extensions = Extension.load(extClsLoader);
 				// install the extensions
 				installExtensions(extensions, appHomePath);
-				final Config configWithArgs;
+				final Config fullDefaultConfig;
 				try {
 					// apply the extensions defaults
-					final var fullDefaultConfig = collectDefaults(extensions, defaultConfig, appHomePath);
-					// parse the CLI args and apply them to the config instance
-					configWithArgs = applyArgsToConfig(args, fullDefaultConfig, initialStepId);
+					fullDefaultConfig = collectDefaults(extensions, defaultConfig, appHomePath);
 				} catch (final Exception e) {
 					throwUncheckedIfInterrupted(e);
 					LogUtil.exception(Level.ERROR, e, "Failed to load the defaults");
 					throw e;
 				}
+				// parse the CLI args and apply them to the config instance; an argument error stops here
+				final Config configWithArgs = applyArgsToConfig(args, fullDefaultConfig, initialStepId);
 
 				applyVtParallelism(configWithArgs);
 				Loggers.MSG.info(
@@ -144,12 +178,24 @@ public final class Main {
 			}
 		} catch (final InterruptedException e) {
 			Loggers.MSG.debug("Interrupted", e);
+		} catch (final CliArgumentException e) {
+			Loggers.ERR.fatal("{}", e.getMessage());
+			return EXIT_ARGUMENT_ERROR;
 		} catch (final Exception e) {
-			LogUtil.trace(Loggers.ERR, Level.FATAL, e, "Unexpected failure");
-			if (RunTerminalException.find(e) != null) {
-				// A scenario run directly has only its exit status to tell its caller that it failed.
-				System.exit(1);
+			// A start failure, a scenario failure or a typed terminal failure of the run
+			if (!(e instanceof ReportedFailure)) {
+				LogUtil.trace(Loggers.ERR, Level.FATAL, e, "Unexpected failure");
 			}
+			return EXIT_FAILURE;
+		}
+		return EXIT_SUCCESS;
+	}
+
+	/** A start, run or scenario failure that is already logged; the engine exits with status 1. */
+	static final class ReportedFailure extends RuntimeException {
+
+		ReportedFailure(final String message, final Throwable cause) {
+			super(message, cause);
 		}
 	}
 
@@ -204,34 +250,99 @@ public final class Main {
 		return ConfigUtil.merge(mainDefaults.pathSep(), allDefaults);
 	}
 
+	/**
+	 * The message for {@code arg}, the first of {@code args} without the {@code --} prefix. It shows no
+	 * part of {@code arg}, which may be a value given after a space: {@code --storage-auth-secret s3cr3t},
+	 * base64 with {@code =} padding, or the rest of an unquoted value, as in
+	 * {@code --storage-net-http-headers-Authorization=Basic dXNlcjpw...=}. It is located by the name of
+	 * the argument before it, without that argument's value, or as the first argument.
+	 */
+	static String argumentWithoutPrefixMessage(final String[] args, final String arg) {
+		final String form = ": an argument takes the form --<name>=<value>; --help lists the options";
+		// Every argument before the first one without the prefix has it, so none of them equals arg.
+		final int index = Arrays.asList(args).indexOf(arg);
+		if (index > 0) {
+			return "Invalid argument after \"" + StringUtils.substringBefore(args[index - 1], CliArgUtil.ARG_VAL_SEP)
+							+ "\", not shown in case it is a value" + form;
+		}
+		return "Invalid first argument, not shown in case it is a value" + form;
+	}
+
+	/**
+	 * Parses the command-line arguments and applies them to the configuration.
+	 *
+	 * <p>Option names are checked by the configuration itself, as it sets each value, so a map option
+	 * such as {@code --storage-net-nodeInterfaces-<key>} takes any key. The values are applied in the
+	 * order the parsed argument map gives, which is not the command-line order.
+	 *
+	 * @throws CliArgumentException for the first argument that cannot be applied. The configuration
+	 *         may hold the arguments applied before it; the engine stops without using it.
+	 */
 	static Config applyArgsToConfig(
 					final String[] args, final Config config, final String initialStepId) {
-		boolean runVersionOverrideAttempted = false;
+		final Map<String, String> parsedArgs;
 		try {
-			final var configArgs = argsWithAliases(args, config);
-			runVersionOverrideAttempted = configArgs.containsKey("run-version");
-			configArgs.forEach(config::val);
+			parsedArgs = CliArgUtil.parseArgs(args);
 		} catch (final IllegalArgumentNameException e) {
-			final var formattedAllCliArgs = allCliArgs(config.schema(), config.pathSep()).stream()
-							.collect(Collectors.joining("\n", "\t", ""));
-			Loggers.ERR.fatal(
-							"Invalid argument: \"{}\"\nThe list of all possible args:\n{}",
-							e.getMessage(),
-							formattedAllCliArgs);
-		} catch (final InvalidValuePathException e) {
-			Loggers.ERR.fatal("Invalid configuration option: \"{}\"", e.path());
-		} catch (final InvalidValueTypeException e) {
-			Loggers.ERR.fatal(
-							"Invalid configuration value type for the option \"{}\", expected: {}, " + "actual: {}",
-							e.path(),
-							e.expectedType(),
-							e.actualType());
+			throw new CliArgumentException(argumentWithoutPrefixMessage(args, e.getMessage()), e);
 		}
-		EngineBuildInfoProvider.global().projectVersion(config, runVersionOverrideAttempted);
+		final List<Map<String, Object>> aliasingConfig = config.listVal("aliasing");
+		final Map<String, String> configArgs;
+		try {
+			configArgs = AliasingUtil.apply(parsedArgs, aliasingConfig);
+		} catch (final IllegalArgumentException e) {
+			// An alias with no target: an option the engine no longer takes
+			throw new CliArgumentException(e.getMessage(), e);
+		}
+		for (final var arg : configArgs.entrySet()) {
+			applyArg(config, arg.getKey(), arg.getValue(), givenName(arg.getKey(), parsedArgs, aliasingConfig));
+		}
+		EngineBuildInfoProvider.global().projectVersion(config, configArgs.containsKey("run-version"));
 		checkAndSetStepId(config, initialStepId);
 		applyLogLevel(config);
 		Arrays.stream(args).forEach(Loggers.CLI::info);
 		return config;
+	}
+
+	private static void applyArg(final Config config, final String path, final String value, final String givenName) {
+		if (!ConfigUtil.isAcceptedBooleanValue(config.schema(), path, config.pathSep(), value)) {
+			throw new CliArgumentException(
+							"Invalid value for the option \"" + givenName + "\": \"" + value + "\" is not true or false", null);
+		}
+		try {
+			config.val(path, value);
+		} catch (final InvalidValuePathException e) {
+			throw new CliArgumentException(
+							"Invalid configuration option: \"" + givenName + "\"; --help lists the options", e);
+		} catch (final InvalidValueTypeException e) {
+			throw new CliArgumentException(
+							"Invalid configuration value type for the option \"" + givenName + "\", expected: "
+											+ e.expectedType() + ", actual: " + e.actualType(),
+							e);
+		} catch (final RuntimeException e) {
+			// A value the option's type cannot parse, such as a number or a boolean
+			throw new CliArgumentException(
+							"Invalid value for the option \"" + givenName + "\": " + e.getMessage(), e);
+		}
+	}
+
+	/** The option as the command line gave it, for messages: an alias's own name when an alias set the path. */
+	private static String givenName(
+					final String path, final Map<String, String> parsedArgs, final List<Map<String, Object>> aliasingConfig) {
+		if (parsedArgs.containsKey(path)) {
+			return path;
+		}
+		if (aliasingConfig != null) {
+			for (final var entry : aliasingConfig) {
+				if (entry.get(AliasingUtil.NAME) instanceof String name
+								&& parsedArgs.containsKey(name)
+								&& entry.get(AliasingUtil.TARGET) instanceof String target
+								&& path.equals(StringUtils.substringBefore(target, AliasingUtil.ARG_VAL_SEP))) {
+					return name;
+				}
+			}
+		}
+		return path;
 	}
 
 	private static void applyLogLevel(final Config config) {
@@ -276,12 +387,6 @@ public final class Main {
 			config.val("load-step-id", initialStepId);
 			config.val("load-step-idAutoGenerated", true);
 		}
-	}
-
-	private static Map<String, String> argsWithAliases(final String[] args, final Config config) {
-		final var parsedArgs = CliArgUtil.parseArgs(args);
-		final List<Map<String, Object>> aliasingConfig = config.listVal("aliasing");
-		return AliasingUtil.apply(parsedArgs, aliasingConfig);
 	}
 
 	private static boolean shouldExposeFleetMetrics(final Config config) {
@@ -389,6 +494,7 @@ public final class Main {
 				throw e;
 			} catch (final Throwable cause) {
 				LogUtil.trace(Loggers.ERR, Level.FATAL, cause, "Run node failure");
+				throw new ReportedFailure("Run node failure", cause);
 			}
 		} finally {
 			server.stop();
@@ -430,38 +536,108 @@ public final class Main {
 			scenarioText = ScenarioUtil.defaultScenario(appHomePath);
 		} else {
 			scriptEngine = ScenarioUtil.scriptEngineByFilePath(scenarioPath, extClsLoader);
-			final var strb = new StringBuilder();
-			try (BufferedReader reader = Files.newBufferedReader(scenarioPath, StandardCharsets.UTF_8)) {
-				String line;
-				while ((line = reader.readLine()) != null) {
-					strb.append(line).append(System.lineSeparator());
-				}
-			} catch (final IOException e) {
-				LogUtil.exception(Level.FATAL, e, "Failed to read the scenario file \"{}\"", scenarioPath);
-				final Path parent = scenarioPath.getParent();
-				if (parent != null) {
-					try (Stream<Path> entries = Files.list(parent)) {
-						entries.forEach(System.out::println);
-					} catch (final IOException ee) {
-						LogUtil.trace(
-										Loggers.ERR, Level.ERROR, ee, "Failed to list the scenarios parent directory");
-					}
-				}
-			}
-			scenarioText = strb.toString();
+			scenarioText = readScenarioFile(scenarioPath);
 		}
 		if (scriptEngine == null) {
 			Loggers.ERR.fatal("Failed to resolve the scenario engine for the file \"{}\"", scenarioPath);
-		} else {
-			Loggers.MSG.info(
-							"Using the \"{}\" scenario engine", scriptEngine.getFactory().getEngineName());
-			// expose the environment values
-			System.getenv().forEach(scriptEngine::put);
-			// expose the loaded configuration and the step types
-			ScenarioUtil.configure(scriptEngine, extensions, config, metricsMgr);
-			// go
-			new RunImpl("", scenarioText, scriptEngine, config.longVal("run-id")).run();
+			throw new ReportedFailure("No scenario engine", null);
 		}
+		Loggers.MSG.info(
+						"Using the \"{}\" scenario engine", scriptEngine.getFactory().getEngineName());
+		// expose the environment values
+		System.getenv().forEach(scriptEngine::put);
+		// expose the loaded configuration and the step types
+		ScenarioUtil.configure(scriptEngine, extensions, config, metricsMgr);
+		// go
+		final var failure = new RunImpl("", scenarioText, scriptEngine, config.longVal("run-id")).runAndReturnFailure();
+		if (failure != null) {
+			throw new ReportedFailure("The scenario failed", failure);
+		}
+	}
+
+	/**
+	 * Reads a scenario file.
+	 *
+	 * @throws ReportedFailure when the file cannot be read, after logging it and listing the entries of
+	 *         its directory
+	 */
+	static String readScenarioFile(final Path scenarioPath) {
+		final var strb = new StringBuilder();
+		try (BufferedReader reader = Files.newBufferedReader(scenarioPath, StandardCharsets.UTF_8)) {
+			String line;
+			while ((line = reader.readLine()) != null) {
+				strb.append(line).append(System.lineSeparator());
+			}
+		} catch (final IOException e) {
+			LogUtil.exception(Level.FATAL, e, "Failed to read the scenario file \"{}\"", scenarioPath);
+			final Path parent = scenarioPath.getParent();
+			if (parent != null) {
+				try (Stream<Path> entries = Files.list(parent)) {
+					entries.forEach(System.out::println);
+				} catch (final IOException ee) {
+					LogUtil.trace(
+									Loggers.ERR, Level.ERROR, ee, "Failed to list the scenarios parent directory");
+				}
+			}
+			throw new ReportedFailure("Failed to read the scenario file", e);
+		}
+		return strb.toString();
+	}
+
+	private static void handleHelpRequest() {
+		try {
+			System.out.print(helpText());
+		} catch (final Exception e) {
+			System.err.println("Error getting the list of options: " + e);
+			System.exit(EXIT_FAILURE);
+		}
+	}
+
+	/**
+	 * The usage text for {@code --help}: the options of the base schema and of each extension's schema,
+	 * and the aliases of the bundled defaults. It sets up no logging and installs nothing, so it reads
+	 * the schemas and the defaults from the jars; the extensions load as for {@code --version}.
+	 */
+	static String helpText() throws Exception {
+		final var ctxClsLoader = Thread.currentThread().getContextClassLoader();
+		final List<Map<String, Object>> schemas = new ArrayList<>();
+		schemas.add(SchemaProvider.resolve(APP_NAME, ctxClsLoader).stream()
+						.findFirst()
+						.orElseThrow(() -> new IllegalStateException("No configuration schema for \"" + APP_NAME + "\"")));
+		final var extDir = Extension.resolveExtDir();
+		if (extDir != null) {
+			try (final var extClsLoader = Extension.extClassLoader(extDir)) {
+				for (final var ext : Extension.load(extClsLoader)) {
+					final var schemaProvider = ext.schemaProvider();
+					if (schemaProvider != null) {
+						schemas.add(schemaProvider.schema());
+					}
+				}
+			}
+		}
+		final var schema = schemas.stream().reduce(TreeUtil::addBranches).orElseThrow();
+		final Map<String, Object> defaults;
+		try (InputStream in = Main.class.getResourceAsStream("/" + PATH_DEFAULTS)) {
+			defaults = in == null
+							? Map.of()
+							: new YAMLMapper().readValue(in, new TypeReference<Map<String, Object>>() {});
+		}
+		@SuppressWarnings("unchecked")
+		final var aliasingConfig = defaults.get("aliasing") instanceof List<?> aliasing
+						? (List<Map<String, Object>>) aliasing
+						: List.<Map<String, Object>> of();
+		final var text = new StringBuilder()
+						.append("Usage: java -jar spt.jar [--<option>=<value> ...]\n")
+						.append("       java -jar spt.jar --version | --help | -h\n")
+						.append("run.sh and the engine image take the same arguments.\n\n")
+						.append("The engine runs the scenario that --run-scenario names, or the default scenario, and exits.\n")
+						.append("With --run-node=true it serves the remote API as a worker node instead.\n")
+						.append("A boolean option given with no value is true; a list takes comma-separated values.\n")
+						.append("Exit status: 0 success; 1 a run, start or scenario failure; 2 an argument error.\n\n");
+		if (extDir == null) {
+			text.append("The extensions' options are not listed: no ext/ directory next to the jar.\n\n");
+		}
+		return text.append(CliArgUtil.usage(schema, aliasingConfig)).toString();
 	}
 
 	private static void handleVersionRequest() {
@@ -498,7 +674,7 @@ public final class Main {
 
 		} catch (final Exception e) {
 			System.err.println("Error getting version information: " + e.getMessage());
-			System.exit(1);
+			System.exit(EXIT_FAILURE);
 		}
 	}
 }

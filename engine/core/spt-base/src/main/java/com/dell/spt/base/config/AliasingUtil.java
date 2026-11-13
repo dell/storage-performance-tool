@@ -10,6 +10,8 @@ public interface AliasingUtil {
 	String NAME = "name";
 	String TARGET = "target";
 	String DEPRECATED = "deprecated";
+	/** Why the engine refuses an entry with no target, for its error message. */
+	String REASON = "reason";
 	String ARG_VAL_SEP = "=";
 
 	static Map<String, String> apply(
@@ -36,6 +38,10 @@ public interface AliasingUtil {
 				deprecationFlag = aliasingEntry.containsKey(DEPRECATED) && (boolean) aliasingEntry.get(DEPRECATED);
 				if (argName.equals(aliasName)) {
 					if (aliasTarget == null) {
+						if (aliasingEntry.get(REASON) instanceof String reason) {
+							throw new IllegalArgumentException(
+											"The argument \"" + aliasName + "\" is not supported: " + reason);
+						}
 						throw new IllegalArgumentException("The argument \"" + aliasName + "\" is deprecated");
 					} else if (deprecationFlag) {
 						Loggers.ERR.warn(

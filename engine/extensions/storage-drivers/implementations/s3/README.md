@@ -284,6 +284,7 @@ Behavior, limits and log output are described in the CLI's
 | storage-object-tagging-enabled                 | Flag | false | Work (PUT/GET/DELETE) with object tagging or not (default)
 | storage-object-tagging-tags                    | Map  | {}    | Map of name-value tags, effective only for the `UPDATE` operation when tagging is enabled
 | storage-object-versioning                      | Flag | false | Specifies whether the versioning storage feature is used or not. When on, the driver checks each bucket at first use and enables versioning on it if it isn't enabled
+| storage-net-http-versioning                    | Flag | false | The Mongoose 3.x name for `storage-object-versioning`. Set to true, it turns `storage-object-versioning` on; set to false, it leaves it as it is. See [4.3.4](#434-mongoose-versioning-flag)
 | storage-checksum-enabled                       | Flag | false | Compute and send a checksum header on write requests. Applies to both simple PUTs and individual multipart upload parts.
 | storage-checksum-algorithm                     | String | md5 | S3 checksum algorithm: [md5, crc32, crc32c, sha1, sha256]. When multipart upload is active, the selected algorithm is applied per part.
 
@@ -422,6 +423,8 @@ docker run \
 Create request is the only versioning operation that doesn't require version-id by default. It just creates a new
 version for the same object. We can only retrieve the version-ids by specifying `item-input-file`. To create such file 
 make sure to enable `--storage-object-versioning` flag and specify `item-output-file` path. 
+Commands written for Mongoose 3.x can keep `--storage-net-http-versioning` instead, see
+[4.3.4](#434-mongoose-versioning-flag).
 
 #### 4.3.1. PUT versions
 
@@ -445,7 +448,7 @@ two approaches.
 
 #### 4.3.1.1. Recycle mode
 
-First approach is to use `--load-op-recycle` mode. We pass the list of objects to version and specify the 
+First approach is to use the recycle mode, `--load-op-recycle-mode=true`. We pass the list of objects to version and specify the
 `limit-count=<N*M>` where `N` - is the length of the intial list and `M` is the amount of versions per object. Be aware
 that `recycle-mode` doesn't guarantee the exact amount of versions per object. But the average amount will be `M`.
 
@@ -453,11 +456,12 @@ that `recycle-mode` doesn't guarantee the exact amount of versions per object. B
 docker run \
     --network host \
     ghcr.io/dell/storage-performance-tool \
-    --storage-auth-uid=user1 \ 
+    --storage-auth-uid=user1 \
     --storage-auth-secret=**************************************** \
     --storage-net-node-addrs=<NODE_IP_ADDRS> \
     --item-input-file=itemsInitialList.csv \
     --storage-object-versioning=true \
+    --load-op-recycle-mode=true \
     --load-op-limit-count=<N*M>
 ```
 
@@ -534,13 +538,42 @@ docker run \
     --storage-object-versioning=true
 ```
 
+#### 4.3.4. Mongoose versioning flag
+
+Mongoose 3.x turns on S3 versioning with `--storage-net-http-versioning=true`. The engine accepts that flag as a
+synonym with the S3 driver types `s3`, `s3-rdma`, `s3-tables` and `s3-aws`, from the command line, a scenario's
+`.config()` or `.append()`, and posted defaults (`spt run --engine-override storage.net.http.versioning=true`). It sets
+`storage-object-versioning` to true before the step starts, on the step configuration or on the `.append()` context
+that sets the synonym, so the drivers and every worker in a distributed run get the setting. When the synonym is set
+for the whole step, the step's `config.yaml` shows both keys true. Each engine logs this notice once:
+
+```
+The argument "storage-net-http-versioning" is the Mongoose name for S3 versioning, use "storage-object-versioning" instead
+```
+
+Either flag set to true turns versioning on. The synonym set to false, or not set, changes nothing: it never turns
+`storage-object-versioning` off. So a scenario step's `.config()` can't turn off a synonym given on the command line
+or in posted defaults by setting it to false: set both keys to false in that `.config()`. What versioning then does
+depends on the driver:
+
+* `s3` and `s3-rdma` check each bucket's versioning at first use, enable it if it is off, and leave it on after the
+  run. Written items are named `key~versionId`.
+* `s3-aws` only splits `key~versionId` input names into the key and the version. It sends no bucket versioning
+  request, and written items keep plain names.
+* `s3-tables` manages its own paths, so the setting has no effect.
+
+With `--storage-driver-type=swift` the flag keeps its Swift meaning and doesn't set `storage-object-versioning`.
+
+The synonym is loopback-qualified: it was tested against a local fake S3 target that answers `?versioning`, not a
+real one. The versioned requests it turns on are the ones `storage-object-versioning` already sends.
+
 ### 4.4. Multipart Upload
 
 S3 [Multipart Upload](https://docs.aws.amazon.com/AmazonS3/latest/dev/mpuoverview.html) allows large objects to be uploaded in parallel parts. SPT supports a complete MPU lifecycle including automatic abort and per-part retry.
 
 #### 4.4.1. Enabling MPU
 
-Set `item-data-ranges-threshold` to the desired part size. Any object whose size exceeds this threshold is automatically split into parts and uploaded via the MPU API. The CLI exposes this as `--part-size`.
+Set `item-data-ranges-threshold` to the desired part size. Any object whose size exceeds this threshold is automatically split into parts and uploaded via the MPU API. A read of such an object is split the same way: each part is read with a range GET, in parallel, with no initiate or complete request. The CLI exposes this as `--part-size`.
 
 **Scheduling note:** cooperative storage drivers derive MPU object and part scheduling limits from the configured concurrency and the observed multipart geometry. They also apply bounded child-operation backpressure, so direct JAR users do not need `load-batch-size=1` for MPU correctness. Setting `load-batch-size=1` remains a conservative troubleshooting option for unusually constrained test environments.
 

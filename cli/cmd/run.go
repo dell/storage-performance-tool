@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -61,6 +62,7 @@ const (
 	flagBucketMetrics         = "bucket-metrics"
 	flagCreatePrefix          = "create-prefix"
 	flagRMIRegistryPort       = "rmi-registry-port"
+	rmiRegistryPortUsage      = "Engine RMI registry port on every host; give each concurrent spt run on the same hosts its own port, and its own --rmi-port-start when a run has a local worker"
 	flagInterfaces            = "interfaces"
 	flagHostInterfaces        = "host-interfaces"
 	itemNamingShardsPath      = "item.naming.shards"
@@ -587,16 +589,22 @@ func shouldRunHeadless(cmd *cobra.Command) bool {
 
 // getAPIPort gets the API port from the command flags with default fallback
 func getAPIPort(cmd *cobra.Command) string {
-	apiPort, _ := cmd.Flags().GetString("api-port")
-	if apiPort == "" {
-		apiPort = constants.SptAPIPort // Default to Spt standard port
-	}
+	apiPort := apiPortFlag(cmd)
 
 	// Log deprecation notice if user specifies legacy port
 	if apiPort == constants.SptLegacyAPIPort {
 		fmt.Printf("Note: spt now defaults to port %s (Spt standard). Using legacy port %s.\n", constants.SptAPIPort, constants.SptLegacyAPIPort)
 	}
 
+	return apiPort
+}
+
+// apiPortFlag returns the --api-port value, or the Spt standard port when it is unset.
+func apiPortFlag(cmd *cobra.Command) string {
+	apiPort, _ := cmd.Flags().GetString(flagAPIPort)
+	if apiPort == "" {
+		apiPort = constants.SptAPIPort // Default to Spt standard port
+	}
 	return apiPort
 }
 
@@ -1236,10 +1244,19 @@ func resolveOrdinaryRunError(runErr error, outcome autoResultsOutcome) error {
 	if !stopped && !failed && runErr == nil && outcome.TrackerErr == nil && len(outcome.AllFailedPhases) > 0 {
 		return &ExitCodeError{Code: constants.ExitCodeWorkloadFailure, Msg: allFailedPhasesReason(outcome.AllFailedPhases)}
 	}
-	if !failed {
-		return runErr
+	if failure := trackedFailureError(runErr, outcome.Tracker); failure != nil {
+		return failure
 	}
-	message := trackedFailureReason(outcome.Tracker)
+	return runErr
+}
+
+// trackedFailureError returns the exit-1 error for a run whose tracker saw the engine's FAILED
+// terminal state, with the engine's cause and any independent run error, or nil when it saw none.
+func trackedFailureError(runErr error, tracker *portcheck.RunResult) error {
+	if tracker == nil || tracker.FinalState != constants.StateFailed {
+		return nil
+	}
+	message := trackedFailureReason(tracker)
 	if runErr != nil && !runcontrol.IsOnlyOwnedEngineTerminalFailure(runErr) {
 		message += "; run also failed: " + runErr.Error()
 	}
@@ -1394,8 +1411,10 @@ func resolveRunCompletionError(
 			params.Cleanup &&
 			outcome.Tracker.FinalState == constants.StateFailed &&
 			scenario.IsSeededDeleteCleanupStepID(outcome.Tracker.FailureStepID)
+		stepFailureReported := outcome.Tracker != nil &&
+			outcome.Tracker.FinalState == constants.StateFailed && !cleanupOnlyFailure
 		// A failed step is the cause, and the incomplete metrics below are usually its consequence.
-		if outcome.Tracker != nil && outcome.Tracker.FinalState == constants.StateFailed && !cleanupOnlyFailure {
+		if stepFailureReported {
 			reasons = append(reasons, fmt.Sprintf(
 				"step %s failed (%s): %s",
 				outcome.Tracker.FailureStepID,
@@ -1429,7 +1448,11 @@ func resolveRunCompletionError(
 			return runErr
 		}
 		if runErr != nil {
-			reasons = append(reasons, "run also failed: "+runErr.Error())
+			if unreported := unreportedDeletePresenterFailures(
+				runErr, stepFailureReported, outcome.DeleteTerminalErr != nil,
+			); unreported != "" {
+				reasons = append(reasons, "run also failed: "+unreported)
+			}
 			causes = append(causes, runErr)
 		}
 		return &ExitCodeError{
@@ -1438,6 +1461,63 @@ func resolveRunCompletionError(
 		}
 	}
 	return resolveVerificationRunError(runErr, outcome, received, params)
+}
+
+// unreportedDeletePresenterFailures returns, on one line, the presenter failures in runErr that a
+// DELETE run's reasons don't already state. Whichever completion signal arrives first, the
+// presenter can restate two of them: its reflection of the engine's FAILED status repeats the
+// failed step the tracker reported, and its live DELETE verdict repeats the verdict auto-results
+// read from the stored DELETE metrics. Only leaves are matched, by exact type, so every other
+// failure a join holds is kept.
+func unreportedDeletePresenterFailures(runErr error, stepFailureReported, verdictReported bool) string {
+	leaves := joinedErrorLeaves(runErr)
+	unreported := make([]string, 0, len(leaves))
+	for _, leaf := range leaves {
+		if stepFailureReported && isExactly[*runcontrol.OwnedEngineTerminalFailure](leaf) ||
+			verdictReported && isExactly[*runcontrol.DeleteTerminalPolicyFailure](leaf) {
+			continue
+		}
+		unreported = append(unreported, leaf.Error())
+	}
+	return strings.Join(unreported, "; ")
+}
+
+// isExactly reports whether err is itself a T. A wrapper's text adds to the T it wraps, and it may
+// wrap other failures with it, so it does not count.
+func isExactly[T error](err error) bool {
+	_, wraps := err.(interface{ Unwrap() error })
+	_, joins := err.(interface{ Unwrap() []error })
+	var target T
+	return !wraps && !joins && errors.As(err, &target)
+}
+
+// joinedErrorLeaves flattens the errors.Join tree in err, in order. Any other error is one leaf,
+// because its text adds to what it wraps; that includes fmt.Errorf with more than one %w, whose
+// text is not just its children's.
+func joinedErrorLeaves(err error) []error {
+	if err == nil {
+		return nil
+	}
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return []error{err}
+	}
+	children := joined.Unwrap()
+	texts := make([]string, 0, len(children))
+	for _, child := range children {
+		if child == nil {
+			return []error{err}
+		}
+		texts = append(texts, child.Error())
+	}
+	if len(children) == 0 || strings.Join(texts, "\n") != err.Error() {
+		return []error{err}
+	}
+	var leaves []error
+	for _, child := range children {
+		leaves = append(leaves, joinedErrorLeaves(child)...)
+	}
+	return leaves
 }
 
 // uniqueStepIDs merges ordered slices of step IDs, removing duplicates and empty entries.
@@ -1747,6 +1827,24 @@ func requestShutdownAll(ctx context.Context, hosts []*hostparse.HostInfo, apiPor
 	return nil
 }
 
+// validatePortFlag rejects a TCP port flag value outside 1-65535.
+func validatePortFlag(flag string, port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("--%s must be between 1 and 65535, got %d", flag, port)
+	}
+	return nil
+}
+
+// validateDistinctEnginePorts refuses an API port equal to the RMI registry port. Every engine
+// serves both, so its second bind would fail and the run would end on a readiness timeout.
+func validateDistinctEnginePorts(apiPort, registryPort int) error {
+	if apiPort != registryPort {
+		return nil
+	}
+	return fmt.Errorf("--%s and --%s are both %d; every engine serves both ports, so they must differ",
+		flagAPIPort, flagRMIRegistryPort, apiPort)
+}
+
 // checkPortConflicts checks for and resolves port conflicts before launching Spt
 func checkPortConflicts(cmd *cobra.Command) error {
 	// Get force mode setting
@@ -2000,10 +2098,6 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			"hosts", testHostsStr,
 			"attach_existing", attachExisting)
 		useMultiHostOrchestrator := shouldUseMultiHostOrchestrator(hostInfos)
-		if useMultiHostOrchestrator && params.RMIRegistryPort != 0 {
-			return fmt.Errorf("--%s applies only to local single-host runs; distributed and remote engines use port %d",
-				flagRMIRegistryPort, constants.DefaultRMIRegistryPort)
-		}
 
 		// The local single-host runner owns Docker on the controller, so it
 		// needs the controller port check. Remote and multi-host runs perform
@@ -2117,6 +2211,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			}
 			multiHostOrchestrator = tui.NewMultiHostOrchestratorWithRMI(hostInfos, minHosts, rmiConfig)
 			multiHostOrchestrator.SetAPIPort(apiPort)
+			multiHostOrchestrator.SetRMIRegistryPort(params.RMIRegistryPort)
 			// Provide image to orchestrator for preflight image checks
 			multiHostOrchestrator.SetImage(sptImage)
 			multiHostOrchestrator.SetAttachExistingWorkers(attachExisting)
@@ -2451,7 +2546,7 @@ func init() {
 	runCmd.Flags().String("delete-items-file", "", "Items file to pre-populate mixed workload DELETE queue (relaxes delete<=put constraint; --cleanup not allowed)")
 	runCmd.Flags().Int("service-threads", 0, "Engine virtual-thread carrier parallelism (0 = JVM default, env: SPT_SERVICE_THREADS)")
 	runCmd.Flags().StringArray(flagEngineOverride, []string{}, "Advanced engine defaults override as path=value; repeat for multiple overrides (for example: storage.driver.threads=6, env: SPT_ENGINE_OVERRIDES)")
-	runCmd.Flags().String("api-port", "", "Spt API port (defaults to 9999, legacy: 43234)")
+	runCmd.Flags().String("api-port", "", "Spt API port for every engine in the run (defaults to 9999, legacy: 43234)")
 	runCmd.Flags().Bool(flagSkipImagePull, false, "Use the locally cached Docker image without pulling the latest tag (env: SPT_SKIP_IMAGE_PULL)")
 	runCmd.Flags().String(flagSptImage, "", "Override the engine image ref (default: matches the CLI version, e.g. ...:v5.10.3; dev builds use ...:spt_dev; env: SPT_IMAGE)")
 
@@ -2486,7 +2581,7 @@ Ensure your SSH keys are configured: ssh-add ~/.ssh/id_rsa`)
 Default: All hosts specified in --test-hosts must connect.
 Example: --test-hosts "host1,host2,host3" --min-hosts 2
          (continues if at least 2 hosts connect)`)
-	runCmd.Flags().Bool(flagAttachExistingWorkers, false, "Attach to prestarted worker nodes; spt still launches the entry node")
+	runCmd.Flags().Bool(flagAttachExistingWorkers, false, "Attach to prestarted worker nodes, which must serve the run's --api-port and --rmi-registry-port; spt still launches the entry node")
 
 	// RMI Configuration Options (for distributed testing)
 	runCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
@@ -2494,8 +2589,7 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 	runCmd.Flags().StringArray(flagHostInterfaces, nil, "Replace --interfaces on one host: <host>=<value>, with <value> auto, a comma-separated list, or none to turn NICs off there; repeat for more hosts")
 	runCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
 	runCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
-	runCmd.Flags().Int(flagRMIRegistryPort, constants.DefaultRMIRegistryPort,
-		"Engine RMI registry port for a local single-host run; give each concurrent spt run on one host its own port")
+	runCmd.Flags().Int(flagRMIRegistryPort, constants.DefaultRMIRegistryPort, rmiRegistryPortUsage)
 
 	// RDMA Acceleration Options
 	runCmd.Flags().String("s3-driver", "default",
@@ -2728,8 +2822,14 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	params.ServiceThreads = serviceThreads
 
 	if registryPort, err := cmd.Flags().GetInt(flagRMIRegistryPort); err == nil {
-		if registryPort < 1 || registryPort > 65535 {
-			return scenario.Params{}, fmt.Errorf("--%s must be between 1 and 65535, got %d", flagRMIRegistryPort, registryPort)
+		if err := validatePortFlag(flagRMIRegistryPort, registryPort); err != nil {
+			return scenario.Params{}, err
+		}
+		// An API port that is not a number is left to the checks that report it.
+		if apiPort, err := strconv.Atoi(strings.TrimSpace(apiPortFlag(cmd))); err == nil {
+			if err := validateDistinctEnginePorts(apiPort, registryPort); err != nil {
+				return scenario.Params{}, err
+			}
 		}
 		// The default leaves the engine command line unchanged.
 		if registryPort != constants.DefaultRMIRegistryPort {

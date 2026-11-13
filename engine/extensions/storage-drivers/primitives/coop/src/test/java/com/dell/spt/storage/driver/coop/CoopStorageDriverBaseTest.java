@@ -49,6 +49,7 @@ import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 /**
  * Tests for CoopStorageDriverBase concurrency management and part-level retry.
@@ -653,6 +654,144 @@ class CoopStorageDriverBaseTest {
 			releaseSubmit.countDown();
 			driver.close();
 		}
+	}
+
+	/** A driver whose dispatch task stays in its first submit, ignoring interrupts, until released. */
+	private static final class StuckSubmitDriver extends CoopStorageDriverMock<DataItem, Operation<DataItem>> {
+		private final CountDownLatch submitEntered = new CountDownLatch(1);
+		private final CountDownLatch releaseSubmit = new CountDownLatch(1);
+
+		private StuckSubmitDriver(final String stepId) throws Exception {
+			super(stepId, DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true),
+							storageConfigForMultipartLimits(0, 0, 1), false, 1);
+		}
+
+		@Override
+		protected boolean submit(final Operation<DataItem> op) {
+			submitEntered.countDown();
+			while (releaseSubmit.getCount() > 0) {
+				try {
+					releaseSubmit.await();
+				} catch (final InterruptedException ignored) {
+					// Hold the dispatch task past its stop, as an extension that ignores interrupts does.
+				}
+			}
+			return true;
+		}
+
+		@Override
+		protected int submit(final List<Operation<DataItem>> ops, final int from, final int to) {
+			return submit(ops.get(from)) ? 1 : 0;
+		}
+
+		/** Starts the driver and puts one operation, which holds the dispatch task in submit. */
+		private void startStuck() throws InterruptedException {
+			start();
+			final Operation<DataItem> stuck = new DataOperationImpl<>(
+							0, OpType.DELETE, new DataItemImpl("stuck", 0, 1), null, "/bucket", null, List.of(), 0);
+			assertTrue(put(stuck));
+			assertTrue(submitEntered.await(2, TimeUnit.SECONDS));
+		}
+	}
+
+	@Test
+	@Timeout(30)
+	void closeAdmissionOnAnInterruptedThreadWaitsForTheDispatchTaskAndKeepsTheInterrupt() throws Exception {
+		final var driver = new CoopStorageDriverMock<DataItem, Operation<DataItem>>(
+						"interrupted-close-admission-step",
+						DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true),
+						storageConfigForMultipartLimits(0, 0, 1), false, 1);
+		try {
+			driver.start();
+			Thread.currentThread().interrupt();
+			final var failure = thrownBy(driver::closeAdmission);
+			final var stillInterrupted = Thread.interrupted();
+
+			assertNull(failure, () -> "closeAdmission on an interrupted thread threw " + failure);
+			assertTrue(stillInterrupted, "closeAdmission must keep the caller's interrupt");
+			assertFalse(driver.isAdmissionOpen());
+			assertTrue(driver.dispatchStoppedInTime(), "the dispatch task stopped within the wait");
+			assertTrue(dispatchTaskOf(driver).await(0, TimeUnit.NANOSECONDS), "the dispatch task has ended");
+		} finally {
+			Thread.interrupted();
+			driver.close();
+		}
+	}
+
+	@Test
+	@Timeout(30)
+	void closeAdmissionOnAnInterruptedThreadStillWaitsOutItsBoundForAStuckDispatchTask() throws Exception {
+		final var driver = new StuckSubmitDriver("interrupted-stuck-close-admission-step");
+		try {
+			driver.startStuck();
+			Thread.currentThread().interrupt();
+			final long startedAt = System.nanoTime();
+			final var failure = thrownBy(driver::closeAdmission);
+			final long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+			final var stillInterrupted = Thread.interrupted();
+
+			assertNull(failure, () -> "closeAdmission on an interrupted thread threw " + failure);
+			assertTrue(stillInterrupted, "closeAdmission must keep the caller's interrupt");
+			assertFalse(driver.dispatchStoppedInTime(), "a dispatch task still in submit did not stop in time");
+			assertTrue(elapsedMillis >= 900, "the interrupt must not skip the wait, which took " + elapsedMillis + " ms");
+			assertTrue(elapsedMillis < 2500, "the wait keeps its one-second bound but took " + elapsedMillis + " ms");
+		} finally {
+			Thread.interrupted();
+			driver.releaseSubmit.countDown();
+			driver.close();
+		}
+	}
+
+	@Test
+	@Timeout(30)
+	void anInterruptDuringTheDispatchStopWaitNeitherEndsTheWaitNorFailsCloseAdmission() throws Exception {
+		final var driver = new StuckSubmitDriver("interrupt-during-close-admission-step");
+		final var thrown = new AtomicReference<Throwable>();
+		final var interruptedAfter = new AtomicReference<Boolean>();
+		try {
+			driver.startStuck();
+			final var closer = new Thread(() -> {
+				try {
+					driver.closeAdmission();
+				} catch (final Throwable t) {
+					thrown.set(t);
+				}
+				interruptedAfter.set(Thread.currentThread().isInterrupted());
+			}, "interrupted-closer");
+			closer.start();
+			awaitCondition(
+							() -> !driver.isAdmissionOpen() && closer.getState() == Thread.State.TIMED_WAITING,
+							"the closer waits for the dispatch task", 2000);
+			closer.interrupt();
+			Thread.sleep(50);
+			assertTrue(closer.isAlive(), () -> "the interrupt ended the wait: " + thrown.get());
+			driver.releaseSubmit.countDown();
+			closer.join(5_000);
+
+			assertFalse(closer.isAlive());
+			assertNull(thrown.get(), () -> "closeAdmission threw " + thrown.get());
+			assertEquals(Boolean.TRUE, interruptedAfter.get(), "closeAdmission must keep the interrupt");
+			assertTrue(driver.dispatchStoppedInTime(), "the task stopped within the bound once released");
+		} finally {
+			driver.releaseSubmit.countDown();
+			driver.close();
+		}
+	}
+
+	/** What {@code call} threw, or null; it does not touch the interrupt flag. */
+	private static Throwable thrownBy(final org.junit.jupiter.api.function.Executable call) {
+		try {
+			call.execute();
+			return null;
+		} catch (final Throwable t) {
+			return t;
+		}
+	}
+
+	private static OperationDispatchTask<?, ?> dispatchTaskOf(final CoopStorageDriverBase<?, ?> driver) throws Exception {
+		final var field = CoopStorageDriverBase.class.getDeclaredField("opDispatchTask");
+		field.setAccessible(true);
+		return (OperationDispatchTask<?, ?>) field.get(driver);
 	}
 
 	@Test
