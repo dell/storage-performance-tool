@@ -47,6 +47,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - **Bundle launcher options** — `run.bat` now passes `-XX:+UseNUMA` and the RMI response timeout, as `run.sh` and the SPT image do. `run.sh` sets `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` unless the caller has set `GLIBC_TUNABLES`, as the image does.
 - **Signals sent to `run.sh`** — `run.sh` now replaces itself with the JVM, as the SPT image's entrypoint does, so a signal sent to `run.sh` stops the engine. **Compatibility:** the process now shows as `java ... spt.jar`; match `spt.jar`, not `run.sh`, to find it.
 - **The bundle's Docker Compose example** — The `spt-weighted` service of the engine bundle's Docker Compose example no longer selects G1 on top of the image's ZGC, which stopped its JVM with `Multiple garbage collectors selected`.
+- **`netty-mock` driver under load steps** — The netty-mock driver no longer overflows the stack under load steps: time-limited steps end on time, and count-limited steps no longer hang.
 
 ## [5.17.0] - 2026-11-11
 
