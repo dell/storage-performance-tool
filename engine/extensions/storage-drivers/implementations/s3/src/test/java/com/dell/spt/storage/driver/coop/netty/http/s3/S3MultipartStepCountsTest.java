@@ -32,13 +32,16 @@ import org.junit.jupiter.api.io.TempDir;
  * initiation, then parts 1 to 5, each part's retries right after it, then the completion or abort.
  * Every initiation after a failed upload also shows that the failed upload released its permit.
  */
-@Timeout(60)
+@Timeout(120)
 final class S3MultipartStepCountsTest {
 
 	/** A count-limited step that hangs runs to this limit, or to its 30 s stop wait after it. */
-	private static final String TIME_LIMIT = "30s";
-	/** Well below a hang, with room for a cold JVM on a loaded runner. */
-	private static final long ENDS_WITHIN_MILLIS = TimeUnit.SECONDS.toMillis(20);
+	private static final String TIME_LIMIT = "60s";
+	/**
+	 * Below a hang, with room for a cold JVM on a loaded runner: the class's slowest test took 19 s with
+	 * three busy threads per CPU, and CI runs the engine modules' tests in parallel.
+	 */
+	private static final long ENDS_WITHIN_MILLIS = TimeUnit.SECONDS.toMillis(45);
 	/** The shipped {@code load-op-wait-limit}. */
 	private static final int DEFAULT_WAIT_LIMIT_SECONDS = 30;
 	/** A short {@code load-op-wait-limit}, for the steps whose end waits for an aborted upload's parts. */
