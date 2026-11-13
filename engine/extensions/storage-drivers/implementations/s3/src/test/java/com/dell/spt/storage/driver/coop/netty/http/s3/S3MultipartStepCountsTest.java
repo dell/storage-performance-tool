@@ -138,6 +138,31 @@ final class S3MultipartStepCountsTest {
 		assertEnded();
 	}
 
+	/**
+	 * A part the target refuses for good fails its upload with the part's own status, so retry doesn't
+	 * start the upload again: each upload is one initiation, its first part's attempts and one abort.
+	 */
+	@Test
+	void uploadsWhosePartsAreRefusedAreEachOneFailure() throws Exception {
+		uploadsWhosePartsAreRefusedAreEachOneFailure(false);
+	}
+
+	@Test
+	void uploadsWhosePartsAreRefusedAreEachOneFailureWithRetry() throws Exception {
+		uploadsWhosePartsAreRefusedAreEachOneFailure(true);
+	}
+
+	private void uploadsWhosePartsAreRefusedAreEachOneFailure(final boolean retry) throws Exception {
+		stub.failParts = true;
+		stub.failureStatus = 403;
+
+		final var outcomes = write(4, 1, retry, null);
+
+		assertEquals(List.of(0L, 4L), outcomes.get("CREATE-1"), outcomes::toString);
+		assertRequests(4, 0, 4);
+		assertEnded();
+	}
+
 	@Test
 	void anUploadWhoseFirstPartRunsOutOfRetriesIsOneFailure() throws Exception {
 		anUploadWhoseFirstPartRunsOutOfRetriesIsOneFailure(false);

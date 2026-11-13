@@ -138,6 +138,8 @@ final class NicSetLoopback implements AutoCloseable {
 	volatile boolean failParts;
 	/** Which object requests the stub answers with 503, chosen by the request itself. */
 	volatile Predicate<Request> failRequest = request -> false;
+	/** The status of the replies that fail requests chosen above: 503 unless a test sets another. */
+	volatile int failureStatus = 503;
 
 	/** The storage configuration of a driver with these endpoints and NICs. */
 	static Config storage(final List<String> endpoints, final List<String> interfaces, final int concurrency) {
@@ -503,7 +505,7 @@ final class NicSetLoopback implements AutoCloseable {
 				if (objectRequest > 0 && (failObjectRequest.test(objectRequest) || (failParts && request.isPart())
 								|| failRequest.test(request))) {
 					final var error = "error".getBytes(StandardCharsets.US_ASCII);
-					exchange.sendResponseHeaders(503, error.length);
+					exchange.sendResponseHeaders(failureStatus, error.length);
 					exchange.getResponseBody().write(error);
 					return;
 				}

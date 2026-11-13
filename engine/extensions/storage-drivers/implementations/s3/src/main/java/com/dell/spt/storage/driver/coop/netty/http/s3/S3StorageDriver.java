@@ -1880,7 +1880,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 								true,
 								abortSucceeded,
 								abortSucceeded ? mpuFailure(compositeOp) : "abort failed: " + op.status());
-				op.status(Operation.Status.FAIL_UNKNOWN);
+				op.status(abortedUploadStatus(compositeOp));
 			} else if (completing) {
 				if (Operation.Status.SUCC.equals(op.status())) {
 					emitMultipartLifecycle(compositeOp, "completed", false, null, null);

@@ -483,7 +483,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					finishOperation(op);
 				}
 				if (aborting) {
-					op.status(Operation.Status.FAIL_UNKNOWN);
+					op.status(abortedUploadStatus(mpuOp));
 					emitMultipartLifecycle(mpuOp, "failed_aborted", true, true, mpuFailure(mpuOp));
 				} else if (completing) {
 					emitMultipartLifecycle(mpuOp, "completed", false, null, null);

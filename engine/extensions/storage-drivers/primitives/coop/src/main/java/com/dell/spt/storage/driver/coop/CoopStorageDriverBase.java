@@ -955,6 +955,17 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			signalDispatch();
 	}
 
+	/**
+	 * The status a multipart upload ends with when it is aborted because a part ran out of retries: that
+	 * part's own failure, so that under {@code load-op-retry} the whole upload is retried only when the
+	 * part's failure is retryable, and an auth or not-found failure is not. {@code FAIL_UNKNOWN} when no
+	 * part failure is recorded.
+	 */
+	protected static Operation.Status abortedUploadStatus(final CompositeOperation<?> parentOp) {
+		final String partFailure = parentOp.get("mpuFailure");
+		return partFailure == null ? Operation.Status.FAIL_UNKNOWN : Operation.Status.valueOf(partFailure);
+	}
+
 	static boolean shouldEnqueueFinalization(final CompositeOperation parentOp) {
 		if (parentOp.get("mpuAbort") != null) {
 			return markFinalizationEnqueued(parentOp);
