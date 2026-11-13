@@ -36,6 +36,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
   Duration runs are unchanged: a `--duration` read from an items file with fewer items than engines still exits 0. A count-based read whose item input path lists no objects still hangs, as it did before.
 
+- **Failed DELETE error** — The final `Error:` of a failed DELETE run states the failed step and the DELETE verdict once each, on one line when auto-results are on (the default). It could repeat the step's reason and the verdict after `run also failed:`, over two lines, when the CLI's status check saw the failure first.
+- **Traced DELETE** — `spt run delete` with op tracing on (`output.metrics.trace.persist=true`, from `--engine-override` or `SPT_ENGINE_OVERRIDES`) now fails before it starts, saying tracing isn't supported for standalone DELETE. It failed with only "failed to start metadata-mode step slice 0", after a seeded DELETE had written its seed objects.
+
 ## [5.17.0] - 2026-11-11
 
 ### Added

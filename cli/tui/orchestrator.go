@@ -539,14 +539,10 @@ func terminalDeletePolicyFailure(update *MultiNodeMetricsUpdate) error {
 		metric.Delete.FailurePolicy.Outcome != deletemetrics.OutcomeFailed {
 		return nil
 	}
-	if deletemetrics.HasVerificationFailure(metric.Delete.Verification) {
-		return fmt.Errorf(
-			"DELETE verification failed for step %q",
-			metric.StepID)
+	return &runcontrol.DeleteTerminalPolicyFailure{
+		StepID:       metric.StepID,
+		Verification: deletemetrics.HasVerificationFailure(metric.Delete.Verification),
 	}
-	return fmt.Errorf(
-		"DELETE failure policy rejected the terminal outcome for step %q",
-		metric.StepID)
 }
 
 func (o *TestOrchestrator) observeDetailedDeleteMetrics(update *MultiNodeMetricsUpdate) {
