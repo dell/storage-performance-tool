@@ -623,6 +623,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				if (!integrityConfig.enabled() && slicer.distributedItems() == 0) {
 					requireAnItemFromAFile(itemConfig, opType);
 				}
+				requireAnItemPerEngine(config, opType, slicer.distributedItems(), configSlices.size());
 			} else if (!skipScatter && !integrityConfig.enabled()) {
 				distributeNoItemsIfNothingToDelete(itemConfig, opType, itemType, configSlices, batchSize);
 			}
@@ -777,6 +778,50 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			throw new RunTerminalException(
 							IntegrityTerminalException.Category.INPUT, loadStepId(), "the items file has no items", null);
 		}
+	}
+
+	/**
+	 * A recycle step limited by count ends when each engine reaches its share, which an engine with
+	 * no items never does, so fewer items than engines end the run. A time limit ends the step
+	 * anyway, so a duration run with an idle engine runs as before. No items at all is for
+	 * {@link #requireAnItemFromAFile}.
+	 */
+	void requireAnItemPerEngine(final Config config, final OpType opType, final long items, final int engines) {
+		if (items == 0
+						|| items >= engines
+						|| !config.boolVal("load-op-recycle-mode")
+						|| config.longVal("load-op-limit-count") <= 0
+						|| hasTimeLimit(this.config)
+						|| hasTimeLimit(config)) {
+			return;
+		}
+		final String input = itemInputFile(config.configVal("item")) != null ? "the items file" : "the item input";
+		throw new RunTerminalException(
+						IntegrityTerminalException.Category.INPUT,
+						loadStepId(),
+						input + " has " + items + (items == 1 ? " item" : " items") + " for " + engines
+										+ " engines; each engine needs at least one in a count-based "
+										+ opType.name().toLowerCase(Locale.ROOT) + ": add items, or pass fewer --test-hosts",
+						null);
+	}
+
+	private static boolean hasTimeLimit(final Config config) {
+		final Object raw = config.val("load-step-limit-time");
+		final long seconds = raw instanceof String text
+						? TimeUtil.getTimeInSeconds(text)
+						: TypeUtil.typeConvert(raw, long.class);
+		return seconds > 0;
+	}
+
+	/** A slice reads a count of 0 as no limit, so each engine needs a count of at least 1. */
+	private RunTerminalException countBelowEngineCount(final long countLimit, final int engines) {
+		return new RunTerminalException(
+						IntegrityTerminalException.Category.CONFIGURATION,
+						loadStepId(),
+						"the count limit (" + countLimit + ") is below the number of engines (" + engines
+										+ "), and each engine needs a count of at least 1: raise --object-count to at least "
+										+ engines + ", or pass fewer --test-hosts",
+						null);
 	}
 
 	/**
@@ -1109,7 +1154,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 	}
 
-	private List<Config> sliceConfig(
+	List<Config> sliceConfig(
 					final Config config, final int sliceCount, final List<String> nodeAddrs, final boolean balanceCountLimit) {
 		final var configSlices = (List<Config>) new ArrayList<Config>(sliceCount);
 		for (var i = 0; i < sliceCount; i++) {
@@ -1125,23 +1170,24 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			//
 			final var countLimit = config.longVal("load-op-limit-count");
 			if (countLimit > 0) {
+				// A slice reads a count of 0 as no limit.
+				if (countLimit < sliceCount) {
+					throw countBelowEngineCount(countLimit, sliceCount);
+				}
 				if (balanceCountLimit) {
 					ConfigSliceUtil.sliceLongValueBalanced(
 									countLimit, configSlices, "load-op-limit-count");
 				} else {
-					ConfigSliceUtil.sliceLongValue(
+					ConfigSliceUtil.sliceCountLimit(
 									countLimit, configSlices, "load-op-limit-count");
 				}
-				configSlices
-								.stream()
-								.mapToLong(configSlice -> configSlice.longVal("load-op-limit-count"))
-								.filter(countLimitSlice -> countLimitSlice == 0)
-								.findAny()
-								.ifPresent(
-												countLimitSlice -> Loggers.MSG.fatal(
-																"{}: the count limit ({}) is too small to be sliced among the {} nodes, the load step " +
-																				"won't work correctly",
-																loadStepId(), countLimit, sliceCount));
+				for (var i = 0; i < sliceCount; i++) {
+					if (configSlices.get(i).longVal("load-op-limit-count") <= 0) {
+						throw new IllegalStateException(
+										loadStepId() + ": the count limit (" + countLimit + ") left load step slice #" + i + " of "
+														+ sliceCount + " without a count");
+					}
+				}
 			}
 			//
 			final var countFailLimit = config.longVal("load-op-limit-fail-count");
@@ -1156,7 +1202,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 												failCountLimitSlice -> Loggers.MSG.error(
 																"{}: the failures count limit ({}) is too small to be sliced among the {} nodes, the load " +
 																				"step may not work correctly",
-																loadStepId(), countLimit, sliceCount));
+																loadStepId(), countFailLimit, sliceCount));
 			}
 			//
 			final var rateLimit = config.doubleVal("load-op-limit-rate");

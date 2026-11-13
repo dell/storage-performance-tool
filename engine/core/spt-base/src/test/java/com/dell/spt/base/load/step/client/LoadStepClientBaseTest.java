@@ -273,6 +273,134 @@ class LoadStepClientBaseTest {
 		assertEquals(slicePath.toString(), slice.stringVal("item-input-file"));
 	}
 
+	private static List<String> remoteNodes(final int count) {
+		final List<String> nodes = new ArrayList<>(count);
+		for (int i = 0; i < count; i++) {
+			nodes.add("198.51.100." + (12 + i) + ":1099");
+		}
+		return nodes;
+	}
+
+	private static List<Long> countLimits(final List<Config> slices) {
+		return slices.stream().map(slice -> slice.longVal("load-op-limit-count")).toList();
+	}
+
+	@Test
+	void aCountBelowTheEngineCountFailsTheRun() throws Exception {
+		final var client = new TestLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
+		final Config config = TestConfigBuilder.config();
+		config.val("load-op-limit-count", 1L);
+		final var failure = assertThrows(
+						RunTerminalException.class, () -> client.sliceConfig(config, 2, remoteNodes(1), false));
+		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, failure.category());
+		assertEquals(client.loadStepId(), failure.stepId());
+		assertEquals(
+						"the count limit (1) is below the number of engines (2), and each engine needs a count of at least 1: "
+										+ "raise --object-count to at least 2, or pass fewer --test-hosts",
+						failure.getMessage());
+
+		config.val("load-op-limit-count", 2L);
+		final var context = assertThrows(
+						RunTerminalException.class, () -> client.sliceConfig(config, 3, remoteNodes(2), false));
+		assertEquals(
+						"the count limit (2) is below the number of engines (3), and each engine needs a count of at least 1: "
+										+ "raise --object-count to at least 3, or pass fewer --test-hosts",
+						context.getMessage());
+	}
+
+	@Test
+	void aCountOfAtLeastTheEngineCountGivesEveryEngineACount() throws Exception {
+		final var client = new TestLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
+		final Config config = TestConfigBuilder.config();
+		config.val("load-op-limit-count", 4L);
+		assertEquals(List.of(2L, 1L, 1L), countLimits(client.sliceConfig(config, 3, remoteNodes(2), false)));
+		config.val("load-op-limit-count", 9L);
+		assertEquals(List.of(3L, 2L, 2L, 2L), countLimits(client.sliceConfig(config, 4, remoteNodes(3), false)));
+		config.val("load-op-limit-count", 2L);
+		assertEquals(List.of(1L, 1L), countLimits(client.sliceConfig(config, 2, remoteNodes(1), false)));
+		// Splits that gave every engine a count stay as they were.
+		config.val("load-op-limit-count", 3L);
+		assertEquals(List.of(2L, 1L), countLimits(client.sliceConfig(config, 2, remoteNodes(1), false)));
+		config.val("load-op-limit-count", 10L);
+		assertEquals(List.of(3L, 3L, 3L, 1L), countLimits(client.sliceConfig(config, 4, remoteNodes(3), false)));
+		// An exact-output step keeps its balanced split.
+		config.val("load-op-limit-count", 10L);
+		assertEquals(List.of(3L, 3L, 2L, 2L), countLimits(client.sliceConfig(config, 4, remoteNodes(3), true)));
+	}
+
+	@Test
+	void aStepWithoutACountLimitIsNotRefused() throws Exception {
+		final var client = new TestLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
+		final Config config = TestConfigBuilder.config();
+		config.val("load-op-limit-count", 0L);
+		assertEquals(List.of(0L, 0L, 0L), countLimits(client.sliceConfig(config, 3, remoteNodes(2), false)));
+		config.val("load-op-limit-count", 1L);
+		assertEquals(List.of(1L), countLimits(client.sliceConfig(config, 1, List.of(), false)));
+	}
+
+	private Config recycleCountRead(final String itemsFile) throws Exception {
+		final Config config = TestConfigBuilder.config();
+		config.val("item-input-file", itemsFile);
+		config.val("load-op-type", "read");
+		config.val("load-op-recycle-mode", true);
+		config.val("load-op-limit-count", 2L);
+		config.val("load-step-limit-time", 0);
+		return config;
+	}
+
+	@Test
+	void aCountBasedRecycleStepWithFewerItemsThanEnginesFails() throws Exception {
+		testConfig.val("load-step-limit-time", 0);
+		final var client = new TestLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
+		final Config config = recycleCountRead(tempDir.resolve("one.csv").toString());
+		final var failure = assertThrows(
+						RunTerminalException.class, () -> client.requireAnItemPerEngine(config, OpType.READ, 1, 2));
+		assertEquals(IntegrityTerminalException.Category.INPUT, failure.category());
+		assertEquals(client.loadStepId(), failure.stepId());
+		assertEquals(
+						"the items file has 1 item for 2 engines; each engine needs at least one in a count-based read: "
+										+ "add items, or pass fewer --test-hosts",
+						failure.getMessage());
+		assertEquals(
+						"the items file has 3 items for 4 engines; each engine needs at least one in a count-based update: "
+										+ "add items, or pass fewer --test-hosts",
+						assertThrows(
+										RunTerminalException.class,
+										() -> client.requireAnItemPerEngine(config, OpType.UPDATE, 3, 4)).getMessage());
+		config.val("item-input-file", null);
+		config.val("item-input-path", "/bucket");
+		assertEquals(
+						"the item input has 1 item for 2 engines; each engine needs at least one in a count-based read: "
+										+ "add items, or pass fewer --test-hosts",
+						assertThrows(
+										RunTerminalException.class,
+										() -> client.requireAnItemPerEngine(config, OpType.READ, 1, 2)).getMessage());
+	}
+
+	@Test
+	void anEngineWithoutItemsIsLeftAloneWhenTheStepEndsAnotherWay() throws Exception {
+		testConfig.val("load-step-limit-time", 0);
+		final var client = new TestLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
+		final Config config = recycleCountRead(tempDir.resolve("one.csv").toString());
+		assertThrows(RunTerminalException.class, () -> client.requireAnItemPerEngine(config, OpType.READ, 1, 2));
+		assertDoesNotThrow(() -> client.requireAnItemPerEngine(config, OpType.READ, 2, 2), "an item for each engine");
+		assertDoesNotThrow(() -> client.requireAnItemPerEngine(config, OpType.READ, 0, 2), "no items at all");
+		config.val("load-step-limit-time", "5s");
+		assertDoesNotThrow(() -> client.requireAnItemPerEngine(config, OpType.READ, 1, 2), "a duration run");
+		config.val("load-step-limit-time", 0);
+		config.val("load-op-recycle-mode", false);
+		assertDoesNotThrow(() -> client.requireAnItemPerEngine(config, OpType.READ, 1, 2), "not recycled");
+		config.val("load-op-recycle-mode", true);
+		config.val("load-op-limit-count", 0L);
+		assertDoesNotThrow(() -> client.requireAnItemPerEngine(config, OpType.READ, 1, 2), "no count limit");
+
+		// A context of a step whose own time limit ends it.
+		config.val("load-op-limit-count", 2L);
+		testConfig.val("load-step-limit-time", "5s");
+		final var timed = new TestLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
+		assertDoesNotThrow(() -> timed.requireAnItemPerEngine(config, OpType.READ, 1, 2), "the step's time limit");
+	}
+
 	@Test
 	void metadataSliceRunIdMustMatchBeforeStart() throws Exception {
 		final LoadStep slice = mock(LoadStep.class);
