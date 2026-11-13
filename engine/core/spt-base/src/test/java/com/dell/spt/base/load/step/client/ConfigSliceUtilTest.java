@@ -211,6 +211,93 @@ class ConfigSliceUtilTest {
 		assertEquals(List.of("eth0", "eth1"), slices.get(0).listVal("storage-net-interfaces"));
 	}
 
+	private interface LongSlicer {
+		void slice(long value, List<Config> slices, String path);
+	}
+
+	private static List<Long> countLimits(final LongSlicer slicer, final long count, final int sliceCount) {
+		final Config base = TestConfigBuilder.config();
+		final List<Config> slices = new ArrayList<>(sliceCount);
+		for (int i = 0; i < sliceCount; i++) {
+			slices.add(ConfigSliceUtil.initSlice(base));
+		}
+		slicer.slice(count, slices, "load-op-limit-count");
+		return slices.stream().map(slice -> slice.longVal("load-op-limit-count")).toList();
+	}
+
+	/** Each row: count, slices, and each slice's count. */
+	static Stream<Arguments> countLimitSlices() {
+		return Stream.of(
+						// The ceil split leaves a slice at 0, which runs without a limit: balanced instead.
+						Arguments.of(4L, 3, List.of(2L, 1L, 1L)),
+						Arguments.of(9L, 4, List.of(3L, 2L, 2L, 2L)),
+						Arguments.of(81L, 10, List.of(9L, 8L, 8L, 8L, 8L, 8L, 8L, 8L, 8L, 8L)),
+						Arguments.of(6L, 4, List.of(2L, 2L, 1L, 1L)),
+						Arguments.of(16L, 5, List.of(4L, 3L, 3L, 3L, 3L)),
+						// A count equal to the slices gives each slice 1.
+						Arguments.of(2L, 2, List.of(1L, 1L)),
+						Arguments.of(3L, 3, List.of(1L, 1L, 1L)),
+						Arguments.of(10L, 10, List.of(1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L)),
+						// The ceil split gives every slice a count, so each keeps the count it had.
+						Arguments.of(3L, 2, List.of(2L, 1L)),
+						Arguments.of(14L, 2, List.of(7L, 7L)),
+						Arguments.of(10L, 4, List.of(3L, 3L, 3L, 1L)),
+						Arguments.of(101L, 10, List.of(11L, 11L, 11L, 11L, 11L, 11L, 11L, 11L, 11L, 2L)),
+						Arguments.of(82L, 10, List.of(9L, 9L, 9L, 9L, 9L, 9L, 9L, 9L, 9L, 1L)),
+						Arguments.of(1_000L, 3, List.of(334L, 334L, 332L)),
+						Arguments.of(7L, 7, List.of(1L, 1L, 1L, 1L, 1L, 1L, 1L)),
+						Arguments.of(1_000_000L, 4, List.of(250_000L, 250_000L, 250_000L, 250_000L)));
+	}
+
+	@ParameterizedTest(name = "{0} on {1} slices")
+	@MethodSource("countLimitSlices")
+	@DisplayName("A count limit of at least the slice count gives every slice a count")
+	void aCountLimitGivesEverySliceACount(final long count, final int sliceCount, final List<Long> expected) {
+		assertEquals(expected, countLimits(ConfigSliceUtil::sliceCountLimit, count, sliceCount));
+	}
+
+	/**
+	 * Where the ceil split gives every slice a count, the count limit's split is the same, so every
+	 * run that worked keeps its per-engine counts. Where it leaves a slice at 0, the counts that
+	 * the review probe found (the largest is (slices - 1)²), the split is the balanced one.
+	 */
+	@Test
+	@DisplayName("Only the ceil splits that leave a slice at 0 change")
+	void onlyTheSplitsThatLeaveASliceAtZeroChange() {
+		final Map<Integer, List<Long>> zeroCounts = new HashMap<>();
+		for (int sliceCount = 2; sliceCount <= 10; sliceCount++) {
+			final List<Long> zeros = new ArrayList<>();
+			for (long count = 1; count <= 200; count++) {
+				final List<Long> ceil = countLimits(ConfigSliceUtil::sliceLongValue, count, sliceCount);
+				if (ceil.contains(0L)) {
+					zeros.add(count);
+				}
+				if (count < sliceCount) {
+					continue;
+				}
+				final List<Long> sliced = countLimits(ConfigSliceUtil::sliceCountLimit, count, sliceCount);
+				final String what = count + " on " + sliceCount;
+				if (ceil.contains(0L)) {
+					assertEquals(countLimits(ConfigSliceUtil::sliceLongValueBalanced, count, sliceCount), sliced, what);
+				} else {
+					assertEquals(ceil, sliced, what);
+				}
+				assertFalse(sliced.contains(0L), what);
+				assertEquals(count, sliced.stream().mapToLong(Long::longValue).sum(), what);
+			}
+			zeroCounts.put(sliceCount, zeros);
+		}
+		assertEquals(List.of(1L), zeroCounts.get(2));
+		assertEquals(List.of(1L, 2L, 4L), zeroCounts.get(3));
+		assertEquals(List.of(1L, 2L, 3L, 5L, 6L, 9L), zeroCounts.get(4));
+		assertEquals(List.of(1L, 2L, 3L, 4L, 6L, 7L, 8L, 11L, 12L, 16L), zeroCounts.get(5));
+		for (int sliceCount = 2; sliceCount <= 10; sliceCount++) {
+			final List<Long> zeros = zeroCounts.get(sliceCount);
+			assertEquals((long) (sliceCount - 1) * (sliceCount - 1), zeros.get(zeros.size() - 1), "slices " + sliceCount);
+		}
+		assertEquals(45, zeroCounts.get(10).size());
+	}
+
 	@Test
 	@DisplayName("without host overrides the slices keep the step's value")
 	void noHostOverridesLeaveTheStepsValue() throws Exception {
