@@ -28,6 +28,9 @@ const (
 	remoteChmodCommand        = "chmod"
 	remoteCleanupTimeout      = 10 * time.Second
 	remoteDiagnosticsSlack    = 30 * time.Second
+	// remoteStagingCommandTimeout bounds each mkdir, chmod and rm that item
+	// file staging runs around its copies.
+	remoteStagingCommandTimeout = time.Duration(constants.ContainerStartTimeoutSecs) * time.Second
 )
 
 // RemoteDockerManager implements DockerInterface by executing docker CLI via SSH
@@ -47,6 +50,9 @@ type RemoteDockerManager struct {
 	diagnosticsDone     bool
 	diagnosticsRec      *diagnosticsRecord
 	diagnosticsStopDone bool
+
+	// stagingCommandTimeout bounds each small staging command; tests shorten it.
+	stagingCommandTimeout time.Duration
 }
 
 func sanitizeHostComponent(host string) string {
@@ -113,7 +119,8 @@ func newRemoteDockerManagerWithExecutor(host *hostparse.HostInfo, exec command.C
 		exec: exec,
 		ops:  command.NewDockerOperations(exec, host),
 		// Default to no-op prober in tests; NewRemoteDockerManager sets a real prober.
-		proberRun: func(context.Context, string, time.Duration) error { return nil },
+		proberRun:             func(context.Context, string, time.Duration) error { return nil },
+		stagingCommandTimeout: remoteStagingCommandTimeout,
 	}, nil
 }
 
@@ -172,33 +179,67 @@ func (m *RemoteDockerManager) SetFileMounts(mounts []scenario.FileMount) error {
 	return m.SetFileMountsContext(context.Background(), mounts)
 }
 
-// SetFileMountsContext stages remote bind-mount inputs within the caller's context.
+// SetFileMountsContext copies item files to the remote host for bind
+// mounting. Its bounds:
+//   - Each copy runs under ctx alone, with no fixed cap, so a large file is
+//     not cut off. A cancel of ctx ends the copy within
+//     constants.CommandWaitDelay, and scp's keepalives end a copy whose peer
+//     stops answering about 60 s after its last reply.
+//   - Each mkdir, chmod and rm around the copies gets its own
+//     stagingCommandTimeout (30 s).
+//   - After a failure or a cancel, the staging directory is removed on a fresh
+//     context bounded by remoteCleanupTimeout (10 s), so that removal and the
+//     orchestrator's rollback stay within TUILaunchJoinTimeout on a dead link.
+//     If the removal fails, the directory stays owned (HasManagedResources) for
+//     the rollback.
 func (m *RemoteDockerManager) SetFileMountsContext(ctx context.Context, mounts []scenario.FileMount) error {
-	ctx, cancel := context.WithTimeout(normalizeContext(ctx), time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
-	defer cancel()
-	if err := m.cleanupStaging(ctx); err != nil {
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := m.withStagingCommandTimeout(ctx, m.cleanupStaging); err != nil {
 		return err
 	}
 	if len(mounts) == 0 {
 		return nil
 	}
-	if err := m.ensureStagingDir(ctx); err != nil {
+	if err := m.withStagingCommandTimeout(ctx, m.ensureStagingDir); err != nil {
 		return err
 	}
 	for _, mount := range mounts {
 		remotePath := path.Join(m.stagingDir, path.Base(mount.ContainerPath))
 		if err := m.exec.CopyFile(ctx, m.host, mount.HostPath, remotePath); err != nil {
-			return errors.Join(err, m.cleanupStaging(ctx))
+			return errors.Join(err, m.cleanupStagingAfterFailure(ctx))
 		}
-		if _, stderr, err := m.exec.ExecuteCommand(ctx, m.host, []string{remoteChmodCommand, "0444", remotePath}); err != nil {
-			return errors.Join(
-				fmt.Errorf("chmod remote item file on %s: %w (stderr: %s)", m.host.Original, err, stderr),
-				m.cleanupStaging(ctx),
-			)
+		if err := m.withStagingCommandTimeout(ctx, func(commandCtx context.Context) error {
+			_, stderr, err := m.exec.ExecuteCommand(commandCtx, m.host, []string{remoteChmodCommand, "0444", remotePath})
+			if err != nil {
+				return fmt.Errorf("chmod remote item file on %s: %w (stderr: %s)", m.host.Original, err, stderr)
+			}
+			return nil
+		}); err != nil {
+			return errors.Join(err, m.cleanupStagingAfterFailure(ctx))
 		}
 		m.stagedBindMounts = append(m.stagedBindMounts, fmt.Sprintf("%s:%s:ro", remotePath, mount.ContainerPath))
 	}
 	return nil
+}
+
+// withStagingCommandTimeout runs one small staging command under its own
+// stagingCommandTimeout within ctx.
+func (m *RemoteDockerManager) withStagingCommandTimeout(ctx context.Context, run func(context.Context) error) error {
+	commandCtx, cancel := context.WithTimeout(ctx, m.stagingCommandTimeout)
+	defer cancel()
+	return run(commandCtx)
+}
+
+// cleanupStagingAfterFailure removes the staging directory on a fresh context
+// bounded by remoteCleanupTimeout, so the removal still runs after ctx was
+// cancelled. ctx's values are kept.
+func (m *RemoteDockerManager) cleanupStagingAfterFailure(ctx context.Context) error {
+	cleanupCtx, cancel := boundedDetachedContext(ctx, remoteCleanupTimeout)
+	defer cancel()
+	return m.cleanupStaging(cleanupCtx)
 }
 
 func (m *RemoteDockerManager) prepareDiagnostics(ctx context.Context, role string) ([]string, []string, error) {
