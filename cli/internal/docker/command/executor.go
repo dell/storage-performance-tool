@@ -170,17 +170,16 @@ const remoteStreamGuard = `exec 3<&0 </dev/null; "$@" & p=$!; ` +
 	`wait "$p"; s=$?; kill "$w" 2>/dev/null; exit "$s"`
 
 // streamHostCommand builds a streamed command: run directly when local, or over
-// SSH under remoteStreamGuard. The SSH session has keepalives, no pty (which
-// would merge stderr into stdout), and, when the client supports the option, an
-// explicit StdinNull=no so client config cannot close the stdin the guard
-// watches. The single-quoted guard reaches sh as one word after the remote
-// login shell parses the command line.
+// SSH under remoteStreamGuard. Besides hostCommand's keepalives, the SSH session
+// has no pty (which would merge stderr into stdout) and, when the client
+// supports the option, an explicit StdinNull=no so client config cannot close
+// the stdin the guard watches. The single-quoted guard reaches sh as one word
+// after the remote login shell parses the command line.
 func streamHostCommand(ctx context.Context, host *hostparse.HostInfo, command []string, supportsStdinNull bool) *exec.Cmd {
 	if host.IsLocal {
 		return hostCommand(ctx, host, command)
 	}
-	sshFlags := []string{constants.SSHFlagNoTTY,
-		"-o", constants.SSHServerAliveInterval, "-o", constants.SSHServerAliveCountMax}
+	sshFlags := []string{constants.SSHFlagNoTTY}
 	if supportsStdinNull {
 		sshFlags = append(sshFlags, "-o", constants.SSHStdinNullNo)
 	}
@@ -205,13 +204,25 @@ func sshAcceptsOption(sshCommand, option string) bool {
 
 // hostCommand builds command for local execution or wraps it in ssh for a
 // remote host. sshFlags go after the default options, before the target.
+//
+// Every remote session carries keepalives, so ssh gives up about 60 s after a
+// peer that keeps the TCP connection up stops answering; see scpCommand for the
+// timing. When the user's config shares connections (ControlMaster auto), the
+// ssh that opens the control process passes them on to it: a client of a
+// shared connection, such as scp's ssh, ignores its own keepalives, and the
+// control process, which owns the connection, decides when it is dead. Ending
+// it ends its clients. A shared connection opened outside SPT follows its own
+// keepalive settings. SPT keeps sharing connections: with BatchMode, a login
+// that needs a password or a second factor works only through a control
+// connection the user opened beforehand.
 func hostCommand(ctx context.Context, host *hostparse.HostInfo, command []string, sshFlags ...string) *exec.Cmd {
 	if host.IsLocal {
 		// #nosec G204: command and arguments originate from trusted spt constructors
 		return exec.CommandContext(ctx, command[0], command[1:]...)
 	}
-	sshArgs := make([]string, 0, 5+len(sshFlags)+len(command))
-	sshArgs = append(sshArgs, "-o", constants.SSHConnectTimeout, "-o", constants.SSHBatchMode)
+	sshArgs := make([]string, 0, 9+len(sshFlags)+len(command))
+	sshArgs = append(sshArgs, "-o", constants.SSHConnectTimeout, "-o", constants.SSHBatchMode,
+		"-o", constants.SSHServerAliveInterval, "-o", constants.SSHServerAliveCountMax)
 	sshArgs = append(sshArgs, sshFlags...)
 	sshArgs = append(sshArgs, host.GetSSHTarget())
 	sshArgs = append(sshArgs, command...)
@@ -273,50 +284,88 @@ func (w *lineWriter) emitLine(line []byte) {
 
 // CopyFile copies a local file to the target host path. It returns within
 // constants.CommandWaitDelay of the copy exiting or ctx ending, even when
-// scp's ssh child keeps the output pipe open; see endHeldPipeWait.
+// scp's ssh child keeps the output pipe open; see endHeldPipeWait. A remote
+// copy whose peer stops answering ends on SSH keepalives; see scpCommand.
+// When ctx ended, the error says the copy was stopped and why, and wraps
+// ctx.Err().
 func (r *RealCommandExecutor) CopyFile(ctx context.Context, host *hostparse.HostInfo, localPath, remotePath string) error {
 	var cmd *exec.Cmd
 	if host.IsLocal {
 		cmd = exec.CommandContext(ctx, "cp", localPath, remotePath) // #nosec G204 -- paths are user-selected SPT artifacts.
 	} else {
-		sshTarget := host.GetSSHTarget() + ":" + remotePath
-		scpArgs := []string{
-			"-o", constants.SSHConnectTimeout,
-			"-o", constants.SSHBatchMode,
-			localPath,
-			sshTarget,
-		}
-		cmd = exec.CommandContext(ctx, constants.SCPCommand, scpArgs...) // #nosec G204 -- SCP target is built from parsed host info.
+		cmd = scpCommand(ctx, localPath, host.GetSSHTarget()+":"+remotePath)
 	}
-	cmd.WaitDelay = constants.CommandWaitDelay
-	out, err := cmd.CombinedOutput()
-	if err = endHeldPipeWait(cmd, host, err); err != nil {
-		return fmt.Errorf("copy %s to %s:%s failed: %w: %s", localPath, host.Original, remotePath, err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	return runCopy(ctx, cmd, host, fmt.Sprintf("copy %s to %s:%s", localPath, host.Original, remotePath))
 }
 
 // CopyFromHost copies a file from the target host to a local path. It returns
 // within constants.CommandWaitDelay of the copy exiting or ctx ending, even
-// when scp's ssh child keeps the output pipe open; see endHeldPipeWait.
+// when scp's ssh child keeps the output pipe open; see endHeldPipeWait. Errors
+// read as CopyFile's do.
 func (r *RealCommandExecutor) CopyFromHost(ctx context.Context, host *hostparse.HostInfo, remotePath, localPath string) error {
 	var cmd *exec.Cmd
 	if host.IsLocal {
 		cmd = exec.CommandContext(ctx, "cp", remotePath, localPath) // #nosec G204 -- paths are user-selected SPT artifacts.
 	} else {
-		sshSource := host.GetSSHTarget() + ":" + remotePath
-		scpArgs := []string{
-			"-o", constants.SSHConnectTimeout,
-			"-o", constants.SSHBatchMode,
-			sshSource,
-			localPath,
-		}
-		cmd = exec.CommandContext(ctx, constants.SCPCommand, scpArgs...) // #nosec G204 -- SCP source is built from parsed host info.
+		cmd = scpCommand(ctx, host.GetSSHTarget()+":"+remotePath, localPath)
 	}
+	return runCopy(ctx, cmd, host, fmt.Sprintf("copy %s:%s to %s", host.Original, remotePath, localPath))
+}
+
+// scpCommand builds an scp from source to target. Its keepalives end a copy
+// whose peer stops answering while the TCP connection stays up: ssh gives up
+// once constants.SSHServerAliveCountMax probes, one every
+// constants.SSHServerAliveInterval of silence, go unanswered, about 60 s after
+// the peer's last reply (59 s measured), with or without a deadline on ctx.
+// scp runs its ssh with ControlMaster=no, which stops it from opening a control
+// process but not from joining one that is open: when the user's config shares
+// connections, scp's ssh rides the open control process and its own keepalives
+// are ignored. A control process an SPT command opened carries hostCommand's
+// keepalives and ends the copy in the same time; see hostCommand.
+func scpCommand(ctx context.Context, source, target string) *exec.Cmd {
+	scpArgs := []string{
+		"-o", constants.SSHConnectTimeout,
+		"-o", constants.SSHBatchMode,
+		"-o", constants.SSHServerAliveInterval,
+		"-o", constants.SSHServerAliveCountMax,
+		source,
+		target,
+	}
+	return exec.CommandContext(ctx, constants.SCPCommand, scpArgs...) // #nosec G204 -- scp source and target are built from parsed host info.
+}
+
+// runCopy runs a copy command and describes its failure as what. When ctx
+// ended, the copy was stopped rather than failing on its own, so the error
+// says so and why, instead of only the kill's "signal: killed", and wraps
+// both the reason and the command's error.
+func runCopy(ctx context.Context, cmd *exec.Cmd, host *hostparse.HostInfo, what string) error {
 	cmd.WaitDelay = constants.CommandWaitDelay
 	out, err := cmd.CombinedOutput()
-	if err = endHeldPipeWait(cmd, host, err); err != nil {
-		return fmt.Errorf("copy %s:%s to %s failed: %w: %s", host.Original, remotePath, localPath, err, strings.TrimSpace(string(out)))
+	if err = endHeldPipeWait(cmd, host, err); err == nil {
+		return nil
 	}
-	return nil
+	detail := ""
+	if trimmed := strings.TrimSpace(string(out)); trimmed != "" {
+		detail = ": " + trimmed
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("%s stopped: %w (%s: %w%s)", what, contextEnd(ctx), cmd.Args[0], err, detail)
+	}
+	return fmt.Errorf("%s failed: %w%s", what, err, detail)
+}
+
+// contextEnd returns why ctx ended. A cause that matches ctx.Err(), such as
+// signal.NotifyContext's "interrupt signal received", is returned as is;
+// another cause follows ctx.Err(). Either way errors.Is matches ctx.Err().
+func contextEnd(ctx context.Context) error {
+	err := ctx.Err()
+	cause := context.Cause(ctx)
+	switch {
+	case cause == nil:
+		return err
+	case errors.Is(cause, err): // also a plain cancel, whose cause is ctx.Err() itself
+		return cause
+	default:
+		return fmt.Errorf("%w: %w", err, cause)
+	}
 }

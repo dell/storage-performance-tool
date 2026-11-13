@@ -178,6 +178,7 @@ type canarySSHD struct {
 	dir     string
 	config  string
 	sshdLog string
+	pid     int
 }
 
 // usePath puts ssh and scp wrappers that read only the canary's client config
@@ -199,10 +200,14 @@ func (e canarySSHD) usePath(t *testing.T, sshFlags string) {
 // requireControlProcess checks that a ControlPersist process serves host.
 func (e canarySSHD) requireControlProcess(t *testing.T, host string) {
 	t.Helper()
-	out, err := exec.Command("/usr/bin/ssh", "-F", e.config, "-O", "check", host).CombinedOutput() // #nosec G204 -- test-only canary
-	if err != nil {
+	if out, err := e.controlCheck(host); err != nil {
 		t.Fatalf("no ControlPersist process for %s: %v: %s", host, err, out)
 	}
+}
+
+// controlCheck asks the control process for host, if any, whether it is running.
+func (e canarySSHD) controlCheck(host string) ([]byte, error) {
+	return exec.Command("/usr/bin/ssh", "-F", e.config, "-O", "check", host).CombinedOutput() // #nosec G204 -- test-only canary
 }
 
 // acceptedSessions counts the connections sshd has authenticated.
@@ -293,7 +298,7 @@ func startCanarySSHD(t *testing.T) canarySSHD {
 	if err := server.Start(); err != nil {
 		t.Fatalf("start sshd: %v", err)
 	}
-	env := canarySSHD{dir: dir, config: clientConfig, sshdLog: sshdLog}
+	env := canarySSHD{dir: dir, config: clientConfig, sshdLog: sshdLog, pid: server.Process.Pid}
 	t.Cleanup(func() {
 		for _, host := range []string{"spt-mux", "spt-mux-verbose"} {
 			_ = exec.Command("/usr/bin/ssh", "-F", clientConfig, "-O", "exit", host).Run() // #nosec G204 -- test-only canary
