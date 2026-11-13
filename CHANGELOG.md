@@ -9,6 +9,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Fixed
 
 - **Runs on one remote engine** — An `spt run` or `spt replay` that runs on a single remote engine (one `--test-hosts` entry, or several where only the first connects and `--min-hosts` allows it) now stores its driver statistics in `spt_run_params.json`; 5.17.0 recorded a `driverStatsError` there instead. A standalone DELETE there, seeded or from `--items-file`, now exits 0 after a clean delete; from 5.15.0 it exited 1 with "metric contributor identity is unavailable before execution starts". A real failure there no longer carries that reason as an extra cause.
+- **Count-limited runs on several engines** — A count-limited run no longer leaves an engine without a count, which that engine read as no limit, and no longer hangs. When the count is at least the number of engines but the split left one of them at 0, the count is now split evenly: `--object-count 4` on three engines runs 2, 1 and 1 operations, where the third engine used to run without a limit until stopped. Splits that already gave every engine a count are unchanged. These count-limited runs now fail before the step starts, with exit 1 and a reason that names the fix:
+  - A count below the number of engines, such as `--object-count 1` or `--seed-count 1` on two `--test-hosts`. One engine used to run without a limit. This includes a `tables` run on two or more engines, whose setup steps run one operation each.
+  - A count-based read from an items file with fewer items than engines. It used to hang.
+  - A scenario run directly with a count below the number of engines, including one that used to finish with a different number of operations than it asked for.
+
+  Duration runs are unchanged: a `--duration` read from an items file with fewer items than engines still exits 0.
 
 ## [5.17.0] - 2026-11-11
 
