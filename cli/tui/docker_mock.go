@@ -253,14 +253,6 @@ func (m *MockDockerManager) recordPortStart(ports enginePorts) {
 	m.portStarts = append(m.portStarts, ports)
 }
 
-// startedOnPorts returns the engine ports of each worker or entry started on ports other than the
-// defaults; a start on the defaults goes through the exported methods, and records none.
-func (m *MockDockerManager) startedOnPorts() []enginePorts {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]enginePorts(nil), m.portStarts...)
-}
-
 // StreamOutput simulates streaming container output
 func (m *MockDockerManager) StreamOutput(containerID string, stdoutCallback func(string), _ func(string)) {
 	m.mu.Lock()

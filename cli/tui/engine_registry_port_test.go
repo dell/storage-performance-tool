@@ -46,6 +46,14 @@ func requireOnlyRunPorts(t *testing.T, role string, tokens []string, want ...str
 	}
 }
 
+// startedOnPorts returns the engine ports of each worker or entry the mock started on ports other
+// than the defaults; a start on the defaults goes through the exported methods, and records none.
+func (m *MockDockerManager) startedOnPorts() []enginePorts {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]enginePorts(nil), m.portStarts...)
+}
+
 // defaultPortsOnlyManager is a DockerInterface without the port-aware start, as an extension's
 // manager is.
 type defaultPortsOnlyManager struct {
