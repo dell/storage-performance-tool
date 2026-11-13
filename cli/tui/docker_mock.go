@@ -59,6 +59,9 @@ type MockDockerManager struct {
 		NetworkMode     string
 	}
 
+	// The engine ports of each worker or entry started on ports other than the defaults
+	portStarts []enginePorts
+
 	// Callbacks for testing
 	onStreamOutput func(containerID string)
 }
@@ -221,25 +224,41 @@ func (m *MockDockerManager) StartEntryNodeContainer(image string, workerAddresse
 }
 
 // startWorkerNodeOnPorts simulates starting a worker node on a run's engine ports. The mock serves
-// no port, so it records the call as StartWorkerNodeContainer does.
+// no port: it records the ports, and the call as StartWorkerNodeContainer does.
 func (m *MockDockerManager) startWorkerNodeOnPorts(
-	ctx context.Context, image, rmiHostname string, _ enginePorts, rmiPortStart, rmiPortCount int, additionalArgs []string,
+	ctx context.Context, image, rmiHostname string, ports enginePorts, rmiPortStart, rmiPortCount int, additionalArgs []string,
 ) (string, error) {
 	if err := normalizeContext(ctx).Err(); err != nil {
 		return "", err
 	}
+	m.recordPortStart(ports)
 	return m.StartWorkerNodeContainer(image, rmiHostname, rmiPortStart, rmiPortCount, additionalArgs)
 }
 
-// startEntryNodeOnPorts simulates starting an entry node on a run's engine ports, and records the
-// call as StartEntryNodeContainer does.
+// startEntryNodeOnPorts simulates starting an entry node on a run's engine ports: it records the
+// ports, and the call as StartEntryNodeContainer does.
 func (m *MockDockerManager) startEntryNodeOnPorts(
-	ctx context.Context, image string, _ enginePorts, workerAddresses, additionalArgs []string, networkMode string,
+	ctx context.Context, image string, ports enginePorts, workerAddresses, additionalArgs []string, networkMode string,
 ) (string, error) {
 	if err := normalizeContext(ctx).Err(); err != nil {
 		return "", err
 	}
+	m.recordPortStart(ports)
 	return m.StartEntryNodeContainer(image, workerAddresses, additionalArgs, networkMode)
+}
+
+func (m *MockDockerManager) recordPortStart(ports enginePorts) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.portStarts = append(m.portStarts, ports)
+}
+
+// startedOnPorts returns the engine ports of each worker or entry started on ports other than the
+// defaults; a start on the defaults goes through the exported methods, and records none.
+func (m *MockDockerManager) startedOnPorts() []enginePorts {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]enginePorts(nil), m.portStarts...)
 }
 
 // StreamOutput simulates streaming container output

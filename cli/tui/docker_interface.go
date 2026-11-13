@@ -108,8 +108,8 @@ func nonDefaultNodePortArgs(ports enginePorts) []string {
 	return []string{ports.nodePortArg()}
 }
 
-// enginePortsLauncher starts RMI workers and entries on a run's engine ports. The managers in this
-// package implement it; any other DockerInterface can start them only on the default ports.
+// enginePortsLauncher starts RMI workers and entries on a run's engine ports. Only this package's
+// own managers take this path, and only on other ports; see builtinEnginePortsLauncher.
 type enginePortsLauncher interface {
 	startWorkerNodeOnPorts(
 		ctx context.Context, image, rmiHostname string, ports enginePorts, rmiPortStart, rmiPortCount int,
@@ -119,6 +119,23 @@ type enginePortsLauncher interface {
 		ctx context.Context, image string, ports enginePorts, workerAddresses, additionalArgs []string,
 		networkMode string,
 	) (string, error)
+}
+
+// builtinEnginePortsLauncher returns the port-aware start of one of this package's own managers,
+// chosen by concrete type. A type that embeds one, such as an extension's wrapper, inherits its
+// unexported methods too; calling them would bypass the wrapper's exported launch overrides, so
+// only the managers themselves qualify.
+func builtinEnginePortsLauncher(dm DockerInterface) (enginePortsLauncher, bool) {
+	switch launcher := dm.(type) {
+	case *DockerManager:
+		return launcher, true
+	case *RemoteDockerManager:
+		return launcher, true
+	case *MockDockerManager:
+		return launcher, true
+	default:
+		return nil, false
+	}
 }
 
 func errDefaultPortsOnly(dm DockerInterface, role string, ports enginePorts) error {
@@ -134,13 +151,15 @@ func startWorkerNodeContainerContext(
 	rmiPortStart, rmiPortCount int,
 	additionalArgs []string,
 ) (string, error) {
-	if launcher, ok := dm.(enginePortsLauncher); ok {
+	if !ports.isDefault() {
+		launcher, ok := builtinEnginePortsLauncher(dm)
+		if !ok {
+			return "", errDefaultPortsOnly(dm, "RMI worker", ports)
+		}
 		return launcher.startWorkerNodeOnPorts(
 			normalizeContext(ctx), image, rmiHostname, ports, rmiPortStart, rmiPortCount, additionalArgs)
 	}
-	if !ports.isDefault() {
-		return "", errDefaultPortsOnly(dm, "RMI worker", ports)
-	}
+	// The default ports start every manager through its exported launch, overrides included.
 	if launcher, ok := dm.(contextDockerLauncher); ok {
 		return launcher.StartWorkerNodeContainerContext(
 			normalizeContext(ctx), image, rmiHostname, rmiPortStart, rmiPortCount, additionalArgs)
@@ -159,13 +178,15 @@ func startEntryNodeContainerContext(
 	workerAddresses, additionalArgs []string,
 	networkMode string,
 ) (string, error) {
-	if launcher, ok := dm.(enginePortsLauncher); ok {
+	if !ports.isDefault() {
+		launcher, ok := builtinEnginePortsLauncher(dm)
+		if !ok {
+			return "", errDefaultPortsOnly(dm, "RMI entry", ports)
+		}
 		return launcher.startEntryNodeOnPorts(
 			normalizeContext(ctx), image, ports, workerAddresses, additionalArgs, networkMode)
 	}
-	if !ports.isDefault() {
-		return "", errDefaultPortsOnly(dm, "RMI entry", ports)
-	}
+	// The default ports start every manager through its exported launch, overrides included.
 	if launcher, ok := dm.(contextDockerLauncher); ok {
 		return launcher.StartEntryNodeContainerContext(
 			normalizeContext(ctx), image, workerAddresses, additionalArgs, networkMode)

@@ -14,7 +14,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -45,43 +44,6 @@ func requireOnlyRunPorts(t *testing.T, role string, tokens []string, want ...str
 			t.Errorf("%s command still names a default port in %q: %s", role, token, strings.Join(tokens, " "))
 		}
 	}
-}
-
-// portRecordingDockerManager is a mock that starts RMI engines on any ports, and records them.
-type portRecordingDockerManager struct {
-	*MockDockerManager
-	mu    sync.Mutex
-	ports []enginePorts
-}
-
-func newPortRecordingDockerManager() *portRecordingDockerManager {
-	return &portRecordingDockerManager{MockDockerManager: NewMockDockerManager()}
-}
-
-func (m *portRecordingDockerManager) record(ports enginePorts) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.ports = append(m.ports, ports)
-}
-
-func (m *portRecordingDockerManager) startedOn() []enginePorts {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]enginePorts(nil), m.ports...)
-}
-
-func (m *portRecordingDockerManager) startWorkerNodeOnPorts(
-	_ context.Context, image, rmiHostname string, ports enginePorts, rmiPortStart, rmiPortCount int, args []string,
-) (string, error) {
-	m.record(ports)
-	return m.StartWorkerNodeContainer(image, rmiHostname, rmiPortStart, rmiPortCount, args)
-}
-
-func (m *portRecordingDockerManager) startEntryNodeOnPorts(
-	_ context.Context, image string, ports enginePorts, workers, args []string, networkMode string,
-) (string, error) {
-	m.record(ports)
-	return m.StartEntryNodeContainer(image, workers, args, networkMode)
 }
 
 // defaultPortsOnlyManager is a DockerInterface without the port-aware start, as an extension's
@@ -372,7 +334,7 @@ func TestListRunStartsEveryEngineOnTheRunsPorts(t *testing.T) {
 	}, 2)
 	o.SetAPIPort(apiPort)
 	o.SetRMIRegistryPort(testRunRegistryPort)
-	primaryDM, workerDM := newPortRecordingDockerManager(), NewMockDockerManager()
+	primaryDM, workerDM := NewMockDockerManager(), NewMockDockerManager()
 	o.hosts[0].DockerManager, o.hosts[1].DockerManager = primaryDM, workerDM
 	o.hosts[0].SetStatus(HostStatusReady)
 	o.hosts[1].SetStatus(HostStatusReady)
@@ -388,7 +350,7 @@ func TestListRunStartsEveryEngineOnTheRunsPorts(t *testing.T) {
 	defer func() { _ = wrapper.StopTest() }()
 
 	port, _ := strconv.Atoi(apiPort)
-	if got, want := primaryDM.startedOn(), []enginePorts{{api: port, registry: testRunRegistryPort}}; !reflect.DeepEqual(got, want) {
+	if got, want := primaryDM.startedOnPorts(), []enginePorts{{api: port, registry: testRunRegistryPort}}; !reflect.DeepEqual(got, want) {
 		t.Errorf("LIST primary started on %+v, want %+v", got, want)
 	}
 	calls := workerDM.GetContainerCalls()
@@ -415,7 +377,7 @@ func TestDistributedRunStartsOnTheRunsPorts(t *testing.T) {
 	o.SetAPIPort(apiPort)
 	o.SetRMIRegistryPort(registryPort)
 	o.detectAdvIP = func(context.Context, *hostparse.HostInfo) (string, error) { return host, nil }
-	entryDM, workerDM := newPortRecordingDockerManager(), newPortRecordingDockerManager()
+	entryDM, workerDM := NewMockDockerManager(), NewMockDockerManager()
 	o.hosts[0].DockerManager, o.hosts[1].DockerManager = entryDM, workerDM
 	o.hosts[0].SetStatus(HostStatusReady)
 	o.hosts[1].SetStatus(HostStatusReady)
@@ -432,10 +394,10 @@ func TestDistributedRunStartsOnTheRunsPorts(t *testing.T) {
 
 	api, _ := strconv.Atoi(apiPort)
 	want := []enginePorts{{api: api, registry: registryPort}}
-	if got := workerDM.startedOn(); !reflect.DeepEqual(got, want) {
+	if got := workerDM.startedOnPorts(); !reflect.DeepEqual(got, want) {
 		t.Errorf("worker started on %+v, want %+v", got, want)
 	}
-	if got := entryDM.startedOn(); !reflect.DeepEqual(got, want) {
+	if got := entryDM.startedOnPorts(); !reflect.DeepEqual(got, want) {
 		t.Errorf("entry started on %+v, want %+v", got, want)
 	}
 	workerAddr := net.JoinHostPort(host, strconv.Itoa(registryPort))
@@ -465,7 +427,7 @@ func TestDistributedRunFailsWhenTheAPIWaitFails(t *testing.T) {
 	o.SetAPIPort(apiPort)
 	o.SetRMIRegistryPort(registryPort)
 	o.detectAdvIP = func(context.Context, *hostparse.HostInfo) (string, error) { return "127.0.0.1", nil }
-	entryDM, workerDM := newPortRecordingDockerManager(), newPortRecordingDockerManager()
+	entryDM, workerDM := NewMockDockerManager(), NewMockDockerManager()
 	o.hosts[0].DockerManager, o.hosts[1].DockerManager = entryDM, workerDM
 	o.hosts[0].SetStatus(HostStatusReady)
 	o.hosts[1].SetStatus(HostStatusReady)

@@ -19,11 +19,9 @@ type workerContextManager struct {
 	check func(context.Context)
 }
 
-func (m *workerContextManager) startWorkerNodeOnPorts(
-	ctx context.Context, image, ip string, ports enginePorts, port, count int, args []string,
-) (string, error) {
+func (m *workerContextManager) StartWorkerNodeContainerContext(ctx context.Context, image, ip string, port, count int, args []string) (string, error) {
 	m.check(ctx)
-	return m.RemoteDockerManager.startWorkerNodeOnPorts(ctx, image, ip, ports, port, count, args)
+	return m.RemoteDockerManager.StartWorkerNodeContainerContext(ctx, image, ip, port, count, args)
 }
 
 func TestStartWorkerNodePhaseContexts(t *testing.T) {
