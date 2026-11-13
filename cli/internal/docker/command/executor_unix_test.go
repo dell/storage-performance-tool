@@ -438,19 +438,20 @@ func TestStreamCommand_HeldPipeKeepsExitError(t *testing.T) {
 // past the wait delay while the command writes its last output and exits 0,
 // with no descendant holding the pipe. The cut can leave that output unread, so
 // the stream must report exec.ErrWaitDelay for the caller to replay, not
-// succeed. The streams share one emit mutex, so a blocked stderr callback also
-// holds stdout's copy.
+// succeed. The first two cases each need their own stream's half of the check.
+// In the third, stdout output waits behind a blocked stderr callback through
+// the shared emit mutex; either half of the check catches that cut.
 func TestStreamCommand_CutDuringCallbackReportsWaitDelay(t *testing.T) {
 	tests := []struct {
 		name string
 		// script writes "first" on the blocked stream; exited is appended.
 		script      string
 		blockStderr bool
-		// complete is every stream's lines when the copy drained in time.
+		// complete is every stream's lines, sorted, when the copy drained in time.
 		complete string
 	}{
-		{name: "stdout callback", script: "echo first; sleep 0.1; echo final", complete: "out:first|out:final"},
-		{name: "stderr callback", script: "echo first >&2; sleep 0.1; echo final >&2", blockStderr: true, complete: "err:first|err:final"},
+		{name: "stdout callback", script: "echo first; sleep 0.1; echo final", complete: "out:final|out:first"},
+		{name: "stderr callback", script: "echo first >&2; sleep 0.1; echo final >&2", blockStderr: true, complete: "err:final|err:first"},
 		{name: "stdout behind a stderr callback", script: "echo first >&2; sleep 0.1; echo out1; sleep 0.1; echo out2",
 			blockStderr: true, complete: "err:first|out:out1|out:out2"},
 	}

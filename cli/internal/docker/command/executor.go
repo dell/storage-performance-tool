@@ -131,11 +131,12 @@ func (r *RealCommandExecutor) StreamCommand(ctx context.Context, host *hostparse
 // streamWriteSettle is how soon before Wait returns a lineWriter's last Write
 // may have ended and still count as caught by the pipe cut. Wait closes the
 // pipes and then joins the copy goroutines, so a Write that was running at the
-// cut ends just before Wait returns. An idle copy's last Write ended no later
-// than the output the command wrote last, so at least about cmd.WaitDelay
-// before the cut unless a descendant wrote shortly before it. Well below the
-// delay and above a CPU-throttling period: a false cut only makes the caller
-// replay, while a missed one loses output.
+// cut ends just before Wait returns. An idle copy's last Write ended once the
+// callbacks for the last output written had returned: with prompt callbacks,
+// about cmd.WaitDelay before the cut. A descendant that wrote, or a callback
+// that returned, within the window before the cut makes a false cut. Well below
+// the delay and above a CPU-throttling period: a false cut only makes the
+// caller replay, while a missed one loses output.
 const streamWriteSettle = 250 * time.Millisecond
 
 // endHeldPipeWait maps the bare exec.ErrWaitDelay that Wait returns when the
