@@ -120,7 +120,9 @@ present and supported.
 | Archived endpoint selection (`storage.net.endpoint`, in step, parent or inline configs) | Resolved field by field, and explicit flags always win. The archived mode applies only when `--endpoint-selection` is not given. An archived timeout applies only to steps of that same mode, and only when its flag is not given. If steps disagree on a field, replay stops and names the flag that settles it. Archived hostname and DNS server are never reused. In JavaScript archives, every endpoint declaration must be an object literal inside a `net` object, with literal or exported-variable values, that states its mode; variable references, expressions, spreads and partial overrides are rejected, and text in comments or strings is ignored. Replay validates the result against the local endpoints and writes it only to the generated defaults, never into the replayed steps | Hostnames and DNS servers belong to the original environment, and every replayed step must use the validated settings |
 | Archived NIC set (`storage.net.interfaces` or `storage.net.nodeInterfaces`) | Dropped with one warning; `--interfaces`, `--host-interfaces` or their environment variables set the replay's NIC set, with the checks of `spt run`. A JavaScript form replay cannot remove, such as a variable, an assignment or the flat key `storage-net-interfaces`, fails the replay as `invalid_interfaces` | NIC names and addresses belong to the original clients, and the replay's NIC set must pass the current run's checks. See [Network Interfaces](NETWORK_INTERFACES.md#replay) |
 | Archived bucket or item-output path | Replaced by `--bucket` or `S3_BUCKET` | Avoid writing to the original environment |
-| Archived bucket set (`storage.targetBucket`) | A JSON archive's bucket count is kept, with the replay bucket (`--bucket` or `S3_BUCKET`) as its base, so replay writes to `<bucket>-0` and on. The count resolves with the archived exports only, so a new base never changes it; a count that uses a variable the archived run script does not export, or that is not a whole number of at least 1, stops the replay. An archive that sets a bucket list (`storage.targetBucket.names`), a JSON archive that sets `targetBucket` anywhere but `storage.targetBucket`, and a JavaScript archive that mentions `targetBucket` anywhere (comments, strings, dashed paths such as `storage-targetBucket-names` and escaped spellings included) stop the replay before it runs, as does an archive whose escapes replay cannot decode within its work limit. A name assembled at run time, such as `"target" + "Bucket"`, is outside replay's model | Replay targets every step at one bucket and cannot read a program's settings exactly, so it keeps only a JSON count, whose members follow from the base |
+| Archived bucket set (`storage.targetBucket`) | A JSON archive's bucket count is kept, with the replay bucket (`--bucket` or `S3_BUCKET`) as its base, so replay writes to `<bucket>-0` and on. The count resolves with the archived exports only, so a new base never changes it; a count that uses a variable the archived run script does not export, or that is not a whole number of at least 1, stops the replay. An archive that sets a bucket list (`storage.targetBucket.names`), a JSON archive that sets `targetBucket` anywhere but `storage.targetBucket`, and a JavaScript archive that mentions `targetBucket` anywhere (a bucket count, a bucket list or the provisioning setting, such as the `"provision": false` that `spt run` writes into its own scenarios; comments, strings, dashed paths such as `storage-targetBucket-names` and escaped spellings included) stop the replay before it runs, as does an archive whose escapes replay cannot decode within its work limit. A name assembled at run time, such as `"target" + "Bucket"`, is outside replay's model | Replay targets every step at one bucket and cannot read a program's settings exactly, so it keeps only a JSON count, whose members follow from the base |
+| Archived target-bucket provisioning setting (`storage.targetBucket.provision` in a JSON archive, `--storage-targetBucket-provision` on the launch script, or a JavaScript scenario that sets it) | Not kept. A JSON archive's setting is dropped with a warning, a launch-script flag is dropped with the launch-script flag warning (next row), and a JavaScript archive that mentions it stops the replay (row above). Replay creates a missing replay bucket for a step that writes, as `spt run` does by default | Replay has no provisioning control of its own; the replay bucket is on the current target, which `--bucket` or `S3_BUCKET` names |
+| Other engine flags on the launch script (`--storage-*` and `--load-*`) | Not kept, with one preflight warning that names them, never their values: `replay does not keep these launch-script flags: ...`. From the launch script, replay reads only its exports, the scenario path, `--item-output-path`, `--storage-net-node-addrs` and `--storage-driver-addrs`. A flag held in an exported variable is named where the script uses the variable | Replay's settings come from the archived scenario and the current target; a flag value can hold a credential or an endpoint |
 | Archived access keys and secret keys | Sanitized from processed config and never reused | Credentials must come from the current environment |
 | Archived client hosts | Replaced by `--test-hosts` or `HOSTS` | Execute on current worker hosts |
 | Archived step IDs | Rewritten to generated replay step IDs | Avoid collisions and keep generated artifacts grouped by replay run |
@@ -244,6 +246,13 @@ spt replay \
 workloads. It stops the run after the specified time even if the archived
 workload duration is much longer.
 
+A replay exits 1 when the engine ends its scenario as failed, whichever step
+failed, as `spt run` does, and names that step and the engine's cause. It also
+exits 1 when a replay that ended on its own has fewer steps with results than its
+scenario runs. A replay whose steps all finished exits 0, even when the results
+fetch is incomplete. See [SPT_SYNTAX.md](SPT_SYNTAX.md#replay-execution-options)
+for the limits of the step count.
+
 RDMA replay launch is not implemented yet. You may use `--s3-driver rdma` with
 `--generate-only` to inspect generated replay artifacts, but launching that
 replay fails before containers start.
@@ -273,6 +282,12 @@ For distributed replay:
 Host networking is the default and is recommended for distributed replay because
 the engine uses Java RMI between nodes. If you choose another Docker network
 mode, verify that inter-node API and RMI traffic can still connect.
+
+Every engine of a replay, local, remote or distributed, serves the API port
+(`--api-port`, default 9999) and the RMI registry port (`--rmi-registry-port`,
+default 1099), and the entry reaches each worker on the registry port. Give a
+replay that shares its hosts with another replay or `spt run` its own pair of
+ports. With `--attach-existing`, the prestarted workers must already serve both.
 
 ## Limitations
 
