@@ -434,35 +434,59 @@ func TestStreamCommand_HeldPipeKeepsExitError(t *testing.T) {
 	}
 }
 
-// TestStreamCommand_CutDuringCallbackReportsWaitDelay holds the stdout callback
-// past the wait delay while the command writes its last line and exits 0, with
-// no descendant holding the pipe. The cut can leave that line unread, so the
-// stream must report exec.ErrWaitDelay for the caller to replay, not succeed.
+// TestStreamCommand_CutDuringCallbackReportsWaitDelay holds a line callback
+// past the wait delay while the command writes its last output and exits 0,
+// with no descendant holding the pipe. The cut can leave that output unread, so
+// the stream must report exec.ErrWaitDelay for the caller to replay, not
+// succeed. The streams share one emit mutex, so a blocked stderr callback also
+// holds stdout's copy.
 func TestStreamCommand_CutDuringCallbackReportsWaitDelay(t *testing.T) {
-	exited := filepath.Join(t.TempDir(), "exited")
-	var stdout []string
-	err := NewCommandExecutor().StreamCommand(context.Background(), CreateLocalHost(),
-		[]string{"sh", "-c", "echo first; sleep 0.1; echo final; : > '" + exited + "'"},
-		func(line string) {
-			stdout = append(stdout, line)
-			if line != "first" {
-				return
-			}
-			// Model a blocked consumer: hold the copy until the delay has cut it.
-			for deadline := time.Now().Add(heldPipeBound); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-				if _, err := os.Stat(exited); err == nil {
-					break
+	tests := []struct {
+		name string
+		// script writes "first" on the blocked stream; exited is appended.
+		script      string
+		blockStderr bool
+		// complete is every stream's lines when the copy drained in time.
+		complete string
+	}{
+		{name: "stdout callback", script: "echo first; sleep 0.1; echo final", complete: "out:first|out:final"},
+		{name: "stderr callback", script: "echo first >&2; sleep 0.1; echo final >&2", blockStderr: true, complete: "err:first|err:final"},
+		{name: "stdout behind a stderr callback", script: "echo first >&2; sleep 0.1; echo out1; sleep 0.1; echo out2",
+			blockStderr: true, complete: "err:first|out:out1|out:out2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			exited := filepath.Join(t.TempDir(), "exited")
+			var lines []string
+			callback := func(prefix string, blocks bool) func(string) {
+				return func(line string) {
+					lines = append(lines, prefix+line)
+					if !blocks || line != "first" {
+						return
+					}
+					// Model a blocked consumer: hold the copy until the delay has cut it.
+					for deadline := time.Now().Add(heldPipeBound); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+						if _, err := os.Stat(exited); err == nil {
+							break
+						}
+					}
+					time.Sleep(constants.StreamCommandWaitDelay + 500*time.Millisecond)
 				}
 			}
-			time.Sleep(constants.StreamCommandWaitDelay + 500*time.Millisecond)
-		}, func(string) {})
-	switch {
-	case errors.Is(err, exec.ErrWaitDelay):
-	case err == nil && strings.Join(stdout, "|") == "first|final":
-		// The delay fired late enough for the copy to drain: nothing was lost.
-		t.Log("the wait delay did not cut the copy on this run")
-	default:
-		t.Fatalf("a cut during a callback must report exec.ErrWaitDelay, got %v with lines %q", err, stdout)
+			err := NewCommandExecutor().StreamCommand(context.Background(), CreateLocalHost(),
+				[]string{"sh", "-c", tt.script + "; : > '" + exited + "'"},
+				callback("out:", !tt.blockStderr), callback("err:", tt.blockStderr))
+			slices.Sort(lines)
+			switch {
+			case errors.Is(err, exec.ErrWaitDelay):
+			case err == nil && strings.Join(lines, "|") == tt.complete:
+				// The delay fired late enough for the copy to drain: nothing was lost.
+				t.Log("the wait delay did not cut the copy on this run")
+			default:
+				t.Fatalf("a cut during a callback must report exec.ErrWaitDelay, got %v with lines %q", err, lines)
+			}
+		})
 	}
 }
 
@@ -472,11 +496,16 @@ func TestLineWriter_CutMidWrite(t *testing.T) {
 	if w.cutMidWrite() {
 		t.Fatal("a writer that never wrote cannot be cut mid-write")
 	}
+	before := time.Now()
 	if _, err := w.Write([]byte("line\n")); err != nil {
 		t.Fatal(err)
 	}
+	if w.lastWrite.Before(before) {
+		t.Fatalf("Write must record when it returned, got %v before %v", w.lastWrite, before)
+	}
+	w.lastWrite = time.Now().Add(-streamWriteSettle / 5)
 	if !w.cutMidWrite() {
-		t.Fatal("a Write that just returned must count as caught by the cut")
+		t.Fatal("a Write that returned just before the cut must count as caught by it")
 	}
 	w.lastWrite = time.Now().Add(-constants.StreamCommandWaitDelay)
 	if w.cutMidWrite() {
