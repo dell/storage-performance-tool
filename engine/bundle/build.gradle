@@ -941,9 +941,11 @@ tasks.register('verifyEngineExitStatusCanary') {
 			// Set once /ready answered and the shutdown request goes out; the node may stop before its 202
 			// is read, so the 202 itself is not required.
 			def shutdownSent = new java.util.concurrent.atomic.AtomicBoolean()
+			// Set when the case ends, so a failed case's stopper can't reach a later node on that port.
+			def stopperDone = new java.util.concurrent.atomic.AtomicBoolean()
 			def stopper = Thread.startDaemon('engine-exit-status-canary-node-stopper') {
 				def deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(60)
-				while (System.nanoTime() < deadline && !shutdownSent.get()) {
+				while (System.nanoTime() < deadline && !shutdownSent.get() && !stopperDone.get()) {
 					try {
 						def ready = (HttpURLConnection) URI.create("http://127.0.0.1:${apiPort}/ready").toURL()
 							.openConnection(java.net.Proxy.NO_PROXY)
@@ -961,17 +963,26 @@ tasks.register('verifyEngineExitStatusCanary') {
 					} catch (IOException ignored) {
 					}
 					if (!shutdownSent.get()) {
-						Thread.sleep(200)
+						try {
+							Thread.sleep(200)
+						} catch (InterruptedException ignored) {
+							return
+						}
 					}
 				}
 			}
-			expect('run-node-shutdown', [
-				'--run-node',
-				"--run-port=${apiPort}",
-				"--load-step-node-port=${registryPort}",
-				'--api-linger-sec=0',
-			], 0, ['Started to serve the remote API'])
-			stopper.join(5000)
+			try {
+				expect('run-node-shutdown', [
+					'--run-node',
+					"--run-port=${apiPort}",
+					"--load-step-node-port=${registryPort}",
+					'--api-linger-sec=0',
+				], 0, ['Started to serve the remote API'])
+			} finally {
+				stopperDone.set(true)
+				stopper.interrupt()
+				stopper.join(10000)
+			}
 			if (!shutdownSent.get()) {
 				throw new GradleException("Packaged engine 'run-node-shutdown' exited before its shutdown request")
 			}
