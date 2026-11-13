@@ -542,15 +542,18 @@ docker run \
 Mongoose 3.x turns on S3 versioning with `--storage-net-http-versioning=true`. The engine accepts that flag as a
 synonym with the S3 driver types `s3`, `s3-rdma`, `s3-tables` and `s3-aws`, from the command line, a scenario's
 `.config()` or `.append()`, and posted defaults (`spt run --engine-override storage.net.http.versioning=true`). It sets
-`storage-object-versioning` to true on the step configuration before the step starts, so the step's `config.yaml`
-shows both keys true and every worker in a distributed run gets the setting. Each engine logs this notice once:
+`storage-object-versioning` to true before the step starts, on the step configuration or on the `.append()` context
+that sets the synonym, so the drivers and every worker in a distributed run get the setting. When the synonym is set
+for the whole step, the step's `config.yaml` shows both keys true. Each engine logs this notice once:
 
 ```
 The argument "storage-net-http-versioning" is the Mongoose name for S3 versioning, use "storage-object-versioning" instead
 ```
 
 Either flag set to true turns versioning on. The synonym set to false, or not set, changes nothing: it never turns
-`storage-object-versioning` off. What versioning then does depends on the driver:
+`storage-object-versioning` off. So a scenario step's `.config()` can't turn off a synonym given on the command line
+or in posted defaults by setting it to false: set both keys to false in that `.config()`. What versioning then does
+depends on the driver:
 
 * `s3` and `s3-rdma` check each bucket's versioning at first use, enable it if it is off, and leave it on after the
   run. Written items are named `key~versionId`.

@@ -154,6 +154,23 @@ class HttpVersioningSynonymStepConfigTest {
 	}
 
 	@Test
+	void aScenarioConfigFalseKeepsTheVersioningAnEngineSynonymTurnedOn() throws Exception {
+		final var engineConfig = config("s3");
+		engineConfig.val(SYNONYM, true);
+		final var prototype = new LinearLoadStepClient(engineConfig, List.of(), null, mock(MetricsManager.class));
+
+		final LoadStepBase synonymOff = prototype.config(
+						scenarioObject("{storage: {net: {http: {versioning: false}}}}"));
+		final LoadStepBase bothOff = prototype.config(
+						scenarioObject("{storage: {object: {versioning: false}, net: {http: {versioning: false}}}}"));
+
+		assertTrue(
+						synonymOff.config.boolVal(TARGET),
+						"the prototype resolved the engine's synonym, and false never turns versioning off");
+		assertFalse(bothOff.config.boolVal(TARGET), "setting both keys false turns it off for the step");
+	}
+
+	@Test
 	void aScenarioAppendCallSetsTheSynonymForThatContext() throws Exception {
 		final var prototype = new LinearLoadStepClient(config("s3-tables"), List.of(), null, mock(MetricsManager.class));
 

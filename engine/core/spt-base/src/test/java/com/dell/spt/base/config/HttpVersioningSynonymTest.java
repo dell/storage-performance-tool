@@ -46,8 +46,13 @@ class HttpVersioningSynonymTest {
 		return config;
 	}
 
+	/** Resolves as if the notice were already logged, so that only the notice test logs it. */
 	private static void resolve(final Config config) {
-		HttpVersioningSynonym.resolve(config, null, new AtomicBoolean());
+		resolve(config, null);
+	}
+
+	private static void resolve(final Config config, final List<Config> ctxConfigs) {
+		HttpVersioningSynonym.resolve(config, ctxConfigs, new AtomicBoolean(true));
 	}
 
 	@ParameterizedTest
@@ -182,7 +187,7 @@ class HttpVersioningSynonymTest {
 		swiftContext.val("storage-driver-type", "swift");
 		swiftContext.val(SYNONYM_PATH, true);
 
-		HttpVersioningSynonym.resolve(step, List.of(synonymContext, plainContext, swiftContext), new AtomicBoolean());
+		resolve(step, List.of(synonymContext, plainContext, swiftContext));
 
 		assertFalse(step.boolVal(TARGET_PATH));
 		assertTrue(synonymContext.boolVal(TARGET_PATH));
@@ -200,7 +205,7 @@ class HttpVersioningSynonymTest {
 		storage.put("object", new HashMap<>(Map.of("versioning", false)));
 		final Config partial = new BasicConfig(step.pathSep(), schema, new HashMap<>(Map.of("storage", storage)));
 
-		HttpVersioningSynonym.resolve(step, new ArrayList<>(List.of(partial)), new AtomicBoolean());
+		resolve(step, new ArrayList<>(List.of(partial)));
 
 		assertTrue(step.boolVal(TARGET_PATH));
 		assertTrue(partial.boolVal(TARGET_PATH), "the merged context has the step's driver type and synonym");
@@ -217,6 +222,14 @@ class HttpVersioningSynonymTest {
 		final var logger = LoggerContext.getContext(false).getLogger(Loggers.ERR.getName());
 		logger.addAppender(appender);
 		try {
+			// Engine loggers are asynchronous, and a step test may have just logged the notice through the
+			// process-wide guard. Count only what follows a marker logged after the appender is attached.
+			Loggers.ERR.warn(appender.marker);
+			final long armDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+			while (!appender.armed && System.nanoTime() < armDeadline) {
+				Thread.sleep(10);
+			}
+			assertTrue(appender.armed, "the marker was not logged");
 			final var guard = new AtomicBoolean();
 			for (int i = 0; i < 3; i++) {
 				final var config = configWithVersioningKeys("s3");
@@ -246,6 +259,8 @@ class HttpVersioningSynonymTest {
 
 	private static final class CapturingAppender extends AbstractAppender {
 		final List<String> messages = Collections.synchronizedList(new ArrayList<>());
+		final String marker = "HttpVersioningSynonymTest marker " + System.nanoTime();
+		volatile boolean armed;
 		volatile boolean warn = true;
 
 		CapturingAppender() {
@@ -255,7 +270,9 @@ class HttpVersioningSynonymTest {
 		@Override
 		public void append(final LogEvent event) {
 			final String message = event.getMessage().getFormattedMessage();
-			if (message.contains(SYNONYM_PATH)) {
+			if (message.equals(marker)) {
+				armed = true;
+			} else if (armed && message.contains(SYNONYM_PATH)) {
 				messages.add(message);
 				warn &= org.apache.logging.log4j.Level.WARN.equals(event.getLevel());
 			}
