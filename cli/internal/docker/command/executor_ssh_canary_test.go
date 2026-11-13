@@ -178,6 +178,7 @@ type canarySSHD struct {
 	dir     string
 	config  string
 	sshdLog string
+	pid     int
 }
 
 // usePath puts ssh and scp wrappers that read only the canary's client config
@@ -293,7 +294,7 @@ func startCanarySSHD(t *testing.T) canarySSHD {
 	if err := server.Start(); err != nil {
 		t.Fatalf("start sshd: %v", err)
 	}
-	env := canarySSHD{dir: dir, config: clientConfig, sshdLog: sshdLog}
+	env := canarySSHD{dir: dir, config: clientConfig, sshdLog: sshdLog, pid: server.Process.Pid}
 	t.Cleanup(func() {
 		for _, host := range []string{"spt-mux", "spt-mux-verbose"} {
 			_ = exec.Command("/usr/bin/ssh", "-F", clientConfig, "-O", "exit", host).Run() // #nosec G204 -- test-only canary
