@@ -25,7 +25,7 @@ const silentHold = 20 * time.Second
 // TestSSHWaitDelayCanary runs the real executor through OpenSSH against a
 // throwaway sshd on a loopback port, with throwaway keys and a client config
 // in the test's temp directory, so it reads no user SSH config or keys. It
-// checks that the executor's WaitDelay leaves ControlPersist masters and mux
+// checks that the executor's WaitDelay leaves ControlPersist processes and mux
 // reuse working, and that it bounds the two measured deadline hangs: a
 // ProxyJump child and scp's ssh child holding the pipe.
 //
@@ -35,7 +35,7 @@ const silentHold = 20 * time.Second
 func TestSSHWaitDelayCanary(t *testing.T) {
 	env := startCanarySSHD(t)
 
-	t.Run("ControlPersist master and mux reuse", func(t *testing.T) {
+	t.Run("ControlPersist process and mux reuse", func(t *testing.T) {
 		env.usePath(t, "")
 		logs := captureDebugLog(t)
 		host := canaryHost("spt-mux")
@@ -44,13 +44,13 @@ func TestSSHWaitDelayCanary(t *testing.T) {
 		started := time.Now()
 		stdout, err := runWithin(t, 10*time.Second, host, []string{"echo", "answer"})
 		if err != nil || stdout != "answer" {
-			t.Fatalf("call 1 (creates the master) = %q, %v", stdout, err)
+			t.Fatalf("call 1 (creates the control process) = %q, %v", stdout, err)
 		}
-		t.Logf("call 1 created the master in %v", time.Since(started).Round(time.Millisecond))
-		env.requireMaster(t, "spt-mux")
-		// Without -v the master's fds 0-2 are /dev/null, so the delay never engages.
+		t.Logf("call 1 created the control process in %v", time.Since(started).Round(time.Millisecond))
+		env.requireControlProcess(t, "spt-mux")
+		// Without -v the control process's fds 0-2 are /dev/null, so the delay never engages.
 		if strings.Contains(logs.String(), "held the output pipe") {
-			t.Fatalf("a ControlPersist master without -v held the pipe:\n%s", logs.String())
+			t.Fatalf("a ControlPersist process without -v held the pipe:\n%s", logs.String())
 		}
 
 		for call := 2; call <= 3; call++ {
@@ -65,13 +65,13 @@ func TestSSHWaitDelayCanary(t *testing.T) {
 			}
 			t.Logf("call %d: %d bytes through the mux in %v", call, len(stdout), time.Since(started).Round(time.Millisecond))
 		}
-		env.requireMaster(t, "spt-mux")
+		env.requireControlProcess(t, "spt-mux")
 		if after := env.acceptedSessions(t); after != before+1 {
 			t.Fatalf("sshd accepted %d connections for 3 calls; the mux was not reused", after-before)
 		}
 	})
 
-	t.Run("ControlPersist master started with -v keeps stderr", func(t *testing.T) {
+	t.Run("ControlPersist process started with -v keeps stderr", func(t *testing.T) {
 		env.usePath(t, "-v")
 		logs := captureDebugLog(t)
 		host := canaryHost("spt-mux-verbose")
@@ -84,20 +84,20 @@ func TestSSHWaitDelayCanary(t *testing.T) {
 			t.Fatalf("call 1 = %q, %v; a held pipe after exit 0 is success", stdout, err)
 		}
 		if bound := constants.CommandWaitDelay + 3*time.Second; elapsed > bound {
-			t.Fatalf("call 1 took %v, past %v: it waited on the master's stderr", elapsed, bound)
+			t.Fatalf("call 1 took %v, past %v: it waited on the control process's stderr", elapsed, bound)
 		}
 		if !strings.Contains(logs.String(), "held the output pipe") {
-			t.Fatalf("expected the master to hold stderr (the case under test):\n%s", logs.String())
+			t.Fatalf("expected the control process to hold stderr (the case under test):\n%s", logs.String())
 		}
-		t.Logf("call 1 returned in %v with the master holding stderr", elapsed.Round(time.Millisecond))
+		t.Logf("call 1 returned in %v with the control process holding stderr", elapsed.Round(time.Millisecond))
 
-		// The master survives the closed pipe (ssh ignores SIGPIPE) and serves the next call.
-		env.requireMaster(t, "spt-mux-verbose")
+		// The control process survives the closed pipe (ssh ignores SIGPIPE) and serves the next call.
+		env.requireControlProcess(t, "spt-mux-verbose")
 		stdout, err = runWithin(t, 10*time.Second, host, []string{"echo", "again"})
 		if err != nil || stdout != "again" {
-			t.Fatalf("call 2 through the master = %q, %v", stdout, err)
+			t.Fatalf("call 2 through the control process = %q, %v", stdout, err)
 		}
-		env.requireMaster(t, "spt-mux-verbose")
+		env.requireControlProcess(t, "spt-mux-verbose")
 		if after := env.acceptedSessions(t); after != before+1 {
 			t.Fatalf("sshd accepted %d connections for 2 calls; the mux was not reused", after-before)
 		}
@@ -196,12 +196,12 @@ func (e canarySSHD) usePath(t *testing.T, sshFlags string) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// requireMaster checks that a ControlPersist master serves host.
-func (e canarySSHD) requireMaster(t *testing.T, host string) {
+// requireControlProcess checks that a ControlPersist process serves host.
+func (e canarySSHD) requireControlProcess(t *testing.T, host string) {
 	t.Helper()
 	out, err := exec.Command("/usr/bin/ssh", "-F", e.config, "-O", "check", host).CombinedOutput() // #nosec G204 -- test-only canary
 	if err != nil {
-		t.Fatalf("no ControlPersist master for %s: %v: %s", host, err, out)
+		t.Fatalf("no ControlPersist process for %s: %v: %s", host, err, out)
 	}
 }
 
@@ -262,7 +262,7 @@ func startCanarySSHD(t *testing.T) canarySSHD {
 	writeLines(t, clientConfig,
 		"Host spt-mux spt-mux-verbose",
 		"  ControlMaster auto",
-		// %n, the alias, keeps one master per host: %C hashes the shared HostName.
+		// %n, the alias, keeps one control process per host: %C hashes the shared HostName.
 		"  ControlPath "+filepath.Join(dir, "cm-%n"),
 		"  ControlPersist 60",
 		"Host spt-jumped-silent",

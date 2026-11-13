@@ -263,7 +263,7 @@ func TestExecuteCommand_HeldPipeAfterExitZeroIsSuccess(t *testing.T) {
 }
 
 func TestExecuteCommand_RemoteHeldPipeAfterExitZeroIsSuccess(t *testing.T) {
-	// An ssh ControlPersist master started with -v keeps the first call's stderr.
+	// An ssh ControlPersist process started with -v keeps the first call's stderr.
 	fakeOnPath(t, constants.SSHCommand, "echo answer; "+pipeHolder(t, ">/dev/null"))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

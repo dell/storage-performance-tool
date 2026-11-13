@@ -146,7 +146,7 @@ const streamWriteSettle = 250 * time.Millisecond
 // after the delay is discarded. That is acceptable for SPT's commands: ssh,
 // scp and the docker CLI write their own output before they exit, and the
 // usual holder is an ssh child (a ProxyJump "ssh -W", scp's ssh, or a
-// ControlPersist master started with -v) that writes only diagnostics.
+// ControlPersist process started with -v) that writes only diagnostics.
 // Exit errors and the context kill are returned unchanged. The holder itself
 // is left running: killing the process group would change how Ctrl-C reaches
 // ssh.
