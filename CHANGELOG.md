@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Fixed
 
 - **Runs on one remote engine** — An `spt run` or `spt replay` that runs on a single remote engine (one `--test-hosts` entry, or several where only the first connects and `--min-hosts` allows it) now stores its driver statistics in `spt_run_params.json`; 5.17.0 recorded a `driverStatsError` there instead. A standalone DELETE there, seeded or from `--items-file`, now exits 0 after a clean delete; from 5.15.0 it exited 1 with "metric contributor identity is unavailable before execution starts". A real failure there no longer carries that reason as an extra cause.
+- **S3 drivers kept in memory after they close** — S3 drivers no longer stay in memory after they close when they signed requests on a long-lived engine thread, such as the scenario thread that checks target buckets. Long multi-step scenarios and engines reused for many runs kept about 24 MB per step with the image's default JVM settings, and the default 4 GB heap could fill after about 170 such steps.
 
 ## [5.17.0] - 2026-11-11
 

@@ -438,35 +438,42 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 	}
 
-	private final class SigningKeyCreateFunctionImpl
+	/**
+	 * Derives the SigV4 signing key of one secret. It is static and copies the driver's region and
+	 * service name, so a signing thread's cache, which outlives the driver, keeps no driver reachable.
+	 */
+	private static final class SigningKeyCreateFunctionImpl
 					implements SigningKeyCreateFunction {
 
-		String secret;
+		private final String secret;
+		private final String region;
+		private final String service;
 
-		public SigningKeyCreateFunctionImpl(final String secret) {
+		SigningKeyCreateFunctionImpl(final String secret, final String region, final String service) {
 			this.secret = secret;
-
+			this.region = region;
+			this.service = service;
 		}
 
 		@Override
 		public byte[] apply(final String datestamp) {
-			return getSignatureKey(secret, datestamp);
+			return getSignatureKey(secret, datestamp, region, service);
 		}
 	}
 
-	private byte[] HmacSHA256(String data, byte[] key) throws NoSuchAlgorithmException, InvalidKeyException {
+	private static byte[] HmacSHA256(String data, byte[] key) throws NoSuchAlgorithmException, InvalidKeyException {
 		Mac mac = Mac.getInstance(S3Api.SIGN_V4_METHOD);
 		mac.init(new SecretKeySpec(key, "RawBytes"));
 		return mac.doFinal(data.getBytes(UTF_8));
 	}
 
-	private byte[] getSignatureKey(String key, String dateStamp) {
+	private static byte[] getSignatureKey(String key, String dateStamp, String region, String service) {
 		byte[] kSigning = new byte[0];
 		try {
 			byte[] kSecret = ("AWS4" + key).getBytes(UTF_8);
 			byte[] kDate = HmacSHA256(dateStamp, kSecret);
-			byte[] kRegion = HmacSHA256(awsRegion, kDate);
-			byte[] kService = HmacSHA256(sigV4ServiceName, kRegion);
+			byte[] kRegion = HmacSHA256(region, kDate);
+			byte[] kService = HmacSHA256(service, kRegion);
 			kSigning = HmacSHA256("aws4_request", kService);
 			int[] m = new int[100];
 			for (int i = 0; i < kSigning.length; i++) {
@@ -2392,7 +2399,14 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			CompletableFuture.allOf(pending).join();
 		}
 		multipartCleanupTasks.clear();
-		super.doClose();
+		try {
+			super.doClose();
+		} finally {
+			// The closing thread's entries go now. Other signing threads keep theirs until they end;
+			// the cached functions are static, so those entries keep no driver reachable.
+			signingKeyCreateFunctionCache.remove();
+			signingKeyCache.remove();
+		}
 	}
 
 	@Override
@@ -2480,7 +2494,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					Loggers.MSG.trace(
 									"SigV4 payload header present={}", httpHeaders.contains(S3Api.AMZ_PAYLOAD_HEADER));
 				}
-				final var signingKeyCreateFunction = signingKeyCreateFunctionCache.get().computeIfAbsent(secret, SigningKeyCreateFunctionImpl::new);
+				final var signingKeyCreateFunction = signingKeyCreateFunctionCache.get().computeIfAbsent(
+								secret, s -> new SigningKeyCreateFunctionImpl(s, awsRegion, sigV4ServiceName));
 				final var signingKey = signingKeyCache.get().computeIfAbsent(date, signingKeyCreateFunction);
 				final Map<String, String> sortedHeaders = getNonCanonicalHeaders(httpHeaders);
 				final var canonicalForm = getCanonicalV4(httpHeaders, sortedHeaders, httpMethod, dstUriPath);
