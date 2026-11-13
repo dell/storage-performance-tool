@@ -25,8 +25,9 @@ type Checker interface {
 	CheckDocker(ctx context.Context, host *hostparse.HostInfo) (string, error)
 	// EnsureImage ensures the image exists locally (pulls if missing)
 	EnsureImage(ctx context.Context, host *hostparse.HostInfo, image string) error
-	// CheckPorts verifies required ports are available and reports conflicts
-	CheckPorts(ctx context.Context, host *hostparse.HostInfo, apiPort int, rmiPortStart, rmiPortCount int) (*dockerconf.ConflictInfo, error)
+	// CheckPorts verifies required ports are available and reports conflicts: the RMI registry
+	// port, the API port and the RMI port range.
+	CheckPorts(ctx context.Context, host *hostparse.HostInfo, registryPort, apiPort int, rmiPortStart, rmiPortCount int) (*dockerconf.ConflictInfo, error)
 }
 
 // ImageIdentity is immutable Docker image evidence resolved on one participant.
@@ -110,8 +111,8 @@ func (c *DefaultChecker) EnsureImage(ctx context.Context, host *hostparse.HostIn
 }
 
 // CheckPorts verifies that the provided ports are not in use
-func (c *DefaultChecker) CheckPorts(ctx context.Context, host *hostparse.HostInfo, apiPort int, rmiPortStart, rmiPortCount int) (*dockerconf.ConflictInfo, error) {
-	ports := []int{constants.DefaultRMIRegistryPort, apiPort}
+func (c *DefaultChecker) CheckPorts(ctx context.Context, host *hostparse.HostInfo, registryPort, apiPort int, rmiPortStart, rmiPortCount int) (*dockerconf.ConflictInfo, error) {
+	ports := []int{registryPort, apiPort}
 	for i := 0; i < rmiPortCount; i++ {
 		ports = append(ports, rmiPortStart+i)
 	}

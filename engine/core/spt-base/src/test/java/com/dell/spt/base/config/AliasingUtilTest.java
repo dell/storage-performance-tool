@@ -144,4 +144,31 @@ public class AliasingUtilTest {
 		Map<String, String> out = AliasingUtil.apply(args, cfg);
 		assertEquals("9", out.get("load-op-list-sharding-split_log_rate"));
 	}
+
+	@Test
+	void anEntryWithNoTargetIsRefused() {
+		Map<String, Object> entry = new LinkedHashMap<>();
+		entry.put(AliasingUtil.NAME, "test-step-distributed");
+		entry.put(AliasingUtil.DEPRECATED, true);
+
+		final var e = assertThrows(
+						IllegalArgumentException.class,
+						() -> AliasingUtil.apply(Map.of("test-step-distributed", "true"), List.of(entry)));
+		assertEquals("The argument \"test-step-distributed\" is deprecated", e.getMessage());
+	}
+
+	@Test
+	void anEntryWithNoTargetGivesItsReason() {
+		Map<String, Object> entry = new LinkedHashMap<>();
+		entry.put(AliasingUtil.NAME, "storage-driver-remote");
+		entry.put(AliasingUtil.DEPRECATED, true);
+		entry.put(AliasingUtil.REASON, "SPT has no remote driver services.");
+
+		final var e = assertThrows(
+						IllegalArgumentException.class,
+						() -> AliasingUtil.apply(Map.of("storage-driver-remote", "true"), List.of(entry)));
+		assertEquals(
+						"The argument \"storage-driver-remote\" is not supported: SPT has no remote driver services.",
+						e.getMessage());
+	}
 }

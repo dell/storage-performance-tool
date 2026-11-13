@@ -129,6 +129,9 @@ into the `3rdparty.log` file with the *dynamic path*. Logging level: "INFO".
 * Error messages with level "INFO" or higher are displayed on the console with orange color.
 * Error messages with level "DEBUG" or higher are written to the file `errors.log` with the
   *dynamic path*
+* `errors.log` is rate limited, with one limit for messages below "WARN" and another for "WARN"
+  messages: each passes up to 1000 messages in any 10 seconds. "ERROR" and "FATAL" messages are
+  not limited.
 
 ### 1.2.6. General Messages
 

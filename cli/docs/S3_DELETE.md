@@ -249,6 +249,10 @@ multi-bucket batching, mixed-workload batching, a public DELETE request-rate lim
 auto-termination, bucket deletion, or a DELETE-specific TUI. `--generate-only` is supported and emits
 the same positive timed DELETE phase without starting an engine.
 
+Generic operation tracing (`output.metrics.trace.persist=true`, which writes `op.trace.csv`) is not
+supported for standalone DELETE. `spt run delete` refuses it before it starts, from `--engine-override`
+or `SPT_ENGINE_OVERRIDES`; `delete.requests.csv` records each DELETE request instead.
+
 For every flag, compatibility rule, topology detail, and engine schema key, see
 [SPT_SYNTAX.md](SPT_SYNTAX.md), the
 [engine configuration reference](../../engine/core/spt-base/doc/usage/input/configuration/README.md),

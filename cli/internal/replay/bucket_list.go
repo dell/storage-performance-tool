@@ -2,6 +2,7 @@ package replay
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -12,8 +13,9 @@ import (
 )
 
 // Replay keeps an archived bucket count, with the replay bucket as its base, and refuses an archive
-// whose bucket set it cannot keep exactly before anything runs: any bucket list, any bucket set in
-// a JavaScript archive, and a JSON count it cannot read with the archived exports.
+// whose bucket set it cannot keep exactly before anything runs: any bucket list, any mention of
+// storage.targetBucket in a JavaScript archive, and a JSON count it cannot read with the archived
+// exports.
 
 // checkArchivedJSONBucketSets refuses a JSON archive that sets a bucket list, sets targetBucket
 // anywhere but storage.targetBucket, or gives a load step a count replay cannot read with the
@@ -156,13 +158,15 @@ const jsLooseDecodeWorkLimit = 128 << 20
 var errJSDecodeLimit = fmt.Errorf("archived JavaScript scenario has escapes that replay could not decode within its work "+
 	"limit (%d MiB scanned), so it cannot tell whether the scenario sets storage.targetBucket", jsLooseDecodeWorkLimit>>20)
 
-// refuseJSTargetBucket refuses a JavaScript archive that sets a target bucket set. A JavaScript
-// scenario is a program, so replay cannot read a bucket count or list from it exactly; it refuses
-// the archive rather than replay into other buckets. The archive counts as setting one when
-// targetBucket appears anywhere, in comments and strings too, as a dashed path such as
-// storage-targetBucket-names and with escapes decoded, nested ones included, so the check errs
-// toward refusing. A name assembled at run time, such as "target" + "Bucket", is outside replay's
-// model.
+// refuseJSTargetBucket refuses a JavaScript archive that mentions storage.targetBucket: a bucket
+// count, a bucket list or the provisioning setting, including the provision: false that spt run
+// writes into its own scenarios. A JavaScript scenario is a program, so replay cannot read any of
+// them from it exactly; it refuses the archive rather than replay into other buckets or with
+// another provisioning setting. The archive counts as mentioning one when targetBucket appears
+// anywhere, in comments and strings too, as a dashed path such as storage-targetBucket-names and
+// with escapes decoded, nested ones included, so the check errs toward refusing; a mention of the
+// provisioning setting alone is refused too. A name assembled at run time, such as
+// "target" + "Bucket", is outside replay's model.
 func refuseJSTargetBucket(source string) error {
 	mentioned, err := jsMentionsTargetBucket(source)
 	if err != nil {
@@ -171,9 +175,13 @@ func refuseJSTargetBucket(source string) error {
 	if !mentioned {
 		return nil
 	}
-	return fmt.Errorf("archived JavaScript scenario sets storage.targetBucket (a bucket count or list), which replay " +
-		"cannot keep exactly from a program; replay a JSON archive, or replay the workload without its bucket set")
+	return errors.New(jsTargetBucketRefusal)
 }
+
+// jsTargetBucketRefusal is the message of refuseJSTargetBucket.
+const jsTargetBucketRefusal = "archived JavaScript scenario mentions storage.targetBucket (a bucket count, a bucket list " +
+	"or the provisioning setting), which replay cannot keep exactly from a program; replay a JSON archive, or remove " +
+	"the setting from the archived scenario"
 
 // jsMentionsTargetBucket reports whether targetBucket appears anywhere in the source once every
 // escape is decoded, repeatedly until the text settles, so that escapes inside escaped strings are

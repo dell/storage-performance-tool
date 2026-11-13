@@ -579,7 +579,10 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		return item;
 	}
 
-	/** Each engine reads from its own share of the items, so it needs at least one of them. */
+	/**
+	 * Each engine reads from its own share of the items, so it needs at least one of them. A mix of
+	 * only PUT and DELETE reads none, and starts with an empty read pool.
+	 */
 	static void requireSeedItems(final List seedItems, final int getWeight, final int statWeight) {
 		if (seedItems.isEmpty() && (getWeight > 0 || statWeight > 0)) {
 			throw itemsFileFailure(

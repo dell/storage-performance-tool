@@ -7,6 +7,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.stream.Collector;
 
 public interface CliArgUtil {
@@ -43,6 +44,95 @@ public interface CliArgUtil {
 	private static String[] handleBooleanShortcuts(final String[] argValPair) {
 		return argValPair.length == 2 ? argValPair : new String[]{argValPair[0], TRUE.toString()
 		};
+	}
+
+	/**
+	 * The options the schema defines, one tab-indented line each and sorted by name, then the aliases
+	 * of the aliasing table in its order. An option shows the type of its value; a map-typed option
+	 * takes a free key, as {@code --storage-net-nodeInterfaces-<key>=<value>}.
+	 */
+	static String usage(final Map<String, Object> schema, final List<Map<String, Object>> aliasingConfig) {
+		final var options = new TreeMap<String, String>();
+		usageLines(schema, ARG_PREFIX, options);
+		final var text = new StringBuilder("Options:\n");
+		options.values().forEach(line -> text.append('\t').append(line).append('\n'));
+		if (aliasingConfig != null && !aliasingConfig.isEmpty()) {
+			text.append("\nAliases:\n");
+			for (final var entry : aliasingConfig) {
+				if (entry.get(AliasingUtil.NAME) instanceof String name) {
+					text.append('\t').append(ARG_PREFIX).append(name).append("  ").append(aliasMeaning(entry, options))
+									.append('\n');
+				}
+			}
+		}
+		return text.toString();
+	}
+
+	private static void usageLines(
+					final Map<?, ?> schema, final String prefix, final Map<String, String> options) {
+		for (final var schemaEntry : schema.entrySet()) {
+			final var name = prefix + schemaEntry.getKey();
+			final var schemaVal = schemaEntry.getValue();
+			if (schemaVal instanceof Map<?, ?> branch) {
+				usageLines(branch, name + ARG_PATH_SEP, options);
+			} else if (schemaVal instanceof Class<?> type && Map.class.isAssignableFrom(type)) {
+				options.put(name, name + ARG_PATH_SEP + "<key>" + ARG_VAL_SEP + "<value>");
+			} else {
+				options.put(name, name + ARG_VAL_SEP + '<' + typeName(schemaVal) + '>');
+			}
+		}
+	}
+
+	private static String typeName(final Object schemaVal) {
+		if (schemaVal == boolean.class || schemaVal == Boolean.class) {
+			return "true|false";
+		} else if (schemaVal == int.class || schemaVal == Integer.class) {
+			return "int";
+		} else if (schemaVal == long.class || schemaVal == Long.class) {
+			return "long";
+		} else if (schemaVal == double.class || schemaVal == Double.class) {
+			return "double";
+		} else if (schemaVal == String.class) {
+			return "string";
+		} else if (schemaVal instanceof Class<?> type && List.class.isAssignableFrom(type)) {
+			return "list";
+		} else if (schemaVal instanceof Class<?> type && type != Object.class) {
+			return type.getSimpleName();
+		}
+		return "value";
+	}
+
+	/**
+	 * What an alias means. {@code options} maps each option's {@code --} name to its usage line; an alias
+	 * whose target is not among them is refused like an unknown option, so it is listed as unsupported.
+	 */
+	private static String aliasMeaning(final Map<String, Object> aliasingEntry, final Map<String, String> options) {
+		final var deprecated = Boolean.TRUE.equals(aliasingEntry.get(AliasingUtil.DEPRECATED));
+		if (aliasingEntry.get(AliasingUtil.TARGET) instanceof String target) {
+			final int valueAt = target.indexOf(ARG_VAL_SEP);
+			final var targetName = ARG_PREFIX + (valueAt < 0 ? target : target.substring(0, valueAt));
+			if (!isOption(options, targetName)) {
+				return "no longer supported: " + targetName + " is not an option";
+			}
+			return "same as " + ARG_PREFIX + target + (deprecated ? " (deprecated)" : "");
+		} else if (aliasingEntry.get(AliasingUtil.REASON) instanceof String reason) {
+			return "not supported: " + reason;
+		}
+		return "no longer supported";
+	}
+
+	/** Whether {@code name} is an option, or a free key of a map-typed option such as {@code --<map>-<key>}. */
+	private static boolean isOption(final Map<String, String> options, final String name) {
+		if (options.containsKey(name)) {
+			return true;
+		}
+		for (final var option : options.entrySet()) {
+			if (option.getValue().endsWith(ARG_PATH_SEP + "<key>" + ARG_VAL_SEP + "<value>")
+							&& name.startsWith(option.getKey() + ARG_PATH_SEP)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	@SuppressWarnings("CollectionWithoutInitialCapacity")

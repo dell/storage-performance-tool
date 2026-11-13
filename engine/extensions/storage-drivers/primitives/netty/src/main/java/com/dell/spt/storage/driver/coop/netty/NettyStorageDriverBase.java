@@ -931,7 +931,9 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	 * Netty drivers can transfer a completed operation's permit and channel to the next queued
 	 * operation. Subclasses whose {@link #submit(Operation)} does per-operation preparation that
 	 * {@link #sendRequest} alone does not perform must override this to return {@code false}, or
-	 * directly dispatched operations would skip that preparation.
+	 * directly dispatched operations would skip that preparation. A driver that can complete an
+	 * operation with {@code SUCC} inside {@link #sendRequest} must return {@code false} too, or each
+	 * completion would send the next operation from the same stack until it overflows.
 	 */
 	@Override
 	protected boolean supportsDirectDispatch() {
