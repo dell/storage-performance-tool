@@ -54,6 +54,8 @@ With `--item-input-path`, where a copy lands in the target bucket depends on the
 
 So count the copies of an `s3` step under the `<source bucket>/` prefix.
 
+`s3-aws` copies the listed items only when the path is a bucket, `/src`. It can't copy a key whose first segment is the bucket's own name, such as `src/k0` in bucket `src`: it reads key `k0` instead.
+
 #### 2.3.2. Swift Objects Copying
 
 There are two variants of object copy requests:

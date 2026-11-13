@@ -822,53 +822,67 @@ public class S3StorageDriverTest {
 	}
 
 	/**
-	 * A responder that pages in byte order and honours start-after, as S3 does. With the whole name
-	 * as start-after, bucket "tb" sorts after every key, so page 2 comes back empty and the input
-	 * stops at 100; bucket "ab" sorts before every key, so page 2 repeats page 1 until the page cap.
+	 * With the whole name as start-after, bucket "tb" sorts after every key, so page 2 came back
+	 * empty and the input stopped at 100.
 	 */
 	@Test
-	void pathItemInputListsEveryKeyOnceWhicheverWayTheBucketSorts() throws Exception {
+	void pathItemInputListsEveryKeyOnceWhenTheBucketSortsAfterTheKeys() throws Exception {
+		assertPathItemInputListsEveryKeyOnce("tb");
+	}
+
+	/**
+	 * With the whole name as start-after, bucket "ab" sorts before every key, so page 2 repeated
+	 * page 1 until the page cap.
+	 */
+	@Test
+	void pathItemInputListsEveryKeyOnceWhenTheBucketSortsBeforeTheKeys() throws Exception {
+		assertPathItemInputListsEveryKeyOnce("ab");
+	}
+
+	/**
+	 * Lists 250 keys under a path item input, with a responder that pages in byte order and honours
+	 * start-after, as S3 does, and fails past 10 pages.
+	 */
+	private void assertPathItemInputListsEveryKeyOnce(final String bucket) throws Exception {
 		final List<String> keys = new ArrayList<>();
 		for (int i = 0; i < 250; i++) {
 			keys.add(String.format("k%04d", i));
 		}
-		for (final String bucket : List.of("tb", "ab")) {
-			final TestS3Driver drv = new TestS3Driver(baseConfig(false, 2, false, null, "127.0.0.1"));
-			final var requests = new java.util.concurrent.atomic.AtomicInteger();
-			drv.respondWith(request -> {
-				if (requests.incrementAndGet() > 10) {
-					throw new AssertionError(bucket + ": more than 10 listing pages for 250 keys");
-				}
-				final String rawStartAfter = rawQueryParam(request.uri(), "start-after");
-				final String startAfter = rawStartAfter == null
-								? ""
-								: java.net.URLDecoder.decode(rawStartAfter, StandardCharsets.UTF_8);
-				final int maxKeys = Integer.parseInt(rawQueryParam(request.uri(), "max-keys"));
-				final List<String> after = keys.stream().filter(key -> key.compareTo(startAfter) > 0).toList();
-				return listPage(after.size() > maxKeys, after.subList(0, Math.min(maxKeys, after.size())));
-			});
-			try {
-				final var input = new com.dell.spt.base.item.io.StorageItemInput<Item>(
-								drv, 100, new ItemFactoryImpl<>(), "/" + bucket, null, 36);
-				final List<String> listed = new ArrayList<>();
-				final List<Item> buffer = new ArrayList<>();
-				try {
-					while (true) {
-						buffer.clear();
-						input.get(buffer, 100);
-						buffer.forEach(item -> listed.add(item.name()));
-					}
-				} catch (final Exception e) {
-					// the input ends after the last page with an EOFException, thrown unchecked
-					if (!(e instanceof java.io.EOFException)) {
-						throw e;
-					}
-				}
-				assertEquals(keys.stream().map(key -> "/" + bucket + "/" + key).toList(), listed, bucket);
-				assertEquals(3, requests.get(), bucket + ": one request per page");
-			} finally {
-				drv.close();
+		final TestS3Driver drv = new TestS3Driver(baseConfig(false, 2, false, null, "127.0.0.1"));
+		final var requests = new java.util.concurrent.atomic.AtomicInteger();
+		drv.respondWith(request -> {
+			if (requests.incrementAndGet() > 10) {
+				throw new AssertionError(bucket + ": more than 10 listing pages for 250 keys");
 			}
+			final String rawStartAfter = rawQueryParam(request.uri(), "start-after");
+			final String startAfter = rawStartAfter == null
+							? ""
+							: java.net.URLDecoder.decode(rawStartAfter, StandardCharsets.UTF_8);
+			final int maxKeys = Integer.parseInt(rawQueryParam(request.uri(), "max-keys"));
+			final List<String> after = keys.stream().filter(key -> key.compareTo(startAfter) > 0).toList();
+			return listPage(after.size() > maxKeys, after.subList(0, Math.min(maxKeys, after.size())));
+		});
+		try {
+			final var input = new com.dell.spt.base.item.io.StorageItemInput<Item>(
+							drv, 100, new ItemFactoryImpl<>(), "/" + bucket, null, 36);
+			final List<String> listed = new ArrayList<>();
+			final List<Item> buffer = new ArrayList<>();
+			try {
+				while (true) {
+					buffer.clear();
+					input.get(buffer, 100);
+					buffer.forEach(item -> listed.add(item.name()));
+				}
+			} catch (final Exception e) {
+				// the input ends after the last page with an EOFException, thrown unchecked
+				if (!(e instanceof java.io.EOFException)) {
+					throw e;
+				}
+			}
+			assertEquals(keys.stream().map(key -> "/" + bucket + "/" + key).toList(), listed, bucket);
+			assertEquals(3, requests.get(), bucket + ": one request per page");
+		} finally {
+			drv.close();
 		}
 	}
 

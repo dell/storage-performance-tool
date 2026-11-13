@@ -2852,9 +2852,14 @@ public class S3AwsStorageDriverTest {
 		 * item input path, and returns the copy request the driver sent.
 		 */
 		private CopyObjectRequest copyRequestFor(final Item item, final String srcPath) throws Exception {
+			return copyRequestFor(OpType.CREATE, item, srcPath, "/dest-bucket");
+		}
+
+		private CopyObjectRequest copyRequestFor(
+						final OpType type, final Item item, final String srcPath, final String dstPath) throws Exception {
 			when(mockS3Client.copyObject(any(CopyObjectRequest.class)))
 							.thenReturn(CompletableFuture.completedFuture(CopyObjectResponse.builder().build()));
-			drv.execute(new OperationImpl<>(0, OpType.CREATE, item, srcPath, "/dest-bucket", TEST_CRED)).join();
+			drv.execute(new OperationImpl<>(0, type, item, srcPath, dstPath, TEST_CRED)).join();
 			final ArgumentCaptor<CopyObjectRequest> cap = ArgumentCaptor.forClass(CopyObjectRequest.class);
 			verify(mockS3Client).copyObject(cap.capture());
 			return cap.getValue();
@@ -2906,6 +2911,44 @@ public class S3AwsStorageDriverTest {
 							new ItemFactoryImpl<>().getItem("/source-bucket/k0001", 0, 1), "/source-bucket");
 			assertEquals("source-bucket", copy.sourceBucket());
 			assertEquals("k0001", copy.sourceKey());
+		}
+
+		@Test
+		void copyObject_readsAListedKeyThatStartsWithASlash() throws Exception {
+			final CopyObjectRequest copy = copyOfTheLastListedItem("/source-bucket", null, "/k0001");
+			assertEquals("source-bucket", copy.sourceBucket());
+			assertEquals("/k0001", copy.sourceKey());
+		}
+
+		@Test
+		void copyObject_copiesTheOneObjectASourcePathWithAKeyNames() throws Exception {
+			// as before 5.17.1: a source path with a key names the object every item copies
+			final CopyObjectRequest copy = copyOfTheLastListedItem("/source-bucket/k0000", null, "k0000", "k0001");
+			assertEquals("source-bucket", copy.sourceBucket());
+			assertEquals("k0000", copy.sourceKey());
+			assertEquals("k0001", copy.destinationKey());
+		}
+
+		@Test
+		void copyObject_doesNotTurnAnUpdateIntoACopyOntoItself() throws Exception {
+			// an UPDATE arrives with the item's own directory as its source path; as before 5.17.1,
+			// that path is read as a key in the driver's bucket, not as the item
+			final CopyObjectRequest copy = copyRequestFor(
+							OpType.UPDATE, new ItemFactoryImpl<>().getItem("/bucket-a/k0001", 0, 1), "/bucket-a", "/bucket-a");
+			assertEquals("test-bucket", copy.sourceBucket());
+			assertEquals("bucket-a", copy.sourceKey());
+		}
+
+		@Test
+		void copySourcePath_readsTheItemOnlyForACreateFromABucket() {
+			assertEquals("/src/k0", S3AwsStorageDriver.copySourcePath(OpType.CREATE, "/k0", "/src"));
+			assertEquals("/src/k0", S3AwsStorageDriver.copySourcePath(OpType.CREATE, "/k0", "/src/"));
+			assertEquals("/src/k0", S3AwsStorageDriver.copySourcePath(OpType.CREATE, "/src/k0", "/src"));
+			assertEquals("/src/key", S3AwsStorageDriver.copySourcePath(OpType.CREATE, "/k0", "/src/key"));
+			assertEquals("/src/dir/", S3AwsStorageDriver.copySourcePath(OpType.CREATE, "/k0", "/src/dir/"));
+			assertEquals("src", S3AwsStorageDriver.copySourcePath(OpType.CREATE, "/k0", "src"));
+			assertEquals("/", S3AwsStorageDriver.copySourcePath(OpType.CREATE, "/k0", "/"));
+			assertEquals("/src", S3AwsStorageDriver.copySourcePath(OpType.UPDATE, "/src/k0", "/src"));
 		}
 
 		@SuppressWarnings("unchecked")
