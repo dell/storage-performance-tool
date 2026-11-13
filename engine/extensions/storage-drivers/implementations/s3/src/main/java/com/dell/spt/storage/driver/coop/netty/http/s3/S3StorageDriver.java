@@ -134,14 +134,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					BUCKET_LIST_QUERY = ThreadLocal.withInitial(StringBuilder::new);
 	//for v4 only
 	// TODO: compare to ConcurrentHashMap
-	// Each thread's signing function per secret; the function keeps that secret's key of the last date.
+	// Each thread's signing function per secret. SPT's own function keeps that secret's key of the last
+	// date itself; a function an extension puts here is memoized by date in signingKeyCache.
 	protected final ThreadLocal<Map<String, SigningKeyCreateFunction>> signingKeyCreateFunctionCache = ThreadLocal.withInitial(HashMap::new);
-	/**
-	 * @deprecated retained for binary compatibility only; SPT never reads this field or fills it,
-	 *             and only clears the closing thread's entry in {@link #doClose()}. It kept one key
-	 *             per date, whatever the secret; each secret's signing function now keeps its own.
-	 */
-	@Deprecated
+	// Each thread's keys by date, for functions an extension puts in signingKeyCreateFunctionCache only.
+	// It keeps one key per date, whatever the secret, as it always has; SPT's own keys are not in it.
 	protected final ThreadLocal<Map<String, byte[]>> signingKeyCache = ThreadLocal.withInitial(HashMap::new);
 	// for v2 only
 	protected static final ThreadLocal<Map<String, Mac>> MAC_BY_SECRET = ThreadLocal.withInitial(HashMap::new);
@@ -455,8 +452,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	 * map, so only that thread reads or writes its date and key. It is static and copies the
 	 * driver's region and service name, so a signing thread's cache, which outlives the driver,
 	 * keeps no driver reachable.
+	 *
+	 * <p>It is final, so the signing path's check for it is a single class comparison: only this
+	 * function bypasses {@link #signingKeyCache}.
 	 */
-	static class SigningKeyCreateFunctionImpl
+	static final class SigningKeyCreateFunctionImpl
 					implements SigningKeyCreateFunction {
 
 		private final String secret;
@@ -471,19 +471,17 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			this.service = service;
 		}
 
-		/** The signing key for {@code datestamp}, derived only when the date is not the last one. */
+		/**
+		 * The signing key for {@code datestamp}, derived only when the date is not the last one. Each
+		 * derivation returns a new array, and a returned key is never changed.
+		 */
 		@Override
 		public byte[] apply(final String datestamp) {
 			if (!datestamp.equals(date)) {
-				key = derive(datestamp);
+				key = getSignatureKey(secret, datestamp, region, service);
 				date = datestamp;
 			}
 			return key;
-		}
-
-		/** Derives the key for {@code datestamp}; tests override it to count derivations. */
-		byte[] derive(final String datestamp) {
-			return getSignatureKey(secret, datestamp, region, service);
 		}
 	}
 
@@ -2420,16 +2418,17 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	@Override
 	protected void doClose() throws IOException {
-		final CompletableFuture<?>[] pending = multipartCleanupTasks.toArray(CompletableFuture[]::new);
-		if (pending.length > 0) {
-			CompletableFuture.allOf(pending).join();
-		}
-		multipartCleanupTasks.clear();
 		try {
+			final CompletableFuture<?>[] pending = multipartCleanupTasks.toArray(CompletableFuture[]::new);
+			if (pending.length > 0) {
+				CompletableFuture.allOf(pending).join();
+			}
+			multipartCleanupTasks.clear();
 			super.doClose();
 		} finally {
-			// The closing thread's entries go now. Other signing threads keep theirs until they end;
-			// the cached functions are static, so those entries keep no driver reachable.
+			// The closing thread's entries go now, even when a cleanup task or super.doClose() fails.
+			// Other signing threads keep theirs until they end; SPT's cached functions are static, so
+			// those entries keep no driver reachable.
 			signingKeyCreateFunctionCache.remove();
 			signingKeyCache.remove();
 		}
@@ -2522,7 +2521,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				}
 				final var signingKeyCreateFunction = signingKeyCreateFunctionCache.get().computeIfAbsent(
 								secret, s -> new SigningKeyCreateFunctionImpl(s, awsRegion, sigV4ServiceName));
-				final var signingKey = signingKeyCreateFunction.apply(date);
+				// SPT's own function keeps its secret's key of the last date. A function an extension put in
+				// the cache is memoized by date, as it always was.
+				final byte[] signingKey = signingKeyCreateFunction instanceof SigningKeyCreateFunctionImpl builtIn
+								? builtIn.apply(date)
+								: signingKeyCache.get().computeIfAbsent(date, signingKeyCreateFunction);
 				final Map<String, String> sortedHeaders = getNonCanonicalHeaders(httpHeaders);
 				final var canonicalForm = getCanonicalV4(httpHeaders, sortedHeaders, httpMethod, dstUriPath);
 				byte[] encodedhash = THREAD_LOCAL_SHA256.get().digest(

@@ -4,6 +4,7 @@ import static com.dell.spt.storage.driver.coop.netty.http.s3.EndpointSelectionTe
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -18,7 +19,9 @@ import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpMethod;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.HexFormat;
+import java.util.IdentityHashMap;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicReference;
@@ -26,7 +29,13 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import org.junit.jupiter.api.Test;
 
-/** The SigV4 signing key depends on the secret and the date, and is derived once per date. */
+/**
+ * The SigV4 signing key depends on the secret and the date, and is derived once per date. SPT's own
+ * function keeps its key itself; a function an extension installs is memoized by date, as before.
+ *
+ * <p>A derivation makes a new key array, and a key is reused by identity, so the derivations of
+ * SPT's own function are counted as the distinct key arrays it returns.
+ */
 class S3SigningKeyCacheTest {
 
 	/** A made-up second credential; no real secret. */
@@ -53,8 +62,76 @@ class S3SigningKeyCacheTest {
 	@Test
 	void oneCredentialKeepsItsSignaturesAndDerivesItsKeyOncePerDate() throws Exception {
 		try (final var driver = driver(); final var fresh = driver()) {
-			final var counting = new CountingFunction(CREDENTIAL.getSecret(), driver.awsRegion, driver.sigV4ServiceName);
-			driver.signingKeyCreateFunctionCache.get().put(CREDENTIAL.getSecret(), counting);
+			final Set<byte[]> keys = identitySet();
+			final Set<String> dates = new TreeSet<>();
+			var compared = 0;
+			for (var i = 0; i < REQUESTS; i++) {
+				final var signed = sign(driver, CREDENTIAL);
+				final var reference = sign(fresh, CREDENTIAL);
+				dates.add(date(signed));
+				keys.add(lastKey(driver, CREDENTIAL, signed));
+				if (amzDate(signed).equals(amzDate(reference))) {
+					assertEquals(signature(reference), signature(signed), "request " + i);
+					compared++;
+				}
+			}
+			assertTrue(compared > 0, "no request was signed in the same second as its reference");
+			assertEquals(dates.size(), keys.size(), "one derivation per date over " + REQUESTS + " requests");
+			assertEquals(1, driver.signingKeyCreateFunctionCache.get().size(), "one function for the one secret");
+			assertTrue(driver.signingKeyCache.get().isEmpty(), "SPT's own keys are not in the date-keyed cache");
+			final var function = builtIn(driver, CREDENTIAL);
+			for (final var date : dates) {
+				assertArrayEquals(
+								independentKey(CREDENTIAL.getSecret(), date, driver.awsRegion, driver.sigV4ServiceName),
+								function.apply(date));
+			}
+		}
+	}
+
+	@Test
+	void alternatingSecretsDeriveEachKeyOncePerDate() throws Exception {
+		try (final var driver = driver()) {
+			final Set<byte[]> firstKeys = identitySet();
+			final Set<byte[]> secondKeys = identitySet();
+			final Set<String> dates = new TreeSet<>();
+			for (var i = 0; i < REQUESTS; i++) {
+				final var first = sign(driver, CREDENTIAL);
+				firstKeys.add(lastKey(driver, CREDENTIAL, first));
+				final var second = sign(driver, OTHER);
+				secondKeys.add(lastKey(driver, OTHER, second));
+				dates.add(date(first));
+				dates.add(date(second));
+			}
+			assertEquals(dates.size(), firstKeys.size(), "the first secret's key, once per date");
+			assertEquals(dates.size(), secondKeys.size(), "the second secret's key, once per date");
+		}
+	}
+
+	@Test
+	void aDateChangeDerivesANewKey() throws Exception {
+		final var function = new S3StorageDriver.SigningKeyCreateFunctionImpl(AWS_EXAMPLE_SECRET, "us-east-1", "iam");
+
+		final var day1 = function.apply("20120215");
+		assertEquals(AWS_EXAMPLE_KEY, HexFormat.of().formatHex(day1), "AWS's published example key");
+		assertSame(day1, function.apply("20120215"), "the same date reuses its key");
+
+		final var day2 = function.apply("20120216");
+		assertNotSame(day1, day2, "a new date derives a new key");
+		assertArrayEquals(independentKey(AWS_EXAMPLE_SECRET, "20120216", "us-east-1", "iam"), day2);
+		assertFalse(HexFormat.of().formatHex(day2).equals(AWS_EXAMPLE_KEY));
+		assertSame(day2, function.apply("20120216"));
+		assertEquals(AWS_EXAMPLE_KEY, HexFormat.of().formatHex(day1), "a returned key is never changed");
+	}
+
+	/**
+	 * An extension that installs its own function, which derives on every call, still has it called
+	 * once per date: the driver memoizes it in the date-keyed cache, as on 11f30c45.
+	 */
+	@Test
+	void anExtensionsFunctionIsMemoizedByDate() throws Exception {
+		try (final var driver = driver(); final var fresh = driver()) {
+			final var extension = new ExtensionFunction(CREDENTIAL.getSecret(), driver.awsRegion, driver.sigV4ServiceName);
+			driver.signingKeyCreateFunctionCache.get().put(CREDENTIAL.getSecret(), extension);
 			final Set<String> dates = new TreeSet<>();
 			var compared = 0;
 			for (var i = 0; i < REQUESTS; i++) {
@@ -67,48 +144,30 @@ class S3SigningKeyCacheTest {
 				}
 			}
 			assertTrue(compared > 0, "no request was signed in the same second as its reference");
-			assertEquals(dates.size(), counting.derivations, "one derivation per date over " + REQUESTS + " requests");
-			assertEquals(1, driver.signingKeyCreateFunctionCache.get().size(), "one function for the one secret");
-			for (final var date : dates) {
-				assertArrayEquals(
-								independentKey(CREDENTIAL.getSecret(), date, driver.awsRegion, driver.sigV4ServiceName),
-								counting.apply(date));
-			}
+			// One date, so one derivation, unless the requests crossed midnight UTC.
+			assertEquals(dates.size(), extension.derivations, "the extension's function, once per date over " + REQUESTS + " requests");
+			assertSame(extension, driver.signingKeyCreateFunctionCache.get().get(CREDENTIAL.getSecret()));
+			assertEquals(dates, driver.signingKeyCache.get().keySet(), "the extension's keys are cached by date");
 		}
 	}
 
+	/** SPT's own function for another secret does not take an extension's key from the date-keyed cache. */
 	@Test
-	void alternatingSecretsDeriveEachKeyOncePerDate() throws Exception {
-		try (final var driver = driver()) {
-			final var first = new CountingFunction(CREDENTIAL.getSecret(), driver.awsRegion, driver.sigV4ServiceName);
-			final var second = new CountingFunction(OTHER.getSecret(), driver.awsRegion, driver.sigV4ServiceName);
-			driver.signingKeyCreateFunctionCache.get().put(CREDENTIAL.getSecret(), first);
-			driver.signingKeyCreateFunctionCache.get().put(OTHER.getSecret(), second);
-			final Set<String> dates = new TreeSet<>();
-			for (var i = 0; i < REQUESTS; i++) {
-				dates.add(date(sign(driver, CREDENTIAL)));
-				dates.add(date(sign(driver, OTHER)));
-			}
-			assertEquals(dates.size(), first.derivations, "the first secret's key, once per date");
-			assertEquals(dates.size(), second.derivations, "the second secret's key, once per date");
+	void sptsOwnFunctionIgnoresAnExtensionsKeys() throws Exception {
+		try (final var driver = driver(); final var freshOther = driver()) {
+			final var extension = new ExtensionFunction(CREDENTIAL.getSecret(), driver.awsRegion, driver.sigV4ServiceName);
+			driver.signingKeyCreateFunctionCache.get().put(CREDENTIAL.getSecret(), extension);
+			final var first = sign(driver, CREDENTIAL);
+			final var extensionKey = driver.signingKeyCache.get().get(date(first));
+			assertNotNull(extensionKey, "the extension's key is cached by date");
+
+			final var other = atOneTimestamp(driver, freshOther, OTHER);
+			assertEquals(signature(other.expected()), signature(other.actual()), "the other secret is signed with its own key");
+			assertInstanceOf(S3StorageDriver.SigningKeyCreateFunctionImpl.class,
+							driver.signingKeyCreateFunctionCache.get().get(OTHER.getSecret()));
+			assertSame(extensionKey, driver.signingKeyCache.get().get(date(first)), "SPT's own key is not cached by date");
+			assertEquals(1, driver.signingKeyCache.get().size());
 		}
-	}
-
-	@Test
-	void aDateChangeDerivesANewKey() throws Exception {
-		final var function = new CountingFunction(AWS_EXAMPLE_SECRET, "us-east-1", "iam");
-
-		final var day1 = function.apply("20120215");
-		assertEquals(AWS_EXAMPLE_KEY, HexFormat.of().formatHex(day1), "AWS's published example key");
-		assertSame(day1, function.apply("20120215"), "the same date reuses its key");
-		assertEquals(1, function.derivations);
-
-		final var day2 = function.apply("20120216");
-		assertEquals(2, function.derivations, "a new date derives a new key");
-		assertArrayEquals(independentKey(AWS_EXAMPLE_SECRET, "20120216", "us-east-1", "iam"), day2);
-		assertFalse(HexFormat.of().formatHex(day2).equals(AWS_EXAMPLE_KEY));
-		assertSame(day2, function.apply("20120216"));
-		assertEquals(2, function.derivations);
 	}
 
 	@Test
@@ -131,20 +190,53 @@ class S3SigningKeyCacheTest {
 		}
 	}
 
-	/** Counts the derivations behind the real date check. */
-	private static final class CountingFunction extends S3StorageDriver.SigningKeyCreateFunctionImpl {
+	/**
+	 * An extension's own function, a plain implementation of the public interface: it derives the
+	 * key on every call and counts its calls.
+	 */
+	private static final class ExtensionFunction implements SigningKeyCreateFunction {
 
+		private final String secret;
+		private final String region;
+		private final String service;
 		int derivations;
 
-		CountingFunction(final String secret, final String region, final String service) {
-			super(secret, region, service);
+		ExtensionFunction(final String secret, final String region, final String service) {
+			this.secret = secret;
+			this.region = region;
+			this.service = service;
 		}
 
 		@Override
-		byte[] derive(final String datestamp) {
+		public byte[] apply(final String datestamp) {
 			derivations++;
-			return super.derive(datestamp);
+			try {
+				return independentKey(secret, datestamp, region, service);
+			} catch (final Exception e) {
+				throw new IllegalStateException(e);
+			}
 		}
+	}
+
+	private static Set<byte[]> identitySet() {
+		return Collections.newSetFromMap(new IdentityHashMap<>());
+	}
+
+	private static S3StorageDriver.SigningKeyCreateFunctionImpl builtIn(
+					final S3StorageDriver<?, ?> driver, final Credential credential) {
+		return assertInstanceOf(S3StorageDriver.SigningKeyCreateFunctionImpl.class,
+						driver.signingKeyCreateFunctionCache.get().get(credential.getSecret()));
+	}
+
+	/**
+	 * The key SPT's own function holds after signing {@code signed}. Asked for the date it was just
+	 * asked for, the function returns its key without a derivation.
+	 */
+	private static byte[] lastKey(final S3StorageDriver<?, ?> driver, final Credential credential, final HttpHeaders signed) {
+		final var function = builtIn(driver, credential);
+		final var key = function.apply(date(signed));
+		assertSame(key, function.apply(date(signed)));
+		return key;
 	}
 
 	private static S3StorageDriver<Item, Operation<Item>> driver() throws Exception {

@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.item.Item;
@@ -19,6 +20,9 @@ import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -41,7 +45,6 @@ class S3SigningCacheRetentionTest {
 	}
 
 	@Test
-	@SuppressWarnings("deprecation")
 	void closeOnTheSigningThreadEmptiesItsCachesAndTheCachedFunctionHoldsNoDriver() throws Exception {
 		final var driver = new S3StorageDriver<Item, Operation<Item>>(
 						"signing-retention", null, plainStorage(), false, 1);
@@ -49,8 +52,9 @@ class S3SigningCacheRetentionTest {
 		final var functions = driver.signingKeyCreateFunctionCache.get();
 		assertEquals(1, functions.size(), "one signing function for the one secret");
 		assertHoldsNoDriver(functions.get(CREDENTIAL.getSecret()), driver);
-		// SPT no longer fills the date-keyed cache; an extension still might, and close clears it.
-		assertTrue(driver.signingKeyCache.get().isEmpty(), "the date-keyed cache is unused");
+		// SPT's own function does not fill the date-keyed cache; an extension's function does, and
+		// close clears it.
+		assertTrue(driver.signingKeyCache.get().isEmpty(), "SPT's own keys are not in the date-keyed cache");
 		driver.signingKeyCache.get().put("20261113", new byte[0]);
 
 		driver.close();
@@ -60,6 +64,27 @@ class S3SigningCacheRetentionTest {
 		assertTrue(driver.signingKeyCache.get().isEmpty(), "the closing thread's keys were cleared");
 		driver.signingKeyCreateFunctionCache.remove();
 		driver.signingKeyCache.remove();
+	}
+
+	@Test
+	void aFailedCloseStillEmptiesTheClosingThreadsCaches() throws Exception {
+		final var driver = new S3StorageDriver<Item, Operation<Item>>(
+						"signing-retention", null, plainStorage(), false, 1);
+		sign(driver);
+		driver.signingKeyCache.get().put("20261113", new byte[0]);
+		final var cleanups = multipartCleanupTasks(driver);
+		cleanups.add(CompletableFuture.failedFuture(new IllegalStateException("a failed multipart cleanup")));
+		try {
+			assertThrows(CompletionException.class, driver::close, "the cleanup's failure ends close");
+			assertTrue(driver.signingKeyCreateFunctionCache.get().isEmpty(), "the closing thread's functions were cleared");
+			assertTrue(driver.signingKeyCache.get().isEmpty(), "the closing thread's keys were cleared");
+		} finally {
+			// The failed close left the driver open; with the failed task gone, close finishes.
+			cleanups.clear();
+			driver.close();
+			driver.signingKeyCreateFunctionCache.remove();
+			driver.signingKeyCache.remove();
+		}
 	}
 
 	@Test
@@ -148,6 +173,13 @@ class S3SigningCacheRetentionTest {
 		headers.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 		driver.applyAuthHeaders(headers, HttpMethod.HEAD, "/bucket", CREDENTIAL);
 		assertNotNull(headers.get(HttpHeaderNames.AUTHORIZATION));
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Set<CompletableFuture<Void>> multipartCleanupTasks(final S3StorageDriver<?, ?> driver) throws Exception {
+		final var field = S3StorageDriver.class.getDeclaredField("multipartCleanupTasks");
+		field.setAccessible(true);
+		return (Set<CompletableFuture<Void>>) field.get(driver);
 	}
 
 	private static S3StorageDriver<?, ?> driverOf(final S3TargetBucketControl control) throws Exception {
