@@ -327,7 +327,7 @@ public interface ConfigUtil {
 	 * Refuses a scenario's value for a boolean setting other than {@code true} or {@code false}; see
 	 * {@link #isAcceptedBooleanValue}. The values are those of {@link #flatten}, after the aliasing.
 	 *
-	 * @throws IllegalArgumentException naming the setting and the value
+	 * @throws InvalidBooleanValueException naming the setting and the value
 	 */
 	static void validateBooleanValues(final Config config, final Map<String, String> argValPairs) {
 		for (final var argValPair : argValPairs.entrySet()) {
@@ -346,7 +346,7 @@ public interface ConfigUtil {
 	 * command line, and any other string would read as false. A value of another type is left to the
 	 * configuration, which refuses it.
 	 *
-	 * @throws IllegalArgumentException naming the setting and the value
+	 * @throws InvalidBooleanValueException naming the setting and the value
 	 */
 	static void validateBooleanValues(
 					final Map<String, Object> schema, final Map<String, Object> configTree, final String sep) {
@@ -389,8 +389,8 @@ public interface ConfigUtil {
 		return "true".equalsIgnoreCase(value) || "false".equalsIgnoreCase(value);
 	}
 
-	private static IllegalArgumentException notTrueOrFalse(final String path, final String value) {
-		return new IllegalArgumentException(path + ": \"" + value + "\" is not true or false");
+	private static InvalidBooleanValueException notTrueOrFalse(final String path, final String value) {
+		return new InvalidBooleanValueException(path + ": \"" + value + "\" is not true or false");
 	}
 
 	/**

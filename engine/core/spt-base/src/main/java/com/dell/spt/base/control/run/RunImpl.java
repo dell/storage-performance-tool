@@ -33,8 +33,9 @@ public final class RunImpl implements Run {
 	}
 
 	/**
-	 * Runs the scenario. A scenario failure is logged and ends the run; a node's run reports it
-	 * through the step status, so it is not thrown, except a typed terminal failure.
+	 * Runs the scenario. A scenario failure is logged and ends the run without being thrown, so a node
+	 * keeps serving, and its {@code /status} then reads {@code COMPLETED}. A typed terminal failure is
+	 * thrown, and a node reports it as {@code FAILED}.
 	 */
 	@Override
 	public final void run() {
