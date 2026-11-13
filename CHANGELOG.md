@@ -50,6 +50,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - **`netty-mock` driver under load steps** — The netty-mock driver no longer overflows the stack under load steps: time-limited steps end on time, and count-limited steps no longer hang.
 - **Driver close on an interrupted thread** — A storage driver closed on an interrupted thread now completes its close, instead of leaving its event loops or I/O workers running; from 5.15.0 such a close threw an `InterruptedException` partway through. The close takes no longer than a close on an uninterrupted thread, and the thread stays interrupted.
 - **A `mixed` step of only writes and deletes** — A `mixed` step with GET and STAT weights of 0 no longer needs seed items to start. Without an items file it failed at start with `Seed items list must be non-null and non-empty`, from 5.8.0. A mix with GET or STAT still needs at least one seed item on each engine.
+- **Warnings in `errors.log`** — Warnings in `errors.log` are no longer dropped when debug lines reach the rate limit. Debug and info messages keep their own limit of 1,000 messages per 10 s, so `errors.log` can grow up to twice as fast when both limits are reached.
 
 ## [5.17.0] - 2026-11-11
 
