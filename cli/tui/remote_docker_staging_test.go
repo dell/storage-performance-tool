@@ -34,13 +34,15 @@ type stagingCall struct {
 type stagingValueKey struct{}
 
 // stagingExecutor records every staging command. copy decides how each
-// CopyFile behaves; rmErr fails every rm.
+// CopyFile behaves; rmErr fails every rm, and rm, when set, decides how each
+// rm on a live context behaves instead.
 type stagingExecutor struct {
 	mu          sync.Mutex
 	calls       []stagingCall
 	copy        func(ctx context.Context) error
 	copyStarted chan struct{}
 	rmErr       error
+	rm          func(ctx context.Context) error
 }
 
 func (e *stagingExecutor) record(ctx context.Context, command string) {
@@ -70,7 +72,21 @@ func (e *stagingExecutor) ExecuteCommand(ctx context.Context, _ *hostparse.HostI
 	if command[0] == "rm" && e.rmErr != nil {
 		return "", "rm: cannot remove", e.rmErr
 	}
+	if command[0] == "rm" && e.rm != nil {
+		return "", "", e.rm(ctx)
+	}
 	return "", "", nil
+}
+
+// commands lists the recorded commands that start with prefix.
+func (e *stagingExecutor) commands(prefix string) []string {
+	var out []string
+	for _, call := range e.recorded() {
+		if strings.HasPrefix(call.command, prefix) {
+			out = append(out, call.command)
+		}
+	}
+	return out
 }
 
 func (e *stagingExecutor) CopyFile(ctx context.Context, _ *hostparse.HostInfo, localPath, remotePath string) error {
@@ -159,10 +175,10 @@ func TestRemoteStagingCopyOutlastsTheSmallCommandTimeout(t *testing.T) {
 	}
 }
 
-// A cancel during a copy returns at once, still reads as a cancellation, and
-// removes the staging directory on a fresh context bounded by
-// remoteCleanupTimeout, so nothing is left owned for the rollback.
-func TestRemoteStagingCancelDuringCopyRemovesTheDirectory(t *testing.T) {
+// A cancel during a copy returns at once, still reads as a cancellation, adds
+// no error of its own and runs nothing more: the staging directory stays owned
+// for the orchestrator's rollback, which removes it.
+func TestRemoteStagingCancelDuringCopyLeavesTheDirectoryForTheRollback(t *testing.T) {
 	exec := &stagingExecutor{
 		copyStarted: make(chan struct{}, 1),
 		copy: func(ctx context.Context) error {
@@ -171,7 +187,7 @@ func TestRemoteStagingCancelDuringCopyRemovesTheDirectory(t *testing.T) {
 		},
 	}
 	mgr := newStagingManager(t, exec)
-	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), stagingValueKey{}, "run"))
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
@@ -193,21 +209,87 @@ func TestRemoteStagingCancelDuringCopyRemovesTheDirectory(t *testing.T) {
 	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "stopped") {
 		t.Fatalf("staging error = %v, want the copy's cancellation", err)
 	}
+	if strings.Contains(err.Error(), "remove remote staging directory") {
+		t.Fatalf("a cancelled staging must not add a removal error: %v", err)
+	}
 	calls := exec.recorded()
-	last := calls[len(calls)-1]
-	if last.command != "rm -rf "+stagingDir {
-		t.Fatalf("last staging command = %q, want rm -rf %s", last.command, stagingDir)
+	if last := calls[len(calls)-1].command; !strings.HasPrefix(last, "copy ") {
+		t.Fatalf("staging ran %q after the cancel; want nothing after the copy", last)
 	}
-	if last.ctxErr != nil || !last.hasDeadline || last.timeLeft <= 0 || last.timeLeft > remoteCleanupTimeout {
-		t.Fatalf("rm ran with err=%v deadline=%t, %v left; want a live context bounded by %v",
-			last.ctxErr, last.hasDeadline, last.timeLeft, remoteCleanupTimeout)
+	if !mgr.HasManagedResources() || mgr.stagingDir != stagingDir {
+		t.Fatalf("after the cancel: owned=%t dir=%q; want %s left owned for the rollback",
+			mgr.HasManagedResources(), mgr.stagingDir, stagingDir)
 	}
-	if last.value != "run" {
-		t.Fatalf("rm context value = %v, want the run's values kept", last.value)
+	if err := mgr.CleanupContext(context.Background()); err != nil || mgr.HasManagedResources() {
+		t.Fatalf("rollback cleanup = %v, owned = %t; want the directory removed", err, mgr.HasManagedResources())
 	}
-	if mgr.HasManagedResources() || mgr.stagedBindMounts != nil {
-		t.Fatalf("after the cleanup: owned=%t binds=%q; want nothing left", mgr.HasManagedResources(), mgr.stagedBindMounts)
+	if rms := exec.commands("rm "); !reflect.DeepEqual(rms, []string{"rm -rf " + stagingDir}) {
+		t.Fatalf("removals = %q, want the rollback's alone", rms)
 	}
+}
+
+// A copy that fails on its own while the run goes on removes the staging
+// directory on a context derived from the run's and bounded by
+// remoteCleanupTimeout. A cancel during that removal ends it at once, adds no
+// error, and leaves the directory owned for the rollback.
+func TestRemoteStagingFailedCopyRemovesTheDirectoryWithinTheRun(t *testing.T) {
+	copyErr := errors.New("copy /host/items.csv to worker:/tmp/x failed: exit status 1: lost connection")
+	t.Run("removed", func(t *testing.T) {
+		exec := &stagingExecutor{copy: func(context.Context) error { return copyErr }}
+		mgr := newStagingManager(t, exec)
+		ctx := context.WithValue(context.Background(), stagingValueKey{}, "run")
+		if err := mgr.SetFileMountsContext(ctx, deleteStagingMounts[:1]); !errors.Is(err, copyErr) || err.Error() != copyErr.Error() {
+			t.Fatalf("staging error = %v, want the copy failure alone", err)
+		}
+		calls := exec.recorded()
+		last := calls[len(calls)-1]
+		if !strings.HasPrefix(last.command, "rm -rf ") {
+			t.Fatalf("last staging command = %q, want the removal", last.command)
+		}
+		if last.ctxErr != nil || !last.hasDeadline || last.timeLeft <= 0 || last.timeLeft > remoteCleanupTimeout {
+			t.Fatalf("rm ran with err=%v deadline=%t, %v left; want a live context bounded by %v",
+				last.ctxErr, last.hasDeadline, last.timeLeft, remoteCleanupTimeout)
+		}
+		if last.value != "run" {
+			t.Fatalf("rm context value = %v, want the run's values kept", last.value)
+		}
+		if mgr.HasManagedResources() || mgr.stagedBindMounts != nil {
+			t.Fatalf("after the cleanup: owned=%t binds=%q; want nothing left", mgr.HasManagedResources(), mgr.stagedBindMounts)
+		}
+	})
+	t.Run("a cancel ends the removal", func(t *testing.T) {
+		removing := make(chan struct{})
+		exec := &stagingExecutor{
+			copy: func(context.Context) error { return copyErr },
+			rm: func(ctx context.Context) error {
+				close(removing)
+				<-ctx.Done()
+				return ctx.Err()
+			},
+		}
+		mgr := newStagingManager(t, exec)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- mgr.SetFileMountsContext(ctx, deleteStagingMounts[:1]) }()
+		select {
+		case <-removing:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the removal did not start")
+		}
+		cancel()
+		select {
+		case err := <-done:
+			if !errors.Is(err, copyErr) || err.Error() != copyErr.Error() {
+				t.Fatalf("staging error = %v, want the copy failure alone", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("the cancel did not end the removal")
+		}
+		if !mgr.HasManagedResources() {
+			t.Fatal("a staging directory whose removal a cancel cut short must stay owned for the rollback")
+		}
+	})
 }
 
 // A copy that fails on its own also cleans up; when that removal fails too,
@@ -233,6 +315,80 @@ func TestRemoteStagingFailedRemovalKeepsTheDirectoryOwned(t *testing.T) {
 	if err := mgr.CleanupContext(context.Background()); err != nil || mgr.HasManagedResources() {
 		t.Fatalf("rollback cleanup = %v, owned = %t; want the directory removed", err, mgr.HasManagedResources())
 	}
+}
+
+// After a cancel during staging, the full-screen UI's join sees staging and
+// the startup rollback end within TUILaunchJoinTimeout, and the rollback
+// removes the directory. Each rm answers after removalTime, as on a slow but
+// live host, so a removal of up to remoteCleanupTimeout before the rollback
+// would push the whole past the join.
+func TestItemFileStagingCancelAndRollbackEndWithinTUIJoin(t *testing.T) {
+	removalTime := constants.TUILaunchJoinTimeout - remoteCleanupTimeout + 2*time.Second
+	if removalTime >= constants.StartupRollbackTimeout {
+		t.Fatalf("a %v removal cannot finish within the %v rollback", removalTime, constants.StartupRollbackTimeout)
+	}
+	exec := &stagingExecutor{
+		copyStarted: make(chan struct{}, 1),
+		copy: func(ctx context.Context) error {
+			<-ctx.Done()
+			return fmt.Errorf("copy /host/items.csv to worker:/tmp/x stopped: %w", context.Cause(ctx))
+		},
+		rm: func(ctx context.Context) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(removalTime):
+				return nil
+			}
+		},
+	}
+	host := &hostparse.HostInfo{Host: "worker.example.com", Original: "worker.example.com"}
+	mgr, err := newRemoteDockerManagerWithExecutor(host, exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{host}, 1)
+	orchestrator.SetNotifier(func(string) {})
+	orchestrator.hosts[0].DockerManager = mgr
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan tuiLaunchResult, 1)
+	staged := make(chan struct{})
+	go func() {
+		defer close(staged)
+		err := orchestrator.configureItemFileMounts(ctx, orchestrator.hosts, deleteStagingMounts[:1])
+		result <- tuiLaunchResult{Submission: SubmissionNotSubmitted, Err: err}
+	}()
+	t.Cleanup(func() { <-staged })
+	select {
+	case <-exec.copyStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the copy did not start")
+	}
+	stagingDir := mgr.stagingDir
+	cancelledAt := time.Now()
+	cancel()
+	joinErr := finishTUILaunch(context.Background(), nil, result, LaunchHooks{})
+	elapsed := time.Since(cancelledAt)
+	if strings.Contains(joinErr.Error(), "timed out waiting for TUI startup cancellation and rollback") {
+		t.Fatalf("the join gave up %v after the cancel, with staging and its rollback still running: %v", elapsed, joinErr)
+	}
+	select {
+	case <-staged:
+	default:
+		t.Fatal("staging and its rollback were still running after the join returned")
+	}
+	if !errors.Is(joinErr, context.Canceled) || strings.Contains(joinErr.Error(), "remove remote staging directory") {
+		t.Fatalf("join error = %v, want the copy's cancellation alone", joinErr)
+	}
+	if rms := exec.commands("rm "); !reflect.DeepEqual(rms, []string{"rm -rf " + stagingDir}) {
+		t.Fatalf("removals = %q, want the rollback's alone", rms)
+	}
+	if mgr.HasManagedResources() {
+		t.Fatalf("the rollback left %s owned", mgr.stagingDir)
+	}
+	t.Logf("the join returned %v after the cancel: %v", elapsed.Round(time.Millisecond), joinErr)
 }
 
 // Each host prints one notice with the item files' total size before its

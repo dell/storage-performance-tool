@@ -183,15 +183,22 @@ func (m *RemoteDockerManager) SetFileMounts(mounts []scenario.FileMount) error {
 // mounting. Its bounds:
 //   - Each copy runs under ctx alone, with no fixed cap, so a large file is
 //     not cut off. A cancel of ctx ends the copy within
-//     constants.CommandWaitDelay, and scp's keepalives end a copy whose peer
-//     stops answering about 60 s after its last reply.
+//     constants.CommandWaitDelay, and SSH keepalives end a copy whose peer
+//     stops answering about 60 s after its last reply. That holds on a shared
+//     connection only when an SPT command opened it; one opened outside SPT
+//     follows its own keepalive settings.
 //   - Each mkdir, chmod and rm around the copies gets its own
 //     stagingCommandTimeout (30 s).
-//   - After a failure or a cancel, the staging directory is removed on a fresh
-//     context bounded by remoteCleanupTimeout (10 s), so that removal and the
-//     orchestrator's rollback stay within TUILaunchJoinTimeout on a dead link.
-//     If the removal fails, the directory stays owned (HasManagedResources) for
-//     the rollback.
+//   - When a copy or chmod fails while ctx is live, the staging directory is
+//     removed on a context derived from ctx and bounded by
+//     remoteCleanupTimeout (10 s), so a later cancel ends the removal at once.
+//     A removal that fails on its own adds its error to the copy's.
+//   - Once ctx has ended, nothing more runs and no error is added to the
+//     copy's or chmod's. The directory stays owned (HasManagedResources) for
+//     the orchestrator's rollback, which removes it on a fresh context of its
+//     own, so a cancelled start spends nothing of TUILaunchJoinTimeout before
+//     the rollback. A directory whose removal failed or was cut short by a
+//     cancel stays owned the same way.
 func (m *RemoteDockerManager) SetFileMountsContext(ctx context.Context, mounts []scenario.FileMount) error {
 	ctx = normalizeContext(ctx)
 	if err := ctx.Err(); err != nil {
@@ -233,13 +240,21 @@ func (m *RemoteDockerManager) withStagingCommandTimeout(ctx context.Context, run
 	return run(commandCtx)
 }
 
-// cleanupStagingAfterFailure removes the staging directory on a fresh context
-// bounded by remoteCleanupTimeout, so the removal still runs after ctx was
-// cancelled. ctx's values are kept.
+// cleanupStagingAfterFailure removes the staging directory after a copy or
+// chmod failed while ctx was live, within remoteCleanupTimeout. Once ctx has
+// ended it leaves the directory owned for the orchestrator's rollback, which
+// runs on a fresh context of its own, and reports nothing: removing it here
+// would only delay that rollback.
 func (m *RemoteDockerManager) cleanupStagingAfterFailure(ctx context.Context) error {
-	cleanupCtx, cancel := boundedDetachedContext(ctx, remoteCleanupTimeout)
+	if ctx.Err() != nil {
+		return nil
+	}
+	cleanupCtx, cancel := context.WithTimeout(ctx, remoteCleanupTimeout)
 	defer cancel()
-	return m.cleanupStaging(cleanupCtx)
+	if err := m.cleanupStaging(cleanupCtx); err != nil && ctx.Err() == nil {
+		return err
+	}
+	return nil
 }
 
 func (m *RemoteDockerManager) prepareDiagnostics(ctx context.Context, role string) ([]string, []string, error) {
