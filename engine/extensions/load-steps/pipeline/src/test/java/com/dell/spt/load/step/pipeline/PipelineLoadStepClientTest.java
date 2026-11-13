@@ -1,6 +1,7 @@
 package com.dell.spt.load.step.pipeline;
 
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.load.step.client.LoadStepClientBase;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.impl.BasicConfig;
 import org.junit.jupiter.api.DisplayName;
@@ -259,6 +260,21 @@ class PipelineLoadStepClientTest {
 		Config cfg = newBaseConfig();
 		PipelineLoadStepClient client = new PipelineLoadStepClient(cfg, Collections.<Extension> emptyList(), Collections.emptyList(), null);
 		assertEquals(PipelineLoadStepExtension.TYPE, client.getTypeName());
+	}
+
+	@Test
+	@DisplayName("each sub-step's count is its context's, and only the first reads an item input")
+	void eachContextControlsItsSubStepAndOnlyTheFirstReadsItems() throws Exception {
+		final PipelineLoadStepClient client = new PipelineLoadStepClient(
+						newBaseConfig(), Collections.<Extension> emptyList(), null, null)
+						.append(Map.of("load-op-type", "create"))
+						.append(Map.of("load-op-type", "read"));
+		assertFalse(client.controlsOperations(LoadStepClientBase.BASE_CONFIG));
+		assertTrue(client.controlsOperations(0));
+		assertTrue(client.controlsOperations(1));
+		assertFalse(client.suppliesItems(LoadStepClientBase.BASE_CONFIG));
+		assertTrue(client.suppliesItems(0));
+		assertFalse(client.suppliesItems(1), "the second sub-step reads the first one's results");
 	}
 
 	@Test
