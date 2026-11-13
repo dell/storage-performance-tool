@@ -777,6 +777,11 @@ that lets SPT discover the launch script and referenced scenario. Each fetched
 artifact is limited to 16 MiB. See [REPLAY.md](REPLAY.md) for source archive
 requirements.
 
+From the launch script, replay reads its exports, the scenario path,
+`--item-output-path`, `--storage-net-node-addrs` and `--storage-driver-addrs`.
+It keeps no other engine flag there, and its preflight warns once, naming the
+`--storage-*` and `--load-*` flags it drops without their values.
+
 ### Replay Target Options
 
 | Flag | Short | Default | Description |
