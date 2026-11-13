@@ -250,49 +250,26 @@ func TestRunVerify_RejectsOutOfRangePorts(t *testing.T) {
 	}
 }
 
-// Verify takes a non-default --rmi-registry-port only where spt run does, a local single host,
-// so it never reports READY for a registry port the run on the same hosts refuses.
-func TestRunVerify_RegistryPortFollowsRunRouting(t *testing.T) {
-	const refusal = "--rmi-registry-port applies only to local single-host runs; distributed and remote engines use port 1099"
-	tests := []struct {
-		name, hosts string
-		flags       map[string]string
-		wantErr     string
-	}{
-		{"local custom registry", "127.0.0.1", map[string]string{flagRMIRegistryPort: "11099"}, ""},
-		{"lone remote custom registry", "entry.example", map[string]string{flagRMIRegistryPort: "11099"}, refusal},
-		{"distributed custom registry", "entry.example,worker.example", map[string]string{flagRMIRegistryPort: "11099"}, refusal},
-		{"lone remote default registry", "entry.example", map[string]string{flagRMIRegistryPort: "1099"}, ""},
-		{"lone remote api port", "entry.example", map[string]string{flagAPIPort: "19100"}, ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+// Verify takes a non-default --rmi-registry-port on any hosts, remote and several included: its
+// own test engine serves the registry there. spt run refuses one on remote hosts until
+// .scratch/distributed-run-api-port 02 lifts that.
+func TestRunVerify_RegistryPortReachesVerifierOnAnyHosts(t *testing.T) {
+	for _, hosts := range []string{"127.0.0.1", "entry.example", "entry.example,worker.example"} {
+		t.Run(hosts, func(t *testing.T) {
 			configs := stubVerifyHosts(t)
 			cmd := newVerifyTestCmd()
-			if err := cmd.Flags().Set("test-hosts", tt.hosts); err != nil {
-				t.Fatal(err)
-			}
-			for flag, value := range tt.flags {
+			for flag, value := range map[string]string{"test-hosts": hosts, flagRMIRegistryPort: "11099"} {
 				if err := cmd.Flags().Set(flag, value); err != nil {
 					t.Fatal(err)
 				}
 			}
 			var err error
 			captureStdout(t, func() { err = runVerify(cmd, nil) })
-			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("runVerify: %v", err)
-				}
-				if len(*configs) != 1 {
-					t.Fatalf("verified %d times, want 1", len(*configs))
-				}
-				return
+			if err != nil {
+				t.Fatalf("runVerify: %v", err)
 			}
-			if err == nil || err.Error() != tt.wantErr {
-				t.Fatalf("runVerify error = %v, want %q", err, tt.wantErr)
-			}
-			if len(*configs) != 0 {
-				t.Fatal("verified hosts with a registry port spt run refuses there")
+			if len(*configs) != 1 || (*configs)[0].RMIRegistryPort != 11099 {
+				t.Fatalf("verifier configs = %+v, want one with registry port 11099", *configs)
 			}
 		})
 	}

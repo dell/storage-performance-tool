@@ -1338,7 +1338,7 @@ spt verify [--test-hosts <hosts>] [options]
 | `--min-hosts` | `0` (all) | Minimum number of hosts that must pass |
 | `--network-mode` | `host` | Docker network mode: `host` (required for RMI) or `bridge` |
 | `--api-port` | `9999` | REST API port the test engine serves and verify checks |
-| `--rmi-registry-port` | `1099` | RMI registry port the test engine serves and verify checks. As with `spt run`, another value applies only to a local single-host verify |
+| `--rmi-registry-port` | `1099` | RMI registry port the test engine serves and verify checks. `spt run` takes another value only for a local single-host run |
 | `--rmi-port-start` | `40000` | Starting port for RMI range |
 | `--rmi-port-count` | `10` | Number of RMI ports to verify |
 | `--force-cleanup` | `false` | Automatically clean up conflicting containers without prompting |
@@ -1366,7 +1366,7 @@ For each specified host, the verify command:
 2. **Validates Docker** — daemon running, API accessible, version compatibility
 3. **Detects Port Conflicts** — checks the RMI registry and REST API ports (`--rmi-registry-port` and `--api-port`) and the RMI port range, identifies existing SPT containers
 4. **Starts Test Container** — launches SPT in node mode on those ports, validates startup and port mapping
-5. **Verifies Services** — waits up to 30 seconds for the RMI registry and the REST API on those ports; if they are not all reachable by then, names the ports last seen closed and any port it got no result for
+5. **Verifies Services** — waits up to 30 seconds for the RMI registry and the REST API on those ports; if they are not all reachable by then, names the ports last seen closed and any port it got no result for, or says that each port was seen open but never all at once
 6. **Lists NICs** — reads the node's interfaces and RDMA devices in the test container and, with `--interfaces`, plans the node's NIC set
 7. **Performs Cleanup** — removes test container, ensures clean state
 

@@ -1748,18 +1748,6 @@ func requestShutdownAll(ctx context.Context, hosts []*hostparse.HostInfo, apiPor
 	return nil
 }
 
-// refuseRemoteRegistryPort rejects a non-default --rmi-registry-port when the
-// hosts route through remote or distributed engines, which listen on 1099.
-// spt run and spt verify share it, so verify never reports READY for a port a
-// run on the same hosts refuses.
-func refuseRemoteRegistryPort(hosts []*hostparse.HostInfo) error {
-	if !shouldUseMultiHostOrchestrator(hosts) {
-		return nil
-	}
-	return fmt.Errorf("--%s applies only to local single-host runs; distributed and remote engines use port %d",
-		flagRMIRegistryPort, constants.DefaultRMIRegistryPort)
-}
-
 // validatePortFlag rejects a TCP port flag value outside 1-65535.
 func validatePortFlag(flag string, port int) error {
 	if port < 1 || port > 65535 {
@@ -2021,10 +2009,9 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			"hosts", testHostsStr,
 			"attach_existing", attachExisting)
 		useMultiHostOrchestrator := shouldUseMultiHostOrchestrator(hostInfos)
-		if params.RMIRegistryPort != 0 {
-			if err := refuseRemoteRegistryPort(hostInfos); err != nil {
-				return err
-			}
+		if useMultiHostOrchestrator && params.RMIRegistryPort != 0 {
+			return fmt.Errorf("--%s applies only to local single-host runs; distributed and remote engines use port %d",
+				flagRMIRegistryPort, constants.DefaultRMIRegistryPort)
 		}
 
 		// The local single-host runner owns Docker on the controller, so it

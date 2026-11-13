@@ -251,7 +251,7 @@ func TestWaitForPorts_NonDefaultPorts(t *testing.T) {
 		return port == 11099
 	}}
 	v := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{APIPort: 19100, RMIRegistryPort: 11099}, &MockCommandExecutor{}, network, &RealTimeProvider{})
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	check := v.waitForPorts(ctx, host, 5*time.Millisecond)
 	if check.Passed || !strings.HasSuffix(check.Message, "; Ports not accessible: [19100 (REST API)]") {
@@ -284,6 +284,37 @@ func TestWaitForPorts_FirstProbeCutShortHasNoResult(t *testing.T) {
 
 // Ports seen open in different rounds but never in the same one fail the wait, and the message
 // does not call them accessible.
+// The wait reports a failed round with every port seen open in some round as never all open at
+// once: round 1 sees the registry closed and the API open, round 2 the registry open and an API
+// probe the deadline cuts short, which keeps the API's open state.
+func TestWaitForPorts_OpenAcrossRoundsIsNotAccessible(t *testing.T) {
+	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true}
+	registryProbes, apiProbes := 0, 0
+	network := &startupNetworkChecker{probe: func(_ string, port int, timeout time.Duration) bool {
+		if port == constants.DefaultRMIRegistryPort {
+			registryProbes++
+			return registryProbes > 1
+		}
+		apiProbes++
+		if apiProbes == 1 {
+			return true
+		}
+		time.Sleep(timeout) // Times out at the deadline, which cut its budget short.
+		return false
+	}}
+	v := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{APIPort: constants.DefaultSptAPIPort}, &MockCommandExecutor{}, network, &RealTimeProvider{})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	check := v.waitForPorts(ctx, host, time.Millisecond)
+	if apiProbes < 2 {
+		t.Fatalf("the API was probed %d times; the test needs a second round", apiProbes)
+	}
+	want := "Service startup wait ended: context deadline exceeded; Ports each seen open, but never all in one round: [1099 (RMI registry) 9999 (REST API)]"
+	if check.Passed || check.Message != want {
+		t.Fatalf("check = %+v, want message %q", check, want)
+	}
+}
+
 func TestPortsMessage_OpenAcrossRoundsIsNotAccessible(t *testing.T) {
 	host := &hostparse.HostInfo{Host: "127.0.0.1", IsLocal: true}
 	v := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{APIPort: 19100}, &MockCommandExecutor{}, &startupNetworkChecker{}, &RealTimeProvider{})

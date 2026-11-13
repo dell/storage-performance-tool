@@ -157,12 +157,6 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("invalid host specification: %w", err)
 	}
 
-	if registryPort != constants.DefaultRMIRegistryPort {
-		if err := refuseRemoteRegistryPort(hosts); err != nil {
-			return err
-		}
-	}
-
 	// Default min-hosts to all if not specified
 	if minHosts == 0 {
 		minHosts = len(hosts)
