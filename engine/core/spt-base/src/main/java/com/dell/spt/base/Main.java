@@ -251,6 +251,26 @@ public final class Main {
 	}
 
 	/**
+	 * The message for {@code arg}, the first of {@code args} without the {@code --} prefix. It never
+	 * shows a value. An argument with {@code =} is named by the part before it: the value of a mistyped
+	 * {@code storage-auth-secret=...} is a credential. One without {@code =} may itself be a value given
+	 * after a space, as in {@code --storage-auth-secret s3cr3t}, so it is named by the argument before it.
+	 */
+	static String argumentWithoutPrefixMessage(final String[] args, final String arg) {
+		final String form = ": an argument takes the form --<name>=<value>; --help lists the options";
+		if (arg.contains(CliArgUtil.ARG_VAL_SEP)) {
+			return "Invalid argument: \"" + StringUtils.substringBefore(arg, CliArgUtil.ARG_VAL_SEP) + "\"" + form;
+		}
+		// Every argument before the first one without the prefix has it.
+		final int index = Arrays.asList(args).indexOf(arg);
+		if (index > 0) {
+			return "Invalid argument after \"" + StringUtils.substringBefore(args[index - 1], CliArgUtil.ARG_VAL_SEP)
+							+ "\", not shown in case it is a value" + form;
+		}
+		return "Invalid first argument, not shown in case it is a value" + form;
+	}
+
+	/**
 	 * Parses the command-line arguments and applies them to the configuration.
 	 *
 	 * <p>Option names are checked by the configuration itself, as it sets each value, so a map option
@@ -266,11 +286,7 @@ public final class Main {
 		try {
 			parsedArgs = CliArgUtil.parseArgs(args);
 		} catch (final IllegalArgumentNameException e) {
-			// Name only: the value of a mistyped "storage-auth-secret=..." is a credential.
-			throw new CliArgumentException(
-							"Invalid argument: \"" + StringUtils.substringBefore(e.getMessage(), CliArgUtil.ARG_VAL_SEP)
-											+ "\": an argument takes the form --<name>=<value>; --help lists the options",
-							e);
+			throw new CliArgumentException(argumentWithoutPrefixMessage(args, e.getMessage()), e);
 		}
 		final List<Map<String, Object>> aliasingConfig = config.listVal("aliasing");
 		final Map<String, String> configArgs;

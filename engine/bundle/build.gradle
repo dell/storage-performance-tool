@@ -211,7 +211,6 @@ task createVSCodeLaunch {
 			"request": "launch",
 			"mainClass": "com.dell.spt.base.Main",
 			"projectName": "spt-base",
-			"args": "--help",
 			"cwd": "\${workspaceFolder}/bundle/build/dist",
 			"classPaths": [
 				"\${workspaceFolder}/bundle/build/dist/spt.jar",
@@ -848,6 +847,11 @@ tasks.register('verifyEngineExitStatusCanary') {
 			expect('unknown-option', ['--bogus'], 2, ['Invalid configuration option: "bogus"'])
 			expect('dry-run-s3', s3Args + ['--dry-run'], 2, ['Invalid configuration option: "dry-run"'])
 			expect('no-prefix', ['load-op-limit-count=10'], 2, ['Invalid argument: "load-op-limit-count"'])
+			def spaced = expect('space-separated-value', ['--storage-auth-secret', 'canary-spaced-secret'], 2,
+				['Invalid argument after "--storage-auth-secret", not shown in case it is a value'])
+			if (spaced.output.contains('canary-spaced-secret')) {
+				throw new GradleException("Packaged engine 'space-separated-value' printed the value:\n${spaced.output}")
+			}
 			expect('unparseable-number-s3', s3Args + ['--load-op-limit-count=5OO'], 2,
 				['Invalid value for the option "load-op-limit-count": For input string: "5OO"'])
 			expect('not-a-boolean', ['--run-node=yes', '--run-port=1'], 2,

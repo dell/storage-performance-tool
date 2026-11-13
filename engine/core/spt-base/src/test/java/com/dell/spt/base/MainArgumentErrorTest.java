@@ -78,6 +78,20 @@ class MainArgumentErrorTest {
 	}
 
 	@Test
+	void aValueGivenAfterASpaceIsAnArgumentErrorThatHidesIt() {
+		assertEquals(
+						"Invalid argument after \"--storage-auth-secret\", not shown in case it is a value: an argument takes"
+										+ " the form --<name>=<value>; --help lists the options",
+						argumentError("--storage-driver-type=s3", "--storage-auth-secret", "s3cr3t-value"));
+		final var afterAValue = argumentError("--storage-auth-uid=uid-value", "s3cr3t-value");
+		assertTrue(afterAValue.startsWith("Invalid argument after \"--storage-auth-uid\", not shown"), afterAValue);
+		assertFalse(afterAValue.contains("uid-value"), afterAValue);
+		final var first = argumentError("s3cr3t-value", "--storage-driver-type=s3");
+		assertTrue(first.startsWith("Invalid first argument, not shown in case it is a value: "), first);
+		assertFalse(first.contains("s3cr3t-value"), first);
+	}
+
+	@Test
 	void aValueOfTheWrongTypeIsAnArgumentError() {
 		final var message = argumentError("--storage-net-nodeInterfaces=lo");
 		assertTrue(

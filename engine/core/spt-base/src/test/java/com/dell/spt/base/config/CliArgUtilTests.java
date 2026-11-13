@@ -128,8 +128,10 @@ class CliArgUtilTests {
 		schema.put("name", String.class);
 		schema.put("anything", Object.class);
 		final List<Map<String, Object>> aliasing = List.of(
-						Map.of(AliasingUtil.NAME, "read", AliasingUtil.TARGET, "op=read"),
+						Map.of(AliasingUtil.NAME, "read", AliasingUtil.TARGET, "name=read"),
 						Map.of(AliasingUtil.NAME, "old-count", AliasingUtil.TARGET, "count", AliasingUtil.DEPRECATED, true),
+						Map.of(AliasingUtil.NAME, "lo", AliasingUtil.TARGET, "net-nodeInterfaces-host=lo"),
+						Map.of(AliasingUtil.NAME, "old-loop", AliasingUtil.TARGET, "loop", AliasingUtil.DEPRECATED, true),
 						Map.of(AliasingUtil.NAME, "gone", AliasingUtil.DEPRECATED, true),
 						Map.of(AliasingUtil.NAME, "remote", AliasingUtil.DEPRECATED, true, AliasingUtil.REASON, "no such model."));
 
@@ -144,8 +146,10 @@ class CliArgUtilTests {
 										+ "\t--run-node=<true|false>\n"
 										+ "\t--run-port=<int>\n"
 										+ "\nAliases:\n"
-										+ "\t--read  same as --op=read\n"
+										+ "\t--read  same as --name=read\n"
 										+ "\t--old-count  same as --count (deprecated)\n"
+										+ "\t--lo  same as --net-nodeInterfaces-host=lo\n"
+										+ "\t--old-loop  no longer supported: --loop is not an option\n"
 										+ "\t--gone  no longer supported\n"
 										+ "\t--remote  not supported: no such model.\n",
 						CliArgUtil.usage(schema, aliasing));

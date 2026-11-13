@@ -60,7 +60,8 @@ public interface CliArgUtil {
 			text.append("\nAliases:\n");
 			for (final var entry : aliasingConfig) {
 				if (entry.get(AliasingUtil.NAME) instanceof String name) {
-					text.append('\t').append(ARG_PREFIX).append(name).append("  ").append(aliasMeaning(entry)).append('\n');
+					text.append('\t').append(ARG_PREFIX).append(name).append("  ").append(aliasMeaning(entry, options))
+									.append('\n');
 				}
 			}
 		}
@@ -101,14 +102,37 @@ public interface CliArgUtil {
 		return "value";
 	}
 
-	private static String aliasMeaning(final Map<String, Object> aliasingEntry) {
+	/**
+	 * What an alias means. {@code options} maps each option's {@code --} name to its usage line; an alias
+	 * whose target is not among them is refused like an unknown option, so it is listed as unsupported.
+	 */
+	private static String aliasMeaning(final Map<String, Object> aliasingEntry, final Map<String, String> options) {
 		final var deprecated = Boolean.TRUE.equals(aliasingEntry.get(AliasingUtil.DEPRECATED));
 		if (aliasingEntry.get(AliasingUtil.TARGET) instanceof String target) {
+			final int valueAt = target.indexOf(ARG_VAL_SEP);
+			final var targetName = ARG_PREFIX + (valueAt < 0 ? target : target.substring(0, valueAt));
+			if (!isOption(options, targetName)) {
+				return "no longer supported: " + targetName + " is not an option";
+			}
 			return "same as " + ARG_PREFIX + target + (deprecated ? " (deprecated)" : "");
 		} else if (aliasingEntry.get(AliasingUtil.REASON) instanceof String reason) {
 			return "not supported: " + reason;
 		}
 		return "no longer supported";
+	}
+
+	/** Whether {@code name} is an option, or a free key of a map-typed option such as {@code --<map>-<key>}. */
+	private static boolean isOption(final Map<String, String> options, final String name) {
+		if (options.containsKey(name)) {
+			return true;
+		}
+		for (final var option : options.entrySet()) {
+			if (option.getValue().endsWith(ARG_PATH_SEP + "<key>" + ARG_VAL_SEP + "<value>")
+							&& name.startsWith(option.getKey() + ARG_PATH_SEP)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	@SuppressWarnings("CollectionWithoutInitialCapacity")
