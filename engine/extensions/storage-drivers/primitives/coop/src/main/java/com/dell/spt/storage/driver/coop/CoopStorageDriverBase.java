@@ -328,14 +328,18 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	}
 
 	/**
-	 * Declares that every submission of an operation starts its request timing again, so the
-	 * completion or abort of a multipart CREATE is timed as an exchange of its own. The parent's
-	 * timing is then reset before that finalization is enqueued: it still holds its initiation's
-	 * response times, which would make the new request look finished after its response started.
-	 * A driver that starts the timing only on an operation's first submission keeps its
-	 * initiation's request times through the finalization, so its timing is left as it is.
+	 * Declares whether this driver times a multipart upload's completion or abort as a new exchange
+	 * of its own, calling {@link Operation#startRequest()} for it. When this returns {@code true},
+	 * the parent's timing is reset before that exchange, so the earlier exchange's response times
+	 * do not make the new request look finished after its response started, and the parent's
+	 * result carries the completion's or abort's own times.
+	 *
+	 * <p>The default is {@code false}: the parent keeps its earlier timing through the completion
+	 * or abort, as before this hook existed. A driver that calls {@code startRequest()} for the
+	 * completion or abort must return {@code true}. A composite READ's finalization is never reset,
+	 * because it sends no request.
 	 */
-	protected boolean timesEverySubmission() {
+	protected boolean timesUploadFinalization() {
 		return false;
 	}
 
@@ -949,9 +953,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				// Execute once again to finalize the composite operation, for example
 				// completing the multipart upload. The finalization gate prevents
 				// concurrent part completions from enqueueing the same parent twice.
-				// See timesEverySubmission(). A composite READ's finalization sends no request, and its
-				// duration runs from its initial pass, so its timing is kept.
-				if (OpType.CREATE.equals(parentOp.type()) && timesEverySubmission()) {
+				// See timesUploadFinalization(). A composite READ's finalization sends no request, and
+				// its duration runs from its initial pass, so its timing is kept.
+				if (OpType.CREATE.equals(parentOp.type()) && timesUploadFinalization()) {
 					parentOp.resetTiming();
 				}
 				enqueueChildOp((O) parentOp, op, "completion operation");

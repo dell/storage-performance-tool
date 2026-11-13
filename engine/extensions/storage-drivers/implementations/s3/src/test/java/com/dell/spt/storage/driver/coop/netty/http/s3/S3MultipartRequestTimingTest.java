@@ -38,9 +38,9 @@ import org.junit.jupiter.api.Timeout;
 
 /**
  * A multipart upload's parent makes two exchanges on one operation, its initiation and then its
- * completion, and a retried part makes another on its part. Each exchange starts from cleared
- * timing, so none logs a false "Request is finished … after the response is started" on the
- * Errors logger, and each result carries its own exchange's times. A composite READ's
+ * completion or abort, and a retried part makes another on its part. Each exchange starts from
+ * cleared timing, so none logs a false "Request is finished … after the response is started" on
+ * the Errors logger, and each result carries its own exchange's times. A composite READ's
  * finalization sends no request, so its result keeps the timing of its initial pass. Each case
  * runs on the default route and on a NIC set, over {@link NicSetLoopback}'s stub.
  */
@@ -49,6 +49,9 @@ final class S3MultipartRequestTimingTest {
 
 	private static final Operation.Status SUCC = Operation.Status.SUCC;
 	private static final int PARTS = 5;
+	/** {@code CoopStorageDriverBase.MAX_PART_RETRIES}. */
+	private static final int PART_RETRIES = 3;
+	private static final String FALSE_LINE = "Request is finished";
 	private static final String DRAINED = "multipart-request-timing-log-capture-drained";
 
 	private final NicSetLoopback stub = new NicSetLoopback();
@@ -60,7 +63,6 @@ final class S3MultipartRequestTimingTest {
 
 	@BeforeEach
 	void start() {
-		assumeTrue(Epoll.isAvailable(), "a NIC set needs the epoll transport");
 		errors.attach();
 	}
 
@@ -98,6 +100,16 @@ final class S3MultipartRequestTimingTest {
 	}
 
 	@Test
+	void anAbortOnTheDefaultRouteLogsNoRequestStateFailureAndIsTimedByItsOwnExchange() throws Exception {
+		anAbortLogsNoRequestStateFailureAndIsTimedByItsOwnExchange(defaultRoute());
+	}
+
+	@Test
+	void anAbortOnANicSetLogsNoRequestStateFailureAndIsTimedByItsOwnExchange() throws Exception {
+		anAbortLogsNoRequestStateFailureAndIsTimedByItsOwnExchange(nicSet());
+	}
+
+	@Test
 	void aCompositeReadOnTheDefaultRouteKeepsItsInitialRequestStartAndLogsNothing() throws Exception {
 		aCompositeReadKeepsItsInitialRequestStartAndLogsNothing(defaultRoute());
 	}
@@ -109,7 +121,7 @@ final class S3MultipartRequestTimingTest {
 
 	private void anUploadLogsNoRequestStateFailureAndItsParentTimesItsCompletion(final Run run) throws Exception {
 		errors.drained();
-		final var results = upload(run, "clean");
+		final var results = upload(run, "clean", PARTS);
 
 		final var parent = finalResult(results);
 		assertEquals(SUCC, parent.status(), parent::toString);
@@ -122,14 +134,15 @@ final class S3MultipartRequestTimingTest {
 			// The parent's result is its completion's exchange, which starts once every part has ended.
 			assertTrue(parent.reqTimeStart() > part.respTimeDone(), () -> "parent " + times(parent) + ", part " + times(part));
 		}
-		assertEquals(List.of(), errors.drained(), "no request-state failure was logged");
+		// The Errors logger is shared by the whole test JVM, so only this defect's line is checked.
+		assertEquals(List.of(), falseLines(errors.drained()));
 	}
 
 	private void aRetriedPartLogsNoRequestStateFailureAndRecordsItsLastAttempt(final Run run) throws Exception {
 		// Object requests count from 1, the initiation first: the first part to arrive is answered 503.
 		stub.failObjectRequest = n -> n == 2;
 		errors.drained();
-		final var results = upload(run, "retried");
+		final var results = upload(run, "retried", PARTS);
 
 		final var parent = finalResult(results);
 		assertEquals(SUCC, parent.status(), parent::toString);
@@ -156,15 +169,49 @@ final class S3MultipartRequestTimingTest {
 		assertEquals(List.of(), lines.stream().filter(line -> line.contains("IllegalStateException")).toList());
 	}
 
+	private void anAbortLogsNoRequestStateFailureAndIsTimedByItsOwnExchange(final Run run) throws Exception {
+		// Every part is answered 503, so the part runs out of retries and the upload is aborted. One
+		// part, so the upload's abort is its last result.
+		stub.failParts = true;
+		errors.drained();
+		final var results = upload(run, "aborted", 1);
+
+		final var composites = results.stream().filter(result -> result instanceof CompositeDataOperation<?>).toList();
+		assertEquals(2, composites.size(), "the initiation and the abort: " + results);
+		final var initiation = composites.get(0);
+		final var parent = composites.get(1);
+		assertEquals(SUCC, initiation.status(), initiation::toString);
+		assertNotEquals(SUCC, parent.status(), parent::toString);
+		assertEquals(1, stub.requests().stream().filter(S3MultipartRequestTimingTest::isAbort).count(),
+						() -> "one abort was sent: " + stub.requests());
+		final var parts = parts(results);
+		assertEquals(1 + PART_RETRIES, parts.size(), results::toString);
+		assertEquals(PART_RETRIES, parts.get(parts.size() - 1).retryCount(), results::toString);
+		// The parent's result is the abort's exchange, which starts once the part's last attempt has ended.
+		assertTimedInOrder(parent);
+		assertTrue(parent.reqTimeStart() > initiation.respTimeDone(), () -> "abort " + times(parent) + ", initiation " + times(initiation));
+		for (final var part : parts) {
+			assertNotEquals(SUCC, part.status(), part::toString);
+			assertTrue(parent.reqTimeStart() > part.respTimeDone(), () -> "abort " + times(parent) + ", part " + times(part));
+		}
+		// Each failed attempt's 503 and its retry are warned of; a request-state failure is not.
+		final var lines = errors.drained();
+		assertTrue(lines.stream().anyMatch(line -> line.contains("part #" + parts.get(0).partNumber() + " failed")), lines::toString);
+		assertEquals(List.of(), lines.stream().filter(line -> line.contains("IllegalStateException")).toList());
+	}
+
 	private void aCompositeReadKeepsItsInitialRequestStartAndLogsNothing(final Run run) throws Exception {
+		// A literal name: the initial pass's completion can rename the item to its path before the
+		// test thread reads it.
+		final var name = "read";
 		stub.absentObjectSize = (long) PARTS * ITEM_SIZE;
-		final var read = new CompositeDataOperationImpl<DataItem>(0, OpType.READ, new DataItemImpl("read", 7, (long) PARTS * ITEM_SIZE),
+		final var read = new CompositeDataOperationImpl<DataItem>(0, OpType.READ, new DataItemImpl(name, 7, (long) PARTS * ITEM_SIZE),
 						null, "/bucket", CREDENTIAL, null, 0, ITEM_SIZE);
 		errors.drained();
 
 		final var start = System.nanoTime();
 		assertTrue(run.driver().put(read));
-		final var results = await(run, read.item().name());
+		final var results = await(run, name);
 		final var wallMicros = (System.nanoTime() - start) / 1_000;
 
 		final var composites = results.stream().filter(result -> result instanceof CompositeDataOperation<?>).toList();
@@ -187,6 +234,7 @@ final class S3MultipartRequestTimingTest {
 	}
 
 	private Run nicSet() throws Exception {
+		assumeTrue(Epoll.isAvailable(), "a NIC set needs the epoll transport");
 		return started(NicSetLoopback.driver(storage(stub.listeners(2), nics(2), 2), false));
 	}
 
@@ -198,8 +246,8 @@ final class S3MultipartRequestTimingTest {
 		return new Run(driver, results);
 	}
 
-	private static List<Operation<?>> upload(final Run run, final String name) throws InterruptedException {
-		final var upload = new CompositeDataOperationImpl<DataItem>(0, OpType.CREATE, new DataItemImpl(name, 7, (long) PARTS * ITEM_SIZE),
+	private static List<Operation<?>> upload(final Run run, final String name, final int parts) throws InterruptedException {
+		final var upload = new CompositeDataOperationImpl<DataItem>(0, OpType.CREATE, new DataItemImpl(name, 7, (long) parts * ITEM_SIZE),
 						null, "/bucket", CREDENTIAL, null, 0, ITEM_SIZE);
 		assertTrue(run.driver().put(upload));
 		return await(run, name);
@@ -234,6 +282,15 @@ final class S3MultipartRequestTimingTest {
 	private static List<PartialDataOperation<?>> parts(final List<Operation<?>> results) {
 		return results.stream().filter(result -> result instanceof PartialDataOperation<?>)
 						.<PartialDataOperation<?>> map(result -> (PartialDataOperation<?>) result).toList();
+	}
+
+	/** The false "Request is finished … after the response is started" lines among {@code lines}. */
+	private static List<String> falseLines(final List<String> lines) {
+		return lines.stream().filter(line -> line.contains(FALSE_LINE)).toList();
+	}
+
+	private static boolean isAbort(final NicSetLoopback.Request request) {
+		return "DELETE".equals(request.method()) && request.query() != null && request.query().contains("uploadId=");
 	}
 
 	/** All four times of an exchange are set and in order. */

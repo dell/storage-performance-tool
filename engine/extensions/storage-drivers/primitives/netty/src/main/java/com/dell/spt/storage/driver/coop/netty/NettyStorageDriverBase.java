@@ -938,9 +938,12 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 		return true;
 	}
 
-	/** {@link #submit(Operation)} and direct dispatch start the request timing of every operation they send. */
+	/**
+	 * {@link #submit(Operation)} and direct dispatch call {@code startRequest()} for every request
+	 * they send, a multipart upload's completion or abort included.
+	 */
 	@Override
-	protected boolean timesEverySubmission() {
+	protected boolean timesUploadFinalization() {
 		return true;
 	}
 
