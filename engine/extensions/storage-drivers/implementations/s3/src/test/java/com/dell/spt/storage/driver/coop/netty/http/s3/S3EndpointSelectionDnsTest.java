@@ -103,7 +103,7 @@ final class S3EndpointSelectionDnsTest {
 		requests.stream().filter(r -> "PUT".equals(r.method()))
 						.forEach(r -> assertEquals("close", r.connection()));
 		awaitNoOpenConnections(run);
-		final var counters = run.driver().counters().snapshot();
+		final var counters = awaitCloses(run, 5);
 		assertEquals(dns.received().size(), counters.lookups());
 		assertEquals(5, counters.selections().values().stream().mapToLong(Long::longValue).sum());
 		assertEquals(5, counters.connectsNew());
@@ -245,6 +245,10 @@ final class S3EndpointSelectionDnsTest {
 		}
 		final var seconds = (System.nanoTime() - started) / 1e9;
 
+		final var distinctPairs = requests.stream().map(r -> r.node() + ":" + r.clientPort()).distinct().count();
+		System.out.printf("per-request DNS loopback: listener port %d, %d requests in %.2f s (%.0f req/s), concurrency 8, "
+						+ "%d of %d node:clientPort pairs distinct%n", port, operations, seconds, operations / seconds,
+						distinctPairs, requests.size());
 		assertEquals(attempts, dns.received().size());
 		// One connection per request, seen from the server: the JDK HttpServer answers a request that
 		// carries Connection: close and then closes the connection. Do not assert distinct client ports:
@@ -263,10 +267,6 @@ final class S3EndpointSelectionDnsTest {
 		// This mode never pools, so this only guards against the route being bound as pooled.
 		assertEquals(0, counters.connectsReused(), counters::toString);
 		assertEquals(attempts, counters.closes(), counters::toString);
-		final var distinctPairs = requests.stream().map(r -> r.node() + ":" + r.clientPort()).distinct().count();
-		System.out.printf("per-request DNS loopback: listener port %d, %d requests in %.2f s (%.0f req/s), concurrency 8, "
-						+ "%d of %d node:clientPort pairs distinct%n", port, operations, seconds, operations / seconds,
-						distinctPairs, requests.size());
 	}
 
 	// ---------- fixtures ----------
