@@ -939,8 +939,8 @@ When multipart uploads are used, the engine produces a `parts.upload.csv` artifa
 - Part uploads share the `--threads` concurrency pool with regular operations.
 - If `--part-size` is omitted, objects are uploaded as single PUTs regardless of size.
 - In a `read` workload, `--part-size` applies to the seed phase and to the read phase. The seed writes each object larger than the part size with a multipart upload. The read phase splits each such object into one range GET per part and sends them in parallel. This works with the default Netty driver and with `--s3-driver rdma`; on `rdma`, these range GETs go over HTTP (see [Threshold-Based Routing](S3_RDMA.md#threshold-based-routing)).
-- With `--s3-driver aws`, a `read` with `--part-size` fails every read of an object larger than the part size: the `s3-aws` driver does not split reads. To seed with multipart uploads on that driver, write with `--part-size --save-items` and read with `--items-file`.
-- A `read` with `--items-file` has no seed phase and does not pass `--part-size` to the read phase, so each object is read with one whole GET.
+- With `--s3-driver aws`, a seeded `read` with `--part-size` fails every read of an object larger than the part size: the `s3-aws` driver does not split reads. To seed with multipart uploads on that driver, write with `--part-size <size> --save-items` and read with `--items-file`.
+- A `read` with `--items-file` has no seed phase and does not pass `--part-size` to the read phase, so each object is read whole, not split by `--part-size`. An `--engine-override` of `item.data.ranges.threshold` is the exception: it applies to this read too.
 
 ### Read Workload
 

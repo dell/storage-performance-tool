@@ -88,9 +88,9 @@ The `--rdma-threshold` flag controls the cutoff:
 
 The default of `1MB` is a good starting point.
 
-Some operations are never proposed for RDMA and use HTTP regardless of size: ranged reads (fixed or random byte ranges), the range GETs of a read split by `--part-size` (a range GET carries no RDMA token), multipart initiate/complete requests (their upload parts do use RDMA), and objects larger than one RDMA buffer (2 GiB − 1).
+Some operations are never proposed for RDMA and use HTTP regardless of size: ranged reads (fixed or random byte ranges), the range GETs of a read split by `--part-size`, multipart initiate/complete requests (their upload parts do use RDMA), and objects larger than one RDMA buffer (2 GiB − 1).
 
-So in a seeded `read` with `--part-size`, the seed's upload parts can use RDMA, but the read phase reads over HTTP, as parallel range GETs. A read from an item file does not split objects: each GET reads a whole object and is routed by the rules above (see [Write-Then-Read Workflow](SPT_SYNTAX.md#write-then-read-workflow)).
+So in a seeded `read` with `--part-size`, the seed's upload parts can use RDMA, but the read phase reads over HTTP, as parallel range GETs. A read from an item file does not split objects, unless an `--engine-override` sets `item.data.ranges.threshold`: each GET reads a whole object and is routed by the rules above (see [Write-Then-Read Workflow](SPT_SYNTAX.md#write-then-read-workflow)).
 
 ---
 
