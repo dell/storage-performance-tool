@@ -257,7 +257,7 @@ class HttpVersioningSynonymTest {
 			final String message = event.getMessage().getFormattedMessage();
 			if (message.contains(SYNONYM_PATH)) {
 				messages.add(message);
-				warn &= event.getLevel() == org.apache.logging.log4j.Level.WARN;
+				warn &= org.apache.logging.log4j.Level.WARN.equals(event.getLevel());
 			}
 		}
 
