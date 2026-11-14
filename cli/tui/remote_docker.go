@@ -158,13 +158,24 @@ func (m *RemoteDockerManager) cleanupStaging(ctx context.Context) error {
 	return nil
 }
 
+// ensureStagingDir creates the remote staging directory once and keeps its
+// path while it may exist. A set path is reused as is, so a caller that needs
+// a fresh directory removes the old one first (SetFileMountsContext does).
+//
+// When the mkdir fails with ctx still live, the failure is definite (for
+// example the path exists as a file) and the path is forgotten. When ctx has
+// ended (deadline or cancel), ssh may have run the mkdir before it was cut
+// off, so the path stays owned (HasManagedResources) and the next cleanup runs
+// an rm -rf that is harmless if the directory does not exist.
 func (m *RemoteDockerManager) ensureStagingDir(ctx context.Context) error {
 	if m.stagingDir != "" {
 		return nil
 	}
 	m.stagingDir = fmt.Sprintf("/tmp/spt-items-%d", time.Now().UnixNano())
 	if _, stderr, err := m.exec.ExecuteCommand(ctx, m.host, []string{"mkdir", "-p", m.stagingDir}); err != nil {
-		m.stagingDir = ""
+		if ctx.Err() == nil {
+			m.stagingDir = ""
+		}
 		return fmt.Errorf("create remote staging directory on %s: %w (stderr: %s)", m.host.Original, err, stderr)
 	}
 	return nil
@@ -188,7 +199,8 @@ func (m *RemoteDockerManager) SetFileMounts(mounts []scenario.FileMount) error {
 //     connection only when an SPT command opened it; one opened outside SPT
 //     follows its own keepalive settings.
 //   - Each mkdir, chmod and rm around the copies gets its own
-//     stagingCommandTimeout (30 s).
+//     stagingCommandTimeout (30 s). A mkdir cut off by that timeout or a
+//     cancel keeps the directory owned for the rollback (ensureStagingDir).
 //   - When a copy or chmod fails while ctx is live, the staging directory is
 //     removed on a context derived from ctx and bounded by
 //     remoteCleanupTimeout (10 s), so a later cancel ends the removal at once.
@@ -204,6 +216,9 @@ func (m *RemoteDockerManager) SetFileMountsContext(ctx context.Context, mounts [
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Remove any earlier staging directory first, including a path kept after
+	// a cut-off mkdir, so ensureStagingDir below never reuses a path that may
+	// not exist.
 	if err := m.withStagingCommandTimeout(ctx, m.cleanupStaging); err != nil {
 		return err
 	}
