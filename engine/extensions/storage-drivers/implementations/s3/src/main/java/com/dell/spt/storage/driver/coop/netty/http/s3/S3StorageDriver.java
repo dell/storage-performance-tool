@@ -135,7 +135,12 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					BUCKET_LIST_QUERY = ThreadLocal.withInitial(StringBuilder::new);
 	//for v4 only
 	// TODO: compare to ConcurrentHashMap
+	// Each thread's signing function per secret. SPT's own function keeps that secret's key of the last
+	// date itself; a function an extension puts here is memoized by date in signingKeyCache.
 	protected final ThreadLocal<Map<String, SigningKeyCreateFunction>> signingKeyCreateFunctionCache = ThreadLocal.withInitial(HashMap::new);
+	// Each thread's keys by date, for functions an extension puts in signingKeyCreateFunctionCache only.
+	// It keeps one key per date, whatever the secret, as it always has; SPT's own keys are not in it,
+	// and SPT's own function never reads it, so a key put here is used only by such a function.
 	protected final ThreadLocal<Map<String, byte[]>> signingKeyCache = ThreadLocal.withInitial(HashMap::new);
 	// for v2 only
 	protected static final ThreadLocal<Map<String, Mac>> MAC_BY_SECRET = ThreadLocal.withInitial(HashMap::new);
@@ -439,35 +444,62 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 	}
 
-	private final class SigningKeyCreateFunctionImpl
+	/**
+	 * The SigV4 signing key of one secret. It keeps the key of the last date it was asked for, so a
+	 * secret's key is derived once a day on each thread, whatever other secrets the thread signs with.
+	 * Region and service name are the driver's own and never vary, so the secret and the date are
+	 * all the key depends on.
+	 *
+	 * <p>Each instance is reachable only from one thread's {@link #signingKeyCreateFunctionCache}
+	 * map, so only that thread reads or writes its date and key. It is static and copies the
+	 * driver's region and service name, so a signing thread's cache, which outlives the driver,
+	 * keeps no driver reachable.
+	 *
+	 * <p>It is final, so the signing path's check for it is a single class comparison: only this
+	 * function bypasses {@link #signingKeyCache}.
+	 */
+	static final class SigningKeyCreateFunctionImpl
 					implements SigningKeyCreateFunction {
 
-		String secret;
+		private final String secret;
+		private final String region;
+		private final String service;
+		private String date;
+		private byte[] key;
 
-		public SigningKeyCreateFunctionImpl(final String secret) {
+		SigningKeyCreateFunctionImpl(final String secret, final String region, final String service) {
 			this.secret = secret;
-
+			this.region = region;
+			this.service = service;
 		}
 
+		/**
+		 * The signing key for {@code datestamp}, derived only when the date is not the last one. Each
+		 * derivation returns a new array, and a returned key is never changed.
+		 */
 		@Override
 		public byte[] apply(final String datestamp) {
-			return getSignatureKey(secret, datestamp);
+			if (!datestamp.equals(date)) {
+				key = getSignatureKey(secret, datestamp, region, service);
+				date = datestamp;
+			}
+			return key;
 		}
 	}
 
-	private byte[] HmacSHA256(String data, byte[] key) throws NoSuchAlgorithmException, InvalidKeyException {
+	private static byte[] HmacSHA256(String data, byte[] key) throws NoSuchAlgorithmException, InvalidKeyException {
 		Mac mac = Mac.getInstance(S3Api.SIGN_V4_METHOD);
 		mac.init(new SecretKeySpec(key, "RawBytes"));
 		return mac.doFinal(data.getBytes(UTF_8));
 	}
 
-	private byte[] getSignatureKey(String key, String dateStamp) {
+	private static byte[] getSignatureKey(String key, String dateStamp, String region, String service) {
 		byte[] kSigning = new byte[0];
 		try {
 			byte[] kSecret = ("AWS4" + key).getBytes(UTF_8);
 			byte[] kDate = HmacSHA256(dateStamp, kSecret);
-			byte[] kRegion = HmacSHA256(awsRegion, kDate);
-			byte[] kService = HmacSHA256(sigV4ServiceName, kRegion);
+			byte[] kRegion = HmacSHA256(region, kDate);
+			byte[] kService = HmacSHA256(service, kRegion);
 			kSigning = HmacSHA256("aws4_request", kService);
 			int[] m = new int[100];
 			for (int i = 0; i < kSigning.length; i++) {
@@ -2407,12 +2439,20 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	@Override
 	protected void doClose() throws IOException {
-		final CompletableFuture<?>[] pending = multipartCleanupTasks.toArray(CompletableFuture[]::new);
-		if (pending.length > 0) {
-			CompletableFuture.allOf(pending).join();
+		try {
+			final CompletableFuture<?>[] pending = multipartCleanupTasks.toArray(CompletableFuture[]::new);
+			if (pending.length > 0) {
+				CompletableFuture.allOf(pending).join();
+			}
+			multipartCleanupTasks.clear();
+			super.doClose();
+		} finally {
+			// The closing thread's entries go now, even when a cleanup task or super.doClose() fails.
+			// Other signing threads keep theirs until they end; SPT's cached functions are static, so
+			// those entries keep no driver reachable.
+			signingKeyCreateFunctionCache.remove();
+			signingKeyCache.remove();
 		}
-		multipartCleanupTasks.clear();
-		super.doClose();
 	}
 
 	@Override
@@ -2500,8 +2540,13 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					Loggers.MSG.trace(
 									"SigV4 payload header present={}", httpHeaders.contains(S3Api.AMZ_PAYLOAD_HEADER));
 				}
-				final var signingKeyCreateFunction = signingKeyCreateFunctionCache.get().computeIfAbsent(secret, SigningKeyCreateFunctionImpl::new);
-				final var signingKey = signingKeyCache.get().computeIfAbsent(date, signingKeyCreateFunction);
+				final var signingKeyCreateFunction = signingKeyCreateFunctionCache.get().computeIfAbsent(
+								secret, s -> new SigningKeyCreateFunctionImpl(s, awsRegion, sigV4ServiceName));
+				// SPT's own function keeps its secret's key of the last date. A function an extension put in
+				// the cache is memoized by date, as it always was.
+				final byte[] signingKey = signingKeyCreateFunction instanceof SigningKeyCreateFunctionImpl builtIn
+								? builtIn.apply(date)
+								: signingKeyCache.get().computeIfAbsent(date, signingKeyCreateFunction);
 				final Map<String, String> sortedHeaders = getNonCanonicalHeaders(httpHeaders);
 				final var canonicalForm = getCanonicalV4(httpHeaders, sortedHeaders, httpMethod, dstUriPath);
 				byte[] encodedhash = THREAD_LOCAL_SHA256.get().digest(
