@@ -1680,26 +1680,75 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		return httpRequest;
 	}
 
+	/**
+	 * Whether a response to {@code op} names its item {@code key~versionId}: true when {@link
+	 * #httpRequest} sends {@code op} through {@link #objectVersioningRequest} under the legacy
+	 * convention, which reads the version from the item name. The response handler then replaces the
+	 * trailing {@code ~versionId} with the returned one instead of appending a second suffix.
+	 */
+	final boolean namesLegacyVersion(final O op) {
+		return versioning
+						&& !taggingEnabled
+						&& !integrityMetadataEnabled()
+						&& op.requestedVersionId() == null
+						&& !(op instanceof DeleteRequestOperation)
+						&& !(op instanceof CompositeDataOperation)
+						&& !(op instanceof PartialDataOperation)
+						&& !(op instanceof ListOperation);
+	}
+
+	/**
+	 * {@code name} with its trailing {@code ~versionId}, if any, replaced by {@code ~versionId}: the
+	 * split {@link #objectVersioningRequest} makes, so a name never collects two suffixes.
+	 */
+	static String withLegacyVersion(final String name, final String versionId) {
+		final int indexOfVersionStart = name.lastIndexOf('~');
+		final String key = indexOfVersionStart == -1 ? name : name.substring(0, indexOfVersionStart);
+		return key + '~' + versionId;
+	}
+
 	HttpRequest objectVersioningRequest(final O op, final String nodeAddr) throws URISyntaxException {
-		final var srcPath = op.srcPath();
 		final var item = (I) op.item();
+		final boolean explicitVersionCarrier = integrityMetadataEnabled() || op.requestedVersionId() != null;
+		if (explicitVersionCarrier) {
+			return objectVersioningRequest(op, item, op.requestedVersionId(), true, nodeAddr);
+		}
+		// The legacy key~version convention, only for ordinary mode. The URI is built from the key
+		// alone, and the item keeps its full name, so a request built again for the same operation (a
+		// retry) selects the same version.
+		final String name = item.name();
+		final int indexOfVersionStart = name.lastIndexOf('~');
+		if (indexOfVersionStart == -1) {
+			return objectVersioningRequest(op, item, null, false, nodeAddr);
+		}
+		item.name(name.substring(0, indexOfVersionStart));
+		try {
+			return objectVersioningRequest(op, item, name.substring(indexOfVersionStart + 1), false, nodeAddr);
+		} finally {
+			item.name(name);
+		}
+	}
+
+	private HttpRequest objectVersioningRequest(
+					final O op,
+					final I item,
+					final String versionId,
+					final boolean explicitVersionCarrier,
+					final String nodeAddr)
+					throws URISyntaxException {
+		final var srcPath = op.srcPath();
 		final var opType = op.type();
 		final HttpHeaders httpHeaders = new DefaultHttpHeaders();
-		final boolean explicitVersionCarrier = integrityMetadataEnabled() || op.requestedVersionId() != null;
-		String versionId = op.requestedVersionId();
-		if (!explicitVersionCarrier) {
-			// Retain the legacy key~version convention only for ordinary mode.
-			final int indexOfVersionStart = item.name().lastIndexOf('~');
-			if (indexOfVersionStart != -1) {
-				versionId = item.name().substring(indexOfVersionStart + 1);
-				item.name(item.name().substring(0, indexOfVersionStart));
-			}
-		}
 		httpHeaders.set(HttpHeaderNames.HOST, nodeAddr);
 		final var httpMethod = dataHttpMethod(opType);
 		final String objectUri = dataUriPath(item, srcPath, op.dstPath(), op.type());
+		// GetObject and HeadObject (a READ, also with read-metadata-only, and a STAT) select a version
+		// with the versionId query; x-amz-version-id is a response header, which S3 ignores on a request.
 		final boolean useVersionQuery = versionId != null
-						&& (explicitVersionCarrier || OpType.DELETE.equals(opType));
+						&& (explicitVersionCarrier
+										|| OpType.DELETE.equals(opType)
+										|| OpType.READ.equals(opType)
+										|| OpType.STAT.equals(opType));
 		final String uri = useVersionQuery
 						? objectUri + "?versionId=" + percentEncode(versionId)
 						: objectUri;
@@ -1723,15 +1772,13 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			}
 			break;
 		case READ:
-			if (!explicitVersionCarrier && versionId != null) {
-				httpHeaders.set("x-amz-version-id", versionId);
-			}
 			httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 			if (op instanceof DataOperation) {
 				applyRangesHeaders(httpHeaders, (DataOperation) op);
 			}
 			break;
 		case UPDATE:
+			// S3 has no in-place update of a version; the header is kept as it was (out of scope).
 			if (!explicitVersionCarrier && versionId != null) {
 				httpHeaders.set("x-amz-version-id", versionId);
 			}

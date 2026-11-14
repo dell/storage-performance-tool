@@ -245,7 +245,11 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 						&& !integrityEnabled
 						&& versionId != null
 						&& !(op instanceof DeleteRequestOperation)) {
-			op.item().name(op.item().name() + "~" + versionId);
+			final Item item = op.item();
+			// The request builder leaves a key~versionId item its full name, so replace that suffix.
+			item.name(s3Driver != null && s3Driver.namesLegacyVersion(op)
+							? S3StorageDriver.withLegacyVersion(item.name(), versionId)
+							: item.name() + "~" + versionId);
 		}
 		if (integrityEnabled
 						&& channel != null

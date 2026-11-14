@@ -426,6 +426,20 @@ make sure to enable `--storage-object-versioning` flag and specify `item-output-
 Commands written for Mongoose 3.x can keep `--storage-net-http-versioning` instead, see
 [4.3.4](#434-mongoose-versioning-flag).
 
+With versioning on, the `s3` and `s3-rdma` drivers read the version from a `key~versionId` item name:
+
+* READ (a `GET`, or a `HEAD` with `--storage-net-http-read-metadata-only`), STAT (a `HEAD`) and DELETE select that
+  version with the `versionId` query parameter, for example `GET /bucket/key?versionId=<versionId>`.
+* UPDATE sends the version in an `x-amz-version-id` request header. S3 has no in-place update of a version: a `PUT`
+  always makes a new one.
+* A successful operation renames the item `key~<versionId>` with the version the target returns, so the output items
+  file records the version that was read, written or deleted.
+* A failed operation keeps its `key~versionId` name, so with `--load-op-retry=true` the retry selects the same
+  version.
+* A copy (a CREATE with `--item-input-path`) and an item above the multipart threshold (`item-data-ranges-threshold`,
+  see [4.4](#44-multipart-upload)) don't select a version: they act on the current version, or on an object literally
+  named `key~versionId`.
+
 #### 4.3.1. PUT versions
 
 There are two approaches to do load testing with versioning. But first stage is common:

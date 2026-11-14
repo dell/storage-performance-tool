@@ -1258,16 +1258,17 @@ public class S3StorageDriverTest {
 
 	// ---------- objectVersioningRequest ----------
 	@Test
-	void objectVersioningRequest_setsVersionHeaderAndPath() throws Exception {
+	void objectVersioningRequest_selectsTheVersionWithTheQuery() throws Exception {
 		Config cfg = baseConfig(true, 2, false, null, "127.0.0.1");
 		TestS3Driver drv = new TestS3Driver(cfg);
 		Item item = new ItemImpl("/bucketV/key~VER123");
 		Operation<Item> op = new OperationImpl<>(123, OpType.READ, item, null, "/bucketV", TEST_CRED);
 		HttpRequest req = (HttpRequest) drv.httpRequest(op, "127.0.0.1");
 		assertEquals(HttpMethod.GET, req.method());
-		// version suffix stripped from URI
-		assertEquals("/bucketV/key", req.uri());
-		assertEquals("VER123", req.headers().get("x-amz-version-id"));
+		// version suffix moved from the key to the versionId query; x-amz-version-id is a response header
+		assertEquals("/bucketV/key?versionId=VER123", req.uri());
+		assertNull(req.headers().get("x-amz-version-id"));
+		assertEquals("key~VER123", item.name());
 		// Authorization added
 		assertTrue(req.headers().contains(HttpHeaderNames.AUTHORIZATION));
 	}
