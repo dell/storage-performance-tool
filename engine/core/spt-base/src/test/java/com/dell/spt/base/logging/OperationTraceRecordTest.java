@@ -56,6 +56,21 @@ class OperationTraceRecordTest {
 	}
 
 	@Test
+	void manifestCreatePathEndsAtItsFirstComma() {
+		final var op = new DataOperationImpl<DataItem>(
+						0, OpType.CREATE, manifestItem("source-bucket", "key"), null, "/bucket/pre,fix",
+						Credential.NONE, null, 0);
+		op.nodeAddr("10.0.0.1:9020");
+		op.status(Operation.Status.SUCC);
+
+		final String row = new OperationTraceCsvLogMessage<>(op.result()).getFormattedMessage();
+
+		final List<String> columns = List.of(row.strip().split(",", -1));
+		assertEquals(9, columns.size(), row);
+		assertEquals("/bucket/pre", columns.get(1), row);
+	}
+
+	@Test
 	void manifestPathIsTheOneTheRecordWasBuiltWith() {
 		final var item = new IntegrityManifestDataItem("bucket-a", "key", 3, "");
 		final var record = new OperationTraceRecord<>(result(OpType.READ, item, null));

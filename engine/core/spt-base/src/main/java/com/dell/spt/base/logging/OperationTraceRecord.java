@@ -70,7 +70,13 @@ public final class OperationTraceRecord<I extends Item, O extends Operation<I>> 
 		strb.append(',');
 		if (itemPath != null) {
 			if (manifestRequestPath != null) {
+				final int start = strb.length();
 				appendRequestPath(strb, manifestRequestPath, itemPath);
+				// Fields are not quoted: like a plain item's path, the row's path ends at its first comma.
+				final int commaPos = strb.indexOf(",", start);
+				if (commaPos >= 0) {
+					strb.setLength(commaPos);
+				}
 			} else {
 				strb.append(itemPath);
 			}
