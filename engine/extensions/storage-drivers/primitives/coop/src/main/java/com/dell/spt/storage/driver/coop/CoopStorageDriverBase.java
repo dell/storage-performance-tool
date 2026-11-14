@@ -327,6 +327,22 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return false;
 	}
 
+	/**
+	 * Declares whether this driver times a multipart upload's completion or abort as a new exchange
+	 * of its own, calling {@link Operation#startRequest()} for it. When this returns {@code true},
+	 * the parent's timing is reset before that exchange, so the earlier exchange's response times
+	 * do not make the new request look finished after its response started, and the parent's
+	 * result carries the completion's or abort's own times.
+	 *
+	 * <p>The default is {@code false}: the parent keeps its earlier timing through the completion
+	 * or abort, as before this hook existed. A driver that calls {@code startRequest()} for the
+	 * completion or abort must return {@code true}. A composite READ's finalization is never reset,
+	 * because it sends no request.
+	 */
+	protected boolean timesUploadFinalization() {
+		return false;
+	}
+
 	/** Operations the dispatch task has drained but not yet submitted. */
 	protected final int dispatcherBacklog() {
 		final var task = this.opDispatchTask;
@@ -903,6 +919,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 						subOp.incrementRetryCount();
 						parentOp.undoMarkSubTaskCompleted();
 						op.status(Operation.Status.PENDING);
+						// The retry is a new request: the failed attempt's response times would make
+						// it look finished after its response started.
+						op.resetTiming();
 						if (op.item() instanceof DataItem dataItem) {
 							dataItem.reset();
 						}
@@ -934,6 +953,11 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				// Execute once again to finalize the composite operation, for example
 				// completing the multipart upload. The finalization gate prevents
 				// concurrent part completions from enqueueing the same parent twice.
+				// See timesUploadFinalization(). A composite READ's finalization sends no request, and
+				// its duration runs from its initial pass, so its timing is kept.
+				if (OpType.CREATE.equals(parentOp.type()) && timesUploadFinalization()) {
+					parentOp.resetTiming();
+				}
 				enqueueChildOp((O) parentOp, op, "completion operation");
 			}
 		}
