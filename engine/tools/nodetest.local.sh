@@ -12,16 +12,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PORT="${PORT:-9999}"
 RUN_SCRIPT="$REPO_ROOT/bundle/build/dist/run.sh"
-JAVA_OPTS="${JAVA_OPTS:-}"
 KEEP_RUNNING=false
+NODE_ARGS=()
 
 usage() {
   cat <<EOF
-Usage: PORT=9999 tools/nodetest.local.sh
+Usage: PORT=9999 tools/nodetest.local.sh [--run-node] [engine arguments...]
+
+--run-node keeps the node running after the tests. Other arguments, such as
+--load-step-node-port=<port>, are passed to run.sh. Give the API port as PORT,
+not --run-port.
 
 Environment variables:
-  PORT       API port to bind (default: 9999)
-  JAVA_OPTS  Extra JVM options (optional)
+  PORT           API port to bind (default: 9999)
+  SPT_JAVA_OPTS  JVM options that run.sh adds after its defaults (optional)
 EOF
 }
 
@@ -30,13 +34,18 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
-# Parse flags (only --run-node is recognized to keep node running after tests)
+# --run-node keeps the node running after the tests; other arguments go to run.sh
 for arg in "$@"; do
   case "$arg" in
     --run-node)
       KEEP_RUNNING=true
       ;;
+    --run-port|--run-port=*)
+      echo "Give the API port as PORT=<port>, not $arg: the tests use PORT" >&2
+      exit 2
+      ;;
     *)
+      NODE_ARGS+=("$arg")
       ;;
   esac
 done
@@ -78,7 +87,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 log "Starting node on port $PORT..."
-( cd "$REPO_ROOT" && env JAVA_OPTS="$JAVA_OPTS" "$RUN_SCRIPT" --run-port="$PORT" --run-node >/dev/null 2>"$out" & echo $! >"$pidfile" )
+( cd "$REPO_ROOT" && "$RUN_SCRIPT" --run-port="$PORT" --run-node ${NODE_ARGS[@]+"${NODE_ARGS[@]}"} >/dev/null 2>"$out" & echo $! >"$pidfile" )
 
 # Wait for readiness via /ready (fallback: /metrics)
 for i in $(seq 1 30); do

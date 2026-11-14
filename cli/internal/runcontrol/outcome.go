@@ -8,6 +8,7 @@ package runcontrol
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -48,6 +49,22 @@ func IsOnlyOwnedEngineTerminalFailure(err error) bool {
 	}
 	var terminalFailure *OwnedEngineTerminalFailure
 	return errors.As(err, &terminalFailure)
+}
+
+// DeleteTerminalPolicyFailure identifies the presenter's reflection of a rejected DELETE terminal
+// outcome, read from one step's live fleet metrics. Auto-results reports the authoritative verdict
+// for every step from the stored DELETE metrics.
+type DeleteTerminalPolicyFailure struct {
+	StepID string
+	// Verification reports that DELETE verification failed, rather than the failure policy.
+	Verification bool
+}
+
+func (e *DeleteTerminalPolicyFailure) Error() string {
+	if e.Verification {
+		return fmt.Sprintf("DELETE verification failed for step %q", e.StepID)
+	}
+	return fmt.Sprintf("DELETE failure policy rejected the terminal outcome for step %q", e.StepID)
 }
 
 // ResourceDisposition records who owns process resources after finalization.

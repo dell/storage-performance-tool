@@ -1072,19 +1072,48 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		opDispatchTask.stop();
 		signalDispatch();
 		if (taskWasRunning || taskWasAlreadyStopped) {
-			try {
-				dispatchStoppedInTime = opDispatchTask.await(TASK_STOP_WAIT_SECONDS, TimeUnit.SECONDS);
-				if (!dispatchStoppedInTime) {
-					Loggers.MSG.warn(
-									"{}: dispatch task did not stop within {} second(s); "
-													+ "queued lifecycle ownership will be recovered without touching task buffers",
-									toString(), TASK_STOP_WAIT_SECONDS);
-				}
-			} catch (final InterruptedException e) {
-				throwUnchecked(e);
+			dispatchStoppedInTime = awaitDispatchStopped();
+			if (!dispatchStoppedInTime) {
+				Loggers.MSG.warn(
+								"{}: dispatch task did not stop within {} second(s); "
+												+ "queued lifecycle ownership will be recovered without touching task buffers",
+								toString(), TASK_STOP_WAIT_SECONDS);
 			}
 		}
 		onAdmissionClosed();
+	}
+
+	/**
+	 * Waits for the dispatch task to stop, also on an interrupted thread: a step's stop or a close
+	 * can arrive as an interrupt, and the rest of the close must still run.
+	 *
+	 * <p>Invariant: the wait ends by the {@link com.dell.spt.base.Constants#TASK_STOP_WAIT_SECONDS}
+	 * deadline whether or not the thread is interrupted, before the call or during the wait, so a
+	 * close on an interrupted thread takes at most that bound longer and never waits unbounded. An
+	 * interrupt neither ends the wait early nor skips it, so the result is the task's real state
+	 * and not a stale earlier one; the interrupt flag is set again before this returns.
+	 */
+	private boolean awaitDispatchStopped() {
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TASK_STOP_WAIT_SECONDS);
+		var interrupted = Thread.interrupted();
+		try {
+			while (true) {
+				final long remaining = deadline - System.nanoTime();
+				try {
+					return opDispatchTask.await(Math.max(0L, remaining), TimeUnit.NANOSECONDS);
+				} catch (final InterruptedException e) {
+					interrupted = true;
+					if (remaining <= 0) {
+						// Another interrupt hit the last check at the deadline: count the task late.
+						return false;
+					}
+				}
+			}
+		} finally {
+			if (interrupted) {
+				Thread.currentThread().interrupt();
+			}
+		}
 	}
 
 	/**

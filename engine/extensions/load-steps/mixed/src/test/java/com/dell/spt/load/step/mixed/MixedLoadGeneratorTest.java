@@ -192,6 +192,65 @@ class MixedLoadGeneratorTest {
 		assertEquals(total, createCount, "All ops should be CREATE (only non-DELETE op type)");
 	}
 
+	@Test
+	@DisplayName("A PUT and DELETE mix runs with an empty read pool and deletes only what it created")
+	void aPutAndDeleteMixRunsWithAnEmptyReadPool() throws Exception {
+		final Map<OpType, Integer> weights = new EnumMap<>(OpType.class);
+		weights.put(OpType.CREATE, 50);
+		weights.put(OpType.DELETE, 50);
+		final OpSchedule schedule = new OpSchedule(weights);
+		final PoolItemInput<Item> pool = new PoolItemInput<>(List.of());
+
+		final Map<OpType, OperationsBuilder> builders = new EnumMap<>(OpType.class);
+		builders.put(OpType.CREATE, testBuilder(OpType.CREATE, null));
+		builders.put(OpType.DELETE, testBuilder(OpType.DELETE, null));
+		final List<String> created = new ArrayList<>();
+		final List<String> deleted = new ArrayList<>();
+		// Completes each operation at once, and feeds each created item to the delete queue as the step does.
+		final Output<Operation> driver = new AcceptingOutput() {
+			@Override
+			public boolean put(final Operation op) {
+				final Item item = (Item) op.item();
+				if (op.type() == OpType.CREATE) {
+					created.add(item.name());
+					pool.addDeleteItem(item);
+				} else {
+					assertEquals(OpType.DELETE, op.type(), "only PUT and DELETE are in the mix");
+					deleted.add(item.name());
+				}
+				return true;
+			}
+		};
+		final MixedLoadGenerator gen = newGenerator(schedule, pool, builders, driver);
+
+		dispatch(gen, 2 * schedule.size());
+
+		assertEquals(2 * schedule.size(), gen.generatedOpCount());
+		assertEquals(gen.generatedOpCount(), created.size() + deleted.size());
+		assertFalse(deleted.isEmpty(), "DELETE ran once PUT completions fed its queue");
+		assertTrue(created.containsAll(deleted), "a DELETE deletes only items the step created");
+		assertEquals(created.size() - deleted.size(), pool.deleteQueueSize());
+	}
+
+	@Test
+	@DisplayName("A mix with GET or STAT is refused when built over an empty read pool")
+	void aMixWithGetOrStatIsRefusedOverAnEmptyReadPool() {
+		for (final OpType drawing : List.of(OpType.READ, OpType.STAT)) {
+			final Map<OpType, Integer> weights = new EnumMap<>(OpType.class);
+			weights.put(drawing, 50);
+			weights.put(OpType.CREATE, 50);
+			final Map<OpType, OperationsBuilder> builders = new EnumMap<>(OpType.class);
+			builders.put(drawing, testBuilder(drawing, null));
+			builders.put(OpType.CREATE, testBuilder(OpType.CREATE, null));
+
+			final var failure = assertThrows(
+							IllegalArgumentException.class,
+							() -> newGenerator(new OpSchedule(weights), new PoolItemInput<>(List.of()), builders, noopOutput()),
+							drawing.toString());
+			assertEquals("MixedLoad: GET and STAT draw from the seed items, and the read pool has none", failure.getMessage());
+		}
+	}
+
 	// ── PUT → DELETE queue flow ───────────────────────────────────────────
 
 	@Test

@@ -334,7 +334,7 @@ func (v *Verifier) stepStartContainer(host *hostparse.HostInfo, result *NodeResu
 
 func (v *Verifier) stepVerifyPorts(host *hostparse.HostInfo, result *NodeResult) {
 	if v.config.ShowProgress {
-		fmt.Printf("  ⏳ Waiting for network ports (1099, %d; up to %s)...", v.config.APIPort, constants.APIReadinessTimeout)
+		fmt.Printf("  ⏳ Waiting for network ports (%d, %d; up to %s)...", v.registryPort(), v.apiPort(), constants.APIReadinessTimeout)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), constants.APIReadinessTimeout)
 	defer cancel()
@@ -348,12 +348,32 @@ func (v *Verifier) stepVerifyPorts(host *hostparse.HostInfo, result *NodeResult)
 	}
 }
 
-// waitForPorts allows slow engines to initialize without delaying already-ready nodes.
+// apiPort is the REST API port verify starts its engine on and checks.
+func (v *Verifier) apiPort() int {
+	if v.config.APIPort == 0 {
+		return constants.DefaultSptAPIPort
+	}
+	return v.config.APIPort
+}
+
+// registryPort is the RMI registry port verify starts its engine on and checks.
+func (v *Verifier) registryPort() int {
+	if v.config.RMIRegistryPort == 0 {
+		return constants.DefaultRMIRegistryPort
+	}
+	return v.config.RMIRegistryPort
+}
+
+// waitForPorts allows slow engines to initialize without delaying already-ready nodes. Its
+// failure names the ports as each was last seen, so a round that the deadline cuts short does
+// not report a port closed that an earlier round found open.
 func (v *Verifier) waitForPorts(ctx context.Context, host *hostparse.HostInfo, interval time.Duration) Check {
 	start := v.timeProvider.Now()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	check := v.checkPorts(ctx, host)
+	ports := v.servicePorts()
+	seen := make([]portState, len(ports))
+	check := v.probePorts(ctx, host, ports, seen)
 	for {
 		check.Duration = v.timeProvider.Since(start)
 		if err := ctx.Err(); err != nil {
@@ -368,9 +388,8 @@ func (v *Verifier) waitForPorts(ctx context.Context, host *hostparse.HostInfo, i
 		select {
 		case <-ctx.Done():
 		case <-ticker.C:
-			// Retain the last actual port observations if the deadline wins the race.
 			if ctx.Err() == nil {
-				check = v.checkPorts(ctx, host)
+				check = v.probePorts(ctx, host, ports, seen)
 			}
 		}
 	}
@@ -755,8 +774,8 @@ func (v *Verifier) startNodeContainer(host *hostparse.HostInfo, result *NodeResu
 		portMappings = make([]command.PortMapping, 0, 2+len(rmiMappings))
 		// Standard ports
 		portMappings = append(portMappings,
-			command.PortMapping{HostPort: constants.DefaultRMIRegistryPort, ContainerPort: constants.DefaultRMIRegistryPort}, // RMI Registry
-			command.PortMapping{HostPort: v.config.APIPort, ContainerPort: v.config.APIPort},                                 // REST API
+			command.PortMapping{HostPort: v.registryPort(), ContainerPort: v.registryPort()}, // RMI Registry
+			command.PortMapping{HostPort: v.apiPort(), ContainerPort: v.apiPort()},           // REST API
 		)
 
 		// Add RMI object port range
@@ -778,7 +797,7 @@ func (v *Verifier) startNodeContainer(host *hostparse.HostInfo, result *NodeResu
 		Environment: map[string]string{
 			constants.JavaOptsEnvVar: fmt.Sprintf("%s%s", constants.JavaRMIHostnamePrefix, externalIP),
 		},
-		Command:  []string{constants.SptNodeCommand},
+		Command:  v.engineCommand(),
 		Detached: true,
 	}
 
@@ -836,51 +855,107 @@ func (v *Verifier) startNodeContainer(host *hostparse.HostInfo, result *NodeResu
 	}
 }
 
-// checkPorts verifies that required ports are accessible
-func (v *Verifier) checkPorts(ctx context.Context, host *hostparse.HostInfo) Check {
+// engineCommand starts the engine in node mode on the ports verify checks. The default registry
+// port is left to the engine, as spt run leaves it.
+func (v *Verifier) engineCommand() []string {
+	cmd := []string{constants.SptNodeCommand, fmt.Sprintf("%s%d", constants.EngineRunPortArgPrefix, v.apiPort())}
+	if port := v.registryPort(); port != constants.DefaultRMIRegistryPort {
+		cmd = append(cmd, fmt.Sprintf("%s%d", constants.EngineNodePortArgPrefix, port))
+	}
+	return cmd
+}
+
+// servicePort is a port the engine serves as soon as it starts. RMI object ports are not among
+// them: they are only created during active load testing.
+type servicePort struct {
+	number int
+	name   string
+}
+
+func (v *Verifier) servicePorts() []servicePort {
+	return []servicePort{
+		{v.registryPort(), "RMI registry"},
+		{v.apiPort(), "REST API"},
+	}
+}
+
+// portState is what verify last saw of a service port.
+type portState int
+
+const (
+	portNotProbed portState = iota
+	portClosed
+	portOpen
+)
+
+// probePorts probes each port once and records what it sees in seen, which holds the state each
+// port was last seen in. The round passes when every port is open in it. A port keeps its last
+// state when no time is left before ctx's deadline to probe it, or when its probe fails at the
+// deadline with a timeout that the deadline cut short, since that probe may have timed out on
+// an open port.
+func (v *Verifier) probePorts(ctx context.Context, host *hostparse.HostInfo, ports []servicePort, seen []portState) Check {
 	start := v.timeProvider.Now()
 	targetIP := v.getExternalIP(host)
-
-	failed := []string{}
-
-	for _, port := range []struct {
-		number int
-		name   string
-	}{
-		{constants.DefaultRMIRegistryPort, "RMI registry"},
-		{v.config.APIPort, "REST API"},
-	} {
-		timeout := constants.PortCheckTimeoutSecs * time.Second
-		if deadline, ok := ctx.Deadline(); ok {
+	fullTimeout := constants.PortCheckTimeoutSecs * time.Second
+	deadline, hasDeadline := ctx.Deadline()
+	passed := true
+	for i, port := range ports {
+		timeout := fullTimeout
+		if hasDeadline {
 			timeout = min(timeout, time.Until(deadline))
 		}
-		if ctx.Err() != nil || timeout <= 0 || !v.netChecker.IsPortOpen(targetIP, port.number, timeout) {
-			failed = append(failed, fmt.Sprintf("%d (%s)", port.number, port.name))
+		if ctx.Err() != nil || timeout <= 0 {
+			passed = false
+			continue
+		}
+		if v.netChecker.IsPortOpen(targetIP, port.number, timeout) {
+			seen[i] = portOpen
+			continue
+		}
+		passed = false
+		if timeout == fullTimeout || time.Now().Before(deadline) {
+			seen[i] = portClosed
 		}
 	}
+	return Check{Passed: passed, Message: v.portsMessage(ports, seen, passed), Duration: v.timeProvider.Since(start)}
+}
 
-	// NOTE: RMI object ports (40000-40009) are only created during active load testing
-	// For infrastructure verification, we only check the service ports that are always available
-
-	if len(failed) > 0 {
-		return Check{
-			Passed:   false,
-			Message:  fmt.Sprintf("Ports not accessible: %v", failed),
-			Duration: v.timeProvider.Since(start),
+// portsMessage names the ports last seen closed and the ports with no result yet: never probed,
+// or probed only by a probe the deadline cut short. A round that failed with every port seen
+// open in some round says so, rather than that the ports are accessible.
+func (v *Verifier) portsMessage(ports []servicePort, seen []portState, passed bool) string {
+	var closed, noResult []string
+	all := make([]string, 0, len(ports))
+	for i, port := range ports {
+		label := fmt.Sprintf("%d (%s)", port.number, port.name)
+		all = append(all, label)
+		switch seen[i] {
+		case portClosed:
+			closed = append(closed, label)
+		case portNotProbed:
+			noResult = append(noResult, label)
 		}
 	}
-
-	return Check{
-		Passed:   true,
-		Message:  fmt.Sprintf("Essential service ports accessible (%d RMI registry, %d REST API)", constants.DefaultRMIRegistryPort, v.config.APIPort),
-		Duration: v.timeProvider.Since(start),
+	var problems []string
+	if len(closed) > 0 {
+		problems = append(problems, fmt.Sprintf("Ports not accessible: %v", closed))
 	}
+	if len(noResult) > 0 {
+		problems = append(problems, fmt.Sprintf("Ports with no result before the wait ended: %v", noResult))
+	}
+	if len(problems) > 0 {
+		return strings.Join(problems, "; ")
+	}
+	if !passed {
+		return fmt.Sprintf("Ports each seen open, but never all in one round: %v", all)
+	}
+	return fmt.Sprintf("Essential service ports accessible (%d RMI registry, %d REST API)", v.registryPort(), v.apiPort())
 }
 
 // checkMetricsEndpoint verifies the /metrics/json endpoint works
 func (v *Verifier) checkMetricsEndpoint(host *hostparse.HostInfo) Check {
 	start := v.timeProvider.Now()
-	url := fmt.Sprintf("http://%s:%d/metrics/json", v.getExternalIP(host), v.config.APIPort)
+	url := fmt.Sprintf("http://%s:%d/metrics/json", v.getExternalIP(host), v.apiPort())
 
 	ctx, cancel := context.WithTimeout(context.Background(), constants.HTTPRequestTimeoutSecs*time.Second)
 	defer cancel()
@@ -925,12 +1000,13 @@ func (v *Verifier) checkMetricsEndpoint(host *hostparse.HostInfo) Check {
 // checkControlEndpoint verifies the /run endpoint accepts control commands
 func (v *Verifier) checkControlEndpoint(host *hostparse.HostInfo) Check {
 	start := time.Now()
-	baseURL := fmt.Sprintf("http://%s:%d", v.getExternalIP(host), v.config.APIPort)
+	url := fmt.Sprintf("http://%s:%d/run", v.getExternalIP(host), v.apiPort())
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	ctx, cancel := context.WithTimeout(context.Background(), constants.HTTPRequestTimeoutSecs*time.Second)
+	defer cancel()
 
 	// Try a simple GET to /run (should return current state)
-	resp, err := client.Get(baseURL + "/run")
+	resp, err := v.netChecker.HTTPGet(ctx, url)
 	if err != nil {
 		return Check{
 			Passed:   false,
@@ -1105,7 +1181,7 @@ func (v *Verifier) checkForPortConflicts(host *hostparse.HostInfo) Check {
 	// Check for conflicts
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	conflictInfo, err := v.preflight.CheckPorts(ctx, host, v.config.APIPort, v.config.RMIPortStart, v.config.RMIPortCount)
+	conflictInfo, err := v.preflight.CheckPorts(ctx, host, v.registryPort(), v.apiPort(), v.config.RMIPortStart, v.config.RMIPortCount)
 	if err != nil {
 		return Check{
 			Passed:   false,

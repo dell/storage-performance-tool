@@ -112,7 +112,7 @@ The length option determines the id length for the new item ids. The minor bits 
 truncated.
 
 ```bash
-java spt-<VERSION>.jar --item-naming-lenth=15 ...
+java spt-<VERSION>.jar --item-naming-length=15 ...
 ```
 
 ## 4. Integrity manifest input

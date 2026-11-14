@@ -561,15 +561,15 @@ func TestHostCommand_SSHArguments(t *testing.T) {
 	remoteHost := CreateRemoteHost("remote.example.com")
 	ctx := context.Background()
 
+	defaults := []string{"ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes",
+		"-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"}
 	oneShot := hostCommand(ctx, remoteHost, []string{"docker", "ps"})
-	wantOneShot := []string{"ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", "testuser@remote.example.com", "docker", "ps"}
-	if strings.Join(oneShot.Args, " ") != strings.Join(wantOneShot, " ") {
-		t.Fatalf("one-shot ssh args = %q, want %q", oneShot.Args, wantOneShot)
+	if want := slices.Concat(defaults, []string{"testuser@remote.example.com", "docker", "ps"}); !slices.Equal(oneShot.Args, want) {
+		t.Fatalf("one-shot ssh args = %q, want %q", oneShot.Args, want)
 	}
 
 	guarded := []string{"testuser@remote.example.com", "sh", "-c", "'" + remoteStreamGuard + "'", "sh", "docker", "logs"}
-	streamFlags := []string{"ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes",
-		"-T", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"}
+	streamFlags := slices.Concat(defaults, []string{"-T"})
 	// Without StdinNull support (OpenSSH < 8.7) the option would be rejected.
 	stream := streamHostCommand(ctx, remoteHost, []string{"docker", "logs"}, false)
 	if want := slices.Concat(streamFlags, guarded); !slices.Equal(stream.Args, want) {
@@ -587,6 +587,48 @@ func TestHostCommand_SSHArguments(t *testing.T) {
 	localStream := streamHostCommand(ctx, CreateLocalHost(), []string{"docker", "logs"}, true)
 	if strings.Join(localStream.Args, " ") != "docker logs" {
 		t.Fatalf("local stream should run directly without the remote guard, got %q", localStream.Args)
+	}
+}
+
+// Every remote session SPT opens carries the keepalives exactly once, before
+// the target, so a control process it opens for a shared connection carries
+// them too; see hostCommand.
+func TestHostCommand_EveryRemoteSessionCarriesKeepalivesOnce(t *testing.T) {
+	ctx := context.Background()
+	remoteHost := CreateRemoteHost("remote.example.com")
+	for _, tc := range []struct {
+		name string
+		cmd  *exec.Cmd
+	}{
+		{"one-shot", hostCommand(ctx, remoteHost, []string{"docker", "ps"})},
+		{"one-shot with flags", hostCommand(ctx, remoteHost, []string{"docker", "ps"}, constants.SSHFlagNoTTY)},
+		{"stream", streamHostCommand(ctx, remoteHost, []string{"docker", "logs"}, false)},
+		{"stream with StdinNull", streamHostCommand(ctx, remoteHost, []string{"docker", "logs"}, true)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := slices.Index(tc.cmd.Args, remoteHost.GetSSHTarget())
+			if tc.cmd.Args[0] != constants.SSHCommand || target < 0 {
+				t.Fatalf("not an ssh command to %s: %q", remoteHost.GetSSHTarget(), tc.cmd.Args)
+			}
+			options := tc.cmd.Args[1:target]
+			for _, keepalive := range []string{constants.SSHServerAliveInterval, constants.SSHServerAliveCountMax} {
+				count := 0
+				for i, arg := range options {
+					if strings.Contains(arg, keepalive[:strings.IndexByte(keepalive, '=')]) {
+						count++
+						if arg != keepalive || i == 0 || options[i-1] != "-o" {
+							t.Fatalf("%s is passed as %q in %q, want -o %s", keepalive, arg, tc.cmd.Args, keepalive)
+						}
+					}
+				}
+				if count != 1 {
+					t.Fatalf("%s appears %d times before the target in %q, want once", keepalive, count, tc.cmd.Args)
+				}
+			}
+		})
+	}
+	if local := hostCommand(ctx, CreateLocalHost(), []string{"docker", "ps"}); slices.Contains(local.Args, constants.SSHServerAliveInterval) {
+		t.Fatalf("a local command takes no ssh options: %q", local.Args)
 	}
 }
 

@@ -14,6 +14,7 @@ import com.dell.spt.base.data.SeedDataInput;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.storage.driver.coop.netty.endpoint.EndpointSelectionCounters;
 import com.dell.spt.storage.driver.coop.netty.endpoint.EndpointSelectionSettings;
 import com.dell.spt.storage.driver.coop.netty.endpoint.ScriptedDnsServer;
 import com.dell.spt.storage.driver.coop.netty.endpoint.ScriptedDnsServer.Reply;
@@ -102,7 +103,7 @@ final class S3EndpointSelectionDnsTest {
 		requests.stream().filter(r -> "PUT".equals(r.method()))
 						.forEach(r -> assertEquals("close", r.connection()));
 		awaitNoOpenConnections(run);
-		final var counters = run.driver().counters().snapshot();
+		final var counters = awaitCloses(run, 5);
 		assertEquals(dns.received().size(), counters.lookups());
 		assertEquals(5, counters.selections().values().stream().mapToLong(Long::longValue).sum());
 		assertEquals(5, counters.connectsNew());
@@ -232,6 +233,8 @@ final class S3EndpointSelectionDnsTest {
 		final var dns = rotatingDns();
 		final var run = driver(dns, 8);
 		final var operations = 300;
+		// The first operation's bucket check adds one request, lookup and connection.
+		final var attempts = operations + 1;
 
 		final var started = System.nanoTime();
 		for (var i = 0; i < operations; i++) {
@@ -242,11 +245,28 @@ final class S3EndpointSelectionDnsTest {
 		}
 		final var seconds = (System.nanoTime() - started) / 1e9;
 
-		assertEquals(operations + 1, dns.received().size());
-		assertEquals(operations + 1, new HashSet<>(requests.stream().map(r -> r.node() + ":" + r.clientPort()).toList()).size());
+		final var distinctPairs = requests.stream().map(r -> r.node() + ":" + r.clientPort()).distinct().count();
+		System.out.printf("per-request DNS loopback: listener port %d, %d requests in %.2f s (%.0f req/s), concurrency 8, "
+						+ "%d of %d node:clientPort pairs distinct%n", port, operations, seconds, operations / seconds,
+						distinctPairs, requests.size());
+		assertEquals(attempts, dns.received().size());
+		// One connection per request, seen from the server: the JDK HttpServer answers a request that
+		// carries Connection: close and then closes the connection. Do not assert distinct client ports:
+		// Linux re-salts its ephemeral-port hash every 10 s, so a run that crosses that moment can get a
+		// closed connection's port again for the same listener.
+		assertEquals(attempts, requests.size());
+		for (final var request : requests) {
+			assertEquals("close", request.connection(), request::toString);
+			assertEquals(HOSTNAME + ":" + port, request.host(), request::toString);
+		}
 		awaitNoOpenConnections(run);
-		System.out.printf("per-request DNS loopback: listener port %d, %d requests in %.2f s (%.0f req/s), concurrency 8%n", port,
-						operations, seconds, operations / seconds);
+		final var counters = awaitCloses(run, attempts);
+		assertEquals(dns.received().size(), counters.lookups(), counters::toString);
+		assertEquals(attempts, counters.selections().values().stream().mapToLong(Long::longValue).sum(), counters::toString);
+		assertEquals(attempts, counters.connectsNew(), counters::toString);
+		// This mode never pools, so this only guards against the route being bound as pooled.
+		assertEquals(0, counters.connectsReused(), counters::toString);
+		assertEquals(attempts, counters.closes(), counters::toString);
 	}
 
 	// ---------- fixtures ----------
@@ -342,5 +362,17 @@ final class S3EndpointSelectionDnsTest {
 			Thread.sleep(10);
 		}
 		assertEquals(0, pool.openChannelCount());
+	}
+
+	/** The pool drops a closed connection before the close counter counts it, so the count can trail. */
+	private static EndpointSelectionCounters.Snapshot awaitCloses(final Run run, final long expected)
+					throws InterruptedException {
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		var counters = run.driver().counters().snapshot();
+		while (counters.closes() < expected && System.nanoTime() < deadline) {
+			Thread.sleep(10);
+			counters = run.driver().counters().snapshot();
+		}
+		return counters;
 	}
 }
