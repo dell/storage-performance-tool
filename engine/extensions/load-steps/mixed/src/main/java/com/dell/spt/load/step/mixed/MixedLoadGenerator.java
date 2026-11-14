@@ -71,11 +71,13 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 	/**
 	 * @param executor         thread executor for the generation task
 	 * @param schedule         pre-shuffled operation schedule
-	 * @param pool             item source (read pool + delete queue)
+	 * @param pool             item source (read pool + delete queue); its read pool may be empty
+	 *                         only when the schedule has no GET or STAT
 	 * @param builders         per-op-type operation builders
 	 * @param opOutput         driver to submit operations to
 	 * @param concurrencyLimit max in-flight operations (matches driver concurrency)
 	 * @param newItemInput     item source for CREATE operations (generates new items)
+	 * @throws IllegalArgumentException if the schedule has GET or STAT and the read pool is empty
 	 */
 	public MixedLoadGenerator(
 					final ThreadTaskExecutor executor,
@@ -99,6 +101,11 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 		final OpType[] active = schedule.activeOpTypes();
 		final java.util.List<OpType> targets = new java.util.ArrayList<>(active.length);
 		for (final OpType op : active) {
+			// Checked here, once, so the per-operation draw needs no check of its own.
+			if ((op == OpType.READ || op == OpType.STAT) && pool.readPoolSize() == 0) {
+				throw new IllegalArgumentException(
+								"MixedLoad: GET and STAT draw from the seed items, and the read pool has none");
+			}
 			inFlightByOpType.put(op, new AtomicInteger());
 			if (op != OpType.DELETE) {
 				targets.add(op);

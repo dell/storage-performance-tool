@@ -1233,6 +1233,7 @@ func newReplayCommandForTest(t *testing.T) *cobra.Command {
 	cmd.Flags().String("network-mode", "host", "")
 	cmd.Flags().Int("rmi-port-start", 40000, "")
 	cmd.Flags().Int("rmi-port-count", 10, "")
+	cmd.Flags().Int(flagRMIRegistryPort, constants.DefaultRMIRegistryPort, "")
 	cmd.Flags().Bool(flagSkipImagePull, false, "")
 	cmd.Flags().String(flagSptImage, "", "")
 	cmd.Flags().String("trace-file", "", "")

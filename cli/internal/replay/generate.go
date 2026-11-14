@@ -130,6 +130,9 @@ func replayWarnings(artifacts Artifacts, opts Options) []Diagnostic {
 	case "js":
 		warnings = append(warnings, Diagnostic{Severity: severityWarning, Message: "adapted legacy JS scenario for replay"})
 	}
+	if ignored := artifacts.RunScript.IgnoredFlags; len(ignored) > 0 {
+		warnings = append(warnings, Diagnostic{Severity: severityWarning, Message: ignoredLaunchFlagsWarning(ignored)})
+	}
 	if strings.HasPrefix(strings.ToLower(artifacts.FolderURL), "http://") {
 		warnings = append(warnings, Diagnostic{Severity: severityWarning, Message: "source uses unauthenticated HTTP"})
 	}
@@ -144,6 +147,12 @@ func replayWarnings(artifacts Artifacts, opts Options) []Diagnostic {
 		warnings = append(warnings, Diagnostic{Severity: severityWarning, Message: fmt.Sprintf("local test-host count (%d) differs from archived client count (%d); workload shape was preserved", len(localHosts), len(archivedClients))})
 	}
 	return warnings
+}
+
+// ignoredLaunchFlagsWarning is the one warning that lists the launch-script flags replay does not
+// keep, by name.
+func ignoredLaunchFlagsWarning(flags []string) string {
+	return "replay does not keep these launch-script flags: " + strings.Join(flags, ", ")
 }
 
 // WriteGenerated writes generated replay artifacts to a private temp or explicit output directory.

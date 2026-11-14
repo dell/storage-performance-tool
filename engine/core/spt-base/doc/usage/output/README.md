@@ -129,6 +129,9 @@ into the `3rdparty.log` file with the *dynamic path*. Logging level: "INFO".
 * Error messages with level "INFO" or higher are displayed on the console with orange color.
 * Error messages with level "DEBUG" or higher are written to the file `errors.log` with the
   *dynamic path*
+* `errors.log` is rate limited, with one limit for messages below "WARN" and another for "WARN"
+  messages: each passes up to 1000 messages in any 10 seconds. "ERROR" and "FATAL" messages are
+  not limited.
 
 ### 1.2.6. General Messages
 
@@ -378,54 +381,45 @@ The console output is absent.
 The file output is disabled by default.
 To enable the file output, set the `output-metrics-trace-persist` configuration parameter to "true".
 
-**Note**:
-> Since v4.0.0 the file header (containing the field names) line is not printed for easier aggregation in case of the
-> distributed mode.
+**Output file**: `op.trace.csv` with *dynamic path*. Each line is one operation, with the fields below
+in this order, separated by commas. The file has no header line, so that the files of a distributed run
+can be joined.
 
-**Output file**: `op.trace.csv` with *dynamic path*.
-
-**Available fields**
+**Fields**
 
 | Field Name       | Description
 | ---------------- | -----------------------------------------------------------------
 | StorageNode      | The target storage node address/hostname
-| ItemPath         | The resulting item path
-| OpTypeCode       | The load operation type code
-| StatusCode       | The load operation resulting status code
+| ItemPath         | `/<bucket>/<key>` for a data operation, with one slash between the bucket and the key, as in the `s3` driver's request path. That holds for a step that reads its items from a `bucket,key,size,version_id` manifest too, and a CREATE from a manifest names the output path it wrote to, not the manifest's bucket. A LIST row holds the listed prefix. The path ends at its first comma, since fields are not quoted.
+| OpType           | The load operation type name: `NOOP`, `CREATE`, `READ`, `UPDATE`, `DELETE`, `LIST` or `STAT`
+| Status           | The load operation resulting status name, listed below
 | ReqTimeStart[us] | The load operation start timestamp in microseconds
 | Duration[us]     | The load operation total duration in microseconds
 | RespLatency[us]  | The load operation response latency in microseconds
 | DataLatency[us]  | The load operation response data latency ("1st byte" of the response content) in microseconds
 | TransferSize     | The count of the bytes transferred within the load operation
 
-**OpTypeCode**
+**Status**
 
-| Code | Op Type
-| ---- | --------
-| 0    | NOOP
-| 1    | CREATE
-| 2    | READ
-| 3    | UPDATE
-| 4    | DELETE
+The HTTP response codes are those the Netty HTTP storage drivers, `s3`, `s3-rdma`, `s3-tables`, `atmos` and `swift`, map to each status.
+The `s3-aws` driver maps an S3 error response itself: there, every 4xx code but 401, 403 and 404 is `RESP_FAIL_CLIENT`, 413 and 414 included, and a 1xx or 3xx code is `FAIL_UNKNOWN`.
+It maps 401, 403, 404, 504, 507 and the other 5xx codes as the table does, and an SDK timeout is `FAIL_TIMEOUT`.
 
-**StatusCode**
-
-| Code | Description                       | HTTP response codes                    |
-| ---- | --------------------------------- | -------------------------------------- |
-| O    | Pending (internal)                |                                        |
-| 1    | Active (internal)                 |                                        |
-| 2    | Interrupted                       |                                        |
-| 3    | Unknown failure                   | all other codes                        |
-| 4    | Success                           | 2xx                                    |
-| 5    | I/O Failure                       |                                        |
-| 6    | Timeout                           | 504                                    |
-| 7    | Unrecognized storage response     |                                        |
-| 8    | Client failure or invalid request | 100, 400, 405, 409, 411, 414, 416      |
-| 9    | Internal storage failure          | 413, 415, 429, 500, 501, 502, 503, 505 |
-| 10   | Item not found on the storage     | 404                                    |
-| 11   | Authentication/access failure     | 401, 403                               |
-| 12   | Data item corrupted               | 2xx                                    |
-| 13   | Not enough space on the storage   | 507                                    |
+| Name                             | Description                       | HTTP response codes  |
+| -------------------------------- | --------------------------------- | -------------------- |
+| `SUCC`                           | Success                           | 2xx                  |
+| `PENDING`, `ACTIVE`, `OMIT`      | Internal                          |                      |
+| `INTERRUPTED`                    | Interrupted                       |                      |
+| `FAIL_UNKNOWN`                   | Unknown failure                   | an unknown class     |
+| `FAIL_IO`                        | I/O failure                       |                      |
+| `FAIL_TIMEOUT`                   | Timeout                           | 504                  |
+| `RESP_FAIL_UNKNOWN`              | Unrecognized storage response     |                      |
+| `RESP_FAIL_CLIENT`               | Client failure or invalid request | 1xx, 3xx, other 4xx  |
+| `RESP_FAIL_SVC`                  | Internal storage failure          | 413, 414, other 5xx  |
+| `RESP_FAIL_NOT_FOUND`            | Item not found on the storage     | 404                  |
+| `RESP_FAIL_AUTH`                 | Authentication/access failure     | 401, 403             |
+| `RESP_FAIL_CORRUPT`              | Data item corrupted               | 2xx                  |
+| `RESP_FAIL_SPACE`                | Not enough space on the storage   | 507                  |
 
 ## 2.4. Threshold
 

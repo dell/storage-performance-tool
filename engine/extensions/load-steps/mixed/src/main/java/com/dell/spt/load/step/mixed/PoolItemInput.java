@@ -15,7 +15,7 @@ import java.util.concurrent.ThreadLocalRandom;
  * <ol>
  *   <li><b>Read pool</b> — immutable array of seed items populated at construction.
  *       {@link #randomItem()} returns a random item (thread-safe, no mutation).
- *       Used by GET and STAT operations.
+ *       Used by GET and STAT operations only, so a mix without them can have an empty one.
  *   <li><b>Delete queue</b> — lock-free {@link ConcurrentLinkedQueue} fed by PUT completions.
  *       {@link #pollDelete()} returns null immediately when empty (non-blocking).
  *       Used by DELETE operations.
@@ -31,7 +31,7 @@ public final class PoolItemInput<I extends Item> {
 	/**
 	 * Creates a pool with the given seed items as the read pool and an empty delete queue.
 	 *
-	 * @param seedItems non-empty list of items for the read pool
+	 * @param seedItems items for the read pool, empty when the mix has no GET or STAT
 	 */
 	public PoolItemInput(final List<I> seedItems) {
 		this(seedItems, null);
@@ -40,13 +40,13 @@ public final class PoolItemInput<I extends Item> {
 	/**
 	 * Creates a pool with seed items for the read pool and optional pre-populated delete queue items.
 	 *
-	 * @param seedItems    non-empty list of items for the read pool
+	 * @param seedItems    items for the read pool, empty when the mix has no GET or STAT
 	 * @param deleteItems  items to pre-populate the delete queue (may be null or empty)
 	 */
 	@SuppressWarnings("unchecked")
 	public PoolItemInput(final List<I> seedItems, final Collection<I> deleteItems) {
-		if (seedItems == null || seedItems.isEmpty()) {
-			throw new IllegalArgumentException("Seed items list must be non-null and non-empty");
+		if (seedItems == null) {
+			throw new IllegalArgumentException("Seed items list must be non-null");
 		}
 		this.readPool = seedItems.toArray((I[]) new Item[0]);
 		this.deleteQueue = new ConcurrentLinkedQueue<>();
@@ -55,7 +55,14 @@ public final class PoolItemInput<I extends Item> {
 		}
 	}
 
-	/** Returns a random item from the read pool. Thread-safe, never returns null. */
+	/**
+	 * Returns a random item from the read pool. Thread-safe, never returns null.
+	 *
+	 * <p>This runs once per GET or STAT, so it doesn't check for an empty pool: a
+	 * {@link MixedLoadGenerator} refuses GET or STAT over an empty pool when it is built.
+	 *
+	 * @throws IllegalArgumentException if the read pool is empty
+	 */
 	public I randomItem() {
 		final I item = readPool[ThreadLocalRandom.current().nextInt(readPool.length)];
 		if (item instanceof DataItemImpl) {

@@ -327,6 +327,22 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return false;
 	}
 
+	/**
+	 * Declares whether this driver times a multipart upload's completion or abort as a new exchange
+	 * of its own, calling {@link Operation#startRequest()} for it. When this returns {@code true},
+	 * the parent's timing is reset before that exchange, so the earlier exchange's response times
+	 * do not make the new request look finished after its response started, and the parent's
+	 * result carries the completion's or abort's own times.
+	 *
+	 * <p>The default is {@code false}: the parent keeps its earlier timing through the completion
+	 * or abort, as before this hook existed. A driver that calls {@code startRequest()} for the
+	 * completion or abort must return {@code true}. A composite READ's finalization is never reset,
+	 * because it sends no request.
+	 */
+	protected boolean timesUploadFinalization() {
+		return false;
+	}
+
 	/** Operations the dispatch task has drained but not yet submitted. */
 	protected final int dispatcherBacklog() {
 		final var task = this.opDispatchTask;
@@ -903,6 +919,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 						subOp.incrementRetryCount();
 						parentOp.undoMarkSubTaskCompleted();
 						op.status(Operation.Status.PENDING);
+						// The retry is a new request: the failed attempt's response times would make
+						// it look finished after its response started.
+						op.resetTiming();
 						if (op.item() instanceof DataItem dataItem) {
 							dataItem.reset();
 						}
@@ -940,6 +959,11 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				// Execute once again to finalize the composite operation, for example
 				// completing the multipart upload. The finalization gate prevents
 				// concurrent part completions from enqueueing the same parent twice.
+				// See timesUploadFinalization(). A composite READ's finalization sends no request, and
+				// its duration runs from its initial pass, so its timing is kept.
+				if (OpType.CREATE.equals(parentOp.type()) && timesUploadFinalization()) {
+					parentOp.resetTiming();
+				}
 				enqueueChildOp((O) parentOp, op, "completion operation");
 			}
 		}
@@ -1089,19 +1113,48 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		opDispatchTask.stop();
 		signalDispatch();
 		if (taskWasRunning || taskWasAlreadyStopped) {
-			try {
-				dispatchStoppedInTime = opDispatchTask.await(TASK_STOP_WAIT_SECONDS, TimeUnit.SECONDS);
-				if (!dispatchStoppedInTime) {
-					Loggers.MSG.warn(
-									"{}: dispatch task did not stop within {} second(s); "
-													+ "queued lifecycle ownership will be recovered without touching task buffers",
-									toString(), TASK_STOP_WAIT_SECONDS);
-				}
-			} catch (final InterruptedException e) {
-				throwUnchecked(e);
+			dispatchStoppedInTime = awaitDispatchStopped();
+			if (!dispatchStoppedInTime) {
+				Loggers.MSG.warn(
+								"{}: dispatch task did not stop within {} second(s); "
+												+ "queued lifecycle ownership will be recovered without touching task buffers",
+								toString(), TASK_STOP_WAIT_SECONDS);
 			}
 		}
 		onAdmissionClosed();
+	}
+
+	/**
+	 * Waits for the dispatch task to stop, also on an interrupted thread: a step's stop or a close
+	 * can arrive as an interrupt, and the rest of the close must still run.
+	 *
+	 * <p>Invariant: the wait ends by the {@link com.dell.spt.base.Constants#TASK_STOP_WAIT_SECONDS}
+	 * deadline whether or not the thread is interrupted, before the call or during the wait, so a
+	 * close on an interrupted thread takes at most that bound longer and never waits unbounded. An
+	 * interrupt neither ends the wait early nor skips it, so the result is the task's real state
+	 * and not a stale earlier one; the interrupt flag is set again before this returns.
+	 */
+	private boolean awaitDispatchStopped() {
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TASK_STOP_WAIT_SECONDS);
+		var interrupted = Thread.interrupted();
+		try {
+			while (true) {
+				final long remaining = deadline - System.nanoTime();
+				try {
+					return opDispatchTask.await(Math.max(0L, remaining), TimeUnit.NANOSECONDS);
+				} catch (final InterruptedException e) {
+					interrupted = true;
+					if (remaining <= 0) {
+						// Another interrupt hit the last check at the deadline: count the task late.
+						return false;
+					}
+				}
+			}
+		} finally {
+			if (interrupted) {
+				Thread.currentThread().interrupt();
+			}
+		}
 	}
 
 	/**
