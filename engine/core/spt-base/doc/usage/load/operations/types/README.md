@@ -79,7 +79,7 @@ items have been updated (modified).
 java -jar spt-<VERSION>.jar --read --item-data-verify --item-input-file=items.csv ...
 ```
 
-A load operation is reported with the [status code](../../../output#232-files) 12 if the content verification fails.
+A load operation is reported with the [status](../../../output#232-files) `RESP_FAIL_CORRUPT` if the content verification fails.
 
 ## 3. Update
 
