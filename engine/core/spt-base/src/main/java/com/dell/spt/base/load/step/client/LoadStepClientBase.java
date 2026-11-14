@@ -52,6 +52,7 @@ import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepBase;
 import com.dell.spt.base.load.step.LoadStepFactory;
+import com.dell.spt.base.load.step.StepIdInUseException;
 import com.dell.spt.base.load.step.client.metrics.MetricsAggregator;
 import com.dell.spt.base.load.step.client.metrics.MetricsAggregatorImpl;
 import com.dell.spt.base.load.step.file.FileManager;
@@ -311,6 +312,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					}
 				}
 			}
+			// Before any item is distributed or any slice started: a refused step runs no load.
+			final var nicSetExpected = nicSetExpected(configSlices, ctxConfigsSlices);
+			refuseStepIdInUse(sliceCount, nicSetExpected);
 			final Runnable distribution = () -> {
 				addFileClients(config, configSlices, suppliesItems(BASE_CONFIG));
 				for (var i = 0; i < slicesByCtxConfig.size(); i++) {
@@ -318,7 +322,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			};
 			// The barrier's deadline starts before the items are distributed (D54-R2).
-			final AdmissionBarrier barrier = anyNicSet(configSlices, ctxConfigsSlices) ? newAdmissionBarrier() : null;
+			final AdmissionBarrier barrier = nicSetExpected.contains(true) ? newAdmissionBarrier() : null;
 			itemSizeRecording = stepItemSizeRecording(barrier == null ? null : barrier.itemSizeRecording());
 			try {
 				if (barrier == null) {
@@ -331,7 +335,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					});
 				}
 				initAndStartStepSlices(nodeAddrs, configSlices, ctxConfigsSlices, metricsMgr, barrier);
-				initNicPathsCollector(nodeAddrs, configSlices, ctxConfigsSlices);
+				initNicPathsCollector(nodeAddrs, nicSetExpected);
 				if (barrier != null) {
 					openAdmissionBarrier(barrier);
 				}
@@ -354,14 +358,128 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 	}
 
-	private static boolean anyNicSet(final List<Config> configSlices, final List<List<Config>> ctxConfigsSlices) {
+	/** One per slice: whether that slice requested a NIC set, in its base or any context configuration. */
+	private static List<Boolean> nicSetExpected(final List<Config> configSlices, final List<List<Config>> ctxConfigsSlices) {
+		final var expected = new ArrayList<Boolean>(configSlices.size());
 		for (var i = 0; i < configSlices.size(); i++) {
-			if (NicSetConfig.isSet(configSlices.get(i).configVal("storage"))
-							|| ctxConfigsSlices.get(i).stream().anyMatch(ctx -> NicSetConfig.isSet(ctx.configVal("storage")))) {
-				return true;
+			expected.add(NicSetConfig.isSet(configSlices.get(i).configVal("storage"))
+							|| ctxConfigsSlices.get(i).stream().anyMatch(ctx -> NicSetConfig.isSet(ctx.configVal("storage"))));
+		}
+		return expected;
+	}
+
+	/** A logger-backed CSV that every slice writes and the step merges at close. */
+	private record LoggerArtifact(String loggerName, String fileName, String header) {}
+
+	/** The terminal lifecycle evidence a CREATE or READ step merges at close, with its range reads. */
+	private List<LoggerArtifact> operationLifecycleArtifacts(final OpType opType) {
+		if (opType != OpType.CREATE && opType != OpType.READ) {
+			return List.of();
+		}
+		final var artifacts = new ArrayList<LoggerArtifact>(2);
+		artifacts.add(new LoggerArtifact(Loggers.OPERATION_LIFECYCLE.getName(),
+						OperationLifecycleArtifact.FILE_NAME, OperationLifecycleArtifact.HEADER));
+		if (hasRangeReadPolicy()) {
+			artifacts.add(new LoggerArtifact(Loggers.RANGE_READ.getName(),
+							com.dell.spt.base.metrics.range.RangeReadArtifact.FILE_NAME,
+							com.dell.spt.base.metrics.range.RangeReadArtifact.HEADER));
+		}
+		return artifacts;
+	}
+
+	/** The integrity logger artifacts a metadata-mode step of {@code opType} merges at close. */
+	private static List<LoggerArtifact> integrityLoggerArtifacts(
+					final IntegrityConfig integrityConfig, final OpType opType, final Config itemConfig) {
+		if (!integrityConfig.enabled()) {
+			return List.of();
+		}
+		final var failures = new LoggerArtifact(Loggers.INTEGRITY_FAILURES.getName(),
+						IntegrityCsvArtifacts.FAILURES_FILE_NAME, IntegrityCsvArtifacts.FAILURES_HEADER);
+		final var performance = new LoggerArtifact(Loggers.INTEGRITY_PERFORMANCE.getName(),
+						IntegrityCsvArtifacts.PERFORMANCE_FILE_NAME, IntegrityCsvArtifacts.PERFORMANCE_HEADER);
+		if (OpType.READ.equals(opType)) {
+			return List.of(failures, performance);
+		}
+		if (!OpType.CREATE.equals(opType)) {
+			return List.of();
+		}
+		final var threshold = itemConfig.configVal("data").configVal("ranges").val("threshold");
+		final long thresholdBytes = threshold instanceof String
+						? BinarySizeFormat.parseFixedSize((String) threshold)
+						: TypeUtil.typeConvert(threshold, long.class);
+		return thresholdBytes > 0
+						? List.of(performance, new LoggerArtifact(Loggers.MULTIPART_LIFECYCLE.getName(),
+										IntegrityCsvArtifacts.MULTIPART_LIFECYCLE_FILE_NAME,
+										IntegrityCsvArtifacts.MULTIPART_LIFECYCLE_HEADER))
+						: List.of(performance);
+	}
+
+	private static OpType opType(final Config config) {
+		return OpType.valueOf(config.configVal("load").configVal("op").stringVal("type").toUpperCase(Locale.ROOT));
+	}
+
+	/**
+	 * Refuses the step before any load when an earlier step with the same id left, on the Entry Node,
+	 * a file that this step would refuse to replace at its close: the operation lifecycle and range
+	 * read evidence of a CREATE or READ step, the integrity logger artifacts, and the NIC files of a
+	 * step with a NIC set. It tests the files of the aggregators that {@link #addFileClients} and
+	 * {@link #initNicPathsCollector} build, chosen the same way; each worker tests its own files when
+	 * its slice starts. A metadata-mode step's manifest is refused the same way when it was already
+	 * published. A step that publishes none of these files runs as before.
+	 *
+	 * @param nicSetExpected one per slice: whether that slice requested a NIC set
+	 */
+	private void refuseStepIdInUse(final int sliceCount, final List<Boolean> nicSetExpected) {
+		final var configs = new ArrayList<Config>();
+		configs.add(config);
+		if (ctxConfigs != null) {
+			configs.addAll(ctxConfigs);
+		}
+		// Each list is built once, from the first configuration that has any, as addFileClients does.
+		List<LoggerArtifact> lifecycle = List.of();
+		List<LoggerArtifact> integrity = List.of();
+		for (final var stepConfig : configs) {
+			final var opType = opType(stepConfig);
+			final var integrityConfig = IntegrityConfig.fromStorage(stepConfig.configVal("storage"));
+			if (lifecycle.isEmpty()) {
+				lifecycle = operationLifecycleArtifacts(opType);
+			}
+			if (integrity.isEmpty()) {
+				integrity = integrityLoggerArtifacts(integrityConfig, opType, stepConfig.configVal("item"));
+			}
+			final var itemOutputFile = stepConfig.stringVal("item-output-file");
+			if (integrityConfig.enabled() && itemOutputFile != null && !itemOutputFile.isEmpty()) {
+				for (final var path : CsvArtifactAggregator.publishedPaths(itemOutputFile, sliceCount, opType)) {
+					if (java.nio.file.Files.exists(path)) {
+						throw terminalFailure(
+										IntegrityTerminalException.Category.PUBLICATION,
+										"item output file is already published by an earlier step (" + path
+														+ " exists); give each step its own item.output.file",
+										null);
+					}
+				}
 			}
 		}
-		return false;
+		final var paths = new ArrayList<java.nio.file.Path>();
+		for (final var artifact : concat(lifecycle, integrity)) {
+			try {
+				paths.addAll(CsvLoggerArtifactAggregator.publishedPaths(
+								fileMgrs.get(0), artifact.loggerName(), loadStepId(), sliceCount));
+			} catch (final IOException | RuntimeException noFile) {
+				// Its aggregator fails to initialize with the reason.
+			}
+		}
+		if (nicSetExpected.contains(true)) {
+			paths.addAll(NicPathsCollector.publishedPaths(fileMgrs.get(0), loadStepId(), nicSetExpected));
+		}
+		StepIdInUseException.refuseExisting(loadStepId(), paths);
+	}
+
+	private static <T> List<T> concat(final List<T> first, final List<T> second) {
+		final var all = new ArrayList<T>(first.size() + second.size());
+		all.addAll(first);
+		all.addAll(second);
+		return all;
 	}
 
 	private AdmissionBarrier newAdmissionBarrier() {
@@ -394,18 +512,13 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		return String.format(Locale.ROOT, "%.1f", millis / 1000.0);
 	}
 
-	private void initNicPathsCollector(
-					final List<String> nodeAddrs, final List<Config> configSlices, final List<List<Config>> ctxConfigsSlices) {
+	private void initNicPathsCollector(final List<String> nodeAddrs, final List<Boolean> nicSetExpected) {
 		if (fileMgrs.size() < 2 || nicPathsCollector != null) {
 			return;
 		}
-		final var expected = new ArrayList<Boolean>(configSlices.size());
-		for (var i = 0; i < configSlices.size(); i++) {
-			expected.add(NicSetConfig.isSet(configSlices.get(i).configVal("storage"))
-							|| ctxConfigsSlices.get(i).stream().anyMatch(ctx -> NicSetConfig.isSet(ctx.configVal("storage"))));
-		}
 		// Every slice writes its event-loop report, so a distributed step always collects.
-		nicPathsCollector = new NicPathsCollector(loadStepId(), fileMgrs, NicPathsCollector.nodeNames(nodeAddrs), expected);
+		nicPathsCollector = new NicPathsCollector(
+						loadStepId(), fileMgrs, NicPathsCollector.nodeNames(nodeAddrs), nicSetExpected);
 	}
 
 	private void initDeleteArtifactAggregator(final List<String> nodeAddrs) {
@@ -607,16 +720,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 
 		initIntegrityLogFileAggregators(integrityConfig, opType, itemConfig);
-		if ((opType == OpType.CREATE || opType == OpType.READ) && operationLifecycleAggregators.isEmpty()) {
+		if (operationLifecycleAggregators.isEmpty()) {
 			try {
-				operationLifecycleAggregators.add(new CsvLoggerArtifactAggregator(loadStepId(), fileMgrs,
-								Loggers.OPERATION_LIFECYCLE.getName(),
-								OperationLifecycleArtifact.FILE_NAME,
-								OperationLifecycleArtifact.HEADER));
-				if (hasRangeReadPolicy()) {
+				for (final var artifact : operationLifecycleArtifacts(opType)) {
 					operationLifecycleAggregators.add(new CsvLoggerArtifactAggregator(loadStepId(), fileMgrs,
-									Loggers.RANGE_READ.getName(), com.dell.spt.base.metrics.range.RangeReadArtifact.FILE_NAME,
-									com.dell.spt.base.metrics.range.RangeReadArtifact.HEADER));
+									artifact.loggerName(), artifact.fileName(), artifact.header()));
 				}
 			} catch (final IOException e) {
 				throw new IllegalStateException("failed to initialize operation lifecycle aggregation", e);
@@ -731,27 +839,9 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			return;
 		}
 		try {
-			if (OpType.READ.equals(opType)) {
+			for (final var artifact : integrityLoggerArtifacts(integrityConfig, opType, itemConfig)) {
 				integrityLogFileAggregators.add(new CsvLoggerArtifactAggregator(
-								loadStepId(), fileMgrs, Loggers.INTEGRITY_FAILURES.getName(),
-								IntegrityCsvArtifacts.FAILURES_FILE_NAME, IntegrityCsvArtifacts.FAILURES_HEADER));
-				integrityLogFileAggregators.add(new CsvLoggerArtifactAggregator(
-								loadStepId(), fileMgrs, Loggers.INTEGRITY_PERFORMANCE.getName(),
-								IntegrityCsvArtifacts.PERFORMANCE_FILE_NAME, IntegrityCsvArtifacts.PERFORMANCE_HEADER));
-			} else if (OpType.CREATE.equals(opType)) {
-				integrityLogFileAggregators.add(new CsvLoggerArtifactAggregator(
-								loadStepId(), fileMgrs, Loggers.INTEGRITY_PERFORMANCE.getName(),
-								IntegrityCsvArtifacts.PERFORMANCE_FILE_NAME, IntegrityCsvArtifacts.PERFORMANCE_HEADER));
-				final var threshold = itemConfig.configVal("data").configVal("ranges").val("threshold");
-				final long thresholdBytes = threshold instanceof String
-								? BinarySizeFormat.parseFixedSize((String) threshold)
-								: TypeUtil.typeConvert(threshold, long.class);
-				if (thresholdBytes > 0) {
-					integrityLogFileAggregators.add(new CsvLoggerArtifactAggregator(
-									loadStepId(), fileMgrs, Loggers.MULTIPART_LIFECYCLE.getName(),
-									IntegrityCsvArtifacts.MULTIPART_LIFECYCLE_FILE_NAME,
-									IntegrityCsvArtifacts.MULTIPART_LIFECYCLE_HEADER));
-				}
+								loadStepId(), fileMgrs, artifact.loggerName(), artifact.fileName(), artifact.header()));
 			}
 		} catch (final IOException e) {
 			throw terminalFailure(

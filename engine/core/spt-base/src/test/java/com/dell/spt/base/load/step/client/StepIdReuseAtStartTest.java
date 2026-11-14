@@ -1,0 +1,264 @@
+package com.dell.spt.base.load.step.client;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import com.dell.spt.base.config.TestConfigBuilder;
+import com.dell.spt.base.control.run.RunTerminalException;
+import com.dell.spt.base.integrity.IntegrityManifestCompletion;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
+import com.dell.spt.base.load.step.LoadStep;
+import com.dell.spt.base.load.step.LoadStepFactory;
+import com.dell.spt.base.load.step.StepIdInUseException;
+import com.dell.spt.base.load.step.file.FileManager;
+import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.metrics.range.RangeReadArtifact;
+import com.github.akurilov.confuse.Config;
+import java.io.IOException;
+import java.nio.file.DirectoryNotEmptyException;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.util.Comparator;
+import java.util.List;
+import java.util.UUID;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+/**
+ * A step whose id an earlier step already used in this log directory is refused at its start, before
+ * any slice starts, when it would refuse the earlier step's files at close; the earlier step's files
+ * stay as they were, even through the refused step's close. A step that publishes none of them runs
+ * as before.
+ */
+public class StepIdReuseAtStartTest {
+
+	private final String stepId = "step-id-reuse-" + UUID.randomUUID();
+	private LoadStepFactory<LoadStep, ?> factory;
+	private Path stepDir;
+
+	@TempDir
+	Path tempDir;
+
+	@AfterEach
+	void removeTheStepFolder() throws IOException {
+		if (stepDir != null) {
+			removeFolder(stepDir);
+		}
+	}
+
+	/**
+	 * Best effort: a step's asynchronous log can add a file while the folder is removed, so the walk is
+	 * retried; the step id is unique, so a folder left behind affects no other test.
+	 */
+	public static void removeFolder(final Path dir) throws IOException {
+		for (int attempt = 0; attempt < 5 && Files.isDirectory(dir); attempt++) {
+			try (Stream<Path> files = Files.walk(dir)) {
+				for (final Path file : files.sorted(Comparator.reverseOrder()).toList()) {
+					Files.deleteIfExists(file);
+				}
+			} catch (final DirectoryNotEmptyException | NoSuchFileException raced) {
+				// A file appeared or went during the walk: walk again.
+			}
+		}
+	}
+
+	@Test
+	void aReadStepIsRefusedWhenAnEarlierStepsNodeSourceExists() throws Exception {
+		final Path stale = earlierFile(nodeSource(Loggers.OPERATION_LIFECYCLE.getName(), 0));
+
+		final var failure = refused(client(config("read")));
+
+		assertEquals(stale.toString(), failure.getMessage().replaceAll(".*\\((.*) exists\\).*", "$1"));
+		assertEquals("earlier", Files.readString(stale));
+		verify(factory, never()).createLocal(any(), anyList(), anyList(), any());
+	}
+
+	@Test
+	void aCreateStepIsRefusedWhenTheCanonicalFileExistsAndItsCloseLeavesItAlone() throws Exception {
+		final Path canonical = earlierFile(canonical(Loggers.OPERATION_LIFECYCLE.getName()));
+		final TestLoadStepClient client = client(config("create"));
+
+		final var failure = refused(client);
+		assertTrue(failure.getMessage().contains(canonical.toString()), failure.getMessage());
+		closeQuietly(client);
+
+		assertEquals("earlier", Files.readString(canonical));
+		assertFalse(Files.exists(nodeSource(Loggers.OPERATION_LIFECYCLE.getName(), 0)),
+						"the refused step's close moved the earlier step's file");
+		try (Stream<Path> files = Files.list(stepDir)) {
+			// The refused step logs its messages there, and adds no result file.
+			assertEquals(List.of(canonical.toAbsolutePath()), files.map(Path::toAbsolutePath)
+							.filter(file -> file.getFileName().toString().endsWith(".csv")).toList());
+		}
+	}
+
+	@Test
+	void aPartialReadIsRefusedWhenAnEarlierRangeReadSourceExists() throws Exception {
+		final Path stale = earlierFile(nodeSource(Loggers.RANGE_READ.getName(), 0));
+		final Config config = config("read");
+		config.val("load-op-read-range-size", "1KiB");
+		// Only its name is checked before the step starts; this fixture never loads a driver.
+		config.val("storage-driver-type", "s3");
+
+		final var failure = refused(client(config));
+
+		assertTrue(failure.getMessage().contains(stale.toString()), failure.getMessage());
+		assertEquals("earlier", Files.readString(stale));
+	}
+
+	@Test
+	void aReadWithoutRangesIgnoresAnEarlierRangeReadFile() throws Exception {
+		earlierFile(nodeSource(Loggers.RANGE_READ.getName(), 0));
+
+		final TestLoadStepClient client = client(config("read"));
+		try {
+			client.start();
+		} catch (final RuntimeException other) {
+			assertFalse(RunTerminalException.find(other) instanceof StepIdInUseException, other.toString());
+		} finally {
+			closeQuietly(client);
+		}
+	}
+
+	@Test
+	void updateDeleteAndNoopStepsStillRunAfterAnEarlierStepWithTheSameId() throws Exception {
+		earlierFile(canonical(Loggers.OPERATION_LIFECYCLE.getName()));
+		earlierFile(nodeSource(Loggers.OPERATION_LIFECYCLE.getName(), 0));
+		for (final String opType : List.of("update", "delete", "noop")) {
+			final TestLoadStepClient client = client(config(opType));
+			try {
+				client.start();
+			} catch (final RuntimeException other) {
+				assertFalse(RunTerminalException.find(other) instanceof StepIdInUseException, opType + ": " + other);
+			} finally {
+				closeQuietly(client);
+			}
+		}
+	}
+
+	@Test
+	void aMetadataModeStepIsRefusedWhenItsManifestWasAlreadyPublished() throws Exception {
+		final Path manifest = tempDir.resolve("written.csv");
+		final Path marker = IntegrityManifestCompletion.completionPath(manifest);
+		Files.writeString(marker, "earlier");
+		final Config config = config("create");
+		config.val("item-output-file", manifest.toString());
+		config.val("storage-integrity-mode", "metadata");
+		config.val("storage-driver-type", "s3");
+
+		final TestLoadStepClient client = client(config);
+		final var thrown = assertThrows(RuntimeException.class, client::start);
+		closeQuietly(client);
+
+		final var failure = IntegrityTerminalException.find(thrown);
+		assertEquals(IntegrityTerminalException.Category.PUBLICATION, failure.category(), thrown.toString());
+		assertTrue(failure.getMessage().contains("item output file is already published by an earlier step"),
+						failure.getMessage());
+		assertEquals("earlier", Files.readString(marker));
+	}
+
+	@Test
+	void theStartCheckTestsTheFilesTheLoggerAggregatorRefusesAtClose() throws Exception {
+		final var entry = FileManager.INSTANCE;
+		final var paths = CsvLoggerArtifactAggregator.publishedPaths(
+						entry, Loggers.OPERATION_LIFECYCLE.getName(), stepId, 3);
+		final Path canonical = canonical(Loggers.OPERATION_LIFECYCLE.getName());
+		assertEquals(List.of(canonical, CsvLoggerArtifactAggregator.nodeSourcePath(canonical, 0),
+						CsvLoggerArtifactAggregator.nodeSourcePath(canonical, 1),
+						CsvLoggerArtifactAggregator.nodeSourcePath(canonical, 2)), paths);
+		assertEquals(OperationLifecycleArtifact.path(stepId), canonical);
+		assertEquals(RangeReadArtifact.path(stepId), canonical(Loggers.RANGE_READ.getName()));
+	}
+
+	@Test
+	void theStartCheckTestsTheFilesTheManifestAggregatorRefusesAtClose() {
+		final Path manifest = tempDir.resolve("verify-input.csv");
+		final Path node0 = CsvArtifactAggregator.nodeSourcePath(manifest, 0);
+		final Path node1 = CsvArtifactAggregator.nodeSourcePath(manifest, 1);
+		assertEquals(List.of(IntegrityManifestCompletion.completionPath(manifest), node0, node1),
+						CsvArtifactAggregator.publishedPaths(manifest.toString(), 2, OpType.CREATE));
+		assertEquals(List.of(IntegrityManifestCompletion.completionPath(manifest),
+						node0, IntegrityManifestCompletion.emissionCountPath(node0),
+						IntegrityManifestCompletion.deleteMarkerCountPath(node0),
+						node1, IntegrityManifestCompletion.emissionCountPath(node1),
+						IntegrityManifestCompletion.deleteMarkerCountPath(node1)),
+						CsvArtifactAggregator.publishedPaths(manifest.toString(), 2, OpType.LIST));
+	}
+
+	private StepIdInUseException refused(final TestLoadStepClient client) {
+		try {
+			final var thrown = assertThrows(RuntimeException.class, client::start);
+			final var failure = assertInstanceOf(StepIdInUseException.class, RunTerminalException.find(thrown),
+							thrown.toString());
+			assertEquals(stepId, failure.stepId());
+			assertTrue(failure.getMessage().startsWith(
+							"step id \"" + stepId + "\" is already used in this log directory ("), failure.getMessage());
+			assertTrue(failure.getMessage().endsWith(" exists); give each step its own load.step.id"),
+							failure.getMessage());
+			assertEquals(IntegrityTerminalException.Category.CONFIGURATION, failure.category());
+			return failure;
+		} finally {
+			closeQuietly(client);
+		}
+	}
+
+	private static void closeQuietly(final TestLoadStepClient client) {
+		try {
+			client.close();
+		} catch (final Exception ignored) {
+			// This fixture has no real slice, so the close of a started step fails at collection.
+		}
+	}
+
+	private Config config(final String opType) {
+		final Config config = TestConfigBuilder.config();
+		config.val("load-step-id", stepId);
+		config.val("load-op-type", opType);
+		config.val("output-metrics-timing-persist", false);
+		config.val("load-step-node-addrs", List.of());
+		config.val("item-data-input-compressibility", 0.0);
+		config.val("item-data-dedupable", false);
+		config.val("item-data-verify", false);
+		config.val("item-output-file", "");
+		return config;
+	}
+
+	@SuppressWarnings("unchecked")
+	private TestLoadStepClient client(final Config config) throws Exception {
+		factory = mock(LoadStepFactory.class);
+		when(factory.id()).thenReturn("test-load-step");
+		when(factory.createLocal(any(), anyList(), anyList(), any())).thenReturn(mock(LoadStep.class));
+		return new TestLoadStepClient(config, List.of(factory), null, mock(MetricsManager.class));
+	}
+
+	private Path canonical(final String loggerName) throws IOException {
+		final Path path = Path.of(FileManager.INSTANCE.logFileName(loggerName, stepId));
+		stepDir = path.toAbsolutePath().getParent();
+		return path;
+	}
+
+	private Path nodeSource(final String loggerName, final int index) throws IOException {
+		return CsvLoggerArtifactAggregator.nodeSourcePath(canonical(loggerName), index);
+	}
+
+	private static Path earlierFile(final Path path) throws IOException {
+		Files.createDirectories(path.toAbsolutePath().getParent());
+		Files.writeString(path, "earlier");
+		return path;
+	}
+}

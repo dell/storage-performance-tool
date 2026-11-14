@@ -1,0 +1,276 @@
+package com.dell.spt.base.load.step;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import com.dell.spt.base.concurrent.ServiceTaskExecutor;
+import com.dell.spt.base.config.TestConfigBuilder;
+import com.dell.spt.base.control.run.RunImpl;
+import com.dell.spt.base.control.run.RunTerminalException;
+import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
+import com.dell.spt.base.load.step.client.StepIdReuseAtStartTest;
+import com.dell.spt.base.load.step.linear.LinearLoadStepClient;
+import com.dell.spt.base.load.step.linear.LinearLoadStepExtension;
+import com.dell.spt.base.metrics.MetricsManagerImpl;
+import com.dell.spt.base.metrics.TerminalStepEntry;
+import com.dell.spt.base.storage.driver.mock.DummyStorageDriverMockExtension;
+import com.github.akurilov.confuse.Config;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
+import javax.script.ScriptEngine;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+/**
+ * Scenarios that give two steps one id, on the real linear step and the dummy mock driver: the second
+ * CREATE is refused at its start, before any load, and leaves the first one's files as they were; an
+ * UPDATE that reuses an id still runs; and the shipped endurance examples give each step its own id.
+ */
+@Timeout(180)
+class StepIdReuseScenarioTest {
+
+	private static final long TERMINAL_RETENTION_MILLIS = TimeUnit.MINUTES.toMillis(10);
+
+	private final MetricsManagerImpl metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+	private final List<Path> stepDirs = new ArrayList<>();
+
+	@TempDir
+	Path tempDir;
+
+	@AfterEach
+	void removeTheStepFolders() throws IOException {
+		for (final Path dir : stepDirs) {
+			StepIdReuseAtStartTest.removeFolder(dir);
+		}
+	}
+
+	@Test
+	void theSecondOfTwoStepsWithOneIdIsRefusedAtItsStart() throws Exception {
+		final String stepId = uniqueStepId("same-id");
+		final String first = "Load.config({load:{step:{id:\"" + stepId + "\"},op:{limit:{count:50}}}}).run();\n";
+		// Another count, so that its metrics would show had it run.
+		final String second = first.replace("count:50", "count:30");
+
+		final var thrown = assertThrows(RunTerminalException.class, () -> run(first + second));
+
+		assertRefused(thrown, stepId);
+		final List<TerminalStepEntry> steps = terminalSteps(stepId);
+		assertEquals(2, steps.size(), "the first step's node and fleet entries: " + steps);
+		for (final TerminalStepEntry step : steps) {
+			assertEquals(50, step.successCount, "the refused step ran operations");
+			assertEquals(50, step.countLimit);
+		}
+	}
+
+	/** As two engine runs into one log directory: the second one's step changes none of the first one's files. */
+	@Test
+	void aRerunWithTheSameStepIdIsRefusedAndLeavesTheEarlierFilesAlone() throws Exception {
+		final String stepId = uniqueStepId("rerun");
+		final String scenario = "Load.config({load:{step:{id:\"" + stepId + "\"},op:{limit:{count:50}}}}).run();\n";
+		run(scenario);
+		final Map<Path, String> before = resultFiles(stepId);
+		assertTrue(before.keySet().stream().anyMatch(file -> file.endsWith(OperationLifecycleArtifact.FILE_NAME)), before.toString());
+
+		final List<TerminalStepEntry> metricsBefore = terminalSteps(stepId);
+
+		final var thrown = assertThrows(RunTerminalException.class, () -> run(scenario));
+
+		assertRefused(thrown, stepId);
+		assertEquals(before, resultFiles(stepId));
+		final List<TerminalStepEntry> metricsAfter = terminalSteps(stepId);
+		assertEquals(metricsBefore.size(), metricsAfter.size());
+		for (int i = 0; i < metricsBefore.size(); i++) {
+			assertTrue(metricsBefore.get(i) == metricsAfter.get(i), "the refused step recorded metrics");
+		}
+	}
+
+	@Test
+	void anUpdateThatReusesTheIdOfAnEarlierStepStillRuns() throws Exception {
+		final String stepId = uniqueStepId("update");
+		final String items = tempDir.resolve("items.csv").toString().replace("\\", "/");
+		final String update = "Load.config({item:{input:{file:\"" + items + "\"}},load:{step:{id:\"" + stepId
+						+ "\"},op:{type:\"update\",limit:{count:10}}}}).run();\n";
+
+		assertDoesNotThrow(() -> run(
+						"Load.config({item:{output:{file:\"" + items + "\"}},load:{step:{id:\"" + stepId
+										+ "\"},op:{limit:{count:10}}}}).run();\n" + update + update));
+
+		for (final TerminalStepEntry step : terminalSteps(stepId)) {
+			assertEquals(com.dell.spt.base.item.op.OpType.UPDATE, step.opType, "the last step's entries");
+			assertEquals(10, step.successCount);
+		}
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"infinite_loop_test.js", "parallel_pipeline_and_infinite_loop_test.js"
+	})
+	void anEnduranceExampleRunsThreeLoopsWithoutReusingAStepId(final String example) throws Exception {
+		final String script;
+		try (InputStream in = getClass().getResourceAsStream("/example/scenario/js/endurance/" + example)) {
+			assertNotNull(in, example);
+			script = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+		}
+		final ScriptEngine engine = ScenarioUtil.scriptEngineByDefault(Thread.currentThread().getContextClassLoader());
+		final var stepIds = new ArrayList<String>();
+		final var load = new BoundedLoad(new LinearLoadStepClient(config(), extensions(), null, metrics), stepIds);
+		engine.put("Load", load);
+		// The pipeline runs once, beside the loop; this test is about the loop.
+		engine.put("PipelineLoad", new IgnoredLoad());
+
+		final var thrown = assertThrows(Exception.class, () -> engine.eval(script));
+
+		assertTrue(BoundedLoad.stopped(thrown), "the loop stopped before its third step ended: " + thrown);
+		assertEquals(BoundedLoad.LOOPS, stepIds.size(), stepIds.toString());
+		assertEquals(BoundedLoad.LOOPS, new HashSet<>(stepIds).size(), "a step id was reused: " + stepIds);
+		for (final String stepId : stepIds) {
+			stepDirs.add(stepDir(stepId));
+			assertTrue(stepId.startsWith("endurance_1_"), stepId);
+			assertEquals(20, terminalSteps(stepId).get(0).successCount, stepId);
+		}
+	}
+
+	private static void assertRefused(final RunTerminalException thrown, final String stepId) {
+		final var refused = assertInstanceOf(StepIdInUseException.class, RunTerminalException.find(thrown), thrown.toString());
+		assertEquals(stepId, refused.stepId());
+		assertTrue(refused.getMessage().startsWith("step id \"" + stepId + "\" is already used in this log directory ("),
+						refused.getMessage());
+	}
+
+	private void run(final String scenario) {
+		final ScriptEngine engine = ScenarioUtil.scriptEngineByDefault(Thread.currentThread().getContextClassLoader());
+		ScenarioUtil.registerStepTypes(engine, extensions(), config(), metrics);
+		new RunImpl("step id reuse", scenario, engine, 1).run();
+	}
+
+	private String uniqueStepId(final String name) throws IOException {
+		final String stepId = "step-id-reuse-" + name + "-" + UUID.randomUUID();
+		stepDirs.add(stepDir(stepId));
+		return stepId;
+	}
+
+	private static Path stepDir(final String stepId) throws IOException {
+		return OperationLifecycleArtifact.path(stepId).toAbsolutePath().getParent();
+	}
+
+	/** The step's result files, by path, with their contents. */
+	private static Map<Path, String> resultFiles(final String stepId) throws IOException {
+		final var files = new LinkedHashMap<Path, String>();
+		try (Stream<Path> list = Files.list(stepDir(stepId))) {
+			for (final Path file : list.sorted().toList()) {
+				// The step's messages are a log, not a result file; a refused step adds its refusal there.
+				if (file.getFileName().toString().endsWith(".csv") || file.getFileName().toString().endsWith(".json")) {
+					files.put(file, Files.readString(file));
+				}
+			}
+		}
+		return files;
+	}
+
+	private List<TerminalStepEntry> terminalSteps(final String stepId) {
+		return metrics.getTerminalSteps().stream().filter(entry -> stepId.equals(entry.stepId)).toList();
+	}
+
+	private Config config() {
+		metrics.setTerminalRetentionMillis(TERMINAL_RETENTION_MILLIS);
+		final Config config = TestConfigBuilder.config();
+		config.val("load-step-limit-time", 0);
+		config.val("storage-driver-type", "dummy-mock");
+		config.val("output-metrics-timing-persist", false);
+		config.val("output-metrics-trace-persist", false);
+		config.val("item-data-input-compressibility", 0.0);
+		config.val("item-data-dedupable", false);
+		config.val("item-data-verify", false);
+		config.val("item-data-ranges-concat", null);
+		config.val("item-input-file", null);
+		config.val("item-input-path", null);
+		config.val("load-op-wait-finish", true);
+		config.val("load-op-wait-limit", 1);
+		config.val("load-step-node-addrs", List.of());
+		return config;
+	}
+
+	private static List<Extension> extensions() {
+		return List.of(new LinearLoadStepExtension<>(), new DummyStorageDriverMockExtension<>());
+	}
+
+	/** What an endurance example sees as {@code Load}: the real step, bounded by a count, for three loops. */
+	public static final class BoundedLoad {
+
+		static final int LOOPS = 3;
+		private static final Map<String, Object> BOUND = Map.of("load", Map.of("op", Map.of("limit", Map.of("count", 20))));
+
+		private final LinearLoadStepClient client;
+		private final List<String> stepIds;
+
+		BoundedLoad(final LinearLoadStepClient client, final List<String> stepIds) {
+			this.client = client;
+			this.stepIds = stepIds;
+		}
+
+		public BoundedLoad config(final Map<String, Object> config) {
+			return new BoundedLoad(client.config(config).config(BOUND), stepIds);
+		}
+
+		public void run() {
+			stepIds.add(client.loadStepId());
+			client.run();
+			if (stepIds.size() == LOOPS) {
+				throw new LoopsDone();
+			}
+		}
+
+		static boolean stopped(final Throwable thrown) {
+			for (Throwable cause = thrown; cause != null; cause = cause.getCause()) {
+				if (cause instanceof LoopsDone || String.valueOf(cause.getMessage()).contains(LoopsDone.MESSAGE)) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		static final class LoopsDone extends RuntimeException {
+			private static final long serialVersionUID = 1L;
+			static final String MESSAGE = "endurance loops done";
+
+			LoopsDone() {
+				super(MESSAGE);
+			}
+		}
+	}
+
+	/** Accepts the configuration calls of a step this test does not run. */
+	public static final class IgnoredLoad {
+
+		public IgnoredLoad config(final Map<String, Object> ignored) {
+			return this;
+		}
+
+		public IgnoredLoad append(final Map<String, Object> ignored) {
+			return this;
+		}
+
+		public IgnoredLoad start() {
+			return this;
+		}
+	}
+}

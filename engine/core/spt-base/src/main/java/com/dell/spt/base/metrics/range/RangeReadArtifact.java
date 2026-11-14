@@ -16,13 +16,17 @@ public final class RangeReadArtifact {
 
 	private RangeReadArtifact() {}
 
+	/** This worker's file of step {@code stepId}, which it refuses to replace. */
+	public static Path path(final String stepId) throws IOException {
+		return Path.of(FileManager.INSTANCE.logFileName(Loggers.RANGE_READ.getName(), stepId));
+	}
+
 	/** Publish synchronously after stop; async logging plus flush does not drain its queue. */
 	public static void publish(final long runId, final String stepId, final String workerId,
 					final List<RangeReadSnapshot> counters, final boolean completeContexts) {
 		Path staging = null;
 		try {
-			final var path = Path.of(FileManager.INSTANCE.logFileName(
-							Loggers.RANGE_READ.getName(), stepId));
+			final var path = path(stepId);
 			Files.createDirectories(path.toAbsolutePath().getParent());
 			if (Files.exists(path)) {
 				throw new IOException("stale range read artifact exists");

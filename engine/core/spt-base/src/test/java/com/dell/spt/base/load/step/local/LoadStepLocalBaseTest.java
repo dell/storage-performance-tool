@@ -229,6 +229,102 @@ class LoadStepLocalBaseTest {
 						compatibility::releaseObjectFailureBudgetAdmission);
 	}
 
+	@Test
+	void aCreateSliceIsRefusedBeforeItsContextsStartWhenAnEarlierLifecycleFileExists() throws Exception {
+		final String stepId = "slice-reuse-" + java.util.UUID.randomUUID();
+		final var stale = earlierFile(com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact.path(stepId));
+		final var eventLoops = earlierFile(java.nio.file.Path.of(com.dell.spt.base.load.step.file.FileManager.INSTANCE
+						.logFileName(com.dell.spt.base.logging.Loggers.EVENT_LOOPS.getName(), stepId)));
+		try {
+			final LoadStepContext context = mockContext();
+			final var step = reuseStep(stepId, "create", context);
+
+			final var failure = assertThrows(
+							com.dell.spt.base.load.step.StepIdInUseException.class, step::startContextsForTest);
+
+			assertTrue(failure.getMessage().contains(stale.toString()), failure.getMessage());
+			verify(context, never()).start();
+			assertEquals("earlier", java.nio.file.Files.readString(stale));
+			assertEquals("earlier", java.nio.file.Files.readString(eventLoops), "the earlier event-loop report was removed");
+		} finally {
+			removeStepFolder(stale);
+		}
+	}
+
+	@Test
+	void aPartialReadSliceIsRefusedWhenAnEarlierRangeReadFileExists() throws Exception {
+		final String stepId = "slice-reuse-" + java.util.UUID.randomUUID();
+		final var stale = earlierFile(com.dell.spt.base.metrics.range.RangeReadArtifact.path(stepId));
+		try {
+			final LoadStepContext context = mockContext();
+			when(context.rangeReadSnapshot()).thenReturn(mock(com.dell.spt.base.metrics.range.RangeReadSnapshot.class));
+			final var step = reuseStep(stepId, "read", context);
+
+			final var failure = assertThrows(
+							com.dell.spt.base.load.step.StepIdInUseException.class, step::startContextsForTest);
+
+			assertTrue(failure.getMessage().contains(stale.toString()), failure.getMessage());
+			verify(context, never()).start();
+		} finally {
+			removeStepFolder(stale);
+		}
+	}
+
+	@Test
+	void aNicSetSliceIsRefusedWhenAnEarlierNicFileExists() throws Exception {
+		final String stepId = "slice-reuse-" + java.util.UUID.randomUUID();
+		final var stale = earlierFile(com.dell.spt.base.nic.NicSetArtifact.path(stepId));
+		try {
+			final LoadStepContext context = mockContext();
+			when(context.hasNicSet()).thenReturn(true);
+			// An UPDATE step publishes no lifecycle evidence, but a NIC set's files are refused all the same.
+			final var step = reuseStep(stepId, "update", context);
+
+			final var failure = assertThrows(
+							com.dell.spt.base.load.step.StepIdInUseException.class, step::startContextsForTest);
+
+			assertTrue(failure.getMessage().contains(stale.toString()), failure.getMessage());
+			verify(context, never()).start();
+		} finally {
+			removeStepFolder(stale);
+		}
+	}
+
+	@Test
+	void anUpdateSliceWithoutANicSetStillStartsAfterAnEarlierStepWithTheSameId() throws Exception {
+		final String stepId = "slice-reuse-" + java.util.UUID.randomUUID();
+		final var lifecycle = earlierFile(com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact.path(stepId));
+		earlierFile(com.dell.spt.base.metrics.range.RangeReadArtifact.path(stepId));
+		earlierFile(com.dell.spt.base.nic.NicPathsArtifact.path(stepId));
+		try {
+			for (final String opType : List.of("update", "delete", "noop")) {
+				final LoadStepContext context = mockContext();
+				reuseStep(stepId, opType, context).startContextsForTest();
+				verify(context).start();
+			}
+		} finally {
+			removeStepFolder(lifecycle);
+		}
+	}
+
+	private static TestLoadStepLocalBase reuseStep(
+					final String stepId, final String opType, final LoadStepContext context) {
+		final Config config = baseConfig();
+		config.val("load-step-id", stepId);
+		config.val("load-op-type", opType);
+		return new TestLoadStepLocalBase(config, mockMetricsManager(), context);
+	}
+
+	private static java.nio.file.Path earlierFile(final java.nio.file.Path path) throws java.io.IOException {
+		java.nio.file.Files.createDirectories(path.toAbsolutePath().getParent());
+		java.nio.file.Files.writeString(path, "earlier");
+		return path;
+	}
+
+	private static void removeStepFolder(final java.nio.file.Path file) throws java.io.IOException {
+		com.dell.spt.base.load.step.client.StepIdReuseAtStartTest.removeFolder(file.toAbsolutePath().getParent());
+	}
+
 	private static Config countDeleteConfig(final String stepId) {
 		final Config config = baseConfig();
 		config.val("load-step-id", stepId);

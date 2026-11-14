@@ -13,6 +13,11 @@ final class NicStepFile {
 
 	private NicStepFile() {}
 
+	/** This worker's file of {@code logger} for step {@code stepId}. */
+	static Path path(final Logger logger, final String stepId) throws IOException {
+		return Path.of(FileManager.INSTANCE.logFileName(logger.getName(), stepId));
+	}
+
 	/**
 	 * Writes {@code content} to {@code logger}'s file of the step, synchronously after stop: async
 	 * logging plus flush does not drain its queue.
@@ -32,7 +37,7 @@ final class NicStepFile {
 					final Logger logger, final String stepId, final String what, final String content, final boolean replace) {
 		Path staging = null;
 		try {
-			final var path = Path.of(FileManager.INSTANCE.logFileName(logger.getName(), stepId));
+			final var path = path(logger, stepId);
 			Files.createDirectories(path.toAbsolutePath().getParent());
 			if (!replace && Files.exists(path)) {
 				throw new IOException("stale " + what + " artifact exists");

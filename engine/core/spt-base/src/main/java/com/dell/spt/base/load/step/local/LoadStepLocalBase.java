@@ -23,6 +23,7 @@ import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.LoadStepBase;
 import com.dell.spt.base.load.step.PreparationStatus;
+import com.dell.spt.base.load.step.StepIdInUseException;
 import com.dell.spt.base.storage.driver.AdmissionPhase;
 import com.dell.spt.base.load.step.local.context.LoadStepContext;
 import com.dell.spt.base.load.step.local.context.LoadStepContextImpl;
@@ -48,6 +49,7 @@ import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import java.util.UUID;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.rmi.RemoteException;
 import java.util.NoSuchElementException;
 import java.util.ArrayList;
@@ -193,6 +195,8 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		operationLifecycleWorkerId = UUID.randomUUID().toString();
 		operationLifecyclePublished = false;
 		nicPathsPublished = false;
+		// Before the earlier step's event-loop report is removed: a refused step changes none of its files.
+		refuseStepIdInUse();
 		discardEarlierEventLoops();
 		if (standaloneDeleteEnabled()) {
 			expectedDeleteObjectLifecycleContexts = List.copyOf(stepContexts);
@@ -1088,6 +1092,36 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		}
 	}
 
+	/**
+	 * Refuses the step before any load when an earlier step with the same id left one of the files
+	 * this slice would refuse to replace at stop: the operation lifecycle and range read evidence of a
+	 * CREATE or READ step, and the NIC files of a step with a NIC set. The Entry Node tests its own
+	 * copies of them before it starts any slice.
+	 */
+	private void refuseStepIdInUse() {
+		final var paths = new ArrayList<Path>();
+		try {
+			if (publishesOperationLifecycle()) {
+				paths.add(OperationLifecycleArtifact.path(loadStepId()));
+				if (expectedOperationLifecycleContexts.stream().anyMatch(context -> context != null && context.rangeReadSnapshot() != null)) {
+					paths.add(RangeReadArtifact.path(loadStepId()));
+				}
+			}
+			if (expectedOperationLifecycleContexts.stream().anyMatch(context -> context != null && context.hasNicSet())) {
+				paths.add(NicPathsArtifact.path(loadStepId()));
+				paths.add(NicSetArtifact.path(loadStepId()));
+			}
+		} catch (final IOException | RuntimeException noFile) {
+			return; // Its publication reports it at stop.
+		}
+		StepIdInUseException.refuseExisting(loadStepId(), paths);
+	}
+
+	private boolean publishesOperationLifecycle() {
+		final String operation = config.stringVal("load-op-type");
+		return "create".equalsIgnoreCase(operation) || "read".equalsIgnoreCase(operation);
+	}
+
 	/** A report an earlier step with this id left must not pass for this one's (see publishEventLoops). */
 	private void discardEarlierEventLoops() {
 		try (final var logContext = put(KEY_STEP_ID, loadStepId())) {
@@ -1115,8 +1149,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	}
 
 	private void publishOperationLifecycle() {
-		final String operation = config.stringVal("load-op-type");
-		if (operationLifecyclePublished || !("create".equalsIgnoreCase(operation) || "read".equalsIgnoreCase(operation))) {
+		if (operationLifecyclePublished || !publishesOperationLifecycle()) {
 			return;
 		}
 		final var counters = new ArrayList<OperationLifecycleCounters>();
