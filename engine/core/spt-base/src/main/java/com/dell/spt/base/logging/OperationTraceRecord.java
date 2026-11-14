@@ -70,13 +70,7 @@ public final class OperationTraceRecord<I extends Item, O extends Operation<I>> 
 		strb.append(',');
 		if (itemPath != null) {
 			if (manifestRequestPath != null) {
-				final int start = strb.length();
 				appendRequestPath(strb, manifestRequestPath, itemPath);
-				// Fields are not quoted: like a plain item's path, the row's path ends at its first comma.
-				final int commaPos = strb.indexOf(",", start);
-				if (commaPos >= 0) {
-					strb.setLength(commaPos);
-				}
 			} else {
 				strb.append(itemPath);
 			}
@@ -124,6 +118,13 @@ public final class OperationTraceRecord<I extends Item, O extends Operation<I>> 
 		}
 		if (!path.startsWith(Operation.SLASH)) {
 			strb.append('/');
+		}
+		// Fields are not quoted: like a plain item's path, the row's path ends at its first comma. The
+		// name was already cut at its own, so only the path can hold one.
+		final int commaPos = path.indexOf(',');
+		if (commaPos >= 0) {
+			strb.append(path, 0, commaPos);
+			return;
 		}
 		strb.append(path);
 		final boolean nameRooted = name.startsWith(Operation.SLASH);
