@@ -941,6 +941,15 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 	}
 
 	/**
+	 * {@link #submit(Operation)} and direct dispatch call {@code startRequest()} for every request
+	 * they send, a multipart upload's completion or abort included.
+	 */
+	@Override
+	protected boolean timesUploadFinalization() {
+		return true;
+	}
+
+	/**
 	 * Returns a completed operation's permit and channel, once per request attempt. A driver whose
 	 * attempts hold capacity beyond the permit releases it here too, then signals the dispatcher.
 	 */
