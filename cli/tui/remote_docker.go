@@ -165,8 +165,9 @@ func (m *RemoteDockerManager) cleanupStaging(ctx context.Context) error {
 // When the mkdir fails with ctx still live, the failure is definite (for
 // example the path exists as a file) and the path is forgotten. When ctx has
 // ended (deadline or cancel), ssh may have run the mkdir before it was cut
-// off, so the path stays owned (HasManagedResources) and the next cleanup runs
-// an rm -rf that is harmless if the directory does not exist.
+// off, so the path stays owned (HasManagedResources) and a later cleanup on a
+// live context runs an rm -rf that is harmless if the directory does not
+// exist. A cleanup on the same ended context fails at once and keeps the path.
 func (m *RemoteDockerManager) ensureStagingDir(ctx context.Context) error {
 	if m.stagingDir != "" {
 		return nil

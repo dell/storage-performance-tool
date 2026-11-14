@@ -161,7 +161,9 @@ func TestItemFileStagingFailureRollsBackOnce(t *testing.T) {
 					t.Fatalf("host %d lost ownership of %s after a failed removal", i, dirs[i])
 				}
 			}
-			if elapsed >= budget*3/2 {
+			// A second pass cannot end before 2x the budget: the failing host's
+			// rm blocks for the whole budget in each pass.
+			if elapsed >= budget*2 {
 				t.Fatalf("the start returned %v after the cancel; want one %v rollback pass", elapsed, budget)
 			}
 			t.Logf("the start returned %v after the cancel", elapsed.Round(time.Millisecond))
