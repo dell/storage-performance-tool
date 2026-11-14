@@ -39,6 +39,21 @@ public class PipelineLoadStepClient
 		return TargetBucketStep.PIPELINE;
 	}
 
+	/**
+	 * Each sub-step runs on its context over the base. A context is the base with its own values on
+	 * top, so the count of each sub-step is its context's, and the base's controls nothing.
+	 */
+	@Override
+	protected boolean controlsOperations(final int contextIndex) {
+		return contextIndex != BASE_CONFIG;
+	}
+
+	/** Only the first sub-step reads its item input; each later one reads the results of the one before. */
+	@Override
+	protected boolean suppliesItems(final int contextIndex) {
+		return contextIndex == 0;
+	}
+
 	@Override
 	protected PipelineLoadStepClient copyInstance(final Config config, final List<Config> ctxConfigs) {
 		return new PipelineLoadStepClient(config, extensions, ctxConfigs, metricsMgr);

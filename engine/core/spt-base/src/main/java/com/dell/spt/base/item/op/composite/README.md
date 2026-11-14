@@ -39,7 +39,7 @@ https://docs.openstack.org/swift/latest/overview_large_objects.html#direct-api
 The `item-data-ranges-threshold` configuration parameter controls the SSC behavior (exposed by
 the CLI as `--part-size`). The value is the
 [size in bytes](../input/configuration.md#122-size). Any new generated object is treated as
-"*large*" if its size is more or equal than the configured threshold. *Large* objects are being
+"*large*" if its size is larger than the configured threshold. *Large* objects are being
 split into the 2 or more parts with the size not more than the configured value above.
 
 # Part-Level Retry
@@ -63,8 +63,16 @@ The record containing the object name and the corresponding upload id is written
 `parts.upload.csv` file if SSC operation is finished. The upload completion response latency is also
 persisted in the 3rd column. Aborted uploads are logged with an `abort` prefix.
 
+# Parallel Range Reads
+
+With the `s3` and `s3-rdma` storage drivers, `item-data-ranges-threshold` also splits a "Read" of
+an object larger than the threshold: each part, at most the threshold in size, is read with a range
+GET, and the parts are read in parallel. There is nothing to initiate or complete. A failed part is
+retried up to 3 times; if it still fails, the other parts finish and the read counts as failed. The
+`s3-rdma` driver sends these range GETs over HTTP. The `s3-aws` driver does not split reads: it
+fails such a read.
+
 # Future Enhancements
 
-* Support Read for the segmented objects (parallel range-read)
 * Support Update for the segmented objects
 * Support Copy for the segmented objects

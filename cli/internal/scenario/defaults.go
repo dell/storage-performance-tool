@@ -627,6 +627,39 @@ func BucketMetricsDisabledAfterOverrides(params Params) bool {
 	return disabled
 }
 
+// OpTracePersistPath is the engine setting that persists a trace record of every operation.
+const OpTracePersistPath = "output.metrics.trace.persist"
+
+// EngineOverridesPersistOpTraces reports whether the engine overrides, applied in order as
+// GenerateDefaults applies them, turn on OpTracePersistPath, directly or through a map value of one
+// of its ancestors. The engine reads a string the way Java's Boolean.parseBoolean does, as true
+// when it is "true" in any case. Overrides that do not apply turn on nothing; GenerateDefaults
+// reports them.
+func EngineOverridesPersistOpTraces(overrides []string) bool {
+	root := map[string]any{}
+	for _, override := range overrides {
+		if err := applyEngineOverride(root, override); err != nil {
+			return false
+		}
+	}
+	var node any = root
+	for _, part := range strings.Split(OpTracePersistPath, ".") {
+		children, ok := node.(map[string]any)
+		if !ok {
+			return false
+		}
+		node = children[part]
+	}
+	switch value := node.(type) {
+	case bool:
+		return value
+	case string:
+		return strings.EqualFold(value, "true")
+	default:
+		return false
+	}
+}
+
 // EngineOverrideSets reports whether an engine override sets the configuration path, directly or
 // through a map value of one of its ancestors, such as storage.targetBucket={count: 4}. An
 // override that does not parse sets nothing; GenerateDefaults reports it.

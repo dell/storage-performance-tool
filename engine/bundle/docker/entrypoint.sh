@@ -21,7 +21,9 @@ set -eu
 # - AlwaysPreTouch: pre-fault heap pages at startup to eliminate page faults during runs
 # - UseNUMA: NUMA-aware allocation for multi-socket servers
 # - Xshare:off: disable CDS to prevent SIGBUS when JDK/JAR resides on NFS
-# - UseAVX=2: avoid AVX-512 EVEX glibc code paths with known SIGBUS crashes
+# - UseAVX=2: avoid AVX-512 EVEX glibc code paths with known SIGBUS crashes. The option
+#   exists only on x86 JVMs, and an arm64 JVM refuses it and doesn't start, so it comes
+#   from X86_JAVA_OPTS, which is empty on other architectures
 # - DoJVMTIVirtualThreadTransitions: skip JVMTI mount/unmount notifications on every
 #   VirtualThread context switch; reduces per-op overhead when no debugging agent is attached
 # - UseCompactObjectHeaders (JEP 519): 64-bit object headers instead of 128-bit;
@@ -32,7 +34,16 @@ set -eu
 #   connection would otherwise hang the whole test/run indefinitely instead of failing fast
 #   into the existing retry/backoff path. 10s is generous relative to normal sub-10ms RMI
 #   round-trips for these small control-plane calls.
-DEFAULT_JAVA_OPTS="-XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA -Xshare:off -XX:UseAVX=2 -XX:+UnlockExperimentalVMOptions -XX:-DoJVMTIVirtualThreadTransitions -XX:+UseCompactObjectHeaders -Dsun.rmi.transport.tcp.responseTimeout=10000"
+#
+# These options are also the defaults of the bundle's run.sh and run.bat: engine/bundle/build.gradle
+# generates them from the X86_JAVA_OPTS and DEFAULT_JAVA_OPTS lines below, so keep each of those
+# one double-quoted line. The launchers leave out UseCompactObjectHeaders, which needs Java 25,
+# and pass X86_JAVA_OPTS when the java they run accepts it.
+X86_JAVA_OPTS=""
+case "$(uname -m)" in
+	x86_64) X86_JAVA_OPTS="-XX:UseAVX=2" ;;
+esac
+DEFAULT_JAVA_OPTS="-XX:+UseZGC -Xms1g -Xmx4g -XX:MaxDirectMemorySize=64g -XX:+AlwaysPreTouch -XX:+UseNUMA -Xshare:off ${X86_JAVA_OPTS} -XX:+UnlockExperimentalVMOptions -XX:-DoJVMTIVirtualThreadTransitions -XX:+UseCompactObjectHeaders -Dsun.rmi.transport.tcp.responseTimeout=10000"
 
 # Append any user-provided JAVA_OPTS (like RMI hostname) to the defaults.
 # If a user provides conflicting flags (like -Xmx8g), Java will use the last one specified.
@@ -56,6 +67,5 @@ if [ "$1" = "sh" ] || [ "$1" = "bash" ] || [ "$1" = "/bin/sh" ] || [ "$1" = "/bi
 fi
 
 # Launch Spt with all provided arguments
-# The default storage driver is set to s3 (instead of dummy-mock) as it's more commonly used
-# Users can override this with --storage-driver-type parameter
+# The default storage driver is dummy-mock; --storage-driver-type selects another, such as s3
 exec java $JAVA_OPTS -jar /opt/spt/spt.jar "$@"

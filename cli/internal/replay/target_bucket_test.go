@@ -50,8 +50,8 @@ func TestConvertJSONKeepsAnArchivedBucketCountWithTheReplayBucketAsBase(t *testi
 // Replay keeps a list only when it can keep it exactly; anything else stops the replay before it
 // runs, never turning unreadable JavaScript into bucket names or dropping the list.
 
-// A JavaScript scenario is a program, so replay refuses any JavaScript archive that sets a bucket
-// set, however it spells targetBucket, rather than replay into other buckets.
+// A JavaScript scenario is a program, so replay refuses any JavaScript archive that mentions
+// targetBucket, however it spells it, rather than replay into other buckets.
 func TestConvertJSRefusesAnArchiveThatSetsABucketSet(t *testing.T) {
 	archive := func(storage string) []byte {
 		return []byte(`var parentConfig_1 = {
@@ -81,7 +81,7 @@ Load
 		{"only a comment", `{ "driver" : { "type" : "s3" } } // targetBucket is not set here`},
 	} {
 		got, err := ConvertJS(archive(c.storage), RunScript{}, opts)
-		if err == nil || !strings.Contains(err.Error(), "sets storage.targetBucket") {
+		if err == nil || !strings.Contains(err.Error(), "mentions storage.targetBucket") {
 			t.Fatalf("%s: err = %v, want the refusal", c.name, err)
 		}
 		if got != nil && len(got.ScenarioJS) > 0 {
@@ -93,6 +93,33 @@ Load
 	got, err := ConvertJS(archive(`{ "driver" : { "type" : "s3" } }`), RunScript{}, explicit)
 	if err != nil || got.EffectiveBucket != "local" {
 		t.Fatalf("an archive without a bucket set replays as before: err = %v, bucket = %q", err, got.EffectiveBucket)
+	}
+}
+
+// The refusal names the provisioning setting too, which spt run writes into its own scenarios, and
+// says how to get past it. Its failure class is unchanged.
+func TestConvertJSRefusalNamesTheProvisioningSetting(t *testing.T) {
+	archive := `var parentConfig_1 = { "storage" : { "driver" : { "type" : "s3" } } };
+var existingBucketsOnly = {"storage": {"targetBucket": {"provision": false}}};
+Load
+    .config(parentConfig_1)
+    .config(existingBucketsOnly)
+    .config({
+      "item" : { "data" : { "size" : "10KB" }, "output" : { "path" : "/alpha" } },
+      "load" : { "step" : { "limit" : { "time" : 60 }, "id" : "W" } }
+    })
+    .run();
+`
+	opts := Options{Endpoints: []string{"http://10.0.0.1:9020"}, Bucket: "local", BaseTimestamp: "20260605.121400.000"}
+	_, err := ConvertJS([]byte(archive), RunScript{}, opts)
+	want := "archived JavaScript scenario mentions storage.targetBucket (a bucket count, a bucket list or the " +
+		"provisioning setting), which replay cannot keep exactly from a program; replay a JSON archive, or remove " +
+		"the setting from the archived scenario"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+	if got := ErrorClass(err); got != failureUnknownError {
+		t.Fatalf("ErrorClass() = %q, want %q", got, failureUnknownError)
 	}
 }
 
@@ -153,7 +180,7 @@ func TestConvertJSRefusesAContinuedTargetBucketKey(t *testing.T) {
 	for _, terminator := range []string{"\n", "\r\n", "\u2028"} {
 		archive := "var parentConfig_1 = {\n  \"storage\" : { \"target\\" + terminator + "Bucket\" : { \"names\" : [\"alpha\", \"beta\"] } }\n};\n" +
 			"Load\n    .config(parentConfig_1)\n    .config({ \"item\" : { \"output\" : { \"path\" : \"/alpha\" } }, \"load\" : { \"step\" : { \"limit\" : { \"time\" : 60 }, \"id\" : \"W\" } } })\n    .run();\n"
-		if _, err := ConvertJS([]byte(archive), RunScript{}, opts); err == nil || !strings.Contains(err.Error(), "sets storage.targetBucket") {
+		if _, err := ConvertJS([]byte(archive), RunScript{}, opts); err == nil || !strings.Contains(err.Error(), "mentions storage.targetBucket") {
 			t.Fatalf("continuation %q: err = %v, want the refusal", terminator, err)
 		}
 	}

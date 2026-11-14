@@ -38,7 +38,7 @@ type Params struct {
 	EngineOverrides []string // Advanced engine defaults overrides as YAML path=value entries
 	PrefixShards    int      // Optional count of fixed-width object-key prefix directories (0 = disabled)
 	BucketCount     int      // storage.targetBucket.count when greater than 1; 0 or 1 targets the bucket alone
-	RMIRegistryPort int      // Single-host engine RMI registry port (0 = engine default 1099)
+	RMIRegistryPort int      // Engine RMI registry port for the run (0 = engine default 1099)
 
 	// BucketNames is storage.targetBucket.names when two or more buckets are listed; Bucket is then the
 	// first name, which item.output.path carries as a placeholder. A one-name list is Bucket alone.

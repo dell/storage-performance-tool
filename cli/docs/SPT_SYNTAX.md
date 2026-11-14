@@ -116,7 +116,7 @@ objects have been removed; those entries therefore no longer refer to readable o
 |------|-------|---------|-------------|
 | `--threads` | `-t` | `1` | Number of parallel client threads |
 | `--object-size` | `-o` | `""` | Size of each generated object (e.g., `1MiB`, `256KiB`, `4GiB`; legacy `MB`, `KB`, and `GB` remain accepted as 1024-based aliases). Seeded DELETE resolves an omitted value explicitly to `1KiB`; ignored for `list` and manifest DELETE |
-| `--part-size` | | `""` | Enable multipart upload with the given part size (e.g., `5MiB`, `64MiB`, `256MiB`; legacy `MB` remains accepted as a 1024-based alias). Applies to `write`, the CREATE phase of `write-verify`, and `read` seed phases |
+| `--part-size` | | `""` | Enable multipart upload with the given part size (e.g., `5MiB`, `64MiB`, `256MiB`; legacy `MB` remains accepted as a 1024-based alias). Applies to `write`, the CREATE phase of `write-verify`, and both phases of a seeded `read`, whose read phase splits each larger object into parallel range GETs ([notes](#multipart-upload-write)) |
 | `--mpu-concurrent-objects` | | `0` | Max concurrent multipart objects in flight (`0` = unlimited). Requires `--part-size` |
 | `--mpu-concurrent-parts` | | `0` | Max concurrent parts in flight per multipart object (`0` = unlimited). Requires `--part-size` |
 | `--object-count` | `-n` | `0` | Fixed number of objects to process. Seeded DELETE creates and selects exactly this many global identities (`0` resolves to 2,500 in finite default mode). With `read-verify --versions=all`, caps canonical version identities rather than distinct keys. In manifest or existing-prefix DELETE, it caps the globally sorted, de-duplicated object selection rather than DELETE requests (`0` means all discovered identities) |
@@ -592,8 +592,8 @@ spt run write \
 | `--auto-terminate-seconds` | | `0` | Auto-terminate headless runs after N seconds (0 = unlimited) |
 | `--keep-scenario` | | `false` | Keep the scenario file after test completion |
 | `--force` | | `false` | Resolve port conflicts and permit known engine build mismatches; invalid build information and collection failures remain non-forceable |
-| `--api-port` | | `9999` | SPT engine API port |
-| `--rmi-registry-port` | | `1099` | Engine RMI registry port for a local single-host run. Give each concurrent `spt run` on one host its own value (and its own `--api-port`); remote and distributed runs reject any other value |
+| `--api-port` | | `9999` | SPT engine API port that every engine in the run serves: a local or remote engine, or the entry and every worker of a distributed run |
+| `--rmi-registry-port` | | `1099` | Engine RMI registry port that every engine in the run serves, on local, remote and distributed runs; the entry reaches each worker on it. Give each concurrent `spt run` on the same hosts its own value (and its own `--api-port`). A run with a local worker (this host in `--test-hosts`, after the first) also publishes its `--rmi-port-start` range, which every run's port check covers, so a concurrent run on the same hosts needs its own range too: otherwise its port check fails, and with `--force` it stops the other run's worker |
 | `--skip-image-pull` | | `false` | Use locally cached Docker image without pulling |
 | `--output-dir` | `-O` | `""` | Local directory to save detailed SPT report files |
 | `--service-threads` | | `0` | Engine virtual-thread carrier parallelism (0 = JVM default `max(2, cpus/4)`) |
@@ -615,7 +615,7 @@ spt run write \
 |------|---------|-------------|
 | `--test-hosts` | from `HOSTS` or `127.0.0.1` | Comma-separated Docker hosts: `[user@]host[,...]` |
 | `--min-hosts` | `0` (all) | Minimum hosts that must connect (0 = all must succeed) |
-| `--attach-existing` | `false` | Attach to pre-started worker nodes; spt still launches the entry node. Unsupported for verification workloads |
+| `--attach-existing` | `false` | Attach to pre-started worker nodes; spt still launches the entry node. The workers must already serve the run's `--api-port` and `--rmi-registry-port`. Unsupported for verification workloads |
 | `--integrity-runtime-identity-tier` | `image` | Distributed verification and guarded existing-prefix DELETE only. `image` proves one immutable image ID across participants; `payload` additionally proves identical canonical `/opt/spt` content (env: `SPT_INTEGRITY_RUNTIME_IDENTITY_TIER`) |
 | `--network-mode` | `host` | Docker network mode: `host` (required for RMI) or `bridge` |
 | `--interfaces` | from `SPT_INTERFACES` or none | Spread each engine's S3 connections over a NIC set: `auto`, or a comma-separated list of interface names, IPv4 addresses or RDMA devices, resolved on each host. Default Netty S3 driver or `s3-rdma`, host networking and `--endpoint-selection default` only; rejected with `--s3-driver aws`, `tables`, `mock`, an `--rdma-device` other than `auto`, `--rdma-local-ip`, and an `--engine-override` of `storage.net.interfaces` or `storage.net.nodeInterfaces`. See [Network Interfaces](NETWORK_INTERFACES.md) |
@@ -777,6 +777,11 @@ that lets SPT discover the launch script and referenced scenario. Each fetched
 artifact is limited to 16 MiB. See [REPLAY.md](REPLAY.md) for source archive
 requirements.
 
+From the launch script, replay reads its exports, the scenario path,
+`--item-output-path`, `--storage-net-node-addrs` and `--storage-driver-addrs`.
+It keeps no other engine flag there, and its preflight warns once, naming the
+`--storage-*` and `--load-*` flags it drops without their values.
+
 ### Replay Target Options
 
 | Flag | Short | Default | Description |
@@ -800,14 +805,15 @@ environment variables.
 | `--minimal` | `false` | Start TUI with only live stats panel visible |
 | `--auto-terminate-seconds` | `0` | Automatically terminate runs after N seconds (`0` = unlimited) |
 | `--force` | `false` | Resolve port conflicts and permit known engine build mismatches; invalid build information and collection failures remain non-forceable |
-| `--api-port` | `9999` | SPT engine API port |
+| `--api-port` | `9999` | SPT engine API port that every engine in the replay serves, the entry and every worker |
+| `--rmi-registry-port` | `1099` | Engine RMI registry port that every engine in the replay serves, a local or remote engine, or the entry and every worker; the entry reaches each worker on it. It must differ from `--api-port`. Give each concurrent replay or `spt run` on the same hosts its own value, with the range caveat of [`spt run --rmi-registry-port`](#3-test-behavior-options) |
 | `--trace-file` | `""` | Save all output to a trace file |
 | `--trace-append` | `false` | Append to an existing trace file |
 | `--verbose` | `false` | Show detailed Docker API calls, debug information, and textual live metrics |
 | `--skip-image-pull` | from `SPT_SKIP_IMAGE_PULL` or `false` | Use locally cached Docker image without pulling |
 | `--spt-image` | from `SPT_IMAGE` or release/dev default | Override the engine image ref |
 
-A replay that ends on its own with fewer steps with results than its scenario runs exits 1, for example when the scenario fails after its first step. The check needs results, so it doesn't run with `--auto-results=false`. A JavaScript `.run()` in a branch that isn't taken counts as a step, and so does a step with nothing to do that finishes without results, such as a DELETE whose items file doesn't exist.
+A replay exits 1, as `spt run` does, when the engine ends its scenario FAILED, whichever step failed, and the error names that step and the engine's cause; this holds with `--auto-terminate-seconds` too. A replay that ends on its own with fewer steps with results than its scenario runs also exits 1, for example when the scenario fails after its first step. The check needs results, so it doesn't run with `--auto-results=false`. A JavaScript `.run()` in a branch that isn't taken counts as a step, and so does a step with nothing to do that finishes without results, such as a DELETE whose items file doesn't exist. A loop around one `.run()` counts once but runs several steps, and a `.start()` doesn't count, so their extra steps can hide a step that never ran, and that replay exits 0.
 
 ### Replay Results Options
 
@@ -825,7 +831,7 @@ A replay that ends on its own with fewer steps with results than its scenario ru
 |------|---------|-------------|
 | `--test-hosts` | from `HOSTS` or `127.0.0.1` | Comma-separated Docker hosts: `[user@]host[,...]` |
 | `--min-hosts` | `0` (all) | Minimum replay hosts that must connect |
-| `--attach-existing` | `false` | Attach to prestarted worker nodes; replay still launches the entry node |
+| `--attach-existing` | `false` | Attach to prestarted worker nodes; replay still launches the entry node. The workers must already serve the replay's `--api-port` and `--rmi-registry-port` |
 | `--network-mode` | `host` | Docker network mode: `host` or `bridge` |
 | `--interfaces` | from `SPT_INTERFACES` or none | Spread each engine's S3 connections over a NIC set, with the checks of `spt run --interfaces`. An archived NIC set is never reused; replay drops it with a warning. See [Network Interfaces](NETWORK_INTERFACES.md#replay) |
 | `--host-interfaces` | from `SPT_HOST_INTERFACES` or none | Replace `--interfaces` on one host, with the checks of `spt run --host-interfaces`. The host must be in `--test-hosts`. |
@@ -938,7 +944,9 @@ When multipart uploads are used, the engine produces a `parts.upload.csv` artifa
 - Multipart upload scheduling is handled by the engine. The CLI does not override `load.batch.size` when `--part-size` is set; direct JAR users also do not need `load-batch-size=1` for MPU correctness.
 - Part uploads share the `--threads` concurrency pool with regular operations.
 - If `--part-size` is omitted, objects are uploaded as single PUTs regardless of size.
-- `--part-size` also applies to the seed (precondition) phase of `read` workloads, so large seed objects are written using multipart upload.
+- In a `read` workload, `--part-size` applies to the seed phase and to the read phase. The seed writes each object larger than the part size with a multipart upload. The read phase splits each such object into one range GET per part and sends them in parallel. This works with the default Netty driver and with `--s3-driver rdma`; on `rdma`, these range GETs go over HTTP (see [Threshold-Based Routing](S3_RDMA.md#threshold-based-routing)).
+- With `--s3-driver aws`, a seeded `read` with `--part-size` fails every read of an object larger than the part size: the `s3-aws` driver does not split reads. To seed with multipart uploads on that driver, write with `--part-size <size> --save-items` and read with `--items-file`.
+- A `read` with `--items-file` has no seed phase and does not pass `--part-size` to the read phase, so each object is read whole, not split by `--part-size`. An `--engine-override` of `item.data.ranges.threshold` is the exception: it applies to this read too.
 
 ### Read Workload
 
@@ -1276,7 +1284,7 @@ spt run write \
 ```
 
 Notes:
-- Workers must already expose the SPT API on 9999 and the RMI registry range on the standard ports.
+- Workers must already serve the run's API port (`--api-port`, default 9999) and RMI registry port (`--rmi-registry-port`, default 1099), plus the RMI range. `spt` starts no worker, so a worker on other ports fails the run's readiness wait; start one for other ports with the engine options `--run-port=<api-port>` and `--load-step-node-port=<rmi-registry-port>`.
 - `spt` still launches and manages the entry node; worker containers remain untouched during shutdown.
 - The host list must include at least one worker; the tool enforces this when `--attach-existing` is set.
 
@@ -1317,7 +1325,7 @@ The `verify` command validates that distributed testing infrastructure is proper
 Distributed SPT testing requires multiple nodes to be properly configured with:
 - Docker installed and accessible
 - Network connectivity between nodes
-- Required ports available (RMI: 1099, REST API: 9999)
+- Required ports available (RMI registry: 1099 and REST API: 9999 by default)
 - Ability to run SPT containers in node mode
 
 The `verify` command performs comprehensive pre-flight checks to ensure all nodes meet these requirements.
@@ -1337,7 +1345,8 @@ spt verify [--test-hosts <hosts>] [options]
 | `--test-hosts` | `""` (localhost) | Comma-separated list of hosts to verify |
 | `--min-hosts` | `0` (all) | Minimum number of hosts that must pass |
 | `--network-mode` | `host` | Docker network mode: `host` (required for RMI) or `bridge` |
-| `--api-port` | `9999` | SPT API port to verify |
+| `--api-port` | `9999` | REST API port the test engine serves and verify checks |
+| `--rmi-registry-port` | `1099` | RMI registry port the test engine serves and verify checks. `spt run` takes the same flag for every engine in a run |
 | `--rmi-port-start` | `40000` | Starting port for RMI range |
 | `--rmi-port-count` | `10` | Number of RMI ports to verify |
 | `--force-cleanup` | `false` | Automatically clean up conflicting containers without prompting |
@@ -1363,9 +1372,9 @@ For each specified host, the verify command:
 
 1. **Checks Connectivity** — local Docker API access or remote SSH connectivity
 2. **Validates Docker** — daemon running, API accessible, version compatibility
-3. **Detects Port Conflicts** — checks ports 1099 and 9999, identifies existing SPT containers
-4. **Starts Test Container** — launches SPT in node mode, validates startup and port mapping
-5. **Verifies Services** — tests RMI Registry (1099) and REST API (9999)
+3. **Detects Port Conflicts** — checks the RMI registry and REST API ports (`--rmi-registry-port` and `--api-port`) and the RMI port range, identifies existing SPT containers
+4. **Starts Test Container** — launches SPT in node mode on those ports, validates startup and port mapping
+5. **Verifies Services** — waits up to 30 seconds for the RMI registry and the REST API on those ports; if they are not all reachable by then, names the ports last seen closed and any port it got no result for, or says that each port was seen open but never all at once
 6. **Lists NICs** — reads the node's interfaces and RDMA devices in the test container and, with `--interfaces`, plans the node's NIC set
 7. **Performs Cleanup** — removes test container, ensures clean state
 
@@ -1421,6 +1430,9 @@ spt verify --test-hosts "node1,node2,node3,node4" --min-hosts 2
 
 # Automated cleanup of conflicts
 spt verify --test-hosts "test1,test2" --force-cleanup
+
+# Verify this host beside a running engine that holds ports 1099 and 9999
+spt verify --api-port 19100 --rmi-registry-port 11099
 
 # Include RDMA hardware checks
 spt verify --test-hosts "rdma1,rdma2" --use-rdma

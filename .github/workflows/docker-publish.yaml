@@ -186,6 +186,7 @@ jobs:
           echo "✓ Version alignment verified: ${expected_version}"
 
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: engine/bundle
@@ -204,6 +205,15 @@ jobs:
           # Cache with explicit scope for better cross-run efficiency
           cache-from: type=gha,scope=spt-engine
           cache-to: type=gha,mode=max,scope=spt-engine
+
+      # Runs each platform's pushed image by digest under QEMU and fails if one can't start.
+      - name: Start each platform's image
+        if: ${{ !inputs.dry_run }}
+        timeout-minutes: 20
+        env:
+          IMAGE_INDEX: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
+        run: scripts/release/check_image_starts.sh --expect-version "${EXPECTED_VERSION}" --index "${IMAGE_INDEX}"
 
       - name: Output image info
         run: |

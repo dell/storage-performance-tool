@@ -862,34 +862,45 @@ func (dm *DockerManager) StartWorkerNodeContainer(image string, rmiHostname stri
 	return dm.StartWorkerNodeContainerContext(dm.ctx, image, rmiHostname, rmiPortStart, rmiPortCount, additionalArgs)
 }
 
-// StartWorkerNodeContainerContext starts an RMI worker within the caller's context.
+// StartWorkerNodeContainerContext starts an RMI worker on the default engine ports within the
+// caller's context.
 func (dm *DockerManager) StartWorkerNodeContainerContext(ctx context.Context, image string, rmiHostname string, rmiPortStart, rmiPortCount int, additionalArgs []string) (string, error) {
+	return dm.startWorkerNodeOnPorts(ctx, image, rmiHostname, defaultEnginePorts(), rmiPortStart, rmiPortCount, additionalArgs)
+}
+
+// startWorkerNodeOnPorts starts an RMI worker that serves, and publishes, the run's API and RMI
+// registry ports.
+func (dm *DockerManager) startWorkerNodeOnPorts(
+	ctx context.Context, image string, rmiHostname string, ports enginePorts, rmiPortStart, rmiPortCount int, additionalArgs []string,
+) (string, error) {
 	ctx = normalizeContext(ctx)
 	if dm.remote != nil {
-		return dm.remote.StartWorkerNodeContainerContext(ctx, image, rmiHostname, rmiPortStart, rmiPortCount, additionalArgs)
+		return dm.remote.startWorkerNodeOnPorts(ctx, image, rmiHostname, ports, rmiPortStart, rmiPortCount, additionalArgs)
 	}
 
 	// Build command for worker node mode
-	cmd := make([]string, 0, 2+len(additionalArgs))
+	cmd := make([]string, 0, 3+len(additionalArgs))
 	cmd = append(cmd,
 		dockerNodeModeArg,
-		"--run-port="+constants.SptAPIPort, // REST API port
+		ports.runPortArg(), // REST API port
 	)
+	cmd = append(cmd, nonDefaultNodePortArgs(ports)...)
 	cmd = append(cmd, additionalArgs...)
 
 	logging.LogContainerEvent("creating", "", "image", image, "mode", "worker_node", "rmi_hostname", rmiHostname, "cmd", cmd)
 
 	// Configure port bindings
+	registryPort, apiPort := strconv.Itoa(ports.registry), strconv.Itoa(ports.api)
 	portBindings := nat.PortMap{
 		// RMI Registry port
-		constants.RMIRegistryPort + "/tcp": []nat.PortBinding{{
+		nat.Port(registryPort + "/tcp"): []nat.PortBinding{{
 			HostIP:   dockerBindAllInterfaces,
-			HostPort: constants.RMIRegistryPort,
+			HostPort: registryPort,
 		}},
 		// REST API port
-		constants.SptAPIPort + "/tcp": []nat.PortBinding{{
+		nat.Port(apiPort + "/tcp"): []nat.PortBinding{{
 			HostIP:   dockerBindAllInterfaces,
-			HostPort: constants.SptAPIPort,
+			HostPort: apiPort,
 		}},
 	}
 
@@ -995,11 +1006,20 @@ func (dm *DockerManager) StartEntryNodeContainer(image string, workerAddresses [
 	return dm.StartEntryNodeContainerContext(dm.ctx, image, workerAddresses, additionalArgs, networkMode)
 }
 
-// StartEntryNodeContainerContext starts an RMI entry node within the caller's context.
+// StartEntryNodeContainerContext starts an RMI entry node on the default engine ports within the
+// caller's context.
 func (dm *DockerManager) StartEntryNodeContainerContext(ctx context.Context, image string, workerAddresses []string, additionalArgs []string, networkMode string) (string, error) {
+	return dm.startEntryNodeOnPorts(ctx, image, defaultEnginePorts(), workerAddresses, additionalArgs, networkMode)
+}
+
+// startEntryNodeOnPorts starts an RMI entry node that serves the run's API and RMI registry
+// ports, and publishes the API port in bridge mode.
+func (dm *DockerManager) startEntryNodeOnPorts(
+	ctx context.Context, image string, ports enginePorts, workerAddresses []string, additionalArgs []string, networkMode string,
+) (string, error) {
 	ctx = normalizeContext(ctx)
 	if dm.remote != nil {
-		return dm.remote.StartEntryNodeContainerContext(ctx, image, workerAddresses, additionalArgs, networkMode)
+		return dm.remote.startEntryNodeOnPorts(ctx, image, ports, workerAddresses, additionalArgs, networkMode)
 	}
 	logging.LogContainerEvent("creating", "", "image", image, "mode", "entry_node", "workers", len(workerAddresses))
 
@@ -1008,12 +1028,13 @@ func (dm *DockerManager) StartEntryNodeContainerContext(ctx context.Context, ima
 	}
 
 	// Build command for entry node (API server mode with RMI coordination)
-	cmd := make([]string, 0, 3+len(additionalArgs))
+	cmd := make([]string, 0, 4+len(additionalArgs))
 	cmd = append(cmd,
 		"--load-step-node-addrs="+strings.Join(workerAddresses, ","),
 		dockerNodeModeArg,
-		"--run-port="+constants.SptAPIPort,
+		ports.runPortArg(),
 	)
+	cmd = append(cmd, nonDefaultNodePortArgs(ports)...)
 
 	// Add additional arguments (e.g., S3 endpoint parameters)
 	cmd = append(cmd, additionalArgs...)
@@ -1037,9 +1058,10 @@ func (dm *DockerManager) StartEntryNodeContainerContext(ctx context.Context, ima
 		Env:          envVars,
 		Labels:       labels,
 	}
+	apiPort := strconv.Itoa(ports.api)
 	if !useHostNetwork {
 		containerConfig.ExposedPorts = nat.PortSet{
-			constants.SptAPIPort + "/tcp": struct{}{}, // Only REST API port needed for entry node
+			nat.Port(apiPort + "/tcp"): struct{}{}, // Only REST API port needed for entry node
 		}
 	}
 
@@ -1050,9 +1072,9 @@ func (dm *DockerManager) StartEntryNodeContainerContext(ctx context.Context, ima
 		// No file mounting needed - scenario content sent via API
 		// Only REST API port binding for entry node
 		hostConfig.PortBindings = nat.PortMap{
-			constants.SptAPIPort + "/tcp": []nat.PortBinding{{
+			nat.Port(apiPort + "/tcp"): []nat.PortBinding{{
 				HostIP:   dockerBindAllInterfaces,
-				HostPort: constants.SptAPIPort,
+				HostPort: apiPort,
 			}},
 		}
 	}

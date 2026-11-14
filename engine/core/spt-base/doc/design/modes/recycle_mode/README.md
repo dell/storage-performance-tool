@@ -81,11 +81,11 @@ conditions:
 
 # Configuration
 
-1. `load-op-recycle`
+1. `load-op-recycle-mode`
 
     The flag to enable the recycle mode. Disabled by default.
 
-2. `load-op-imit-recycle`
+2. `load-op-limit-recycle`
 
     The recycle queue size. Note that this queue size is also used by storage drivers internal queues.
 

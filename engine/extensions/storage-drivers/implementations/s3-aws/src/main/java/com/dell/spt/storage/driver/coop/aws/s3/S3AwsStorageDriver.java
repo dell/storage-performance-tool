@@ -2082,7 +2082,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	// -----------------------------------------------------------------------
 
 	/**
-	 * Copy an object from source to destination.
+	 * Copy an object from source to destination. See {@link #copySourcePath} for the source; the
+	 * copy keeps the item's key in the destination.
 	 */
 	@SuppressWarnings("unchecked")
 	private CompletableFuture<Void> copyObject(final O op) {
@@ -2092,8 +2093,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			return CompletableFuture.failedFuture(new IllegalArgumentException("Source path is required for copy operation"));
 		}
 
-		// Parse source bucket and key from srcPath
-		final String[] srcBk = parseBucketAndKey(srcPath);
+		final String[] srcBk = parseBucketAndKey(copySourcePath(op.type(), op.item().name(), srcPath));
 
 		var reqBuilder = CopyObjectRequest.builder()
 						.sourceBucket(srcBk[0])
@@ -2103,6 +2103,30 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		awaitRequest(s3AsyncClient.copyObject(reqBuilder.build()));
 		return CompletableFuture.completedFuture(null);
+	}
+
+	/**
+	 * Returns the full path of the object a copy reads. For a copy step, a CREATE whose source path
+	 * is a bucket, {@code /src} or {@code /src/}, that is the item in that bucket: the item's name
+	 * when it already holds the path, otherwise the path joined with the name. This is the object
+	 * the {@code s3} driver names in {@code x-amz-copy-source}. This driver lists names as
+	 * {@code "/" + key}, so {@code /src} gives {@code /src/<key>}.
+	 *
+	 * <p>Any other source path is the source itself, as before: {@code /src/key} copies that one
+	 * object to every item, and an UPDATE, which arrives here with the item's own directory, is not
+	 * turned into a copy of the object onto itself.
+	 */
+	static String copySourcePath(final OpType type, final String itemName, final String srcPath) {
+		if (type != OpType.CREATE || !isBucketPath(srcPath)) {
+			return srcPath;
+		}
+		return ItemNamePaths.holdsPath(itemName, srcPath) ? itemName : ItemNamePaths.join(srcPath, itemName);
+	}
+
+	/** Whether a path names a bucket alone: {@code /bucket}, with or without a trailing slash. */
+	private static boolean isBucketPath(final String path) {
+		final int end = path.endsWith("/") ? path.length() - 1 : path.length();
+		return path.startsWith("/") && end > 1 && path.lastIndexOf('/', end - 1) == 0;
 	}
 
 	@Override

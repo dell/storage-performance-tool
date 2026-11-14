@@ -18,6 +18,7 @@ import static com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.wait
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -265,6 +266,64 @@ final class S3NicSetDriverTest {
 		run.close();
 		assertTrue(run.runtime.snapshot().reconciled());
 		assertEquals(4, run.runtime.snapshot().logical().accepted());
+	}
+
+	@Test
+	void anInterruptedCloseOfAStartedDriverClosesItAndEndsEveryIoThread() throws Exception {
+		assertInterruptedCloseCompletes(false);
+	}
+
+	@Test
+	void anInterruptedCloseOfAStoppedDriverClosesIt() throws Exception {
+		assertInterruptedCloseCompletes(true);
+	}
+
+	/**
+	 * Closes a started, or first stopped, driver on an interrupted thread: the close runs to the end
+	 * without throwing, the interrupt is still set afterwards, the connections are closed and every
+	 * {@code ioWorker} thread the driver started has ended, the base group's as well as the NICs'.
+	 */
+	private void assertInterruptedCloseCompletes(final boolean stopFirst) throws Exception {
+		final var before = ioWorkerThreads();
+		final var run = started(listeners(1), List.of(NIC_A, NIC_B), 1);
+		assertEquals(Operation.Status.SUCC, run.execute(dataOp(OpType.CREATE, "interrupted-close")).status());
+		final var driverThreads = new ArrayList<>(ioWorkerThreads());
+		driverThreads.removeAll(before);
+		final var names = driverThreads.stream().map(Thread::getName).toList();
+		assertTrue(names.stream().anyMatch(name -> name.startsWith("ioWorker-" + NIC_A)), names::toString);
+		assertTrue(names.stream().anyMatch(name -> name.startsWith("ioWorker-" + NIC_B)), names::toString);
+		assertTrue(names.stream().anyMatch(name -> !name.startsWith("ioWorker-lo-")), () -> "the base group's: " + names);
+		final var pool = run.pool();
+		if (stopFirst) {
+			run.driver().stop();
+		}
+
+		Throwable closeFailure = null;
+		Thread.currentThread().interrupt();
+		try {
+			run.driver().close();
+		} catch (final Throwable t) {
+			closeFailure = t;
+		}
+		final var stillInterrupted = Thread.interrupted();
+
+		final var failure = closeFailure;
+		assertNull(failure, () -> "close on an interrupted thread threw " + failure);
+		assertTrue(stillInterrupted, "close must keep the caller's interrupt");
+		assertTrue(run.driver().isClosed());
+		assertEquals(0, pool.state().stream().mapToInt(NicSetConnectionPool.NicState::open).sum());
+		for (final var thread : driverThreads) {
+			thread.join(5_000);
+		}
+		assertEquals(List.of(), driverThreads.stream().filter(Thread::isAlive).map(Thread::getName).toList(),
+						"every ioWorker thread of the driver ended");
+	}
+
+	private static List<Thread> ioWorkerThreads() {
+		return Thread.getAllStackTraces().keySet().stream()
+						.filter(Thread::isAlive)
+						.filter(thread -> thread.getName().startsWith("ioWorker"))
+						.toList();
 	}
 
 	private S3NicSetDriver<DataItem, Operation<DataItem>> created(final List<String> endpoints, final List<String> interfaces,

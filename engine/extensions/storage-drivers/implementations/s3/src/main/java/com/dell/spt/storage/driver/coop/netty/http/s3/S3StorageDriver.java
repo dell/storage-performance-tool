@@ -29,6 +29,7 @@ import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
+import com.dell.spt.base.item.ItemNamePaths;
 import com.dell.spt.base.item.io.TerminalItemInputException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
@@ -829,7 +830,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			} else if (options.startAfter() != null && !options.startAfter().isEmpty()) {
 				appendQueryParam(uriBuilder, "start-after", sanitizePrefix(options.startAfter()));
 			} else if (lastPrevItem != null) {
-				appendQueryParam(uriBuilder, "start-after", sanitizePrefix(lastPrevItem.name()));
+				appendQueryParam(uriBuilder, "start-after", listedKey(lastPrevItem.name(), path));
 			}
 		}
 		appendQueryParam(uriBuilder, "max-keys", Integer.toString(countLimit));
@@ -1314,6 +1315,19 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			return null;
 		}
 		return prefix.startsWith(SLASH) ? prefix.substring(1) : prefix;
+	}
+
+	/**
+	 * Returns the object key a listed item stands for: its name without the listed path. Listed names
+	 * are the path, then the key, so sending the whole name as {@code start-after} would name no key
+	 * in the bucket. The key is sent whole, since a key may itself start with a slash. A name that
+	 * does not hold the path, such as one an extension built, is sent as before.
+	 */
+	private static String listedKey(final String itemName, final String path) {
+		if (path != null && ItemNamePaths.holdsPath(itemName, path)) {
+			return ItemNamePaths.relativeToPath(itemName, path);
+		}
+		return sanitizePrefix(itemName);
 	}
 
 	@Override

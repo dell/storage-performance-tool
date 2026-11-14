@@ -28,6 +28,9 @@ const (
 	remoteChmodCommand        = "chmod"
 	remoteCleanupTimeout      = 10 * time.Second
 	remoteDiagnosticsSlack    = 30 * time.Second
+	// remoteStagingCommandTimeout bounds each mkdir, chmod and rm that item
+	// file staging runs around its copies.
+	remoteStagingCommandTimeout = time.Duration(constants.ContainerStartTimeoutSecs) * time.Second
 )
 
 // RemoteDockerManager implements DockerInterface by executing docker CLI via SSH
@@ -47,6 +50,9 @@ type RemoteDockerManager struct {
 	diagnosticsDone     bool
 	diagnosticsRec      *diagnosticsRecord
 	diagnosticsStopDone bool
+
+	// stagingCommandTimeout bounds each small staging command; tests shorten it.
+	stagingCommandTimeout time.Duration
 }
 
 func sanitizeHostComponent(host string) string {
@@ -75,7 +81,7 @@ func sanitizeHostComponent(host string) string {
 }
 
 func generateRemoteContainerName(prefix, host string) string {
-	return fmt.Sprintf("spt-%s-%d-%s", prefix, time.Now().Unix(), sanitizeHostComponent(host))
+	return fmt.Sprintf("spt-%s-%d-%s", prefix, time.Now().UnixNano(), sanitizeHostComponent(host))
 }
 
 func (m *RemoteDockerManager) baseLabels(role string) map[string]string {
@@ -113,7 +119,8 @@ func newRemoteDockerManagerWithExecutor(host *hostparse.HostInfo, exec command.C
 		exec: exec,
 		ops:  command.NewDockerOperations(exec, host),
 		// Default to no-op prober in tests; NewRemoteDockerManager sets a real prober.
-		proberRun: func(context.Context, string, time.Duration) error { return nil },
+		proberRun:             func(context.Context, string, time.Duration) error { return nil },
+		stagingCommandTimeout: remoteStagingCommandTimeout,
 	}, nil
 }
 
@@ -172,31 +179,80 @@ func (m *RemoteDockerManager) SetFileMounts(mounts []scenario.FileMount) error {
 	return m.SetFileMountsContext(context.Background(), mounts)
 }
 
-// SetFileMountsContext stages remote bind-mount inputs within the caller's context.
+// SetFileMountsContext copies item files to the remote host for bind
+// mounting. Its bounds:
+//   - Each copy runs under ctx alone, with no fixed cap, so a large file is
+//     not cut off. A cancel of ctx ends the copy within
+//     constants.CommandWaitDelay, and SSH keepalives end a copy whose peer
+//     stops answering about 60 s after its last reply. That holds on a shared
+//     connection only when an SPT command opened it; one opened outside SPT
+//     follows its own keepalive settings.
+//   - Each mkdir, chmod and rm around the copies gets its own
+//     stagingCommandTimeout (30 s).
+//   - When a copy or chmod fails while ctx is live, the staging directory is
+//     removed on a context derived from ctx and bounded by
+//     remoteCleanupTimeout (10 s), so a later cancel ends the removal at once.
+//     A removal that fails on its own adds its error to the copy's.
+//   - Once ctx has ended, nothing more runs and no error is added to the
+//     copy's or chmod's. The directory stays owned (HasManagedResources) for
+//     the orchestrator's rollback, which removes it on a fresh context of its
+//     own, so a cancelled start spends nothing of TUILaunchJoinTimeout before
+//     the rollback. A directory whose removal failed or was cut short by a
+//     cancel stays owned the same way.
 func (m *RemoteDockerManager) SetFileMountsContext(ctx context.Context, mounts []scenario.FileMount) error {
-	ctx, cancel := context.WithTimeout(normalizeContext(ctx), time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
-	defer cancel()
-	if err := m.cleanupStaging(ctx); err != nil {
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := m.withStagingCommandTimeout(ctx, m.cleanupStaging); err != nil {
 		return err
 	}
 	if len(mounts) == 0 {
 		return nil
 	}
-	if err := m.ensureStagingDir(ctx); err != nil {
+	if err := m.withStagingCommandTimeout(ctx, m.ensureStagingDir); err != nil {
 		return err
 	}
 	for _, mount := range mounts {
 		remotePath := path.Join(m.stagingDir, path.Base(mount.ContainerPath))
 		if err := m.exec.CopyFile(ctx, m.host, mount.HostPath, remotePath); err != nil {
-			return errors.Join(err, m.cleanupStaging(ctx))
+			return errors.Join(err, m.cleanupStagingAfterFailure(ctx))
 		}
-		if _, stderr, err := m.exec.ExecuteCommand(ctx, m.host, []string{remoteChmodCommand, "0444", remotePath}); err != nil {
-			return errors.Join(
-				fmt.Errorf("chmod remote item file on %s: %w (stderr: %s)", m.host.Original, err, stderr),
-				m.cleanupStaging(ctx),
-			)
+		if err := m.withStagingCommandTimeout(ctx, func(commandCtx context.Context) error {
+			_, stderr, err := m.exec.ExecuteCommand(commandCtx, m.host, []string{remoteChmodCommand, "0444", remotePath})
+			if err != nil {
+				return fmt.Errorf("chmod remote item file on %s: %w (stderr: %s)", m.host.Original, err, stderr)
+			}
+			return nil
+		}); err != nil {
+			return errors.Join(err, m.cleanupStagingAfterFailure(ctx))
 		}
 		m.stagedBindMounts = append(m.stagedBindMounts, fmt.Sprintf("%s:%s:ro", remotePath, mount.ContainerPath))
+	}
+	return nil
+}
+
+// withStagingCommandTimeout runs one small staging command under its own
+// stagingCommandTimeout within ctx.
+func (m *RemoteDockerManager) withStagingCommandTimeout(ctx context.Context, run func(context.Context) error) error {
+	commandCtx, cancel := context.WithTimeout(ctx, m.stagingCommandTimeout)
+	defer cancel()
+	return run(commandCtx)
+}
+
+// cleanupStagingAfterFailure removes the staging directory after a copy or
+// chmod failed while ctx was live, within remoteCleanupTimeout. Once ctx has
+// ended it leaves the directory owned for the orchestrator's rollback, which
+// runs on a fresh context of its own, and reports nothing: removing it here
+// would only delay that rollback.
+func (m *RemoteDockerManager) cleanupStagingAfterFailure(ctx context.Context) error {
+	if ctx.Err() != nil {
+		return nil
+	}
+	cleanupCtx, cancel := context.WithTimeout(ctx, remoteCleanupTimeout)
+	defer cancel()
+	if err := m.cleanupStaging(cleanupCtx); err != nil && ctx.Err() == nil {
+		return err
 	}
 	return nil
 }
@@ -355,8 +411,17 @@ func (m *RemoteDockerManager) StartWorkerNodeContainer(image string, rmiHostname
 		context.Background(), image, rmiHostname, rmiPortStart, rmiPortCount, additionalArgs)
 }
 
-// StartWorkerNodeContainerContext starts a remote RMI worker within the caller's context.
-func (m *RemoteDockerManager) StartWorkerNodeContainerContext(ctx context.Context, image string, rmiHostname string, _ int, _ int, additionalArgs []string) (string, error) {
+// StartWorkerNodeContainerContext starts a remote RMI worker on the default engine ports within
+// the caller's context.
+func (m *RemoteDockerManager) StartWorkerNodeContainerContext(ctx context.Context, image string, rmiHostname string, rmiPortStart, rmiPortCount int, additionalArgs []string) (string, error) {
+	return m.startWorkerNodeOnPorts(ctx, image, rmiHostname, defaultEnginePorts(), rmiPortStart, rmiPortCount, additionalArgs)
+}
+
+// startWorkerNodeOnPorts starts a remote RMI worker that serves the run's API and RMI registry
+// ports, and waits for its API on the run's API port.
+func (m *RemoteDockerManager) startWorkerNodeOnPorts(
+	ctx context.Context, image string, rmiHostname string, ports enginePorts, _ int, _ int, additionalArgs []string,
+) (string, error) {
 	ctx = normalizeContext(ctx)
 	// Detect advertised IP on the remote host if not explicitly provided
 	advIP := strings.TrimSpace(rmiHostname)
@@ -379,8 +444,7 @@ func (m *RemoteDockerManager) StartWorkerNodeContainerContext(ctx context.Contex
 	// Host networking with explicit JVM RMI hostname and explicit ports
 	name := generateRemoteContainerName("worker", m.host.Host)
 	cmd := make([]string, 0, 3+len(additionalArgs))
-	cmd = append(cmd, dockerNodeModeArg, "--run-port=9999",
-		fmt.Sprintf("%s%d", constants.EngineNodePortArgPrefix, constants.DefaultRMIRegistryPort))
+	cmd = append(cmd, dockerNodeModeArg, ports.runPortArg(), ports.nodePortArg())
 	cmd = append(cmd, additionalArgs...)
 	cfg := command.ContainerConfig{
 		Image:       image,
@@ -412,7 +476,7 @@ func (m *RemoteDockerManager) StartWorkerNodeContainerContext(ctx context.Contex
 
 	// Readiness probe against remote host over network
 	if m.proberRun != nil {
-		baseURL := fmt.Sprintf("http://%s:%d", m.host.Host, constants.DefaultSptAPIPort)
+		baseURL := fmt.Sprintf("http://%s:%d", m.host.Host, ports.api)
 		rctx, rcancel := context.WithTimeout(ctx, constants.APIReadinessTimeout)
 		defer rcancel()
 		if err := m.proberRun(rctx, baseURL, constants.APIPollingTimeout); err != nil {
@@ -428,15 +492,24 @@ func (m *RemoteDockerManager) StartEntryNodeContainer(image string, workerAddres
 		context.Background(), image, workerAddresses, additionalArgs, networkMode)
 }
 
-// StartEntryNodeContainerContext starts a remote RMI entry node within the caller's context.
+// StartEntryNodeContainerContext starts a remote RMI entry node on the default engine ports within
+// the caller's context.
 func (m *RemoteDockerManager) StartEntryNodeContainerContext(ctx context.Context, image string, workerAddresses []string, additionalArgs []string, networkMode string) (string, error) {
+	return m.startEntryNodeOnPorts(ctx, image, defaultEnginePorts(), workerAddresses, additionalArgs, networkMode)
+}
+
+// startEntryNodeOnPorts starts a remote RMI entry node that serves the run's API and RMI registry
+// ports, and waits for its API on the run's API port.
+func (m *RemoteDockerManager) startEntryNodeOnPorts(
+	ctx context.Context, image string, ports enginePorts, workerAddresses []string, additionalArgs []string, networkMode string,
+) (string, error) {
 	ctx = normalizeContext(ctx)
-	// Build command: [--load-step-node-addrs=<csv>, --run-node, --run-port=9999] + additionalArgs
 	cmd := []string{}
 	if len(workerAddresses) > 0 {
 		cmd = append(cmd, "--load-step-node-addrs="+strings.Join(workerAddresses, ","))
 	}
-	cmd = append(cmd, dockerNodeModeArg, "--run-port="+constants.SptAPIPort)
+	cmd = append(cmd, dockerNodeModeArg, ports.runPortArg())
+	cmd = append(cmd, nonDefaultNodePortArgs(ports)...)
 	cmd = append(cmd, additionalArgs...)
 
 	startCtx, cancel := context.WithTimeout(ctx, time.Duration(constants.ContainerStartTimeoutSecs)*time.Second)
@@ -472,7 +545,7 @@ func (m *RemoteDockerManager) StartEntryNodeContainerContext(ctx context.Context
 	}
 	m.containerID = strings.TrimSpace(id)
 	if m.proberRun != nil {
-		baseURL := fmt.Sprintf("http://%s:%d", m.host.Host, constants.DefaultSptAPIPort)
+		baseURL := fmt.Sprintf("http://%s:%d", m.host.Host, ports.api)
 		rctx, rcancel := context.WithTimeout(ctx, constants.APIReadinessTimeout)
 		defer rcancel()
 		if err := m.proberRun(rctx, baseURL, constants.APIPollingTimeout); err != nil {

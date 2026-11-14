@@ -49,10 +49,43 @@ Configuration:
         DirectWriteRolloverStrategy: {}
         PatternLayout:
           pattern: "%d{ISO8601}{GMT+0} | %p | %X{class_name} | %t | %m%n"
+        # errors.log rate limits. Only the Errors logger (level DEBUG) writes here. Events below
+        # WARN (INFO, DEBUG, and TRACE if the logger is lowered to it) and WARN events each have
+        # their own budget, so a flood of debug lines can't use up the warnings' budget. Each
+        # budget passes 1000 events, and a used slot comes back 10 s after it was used
+        # (maxBurst / rate). ERROR and FATAL are not limited.
+        #
+        # How the chain works (Log4j 2.26.1):
+        # - A BurstFilter limits events at its level and below. An event above its level gets
+        #   onMatch without using a slot. An event in range gets onMatch if it takes a free slot,
+        #   onMismatch if none is free.
+        # - The filters run in order, and the first ACCEPT or DENY ends the chain. A NEUTRAL
+        #   event goes on to the next filter, and an event that is NEUTRAL at the end is written.
+        #
+        # 1. Budget below WARN: an INFO or DEBUG event with no free slot is denied. Everything
+        #    else goes on.
+        # 2. INFO and DEBUG events are accepted here, so they never reach WARN's budget.
+        # 3. WARN budget: a WARN event with no free slot is denied. ERROR and FATAL are written.
+        #
+        # Each item needs `type`, because one YAML map can't hold the BurstFilter key twice.
         Filters:
-          BurstFilter:
-            rate: 100
-            maxBurst: 1000
+          Filter:
+            - type: BurstFilter
+              level: INFO
+              rate: 100
+              maxBurst: 1000
+              onMatch: NEUTRAL
+              onMismatch: DENY
+            - type: ThresholdFilter
+              level: WARN
+              onMatch: NEUTRAL
+              onMismatch: ACCEPT
+            - type: BurstFilter
+              level: WARN
+              rate: 100
+              maxBurst: 1000
+              onMatch: NEUTRAL
+              onMismatch: DENY
       - name: metricsFile
         filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}metrics.csv"
         Policies:

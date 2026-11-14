@@ -79,7 +79,7 @@ func (f identityPreflight) EnsureImage(context.Context, *hostparse.HostInfo, str
 	return nil
 }
 
-func (f identityPreflight) CheckPorts(context.Context, *hostparse.HostInfo, int, int, int) (*dockerconf.ConflictInfo, error) {
+func (f identityPreflight) CheckPorts(context.Context, *hostparse.HostInfo, int, int, int, int) (*dockerconf.ConflictInfo, error) {
 	return &dockerconf.ConflictInfo{}, nil
 }
 
