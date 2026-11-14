@@ -4,6 +4,7 @@ import static com.dell.spt.base.Constants.DIR_CONFIG;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 
 import com.dell.spt.base.config.ConfigUtil;
+import com.dell.spt.base.config.InvalidBooleanValueException;
 import com.dell.spt.base.logging.LogUtil;
 import com.github.akurilov.confuse.Config;
 import java.nio.file.Path;
@@ -36,6 +37,9 @@ public abstract class ExtensionBase extends InstallableJarResources implements E
 		final var defaultsFile = Paths.get(appHomePath.toString(), DIR_CONFIG, defaultsFileName).toFile();
 		try {
 			return ConfigUtil.loadConfig(defaultsFile, schema);
+		} catch (final InvalidBooleanValueException e) {
+			// Dropping the file would lose every default it sets; stop the start as the main defaults do.
+			throw e;
 		} catch (final Exception e) {
 			throwUncheckedIfInterrupted(e);
 			LogUtil.exception(

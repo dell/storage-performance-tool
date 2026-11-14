@@ -27,6 +27,10 @@ import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
 import javax.servlet.http.Part;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import com.dell.spt.base.control.ApiStatus;
+import com.dell.spt.base.load.step.LoadStepManagerService;
 
 /**
  * Test for RunServlet focusing on:
@@ -92,6 +96,34 @@ class RunServletTest {
 		final var merged = RunServlet.mergeIncomingWithLocalConfig(null, mockResponse, TestConfigBuilder.config());
 
 		assertEquals(EngineBuildInfoProvider.global().snapshot().version(), merged.stringVal("run-version"));
+	}
+
+	/** {@code spt run --engine-override load-op-shuffle=no} posts the value as the text "no". */
+	@Test
+	void aRefusedBooleanInPostedDefaultsIsNamedInTheBadRequestBody() throws Exception {
+		final var stepSvc = mock(LoadStepManagerService.class);
+		final var servlet = new RunServlet(null, Collections.emptyList(), null, TestConfigBuilder.config(), null,
+						stepSvc, new ApiStatus(), mockScenarioExecutor);
+		when(mockRequest.getHeader("Content-Type")).thenReturn("multipart/form-data; boundary=b");
+		final Part defaults = defaultsPart("load:\n  op:\n    shuffle: \"no\"\n");
+		when(mockRequest.getPart("defaults")).thenReturn(defaults);
+		final var body = new StringWriter();
+		when(mockResponse.getWriter()).thenReturn(new PrintWriter(body));
+
+		servlet.doPost(mockRequest, mockResponse);
+
+		verify(mockResponse).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+		verify(mockResponse).setContentType("text/plain; charset=UTF-8");
+		assertEquals("load-op-shuffle: \"no\" is not true or false", body.toString());
+		verify(mockScenarioExecutor, never()).execute(any());
+	}
+
+	@Test
+	void anyOtherBadRequestKeepsItsEmptyBody() throws Exception {
+		RunServlet.setBadRequestResponse(mockResponse, new IllegalStateException("internal detail"));
+
+		verify(mockResponse).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+		verify(mockResponse, never()).getWriter();
 	}
 
 	private static Part defaultsPart(final String content) throws IOException {

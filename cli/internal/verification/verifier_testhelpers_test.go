@@ -38,3 +38,9 @@ func (v *Verifier) checkRemoteDocker(host *hostparse.HostInfo, start time.Time) 
 	version := strings.TrimSpace(stdout)
 	return Check{Passed: true, Message: fmt.Sprintf("Docker %s accessible via SSH", version), Duration: v.timeProvider.Since(start)}
 }
+
+// checkPorts is a test-only helper: one probe round of the service ports, with nothing seen before.
+func (v *Verifier) checkPorts(ctx context.Context, host *hostparse.HostInfo) Check {
+	ports := v.servicePorts()
+	return v.probePorts(ctx, host, ports, make([]portState, len(ports)))
+}

@@ -32,7 +32,7 @@ docker run --network host ghcr.io/dell/storage-performance-tool \
     --read \
     --item-input-path="some path to item on storage" \
     --load-step-limit-time=60s \
-    --load-op-recycle=true
+    --load-op-recycle-mode=true
 ```
 
 ☝️ This command will perform **"read"** operation for 60 seconds. Spt will "read" all items from specified "item-input-path" (for example, for File System (as Storage) path = `/path/to/directory`) and when "items" run out spt will "read" them again (`recycle`).

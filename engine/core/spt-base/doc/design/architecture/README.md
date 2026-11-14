@@ -119,7 +119,7 @@ component. Many load step contexts may be associated with the single metrics man
 ## 2.5. After-test data aggregation
 
 This chapter describes how data is aggregated after Spt has finished a load step. 
-In standalone mode there is nothing to be done as we synchronously write in the file specified by `--output-fiie` as we go.
+In standalone mode there is nothing to be done as we synchronously write in the file specified by `--item-output-file` as we go.
 But with [distributed mode](https://github.com/dell/storage-performance-tool/tree/main/engine/core/spt-base/tree/master/doc/design/modes/distributed_mode) 
 we aggregate data from local temporary files from worker nodes as soon as workload is done. 
 It happens when `--item-output-file` or `--output-metrics-trace-persist` are specified (or both). 

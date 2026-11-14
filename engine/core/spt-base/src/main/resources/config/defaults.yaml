@@ -330,6 +330,8 @@ aliasing:
   target: "load-op-type"
 - name: "storage-driver-remote"
   deprecated: true
+  # Mongoose 3.x ran driver services on those hosts and generated no load on its own host.
+  reason: "SPT has no remote driver services. Start each --storage-driver-addrs host as a worker engine (run.sh --run-node=true) and run this command without --storage-driver-remote. The engine you start also runs its share of the load."
 - name: "storage-driver-addrs"
   deprecated: true
   target: "load-step-node-addrs"

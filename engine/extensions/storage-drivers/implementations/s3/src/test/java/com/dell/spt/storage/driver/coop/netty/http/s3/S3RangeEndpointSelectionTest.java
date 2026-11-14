@@ -147,7 +147,8 @@ final class S3RangeEndpointSelectionTest {
 						requests.stream().map(Captured::listener).toList());
 		assertEquals(requests.get(0).clientPort(), requests.get(2).clientPort());
 		assertEquals(requests.get(1).clientPort(), requests.get(3).clientPort());
-		assertNotEquals(requests.get(0).clientPort(), requests.get(1).clientPort());
+		// Two listeners mean two connections. Their client ports come from independent kernel
+		// sequences, so they can be equal by chance and are not compared.
 		assertEquals(2, run.driver.connectionPool().openChannelCount());
 	}
 
@@ -221,7 +222,8 @@ final class S3RangeEndpointSelectionTest {
 			assertEquals("close", request.connection());
 			assertTrue(signedHeaders(request.authorization()).contains("host"), request.authorization());
 		}
-		assertEquals(3, requests.stream().map(Captured::clientPort).distinct().count(), "a new connection per attempt");
+		// Three listeners mean a new connection per attempt. Client ports are not compared: each
+		// listener has its own kernel port sequence, so two connections can share a port by chance.
 		awaitNoOpenConnections(run);
 	}
 

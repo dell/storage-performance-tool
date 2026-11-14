@@ -15,14 +15,15 @@ import (
 
 // Config holds the verification configuration
 type Config struct {
-	NetworkMode  string // "bridge" or "host"
-	APIPort      int    // Spt API port (default 9999)
-	RMIPortStart int    // Starting port for RMI range
-	RMIPortCount int    // Number of RMI ports
-	MinHosts     int    // Minimum hosts that must pass
-	ForceCleanup bool   // Automatically clean up conflicts without prompting
-	ShowProgress bool   // Show detailed step-by-step progress messages
-	UseRdma      bool   // Include RDMA hardware/config verification
+	NetworkMode     string // "bridge" or "host"
+	APIPort         int    // Spt API port (0 = default 9999)
+	RMIPortStart    int    // Starting port for RMI range
+	RMIPortCount    int    // Number of RMI ports
+	RMIRegistryPort int    // Engine RMI registry port (0 = default 1099)
+	MinHosts        int    // Minimum hosts that must pass
+	ForceCleanup    bool   // Automatically clean up conflicts without prompting
+	ShowProgress    bool   // Show detailed step-by-step progress messages
+	UseRdma         bool   // Include RDMA hardware/config verification
 
 	// Interfaces is the NIC set to plan on each host (--interfaces); empty lists the NICs only.
 	Interfaces []string

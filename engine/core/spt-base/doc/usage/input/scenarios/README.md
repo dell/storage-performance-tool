@@ -588,9 +588,10 @@ The guarantee therefore applies only where the filesystem provider honors
 those operations, and must not be assumed for network or userspace filesystems
 without an equivalent server-side persistence contract.
 
-Direct-JAR v1 exits 1 when a scenario ends in a terminal failure. Other failures,
-such as an unreadable or invalid scenario file, still exit 0, so exit 0 doesn't
-show that a scenario ran. It has none of the Go CLI's other exit codes, does not
+Direct-JAR v1 exits 1 when a scenario ends in a terminal failure, when the
+scenario file is missing or cannot be read, and when the scenario fails, for
+example with a syntax or configuration error. It exits 2 for an argument error
+and 0 when the scenario ran to its end. It has none of the Go CLI's other exit codes, does not
 retrieve remote artifacts and does not generate `verify-remaining.csv`. The QA harness owns those tasks and may choose its own
 item-list filenames. An external item file needs no completion sidecar, while
 an engine-produced handoff uses its generated completion evidence.

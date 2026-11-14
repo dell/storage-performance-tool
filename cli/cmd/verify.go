@@ -65,13 +65,38 @@ func init() {
 	registerVerifyFlags(verifyCmd.Flags())
 }
 
+// flagAPIPort sets the engine's REST API port.
+const flagAPIPort = "api-port"
+
+// verifyHostsFunc verifies the hosts; tests replace it to see the configuration runVerify builds.
+var verifyHostsFunc = func(hosts []*hostparse.HostInfo, config verification.Config) *verification.Report {
+	return verification.NewVerifier(hosts, config).VerifyAll()
+}
+
+// verifyEnginePorts returns the REST API and RMI registry ports verify starts its engine on.
+func verifyEnginePorts(cmd *cobra.Command) (int, int, error) {
+	apiPort, _ := cmd.Flags().GetInt(flagAPIPort)
+	if err := validatePortFlag(flagAPIPort, apiPort); err != nil {
+		return 0, 0, err
+	}
+	registryPort, _ := cmd.Flags().GetInt(flagRMIRegistryPort)
+	if err := validatePortFlag(flagRMIRegistryPort, registryPort); err != nil {
+		return 0, 0, err
+	}
+	if err := validateDistinctEnginePorts(apiPort, registryPort); err != nil {
+		return 0, 0, err
+	}
+	return apiPort, registryPort, nil
+}
+
 // registerVerifyFlags adds verify's flags; tests build verify-shaped commands from it.
 func registerVerifyFlags(flags *pflag.FlagSet) {
 	flags.String("test-hosts", "", "Comma-separated list of hosts to verify (defaults to localhost)")
 	// Removed MarkFlagRequired to allow localhost default
 	flags.Int("min-hosts", 0, "Minimum hosts that must pass (0 = all)")
 	flags.String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
-	flags.Int("api-port", 9999, "Spt API port to verify")
+	flags.Int(flagAPIPort, constants.DefaultSptAPIPort, "Spt API port to verify")
+	flags.Int(flagRMIRegistryPort, constants.DefaultRMIRegistryPort, rmiRegistryPortUsage)
 	flags.Int("rmi-port-start", 40000, "Starting port for RMI range")
 	flags.Int("rmi-port-count", 10, "Number of RMI ports to verify")
 	flags.Bool("force-cleanup", false, "Automatically clean up conflicting containers without prompting")
@@ -106,7 +131,10 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 	}
 	minHosts, _ := cmd.Flags().GetInt("min-hosts")
 	networkMode, _ := cmd.Flags().GetString("network-mode")
-	apiPort, _ := cmd.Flags().GetInt("api-port")
+	apiPort, registryPort, err := verifyEnginePorts(cmd)
+	if err != nil {
+		return err
+	}
 	rmiPortStart, _ := cmd.Flags().GetInt("rmi-port-start")
 	rmiPortCount, _ := cmd.Flags().GetInt("rmi-port-count")
 	forceCleanup, _ := cmd.Flags().GetBool("force-cleanup")
@@ -120,6 +148,7 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 		"min_hosts", minHosts,
 		"network_mode", networkMode,
 		"api_port", apiPort,
+		"rmi_registry_port", registryPort,
 		"rmi_port_range", fmt.Sprintf("%d-%d", rmiPortStart, rmiPortStart+rmiPortCount-1),
 		"force_cleanup", forceCleanup,
 		"use_rdma", useRdma,
@@ -172,14 +201,15 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 
 	// Create and run verifier
 	config := verification.Config{
-		NetworkMode:  networkMode,
-		APIPort:      apiPort,
-		RMIPortStart: rmiPortStart,
-		RMIPortCount: rmiPortCount,
-		MinHosts:     minHosts,
-		ForceCleanup: forceCleanup,
-		ShowProgress: len(hosts) == 1, // Show detailed progress for single host verification
-		UseRdma:      useRdma,
+		NetworkMode:     networkMode,
+		APIPort:         apiPort,
+		RMIPortStart:    rmiPortStart,
+		RMIPortCount:    rmiPortCount,
+		RMIRegistryPort: registryPort,
+		MinHosts:        minHosts,
+		ForceCleanup:    forceCleanup,
+		ShowProgress:    len(hosts) == 1, // Show detailed progress for single host verification
+		UseRdma:         useRdma,
 
 		Interfaces:     interfaces,
 		HostInterfaces: hostInterfaces,
@@ -188,8 +218,7 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 		Threads:        threads,
 	}
 
-	verifier := verification.NewVerifier(hosts, config)
-	report := verifier.VerifyAll()
+	report := verifyHostsFunc(hosts, config)
 	attached, _ := cmd.Flags().GetBool(flagAttachExistingWorkers)
 	if err := verifyPoolPreview(commandContext(cmd), cmd, verifyPoolInput{
 		hosts: hosts, interfaces: interfaces, hostInterfaces: hostInterfaces, endpoints: endpoints,

@@ -11,6 +11,7 @@ const (
 	// API and connection timeouts
 	APIPollingTimeout               = 500 * time.Millisecond // Timeout for API polling requests
 	StreamCommandWaitDelay          = 1 * time.Second        // Bound on draining a streamed command's output after it exits or is cancelled
+	CommandWaitDelay                = 1 * time.Second        // Bound on draining a command's or file copy's output after it exits or is cancelled, when a descendant holds the pipe
 	EntryLogRelayReconnectInitial   = 1 * time.Second        // First delay before resuming a dropped remote log stream
 	EntryLogRelayReconnectMax       = 30 * time.Second       // Cap on the doubling reconnect delay for a remote log stream
 	APIReadinessPollInterval        = 500 * time.Millisecond // Interval between API readiness probes

@@ -16,3 +16,4 @@ storage:
       max:
         chunk:
           size: 65536
+      versioning: false

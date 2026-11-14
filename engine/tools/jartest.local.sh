@@ -70,6 +70,18 @@ is_true() {
   esac
 }
 
+# The engine takes only true or false for a boolean option; pass any other
+# value through, so the engine refuses it.
+as_bool() {
+  case "${1,,}" in
+    1|true|yes|y|on) echo true ;;
+    0|false|no|n|off) echo false ;;
+    *) echo "$1" ;;
+  esac
+}
+JARTEST_DEDUPABLE="$(as_bool "${JARTEST_DEDUPABLE}")"
+JARTEST_VERIFY="$(as_bool "${JARTEST_VERIFY}")"
+
 echo "== jartest: ${JARTEST_OP_LIMIT_COUNT} × ${JARTEST_OBJECT_SIZE}, concurrency=${JARTEST_CONCURRENCY}, dedupable=${JARTEST_DEDUPABLE}, compressibility=${JARTEST_COMPRESSIBILITY}, verify=${JARTEST_VERIFY} =="
 echo "== Results: ${RESULTS_DIR} =="
 

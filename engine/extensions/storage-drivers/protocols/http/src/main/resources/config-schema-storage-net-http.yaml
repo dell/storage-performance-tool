@@ -12,3 +12,4 @@ storage:
       max:
         chunk:
           size: int
+      versioning: boolean

@@ -13,7 +13,17 @@ var (
 	itemOutputPathRe   = regexp.MustCompile(`--item-output-path\s*=?\s*([^\s]+)`)
 	storageNodeAddrsRe = regexp.MustCompile(`--storage-net-node-addrs\s*=?\s*([^\s]+)`)
 	clientAddrsRe      = regexp.MustCompile(`--storage-driver-addrs\s*=?\s*([^\s]+)`)
+	// engineTreeFlagRe matches the name of a --storage-* or --load-* engine flag, which ends where
+	// a value or the next word begins.
+	engineTreeFlagRe = regexp.MustCompile(`(?:^|[\s"'=;(])--((?:storage|load)(?:-[A-Za-z0-9_]+)+)`)
 )
+
+// keptEngineTreeFlags are the --storage-* and --load-* flags ParseRunScript reads. Replay keeps no
+// other flag of those trees.
+var keptEngineTreeFlags = map[string]bool{
+	"storage-net-node-addrs": true,
+	"storage-driver-addrs":   true,
+}
 
 // ParseRunScript extracts replay-relevant data from an archived shell run script.
 func ParseRunScript(script string) (RunScript, error) {
@@ -40,11 +50,36 @@ func ParseRunScript(script string) (RunScript, error) {
 	if m := clientAddrsRe.FindStringSubmatch(expanded); len(m) == 2 {
 		rs.ClientAddrs = strings.Trim(m[1], `"'`)
 	}
+	rs.IgnoredFlags = ignoredEngineTreeFlags(lines, rs.Exports)
 
 	if rs.ScenarioPath == "" {
 		return rs, classifiedErrorf(failureRunScriptMissingScenario, "run script does not reference a scenario file")
 	}
 	return rs, nil
+}
+
+// ignoredEngineTreeFlags returns the names of the --storage-* and --load-* flags on the script's
+// lines, exports expanded, that replay does not keep, once each in the order they first appear.
+// An export line only assigns a variable, so it is not read for flags; a flag held in an exported
+// variable is found where the variable is used. Values are never returned, since one can hold a
+// credential or an endpoint.
+func ignoredEngineTreeFlags(lines []string, exports map[string]string) []string {
+	var ignored []string
+	seen := map[string]bool{}
+	for _, line := range lines {
+		if exportLineRe.MatchString(line) {
+			continue
+		}
+		for _, m := range engineTreeFlagRe.FindAllStringSubmatch(expandWithExports(line, exports), -1) {
+			name := m[1]
+			if keptEngineTreeFlags[name] || seen[name] {
+				continue
+			}
+			seen[name] = true
+			ignored = append(ignored, "--"+name)
+		}
+	}
+	return ignored
 }
 
 func parseShellValue(raw string) string {
