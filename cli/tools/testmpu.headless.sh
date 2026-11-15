@@ -61,7 +61,7 @@ echo " - Global Threads: 8"
 echo " - Max Concurrent MPU Objects: 2"
 echo " - Max Concurrent MPU Parts per Object: 3"
 echo " - Endpoint: $S3_ENDPOINTS"
-echo " - Results: under $RESULTS_DIR, in a $RUN_LABEL-* run directory"
+echo " - Results: under $RESULTS_DIR, in a $RUN_LABEL-* run directory (unless you pass your own --results-dir or --label)"
 echo "=========================================================================="
 
 "$SPT_BIN" run write \
@@ -82,4 +82,4 @@ echo "==========================================================================
   "$@"
 
 echo ""
-echo "Test completed. Results are under $RESULTS_DIR, in the newest $RUN_LABEL-* run directory"
+echo "Test completed. Results are under $RESULTS_DIR, in the newest $RUN_LABEL-* run directory (unless you passed your own --results-dir or --label)"
