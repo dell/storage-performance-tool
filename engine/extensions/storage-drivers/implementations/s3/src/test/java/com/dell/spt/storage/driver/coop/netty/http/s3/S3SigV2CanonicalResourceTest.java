@@ -32,7 +32,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The SigV2 canonical resource: the path plus only the query's sub-resources, sorted, with an empty
- * value signed as the bare name. Expected canonical strings are written out by hand, and expected
+ * value signed as the bare name and a {@code versionId} value decoded. Expected canonical strings are written out by hand, and expected
  * signatures are computed here with {@link Mac} over a hand-built string to sign, never with the
  * driver's own {@code getCanonical}.
  */
@@ -99,6 +99,26 @@ class S3SigV2CanonicalResourceTest {
 		assertEquals("/b/", resource("/b/"));
 		assertEquals("/", resource("/"));
 		assertEquals("", resource(""));
+	}
+
+	/** As #319 signs a version ID that needs encoding: decoded, while the URI carries it encoded. */
+	@Test
+	void aVersionIdValueWithAPercentIsSignedDecoded() {
+		assertEquals("/b/k?versionId=v+1=:x", resource("/b/k?versionId=v%2B1%3D%3Ax"));
+		assertEquals("/b/k?versionId=v 1&a%b", resource("/b/k?versionId=v%201%26a%25b"));
+		assertEquals("/b/k?versionId=\u00e9\u4e2d", resource("/b/k?versionId=%C3%A9%E4%B8%AD"));
+		// A '+' is a plus sign, as the URI encodes a space as %20.
+		assertEquals("/b/k?versionId=a+b", resource("/b/k?versionId=a+b"));
+		// An unversioned name that holds a query: only its sub-resources, decoded.
+		assertEquals("/b/k?versionId=a+b", resource("/b/k?x=1&versionId=a%2Bb"));
+		assertEquals("/b/k?tagging&versionId=a+b", resource("/b/k?versionId=a%2Bb&tagging"));
+		// A malformed escape can't be decoded: signed as sent.
+		assertEquals("/b/k?versionId=50%", resource("/b/k?versionId=50%"));
+		assertEquals("/b/k?versionId=a%zz", resource("/b/k?versionId=a%zz"));
+		// Only versionId is decoded.
+		assertEquals("/b/k?uploadId=a%41", resource("/b/k?uploadId=a%41"));
+		assertEquals("/b/k?response-content-type=text%2Fplain", resource("/b/k?response-content-type=text%2Fplain"));
+		assertTrue(!S3StorageDriver.isCanonicalV2Query("/b/k?versionId=a%2Bb", "/b/k".length()));
 	}
 
 	@Test
@@ -182,7 +202,74 @@ class S3SigV2CanonicalResourceTest {
 					"/b/k?partNumber=1&uploadId=U&tenant=t1",
 					"/bench?tenant=t1",
 					"/bench?object-lock=",
-					"/johnsmith/?prefix=photos&max-keys=50&marker=puppy");
+					"/johnsmith/?prefix=photos&max-keys=50&marker=puppy",
+					"/b/k?versionId=v%2B1%3D%3Ax",
+					"/b/k?versionId=v%201%26a%25b",
+					"/b/k?x=1&versionId=a%2Bb",
+					"/b/k?versionId=a%2Bb&tagging",
+					"/b/k?versionId=50%",
+					"/b/k?versionId=a%zz",
+					"/b/k?versionId=%FF",
+					"/b/k?uploadId=a%41");
+
+	/**
+	 * An independent reference for the canonical resource, written from the SigV2 specification
+	 * without the driver's scanning: split the query on {@code &}, keep the sub-resources, decode a
+	 * {@code versionId} value (as sent when malformed), sort stably by name, and write an empty value
+	 * as the bare name.
+	 */
+	private static String reference(final String uri) {
+		final int q = uri.indexOf('?');
+		if (q < 0) {
+			return uri;
+		}
+		final List<String[]> subResources = new ArrayList<>();
+		for (final var param : uri.substring(q + 1).split("&", -1)) {
+			final int eq = param.indexOf('=');
+			final var name = eq < 0 ? param : param.substring(0, eq);
+			if (S3Api.SIGV2_SUB_RESOURCES.contains(name)) {
+				final var value = eq < 0 ? "" : param.substring(eq + 1);
+				subResources.add(new String[]{name, name.equals("versionId") ? referenceDecode(value) : value
+				});
+			}
+		}
+		subResources.sort(java.util.Comparator.comparing(pair -> pair[0]));
+		final var out = new StringBuilder(uri.substring(0, q));
+		for (int i = 0; i < subResources.size(); i++) {
+			final var pair = subResources.get(i);
+			out.append(i == 0 ? '?' : '&').append(pair[0]);
+			if (!pair[1].isEmpty()) {
+				out.append('=').append(pair[1]);
+			}
+		}
+		return out.toString();
+	}
+
+	/** RFC 3986 percent-decoding to UTF-8, {@code +} kept; the value as sent if an escape is malformed. */
+	private static String referenceDecode(final String value) {
+		final var bytes = new java.io.ByteArrayOutputStream();
+		for (int i = 0; i < value.length(); i++) {
+			final char c = value.charAt(i);
+			if (c != '%') {
+				bytes.writeBytes(String.valueOf(c).getBytes(StandardCharsets.UTF_8));
+			} else if (i + 2 < value.length() && Character.digit(value.charAt(i + 1), 16) >= 0
+							&& Character.digit(value.charAt(i + 2), 16) >= 0) {
+				bytes.write(Integer.parseInt(value.substring(i + 1, i + 3), 16));
+				i += 2;
+			} else {
+				return value;
+			}
+		}
+		return bytes.toString(StandardCharsets.UTF_8);
+	}
+
+	@Test
+	void theFilteringRouteSignsWhatTheReferenceSigns() {
+		for (final var uri : QUERY_URIS) {
+			assertEquals(reference(uri), filtered(uri), uri);
+			assertEquals(reference(uri), resource(uri), uri);
+		}
+	}
 
 	private static String filtered(final String uri) {
 		final var buff = new StringBuilder("prefix\n");
@@ -197,13 +284,17 @@ class S3SigV2CanonicalResourceTest {
 		}
 	}
 
-	/** Random queries from sub-resources, other names, empty and repeated values, and stray separators. */
+	/**
+	 * Random queries from sub-resources, other names, empty, repeated and percent-encoded values, and
+	 * stray separators: the fast path, the filtering route and the reference agree on each.
+	 */
 	@Test
 	void theFastPathSignsWhatTheFilteringRouteSignsForRandomQueries() {
 		final var names = List.of("acl", "delete", "partNumber", "tagging", "uploadId", "uploads", "versionId",
 						"versioning", "versions", "select", "select-type", "response-expires", "list-type", "max-keys",
 						"prefix", "uploadIds", "Versions", "");
-		final var values = List.of("", "=", "=1", "=U", "=2~abc.DEF", "=a%2Fb", "==", "=x=y");
+		final var values = List.of(
+						"", "=", "=1", "=U", "=2~abc.DEF", "=a%2Fb", "==", "=x=y", "=a%2Bb%3D", "=a+b", "=50%", "=%zz", "=%C3%A9");
 		final var random = new java.util.Random(20261115L);
 		int fast = 0;
 		for (int n = 0; n < 50_000; n++) {
@@ -220,11 +311,14 @@ class S3SigV2CanonicalResourceTest {
 				uri.append('&');
 			}
 			final var text = uri.toString();
-			assertEquals(filtered(text), resource(text), text);
+			final var expected = reference(text);
+			assertEquals(expected, filtered(text), text);
+			assertEquals(expected, resource(text), text);
 			if (S3StorageDriver.isCanonicalV2Query(text, text.indexOf('?'))) {
 				fast++;
 			}
 		}
+		System.out.println("random canonical-resource queries: 50000, fast path " + fast);
 		assertTrue(fast > 1_000, "the random queries reach the fast path: " + fast);
 	}
 

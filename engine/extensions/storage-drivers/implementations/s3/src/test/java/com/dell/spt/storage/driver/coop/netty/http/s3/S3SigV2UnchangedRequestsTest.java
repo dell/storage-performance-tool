@@ -28,9 +28,9 @@ import org.junit.jupiter.api.Test;
 
 /**
  * SigV2 requests that signed correctly before the canonical-resource fix, built through the
- * driver's own request builders: each must sign exactly the bytes it signed on the base revision.
+ * driver's own request builders: each must sign exactly the bytes it signs on main without the fix.
  * The expected canonical resources are literals and the signatures are recomputed by
- * {@link SigV2TestSupport}; this class uses no API the base revision lacks, so it runs there too.
+ * {@link SigV2TestSupport}; this class uses no API main lacks, so it runs there too.
  */
 class S3SigV2UnchangedRequestsTest {
 
@@ -95,8 +95,13 @@ class S3SigV2UnchangedRequestsTest {
 		}
 	}
 
+	/**
+	 * Since v5.17.1 (#319) a version ID that needs encoding is sent encoded and signed decoded, as V2
+	 * requires; base signed it as sent, which a strict target rejected. The canonical-resource fix
+	 * keeps #319's bytes.
+	 */
 	@Test
-	void aVersionIdDeleteSignsTheVersionIdAsSent() throws Exception {
+	void aVersionIdDeleteSignsAnEncodedVersionIdDecoded() throws Exception {
 		final var drv = driver(true);
 		try {
 			final Operation<Item> op = new OperationImpl<>(1, OpType.DELETE, new ItemImpl("/bv/key~VER+1="), null, "/bv", CREDENTIAL);
@@ -104,7 +109,7 @@ class S3SigV2UnchangedRequestsTest {
 			final HttpRequest request = drv.httpRequest(op, NODE);
 			assertEquals(HttpMethod.DELETE, request.method());
 			assertEquals("/bv/key?versionId=VER%2B1%3D", request.uri());
-			SigV2TestSupport.assertSignedOver(request, "/bv/key?versionId=VER%2B1%3D");
+			SigV2TestSupport.assertSignedOver(request, "/bv/key?versionId=VER+1=");
 		} finally {
 			drv.close();
 		}
@@ -132,13 +137,14 @@ class S3SigV2UnchangedRequestsTest {
 		}
 	}
 
+	/** The first-use check of a bucket that has never been versioned (no Status) enables it. */
 	@Test
 	void theBucketVersioningGetAndPutSignTheVersioningSubResource() throws Exception {
 		final var drv = driver(true);
 		try {
 			drv.respondWith(request -> request.method() == HttpMethod.GET
 							? new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.copiedBuffer(
-											"<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>",
+											"<VersioningConfiguration/>",
 											StandardCharsets.US_ASCII))
 							: new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK));
 
@@ -152,7 +158,7 @@ class S3SigV2UnchangedRequestsTest {
 			assertEquals("/bv?versioning", get.uri());
 			SigV2TestSupport.assertSignedOver(get, "/bv?versioning");
 			final FullHttpRequest put = drv.log().poll();
-			assertNotNull(put, "a suspended bucket is switched to versioning enabled");
+			assertNotNull(put, "a never-versioned bucket is switched to versioning enabled");
 			assertEquals(HttpMethod.PUT, put.method());
 			assertEquals("/bv?versioning", put.uri());
 			SigV2TestSupport.assertSignedOver(put, "/bv?versioning");
