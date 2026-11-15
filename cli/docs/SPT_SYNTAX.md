@@ -592,7 +592,7 @@ spt run write \
 | `--auto-terminate-seconds` | | `0` | Auto-terminate headless runs after N seconds (0 = unlimited) |
 | `--keep-scenario` | | `false` | Keep the scenario file after test completion |
 | `--force` | | `false` | Resolve port conflicts and permit known engine build mismatches; invalid build information and collection failures remain non-forceable |
-| `--api-port` | | `9999` | SPT engine API port that every engine in the run serves: a local or remote engine, or the entry and every worker of a distributed run |
+| `--api-port` | | `9999` | SPT engine API port that every engine in the run serves: a local or remote engine, or the entry and every worker of a distributed run. A whole number from 1 to 65535 |
 | `--rmi-registry-port` | | `1099` | Engine RMI registry port that every engine in the run serves, on local, remote and distributed runs; the entry reaches each worker on it. Give each concurrent `spt run` on the same hosts its own value and its own `--api-port`, also when a run has a local worker (this host in `--test-hosts`, after the first): those are the only ports a local worker publishes |
 | `--skip-image-pull` | | `false` | Use locally cached Docker image without pulling |
 | `--output-dir` | `-O` | `""` | Deprecated; has no effect and warns when used. Results always go under `--results-dir` |
@@ -805,7 +805,7 @@ environment variables.
 | `--minimal` | `false` | Start TUI with only live stats panel visible |
 | `--auto-terminate-seconds` | `0` | Automatically terminate runs after N seconds (`0` = unlimited) |
 | `--force` | `false` | Resolve port conflicts and permit known engine build mismatches; invalid build information and collection failures remain non-forceable |
-| `--api-port` | `9999` | SPT engine API port that every engine in the replay serves, the entry and every worker |
+| `--api-port` | `9999` | SPT engine API port that every engine in the replay serves, the entry and every worker. A whole number from 1 to 65535 |
 | `--rmi-registry-port` | `1099` | Engine RMI registry port that every engine in the replay serves, a local or remote engine, or the entry and every worker; the entry reaches each worker on it. It must differ from `--api-port`. Give each concurrent replay or `spt run` on the same hosts its own value (and its own `--api-port`) |
 | `--trace-file` | `""` | Save all output to a trace file |
 | `--trace-append` | `false` | Append to an existing trace file |
