@@ -15,7 +15,7 @@ public final class ScriptEngineNotInstalledException extends IllegalStateExcepti
 	public ScriptEngineNotInstalledException(final String lang, final String ext) {
 		super("The " + lang + " script engine is not installed, so the \"." + ext
 						+ "\" scenario cannot run: put a JSR-223 " + lang + " engine jar in the ext/ directory next to"
-						+ " spt.jar (doc/usage/input/scenarios/README.md, section 3.2). JavaScript scenarios need"
+						+ " spt.jar (engine/core/spt-base/doc/usage/input/scenarios/README.md in the SPT repository, section 3.2). JavaScript scenarios need"
 						+ " no engine jar.");
 	}
 }

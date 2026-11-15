@@ -49,7 +49,7 @@ class ScenarioUtilScriptEngineTest {
 						"The " + lang + " script engine is not installed, so the \"." + ext
 										+ "\" scenario cannot run: put a JSR-223 " + lang
 										+ " engine jar in the ext/ directory next to spt.jar"
-										+ " (doc/usage/input/scenarios/README.md, section 3.2)."
+										+ " (engine/core/spt-base/doc/usage/input/scenarios/README.md in the SPT repository, section 3.2)."
 										+ " JavaScript scenarios need no engine jar.",
 						e.getMessage());
 		assertFalse(e.getMessage().contains(dir.toString()), "the message must not carry the scenario path");
