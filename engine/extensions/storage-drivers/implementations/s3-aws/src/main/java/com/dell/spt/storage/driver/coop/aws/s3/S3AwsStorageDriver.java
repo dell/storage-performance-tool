@@ -483,7 +483,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					finishOperation(op);
 				}
 				if (aborting) {
-					op.status(Operation.Status.FAIL_UNKNOWN);
+					op.status(abortedUploadStatus(mpuOp));
 					emitMultipartLifecycle(mpuOp, "failed_aborted", true, true, mpuFailure(mpuOp));
 				} else if (completing) {
 					emitMultipartLifecycle(mpuOp, "completed", false, null, null);
@@ -524,6 +524,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 										originalStatus, DELETE_TRANSPORT_FAILURE));
 					}
 				}
+			} else if (aborting && originalStatus != Status.INTERRUPTED) {
+				// The upload ends with its part's failure, as when the abort succeeds.
+				op.status(abortedUploadStatus(mpuOp));
 			} else {
 				op.status(originalStatus);
 			}

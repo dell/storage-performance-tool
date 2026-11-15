@@ -1020,6 +1020,14 @@ final class MetricsJsonResponder {
 		if (countLimit > 0 && totalOps < countLimit) {
 			return 1; // still below the configured op count: transient gap, not done
 		}
+		// A step with neither a time nor a count limit (for example a READ of a listing
+		// run to exhaustion, or a LIST) has no limit to tell a gap from the end, so its
+		// active context always reports Running. Completed for such a step comes only
+		// from its terminal entry, once its context has been unregistered
+		// (appendTerminalEntries, appendDistributedTerminalEntries).
+		if (timeLimitSec <= 0 && countLimit <= 0) {
+			return 1; // unlimited and still active: not done until the step ends
+		}
 		return 2; // completed
 	}
 

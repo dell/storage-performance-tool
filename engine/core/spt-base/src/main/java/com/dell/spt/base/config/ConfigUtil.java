@@ -36,6 +36,18 @@ public interface ConfigUtil {
 	/** Credential leaves under {@code storage.auth} that logged configuration must not reveal. */
 	List<String> MASKED_AUTH_KEYS = List.of("uid", "secret", "token");
 
+	/**
+	 * Request headers under {@code storage.net.http.headers} whose values carry credentials, so logged
+	 * and served configuration must not reveal them. Header names match regardless of case.
+	 */
+	List<String> MASKED_HEADER_NAMES = List.of("Authorization", "Proxy-Authorization", "Cookie", "x-amz-security-token", "X-Auth-Token");
+
+	/** The command-line path of the {@code storage.auth} credentials, before the leaf name. */
+	String AUTH_ARG_PATH_PREFIX = "storage-auth-";
+
+	/** The command-line path of a request header, before the header name. */
+	String HEADER_ARG_PATH_PREFIX = "storage-net-http-headers-";
+
 	static ObjectMapper readConfigMapper(final ConfigFormat format, final Map<String, Object> schema)
 					throws NoSuchMethodException {
 		final ObjectMapper mapper;
@@ -118,24 +130,105 @@ public interface ConfigUtil {
 	}
 
 	/**
-	 * Replaces each set {@code storage.auth} credential with {@link #MASKED_VALUE}. The storage and auth
-	 * maps are replaced with copies, so no map shared with the source configuration is modified.
+	 * Replaces each set {@code storage.auth} credential, and the value of each request header under
+	 * {@code storage.net.http.headers} named in {@link #MASKED_HEADER_NAMES}, with {@link #MASKED_VALUE}.
+	 * A null or empty value stays as it is. The maps on the way to a masked value are replaced with
+	 * copies, so no map shared with the source configuration is modified.
 	 */
 	static void maskCredentials(final Map<String, Object> configTree) {
-		if (!(configTree.get("storage") instanceof Map<?, ?> storage)
-						|| !(storage.get("auth") instanceof Map<?, ?> auth)) {
+		if (!(configTree.get("storage") instanceof Map<?, ?> storage)) {
 			return;
 		}
-		final var maskedAuth = new LinkedHashMap<Object, Object>(auth);
-		for (final var key : MASKED_AUTH_KEYS) {
-			final var value = maskedAuth.get(key);
-			if (value != null && !value.toString().isEmpty()) {
-				maskedAuth.put(key, MASKED_VALUE);
+		final var maskedStorage = new LinkedHashMap<Object, Object>(storage);
+		var masked = false;
+		if (storage.get("auth") instanceof Map<?, ?> auth) {
+			final var maskedAuth = new LinkedHashMap<Object, Object>(auth);
+			for (final var key : MASKED_AUTH_KEYS) {
+				maskIfSet(maskedAuth, key);
+			}
+			maskedStorage.put("auth", maskedAuth);
+			masked = true;
+		}
+		if (storage.get("net") instanceof Map<?, ?> net
+						&& net.get("http") instanceof Map<?, ?> http
+						&& http.get("headers") instanceof Map<?, ?> headers) {
+			final var maskedHeaders = new LinkedHashMap<Object, Object>(headers);
+			for (final var name : headers.keySet()) {
+				if (name instanceof String headerName && isMaskedHeaderName(headerName)) {
+					maskIfSet(maskedHeaders, name);
+				}
+			}
+			final var maskedHttp = new LinkedHashMap<Object, Object>(http);
+			maskedHttp.put("headers", maskedHeaders);
+			final var maskedNet = new LinkedHashMap<Object, Object>(net);
+			maskedNet.put("http", maskedHttp);
+			maskedStorage.put("net", maskedNet);
+			masked = true;
+		}
+		if (masked) {
+			configTree.put("storage", maskedStorage);
+		}
+	}
+
+	private static void maskIfSet(final Map<Object, Object> values, final Object key) {
+		final var value = values.get(key);
+		if (value != null && !value.toString().isEmpty()) {
+			values.put(key, MASKED_VALUE);
+		}
+	}
+
+	/** Whether a request header's value carries a credential: its name is in {@link #MASKED_HEADER_NAMES}, in any case. */
+	static boolean isMaskedHeaderName(final String headerName) {
+		for (final var masked : MASKED_HEADER_NAMES) {
+			if (masked.equalsIgnoreCase(headerName)) {
+				return true;
 			}
 		}
-		final var maskedStorage = new LinkedHashMap<Object, Object>(storage);
-		maskedStorage.put("auth", maskedAuth);
-		configTree.put("storage", maskedStorage);
+		return false;
+	}
+
+	/**
+	 * Whether the value at a command-line configuration path, such as {@code storage-auth-secret} or
+	 * {@code storage-net-http-headers-Authorization}, is one that {@link #maskCredentials} masks.
+	 */
+	static boolean isMaskedArgPath(final String path) {
+		if (path.startsWith(AUTH_ARG_PATH_PREFIX)) {
+			return MASKED_AUTH_KEYS.contains(path.substring(AUTH_ARG_PATH_PREFIX.length()));
+		}
+		return path.startsWith(HEADER_ARG_PATH_PREFIX)
+						&& isMaskedHeaderName(path.substring(HEADER_ARG_PATH_PREFIX.length()));
+	}
+
+	/**
+	 * A command-line argument as the engine logs it: {@code <name as given>=***} when its value is set
+	 * and the name, after the aliasing, is a path {@link #isMaskedArgPath} masks; otherwise the argument
+	 * as given. The name is resolved as {@link AliasingUtil#apply} resolves it: the first aliasing entry
+	 * with that exact name decides, and its target is cut at the first {@code =}. An argument without
+	 * a {@code =} or with an empty value is logged as given, as {@link #maskCredentials} leaves an empty
+	 * value.
+	 */
+	static String maskedArg(final String arg, final List<Map<String, Object>> aliasingConfig) {
+		final int valueAt = arg.indexOf(CliArgUtil.ARG_VAL_SEP);
+		if (valueAt < 0 || valueAt == arg.length() - 1) {
+			return arg;
+		}
+		final var givenName = arg.substring(0, valueAt);
+		final var name = givenName.startsWith(CliArgUtil.ARG_PREFIX)
+						? givenName.substring(CliArgUtil.ARG_PREFIX.length())
+						: givenName;
+		var path = name;
+		if (aliasingConfig != null) {
+			for (final var entry : aliasingConfig) {
+				if (name.equals(entry.get(AliasingUtil.NAME))) {
+					if (entry.get(AliasingUtil.TARGET) instanceof String target) {
+						final int targetValueAt = target.indexOf(AliasingUtil.ARG_VAL_SEP);
+						path = targetValueAt < 0 ? target : target.substring(0, targetValueAt);
+					}
+					break;
+				}
+			}
+		}
+		return isMaskedArgPath(path) ? givenName + CliArgUtil.ARG_VAL_SEP + MASKED_VALUE : arg;
 	}
 
 	@SuppressWarnings("unchecked")
