@@ -19,10 +19,14 @@ import org.apache.logging.log4j.ThreadContext;
 
 import java.io.EOFException;
 import java.io.IOException;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.EnumMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -71,8 +75,12 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 	private volatile boolean countLimitReached = false;
 	// Operations whose final result the step context did not count, such as an interrupted one.
 	// Counted only in a count-limited step, by UncountedFinalResultOutput on the drivers'
-	// completion threads, so an adder; a result the step context counts is not counted here.
-	private final LongAdder uncountedFinalResults = new LongAdder();
+	// completion threads; a result the step context counts is not counted here. Each platform
+	// thread counts in a cell of its own, which it alone writes, so an increment needs no locked
+	// instruction; virtual threads, unbounded in number, share an adder.
+	private final ThreadLocal<UncountedCell> uncountedCell = ThreadLocal.withInitial(this::newUncountedCell);
+	private final List<UncountedCell> uncountedCells = new CopyOnWriteArrayList<>();
+	private final LongAdder uncountedOnVirtualThreads = new LongAdder();
 	private volatile OperationLifecycleTracker<O> operationLifecycle = OperationLifecycleTracker.disabled();
 	// Set on the task thread when the driver refuses an operation with EOF, read by handleError.
 	private boolean outputClosed = false;
@@ -405,7 +413,7 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 		// At the cap the driver has accepted exactly countLimit operations, and the mixed step
 		// neither retries nor recycles one, so each has exactly one final result.
 		return countLimitReached
-						&& countedResults + uncountedFinalResults.sum() >= countLimit
+						&& countedResults + uncountedFinalResultCount() >= countLimit
 						&& !operationLifecycle.hasOutstandingOperations();
 	}
 
@@ -414,7 +422,52 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 	 * count-limited step, after the step context has taken the result.
 	 */
 	void onUncountedFinalResult() {
-		uncountedFinalResults.increment();
+		if (Thread.currentThread().isVirtual()) {
+			uncountedOnVirtualThreads.increment();
+		} else {
+			uncountedCell.get().increment();
+		}
+	}
+
+	/**
+	 * The uncounted final results so far. A count taken while results arrive may miss the latest,
+	 * never adds one that has not arrived, and is exact once they have all arrived.
+	 */
+	long uncountedFinalResultCount() {
+		long count = uncountedOnVirtualThreads.sum();
+		for (final UncountedCell cell : uncountedCells) {
+			count += cell.count();
+		}
+		return count;
+	}
+
+	private UncountedCell newUncountedCell() {
+		final UncountedCell cell = new UncountedCell();
+		uncountedCells.add(cell);
+		return cell;
+	}
+
+	/** One platform thread's count of uncounted final results: written by that thread alone. */
+	static final class UncountedCell {
+		private static final VarHandle COUNT;
+
+		static {
+			try {
+				COUNT = MethodHandles.lookup().findVarHandle(UncountedCell.class, "count", long.class);
+			} catch (final ReflectiveOperationException e) {
+				throw new ExceptionInInitializerError(e);
+			}
+		}
+		private long count;
+
+		void increment() {
+			// The single writer reads its own last write, so a release store is enough.
+			COUNT.setRelease(this, count + 1);
+		}
+
+		long count() {
+			return (long) COUNT.getAcquire(this);
+		}
 	}
 
 	@Override

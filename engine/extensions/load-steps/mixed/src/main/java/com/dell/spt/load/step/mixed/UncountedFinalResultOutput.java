@@ -104,30 +104,32 @@ final class UncountedFinalResultOutput implements Output {
 	 * a driver that publishes one result for it, and an {@code INTERRUPTED} or {@code OMIT} result.
 	 */
 	static int kind(final Operation<?> op, final boolean compositesInParts) {
+		final Status status = op.status();
+		if (status == Status.SUCC) {
+			// Most results: tested for a composite first, and for a part only after.
+			if (op instanceof CompositeOperation<?> composite) {
+				if (op instanceof PartialOperation) {
+					return NOT_FINAL;
+				}
+				if (composite.allSubOperationsDone()) {
+					return COUNTED;
+				}
+				final OpType type = op.type();
+				return compositesInParts && (type == OpType.CREATE || type == OpType.READ) ? NOT_FINAL : UNCOUNTED;
+			}
+			return op instanceof PartialOperation ? NOT_FINAL : COUNTED;
+		}
 		if (op instanceof PartialOperation) {
 			return NOT_FINAL;
 		}
-		final Status status = op.status();
-		if (op instanceof CompositeOperation<?> composite && !composite.allSubOperationsDone()) {
-			if (isFailure(status)) {
-				return COUNTED;
-			}
-			if (compositesInParts
-							&& Status.SUCC.equals(status)
-							&& (OpType.CREATE.equals(op.type()) || OpType.READ.equals(op.type()))) {
-				return NOT_FINAL;
-			}
+		if (status == Status.INTERRUPTED || status == Status.OMIT) {
 			return UNCOUNTED;
 		}
-		if (Status.INTERRUPTED.equals(status) || Status.OMIT.equals(status)) {
-			return UNCOUNTED;
+		if (status == Status.PENDING || status == Status.ACTIVE) {
+			// Not a failure: an unfinished composite's result is not counted, as for a success.
+			return op instanceof CompositeOperation<?> composite && !composite.allSubOperationsDone() ? UNCOUNTED : COUNTED;
 		}
+		// A failure, finished or not, and a result with no status.
 		return COUNTED;
-	}
-
-	/** As the step context's: a status that ends an operation as failed. */
-	private static boolean isFailure(final Status status) {
-		return !(Status.SUCC.equals(status) || Status.PENDING.equals(status) || Status.ACTIVE.equals(status)
-						|| Status.INTERRUPTED.equals(status) || Status.OMIT.equals(status));
 	}
 }

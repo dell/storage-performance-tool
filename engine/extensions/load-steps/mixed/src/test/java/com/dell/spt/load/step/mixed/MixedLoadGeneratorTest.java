@@ -49,6 +49,7 @@ import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 /**
  * Unit tests for {@link MixedLoadGenerator}.
@@ -244,6 +245,87 @@ class MixedLoadGeneratorTest {
 	}
 
 	@Test
+	@DisplayName("A capped step's result output classifies every status and shape as the rules it was written to")
+	void resultKindsMatchTheirRulesForEveryStatusAndShape() {
+		final List<Operation.Status> statuses = new ArrayList<>(List.of(Operation.Status.values()));
+		statuses.add(null);
+		for (final boolean inParts : new boolean[]{true, false
+		}) {
+			for (final OpType type : OpType.values()) {
+				for (final Operation.Status status : statuses) {
+					final List<Operation<Item>> shapes = List.of(
+									operation(type, status),
+									part(type, status),
+									composite(type, status, true),
+									composite(type, status, false),
+									partOfComposite(type, status, true),
+									partOfComposite(type, status, false));
+					for (final Operation<Item> op : shapes) {
+						assertEquals(ruledKind(op, inParts), kind(op, inParts),
+										() -> op + " " + type + " " + status
+														+ " in parts " + inParts);
+					}
+				}
+			}
+		}
+	}
+
+	/** The classification rules, in the order they are stated, against which the output's faster order is tested. */
+	private static int ruledKind(final Operation<?> op, final boolean compositesInParts) {
+		if (op instanceof PartialOperation) {
+			return UncountedFinalResultOutput.NOT_FINAL;
+		}
+		final Operation.Status status = op.status();
+		final boolean notFailed = Operation.Status.SUCC.equals(status) || Operation.Status.PENDING.equals(status)
+						|| Operation.Status.ACTIVE.equals(status) || Operation.Status.INTERRUPTED.equals(status)
+						|| Operation.Status.OMIT.equals(status);
+		if (op instanceof CompositeOperation<?> composite && !composite.allSubOperationsDone()) {
+			if (!notFailed) {
+				return UncountedFinalResultOutput.COUNTED;
+			}
+			if (compositesInParts && Operation.Status.SUCC.equals(status)
+							&& (OpType.CREATE.equals(op.type()) || OpType.READ.equals(op.type()))) {
+				return UncountedFinalResultOutput.NOT_FINAL;
+			}
+			return UncountedFinalResultOutput.UNCOUNTED;
+		}
+		if (Operation.Status.INTERRUPTED.equals(status) || Operation.Status.OMIT.equals(status)) {
+			return UncountedFinalResultOutput.UNCOUNTED;
+		}
+		return UncountedFinalResultOutput.COUNTED;
+	}
+
+	@Test
+	@Timeout(30)
+	@DisplayName("Uncounted final results from many platform and virtual threads at once are all counted")
+	void uncountedFinalResultsFromManyThreadsAreAllCounted() throws Exception {
+		final MixedLoadGenerator gen = cappedAtOne();
+		final int threadsOfEachKind = 4;
+		final int resultsPerThread = 100_000;
+		final CountDownLatch start = new CountDownLatch(1);
+		final List<Thread> threads = new ArrayList<>();
+		for (int i = 0; i < threadsOfEachKind; i++) {
+			for (final Thread.Builder builder : List.of(Thread.ofPlatform(), Thread.ofVirtual())) {
+				threads.add(builder.start(() -> {
+					try {
+						start.await();
+					} catch (final InterruptedException e) {
+						throw new IllegalStateException(e);
+					}
+					for (int n = 0; n < resultsPerThread; n++) {
+						gen.onUncountedFinalResult();
+					}
+				}));
+			}
+		}
+		start.countDown();
+		for (final Thread thread : threads) {
+			thread.join();
+		}
+		assertEquals(2L * threadsOfEachKind * resultsPerThread, gen.uncountedFinalResultCount());
+	}
+
+	@Test
 	@DisplayName("A final result the step context threw on still ends its operation")
 	void aResultTheStepContextThrewOnIsAccounted() throws Exception {
 		final MixedLoadGenerator gen = cappedAtOne();
@@ -305,11 +387,26 @@ class MixedLoadGeneratorTest {
 		return op;
 	}
 
-	@SuppressWarnings("unchecked")
 	private static Operation<Item> part(final Operation.Status status) {
+		return part(OpType.CREATE, status);
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Operation<Item> part(final OpType type, final Operation.Status status) {
 		final PartialOperation<Item> op = mock(PartialOperation.class);
-		when(op.type()).thenReturn(OpType.CREATE);
+		when(op.type()).thenReturn(type);
 		when(op.status()).thenReturn(status);
+		return op;
+	}
+
+	/** An operation that is both a part and a composite, which no class in the engine is. */
+	@SuppressWarnings("unchecked")
+	private static Operation<Item> partOfComposite(
+					final OpType type, final Operation.Status status, final boolean done) {
+		final CompositeOperation<Item> op = mock(CompositeOperation.class, withSettings().extraInterfaces(PartialOperation.class));
+		when(op.type()).thenReturn(type);
+		when(op.status()).thenReturn(status);
+		when(op.allSubOperationsDone()).thenReturn(done);
 		return op;
 	}
 
