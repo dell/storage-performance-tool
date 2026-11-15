@@ -72,9 +72,10 @@ persisted in the 3rd column. Aborted uploads are logged with an `abort` prefix.
 
 ## 2. Parallel Range Reads
 
-With the `s3` and `s3-rdma` storage drivers, `item-data-ranges-threshold` also splits a "Read" of
-an object larger than the threshold: each part, at most the threshold in size, is read with a range
-GET, and the parts are read in parallel. There is nothing to initiate or complete. A failed part is
-retried up to 3 times; if it still fails, the other parts finish and the read counts as failed. The
-`s3-rdma` driver sends these range GETs over HTTP. The `s3-aws` driver does not split reads: it
-fails such a read.
+With the `s3`, `s3-aws` and `s3-rdma` storage drivers, `item-data-ranges-threshold` also splits a
+"Read" of an object larger than the threshold: each part, at most the threshold in size, is read
+with a range GET, and the parts are read in parallel. There is nothing to initiate or complete. A
+failed part is retried up to 3 times; if it still fails, the other parts finish and the read counts
+as failed, with that part's status. The read counts once, with the object's size in bytes. The
+`s3-rdma` driver sends these range GETs over HTTP. Through 5.17.0 the `s3-aws` driver did not split
+reads: it failed such a read without a request.

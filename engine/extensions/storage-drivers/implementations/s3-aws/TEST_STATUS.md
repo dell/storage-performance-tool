@@ -6,7 +6,7 @@ Successfully implemented the following features in the S3-AWS driver:
 - ✅ Upgraded from sync S3Client to async S3AsyncClient
 - ✅ Added aws-crt dependency for CRT-based performance optimization
 - ✅ Implemented CompositeDataOperation support for multipart upload
-- ✅ Implemented PartialDataOperation support for range reads
+- ✅ Implemented reads split by `item.data.ranges.threshold`: one ranged GET per part (through 5.17.0 such a read failed without a request)
 - ✅ Added copy operation support
 - ✅ Added object versioning support
 - ✅ Added object tagging support
@@ -91,7 +91,8 @@ storage:
 - ✅ MultipartUploadTest.completeMultipartUpload_assemblesParts
 - ✅ CopyOperationTest (both tests)
 - ✅ VersioningTest.extractVersionId_* (all 4 tests)
-- ✅ RangeReadTest.readRange_handlesIOException
+- ✅ RangeReadTest.readRange_calculatesCorrectRange (re-enabled after 5.17.0, with a nonzero item offset)
+- ✅ S3AwsCompositeReadTest (split reads through a started driver and a load step, against a loopback S3)
 
 ### Disabled Tests (Mocking Limitations)
 
@@ -105,9 +106,9 @@ The following tests have been disabled due to Mockito's limitations with complex
    - Issue: Requires real CompositeDataOperation instances for instanceof checks
    - Initiation and abort tests pass
 
-3. **RangeReadTest.readRange_calculatesCorrectRange** (Disabled)
-   - Issue: Requires real CompositeDataOperation/PartialDataOperation instances for instanceof checks
-   - The readRange_handlesIOException test passes
+3. **RangeReadTest.readRange_handlesIOException** (Disabled)
+   - Issue: Mocking complexity with the execute() path
+   - readRange_calculatesCorrectRange and S3AwsCompositeReadTest cover the range read
 
 4. **VersioningTest.readObject_includesVersionIdWhenPresent** (Disabled)
    - Issue: Requires real DataOperation instances for instanceof checks
@@ -163,7 +164,7 @@ This pattern can be extended to other advanced features (multipart upload, range
 The S3-AWS driver implementation is functionally complete with all requested features:
 - ✅ Async S3AsyncClient with CRT support
 - ✅ Multipart upload support
-- ✅ Range read support
+- ✅ Range read support (reads split by the size threshold, as ranged GETs)
 - ✅ Copy operations
 - ✅ Object versioning
 - ✅ Object tagging

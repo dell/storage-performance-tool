@@ -79,6 +79,15 @@ Transparent retries retain the logical request's first send marker but replace e
 so a terminal failure
 without a completed response cannot reuse stale latency or duration samples.
 
+### Reads Split by the Part Size
+
+A READ of an object larger than `item.data.ranges.threshold` (`--part-size` on the CLI) is split
+into parts, as on the `s3` driver: each part is a ranged GET of its bytes in the object, and the
+parts are read in parallel. The read sends no request of its own. It counts once, when its last
+part ends, with the object's size in bytes and a duration from its start to its last part's end. A
+failed part is retried up to 3 times; if it still fails, the other parts finish and the read fails
+with that part's status. Through 5.17.0 the driver failed such a read without a request.
+
 ### UPDATE
 
 An UPDATE rewrites the whole object with one PutObject of the item's current content, and counts
