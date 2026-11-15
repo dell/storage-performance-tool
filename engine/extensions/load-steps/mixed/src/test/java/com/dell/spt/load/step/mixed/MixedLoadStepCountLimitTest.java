@@ -14,6 +14,7 @@ import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.StorageDriverFactory;
 import com.dell.spt.base.storage.driver.mock.DummyStorageDriverMock;
@@ -31,9 +32,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.LockSupport;
 import org.apache.logging.log4j.ThreadContext;
@@ -99,6 +103,7 @@ class MixedLoadStepCountLimitTest {
 		assertEquals(countLimit, drivers.accepted.sum(), "operations the driver accepted");
 		assertEquals(countLimit, counted(stepId), "operations the step counted");
 		assertTrue(elapsedMillis < PROMPT_END_MILLIS, "the step ended on its count, after " + elapsedMillis + " ms");
+		assertEquals(UncountedFinalResultOutput.class, drivers.resultOutput.get().getClass(), "the result output");
 	}
 
 	@Test
@@ -129,6 +134,107 @@ class MixedLoadStepCountLimitTest {
 		assertTrue(elapsedMillis >= 900, "the step ran to its time limit, " + elapsedMillis + " ms");
 		assertTrue(drivers.accepted.sum() > 0, "the step ran operations");
 		assertEquals(drivers.accepted.sum(), counted(stepId), "every accepted operation was counted");
+		assertTrue(
+						drivers.resultOutput.get() instanceof UncountedFinalResultOutput == false,
+						"a step without a count limit keeps its result output");
+	}
+
+	/** {@code Long.MAX_VALUE} is no count limit, as 0 is. */
+	@Test
+	void aStepWithAMaximalCountRunsToItsTimeLimit() throws Exception {
+		final String stepId = newStepId("max-count");
+		final Config config = stepConfig(stepId);
+		config.val("load-step-limit-time", "1s");
+		config.val("load-op-limit-count", Long.MAX_VALUE);
+
+		final long elapsedMillis = run(config);
+
+		assertTrue(elapsedMillis >= 900, "the step ran to its time limit, " + elapsedMillis + " ms");
+		assertEquals(drivers.accepted.sum(), counted(stepId), "every accepted operation was counted");
+		assertTrue(
+						drivers.resultOutput.get() instanceof UncountedFinalResultOutput == false,
+						"a step without a count limit keeps its result output");
+	}
+
+	/**
+	 * The dummy driver publishes one result for a composite, which the step does not count, as
+	 * before: a count-limited step of flat reads and composite writes counts its reads only, and
+	 * ends on its count.
+	 */
+	@Test
+	void aMixOfFlatReadsAndCompositeWritesOnTheDummyDriverEndsOnItsCount() throws Exception {
+		final String stepId = newStepId("dummy-composite-mix");
+		final Config config = stepConfig(stepId);
+		config.val("load-op-limit-count", 50L);
+		config.val("item-data-ranges-threshold", "512B");
+		config.val("load-op-weights-get", 50);
+		config.val("load-op-weights-put", 50);
+		config.val("load-op-weights-delete", 0);
+		config.val("load-op-weights-stat", 0);
+		config.val(
+						"item-input-file",
+						Files.write(
+										home.resolve("tiny-seeds-" + stepId + ".csv"),
+										List.of(new DataItemImpl("/bucket/tiny", 0, 64).toString()))
+										.toString());
+
+		final long elapsedMillis = run(config);
+
+		assertEquals(50, drivers.accepted.sum(), "operations the driver accepted");
+		final long reads = drivers.accepted(OpType.READ);
+		assertTrue(reads > 0 && reads < 50, "the step ran reads and writes, " + reads + " reads");
+		assertEquals(reads, metrics.counted(stepId, OpType.READ), "reads the step counted");
+		assertEquals(0, metrics.counted(stepId, OpType.CREATE), "composite writes the step counted");
+		assertTrue(elapsedMillis < PROMPT_END_MILLIS, "the step ended on its count, after " + elapsedMillis + " ms");
+	}
+
+	@Test
+	void aCompositeWriteOnTheDummyDriverEndsAfterItsOnlyResult() throws Exception {
+		final String stepId = newStepId("dummy-composite");
+		final Config config = multipartStepConfig(stepId, 1);
+		config.val("storage-driver-type", CountingDriverFactory.TYPE);
+
+		final long elapsedMillis = run(config);
+
+		assertEquals(1, drivers.accepted.sum(), "operations the driver accepted");
+		assertEquals(0, counted(stepId), "composite writes the step counted");
+		assertTrue(elapsedMillis < PROMPT_END_MILLIS, "the step ended on its count, after " + elapsedMillis + " ms");
+	}
+
+	/** A STAT above the ranges threshold is one composite result, which the step does not count. */
+	@Test
+	void aStepOfStatsAboveTheThresholdEndsWithoutCountingThemOnTheDummyDriver() throws Exception {
+		final String stepId = newStepId("dummy-split-stat");
+		final Config config = statStepConfig(stepId);
+		config.val("storage-driver-type", CountingDriverFactory.TYPE);
+
+		final long elapsedMillis = run(config);
+
+		assertEquals(40, drivers.accepted.sum(), "operations the driver accepted");
+		assertTrue(drivers.accepted(OpType.STAT) > 0, "the step ran STATs");
+		assertEquals(0, counted(stepId), "STATs and composite writes the step counted");
+		assertTrue(elapsedMillis < PROMPT_END_MILLIS, "the step ended on its count, after " + elapsedMillis + " ms");
+	}
+
+	@Test
+	void aStepOfStatsAboveTheThresholdEndsWithoutCountingThemOnTheNioDriver() throws Exception {
+		final String stepId = newStepId("nio-split-stat");
+		final Config config = statStepConfig(stepId);
+
+		final long elapsedMillis = run(config);
+
+		assertEquals(0, metrics.counted(stepId, OpType.STAT), "STATs the step counted");
+		assertTrue(metrics.counted(stepId, OpType.CREATE) < 40, "the step ran STATs");
+		assertTrue(elapsedMillis < PROMPT_END_MILLIS, "the step ended on its count, after " + elapsedMillis + " ms");
+	}
+
+	/** 40 operations, nearly all STATs of the 1 KB seed items, above a 512 B ranges threshold. */
+	private Config statStepConfig(final String stepId) throws Exception {
+		final Config config = multipartStepConfig(stepId, 40);
+		// A mixed step needs two weights: a few creates of new items run with the STATs.
+		config.val("load-op-weights-put", 1);
+		config.val("load-op-weights-stat", 100);
+		return config;
 	}
 
 	@Test
@@ -140,6 +246,9 @@ class MixedLoadStepCountLimitTest {
 		final long elapsedMillis = run(config);
 
 		assertEquals(1, nioDrivers.paused.sum(), "completions paused after their result was published");
+		// The upload was the step's one operation, and its tracker held nothing at the pause: the
+		// pause came after its initiation's terminal result and before its parts were queued.
+		assertEquals(Boolean.FALSE, nioDrivers.outstandingAtPause.get(), "the driver held an operation at the pause");
 		assertEquals(1, counted(stepId), "the step counted the upload");
 		assertTrue(elapsedMillis < PROMPT_END_MILLIS, "the step ended on its count, after " + elapsedMillis + " ms");
 	}
@@ -152,6 +261,31 @@ class MixedLoadStepCountLimitTest {
 		final long elapsedMillis = run(config);
 
 		assertEquals(50, counted(stepId), "uploads the step counted");
+		assertTrue(elapsedMillis < PROMPT_END_MILLIS, "the step ended on its count, after " + elapsedMillis + " ms");
+	}
+
+	/**
+	 * A cooperative driver that leaves an aborted upload's finalization a success, as the file system
+	 * driver does: the upload ends as a failure, which the step counts, without sending its unsent
+	 * parts, and the step ends on its count.
+	 */
+	@Test
+	void aStepWhoseUploadsAbortEndsOnItsCount() throws Exception {
+		final String stepId = newStepId("multipart-abort");
+		final Config config = multipartStepConfig(stepId, 2);
+		// One part in flight per upload: the first part runs out of retries, and the upload is
+		// aborted before its second part is sent, so the abort's result is unfinished.
+		config.val("storage-driver-limit-multipart-parts", 1);
+		nioDrivers.failParts.set(true);
+
+		final long elapsedMillis = run(config);
+
+		// Each upload's first part: one attempt and three retries (the step's one STAT in 10,001 runs
+		// no part).
+		final long failedParts = nioDrivers.failedParts.sum();
+		assertTrue(failedParts > 0 && failedParts % 4 == 0, "failed part attempts: " + failedParts);
+		assertEquals(0, nioDrivers.laterParts.sum(), "second parts sent after their upload was aborted");
+		assertEquals(failedParts / 4, metrics.counted(stepId, OpType.CREATE), "aborted uploads the step counted");
 		assertTrue(elapsedMillis < PROMPT_END_MILLIS, "the step ended on its count, after " + elapsedMillis + " ms");
 	}
 
@@ -265,6 +399,8 @@ class MixedLoadStepCountLimitTest {
 		static final String TYPE = "count-limit-mock";
 
 		final LongAdder accepted = new LongAdder();
+		final Map<OpType, LongAdder> acceptedByType = new ConcurrentHashMap<>();
+		final AtomicReference<Object> resultOutput = new AtomicReference<>();
 		final LongAdder interrupted = new LongAdder();
 		final AtomicBoolean interruptFirstResult = new AtomicBoolean();
 
@@ -295,6 +431,9 @@ class MixedLoadStepCountLimitTest {
 				final boolean result = (boolean) call.callRealMethod();
 				if (result) {
 					accepted.increment();
+					acceptedByType
+									.computeIfAbsent(((Operation) call.getArgument(0)).type(), type -> new LongAdder())
+									.increment();
 				}
 				return result;
 			}).when(driver).put(any(Operation.class));
@@ -304,9 +443,16 @@ class MixedLoadStepCountLimitTest {
 				final Field resultOutput = DummyStorageDriverMock.class.getDeclaredField("opResultOut");
 				resultOutput.setAccessible(true);
 				resultOutput.set(call.getMock(), new InterruptingOutput(call.getArgument(0)));
+				this.resultOutput.set(call.getArgument(0));
 				return null;
 			}).when(driver).operationResultOutput(any());
 			return driver;
+		}
+
+		/** The operations of {@code type} the driver accepted. */
+		long accepted(final OpType type) {
+			final LongAdder count = acceptedByType.get(type);
+			return count == null ? 0 : count.sum();
 		}
 
 		/** Publishes the first result it passes on as {@code INTERRUPTED}, when asked to. */
@@ -368,6 +514,12 @@ class MixedLoadStepCountLimitTest {
 
 		final AtomicBoolean pauseFirstCompletion = new AtomicBoolean();
 		final LongAdder paused = new LongAdder();
+		/** Whether the driver's lifecycle tracker held an operation when the pause ran. */
+		final AtomicReference<Boolean> outstandingAtPause = new AtomicReference<>();
+		final AtomicBoolean failParts = new AtomicBoolean();
+		final LongAdder failedParts = new LongAdder();
+		/** Parts after the first that the driver sent. */
+		final LongAdder laterParts = new LongAdder();
 
 		@Override
 		public String id() {
@@ -391,14 +543,14 @@ class MixedLoadStepCountLimitTest {
 		public StorageDriver create(
 						final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
 						final int batchSize) {
-			final NioStorageDriverMock driver = new NioStorageDriverMock(stepId, dataInput, storageConfig, verifyFlag, batchSize);
+			final ProbeDriver driver = new ProbeDriver(stepId, dataInput, storageConfig, verifyFlag, batchSize);
 			if (pauseFirstCompletion.get()) {
 				// handleCompleted counts the completion between publishing its result and enqueueing
 				// a multipart upload's parts, so the count's increment is where the pause goes.
 				try {
 					final Field completedOpCount = CoopStorageDriverBase.class.getDeclaredField("completedOpCount");
 					completedOpCount.setAccessible(true);
-					completedOpCount.set(driver, new PausingCount());
+					completedOpCount.set(driver, new PausingCount(driver));
 				} catch (final ReflectiveOperationException e) {
 					throw new IllegalStateException(e);
 				}
@@ -406,14 +558,46 @@ class MixedLoadStepCountLimitTest {
 			return driver;
 		}
 
+		/** The NIO mock, whose parts fail with {@code FAIL_IO} when asked to. */
+		@SuppressWarnings({"rawtypes", "unchecked"
+		})
+		private final class ProbeDriver extends NioStorageDriverMock {
+
+			ProbeDriver(
+							final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
+							final int batchSize) {
+				super(stepId, dataInput, storageConfig, verifyFlag, batchSize);
+			}
+
+			@Override
+			protected void invokeNio(final Operation op) {
+				super.invokeNio(op);
+				if (op instanceof PartialOperation<?> part && part.partNumber() > 0) {
+					laterParts.increment();
+				}
+				if (failParts.get() && op instanceof PartialOperation) {
+					failedParts.increment();
+					op.status(Operation.Status.FAIL_IO);
+				}
+			}
+		}
+
 		/** Pauses its first increment, when asked to. */
 		private final class PausingCount extends LongAdder {
 
 			private static final long serialVersionUID = 1L;
 
+			private final transient StorageDriver<?, ?> driver;
+
+			PausingCount(final StorageDriver<?, ?> driver) {
+				this.driver = driver;
+			}
+
 			@Override
 			public void increment() {
 				if (pauseFirstCompletion.compareAndSet(true, false)) {
+					final var lifecycle = driver.operationLifecycle();
+					outstandingAtPause.set(lifecycle.isEnabled() ? lifecycle.hasOutstandingOperations() : null);
 					paused.increment();
 					LockSupport.parkNanos(PAUSE_NANOS);
 				}

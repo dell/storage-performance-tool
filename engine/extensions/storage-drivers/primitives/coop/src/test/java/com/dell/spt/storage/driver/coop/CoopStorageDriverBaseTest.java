@@ -1938,6 +1938,32 @@ class CoopStorageDriverBaseTest {
 						"retryCount should not be incremented further");
 	}
 
+	/**
+	 * A driver that does not handle an abort leaves the aborted upload's finalization a success,
+	 * before its parts are all done: it ends as the abort's failure, and its unsent parts are not
+	 * sent, or the upload would never settle.
+	 */
+	@Test
+	void handleCompleted_abortFinalizationLeftASuccessFailsAndSendsNoMoreParts() throws Exception {
+		final var driver = newRetryTestDriver();
+		final var baseItem = new DataItemImpl("obj-abort", 0, 2048);
+		baseItem.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true));
+		final var parent = new CompositeDataOperationImpl<DataItem>(
+						0, OpType.CREATE, baseItem, null, "/bucket", null, null, 0, 1024);
+		parent.subOperations(); // pendingSubTasksCount = 2
+		parent.nextSubOperations(1); // the first part was sent and ran out of retries
+		parent.markSubTaskCompleted(); // pending = 1: the second part was never sent
+		parent.put("mpuFailure", Operation.Status.FAIL_IO.name());
+		parent.put("mpuAbort", "true");
+		parent.status(Operation.Status.SUCC);
+
+		assertTrue(driver.handleCompleted((Operation<Item>) (Operation<?>) parent));
+
+		assertEquals(Operation.Status.FAIL_IO, parent.status(), "the aborted upload's status");
+		assertTrue(childQueueOf(driver).isEmpty(), "no part was enqueued after the abort");
+		assertEquals(1, parent.nextSubOperations(1).size(), "the unsent part was not taken");
+	}
+
 	@Test
 	void handleCompleted_successfulPartDoesNotRetryOrAbort() throws Exception {
 		final var driver = newRetryTestDriver();

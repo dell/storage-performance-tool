@@ -7,8 +7,6 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationsBuilder;
-import com.dell.spt.base.item.op.composite.CompositeOperation;
-import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.logging.LogUtil;
@@ -70,9 +68,10 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 	private long dispatched = 0;
 	// Set once dispatch has reached the count limit, read by the step's completion check.
 	private volatile boolean countLimitReached = false;
-	// Operations that have published their final result. Counted only in a count-limited step, by
-	// FinalResultCountingOutput on the drivers' completion threads, so an adder.
-	private final LongAdder finalResults = new LongAdder();
+	// Operations whose final result the step context did not count, such as an interrupted one.
+	// Counted only in a count-limited step, by UncountedFinalResultOutput on the drivers'
+	// completion threads, so an adder; a result the step context counts is not counted here.
+	private final LongAdder uncountedFinalResults = new LongAdder();
 	private volatile OperationLifecycleTracker<O> operationLifecycle = OperationLifecycleTracker.disabled();
 	// Set on the task thread when the driver refuses an operation with EOF, read by handleError.
 	private boolean outputClosed = false;
@@ -107,7 +106,7 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 					final Input<I> newItemInput,
 					final long countLimit) {
 		super(executor);
-		this.countLimit = countLimit > 0 ? countLimit : Long.MAX_VALUE;
+		this.countLimit = isCountLimit(countLimit) ? countLimit : Long.MAX_VALUE;
 		this.schedule = schedule;
 		this.pool = pool;
 		this.builders = builders;
@@ -374,45 +373,36 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 	}
 
 	/**
+	 * Whether {@code countLimit}, a step's {@code load-op-limit-count}, limits the step: 0 or less,
+	 * and {@link Long#MAX_VALUE}, mean no limit.
+	 */
+	static boolean isCountLimit(final long countLimit) {
+		return countLimit > 0 && countLimit < Long.MAX_VALUE;
+	}
+
+	/**
 	 * Whether dispatch has reached the count limit, every operation dispatched has published its
-	 * final result (see {@link #isFinalResult}), and the driver holds no operation in its lifecycle
-	 * custody. A step then ends even if some of those operations produced no counted result, for
-	 * example an {@code INTERRUPTED} one. Read by the step's completion check, not per operation.
+	 * final result, and the driver holds no operation in its lifecycle custody. Each final result
+	 * is either among the step context's {@code countedResults} or counted here as uncounted (see
+	 * {@link UncountedFinalResultOutput}), so a step then ends even if some of those operations
+	 * produced no counted result, for example an {@code INTERRUPTED} one. Read by the step's
+	 * completion check, not per operation.
 	 */
 	@Override
-	public boolean isCountLimitDrained() {
+	public boolean isCountLimitDrained(final long countedResults) {
 		// At the cap the driver has accepted exactly countLimit operations, and the mixed step
 		// neither retries nor recycles one, so each has exactly one final result.
 		return countLimitReached
-						&& finalResults.sum() >= countLimit
+						&& countedResults + uncountedFinalResults.sum() >= countLimit
 						&& !operationLifecycle.hasOutstandingOperations();
 	}
 
 	/**
-	 * Counts one operation's final result. Called only in a count-limited step, after the step
-	 * context has taken the result, so a drained step has counted every result it will count.
+	 * Counts one operation's final result that the step context did not count. Called only in a
+	 * count-limited step, after the step context has taken the result.
 	 */
-	void onFinalResult() {
-		finalResults.increment();
-	}
-
-	/**
-	 * Whether {@code op} is the last result its operation publishes. Not a part's result, and not a
-	 * multipart upload's or a range read's successful initiation, whose parts and final result are
-	 * still to come. Any other result is final, also the one result of a composite of another type
-	 * (a DELETE above the ranges threshold), which the step context does not count.
-	 */
-	static boolean isFinalResult(final Operation<?> op) {
-		if (op instanceof PartialOperation) {
-			return false;
-		}
-		if (op instanceof CompositeOperation<?> composite
-						&& !composite.allSubOperationsDone()
-						&& Operation.Status.SUCC.equals(op.status())) {
-			final OpType type = op.type();
-			return !(OpType.CREATE.equals(type) || OpType.READ.equals(type));
-		}
-		return true;
+	void onUncountedFinalResult() {
+		uncountedFinalResults.increment();
 	}
 
 	@Override

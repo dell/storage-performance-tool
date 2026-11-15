@@ -46,8 +46,10 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends T
 	 * step context then ends the step, which would otherwise wait on its counted results. The
 	 * default is {@code false}: a generator that does not cap dispatch leaves the count limit to
 	 * the step context.
+	 *
+	 * @param countedResults the results the step context has counted
 	 */
-	default boolean isCountLimitDrained() {
+	default boolean isCountLimitDrained(final long countedResults) {
 		return false;
 	}
 

@@ -97,6 +97,16 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 		return false;
 	}
 
+	/**
+	 * Whether this driver completes a composite CREATE or READ in parts: after the composite's
+	 * successful, unfinished result (a multipart upload's initiation) it publishes its parts'
+	 * results and then one more result for the composite. The default is {@code false}: the driver
+	 * publishes one result for each composite operation, as for any other.
+	 */
+	default boolean completesCompositesInParts() {
+		return false;
+	}
+
 	/** Returns a terminal asynchronous driver failure for the load-step thread to rethrow. */
 	default IntegrityTerminalException terminalFailure() {
 		return null;

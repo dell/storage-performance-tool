@@ -397,11 +397,13 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 			@Override
 			public void close() throws Exception { /* stepCtx lifecycle managed by LoadStepLocalBase */ }
 		};
-		// A count-limited step also counts each operation's final result, after the step context
-		// has taken it, so the step can end once every operation it dispatched has ended. A step
-		// with no count limit keeps the wrapper above alone.
+		// A count-limited step also counts each final result the step context does not count, so
+		// the step can end once every operation it dispatched has ended. A step with no count
+		// limit (0, or Long.MAX_VALUE) keeps the wrapper above alone.
 		driver.operationResultOutput(
-						countLimit > 0 ? new FinalResultCountingOutput(resultOutput, generator) : resultOutput);
+						MixedLoadGenerator.isCountLimit(countLimit)
+										? new UncountedFinalResultOutput(resultOutput, generator, driver.completesCompositesInParts())
+										: resultOutput);
 
 		stepContexts.add(stepCtx);
 

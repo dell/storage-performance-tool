@@ -725,17 +725,21 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	/**
 	 * Whether the generator has dispatched its count limit and every operation it dispatched has
 	 * published its final result. Some of those operations can end without a counted result, so the
-	 * count check alone would wait for the time limit, or for good without one. The generator counts
-	 * a final result after this context has taken it, so nothing is left to count.
+	 * count check alone would wait for the time limit, or for good without one. Standalone DELETE
+	 * counts its results by its own rules, so it keeps the count check only.
 	 */
 	private boolean isDoneCountLimitDrained() {
-		if (!generator.isCountLimitDrained()) {
+		if (standaloneDeleteEnabled) {
+			return false;
+		}
+		final long counted = counterResults.sum();
+		if (!generator.isCountLimitDrained(counted)) {
 			return false;
 		}
 		Loggers.MSG.debug(
 						"{}: done, the generator's count limit was dispatched and every operation ended ({} counted)",
 						id,
-						counterResults.sum());
+						counted);
 		return true;
 	}
 
