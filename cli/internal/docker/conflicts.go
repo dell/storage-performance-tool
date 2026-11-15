@@ -255,10 +255,7 @@ func (info *ConflictInfo) GenerateSSHStopCommands() []string {
 	commands := make([]string, 0, len(info.Containers))
 
 	for _, container := range info.Containers {
-		containerIDShort := container.ID
-		if len(containerIDShort) > constants.ContainerIDDisplayLength {
-			containerIDShort = containerIDShort[:constants.ContainerIDDisplayLength]
-		}
+		containerIDShort := containerutil.ShortID(container.ID)
 
 		var cmd string
 		if info.Host.IsLocal {
@@ -305,10 +302,7 @@ func (info *ConflictInfo) printContainerDetails() {
 		"CONTAINER ID", "NAME", "IMAGE", "STATUS", "AGE", "PORTS")
 
 	for _, container := range info.Containers {
-		containerIDShort := container.ID
-		if len(containerIDShort) > constants.ContainerIDDisplayLength {
-			containerIDShort = containerIDShort[:constants.ContainerIDDisplayLength]
-		}
+		containerIDShort := containerutil.ShortID(container.ID)
 
 		age := "unknown"
 		if !container.Created.IsZero() {

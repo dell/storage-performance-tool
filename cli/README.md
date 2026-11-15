@@ -325,7 +325,6 @@ The verification process checks each node for:
 - Ports required for distributed runs:
   - RMI Registry: 1099
   - REST API: 9999 (Spt standard)
-  - RMI object range: 40000–40009 (10 ports, configurable via `--rmi-port-start/--rmi-port-count`)
 - REST API endpoint functionality
 - Clean container shutdown
 
@@ -355,7 +354,7 @@ Some operator workflows pre-launch Spt worker containers (for example with `--ru
 
 Key points:
 - `spt` still launches and manages the entry node container; only the worker nodes are reused.
-- Workers must already be running the Spt API (`--run-node`) and listening on the run's API port (`--api-port`, default 9999) and RMI registry port (`--rmi-registry-port`, default 1099), plus the configured RMI range. `spt` starts no worker, so a worker on other ports fails the run's readiness wait; start one for other ports with the engine options `--run-port=<api-port>` and `--load-step-node-port=<rmi-registry-port>`.
+- Workers must already be running the Spt API (`--run-node`) and listening on the run's API port (`--api-port`, default 9999) and RMI registry port (`--rmi-registry-port`, default 1099). `spt` starts no worker, so a worker on other ports fails the run's readiness wait; start one for other ports with the engine options `--run-port=<api-port>` and `--load-step-node-port=<rmi-registry-port>`.
 - Preflight checks tolerate expected port usage on worker hosts but continue to flag unknown listeners.
 - Attached workers remain unmanaged during shutdown—`spt` stops the entry node but leaves prestarted workers running.
 - The host list must include at least two entries (entry + worker). `spt` enforces this and fails fast otherwise.
@@ -576,14 +575,14 @@ Executes a benchmark test with the specified workload type.
 - `--generate-only`: Generate scenario file without executing Docker
 - `--force`: Resolve supported port conflicts without interaction and permit a known engine build mismatch. It does not override invalid build information or collection failures
 - `--api-port`: Spt API port that every engine in the run serves, the entry and every worker (defaults to 9999, legacy: 43234)
-- `--rmi-registry-port`: Engine RMI registry port that every engine in the run serves, on local, remote and distributed runs (default 1099); the entry reaches each worker on it. To run several `spt run` instances on the same hosts at once, give each its own `--api-port` and `--rmi-registry-port`. A run with a local worker (this host in `--test-hosts`, after the first) also publishes its RMI range (`--rmi-port-start`, 40000-40009 by default), which every run's port check covers on each host, so a concurrent run on the same hosts needs its own `--rmi-port-start` too: otherwise its port check fails, and with `--force` it stops the other run's worker. With `--attach-existing`, the workers must already serve the run's ports ([Attaching Prestarted Worker Nodes](#attaching-prestarted-worker-nodes))
+- `--rmi-registry-port`: Engine RMI registry port that every engine in the run serves, on local, remote and distributed runs (default 1099); the entry reaches each worker on it. To run several `spt run` instances on the same hosts at once, give each its own `--api-port` and `--rmi-registry-port`, also when a run has a local worker (this host in `--test-hosts`, after the first): those are the only ports a local worker publishes. With `--attach-existing`, the workers must already serve the run's ports ([Attaching Prestarted Worker Nodes](#attaching-prestarted-worker-nodes))
 - `--spt-image`: Override the engine image ref. By default, release builds use an image tag matching the CLI version (for example, `...:v5.10.3`) and local/dev builds use `...:spt_dev`.
 - `--skip-image-pull`: Use the locally cached Spt image instead of pulling before each run. Dev images such as `spt_dev` automatically skip pulls because they are local-only.
 - `--keep-scenario`: Keep the generated JavaScript scenario file after test completes (useful for debugging)
 
 See [Partial-object READs](docs/PARTIAL_READS.md) for examples, response rules, mutable datasets, and result semantics.
 
-Partial reads apply only to the READ phase. Size must be positive and the inclusive endpoint must fit a signed 64-bit integer. Fixed spans are sent unchanged, including out-of-bounds spans; random selection fails locally when the recorded object size is too small. Success requires a structurally valid, complete HTTP 206 response with the exact requested bytes. Inventory size is preserved when objects change, and content is not verified. READ-VERIFY, MIXED, AWS S3, and native S3-RDMA are unsupported. Count and duration runs recycle successful partial reads; failures retire the item. When range flags are enabled, merged engine overrides must keep legacy ranges, verification, metadata-only reads, tagging, and recycled content updates disabled, and any explicit network timeout must be positive. Set the partial-read policy with the range flags; global `load.op.read.range` overrides would also affect preparation and cleanup. READ/WRITE performance qualification remains pending; see the feature guide for current limitations.
+Partial reads apply only to the READ phase. Size must be positive and the inclusive endpoint must fit a signed 64-bit integer. Fixed spans are sent unchanged, including out-of-bounds spans; random selection fails locally when the recorded object size is too small. Success requires a structurally valid, complete HTTP 206 response with the exact requested bytes. Inventory size is preserved when objects change, and content is not verified. READ-VERIFY, MIXED, AWS S3, and native S3-RDMA are unsupported. Count and duration runs recycle successful partial reads; failures retire the item. When range flags are enabled, merged engine overrides must keep legacy ranges, verification, metadata-only reads, tagging, and recycled content updates disabled, and any explicit network timeout must be positive. Set the partial-read policy with the range flags; global `load.op.read.range` overrides would also affect preparation and cleanup. Ordinary READ and WRITE runs (range flags omitted) showed no regression in the v5.15.2 release performance check against v5.14.2, the last release before partial reads; that check does not isolate the partial-read cost or include partial-read workloads, and no partial-read performance figures are published. See the feature guide for current limitations.
 
 The public `delete` command's explicit-manifest mode requires the exact CSV header
 `bucket,key,size,version_id`, performs strict
@@ -663,8 +662,7 @@ Pre-flight verification of distributed testing infrastructure. Ensures all speci
 - `--network-mode`: Docker network mode - "host" (default) or "bridge". Host networking is required for Java RMI distributed communication.
 - `--api-port`: REST API port the test engine serves and verify checks (default: 9999)
 - `--rmi-registry-port`: RMI registry port the test engine serves and verify checks (default: 1099). `spt run` takes the same flag for every engine in a run.
-- `--rmi-port-start`: Starting port for RMI object port range verification (default: 40000)
-- `--rmi-port-count`: Number of RMI ports to verify (default: 10)
+- `--rmi-port-start`, `--rmi-port-count`: No effect; kept for compatibility (defaults 40000 and 10). The engine serves its RMI services on the registry port, so verify neither publishes nor checks a separate RMI range.
 - `--force-cleanup`: Automatically clean up conflicting containers without prompting
 
 **Example Output:**
@@ -703,7 +701,7 @@ Use `--force-cleanup` to automatically choose cleanup without prompting.
 
 ### Remote Multi‑Node Networking
 
-**Host networking is required** for distributed testing due to Java RMI's local-host security restrictions. Bridge networking fails because RMI rejects registry operations from Docker's bridge gateway IP (`172.17.0.1`) as "non-local". See `mike/planning/RMI_HOST_NETWORKING_REQUIREMENT.md` for technical details.
+**Host networking is the default** for distributed testing. Engines bind their RMI services through the registry's loopback address, so Java RMI no longer refuses them from Docker's bridge gateway as "non-local": a local bridge worker and `spt verify --network-mode bridge` start. Remote multi-node runs use host networking.
 
 - Workers and the entry node run with `--network host` (the default since v5.1.0).
 - spt detects a routable "advertised" IP per worker (default‑route IP) and sets both:
