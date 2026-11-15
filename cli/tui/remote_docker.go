@@ -559,16 +559,22 @@ func (m *RemoteDockerManager) startEntryNodeOnPorts(
 	}
 
 	name := generateRemoteContainerName("entry", m.host.Host)
+	mode := selectedNodeNetworkMode(networkMode)
 	cfg := command.ContainerConfig{
 		Image:       image,
 		Name:        name,
-		NetworkMode: selectedNodeNetworkMode(networkMode),
+		NetworkMode: mode,
 		Detached:    true,
 		Labels:      m.baseLabels(constants.DockerRoleEntry),
 		Environment: remoteEngineEnvironment(remoteNodeEnvironment(""), m.host.Host),
 		Command:     cmd,
 		BindMounts:  append(diagnosticBinds, m.stagedBindMounts...),
 		EnvFiles:    envFiles,
+	}
+	// Outside host networking the CLI reaches the entry's API only through a published port.
+	// Nothing calls into the entry over RMI, so its registry port stays unpublished.
+	if mode != command.NetworkModeHost {
+		cfg.PortMappings = []command.PortMapping{{HostPort: ports.api, ContainerPort: ports.api}}
 	}
 
 	// RDMA device passthrough when SPT_RDMA is enabled
