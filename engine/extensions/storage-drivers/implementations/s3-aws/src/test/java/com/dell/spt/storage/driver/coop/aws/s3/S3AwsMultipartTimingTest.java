@@ -29,6 +29,8 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -37,6 +39,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntPredicate;
+import java.util.function.Predicate;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.LogEvent;
@@ -176,16 +179,24 @@ final class S3AwsMultipartTimingTest {
 
 	/**
 	 * A loopback S3 that answers multipart uploads: their initiation, parts, completion and abort,
-	 * and every other request with an empty 200. It answers the parts {@link #failPart} picks,
-	 * counted from 1, with a 400 that the client does not retry itself.
+	 * and every other request with an empty 200. Each initiation gets an upload ID of its own, from
+	 * {@code upload-1}. It answers with {@link #failureStatus} the parts {@link #failPart} picks,
+	 * counted from 1 over every part request it receives, and every part of the uploads
+	 * {@link #failUpload} picks by ID. The default 400 is one the client does not retry itself.
 	 */
 	static final class MultipartStub implements AutoCloseable {
 
 		private final HttpServer server;
 		private final ExecutorService threads = Executors.newCachedThreadPool();
 		final AtomicInteger partRequests = new AtomicInteger();
+		final AtomicInteger initiations = new AtomicInteger();
+		final AtomicInteger completions = new AtomicInteger();
 		final List<String> aborts = new CopyOnWriteArrayList<>();
+		/** The upload IDs initiated and neither completed nor aborted. */
+		final Set<String> openUploads = ConcurrentHashMap.newKeySet();
 		volatile IntPredicate failPart = n -> false;
+		volatile Predicate<String> failUpload = uploadId -> false;
+		volatile int failureStatus = 400;
 
 		MultipartStub() {
 			try {
@@ -210,25 +221,49 @@ final class S3AwsMultipartTimingTest {
 				exchange.getResponseHeaders().set("Date", DateTimeFormatter.RFC_1123_DATE_TIME.format(ZonedDateTime.now(ZoneOffset.UTC)));
 				if ("PUT".equals(method) && query.contains("partNumber=")) {
 					final var n = partRequests.incrementAndGet();
-					if (failPart.test(n)) {
-						respond(exchange, 400, "<Error><Code>InvalidArgument</Code><Message>scripted</Message></Error>");
+					if (failPart.test(n) || failUpload.test(uploadId(query))) {
+						final var status = failureStatus;
+						respond(exchange, status, "<Error><Code>" + errorCode(status) + "</Code><Message>scripted</Message></Error>");
 						return;
 					}
 					exchange.getResponseHeaders().set("ETag", "\"etag-" + n + "\"");
 					empty(exchange, 200);
 				} else if ("POST".equals(method) && query.contains("uploads")) {
+					final var uploadId = "upload-" + initiations.incrementAndGet();
+					openUploads.add(uploadId);
 					respond(exchange, 200, "<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>k</Key>"
-									+ "<UploadId>upload-1</UploadId></InitiateMultipartUploadResult>");
+									+ "<UploadId>" + uploadId + "</UploadId></InitiateMultipartUploadResult>");
 				} else if ("POST".equals(method) && query.contains("uploadId=")) {
+					completions.incrementAndGet();
+					openUploads.remove(uploadId(query));
 					respond(exchange, 200, "<CompleteMultipartUploadResult><Bucket>bucket</Bucket><Key>k</Key>"
 									+ "<ETag>\"done\"</ETag></CompleteMultipartUploadResult>");
 				} else if ("DELETE".equals(method) && query.contains("uploadId=")) {
 					aborts.add(exchange.getRequestURI().toString());
+					openUploads.remove(uploadId(query));
 					exchange.sendResponseHeaders(204, -1);
 				} else {
 					empty(exchange, 200);
 				}
 			}
+		}
+
+		private static String uploadId(final String query) {
+			for (final var param : query.split("&")) {
+				if (param.startsWith("uploadId=")) {
+					return param.substring("uploadId=".length());
+				}
+			}
+			return "";
+		}
+
+		private static String errorCode(final int status) {
+			return switch (status) {
+			case 403 -> "AccessDenied";
+			case 500 -> "InternalError";
+			case 503 -> "SlowDown";
+			default -> status >= 500 ? "ServiceUnavailable" : "InvalidArgument";
+			};
 		}
 
 		private static void empty(final HttpExchange exchange, final int status) throws IOException {

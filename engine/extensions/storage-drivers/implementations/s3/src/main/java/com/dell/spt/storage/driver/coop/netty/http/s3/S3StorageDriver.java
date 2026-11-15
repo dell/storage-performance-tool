@@ -1926,7 +1926,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 								true,
 								abortSucceeded,
 								abortSucceeded ? mpuFailure(compositeOp) : "abort failed: " + op.status());
-				op.status(Operation.Status.FAIL_UNKNOWN);
+				op.status(abortedUploadStatus(compositeOp));
 			} else if (completing) {
 				if (Operation.Status.SUCC.equals(op.status())) {
 					emitMultipartLifecycle(compositeOp, "completed", false, null, null);
@@ -1941,7 +1941,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 							&& !compositeOp.allSubOperationsDone()) {
 				final var initUploadId = channel.attr(S3Api.KEY_ATTR_UPLOAD_ID).get();
 				if (initUploadId == null) {
-					op.status(Operation.Status.RESP_FAIL_NOT_FOUND);
+					// A failed initiation keeps its own status, so load-op-retry retries it when the
+					// failure is transient; only an answer without an upload ID becomes not-found.
+					if (Operation.Status.SUCC.equals(op.status())) {
+						op.status(Operation.Status.RESP_FAIL_NOT_FOUND);
+					}
 				} else {
 					compositeOp.put(S3Api.KEY_UPLOAD_ID, initUploadId);
 				}
@@ -2027,6 +2031,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			} catch (final RuntimeException e) {
 				LogUtil.exception(Level.DEBUG, e, "{}: failed to record an orphaned multipart upload", stepId);
 			}
+			// The upload ends with its part's failure, as after an answered abort.
+			op.status(abortedUploadStatus(compositeOp));
 		}
 	}
 

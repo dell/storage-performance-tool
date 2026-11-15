@@ -140,7 +140,8 @@ Available workload types:
 	newRunCmd.Flags().Bool(flagDeferVerification, false, "Defer write-verify readback")
 	newRunCmd.Flags().Bool(flagCreatePrefix, false, "Deprecated: has no effect")
 	_ = newRunCmd.Flags().MarkDeprecated(flagCreatePrefix, createPrefixDeprecation)
-	newRunCmd.Flags().StringP("output-dir", "O", "", "Specifies a local directory on the host machine to save the detailed Spt report files (e.g., ./results/test-01)")
+	newRunCmd.Flags().StringP(flagOutputDir, "O", "", "Deprecated: has no effect; use --results-dir")
+	_ = newRunCmd.Flags().MarkDeprecated(flagOutputDir, outputDirDeprecation)
 	newRunCmd.Flags().Bool(flagAttachExistingWorkers, false, "Attach to prestarted worker nodes; spt still launches the entry node")
 
 	newRootCmd.AddCommand(newRunCmd)
@@ -161,8 +162,8 @@ Available workload types:
 	newVerifyCmd.Flags().String("test-hosts", "", "Comma-separated list of hosts to verify (defaults to localhost)")
 	newVerifyCmd.Flags().Int("min-hosts", 0, "Minimum hosts that must pass (0 = all)")
 	newVerifyCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
-	newVerifyCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
-	newVerifyCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
+	newVerifyCmd.Flags().Int("rmi-port-start", 40000, rmiPortStartUsage)
+	newVerifyCmd.Flags().Int("rmi-port-count", 10, rmiPortCountUsage)
 	newVerifyCmd.Flags().Bool("force-cleanup", false, "Automatically clean up conflicting containers without prompting")
 
 	newRootCmd.AddCommand(newVerifyCmd)

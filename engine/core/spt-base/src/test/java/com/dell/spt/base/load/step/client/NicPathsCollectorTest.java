@@ -94,6 +94,24 @@ class NicPathsCollectorTest {
 	}
 
 	@Test
+	void theStartCheckTestsTheNicFilesTheStepWouldRefuseButNotTheEventLoops() throws Exception {
+		final var entry = mock(FileManager.class);
+		when(entry.logFileName(LOGGER, "step")).thenReturn(dir.resolve(NicPathsArtifact.FILE_NAME).toString());
+		when(entry.logFileName(SET_LOGGER, "step")).thenReturn(dir.resolve(NicSetArtifact.FILE_NAME).toString());
+		when(entry.logFileName(LOOPS_LOGGER, "step")).thenReturn(dir.resolve(EventLoopsArtifact.FILE_NAME).toString());
+
+		assertEquals(List.of(dir.resolve("nic.paths.csv"), dir.resolve("nic.set.json")),
+						NicPathsCollector.publishedPaths(entry, "step", List.of(true)), "a single engine: its own files");
+		assertEquals(List.of(
+						dir.resolve("nic.paths.csv"), dir.resolve("nic.paths.node-000.csv"), dir.resolve("nic.paths.node-002.csv"),
+						dir.resolve("nic.set.json"), dir.resolve("nic.set.node-000.json"), dir.resolve("nic.set.node-002.json")),
+						NicPathsCollector.publishedPaths(entry, "step", List.of(true, false, true)),
+						"the copies of the slices that requested a NIC set");
+		assertEquals(List.of(dir.resolve("nic.paths.node-001.csv"), dir.resolve("nic.set.node-001.json")),
+						NicPathsCollector.publishedPaths(entry, "step", List.of(false, true)));
+	}
+
+	@Test
 	void everySliceGivesItsEventLoopsWhetherOrNotItHasANicSet() throws Exception {
 		final Path canonical = dir.resolve(EventLoopsArtifact.FILE_NAME);
 		final var managers = new ArrayList<FileManager>();

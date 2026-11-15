@@ -59,6 +59,7 @@ import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
 import software.amazon.awssdk.core.interceptor.SdkInternalExecutionAttribute;
 import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
 
+import com.github.akurilov.commons.collection.Range;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -2078,6 +2079,56 @@ public class S3AwsStorageDriverTest {
 	@Nested
 	class InvokeNioTest {
 
+		/** A multipart upload aborted after a part was refused for good (403), whose abort is answered or throttled. */
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		private CompositeDataOperation abortAfterARefusedPart(final CompletableFuture<AbortMultipartUploadResponse> answer) {
+			final CompositeDataOperation compositeOp = mock(CompositeDataOperation.class);
+			final DataItem item = mock(DataItem.class);
+			when(compositeOp.type()).thenReturn(OpType.CREATE);
+			when(compositeOp.dstPath()).thenReturn("/bucket");
+			when(compositeOp.item()).thenReturn(item);
+			when(item.name()).thenReturn("key");
+			when(compositeOp.get(KEY_UPLOAD_ID)).thenReturn("upload-id-abort");
+			when(compositeOp.get(KEY_MPU_ABORT)).thenReturn("true");
+			when(compositeOp.get("mpuFailure")).thenReturn(Operation.Status.RESP_FAIL_AUTH.name());
+			when(mockS3Client.abortMultipartUpload(any(AbortMultipartUploadRequest.class))).thenReturn(answer);
+			return compositeOp;
+		}
+
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		private static Operation.Status lastStatus(final CompositeDataOperation compositeOp) {
+			final ArgumentCaptor<Operation.Status> statuses = ArgumentCaptor.forClass(Operation.Status.class);
+			verify(compositeOp, atLeastOnce()).status(statuses.capture());
+			return statuses.getValue();
+		}
+
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		@Test
+		void anAnsweredAbortEndsTheUploadWithItsPartsStatus() {
+			final var compositeOp = abortAfterARefusedPart(
+							CompletableFuture.completedFuture(AbortMultipartUploadResponse.builder().build()));
+
+			drv.invokeNio((Operation) compositeOp);
+
+			assertEquals(Operation.Status.RESP_FAIL_AUTH, lastStatus(compositeOp));
+		}
+
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		@Test
+		void aFailedAbortEndsTheUploadWithItsPartsStatus() {
+			final S3Exception throttled = (S3Exception) S3Exception.builder().statusCode(503).message("Slow Down").build();
+			final var compositeOp = abortAfterARefusedPart(CompletableFuture.failedFuture(throttled));
+
+			drv.invokeNio((Operation) compositeOp);
+
+			assertEquals(Operation.Status.RESP_FAIL_AUTH, lastStatus(compositeOp),
+							"a throttled abort must not make a refused upload retryable");
+		}
+
 		@SuppressWarnings("unchecked")
 		@Test
 		void successfulDelete_callsFinishOperation() {
@@ -2864,6 +2915,83 @@ public class S3AwsStorageDriverTest {
 	}
 
 	// -----------------------------------------------------------------------
+	// Update Operations
+	// -----------------------------------------------------------------------
+
+	/** An UPDATE rewrites the whole object with one PutObject, as before 5.9.0, and never copies. */
+	@Nested
+	class UpdateOperationTest {
+
+		private static final long SIZE = 1024;
+
+		private DataItem item(final String name) throws Exception {
+			final DataItem item = new DataItemImpl(name, 12345, SIZE);
+			item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4MB"), 16, false));
+			return item;
+		}
+
+		/** Runs the UPDATE through invokeNio, as a load step does, and returns the PUT it sent. */
+		@SuppressWarnings("unchecked")
+		private PutObjectRequest putFor(final DataOperationImpl<DataItem> op) throws Exception {
+			when(mockS3Client.putObject(any(PutObjectRequest.class), any(AsyncRequestBody.class)))
+							.thenReturn(CompletableFuture.completedFuture(PutObjectResponse.builder().build()));
+
+			drv.invokeNio((Operation<Item>) (Operation<?>) op);
+
+			final ArgumentCaptor<PutObjectRequest> request = ArgumentCaptor.forClass(PutObjectRequest.class);
+			final ArgumentCaptor<AsyncRequestBody> body = ArgumentCaptor.forClass(AsyncRequestBody.class);
+			verify(mockS3Client).putObject(request.capture(), body.capture());
+			verify(mockS3Client, Mockito.never()).copyObject(any(CopyObjectRequest.class));
+			assertEquals(Optional.of(SIZE), body.getValue().contentLength());
+			assertEquals(SIZE, op.countBytesDone());
+			assertEquals(Operation.Status.SUCC, op.status());
+			return request.getValue();
+		}
+
+		@Test
+		void update_putsTheWholeItemNamedInAnItemsFile() throws Exception {
+			// an items file read builds the op with no paths; the item's directory becomes both paths
+			final PutObjectRequest put = putFor(new DataOperationImpl<>(
+							0, OpType.UPDATE, item("/tb4/k0000"), null, null, TEST_CRED, null, 0));
+			assertEquals("tb4", put.bucket());
+			assertEquals("k0000", put.key());
+		}
+
+		@Test
+		void update_putsTheItemWhenItsDirectoryIsBothPaths() throws Exception {
+			final PutObjectRequest put = putFor(new DataOperationImpl<>(
+							0, OpType.UPDATE, item("/bucket-a/k0001"), "/bucket-a", "/bucket-a", TEST_CRED, null, 0));
+			assertEquals("bucket-a", put.bucket());
+			assertEquals("k0001", put.key());
+		}
+
+		@Test
+		void update_putsAListedItemIntoTheListedBucket() throws Exception {
+			// a path item input lists names as "/" + key, with the input path as the source path
+			final PutObjectRequest put = putFor(new DataOperationImpl<>(
+							0, OpType.UPDATE, item("/k0000"), "/tb4", null, TEST_CRED, null, 0));
+			assertEquals("tb4", put.bucket());
+			assertEquals("k0000", put.key());
+		}
+
+		@Test
+		void update_ignoresConfiguredRandomRangesAndPutsTheWholeItem() throws Exception {
+			final PutObjectRequest put = putFor(new DataOperationImpl<>(
+							0, OpType.UPDATE, item("/tb4/k0000"), null, null, TEST_CRED, null, 3));
+			assertEquals("tb4", put.bucket());
+			assertEquals("k0000", put.key());
+		}
+
+		@Test
+		void update_ignoresConfiguredFixedRangesAndPutsTheWholeItem() throws Exception {
+			final PutObjectRequest put = putFor(new DataOperationImpl<>(
+							0, OpType.UPDATE, item("/tb4/k0000"), null, null, TEST_CRED, List.of(new Range(0L, 99L, -1L)), 0));
+			assertEquals("tb4", put.bucket());
+			assertEquals("k0000", put.key());
+		}
+	}
+
+	// -----------------------------------------------------------------------
 	// Copy Operations
 	// -----------------------------------------------------------------------
 
@@ -2953,25 +3081,14 @@ public class S3AwsStorageDriverTest {
 		}
 
 		@Test
-		void copyObject_doesNotTurnAnUpdateIntoACopyOntoItself() throws Exception {
-			// an UPDATE arrives with the item's own directory as its source path; as before 5.17.1,
-			// that path is read as a key in the driver's bucket, not as the item
-			final CopyObjectRequest copy = copyRequestFor(
-							OpType.UPDATE, new ItemFactoryImpl<>().getItem("/bucket-a/k0001", 0, 1), "/bucket-a", "/bucket-a");
-			assertEquals("test-bucket", copy.sourceBucket());
-			assertEquals("bucket-a", copy.sourceKey());
-		}
-
-		@Test
-		void copySourcePath_readsTheItemOnlyForACreateFromABucket() {
-			assertEquals("/src/k0", S3AwsStorageDriver.copySourcePath(OpType.CREATE, "/k0", "/src"));
-			assertEquals("/src/k0", S3AwsStorageDriver.copySourcePath(OpType.CREATE, "/k0", "/src/"));
-			assertEquals("/src/k0", S3AwsStorageDriver.copySourcePath(OpType.CREATE, "/src/k0", "/src"));
-			assertEquals("/src/key", S3AwsStorageDriver.copySourcePath(OpType.CREATE, "/k0", "/src/key"));
-			assertEquals("/src/dir/", S3AwsStorageDriver.copySourcePath(OpType.CREATE, "/k0", "/src/dir/"));
-			assertEquals("src", S3AwsStorageDriver.copySourcePath(OpType.CREATE, "/k0", "src"));
-			assertEquals("/", S3AwsStorageDriver.copySourcePath(OpType.CREATE, "/k0", "/"));
-			assertEquals("/src", S3AwsStorageDriver.copySourcePath(OpType.UPDATE, "/src/k0", "/src"));
+		void copySourcePath_readsTheItemOnlyForACopyFromABucket() {
+			assertEquals("/src/k0", S3AwsStorageDriver.copySourcePath("/k0", "/src"));
+			assertEquals("/src/k0", S3AwsStorageDriver.copySourcePath("/k0", "/src/"));
+			assertEquals("/src/k0", S3AwsStorageDriver.copySourcePath("/src/k0", "/src"));
+			assertEquals("/src/key", S3AwsStorageDriver.copySourcePath("/k0", "/src/key"));
+			assertEquals("/src/dir/", S3AwsStorageDriver.copySourcePath("/k0", "/src/dir/"));
+			assertEquals("src", S3AwsStorageDriver.copySourcePath("/k0", "src"));
+			assertEquals("/", S3AwsStorageDriver.copySourcePath("/k0", "/"));
 		}
 
 		@SuppressWarnings("unchecked")
@@ -3682,12 +3799,12 @@ public class S3AwsStorageDriverTest {
 		}
 
 		@Test
-		void doClose_closesS3AsyncClientAndExecutors() throws Exception {
+		void doClose_closesS3AsyncClientAndUploadExecutor() throws Exception {
 			S3AsyncClient mockClient = mock(S3AsyncClient.class);
 			S3AsyncClient exactVersionClient = mock(S3AsyncClient.class);
 			final Config config = mockDriverConfig();
 
-			// Create the driver so it initializes its executors
+			// Create the driver so it initializes its upload executor
 			S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
 							"step-1", mock(com.dell.spt.base.data.DataInput.class), config, false, 1, mockClient, exactVersionClient, 100 * 1024L, 8 * 1024 * 1024L);
 
@@ -3698,12 +3815,7 @@ public class S3AwsStorageDriverTest {
 			verify(mockClient, times(1)).close();
 			verify(exactVersionClient, times(1)).close();
 
-			// Assert: Verify the thread pools were shut down
-			Field executorField = S3AwsStorageDriver.class.getDeclaredField("executor");
-			executorField.setAccessible(true);
-			ExecutorService executor = (ExecutorService) executorField.get(driver);
-			assertTrue(executor.isShutdown(), "Read executor should be shut down");
-
+			// Assert: Verify the thread pool was shut down
 			Field uploadExecutorField = S3AwsStorageDriver.class.getDeclaredField("uploadExecutor");
 			uploadExecutorField.setAccessible(true);
 			ExecutorService uploadExecutor = (ExecutorService) uploadExecutorField.get(driver);

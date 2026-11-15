@@ -288,6 +288,14 @@ Behavior, limits and log output are described in the CLI's
 | storage-checksum-enabled                       | Flag | false | Compute and send a checksum header on write requests. Applies to both simple PUTs and individual multipart upload parts.
 | storage-checksum-algorithm                     | String | md5 | S3 checksum algorithm: [md5, crc32, crc32c, sha1, sha256]. When multipart upload is active, the selected algorithm is applied per part.
 
+**Default auth version.** Until a later release, a run that passes no `storage-auth-version` may not get the
+default shown above. Each installed S3 driver extension (`s3`, `s3-aws`, `s3-rdma`, `s3-tables`) sets its own default,
+2 or 4, and the one the engine loads last wins. The engine loads its extensions in the order in which the host lists
+its `ext/` directory, so the same command can sign with V2 on one host and V4 on another (`s3-aws` itself does not use the
+setting). Pass
+`--storage-auth-version=4`, or `--storage-auth-version=2` for a legacy target that rejects SigV4, on every direct
+engine run (`java -jar`, `run.sh` or the image). `spt run` always passes a version and is not affected.
+
 ### 3.2. Other Options
 
 * A **bucket** may be specified with either `item-input-path` or `item-output-path` configuration option
@@ -564,8 +572,9 @@ depends on the driver:
 
 With `--storage-driver-type=swift` the flag keeps its Swift meaning and doesn't set `storage-object-versioning`.
 
-The synonym is loopback-qualified: it was tested against a local fake S3 target that answers `?versioning`, not a
-real one. The versioned requests it turns on are the ones `storage-object-versioning` already sends.
+The synonym is qualified on a SeaweedFS target for the bucket check, the versioned names and the configuration
+record, and not yet on ECS or ObjectScale. The versioned requests it turns on are the ones
+`storage-object-versioning` already sends.
 
 ### 4.4. Multipart Upload
 

@@ -338,10 +338,7 @@ func (info *VerificationConflictInfo) GenerateSSHStopCommands(_ string) []string
 	for _, container := range info.Containers {
 		// Only generate stop command for containers not matching the target image (in non-force mode)
 		// or generate for all containers (to show user what would be stopped)
-		containerIDShort := container.ID
-		if len(containerIDShort) > 12 {
-			containerIDShort = containerIDShort[:12]
-		}
+		containerIDShort := containerutil.ShortID(container.ID)
 
 		var cmd string
 		if info.Host.IsLocal {
@@ -495,10 +492,7 @@ func (vcr *VerificationConflictResolver) displayConflictInfo(info *VerificationC
 			"CONTAINER ID", "NAME", "IMAGE", "STATUS", "AGE", "PORTS")
 
 		for _, container := range info.Containers {
-			containerIDShort := container.ID
-			if len(containerIDShort) > 12 {
-				containerIDShort = containerIDShort[:12]
-			}
+			containerIDShort := containerutil.ShortID(container.ID)
 
 			// Calculate age (simplified)
 			age := "unknown"
@@ -717,19 +711,13 @@ func (vcr *VerificationConflictResolver) executeCleanup(ctx context.Context, inf
 	dockerOps := command.NewDockerOperations(vcr.cmdExecutor, info.Host)
 
 	for _, container := range info.Containers {
-		containerIDShort := container.ID
-		if len(containerIDShort) > 12 {
-			containerIDShort = containerIDShort[:12]
-		}
+		containerIDShort := containerutil.ShortID(container.ID)
 		fmt.Printf("  Removing container %s (%s)...\n", container.Name, containerIDShort)
 
 		// Force remove container using common operations
 		err := dockerOps.StopContainer(ctx, container.ID)
 		if err != nil {
-			containerIDShort := container.ID
-			if len(containerIDShort) > 12 {
-				containerIDShort = containerIDShort[:12]
-			}
+			containerIDShort := containerutil.ShortID(container.ID)
 			errorMsg := fmt.Sprintf("Failed to remove %s: %s", containerIDShort, err.Error())
 			errors = append(errors, errorMsg)
 			logging.LogWarn("verify-conflicts", "failed to remove container",

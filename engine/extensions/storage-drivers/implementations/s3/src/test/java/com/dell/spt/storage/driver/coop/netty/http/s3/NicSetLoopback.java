@@ -65,6 +65,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.IntPredicate;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import java.util.stream.IntStream;
 
@@ -135,6 +136,10 @@ final class NicSetLoopback implements AutoCloseable {
 	volatile IntPredicate holdOnListener = listener -> true;
 	/** Whether the stub answers every part upload with 503, whatever its count. */
 	volatile boolean failParts;
+	/** Which object requests the stub answers with 503, chosen by the request itself. */
+	volatile Predicate<Request> failRequest = request -> false;
+	/** The status of the replies that fail requests chosen above: 503 unless a test sets another. */
+	volatile int failureStatus = 503;
 
 	/** The storage configuration of a driver with these endpoints and NICs. */
 	static Config storage(final List<String> endpoints, final List<String> interfaces, final int concurrency) {
@@ -497,9 +502,10 @@ final class NicSetLoopback implements AutoCloseable {
 					exchange.close();
 					return;
 				}
-				if (objectRequest > 0 && (failObjectRequest.test(objectRequest) || (failParts && request.isPart()))) {
+				if (objectRequest > 0 && (failObjectRequest.test(objectRequest) || (failParts && request.isPart())
+								|| failRequest.test(request))) {
 					final var error = "error".getBytes(StandardCharsets.US_ASCII);
-					exchange.sendResponseHeaders(503, error.length);
+					exchange.sendResponseHeaders(failureStatus, error.length);
 					exchange.getResponseBody().write(error);
 					return;
 				}
@@ -526,8 +532,13 @@ final class NicSetLoopback implements AutoCloseable {
 			if ("tagging".equals(query)) {
 				tags.put(path, new String(body, StandardCharsets.UTF_8));
 			} else if (query.contains("partNumber=")) {
-				uploads.computeIfAbsent(param(query, "uploadId"), unused -> new ConcurrentSkipListMap<>())
-								.put(Integer.parseInt(param(query, "partNumber")), body);
+				// A part sent after its upload was aborted finds no upload, as on S3.
+				final var parts = uploads.get(param(query, "uploadId"));
+				if (parts == null) {
+					exchange.sendResponseHeaders(404, -1);
+					return;
+				}
+				parts.put(Integer.parseInt(param(query, "partNumber")), body);
 			} else {
 				objects.put(path, body);
 			}
@@ -544,6 +555,10 @@ final class NicSetLoopback implements AutoCloseable {
 								+ uploadId + "</UploadId></InitiateMultipartUploadResult>");
 			} else {
 				final var parts = uploads.remove(param(query, "uploadId"));
+				if (parts == null) {
+					exchange.sendResponseHeaders(404, -1);
+					return;
+				}
 				final var whole = new ByteArrayOutputStream();
 				parts.values().forEach(whole::writeBytes);
 				objects.put(path, whole.toByteArray());
@@ -619,7 +634,7 @@ final class NicSetLoopback implements AutoCloseable {
 		exchange.getResponseBody().write(bytes);
 	}
 
-	private static String param(final String query, final String name) {
+	static String param(final String query, final String name) {
 		for (final var pair : query.split("&", -1)) {
 			if (pair.startsWith(name + "=")) {
 				return pair.substring(name.length() + 1);
