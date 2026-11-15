@@ -2,8 +2,12 @@ package com.dell.spt.storage.driver.coop.netty.http.s3;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
@@ -15,8 +19,9 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -35,10 +40,10 @@ final class S3ResponseHandlerCompletionTest {
 	private final S3ResponseHandler<DataItemImpl, CompositeDataOperationImpl<DataItemImpl>> handler = new S3ResponseHandler<>(driver, false, false, null);
 	private final EmbeddedChannel channel = new EmbeddedChannel();
 
+	/** Each test is one step: its driver logs each completion error code once. */
 	@BeforeEach
-	@AfterEach
-	void resetLog() {
-		S3ResponseHandler.resetCompletionErrorCodeLogForTest();
+	void stepLog() {
+		when(driver.completionErrorCodeLog()).thenReturn(new S3ResponseHandler.CompletionErrorCodeLog());
 	}
 
 	@Test
@@ -160,9 +165,66 @@ final class S3ResponseHandlerCompletionTest {
 	void theStatusIsSetBeforeTheDriverCompletesTheUpload() throws Exception {
 		final var op = completion();
 		op.status(Operation.Status.SUCC);
+		final var statusSeenByComplete = new AtomicReference<Operation.Status>();
+		doAnswer(invocation -> {
+			statusSeenByComplete.set(invocation.<CompositeDataOperationImpl<DataItemImpl>> getArgument(1).status());
+			return null;
+		}).when(driver).complete(any(), any());
 		finish(op, "<Error><Code>InternalError</Code></Error>");
 		verify(driver).complete(channel, op);
-		assertEquals(Operation.Status.RESP_FAIL_SVC, op.status());
+		assertEquals(Operation.Status.RESP_FAIL_SVC, statusSeenByComplete.get());
+	}
+
+	/** The target's code text cannot forge a log line: a code that is not a plain name is logged unreadable. */
+	@Test
+	void aCodeThatIsNotAPlainNameIsLoggedUnreadable() throws Exception {
+		try (final var errors = new ErrorsLogCapture()) {
+			assertEquals(Operation.Status.RESP_FAIL_CLIENT, completionStatus(
+							"<Error><Code>X\n2026-11-15T00:00:00 | ERROR | forged line</Code></Error>"));
+			final var lines = errors.completionErrorLines();
+			assertEquals(1, lines.size(), lines::toString);
+			final var message = lines.get(0).message();
+			assertTrue(message.contains("S3 error code (unreadable);"), message);
+			assertTrue(!message.contains("forged") && !message.contains("\n"), message);
+		}
+	}
+
+	@Test
+	void aTooLongCodeIsLoggedUnreadableAndKeepsItsStatus() throws Exception {
+		try (final var errors = new ErrorsLogCapture()) {
+			final var longCode = "A".repeat(S3ResponseHandler.MAX_LOGGED_ERROR_CODE_LENGTH + 1);
+			assertEquals(Operation.Status.RESP_FAIL_CLIENT, completionStatus("<Error><Code>" + longCode + "</Code></Error>"));
+			final var lines = errors.completionErrorLines();
+			assertEquals(1, lines.size(), lines::toString);
+			assertTrue(lines.get(0).message().contains("S3 error code (unreadable);"), lines::toString);
+		}
+	}
+
+	/** Junk codes share the one unreadable slot, so they cannot use up the step's log budget. */
+	@Test
+	void junkCodesDoNotUseUpTheLogBudget() throws Exception {
+		try (final var errors = new ErrorsLogCapture()) {
+			for (int i = 0; i < S3ResponseHandler.MAX_LOGGED_COMPLETION_ERROR_CODES + 1; i++) {
+				completionStatus("<Error><Code>junk " + i + "</Code></Error>");
+			}
+			completionStatus("<Error><Code>InvalidPart</Code></Error>");
+			final List<String> messages = errors.completionErrorLines().stream().map(ErrorsLogCapture.Line::message).toList();
+			assertEquals(2, messages.size(), messages::toString);
+			assertTrue(messages.get(0).contains("S3 error code (unreadable);"), messages::toString);
+			assertTrue(messages.get(1).contains("S3 error code InvalidPart;"), messages::toString);
+		}
+	}
+
+	/** Each step's driver logs a code its step saw, even when an earlier step logged it. */
+	@Test
+	void eachDriverLogsTheCodeOnce() throws Exception {
+		try (final var errors = new ErrorsLogCapture()) {
+			completionStatus("<Error><Code>SlowDown</Code></Error>");
+			completionStatus("<Error><Code>SlowDown</Code></Error>");
+			when(driver.completionErrorCodeLog()).thenReturn(new S3ResponseHandler.CompletionErrorCodeLog());
+			completionStatus("<Error><Code>SlowDown</Code></Error>");
+			assertEquals(2, errors.completionErrorLines().size());
+		}
 	}
 
 	private Operation.Status completionStatus(final String... chunks) throws Exception {

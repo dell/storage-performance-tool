@@ -467,12 +467,12 @@ final class S3MultipartStepCountsTest {
 	}
 
 	/**
-	 * Every completion is answered 200 with an S3 {@code <Error>} body after a declaration and S3's
-	 * keep-alive whitespace, sent in a chunk of its own. Each upload is one failure and is aborted.
+	 * Every completion is answered 200 with S3's keep-alive whitespace, sent in a chunk of its own, then
+	 * an XML declaration and an S3 {@code <Error>} document. Each upload is one failure and is aborted.
 	 */
 	@Test
 	void completionsAnswered200WithAnErrorBodyAreEachOneFailure() throws Exception {
-		stub.completionErrorBody = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\n   \n"
+		stub.completionErrorBody = "\n   \n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\n"
 						+ "<Error><Code>InternalError</Code><Message>We encountered an internal error.</Message></Error>";
 		stub.failCompletionWithErrorBody = request -> true;
 
@@ -507,6 +507,37 @@ final class S3MultipartStepCountsTest {
 		assertEquals(List.of(3L, 1L), outcomes.get("CREATE-1"), outcomes::toString);
 		assertRequests(4, 4, 1);
 		assertEnded();
+	}
+
+	/**
+	 * Two steps in one process, whose completions all fail with the same code: each step's driver logs
+	 * it, so each step's {@code errors.log} names the code.
+	 */
+	@Test
+	void eachStepLogsTheErrorCodeOfItsFailedCompletions() throws Exception {
+		stub.completionErrorBody = "<Error><Code>InternalError</Code></Error>";
+		stub.failCompletionWithErrorBody = request -> true;
+		final var first = "codes-first-" + System.nanoTime();
+		final var second = "codes-second-" + System.nanoTime();
+		try (final var errors = new ErrorsLogCapture()) {
+			timed(null, """
+							Load.config({
+								"load": {"step": {"id": "%s", "limit": {"time": "%s"}}, "op": {"limit": {"count": 2}}},
+								"item": {"data": {"size": "5KB", "ranges": {"threshold": "1KB"}}}
+							}).run();
+							Load.config({
+								"load": {"step": {"id": "%s", "limit": {"time": "%s"}}, "op": {"limit": {"count": 2}}},
+								"item": {"data": {"size": "5KB", "ranges": {"threshold": "1KB"}}}
+							}).run();
+							""".formatted(first, TIME_LIMIT, second, TIME_LIMIT));
+			final var lines = errors.completionErrorLines();
+			assertEquals(1, lines.stream().filter(line -> first.equals(line.stepId())).count(), lines::toString);
+			assertEquals(1, lines.stream().filter(line -> second.equals(line.stepId())).count(), lines::toString);
+			assertTrue(lines.stream().allMatch(line -> line.message().contains("S3 error code InternalError;")),
+							lines::toString);
+		}
+		assertRequests(4, 4, 4);
+		assertEquals(0, stub.openUploads(), "no upload stays open");
 	}
 
 	private static Predicate<Request> firstCompletion() {

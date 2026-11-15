@@ -73,9 +73,12 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	/** The S3 error codes of a completion that may succeed if the whole upload is tried again. */
 	static final Set<String> TRANSIENT_COMPLETION_ERROR_CODES = Set.of(
 					"InternalError", "ServiceUnavailable", "SlowDown", "RequestTimeout");
-	private static final String UNREADABLE_ERROR_CODE = "(unreadable)";
-	private static final int MAX_LOGGED_COMPLETION_ERROR_CODES = 16;
-	private static final Map<String, Boolean> LOGGED_COMPLETION_ERROR_CODES = new ConcurrentHashMap<>();
+	/** How a completion error code that is missing, too long or not a plain S3 code name is logged. */
+	static final String UNREADABLE_ERROR_CODE = "(unreadable)";
+	/** The longest completion error code logged as it is; S3 code names are far shorter. */
+	static final int MAX_LOGGED_ERROR_CODE_LENGTH = 64;
+	/** How many distinct completion error codes one driver, so one step, logs. */
+	static final int MAX_LOGGED_COMPLETION_ERROR_CODES = 16;
 	private static final byte[] XML_DECLARATION_START = "<?xml".getBytes(US_ASCII);
 	private static final byte[] XML_DECLARATION_END = "?>".getBytes(US_ASCII);
 	private static final byte[] ERROR_ROOT_START = "<Error".getBytes(US_ASCII);
@@ -457,7 +460,8 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 										"Upload id not found in the following response content:\n{}", contentStr);
 					}
 				} else {
-					final Operation.Status failure = completionFailureStatus(mpuOp, content);
+					final Operation.Status failure = completionFailureStatus(
+									mpuOp, content, s3Driver == null ? null : s3Driver.completionErrorCodeLog());
 					if (failure != null) {
 						op.status(failure);
 					}
@@ -477,9 +481,11 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	 * root element. A
 	 * transient code, or one that cannot be read within the bound, gives {@code RESP_FAIL_SVC}, which
 	 * {@code load-op-retry} retries as a whole upload; any other code gives {@code RESP_FAIL_CLIENT}.
-	 * An empty or whitespace-only body still counts as success: the check is negative.
+	 * An empty or whitespace-only body still counts as success: the check is negative. The code is
+	 * logged through {@code log}, once per code for the driver's step; a {@code null} log logs nothing.
 	 */
-	static Operation.Status completionFailureStatus(final CompositeDataOperation<?> op, final ByteBuf content) {
+	static Operation.Status completionFailureStatus(
+					final CompositeDataOperation<?> op, final ByteBuf content, final CompletionErrorCodeLog log) {
 		if (op.status() != Operation.Status.SUCC
 						|| !OpType.CREATE.equals(op.type())
 						|| op.get(S3Api.KEY_MPU_ABORT) != null) {
@@ -506,7 +512,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		if (next != '>' && next != '/' && !isXmlWhitespace(next)) {
 			return null; // another root element whose name starts with "Error"
 		}
-		return completionErrorCodeStatus(op, errorCode(content, afterName, end));
+		return completionErrorCodeStatus(op, errorCode(content, afterName, end), log);
 	}
 
 	/** The text of the first {@code <Code>} element in {@code [from, end)}, or {@code null} if it is not all there. */
@@ -527,33 +533,58 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		return trimmedEnd > valueStart ? content.toString(valueStart, trimmedEnd - valueStart, UTF_8) : null;
 	}
 
-	private static Operation.Status completionErrorCodeStatus(final CompositeDataOperation<?> op, final String code) {
+	private static Operation.Status completionErrorCodeStatus(
+					final CompositeDataOperation<?> op, final String code, final CompletionErrorCodeLog log) {
 		final Operation.Status status = code == null || TRANSIENT_COMPLETION_ERROR_CODES.contains(code)
 						? Operation.Status.RESP_FAIL_SVC
 						: Operation.Status.RESP_FAIL_CLIENT;
-		logCompletionErrorCode(op, code == null ? UNREADABLE_ERROR_CODE : code, status);
+		if (log != null) {
+			log.log(op, loggableErrorCode(code), status);
+		}
 		return status;
 	}
 
-	/** Logs each distinct error code once per process, and at most {@link #MAX_LOGGED_COMPLETION_ERROR_CODES} codes. */
-	private static void logCompletionErrorCode(
-					final CompositeDataOperation<?> op, final String code, final Operation.Status status) {
-		if (LOGGED_COMPLETION_ERROR_CODES.size() >= MAX_LOGGED_COMPLETION_ERROR_CODES
-						|| LOGGED_COMPLETION_ERROR_CODES.putIfAbsent(code, Boolean.TRUE) != null) {
-			return;
+	/**
+	 * The code as it is logged: a plain S3 code name of at most {@link #MAX_LOGGED_ERROR_CODE_LENGTH}
+	 * letters, digits, dots, dashes and underscores, or else {@link #UNREADABLE_ERROR_CODE}, so the
+	 * target's text cannot forge log lines and junk codes share one log slot. Only the log uses it.
+	 */
+	static String loggableErrorCode(final String code) {
+		if (code == null || code.isEmpty() || code.length() > MAX_LOGGED_ERROR_CODE_LENGTH) {
+			return UNREADABLE_ERROR_CODE;
 		}
-		final boolean last = LOGGED_COMPLETION_ERROR_CODES.size() >= MAX_LOGGED_COMPLETION_ERROR_CODES;
-		Loggers.ERR.warn(
-						"{}: multipart completion answered 2xx with S3 error code {}; the upload counts as {} and is aborted"
-										+ " (logged once per code{})",
-						op.item().name(),
-						code,
-						status,
-						last ? "; further codes are not logged" : "");
+		for (int i = 0; i < code.length(); i++) {
+			final char c = code.charAt(i);
+			if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+							|| c == '.' || c == '_' || c == '-')) {
+				return UNREADABLE_ERROR_CODE;
+			}
+		}
+		return code;
 	}
 
-	static void resetCompletionErrorCodeLogForTest() {
-		LOGGED_COMPLETION_ERROR_CODES.clear();
+	/**
+	 * The completion error codes one driver has logged: each code once, and at most {@link
+	 * #MAX_LOGGED_COMPLETION_ERROR_CODES} codes. A driver serves one step, and each step has its own
+	 * {@code errors.log}, so every step's log names the codes its uploads failed with.
+	 */
+	static final class CompletionErrorCodeLog {
+
+		private final Map<String, Boolean> codes = new ConcurrentHashMap<>();
+
+		void log(final CompositeDataOperation<?> op, final String code, final Operation.Status status) {
+			if (codes.size() >= MAX_LOGGED_COMPLETION_ERROR_CODES || codes.putIfAbsent(code, Boolean.TRUE) != null) {
+				return;
+			}
+			final boolean last = codes.size() >= MAX_LOGGED_COMPLETION_ERROR_CODES;
+			Loggers.ERR.warn(
+							"{}: multipart completion answered 2xx with S3 error code {}; the upload counts as {} and is aborted"
+											+ " (logged once per code in this step{})",
+							op.item().name(),
+							code,
+							status,
+							last ? "; further codes are not logged" : "");
+		}
 	}
 
 	private static int skipXmlWhitespace(final ByteBuf content, final int from, final int end) {
