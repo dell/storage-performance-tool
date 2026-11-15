@@ -17,6 +17,7 @@ import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.stream.Collectors;
 import javax.script.ScriptEngine;
 import javax.script.ScriptEngineFactory;
@@ -37,10 +38,20 @@ public interface ScenarioUtil {
 	}
 
 	/**
-	 * Tries to instantiate the script engine for the given script file
+	 * The scenario file extensions, lower case, that name a language with no engine in the JVM, and that
+	 * language's name. A file with one of them runs only with that language's JSR-223 engine in
+	 * {@code ext/}; it never falls back to JavaScript.
+	 */
+	Map<String, String> ENGINE_REQUIRED_EXTENSIONS = Map.of("groovy", "Groovy", "py", "Python");
+
+	/**
+	 * Tries to instantiate the script engine for the given script file: by the file's extension, then
+	 * by its MIME type, then JavaScript.
 	 *
 	 * @param scenarioPath the path to the script
 	 * @return the script engine resolved either <code>null</code>
+	 * @throws ScriptEngineNotInstalledException when the file's extension is one of {@link
+	 *         #ENGINE_REQUIRED_EXTENSIONS} and no installed engine claims the file
 	 */
 	static ScriptEngine scriptEngineByFilePath(final Path scenarioPath, final ClassLoader clsLoader) {
 
@@ -52,8 +63,9 @@ public interface ScenarioUtil {
 		// 1st try to determine the scenario type by the scenario file extension
 		final String scenarioFileName = scenarioPath.getFileName().toString();
 		final int dotPos = scenarioFileName.lastIndexOf('.');
+		String scenarioFileExt = null;
 		if (dotPos > 0) {
-			final String scenarioFileExt = scenarioFileName.substring(dotPos + 1);
+			scenarioFileExt = scenarioFileName.substring(dotPos + 1);
 			se = sem.getEngineByExtension(scenarioFileExt);
 		}
 
@@ -85,6 +97,12 @@ public interface ScenarioUtil {
 								sef.getLanguageName(),
 								Arrays.toString(sef.getExtensions().toArray()),
 								Arrays.toString(sef.getMimeTypes().toArray()));
+			}
+			if (scenarioFileExt != null) {
+				final String lang = ENGINE_REQUIRED_EXTENSIONS.get(scenarioFileExt.toLowerCase(Locale.ROOT));
+				if (lang != null) {
+					throw new ScriptEngineNotInstalledException(lang, scenarioFileExt);
+				}
 			}
 			// 3rd: treat the scenario file as a Javascript file
 			se = defaultScriptEngine(sem);

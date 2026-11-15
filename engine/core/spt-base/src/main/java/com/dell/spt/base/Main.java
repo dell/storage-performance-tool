@@ -31,6 +31,7 @@ import com.dell.spt.base.env.CoreResourcesToInstall;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.load.step.LoadStepManagerService;
 import com.dell.spt.base.load.step.ScenarioUtil;
+import com.dell.spt.base.load.step.ScriptEngineNotInstalledException;
 import com.dell.spt.base.load.step.service.LoadStepManagerServiceImpl;
 import com.dell.spt.base.load.step.service.file.FileManagerServiceImpl;
 import com.dell.spt.base.logging.LogUtil;
@@ -535,7 +536,7 @@ public final class Main {
 			scriptEngine = ScenarioUtil.scriptEngineByDefault(extClsLoader);
 			scenarioText = ScenarioUtil.defaultScenario(appHomePath);
 		} else {
-			scriptEngine = ScenarioUtil.scriptEngineByFilePath(scenarioPath, extClsLoader);
+			scriptEngine = scriptEngineForFile(scenarioPath, extClsLoader);
 			scenarioText = readScenarioFile(scenarioPath);
 		}
 		if (scriptEngine == null) {
@@ -552,6 +553,21 @@ public final class Main {
 		final var failure = new RunImpl("", scenarioText, scriptEngine, config.longVal("run-id")).runAndReturnFailure();
 		if (failure != null) {
 			throw new ReportedFailure("The scenario failed", failure);
+		}
+	}
+
+	/**
+	 * Resolves the script engine for a scenario file.
+	 *
+	 * @throws ReportedFailure when the file's language needs a script engine that is not installed,
+	 *         after logging that
+	 */
+	static ScriptEngine scriptEngineForFile(final Path scenarioPath, final ClassLoader extClsLoader) {
+		try {
+			return ScenarioUtil.scriptEngineByFilePath(scenarioPath, extClsLoader);
+		} catch (final ScriptEngineNotInstalledException e) {
+			Loggers.ERR.fatal("{}", e.getMessage());
+			throw new ReportedFailure("No scenario engine", e);
 		}
 	}
 

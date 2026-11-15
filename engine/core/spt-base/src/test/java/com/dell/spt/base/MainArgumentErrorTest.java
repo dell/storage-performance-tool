@@ -4,11 +4,13 @@ import static com.dell.spt.base.Constants.APP_NAME;
 import static com.dell.spt.base.Constants.PATH_DEFAULTS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.config.CliArgumentException;
 import com.dell.spt.base.config.ConfigUtil;
+import com.dell.spt.base.load.step.ScriptEngineNotInstalledException;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.SchemaProvider;
 import java.io.ByteArrayOutputStream;
@@ -235,6 +237,17 @@ class MainArgumentErrorTest {
 		final var failure = assertThrows(
 						Main.ReportedFailure.class, () -> Main.readScenarioFile(dir.resolve("missing.js")));
 		assertTrue(failure.getCause() instanceof java.nio.file.NoSuchFileException, String.valueOf(failure.getCause()));
+	}
+
+	@Test
+	void aScenarioWhoseEngineIsNotInstalledIsAReportedScenarioFailure(@TempDir final Path dir)
+					throws Exception {
+		final Path scenario = dir.resolve("default.groovy");
+		Files.writeString(scenario, "Load.run()\n");
+		final var failure = assertThrows(
+						Main.ReportedFailure.class,
+						() -> Main.scriptEngineForFile(scenario, Thread.currentThread().getContextClassLoader()));
+		assertInstanceOf(ScriptEngineNotInstalledException.class, failure.getCause());
 	}
 
 	@Test
