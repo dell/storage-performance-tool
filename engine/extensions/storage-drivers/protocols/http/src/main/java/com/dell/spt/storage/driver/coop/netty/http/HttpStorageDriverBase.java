@@ -150,6 +150,9 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
 		final FullHttpResponse resp;
 		final var channel = getUnpooledConnection(storageNodeAddrs[0], storageNodePort);
+		// The response, or null once the channel goes inactive without one: a closed channel, the
+		// driver's I/O shutdown among its causes, ends the wait at once instead of after the timeout.
+		final var fullResp = new CompletableFuture<FullHttpResponse>();
 		try {
 			final var pipeline = channel.pipeline();
 			Loggers.MSG.debug(
@@ -158,9 +161,6 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 							channel.hashCode(),
 							pipeline);
 			pipeline.removeLast(); // remove the API specific handler
-			// The response, or null once the channel goes inactive without one: a closed channel, the
-			// driver's I/O shutdown among its causes, ends the wait at once instead of after the timeout.
-			final var fullResp = new CompletableFuture<FullHttpResponse>();
 			pipeline.addLast(new HttpObjectAggregator(Integer.MAX_VALUE));
 			pipeline.addLast(
 							new SimpleChannelInboundHandler<HttpObject>() {
@@ -182,9 +182,11 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		} catch (final NoSuchElementException e) {
 			throw new ConnectException("Channel pipeline is empty: connectivity related failure");
 		} catch (final InterruptedException e) {
+			releaseUnclaimedResponse(fullResp);
 			throwUnchecked(e);
 			return null;
 		} catch (final Exception e) {
+			releaseUnclaimedResponse(fullResp);
 			if (e instanceof ClosedChannelException) {
 				throw new ConnectException("Connection is closed: " + e.toString());
 			} else {
@@ -195,6 +197,19 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			final var unusedClose = channel.close();
 		}
 		return resp;
+	}
+
+	/**
+	 * Settles a control request's response that no caller will take: a response already read is
+	 * released, and the handler releases any read after this.
+	 */
+	static void releaseUnclaimedResponse(final CompletableFuture<FullHttpResponse> fullResp) {
+		if (!fullResp.complete(null)) {
+			final var resp = fullResp.getNow(null);
+			if (resp != null) {
+				resp.release();
+			}
+		}
 	}
 
 	private FullHttpResponse awaitResponse(

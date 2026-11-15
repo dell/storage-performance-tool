@@ -72,7 +72,7 @@ class S3SigningCacheRetentionTest {
 		final var cleanups = multipartCleanupTasks(driver);
 		cleanups.put(
 						CompletableFuture.failedFuture(new IllegalStateException("a failed multipart cleanup")),
-						new S3StorageDriver.PendingAbort(null, Operation.Status.FAIL_UNKNOWN));
+						new S3StorageDriver.PendingAbort(null, Operation.Status.FAIL_UNKNOWN, System.nanoTime()));
 		try {
 			driver.close();
 			assertTrue(cleanups.isEmpty(), "the close let go of the failed cleanup");

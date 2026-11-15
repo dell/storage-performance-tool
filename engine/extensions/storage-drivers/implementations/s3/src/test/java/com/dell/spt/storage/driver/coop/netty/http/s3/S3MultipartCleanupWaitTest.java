@@ -67,7 +67,7 @@ final class S3MultipartCleanupWaitTest {
 	private static final int NET_TIMEOUT_MILLIS = 5_000;
 	/** How long the stub holds the delayed abort before it answers. */
 	private static final long ABORT_DELAY_MILLIS = 300;
-	/** A short stop wait, in place of the shipped 10 s, for the tests of what follows it. */
+	/** A short stop wait, in place of the shipped 5 s, for the tests of what follows it. */
 	private static final long STOP_WAIT_MILLIS = 300;
 	/** Room for a loaded host above an expected wait, still below {@link #NET_TIMEOUT_MILLIS}. */
 	private static final long SLACK_MILLIS = 2_500;
@@ -154,8 +154,9 @@ final class S3MultipartCleanupWaitTest {
 		assertEquals(List.of("failed_orphaned"), states(key), () -> lifecycle(key).toString());
 		assertTrue(lifecycle(key).get(0).contains("abort failed"), () -> lifecycle(key).toString());
 		assertTrue(closeMillis < STOP_WAIT_MILLIS + SLACK_MILLIS, () -> "close took " + closeMillis + " ms");
-		waitFor(() -> warnings.stream().anyMatch(message -> message.contains("unanswered after")), "the stop's WARN");
-		assertEquals(1, warnings.stream().filter(message -> message.contains("unanswered after")).count(), warnings::toString);
+		final var stopWarn = "1 multipart abort(s) unanswered " + STOP_WAIT_MILLIS + " ms after they were sent";
+		waitFor(() -> warnings.stream().anyMatch(message -> message.contains(stopWarn)), "the stop's WARN");
+		assertEquals(1, warnings.stream().filter(message -> message.contains("multipart abort(s) unanswered")).count(), warnings::toString);
 	}
 
 	/**
@@ -176,6 +177,39 @@ final class S3MultipartCleanupWaitTest {
 
 		assertEquals(List.of("failed_orphaned"), states(key), () -> lifecycle(key).toString());
 		assertTrue(closeMillis < STOP_WAIT_MILLIS + SLACK_MILLIS, () -> "close took " + closeMillis + " ms");
+	}
+
+	/**
+	 * Two drivers, as a worker's two contexts, each with an abort never answered, are stopped one after
+	 * the other, the way a step slice stops its contexts inside the entry node's RMI call. Each abort's
+	 * wait counts from when it was scheduled, so the second stop does not wait its own full deadline
+	 * again: the two stops together take about one deadline, not two.
+	 */
+	@Test
+	void contextsStoppedInTurnShareOneDeadlineForTheirPendingAborts() throws Exception {
+		final long stopWaitMillis = 3_000;
+		failCompletions();
+		stub.abortsUnanswered = true;
+		final var first = probe(0);
+		final var second = probe(0);
+		first.multipartCleanupStopWaitMillis(stopWaitMillis);
+		second.multipartCleanupStopWaitMillis(stopWaitMillis);
+		final var firstKey = key("first-context");
+		final var secondKey = key("second-context");
+
+		upload(first, firstKey);
+		upload(second, secondKey);
+		waitFor(() -> stub.requests().stream().filter(NicSetLoopback::isAbort).count() == 2, "both aborts reached the stub");
+		final long start = System.nanoTime();
+		first.stop();
+		final var firstMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+		second.stop();
+		final var bothMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+		assertTrue(firstMillis >= stopWaitMillis - SLACK_MILLIS, () -> "the first stop took " + firstMillis + " ms");
+		assertTrue(bothMillis < stopWaitMillis + SLACK_MILLIS, () -> "the two stops took " + bothMillis + " ms");
+		assertEquals(List.of("failed_orphaned"), states(firstKey), () -> lifecycle(firstKey).toString());
+		assertEquals(List.of("failed_orphaned"), states(secondKey), () -> lifecycle(secondKey).toString());
 	}
 
 	/**

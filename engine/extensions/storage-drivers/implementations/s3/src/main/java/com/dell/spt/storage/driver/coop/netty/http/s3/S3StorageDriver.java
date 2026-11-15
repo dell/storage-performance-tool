@@ -124,14 +124,17 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	private static final String REDACTED_HEADER_VALUE = "<redacted>";
 	/**
-	 * How long the stop waits for the aborts that follow failed multipart completions before the
-	 * driver's I/O shuts down. An abort carries no data and a target answers it in milliseconds, so 10 s
-	 * leaves room for a loaded target while bounding what an unanswered abort adds to the step, a third
-	 * of the default 30 s net timeout that held the close before. It does not depend on
-	 * {@code storage.net.timeoutMilliSec}, so it holds at 0 too; an abort still unanswered then ends when
-	 * the I/O shutdown closes its connection.
+	 * How long an abort that follows a failed multipart completion may keep the stop waiting, counted
+	 * from when the abort was scheduled, or from the stop's start for one scheduled during the stop. An
+	 * abort carries no data and a target answers it in milliseconds, so 5 s leaves room for a loaded
+	 * target. The bound is half the entry node's RMI response timeout
+	 * ({@code -Dsun.rmi.transport.tcp.responseTimeout=10000} in the image and {@code run.sh}): a
+	 * worker's step slice stops inside that RMI call and stops its contexts one after another, and
+	 * counting from the schedule keeps the aborts pending at the step's stop within 5 s in all,
+	 * whatever the number of contexts. It does not depend on {@code storage.net.timeoutMilliSec}, so it
+	 * holds at 0 too; an abort still unanswered then ends when the I/O shutdown closes its connection.
 	 */
-	static final long MULTIPART_CLEANUP_STOP_WAIT_MILLIS = 10_000;
+	static final long MULTIPART_CLEANUP_STOP_WAIT_MILLIS = 5_000;
 	/**
 	 * The close's own bound on the same aborts when {@code storage.net.timeoutMilliSec} is 0 or less,
 	 * where the request has no timeout of its own: 60 s, twice the default timeout, as below.
@@ -628,7 +631,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			try {
 				getBucketVersioningResp = executeHttpRequest(getBucketVersioningReq);
 				if (getBucketVersioningResp == null) {
-					Loggers.ERR.warn("Response timeout");
+					// "Response timeout" kept first for anyone searching logs for it; a closed connection ends here too.
+					Loggers.ERR.warn("Response timeout or connection closed: the bucket versioning check got no response");
 				} else {
 					try {
 						handleCheckBucketVersioningResponse(
@@ -2111,15 +2115,18 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		return true;
 	}
 
-	/** An abort after a failed completion, still pending: its upload and the completion's status. */
-	record PendingAbort(CompositeDataOperation op, Operation.Status completionStatus) {}
+	/**
+	 * An abort after a failed completion, still pending: its upload, the completion's status and when
+	 * the abort was scheduled ({@link System#nanoTime()}).
+	 */
+	record PendingAbort(CompositeDataOperation op, Operation.Status completionStatus, long scheduledAtNanos) {}
 
 	void scheduleFailedCompletionAbort(
 					final CompositeDataOperation op, final Operation.Status completionStatus) {
 		final CompletableFuture<Void> cleanupTask = new CompletableFuture<>();
 		// Tracked before the closing flag is read, and the close sets that flag before its snapshot:
 		// a task the snapshot misses sees the flag and sends nothing.
-		multipartCleanupTasks.put(cleanupTask, new PendingAbort(op, completionStatus));
+		multipartCleanupTasks.put(cleanupTask, new PendingAbort(op, completionStatus, System.nanoTime()));
 		if (multipartCleanupClosing) {
 			try {
 				recordAbortNotSent(op, completionStatus, "not sent: the driver is closing");
@@ -2156,7 +2163,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	/**
 	 * The stop waits here, after any subclass's stop work and before the I/O shuts down, for the aborts
-	 * that follow failed multipart completions, up to {@link #MULTIPART_CLEANUP_STOP_WAIT_MILLIS}. A
+	 * that follow failed multipart completions, each up to {@link #MULTIPART_CLEANUP_STOP_WAIT_MILLIS}
+	 * after it was scheduled or after the stop began, whichever is earlier. A
 	 * subclass that overrides this calls {@code super.beforeIoShutdown()} last: its own stop work can
 	 * schedule such an abort.
 	 */
@@ -2167,34 +2175,42 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	private void awaitMultipartCleanupBeforeIoShutdown() {
-		final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(multipartCleanupStopWaitMillis);
+		final long stopStart = System.nanoTime();
+		final long waitNanos = TimeUnit.MILLISECONDS.toNanos(multipartCleanupStopWaitMillis);
 		final Set<CompletableFuture<Void>> awaited = new HashSet<>();
+		var unanswered = 0;
 		while (true) {
-			// Waited on once each: a task completes its future before it leaves the set.
-			final List<CompletableFuture<Void>> pending = new ArrayList<>();
-			for (final var task : multipartCleanupTasks.keySet()) {
-				if (!task.isDone() && awaited.add(task)) {
-					pending.add(task);
+			// Waited on once each: a task completes its future before it leaves the map.
+			final List<Map.Entry<CompletableFuture<Void>, PendingAbort>> pending = new ArrayList<>();
+			for (final var entry : multipartCleanupTasks.entrySet()) {
+				if (!entry.getKey().isDone() && awaited.add(entry.getKey())) {
+					pending.add(entry);
 				}
 			}
 			if (pending.isEmpty()) {
-				return;
+				break;
 			}
-			try {
-				CompletableFuture.allOf(pending.toArray(CompletableFuture[]::new))
-								.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
-			} catch (final ExecutionException e) {
-				// The failed task logged its failure; the others are done too.
-			} catch (final TimeoutException e) {
-				Loggers.ERR.warn("{}: {} multipart abort(s) unanswered after {} ms; the I/O shutdown ends them",
-								stepId, pendingCleanupCount(), multipartCleanupStopWaitMillis);
-				return;
-			} catch (final InterruptedException e) {
-				Thread.currentThread().interrupt();
-				Loggers.ERR.warn("{}: interrupted waiting for {} multipart abort(s); the I/O shutdown ends them",
-								stepId, pendingCleanupCount());
-				return;
+			for (var i = 0; i < pending.size(); i++) {
+				final var entry = pending.get(i);
+				// From the schedule, so a worker's contexts stopping in turn do not add up their waits.
+				final long deadline = Math.min(entry.getValue().scheduledAtNanos(), stopStart) + waitNanos;
+				try {
+					entry.getKey().get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+				} catch (final ExecutionException e) {
+					// The failed task logged its failure.
+				} catch (final TimeoutException e) {
+					unanswered++;
+				} catch (final InterruptedException e) {
+					Thread.currentThread().interrupt();
+					Loggers.ERR.warn("{}: interrupted waiting for {} multipart abort(s); the I/O shutdown ends them",
+									stepId, unanswered + pending.size() - i);
+					return;
+				}
 			}
+		}
+		if (unanswered > 0) {
+			Loggers.ERR.warn("{}: {} multipart abort(s) unanswered {} ms after they were sent; the I/O shutdown ends them",
+							stepId, unanswered, multipartCleanupStopWaitMillis);
 		}
 	}
 
@@ -2251,16 +2267,20 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		} catch (final InterruptedException e) {
 			Thread.currentThread().interrupt();
 		}
-		var orphaned = 0;
-		for (final var entry : pending.entrySet()) {
-			if (!entry.getKey().isDone()) {
-				orphaned++;
-				// A record the task writes later is dropped as a second one.
-				recordAbortNotSent(entry.getValue().op(), entry.getValue().completionStatus(), "pending at close");
+		// Those still pending when the wait ended; a record a task writes later is dropped as a second one.
+		final var orphaned = new ArrayList<PendingAbort>();
+		pending.forEach((task, abort) -> {
+			if (!task.isDone()) {
+				orphaned.add(abort);
 			}
+		});
+		for (final var abort : orphaned) {
+			recordAbortNotSent(abort.op(), abort.completionStatus(), "pending at close");
 		}
-		Loggers.ERR.warn("{}: {} multipart abort(s) still pending at close after {} ms; their uploads are recorded orphaned",
-						stepId, orphaned, bound);
+		if (!orphaned.isEmpty()) {
+			Loggers.ERR.warn("{}: {} multipart abort(s) still pending at close after {} ms; their uploads are recorded orphaned",
+							stepId, orphaned.size(), bound);
+		}
 	}
 
 	void abortAfterFailedCompletion(
