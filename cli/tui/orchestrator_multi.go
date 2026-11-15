@@ -27,6 +27,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/remoteip"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
+	"github.com/dell/storage-performance-tool/cli/internal/textutil"
 	units "github.com/docker/go-units"
 )
 
@@ -850,7 +851,7 @@ func (o *MultiHostOrchestrator) WaitForAPIs(ctx context.Context, timeout time.Du
 				errMsg := fmt.Sprintf("  ❌ %s: API timeout: %v", h.Info.Original, err)
 				apiErrors = append(apiErrors, errMsg)
 				if report != "" {
-					apiErrors = append(apiErrors, strings.Split(command.IndentLines(report, "      "), "\n")...)
+					apiErrors = append(apiErrors, strings.Split(textutil.IndentLines(report, "      "), "\n")...)
 				}
 				apiErrorsMu.Unlock()
 

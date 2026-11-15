@@ -9,7 +9,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 )
 
-func TestParseContainerState(t *testing.T) {
+func TestParseContainerStateFormats(t *testing.T) {
 	tests := []struct {
 		in   string
 		want string
@@ -20,14 +20,14 @@ func TestParseContainerState(t *testing.T) {
 		{"created:0:false", "created"},
 	}
 	for _, tt := range tests {
-		state, err := ParseContainerState(tt.in)
+		state, err := parseContainerState(tt.in)
 		if err != nil || state.String() != tt.want {
-			t.Errorf("ParseContainerState(%q) = %q, %v; want %q", tt.in, state, err, tt.want)
+			t.Errorf("parseContainerState(%q) = %q, %v; want %q", tt.in, state, err, tt.want)
 		}
 	}
 	for _, bad := range []string{"", "running", "exited:x:false"} {
-		if _, err := ParseContainerState(bad); err == nil {
-			t.Errorf("ParseContainerState(%q) succeeded, want an error", bad)
+		if _, err := parseContainerState(bad); err == nil {
+			t.Errorf("parseContainerState(%q) succeeded, want an error", bad)
 		}
 	}
 }
@@ -35,7 +35,7 @@ func TestParseContainerState(t *testing.T) {
 func TestInspectContainerStateMissingAndFailed(t *testing.T) {
 	mock := NewMockCommandExecutor()
 	host := CreateRemoteHost("worker-1")
-	inspect := "docker inspect --format " + containerStateFormat + " "
+	inspect := "docker inspect --format " + constants.DockerContainerStateFormat + " "
 	mock.SetCommandFailure(inspect+"gone", "Error: No such object: gone", errors.New("exit status 1"))
 	mock.SetCommandFailure(inspect+"cid", "permission denied", errors.New("exit status 1"))
 

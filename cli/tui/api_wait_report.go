@@ -4,14 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
+	"github.com/dell/storage-performance-tool/cli/internal/textutil"
 )
-
-// apiWaitReportTimeout bounds reading a container's state and logs after its API wait failed,
-// so a slow Docker or SSH host adds little to the failure it is explaining.
-const apiWaitReportTimeout = 10 * time.Second
 
 // apiWaitReporter is implemented by the Docker managers that can describe a container whose
 // engine API never became ready: its state and last log lines (command.APIWaitReport).
@@ -33,7 +30,7 @@ func containerAPIWaitReport(ctx context.Context, dm DockerInterface, containerID
 	if ctx.Err() != nil {
 		return ""
 	}
-	reportCtx, cancel := context.WithTimeout(ctx, apiWaitReportTimeout)
+	reportCtx, cancel := context.WithTimeout(ctx, constants.APIWaitReportTimeout)
 	defer cancel()
 	return reporter.apiWaitReport(reportCtx, containerID)
 }
@@ -44,7 +41,7 @@ func withAPIWaitReport(err error, report string) error {
 	if err == nil || report == "" {
 		return err
 	}
-	return fmt.Errorf("%w\n%s", err, command.IndentLines(report, "  "))
+	return fmt.Errorf("%w\n%s", err, textutil.IndentLines(report, "  "))
 }
 
 // containerStateReader is implemented by the Docker managers that can read a container's state.
@@ -63,7 +60,7 @@ func containerStateDiagnostic(ctx context.Context, dm DockerInterface, container
 	if ctx.Err() != nil {
 		return ""
 	}
-	stateCtx, cancel := context.WithTimeout(ctx, apiWaitReportTimeout)
+	stateCtx, cancel := context.WithTimeout(ctx, constants.APIWaitReportTimeout)
 	defer cancel()
 	state, err := reader.containerState(stateCtx, containerID)
 	if err != nil {
@@ -79,7 +76,7 @@ func (dm *DockerManager) apiWaitReport(ctx context.Context, containerID string) 
 	state, stateErr := dm.containerState(ctx, containerID)
 	logs, logErr := "", errNoDockerClient
 	if dm.client != nil {
-		logs, logErr = dm.ContainerLogTailContext(ctx, containerID, command.APIWaitLogLines)
+		logs, logErr = dm.containerLogTailContext(ctx, containerID, command.APIWaitLogLines)
 	}
 	return command.APIWaitReport(containerID, state, stateErr, logs, logErr)
 }

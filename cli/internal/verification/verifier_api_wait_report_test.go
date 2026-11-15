@@ -22,7 +22,7 @@ const (
 var (
 	verifyInspectCommand = strings.Join([]string{
 		constants.DockerCommand, constants.DockerCmdInspect, constants.DockerFlagFormat,
-		"{{.State.Status}}:{{.State.ExitCode}}:{{.State.OOMKilled}}", mockContainerID,
+		constants.DockerContainerStateFormat, mockContainerID,
 	}, " ")
 	verifyLogsCommand = strings.Join([]string{
 		constants.DockerCommand, constants.DockerCmdLogs, constants.DockerFlagTail, "20", mockContainerID, "2>&1",

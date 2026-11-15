@@ -22,10 +22,6 @@ import (
 
 const dockerExecCommand = "exec"
 
-// apiWaitReportTimeout bounds reading the verify container's state and logs after its ports
-// never opened.
-const apiWaitReportTimeout = 10 * time.Second
-
 // portWaitTimeout is how long verify waits for its engine's ports; tests shorten it.
 var portWaitTimeout = constants.APIReadinessTimeout
 
@@ -364,7 +360,7 @@ func (v *Verifier) apiWaitReport(host *hostparse.HostInfo, containerID string) s
 	if containerID == "" {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), apiWaitReportTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), constants.APIWaitReportTimeout)
 	defer cancel()
 	state, stateErr := command.InspectContainerState(ctx, v.cmdExecutor, host, containerID)
 	logs, logErr := command.ContainerLogTail(ctx, v.cmdExecutor, host, containerID, command.APIWaitLogLines)

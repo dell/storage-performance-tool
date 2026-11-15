@@ -529,11 +529,11 @@ func (dm *DockerManager) ContainerDiagnosticTail(containerID string, maxLines in
 
 // ContainerLogTail returns recent stdout/stderr lines from Docker logs.
 func (dm *DockerManager) ContainerLogTail(containerID string, maxLines int) (string, error) {
-	return dm.ContainerLogTailContext(dm.ctx, containerID, maxLines)
+	return dm.containerLogTailContext(dm.ctx, containerID, maxLines)
 }
 
-// ContainerLogTailContext returns recent stdout/stderr lines from Docker logs within ctx.
-func (dm *DockerManager) ContainerLogTailContext(ctx context.Context, containerID string, maxLines int) (string, error) {
+// containerLogTailContext returns recent stdout/stderr lines from Docker logs within ctx.
+func (dm *DockerManager) containerLogTailContext(ctx context.Context, containerID string, maxLines int) (string, error) {
 	if containerID == "" {
 		return "", nil
 	}

@@ -14,10 +14,6 @@ import (
 // APIWaitLogLines is how many of a container's last log lines a failed engine API wait shows.
 const APIWaitLogLines = 20
 
-// containerStateFormat has no space, comma or pipe, so it passes through the remote shell
-// that an SSH command runs in unchanged.
-const containerStateFormat = "{{.State.Status}}:{{.State.ExitCode}}:{{.State.OOMKilled}}"
-
 // ContainerState is the state of a container as docker inspect reports it.
 type ContainerState struct {
 	Status    string // docker's State.Status: running, exited, created, restarting, dead...
@@ -48,7 +44,7 @@ func (s ContainerState) String() string {
 // InspectContainerState reads a container's state with docker inspect on the host. A
 // container docker no longer knows is reported as Missing, not as an error.
 func InspectContainerState(ctx context.Context, executor CommandExecutor, host *hostparse.HostInfo, containerID string) (ContainerState, error) {
-	dockerCmd := []string{constants.DockerCommand, constants.DockerCmdInspect, constants.DockerFlagFormat, containerStateFormat, containerID}
+	dockerCmd := []string{constants.DockerCommand, constants.DockerCmdInspect, constants.DockerFlagFormat, constants.DockerContainerStateFormat, containerID}
 	stdout, stderr, err := executor.ExecuteCommand(ctx, host, dockerCmd)
 	if err != nil {
 		if isNoSuchContainer(stderr) || isNoSuchContainer(err.Error()) {
@@ -59,11 +55,11 @@ func InspectContainerState(ctx context.Context, executor CommandExecutor, host *
 		}
 		return ContainerState{}, err
 	}
-	return ParseContainerState(stdout)
+	return parseContainerState(stdout)
 }
 
-// ParseContainerState parses the output of containerStateFormat.
-func ParseContainerState(output string) (ContainerState, error) {
+// parseContainerState parses the output of constants.DockerContainerStateFormat.
+func parseContainerState(output string) (ContainerState, error) {
 	fields := strings.Split(strings.TrimSpace(output), ":")
 	if len(fields) != 3 || strings.TrimSpace(fields[0]) == "" {
 		return ContainerState{}, fmt.Errorf("unexpected docker inspect output %q", strings.TrimSpace(output))
@@ -174,12 +170,4 @@ func APIWaitReport(containerID string, state ContainerState, stateErr error, log
 		}
 	}
 	return b.String()
-}
-
-// IndentLines prefixes every line of text with prefix.
-func IndentLines(text, prefix string) string {
-	if text == "" {
-		return ""
-	}
-	return prefix + strings.ReplaceAll(text, "\n", "\n"+prefix)
 }

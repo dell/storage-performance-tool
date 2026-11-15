@@ -172,7 +172,7 @@ func TestRemoteWorkerReadinessFailureReportsContainer(t *testing.T) {
 	mgr.proberRun = func(context.Context, string, time.Duration) error { return waitErr }
 	mock.SetCommandSuccess(strings.Join([]string{
 		constants.DockerCommand, constants.DockerCmdInspect, constants.DockerFlagFormat,
-		"{{.State.Status}}:{{.State.ExitCode}}:{{.State.OOMKilled}}", "abc123def456",
+		constants.DockerContainerStateFormat, "abc123def456",
 	}, " "), "exited:137:true")
 	mock.SetCommandResponse("docker logs --tail 20 abc123def456 2>&1", command.MockResponse{
 		Stdout: "loading key RUNACCESSKEY77", Stderr: "Failed to bind to 0.0.0.0:1099",
