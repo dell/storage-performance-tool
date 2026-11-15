@@ -49,6 +49,8 @@ The source object path is specified with `x-amz-copy-source` header.
 
 With `--item-input-path`, the `s3` and `s3-aws` drivers both land a copy under the source bucket's name: `/src/k0` is copied to `/dst/src/k0`, and a nested key such as `dir/k0` to `/dst/src/dir/k0`. So count the copies under the `<source bucket>/` prefix of the target bucket.
 
+The same holds for listed items and for an items file whose names carry a bucket, such as one written by an earlier READ or copy step: an item named `/src/dir/k0` lands at `/dst/src/dir/k0`.
+
 `s3-aws` copies the listed items only when the path is a bucket, `/src`. A path that names an object, such as `/src/k0`, copies that one object to every item.
 
 #### 2.3.2. Swift Objects Copying
