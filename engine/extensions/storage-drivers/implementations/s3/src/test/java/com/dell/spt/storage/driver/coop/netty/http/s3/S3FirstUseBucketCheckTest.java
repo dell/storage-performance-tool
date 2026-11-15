@@ -413,6 +413,9 @@ final class S3FirstUseBucketCheckTest {
 		getVersioningBody = "<VersioningConfiguration><Status>X\nINFO bucket b9: versioning is already enabled</Status>"
 						+ "</VersioningConfiguration>";
 		final var driver = driver(List.of(listener()), "default", 5_000, true);
+		// The driver's step file is shared with earlier tests and runs: read only what this test adds.
+		final var file = Path.of(FileManager.INSTANCE.logFileName(Loggers.BUCKET_VERSIONING.getName(), "first-use"));
+		final long start = Files.exists(file) ? Files.size(file) : 0;
 
 		driver.requestNewPath("/ver-forge/p");
 
@@ -421,14 +424,19 @@ final class S3FirstUseBucketCheckTest {
 		assertFalse(notice.text().contains("\n"), notice::toString);
 		assertTrue(notice.text().contains("\"X INFO bucket b9: versioning is already enabled\""), notice::toString);
 		// What the Entry Node would relay: the file has the bucket's line and no line for b9.
-		final var file = Path.of(FileManager.INSTANCE.logFileName(Loggers.BUCKET_VERSIONING.getName(), "first-use"));
 		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-		while ((!Files.exists(file) || !Files.readString(file).contains("ver-forge")) && System.nanoTime() < deadline) {
+		while ((!Files.exists(file) || !added(file, start).contains("ver-forge")) && System.nanoTime() < deadline) {
 			Thread.sleep(10);
 		}
-		final var lines = Files.readAllLines(file);
+		final var lines = added(file, start).lines().toList();
 		assertTrue(lines.stream().anyMatch(line -> line.startsWith("WARN bucket ver-forge:")), lines::toString);
 		assertFalse(lines.stream().anyMatch(line -> line.startsWith("INFO bucket b9")), lines::toString);
+	}
+
+	private static String added(final Path file, final long start) throws IOException {
+		final byte[] bytes = Files.readAllBytes(file);
+		return new String(bytes, (int) Math.min(start, bytes.length), (int) Math.max(0, bytes.length - start),
+						StandardCharsets.UTF_8);
 	}
 
 	@Test
