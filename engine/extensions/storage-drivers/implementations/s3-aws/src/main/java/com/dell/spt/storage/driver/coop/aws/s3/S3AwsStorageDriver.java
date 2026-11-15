@@ -1039,11 +1039,12 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	}
 
 	/**
-	 * Handle composite operations (multipart upload).
+	 * Handle composite operations: a multipart upload, or a read split into ranged GETs.
 	 * For CREATE operations, this manages the multipart upload lifecycle:
 	 * - Initiate multipart upload if this is the first call
 	 * - Abort multipart upload if requested
 	 * - Complete multipart upload if all parts are done
+	 * For READ operations, see {@link #compositeReadPass}.
 	 */
 	@SuppressWarnings("unchecked")
 	private CompletableFuture<Void> executeCompositeOperation(final CompositeDataOperation op) {
@@ -1061,14 +1062,33 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			// Initiate multipart upload (first call)
 			return initiateMultipartUpload(op);
 		} else if (op.type() == OpType.READ) {
-			// Composite READ operations should be handled by the framework
-			// by splitting into partial operations, not as a single HTTP request
-			return CompletableFuture.failedFuture(
-							new UnsupportedOperationException("Composite READ must be handled by partial operations"));
+			return compositeReadPass(op);
 		} else {
 			// For DELETE/UPDATE, delegate to standard path
 			return putObject((O) op);
 		}
+	}
+
+	/**
+	 * A pass of a read split by the size threshold, which sends no request of its own: its parts are
+	 * ranged GETs, as on the Netty driver. The initial pass ends SUCC, so that the driver base sends
+	 * the parts; the finalization pass, once every part has ended, ends SUCC, or with the status of
+	 * a part that ran out of retries. The read is counted once, by its finalization, from the
+	 * initial pass's request start to the finalization's response end, and counts no bytes: each
+	 * part counts its own.
+	 */
+	private static CompletableFuture<Void> compositeReadPass(final CompositeDataOperation op) {
+		// A recycled read is a result() copy, which has no parts and counts them all done. Asking for
+		// the parts makes them again, so that only a read whose parts have run is finalized.
+		op.subOperations();
+		if (op.allSubOperationsDone()) {
+			final String partFailure = op.get(KEY_MPU_FAILURE);
+			op.status(partFailure == null ? Status.SUCC : Status.valueOf(partFailure));
+			op.finishResponse();
+		} else {
+			op.startResponse();
+		}
+		return CompletableFuture.completedFuture(null);
 	}
 
 	/**
@@ -2036,10 +2056,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		final var parentOp = op.parent();
 		final var bk = resolveBucketAndKey((O) parentOp);
 
-		// Calculate range based on item offset and size
-		// The framework's DataItem tracks the correct slice offset natively
-		long rangeStart = op.item().offset();
-		long rangeEnd;
+		// The part's position in the object, as on the Netty driver. The part item's offset is its
+		// position in the data ring, which is the object's offset plus this.
+		final long rangeStart = (long) op.partNumber() * parentOp.sizeThreshold();
+		final long rangeEnd;
 		try {
 			rangeEnd = rangeStart + op.item().size() - 1;
 		} catch (IOException e) {
