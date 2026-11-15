@@ -527,6 +527,20 @@ final class S3VersionedRequestTest {
 		assertEquals("key~v1~v2", op.item().name());
 	}
 
+	@Test
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	void aListResponseAppendsTheVersion() throws Exception {
+		final var driver = driver(true, 4, false);
+		final var handler = new S3ResponseHandler(driver, false, true, null);
+		final var item = new PathItemImpl("pre~fix");
+		final Operation list = new ListOperationImpl<>(0, OpType.LIST, item, CREDENTIAL);
+
+		handler.handleResponseHeaders(null, list, versionResponse("v2"));
+
+		assertEquals("pre~fix~v2", item.name());
+	}
+
 	// ---------- building the request again, as a retry does ----------
 
 	@Test
@@ -655,6 +669,24 @@ final class S3VersionedRequestTest {
 		assertEquals(Operation.Status.RESP_FAIL_SVC, result.status());
 		assertEquals(List.of("DELETE /b/obj?versionId=ver0001 503"), target.objectLog());
 		assertEquals(List.of("ver0001", "ver0002"), target.versions());
+	}
+
+	/**
+	 * A READ or STAT naming a version the target no longer holds fails with 404. Before the {@code
+	 * versionId} query it read, or checked, the current version and succeeded.
+	 */
+	@Test
+	void aReadOrStatOfAVersionThatNoLongerExistsFailsNotFound() throws Exception {
+		final var target = new VersionedTarget("NONE");
+		final var driver = loopbackDriver(target);
+
+		final var read = run(driver, op(OpType.READ, "obj~ver0009"));
+		final var stat = run(driver, op(OpType.STAT, "obj~ver0009"));
+
+		assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, read.status());
+		assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, stat.status());
+		assertEquals(List.of("GET /b/obj?versionId=ver0009 404", "HEAD /b/obj?versionId=ver0009 404"), target.objectLog());
+		assertEquals("/b/obj~ver0009", read.item().name());
 	}
 
 	// ---------- helpers ----------
@@ -922,7 +954,7 @@ final class S3VersionedRequestTest {
 								? query.substring("versionId=".length())
 								: null;
 				switch (method) {
-				case "GET" -> {
+				case "GET", "HEAD" -> {
 					final var selected = versionId != null ? versionId : last();
 					final int size = versions.getOrDefault(selected, -1);
 					if (size < 0) {
@@ -932,8 +964,13 @@ final class S3VersionedRequestTest {
 					}
 					objectLog.add(line + " 200 " + size);
 					exchange.getResponseHeaders().set(VERSION_HEADER, selected);
-					exchange.sendResponseHeaders(200, size);
-					exchange.getResponseBody().write(new byte[size]);
+					if ("HEAD".equals(method)) {
+						exchange.getResponseHeaders().set("Content-Length", Integer.toString(size));
+						exchange.sendResponseHeaders(200, -1);
+					} else {
+						exchange.sendResponseHeaders(200, size);
+						exchange.getResponseBody().write(new byte[size]);
+					}
 				}
 				case "DELETE" -> {
 					final var deleted = versionId != null ? versionId : "mark" + sequence.incrementAndGet();
