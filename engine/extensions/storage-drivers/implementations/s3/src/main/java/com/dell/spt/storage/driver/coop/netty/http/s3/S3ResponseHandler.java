@@ -246,7 +246,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 						&& versionId != null
 						&& !(op instanceof DeleteRequestOperation)) {
 			final Item item = op.item();
-			// The request builder leaves a key~versionId item its full name, so replace that suffix.
+			// The request builder never renames a key~versionId item, so replace that suffix.
 			item.name(s3Driver != null && s3Driver.namesLegacyVersion(op)
 							? S3StorageDriver.withLegacyVersion(item.name(), versionId)
 							: item.name() + "~" + versionId);

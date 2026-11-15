@@ -50,10 +50,10 @@ import org.junit.jupiter.api.Timeout;
  * With {@code storage.object.versioning} on, a {@code key~versionId} item names one object version.
  * A READ (also with {@code read-metadata-only}, a HEAD) and a STAT select it with the {@code
  * versionId} query, as {@code GetObject} and {@code HeadObject} do; {@code x-amz-version-id} is a
- * response header. DELETE keeps its query and UPDATE its header. The request builder leaves the
- * item its full name, so a request built again for the same operation, as a retry builds it,
- * selects the same version, and a successful response replaces the version suffix. Under V2 the
- * version is signed decoded.
+ * response header. DELETE keeps its query and UPDATE its header. The request builder never renames
+ * the item, so a request built again for the same operation, as a retry builds it, selects the same
+ * version, and a successful response replaces the version suffix. Under V2 the version is signed
+ * decoded.
  */
 @Timeout(60)
 final class S3VersionedRequestTest {
@@ -267,6 +267,40 @@ final class S3VersionedRequestTest {
 		}
 	}
 
+	// ---------- the item is never renamed while its request is built ----------
+
+	/**
+	 * The channel owns the operation while its request is built, so its idle timeout can complete the
+	 * operation, and a retry can be built from it, at any point of the build. The probe reads the item
+	 * name from inside the build, after the URI is made.
+	 */
+	@Test
+	void theItemKeepsItsVersionedNameWhileTheRequestIsBuilt() throws Exception {
+		final List<String> seen = new CopyOnWriteArrayList<>();
+		final Config config = S3StorageDriverTest.baseConfig(true, 4, false, null, HOST);
+		final var driver = new S3StorageDriverTest.TestS3Driver(config) {
+			@Override
+			protected void applyMetaDataHeaders(final HttpHeaders headers, final Operation<Item> op) {
+				seen.add(op.type() + " " + op.item().name());
+				super.applyMetaDataHeaders(headers, op);
+			}
+		};
+		resources.add(driver);
+		final List<String> uris = new ArrayList<>();
+		for (final var type : List.of(OpType.READ, OpType.STAT, OpType.DELETE, OpType.UPDATE)) {
+			uris.add(driver.httpRequest(op(type, "key~v1"), HOST).uri());
+		}
+		final var copy = op(OpType.CREATE, "key~v1", "/src", "/b");
+		final var copyRequest = driver.httpRequest(copy, HOST);
+
+		assertEquals(List.of("READ key~v1", "STAT key~v1", "DELETE key~v1", "UPDATE key~v1", "CREATE key~v1"), seen);
+		assertEquals(
+						List.of("/b/key?versionId=v1", "/b/key?versionId=v1", "/b/key?versionId=v1", "/b/key"), uris);
+		assertEquals("/b/key", copyRequest.uri());
+		assertEquals("/src/key", copyRequest.headers().get(S3Api.KEY_X_AMZ_COPY_SOURCE));
+		assertEquals("key~v1", copy.item().name());
+	}
+
 	// ---------- building the request again, as a retry does ----------
 
 	@Test
@@ -421,6 +455,14 @@ final class S3VersionedRequestTest {
 			op.markRandomRanges(1);
 		}
 		return (Operation<Item>) (Operation<?>) op;
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Operation<Item> op(
+					final OpType type, final String name, final String srcPath, final String dstPath) throws IOException {
+		final var item = new DataItemImpl(name, 0, 16);
+		item.dataInput(dataInput());
+		return (Operation<Item>) (Operation<?>) new DataOperationImpl<>(0, type, item, srcPath, dstPath, CREDENTIAL, null, 0);
 	}
 
 	/**
