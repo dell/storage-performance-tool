@@ -117,8 +117,8 @@ func TestCleanupVerifyContainers_UnlabelledJudgedByAge(t *testing.T) {
 
 func TestCleanupVerifyContainers_UnlabelledOldRemovedByVerifierWithoutRunID(t *testing.T) {
 	exec := &MockCommandExecutor{Commands: map[string]MockCommandResponse{
-		verifyCleanupListCommand(): {Stdout: verifyPSLine("01d000000002", dockerCreatedAt(cleanupNow.Add(-time.Hour)), "spt.verify=true")},
-		"docker rm -f 01d000000002":        {},
+		verifyCleanupListCommand():  {Stdout: verifyPSLine("01d000000002", dockerCreatedAt(cleanupNow.Add(-time.Hour)), "spt.verify=true")},
+		"docker rm -f 01d000000002": {},
 	}}
 	host := &hostparse.HostInfo{Host: "wrk1"}
 	v := &Verifier{cmdExecutor: exec, timeProvider: NewMockTimeProvider(cleanupNow)}

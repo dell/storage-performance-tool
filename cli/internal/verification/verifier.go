@@ -1106,9 +1106,11 @@ func (v *Verifier) getExternalIP(host *hostparse.HostInfo) string {
 //
 // Each command that reaches its timeout may also take constants.CommandWaitDelay (1 s) to stop. That
 // is about 160 s without RDMA and about 375 s with 16 RDMA devices. 15 minutes is well above
-// either, so a container younger than this belongs to a verify that is still running, and it also
-// leaves room for a few minutes of clock skew between this client and the Docker host, whose clock
-// stamps the creation time.
+// either, so in ordinary use a container younger than this belongs to a verify that is still
+// running, and it also leaves room for a few minutes of clock skew between this client and the
+// Docker host, whose clock stamps the creation time. It is an operating assumption, not a bound: a
+// verify that is suspended, a client clock far ahead of the host's, or an --rdma run with many
+// slow devices (each read has its own timeout, with no overall cutoff) can outlive it.
 const verifyContainerStaleAge = 15 * time.Minute
 
 // verifyContainerFields is the number of "@"-separated fields in constants.DockerVerifyCleanupFormat.
@@ -1117,7 +1119,8 @@ const verifyContainerFields = 3
 // cleanupVerifyContainers removes running verify containers on host that earlier spt verify runs
 // left behind. It removes only containers older than verifyContainerStaleAge that do not carry this
 // invocation's run label; a container without the run label (from an older CLI) is judged by age
-// alone. A running verify of another invocation is never removed.
+// alone. A running verify of another invocation is left alone while it is younger than
+// verifyContainerStaleAge (see there for when one can outlive it).
 func (v *Verifier) cleanupVerifyContainers(host *hostparse.HostInfo, dockerOps command.DockerOperations) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1176,7 +1179,8 @@ func (v *Verifier) cleanupVerifyContainers(host *hostparse.HostInfo, dockerOps c
 
 // isDockerContainerID reports whether id looks like a Docker container ID: 12 (short) to 64 (full)
 // lower-case hex characters. A docker ps line whose first field is anything else is left alone, so
-// label text that spans lines can never reach docker rm.
+// only a hex ID can reach docker rm. This does not prove that the line is a real row: a label value
+// that holds a newline followed by text shaped like a row is read as one.
 func isDockerContainerID(id string) bool {
 	if len(id) < 12 || len(id) > 64 {
 		return false
