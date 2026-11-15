@@ -733,8 +733,10 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	 * counted before the step ends.
 	 */
 	private boolean isDoneCountLimitDrained() {
-		if (generator == null || !generator.isCountLimitDrained()) {
-			countLimitDrainedResults = -1;
+		if (!generator.isCountLimitDrained()) {
+			if (countLimitDrainedResults != -1) {
+				countLimitDrainedResults = -1;
+			}
 			return false;
 		}
 		final long results = counterResults.sum();
