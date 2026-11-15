@@ -620,6 +620,26 @@ final class S3VersionedRequestTest {
 	}
 
 	@Test
+	void theQueryUriIsRightForANonLatin1NameAndAfterOne() throws Exception {
+		final var driver = driver(true, 4, false);
+		// Built in this order on one thread: an encoded non-Latin-1 version, then a non-Latin-1 key in the
+		// one-copy builder, then a Latin-1 name in the same builder.
+		final String[][] cases = {
+				{"key~\u00e9\u4e2d", "/b/key?versionId=%C3%A9%E4%B8%AD"
+				},
+				{"\u00e9\u4e2d~v1", "/b/\u00e9\u4e2d?versionId=v1"
+				},
+				{"key~v1", "/b/key?versionId=v1"
+				},
+		};
+		for (final String[] expected : cases) {
+			final var op = op(OpType.READ, expected[0]);
+			assertEquals(expected[1], driver.httpRequest(op, HOST).uri(), expected[0]);
+			assertEquals(expected[0], op.item().name());
+		}
+	}
+
+	@Test
 	void aSuffixIsReplacedOnlyOnTheRouteThatSplitsIt() throws Exception {
 		assertEquals("key~v2", S3StorageDriver.withLegacyVersion("key~v1", "v2"));
 		assertEquals("key~v2", S3StorageDriver.withLegacyVersion("key", "v2"));
