@@ -354,7 +354,8 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		}
 		replayMonitor = startReplayAutoResultsMonitor(
 			replayContext, metadata.BaseURL, resultsOpts.Label, resultsOpts.ResultsDir,
-			replayStepIDs(generated), params.RunID, resultsOpts.Debug, hostInfos, apiPort,
+			replayStepIDs(generated), params.RunID, resultsOpts.Debug,
+			shutdownTargetHosts(hostInfos, attachExisting), apiPort,
 			resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, paths.Scenario,
 			metadata, out, out, traceOpts.Path, finalizeReplaySession,
 		)

@@ -1780,6 +1780,18 @@ func copyFileAtomic(srcPath string, destPath string) error {
 	return nil
 }
 
+// shutdownTargetHosts returns the hosts the end-of-run shutdown asks to stop.
+// Attached workers run engines that spt did not start, and they stay running
+// for the next attach run, so in attach mode only the entry node is asked.
+// The entry still ends its own run first, which releases the workers' step
+// services.
+func shutdownTargetHosts(hosts []*hostparse.HostInfo, attachExisting bool) []*hostparse.HostInfo {
+	if attachExisting && len(hosts) > 1 {
+		return hosts[:1:1]
+	}
+	return hosts
+}
+
 // requestShutdownAll stops the entry node first and waits for its owned run to
 // become terminal before stopping workers. The entry owns distributed RMI step
 // clients, so worker services must remain available through entry cleanup.
@@ -2362,7 +2374,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 		)
 		startAutoResultsMonitoring := func() {
 			if resultsOpts.AutoResults && autoMonitor == nil {
-				autoMonitor = startAutoResultsFunc(runContext, baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, params.RunID, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path, finalizeRunSession, integrityOptions)
+				autoMonitor = startAutoResultsFunc(runContext, baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, params.RunID, resultsOpts.Debug, shutdownTargetHosts(hostInfos, attachExisting), apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path, finalizeRunSession, integrityOptions)
 				if autoMonitor != nil {
 					autoMonitor.BindSession(runSession)
 					preparedCleanupDelegated = true
@@ -2636,7 +2648,7 @@ func init() {
 	runCmd.Flags().String("label", "", "Optional label used for output directory naming and as the step ID prefix (default: mt)")
 	runCmd.Flags().Bool("auto-results-debug", false, "Enable verbose debug logs for auto-results completion detection")
 	// Phase 5 shutdown controls
-	runCmd.Flags().Bool("shutdown-on-complete", true, "After fetching results, request /shutdown on all Spt hosts")
+	runCmd.Flags().Bool("shutdown-on-complete", true, "After fetching results, request /shutdown on all Spt hosts; with --attach-existing, on the entry node only")
 	runCmd.Flags().Int("shutdown-linger", 5, "Seconds to wait for /status linger after /shutdown")
 
 	// Multi-Host Options

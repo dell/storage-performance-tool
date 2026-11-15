@@ -320,7 +320,7 @@ func TestAutoResultsShutdownAfterStartFailureFollowsSubmission(t *testing.T) {
 // in spt_run_params.json. A start that never reached the engine identity gate has nothing to
 // summarize, so no summary is attempted. One the gate rejected, or one whose POST /run was
 // refused after the gate passed, keeps its summary. A launch accepted for cleanup still asks
-// every host to shut down.
+// every host to shut down, or in attach mode the entry only.
 func TestRunCommandStartFailureBeforeSubmissionSendsNoShutdown(t *testing.T) {
 	const (
 		gateNotRun   = ""
@@ -485,6 +485,10 @@ func TestRunCommandStartFailureBeforeSubmissionSendsNoShutdown(t *testing.T) {
 			shutdownMu.Lock()
 			defer shutdownMu.Unlock()
 			wantHosts := strings.Split(test.hosts, ",")
+			if test.attach {
+				// Attached workers were started by someone else, so only the entry is asked.
+				wantHosts = wantHosts[:1]
+			}
 			if test.acceptedForCleanup {
 				if len(shutdownHosts) != 1 || !slices.Equal(shutdownHosts[0], wantHosts) {
 					t.Fatalf("shutdown requests = %v, want one to %v", shutdownHosts, wantHosts)
