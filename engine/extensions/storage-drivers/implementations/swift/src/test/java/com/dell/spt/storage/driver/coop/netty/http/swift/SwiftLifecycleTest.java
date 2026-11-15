@@ -89,8 +89,10 @@ final class SwiftLifecycleTest {
 			final var recovered = driver.recoverQueuedOperations();
 			assertEquals(1, recovered.size());
 			assertTrue(recovered.get(0) == children.get(1));
-			assertEquals(2, driver.operationLifecycle().resolveOutstandingAsUnresolved(),
-							"the transported child and its parent must both outlive the bound");
+			assertEquals(OperationLifecycleState.UNRESOLVED, parent.lifecycle().state(),
+							"the stop's refusal of the remaining segment settles the parent at once");
+			assertEquals(1, driver.operationLifecycle().resolveOutstandingAsUnresolved(),
+							"only the transported child is left for the bound");
 
 			assertEquals(OperationLifecycleState.UNRESOLVED, parent.lifecycle().state());
 			assertEquals(OperationLifecycleState.UNRESOLVED, children.get(0).lifecycle().state());

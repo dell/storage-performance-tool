@@ -49,6 +49,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	/** Completion-driven direct dispatch; set to false to use dispatcher scheduling. */
 	static final String DIRECT_DISPATCH_PROPERTY = "spt.dispatch.direct";
 	private static final String KEY_FINALIZATION_ENQUEUED = "sptFinalizationEnqueued";
+	/** The upload ID a multipart driver records on the upload once its initiation is answered. */
+	private static final String KEY_UPLOAD_ID = "uploadId";
 
 	protected final Semaphore concurrencyThrottle;
 	protected volatile Semaphore mpuObjectThrottle;
@@ -436,6 +438,86 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	}
 
 	/**
+	 * As {@link #beginDispatch}, for a worker that holds {@code op} past its admission: when the
+	 * closed admission refuses it, the composite it continues is settled before this returns false,
+	 * as {@link #settleClosedDispatch} settles it. A refusal while admission is open, and a dispatch,
+	 * run exactly as {@link #beginDispatch} runs them.
+	 */
+	protected final boolean beginDispatchOrSettle(final O op) {
+		if (admissionLock == null) {
+			return claimDispatchOwnership(op);
+		}
+		admissionLock.lock();
+		try {
+			if (admissionOpen) {
+				return claimDispatchOwnership(op);
+			}
+		} finally {
+			admissionLock.unlock();
+		}
+		settleClosedDispatch(op);
+		return false;
+	}
+
+	/**
+	 * As {@link #withDispatchAdmission(BooleanSupplier)}, for the transport claim of {@code op}: when
+	 * the closed admission refuses it, the composite it continues is settled before this returns
+	 * false, as {@link #settleClosedDispatch} settles it. A finalization or abort the stop refuses is
+	 * in no queue, so nothing else would settle it. A refusal while admission is open, a stale
+	 * circulation or a part of an ended upload, and a successful hand-off run exactly as {@link
+	 * #withDispatchAdmission(BooleanSupplier)} runs them.
+	 */
+	protected final boolean withDispatchAdmission(final BooleanSupplier handoff, final O op) {
+		if (admissionLock == null) {
+			return handoff.getAsBoolean();
+		}
+		admissionLock.lock();
+		try {
+			if (admissionOpen) {
+				return handoff.getAsBoolean();
+			}
+		} finally {
+			admissionLock.unlock();
+		}
+		settleClosedDispatch(op);
+		return false;
+	}
+
+	/**
+	 * A transport attempt that names, only when the closed admission refuses its claim, the operation
+	 * that claim was for. An attempt that holds its operation in a field passes itself, so that a
+	 * claim admission allows reads nothing more than {@link #withDispatchAdmission(BooleanSupplier)}
+	 * reads.
+	 */
+	protected interface DispatchRefusal<O> {
+
+		/** The operation of the refused claim, whose composite the closed admission settles. */
+		O refusedOperation();
+	}
+
+	/**
+	 * As {@link #withDispatchAdmission(BooleanSupplier, Operation)}, with the operation asked of
+	 * {@code refusal} only when the closed admission refuses the claim. A refusal while admission is
+	 * open, and a successful hand-off, run exactly as {@link #withDispatchAdmission(BooleanSupplier)}
+	 * runs them.
+	 */
+	protected final boolean withDispatchAdmission(final BooleanSupplier handoff, final DispatchRefusal<O> refusal) {
+		if (admissionLock == null) {
+			return handoff.getAsBoolean();
+		}
+		admissionLock.lock();
+		try {
+			if (admissionOpen) {
+				return handoff.getAsBoolean();
+			}
+		} finally {
+			admissionLock.unlock();
+		}
+		settleClosedDispatch(refusal.refusedOperation());
+		return false;
+	}
+
+	/**
 	 * Called under admission lock by queued and direct dispatch. The compatibility default
 	 * records logical dispatch; retained-attempt adapters may defer that record until actual
 	 * transport handoff and must fence stale/duplicate attempt tokens themselves.
@@ -658,7 +740,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			if (!admissionOpen) {
 				claimChildQueueOwnership(childOp);
 				operationLifecycle().unattempted(childOp);
-				recoverQueuedCompositeParent(childOp, permitOwner);
+				settleRefusedCompositeParent(childOp, permitOwner);
 				safeReleaseMpuObjectPermit(permitOwner);
 				return false;
 			}
@@ -707,7 +789,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 					claimChildQueueOwnership(childOp);
 					operationLifecycle().unattempted(childOp);
 				}
-				recoverQueuedCompositeParent(childOps.get(0), permitOwner);
+				settleRefusedCompositeParent(childOps.get(0), permitOwner);
 				safeReleaseMpuObjectPermit(permitOwner);
 				return false;
 			}
@@ -847,12 +929,92 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 						|| state == OperationLifecycleState.UNRESOLVED;
 	}
 
-	private void recoverQueuedCompositeParent(final O childOp, final O permitOwner) {
+	/**
+	 * Settles the composite operation whose next request, a part, a range or its finalization, the
+	 * closed admission refused, or that queue recovery took back. Runs only after admission has
+	 * closed, so the open-admission path never reaches it.
+	 *
+	 * <p>A composite that has not dispatched anything of this pass is unattempted, unless it is an
+	 * upload whose initiation was answered: that upload is open on the target, so it is unresolved.
+	 * A dispatched composite can no longer finish, so it is unresolved at once instead of at the
+	 * drain's deadline, which would hold the step's end for {@code load-op-wait-limit}. Its parts
+	 * still in flight end on their own; their completions cannot claim the settled composite again,
+	 * because an unresolved operation starts no new lifecycle.
+	 *
+	 * <p>A refused part of a composite whose finalization or abort is already enqueued leaves the
+	 * composite to that request: it is either in flight and ends the composite, or queued, and then
+	 * refused or recovered itself.
+	 */
+	private void settleRefusedCompositeParent(final O childOp, final O permitOwner) {
 		final O parentOp = compositeParent(childOp, permitOwner);
-		if (parentOp != null
-						&& operationLifecycle().stateOf(parentOp) == OperationLifecycleState.DRIVER_QUEUED) {
-			operationLifecycle().unattempted(parentOp);
+		if (parentOp == null) {
+			return;
 		}
+		final var lifecycle = operationLifecycle();
+		final var state = lifecycle.stateOf(parentOp);
+		if (state == OperationLifecycleState.DRIVER_QUEUED) {
+			if (isInitiatedUpload(parentOp)) {
+				if (lifecycle.unresolvedSubmission(parentOp)) {
+					safeReleaseMpuObjectPermit(parentOp);
+				}
+			} else {
+				lifecycle.unattempted(parentOp);
+			}
+		} else if (state == OperationLifecycleState.DISPATCHED
+						&& (childOp == parentOp || !isPartOfFinalizedUpload(childOp, parentOp))
+						&& lifecycle.unresolved(parentOp)) {
+			safeReleaseMpuObjectPermit(parentOp);
+		}
+	}
+
+	/**
+	 * Settles, after a stop, the composite that an unsent request leaves: stop-time code, such as a
+	 * driver's {@link #onAdmissionClosed()}, calls it for a request the stop keeps from being sent.
+	 * While admission is open it does nothing. A transport claim refused by the stop settles through
+	 * {@link #withDispatchAdmission(BooleanSupplier, Operation)} or {@link #beginDispatchOrSettle}
+	 * instead, which know the refusal's reason from the admission check they make anyway.
+	 */
+	protected final void settleRefusedDispatch(final O op) {
+		if (isAdmissionOpen()) {
+			return;
+		}
+		settleClosedDispatch(op);
+	}
+
+	/**
+	 * Settles the composite that a request the closed admission refused leaves: a composite's
+	 * finalization or abort, or one of its parts. A dispatched composite, or an upload whose
+	 * initiation was answered, can no longer finish: it is settled as {@link
+	 * #settleRefusedCompositeParent} settles it, so it is unresolved once and its upload permit comes
+	 * back once. A refused finalization or abort is in no queue, so queue recovery never sees it. A
+	 * refused part keeps its own state for the caller or queue recovery, and a queued composite that
+	 * opened nothing on the target is left to queue recovery. Runs only once admission has closed.
+	 */
+	@SuppressWarnings("unchecked")
+	private void settleClosedDispatch(final O op) {
+		final O parentOp;
+		if (op instanceof PartialOperation<?> partialOp) {
+			parentOp = (O) partialOp.parent();
+		} else if (op instanceof CompositeOperation) {
+			parentOp = op;
+		} else {
+			return;
+		}
+		if (parentOp == null) {
+			return;
+		}
+		final var state = operationLifecycle().stateOf(parentOp);
+		if (state == OperationLifecycleState.DISPATCHED
+						|| (state == OperationLifecycleState.DRIVER_QUEUED && isInitiatedUpload(parentOp))) {
+			settleRefusedCompositeParent(op, parentOp);
+		}
+	}
+
+	/** Whether {@code op} is a multipart upload whose initiation was answered with an upload ID. */
+	private static boolean isInitiatedUpload(final Operation<?> op) {
+		return op instanceof CompositeOperation<?> compositeOp
+						&& OpType.CREATE.equals(op.type())
+						&& compositeOp.get(KEY_UPLOAD_ID) != null;
 	}
 
 	private boolean enqueueChildOpWithTimeout(final O childOp, final O permitOwner, final String failureContext) {
@@ -879,6 +1041,7 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			try {
 				if (!admissionOpen) {
 					operationLifecycle().unattempted(childOp);
+					settleRefusedCompositeParent(childOp, permitOwner);
 					safeReleaseMpuObjectPermit(permitOwner);
 					return false;
 				}
@@ -892,6 +1055,10 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				TimeUnit.MILLISECONDS.sleep(LIFECYCLE_POLL_INTERVAL_MILLIS);
 			} catch (final InterruptedException e) {
 				operationLifecycle().unattempted(childOp);
+				if (!isAdmissionOpen()) {
+					// A stop that arrives as an interrupt refuses the enqueue as the closed admission does.
+					settleRefusedCompositeParent(childOp, permitOwner);
+				}
 				safeReleaseMpuObjectPermit(permitOwner);
 				throwUnchecked(e);
 				return false;
@@ -1230,14 +1397,41 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		childOpQueue.drainTo(recovered);
 		inOpQueue.drainTo(recovered);
 		recovered.addAll(recoverAdditionalQueuedOperations());
+		recovered.addAll(opDispatchTask.takeStoppedContinuations());
 		recovered.removeAll(indeterminateSubmissions);
 		final var unattempted = new ArrayList<O>(recovered.size());
 		for (final O op : recovered) {
-			if (recoverQueuedOperation(op)) {
+			if (op instanceof CompositeOperation || op instanceof PartialOperation) {
+				recoverQueuedCompositeWork(op, unattempted);
+			} else if (recoverQueuedOperation(op)) {
 				unattempted.add(op);
 			}
 		}
 		return List.copyOf(unattempted);
+	}
+
+	/**
+	 * Recovers a queued part, range or composite, then settles its composite: the composite cannot
+	 * finish once queued work of it is taken back (see {@link #settleRefusedCompositeParent}). An
+	 * initiated upload waiting for its first parts is unresolved, not unattempted, because it is open
+	 * on the target; a composite whose queued finalization is taken back is unresolved too.
+	 */
+	@SuppressWarnings("unchecked")
+	private void recoverQueuedCompositeWork(final O op, final List<O> unattempted) {
+		if (op instanceof CompositeOperation
+						&& operationLifecycle().stateOf(op) == OperationLifecycleState.DRIVER_QUEUED
+						&& isInitiatedUpload(op)) {
+			settleRefusedCompositeParent(op, op);
+			return;
+		}
+		if (recoverQueuedOperation(op)) {
+			unattempted.add(op);
+		}
+		if (op instanceof PartialOperation<?> partialOp) {
+			settleRefusedCompositeParent(op, (O) partialOp.parent());
+		} else {
+			settleRefusedCompositeParent(op, op);
+		}
 	}
 
 	/**

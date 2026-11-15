@@ -353,8 +353,21 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		applyMetaDataHeaders(httpHeaders, op);
 		applyDynamicHeaders(httpHeaders);
 		applySharedHeaders(httpHeaders);
-		applyAuthHeaders(httpHeaders, httpMethod, uriPath, op.credential());
+		applyAuthHeaders(httpHeaders, httpMethod, authUri(uriPath, uri), op.credential());
 		return httpRequest;
+	}
+
+	/**
+	 * Selects the URI that {@link #httpRequest} signs. The default signs the path without the
+	 * configured URI arguments, as every driver has always done; a driver whose signature covers the
+	 * query returns {@code uri}. Without URI arguments both are the same string.
+	 *
+	 * @param uriPath the request path without the URI arguments
+	 * @param uri the request URI as sent: {@code uriPath} followed by the URI arguments, if any
+	 * @return the URI passed to {@link #applyAuthHeaders}
+	 */
+	protected String authUri(final String uriPath, final String uri) {
+		return uriPath;
 	}
 
 	protected HttpMethod dataHttpMethod(final OpType opType) {

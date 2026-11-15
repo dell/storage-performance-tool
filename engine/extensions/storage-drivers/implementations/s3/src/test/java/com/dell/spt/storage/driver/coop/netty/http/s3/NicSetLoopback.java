@@ -66,6 +66,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.IntPredicate;
 import java.util.function.Predicate;
+import java.util.function.ToLongFunction;
 import java.util.regex.Pattern;
 import java.util.stream.IntStream;
 
@@ -157,6 +158,8 @@ final class NicSetLoopback implements AutoCloseable {
 	 * chunk of its own before the rest.
 	 */
 	volatile String completionErrorBody = "<Error><Code>InternalError</Code></Error>";
+	/** How long the stub waits before it answers each object request, chosen by the request itself; none by default. */
+	volatile ToLongFunction<Request> answerDelayMillis = request -> 0;
 
 	/** The storage configuration of a driver with these endpoints and NICs. */
 	static Config storage(final List<String> endpoints, final List<String> interfaces, final int concurrency) {
@@ -380,21 +383,51 @@ final class NicSetLoopback implements AutoCloseable {
 		}
 	}
 
+	/** A silent port, from {@link #blackhole}. Closing it frees the port. */
+	interface Blackhole extends AutoCloseable {
+
+		/**
+		 * Lets the port accept connects again, without a moment in which it is closed and a SYN would
+		 * be reset: the connections that filled its accept queue are closed and taken off it, so a
+		 * pending connect's next SYN retransmit is accepted.
+		 *
+		 * @return the port's listener, non-blocking, whose accept queue then holds only connects made
+		 *     to the port after this
+		 */
+		ServerSocketChannel admit() throws IOException;
+	}
+
 	/**
 	 * Stops listener {@code index} and leaves its port silent: a listening socket whose accept queue
 	 * is full, so the kernel drops each new SYN and a connect waits for its timeout. Closing the
 	 * result frees the port.
 	 */
-	AutoCloseable blackhole(final int index) throws IOException, InterruptedException {
+	Blackhole blackhole(final int index) throws IOException, InterruptedException {
 		final var address = servers.get(index).getAddress();
 		servers.get(index).stop(0);
 		final var listener = ServerSocketChannel.open();
 		final List<SocketChannel> queued = new ArrayList<>();
-		final AutoCloseable silence = () -> {
-			for (final var channel : queued) {
-				channel.close();
+		final Blackhole silence = new Blackhole() {
+			@Override
+			public ServerSocketChannel admit() throws IOException {
+				for (final var channel : queued) {
+					channel.close();
+				}
+				queued.clear();
+				listener.configureBlocking(false);
+				for (var filler = listener.accept(); filler != null; filler = listener.accept()) {
+					filler.close();
+				}
+				return listener;
 			}
-			listener.close();
+
+			@Override
+			public void close() throws IOException {
+				for (final var channel : queued) {
+					channel.close();
+				}
+				listener.close();
+			}
 		};
 		try {
 			listener.setOption(StandardSocketOptions.SO_REUSEADDR, true);
@@ -533,6 +566,10 @@ final class NicSetLoopback implements AutoCloseable {
 				}
 				if (isAbort(request) && abortDelayMillis > 0) {
 					Thread.sleep(abortDelayMillis);
+				}
+				final long delayMillis = objectRequest > 0 ? answerDelayMillis.applyAsLong(request) : 0;
+				if (delayMillis > 0) {
+					TimeUnit.MILLISECONDS.sleep(delayMillis);
 				}
 				final var held = gate;
 				if (held != null && request.isObjectRequest() && holdOnListener.test(listener)
