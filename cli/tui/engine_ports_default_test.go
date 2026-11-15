@@ -64,12 +64,12 @@ type recordingPortPreflight struct {
 }
 
 func (p *recordingPortPreflight) CheckPorts(
-	_ context.Context, host *hostparse.HostInfo, registryPort, apiPort, rmiPortStart, rmiPortCount int,
+	_ context.Context, host *hostparse.HostInfo, registryPort, apiPort int,
 ) (*dockerconf.ConflictInfo, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.checks = append(p.checks, fmt.Sprintf("%s registry=%d api=%d rmi=%d+%d",
-		host.Original, registryPort, apiPort, rmiPortStart, rmiPortCount))
+	p.checks = append(p.checks, fmt.Sprintf("%s registry=%d api=%d",
+		host.Original, registryPort, apiPort))
 	return &dockerconf.ConflictInfo{}, nil
 }
 
@@ -215,7 +215,8 @@ func defaultEngineCommands(t *testing.T) []string {
 	return got
 }
 
-// wantDefaultEngineCommands is what 9b60d6dc generated for each engine on the default ports.
+// wantDefaultEngineCommands is what 9b60d6dc generated for each engine on the default ports,
+// less the unused RMI object range the local worker published and the port check covered.
 var wantDefaultEngineCommands = []string{
 	`remote node host: docker run -d --name spt-node-<time>-worker1-example-com -e SPT_LOG_DIR=/tmp/spt-node-home --label spt.host=worker1.example.com --label spt.managed=true --label spt.role=node --network host ghcr.io/dell/storage-performance-tool --run-node=true --run-port=9999 --storage-driver-type=s3`,
 	`remote node bridge: docker run -d --name spt-node-<time>-worker1-example-com -e SPT_LOG_DIR=/tmp/spt-node-home --label spt.host=worker1.example.com --label spt.managed=true --label spt.role=node -p 9999:9999/tcp ghcr.io/dell/storage-performance-tool --run-node=true --run-port=9999 --storage-driver-type=s3`,
@@ -224,14 +225,14 @@ var wantDefaultEngineCommands = []string{
 	`remote entry bridge: docker run -d --name spt-entry-<time>-worker1-example-com -e SPT_LOG_DIR=/tmp/spt-node-home --label spt.host=worker1.example.com --label spt.managed=true --label spt.role=entry ghcr.io/dell/storage-performance-tool --load-step-node-addrs=10.0.0.11:1099,10.0.0.12:1099 --run-node=true --run-port=9999 --storage-driver-type=s3`,
 	`local node host: cmd=["--run-node=true" "--run-port=9999" "--storage-driver-type=s3"] exposed=[] bindings=[] network="host"`,
 	`local node bridge: cmd=["--run-node=true" "--run-port=9999" "--storage-driver-type=s3"] exposed=[9999/tcp] bindings=[9999/tcp->127.0.0.1:9999] network=""`,
-	`local worker: cmd=["--run-node=true" "--run-port=9999" "--storage-driver-type=s3"] exposed=[1099/tcp 40000/tcp 40001/tcp 40002/tcp 9999/tcp] bindings=[1099/tcp->0.0.0.0:1099 9999/tcp->0.0.0.0:9999 40000/tcp->0.0.0.0:40000 40001/tcp->0.0.0.0:40001 40002/tcp->0.0.0.0:40002] network=""`,
+	`local worker: cmd=["--run-node=true" "--run-port=9999" "--storage-driver-type=s3"] exposed=[1099/tcp 9999/tcp] bindings=[1099/tcp->0.0.0.0:1099 9999/tcp->0.0.0.0:9999] network=""`,
 	`local entry host: cmd=["--load-step-node-addrs=10.0.0.11:1099" "--run-node=true" "--run-port=9999" "--storage-driver-type=s3"] exposed=[] bindings=[] network="host"`,
 	`local entry bridge: cmd=["--load-step-node-addrs=10.0.0.11:1099" "--run-node=true" "--run-port=9999" "--storage-driver-type=s3"] exposed=[9999/tcp] bindings=[9999/tcp->0.0.0.0:9999] network=""`,
 	`distributed worker: docker run -d --name spt-worker-<time>-worker1-example-com -e JAVA_OPTS=-Djava.rmi.server.hostname=198.51.100.12 -e JAVA_TOOL_OPTIONS=-Djava.rmi.server.hostname=198.51.100.12 -e SPT_LOG_DIR=/tmp/spt-node-home --label spt.host=worker1.example.com --label spt.managed=true --label spt.role=worker --network host ghcr.io/dell/storage-performance-tool --run-node=true --run-port=9999 --load-step-node-port=1099 --storage-driver-type=s3`,
 	`distributed entry: docker run -d --name spt-entry-<time>-worker1-example-com -e SPT_LOG_DIR=/tmp/spt-node-home --label spt.host=worker1.example.com --label spt.managed=true --label spt.role=entry --network host ghcr.io/dell/storage-performance-tool --load-step-node-addrs=198.51.100.12:1099 --run-node=true --run-port=9999 --storage-driver-type=s3 --storage-net-nodeInterfaces-198.51.100.12:1099=mlx5_0`,
 	`lone remote: docker run -d --name spt-node-<time>-worker1-example-com -e SPT_LOG_DIR=/tmp/spt-node-home --label spt.host=worker1.example.com --label spt.managed=true --label spt.role=node --network host ghcr.io/dell/storage-performance-tool --run-node=true --run-port=9999 --storage-driver-type=s3`,
-	`port check: entry.example registry=1099 api=9999 rmi=40000+10`,
-	`port check: wrk2.example registry=1099 api=9999 rmi=40000+10`,
+	`port check: entry.example registry=1099 api=9999`,
+	`port check: wrk2.example registry=1099 api=9999`,
 }
 
 func TestDefaultEnginePortsKeepEveryEngineCommand(t *testing.T) {
