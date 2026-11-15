@@ -6,6 +6,7 @@ package verification
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -37,6 +38,7 @@ func NewVerifierWithDeps(hosts []*hostparse.HostInfo, config Config, cmdExecutor
 		netChecker:   netChecker,
 		timeProvider: timeProvider,
 		preflight:    preflight.NewCheckerWithExecutor(cmdExecutor),
+		runID:        newVerifyRunID(),
 	}
 }
 
@@ -53,7 +55,13 @@ func NewVerifierWithDepsAndPreflight(hosts []*hostparse.HostInfo, config Config,
 		netChecker:   netChecker,
 		timeProvider: timeProvider,
 		preflight:    pf,
+		runID:        newVerifyRunID(),
 	}
+}
+
+// newVerifyRunID returns a random id for one spt verify invocation.
+func newVerifyRunID() string {
+	return rand.Text()
 }
 
 // printProgressWarning prints a yellow warning line with the message during step-by-step progress.
@@ -756,7 +764,7 @@ func (v *Verifier) startNodeContainer(host *hostparse.HostInfo, result *NodeResu
 	// Create Docker operations instance
 	dockerOps := command.NewDockerOperations(v.cmdExecutor, host)
 
-	// Remove any lingering verification containers from prior runs to avoid port conflicts.
+	// Remove stale verification containers left by earlier runs; see cleanupVerifyContainers.
 	v.cleanupVerifyContainers(host, dockerOps)
 
 	// Build container configuration
@@ -788,11 +796,12 @@ func (v *Verifier) startNodeContainer(host *hostparse.HostInfo, result *NodeResu
 		NetworkMode:  networkMode,
 		PortMappings: portMappings,
 		Labels: map[string]string{
-			"spt.verify":                 stringTrue,
-			"spt.verify.host":            host.Host,
-			constants.DockerLabelManaged: stringTrue,
-			constants.DockerLabelRole:    constants.DockerRoleVerify,
-			constants.DockerLabelHost:    host.Host,
+			constants.DockerLabelVerify:     stringTrue,
+			constants.DockerLabelVerifyHost: host.Host,
+			constants.DockerLabelVerifyRun:  v.runID,
+			constants.DockerLabelManaged:    stringTrue,
+			constants.DockerLabelRole:       constants.DockerRoleVerify,
+			constants.DockerLabelHost:       host.Host,
 		},
 		Environment: map[string]string{
 			constants.JavaOptsEnvVar: fmt.Sprintf("%s%s", constants.JavaRMIHostnamePrefix, externalIP),
@@ -1082,6 +1091,31 @@ func (v *Verifier) getExternalIP(host *hostparse.HostInfo) string {
 
 // isPortOpen removed as unused (dead code)
 
+// verifyContainerStaleAge is how old a running verify container must be before another spt verify
+// invocation removes it as left behind. A verify container lives from its start to its removal at the
+// end of the same invocation, and every step in between is bounded by its own timeout:
+//
+//	start           30 s  (constants.ContainerStartTimeoutSecs)
+//	RDMA checks     30 s  (device, driver and readiness, 10 s each; --rdma only)
+//	RDMA ports      10 s  per RDMA device (--rdma only; 16 devices give 160 s)
+//	NIC plan        60 s  (constants.NicPlanTimeoutSecs)
+//	port readiness  30 s  (constants.APIReadinessTimeout) plus one 2 s probe round
+//	endpoints       10 s  (two requests of constants.HTTPRequestTimeoutSecs)
+//	removal         20 s  (stopContainer)
+//
+// That is about 150 s without RDMA and about 350 s with 16 RDMA devices. 15 minutes is well above
+// either, so a container younger than this belongs to a verify that is still running, and it also
+// leaves room for a few minutes of clock skew between this client and the Docker host, whose clock
+// stamps the creation time.
+const verifyContainerStaleAge = 15 * time.Minute
+
+// verifyContainerFields is the number of "@"-separated fields in constants.DockerVerifyCleanupFormat.
+const verifyContainerFields = 3
+
+// cleanupVerifyContainers removes running verify containers on host that earlier spt verify runs
+// left behind. It removes only containers older than verifyContainerStaleAge that do not carry this
+// invocation's run label; a container without the run label (from an older CLI) is judged by age
+// alone. A running verify of another invocation is never removed.
 func (v *Verifier) cleanupVerifyContainers(host *hostparse.HostInfo, dockerOps command.DockerOperations) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1089,8 +1123,8 @@ func (v *Verifier) cleanupVerifyContainers(host *hostparse.HostInfo, dockerOps c
 	stdout, stderr, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{
 		constants.DockerCommand,
 		constants.DockerCmdPS,
-		constants.DockerFlagQuiet,
-		constants.DockerFlagFilter, "label=spt.verify=true",
+		constants.DockerFlagFilter, "label=" + constants.DockerLabelVerify + "=" + stringTrue,
+		constants.DockerFlagFormat, constants.DockerVerifyCleanupFormat,
 	})
 	if err != nil {
 		logging.LogWarn("verifier", "failed to list verification containers",
@@ -1100,27 +1134,82 @@ func (v *Verifier) cleanupVerifyContainers(host *hostparse.HostInfo, dockerOps c
 		return
 	}
 
-	ids := strings.Fields(stdout)
-	for _, id := range ids {
-		if id == "" {
+	now := v.timeProvider.Now()
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
-		rmCtx, rmCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		err := dockerOps.StopContainer(rmCtx, id)
-		rmCancel()
-		if err != nil {
-			if !strings.Contains(strings.ToLower(err.Error()), "no such container") {
-				logging.LogWarn("verifier", "failed to remove lingering verification container",
-					"host", host.Host,
-					"container", id,
-					"error", err.Error())
-			}
-		} else {
-			logging.LogInfo("verifier", "removed lingering verification container",
+		fields := strings.SplitN(line, "@", verifyContainerFields)
+		id := fields[0]
+		if len(fields) != verifyContainerFields || id == "" {
+			logging.LogWarn("verifier", "left verification container alone: unexpected docker ps line",
 				"host", host.Host,
-				"container", id)
+				"line", line)
+			continue
+		}
+		created, err := parseDockerCreatedAt(fields[1])
+		if err != nil {
+			logging.LogWarn("verifier", "left verification container alone: cannot parse its creation time",
+				"host", host.Host,
+				"container", id,
+				"created", fields[1],
+				"error", err.Error())
+			continue
+		}
+		runID := dockerLabelValue(fields[2], constants.DockerLabelVerifyRun)
+		age := now.Sub(created)
+		if (runID != "" && runID == v.runID) || age < verifyContainerStaleAge {
+			logging.LogDebug("verifier", "left verification container alone: not stale",
+				"host", host.Host,
+				"container", id,
+				"run", runID,
+				"age", age.Round(time.Second).String(),
+				"stale_age", verifyContainerStaleAge.String())
+			continue
+		}
+		v.removeStaleVerifyContainer(host, dockerOps, id, age)
+	}
+}
+
+func (v *Verifier) removeStaleVerifyContainer(host *hostparse.HostInfo, dockerOps command.DockerOperations, id string, age time.Duration) {
+	rmCtx, rmCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	err := dockerOps.StopContainer(rmCtx, id)
+	rmCancel()
+	if err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "no such container") {
+			logging.LogWarn("verifier", "failed to remove lingering verification container",
+				"host", host.Host,
+				"container", id,
+				"error", err.Error())
+		}
+		return
+	}
+	logging.LogInfo("verifier", "removed lingering verification container",
+		"host", host.Host,
+		"container", id,
+		"age", age.Round(time.Second).String())
+}
+
+// parseDockerCreatedAt parses docker ps's CreatedAt ("2006-01-02 15:04:05 -0700 MST"). It reads the
+// numeric offset and ignores the zone name, which Go cannot parse for every zone.
+func parseDockerCreatedAt(s string) (time.Time, error) {
+	parts := strings.Fields(s)
+	if len(parts) < 3 {
+		return time.Time{}, fmt.Errorf("want date, time and offset, got %q", s)
+	}
+	return time.Parse("2006-01-02 15:04:05 -0700", strings.Join(parts[:3], " "))
+}
+
+// dockerLabelValue returns the value of label in docker ps's Labels field ("k=v,k=v"), or "" when
+// it is absent.
+func dockerLabelValue(labels, label string) string {
+	for _, kv := range strings.Split(labels, ",") {
+		if value, ok := strings.CutPrefix(kv, label+"="); ok {
+			return value
 		}
 	}
+	return ""
 }
 
 func (v *Verifier) assessNode(result *NodeResult) Check {

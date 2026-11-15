@@ -101,4 +101,8 @@ type Verifier struct {
 	netChecker   NetworkChecker
 	timeProvider TimeProvider
 	preflight    preflight.Checker
+
+	// runID identifies this spt verify invocation; every container it starts carries it in the
+	// constants.DockerLabelVerifyRun label.
+	runID string
 }

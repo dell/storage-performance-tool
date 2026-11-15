@@ -64,6 +64,11 @@ const (
 	DockerContainerFormat = "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}"
 	DockerIPAddressFormat = "{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}"
 	DockerConflictFormat  = "{{.ID}}\\\\t{{.Names}}\\\\t{{.Image}}\\\\t{{.State}}\\\\t{{.Ports}}\\\\t{{.CreatedAt}}"
+	// DockerVerifyCleanupFormat lists a verify container's ID, creation time and labels in one
+	// docker ps call. Like the formats above it has no spaces or shell metacharacters, so it reaches
+	// docker as one word both locally and through SSH's remote shell; "@" separates the fields
+	// because CreatedAt holds spaces and Labels holds commas.
+	DockerVerifyCleanupFormat = "{{.ID}}@{{.CreatedAt}}@{{.Labels}}"
 )
 
 // Port number constants
@@ -103,6 +108,13 @@ const (
 	DockerLabelRole    = "spt.role"
 	DockerLabelHost    = "spt.host"
 	DockerLabelRunID   = "spt.run.id"
+
+	// DockerLabelVerify marks every container spt verify starts; DockerLabelVerifyHost names the
+	// host it verifies; DockerLabelVerifyRun carries the id of the spt verify invocation that
+	// started it, so a verify never removes another invocation's container.
+	DockerLabelVerify     = "spt.verify"
+	DockerLabelVerifyHost = "spt.verify.host"
+	DockerLabelVerifyRun  = "spt.verify.run"
 
 	DockerRoleEntry  = "entry"
 	DockerRoleWorker = "worker"
