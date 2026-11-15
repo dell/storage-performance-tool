@@ -62,7 +62,9 @@ const (
 	flagBucketMetrics         = "bucket-metrics"
 	flagCreatePrefix          = "create-prefix"
 	flagRMIRegistryPort       = "rmi-registry-port"
-	rmiRegistryPortUsage      = "Engine RMI registry port on every host; give each concurrent spt run on the same hosts its own port, and its own --rmi-port-start when a run has a local worker"
+	rmiRegistryPortUsage      = "Engine RMI registry port on every host; give each concurrent spt run on the same hosts, with or without a local worker, its own --rmi-registry-port and --api-port"
+	rmiPortStartUsage         = "No effect; kept for compatibility (the engine serves RMI on the registry port)"
+	rmiPortCountUsage         = "No effect; kept for compatibility"
 	flagInterfaces            = "interfaces"
 	flagHostInterfaces        = "host-interfaces"
 	itemNamingShardsPath      = "item.naming.shards"
@@ -1973,6 +1975,11 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 		if err := validateRunWorkloadTypeFunc(workloadType); err != nil {
 			return err
 		}
+		// Refuse a --network-mode typo before the scenario file, any port check or host connection.
+		networkModeFlag, _ := cmd.Flags().GetString("network-mode")
+		if err := validateNetworkMode(networkModeFlag); err != nil {
+			return err
+		}
 
 		// Build scenario parameters
 		params, err := buildScenarioParams(workloadType, cmd)
@@ -2587,8 +2594,8 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 	runCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
 	runCmd.Flags().String(flagInterfaces, "", "Spread each engine's connections over a NIC set: auto, or interface names, IPv4 addresses or RDMA devices (comma-separated; default S3 driver, host networking; env: SPT_INTERFACES)")
 	runCmd.Flags().StringArray(flagHostInterfaces, nil, "Replace --interfaces on one host: <host>=<value>, with <value> auto, a comma-separated list, or none to turn NICs off there; repeat for more hosts")
-	runCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
-	runCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
+	runCmd.Flags().Int("rmi-port-start", 40000, rmiPortStartUsage)
+	runCmd.Flags().Int("rmi-port-count", 10, rmiPortCountUsage)
 	runCmd.Flags().Int(flagRMIRegistryPort, constants.DefaultRMIRegistryPort, rmiRegistryPortUsage)
 
 	// RDMA Acceleration Options

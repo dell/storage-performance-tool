@@ -56,12 +56,17 @@ func (ma *MetricsAggregator) Aggregate(nodeMetrics map[string]*PerformanceMetric
 	}
 
 	logging.LogDebug("metrics-aggregator", "aggregating node metrics", "node_count", len(filtered))
-	return ma.aggregateNodeMetrics(filtered)
+	result, _ := ma.aggregateNodeMetrics(filtered)
+	return result
 }
 
-func (ma *MetricsAggregator) aggregateNodeMetrics(nodeMetrics map[string]*PerformanceMetric) *PerformanceMetric {
+// aggregateNodeMetrics sums one op type's per-node metrics. limitMixed reports
+// that at least two nodes reported a limit and the limit types differ; the
+// result then has no limit and the minimum TestState over the nodes, so the
+// step completes only when every node has.
+func (ma *MetricsAggregator) aggregateNodeMetrics(nodeMetrics map[string]*PerformanceMetric) (result *PerformanceMetric, limitMixed bool) {
 	if len(nodeMetrics) == 0 {
-		return nil
+		return nil, false
 	}
 
 	nodeCount := len(nodeMetrics)
@@ -73,24 +78,25 @@ func (ma *MetricsAggregator) aggregateNodeMetrics(nodeMetrics map[string]*Perfor
 
 	ma.warnOnAggregateSamples(nodeMetrics, nodeCount)
 
-	result := ma.sumWorkerMetrics(nodeMetrics, nodesPresent)
+	result, limitMixed = ma.sumWorkerMetrics(nodeMetrics, nodesPresent)
 	if result != nil {
 		logging.LogDebug("metrics-aggregator", "summed node metrics",
 			"success", result.SuccessCount,
 			"failed", result.FailedCount,
 			"ops_per_sec", result.OpsPerSec,
-			"nodes", len(nodesPresent))
+			"nodes", len(nodesPresent),
+			"limit_mixed", limitMixed)
 	}
-	return result
+	return result, limitMixed
 }
 
-func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*PerformanceMetric, nodesPresent []string) *PerformanceMetric {
+func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*PerformanceMetric, nodesPresent []string) (*PerformanceMetric, bool) {
 	deleteMetrics, deleteCompatible, deleteIncomplete := aggregateDeleteMetrics(nodeMetrics, nodesPresent)
 	if !deleteCompatible {
 		ma.incompatibleDeleteWarnOnce.Do(func() {
 			logging.LogWarn("metrics-aggregator", "refusing to merge incompatible DELETE result identities")
 		})
-		return nil
+		return nil, false
 	}
 	var result PerformanceMetric
 	result.Scope = aggregateLabel
@@ -123,6 +129,7 @@ func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*Performanc
 		totalLimitOps        int64
 		maxLimitTime         int64
 		allHaveCorruptCount  = true
+		minTestState         int
 	)
 
 	for _, metric := range nodeMetrics {
@@ -196,6 +203,9 @@ func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*Performanc
 		if metric.TestState > result.TestState {
 			result.TestState = metric.TestState
 		}
+		if metricCount == 1 || metric.TestState < minTestState {
+			minTestState = metric.TestState
+		}
 		if result.RunID == "" {
 			result.RunID = metric.RunID
 		}
@@ -253,7 +263,11 @@ func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*Performanc
 	result.OverallUnbounded = allOverallUnbounded
 	result.HasCorruptCount = metricCount > 0 && allHaveCorruptCount
 
-	if !limitMixed && limitPresent {
+	if limitMixed {
+		// Nodes disagree on the limit type, so no single limit describes the
+		// step. Report none, and stay below Completed until every node is.
+		result.TestState = minTestState
+	} else if limitPresent {
 		result.HasLimit = true
 		result.LimitType = limitType
 		switch limitType {
@@ -286,9 +300,9 @@ func (ma *MetricsAggregator) sumWorkerMetrics(nodeMetrics map[string]*Performanc
 	for _, metric := range nodeMetrics {
 		nodeList = append(nodeList, metric)
 	}
-	applyProgressAndLimitFields(&result, nodeList)
+	applyProgressAndLimitFields(&result, nodeList, limitMixed)
 
-	return &result
+	return &result, limitMixed
 }
 
 const maxDeleteBucketMetrics = deletemetrics.MaxBucketMetrics
@@ -619,6 +633,7 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 
 	perOp = make(map[string]*PerformanceMetric, len(groups))
 	groupedMetrics := make([]*PerformanceMetric, 0, len(groups))
+	anyLimitMixed := false
 	for _, groupID := range groupOrder {
 		group := groups[groupID]
 		metric := group[0]
@@ -634,10 +649,12 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 				}
 				nodeMetrics[nodeID] = nodeMetric
 			}
-			metric = NewMetricsAggregator().aggregateNodeMetrics(nodeMetrics)
+			var limitMixed bool
+			metric, limitMixed = NewMetricsAggregator().aggregateNodeMetrics(nodeMetrics)
 			if metric == nil {
 				return nil, nil
 			}
+			anyLimitMixed = anyLimitMixed || limitMixed
 		}
 		perOp[groupKeys[groupID]] = metric
 		groupedMetrics = append(groupedMetrics, metric)
@@ -670,6 +687,9 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 	agg.SampleTimestamp = first.SampleTimestamp
 	agg.SampleTimestampRaw = first.SampleTimestampRaw
 	agg.SptTimestamp = first.SptTimestamp
+	// The step is complete only when every op type is: start from the first
+	// group's state and take the minimum across groups.
+	agg.TestState = first.TestState
 
 	for _, m := range groupedMetrics {
 		if !strings.EqualFold(first.OpType, m.OpType) {
@@ -705,13 +725,13 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 			ttfbMetricCount++
 		}
 
-		if m.TestState > agg.TestState {
+		if m.TestState < agg.TestState {
 			agg.TestState = m.TestState
 		}
 		if m.StepTime > agg.StepTime {
 			agg.StepTime = m.StepTime
 		}
-		if m.HasLimit {
+		if m.HasLimit && !anyLimitMixed {
 			agg.HasLimit = true
 			agg.LimitType = m.LimitType
 			agg.LimitTimeSec = m.LimitTimeSec
@@ -743,7 +763,18 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 	agg.Unbounded = first.Unbounded
 	agg.OverallUnbounded = first.OverallUnbounded
 
-	applyProgressAndLimitFields(&agg, groupedMetrics)
+	if anyLimitMixed {
+		// A group whose nodes disagree on the limit type has no limit, so the
+		// combined step has none either, and completes only when every node of
+		// every op type has.
+		for _, m := range metrics {
+			if m != nil && m.TestState < agg.TestState {
+				agg.TestState = m.TestState
+			}
+		}
+	}
+
+	applyProgressAndLimitFields(&agg, groupedMetrics, anyLimitMixed)
 
 	return &agg, perOp
 }
@@ -754,15 +785,17 @@ func AggregateByOpType(metrics []*PerformanceMetric) (combined *PerformanceMetri
 //
 //   - StepTime: MAX across nodes (the most-progressed elapsed time).
 //   - HasLimit/LimitType/LimitTimeSec/LimitOpCount: filled from a node only when
-//     the aggregate has not already computed them.
-func applyProgressAndLimitFields(result *PerformanceMetric, metrics []*PerformanceMetric) {
+//     the aggregate has not already computed them and limitMixed is false. When
+//     the nodes disagree on the limit type, the aggregate keeps no limit rather
+//     than the limit of whichever node comes first.
+func applyProgressAndLimitFields(result *PerformanceMetric, metrics []*PerformanceMetric, limitMixed bool) {
 	if result == nil || len(metrics) == 0 {
 		return
 	}
 
 	var (
 		maxStepTime float64
-		limitSet    = result.HasLimit
+		limitSet    = result.HasLimit || limitMixed
 	)
 
 	for _, m := range metrics {

@@ -22,7 +22,7 @@ import org.junit.jupiter.api.Test;
 @SuppressWarnings("unchecked")
 final class CompositeReadFailureDriverTest {
 
-	private static final class D extends CoopStorageDriverMock<Item, Operation<Item>> {
+	static final class D extends CoopStorageDriverMock<Item, Operation<Item>> {
 		D(final DataInput in, final Config cfg) throws Exception {
 			super("composite-read-step", in, cfg, false, 1);
 		}
@@ -34,7 +34,7 @@ final class CompositeReadFailureDriverTest {
 		return (BlockingQueue<Operation<Item>>) field.get(driver);
 	}
 
-	private static Config cfg() {
+	static Config cfg() {
 		final var storageConfig = mock(Config.class);
 		final var driverConfig = mock(Config.class);
 		final var limitConfig = mock(Config.class);
