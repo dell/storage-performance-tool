@@ -403,6 +403,18 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 		return removed;
 	}
 
+	/**
+	 * A new cycle starts with no continuations of the earlier one: queue recovery of that cycle took
+	 * them, or they are no longer its to take.
+	 */
+	@Override
+	public void restart() {
+		synchronized (stoppedContinuations) {
+			stoppedContinuations.clear();
+		}
+		super.restart();
+	}
+
 	/** Takes the continuations {@link #doStop()} found unsent, once, for queue recovery. */
 	List<O> takeStoppedContinuations() {
 		synchronized (stoppedContinuations) {
