@@ -408,6 +408,35 @@ final class TimeLimitStopCompositeTest {
 		assertUnresolvedOnce(upload);
 	}
 
+	/**
+	 * A continuation the dispatch task kept at a stop belongs to that stop's queue recovery. The
+	 * driver's own stop and shutdown recover it before any restart; one that is still there when the
+	 * task restarts, such as a hand-off that came after that recovery, is not taken by the next
+	 * cycle's recovery.
+	 */
+	@Test
+	@SuppressWarnings("unchecked")
+	void aRestartedDispatchTaskKeepsNoContinuationOfTheEarlierCycle() throws Exception {
+		startDriver(16);
+		final var upload = initiationInFlight(1024);
+		driver.start();
+		driver.closeAdmission();
+		final var taskField = CoopStorageDriverBase.class.getDeclaredField("opDispatchTask");
+		taskField.setAccessible(true);
+		final var task = (OperationDispatchTask<Item, Operation<Item>>) taskField.get(driver);
+		final var keptField = OperationDispatchTask.class.getDeclaredField("stoppedContinuations");
+		keptField.setAccessible(true);
+		final var kept = (List<Operation<Item>>) keptField.get(task);
+		synchronized (kept) {
+			kept.add(op(upload));
+		}
+		assertTrue(task.isStopped(), "the stop stopped the task");
+
+		task.restart();
+
+		assertTrue(task.takeStoppedContinuations().isEmpty(), "the new cycle starts with no continuation of the earlier one");
+	}
+
 	/** A multi-range read's next range comes after the stop, which refuses it: the read is unresolved at once. */
 	@Test
 	void aReadWhoseNextRangeTheStopRefusesIsUnresolvedAtOnce() throws Exception {
