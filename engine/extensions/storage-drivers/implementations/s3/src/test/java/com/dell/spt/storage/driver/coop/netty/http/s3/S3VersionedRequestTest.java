@@ -10,13 +10,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.data.SeedDataInput;
 import com.dell.spt.base.item.DataItemImpl;
+import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.PathItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.item.op.deletion.DeleteRequest;
+import com.dell.spt.base.item.op.deletion.DeleteRequestOperationImpl;
+import com.dell.spt.base.item.op.deletion.DeleteTarget;
+import com.dell.spt.base.item.op.list.ListOperationImpl;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl;
 import com.dell.spt.base.storage.Credential;
+import com.dell.spt.base.storage.driver.ListOptions;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
@@ -65,6 +72,12 @@ final class S3VersionedRequestTest {
 					"user1", "u5QtPuQx+W5nrrQQEg7nArBqSgC8qLiDt2RhQthb");
 	private static final String HOST = "127.0.0.1:9024";
 	private static final String VERSION_HEADER = "x-amz-version-id";
+	/** Version IDs and their encoding in the query: plain, reserved characters, and UTF-8. */
+	private static final Map<String, String> ENCODED_IDS = Map.of(
+					"v1", "v1",
+					"v+1=:x", "v%2B1%3D%3Ax",
+					"v 1&a%b", "v%201%26a%25b",
+					"\u00e9\u4e2d", "%C3%A9%E4%B8%AD");
 
 	private final List<AutoCloseable> resources = new ArrayList<>();
 
@@ -239,11 +252,7 @@ final class S3VersionedRequestTest {
 
 	@Test
 	void aVersionIdThatNeedsEncodingIsSentEncodedAndSignedDecodedUnderV2() throws Exception {
-		final Map<String, String> encoded = new LinkedHashMap<>();
-		encoded.put("v1", "v1");
-		encoded.put("v+1=:x", "v%2B1%3D%3Ax");
-		encoded.put("v 1&a%b", "v%201%26a%25b");
-		encoded.put("\u00e9\u4e2d", "%C3%A9%E4%B8%AD");
+		final Map<String, String> encoded = ENCODED_IDS;
 		final var driver = driver(true, 2, false);
 		final var headDriver = driver(true, 2, true);
 		for (final var entry : encoded.entrySet()) {
@@ -268,6 +277,105 @@ final class S3VersionedRequestTest {
 								what);
 			}
 		}
+	}
+
+	/** The standalone (manifest) DELETE and the delete-verification HEAD select a version too. */
+	@Test
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	void aManifestDeleteAndAPresenceHeadSignAnEncodedVersionDecodedUnderV2() throws Exception {
+		final var driver = driver(false, 2, false);
+		for (final var entry : ENCODED_IDS.entrySet()) {
+			final var target = new DeleteTarget(new IntegrityManifestDataItem("b", "key", 0, entry.getKey()));
+			final Operation delete = new DeleteRequestOperationImpl(0, new DeleteRequest("b", CREDENTIAL, List.of(target)));
+			final HttpRequest deleteRequest = driver.httpRequest(delete, HOST);
+			driver.log().clear();
+			driver.presence(target);
+			final HttpRequest head = driver.log().poll();
+			for (final var request : List.of(deleteRequest, head)) {
+				final var what = request.method() + " of " + entry.getKey();
+				assertEquals("/b/key?versionId=" + entry.getValue(), request.uri(), what);
+				assertEquals(
+								"AWS " + CREDENTIAL.getUid() + ":" + referenceV2Signature(request),
+								request.headers().get(HttpHeaderNames.AUTHORIZATION),
+								what);
+			}
+		}
+	}
+
+	/**
+	 * Requests that select no version sign their URI exactly as sent, as before: only the requests
+	 * that put a version ID in the query sign it decoded. That holds for an unversioned name that
+	 * itself holds {@code versionId=}, and for the multipart, tagging and list queries.
+	 */
+	@Test
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	void requestsThatSelectNoVersionSignTheirUriAsSentUnderV2() throws Exception {
+		final var unversioned = driver(false, 2, false);
+		final List<HttpRequest> requests = new ArrayList<>();
+		requests.add(unversioned.httpRequest(op(OpType.READ, "k?x=1&versionId=a%2Bb"), HOST));
+		requests.add(unversioned.httpRequest(op(OpType.READ, "key"), HOST));
+		final var item = new DataItemImpl("key", 0, 16);
+		item.dataInput(dataInput());
+		final var upload = new CompositeDataOperationImpl<>(0, OpType.CREATE, item, null, "/b", CREDENTIAL, null, 0, 8);
+		requests.add(unversioned.httpRequest((Operation) upload, HOST));
+		upload.put(S3Api.KEY_UPLOAD_ID, "2~up+load/id");
+		final var part = new DataItemImpl("key", 0, 8);
+		part.dataInput(dataInput());
+		requests.add(unversioned.httpRequest(
+						(Operation) new PartialDataOperationImpl<>(0, OpType.CREATE, part, null, "/b", CREDENTIAL, 1, upload),
+						HOST));
+		final var list = new ListOperationImpl<PathItemImpl>(0, OpType.LIST, new PathItemImpl("/b/pre fix"), CREDENTIAL);
+		list.options(ListOptions.builder().startAfter("a+b c").build());
+		requests.add(unversioned.httpRequest((Operation) list, HOST));
+		final Config config = S3StorageDriverTest.baseConfig(true, 2, false, null, HOST);
+		config.val("storage-object-tagging-enabled", true);
+		final var tagging = new S3StorageDriverTest.TestS3Driver(config);
+		resources.add(tagging);
+		requests.add(tagging.httpRequest(op(OpType.READ, "key~v1"), HOST));
+
+		final List<String> uris = new ArrayList<>();
+		for (final var request : requests) {
+			uris.add(request.uri());
+			assertEquals(
+							"AWS " + CREDENTIAL.getUid() + ":" + asSentV2Signature(request),
+							request.headers().get(HttpHeaderNames.AUTHORIZATION),
+							request::uri);
+		}
+		assertEquals("/b/k?x=1&versionId=a%2Bb", uris.get(0));
+		assertEquals("/b/key", uris.get(1));
+		assertTrue(uris.get(2).endsWith("?uploads"), uris.get(2));
+		assertTrue(uris.get(3).contains("uploadId=2~up+load/id"), uris.get(3));
+		assertTrue(uris.get(4).contains("start-after=a%2Bb%20c"), uris.get(4));
+		assertEquals("/b/key~v1?tagging", uris.get(5));
+	}
+
+	/** SigV4 of a version ID that needs no encoding, and of a query of several parameters. */
+	@Test
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	void v4SignsAPlainVersionIdAndAMultiParameterQueryAsTheSpecificationDoes() throws Exception {
+		final var driver = driver(true, 4, false);
+		for (final var type : List.of(OpType.READ, OpType.STAT, OpType.DELETE)) {
+			final var request = driver.httpRequest(op(type, "key~3HL4kqtJlcpXroDTDmJ.rmSpXd3dIbrHY"), HOST);
+			assertEquals("/b/key?versionId=3HL4kqtJlcpXroDTDmJ.rmSpXd3dIbrHY", request.uri());
+			assertEquals(referenceV4Signature(request), signature(request.headers()), type::toString);
+		}
+		final var list = new ListOperationImpl<PathItemImpl>(0, OpType.LIST, new PathItemImpl("/b/pre"), CREDENTIAL);
+		list.options(ListOptions.builder().startAfter("a+b").build());
+		final var listRequest = driver.httpRequest((Operation) list, HOST);
+		assertTrue(listRequest.uri().contains("&"), listRequest::uri);
+		assertEquals(referenceV4Signature(listRequest), signature(listRequest.headers()));
+		// A single parameter whose value is sent unencoded: %41 is canonically A.
+		final var item = new DataItemImpl("key", 0, 16);
+		item.dataInput(dataInput());
+		final var upload = new CompositeDataOperationImpl<>(0, OpType.CREATE, item, null, "/b", CREDENTIAL, null, 0, 8);
+		upload.put(S3Api.KEY_UPLOAD_ID, "a%41");
+		upload.put(S3Api.KEY_MPU_ABORT, "true");
+		final var abort = driver.httpRequest((Operation) upload, HOST);
+		assertEquals("/b/key?uploadId=a%41", abort.uri());
+		assertEquals(referenceV4Signature(abort), signature(abort.headers()));
 	}
 
 	// ---------- the item is never renamed while its request is built ----------
@@ -592,6 +700,15 @@ final class S3VersionedRequestTest {
 	 * botocore: the path as sent, then the sub-resources sorted, each value percent-decoded.
 	 */
 	private static String referenceV2Signature(final HttpRequest request) throws Exception {
+		return v2Signature(request, true);
+	}
+
+	/** The V2 signature SPT gives a request that selects no version: its URI signed exactly as sent. */
+	private static String asSentV2Signature(final HttpRequest request) throws Exception {
+		return v2Signature(request, false);
+	}
+
+	private static String v2Signature(final HttpRequest request, final boolean subResourcesDecoded) throws Exception {
 		final var headers = request.headers();
 		final var stringToSign = new StringBuilder(request.method().name()).append('\n');
 		for (final var name : List.of("content-md5", "content-type", "date")) {
@@ -607,8 +724,12 @@ final class S3VersionedRequestTest {
 		amz.forEach((name, value) -> stringToSign.append(name).append(':').append(value).append('\n'));
 		final var uri = request.uri();
 		final var queryIndex = uri.indexOf('?');
-		stringToSign.append(queryIndex < 0 ? uri : uri.substring(0, queryIndex));
-		if (queryIndex >= 0) {
+		if (!subResourcesDecoded) {
+			stringToSign.append(uri);
+		} else {
+			stringToSign.append(queryIndex < 0 ? uri : uri.substring(0, queryIndex));
+		}
+		if (subResourcesDecoded && queryIndex >= 0) {
 			final var subResources = new TreeMap<String, String>();
 			for (final var pair : uri.substring(queryIndex + 1).split("&")) {
 				final var eq = pair.indexOf('=');

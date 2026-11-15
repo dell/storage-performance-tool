@@ -988,9 +988,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 		final var target = deleteRequest.targets().get(0);
 		final var objectUri = standaloneObjectUri(deleteRequest.bucket(), target);
-		final var uri = target.versionId() == null
-						? objectUri
-						: objectUri + "?versionId=" + percentEncode(target.versionId());
+		final var encodedVersionId = target.versionId() == null ? null : encodeVersionId(target.versionId());
+		final var uri = encodedVersionId == null ? objectUri : objectUri + VERSION_ID_QUERY + encodedVersionId;
 		final HttpHeaders headers = new DefaultHttpHeaders();
 		if (nodeAddr != null) {
 			headers.set(HttpHeaderNames.HOST, nodeAddr);
@@ -998,7 +997,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		headers.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 		applyDynamicHeaders(headers);
 		applySharedHeaders(headers);
-		applyAuthHeaders(headers, HttpMethod.DELETE, uri, deleteRequest.credential());
+		applyAuthHeaders(
+						headers,
+						HttpMethod.DELETE,
+						signedUri(uri, objectUri, target.versionId(), encodedVersionId),
+						deleteRequest.credential());
 		return new DefaultHttpRequest(HTTP_1_1, HttpMethod.DELETE, uri, headers);
 	}
 
@@ -1064,9 +1067,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	@Override
 	public Presence presence(final DeleteTarget target) {
 		final String objectUri = standaloneObjectUri(target.bucket(), target);
-		final String uri = target.versionId() == null
-						? objectUri
-						: objectUri + "?versionId=" + percentEncode(target.versionId());
+		final String encodedVersionId = target.versionId() == null ? null : encodeVersionId(target.versionId());
+		final String uri = encodedVersionId == null ? objectUri : objectUri + VERSION_ID_QUERY + encodedVersionId;
 		final HttpHeaders headers = new DefaultHttpHeaders();
 		final String nodeAddr = helperAuthority;
 		headers.set(HttpHeaderNames.HOST, nodeAddr);
@@ -1077,7 +1079,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		applyAuthHeaders(
 						headers,
 						HttpMethod.HEAD,
-						uri,
+						signedUri(uri, objectUri, target.versionId(), encodedVersionId),
 						pathToCredMap.getOrDefault(bucketPath, this.credential));
 		final FullHttpRequest request = new DefaultFullHttpRequest(
 						HTTP_1_1,
@@ -1233,6 +1235,9 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		if (rawQuery == null || rawQuery.isEmpty()) {
 			return "";
 		}
+		if (isCanonicalSingleParameter(rawQuery)) {
+			return rawQuery;
+		}
 		final var parts = rawQuery.split("&", 0);
 		final List<String> canonicalComponents = new ArrayList<>(parts.length);
 		for (final var part : parts) {
@@ -1247,6 +1252,27 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 		Collections.sort(canonicalComponents);
 		return String.join("&", canonicalComponents);
+	}
+
+	/**
+	 * Whether {@code rawQuery} is one {@code key=value} pair of unreserved characters, such as {@code
+	 * versionId=<an AWS version ID>}: decoding and encoding it again gives it back, and one pair needs no
+	 * sorting, so it is already canonical. The scan stops at the first other character.
+	 */
+	private static boolean isCanonicalSingleParameter(final String rawQuery) {
+		int equalsIndex = -1;
+		for (int i = 0; i < rawQuery.length(); i++) {
+			final char ch = rawQuery.charAt(i);
+			if (ch == '=') {
+				if (equalsIndex != -1) {
+					return false;
+				}
+				equalsIndex = i;
+			} else if (!isUnreserved(ch)) {
+				return false;
+			}
+		}
+		return equalsIndex > 0;
 	}
 
 	private static String normalizeHeaderValue(final String value) {
@@ -1297,6 +1323,37 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			Loggers.MSG.debug("Failed to URL-decode component '{}': {}", value, ex.getMessage());
 			return value;
 		}
+	}
+
+	private static final String VERSION_ID_QUERY = "?versionId=";
+
+	/**
+	 * The {@code versionId} query value: {@code versionId} itself when every character is unreserved,
+	 * as in an AWS version ID, so the common case allocates nothing; otherwise its percent-encoding.
+	 */
+	private static String encodeVersionId(final String versionId) {
+		for (int i = 0; i < versionId.length(); i++) {
+			if (!isUnreserved(versionId.charAt(i))) {
+				return percentEncode(versionId);
+			}
+		}
+		return versionId;
+	}
+
+	/**
+	 * The URI to sign for {@code uri}, which is {@code objectUri?versionId=<encodedVersionId>} when
+	 * {@code encodedVersionId} is set. V2 signs a sub-resource value decoded, so it signs the version ID
+	 * itself; V4 and every other request sign {@code uri} as sent. Only these version-selecting
+	 * requests pay for it: no other request's signing changes.
+	 */
+	private String signedUri(
+					final String uri, final String objectUri, final String versionId, final String encodedVersionId) {
+		// Percent-encoding lengthens every character it changes, so an unchanged length means the
+		// version ID needed none, and the URI as sent is also its decoded form.
+		if (authVersion != 2 || encodedVersionId == null || encodedVersionId.length() == versionId.length()) {
+			return uri;
+		}
+		return objectUri + VERSION_ID_QUERY + versionId;
 	}
 
 	private static String percentEncode(final String value) {
@@ -1762,8 +1819,9 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 										|| OpType.DELETE.equals(opType)
 										|| OpType.READ.equals(opType)
 										|| OpType.STAT.equals(opType));
+		final String encodedVersionId = useVersionQuery ? encodeVersionId(versionId) : null;
 		final String uri = useVersionQuery
-						? objectUri + "?versionId=" + percentEncode(versionId)
+						? objectUri + VERSION_ID_QUERY + encodedVersionId
 						: objectUri;
 		final var httpRequest = (HttpRequest) new DefaultHttpRequest(
 						HTTP_1_1, httpMethod, uri, httpHeaders);
@@ -1812,7 +1870,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		applyMetaDataHeaders(httpHeaders, op);
 		applyDynamicHeaders(httpHeaders);
 		applySharedHeaders(httpHeaders);
-		applyAuthHeaders(httpHeaders, httpRequest.method(), uri, op.credential());
+		applyAuthHeaders(httpHeaders, httpRequest.method(), signedUri(uri, objectUri, versionId, encodedVersionId), op.credential());
 		return httpRequest;
 	}
 
@@ -2762,44 +2820,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 							.append(sortedHeader.getValue());
 		}
 		buffCanonical.append('\n');
-		appendV2CanonicalResource(buffCanonical, dstUriPath);
+		buffCanonical.append(dstUriPath);
 		if (Loggers.MSG.isTraceEnabled()) {
 			Loggers.MSG.trace("Canonical representation:\n{}", buffCanonical);
 		}
 		return buffCanonical.toString();
-	}
-
-	private static final String VERSION_ID_PARAM = "versionId=";
-
-	/**
-	 * Appends the V2 canonical resource of {@code dstUriPath}. V2 signs a sub-resource value decoded,
-	 * while the request URI carries it percent-encoded: the {@code versionId} value, which the driver
-	 * encodes, is decoded here. Everything else is appended as before.
-	 */
-	static void appendV2CanonicalResource(final StringBuilder canonical, final String dstUriPath) {
-		final int queryIndex = dstUriPath.indexOf('?');
-		if (queryIndex < 0) {
-			canonical.append(dstUriPath);
-			return;
-		}
-		canonical.append(dstUriPath, 0, queryIndex + 1);
-		final int length = dstUriPath.length();
-		int start = queryIndex + 1;
-		while (true) {
-			final int amp = dstUriPath.indexOf('&', start);
-			final int end = amp < 0 ? length : amp;
-			if (dstUriPath.startsWith(VERSION_ID_PARAM, start)) {
-				canonical.append(VERSION_ID_PARAM)
-								.append(decodeQueryComponent(dstUriPath.substring(start + VERSION_ID_PARAM.length(), end)));
-			} else {
-				canonical.append(dstUriPath, start, end);
-			}
-			if (amp < 0) {
-				return;
-			}
-			canonical.append('&');
-			start = amp + 1;
-		}
 	}
 
 	@Override
