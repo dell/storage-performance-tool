@@ -63,9 +63,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -158,26 +158,27 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 							channel.hashCode(),
 							pipeline);
 			pipeline.removeLast(); // remove the API specific handler
-			final var fullRespSync = new SynchronousQueue<FullHttpResponse>();
+			// The response, or null once the channel goes inactive without one: a closed channel, the
+			// driver's I/O shutdown among its causes, ends the wait at once instead of after the timeout.
+			final var fullResp = new CompletableFuture<FullHttpResponse>();
 			pipeline.addLast(new HttpObjectAggregator(Integer.MAX_VALUE));
 			pipeline.addLast(
 							new SimpleChannelInboundHandler<HttpObject>() {
 								@Override
-								protected final void channelRead0(final ChannelHandlerContext ctx, final HttpObject msg)
-												throws Exception {
-									if (msg instanceof FullHttpResponse) {
-										fullRespSync.put(((FullHttpResponse) msg).retain());
+								protected final void channelRead0(final ChannelHandlerContext ctx, final HttpObject msg) {
+									if (msg instanceof FullHttpResponse response && !fullResp.complete(response.retain())) {
+										response.release();
 									}
+								}
+
+								@Override
+								public void channelInactive(final ChannelHandlerContext ctx) throws Exception {
+									fullResp.complete(null);
+									super.channelInactive(ctx);
 								}
 							});
 			channel.writeAndFlush(request).sync();
-			if (null == (resp = fullRespSync.poll(netTimeoutMilliSec, TimeUnit.MILLISECONDS))) {
-				if (warnOnTimeout) {
-					Loggers.MSG.warn("{}: Response timeout: {}", stepId, timeoutRequestDescription(request));
-				} else {
-					Loggers.MSG.debug("{}: Response timeout: {}", stepId, timeoutRequestDescription(request));
-				}
-			}
+			resp = awaitResponse(fullResp, request, warnOnTimeout);
 		} catch (final NoSuchElementException e) {
 			throw new ConnectException("Channel pipeline is empty: connectivity related failure");
 		} catch (final InterruptedException e) {
@@ -194,6 +195,35 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			final var unusedClose = channel.close();
 		}
 		return resp;
+	}
+
+	private FullHttpResponse awaitResponse(
+					final CompletableFuture<FullHttpResponse> fullResp,
+					final FullHttpRequest request,
+					final boolean warnOnTimeout)
+					throws InterruptedException, ExecutionException {
+		FullHttpResponse resp;
+		try {
+			resp = fullResp.get(netTimeoutMilliSec, TimeUnit.MILLISECONDS);
+			if (resp == null) {
+				logUnanswered(warnOnTimeout, "Connection closed before the response", request);
+			}
+		} catch (final TimeoutException e) {
+			// A response that arrived meanwhile is kept; a later one is released by the handler.
+			resp = fullResp.complete(null) ? null : fullResp.getNow(null);
+			if (resp == null) {
+				logUnanswered(warnOnTimeout, "Response timeout", request);
+			}
+		}
+		return resp;
+	}
+
+	private void logUnanswered(final boolean warn, final String what, final FullHttpRequest request) {
+		if (warn) {
+			Loggers.MSG.warn("{}: {}: {}", stepId, what, timeoutRequestDescription(request));
+		} else {
+			Loggers.MSG.debug("{}: {}: {}", stepId, what, timeoutRequestDescription(request));
+		}
 	}
 
 	static String timeoutRequestDescription(final FullHttpRequest request) {

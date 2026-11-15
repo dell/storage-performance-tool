@@ -1,5 +1,6 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3;
 
+import static com.dell.spt.base.Constants.KEY_STEP_ID;
 import static com.dell.spt.base.item.op.Operation.SLASH;
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.dell.spt.storage.driver.coop.netty.http.s3.S3Api.TAGGING_ENTRY_END;
@@ -91,6 +92,9 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.HexFormat;
@@ -109,6 +113,7 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.parsers.SAXParser;
+import org.apache.logging.log4j.CloseableThreadContext;
 import org.apache.logging.log4j.Level;
 import org.xml.sax.SAXException;
 
@@ -118,6 +123,22 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				implements com.dell.spt.base.storage.driver.ListDiscoveryProbe, DeleteVerificationProbe {
 
 	private static final String REDACTED_HEADER_VALUE = "<redacted>";
+	/**
+	 * How long the stop waits for the aborts that follow failed multipart completions before the
+	 * driver's I/O shuts down. An abort carries no data and a target answers it in milliseconds, so 10 s
+	 * leaves room for a loaded target while bounding what an unanswered abort adds to the step, a third
+	 * of the default 30 s net timeout that held the close before. It does not depend on
+	 * {@code storage.net.timeoutMilliSec}, so it holds at 0 too; an abort still unanswered then ends when
+	 * the I/O shutdown closes its connection.
+	 */
+	static final long MULTIPART_CLEANUP_STOP_WAIT_MILLIS = 10_000;
+	/**
+	 * The close's own bound on the same aborts when {@code storage.net.timeoutMilliSec} is 0 or less,
+	 * where the request has no timeout of its own: 60 s, twice the default timeout, as below.
+	 */
+	static final long MULTIPART_CLEANUP_CLOSE_CAP_MILLIS = 60_000;
+	/** Above twice the net timeout, for building and signing the abort and scheduling its thread. */
+	static final long MULTIPART_CLEANUP_CLOSE_MARGIN_MILLIS = 1_000;
 	static final String DELETE_FAILURE_MESSAGE = "S3 DELETE request failed at the transport or service boundary";
 	private static final String DELETE_QUERY = "delete";
 	private static final String DELETE_REQUEST_HEADER = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
@@ -340,7 +361,12 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	protected final String checksumAlgorithm;
 	protected final ChecksumStrategy checksumStrategy;
 	protected final String sigV4ServiceName;
-	private final Set<CompletableFuture<Void>> multipartCleanupTasks = ConcurrentHashMap.newKeySet();
+	/** The pending aborts that follow failed multipart completions, each with its upload. */
+	private final Map<CompletableFuture<Void>, PendingAbort> multipartCleanupTasks = new ConcurrentHashMap<>();
+	/** Set by the close before it takes its snapshot; an abort scheduled after that is not sent. */
+	private volatile boolean multipartCleanupClosing;
+	private volatile long multipartCleanupStopWaitMillis = MULTIPART_CLEANUP_STOP_WAIT_MILLIS;
+	private volatile long multipartCleanupCloseCapMillis = MULTIPART_CLEANUP_CLOSE_CAP_MILLIS;
 	// One WARN for a multipart abort the kernel route could not connect; the rest go to DEBUG.
 	private final AtomicBoolean kernelRouteAbortWarned = new AtomicBoolean();
 	private final KernelRouteAborts<KernelRouteAbort> kernelRouteAborts = new KernelRouteAborts<>();
@@ -2023,11 +2049,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	private void settleUnsentMultipartRequest(final O op) {
 		if (completionFailedWithoutAConnection(op)) {
 			scheduleFailedCompletionAbort((CompositeDataOperation) op, op.status());
-		} else if (abortsMultipartUpload(op) && Operation.Status.FAIL_IO.equals(op.status())) {
+		} else if (abortsMultipartUpload(op) && failedUnsent(op.status())) {
 			final var compositeOp = (CompositeDataOperation) op;
 			try {
 				emitMultipartLifecycle(compositeOp, "failed_orphaned", true, false,
-								mpuFailure(compositeOp) + "; abort failed: " + Operation.Status.FAIL_IO);
+								mpuFailure(compositeOp) + "; abort failed: " + op.status());
 			} catch (final RuntimeException e) {
 				LogUtil.exception(Level.DEBUG, e, "{}: failed to record an orphaned multipart upload", stepId);
 			}
@@ -2038,16 +2064,26 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	/**
 	 * Whether {@code op} is a multipart upload's completion that failed before it had a connection: a
-	 * failed lease or connect, on the default route, with endpoint selection or on a NIC set (every
-	 * such failure is FAIL_IO with no channel).
+	 * failed lease or connect, on the default route, with endpoint selection or on a NIC set. A refused
+	 * or timed-out connect is FAIL_IO; a lease that throws anything else is FAIL_UNKNOWN.
 	 */
 	static boolean completionFailedWithoutAConnection(final Operation<?> op) {
 		return op instanceof CompositeDataOperation compositeOp
 						&& OpType.CREATE.equals(op.type())
-						&& Operation.Status.FAIL_IO.equals(op.status())
+						&& failedUnsent(op.status())
 						&& compositeOp.get(S3Api.KEY_MPU_ABORT) == null
 						&& compositeOp.get(S3Api.KEY_UPLOAD_ID) != null
 						&& compositeOp.allSubOperationsDone();
+	}
+
+	/**
+	 * Whether a request that never had a connection failed: any failure but an interrupt, which is
+	 * rethrown before the operation completes, so its operation stays with the stop.
+	 */
+	private static boolean failedUnsent(final Operation.Status status) {
+		return status != null && !Operation.Status.SUCC.equals(status) && !Operation.Status.INTERRUPTED.equals(status)
+						&& !Operation.Status.PENDING.equals(status) && !Operation.Status.ACTIVE.equals(status)
+						&& !Operation.Status.OMIT.equals(status);
 	}
 
 	private static Operation.Status deleteFailureStatus(final Operation.Status status) {
@@ -2075,15 +2111,30 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		return true;
 	}
 
-	private void scheduleFailedCompletionAbort(
+	/** An abort after a failed completion, still pending: its upload and the completion's status. */
+	private record PendingAbort(CompositeDataOperation op, Operation.Status completionStatus) {}
+
+	void scheduleFailedCompletionAbort(
 					final CompositeDataOperation op, final Operation.Status completionStatus) {
 		final CompletableFuture<Void> cleanupTask = new CompletableFuture<>();
-		multipartCleanupTasks.add(cleanupTask);
+		// Tracked before the closing flag is read, and the close sets that flag before its snapshot:
+		// a task the snapshot misses sees the flag and sends nothing.
+		multipartCleanupTasks.put(cleanupTask, new PendingAbort(op, completionStatus));
+		if (multipartCleanupClosing) {
+			try {
+				recordAbortNotSent(op, completionStatus, "not sent: the driver is closing");
+			} finally {
+				multipartCleanupTasks.remove(cleanupTask);
+				cleanupTask.complete(null);
+			}
+			return;
+		}
 		ServiceTaskExecutor.VT_EXECUTOR.submit(() -> {
 			try {
 				abortAfterFailedCompletion(op, completionStatus);
 				cleanupTask.complete(null);
 			} catch (final Throwable failure) {
+				LogUtil.exception(Level.WARN, failure, "{}: the abort after a failed multipart completion failed", stepId);
 				cleanupTask.completeExceptionally(failure);
 			} finally {
 				multipartCleanupTasks.remove(cleanupTask);
@@ -2091,7 +2142,128 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		});
 	}
 
-	private void abortAfterFailedCompletion(
+	/** Records an upload whose abort was not sent, or not answered by the close, as orphaned. */
+	private void recordAbortNotSent(
+					final CompositeDataOperation op, final Operation.Status completionStatus, final String why) {
+		// The record goes to this step's file from any thread, the closing one among them.
+		try (final var ctx = CloseableThreadContext.put(KEY_STEP_ID, stepId)) {
+			emitMultipartLifecycle(op, "failed_orphaned", true, false,
+							"completion failed: " + completionStatus + "; abort " + why);
+		} catch (final RuntimeException e) {
+			LogUtil.exception(Level.DEBUG, e, "{}: failed to record an orphaned multipart upload", stepId);
+		}
+	}
+
+	/**
+	 * The stop waits here, after any subclass's stop work and before the I/O shuts down, for the aborts
+	 * that follow failed multipart completions, up to {@link #MULTIPART_CLEANUP_STOP_WAIT_MILLIS}. A
+	 * subclass that overrides this calls {@code super.beforeIoShutdown()} last: its own stop work can
+	 * schedule such an abort.
+	 */
+	@Override
+	protected void beforeIoShutdown() {
+		super.beforeIoShutdown();
+		awaitMultipartCleanupBeforeIoShutdown();
+	}
+
+	private void awaitMultipartCleanupBeforeIoShutdown() {
+		final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(multipartCleanupStopWaitMillis);
+		final Set<CompletableFuture<Void>> awaited = new HashSet<>();
+		while (true) {
+			// Waited on once each: a task completes its future before it leaves the set.
+			final List<CompletableFuture<Void>> pending = new ArrayList<>();
+			for (final var task : multipartCleanupTasks.keySet()) {
+				if (!task.isDone() && awaited.add(task)) {
+					pending.add(task);
+				}
+			}
+			if (pending.isEmpty()) {
+				return;
+			}
+			try {
+				CompletableFuture.allOf(pending.toArray(CompletableFuture[]::new))
+								.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+			} catch (final ExecutionException e) {
+				// The failed task logged its failure; the others are done too.
+			} catch (final TimeoutException e) {
+				Loggers.ERR.warn("{}: {} multipart abort(s) unanswered after {} ms; the I/O shutdown ends them",
+								stepId, pendingCleanupCount(), multipartCleanupStopWaitMillis);
+				return;
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+				Loggers.ERR.warn("{}: interrupted waiting for {} multipart abort(s); the I/O shutdown ends them",
+								stepId, pendingCleanupCount());
+				return;
+			}
+		}
+	}
+
+	private long pendingCleanupCount() {
+		return multipartCleanupTasks.keySet().stream().filter(task -> !task.isDone()).count();
+	}
+
+	/**
+	 * The close's bound on the aborts still pending, a backstop after the stop's wait: an abort waits
+	 * up to the net timeout for its connect and again for its answer, so twice the timeout plus a
+	 * margin; with no net timeout (0 or less), a fixed cap.
+	 */
+	long multipartCleanupCloseBoundMillis() {
+		return netTimeoutMilliSec < Integer.MAX_VALUE
+						? 2L * netTimeoutMilliSec + MULTIPART_CLEANUP_CLOSE_MARGIN_MILLIS
+						: multipartCleanupCloseCapMillis;
+	}
+
+	/** Test seam: the stop's wait in place of {@link #MULTIPART_CLEANUP_STOP_WAIT_MILLIS}. */
+	final void multipartCleanupStopWaitMillis(final long millis) {
+		multipartCleanupStopWaitMillis = millis;
+	}
+
+	/** Test seam: the close's cap in place of {@link #MULTIPART_CLEANUP_CLOSE_CAP_MILLIS}. */
+	final void multipartCleanupCloseCapMillis(final long millis) {
+		multipartCleanupCloseCapMillis = millis;
+	}
+
+	/** The aborts after failed completions not yet done. */
+	final int pendingMultipartCleanupTasks() {
+		return (int) pendingCleanupCount();
+	}
+
+	/** Test seam: runs in the close right after it marks the driver closing, before its snapshot. */
+	void afterMultipartCleanupClosing() {}
+
+	private void closeMultipartCleanup() {
+		multipartCleanupClosing = true;
+		afterMultipartCleanupClosing();
+		final Map<CompletableFuture<Void>, PendingAbort> pending = new HashMap<>(multipartCleanupTasks);
+		pending.keySet().removeIf(CompletableFuture::isDone);
+		if (pending.isEmpty()) {
+			return;
+		}
+		final long bound = multipartCleanupCloseBoundMillis();
+		try {
+			CompletableFuture.allOf(pending.keySet().toArray(CompletableFuture[]::new)).get(bound, TimeUnit.MILLISECONDS);
+			return;
+		} catch (final ExecutionException e) {
+			// The failed task logged its failure; the others are done too.
+			return;
+		} catch (final TimeoutException e) {
+			// Recorded below.
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
+		}
+		var orphaned = 0;
+		for (final var entry : pending.entrySet()) {
+			if (!entry.getKey().isDone()) {
+				orphaned++;
+				// A record the task writes later is dropped as a second one.
+				recordAbortNotSent(entry.getValue().op(), entry.getValue().completionStatus(), "pending at close");
+			}
+		}
+		Loggers.ERR.warn("{}: {} multipart abort(s) still pending at close after {} ms; their uploads are recorded orphaned",
+						stepId, orphaned, bound);
+	}
+
+	void abortAfterFailedCompletion(
 					final CompositeDataOperation op, final Operation.Status completionStatus) {
 		FullHttpResponse response = null;
 		try {
@@ -2440,12 +2612,12 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	@Override
 	protected void doClose() throws IOException {
 		try {
-			final CompletableFuture<?>[] pending = multipartCleanupTasks.toArray(CompletableFuture[]::new);
-			if (pending.length > 0) {
-				CompletableFuture.allOf(pending).join();
+			try (final var ctx = CloseableThreadContext.put(KEY_STEP_ID, stepId)) {
+				closeMultipartCleanup();
+			} finally {
+				multipartCleanupTasks.clear();
+				super.doClose();
 			}
-			multipartCleanupTasks.clear();
-			super.doClose();
 		} finally {
 			// The closing thread's entries go now, even when a cleanup task or super.doClose() fails.
 			// Other signing threads keep theirs until they end; SPT's cached functions are static, so
