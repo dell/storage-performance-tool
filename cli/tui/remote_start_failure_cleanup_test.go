@@ -15,6 +15,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
@@ -27,6 +28,13 @@ type startFailureCall struct {
 	ctxErr  error
 }
 
+// startFailureHook decides the outcome of every command that starts with
+// prefix.
+type startFailureHook struct {
+	prefix string
+	run    func(ctx context.Context) error
+}
+
 // startFailureExecutor plays a remote host for a whole engine start: docker
 // run prints a container ID and every other command succeeds unless a hook
 // for its prefix says otherwise. It records each command with the state of
@@ -34,8 +42,8 @@ type startFailureCall struct {
 type startFailureExecutor struct {
 	mu    sync.Mutex
 	calls []startFailureCall
-	// hooks maps a command prefix to its outcome; the first match wins.
-	hooks map[string]func(ctx context.Context) error
+	// hooks are tried in order and the first whose prefix matches decides.
+	hooks []startFailureHook
 	copy  func(ctx context.Context) error
 }
 
@@ -51,9 +59,9 @@ func (e *startFailureExecutor) ExecuteCommand(ctx context.Context, _ *hostparse.
 	if err := ctx.Err(); err != nil {
 		return "", "", err
 	}
-	for prefix, hook := range e.hooks {
-		if strings.HasPrefix(joined, prefix) {
-			if err := hook(ctx); err != nil {
+	for _, hook := range e.hooks {
+		if strings.HasPrefix(joined, hook.prefix) {
+			if err := hook.run(ctx); err != nil {
 				return "", "failed", err
 			}
 			break
@@ -275,25 +283,15 @@ func TestDiagnosticsDirectoryFailureRollbackRemovesIt(t *testing.T) {
 			ownRemovalFailed := false
 			switch mode {
 			case "mkdir cut off":
-				exec.hooks = map[string]func(context.Context) error{
-					"mkdir -p " + remoteDiagnosticsBaseDir: func(context.Context) error {
+				exec.hooks = []startFailureHook{{
+					prefix: "mkdir -p " + remoteDiagnosticsBaseDir,
+					run: func(context.Context) error {
 						cancel()
 						return context.Canceled
 					},
-				}
+				}}
 			case "chmod failed":
-				exec.hooks = map[string]func(context.Context) error{
-					remoteChmodCommand + " 0777 " + remoteDiagnosticsBaseDir: func(context.Context) error {
-						return errors.New("exit status 1")
-					},
-					"rm -rf " + remoteDiagnosticsBaseDir: func(context.Context) error {
-						if !ownRemovalFailed {
-							ownRemovalFailed = true
-							return errors.New("exit status 1")
-						}
-						return nil
-					},
-				}
+				exec.hooks = chmodFailsAndFirstRemovalFails(&ownRemovalFailed)
 			}
 			wrapper, orchestrator, managers := newStartFailureOrchestrator(t, []*startFailureExecutor{exec})
 
@@ -330,9 +328,10 @@ func TestDiagnosticsDefiniteMkdirFailureOwnsNothing(t *testing.T) {
 	t.Setenv(constants.EnvSptJavaOpts, "-Xlog:gc")
 	exec := &startFailureExecutor{
 		copy: func(context.Context) error { return nil },
-		hooks: map[string]func(context.Context) error{
-			"mkdir -p " + remoteDiagnosticsBaseDir: func(context.Context) error { return errors.New("exit status 1") },
-		},
+		hooks: []startFailureHook{{
+			prefix: "mkdir -p " + remoteDiagnosticsBaseDir,
+			run:    func(context.Context) error { return errors.New("exit status 1") },
+		}},
 	}
 	wrapper, orchestrator, managers := newStartFailureOrchestrator(t, []*startFailureExecutor{exec})
 
@@ -368,9 +367,10 @@ func TestFailedStartThatCreatedNothingLeavesHostUnmanaged(t *testing.T) {
 		t.Run(route.name, func(t *testing.T) {
 			execs := make([]*startFailureExecutor, route.hosts)
 			for i := range execs {
-				execs[i] = &startFailureExecutor{hooks: map[string]func(context.Context) error{
-					"docker run": func(context.Context) error { return errors.New("manifest unknown") },
-				}}
+				execs[i] = &startFailureExecutor{hooks: []startFailureHook{{
+					prefix: "docker run",
+					run:    func(context.Context) error { return errors.New("manifest unknown") },
+				}}}
 			}
 			wrapper, orchestrator, managers := newStartFailureOrchestrator(t, execs)
 			if err := route.start(wrapper); err == nil {
@@ -387,4 +387,146 @@ func TestFailedStartThatCreatedNothingLeavesHostUnmanaged(t *testing.T) {
 			}
 		})
 	}
+}
+
+// chmodFailsAndFirstRemovalFails makes the diagnostics chmod fail and the
+// start's own removal of the directory fail once, so the directory stays
+// owned after the failed start and only a later cleanup removes it.
+func chmodFailsAndFirstRemovalFails(ownRemovalFailed *bool) []startFailureHook {
+	return []startFailureHook{
+		{prefix: remoteChmodCommand + " 0777 " + remoteDiagnosticsBaseDir, run: func(context.Context) error {
+			return errors.New("exit status 1")
+		}},
+		{prefix: "rm -rf " + remoteDiagnosticsBaseDir, run: func(context.Context) error {
+			if !*ownRemovalFailed {
+				*ownRemovalFailed = true
+				return errors.New("exit status 1")
+			}
+			return nil
+		}},
+	}
+}
+
+// diagnosticsDirOf returns the diagnostics directory the host's start made.
+func diagnosticsDirOf(t *testing.T, exec *startFailureExecutor) string {
+	t.Helper()
+	mkdirs := exec.commands("mkdir -p " + remoteDiagnosticsBaseDir)
+	if len(mkdirs) != 1 {
+		t.Fatalf("diagnostics mkdirs = %q, want one", mkdirs)
+	}
+	return strings.TrimPrefix(mkdirs[0], "mkdir -p ")
+}
+
+// stagingDirOf returns the staging directory the host's start made.
+func stagingDirOf(t *testing.T, exec *startFailureExecutor) string {
+	t.Helper()
+	mkdirs := exec.commands("mkdir -p /tmp/spt-items-")
+	if len(mkdirs) != 1 {
+		t.Fatalf("staging mkdirs = %q, want one", mkdirs)
+	}
+	return strings.TrimPrefix(mkdirs[0], "mkdir -p ")
+}
+
+// A LIST start runs an API-only container on each idle worker, then the
+// entry on the primary. Here the idle worker's diagnostics chmod fails and
+// its own removal fails too, so it keeps its directories; the run goes on to
+// the primary, whose container fails its readiness check. The rollback must
+// reach both hosts: the worker's directories and the primary's container.
+func TestListStartFailureRollsBackWorkerAndPrimary(t *testing.T) {
+	t.Setenv(constants.EnvSptJavaOpts, "-Xlog:gc")
+	primaryExec := &startFailureExecutor{copy: func(context.Context) error { return nil }}
+	workerOwnRemovalFailed := false
+	workerExec := &startFailureExecutor{
+		copy:  func(context.Context) error { return nil },
+		hooks: chmodFailsAndFirstRemovalFails(&workerOwnRemovalFailed),
+	}
+	wrapper, orchestrator, managers := newStartFailureOrchestrator(
+		t, []*startFailureExecutor{primaryExec, workerExec})
+	managers[0].proberRun = failReadiness
+
+	params := scenario.ScenarioParams{
+		WorkloadType: scenario.WorkloadTypeList, Threads: 1, ObjectSize: "1MB", Bucket: "bucket",
+	}
+	err := wrapper.StartTestWithLaunchHooks(context.Background(), "test-image", params, LaunchHooks{})
+	if err == nil || !strings.Contains(err.Error(), "entry API readiness") {
+		t.Fatalf("LIST start error = %v, want the primary's readiness failure", err)
+	}
+
+	workerDiagnostics := diagnosticsDirOf(t, workerExec)
+	if got := workerExec.liveCommands("rm -rf " + workerDiagnostics); len(got) != 2 {
+		t.Fatalf("worker diagnostics removals = %q, want the start's failed one and the rollback's", got)
+	}
+	workerStaging := stagingDirOf(t, workerExec)
+	if got := workerExec.liveCommands("rm -rf " + workerStaging); len(got) != 1 {
+		t.Fatalf("worker staging removals = %q, want one", got)
+	}
+	if got := primaryExec.liveCommands("docker rm -f " + startFailureContainerID); len(got) != 1 {
+		t.Fatalf("primary container removals = %q, want one", got)
+	}
+	primaryDiagnostics := diagnosticsDirOf(t, primaryExec)
+	if got := primaryExec.liveCommands("rm -rf " + primaryDiagnostics); len(got) != 1 {
+		t.Fatalf("primary diagnostics removals = %q, want one", got)
+	}
+	for i := range managers {
+		assertNothingLeft(t, orchestrator.hosts[i], managers[i])
+	}
+}
+
+// A worker whose diagnostics mkdir is cut off fails its start, while the run
+// goes on with the entry. The worker's host is claimed, and the end of the
+// run removes what it owns: the diagnostics directory no container used is
+// only removed, with nothing to collect, and the staging directory with it.
+func TestUnusedDiagnosticsRemovedAtEndOfRun(t *testing.T) {
+	t.Setenv(constants.EnvSptJavaOpts, "-Xlog:gc")
+	resultsRoot := t.TempDir()
+	entryExec := &startFailureExecutor{copy: func(context.Context) error { return nil }}
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	defer cancelWorker()
+	workerExec := &startFailureExecutor{
+		copy: func(context.Context) error { return nil },
+		hooks: []startFailureHook{{
+			prefix: "mkdir -p " + remoteDiagnosticsBaseDir,
+			run: func(context.Context) error {
+				cancelWorker() // the worker's start ends while its mkdir runs
+				return context.Canceled
+			},
+		}},
+	}
+	_, orchestrator, managers := newStartFailureOrchestrator(
+		t, []*startFailureExecutor{entryExec, workerExec})
+	orchestrator.SetResultsRoot(resultsRoot)
+	for _, mgr := range managers {
+		mgr.setDiagnosticsResultsRoot(resultsRoot)
+	}
+	entry, worker := orchestrator.hosts[0], orchestrator.hosts[1]
+
+	if err := orchestrator.startWorkerNode(workerCtx, worker, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("worker start error = %v, want its cut-off mkdir", err)
+	}
+	if !worker.IsManaged() {
+		t.Fatal("a worker that owns directories is not managed after its failed start")
+	}
+	if err := orchestrator.startEntryNodeContext(
+		context.Background(), entry, nil, scenario.ScenarioParams{WorkloadType: "mock"}, nil); err != nil {
+		t.Fatalf("entry start error = %v", err)
+	}
+
+	outcome := orchestrator.FinalizeDiagnosticsAndCleanupOutcome(context.Background())
+	if err := outcome.Error(); err != nil {
+		t.Fatalf("end-of-run outcome error = %v", err)
+	}
+	if outcome.Resources != runcontrol.ResourceDispositionRemoved {
+		t.Fatalf("end-of-run resources = %v, want removed", outcome.Resources)
+	}
+	if got := workerExec.commands("find "); len(got) != 0 {
+		t.Fatalf("collected from a directory no container used: %q", got)
+	}
+	if got := workerExec.liveCommands("rm -rf " + diagnosticsDirOf(t, workerExec)); len(got) != 1 {
+		t.Fatalf("worker diagnostics removals on a live context = %q, want one", got)
+	}
+	if got := workerExec.liveCommands("rm -rf " + stagingDirOf(t, workerExec)); len(got) != 1 {
+		t.Fatalf("worker staging removals on a live context = %q, want one", got)
+	}
+	assertNothingLeft(t, worker, managers[1])
+	assertNothingLeft(t, entry, managers[0])
 }
