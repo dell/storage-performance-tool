@@ -66,7 +66,7 @@ func assertNeverSubmittedCleanupOutput(t *testing.T, output string) {
 			t.Errorf("output lacks %q:\n%s", want, output)
 		}
 	}
-	for _, unwanted := range []string{"requesting shutdown on all hosts", shutdownWarningLine, summaryIssueLine} {
+	for _, unwanted := range []string{"Auto-results: requesting shutdown", shutdownWarningLine, summaryIssueLine} {
 		if strings.Contains(output, unwanted) {
 			t.Errorf("output contains %q after a launch that was never submitted:\n%s", unwanted, output)
 		}

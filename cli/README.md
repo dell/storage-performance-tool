@@ -357,6 +357,7 @@ Key points:
 - Workers must already be running the Spt API (`--run-node`) and listening on the run's API port (`--api-port`, default 9999) and RMI registry port (`--rmi-registry-port`, default 1099). `spt` starts no worker, so a worker on other ports fails the run's readiness wait; start one for other ports with the engine options `--run-port=<api-port>` and `--load-step-node-port=<rmi-registry-port>`.
 - Preflight checks tolerate expected port usage on worker hosts but continue to flag unknown listeners.
 - Attached workers remain unmanaged during shutdown—`spt` stops the entry node but leaves prestarted workers running.
+- The workers' steps end only when the entry ends its run. If the entry dies or can't be reached mid-run, or an interrupted run's entry takes more than 10 seconds to stop its run, a worker's step can keep generating load until its own limit. After a failed or interrupted attach run, check the workers and restart them before the next run.
 - The host list must include at least two entries (entry + worker). `spt` enforces this and fails fast otherwise.
 - Verification workloads reject `--attach-existing` because SPT cannot establish trusted runtime identity for unmanaged workers.
 
@@ -814,7 +815,7 @@ Auto Results and Shutdown
 - Engine provenance is recorded in one run-level `engine.info.json` and shown with the separate CLI identity in the Environment section. See [`ENGINE_BUILD_INFO.md`](docs/ENGINE_BUILD_INFO.md).
 - Each engine's event loops for every step are fetched as `<step>.event.loops.json`, stored under `eventLoopEngines` in `spt_run_params.json` and named in the summary's `Event loops` line. See [`EVENT_LOOPS.md`](docs/EVENT_LOOPS.md).
 - `--label`: prefix for the output directory name and step ID prefix used in filenames.
-- `--shutdown-on-complete` (default: true): after a successful fetch, POST `/shutdown` to all Spt hosts and wait for `/status` to linger in a terminal state.
+- `--shutdown-on-complete` (default: true): after a successful fetch, POST `/shutdown` to all Spt hosts, or with `--attach-existing` to the entry node only, and wait for `/status` to linger in a terminal state.
 
 Environment configuration
 - spt loads environment variables from `.env` files at startup using the `godotenv` library: first from `$HOME/.env` (if present) and then from `./.env` (if present). Existing OS environment variables are not overridden; the local `./.env` overrides values from `$HOME/.env` loaded by spt.

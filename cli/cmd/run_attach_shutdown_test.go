@@ -49,7 +49,9 @@ func (f *attachShutdownTracker) SetExpectedRunID(int64)       {}
 func (f *attachShutdownTracker) SetRequireTerminalState(bool) {}
 
 // installAttachShutdownSeams keeps the shipped auto-results monitor off the network and
-// records the hosts of each end-of-run shutdown request.
+// records the hosts of each end-of-run shutdown request at requestShutdownAllFunc. The tests
+// prove the host list the monitor hands to requestShutdownAll, which posts /shutdown only to
+// the hosts it is given; they send no HTTP requests themselves.
 func installAttachShutdownSeams(t *testing.T, interrupt bool) (shutdowns func() [][]string, trackerCalls *atomic.Int32) {
 	t.Helper()
 	origRunTracker := newRunTrackerFunc
@@ -130,8 +132,14 @@ var attachShutdownCases = []attachShutdownCase{
 // checkAttachShutdown asserts one end-of-run shutdown request: to the entry node only in attach
 // mode, where the workers were started by someone else, and to every host otherwise. An
 // interrupted run's shutdown is the one that reconciles the stopped run.
-func checkAttachShutdown(t *testing.T, test attachShutdownCase, hosts []string, requests [][]string, trackerCalls int32) {
+func checkAttachShutdown(
+	t *testing.T, test attachShutdownCase, hosts []string, requests [][]string, trackerCalls int32, output string,
+) {
 	t.Helper()
+	// The progress line names no host set, since an attach run asks the entry only.
+	if !strings.Contains(output, "Auto-results: requesting shutdown...") || strings.Contains(output, "all hosts") {
+		t.Errorf("shutdown progress output:\n%s\nwant \"Auto-results: requesting shutdown...\" without \"all hosts\"", output)
+	}
 	want := hosts
 	if test.attach {
 		want = hosts[:1]
@@ -169,6 +177,7 @@ func TestRunCommandAttachShutdownReachesEntryOnly(t *testing.T) {
 				}, descriptors, force)
 			}
 			shutdowns, trackerCalls := installAttachShutdownSeams(t, test.interrupt)
+			output := &lockedBuffer{}
 			origAuto := startAutoResultsFunc
 			t.Cleanup(func() { startAutoResultsFunc = origAuto })
 			startAutoResultsFunc = func(
@@ -178,7 +187,7 @@ func TestRunCommandAttachShutdownReachesEntryOnly(t *testing.T) {
 				options ...*integrity.FinalizeOptions,
 			) *autoResultsMonitor {
 				return startAutoResultsMonitor(ctx, baseURL, label, dir, steps, runID, debug, hosts, apiPort,
-					shutdownOn, linger, scenarioPath, metadata, io.Discard, io.Discard, traceFile, hook, options...)
+					shutdownOn, linger, scenarioPath, metadata, output, output, traceFile, hook, options...)
 			}
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -209,7 +218,7 @@ func TestRunCommandAttachShutdownReachesEntryOnly(t *testing.T) {
 			if launches.Load() != 1 {
 				t.Fatalf("distributed launches = %d, want 1", launches.Load())
 			}
-			checkAttachShutdown(t, test, hosts, shutdowns(), trackerCalls.Load())
+			checkAttachShutdown(t, test, hosts, shutdowns(), trackerCalls.Load(), output.String())
 		})
 	}
 }
@@ -276,7 +285,8 @@ func TestReplayCommandAttachShutdownReachesEntryOnly(t *testing.T) {
 
 			cmd := newReplayCommandForTest(t)
 			cmd.SetContext(ctx)
-			cmd.SetOut(io.Discard)
+			output := &lockedBuffer{}
+			cmd.SetOut(output)
 			cmd.SetErr(io.Discard)
 			args := []string{
 				"--from", server.URL, "--endpoints", "http://s3.example", "--headless",
@@ -297,7 +307,7 @@ func TestReplayCommandAttachShutdownReachesEntryOnly(t *testing.T) {
 			if launches.Load() != 1 {
 				t.Fatalf("distributed launches = %d, want 1", launches.Load())
 			}
-			checkAttachShutdown(t, test, hosts, shutdowns(), trackerCalls.Load())
+			checkAttachShutdown(t, test, hosts, shutdowns(), trackerCalls.Load(), output.String())
 		})
 	}
 }

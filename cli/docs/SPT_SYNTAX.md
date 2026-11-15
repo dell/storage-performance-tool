@@ -1285,7 +1285,8 @@ spt run write \
 
 Notes:
 - Workers must already serve the run's API port (`--api-port`, default 9999) and RMI registry port (`--rmi-registry-port`, default 1099). `spt` starts no worker, so a worker on other ports fails the run's readiness wait; start one for other ports with the engine options `--run-port=<api-port>` and `--load-step-node-port=<rmi-registry-port>`.
-- `spt` still launches and manages the entry node; worker containers remain untouched during shutdown. At the end of a run, normal or interrupted, `--shutdown-on-complete` asks only the entry node to shut down, after it ends its own run, so the attached workers keep running and the next run can attach to them again. Whoever started a worker stops it.
+- `spt` still launches and manages the entry node; worker containers remain untouched during shutdown. At the end of a run, normal or interrupted, `--shutdown-on-complete` asks only the entry node to shut down, which ends its run, so the attached workers keep running and the next run can attach to them again. Whoever started a worker stops it.
+- The workers' steps end only when the entry ends its run. If the entry dies or can't be reached mid-run, or an interrupted run's entry takes more than 10 seconds to stop its run, a worker's step can keep generating load until its own limit. After a failed or interrupted attach run, check the workers and restart them before the next run.
 - `--items-file` and the other item files are copied only to the entry node, not to the attached workers.
 - The host list must include at least one worker; the tool enforces this when `--attach-existing` is set.
 

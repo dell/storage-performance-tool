@@ -660,6 +660,6 @@ func init() {
 	replayCmd.Flags().Bool("auto-results", true, "Automatically retrieve results artifacts at end of replay")
 	replayCmd.Flags().String("results-dir", "./results", "Directory to write retrieved replay results artifacts")
 	replayCmd.Flags().Bool("auto-results-debug", false, "Enable verbose debug logs for replay auto-results completion detection")
-	replayCmd.Flags().Bool("shutdown-on-complete", true, "After fetching results, request /shutdown on Spt")
+	replayCmd.Flags().Bool("shutdown-on-complete", true, "After fetching results, request /shutdown on Spt; with --attach-existing, on the entry node only")
 	replayCmd.Flags().Int("shutdown-linger", 5, "Seconds to wait for /status linger after /shutdown")
 }
