@@ -2,4 +2,4 @@ ARG SPT_VERSION
 
 FROM ghcr.io/dell/storage-performance-tool:${SPT_VERSION}
 
-ADD ["https://repo1.maven.org/maven2/org/python/jython-standalone/2.7.1/jython-standalone-2.7.1.jar", "/opt/spt/ext/jython-standalone.jar"]
+ADD --chown=spt:spt ["https://repo1.maven.org/maven2/org/python/jython-standalone/2.7.1/jython-standalone-2.7.1.jar", "/opt/spt/ext/jython-standalone.jar"]
