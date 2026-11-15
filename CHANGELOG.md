@@ -65,6 +65,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   - On `fs`, an UPDATE above the threshold now writes each object once, as one plain UPDATE, and reports the object's size; it used to write the parts and then the whole object, and reported twice the size.
   - With `--s3-driver aws`, an UPDATE above the threshold sent whole-object PUTs and counted none of them as succeeded; it now takes the driver's ordinary UPDATE route, which has a defect of its own that a separate `s3-aws` UPDATE fix addresses.
   - A `mixed` step with a threshold now counts its DELETE and STAT results above the threshold, which it sent and then dropped.
+  - The warning "Multipart upload threshold is set … but batch size is …" now appears only for CREATE and READ steps, the ones split into parts; a DELETE, UPDATE, STAT or NOOP step with a threshold and a batch size above 1 no longer logs it.
 
   **Compatibility:** the output of these completed workloads changes: `fs` UPDATE byte counts, the DELETE and STAT counts of `mixed` steps with a threshold, and `s3` UPDATE with byte ranges and a threshold, which now runs. Only an engine override of `item.data.ranges.threshold` or a custom scenario reaches them; the CLI never passes a threshold to those steps.
 
