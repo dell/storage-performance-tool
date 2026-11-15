@@ -1,5 +1,6 @@
 package com.dell.spt.load.step.mixed;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -40,7 +41,8 @@ import org.junit.jupiter.api.io.TempDir;
 /**
  * A mixed step's normal stop is not an error: whatever ends it, the generator logs no ERROR. The
  * driver refuses an operation after admission closes the way the coop drivers do, with an
- * {@link EOFException}.
+ * {@link EOFException}; a stop by duration or interrupt meets that refusal, while a count-limited
+ * step has stopped dispatching at its count before admission closes.
  */
 class MixedLoadStepStopLogTest {
 
@@ -78,10 +80,13 @@ class MixedLoadStepStopLogTest {
 		final Config config = stepConfig(stepId);
 		config.val("load-op-limit-count", 20_000L);
 
-		final MetricsManagerImpl metrics = run(config);
+		final FinalCountsMetricsManager metrics = new FinalCountsMetricsManager();
+		new MixedLoadStepClient(config, extensions(), null, metrics).run();
 
-		assertTrue(operations(metrics, stepId) > 0, "the step ran operations");
-		assertNoGeneratorError();
+		// The generator stops dispatching at the count, so no operation reaches the driver after its
+		// admission closes: there is no refusal at this stop, only the absence of a generator ERROR.
+		assertEquals(20_000L, metrics.counted(stepId), "the step ran exactly its count");
+		assertNoGeneratorErrorLogged();
 	}
 
 	@Test
@@ -141,6 +146,10 @@ class MixedLoadStepStopLogTest {
 
 	private void assertNoGeneratorError() throws InterruptedException {
 		assertTrue(drivers.refused.sum() > 0, "the driver refused an operation with EOF at the stop");
+		assertNoGeneratorErrorLogged();
+	}
+
+	private void assertNoGeneratorErrorLogged() throws InterruptedException {
 		final List<String> errors = log.errorsContaining("MixedLoadGenerator");
 		assertTrue(errors.isEmpty(), errors.toString());
 	}

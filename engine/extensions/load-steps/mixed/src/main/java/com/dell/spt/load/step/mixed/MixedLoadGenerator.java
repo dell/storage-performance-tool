@@ -8,8 +8,10 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationsBuilder;
 import com.dell.spt.base.load.generator.LoadGenerator;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.storage.driver.CompositeResults;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import org.apache.logging.log4j.Level;
@@ -17,14 +19,19 @@ import org.apache.logging.log4j.ThreadContext;
 
 import java.io.EOFException;
 import java.io.IOException;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.EnumMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.locks.LockSupport;
 
 /**
  * A schedule-driven load generator for mixed workloads.
@@ -60,8 +67,25 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 	private final Queue<O> recycleQueue = new ConcurrentLinkedQueue<>();
 	private final LongAdder generatedCount = new LongAdder();
 	private volatile boolean itemInputFinished = false;
+	// The most operations this generator dispatches; Long.MAX_VALUE when the step has no count limit.
+	private final long countLimit;
+	// Operations the driver accepted. Written and read on the task thread only, so a plain long.
+	private long dispatched = 0;
+	// Set once dispatch has reached the count limit, read by the step's completion check.
+	private volatile boolean countLimitReached = false;
+	// Operations whose final result the step context did not count, such as an interrupted one.
+	// Counted only in a count-limited step, by UncountedFinalResultOutput on the drivers'
+	// completion threads; a result the step context counts is not counted here. Each platform
+	// thread counts in a cell of its own, which it alone writes, so an increment needs no locked
+	// instruction; virtual threads, unbounded in number, share an adder.
+	private final ThreadLocal<UncountedCell> uncountedCell = ThreadLocal.withInitial(this::newUncountedCell);
+	private final List<UncountedCell> uncountedCells = new CopyOnWriteArrayList<>();
+	private final LongAdder uncountedOnVirtualThreads = new LongAdder();
+	private volatile OperationLifecycleTracker<O> operationLifecycle = OperationLifecycleTracker.disabled();
 	// Set on the task thread when the driver refuses an operation with EOF, read by handleError.
 	private boolean outputClosed = false;
+
+	private static final long CAPPED_PARK_NANOS = 1_000_000L;
 
 	// Active op types excluding DELETE (for re-roll)
 	private final OpType[] rerollTargets;
@@ -77,6 +101,8 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 	 * @param opOutput         driver to submit operations to
 	 * @param concurrencyLimit max in-flight operations (matches driver concurrency)
 	 * @param newItemInput     item source for CREATE operations (generates new items)
+	 * @param countLimit       the most operations to dispatch, the step's {@code load-op-limit-count};
+	 *                         0 or less, or {@link Long#MAX_VALUE}, for no limit
 	 * @throws IllegalArgumentException if the schedule has GET or STAT and the read pool is empty
 	 */
 	public MixedLoadGenerator(
@@ -86,8 +112,10 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 					final Map<OpType, OperationsBuilder<I, O>> builders,
 					final Output<O> opOutput,
 					final int concurrencyLimit,
-					final Input<I> newItemInput) {
+					final Input<I> newItemInput,
+					final long countLimit) {
 		super(executor);
+		this.countLimit = isCountLimit(countLimit) ? countLimit : Long.MAX_VALUE;
 		this.schedule = schedule;
 		this.pool = pool;
 		this.builders = builders;
@@ -121,6 +149,18 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 		this.rerollTotalWeight = cumulative;
 	}
 
+	/** A generator with no count limit. Preserves the constructor descriptor used by existing extensions. */
+	public MixedLoadGenerator(
+					final ThreadTaskExecutor executor,
+					final OpSchedule schedule,
+					final PoolItemInput<I> pool,
+					final Map<OpType, OperationsBuilder<I, O>> builders,
+					final Output<O> opOutput,
+					final int concurrencyLimit,
+					final Input<I> newItemInput) {
+		this(executor, schedule, pool, builders, opOutput, concurrencyLimit, newItemInput, 0);
+	}
+
 	/** Preserves the constructor descriptor used by existing extensions. */
 	public MixedLoadGenerator(
 					final VirtualThreadExecutor executor,
@@ -130,7 +170,7 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 					final Output<O> opOutput,
 					final int concurrencyLimit,
 					final Input<I> newItemInput) {
-		this((ThreadTaskExecutor) executor, schedule, pool, builders, opOutput, concurrencyLimit, newItemInput);
+		this((ThreadTaskExecutor) executor, schedule, pool, builders, opOutput, concurrencyLimit, newItemInput, 0);
 	}
 
 	@Override
@@ -141,6 +181,15 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 
 	@Override
 	protected void doWork() throws Exception {
+		// The count limit caps dispatch here, as LoadGeneratorImpl caps generation: the step's own
+		// count check polls, and would let everything dispatched before it sees the limit run.
+		if (dispatched >= countLimit) {
+			countLimitReached = true;
+			itemInputFinished = true;
+			// Parked, not yielded, so the task thread does not spin until the step stops.
+			LockSupport.parkNanos(CAPPED_PARK_NANOS);
+			return;
+		}
 		// Acquire a concurrency permit before generating the next op.
 		// This prevents the generator from flooding the driver's input queue
 		// faster than the driver can process operations.
@@ -205,6 +254,7 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 			return false;
 		}
 		generatedCount.increment();
+		dispatched++;
 		return true;
 	}
 
@@ -234,6 +284,7 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 			return false;
 		}
 		generatedCount.increment();
+		dispatched++;
 		return true;
 	}
 
@@ -323,6 +374,100 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 		// which LoadStepContextImpl validates against at construction time (load-op-retry
 		// against a generator that can't actually requeue a failed operation would silently
 		// drop it - neither retried nor counted as failed).
+	}
+
+	@Override
+	public void operationLifecycle(final OperationLifecycleTracker<O> lifecycle) {
+		this.operationLifecycle = lifecycle == null ? OperationLifecycleTracker.disabled() : lifecycle;
+	}
+
+	/**
+	 * Whether {@code countLimit}, a step's {@code load-op-limit-count}, limits the step: 0 or less,
+	 * and {@link Long#MAX_VALUE}, mean no limit.
+	 */
+	static boolean isCountLimit(final long countLimit) {
+		return countLimit > 0 && countLimit < Long.MAX_VALUE;
+	}
+
+	/**
+	 * Whether a step with {@code countLimit} caps its dispatch at it, on a driver that publishes
+	 * composite results as {@code compositeResults} says: only on a driver that declares how, since
+	 * the step can tell an operation's final result only then. Any other driver keeps the step as it
+	 * was before, with no cap, so it can run past its count.
+	 */
+	static boolean capsDispatch(final long countLimit, final CompositeResults compositeResults) {
+		return isCountLimit(countLimit)
+						&& (compositeResults == CompositeResults.IN_PARTS || compositeResults == CompositeResults.ONE_RESULT);
+	}
+
+	/**
+	 * Whether dispatch has reached the count limit, every operation dispatched has published its
+	 * final result, and the driver holds no operation in its lifecycle custody. Each final result
+	 * is either among the step context's {@code countedResults} or counted here as uncounted (see
+	 * {@link UncountedFinalResultOutput}), so a step then ends even if some of those operations
+	 * produced no counted result, for example an {@code INTERRUPTED} one. Read by the step's
+	 * completion check, not per operation.
+	 */
+	@Override
+	public boolean isCountLimitDrained(final long countedResults) {
+		// At the cap the driver has accepted exactly countLimit operations, and the mixed step
+		// neither retries nor recycles one, so each has exactly one final result.
+		return countLimitReached
+						&& countedResults + uncountedFinalResultCount() >= countLimit
+						&& !operationLifecycle.hasOutstandingOperations();
+	}
+
+	/**
+	 * Counts one operation's final result that the step context did not count. Called only in a
+	 * count-limited step, after the step context has taken the result.
+	 */
+	void onUncountedFinalResult() {
+		if (Thread.currentThread().isVirtual()) {
+			uncountedOnVirtualThreads.increment();
+		} else {
+			uncountedCell.get().increment();
+		}
+	}
+
+	/**
+	 * The uncounted final results so far. A count taken while results arrive may miss the latest,
+	 * never adds one that has not arrived, and is exact once they have all arrived.
+	 */
+	long uncountedFinalResultCount() {
+		long count = uncountedOnVirtualThreads.sum();
+		for (final UncountedCell cell : uncountedCells) {
+			count += cell.count();
+		}
+		return count;
+	}
+
+	private UncountedCell newUncountedCell() {
+		final UncountedCell cell = new UncountedCell();
+		uncountedCells.add(cell);
+		return cell;
+	}
+
+	/** One platform thread's count of uncounted final results: written by that thread alone. */
+	static final class UncountedCell {
+		private static final VarHandle COUNT;
+
+		static {
+			try {
+				COUNT = MethodHandles.lookup().findVarHandle(UncountedCell.class, "count", long.class);
+			} catch (final ReflectiveOperationException e) {
+				throw new ExceptionInInitializerError(e);
+			}
+		}
+		private long count;
+
+		void increment() {
+			// The single writer reads its own last write, so a release store is enough.
+			COUNT.setRelease(this, count + 1);
+		}
+
+		long count() {
+			return (long) COUNT.getAcquire(this);
+		}
 	}
 
 	@Override
