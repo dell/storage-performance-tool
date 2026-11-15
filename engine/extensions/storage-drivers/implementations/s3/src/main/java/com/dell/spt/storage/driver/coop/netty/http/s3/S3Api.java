@@ -55,21 +55,28 @@ public interface S3Api {
 	 *
 	 * <p>The set holds the names SPT sends ({@code delete}, {@code partNumber}, {@code tagging},
 	 * {@code uploadId}, {@code uploads}, {@code versionId}, {@code versioning}, {@code versions}),
-	 * which botocore, MinIO and SeaweedFS all list, plus the rest of botocore's
-	 * {@code HmacV1Auth.QSAOfInterest} subset named by AWS's SigV2 documentation, including the
-	 * {@code response-*} overrides. The servers' lists differ at the edges, which none of SPT's
-	 * own requests reach.
+	 * which botocore, MinIO and SeaweedFS all list, plus every other name of botocore's
+	 * {@code HmacV1Auth.QSAOfInterest} (1.37.9), including the {@code response-*} overrides. The
+	 * servers' lists differ at the edges, which none of SPT's own requests reach. Names match
+	 * whole and case-sensitively, so no name is a prefix of another in effect.
 	 */
 	Set<String> SIGV2_SUB_RESOURCES = Set.of(
+					"accelerate",
 					"acl",
+					"analytics",
 					"cors",
+					"defaultObjectAcl",
 					"delete",
+					"inventory",
 					"lifecycle",
 					"location",
 					"logging",
+					"metrics",
 					"notification",
+					"object-lock",
 					"partNumber",
 					"policy",
+					"replication",
 					"requestPayment",
 					"response-cache-control",
 					"response-content-disposition",
@@ -79,6 +86,8 @@ public interface S3Api {
 					"response-expires",
 					"restore",
 					"select",
+					"select-type",
+					"storageClass",
 					"tagging",
 					"torrent",
 					"uploadId",

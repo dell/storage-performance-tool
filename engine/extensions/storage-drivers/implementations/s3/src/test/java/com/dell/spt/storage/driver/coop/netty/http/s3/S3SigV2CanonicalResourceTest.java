@@ -22,12 +22,12 @@ import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
 import java.nio.charset.StandardCharsets;
-import java.util.Base64;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -38,9 +38,8 @@ import org.junit.jupiter.api.Test;
  */
 class S3SigV2CanonicalResourceTest {
 
-	private static final String UID = "user1";
-	// The secret S3StorageDriverTest.baseConfig configures.
-	private static final String SECRET = "u5QtPuQx+W5nrrQQEg7nArBqSgC8qLiDt2RhQthb";
+	private static final String UID = SigV2TestSupport.UID;
+	private static final String SECRET = SigV2TestSupport.SECRET;
 
 	private static String resource(final String uri) {
 		final var buff = new StringBuilder("prefix\n");
@@ -108,6 +107,40 @@ class S3SigV2CanonicalResourceTest {
 		assertEquals("/b?uploads", resource("/b?&uploads&"));
 	}
 
+	@Test
+	void selectAndSelectTypeAreBothWholeNames() {
+		assertEquals("/b/k?select&select-type=2", resource("/b/k?select-type=2&select"));
+		assertEquals("/b/k", resource("/b/k?select-typex=2&selectx&select-"));
+	}
+
+	@Test
+	void moreSubResourcesThanTheSortArrayFirstHoldsAreSortedInReverseInput() {
+		// The sorting path starts with room for four; eight in reverse order make it grow.
+		final var names = new ArrayList<>(List.of(
+						"acl", "cors", "delete", "lifecycle", "partNumber=3", "tagging", "uploadId=U", "website"));
+		final var expected = "/b/k?" + String.join("&", names);
+		Collections.reverse(names);
+		final var uri = "/b/k?max-keys=1&" + String.join("&", names) + "&prefix=p";
+		assertEquals(expected, resource(uri));
+	}
+
+	/** Pins the whole set, so any later edit to it shows up here. */
+	@Test
+	void theSubResourceSetIsTheTicketListPlusBotocoreQsaOfInterest() {
+		assertEquals(Set.of(
+						"accelerate", "acl", "analytics", "cors", "defaultObjectAcl", "delete", "inventory",
+						"lifecycle", "location", "logging", "metrics", "notification", "object-lock", "partNumber",
+						"policy", "replication", "requestPayment", "response-cache-control",
+						"response-content-disposition", "response-content-encoding", "response-content-language",
+						"response-content-type", "response-expires", "restore", "select", "select-type",
+						"storageClass", "tagging", "torrent", "uploadId", "uploads", "versionId", "versioning",
+						"versions", "website"),
+						S3Api.SIGV2_SUB_RESOURCES);
+		for (final var name : S3Api.SIGV2_SUB_RESOURCES) {
+			assertEquals("/b?" + name, resource("/b?" + name + "=&max-keys=1"), name);
+		}
+	}
+
 	// ---------- the whole string to sign ----------
 
 	@Test
@@ -142,7 +175,7 @@ class S3SigV2CanonicalResourceTest {
 		final var awsSecret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 		final var date = "Tue, 27 Mar 2007 19:42:41 +0000";
 		final var stringToSign = "GET\n\n\n" + date + "\n/johnsmith/";
-		assertEquals("htDYFYduRNen8P9ZfE/s9SuKy0U=", sign(awsSecret, stringToSign));
+		assertEquals("htDYFYduRNen8P9ZfE/s9SuKy0U=", SigV2TestSupport.sign(awsSecret, stringToSign));
 
 		final var drv = new S3StorageDriverTest.TestS3Driver(S3StorageDriverTest.baseConfig(false, 2, false, null, "127.0.0.1"));
 		try {
@@ -169,10 +202,10 @@ class S3SigV2CanonicalResourceTest {
 
 			final var first = drv.log().poll();
 			assertEquals("/tb?list-type=2&max-keys=100", first.uri());
-			assertSignedOver(first, "/tb");
+			SigV2TestSupport.assertSignedOver(first, "/tb");
 			final var second = drv.log().poll();
 			assertEquals("/tb?list-type=2&start-after=k0001&max-keys=100", second.uri());
-			assertSignedOver(second, "/tb");
+			SigV2TestSupport.assertSignedOver(second, "/tb");
 		} finally {
 			drv.close();
 		}
@@ -188,7 +221,7 @@ class S3SigV2CanonicalResourceTest {
 
 			final var request = drv.log().poll();
 			assertEquals("/tb?versions=&prefix=p&key-marker=k&max-keys=5", request.uri());
-			assertSignedOver(request, "/tb?versions");
+			SigV2TestSupport.assertSignedOver(request, "/tb?versions");
 		} finally {
 			drv.close();
 		}
@@ -203,7 +236,7 @@ class S3SigV2CanonicalResourceTest {
 
 			final var request = drv.log().poll();
 			assertTrue(request.uri().startsWith("/tb?list-type=2&"), request.uri());
-			assertSignedOver(request, "/tb");
+			SigV2TestSupport.assertSignedOver(request, "/tb");
 		} finally {
 			drv.close();
 		}
@@ -220,13 +253,13 @@ class S3SigV2CanonicalResourceTest {
 			objects.options(ListOptions.builder().maxKeys(5).startAfter("x").build());
 			final var objectsRequest = (FullHttpRequest) drv.httpRequest((Operation) objects, "127.0.0.1");
 			assertTrue(objectsRequest.uri().startsWith("/tb?list-type=2&"), objectsRequest.uri());
-			assertSignedOver(objectsRequest, "/tb");
+			SigV2TestSupport.assertSignedOver(objectsRequest, "/tb");
 
 			final var versions = new ListOperationImpl<PathItemImpl>(0, OpType.LIST, new PathItemImpl("/tb/p"), credential);
 			versions.options(ListOptions.builder().includeVersions(true).maxKeys(5).build());
 			final var versionsRequest = (FullHttpRequest) drv.httpRequest((Operation) versions, "127.0.0.1");
 			assertTrue(versionsRequest.uri().startsWith("/tb?versions=&"), versionsRequest.uri());
-			assertSignedOver(versionsRequest, "/tb?versions");
+			SigV2TestSupport.assertSignedOver(versionsRequest, "/tb?versions");
 		} finally {
 			drv.close();
 		}
@@ -246,42 +279,30 @@ class S3SigV2CanonicalResourceTest {
 				final var request = drv.log().poll();
 				assertNotNull(request);
 				assertEquals(expectedPath + "?tenant=t1", request.uri());
-				assertSignedOver(request, expectedPath);
+				SigV2TestSupport.assertSignedOver(request, expectedPath);
 			}
 		} finally {
 			drv.close();
 		}
 	}
 
-	// ---------- helpers ----------
+	@Test
+	void aBucketHeadSignsABotocoreSubResourceFromUriArguments() throws Exception {
+		final Config config = S3StorageDriverTest.baseConfig(false, 2, false, null, "127.0.0.1");
+		config.val("storage-net-http-uri-args", Map.of("object-lock", ""));
+		final var drv = new S3StorageDriverTest.TestS3Driver(config);
+		try {
+			drv.checkTargetBucket("bench", null);
 
-	/** Asserts the request's V2 signature covers its headers and exactly {@code resource}. */
-	private static void assertSignedOver(final FullHttpRequest request, final String resource) throws Exception {
-		final var headers = request.headers();
-		for (final var header : headers) {
-			assertTrue(!header.getKey().toLowerCase(Locale.ROOT).startsWith("x-amz-"),
-							"this check builds the string to sign with no x-amz- headers: " + header.getKey());
+			final var request = drv.log().poll();
+			assertEquals("/bench?object-lock=", request.uri());
+			SigV2TestSupport.assertSignedOver(request, "/bench?object-lock");
+		} finally {
+			drv.close();
 		}
-		final var date = headers.get(HttpHeaderNames.DATE);
-		assertNotNull(date, "a V2 request carries a Date");
-		final var stringToSign = request.method().name()
-						+ '\n' + nullToEmpty(headers.get(HttpHeaderNames.CONTENT_MD5))
-						+ '\n' + nullToEmpty(headers.get(HttpHeaderNames.CONTENT_TYPE))
-						+ '\n' + date
-						+ '\n' + resource;
-		assertEquals("AWS " + UID + ':' + sign(SECRET, stringToSign), headers.get(HttpHeaderNames.AUTHORIZATION),
-						request.method() + " " + request.uri() + " signs over " + resource);
 	}
 
-	private static String nullToEmpty(final String value) {
-		return value == null ? "" : value;
-	}
-
-	private static String sign(final String secret, final String stringToSign) throws Exception {
-		final var mac = Mac.getInstance("HmacSHA1");
-		mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA1"));
-		return Base64.getEncoder().encodeToString(mac.doFinal(stringToSign.getBytes(StandardCharsets.UTF_8)));
-	}
+	// ---------- helpers ----------
 
 	private static DefaultFullHttpResponse listPage(final boolean truncated, final String... keys) {
 		final var xml = new StringBuilder("<ListBucketResult><IsTruncated>").append(truncated).append("</IsTruncated>");
