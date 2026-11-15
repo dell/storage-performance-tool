@@ -67,14 +67,30 @@ public interface Operation<I extends Item> {
 	void dstPath(final String dstPath);
 
 	/**
-	 * For a copy that has completed an attempt, the item's name as that first attempt had it, before
-	 * {@link #result()} rebuilt it under the destination path. A driver builds the copy source from
-	 * it, when set, so every attempt of one copy reads the same object. Null for a first attempt and
-	 * for any operation that is not a copy.
+	 * For a copy (a CREATE with a source path), the source its first attempt read, in the form the
+	 * driver that sent it keeps: the HTTP drivers keep the URI path their own {@code dataUriPath}
+	 * resolved for the source, which they pass to the copy headers, and other drivers keep the item's
+	 * name as it was before {@link #result()} first rebuilt it under the destination path. The driver
+	 * sets it once, when it builds the first request or, if none was built, when the attempt
+	 * completes, before {@code result()}; a copy sent again (recycle mode, {@code load.op.retry} or a
+	 * {@code PENDING} redispatch) reads it instead of resolving its renamed item again. It is never
+	 * cleared, so it survives {@link #reset()}. Null until then, and for any other operation.
+	 *
+	 * <p>Only an operation that keeps it, as {@code OperationImpl} and its subclasses do, gets this; an
+	 * implementation with these defaults behaves as before. No driver reads it for a composite,
+	 * partial or path operation: those can't copy today (a Netty multipart copy is refused, an
+	 * {@code s3-aws} composite CREATE uploads, and path copies are unsupported).
 	 */
-	default String copySourceName() {
+	default String copySource() {
 		return null;
 	}
+
+	/**
+	 * Keeps {@link #copySource()}; only a driver calls it. The default keeps nothing. It is a member
+	 * of this interface, not only of {@code OperationImpl}, because drivers see their operations as
+	 * {@code Operation}.
+	 */
+	default void copySource(final String copySource) {}
 
 	Credential credential();
 

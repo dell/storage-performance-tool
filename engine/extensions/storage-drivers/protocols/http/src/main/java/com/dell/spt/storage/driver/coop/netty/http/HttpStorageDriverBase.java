@@ -323,7 +323,7 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 					httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 				}
 			} else {
-				applyCopyHeaders(httpHeaders, copySourceUriPath(op, item, srcPath, opType));
+				applyCopyHeaders(httpHeaders, keptCopySource(op));
 				httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 			}
 			break;
@@ -385,27 +385,30 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 	}
 
 	/**
-	 * The URI path of the object a copy reads. A first attempt reads the object {@link #dataUriPath}
-	 * names with no destination path. A copy sent again, whose name {@code result()} has rebuilt under
-	 * the destination path, reads the source path joined with the name the first attempt had ({@link
-	 * Operation#copySourceName()}), so every attempt names the same object. That path is built as the
-	 * base {@code dataUriPath} builds it, without an override's prefix: the Swift driver takes its
-	 * namespace off the copy source again, and the Atmos driver sends none.
+	 * The source a copy reads, as {@link Operation#copySource()} keeps it: on the first attempt, what
+	 * {@link #copySource(Operation)} resolves, which is then kept; on every later attempt, the kept
+	 * value, so a copy sent again reads the object its first attempt read, whatever the item's name has
+	 * become since.
 	 */
-	protected final String copySourceUriPath(
-					final O op, final I item, final String srcPath, final OpType opType) {
-		final String copySourceName = op.copySourceName();
-		return copySourceName == null
-						? dataUriPath(item, srcPath, null, opType)
-						: joinedUriPath(copySourceName, srcPath);
+	protected final String keptCopySource(final O op) {
+		final String kept = op.copySource();
+		if (kept != null) {
+			return kept;
+		}
+		final String copySource = copySource(op);
+		op.copySource(copySource);
+		return copySource;
 	}
 
-	/** The base {@link #dataUriPath} of an item named {@code itemName} under {@code path}. */
-	protected static String joinedUriPath(final String itemName, final String path) {
-		if (path == null || ItemNamePaths.holdsPath(itemName, path)) {
-			return itemName.startsWith(SLASH) ? itemName : SLASH + itemName;
-		}
-		return ItemNamePaths.join(path.startsWith(SLASH) ? path : SLASH + path, itemName);
+	/**
+	 * The URI path of the object a copy reads on its first attempt, which {@link #applyCopyHeaders}
+	 * receives: the {@link #dataUriPath} of the item with no destination path, through any override of
+	 * it. Called once per copy, while the item has its first name; see {@link Operation#copySource()}.
+	 */
+	@Override
+	@SuppressWarnings("unchecked")
+	protected String copySource(final O op) {
+		return dataUriPath((I) op.item(), op.srcPath(), null, op.type());
 	}
 
 	protected abstract String tokenUriPath(

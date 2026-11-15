@@ -1946,25 +1946,40 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * The {@code x-amz-copy-source} of a copy on the versioned route. A first attempt reads the object
-	 * {@link #dataUriPath} names, without the {@code ~versionId} under the legacy convention. A copy sent
-	 * again reads the source path joined with the name its first attempt had ({@link
-	 * #copySourceUriPath}); under the legacy convention that name is kept after the first response
-	 * named its version, so its own trailing {@code ~versionId} is taken off, as the first attempt took
-	 * off the one its name had.
+	 * The {@code x-amz-copy-source} of a copy on the versioned route: the source {@link
+	 * #keptCopySource} keeps, so a copy sent again reads the source its first attempt read; on the
+	 * first attempt, the object {@link #dataUriPath} names, without the {@code ~versionId} under the
+	 * legacy convention.
 	 */
 	private String versionedCopySource(
-					final O op, final I item, final String srcPath, final String versionId,
-					final boolean explicitVersionCarrier) {
-		final String copySourceName = op.copySourceName();
-		if (copySourceName == null) {
-			final String copySource = dataUriPath(item, srcPath, null, op.type());
-			return !explicitVersionCarrier && versionId != null ? withoutVersionSuffix(copySource, versionId) : copySource;
+					final O op, final I item, final String srcPath, final boolean legacyVersion, final String versionId) {
+		final String kept = op.copySource();
+		if (kept != null) {
+			return kept;
 		}
-		final int indexOfVersionStart = explicitVersionCarrier ? -1 : copySourceName.lastIndexOf('~');
-		return joinedUriPath(
-						indexOfVersionStart == -1 ? copySourceName : copySourceName.substring(0, indexOfVersionStart),
-						srcPath);
+		final String copySource = dataUriPath(item, srcPath, null, op.type());
+		final String firstCopySource = legacyVersion ? withoutVersionSuffix(copySource, versionId) : copySource;
+		op.copySource(firstCopySource);
+		return firstCopySource;
+	}
+
+	/**
+	 * The source of a copy whose attempt completed before a request was built: what its first request
+	 * would have carried. On the legacy versioned route that is the {@link #dataUriPath} without the
+	 * name's {@code ~versionId}, as {@link #versionedCopySource} builds it; on every other route, the
+	 * HTTP drivers' source.
+	 */
+	@Override
+	protected String copySource(final O op) {
+		final String copySource = super.copySource(op);
+		if (!namesLegacyVersion(op)) {
+			return copySource;
+		}
+		final String name = op.item().name();
+		final int indexOfVersionStart = name.lastIndexOf('~');
+		return indexOfVersionStart == -1
+						? copySource
+						: withoutVersionSuffix(copySource, name.substring(indexOfVersionStart + 1));
 	}
 
 	/**
@@ -2049,7 +2064,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 				}
 			} else {
-				applyCopyHeaders(httpHeaders, versionedCopySource(op, item, srcPath, versionId, explicitVersionCarrier));
+				applyCopyHeaders(httpHeaders, versionedCopySource(op, item, srcPath, legacyVersion, versionId));
 				httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 			}
 			break;
