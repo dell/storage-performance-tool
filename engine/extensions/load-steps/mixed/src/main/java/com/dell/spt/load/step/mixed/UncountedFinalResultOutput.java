@@ -90,10 +90,12 @@ final class UncountedFinalResultOutput implements Output {
 	/**
 	 * Whether {@code op} is its operation's final result, and whether the step context counts it.
 	 * Not final: a part's result, and, on a driver that completes composites in parts, a successful
-	 * unfinished CREATE or READ composite, since its parts and its final result are still to come (a
-	 * cooperative driver ends an aborted upload as a failure, never as an unfinished success). Final but uncounted: any other unfinished composite that did not fail, such
-	 * as the one result of a DELETE or STAT above the ranges threshold, or of any composite on a
-	 * driver that publishes one result for it, and an {@code INTERRUPTED} or {@code OMIT} result.
+	 * unfinished CREATE or READ composite, since its parts and its final result are still to come.
+	 * An aborted upload that a driver leaves an unfinished success, as {@code fs} does, looks the
+	 * same: the cooperative base then sends its unsent parts and the upload never ends, a known
+	 * defect of that base. Final but uncounted: any other unfinished composite that did not fail,
+	 * such as the one result of a DELETE or STAT above the ranges threshold, or of any composite on
+	 * a driver that publishes one result for it, and an {@code INTERRUPTED} or {@code OMIT} result.
 	 */
 	static int kind(final Operation<?> op, final boolean compositesInParts) {
 		if (op instanceof PartialOperation) {

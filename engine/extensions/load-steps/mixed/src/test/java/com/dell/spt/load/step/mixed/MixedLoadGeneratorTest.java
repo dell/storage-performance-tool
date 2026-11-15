@@ -213,8 +213,7 @@ class MixedLoadGeneratorTest {
 			// A finished composite: the upload's completion, counted like any other result.
 			assertEquals(counted, kind(composite(OpType.CREATE, Operation.Status.SUCC, true), inParts));
 			assertEquals(uncounted, kind(composite(OpType.CREATE, Operation.Status.INTERRUPTED, true), inParts));
-			// A failed unfinished composite (its initiation, or its abort: a cooperative driver ends an
-			// aborted upload as a failure) is counted as a failure.
+			// A failed unfinished composite (its initiation, or its abort) is counted as a failure.
 			assertEquals(counted, kind(composite(OpType.CREATE, Operation.Status.FAIL_IO, false), inParts));
 			assertEquals(uncounted, kind(composite(OpType.CREATE, Operation.Status.INTERRUPTED, false), inParts));
 			// A DELETE or STAT composite publishes one result and has no parts.

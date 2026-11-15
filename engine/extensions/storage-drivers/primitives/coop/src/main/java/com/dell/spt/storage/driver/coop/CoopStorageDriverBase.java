@@ -895,21 +895,16 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	 */
 	@SuppressWarnings("unchecked")
 	protected final boolean handleCompleted(final O op, final boolean wakeDispatcher) {
-		final boolean composite = op instanceof CompositeOperation;
-		if (composite) {
-			failAbortedUploadPublishedAsSuccess((CompositeOperation<?>) op);
-		}
 		final boolean accepted = super.handleCompleted(op);
 		if (!accepted) {
-			if (composite || op instanceof PartialOperation) {
+			if (op instanceof CompositeOperation || op instanceof PartialOperation) {
 				safeReleaseMpuObjectPermit(op);
 			}
 			return false;
 		}
 
 		completedOpCount.increment();
-		if (composite) {
-			final CompositeOperation parentOp = (CompositeOperation) op;
+		if (op instanceof CompositeOperation parentOp) {
 			if (!parentOp.allSubOperationsDone()) {
 				if (op.status() == Operation.Status.SUCC) {
 					final List<O> subOps = (List<O>) parentOp.nextSubOperations(mpuMaxParts > 0 ? mpuMaxParts : Integer.MAX_VALUE);
@@ -997,18 +992,6 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		completedOpCount.increment();
 		if (wakeDispatcher)
 			signalDispatch();
-	}
-
-	/**
-	 * Gives an aborted upload's finalization the abort's failure status when the driver left it a
-	 * success, as a driver that does not handle the abort itself does (the file system driver; the
-	 * mocks never fail a part): an aborted upload ends as a failure, as {@code s3} and {@code s3-aws}
-	 * report it, and its unsent parts are not sent.
-	 */
-	private static void failAbortedUploadPublishedAsSuccess(final CompositeOperation<?> op) {
-		if (op.status() == Operation.Status.SUCC && !op.allSubOperationsDone() && op.get("mpuAbort") != null) {
-			op.status(abortedUploadStatus(op));
-		}
 	}
 
 	/**
