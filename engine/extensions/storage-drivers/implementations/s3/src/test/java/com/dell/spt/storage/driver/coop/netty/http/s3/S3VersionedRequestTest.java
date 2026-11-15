@@ -376,6 +376,11 @@ final class S3VersionedRequestTest {
 		final var abort = driver.httpRequest((Operation) upload, HOST);
 		assertEquals("/b/key?uploadId=a%41", abort.uri());
 		assertEquals(referenceV4Signature(abort), signature(abort.headers()));
+		// A second '=' belongs to the value, which is canonically ab%3D%3D: not a single canonical pair.
+		upload.put(S3Api.KEY_UPLOAD_ID, "ab==");
+		final var abortWithEquals = driver.httpRequest((Operation) upload, HOST);
+		assertEquals("/b/key?uploadId=ab==", abortWithEquals.uri());
+		assertEquals(referenceV4Signature(abortWithEquals), signature(abortWithEquals.headers()));
 	}
 
 	// ---------- the item is never renamed while its request is built ----------
