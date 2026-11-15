@@ -20,6 +20,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
+	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
 )
 
 const (
@@ -160,20 +161,24 @@ func (o *TestOrchestrator) SetCallbacks(
 	o.onError = onError
 }
 
-func (o *TestOrchestrator) containerStartupDiagnostics() string {
+func (o *TestOrchestrator) containerStartupDiagnostics(ctx context.Context) string {
 	if o.dockerManager == nil || o.containerID == "" {
 		return ""
 	}
-	tailer, ok := o.dockerManager.(containerDiagnosticTailer)
-	if !ok {
-		return ""
+	var parts []string
+	if state := containerStateDiagnostic(ctx, o.dockerManager, o.containerID); state != "" {
+		parts = append(parts, state)
 	}
-	diagnostics, err := tailer.ContainerDiagnosticTail(o.containerID, startupLogTailLines)
-	if err != nil {
-		logging.LogDebug("orchestrator", "failed to collect container startup diagnostics", "error", err.Error())
-		return ""
+	if tailer, ok := o.dockerManager.(containerDiagnosticTailer); ok {
+		diagnostics, err := tailer.ContainerDiagnosticTail(o.containerID, startupLogTailLines)
+		if err != nil {
+			logging.LogDebug("orchestrator", "failed to collect container startup diagnostics", "error", err.Error())
+			parts = append(parts, fmt.Sprintf("could not read container logs: %v", err))
+		} else if diagnostics = strings.TrimSpace(diagnostics); diagnostics != "" {
+			parts = append(parts, diagnostics)
+		}
 	}
-	return strings.TrimSpace(diagnostics)
+	return strings.TrimSpace(secretmask.EnvironmentValues(secretmask.Text(strings.Join(parts, "\n\n"))))
 }
 
 // StartTest starts a Spt test using the API approach
@@ -297,10 +302,10 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 	if err := o.apiClient.WaitForAPIReadyContext(ctx, apiReadyTimeout); err != nil {
 		// Clean up the started container since API is not ready
 		logging.LogError("orchestrator", "API readiness check failed, cleaning up container", err)
-		diagnostics := o.containerStartupDiagnostics()
+		diagnostics := o.containerStartupDiagnostics(ctx)
 		reportedDiagnostics := false
 		if diagnostics != "" && o.onError != nil {
-			o.onError("Container startup diagnostics:\n" + diagnostics)
+			o.onError(fmt.Sprintf("spt API failed to become ready: %v\n\nContainer startup diagnostics:\n%s", err, diagnostics))
 			reportedDiagnostics = true
 		}
 		cleanupErr := cleanupSingleHostStartFailure(ctx, o.dockerManager)

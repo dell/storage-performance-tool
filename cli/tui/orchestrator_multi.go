@@ -841,10 +841,17 @@ func (o *MultiHostOrchestrator) WaitForAPIs(ctx context.Context, timeout time.Du
 
 			if err := apiClient.WaitForAPIReadyContext(ctx, timeout); err != nil {
 				h.SetError(fmt.Errorf("API not ready: %w", err))
+				h.mu.Lock()
+				dm, containerID := h.DockerManager, h.ContainerID
+				h.mu.Unlock()
+				report := containerAPIWaitReport(ctx, dm, containerID)
 
 				apiErrorsMu.Lock()
 				errMsg := fmt.Sprintf("  ❌ %s: API timeout: %v", h.Info.Original, err)
 				apiErrors = append(apiErrors, errMsg)
+				if report != "" {
+					apiErrors = append(apiErrors, strings.Split(command.IndentLines(report, "      "), "\n")...)
+				}
 				apiErrorsMu.Unlock()
 
 				logging.LogError("docker-multi", "API wait failed",
