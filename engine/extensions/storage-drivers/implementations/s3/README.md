@@ -562,14 +562,17 @@ depends on the driver:
   * No `Status`, so the bucket has never been versioned: `PUT ?versioning` enables it, signed with the bucket's
     credential and carrying the configured headers, as the check is. Versioning stays on after the run. The notice
     says it was enabled by this run, or warns that it could not be enabled, with the status or the timeout.
-  * `Suspended`, with or without MFA delete, or any other status: an administrator chose it, so nothing is sent, and
-    a warning says the bucket was left alone.
+  * `Suspended`, with or without MFA delete: an administrator chose it, so nothing is sent, and a warning says the
+    bucket was left alone.
+  * Any other status: SPT doesn't recognize it and leaves it alone, so nothing is sent, and a warning quotes it.
   * The check fails (an error status, a timeout or a connection failure): nothing is sent, and a warning names the
     bucket and the cause.
 
-  After a warning the run goes on un-versioned. Notices go to the step's `messages.log` and warnings to `errors.log`;
-  on a distributed run the entry engine copies each worker's notices there, prefixed with the node, when the step
-  ends. Written items are named `key~versionId` when the target returns a version ID.
+  After a warning the run goes on un-versioned. Notices go to the step's `messages.log` and warnings to `errors.log`.
+  On a distributed run the entry engine copies each worker's notices into its own two logs, prefixed with the node,
+  when the step stops and before it publishes the total metrics. Each engine also writes them to
+  `log/<step id>/bucket.versioning.log`, which only carries them to the entry engine; it is not a result file. Written
+  items are named `key~versionId` when the target returns a version ID.
 * `s3-aws` only splits `key~versionId` input names into the key and the version. It sends no bucket versioning
   request, and written items keep plain names.
 * `s3-tables` manages its own paths, so the setting has no effect.

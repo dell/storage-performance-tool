@@ -335,6 +335,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	private static final String VERSIONING_STATUS_ENABLED = "Enabled";
 	private static final String VERSIONING_STATUS_SUSPENDED = "Suspended";
+	/** The most of an unrecognized status a notice quotes. */
+	private static final int MAX_QUOTED_STATUS = 64;
 	/** The first {@code Status} element of a {@code VersioningConfiguration}, with or without a namespace prefix. */
 	private static final Pattern VERSIONING_STATUS = Pattern.compile(
 					"<(?:[A-Za-z_][\\w.-]*:)?Status\\s*>([^<]*)</(?:[A-Za-z_][\\w.-]*:)?Status\\s*>");
@@ -598,11 +600,20 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * The first-use versioning check of a bucket: {@code GET ?versioning}, then {@code PUT ?versioning}
-	 * only for a bucket that has never been versioned. Each outcome logs one {@link
-	 * BucketVersioningNotice}; none throws, so the bucket's path is cached and never checked again.
+	 * The first-use versioning check of a bucket: {@code GET ?versioning}, then {@link
+	 * #handleCheckBucketVersioningResponse(FullHttpResponse, String, String)}, which by default sends
+	 * {@code PUT ?versioning} only for a bucket that has never been versioned. Each outcome of the
+	 * default handling logs one {@link BucketVersioningNotice}; none throws, so the bucket's path is
+	 * cached and never checked again. The check is marked as running until it returns, so the Entry
+	 * Node waits for it at the step's stop.
 	 */
 	private void checkBucketVersioning(final String nodeAddr, final String bucketPath, final Credential credential) {
+		try (final var check = BucketVersioningNotice.check(stepId, bucketLabel(bucketPath))) {
+			checkBucketVersioningOnce(nodeAddr, bucketPath, credential);
+		}
+	}
+
+	private void checkBucketVersioningOnce(final String nodeAddr, final String bucketPath, final Credential credential) {
 		final var bucketVersioningReqUri = bucketPath + "?" + S3Api.URL_ARG_VERSIONING;
 		final FullHttpRequest getBucketVersioningReq = new DefaultFullHttpRequest(
 						HttpVersion.HTTP_1_1,
@@ -628,7 +639,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			return;
 		}
 		try {
-			handleCheckBucketVersioningResponse(getBucketVersioningResp, nodeAddr, bucketVersioningReqUri, credential);
+			// The protected hook, so a subclass's override still decides what is done.
+			handleCheckBucketVersioningResponse(getBucketVersioningResp, nodeAddr, bucketVersioningReqUri);
 		} finally {
 			getBucketVersioningResp.release();
 		}
@@ -636,8 +648,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	/**
 	 * The headers of a versioning request, built as the bucket {@code HEAD} builds its own: the
-	 * dynamic and shared headers, a {@code Date} only when they give none, and the bucket's
-	 * credential.
+	 * dynamic and shared headers, and the bucket's credential. A {@code PUT} also gets a {@code Date}
+	 * when those headers give none; a {@code GET}, like the {@code HEAD}, does not.
 	 */
 	private HttpHeaders bucketVersioningHeaders(
 					final String nodeAddr,
@@ -737,30 +749,18 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * Kept for subclasses; signs a {@code PUT ?versioning} with the bucket's credential from
-	 * {@link #pathToCredMap}, as the first-use check does.
+	 * Acts on a bucket's {@code GET ?versioning} response, with versioning on; the first-use check
+	 * calls it for each bucket. A bucket whose {@code Status} is {@code Enabled} is left as it is.
+	 * One that has no {@code Status}, so has never been versioned, goes to {@link
+	 * #enableBucketVersioning(String, String)}. A {@code Suspended} or unrecognized status, and a
+	 * failed response, are left alone with a warning, and the run goes on un-versioned.
+	 *
+	 * <p>A subclass that overrides it decides instead, and logs no notice unless it calls this one.
 	 */
 	protected void handleCheckBucketVersioningResponse(
 					final FullHttpResponse getBucketVersioningResp,
 					final String nodeAddr,
 					final String bucketVersioningReqUri) {
-		handleCheckBucketVersioningResponse(
-						getBucketVersioningResp, nodeAddr, bucketVersioningReqUri, bucketCredential(bucketVersioningReqUri));
-	}
-
-	/**
-	 * Acts on a bucket's {@code GET ?versioning} response, with versioning on: a bucket whose
-	 * {@code Status} is {@code Enabled} is left as it is; one that has no {@code Status}, so has never
-	 * been versioned, gets {@code PUT ?versioning}; a {@code Suspended} or unknown status, and a
-	 * failed response, are left alone with a warning, and the run goes on un-versioned.
-	 *
-	 * @param credential the bucket's credential, or null for the driver's own
-	 */
-	protected void handleCheckBucketVersioningResponse(
-					final FullHttpResponse getBucketVersioningResp,
-					final String nodeAddr,
-					final String bucketVersioningReqUri,
-					final Credential credential) {
 		if (!versioning) {
 			return;
 		}
@@ -772,21 +772,24 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 		final var status = versioningStatus(getBucketVersioningResp.content().toString(UTF_8));
 		if (status == null) {
-			enableBucketVersioning(nodeAddr, bucketVersioningReqUri, credential);
+			enableBucketVersioning(nodeAddr, bucketVersioningReqUri);
 		} else if (VERSIONING_STATUS_ENABLED.equals(status)) {
 			BucketVersioningNotice.info(stepId, bucketLabel(bucketPath) + ": versioning is already enabled");
 		} else if (VERSIONING_STATUS_SUSPENDED.equals(status)) {
 			BucketVersioningNotice.warn(stepId, bucketLabel(bucketPath)
 							+ ": versioning is suspended; SPT left it alone, and the run goes on un-versioned");
 		} else {
-			BucketVersioningNotice.warn(stepId, bucketLabel(bucketPath) + ": the versioning status \"" + status
+			BucketVersioningNotice.warn(stepId, bucketLabel(bucketPath) + ": the versioning status \"" + quotedStatus(status)
 							+ "\" is neither Enabled nor Suspended; SPT left it alone, and the run goes on un-versioned");
 		}
 	}
 
 	/**
-	 * Kept for subclasses; signs the request with the bucket's credential from {@link #pathToCredMap},
-	 * as the first-use check does.
+	 * Enables a never-versioned bucket's versioning; {@link
+	 * #handleCheckBucketVersioningResponse(FullHttpResponse, String, String)} calls it. By default it
+	 * sends {@code PUT ?versioning} signed with the bucket's credential from {@link #pathToCredMap},
+	 * the one the first-use check used. A subclass that overrides it decides whether anything is sent,
+	 * and logs no notice unless it calls this one.
 	 */
 	protected void enableBucketVersioning(
 					final String nodeAddr, final String bucketVersioningReqUri) {
@@ -848,6 +851,12 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 		final var status = matcher.group(1).strip();
 		return status.isEmpty() ? null : status;
+	}
+
+	/** A status for a notice: on one line, at most {@value #MAX_QUOTED_STATUS} characters. */
+	static String quotedStatus(final String status) {
+		final var line = BucketVersioningNotice.oneLine(status).replaceAll("\\s+", " ");
+		return line.length() <= MAX_QUOTED_STATUS ? line : line.substring(0, MAX_QUOTED_STATUS) + "...";
 	}
 
 	private Credential bucketCredential(final String bucketVersioningReqUri) {

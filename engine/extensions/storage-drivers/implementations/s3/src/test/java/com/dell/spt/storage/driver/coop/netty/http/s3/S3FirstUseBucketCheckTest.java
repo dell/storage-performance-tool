@@ -11,6 +11,8 @@ import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.load.step.file.FileManager;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.confuse.Config;
 import com.sun.net.httpserver.HttpExchange;
@@ -20,6 +22,8 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -157,6 +161,21 @@ final class S3FirstUseBucketCheckTest {
 
 		assertEquals(1, requests.stream().filter(r -> "HEAD".equals(r.method())).count(), requests::toString);
 		assertEquals(0, requests.stream().filter(r -> "versioning".equals(r.query())).count(), requests::toString);
+		notices.awaitOnly("bench-1", Level.WARN, "could not read the versioning state (the connection failed); SPT sent"
+						+ " no request to enable it");
+	}
+
+	@Test
+	void aConnectionFailureOfThePutCouldNotEnable() throws Exception {
+		// Round robin over two listeners and a closed port: the HEAD and the GET reach the listeners, the
+		// PUT ?versioning the closed port.
+		final var driver = driver(List.of(listener(), listener(), "127.0.0.1:" + closedPort()), "round-robin", 5_000, true);
+
+		assertEquals("/ver-putrefused/p", assertDoesNotThrow(() -> driver.requestNewPath("/ver-putrefused/p")));
+
+		assertEquals(List.of(new Captured("HEAD", "/ver-putrefused", null),
+						new Captured("GET", "/ver-putrefused", "versioning")), requests);
+		notices.awaitOnly("ver-putrefused", Level.WARN, "could not enable versioning (the connection failed)");
 	}
 
 	@Test
@@ -387,6 +406,120 @@ final class S3FirstUseBucketCheckTest {
 
 		assertEquals(0, versioningPuts(), requests::toString);
 		notices.awaitOnly("ver-unknown", Level.WARN, "the versioning status \"Disabled\" is neither Enabled nor Suspended");
+	}
+
+	@Test
+	void aStatusWithALineBreakStaysOneNotice() throws Exception {
+		getVersioningBody = "<VersioningConfiguration><Status>X\nINFO bucket b9: versioning is already enabled</Status>"
+						+ "</VersioningConfiguration>";
+		final var driver = driver(List.of(listener()), "default", 5_000, true);
+
+		driver.requestNewPath("/ver-forge/p");
+
+		assertEquals(0, versioningPuts(), requests::toString);
+		final var notice = notices.awaitOnly("ver-forge", Level.WARN, "is neither Enabled nor Suspended");
+		assertFalse(notice.text().contains("\n"), notice::toString);
+		assertTrue(notice.text().contains("\"X INFO bucket b9: versioning is already enabled\""), notice::toString);
+		// What the Entry Node would relay: the file has the bucket's line and no line for b9.
+		final var file = Path.of(FileManager.INSTANCE.logFileName(Loggers.BUCKET_VERSIONING.getName(), "first-use"));
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		while ((!Files.exists(file) || !Files.readString(file).contains("ver-forge")) && System.nanoTime() < deadline) {
+			Thread.sleep(10);
+		}
+		final var lines = Files.readAllLines(file);
+		assertTrue(lines.stream().anyMatch(line -> line.startsWith("WARN bucket ver-forge:")), lines::toString);
+		assertFalse(lines.stream().anyMatch(line -> line.startsWith("INFO bucket b9")), lines::toString);
+	}
+
+	@Test
+	void aLongStatusIsCutShort() {
+		assertEquals("a".repeat(64) + "...", S3StorageDriver.quotedStatus("a".repeat(100)));
+		assertEquals("x y z", S3StorageDriver.quotedStatus(" x\r\n\ty \u2028z "));
+	}
+
+	@Test
+	void anOverrideOfTheResponseHookStillDecides() throws Exception {
+		final var driver = hookDriver(true, false);
+
+		driver.requestNewPath("/ver-hook1/p");
+
+		assertEquals(1, driver.responses, "the first-use check calls the old protected response hook");
+		assertEquals(0, driver.enables, "the override decided not to enable");
+		assertEquals(0, versioningPuts(), requests::toString);
+		Thread.sleep(200);
+		assertEquals(List.of(), notices.forBucket("ver-hook1"), "the override logged nothing, so SPT logs nothing");
+	}
+
+	@Test
+	void anOverrideOfTheEnableHookThatSendsNothingSuppressesThePut() throws Exception {
+		final var driver = hookDriver(false, true);
+
+		driver.requestNewPath("/ver-hook2/p");
+
+		assertEquals(1, driver.responses);
+		assertEquals(1, driver.enables, "a never-versioned bucket goes to the old protected enable hook");
+		assertEquals(0, versioningPuts(), requests::toString);
+		Thread.sleep(200);
+		assertEquals(List.of(), notices.forBucket("ver-hook2"), notices.forBucket("ver-hook2")::toString);
+	}
+
+	@Test
+	void anOverrideOfTheEnableHookThatCallsSuperEnables() throws Exception {
+		final var driver = hookDriver(false, false);
+
+		driver.requestNewPath("/ver-hook3/p");
+
+		assertEquals(1, driver.enables);
+		assertEquals(1, versioningPuts(), requests::toString);
+		notices.awaitOnly("ver-hook3", Level.INFO, "versioning enabled by this run");
+	}
+
+	/** A driver extension that overrides the two protected hooks, as one written for 5.17.0 can. */
+	@SuppressWarnings("rawtypes")
+	private static final class HookDriver extends S3StorageDriver {
+
+		private final boolean decideInResponseHook;
+		private final boolean suppressEnable;
+		volatile int responses;
+		volatile int enables;
+
+		@SuppressWarnings("unchecked")
+		HookDriver(final Config storageConfig, final boolean decideInResponseHook, final boolean suppressEnable)
+						throws Exception {
+			super("first-use", new SeedDataInput(1, ITEM_SIZE, 1, true), storageConfig, false, 16);
+			this.decideInResponseHook = decideInResponseHook;
+			this.suppressEnable = suppressEnable;
+		}
+
+		@Override
+		protected void handleCheckBucketVersioningResponse(
+						final io.netty.handler.codec.http.FullHttpResponse response, final String nodeAddr, final String uri) {
+			responses++;
+			if (!decideInResponseHook) {
+				super.handleCheckBucketVersioningResponse(response, nodeAddr, uri);
+			}
+		}
+
+		@Override
+		protected void enableBucketVersioning(final String nodeAddr, final String uri) {
+			enables++;
+			if (!suppressEnable) {
+				super.enableBucketVersioning(nodeAddr, uri);
+			}
+		}
+	}
+
+	private HookDriver hookDriver(final boolean decideInResponseHook, final boolean suppressEnable) throws Exception {
+		getVersioningBody = NEVER;
+		final Config config = S3StorageDriverTest.baseConfig(true, 4, false, null, "127.0.0.1");
+		config.val("storage-driver-limit-concurrency", 1);
+		config.val("storage-net-timeoutMilliSec", 5_000);
+		final var endpoint = listener();
+		config.val("storage-net-node-port", Integer.parseInt(endpoint.substring(endpoint.indexOf(':') + 1)));
+		final var driver = new HookDriver(config.configVal("storage"), decideInResponseHook, suppressEnable);
+		resources.add(driver);
+		driver.start();
+		return driver;
 	}
 
 	private long versioningPuts() {

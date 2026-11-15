@@ -43,7 +43,10 @@ public interface Loggers {
 	Logger NIC_PATHS = LogManager.getLogger(BASE + "NicPaths");
 	Logger NIC_SET = LogManager.getLogger(BASE + "NicSet");
 	Logger EVENT_LOOPS = LogManager.getLogger(BASE + "EventLoops");
-	/** One line per bucket versioning notice of an S3 driver's first-use check, for the Entry Node to relay. */
+	/**
+	 * Names each step's {@code bucket.versioning.log}, which {@code BucketVersioningNotice} appends to
+	 * itself, synchronously, for the Entry Node to relay; nothing is logged through it.
+	 */
 	Logger BUCKET_VERSIONING = LogManager.getLogger(BASE + "BucketVersioning");
 	Logger TABLES_METRICS = LogManager.getLogger(BASE + "TablesMetrics");
 	Logger SCENARIO = LogManager.getLogger(BASE + "Scenario");

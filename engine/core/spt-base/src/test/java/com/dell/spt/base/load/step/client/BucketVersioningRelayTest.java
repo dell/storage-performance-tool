@@ -4,33 +4,31 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.config.HttpVersioningSynonym;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.load.step.file.FileManager;
-import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.storage.driver.bucket.BucketVersioningNotice;
+import com.dell.spt.base.storage.driver.bucket.BucketVersioningNotice.Kind;
 import com.github.akurilov.commons.collection.TreeUtil;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.impl.BasicConfig;
-import java.io.EOFException;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
-import org.apache.logging.log4j.Level;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
@@ -38,6 +36,7 @@ import org.junit.jupiter.api.io.TempDir;
  * fetches as {@code messages.log} and {@code errors.log}: a two-engine step shows the notice of the engine that
  * enabled versioning, not only the Entry Node's.
  */
+@Timeout(60)
 class BucketVersioningRelayTest {
 
 	private static final String LOGGER = Loggers.BUCKET_VERSIONING.getName();
@@ -48,73 +47,148 @@ class BucketVersioningRelayTest {
 	/** What the relay logs: a WARN goes to the errors, anything else to the messages. */
 	private final List<String> relayed = new CopyOnWriteArrayList<>();
 
-	private BucketVersioningRelay relay(final String step, final List<FileManager> managers, final List<String> nodes) {
+	private BucketVersioningRelay relay(final String step, final List<FileManager> managers, final List<String> nodes,
+					final long pendingWaitMillis) {
 		return new BucketVersioningRelay(step, managers, NicPathsCollector.nodeNames(nodes),
-						(level, message) -> relayed.add(level + " " + message));
+						(level, message) -> relayed.add(level + " " + message), pendingWaitMillis);
+	}
+
+	/** A node whose file manager reads {@code file} for the step's notices. */
+	private static FileManager node(final Path file, final String step) throws Exception {
+		final var node = mock(FileManager.class);
+		when(node.logFileName(LOGGER, step)).thenReturn(file.toString());
+		when(node.fileSize(file.toString())).thenAnswer(inv -> FileManager.INSTANCE.fileSize(file.toString()));
+		when(node.readFromFile(eq(file.toString()), anyLong()))
+						.thenAnswer(inv -> FileManager.INSTANCE.readFromFile(file.toString(), inv.getArgument(1)));
+		return node;
 	}
 
 	@Test
 	void eachOtherNodesNoticesReachTheEntryNodesMessagesAndErrors() throws Exception {
 		final var step = "relay-" + System.nanoTime();
-		final var managers = new ArrayList<FileManager>();
-		for (int i = 0; i < 4; i++) {
-			final var manager = mock(FileManager.class);
-			when(manager.logFileName(LOGGER, step)).thenReturn("/node-" + i + "/bucket.versioning.log");
-			managers.add(manager);
-		}
-		final byte[] node1 = ("INFO bucket b1: versioning enabled by this run (the bucket had never been versioned)\n"
-						+ "WARN bucket b2: versioning is suspended; SPT left it alone, and the run goes on un-versioned\n")
-						.getBytes(StandardCharsets.UTF_8);
-		when(managers.get(1).readFromFile("/node-1/bucket.versioning.log", 0)).thenReturn(node1);
-		when(managers.get(1).readFromFile("/node-1/bucket.versioning.log", node1.length)).thenThrow(new EOFException());
-		when(managers.get(2).readFromFile("/node-2/bucket.versioning.log", 0))
-						.thenThrow(new NoSuchFileException("/node-2/bucket.versioning.log"));
-		when(managers.get(3).readFromFile("/node-3/bucket.versioning.log", 0)).thenThrow(new IOException("connection reset"));
+		final var entry = mock(FileManager.class);
+		final var file1 = dir.resolve("1").resolve(BucketVersioningNotice.FILE_NAME);
+		final var file2 = dir.resolve("2").resolve(BucketVersioningNotice.FILE_NAME);
+		final var broken = mock(FileManager.class);
+		when(broken.logFileName(LOGGER, step)).thenReturn("/node-3/" + BucketVersioningNotice.FILE_NAME);
+		when(broken.fileSize("/node-3/" + BucketVersioningNotice.FILE_NAME)).thenThrow(new IOException("connection reset"));
+		final var managers = List.of(entry, node(file1, step), node(file2, step), broken);
+		final var relay = relay(step, managers, List.of("node-b:1099", "node-c:1099", "node-d:1099"), 0);
+		Files.createDirectories(file1.getParent());
+		Files.writeString(file1, "CHECK bucket b1\n"
+						+ "INFO bucket b1: versioning enabled by this run (the bucket had never been versioned)\n"
+						+ "DONE bucket b1\n"
+						+ "CHECK bucket b2\n"
+						+ "WARN bucket b2: versioning is suspended; SPT left it alone, and the run goes on un-versioned\n"
+						+ "DONE bucket b2\n");
 
-		relay(step, managers, List.of("node-b:1099", "node-c:1099", "node-d:1099")).close();
+		relay.close();
 
 		assertEquals(List.of(
 						"INFO " + step + ": node 001 (node-b:1099): bucket b1: versioning enabled by this run"
 										+ " (the bucket had never been versioned)",
 						"WARN " + step + ": node 001 (node-b:1099): bucket b2: versioning is suspended; SPT left it"
 										+ " alone, and the run goes on un-versioned",
-						"WARN " + step + ": could not read the bucket versioning notices of node 003 (node-d:1099):"
+						"WARN " + step + ": could not relay the bucket versioning notices of node 003 (node-d:1099):"
 										+ " connection reset"),
 						relayed, "node 002 has no notices and is quiet; the Entry Node's own are not read");
-		verify(managers.get(0), never()).readFromFile("/node-0/bucket.versioning.log", 0);
+		verifyNoInteractions(entry);
 	}
 
 	@Test
-	void aNodeFileWrittenThroughTheLoggerIsRelayed() throws Exception {
-		final var step = "relay-file-" + System.nanoTime();
-		final var file = dir.resolve("bucket.versioning.log");
-		// What the driver's notice writes, through the appender's "%p %m%n" layout.
-		Files.writeString(file, "INFO bucket b3: versioning is already enabled\n");
-		final var entry = mock(FileManager.class);
-		final var node = mock(FileManager.class);
-		when(node.logFileName(LOGGER, step)).thenReturn(file.toString());
-		when(node.readFromFile(file.toString(), 0)).thenAnswer(inv -> FileManager.INSTANCE.readFromFile(file.toString(), 0));
-		when(node.readFromFile(file.toString(), Files.size(file)))
-						.thenAnswer(inv -> FileManager.INSTANCE.readFromFile(file.toString(), Files.size(file)));
+	void aSecondPassRelaysOnlyWhatIsNew() throws Exception {
+		final var step = "relay-twice-" + System.nanoTime();
+		final var file = dir.resolve(BucketVersioningNotice.FILE_NAME);
+		final var relay = relay(step, List.of(mock(FileManager.class), node(file, step)), List.of("node-b:1099"), 0);
+		Files.writeString(file, "INFO bucket b3: versioning is already enabled\nINFO bucket b4: partly wri");
 
-		relay(step, List.of(entry, node), List.of("node-b:1099")).close();
+		relay.relayAtStop();
+		Files.writeString(file, Files.readString(file) + "tten\n");
+		relay.close();
 
-		assertEquals(List.of("INFO " + step + ": node 001 (node-b:1099): bucket b3: versioning is already enabled"), relayed);
+		assertEquals(List.of("INFO " + step + ": node 001 (node-b:1099): bucket b3: versioning is already enabled",
+						"INFO " + step + ": node 001 (node-b:1099): bucket b4: partly written"), relayed);
 	}
 
 	@Test
-	void theLoggerWritesTheStepsBucketVersioningLog() throws Exception {
+	void theStopWaitsForACheckStillRunning() throws Exception {
+		final var step = "relay-pending-" + System.nanoTime();
+		final var file = Path.of(FileManager.INSTANCE.logFileName(LOGGER, step));
+		final var relay = relay(step, List.of(mock(FileManager.class), node(file, step)), List.of("node-b:1099"), 10_000);
+		final var check = BucketVersioningNotice.check(step, "bucket b5");
+		final var worker = Thread.ofPlatform().start(() -> {
+			try {
+				Thread.sleep(300);
+			} catch (final InterruptedException e) {
+				return;
+			}
+			BucketVersioningNotice.info(step, "bucket b5: versioning enabled by this run");
+			check.close();
+		});
+
+		final long start = System.nanoTime();
+		relay.relayAtStop();
+		final long millis = (System.nanoTime() - start) / 1_000_000;
+		worker.join();
+
+		assertEquals(List.of("INFO " + step + ": node 001 (node-b:1099): bucket b5: versioning enabled by this run"), relayed);
+		assertTrue(millis >= 250 && millis < 5_000, "waited for the check, not the whole bound: " + millis + " ms");
+	}
+
+	@Test
+	void aCheckThatOutlivesTheWaitIsNamedOnce() throws Exception {
+		final var step = "relay-stuck-" + System.nanoTime();
+		final var file = Path.of(FileManager.INSTANCE.logFileName(LOGGER, step));
+		final var relay = relay(step, List.of(mock(FileManager.class), node(file, step)), List.of("node-b:1099"), 200);
+		BucketVersioningNotice.check(step, "bucket b6");
+
+		relay.relayAtStop();
+		relay.close();
+
+		assertEquals(List.of("WARN " + step + ": node 001 (node-b:1099): the versioning check of bucket b6 had not ended"
+						+ " when the step stopped; its notice may be only in that node's bucket.versioning.log"), relayed);
+	}
+
+	@Test
+	void aNoticeIsInTheFileWhenItReturns() throws Exception {
+		final var step = "notice-sync-" + System.nanoTime();
+		final var file = Path.of(FileManager.INSTANCE.logFileName(LOGGER, step));
+
+		BucketVersioningNotice.warn(step, "bucket b7: could not enable versioning");
+
+		assertEquals(List.of("WARN bucket b7: could not enable versioning"), Files.readAllLines(file),
+						"written before the driver goes on, not by the async logger");
+	}
+
+	@Test
+	void aNoticeWithALineBreakIsOneLine() throws Exception {
+		final var step = "notice-forge-" + System.nanoTime();
+		final var file = Path.of(FileManager.INSTANCE.logFileName(LOGGER, step));
+
+		BucketVersioningNotice.warn(step, "bucket b8: the versioning status \"X\nINFO bucket b9: versioning is already"
+						+ " enabled\" is neither Enabled nor Suspended");
+
+		assertEquals(List.of("WARN bucket b8: the versioning status \"X INFO bucket b9: versioning is already enabled\" is"
+						+ " neither Enabled nor Suspended"), Files.readAllLines(file));
+	}
+
+	@Test
+	void theLoggerNamesTheStepsBucketVersioningLog() throws Exception {
 		final var name = FileManager.INSTANCE.logFileName(LOGGER, "some-step");
-		assertTrue(name.endsWith("some-step" + java.io.File.separator + "bucket.versioning.log"), name);
+		assertTrue(name.endsWith("some-step" + java.io.File.separator + BucketVersioningNotice.FILE_NAME), name);
 	}
 
 	@Test
-	void aLineIsReadBackAsItsLevelAndText() {
-		assertEquals(new BucketVersioningNotice.Line(Level.WARN, "bucket b: x y"),
+	void aLineIsReadBackAsItsKindAndText() {
+		assertEquals(new BucketVersioningNotice.Line(Kind.WARN, "bucket b: x y"),
 						BucketVersioningNotice.Line.parse("WARN bucket b: x y\r"));
-		assertEquals(new BucketVersioningNotice.Line(Level.INFO, "bucket b: x"),
+		assertEquals(new BucketVersioningNotice.Line(Kind.INFO, "bucket b: x"),
 						BucketVersioningNotice.Line.parse("INFO bucket b: x"));
-		assertEquals(Level.INFO, BucketVersioningNotice.Line.parse("ERROR bucket b: x").level());
+		assertEquals(new BucketVersioningNotice.Line(Kind.CHECK, "bucket b"),
+						BucketVersioningNotice.Line.parse("CHECK bucket b"));
+		assertEquals(org.apache.logging.log4j.Level.WARN, BucketVersioningNotice.Line.parse("WARN b").level());
+		assertEquals(org.apache.logging.log4j.Level.INFO, BucketVersioningNotice.Line.parse("DONE b").level());
+		assertNull(BucketVersioningNotice.Line.parse("ERROR bucket b: x"), "an unknown kind is skipped");
 		assertNull(BucketVersioningNotice.Line.parse(""));
 		assertNull(BucketVersioningNotice.Line.parse("WARN"));
 		assertNull(BucketVersioningNotice.Line.parse("WARN "));

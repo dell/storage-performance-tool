@@ -14,25 +14,26 @@ import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.apache.logging.log4j.core.config.Property;
 
 /**
- * Captures the lines a driver writes to {@code bucket.versioning.log}, the ones the Entry Node relays. Engine
- * loggers are asynchronous, so a check waits for the line.
+ * Captures the bucket versioning notices a driver logs to the messages (INFO) and the errors (WARN). Engine loggers
+ * are asynchronous, so a check waits for the notice.
  */
 final class BucketVersioningNotices extends AbstractAppender implements AutoCloseable {
 
 	record Notice(Level level, String text) {}
 
 	private final List<Notice> notices = new CopyOnWriteArrayList<>();
-	private final org.apache.logging.log4j.core.Logger logger;
+	private final List<org.apache.logging.log4j.core.Logger> loggers;
 
 	private BucketVersioningNotices() {
 		super("testBucketVersioningNotices" + System.nanoTime(), null, null, true, Property.EMPTY_ARRAY);
-		logger = LoggerContext.getContext(false).getLogger(Loggers.BUCKET_VERSIONING.getName());
+		final var context = LoggerContext.getContext(false);
+		loggers = List.of(context.getLogger(Loggers.MSG.getName()), context.getLogger(Loggers.ERR.getName()));
 	}
 
 	static BucketVersioningNotices attach() {
 		final var notices = new BucketVersioningNotices();
 		notices.start();
-		notices.logger.addAppender(notices);
+		notices.loggers.forEach(logger -> logger.addAppender(notices));
 		return notices;
 	}
 
@@ -42,30 +43,32 @@ final class BucketVersioningNotices extends AbstractAppender implements AutoClos
 	}
 
 	/** Waits for the bucket's notice that contains {@code part}, then checks it is the bucket's only one. */
-	void awaitOnly(final String bucket, final Level level, final String part) throws InterruptedException {
-		final var prefix = "bucket " + bucket + ":";
+	Notice awaitOnly(final String bucket, final Level level, final String part) throws InterruptedException {
 		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
 		while (System.nanoTime() < deadline) {
-			final var found = forBucket(prefix);
+			final var found = forBucket(bucket);
 			if (found.stream().anyMatch(notice -> notice.text().contains(part))) {
 				Thread.sleep(100);
-				final var settled = forBucket(prefix);
+				final var settled = forBucket(bucket);
 				assertEquals(1, settled.size(), "one notice per bucket: " + settled);
 				assertEquals(level, settled.get(0).level(), settled::toString);
-				return;
+				return settled.get(0);
 			}
 			Thread.sleep(10);
 		}
 		fail("no notice for " + bucket + " containing \"" + part + "\": " + notices);
+		return null;
 	}
 
-	private List<Notice> forBucket(final String prefix) {
-		return notices.stream().filter(notice -> notice.text().startsWith(prefix)).toList();
+	/** The notices that name the bucket, as {@code "<step>: bucket <name>: ..."}. */
+	List<Notice> forBucket(final String bucket) {
+		final var prefix = ": bucket " + bucket + ":";
+		return notices.stream().filter(notice -> notice.text().contains(prefix)).toList();
 	}
 
 	@Override
 	public void close() {
-		logger.removeAppender(this);
+		loggers.forEach(logger -> logger.removeAppender(this));
 		stop();
 	}
 }

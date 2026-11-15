@@ -288,6 +288,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			initFileManagers(nodeAddrs, fileMgrs);
 			initDeleteArtifactAggregator(nodeAddrs);
+			// Before any slice starts, so the relay notes where this run's notices begin.
+			initBucketVersioningRelay(nodeAddrs);
 			final var sliceCount = 1 + nodeAddrs.size();
 			// init the base/shared config slices
 			final var configSlices = sliceConfig(
@@ -333,7 +335,6 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 				initAndStartStepSlices(nodeAddrs, configSlices, ctxConfigsSlices, metricsMgr, barrier);
 				initNicPathsCollector(nodeAddrs, configSlices, ctxConfigsSlices);
-				initBucketVersioningRelay(nodeAddrs);
 				if (barrier != null) {
 					openAdmissionBarrier(barrier);
 				}
@@ -412,11 +413,22 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	/** On a distributed step with bucket versioning on, relays the other nodes' first-use notices. */
 	private void initBucketVersioningRelay(final List<String> nodeAddrs) {
-		if (fileMgrs.size() < 2 || bucketVersioningRelay != null
-						|| !BucketVersioningRelay.versioningRequested(config, ctxConfigs)) {
-			return;
+		// A relay left by an earlier start of this client would relay from that run's offsets.
+		bucketVersioningRelay = fileMgrs.size() < 2 || !BucketVersioningRelay.versioningRequested(config, ctxConfigs)
+						? null
+						: new BucketVersioningRelay(loadStepId(), fileMgrs, NicPathsCollector.nodeNames(nodeAddrs));
+	}
+
+	/**
+	 * Relays the other nodes' bucket versioning notices once the slices have stopped and before the
+	 * step publishes its total metrics, after which the CLI may fetch the messages and errors.
+	 */
+	private void relayBucketVersioningNoticesAtStop() {
+		if (bucketVersioningRelay != null) {
+			try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
+				bucketVersioningRelay.relayAtStop();
+			}
 		}
-		bucketVersioningRelay = new BucketVersioningRelay(loadStepId(), fileMgrs, NicPathsCollector.nodeNames(nodeAddrs));
 	}
 
 	private void initDeleteArtifactAggregator(final List<String> nodeAddrs) {
@@ -2501,6 +2513,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			});
 		}
+		relayBucketVersioningNoticesAtStop();
 		if (null != metricsAggregator) {
 			try {
 				metricsAggregator.stop();

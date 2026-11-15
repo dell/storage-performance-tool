@@ -270,6 +270,8 @@ Configuration:
         DirectWriteRolloverStrategy: {}
         PatternLayout:
           pattern: "%m%n"
+      # Names each step's bucket.versioning.log, the file the Entry Node relays. BucketVersioningNotice
+      # appends its lines itself, synchronously, so nothing is written through this appender.
       - name: bucketVersioningFile
         filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}bucket.versioning.log"
         Policies:
