@@ -46,9 +46,22 @@ import org.junit.jupiter.params.provider.ValueSource;
  * allows for timer slack on each completion and for the generator's output back-off, which can
  * leave a freed slot idle for up to about 1 ms, with headroom for a 2-core CI runner that also runs
  * other test JVMs in parallel; the high side allows for wave
- * quantization, at most one wave of {@code C} completions over a window of tens of waves. Timing
- * bounds compare the window with deliberately slow operations (hundreds of milliseconds), so they
- * hold far above scheduler noise.
+ * quantization, at most one wave of {@code C} completions over a window of tens of waves.
+ *
+ * <p>The time-limited test uses a lower floor of 0.6: on a pinned, loaded host its ratio fell to
+ * 0.75 at the old 200 ms drain hold, and to 0.82 at 500 ms. At 0.6 the floor only guards against gross undercounting:
+ * it no longer catches a window that wrongly includes the 600 ms ramp, which reads about 0.66 of
+ * {@code C / L}. That test proves the ramp is excluded by the window's start offset, by the count
+ * check that the whole slow wave and the drained requests precede or follow the window, by the
+ * slow wave in the whole-step p99 and by the whole-step {@code TPAvg} against the steady one; it
+ * proves the drain is excluded by the counts and the window maxima.
+ *
+ * <p>Timing bounds compare the window with deliberately slow operations. A loaded JVM stalls every
+ * thread for up to about 180 ms (pauses measured on a pinned, loaded host), and a stall only
+ * lengthens a recorded duration: an ordinary request reads {@code L} plus the stall, and a held
+ * request never reads less than its hold. So each held or drained request is held for at least
+ * 500 ms and the window's timings are bounded at that hold, about 300 ms above an ordinary
+ * request stretched by such a stall; the slow first wave is longer still.
  */
 @Timeout(value = 30, unit = TimeUnit.SECONDS)
 class LinearLoadStepSteadyLifecycleTest {
@@ -58,10 +71,31 @@ class LinearLoadStepSteadyLifecycleTest {
 	private static final double C_OVER_L = C * 1000.0 / L_MILLIS;
 	private static final double RATE_LOW = 0.75;
 	private static final double RATE_HIGH = 1.05;
-	/** Every window timing statistic stays below this; every deliberately slow operation exceeds it. */
-	private static final long WINDOW_TIMING_BOUND_MICROS = TimeUnit.MILLISECONDS.toMicros(150);
+	/**
+	 * The time-limited test's rate floor: it guards only against gross undercounting, not against a
+	 * ramp-inclusive window (about 0.66); see the class Javadoc for the checks that prove the ramp.
+	 */
+	private static final double TIME_LIMITED_RATE_LOW = 0.6;
+	/** The slow first wave, the ramp: longer than the drain hold, so the window bound excludes it too. */
 	private static final long SLOW_FIRST_MILLIS = 600;
-	private static final long DRAIN_HOLD_MILLIS = 200;
+	/**
+	 * Each drained request is held in flight at least this long, and the window's timings stay below
+	 * it. It separates a held request, which never reads less than its hold, from an ordinary 25 ms
+	 * request stretched by a stall (up to about 190 ms measured on a pinned, loaded host).
+	 */
+	private static final long DRAIN_HOLD_MILLIS = 500;
+	/**
+	 * Every window timing statistic stays below this; every held, drained or slow-wave request is at
+	 * least this long. It is the drain hold itself, so the two cannot drift apart.
+	 */
+	private static final long WINDOW_TIMING_BOUND_MICROS = TimeUnit.MILLISECONDS.toMicros(DRAIN_HOLD_MILLIS);
+
+	static {
+		// The window bound excludes the slow wave only while the wave outlasts the hold.
+		if (DRAIN_HOLD_MILLIS >= SLOW_FIRST_MILLIS) {
+			throw new IllegalStateException("the drain hold must be shorter than the slow first wave");
+		}
+	}
 
 	/**
 	 * Rate, slow first wave and drain exclusion at the deadline, in one time-limited step: the
@@ -94,9 +128,9 @@ class LinearLoadStepSteadyLifecycleTest {
 				assertEquals(SteadyStatus.VALID, steady.status(), steady.toString());
 				assertEquals("run exit", steady.cause());
 
-				// Rate: the window holds C / L.
 				final double steadyRate = window.successSnapshot().mean();
-				assertWithin(steadyRate, RATE_LOW * C_OVER_L, RATE_HIGH * C_OVER_L, "steady TPAvg vs C/L");
+				// Rate: the window holds C / L; the low side guards only against gross undercounting.
+				assertWithin(steadyRate, TIME_LIMITED_RATE_LOW * C_OVER_L, RATE_HIGH * C_OVER_L, "steady TPAvg vs C/L");
 				// The ramp (no completion before the slow first wave) and the held drain are outside
 				// the window, so the whole-step TPAvg is lower by at least half their share.
 				final double totalElapsedMillis = total.successSnapshot().elapsedTimeMillis();
