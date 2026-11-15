@@ -90,34 +90,58 @@ func TestVerifierMayBeMissingOnlyWhenNotStartedCompletedOrAnEmptySelectionIsAllo
 	}
 }
 
-func TestStepsToFetchAddsOnlyAnUnseenCompletedReadStep(t *testing.T) {
+func TestStepsToFetchAddsOnlyUnseenCompletedPlannedSteps(t *testing.T) {
 	list, read := "mt-001-x-list", "mt-002-x-verify"
-	allowed := integrityplan.Plan{AllowEmpty: true, Verifier: integrityplan.PlannedStep{ID: read}}
-	strict := integrityplan.Plan{Verifier: integrityplan.PlannedStep{ID: read}}
+	plan := func(allowEmpty bool) integrityplan.Plan {
+		return integrityplan.Plan{
+			AllowEmpty: allowEmpty,
+			Producer:   &integrityplan.PlannedStep{ID: list, Role: integrityplan.StepRoleList},
+			Verifier:   integrityplan.PlannedStep{ID: read},
+		}
+	}
+	tracker := func(listLifecycle, readLifecycle portcheck.StepLifecycle) *portcheck.RunResult {
+		return &portcheck.RunResult{Steps: map[string]portcheck.StepCompletion{
+			list: {Lifecycle: listLifecycle}, read: {Lifecycle: readLifecycle},
+		}}
+	}
+	completed, started := portcheck.StepLifecycleCompleted, portcheck.StepLifecycleStarted
 	tests := []struct {
-		name      string
-		plan      integrityplan.Plan
-		observed  string
-		lifecycle portcheck.StepLifecycle
-		want      int
+		name     string
+		plan     integrityplan.Plan
+		seen     []string
+		observed integrity.StepRoles
+		tracker  *portcheck.RunResult
+		want     []string
 	}{
-		{"allowed and unseen", allowed, "", portcheck.StepLifecycleCompleted, 2},
-		{"already seen", allowed, read, portcheck.StepLifecycleCompleted, 1},
-		{"never started", allowed, "", portcheck.StepLifecycleNotStarted, 1},
-		{"only planned", allowed, "", portcheck.StepLifecyclePlanned, 1},
-		{"not allowed and unseen", strict, "", portcheck.StepLifecycleCompleted, 2},
-		{"not allowed and seen", strict, read, portcheck.StepLifecycleCompleted, 1},
-		{"not allowed and still running", strict, "", portcheck.StepLifecycleStarted, 1},
-		{"not allowed and failed", strict, "", portcheck.StepLifecycleFailed, 1},
+		{"allowed and READ unseen", plan(true), []string{list}, integrity.StepRoles{List: list},
+			tracker(completed, completed), []string{list, read}},
+		{"READ unseen", plan(false), []string{list}, integrity.StepRoles{List: list},
+			tracker(completed, completed), []string{list, read}},
+		{"LIST unseen", plan(false), []string{read}, integrity.StepRoles{Read: read},
+			tracker(completed, completed), []string{read, list}},
+		{"both seen", plan(false), []string{list, read}, integrity.StepRoles{List: list, Read: read},
+			tracker(completed, completed), []string{list, read}},
+		{"READ never started", plan(false), []string{list}, integrity.StepRoles{List: list},
+			tracker(completed, portcheck.StepLifecycleNotStarted), []string{list}},
+		{"READ only planned", plan(false), []string{list}, integrity.StepRoles{List: list},
+			tracker(completed, portcheck.StepLifecyclePlanned), []string{list}},
+		{"READ still running", plan(false), []string{list}, integrity.StepRoles{List: list},
+			tracker(completed, started), []string{list}},
+		{"READ failed", plan(false), []string{list}, integrity.StepRoles{List: list},
+			tracker(completed, portcheck.StepLifecycleFailed), []string{list}},
+		{"LIST still running", plan(false), []string{read}, integrity.StepRoles{Read: read},
+			tracker(started, completed), []string{read}},
+		{"no tracker", plan(false), []string{list}, integrity.StepRoles{List: list}, nil, []string{list}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := stepsToFetch([]string{list}, test.plan, test.observed, test.lifecycle)
-			if len(got) != test.want || got[0] != list {
-				t.Fatalf("stepsToFetch() = %v, want %d steps from %q", got, test.want, list)
+			seen := slices.Clone(test.seen)
+			got := stepsToFetch(seen, test.plan, test.observed, test.tracker)
+			if !slices.Equal(got, test.want) {
+				t.Fatalf("stepsToFetch() = %v, want %v", got, test.want)
 			}
-			if test.want == 2 && got[1] != read {
-				t.Fatalf("stepsToFetch() = %v, want the planned READ %q second", got, read)
+			if !slices.Equal(seen, test.seen) {
+				t.Fatalf("stepsToFetch() changed its input to %v", seen)
 			}
 		})
 	}

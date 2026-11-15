@@ -927,13 +927,14 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, logErr)
 				logging.LogError("auto-results", "no step IDs discovered; skipping fetch", logErr)
 				writeProgress("Results fetch could not start; preserving run metadata and continuing shutdown. Output: %s\n", root)
-			} else {
-				writeProgress("Auto-results: fetching %d step(s): %s\n", len(stepIDs), strings.Join(stepIDs, ", "))
 			}
 
 			var observedRuntimeRoles integrity.StepRoles
 			var plannedRoles integrity.StepRoles
 			fetchStepIDs := stepIDs
+			// readUnseen marks a READ the tracker says completed which the live step list never showed,
+			// while it showed another step of the run.
+			readUnseen := false
 			if verificationRun {
 				plan := integrityOptions[0].Plan
 				deferredVerification := plan.Valid() && plan.VerificationDeferred()
@@ -950,8 +951,9 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 						artifactsReady = false
 					} else {
 						observedRuntimeRoles = binding.Roles
-						fetchStepIDs = stepsToFetch(stepIDs, plan, binding.Roles.Read, stepRoleLifecycle(
-							outcome.Tracker, binding.Roles.Read, plannedRoles.Read))
+						fetchStepIDs = stepsToFetch(stepIDs, plan, binding.Roles, outcome.Tracker)
+						readUnseen = len(runtimeStepIDs) > 0 && binding.Roles.Read == "" &&
+							stepRoleLifecycle(outcome.Tracker, "", plannedRoles.Read) == portcheck.StepLifecycleCompleted
 					}
 				} else {
 					observedRuntimeRoles = integrity.ResolveStepRoles(stepIDs, nil)
@@ -964,8 +966,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 					// Its planned lifecycle remains part of finalization, while runtime
 					// evidence and ActualStepIDs stay exact.
 					if readLifecycle != portcheck.StepLifecycleNotStarted {
-						if runtimeRoles.Read == "" && plan.Valid() && !plan.AllowEmpty &&
-							readLifecycle == portcheck.StepLifecycleCompleted {
+						if readUnseen && !plan.AllowEmpty {
 							outcome.CorruptionMetricsErr = fmt.Errorf(
 								"verification READ step %s completed, but its live corruption count was not observed",
 								plan.Verifier.ID)
@@ -1004,6 +1005,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			}
 			integrityFinalizationReady := artifactsReady
 			if artifactsReady {
+				writeProgress("Auto-results: fetching %d step(s): %s\n", len(fetchStepIDs), strings.Join(fetchStepIDs, ", "))
 				fetch := newResultsFetcherFunc(baseURL, root)
 				if _, ferr := fetch.FetchArtifactsForSteps(artifactCtx, fetchStepIDs); ferr != nil {
 					outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, ferr)
@@ -1186,18 +1188,24 @@ func verifierMayBeMissing(plan integrityplan.Plan, readLifecycle portcheck.StepL
 		readLifecycle == portcheck.StepLifecycleCompleted || plan.AllowEmpty
 }
 
-// stepsToFetch adds the planned READ step when the tracker says it completed but the live step list
-// never showed it: with nothing to read it can end between two polls of the live metrics, and its
-// files are still there. A READ that isn't known to have completed is not reported as a step of this
-// run.
+// stepsToFetch adds each planned producer or READ step that the tracker says completed but the live
+// step list never showed: a short step, such as one with nothing to list or read, can end between two
+// polls of the live metrics, and its files are still there. A step that isn't known to have completed
+// is not reported as a step of this run.
 func stepsToFetch(
-	stepIDs []string, plan integrityplan.Plan, observedRead string, readLifecycle portcheck.StepLifecycle,
+	stepIDs []string, plan integrityplan.Plan, observed integrity.StepRoles, tracker *portcheck.RunResult,
 ) []string {
-	if observedRead != "" || plan.Verifier.ID == "" ||
-		readLifecycle != portcheck.StepLifecycleCompleted || slices.Contains(stepIDs, plan.Verifier.ID) {
-		return stepIDs
+	fetch := stepIDs
+	add := func(step *integrityplan.PlannedStep, observedID string) {
+		if step == nil || step.ID == "" || observedID != "" || slices.Contains(fetch, step.ID) ||
+			stepRoleLifecycle(tracker, "", step.ID) != portcheck.StepLifecycleCompleted {
+			return
+		}
+		fetch = append(slices.Clone(fetch), step.ID)
 	}
-	return append(slices.Clone(stepIDs), plan.Verifier.ID)
+	add(plan.Producer, observed.Create+observed.List)
+	add(&plan.Verifier, observed.Read)
+	return fetch
 }
 
 // dropLiveCorruptionErrorOfEmptySelection forgives a missing live corruption count when finalization
