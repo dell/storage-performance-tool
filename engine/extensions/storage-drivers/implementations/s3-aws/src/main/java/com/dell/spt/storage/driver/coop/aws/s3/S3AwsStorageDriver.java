@@ -1012,11 +1012,15 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			return CompletableFuture.completedFuture(null);
 
 		case CREATE:
-		case UPDATE:
 			// Check if this is a copy operation (srcPath present)
 			if (op.srcPath() != null && !op.srcPath().isEmpty()) {
 				return copyObject(op);
 			}
+			return putObject(op);
+
+		case UPDATE:
+			// An UPDATE rewrites the whole object with the item's current content, as before 5.9.0.
+			// Its source path is the item's own directory, not a copy source.
 			return putObject(op);
 
 		case READ:
@@ -2096,7 +2100,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			return CompletableFuture.failedFuture(new IllegalArgumentException("Source path is required for copy operation"));
 		}
 
-		final String[] srcBk = parseBucketAndKey(copySourcePath(op.type(), op.item().name(), srcPath));
+		final String[] srcBk = parseBucketAndKey(copySourcePath(op.item().name(), srcPath));
 
 		var reqBuilder = CopyObjectRequest.builder()
 						.sourceBucket(srcBk[0])
@@ -2116,11 +2120,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	 * {@code "/" + key}, so {@code /src} gives {@code /src/<key>}.
 	 *
 	 * <p>Any other source path is the source itself, as before: {@code /src/key} copies that one
-	 * object to every item, and an UPDATE, which arrives here with the item's own directory, is not
-	 * turned into a copy of the object onto itself.
+	 * object to every item. Only a CREATE is a copy; an UPDATE is a PUT (see {@link #execute}).
 	 */
-	static String copySourcePath(final OpType type, final String itemName, final String srcPath) {
-		if (type != OpType.CREATE || !isBucketPath(srcPath)) {
+	static String copySourcePath(final String itemName, final String srcPath) {
+		if (!isBucketPath(srcPath)) {
 			return srcPath;
 		}
 		return ItemNamePaths.holdsPath(itemName, srcPath) ? itemName : ItemNamePaths.join(srcPath, itemName);
