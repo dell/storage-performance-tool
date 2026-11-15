@@ -53,7 +53,6 @@ import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslProvider;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
-import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.util.concurrent.Future;
 
 import java.io.IOException;
@@ -1016,9 +1015,8 @@ public abstract class NettyStorageDriverBase<I extends Item, O extends Operation
 			pipeline.addLast(sslHandler);
 		}
 		if (netTimeoutMilliSec > 0) {
-			pipeline.addLast(
-							new IdleStateHandler(
-											netTimeoutMilliSec, netTimeoutMilliSec, netTimeoutMilliSec, TimeUnit.MILLISECONDS));
+			// An inactivity timeout, not a request deadline: see NetInactivityHandler.
+			pipeline.addLast(new NetInactivityHandler(netTimeoutMilliSec));
 		}
 	}
 

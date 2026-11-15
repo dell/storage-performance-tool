@@ -25,7 +25,6 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.PrematureChannelClosureException;
 import io.netty.handler.timeout.IdleStateEvent;
-import io.netty.handler.timeout.IdleStateHandler;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -124,7 +123,7 @@ class NettyCompletionPathTest {
 	}
 
 	@Test
-	void idleStateHandlerDoesNotCompleteThePriorOperationAfterChannelRelease() throws Exception {
+	void inactivityTimerDoesNotCompleteThePriorOperationAfterChannelRelease() throws Exception {
 		final var idleEventCount = new AtomicInteger();
 		final var handler = new ResponseHandlerBase<Object, Item, Operation<Item>>(driver, false) {
 			@Override
@@ -134,7 +133,7 @@ class NettyCompletionPathTest {
 			}
 		};
 		final var channel = new EmbeddedChannel(
-						new IdleStateHandler(0, 0, 1, TimeUnit.MILLISECONDS),
+						new NetInactivityHandler(1),
 						new ChannelInboundHandlerAdapter() {
 							@Override
 							public void userEventTriggered(final io.netty.channel.ChannelHandlerContext ctx, final Object evt) {
@@ -153,14 +152,14 @@ class NettyCompletionPathTest {
 
 		driver.complete(channel, op);
 
-		// Exercise the actual scheduled IdleStateHandler path, not a manually-invoked
+		// Exercise the driver's scheduled inactivity timer, not a manually-invoked
 		// userEventTriggered proxy. Before the attribute clear, this timed-out event
 		// completed the prior operation again after its channel had been released.
 		channel.advanceTimeBy(1, TimeUnit.MILLISECONDS);
 		channel.runScheduledPendingTasks();
 		channel.runPendingTasks();
 
-		assertTrue(idleEventCount.get() > 0, "IdleStateHandler should emit an idle event");
+		assertTrue(idleEventCount.get() > 0, "the inactivity timer should emit an idle event");
 		verify(driver, times(1)).complete(channel, op);
 		verify(op, never()).status(any(Operation.Status.class));
 		verify(connPool, times(1)).release(channel);

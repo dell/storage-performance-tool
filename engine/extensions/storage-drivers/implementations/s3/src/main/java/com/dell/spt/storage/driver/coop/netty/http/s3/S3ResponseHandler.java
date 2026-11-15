@@ -269,7 +269,13 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 						&& !integrityEnabled
 						&& versionId != null
 						&& !(op instanceof DeleteRequestOperation)) {
-			op.item().name(op.item().name() + "~" + versionId);
+			final Item item = op.item();
+			final String name = item.name();
+			// A name without a suffix appends, as it always did. The request builder never renames a
+			// key~versionId item, so on the route that splits it the suffix is replaced.
+			item.name(name.indexOf('~') >= 0 && s3Driver != null && s3Driver.namesLegacyVersion(op)
+							? S3StorageDriver.withLegacyVersion(name, versionId)
+							: name + "~" + versionId);
 		}
 		if (integrityEnabled
 						&& channel != null

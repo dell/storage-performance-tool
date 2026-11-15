@@ -434,6 +434,31 @@ make sure to enable `--storage-object-versioning` flag and specify `item-output-
 Commands written for Mongoose 3.x can keep `--storage-net-http-versioning` instead, see
 [4.3.4](#434-mongoose-versioning-flag).
 
+With versioning on, the `s3` and `s3-rdma` drivers read the version from a `key~versionId` item name:
+
+* READ (a `GET`, or a `HEAD` with `--storage-net-http-read-metadata-only`), STAT (a `HEAD`) and DELETE select that
+  version with the `versionId` query parameter, for example `GET /bucket/key?versionId=<versionId>`.
+* UPDATE sends the version in an `x-amz-version-id` request header. S3 has no in-place update of a version: a `PUT`
+  always makes a new one.
+* A successful operation whose response has an `x-amz-version-id` header renames the item `key~<versionId>` with
+  that version, so the output items file records the version that was read, written or deleted. Without the header
+  the item keeps its name: for a READ, STAT or DELETE that is the version it selected, but for a CREATE or UPDATE it
+  is the previous version, not the one the `PUT` made.
+* A failed operation keeps its `key~versionId` name, so with `--load-op-retry=true` the retry selects the same
+  version. A READ or STAT naming a version that no longer exists fails with 404.
+* Under V2 signing (`--storage-auth-version=2`, the default for the `s3` driver; `s3-rdma` and `s3-tables`
+  default to 4, and `spt run` passes 4) the `versionId` value is signed decoded, as V2 requires; the URI
+  carries it percent-encoded.
+* A driver extension that overrides `dataUriPath` builds the versioned paths too: the driver passes it the whole
+  `key~versionId` item and takes the `~versionId` suffix off the end of the path it returns. If the returned path
+  doesn't end with that suffix, nothing is sent: the operation fails at once with `FAIL_UNKNOWN`, its concurrency
+  permit is released, its connection is closed as for any failed operation (the next one opens a new connection),
+  and `errors.log` records "Send HTTP request failure" (at ERROR the first
+  time, then at DEBUG). It does not wait for `storage-net-timeoutMilliSec`, and it doesn't hang with that set to 0.
+* A copy (a CREATE with `--item-input-path`) and an item above the multipart threshold (`item-data-ranges-threshold`,
+  see [4.4](#44-multipart-upload)) don't select a version: they act on the current version, or on an object literally
+  named `key~versionId`.
+
 #### 4.3.1. PUT versions
 
 There are two approaches to do load testing with versioning. But first stage is common:
