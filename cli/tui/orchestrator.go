@@ -23,8 +23,10 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
 )
 
+// apiReadyTimeout is how long a single-host run waits for its engine API; tests shorten it.
+var apiReadyTimeout = 60 * time.Second
+
 const (
-	apiReadyTimeout     = 60 * time.Second
 	startupLogTailLines = 120
 
 	// Optimized polling intervals
@@ -160,6 +162,19 @@ func (o *TestOrchestrator) SetCallbacks(
 	o.onOutput = onOutput
 	o.onError = onError
 }
+
+// reportedAPIWaitError is the single-host API wait failure after onError has printed it with
+// the container startup diagnostics: its text points there instead of repeating the failure,
+// and it still wraps the wait's error.
+type reportedAPIWaitError struct {
+	err error
+}
+
+func (e reportedAPIWaitError) Error() string {
+	return "engine did not become ready; the failure and container startup diagnostics are above"
+}
+
+func (e reportedAPIWaitError) Unwrap() error { return e.err }
 
 func (o *TestOrchestrator) containerStartupDiagnostics(ctx context.Context) string {
 	if o.dockerManager == nil || o.containerID == "" {
@@ -316,7 +331,7 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 		var startupErr error
 		if diagnostics != "" {
 			if reportedDiagnostics {
-				startupErr = fmt.Errorf("spt API failed to become ready: %w; see container startup diagnostics above", err)
+				startupErr = reportedAPIWaitError{err: err}
 			} else {
 				startupErr = fmt.Errorf("spt API failed to become ready: %w\n\nContainer startup diagnostics:\n%s", err, diagnostics)
 			}

@@ -17,6 +17,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/pkg/stdcopy"
 )
@@ -245,5 +246,41 @@ func TestDockerManagerContainerStateReportsMissingContainer(t *testing.T) {
 	state, err := dm.containerState(context.Background(), "cid")
 	if err != nil || !state.Missing || state.String() != "missing (no such container)" {
 		t.Fatalf("containerState() = %+v, %v; want missing", state, err)
+	}
+}
+
+// TestSingleHostAPIWaitFailurePrintsFailureOnceBeforeDiagnostics runs the single-host start
+// through a failed API wait: the failure line appears once, followed by the diagnostics.
+func TestSingleHostAPIWaitFailurePrintsFailureOnceBeforeDiagnostics(t *testing.T) {
+	previous := apiReadyTimeout
+	apiReadyTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { apiReadyTimeout = previous })
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	mock := NewMockDockerManager()
+	mock.SetAPIWaitContainer(command.ContainerState{Status: "exited", ExitCode: 1}, nil, "", nil)
+	orchestrator := NewTestOrchestrator(mock, constants.SptAPIPort, "")
+	orchestrator.apiClient = NewSptAPIClient(server.URL)
+	var errorsReported []string
+	orchestrator.SetCallbacks(nil, nil, nil, func(message string) { errorsReported = append(errorsReported, message) })
+
+	err := orchestrator.StartTestWithContent(context.Background(), "test-image",
+		scenario.Params{WorkloadType: "write", Threads: 1, ObjectSize: "1MB"},
+		[]byte("// scenario\n"), []byte("storage: {}\n"))
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("StartTestWithContent() error = %v, want the wrapped wait failure", err)
+	}
+	output := strings.Join(append(errorsReported, err.Error()), "\n")
+	const failure = "spt API failed to become ready: spt API did not become ready after 200ms"
+	if count := strings.Count(output, failure); count != 1 {
+		t.Fatalf("the failure line appears %d times, want once:\n%s", count, output)
+	}
+	failureAt := strings.Index(output, failure)
+	headerAt := strings.Index(output, "Container startup diagnostics:\nContainer state: exited with exit code 1")
+	if headerAt < failureAt {
+		t.Fatalf("the diagnostics must follow the failure line:\n%s", output)
 	}
 }
