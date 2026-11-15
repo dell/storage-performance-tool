@@ -22,7 +22,7 @@ final class LoggerLevels implements AutoCloseable {
 		final var context = LoggerContext.getContext(false);
 		for (final var name : names) {
 			final var current = context.getLogger(name).getLevel();
-			if (current == null || current.isMoreSpecificThan(level) && !current.equals(level)) {
+			if (current == null || (current.isMoreSpecificThan(level) && !current.equals(level))) {
 				levels.previous.put(name, current);
 				Configurator.setLevel(name, level);
 			}
