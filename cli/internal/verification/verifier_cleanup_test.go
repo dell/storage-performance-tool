@@ -77,20 +77,20 @@ func runLabel(id string) string { return constants.DockerLabelVerifyRun + "=" + 
 func TestCleanupVerifyContainers_LeavesFreshContainerOfAnotherRun(t *testing.T) {
 	logs := captureLogs(t)
 	created := dockerCreatedAt(cleanupNow.Add(-20 * time.Second))
-	removed, _ := runCleanup(t, verifyPSLine("fresh1", created, "spt.verify=true", runLabel("other-run")))
+	removed, _ := runCleanup(t, verifyPSLine("0f0f0f0f0f01", created, "spt.verify=true", runLabel("other-run")))
 
 	assertRemoved(t, removed)
-	if !strings.Contains(logs.String(), "level=DEBUG") || !strings.Contains(logs.String(), "container=fresh1") {
-		t.Fatalf("want one DEBUG line naming fresh1, got:\n%s", logs.String())
+	if !strings.Contains(logs.String(), "level=DEBUG") || !strings.Contains(logs.String(), "container=0f0f0f0f0f01") {
+		t.Fatalf("want one DEBUG line naming 0f0f0f0f0f01, got:\n%s", logs.String())
 	}
 }
 
 func TestCleanupVerifyContainers_RemovesStaleContainerOfAnotherRun(t *testing.T) {
 	logs := captureLogs(t)
 	created := dockerCreatedAt(cleanupNow.Add(-verifyContainerStaleAge - time.Minute))
-	removed, _ := runCleanup(t, verifyPSLine("stale1", created, runLabel("other-run"), "spt.verify=true"))
+	removed, _ := runCleanup(t, verifyPSLine("05a1e0000001", created, runLabel("other-run"), "spt.verify=true"))
 
-	assertRemoved(t, removed, "stale1")
+	assertRemoved(t, removed, "05a1e0000001")
 	out := logs.String()
 	if !strings.Contains(out, "level=INFO") || !strings.Contains(out, "removed lingering verification container") || !strings.Contains(out, "age=16m0s") {
 		t.Fatalf("want the INFO removal line with the age, got:\n%s", out)
@@ -99,7 +99,7 @@ func TestCleanupVerifyContainers_RemovesStaleContainerOfAnotherRun(t *testing.T)
 
 func TestCleanupVerifyContainers_LeavesOwnRunAtAnyAge(t *testing.T) {
 	created := dockerCreatedAt(cleanupNow.Add(-2 * verifyContainerStaleAge))
-	removed, _ := runCleanup(t, verifyPSLine("own1", created, runLabel("this-run")))
+	removed, _ := runCleanup(t, verifyPSLine("0000000000a1", created, runLabel("this-run")))
 
 	assertRemoved(t, removed)
 }
@@ -108,24 +108,24 @@ func TestCleanupVerifyContainers_UnlabelledJudgedByAge(t *testing.T) {
 	oldCreated := dockerCreatedAt(cleanupNow.Add(-time.Hour))
 	freshCreated := dockerCreatedAt(cleanupNow.Add(-time.Minute))
 	removed, _ := runCleanup(t, strings.Join([]string{
-		verifyPSLine("oldunlabelled", oldCreated, "spt.verify=true", "spt.verify.host=wrk1"),
-		verifyPSLine("freshunlabelled", freshCreated, "spt.verify=true", "spt.verify.host=wrk1"),
+		verifyPSLine("01d000000001", oldCreated, "spt.verify=true", "spt.verify.host=wrk1"),
+		verifyPSLine("0f0000000002", freshCreated, "spt.verify=true", "spt.verify.host=wrk1"),
 	}, "\n"))
 
-	assertRemoved(t, removed, "oldunlabelled")
+	assertRemoved(t, removed, "01d000000001")
 }
 
 func TestCleanupVerifyContainers_UnlabelledOldRemovedByVerifierWithoutRunID(t *testing.T) {
 	exec := &MockCommandExecutor{Commands: map[string]MockCommandResponse{
-		verifyCleanupListCommand(): {Stdout: verifyPSLine("old1", dockerCreatedAt(cleanupNow.Add(-time.Hour)), "spt.verify=true")},
-		"docker rm -f old1":        {},
+		verifyCleanupListCommand(): {Stdout: verifyPSLine("01d000000002", dockerCreatedAt(cleanupNow.Add(-time.Hour)), "spt.verify=true")},
+		"docker rm -f 01d000000002":        {},
 	}}
 	host := &hostparse.HostInfo{Host: "wrk1"}
 	v := &Verifier{cmdExecutor: exec, timeProvider: NewMockTimeProvider(cleanupNow)}
 
 	v.cleanupVerifyContainers(host, command.NewDockerOperations(exec, host))
 
-	if last := strings.Join(exec.ExecutedCommands[len(exec.ExecutedCommands)-1].Command, " "); last != "docker rm -f old1" {
+	if last := strings.Join(exec.ExecutedCommands[len(exec.ExecutedCommands)-1].Command, " "); last != "docker rm -f 01d000000002" {
 		t.Fatalf("an unlabelled stale container must not match an empty run id; last command %q", last)
 	}
 }
@@ -133,23 +133,63 @@ func TestCleanupVerifyContainers_UnlabelledOldRemovedByVerifierWithoutRunID(t *t
 func TestCleanupVerifyContainers_LeavesUnparseableTimeAlone(t *testing.T) {
 	logs := captureLogs(t)
 	removed, _ := runCleanup(t, strings.Join([]string{
-		verifyPSLine("badtime", "yesterday-ish", runLabel("other-run")),
+		verifyPSLine("0bad00000001", "yesterday-ish", runLabel("other-run")),
 		"garbage-line-without-fields",
 	}, "\n"))
 
 	assertRemoved(t, removed)
 	out := logs.String()
-	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "container=badtime") {
-		t.Fatalf("want a WARN line naming badtime, got:\n%s", out)
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "container=0bad00000001") {
+		t.Fatalf("want a WARN line naming 0bad00000001, got:\n%s", out)
 	}
 }
 
 func TestCleanupVerifyContainers_ReadsZoneOffset(t *testing.T) {
 	// A Docker host in UTC-5 reports local time. 06:58 -0500 is 11:58 UTC, two minutes old for a
 	// client clock of 12:00 UTC, so it is fresh; read without the offset it would look five hours old.
-	removed, _ := runCleanup(t, verifyPSLine("est1", "2026-11-14 06:58:00 -0500 EST", runLabel("other-run")))
+	removed, _ := runCleanup(t, verifyPSLine("0e5700000001", "2026-11-14 06:58:00 -0500 EST", runLabel("other-run")))
 
 	assertRemoved(t, removed)
+}
+
+func TestCleanupVerifyContainers_StaleAgeBoundary(t *testing.T) {
+	removed, _ := runCleanup(t, strings.Join([]string{
+		verifyPSLine("0a6e00000001", dockerCreatedAt(cleanupNow.Add(-verifyContainerStaleAge)), runLabel("other-run")),
+		verifyPSLine("0a6e00000002", dockerCreatedAt(cleanupNow.Add(-verifyContainerStaleAge+time.Second)), runLabel("other-run")),
+	}, "\n"))
+
+	assertRemoved(t, removed, "0a6e00000001")
+}
+
+func TestCleanupVerifyContainers_ReadsLabelsHoldingAtSignsAndCommas(t *testing.T) {
+	created := dockerCreatedAt(cleanupNow.Add(-time.Minute))
+	removed, _ := runCleanup(t, verifyPSLine("0ab000000001", created,
+		"maintainer=spt-dev@example.com", "org.opencontainers.image.title=a,b", runLabel("this-run"), "spt.verify=true"))
+	assertRemoved(t, removed)
+
+	old := dockerCreatedAt(cleanupNow.Add(-time.Hour))
+	removed, _ = runCleanup(t, verifyPSLine("0ab000000002", old,
+		"maintainer=spt-dev@example.com", runLabel("this-run")))
+	assertRemoved(t, removed)
+}
+
+func TestCleanupVerifyContainers_LeavesLineWithoutContainerIDAlone(t *testing.T) {
+	// A label value holding a newline lets label text start a docker ps line. Its first field must
+	// never reach docker rm, however old the line's creation time reads.
+	logs := captureLogs(t)
+	old := dockerCreatedAt(cleanupNow.Add(-time.Hour))
+	removed, _ := runCleanup(t, strings.Join([]string{
+		verifyPSLine("$(touch${IFS}x)", old, runLabel("other-run")),
+		verifyPSLine("0123456789AB", old, runLabel("other-run")),
+		verifyPSLine("0123456789a", old, runLabel("other-run")),
+		verifyPSLine(strings.Repeat("a", 65), old, runLabel("other-run")),
+		verifyPSLine(strings.Repeat("a", 64), old, runLabel("other-run")),
+	}, "\n"))
+
+	assertRemoved(t, removed, strings.Repeat("a", 64))
+	if got := strings.Count(logs.String(), "unexpected docker ps line"); got != 4 {
+		t.Fatalf("want 4 WARN lines for the lines without a container ID, got %d:\n%s", got, logs.String())
+	}
 }
 
 func TestStartNodeContainer_CarriesRunLabel(t *testing.T) {

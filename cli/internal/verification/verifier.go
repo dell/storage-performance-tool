@@ -1099,11 +1099,13 @@ func (v *Verifier) getExternalIP(host *hostparse.HostInfo) string {
 //	RDMA checks     30 s  (device, driver and readiness, 10 s each; --rdma only)
 //	RDMA ports      10 s  per RDMA device (--rdma only; 16 devices give 160 s)
 //	NIC plan        60 s  (constants.NicPlanTimeoutSecs)
-//	port readiness  30 s  (constants.APIReadinessTimeout) plus one 2 s probe round
+//	policy rules    10 s  (--interfaces only)
+//	port readiness  30 s  (constants.APIReadinessTimeout; each probe is capped at that deadline)
 //	endpoints       10 s  (two requests of constants.HTTPRequestTimeoutSecs)
 //	removal         20 s  (stopContainer)
 //
-// That is about 150 s without RDMA and about 350 s with 16 RDMA devices. 15 minutes is well above
+// Each command that reaches its timeout may also take constants.CommandWaitDelay (1 s) to stop. That
+// is about 160 s without RDMA and about 375 s with 16 RDMA devices. 15 minutes is well above
 // either, so a container younger than this belongs to a verify that is still running, and it also
 // leaves room for a few minutes of clock skew between this client and the Docker host, whose clock
 // stamps the creation time.
@@ -1142,7 +1144,7 @@ func (v *Verifier) cleanupVerifyContainers(host *hostparse.HostInfo, dockerOps c
 		}
 		fields := strings.SplitN(line, "@", verifyContainerFields)
 		id := fields[0]
-		if len(fields) != verifyContainerFields || id == "" {
+		if len(fields) != verifyContainerFields || !isDockerContainerID(id) {
 			logging.LogWarn("verifier", "left verification container alone: unexpected docker ps line",
 				"host", host.Host,
 				"line", line)
@@ -1170,6 +1172,21 @@ func (v *Verifier) cleanupVerifyContainers(host *hostparse.HostInfo, dockerOps c
 		}
 		v.removeStaleVerifyContainer(host, dockerOps, id, age)
 	}
+}
+
+// isDockerContainerID reports whether id looks like a Docker container ID: 12 (short) to 64 (full)
+// lower-case hex characters. A docker ps line whose first field is anything else is left alone, so
+// label text that spans lines can never reach docker rm.
+func isDockerContainerID(id string) bool {
+	if len(id) < 12 || len(id) > 64 {
+		return false
+	}
+	for _, c := range id {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (v *Verifier) removeStaleVerifyContainer(host *hostparse.HostInfo, dockerOps command.DockerOperations, id string, age time.Duration) {
