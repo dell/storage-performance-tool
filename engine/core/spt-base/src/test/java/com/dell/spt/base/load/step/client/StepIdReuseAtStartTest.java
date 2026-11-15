@@ -287,8 +287,9 @@ public class StepIdReuseAtStartTest {
 		final Config config = config("update");
 		config.val("storage-net-nodeInterfaces-entry", "none");
 		final String line = "Load step slice #0 (entry) interfaces: none (host override)";
+		final String end = "stepIdReuseSliceLines end " + UUID.randomUUID();
 		final List<String> messages = Collections.synchronizedList(new ArrayList<>());
-		final var seen = new CountDownLatch(1);
+		final var ended = new CountDownLatch(1);
 		final var appender = new AbstractAppender("stepIdReuseSliceLines", null, null, true, Property.EMPTY_ARRAY) {
 			@Override
 			public void append(final LogEvent event) {
@@ -296,8 +297,8 @@ public class StepIdReuseAtStartTest {
 				if (message.contains(stepId) || message.startsWith("Load step slice #")) {
 					messages.add(message);
 				}
-				if (message.equals(line)) {
-					seen.countDown();
+				if (message.equals(end)) {
+					ended.countDown();
 				}
 			}
 		};
@@ -311,9 +312,15 @@ public class StepIdReuseAtStartTest {
 			} catch (final RuntimeException other) {
 				assertFalse(RunTerminalException.find(other) instanceof StepIdInUseException, other.toString());
 			}
-			// One thread's messages arrive in order, so a check's line would arrive before the start's.
-			assertTrue(seen.await(10, TimeUnit.SECONDS), messages.toString());
-			assertEquals(1, messages.stream().filter(line::equals).count(), messages.toString());
+			// One thread's messages arrive in order, so once this marker logged after the start has
+			// arrived, every line the start logged has arrived before it.
+			Loggers.MSG.info(end);
+			assertTrue(ended.await(10, TimeUnit.SECONDS), "the end marker never arrived");
+			final List<String> snapshot;
+			synchronized (messages) {
+				snapshot = new ArrayList<>(messages);
+			}
+			assertEquals(1, snapshot.stream().filter(line::equals).count(), snapshot.toString());
 		} finally {
 			closeQuietly(client);
 			logger.removeAppender(appender);

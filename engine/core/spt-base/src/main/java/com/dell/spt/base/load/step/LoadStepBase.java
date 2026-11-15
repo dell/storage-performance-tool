@@ -434,6 +434,8 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	 * call may reach the step's other nodes. Both calls test the same files, so a repeat is harmless.
 	 *
 	 * @throws StepIdInUseException naming the first such file
+	 * @throws StepIdCheckException when a file cannot be tested, here or on another node, so the step
+	 *     cannot tell whether an earlier step left it
 	 */
 	protected void refuseStepIdInUse(final boolean nodes) {}
 
