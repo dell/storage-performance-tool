@@ -283,7 +283,7 @@ Behavior, limits and log output are described in the CLI's
 | storage-object-fsAccess                        | Flag | false | Specifies whether filesystem access is enabled or not
 | storage-object-tagging-enabled                 | Flag | false | Work (PUT/GET/DELETE) with object tagging or not (default)
 | storage-object-tagging-tags                    | Map  | {}    | Map of name-value tags, effective only for the `UPDATE` operation when tagging is enabled
-| storage-object-versioning                      | Flag | false | Specifies whether the versioning storage feature is used or not. When on, the driver checks each bucket at first use and enables versioning on it if it isn't enabled
+| storage-object-versioning                      | Flag | false | Specifies whether the versioning storage feature is used or not. When on, the driver reads each bucket's versioning state at first use and enables versioning only on a bucket that has never had it; it leaves a suspended bucket alone and sends nothing when it can't read the state, with a warning, and reports what it found or changed. See [4.3.4](#434-mongoose-versioning-flag)
 | storage-net-http-versioning                    | Flag | false | The Mongoose 3.x name for `storage-object-versioning`. Set to true, it turns `storage-object-versioning` on; set to false, it leaves it as it is. See [4.3.4](#434-mongoose-versioning-flag)
 | storage-checksum-enabled                       | Flag | false | Compute and send a checksum header on write requests. Applies to both simple PUTs and individual multipart upload parts.
 | storage-checksum-algorithm                     | String | md5 | S3 checksum algorithm: [md5, crc32, crc32c, sha1, sha256]. When multipart upload is active, the selected algorithm is applied per part.
@@ -589,8 +589,29 @@ Either flag set to true turns versioning on. The synonym set to false, or not se
 or in posted defaults by setting it to false: set both keys to false in that `.config()`. What versioning then does
 depends on the driver:
 
-* `s3` and `s3-rdma` check each bucket's versioning at first use, enable it if it is off, and leave it on after the
-  run. Written items are named `key~versionId`.
+* `s3` and `s3-rdma` read each bucket's versioning state (`GET ?versioning`) at first use, once per bucket per
+  driver, and act on its `Status`:
+  * `Enabled`: nothing is sent; the notice says versioning is already enabled.
+  * No `Status`, so the bucket has never been versioned: `PUT ?versioning` enables it, signed with the bucket's
+    credential and carrying the configured headers, as the check is. Versioning stays on after the run. A warning
+    says it was enabled by this run, or that it could not be enabled, with the status or the timeout.
+  * `Suspended`, with or without MFA delete: an administrator chose it, so nothing is sent, and a warning says the
+    bucket was left alone.
+  * Any other status: SPT doesn't recognize it and leaves it alone, so nothing is sent, and a warning quotes it.
+  * The check fails (an error status, a timeout or a connection failure), or its body is not a
+    `VersioningConfiguration` SPT can read: nothing is sent, and a warning names the bucket and the cause.
+
+  The body is read by element name, whatever namespace prefix, declarations or attributes it carries. After a warning
+  the run goes on un-versioned, unless the warning says this run enabled versioning. The notice that versioning is
+  already enabled goes to the step's `messages.log`, and every warning to `errors.log`.
+  On a distributed run the entry engine copies each worker's notices into its own two logs, prefixed with the node,
+  when the step stops and before it publishes the total metrics. Each read of the workers' notices, when the step
+  starts, stops and closes, waits at most 10 seconds, and a worker that doesn't answer in time is left out with a
+  warning. A later read skips, at once and with a warning, a worker whose earlier read hasn't returned, and every
+  worker once 32 such reads are outstanding in the engine. Each engine also writes them to
+  `log/<step id>/bucket.versioning.log`, which only carries them to the entry engine; it is not a result file. The
+  engine's log API lists and serves it as `BucketVersioning`, but the CLI doesn't fetch it. Written
+  items are named `key~versionId` when the target returns a version ID.
 * `s3-aws` only splits `key~versionId` input names into the key and the version. It sends no bucket versioning
   request, and written items keep plain names.
 * `s3-tables` manages its own paths, so the setting has no effect.
