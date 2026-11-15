@@ -2679,8 +2679,12 @@ public class S3StorageDriverTest {
 	@Nested
 	class StaleUploadIdOnReusedConnection {
 
-		private static final String PREVIOUS_ID = "previous-upload-id";
-		private static final String SENTINEL_ID = "sentinel-upload-id";
+		/*
+		 * Unique per test: the multipart logger is asynchronous, so a row an earlier test logged can still reach the next
+		 * test's capture.
+		 */
+		private final String previousId = "previous-upload-id-" + System.nanoTime();
+		private final String sentinelId = "sentinel-upload-id-" + System.nanoTime();
 		private static final String INIT_BODY_PREFIX = "<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>obj</Key>";
 		private static final String INIT_BODY_SUFFIX = "</InitiateMultipartUploadResult>";
 
@@ -2721,12 +2725,12 @@ public class S3StorageDriverTest {
 			return op;
 		}
 
-		/** A connection whose last initiation was answered with {@link #PREVIOUS_ID}. */
+		/** A connection whose last initiation was answered with {@link #previousId}. */
 		private EmbeddedChannel reusedChannel() throws Exception {
 			final var channel = new EmbeddedChannel();
-			final var first = initiate(channel, Operation.Status.SUCC, initBody(PREVIOUS_ID));
+			final var first = initiate(channel, Operation.Status.SUCC, initBody(previousId));
 			assertEquals(Operation.Status.SUCC, first.status());
-			assertEquals(PREVIOUS_ID, first.get(S3Api.KEY_UPLOAD_ID));
+			assertEquals(previousId, first.get(S3Api.KEY_UPLOAD_ID));
 			assertTrue(channel.isOpen(), "a successful initiation keeps the connection for reuse");
 			return channel;
 		}
@@ -2744,11 +2748,11 @@ public class S3StorageDriverTest {
 			try {
 				final var channel = reusedChannel();
 				second = initiate(channel, status, body);
-				initiate(new EmbeddedChannel(), Operation.Status.SUCC, initBody(SENTINEL_ID));
+				initiate(new EmbeddedChannel(), Operation.Status.SUCC, initBody(sentinelId));
 				final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
 				while (System.nanoTime() < deadline) {
 					synchronized (capture.messages) {
-						if (capture.messages.stream().anyMatch(m -> m.contains(SENTINEL_ID))) {
+						if (capture.messages.stream().anyMatch(m -> m.contains(sentinelId))) {
 							break;
 						}
 					}
@@ -2761,9 +2765,9 @@ public class S3StorageDriverTest {
 			synchronized (capture.messages) {
 				rows = new ArrayList<>(capture.messages);
 			}
-			assertTrue(rows.stream().anyMatch(m -> m.contains(SENTINEL_ID)),
+			assertTrue(rows.stream().anyMatch(m -> m.contains(sentinelId)),
 							"the sentinel initiation's INIT row must be captured: " + rows);
-			assertEquals(1, rows.stream().filter(m -> m.contains(PREVIOUS_ID)).count(),
+			assertEquals(1, rows.stream().filter(m -> m.contains(previousId)).count(),
 							"only the first initiation's INIT row may carry its upload ID: " + rows);
 			return second;
 		}
