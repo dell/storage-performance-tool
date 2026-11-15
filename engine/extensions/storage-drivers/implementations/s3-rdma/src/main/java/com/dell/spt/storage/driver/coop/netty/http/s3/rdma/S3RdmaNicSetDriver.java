@@ -888,13 +888,12 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		public boolean fail(final O ignored, final boolean settlePart) {
 			final var row = counters.path(nicIndex, -1);
 			row.attempted();
-			final boolean claimed = withDispatchAdmission(this::claim);
+			final boolean claimed = withDispatchAdmission(this::claim, op);
 			nicPool.admission().cancelled(nicIndex, trial);
 			concurrencyThrottle.release();
 			signalDispatchCapacityAvailable();
 			if (!claimed) {
 				row.interrupted();
-				settleRefusedDispatch(op);
 				return true;
 			}
 			final var lifecycle = op.lifecycle();
@@ -935,7 +934,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		public void failed(final int path, final Throwable cause) {
 			final var row = counters.path(nicIndex, path);
 			row.attempted();
-			final boolean claimed = withDispatchAdmission(this::claim);
+			final boolean claimed = withDispatchAdmission(this::claim, op);
 			nicSet.logSetupFailure(cause, !claimed);
 			if (context != null) {
 				releaseContext(context, true);
@@ -951,7 +950,6 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 			signalDispatchCapacityAvailable();
 			if (!claimed) {
 				row.interrupted();
-				settleRefusedDispatch(op);
 				return;
 			}
 			final var lifecycle = op.lifecycle();
@@ -971,9 +969,9 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 			if (admission.waitEnded(nicIndex)) {
 				signalDispatchCapacityAvailable();
 			}
-			if (!withDispatchAdmission(this::claim)) {
+			if (!withDispatchAdmission(this::claim, op)) {
 				// Stopped, or the circulation is stale: nothing is written and queue recovery owns the operation.
-				// A stopped composite's finalization is in no queue: it is settled here.
+				// A stopped composite's finalization is in no queue: the refused claim settled it.
 				final var row = counters.path(channel);
 				row.attempted();
 				row.interrupted();
@@ -984,7 +982,6 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 				admission.attemptEnded(nicIndex, trial);
 				concurrencyThrottle.release();
 				signalDispatchCapacityAvailable();
-				settleRefusedDispatch(op);
 				return;
 			}
 			if (context != null) {

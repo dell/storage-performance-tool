@@ -2548,11 +2548,10 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			return;
 		}
 		final var op = abort.op;
-		if (!withDispatchAdmission(() -> claimCapturedDispatch(op, abort.token))) {
+		if (!withDispatchAdmission(() -> claimCapturedDispatch(op, abort.token), op)) {
 			final var unusedClose = channel.close();
 			concurrencyThrottle.release();
 			signalDispatchCapacityAvailable();
-			settleRefusedDispatch(op);
 			return;
 		}
 		try {
@@ -2575,12 +2574,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			return;
 		}
 		final var op = abort.op;
-		final boolean claimed = withDispatchAdmission(() -> claimCapturedDispatch(op, abort.token));
+		final boolean claimed = withDispatchAdmission(() -> claimCapturedDispatch(op, abort.token), op);
 		concurrencyThrottle.release();
 		signalDispatchCapacityAvailable();
 		if (!claimed) {
 			LogUtil.exception(Level.DEBUG, cause, "{}: multipart abort connect ended after the stop", stepId);
-			settleRefusedDispatch(op);
 			return;
 		}
 		op.nodeAddr(helperAuthority);

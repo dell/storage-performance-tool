@@ -428,6 +428,52 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	}
 
 	/**
+	 * As {@link #beginDispatch}, for a worker that holds {@code op} past its admission: when the
+	 * closed admission refuses it, the composite it continues is settled before this returns false,
+	 * as {@link #settleClosedDispatch} settles it. A refusal while admission is open, and a dispatch,
+	 * run exactly as {@link #beginDispatch} runs them.
+	 */
+	protected final boolean beginDispatchOrSettle(final O op) {
+		if (admissionLock == null) {
+			return claimDispatchOwnership(op);
+		}
+		admissionLock.lock();
+		try {
+			if (admissionOpen) {
+				return claimDispatchOwnership(op);
+			}
+		} finally {
+			admissionLock.unlock();
+		}
+		settleClosedDispatch(op);
+		return false;
+	}
+
+	/**
+	 * As {@link #withDispatchAdmission(BooleanSupplier)}, for the transport claim of {@code op}: when
+	 * the closed admission refuses it, the composite it continues is settled before this returns
+	 * false, as {@link #settleClosedDispatch} settles it. A finalization or abort the stop refuses is
+	 * in no queue, so nothing else would settle it. A refusal while admission is open, a stale
+	 * circulation or a part of an ended upload, and a successful hand-off run exactly as {@link
+	 * #withDispatchAdmission(BooleanSupplier)} runs them.
+	 */
+	protected final boolean withDispatchAdmission(final BooleanSupplier handoff, final O op) {
+		if (admissionLock == null) {
+			return handoff.getAsBoolean();
+		}
+		admissionLock.lock();
+		try {
+			if (admissionOpen) {
+				return handoff.getAsBoolean();
+			}
+		} finally {
+			admissionLock.unlock();
+		}
+		settleClosedDispatch(op);
+		return false;
+	}
+
+	/**
 	 * Called under admission lock by queued and direct dispatch. The compatibility default
 	 * records logical dispatch; retained-attempt adapters may defer that record until actual
 	 * transport handoff and must fence stale/duplicate attempt tokens themselves.
@@ -878,24 +924,30 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	}
 
 	/**
-	 * Settles, after a stop, the composite that a refused transport claim leaves: the claim of a
-	 * composite's finalization or abort, or of one of its parts, that a driver deferring custody to
-	 * its request write makes there, or that a worker makes at its own dispatch boundary. A driver
-	 * calls it only in the branch where that claim was refused, and nothing was sent.
-	 *
-	 * <p>While admission is open it does nothing: a claim refused then is a stale circulation, which
-	 * its newer circulation owns. After the stop, a dispatched composite, or an upload whose
-	 * initiation was answered, can no longer finish: it is settled as {@link
-	 * #settleRefusedCompositeParent} settles it, so it is unresolved once and its upload permit comes
-	 * back once. A refused finalization or abort is in no queue, so queue recovery never sees it. A
-	 * refused part keeps its own state for the caller or queue recovery, and a queued composite that
-	 * opened nothing on the target is left to queue recovery.
+	 * Settles, after a stop, the composite that an unsent request leaves: stop-time code, such as a
+	 * driver's {@link #onAdmissionClosed()}, calls it for a request the stop keeps from being sent.
+	 * While admission is open it does nothing. A transport claim refused by the stop settles through
+	 * {@link #withDispatchAdmission(BooleanSupplier, Operation)} or {@link #beginDispatchOrSettle}
+	 * instead, which know the refusal's reason from the admission check they make anyway.
 	 */
-	@SuppressWarnings("unchecked")
 	protected final void settleRefusedDispatch(final O op) {
 		if (isAdmissionOpen()) {
 			return;
 		}
+		settleClosedDispatch(op);
+	}
+
+	/**
+	 * Settles the composite that a request the closed admission refused leaves: a composite's
+	 * finalization or abort, or one of its parts. A dispatched composite, or an upload whose
+	 * initiation was answered, can no longer finish: it is settled as {@link
+	 * #settleRefusedCompositeParent} settles it, so it is unresolved once and its upload permit comes
+	 * back once. A refused finalization or abort is in no queue, so queue recovery never sees it. A
+	 * refused part keeps its own state for the caller or queue recovery, and a queued composite that
+	 * opened nothing on the target is left to queue recovery. Runs only once admission has closed.
+	 */
+	@SuppressWarnings("unchecked")
+	private void settleClosedDispatch(final O op) {
 		final O parentOp;
 		if (op instanceof PartialOperation<?> partialOp) {
 			parentOp = (O) partialOp.parent();

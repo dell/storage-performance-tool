@@ -191,11 +191,9 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 					try {
 						// check if the op is invoked 1st time
 						if (PENDING.equals(op.status())) {
-							if (!isStarted() || !beginDispatch(op)) {
+							if (!isStarted() || !beginDispatchOrSettle(op)) {
 								// Permit already acquired in submit() — release it
 								concurrencyThrottle.release();
-								// After a stop, the composite this leaves cannot finish: it is settled first.
-								settleRefusedDispatch(op);
 								operationLifecycle().unattempted(op);
 								processedCount++;
 								continue;
