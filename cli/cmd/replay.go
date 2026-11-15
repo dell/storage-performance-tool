@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -468,8 +467,9 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	return resolveReplayRunError(err, false, len(replayStepIDs(generated)), outcome)
 }
 
-// replayRMIRegistryPort reads --rmi-registry-port and checks it as spt run does: every engine of
-// the replay serves it and the API port, so it must be a TCP port other than the API port.
+// replayRMIRegistryPort reads --rmi-registry-port and checks it and --api-port as spt run does:
+// every engine of the replay serves both, so each must be a TCP port and they must differ. It also
+// leaves the canonical --api-port in the flag for every later reader.
 func replayRMIRegistryPort(cmd *cobra.Command) (int, error) {
 	registryPort, err := cmd.Flags().GetInt(flagRMIRegistryPort)
 	if err != nil {
@@ -478,11 +478,12 @@ func replayRMIRegistryPort(cmd *cobra.Command) (int, error) {
 	if err := validatePortFlag(flagRMIRegistryPort, registryPort); err != nil {
 		return 0, err
 	}
-	// An API port that is not a number is left to the checks that report it.
-	if apiPort, err := strconv.Atoi(strings.TrimSpace(apiPortFlag(cmd))); err == nil {
-		if err := validateDistinctEnginePorts(apiPort, registryPort); err != nil {
-			return 0, err
-		}
+	apiPort, err := normalizeAPIPortFlag(cmd)
+	if err != nil {
+		return 0, err
+	}
+	if err := validateDistinctEnginePorts(apiPort, registryPort); err != nil {
+		return 0, err
 	}
 	return registryPort, nil
 }
