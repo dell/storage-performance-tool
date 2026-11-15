@@ -248,40 +248,50 @@ class MixedLoadStepCountLimitTest {
 		assertTrue(elapsedMillis < PROMPT_END_MILLIS, "the step ended on its count, after " + elapsedMillis + " ms");
 	}
 
-	/** A STAT above the ranges threshold is one composite result, which the step does not count. */
+	/**
+	 * A READ above the ranges threshold is a composite, and the dummy driver publishes one result for
+	 * it, which the step does not count: a count-limited step of such reads, with a few such writes,
+	 * counts none of them and ends on its count.
+	 */
 	@Test
-	void aStepOfStatsAboveTheThresholdEndsWithoutCountingThemOnTheDummyDriver() throws Exception {
-		final String stepId = newStepId("dummy-split-stat");
-		final Config config = statStepConfig(stepId);
+	void aStepOfReadsAboveTheThresholdEndsWithoutCountingThemOnTheDummyDriver() throws Exception {
+		final String stepId = newStepId("dummy-split-read");
+		final Config config = multipartStepConfig(stepId, 40);
 		config.val("storage-driver-type", CountingDriverFactory.TYPE);
+		// A mixed step needs two weights: a few creates of new items run with the reads.
+		config.val("load-op-weights-put", 1);
+		config.val("load-op-weights-get", 100);
 
 		final long elapsedMillis = run(config);
 
 		assertEquals(40, drivers.accepted.sum(), "operations the driver accepted");
-		assertTrue(drivers.accepted(OpType.STAT) > 0, "the step ran STATs");
-		assertEquals(0, counted(stepId), "STATs and composite writes the step counted");
+		assertTrue(drivers.accepted(OpType.READ) > 0, "the step ran reads");
+		assertEquals(0, counted(stepId), "composite reads and writes the step counted");
 		assertTrue(elapsedMillis < PROMPT_END_MILLIS, "the step ended on its count, after " + elapsedMillis + " ms");
 	}
 
+	/**
+	 * On a cooperative driver every final result of a CREATE or READ is counted, a STAT above the
+	 * ranges threshold is a plain operation, and an interrupted result is not counted. A step whose
+	 * STATs the NIO mock publishes as {@code INTERRUPTED} counts only its writes, and ends on its
+	 * count.
+	 */
 	@Test
-	void aStepOfStatsAboveTheThresholdEndsWithoutCountingThemOnTheNioDriver() throws Exception {
-		final String stepId = newStepId("nio-split-stat");
-		final Config config = statStepConfig(stepId);
+	void aStepOfInterruptedStatsEndsWithoutCountingThemOnTheNioDriver() throws Exception {
+		final String stepId = newStepId("nio-interrupted-stat");
+		final Config config = multipartStepConfig(stepId, 40);
+		// A mixed step needs two weights: a few uploads run with the STATs.
+		config.val("load-op-weights-put", 1);
+		config.val("load-op-weights-stat", 100);
+		nioDrivers.interruptStats.set(true);
 
 		final long elapsedMillis = run(config);
 
-		assertEquals(0, metrics.counted(stepId, OpType.STAT), "STATs the step counted");
-		assertTrue(metrics.counted(stepId, OpType.CREATE) < 40, "the step ran STATs");
+		final long stats = nioDrivers.interruptedStats.sum();
+		assertTrue(stats > 0, "STATs published as INTERRUPTED");
+		assertEquals(0, metrics.counted(stepId, OpType.STAT), "interrupted STATs the step counted");
+		assertEquals(40 - stats, metrics.counted(stepId, OpType.CREATE), "uploads the step counted");
 		assertTrue(elapsedMillis < PROMPT_END_MILLIS, "the step ended on its count, after " + elapsedMillis + " ms");
-	}
-
-	/** 40 operations, nearly all STATs of the 1 KB seed items, above a 512 B ranges threshold. */
-	private Config statStepConfig(final String stepId) throws Exception {
-		final Config config = multipartStepConfig(stepId, 40);
-		// A mixed step needs two weights: a few creates of new items run with the STATs.
-		config.val("load-op-weights-put", 1);
-		config.val("load-op-weights-stat", 100);
-		return config;
 	}
 
 	@Test
@@ -384,11 +394,11 @@ class MixedLoadStepCountLimitTest {
 	}
 
 	/**
-	 * A DELETE above the ranges threshold is sent as one composite result, which the step does not
-	 * count, so the step counts fewer than its count, but it ends without waiting for its time limit.
+	 * A DELETE above the ranges threshold is a plain operation, so the step counts it like any other
+	 * result: a count-limited step of uploads and such DELETEs counts its count, and ends on it.
 	 */
 	@Test
-	void aStepWithSplitDeletesEndsWithoutCountingThem() throws Exception {
+	void aStepWithDeletesAboveTheThresholdCountsThemAndEndsOnItsCount() throws Exception {
 		final String stepId = newStepId("split-delete");
 		final Config config = multipartStepConfig(stepId, 200);
 		config.val("load-op-weights-put", 5000);
@@ -396,12 +406,10 @@ class MixedLoadStepCountLimitTest {
 
 		final long elapsedMillis = run(config);
 
-		assertEquals(0, metrics.counted(stepId, OpType.DELETE), "split DELETEs the step counted");
-		final long uploads = metrics.counted(stepId, OpType.CREATE);
-		assertTrue(uploads > 0 && uploads < 200, "the step ran uploads and split DELETEs, counted " + uploads);
-		assertTrue(
-						elapsedMillis < PROMPT_END_MILLIS,
-						"the step ended without waiting for its time limit, after " + elapsedMillis + " ms");
+		final long deletes = metrics.counted(stepId, OpType.DELETE);
+		assertTrue(deletes > 0 && deletes < 200, "the step ran uploads and DELETEs, counted " + deletes + " DELETEs");
+		assertEquals(200, counted(stepId), "operations the step counted");
+		assertTrue(elapsedMillis < PROMPT_END_MILLIS, "the step ended on its count, after " + elapsedMillis + " ms");
 	}
 
 	/**
@@ -623,6 +631,9 @@ class MixedLoadStepCountLimitTest {
 		/** The result output the step installed through a decorator. */
 		final AtomicReference<Object> resultOutput = new AtomicReference<>();
 		final LongAdder failedParts = new LongAdder();
+		/** Whether the driver publishes every STAT as {@code INTERRUPTED}, which the step does not count. */
+		final AtomicBoolean interruptStats = new AtomicBoolean();
+		final LongAdder interruptedStats = new LongAdder();
 		/** Parts after the first that the driver sent. */
 		final LongAdder laterParts = new LongAdder();
 
@@ -695,7 +706,7 @@ class MixedLoadStepCountLimitTest {
 							});
 		}
 
-		/** The NIO mock, whose parts fail with {@code FAIL_IO} when asked to. */
+		/** The NIO mock, whose parts fail with {@code FAIL_IO}, and whose STATs are interrupted, when asked to. */
 		@SuppressWarnings({"rawtypes", "unchecked"
 		})
 		private final class ProbeDriver extends NioStorageDriverMock {
@@ -715,6 +726,10 @@ class MixedLoadStepCountLimitTest {
 				if (failParts.get() && op instanceof PartialOperation) {
 					failedParts.increment();
 					op.status(Operation.Status.FAIL_IO);
+				}
+				if (interruptStats.get() && op.type() == OpType.STAT) {
+					interruptedStats.increment();
+					op.status(Operation.Status.INTERRUPTED);
 				}
 			}
 		}

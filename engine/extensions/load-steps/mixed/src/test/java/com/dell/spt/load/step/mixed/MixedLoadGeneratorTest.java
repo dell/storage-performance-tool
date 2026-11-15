@@ -233,7 +233,7 @@ class MixedLoadGeneratorTest {
 			// A failed unfinished composite (its initiation, or its abort) is counted as a failure.
 			assertEquals(counted, kind(composite(OpType.CREATE, Operation.Status.FAIL_IO, false), inParts));
 			assertEquals(uncounted, kind(composite(OpType.CREATE, Operation.Status.INTERRUPTED, false), inParts));
-			// A DELETE or STAT composite publishes one result and has no parts.
+			// A composite of another type has one result and no parts: only an out-of-tree builder makes one.
 			assertEquals(uncounted, kind(composite(OpType.DELETE, Operation.Status.SUCC, false), inParts));
 			assertEquals(uncounted, kind(composite(OpType.STAT, Operation.Status.SUCC, false), inParts));
 		}
