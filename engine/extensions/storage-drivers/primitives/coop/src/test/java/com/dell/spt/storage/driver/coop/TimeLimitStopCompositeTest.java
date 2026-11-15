@@ -154,6 +154,69 @@ final class TimeLimitStopCompositeTest {
 		assertEquals(MPU_OBJECT_PERMITS, freeUploadPermits(), "the upload permit is back, once");
 	}
 
+	/** Counts how often a transport claim is attempted, and how often its refusal is asked for its operation. */
+	private static final class CountedRefusal implements CoopStorageDriverBase.DispatchRefusal<Operation<Item>> {
+		private final Operation<Item> op;
+		final AtomicInteger handoffs = new AtomicInteger();
+		final AtomicInteger asked = new AtomicInteger();
+
+		CountedRefusal(final Operation<Item> op) {
+			this.op = op;
+		}
+
+		boolean refuse() {
+			handoffs.incrementAndGet();
+			return false;
+		}
+
+		@Override
+		public Operation<Item> refusedOperation() {
+			asked.incrementAndGet();
+			return op;
+		}
+	}
+
+	/**
+	 * A transport claim of the dispatched upload, as an RDMA attempt makes for its finalization, which
+	 * the closed admission refuses: the refusal is asked for its operation once, the claim is never
+	 * tried, and the upload is unresolved at once.
+	 */
+	@Test
+	void aClaimTheClosedAdmissionRefusesSettlesTheOperationItsRefusalNames() throws Exception {
+		startDriver(16);
+		final var lifecycle = driver.operationLifecycle();
+		final var upload = initiationInFlight(1024);
+		final var refusal = new CountedRefusal(op(upload));
+		driver.closeAdmission();
+
+		assertFalse(driver.withDispatchAdmission(refusal::refuse, refusal), "the closed admission refuses the claim");
+
+		assertEquals(0, refusal.handoffs.get(), "the claim is not tried");
+		assertEquals(1, refusal.asked.get(), "the refusal is asked once");
+		assertEquals(OperationLifecycleState.UNRESOLVED, lifecycle.stateOf(op(upload)), () -> "the upload: " + lifecycle.snapshot());
+		assertEquals(1, lifecycle.snapshot().unresolved(), () -> lifecycle.snapshot().toString());
+		assertEquals(0, lifecycle.snapshot().inFlight(), () -> "nothing holds the drain: " + lifecycle.snapshot());
+	}
+
+	/**
+	 * While admission is open, a claim the hand-off refuses, a stale circulation, returns as the
+	 * hand-off does: the refusal is never asked, and the upload stays dispatched.
+	 */
+	@Test
+	void aClaimRefusedWhileAdmissionIsOpenNeverAsksItsRefusal() throws Exception {
+		startDriver(16);
+		final var lifecycle = driver.operationLifecycle();
+		final var upload = initiationInFlight(1024);
+		final var refusal = new CountedRefusal(op(upload));
+
+		assertFalse(driver.withDispatchAdmission(refusal::refuse, refusal), "the hand-off refuses the claim");
+
+		assertEquals(1, refusal.handoffs.get(), "the claim is tried once");
+		assertEquals(0, refusal.asked.get(), "the refusal is never asked");
+		assertEquals(OperationLifecycleState.DISPATCHED, lifecycle.stateOf(op(upload)), () -> "the upload: " + lifecycle.snapshot());
+		assertEquals(0, lifecycle.snapshot().unresolved(), () -> lifecycle.snapshot().toString());
+	}
+
 	/** The last part's answer comes after the stop, which refuses the upload's completion. */
 	@Test
 	void anUploadWhoseCompletionTheStopRefusesIsUnresolvedAtOnce() throws Exception {
