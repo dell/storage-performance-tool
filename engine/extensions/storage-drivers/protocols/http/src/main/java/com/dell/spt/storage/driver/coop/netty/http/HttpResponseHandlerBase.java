@@ -111,8 +111,14 @@ public abstract class HttpResponseHandlerBase<I extends Item, O extends Operatio
 						startDataResponse(dataOp, dataOp::startDataResponse);
 					}
 					if (verifyFlag) {
-						if (!RESP_FAIL_CORRUPT.equals(op.status())) {
+						// Only a 2xx body is item data. A refused response keeps the status of its
+						// status line and counts its body as the unverified route does; a 2xx body
+						// that already failed verification skips its later chunks.
+						final Operation.Status status = op.status();
+						if (SUCC.equals(status)) {
 							verifyChunk(dataOp, countBytesDone, contentChunk, chunkSize);
+						} else if (!RESP_FAIL_CORRUPT.equals(status)) {
+							dataOp.countBytesDone(countBytesDone + chunkSize);
 						}
 					} else {
 						dataOp.countBytesDone(countBytesDone + chunkSize);
