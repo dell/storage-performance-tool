@@ -474,6 +474,40 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	}
 
 	/**
+	 * A transport attempt that names, only when the closed admission refuses its claim, the operation
+	 * that claim was for. An attempt that holds its operation in a field passes itself, so that a
+	 * claim admission allows reads nothing more than {@link #withDispatchAdmission(BooleanSupplier)}
+	 * reads.
+	 */
+	protected interface DispatchRefusal<O> {
+
+		/** The operation of the refused claim, whose composite the closed admission settles. */
+		O refusedOperation();
+	}
+
+	/**
+	 * As {@link #withDispatchAdmission(BooleanSupplier, Operation)}, with the operation asked of
+	 * {@code refusal} only when the closed admission refuses the claim. A refusal while admission is
+	 * open, and a successful hand-off, run exactly as {@link #withDispatchAdmission(BooleanSupplier)}
+	 * runs them.
+	 */
+	protected final boolean withDispatchAdmission(final BooleanSupplier handoff, final DispatchRefusal<O> refusal) {
+		if (admissionLock == null) {
+			return handoff.getAsBoolean();
+		}
+		admissionLock.lock();
+		try {
+			if (admissionOpen) {
+				return handoff.getAsBoolean();
+			}
+		} finally {
+			admissionLock.unlock();
+		}
+		settleClosedDispatch(refusal.refusedOperation());
+		return false;
+	}
+
+	/**
 	 * Called under admission lock by queued and direct dispatch. The compatibility default
 	 * records logical dispatch; retained-attempt adapters may defer that record until actual
 	 * transport handoff and must fence stale/duplicate attempt tokens themselves.

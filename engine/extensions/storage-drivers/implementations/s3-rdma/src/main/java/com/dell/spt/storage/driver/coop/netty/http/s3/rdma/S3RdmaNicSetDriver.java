@@ -805,7 +805,11 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 	 * once; an attempt that never asked the pool gives both back itself. A trial (D87) marks its
 	 * channel, whose release ends it, or ends with the attempt when no channel carries it.
 	 */
-	private final class Attempt implements RdmaPreparationLane.Task, NicSetConnectionPool.Acquisition, AttemptRoute<O> {
+	private final class Attempt
+					implements RdmaPreparationLane.Task,
+					NicSetConnectionPool.Acquisition,
+					AttemptRoute<O>,
+					DispatchRefusal<O> {
 
 		private final O op;
 		private final DispatchToken<O> token;
@@ -885,10 +889,15 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		}
 
 		@Override
+		public O refusedOperation() {
+			return op;
+		}
+
+		@Override
 		public boolean fail(final O ignored, final boolean settlePart) {
 			final var row = counters.path(nicIndex, -1);
 			row.attempted();
-			final boolean claimed = withDispatchAdmission(this::claim, op);
+			final boolean claimed = withDispatchAdmission(this::claim, this);
 			nicPool.admission().cancelled(nicIndex, trial);
 			concurrencyThrottle.release();
 			signalDispatchCapacityAvailable();
@@ -934,7 +943,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 		public void failed(final int path, final Throwable cause) {
 			final var row = counters.path(nicIndex, path);
 			row.attempted();
-			final boolean claimed = withDispatchAdmission(this::claim, op);
+			final boolean claimed = withDispatchAdmission(this::claim, this);
 			nicSet.logSetupFailure(cause, !claimed);
 			if (context != null) {
 				releaseContext(context, true);
@@ -969,7 +978,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 			if (admission.waitEnded(nicIndex)) {
 				signalDispatchCapacityAvailable();
 			}
-			if (!withDispatchAdmission(this::claim, op)) {
+			if (!withDispatchAdmission(this::claim, this)) {
 				// Stopped, or the circulation is stale: nothing is written and queue recovery owns the operation.
 				// A stopped composite's finalization is in no queue: the refused claim settled it.
 				final var row = counters.path(channel);
