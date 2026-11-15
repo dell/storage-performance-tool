@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -623,6 +624,12 @@ final class S3VersionedRequestTest {
 		assertEquals("key~v2", S3StorageDriver.withLegacyVersion("key~v1", "v2"));
 		assertEquals("key~v2", S3StorageDriver.withLegacyVersion("key", "v2"));
 		assertEquals("a~b~v2", S3StorageDriver.withLegacyVersion("a~b~v1", "v2"));
+		// The same version keeps the name itself, with nothing built.
+		final String named = "key~v1";
+		assertSame(named, S3StorageDriver.withLegacyVersion(named, "v1"));
+		// A version ID with a ~ is split where the builder splits it, at the last ~.
+		assertEquals("k~a~a~b", S3StorageDriver.withLegacyVersion("k~a~b", "a~b"));
+		assertEquals("k~v1~v1", S3StorageDriver.withLegacyVersion("k~v1", "v1~v1"));
 
 		final var driver = driver(true, 4, false);
 		assertTrue(driver.namesLegacyVersion(op(OpType.READ, "key~v1")));

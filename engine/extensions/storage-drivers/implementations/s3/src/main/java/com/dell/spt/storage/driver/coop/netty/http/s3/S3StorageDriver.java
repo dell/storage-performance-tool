@@ -1235,9 +1235,14 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		if (rawQuery == null || rawQuery.isEmpty()) {
 			return "";
 		}
-		if (isCanonicalSingleParameter(rawQuery)) {
+		if (isCanonicalSingleParameter(rawQuery, 0)) {
 			return rawQuery;
 		}
+		return canonicalizeQueryParameters(rawQuery);
+	}
+
+	/** {@link #canonicalizeQueryString} without its single-parameter shortcut: decodes, encodes and sorts each pair. */
+	private static String canonicalizeQueryParameters(final String rawQuery) {
 		final var parts = rawQuery.split("&", 0);
 		final List<String> canonicalComponents = new ArrayList<>(parts.length);
 		for (final var part : parts) {
@@ -1255,13 +1260,14 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * Whether {@code rawQuery} is one {@code key=value} pair of unreserved characters, such as {@code
-	 * versionId=<an AWS version ID>}: decoding and encoding it again gives it back, and one pair needs no
-	 * sorting, so it is already canonical. The scan stops at the first other character.
+	 * Whether {@code rawQuery} from {@code start} to its end is one {@code key=value} pair of unreserved
+	 * characters, such as {@code versionId=<an AWS version ID>}: decoding and encoding it again gives it
+	 * back, and one pair needs no sorting, so it is already canonical. The scan stops at the first other
+	 * character.
 	 */
-	private static boolean isCanonicalSingleParameter(final String rawQuery) {
+	private static boolean isCanonicalSingleParameter(final String rawQuery, final int start) {
 		int equalsIndex = -1;
-		for (int i = 0; i < rawQuery.length(); i++) {
+		for (int i = start; i < rawQuery.length(); i++) {
 			final char ch = rawQuery.charAt(i);
 			if (ch == '=') {
 				if (equalsIndex != -1) {
@@ -1272,7 +1278,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				return false;
 			}
 		}
-		return equalsIndex > 0;
+		return equalsIndex > start;
 	}
 
 	private static String normalizeHeaderValue(final String value) {
@@ -1760,8 +1766,14 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	 */
 	static String withLegacyVersion(final String name, final String versionId) {
 		final int indexOfVersionStart = name.lastIndexOf('~');
-		final String key = indexOfVersionStart == -1 ? name : name.substring(0, indexOfVersionStart);
-		return key + '~' + versionId;
+		if (indexOfVersionStart == -1) {
+			return name + '~' + versionId;
+		}
+		if (name.length() - indexOfVersionStart - 1 == versionId.length() && name.endsWith(versionId)) {
+			// Already key~versionId, as after a versioned READ or STAT of the version the response names.
+			return name;
+		}
+		return name.substring(0, indexOfVersionStart) + '~' + versionId;
 	}
 
 	HttpRequest objectVersioningRequest(final O op, final String nodeAddr) throws URISyntaxException {
@@ -1789,9 +1801,18 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	 * object.
 	 */
 	static String withoutVersionSuffix(final String uriPath, final String versionId) {
+		return uriPath.substring(0, versionSuffixStart(uriPath, versionId));
+	}
+
+	/**
+	 * The index of the {@code ~} that starts {@code uriPath}'s trailing {@code ~versionId}, where {@link
+	 * #withoutVersionSuffix} cuts it; it throws the same {@link RejectedRequestException} when there is
+	 * none.
+	 */
+	private static int versionSuffixStart(final String uriPath, final String versionId) {
 		final int keyEnd = uriPath.length() - versionId.length() - 1;
 		if (keyEnd > 0 && uriPath.charAt(keyEnd) == '~' && uriPath.endsWith(versionId)) {
-			return uriPath.substring(0, keyEnd);
+			return keyEnd;
 		}
 		throw new RejectedRequestException(
 						"dataUriPath gave " + uriPath + ", which does not end with the item's ~" + versionId
@@ -1812,7 +1833,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final var httpMethod = dataHttpMethod(opType);
 		final boolean legacyVersion = !explicitVersionCarrier && versionId != null;
 		final String itemUri = dataUriPath(item, srcPath, op.dstPath(), op.type());
-		final String objectUri = legacyVersion ? withoutVersionSuffix(itemUri, versionId) : itemUri;
+		final int keyEnd = legacyVersion ? versionSuffixStart(itemUri, versionId) : itemUri.length();
 		// GetObject and HeadObject (a READ, also with read-metadata-only, and a STAT) select a version
 		// with the versionId query; x-amz-version-id is a response header, which S3 ignores on a request.
 		final boolean useVersionQuery = versionId != null
@@ -1821,9 +1842,22 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 										|| OpType.READ.equals(opType)
 										|| OpType.STAT.equals(opType));
 		final String encodedVersionId = useVersionQuery ? encodeVersionId(versionId) : null;
-		final String uri = useVersionQuery
-						? objectUri + VERSION_ID_QUERY + encodedVersionId
-						: objectUri;
+		final String uri;
+		final String signedUri;
+		if (!useVersionQuery) {
+			uri = legacyVersion ? itemUri.substring(0, keyEnd) : itemUri;
+			signedUri = uri;
+		} else if (legacyVersion && encodedVersionId.length() == versionId.length()) {
+			// itemUri is <the key's path>~<versionId>, and the version ID needs no encoding (encoding
+			// lengthens what it changes), so the URI is itemUri with that ~ replaced by ?versionId=, built in
+			// one copy. Both signers sign it as sent.
+			uri = versionQueryUri(itemUri, keyEnd);
+			signedUri = uri;
+		} else {
+			final String objectUri = legacyVersion ? itemUri.substring(0, keyEnd) : itemUri;
+			uri = objectUri + VERSION_ID_QUERY + encodedVersionId;
+			signedUri = signedUri(uri, objectUri, versionId, encodedVersionId);
+		}
 		final var httpRequest = (HttpRequest) new DefaultHttpRequest(
 						HTTP_1_1, httpMethod, uri, httpHeaders);
 		switch (opType) {
@@ -1871,8 +1905,24 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		applyMetaDataHeaders(httpHeaders, op);
 		applyDynamicHeaders(httpHeaders);
 		applySharedHeaders(httpHeaders);
-		applyAuthHeaders(httpHeaders, httpRequest.method(), signedUri(uri, objectUri, versionId, encodedVersionId), op.credential());
+		applyAuthHeaders(httpHeaders, httpRequest.method(), signedUri, op.credential());
 		return httpRequest;
+	}
+
+	private static final ThreadLocal<StringBuilder> THR_LOC_VERSION_URI = ThreadLocal.withInitial(StringBuilder::new);
+
+	/**
+	 * {@code itemUri}, which ends with {@code ~versionId} from {@code keyEnd}, with that {@code ~}
+	 * replaced by {@code ?versionId=}: the same string as {@code itemUri.substring(0, keyEnd) +
+	 * VERSION_ID_QUERY + versionId}, without the key's path copied out first.
+	 */
+	private static String versionQueryUri(final String itemUri, final int keyEnd) {
+		final StringBuilder uri = THR_LOC_VERSION_URI.get();
+		uri.setLength(0);
+		return uri.append(itemUri, 0, keyEnd)
+						.append(VERSION_ID_QUERY)
+						.append(itemUri, keyEnd + 1, itemUri.length())
+						.toString();
 	}
 
 	FullHttpRequest objectTaggingRequest(final O op, final String nodeAddr) {
@@ -2736,8 +2786,13 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 		buffCanonical.append('\n');
 		if (queryIndex != -1) {
-			final String canonicalQuery = canonicalizeQueryString(dstUriPath.substring(queryIndex + 1));
-			buffCanonical.append(canonicalQuery);
+			final int queryStart = queryIndex + 1;
+			if (isCanonicalSingleParameter(dstUriPath, queryStart)) {
+				// What canonicalizeQueryString returns for it, appended without copying it out first.
+				buffCanonical.append(dstUriPath, queryStart, dstUriPath.length());
+			} else {
+				buffCanonical.append(canonicalizeQueryParameters(dstUriPath.substring(queryStart)));
+			}
 		}
 		buffCanonical.append('\n');
 		for (final var header : S3Api.HEADERS_CANONICAL_V4) {
