@@ -326,8 +326,9 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 		if (admission.waitEnded(nic)) {
 			signalDispatchCapacityAvailable();
 		}
-		if (!withDispatchAdmission(() -> claimCapturedDispatch(op, token))) {
+		if (!withDispatchAdmission(() -> claimCapturedDispatch(op, token), op)) {
 			// Stopped, or the circulation is stale: nothing is written and queue recovery owns the operation.
+			// A stopped composite's finalization is in no queue: the refused claim settled it.
 			final var row = counters.path(channel);
 			row.attempted();
 			row.interrupted();
@@ -370,7 +371,7 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 					final Throwable cause) {
 		final var row = counters.path(nic, path);
 		row.attempted();
-		final boolean claimed = withDispatchAdmission(() -> claimCapturedDispatch(op, token));
+		final boolean claimed = withDispatchAdmission(() -> claimCapturedDispatch(op, token), op);
 		nicSet.logSetupFailure(cause, !claimed);
 		final var admission = nicPool.admission();
 		if (claimed) {

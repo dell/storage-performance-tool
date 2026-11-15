@@ -305,14 +305,16 @@ final class S3VersionedRequestTest {
 	}
 
 	/**
-	 * Requests that select no version sign their URI exactly as sent, as before: only the requests
-	 * that put a version ID in the query sign it decoded. That holds for an unversioned name that
-	 * itself holds {@code versionId=}, and for the multipart, tagging and list queries.
+	 * The V2 canonical resource of requests that select no version: the path, then only the
+	 * sub-resources, sorted, with a {@code versionId} value decoded. An unversioned name that itself
+	 * holds {@code ?x=1&versionId=a%2Bb} sends that query, so it signs {@code versionId=a+b} without
+	 * {@code x}, as a strict target computes it; the multipart and tagging requests sign their URI as
+	 * sent, and the listing signs the bucket path.
 	 */
 	@Test
 	@SuppressWarnings({"rawtypes", "unchecked"
 	})
-	void requestsThatSelectNoVersionSignTheirUriAsSentUnderV2() throws Exception {
+	void requestsThatSelectNoVersionSignTheirSubResourcesUnderV2() throws Exception {
 		final var unversioned = driver(false, 2, false);
 		final List<HttpRequest> requests = new ArrayList<>();
 		requests.add(unversioned.httpRequest(op(OpType.READ, "k?x=1&versionId=a%2Bb"), HOST));
@@ -339,17 +341,23 @@ final class S3VersionedRequestTest {
 		final List<String> uris = new ArrayList<>();
 		for (final var request : requests) {
 			uris.add(request.uri());
-			assertEquals(
-							"AWS " + CREDENTIAL.getUid() + ":" + asSentV2Signature(request),
-							request.headers().get(HttpHeaderNames.AUTHORIZATION),
-							request::uri);
 		}
 		assertEquals("/b/k?x=1&versionId=a%2Bb", uris.get(0));
 		assertEquals("/b/key", uris.get(1));
-		assertTrue(uris.get(2).endsWith("?uploads"), uris.get(2));
-		assertTrue(uris.get(3).contains("uploadId=2~up+load/id"), uris.get(3));
-		assertTrue(uris.get(4).contains("start-after=a%2Bb%20c"), uris.get(4));
+		assertEquals("/b/key?uploads", uris.get(2));
+		assertEquals("/b/key?partNumber=2&uploadId=2~up+load/id", uris.get(3));
+		assertTrue(uris.get(4).startsWith("/b?") && uris.get(4).contains("start-after=a%2Bb%20c"), uris.get(4));
 		assertEquals("/b/key~v1?tagging", uris.get(5));
+		final List<String> resources = List.of(
+						"/b/k?versionId=a+b",
+						"/b/key",
+						"/b/key?uploads",
+						"/b/key?partNumber=2&uploadId=2~up+load/id",
+						"/b",
+						"/b/key~v1?tagging");
+		for (int i = 0; i < requests.size(); i++) {
+			SigV2TestSupport.assertSignedOver(requests.get(i), resources.get(i));
+		}
 	}
 
 	/** SigV4 of a version ID that needs no encoding, and of a query of several parameters. */
@@ -816,18 +824,10 @@ final class S3VersionedRequestTest {
 
 	/**
 	 * An independent V2 (HMAC-SHA1) signature of {@code request}, after the AWS specification and
-	 * botocore: the path as sent, then the sub-resources sorted, each value percent-decoded.
+	 * botocore: the path as sent, then the query parameters sorted, each value percent-decoded. It does
+	 * not drop parameters that are not sub-resources, so it is used only on queries that hold none.
 	 */
 	private static String referenceV2Signature(final HttpRequest request) throws Exception {
-		return v2Signature(request, true);
-	}
-
-	/** The V2 signature SPT gives a request that selects no version: its URI signed exactly as sent. */
-	private static String asSentV2Signature(final HttpRequest request) throws Exception {
-		return v2Signature(request, false);
-	}
-
-	private static String v2Signature(final HttpRequest request, final boolean subResourcesDecoded) throws Exception {
 		final var headers = request.headers();
 		final var stringToSign = new StringBuilder(request.method().name()).append('\n');
 		for (final var name : List.of("content-md5", "content-type", "date")) {
@@ -843,12 +843,8 @@ final class S3VersionedRequestTest {
 		amz.forEach((name, value) -> stringToSign.append(name).append(':').append(value).append('\n'));
 		final var uri = request.uri();
 		final var queryIndex = uri.indexOf('?');
-		if (!subResourcesDecoded) {
-			stringToSign.append(uri);
-		} else {
-			stringToSign.append(queryIndex < 0 ? uri : uri.substring(0, queryIndex));
-		}
-		if (subResourcesDecoded && queryIndex >= 0) {
+		stringToSign.append(queryIndex < 0 ? uri : uri.substring(0, queryIndex));
+		if (queryIndex >= 0) {
 			final var subResources = new TreeMap<String, String>();
 			for (final var pair : uri.substring(queryIndex + 1).split("&")) {
 				final var eq = pair.indexOf('=');

@@ -86,6 +86,7 @@ import java.security.InvalidKeyException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Set;
@@ -1157,11 +1158,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		headers.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 		applyDynamicHeaders(headers);
 		applySharedHeaders(headers);
-		applyAuthHeaders(
-						headers,
-						HttpMethod.DELETE,
-						signedUri(uri, objectUri, target.versionId(), encodedVersionId),
-						deleteRequest.credential());
+		applyAuthHeaders(headers, HttpMethod.DELETE, uri, deleteRequest.credential());
 		return new DefaultHttpRequest(HTTP_1_1, HttpMethod.DELETE, uri, headers);
 	}
 
@@ -1239,7 +1236,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		applyAuthHeaders(
 						headers,
 						HttpMethod.HEAD,
-						signedUri(uri, objectUri, target.versionId(), encodedVersionId),
+						uri,
 						pathToCredMap.getOrDefault(bucketPath, this.credential));
 		final FullHttpRequest request = new DefaultFullHttpRequest(
 						HTTP_1_1,
@@ -1498,22 +1495,6 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			}
 		}
 		return versionId;
-	}
-
-	/**
-	 * The URI to sign for {@code uri}, which is {@code objectUri?versionId=<encodedVersionId>} when
-	 * {@code encodedVersionId} is set. V2 signs a sub-resource value decoded, so it signs the version ID
-	 * itself; V4 and every other request sign {@code uri} as sent. Only these version-selecting
-	 * requests pay for it: no other request's signing changes.
-	 */
-	private String signedUri(
-					final String uri, final String objectUri, final String versionId, final String encodedVersionId) {
-		// Percent-encoding lengthens every character it changes, so an unchanged length means the
-		// version ID needed none, and the URI as sent is also its decoded form.
-		if (authVersion != 2 || encodedVersionId == null || encodedVersionId.length() == versionId.length()) {
-			return uri;
-		}
-		return objectUri + VERSION_ID_QUERY + versionId;
 	}
 
 	private static String percentEncode(final String value) {
@@ -2016,20 +1997,17 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 										|| OpType.STAT.equals(opType));
 		final String encodedVersionId = useVersionQuery ? encodeVersionId(versionId) : null;
 		final String uri;
-		final String uriToSign;
 		if (!useVersionQuery) {
 			uri = legacyVersion ? itemUri.substring(0, keyEnd) : itemUri;
-			uriToSign = uri;
 		} else if (legacyVersion && encodedVersionId.length() == versionId.length()) {
 			// itemUri is <the key's path>~<versionId>, and the version ID needs no encoding (encoding
 			// lengthens what it changes), so the URI is itemUri with that ~ replaced by ?versionId=, built in
-			// one copy. Both signers sign it as sent.
+			// one copy. V4 signs it as sent, and so does V2 unless the ID is empty, which V2 signs as the
+			// bare ?versionId (see appendV2CanonicalResource).
 			uri = versionQueryUri(itemUri, keyEnd);
-			uriToSign = uri;
 		} else {
-			final String objectUri = legacyVersion ? itemUri.substring(0, keyEnd) : itemUri;
-			uri = objectUri + VERSION_ID_QUERY + encodedVersionId;
-			uriToSign = signedUri(uri, objectUri, versionId, encodedVersionId);
+			// V2 signs the versionId value decoded (see appendV2CanonicalResource); V4 signs it encoded.
+			uri = (legacyVersion ? itemUri.substring(0, keyEnd) : itemUri) + VERSION_ID_QUERY + encodedVersionId;
 		}
 		final var httpRequest = (HttpRequest) new DefaultHttpRequest(
 						HTTP_1_1, httpMethod, uri, httpHeaders);
@@ -2077,7 +2055,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		applyMetaDataHeaders(httpHeaders, op);
 		applyDynamicHeaders(httpHeaders);
 		applySharedHeaders(httpHeaders);
-		applyAuthHeaders(httpHeaders, httpRequest.method(), uriToSign, op.credential());
+		applyAuthHeaders(httpHeaders, httpRequest.method(), uri, op.credential());
 		return httpRequest;
 	}
 
@@ -2694,7 +2672,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	/**
 	 * Settles every kernel-route abort whose connect is still pending, and starts no more: each
-	 * connection closes, its permit comes back and queue recovery owns its operation. NIC-set
+	 * connection closes, its permit comes back and, after a stop, its upload, which the unsent abort
+	 * leaves open, is unresolved at once. NIC-set
 	 * drivers call it when admission closes and before their I/O shuts down, so no permit waits on
 	 * a connect timeout or on a listener an event loop that terminated would never run.
 	 */
@@ -2704,6 +2683,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				final var connect = abort.connect;
 				// Settled is for good: nothing else gives this permit back.
 				settleKernelRouteChannel(stepId, connect == null ? null : connect.channel(), this::giveBackKernelRoutePermit);
+				settleRefusedDispatch(abort.op);
 			}
 		}
 	}
@@ -2755,7 +2735,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			return;
 		}
 		final var op = abort.op;
-		if (!withDispatchAdmission(() -> claimCapturedDispatch(op, abort.token))) {
+		if (!withDispatchAdmission(() -> claimCapturedDispatch(op, abort.token), op)) {
 			final var unusedClose = channel.close();
 			concurrencyThrottle.release();
 			signalDispatchCapacityAvailable();
@@ -2781,7 +2761,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			return;
 		}
 		final var op = abort.op;
-		final boolean claimed = withDispatchAdmission(() -> claimCapturedDispatch(op, abort.token));
+		final boolean claimed = withDispatchAdmission(() -> claimCapturedDispatch(op, abort.token), op);
 		concurrencyThrottle.release();
 		signalDispatchCapacityAvailable();
 		if (!claimed) {
@@ -3222,11 +3202,216 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 							.append(sortedHeader.getValue());
 		}
 		buffCanonical.append('\n');
-		buffCanonical.append(dstUriPath);
+		appendV2CanonicalResource(buffCanonical, dstUriPath);
 		if (Loggers.MSG.isTraceEnabled()) {
 			Loggers.MSG.trace("Canonical representation:\n{}", buffCanonical);
 		}
 		return buffCanonical.toString();
+	}
+
+	/** {@link S3Api#SIGV2_SUB_RESOURCES} indexed by name length, for a lookup with no substring. */
+	private static final String[][] SIGV2_SUB_RESOURCES_BY_LENGTH = subResourcesByLength();
+
+	private static String[][] subResourcesByLength() {
+		int maxLength = 0;
+		for (final var name : S3Api.SIGV2_SUB_RESOURCES) {
+			maxLength = Math.max(maxLength, name.length());
+		}
+		final var byLength = new String[maxLength + 1][];
+		for (int length = 0; length <= maxLength; length++) {
+			final int len = length;
+			byLength[length] = S3Api.SIGV2_SUB_RESOURCES.stream()
+							.filter(name -> name.length() == len)
+							.sorted()
+							.toArray(String[]::new);
+		}
+		return byLength;
+	}
+
+	/**
+	 * Appends the SigV2 canonical resource of a request URI: the path, then only the query's
+	 * sub-resources ({@link S3Api#SIGV2_SUB_RESOURCES}), sorted by name and joined with {@code &}.
+	 * The {@code ?} is left out when no sub-resource remains. An empty value signs as the bare name,
+	 * so {@code ?versions=} signs as {@code ?versions}. A {@code versionId} value that holds a
+	 * {@code %} is signed percent-decoded, as V2 requires (the URI carries it encoded), so a version
+	 * ID that needs encoding signs as itself. Every other non-empty value is signed as sent: AWS,
+	 * botocore and MinIO sign the decoded value and SeaweedFS the re-encoded one, which agree for
+	 * the unreserved characters that upload IDs and part numbers are made of.
+	 *
+	 * <p>A URI with no query, or whose query is already canonical (see {@link #isCanonicalV2Query}),
+	 * is appended whole, as before the fix: that is every multipart, tagging, delete and versioning
+	 * request SPT builds, and every {@code versionId} request whose ID is non-empty and needs no
+	 * encoding. This method stays small, so it inlines into {@code getCanonical}; only a listing, a
+	 * {@code storage-net-http-uri-args} query, an unsorted query, or a {@code versionId} that is empty
+	 * or encoded takes {@link #appendFilteredV2Resource}.
+	 */
+	static void appendV2CanonicalResource(final StringBuilder buff, final String uri) {
+		final int queryStart = uri.indexOf('?');
+		if (queryStart < 0 || isCanonicalV2Query(uri, queryStart)) {
+			buff.append(uri);
+		} else {
+			appendFilteredV2Resource(buff, uri, queryStart);
+		}
+	}
+
+	/**
+	 * Whether the query starting at {@code queryStart} (the {@code ?}) is already its own canonical
+	 * form, so that {@link #appendFilteredV2Resource} would append it unchanged: at least one
+	 * parameter, every parameter a sub-resource with no empty value and no {@code versionId} value to
+	 * decode, and the names in sorted order. One pass over the query, with no allocation.
+	 */
+	static boolean isCanonicalV2Query(final String uri, final int queryStart) {
+		final int uriLength = uri.length();
+		int paramStart = queryStart + 1;
+		int prevNameStart = -1;
+		int prevNameEnd = -1;
+		while (paramStart < uriLength) {
+			final int amp = uri.indexOf('&', paramStart);
+			final int paramEnd = amp < 0 ? uriLength : amp;
+			final int eq = uri.indexOf('=', paramStart, paramEnd);
+			final int nameEnd = eq < 0 ? paramEnd : eq;
+			if (eq == paramEnd - 1 // an empty value signs as the bare name
+							|| !isV2SubResource(uri, paramStart, nameEnd) // also rejects an empty parameter
+							|| (eq >= 0 && isEncodedVersionId(uri, paramStart, eq, paramEnd))
+							|| (prevNameStart >= 0
+											&& compareRegions(uri, prevNameStart, prevNameEnd, paramStart, nameEnd) > 0)) {
+				return false;
+			}
+			if (amp < 0) {
+				return true;
+			}
+			prevNameStart = paramStart;
+			prevNameEnd = nameEnd;
+			paramStart = amp + 1;
+		}
+		// No parameter, or a trailing '&': the filtered form drops what the URI holds.
+		return false;
+	}
+
+	/**
+	 * Appends the path, then only the query's sub-resources, sorted and with empty values bare. The
+	 * usual sorted query is filtered in one pass with no allocation; an unsorted one takes the
+	 * sorting path.
+	 */
+	static void appendFilteredV2Resource(final StringBuilder buff, final String uri, final int queryStart) {
+		// Append the whole URI and cut it back: one array copy, not a per-character append.
+		final int resourceEnd = buff.length() + queryStart;
+		buff.append(uri);
+		buff.setLength(resourceEnd);
+		final int uriLength = uri.length();
+		int prevNameStart = -1;
+		int prevNameEnd = -1;
+		int paramStart = queryStart + 1;
+		while (paramStart < uriLength) {
+			int paramEnd = uri.indexOf('&', paramStart);
+			if (paramEnd < 0) {
+				paramEnd = uriLength;
+			}
+			int nameEnd = uri.indexOf('=', paramStart, paramEnd);
+			if (nameEnd < 0) {
+				nameEnd = paramEnd;
+			}
+			if (isV2SubResource(uri, paramStart, nameEnd)) {
+				if (prevNameStart >= 0 && compareRegions(uri, prevNameStart, prevNameEnd, paramStart, nameEnd) > 0) {
+					buff.setLength(resourceEnd);
+					appendSortedV2SubResources(buff, uri, queryStart);
+					return;
+				}
+				appendV2SubResource(buff, uri, prevNameStart < 0, paramStart, nameEnd, paramEnd);
+				prevNameStart = paramStart;
+				prevNameEnd = nameEnd;
+			}
+			paramStart = paramEnd + 1;
+		}
+	}
+
+	private static void appendSortedV2SubResources(final StringBuilder buff, final String uri, final int queryStart) {
+		final int uriLength = uri.length();
+		// Each sub-resource takes three slots: name start, name end, parameter end.
+		var spans = new int[12];
+		int count = 0;
+		int paramStart = queryStart + 1;
+		while (paramStart < uriLength) {
+			int paramEnd = uri.indexOf('&', paramStart);
+			if (paramEnd < 0) {
+				paramEnd = uriLength;
+			}
+			int nameEnd = uri.indexOf('=', paramStart, paramEnd);
+			if (nameEnd < 0) {
+				nameEnd = paramEnd;
+			}
+			if (isV2SubResource(uri, paramStart, nameEnd)) {
+				if (3 * count + 3 > spans.length) {
+					spans = Arrays.copyOf(spans, spans.length * 2);
+				}
+				// Stable insertion sort by name: equal names keep their order in the query.
+				int i = count;
+				while (i > 0 && compareRegions(uri, spans[3 * (i - 1)], spans[3 * (i - 1) + 1], paramStart, nameEnd) > 0) {
+					System.arraycopy(spans, 3 * (i - 1), spans, 3 * i, 3);
+					i--;
+				}
+				spans[3 * i] = paramStart;
+				spans[3 * i + 1] = nameEnd;
+				spans[3 * i + 2] = paramEnd;
+				count++;
+			}
+			paramStart = paramEnd + 1;
+		}
+		for (int i = 0; i < count; i++) {
+			appendV2SubResource(buff, uri, i == 0, spans[3 * i], spans[3 * i + 1], spans[3 * i + 2]);
+		}
+	}
+
+	private static void appendV2SubResource(
+					final StringBuilder buff, final String uri, final boolean first,
+					final int nameStart, final int nameEnd, final int paramEnd) {
+		buff.append(first ? '?' : '&');
+		// nameEnd is either the parameter end (no value) or the '=' before the value.
+		if (nameEnd + 1 < paramEnd && isEncodedVersionId(uri, nameStart, nameEnd, paramEnd)) {
+			buff.append(uri, nameStart, nameEnd + 1).append(decodeQueryComponent(uri.substring(nameEnd + 1, paramEnd)));
+		} else {
+			buff.append(uri, nameStart, nameEnd + 1 < paramEnd ? paramEnd : nameEnd);
+		}
+	}
+
+	private static final String VERSION_ID = "versionId";
+
+	/**
+	 * Whether the parameter whose name ends at the {@code =} at {@code eq} is {@code versionId} with a
+	 * value that holds a {@code %}: one that V2 signs decoded. Checks the length first, so another
+	 * name costs one comparison.
+	 */
+	private static boolean isEncodedVersionId(final String uri, final int nameStart, final int eq, final int paramEnd) {
+		return eq - nameStart == VERSION_ID.length()
+						&& uri.startsWith(VERSION_ID, nameStart)
+						&& uri.indexOf('%', eq + 1, paramEnd) >= 0;
+	}
+
+	private static boolean isV2SubResource(final String uri, final int nameStart, final int nameEnd) {
+		final int length = nameEnd - nameStart;
+		if (length <= 0 || length >= SIGV2_SUB_RESOURCES_BY_LENGTH.length) {
+			return false;
+		}
+		for (final var name : SIGV2_SUB_RESOURCES_BY_LENGTH[length]) {
+			if (uri.startsWith(name, nameStart)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** Compares two regions of {@code s} the way {@link String#compareTo} compares strings. */
+	private static int compareRegions(final String s, final int aStart, final int aEnd, final int bStart, final int bEnd) {
+		final int aLength = aEnd - aStart;
+		final int bLength = bEnd - bStart;
+		final int common = Math.min(aLength, bLength);
+		for (int i = 0; i < common; i++) {
+			final int diff = s.charAt(aStart + i) - s.charAt(bStart + i);
+			if (diff != 0) {
+				return diff;
+			}
+		}
+		return aLength - bLength;
 	}
 
 	@Override

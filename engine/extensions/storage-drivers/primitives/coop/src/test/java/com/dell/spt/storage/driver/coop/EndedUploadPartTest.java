@@ -32,6 +32,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -48,6 +49,8 @@ final class EndedUploadPartTest {
 	static final class DeferringDriver extends CoopStorageDriverMock<Item, Operation<Item>> {
 		final Queue<Runnable> deferred = new ConcurrentLinkedQueue<>();
 		final AtomicLong refused = new AtomicLong();
+		/** Runs on the dispatch task before each submit, so a test can hold the task inside it. */
+		volatile Consumer<Operation<Item>> beforeSubmit = op -> {};
 
 		DeferringDriver(final DataInput in, final Config cfg) throws Exception {
 			super("ended-upload-part-step", in, cfg, false, 1);
@@ -60,6 +63,7 @@ final class EndedUploadPartTest {
 
 		@Override
 		protected boolean submit(final Operation<Item> op) {
+			beforeSubmit.accept(op);
 			final boolean accepted = super.submit(op);
 			if (!accepted) {
 				refused.incrementAndGet();
