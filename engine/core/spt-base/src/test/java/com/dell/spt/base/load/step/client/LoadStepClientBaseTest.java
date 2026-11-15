@@ -2561,6 +2561,76 @@ class LoadStepClientBaseTest {
 		verify(slice, atLeastOnce()).await(anyLong(), any(TimeUnit.class));
 	}
 
+	/**
+	 * A stop that is not the failure budget's, during the await: the slice's await reports it was
+	 * stopped, as the real slice does once admission closes, and the controller's await ends with
+	 * that cause promptly instead of polling to the deadline.
+	 */
+	@Test
+	void durationStopDuringAwaitEndsPromptlyWithTheStopCause() throws Exception {
+		final Config config = durationConfig();
+		config.val("load-op-wait-limit", 0);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch awaitEntered = new CountDownLatch(1);
+		final CountDownLatch admissionClosed = new CountDownLatch(1);
+		final AtomicLong admissionClosedNanos = new AtomicLong();
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
+			awaitEntered.countDown();
+			if (!admissionClosed.await(20, TimeUnit.MILLISECONDS)) {
+				return false;
+			}
+			throw new IntegrityTerminalException(
+							IntegrityTerminalException.Category.EXECUTION,
+							"Standalone DELETE input slice was stopped before the requested duration");
+		});
+		when(slice.durationAwaitStatus()).thenReturn(DurationAwaitStatus.RUNNING);
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		doAnswer(invocation -> {
+			admissionClosedNanos.compareAndSet(0, System.nanoTime());
+			admissionClosed.countDown();
+			return null;
+		}).when(slice).closeOperationAdmissionForStepStop();
+		addRawStepSlice(client, slice);
+
+		final AtomicReference<Throwable> stopFailure = new AtomicReference<>();
+		final Thread stopThread = Thread.ofPlatform().unstarted(() -> {
+			try {
+				assertTrue(awaitEntered.await(5, TimeUnit.SECONDS), "the controller never awaited the slice");
+				client.stop();
+			} catch (final Throwable failure) {
+				stopFailure.set(failure);
+			}
+		});
+		stopThread.start();
+		try {
+			final IntegrityTerminalException failure = assertThrows(
+							IntegrityTerminalException.class,
+							() -> client.await(30, TimeUnit.SECONDS));
+			final long returnedNanos = System.nanoTime();
+			assertTrue(failure.getMessage().contains("stopped before the requested duration"), failure.getMessage());
+			assertFalse(failure.getMessage().contains("exhausted"), failure.getMessage());
+			assertTrue(admissionClosedNanos.get() != 0, "the stop did not close admission");
+			final long afterAdmissionClosedMillis =
+							TimeUnit.NANOSECONDS.toMillis(returnedNanos - admissionClosedNanos.get());
+			assertTrue(
+							afterAdmissionClosedMillis < 1_000,
+							"await returned " + afterAdmissionClosedMillis + " ms after admission closed");
+		} finally {
+			stopThread.join(TimeUnit.SECONDS.toMillis(10));
+			assertFalse(stopThread.isAlive(), "the stop did not return");
+			try {
+				client.close();
+			} catch (final IntegrityTerminalException closeFailure) {
+				// The stopped slice never confirmed its deadline, so the run fails; not as exhausted.
+				assertFalse(closeFailure.getMessage().contains("exhausted"), closeFailure.getMessage());
+			}
+			assertNoLiveThreads("spt-delete-await-");
+		}
+		assertNull(stopFailure.get());
+	}
+
 	@Test
 	void durationBudgetStopDuringStartupReportsPolicyInsteadOfInventoryExhaustion() throws Exception {
 		final Config config = durationConfig();

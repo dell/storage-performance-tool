@@ -11,6 +11,7 @@ import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.steadySet
 import static com.dell.spt.base.load.step.local.SteadyLifecycleSupport.windowEndMillis;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -445,6 +446,73 @@ class LoadStepLocalSteadyStopPathTest {
 
 				assertEquals(DurationAwaitStatus.RUNNING, step.durationAwaitStatus());
 				step.validateTerminalStateForStepStop();
+			} finally {
+				step.close();
+			}
+		}
+	}
+
+	/** How a slice is stopped while an await is live. */
+	enum LiveAwaitStop {
+		/** The Entry Node's stop phases, as {@code LoadStepClientBase} calls them over RMI. */
+		ENTRY_NODE_PHASES,
+		/** The slice's own stop. */
+		STEP_STOP
+	}
+
+	/**
+	 * A slice stopped before its deadline while an await is live did not run out: its await ends
+	 * as promptly as an exhausted one would, without the exhaustion failure or status.
+	 */
+	@ParameterizedTest
+	@EnumSource(LiveAwaitStop.class)
+	void aLiveAwaitOnASliceStoppedBeforeTheDeadlineEndsPromptlyAndIsNotExhausted(final LiveAwaitStop how)
+					throws Exception {
+		final int inventory = 5_000;
+		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.standaloneDelete(C, L_MILLIS).inputQueue(100_000);
+		try (final var metricsMgr = new RecordingMetricsManager()) {
+			final var step = new DurationDeleteStep(
+							durationDeleteConfig("duration-stopped-live-await-" + how), driver, metricsMgr, inventory);
+			try {
+				step.start();
+				step.startDurationInterval(TimeUnit.SECONDS.toNanos(30));
+				awaitCondition(() -> driver.scheduledOpCount() == inventory, "the whole inventory handed to the queue");
+				final var outcome = new java.util.concurrent.atomic.AtomicReference<Object>();
+				final var returnedNanos = new java.util.concurrent.atomic.AtomicLong();
+				final var awaitEntered = new java.util.concurrent.CountDownLatch(1);
+				final Thread awaiter = new Thread(() -> {
+					awaitEntered.countDown();
+					try {
+						outcome.set(step.await(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS));
+					} catch (final Throwable failure) {
+						outcome.set(failure);
+					}
+					returnedNanos.set(System.nanoTime());
+				}, "duration-live-await");
+				awaiter.start();
+				assertTrue(awaitEntered.await(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS));
+				// Let the await reach its poll loop before the stop.
+				Thread.sleep(50);
+				final long stopNanos = System.nanoTime();
+				if (how == LiveAwaitStop.ENTRY_NODE_PHASES) {
+					step.closeOperationAdmissionForStepStop();
+					step.recoverQueuedOperationsForStepStop();
+					step.drainDispatchedOperationsForStepStop(TimeUnit.SECONDS.toNanos(5));
+				} else {
+					step.stop();
+				}
+				awaiter.join(2 * WAIT_TIMEOUT_MILLIS);
+				assertFalse(awaiter.isAlive(), "the await did not return");
+
+				final long afterStopMillis = TimeUnit.NANOSECONDS.toMillis(returnedNanos.get() - stopNanos);
+				assertTrue(afterStopMillis < 1_000, "the await returned " + afterStopMillis + " ms after the stop");
+				final var failure = assertInstanceOf(IntegrityTerminalException.class, outcome.get());
+				assertTrue(failure.getMessage().contains("stopped before the requested duration"), failure.getMessage());
+				assertFalse(failure.getMessage().contains("exhausted"), failure.getMessage());
+				assertEquals(DurationAwaitStatus.RUNNING, step.durationAwaitStatus());
+				if (how == LiveAwaitStop.ENTRY_NODE_PHASES) {
+					step.validateTerminalStateForStepStop();
+				}
 			} finally {
 				step.close();
 			}

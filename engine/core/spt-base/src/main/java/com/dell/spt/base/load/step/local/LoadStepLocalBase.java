@@ -106,6 +106,8 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private final Object durationAdmissionClose = new Object();
 	private final Object durationDeadlineEnforcement = new Object();
 	private volatile boolean durationAdmissionClosedLocally;
+	/** Set as a step stop starts closing admission, before any context's queue is recovered. */
+	private volatile boolean durationStopBegun;
 	private volatile CompletableFuture<Void> deletePreValidationTask;
 	private volatile CompletableFuture<Void> deletePostVerificationTask;
 
@@ -458,6 +460,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			durationIntervalNanos = Long.MIN_VALUE;
 			durationAwaitStatus = DurationAwaitStatus.NOT_STARTED;
 			durationAdmissionClosedLocally = false;
+			durationStopBegun = false;
 		}
 	}
 
@@ -929,6 +932,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 								&& DurationTime.deadlineReached(pollDeadlineNanos, observedNanos)) {
 					return false;
 				}
+				boolean stoppedBeforeDeadline = false;
 				for (final LoadStepContext context : List.copyOf(stepContexts)) {
 					if (context == null) {
 						continue;
@@ -940,6 +944,14 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 							continue;
 						}
 						exhaustedAtNanos = System.nanoTime();
+						if (durationStopBegun
+										&& DurationTime.timestampBeforeDeadline(exhaustedAtNanos, deadlineNanos)) {
+							// A stop emptied the queue; the slice did not run out. Another context's
+							// recorded exhaustion still wins, and the final counts still decide
+							// exhaustion at validation.
+							stoppedBeforeDeadline = true;
+							continue;
+						}
 					} else {
 						exhaustedAtNanos = exhaustion.getAsLong();
 					}
@@ -949,6 +961,9 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 					}
 					durationAwaitStatus = DurationAwaitStatus.REACHED_DEADLINE;
 					return false;
+				}
+				if (stoppedBeforeDeadline) {
+					break;
 				}
 				long remainingNanos = DurationTime.remainingNanos(
 								deadlineNanos, System.nanoTime());
@@ -972,6 +987,12 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			}
 			throw failure;
 		}
+		// Thrown where the exhaustion failure was, so the await ends as promptly. The status stays
+		// RUNNING, as for a slice stopped with no await live.
+		throw terminalFailure(
+						IntegrityTerminalException.Category.EXECUTION,
+						"Standalone DELETE input slice was stopped before the requested duration",
+						null);
 	}
 
 	private boolean completeDurationDeadlineAudit() {
@@ -1171,6 +1192,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	@Override
 	public final void closeOperationAdmissionForStepStop() {
 		closeSteadyWindows("close operation admission");
+		durationStopBegun = true;
 		synchronized (durationAdmissionClose) {
 			if (durationAdmissionClosedLocally) {
 				return;
