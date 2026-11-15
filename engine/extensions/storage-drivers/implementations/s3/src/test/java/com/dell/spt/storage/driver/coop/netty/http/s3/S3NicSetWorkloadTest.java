@@ -1199,9 +1199,10 @@ final class S3NicSetWorkloadTest {
 		final var run = pending.run();
 		S3NicSetAdmissionTest.closeAdmissionFlagOnly(run.driver());
 		pending.blackhole().close();
+		ServerSocketChannel listener = null;
 		if (connects) {
 			// The connect's next SYN finds a listening port; the kernel completes the handshake.
-			final var listener = ServerSocketChannel.open();
+			listener = ServerSocketChannel.open();
 			resources.add(listener);
 			listener.setOption(StandardSocketOptions.SO_REUSEADDR, true);
 			listener.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), pending.port()), 8);
@@ -1209,6 +1210,16 @@ final class S3NicSetWorkloadTest {
 
 		waitFor(() -> run.driver().kernelRouteAbortsPending() == 0, "the abort's connect ended", 15);
 		waitFor(() -> run.driver().activeOpCount() == 0, "the abort gave back its permit");
+		if (listener != null) {
+			// The connected branch ran, not the failed one: the connection arrived and was closed unused.
+			listener.configureBlocking(false);
+			final var accepted = listener.accept();
+			assertNotNull(accepted, "the abort's connect was established");
+			resources.add(accepted);
+			accepted.configureBlocking(true);
+			accepted.socket().setSoTimeout(5_000);
+			assertEquals(-1, accepted.socket().getInputStream().read(), "the connection closed with nothing sent");
+		}
 		assertAbortSettledUnsent(pending);
 		run.driver().closeAdmission();
 		assertAbortSettledUnsent(pending);
