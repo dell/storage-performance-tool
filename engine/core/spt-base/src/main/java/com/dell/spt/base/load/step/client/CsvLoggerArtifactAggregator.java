@@ -54,6 +54,25 @@ public final class CsvLoggerArtifactAggregator implements AutoCloseable {
 		}
 	}
 
+	/**
+	 * The files {@link #close()} and the workers refuse to replace for this artifact of step
+	 * {@code loadStepId}, on the Entry Node: its canonical file and the node source of each of
+	 * {@code sliceCount} slices. A step refuses its id at start when any of them exists.
+	 *
+	 * @param entry the Entry Node's file manager
+	 */
+	static List<Path> publishedPaths(
+					final FileManager entry, final String loggerName, final String loadStepId, final int sliceCount)
+					throws IOException {
+		final Path canonical = Path.of(entry.logFileName(loggerName, loadStepId));
+		final List<Path> paths = new ArrayList<>(1 + sliceCount);
+		paths.add(canonical);
+		for (int i = 0; i < sliceCount; i++) {
+			paths.add(nodeSourcePath(canonical, i));
+		}
+		return paths;
+	}
+
 	@Override
 	public void close() {
 		try {

@@ -65,6 +65,39 @@ final class NicPathsCollector implements AutoCloseable {
 		this.expected = List.copyOf(expected);
 	}
 
+	/**
+	 * The NIC files of step {@code loadStepId} that an earlier step with the same id left on the Entry
+	 * Node and that this step would refuse to replace: the Entry Node's own NIC files when it
+	 * requested a NIC set, and, in a distributed step, the copy of each slice that did. A step refuses
+	 * its id at start when any of them exists. The event-loop report is replaced, so it is not here.
+	 *
+	 * @param entry the Entry Node's file manager
+	 * @param expected one per slice: whether that slice requested a NIC set
+	 */
+	static List<Path> publishedPaths(final FileManager entry, final String loadStepId, final List<Boolean> expected)
+					throws IOException {
+		final var paths = new ArrayList<Path>();
+		for (final var evidence : EVIDENCE) {
+			if (evidence.replaces()) {
+				continue;
+			}
+			// A file that cannot be named cannot be tested, so the step is refused.
+			final Path canonical = Path.of(entry.logFileName(evidence.logger().getName(), loadStepId)).toAbsolutePath();
+			if (!evidence.fileName().equals(canonical.getFileName().toString())) {
+				continue; // Its collection warns at close.
+			}
+			if (expected.get(0)) {
+				paths.add(canonical);
+			}
+			for (int i = 0; expected.size() > 1 && i < expected.size(); i++) {
+				if (expected.get(i)) {
+					paths.add(nodeCopyPath(canonical, i));
+				}
+			}
+		}
+		return paths;
+	}
+
 	@Override
 	public void close() {
 		for (int i = 0; i < fileManagers.size(); i++) {

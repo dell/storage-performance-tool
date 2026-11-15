@@ -9,10 +9,19 @@ import static org.mockito.Mockito.verify;
 import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
+import com.dell.spt.base.load.step.StepIdInUseException;
+import com.dell.spt.base.load.step.client.StepIdReuseAtStartTest;
 import com.dell.spt.base.load.step.client.TestLoadStepClient;
+import com.dell.spt.base.load.step.file.FileManager;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.github.akurilov.confuse.Config;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -77,5 +86,36 @@ class ControllerTargetBucketProvisioningTest {
 
 		assertEquals(1, extension.opened, "only the controller opens a control client, once per step");
 		assertEquals(64, extension.openedWith.get(0).intVal("driver-limit-concurrency"));
+	}
+
+	@ParameterizedTest(name = "remote slices: {0}")
+	@ValueSource(booleans = {false, true
+	})
+	@Timeout(value = 60, unit = TimeUnit.SECONDS)
+	void aConfiguredStepIdInUseIsRefusedBeforeTheTargetIsTouched(final boolean distributed) throws Exception {
+		final var stepId = "create-step-" + UUID.randomUUID();
+		final Path earlier = Path.of(FileManager.INSTANCE.logFileName(Loggers.OPERATION_LIFECYCLE.getName(), stepId));
+		Files.createDirectories(earlier.getParent());
+		Files.writeString(earlier, "earlier");
+		try {
+			final var extension = new ScriptedTargetBucketExtension().check("bench", TargetBucketResponse.notFound());
+			final Config config = TargetBucketProvisioningTest.stepConfig("create", "/bench");
+			config.val("load-step-id", stepId);
+			// Unreachable nodes: the refusal must reach none of them, nor wait for them.
+			config.val("load-step-node-addrs", distributed ? List.of("192.0.2.10:1099", "192.0.2.11:1099") : List.of());
+			final var metrics = mock(MetricsManager.class);
+			final var client = new TestLoadStepClient(config, List.<Extension> of(extension), null, metrics);
+
+			final var failure = assertThrows(RunTerminalException.class, client::run);
+
+			assertInstanceOf(StepIdInUseException.class, RunTerminalException.find(failure), failure.toString());
+			assertEquals(IntegrityTerminalException.Category.CONFIGURATION, failure.category());
+			assertEquals(List.of(), extension.requests, "a refused step must not touch the target");
+			assertEquals(0, extension.opened);
+			assertFalse(client.wasInitCalled());
+			assertEquals("earlier", Files.readString(earlier));
+		} finally {
+			StepIdReuseAtStartTest.removeFolder(earlier.getParent());
+		}
 	}
 }

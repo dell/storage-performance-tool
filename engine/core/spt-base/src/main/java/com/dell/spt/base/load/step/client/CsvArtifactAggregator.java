@@ -157,6 +157,27 @@ public final class CsvArtifactAggregator implements AutoCloseable {
 		}
 	}
 
+	/**
+	 * The files close refuses to replace for the manifest {@code itemOutputFile} of a step with
+	 * {@code sliceCount} slices and artifact operation {@code artifactOpType}: its completion record
+	 * and each slice's node source, with a LIST step's node emission and delete-marker counts. A step
+	 * refuses to start when any of them exists.
+	 */
+	static List<Path> publishedPaths(final String itemOutputFile, final int sliceCount, final OpType artifactOpType) {
+		final Path manifest = Path.of(itemOutputFile);
+		final List<Path> paths = new ArrayList<>();
+		paths.add(IntegrityManifestCompletion.completionPath(manifest));
+		for (int i = 0; i < sliceCount; i++) {
+			final Path nodePath = nodeSourcePath(manifest, i);
+			paths.add(nodePath);
+			if (OpType.LIST.equals(artifactOpType)) {
+				paths.add(IntegrityManifestCompletion.emissionCountPath(nodePath));
+				paths.add(IntegrityManifestCompletion.deleteMarkerCountPath(nodePath));
+			}
+		}
+		return paths;
+	}
+
 	@Override
 	public void close() {
 		close(OpType.LIST.equals(artifactOpType) ? -1 : 0);
