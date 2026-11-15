@@ -46,6 +46,7 @@ import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.bucket.AwsS3Region;
+import com.dell.spt.base.storage.driver.bucket.BucketVersioningNotice;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketResponse;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.storage.driver.coop.netty.http.HttpStorageDriverBase;
@@ -101,6 +102,7 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 import java.util.zip.CRC32;
 import java.util.zip.CRC32C;
 import java.util.zip.Checksum;
@@ -330,6 +332,12 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					final ChecksumStrategy checksumStrategy) {
 		strategiesByToken.put(checksumStrategy.configToken, checksumStrategy);
 	}
+
+	private static final String VERSIONING_STATUS_ENABLED = "Enabled";
+	private static final String VERSIONING_STATUS_SUSPENDED = "Suspended";
+	/** The first {@code Status} element of a {@code VersioningConfiguration}, with or without a namespace prefix. */
+	private static final Pattern VERSIONING_STATUS = Pattern.compile(
+					"<(?:[A-Za-z_][\\w.-]*:)?Status\\s*>([^<]*)</(?:[A-Za-z_][\\w.-]*:)?Status\\s*>");
 
 	protected final boolean fsAccess;
 	protected final boolean taggingEnabled;
@@ -584,40 +592,69 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 		// check the bucket versioning state
 		if (versioning) {
-			final var bucketVersioningReqUri = bucketPath + "?" + S3Api.URL_ARG_VERSIONING;
-			reqHeaders = new DefaultHttpHeaders();
-			reqHeaders.set(HttpHeaderNames.HOST, nodeAddr);
-			reqHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
-			applyDynamicHeaders(reqHeaders);
-			applySharedHeaders(reqHeaders);
-			applyAuthHeaders(reqHeaders, HttpMethod.GET, bucketVersioningReqUri, credential);
-			final FullHttpRequest getBucketVersioningReq = new DefaultFullHttpRequest(
-							HttpVersion.HTTP_1_1,
-							HttpMethod.GET,
-							bucketVersioningReqUri,
-							Unpooled.EMPTY_BUFFER,
-							reqHeaders,
-							EmptyHttpHeaders.INSTANCE);
-			final FullHttpResponse getBucketVersioningResp;
-			try {
-				getBucketVersioningResp = executeHttpRequest(getBucketVersioningReq);
-				if (getBucketVersioningResp == null) {
-					Loggers.ERR.warn("Response timeout");
-				} else {
-					try {
-						handleCheckBucketVersioningResponse(
-										getBucketVersioningResp, nodeAddr, bucketVersioningReqUri);
-					} finally {
-						getBucketVersioningResp.release();
-					}
-				}
-			} catch (final InterruptedException e) {
-				throwUnchecked(e);
-			} catch (final ConnectException e) {
-				LogUtil.exception(Level.WARN, e, "Failed to connect to the storage node");
-			}
+			checkBucketVersioning(nodeAddr, bucketPath, credential);
 		}
 		return path;
+	}
+
+	/**
+	 * The first-use versioning check of a bucket: {@code GET ?versioning}, then {@code PUT ?versioning}
+	 * only for a bucket that has never been versioned. Each outcome logs one {@link
+	 * BucketVersioningNotice}; none throws, so the bucket's path is cached and never checked again.
+	 */
+	private void checkBucketVersioning(final String nodeAddr, final String bucketPath, final Credential credential) {
+		final var bucketVersioningReqUri = bucketPath + "?" + S3Api.URL_ARG_VERSIONING;
+		final FullHttpRequest getBucketVersioningReq = new DefaultFullHttpRequest(
+						HttpVersion.HTTP_1_1,
+						HttpMethod.GET,
+						bucketVersioningReqUri,
+						Unpooled.EMPTY_BUFFER,
+						bucketVersioningHeaders(nodeAddr, HttpMethod.GET, bucketVersioningReqUri, 0, credential),
+						EmptyHttpHeaders.INSTANCE);
+		final FullHttpResponse getBucketVersioningResp;
+		try {
+			getBucketVersioningResp = executeHttpRequest(getBucketVersioningReq);
+		} catch (final InterruptedException e) {
+			throwUnchecked(e);
+			return;
+		} catch (final ConnectException e) {
+			LogUtil.exception(Level.DEBUG, e, "{}: the bucket {} versioning check failed to connect", stepId, bucketPath);
+			BucketVersioningNotice.warn(stepId, versioningCheckFailed(bucketPath, "the connection failed"));
+			return;
+		}
+		if (getBucketVersioningResp == null) {
+			BucketVersioningNotice.warn(
+							stepId, versioningCheckFailed(bucketPath, "GET ?versioning timed out after " + netTimeoutMilliSec + " ms"));
+			return;
+		}
+		try {
+			handleCheckBucketVersioningResponse(getBucketVersioningResp, nodeAddr, bucketVersioningReqUri, credential);
+		} finally {
+			getBucketVersioningResp.release();
+		}
+	}
+
+	/**
+	 * The headers of a versioning request, built as the bucket {@code HEAD} builds its own: the
+	 * dynamic and shared headers, a {@code Date} only when they give none, and the bucket's
+	 * credential.
+	 */
+	private HttpHeaders bucketVersioningHeaders(
+					final String nodeAddr,
+					final HttpMethod method,
+					final String uri,
+					final int contentLength,
+					final Credential credential) {
+		final HttpHeaders reqHeaders = new DefaultHttpHeaders();
+		reqHeaders.set(HttpHeaderNames.HOST, nodeAddr);
+		reqHeaders.set(HttpHeaderNames.CONTENT_LENGTH, contentLength);
+		applyDynamicHeaders(reqHeaders);
+		applySharedHeaders(reqHeaders);
+		if (HttpMethod.PUT.equals(method) && !reqHeaders.contains(HttpHeaderNames.DATE)) {
+			reqHeaders.set(HttpHeaderNames.DATE, DateUtil.formatNowRfc1123());
+		}
+		applyAuthHeaders(reqHeaders, method, uri, credential);
+		return reqHeaders;
 	}
 
 	/**
@@ -699,52 +736,140 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		return headerValue;
 	}
 
+	/**
+	 * Kept for subclasses; signs a {@code PUT ?versioning} with the bucket's credential from
+	 * {@link #pathToCredMap}, as the first-use check does.
+	 */
 	protected void handleCheckBucketVersioningResponse(
 					final FullHttpResponse getBucketVersioningResp,
 					final String nodeAddr,
 					final String bucketVersioningReqUri) {
-		var versioningEnabled = false;
-		if (!HttpStatusClass.SUCCESS.equals(getBucketVersioningResp.status().codeClass())) {
-			Loggers.ERR.warn(
-							"The bucket versioning checking response is: {}",
-							getBucketVersioningResp.status().toString());
-		} else {
-			final var content = getBucketVersioningResp.content().toString(StandardCharsets.US_ASCII);
-			versioningEnabled = content.contains("Enabled");
+		handleCheckBucketVersioningResponse(
+						getBucketVersioningResp, nodeAddr, bucketVersioningReqUri, bucketCredential(bucketVersioningReqUri));
+	}
+
+	/**
+	 * Acts on a bucket's {@code GET ?versioning} response, with versioning on: a bucket whose
+	 * {@code Status} is {@code Enabled} is left as it is; one that has no {@code Status}, so has never
+	 * been versioned, gets {@code PUT ?versioning}; a {@code Suspended} or unknown status, and a
+	 * failed response, are left alone with a warning, and the run goes on un-versioned.
+	 *
+	 * @param credential the bucket's credential, or null for the driver's own
+	 */
+	protected void handleCheckBucketVersioningResponse(
+					final FullHttpResponse getBucketVersioningResp,
+					final String nodeAddr,
+					final String bucketVersioningReqUri,
+					final Credential credential) {
+		if (!versioning) {
+			return;
 		}
-		if (versioning && !versioningEnabled) {
-			enableBucketVersioning(nodeAddr, bucketVersioningReqUri);
+		final var bucketPath = bucketPathOf(bucketVersioningReqUri);
+		if (!HttpStatusClass.SUCCESS.equals(getBucketVersioningResp.status().codeClass())) {
+			BucketVersioningNotice.warn(stepId, versioningCheckFailed(
+							bucketPath, "GET ?versioning returned " + getBucketVersioningResp.status()));
+			return;
+		}
+		final var status = versioningStatus(getBucketVersioningResp.content().toString(UTF_8));
+		if (status == null) {
+			enableBucketVersioning(nodeAddr, bucketVersioningReqUri, credential);
+		} else if (VERSIONING_STATUS_ENABLED.equals(status)) {
+			BucketVersioningNotice.info(stepId, bucketLabel(bucketPath) + ": versioning is already enabled");
+		} else if (VERSIONING_STATUS_SUSPENDED.equals(status)) {
+			BucketVersioningNotice.warn(stepId, bucketLabel(bucketPath)
+							+ ": versioning is suspended; SPT left it alone, and the run goes on un-versioned");
+		} else {
+			BucketVersioningNotice.warn(stepId, bucketLabel(bucketPath) + ": the versioning status \"" + status
+							+ "\" is neither Enabled nor Suspended; SPT left it alone, and the run goes on un-versioned");
 		}
 	}
 
+	/**
+	 * Kept for subclasses; signs the request with the bucket's credential from {@link #pathToCredMap},
+	 * as the first-use check does.
+	 */
 	protected void enableBucketVersioning(
 					final String nodeAddr, final String bucketVersioningReqUri) {
-		final HttpHeaders reqHeaders = new DefaultHttpHeaders();
-		reqHeaders.set(HttpHeaderNames.HOST, nodeAddr);
-		reqHeaders.set(HttpHeaderNames.DATE, DateUtil.formatNowRfc1123());
-		reqHeaders.set(HttpHeaderNames.CONTENT_LENGTH, S3Api.VERSIONING_ENABLE_CONTENT.length);
-		applyAuthHeaders(reqHeaders, HttpMethod.PUT, bucketVersioningReqUri, credential);
+		enableBucketVersioning(nodeAddr, bucketVersioningReqUri, bucketCredential(bucketVersioningReqUri));
+	}
+
+	/**
+	 * Sends {@code PUT ?versioning} to enable a bucket's versioning, with the headers and credential
+	 * of the {@code GET ?versioning}, and logs what came of it. A failure, including a timeout, is a
+	 * warning, and the run goes on.
+	 *
+	 * @param credential the bucket's credential, or null for the driver's own
+	 */
+	protected void enableBucketVersioning(
+					final String nodeAddr, final String bucketVersioningReqUri, final Credential credential) {
+		final var bucketPath = bucketPathOf(bucketVersioningReqUri);
 		final var putBucketVersioningReq = (FullHttpRequest) new DefaultFullHttpRequest(
 						HttpVersion.HTTP_1_1,
 						HttpMethod.PUT,
 						bucketVersioningReqUri,
 						Unpooled.wrappedBuffer(S3Api.VERSIONING_ENABLE_CONTENT).retain(),
-						reqHeaders,
+						bucketVersioningHeaders(nodeAddr, HttpMethod.PUT, bucketVersioningReqUri,
+										S3Api.VERSIONING_ENABLE_CONTENT.length, credential),
 						EmptyHttpHeaders.INSTANCE);
 		final FullHttpResponse putBucketVersioningResp;
 		try {
 			putBucketVersioningResp = executeHttpRequest(putBucketVersioningReq);
-			if (!HttpStatusClass.SUCCESS.equals(putBucketVersioningResp.status().codeClass())) {
-				Loggers.ERR.warn(
-								"The bucket versioning setting response is: {}",
-								putBucketVersioningResp.status().toString());
-			}
-			putBucketVersioningResp.release();
 		} catch (final InterruptedException e) {
 			throwUnchecked(e);
+			return;
 		} catch (final ConnectException e) {
-			LogUtil.exception(Level.WARN, e, "Failed to connect to the storage node");
+			LogUtil.exception(Level.DEBUG, e, "{}: enabling the bucket {} versioning failed to connect", stepId, bucketPath);
+			BucketVersioningNotice.warn(stepId, versioningNotEnabled(bucketPath, "the connection failed"));
+			return;
 		}
+		if (putBucketVersioningResp == null) {
+			BucketVersioningNotice.warn(stepId, versioningNotEnabled(
+							bucketPath, "PUT ?versioning timed out after " + netTimeoutMilliSec + " ms"));
+			return;
+		}
+		try {
+			if (HttpStatusClass.SUCCESS.equals(putBucketVersioningResp.status().codeClass())) {
+				BucketVersioningNotice.info(stepId, bucketLabel(bucketPath)
+								+ ": versioning enabled by this run (the bucket had never been versioned)");
+			} else {
+				BucketVersioningNotice.warn(stepId, versioningNotEnabled(
+								bucketPath, "PUT ?versioning returned " + putBucketVersioningResp.status()));
+			}
+		} finally {
+			putBucketVersioningResp.release();
+		}
+	}
+
+	/** The {@code Status} of a {@code VersioningConfiguration} body; null when it has none or an empty one. */
+	static String versioningStatus(final String body) {
+		final var matcher = VERSIONING_STATUS.matcher(body);
+		if (!matcher.find()) {
+			return null;
+		}
+		final var status = matcher.group(1).strip();
+		return status.isEmpty() ? null : status;
+	}
+
+	private Credential bucketCredential(final String bucketVersioningReqUri) {
+		return pathToCredMap.getOrDefault(bucketPathOf(bucketVersioningReqUri), credential);
+	}
+
+	private static String bucketPathOf(final String bucketVersioningReqUri) {
+		final var query = bucketVersioningReqUri.indexOf('?');
+		return query < 0 ? bucketVersioningReqUri : bucketVersioningReqUri.substring(0, query);
+	}
+
+	private static String bucketLabel(final String bucketPath) {
+		return "bucket " + (bucketPath.startsWith(SLASH) ? bucketPath.substring(1) : bucketPath);
+	}
+
+	private static String versioningCheckFailed(final String bucketPath, final String cause) {
+		return bucketLabel(bucketPath) + ": could not read the versioning state (" + cause
+						+ "); SPT sent no request to enable it, and the run goes on un-versioned";
+	}
+
+	private static String versioningNotEnabled(final String bucketPath, final String cause) {
+		return bucketLabel(bucketPath) + ": could not enable versioning (" + cause + "); the run goes on un-versioned";
 	}
 
 	@Override

@@ -4,12 +4,14 @@ import static com.dell.spt.storage.driver.coop.netty.http.s3.EndpointSelectionTe
 import static com.dell.spt.storage.driver.coop.netty.http.s3.EndpointSelectionTestSupport.ITEM_SIZE;
 import static org.junit.jupiter.api.Assertions.*;
 
+import com.dell.spt.base.config.HttpVersioningSynonym;
 import com.dell.spt.base.data.SeedDataInput;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.confuse.Config;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -19,6 +21,7 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -26,6 +29,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.logging.log4j.Level;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -40,7 +44,9 @@ import org.junit.jupiter.api.Timeout;
  *       cached, so that driver instance never checks the bucket again;
  *   <li>only a connection failure of the initial HEAD returns null and caches nothing; the object
  *       operation is still submitted and its own request decides its outcome;
- *   <li>with versioning, initialization adds GET ?versioning and, to reconcile, PUT ?versioning;
+ *   <li>with versioning, initialization adds GET ?versioning and, only for a bucket that has never been
+ *       versioned, PUT ?versioning, signed and built like the GET; each outcome logs one bucket versioning
+ *       notice, and none throws, so the path is cached;
  *   <li>an interrupt ends a pending helper request.
  * </ul>
  */
@@ -49,6 +55,14 @@ final class S3FirstUseBucketCheckTest {
 
 	private record Captured(String method, String path, String query) {}
 
+	/** A request with the headers the versioning tests check. */
+	private record Seen(String method, String path, String query, String auth, String probe, int dates) {}
+
+	private static final String ENABLED = "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>";
+	private static final String SUSPENDED = "<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>";
+	private static final String SUSPENDED_MFA = "<VersioningConfiguration><Status>Suspended</Status><MfaDelete>Enabled</MfaDelete></VersioningConfiguration>";
+	private static final String NEVER = "<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>";
+
 	private final List<Captured> requests = new CopyOnWriteArrayList<>();
 	private final List<AutoCloseable> resources = new ArrayList<>();
 	private final ExecutorService serverThreads = Executors.newCachedThreadPool();
@@ -56,9 +70,17 @@ final class S3FirstUseBucketCheckTest {
 	private volatile int headStatus = 200;
 	private volatile long headDelayMillis;
 	private volatile CountDownLatch headArrived = new CountDownLatch(1);
+	private final List<Seen> seen = new CopyOnWriteArrayList<>();
+	private volatile int getVersioningStatus = 200;
+	private volatile String getVersioningBody = "<VersioningConfiguration/>";
+	private volatile int putVersioningStatus = 200;
+	private volatile long putVersioningDelayMillis;
+	private volatile long getVersioningDelay;
+	private final BucketVersioningNotices notices = BucketVersioningNotices.attach();
 
 	@AfterEach
 	void tearDown() throws Exception {
+		notices.close();
 		for (final var resource : resources) {
 			resource.close();
 		}
@@ -163,6 +185,248 @@ final class S3FirstUseBucketCheckTest {
 						new Captured("HEAD", "/bench-0", null),
 						new Captured("GET", "/bench-0", "versioning"),
 						new Captured("PUT", "/bench-0", "versioning")), requests);
+		notices.awaitOnly("bench-0", Level.INFO, "versioning enabled by this run");
+	}
+
+	@Test
+	void anEnabledBucketGetsNoPut() throws Exception {
+		getVersioningBody = ENABLED;
+		final var driver = driver(List.of(listener()), "default", 5_000, true);
+
+		assertEquals("/ver-enabled/p", driver.requestNewPath("/ver-enabled/p"));
+
+		assertEquals(List.of(new Captured("HEAD", "/ver-enabled", null), new Captured("GET", "/ver-enabled", "versioning")),
+						requests);
+		notices.awaitOnly("ver-enabled", Level.INFO, "versioning is already enabled");
+	}
+
+	@Test
+	void aNeverVersionedBucketIsEnabledWithANotice() throws Exception {
+		getVersioningBody = NEVER;
+		final var driver = driver(List.of(listener()), "default", 5_000, true);
+
+		assertEquals("/ver-never/p", driver.requestNewPath("/ver-never/p"));
+
+		assertEquals(1, versioningPuts(), requests::toString);
+		notices.awaitOnly("ver-never", Level.INFO, "versioning enabled by this run");
+	}
+
+	@Test
+	void aRefusedPutCouldNotEnable() throws Exception {
+		putVersioningStatus = 403;
+		final var driver = driver(List.of(listener()), "default", 5_000, true);
+
+		assertEquals("/ver-put403/p", driver.requestNewPath("/ver-put403/p"));
+
+		assertEquals(1, versioningPuts(), requests::toString);
+		notices.awaitOnly("ver-put403", Level.WARN, "could not enable versioning (PUT ?versioning returned 403 Forbidden)");
+	}
+
+	@Test
+	void aTimedOutPutCouldNotEnableAndIsCached() throws Exception {
+		putVersioningDelayMillis = 3_000;
+		final var driver = driver(List.of(listener()), "default", 400, true);
+
+		final var outcomes = putTwice(driver, "/ver-puttimeout/p");
+
+		assertEquals(List.of(Operation.Status.SUCC, Operation.Status.SUCC), outcomes, "no exception reached driver.put");
+		assertEquals(List.of(
+						new Captured("HEAD", "/ver-puttimeout", null),
+						new Captured("GET", "/ver-puttimeout", "versioning"),
+						new Captured("PUT", "/ver-puttimeout", "versioning"),
+						new Captured("PUT", "/ver-puttimeout/p/k0", null),
+						new Captured("PUT", "/ver-puttimeout/p/k1", null)), requests,
+						"the path is cached: the second operation sends no HEAD, GET or PUT ?versioning");
+		notices.awaitOnly("ver-puttimeout", Level.WARN, "could not enable versioning (PUT ?versioning timed out after 400 ms)");
+	}
+
+	@Test
+	void aTimedOutPutReturnsThePath() throws Exception {
+		putVersioningDelayMillis = 3_000;
+		final var driver = driver(List.of(listener()), "default", 400, true);
+
+		assertEquals("/ver-puttimeout2/p", assertDoesNotThrow(() -> driver.requestNewPath("/ver-puttimeout2/p")));
+	}
+
+	@Test
+	void aSuspendedBucketIsLeftAlone() throws Exception {
+		getVersioningBody = SUSPENDED;
+		final var driver = driver(List.of(listener()), "default", 5_000, true);
+
+		assertEquals("/ver-suspended/p", driver.requestNewPath("/ver-suspended/p"));
+
+		assertEquals(0, versioningPuts(), requests::toString);
+		notices.awaitOnly("ver-suspended", Level.WARN, "versioning is suspended; SPT left it alone");
+	}
+
+	@Test
+	void aSuspendedBucketWithMfaDeleteEnabledIsLeftAlone() throws Exception {
+		getVersioningBody = SUSPENDED_MFA;
+		final var driver = driver(List.of(listener()), "default", 5_000, true);
+
+		assertEquals("/ver-suspendedmfa/p", driver.requestNewPath("/ver-suspendedmfa/p"));
+
+		assertEquals(0, versioningPuts(), requests::toString);
+		notices.awaitOnly("ver-suspendedmfa", Level.WARN, "versioning is suspended; SPT left it alone");
+	}
+
+	@Test
+	void aFailedVersioningCheckSendsNoPut() throws Exception {
+		for (final int status : new int[]{403, 404, 500
+		}) {
+			getVersioningStatus = status;
+			final var driver = driver(List.of(listener()), "default", 5_000, true);
+			final var bucket = "ver-get" + status;
+
+			assertEquals("/" + bucket + "/p", driver.requestNewPath("/" + bucket + "/p"));
+
+			assertEquals(0, versioningPuts(), requests::toString);
+			notices.awaitOnly(bucket, Level.WARN, "could not read the versioning state (GET ?versioning returned " + status);
+			notices.awaitOnly(bucket, Level.WARN, "SPT sent no request to enable it, and the run goes on un-versioned");
+		}
+	}
+
+	@Test
+	void aTimedOutVersioningCheckSendsNoPut() throws Exception {
+		final var driver = driver(List.of(listener()), "default", 400, true);
+		getVersioningDelay = 3_000;
+
+		assertEquals("/ver-gettimeout/p", driver.requestNewPath("/ver-gettimeout/p"));
+
+		assertEquals(0, versioningPuts(), requests::toString);
+		notices.awaitOnly("ver-gettimeout", Level.WARN, "could not read the versioning state (GET ?versioning timed out after 400 ms)");
+	}
+
+	@Test
+	void theMongooseSynonymLeavesASuspendedBucketAlone() throws Exception {
+		getVersioningBody = SUSPENDED;
+		final Config config = S3StorageDriverTest.baseConfig(false, 4, false, null, "127.0.0.1");
+		config.val(HttpVersioningSynonym.SYNONYM_PATH, true);
+		HttpVersioningSynonym.resolve(config, null);
+		final var driver = driver(config, listener(), 5_000);
+
+		assertEquals("/ver-synonym/p", driver.requestNewPath("/ver-synonym/p"));
+
+		assertEquals(List.of(new Captured("HEAD", "/ver-synonym", null), new Captured("GET", "/ver-synonym", "versioning")),
+						requests);
+		notices.awaitOnly("ver-synonym", Level.WARN, "versioning is suspended; SPT left it alone");
+	}
+
+	@Test
+	void thePutIsSignedWithTheBucketsCredentialAndCarriesTheConfiguredHeaders() throws Exception {
+		signedWithTheBucketsCredential(2);
+		signedWithTheBucketsCredential(4);
+	}
+
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	private void signedWithTheBucketsCredential(final int authVersion) throws Exception {
+		final Config config = S3StorageDriverTest.baseConfig(true, authVersion, false, null, "127.0.0.1");
+		final var headers = new HashMap<String, String>();
+		headers.put("Date", "#{date:formatNowRfc1123()}%{date:formatNowRfc1123()}");
+		headers.put("x-probe", "shared");
+		config.val("storage-net-http-headers", headers);
+		final var driver = driver(config, listener(), 5_000);
+		final var results = new EndpointSelectionTestSupport.Results();
+		driver.operationResultOutput((com.github.akurilov.commons.io.Output) results);
+		final var pathCredential = Credential.getInstance("pathuser", "pathsecretpathsecretpathsecretpathsecret0");
+		final var bucket = "/ver-sign" + authVersion;
+		final Operation<DataItem> op = new DataOperationImpl<>(
+						0, OpType.CREATE, new DataItemImpl("k0", 0, ITEM_SIZE), null, bucket + "/p", pathCredential, null, 0);
+
+		assertTrue(driver.put(op));
+		assertEquals(Operation.Status.SUCC, results.await().status());
+
+		final var bucketRequests = seen.stream().filter(r -> bucket.equals(r.path())).toList();
+		assertEquals(List.of("HEAD", "GET", "PUT"), bucketRequests.stream().map(Seen::method).toList(), seen::toString);
+		final var put = bucketRequests.get(2);
+		assertEquals("versioning", put.query());
+		assertTrue(put.auth().contains("pathuser"), "the PUT names the bucket's user: " + put.auth());
+		assertFalse(put.auth().contains(CREDENTIAL.getUid()), put.auth());
+		assertEquals("shared", put.probe(), "the PUT carries the shared header");
+		// V4 signs x-amz-date and drops Date, as for every request.
+		assertEquals(authVersion == 2 ? 1 : 0, put.dates(), "exactly one Date under V2, none under V4");
+		for (final var request : bucketRequests) {
+			assertTrue(request.auth().contains("pathuser"), request.toString());
+			assertEquals("shared", request.probe(), request.toString());
+		}
+	}
+
+	@Test
+	void thePutHasADateWhenTheConfigurationGivesNone() throws Exception {
+		final Config config = S3StorageDriverTest.baseConfig(true, 2, false, null, "127.0.0.1");
+		config.val("storage-net-http-headers", new HashMap<String, String>());
+		final var driver = driver(config, listener(), 5_000);
+
+		driver.requestNewPath("/ver-nodate/p");
+
+		final var put = seen.stream().filter(r -> "PUT".equals(r.method()) && "versioning".equals(r.query())).findFirst();
+		assertTrue(put.isPresent(), seen::toString);
+		assertEquals(1, put.get().dates(), seen::toString);
+	}
+
+	@Test
+	void theStatusIsReadExactly() {
+		assertEquals("Enabled", S3StorageDriver.versioningStatus(ENABLED));
+		assertEquals("Suspended", S3StorageDriver.versioningStatus(SUSPENDED));
+		assertEquals("Suspended", S3StorageDriver.versioningStatus(SUSPENDED_MFA), "MfaDelete never counts");
+		assertEquals("Enabled", S3StorageDriver.versioningStatus(
+						"<s3:VersioningConfiguration><s3:Status> Enabled </s3:Status></s3:VersioningConfiguration>"));
+		assertNull(S3StorageDriver.versioningStatus(NEVER));
+		assertNull(S3StorageDriver.versioningStatus("<VersioningConfiguration><Status></Status></VersioningConfiguration>"));
+		assertNull(S3StorageDriver.versioningStatus(
+						"<VersioningConfiguration><MfaDelete>Enabled</MfaDelete></VersioningConfiguration>"));
+	}
+
+	@Test
+	void anUnknownStatusIsLeftAlone() throws Exception {
+		getVersioningBody = "<VersioningConfiguration><Status>Disabled</Status></VersioningConfiguration>";
+		final var driver = driver(List.of(listener()), "default", 5_000, true);
+
+		driver.requestNewPath("/ver-unknown/p");
+
+		assertEquals(0, versioningPuts(), requests::toString);
+		notices.awaitOnly("ver-unknown", Level.WARN, "the versioning status \"Disabled\" is neither Enabled nor Suspended");
+	}
+
+	private long versioningPuts() {
+		return requests.stream().filter(r -> "PUT".equals(r.method()) && "versioning".equals(r.query())).count();
+	}
+
+	/** Answers a bucket's {@code ?versioning} request; false for an object-level one. */
+	private boolean respondToVersioning(final HttpExchange exchange, final String method) throws IOException {
+		if (exchange.getRequestURI().getRawPath().indexOf('/', 1) >= 0) {
+			return false;
+		}
+		if ("GET".equals(method)) {
+			if (!sleep(getVersioningDelay)) {
+				return true;
+			}
+			final byte[] body = (getVersioningStatus / 100 == 2
+							? getVersioningBody
+							: "<Error><Code>AccessDenied</Code></Error>").getBytes(StandardCharsets.UTF_8);
+			exchange.sendResponseHeaders(getVersioningStatus, body.length);
+			exchange.getResponseBody().write(body);
+			return true;
+		}
+		if (!sleep(putVersioningDelayMillis)) {
+			return true;
+		}
+		exchange.sendResponseHeaders(putVersioningStatus, -1);
+		return true;
+	}
+
+	private static boolean sleep(final long millis) {
+		if (millis <= 0) {
+			return true;
+		}
+		try {
+			Thread.sleep(millis);
+			return true;
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
+			return false;
+		}
 	}
 
 	@Test
@@ -219,6 +483,19 @@ final class S3FirstUseBucketCheckTest {
 			final var endpoint = endpoints.get(0);
 			config.val("storage-net-node-port", Integer.parseInt(endpoint.substring(endpoint.indexOf(':') + 1)));
 		}
+		return start(config);
+	}
+
+	@SuppressWarnings("rawtypes")
+	private S3StorageDriver driver(final Config config, final String endpoint, final int timeoutMillis) throws Exception {
+		config.val("storage-driver-limit-concurrency", 1);
+		config.val("storage-net-timeoutMilliSec", timeoutMillis);
+		config.val("storage-net-node-port", Integer.parseInt(endpoint.substring(endpoint.indexOf(':') + 1)));
+		return start(config);
+	}
+
+	@SuppressWarnings("rawtypes")
+	private S3StorageDriver start(final Config config) throws Exception {
 		final var driver = (S3StorageDriver) new S3StorageDriverExtension().create(
 						"first-use", new SeedDataInput(1, ITEM_SIZE, 1, true), config.configVal("storage"), false, 16);
 		resources.add(driver);
@@ -247,6 +524,13 @@ final class S3FirstUseBucketCheckTest {
 			final var uri = exchange.getRequestURI();
 			final var method = exchange.getRequestMethod();
 			requests.add(new Captured(method, uri.getRawPath(), uri.getRawQuery()));
+			final var headers = exchange.getRequestHeaders();
+			final var dates = headers.get("Date");
+			seen.add(new Seen(method, uri.getRawPath(), uri.getRawQuery(), headers.getFirst("Authorization"),
+							headers.getFirst("x-probe"), dates == null ? 0 : dates.size()));
+			if ("versioning".equals(uri.getRawQuery()) && respondToVersioning(exchange, method)) {
+				return;
+			}
 			if ("HEAD".equals(method)) {
 				headArrived.countDown();
 				if (headDelayMillis > 0) {
