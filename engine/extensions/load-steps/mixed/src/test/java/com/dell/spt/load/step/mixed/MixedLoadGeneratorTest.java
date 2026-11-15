@@ -44,6 +44,7 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.LongAdder;
 
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.junit.jupiter.api.Assertions.*;
@@ -323,6 +324,115 @@ class MixedLoadGeneratorTest {
 			thread.join();
 		}
 		assertEquals(2L * threadsOfEachKind * resultsPerThread, gen.uncountedFinalResultCount());
+	}
+
+	@Test
+	@Timeout(30)
+	@DisplayName("Each platform thread counts uncounted final results in a cell of its own")
+	void eachPlatformThreadCountsInItsOwnCell() throws Exception {
+		final MixedLoadGenerator gen = cappedAtOne();
+		final MixedLoadGenerator.UncountedCell first = countOnPlatformThread(gen, 3);
+		final MixedLoadGenerator.UncountedCell second = countOnPlatformThread(gen, 5);
+
+		assertNotSame(first, second, "the second thread was given the first thread's cell");
+		assertEquals(List.of(first, second), uncountedCells(gen), "each thread's cell is registered once, in order");
+		assertEquals(3, first.count(), "the first thread's cell holds its own count only");
+		assertEquals(5, second.count(), "the second thread's cell holds its own count only");
+		assertEquals(0, uncountedOnVirtualThreads(gen).sum(), "no platform thread's result went to the adder");
+		assertEquals(8, gen.uncountedFinalResultCount());
+	}
+
+	/** Counts {@code results} on a new platform thread, joined, and returns the cell that thread counted in. */
+	private static MixedLoadGenerator.UncountedCell countOnPlatformThread(
+					final MixedLoadGenerator gen, final int results) throws Exception {
+		final AtomicReference<MixedLoadGenerator.UncountedCell> cell = new AtomicReference<>();
+		final AtomicReference<Throwable> failure = new AtomicReference<>();
+		final Thread thread = Thread.ofPlatform().start(() -> {
+			try {
+				for (int n = 0; n < results; n++) {
+					gen.onUncountedFinalResult();
+				}
+				cell.set(((ThreadLocal<MixedLoadGenerator.UncountedCell>) generatorField(gen, "uncountedCell")).get());
+			} catch (final Throwable e) {
+				failure.set(e);
+			}
+		});
+		thread.join();
+		if (failure.get() != null) {
+			throw new AssertionError(failure.get());
+		}
+		return cell.get();
+	}
+
+	@Test
+	@Timeout(30)
+	@DisplayName("Virtual threads count uncounted final results in the shared adder, and register no cell")
+	void virtualThreadsCountInTheAdder() throws Exception {
+		final MixedLoadGenerator gen = cappedAtOne();
+		final List<Thread> threads = new ArrayList<>();
+		for (int i = 0; i < 3; i++) {
+			threads.add(Thread.ofVirtual().start(() -> {
+				for (int n = 0; n < 4; n++) {
+					gen.onUncountedFinalResult();
+				}
+			}));
+		}
+		for (final Thread thread : threads) {
+			thread.join();
+		}
+
+		assertEquals(List.of(), uncountedCells(gen), "a virtual thread was given a cell");
+		assertEquals(12, uncountedOnVirtualThreads(gen).sum());
+		assertEquals(12, gen.uncountedFinalResultCount());
+	}
+
+	@Test
+	@Timeout(30)
+	@DisplayName("A count taken while results arrive never exceeds the results begun so far")
+	void aCountTakenWhileResultsArriveNeverRunsAhead() throws Exception {
+		final MixedLoadGenerator gen = cappedAtOne();
+		final int resultsPerThread = 50_000;
+		final AtomicInteger begun = new AtomicInteger();
+		final List<Thread> threads = new ArrayList<>();
+		for (final Thread.Builder builder : List.of(Thread.ofPlatform(), Thread.ofPlatform(), Thread.ofVirtual())) {
+			threads.add(builder.start(() -> {
+				for (int n = 0; n < resultsPerThread; n++) {
+					begun.incrementAndGet();
+					gen.onUncountedFinalResult();
+				}
+			}));
+		}
+		long last = 0;
+		while (threads.stream().anyMatch(Thread::isAlive)) {
+			// Read the count before the bound: every result in the count had begun by then.
+			final long count = gen.uncountedFinalResultCount();
+			final int bound = begun.get();
+			assertTrue(count <= bound, () -> count + " counted, only " + bound + " begun");
+			final long earlier = last;
+			assertTrue(count >= earlier, () -> count + " counted after " + earlier + " earlier");
+			last = count;
+		}
+		for (final Thread thread : threads) {
+			thread.join();
+		}
+		assertEquals(3L * resultsPerThread, gen.uncountedFinalResultCount());
+	}
+
+	private static List<MixedLoadGenerator.UncountedCell> uncountedCells(final MixedLoadGenerator gen)
+					throws ReflectiveOperationException {
+		return (List<MixedLoadGenerator.UncountedCell>) generatorField(gen, "uncountedCells");
+	}
+
+	private static LongAdder uncountedOnVirtualThreads(final MixedLoadGenerator gen)
+					throws ReflectiveOperationException {
+		return (LongAdder) generatorField(gen, "uncountedOnVirtualThreads");
+	}
+
+	private static Object generatorField(final MixedLoadGenerator gen, final String name)
+					throws ReflectiveOperationException {
+		final var field = MixedLoadGenerator.class.getDeclaredField(name);
+		field.setAccessible(true);
+		return field.get(gen);
 	}
 
 	@Test
