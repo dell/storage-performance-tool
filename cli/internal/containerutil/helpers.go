@@ -53,3 +53,12 @@ func AnySpt[T any](list []T, name func(T) string, image func(T) string) bool {
 
 // HasConflicts returns true when any ports are marked conflicted.
 func HasConflicts(ports []int) bool { return len(ports) > 0 }
+
+// ShortID returns a container ID shortened for display: at most
+// constants.ContainerIDDisplayLength characters, or the whole ID when it is shorter.
+func ShortID(id string) string {
+	if len(id) > constants.ContainerIDDisplayLength {
+		return id[:constants.ContainerIDDisplayLength]
+	}
+	return id
+}

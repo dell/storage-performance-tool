@@ -36,6 +36,8 @@ type fakeDockerClient struct {
 	removeErr             error
 	createHostConfig      *container.HostConfig
 	createContainerConfig *container.Config
+	containerState        *container.State
+	containerInspectErr   error
 }
 
 func (f *fakeDockerClient) ImageInspect(ctx context.Context, imageID string, _ ...client.ImageInspectOption) (image.InspectResponse, error) {
@@ -53,6 +55,16 @@ func (f *fakeDockerClient) ContainerLogs(ctx context.Context, container string, 
 	var logs bytes.Buffer
 	_, _ = stdcopy.NewStdWriter(&logs, stdcopy.Stdout).Write([]byte("log1\nlog2\n"))
 	return io.NopCloser(bytes.NewReader(logs.Bytes())), nil
+}
+func (f *fakeDockerClient) ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error) {
+	if f.containerInspectErr != nil {
+		return container.InspectResponse{}, f.containerInspectErr
+	}
+	state := f.containerState
+	if state == nil {
+		state = &container.State{Status: "running", Running: true}
+	}
+	return container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: containerID, State: state}}, nil
 }
 func (f *fakeDockerClient) ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
 	f.createContainerConfig = config
