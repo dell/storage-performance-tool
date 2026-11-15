@@ -940,7 +940,7 @@ When multipart uploads are used, the engine produces a `parts.upload.csv` artifa
 **Notes:**
 
 - `--part-size` must be smaller than `--object-size` (multipart with a single part is pointless).
-- No minimum part size is enforced by the CLI -- different S3-compatible storage systems have varying constraints, so the storage system reports errors for invalid sizes at runtime. Amazon S3 requires every part but the last to be at least 5 MiB and refuses the completion of an upload with a smaller part (`EntityTooSmall`); the `s3` driver logs that code and its message in the step's `errors.log`.
+- No minimum part size is enforced by the CLI -- different S3-compatible storage systems have varying constraints, so the storage system reports errors for invalid sizes at runtime. Amazon S3 requires every part but the last to be at least 5 MiB and refuses the completion of an upload with a smaller part (`EntityTooSmall`); the `s3` and `s3-rdma` drivers log that code and its message in the step's `errors.log`.
 - Multipart upload scheduling is handled by the engine. The CLI does not override `load.batch.size` when `--part-size` is set; direct JAR users also do not need `load-batch-size=1` for MPU correctness.
 - Part uploads share the `--threads` concurrency pool with regular operations.
 - If `--part-size` is omitted, objects are uploaded as single PUTs regardless of size.

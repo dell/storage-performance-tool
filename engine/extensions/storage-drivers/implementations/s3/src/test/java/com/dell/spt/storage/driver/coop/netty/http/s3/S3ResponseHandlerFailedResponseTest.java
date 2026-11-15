@@ -12,6 +12,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl;
 import com.dell.spt.base.storage.Credential;
 
 import io.netty.buffer.Unpooled;
@@ -160,6 +161,96 @@ final class S3ResponseHandlerFailedResponseTest {
 			respond(op, HttpResponseStatus.NOT_FOUND);
 			assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, op.status());
 			assertEquals(List.of(), messages(errors));
+			assertFalse(S3ResponseHandler.keptFailedResponse(channel), "no body is kept for a refusal without one");
+		}
+	}
+
+	@Test
+	void aRefusedPartLogsItsCode() throws Exception {
+		try (final var errors = new ErrorsLogCapture()) {
+			final var parent = (CompositeDataOperationImpl<DataItemImpl>) completion();
+			final Operation<DataItemImpl> part = new PartialDataOperationImpl<DataItemImpl>(
+							0, OpType.CREATE, new DataItemImpl(0L, PART_SIZE), null, "/bucket/", Credential.NONE, 0, parent);
+			respond(part, HttpResponseStatus.SERVICE_UNAVAILABLE,
+							"<Error><Code>SlowDown</Code><Message>Please reduce your request rate.</Message></Error>");
+			assertEquals(Operation.Status.RESP_FAIL_SVC, part.status());
+			assertEquals(List.of(part + ": S3 error code SlowDown, message: Please reduce your request rate."), messages(errors));
+		}
+	}
+
+	/** A refused initiation logs its status line, the code line, then the existing line with the raw body. */
+	@Test
+	void aRefusedInitiationLogsItsCodeBetweenTheExistingLines() throws Exception {
+		try (final var errors = new ErrorsLogCapture()) {
+			final var op = upload();
+			final var body = "<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>";
+			respond(op, HttpResponseStatus.FORBIDDEN, body);
+			assertEquals(Operation.Status.RESP_FAIL_AUTH, op.status());
+			verify(driver).complete(channel, op);
+			assertEquals(List.of(op + ": 403 Forbidden", op + ": S3 error code AccessDenied, message: Access Denied",
+							"Upload id not found in the following response content:\n" + body),
+							errors.drained().stream().map(ErrorsLogCapture.Line::message).toList());
+		}
+	}
+
+	@Test
+	void aRefusedAbortLogsItsCode() throws Exception {
+		try (final var errors = new ErrorsLogCapture()) {
+			final var op = completion();
+			((CompositeDataOperationImpl<DataItemImpl>) op).put(S3Api.KEY_MPU_ABORT, "true");
+			respond(op, HttpResponseStatus.NOT_FOUND,
+							"<Error><Code>NoSuchUpload</Code><Message>The specified upload does not exist.</Message></Error>");
+			assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, op.status());
+			assertEquals(List.of(op + ": S3 error code NoSuchUpload, message: The specified upload does not exist."),
+							messages(errors));
+		}
+	}
+
+	/**
+	 * With verification on, a refused read's body is verified as data and its status becomes
+	 * RESP_FAIL_CORRUPT, as before this change; its whole error body is still kept and its code logged.
+	 */
+	@Test
+	void aRefusedVerifiedReadLogsTheCodeOfABodyInTwoChunks() throws Exception {
+		try (final var errors = new ErrorsLogCapture()) {
+			final var op = smallRead();
+			respondVerified(op, HttpResponseStatus.NOT_FOUND, "<Error><Code>NoSuch", "Key</Code><Message>gone</Message></Error>");
+			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, op.status());
+			assertEquals(List.of(op + ": S3 error code NoSuchKey, message: gone"), messages(errors));
+		}
+	}
+
+	/** A 2xx read whose data fails verification is not an S3 error: nothing is kept or logged as one. */
+	@Test
+	void aSuccessfulReadThatFailsVerificationLogsNoS3Error() throws Exception {
+		try (final var errors = new ErrorsLogCapture()) {
+			final var op = smallRead();
+			respondVerified(op, HttpResponseStatus.OK, "<Error><Code>First", "Chunk</Code><Message>m</Message></Error>");
+			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, op.status());
+			assertEquals(List.of(), messages(errors));
+			assertFalse(S3ResponseHandler.keptFailedResponse(channel), "no body is kept for a 2xx response");
+		}
+	}
+
+	@Test
+	void aMessageCutInsideASurrogatePairEndsWithTheCutMark() throws Exception {
+		try (final var errors = new ErrorsLogCapture()) {
+			final var op = flat(OpType.CREATE);
+			final var head = "m".repeat(S3ResponseHandler.MAX_LOGGED_ERROR_MESSAGE_LENGTH - 1);
+			respond(op, HttpResponseStatus.BAD_REQUEST, "<Error><Code>InvalidArgument</Code><Message>" + head
+							+ "\uD83D\uDE00tail</Message></Error>");
+			assertEquals(List.of(op + ": S3 error code InvalidArgument, message: " + head + S3ResponseHandler.CUT_MARK),
+							messages(errors));
+		}
+	}
+
+	@Test
+	void formatCharactersAreReplaced() throws Exception {
+		try (final var errors = new ErrorsLogCapture()) {
+			final var op = flat(OpType.CREATE);
+			respond(op, HttpResponseStatus.BAD_REQUEST,
+							"<Error><Code>InvalidArgument</Code><Message>left\u202Eright\u200Bend</Message></Error>");
+			assertEquals(List.of(op + ": S3 error code InvalidArgument, message: left right end"), messages(errors));
 		}
 	}
 
@@ -221,6 +312,23 @@ final class S3ResponseHandlerFailedResponseTest {
 		return ((DataOperationImpl<DataItemImpl>) op).countBytesDone();
 	}
 
+	/** Answers {@code op} through a handler that verifies read data, as {@code item.data.verify} does. */
+	private void respondVerified(final Operation<DataItemImpl> op, final HttpResponseStatus status, final String... chunks)
+					throws Exception {
+		final var verifying = new S3ResponseHandler<DataItemImpl, Operation<DataItemImpl>>(driver, true, false, null);
+		verifying.handleResponseStatus(op, status.codeClass(), status);
+		for (final var chunk : chunks) {
+			verifying.handleResponseContentChunk(channel, op, Unpooled.wrappedBuffer(chunk.getBytes(StandardCharsets.UTF_8)));
+		}
+		verifying.handleResponseContentFinish(channel, op);
+	}
+
+	/** A read of a 4-byte item, whose verification fails on any longer body by its size. */
+	private static Operation<DataItemImpl> smallRead() {
+		return new DataOperationImpl<DataItemImpl>(
+						0, OpType.READ, new DataItemImpl("k-small", 0L, 4), null, "/bucket/", Credential.NONE, null, 0);
+	}
+
 	private static List<String> messages(final ErrorsLogCapture errors) throws InterruptedException {
 		return errors.failedResponseLines().stream().map(ErrorsLogCapture.Line::message).toList();
 	}
@@ -230,11 +338,18 @@ final class S3ResponseHandlerFailedResponseTest {
 						0, type, new DataItemImpl("k-" + type, 0L, 4 * PART_SIZE), null, "/bucket/", Credential.NONE, null, 0);
 	}
 
-	/** An upload whose parts are all done, so its next response is its completion's. */
-	private static Operation<DataItemImpl> completion() {
+	/** An upload whose parts are not done yet, so its next response is its initiation's. */
+	private static Operation<DataItemImpl> upload() {
 		final var op = new CompositeDataOperationImpl<DataItemImpl>(
 						0, OpType.CREATE, new DataItemImpl(0L, 4 * PART_SIZE), null, "/bucket/", Credential.NONE,
 						null, 0, PART_SIZE);
+		op.subOperations();
+		return op;
+	}
+
+	/** An upload whose parts are all done, so its next response is its completion's. */
+	private static Operation<DataItemImpl> completion() {
+		final var op = (CompositeDataOperationImpl<DataItemImpl>) upload();
 		for (int i = 0; i < op.subOperations().size(); i++) {
 			op.markSubTaskCompleted();
 		}
