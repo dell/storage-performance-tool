@@ -25,6 +25,11 @@ dependencies {
 	testImplementation(
 		libs.mockito.core,
 	)
+	// The NIO mock, a cooperative driver with multipart uploads, for the count-limit tests.
+	testImplementation(
+		project(':extensions:storage-drivers:primitives:coop'),
+		project(':extensions:storage-drivers:primitives:nio'),
+	)
 
 	testRuntimeOnly(
 		libs.commons.codec,

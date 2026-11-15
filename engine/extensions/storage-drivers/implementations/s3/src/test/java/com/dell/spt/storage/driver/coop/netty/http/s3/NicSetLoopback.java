@@ -145,6 +145,8 @@ final class NicSetLoopback implements AutoCloseable {
 	/** Whether the stub never answers a multipart abort: it holds the request until {@link #close()}. */
 	volatile boolean abortsUnanswered;
 	private final CountDownLatch closed = new CountDownLatch(1);
+	/** The body of the replies that fail requests chosen above. */
+	volatile String failureBody = "error";
 	/**
 	 * Which multipart completions the stub answers 200 with {@link #completionErrorBody}, as S3 answers
 	 * a completion that failed after its status line: the upload stays open.
@@ -520,7 +522,7 @@ final class NicSetLoopback implements AutoCloseable {
 				}
 				if (objectRequest > 0 && (failObjectRequest.test(objectRequest) || (failParts && request.isPart())
 								|| failRequest.test(request))) {
-					final var error = "error".getBytes(StandardCharsets.US_ASCII);
+					final var error = failureBody.getBytes(StandardCharsets.UTF_8);
 					exchange.sendResponseHeaders(failureStatus, error.length);
 					exchange.getResponseBody().write(error);
 					return;
