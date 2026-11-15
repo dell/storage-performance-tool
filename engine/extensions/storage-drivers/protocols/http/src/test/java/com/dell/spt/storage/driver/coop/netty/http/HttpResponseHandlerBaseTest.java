@@ -271,7 +271,8 @@ class HttpResponseHandlerBaseTest {
 
 	/**
 	 * With verification on, a refused READ's error body is not item data: the read keeps the status of
-	 * its status line, not {@code RESP_FAIL_CORRUPT}, and counts its body as the unverified route does.
+	 * its status line, not {@code RESP_FAIL_CORRUPT}, as it does without verification. It counts no
+	 * bytes, so a range retry that reuses the count still verifies its body from the start.
 	 */
 	@ParameterizedTest(name = "{0}, item {2} B, {3} chunk(s) → {1}")
 	@MethodSource("refusedVerifiedReads")
@@ -284,8 +285,8 @@ class HttpResponseHandlerBaseTest {
 		final ReadOutcome verified = read(true, itemSize, httpStatus, body, chunks);
 		final ReadOutcome unverified = read(false, itemSize, httpStatus, body, chunks);
 
-		assertEquals(new ReadOutcome(expected, body.length), verified);
-		assertEquals(unverified, verified, "verify on and off agree for a refused read");
+		assertEquals(new ReadOutcome(expected, 0), verified);
+		assertEquals(unverified.status(), verified.status(), "verify on and off agree on a refused read's status");
 	}
 
 	@Test

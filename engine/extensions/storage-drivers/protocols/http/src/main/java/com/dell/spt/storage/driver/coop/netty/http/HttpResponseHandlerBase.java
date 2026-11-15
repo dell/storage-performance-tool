@@ -11,7 +11,6 @@ import static com.dell.spt.base.item.op.Operation.Status.FAIL_TIMEOUT;
 import static com.dell.spt.base.item.op.Operation.Status.FAIL_UNKNOWN;
 import static com.dell.spt.base.item.op.Operation.Status.RESP_FAIL_AUTH;
 import static com.dell.spt.base.item.op.Operation.Status.RESP_FAIL_CLIENT;
-import static com.dell.spt.base.item.op.Operation.Status.RESP_FAIL_CORRUPT;
 import static com.dell.spt.base.item.op.Operation.Status.RESP_FAIL_NOT_FOUND;
 import static com.dell.spt.base.item.op.Operation.Status.RESP_FAIL_SPACE;
 import static com.dell.spt.base.item.op.Operation.Status.RESP_FAIL_SVC;
@@ -112,13 +111,11 @@ public abstract class HttpResponseHandlerBase<I extends Item, O extends Operatio
 					}
 					if (verifyFlag) {
 						// Only a 2xx body is item data. A refused response keeps the status of its
-						// status line and counts its body as the unverified route does; a 2xx body
+						// status line and counts no bytes: a range retry reuses the count, so a
+						// counted error body would fail the retried range's size check. A 2xx body
 						// that already failed verification skips its later chunks.
-						final Operation.Status status = op.status();
-						if (SUCC.equals(status)) {
+						if (SUCC.equals(op.status())) {
 							verifyChunk(dataOp, countBytesDone, contentChunk, chunkSize);
-						} else if (!RESP_FAIL_CORRUPT.equals(status)) {
-							dataOp.countBytesDone(countBytesDone + chunkSize);
 						}
 					} else {
 						dataOp.countBytesDone(countBytesDone + chunkSize);
