@@ -854,6 +854,47 @@ public class NioStorageDriverBaseTest {
 		}
 	}
 
+	/**
+	 * While admission is open, a part the worker refuses because its circulation went stale is
+	 * marked unattempted, as before the stop's settlement existed; its upload, still dispatched, is
+	 * left alone.
+	 */
+	@Test
+	@SuppressWarnings("unchecked")
+	void aPartTheWorkerRefusesWhileAdmissionIsOpenLeavesItsUploadDispatched() throws Exception {
+		final var drv = newBlockingDriver(buildStorageConfig(2, 1));
+		final var lifecycle = drv.operationLifecycle();
+		final var item = new DataItemImpl("upload", 0, 2048);
+		item.dataInput(dataInput);
+		final var upload = new CompositeDataOperationImpl<DataItemImpl>(0, OpType.CREATE, item, null, "/tmp/test", null, null, 0, 1024);
+		try {
+			drv.start();
+			assertTrue(drv.put(newCreateOp("blocking", 256)));
+			assertTrue(drv.awaitInvokeEntered(2_000), "the worker is inside a blocking invocation");
+			assertTrue(lifecycle.driverQueued(upload));
+			assertTrue(lifecycle.dispatched(upload), "the upload's initiation was dispatched");
+			final var part = (Operation<DataItemImpl>) upload.subOperations().get(0);
+			assertTrue(lifecycle.driverQueued(part));
+			assertTrue(drv.submit(part), "the part waits in the worker's buffer");
+
+			lifecycle.enforceDispatchDeadline(System.nanoTime());
+			drv.releaseInvokes();
+			awaitLifecycle(drv, () -> part.lifecycle().state() == OperationLifecycleState.UNATTEMPTED,
+							"the worker refuses the part while admission is open");
+
+			assertEquals(OperationLifecycleState.DISPATCHED, upload.lifecycle().state(),
+							() -> "the upload is left alone: " + lifecycle.snapshot());
+			awaitLifecycle(drv, () -> lifecycle.snapshot().inFlight() == 1, "the blocking operation ends");
+			assertEquals(0, lifecycle.snapshot().unresolved(), () -> lifecycle.snapshot().toString());
+		} finally {
+			drv.releaseInvokes();
+			if (drv.isStarted()) {
+				drv.stop();
+			}
+			drv.close();
+		}
+	}
+
 	@Test
 	void closeAdmissionRetainsActiveNioWorkForTheBoundedDrain() throws Exception {
 		final var drv = newRetainedActiveDriver(buildStorageConfig(1, 1));
