@@ -591,6 +591,48 @@ public class MetricsJsonResponderTest {
 	}
 
 	@Test
+	void unlimitedNodeStepReportsRunningUntilUnregisterThenCompletedFromTerminalEntry() {
+		// A real context with neither a count nor a time limit, idle between
+		// operations (concurrency 0), driven through MetricsManagerImpl.unregister.
+		final MetricsManagerImpl mgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+		mgr.setTerminalRetentionMillis(30_000L);
+		final MetricsContext<?> ctx = MetricsContextImpl.builder()
+						.loadStepId("unlimited-real")
+						.runId(445L)
+						.opType(OpType.LIST)
+						.concurrencyLimit(1)
+						.concurrencyThreshold(0)
+						.itemDataSize(new SizeInBytes(1024))
+						.stdOutColorFlag(false)
+						.outputPeriodSec(0)
+						.comment("")
+						.actualConcurrencyGauge(() -> 0)
+						.build();
+		ctx.start();
+		ctx.markSucc(1024L, 1_000L, 100L, 250L);
+		ctx.markSucc(1024L, 2_000L, 200L, 350L);
+		ctx.refreshLastSnapshot();
+		mgr.register(ctx);
+
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
+		final JsonNode active = stepNode(responder.buildNodeMetrics(false), "unlimited-real");
+		assertFalse(active.has("terminal"), "expected the active row before unregister");
+		assertEquals("none", active.get("limit").get("type").asText());
+		assertEquals(0L, active.get("concurrency").get("current").asLong());
+		assertEquals(1, active.get("test_state").asInt(),
+						"an active unlimited step idle between operations must report Running");
+
+		mgr.unregister(ctx);
+
+		final JsonNode ended = stepNode(responder.buildNodeMetrics(false), "unlimited-real");
+		assertTrue(ended.get("terminal").asBoolean());
+		assertTrue(ended.get("unbounded").asBoolean());
+		assertEquals(2, ended.get("operations").get("success_count").asLong());
+		assertEquals(2, ended.get("test_state").asInt(),
+						"the unlimited step's terminal entry after unregister must report Completed");
+	}
+
+	@Test
 	void clusterMetricsIncludeDistributedTerminalEntries() {
 		final MetricsManager mgr = mock(MetricsManager.class);
 		when(mgr.getDistributedContexts()).thenReturn(Set.of());
