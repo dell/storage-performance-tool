@@ -2366,13 +2366,17 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 									deadlineNanos, probe.observedAtNanos())) {
 						return false;
 					}
+					if (probe.failure() != null || probe.exhausted()) {
+						// The monitor records the budget failure before it closes admission, so a
+						// slice that failed or ran dry because of that stop finds it set here.
+						if (failureBudgetFailure != null) {
+							throw failureBudgetFailure;
+						}
+					}
 					if (probe.failure() != null) {
 						throwUnchecked(probe.failure());
 					}
 					if (probe.exhausted()) {
-						if (failureBudgetFailure != null) {
-							throw failureBudgetFailure;
-						}
 						throw recordDurationValidityFailure(
 										standaloneDeleteEarlyExhaustionFailure());
 					}
