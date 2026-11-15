@@ -15,7 +15,8 @@ public enum CompositeResults {
 	/**
 	 * After a composite CREATE's or READ's successful, unfinished result (a multipart upload's
 	 * initiation), the driver publishes its parts' results and then one more result for the
-	 * composite. A composite of another type, such as a DELETE or a STAT, has one result.
+	 * composite. A composite of another type, which only an operations builder outside the engine
+	 * makes, has one result.
 	 */
 	IN_PARTS,
 

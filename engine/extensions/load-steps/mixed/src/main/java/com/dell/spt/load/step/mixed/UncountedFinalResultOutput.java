@@ -100,8 +100,9 @@ final class UncountedFinalResultOutput implements Output {
 	 * An aborted upload that a driver leaves an unfinished success, as {@code fs} does, looks the
 	 * same: the cooperative base then sends its unsent parts and the upload never ends, a known
 	 * defect of that base. Final but uncounted: any other unfinished composite that did not fail,
-	 * such as the one result of a DELETE or STAT above the ranges threshold, or of any composite on
-	 * a driver that publishes one result for it, and an {@code INTERRUPTED} or {@code OMIT} result.
+	 * such as the one result of any composite on a driver that publishes one result for it, or of a
+	 * composite of another type than CREATE or READ, which only an operations builder outside the
+	 * engine makes, and an {@code INTERRUPTED} or {@code OMIT} result.
 	 */
 	static int kind(final Operation<?> op, final boolean compositesInParts) {
 		final Status status = op.status();
