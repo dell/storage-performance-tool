@@ -7,6 +7,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.dell.spt.base.Constants;
+import com.dell.spt.base.buildinfo.EngineBuildInfoPublisher;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.control.run.RunImpl;
@@ -34,6 +36,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import javax.script.ScriptEngine;
+import org.apache.logging.log4j.CloseableThreadContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -82,25 +85,32 @@ class StepIdReuseScenarioTest {
 		}
 	}
 
-	/** As two engine runs into one log directory: the second one's step changes none of the first one's files. */
+	/**
+	 * As two engine runs into one log directory: the second one's step changes none of the files the
+	 * refusal protects, the first one's build record among them.
+	 */
 	@Test
 	void aRerunWithTheSameStepIdIsRefusedAndLeavesTheEarlierFilesAlone() throws Exception {
 		final String stepId = uniqueStepId("rerun");
 		final String scenario = "Load.config({load:{step:{id:\"" + stepId + "\"},op:{limit:{count:50}}}}).run();\n";
-		run(scenario);
-		final Map<Path, String> before = resultFiles(stepId);
-		assertTrue(before.keySet().stream().anyMatch(file -> file.endsWith(OperationLifecycleArtifact.FILE_NAME)), before.toString());
+		// The build record goes to the log home of the thread context, which the loggers' folder is under here.
+		final String logHome = stepDir(stepId).getParent().getParent().toString();
+		try (var home = CloseableThreadContext.put(Constants.KEY_HOME_DIR, logHome)) {
+			run(scenario);
+			final Map<Path, String> before = protectedFiles(stepId);
+			assertTrue(before.keySet().stream().anyMatch(file -> file.endsWith(OperationLifecycleArtifact.FILE_NAME)), before.toString());
+			assertTrue(before.keySet().stream().anyMatch(file -> file.endsWith(EngineBuildInfoPublisher.FILE_NAME)), before.toString());
+			final List<TerminalStepEntry> metricsBefore = terminalSteps(stepId);
 
-		final List<TerminalStepEntry> metricsBefore = terminalSteps(stepId);
+			final var thrown = assertThrows(RunTerminalException.class, () -> run(scenario));
 
-		final var thrown = assertThrows(RunTerminalException.class, () -> run(scenario));
-
-		assertRefused(thrown, stepId);
-		assertEquals(before, resultFiles(stepId));
-		final List<TerminalStepEntry> metricsAfter = terminalSteps(stepId);
-		assertEquals(metricsBefore.size(), metricsAfter.size());
-		for (int i = 0; i < metricsBefore.size(); i++) {
-			assertTrue(metricsBefore.get(i) == metricsAfter.get(i), "the refused step recorded metrics");
+			assertRefused(thrown, stepId);
+			assertEquals(before, protectedFiles(stepId));
+			final List<TerminalStepEntry> metricsAfter = terminalSteps(stepId);
+			assertEquals(metricsBefore.size(), metricsAfter.size());
+			for (int i = 0; i < metricsBefore.size(); i++) {
+				assertTrue(metricsBefore.get(i) == metricsAfter.get(i), "the refused step recorded metrics");
+			}
 		}
 	}
 
@@ -169,17 +179,25 @@ class StepIdReuseScenarioTest {
 	}
 
 	private static Path stepDir(final String stepId) throws IOException {
-		return OperationLifecycleArtifact.path(stepId).toAbsolutePath().getParent();
+		return Path.of(com.dell.spt.base.load.step.file.FileManager.INSTANCE.logFileName(
+						com.dell.spt.base.logging.Loggers.OPERATION_LIFECYCLE.getName(), stepId)).toAbsolutePath().getParent();
 	}
 
-	/** The step's result files, by path, with their contents. */
-	private static Map<Path, String> resultFiles(final String stepId) throws IOException {
+	/**
+	 * The step's files that a refused step must leave alone, by path, with their contents and identity: its
+	 * operation lifecycle evidence, its event-loop reports and its build record. Its metrics files are
+	 * written asynchronously after a step ends, and its messages are a log the refusal adds to.
+	 */
+	private static Map<Path, String> protectedFiles(final String stepId) throws IOException {
 		final var files = new LinkedHashMap<Path, String>();
 		try (Stream<Path> list = Files.list(stepDir(stepId))) {
 			for (final Path file : list.sorted().toList()) {
-				// The step's messages are a log, not a result file; a refused step adds its refusal there.
-				if (file.getFileName().toString().endsWith(".csv") || file.getFileName().toString().endsWith(".json")) {
-					files.put(file, Files.readString(file));
+				final String name = file.getFileName().toString();
+				if (name.startsWith("operation.lifecycle") || name.startsWith("event.loops")
+								|| name.equals(EngineBuildInfoPublisher.FILE_NAME)) {
+					// A file replaced by an identical one is replaced all the same: it has a new file key.
+					final var attributes = Files.readAttributes(file, java.nio.file.attribute.BasicFileAttributes.class);
+					files.put(file, Files.readString(file) + " | " + attributes.fileKey() + " | " + attributes.lastModifiedTime());
 				}
 			}
 		}
