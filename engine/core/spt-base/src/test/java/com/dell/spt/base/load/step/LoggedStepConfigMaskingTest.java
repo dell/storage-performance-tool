@@ -5,14 +5,18 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
+import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.load.step.linear.LinearLoadStepLocal;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
+import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.Level;
@@ -67,6 +71,58 @@ class LoggedStepConfigMaskingTest {
 		assertFalse(logged.contains("step-secret-value"));
 		assertEquals("step-uid-value", step.config.stringVal("storage-auth-uid"));
 		assertEquals("step-secret-value", step.config.stringVal("storage-auth-secret"));
+	}
+
+	@Test
+	void stepConfigLogMasksListedHeadersWhileStepKeepsThem() throws Exception {
+		final Map<String, Object> headers = new HashMap<>();
+		headers.put("Authorization", "AWS step-auth-header-value");
+		headers.put("x-amz-security-token", "step-session-token-value");
+		headers.put("COOKIE", "step-cookie-value");
+		headers.put("X-Custom", "step-custom-value");
+		final var config = TestConfigBuilder.configWithHttpHeaders(headers);
+		config.val("load-step-id", stepId);
+		config.val("storage-auth-secret", "step-secret-value");
+
+		final LoadStepBase step = new LinearLoadStepLocal(
+						config, List.of(), List.of(TestConfigBuilder.config()), mock(MetricsManager.class));
+		final var unmasked = parse(ConfigUtil.toString(step.config, ConfigFormat.YAML, "Load"));
+
+		assertTrue(appender.awaitFirst(5, TimeUnit.SECONDS), "no configuration was logged");
+		final var logged = appender.messages().get(0);
+		for (final var value : List.of("step-auth-header-value", "step-session-token-value", "step-cookie-value",
+						"step-secret-value")) {
+			assertFalse(logged.contains(value), value);
+		}
+		// Every other value is the step's own, as the unmasked form gives it.
+		final var expected = unmasked;
+		authOf(expected).put("secret", ConfigUtil.MASKED_VALUE);
+		final var expectedHeaders = headersOf(expected);
+		expectedHeaders.put("Authorization", ConfigUtil.MASKED_VALUE);
+		expectedHeaders.put("x-amz-security-token", ConfigUtil.MASKED_VALUE);
+		expectedHeaders.put("COOKIE", ConfigUtil.MASKED_VALUE);
+		assertEquals(expected, parse(logged));
+		assertEquals("step-custom-value", headersOf(parse(logged)).get("X-Custom"));
+		final var stepHeaders = step.config.mapVal("storage-net-http-headers");
+		assertEquals("AWS step-auth-header-value", stepHeaders.get("Authorization"));
+		assertEquals("step-session-token-value", stepHeaders.get("x-amz-security-token"));
+		assertEquals("step-cookie-value", stepHeaders.get("COOKIE"));
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Map<String, Object> parse(final String yaml) throws Exception {
+		return new YAMLMapper().readValue(yaml, Map.class);
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Map<String, Object> authOf(final Map<String, Object> configTree) {
+		return (Map<String, Object>) ((Map<String, Object>) configTree.get("storage")).get("auth");
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Map<String, Object> headersOf(final Map<String, Object> configTree) {
+		final var net = (Map<String, Object>) ((Map<String, Object>) configTree.get("storage")).get("net");
+		return (Map<String, Object>) ((Map<String, Object>) net.get("http")).get("headers");
 	}
 
 	private static final class CapturingAppender extends AbstractAppender {

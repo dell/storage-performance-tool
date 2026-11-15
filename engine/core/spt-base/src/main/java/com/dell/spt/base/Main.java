@@ -31,6 +31,7 @@ import com.dell.spt.base.env.CoreResourcesToInstall;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.load.step.LoadStepManagerService;
 import com.dell.spt.base.load.step.ScenarioUtil;
+import com.dell.spt.base.load.step.ScriptEngineNotInstalledException;
 import com.dell.spt.base.load.step.service.LoadStepManagerServiceImpl;
 import com.dell.spt.base.load.step.service.file.FileManagerServiceImpl;
 import com.dell.spt.base.logging.LogUtil;
@@ -273,7 +274,9 @@ public final class Main {
 	 *
 	 * <p>Option names are checked by the configuration itself, as it sets each value, so a map option
 	 * such as {@code --storage-net-nodeInterfaces-<key>} takes any key. The values are applied in the
-	 * order the parsed argument map gives, which is not the command-line order.
+	 * order the parsed argument map gives, which is not the command-line order. Once they are applied,
+	 * each argument is logged to {@code cli.args.log} in command-line order, with credential values
+	 * masked ({@link ConfigUtil#maskedArg}); the configuration keeps the real values.
 	 *
 	 * @throws CliArgumentException for the first argument that cannot be applied. The configuration
 	 *         may hold the arguments applied before it; the engine stops without using it.
@@ -300,7 +303,10 @@ public final class Main {
 		EngineBuildInfoProvider.global().projectVersion(config, configArgs.containsKey("run-version"));
 		checkAndSetStepId(config, initialStepId);
 		applyLogLevel(config);
-		Arrays.stream(args).forEach(Loggers.CLI::info);
+		// In command-line order, with credential values masked as the step configuration masks them
+		for (final var arg : args) {
+			Loggers.CLI.info(ConfigUtil.maskedArg(arg, aliasingConfig));
+		}
 		return config;
 	}
 
@@ -535,7 +541,7 @@ public final class Main {
 			scriptEngine = ScenarioUtil.scriptEngineByDefault(extClsLoader);
 			scenarioText = ScenarioUtil.defaultScenario(appHomePath);
 		} else {
-			scriptEngine = ScenarioUtil.scriptEngineByFilePath(scenarioPath, extClsLoader);
+			scriptEngine = scriptEngineForFile(scenarioPath, extClsLoader);
 			scenarioText = readScenarioFile(scenarioPath);
 		}
 		if (scriptEngine == null) {
@@ -552,6 +558,21 @@ public final class Main {
 		final var failure = new RunImpl("", scenarioText, scriptEngine, config.longVal("run-id")).runAndReturnFailure();
 		if (failure != null) {
 			throw new ReportedFailure("The scenario failed", failure);
+		}
+	}
+
+	/**
+	 * Resolves the script engine for a scenario file.
+	 *
+	 * @throws ReportedFailure when the file's language needs a script engine that is not installed,
+	 *         after logging that
+	 */
+	static ScriptEngine scriptEngineForFile(final Path scenarioPath, final ClassLoader extClsLoader) {
+		try {
+			return ScenarioUtil.scriptEngineByFilePath(scenarioPath, extClsLoader);
+		} catch (final ScriptEngineNotInstalledException e) {
+			Loggers.ERR.fatal("{}", e.getMessage());
+			throw new ReportedFailure("No scenario engine", e);
 		}
 	}
 

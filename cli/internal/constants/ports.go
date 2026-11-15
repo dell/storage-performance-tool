@@ -9,8 +9,8 @@ const (
 	SptAPIPort          = "9999"  // Spt standard REST API port
 	SptLegacyAPIPort    = "43234" // Legacy spt API port
 	RMIRegistryPort     = "1099"  // RMI registry port for distributed testing
-	DefaultRMIPortStart = 40000   // Default starting port for RMI object ports
-	DefaultRMIPortCount = 10      // Default number of RMI ports to allocate per host
+	DefaultRMIPortStart = 40000   // Default start of the recorded RMI port range; engines export on the registry port
+	DefaultRMIPortCount = 10      // Default size of the recorded RMI port range; nothing is allocated from it
 )
 
 // Default HTTP port constants

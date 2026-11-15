@@ -52,7 +52,6 @@ function configCreate(iterId, size, itemOutputFile, limitCount, limitTime) {
 			"step": {
 				"id": "create0_" + iterId,
 				"limit": {
-					"count": limitCount,
 					"time": limitTime
 				}
 			}

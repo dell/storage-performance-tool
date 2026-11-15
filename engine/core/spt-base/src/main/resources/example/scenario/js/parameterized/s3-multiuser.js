@@ -39,7 +39,7 @@ var multiUserConfig = {
 		"driver" : {
 			"limit" : {
 				"concurrency" : 10
-			}
+			},
 			"type" : "s3"
 		}
 	}

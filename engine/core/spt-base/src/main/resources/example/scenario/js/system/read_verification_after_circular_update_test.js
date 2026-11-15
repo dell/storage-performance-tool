@@ -30,7 +30,7 @@ PreconditionLoad
 	.config({
 	"load" : {
 		"op" : {
-		"recycle" : true,
+		"recycle" : {"mode": true},
 		"type" : "update",
 		"limit" : {
 			"count": 10000

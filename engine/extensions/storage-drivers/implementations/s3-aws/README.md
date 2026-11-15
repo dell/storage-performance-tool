@@ -79,6 +79,21 @@ Transparent retries retain the logical request's first send marker but replace e
 so a terminal failure
 without a completed response cannot reuse stale latency or duration samples.
 
+### UPDATE
+
+An UPDATE rewrites the whole object with one PutObject of the item's current content, and counts
+the item's size as its bytes done. This matches the `s3` driver's default UPDATE, which with no
+ranges configured sends the whole object with its current content (with a `Range` header that
+`s3-aws` does not send). Configured ranges (`item.data.ranges.random` or `item.data.ranges.fixed`)
+are ignored: the whole object is written whatever ranges are set. An UPDATE is never a copy; only a
+CREATE with a source path is (copy mode).
+
+With object tagging on, the two drivers differ: the `s3` driver sends an UPDATE as `PUT ?tagging`
+and does not rewrite the object, while `s3-aws` rewrites the whole object with the tags on the PUT.
+
+Before 5.9.0 an UPDATE took the same route. From 5.9.0 to 5.17.0 an UPDATE of an item whose name
+or input path carries a bucket was sent as a copy from a missing object and failed.
+
 ### Blocking Compatibility
 
 To maintain compatibility with the existing `NioStorageDriverBase` threading model, async operations are blocked using `.join()` in `invokeNio()`. This preserves the existing driver architecture while leveraging CRT's native performance benefits.

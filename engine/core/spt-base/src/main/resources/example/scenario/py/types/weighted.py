@@ -25,8 +25,10 @@ precondition2 = PreconditionLoad \
 					"limit": {
 						"count": 10000
 					}
-				},
-				"step": {
+				}
+			},
+			"storage": {
+				"driver": {
 					"limit": {
 						"concurrency": sharedConcurrency
 					}
@@ -59,7 +61,7 @@ weightedLoad1 = WeightedLoad \
 				}
 			},
 			"load": {
-				"generator": {
+				"op": {
 					"weight": 20
 				}
 			}
@@ -73,13 +75,13 @@ weightedLoad1 = WeightedLoad \
 				}
 			},
 			"load": {
-				"generator": {
+				"op": {
 					"recycle": {
-						"enabled": True
+						"mode": True
 					},
-					"weight": 80
-				},
-				"type": "read"
+					"weight": 80,
+					"type": "read"
+				}
 			}
 		}
 	)

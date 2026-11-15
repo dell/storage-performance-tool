@@ -2,7 +2,7 @@ var sharedConfig = {
 	"storage": {
 		"namespace": "ns1",
 		"net": {
-			"ssl": true
+			"ssl": {"enabled": true}
 		}
 	}
 }

@@ -16,6 +16,7 @@ const (
 	EntryLogRelayReconnectMax       = 30 * time.Second       // Cap on the doubling reconnect delay for a remote log stream
 	APIReadinessPollInterval        = 500 * time.Millisecond // Interval between API readiness probes
 	APIReadinessTimeout             = 30 * time.Second       // Timeout for waiting for APIs to be ready
+	APIWaitReportTimeout            = 10 * time.Second       // Bound on reading a container's state and logs after its API wait failed
 	SubmissionReconciliationTimeout = 10 * time.Second       // Bounded /status reconciliation after an ambiguous POST /run
 	PortCheckTimeout                = 2 * time.Second        // Timeout for checking if a port is open
 	AutoResultsTrackerPollInterval  = 500 * time.Millisecond // Completion-tracker polling interval

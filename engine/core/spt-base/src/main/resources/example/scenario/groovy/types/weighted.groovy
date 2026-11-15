@@ -23,8 +23,10 @@ final preconditionLoad1 = PreconditionLoad
 					limit : [
 						count : 10000
 					]
-				],
-				step : [
+				]
+			],
+			storage : [
+				driver : [
 					limit : [
 						concurrency : sharedConcurrency
 					]
@@ -57,7 +59,7 @@ final weightedLoad1 = WeightedLoad
 				]
 			],
 			load : [
-				generator : [
+				op : [
 					weight : 20
 				]
 			]
@@ -71,13 +73,13 @@ final weightedLoad1 = WeightedLoad
 				]
 			],
 			load : [
-				generator : [
+				op : [
 					recycle : [
-						enabled : true
+						mode : true
 					],
-					weight : 80
-				],
-				type : "read"
+					weight : 80,
+					type : "read"
+				]
 			]
 		]
 	)
