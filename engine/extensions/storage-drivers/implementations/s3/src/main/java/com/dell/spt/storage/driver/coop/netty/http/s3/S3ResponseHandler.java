@@ -73,7 +73,9 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	/** The S3 error codes of a completion that may succeed if the whole upload is tried again. */
 	static final Set<String> TRANSIENT_COMPLETION_ERROR_CODES = Set.of(
 					"InternalError", "ServiceUnavailable", "SlowDown", "RequestTimeout");
-	/** How a completion error code that is missing, too long or not a plain S3 code name is logged. */
+	/** How a missing, empty or truncated completion error code is logged; it maps to RESP_FAIL_SVC. */
+	static final String MISSING_ERROR_CODE = "(missing)";
+	/** How a completion error code that is too long or not a plain S3 code name is logged; it maps to RESP_FAIL_CLIENT. */
 	static final String UNREADABLE_ERROR_CODE = "(unreadable)";
 	/** The longest completion error code logged as it is; S3 code names are far shorter. */
 	static final int MAX_LOGGED_ERROR_CODE_LENGTH = 64;
@@ -546,11 +548,16 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 
 	/**
 	 * The code as it is logged: a plain S3 code name of at most {@link #MAX_LOGGED_ERROR_CODE_LENGTH}
-	 * letters, digits, dots, dashes and underscores, or else {@link #UNREADABLE_ERROR_CODE}, so the
-	 * target's text cannot forge log lines and junk codes share one log slot. Only the log uses it.
+	 * letters, digits, dots, dashes and underscores; {@link #MISSING_ERROR_CODE} for no code; or else
+	 * {@link #UNREADABLE_ERROR_CODE}, so the target's text cannot forge log lines and junk codes share
+	 * one log slot. A missing code and a junk code map to different statuses, so they keep separate
+	 * slots. Only the log uses it.
 	 */
 	static String loggableErrorCode(final String code) {
-		if (code == null || code.isEmpty() || code.length() > MAX_LOGGED_ERROR_CODE_LENGTH) {
+		if (code == null || code.isEmpty()) {
+			return MISSING_ERROR_CODE;
+		}
+		if (code.length() > MAX_LOGGED_ERROR_CODE_LENGTH) {
 			return UNREADABLE_ERROR_CODE;
 		}
 		for (int i = 0; i < code.length(); i++) {
@@ -579,7 +586,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 			final boolean last = codes.size() >= MAX_LOGGED_COMPLETION_ERROR_CODES;
 			Loggers.ERR.warn(
 							"{}: multipart completion answered 2xx with S3 error code {}; the upload counts as {} and is aborted"
-											+ " (logged once per code in this step{})",
+											+ " (logged once per code{})",
 							op.item().name(),
 							code,
 							status,

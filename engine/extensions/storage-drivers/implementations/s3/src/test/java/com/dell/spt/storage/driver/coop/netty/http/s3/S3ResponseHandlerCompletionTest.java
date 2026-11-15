@@ -215,6 +215,21 @@ final class S3ResponseHandlerCompletionTest {
 		}
 	}
 
+	/** A missing code (retried) and a junk code (not retried) keep separate log slots and say which they are. */
+	@Test
+	void aMissingCodeAndAJunkCodeAreLoggedApart() throws Exception {
+		try (final var errors = new ErrorsLogCapture()) {
+			assertEquals(Operation.Status.RESP_FAIL_SVC, completionStatus("<Error><Message>no code</Message></Error>"));
+			assertEquals(Operation.Status.RESP_FAIL_CLIENT, completionStatus("<Error><Code>Slow Down</Code></Error>"));
+			final List<String> messages = errors.completionErrorLines().stream().map(ErrorsLogCapture.Line::message).toList();
+			assertEquals(2, messages.size(), messages::toString);
+			assertTrue(messages.get(0).contains("S3 error code (missing);")
+							&& messages.get(0).contains(Operation.Status.RESP_FAIL_SVC.toString()), messages::toString);
+			assertTrue(messages.get(1).contains("S3 error code (unreadable);")
+							&& messages.get(1).contains(Operation.Status.RESP_FAIL_CLIENT.toString()), messages::toString);
+		}
+	}
+
 	/** Each step's driver logs a code its step saw, even when an earlier step logged it. */
 	@Test
 	void eachDriverLogsTheCodeOnce() throws Exception {
