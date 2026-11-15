@@ -476,7 +476,7 @@ func (o *MultiHostOrchestrator) ConnectHosts(ctx context.Context) error {
 					connectErrorsMu.Unlock()
 					return
 				}
-				if cinfo, perr := o.preflight.CheckPorts(ctx, h.Info, registryPort, apiPort); perr != nil {
+				if cinfo, perr := portCheckResult(o.preflight.CheckPorts(ctx, h.Info, registryPort, apiPort)); perr != nil {
 					h.SetError(fmt.Errorf("port check failed: %w", perr))
 					connectErrorsMu.Lock()
 					connectErrors = append(connectErrors, fmt.Sprintf("  ❌ %s: Port check failed: %v", h.Info.Original, perr))
@@ -519,13 +519,13 @@ func (o *MultiHostOrchestrator) ConnectHosts(ctx context.Context) error {
 								}
 							}
 							if stopped > 0 {
-								if c2, e2 := o.preflight.CheckPorts(ctx, h.Info, registryPort, apiPort); e2 == nil && len(c2.ConflictPorts) == 0 {
+								if summary, e2 := recheckPortsAfterCleanup(ctx, o.preflight, h.Info, registryPort, apiPort); e2 == nil {
 									logging.LogInfo("docker-multi", "resolved port conflicts via cleanup", "host", h.Info.Original)
 									resolved = true
 								} else {
-									h.SetError(fmt.Errorf("ports still in use after cleanup: %v", c2.ConflictPorts))
+									h.SetError(e2)
 									connectErrorsMu.Lock()
-									connectErrors = append(connectErrors, fmt.Sprintf("  ❌ %s: Ports still in use: %v", h.Info.Original, c2.ConflictPorts))
+									connectErrors = append(connectErrors, summary)
 									connectErrorsMu.Unlock()
 									return
 								}
