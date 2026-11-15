@@ -894,6 +894,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 			signalDispatchCapacityAvailable();
 			if (!claimed) {
 				row.interrupted();
+				settleRefusedDispatch(op);
 				return true;
 			}
 			final var lifecycle = op.lifecycle();
@@ -950,6 +951,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 			signalDispatchCapacityAvailable();
 			if (!claimed) {
 				row.interrupted();
+				settleRefusedDispatch(op);
 				return;
 			}
 			final var lifecycle = op.lifecycle();
@@ -971,6 +973,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 			}
 			if (!withDispatchAdmission(this::claim)) {
 				// Stopped, or the circulation is stale: nothing is written and queue recovery owns the operation.
+				// A stopped composite's finalization is in no queue: it is settled here.
 				final var row = counters.path(channel);
 				row.attempted();
 				row.interrupted();
@@ -981,6 +984,7 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 				admission.attemptEnded(nicIndex, trial);
 				concurrencyThrottle.release();
 				signalDispatchCapacityAvailable();
+				settleRefusedDispatch(op);
 				return;
 			}
 			if (context != null) {

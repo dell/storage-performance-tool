@@ -343,6 +343,61 @@ final class S3NicSetAdmissionTest {
 		assertEquals(List.of(4L, 3L, 0L, 1L, 0L, 2L * EndpointSelectionTestSupport.ITEM_SIZE), totals(rows), rows::toString);
 	}
 
+	/**
+	 * Both parts are sent; part 2's answer waits until the NIC that carried part 1 has its event loop
+	 * blocked. The completion, which follows part 2's answer, then waits on that NIC for its connection
+	 * when the stop comes. Its claim is refused, nothing is sent, and the upload, in no queue, is
+	 * unresolved at once instead of holding the step's drain until its deadline.
+	 */
+	@Test
+	void aStopWhileTheCompletionWaitsForItsConnectionLeavesTheUploadUnresolved() throws Exception {
+		final var run = started(stub.listeners(2), nics(2), 2);
+		final var pool = run.pool();
+		final var admission = pool.admission();
+		assertEquals(Operation.Status.SUCC, run.execute(dataOp(OpType.CREATE, "before")).status());
+		final var channels = List.of(channelOf(pool, 0), channelOf(pool, 1));
+		final var upload = new CompositeDataOperationImpl<DataItem>(0, OpType.CREATE, new DataItemImpl("upload", 7,
+						2L * EndpointSelectionTestSupport.ITEM_SIZE), null, "/bucket", EndpointSelectionTestSupport.CREDENTIAL,
+						null, 0, EndpointSelectionTestSupport.ITEM_SIZE);
+		final var answerPart2 = new CountDownLatch(1);
+		stub.answerDelayMillis = request -> {
+			if (request.isPart() && request.query().contains("partNumber=2")) {
+				awaitQuietly(answerPart2);
+			}
+			return 0;
+		};
+
+		assertTrue(run.driver().put(upload));
+		waitFor(() -> parts() == 2, "both parts reach the stub");
+		final var firstPart = stub.objectRequests().stream()
+						.filter(request -> request.isPart() && request.query().contains("partNumber=1")).findFirst().orElseThrow();
+		final int first = ADDRESSES.get(0).equals(firstPart.source()) ? 0 : 1;
+		waitFor(() -> admission.count(first) == 0, "part 1's attempt ended");
+		final var unblock = block(channels.get(first));
+		answerPart2.countDown();
+		waitFor(() -> admission.count(first) == 1 && admission.count(1 - first) == 0,
+						"the completion waits for its connection on part 1's NIC");
+		assertTrue(stub.objectRequests().stream().noneMatch(S3NicSetAdmissionTest::isCompletion), "the completion was not sent");
+		run.driver().closeAdmission();
+		final var recovered = run.driver().recoverQueuedOperations();
+		unblock.countDown();
+
+		waitFor(() -> admission.count(first) == 0 && run.driver().activeOpCount() == 0, "the completion released its NIC and permit");
+		assertTrue(recovered.isEmpty(), recovered::toString);
+		assertTrue(stub.objectRequests().stream().noneMatch(S3NicSetAdmissionTest::isCompletion), "the upload was not completed");
+		assertEquals(1, stub.openUploads(), "the upload stays open on the target");
+		final var lifecycle = run.driver().operationLifecycle();
+		assertEquals(OperationLifecycleState.UNRESOLVED, lifecycle.stateOf(upload), () -> "the upload: " + lifecycle.snapshot());
+		assertEquals(1, lifecycle.snapshot().unresolved(), lifecycle.snapshot()::toString);
+		assertEquals(0, lifecycle.snapshot().inFlight(), () -> "nothing holds the drain: " + lifecycle.snapshot());
+		assertEquals(0, lifecycle.counters().failed(), "the refused completion charges no failure");
+		assertTrue(lifecycle.counters().reconciled(), lifecycle.counters()::toString);
+	}
+
+	private static boolean isCompletion(final NicSetLoopback.Request request) {
+		return "POST".equals(request.method()) && request.query() != null && request.query().startsWith("uploadId=");
+	}
+
 	@Test
 	void anAttemptSentBeforeTheDrainCutWithNoOutcomeStaysUnresolved() throws Exception {
 		final var run = started(stub.listeners(1), nics(1), 1);

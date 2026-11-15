@@ -326,6 +326,7 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 		}
 		if (!withDispatchAdmission(() -> claimCapturedDispatch(op, token))) {
 			// Stopped, or the circulation is stale: nothing is written and queue recovery owns the operation.
+			// A stopped composite's finalization is in no queue: it is settled here.
 			final var row = counters.path(channel);
 			row.attempted();
 			row.interrupted();
@@ -333,6 +334,7 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 			admission.attemptEnded(nic, trial);
 			concurrencyThrottle.release();
 			signalDispatchCapacityAvailable();
+			settleRefusedDispatch(op);
 			return;
 		}
 		try {
@@ -381,6 +383,7 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 		signalDispatchCapacityAvailable();
 		if (!claimed) {
 			row.interrupted();
+			settleRefusedDispatch(op);
 			return;
 		}
 		final var lifecycle = op.lifecycle();

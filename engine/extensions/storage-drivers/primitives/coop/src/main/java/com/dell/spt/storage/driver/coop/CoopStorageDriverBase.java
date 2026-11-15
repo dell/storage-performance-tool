@@ -877,6 +877,43 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		}
 	}
 
+	/**
+	 * Settles, after a stop, the composite that a refused transport claim leaves: the claim of a
+	 * composite's finalization or abort, or of one of its parts, that a driver deferring custody to
+	 * its request write makes there, or that a worker makes at its own dispatch boundary. A driver
+	 * calls it only in the branch where that claim was refused, and nothing was sent.
+	 *
+	 * <p>While admission is open it does nothing: a claim refused then is a stale circulation, which
+	 * its newer circulation owns. After the stop, a dispatched composite, or an upload whose
+	 * initiation was answered, can no longer finish: it is settled as {@link
+	 * #settleRefusedCompositeParent} settles it, so it is unresolved once and its upload permit comes
+	 * back once. A refused finalization or abort is in no queue, so queue recovery never sees it. A
+	 * refused part keeps its own state for the caller or queue recovery, and a queued composite that
+	 * opened nothing on the target is left to queue recovery.
+	 */
+	@SuppressWarnings("unchecked")
+	protected final void settleRefusedDispatch(final O op) {
+		if (isAdmissionOpen()) {
+			return;
+		}
+		final O parentOp;
+		if (op instanceof PartialOperation<?> partialOp) {
+			parentOp = (O) partialOp.parent();
+		} else if (op instanceof CompositeOperation) {
+			parentOp = op;
+		} else {
+			return;
+		}
+		if (parentOp == null) {
+			return;
+		}
+		final var state = operationLifecycle().stateOf(parentOp);
+		if (state == OperationLifecycleState.DISPATCHED
+						|| (state == OperationLifecycleState.DRIVER_QUEUED && isInitiatedUpload(parentOp))) {
+			settleRefusedCompositeParent(op, parentOp);
+		}
+	}
+
 	/** Whether {@code op} is a multipart upload whose initiation was answered with an upload ID. */
 	private static boolean isInitiatedUpload(final Operation<?> op) {
 		return op instanceof CompositeOperation<?> compositeOp
