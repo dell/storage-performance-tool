@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -40,9 +41,17 @@ import org.apache.logging.log4j.ThreadContext;
  * <p>The relay is best-effort evidence and never holds the step up past its bound. Each pass (at
  * start, at stop and at close) reads every node on a daemon thread of its own, and the step thread
  * waits for them at most {@link #BOUND_MILLIS} from the start of the pass, remote reads and the
- * wait for running checks included: a remote call over RMI can't be interrupted. A node whose
- * thread hasn't finished by then is named in one WARN and left out of the relay for good, and
- * anything its abandoned thread reads later is dropped.
+ * wait for running checks included: a remote call over RMI can't be interrupted. An interrupt of
+ * the step thread doesn't cut the wait short; the pass keeps it and sets it again before it
+ * returns. A node whose thread hasn't finished by then is named in one WARN and left out of the
+ * relay for good, and anything its abandoned thread reads later is dropped.
+ *
+ * <p>An abandoned read can stay blocked for the life of the process when no RMI response timeout
+ * is set, as on a direct {@code java -jar} launch, so the engine keeps count of them ({@link
+ * Reads}). A pass starts no read of a node's file service while an earlier abandoned read of it
+ * hasn't returned, nor any read while {@link Reads#MAX_ABANDONED} abandoned reads are outstanding:
+ * it leaves the node out of that pass with a WARN. A read that returns at last ends its thread and
+ * frees its place, and its result is dropped.
  *
  * <p>A node without notices has an empty or no file, which is normal. A file that can't be read is
  * a WARN, not a step failure. The relay reads at most {@link #MAX_BYTES} of a node's file per step
@@ -67,6 +76,7 @@ final class BucketVersioningRelay implements AutoCloseable {
 	private final List<Node> nodes = new ArrayList<>();
 	/** Taken to relay a node's record and to abandon a node, so no record of an abandoned node is written. */
 	private final Object emitLock = new Object();
+	private final Reads reads;
 
 	/**
 	 * @param fileManagers one per slice, the Entry Node's first
@@ -92,6 +102,18 @@ final class BucketVersioningRelay implements AutoCloseable {
 					final List<String> nodeNames,
 					final BiConsumer<Level, String> output,
 					final long boundMillis) {
+		this(loadStepId, fileManagers, nodeNames, output, boundMillis, Reads.ENGINE);
+	}
+
+	/** @param reads the outstanding reads to count this relay's in: the engine's, or a test's own */
+	BucketVersioningRelay(
+					final String loadStepId,
+					final List<FileManager> fileManagers,
+					final List<String> nodeNames,
+					final BiConsumer<Level, String> output,
+					final long boundMillis,
+					final Reads reads) {
+		this.reads = reads;
 		if (fileManagers.size() != nodeNames.size()) {
 			throw new IllegalArgumentException("one file manager and name per slice");
 		}
@@ -103,13 +125,13 @@ final class BucketVersioningRelay implements AutoCloseable {
 			candidates.add(new Node(fileManagers.get(i), "node " + String.format("%03d", i) + " (" + nodeNames.get(i) + ")"));
 		}
 		final long end = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(boundMillis);
-		final var stalled = runPass(candidates, Node::start, end);
+		final var pass = runPass(candidates, Node::start, end);
 		for (final var node : candidates) {
-			if (!stalled.contains(node)) {
+			if (!pass.stalled.contains(node) && !pass.skipped.containsKey(node)) {
 				nodes.add(node);
 			}
 		}
-		warnStalled(stalled, "when the step started");
+		warnLeftOut(pass, "when the step started");
 	}
 
 	/**
@@ -148,7 +170,7 @@ final class BucketVersioningRelay implements AutoCloseable {
 	synchronized void relayAtStop() {
 		final long end = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(boundMillis);
 		final long waitEnd = end - TimeUnit.MILLISECONDS.toNanos(Math.min(GRACE_MILLIS, boundMillis / 4));
-		final var stalled = runPass(nodes, node -> {
+		final var pass = runPass(nodes, node -> {
 			node.relay();
 			while (node.waiting() && System.nanoTime() < waitEnd && !node.abandoned) {
 				try {
@@ -159,77 +181,178 @@ final class BucketVersioningRelay implements AutoCloseable {
 				node.relay();
 			}
 		}, end);
-		warnPending();
-		warnStalled(stalled, "when the step stopped");
+		warnPending(pass);
+		warnLeftOut(pass, "when the step stopped");
 	}
 
 	/** Relays anything written since the last pass. */
 	@Override
 	public synchronized void close() {
 		final long end = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(boundMillis);
-		final var stalled = runPass(nodes, Node::relay, end);
-		warnPending();
-		warnStalled(stalled, "when the step closed");
+		final var pass = runPass(nodes, Node::relay, end);
+		warnPending(pass);
+		warnLeftOut(pass, "when the step closed");
+	}
+
+	/** Why a pass started no read of a node. */
+	enum Skip {
+		/** An earlier read of the same file service, abandoned, hasn't returned. */
+		EARLIER_READ,
+		/** {@link Reads#MAX_ABANDONED} abandoned reads are outstanding. */
+		CAP
+	}
+
+	/** The nodes a pass gave up on at its deadline, and the ones it started no read of. */
+	private record Pass(List<Node> stalled, Map<Node, Skip> skipped) {}
+
+	/**
+	 * The relay reads an engine has abandoned and that haven't returned, so the threads they hold
+	 * stay bounded for the life of the process. A read is counted from the moment its pass abandons
+	 * it until it returns. Reads are keyed by the node's file manager: an RMI stub equals another
+	 * stub of the same remote object, its worker's file service, without a remote call.
+	 */
+	static final class Reads {
+
+		/** The most abandoned reads the engine keeps outstanding before it starts no more. */
+		static final int MAX_ABANDONED = 32;
+
+		static final Reads ENGINE = new Reads(MAX_ABANDONED);
+
+		private final int maxAbandoned;
+		private final Map<FileManager, Integer> abandonedByService = new HashMap<>();
+		private int abandoned;
+
+		Reads(final int maxAbandoned) {
+			this.maxAbandoned = maxAbandoned;
+		}
+
+		/** A read the pass may start, or null with the reason in {@code skip}. */
+		synchronized Read start(final FileManager service, final Skip[] skip) {
+			if (abandonedByService.containsKey(service)) {
+				skip[0] = Skip.EARLIER_READ;
+				return null;
+			}
+			if (abandoned >= maxAbandoned) {
+				skip[0] = Skip.CAP;
+				return null;
+			}
+			return new Read(service);
+		}
+
+		synchronized int abandoned() {
+			return abandoned;
+		}
+
+		private synchronized void abandon(final Read read) {
+			if (!read.returned && !read.abandoned) {
+				read.abandoned = true;
+				abandoned++;
+				abandonedByService.merge(read.service, 1, Integer::sum);
+			}
+		}
+
+		private synchronized void returned(final Read read) {
+			read.returned = true;
+			if (read.abandoned) {
+				abandoned--;
+				abandonedByService.computeIfPresent(read.service, (service, count) -> count > 1 ? count - 1 : null);
+			}
+		}
+
+		/** One pass's read of one node. */
+		final class Read {
+
+			private final FileManager service;
+			private boolean abandoned;
+			private boolean returned;
+
+			private Read(final FileManager service) {
+				this.service = service;
+			}
+		}
 	}
 
 	/**
 	 * Runs the work for each node not yet abandoned on a daemon thread of its own, and waits for them
-	 * until {@code end}. Abandons and returns the nodes whose thread is still running then.
+	 * until {@code end}, whatever the caller's interrupt status, which it keeps. Abandons the nodes
+	 * whose thread is still running then.
 	 */
-	private List<Node> runPass(final List<Node> passNodes, final Consumer<Node> work, final long end) {
+	private Pass runPass(final List<Node> passNodes, final Consumer<Node> work, final long end) {
 		final var threads = new LinkedHashMap<Node, Thread>();
+		final var readsOf = new HashMap<Node, Reads.Read>();
+		final var skipped = new LinkedHashMap<Node, Skip>();
 		// The records go to the step's logs by the caller's log context.
 		final Map<String, String> logContext = ThreadContext.getImmutableContext();
 		for (final var node : passNodes) {
-			if (!node.abandoned) {
-				threads.put(node, Thread.ofPlatform().daemon().name("bucket-versioning-relay-" + loadStepId + "-" + node.label)
-								.start(() -> {
-									try (var ctx = CloseableThreadContext.putAll(logContext)) {
-										work.accept(node);
-									} catch (final Throwable t) {
-										// Already a WARN through the node, or the node was abandoned.
-									}
-								}));
+			if (node.abandoned) {
+				continue;
 			}
+			final var skip = new Skip[1];
+			final var read = reads.start(node.fileManager, skip);
+			if (read == null) {
+				skipped.put(node, skip[0]);
+				continue;
+			}
+			readsOf.put(node, read);
+			threads.put(node, Thread.ofPlatform().daemon().name("bucket-versioning-relay-" + loadStepId + "-" + node.label)
+							.start(() -> {
+								try (var ctx = CloseableThreadContext.putAll(logContext)) {
+									work.accept(node);
+								} catch (final Throwable t) {
+									// Already a WARN through the node, or the node was abandoned.
+								} finally {
+									reads.returned(read);
+								}
+							}));
 		}
-		boolean interrupted = false;
+		// An interrupt doesn't end the wait: an interrupted stop relays as an uninterrupted one does.
+		boolean interrupted = Thread.interrupted();
 		final var stalled = new ArrayList<Node>();
 		for (final var entry : threads.entrySet()) {
-			final long left = end - System.nanoTime();
-			if (!interrupted && left > 0) {
+			final var thread = entry.getValue();
+			long left;
+			while (thread.isAlive() && (left = end - System.nanoTime()) > 0) {
 				try {
-					entry.getValue().join(Duration.ofNanos(left));
+					thread.join(Duration.ofNanos(left));
 				} catch (final InterruptedException e) {
 					interrupted = true;
 				}
 			}
-			if (entry.getValue().isAlive()) {
+			if (thread.isAlive()) {
 				synchronized (emitLock) {
 					entry.getKey().abandoned = true;
 				}
+				reads.abandon(readsOf.get(entry.getKey()));
 				stalled.add(entry.getKey());
 			}
 		}
 		if (interrupted) {
 			Thread.currentThread().interrupt();
 		}
-		return stalled;
+		return new Pass(stalled, skipped);
 	}
 
-	private void warnStalled(final List<Node> stalled, final String when) {
-		if (stalled.isEmpty()) {
-			return;
+	private void warnLeftOut(final Pass pass, final String when) {
+		final var stalled = pass.stalled();
+		if (!stalled.isEmpty()) {
+			final boolean one = stalled.size() == 1;
+			output.accept(Level.WARN, loadStepId + ": " + String.join(", ", stalled.stream().map(node -> node.label).toList())
+							+ " did not answer within " + boundMillis + " ms " + when + ", so the relay left " + (one ? "it" : "them")
+							+ " out; " + (one ? "its" : "their") + " bucket versioning notices are only in "
+							+ (one ? "that node's " : "each of those nodes' ") + BucketVersioningNotice.FILE_NAME);
 		}
-		final boolean one = stalled.size() == 1;
-		output.accept(Level.WARN, loadStepId + ": " + String.join(", ", stalled.stream().map(node -> node.label).toList())
-						+ " did not answer within " + boundMillis + " ms " + when + ", so the relay left " + (one ? "it" : "them")
-						+ " out; " + (one ? "its" : "their") + " bucket versioning notices are only in "
-						+ (one ? "that node's " : "each of those nodes' ") + BucketVersioningNotice.FILE_NAME);
+		pass.skipped().forEach((node, skip) -> output.accept(Level.WARN, loadStepId + ": " + node.label + ": "
+						+ (skip == Skip.EARLIER_READ
+										? "an earlier read of its " + BucketVersioningNotice.FILE_NAME + " has not returned"
+										: reads.maxAbandoned + " earlier reads of the nodes' " + BucketVersioningNotice.FILE_NAME
+														+ " have not returned, the most the engine keeps waiting")
+						+ ", so the relay left it out " + when + "; its bucket versioning notices are only in that node's "
+						+ BucketVersioningNotice.FILE_NAME));
 	}
 
-	private void warnPending() {
+	private void warnPending(final Pass pass) {
 		for (final var node : nodes) {
-			if (!node.abandoned && node.waiting() && !node.pendingWarned) {
+			if (!node.abandoned && !pass.skipped().containsKey(node) && node.waiting() && !node.pendingWarned) {
 				node.pendingWarned = true;
 				output.accept(Level.WARN, loadStepId + ": " + node.label + ": the versioning check of "
 								+ String.join(", ", node.pending.keySet()) + " had not ended when the step stopped; its notice"

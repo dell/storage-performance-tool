@@ -552,6 +552,17 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 	}
 
+	/** Relays the nodes' notices written so far when a close fails, keeping the close's failure. */
+	private void relayBucketVersioningNoticesAtClose(final Throwable failure) {
+		if (bucketVersioningRelay != null) {
+			try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
+				bucketVersioningRelay.close();
+			} catch (final RuntimeException e) {
+				failure.addSuppressed(e);
+			}
+		}
+	}
+
 	private void initDeleteArtifactAggregator(final List<String> nodeAddrs) {
 		if (!supportsStandaloneDeleteArtifactAggregation()
 						|| !standaloneDeleteEnabled()
@@ -2613,6 +2624,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	protected final void doStop() {
 		if (standaloneDeleteDurationMode()) {
 			if (!durationAdmissionBarrierSatisfied || durationStopFailure != null) {
+				// The relay reads the nodes' files only: it needs neither the failed slice nor its barrier.
+				relayBucketVersioningNoticesAtStop();
 				publishFailedOutcomeBeforeIncompleteDurationMetricsOutput();
 				super.doStop();
 				return;
@@ -2708,7 +2721,13 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		stopFailureBudgetMonitor();
 		final boolean durationMode = standaloneDeleteDurationMode();
 		if (durationMode) {
-			closeForStandaloneDeleteMode(true);
+			try {
+				closeForStandaloneDeleteMode(true);
+			} catch (final IOException | RuntimeException | Error e) {
+				// A close that fails keeps the relay for its retry, but relays what the nodes wrote so far.
+				relayBucketVersioningNoticesAtClose(e);
+				throw e;
+			}
 			return;
 		}
 		try {

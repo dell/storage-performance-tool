@@ -579,9 +579,12 @@ depends on the driver:
   The body is read by element name, whatever namespace prefix, declarations or attributes it carries. After a warning
   the run goes on un-versioned. Notices go to the step's `messages.log` and warnings to `errors.log`.
   On a distributed run the entry engine copies each worker's notices into its own two logs, prefixed with the node,
-  when the step stops and before it publishes the total metrics. It waits at most 10 seconds for that, and warns
-  about a worker that doesn't answer in time and leaves it out. Each engine also writes them to
-  `log/<step id>/bucket.versioning.log`, which only carries them to the entry engine; it is not a result file. Written
+  when the step stops and before it publishes the total metrics. Each read of the workers' notices, when the step
+  starts, stops and closes, waits at most 10 seconds, and a worker that doesn't answer in time is left out with a
+  warning. A later read skips, at once and with a warning, a worker whose earlier read hasn't returned, and every
+  worker once 32 such reads are outstanding in the engine. Each engine also writes them to
+  `log/<step id>/bucket.versioning.log`, which only carries them to the entry engine; it is not a result file. The
+  engine's log API lists and serves it as `BucketVersioning`, but the CLI doesn't fetch it. Written
   items are named `key~versionId` when the target returns a version ID.
 * `s3-aws` only splits `key~versionId` input names into the key and the version. It sends no bucket versioning
   request, and written items keep plain names.

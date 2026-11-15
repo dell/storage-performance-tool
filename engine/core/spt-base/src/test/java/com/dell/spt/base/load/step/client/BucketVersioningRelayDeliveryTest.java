@@ -2,6 +2,7 @@ package com.dell.spt.base.load.step.client;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
@@ -9,12 +10,14 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.Constants;
 import com.dell.spt.base.config.HttpVersioningSynonym;
 import com.dell.spt.base.config.TestConfigBuilder;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepBase;
 import com.dell.spt.base.load.step.file.FileManager;
@@ -31,6 +34,8 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.rmi.MarshalledObject;
+import java.rmi.RemoteException;
 import java.rmi.server.RMIClientSocketFactory;
 import java.rmi.server.RMIServerSocketFactory;
 import java.rmi.server.UnicastRemoteObject;
@@ -469,6 +474,171 @@ class BucketVersioningRelayDeliveryTest {
 			Thread.sleep(10);
 		}
 		fail("the file did not get " + text);
+	}
+
+	/** Another stub of the same remote file service, as a later step's lookup of the worker gets. */
+	private static FileManager anotherStub(final FileManager stub) throws Exception {
+		return new MarshalledObject<>(stub).get();
+	}
+
+	private static long liveRelayThreads(final String prefix) {
+		return Thread.getAllStackTraces().keySet().stream()
+						.filter(thread -> thread.isAlive() && thread.getName().contains(prefix))
+						.count();
+	}
+
+	/**
+	 * Sol's lifetime probe: with no RMI response timeout a stalled read never returns, so each step's relay used to
+	 * leave one more blocked thread. Later steps now skip the worker at once while its earlier read is outstanding.
+	 */
+	@Test
+	void aStalledWorkerHoldsOneRelayThreadAcrossSteps() throws Exception {
+		final var prefix = "relay-lifetime-" + System.nanoTime();
+		final var file = dir.resolve(NOTICE_FILE);
+		try (final var node = new StalledNode(file, 2)) {
+			final var first = new BucketVersioningRelay(prefix + "-0", List.of(mock(FileManager.class), anotherStub(node.remote)),
+							List.of("entry", "worker:1099"), (level, message) -> relayed.add(level + " " + message), 300);
+			first.relayAtStop();
+			first.close();
+			assertTrue(node.entered.await(0, TimeUnit.SECONDS), "the first step's read stalled");
+			assertEquals(1, liveRelayThreads(prefix), "the abandoned read's thread");
+
+			for (int i = 1; i <= 3; i++) {
+				final var step = prefix + "-" + i;
+				final var stub = anotherStub(node.remote);
+				final long millis = millisOf(() -> {
+					final var relay = new BucketVersioningRelay(step, List.of(mock(FileManager.class), stub),
+									List.of("entry", "worker:1099"), (level, message) -> relayed.add(level + " " + message), 10_000);
+					relay.relayAtStop();
+					relay.close();
+				});
+				assertEquals(1, liveRelayThreads(prefix), "step " + i + " added no thread for the stalled worker");
+				assertTrue(millis < 2_000, "step " + i + " skipped the worker at once: " + millis + " ms");
+			}
+			final var skipped = relayed.stream()
+							.filter(line -> line.contains(": node 001 (worker:1099): an earlier read of its bucket.versioning.log has"
+											+ " not returned, so the relay left it out when the step started"))
+							.count();
+			assertEquals(3, skipped, relayed::toString);
+
+			node.release.countDown();
+			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+			while (liveRelayThreads(prefix) > 0 && System.nanoTime() < deadline) {
+				Thread.sleep(10);
+			}
+			assertEquals(0, liveRelayThreads(prefix), "the released read ended its thread");
+		}
+	}
+
+	/**
+	 * Fable's probe B: a run stopped through the engine API interrupts the step thread in {@code await}, whose
+	 * {@code finally} stops the step with the interrupt still set. The healthy worker's notice still reaches the
+	 * entry's logs before the totals.
+	 */
+	@Test
+	void anInterruptedRunStillRelaysAtItsStop() throws Exception {
+		final var metricsMgr = mock(MetricsManager.class);
+		final var client = new TestLoadStepClient(stepConfig(), Collections.emptyList(), Collections.emptyList(),
+						metricsMgr);
+		final var step = client.loadStepId();
+		final var file = dir.resolve(NOTICE_FILE);
+		Files.writeString(file, "");
+		final var worker = node(file, step);
+		when(worker.fileSize(file.toString())).thenAnswer(inv -> {
+			// Healthy, but not instant: the stop is still waiting when it sees its interrupt.
+			Thread.sleep(200);
+			return FileManager.INSTANCE.fileSize(file.toString());
+		});
+		managers(client).add(mock(FileManager.class));
+		managers(client).add(worker);
+		metricsContexts(client).add(mock(MetricsContext.class));
+		initRelay(client);
+		append(file, "WARN bucket w3: versioning is suspended; SPT left it alone, and the run goes on un-versioned\n");
+		final var slice = mock(LoadStep.class);
+		final var awaiting = new CountDownLatch(1);
+		when(slice.await(anyLong(), any())).thenAnswer(inv -> {
+			awaiting.countDown();
+			return false;
+		});
+		slices(client).add(slice);
+		final var notice = "WARN " + step + ": node 001 (worker:1099): bucket w3: versioning is suspended";
+		try (final var events = new Events()) {
+			final var noticeAtTotals = new AtomicBoolean();
+			final var interruptedAtTotals = new AtomicBoolean();
+			doAnswer(inv -> {
+				// The stop runs with the run's interrupt still set: wait for the async logger without consuming it.
+				interruptedAtTotals.set(Thread.interrupted());
+				try {
+					noticeAtTotals.set(awaitEvent(events.lines, notice, 3));
+				} finally {
+					if (interruptedAtTotals.get()) {
+						Thread.currentThread().interrupt();
+					}
+				}
+				return null;
+			}).when(metricsMgr).unregister(any());
+			final var runner = Thread.ofPlatform().start(() -> {
+				try {
+					client.await(60, TimeUnit.SECONDS);
+				} catch (final Throwable t) {
+					// The interrupt ends the await.
+				}
+			});
+			assertTrue(awaiting.await(5, TimeUnit.SECONDS));
+			runner.interrupt();
+			runner.join(30_000);
+
+			assertFalse(runner.isAlive(), "the interrupted run stopped");
+			assertTrue(interruptedAtTotals.get(), "the stop kept the run's interrupt");
+			assertTrue(noticeAtTotals.get(), "the notice reached the logs before the totals: " + events.lines);
+			assertFalse(events.lines.stream().anyMatch(line -> line.contains("did not answer")), events.lines::toString);
+		}
+	}
+
+	/**
+	 * Sol's duration probe: a duration DELETE whose admission closure fails on one slice publishes its failed
+	 * outcome on an early route, and its close fails. A healthy worker's completed notice is still relayed before the
+	 * totals, and the close's failure still propagates.
+	 */
+	@Test
+	void aFailedDurationDeleteStillRelaysAtItsStop() throws Exception {
+		final var base = TestConfigBuilder.config();
+		final Map<String, Object> keys = Map.of("storage", Map.of("object", Map.of("versioning", Boolean.class)));
+		final var schema = TreeUtil.reduceForest(List.of(TreeUtil.copyTree(base.schema()), keys));
+		final Config config = new BasicConfig(base.pathSep(), schema, Config.deepToMap(base));
+		config.val("load-step-id", "relay-duration-" + System.nanoTime());
+		config.val("load-op-type", "delete");
+		config.val("load-op-delete-standalone", true);
+		config.val("load-op-delete-duration", true);
+		config.val("load-step-limit-time", "60s");
+		config.val(HttpVersioningSynonym.TARGET_PATH, true);
+		final var metricsMgr = mock(MetricsManager.class);
+		final var client = new TestLoadStepClient(config, List.of(), List.of(), metricsMgr);
+		final var step = client.loadStepId();
+		final var file = dir.resolve(NOTICE_FILE);
+		Files.writeString(file, "");
+		final var relay = relay(step, node(file, step));
+		final var field = LoadStepClientBase.class.getDeclaredField("bucketVersioningRelay");
+		field.setAccessible(true);
+		field.set(client, relay);
+		metricsContexts(client).add(mock(MetricsContext.class));
+		final var failedSlice = mock(LoadStep.class);
+		doThrow(new RemoteException("admission unavailable")).when(failedSlice).closeOperationAdmissionForStepStop();
+		slices(client).add(failedSlice);
+		final var atTotals = new CopyOnWriteArrayList<String>();
+		doAnswer(inv -> {
+			atTotals.addAll(relayed);
+			return null;
+		}).when(metricsMgr).unregister(any());
+		Files.writeString(file, "CHECK bucket b\nWARN bucket b: versioning is suspended; SPT left it alone\nDONE bucket b\n");
+
+		client.stop();
+
+		final var notice = "WARN " + step + ": node 001 (worker): bucket b: versioning is suspended; SPT left it alone";
+		assertEquals(List.of(notice), atTotals, "relayed at the stop, before the totals");
+		final var failure = assertThrows(IntegrityTerminalException.class, client::close);
+		assertTrue(failure.getMessage().contains("failed to close operation admission"), failure.getMessage());
+		assertEquals(List.of(notice), relayed, "relayed once");
 	}
 
 	@SuppressWarnings("unchecked")

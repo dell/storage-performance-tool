@@ -29,7 +29,6 @@ import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -134,7 +133,6 @@ class BucketVersioningRelayTest {
 		});
 		final var relay = relay(step, List.of(mock(FileManager.class), node), List.of("node-b:1099"), 30_000);
 		final var check = BucketVersioningNotice.check(step, "bucket b5");
-		final var ended = new AtomicBoolean();
 		final var worker = Thread.ofPlatform().start(() -> {
 			try {
 				if (!polled.await(20, TimeUnit.SECONDS)) {
@@ -145,16 +143,96 @@ class BucketVersioningRelayTest {
 			}
 			BucketVersioningNotice.info(step, "bucket b5: versioning enabled by this run");
 			check.close();
-			ended.set(true);
 		});
 
 		relay.relayAtStop();
-		final boolean endedBeforeTheStopReturned = ended.get();
+		final var atStop = List.copyOf(relayed);
 		worker.join();
+		// A check still open would be named now, as it is at the stop.
+		relay.close();
 
-		assertTrue(endedBeforeTheStopReturned, "the stop was waiting when the check ended, and returned after it");
-		assertEquals(List.of("INFO " + step + ": node 001 (node-b:1099): bucket b5: versioning enabled by this run"), relayed,
-						"the check's notice, and no WARN that it had not ended");
+		assertEquals(List.of("INFO " + step + ": node 001 (node-b:1099): bucket b5: versioning enabled by this run"), atStop,
+						"the stop waited for the check: its notice, and no WARN that it had not ended");
+		assertEquals(atStop, relayed, "the check was cleared: the close names no open check");
+	}
+
+	@Test
+	void anInterruptedCallerStillRelaysAndKeepsItsInterrupt() throws Exception {
+		final var step = "relay-interrupted-" + System.nanoTime();
+		final var file = dir.resolve(BucketVersioningNotice.FILE_NAME);
+		final var node = node(file, step);
+		when(node.fileSize(file.toString())).thenAnswer(inv -> {
+			// A healthy node that takes a moment, so the pass is still waiting when it sees the interrupt.
+			Thread.sleep(200);
+			return FileManager.INSTANCE.fileSize(file.toString());
+		});
+		final boolean[] interruptedAfter = new boolean[2];
+		Files.writeString(file, "");
+		Thread.currentThread().interrupt();
+		try {
+			final var relay = relay(step, List.of(mock(FileManager.class), node), List.of("node-b:1099"), 10_000);
+			interruptedAfter[0] = Thread.currentThread().isInterrupted();
+			Files.writeString(file, "WARN bucket b10: versioning is suspended; SPT left it alone\n");
+			relay.relayAtStop();
+			interruptedAfter[1] = Thread.currentThread().isInterrupted();
+		} finally {
+			Thread.interrupted();
+		}
+
+		assertTrue(interruptedAfter[0] && interruptedAfter[1], "the interrupt is kept through each pass");
+		assertEquals(List.of("WARN " + step + ": node 001 (node-b:1099): bucket b10: versioning is suspended; SPT left it alone"),
+						relayed, "the notice, and no false WARN that the node did not answer");
+	}
+
+	@Test
+	void pastTheEnginesCapOfAbandonedReadsANodeIsLeftOutAtOnce() throws Exception {
+		final var step = "relay-readcap-" + System.nanoTime();
+		final var reads = new BucketVersioningRelay.Reads(1);
+		final var stalledFile = dir.resolve("s").resolve(BucketVersioningNotice.FILE_NAME);
+		final var healthyFile = dir.resolve("h").resolve(BucketVersioningNotice.FILE_NAME);
+		Files.createDirectories(healthyFile.getParent());
+		Files.writeString(healthyFile, "INFO bucket b11: versioning is already enabled\n");
+		final var stalled = node(stalledFile, step);
+		final var release = new CountDownLatch(1);
+		final var calls = new AtomicInteger();
+		when(stalled.fileSize(stalledFile.toString())).thenAnswer(inv -> {
+			if (calls.incrementAndGet() > 1) {
+				release.await(30, TimeUnit.SECONDS);
+			}
+			return 0L;
+		});
+		final var healthy = node(healthyFile, step);
+		try {
+			final var first = new BucketVersioningRelay(step, List.of(mock(FileManager.class), stalled),
+							List.of("entry", "node-s:1099"), (level, message) -> relayed.add(level + " " + message), 300, reads);
+			first.relayAtStop();
+			assertEquals(1, reads.abandoned(), "the stalled read is counted");
+			relayed.clear();
+
+			final long start = System.nanoTime();
+			final var second = new BucketVersioningRelay(step, List.of(mock(FileManager.class), healthy),
+							List.of("entry", "node-h:1099"), (level, message) -> relayed.add(level + " " + message), 10_000, reads);
+			second.close();
+			final long millis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+			assertTrue(millis < 5_000, "left out at once, not at the bound: " + millis + " ms");
+			assertEquals(List.of("WARN " + step + ": node 001 (node-h:1099): 1 earlier reads of the nodes' bucket.versioning.log"
+							+ " have not returned, the most the engine keeps waiting, so the relay left it out when the step"
+							+ " started; its bucket versioning notices are only in that node's bucket.versioning.log"), relayed);
+		} finally {
+			release.countDown();
+		}
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+		while (reads.abandoned() > 0 && System.nanoTime() < deadline) {
+			Thread.sleep(10);
+		}
+		assertEquals(0, reads.abandoned(), "a read that returns frees its place");
+		relayed.clear();
+		final var third = new BucketVersioningRelay(step, List.of(mock(FileManager.class), healthy),
+						List.of("entry", "node-h:1099"), (level, message) -> relayed.add(level + " " + message), 10_000, reads);
+		Files.writeString(healthyFile, Files.readString(healthyFile) + "INFO bucket b12: versioning is already enabled\n");
+		third.close();
+		assertEquals(List.of("INFO " + step + ": node 001 (node-h:1099): bucket b12: versioning is already enabled"), relayed);
 	}
 
 	@Test
