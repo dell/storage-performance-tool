@@ -318,7 +318,6 @@ class S3SigV2CanonicalResourceTest {
 				fast++;
 			}
 		}
-		System.out.println("random canonical-resource queries: 50000, fast path " + fast);
 		assertTrue(fast > 1_000, "the random queries reach the fast path: " + fast);
 	}
 

@@ -1954,7 +1954,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		} else if (legacyVersion && encodedVersionId.length() == versionId.length()) {
 			// itemUri is <the key's path>~<versionId>, and the version ID needs no encoding (encoding
 			// lengthens what it changes), so the URI is itemUri with that ~ replaced by ?versionId=, built in
-			// one copy. Both signers sign it as sent.
+			// one copy. V4 signs it as sent, and so does V2 unless the ID is empty, which V2 signs as the
+			// bare ?versionId (see appendV2CanonicalResource).
 			uri = versionQueryUri(itemUri, keyEnd);
 		} else {
 			// V2 signs the versionId value decoded (see appendV2CanonicalResource); V4 signs it encoded.
@@ -3027,10 +3028,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	 * the unreserved characters that upload IDs and part numbers are made of.
 	 *
 	 * <p>A URI with no query, or whose query is already canonical (see {@link #isCanonicalV2Query}),
-	 * is appended whole, as before the fix: that is every multipart, {@code versionId}, tagging,
-	 * delete and versioning request SPT builds. This method stays small, so it inlines into
-	 * {@code getCanonical}; only a listing, a {@code storage-net-http-uri-args} query or an unsorted
-	 * query takes {@link #appendFilteredV2Resource}.
+	 * is appended whole, as before the fix: that is every multipart, tagging, delete and versioning
+	 * request SPT builds, and every {@code versionId} request whose ID is non-empty and needs no
+	 * encoding. This method stays small, so it inlines into {@code getCanonical}; only a listing, a
+	 * {@code storage-net-http-uri-args} query, an unsorted query, or a {@code versionId} that is empty
+	 * or encoded takes {@link #appendFilteredV2Resource}.
 	 */
 	static void appendV2CanonicalResource(final StringBuilder buff, final String uri) {
 		final int queryStart = uri.indexOf('?');
