@@ -895,17 +895,25 @@ func TestWaitForReplayAutoResultsJoinsCoordinator(t *testing.T) {
 func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 	server := newReplayArchiveServer(t)
 	defer server.Close()
+	// acceptedForCleanup marks POST /run accepted without a trusted identity, so a workload may be
+	// running and the monitor still asks every host to shut down. A launch that fails before
+	// POST /run leaves the session never submitted, and the monitor asks no host.
 	tests := []struct {
-		name     string
-		hosts    string
-		headless bool
-		wantPath string
-		wantErr  error
+		name               string
+		hosts              string
+		headless           bool
+		wantPath           string
+		wantErr            error
+		acceptedForCleanup bool
 	}{
-		{name: "local headless", hosts: "127.0.0.1", headless: true, wantPath: "local-headless", wantErr: errors.New("local headless failed")},
-		{name: "local tui", hosts: "127.0.0.1", wantPath: "local-tui", wantErr: errors.New("local tui failed")},
-		{name: "remote headless cancellation", hosts: "qa-entry.example", headless: true, wantPath: "remote-headless", wantErr: context.Canceled},
-		{name: "remote tui", hosts: "qa-entry.example", wantPath: "remote-tui", wantErr: errors.New("remote tui failed")},
+		{name: "local headless", hosts: "127.0.0.1", headless: true, wantPath: "local-headless", wantErr: errors.New("local headless failed"), acceptedForCleanup: true},
+		{name: "local tui", hosts: "127.0.0.1", wantPath: "local-tui", wantErr: errors.New("local tui failed"), acceptedForCleanup: true},
+		{name: "remote headless cancellation", hosts: "qa-entry.example", headless: true, wantPath: "remote-headless", wantErr: context.Canceled, acceptedForCleanup: true},
+		{name: "remote tui", hosts: "qa-entry.example", wantPath: "remote-tui", wantErr: errors.New("remote tui failed"), acceptedForCleanup: true},
+		{name: "local headless never submitted", hosts: "127.0.0.1", headless: true, wantPath: "local-headless", wantErr: errors.New("local headless failed")},
+		{name: "local tui never submitted", hosts: "127.0.0.1", wantPath: "local-tui", wantErr: errors.New("local tui failed")},
+		{name: "remote headless cancellation never submitted", hosts: "qa-entry.example", headless: true, wantPath: "remote-headless", wantErr: context.Canceled},
+		{name: "remote tui never submitted", hosts: "qa-entry.example", wantPath: "remote-tui", wantErr: errors.New("remote tui failed")},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -969,6 +977,9 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 						sessionManagedCalls.Add(1)
 					}
 				}
+				if test.acceptedForCleanup {
+					options.LaunchHooks.NotifyAcceptedForCleanup()
+				}
 				return test.wantErr
 			}
 			startReplayRemoteTUI = func(
@@ -982,6 +993,9 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 					if options.LaunchHooks.SessionManaged() {
 						sessionManagedCalls.Add(1)
 					}
+				}
+				if test.acceptedForCleanup {
+					options.LaunchHooks.NotifyAcceptedForCleanup()
 				}
 				return test.wantErr
 			}
@@ -997,6 +1011,9 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 						sessionManagedCalls.Add(1)
 					}
 				}
+				if test.acceptedForCleanup {
+					options.LaunchHooks.NotifyAcceptedForCleanup()
+				}
 				return test.wantErr
 			}
 			startReplayLocalTUI = func(_ string, _ string, _ scenario.Params, options tui.RunOptions) error {
@@ -1009,11 +1026,15 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 						sessionManagedCalls.Add(1)
 					}
 				}
+				if test.acceptedForCleanup {
+					options.LaunchHooks.NotifyAcceptedForCleanup()
+				}
 				return test.wantErr
 			}
 
 			cmd := newReplayCommandForTest(t)
-			cmd.SetOut(io.Discard)
+			output := &lockedBuffer{}
+			cmd.SetOut(output)
 			cmd.SetErr(io.Discard)
 			args := []string{
 				"--from", server.URL, "--endpoints", "http://s3.example",
@@ -1036,6 +1057,13 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 			}
 			shutdownMu.Lock()
 			defer shutdownMu.Unlock()
+			if !test.acceptedForCleanup {
+				if len(shutdownRequests) != 0 {
+					t.Fatalf("shutdown requests = %+v, want none after a launch that was never submitted", shutdownRequests)
+				}
+				assertNeverSubmittedCleanupOutput(t, output.String())
+				return
+			}
 			if len(shutdownRequests) != 1 {
 				t.Fatalf("shutdown requests = %+v, want exactly one", shutdownRequests)
 			}
