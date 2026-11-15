@@ -6,6 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import javax.script.ScriptEngine;
@@ -62,6 +64,29 @@ class ScenarioUtilScriptEngineTest {
 		assertTrue(
 						se.getFactory().getExtensions().contains("js"),
 						"expected the JavaScript engine, got " + se.getFactory().getEngineName());
+	}
+
+	/**
+	 * A class loader whose services list {@link FakeScriptEngineFactory}, as an engine jar in
+	 * {@code ext/} would.
+	 */
+	private ClassLoader fakeEngineClassLoader() throws Exception {
+		final var services = dir.resolve("fake-engine/META-INF/services/javax.script.ScriptEngineFactory");
+		Files.createDirectories(services.getParent());
+		Files.writeString(services, FakeScriptEngineFactory.class.getName() + "\n");
+		return new URLClassLoader(
+						new URL[]{dir.resolve("fake-engine").toUri().toURL()
+						},
+						Thread.currentThread().getContextClassLoader());
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"t.groovy", "t.py", "T.GROOVY", "T.PY", "t.Groovy"
+	})
+	void anInstalledGroovyOrPythonEngineIsUsed(final String fileName) throws Exception {
+		final var se = ScenarioUtil.scriptEngineByFilePath(scenario(fileName), fakeEngineClassLoader());
+		assertNotNull(se);
+		assertEquals(FakeScriptEngineFactory.ENGINE_NAME, se.getFactory().getEngineName());
 	}
 
 	@Test
