@@ -2112,7 +2112,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/** An abort after a failed completion, still pending: its upload and the completion's status. */
-	private record PendingAbort(CompositeDataOperation op, Operation.Status completionStatus) {}
+	record PendingAbort(CompositeDataOperation op, Operation.Status completionStatus) {}
 
 	void scheduleFailedCompletionAbort(
 					final CompositeDataOperation op, final Operation.Status completionStatus) {

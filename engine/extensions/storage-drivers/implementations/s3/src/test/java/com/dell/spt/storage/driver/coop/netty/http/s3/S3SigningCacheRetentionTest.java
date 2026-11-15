@@ -5,7 +5,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.item.Item;
@@ -20,9 +19,7 @@ import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -67,21 +64,21 @@ class S3SigningCacheRetentionTest {
 	}
 
 	@Test
-	void aFailedCloseStillEmptiesTheClosingThreadsCaches() throws Exception {
+	void aFailedCleanupStillEmptiesTheClosingThreadsCaches() throws Exception {
 		final var driver = new S3StorageDriver<Item, Operation<Item>>(
 						"signing-retention", null, plainStorage(), false, 1);
 		sign(driver);
 		driver.signingKeyCache.get().put("20261113", new byte[0]);
 		final var cleanups = multipartCleanupTasks(driver);
-		cleanups.add(CompletableFuture.failedFuture(new IllegalStateException("a failed multipart cleanup")));
+		cleanups.put(
+						CompletableFuture.failedFuture(new IllegalStateException("a failed multipart cleanup")),
+						new S3StorageDriver.PendingAbort(null, Operation.Status.FAIL_UNKNOWN));
 		try {
-			assertThrows(CompletionException.class, driver::close, "the cleanup's failure ends close");
+			driver.close();
+			assertTrue(cleanups.isEmpty(), "the close let go of the failed cleanup");
 			assertTrue(driver.signingKeyCreateFunctionCache.get().isEmpty(), "the closing thread's functions were cleared");
 			assertTrue(driver.signingKeyCache.get().isEmpty(), "the closing thread's keys were cleared");
 		} finally {
-			// The failed close left the driver open; with the failed task gone, close finishes.
-			cleanups.clear();
-			driver.close();
 			driver.signingKeyCreateFunctionCache.remove();
 			driver.signingKeyCache.remove();
 		}
@@ -176,10 +173,11 @@ class S3SigningCacheRetentionTest {
 	}
 
 	@SuppressWarnings("unchecked")
-	private static Set<CompletableFuture<Void>> multipartCleanupTasks(final S3StorageDriver<?, ?> driver) throws Exception {
+	private static Map<CompletableFuture<Void>, S3StorageDriver.PendingAbort> multipartCleanupTasks(
+					final S3StorageDriver<?, ?> driver) throws Exception {
 		final var field = S3StorageDriver.class.getDeclaredField("multipartCleanupTasks");
 		field.setAccessible(true);
-		return (Set<CompletableFuture<Void>>) field.get(driver);
+		return (Map<CompletableFuture<Void>, S3StorageDriver.PendingAbort>) field.get(driver);
 	}
 
 	private static S3StorageDriver<?, ?> driverOf(final S3TargetBucketControl control) throws Exception {
