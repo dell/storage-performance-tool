@@ -128,6 +128,14 @@ public class CompositeDataOperationImpl<I extends DataItem> extends DataOperatio
 	}
 
 	@Override
+	public final void resetSubOperations() {
+		subTasks.clear();
+		subTaskYieldIndex.set(0);
+		contextData.clear();
+		pendingSubTasksCount.set(-1);
+	}
+
+	@Override
 	public final long sizeThreshold() {
 		return sizeThreshold;
 	}

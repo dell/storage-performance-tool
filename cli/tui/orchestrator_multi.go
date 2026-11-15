@@ -651,6 +651,10 @@ func (o *MultiHostOrchestrator) GetExecutionParticipantHosts() ([]*HostConnectio
 	return participants, true, nil
 }
 
+// configureItemFileMounts stages the item files on each host. On a failure it
+// returns the error without rolling back: every caller chain runs the start
+// rollback (cleanupManagedContainersAfterStartFailure) once on that error, so
+// a second pass here would only repeat its work and its errors.
 func (o *MultiHostOrchestrator) configureItemFileMounts(
 	ctx context.Context, hosts []*HostConnection, mounts []scenario.FileMount,
 ) error {
@@ -660,8 +664,7 @@ func (o *MultiHostOrchestrator) configureItemFileMounts(
 	copied := itemFileCopySize(mounts)
 	for _, host := range hosts {
 		if host.DockerManager == nil {
-			cause := fmt.Errorf("host %s has no Docker manager configured", host.Info.Original)
-			return errors.Join(cause, o.cleanupManagedContainersAfterStartFailure(ctx))
+			return fmt.Errorf("host %s has no Docker manager configured", host.Info.Original)
 		}
 		// Remote item staging is itself a managed resource. Claim ownership
 		// before staging so a failed remote rm remains reachable by StopAll.
@@ -670,8 +673,7 @@ func (o *MultiHostOrchestrator) configureItemFileMounts(
 		// what each one waits for.
 		o.notifyf("📦 Copying %sitem files to %s...", copied, host.Info.Original)
 		if err := configureDockerFileMounts(ctx, host.DockerManager, mounts); err != nil {
-			cause := fmt.Errorf("configure item file mounts on %s: %w", host.Info.Original, err)
-			return errors.Join(cause, o.cleanupManagedContainersAfterStartFailure(ctx))
+			return fmt.Errorf("configure item file mounts on %s: %w", host.Info.Original, err)
 		}
 	}
 	return nil
