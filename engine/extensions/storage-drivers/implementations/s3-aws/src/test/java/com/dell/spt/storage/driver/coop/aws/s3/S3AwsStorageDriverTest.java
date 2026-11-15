@@ -3776,12 +3776,12 @@ public class S3AwsStorageDriverTest {
 		}
 
 		@Test
-		void doClose_closesS3AsyncClientAndExecutors() throws Exception {
+		void doClose_closesS3AsyncClientAndUploadExecutor() throws Exception {
 			S3AsyncClient mockClient = mock(S3AsyncClient.class);
 			S3AsyncClient exactVersionClient = mock(S3AsyncClient.class);
 			final Config config = mockDriverConfig();
 
-			// Create the driver so it initializes its executors
+			// Create the driver so it initializes its upload executor
 			S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
 							"step-1", mock(com.dell.spt.base.data.DataInput.class), config, false, 1, mockClient, exactVersionClient, 100 * 1024L, 8 * 1024 * 1024L);
 
@@ -3792,12 +3792,7 @@ public class S3AwsStorageDriverTest {
 			verify(mockClient, times(1)).close();
 			verify(exactVersionClient, times(1)).close();
 
-			// Assert: Verify the thread pools were shut down
-			Field executorField = S3AwsStorageDriver.class.getDeclaredField("executor");
-			executorField.setAccessible(true);
-			ExecutorService executor = (ExecutorService) executorField.get(driver);
-			assertTrue(executor.isShutdown(), "Read executor should be shut down");
-
+			// Assert: Verify the thread pool was shut down
 			Field uploadExecutorField = S3AwsStorageDriver.class.getDeclaredField("uploadExecutor");
 			uploadExecutorField.setAccessible(true);
 			ExecutorService uploadExecutor = (ExecutorService) uploadExecutorField.get(driver);
