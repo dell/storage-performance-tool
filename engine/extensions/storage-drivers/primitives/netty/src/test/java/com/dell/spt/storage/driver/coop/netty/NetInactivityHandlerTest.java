@@ -88,6 +88,30 @@ class NetInactivityHandlerTest {
 	}
 
 	@Test
+	void aNewMessageAloneCountsAsProgress() throws Exception {
+		// One flushed record done and the next one started at the same offset, with the same bytes
+		// pending (a new record replaced the old one in the count).
+		final var out = new Output(1);
+		final var handler = new NetInactivityHandler(1);
+		handler.channelIdle(out.ctx, FIRST);
+		out.message = new Object();
+		handler.channelIdle(out.ctx, NEXT);
+		verify(out.ctx, never()).fireUserEventTriggered(NEXT);
+	}
+
+	@Test
+	void fewerPendingBytesAloneCountAsProgress() throws Exception {
+		// A whole message went out and the next one has not started: same current message (by
+		// identity) and progress, fewer bytes pending.
+		final var out = new Output(1);
+		final var handler = new NetInactivityHandler(1);
+		handler.channelIdle(out.ctx, FIRST);
+		out.pending = 500;
+		handler.channelIdle(out.ctx, NEXT);
+		verify(out.ctx, never()).fireUserEventTriggered(NEXT);
+	}
+
+	@Test
 	void aNewActivityTakesAFreshSample() throws Exception {
 		// After a read or completed write the next event is a first one again: it only samples,
 		// whatever the previous period's sample was.
@@ -117,7 +141,7 @@ class NetInactivityHandlerTest {
 	}
 
 	@Test
-	void aScheduledEventReachesTheNextHandler() {
+	void aScheduledEventReachesTheNextHandler() throws InterruptedException {
 		final var seen = new ArrayList<Object>();
 		final var channel = new EmbeddedChannel(
 						new NetInactivityHandler(1),
@@ -127,8 +151,15 @@ class NetInactivityHandlerTest {
 								seen.add(evt);
 							}
 						});
-		channel.advanceTimeBy(1, TimeUnit.MILLISECONDS);
-		channel.runScheduledPendingTasks();
+		// IdleStateHandler times the idle period with System.nanoTime(), not the channel's virtual
+		// clock, and that is package-private in Netty, so the test cannot share one clock with
+		// it. Let the real 1 ms period expire: until it has, the task only reschedules itself.
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		while (seen.isEmpty() && System.nanoTime() < deadline) {
+			Thread.sleep(2);
+			channel.advanceTimeBy(2, TimeUnit.MILLISECONDS);
+			channel.runScheduledPendingTasks();
+		}
 		assertTrue(seen.contains(FIRST), seen::toString);
 		channel.finishAndReleaseAll();
 	}
