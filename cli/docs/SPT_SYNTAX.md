@@ -606,7 +606,7 @@ spt run write \
 | `--results-dir` | `./results` | Directory to write retrieved results artifacts |
 | `--label` | `""` | Label for output directory naming and step ID prefix (default: `mt`); step artifacts use the same prefix |
 | `--auto-results-debug` | `false` | Enable verbose debug logs for results retrieval |
-| `--shutdown-on-complete` | `true` | Request `/shutdown` on all hosts after fetching results |
+| `--shutdown-on-complete` | `true` | Request `/shutdown` on all hosts after fetching results; with `--attach-existing`, on the entry node only, so the attached workers keep running |
 | `--shutdown-linger` | `5` | Seconds to wait for `/status` linger after `/shutdown` |
 
 #### 5. Multi-Host / Distributed Options
@@ -822,7 +822,7 @@ A replay exits 1, as `spt run` does, when the engine ends its scenario FAILED, w
 | `--auto-results` | `true` | Automatically retrieve results artifacts at end of replay |
 | `--results-dir` | `./results` | Directory to write retrieved replay results artifacts |
 | `--auto-results-debug` | `false` | Enable verbose auto-results logs |
-| `--shutdown-on-complete` | `true` | Request `/shutdown` after fetching results |
+| `--shutdown-on-complete` | `true` | Request `/shutdown` after fetching results; with `--attach-existing`, on the entry node only, so the attached workers keep running |
 | `--shutdown-linger` | `5` | Seconds to wait for `/status` linger after `/shutdown` |
 
 ### Replay Distributed Options
@@ -944,8 +944,7 @@ When multipart uploads are used, the engine produces a `parts.upload.csv` artifa
 - Multipart upload scheduling is handled by the engine. The CLI does not override `load.batch.size` when `--part-size` is set; direct JAR users also do not need `load-batch-size=1` for MPU correctness.
 - Part uploads share the `--threads` concurrency pool with regular operations.
 - If `--part-size` is omitted, objects are uploaded as single PUTs regardless of size.
-- In a `read` workload, `--part-size` applies to the seed phase and to the read phase. The seed writes each object larger than the part size with a multipart upload. The read phase splits each such object into one range GET per part and sends them in parallel. This works with the default Netty driver and with `--s3-driver rdma`; on `rdma`, these range GETs go over HTTP (see [Threshold-Based Routing](S3_RDMA.md#threshold-based-routing)).
-- With `--s3-driver aws`, a seeded `read` with `--part-size` fails every read of an object larger than the part size: the `s3-aws` driver does not split reads. To seed with multipart uploads on that driver, write with `--part-size <size> --save-items` and read with `--items-file`.
+- In a `read` workload, `--part-size` applies to the seed phase and to the read phase. The seed writes each object larger than the part size with a multipart upload. The read phase splits each such object into one range GET per part and sends them in parallel. This works with the default Netty driver, with `--s3-driver aws` and with `--s3-driver rdma`; on `rdma`, these range GETs go over HTTP (see [Threshold-Based Routing](S3_RDMA.md#threshold-based-routing)). Through 5.17.0, `--s3-driver aws` sent no request for such a read and failed it.
 - A `read` with `--items-file` has no seed phase and does not pass `--part-size` to the read phase, so each object is read whole, not split by `--part-size`. An `--engine-override` of `item.data.ranges.threshold` is the exception: it applies to this read too.
 
 ### Read Workload
@@ -1285,7 +1284,9 @@ spt run write \
 
 Notes:
 - Workers must already serve the run's API port (`--api-port`, default 9999) and RMI registry port (`--rmi-registry-port`, default 1099). `spt` starts no worker, so a worker on other ports fails the run's readiness wait; start one for other ports with the engine options `--run-port=<api-port>` and `--load-step-node-port=<rmi-registry-port>`.
-- `spt` still launches and manages the entry node; worker containers remain untouched during shutdown.
+- `spt` still launches and manages the entry node; worker containers remain untouched during shutdown. At the end of a run, normal or interrupted, `--shutdown-on-complete` asks only the entry node to shut down, which ends its run, so the attached workers keep running and the next run can attach to them again. Whoever started a worker stops it.
+- The workers' steps end only when the entry ends its run. If the entry dies or can't be reached mid-run, or an interrupted run's entry takes more than 10 seconds to stop its run, a worker's step can keep generating load until its own limit. After a failed or interrupted attach run, check the workers and restart them before the next run.
+- `--items-file` and the other item files are copied only to the entry node, not to the attached workers.
 - The host list must include at least one worker; the tool enforces this when `--attach-existing` is set.
 
 ### Headless CI Mode

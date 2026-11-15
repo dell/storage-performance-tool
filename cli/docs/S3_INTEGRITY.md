@@ -199,7 +199,8 @@ runs return `1` and reject `--allow-empty-selection`. An empty `read-verify`
 selection also returns `1` by default. Use `--allow-empty-selection` only when
 an empty, successfully discovered or staged set is the expected answer. For an
 immediate or later verification run, a nonempty selection with zero successful
-verification operations can never pass.
+verification operations can never pass, and a run that leaves any selected
+object unverified returns `1` and lists those objects in `verify-remaining.csv`.
 
 ## Results and resumability
 

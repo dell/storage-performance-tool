@@ -188,19 +188,35 @@ class ResponseHandlerBaseTest {
 	}
 
 	@Test
-	void userEventTriggered_idleStateEvent_throwsSocketTimeout() {
+	void userEventTriggered_idleStateEvent_failsTheInFlightOperation() throws Exception {
+		// NetInactivityHandler decides which idle events reach this handler; each one that does
+		// is a timeout of the operation in flight.
 		final var driver = mock(NettyStorageDriverBase.class);
+		when(driver.isStarted()).thenReturn(true);
+		when(driver.isStopped()).thenReturn(false);
+		final var handler = newHandler(driver);
+		final Operation<Item> op = mock(Operation.class);
+		final var ch = channelWithHandler(handler, op);
+
+		ch.pipeline().fireUserEventTriggered(IdleStateEvent.FIRST_ALL_IDLE_STATE_EVENT);
+
+		verify(op).status(Operation.Status.FAIL_IO);
+		verify(driver).complete(ch, op);
+		ch.finishAndReleaseAll();
+	}
+
+	@Test
+	void userEventTriggered_idleStateEventWithoutOperation_keepsTheChannelOpen() {
+		// An idle pooled connection with no operation swallows the event and stays in the pool.
+		final var driver = mock(NettyStorageDriverBase.class);
+		when(driver.isStarted()).thenReturn(true);
 		final var handler = newHandler(driver);
 		final var ch = channelWithHandler(handler, null);
 
-		// IdleStateEvent should cause SocketTimeoutException, which propagates
-		// through the pipeline as an exception
 		ch.pipeline().fireUserEventTriggered(IdleStateEvent.ALL_IDLE_STATE_EVENT);
 
-		// The SocketTimeoutException thrown by userEventTriggered will be caught
-		// by Netty and forwarded to exceptionCaught. Since there's no op on the
-		// channel, it should be a no-op there.
-		// Verify the channel is still usable (no crash)
+		assertTrue(ch.isOpen());
+		verify(driver, never()).complete(any(), any());
 		ch.finishAndReleaseAll();
 	}
 
