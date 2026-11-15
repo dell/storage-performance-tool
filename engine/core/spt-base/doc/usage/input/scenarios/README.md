@@ -605,8 +605,9 @@ and for the Jython support are available for the reference:
 [`Dockerfile.scripting-groovy`](../../../../ci/docker/Dockerfile.scripting-groovy) and
 [`Dockerfile.scripting-jython`](../../../../ci/docker/Dockerfile.scripting-jython).
 
-The engine picks the script engine by the scenario file's extension. A
-`.groovy` or `.py` scenario needs its engine jar in `ext/`: without it the
-engine stops with a message that the Groovy or Python script engine is not
-installed, and exits 1. Any other file that no installed engine claims runs
-as JavaScript.
+With `--run-scenario`, the engine picks the script engine by the scenario
+file's extension. A `.groovy` or `.py` scenario needs its engine jar in
+`ext/`: without it the engine stops with a message that the Groovy or Python
+script engine is not installed, and exits 1. Any other file that no installed
+engine claims runs as JavaScript. A node (`--run-node`) always runs the
+scenario posted to `POST /run` as JavaScript, whatever engines are in `ext/`.
