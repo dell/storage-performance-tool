@@ -511,8 +511,8 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 	/**
 	 * Thrown by {@link #httpRequest} for an operation it can't build as asked, for example a versioned
 	 * request whose {@code dataUriPath} override drops the version. Nothing is sent: the operation
-	 * fails at once with {@link Status#FAIL_UNKNOWN} and its permit and connection return through
-	 * {@link #complete}.
+	 * fails at once with {@link Status#FAIL_UNKNOWN}, and {@link #complete} returns its permit and
+	 * closes its connection, as for any failed operation.
 	 */
 	protected static final class RejectedRequestException extends IllegalStateException {
 
