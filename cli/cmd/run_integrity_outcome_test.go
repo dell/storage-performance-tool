@@ -341,7 +341,7 @@ func TestResolveVerificationRunErrorDeferredWritePolicy(t *testing.T) {
 	params := scenario.Params{WorkloadType: scenario.WorkloadTypeWriteVerify, DeferVerification: true}
 	outcome := autoResultsOutcome{
 		Tracker:      &portcheck.RunResult{FinalState: constants.StateCompleted},
-		Finalization: &integrity.FinalizeOutcome{Complete: true, VerificationDeferred: true},
+		Finalization: &integrity.FinalizeOutcome{Complete: true, VerificationDeferred: true, SelectionCount: 3},
 	}
 	if err := resolveVerificationRunError(nil, outcome, true, params); err != nil {
 		t.Fatalf("nonempty deferred seed should pass: %v", err)

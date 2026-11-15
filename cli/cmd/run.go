@@ -141,8 +141,9 @@ type autoResultsOutcome struct {
 	// empty selection proven by finalization may pass it, and no count is taken from its files.
 	LiveCorruptionUnobserved bool
 	// ProducerRecovered marks a LIST or CREATE step that the live step list never showed and whose
-	// files were fetched because the tracker says it completed. Like every other route, such a run
-	// passes a non-empty selection only when every selected object verified.
+	// files were fetched because the tracker says it completed. It records the route only: no exit
+	// rule reads it, because every route passes a non-empty selection only when every selected
+	// object verified.
 	ProducerRecovered bool
 }
 
