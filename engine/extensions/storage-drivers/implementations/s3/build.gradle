@@ -50,7 +50,9 @@ dependencies {
 		libs.netty.transport.native.epoll,
 	)
 	// S3NicSetWorkloadTest runs pipeline and weighted steps as engine scenarios on the NIC-set route.
+	// ScenarioExampleConfigTest binds every step type the image ships, MixedLoad included.
 	testRuntimeOnly(
+		project(':extensions:load-steps:mixed'),
 		project(':extensions:load-steps:pipeline'),
 		project(':extensions:load-steps:weighted'),
 	)

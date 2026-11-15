@@ -128,6 +128,12 @@ public interface ConfigSliceUtil {
 	 */
 	static void sliceNodeInterfaces(
 					final Config config, final List<Config> configSlices, final List<String> nodeAddrs) {
+		sliceNodeInterfaces(config, configSlices, nodeAddrs, true);
+	}
+
+	/** As {@link #sliceNodeInterfaces(Config, List, List)}, logging each slice's interfaces only when {@code logged}. */
+	static void sliceNodeInterfaces(
+					final Config config, final List<Config> configSlices, final List<String> nodeAddrs, final boolean logged) {
 		final var overrides = NicSetConfig.nodeInterfaces(config);
 		if (overrides.isEmpty()) {
 			return;
@@ -141,6 +147,9 @@ public interface ConfigSliceUtil {
 				configSlice.val(NicSetConfig.SLICE_INTERFACES_PATH, new ArrayList<>(override));
 			}
 			configSlice.val(NicSetConfig.SLICE_NODE_INTERFACES_PATH, new HashMap<String, Object>());
+			if (!logged) {
+				continue;
+			}
 			final var effective = override != null ? override : stepValue;
 			Loggers.MSG.info(
 							"Load step slice #{} ({}) interfaces: {} ({})",

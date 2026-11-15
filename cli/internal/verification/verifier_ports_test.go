@@ -54,8 +54,8 @@ func TestStartNodeContainer_EngineListensOnVerifiedPorts(t *testing.T) {
 		{
 			name:   "bridge publishes the API port it serves",
 			config: Config{NetworkMode: constants.BridgeNetworkMode, APIPort: 19100, RMIPortStart: 40000, RMIPortCount: 2},
-			want:   []string{"-p 1099:1099/tcp", "-p 19100:19100/tcp", "-p 40000:40000/tcp", "-p 40001:40001/tcp", "--run-port=19100"},
-			absent: []string{"-p 9999:9999/tcp", "--run-port=9999", constants.EngineNodePortArgPrefix},
+			want:   []string{"-p 1099:1099/tcp", "-p 19100:19100/tcp", "--run-port=19100"},
+			absent: []string{"-p 9999:9999/tcp", "--run-port=9999", constants.EngineNodePortArgPrefix, "-p 40000:", "-p 40001:"},
 		},
 		{
 			name:   "RDMA keeps its device flags",
@@ -111,8 +111,8 @@ type recordingPreflight struct {
 	ports [][]int
 }
 
-func (p *recordingPreflight) CheckPorts(_ context.Context, host *hostparse.HostInfo, registryPort, apiPort, rmiPortStart, rmiPortCount int) (*dockerconf.ConflictInfo, error) {
-	p.ports = append(p.ports, []int{registryPort, apiPort, rmiPortStart, rmiPortCount})
+func (p *recordingPreflight) CheckPorts(_ context.Context, host *hostparse.HostInfo, registryPort, apiPort int) (*dockerconf.ConflictInfo, error) {
+	p.ports = append(p.ports, []int{registryPort, apiPort})
 	return &dockerconf.ConflictInfo{Host: host}, nil
 }
 
@@ -136,7 +136,7 @@ func TestVerifyNode_NonDefaultPortsAreConsistent(t *testing.T) {
 	if !result.Overall.Passed || result.Overall.Message != "READY" {
 		t.Fatalf("Overall = %+v; ports %+v, metrics %+v, control %+v", result.Overall, result.PortsAccessible, result.MetricsEndpoint, result.ControlEndpoint)
 	}
-	if want := [][]int{{registryPort, apiPort, 40000, 10}}; !slices.EqualFunc(pf.ports, want, slices.Equal[[]int]) {
+	if want := [][]int{{registryPort, apiPort}}; !slices.EqualFunc(pf.ports, want, slices.Equal[[]int]) {
 		t.Errorf("preflight checked %v, want %v", pf.ports, want)
 	}
 	run := strings.Join(dockerRunCommand(t, executor.ExecutedCommands), " ")

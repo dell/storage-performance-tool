@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -62,7 +63,9 @@ const (
 	flagBucketMetrics         = "bucket-metrics"
 	flagCreatePrefix          = "create-prefix"
 	flagRMIRegistryPort       = "rmi-registry-port"
-	rmiRegistryPortUsage      = "Engine RMI registry port on every host; give each concurrent spt run on the same hosts its own port, and its own --rmi-port-start when a run has a local worker"
+	rmiRegistryPortUsage      = "Engine RMI registry port on every host; give each concurrent spt run on the same hosts, with or without a local worker, its own --rmi-registry-port and --api-port"
+	rmiPortStartUsage         = "No effect; kept for compatibility (the engine serves RMI on the registry port)"
+	rmiPortCountUsage         = "No effect; kept for compatibility"
 	flagInterfaces            = "interfaces"
 	flagHostInterfaces        = "host-interfaces"
 	itemNamingShardsPath      = "item.naming.shards"
@@ -70,6 +73,11 @@ const (
 	deleteAllDiscoveredLabel  = "all discovered identities (unbounded)"
 	createPrefixDeprecation   = "it never had an effect and will be removed in the next minor release; " +
 		"spt provisions target buckets by default (see --provision-target-bucket)"
+)
+
+const (
+	flagOutputDir        = "output-dir"
+	outputDirDeprecation = "it never had an effect; spt run writes results under --results-dir (default ./results)"
 )
 
 // resolvePortConflictFunc is a test seam for port conflict resolution.
@@ -194,6 +202,32 @@ func (m *autoResultsMonitor) BindSession(session *runcontrol.Session) {
 	m.sessionMu.Lock()
 	m.session = session
 	m.sessionMu.Unlock()
+}
+
+// hasSummarizableEvidence reports whether the results root holds anything the
+// run summary loads: the results manifest or the engine identity manifest. A
+// root that cannot be inspected counts as having evidence, so the summary step
+// runs and reports the problem itself.
+func hasSummarizableEvidence(root string) bool {
+	for _, name := range []string{constants.ResultsManifestFileName, constants.EngineInfoManifestName} {
+		if _, err := os.Stat(filepath.Join(root, name)); !errors.Is(err, fs.ErrNotExist) {
+			return true
+		}
+	}
+	return false
+}
+
+// provenNotSubmitted reports that the bound session never dispatched POST /run.
+// Without a bound session the monitor cannot tell, so it reports false and the
+// caller keeps the conservative cleanup.
+func (m *autoResultsMonitor) provenNotSubmitted() bool {
+	if m == nil {
+		return false
+	}
+	m.sessionMu.RLock()
+	session := m.session
+	m.sessionMu.RUnlock()
+	return session != nil && session.SubmissionState() == runcontrol.SubmissionNotSubmitted
 }
 
 func (m *autoResultsMonitor) markWorkloadTerminal() {
@@ -744,6 +778,11 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			}
 		}
 		cleanupOnly := monitor.cleanupOnly.Load()
+		// A launch that failed before POST /run left no workload to stop and no
+		// results to summarize. /shutdown carries no run identity, so posting it
+		// would only be refused by hosts without an engine, or stop prestarted
+		// attach-mode workers. Removal still runs through the pre-summary hook.
+		nothingSubmitted := cleanupOnly && monitor.provenNotSubmitted()
 		if cleanupOnly {
 			outcome.TrackerErr = monitorCtx.Err()
 			writeProgress("Auto-results: launch did not establish trusted evidence; skipping ordinary tracking and finalizing resources.\n")
@@ -1059,7 +1098,9 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 
 		// Normal terminal runs collect their completed evidence before shutdown.
 		// Interrupted runs already shut down and reconciled before salvage.
-		if shutdownOn && !shutdownPerformed {
+		if shutdownOn && !shutdownPerformed && nothingSubmitted {
+			writeProgress("Auto-results: no run was submitted; nothing to shut down.\n")
+		} else if shutdownOn && !shutdownPerformed {
 			if !cleanupOnly {
 				settleTimer := time.NewTimer(constants.AutoResultsShutdownSettleDelay)
 				select {
@@ -1105,6 +1146,13 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		updateRunLifecycleMetadata(metadata, &outcome)
 		if err := writeRunMetadata(metadata, root); err != nil {
 			logging.LogError("auto-results", "write pre-summary lifecycle metadata", err)
+		}
+		// The engine identity gate runs before POST /run and leaves its manifest
+		// indexed, so a rejected or refused submission still has a summary to
+		// render. Only a start that never reached the gate has nothing to load.
+		if nothingSubmitted && !hasSummarizableEvidence(root) {
+			writeProgress("Auto-results: no run was submitted; no results were produced.\n")
+			return
 		}
 
 		writer := summaryOut
@@ -1835,6 +1883,32 @@ func validatePortFlag(flag string, port int) error {
 	return nil
 }
 
+// normalizeAPIPortFlag checks --api-port and returns it. An unset flag is the Spt standard port.
+// A set value must be plain decimal digits, after trimming, from 1 to 65535: a sign, an inner space
+// or any other character is refused, so a value such as +20041 cannot reach the engine and the API
+// URLs in two different forms. The canonical decimal is written back to the flag, so every later
+// reader (getAPIPort, the port check, each route and the run metadata) sees 9999 for 09999.
+func normalizeAPIPortFlag(cmd *cobra.Command) (int, error) {
+	raw, _ := cmd.Flags().GetString(flagAPIPort)
+	if raw == "" {
+		return constants.DefaultSptAPIPort, nil
+	}
+	value := strings.TrimSpace(raw)
+	if value == "" || strings.TrimLeft(value, "0123456789") != "" {
+		return 0, fmt.Errorf("--%s must be between 1 and 65535, got %q", flagAPIPort, raw)
+	}
+	port, err := strconv.Atoi(value)
+	if err != nil || port < 1 || port > 65535 {
+		return 0, fmt.Errorf("--%s must be between 1 and 65535, got %s", flagAPIPort, value)
+	}
+	if canonical := strconv.Itoa(port); canonical != raw {
+		if err := cmd.Flags().Set(flagAPIPort, canonical); err != nil {
+			return 0, err
+		}
+	}
+	return port, nil
+}
+
 // validateDistinctEnginePorts refuses an API port equal to the RMI registry port. Every engine
 // serves both, so its second bind would fail and the run would end on a readiness timeout.
 func validateDistinctEnginePorts(apiPort, registryPort int) error {
@@ -1971,6 +2045,11 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 
 		// Validate workload type
 		if err := validateRunWorkloadTypeFunc(workloadType); err != nil {
+			return err
+		}
+		// Refuse a --network-mode typo before the scenario file, any port check or host connection.
+		networkModeFlag, _ := cmd.Flags().GetString("network-mode")
+		if err := validateNetworkMode(networkModeFlag); err != nil {
 			return err
 		}
 
@@ -2522,7 +2601,8 @@ func init() {
 	runCmd.Flags().String(flagVersions, scenario.VersionsCurrent, "Read-verify prefix discovery: current or all object versions")
 	runCmd.Flags().Bool(flagCreatePrefix, false, "Deprecated: has no effect")
 	_ = runCmd.Flags().MarkDeprecated(flagCreatePrefix, createPrefixDeprecation)
-	runCmd.Flags().StringP("output-dir", "O", "", "Specifies a local directory on the host machine to save the detailed Spt report files (e.g., ./results/test-01)")
+	runCmd.Flags().StringP(flagOutputDir, "O", "", "Deprecated: has no effect; use --results-dir")
+	_ = runCmd.Flags().MarkDeprecated(flagOutputDir, outputDirDeprecation)
 	runCmd.Flags().Bool("generate-only", false, "Generate the scenario file without running Docker or Spt")
 	// Headless auto-termination
 	runCmd.Flags().Int("auto-terminate-seconds", 0, "Automatically terminate headless runs after N seconds (0 = unlimited)")
@@ -2587,8 +2667,8 @@ Example: --test-hosts "host1,host2,host3" --min-hosts 2
 	runCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
 	runCmd.Flags().String(flagInterfaces, "", "Spread each engine's connections over a NIC set: auto, or interface names, IPv4 addresses or RDMA devices (comma-separated; default S3 driver, host networking; env: SPT_INTERFACES)")
 	runCmd.Flags().StringArray(flagHostInterfaces, nil, "Replace --interfaces on one host: <host>=<value>, with <value> auto, a comma-separated list, or none to turn NICs off there; repeat for more hosts")
-	runCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
-	runCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
+	runCmd.Flags().Int("rmi-port-start", 40000, rmiPortStartUsage)
+	runCmd.Flags().Int("rmi-port-count", 10, rmiPortCountUsage)
 	runCmd.Flags().Int(flagRMIRegistryPort, constants.DefaultRMIRegistryPort, rmiRegistryPortUsage)
 
 	// RDMA Acceleration Options
@@ -2825,11 +2905,12 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		if err := validatePortFlag(flagRMIRegistryPort, registryPort); err != nil {
 			return scenario.Params{}, err
 		}
-		// An API port that is not a number is left to the checks that report it.
-		if apiPort, err := strconv.Atoi(strings.TrimSpace(apiPortFlag(cmd))); err == nil {
-			if err := validateDistinctEnginePorts(apiPort, registryPort); err != nil {
-				return scenario.Params{}, err
-			}
+		apiPort, err := normalizeAPIPortFlag(cmd)
+		if err != nil {
+			return scenario.Params{}, err
+		}
+		if err := validateDistinctEnginePorts(apiPort, registryPort); err != nil {
+			return scenario.Params{}, err
 		}
 		// The default leaves the engine command line unchanged.
 		if registryPort != constants.DefaultRMIRegistryPort {
