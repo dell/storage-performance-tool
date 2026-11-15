@@ -438,8 +438,13 @@ With versioning on, the `s3` and `s3-rdma` drivers read the version from a `key~
   is the previous version, not the one the `PUT` made.
 * A failed operation keeps its `key~versionId` name, so with `--load-op-retry=true` the retry selects the same
   version. A READ or STAT naming a version that no longer exists fails with 404.
-* Under V2 signing (`--storage-auth-version=2`, the default) the `versionId` value is signed decoded, as V2 requires; the URI
+* Under V2 signing (`--storage-auth-version=2`, the default for the `s3` driver; `s3-rdma` and `s3-tables`
+  default to 4, and `spt run` passes 4) the `versionId` value is signed decoded, as V2 requires; the URI
   carries it percent-encoded.
+* A driver extension that overrides `dataUriPath` builds the versioned paths too: the driver passes it the whole
+  `key~versionId` item and takes the `~versionId` suffix off the end of the path it returns. If the returned path
+  doesn't end with that suffix, the driver doesn't build the request, as with any request it can't build: no request
+  line is sent and `errors.log` records "Send HTTP request failure" (at ERROR the first time, then at DEBUG).
 * A copy (a CREATE with `--item-input-path`) and an item above the multipart threshold (`item-data-ranges-threshold`,
   see [4.4](#44-multipart-upload)) don't select a version: they act on the current version, or on an object literally
   named `key~versionId`.
