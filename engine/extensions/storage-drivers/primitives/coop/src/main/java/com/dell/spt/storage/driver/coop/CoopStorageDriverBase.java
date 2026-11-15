@@ -959,6 +959,10 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				TimeUnit.MILLISECONDS.sleep(LIFECYCLE_POLL_INTERVAL_MILLIS);
 			} catch (final InterruptedException e) {
 				operationLifecycle().unattempted(childOp);
+				if (!isAdmissionOpen()) {
+					// A stop that arrives as an interrupt refuses the enqueue as the closed admission does.
+					settleRefusedCompositeParent(childOp, permitOwner);
+				}
 				safeReleaseMpuObjectPermit(permitOwner);
 				throwUnchecked(e);
 				return false;
