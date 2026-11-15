@@ -2742,18 +2742,64 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	 * botocore and MinIO sign the decoded value and SeaweedFS the re-encoded one, which agree for
 	 * the unreserved characters that version and upload IDs are made of, so nothing is decoded.
 	 *
-	 * <p>A URI with no query is appended unchanged. SPT builds its sub-resources in sorted order, so
-	 * the usual query is filtered in one pass with no allocation; only an unsorted query, such as one
-	 * from {@code storage-net-http-uri-args}, takes the sorting path.
+	 * <p>A URI with no query, or whose query is already canonical (see {@link #isCanonicalV2Query}),
+	 * is appended whole, as before the fix: that is every multipart, {@code versionId}, tagging,
+	 * delete and versioning request SPT builds. This method stays small, so it inlines into
+	 * {@code getCanonical}; only a listing, a {@code storage-net-http-uri-args} query or an unsorted
+	 * query takes {@link #appendFilteredV2Resource}.
 	 */
 	static void appendV2CanonicalResource(final StringBuilder buff, final String uri) {
 		final int queryStart = uri.indexOf('?');
-		if (queryStart < 0) {
+		if (queryStart < 0 || isCanonicalV2Query(uri, queryStart)) {
 			buff.append(uri);
-			return;
+		} else {
+			appendFilteredV2Resource(buff, uri, queryStart);
 		}
-		buff.append(uri, 0, queryStart);
-		final int resourceEnd = buff.length();
+	}
+
+	/**
+	 * Whether the query starting at {@code queryStart} (the {@code ?}) is already its own canonical
+	 * form, so that {@link #appendFilteredV2Resource} would append it unchanged: at least one
+	 * parameter, every parameter a sub-resource with no empty value, and the names in sorted order.
+	 * One pass over the query, with no allocation.
+	 */
+	static boolean isCanonicalV2Query(final String uri, final int queryStart) {
+		final int uriLength = uri.length();
+		int paramStart = queryStart + 1;
+		int prevNameStart = -1;
+		int prevNameEnd = -1;
+		while (paramStart < uriLength) {
+			final int amp = uri.indexOf('&', paramStart);
+			final int paramEnd = amp < 0 ? uriLength : amp;
+			final int eq = uri.indexOf('=', paramStart, paramEnd);
+			final int nameEnd = eq < 0 ? paramEnd : eq;
+			if (eq == paramEnd - 1 // an empty value signs as the bare name
+							|| !isV2SubResource(uri, paramStart, nameEnd) // also rejects an empty parameter
+							|| (prevNameStart >= 0
+											&& compareRegions(uri, prevNameStart, prevNameEnd, paramStart, nameEnd) > 0)) {
+				return false;
+			}
+			if (amp < 0) {
+				return true;
+			}
+			prevNameStart = paramStart;
+			prevNameEnd = nameEnd;
+			paramStart = amp + 1;
+		}
+		// No parameter, or a trailing '&': the filtered form drops what the URI holds.
+		return false;
+	}
+
+	/**
+	 * Appends the path, then only the query's sub-resources, sorted and with empty values bare. The
+	 * usual sorted query is filtered in one pass with no allocation; an unsorted one takes the
+	 * sorting path.
+	 */
+	static void appendFilteredV2Resource(final StringBuilder buff, final String uri, final int queryStart) {
+		// Append the whole URI and cut it back: one array copy, not a per-character append.
+		final int resourceEnd = buff.length() + queryStart;
+		buff.append(uri);
+		buff.setLength(resourceEnd);
 		final int uriLength = uri.length();
 		int prevNameStart = -1;
 		int prevNameEnd = -1;

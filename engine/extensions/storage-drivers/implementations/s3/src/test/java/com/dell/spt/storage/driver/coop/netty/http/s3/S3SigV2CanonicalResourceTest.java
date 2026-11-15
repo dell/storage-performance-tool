@@ -141,6 +141,107 @@ class S3SigV2CanonicalResourceTest {
 		}
 	}
 
+	// ---------- the fast path against the filtering route ----------
+
+	/** Every URI with a query that the tests in this class use, plus edge shapes. */
+	private static final List<String> QUERY_URIS = List.of(
+					"/b?list-type=2&prefix=p&max-keys=5&start-after=x",
+					"/b?max-keys=10",
+					"/b?list-type=2&prefix=p&delimiter=%2F&continuation-token=abc%3D&max-keys=1000",
+					"/b?",
+					"/b?versions=&prefix=p&key-marker=k&max-keys=5",
+					"/b?versions&max-keys=5",
+					"/b?max-keys=5&versions=",
+					"/b/k?partNumber=2&uploadId=U",
+					"/b/k?uploadId=U&partNumber=2",
+					"/b?versions=&versioning&versionId=V",
+					"/b/k?versionId=V&max-keys=1&tagging&acl=",
+					"/b?tagging&acl=2&acl=1",
+					"/b/k?versionId=V",
+					"/b?versioning",
+					"/b?delete",
+					"/b/k?tagging",
+					"/b/k?uploads",
+					"/b/k?uploadId=U",
+					"/b/k?partNumber=1&uploadId=2~abc.DEF_ghi-123",
+					"/b/k?response-content-type=text%2Fplain",
+					"/b?versionsx=1&xversions&Versions&upload=1&uploadIds=2&=v&&",
+					"/b?&uploads&",
+					"/b/k?select-type=2&select",
+					"/b/k?select-typex=2&selectx&select-",
+					"/b?acl=1&acl=2",
+					"/b?acl=2&acl=1",
+					"/b?acl&acl",
+					"/b?uploads&",
+					"/b?&uploads",
+					"/b?uploads=",
+					"/b?=",
+					"/b?&",
+					"/b??uploads",
+					"/b?uploads?x=1",
+					"/b/k?partNumber=1&uploadId=U&tenant=t1",
+					"/bench?tenant=t1",
+					"/bench?object-lock=",
+					"/johnsmith/?prefix=photos&max-keys=50&marker=puppy");
+
+	private static String filtered(final String uri) {
+		final var buff = new StringBuilder("prefix\n");
+		S3StorageDriver.appendFilteredV2Resource(buff, uri, uri.indexOf('?'));
+		return buff.substring("prefix\n".length());
+	}
+
+	@Test
+	void theFastPathSignsWhatTheFilteringRouteSigns() {
+		for (final var uri : QUERY_URIS) {
+			assertEquals(filtered(uri), resource(uri), uri);
+		}
+	}
+
+	/** Random queries from sub-resources, other names, empty and repeated values, and stray separators. */
+	@Test
+	void theFastPathSignsWhatTheFilteringRouteSignsForRandomQueries() {
+		final var names = List.of("acl", "delete", "partNumber", "tagging", "uploadId", "uploads", "versionId",
+						"versioning", "versions", "select", "select-type", "response-expires", "list-type", "max-keys",
+						"prefix", "uploadIds", "Versions", "");
+		final var values = List.of("", "=", "=1", "=U", "=2~abc.DEF", "=a%2Fb", "==", "=x=y");
+		final var random = new java.util.Random(20261115L);
+		int fast = 0;
+		for (int n = 0; n < 50_000; n++) {
+			final var uri = new StringBuilder(random.nextBoolean() ? "/b" : "/b/k");
+			uri.append('?');
+			final int params = random.nextInt(6);
+			for (int i = 0; i < params; i++) {
+				if (i > 0) {
+					uri.append('&');
+				}
+				uri.append(names.get(random.nextInt(names.size()))).append(values.get(random.nextInt(values.size())));
+			}
+			if (random.nextInt(10) == 0) {
+				uri.append('&');
+			}
+			final var text = uri.toString();
+			assertEquals(filtered(text), resource(text), text);
+			if (S3StorageDriver.isCanonicalV2Query(text, text.indexOf('?'))) {
+				fast++;
+			}
+		}
+		assertTrue(fast > 1_000, "the random queries reach the fast path: " + fast);
+	}
+
+	@Test
+	void sptsOwnSubResourceQueriesTakeTheFastPathAndListingsDoNot() {
+		for (final var uri : List.of(
+						"/b/k?uploads", "/b/k?partNumber=2&uploadId=U", "/b/k?uploadId=U", "/b/k?versionId=V",
+						"/b/k?tagging", "/b?delete", "/b?versioning")) {
+			assertTrue(S3StorageDriver.isCanonicalV2Query(uri, uri.indexOf('?')), uri);
+		}
+		for (final var uri : List.of(
+						"/b?list-type=2&max-keys=1000", "/b?versions=&max-keys=5", "/b/k?uploadId=U&partNumber=2",
+						"/bench?tenant=t1", "/b?", "/b?uploads&")) {
+			assertTrue(!S3StorageDriver.isCanonicalV2Query(uri, uri.indexOf('?')), uri);
+		}
+	}
+
 	// ---------- the whole string to sign ----------
 
 	@Test
