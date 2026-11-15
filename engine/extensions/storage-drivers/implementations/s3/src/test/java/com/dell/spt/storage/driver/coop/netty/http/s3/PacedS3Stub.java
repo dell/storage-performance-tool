@@ -37,12 +37,15 @@ import javax.net.ssl.SSLContext;
  *   <li>{@code quick-*}: answered at once;
  *   <li>{@code delay-*}: answered {@link #delayMillis} after the request body is read;
  *   <li>{@code silent-*}: the request is read, the response never comes;
- *   <li>{@code stall-*}: the first {@link #STALL_AFTER_BYTES} of the body are read, then nothing.
+ *   <li>{@code stall-*}: the first {@link #STALL_AFTER_BYTES} of the body are read, then nothing;
+ *   <li>{@code late-stall-*}: the first {@link #LATE_STALL_AFTER_BYTES} are read at the rate, so the
+ *       upload progresses across several timer periods, then nothing.
  * </ul>
  */
 final class PacedS3Stub implements AutoCloseable {
 
 	static final int STALL_AFTER_BYTES = 256 * 1024;
+	static final long LATE_STALL_AFTER_BYTES = 6L << 20;
 	private static final int SOCKET_BUFFER_BYTES = 64 * 1024;
 
 	private final ServerSocket server;
@@ -54,6 +57,7 @@ final class PacedS3Stub implements AutoCloseable {
 	private final long rateBytesPerSec;
 	private final long delayMillis;
 	private final long getBodyBytes;
+	private volatile long stoppedReadingNanos;
 
 	PacedS3Stub(final SSLContext tls, final long rateBytesPerSec, final long delayMillis, final long getBodyBytes)
 					throws IOException {
@@ -74,6 +78,11 @@ final class PacedS3Stub implements AutoCloseable {
 	/** The connection, numbered from 1 in accept order, that carried the named object's request. */
 	Integer connectionOf(final String name) {
 		return connectionByName.get(name);
+	}
+
+	/** When a {@code late-stall-} request stopped being read ({@link System#nanoTime()}), or 0. */
+	long stoppedReadingNanos() {
+		return stoppedReadingNanos;
 	}
 
 	private void acceptLoop() {
@@ -107,6 +116,12 @@ final class PacedS3Stub implements AutoCloseable {
 				final var name = path.substring(path.lastIndexOf('/') + 1);
 				final var length = contentLength(head);
 				connectionByName.put(name, connection);
+				if (name.startsWith("late-stall-")) {
+					skip(in, Math.min(length, LATE_STALL_AFTER_BYTES), rateBytesPerSec);
+					stoppedReadingNanos = System.nanoTime();
+					closed.await();
+					return;
+				}
 				if (name.startsWith("stall-")) {
 					skip(in, Math.min(length, STALL_AFTER_BYTES), 0);
 					closed.await();
@@ -224,14 +239,21 @@ final class PacedS3Stub implements AutoCloseable {
 		final var keystore = dir.resolve("stub.p12");
 		final var password = "stub-pass";
 		final var keytool = Path.of(System.getProperty("java.home"), "bin", "keytool").toString();
+		final var log = dir.resolve("keytool.log");
 		final var process = new ProcessBuilder(keytool, "-genkeypair", "-alias", "stub", "-keyalg", "EC",
 						"-groupname", "secp256r1", "-dname", "CN=localhost", "-validity", "2", "-storetype", "PKCS12",
 						"-keystore", keystore.toString(), "-storepass", password, "-keypass", password)
 						.redirectErrorStream(true)
+						.redirectOutput(log.toFile())
 						.start();
-		final var output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-		if (!process.waitFor(60, TimeUnit.SECONDS) || process.exitValue() != 0) {
-			throw new IllegalStateException("keytool failed: " + output);
+		try {
+			if (!process.waitFor(60, TimeUnit.SECONDS) || process.exitValue() != 0) {
+				throw new IllegalStateException("keytool failed: " + Files.readString(log));
+			}
+		} finally {
+			if (process.isAlive()) {
+				process.destroyForcibly().waitFor(10, TimeUnit.SECONDS);
+			}
 		}
 		final var store = KeyStore.getInstance("PKCS12");
 		try (final var in = Files.newInputStream(keystore)) {

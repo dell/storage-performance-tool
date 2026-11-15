@@ -22,7 +22,7 @@ count of the open connections may be limited by `storage-driver-limit-concurrenc
 | storage-net-sndBuf                             | Fixed size >= 0 | 0 | The network connection output buffer size. Estimated automatically if 0 (default)
 | storage-net-selectInterval                     | Integer > 0 | 100 |
 | storage-net-tcpNoDelay                         | Flag | true |
-| storage-net-timeoutMilliSec                    | Integer >= 0 | 30000 | The socket/response idle timeout (milliseconds). This is an idle timeout, not a total-request cap, so it does not penalize large-but-progressing transfers: a request fails when its response stays silent this long after the request was sent, or when its upload makes no progress for this long (reported within twice this long). 0 disables it. List-heavy workloads against large buckets may need more idle headroom (slow delimiter seeding/pagination) -- see the Connection Timeout section below.
+| storage-net-timeoutMilliSec                    | Integer >= 0 | 30000 | The socket/response idle timeout (milliseconds). This is an idle timeout, not a total-request cap, so it does not penalize large-but-progressing transfers: a request fails when its response stays silent this long after its last request byte left for the socket, or within twice this long when its upload stops making progress. Bytes already in the socket buffers do not count as progress. 0 sets it to the largest value, `Integer.MAX_VALUE` ms (about 24.8 days). List-heavy workloads against large buckets may need more idle headroom (slow delimiter seeding/pagination) -- see the Connection Timeout section below.
 | storage-net-ioRatio                            | 0 < Integer < 100 | 50 | Internal [Netty's I/O ratio parameter](https://github.com/netty/netty/issues/1154#issuecomment-14870909). It's recommended to make it higher for large request/response payload (>1MB)
 | storage-net-transport                          | Enum | nio | The I/O transport to use (see the [details](http://netty.io/wiki/native-transports.html)). By default tries to use "nio" (the most compatible). For Linux try to use "epoll" or "iouring", for MacOS/BSD use "kqueue" (requires rebuilding).
 | storage-net-ssl-ciphers                        | List of strings | null | The list of ciphers to use if SSL is enabled. First cipher in the list that matches is applied. Make sure to match used ciphers and protocols. 
@@ -89,10 +89,18 @@ java -jar spt-<VERSION>.jar \
 
 The timer runs per connection and restarts on every read and every completed write, so a long
 PUT, part or GET that keeps moving never times out, however long it takes. A request whose
-response never comes fails this long after the request was sent. An upload the target stops
-reading fails between one and two timeouts after its last progress, because a large body is a
-single write whose progress the timer checks once per period. An idle pooled connection with no
-request in flight is not failed and stays in the pool.
+response never comes fails this long after its last request byte was handed to the socket. An
+upload the target stops reading fails within twice the timeout of its last progress: a large body
+is one write, or a run of TLS records, whose progress the timer samples once per period. An idle
+pooled connection with no request in flight is not failed and stays in the pool. A timeout of 0
+sets the largest value, `Integer.MAX_VALUE` ms (about 24.8 days).
+
+The timer sees the client's own outbound buffer, not the kernel's socket buffers. Once the last
+request byte is handed to the socket, the response clock starts, even if the target is still
+reading the body's tail from those buffers. With large socket buffers (`storage-net-sndBuf`, and
+the target's receive buffer) and a target reading slowly, that tail can take longer than the
+timeout and the request fails while the target is still reading. Raise the timeout if that
+happens.
 
 ## 5. I/O Buffer Size
 
