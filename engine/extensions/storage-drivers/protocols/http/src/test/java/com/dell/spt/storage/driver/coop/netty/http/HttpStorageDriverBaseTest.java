@@ -195,8 +195,16 @@ class HttpStorageDriverBaseTest {
 		@Override
 		protected void applyMetaDataHeaders(final HttpHeaders httpHeaders) {}
 
+		private final List<String> signedUris = new java.util.ArrayList<>();
+
 		@Override
-		protected void applyAuthHeaders(final HttpHeaders httpHeaders, final HttpMethod httpMethod, final String dstUriPath, final Credential credential) {}
+		protected void applyAuthHeaders(final HttpHeaders httpHeaders, final HttpMethod httpMethod, final String dstUriPath, final Credential credential) {
+			signedUris.add(dstUriPath);
+		}
+
+		List<String> signedUris() {
+			return signedUris;
+		}
 
 		@Override
 		protected void applyCopyHeaders(final HttpHeaders httpHeaders, final String srcPath) {
@@ -301,6 +309,20 @@ class HttpStorageDriverBaseTest {
 		assertEquals(
 						"/bucket/base/s0000001/1",
 						drv.exposeDataUriPath(read.item(), read.srcPath(), read.dstPath(), OpType.READ));
+	}
+
+	@Test
+	void defaultRequestSignsThePathWithoutUriArgs() throws Exception {
+		final var cfg = baseConfig();
+		cfg.val("storage-net-http-uri-args", Map.of("tri", "probe"));
+		final var drv = new TestHttpDriver(cfg);
+		final var item = new DataItemImpl("obj", 0, 0);
+		final var req = drv.httpRequest(
+						new DataOperationImpl<>(0, OpType.READ, item, null, "/bucket", null, null, 0), "127.0.0.1");
+
+		assertEquals("/bucket/obj?tri=probe", req.uri());
+		assertEquals(List.of("/bucket/obj"), drv.signedUris(),
+						"the base default (Atmos, Swift) must keep signing the bare path");
 	}
 
 	@Test

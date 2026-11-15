@@ -89,6 +89,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.Set;
 import java.time.Instant;
 import java.util.HashMap;
@@ -1389,6 +1390,34 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
+	 * The SigV4 order of encoded {@code name=value} pairs: char by char, with {@code '='} below every other
+	 * character, and a string that is a prefix of the other first. Each name and value has been through
+	 * {@link #percentEncode}, so the pair is ASCII and holds {@code '='} only as its one delimiter, and this
+	 * order is the order by encoded name, then by encoded value, that SigV4 asks for.
+	 */
+	static final Comparator<String> CANONICAL_PAIR_ORDER = new CanonicalPairOrder();
+
+	private static final class CanonicalPairOrder implements Comparator<String> {
+
+		@Override
+		public int compare(final String left, final String right) {
+			final int common = Math.min(left.length(), right.length());
+			for (int i = 0; i < common; i++) {
+				final char l = left.charAt(i);
+				final char r = right.charAt(i);
+				if (l != r) {
+					return rank(l) - rank(r);
+				}
+			}
+			return left.length() - right.length();
+		}
+
+		private static int rank(final char ch) {
+			return ch == '=' ? -1 : ch;
+		}
+	}
+
+	/**
 	 * The V4 canonical form of a non-empty {@code rawQuery}: each pair decoded, encoded again and sorted.
 	 * {@link #getCanonicalV4} appends a query that {@link #isCanonicalSingleParameter} accepts as it is,
 	 * without calling this.
@@ -1406,7 +1435,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			final String encodedPair = percentEncode(decodeQueryComponent(rawKey)) + '=' + percentEncode(decodeQueryComponent(rawValue));
 			canonicalComponents.add(encodedPair);
 		}
-		Collections.sort(canonicalComponents);
+		canonicalComponents.sort(CANONICAL_PAIR_ORDER);
 		return String.join("&", canonicalComponents);
 	}
 
@@ -3056,6 +3085,16 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			Loggers.MSG.warn("Couldn't complete HmacSHA256 for auth v4. Either secret is incorrect " +
 							"or used algorithm doesn't exist. \n{}", e.getMessage());
 		}
+	}
+
+	/**
+	 * SigV4 covers the canonical query, so V4 signs the URI with its configured URI arguments. V2 keeps
+	 * signing the bare path: its string to sign names only sub-resources, and ordinary arguments are not
+	 * among them.
+	 */
+	@Override
+	protected String authUri(final String uriPath, final String uri) {
+		return authVersion == 4 ? uri : uriPath;
 	}
 
 	protected Map<String, String> getNonCanonicalHeaders(final HttpHeaders httpHeaders) {
