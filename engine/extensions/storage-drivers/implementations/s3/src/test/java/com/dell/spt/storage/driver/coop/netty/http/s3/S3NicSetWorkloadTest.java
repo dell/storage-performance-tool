@@ -51,6 +51,7 @@ import com.dell.spt.base.item.op.deletion.DeleteRequestOperationImpl;
 import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.list.ListOperation;
 import com.dell.spt.base.item.op.list.ListOperationImpl;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.step.ScenarioUtil;
 import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.logging.Loggers;
@@ -72,6 +73,10 @@ import com.github.akurilov.confuse.Config;
 import io.netty.channel.epoll.Epoll;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.StandardSocketOptions;
+import java.nio.channels.ServerSocketChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -1157,17 +1162,74 @@ final class S3NicSetWorkloadTest {
 	/**
 	 * The abort's kernel route is silent: the first endpoint stops answering once the upload began,
 	 * and its port drops every connect. The step's stop settles the pending connect at once: its
-	 * permit comes back without waiting for the connect timeout, and nothing reaches the target.
+	 * permit comes back without waiting for the connect timeout, nothing reaches the target, and the
+	 * upload, which the unsent abort leaves open, is unresolved at once.
 	 */
 	@Test
 	void aStopSettlesAnAbortWhoseKernelRouteConnectIsPending() throws Exception {
+		final var pending = abortWithAPendingKernelRouteConnect();
+		final var run = pending.run();
+
+		run.driver().closeAdmission();
+
+		assertEquals(0, run.driver().kernelRouteAbortsPending(), "the stop settled the connect");
+		assertEquals(0, run.driver().activeOpCount(), "its permit came back before the connect timeout");
+		assertAbortSettledUnsent(pending);
+	}
+
+	/**
+	 * As {@link #aStopSettlesAnAbortWhoseKernelRouteConnectIsPending}, with the abort's connect
+	 * established while the stop has closed admission but not yet the kernel route, as while it waits
+	 * for the dispatch task to stop: the connection arrives, the abort's claim is refused, and the
+	 * connection closes unused.
+	 */
+	@Test
+	void anAbortWhoseKernelRouteConnectsWhileTheStopClosesAdmissionIsSettledUnsent() throws Exception {
+		checkKernelRouteConnectEndingInTheStop(true);
+	}
+
+	/** As {@link #anAbortWhoseKernelRouteConnectsWhileTheStopClosesAdmissionIsSettledUnsent}, with the connect refused. */
+	@Test
+	void anAbortWhoseKernelRouteConnectFailsWhileTheStopClosesAdmissionIsSettledUnsent() throws Exception {
+		checkKernelRouteConnectEndingInTheStop(false);
+	}
+
+	private void checkKernelRouteConnectEndingInTheStop(final boolean connects) throws Exception {
+		final var pending = abortWithAPendingKernelRouteConnect();
+		final var run = pending.run();
+		S3NicSetAdmissionTest.closeAdmissionFlagOnly(run.driver());
+		pending.blackhole().close();
+		if (connects) {
+			// The connect's next SYN finds a listening port; the kernel completes the handshake.
+			final var listener = ServerSocketChannel.open();
+			resources.add(listener);
+			listener.setOption(StandardSocketOptions.SO_REUSEADDR, true);
+			listener.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), pending.port()), 8);
+		}
+
+		waitFor(() -> run.driver().kernelRouteAbortsPending() == 0, "the abort's connect ended", 15);
+		waitFor(() -> run.driver().activeOpCount() == 0, "the abort gave back its permit");
+		assertAbortSettledUnsent(pending);
+		run.driver().closeAdmission();
+		assertAbortSettledUnsent(pending);
+	}
+
+	/** A one-part upload whose abort waits on its kernel route's connect, to a silent port. */
+	private record PendingAbort(Run run, CompositeDataOperation<DataItem> upload, AutoCloseable blackhole, int port) {}
+
+	private PendingAbort abortWithAPendingKernelRouteConnect() throws Exception {
 		assumeTrue(NicSetLoopback.dropsSynsOnAFullAcceptQueue(), "the blackhole needs tcp_abort_on_overflow at 0");
 		final var endpoints = stub.listeners(2);
 		final var run = started(endpoints, nics(2), 2, false);
+		final var blackhole = new AtomicReference<AutoCloseable>();
 		stub.failParts = true;
 		stub.failObjectRequest = n -> {
 			if (n == 2) {
-				onAnotherThread(() -> resources.add(stub.blackhole(0)));
+				onAnotherThread(() -> {
+					final var silence = stub.blackhole(0);
+					resources.add(silence);
+					blackhole.set(silence);
+				});
 			}
 			return false;
 		};
@@ -1181,14 +1243,17 @@ final class S3NicSetWorkloadTest {
 		while (run.results().poll() != null) {
 			// drained
 		}
+		assertNotNull(blackhole.get(), "the first endpoint is silent");
+		return new PendingAbort(run, upload, blackhole.get(), port(endpoints.get(0)));
+	}
 
-		run.driver().closeAdmission();
-
-		assertEquals(0, run.driver().kernelRouteAbortsPending(), "the stop settled the connect");
-		assertEquals(0, run.driver().activeOpCount(), "its permit came back before the connect timeout");
+	private void assertAbortSettledUnsent(final PendingAbort pending) throws Exception {
+		final var lifecycle = pending.run().driver().operationLifecycle();
 		assertTrue(stub.requests().stream().noneMatch(S3NicSetWorkloadTest::isAbort), () -> "requests: " + stub.requests());
 		assertEquals(1, stub.openUploads(), "nothing aborted the upload");
-		assertNull(run.results().poll(300), "queue recovery owns the upload, which publishes no result");
+		assertEquals(OperationLifecycleState.UNRESOLVED, lifecycle.stateOf(pending.upload()), () -> "the upload: " + lifecycle.snapshot());
+		assertEquals(0, lifecycle.snapshot().inFlight(), () -> "nothing holds the drain: " + lifecycle.snapshot());
+		assertNull(pending.run().results().poll(300), "the settled upload publishes no result");
 	}
 
 	/**
@@ -1208,8 +1273,17 @@ final class S3NicSetWorkloadTest {
 		return runScenario(endpoints, factory, factory == null ? List.of() : nics(2), stepId, scenario);
 	}
 
+	/**
+	 * As above with no NIC set, and {@code replacement} in place of the loaded extension of its id, as
+	 * the driver type: a test factory that wraps a shipped one, for example.
+	 */
+	static Map<String, List<Long>> runScenarioReplacing(final List<String> endpoints, final Extension replacement,
+					final String stepId, final String scenario) throws Exception {
+		return runScenario(endpoints, replacement, List.of(), stepId, scenario);
+	}
+
 	/** As above with {@code interfaces} as the base config's NIC set, which a sub-load's own value replaces. */
-	private static Map<String, List<Long>> runScenario(final List<String> endpoints, final NicSetLoopback.Factory factory,
+	private static Map<String, List<Long>> runScenario(final List<String> endpoints, final Extension factory,
 					final List<String> interfaces, final String stepId, final String scenario) throws Exception {
 		final var root = NicSetLoopback.root(endpoints, interfaces, 1);
 		final Config config = ConfigUtil.merge("-", List.of(new BundledDefaultsProvider().config("-", root.schema()), root));
@@ -1223,10 +1297,11 @@ final class S3NicSetWorkloadTest {
 		config.val("item-output-delay", 0);
 		config.val("item-output-queue-limit", 1_000);
 		config.val("output-color", false);
-		config.val("storage-driver-type", factory == null ? "s3" : NicSetLoopback.DRIVER_TYPE);
+		config.val("storage-driver-type", factory == null ? "s3" : factory.id());
 		final var classLoader = Thread.currentThread().getContextClassLoader();
 		final List<Extension> extensions = new ArrayList<>(Extension.load(classLoader));
 		if (factory != null) {
+			extensions.removeIf(extension -> factory.id().equals(extension.id()));
 			extensions.add(factory);
 		}
 		final Map<String, List<Long>> outcomes = new ConcurrentHashMap<>();

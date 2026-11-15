@@ -346,19 +346,33 @@ final class S3NicSetAdmissionTest {
 	/**
 	 * Both parts are sent; part 2's answer waits until the NIC that carried part 1 has its event loop
 	 * blocked. The completion, which follows part 2's answer, then waits on that NIC for its connection
-	 * when the stop comes. Its claim is refused, nothing is sent, and the upload, in no queue, is
-	 * unresolved at once instead of holding the step's drain until its deadline.
+	 * when the stop comes. The stop fails the waiting attempt, its claim is refused, nothing is sent,
+	 * and the upload, in no queue, is unresolved at once instead of holding the step's drain until its
+	 * deadline.
 	 */
 	@Test
 	void aStopWhileTheCompletionWaitsForItsConnectionLeavesTheUploadUnresolved() throws Exception {
+		checkStopWhileTheCompletionWaits(false);
+	}
+
+	/**
+	 * As {@link #aStopWhileTheCompletionWaitsForItsConnectionLeavesTheUploadUnresolved}, with the
+	 * completion's connection delivered while the stop has closed admission but has not yet closed the
+	 * NIC pool's, as while it waits for the dispatch task to stop: the connection arrives, and its claim
+	 * is refused there.
+	 */
+	@Test
+	void aCompletionWhoseConnectionArrivesWhileTheStopClosesAdmissionLeavesTheUploadUnresolved() throws Exception {
+		checkStopWhileTheCompletionWaits(true);
+	}
+
+	private void checkStopWhileTheCompletionWaits(final boolean arrivesInTheStop) throws Exception {
 		final var run = started(stub.listeners(2), nics(2), 2);
 		final var pool = run.pool();
 		final var admission = pool.admission();
 		assertEquals(Operation.Status.SUCC, run.execute(dataOp(OpType.CREATE, "before")).status());
 		final var channels = List.of(channelOf(pool, 0), channelOf(pool, 1));
-		final var upload = new CompositeDataOperationImpl<DataItem>(0, OpType.CREATE, new DataItemImpl("upload", 7,
-						2L * EndpointSelectionTestSupport.ITEM_SIZE), null, "/bucket", EndpointSelectionTestSupport.CREDENTIAL,
-						null, 0, EndpointSelectionTestSupport.ITEM_SIZE);
+		final var upload = twoPartUpload();
 		final var answerPart2 = new CountDownLatch(1);
 		stub.answerDelayMillis = request -> {
 			if (request.isPart() && request.query().contains("partNumber=2")) {
@@ -378,20 +392,87 @@ final class S3NicSetAdmissionTest {
 		waitFor(() -> admission.count(first) == 1 && admission.count(1 - first) == 0,
 						"the completion waits for its connection on part 1's NIC");
 		assertTrue(stub.objectRequests().stream().noneMatch(S3NicSetAdmissionTest::isCompletion), "the completion was not sent");
-		run.driver().closeAdmission();
-		final var recovered = run.driver().recoverQueuedOperations();
-		unblock.countDown();
+		final var lifecycle = run.driver().operationLifecycle();
+		final List<Operation<DataItem>> recovered;
+		if (arrivesInTheStop) {
+			closeAdmissionFlagOnly(run.driver());
+			unblock.countDown();
+			waitFor(() -> admission.count(first) == 0 && run.driver().activeOpCount() == 0,
+							"the completion's connection arrived, and it released its NIC and permit");
+			assertEquals(OperationLifecycleState.UNRESOLVED, lifecycle.stateOf(upload), () -> "refused, the upload: " + lifecycle.snapshot());
+			run.driver().closeAdmission();
+			recovered = run.driver().recoverQueuedOperations();
+		} else {
+			run.driver().closeAdmission();
+			recovered = run.driver().recoverQueuedOperations();
+			unblock.countDown();
+			waitFor(() -> admission.count(first) == 0 && run.driver().activeOpCount() == 0, "the completion released its NIC and permit");
+		}
 
-		waitFor(() -> admission.count(first) == 0 && run.driver().activeOpCount() == 0, "the completion released its NIC and permit");
 		assertTrue(recovered.isEmpty(), recovered::toString);
 		assertTrue(stub.objectRequests().stream().noneMatch(S3NicSetAdmissionTest::isCompletion), "the upload was not completed");
 		assertEquals(1, stub.openUploads(), "the upload stays open on the target");
-		final var lifecycle = run.driver().operationLifecycle();
 		assertEquals(OperationLifecycleState.UNRESOLVED, lifecycle.stateOf(upload), () -> "the upload: " + lifecycle.snapshot());
 		assertEquals(1, lifecycle.snapshot().unresolved(), lifecycle.snapshot()::toString);
 		assertEquals(0, lifecycle.snapshot().inFlight(), () -> "nothing holds the drain: " + lifecycle.snapshot());
 		assertEquals(0, lifecycle.counters().failed(), "the refused completion charges no failure");
 		assertTrue(lifecycle.counters().reconciled(), lifecycle.counters()::toString);
+	}
+
+	/**
+	 * While admission is open, a part whose connection arrives after its circulation went stale is
+	 * refused and stays queued; its upload, still dispatched, is left alone. Only the stop's queue
+	 * recovery then settles it.
+	 */
+	@Test
+	void aStalePartWhileAdmissionIsOpenLeavesItsUploadDispatched() throws Exception {
+		final var run = started(stub.listeners(2), nics(2), 2);
+		final var pool = run.pool();
+		final var admission = pool.admission();
+		assertEquals(Operation.Status.SUCC, run.execute(dataOp(OpType.CREATE, "before")).status());
+		final var channels = List.of(channelOf(pool, 0), channelOf(pool, 1));
+		final var upload = twoPartUpload();
+		stub.hold();
+
+		assertTrue(run.driver().put(upload));
+		waitFor(() -> stub.objectRequests().size() == 2, "the initiation reaches the stub");
+		final int waiting = ADDRESSES.get(0).equals(stub.objectRequests().get(1).source()) ? 1 : 0;
+		final var unblock = block(channels.get(waiting));
+		stub.release();
+		waitFor(() -> admission.count(waiting) == 1 && admission.count(1 - waiting) == 0 && parts() == 1,
+						"one part was sent and answered while the other waits for its connection");
+		final var lifecycle = run.driver().operationLifecycle();
+		lifecycle.enforceDispatchDeadline(System.nanoTime());
+		unblock.countDown();
+
+		waitFor(() -> admission.count(waiting) == 0 && run.driver().activeOpCount() == 0, "the stale part released its NIC and permit");
+		assertEquals(OperationLifecycleState.DISPATCHED, lifecycle.stateOf(upload), () -> "the upload is left alone: " + lifecycle.snapshot());
+		assertEquals(0, lifecycle.snapshot().unresolved(), lifecycle.snapshot()::toString);
+		assertEquals(1, parts(), () -> "requests: " + stub.objectRequests());
+
+		run.driver().closeAdmission();
+		final var recovered = run.driver().recoverQueuedOperations();
+		assertEquals(1, recovered.size(), recovered::toString);
+		assertTrue(recovered.get(0) instanceof PartialOperation<?> part && part.parent() == upload, "the stale part was recovered");
+		assertEquals(OperationLifecycleState.UNRESOLVED, lifecycle.stateOf(upload), () -> "recovery settles the upload: " + lifecycle.snapshot());
+		assertEquals(1, lifecycle.snapshot().unresolved(), lifecycle.snapshot()::toString);
+		assertTrue(lifecycle.counters().reconciled(), lifecycle.counters()::toString);
+	}
+
+	private static CompositeDataOperationImpl<DataItem> twoPartUpload() {
+		return new CompositeDataOperationImpl<DataItem>(0, OpType.CREATE, new DataItemImpl("upload", 7,
+						2L * EndpointSelectionTestSupport.ITEM_SIZE), null, "/bucket", EndpointSelectionTestSupport.CREDENTIAL,
+						null, 0, EndpointSelectionTestSupport.ITEM_SIZE);
+	}
+
+	/**
+	 * Closes the driver's admission as {@code closeAdmission()} does first, and no more: the state a
+	 * stop is in while it waits for the dispatch task to stop, before the NIC pool's admission closes.
+	 */
+	static void closeAdmissionFlagOnly(final CoopStorageDriverBase<?, ?> driver) throws ReflectiveOperationException {
+		final var field = CoopStorageDriverBase.class.getDeclaredField("admissionOpen");
+		field.setAccessible(true);
+		field.setBoolean(driver, false);
 	}
 
 	private static boolean isCompletion(final NicSetLoopback.Request request) {
