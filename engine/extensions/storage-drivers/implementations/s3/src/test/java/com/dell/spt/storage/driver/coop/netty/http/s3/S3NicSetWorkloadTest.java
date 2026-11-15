@@ -73,9 +73,6 @@ import com.github.akurilov.confuse.Config;
 import io.netty.channel.epoll.Epoll;
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
-import java.net.StandardSocketOptions;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -1195,24 +1192,24 @@ final class S3NicSetWorkloadTest {
 	}
 
 	private void checkKernelRouteConnectEndingInTheStop(final boolean connects) throws Exception {
-		final var pending = abortWithAPendingKernelRouteConnect();
+		// A connect that must still be pending when the port admits it spans several SYN retransmits
+		// (about 1, 3 and 7 s on Linux), not only the first, so a stalled test thread does not fail it.
+		final var pending = abortWithAPendingKernelRouteConnect(connects ? SPANNING_CONNECT_TIMEOUT_MILLIS : FIXTURE_CONNECT_TIMEOUT_MILLIS);
 		final var run = pending.run();
 		S3NicSetAdmissionTest.closeAdmissionFlagOnly(run.driver());
-		pending.blackhole().close();
 		ServerSocketChannel listener = null;
 		if (connects) {
-			// The connect's next SYN finds a listening port; the kernel completes the handshake.
-			listener = ServerSocketChannel.open();
-			resources.add(listener);
-			listener.setOption(StandardSocketOptions.SO_REUSEADDR, true);
-			listener.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), pending.port()), 8);
+			// The connect's next SYN retransmit finds room on the port; the kernel completes the handshake.
+			listener = pending.blackhole().admit();
+		} else {
+			// The connect's next SYN retransmit finds the port closed, and is reset.
+			pending.blackhole().close();
 		}
 
 		waitFor(() -> run.driver().kernelRouteAbortsPending() == 0, "the abort's connect ended", 15);
 		waitFor(() -> run.driver().activeOpCount() == 0, "the abort gave back its permit");
 		if (listener != null) {
 			// The connected branch ran, not the failed one: the connection arrived and was closed unused.
-			listener.configureBlocking(false);
 			final var accepted = listener.accept();
 			assertNotNull(accepted, "the abort's connect was established");
 			resources.add(accepted);
@@ -1225,14 +1222,31 @@ final class S3NicSetWorkloadTest {
 		assertAbortSettledUnsent(pending);
 	}
 
+	/** The network timeout {@link NicSetLoopback#root} gives every driver. */
+	private static final int FIXTURE_CONNECT_TIMEOUT_MILLIS = 2_000;
+	/**
+	 * A connect timeout that spans the kernel's SYN retransmits at about 1, 3 and 7 s. The NIC Paths
+	 * share it, so the part retries to the silent port before the abort take as long.
+	 */
+	private static final int SPANNING_CONNECT_TIMEOUT_MILLIS = 8_000;
+
 	/** A one-part upload whose abort waits on its kernel route's connect, to a silent port. */
-	private record PendingAbort(Run run, CompositeDataOperation<DataItem> upload, AutoCloseable blackhole, int port) {}
+	private record PendingAbort(Run run, CompositeDataOperation<DataItem> upload, NicSetLoopback.Blackhole blackhole) {}
 
 	private PendingAbort abortWithAPendingKernelRouteConnect() throws Exception {
+		return abortWithAPendingKernelRouteConnect(FIXTURE_CONNECT_TIMEOUT_MILLIS);
+	}
+
+	/** As {@link #abortWithAPendingKernelRouteConnect()}, with the driver's network timeout, its connect timeout, set. */
+	private PendingAbort abortWithAPendingKernelRouteConnect(final int connectTimeoutMillis) throws Exception {
 		assumeTrue(NicSetLoopback.dropsSynsOnAFullAcceptQueue(), "the blackhole needs tcp_abort_on_overflow at 0");
 		final var endpoints = stub.listeners(2);
-		final var run = started(endpoints, nics(2), 2, false);
-		final var blackhole = new AtomicReference<AutoCloseable>();
+		final var storage = storage(endpoints, nics(2), 2);
+		storage.val("net-timeoutMilliSec", connectTimeoutMillis);
+		final var driver = NicSetLoopback.driver(storage, false);
+		resources.add(driver);
+		final var run = NicSetLoopback.started(driver);
+		final var blackhole = new AtomicReference<NicSetLoopback.Blackhole>();
 		stub.failParts = true;
 		stub.failObjectRequest = n -> {
 			if (n == 2) {
@@ -1255,7 +1269,7 @@ final class S3NicSetWorkloadTest {
 			// drained
 		}
 		assertNotNull(blackhole.get(), "the first endpoint is silent");
-		return new PendingAbort(run, upload, blackhole.get(), port(endpoints.get(0)));
+		return new PendingAbort(run, upload, blackhole.get());
 	}
 
 	private void assertAbortSettledUnsent(final PendingAbort pending) throws Exception {
