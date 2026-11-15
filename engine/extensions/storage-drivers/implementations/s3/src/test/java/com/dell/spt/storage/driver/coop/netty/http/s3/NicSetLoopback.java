@@ -66,6 +66,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.IntPredicate;
 import java.util.function.Predicate;
+import java.util.function.ToLongFunction;
 import java.util.regex.Pattern;
 import java.util.stream.IntStream;
 
@@ -150,6 +151,8 @@ final class NicSetLoopback implements AutoCloseable {
 	 * chunk of its own before the rest.
 	 */
 	volatile String completionErrorBody = "<Error><Code>InternalError</Code></Error>";
+	/** How long the stub waits before it answers each object request, chosen by the request itself; none by default. */
+	volatile ToLongFunction<Request> answerDelayMillis = request -> 0;
 
 	/** The storage configuration of a driver with these endpoints and NICs. */
 	static Config storage(final List<String> endpoints, final List<String> interfaces, final int concurrency) {
@@ -518,6 +521,10 @@ final class NicSetLoopback implements AutoCloseable {
 					exchange.sendResponseHeaders(failureStatus, error.length);
 					exchange.getResponseBody().write(error);
 					return;
+				}
+				final long delayMillis = objectRequest > 0 ? answerDelayMillis.applyAsLong(request) : 0;
+				if (delayMillis > 0) {
+					TimeUnit.MILLISECONDS.sleep(delayMillis);
 				}
 				final var held = gate;
 				if (held != null && request.isObjectRequest() && holdOnListener.test(listener)
