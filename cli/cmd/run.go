@@ -72,6 +72,11 @@ const (
 		"spt provisions target buckets by default (see --provision-target-bucket)"
 )
 
+const (
+	flagOutputDir        = "output-dir"
+	outputDirDeprecation = "it never had an effect; spt run writes results under --results-dir (default ./results)"
+)
+
 // resolvePortConflictFunc is a test seam for port conflict resolution.
 // In production it points to portcheck.ResolvePortConflict; tests can override.
 var resolvePortConflictFunc = portcheck.ResolvePortConflict
@@ -2522,7 +2527,8 @@ func init() {
 	runCmd.Flags().String(flagVersions, scenario.VersionsCurrent, "Read-verify prefix discovery: current or all object versions")
 	runCmd.Flags().Bool(flagCreatePrefix, false, "Deprecated: has no effect")
 	_ = runCmd.Flags().MarkDeprecated(flagCreatePrefix, createPrefixDeprecation)
-	runCmd.Flags().StringP("output-dir", "O", "", "Specifies a local directory on the host machine to save the detailed Spt report files (e.g., ./results/test-01)")
+	runCmd.Flags().StringP(flagOutputDir, "O", "", "Deprecated: has no effect; use --results-dir")
+	_ = runCmd.Flags().MarkDeprecated(flagOutputDir, outputDirDeprecation)
 	runCmd.Flags().Bool("generate-only", false, "Generate the scenario file without running Docker or Spt")
 	// Headless auto-termination
 	runCmd.Flags().Int("auto-terminate-seconds", 0, "Automatically terminate headless runs after N seconds (0 = unlimited)")

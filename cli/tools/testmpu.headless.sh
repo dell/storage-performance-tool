@@ -47,8 +47,9 @@ unset _caller_env _v
 : "${S3_SECRET_KEY:=admin123}"
 : "${S3_BUCKET:=spttest}"
 
-RESULTS_DIR="$SCRIPT_DIR/results/mpu-headless-$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$RESULTS_DIR"
+# spt run names each run directory <label>-<token> at launch, under --results-dir.
+RESULTS_DIR="$SCRIPT_DIR/results"
+RUN_LABEL="mpu-headless"
 
 echo "=========================================================================="
 echo " Running Headless MPU Workload with Concurrency Limits"
@@ -60,7 +61,7 @@ echo " - Global Threads: 8"
 echo " - Max Concurrent MPU Objects: 2"
 echo " - Max Concurrent MPU Parts per Object: 3"
 echo " - Endpoint: $S3_ENDPOINTS"
-echo " - Results: $RESULTS_DIR"
+echo " - Results: under $RESULTS_DIR, in a $RUN_LABEL-* run directory"
 echo "=========================================================================="
 
 "$SPT_BIN" run write \
@@ -76,8 +77,9 @@ echo "==========================================================================
   --mpu-concurrent-objects 2 \
   --mpu-concurrent-parts 3 \
   --headless \
-  --output-dir "$RESULTS_DIR" \
+  --results-dir "$RESULTS_DIR" \
+  --label "$RUN_LABEL" \
   "$@"
 
 echo ""
-echo "Test completed. Results saved to $RESULTS_DIR"
+echo "Test completed. Results are under $RESULTS_DIR, in the newest $RUN_LABEL-* run directory"
