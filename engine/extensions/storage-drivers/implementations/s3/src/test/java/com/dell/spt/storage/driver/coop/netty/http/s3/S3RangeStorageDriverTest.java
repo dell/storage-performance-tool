@@ -21,7 +21,11 @@ import org.junit.jupiter.api.Test;
 class S3RangeStorageDriverTest {
 	private record Request(String method, String path, String range, String authorization) {}
 
-	private record Response(int status, String contentRange, String body) {
+	private record Response(int status, String contentRange, String body, long byteDelayMillis) {
+		Response(int status, String contentRange, String body) {
+			this(status, contentRange, body, 0);
+		}
+
 		static Response disconnect() {
 			return new Response(0, null, "");
 		}
@@ -62,7 +66,21 @@ class S3RangeStorageDriverTest {
 										: response.contentRange());
 					byte[] body = response.body().getBytes(StandardCharsets.US_ASCII);
 					exchange.sendResponseHeaders(response.status(), body.length);
-					exchange.getResponseBody().write(body);
+					if (response.byteDelayMillis() > 0) {
+						// A body that keeps moving: one byte at a time, flushed.
+						for (byte b : body) {
+							exchange.getResponseBody().write(b);
+							exchange.getResponseBody().flush();
+							try {
+								Thread.sleep(response.byteDelayMillis());
+							} catch (InterruptedException interrupted) {
+								Thread.currentThread().interrupt();
+								return;
+							}
+						}
+					} else {
+						exchange.getResponseBody().write(body);
+					}
 				}
 			});
 			server.start();
@@ -310,6 +328,19 @@ class S3RangeStorageDriverTest {
 				assertEquals(0, f.snapshot().httpFailures());
 				assertTrue(f.snapshot().reconciled());
 			}
+		}
+	}
+
+	@Test
+	void aRangeReadThatKeepsMovingOutlivesTheNetTimeout() throws Exception {
+		// 60 bytes, one every 50 ms: about 3 s against the fixture's 2 s inactivity timeout.
+		try (var f = new Fixture(new RangeReadPolicy(60, 0L, 1), false,
+						n -> new Response(206, "echo/100", "x".repeat(60), 50))) {
+			final long start = System.nanoTime();
+			f.read("steady", 100);
+			assertEquals(Operation.Status.SUCC, f.outcome());
+			assertTrue(System.nanoTime() - start > TimeUnit.MILLISECONDS.toNanos(2000), "too fast to show the fix");
+			assertEquals(0, f.snapshot().transportFailures());
 		}
 	}
 
