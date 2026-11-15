@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/containerutil"
 	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
@@ -841,12 +842,12 @@ func (v *Verifier) startNodeContainer(host *hostparse.HostInfo, result *NodeResu
 
 	logging.LogInfo("verifier", "started container",
 		"host", host.Host,
-		"container", containerID[:constants.ContainerIDDisplayLength],
+		"container", containerutil.ShortID(containerID),
 		"external_ip", externalIP)
 
 	return Check{
 		Passed:   true,
-		Message:  fmt.Sprintf("Container started: %s", containerID[:constants.ContainerIDDisplayLength]),
+		Message:  fmt.Sprintf("Container started: %s", containerutil.ShortID(containerID)),
 		Duration: v.timeProvider.Since(start),
 	}
 }
@@ -1044,7 +1045,7 @@ func (v *Verifier) stopContainer(host *hostparse.HostInfo, containerID string) C
 	if err != nil {
 		// Log warning but don't fail completely - cleanup is best effort
 		logging.LogWarn("verifier", "failed to remove container",
-			"container", containerID[:12],
+			"container", containerutil.ShortID(containerID),
 			"host", host.Host,
 			"error", err.Error())
 
@@ -1058,7 +1059,7 @@ func (v *Verifier) stopContainer(host *hostparse.HostInfo, containerID string) C
 
 	logging.LogInfo("verifier", "container removed",
 		"host", host.Host,
-		"container", containerID[:12])
+		"container", containerutil.ShortID(containerID))
 
 	return Check{
 		Passed:   true,
@@ -1210,11 +1211,11 @@ func (v *Verifier) checkForPortConflicts(host *hostparse.HostInfo) Check {
 
 			cleanedUp := 0
 			for _, container := range sptContainers {
-				fmt.Printf("  Stopping container %s (%s)...\n", container.Name, container.ID[:12])
+				fmt.Printf("  Stopping container %s (%s)...\n", container.Name, containerutil.ShortID(container.ID))
 				if err := dockerOps.StopContainer(ctx, container.ID); err != nil {
 					logging.LogWarn("verifier", "failed to stop container during force cleanup",
 						"host", host.Host, "container", container.ID, "error", err)
-					fmt.Printf("    Failed to stop %s: %s\n", container.ID[:12], err.Error())
+					fmt.Printf("    Failed to stop %s: %s\n", containerutil.ShortID(container.ID), err.Error())
 				} else {
 					cleanedUp++
 				}

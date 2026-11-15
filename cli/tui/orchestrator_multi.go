@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/containerutil"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
@@ -476,7 +477,7 @@ func (o *MultiHostOrchestrator) ConnectHosts(ctx context.Context) error {
 					connectErrorsMu.Unlock()
 					return
 				}
-				if cinfo, perr := o.preflight.CheckPorts(ctx, h.Info, registryPort, apiPort); perr != nil {
+				if cinfo, perr := portCheckResult(o.preflight.CheckPorts(ctx, h.Info, registryPort, apiPort)); perr != nil {
 					h.SetError(fmt.Errorf("port check failed: %w", perr))
 					connectErrorsMu.Lock()
 					connectErrors = append(connectErrors, fmt.Sprintf("  ❌ %s: Port check failed: %v", h.Info.Original, perr))
@@ -519,13 +520,13 @@ func (o *MultiHostOrchestrator) ConnectHosts(ctx context.Context) error {
 								}
 							}
 							if stopped > 0 {
-								if c2, e2 := o.preflight.CheckPorts(ctx, h.Info, registryPort, apiPort); e2 == nil && len(c2.ConflictPorts) == 0 {
+								if summary, e2 := recheckPortsAfterCleanup(ctx, o.preflight, h.Info, registryPort, apiPort); e2 == nil {
 									logging.LogInfo("docker-multi", "resolved port conflicts via cleanup", "host", h.Info.Original)
 									resolved = true
 								} else {
-									h.SetError(fmt.Errorf("ports still in use after cleanup: %v", c2.ConflictPorts))
+									h.SetError(e2)
 									connectErrorsMu.Lock()
-									connectErrors = append(connectErrors, fmt.Sprintf("  ❌ %s: Ports still in use: %v", h.Info.Original, c2.ConflictPorts))
+									connectErrors = append(connectErrors, summary)
 									connectErrorsMu.Unlock()
 									return
 								}
@@ -771,7 +772,7 @@ func (o *MultiHostOrchestrator) StartContainers(ctx context.Context, image strin
 			h.SetManaged(true)
 			h.SetPhase(NodePhaseContainerStarting)
 
-			o.notifyf("  ✅ Container started on %s (ID: %s)", h.Info.Original, containerID[:12])
+			o.notifyf("  ✅ Container started on %s (ID: %s)", h.Info.Original, containerutil.ShortID(containerID))
 			logging.LogInfo("docker-multi", "container started",
 				"host", h.Info.Original,
 				"container_id", containerID)
@@ -3090,7 +3091,7 @@ func (o *MultiHostOrchestrator) startWorkerNode(ctx context.Context, host *HostC
 
 	logging.LogInfo("orchestrator", "started worker node",
 		"host", host.Info.Host,
-		"container", containerID[:12],
+		"container", containerutil.ShortID(containerID),
 		"rmi_hostname", advIP)
 
 	host.SetManaged(true)
@@ -3159,7 +3160,7 @@ func (o *MultiHostOrchestrator) startEntryNodeContext(
 	logging.LogInfo("orchestrator", "started entry node",
 		"host", primary.Info.Host,
 		"workers", strings.Join(workerAddresses, ","),
-		"container", containerID[:12])
+		"container", containerutil.ShortID(containerID))
 
 	return nil
 }

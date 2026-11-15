@@ -76,3 +76,27 @@ func TestHasConflicts(t *testing.T) {
 		t.Fatalf("expected non-empty slice -> conflicts")
 	}
 }
+
+func TestShortID(t *testing.T) {
+	full := "4f2c9a1b7e3d0c8a5b6f1e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3"
+	tests := []struct {
+		name string
+		id   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"5 characters", "4f2c9", "4f2c9"},
+		{"12 characters", "4f2c9a1b7e3d", "4f2c9a1b7e3d"},
+		{"64 characters", full, "4f2c9a1b7e3d"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ShortID(tt.id); got != tt.want {
+				t.Fatalf("ShortID(%q) = %q; want %q", tt.id, got, tt.want)
+			}
+		})
+	}
+	if len(full) != 64 {
+		t.Fatalf("test ID has %d characters, want 64", len(full))
+	}
+}
