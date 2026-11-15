@@ -1957,6 +1957,19 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 	}
 
+	private synchronized void attachToFailureBudgetFailure(
+					final IntegrityTerminalException budgetFailure, final Throwable failure) {
+		if (failure == null || failure == budgetFailure) {
+			return;
+		}
+		for (final Throwable attached : budgetFailure.getSuppressed()) {
+			if (attached == failure) {
+				return;
+			}
+		}
+		budgetFailure.addSuppressed(failure);
+	}
+
 	private void coordinateFailureBudgetStop() {
 		if (standaloneDeleteStopCoordinated) {
 			return;
@@ -2368,9 +2381,12 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					}
 					if (probe.failure() != null || probe.exhausted()) {
 						// The monitor records the budget failure before it closes admission, so a
-						// slice that failed or ran dry because of that stop finds it set here.
-						if (failureBudgetFailure != null) {
-							throw failureBudgetFailure;
+						// slice that failed or ran dry because of that stop finds it set here. The
+						// slice's own failure, such as a lost engine, stays on it as evidence.
+						final IntegrityTerminalException budgetFailure = failureBudgetFailure;
+						if (budgetFailure != null) {
+							attachToFailureBudgetFailure(budgetFailure, probe.failure());
+							throw budgetFailure;
 						}
 					}
 					if (probe.failure() != null) {

@@ -2516,7 +2516,9 @@ class LoadStepClientBaseTest {
 			if (!admissionClosed.await(20, TimeUnit.MILLISECONDS)) {
 				return false;
 			}
-			// As the real slice does: once the stop empties its queue, its await reads it as done.
+			// As the real slice did before it told a stop from an exhaustion: the stop emptied its
+			// queue and its await read that as the inventory running out. The controller must name
+			// the budget whatever a stopped slice reports.
 			throw new IntegrityTerminalException(
 							IntegrityTerminalException.Category.EXECUTION,
 							"Standalone DELETE inventory slice exhausted before the requested duration; "
@@ -2561,12 +2563,13 @@ class LoadStepClientBaseTest {
 	}
 
 	/**
-	 * A stop that is not the failure budget's, during the await: the slice's await reports it was
-	 * stopped, as the real slice does once admission closes, and the controller's await ends with
-	 * that cause promptly instead of polling to the deadline.
+	 * The controller's side of a stop that is not the failure budget's: a slice whose await fails
+	 * once admission closes ends the controller's await promptly with that slice's cause, instead
+	 * of polling to the deadline. The mock supplies the slice's text, so this covers only the
+	 * controller; {@code LoadStepLocalSteadyStopPathTest} joins a real slice to the controller.
 	 */
 	@Test
-	void durationStopDuringAwaitEndsPromptlyWithTheStopCause() throws Exception {
+	void durationStopDuringAwaitEndsPromptlyWithTheSlicesFailure() throws Exception {
 		final Config config = durationConfig();
 		config.val("load-op-wait-limit", 0);
 		final TestLoadStepClient client = new TestLoadStepClient(
@@ -2627,6 +2630,59 @@ class LoadStepClientBaseTest {
 			assertNoLiveThreads("spt-delete-await-");
 		}
 		assertNull(stopFailure.get());
+	}
+
+	/** A slice failure that lands with a budget stop stays on the budget failure as evidence. */
+	@Test
+	void durationBudgetStopKeepsASlicesRemoteFailureAsSuppressed() throws Exception {
+		final Config config = durationConfig();
+		config.val("load-op-wait-limit", 0);
+		config.val("load-op-failureBudget-maxFailedObjects", 0L);
+		final TestLoadStepClient client = new TestLoadStepClient(
+						config, extensions, ctxConfigs, mockMetricsManager);
+		final CountDownLatch awaitEntered = new CountDownLatch(1);
+		final CountDownLatch admissionClosed = new CountDownLatch(1);
+		final java.rmi.ConnectException engineLost = new java.rmi.ConnectException("worker engine lost");
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.await(anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
+			awaitEntered.countDown();
+			if (!admissionClosed.await(20, TimeUnit.MILLISECONDS)) {
+				return false;
+			}
+			throw engineLost;
+		});
+		when(slice.durationAwaitStatus()).thenReturn(DurationAwaitStatus.RUNNING);
+		when(slice.deleteObjectLifecycle()).thenAnswer(invocation -> awaitEntered.getCount() == 0
+						? new DeleteObjectLifecycleSnapshot(1, 1, 0, 1, 0, 0, 0, 0, true)
+						: DeleteObjectLifecycleSnapshot.empty());
+		when(slice.isDispatchedOperationsDrainCompleteForStepStop()).thenReturn(true);
+		doAnswer(invocation -> {
+			admissionClosed.countDown();
+			return null;
+		}).when(slice).closeOperationAdmissionForStepStop();
+		addRawStepSlice(client, slice);
+
+		try {
+			final IntegrityTerminalException failure = assertThrows(
+							IntegrityTerminalException.class,
+							() -> client.await(30, TimeUnit.SECONDS));
+			assertTrue(failure.getMessage().contains("failed-object budget exceeded"), failure.getMessage());
+			assertTrue(
+							java.util.Arrays.stream(failure.getSuppressed()).anyMatch(suppressed -> causedBy(suppressed, engineLost)),
+							"the budget failure lost the slice's remote failure: " + java.util.Arrays.toString(failure.getSuppressed()));
+		} finally {
+			assertThrows(IntegrityTerminalException.class, client::close);
+			assertNoLiveThreads("spt-delete-failure-budget-", "spt-delete-await-");
+		}
+	}
+
+	private static boolean causedBy(final Throwable failure, final Throwable cause) {
+		for (Throwable current = failure; current != null; current = current.getCause()) {
+			if (current == cause) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	@Test
