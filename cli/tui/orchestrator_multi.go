@@ -750,6 +750,7 @@ func (o *MultiHostOrchestrator) StartContainers(ctx context.Context, image strin
 			containerID, err := startContainerInNodeModeContext(
 				ctx, h.DockerManager, image, o.apiPort, o.networkMode, engineArgs)
 			if err != nil {
+				claimFailedStartResources(h)
 				h.SetError(fmt.Errorf("failed to start container: %w", err))
 
 				startErrorsMu.Lock()
@@ -960,6 +961,18 @@ func hasManagedDockerResources(manager DockerInterface) bool {
 		return reporter.HasManagedResources()
 	}
 	return manager.ContainerID() != ""
+}
+
+// claimFailedStartResources marks a host managed after a failed start when its
+// manager still owns something there: a container that failed its API
+// readiness check, or a staging or diagnostics directory the start made. The
+// start rollback (cleanupManagedContainersAfterStartFailure) and
+// StopAllContainers skip unmanaged hosts, so without this the resources stay
+// on the host. A manager that owns nothing leaves the host as it was.
+func claimFailedStartResources(host *HostConnection) {
+	if host != nil && host.DockerManager != nil && hasManagedDockerResources(host.DockerManager) {
+		host.SetManaged(true)
+	}
 }
 
 func markHostCleanupComplete(host *HostConnection) {
@@ -2464,6 +2477,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 					slices.Concat(m.multiHost.nodeModePortArgs(), startupArgs))
 				if err != nil {
 					// Record but continue; non-critical for primary execution
+					claimFailedStartResources(w)
 					w.SetError(err)
 					logging.LogError("orchestrator", "failed to start idle worker API container", err, "host", w.Info.Original)
 					continue
@@ -2527,6 +2541,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 			cid, err := startEntryNodeContainerContext(
 				ctx, primary.DockerManager, image, ports, nil, additionalArgs, m.multiHost.networkMode)
 			if err != nil {
+				claimFailedStartResources(primary)
 				return failBeforeSubmission(err)
 			}
 			primary.mu.Lock()
@@ -3063,6 +3078,7 @@ func (o *MultiHostOrchestrator) startWorkerNode(ctx context.Context, host *HostC
 		additionalArgs,
 	)
 	if err != nil {
+		claimFailedStartResources(host)
 		return fmt.Errorf("failed to start worker on %s: %w", host.Info.Host, err)
 	}
 
@@ -3130,6 +3146,7 @@ func (o *MultiHostOrchestrator) startEntryNodeContext(
 		o.networkMode,
 	)
 	if err != nil {
+		claimFailedStartResources(primary)
 		return fmt.Errorf("failed to start entry node: %w", err)
 	}
 
