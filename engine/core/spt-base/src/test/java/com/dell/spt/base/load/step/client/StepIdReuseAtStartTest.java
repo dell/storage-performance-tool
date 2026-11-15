@@ -258,6 +258,19 @@ public class StepIdReuseAtStartTest {
 		assertTrue(failure.getMessage().contains("(/w/nic.set.json exists)"), failure.getMessage());
 	}
 
+	@Test
+	void theStartRefusesAStepWhoseOtherNodeHoldsAnEarlierFileBeforeAnySliceOrBuildRecord() throws Exception {
+		final FileManager worker = node(Loggers.OPERATION_LIFECYCLE.getName(), NODE_FILE, 120);
+
+		final var failure = refusedAtStart(config("create"), worker);
+
+		assertInstanceOf(StepIdInUseException.class, failure, failure.toString());
+		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, failure.category());
+		assertEquals("step id \"" + stepId + "\" is already used in the log directory of node " + NODE + " ("
+						+ NODE_FILE + " exists); give each step its own load.step.id", failure.getMessage());
+		verify(worker).fileSize(NODE_FILE);
+	}
+
 	/** The faults a node's file manager can answer the reuse check with, none of them a definite answer. */
 	static Stream<Arguments> uncheckableNodes() {
 		return Stream.of(
