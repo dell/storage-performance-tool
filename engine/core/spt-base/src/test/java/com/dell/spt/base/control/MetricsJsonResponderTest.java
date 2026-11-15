@@ -1238,6 +1238,146 @@ public class MetricsJsonResponderTest {
 						"concurrency==0 after the configured duration must report Completed");
 	}
 
+	@Test
+	void clusterMetricsReportCompletedWhenConcurrencyZeroAtOpCountLimit() throws Exception {
+		// Positive path: once the configured op count has been reached,
+		// concurrency==0 is a genuine completion.
+		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot(1000L, 0L, 5_000L);
+		final DistributedMetricsContext ctx = mockDistributedContext("step-count-done", OpType.CREATE, snapshot,
+						Map.of(MetricsConstants.METADATA_LIMIT_OP_COUNT, 1000L));
+
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of(ctx));
+		when(mgr.getAllContexts()).thenReturn(Set.of());
+		when(mgr.getTerminalSteps()).thenReturn(List.of());
+
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
+		final JsonNode obj = stepNode(responder.buildClusterMetrics(false), "step-count-done");
+		assertEquals(2, obj.get("test_state").asInt(),
+						"concurrency==0 at the configured op count must report Completed");
+	}
+
+	@Test
+	void clusterMetricsStayRunningBeforeFirstOperationWhenUnlimited() throws Exception {
+		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot(0L, 0L, 5_000L);
+		final DistributedMetricsContext ctx = mockDistributedContext("step-unlimited-idle", OpType.READ, snapshot,
+						Map.of());
+
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of(ctx));
+		when(mgr.getAllContexts()).thenReturn(Set.of());
+		when(mgr.getTerminalSteps()).thenReturn(List.of());
+
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
+		final JsonNode obj = stepNode(responder.buildClusterMetrics(false), "step-unlimited-idle");
+		assertEquals(1, obj.get("test_state").asInt(), "no operations issued yet must report Running");
+	}
+
+	@Test
+	void clusterMetricsStayRunningWhenUnlimitedContextConcurrencyZeroUntilTerminalEntry() throws Exception {
+		// Regression: a step with neither a count nor a time limit has no limit to
+		// tell a transient concurrency==0 gap from its end. Its active context must
+		// report Running; Completed comes only from the step's terminal entry, or
+		// the CLI's fleet maximum lets the first idle engine end a multi-host step.
+		final DistributedAllMetricsSnapshot snapshot = mockDistributedSnapshot(80L, 0L, 5_000L);
+		final DistributedMetricsContext ctx = mockDistributedContext("step-unlimited", OpType.LIST, snapshot,
+						Map.of());
+
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of(ctx));
+		when(mgr.getAllContexts()).thenReturn(Set.of());
+		when(mgr.getTerminalSteps()).thenReturn(List.of());
+
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
+		final JsonNode active = stepNode(responder.buildClusterMetrics(false), "step-unlimited");
+		assertEquals(1, active.get("test_state").asInt(),
+						"an active unlimited context with concurrency==0 must report Running, not Completed");
+
+		// The step ends: its context is unregistered and its terminal entry is served.
+		final TerminalStepEntry terminal = new TerminalStepEntry(
+						"step-unlimited",
+						OpType.LIST,
+						123L,
+						System.currentTimeMillis(),
+						80L,
+						0L,
+						0L,
+						0.0,
+						0.0,
+						null,
+						null,
+						null,
+						0L,
+						0.0,
+						0L,
+						0L,
+						5_000L,
+						true,
+						1,
+						List.of("local"),
+						false);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of());
+		when(mgr.getTerminalSteps()).thenReturn(List.of(terminal));
+
+		final JsonNode ended = stepNode(responder.buildClusterMetrics(false), "step-unlimited");
+		assertTrue(ended.get("terminal").asBoolean());
+		assertTrue(ended.get("unbounded").asBoolean());
+		assertEquals(2, ended.get("test_state").asInt(), "the unlimited step's terminal entry must report Completed");
+	}
+
+	@Test
+	void nodeMetricsStayRunningWhenUnlimitedContextConcurrencyZeroUntilTerminalEntry() {
+		final AllMetricsSnapshot snapshot = mockNodeSnapshot(80L, 0L, 5_000L);
+		final MetricsContext ctx = mock(MetricsContext.class);
+		when(ctx.loadStepId()).thenReturn("node-unlimited");
+		when(ctx.opType()).thenReturn(OpType.READ);
+		when(ctx.lastSnapshot()).thenReturn(snapshot);
+		when(ctx.metadata()).thenReturn(Map.of());
+		when(ctx.runId()).thenReturn(42L);
+
+		final MetricsManager mgr = mock(MetricsManager.class);
+		when(mgr.getDistributedContexts()).thenReturn(Set.of());
+		when(mgr.getAllContexts()).thenReturn(Set.of(ctx));
+		when(mgr.getTerminalSteps()).thenReturn(List.of());
+
+		final MetricsJsonResponder responder = new MetricsJsonResponder(mgr, defaultConfig());
+		final JsonNode active = stepNode(responder.buildNodeMetrics(false), "node-unlimited");
+		assertEquals(1, active.get("test_state").asInt(),
+						"an active unlimited context with concurrency==0 must report Running, not Completed");
+
+		final TerminalStepEntry terminal = new TerminalStepEntry(
+						"node-unlimited",
+						OpType.READ,
+						42L,
+						System.currentTimeMillis(),
+						80L,
+						0L,
+						0L,
+						0.0,
+						0.0,
+						0L,
+						0.0,
+						0L,
+						0L,
+						5_000L);
+		when(mgr.getAllContexts()).thenReturn(Set.of());
+		when(mgr.getTerminalSteps()).thenReturn(List.of(terminal));
+
+		final JsonNode ended = stepNode(responder.buildNodeMetrics(false), "node-unlimited");
+		assertTrue(ended.get("terminal").asBoolean());
+		assertTrue(ended.get("unbounded").asBoolean());
+		assertEquals(2, ended.get("test_state").asInt(), "the unlimited step's terminal entry must report Completed");
+	}
+
+	private static JsonNode stepNode(final ArrayNode payload, final String stepId) {
+		for (final JsonNode node : payload) {
+			if (stepId.equals(node.get("step_id").asText())) {
+				return node;
+			}
+		}
+		throw new AssertionError("expected metrics for " + stepId + " in " + payload);
+	}
+
 	private static AllMetricsSnapshot mockNodeSnapshot(
 					final long succCount,
 					final long failCount,
