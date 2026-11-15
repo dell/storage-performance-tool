@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/containerutil"
 	"github.com/dell/storage-performance-tool/cli/internal/deletemetrics"
 	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
@@ -477,7 +478,7 @@ func (o *MultiHostOrchestrator) ConnectHosts(ctx context.Context) error {
 					connectErrorsMu.Unlock()
 					return
 				}
-				if cinfo, perr := o.preflight.CheckPorts(ctx, h.Info, registryPort, apiPort, o.rmiPortStart, o.rmiPortCount); perr != nil {
+				if cinfo, perr := portCheckResult(o.preflight.CheckPorts(ctx, h.Info, registryPort, apiPort)); perr != nil {
 					h.SetError(fmt.Errorf("port check failed: %w", perr))
 					connectErrorsMu.Lock()
 					connectErrors = append(connectErrors, fmt.Sprintf("  ❌ %s: Port check failed: %v", h.Info.Original, perr))
@@ -520,13 +521,13 @@ func (o *MultiHostOrchestrator) ConnectHosts(ctx context.Context) error {
 								}
 							}
 							if stopped > 0 {
-								if c2, e2 := o.preflight.CheckPorts(ctx, h.Info, registryPort, apiPort, o.rmiPortStart, o.rmiPortCount); e2 == nil && len(c2.ConflictPorts) == 0 {
+								if summary, e2 := recheckPortsAfterCleanup(ctx, o.preflight, h.Info, registryPort, apiPort); e2 == nil {
 									logging.LogInfo("docker-multi", "resolved port conflicts via cleanup", "host", h.Info.Original)
 									resolved = true
 								} else {
-									h.SetError(fmt.Errorf("ports still in use after cleanup: %v", c2.ConflictPorts))
+									h.SetError(e2)
 									connectErrorsMu.Lock()
-									connectErrors = append(connectErrors, fmt.Sprintf("  ❌ %s: Ports still in use: %v", h.Info.Original, c2.ConflictPorts))
+									connectErrors = append(connectErrors, summary)
 									connectErrorsMu.Unlock()
 									return
 								}
@@ -652,6 +653,10 @@ func (o *MultiHostOrchestrator) GetExecutionParticipantHosts() ([]*HostConnectio
 	return participants, true, nil
 }
 
+// configureItemFileMounts stages the item files on each host. On a failure it
+// returns the error without rolling back: every caller chain runs the start
+// rollback (cleanupManagedContainersAfterStartFailure) once on that error, so
+// a second pass here would only repeat its work and its errors.
 func (o *MultiHostOrchestrator) configureItemFileMounts(
 	ctx context.Context, hosts []*HostConnection, mounts []scenario.FileMount,
 ) error {
@@ -661,8 +666,7 @@ func (o *MultiHostOrchestrator) configureItemFileMounts(
 	copied := itemFileCopySize(mounts)
 	for _, host := range hosts {
 		if host.DockerManager == nil {
-			cause := fmt.Errorf("host %s has no Docker manager configured", host.Info.Original)
-			return errors.Join(cause, o.cleanupManagedContainersAfterStartFailure(ctx))
+			return fmt.Errorf("host %s has no Docker manager configured", host.Info.Original)
 		}
 		// Remote item staging is itself a managed resource. Claim ownership
 		// before staging so a failed remote rm remains reachable by StopAll.
@@ -671,8 +675,7 @@ func (o *MultiHostOrchestrator) configureItemFileMounts(
 		// what each one waits for.
 		o.notifyf("📦 Copying %sitem files to %s...", copied, host.Info.Original)
 		if err := configureDockerFileMounts(ctx, host.DockerManager, mounts); err != nil {
-			cause := fmt.Errorf("configure item file mounts on %s: %w", host.Info.Original, err)
-			return errors.Join(cause, o.cleanupManagedContainersAfterStartFailure(ctx))
+			return fmt.Errorf("configure item file mounts on %s: %w", host.Info.Original, err)
 		}
 	}
 	return nil
@@ -749,6 +752,7 @@ func (o *MultiHostOrchestrator) StartContainers(ctx context.Context, image strin
 			containerID, err := startContainerInNodeModeContext(
 				ctx, h.DockerManager, image, o.apiPort, o.networkMode, engineArgs)
 			if err != nil {
+				claimFailedStartResources(h)
 				h.SetError(fmt.Errorf("failed to start container: %w", err))
 
 				startErrorsMu.Lock()
@@ -769,7 +773,7 @@ func (o *MultiHostOrchestrator) StartContainers(ctx context.Context, image strin
 			h.SetManaged(true)
 			h.SetPhase(NodePhaseContainerStarting)
 
-			o.notifyf("  ✅ Container started on %s (ID: %s)", h.Info.Original, containerID[:12])
+			o.notifyf("  ✅ Container started on %s (ID: %s)", h.Info.Original, containerutil.ShortID(containerID))
 			logging.LogInfo("docker-multi", "container started",
 				"host", h.Info.Original,
 				"container_id", containerID)
@@ -966,6 +970,18 @@ func hasManagedDockerResources(manager DockerInterface) bool {
 		return reporter.HasManagedResources()
 	}
 	return manager.ContainerID() != ""
+}
+
+// claimFailedStartResources marks a host managed after a failed start when its
+// manager still owns something there: a container that failed its API
+// readiness check, or a staging or diagnostics directory the start made. The
+// start rollback (cleanupManagedContainersAfterStartFailure) and
+// StopAllContainers skip unmanaged hosts, so without this the resources stay
+// on the host. A manager that owns nothing leaves the host as it was.
+func claimFailedStartResources(host *HostConnection) {
+	if host != nil && host.DockerManager != nil && hasManagedDockerResources(host.DockerManager) {
+		host.SetManaged(true)
+	}
 }
 
 func markHostCleanupComplete(host *HostConnection) {
@@ -1646,15 +1662,17 @@ func (m *MultiHostTestOrchestrator) observeEntryTerminalFailure(ctx context.Cont
 // the distributed test has truly finished and the headless coordinator should
 // stop.
 //
-// The engine reports test_state=Completed whenever operations have started but
-// the instantaneous concurrency is 0. The asynchronous Netty S3 driver hits that
-// transiently between operations at low thread counts, so a single Completed
-// sample is not a reliable end-of-test signal: in headless mode it caused
-// duration-bounded runs to abort within seconds of starting. For a time-bounded
-// run we therefore only honor completion once the configured duration has
-// actually elapsed (StepTime carries the engine-reported elapsed_time_seconds).
-// Op-count and unbounded runs are guarded by the engine-side fix and keep the
-// prior trust-the-state behavior here.
+// An active engine context can sit at instantaneous concurrency 0 between
+// operations: the asynchronous Netty S3 driver hits that transiently at low
+// thread counts. Older engines reported test_state=Completed for such a gap, so
+// a single Completed sample is not a reliable end-of-test signal: in headless
+// mode it caused duration-bounded runs to abort within seconds of starting. For
+// a time-bounded run we therefore only honor completion once the configured
+// duration has actually elapsed (StepTime carries the engine-reported
+// elapsed_time_seconds). Op-count and unbounded runs are guarded by the engine:
+// it reports Completed for an op-count run only at its count, and for a run
+// with neither limit only from the step's terminal entry, so they keep the
+// trust-the-state behavior here.
 func shouldSignalCompletion(agg *PerformanceMetric) bool {
 	if agg == nil || agg.Partial || agg.TestState < constants.TestStateCompleted {
 		return false
@@ -1676,7 +1694,7 @@ func shouldSignalCompletion(agg *PerformanceMetric) bool {
 	}
 	// For op-count-bounded runs, require the fleet to have reached 100% completion
 	// before trusting the Completed state. CompletionPercent is normalization-safe
-	// across N nodes (it is the slowest node's progress); comparing a summed
+	// across N nodes (it is summed work over summed limits); comparing a summed
 	// SuccessCount against a per-node LimitOpCount would be wrong once aggregated.
 	if agg.HasLimit && agg.LimitType == constants.LimitTypeOpCount {
 		return agg.CompletionPercent >= 100
@@ -2468,6 +2486,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 					slices.Concat(m.multiHost.nodeModePortArgs(), startupArgs))
 				if err != nil {
 					// Record but continue; non-critical for primary execution
+					claimFailedStartResources(w)
 					w.SetError(err)
 					logging.LogError("orchestrator", "failed to start idle worker API container", err, "host", w.Info.Original)
 					continue
@@ -2531,6 +2550,7 @@ func (m *MultiHostTestOrchestrator) StartTestWithLaunchHooks(
 			cid, err := startEntryNodeContainerContext(
 				ctx, primary.DockerManager, image, ports, nil, additionalArgs, m.multiHost.networkMode)
 			if err != nil {
+				claimFailedStartResources(primary)
 				return failBeforeSubmission(err)
 			}
 			primary.mu.Lock()
@@ -3067,6 +3087,7 @@ func (o *MultiHostOrchestrator) startWorkerNode(ctx context.Context, host *HostC
 		additionalArgs,
 	)
 	if err != nil {
+		claimFailedStartResources(host)
 		return fmt.Errorf("failed to start worker on %s: %w", host.Info.Host, err)
 	}
 
@@ -3078,7 +3099,7 @@ func (o *MultiHostOrchestrator) startWorkerNode(ctx context.Context, host *HostC
 
 	logging.LogInfo("orchestrator", "started worker node",
 		"host", host.Info.Host,
-		"container", containerID[:12],
+		"container", containerutil.ShortID(containerID),
 		"rmi_hostname", advIP)
 
 	host.SetManaged(true)
@@ -3134,6 +3155,7 @@ func (o *MultiHostOrchestrator) startEntryNodeContext(
 		o.networkMode,
 	)
 	if err != nil {
+		claimFailedStartResources(primary)
 		return fmt.Errorf("failed to start entry node: %w", err)
 	}
 
@@ -3146,7 +3168,7 @@ func (o *MultiHostOrchestrator) startEntryNodeContext(
 	logging.LogInfo("orchestrator", "started entry node",
 		"host", primary.Info.Host,
 		"workers", strings.Join(workerAddresses, ","),
-		"container", containerID[:12])
+		"container", containerutil.ShortID(containerID))
 
 	return nil
 }

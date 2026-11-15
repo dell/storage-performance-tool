@@ -1,21 +1,30 @@
+// This example uses current configuration names; the Mongoose 3/4 names it once used are not aliased.
 Load
 	.config(
 		{
 			"load": {
-				"limit": {
-					"count": 100
+				"op": {
+					"limit": {
+						"count": 100
+					}
 				},
-				"threads": 10
-			},
-			"run": {
-				"id": "backward-compatibility-test"
+				"step": {
+					"id": "backward-compatibility-test"
+				}
 			},
 			"storage": {
 				"auth": {
-					"id": "wuser1@sanity.local"
+					"uid": "wuser1@sanity.local"
 				},
-				"node": {
-					"addrs": new java.util.ArrayList(["127.0.0.1"])
+				"driver": {
+					"limit": {
+						"concurrency": 10
+					}
+				},
+				"net": {
+					"node": {
+						"addrs": new java.util.ArrayList(["127.0.0.1"])
+					}
 				}
 			}
 		}

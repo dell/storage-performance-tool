@@ -875,7 +875,8 @@ func (dm *DockerManager) StartWorkerNodeContainerContext(ctx context.Context, im
 }
 
 // startWorkerNodeOnPorts starts an RMI worker that serves, and publishes, the run's API and RMI
-// registry ports.
+// registry ports. Those are the only ports the engine listens on: it exports its RMI services on
+// the registry port, so the --rmi-port-start range is accepted for compatibility and not published.
 func (dm *DockerManager) startWorkerNodeOnPorts(
 	ctx context.Context, image string, rmiHostname string, ports enginePorts, rmiPortStart, rmiPortCount int, additionalArgs []string,
 ) (string, error) {
@@ -908,16 +909,6 @@ func (dm *DockerManager) startWorkerNodeOnPorts(
 			HostIP:   dockerBindAllInterfaces,
 			HostPort: apiPort,
 		}},
-	}
-
-	// Add RMI object ports
-	for i := 0; i < rmiPortCount; i++ {
-		port := rmiPortStart + i
-		portKey := fmt.Sprintf("%d/tcp", port)
-		portBindings[nat.Port(portKey)] = []nat.PortBinding{{
-			HostIP:   dockerBindAllInterfaces,
-			HostPort: fmt.Sprintf("%d", port),
-		}}
 	}
 
 	// Prepare exposed ports

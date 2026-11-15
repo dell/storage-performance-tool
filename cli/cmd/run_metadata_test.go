@@ -511,3 +511,60 @@ func TestBuildRunMetadataPopulatesCoreFields(t *testing.T) {
 		t.Fatalf("TraceAuto should be true")
 	}
 }
+
+// The RMI object range flags have no effect any more, but every command still accepts them and a
+// run still records them in spt_run_params.json.
+func TestRMIPortRangeFlagsStayAcceptedAndRecorded(t *testing.T) {
+	for name, c := range map[string]*cobra.Command{"run": runCmd, "replay": replayCmd, "verify": verifyCmd} {
+		for flag, def := range map[string]string{"rmi-port-start": "40000", "rmi-port-count": "10"} {
+			f := c.Flags().Lookup(flag)
+			if f == nil {
+				t.Fatalf("%s lacks --%s", name, flag)
+			}
+			if f.DefValue != def {
+				t.Errorf("%s --%s default = %s, want %s", name, flag, f.DefValue, def)
+			}
+			if !strings.HasPrefix(f.Usage, "No effect") {
+				t.Errorf("%s --%s usage = %q, want it to say the flag has no effect", name, flag, f.Usage)
+			}
+		}
+	}
+
+	cmd := &cobra.Command{Use: "spt"}
+	cmd.Flags().Int("rmi-port-start", 40000, "")
+	cmd.Flags().Int("rmi-port-count", 10, "")
+	if err := cmd.ParseFlags([]string{"--rmi-port-start", "21140", "--rmi-port-count", "5"}); err != nil {
+		t.Fatalf("ParseFlags() error = %v", err)
+	}
+	start, _ := cmd.Flags().GetInt("rmi-port-start")
+	count, _ := cmd.Flags().GetInt("rmi-port-count")
+	meta := buildRunMetadata(runMetadataInput{
+		WorkloadType: "write",
+		HostInfos: []*hostparse.HostInfo{
+			{Host: "wrk1", Original: "wrk1"}, {Host: "wrk2", Original: "wrk2"},
+		},
+		RMIPortStart: start,
+		RMIPortCount: count,
+		Command:      cmd,
+	})
+	dir := t.TempDir()
+	if err := writeRunMetadata(meta, dir); err != nil {
+		t.Fatalf("writeRunMetadata() error = %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(dir, constants.ResultsMetadataFileName))
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	var decoded struct {
+		MultiHost struct {
+			RMIPortStart int `json:"rmiPortStart"`
+			RMIPortCount int `json:"rmiPortCount"`
+		} `json:"multiHost"`
+	}
+	if err := json.Unmarshal(content, &decoded); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if decoded.MultiHost.RMIPortStart != 21140 || decoded.MultiHost.RMIPortCount != 5 {
+		t.Fatalf("multiHost RMI range = %d+%d, want 21140+5", decoded.MultiHost.RMIPortStart, decoded.MultiHost.RMIPortCount)
+	}
+}

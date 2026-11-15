@@ -168,13 +168,3 @@ func BuildPortMapping(hostPort, containerPort int) PortMapping {
 		Protocol:      constants.DefaultProtocol,
 	}
 }
-
-// BuildRMIPortMappings creates port mappings for RMI object ports
-func BuildRMIPortMappings(portStart, portCount int) []PortMapping {
-	mappings := make([]PortMapping, portCount)
-	for i := 0; i < portCount; i++ {
-		port := portStart + i
-		mappings[i] = BuildPortMapping(port, port)
-	}
-	return mappings
-}
