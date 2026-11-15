@@ -10,6 +10,8 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.item.op.OperationsBuilder;
+import com.dell.spt.base.item.op.composite.CompositeOperation;
+import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationsBuilderImpl;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
@@ -44,6 +46,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Unit tests for {@link MixedLoadGenerator}.
@@ -54,6 +58,47 @@ import static org.junit.jupiter.api.Assertions.*;
 @SuppressWarnings({"unchecked", "rawtypes"
 })
 class MixedLoadGeneratorTest {
+
+	@Test
+	@DisplayName("Only an upload's or range read's successful initiation, and a part, are not final results")
+	void finalResults() {
+		assertTrue(MixedLoadGenerator.isFinalResult(operation(OpType.READ, Operation.Status.SUCC)));
+		assertTrue(MixedLoadGenerator.isFinalResult(operation(OpType.CREATE, Operation.Status.INTERRUPTED)));
+		assertFalse(MixedLoadGenerator.isFinalResult(part(Operation.Status.SUCC)));
+		assertFalse(MixedLoadGenerator.isFinalResult(part(Operation.Status.FAIL_IO)));
+		assertFalse(MixedLoadGenerator.isFinalResult(composite(OpType.CREATE, Operation.Status.SUCC, false)));
+		assertFalse(MixedLoadGenerator.isFinalResult(composite(OpType.READ, Operation.Status.SUCC, false)));
+		assertTrue(MixedLoadGenerator.isFinalResult(composite(OpType.CREATE, Operation.Status.SUCC, true)));
+		assertTrue(MixedLoadGenerator.isFinalResult(composite(OpType.CREATE, Operation.Status.FAIL_IO, false)));
+		assertTrue(MixedLoadGenerator.isFinalResult(composite(OpType.CREATE, Operation.Status.INTERRUPTED, false)));
+		// A composite DELETE publishes one result and never finishes its parts.
+		assertTrue(MixedLoadGenerator.isFinalResult(composite(OpType.DELETE, Operation.Status.SUCC, false)));
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Operation<Item> operation(final OpType type, final Operation.Status status) {
+		final Operation<Item> op = mock(Operation.class);
+		when(op.type()).thenReturn(type);
+		when(op.status()).thenReturn(status);
+		return op;
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Operation<Item> part(final Operation.Status status) {
+		final PartialOperation<Item> op = mock(PartialOperation.class);
+		when(op.type()).thenReturn(OpType.CREATE);
+		when(op.status()).thenReturn(status);
+		return op;
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Operation<Item> composite(final OpType type, final Operation.Status status, final boolean done) {
+		final CompositeOperation<Item> op = mock(CompositeOperation.class);
+		when(op.type()).thenReturn(type);
+		when(op.status()).thenReturn(status);
+		when(op.allSubOperationsDone()).thenReturn(done);
+		return op;
+	}
 
 	@Test
 	void mixedPutItemInputUsesConfiguredPrefixShards() throws Exception {
@@ -113,7 +158,7 @@ class MixedLoadGeneratorTest {
 	}
 
 	@Test
-	@DisplayName("A count-limited generator dispatches its count, then reports the cap drained once all have completed")
+	@DisplayName("A count-limited generator dispatches its count, then reports the cap drained once each has its final result")
 	void aCountLimitedGeneratorDispatchesItsCount() throws Exception {
 		final List<Operation> dispatched = new CopyOnWriteArrayList<>();
 		final MixedLoadGenerator gen = countLimitedGenerator(capturingOutput(dispatched), 5);
@@ -124,13 +169,17 @@ class MixedLoadGeneratorTest {
 		assertEquals(5, gen.generatedOpCount());
 		assertTrue(gen.isItemInputFinished(), "a capped generator has finished its input");
 		assertFalse(gen.isCountLimitDrained(), "its operations are still in flight");
-		for (int i = 0; i < 4; i++) {
+		for (int i = 0; i < 5; i++) {
 			gen.onOperationCompleted(dispatched.get(i));
 			gen.releasePermit();
 		}
-		assertFalse(gen.isCountLimitDrained(), "one operation is still in flight");
-		gen.onOperationCompleted(dispatched.get(4));
-		gen.releasePermit();
+		// Out of flight is not ended: a multipart upload leaves flight at its initiation.
+		assertFalse(gen.isCountLimitDrained(), "no operation has published its final result");
+		for (int i = 0; i < 4; i++) {
+			gen.onFinalResult();
+		}
+		assertFalse(gen.isCountLimitDrained(), "one operation has not published its final result");
+		gen.onFinalResult();
 		assertTrue(gen.isCountLimitDrained(), "every dispatched operation has ended");
 	}
 
@@ -167,6 +216,9 @@ class MixedLoadGeneratorTest {
 		for (final Operation op : dispatched) {
 			gen.onOperationCompleted(op);
 			gen.releasePermit();
+		}
+		for (int i = 0; i < dispatched.size(); i++) {
+			gen.onFinalResult();
 		}
 		assertFalse(gen.isCountLimitDrained(), "no count limit, so no cap to drain");
 	}

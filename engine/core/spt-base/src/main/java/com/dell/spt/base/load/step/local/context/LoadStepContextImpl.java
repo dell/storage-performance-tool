@@ -178,9 +178,6 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private boolean driverStartedForAdmission;
 	private final AtomicBoolean objectFailureBudgetAdmissionReleased = new AtomicBoolean(false);
 	private final OperationLifecycleTracker<O> operationLifecycle;
-	// The counted results at the last completion check that found the generator's count limit
-	// drained, or -1. Read and written by the completion checks.
-	private volatile long countLimitDrainedResults = -1;
 	private final boolean standaloneDeleteEnabled;
 	private final boolean standaloneDeleteDurationMode;
 	private final StandaloneDeleteConfig standaloneDeleteConfig;
@@ -726,28 +723,19 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	/**
-	 * Whether the generator has dispatched its count limit and everything it dispatched has ended,
-	 * on two consecutive checks with the same counted results. Some of those operations can end
-	 * without a counted result, so the count check alone would wait for the time limit, or for good
-	 * without one. The second check lets a result whose operation has left flight finish being
-	 * counted before the step ends.
+	 * Whether the generator has dispatched its count limit and every operation it dispatched has
+	 * published its final result. Some of those operations can end without a counted result, so the
+	 * count check alone would wait for the time limit, or for good without one. The generator counts
+	 * a final result after this context has taken it, so nothing is left to count.
 	 */
 	private boolean isDoneCountLimitDrained() {
 		if (!generator.isCountLimitDrained()) {
-			if (countLimitDrainedResults != -1) {
-				countLimitDrainedResults = -1;
-			}
-			return false;
-		}
-		final long results = counterResults.sum();
-		if (countLimitDrainedResults != results) {
-			countLimitDrainedResults = results;
 			return false;
 		}
 		Loggers.MSG.debug(
 						"{}: done, the generator's count limit was dispatched and every operation ended ({} counted)",
 						id,
-						results);
+						counterResults.sum());
 		return true;
 	}
 

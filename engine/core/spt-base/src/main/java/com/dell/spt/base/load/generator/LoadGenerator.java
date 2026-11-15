@@ -41,8 +41,9 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends T
 
 	/**
 	 * Whether this generator caps dispatch at the step's count limit, has reached it, and every
-	 * operation it dispatched has published its last result, whether or not the step counted one.
-	 * The step context then ends the step, which would otherwise wait on its counted results. The
+	 * operation it dispatched has published its last result to the step context, whether or not
+	 * the step counted one. A multipart upload's initiation and its parts are not last results. The
+	 * step context then ends the step, which would otherwise wait on its counted results. The
 	 * default is {@code false}: a generator that does not cap dispatch leaves the count limit to
 	 * the step context.
 	 */

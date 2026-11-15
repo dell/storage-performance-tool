@@ -12,10 +12,13 @@ import com.dell.spt.base.config.InitialConfigSchemaProvider;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.DataItemImpl;
+import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.StorageDriverFactory;
 import com.dell.spt.base.storage.driver.mock.DummyStorageDriverMock;
+import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
+import com.dell.spt.storage.driver.coop.nio.mock.NioStorageDriverMock;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.confuse.Config;
@@ -32,6 +35,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.locks.LockSupport;
 import org.apache.logging.log4j.ThreadContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -42,8 +46,9 @@ import org.junit.jupiter.api.io.TempDir;
 /**
  * A count-limited mixed step runs exactly its count, on a driver that completes each operation as
  * it is handed over, at a concurrency of 16, and ends as soon as those operations have ended, also
- * when one of them produced no counted result. Without a count limit the step runs to its time
- * limit as before.
+ * when one of them produced no counted result. On the NIO mock, a cooperative driver, multipart
+ * uploads are counted the same way, also when their parts are enqueued late. Without a count limit
+ * the step runs to its time limit as before.
  */
 @Timeout(120)
 class MixedLoadStepCountLimitTest {
@@ -56,6 +61,7 @@ class MixedLoadStepCountLimitTest {
 	Path home;
 
 	private final CountingDriverFactory drivers = new CountingDriverFactory();
+	private final NioDriverFactory nioDrivers = new NioDriverFactory();
 	private FinalCountsMetricsManager metrics;
 
 	@BeforeEach
@@ -125,6 +131,68 @@ class MixedLoadStepCountLimitTest {
 		assertEquals(drivers.accepted.sum(), counted(stepId), "every accepted operation was counted");
 	}
 
+	@Test
+	void aMultipartUploadWhosePartsAreEnqueuedLateIsCounted() throws Exception {
+		final String stepId = newStepId("multipart-late-parts");
+		final Config config = multipartStepConfig(stepId, 1);
+		nioDrivers.pauseFirstCompletion.set(true);
+
+		final long elapsedMillis = run(config);
+
+		assertEquals(1, nioDrivers.paused.sum(), "completions paused after their result was published");
+		assertEquals(1, counted(stepId), "the step counted the upload");
+		assertTrue(elapsedMillis < PROMPT_END_MILLIS, "the step ended on its count, after " + elapsedMillis + " ms");
+	}
+
+	@Test
+	void aCountOfFiftyMultipartUploadsRunsFiftyUploads() throws Exception {
+		final String stepId = newStepId("multipart-exact");
+		final Config config = multipartStepConfig(stepId, 50);
+
+		final long elapsedMillis = run(config);
+
+		assertEquals(50, counted(stepId), "uploads the step counted");
+		assertTrue(elapsedMillis < PROMPT_END_MILLIS, "the step ended on its count, after " + elapsedMillis + " ms");
+	}
+
+	/**
+	 * A DELETE above the ranges threshold is sent as one composite result, which the step does not
+	 * count, so the step counts fewer than its count, but it ends without waiting for its time limit.
+	 */
+	@Test
+	void aStepWithSplitDeletesEndsWithoutCountingThem() throws Exception {
+		final String stepId = newStepId("split-delete");
+		final Config config = multipartStepConfig(stepId, 200);
+		config.val("load-op-weights-put", 5000);
+		config.val("load-op-weights-delete", 5000);
+
+		final long elapsedMillis = run(config);
+
+		assertEquals(0, metrics.counted(stepId, OpType.DELETE), "split DELETEs the step counted");
+		final long uploads = metrics.counted(stepId, OpType.CREATE);
+		assertTrue(uploads > 0 && uploads < 200, "the step ran uploads and split DELETEs, counted " + uploads);
+		assertTrue(
+						elapsedMillis < PROMPT_END_MILLIS,
+						"the step ended without waiting for its time limit, after " + elapsedMillis + " ms");
+	}
+
+	/**
+	 * A count-limited step of uploads only on the NIO mock, each 1 KB item uploaded in two parts.
+	 * The STAT weight meets the mixed step's configuration check but is too small for the schedule
+	 * to hold a STAT.
+	 */
+	private Config multipartStepConfig(final String stepId, final long countLimit) throws Exception {
+		final Config config = stepConfig(stepId);
+		config.val("storage-driver-type", NioDriverFactory.TYPE);
+		config.val("load-op-limit-count", countLimit);
+		config.val("load-op-weights-get", 0);
+		config.val("load-op-weights-put", 10000);
+		config.val("load-op-weights-delete", 0);
+		config.val("load-op-weights-stat", 1);
+		config.val("item-data-ranges-threshold", "512B");
+		return config;
+	}
+
 	private long run(final Config config) {
 		metrics = new FinalCountsMetricsManager();
 		final long start = System.nanoTime();
@@ -138,7 +206,7 @@ class MixedLoadStepCountLimitTest {
 	}
 
 	private List<Extension> extensions() {
-		return List.of(new MixedLoadStepExtension(), drivers);
+		return List.of(new MixedLoadStepExtension(), drivers, nioDrivers);
 	}
 
 	/** A step ID unique across test runs, as in {@link MixedLoadStepStopLogTest}. */
@@ -282,6 +350,74 @@ class MixedLoadStepCountLimitTest {
 			@Override
 			public void close() throws Exception {
 				output.close();
+			}
+		}
+	}
+
+	/**
+	 * The shipped NIO mock. When asked, its first completion pauses after the operation's result
+	 * is published and its lifecycle is terminal, and before a multipart upload's parts are
+	 * enqueued, as a busy completion thread can.
+	 */
+	@SuppressWarnings({"rawtypes"
+	})
+	static final class NioDriverFactory implements StorageDriverFactory {
+
+		static final String TYPE = "count-limit-nio-mock";
+		private static final long PAUSE_NANOS = TimeUnit.MILLISECONDS.toNanos(200);
+
+		final AtomicBoolean pauseFirstCompletion = new AtomicBoolean();
+		final LongAdder paused = new LongAdder();
+
+		@Override
+		public String id() {
+			return TYPE;
+		}
+
+		@Override
+		public SchemaProvider schemaProvider() {
+			return null;
+		}
+
+		@Override
+		public void install(final Path dstPath) {}
+
+		@Override
+		public Config defaults(final Path appHomePath) {
+			return null;
+		}
+
+		@Override
+		public StorageDriver create(
+						final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
+						final int batchSize) {
+			final NioStorageDriverMock driver = new NioStorageDriverMock(stepId, dataInput, storageConfig, verifyFlag, batchSize);
+			if (pauseFirstCompletion.get()) {
+				// handleCompleted counts the completion between publishing its result and enqueueing
+				// a multipart upload's parts, so the count's increment is where the pause goes.
+				try {
+					final Field completedOpCount = CoopStorageDriverBase.class.getDeclaredField("completedOpCount");
+					completedOpCount.setAccessible(true);
+					completedOpCount.set(driver, new PausingCount());
+				} catch (final ReflectiveOperationException e) {
+					throw new IllegalStateException(e);
+				}
+			}
+			return driver;
+		}
+
+		/** Pauses its first increment, when asked to. */
+		private final class PausingCount extends LongAdder {
+
+			private static final long serialVersionUID = 1L;
+
+			@Override
+			public void increment() {
+				if (pauseFirstCompletion.compareAndSet(true, false)) {
+					paused.increment();
+					LockSupport.parkNanos(PAUSE_NANOS);
+				}
+				super.increment();
 			}
 		}
 	}

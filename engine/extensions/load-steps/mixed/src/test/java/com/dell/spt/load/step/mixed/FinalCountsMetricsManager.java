@@ -45,4 +45,12 @@ final class FinalCountsMetricsManager extends MetricsManagerImpl {
 						.mapToLong(FinalCount::done)
 						.sum();
 	}
+
+	/** Successful and failed operations of one operation type of the step. */
+	long counted(final String stepId, final OpType opType) {
+		return finalCounts.stream()
+						.filter(count -> stepId.equals(count.stepId()) && opType == count.opType())
+						.mapToLong(FinalCount::done)
+						.sum();
+	}
 }
