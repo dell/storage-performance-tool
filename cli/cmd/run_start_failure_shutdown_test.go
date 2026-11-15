@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
@@ -66,6 +67,54 @@ func assertNeverSubmittedCleanupOutput(t *testing.T, output string) {
 	for _, unwanted := range []string{"requesting shutdown on all hosts", shutdownWarningLine, summaryIssueLine} {
 		if strings.Contains(output, unwanted) {
 			t.Errorf("output contains %q after a launch that was never submitted:\n%s", unwanted, output)
+		}
+	}
+}
+
+// assertRejectedRunSummary checks that a start the engine identity gate rejected kept its
+// rejected-run summary, without the lines of a start that left nothing to summarize.
+func assertRejectedRunSummary(t *testing.T, resultsDir, output string) {
+	t.Helper()
+	summaryFiles, _ := filepath.Glob(filepath.Join(resultsDir, "*", "*_results_summary.txt"))
+	if len(summaryFiles) != 1 {
+		t.Fatalf("summary files = %v, want one; output:\n%s", summaryFiles, output)
+	}
+	saved, err := os.ReadFile(summaryFiles[0]) // #nosec G304 -- test temp directory
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(saved), "Run rejected") {
+		t.Fatalf("summary lacks the rejected-run section:\n%s", saved)
+	}
+	if !strings.Contains(output, "Auto-results: summary saved to") {
+		t.Errorf("output lacks the saved summary line:\n%s", output)
+	}
+	for _, unwanted := range []string{neverSubmittedResultsLine, shutdownWarningLine, summaryIssueLine} {
+		if strings.Contains(output, unwanted) {
+			t.Errorf("output contains %q:\n%s", unwanted, output)
+		}
+	}
+}
+
+// awaitMonitorSetup makes a stubbed launch wait, as a real one does while its engine starts,
+// until the auto-results monitor has finished preparing the results root. The monitor's setup
+// and the engine identity gate's rejection record both write the run metadata, and only an
+// instant stub launch can overlap them.
+func awaitMonitorSetup(t *testing.T) func() {
+	t.Helper()
+	original := archivePreparedRunInputsFunc
+	t.Cleanup(func() { archivePreparedRunInputsFunc = original })
+	ready := make(chan struct{})
+	var once sync.Once
+	archivePreparedRunInputsFunc = func(meta *runMetadata, scenarioPath, destDir string) error {
+		defer once.Do(func() { close(ready) })
+		return original(meta, scenarioPath, destDir)
+	}
+	return func() {
+		select {
+		case <-ready:
+		case <-time.After(5 * time.Second):
+			t.Error("auto-results monitor did not prepare the results root")
 		}
 	}
 }
@@ -226,22 +275,37 @@ func TestAutoResultsShutdownAfterStartFailureFollowsSubmission(t *testing.T) {
 	}
 }
 
-// spt run, on the local and the host-orchestrated routes and in attach mode, sends no
-// shutdown request after a start that fails before POST /run, and records that in
-// spt_run_params.json. A launch accepted for cleanup still asks every host.
+// spt run, on the local and the host-orchestrated routes, headless and TUI, and in attach
+// mode, sends no shutdown request after a start that fails before POST /run, and records that
+// in spt_run_params.json. A start that never reached the engine identity gate has nothing to
+// summarize, so no summary is attempted. One the gate rejected, or one whose POST /run was
+// refused after the gate passed, keeps its summary. A launch accepted for cleanup still asks
+// every host to shut down.
 func TestRunCommandStartFailureBeforeSubmissionSendsNoShutdown(t *testing.T) {
+	const (
+		gateNotRun   = ""
+		gateRejects  = "rejects"
+		gateProceeds = "proceeds"
+	)
 	tests := []struct {
 		name               string
 		hosts              string
 		minHosts           string
+		tui                bool
 		attach             bool
+		gate               string
 		acceptedForCleanup bool
 		wantLocal          bool
 	}{
 		{name: "local", hosts: "127.0.0.1", minHosts: "1", wantLocal: true},
+		{name: "local tui", hosts: "127.0.0.1", minHosts: "1", tui: true, wantLocal: true},
 		{name: "single remote", hosts: "entry.example", minHosts: "1"},
 		{name: "multi host", hosts: "entry.example,worker.example", minHosts: "2"},
+		{name: "multi host tui", hosts: "entry.example,worker.example", minHosts: "2", tui: true},
 		{name: "attach existing workers", hosts: "entry.example,worker.example", minHosts: "2", attach: true},
+		{name: "local gate rejects", hosts: "127.0.0.1", minHosts: "1", wantLocal: true, gate: gateRejects},
+		{name: "local gate proceeds then POST refused", hosts: "127.0.0.1", minHosts: "1", wantLocal: true, gate: gateProceeds},
+		{name: "attach gate rejects", hosts: "entry.example,worker.example", minHosts: "2", attach: true, gate: gateRejects},
 		{name: "local accepted for cleanup", hosts: "127.0.0.1", minHosts: "1", wantLocal: true, acceptedForCleanup: true},
 		{name: "attach existing workers accepted for cleanup", hosts: "entry.example,worker.example", minHosts: "2", attach: true, acceptedForCleanup: true},
 	}
@@ -257,7 +321,18 @@ func TestRunCommandStartFailureBeforeSubmissionSendsNoShutdown(t *testing.T) {
 			setGlobalRunFlagForTest(t, flagAttachExistingWorkers, boolString(test.attach))
 			restore := installRunEngineInfoCommandSeams(t)
 			defer restore()
-			shouldRunHeadlessForRun = func(*cobra.Command) bool { return true }
+			shouldRunHeadlessForRun = func(*cobra.Command) bool { return !test.tui }
+			consistency := engineinfo.ConsistencyConsistent
+			if test.gate == gateRejects {
+				consistency = engineinfo.ConsistencyMismatch
+			}
+			evaluateEngineIdentityGate = func(
+				ctx context.Context, _ engineinfo.FleetCollector, descriptors []engineinfo.ParticipantDescriptor, force bool,
+			) (engineinfo.GateOutcome, error) {
+				return engineinfo.EvaluateGate(ctx, fixedFleetCollector{
+					fleet: runGateFleet(consistency, engineinfo.StatusCollected),
+				}, descriptors, force)
+			}
 
 			origSummary := generateRunSummaryFunc
 			origShutdown := requestShutdownAllFunc
@@ -267,10 +342,11 @@ func TestRunCommandStartFailureBeforeSubmissionSendsNoShutdown(t *testing.T) {
 				requestShutdownAllFunc = origShutdown
 				startAutoResultsFunc = origAuto
 			})
+			// The shipped summary runs, so a missing summary or a false summary problem shows.
 			var summaries atomic.Int32
-			generateRunSummaryFunc = func(context.Context, string, io.Writer) (*summary.RunSummary, error) {
+			generateRunSummaryFunc = func(ctx context.Context, runDir string, out io.Writer) (*summary.RunSummary, error) {
 				summaries.Add(1)
-				return nil, errors.New("load results: load manifest: index.json: no such file or directory")
+				return generateRunSummary(ctx, runDir, out)
 			}
 			var shutdownMu sync.Mutex
 			var shutdownHosts [][]string
@@ -284,7 +360,7 @@ func TestRunCommandStartFailureBeforeSubmissionSendsNoShutdown(t *testing.T) {
 				shutdownHosts = append(shutdownHosts, names)
 				return errors.New("shutdown http: connect: connection refused")
 			}
-			// The shipped monitor writes headless progress to stdout; capture it here.
+			// The shipped monitor writes progress to stdout or the TUI; capture it here.
 			output := &lockedBuffer{}
 			startAutoResultsFunc = func(
 				ctx context.Context, baseURL, label, dir string, steps []string, runID int64, debug bool,
@@ -297,27 +373,53 @@ func TestRunCommandStartFailureBeforeSubmissionSendsNoShutdown(t *testing.T) {
 			}
 
 			startErr := errors.New("engine did not become ready")
+			if test.gate == gateProceeds {
+				startErr = errors.New("failed to start test via API: failed to start test (status 500): refused")
+			}
 			var localCalls, remoteCalls atomic.Int32
-			fail := func(hooks tui.LaunchHooks) error {
+			monitorReady := awaitMonitorSetup(t)
+			fail := func(ctx context.Context, hooks tui.LaunchHooks) error {
+				monitorReady()
+				if test.gate != gateNotRun {
+					if _, err := hooks.RunPreSubmissionCheck(ctx); err != nil {
+						return err
+					}
+				}
 				if test.acceptedForCleanup {
 					hooks.NotifyAcceptedForCleanup()
 				}
 				return startErr
 			}
-			startLocalHeadlessRunFunc = func(_ string, _ string, _ scenario.Params, options headless.HeadlessOptions) error {
-				localCalls.Add(1)
-				return fail(options.LaunchHooks)
-			}
-			startMultiHostHeadlessRunFunc = func(orchestrator *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params, options headless.HeadlessOptions) error {
+			checkAttach := func(orchestrator *tui.MultiHostOrchestrator) {
 				if orchestrator.AttachExistingWorkersEnabled() != test.attach {
 					t.Errorf("orchestrator attach mode = %t, want %t", orchestrator.AttachExistingWorkersEnabled(), test.attach)
 				}
+			}
+			startLocalHeadlessRunFunc = func(_ string, _ string, _ scenario.Params, options headless.HeadlessOptions) error {
+				localCalls.Add(1)
+				return fail(options.Context, options.LaunchHooks)
+			}
+			startLocalTUIRunFunc = func(_ string, _ string, _ scenario.Params, options tui.RunOptions) error {
+				localCalls.Add(1)
+				return fail(options.Context, options.LaunchHooks)
+			}
+			startMultiHostHeadlessRunFunc = func(orchestrator *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params, options headless.HeadlessOptions) error {
+				checkAttach(orchestrator)
 				remoteCalls.Add(1)
-				return fail(options.LaunchHooks)
+				return fail(options.Context, options.LaunchHooks)
+			}
+			startMultiHostTUIRunFunc = func(orchestrator *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params, options tui.RunOptions) error {
+				checkAttach(orchestrator)
+				remoteCalls.Add(1)
+				return fail(options.Context, options.LaunchHooks)
 			}
 
 			err := runCmd.RunE(runCmd, []string{WorkloadTypeMock})
-			if !errors.Is(err, startErr) {
+			if test.gate == gateRejects {
+				if err == nil || !strings.Contains(err.Error(), "mismatch rejected") {
+					t.Fatalf("RunE() error = %v, want the gate rejection", err)
+				}
+			} else if !errors.Is(err, startErr) {
 				t.Fatalf("RunE() error = %v, want the start error", err)
 			}
 			if test.wantLocal != (localCalls.Load() == 1) || test.wantLocal == (remoteCalls.Load() == 1) {
@@ -338,6 +440,7 @@ func TestRunCommandStartFailureBeforeSubmissionSendsNoShutdown(t *testing.T) {
 			if err := json.Unmarshal(content, &recorded); err != nil || recorded.Lifecycle == nil {
 				t.Fatalf("decode lifecycle from %s: %v\n%s", metadataFiles[0], err, content)
 			}
+			summaryFiles, _ := filepath.Glob(filepath.Join(filepath.Dir(metadataFiles[0]), "*_results_summary.txt"))
 
 			shutdownMu.Lock()
 			defer shutdownMu.Unlock()
@@ -354,14 +457,48 @@ func TestRunCommandStartFailureBeforeSubmissionSendsNoShutdown(t *testing.T) {
 			if len(shutdownHosts) != 0 {
 				t.Fatalf("shutdown requests = %v, want none after a start that was never submitted", shutdownHosts)
 			}
-			if summaries.Load() != 0 {
-				t.Fatalf("summary attempts = %d, want none", summaries.Load())
+			if recorded.Lifecycle.Shutdown.Started || recorded.Lifecycle.Shutdown.Error != "" {
+				t.Fatalf("lifecycle.shutdown = %+v, want not started", recorded.Lifecycle.Shutdown)
 			}
-			if recorded.Lifecycle.Shutdown.Started || recorded.Lifecycle.Shutdown.Error != "" ||
-				recorded.Lifecycle.Summary.Started || recorded.Lifecycle.Summary.Error != "" {
-				t.Fatalf("lifecycle = %+v, want shutdown and summary not started", recorded.Lifecycle)
+			if test.gate == gateNotRun {
+				if summaries.Load() != 0 || len(summaryFiles) != 0 {
+					t.Fatalf("summary attempts = %d files = %v, want none", summaries.Load(), summaryFiles)
+				}
+				if recorded.Lifecycle.Summary.Started || recorded.Lifecycle.Summary.Error != "" {
+					t.Fatalf("lifecycle.summary = %+v, want not started", recorded.Lifecycle.Summary)
+				}
+				assertNeverSubmittedCleanupOutput(t, output.String())
+				return
 			}
-			assertNeverSubmittedCleanupOutput(t, output.String())
+			// The gate's identity manifest gives the summary something to render.
+			text := output.String()
+			if len(summaryFiles) != 1 {
+				t.Fatalf("summary files = %v, want one; output:\n%s", summaryFiles, text)
+			}
+			if !recorded.Lifecycle.Summary.Completed || recorded.Lifecycle.Summary.Error != "" {
+				t.Fatalf("lifecycle.summary = %+v, want completed without error", recorded.Lifecycle.Summary)
+			}
+			saved, readErr := os.ReadFile(summaryFiles[0]) // #nosec G304 -- test temp directory
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			wantSection := "Missing steps"
+			if test.gate == gateRejects {
+				wantSection = "Run rejected"
+			}
+			if !strings.Contains(string(saved), wantSection) {
+				t.Fatalf("summary lacks %q:\n%s", wantSection, saved)
+			}
+			for _, want := range []string{neverSubmittedShutdownLine, "Auto-results: summary saved to"} {
+				if !strings.Contains(text, want) {
+					t.Errorf("output lacks %q:\n%s", want, text)
+				}
+			}
+			for _, unwanted := range []string{neverSubmittedResultsLine, shutdownWarningLine, summaryIssueLine} {
+				if strings.Contains(text, unwanted) {
+					t.Errorf("output contains %q:\n%s", unwanted, text)
+				}
+			}
 		})
 	}
 }

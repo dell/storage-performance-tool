@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -201,6 +202,19 @@ func (m *autoResultsMonitor) BindSession(session *runcontrol.Session) {
 	m.sessionMu.Lock()
 	m.session = session
 	m.sessionMu.Unlock()
+}
+
+// hasSummarizableEvidence reports whether the results root holds anything the
+// run summary loads: the results manifest or the engine identity manifest. A
+// root that cannot be inspected counts as having evidence, so the summary step
+// runs and reports the problem itself.
+func hasSummarizableEvidence(root string) bool {
+	for _, name := range []string{constants.ResultsManifestFileName, constants.EngineInfoManifestName} {
+		if _, err := os.Stat(filepath.Join(root, name)); !errors.Is(err, fs.ErrNotExist) {
+			return true
+		}
+	}
+	return false
 }
 
 // provenNotSubmitted reports that the bound session never dispatched POST /run.
@@ -1133,7 +1147,10 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		if err := writeRunMetadata(metadata, root); err != nil {
 			logging.LogError("auto-results", "write pre-summary lifecycle metadata", err)
 		}
-		if nothingSubmitted {
+		// The engine identity gate runs before POST /run and leaves its manifest
+		// indexed, so a rejected or refused submission still has a summary to
+		// render. Only a start that never reached the gate has nothing to load.
+		if nothingSubmitted && !hasSummarizableEvidence(root) {
 			writeProgress("Auto-results: no run was submitted; no results were produced.\n")
 			return
 		}
