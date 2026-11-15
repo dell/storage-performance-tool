@@ -77,6 +77,7 @@ public class DataOperationImpl<T extends DataItem> extends OperationImpl<T>
 
 	@Override
 	public DataOperationImpl<T> result() {
+		keepCopySourceName();
 		buildItemPath(item, dstPath == null ? srcPath : dstPath);
 		return new DataOperationImpl<>(this);
 	}

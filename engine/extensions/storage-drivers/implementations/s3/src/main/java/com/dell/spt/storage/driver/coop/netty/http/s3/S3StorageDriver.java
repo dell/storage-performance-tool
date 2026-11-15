@@ -1946,6 +1946,28 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
+	 * The {@code x-amz-copy-source} of a copy on the versioned route. A first attempt reads the object
+	 * {@link #dataUriPath} names, without the {@code ~versionId} under the legacy convention. A copy sent
+	 * again reads the source path joined with the name its first attempt had ({@link
+	 * #copySourceUriPath}); under the legacy convention that name is kept after the first response
+	 * named its version, so its own trailing {@code ~versionId} is taken off, as the first attempt took
+	 * off the one its name had.
+	 */
+	private String versionedCopySource(
+					final O op, final I item, final String srcPath, final String versionId,
+					final boolean explicitVersionCarrier) {
+		final String copySourceName = op.copySourceName();
+		if (copySourceName == null) {
+			final String copySource = dataUriPath(item, srcPath, null, op.type());
+			return !explicitVersionCarrier && versionId != null ? withoutVersionSuffix(copySource, versionId) : copySource;
+		}
+		final int indexOfVersionStart = explicitVersionCarrier ? -1 : copySourceName.lastIndexOf('~');
+		return joinedUriPath(
+						indexOfVersionStart == -1 ? copySourceName : copySourceName.substring(0, indexOfVersionStart),
+						srcPath);
+	}
+
+	/**
 	 * {@code uriPath}, which {@link #dataUriPath} built from a {@code key~versionId} item name, without
 	 * that trailing {@code ~versionId}: the path of the key, as {@code dataUriPath} gives it for an item
 	 * named {@code key}. The base {@code dataUriPath} puts the name last, so does an override that only
@@ -2027,8 +2049,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 				}
 			} else {
-				final String copySource = dataUriPath(item, srcPath, null, opType);
-				applyCopyHeaders(httpHeaders, legacyVersion ? withoutVersionSuffix(copySource, versionId) : copySource);
+				applyCopyHeaders(httpHeaders, versionedCopySource(op, item, srcPath, versionId, explicitVersionCarrier));
 				httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 			}
 			break;

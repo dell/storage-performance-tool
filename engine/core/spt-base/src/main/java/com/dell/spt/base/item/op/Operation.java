@@ -66,6 +66,16 @@ public interface Operation<I extends Item> {
 
 	void dstPath(final String dstPath);
 
+	/**
+	 * For a copy that has completed an attempt, the item's name as that first attempt had it, before
+	 * {@link #result()} rebuilt it under the destination path. A driver builds the copy source from
+	 * it, when set, so every attempt of one copy reads the same object. Null for a first attempt and
+	 * for any operation that is not a copy.
+	 */
+	default String copySourceName() {
+		return null;
+	}
+
 	Credential credential();
 
 	void credential(final Credential credential);

@@ -323,7 +323,7 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 					httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 				}
 			} else {
-				applyCopyHeaders(httpHeaders, dataUriPath(item, srcPath, null, opType));
+				applyCopyHeaders(httpHeaders, copySourceUriPath(op, item, srcPath, opType));
 				httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 			}
 			break;
@@ -378,6 +378,30 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 					final I item, final String srcPath, final String dstPath, final OpType opType) {
 		final String path = dstPath != null ? dstPath : srcPath;
 		final String itemName = item.name();
+		if (path == null || ItemNamePaths.holdsPath(itemName, path)) {
+			return itemName.startsWith(SLASH) ? itemName : SLASH + itemName;
+		}
+		return ItemNamePaths.join(path.startsWith(SLASH) ? path : SLASH + path, itemName);
+	}
+
+	/**
+	 * The URI path of the object a copy reads. A first attempt reads the object {@link #dataUriPath}
+	 * names with no destination path. A copy sent again, whose name {@code result()} has rebuilt under
+	 * the destination path, reads the source path joined with the name the first attempt had ({@link
+	 * Operation#copySourceName()}), so every attempt names the same object. That path is built as the
+	 * base {@code dataUriPath} builds it, without an override's prefix: the Swift driver takes its
+	 * namespace off the copy source again, and the Atmos driver sends none.
+	 */
+	protected final String copySourceUriPath(
+					final O op, final I item, final String srcPath, final OpType opType) {
+		final String copySourceName = op.copySourceName();
+		return copySourceName == null
+						? dataUriPath(item, srcPath, null, opType)
+						: joinedUriPath(copySourceName, srcPath);
+	}
+
+	/** The base {@link #dataUriPath} of an item named {@code itemName} under {@code path}. */
+	protected static String joinedUriPath(final String itemName, final String path) {
 		if (path == null || ItemNamePaths.holdsPath(itemName, path)) {
 			return itemName.startsWith(SLASH) ? itemName : SLASH + itemName;
 		}

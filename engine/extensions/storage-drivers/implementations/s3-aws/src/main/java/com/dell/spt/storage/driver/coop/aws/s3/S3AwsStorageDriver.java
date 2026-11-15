@@ -2153,9 +2153,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	// -----------------------------------------------------------------------
 
 	/**
-	 * Copy an object from source to destination. See {@link #copySourcePath} for the source; the
-	 * copy lands at the item's name under the destination path, which for a listed item holds the
-	 * source bucket.
+	 * Copy an object from source to destination. See {@link #copySourcePath} for the source, which a
+	 * copy sent again builds from {@link Operation#copySourceName()}; the copy lands at the item's name
+	 * under the destination path, which for a listed item holds the source bucket.
 	 */
 	@SuppressWarnings("unchecked")
 	private CompletableFuture<Void> copyObject(final O op) {
@@ -2165,7 +2165,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			return CompletableFuture.failedFuture(new IllegalArgumentException("Source path is required for copy operation"));
 		}
 
-		final String[] srcBk = parseBucketAndKey(copySourcePath(op.item().name(), srcPath));
+		// A copy sent again reads by the name its first attempt had, not the one result() rebuilt under
+		// the destination path.
+		final String copySourceName = op.copySourceName();
+		final String[] srcBk = parseBucketAndKey(
+						copySourcePath(copySourceName == null ? op.item().name() : copySourceName, srcPath));
 
 		var reqBuilder = CopyObjectRequest.builder()
 						.sourceBucket(srcBk[0])

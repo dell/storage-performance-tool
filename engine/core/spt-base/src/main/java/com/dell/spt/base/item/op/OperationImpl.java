@@ -19,6 +19,11 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 	protected String srcPath;
 	protected String dstPath;
 	protected Credential credential;
+	/**
+	 * For a copy, the item's name before {@link #result()} first rebuilt it under the destination
+	 * path: the name the copy's source was read by. Null for any other operation.
+	 */
+	protected String copySourceName;
 
 	protected volatile String nodeAddr;
 	protected volatile Status status;
@@ -100,6 +105,7 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 		this.srcPath = other.srcPath;
 		this.dstPath = other.dstPath;
 		this.credential = other.credential;
+		this.copySourceName = other.copySourceName;
 		this.nodeAddr = other.nodeAddr;
 		this.status = other.status;
 		this.reqTimeStart = other.reqTimeStart;
@@ -119,8 +125,21 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 
 	@Override
 	public OperationImpl<I> result() {
+		keepCopySourceName();
 		buildItemPath(item, dstPath == null ? srcPath : dstPath);
 		return new OperationImpl<>(this);
+	}
+
+	/**
+	 * Called by {@link #result()} before it rebuilds the item's name: for a copy (a CREATE with a
+	 * source path), keeps the name its first attempt read the source by, once. A copy sent again, by
+	 * recycle mode, {@code load.op.retry} or a {@code PENDING} redispatch, then reads the same source
+	 * rather than one built from its destination name.
+	 */
+	protected final void keepCopySourceName() {
+		if (opType == OpType.CREATE && srcPath != null && copySourceName == null) {
+			copySourceName = item.name();
+		}
 	}
 
 	@Override
@@ -283,6 +302,11 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 	@Override
 	public final void dstPath(final String dstPath) {
 		this.dstPath = dstPath;
+	}
+
+	@Override
+	public final String copySourceName() {
+		return copySourceName;
 	}
 
 	@Override
