@@ -498,7 +498,7 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			LogUtil.exception(Level.WARN, e, "Failed to build the request URI");
 		} catch (final Throwable e) {
 			throwUncheckedIfInterrupted(e);
-			if (completeReconciledDeleteAfterRequestBuildFailure(channel, op, e)) {
+			if (completeAfterRequestBuildFailure(channel, op, e)) {
 				return;
 			}
 			logRequestBuildFailure(e);
@@ -507,13 +507,38 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		channel.flush();
 	}
 
-	private boolean completeReconciledDeleteAfterRequestBuildFailure(
+	/**
+	 * Thrown by {@link #httpRequest} for an operation it can't build as asked, for example a versioned
+	 * request whose {@code dataUriPath} override drops the version. Nothing is sent: the operation
+	 * fails at once with {@link Status#FAIL_UNKNOWN} and its permit and connection return through
+	 * {@link #complete}.
+	 */
+	protected static final class RejectedRequestException extends IllegalStateException {
+
+		private static final long serialVersionUID = 1L;
+
+		public RejectedRequestException(final String message) {
+			super(message);
+		}
+	}
+
+	/**
+	 * Completes the operation at once after its request failed to build, when the failure has a
+	 * terminal outcome: a reconciled standalone DELETE keeps its protocol status, and a {@link
+	 * RejectedRequestException} on a leased channel fails with {@code FAIL_UNKNOWN}. Returns {@code
+	 * false} for any other failure, which is only logged.
+	 */
+	private boolean completeAfterRequestBuildFailure(
 					final Channel channel, final O op, final Throwable requestFailure) {
-		if (!(op instanceof DeleteRequestOperation deleteOperation)
-						|| deleteOperation.deleteResult() == null) {
+		final boolean reconciledDelete = op instanceof DeleteRequestOperation deleteOperation
+						&& deleteOperation.deleteResult() != null;
+		if (!reconciledDelete && !(channel != null && requestFailure instanceof RejectedRequestException)) {
 			return false;
 		}
 		logRequestBuildFailure(requestFailure);
+		if (!reconciledDelete) {
+			op.status(Status.FAIL_UNKNOWN);
+		}
 		try {
 			op.finishRequest();
 		} catch (final IllegalStateException e) {

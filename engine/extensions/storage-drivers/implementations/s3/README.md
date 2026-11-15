@@ -443,8 +443,9 @@ With versioning on, the `s3` and `s3-rdma` drivers read the version from a `key~
   carries it percent-encoded.
 * A driver extension that overrides `dataUriPath` builds the versioned paths too: the driver passes it the whole
   `key~versionId` item and takes the `~versionId` suffix off the end of the path it returns. If the returned path
-  doesn't end with that suffix, the driver doesn't build the request, as with any request it can't build: no request
-  line is sent and `errors.log` records "Send HTTP request failure" (at ERROR the first time, then at DEBUG).
+  doesn't end with that suffix, nothing is sent: the operation fails at once with `FAIL_UNKNOWN`, its concurrency
+  permit and connection are released, and `errors.log` records "Send HTTP request failure" (at ERROR the first
+  time, then at DEBUG). It does not wait for `storage-net-timeoutMilliSec`, and it doesn't hang with that set to 0.
 * A copy (a CREATE with `--item-input-path`) and an item above the multipart threshold (`item-data-ranges-threshold`,
   see [4.4](#44-multipart-upload)) don't select a version: they act on the current version, or on an object literally
   named `key~versionId`.

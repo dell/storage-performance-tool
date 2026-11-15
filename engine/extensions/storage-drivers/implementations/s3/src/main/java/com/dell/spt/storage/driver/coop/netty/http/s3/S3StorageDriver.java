@@ -1785,14 +1785,15 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	 * named {@code key}. The base {@code dataUriPath} puts the name last, so does an override that only
 	 * changes what comes before it. An override whose path does not end with the suffix has rewritten
 	 * the name itself; the key's path can't be known without renaming the item, so the request is not
-	 * built and the operation fails, rather than acting on another object.
+	 * built and the operation fails at once with {@code FAIL_UNKNOWN}, rather than acting on another
+	 * object.
 	 */
 	static String withoutVersionSuffix(final String uriPath, final String versionId) {
 		final int keyEnd = uriPath.length() - versionId.length() - 1;
 		if (keyEnd > 0 && uriPath.charAt(keyEnd) == '~' && uriPath.endsWith(versionId)) {
 			return uriPath.substring(0, keyEnd);
 		}
-		throw new IllegalStateException(
+		throw new RejectedRequestException(
 						"dataUriPath gave " + uriPath + ", which does not end with the item's ~" + versionId
 										+ ": the versioned request can't select the version");
 	}

@@ -689,6 +689,56 @@ final class S3VersionedRequestTest {
 		assertEquals("/b/obj~ver0009", read.item().name());
 	}
 
+	/**
+	 * A versioned request that the driver rejects, here because a {@code dataUriPath} override
+	 * rewrites the name, fails at once with the response timeout off: nothing is sent, the operation
+	 * completes once with {@code FAIL_UNKNOWN}, and its permit and connection serve the next one.
+	 */
+	@Test
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	void aRejectedVersionedRequestFailsAtOnceAndReturnsItsPermit() throws Exception {
+		final var target = new VersionedTarget("NONE");
+		resources.add(target);
+		final Config config = S3StorageDriverTest.baseConfig(true, 4, false, null, "127.0.0.1");
+		config.val("storage-net-node-port", target.port());
+		config.val("storage-net-timeoutMilliSec", 0);
+		config.val("storage-driver-limit-concurrency", 1);
+		config.val("storage-driver-threads", 1);
+		final var driver = new S3StorageDriverTest.TestS3Driver(config) {
+			@Override
+			protected String dataUriPath(
+							final Item item, final String srcPath, final String dstPath, final OpType opType) {
+				final String path = super.dataUriPath(item, srcPath, dstPath, opType);
+				return path.startsWith("/b/obj~") ? "/b/" + Integer.toHexString(path.hashCode()) : path;
+			}
+		};
+		resources.add(driver);
+		driver.start();
+		final var results = new EndpointSelectionTestSupport.Results();
+		driver.operationResultOutput((Output) results);
+
+		for (final var type : List.of(OpType.READ, OpType.STAT, OpType.DELETE)) {
+			final var rejected = op(type, "obj~ver0001");
+			rejected.reset();
+			assertTrue(driver.put(rejected));
+			final var result = results.poll(10_000);
+			assertNotNull(result, type + " never completed");
+			assertEquals(Operation.Status.FAIL_UNKNOWN, result.status(), type.toString());
+			// A second release would make this -1, a held permit 1.
+			assertEquals(0, driver.activeOpCount(), type.toString());
+		}
+		final var plain = op(OpType.READ, "obj");
+		plain.reset();
+		assertTrue(driver.put(plain));
+		final var plainResult = results.poll(10_000);
+		assertNotNull(plainResult, "the next operation never completed");
+		assertEquals(Operation.Status.SUCC, plainResult.status());
+		assertEquals(0, driver.activeOpCount());
+		assertNull(results.poll(200), "an operation completed twice");
+		assertEquals(List.of("GET /b/obj 200 2000"), target.objectLog());
+	}
+
 	// ---------- helpers ----------
 
 	private S3StorageDriverTest.TestS3Driver driver(
