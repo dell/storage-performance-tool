@@ -5,6 +5,7 @@ import io.netty.util.AsciiString;
 import io.netty.util.AttributeKey;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Set;
 
 /**
 Created by kurila on 02.08.16.
@@ -46,6 +47,55 @@ public interface S3Api {
 			HttpHeaderNames.HOST,
 	};
 	String URL_ARG_VERSIONING = "versioning";
+
+	/**
+	 * The query parameters that SigV2 signs as part of the canonical resource, the "sub-resources".
+	 * Every other query parameter, such as {@code list-type}, {@code max-keys}, {@code prefix} or
+	 * {@code start-after}, is left out of the signature.
+	 *
+	 * <p>The set holds the names SPT sends ({@code delete}, {@code partNumber}, {@code tagging},
+	 * {@code uploadId}, {@code uploads}, {@code versionId}, {@code versioning}, {@code versions}),
+	 * which botocore, MinIO and SeaweedFS all list, plus every other name of botocore's
+	 * {@code HmacV1Auth.QSAOfInterest} (1.37.9), including the {@code response-*} overrides. The
+	 * servers' lists differ at the edges, which none of SPT's own requests reach. Names match
+	 * whole and case-sensitively, so no name is a prefix of another in effect.
+	 */
+	Set<String> SIGV2_SUB_RESOURCES = Set.of(
+					"accelerate",
+					"acl",
+					"analytics",
+					"cors",
+					"defaultObjectAcl",
+					"delete",
+					"inventory",
+					"lifecycle",
+					"location",
+					"logging",
+					"metrics",
+					"notification",
+					"object-lock",
+					"partNumber",
+					"policy",
+					"replication",
+					"requestPayment",
+					"response-cache-control",
+					"response-content-disposition",
+					"response-content-encoding",
+					"response-content-language",
+					"response-content-type",
+					"response-expires",
+					"restore",
+					"select",
+					"select-type",
+					"storageClass",
+					"tagging",
+					"torrent",
+					"uploadId",
+					"uploads",
+					"versionId",
+					"versioning",
+					"versions",
+					"website");
 
 	String SIGN_METHOD = "HmacSHA1";
 
