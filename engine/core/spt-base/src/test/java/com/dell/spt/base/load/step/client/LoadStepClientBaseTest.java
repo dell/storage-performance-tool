@@ -2543,8 +2543,7 @@ class LoadStepClientBaseTest {
 			assertTrue(failure.getMessage().contains("failed-object budget exceeded"), failure.getMessage());
 			assertFalse(failure.getMessage().contains("inventory slice exhausted"), failure.getMessage());
 			assertTrue(admissionClosedNanos.get() != 0, "budget monitor did not close admission");
-			final long afterAdmissionClosedMillis =
-							TimeUnit.NANOSECONDS.toMillis(returnedNanos - admissionClosedNanos.get());
+			final long afterAdmissionClosedMillis = TimeUnit.NANOSECONDS.toMillis(returnedNanos - admissionClosedNanos.get());
 			assertTrue(
 							afterAdmissionClosedMillis < 1_000,
 							"await returned " + afterAdmissionClosedMillis + " ms after admission closed");
@@ -2612,8 +2611,7 @@ class LoadStepClientBaseTest {
 			assertTrue(failure.getMessage().contains("stopped before the requested duration"), failure.getMessage());
 			assertFalse(failure.getMessage().contains("exhausted"), failure.getMessage());
 			assertTrue(admissionClosedNanos.get() != 0, "the stop did not close admission");
-			final long afterAdmissionClosedMillis =
-							TimeUnit.NANOSECONDS.toMillis(returnedNanos - admissionClosedNanos.get());
+			final long afterAdmissionClosedMillis = TimeUnit.NANOSECONDS.toMillis(returnedNanos - admissionClosedNanos.get());
 			assertTrue(
 							afterAdmissionClosedMillis < 1_000,
 							"await returned " + afterAdmissionClosedMillis + " ms after admission closed");
