@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/dell/storage-performance-tool/cli/internal/textutil"
 )
 
 // ANSI color codes for terminal output
@@ -171,6 +173,9 @@ func (r *Report) printCheck(name string, check Check, color bool) {
 	}
 
 	fmt.Printf("  %s%s %-20s %s - %s%s\n", colorStart, symbol, name+":", status, message, colorEnd)
+	if !check.Passed && check.Detail != "" {
+		fmt.Println(textutil.IndentLines(check.Detail, "      "))
+	}
 
 	// Display detailed command output for failed operations (not warnings)
 	if !check.Passed && !check.Warning && check.CommandResult != nil {

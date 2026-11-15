@@ -1,6 +1,7 @@
 package com.dell.spt.base.load.step.client;
 
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
@@ -8,6 +9,7 @@ import com.github.akurilov.confuse.Config;
 
 import java.rmi.RemoteException;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Concrete test implementation of LoadStepClientBase for testing purposes.
@@ -20,6 +22,7 @@ public class TestLoadStepClient extends LoadStepClientBase<TestLoadStepClient> {
 	private boolean initCalled = false;
 	private boolean copyInstanceCalled = false;
 	private int copyInstanceCallCount = 0;
+	private Map<String, FileManager> nodeFileManagers = null;
 
 	public TestLoadStepClient(
 					Config config,
@@ -38,6 +41,17 @@ public class TestLoadStepClient extends LoadStepClientBase<TestLoadStepClient> {
 
 		// Return a new instance with the updated config
 		return new TestLoadStepClient(config, extensions, ctxConfigs, metricsMgr);
+	}
+
+	/** Gives the remote nodes these file managers, by node address, instead of resolving them. */
+	public TestLoadStepClient withNodeFileManagers(final Map<String, FileManager> fileManagers) {
+		nodeFileManagers = Map.copyOf(fileManagers);
+		return this;
+	}
+
+	@Override
+	FileManager resolveFileManager(final String nodeAddr) {
+		return nodeFileManagers == null ? super.resolveFileManager(nodeAddr) : nodeFileManagers.get(nodeAddr);
 	}
 
 	@Override

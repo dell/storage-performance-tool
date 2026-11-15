@@ -93,3 +93,11 @@ func WrapWords(text string, width int) []string {
 	}
 	return out
 }
+
+// IndentLines prefixes every line of text with prefix.
+func IndentLines(text, prefix string) string {
+	if text == "" {
+		return ""
+	}
+	return prefix + strings.ReplaceAll(text, "\n", "\n"+prefix)
+}

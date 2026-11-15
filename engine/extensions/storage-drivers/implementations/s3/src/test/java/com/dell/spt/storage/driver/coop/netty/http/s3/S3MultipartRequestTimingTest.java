@@ -181,7 +181,8 @@ final class S3MultipartRequestTimingTest {
 		final var initiation = composites.get(0);
 		final var parent = composites.get(1);
 		assertEquals(SUCC, initiation.status(), initiation::toString);
-		assertNotEquals(SUCC, parent.status(), parent::toString);
+		// The aborted upload ends with its part's 503, not the abort's own outcome.
+		assertEquals(Operation.Status.RESP_FAIL_SVC, parent.status(), parent::toString);
 		assertEquals(1, stub.requests().stream().filter(S3MultipartRequestTimingTest::isAbort).count(),
 						() -> "one abort was sent: " + stub.requests());
 		final var parts = parts(results);

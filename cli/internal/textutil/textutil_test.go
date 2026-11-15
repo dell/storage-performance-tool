@@ -221,3 +221,12 @@ func TestRepeat(t *testing.T) {
 		})
 	}
 }
+
+func TestIndentLines(t *testing.T) {
+	if got := IndentLines("a\nb", "  "); got != "  a\n  b" {
+		t.Fatalf("IndentLines() = %q", got)
+	}
+	if got := IndentLines("", "  "); got != "" {
+		t.Fatalf("IndentLines(\"\") = %q, want empty", got)
+	}
+}

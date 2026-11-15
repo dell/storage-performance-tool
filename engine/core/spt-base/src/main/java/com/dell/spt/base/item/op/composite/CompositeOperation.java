@@ -35,4 +35,10 @@ public interface CompositeOperation<I extends Item> extends Operation<I> {
 	default void undoMarkSubTaskCompleted() {}
 
 	boolean allSubOperationsDone();
+
+	/**
+	 * Forgets the sub-operations and context data of an earlier attempt, so that a retried composite
+	 * starts again from its initiation instead of resuming or finalizing the failed attempt.
+	 */
+	default void resetSubOperations() {}
 }

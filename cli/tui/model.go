@@ -24,6 +24,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/dell/storage-performance-tool/cli/internal/cmdline"
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/containerutil"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/mathutil"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
@@ -1751,7 +1752,7 @@ func StartTUIWithContainer(image string, cmd []string) error {
 		}
 
 		p.Send(containerStartedMsg{containerID: containerID})
-		p.Send(sptMessageMsg(fmt.Sprintf("Container started: %s", containerID[:12])))
+		p.Send(sptMessageMsg(fmt.Sprintf("Container started: %s", containerutil.ShortID(containerID))))
 
 		// Start streaming output
 		dm.StreamOutput(containerID,

@@ -44,6 +44,21 @@ public abstract class ServiceUtil {
 		}
 	}
 
+	/**
+	 * The registry on {@code port} in this host's network namespace, located on the loopback
+	 * address, for binding and unbinding. Never the advertised {@code java.rmi.server.hostname}: from
+	 * inside a Docker bridge container a call to the host's own address comes back from the bridge
+	 * gateway, and the registry refuses a bind from a non-local origin. A call through this stub comes
+	 * from the loopback address, which the registry accepts. The registry object this process created
+	 * is not called directly: {@code REGISTRY_MAP} holds only a stub when the registry was created
+	 * elsewhere in this JVM or before a {@link #shutdown()}, so the loopback stub is the one route that
+	 * serves every case. The stubs the registry hands out still carry the advertised hostname, which
+	 * {@link UnicastRemoteObject#exportObject(java.rmi.Remote, int)} gives them.
+	 */
+	private static Registry loopbackRegistry(final int port) throws RemoteException {
+		return LocateRegistry.getRegistry(InetAddress.getLoopbackAddress().getHostAddress(), port);
+	}
+
 	public static URI getLocalSvcUri(final String svcName, final int port)
 					throws URISyntaxException, SocketException {
 		final String hostName = getAnyExternalHostAddress();
@@ -135,7 +150,7 @@ public abstract class ServiceUtil {
 			final String svcName = svc.name();
 			svcUri = getLocalSvcUri(svcName, port).toString();
 			if (!SVC_MAP.containsKey(svcName + ":" + port)) {
-				Naming.rebind(svcUri, svc);
+				loopbackRegistry(port).rebind(svcName, svc);
 				SVC_MAP.put(svcName + ":" + port, new WeakReference<>(svc));
 			} else {
 				throw new AssertionError("Service already registered");
@@ -171,7 +186,7 @@ public abstract class ServiceUtil {
 		} finally {
 			try {
 				svcUri = getLocalSvcUri(svcName, svc.registryPort()).toString();
-				Naming.unbind(svcUri);
+				loopbackRegistry(svc.registryPort()).unbind(svcName);
 				synchronized (SVC_MAP) {
 					if (null == SVC_MAP.remove(svcName + ":" + svc.registryPort())) {
 						System.err.println("Failed to remove the service \"" + svcName + "\"");
