@@ -60,7 +60,7 @@ import org.junit.jupiter.api.Timeout;
  * Each driver runs against the loopback stub with integrity metadata on, so its uploads get
  * {@code multipart.lifecycle.csv} records.
  */
-@Timeout(120)
+@Timeout(value = 120, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 final class S3MultipartCleanupWaitTest {
 
 	/** A net timeout the tests' bounds stay well below, so a wait that runs it out fails them. */
