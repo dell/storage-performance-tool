@@ -4,7 +4,10 @@ import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
+import com.dell.spt.base.item.op.composite.CompositeOperation;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -114,5 +117,64 @@ class DataOperationsBuilderImplTest {
 		assertEquals(2, parts.size());
 		assertSame(op, parts.get(0).parent());
 		assertSame(op, parts.get(1).parent());
+	}
+
+	private static DataOperationsBuilderImpl<DataItemImpl, DataOperation<DataItemImpl>> builder(
+					final OpType opType, final boolean thresholdFirst) {
+		final var builder = new DataOperationsBuilderImpl<DataItemImpl, DataOperation<DataItemImpl>>(0);
+		if (thresholdFirst) {
+			builder.sizeThreshold(100).opType(opType);
+		} else {
+			builder.opType(opType).sizeThreshold(100);
+		}
+		return builder.inputPath("/src");
+	}
+
+	/** Only CREATE and READ have a multipart implementation; see the part-size cleanup hang. */
+	@ParameterizedTest
+	@EnumSource(value = OpType.class, names = {"DELETE", "UPDATE", "NOOP", "STAT"
+	})
+	void typesWithoutMultipartGetPlainOperationsAboveThreshold(final OpType opType) throws Exception {
+		for (final boolean thresholdFirst : List.of(true, false)) {
+			final var builder = builder(opType, thresholdFirst);
+			final var item = newItem("obj", 1000);
+			final var op = builder.buildOp(item);
+			assertFalse(op instanceof CompositeOperation, opType + " buildOp, thresholdFirst=" + thresholdFirst);
+			assertEquals(opType, op.type());
+			final List<DataOperation<DataItemImpl>> out = new ArrayList<>();
+			builder.buildOps(List.of(newItem("a", 1000), newItem("b", 10)), out);
+			assertEquals(2, out.size());
+			for (final var built : out) {
+				assertFalse(built instanceof CompositeOperation, opType + " buildOps, thresholdFirst=" + thresholdFirst);
+				assertEquals(opType, built.type());
+			}
+			assertEquals(100, builder.sizeThreshold(), "the configured threshold is still reported");
+		}
+	}
+
+	@ParameterizedTest
+	@EnumSource(value = OpType.class, names = {"CREATE", "READ"
+	})
+	void multipartTypesGetCompositeOperationsAboveThreshold(final OpType opType) throws Exception {
+		for (final boolean thresholdFirst : List.of(true, false)) {
+			final var builder = builder(opType, thresholdFirst);
+			final var op = builder.buildOp(newItem("obj", 1000));
+			assertTrue(op instanceof CompositeDataOperation, opType + " buildOp, thresholdFirst=" + thresholdFirst);
+			assertEquals(100, ((CompositeDataOperation<DataItemImpl>) op).sizeThreshold());
+			final List<DataOperation<DataItemImpl>> out = new ArrayList<>();
+			builder.buildOps(List.of(newItem("a", 1000), newItem("b", 10)), out);
+			assertTrue(out.get(0) instanceof CompositeDataOperation, opType + " buildOps, thresholdFirst=" + thresholdFirst);
+			assertFalse(out.get(1) instanceof CompositeOperation);
+		}
+	}
+
+	@Test
+	void switchingOpTypeAwayFromReadDropsTheCompositeAndBack() throws Exception {
+		final var builder = builder(OpType.READ, true);
+		assertTrue(builder.buildOp(newItem("obj", 1000)) instanceof CompositeDataOperation);
+		builder.opType(OpType.DELETE);
+		assertFalse(builder.buildOp(newItem("obj", 1000)) instanceof CompositeOperation);
+		builder.opType(OpType.CREATE);
+		assertTrue(builder.buildOp(newItem("obj", 1000)) instanceof CompositeDataOperation);
 	}
 }

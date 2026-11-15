@@ -995,7 +995,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		// Handle composite operations (multipart upload)
 		if (op instanceof CompositeDataOperation) {
-			return executeCompositeOperation((CompositeDataOperation) op);
+			final CompletableFuture<Void> compositeResult = executeCompositeOperation((CompositeDataOperation) op);
+			if (compositeResult != null) {
+				return compositeResult;
+			}
+			// a composite of a type with no multipart implementation runs as a standard operation
 		}
 
 		// Handle partial operations (range reads/part uploads)
@@ -1039,6 +1043,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	 * - Initiate multipart upload if this is the first call
 	 * - Abort multipart upload if requested
 	 * - Complete multipart upload if all parts are done
+	 *
+	 * @return {@code null} for any other op type, which has no multipart implementation: the caller
+	 *         then runs it as a standard operation of its type (a DELETE is a delete-object request)
 	 */
 	@SuppressWarnings("unchecked")
 	private CompletableFuture<Void> executeCompositeOperation(final CompositeDataOperation op) {
@@ -1061,8 +1068,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			return CompletableFuture.failedFuture(
 							new UnsupportedOperationException("Composite READ must be handled by partial operations"));
 		} else {
-			// For DELETE/UPDATE, delegate to standard path
-			return putObject((O) op);
+			return null;
 		}
 	}
 
