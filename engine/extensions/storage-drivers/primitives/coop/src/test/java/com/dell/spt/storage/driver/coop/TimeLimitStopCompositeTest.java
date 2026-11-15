@@ -23,6 +23,7 @@ import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
@@ -359,6 +360,52 @@ final class TimeLimitStopCompositeTest {
 		assertFalse(lifecycle.hasOutstandingOperations(), () -> lifecycle.snapshot().toString());
 		assertEquals(2, uploadResults.get(), "the upload has its initiation's result and its abort's");
 		assertEquals(MPU_OBJECT_PERMITS, freeUploadPermits(), "the upload permit is back, once");
+	}
+
+	/**
+	 * The dispatch task holds the upload's completion when the stop closes admission: the claim is refused
+	 * and the completion, in no queue, is left in the task's buffer as the task stops. Queue recovery takes
+	 * it from the task and the upload is unresolved at once.
+	 */
+	@Test
+	void aCompletionTheDispatchTaskHoldsAtTheStopIsUnresolvedByRecovery() throws Exception {
+		startDriver(16);
+		final var lifecycle = driver.operationLifecycle();
+		final var upload = initiationInFlight(1024);
+		assertTrue(driver.handleCompleted(op(upload)));
+		final var part = parts(upload).get(0);
+		dispatch(part);
+		complete(upload, part, Operation.Status.SUCC);
+		assertSame(upload, driver.childOpQueue.peek(), "the completion is queued");
+		final var entered = new CountDownLatch(1);
+		final var release = new CountDownLatch(1);
+		driver.beforeSubmit = op -> {
+			if (op == op(upload)) {
+				entered.countDown();
+				try {
+					release.await(10, TimeUnit.SECONDS);
+				} catch (final InterruptedException e) {
+					// The stop interrupts the task; the submit then runs and is refused.
+				}
+			}
+		};
+		driver.start();
+		assertTrue(entered.await(10, TimeUnit.SECONDS), "the dispatch task took the completion");
+		final var closing = new Thread(driver::closeAdmission, "close-admission");
+		closing.start();
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+		while (driver.isAdmissionOpen() && System.nanoTime() < deadline) {
+			Thread.onSpinWait();
+		}
+		assertFalse(driver.isAdmissionOpen(), "admission closed");
+		release.countDown();
+		closing.join(TimeUnit.SECONDS.toMillis(30));
+		assertFalse(closing.isAlive(), "the stop ended");
+		assertEquals(OperationLifecycleState.DISPATCHED, lifecycle.stateOf(op(upload)), "the refused completion waits for recovery");
+
+		assertTrue(driver.recoverQueuedOperations().isEmpty(), "the dispatched upload is not unattempted");
+
+		assertUnresolvedOnce(upload);
 	}
 
 	/** A multi-range read's next range comes after the stop, which refuses it: the read is unresolved at once. */
