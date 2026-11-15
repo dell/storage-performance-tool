@@ -86,7 +86,7 @@ func TestWaitForAPIsFailureReportsExitedContainer(t *testing.T) {
 		"Container mock-contain: exited with exit code 1",
 		"Last 3 container log lines:",
 		"Failed to bind to 0.0.0.0:9999",
-		"starting engine against ***",
+		"starting engine against http://***",
 		"--secret-key ***",
 		"API Summary: 0/1 APIs ready")
 	output := strings.Join(lines, "\n")
@@ -222,7 +222,7 @@ func TestSingleHostStartupDiagnosticsReportStateFirst(t *testing.T) {
 	orchestrator.containerID = "cid"
 
 	got := orchestrator.containerStartupDiagnostics(context.Background())
-	want := "Container state: exited with exit code 3\n\nDocker logs:\nconnecting to ***\nFailed to bind"
+	want := "Container state: exited with exit code 3\n\nDocker logs:\nconnecting to http://***\nFailed to bind"
 	if got != want {
 		t.Fatalf("diagnostics =\n%s\nwant\n%s", got, want)
 	}

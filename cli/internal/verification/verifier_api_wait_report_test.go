@@ -94,7 +94,7 @@ func TestVerifyPortsFailureReportsExitedContainer(t *testing.T) {
 		"Container " + mockContainerID + ": exited with exit code 1",
 		"Last 4 container log lines:",
 		"Failed to bind to 0.0.0.0:9999",
-		"connecting to *** and ***",
+		"connecting to http://*** and ***",
 		"secret *** loaded",
 	} {
 		if !strings.Contains(check.Detail, want) || !strings.Contains(printed, want) {

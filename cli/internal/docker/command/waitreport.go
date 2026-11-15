@@ -145,8 +145,9 @@ func joinNonEmpty(parts ...string) string {
 }
 
 // APIWaitReport describes a container whose engine API never became ready: its state and
-// its last log lines, or why either could not be read. The text is redacted with
-// secretmask.Text and secretmask.EnvironmentValues. It has no indentation; callers indent it.
+// its last log lines, or why either could not be read. Only the log lines are redacted, with
+// secretmask.Text and secretmask.EnvironmentValues; the container ID and the CLI's own text
+// are not. It has no indentation; callers indent it.
 func APIWaitReport(containerID string, state ContainerState, stateErr error, logs string, logErr error) string {
 	var b strings.Builder
 	id := containerID
@@ -164,14 +165,15 @@ func APIWaitReport(containerID string, state ContainerState, stateErr error, log
 	case strings.TrimSpace(logs) == "":
 		b.WriteString("\nContainer logs: (empty)")
 	default:
-		lines := strings.Split(strings.TrimRight(logs, "\n"), "\n")
+		masked := secretmask.EnvironmentValues(secretmask.Text(strings.TrimRight(logs, "\n")))
+		lines := strings.Split(masked, "\n")
 		fmt.Fprintf(&b, "\nLast %d container log lines:", len(lines))
 		for _, line := range lines {
 			b.WriteString("\n  ")
 			b.WriteString(strings.TrimRight(line, "\r"))
 		}
 	}
-	return secretmask.EnvironmentValues(secretmask.Text(b.String()))
+	return b.String()
 }
 
 // IndentLines prefixes every line of text with prefix.

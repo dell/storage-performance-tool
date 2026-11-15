@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 )
 
 func TestParseContainerState(t *testing.T) {
@@ -52,5 +54,17 @@ func TestAPIWaitReportEmptyLogsAndLongID(t *testing.T) {
 	want := "Container 0123456789ab: running\nContainer logs: (empty)"
 	if got != want {
 		t.Fatalf("APIWaitReport() = %q, want %q", got, want)
+	}
+}
+
+// TestAPIWaitReportMasksOnlyLogLines keeps the container ID and the CLI's own text whole, even
+// when a credential's value equals them.
+func TestAPIWaitReportMasksOnlyLogLines(t *testing.T) {
+	t.Setenv(constants.EnvS3AccessKey, "test")
+	t.Setenv(constants.EnvS3SecretKey, "running")
+	got := APIWaitReport("test", ContainerState{Status: "running"}, nil, "key test\nstate running\nlatest", nil)
+	want := "Container test: running\nLast 3 container log lines:\n  key ***\n  state ***\n  latest"
+	if got != want {
+		t.Fatalf("APIWaitReport() =\n%s\nwant\n%s", got, want)
 	}
 }

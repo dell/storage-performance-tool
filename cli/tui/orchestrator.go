@@ -175,10 +175,11 @@ func (o *TestOrchestrator) containerStartupDiagnostics(ctx context.Context) stri
 			logging.LogDebug("orchestrator", "failed to collect container startup diagnostics", "error", err.Error())
 			parts = append(parts, fmt.Sprintf("could not read container logs: %v", err))
 		} else if diagnostics = strings.TrimSpace(diagnostics); diagnostics != "" {
-			parts = append(parts, diagnostics)
+			// ContainerDiagnosticTail masks credentials by key name; mask bare values too.
+			parts = append(parts, secretmask.EnvironmentValues(diagnostics))
 		}
 	}
-	return strings.TrimSpace(secretmask.EnvironmentValues(secretmask.Text(strings.Join(parts, "\n\n"))))
+	return strings.TrimSpace(strings.Join(parts, "\n\n"))
 }
 
 // StartTest starts a Spt test using the API approach
