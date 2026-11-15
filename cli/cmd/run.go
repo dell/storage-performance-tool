@@ -1973,6 +1973,11 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 		if err := validateRunWorkloadTypeFunc(workloadType); err != nil {
 			return err
 		}
+		// Refuse a --network-mode typo before any file, port check or host connection.
+		networkModeFlag, _ := cmd.Flags().GetString("network-mode")
+		if err := validateNetworkMode(networkModeFlag); err != nil {
+			return err
+		}
 
 		// Build scenario parameters
 		params, err := buildScenarioParams(workloadType, cmd)
