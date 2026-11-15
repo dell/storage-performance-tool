@@ -1290,7 +1290,7 @@ func TestMultiHostOrchestrator_WaitForRMIReady_Timeout(t *testing.T) {
 	// Test with very short timeout to ensure it times out quickly
 	err = orchestrator.waitForRMIReadyContext(context.Background(), host, 2*time.Second)
 	if err == nil {
-		t.Error("Expected waitForRMIReady to timeout, but it succeeded")
+		t.Fatal("Expected waitForRMIReady to timeout, but it succeeded")
 	}
 	if !strings.Contains(err.Error(), "RMI registry not ready") {
 		t.Errorf("Expected timeout error message, got: %v", err)
@@ -1410,6 +1410,12 @@ func TestMultiHostOrchestrator_WaitForAllWorkersReady_PartialFailure(t *testing.
 
 	// Set minHosts to 1 (1 entry + 0 workers required) so partial failure is acceptable
 	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
+	// Probe a closed port, not the default registry port, so a local engine on 1099 is never dialled.
+	registryPort, err := strconv.Atoi(closedPort(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	orchestrator.SetRMIRegistryPort(registryPort)
 
 	workers := []*HostConnection{
 		{
@@ -1423,7 +1429,7 @@ func TestMultiHostOrchestrator_WaitForAllWorkersReady_PartialFailure(t *testing.
 	}
 
 	// One worker will fail (invalid host), but since we only require 0 workers (minHosts=1 - 1 entry = 0), it should succeed
-	err := orchestrator.waitForAllWorkersReadyContext(context.Background(), workers, 2*time.Second)
+	err = orchestrator.waitForAllWorkersReadyContext(context.Background(), workers, 2*time.Second)
 	if err != nil {
 		t.Errorf("Expected waitForAllWorkersReady to succeed with partial failure when minHosts allows it, got: %v", err)
 	}
