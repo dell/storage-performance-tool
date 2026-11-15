@@ -1231,17 +1231,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		uriBuilder.append(percentEncode(key)).append('=').append(percentEncode(value));
 	}
 
-	private static String canonicalizeQueryString(final String rawQuery) {
-		if (rawQuery == null || rawQuery.isEmpty()) {
-			return "";
-		}
-		if (isCanonicalSingleParameter(rawQuery, 0)) {
-			return rawQuery;
-		}
-		return canonicalizeQueryParameters(rawQuery);
-	}
-
-	/** {@link #canonicalizeQueryString} without its single-parameter shortcut: decodes, encodes and sorts each pair. */
+	/**
+	 * The V4 canonical form of a non-empty {@code rawQuery}: each pair decoded, encoded again and sorted.
+	 * {@link #getCanonicalV4} appends a query that {@link #isCanonicalSingleParameter} accepts as it is,
+	 * without calling this.
+	 */
 	private static String canonicalizeQueryParameters(final String rawQuery) {
 		final var parts = rawQuery.split("&", 0);
 		final List<String> canonicalComponents = new ArrayList<>(parts.length);
@@ -1843,20 +1837,20 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 										|| OpType.STAT.equals(opType));
 		final String encodedVersionId = useVersionQuery ? encodeVersionId(versionId) : null;
 		final String uri;
-		final String signedUri;
+		final String uriToSign;
 		if (!useVersionQuery) {
 			uri = legacyVersion ? itemUri.substring(0, keyEnd) : itemUri;
-			signedUri = uri;
+			uriToSign = uri;
 		} else if (legacyVersion && encodedVersionId.length() == versionId.length()) {
 			// itemUri is <the key's path>~<versionId>, and the version ID needs no encoding (encoding
 			// lengthens what it changes), so the URI is itemUri with that ~ replaced by ?versionId=, built in
 			// one copy. Both signers sign it as sent.
 			uri = versionQueryUri(itemUri, keyEnd);
-			signedUri = uri;
+			uriToSign = uri;
 		} else {
 			final String objectUri = legacyVersion ? itemUri.substring(0, keyEnd) : itemUri;
 			uri = objectUri + VERSION_ID_QUERY + encodedVersionId;
-			signedUri = signedUri(uri, objectUri, versionId, encodedVersionId);
+			uriToSign = signedUri(uri, objectUri, versionId, encodedVersionId);
 		}
 		final var httpRequest = (HttpRequest) new DefaultHttpRequest(
 						HTTP_1_1, httpMethod, uri, httpHeaders);
@@ -1905,7 +1899,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		applyMetaDataHeaders(httpHeaders, op);
 		applyDynamicHeaders(httpHeaders);
 		applySharedHeaders(httpHeaders);
-		applyAuthHeaders(httpHeaders, httpRequest.method(), signedUri, op.credential());
+		applyAuthHeaders(httpHeaders, httpRequest.method(), uriToSign, op.credential());
 		return httpRequest;
 	}
 
@@ -2794,11 +2788,12 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		if (queryIndex != -1) {
 			final int queryStart = queryIndex + 1;
 			if (isCanonicalSingleParameter(dstUriPath, queryStart)) {
-				// What canonicalizeQueryString returns for it, appended without copying it out first.
+				// Already canonical: appended without copying it out first.
 				buffCanonical.append(dstUriPath, queryStart, dstUriPath.length());
-			} else {
+			} else if (queryStart < dstUriPath.length()) {
 				buffCanonical.append(canonicalizeQueryParameters(dstUriPath.substring(queryStart)));
 			}
+			// An empty query (the URI ends with ?) has an empty canonical form: nothing to append.
 		}
 		buffCanonical.append('\n');
 		for (final var header : S3Api.HEADERS_CANONICAL_V4) {
