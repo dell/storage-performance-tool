@@ -157,7 +157,10 @@ class S3UriArgsSigningTest {
 						"versionId=VER%2B1%3D",
 						"tagging",
 						"versioning",
-						"delete");
+						"delete",
+						// s3-tables GetTable: name and namespace are the only prefix-related names SPT builds.
+						"tableBucketARN=arn:aws:s3tables:us-east-1:111122223333:bucket/tb&namespace=ns1&name=tbl1",
+						"tableBucketARN=arn%3Aaws%3As3tables%3Aus-east-1%3A111122223333%3Abucket%2Ftb&namespace=ns1&name=tbl1");
 		for (final var query : queries) {
 			assertEquals(legacyCanonicalQuery(query), canonicalQuery(query), query);
 		}
@@ -190,7 +193,7 @@ class S3UriArgsSigningTest {
 	}
 
 	private static String canonicalQuery(final String rawQuery) throws Exception {
-		final Method m = S3StorageDriver.class.getDeclaredMethod("canonicalizeQueryString", String.class);
+		final Method m = S3StorageDriver.class.getDeclaredMethod("canonicalizeQueryParameters", String.class);
 		m.setAccessible(true);
 		return (String) m.invoke(null, rawQuery);
 	}

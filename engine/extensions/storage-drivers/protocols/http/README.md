@@ -61,16 +61,18 @@ Load
 
 Custom URI query arguments may be set in the same way as custom HTTP headers.
 
-With the `s3` driver (and `s3-rdma` and `s3-tables`, which build on it), the arguments are sent on:
+With the `s3` and `s3-rdma` drivers, the arguments are sent on:
 
 - object requests built by the common request builder: PUT, GET, HEAD, UPDATE, copy, and DELETE when it is not a standalone DELETE step;
 - the bucket HEAD and the bucket create that check and create the target bucket.
 
-They are not sent on multipart upload requests (initiate, part, complete, abort), range-read part requests, object versioning or tagging requests, standalone DELETE requests, LIST requests, item-source listing, the delimiter probe, bucket versioning requests, the presence `HEAD` of a verification, or multi-object delete. With object versioning or object tagging enabled, they are not sent on any object request.
+They are not sent on multipart upload requests (initiate, part, complete, abort), range-read part requests, object versioning or tagging requests, standalone DELETE requests, LIST requests, item-source listing, the delimiter probe, bucket versioning requests, the presence `HEAD` of a verification, or multi-object delete. With object versioning or object tagging enabled, they are not sent on object requests, except a DELETE or UPDATE of a composite (multipart) item, which still takes the common builder and carries them.
+
+The `s3-tables` driver builds its table requests itself and sends no arguments on them; only its target-bucket HEAD and create carry them.
 
 With `--storage-auth-version 4`, the arguments are part of the signed query, sorted by name and then by value. With V2, object requests are signed over the path only, so an argument that V2 signs as a sub-resource (such as `acl` or `versionId`) is not signed.
 
-Argument names and values are sent as written, without encoding: give values that are already URI-safe, and percent-encode any other character yourself.
+Argument names and values are sent as written, without encoding: give values that are already URI-safe, and percent-encode any other character yourself. Write a space as `%20` and a literal plus as `%2B`: a raw `+` is signed as a plus, and a target that reads `+` in a query as a space will refuse the signature.
 
 ```javascript
 var uriQueryConfig = {
