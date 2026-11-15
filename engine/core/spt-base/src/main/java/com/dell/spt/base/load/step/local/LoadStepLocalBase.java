@@ -2,6 +2,7 @@ package com.dell.spt.base.load.step.local;
 
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
+import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
@@ -23,6 +24,10 @@ import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.LoadStepBase;
 import com.dell.spt.base.load.step.PreparationStatus;
+import com.dell.spt.base.load.step.StepIdFiles;
+import com.dell.spt.base.load.step.StepIdCheckException;
+import com.dell.spt.base.load.step.StepIdInUseException;
+import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.storage.driver.AdmissionPhase;
 import com.dell.spt.base.load.step.local.context.LoadStepContext;
 import com.dell.spt.base.load.step.local.context.LoadStepContextImpl;
@@ -48,6 +53,7 @@ import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import java.util.UUID;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.rmi.RemoteException;
 import java.util.NoSuchElementException;
 import java.util.ArrayList;
@@ -86,6 +92,8 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private String operationLifecycleWorkerId;
 	private boolean operationLifecyclePublished;
 	private boolean nicPathsPublished;
+	// Refused at start: an earlier step with the same id left its files here, and this one publishes none.
+	private volatile boolean startRefused;
 	private volatile StepPreparation preparation;
 	private volatile Thread preparationDeadlineGuard;
 	private volatile PoolPreparation.Report poolReport;
@@ -1081,7 +1089,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	 * warns; they are evidence, not a step outcome.
 	 */
 	private void publishNicPaths() {
-		if (nicPathsPublished) {
+		if (nicPathsPublished || startRefused) {
 			return;
 		}
 		nicPathsPublished = true;
@@ -1115,6 +1123,39 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		}
 	}
 
+	/**
+	 * Refuses this slice, before it seeds or writes any of them, when an earlier step with the same id
+	 * left one of the {@link StepIdFiles} this slice would publish: the same files the Entry Node
+	 * tests before it starts any slice. A refused slice publishes nothing at close, so the earlier
+	 * step's files, its event-loop report among them, stay as they were.
+	 */
+	@Override
+	protected final void refuseStepIdInUse(final boolean nodes) {
+		startRefused = false;
+		final var paths = new ArrayList<Path>();
+		for (final var loggerName : StepIdFiles.sliceLoggerNames(
+						StepIdFiles.merged(config, ctxConfigs), StepIdFiles.nicSet(config, ctxConfigs))) {
+			try {
+				paths.add(Path.of(FileManager.INSTANCE.logFileName(loggerName, loadStepId())));
+			} catch (final IOException | RuntimeException unknown) {
+				throwUncheckedIfInterrupted(unknown);
+				startRefused = true;
+				throw StepIdCheckException.here(loadStepId(), "the " + loggerName + " file", unknown);
+			}
+		}
+		try {
+			StepIdInUseException.refuseExisting(loadStepId(), paths);
+		} catch (final StepIdInUseException | StepIdCheckException refused) {
+			startRefused = true;
+			throw refused;
+		}
+	}
+
+	private boolean publishesOperationLifecycle() {
+		final String operation = config.stringVal("load-op-type");
+		return "create".equalsIgnoreCase(operation) || "read".equalsIgnoreCase(operation);
+	}
+
 	/** A report an earlier step with this id left must not pass for this one's (see publishEventLoops). */
 	private void discardEarlierEventLoops() {
 		try (final var logContext = put(KEY_STEP_ID, loadStepId())) {
@@ -1142,8 +1183,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	}
 
 	private void publishOperationLifecycle() {
-		final String operation = config.stringVal("load-op-type");
-		if (operationLifecyclePublished || !("create".equalsIgnoreCase(operation) || "read".equalsIgnoreCase(operation))) {
+		if (operationLifecyclePublished || startRefused || !publishesOperationLifecycle()) {
 			return;
 		}
 		final var counters = new ArrayList<OperationLifecycleCounters>();

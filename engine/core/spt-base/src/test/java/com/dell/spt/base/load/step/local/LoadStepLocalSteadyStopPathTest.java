@@ -66,8 +66,33 @@ class LoadStepLocalSteadyStopPathTest {
 
 	private static final int C = 8;
 	private static final long L_MILLIS = 25;
-	/** A request completed after the cut waits at least this long; window timings stay below it. */
-	private static final long LATE_HOLD_MILLIS = 150;
+	/**
+	 * A request completed after the cut waits at least this long, and the window's timings stay below
+	 * it. A loaded JVM stalls every thread for up to about 180 ms, and a stall only lengthens a
+	 * recorded duration: an ordinary 25 ms request read up to about 190 ms on a pinned, loaded host,
+	 * while a held request never reads less than its hold. With the hold, the window maxima are the
+	 * only check here that catches a held request counted in the window, so keep the bound tight to it.
+	 */
+	private static final long LATE_HOLD_MILLIS = 500;
+	/** Every window duration stays below this; every held request is at least this long. */
+	private static final long WINDOW_TIMING_BOUND_MICROS = TimeUnit.MILLISECONDS.toMicros(LATE_HOLD_MILLIS);
+	/**
+	 * Steady load runs at least this long from the step's start before a stop, so a window opened
+	 * late by a starved metrics loop (335 ms late measured on a cold, loaded JVM) still exceeds the
+	 * steady minimum duration of {@code durationDeleteConfig} and of {@code createStepConfig}.
+	 */
+	private static final long STEADY_FLOOR_MILLIS = 1_500;
+	/**
+	 * The worker deadline guard's injected duration: after the steady floor, with room for the
+	 * completion await before it, since the guard's cut stops every completion the await counts.
+	 */
+	private static final long WORKER_DEADLINE_MILLIS = 2_000;
+
+	static {
+		if (WORKER_DEADLINE_MILLIS - STEADY_FLOOR_MILLIS < 250) {
+			throw new IllegalStateException("the worker deadline must fall well after the steady floor");
+		}
+	}
 
 	/** Slow first drain: with two contexts, the second context's cutoff is not delayed. */
 	@Test
@@ -86,9 +111,16 @@ class LoadStepLocalSteadyStopPathTest {
 			final Thread runner = Thread.ofPlatform().name("steady-two-contexts-run").start(step);
 			final Thread stopper = Thread.ofPlatform().name("steady-two-contexts-stop").unstarted(step::stop);
 			try {
+				// The floor runs from the first completion on both contexts: a cold JVM can start the
+				// step hundreds of milliseconds after the runner thread.
+				awaitCondition(
+								() -> slowDrain.completedCount() >= 1 && other.completedCount() >= 1,
+								"load on both contexts");
+				final long loadStartNanos = System.nanoTime();
 				awaitCondition(
 								() -> slowDrain.completedCount() >= 24L * C && other.completedCount() >= 24L * C,
 								"steady load on both contexts");
+				sleepUntil(loadStartNanos + TimeUnit.MILLISECONDS.toNanos(STEADY_FLOOR_MILLIS));
 				stopper.start(); // a user stop
 				assertTrue(slowDrain.awaitAdmissionClosed(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS));
 				final long drainStartNanos = slowDrain.admissionClosedNanos();
@@ -170,14 +202,16 @@ class LoadStepLocalSteadyStopPathTest {
 			driver.holdCompletionsWhen(firstCompletionOr(step::windowsClosed)).stopProbe(step::windowsClosed);
 			try {
 				step.start();
+				final long stepStartNanos = System.nanoTime();
 				final long durationNanos = stop == EarlyStop.WORKER_DEADLINE_GUARD
-								? TimeUnit.MILLISECONDS.toNanos(700)
+								? TimeUnit.MILLISECONDS.toNanos(WORKER_DEADLINE_MILLIS)
 								: TimeUnit.SECONDS.toNanos(30);
 				step.startDurationInterval(durationNanos);
 				assertNull(step.metrics().steadyResult(), "arming the duration interval is not an end event");
-				// Twelve waves of the C - 1 requests that cycle while the first is held, as long as twelve
-				// waves of C took before the hold, so the worker deadline guard keeps its margin.
+				// Twelve waves of the C - 1 requests that cycle while the first is held, then the steady
+				// floor; the worker deadline falls after both.
 				awaitCondition(() -> driver.completedCount() >= 12L * (C - 1), "steady DELETE load");
+				sleepUntil(stepStartNanos + TimeUnit.MILLISECONDS.toNanos(STEADY_FLOOR_MILLIS));
 
 				switch (stop) {
 				case WORKER_DEADLINE_GUARD -> {
@@ -228,8 +262,8 @@ class LoadStepLocalSteadyStopPathTest {
 				final AllMetricsSnapshot window = statistics(steady);
 				final AllMetricsSnapshot total = metricsMgr.total(step.metrics());
 				assertEquals(SteadyStatus.VALID, steady.status(), steady.toString());
-				assertTrue(window.durationSnapshot().max() < TimeUnit.MILLISECONDS.toMicros(LATE_HOLD_MILLIS), "window max");
-				assertTrue(total.durationSnapshot().max() >= TimeUnit.MILLISECONDS.toMicros(LATE_HOLD_MILLIS), "total max");
+				assertTrue(window.durationSnapshot().max() < WINDOW_TIMING_BOUND_MICROS, "window max");
+				assertTrue(total.durationSnapshot().max() >= WINDOW_TIMING_BOUND_MICROS, "total max");
 				assertTrue(
 								window.successSnapshot().count() + MIN_COMPLETIONS_BEFORE_WINDOW + late <= total.successSnapshot().count(),
 								"window " + window.successSnapshot().count() + ", total " + total.successSnapshot().count());
@@ -270,8 +304,8 @@ class LoadStepLocalSteadyStopPathTest {
 				assertTrue(driver.stopProbeHeldAtAdmissionClose(), "the window closed before admission closed");
 				final int drained = driver.heldTotal();
 				assertTrue(drained >= 1, "requests were in flight at the stop");
-				assertTrue(window.durationSnapshot().max() < TimeUnit.MILLISECONDS.toMicros(LATE_HOLD_MILLIS), "window max");
-				assertTrue(total.durationSnapshot().max() >= TimeUnit.MILLISECONDS.toMicros(LATE_HOLD_MILLIS), "total max");
+				assertTrue(window.durationSnapshot().max() < WINDOW_TIMING_BOUND_MICROS, "window max");
+				assertTrue(total.durationSnapshot().max() >= WINDOW_TIMING_BOUND_MICROS, "total max");
 				assertTrue(window.successSnapshot().count() + MIN_COMPLETIONS_BEFORE_WINDOW + drained <= total.successSnapshot().count());
 			} finally {
 				driver.releaseHeld();
