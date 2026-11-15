@@ -3618,7 +3618,13 @@ func (o *MultiHostOrchestrator) StartDistributedTestWithContent(ctx context.Cont
 
 	entryNode := o.hosts[0]
 	workerNodes := o.hosts[1:]
-	if err := o.configureItemFileMounts(ctx, o.hosts, params.ItemFileMounts); err != nil {
+	// An attached worker runs an engine someone else started, with no bind
+	// mount for a staged file, so item files go only to the hosts spt starts.
+	stagedHosts := o.hosts
+	if attachWorkers {
+		stagedHosts = []*HostConnection{entryNode}
+	}
+	if err := o.configureItemFileMounts(ctx, stagedHosts, params.ItemFileMounts); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
