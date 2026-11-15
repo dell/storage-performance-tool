@@ -300,6 +300,12 @@ func (o *MultiHostOrchestrator) RMIRegistryPort() int {
 	return o.registryPort
 }
 
+// NetworkMode returns the network mode the run's entry, lone engine and idle LIST engines start
+// in; remote workers always use host networking. It is fixed at construction.
+func (o *MultiHostOrchestrator) NetworkMode() string {
+	return o.networkMode
+}
+
 // enginePorts returns the API and RMI registry ports that every engine in the run serves. An
 // unset API port is the default, as SetAPIPort treats it.
 func (o *MultiHostOrchestrator) enginePorts() (enginePorts, error) {
