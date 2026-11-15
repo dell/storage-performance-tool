@@ -94,9 +94,16 @@ public class DataOperationsBuilderImpl<I extends DataItem, O extends DataOperati
 	}
 
 	private void updateEffectiveSizeThreshold() {
-		effectiveSizeThreshold = OpType.CREATE.equals(opType) || OpType.READ.equals(opType)
-						? sizeThreshold
-						: Long.MAX_VALUE;
+		effectiveSizeThreshold = buildsCompositeOperations(opType) ? sizeThreshold : Long.MAX_VALUE;
+	}
+
+	/**
+	 * Whether items above the size threshold get a composite (multipart) operation for this op type:
+	 * only CREATE and READ have a composite implementation. Any other type gets the plain operation it
+	 * would get with no threshold.
+	 */
+	public static boolean buildsCompositeOperations(final OpType opType) {
+		return OpType.CREATE.equals(opType) || OpType.READ.equals(opType);
 	}
 
 	@Override
