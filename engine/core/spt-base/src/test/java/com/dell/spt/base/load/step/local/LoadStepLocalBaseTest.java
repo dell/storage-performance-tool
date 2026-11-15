@@ -2,6 +2,7 @@ package com.dell.spt.base.load.step.local;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -27,6 +28,7 @@ import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.load.step.PreparationStatus;
 import com.dell.spt.base.control.run.RunTerminalException;
+import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
@@ -232,15 +234,13 @@ class LoadStepLocalBaseTest {
 	@Test
 	void aCreateSliceIsRefusedBeforeItsContextsStartWhenAnEarlierLifecycleFileExists() throws Exception {
 		final String stepId = "slice-reuse-" + java.util.UUID.randomUUID();
-		final var stale = earlierFile(com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact.path(stepId));
-		final var eventLoops = earlierFile(java.nio.file.Path.of(com.dell.spt.base.load.step.file.FileManager.INSTANCE
-						.logFileName(com.dell.spt.base.logging.Loggers.EVENT_LOOPS.getName(), stepId)));
+		final var stale = earlierFile(logFile(Loggers.OPERATION_LIFECYCLE, stepId));
+		final var eventLoops = earlierFile(logFile(Loggers.EVENT_LOOPS, stepId));
 		try {
 			final LoadStepContext context = mockContext();
 			final var step = reuseStep(stepId, "create", context);
 
-			final var failure = assertThrows(
-							com.dell.spt.base.load.step.StepIdInUseException.class, step::startContextsForTest);
+			final var failure = refused(step, stale);
 
 			assertTrue(failure.getMessage().contains(stale.toString()), failure.getMessage());
 			verify(context, never()).start();
@@ -252,18 +252,63 @@ class LoadStepLocalBaseTest {
 	}
 
 	@Test
-	void aPartialReadSliceIsRefusedWhenAnEarlierRangeReadFileExists() throws Exception {
+	void aMetadataSliceIsRefusedBeforeItSeedsAnEarlierIntegrityLog() throws Exception {
 		final String stepId = "slice-reuse-" + java.util.UUID.randomUUID();
-		final var stale = earlierFile(com.dell.spt.base.metrics.range.RangeReadArtifact.path(stepId));
+		final var stale = earlierFile(logFile(Loggers.INTEGRITY_PERFORMANCE, stepId));
 		try {
 			final LoadStepContext context = mockContext();
-			when(context.rangeReadSnapshot()).thenReturn(mock(com.dell.spt.base.metrics.range.RangeReadSnapshot.class));
-			final var step = reuseStep(stepId, "read", context);
+			final Config config = reuseConfig(stepId, "create");
+			config.val("storage-integrity-mode", "metadata");
+			config.val("storage-driver-type", "s3");
+			final var step = new TestLoadStepLocalBase(config, mockMetricsManager(), context);
 
-			final var failure = assertThrows(
-							com.dell.spt.base.load.step.StepIdInUseException.class, step::startContextsForTest);
+			refused(step, stale);
 
-			assertTrue(failure.getMessage().contains(stale.toString()), failure.getMessage());
+			verify(context, never()).start();
+			step.close();
+			assertEquals("earlier", java.nio.file.Files.readString(stale), "the slice seeded the earlier step's integrity log");
+		} finally {
+			removeStepFolder(stale);
+		}
+	}
+
+	@Test
+	void aRefusedSliceClosesWithoutPublishingOverTheEarlierStepsFiles() throws Exception {
+		final String stepId = "slice-reuse-" + java.util.UUID.randomUUID();
+		final var lifecycle = earlierFile(logFile(Loggers.OPERATION_LIFECYCLE, stepId));
+		final var eventLoops = earlierFile(logFile(Loggers.EVENT_LOOPS, stepId));
+		final var nicPaths = earlierFile(logFile(Loggers.NIC_PATHS, stepId));
+		final var nicSet = earlierFile(logFile(Loggers.NIC_SET, stepId));
+		try {
+			final LoadStepContext context = mockContext();
+			when(context.hasNicSet()).thenReturn(true);
+			final var step = reuseStep(stepId, "create", context);
+			refused(step, lifecycle);
+
+			step.stop();
+			step.close();
+
+			for (final var file : List.of(lifecycle, eventLoops, nicPaths, nicSet)) {
+				assertEquals("earlier", java.nio.file.Files.readString(file), "the refused slice published " + file);
+			}
+		} finally {
+			removeStepFolder(lifecycle);
+		}
+	}
+
+	@Test
+	void aPartialReadSliceIsRefusedWhenAnEarlierRangeReadFileExists() throws Exception {
+		final String stepId = "slice-reuse-" + java.util.UUID.randomUUID();
+		final var stale = earlierFile(logFile(Loggers.RANGE_READ, stepId));
+		try {
+			final LoadStepContext context = mockContext();
+			final Config config = reuseConfig(stepId, "read");
+			config.val("load-op-read-range-size", "1KiB");
+			config.val("storage-driver-type", "s3");
+			final var step = new TestLoadStepLocalBase(config, mockMetricsManager(), context);
+
+			refused(step, stale);
+
 			verify(context, never()).start();
 		} finally {
 			removeStepFolder(stale);
@@ -273,17 +318,16 @@ class LoadStepLocalBaseTest {
 	@Test
 	void aNicSetSliceIsRefusedWhenAnEarlierNicFileExists() throws Exception {
 		final String stepId = "slice-reuse-" + java.util.UUID.randomUUID();
-		final var stale = earlierFile(com.dell.spt.base.nic.NicSetArtifact.path(stepId));
+		final var stale = earlierFile(logFile(Loggers.NIC_SET, stepId));
 		try {
 			final LoadStepContext context = mockContext();
-			when(context.hasNicSet()).thenReturn(true);
 			// An UPDATE step publishes no lifecycle evidence, but a NIC set's files are refused all the same.
-			final var step = reuseStep(stepId, "update", context);
+			final Config config = reuseConfig(stepId, "update");
+			config.val(com.dell.spt.base.config.NicSetConfig.SLICE_INTERFACES_PATH, List.of("lo"));
+			final var step = new TestLoadStepLocalBase(config, mockMetricsManager(), context);
 
-			final var failure = assertThrows(
-							com.dell.spt.base.load.step.StepIdInUseException.class, step::startContextsForTest);
+			refused(step, stale);
 
-			assertTrue(failure.getMessage().contains(stale.toString()), failure.getMessage());
 			verify(context, never()).start();
 		} finally {
 			removeStepFolder(stale);
@@ -293,26 +337,48 @@ class LoadStepLocalBaseTest {
 	@Test
 	void anUpdateSliceWithoutANicSetStillStartsAfterAnEarlierStepWithTheSameId() throws Exception {
 		final String stepId = "slice-reuse-" + java.util.UUID.randomUUID();
-		final var lifecycle = earlierFile(com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact.path(stepId));
-		earlierFile(com.dell.spt.base.metrics.range.RangeReadArtifact.path(stepId));
-		earlierFile(com.dell.spt.base.nic.NicPathsArtifact.path(stepId));
+		final var lifecycle = earlierFile(logFile(Loggers.OPERATION_LIFECYCLE, stepId));
+		earlierFile(logFile(Loggers.RANGE_READ, stepId));
+		earlierFile(logFile(Loggers.NIC_PATHS, stepId));
+		earlierFile(logFile(Loggers.INTEGRITY_PERFORMANCE, stepId));
 		try {
 			for (final String opType : List.of("update", "delete", "noop")) {
 				final LoadStepContext context = mockContext();
-				reuseStep(stepId, opType, context).startContextsForTest();
+				final var step = reuseStep(stepId, opType, context);
+				step.start();
 				verify(context).start();
+				step.close();
 			}
 		} finally {
 			removeStepFolder(lifecycle);
 		}
 	}
 
-	private static TestLoadStepLocalBase reuseStep(
-					final String stepId, final String opType, final LoadStepContext context) {
+	/** Starts {@code step}, which must be refused for {@code stale} and nothing else. */
+	private static com.dell.spt.base.load.step.StepIdInUseException refused(
+					final TestLoadStepLocalBase step, final java.nio.file.Path stale) {
+		final var thrown = assertThrows(RuntimeException.class, step::start);
+		final var failure = assertInstanceOf(com.dell.spt.base.load.step.StepIdInUseException.class,
+						RunTerminalException.find(thrown), thrown.toString());
+		assertTrue(failure.getMessage().contains("(" + stale + " exists)"), failure.getMessage());
+		return failure;
+	}
+
+	private static Config reuseConfig(final String stepId, final String opType) {
 		final Config config = baseConfig();
 		config.val("load-step-id", stepId);
 		config.val("load-op-type", opType);
-		return new TestLoadStepLocalBase(config, mockMetricsManager(), context);
+		return config;
+	}
+
+	private static TestLoadStepLocalBase reuseStep(
+					final String stepId, final String opType, final LoadStepContext context) {
+		return new TestLoadStepLocalBase(reuseConfig(stepId, opType), mockMetricsManager(), context);
+	}
+
+	private static java.nio.file.Path logFile(final org.apache.logging.log4j.Logger logger, final String stepId)
+					throws java.io.IOException {
+		return java.nio.file.Path.of(com.dell.spt.base.load.step.file.FileManager.INSTANCE.logFileName(logger.getName(), stepId));
 	}
 
 	private static java.nio.file.Path earlierFile(final java.nio.file.Path path) throws java.io.IOException {

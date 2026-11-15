@@ -1,8 +1,6 @@
 package com.dell.spt.base.nic;
 
 import com.dell.spt.base.logging.Loggers;
-import java.io.IOException;
-import java.nio.file.Path;
 import com.dell.spt.base.nic.pool.PoolPreparation;
 import com.dell.spt.base.nic.pool.PoolReportJson;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -40,11 +38,6 @@ public final class NicSetArtifact {
 	}
 
 	private NicSetArtifact() {}
-
-	/** This worker's file of step {@code stepId}, which it refuses to replace. */
-	public static Path path(final String stepId) throws IOException {
-		return NicStepFile.path(Loggers.NIC_SET, stepId);
-	}
 
 	/** Publish synchronously after stop; async logging plus flush does not drain its queue. */
 	public static void publish(final long runId, final String stepId, final String workerId, final List<Context> contexts,

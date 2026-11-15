@@ -23,7 +23,9 @@ import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.LoadStepBase;
 import com.dell.spt.base.load.step.PreparationStatus;
+import com.dell.spt.base.load.step.StepIdFiles;
 import com.dell.spt.base.load.step.StepIdInUseException;
+import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.storage.driver.AdmissionPhase;
 import com.dell.spt.base.load.step.local.context.LoadStepContext;
 import com.dell.spt.base.load.step.local.context.LoadStepContextImpl;
@@ -88,6 +90,8 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private String operationLifecycleWorkerId;
 	private boolean operationLifecyclePublished;
 	private boolean nicPathsPublished;
+	// Refused at start: an earlier step with the same id left its files here, and this one publishes none.
+	private volatile boolean startRefused;
 	private volatile StepPreparation preparation;
 	private volatile Thread preparationDeadlineGuard;
 	private volatile PoolPreparation.Report poolReport;
@@ -195,8 +199,6 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		operationLifecycleWorkerId = UUID.randomUUID().toString();
 		operationLifecyclePublished = false;
 		nicPathsPublished = false;
-		// Before the earlier step's event-loop report is removed: a refused step changes none of its files.
-		refuseStepIdInUse();
 		discardEarlierEventLoops();
 		if (standaloneDeleteEnabled()) {
 			expectedDeleteObjectLifecycleContexts = List.copyOf(stepContexts);
@@ -1058,7 +1060,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	 * warns; they are evidence, not a step outcome.
 	 */
 	private void publishNicPaths() {
-		if (nicPathsPublished) {
+		if (nicPathsPublished || startRefused) {
 			return;
 		}
 		nicPathsPublished = true;
@@ -1093,28 +1095,29 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	}
 
 	/**
-	 * Refuses the step before any load when an earlier step with the same id left one of the files
-	 * this slice would refuse to replace at stop: the operation lifecycle and range read evidence of a
-	 * CREATE or READ step, and the NIC files of a step with a NIC set. The Entry Node tests its own
-	 * copies of them before it starts any slice.
+	 * Refuses this slice, before it seeds or writes any of them, when an earlier step with the same id
+	 * left one of the {@link StepIdFiles} this slice would publish: the same files the Entry Node
+	 * tests before it starts any slice. A refused slice publishes nothing at close, so the earlier
+	 * step's files, its event-loop report among them, stay as they were.
 	 */
-	private void refuseStepIdInUse() {
+	@Override
+	protected final void refuseStepIdInUse(final boolean nodes) {
+		startRefused = false;
 		final var paths = new ArrayList<Path>();
-		try {
-			if (publishesOperationLifecycle()) {
-				paths.add(OperationLifecycleArtifact.path(loadStepId()));
-				if (expectedOperationLifecycleContexts.stream().anyMatch(context -> context != null && context.rangeReadSnapshot() != null)) {
-					paths.add(RangeReadArtifact.path(loadStepId()));
-				}
+		for (final var loggerName : StepIdFiles.sliceLoggerNames(
+						StepIdFiles.merged(config, ctxConfigs), StepIdFiles.nicSet(config, ctxConfigs))) {
+			try {
+				paths.add(Path.of(FileManager.INSTANCE.logFileName(loggerName, loadStepId())));
+			} catch (final IOException | RuntimeException noFile) {
+				// Its publication reports it at stop.
 			}
-			if (expectedOperationLifecycleContexts.stream().anyMatch(context -> context != null && context.hasNicSet())) {
-				paths.add(NicPathsArtifact.path(loadStepId()));
-				paths.add(NicSetArtifact.path(loadStepId()));
-			}
-		} catch (final IOException | RuntimeException noFile) {
-			return; // Its publication reports it at stop.
 		}
-		StepIdInUseException.refuseExisting(loadStepId(), paths);
+		try {
+			StepIdInUseException.refuseExisting(loadStepId(), paths);
+		} catch (final StepIdInUseException refused) {
+			startRefused = true;
+			throw refused;
+		}
 	}
 
 	private boolean publishesOperationLifecycle() {
@@ -1149,7 +1152,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	}
 
 	private void publishOperationLifecycle() {
-		if (operationLifecyclePublished || !publishesOperationLifecycle()) {
+		if (operationLifecyclePublished || startRefused || !publishesOperationLifecycle()) {
 			return;
 		}
 		final var counters = new ArrayList<OperationLifecycleCounters>();

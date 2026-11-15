@@ -1,8 +1,6 @@
 package com.dell.spt.base.nic;
 
 import com.dell.spt.base.logging.Loggers;
-import java.io.IOException;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.commons.csv.CSVFormat;
@@ -31,11 +29,6 @@ public final class NicPathsArtifact {
 	public record Context(int contextIndex, NicPathRows rows) {}
 
 	private NicPathsArtifact() {}
-
-	/** This worker's file of step {@code stepId}, which it refuses to replace. */
-	public static Path path(final String stepId) throws IOException {
-		return NicStepFile.path(Loggers.NIC_PATHS, stepId);
-	}
 
 	/**
 	 * Writes the step's per-path file. Publish synchronously after stop; async logging plus flush does not drain its queue.

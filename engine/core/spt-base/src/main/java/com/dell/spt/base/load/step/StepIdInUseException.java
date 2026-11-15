@@ -19,6 +19,12 @@ public final class StepIdInUseException extends RunTerminalException {
 		super(Category.CONFIGURATION, stepId, message(stepId, existing), null);
 	}
 
+	/** The step's file {@code existing} exists on the remote node {@code node}. */
+	public StepIdInUseException(final String stepId, final String node, final String existing) {
+		super(Category.CONFIGURATION, stepId, "step id \"" + stepId + "\" is already used in the log directory of node "
+						+ node + " (" + existing + " exists); give each step its own load.step.id", null);
+	}
+
 	static String message(final String stepId, final Path existing) {
 		return "step id \"" + stepId + "\" is already used in this log directory (" + existing
 						+ " exists); give each step its own load.step.id";

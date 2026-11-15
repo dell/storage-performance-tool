@@ -7,6 +7,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -17,18 +20,20 @@ import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.OpType;
-import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepFactory;
+import com.dell.spt.base.load.step.StepIdFiles;
 import com.dell.spt.base.load.step.StepIdInUseException;
 import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
-import com.dell.spt.base.metrics.range.RangeReadArtifact;
 import com.github.akurilov.confuse.Config;
+import java.io.EOFException;
 import java.io.IOException;
+import java.rmi.RemoteException;
 import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.Comparator;
@@ -181,8 +186,6 @@ public class StepIdReuseAtStartTest {
 		assertEquals(List.of(canonical, CsvLoggerArtifactAggregator.nodeSourcePath(canonical, 0),
 						CsvLoggerArtifactAggregator.nodeSourcePath(canonical, 1),
 						CsvLoggerArtifactAggregator.nodeSourcePath(canonical, 2)), paths);
-		assertEquals(OperationLifecycleArtifact.path(stepId), canonical);
-		assertEquals(RangeReadArtifact.path(stepId), canonical(Loggers.RANGE_READ.getName()));
 	}
 
 	@Test
@@ -198,6 +201,91 @@ public class StepIdReuseAtStartTest {
 						node1, IntegrityManifestCompletion.emissionCountPath(node1),
 						IntegrityManifestCompletion.deleteMarkerCountPath(node1)),
 						CsvArtifactAggregator.publishedPaths(manifest.toString(), 2, OpType.LIST));
+	}
+
+	@Test
+	void theEntryNodeRefusesTheStepWhenAnotherNodeHoldsAnEarlierFileOfIt() throws Exception {
+		final var merged = StepIdFiles.merged(config("create"), List.of());
+		final FileManager worker = node(Loggers.OPERATION_LIFECYCLE.getName(), "/w/operation.lifecycle.csv", 120);
+
+		final var failure = assertThrows(StepIdInUseException.class, () -> LoadStepClientBase.refuseNodeFiles(
+						stepId, List.of(FileManager.INSTANCE, worker), List.of("10.0.0.2:1100"), merged, List.of(false, false)));
+
+		assertEquals("step id \"" + stepId + "\" is already used in the log directory of node 10.0.0.2:1100 "
+						+ "(/w/operation.lifecycle.csv exists); give each step its own load.step.id", failure.getMessage());
+		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, failure.category());
+	}
+
+	@Test
+	void anotherNodesEarlierIntegrityLogAndEmptyFilesAreRefusedToo() throws Exception {
+		final Config config = config("create");
+		config.val("storage-integrity-mode", "metadata");
+		final var merged = StepIdFiles.merged(config, List.of());
+		assertEquals(List.of(Loggers.OPERATION_LIFECYCLE.getName(), Loggers.INTEGRITY_PERFORMANCE.getName()),
+						StepIdFiles.sliceLoggerNames(merged, false));
+		final FileManager worker = node(Loggers.INTEGRITY_PERFORMANCE.getName(), "/w/integrity.performance.csv", 0);
+
+		final var failure = assertThrows(StepIdInUseException.class, () -> LoadStepClientBase.refuseNodeFiles(
+						stepId, List.of(FileManager.INSTANCE, worker), List.of("n2"), merged, List.of(false, false)));
+
+		assertTrue(failure.getMessage().contains("(/w/integrity.performance.csv exists)"), failure.getMessage());
+	}
+
+	@Test
+	void anotherNodesNicFilesAreTestedOnlyWhenItsSliceRequestedANicSet() throws Exception {
+		final var merged = StepIdFiles.merged(config("update"), List.of());
+		final FileManager worker = node(Loggers.NIC_SET.getName(), "/w/nic.set.json", 10);
+		final List<FileManager> fileMgrs = List.of(FileManager.INSTANCE, worker);
+
+		LoadStepClientBase.refuseNodeFiles(stepId, fileMgrs, List.of("n2"), merged, List.of(true, false));
+		final var failure = assertThrows(StepIdInUseException.class,
+						() -> LoadStepClientBase.refuseNodeFiles(stepId, fileMgrs, List.of("n2"), merged, List.of(false, true)));
+
+		assertTrue(failure.getMessage().contains("(/w/nic.set.json exists)"), failure.getMessage());
+	}
+
+	@Test
+	void aNodeThatCannotTellLeavesTheTestToItsSlice() throws Exception {
+		final var merged = StepIdFiles.merged(config("create"), List.of());
+		final FileManager worker = mock(FileManager.class);
+		when(worker.logFileName(anyString(), eq(stepId))).thenThrow(new RemoteException("unreachable"));
+
+		LoadStepClientBase.refuseNodeFiles(stepId, List.of(FileManager.INSTANCE, worker), List.of("n2"), merged, List.of(false, false));
+	}
+
+	@Test
+	void aMetadataSlicesRefusalKeepsItsCategoryAndMessage() throws Exception {
+		final TestLoadStepClient client = client(config("create"));
+		final var refusal = new StepIdInUseException(stepId, "n2", "/w/operation.lifecycle.csv");
+		final var remote = new java.rmi.ServerException("remote call failed", refusal);
+
+		final var single = client.metadataSliceStartFailure(refusal, 0, 1);
+		final var distributed = client.metadataSliceStartFailure(remote, 1, 2);
+		final var other = client.metadataSliceStartFailure(new IllegalStateException("boom"), 1, 2);
+
+		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, single.category());
+		assertEquals(refusal.getMessage(), single.getMessage());
+		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, distributed.category());
+		assertEquals("engine 2 of 2: " + refusal.getMessage(), distributed.getMessage());
+		assertInstanceOf(IntegrityTerminalException.class, other);
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, other.category());
+		assertEquals("failed to start metadata-mode step slice 1", other.getMessage());
+	}
+
+	/** A node whose file of {@code loggerName} exists with {@code size} bytes; its other files are missing. */
+	private FileManager node(final String loggerName, final String file, final long size) throws IOException {
+		final FileManager node = mock(FileManager.class);
+		when(node.logFileName(anyString(), eq(stepId))).thenAnswer(call -> "/w/other-" + call.getArgument(0));
+		when(node.logFileName(loggerName, stepId)).thenReturn(file);
+		when(node.fileSize(anyString())).thenReturn(0L);
+		when(node.fileSize(file)).thenReturn(size);
+		when(node.readFromFile(anyString(), anyLong())).thenAnswer(call -> {
+			throw new NoSuchFileException(call.getArgument(0));
+		});
+		if (size == 0) {
+			when(node.readFromFile(eq(file), anyLong())).thenThrow(new EOFException());
+		}
+		return node;
 	}
 
 	private StepIdInUseException refused(final TestLoadStepClient client) {
