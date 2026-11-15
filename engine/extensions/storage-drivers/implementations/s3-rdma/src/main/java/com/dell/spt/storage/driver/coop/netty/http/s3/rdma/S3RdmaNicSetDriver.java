@@ -425,6 +425,8 @@ final class S3RdmaNicSetDriver<I extends Item, O extends Operation<I>> extends S
 	@Override
 	protected void beforeIoShutdown() {
 		stopAdmittedWork();
+		// Last: the wait for multipart cleanup aborts, after the stop work that can schedule one.
+		super.beforeIoShutdown();
 	}
 
 	/** The kernel-route aborts whose connect has not settled. */

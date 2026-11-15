@@ -25,14 +25,18 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.buffer.Unpooled;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
+import io.netty.handler.codec.http.DefaultFullHttpResponse;
+import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
 import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -49,6 +53,30 @@ class HttpStorageDriverBaseTest {
 
 		assertEquals("method=HEAD, uri=/bucket", description);
 		assertFalse(description.contains("sensitive-signature"));
+	}
+
+	/** A control request ended by an interrupt or a failure releases a response already read. */
+	@Test
+	void anUnclaimedResponseAlreadyReadIsReleased() {
+		final FullHttpResponse response = new DefaultFullHttpResponse(
+						HttpVersion.HTTP_1_1, HttpResponseStatus.OK, Unpooled.buffer(4).writeInt(1));
+		final var fullResp = CompletableFuture.completedFuture(response);
+
+		HttpStorageDriverBase.releaseUnclaimedResponse(fullResp);
+
+		assertEquals(0, response.refCnt());
+	}
+
+	/** One still unread is settled empty, so the handler releases it when it arrives. */
+	@Test
+	void anUnclaimedResponseNotYetReadIsLeftForTheHandlerToRelease() {
+		final var fullResp = new CompletableFuture<FullHttpResponse>();
+
+		HttpStorageDriverBase.releaseUnclaimedResponse(fullResp);
+
+		assertNull(fullResp.getNow(null));
+		assertFalse(fullResp.complete(new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK)),
+						"a response read later is the handler's to release");
 	}
 
 	private static Config baseConfig() {
