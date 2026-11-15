@@ -2219,6 +2219,45 @@ public class S3StorageDriverTest {
 		assertTrue(capture.messages.isEmpty(), "No log message should be emitted for missing upload ID");
 	}
 
+	@Test
+	void complete_mpuInit_keepsTheStatusOfAFailedInitiation() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		setOpResultOut(drv);
+
+		var compositeOp = newCompositeOp(OpType.CREATE, 4096, 1024);
+		compositeOp.status(Operation.Status.RESP_FAIL_SVC);
+
+		@SuppressWarnings("unchecked")
+		final var op = (Operation<Item>) (Operation<?>) compositeOp;
+		drv.complete(mockChannelForComplete(null), op);
+
+		assertEquals(Operation.Status.RESP_FAIL_SVC, compositeOp.status(),
+						"A failed initiation should keep its status, so that load-op-retry can retry it");
+	}
+
+	@Test
+	void complete_mpuAbortWithoutAConnection_endsWithThePartsStatus() throws Exception {
+		Config cfg = baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443");
+		TestS3Driver drv = new TestS3Driver(cfg);
+		setOpResultOut(drv);
+
+		var compositeOp = newCompositeOp(OpType.CREATE, 4096, 1024);
+		compositeOp.put(S3Api.KEY_UPLOAD_ID, "abort-id-789");
+		compositeOp.put("mpuFailure", Operation.Status.RESP_FAIL_AUTH.name());
+		compositeOp.put(S3Api.KEY_MPU_ABORT, "true");
+		// The abort's lease or connect failed, so it sent nothing.
+		compositeOp.status(Operation.Status.FAIL_IO);
+
+		@SuppressWarnings("unchecked")
+		final var op = (Operation<Item>) (Operation<?>) compositeOp;
+		drv.complete(null, op);
+
+		assertEquals(Operation.Status.RESP_FAIL_AUTH, compositeOp.status(),
+						"An upload whose abort could not connect ends with its part's failure, so load-op-retry does"
+										+ " not retry a refused upload");
+	}
+
 	// ========== Per-phase MPU logging: ABORT ==========
 
 	@Test

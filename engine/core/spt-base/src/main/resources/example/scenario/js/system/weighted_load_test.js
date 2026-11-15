@@ -52,7 +52,7 @@ WeightedLoad
 	.append({
 	"load" : {
 		"op" : {
-		"recycle" : true,
+		"recycle" : {"mode": true},
 		"type" : "read",
 		"weight" : 80
 		}

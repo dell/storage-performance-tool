@@ -45,6 +45,36 @@ public class TestConfigBuilder {
 	}
 
 	/**
+	 * Create the full test configuration with the HTTP extension's {@code storage.net.http.headers} map
+	 * added to the schema and set to {@code headers}, as a node whose classpath holds that extension
+	 * has it. The cached schema is not modified.
+	 */
+	public static Config configWithHttpHeaders(final Map<String, Object> headers) {
+		final Map<String, Object> schema = deepCopy(loadFullSchema());
+		final Map<String, Object> values = createFullValues();
+		httpBranch(schema).put("headers", Map.class);
+		httpBranch(values).put("headers", new HashMap<>(headers));
+		return new BasicConfig(PATH_SEPARATOR, schema, values);
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Map<String, Object> httpBranch(final Map<String, Object> tree) {
+		final var storage = (Map<String, Object>) tree.computeIfAbsent("storage", k -> new HashMap<String, Object>());
+		final var net = (Map<String, Object>) storage.computeIfAbsent("net", k -> new HashMap<String, Object>());
+		return (Map<String, Object>) net.computeIfAbsent("http", k -> new HashMap<String, Object>());
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Map<String, Object> deepCopy(final Map<String, Object> tree) {
+		final Map<String, Object> copy = new HashMap<>();
+		for (final Map.Entry<String, Object> entry : tree.entrySet()) {
+			final Object value = entry.getValue();
+			copy.put(entry.getKey(), value instanceof Map ? deepCopy((Map<String, Object>) value) : value);
+		}
+		return copy;
+	}
+
+	/**
 	 * Load and parse the full schema from config-schema.yaml resource.
 	 * The schema is cached after first load for performance.
 	 */

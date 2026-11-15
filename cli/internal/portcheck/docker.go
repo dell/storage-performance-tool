@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/containerutil"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
@@ -48,7 +49,7 @@ func (d *DockerContainerFinder) FindContainerUsingPort(ctx context.Context, port
 		// Check if container is using the port
 		if d.containerUsesPort(c, port) {
 			logging.LogInfo("portcheck", "found container using port",
-				"containerID", c.ID[:12],
+				"containerID", containerutil.ShortID(c.ID),
 				"name", d.getContainerName(c),
 				"port", port)
 
@@ -133,10 +134,7 @@ func (d *DockerContainerFinder) getContainerName(c containertypes.Summary) strin
 		}
 		return name
 	}
-	if len(c.ID) >= 12 {
-		return c.ID[:12] // Fallback to short ID
-	}
-	return c.ID // Return full ID if shorter than 12 chars
+	return containerutil.ShortID(c.ID) // Fallback to short ID
 }
 
 // StopContainer stops a container by ID
@@ -144,25 +142,25 @@ func (d *DockerContainerFinder) StopContainer(ctx context.Context, containerID s
 	timeout := 10 * time.Second
 
 	logging.LogInfo("portcheck", "stopping container",
-		"containerID", containerID[:12],
+		"containerID", containerutil.ShortID(containerID),
 		"timeout", timeout)
 
 	err := d.client.ContainerStop(ctx, containerID, containertypes.StopOptions{
 		Timeout: &[]int{int(timeout.Seconds())}[0],
 	})
 	if err != nil {
-		return fmt.Errorf("failed to stop container %s: %w", containerID[:12], err)
+		return fmt.Errorf("failed to stop container %s: %w", containerutil.ShortID(containerID), err)
 	}
 
 	logging.LogInfo("portcheck", "container stopped successfully",
-		"containerID", containerID[:12])
+		"containerID", containerutil.ShortID(containerID))
 	return nil
 }
 
 // RemoveContainer removes a container by ID
 func (d *DockerContainerFinder) RemoveContainer(ctx context.Context, containerID string, force bool) error {
 	logging.LogInfo("portcheck", "removing container",
-		"containerID", containerID[:12],
+		"containerID", containerutil.ShortID(containerID),
 		"force", force)
 
 	options := containertypes.RemoveOptions{
@@ -171,11 +169,11 @@ func (d *DockerContainerFinder) RemoveContainer(ctx context.Context, containerID
 
 	err := d.client.ContainerRemove(ctx, containerID, options)
 	if err != nil {
-		return fmt.Errorf("failed to remove container %s: %w", containerID[:12], err)
+		return fmt.Errorf("failed to remove container %s: %w", containerutil.ShortID(containerID), err)
 	}
 
 	logging.LogInfo("portcheck", "container removed successfully",
-		"containerID", containerID[:12])
+		"containerID", containerutil.ShortID(containerID))
 	return nil
 }
 
@@ -183,7 +181,7 @@ func (d *DockerContainerFinder) RemoveContainer(ctx context.Context, containerID
 func (d *DockerContainerFinder) GetContainerStatus(ctx context.Context, containerID string) (string, error) {
 	inspect, err := d.client.ContainerInspect(ctx, containerID)
 	if err != nil {
-		return "", fmt.Errorf("failed to inspect container %s: %w", containerID[:12], err)
+		return "", fmt.Errorf("failed to inspect container %s: %w", containerutil.ShortID(containerID), err)
 	}
 
 	return inspect.State.Status, nil
@@ -241,12 +239,12 @@ func IsSptContainer(container *ContainerInfo) bool {
 // ForceStopAndRemoveContainer forcefully stops and removes a container
 func (d *DockerContainerFinder) ForceStopAndRemoveContainer(ctx context.Context, containerID string) error {
 	logging.LogInfo("portcheck", "force stopping and removing container",
-		"containerID", containerID[:12])
+		"containerID", containerutil.ShortID(containerID))
 
 	// First try to stop the container
 	if err := d.StopContainer(ctx, containerID); err != nil {
 		logging.LogDebug("portcheck", "normal stop failed, trying force stop",
-			"containerID", containerID[:12],
+			"containerID", containerutil.ShortID(containerID),
 			"error", err.Error())
 	}
 
