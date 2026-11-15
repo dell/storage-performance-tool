@@ -33,9 +33,10 @@ public final class RunImpl implements Run {
 	}
 
 	/**
-	 * Runs the scenario. A scenario failure is logged and ends the run without being thrown, so a node
-	 * keeps serving, and its {@code /status} then reads {@code COMPLETED}. A typed terminal failure is
-	 * thrown, and a node reports it as {@code FAILED}.
+	 * Runs the scenario. A scenario failure is not thrown and, unless it is a script failure, not
+	 * logged either; a typed terminal failure is thrown. A node runs its scenario with
+	 * {@link #runAndReturnFailure()} instead, so that its {@code /status} reports every failure as
+	 * {@code FAILED}.
 	 */
 	@Override
 	public final void run() {
@@ -43,8 +44,9 @@ public final class RunImpl implements Run {
 	}
 
 	/**
-	 * Runs the scenario as {@link #run()} does, for an engine started with a scenario, and returns the
-	 * scenario's failure so that the engine exits with a failure status.
+	 * Runs the scenario as {@link #run()} does, but logs every failure and returns it: an engine
+	 * started with a scenario then exits with a failure status, and a node keeps serving and reports
+	 * the failure in its {@code /status}.
 	 *
 	 * @return the logged failure of the scenario, or {@code null} when it ran to its end
 	 * @throws RunTerminalException for a typed terminal failure, as {@link #run()} does

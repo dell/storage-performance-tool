@@ -287,7 +287,8 @@ public class RunServlet extends HttpServlet {
 
 	/**
 	 * Wrapper around a Run that publishes terminal status only after the
-	 * delegate's cleanup has returned.
+	 * delegate's cleanup has returned: {@code STOPPED} after a requested stop, {@code FAILED} with
+	 * a category and an engine-built message after a scenario failure, else {@code COMPLETED}.
 	 */
 	static final class StatusAwareRun implements Run {
 
@@ -321,20 +322,42 @@ public class RunServlet extends HttpServlet {
 			if (!executionState.compareAndSet(ExecutionState.NEW, ExecutionState.RUNNING)) {
 				return;
 			}
+			Throwable failure = null;
 			try {
-				delegate.run();
+				failure = runDelegate();
 			} catch (final RunTerminalException e) {
 				apiStatus.setFailed(e.stepId(), e.category(), e.getMessage());
 				throw e;
+			} catch (final Error e) {
+				// A Java error from a call the scenario makes passes the script engine as it is
+				failure = e;
+				throw e;
 			} finally {
+				// A stop's interruption reaches the scenario as a failure, so a requested stop wins.
 				if (stopRequested.get()) {
 					apiStatus.setStopped();
 				} else {
+					if (failure != null) {
+						apiStatus.setFailed(
+										null, ScenarioFailureStatus.category(failure), ScenarioFailureStatus.message(failure));
+					}
 					apiStatus.completeIfNotStopped();
 				}
 				executionState.set(ExecutionState.FINISHED);
 				completion.countDown();
 			}
+		}
+
+		/**
+		 * Runs the delegate and returns the scenario's failure, which a scenario run logs and does not
+		 * throw; a typed terminal failure is thrown.
+		 */
+		private Throwable runDelegate() {
+			if (delegate instanceof RunImpl scenarioRun) {
+				return scenarioRun.runAndReturnFailure();
+			}
+			delegate.run();
+			return null;
 		}
 
 		boolean stopAndAwait(
