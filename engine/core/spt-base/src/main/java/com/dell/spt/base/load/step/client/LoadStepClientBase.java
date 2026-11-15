@@ -379,7 +379,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		for (var i = 0; i < sliceCount; i++) {
 			slices.add(ConfigSliceUtil.initSlice(config));
 		}
-		ConfigSliceUtil.sliceNodeInterfaces(config, slices, nodeAddrs);
+		// The step start slices the configuration again, and logs each slice's interfaces then.
+		ConfigSliceUtil.sliceNodeInterfaces(config, slices, nodeAddrs, false);
 		return slices;
 	}
 

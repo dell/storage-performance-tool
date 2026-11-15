@@ -43,12 +43,20 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import org.apache.logging.log4j.CloseableThreadContext;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -269,6 +277,45 @@ public class StepIdReuseAtStartTest {
 		assertEquals("step id \"" + stepId + "\" is already used in the log directory of node " + NODE + " ("
 						+ NODE_FILE + " exists); give each step its own load.step.id", failure.getMessage());
 		verify(worker).fileSize(NODE_FILE);
+	}
+
+	@Test
+	void theStartCheckLogsNoSliceInterfacesOfItsOwn() throws Exception {
+		final Config config = config("update");
+		config.val("storage-net-nodeInterfaces-entry", "none");
+		final String line = "Load step slice #0 (entry) interfaces: none (host override)";
+		final List<String> messages = Collections.synchronizedList(new ArrayList<>());
+		final var seen = new CountDownLatch(1);
+		final var appender = new AbstractAppender("stepIdReuseSliceLines", null, null, true, Property.EMPTY_ARRAY) {
+			@Override
+			public void append(final LogEvent event) {
+				final String message = event.getMessage().getFormattedMessage();
+				if (message.contains(stepId) || message.startsWith("Load step slice #")) {
+					messages.add(message);
+				}
+				if (message.equals(line)) {
+					seen.countDown();
+				}
+			}
+		};
+		appender.start();
+		final var logger = LoggerContext.getContext(false).getLogger(Loggers.MSG.getName());
+		logger.addAppender(appender);
+		final TestLoadStepClient client = client(config);
+		try {
+			try {
+				client.start();
+			} catch (final RuntimeException other) {
+				assertFalse(RunTerminalException.find(other) instanceof StepIdInUseException, other.toString());
+			}
+			// One thread's messages arrive in order, so a check's line would arrive before the start's.
+			assertTrue(seen.await(10, TimeUnit.SECONDS), messages.toString());
+			assertEquals(1, messages.stream().filter(line::equals).count(), messages.toString());
+		} finally {
+			closeQuietly(client);
+			logger.removeAppender(appender);
+			appender.stop();
+		}
 	}
 
 	/** The faults a node's file manager can answer the reuse check with, none of them a definite answer. */
