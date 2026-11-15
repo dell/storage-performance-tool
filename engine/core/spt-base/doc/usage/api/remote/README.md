@@ -427,8 +427,8 @@ Fields:
 - `since`: ISO‑8601 instant indicating when the state was entered.
 - `run_id` and `step_id`: included when known.
 - `category` and `message`: included only when `state` is `FAILED`.
-  - `category` is one of `configuration`, `input`, `execution`, `aggregation`, `publication` or `cleanup`. A typed terminal failure of a step sets its own category. A scenario that fails otherwise reads `configuration` for a syntax error or a setting that `Load.config(...)` or `.append(...)` refuses, and `execution` for any other failure.
-  - `message` is a short description of the cause, at most 1024 characters. For a scenario failure the engine writes it without quoting the scenario: it names a refused setting only by the part of its path the engine defines, never by a value or a key the scenario wrote. The node's log has the details.
+  - `category` is one of `configuration`, `input`, `execution`, `aggregation`, `publication` or `cleanup`. A typed terminal failure of a step sets its own category. A scenario that fails otherwise reads `configuration` for a syntax error in the posted scenario text or a setting that `Load.config(...)` or `.append(...)` refuses, and `execution` for any other failure.
+  - `message` is a short description of the cause, at most 1024 characters. For a scenario failure the engine writes it without quoting the scenario: it names a refused setting only by the part of its path the engine defines, never by a value or a key the scenario wrote. A typed terminal failure's message is its own and may name a setting, such as the items file's name. The node's log has the details.
 
 Example body after a failed scenario:
 
