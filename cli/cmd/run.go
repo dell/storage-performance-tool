@@ -62,7 +62,7 @@ const (
 	flagBucketMetrics         = "bucket-metrics"
 	flagCreatePrefix          = "create-prefix"
 	flagRMIRegistryPort       = "rmi-registry-port"
-	rmiRegistryPortUsage      = "Engine RMI registry port on every host; give each concurrent spt run on the same hosts its own port"
+	rmiRegistryPortUsage      = "Engine RMI registry port on every host; give each concurrent spt run on the same hosts, with or without a local worker, its own --rmi-registry-port and --api-port"
 	rmiPortStartUsage         = "No effect; kept for compatibility (the engine serves RMI on the registry port)"
 	rmiPortCountUsage         = "No effect; kept for compatibility"
 	flagInterfaces            = "interfaces"

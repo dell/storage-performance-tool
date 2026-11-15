@@ -593,7 +593,7 @@ spt run write \
 | `--keep-scenario` | | `false` | Keep the scenario file after test completion |
 | `--force` | | `false` | Resolve port conflicts and permit known engine build mismatches; invalid build information and collection failures remain non-forceable |
 | `--api-port` | | `9999` | SPT engine API port that every engine in the run serves: a local or remote engine, or the entry and every worker of a distributed run |
-| `--rmi-registry-port` | | `1099` | Engine RMI registry port that every engine in the run serves, on local, remote and distributed runs; the entry reaches each worker on it. Give each concurrent `spt run` on the same hosts its own value (and its own `--api-port`) |
+| `--rmi-registry-port` | | `1099` | Engine RMI registry port that every engine in the run serves, on local, remote and distributed runs; the entry reaches each worker on it. Give each concurrent `spt run` on the same hosts its own value and its own `--api-port`, also when a run has a local worker (this host in `--test-hosts`, after the first): those are the only ports a local worker publishes |
 | `--skip-image-pull` | | `false` | Use locally cached Docker image without pulling |
 | `--output-dir` | `-O` | `""` | Local directory to save detailed SPT report files |
 | `--service-threads` | | `0` | Engine virtual-thread carrier parallelism (0 = JVM default `max(2, cpus/4)`) |
