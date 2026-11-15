@@ -1392,8 +1392,33 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		uriBuilder.append(percentEncode(key)).append('=').append(percentEncode(value));
 	}
 
-	private static final Comparator<String[]> CANONICAL_QUERY_PARAMETER_ORDER = Comparator.<String[], String> comparing(parameter -> parameter[0])
-					.thenComparing(parameter -> parameter[1]);
+	/**
+	 * The SigV4 order of encoded {@code name=value} pairs: char by char, with {@code '='} below every other
+	 * character, and a string that is a prefix of the other first. Each name and value has been through
+	 * {@link #percentEncode}, so the pair is ASCII and holds {@code '='} only as its one delimiter, and this
+	 * order is the order by encoded name, then by encoded value, that SigV4 asks for.
+	 */
+	static final Comparator<String> CANONICAL_PAIR_ORDER = new CanonicalPairOrder();
+
+	private static final class CanonicalPairOrder implements Comparator<String> {
+
+		@Override
+		public int compare(final String left, final String right) {
+			final int common = Math.min(left.length(), right.length());
+			for (int i = 0; i < common; i++) {
+				final char l = left.charAt(i);
+				final char r = right.charAt(i);
+				if (l != r) {
+					return rank(l) - rank(r);
+				}
+			}
+			return left.length() - right.length();
+		}
+
+		private static int rank(final char ch) {
+			return ch == '=' ? -1 : ch;
+		}
+	}
 
 	/**
 	 * The V4 canonical form of a non-empty {@code rawQuery}: each pair decoded, encoded again and sorted.
@@ -1402,7 +1427,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	 */
 	private static String canonicalizeQueryParameters(final String rawQuery) {
 		final var parts = rawQuery.split("&", 0);
-		final List<String[]> canonicalComponents = new ArrayList<>(parts.length);
+		final List<String> canonicalComponents = new ArrayList<>(parts.length);
 		for (final var part : parts) {
 			if (part == null || part.isEmpty()) {
 				continue;
@@ -1410,21 +1435,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			final int eqIdx = part.indexOf('=');
 			final String rawKey = eqIdx >= 0 ? part.substring(0, eqIdx) : part;
 			final String rawValue = eqIdx >= 0 ? part.substring(eqIdx + 1) : "";
-			canonicalComponents.add(new String[]{
-					percentEncode(decodeQueryComponent(rawKey)), percentEncode(decodeQueryComponent(rawValue))
-			});
+			final String encodedPair = percentEncode(decodeQueryComponent(rawKey)) + '=' + percentEncode(decodeQueryComponent(rawValue));
+			canonicalComponents.add(encodedPair);
 		}
-		// SigV4 sorts by the encoded name, then by the encoded value. Sorting the joined "name=value"
-		// strings differs when one name is a prefix of another that continues below '=' ("a1" < "a=").
-		canonicalComponents.sort(CANONICAL_QUERY_PARAMETER_ORDER);
-		final var canonicalQuery = new StringBuilder(rawQuery.length() + canonicalComponents.size());
-		for (final var component : canonicalComponents) {
-			if (canonicalQuery.length() > 0) {
-				canonicalQuery.append('&');
-			}
-			canonicalQuery.append(component[0]).append('=').append(component[1]);
-		}
-		return canonicalQuery.toString();
+		canonicalComponents.sort(CANONICAL_PAIR_ORDER);
+		return String.join("&", canonicalComponents);
 	}
 
 	/**

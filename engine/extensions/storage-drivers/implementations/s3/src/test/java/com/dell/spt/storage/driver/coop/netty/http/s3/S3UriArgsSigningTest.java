@@ -25,12 +25,14 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Random;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -87,6 +89,48 @@ class S3UriArgsSigningTest {
 		assertEquals("a=1&a1=2", canonicalQuery("a1=2&a=1"));
 		assertEquals("a=1&a%2Fc=3&a.b=2", canonicalQuery("a.b=2&a%2Fc=3&a=1"));
 		assertEquals("k=1&k=2&k2=0", canonicalQuery("k2=0&k=2&k=1"));
+	}
+
+	@Test
+	void canonicalPairOrderMatchesSortByEncodedNameThenValue() {
+		final Comparator<String> order = S3StorageDriver.CANONICAL_PAIR_ORDER;
+		assertTrue(order.compare("a=1", "a1=2") < 0);
+		assertTrue(order.compare("tenant=t1", "tenant-id=7") < 0);
+		assertTrue(order.compare("k=1", "k=12") < 0);
+		assertEquals(0, order.compare("k=1", "k=1"));
+		// Encoded atoms on both sides of '=' (0x3D): '%' 0x25, '-' '.' '0'-'9' below it; 'A' '_' 'a' '~' above.
+		final String[] atoms = {"-", ".", "0", "5", "9", "A", "_", "a", "~", "%2F", "%3D", "%20"
+		};
+		final Random random = new Random(0x5167_4a43L);
+		for (int c = 0; c < 10_000; c++) {
+			final String stem = randomAtoms(random, atoms, 1 + random.nextInt(2));
+			final int count = 2 + random.nextInt(5);
+			final List<String[]> pairs = new ArrayList<>();
+			final List<String> joined = new ArrayList<>();
+			for (int i = 0; i < count; i++) {
+				// Names extend one stem, so many are prefixes of one another.
+				final String name = stem + randomAtoms(random, atoms, random.nextInt(3));
+				final String value = randomAtoms(random, atoms, random.nextInt(4));
+				pairs.add(new String[]{name, value
+				});
+				joined.add(name + '=' + value);
+			}
+			pairs.sort(Comparator.<String[], String> comparing(pair -> pair[0]).thenComparing(pair -> pair[1]));
+			final List<String> expected = new ArrayList<>();
+			for (final var pair : pairs) {
+				expected.add(pair[0] + '=' + pair[1]);
+			}
+			joined.sort(order);
+			assertEquals(expected, joined, "case " + c);
+		}
+	}
+
+	private static String randomAtoms(final Random random, final String[] atoms, final int count) {
+		final var out = new StringBuilder();
+		for (int i = 0; i < count; i++) {
+			out.append(atoms[random.nextInt(atoms.length)]);
+		}
+		return out.toString();
 	}
 
 	@Test
