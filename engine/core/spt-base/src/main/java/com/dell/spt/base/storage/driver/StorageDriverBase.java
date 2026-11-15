@@ -352,6 +352,31 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 		return true;
 	}
 
+	/**
+	 * Keeps {@link Operation#copySource()} for a copy whose attempt completes before the driver built
+	 * any request for it, so before {@code result()} rebuilds its item's name under the destination
+	 * path. A driver that keeps the source while it builds the request sets it then, and this is not
+	 * called for that copy again.
+	 */
+	private void keepCopySource(final O op) {
+		try {
+			op.copySource(copySource(op));
+		} catch (final RuntimeException e) {
+			// Nothing is kept: a copy sent again resolves its source as it did before copySource existed.
+			Loggers.ERR.debug("{}: no copy source kept for {}: {}", toString(), op, e.toString());
+		}
+	}
+
+	/**
+	 * The copy source a driver keeps for {@code op}, a copy whose item still has the name its first
+	 * attempt used (see {@link Operation#copySource()}): by default the item's name. A driver that
+	 * resolves the source otherwise overrides it to return the same value as its first request would
+	 * carry, and reads {@code op.copySource()}, when set, on every later attempt.
+	 */
+	protected String copySource(final O op) {
+		return op.item().name();
+	}
+
 	protected boolean handleCompleted(final O op) {
 		// Synchronous/custom drivers may complete inside submit(). If they did not use the
 		// explicit dispatch hook, completion itself proves transport execution began.
@@ -366,6 +391,10 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 				Loggers.MSG.trace("{}: Load operation completed", op);
 			}
 			final var terminalStatus = op.status();
+			if (op.type() == OpType.CREATE && op.srcPath() != null && !op.srcPath().isEmpty()
+							&& op.copySource() == null) {
+				keepCopySource(op);
+			}
 			@SuppressWarnings("unchecked")
 			final O opResult = (O) op.result();
 			if (!lifecycle.isOperationLifecycleTracked(op)) {

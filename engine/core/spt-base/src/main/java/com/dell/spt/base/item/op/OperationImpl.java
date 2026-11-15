@@ -19,6 +19,8 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 	protected String srcPath;
 	protected String dstPath;
 	protected Credential credential;
+	/** {@link Operation#copySource()}: kept by the driver, carried by the copy constructor. */
+	protected String copySource;
 
 	protected volatile String nodeAddr;
 	protected volatile Status status;
@@ -100,6 +102,7 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 		this.srcPath = other.srcPath;
 		this.dstPath = other.dstPath;
 		this.credential = other.credential;
+		this.copySource = other.copySource;
 		this.nodeAddr = other.nodeAddr;
 		this.status = other.status;
 		this.reqTimeStart = other.reqTimeStart;
@@ -283,6 +286,23 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 	@Override
 	public final void dstPath(final String dstPath) {
 		this.dstPath = dstPath;
+	}
+
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>Final, as is its setter, so that the kept source is the one the driver set. A subclass that
+	 * already declares {@code copySource()} or {@code copySource(String)} no longer loads against these
+	 * final methods; none is known.
+	 */
+	@Override
+	public final String copySource() {
+		return copySource;
+	}
+
+	@Override
+	public final void copySource(final String copySource) {
+		this.copySource = copySource;
 	}
 
 	@Override

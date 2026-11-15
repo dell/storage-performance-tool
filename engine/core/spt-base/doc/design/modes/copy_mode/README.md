@@ -40,8 +40,9 @@ are available.
 ### 2.3. HTTP Storage Case
 
 > Note:
-Cloud Storage object copy requests don't contain any payload so the
-byte count related metrics are not calculated (remain zero).
+Cloud Storage object copy requests don't contain any payload. The
+byte count related metrics report the copied items' sizes, the logical
+size copied, not the bytes on the wire.
 
 #### 2.3.1. S3 Objects Copying
 

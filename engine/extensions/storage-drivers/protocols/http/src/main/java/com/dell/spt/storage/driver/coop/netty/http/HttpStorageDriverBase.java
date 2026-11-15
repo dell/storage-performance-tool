@@ -323,7 +323,7 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 					httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 				}
 			} else {
-				applyCopyHeaders(httpHeaders, dataUriPath(item, srcPath, null, opType));
+				applyCopyHeaders(httpHeaders, keptCopySource(op));
 				httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 			}
 			break;
@@ -395,6 +395,33 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			return itemName.startsWith(SLASH) ? itemName : SLASH + itemName;
 		}
 		return ItemNamePaths.join(path.startsWith(SLASH) ? path : SLASH + path, itemName);
+	}
+
+	/**
+	 * The source a copy reads, as {@link Operation#copySource()} keeps it: on the first attempt, what
+	 * {@link #copySource(Operation)} resolves, which is then kept; on every later attempt, the kept
+	 * value, so a copy sent again reads the object its first attempt read, whatever the item's name has
+	 * become since.
+	 */
+	protected final String keptCopySource(final O op) {
+		final String kept = op.copySource();
+		if (kept != null) {
+			return kept;
+		}
+		final String copySource = copySource(op);
+		op.copySource(copySource);
+		return copySource;
+	}
+
+	/**
+	 * The URI path of the object a copy reads on its first attempt, which {@link #applyCopyHeaders}
+	 * receives: the {@link #dataUriPath} of the item with no destination path, through any override of
+	 * it. Called once per copy, while the item has its first name; see {@link Operation#copySource()}.
+	 */
+	@Override
+	@SuppressWarnings("unchecked")
+	protected String copySource(final O op) {
+		return dataUriPath((I) op.item(), op.srcPath(), null, op.type());
 	}
 
 	protected abstract String tokenUriPath(

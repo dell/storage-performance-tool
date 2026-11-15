@@ -1956,6 +1956,25 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
+	 * The source a copy's first request carries, which {@link #keptCopySource} keeps: on the legacy
+	 * versioned route, the {@link #dataUriPath} without the name's {@code ~versionId}, as {@link
+	 * #objectVersioningRequest} names the object; on every other route, the HTTP drivers' source.
+	 * Both the request builders and a completion before any request was built use it.
+	 */
+	@Override
+	protected String copySource(final O op) {
+		final String copySource = super.copySource(op);
+		if (!namesLegacyVersion(op)) {
+			return copySource;
+		}
+		final String name = op.item().name();
+		final int indexOfVersionStart = name.lastIndexOf('~');
+		return indexOfVersionStart == -1
+						? copySource
+						: withoutVersionSuffix(copySource, name.substring(indexOfVersionStart + 1));
+	}
+
+	/**
 	 * {@code uriPath}, which {@link #dataUriPath} built from a {@code key~versionId} item name, without
 	 * that trailing {@code ~versionId}: the path of the key, as {@code dataUriPath} gives it for an item
 	 * named {@code key}. The base {@code dataUriPath} puts the name last, so does an override that only
@@ -2034,8 +2053,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 				}
 			} else {
-				final String copySource = dataUriPath(item, srcPath, null, opType);
-				applyCopyHeaders(httpHeaders, legacyVersion ? withoutVersionSuffix(copySource, versionId) : copySource);
+				applyCopyHeaders(httpHeaders, keptCopySource(op));
 				httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 			}
 			break;

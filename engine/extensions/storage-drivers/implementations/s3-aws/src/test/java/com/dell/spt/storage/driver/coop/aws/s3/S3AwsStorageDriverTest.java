@@ -3988,6 +3988,64 @@ public class S3AwsStorageDriverTest {
 			assertEquals(List.of("src|dst/k0000 -> dst|src/dst/k0000", "src|k0000 -> dst|src/k0000"), copyRequests());
 		}
 
+		/**
+		 * The previous attempt's result, reset, as {@code load.op.retry}, recycle mode or a PENDING
+		 * redispatch dispatches a copy again.
+		 */
+		@SuppressWarnings("unchecked")
+		private Operation<Item> again(final Operation<Item> op) {
+			final var next = (Operation<Item>) op.result();
+			next.reset();
+			return next;
+		}
+
+		@Test
+		void aCopySentAgainReadsTheSourceItsFirstAttemptRead() throws Exception {
+			final Operation<Item> first = copy(listed("/source-bucket", null, false, "k0001").get(0), "/source-bucket",
+							"/dest-bucket");
+			final Operation<Item> second = again(first);
+			drv.execute(second).join();
+			drv.execute(again(second)).join();
+			assertEquals(
+							Collections.nCopies(3, "source-bucket|k0001 -> dest-bucket|source-bucket/k0001"), copyRequests());
+		}
+
+		@Test
+		void aNestedKeySentAgainIsReadWhole() throws Exception {
+			final Operation<Item> first = copy(listed("/source-bucket", "dir/", false, "dir/sub/k0002").get(0),
+							"/source-bucket", "/dest-bucket");
+			drv.execute(again(first)).join();
+			assertEquals(
+							Collections.nCopies(2, "source-bucket|dir/sub/k0002 -> dest-bucket|source-bucket/dir/sub/k0002"),
+							copyRequests());
+		}
+
+		@Test
+		void aKeyNamedLikeTheDestinationBucketIsReadAsListedOnEveryAttempt() throws Exception {
+			final Item listedItem = listed("/src", null, false, "dst/k0000").get(0);
+			assertEquals("/src/dst/k0000", listedItem.name());
+			final Operation<Item> first = copy(listedItem, "/src", "/dst");
+			drv.execute(again(first)).join();
+			assertEquals(Collections.nCopies(2, "src|dst/k0000 -> dst|src/dst/k0000"), copyRequests());
+		}
+
+		@Test
+		void aCopyRetriedAfterAFailureReadsTheSameSource() throws Exception {
+			// The SDK retries a 503 itself; a failure that outlasts its retries reaches load.op.retry,
+			// which dispatches the failed attempt's result again.
+			when(mockS3Client.copyObject(any(CopyObjectRequest.class)))
+							.thenReturn(CompletableFuture.failedFuture(
+											S3Exception.builder().statusCode(503).message("SlowDown").build()))
+							.thenReturn(CompletableFuture.completedFuture(CopyObjectResponse.builder().build()));
+			final Operation<Item> first = build(
+							OpType.CREATE, listed("/source-bucket", null, false, "k0001").get(0), "/source-bucket",
+							"/dest-bucket");
+			assertThrows(CompletionException.class, () -> drv.execute(first).join());
+			drv.execute(again(first)).join();
+			assertEquals(
+							Collections.nCopies(2, "source-bucket|k0001 -> dest-bucket|source-bucket/k0001"), copyRequests());
+		}
+
 		@Test
 		void itemsWrittenAfterAReadOrACopyResolveTheSameObjectsWhenReadAgain() throws Exception {
 			final Item listedItem = listed("/pp", "dir/", false, "dir/sub/k0000").get(0);
