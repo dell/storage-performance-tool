@@ -735,7 +735,7 @@ func (m *FlexibleMockCommandExecutor) ExecuteCommand(ctx context.Context, host *
 	cmdStr := strings.Join(command, " ")
 
 	// Ignore verification cleanup queries
-	if strings.Join(command, " ") == "docker ps -q --filter label=spt.verify=true" {
+	if cmdStr == verifyCleanupListCommand() {
 		return "", "", nil
 	}
 
@@ -777,7 +777,7 @@ func (m *cleanupOnFailureExecutor) ExecuteCommand(ctx context.Context, host *hos
 	cmdStr := strings.Join(command, " ")
 
 	switch {
-	case cmdStr == "docker ps -q --filter label=spt.verify=true":
+	case cmdStr == verifyCleanupListCommand():
 		return "", "", nil
 	case strings.HasPrefix(cmdStr, "docker pull "):
 		return "pulled", "", nil
