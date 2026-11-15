@@ -6,6 +6,7 @@ import com.dell.spt.base.concurrent.TaskBase;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.logging.Loggers;
@@ -802,6 +803,48 @@ public class NioStorageDriverBaseTest {
 							() -> drv.operationLifecycle().snapshot().inFlight() == 0,
 							"dispatched operation should become terminal");
 			assertEquals(OperationLifecycleState.TERMINAL, dispatched.lifecycle().state());
+		} finally {
+			drv.releaseInvokes();
+			if (drv.isStarted()) {
+				drv.stop();
+			}
+			drv.close();
+		}
+	}
+
+	/**
+	 * A part of a dispatched upload waits in the worker's buffer behind a blocking operation. The stop
+	 * closes admission and the worker then refuses the part before queue recovery runs, so recovery never
+	 * sees it. The upload can no longer complete, so the refusal settles it unresolved at once.
+	 */
+	@Test
+	@SuppressWarnings("unchecked")
+	void aPartTheWorkerRefusesAfterTheStopLeavesItsUploadUnresolved() throws Exception {
+		final var drv = newBlockingDriver(buildStorageConfig(2, 1));
+		final var lifecycle = drv.operationLifecycle();
+		final var item = new DataItemImpl("upload", 0, 2048);
+		item.dataInput(dataInput);
+		final var upload = new CompositeDataOperationImpl<DataItemImpl>(0, OpType.CREATE, item, null, "/tmp/test", null, null, 0, 1024);
+		try {
+			drv.start();
+			assertTrue(drv.put(newCreateOp("blocking", 256)));
+			assertTrue(drv.awaitInvokeEntered(2_000), "the worker is inside a blocking invocation");
+			assertTrue(lifecycle.driverQueued(upload));
+			assertTrue(lifecycle.dispatched(upload), "the upload's initiation was dispatched");
+			final var part = (Operation<DataItemImpl>) upload.subOperations().get(0);
+			assertTrue(lifecycle.driverQueued(part));
+			assertTrue(drv.submit(part), "the part waits in the worker's buffer");
+
+			drv.closeAdmission();
+			drv.releaseInvokes();
+			awaitLifecycle(drv, () -> part.lifecycle().state() == OperationLifecycleState.UNATTEMPTED,
+							"the worker refuses the part after the stop");
+
+			assertEquals(OperationLifecycleState.UNRESOLVED, upload.lifecycle().state(), () -> lifecycle.snapshot().toString());
+			assertTrue(drv.recoverQueuedOperations().isEmpty(), "recovery never sees the refused part");
+			awaitLifecycle(drv, () -> lifecycle.snapshot().inFlight() == 0, "the blocking operation ends");
+			assertEquals(1, lifecycle.snapshot().unresolved(), () -> lifecycle.snapshot().toString());
+			assertFalse(lifecycle.hasOutstandingOperations(), () -> lifecycle.snapshot().toString());
 		} finally {
 			drv.releaseInvokes();
 			if (drv.isStarted()) {

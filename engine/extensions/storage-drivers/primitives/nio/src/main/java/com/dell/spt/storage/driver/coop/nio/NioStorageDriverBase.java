@@ -194,6 +194,8 @@ public abstract class NioStorageDriverBase<I extends Item, O extends Operation<I
 							if (!isStarted() || !beginDispatch(op)) {
 								// Permit already acquired in submit() — release it
 								concurrencyThrottle.release();
+								// After a stop, the composite this leaves cannot finish: it is settled first.
+								settleRefusedDispatch(op);
 								operationLifecycle().unattempted(op);
 								processedCount++;
 								continue;
