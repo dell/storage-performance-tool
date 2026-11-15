@@ -98,13 +98,15 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * Whether this driver completes a composite CREATE or READ in parts: after the composite's
-	 * successful, unfinished result (a multipart upload's initiation) it publishes its parts'
-	 * results and then one more result for the composite. The default is {@code false}: the driver
-	 * publishes one result for each composite operation, as for any other.
+	 * How this driver publishes a composite operation's results. A count-limited {@code mixed} step
+	 * reads it once, at setup, and caps its dispatch at its count only on a driver that declares
+	 * {@link CompositeResults#IN_PARTS} or {@link CompositeResults#ONE_RESULT}. The default is
+	 * {@link CompositeResults#UNDECLARED}, which keeps such a step as it was before: no cap, so it
+	 * can run past its count. A driver that wraps another, and wants the cap, returns the wrapped
+	 * driver's value.
 	 */
-	default boolean completesCompositesInParts() {
-		return false;
+	default CompositeResults compositeResults() {
+		return CompositeResults.UNDECLARED;
 	}
 
 	/** Returns a terminal asynchronous driver failure for the load-step thread to rethrow. */

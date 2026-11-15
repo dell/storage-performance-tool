@@ -11,6 +11,7 @@ import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.storage.driver.CompositeResults;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import org.apache.logging.log4j.Level;
@@ -378,6 +379,17 @@ public final class MixedLoadGenerator<I extends Item, O extends Operation<I>>
 	 */
 	static boolean isCountLimit(final long countLimit) {
 		return countLimit > 0 && countLimit < Long.MAX_VALUE;
+	}
+
+	/**
+	 * Whether a step with {@code countLimit} caps its dispatch at it, on a driver that publishes
+	 * composite results as {@code compositeResults} says: only on a driver that declares how, since
+	 * the step can tell an operation's final result only then. Any other driver keeps the step as it
+	 * was before, with no cap, so it can run past its count.
+	 */
+	static boolean capsDispatch(final long countLimit, final CompositeResults compositeResults) {
+		return isCountLimit(countLimit)
+						&& (compositeResults == CompositeResults.IN_PARTS || compositeResults == CompositeResults.ONE_RESULT);
 	}
 
 	/**

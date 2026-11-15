@@ -16,6 +16,7 @@ import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationsBuilderImpl;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.storage.driver.CompositeResults;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import org.apache.logging.log4j.ThreadContext;
@@ -175,6 +176,20 @@ class MixedLoadGeneratorTest {
 			gen.releasePermit();
 		}
 		assertFalse(gen.isCountLimitDrained(dispatched.size()), "no count limit, so no cap to drain");
+	}
+
+	@Test
+	@DisplayName("A step caps its dispatch only at a count limit, on a driver that declares its composite results")
+	void aStepCapsDispatchOnlyOnADeclaredDriver() {
+		for (final CompositeResults declared : new CompositeResults[]{CompositeResults.IN_PARTS, CompositeResults.ONE_RESULT
+		}) {
+			assertTrue(MixedLoadGenerator.capsDispatch(1, declared), declared + " at a count of 1");
+			assertTrue(MixedLoadGenerator.capsDispatch(Long.MAX_VALUE - 1, declared), declared + " at a large count");
+			assertFalse(MixedLoadGenerator.capsDispatch(0, declared), declared + " with no count limit");
+			assertFalse(MixedLoadGenerator.capsDispatch(Long.MAX_VALUE, declared), declared + " at Long.MAX_VALUE");
+		}
+		assertFalse(MixedLoadGenerator.capsDispatch(1, CompositeResults.UNDECLARED), "an undeclared driver");
+		assertFalse(MixedLoadGenerator.capsDispatch(1, null), "a driver that returns null");
 	}
 
 	@Test

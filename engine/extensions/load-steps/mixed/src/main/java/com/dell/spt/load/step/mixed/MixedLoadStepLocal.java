@@ -29,6 +29,7 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.storage.Credential;
+import com.dell.spt.base.storage.driver.CompositeResults;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.util.BinarySizeFormat;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketSet;
@@ -320,11 +321,22 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 
 		// ── 12. Create MixedLoadGenerator ──────────────────────────────────
 		// The generator dispatches at most the count limit the step context reads, so the step runs
-		// exactly that many operations.
+		// exactly that many operations, on a driver that declares how it publishes composite
+		// results, read once here. On any other driver the step keeps its earlier route: no cap.
 		final long countLimit = loadConfig.configVal("op").configVal("limit").longVal("count");
+		final CompositeResults compositeResults = driver.compositeResults();
+		final boolean capped = MixedLoadGenerator.capsDispatch(countLimit, compositeResults);
+		if (MixedLoadGenerator.isCountLimit(countLimit) && !capped) {
+			Loggers.MSG.info(
+							"MixedLoad: the storage driver {} does not declare how it publishes composite results"
+											+ " (StorageDriver.compositeResults), so the count limit {} is applied as before,"
+											+ " and the step may run past it",
+							driver.getClass().getName(),
+							countLimit);
+		}
 		final MixedLoadGenerator generator = new MixedLoadGenerator(
 						ServiceTaskExecutor.TASK_EXECUTOR, schedule, pool, builders,
-						driver, concurrencyLimit, newItemInput, countLimit);
+						driver, concurrencyLimit, newItemInput, capped ? countLimit : 0);
 		this.mixedGenerator = generator;
 
 		// ── 13. Register metrics ───────────────────────────────────────────
@@ -397,12 +409,14 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 			@Override
 			public void close() throws Exception { /* stepCtx lifecycle managed by LoadStepLocalBase */ }
 		};
-		// A count-limited step also counts each final result the step context does not count, so
-		// the step can end once every operation it dispatched has ended. A step with no count
-		// limit (0, or Long.MAX_VALUE) keeps the wrapper above alone.
+		// A capped step also counts each final result the step context does not count, so the step
+		// can end once every operation it dispatched has ended. A step with no count limit (0, or
+		// Long.MAX_VALUE), or on a driver that does not declare its composite results, keeps the
+		// wrapper above alone.
 		driver.operationResultOutput(
-						MixedLoadGenerator.isCountLimit(countLimit)
-										? new UncountedFinalResultOutput(resultOutput, generator, driver.completesCompositesInParts())
+						capped
+										? new UncountedFinalResultOutput(
+														resultOutput, generator, compositeResults == CompositeResults.IN_PARTS)
 										: resultOutput);
 
 		stepContexts.add(stepCtx);

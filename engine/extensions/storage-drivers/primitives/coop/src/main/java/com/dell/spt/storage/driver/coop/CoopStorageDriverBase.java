@@ -17,6 +17,7 @@ import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.storage.driver.CompositeResults;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.StorageDriverBase;
 import com.github.akurilov.confuse.Config;
@@ -386,8 +387,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	 * {@link #handleCompleted}, and then the composite once more to finalize it.
 	 */
 	@Override
-	public final boolean completesCompositesInParts() {
-		return true;
+	public final CompositeResults compositeResults() {
+		return CompositeResults.IN_PARTS;
 	}
 
 	/** Plain operations only: composite and partial work keeps the dispatcher's MPU accounting. */

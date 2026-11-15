@@ -4,6 +4,7 @@ import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.storage.driver.CompositeResults;
 import com.github.akurilov.commons.io.Output;
 import java.util.List;
 import java.util.concurrent.FutureTask;
@@ -39,6 +40,13 @@ class DummyStorageDriverMockTest {
 
 		assertNotNull(mockDriver);
 		assertEquals(DEFAULT_CONCURRENCY_LIMIT, mockDriver.concurrencyLimit());
+	}
+
+	/** The mock publishes one result for a composite, and says so. */
+	@Test
+	void testDeclaresOneResultPerComposite() {
+		final var mockDriver = DummyStorageDriverMock.<DataItem, DataOperation<DataItem>> create();
+		assertEquals(CompositeResults.ONE_RESULT, mockDriver.compositeResults());
 	}
 
 	@Test

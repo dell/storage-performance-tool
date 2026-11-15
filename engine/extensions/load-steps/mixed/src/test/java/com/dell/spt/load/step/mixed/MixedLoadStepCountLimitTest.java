@@ -27,6 +27,9 @@ import com.github.akurilov.confuse.SchemaProvider;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -252,6 +255,47 @@ class MixedLoadStepCountLimitTest {
 		assertEquals(Boolean.FALSE, nioDrivers.outstandingAtPause.get(), "the driver held an operation at the pause");
 		assertEquals(1, counted(stepId), "the step counted the upload");
 		assertTrue(elapsedMillis < PROMPT_END_MILLIS, "the step ended on its count, after " + elapsedMillis + " ms");
+	}
+
+	/**
+	 * A driver that does not declare how it publishes composite results, such as a decorator that
+	 * does not forward the declaration, with the late-parts upload above. The step keeps its earlier
+	 * route: the step's own result output, with no cap. So an upload's initiation is never taken for
+	 * its final result, and the step does not end before it counts an upload, as it did when the
+	 * undeclared default meant one result per composite. As before this change, the step dispatches
+	 * past its count, counts more than it, and waits for the uploads still running when it stops (on
+	 * 518a0b4c, too, it ends after about 30 s), but not for its time limit.
+	 */
+	@Test
+	void aMultipartUploadOnAnUndeclaredDriverIsCountedAsBefore() throws Exception {
+		final String stepId = newStepId("undeclared-late-parts");
+		final Config config = multipartStepConfig(stepId, 1);
+		nioDrivers.undeclaredDecorator.set(true);
+		nioDrivers.pauseFirstCompletion.set(true);
+
+		final long elapsedMillis = run(config);
+
+		assertTrue(counted(stepId) >= 1, "the step counted an upload, " + counted(stepId));
+		assertTrue(
+						nioDrivers.resultOutput.get() != null
+										&& !(nioDrivers.resultOutput.get() instanceof UncountedFinalResultOutput),
+						"the step installed its result output without the capped wrapper: " + nioDrivers.resultOutput.get());
+		assertEquals(1, nioDrivers.paused.sum(), "completions paused after their result was published");
+		assertTrue(
+						elapsedMillis < TimeUnit.SECONDS.toMillis(55),
+						"the step ended before its time limit, after " + elapsedMillis + " ms");
+	}
+
+	@Test
+	void aDeclaredDriverInstallsTheCappedResultOutput() throws Exception {
+		final String stepId = newStepId("declared-output");
+		final Config config = multipartStepConfig(stepId, 20);
+		nioDrivers.recordResultOutput.set(true);
+
+		run(config);
+
+		assertEquals(UncountedFinalResultOutput.class, nioDrivers.resultOutput.get().getClass(), "the result output");
+		assertEquals(20, counted(stepId), "uploads the step counted");
 	}
 
 	@Test
@@ -520,6 +564,12 @@ class MixedLoadStepCountLimitTest {
 		/** Whether the driver's lifecycle tracker held an operation when the pause ran. */
 		final AtomicReference<Boolean> outstandingAtPause = new AtomicReference<>();
 		final AtomicBoolean failParts = new AtomicBoolean();
+		/** Whether the driver is wrapped in a decorator that does not declare its composite results. */
+		final AtomicBoolean undeclaredDecorator = new AtomicBoolean();
+		/** Whether the driver is wrapped in a decorator that forwards everything, to record its output. */
+		final AtomicBoolean recordResultOutput = new AtomicBoolean();
+		/** The result output the step installed through a decorator. */
+		final AtomicReference<Object> resultOutput = new AtomicReference<>();
 		final LongAdder failedParts = new LongAdder();
 		/** Parts after the first that the driver sent. */
 		final LongAdder laterParts = new LongAdder();
@@ -558,7 +608,37 @@ class MixedLoadStepCountLimitTest {
 					throw new IllegalStateException(e);
 				}
 			}
+			if (undeclaredDecorator.get() || recordResultOutput.get()) {
+				return decorator(driver, undeclaredDecorator.get());
+			}
 			return driver;
+		}
+
+		/**
+		 * An interface decorator, as a driver author might write one before drivers could declare
+		 * their composite results: it forwards every method to {@code driver}, and records the result
+		 * output the step installs. When {@code undeclared}, it does not forward the declaration, so
+		 * it has the interface's default.
+		 */
+		private StorageDriver decorator(final StorageDriver driver, final boolean undeclared) {
+			return (StorageDriver) Proxy.newProxyInstance(
+							StorageDriver.class.getClassLoader(), new Class<?>[]{StorageDriver.class
+							},
+							(proxy, method, args) -> {
+								if (undeclared
+												&& ("compositeResults".equals(method.getName())
+																|| "completesCompositesInParts".equals(method.getName()))) {
+									return InvocationHandler.invokeDefault(proxy, method, args);
+								}
+								if ("operationResultOutput".equals(method.getName())) {
+									resultOutput.set(args[0]);
+								}
+								try {
+									return method.invoke(driver, args);
+								} catch (final InvocationTargetException e) {
+									throw e.getCause();
+								}
+							});
 		}
 
 		/** The NIO mock, whose parts fail with {@code FAIL_IO} when asked to. */

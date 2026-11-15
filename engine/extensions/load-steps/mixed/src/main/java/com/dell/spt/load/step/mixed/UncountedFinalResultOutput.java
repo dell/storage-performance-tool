@@ -13,13 +13,18 @@ import java.util.List;
  * The driver's result output of a count-limited mixed step. It passes each result on to the step
  * context, which counts most final results, and counts on the generator each final result the
  * step context does not count, so the generator knows when every operation it dispatched has
- * ended. Only those uncounted results write shared state here. A step with no count limit does
- * not use it.
+ * ended. Only those uncounted results write shared state here. A step with no count limit, or on
+ * a driver that does not declare its composite results, does not use it.
  *
  * <p>{@link #kind} follows the step context's counting rules in
  * {@code LoadStepContextImpl.put}: its uncounted results are a part's result, an unfinished
  * composite's result unless it failed, an {@code INTERRUPTED} result and an {@code OMIT} one. A
  * mixed step neither retries nor recycles an operation, so each counted result is final.
+ *
+ * <p>A known limit: the step context does count a part's result published as {@code PENDING}
+ * (through {@code recyclePendingOp}), which {@link #kind} takes for a part's result, not final.
+ * No in-tree driver publishes one, and the step context counted it before as well. A driver that
+ * did would make the step count more results than it ran operations, and end early.
  */
 @SuppressWarnings({"rawtypes", "unchecked"
 })
@@ -35,7 +40,8 @@ final class UncountedFinalResultOutput implements Output {
 	private final Output output;
 	private final MixedLoadGenerator generator;
 	// Whether the driver follows a successful, unfinished composite CREATE or READ with its parts
-	// and a final result (StorageDriver.completesCompositesInParts), read once at setup.
+	// and a final result (CompositeResults.IN_PARTS from StorageDriver.compositeResults), read once
+	// at setup.
 	private final boolean compositesInParts;
 
 	UncountedFinalResultOutput(final Output output, final MixedLoadGenerator generator, final boolean compositesInParts) {
