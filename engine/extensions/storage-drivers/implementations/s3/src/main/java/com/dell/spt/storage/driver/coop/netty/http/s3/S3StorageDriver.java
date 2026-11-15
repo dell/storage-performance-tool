@@ -88,6 +88,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.Set;
 import java.time.Instant;
 import java.util.HashMap;
@@ -1391,6 +1392,9 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		uriBuilder.append(percentEncode(key)).append('=').append(percentEncode(value));
 	}
 
+	private static final Comparator<String[]> CANONICAL_QUERY_PARAMETER_ORDER = Comparator.<String[], String> comparing(parameter -> parameter[0])
+					.thenComparing(parameter -> parameter[1]);
+
 	/**
 	 * The V4 canonical form of a non-empty {@code rawQuery}: each pair decoded, encoded again and sorted.
 	 * {@link #getCanonicalV4} appends a query that {@link #isCanonicalSingleParameter} accepts as it is,
@@ -1398,7 +1402,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	 */
 	private static String canonicalizeQueryParameters(final String rawQuery) {
 		final var parts = rawQuery.split("&", 0);
-		final List<String> canonicalComponents = new ArrayList<>(parts.length);
+		final List<String[]> canonicalComponents = new ArrayList<>(parts.length);
 		for (final var part : parts) {
 			if (part == null || part.isEmpty()) {
 				continue;
@@ -1406,11 +1410,21 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			final int eqIdx = part.indexOf('=');
 			final String rawKey = eqIdx >= 0 ? part.substring(0, eqIdx) : part;
 			final String rawValue = eqIdx >= 0 ? part.substring(eqIdx + 1) : "";
-			final String encodedPair = percentEncode(decodeQueryComponent(rawKey)) + '=' + percentEncode(decodeQueryComponent(rawValue));
-			canonicalComponents.add(encodedPair);
+			canonicalComponents.add(new String[]{
+					percentEncode(decodeQueryComponent(rawKey)), percentEncode(decodeQueryComponent(rawValue))
+			});
 		}
-		Collections.sort(canonicalComponents);
-		return String.join("&", canonicalComponents);
+		// SigV4 sorts by the encoded name, then by the encoded value. Sorting the joined "name=value"
+		// strings differs when one name is a prefix of another that continues below '=' ("a1" < "a=").
+		canonicalComponents.sort(CANONICAL_QUERY_PARAMETER_ORDER);
+		final var canonicalQuery = new StringBuilder(rawQuery.length() + canonicalComponents.size());
+		for (final var component : canonicalComponents) {
+			if (canonicalQuery.length() > 0) {
+				canonicalQuery.append('&');
+			}
+			canonicalQuery.append(component[0]).append('=').append(component[1]);
+		}
+		return canonicalQuery.toString();
 	}
 
 	/**
@@ -3076,6 +3090,16 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			Loggers.MSG.warn("Couldn't complete HmacSHA256 for auth v4. Either secret is incorrect " +
 							"or used algorithm doesn't exist. \n{}", e.getMessage());
 		}
+	}
+
+	/**
+	 * SigV4 covers the canonical query, so V4 signs the URI with its configured URI arguments. V2 keeps
+	 * signing the bare path: its string to sign names only sub-resources, and ordinary arguments are not
+	 * among them.
+	 */
+	@Override
+	protected String authUri(final String uriPath, final String uri) {
+		return authVersion == 4 ? uri : uriPath;
 	}
 
 	protected Map<String, String> getNonCanonicalHeaders(final HttpHeaders httpHeaders) {

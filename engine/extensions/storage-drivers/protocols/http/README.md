@@ -5,7 +5,7 @@
 | Name                                           | Type         | Default Value    | Description                                      |
 |:-----------------------------------------------|:-------------|:-----------------|:-------------------------------------------------|
 | storage-net-http-headers                       | Map          | { "Connection" : "keep-alive", "Date": "#{date:formatNowRfc1123()}%{date:formatNowRfc1123()}", "User-Agent" : "spt-storage-driver-http/4.2.6" } | Custom HTTP headers section. A user may place here a key-value pair which will be used as HTTP header. The headers will be appended to every HTTP request issued.
-| storage-net-http-uri-args                      | Map          | {}               | Custom URI query arguments according [RFC 2396](http://www.ietf.org/rfc/rfc2396.txt).The headers will be appended to every HTTP request issued.
+| storage-net-http-uri-args                      | Map          | {}               | Custom URI query arguments according [RFC 2396](http://www.ietf.org/rfc/rfc2396.txt). The arguments are appended to the requests listed in [3. Custom URI Arguments](#3-custom-uri-arguments), not to every HTTP request.
 | storage-net-http-read-metadata-only            | Map          | false            | Specifies whether Spt issues GET request or HEAD. HEAD is used when enabled.
 | storage-net-http-max-chunk-size                | Integer      | 65536            | The limit, in bytes, at which Netty will send a chunk down the pipeline.
 
@@ -60,6 +60,17 @@ Load
 ## 3. Custom URI Arguments
 
 Custom URI query arguments may be set in the same way as custom HTTP headers.
+
+With the `s3` driver (and `s3-rdma` and `s3-tables`, which build on it), the arguments are sent on:
+
+- object requests built by the common request builder: PUT, GET, HEAD, UPDATE, copy, and DELETE when it is not a standalone DELETE step;
+- the bucket HEAD and the bucket create that check and create the target bucket.
+
+They are not sent on multipart upload requests (initiate, part, complete, abort), range-read part requests, object versioning or tagging requests, standalone DELETE requests, LIST requests, item-source listing, the delimiter probe, bucket versioning requests, the presence `HEAD` of a verification, or multi-object delete. With object versioning or object tagging enabled, they are not sent on any object request.
+
+With `--storage-auth-version 4`, the arguments are part of the signed query, sorted by name and then by value. With V2, object requests are signed over the path only, so an argument that V2 signs as a sub-resource (such as `acl` or `versionId`) is not signed.
+
+Argument names and values are sent as written, without encoding: give values that are already URI-safe, and percent-encode any other character yourself.
 
 ```javascript
 var uriQueryConfig = {
