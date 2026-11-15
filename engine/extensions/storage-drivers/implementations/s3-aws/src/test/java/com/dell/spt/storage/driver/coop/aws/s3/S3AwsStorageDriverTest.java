@@ -59,6 +59,7 @@ import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
 import software.amazon.awssdk.core.interceptor.SdkInternalExecutionAttribute;
 import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
 
+import com.github.akurilov.commons.collection.Range;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -2870,6 +2871,7 @@ public class S3AwsStorageDriverTest {
 			verify(mockS3Client, Mockito.never()).copyObject(any(CopyObjectRequest.class));
 			assertEquals(Optional.of(SIZE), body.getValue().contentLength());
 			assertEquals(SIZE, op.countBytesDone());
+			assertEquals(Operation.Status.SUCC, op.status());
 			return request.getValue();
 		}
 
@@ -2903,6 +2905,14 @@ public class S3AwsStorageDriverTest {
 		void update_ignoresConfiguredRandomRangesAndPutsTheWholeItem() throws Exception {
 			final PutObjectRequest put = putFor(new DataOperationImpl<>(
 							0, OpType.UPDATE, item("/tb4/k0000"), null, null, TEST_CRED, null, 3));
+			assertEquals("tb4", put.bucket());
+			assertEquals("k0000", put.key());
+		}
+
+		@Test
+		void update_ignoresConfiguredFixedRangesAndPutsTheWholeItem() throws Exception {
+			final PutObjectRequest put = putFor(new DataOperationImpl<>(
+							0, OpType.UPDATE, item("/tb4/k0000"), null, null, TEST_CRED, List.of(new Range(0L, 99L, -1L)), 0));
 			assertEquals("tb4", put.bucket());
 			assertEquals("k0000", put.key());
 		}
