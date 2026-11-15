@@ -14,6 +14,10 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Predicate;
+import java.util.function.ToLongFunction;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -22,10 +26,11 @@ import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Time-limited steps of multipart writes and multi-range reads on the shipped {@code s3} driver and the
- * loopback stub, which answers each object request after a delay so that operations are in flight when
- * the time limit stops the step. The stop refuses their next part, next range or completion: such an
- * operation is reported unresolved at once, so the step ends a few seconds after its limit instead of
- * after its {@code load-op-wait-limit}, and every upload left open on the stub is counted unresolved.
+ * loopback stub. The stub holds one chosen request until it sees the stop, so that its operation is in
+ * flight when the time limit stops the step, whatever the timing. The stop refuses that operation's next
+ * part, next range or completion: such an operation is reported unresolved at once, so the step ends a
+ * few seconds after its limit instead of after its {@code load-op-wait-limit}, and every upload left open
+ * on the stub is counted unresolved.
  */
 @Timeout(300)
 final class S3TimeLimitStopTest {
@@ -40,6 +45,8 @@ final class S3TimeLimitStopTest {
 	 * The time limit plus room for a cold scenario engine on a loaded runner, and far below the time
 	 * limit plus {@link #WAIT_LIMIT_SECONDS}.
 	 */
+	/** Longer than a held answer waits, so that the held request does not time out. */
+	private static final long NET_TIMEOUT_MILLIS = TimeUnit.SECONDS.toMillis(60);
 	private static final long ENDS_WITHIN_MILLIS = TimeUnit.SECONDS.toMillis(TIME_LIMIT_SECONDS + 30);
 
 	private final NicSetLoopback stub = new NicSetLoopback();
@@ -61,17 +68,19 @@ final class S3TimeLimitStopTest {
 	}
 
 	/**
-	 * Sixteen threads write 5 KB objects in five 1 KB parts, four uploads at a time, each request answered
-	 * after 50 to 150 ms, by object. At the stop, the uploads in flight have parts or a completion still to
-	 * send. Each is unresolved as soon as the stop refuses its next request, and stays open on the stub. A
-	 * single delay kept the four uploads in step, so a stop could fall between two waves with none in flight.
+	 * Sixteen threads write 5 KB objects in five 1 KB parts, four uploads at a time. The stub holds the
+	 * first part's answer until it sees the stop, so that upload has parts or its completion still to send
+	 * at the stop; others may too. Each is unresolved as soon as the stop refuses its next request, and
+	 * stays open on the stub.
 	 */
 	@Test
 	void aTimeLimitedMultipartWriteEndsAtItsLimitAndCountsTheOpenUploads() throws Exception {
-		stub.answerDelayMillis = request -> 50 + Math.floorMod(request.path().hashCode(), 101);
+		final var hold = new HoldUntilStopped(request -> true, NicSetLoopback.Request::isPart);
+		stub.answerDelayMillis = hold;
 
 		write(16);
 
+		hold.assertHeld();
 		assertEndedNearItsLimit();
 		final var open = stub.openUploads();
 		assertTrue(open > 0, "the stop left uploads in flight");
@@ -80,17 +89,20 @@ final class S3TimeLimitStopTest {
 	}
 
 	/**
-	 * Every initiation is answered after 1.5 s and the parts at once, so the stop finds initiations in
-	 * flight. Their answers come after it: the upload is open on the stub, but none of its parts can be
-	 * sent. It is unresolved, as every other upload left open; it used to count as unattempted, so
-	 * nothing reported it.
+	 * The stub holds the first initiation's answer until it sees the stop; the other uploads run on. The
+	 * held answer then opens the upload on the stub, but none of its parts can be sent. It is unresolved,
+	 * as every other upload left open; it used to count as unattempted, so nothing reported it.
 	 */
 	@Test
 	void anUploadInitiatedAfterTheStopIsCountedUnresolved() throws Exception {
-		stub.answerDelayMillis = request -> "POST init".equals(S3NicSetWorkloadTest.phase(request)) ? 1_500 : 0;
+		final var hold = new HoldUntilStopped(request -> true, request -> "POST init".equals(S3NicSetWorkloadTest.phase(request)));
+		stub.answerDelayMillis = hold;
 
 		write(4);
 
+		hold.assertHeld();
+		assertTrue(stub.objectRequests().stream().noneMatch(request -> request.isPart() && hold.heldPath().equals(request.path())),
+						"no part of the upload initiated after the stop was sent");
 		assertEndedNearItsLimit();
 		final var open = stub.openUploads();
 		assertTrue(open > 0, "the stop left initiations in flight");
@@ -99,16 +111,89 @@ final class S3TimeLimitStopTest {
 	}
 
 	/**
-	 * Eight threads read 5 KB objects in five 1 KB ranges, two reads at a time, each range answered after
-	 * 100 ms. At the stop, the reads in flight have ranges or their local finalization still to run: each
-	 * is unresolved as soon as the stop refuses it, and the step ends at its limit.
+	 * Eight threads read 5 KB objects in five 1 KB ranges. The stub holds the first range's answer until it
+	 * sees the stop, so that read has ranges or its local finalization still to run at the stop; others may
+	 * too. Each is unresolved as soon as the stop refuses it, and the step ends at its limit.
 	 */
 	@Test
 	void aTimeLimitedMultiRangeReadEndsAtItsLimit() throws Exception {
+		final var hold = new HoldUntilStopped(request -> request.range() != null, request -> request.range() != null);
+		stub.answerDelayMillis = hold;
+
 		read(8);
 
+		hold.assertHeld();
 		assertEndedNearItsLimit();
 		assertTrue(unresolved() > 0, "the stop left reads in flight");
+	}
+
+	/**
+	 * Holds the answer of the first request that {@code held} selects until the stub sees the stop: the
+	 * time limit has passed since the step's first request, which {@code stepRequest} selects, and no
+	 * other request has come for {@link #QUIET_MILLIS}. While admission is open the step's other
+	 * operations keep sending, so that quiet comes only after the stop. Every other request is answered
+	 * at once.
+	 */
+	private static final class HoldUntilStopped implements ToLongFunction<NicSetLoopback.Request> {
+		private static final long QUIET_MILLIS = 500;
+		private static final long HOLD_AT_MOST_MILLIS = TimeUnit.SECONDS.toMillis(30);
+
+		private final Predicate<NicSetLoopback.Request> stepRequest;
+		private final Predicate<NicSetLoopback.Request> held;
+		private final AtomicBoolean taken = new AtomicBoolean();
+		private final AtomicLong stepStartNanos = new AtomicLong();
+		private volatile long lastOtherNanos;
+		private volatile String heldPath;
+		private volatile boolean sawStop;
+
+		HoldUntilStopped(final Predicate<NicSetLoopback.Request> stepRequest, final Predicate<NicSetLoopback.Request> held) {
+			this.stepRequest = stepRequest;
+			this.held = held;
+		}
+
+		@Override
+		public long applyAsLong(final NicSetLoopback.Request request) {
+			final long now = System.nanoTime();
+			if (stepRequest.test(request)) {
+				stepStartNanos.compareAndSet(0, now);
+			}
+			if (stepStartNanos.get() != 0 && held.test(request) && taken.compareAndSet(false, true)) {
+				heldPath = request.path();
+				sawStop = awaitStop();
+				return 0;
+			}
+			lastOtherNanos = now;
+			return 0;
+		}
+
+		private boolean awaitStop() {
+			final long limitNanos = TimeUnit.SECONDS.toNanos(TIME_LIMIT_SECONDS);
+			final long quietNanos = TimeUnit.MILLISECONDS.toNanos(QUIET_MILLIS);
+			final long giveUp = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(HOLD_AT_MOST_MILLIS);
+			while (System.nanoTime() < giveUp) {
+				final long now = System.nanoTime();
+				if (now - stepStartNanos.get() > limitNanos && now - lastOtherNanos > quietNanos) {
+					return true;
+				}
+				try {
+					Thread.sleep(20);
+				} catch (final InterruptedException e) {
+					Thread.currentThread().interrupt();
+					return false;
+				}
+			}
+			return false;
+		}
+
+		String heldPath() {
+			return heldPath;
+		}
+
+		/** A request was held, and answered only once the stub saw the stop. */
+		void assertHeld() {
+			assertTrue(taken.get(), "a request was held");
+			assertTrue(sawStop, "the held request was answered after the stop");
+		}
 	}
 
 	/** A time-limited step of 5 KB uploads of five 1 KB parts. */
@@ -125,7 +210,6 @@ final class S3TimeLimitStopTest {
 							"item": {"data": {"size": "5KB"}, "output": {"file": "%s"}}
 						}).run();
 						""".formatted(System.nanoTime(), items);
-		stub.answerDelayMillis = request -> request.range() != null ? 100 : 0;
 		timed(seed + stepScenario("read", concurrency, """
 						"item": {"data": {"ranges": {"threshold": "1KB"}}, "input": {"file": "%s"}}""".formatted(items)));
 	}
@@ -137,10 +221,10 @@ final class S3TimeLimitStopTest {
 								"step": {"limit": {"time": "%ds"}},
 								"op": {"type": "%s", "limit": {"count": 0}, "recycle": {"mode": %s}, "wait": {"limit": %d}}
 							},
-							"storage": {"driver": {"limit": {"concurrency": %d}}},
+							"storage": {"driver": {"limit": {"concurrency": %d}}, "net": {"timeoutMilliSec": %d}},
 							%s
 						}).run();
-						""".formatted(TIME_LIMIT_SECONDS, opType, "read".equals(opType), WAIT_LIMIT_SECONDS, concurrency, item);
+						""".formatted(TIME_LIMIT_SECONDS, opType, "read".equals(opType), WAIT_LIMIT_SECONDS, concurrency, NET_TIMEOUT_MILLIS, item);
 	}
 
 	private Map<String, List<Long>> timed(final String scenario) throws Exception {
