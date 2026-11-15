@@ -35,7 +35,8 @@ type stagingValueKey struct{}
 
 // stagingExecutor records every staging command. copy decides how each
 // CopyFile behaves; rmErr fails every rm, and rm, when set, decides how each
-// rm on a live context behaves instead.
+// rm on a live context behaves instead. mkdir, when set, decides how each
+// mkdir on a live context behaves.
 type stagingExecutor struct {
 	mu          sync.Mutex
 	calls       []stagingCall
@@ -43,6 +44,7 @@ type stagingExecutor struct {
 	copyStarted chan struct{}
 	rmErr       error
 	rm          func(ctx context.Context) error
+	mkdir       func(ctx context.Context) error
 }
 
 func (e *stagingExecutor) record(ctx context.Context, command string) {
@@ -68,6 +70,9 @@ func (e *stagingExecutor) ExecuteCommand(ctx context.Context, _ *hostparse.HostI
 	e.record(ctx, strings.Join(command, " "))
 	if err := ctx.Err(); err != nil {
 		return "", "", err
+	}
+	if command[0] == "mkdir" && e.mkdir != nil {
+		return "", "", e.mkdir(ctx)
 	}
 	if command[0] == "rm" && e.rmErr != nil {
 		return "", "rm: cannot remove", e.rmErr
@@ -318,10 +323,11 @@ func TestRemoteStagingFailedRemovalKeepsTheDirectoryOwned(t *testing.T) {
 }
 
 // After a cancel during staging, the full-screen UI's join sees staging and
-// the startup rollback end within TUILaunchJoinTimeout, and the rollback
-// removes the directory. Each rm answers after removalTime, as on a slow but
-// live host, so a removal of up to remoteCleanupTimeout before the rollback
-// would push the whole past the join.
+// the caller's startup rollback end within TUILaunchJoinTimeout, and the
+// rollback removes the directory. The start runs through the real lone-remote
+// caller, which owns the rollback. Each rm answers after removalTime, as on a
+// slow but live host, so a removal of up to remoteCleanupTimeout before the
+// rollback would push the whole past the join.
 func TestItemFileStagingCancelAndRollbackEndWithinTUIJoin(t *testing.T) {
 	removalTime := constants.TUILaunchJoinTimeout - remoteCleanupTimeout + 2*time.Second
 	if removalTime >= constants.StartupRollbackTimeout {
@@ -350,13 +356,17 @@ func TestItemFileStagingCancelAndRollbackEndWithinTUIJoin(t *testing.T) {
 	orchestrator := NewMultiHostOrchestrator([]*hostparse.HostInfo{host}, 1)
 	orchestrator.SetNotifier(func(string) {})
 	orchestrator.hosts[0].DockerManager = mgr
+	orchestrator.hosts[0].SetStatus(HostStatusReady)
+	wrapper := NewMultiHostTestOrchestrator(orchestrator)
+	params := scenario.ScenarioParams{WorkloadType: "mock", ItemFileMounts: deleteStagingMounts[:1]}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	result := make(chan tuiLaunchResult, 1)
 	staged := make(chan struct{})
 	go func() {
-		err := orchestrator.configureItemFileMounts(ctx, orchestrator.hosts, deleteStagingMounts[:1])
+		err := wrapper.StartTestWithContentAndLaunchHooks(
+			ctx, "test-image", params, []byte(`Load.run({})`), nil, LaunchHooks{})
 		// Close staged before the join can see the result, so the check
 		// below never races the close.
 		close(staged)
