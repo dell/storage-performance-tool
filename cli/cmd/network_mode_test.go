@@ -455,3 +455,106 @@ func TestReplayCommandPassesTheNormalisedNetworkModeToTheLocalLaunch(t *testing.
 		})
 	}
 }
+
+// bridgeNICSetCases are --interfaces and --host-interfaces values that ask for NICs, each given with a
+// bridge spelling other than the exact one, with the error requireHostNetwork must still return.
+func bridgeNICSetCases(host string) []struct{ name, flag, value, mode, want string } {
+	const needsHost = " needs --network-mode host: a bridge-network container sees only its own interface"
+	var cases []struct{ name, flag, value, mode, want string }
+	for _, mode := range []string{"Bridge", " BRIDGE"} {
+		cases = append(cases,
+			struct{ name, flag, value, mode, want string }{
+				fmt.Sprintf("--interfaces %q", mode), flagInterfaces, "auto", mode, "--" + flagInterfaces + needsHost},
+			struct{ name, flag, value, mode, want string }{
+				fmt.Sprintf("--host-interfaces %q", mode), flagHostInterfaces, host + "=auto", mode, "--" + flagHostInterfaces + needsHost},
+		)
+	}
+	return cases
+}
+
+// The --interfaces checks compare the flag with exactly bridge, so they rely on the flag being
+// normalised before they read it.
+func TestRunCmdRefusesANICSetWithAnyBridgeSpelling(t *testing.T) {
+	for _, route := range []struct{ name, hosts, minHosts string }{
+		{"local", "127.0.0.1", "1"},
+		{"distributed", "entry.example,worker.example", "2"},
+	} {
+		for _, tc := range bridgeNICSetCases(strings.Split(route.hosts, ",")[0]) {
+			t.Run(route.name+" "+tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				t.Chdir(dir)
+				setDeleteRouteFlags(t, route.hosts, route.minHosts)
+				setGlobalRunFlagForTest(t, "network-mode", tc.mode)
+				setGlobalRunFlagForTest(t, tc.flag, tc.value)
+				calls := stubRunNetworkModeRoutes(t)
+
+				var runErr error
+				captureStdout(t, func() {
+					runErr = runCmd.RunE(runCmd, []string{WorkloadTypeDelete})
+				})
+				if runErr == nil || runErr.Error() != tc.want {
+					t.Fatalf("RunE() error = %v, want %q", runErr, tc.want)
+				}
+				if *calls != (runNetworkModeRouteCalls{}) {
+					t.Fatalf("route calls = %+v, want none", *calls)
+				}
+				if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+					t.Fatalf("a refused run wrote files: %v (err %v)", entries, err)
+				}
+				command := &cobra.Command{
+					Use: "run", SilenceErrors: true, SilenceUsage: true,
+					RunE: func(*cobra.Command, []string) error {
+						return runCmd.RunE(runCmd, []string{WorkloadTypeDelete})
+					},
+				}
+				if code := executeCommandCode(command); code != 1 {
+					t.Fatalf("exit status = %d, want 1", code)
+				}
+			})
+		}
+	}
+}
+
+func TestReplayCommandRefusesANICSetWithAnyBridgeSpelling(t *testing.T) {
+	for _, hosts := range []string{"127.0.0.1", "qa-entry-01,qa-worker-01"} {
+		for _, tc := range bridgeNICSetCases(strings.Split(hosts, ",")[0]) {
+			t.Run(hosts+" "+tc.name, func(t *testing.T) {
+				server, requests := newNetworkModeReplayArchive(t)
+				calls := stubReplayNetworkModeRoutes(t)
+				resultsDir := t.TempDir()
+				args := []string{
+					"--from", server.URL,
+					"--endpoints", "http://10.0.0.1:9020",
+					"--test-hosts", hosts,
+					"--network-mode", tc.mode,
+					"--" + tc.flag, tc.value,
+					"--results-dir", resultsDir,
+				}
+				newCmd := func() *cobra.Command {
+					cmd := newReplayCommandForTest(t)
+					cmd.Flags().String(flagInterfaces, "", "")
+					cmd.Flags().StringArray(flagHostInterfaces, nil, "")
+					cmd.SetOut(io.Discard)
+					cmd.SilenceErrors = true
+					cmd.SetArgs(args)
+					return cmd
+				}
+				if err := newCmd().Execute(); err == nil || err.Error() != tc.want {
+					t.Fatalf("Execute() error = %v, want %q", err, tc.want)
+				}
+				if code := executeCommandCode(newCmd()); code != 1 {
+					t.Fatalf("exit status = %d, want 1", code)
+				}
+				if got := requests.Load(); got != 0 {
+					t.Fatalf("archive requests = %d, want 0", got)
+				}
+				if *calls != (replayNetworkModeCalls{}) {
+					t.Fatalf("replay calls = %+v, want none", *calls)
+				}
+				if entries, err := os.ReadDir(resultsDir); err != nil || len(entries) != 0 {
+					t.Fatalf("a refused replay wrote results: %v (err %v)", entries, err)
+				}
+			})
+		}
+	}
+}
