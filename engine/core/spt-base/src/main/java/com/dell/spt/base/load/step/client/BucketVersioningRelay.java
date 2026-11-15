@@ -260,7 +260,7 @@ final class BucketVersioningRelay implements AutoCloseable {
 		}
 
 		/** One pass's read of one node. */
-		final class Read {
+		static final class Read {
 
 			private final FileManager service;
 			private boolean abandoned;
