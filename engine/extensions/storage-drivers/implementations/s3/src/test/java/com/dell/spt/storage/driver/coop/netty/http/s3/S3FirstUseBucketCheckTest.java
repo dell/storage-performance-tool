@@ -14,6 +14,7 @@ import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.Credential;
+import com.dell.spt.storage.driver.coop.netty.http.s3.VersioningConfigurationXmlHandler.Kind;
 import com.github.akurilov.confuse.Config;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -66,6 +67,12 @@ final class S3FirstUseBucketCheckTest {
 	private static final String SUSPENDED = "<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>";
 	private static final String SUSPENDED_MFA = "<VersioningConfiguration><Status>Suspended</Status><MfaDelete>Enabled</MfaDelete></VersioningConfiguration>";
 	private static final String NEVER = "<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>";
+	private static final String S3_NS = "http://s3.amazonaws.com/doc/2006-03-01/";
+	/** Sol's review probe: a legal namespace declaration on the Status hid it from the old regex. */
+	private static final String SUSPENDED_NS_DECLARED = "<VersioningConfiguration xmlns=\"" + S3_NS + "\">"
+					+ "<s3:Status xmlns:s3=\"" + S3_NS + "\">Suspended</s3:Status></VersioningConfiguration>";
+	private static final String ENABLED_ATTRIBUTED = "<VersioningConfiguration xmlns=\"" + S3_NS + "\">"
+					+ "<Status note=\"x\">Enabled</Status></VersioningConfiguration>";
 
 	private final List<Captured> requests = new CopyOnWriteArrayList<>();
 	private final List<AutoCloseable> resources = new ArrayList<>();
@@ -386,15 +393,96 @@ final class S3FirstUseBucketCheckTest {
 
 	@Test
 	void theStatusIsReadExactly() {
-		assertEquals("Enabled", S3StorageDriver.versioningStatus(ENABLED));
-		assertEquals("Suspended", S3StorageDriver.versioningStatus(SUSPENDED));
-		assertEquals("Suspended", S3StorageDriver.versioningStatus(SUSPENDED_MFA), "MfaDelete never counts");
-		assertEquals("Enabled", S3StorageDriver.versioningStatus(
-						"<s3:VersioningConfiguration><s3:Status> Enabled </s3:Status></s3:VersioningConfiguration>"));
-		assertNull(S3StorageDriver.versioningStatus(NEVER));
-		assertNull(S3StorageDriver.versioningStatus("<VersioningConfiguration><Status></Status></VersioningConfiguration>"));
-		assertNull(S3StorageDriver.versioningStatus(
-						"<VersioningConfiguration><MfaDelete>Enabled</MfaDelete></VersioningConfiguration>"));
+		assertEquals(state(Kind.ENABLED), read(ENABLED));
+		assertEquals(state(Kind.SUSPENDED), read(SUSPENDED));
+		assertEquals(state(Kind.SUSPENDED), read(SUSPENDED_MFA), "MfaDelete never counts");
+		assertEquals(state(Kind.ENABLED), read("<s3:VersioningConfiguration xmlns:s3=\"" + S3_NS + "\">"
+						+ "<s3:Status> Enabled </s3:Status></s3:VersioningConfiguration>"));
+		assertEquals(state(Kind.NEVER), read(NEVER));
+		assertEquals(state(Kind.NEVER), read("<VersioningConfiguration><Status></Status></VersioningConfiguration>"));
+		assertEquals(state(Kind.NEVER), read("<VersioningConfiguration><MfaDelete>Enabled</MfaDelete></VersioningConfiguration>"));
+		assertEquals(new VersioningConfigurationXmlHandler.State(Kind.OTHER, "Disabled"),
+						read("<VersioningConfiguration><Status>Disabled</Status></VersioningConfiguration>"));
+	}
+
+	@Test
+	void aStatusIsReadWhateverItsPrefixNamespaceOrAttributes() {
+		assertEquals(state(Kind.SUSPENDED), read(SUSPENDED_NS_DECLARED));
+		assertEquals(state(Kind.ENABLED), read(ENABLED_ATTRIBUTED));
+		assertEquals(state(Kind.SUSPENDED), read("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<x:VersioningConfiguration"
+						+ " xmlns:x=\"urn:other\"><x:Status a=\"1\">Suspended</x:Status></x:VersioningConfiguration>"));
+		assertEquals(state(Kind.NEVER), read("<VersioningConfiguration><MfaDelete><Status>Enabled</Status></MfaDelete>"
+						+ "</VersioningConfiguration>"), "only the root's own Status counts");
+	}
+
+	@Test
+	void aBodyThatIsNotAReadableVersioningConfigurationIsUnrecognized() {
+		for (final var body : List.of(
+						"",
+						"not xml",
+						"<VersioningConfiguration><Status>Enabled</Status>",
+						"<Error><Code>AccessDenied</Code></Error>",
+						"<Other><Status>Enabled</Status></Other>",
+						"<s3:VersioningConfiguration><s3:Status>Enabled</s3:Status></s3:VersioningConfiguration>",
+						"<VersioningConfiguration><Status>Enabled</Status><Status>Suspended</Status></VersioningConfiguration>",
+						"<VersioningConfiguration><Status><b>Enabled</b></Status></VersioningConfiguration>",
+						"<!DOCTYPE VersioningConfiguration [<!ENTITY s \"Suspended\">]>"
+										+ "<VersioningConfiguration><Status>&s;</Status></VersioningConfiguration>",
+						"<!DOCTYPE VersioningConfiguration SYSTEM \"http://127.0.0.1:1/x.dtd\"><VersioningConfiguration/>")) {
+			assertEquals(state(Kind.UNRECOGNIZED), read(body), body);
+		}
+	}
+
+	@Test
+	void aSuspendedStatusWithANamespaceDeclarationIsLeftAlone() throws Exception {
+		getVersioningBody = SUSPENDED_NS_DECLARED;
+		final var driver = driver(List.of(listener()), "default", 5_000, true);
+
+		driver.requestNewPath("/ver-suspended-ns/p");
+
+		assertEquals(0, versioningPuts(), requests::toString);
+		notices.awaitOnly("ver-suspended-ns", Level.WARN, "versioning is suspended; SPT left it alone");
+	}
+
+	@Test
+	void anAttributedEnabledStatusGetsNoPut() throws Exception {
+		getVersioningBody = ENABLED_ATTRIBUTED;
+		final var driver = driver(List.of(listener()), "default", 5_000, true);
+
+		driver.requestNewPath("/ver-enabled-attr/p");
+
+		assertEquals(0, versioningPuts(), requests::toString);
+		notices.awaitOnly("ver-enabled-attr", Level.INFO, "versioning is already enabled");
+	}
+
+	@Test
+	void anUnparseableBodySendsNoPut() throws Exception {
+		unrecognizedBodySendsNoPut("ver-unparseable", "<VersioningConfiguration><Status>Enabled");
+		unrecognizedBodySendsNoPut("ver-emptybody", "");
+	}
+
+	@Test
+	void aBodyWithAnotherRootSendsNoPut() throws Exception {
+		unrecognizedBodySendsNoPut("ver-otherroot", "<ListBucketResult><Name>x</Name></ListBucketResult>");
+	}
+
+	private void unrecognizedBodySendsNoPut(final String bucket, final String body) throws Exception {
+		getVersioningBody = body;
+		final var driver = driver(List.of(listener()), "default", 5_000, true);
+
+		driver.requestNewPath("/" + bucket + "/p");
+
+		assertEquals(0, versioningPuts(), requests::toString);
+		notices.awaitOnly(bucket, Level.WARN, "could not read the versioning state (GET ?versioning returned a body that is"
+						+ " not a VersioningConfiguration SPT can read); SPT sent no request to enable it");
+	}
+
+	private static VersioningConfigurationXmlHandler.State read(final String body) {
+		return S3StorageDriver.versioningState(body.getBytes(StandardCharsets.UTF_8));
+	}
+
+	private static VersioningConfigurationXmlHandler.State state(final Kind kind) {
+		return new VersioningConfigurationXmlHandler.State(kind, null);
 	}
 
 	@Test
@@ -546,7 +634,7 @@ final class S3FirstUseBucketCheckTest {
 			final byte[] body = (getVersioningStatus / 100 == 2
 							? getVersioningBody
 							: "<Error><Code>AccessDenied</Code></Error>").getBytes(StandardCharsets.UTF_8);
-			exchange.sendResponseHeaders(getVersioningStatus, body.length);
+			exchange.sendResponseHeaders(getVersioningStatus, body.length == 0 ? -1 : body.length);
 			exchange.getResponseBody().write(body);
 			return true;
 		}

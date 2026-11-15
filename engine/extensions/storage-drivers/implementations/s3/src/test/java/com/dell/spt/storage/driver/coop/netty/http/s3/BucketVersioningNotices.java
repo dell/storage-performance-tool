@@ -4,13 +4,16 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import com.dell.spt.base.logging.Loggers;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.LoggerContext;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Configurator;
 import org.apache.logging.log4j.core.config.Property;
 
 /**
@@ -23,6 +26,8 @@ final class BucketVersioningNotices extends AbstractAppender implements AutoClos
 
 	private final List<Notice> notices = new CopyOnWriteArrayList<>();
 	private final List<org.apache.logging.log4j.core.Logger> loggers;
+	/** The levels it lowered, to put back: earlier tests in the JVM may leave the errors at ERROR. */
+	private final Map<String, Level> previousLevels = new LinkedHashMap<>();
 
 	private BucketVersioningNotices() {
 		super("testBucketVersioningNotices" + System.nanoTime(), null, null, true, Property.EMPTY_ARRAY);
@@ -33,7 +38,13 @@ final class BucketVersioningNotices extends AbstractAppender implements AutoClos
 	static BucketVersioningNotices attach() {
 		final var notices = new BucketVersioningNotices();
 		notices.start();
-		notices.loggers.forEach(logger -> logger.addAppender(notices));
+		for (final var logger : notices.loggers) {
+			if (logger.getLevel().isMoreSpecificThan(Level.INFO) && !Level.INFO.equals(logger.getLevel())) {
+				notices.previousLevels.put(logger.getName(), logger.getLevel());
+				Configurator.setLevel(logger.getName(), Level.INFO);
+			}
+			logger.addAppender(notices);
+		}
 		return notices;
 	}
 
@@ -70,5 +81,6 @@ final class BucketVersioningNotices extends AbstractAppender implements AutoClos
 	public void close() {
 		loggers.forEach(logger -> logger.removeAppender(this));
 		stop();
+		previousLevels.forEach(Configurator::setLevel);
 	}
 }

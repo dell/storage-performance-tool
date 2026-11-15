@@ -57,6 +57,23 @@ final class S3XmlParser {
 		reader.parse(new InputSource(input));
 	}
 
+	/**
+	 * Parses with a new namespace-aware parser under the same fail-closed controls, so the handler
+	 * gets each element's local name whatever its prefix. For rare responses, such as a bucket's
+	 * {@code GET ?versioning}; it leaves the thread's listing parser alone.
+	 */
+	static void parseNamespaceAware(final InputStream input, final DefaultHandler handler)
+					throws IOException, ParserConfigurationException, SAXException {
+		final SAXParser parser = newHardenedParser(true);
+		applyRequiredControls(parser);
+		final var reader = parser.getXMLReader();
+		reader.setContentHandler(handler);
+		reader.setDTDHandler(handler);
+		reader.setErrorHandler(handler);
+		reader.setEntityResolver(REJECTING_ENTITY_RESOLVER);
+		reader.parse(new InputSource(input));
+	}
+
 	static void clearThreadLocalForTest() {
 		S3StorageDriver.THREAD_LOCAL_XML_PARSER.remove();
 	}
@@ -64,7 +81,7 @@ final class S3XmlParser {
 	private static SAXParser acquire() throws ParserConfigurationException, SAXException {
 		SAXParser parser = S3StorageDriver.THREAD_LOCAL_XML_PARSER.get();
 		if (parser == null) {
-			parser = newHardenedParser();
+			parser = newHardenedParser(false);
 			S3StorageDriver.THREAD_LOCAL_XML_PARSER.set(parser);
 		} else {
 			try {
@@ -79,10 +96,10 @@ final class S3XmlParser {
 		return parser;
 	}
 
-	private static SAXParser newHardenedParser()
+	private static SAXParser newHardenedParser(final boolean namespaceAware)
 					throws ParserConfigurationException, SAXException {
 		final SAXParserFactory factory = SAXParserFactory.newInstance();
-		factory.setNamespaceAware(false);
+		factory.setNamespaceAware(namespaceAware);
 		try {
 			factory.setXIncludeAware(false);
 		} catch (final UnsupportedOperationException e) {

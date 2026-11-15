@@ -27,6 +27,10 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
@@ -48,9 +52,9 @@ class BucketVersioningRelayTest {
 	private final List<String> relayed = new CopyOnWriteArrayList<>();
 
 	private BucketVersioningRelay relay(final String step, final List<FileManager> managers, final List<String> nodes,
-					final long pendingWaitMillis) {
+					final long boundMillis) {
 		return new BucketVersioningRelay(step, managers, NicPathsCollector.nodeNames(nodes),
-						(level, message) -> relayed.add(level + " " + message), pendingWaitMillis);
+						(level, message) -> relayed.add(level + " " + message), boundMillis);
 	}
 
 	/** A node whose file manager reads {@code file} for the step's notices. */
@@ -73,7 +77,7 @@ class BucketVersioningRelayTest {
 		when(broken.logFileName(LOGGER, step)).thenReturn("/node-3/" + BucketVersioningNotice.FILE_NAME);
 		when(broken.fileSize("/node-3/" + BucketVersioningNotice.FILE_NAME)).thenThrow(new IOException("connection reset"));
 		final var managers = List.of(entry, node(file1, step), node(file2, step), broken);
-		final var relay = relay(step, managers, List.of("node-b:1099", "node-c:1099", "node-d:1099"), 0);
+		final var relay = relay(step, managers, List.of("node-b:1099", "node-c:1099", "node-d:1099"), 10_000);
 		Files.createDirectories(file1.getParent());
 		Files.writeString(file1, "CHECK bucket b1\n"
 						+ "INFO bucket b1: versioning enabled by this run (the bucket had never been versioned)\n"
@@ -84,14 +88,18 @@ class BucketVersioningRelayTest {
 
 		relay.close();
 
+		// Each node is read on a thread of its own, so only each node's own records keep their order.
 		assertEquals(List.of(
 						"INFO " + step + ": node 001 (node-b:1099): bucket b1: versioning enabled by this run"
 										+ " (the bucket had never been versioned)",
 						"WARN " + step + ": node 001 (node-b:1099): bucket b2: versioning is suspended; SPT left it"
-										+ " alone, and the run goes on un-versioned",
+										+ " alone, and the run goes on un-versioned"),
+						relayed.stream().filter(record -> record.contains("node 001")).toList());
+		assertEquals(List.of(
 						"WARN " + step + ": could not relay the bucket versioning notices of node 003 (node-d:1099):"
 										+ " connection reset"),
-						relayed, "node 002 has no notices and is quiet; the Entry Node's own are not read");
+						relayed.stream().filter(record -> !record.contains("node 001")).toList(),
+						"node 002 has no notices and is quiet; the Entry Node's own are not read");
 		verifyNoInteractions(entry);
 	}
 
@@ -99,7 +107,7 @@ class BucketVersioningRelayTest {
 	void aSecondPassRelaysOnlyWhatIsNew() throws Exception {
 		final var step = "relay-twice-" + System.nanoTime();
 		final var file = dir.resolve(BucketVersioningNotice.FILE_NAME);
-		final var relay = relay(step, List.of(mock(FileManager.class), node(file, step)), List.of("node-b:1099"), 0);
+		final var relay = relay(step, List.of(mock(FileManager.class), node(file, step)), List.of("node-b:1099"), 10_000);
 		Files.writeString(file, "INFO bucket b3: versioning is already enabled\nINFO bucket b4: partly wri");
 
 		relay.relayAtStop();
@@ -114,25 +122,101 @@ class BucketVersioningRelayTest {
 	void theStopWaitsForACheckStillRunning() throws Exception {
 		final var step = "relay-pending-" + System.nanoTime();
 		final var file = Path.of(FileManager.INSTANCE.logFileName(LOGGER, step));
-		final var relay = relay(step, List.of(mock(FileManager.class), node(file, step)), List.of("node-b:1099"), 10_000);
+		final var node = node(file, step);
+		final var reads = new AtomicInteger();
+		final var polled = new CountDownLatch(1);
+		when(node.fileSize(file.toString())).thenAnswer(inv -> {
+			// The init reads once and the stop's first pass once: a third read is the stop polling the running check.
+			if (reads.incrementAndGet() >= 3) {
+				polled.countDown();
+			}
+			return FileManager.INSTANCE.fileSize(file.toString());
+		});
+		final var relay = relay(step, List.of(mock(FileManager.class), node), List.of("node-b:1099"), 30_000);
 		final var check = BucketVersioningNotice.check(step, "bucket b5");
+		final var ended = new AtomicBoolean();
 		final var worker = Thread.ofPlatform().start(() -> {
 			try {
-				Thread.sleep(300);
+				if (!polled.await(20, TimeUnit.SECONDS)) {
+					return;
+				}
 			} catch (final InterruptedException e) {
 				return;
 			}
 			BucketVersioningNotice.info(step, "bucket b5: versioning enabled by this run");
 			check.close();
+			ended.set(true);
 		});
+
+		relay.relayAtStop();
+		final boolean endedBeforeTheStopReturned = ended.get();
+		worker.join();
+
+		assertTrue(endedBeforeTheStopReturned, "the stop was waiting when the check ended, and returned after it");
+		assertEquals(List.of("INFO " + step + ": node 001 (node-b:1099): bucket b5: versioning enabled by this run"), relayed,
+						"the check's notice, and no WARN that it had not ended");
+	}
+
+	@Test
+	void pastTheCapTheStopDoesNotWaitForChecksItCannotFollow() throws Exception {
+		final var step = "relay-capped-" + System.nanoTime();
+		final var file = dir.resolve(BucketVersioningNotice.FILE_NAME);
+		final var relay = relay(step, List.of(mock(FileManager.class), node(file, step)), List.of("node-b:1099"), 30_000);
+		final var line = "INFO bucket b: " + "x".repeat(1000) + "\n";
+		// A check opens, and its DONE lies past the cap.
+		Files.writeString(file, "CHECK bucket bc\n" + line.repeat(BucketVersioningRelay.MAX_BYTES / line.length() + 1)
+						+ "DONE bucket bc\n");
 
 		final long start = System.nanoTime();
 		relay.relayAtStop();
 		final long millis = (System.nanoTime() - start) / 1_000_000;
-		worker.join();
 
-		assertEquals(List.of("INFO " + step + ": node 001 (node-b:1099): bucket b5: versioning enabled by this run"), relayed);
-		assertTrue(millis >= 250 && millis < 5_000, "waited for the check, not the whole bound: " + millis + " ms");
+		assertTrue(millis < 20_000, "the stop did not wait out the bound: " + millis + " ms");
+		assertEquals(List.of("WARN " + step + ": node 001 (node-b:1099): its bucket versioning notices pass the 1 MiB the"
+						+ " relay reads, so its running checks can't be followed; the rest are only in that node's"
+						+ " bucket.versioning.log"), relayed.stream().filter(record -> record.startsWith("WARN")).toList(),
+						"the cap warning, and no false WARN that the check had not ended");
+	}
+
+	@Test
+	void aNodeThatStallsIsLeftOutWithinTheBound() throws Exception {
+		final var step = "relay-stall-" + System.nanoTime();
+		final var file = dir.resolve(BucketVersioningNotice.FILE_NAME);
+		final var stalled = node(file, step);
+		final var quiet = node(dir.resolve("q").resolve(BucketVersioningNotice.FILE_NAME), step);
+		final var release = new CountDownLatch(1);
+		final var reads = new AtomicInteger();
+		when(stalled.fileSize(file.toString())).thenAnswer(inv -> {
+			if (reads.incrementAndGet() > 1) {
+				release.await(30, TimeUnit.SECONDS);
+				// Read after the relay gave up on the node: it must be dropped.
+				Files.writeString(file, "WARN bucket late: read after the bound\n");
+			}
+			return FileManager.INSTANCE.fileSize(file.toString());
+		});
+		final var relay = relay(step, List.of(mock(FileManager.class), stalled, quiet), List.of("node-b:1099", "node-c:1099"),
+						500);
+		try {
+			final long start = System.nanoTime();
+			relay.relayAtStop();
+			final long stopMillis = (System.nanoTime() - start) / 1_000_000;
+			relay.close();
+
+			assertTrue(stopMillis < 5_000, "the stop returned at its bound: " + stopMillis + " ms");
+			assertEquals(List.of("WARN " + step + ": node 001 (node-b:1099) did not answer within 500 ms when the step"
+							+ " stopped, so the relay left it out; its bucket versioning notices are only in that node's"
+							+ " bucket.versioning.log"), relayed, "one WARN, and the close leaves the node out");
+		} finally {
+			release.countDown();
+		}
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+		while (Thread.getAllStackTraces().keySet().stream().anyMatch(t -> t.getName().contains(step))
+						&& System.nanoTime() < deadline) {
+			Thread.sleep(10);
+		}
+		assertFalse(Thread.getAllStackTraces().keySet().stream().anyMatch(t -> t.getName().contains(step)),
+						"the abandoned thread ended once released");
+		assertEquals(1, relayed.size(), "its late read was dropped: " + relayed);
 	}
 
 	@Test

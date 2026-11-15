@@ -53,6 +53,7 @@ import com.dell.spt.storage.driver.coop.netty.http.HttpStorageDriverBase;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.confuse.Config;
 import io.netty.buffer.ByteBufInputStream;
+import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
@@ -102,7 +103,6 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.function.Function;
 import java.util.function.Supplier;
-import java.util.regex.Pattern;
 import java.util.zip.CRC32;
 import java.util.zip.CRC32C;
 import java.util.zip.Checksum;
@@ -333,13 +333,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		strategiesByToken.put(checksumStrategy.configToken, checksumStrategy);
 	}
 
-	private static final String VERSIONING_STATUS_ENABLED = "Enabled";
-	private static final String VERSIONING_STATUS_SUSPENDED = "Suspended";
 	/** The most of an unrecognized status a notice quotes. */
 	private static final int MAX_QUOTED_STATUS = 64;
-	/** The first {@code Status} element of a {@code VersioningConfiguration}, with or without a namespace prefix. */
-	private static final Pattern VERSIONING_STATUS = Pattern.compile(
-					"<(?:[A-Za-z_][\\w.-]*:)?Status\\s*>([^<]*)</(?:[A-Za-z_][\\w.-]*:)?Status\\s*>");
 
 	protected final boolean fsAccess;
 	protected final boolean taggingEnabled;
@@ -751,9 +746,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	/**
 	 * Acts on a bucket's {@code GET ?versioning} response, with versioning on; the first-use check
 	 * calls it for each bucket. A bucket whose {@code Status} is {@code Enabled} is left as it is.
-	 * One that has no {@code Status}, so has never been versioned, goes to {@link
-	 * #enableBucketVersioning(String, String)}. A {@code Suspended} or unrecognized status, and a
-	 * failed response, are left alone with a warning, and the run goes on un-versioned.
+	 * A {@code VersioningConfiguration} with no or an empty {@code Status}, so a bucket that has
+	 * never been versioned, goes to {@link #enableBucketVersioning(String, String)}. A {@code
+	 * Suspended} or unrecognized status, a body that isn't a readable {@code
+	 * VersioningConfiguration}, and a failed response are left alone with a warning, and the run
+	 * goes on un-versioned.
 	 *
 	 * <p>A subclass that overrides it decides instead, and logs no notice unless it calls this one.
 	 */
@@ -770,17 +767,17 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 							bucketPath, "GET ?versioning returned " + getBucketVersioningResp.status()));
 			return;
 		}
-		final var status = versioningStatus(getBucketVersioningResp.content().toString(UTF_8));
-		if (status == null) {
-			enableBucketVersioning(nodeAddr, bucketVersioningReqUri);
-		} else if (VERSIONING_STATUS_ENABLED.equals(status)) {
-			BucketVersioningNotice.info(stepId, bucketLabel(bucketPath) + ": versioning is already enabled");
-		} else if (VERSIONING_STATUS_SUSPENDED.equals(status)) {
-			BucketVersioningNotice.warn(stepId, bucketLabel(bucketPath)
-							+ ": versioning is suspended; SPT left it alone, and the run goes on un-versioned");
-		} else {
-			BucketVersioningNotice.warn(stepId, bucketLabel(bucketPath) + ": the versioning status \"" + quotedStatus(status)
-							+ "\" is neither Enabled nor Suspended; SPT left it alone, and the run goes on un-versioned");
+		final var state = versioningState(ByteBufUtil.getBytes(getBucketVersioningResp.content()));
+		switch (state.kind()) {
+		case NEVER -> enableBucketVersioning(nodeAddr, bucketVersioningReqUri);
+		case ENABLED -> BucketVersioningNotice.info(stepId, bucketLabel(bucketPath) + ": versioning is already enabled");
+		case SUSPENDED -> BucketVersioningNotice.warn(stepId, bucketLabel(bucketPath)
+						+ ": versioning is suspended; SPT left it alone, and the run goes on un-versioned");
+		case OTHER -> BucketVersioningNotice.warn(stepId, bucketLabel(bucketPath) + ": the versioning status \""
+						+ quotedStatus(state.status())
+						+ "\" is neither Enabled nor Suspended; SPT left it alone, and the run goes on un-versioned");
+		default -> BucketVersioningNotice.warn(stepId, versioningCheckFailed(
+						bucketPath, "GET ?versioning returned a body that is not a VersioningConfiguration SPT can read"));
 		}
 	}
 
@@ -843,14 +840,12 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 	}
 
-	/** The {@code Status} of a {@code VersioningConfiguration} body; null when it has none or an empty one. */
-	static String versioningStatus(final String body) {
-		final var matcher = VERSIONING_STATUS.matcher(body);
-		if (!matcher.find()) {
-			return null;
-		}
-		final var status = matcher.group(1).strip();
-		return status.isEmpty() ? null : status;
+	/**
+	 * What a {@code GET ?versioning} body says, read by a hardened namespace-aware parser: only a
+	 * {@code VersioningConfiguration} with no or an empty {@code Status} counts as never versioned.
+	 */
+	static VersioningConfigurationXmlHandler.State versioningState(final byte[] body) {
+		return VersioningConfigurationXmlHandler.read(body);
 	}
 
 	/** A status for a notice: on one line, at most {@value #MAX_QUOTED_STATUS} characters. */
