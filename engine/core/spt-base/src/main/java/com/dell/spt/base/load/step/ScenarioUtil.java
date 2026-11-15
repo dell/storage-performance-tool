@@ -67,6 +67,13 @@ public interface ScenarioUtil {
 		if (dotPos > 0) {
 			scenarioFileExt = scenarioFileName.substring(dotPos + 1);
 			se = sem.getEngineByExtension(scenarioFileExt);
+			if (se == null) {
+				// engines register lower-case extensions; the check below matches any case
+				final String lowerCaseExt = scenarioFileExt.toLowerCase(Locale.ROOT);
+				if (!lowerCaseExt.equals(scenarioFileExt)) {
+					se = sem.getEngineByExtension(lowerCaseExt);
+				}
+			}
 		}
 
 		if (se == null) {
