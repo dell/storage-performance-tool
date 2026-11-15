@@ -1709,38 +1709,40 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	HttpRequest objectVersioningRequest(final O op, final String nodeAddr) throws URISyntaxException {
 		final var item = (I) op.item();
-		final String name = item.name();
 		if (integrityMetadataEnabled() || op.requestedVersionId() != null) {
-			return objectVersioningRequest(op, item, name, op.requestedVersionId(), true, nodeAddr);
+			return objectVersioningRequest(op, item, op.requestedVersionId(), true, nodeAddr);
 		}
-		// The legacy key~version convention, only for ordinary mode. The name is read once and the
-		// request is built from the key and version as values. The item is never renamed: the channel
-		// owns the operation while the request is built, so a completion (an idle timeout) or a retry
-		// that reads the item meanwhile sees the name that selects the version.
+		// The legacy key~version convention, only for ordinary mode. The item is never renamed: the
+		// channel owns the operation while the request is built, so a completion (an idle timeout) or a
+		// retry that reads the item meanwhile sees the name that selects the version. The paths are built
+		// by dataUriPath from the whole name, and the ~versionId it ends with is taken off.
+		final String name = item.name();
 		final int indexOfVersionStart = name.lastIndexOf('~');
-		if (indexOfVersionStart == -1) {
-			return objectVersioningRequest(op, item, name, null, false, nodeAddr);
-		}
 		return objectVersioningRequest(
-						op, item, name.substring(0, indexOfVersionStart), name.substring(indexOfVersionStart + 1), false, nodeAddr);
+						op, item, indexOfVersionStart == -1 ? null : name.substring(indexOfVersionStart + 1), false, nodeAddr);
 	}
 
 	/**
-	 * The object path for {@code key}, as {@link #dataUriPath} builds it for an item of that name; the
-	 * versioned route passes the key without its {@code ~versionId} suffix as a value.
+	 * {@code uriPath}, which {@link #dataUriPath} built from a {@code key~versionId} item name, without
+	 * that trailing {@code ~versionId}: the path of the key, as {@code dataUriPath} gives it for an item
+	 * named {@code key}. The base {@code dataUriPath} puts the name last, so does an override that only
+	 * changes what comes before it. An override whose path does not end with the suffix has rewritten
+	 * the name itself; the key's path can't be known without renaming the item, so the request is not
+	 * built and the operation fails, rather than acting on another object.
 	 */
-	private static String keyUriPath(final String key, final String srcPath, final String dstPath) {
-		final String path = dstPath != null ? dstPath : srcPath;
-		if (path == null || ItemNamePaths.holdsPath(key, path)) {
-			return key.startsWith(SLASH) ? key : SLASH + key;
+	static String withoutVersionSuffix(final String uriPath, final String versionId) {
+		final int keyEnd = uriPath.length() - versionId.length() - 1;
+		if (keyEnd > 0 && uriPath.charAt(keyEnd) == '~' && uriPath.endsWith(versionId)) {
+			return uriPath.substring(0, keyEnd);
 		}
-		return ItemNamePaths.join(path.startsWith(SLASH) ? path : SLASH + path, key);
+		throw new IllegalStateException(
+						"dataUriPath gave " + uriPath + ", which does not end with the item's ~" + versionId
+										+ ": the versioned request can't select the version");
 	}
 
 	private HttpRequest objectVersioningRequest(
 					final O op,
 					final I item,
-					final String key,
 					final String versionId,
 					final boolean explicitVersionCarrier,
 					final String nodeAddr)
@@ -1750,7 +1752,9 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final HttpHeaders httpHeaders = new DefaultHttpHeaders();
 		httpHeaders.set(HttpHeaderNames.HOST, nodeAddr);
 		final var httpMethod = dataHttpMethod(opType);
-		final String objectUri = keyUriPath(key, srcPath, op.dstPath());
+		final boolean legacyVersion = !explicitVersionCarrier && versionId != null;
+		final String itemUri = dataUriPath(item, srcPath, op.dstPath(), op.type());
+		final String objectUri = legacyVersion ? withoutVersionSuffix(itemUri, versionId) : itemUri;
 		// GetObject and HeadObject (a READ, also with read-metadata-only, and a STAT) select a version
 		// with the versionId query; x-amz-version-id is a response header, which S3 ignores on a request.
 		final boolean useVersionQuery = versionId != null
@@ -1776,7 +1780,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 				}
 			} else {
-				applyCopyHeaders(httpHeaders, keyUriPath(key, srcPath, null));
+				final String copySource = dataUriPath(item, srcPath, null, opType);
+				applyCopyHeaders(httpHeaders, legacyVersion ? withoutVersionSuffix(copySource, versionId) : copySource);
 				httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 			}
 			break;

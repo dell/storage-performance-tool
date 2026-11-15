@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.data.DataInput;
@@ -301,6 +302,69 @@ final class S3VersionedRequestTest {
 		assertEquals("/b/key", copyRequest.uri());
 		assertEquals("/src/key", copyRequest.headers().get(S3Api.KEY_X_AMZ_COPY_SOURCE));
 		assertEquals("key~v1", copy.item().name());
+	}
+
+	/** A subclass's {@code dataUriPath} still makes the paths of the versioned route. */
+	@Test
+	void aDataUriPathOverrideMakesTheVersionedPaths() throws Exception {
+		final Config config = S3StorageDriverTest.baseConfig(true, 2, false, null, HOST);
+		final var driver = new S3StorageDriverTest.TestS3Driver(config) {
+			@Override
+			protected String dataUriPath(
+							final Item item, final String srcPath, final String dstPath, final OpType opType) {
+				return "/custom" + super.dataUriPath(item, srcPath, dstPath, opType);
+			}
+		};
+		resources.add(driver);
+		final Map<OpType, String> uris = new LinkedHashMap<>();
+		for (final var type : List.of(OpType.READ, OpType.STAT, OpType.DELETE, OpType.UPDATE)) {
+			final var op = op(type, "key~v+1");
+			final var request = driver.httpRequest(op, HOST);
+			uris.put(type, request.uri());
+			assertEquals("key~v+1", op.item().name());
+			assertEquals(
+							"AWS " + CREDENTIAL.getUid() + ":" + referenceV2Signature(request),
+							request.headers().get(HttpHeaderNames.AUTHORIZATION),
+							type::toString);
+		}
+		final var copy = op(OpType.CREATE, "key~v1", "/src", "/b");
+		final var copyRequest = driver.httpRequest(copy, HOST);
+		final var plain = driver.httpRequest(op(OpType.READ, "key"), HOST);
+
+		assertEquals("/custom/b/key?versionId=v%2B1", uris.get(OpType.READ));
+		assertEquals("/custom/b/key?versionId=v%2B1", uris.get(OpType.STAT));
+		assertEquals("/custom/b/key?versionId=v%2B1", uris.get(OpType.DELETE));
+		assertEquals("/custom/b/key", uris.get(OpType.UPDATE));
+		assertEquals("/custom/b/key", copyRequest.uri());
+		assertEquals("/custom/src/key", copyRequest.headers().get(S3Api.KEY_X_AMZ_COPY_SOURCE));
+		assertEquals("/custom/b/key", plain.uri());
+	}
+
+	/**
+	 * An override that rewrites the name gives a path without the {@code ~versionId} suffix. The key's
+	 * path is then unknown, so the request is not built, rather than sent for another object.
+	 */
+	@Test
+	void aDataUriPathOverrideThatRewritesTheNameFailsTheVersionedRequest() throws Exception {
+		final Config config = S3StorageDriverTest.baseConfig(true, 4, false, null, HOST);
+		final var driver = new S3StorageDriverTest.TestS3Driver(config) {
+			@Override
+			protected String dataUriPath(
+							final Item item, final String srcPath, final String dstPath, final OpType opType) {
+				return "/b/" + Integer.toHexString(item.name().hashCode());
+			}
+		};
+		resources.add(driver);
+		for (final var type : List.of(OpType.READ, OpType.DELETE, OpType.UPDATE)) {
+			final var op = op(type, "key~v1");
+			final var failure = assertThrows(IllegalStateException.class, () -> driver.httpRequest(op, HOST));
+			assertTrue(failure.getMessage().contains("~v1"), failure::getMessage);
+			assertEquals("key~v1", op.item().name());
+		}
+		final var copy = op(OpType.CREATE, "key~v1", "/src", "/b");
+		assertThrows(IllegalStateException.class, () -> driver.httpRequest(copy, HOST));
+		// Without a version suffix there is nothing to take off: the override's path is sent as it is.
+		assertEquals("/b/" + Integer.toHexString("key".hashCode()), driver.httpRequest(op(OpType.READ, "key"), HOST).uri());
 	}
 
 	// ---------- the routes that do not split the name append the version ----------
