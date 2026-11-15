@@ -43,6 +43,8 @@ public interface Loggers {
 	Logger NIC_PATHS = LogManager.getLogger(BASE + "NicPaths");
 	Logger NIC_SET = LogManager.getLogger(BASE + "NicSet");
 	Logger EVENT_LOOPS = LogManager.getLogger(BASE + "EventLoops");
+	/** One line per bucket versioning notice of an S3 driver's first-use check, for the Entry Node to relay. */
+	Logger BUCKET_VERSIONING = LogManager.getLogger(BASE + "BucketVersioning");
 	Logger TABLES_METRICS = LogManager.getLogger(BASE + "TablesMetrics");
 	Logger SCENARIO = LogManager.getLogger(BASE + "Scenario");
 	Logger TEST = LogManager.getLogger(BASE + "Test");
@@ -90,6 +92,7 @@ public interface Loggers {
 					Map.entry(NIC_PATHS.getName().substring(BASE.length()), "Terminal NIC Paths v1"),
 					Map.entry(NIC_SET.getName().substring(BASE.length()), "Terminal NIC Set v1"),
 					Map.entry(EVENT_LOOPS.getName().substring(BASE.length()), "Terminal Event Loops v1"),
+					Map.entry(BUCKET_VERSIONING.getName().substring(BASE.length()), "Bucket Versioning Notices"),
 					Map.entry(SCENARIO.getName().substring(BASE.length()), "Scenario"),
 					Map.entry(TABLES_METRICS.getName().substring(BASE.length()), "S3 Tables Metrics"));
 }

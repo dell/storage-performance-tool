@@ -143,6 +143,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private final List<AutoCloseable> itemOutputFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> operationLifecycleAggregators = new ArrayList<>();
 	private NicPathsCollector nicPathsCollector;
+	private BucketVersioningRelay bucketVersioningRelay;
 	private final List<AutoCloseable> integrityLogFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> itemTimingMetricsOutputFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> opTraceLogFileAggregators = new ArrayList<>();
@@ -332,6 +333,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 				initAndStartStepSlices(nodeAddrs, configSlices, ctxConfigsSlices, metricsMgr, barrier);
 				initNicPathsCollector(nodeAddrs, configSlices, ctxConfigsSlices);
+				initBucketVersioningRelay(nodeAddrs);
 				if (barrier != null) {
 					openAdmissionBarrier(barrier);
 				}
@@ -406,6 +408,15 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 		// Every slice writes its event-loop report, so a distributed step always collects.
 		nicPathsCollector = new NicPathsCollector(loadStepId(), fileMgrs, NicPathsCollector.nodeNames(nodeAddrs), expected);
+	}
+
+	/** On a distributed step with bucket versioning on, relays the other nodes' first-use notices. */
+	private void initBucketVersioningRelay(final List<String> nodeAddrs) {
+		if (fileMgrs.size() < 2 || bucketVersioningRelay != null
+						|| !BucketVersioningRelay.versioningRequested(config, ctxConfigs)) {
+			return;
+		}
+		bucketVersioningRelay = new BucketVersioningRelay(loadStepId(), fileMgrs, NicPathsCollector.nodeNames(nodeAddrs));
 	}
 
 	private void initDeleteArtifactAggregator(final List<String> nodeAddrs) {
@@ -2732,6 +2743,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			if (nicPathsCollector != null && (!durationMode || (durationAdmissionBarrierSatisfied && durationSlicesClosed))) {
 				nicPathsCollector.close();
 				nicPathsCollector = null;
+			}
+			if (bucketVersioningRelay != null && (!durationMode || (durationAdmissionBarrierSatisfied && durationSlicesClosed))) {
+				bucketVersioningRelay.close();
+				bucketVersioningRelay = null;
 			}
 			for (final var integrityLogFileAggregator : integrityLogFileAggregators) {
 				try {
