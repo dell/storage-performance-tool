@@ -48,11 +48,11 @@ public abstract class ServiceUtil {
 	 * The registry on {@code port} in this host's network namespace, located on the loopback
 	 * address, for binding and unbinding. Never the advertised {@code java.rmi.server.hostname}: from
 	 * inside a Docker bridge container a call to the host's own address comes back from the bridge
-	 * gateway, and the registry refuses a bind from a non-local origin. Nor the registry object this
-	 * process created, called directly: the registry checks the origin of the RMI call in progress,
-	 * so a service created inside a remote call (a step service the entry asks for) would be refused
-	 * for the entry's address. A call through this stub comes from the loopback address, which the
-	 * registry accepts. The stubs the registry hands out still carry the advertised hostname, which
+	 * gateway, and the registry refuses a bind from a non-local origin. A call through this stub comes
+	 * from the loopback address, which the registry accepts. The registry object this process created
+	 * is not called directly: {@code REGISTRY_MAP} holds only a stub when the registry was created
+	 * elsewhere in this JVM or before a {@link #shutdown()}, so the loopback stub is the one route that
+	 * serves every case. The stubs the registry hands out still carry the advertised hostname, which
 	 * {@link UnicastRemoteObject#exportObject(java.rmi.Remote, int)} gives them.
 	 */
 	private static Registry loopbackRegistry(final int port) throws RemoteException {

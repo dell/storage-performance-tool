@@ -43,6 +43,12 @@ class ServiceUtilTest {
 	@AfterEach
 	void restoreHostname() throws RemoteException {
 		ServiceUtil.shutdown();
+		// RMI keeps the last hostname it sampled after the property is cleared, so a test's advertised
+		// name would reach later tests' stubs. Export once under the default to leave that one.
+		System.setProperty(HOST_PROPERTY, "127.0.0.1");
+		final Remote sample = new Remote() {};
+		UnicastRemoteObject.exportObject(sample, 0);
+		UnicastRemoteObject.unexportObject(sample, true);
 		if (originalHostProperty == null) {
 			System.clearProperty(HOST_PROPERTY);
 		} else {
@@ -171,7 +177,12 @@ class ServiceUtilTest {
 						.start();
 		try {
 			final BufferedReader out = new BufferedReader(new InputStreamReader(holder.getInputStream(), StandardCharsets.UTF_8));
-			assertEquals("READY", out.readLine());
+			// The JVM may print its own notes first, for example "Picked up JAVA_TOOL_OPTIONS".
+			String line;
+			do {
+				line = out.readLine();
+			} while (line != null && !"READY".equals(line));
+			assertEquals("READY", line);
 
 			final TestService service = newService(port);
 			assertThrows(ExportException.class, () -> ServiceUtil.create(service, port));
