@@ -601,4 +601,13 @@ an engine-produced handoff uses its generated completion evidence.
 It's possible to use other JSR-223 compliant scripting language to write
 down custom scripts. However there's no official support for other
 scripting languages. The are example dockerfiles for the Groovy support
-and for the Jython support are available for the reference.
+and for the Jython support are available for the reference:
+[`Dockerfile.scripting-groovy`](../../../../ci/docker/Dockerfile.scripting-groovy) and
+[`Dockerfile.scripting-jython`](../../../../ci/docker/Dockerfile.scripting-jython).
+
+With `--run-scenario`, the engine picks the script engine by the scenario
+file's extension. A `.groovy` or `.py` scenario needs its engine jar in
+`ext/`: without it the engine stops with a message that the Groovy or Python
+script engine is not installed, and exits 1. Any other file that no installed
+engine claims runs as JavaScript. A node (`--run-node`) always runs the
+scenario posted to `POST /run` as JavaScript, whatever engines are in `ext/`.

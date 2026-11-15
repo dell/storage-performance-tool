@@ -45,6 +45,9 @@ type Check struct {
 	Duration      time.Duration
 	Error         error
 	CommandResult *command.CommandResult // Optional detailed command results
+	// Detail is extra failure context printed under a failed check, such as the state and
+	// last log lines of a container whose engine never became ready.
+	Detail string
 }
 
 // NodeResult holds the verification results for a single node
@@ -101,4 +104,8 @@ type Verifier struct {
 	netChecker   NetworkChecker
 	timeProvider TimeProvider
 	preflight    preflight.Checker
+
+	// runID identifies this spt verify invocation; every container it starts carries it in the
+	// constants.DockerLabelVerifyRun label.
+	runID string
 }

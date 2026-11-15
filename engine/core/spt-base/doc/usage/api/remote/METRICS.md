@@ -118,8 +118,10 @@ Use the timestamps for different purposes:
 | `test_state` | State | Interpretation |
 |:--:|:--|:--|
 | `0` | Idle | No active or retained local step was available |
-| `1` | Running | A step is starting, has operations in flight, or has not reached its configured bound |
-| `2` | Completed | The bounded work is complete or the row is a retained terminal sample |
+| `1` | Running | An active step that has issued no operations yet, has operations in flight, has not reached its configured count or time limit, or has no count or time limit at all |
+| `2` | Completed | An active step with a count or time limit has reached it with no operations in flight, or the row is a retained terminal sample |
+
+A step with neither a count nor a time limit has no bound to tell a pause between operations from its end, so its active row stays `1`; it reports `2` only from its retained terminal row, which is kept for `api.linger.sec` (default 20 s) after the step ends.
 
 An idle sample has blank `run_id` and `step_id`, `op_type: "none"`, and zero-valued metric groups. It is a readiness signal, not a completed zero-throughput test.
 

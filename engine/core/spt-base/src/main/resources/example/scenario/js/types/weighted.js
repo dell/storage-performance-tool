@@ -38,7 +38,7 @@ PreconditionLoad
 				}
 			},
 			"load": {
-				"step": {
+				"op": {
 					"limit": {
 						"count": 10000
 					}
@@ -81,11 +81,11 @@ WeightedLoad
 			"load": {
 				"op": {
 					"recycle": {
-						"enabled": true
+						"mode": true
 					},
-					"weight": 80
-				},
-				"type": "read"
+					"weight": 80,
+					"type": "read"
+				}
 			}
 		}
 	)

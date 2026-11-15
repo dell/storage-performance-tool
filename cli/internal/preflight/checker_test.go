@@ -177,7 +177,7 @@ func TestPreflight_CheckPorts_NoConflicts(t *testing.T) {
 	mock.SetCommandSuccess(fmt.Sprintf("%s %s %s %s", constants.DockerCommand, constants.DockerCmdPS, constants.DockerFlagAll, constants.DockerFlagFormat+" "+constants.DockerConflictFormat), "")
 
 	pf := &DefaultChecker{exec: mock}
-	info, err := pf.CheckPorts(context.Background(), testHost(), constants.DefaultRMIRegistryPort, constants.DefaultSptAPIPort, constants.DefaultRMIPortStart, constants.DefaultRMIPortCount)
+	info, err := pf.CheckPorts(context.Background(), testHost(), constants.DefaultRMIRegistryPort, constants.DefaultSptAPIPort)
 	if err != nil {
 		t.Fatalf("CheckPorts error: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestPreflight_CheckPorts_WithConflictAndContainer(t *testing.T) {
 	mock.SetCommandSuccess(fmt.Sprintf("%s %s %s %s", constants.DockerCommand, constants.DockerCmdPS, constants.DockerFlagAll, constants.DockerFlagFormat+" "+constants.DockerConflictFormat), dockerOut)
 
 	pf := &DefaultChecker{exec: mock}
-	info, err := pf.CheckPorts(context.Background(), testHost(), constants.DefaultRMIRegistryPort, constants.DefaultSptAPIPort, constants.DefaultRMIPortStart, constants.DefaultRMIPortCount)
+	info, err := pf.CheckPorts(context.Background(), testHost(), constants.DefaultRMIRegistryPort, constants.DefaultSptAPIPort)
 	if err != nil {
 		t.Fatalf("CheckPorts error: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestPreflight_CheckPorts_NonDefaultRegistryPort(t *testing.T) {
 	mock.SetCommandSuccess(fmt.Sprintf("%s %s %s %s", constants.DockerCommand, constants.DockerCmdPS, constants.DockerFlagAll, constants.DockerFlagFormat+" "+constants.DockerConflictFormat), "")
 
 	pf := &DefaultChecker{exec: mock}
-	info, err := pf.CheckPorts(context.Background(), testHost(), 11099, 19100, constants.DefaultRMIPortStart, constants.DefaultRMIPortCount)
+	info, err := pf.CheckPorts(context.Background(), testHost(), 11099, 19100)
 	if err != nil {
 		t.Fatalf("CheckPorts error: %v", err)
 	}

@@ -19,7 +19,7 @@ import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-/** Servlet that serves the current configuration and schema over HTTP. */
+/** Servlet that serves the current configuration, with credential values masked, and the schema over HTTP. */
 public class ConfigServlet extends HttpServlet {
 
 	private static final String SCHEMA_PATH = "schema";
@@ -84,6 +84,6 @@ public class ConfigServlet extends HttpServlet {
 	private void getConfig(final HttpServletResponse resp, final ConfigFormat format) throws IOException {
 		resp.setStatus(HttpServletResponse.SC_OK);
 		final var respWriter = resp.getWriter();
-		respWriter.print(ConfigUtil.toString(config, format));
+		respWriter.print(ConfigUtil.toMaskedString(config, format, null));
 	}
 }

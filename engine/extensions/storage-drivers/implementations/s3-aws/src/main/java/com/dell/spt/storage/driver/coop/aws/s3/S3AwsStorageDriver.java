@@ -128,7 +128,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private final S3AsyncClient standaloneDeleteS3Client;
 	private final SdkAsyncHttpClient standaloneDeleteHttpClient;
 	private final S3AwsStandaloneDeleteResources.Lazy lazyStandaloneDeleteResources;
-	private final ExecutorService executor; // For read operations
 	private final ExecutorService uploadExecutor; // Dedicated for upload operations
 	private final String bucketName;
 	private final boolean checksumEnabled;
@@ -286,7 +285,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		// Use virtual threads to support high concurrency without OS-level thread explosion
 		// This allows thousands of blocking operations while honoring user's --concurrency limit
-		this.executor = Executors.newVirtualThreadPerTaskExecutor();
 		this.uploadExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
 		this.bucketName = resolveBucketName(config);
@@ -483,7 +481,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 					finishOperation(op);
 				}
 				if (aborting) {
-					op.status(Operation.Status.FAIL_UNKNOWN);
+					op.status(abortedUploadStatus(mpuOp));
 					emitMultipartLifecycle(mpuOp, "failed_aborted", true, true, mpuFailure(mpuOp));
 				} else if (completing) {
 					emitMultipartLifecycle(mpuOp, "completed", false, null, null);
@@ -524,6 +522,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 										originalStatus, DELETE_TRANSPORT_FAILURE));
 					}
 				}
+			} else if (aborting && originalStatus != Status.INTERRUPTED) {
+				// The upload ends with its part's failure, as when the abort succeeds.
+				op.status(abortedUploadStatus(mpuOp));
 			} else {
 				op.status(originalStatus);
 			}
@@ -1009,11 +1010,15 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			return CompletableFuture.completedFuture(null);
 
 		case CREATE:
-		case UPDATE:
 			// Check if this is a copy operation (srcPath present)
 			if (op.srcPath() != null && !op.srcPath().isEmpty()) {
 				return copyObject(op);
 			}
+			return putObject(op);
+
+		case UPDATE:
+			// An UPDATE rewrites the whole object with the item's current content, as before 5.9.0.
+			// Its source path is the item's own directory, not a copy source.
 			return putObject(op);
 
 		case READ:
@@ -2093,7 +2098,7 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			return CompletableFuture.failedFuture(new IllegalArgumentException("Source path is required for copy operation"));
 		}
 
-		final String[] srcBk = parseBucketAndKey(copySourcePath(op.type(), op.item().name(), srcPath));
+		final String[] srcBk = parseBucketAndKey(copySourcePath(op.item().name(), srcPath));
 
 		var reqBuilder = CopyObjectRequest.builder()
 						.sourceBucket(srcBk[0])
@@ -2113,11 +2118,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	 * {@code "/" + key}, so {@code /src} gives {@code /src/<key>}.
 	 *
 	 * <p>Any other source path is the source itself, as before: {@code /src/key} copies that one
-	 * object to every item, and an UPDATE, which arrives here with the item's own directory, is not
-	 * turned into a copy of the object onto itself.
+	 * object to every item. Only a CREATE is a copy; an UPDATE is a PUT (see {@link #execute}).
 	 */
-	static String copySourcePath(final OpType type, final String itemName, final String srcPath) {
-		if (type != OpType.CREATE || !isBucketPath(srcPath)) {
+	static String copySourcePath(final String itemName, final String srcPath) {
+		if (!isBucketPath(srcPath)) {
 			return srcPath;
 		}
 		return ItemNamePaths.holdsPath(itemName, srcPath) ? itemName : ItemNamePaths.join(srcPath, itemName);
@@ -2206,24 +2210,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 
 		try {
-			// Shutdown the executor service to release thread pool resources
-			if (executor != null) {
-				executor.shutdown();
-				// Wait for pending tasks to complete (with timeout)
-				if (!executor.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS)) {
-					LOG.warn("Executor service did not terminate gracefully, forcing shutdown");
-					executor.shutdownNow();
-				}
-				LOG.info("Executor service shutdown successfully");
-			}
-		} catch (InterruptedException e) {
-			LOG.warn("Executor service shutdown interrupted");
-			Thread.currentThread().interrupt();
-		} catch (Exception e) {
-			LOG.warn("Failed to shutdown executor service: {}", e.getMessage());
-		}
-
-		try {
 			// Shutdown the upload executor service to release thread pool resources
 			if (uploadExecutor != null) {
 				uploadExecutor.shutdown();
@@ -2235,7 +2221,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				LOG.info("Upload executor service shutdown successfully");
 			}
 		} catch (InterruptedException e) {
-			LOG.warn("Upload executor service shutdown interrupted");
+			// A close on an interrupted thread stops waiting at once. The clients are already closed and
+			// nothing depends on the wait, so interrupt the tasks still running rather than leave them.
+			uploadExecutor.shutdownNow();
+			LOG.warn("Upload executor service shutdown interrupted, forcing shutdown");
 			Thread.currentThread().interrupt();
 		} catch (Exception e) {
 			LOG.warn("Failed to shutdown upload executor service: {}", e.getMessage());

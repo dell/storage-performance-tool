@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
@@ -64,6 +65,13 @@ type MockDockerManager struct {
 
 	// Callbacks for testing
 	onStreamOutput func(containerID string)
+
+	// What apiWaitReport reads for a container whose API wait failed
+	waitState    command.ContainerState
+	waitStateErr error
+	waitLogs     string
+	waitLogsErr  error
+	waitReports  []string // container IDs apiWaitReport was asked about
 }
 
 // NewMockDockerManager creates a new mock Docker manager
@@ -464,4 +472,36 @@ func (m *MockDockerManager) GetEntryNodeCalls() []struct {
 	}, len(m.entryNodeCalls))
 	copy(result, m.entryNodeCalls)
 	return result
+}
+
+// SetAPIWaitContainer sets the container state and logs apiWaitReport reads after a failed API
+// wait, and the errors reading them returns.
+func (m *MockDockerManager) SetAPIWaitContainer(state command.ContainerState, stateErr error, logs string, logsErr error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.waitState, m.waitStateErr, m.waitLogs, m.waitLogsErr = state, stateErr, logs, logsErr
+}
+
+// APIWaitReportCalls returns the container IDs apiWaitReport described.
+func (m *MockDockerManager) APIWaitReportCalls() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.waitReports...)
+}
+
+func (m *MockDockerManager) apiWaitReport(_ context.Context, containerID string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.waitReports = append(m.waitReports, containerID)
+	logs := m.waitLogs
+	if m.waitLogsErr == nil && len(logs) > 0 {
+		logs = tailLines(logs, command.APIWaitLogLines)
+	}
+	return command.APIWaitReport(containerID, m.waitState, m.waitStateErr, logs, m.waitLogsErr)
+}
+
+func (m *MockDockerManager) containerState(_ context.Context, _ string) (command.ContainerState, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.waitState, m.waitStateErr
 }
