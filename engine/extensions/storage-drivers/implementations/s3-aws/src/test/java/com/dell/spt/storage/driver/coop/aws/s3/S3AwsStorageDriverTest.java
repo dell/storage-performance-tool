@@ -237,6 +237,29 @@ public class S3AwsStorageDriverTest {
 		}
 	}
 
+	@Test
+	@SuppressWarnings("unchecked")
+	void compositeDeleteSendsDeleteObjectAndNoPut() throws Exception {
+		when(mockS3Client.deleteObject(any(DeleteObjectRequest.class)))
+						.thenReturn(CompletableFuture.completedFuture(DeleteObjectResponse.builder().build()));
+		// stubbed so that a regression to the old PUT fallback fails the never() check, not an NPE
+		when(mockS3Client.putObject(any(PutObjectRequest.class), any(AsyncRequestBody.class)))
+						.thenReturn(CompletableFuture.completedFuture(PutObjectResponse.builder().build()));
+		final DataItem item = new DataItemImpl("key", 0, 4096);
+		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4MB"), 1, false));
+		final var op = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<DataItem>(
+						0, OpType.DELETE, item, null, "/bucket", TEST_CRED, null, 0, 1024);
+
+		drv.execute((Operation<Item>) (Operation<?>) op).join();
+
+		final ArgumentCaptor<DeleteObjectRequest> request = ArgumentCaptor.forClass(DeleteObjectRequest.class);
+		verify(mockS3Client).deleteObject(request.capture());
+		assertEquals("bucket", request.getValue().bucket());
+		assertEquals("key", request.getValue().key());
+		verify(mockS3Client, never()).putObject(any(PutObjectRequest.class), any(AsyncRequestBody.class));
+		verify(mockS3Client, never()).createMultipartUpload(any(CreateMultipartUploadRequest.class));
+	}
+
 	@Nested
 	class IntegrityMetadataTest {
 
@@ -3016,12 +3039,13 @@ public class S3AwsStorageDriverTest {
 		}
 
 		@Test
-		void copyObject_readsTheListedItemFromTheSourceBucketAndKeepsItsKey() throws Exception {
+		void copyObject_readsTheListedItemFromTheSourceBucketAndLandsUnderTheSourceBucket() throws Exception {
+			// as on the s3 driver, a listed name carries its bucket, so the copy lands at <dst>/<src bucket>/<key>
 			final CopyObjectRequest copy = copyOfTheLastListedItem("/source-bucket", null, "k0000", "k0001");
 			assertEquals("source-bucket", copy.sourceBucket());
 			assertEquals("k0001", copy.sourceKey());
 			assertEquals("dest-bucket", copy.destinationBucket());
-			assertEquals("k0001", copy.destinationKey());
+			assertEquals("source-bucket/k0001", copy.destinationKey());
 		}
 
 		@Test
@@ -3029,7 +3053,7 @@ public class S3AwsStorageDriverTest {
 			final CopyObjectRequest copy = copyOfTheLastListedItem("/source-bucket", "dir/sub/", "dir/sub/k0001");
 			assertEquals("source-bucket", copy.sourceBucket());
 			assertEquals("dir/sub/k0001", copy.sourceKey());
-			assertEquals("dir/sub/k0001", copy.destinationKey());
+			assertEquals("source-bucket/dir/sub/k0001", copy.destinationKey());
 		}
 
 		@Test
@@ -3061,18 +3085,22 @@ public class S3AwsStorageDriverTest {
 			final CopyObjectRequest copy = copyOfTheLastListedItem("/source-bucket/k0000", null, "k0000", "k0001");
 			assertEquals("source-bucket", copy.sourceBucket());
 			assertEquals("k0000", copy.sourceKey());
-			assertEquals("k0001", copy.destinationKey());
+			assertEquals("source-bucket/k0001", copy.destinationKey());
 		}
 
 		@Test
 		void copySourcePath_readsTheItemOnlyForACopyFromABucket() {
-			assertEquals("/src/k0", S3AwsStorageDriver.copySourcePath("/k0", "/src"));
-			assertEquals("/src/k0", S3AwsStorageDriver.copySourcePath("/k0", "/src/"));
+			// listed names carry the bucket, /src/<key>
 			assertEquals("/src/k0", S3AwsStorageDriver.copySourcePath("/src/k0", "/src"));
-			assertEquals("/src/key", S3AwsStorageDriver.copySourcePath("/k0", "/src/key"));
-			assertEquals("/src/dir/", S3AwsStorageDriver.copySourcePath("/k0", "/src/dir/"));
-			assertEquals("src", S3AwsStorageDriver.copySourcePath("/k0", "src"));
-			assertEquals("/", S3AwsStorageDriver.copySourcePath("/k0", "/"));
+			assertEquals("/src/k0", S3AwsStorageDriver.copySourcePath("/src/k0", "/src/"));
+			assertEquals("/src/src/k0", S3AwsStorageDriver.copySourcePath("/src/src/k0", "/src"));
+			assertEquals("/src/dst/k0", S3AwsStorageDriver.copySourcePath("/src/dst/k0", "/src"));
+			// an items-file name without the bucket is joined to the source bucket
+			assertEquals("/src/k0", S3AwsStorageDriver.copySourcePath("/k0", "/src"));
+			assertEquals("/src/key", S3AwsStorageDriver.copySourcePath("/src/k0", "/src/key"));
+			assertEquals("/src/dir/", S3AwsStorageDriver.copySourcePath("/src/k0", "/src/dir/"));
+			assertEquals("src", S3AwsStorageDriver.copySourcePath("/src/k0", "src"));
+			assertEquals("/", S3AwsStorageDriver.copySourcePath("/src/k0", "/"));
 		}
 
 		@SuppressWarnings("unchecked")
@@ -3804,6 +3832,220 @@ public class S3AwsStorageDriverTest {
 			uploadExecutorField.setAccessible(true);
 			ExecutorService uploadExecutor = (ExecutorService) uploadExecutorField.get(driver);
 			assertTrue(uploadExecutor.isShutdown(), "Upload executor should be shut down");
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// Listed items: names carry the listed bucket, as on the s3 driver
+	// -----------------------------------------------------------------------
+
+	@Nested
+	class ListedItemNamesTest {
+
+		/** Lists one page of the path the way a path item input does. */
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		private List<Item> listed(final String path, final String prefix, final boolean truncated, final String... keys)
+						throws Exception {
+			final List<S3Object> contents = new ArrayList<>();
+			for (final String key : keys) {
+				contents.add(S3Object.builder().key(key).size(1L).build());
+			}
+			when(mockS3Client.listObjectsV2(any(ListObjectsV2Request.class)))
+							.thenReturn(CompletableFuture.completedFuture(
+											ListObjectsV2Response.builder().contents(contents).isTruncated(truncated).build()));
+			final List<Item> items = drv.list(
+							(ItemFactory) new com.dell.spt.base.item.DataItemFactoryImpl<>(), path, prefix, 36, null, 100,
+							ListOptions.DEFAULT);
+			return truncated ? items : items.subList(0, items.size() - 1);
+		}
+
+		/** Builds an operation the way the load generator does for a step with the given paths. */
+		@SuppressWarnings({"unchecked", "rawtypes"
+		})
+		private Operation<Item> build(
+						final OpType opType, final Item item, final String inputPath, final String outputPath) throws Exception {
+			final var builder = new com.dell.spt.base.item.op.data.DataOperationsBuilderImpl(0);
+			builder.opType(opType);
+			builder.inputPath(inputPath);
+			builder.outputPathInput(
+							outputPath == null ? null : new com.dell.spt.base.config.ConstantValueInputImpl<>(outputPath));
+			builder.credentialInput(null);
+			builder.sizeThreshold(Long.MAX_VALUE);
+			return (Operation<Item>) builder.buildOp(item);
+		}
+
+		/** Reads each item from the input path and returns the bucket and key of each GET sent. */
+		@SuppressWarnings("unchecked")
+		private List<String> readRequests(final String inputPath, final List<Item> items) throws Exception {
+			when(mockS3Client.getObject(any(GetObjectRequest.class), any(AsyncResponseTransformer.class)))
+							.thenReturn(CompletableFuture.failedFuture(NoSuchKeyException.builder().message("probe").build()));
+			for (final Item item : items) {
+				try {
+					drv.execute(build(OpType.READ, item, inputPath, null)).join();
+				} catch (final CompletionException ignored) {
+					// the probe answers every GET with a 404; only the request matters here
+				}
+			}
+			final ArgumentCaptor<GetObjectRequest> cap = ArgumentCaptor.forClass(GetObjectRequest.class);
+			verify(mockS3Client, Mockito.atLeastOnce()).getObject(cap.capture(), any(AsyncResponseTransformer.class));
+			final List<String> sent = new ArrayList<>();
+			for (final GetObjectRequest request : cap.getAllValues()) {
+				sent.add(request.bucket() + "|" + request.key());
+			}
+			return sent;
+		}
+
+		/** Deletes each item from the input path and returns the bucket and key of each DELETE sent. */
+		private List<String> deleteRequests(final String inputPath, final List<Item> items) throws Exception {
+			when(mockS3Client.deleteObject(any(DeleteObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(DeleteObjectResponse.builder().build()));
+			for (final Item item : items) {
+				drv.execute(build(OpType.DELETE, item, inputPath, null)).join();
+			}
+			final ArgumentCaptor<DeleteObjectRequest> cap = ArgumentCaptor.forClass(DeleteObjectRequest.class);
+			verify(mockS3Client, Mockito.atLeastOnce()).deleteObject(cap.capture());
+			final List<String> sent = new ArrayList<>();
+			for (final DeleteObjectRequest request : cap.getAllValues()) {
+				sent.add(request.bucket() + "|" + request.key());
+			}
+			return sent;
+		}
+
+		/** Copies an item from the source path to the destination path, as a copy step does. */
+		private Operation<Item> copy(final Item item, final String srcPath, final String dstPath) throws Exception {
+			when(mockS3Client.copyObject(any(CopyObjectRequest.class)))
+							.thenReturn(CompletableFuture.completedFuture(CopyObjectResponse.builder().build()));
+			final Operation<Item> op = build(OpType.CREATE, item, srcPath, dstPath);
+			drv.execute(op).join();
+			return op;
+		}
+
+		private List<String> copyRequests() {
+			final ArgumentCaptor<CopyObjectRequest> cap = ArgumentCaptor.forClass(CopyObjectRequest.class);
+			verify(mockS3Client, Mockito.atLeastOnce()).copyObject(cap.capture());
+			final List<String> sent = new ArrayList<>();
+			for (final CopyObjectRequest request : cap.getAllValues()) {
+				sent.add(request.sourceBucket() + "|" + request.sourceKey()
+								+ " -> " + request.destinationBucket() + "|" + request.destinationKey());
+			}
+			return sent;
+		}
+
+		@Test
+		void listedNamesCarryTheListedBucket() throws Exception {
+			final List<Item> items = listed("/pp", null, false, "k0000", "dir/sub/k0001", "/k0002");
+			assertEquals(List.of("/pp/k0000", "/pp/dir/sub/k0001", "/pp//k0002"),
+							items.stream().map(Item::name).toList());
+		}
+
+		@Test
+		void readOfListedNestedKeysAsksTheListedBucketForTheWholeKey() throws Exception {
+			final List<Item> items = listed("/pp", "dir/", false, "dir/sub/k0000", "dir/sub/k0001");
+			assertEquals(List.of("pp|dir/sub/k0000", "pp|dir/sub/k0001"), readRequests("/pp", items));
+		}
+
+		@Test
+		void deleteOfListedNestedKeysSendsDeleteToTheListedBucketOnly() throws Exception {
+			// a bucket named "dir" exists; before the fix, these deletes emptied it
+			final List<Item> items = listed("/pp", "dir/", false, "dir/sub/k0000", "dir/sub/k0001");
+			assertEquals(List.of("pp|dir/sub/k0000", "pp|dir/sub/k0001"), deleteRequests("/pp", items));
+		}
+
+		@Test
+		void listedKeyWhoseFirstSegmentIsTheListedBucketKeepsIt() throws Exception {
+			assertEquals(List.of("pp|pp/k0000"), readRequests("/pp", listed("/pp", null, false, "pp/k0000")));
+			assertEquals(List.of("pp|pp/k0000"), deleteRequests("/pp", listed("/pp", null, false, "pp/k0000")));
+		}
+
+		@Test
+		void flatListedKeysAreRequestedAsBefore() throws Exception {
+			assertEquals(List.of("pp|k0000", "pp|k0001"), readRequests("/pp", listed("/pp", null, false, "k0000", "k0001")));
+			assertEquals(List.of("pp|k0000", "pp|k0001"),
+							deleteRequests("/pp", listed("/pp", null, false, "k0000", "k0001")));
+		}
+
+		@Test
+		void aPathBelowTheBucketListsTheBucketAndNamesTheWholeKey() throws Exception {
+			// a path that holds more than the bucket lists the bucket; names hold the bucket and the whole key
+			final List<Item> items = listed("/pp/sub", "sub/", false, "sub/k0000", "sub/deeper/k0001");
+			assertEquals(List.of("/pp/sub/k0000", "/pp/sub/deeper/k0001"), items.stream().map(Item::name).toList());
+			assertEquals(List.of("pp|sub/k0000", "pp|sub/deeper/k0001"), readRequests("/pp/sub", items));
+		}
+
+		@Test
+		void copyOfAKeyNamedLikeTheSourceBucketReadsItAndLandsUnderTheSourceBucket() throws Exception {
+			final Operation<Item> op = copy(listed("/pp", null, false, "pp/k0000").get(0), "/pp", "/dst");
+			assertEquals(List.of("pp|pp/k0000 -> dst|pp/pp/k0000"), copyRequests());
+			assertEquals("/dst/pp/pp/k0000", op.result().item().name());
+		}
+
+		@Test
+		void copyOfAKeyNamedLikeTheDestinationBucketKeepsSourceKeysApart() throws Exception {
+			final List<Item> items = listed("/src", null, false, "dst/k0000", "k0000");
+			copy(items.get(0), "/src", "/dst");
+			copy(items.get(1), "/src", "/dst");
+			assertEquals(List.of("src|dst/k0000 -> dst|src/dst/k0000", "src|k0000 -> dst|src/k0000"), copyRequests());
+		}
+
+		@Test
+		void itemsWrittenAfterAReadOrACopyResolveTheSameObjectsWhenReadAgain() throws Exception {
+			final Item listedItem = listed("/pp", "dir/", false, "dir/sub/k0000").get(0);
+			final Operation<Item> read = build(OpType.READ, listedItem, "/pp", null);
+			final String readName = read.result().item().name();
+			assertEquals("/pp/dir/sub/k0000", readName);
+
+			final Operation<Item> copied = copy(listed("/src", null, false, "dst/k0001").get(0), "/src", "/dst");
+			final String copyName = copied.result().item().name();
+			assertEquals("/dst/src/dst/k0001", copyName);
+
+			// a later step reads the items file, which holds these names, with no item input path
+			final List<Item> fromFile = List.of(
+							new DataItemImpl(readName, 0, 1), new DataItemImpl(copyName, 0, 1));
+			assertEquals(List.of("pp|dir/sub/k0000", "dst|src/dst/k0001"), readRequests(null, fromFile));
+		}
+
+		/** Lists a truncated first page, then the next page after its last item, and returns its start-after. */
+		private String startAfterOfTheNextPage(final String path, final String prefix, final String... firstPageKeys)
+						throws Exception {
+			final List<Item> firstPage = listed(path, prefix, true, firstPageKeys);
+			drv.list(new ItemFactoryImpl<>(), path, prefix, 36, firstPage.get(firstPage.size() - 1), 100, ListOptions.DEFAULT);
+			final ArgumentCaptor<ListObjectsV2Request> cap = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+			verify(mockS3Client, Mockito.times(2)).listObjectsV2(cap.capture());
+			assertNull(cap.getAllValues().get(0).startAfter());
+			return cap.getAllValues().get(1).startAfter();
+		}
+
+		@Test
+		void nextPageStartsAfterTheKeyWithoutTheBucket() throws Exception {
+			assertEquals("k0001", startAfterOfTheNextPage("/pp", null, "k0000", "k0001"));
+		}
+
+		@Test
+		void nextPageStartsAfterTheWholeNestedKey() throws Exception {
+			assertEquals("dir/sub/k0001", startAfterOfTheNextPage("/pp", "dir/sub/", "dir/sub/k0000", "dir/sub/k0001"));
+		}
+
+		@Test
+		void nextPageOfAPathWithATrailingSlashStartsAfterTheKey() throws Exception {
+			assertEquals("k0001", startAfterOfTheNextPage("/pp/", null, "k0000", "k0001"));
+		}
+
+		@Test
+		void nextPageOfAPathBelowTheBucketStartsAfterTheWholeKey() throws Exception {
+			assertEquals("sub/k0001", startAfterOfTheNextPage("/pp/sub", "sub/", "sub/k0000", "sub/k0001"));
+		}
+
+		@Test
+		void nextPageStartsAfterAKeyThatStartsWithASlashWhole() throws Exception {
+			assertEquals("/k0001", startAfterOfTheNextPage("/pp", null, "/k0000", "/k0001"));
+		}
+
+		@Test
+		void listedKeyKeepsANameOutsideTheBucketAsBefore() {
+			assertEquals("object-49", S3AwsStorageDriver.listedKey("/object-49", "/pp"));
+			assertEquals("other/k0", S3AwsStorageDriver.listedKey("/other/k0", "/pp"));
+			assertEquals("k0", S3AwsStorageDriver.listedKey("/pp/k0", "/pp"));
 		}
 	}
 

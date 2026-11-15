@@ -29,6 +29,15 @@ public class DataOperationsBuilderImpl<I extends DataItem, O extends DataOperati
 	protected volatile List<Range> fixedRanges = null;
 	protected volatile int randomRangesCount = 0;
 	protected volatile long sizeThreshold = 0;
+	/**
+	 * The threshold {@link #buildOp} and {@link #buildOps} compare item sizes against: the configured
+	 * {@link #sizeThreshold} for CREATE and READ, the only op types with a composite (multipart)
+	 * implementation, and {@link Long#MAX_VALUE} for every other type, which therefore always gets a
+	 * plain operation. Recomputed at configuration time by {@link #opType(OpType)} and
+	 * {@link #sizeThreshold(long)}, whichever is called last, so building an operation does no op-type
+	 * check.
+	 */
+	protected volatile long effectiveSizeThreshold = 0;
 
 	public DataOperationsBuilderImpl(final int originIndex) {
 		super(originIndex);
@@ -37,6 +46,7 @@ public class DataOperationsBuilderImpl<I extends DataItem, O extends DataOperati
 	@Override
 	public DataOperationsBuilderImpl<I, O> opType(final OpType opType) {
 		super.opType(opType);
+		updateEffectiveSizeThreshold();
 		return this;
 	}
 
@@ -79,7 +89,21 @@ public class DataOperationsBuilderImpl<I extends DataItem, O extends DataOperati
 	@Override
 	public DataOperationsBuilderImpl<I, O> sizeThreshold(final long sizeThreshold) {
 		this.sizeThreshold = sizeThreshold > 0 ? sizeThreshold : Long.MAX_VALUE;
+		updateEffectiveSizeThreshold();
 		return this;
+	}
+
+	private void updateEffectiveSizeThreshold() {
+		effectiveSizeThreshold = buildsCompositeOperations(opType) ? sizeThreshold : Long.MAX_VALUE;
+	}
+
+	/**
+	 * Whether items above the size threshold get a composite (multipart) operation for this op type:
+	 * only CREATE and READ have a composite implementation. Any other type gets the plain operation it
+	 * would get with no threshold.
+	 */
+	public static boolean buildsCompositeOperations(final OpType opType) {
+		return OpType.CREATE.equals(opType) || OpType.READ.equals(opType);
 	}
 
 	@Override
@@ -117,7 +141,7 @@ public class DataOperationsBuilderImpl<I extends DataItem, O extends DataOperati
 	@SuppressWarnings("unchecked")
 	public O buildOp(final I dataItem) throws IOException, IllegalArgumentException {
 		final String outputPath = nextOutputPath(dataItem);
-		if (dataItem.size() > sizeThreshold) {
+		if (dataItem.size() > effectiveSizeThreshold) {
 			if (randomRangesCount > 0 || (fixedRanges != null && fixedRanges.size() > 0)) {
 				throw new IllegalArgumentException(
 								"Not supported - both byte ranges configured and size threshold");
@@ -171,7 +195,7 @@ public class DataOperationsBuilderImpl<I extends DataItem, O extends DataOperati
 		String outputPath;
 		for (final I nextItem : items) {
 			outputPath = nextOutputPath(nextItem);
-			if (nextItem.size() > sizeThreshold) {
+			if (nextItem.size() > effectiveSizeThreshold) {
 				if (randomRangesCount > 0 || (fixedRanges != null && fixedRanges.size() > 0)) {
 					throw new IllegalArgumentException(
 									"Not supported - both byte ranges configured and size threshold");

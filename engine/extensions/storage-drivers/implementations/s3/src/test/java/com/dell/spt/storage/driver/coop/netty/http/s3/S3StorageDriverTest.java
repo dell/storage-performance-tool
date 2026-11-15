@@ -652,11 +652,41 @@ public class S3StorageDriverTest {
 	}
 
 	@Test
-	void canonicalizeQueryString_sortsAndEncodes() throws Exception {
-		Method qm = S3StorageDriver.class.getDeclaredMethod("canonicalizeQueryString", String.class);
-		qm.setAccessible(true);
-		final String canonical = (String) qm.invoke(null, "z=~&b=two+three&a=1&b=two three");
-		assertEquals("a=1&b=two%20three&b=two%2Bthree&z=~", canonical);
+	void canonicalV4_sortsAndEncodesTheQuery() throws Exception {
+		try (TestS3Driver drv = canonicalV4Driver()) {
+			final String[] lines = canonicalV4(drv, "/bucket/obj?z=~&b=two+three&a=1&b=two three").split("\n", -1);
+			assertEquals("/bucket/obj", lines[1]);
+			assertEquals("a=1&b=two%20three&b=two%2Bthree&z=~", lines[2]);
+		}
+	}
+
+	@Test
+	void canonicalV4_anEmptyQueryIsTheEmptyQueryLine() throws Exception {
+		final String expected = "HEAD\n/b/key\n\nhost:127.0.0.1:9020\nx-amz-content-sha256:" + S3Api.AMZ_EMPTY_BODY_SHA256
+						+ "\nx-amz-date:20251004T000000Z\n\nhost;x-amz-content-sha256;x-amz-date\n" + S3Api.AMZ_EMPTY_BODY_SHA256;
+		try (TestS3Driver drv = canonicalV4Driver()) {
+			assertEquals(expected, canonicalV4(drv, "/b/key"));
+			assertEquals(expected, canonicalV4(drv, "/b/key?"));
+		}
+	}
+
+	private static HttpHeaders canonicalV4Headers() {
+		final HttpHeaders headers = new DefaultHttpHeaders();
+		headers.set(HttpHeaderNames.HOST, "127.0.0.1:9020");
+		headers.set(HttpHeaderNames.CONTENT_LENGTH, 0);
+		headers.set(S3Api.AMZ_DATE_HEADER, "20251004T000000Z");
+		headers.set(S3Api.AMZ_PAYLOAD_HEADER, S3Api.AMZ_EMPTY_BODY_SHA256);
+		return headers;
+	}
+
+	private static TestS3Driver canonicalV4Driver() throws Exception {
+		return new TestS3Driver(baseConfig(false, 4, false, null, "127.0.0.1:9020"));
+	}
+
+	/** The V4 canonical request of a HEAD of {@code uri}, with fixed headers. */
+	private static String canonicalV4(final TestS3Driver drv, final String uri) {
+		final HttpHeaders headers = canonicalV4Headers();
+		return drv.getCanonicalV4(headers, new TreeMap<>(drv.getNonCanonicalHeaders(headers)), HttpMethod.HEAD, uri);
 	}
 
 	// ---------- normalizeHeaderValue ----------
@@ -1258,16 +1288,17 @@ public class S3StorageDriverTest {
 
 	// ---------- objectVersioningRequest ----------
 	@Test
-	void objectVersioningRequest_setsVersionHeaderAndPath() throws Exception {
+	void objectVersioningRequest_selectsTheVersionWithTheQuery() throws Exception {
 		Config cfg = baseConfig(true, 2, false, null, "127.0.0.1");
 		TestS3Driver drv = new TestS3Driver(cfg);
 		Item item = new ItemImpl("/bucketV/key~VER123");
 		Operation<Item> op = new OperationImpl<>(123, OpType.READ, item, null, "/bucketV", TEST_CRED);
 		HttpRequest req = (HttpRequest) drv.httpRequest(op, "127.0.0.1");
 		assertEquals(HttpMethod.GET, req.method());
-		// version suffix stripped from URI
-		assertEquals("/bucketV/key", req.uri());
-		assertEquals("VER123", req.headers().get("x-amz-version-id"));
+		// version suffix moved from the key to the versionId query; x-amz-version-id is a response header
+		assertEquals("/bucketV/key?versionId=VER123", req.uri());
+		assertNull(req.headers().get("x-amz-version-id"));
+		assertEquals("key~VER123", item.name());
 		// Authorization added
 		assertTrue(req.headers().contains(HttpHeaderNames.AUTHORIZATION));
 	}
