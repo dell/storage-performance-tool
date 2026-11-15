@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1250,8 +1251,12 @@ func TestMultiHostOrchestrator_CheckPort(t *testing.T) {
 
 	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
 
-	// Test with a port that should be closed (high port number)
-	result := orchestrator.checkPortContext(context.Background(), "127.0.0.1", 65432, 1*time.Second)
+	// Test with a port that nothing listens on
+	closed, err := strconv.Atoi(closedPort(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := orchestrator.checkPortContext(context.Background(), "127.0.0.1", closed, 1*time.Second)
 	if result {
 		t.Error("Expected checkPort to return false for closed port, got true")
 	}
@@ -1269,13 +1274,12 @@ func TestMultiHostOrchestrator_WaitForRMIReady_Timeout(t *testing.T) {
 	}
 
 	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
-
-	// If the standard RMI port is already open on localhost (e.g., a dev
-	// environment is running a node), this test's assumption is invalid.
-	// Skip to avoid flakiness on shared environments/CI agents.
-	if orchestrator.checkPortContext(context.Background(), "127.0.0.1", constants.RMIRegistryPortInt, 100*time.Millisecond) {
-		t.Skip("skipping: RMI port 1099 is open on localhost")
+	// Probe a registry port that nothing listens on, never the default one.
+	registryPort, err := strconv.Atoi(closedPort(t))
+	if err != nil {
+		t.Fatal(err)
 	}
+	orchestrator.SetRMIRegistryPort(registryPort)
 
 	// Create a host connection that doesn't have RMI running
 	host := &HostConnection{
@@ -1284,9 +1288,9 @@ func TestMultiHostOrchestrator_WaitForRMIReady_Timeout(t *testing.T) {
 	}
 
 	// Test with very short timeout to ensure it times out quickly
-	err := orchestrator.waitForRMIReadyContext(context.Background(), host, 2*time.Second)
+	err = orchestrator.waitForRMIReadyContext(context.Background(), host, 2*time.Second)
 	if err == nil {
-		t.Error("Expected waitForRMIReady to timeout, but it succeeded")
+		t.Fatal("Expected waitForRMIReady to timeout, but it succeeded")
 	}
 	if !strings.Contains(err.Error(), "RMI registry not ready") {
 		t.Errorf("Expected timeout error message, got: %v", err)
@@ -1406,6 +1410,12 @@ func TestMultiHostOrchestrator_WaitForAllWorkersReady_PartialFailure(t *testing.
 
 	// Set minHosts to 1 (1 entry + 0 workers required) so partial failure is acceptable
 	orchestrator := NewMultiHostOrchestrator(hostInfos, 1)
+	// Probe a closed port, not the default registry port, so a local engine on 1099 is never dialled.
+	registryPort, err := strconv.Atoi(closedPort(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	orchestrator.SetRMIRegistryPort(registryPort)
 
 	workers := []*HostConnection{
 		{
@@ -1419,7 +1429,7 @@ func TestMultiHostOrchestrator_WaitForAllWorkersReady_PartialFailure(t *testing.
 	}
 
 	// One worker will fail (invalid host), but since we only require 0 workers (minHosts=1 - 1 entry = 0), it should succeed
-	err := orchestrator.waitForAllWorkersReadyContext(context.Background(), workers, 2*time.Second)
+	err = orchestrator.waitForAllWorkersReadyContext(context.Background(), workers, 2*time.Second)
 	if err != nil {
 		t.Errorf("Expected waitForAllWorkersReady to succeed with partial failure when minHosts allows it, got: %v", err)
 	}
@@ -2036,11 +2046,7 @@ func TestSingleRemoteExistingPrefixDeleteCapabilityFailureStopsBeforeRun(t *test
 }
 
 func TestDistributedExistingPrefixDeleteCapabilityFailureStopsBeforeRun(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:"+constants.RMIRegistryPort)
-	if err != nil {
-		t.Skipf("unable to bind local RMI port for test: %v", err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
+	registryPort := listenOnFreePort(t)
 
 	var runPosts atomic.Int64
 	srv := newExistingDeleteCapabilityAPIServer(t, &runPosts)
@@ -2051,6 +2057,7 @@ func TestDistributedExistingPrefixDeleteCapabilityFailureStopsBeforeRun(t *testi
 		{Host: "localhost", IsLocal: true, Original: "worker1"},
 	}, 2)
 	orchestrator.SetAPIPort(port)
+	orchestrator.SetRMIRegistryPort(registryPort)
 	orchestrator.detectAdvIP = func(_ context.Context, _ *hostparse.HostInfo) (string, error) {
 		return "127.0.0.1", nil
 	}
@@ -2067,7 +2074,7 @@ func TestDistributedExistingPrefixDeleteCapabilityFailureStopsBeforeRun(t *testi
 	wrapper := NewMultiHostTestOrchestrator(orchestrator)
 	wrapper.SetCallbacks(func(*TestStatus) {}, func(*MultiNodeMetricsUpdate) {}, func(string) {}, func(string) {})
 
-	err = wrapper.StartTestWithContent(
+	err := wrapper.StartTestWithContent(
 		context.Background(),
 		"test-image",
 		scenario.ScenarioParams{
@@ -2116,11 +2123,7 @@ func newExistingDeleteCapabilityAPIServer(
 }
 
 func TestMultiHostTestOrchestrator_StartTestWithContent_MultiHostStartsDistributedAndPostsProvidedArtifacts(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:"+constants.RMIRegistryPort)
-	if err != nil {
-		t.Skipf("unable to bind local RMI port for test: %v", err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
+	registryPort := listenOnFreePort(t)
 
 	var postedScenario string
 	var postedDefaults string
@@ -2135,6 +2138,7 @@ func TestMultiHostTestOrchestrator_StartTestWithContent_MultiHostStartsDistribut
 
 	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
 	orchestrator.SetAPIPort(port)
+	orchestrator.SetRMIRegistryPort(registryPort)
 	orchestrator.detectAdvIP = func(_ context.Context, _ *hostparse.HostInfo) (string, error) {
 		return "127.0.0.1", nil
 	}
@@ -2204,7 +2208,7 @@ func TestMultiHostTestOrchestrator_StartTestWithContent_MultiHostStartsDistribut
 	if !containsStringSimple(strings.Join(entryCalls[0].AdditionalArgs, " "), "--load-service-threads=4") {
 		t.Fatalf("entry startup args = %v, want --load-service-threads=4", entryCalls[0].AdditionalArgs)
 	}
-	wantWorkerAddr := "127.0.0.1:" + constants.RMIRegistryPort
+	wantWorkerAddr := "127.0.0.1:" + strconv.Itoa(registryPort)
 	if len(entryCalls[0].WorkerAddresses) != 1 || entryCalls[0].WorkerAddresses[0] != wantWorkerAddr {
 		t.Fatalf("entry worker addresses = %v, want [%s]", entryCalls[0].WorkerAddresses, wantWorkerAddr)
 	}
@@ -2438,11 +2442,7 @@ func TestMultiHostTestOrchestrator_CompletionCh_ClosesOnTerminalStatus(t *testin
 }
 
 func TestMultiHostOrchestrator_StartDistributedTest_AttachWorkers(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:1099")
-	if err != nil {
-		t.Skipf("unable to bind local RMI port for test: %v", err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
+	registryPort := listenOnFreePort(t)
 
 	hostInfos := []*hostparse.HostInfo{
 		{Host: "entry", Original: "entry"},
@@ -2450,6 +2450,7 @@ func TestMultiHostOrchestrator_StartDistributedTest_AttachWorkers(t *testing.T) 
 	}
 
 	orchestrator := NewMultiHostOrchestrator(hostInfos, 2)
+	orchestrator.SetRMIRegistryPort(registryPort)
 	orchestrator.SetAttachExistingWorkers(true)
 	orchestrator.detectAdvIP = func(_ context.Context, _ *hostparse.HostInfo) (string, error) {
 		return "127.0.0.1", nil
@@ -2468,7 +2469,7 @@ func TestMultiHostOrchestrator_StartDistributedTest_AttachWorkers(t *testing.T) 
 		ObjectSize:   "1MB",
 	}
 
-	err = orchestrator.StartDistributedTest(context.Background(), "test-image", params)
+	err := orchestrator.StartDistributedTest(context.Background(), "test-image", params)
 	if err != nil {
 		t.Fatalf("StartDistributedTest returned error: %v", err)
 	}
@@ -2477,7 +2478,7 @@ func TestMultiHostOrchestrator_StartDistributedTest_AttachWorkers(t *testing.T) 
 		t.Fatal(err)
 	}
 	if len(contributors) != 2 || contributors[0] != constants.MetricsLocalContributorID ||
-		contributors[1] != "127.0.0.1:"+constants.RMIRegistryPort {
+		contributors[1] != "127.0.0.1:"+strconv.Itoa(registryPort) {
 		t.Fatalf("runtime metric contributors = %v", contributors)
 	}
 
