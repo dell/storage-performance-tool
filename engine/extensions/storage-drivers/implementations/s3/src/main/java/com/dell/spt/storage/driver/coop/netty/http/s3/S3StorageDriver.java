@@ -1946,28 +1946,10 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * The {@code x-amz-copy-source} of a copy on the versioned route: the source {@link
-	 * #keptCopySource} keeps, so a copy sent again reads the source its first attempt read; on the
-	 * first attempt, the object {@link #dataUriPath} names, without the {@code ~versionId} under the
-	 * legacy convention.
-	 */
-	private String versionedCopySource(
-					final O op, final I item, final String srcPath, final boolean legacyVersion, final String versionId) {
-		final String kept = op.copySource();
-		if (kept != null) {
-			return kept;
-		}
-		final String copySource = dataUriPath(item, srcPath, null, op.type());
-		final String firstCopySource = legacyVersion ? withoutVersionSuffix(copySource, versionId) : copySource;
-		op.copySource(firstCopySource);
-		return firstCopySource;
-	}
-
-	/**
-	 * The source of a copy whose attempt completed before a request was built: what its first request
-	 * would have carried. On the legacy versioned route that is the {@link #dataUriPath} without the
-	 * name's {@code ~versionId}, as {@link #versionedCopySource} builds it; on every other route, the
-	 * HTTP drivers' source.
+	 * The source a copy's first request carries, which {@link #keptCopySource} keeps: on the legacy
+	 * versioned route, the {@link #dataUriPath} without the name's {@code ~versionId}, as {@link
+	 * #objectVersioningRequest} names the object; on every other route, the HTTP drivers' source.
+	 * Both the request builders and a completion before any request was built use it.
 	 */
 	@Override
 	protected String copySource(final O op) {
@@ -2064,7 +2046,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 				}
 			} else {
-				applyCopyHeaders(httpHeaders, versionedCopySource(op, item, srcPath, legacyVersion, versionId));
+				applyCopyHeaders(httpHeaders, keptCopySource(op));
 				httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 			}
 			break;

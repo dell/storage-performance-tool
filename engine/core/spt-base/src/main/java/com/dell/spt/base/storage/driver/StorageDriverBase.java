@@ -391,7 +391,8 @@ public abstract class StorageDriverBase<I extends Item, O extends Operation<I>> 
 				Loggers.MSG.trace("{}: Load operation completed", op);
 			}
 			final var terminalStatus = op.status();
-			if (op.type() == OpType.CREATE && op.srcPath() != null && op.copySource() == null) {
+			if (op.type() == OpType.CREATE && op.srcPath() != null && !op.srcPath().isEmpty()
+							&& op.copySource() == null) {
 				keepCopySource(op);
 			}
 			@SuppressWarnings("unchecked")

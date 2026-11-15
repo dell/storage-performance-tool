@@ -288,6 +288,13 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 		this.dstPath = dstPath;
 	}
 
+	/**
+	 * {@inheritDoc}
+	 *
+	 * <p>Final, as is its setter, so that the kept source is the one the driver set. A subclass that
+	 * already declares {@code copySource()} or {@code copySource(String)} no longer loads against these
+	 * final methods; none is known.
+	 */
 	@Override
 	public final String copySource() {
 		return copySource;

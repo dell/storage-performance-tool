@@ -70,6 +70,19 @@ class S3CopySourceOnRedispatchTest {
 		return driver;
 	}
 
+	/** A driver whose copy source hook prefixes the source S3 resolves, so that a source it decides is told apart. */
+	private S3StorageDriverTest.TestS3Driver hookDriver(final boolean versioning) throws Exception {
+		final var driver = new S3StorageDriverTest.TestS3Driver(
+						S3StorageDriverTest.baseConfig(versioning, 4, false, null, HOST)) {
+			@Override
+			protected String copySource(final Operation<Item> op) {
+				return "/hook" + super.copySource(op);
+			}
+		};
+		resources.add(driver);
+		return driver;
+	}
+
 	/** The operation a completion hands to the driver's result output. */
 	@SuppressWarnings("unchecked")
 	private static AtomicReference<Operation<Item>> captureResults(final S3StorageDriverTest.TestS3Driver driver)
@@ -193,6 +206,39 @@ class S3CopySourceOnRedispatchTest {
 	}
 
 	@Test
+	void theCopySourceHookDecidesTheSourceOnEveryRoute() throws Exception {
+		for (final boolean versioning : new boolean[]{false, true
+		}) {
+			final String route = versioning ? "versioned" : "unversioned";
+			assertEquals(
+							List.of("/dst/src/k0 <- /hook/src/k0", "/dst/src/k0 <- /hook/src/k0",
+											"/dst/src/k0 <- /hook/src/k0"),
+							threeAttempts(hookDriver(versioning), "/src/k0"), route);
+			assertSourceAfterAFailureBeforeTheRequest(hookDriver(versioning), "/dst/src/k0 <- /hook/src/k0");
+		}
+	}
+
+	@Test
+	void aCopyCompletedAgainAndAgainKeepsReadingItsFirstSource() throws Exception {
+		// As recycle mode sends it: each attempt is sent and completes, and its result is sent again.
+		final var driver = driver(false);
+		final var results = captureResults(driver);
+		final List<String> sent = new ArrayList<>();
+		Operation<Item> op = copy("/src/k0");
+		for (int attempt = 0; attempt < 4; attempt++) {
+			final HttpRequest request = driver.httpRequest(op, HOST);
+			sent.add(request.uri() + " <- " + request.headers().get(S3Api.KEY_X_AMZ_COPY_SOURCE));
+			op.status(Operation.Status.SUCC);
+			driver.complete(null, op);
+			op = results.get();
+			op.reset();
+			op.startNextLifecycle();
+		}
+		assertEquals(List.of("/dst/src/k0 <- /src/k0", "/dst/src/k0 <- /src/k0", "/dst/src/k0 <- /src/k0",
+						"/dst/src/k0 <- /src/k0"), sent);
+	}
+
+	@Test
 	void aCopyThatFailedBeforeItsRequestWasBuiltReadsItsSourceWhenSentAgain() throws Exception {
 		assertSourceAfterAFailureBeforeTheRequest(driver(false), "/dst/src/k0 <- /src/k0");
 		assertSourceAfterAFailureBeforeTheRequest(driver(true), "/dst/src/k0 <- /src/k0");
@@ -245,9 +291,13 @@ class S3CopySourceOnRedispatchTest {
 			driver.complete(null, op);
 			assertNull(results.get().copySource(), opType.name());
 		}
-		final var create = op(OpType.CREATE, "k0", null);
-		create.status(Operation.Status.FAIL_IO);
-		driver.complete(null, create);
-		assertNull(results.get().copySource());
+		for (final String srcPath : new String[]{null, ""
+		}) {
+			final var create = op(OpType.CREATE, "k0", srcPath);
+			assertEquals(srcPath, create.srcPath());
+			create.status(Operation.Status.FAIL_IO);
+			driver.complete(null, create);
+			assertNull(results.get().copySource(), "CREATE from " + srcPath);
+		}
 	}
 }
