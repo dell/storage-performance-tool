@@ -3,11 +3,14 @@ package verification
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 )
 
@@ -21,7 +24,9 @@ var (
 		constants.DockerCommand, constants.DockerCmdInspect, constants.DockerFlagFormat,
 		"{{.State.Status}}:{{.State.ExitCode}}:{{.State.OOMKilled}}", mockContainerID,
 	}, " ")
-	verifyLogsCommand = strings.Join([]string{constants.DockerCommand, constants.DockerCmdLogs, mockContainerID}, " ")
+	verifyLogsCommand = strings.Join([]string{
+		constants.DockerCommand, constants.DockerCmdLogs, constants.DockerFlagTail, "20", mockContainerID, "2>&1",
+	}, " ")
 )
 
 // verifyPortsWithContainer runs verify's port wait against a started container whose engine
@@ -75,10 +80,11 @@ func TestVerifyPortsFailureReportsExitedContainer(t *testing.T) {
 		"starting engine",
 		"connecting to " + waitReportEndpoint + " and 10.9.8.6:9020",
 		"secret " + waitReportSecret + " loaded",
-		"java.net.BindException: Failed to bind to 0.0.0.0:9999",
 	}, "\n")
+	// The executor keeps a successful command's stderr apart; the tail must keep it too.
 	result, _, printed := verifyPortsWithContainer(t, false,
-		MockCommandResponse{Stdout: "exited:1:false"}, MockCommandResponse{Stdout: logs})
+		MockCommandResponse{Stdout: "exited:1:false"},
+		MockCommandResponse{Stdout: logs, Stderr: "java.net.BindException: Failed to bind to 0.0.0.0:9999"})
 
 	check := result.PortsAccessible
 	if check.Passed || !strings.Contains(check.Message, "Service startup wait ended") {
@@ -164,5 +170,38 @@ func TestVerifyPortsSuccessReadsNoContainerDetail(t *testing.T) {
 	}
 	if strings.Count(strings.TrimSpace(printed), "\n") != 0 || strings.Contains(printed, "Container ") {
 		t.Fatalf("a passed check prints one line:\n%s", printed)
+	}
+}
+
+// TestVerifyAPIWaitReportKeepsContainerStderr runs the real command executor against a fake
+// docker on PATH whose container wrote one line to stdout and two to stderr, as a JVM that
+// rejects an option does.
+func TestVerifyAPIWaitReportKeepsContainerStderr(t *testing.T) {
+	dir := t.TempDir()
+	script := `#!/bin/sh
+case "$1" in
+inspect) echo "exited:1:false" ;;
+logs) echo "engine stdout line"; echo "Unrecognized VM option 'Bogus'" >&2; echo "Error: Could not create the Java Virtual Machine." >&2 ;;
+*) exit 2 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0o700); err != nil { // #nosec G306 -- test-only fake docker
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	host := &hostparse.HostInfo{Host: "127.0.0.1", Original: "localhost", IsLocal: true}
+	v := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{}, command.NewCommandExecutor(), &MockNetworkChecker{}, &RealTimeProvider{})
+
+	report := v.apiWaitReport(host, mockContainerID)
+	for _, want := range []string{
+		"Container " + mockContainerID + ": exited with exit code 1",
+		"Last 3 container log lines:",
+		"engine stdout line",
+		"Unrecognized VM option 'Bogus'",
+		"Error: Could not create the Java Virtual Machine.",
+	} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("report lacks %q:\n%s", want, report)
+		}
 	}
 }

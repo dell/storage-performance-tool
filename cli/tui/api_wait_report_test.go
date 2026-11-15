@@ -173,7 +173,9 @@ func TestRemoteWorkerReadinessFailureReportsContainer(t *testing.T) {
 		constants.DockerCommand, constants.DockerCmdInspect, constants.DockerFlagFormat,
 		"{{.State.Status}}:{{.State.ExitCode}}:{{.State.OOMKilled}}", "abc123def456",
 	}, " "), "exited:137:true")
-	mock.SetCommandSuccess("docker logs abc123def456", "loading key RUNACCESSKEY77\nFailed to bind to 0.0.0.0:1099")
+	mock.SetCommandResponse("docker logs --tail 20 abc123def456 2>&1", command.MockResponse{
+		Stdout: "loading key RUNACCESSKEY77", Stderr: "Failed to bind to 0.0.0.0:1099",
+	})
 
 	_, err := mgr.StartWorkerNodeContainerContext(context.Background(), constants.DefaultSptImage, "192.0.2.10", 1099, 1, nil)
 	if !errors.Is(err, waitErr) {

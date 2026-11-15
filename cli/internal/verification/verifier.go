@@ -367,8 +367,7 @@ func (v *Verifier) apiWaitReport(host *hostparse.HostInfo, containerID string) s
 	ctx, cancel := context.WithTimeout(context.Background(), apiWaitReportTimeout)
 	defer cancel()
 	state, stateErr := command.InspectContainerState(ctx, v.cmdExecutor, host, containerID)
-	logs, logErr := command.ContainerLogTail(
-		ctx, command.NewDockerOperations(v.cmdExecutor, host), containerID, command.APIWaitLogLines)
+	logs, logErr := command.ContainerLogTail(ctx, v.cmdExecutor, host, containerID, command.APIWaitLogLines)
 	return command.APIWaitReport(containerID, state, stateErr, logs, logErr)
 }
 

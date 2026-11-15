@@ -37,6 +37,7 @@ const (
 	DockerFlagTimestamps = "--timestamps"
 	DockerFlagSince      = "--since"
 	DockerFlagFollow     = "--follow"
+	DockerFlagTail       = "--tail"
 	DockerFlagRemove     = "--rm"
 	DockerFlagReadOnly   = "--read-only"
 	DockerFlagEntrypoint = "--entrypoint"

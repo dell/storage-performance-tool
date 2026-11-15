@@ -85,17 +85,63 @@ func isNoSuchContainer(text string) bool {
 }
 
 // ContainerLogTail returns a container's last maxLines log lines, stdout and stderr
-// together, read with GetContainerLogs.
-func ContainerLogTail(ctx context.Context, ops DockerOperations, containerID string, maxLines int) (string, error) {
-	var lines []string
-	collect := func(line string) { lines = append(lines, line) }
-	if err := ops.GetContainerLogs(ctx, containerID, false, collect, collect); err != nil {
+// together in the order docker logs writes them. The command's stderr goes to its stdout
+// (2>&1), because the executor keeps stderr only for a failed command; a remote host's
+// shell reads the redirection from the SSH command line, and a local host runs it through
+// sh -c. Only the last maxLines lines are read (--tail).
+func ContainerLogTail(ctx context.Context, executor CommandExecutor, host *hostparse.HostInfo, containerID string, maxLines int) (string, error) {
+	if !isDockerObjectID(containerID) {
+		return "", fmt.Errorf("unexpected container ID %q", containerID)
+	}
+	if maxLines <= 0 {
+		maxLines = APIWaitLogLines
+	}
+	logsCmd := []string{constants.DockerCommand, constants.DockerCmdLogs, constants.DockerFlagTail,
+		strconv.Itoa(maxLines), containerID, "2>&1"}
+	if host == nil || host.IsLocal {
+		logsCmd = []string{"sh", "-c", strings.Join(logsCmd, " ")}
+	}
+	stdout, stderr, err := executor.ExecuteCommand(ctx, host, logsCmd)
+	output := strings.TrimRight(joinNonEmpty(stdout, stderr), "\n")
+	if err != nil {
+		if detail := strings.TrimSpace(output); detail != "" {
+			return "", fmt.Errorf("%w (output: %s)", err, detail)
+		}
 		return "", err
 	}
-	if maxLines > 0 && len(lines) > maxLines {
+	lines := strings.Split(output, "\n")
+	if len(lines) > maxLines {
 		lines = lines[len(lines)-maxLines:]
 	}
 	return strings.Join(lines, "\n"), nil
+}
+
+// isDockerObjectID reports whether id is safe to place on a shell command line: docker's
+// container IDs and names use only letters, digits, '_', '.' and '-'.
+func isDockerObjectID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, r := range id {
+		if !isDockerIDRune(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isDockerIDRune(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '.' || r == '-'
+}
+
+func joinNonEmpty(parts ...string) string {
+	kept := parts[:0:0]
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			kept = append(kept, strings.TrimRight(part, "\n"))
+		}
+	}
+	return strings.Join(kept, "\n")
 }
 
 // APIWaitReport describes a container whose engine API never became ready: its state and

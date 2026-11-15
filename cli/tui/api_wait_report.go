@@ -112,7 +112,7 @@ func (dm *DockerManager) containerState(ctx context.Context, containerID string)
 
 func (m *RemoteDockerManager) apiWaitReport(ctx context.Context, containerID string) string {
 	state, stateErr := m.containerState(ctx, containerID)
-	logs, logErr := command.ContainerLogTail(ctx, m.ops, containerID, command.APIWaitLogLines)
+	logs, logErr := command.ContainerLogTail(ctx, m.exec, m.host, containerID, command.APIWaitLogLines)
 	return command.APIWaitReport(containerID, state, stateErr, logs, logErr)
 }
 
