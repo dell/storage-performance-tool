@@ -4,18 +4,31 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.data.DataInput;
+import com.dell.spt.base.item.op.data.range.RangeReadPolicy;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
 import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.storage.driver.StorageDriver;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketControl;
+import com.dell.spt.base.storage.driver.bucket.TargetBucketControlFactory;
+import com.dell.spt.base.storage.driver.endpoint.EndpointSelectionDriverFactory;
+import com.dell.spt.base.storage.driver.nic.NicSetDriverFactory;
+import com.dell.spt.base.storage.driver.range.RangeReadDriverFactory;
+import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
+import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.SchemaProvider;
 import io.netty.channel.epoll.Epoll;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 import java.util.function.ToLongFunction;
 import org.junit.jupiter.api.AfterEach;
@@ -26,8 +39,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Time-limited steps of multipart writes and multi-range reads on the shipped {@code s3} driver and the
- * loopback stub. The stub holds one chosen request until it sees the stop, so that its operation is in
- * flight when the time limit stops the step, whatever the timing. The stop refuses that operation's next
+ * loopback stub. The stub holds one chosen request until the step's driver has closed admission, so
+ * that its operation is in flight when the time limit stops the step, whatever the timing. The stop refuses that operation's next
  * part, next range or completion: such an operation is reported unresolved at once, so the step ends a
  * few seconds after its limit instead of after its {@code load-op-wait-limit}, and every upload left open
  * on the stub is counted unresolved.
@@ -45,11 +58,12 @@ final class S3TimeLimitStopTest {
 	 * The time limit plus room for a cold scenario engine on a loaded runner, and far below the time
 	 * limit plus {@link #WAIT_LIMIT_SECONDS}.
 	 */
+	private static final long ENDS_WITHIN_MILLIS = TimeUnit.SECONDS.toMillis(TIME_LIMIT_SECONDS + 30);
 	/** Longer than a held answer waits, so that the held request does not time out. */
 	private static final long NET_TIMEOUT_MILLIS = TimeUnit.SECONDS.toMillis(60);
-	private static final long ENDS_WITHIN_MILLIS = TimeUnit.SECONDS.toMillis(TIME_LIMIT_SECONDS + 30);
 
 	private final NicSetLoopback stub = new NicSetLoopback();
+	private final ObservedS3 factory = new ObservedS3();
 	private long stepMillis;
 	private String stepId;
 
@@ -69,13 +83,13 @@ final class S3TimeLimitStopTest {
 
 	/**
 	 * Sixteen threads write 5 KB objects in five 1 KB parts, four uploads at a time. The stub holds the
-	 * first part's answer until it sees the stop, so that upload has parts or its completion still to send
+	 * first part's answer until the stop has closed admission, so that upload has parts or its completion still to send
 	 * at the stop; others may too. Each is unresolved as soon as the stop refuses its next request, and
 	 * stays open on the stub.
 	 */
 	@Test
 	void aTimeLimitedMultipartWriteEndsAtItsLimitAndCountsTheOpenUploads() throws Exception {
-		final var hold = new HoldUntilStopped(request -> true, NicSetLoopback.Request::isPart);
+		final var hold = new HoldUntilStopped(NicSetLoopback.Request::isPart);
 		stub.answerDelayMillis = hold;
 
 		write(16);
@@ -89,13 +103,14 @@ final class S3TimeLimitStopTest {
 	}
 
 	/**
-	 * The stub holds the first initiation's answer until it sees the stop; the other uploads run on. The
-	 * held answer then opens the upload on the stub, but none of its parts can be sent. It is unresolved,
+	 * The stub holds the first initiation's answer until the stop has closed admission. At concurrency
+	 * 4, five parts allow one upload at a time, so it is the only one in flight. The held answer then
+	 * opens the upload on the stub, but none of its parts can be sent. It is unresolved,
 	 * as every other upload left open; it used to count as unattempted, so nothing reported it.
 	 */
 	@Test
 	void anUploadInitiatedAfterTheStopIsCountedUnresolved() throws Exception {
-		final var hold = new HoldUntilStopped(request -> true, request -> "POST init".equals(S3NicSetWorkloadTest.phase(request)));
+		final var hold = new HoldUntilStopped(request -> "POST init".equals(S3NicSetWorkloadTest.phase(request)));
 		stub.answerDelayMillis = hold;
 
 		write(4);
@@ -111,13 +126,13 @@ final class S3TimeLimitStopTest {
 	}
 
 	/**
-	 * Eight threads read 5 KB objects in five 1 KB ranges. The stub holds the first range's answer until it
-	 * sees the stop, so that read has ranges or its local finalization still to run at the stop; others may
+	 * Eight threads read 5 KB objects in five 1 KB ranges. The stub holds the first range's answer until
+	 * the stop has closed admission, so that read has ranges or its local finalization still to run at the stop; others may
 	 * too. Each is unresolved as soon as the stop refuses it, and the step ends at its limit.
 	 */
 	@Test
 	void aTimeLimitedMultiRangeReadEndsAtItsLimit() throws Exception {
-		final var hold = new HoldUntilStopped(request -> request.range() != null, request -> request.range() != null);
+		final var hold = new HoldUntilStopped(request -> request.range() != null);
 		stub.answerDelayMillis = hold;
 
 		read(8);
@@ -128,55 +143,40 @@ final class S3TimeLimitStopTest {
 	}
 
 	/**
-	 * Holds the answer of the first request that {@code held} selects until the stub sees the stop: the
-	 * time limit has passed since the step's first request, which {@code stepRequest} selects, and no
-	 * other request has come for {@link #QUIET_MILLIS}. While admission is open the step's other
-	 * operations keep sending, so that quiet comes only after the stop. Every other request is answered
-	 * at once.
+	 * Holds the answer of the first request of the time-limited step that {@code held} selects until
+	 * that step's driver has closed admission, the stop's first act, and answers every other request at
+	 * once. Drivers of other steps, and the step client's own checks, which it closes unstarted, never
+	 * release it: only a started driver of the step does.
 	 */
-	private static final class HoldUntilStopped implements ToLongFunction<NicSetLoopback.Request> {
-		private static final long QUIET_MILLIS = 500;
+	private final class HoldUntilStopped implements ToLongFunction<NicSetLoopback.Request> {
 		private static final long HOLD_AT_MOST_MILLIS = TimeUnit.SECONDS.toMillis(30);
 
-		private final Predicate<NicSetLoopback.Request> stepRequest;
 		private final Predicate<NicSetLoopback.Request> held;
 		private final AtomicBoolean taken = new AtomicBoolean();
-		private final AtomicLong stepStartNanos = new AtomicLong();
-		private volatile long lastOtherNanos;
 		private volatile String heldPath;
-		private volatile boolean sawStop;
+		private volatile boolean releasedAfterTheClose;
 
-		HoldUntilStopped(final Predicate<NicSetLoopback.Request> stepRequest, final Predicate<NicSetLoopback.Request> held) {
-			this.stepRequest = stepRequest;
+		HoldUntilStopped(final Predicate<NicSetLoopback.Request> held) {
 			this.held = held;
 		}
 
 		@Override
 		public long applyAsLong(final NicSetLoopback.Request request) {
-			final long now = System.nanoTime();
-			if (stepRequest.test(request)) {
-				stepStartNanos.compareAndSet(0, now);
-			}
-			if (stepStartNanos.get() != 0 && held.test(request) && taken.compareAndSet(false, true)) {
+			if (held.test(request) && factory.stepDriverStarted(stepId) && taken.compareAndSet(false, true)) {
 				heldPath = request.path();
-				sawStop = awaitStop();
-				return 0;
+				releasedAfterTheClose = awaitAdmissionClosed();
 			}
-			lastOtherNanos = now;
 			return 0;
 		}
 
-		private boolean awaitStop() {
-			final long limitNanos = TimeUnit.SECONDS.toNanos(TIME_LIMIT_SECONDS);
-			final long quietNanos = TimeUnit.MILLISECONDS.toNanos(QUIET_MILLIS);
+		private boolean awaitAdmissionClosed() {
 			final long giveUp = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(HOLD_AT_MOST_MILLIS);
 			while (System.nanoTime() < giveUp) {
-				final long now = System.nanoTime();
-				if (now - stepStartNanos.get() > limitNanos && now - lastOtherNanos > quietNanos) {
+				if (factory.stepAdmissionClosed(stepId)) {
 					return true;
 				}
 				try {
-					Thread.sleep(20);
+					Thread.sleep(5);
 				} catch (final InterruptedException e) {
 					Thread.currentThread().interrupt();
 					return false;
@@ -189,10 +189,88 @@ final class S3TimeLimitStopTest {
 			return heldPath;
 		}
 
-		/** A request was held, and answered only once the stub saw the stop. */
+		/** A request was held, and its answer was released only once the step's driver had closed admission. */
 		void assertHeld() {
 			assertTrue(taken.get(), "a request was held");
-			assertTrue(sawStop, "the held request was answered after the stop");
+			assertTrue(releasedAfterTheClose, "the held answer was released after the step's driver closed admission");
+		}
+	}
+
+	/**
+	 * The shipped {@code s3} extension, which it stands in for, keeping every driver it creates, so that
+	 * a test sees when a step's driver closes admission.
+	 */
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	private static final class ObservedS3 implements RangeReadDriverFactory, EndpointSelectionDriverFactory, NicSetDriverFactory,
+					TargetBucketControlFactory {
+		private final S3StorageDriverExtension delegate = new S3StorageDriverExtension();
+		private final List<CoopStorageDriverBase<?, ?>> drivers = new CopyOnWriteArrayList<>();
+		private final Map<CoopStorageDriverBase<?, ?>, String> stepIds = new ConcurrentHashMap<>();
+
+		@Override
+		public String id() {
+			return delegate.id();
+		}
+
+		@Override
+		public StorageDriver create(final String stepId, final DataInput dataInput, final Config storageConfig,
+						final boolean verifyFlag, final int batchSize) throws IllegalConfigurationException, InterruptedException {
+			return kept(stepId, delegate.create(stepId, dataInput, storageConfig, verifyFlag, batchSize));
+		}
+
+		@Override
+		public StorageDriver createRangeRead(final String stepId, final DataInput dataInput, final Config storageConfig,
+						final int batchSize, final RangeReadPolicy policy) throws IllegalConfigurationException, InterruptedException {
+			return kept(stepId, delegate.createRangeRead(stepId, dataInput, storageConfig, batchSize, policy));
+		}
+
+		private StorageDriver kept(final String stepId, final StorageDriver driver) {
+			final var coop = (CoopStorageDriverBase<?, ?>) driver;
+			stepIds.put(coop, stepId);
+			drivers.add(coop);
+			return driver;
+		}
+
+		@Override
+		public TargetBucketControl openTargetBucketControl(final String stepId, final Config storageConfig)
+						throws IllegalConfigurationException, InterruptedException {
+			return delegate.openTargetBucketControl(stepId, storageConfig);
+		}
+
+		@Override
+		public Config defaults(final Path appHomePath) {
+			return delegate.defaults(appHomePath);
+		}
+
+		@Override
+		public SchemaProvider schemaProvider() {
+			return delegate.schemaProvider();
+		}
+
+		@Override
+		public void install(final Path dstPath) {
+			delegate.install(dstPath);
+		}
+
+		/** A driver of step {@code stepId} has started. */
+		boolean stepDriverStarted(final String stepId) {
+			return drivers.stream().anyMatch(driver -> stepId.equals(stepIds.get(driver)) && driver.isStarted());
+		}
+
+		/** A started driver of step {@code stepId} has closed admission. */
+		boolean stepAdmissionClosed(final String stepId) {
+			return drivers.stream().anyMatch(driver -> stepId.equals(stepIds.get(driver)) && driver.isStarted() && !admissionOpen(driver));
+		}
+
+		private static boolean admissionOpen(final CoopStorageDriverBase<?, ?> driver) {
+			try {
+				final var method = CoopStorageDriverBase.class.getDeclaredMethod("isAdmissionOpen");
+				method.setAccessible(true);
+				return (boolean) method.invoke(driver);
+			} catch (final ReflectiveOperationException e) {
+				throw new AssertionError(e);
+			}
 		}
 	}
 
@@ -230,7 +308,7 @@ final class S3TimeLimitStopTest {
 	private Map<String, List<Long>> timed(final String scenario) throws Exception {
 		stepId = "time-limit-stop-" + System.nanoTime();
 		final var started = System.nanoTime();
-		final var outcomes = S3NicSetWorkloadTest.runScenario(stub.listeners(1), null, stepId, scenario);
+		final var outcomes = S3NicSetWorkloadTest.runScenarioReplacing(stub.listeners(1), factory, stepId, scenario);
 		stepMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
 		return outcomes;
 	}
