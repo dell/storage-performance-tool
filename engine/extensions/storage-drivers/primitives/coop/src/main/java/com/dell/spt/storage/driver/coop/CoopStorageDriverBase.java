@@ -461,10 +461,16 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				}
 			} else if (parentState != OperationLifecycleState.DISPATCHED
 							&& parentState != OperationLifecycleState.NEW) {
-				if (state == OperationLifecycleState.DRIVER_QUEUED && hasEnded(parentState)) {
+				if (state == OperationLifecycleState.DRIVER_QUEUED
+								&& (hasEnded(parentState)
+												|| (parentState == OperationLifecycleState.COMPLETING
+																&& isPartOfFinalizedUpload(op, parent)))) {
 					// A part still queued when its upload ended, for example one enqueued while the
 					// upload's abort ran, is never sent. It is settled here, so the dispatcher drops
-					// it instead of offering it again, and the ended upload is not claimed again.
+					// it instead of offering it again, and the ended upload is not claimed again. An
+					// upload whose finalization or abort is enqueued has ended once that request's
+					// completion runs; the initiation's completion runs before the finalization flag
+					// can be set, so a part of a live upload is only refused there.
 					lifecycle.unattempted(op);
 				}
 				return false;

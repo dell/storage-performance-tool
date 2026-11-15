@@ -281,4 +281,111 @@ final class EndedUploadPartTest {
 		complete(upload, parts.get(2), Operation.Status.RESP_FAIL_NOT_FOUND);
 		assertUploadEndedOnce(upload);
 	}
+
+	/**
+	 * Part 3 is still queued, already claimed, when the abort's completion starts to publish the upload's
+	 * result, with the upload {@code COMPLETING}. The dispatch task meets part 3 ahead of an ordinary
+	 * DELETE while that result is held. Part 3 is settled unsent at its first refusal and the DELETE runs
+	 * before the result is released. Before, part 3 stayed {@code DRIVER_QUEUED} and the task offered it
+	 * again in a busy loop for as long as the result's publication took.
+	 */
+	@Test
+	void aQueuedPartIsSettledWhileTheAbortsResultIsPublished() throws Exception {
+		startDriver(16);
+		final var lifecycle = driver.operationLifecycle();
+		final var upload = initiatedUpload();
+		final var parts = parts(upload);
+		dispatch(parts.get(0));
+		dispatch(parts.get(1));
+		// Part 3 is taken out of the queue so that the abort is dispatched ahead of it, as a deferred
+		// enqueue can arrange; it goes back once the abort is publishing.
+		assertSame(parts.get(2), driver.childOpQueue.poll());
+		final var publishing = new CountDownLatch(1);
+		final var releaseResult = new CountDownLatch(1);
+		onUploadResult.set(() -> {
+			publishing.countDown();
+			try {
+				assertTrue(releaseResult.await(10, TimeUnit.SECONDS));
+			} catch (final InterruptedException e) {
+				throw new AssertionError(e);
+			}
+		});
+		final var abortFailure = new AtomicReference<Throwable>();
+		final var abortThread = new Thread(() -> {
+			try {
+				abort(upload, parts.get(0));
+			} catch (final Throwable t) {
+				abortFailure.set(t);
+			}
+		}, "abort-result");
+		abortThread.start();
+		final boolean deleteRanWhilePublishing;
+		try {
+			assertTrue(publishing.await(5, TimeUnit.SECONDS));
+			assertEquals(OperationLifecycleState.COMPLETING, lifecycle.stateOf(op(upload)));
+			assertTrue(driver.childOpQueue.offer(op(parts.get(2))));
+			driver.start();
+			assertTrue(driver.put(new OperationImpl<>(0, OpType.DELETE, new DataItemImpl("after", 0, 1), null, "/bucket", null)));
+			deleteRanWhilePublishing = deleteCompleted.await(2, TimeUnit.SECONDS);
+		} finally {
+			releaseResult.countDown();
+			abortThread.join(TimeUnit.SECONDS.toMillis(11));
+		}
+		assertFalse(abortThread.isAlive());
+		assertEquals(null, abortFailure.get());
+		assertTrue(deleteRanWhilePublishing, () -> "the DELETE runs while the abort's result is held; part 3 is "
+						+ lifecycle.stateOf(op(parts.get(2))) + " after " + driver.refused.get() + " refused submits");
+		assertEquals(1, driver.refused.get(), "part 3 is refused once");
+		assertEquals(OperationLifecycleState.UNATTEMPTED, lifecycle.stateOf(op(parts.get(2))), "part 3 is settled unsent");
+		complete(upload, parts.get(1), Operation.Status.RESP_FAIL_NOT_FOUND);
+		assertUploadEndedOnce(upload);
+	}
+
+	/**
+	 * The upload is also {@code COMPLETING} while its initiation's result is published, before its first
+	 * parts are queued. A part that is queued and offered to dispatch then is refused but not settled: the
+	 * upload is live. Once the initiation's completion ends, every part is sent, the upload's completion
+	 * follows, and the upload ends with its completion's result.
+	 */
+	@Test
+	void aPartOfALiveUploadOfferedWhileItsInitiationCompletesIsStillSent() throws Exception {
+		startDriver(16);
+		final var lifecycle = driver.operationLifecycle();
+		final var item = new DataItemImpl("c", 0, 5120);
+		item.dataInput(dataInput);
+		final var upload = new CompositeDataOperationImpl<DataItem>(0, OpType.CREATE, item, null, "/bucket", null, null, 0, 1024);
+		final var parts = parts(upload);
+		final var stateAtOffer = new AtomicReference<OperationLifecycleState>();
+		final var claimedAtOffer = new AtomicReference<Boolean>();
+		final var partStateAfterOffer = new AtomicReference<OperationLifecycleState>();
+		onUploadResult.set(() -> {
+			stateAtOffer.set(lifecycle.stateOf(op(upload)));
+			assertTrue(lifecycle.driverQueued(op(parts.get(0))));
+			claimedAtOffer.set(driver.claimDispatchOwnership(op(parts.get(0))));
+			partStateAfterOffer.set(lifecycle.stateOf(op(parts.get(0))));
+		});
+		assertTrue(lifecycle.driverQueued(op(upload)));
+		assertTrue(driver.claimDispatchOwnership(op(upload)));
+		upload.status(Operation.Status.SUCC);
+		assertTrue(driver.handleCompleted(op(upload)));
+
+		assertEquals(OperationLifecycleState.COMPLETING, stateAtOffer.get());
+		assertEquals(Boolean.FALSE, claimedAtOffer.get(), "the part is refused while the initiation completes");
+		assertEquals(OperationLifecycleState.DRIVER_QUEUED, partStateAfterOffer.get(), "the part is not settled");
+		for (int i = 0; i < 3; i++) {
+			dispatch(parts.get(i));
+		}
+		for (int i = 0; i < 5; i++) {
+			complete(upload, parts.get(i), Operation.Status.SUCC);
+			if (i < 2) {
+				dispatch(parts.get(i + 3));
+			}
+		}
+		dispatch(upload);
+		upload.status(Operation.Status.SUCC);
+		assertTrue(driver.handleCompleted(op(upload)), "the upload's completion ends it");
+		parts.forEach(part -> assertEquals(OperationLifecycleState.TERMINAL, lifecycle.stateOf(op(part)), part::toString));
+		assertEquals(0, lifecycle.snapshot().unattempted(), "nothing was settled unsent");
+		assertUploadEndedOnce(upload);
+	}
 }

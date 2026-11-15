@@ -13,11 +13,16 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+import com.dell.spt.base.data.SeedDataInput;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.data.range.RangeReadPolicy;
 import com.dell.spt.base.item.op.partial.PartialOperation;
@@ -29,6 +34,7 @@ import com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.Run;
 import com.dell.spt.storage.driver.coop.netty.nic.NicAdmission;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetConnectionPool;
 import com.dell.spt.storage.driver.coop.netty.nic.NicSetSettings;
+import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.confuse.Config;
 import io.netty.channel.Channel;
 import io.netty.channel.epoll.Epoll;
@@ -40,6 +46,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -63,6 +70,8 @@ final class S3NicSetAdmissionTest {
 	private static final long OBJECT_SIZE = 10;
 	/** Bytes 2-4 of every object. */
 	private static final RangeReadPolicy FIXED = new RangeReadPolicy(3, 2L, 1);
+	/** The retries a part gets, {@code CoopStorageDriverBase.MAX_PART_RETRIES}. */
+	private static final int PART_RETRIES = 3;
 
 	private final NicSetLoopback stub = new NicSetLoopback();
 	private final List<AutoCloseable> resources = new ArrayList<>();
@@ -436,6 +445,90 @@ final class S3NicSetAdmissionTest {
 		assertTrue(snapshot.reconciled(), snapshot::toString);
 		assertEquals(1, snapshot.logical().failed());
 		assertEquals(1, snapshot.requestsSent());
+	}
+
+	/**
+	 * A two-part upload on two NICs at concurrency 4, with the default part window of 2: both parts are
+	 * dispatched at once, and each is at its retry limit. The part on one NIC gets 503 and the upload is
+	 * aborted. The other part waits for its NIC's connection until the abort's result is being published,
+	 * with the upload {@code COMPLETING}. Its connection then arrives, its claim is refused, and it gives
+	 * back its connection, NIC and permit. It is settled unsent: no dispatcher owns it any more, so before,
+	 * it stayed {@code DRIVER_QUEUED} for the rest of the step.
+	 */
+	@Test
+	void aPartWhoseConnectionArrivesWhileTheAbortCompletesIsSettled() throws Exception {
+		checkPartWaitingForItsNicDuringAnAbort(false);
+	}
+
+	/** As {@link #aPartWhoseConnectionArrivesWhileTheAbortCompletesIsSettled}, with the abort ended first. */
+	@Test
+	void aPartWhoseConnectionArrivesAfterTheAbortEndedIsSettled() throws Exception {
+		checkPartWaitingForItsNicDuringAnAbort(true);
+	}
+
+	@SuppressWarnings("unchecked")
+	private void checkPartWaitingForItsNicDuringAnAbort(final boolean abortEndsFirst) throws Exception {
+		final var run = started(stub.listeners(2), nics(2), 4);
+		// The first-use bucket check runs before any NIC is held.
+		assertEquals(Operation.Status.SUCC, run.executeAlone(dataOp(OpType.CREATE, "warmup")).status());
+		final var lifecycle = run.driver().operationLifecycle();
+		final var channels = List.of(channelOf(run.pool(), 0), channelOf(run.pool(), 1));
+		final var upload = new CompositeDataOperationImpl<DataItem>(0, OpType.CREATE,
+						new DataItemImpl("upload", 7, 2L * EndpointSelectionTestSupport.ITEM_SIZE),
+						null, "/bucket", EndpointSelectionTestSupport.CREDENTIAL, null, 0,
+						EndpointSelectionTestSupport.ITEM_SIZE);
+		upload.item().dataInput(new SeedDataInput(1, EndpointSelectionTestSupport.ITEM_SIZE, 1, true));
+		// Whichever part is sent first runs out of retries and aborts the upload.
+		for (final var part : upload.subOperations()) {
+			for (var i = 0; i < PART_RETRIES; i++) {
+				((PartialOperation<?>) part).incrementRetryCount();
+			}
+		}
+		final var publishingAbort = new CountDownLatch(1);
+		final var releaseAbort = new CountDownLatch(1);
+		blocks.add(releaseAbort);
+		final var uploadResults = new AtomicInteger();
+		final Output<Operation<DataItem>> out = mock(Output.class);
+		when(out.put(any(Operation.class))).thenAnswer(call -> {
+			if (call.getArgument(0) instanceof CompositeOperation && uploadResults.incrementAndGet() == 2) {
+				publishingAbort.countDown();
+				awaitQuietly(releaseAbort);
+			}
+			return true;
+		});
+		run.driver().operationResultOutput(out);
+		stub.failParts = true;
+		stub.hold();
+		assertTrue(run.driver().put(upload));
+		waitFor(() -> stub.objectRequests().size() == 2, "the initiation reaches the stub");
+		// The initiation's connection is on one NIC; hold the other, so its part waits for a connection.
+		final int waiting = ADDRESSES.get(0).equals(stub.objectRequests().get(1).source()) ? 1 : 0;
+		final var unblockNic = block(channels.get(waiting));
+		stub.release();
+		try {
+			assertTrue(publishingAbort.await(5, TimeUnit.SECONDS), "the abort reaches result output");
+			assertEquals("true", upload.get("mpuAbort"));
+			assertEquals(OperationLifecycleState.COMPLETING, lifecycle.stateOf(upload));
+			waitFor(() -> run.pool().admission().count(waiting) == 1 && run.pool().pendingCount() == 1,
+							"the other part waits for its NIC");
+			if (abortEndsFirst) {
+				releaseAbort.countDown();
+				waitFor(() -> lifecycle.stateOf(upload) == OperationLifecycleState.TERMINAL, "the abort ends the upload");
+			}
+			unblockNic.countDown();
+			waitFor(() -> run.pool().admission().count(waiting) == 0 && run.pool().pendingCount() == 0,
+							"the refused part gave back its NIC and connection");
+		} finally {
+			releaseAbort.countDown();
+		}
+		awaitIdle(run);
+		waitFor(() -> lifecycle.stateOf(upload) == OperationLifecycleState.TERMINAL, "the abort ends the upload");
+		final var unsent = upload.subOperations().stream()
+						.filter(part -> lifecycle.stateOf(part) == OperationLifecycleState.UNATTEMPTED).count();
+		assertEquals(1, unsent, () -> "the waiting part is settled unsent: " + lifecycle.snapshot());
+		assertEquals(false, lifecycle.hasOutstandingOperations(), () -> "nothing is outstanding: " + lifecycle.snapshot());
+		assertEquals(1, parts(), "one part was sent");
+		assertEquals(2, uploadResults.get(), "the upload has its initiation's result and its abort's, and no other");
 	}
 
 	private Run started(final List<String> endpoints, final List<String> interfaces, final int concurrency) throws Exception {
