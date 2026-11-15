@@ -170,8 +170,8 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("min-hosts (%d) cannot be greater than total hosts (%d)", minHosts, len(hosts))
 	}
 
-	if networkMode != constants.BridgeNetworkMode && networkMode != constants.HostNetworkMode {
-		return fmt.Errorf("network-mode must be '%s' or '%s', got: %s", constants.BridgeNetworkMode, constants.HostNetworkMode, networkMode)
+	if err := validateNetworkMode(networkMode); err != nil {
+		return err
 	}
 
 	hostInterfaces, _, err := readHostInterfaces(cmd)
