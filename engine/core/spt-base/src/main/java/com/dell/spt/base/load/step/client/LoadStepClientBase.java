@@ -483,7 +483,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					throw StepIdCheckException.onNode(stepId, i, fileMgrs.size(), nodeAddrs.get(i - 1), file, unknown);
 				}
 				if (exists) {
-					throw new StepIdInUseException(stepId, nodeAddrs.get(i - 1), file);
+					throw StepIdInUseException.onNode(stepId, i, fileMgrs.size(), nodeAddrs.get(i - 1), file);
 				}
 			}
 		}

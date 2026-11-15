@@ -2,6 +2,7 @@ package com.dell.spt.base.load.step;
 
 import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException.Category;
+import com.dell.spt.base.logging.Loggers;
 import java.io.IOException;
 import java.nio.file.Path;
 
@@ -19,10 +20,20 @@ public final class StepIdInUseException extends RunTerminalException {
 		super(Category.CONFIGURATION, stepId, message(stepId, existing), null);
 	}
 
-	/** The step's file {@code existing} exists on the remote node {@code node}. */
-	public StepIdInUseException(final String stepId, final String node, final String existing) {
-		super(Category.CONFIGURATION, stepId, "step id \"" + stepId + "\" is already used in the log directory of node "
-						+ node + " (" + existing + " exists); give each step its own load.step.id", null);
+	private StepIdInUseException(final String stepId, final String message) {
+		super(Category.CONFIGURATION, stepId, message, null);
+	}
+
+	/**
+	 * The step's file {@code existing} exists on the node {@code node}, the engine {@code slice + 1}
+	 * of {@code sliceCount}. The message is public, so it counts the engine and leaves its address
+	 * and the file to the log.
+	 */
+	public static StepIdInUseException onNode(
+					final String stepId, final int slice, final int sliceCount, final String node, final String existing) {
+		Loggers.ERR.error("{}: an earlier step with this id left {} on node {}", stepId, existing, node);
+		return new StepIdInUseException(stepId, "engine " + (slice + 1) + " of " + sliceCount + ": step id \"" + stepId
+						+ "\" is already used in that node's log directory; see the entry's log");
 	}
 
 	static String message(final String stepId, final Path existing) {

@@ -233,8 +233,8 @@ public class StepIdReuseAtStartTest {
 		final var failure = assertThrows(StepIdInUseException.class, () -> LoadStepClientBase.refuseNodeFiles(
 						stepId, List.of(FileManager.INSTANCE, worker), List.of("10.0.0.2:1100"), merged, List.of(false, false)));
 
-		assertEquals("step id \"" + stepId + "\" is already used in the log directory of node 10.0.0.2:1100 "
-						+ "(/w/operation.lifecycle.csv exists); give each step its own load.step.id", failure.getMessage());
+		assertEquals("engine 2 of 2: step id \"" + stepId + "\" is already used in that node's log directory; "
+						+ "see the entry's log", failure.getMessage());
 		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, failure.category());
 	}
 
@@ -250,7 +250,9 @@ public class StepIdReuseAtStartTest {
 		final var failure = assertThrows(StepIdInUseException.class, () -> LoadStepClientBase.refuseNodeFiles(
 						stepId, List.of(FileManager.INSTANCE, worker), List.of("n2"), merged, List.of(false, false)));
 
-		assertTrue(failure.getMessage().contains("(/w/integrity.performance.csv exists)"), failure.getMessage());
+		assertEquals("engine 2 of 2: step id \"" + stepId + "\" is already used in that node's log directory; "
+						+ "see the entry's log", failure.getMessage());
+		verify(worker).readFromFile(eq("/w/integrity.performance.csv"), anyLong());
 	}
 
 	@Test
@@ -263,7 +265,8 @@ public class StepIdReuseAtStartTest {
 		final var failure = assertThrows(StepIdInUseException.class,
 						() -> LoadStepClientBase.refuseNodeFiles(stepId, fileMgrs, List.of("n2"), merged, List.of(false, true)));
 
-		assertTrue(failure.getMessage().contains("(/w/nic.set.json exists)"), failure.getMessage());
+		assertTrue(failure.getMessage().startsWith("engine 2 of 2: "), failure.getMessage());
+		verify(worker, org.mockito.Mockito.atLeastOnce()).fileSize("/w/nic.set.json");
 	}
 
 	@Test
@@ -274,8 +277,9 @@ public class StepIdReuseAtStartTest {
 
 		assertInstanceOf(StepIdInUseException.class, failure, failure.toString());
 		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, failure.category());
-		assertEquals("step id \"" + stepId + "\" is already used in the log directory of node " + NODE + " ("
-						+ NODE_FILE + " exists); give each step its own load.step.id", failure.getMessage());
+		assertEquals("engine 2 of 2: step id \"" + stepId + "\" is already used in that node's log directory; "
+						+ "see the entry's log", failure.getMessage());
+		assertFalse(failure.getMessage().contains(NODE) || failure.getMessage().contains(NODE_FILE), failure.getMessage());
 		verify(worker).fileSize(NODE_FILE);
 	}
 
@@ -418,7 +422,7 @@ public class StepIdReuseAtStartTest {
 	@Test
 	void aMetadataSlicesRefusalKeepsItsCategoryAndMessage() throws Exception {
 		final TestLoadStepClient client = client(config("create"));
-		final var refusal = new StepIdInUseException(stepId, "n2", "/w/operation.lifecycle.csv");
+		final var refusal = new StepIdInUseException(stepId, Path.of("/w/operation.lifecycle.csv"));
 		final var remote = new java.rmi.ServerException("remote call failed", refusal);
 
 		final var single = client.metadataSliceStartFailure(refusal, 0, 1);
