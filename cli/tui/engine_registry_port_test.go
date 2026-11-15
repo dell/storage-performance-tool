@@ -22,6 +22,7 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/nicplan"
+	"github.com/dell/storage-performance-tool/cli/internal/preflight"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 )
 
@@ -126,8 +127,8 @@ func TestLocalEnginesPublishTheRunsRegistryPort(t *testing.T) {
 		t.Fatalf("startWorkerNodeOnPorts() error = %v", err)
 	}
 	want := `cmd=["--run-node=true" "--run-port=19300" "--load-step-node-port=11099"] ` +
-		`exposed=[11099/tcp 19300/tcp 40000/tcp 40001/tcp] ` +
-		`bindings=[11099/tcp->0.0.0.0:11099 19300/tcp->0.0.0.0:19300 40000/tcp->0.0.0.0:40000 40001/tcp->0.0.0.0:40001] network=""`
+		`exposed=[11099/tcp 19300/tcp] ` +
+		`bindings=[11099/tcp->0.0.0.0:11099 19300/tcp->0.0.0.0:19300] network=""`
 	if got := localContainer(worker); got != want {
 		t.Errorf("local worker:\n got: %s\nwant: %s", got, want)
 	}
@@ -236,9 +237,9 @@ func TestConnectHostsChecksTheRunsPortsOnEveryHost(t *testing.T) {
 		host.DockerManager.Close()
 	}
 	want := []string{
-		"entry.example registry=11099 api=19300 rmi=40000+10",
-		"wrk2.example registry=11099 api=19300 rmi=40000+10",
-		"wrk3.example registry=11099 api=19300 rmi=40000+10",
+		"entry.example registry=11099 api=19300",
+		"wrk2.example registry=11099 api=19300",
+		"wrk3.example registry=11099 api=19300",
 	}
 	if got := preflight.sortedChecks(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("port checks = %q, want %q", got, want)
@@ -459,5 +460,40 @@ func TestDistributedRunFailsWhenTheAPIWaitFails(t *testing.T) {
 	}
 	if entryDM.GetCleanupCallCount() == 0 || workerDM.GetCleanupCallCount() == 0 {
 		t.Error("a failed API wait left an engine container running")
+	}
+}
+
+// TestAPortHeldInTheRMIRangeDoesNotFailPreflight holds 40000-40009, the default --rmi-port-start
+// range, on a lone remote host. The engine never listens on that range, so the preflight passes.
+func TestAPortHeldInTheRMIRangeDoesNotFailPreflight(t *testing.T) {
+	host := &hostparse.HostInfo{Host: "wrk1.example", Original: "wrk1.example"}
+	exec := command.NewMockCommandExecutor()
+	exec.SetCommandSuccess(strings.Join([]string{constants.DockerCommand, constants.DockerCmdVersion,
+		constants.DockerFlagFormat, constants.DockerVersionFormat}, " "), "29.0.0")
+	listeners := make([]string, 0, constants.DefaultRMIPortCount)
+	for port := constants.DefaultRMIPortStart; port < constants.DefaultRMIPortStart+constants.DefaultRMIPortCount; port++ {
+		listeners = append(listeners, fmt.Sprintf(
+			`tcp LISTEN 0 4096 0.0.0.0:%d 0.0.0.0:* users:(("docker-proxy",pid=2222,fd=7))`, port))
+	}
+	exec.SetCommandSuccess("sh -c "+constants.PortSnapshotCommand, strings.Join(listeners, "\n"))
+	exec.SetCommandSuccess(fmt.Sprintf("%s %s %s %s", constants.DockerCommand, constants.DockerCmdPS,
+		constants.DockerFlagAll, constants.DockerFlagFormat+" "+constants.DockerConflictFormat),
+		"abc\tholder\tbusybox\trunning\t0.0.0.0:40000-40009->40000-40009/tcp\t2026-11-14 12:00:00 +0000 UTC")
+
+	o := NewMultiHostOrchestrator([]*hostparse.HostInfo{host}, 1)
+	o.preflight = preflight.NewCheckerWithExecutor(exec)
+	o.SetNotifier(func(string) {})
+	o.newDockerManagerForHost = func(ctx context.Context, host *hostparse.HostInfo) (*DockerManager, error) {
+		managerCtx, cancel := context.WithCancel(ctx)
+		return &DockerManager{ctx: managerCtx, cancel: cancel, hostInfo: host}, nil
+	}
+	err := o.ConnectHosts(context.Background())
+	for _, h := range o.hosts {
+		if h.DockerManager != nil {
+			h.DockerManager.Close()
+		}
+	}
+	if err != nil {
+		t.Fatalf("ConnectHosts() error = %v, want the RMI range left unchecked", err)
 	}
 }

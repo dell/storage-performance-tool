@@ -43,7 +43,7 @@ Load
 			},
 			"load": {
 				"op": {
-					"recycle": true,
+					"recycle": {"mode": true},
 					"type": "update",
 					"limit": {
 						"count": ~~(BASE_ITEMS_COUNT * APPEND_COUNT)

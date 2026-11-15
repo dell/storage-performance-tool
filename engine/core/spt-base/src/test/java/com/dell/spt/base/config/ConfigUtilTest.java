@@ -205,6 +205,118 @@ public class ConfigUtilTest {
 		assertEquals(Map.of("storage", Map.of("auth", "x")), scalarAuth);
 	}
 
+	@Test
+	public void maskedStringHidesListedHeadersInAnyCaseWithoutChangingLiveConfig() throws Exception {
+		final var headers = new HashMap<String, Object>();
+		headers.put("Authorization", "AWS fake-auth-header-1");
+		headers.put("x-auth-token", "fake-swift-token-1");
+		headers.put("COOKIE", "session=fake-cookie-1");
+		headers.put("Proxy-Authorization", "Basic ZmFrZTpmYWtl");
+		headers.put("X-Amz-Security-Token", "fake-session-token-1");
+		headers.put("X-Custom", "custom-value-1");
+		headers.put("Cookie2", "unlisted-cookie-1");
+		headers.put("x-amz-date", "");
+		final var config = TestConfigBuilder.configWithHttpHeaders(headers);
+
+		final var masked = ConfigUtil.toMaskedString(config, ConfigFormat.YAML, "Load");
+
+		for (final var value : List.of("fake-auth-header-1", "fake-swift-token-1", "fake-cookie-1", "ZmFrZTpmYWtl",
+						"fake-session-token-1")) {
+			assertFalse(masked.contains(value), value);
+		}
+		final var maskedHeaders = headersOf(parse(masked));
+		for (final var name : List.of("Authorization", "x-auth-token", "COOKIE", "Proxy-Authorization",
+						"X-Amz-Security-Token")) {
+			assertEquals(ConfigUtil.MASKED_VALUE, maskedHeaders.get(name), name);
+		}
+		assertEquals("custom-value-1", maskedHeaders.get("X-Custom"));
+		assertEquals("unlisted-cookie-1", maskedHeaders.get("Cookie2"));
+		assertEquals("", maskedHeaders.get("x-amz-date"));
+		assertEquals("AWS fake-auth-header-1", config.mapVal("storage-net-http-headers").get("Authorization"));
+		assertEquals("fake-swift-token-1", config.mapVal("storage-net-http-headers").get("x-auth-token"));
+	}
+
+	@Test
+	public void maskedStringChangesOnlyCredentialAndListedHeaderValues() throws Exception {
+		final var headers = new HashMap<String, Object>();
+		headers.put("authorization", "fake-auth-header-2");
+		headers.put("X-Custom", "custom-value-2");
+		final var config = TestConfigBuilder.configWithHttpHeaders(headers);
+		config.val("storage-auth-secret", "secret-value-3");
+		final var expected = parse(ConfigUtil.toString(config, ConfigFormat.YAML, "Load"));
+		authOf(expected).put("secret", ConfigUtil.MASKED_VALUE);
+		headersOf(expected).put("authorization", ConfigUtil.MASKED_VALUE);
+
+		assertEquals(expected, parse(ConfigUtil.toMaskedString(config, ConfigFormat.YAML, "Load")));
+	}
+
+	@Test
+	public void maskCredentialsKeepsUnsetAndEmptyHeadersAndCopiesSharedMaps() {
+		final var headers = new HashMap<String, Object>();
+		headers.put("Authorization", null);
+		headers.put("Cookie", "");
+		headers.put("X-Auth-Token", "fake-swift-token-2");
+		final Map<String, Object> http = Map.of("headers", headers, "uri", Map.of("args", Map.of()));
+		final Map<String, Object> net = Map.of("http", http, "node", Map.of("port", 9020));
+		final Map<String, Object> storage = Map.of("net", net, "driver", Map.of("type", "s3"));
+		final Map<String, Object> configTree = new HashMap<>(Map.of("storage", storage));
+
+		ConfigUtil.maskCredentials(configTree);
+
+		final var maskedHeaders = headersOf(configTree);
+		assertTrue(maskedHeaders.containsKey("Authorization"));
+		assertNull(maskedHeaders.get("Authorization"));
+		assertEquals("", maskedHeaders.get("Cookie"));
+		assertEquals(ConfigUtil.MASKED_VALUE, maskedHeaders.get("X-Auth-Token"));
+		assertEquals("fake-swift-token-2", headers.get("X-Auth-Token"));
+		final var maskedStorage = (Map<?, ?>) configTree.get("storage");
+		assertEquals(Map.of("type", "s3"), maskedStorage.get("driver"));
+		assertEquals(Map.of("port", 9020), ((Map<?, ?>) maskedStorage.get("net")).get("node"));
+		assertFalse(maskedStorage.containsKey("auth"));
+	}
+
+	@Test
+	public void maskedArgPathsAreTheAuthCredentialsAndListedHeaders() {
+		for (final var path : List.of("storage-auth-uid", "storage-auth-secret", "storage-auth-token",
+						"storage-net-http-headers-Authorization", "storage-net-http-headers-proxy-authorization",
+						"storage-net-http-headers-cookie", "storage-net-http-headers-X-Amz-Security-Token",
+						"storage-net-http-headers-x-auth-token")) {
+			assertTrue(ConfigUtil.isMaskedArgPath(path), path);
+		}
+		for (final var path : List.of("storage-auth-file", "storage-auth-uid-x", "storage-auth", "storage-driver-type",
+						"storage-net-http-headers-X-Custom", "storage-net-http-headers-", "storage-net-http-uri-args-token",
+						"item-output-path")) {
+			assertFalse(ConfigUtil.isMaskedArgPath(path), path);
+		}
+	}
+
+	@Test
+	public void maskedArgFollowsTheFirstAliasingEntryAndKeepsTheGivenName() {
+		final List<Map<String, Object>> aliasing = List.of(
+						Map.of(AliasingUtil.NAME, "atmos-subtenant", AliasingUtil.TARGET, "storage-auth-token"),
+						Map.of(AliasingUtil.NAME, "fixed-secret", AliasingUtil.TARGET, "storage-auth-secret=x"),
+						Map.of(AliasingUtil.NAME, "s3-output-bucket", AliasingUtil.TARGET, "item-output-path"),
+						Map.of(AliasingUtil.NAME, "s3-output-bucket", AliasingUtil.TARGET, "storage-auth-secret"),
+						Map.of(AliasingUtil.NAME, "storage-auth-file", AliasingUtil.TARGET, "storage-auth-secret"));
+
+		assertEquals("--atmos-subtenant=***", ConfigUtil.maskedArg("--atmos-subtenant=fake-token-3", aliasing));
+		assertEquals("--fixed-secret=***", ConfigUtil.maskedArg("--fixed-secret=fake-secret-3", aliasing));
+		assertEquals("--s3-output-bucket=/b", ConfigUtil.maskedArg("--s3-output-bucket=/b", aliasing));
+		assertEquals("--storage-auth-file=***", ConfigUtil.maskedArg("--storage-auth-file=/creds.csv", aliasing));
+		assertEquals("--storage-auth-uid=***", ConfigUtil.maskedArg("--storage-auth-uid=fake-uid-3", null));
+		assertEquals("--storage-auth-secret=***", ConfigUtil.maskedArg("--storage-auth-secret==a=b=", List.of()));
+		assertEquals("--storage-auth-secret=", ConfigUtil.maskedArg("--storage-auth-secret=", aliasing));
+		assertEquals("--storage-auth-secret", ConfigUtil.maskedArg("--storage-auth-secret", aliasing));
+		assertEquals("--storage-auth-file=/c", ConfigUtil.maskedArg("--storage-auth-file=/c", List.of()));
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Map<String, Object> headersOf(final Map<String, Object> configTree) {
+		final var storage = (Map<String, Object>) configTree.get("storage");
+		final var net = (Map<String, Object>) storage.get("net");
+		return (Map<String, Object>) ((Map<String, Object>) net.get("http")).get("headers");
+	}
+
 	@SuppressWarnings("unchecked")
 	private static Map<String, Object> parse(final String yaml) throws Exception {
 		return new YAMLMapper().readValue(yaml, Map.class);

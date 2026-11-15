@@ -95,9 +95,12 @@ run.bat --version     # Windows
   --storage-net-node-addrs=your-s3-endpoint.com \
   --storage-auth-uid=your-access-key \
   --storage-auth-secret=your-secret-key \
+  --storage-auth-version=4 \
   --item-data-size=1MB \
   --load-op-limit-count=1000
 ```
+
+Pass `--storage-auth-version` on every direct engine run with the `s3`, `s3-rdma` or `s3-tables` driver: `4` for SigV4, or `2` for a legacy target that rejects SigV4. Without it the engine's default depends on the host until a later release, so the same command can sign with V2 on one host and V4 on another (see the S3 driver's [default auth version](extensions/storage-drivers/implementations/s3/README.md#31-s3-specific-options) note). `spt run` always passes a version.
 
 ### Selecting a Storage Driver
 
@@ -229,7 +232,8 @@ docker run --rm ghcr.io/dell/storage-performance-tool:latest \
   --storage-driver-type=s3 \
   --storage-net-node-addrs=your-s3-endpoint.com \
   --storage-auth-uid=your-access-key \
-  --storage-auth-secret=your-secret-key
+  --storage-auth-secret=your-secret-key \
+  --storage-auth-version=4
 
 # Run using the AWS SDK driver
 docker run --rm ghcr.io/dell/storage-performance-tool:latest \
@@ -242,7 +246,8 @@ docker run --rm ghcr.io/dell/storage-performance-tool:latest \
 docker run --rm ghcr.io/dell/storage-performance-tool:latest \
   --run-scenario=/opt/spt/scenarios/js/types/weighted.js \
   --storage-driver-type=s3 \
-  --storage-net-node-addrs=localhost:9000
+  --storage-net-node-addrs=localhost:9000 \
+  --storage-auth-version=4
 
 # Run with your custom scenario
 docker run --rm \
