@@ -100,9 +100,10 @@ final class PacedS3Stub implements AutoCloseable {
 				if (head == null) {
 					return;
 				}
-				final var requestLine = head.get(0).split(" ");
-				final var method = requestLine[0];
-				final var path = requestLine[1];
+				final var requestLine = head.get(0);
+				final int methodEnd = requestLine.indexOf(' ');
+				final var method = requestLine.substring(0, methodEnd);
+				final var path = requestLine.substring(methodEnd + 1, requestLine.indexOf(' ', methodEnd + 1));
 				final var name = path.substring(path.lastIndexOf('/') + 1);
 				final var length = contentLength(head);
 				connectionByName.put(name, connection);

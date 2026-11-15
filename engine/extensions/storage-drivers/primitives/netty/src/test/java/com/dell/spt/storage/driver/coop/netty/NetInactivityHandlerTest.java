@@ -53,6 +53,15 @@ class NetInactivityHandlerTest {
 	}
 
 	@Test
+	void unflushedBytesDoNotHoldTheTimeoutBack() throws Exception {
+		// TLS holds a request back until its handshake completes: nothing is sending it.
+		final var ctx = context(0);
+		when(ctx.channel().unsafe().outboundBuffer().totalPendingWriteBytes()).thenReturn(1387L);
+		new NetInactivityHandler(1).channelIdle(ctx, IdleStateEvent.FIRST_ALL_IDLE_STATE_EVENT);
+		verify(ctx).fireUserEventTriggered(IdleStateEvent.FIRST_ALL_IDLE_STATE_EVENT);
+	}
+
+	@Test
 	void aClosedChannelWithoutAnOutboundBufferTimesOut() throws Exception {
 		final var ctx = context(-1);
 		new NetInactivityHandler(1).channelIdle(ctx, IdleStateEvent.FIRST_ALL_IDLE_STATE_EVENT);
@@ -76,16 +85,17 @@ class NetInactivityHandlerTest {
 		channel.finishAndReleaseAll();
 	}
 
-	/** A context whose outbound buffer holds {@code pending} bytes, or has none when negative. */
-	private static ChannelHandlerContext context(final long pending) {
+	/** A context whose outbound buffer holds {@code flushed} entries, or has none when negative. */
+	private static ChannelHandlerContext context(final int flushed) {
 		final var ctx = mock(ChannelHandlerContext.class);
 		final var channel = mock(Channel.class);
 		final var unsafe = mock(Channel.Unsafe.class);
 		when(ctx.channel()).thenReturn(channel);
 		when(channel.unsafe()).thenReturn(unsafe);
-		if (pending >= 0) {
+		if (flushed >= 0) {
 			final var buf = mock(ChannelOutboundBuffer.class);
-			when(buf.totalPendingWriteBytes()).thenReturn(pending);
+			when(buf.size()).thenReturn(flushed);
+			when(buf.isEmpty()).thenReturn(flushed == 0);
 			when(unsafe.outboundBuffer()).thenReturn(buf);
 		}
 		return ctx;

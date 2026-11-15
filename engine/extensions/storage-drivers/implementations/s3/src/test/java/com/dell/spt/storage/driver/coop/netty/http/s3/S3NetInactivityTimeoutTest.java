@@ -89,8 +89,17 @@ final class S3NetInactivityTimeoutTest {
 
 	@Test
 	void aStalledUploadFailsWithinTwiceTheTimeout() throws Exception {
-		try (var stub = new PacedS3Stub(null, RATE, DELAY_MS, 0);
-						var driver = driver(stub, false)) {
+		assertStalledPut(null);
+	}
+
+	@Test
+	void aStalledTlsUploadFailsWithinTwiceTheTimeout() throws Exception {
+		assertStalledPut(PacedS3Stub.selfSignedTls(tmp));
+	}
+
+	private void assertStalledPut(final SSLContext tls) throws Exception {
+		try (var stub = new PacedS3Stub(tls, RATE, DELAY_MS, 0);
+						var driver = driver(stub, tls != null)) {
 			final var result = driver.run(op(OpType.CREATE, "stall-put", 32L * MIB));
 			assertEquals(Operation.Status.FAIL_IO, result.status(), result::toString);
 			assertTrue(result.elapsedMillis >= TIMEOUT_MS - 100, result::toString);
