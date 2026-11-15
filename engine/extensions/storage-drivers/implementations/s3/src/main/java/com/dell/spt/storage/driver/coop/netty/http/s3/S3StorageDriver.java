@@ -83,6 +83,7 @@ import java.security.InvalidKeyException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Set;
@@ -2707,11 +2708,149 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 							.append(sortedHeader.getValue());
 		}
 		buffCanonical.append('\n');
-		buffCanonical.append(dstUriPath);
+		appendV2CanonicalResource(buffCanonical, dstUriPath);
 		if (Loggers.MSG.isTraceEnabled()) {
 			Loggers.MSG.trace("Canonical representation:\n{}", buffCanonical);
 		}
 		return buffCanonical.toString();
+	}
+
+	/** {@link S3Api#SIGV2_SUB_RESOURCES} indexed by name length, for a lookup with no substring. */
+	private static final String[][] SIGV2_SUB_RESOURCES_BY_LENGTH = subResourcesByLength();
+
+	private static String[][] subResourcesByLength() {
+		int maxLength = 0;
+		for (final var name : S3Api.SIGV2_SUB_RESOURCES) {
+			maxLength = Math.max(maxLength, name.length());
+		}
+		final var byLength = new String[maxLength + 1][];
+		for (int length = 0; length <= maxLength; length++) {
+			final int len = length;
+			byLength[length] = S3Api.SIGV2_SUB_RESOURCES.stream()
+							.filter(name -> name.length() == len)
+							.sorted()
+							.toArray(String[]::new);
+		}
+		return byLength;
+	}
+
+	/**
+	 * Appends the SigV2 canonical resource of a request URI: the path, then only the query's
+	 * sub-resources ({@link S3Api#SIGV2_SUB_RESOURCES}), sorted by name and joined with {@code &}.
+	 * The {@code ?} is left out when no sub-resource remains. An empty value signs as the bare name,
+	 * so {@code ?versions=} signs as {@code ?versions}. A non-empty value is signed as sent: AWS,
+	 * botocore and MinIO sign the decoded value and SeaweedFS the re-encoded one, which agree for
+	 * the unreserved characters that version and upload IDs are made of, so nothing is decoded.
+	 *
+	 * <p>A URI with no query is appended unchanged. SPT builds its sub-resources in sorted order, so
+	 * the usual query is filtered in one pass with no allocation; only an unsorted query, such as one
+	 * from {@code storage-net-http-uri-args}, takes the sorting path.
+	 */
+	static void appendV2CanonicalResource(final StringBuilder buff, final String uri) {
+		final int queryStart = uri.indexOf('?');
+		if (queryStart < 0) {
+			buff.append(uri);
+			return;
+		}
+		buff.append(uri, 0, queryStart);
+		final int resourceEnd = buff.length();
+		final int uriLength = uri.length();
+		int prevNameStart = -1;
+		int prevNameEnd = -1;
+		int paramStart = queryStart + 1;
+		while (paramStart < uriLength) {
+			int paramEnd = uri.indexOf('&', paramStart);
+			if (paramEnd < 0) {
+				paramEnd = uriLength;
+			}
+			int nameEnd = uri.indexOf('=', paramStart, paramEnd);
+			if (nameEnd < 0) {
+				nameEnd = paramEnd;
+			}
+			if (isV2SubResource(uri, paramStart, nameEnd)) {
+				if (prevNameStart >= 0 && compareRegions(uri, prevNameStart, prevNameEnd, paramStart, nameEnd) > 0) {
+					buff.setLength(resourceEnd);
+					appendSortedV2SubResources(buff, uri, queryStart);
+					return;
+				}
+				appendV2SubResource(buff, uri, prevNameStart < 0, paramStart, nameEnd, paramEnd);
+				prevNameStart = paramStart;
+				prevNameEnd = nameEnd;
+			}
+			paramStart = paramEnd + 1;
+		}
+	}
+
+	private static void appendSortedV2SubResources(final StringBuilder buff, final String uri, final int queryStart) {
+		final int uriLength = uri.length();
+		// Each sub-resource takes three slots: name start, name end, parameter end.
+		var spans = new int[12];
+		int count = 0;
+		int paramStart = queryStart + 1;
+		while (paramStart < uriLength) {
+			int paramEnd = uri.indexOf('&', paramStart);
+			if (paramEnd < 0) {
+				paramEnd = uriLength;
+			}
+			int nameEnd = uri.indexOf('=', paramStart, paramEnd);
+			if (nameEnd < 0) {
+				nameEnd = paramEnd;
+			}
+			if (isV2SubResource(uri, paramStart, nameEnd)) {
+				if (3 * count + 3 > spans.length) {
+					spans = Arrays.copyOf(spans, spans.length * 2);
+				}
+				// Stable insertion sort by name: equal names keep their order in the query.
+				int i = count;
+				while (i > 0 && compareRegions(uri, spans[3 * (i - 1)], spans[3 * (i - 1) + 1], paramStart, nameEnd) > 0) {
+					System.arraycopy(spans, 3 * (i - 1), spans, 3 * i, 3);
+					i--;
+				}
+				spans[3 * i] = paramStart;
+				spans[3 * i + 1] = nameEnd;
+				spans[3 * i + 2] = paramEnd;
+				count++;
+			}
+			paramStart = paramEnd + 1;
+		}
+		for (int i = 0; i < count; i++) {
+			appendV2SubResource(buff, uri, i == 0, spans[3 * i], spans[3 * i + 1], spans[3 * i + 2]);
+		}
+	}
+
+	private static void appendV2SubResource(
+					final StringBuilder buff, final String uri, final boolean first,
+					final int nameStart, final int nameEnd, final int paramEnd) {
+		buff.append(first ? '?' : '&');
+		// nameEnd is either the parameter end (no value) or the '=' before the value.
+		buff.append(uri, nameStart, nameEnd + 1 < paramEnd ? paramEnd : nameEnd);
+	}
+
+	private static boolean isV2SubResource(final String uri, final int nameStart, final int nameEnd) {
+		final int length = nameEnd - nameStart;
+		if (length <= 0 || length >= SIGV2_SUB_RESOURCES_BY_LENGTH.length) {
+			return false;
+		}
+		for (final var name : SIGV2_SUB_RESOURCES_BY_LENGTH[length]) {
+			if (uri.startsWith(name, nameStart)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** Compares two regions of {@code s} the way {@link String#compareTo} compares strings. */
+	private static int compareRegions(final String s, final int aStart, final int aEnd, final int bStart, final int bEnd) {
+		final int aLength = aEnd - aStart;
+		final int bLength = bEnd - bStart;
+		final int common = Math.min(aLength, bLength);
+		for (int i = 0; i < common; i++) {
+			final int diff = s.charAt(aStart + i) - s.charAt(bStart + i);
+			if (diff != 0) {
+				return diff;
+			}
+		}
+		return aLength - bLength;
 	}
 
 	@Override
