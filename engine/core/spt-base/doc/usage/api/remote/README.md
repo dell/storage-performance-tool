@@ -423,9 +423,18 @@ Example body:
 ```
 
 Fields:
-- `state`: one of `IDLE`, `RUNNING`, `COMPLETED`, `STOPPED`.
+- `state`: one of `IDLE`, `RUNNING`, `COMPLETED`, `STOPPED`, `FAILED`.
 - `since`: ISO‑8601 instant indicating when the state was entered.
 - `run_id` and `step_id`: included when known.
+- `category` and `message`: included only when `state` is `FAILED`.
+  - `category` is one of `configuration`, `input`, `execution`, `aggregation`, `publication` or `cleanup`. A typed terminal failure of a step sets its own category. A scenario that fails otherwise reads `configuration` for a syntax error in the posted scenario text or a setting that `Load.config(...)` or `.append(...)` refuses, and `execution` for any other failure.
+  - `message` is a short description of the cause, at most 1024 characters. For a scenario failure the engine writes it without quoting the scenario: it names a refused setting only by the part of its path the engine defines, never by a value or a key the scenario wrote. A typed terminal failure's message is its own and may name a setting, such as the items file's name. The node's log has the details.
+
+Example body after a failed scenario:
+
+```json
+{"state":"FAILED","since":"2025-09-10T12:35:02Z","run_id":1757500000000,"step_id":"my-step-001","category":"configuration","message":"invalid configuration option under \"load-op\""}
+```
 
 Availability:
 - Served during a run and for a short window after terminal cleanup, controlled by `api.linger.sec` (default 20s).

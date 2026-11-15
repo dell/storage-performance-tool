@@ -1,5 +1,6 @@
 package com.dell.spt.load.step.weighted;
 
+import com.dell.spt.base.config.ScenarioConfigurationException;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.step.client.LoadStepClientBase;
@@ -20,7 +21,6 @@ import java.util.Locale;
 import java.util.Map;
 
 import static com.github.akurilov.commons.collection.TreeUtil.reduceForest;
-import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static com.github.akurilov.confuse.Config.deepToMap;
 
 public class WeightedLoadStepClient extends LoadStepClientBase<WeightedLoadStepClient> {
@@ -67,7 +67,7 @@ public class WeightedLoadStepClient extends LoadStepClientBase<WeightedLoadStepC
 				subConfig = new BasicConfig(config.pathSep(), config.schema(), mergedConfigTree);
 			} catch (final InvalidValueTypeException | InvalidValuePathException e) {
 				LogUtil.exception(Level.FATAL, e, "Scenario syntax error");
-				throwUnchecked(e);
+				throw new ScenarioConfigurationException(e, config);
 			}
 			final OpType opType = OpType.valueOf(subConfig.stringVal("load-op-type").toUpperCase(Locale.ROOT));
 			final int concurrencyLimit = config.intVal("storage-driver-limit-concurrency");

@@ -34,6 +34,7 @@ import com.dell.spt.base.integrity.IntegrityConfig;
 import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
 import com.dell.spt.base.integrity.IntegrityInputProvenance;
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
+import com.dell.spt.base.config.ScenarioConfigurationException;
 import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.Item;
@@ -3116,7 +3117,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			EngineBuildInfoProvider.global().projectVersion(configCopy, aliasedArgs.containsKey("run-version"));
 		} catch (final Exception e) {
 			LogUtil.exception(Level.FATAL, e, "Scenario syntax error");
-			throwUnchecked(e);
+			throw new ScenarioConfigurationException(e, config);
 		}
 		return copyInstance(configCopy, null);
 	}
@@ -3142,7 +3143,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			EngineBuildInfoProvider.global().projectVersion(ctxConfig, aliasedArgs.containsKey("run-version"));
 		} catch (final Exception e) {
 			LogUtil.exception(Level.FATAL, e, "Scenario syntax error");
-			throwUnchecked(e);
+			throw new ScenarioConfigurationException(e, config);
 		}
 		ctxConfigsCopy.add(ctxConfig);
 		return copyInstance(config, ctxConfigsCopy);
