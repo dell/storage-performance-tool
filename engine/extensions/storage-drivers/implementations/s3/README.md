@@ -432,10 +432,14 @@ With versioning on, the `s3` and `s3-rdma` drivers read the version from a `key~
   version with the `versionId` query parameter, for example `GET /bucket/key?versionId=<versionId>`.
 * UPDATE sends the version in an `x-amz-version-id` request header. S3 has no in-place update of a version: a `PUT`
   always makes a new one.
-* A successful operation renames the item `key~<versionId>` with the version the target returns, so the output items
-  file records the version that was read, written or deleted.
+* A successful operation whose response has an `x-amz-version-id` header renames the item `key~<versionId>` with
+  that version, so the output items file records the version that was read, written or deleted. Without the header
+  the item keeps its name: for a READ, STAT or DELETE that is the version it selected, but for a CREATE or UPDATE it
+  is the previous version, not the one the `PUT` made.
 * A failed operation keeps its `key~versionId` name, so with `--load-op-retry=true` the retry selects the same
-  version.
+  version. A READ or STAT naming a version that no longer exists fails with 404.
+* Under V2 signing (`--storage-auth-version=2`, the default) the `versionId` value is signed decoded, as V2 requires; the URI
+  carries it percent-encoded.
 * A copy (a CREATE with `--item-input-path`) and an item above the multipart threshold (`item-data-ranges-threshold`,
   see [4.4](#44-multipart-upload)) don't select a version: they act on the current version, or on an object literally
   named `key~versionId`.
