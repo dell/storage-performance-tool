@@ -74,18 +74,15 @@ final class NicPathsCollector implements AutoCloseable {
 	 * @param entry the Entry Node's file manager
 	 * @param expected one per slice: whether that slice requested a NIC set
 	 */
-	static List<Path> publishedPaths(final FileManager entry, final String loadStepId, final List<Boolean> expected) {
+	static List<Path> publishedPaths(final FileManager entry, final String loadStepId, final List<Boolean> expected)
+					throws IOException {
 		final var paths = new ArrayList<Path>();
 		for (final var evidence : EVIDENCE) {
 			if (evidence.replaces()) {
 				continue;
 			}
-			final Path canonical;
-			try {
-				canonical = Path.of(entry.logFileName(evidence.logger().getName(), loadStepId)).toAbsolutePath();
-			} catch (final IOException | RuntimeException noFile) {
-				continue; // Its publication warns at stop.
-			}
+			// A file that cannot be named cannot be tested, so the step is refused.
+			final Path canonical = Path.of(entry.logFileName(evidence.logger().getName(), loadStepId)).toAbsolutePath();
 			if (!evidence.fileName().equals(canonical.getFileName().toString())) {
 				continue; // Its collection warns at close.
 			}

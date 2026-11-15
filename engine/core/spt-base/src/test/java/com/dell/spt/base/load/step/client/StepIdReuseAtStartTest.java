@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -15,6 +16,8 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.dell.spt.base.Constants;
+import com.dell.spt.base.buildinfo.EngineBuildInfoPublisher;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
@@ -22,6 +25,7 @@ import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepFactory;
+import com.dell.spt.base.load.step.StepIdCheckException;
 import com.dell.spt.base.load.step.StepIdFiles;
 import com.dell.spt.base.load.step.StepIdInUseException;
 import com.dell.spt.base.load.step.file.FileManager;
@@ -31,17 +35,25 @@ import com.github.akurilov.confuse.Config;
 import java.io.EOFException;
 import java.io.IOException;
 import java.rmi.RemoteException;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Stream;
+import org.apache.logging.log4j.CloseableThreadContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
@@ -52,6 +64,8 @@ import org.junit.jupiter.api.io.TempDir;
  */
 public class StepIdReuseAtStartTest {
 
+	private static final String NODE = "127.0.0.1:1";
+	private static final String NODE_FILE = "/w/operation.lifecycle.csv";
 	private final String stepId = "step-id-reuse-" + UUID.randomUUID();
 	private LoadStepFactory<LoadStep, ?> factory;
 	private Path stepDir;
@@ -244,13 +258,101 @@ public class StepIdReuseAtStartTest {
 		assertTrue(failure.getMessage().contains("(/w/nic.set.json exists)"), failure.getMessage());
 	}
 
-	@Test
-	void aNodeThatCannotTellLeavesTheTestToItsSlice() throws Exception {
-		final var merged = StepIdFiles.merged(config("create"), List.of());
-		final FileManager worker = mock(FileManager.class);
-		when(worker.logFileName(anyString(), eq(stepId))).thenThrow(new RemoteException("unreachable"));
+	/** The faults a node's file manager can answer the reuse check with, none of them a definite answer. */
+	static Stream<Arguments> uncheckableNodes() {
+		return Stream.of(
+						Arguments.of("a denied file on readFromFile", (Fault) (node, stepId) -> when(node.readFromFile(eq(NODE_FILE), anyLong()))
+										.thenThrow(new AccessDeniedException(NODE_FILE))),
+						Arguments.of("an RMI failure on fileSize", (Fault) (node, stepId) -> when(node.fileSize(NODE_FILE))
+										.thenThrow(new RemoteException("connection reset"))),
+						Arguments.of("an RMI failure on readFromFile", (Fault) (node, stepId) -> when(node.readFromFile(eq(NODE_FILE), anyLong()))
+										.thenThrow(new RemoteException("connection reset"))),
+						Arguments.of("an RMI failure on logFileName", (Fault) (node, stepId) -> when(node.logFileName(
+										Loggers.OPERATION_LIFECYCLE.getName(), stepId)).thenThrow(new RemoteException("connection reset"))));
+	}
 
-		LoadStepClientBase.refuseNodeFiles(stepId, List.of(FileManager.INSTANCE, worker), List.of("n2"), merged, List.of(false, false));
+	@FunctionalInterface
+	interface Fault {
+		void apply(FileManager node, String stepId) throws IOException;
+	}
+
+	@ParameterizedTest(name = "{0}")
+	@MethodSource("uncheckableNodes")
+	void aNodeThatCannotTellIsRefusedBeforeAnySliceStarts(final String name, final Fault fault) throws Exception {
+		final FileManager worker = node(Loggers.OPERATION_LIFECYCLE.getName(), NODE_FILE, 0);
+		fault.apply(worker, stepId);
+
+		final var failure = refusedAtStart(config("create"), worker);
+
+		final var unchecked = assertInstanceOf(StepIdCheckException.class, failure, failure.toString());
+		assertEquals("engine 2 of 2: step id \"" + stepId + "\" could not be checked in that node's log directory; "
+						+ "see the entry's log", unchecked.getMessage());
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, unchecked.category());
+	}
+
+	@Test
+	void anEntryFileThatCannotBeTestedRefusesTheStepBeforeAnySliceStarts() throws Exception {
+		final Path lifecycle = canonical(Loggers.OPERATION_LIFECYCLE.getName());
+		Files.createDirectories(stepDir);
+		// A link to itself: the file system cannot tell whether an earlier step left the file.
+		Files.createSymbolicLink(lifecycle, lifecycle.getFileName());
+
+		final var failure = refusedAtStart(config("create"), null);
+
+		assertInstanceOf(StepIdCheckException.class, failure, failure.toString());
+		assertEquals("step id \"" + stepId + "\" could not be checked in this log directory; see the engine log",
+						failure.getMessage());
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertTrue(Files.isSymbolicLink(lifecycle));
+	}
+
+	@Test
+	void anEntryManifestThatCannotBeTestedRefusesTheStepBeforeAnySliceStarts() throws Exception {
+		assumeFalse("root".equals(System.getProperty("user.name")), "root reads a denied directory");
+		final Path denied = Files.createDirectory(tempDir.resolve("denied"));
+		final Config config = config("create");
+		config.val("item-output-file", denied.resolve("written.csv").toString());
+		config.val("storage-integrity-mode", "metadata");
+		config.val("storage-driver-type", "s3");
+		Files.setPosixFilePermissions(denied, PosixFilePermissions.fromString("---------"));
+		try {
+			final var failure = refusedAtStart(config, null);
+
+			assertInstanceOf(StepIdCheckException.class, failure, failure.toString());
+			assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		} finally {
+			Files.setPosixFilePermissions(denied, PosixFilePermissions.fromString("rwx------"));
+		}
+	}
+
+	/**
+	 * Starts a step of {@code config}, on this node and, with {@code worker}, on one other node, and
+	 * returns why it was refused: before any slice started and before its build record was written.
+	 */
+	private RunTerminalException refusedAtStart(final Config config, final FileManager worker) throws Exception {
+		final Path buildRecord = canonical(Loggers.OPERATION_LIFECYCLE.getName()).resolveSibling(EngineBuildInfoPublisher.FILE_NAME);
+		if (worker != null) {
+			config.val("load-step-node-addrs", List.of(NODE));
+		}
+		final TestLoadStepClient client = client(config);
+		if (worker != null) {
+			client.withNodeFileManagers(Map.of(NODE, worker));
+		}
+		final List<String> before = resultFiles();
+		final RuntimeException thrown;
+		// The build record goes to the log home of the thread context, which the loggers' folder is under here.
+		try (var home = CloseableThreadContext.put(Constants.KEY_HOME_DIR, stepDir.getParent().getParent().toString())) {
+			thrown = assertThrows(RuntimeException.class, client::start);
+		} finally {
+			closeQuietly(client);
+		}
+		verify(factory, never()).createLocal(any(), anyList(), anyList(), any());
+		assertFalse(Files.exists(buildRecord, LinkOption.NOFOLLOW_LINKS), "the refused step wrote its build record");
+		assertEquals(before, resultFiles(), "the refused step published a result file");
+		final var failure = RunTerminalException.find(thrown);
+		assertTrue(failure instanceof StepIdCheckException || failure instanceof StepIdInUseException, thrown.toString());
+		assertEquals(stepId, failure.stepId());
+		return failure;
 	}
 
 	@Test
@@ -302,6 +404,19 @@ public class StepIdReuseAtStartTest {
 			return failure;
 		} finally {
 			closeQuietly(client);
+		}
+	}
+
+	/** The step folder's result files, without its logs. */
+	private List<String> resultFiles() throws IOException {
+		if (!Files.isDirectory(stepDir)) {
+			return List.of();
+		}
+		try (Stream<Path> files = Files.list(stepDir)) {
+			return files.map(file -> file.getFileName().toString())
+							.filter(file -> file.endsWith(".csv") || file.endsWith(".json"))
+							.sorted()
+							.toList();
 		}
 	}
 

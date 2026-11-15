@@ -2,7 +2,7 @@ package com.dell.spt.base.load.step;
 
 import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException.Category;
-import java.nio.file.Files;
+import java.io.IOException;
 import java.nio.file.Path;
 
 /**
@@ -35,10 +35,17 @@ public final class StepIdInUseException extends RunTerminalException {
 	 *
 	 * @param paths the files the step would refuse to replace
 	 * @throws StepIdInUseException for the first of {@code paths} that exists
+	 * @throws StepIdCheckException for the first of {@code paths} that cannot be tested
 	 */
 	public static void refuseExisting(final String stepId, final Iterable<Path> paths) {
 		for (final Path path : paths) {
-			if (Files.exists(path)) {
+			final boolean exists;
+			try {
+				exists = StepIdFiles.exists(path);
+			} catch (final IOException unknown) {
+				throw StepIdCheckException.here(stepId, path.toString(), unknown);
+			}
+			if (exists) {
 				throw new StepIdInUseException(stepId, path);
 			}
 		}

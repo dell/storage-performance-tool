@@ -335,6 +335,38 @@ class LoadStepLocalBaseTest {
 	}
 
 	@Test
+	void aSliceWhoseFileCannotBeTestedIsRefusedAndClosesWithoutPublishing() throws Exception {
+		final String stepId = "slice-reuse-" + java.util.UUID.randomUUID();
+		final var lifecycle = logFile(Loggers.OPERATION_LIFECYCLE, stepId);
+		final var eventLoops = earlierFile(logFile(Loggers.EVENT_LOOPS, stepId));
+		final var nicPaths = earlierFile(logFile(Loggers.NIC_PATHS, stepId));
+		// A link to itself: the file system cannot tell whether an earlier step left the file.
+		java.nio.file.Files.createSymbolicLink(lifecycle, lifecycle.getFileName());
+		try {
+			final LoadStepContext context = mockContext();
+			when(context.hasNicSet()).thenReturn(true);
+			final var step = reuseStep(stepId, "create", context);
+
+			final var thrown = assertThrows(RuntimeException.class, step::start);
+			final var failure = assertInstanceOf(com.dell.spt.base.load.step.StepIdCheckException.class,
+							RunTerminalException.find(thrown), thrown.toString());
+			assertEquals("step id \"" + stepId + "\" could not be checked in this log directory; see the engine log",
+							failure.getMessage());
+			assertEquals(com.dell.spt.base.integrity.IntegrityTerminalException.Category.EXECUTION, failure.category());
+			verify(context, never()).start();
+			step.stop();
+			step.close();
+
+			assertTrue(java.nio.file.Files.isSymbolicLink(lifecycle), "the refused slice published its lifecycle file");
+			for (final var file : List.of(eventLoops, nicPaths)) {
+				assertEquals("earlier", java.nio.file.Files.readString(file), "the refused slice published " + file);
+			}
+		} finally {
+			removeStepFolder(eventLoops);
+		}
+	}
+
+	@Test
 	void anUpdateSliceWithoutANicSetStillStartsAfterAnEarlierStepWithTheSameId() throws Exception {
 		final String stepId = "slice-reuse-" + java.util.UUID.randomUUID();
 		final var lifecycle = earlierFile(logFile(Loggers.OPERATION_LIFECYCLE, stepId));

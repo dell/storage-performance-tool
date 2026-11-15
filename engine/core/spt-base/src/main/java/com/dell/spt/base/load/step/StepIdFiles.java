@@ -16,7 +16,10 @@ import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.impl.BasicConfig;
 import java.io.EOFException;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -145,6 +148,21 @@ public final class StepIdFiles {
 			names.addAll(NIC_LOGGER_NAMES);
 		}
 		return List.copyOf(names);
+	}
+
+	/**
+	 * Whether {@code path} exists on this node. Unlike {@link Files#exists}, a file that cannot be
+	 * tested, for a denied directory for example, is neither present nor absent.
+	 *
+	 * @throws IOException when the file system cannot tell
+	 */
+	public static boolean exists(final Path path) throws IOException {
+		try {
+			Files.readAttributes(path, BasicFileAttributes.class);
+			return true;
+		} catch (final NoSuchFileException missing) {
+			return false;
+		}
 	}
 
 	/**

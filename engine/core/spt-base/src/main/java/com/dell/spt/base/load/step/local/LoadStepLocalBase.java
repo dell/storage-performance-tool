@@ -2,6 +2,7 @@ package com.dell.spt.base.load.step.local;
 
 import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
+import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.apache.logging.log4j.CloseableThreadContext.Instance;
 import static org.apache.logging.log4j.CloseableThreadContext.put;
@@ -24,6 +25,7 @@ import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.LoadStepBase;
 import com.dell.spt.base.load.step.PreparationStatus;
 import com.dell.spt.base.load.step.StepIdFiles;
+import com.dell.spt.base.load.step.StepIdCheckException;
 import com.dell.spt.base.load.step.StepIdInUseException;
 import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.storage.driver.AdmissionPhase;
@@ -1108,13 +1110,15 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 						StepIdFiles.merged(config, ctxConfigs), StepIdFiles.nicSet(config, ctxConfigs))) {
 			try {
 				paths.add(Path.of(FileManager.INSTANCE.logFileName(loggerName, loadStepId())));
-			} catch (final IOException | RuntimeException noFile) {
-				// Its publication reports it at stop.
+			} catch (final IOException | RuntimeException unknown) {
+				throwUncheckedIfInterrupted(unknown);
+				startRefused = true;
+				throw StepIdCheckException.here(loadStepId(), "the " + loggerName + " file", unknown);
 			}
 		}
 		try {
 			StepIdInUseException.refuseExisting(loadStepId(), paths);
-		} catch (final StepIdInUseException refused) {
+		} catch (final StepIdInUseException | StepIdCheckException refused) {
 			startRefused = true;
 			throw refused;
 		}

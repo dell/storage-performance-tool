@@ -49,6 +49,7 @@ import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepBase;
 import com.dell.spt.base.load.step.LoadStepFactory;
+import com.dell.spt.base.load.step.StepIdCheckException;
 import com.dell.spt.base.load.step.StepIdFiles;
 import com.dell.spt.base.load.step.StepIdInUseException;
 import com.dell.spt.base.load.step.client.metrics.MetricsAggregator;
@@ -408,7 +409,13 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			if (integrityConfig.enabled() && itemOutputFile != null && !itemOutputFile.isEmpty()) {
 				for (final var path : CsvArtifactAggregator.publishedPaths(
 								itemOutputFile, sliceCount, StepIdFiles.opType(stepConfig))) {
-					if (java.nio.file.Files.exists(path)) {
+					final boolean published;
+					try {
+						published = StepIdFiles.exists(path);
+					} catch (final IOException unknown) {
+						throw StepIdCheckException.here(loadStepId(), path.toString(), unknown);
+					}
+					if (published) {
 						throw terminalFailure(
 										IntegrityTerminalException.Category.PUBLICATION,
 										"item output file is already published by an earlier step (" + path
@@ -425,12 +432,18 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			try {
 				paths.addAll(CsvLoggerArtifactAggregator.publishedPaths(
 								FileManager.INSTANCE, artifact.loggerName(), loadStepId(), sliceCount));
-			} catch (final IOException | RuntimeException noFile) {
-				// Its aggregator fails to initialize with the reason.
+			} catch (final IOException | RuntimeException unknown) {
+				throwUncheckedIfInterrupted(unknown);
+				throw StepIdCheckException.here(loadStepId(), "the " + artifact.loggerName() + " file", unknown);
 			}
 		}
 		if (nicSetExpected.contains(true)) {
-			paths.addAll(NicPathsCollector.publishedPaths(FileManager.INSTANCE, loadStepId(), nicSetExpected));
+			try {
+				paths.addAll(NicPathsCollector.publishedPaths(FileManager.INSTANCE, loadStepId(), nicSetExpected));
+			} catch (final IOException | RuntimeException unknown) {
+				throwUncheckedIfInterrupted(unknown);
+				throw StepIdCheckException.here(loadStepId(), "the NIC files", unknown);
+			}
 		}
 		StepIdInUseException.refuseExisting(loadStepId(), paths);
 		if (!nodes) {
@@ -443,8 +456,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	/**
 	 * Refuses step {@code stepId} when an earlier step with its id left, on another node of the step,
-	 * a file that node's slice would publish; a file its node cannot tell about is left to the slice,
-	 * which tests its own files when it starts.
+	 * a file that node's slice would publish, or when the node cannot tell whether one is there: a
+	 * slice must not start over a file nobody could test.
 	 *
 	 * @param fileMgrs one per slice, the Entry Node's first
 	 * @param nodeAddrs one per other node, in slice order
@@ -459,14 +472,14 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		for (var i = 1; i < fileMgrs.size(); i++) {
 			final var fileMgr = fileMgrs.get(i);
 			for (final var loggerName : StepIdFiles.sliceLoggerNames(merged, nicSetExpected.get(i))) {
-				final String file;
+				String file = "the " + loggerName + " file";
 				final boolean exists;
 				try {
 					file = fileMgr.logFileName(loggerName, stepId);
 					exists = StepIdFiles.exists(fileMgr, file);
 				} catch (final IOException | RuntimeException unknown) {
 					throwUncheckedIfInterrupted(unknown);
-					continue;
+					throw StepIdCheckException.onNode(stepId, i, fileMgrs.size(), nodeAddrs.get(i - 1), file, unknown);
 				}
 				if (exists) {
 					throw new StepIdInUseException(stepId, nodeAddrs.get(i - 1), file);
@@ -603,12 +616,12 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		return List.copyOf(contributors);
 	}
 
-	private static void initFileManagers(final List<String> nodeAddrs, final List<FileManager> fileMgrsDst) {
+	private void initFileManagers(final List<String> nodeAddrs, final List<FileManager> fileMgrsDst) {
 		// local file manager
 		fileMgrsDst.add(FileManager.INSTANCE);
 		// remote file managers
 		for (final var nodeAddr : nodeAddrs) {
-			final var fileMgr = resolveFileManagerWithRetries(nodeAddr, 10);
+			final var fileMgr = resolveFileManager(nodeAddr);
 			if (null == fileMgr) {
 				throw new IllegalStateException(
 								"Failed to resolve the file manager service @ " + nodeAddr
@@ -616,6 +629,11 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			}
 			fileMgrsDst.add(fileMgr);
 		}
+	}
+
+	/** The file manager of the node {@code nodeAddr}, or null when it cannot be resolved; tests supply their own. */
+	FileManager resolveFileManager(final String nodeAddr) {
+		return resolveFileManagerWithRetries(nodeAddr, 10);
 	}
 
 	private static FileManagerService resolveFileManagerWithRetries(final String nodeAddrWithPort, final int maxRetries) {
