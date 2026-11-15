@@ -141,6 +141,13 @@ final class NicSetLoopback implements AutoCloseable {
 	volatile Predicate<Request> failRequest = request -> false;
 	/** The status of the replies that fail requests chosen above: 503 unless a test sets another. */
 	volatile int failureStatus = 503;
+	/** How long the stub waits before it takes a multipart abort; the upload stays open meanwhile. */
+	volatile long abortDelayMillis;
+	/** Whether the stub never answers a multipart abort: it holds the request until {@link #close()}. */
+	volatile boolean abortsUnanswered;
+	private final CountDownLatch closed = new CountDownLatch(1);
+	/** The body of the replies that fail requests chosen above. */
+	volatile String failureBody = "error";
 	/**
 	 * Which multipart completions the stub answers 200 with {@link #completionErrorBody}, as S3 answers
 	 * a completion that failed after its status line: the upload stays open.
@@ -518,6 +525,7 @@ final class NicSetLoopback implements AutoCloseable {
 
 	@Override
 	public void close() {
+		closed.countDown();
 		release();
 		servers.forEach(server -> server.stop(0));
 		serverThreads.shutdownNow();
@@ -547,10 +555,17 @@ final class NicSetLoopback implements AutoCloseable {
 				}
 				if (objectRequest > 0 && (failObjectRequest.test(objectRequest) || (failParts && request.isPart())
 								|| failRequest.test(request))) {
-					final var error = "error".getBytes(StandardCharsets.US_ASCII);
+					final var error = failureBody.getBytes(StandardCharsets.UTF_8);
 					exchange.sendResponseHeaders(failureStatus, error.length);
 					exchange.getResponseBody().write(error);
 					return;
+				}
+				if (isAbort(request) && abortsUnanswered) {
+					closed.await();
+					return;
+				}
+				if (isAbort(request) && abortDelayMillis > 0) {
+					Thread.sleep(abortDelayMillis);
 				}
 				final long delayMillis = objectRequest > 0 ? answerDelayMillis.applyAsLong(request) : 0;
 				if (delayMillis > 0) {
@@ -681,6 +696,11 @@ final class NicSetLoopback implements AutoCloseable {
 		final var bytes = xml.getBytes(StandardCharsets.UTF_8);
 		exchange.sendResponseHeaders(status, bytes.length);
 		exchange.getResponseBody().write(bytes);
+	}
+
+	/** A multipart upload's abort. */
+	static boolean isAbort(final Request request) {
+		return "DELETE".equals(request.method()) && request.query() != null && request.query().contains("uploadId=");
 	}
 
 	/** Answers 200 with a chunked body: its leading whitespace first, flushed, then the rest. */

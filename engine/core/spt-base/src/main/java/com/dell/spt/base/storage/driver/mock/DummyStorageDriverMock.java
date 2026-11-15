@@ -9,6 +9,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.storage.driver.CompositeResults;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.github.akurilov.commons.collection.Range;
 import com.dell.spt.base.concurrent.AsyncRunnableBase;
@@ -208,6 +209,12 @@ public final class DummyStorageDriverMock<I extends Item, O extends Operation<I>
 		}
 		op.finishResponse();
 		op.status(Operation.Status.SUCC);
+	}
+
+	/** The mock completes each operation at once, a composite with one result, without parts. */
+	@Override
+	public final CompositeResults compositeResults() {
+		return CompositeResults.ONE_RESULT;
 	}
 
 	@Override

@@ -1,5 +1,6 @@
 package com.dell.spt.load.step.mixed;
 
+import com.dell.spt.base.concurrent.ThreadTaskExecutor;
 import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.item.DataItemFactoryImpl;
 import com.dell.spt.base.item.DataItemImpl;
@@ -9,10 +10,13 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.item.op.OperationsBuilder;
+import com.dell.spt.base.item.op.composite.CompositeOperation;
+import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.data.DataOperationsBuilderImpl;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.storage.driver.CompositeResults;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import org.apache.logging.log4j.ThreadContext;
@@ -40,9 +44,13 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.LongAdder;
 
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 /**
  * Unit tests for {@link MixedLoadGenerator}.
@@ -97,6 +105,450 @@ class MixedLoadGeneratorTest {
 						Output.class,
 						int.class,
 						Input.class));
+	}
+
+	@Test
+	void theThreadExecutorConstructorDescriptorRemainsAvailable() throws Exception {
+		assertNotNull(MixedLoadGenerator.class.getConstructor(
+						ThreadTaskExecutor.class,
+						OpSchedule.class,
+						PoolItemInput.class,
+						Map.class,
+						Output.class,
+						int.class,
+						Input.class));
+	}
+
+	@Test
+	@DisplayName("A count-limited generator dispatches its count, then reports the cap drained once each has its final result")
+	void aCountLimitedGeneratorDispatchesItsCount() throws Exception {
+		final List<Operation> dispatched = new CopyOnWriteArrayList<>();
+		final MixedLoadGenerator gen = countLimitedGenerator(capturingOutput(dispatched), 5);
+
+		dispatch(gen, 20);
+
+		assertEquals(5, dispatched.size(), "operations handed to the driver");
+		assertEquals(5, gen.generatedOpCount());
+		assertTrue(gen.isItemInputFinished(), "a capped generator has finished its input");
+		assertFalse(gen.isCountLimitDrained(0), "its operations are still in flight");
+		for (int i = 0; i < 5; i++) {
+			gen.onOperationCompleted(dispatched.get(i));
+			gen.releasePermit();
+		}
+		// Out of flight is not ended: a multipart upload leaves flight at its initiation.
+		assertFalse(gen.isCountLimitDrained(0), "no operation has published its final result");
+		assertFalse(gen.isCountLimitDrained(4), "four counted results, one final result to come");
+		gen.onUncountedFinalResult();
+		assertTrue(gen.isCountLimitDrained(4), "four counted results and one uncounted final result");
+		assertTrue(gen.isCountLimitDrained(5), "every dispatched operation has ended");
+	}
+
+	@Test
+	@DisplayName("A refused operation does not count toward the count limit")
+	void aRefusedOperationDoesNotCountTowardTheLimit() throws Exception {
+		final List<Operation> dispatched = new CopyOnWriteArrayList<>();
+		final Output<Operation> capture = capturingOutput(dispatched);
+		final AtomicInteger calls = new AtomicInteger();
+		final Output<Operation> refusesEveryOther = new AcceptingOutput() {
+			@Override
+			public boolean put(final Operation op) {
+				return calls.getAndIncrement() % 2 == 0 && capture.put(op);
+			}
+		};
+		final MixedLoadGenerator gen = countLimitedGenerator(refusesEveryOther, 3);
+
+		dispatch(gen, 20);
+
+		assertEquals(3, dispatched.size(), "operations the driver accepted");
+		assertEquals(3, gen.generatedOpCount());
+	}
+
+	@Test
+	@DisplayName("Without a count limit the generator dispatches on every call and never reports a drained cap")
+	void anUncappedGeneratorIsNotLimited() throws Exception {
+		final List<Operation> dispatched = new CopyOnWriteArrayList<>();
+		final MixedLoadGenerator gen = countLimitedGenerator(capturingOutput(dispatched), 0);
+
+		dispatch(gen, 50);
+
+		assertEquals(50, dispatched.size());
+		assertFalse(gen.isItemInputFinished());
+		for (final Operation op : dispatched) {
+			gen.onOperationCompleted(op);
+			gen.releasePermit();
+		}
+		assertFalse(gen.isCountLimitDrained(dispatched.size()), "no count limit, so no cap to drain");
+	}
+
+	@Test
+	@DisplayName("A step caps its dispatch only at a count limit, on a driver that declares its composite results")
+	void aStepCapsDispatchOnlyOnADeclaredDriver() {
+		for (final CompositeResults declared : new CompositeResults[]{CompositeResults.IN_PARTS, CompositeResults.ONE_RESULT
+		}) {
+			assertTrue(MixedLoadGenerator.capsDispatch(1, declared), declared + " at a count of 1");
+			assertTrue(MixedLoadGenerator.capsDispatch(Long.MAX_VALUE - 1, declared), declared + " at a large count");
+			assertFalse(MixedLoadGenerator.capsDispatch(0, declared), declared + " with no count limit");
+			assertFalse(MixedLoadGenerator.capsDispatch(Long.MAX_VALUE, declared), declared + " at Long.MAX_VALUE");
+		}
+		assertFalse(MixedLoadGenerator.capsDispatch(1, CompositeResults.UNDECLARED), "an undeclared driver");
+		assertFalse(MixedLoadGenerator.capsDispatch(1, null), "a driver that returns null");
+	}
+
+	@Test
+	@DisplayName("Long.MAX_VALUE, like 0, is no count limit")
+	void maxValueIsNoCountLimit() throws Exception {
+		assertFalse(MixedLoadGenerator.isCountLimit(0));
+		assertFalse(MixedLoadGenerator.isCountLimit(-1));
+		assertFalse(MixedLoadGenerator.isCountLimit(Long.MAX_VALUE));
+		assertTrue(MixedLoadGenerator.isCountLimit(1));
+		assertTrue(MixedLoadGenerator.isCountLimit(Long.MAX_VALUE - 1));
+		final List<Operation> dispatched = new CopyOnWriteArrayList<>();
+		final MixedLoadGenerator gen = countLimitedGenerator(capturingOutput(dispatched), Long.MAX_VALUE);
+
+		dispatch(gen, 50);
+
+		assertEquals(50, dispatched.size());
+		assertFalse(gen.isItemInputFinished());
+		assertFalse(gen.isCountLimitDrained(Long.MAX_VALUE), "no count limit, so no cap to drain");
+	}
+
+	@Test
+	@DisplayName("A capped step's result output tells final from not final, and counted from uncounted, as the step context counts")
+	void resultKinds() {
+		final int notFinal = UncountedFinalResultOutput.NOT_FINAL;
+		final int counted = UncountedFinalResultOutput.COUNTED;
+		final int uncounted = UncountedFinalResultOutput.UNCOUNTED;
+		for (final boolean inParts : new boolean[]{true, false
+		}) {
+			assertEquals(counted, kind(operation(OpType.READ, Operation.Status.SUCC), inParts));
+			assertEquals(counted, kind(operation(OpType.READ, Operation.Status.FAIL_IO), inParts));
+			assertEquals(counted, kind(operation(OpType.CREATE, Operation.Status.PENDING), inParts));
+			assertEquals(uncounted, kind(operation(OpType.CREATE, Operation.Status.INTERRUPTED), inParts));
+			assertEquals(uncounted, kind(operation(OpType.CREATE, Operation.Status.OMIT), inParts));
+			assertEquals(notFinal, kind(part(Operation.Status.SUCC), inParts));
+			assertEquals(notFinal, kind(part(Operation.Status.FAIL_IO), inParts));
+			// A finished composite: the upload's completion, counted like any other result.
+			assertEquals(counted, kind(composite(OpType.CREATE, Operation.Status.SUCC, true), inParts));
+			assertEquals(uncounted, kind(composite(OpType.CREATE, Operation.Status.INTERRUPTED, true), inParts));
+			// A failed unfinished composite (its initiation, or its abort) is counted as a failure.
+			assertEquals(counted, kind(composite(OpType.CREATE, Operation.Status.FAIL_IO, false), inParts));
+			assertEquals(uncounted, kind(composite(OpType.CREATE, Operation.Status.INTERRUPTED, false), inParts));
+			// A composite of another type has one result and no parts: only an out-of-tree builder makes one.
+			assertEquals(uncounted, kind(composite(OpType.DELETE, Operation.Status.SUCC, false), inParts));
+			assertEquals(uncounted, kind(composite(OpType.STAT, Operation.Status.SUCC, false), inParts));
+		}
+		// The successful initiation of an upload or a range read: parts follow on a cooperative driver,
+		// and nothing follows on a driver that publishes one result for each composite.
+		assertEquals(notFinal, kind(composite(OpType.CREATE, Operation.Status.SUCC, false), true));
+		assertEquals(notFinal, kind(composite(OpType.READ, Operation.Status.SUCC, false), true));
+		assertEquals(uncounted, kind(composite(OpType.CREATE, Operation.Status.SUCC, false), false));
+		assertEquals(uncounted, kind(composite(OpType.READ, Operation.Status.SUCC, false), false));
+	}
+
+	@Test
+	@DisplayName("A capped step's result output classifies every status and shape as the rules it was written to")
+	void resultKindsMatchTheirRulesForEveryStatusAndShape() {
+		final List<Operation.Status> statuses = new ArrayList<>(List.of(Operation.Status.values()));
+		statuses.add(null);
+		for (final boolean inParts : new boolean[]{true, false
+		}) {
+			for (final OpType type : OpType.values()) {
+				for (final Operation.Status status : statuses) {
+					final List<Operation<Item>> shapes = List.of(
+									operation(type, status),
+									part(type, status),
+									composite(type, status, true),
+									composite(type, status, false),
+									partOfComposite(type, status, true),
+									partOfComposite(type, status, false));
+					for (final Operation<Item> op : shapes) {
+						assertEquals(ruledKind(op, inParts), kind(op, inParts),
+										() -> op + " " + type + " " + status
+														+ " in parts " + inParts);
+					}
+				}
+			}
+		}
+	}
+
+	/** The classification rules, in the order they are stated, against which the output's faster order is tested. */
+	private static int ruledKind(final Operation<?> op, final boolean compositesInParts) {
+		if (op instanceof PartialOperation) {
+			return UncountedFinalResultOutput.NOT_FINAL;
+		}
+		final Operation.Status status = op.status();
+		final boolean notFailed = Operation.Status.SUCC.equals(status) || Operation.Status.PENDING.equals(status)
+						|| Operation.Status.ACTIVE.equals(status) || Operation.Status.INTERRUPTED.equals(status)
+						|| Operation.Status.OMIT.equals(status);
+		if (op instanceof CompositeOperation<?> composite && !composite.allSubOperationsDone()) {
+			if (!notFailed) {
+				return UncountedFinalResultOutput.COUNTED;
+			}
+			if (compositesInParts && Operation.Status.SUCC.equals(status)
+							&& (OpType.CREATE.equals(op.type()) || OpType.READ.equals(op.type()))) {
+				return UncountedFinalResultOutput.NOT_FINAL;
+			}
+			return UncountedFinalResultOutput.UNCOUNTED;
+		}
+		if (Operation.Status.INTERRUPTED.equals(status) || Operation.Status.OMIT.equals(status)) {
+			return UncountedFinalResultOutput.UNCOUNTED;
+		}
+		return UncountedFinalResultOutput.COUNTED;
+	}
+
+	@Test
+	@Timeout(30)
+	@DisplayName("Uncounted final results from many platform and virtual threads at once are all counted")
+	void uncountedFinalResultsFromManyThreadsAreAllCounted() throws Exception {
+		final MixedLoadGenerator gen = cappedAtOne();
+		final int threadsOfEachKind = 4;
+		final int resultsPerThread = 100_000;
+		final CountDownLatch start = new CountDownLatch(1);
+		final List<Thread> threads = new ArrayList<>();
+		for (int i = 0; i < threadsOfEachKind; i++) {
+			for (final Thread.Builder builder : List.of(Thread.ofPlatform(), Thread.ofVirtual())) {
+				threads.add(builder.start(() -> {
+					try {
+						start.await();
+					} catch (final InterruptedException e) {
+						throw new IllegalStateException(e);
+					}
+					for (int n = 0; n < resultsPerThread; n++) {
+						gen.onUncountedFinalResult();
+					}
+				}));
+			}
+		}
+		start.countDown();
+		for (final Thread thread : threads) {
+			thread.join();
+		}
+		assertEquals(2L * threadsOfEachKind * resultsPerThread, gen.uncountedFinalResultCount());
+	}
+
+	@Test
+	@Timeout(30)
+	@DisplayName("Each platform thread counts uncounted final results in a cell of its own")
+	void eachPlatformThreadCountsInItsOwnCell() throws Exception {
+		final MixedLoadGenerator gen = cappedAtOne();
+		final MixedLoadGenerator.UncountedCell first = countOnPlatformThread(gen, 3);
+		final MixedLoadGenerator.UncountedCell second = countOnPlatformThread(gen, 5);
+
+		assertNotSame(first, second, "the second thread was given the first thread's cell");
+		assertEquals(List.of(first, second), uncountedCells(gen), "each thread's cell is registered once, in order");
+		assertEquals(3, first.count(), "the first thread's cell holds its own count only");
+		assertEquals(5, second.count(), "the second thread's cell holds its own count only");
+		assertEquals(0, uncountedOnVirtualThreads(gen).sum(), "no platform thread's result went to the adder");
+		assertEquals(8, gen.uncountedFinalResultCount());
+	}
+
+	/** Counts {@code results} on a new platform thread, joined, and returns the cell that thread counted in. */
+	private static MixedLoadGenerator.UncountedCell countOnPlatformThread(
+					final MixedLoadGenerator gen, final int results) throws Exception {
+		final AtomicReference<MixedLoadGenerator.UncountedCell> cell = new AtomicReference<>();
+		final AtomicReference<Throwable> failure = new AtomicReference<>();
+		final Thread thread = Thread.ofPlatform().start(() -> {
+			try {
+				for (int n = 0; n < results; n++) {
+					gen.onUncountedFinalResult();
+				}
+				cell.set(((ThreadLocal<MixedLoadGenerator.UncountedCell>) generatorField(gen, "uncountedCell")).get());
+			} catch (final Throwable e) {
+				failure.set(e);
+			}
+		});
+		thread.join();
+		if (failure.get() != null) {
+			throw new AssertionError(failure.get());
+		}
+		return cell.get();
+	}
+
+	@Test
+	@Timeout(30)
+	@DisplayName("Virtual threads count uncounted final results in the shared adder, and register no cell")
+	void virtualThreadsCountInTheAdder() throws Exception {
+		final MixedLoadGenerator gen = cappedAtOne();
+		final List<Thread> threads = new ArrayList<>();
+		for (int i = 0; i < 3; i++) {
+			threads.add(Thread.ofVirtual().start(() -> {
+				for (int n = 0; n < 4; n++) {
+					gen.onUncountedFinalResult();
+				}
+			}));
+		}
+		for (final Thread thread : threads) {
+			thread.join();
+		}
+
+		assertEquals(List.of(), uncountedCells(gen), "a virtual thread was given a cell");
+		assertEquals(12, uncountedOnVirtualThreads(gen).sum());
+		assertEquals(12, gen.uncountedFinalResultCount());
+	}
+
+	@Test
+	@Timeout(30)
+	@DisplayName("A count taken while results arrive never exceeds the results begun so far")
+	void aCountTakenWhileResultsArriveNeverRunsAhead() throws Exception {
+		final MixedLoadGenerator gen = cappedAtOne();
+		final int resultsPerThread = 50_000;
+		final AtomicInteger begun = new AtomicInteger();
+		final List<Thread> threads = new ArrayList<>();
+		for (final Thread.Builder builder : List.of(Thread.ofPlatform(), Thread.ofPlatform(), Thread.ofVirtual())) {
+			threads.add(builder.start(() -> {
+				for (int n = 0; n < resultsPerThread; n++) {
+					begun.incrementAndGet();
+					gen.onUncountedFinalResult();
+				}
+			}));
+		}
+		long last = 0;
+		while (threads.stream().anyMatch(Thread::isAlive)) {
+			// Read the count before the bound: every result in the count had begun by then.
+			final long count = gen.uncountedFinalResultCount();
+			final int bound = begun.get();
+			assertTrue(count <= bound, () -> count + " counted, only " + bound + " begun");
+			final long earlier = last;
+			assertTrue(count >= earlier, () -> count + " counted after " + earlier + " earlier");
+			last = count;
+		}
+		for (final Thread thread : threads) {
+			thread.join();
+		}
+		assertEquals(3L * resultsPerThread, gen.uncountedFinalResultCount());
+	}
+
+	private static List<MixedLoadGenerator.UncountedCell> uncountedCells(final MixedLoadGenerator gen)
+					throws ReflectiveOperationException {
+		return (List<MixedLoadGenerator.UncountedCell>) generatorField(gen, "uncountedCells");
+	}
+
+	private static LongAdder uncountedOnVirtualThreads(final MixedLoadGenerator gen)
+					throws ReflectiveOperationException {
+		return (LongAdder) generatorField(gen, "uncountedOnVirtualThreads");
+	}
+
+	private static Object generatorField(final MixedLoadGenerator gen, final String name)
+					throws ReflectiveOperationException {
+		final var field = MixedLoadGenerator.class.getDeclaredField(name);
+		field.setAccessible(true);
+		return field.get(gen);
+	}
+
+	@Test
+	@DisplayName("A final result the step context threw on still ends its operation")
+	void aResultTheStepContextThrewOnIsAccounted() throws Exception {
+		final MixedLoadGenerator gen = cappedAtOne();
+		final Output<Operation> throwing = new AcceptingOutput() {
+			@Override
+			public boolean put(final Operation op) {
+				throw new IllegalStateException("thrown by the step context");
+			}
+		};
+		final UncountedFinalResultOutput output = new UncountedFinalResultOutput(throwing, gen, true);
+
+		assertThrows(IllegalStateException.class, () -> output.put(part(Operation.Status.SUCC)));
+		assertFalse(gen.isCountLimitDrained(0), "a part's result does not end its operation");
+		assertThrows(IllegalStateException.class, () -> output.put(operation(OpType.READ, Operation.Status.SUCC)));
+		assertTrue(gen.isCountLimitDrained(0), "the result was not counted, and it ended its operation");
+	}
+
+	@Test
+	@DisplayName("A batch of results is accounted as the same results one at a time, refused or not")
+	void aBatchIsAccountedAsSingleResults() throws Exception {
+		final List<Operation> taken = new ArrayList<>();
+		final Output<Operation> refusing = new AcceptingOutput() {
+			@Override
+			public boolean put(final Operation op) {
+				taken.add(op);
+				return false;
+			}
+		};
+		final MixedLoadGenerator single = cappedAtOne();
+		assertFalse(new UncountedFinalResultOutput(refusing, single, true)
+						.put(operation(OpType.READ, Operation.Status.INTERRUPTED)));
+		assertTrue(single.isCountLimitDrained(0), "a refused final result ended its operation");
+
+		final MixedLoadGenerator batch = cappedAtOne();
+		final List<Operation> results = List.of(
+						part(Operation.Status.SUCC), operation(OpType.READ, Operation.Status.INTERRUPTED));
+		assertEquals(2, new UncountedFinalResultOutput(refusing, batch, true).put(results, 0, 2));
+		assertTrue(batch.isCountLimitDrained(0), "the same result in a batch ended its operation");
+		assertEquals(3, taken.size(), "each result was passed on");
+	}
+
+	/** A generator that has dispatched its count limit of 1. */
+	private MixedLoadGenerator cappedAtOne() throws Exception {
+		final MixedLoadGenerator gen = countLimitedGenerator(capturingOutput(new CopyOnWriteArrayList<>()), 1);
+		dispatch(gen, 3);
+		assertTrue(gen.isItemInputFinished(), "the generator reached its count limit");
+		return gen;
+	}
+
+	private static int kind(final Operation<?> op, final boolean compositesInParts) {
+		return UncountedFinalResultOutput.kind(op, compositesInParts);
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Operation<Item> operation(final OpType type, final Operation.Status status) {
+		final Operation<Item> op = mock(Operation.class);
+		when(op.type()).thenReturn(type);
+		when(op.status()).thenReturn(status);
+		return op;
+	}
+
+	private static Operation<Item> part(final Operation.Status status) {
+		return part(OpType.CREATE, status);
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Operation<Item> part(final OpType type, final Operation.Status status) {
+		final PartialOperation<Item> op = mock(PartialOperation.class);
+		when(op.type()).thenReturn(type);
+		when(op.status()).thenReturn(status);
+		return op;
+	}
+
+	/** An operation that is both a part and a composite, which no class in the engine is. */
+	@SuppressWarnings("unchecked")
+	private static Operation<Item> partOfComposite(
+					final OpType type, final Operation.Status status, final boolean done) {
+		final CompositeOperation<Item> op = mock(CompositeOperation.class, withSettings().extraInterfaces(PartialOperation.class));
+		when(op.type()).thenReturn(type);
+		when(op.status()).thenReturn(status);
+		when(op.allSubOperationsDone()).thenReturn(done);
+		return op;
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Operation<Item> composite(
+					final OpType type, final Operation.Status status, final boolean done) {
+		final CompositeOperation<Item> op = mock(CompositeOperation.class);
+		when(op.type()).thenReturn(type);
+		when(op.status()).thenReturn(status);
+		when(op.allSubOperationsDone()).thenReturn(done);
+		return op;
+	}
+
+	private MixedLoadGenerator countLimitedGenerator(final Output<Operation> driver, final long countLimit) {
+		final Map<OpType, Integer> weights = new EnumMap<>(OpType.class);
+		weights.put(OpType.READ, 50);
+		weights.put(OpType.CREATE, 50);
+		final Map<OpType, OperationsBuilder> builders = new EnumMap<>(OpType.class);
+		builders.put(OpType.READ, testBuilder(OpType.READ, null));
+		builders.put(OpType.CREATE, testBuilder(OpType.CREATE, null));
+		return new MixedLoadGenerator(executor, new OpSchedule(weights), new PoolItemInput<>(makeItems(10)),
+						builders, driver, 10_000, mockNewItemSupplier(), countLimit);
+	}
+
+	private static Output<Operation> capturingOutput(final List<Operation> dispatched) {
+		return new AcceptingOutput() {
+			@Override
+			public boolean put(final Operation op) {
+				dispatched.add(op);
+				return true;
+			}
+		};
 	}
 
 	@BeforeAll

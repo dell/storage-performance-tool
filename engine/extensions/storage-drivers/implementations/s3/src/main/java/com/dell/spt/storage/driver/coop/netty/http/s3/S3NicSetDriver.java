@@ -144,6 +144,8 @@ final class S3NicSetDriver<I extends Item, O extends Operation<I>> extends S3Sto
 	protected void beforeIoShutdown() {
 		nicPool.closeAdmission();
 		closeKernelRoute();
+		// Last: the wait for multipart cleanup aborts, after the stop work that can schedule one.
+		super.beforeIoShutdown();
 	}
 
 	@Override

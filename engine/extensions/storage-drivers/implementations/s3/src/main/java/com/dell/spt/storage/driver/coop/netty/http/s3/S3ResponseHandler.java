@@ -59,6 +59,8 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 					"spt-list-content");
 	private static final AttributeKey<IntegrityResponseObserver> INTEGRITY_OBSERVER_ATTR_KEY = AttributeKey.newInstance("spt-integrity-observer");
 	private static final AttributeKey<Boolean> OUT_OF_BAND_READ_ATTR_KEY = AttributeKey.newInstance("spt-integrity-out-of-band-read");
+	/** The start of a failed flat response's body, kept only once its status has failed. */
+	private static final AttributeKey<ByteBuf> FAILED_RESPONSE_ATTR_KEY = AttributeKey.newInstance("spt-failed-response");
 	private static final int MIN_CONTENT_SIZE = 0x100;
 	private static final int MAX_CONTENT_SIZE = 0x400;
 	private static final int DELETE_RESPONSE_INITIAL_BUFFER_BYTES = 4 * 1024;
@@ -85,6 +87,15 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	private static final byte[] XML_DECLARATION_END = "?>".getBytes(US_ASCII);
 	private static final byte[] ERROR_ROOT_START = "<Error".getBytes(US_ASCII);
 	private static final byte[] CODE_START = "<Code>".getBytes(US_ASCII);
+	private static final byte[] MESSAGE_START = "<Message>".getBytes(US_ASCII);
+	/**
+	 * How much of a failed response's body is kept and read for its S3 {@code <Code>} and {@code
+	 * <Message>}: an S3 error document names both in its first few hundred bytes.
+	 */
+	static final int FAILED_RESPONSE_SCAN_BYTES = 1024;
+	/** The longest S3 error message logged; a longer one is cut and ends with {@value #CUT_MARK}. */
+	static final int MAX_LOGGED_ERROR_MESSAGE_LENGTH = 256;
+	static final String CUT_MARK = "...";
 	private static final Pattern PATTERN_UPLOAD_ID = Pattern.compile(
 					"<UploadId>([^<]+)</UploadId>", Pattern.MULTILINE);
 
@@ -202,6 +213,14 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		return ACTIVE_LIST_SPOOLS.get();
 	}
 
+	/**
+	 * Whether {@code channel} has ever kept a failed response's body; tests check that a success, or a
+	 * refusal with no body, keeps none.
+	 */
+	static boolean keptFailedResponse(final Channel channel) {
+		return channel.hasAttr(FAILED_RESPONSE_ATTR_KEY);
+	}
+
 	static void resetDeleteResponseDiagnosticsForTest() {
 		for (int index = 0; index < DELETE_RESPONSE_DIAGNOSTICS.length(); index++) {
 			DELETE_RESPONSE_DIAGNOSTICS.set(index, 0);
@@ -211,6 +230,13 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	private final S3StorageDriver<I, O> s3Driver;
 	private final boolean versioningEnabled;
 	private final String checksumHeader; // e.g. "x-amz-checksum-crc32c", or null if disabled
+	/**
+	 * Whether the channel's current response has a failed HTTP status, set by {@link
+	 * #handleResponseStatus} at the start of every response. The handler is one per channel and Netty
+	 * runs a channel's handlers on its event loop, so a plain field serves; reading it keeps the
+	 * success path free of the operation's {@code volatile} status.
+	 */
+	private boolean responseFailed;
 
 	public S3ResponseHandler(final S3StorageDriver<I, O> driver, final boolean verifyFlag,
 					final boolean versioningEnabled, final String checksumHeader) {
@@ -226,13 +252,17 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 					final HttpStatusClass statusClass,
 					final HttpResponseStatus responseStatus) {
 		if (!(op instanceof DeleteRequestOperation)) {
-			return super.handleResponseStatus(op, statusClass, responseStatus);
+			final boolean succeeded = super.handleResponseStatus(op, statusClass, responseStatus);
+			responseFailed = !succeeded;
+			return succeeded;
 		}
 		// Dedicated DELETE artifacts carry the actionable result. Avoid the inherited per-request
 		// warning here: it would repeat under load and serialize the representative first key.
 		final Operation.Status status = responseOperationStatus(statusClass, responseStatus);
 		op.status(status);
-		return Operation.Status.SUCC.equals(status);
+		final boolean succeeded = Operation.Status.SUCC.equals(status);
+		responseFailed = !succeeded;
+		return succeeded;
 	}
 
 	@Override
@@ -318,7 +348,32 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 				handleInitMultipartUploadResponseContentChunk(channel, contentChunk);
 			}
 		} else {
+			if (responseFailed) {
+				bufferFailedResponse(channel, contentChunk);
+			}
 			super.handleResponseContentChunk(channel, op, contentChunk);
+		}
+	}
+
+	/**
+	 * Keeps the first {@link #FAILED_RESPONSE_SCAN_BYTES} bytes of a failed flat response's body, for
+	 * {@link #logFailedResponse}, without consuming the chunk. Only a response whose HTTP status failed
+	 * is kept, whatever verification later makes of its status, so a 2xx body that fails verification
+	 * is not taken for an error document.
+	 */
+	private static void bufferFailedResponse(final Channel channel, final ByteBuf contentChunk) {
+		if (channel == null || !contentChunk.isReadable()) {
+			return;
+		}
+		final Attribute<ByteBuf> bodyAttr = channel.attr(FAILED_RESPONSE_ATTR_KEY);
+		ByteBuf body = bodyAttr.get();
+		if (body == null) {
+			body = Unpooled.buffer(Math.min(contentChunk.readableBytes(), FAILED_RESPONSE_SCAN_BYTES), FAILED_RESPONSE_SCAN_BYTES);
+			bodyAttr.set(body);
+		}
+		final int length = Math.min(body.maxWritableBytes(), contentChunk.readableBytes());
+		if (length > 0) {
+			body.writeBytes(contentChunk, contentChunk.readerIndex(), length);
 		}
 	}
 
@@ -457,6 +512,9 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 			final Attribute<ByteBuf> contentAttr = channel.attr(CONTENT_ATTR_KEY);
 			final ByteBuf content = contentAttr.get();
 			if (content != null && content.readableBytes() > 0 && op instanceof CompositeDataOperation mpuOp) {
+				if (responseFailed) {
+					logFailedResponse(op, content);
+				}
 				if (!mpuOp.allSubOperationsDone()) {
 					// this is an MPU init response
 					final String contentStr = content.toString(UTF_8);
@@ -475,9 +533,74 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 					}
 				}
 				content.clear();
+			} else if (responseFailed) {
+				finishFailedResponse(channel, op);
 			}
 		}
 		super.handleResponseContentFinish(channel, op);
+	}
+
+	private static void finishFailedResponse(final Channel channel, final Operation<?> op) {
+		if (!channel.hasAttr(FAILED_RESPONSE_ATTR_KEY)) {
+			return; // no body was kept on this channel
+		}
+		final ByteBuf body = channel.attr(FAILED_RESPONSE_ATTR_KEY).getAndSet(null);
+		if (body != null) {
+			try {
+				logFailedResponse(op, body);
+			} finally {
+				body.release();
+			}
+		}
+	}
+
+	/**
+	 * Logs to {@code errors.log} the S3 {@code <Code>} and {@code <Message>} of a failed response's
+	 * body, read from its first {@link #FAILED_RESPONSE_SCAN_BYTES} bytes, after the status line logged
+	 * when the response started. The code is logged as {@link #loggableErrorCode} gives it, the message
+	 * cut to {@link #MAX_LOGGED_ERROR_MESSAGE_LENGTH} characters with every control, line separator and
+	 * format character made a space, so neither can break or forge a log line; either one not found is logged {@link
+	 * #MISSING_ERROR_CODE}. An empty body logs nothing. It reads the body without consuming it and
+	 * leaves the operation as it is.
+	 */
+	static void logFailedResponse(final Operation<?> op, final ByteBuf content) {
+		final int start = content.readerIndex();
+		final int end = Math.min(content.writerIndex(), start + FAILED_RESPONSE_SCAN_BYTES);
+		if (start >= end) {
+			return;
+		}
+		Loggers.ERR.warn(
+						"{}: S3 error code {}, message: {}",
+						op.toString(),
+						loggableErrorCode(errorCode(content, start, end)),
+						errorMessage(content, start, end));
+	}
+
+	/** The loggable text of the first {@code <Message>} element in {@code [from, end)}; see {@link #logFailedResponse}. */
+	private static String errorMessage(final ByteBuf content, final int from, final int end) {
+		final int element = indexOf(content, from, end, MESSAGE_START);
+		if (element < 0) {
+			return MISSING_ERROR_CODE;
+		}
+		final int valueStart = skipXmlWhitespace(content, element + MESSAGE_START.length, end);
+		final int valueEnd = content.indexOf(valueStart, end, (byte) '<');
+		final boolean complete = valueEnd >= 0;
+		final String raw = content.toString(valueStart, (complete ? valueEnd : end) - valueStart, UTF_8);
+		final var text = new StringBuilder(Math.min(raw.length(), MAX_LOGGED_ERROR_MESSAGE_LENGTH) + CUT_MARK.length());
+		for (int i = 0; i < raw.length() && text.length() < MAX_LOGGED_ERROR_MESSAGE_LENGTH; i++) {
+			final char c = raw.charAt(i);
+			text.append(Character.isISOControl(c) || c == '\u2028' || c == '\u2029'
+							|| Character.getType(c) == Character.FORMAT ? ' ' : c);
+		}
+		final boolean cut = !complete || text.length() < raw.length();
+		if (cut && text.length() > 0 && Character.isHighSurrogate(text.charAt(text.length() - 1))) {
+			text.setLength(text.length() - 1); // the cut split a surrogate pair
+		}
+		final String message = text.toString().strip();
+		if (message.isEmpty()) {
+			return MISSING_ERROR_CODE;
+		}
+		return cut ? message + CUT_MARK : message;
 	}
 
 	/**
