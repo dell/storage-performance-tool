@@ -37,6 +37,7 @@ const (
 	DockerFlagTimestamps = "--timestamps"
 	DockerFlagSince      = "--since"
 	DockerFlagFollow     = "--follow"
+	DockerFlagTail       = "--tail"
 	DockerFlagRemove     = "--rm"
 	DockerFlagReadOnly   = "--read-only"
 	DockerFlagEntrypoint = "--entrypoint"
@@ -64,6 +65,9 @@ const (
 	DockerContainerFormat = "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}"
 	DockerIPAddressFormat = "{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}"
 	DockerConflictFormat  = "{{.ID}}\\\\t{{.Names}}\\\\t{{.Image}}\\\\t{{.State}}\\\\t{{.Ports}}\\\\t{{.CreatedAt}}"
+	// DockerContainerStateFormat has no space, comma or pipe, so it passes unchanged through
+	// the remote shell an SSH command runs in.
+	DockerContainerStateFormat = "{{.State.Status}}:{{.State.ExitCode}}:{{.State.OOMKilled}}"
 )
 
 // Port number constants

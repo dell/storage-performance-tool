@@ -518,7 +518,8 @@ func (m *RemoteDockerManager) startWorkerNodeOnPorts(
 		rctx, rcancel := context.WithTimeout(ctx, constants.APIReadinessTimeout)
 		defer rcancel()
 		if err := m.proberRun(rctx, baseURL, constants.APIPollingTimeout); err != nil {
-			return m.containerID, fmt.Errorf("worker API readiness: %w", err)
+			return m.containerID, withAPIWaitReport(
+				fmt.Errorf("worker API readiness: %w", err), containerAPIWaitReport(ctx, m, m.containerID))
 		}
 	}
 	return m.containerID, nil
@@ -587,7 +588,8 @@ func (m *RemoteDockerManager) startEntryNodeOnPorts(
 		rctx, rcancel := context.WithTimeout(ctx, constants.APIReadinessTimeout)
 		defer rcancel()
 		if err := m.proberRun(rctx, baseURL, constants.APIPollingTimeout); err != nil {
-			return m.containerID, fmt.Errorf("entry API readiness: %w", err)
+			return m.containerID, withAPIWaitReport(
+				fmt.Errorf("entry API readiness: %w", err), containerAPIWaitReport(ctx, m, m.containerID))
 		}
 	}
 	return m.containerID, nil

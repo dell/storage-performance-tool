@@ -55,6 +55,7 @@ type dockerClient interface {
 	ImageInspect(ctx context.Context, imageID string, inspectOpts ...client.ImageInspectOption) (image.InspectResponse, error)
 	ImagePull(ctx context.Context, ref string, options image.PullOptions) (io.ReadCloser, error)
 	ContainerLogs(ctx context.Context, container string, options container.LogsOptions) (io.ReadCloser, error)
+	ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error)
 	ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error)
 	ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error
 	ContainerStop(ctx context.Context, containerID string, options container.StopOptions) error
@@ -528,13 +529,18 @@ func (dm *DockerManager) ContainerDiagnosticTail(containerID string, maxLines in
 
 // ContainerLogTail returns recent stdout/stderr lines from Docker logs.
 func (dm *DockerManager) ContainerLogTail(containerID string, maxLines int) (string, error) {
+	return dm.containerLogTailContext(dm.ctx, containerID, maxLines)
+}
+
+// containerLogTailContext returns recent stdout/stderr lines from Docker logs within ctx.
+func (dm *DockerManager) containerLogTailContext(ctx context.Context, containerID string, maxLines int) (string, error) {
 	if containerID == "" {
 		return "", nil
 	}
 	if maxLines <= 0 {
 		maxLines = 80
 	}
-	out, err := dm.client.ContainerLogs(dm.ctx, containerID, container.LogsOptions{
+	out, err := dm.client.ContainerLogs(normalizeContext(ctx), containerID, container.LogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Tail:       strconv.Itoa(maxLines),

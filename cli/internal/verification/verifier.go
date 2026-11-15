@@ -23,6 +23,9 @@ import (
 
 const dockerExecCommand = "exec"
 
+// portWaitTimeout is how long verify waits for its engine's ports; tests shorten it.
+var portWaitTimeout = constants.APIReadinessTimeout
+
 // NewVerifier creates a new verifier instance with default implementations
 func NewVerifier(hosts []*hostparse.HostInfo, config Config) *Verifier {
 	return NewVerifierWithDeps(hosts, config, command.NewCommandExecutor(), &RealNetworkChecker{}, &RealTimeProvider{})
@@ -337,9 +340,12 @@ func (v *Verifier) stepVerifyPorts(host *hostparse.HostInfo, result *NodeResult)
 	if v.config.ShowProgress {
 		fmt.Printf("  ⏳ Waiting for network ports (%d, %d; up to %s)...", v.registryPort(), v.apiPort(), constants.APIReadinessTimeout)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), constants.APIReadinessTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), portWaitTimeout)
 	defer cancel()
 	result.PortsAccessible = v.waitForPorts(ctx, host, constants.APIReadinessPollInterval)
+	if !result.PortsAccessible.Passed {
+		result.PortsAccessible.Detail = v.apiWaitReport(host, result.containerID)
+	}
 	if v.config.ShowProgress {
 		if result.PortsAccessible.Passed {
 			fmt.Println(" ✅")
@@ -347,6 +353,19 @@ func (v *Verifier) stepVerifyPorts(host *hostparse.HostInfo, result *NodeResult)
 			fmt.Println(" ❌")
 		}
 	}
+}
+
+// apiWaitReport describes the verify container after its engine's ports never opened: its
+// state and last log lines, or why they could not be read.
+func (v *Verifier) apiWaitReport(host *hostparse.HostInfo, containerID string) string {
+	if containerID == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), constants.APIWaitReportTimeout)
+	defer cancel()
+	state, stateErr := command.InspectContainerState(ctx, v.cmdExecutor, host, containerID)
+	logs, logErr := command.ContainerLogTail(ctx, v.cmdExecutor, host, containerID, command.APIWaitLogLines)
+	return command.APIWaitReport(containerID, state, stateErr, logs, logErr)
 }
 
 // apiPort is the REST API port verify starts its engine on and checks.
