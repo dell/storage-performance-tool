@@ -71,19 +71,26 @@ func TestResolveVerificationRunErrorCleanEmptyReadRequiresExplicitAllowance(t *t
 	}
 }
 
-func TestVerifierMayBeMissingOnlyWhenNotStartedOrAnEmptySelectionIsAllowed(t *testing.T) {
+func TestVerifierMayBeMissingOnlyWhenNotStartedCompletedOrAnEmptySelectionIsAllowed(t *testing.T) {
 	if !verifierMayBeMissing(integrityplan.Plan{}, portcheck.StepLifecycleNotStarted) {
 		t.Fatal("a READ step that never started has no live evidence")
 	}
-	if !verifierMayBeMissing(integrityplan.Plan{AllowEmpty: true}, portcheck.StepLifecycleCompleted) {
+	if !verifierMayBeMissing(integrityplan.Plan{AllowEmpty: true}, portcheck.StepLifecycleStarted) {
 		t.Fatal("--allow-empty-selection says a READ step may publish nothing")
 	}
-	if verifierMayBeMissing(integrityplan.Plan{}, portcheck.StepLifecycleCompleted) {
-		t.Fatal("without the flag a completed READ step must appear")
+	if !verifierMayBeMissing(integrityplan.Plan{}, portcheck.StepLifecycleCompleted) {
+		t.Fatal("a completed READ step can end between two polls of the live metrics")
+	}
+	for _, lifecycle := range []portcheck.StepLifecycle{
+		portcheck.StepLifecycleStarted, portcheck.StepLifecyclePlanned, portcheck.StepLifecycleFailed, "",
+	} {
+		if verifierMayBeMissing(integrityplan.Plan{}, lifecycle) {
+			t.Fatalf("without the flag a READ step in lifecycle %q must appear", lifecycle)
+		}
 	}
 }
 
-func TestStepsToFetchAddsOnlyAnUnseenReadStepOfAnEmptySelection(t *testing.T) {
+func TestStepsToFetchAddsOnlyAnUnseenCompletedReadStep(t *testing.T) {
 	list, read := "mt-001-x-list", "mt-002-x-verify"
 	allowed := integrityplan.Plan{AllowEmpty: true, Verifier: integrityplan.PlannedStep{ID: read}}
 	strict := integrityplan.Plan{Verifier: integrityplan.PlannedStep{ID: read}}
@@ -98,7 +105,10 @@ func TestStepsToFetchAddsOnlyAnUnseenReadStepOfAnEmptySelection(t *testing.T) {
 		{"already seen", allowed, read, portcheck.StepLifecycleCompleted, 1},
 		{"never started", allowed, "", portcheck.StepLifecycleNotStarted, 1},
 		{"only planned", allowed, "", portcheck.StepLifecyclePlanned, 1},
-		{"not allowed", strict, "", portcheck.StepLifecycleCompleted, 1},
+		{"not allowed and unseen", strict, "", portcheck.StepLifecycleCompleted, 2},
+		{"not allowed and seen", strict, read, portcheck.StepLifecycleCompleted, 1},
+		{"not allowed and still running", strict, "", portcheck.StepLifecycleStarted, 1},
+		{"not allowed and failed", strict, "", portcheck.StepLifecycleFailed, 1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -113,8 +123,9 @@ func TestStepsToFetchAddsOnlyAnUnseenReadStepOfAnEmptySelection(t *testing.T) {
 	}
 }
 
-// A READ step with nothing to read can end between two polls, and the run must still fetch its files.
-func TestAutoResultsFetchesAnUnseenReadStepOnlyWhenAnEmptySelectionIsAllowed(t *testing.T) {
+// A READ step with nothing to read can end between two polls, and the run must still fetch its files,
+// with or without --allow-empty-selection.
+func TestAutoResultsFetchesAnUnseenCompletedReadStep(t *testing.T) {
 	const runID = int64(42)
 	list, read := "mt-001-20260823.100000.000-list", "mt-002-20260823.100000.000-verify"
 	for _, allowEmpty := range []bool{true, false} {
@@ -153,11 +164,7 @@ func TestAutoResultsFetchesAnUnseenReadStepOnlyWhenAnEmptySelectionIsAllowed(t *
 			monitor.Arm()
 			<-monitor.done
 
-			// Without the flag a missing READ step fails role binding, so nothing is fetched.
-			var want []string
-			if allowEmpty {
-				want = []string{list, read}
-			}
+			want := []string{list, read}
 			fetcher.mu.Lock()
 			defer fetcher.mu.Unlock()
 			if !slices.Equal(fetcher.stepIDs, want) {

@@ -127,6 +127,11 @@ type autoResultsOutcome struct {
 	AllFailedPhases      []summary.AllFailedPhase
 	SummaryRead          bool
 	StepsWithResults     int
+
+	// LiveCorruptionUnobserved marks a completed verification READ that the live step list never
+	// showed, on a run without --allow-empty-selection: its corruption count is unknown, so only an
+	// empty selection proven by finalization may pass it, and no count is taken from its files.
+	LiveCorruptionUnobserved bool
 }
 
 type postRunBudgets struct {
@@ -959,7 +964,13 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 					// Its planned lifecycle remains part of finalization, while runtime
 					// evidence and ActualStepIDs stay exact.
 					if readLifecycle != portcheck.StepLifecycleNotStarted {
-						if runtimeRoles.Read == "" {
+						if runtimeRoles.Read == "" && plan.Valid() && !plan.AllowEmpty &&
+							readLifecycle == portcheck.StepLifecycleCompleted {
+							outcome.CorruptionMetricsErr = fmt.Errorf(
+								"verification READ step %s completed, but its live corruption count was not observed",
+								plan.Verifier.ID)
+							outcome.LiveCorruptionUnobserved = true
+						} else if runtimeRoles.Read == "" {
 							outcome.CorruptionMetricsErr = fmt.Errorf("verification READ step could not be identified")
 						} else {
 							corrupt, observeErr := integrity.ObserveJSONCorruptCountContext(artifactCtx, baseURL, runtimeRoles.Read)
@@ -1167,18 +1178,22 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 
 // verifierMayBeMissing reports whether a run's READ step can be absent from the live step list. One
 // that never started publishes nothing, and neither does the READ step of an empty selection, which
-// --allow-empty-selection says to expect. Finalization still decides from the counts on file.
+// --allow-empty-selection says to expect. A READ the tracker says completed may also have ended
+// between two polls of the live metrics, with or without the flag. Finalization still decides from
+// the counts on file.
 func verifierMayBeMissing(plan integrityplan.Plan, readLifecycle portcheck.StepLifecycle) bool {
-	return readLifecycle == portcheck.StepLifecycleNotStarted || plan.AllowEmpty
+	return readLifecycle == portcheck.StepLifecycleNotStarted ||
+		readLifecycle == portcheck.StepLifecycleCompleted || plan.AllowEmpty
 }
 
-// stepsToFetch adds the planned READ step when --allow-empty-selection expects it may go unseen and it
-// did complete: with nothing to read it can end between two polls of the live metrics, and its files
-// are still there. A READ that isn't known to have completed is not reported as a step of this run.
+// stepsToFetch adds the planned READ step when the tracker says it completed but the live step list
+// never showed it: with nothing to read it can end between two polls of the live metrics, and its
+// files are still there. A READ that isn't known to have completed is not reported as a step of this
+// run.
 func stepsToFetch(
 	stepIDs []string, plan integrityplan.Plan, observedRead string, readLifecycle portcheck.StepLifecycle,
 ) []string {
-	if !plan.AllowEmpty || observedRead != "" || plan.Verifier.ID == "" ||
+	if observedRead != "" || plan.Verifier.ID == "" ||
 		readLifecycle != portcheck.StepLifecycleCompleted || slices.Contains(stepIDs, plan.Verifier.ID) {
 		return stepIDs
 	}
@@ -1192,6 +1207,7 @@ func dropLiveCorruptionErrorOfEmptySelection(outcome *autoResultsOutcome) {
 	final := outcome.Finalization
 	if outcome.FinalizationErr == nil && final != nil && final.EmptySelection && final.VerificationAttemptedCount == 0 {
 		outcome.CorruptionMetricsErr = nil
+		outcome.LiveCorruptionUnobserved = false
 	}
 }
 
@@ -1296,7 +1312,8 @@ func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, recei
 	if outcome.ObservedCorruptCount != nil {
 		corrupt = *outcome.ObservedCorruptCount
 	}
-	if outcome.Finalization != nil && outcome.Finalization.CorruptCount > corrupt {
+	// The files of a READ whose live count was never observed are not a corruption count.
+	if outcome.Finalization != nil && !outcome.LiveCorruptionUnobserved && outcome.Finalization.CorruptCount > corrupt {
 		corrupt = outcome.Finalization.CorruptCount
 	}
 	primary := ""
