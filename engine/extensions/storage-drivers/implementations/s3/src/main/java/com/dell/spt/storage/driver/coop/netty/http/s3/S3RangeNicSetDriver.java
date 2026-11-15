@@ -96,6 +96,8 @@ final class S3RangeNicSetDriver extends S3RangeStorageDriver implements NicPathC
 	@Override
 	protected void beforeIoShutdown() {
 		nicPool.closeAdmission();
+		// Last: the wait for multipart cleanup aborts, after the stop work that can schedule one.
+		super.beforeIoShutdown();
 	}
 
 	/** A free permit and a NIC with room, so the dispatch task parks while every NIC is full. */

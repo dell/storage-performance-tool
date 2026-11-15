@@ -47,9 +47,13 @@ import com.dell.spt.storage.driver.coop.netty.http.s3.rdma.RdmaNicLoopback.Run;
 import com.github.akurilov.commons.collection.Range;
 import com.github.akurilov.confuse.Config;
 import io.netty.channel.epoll.Epoll;
+import com.dell.spt.storage.driver.coop.netty.http.s3.S3StorageDriver;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -60,6 +64,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -352,6 +357,63 @@ final class S3RdmaNicSetWorkloadTest {
 		assertTrue(stub.requests().stream().noneMatch(S3RdmaNicSetWorkloadTest::isAbort), () -> "requests: " + stub.requests());
 		assertEquals(1, stub.openUploads(), "nothing aborted the upload");
 		assertNull(run.results().poll(300), "queue recovery owns the upload, which publishes no result");
+	}
+
+	/**
+	 * The upload's completion fails and the target holds its abort's answer. The stop waits for
+	 * that answer before the I/O shuts down, after the RDMA driver's own stop work: once the stop
+	 * returns, the target has aborted the upload.
+	 */
+	@Test
+	void theStopWaitsForADelayedAbortAfterItsOwnStopWork() throws Exception {
+		final var endpoints = stub.listeners(2);
+		final var run = started(endpoints, 2, 2);
+		// Initiation, two parts, then the completion.
+		stub.failObjectRequest = n -> n == 4;
+		stub.hold(S3RdmaNicSetWorkloadTest::isAbort);
+		assertTrue(run.driver().put(S3RdmaNicSetDriverTest.upload("delayed-abort", 2048, 2)));
+		assertNotEquals(Operation.Status.SUCC, awaitUpload(run).status());
+		final var answer = new Thread(() -> {
+			try {
+				waitFor(() -> stub.requests().stream().anyMatch(S3RdmaNicSetWorkloadTest::isAbort), "the abort reached the stub");
+				// The target's answer comes 300 ms after the abort reached it.
+				Thread.sleep(300);
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+			} finally {
+				stub.release();
+			}
+		}, "delayed-abort-answer");
+		answer.start();
+
+		run.driver().stop();
+
+		assertEquals(0, stub.openUploads(), "the stop read the abort's answer");
+		answer.join();
+	}
+
+	/**
+	 * Every {@code S3StorageDriver} subclass in this module that overrides the stop hook has a test
+	 * here showing that its stop reaches the wait for multipart cleanup aborts. A new override must call
+	 * {@code super.beforeIoShutdown()} last, after its own stop work, and get such a test.
+	 */
+	@Test
+	void everyOverrideOfTheStopHookIsCovered() throws Exception {
+		final var location = Path.of(S3RdmaNicSetDriver.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+		assumeTrue(Files.isDirectory(location), "the module's classes are in a directory");
+		final var pkg = location.resolve(S3RdmaNicSetDriver.class.getPackageName().replace('.', '/'));
+		final Set<Class<?>> overrides = new HashSet<>();
+		try (Stream<Path> classes = Files.walk(pkg)) {
+			for (final var file : classes.filter(path -> path.toString().endsWith(".class")).toList()) {
+				final var name = location.relativize(file).toString().replace('/', '.').replaceAll("\\.class$", "");
+				final var type = Class.forName(name, false, S3RdmaNicSetDriver.class.getClassLoader());
+				if (S3StorageDriver.class.isAssignableFrom(type) && Stream.of(type.getDeclaredMethods())
+								.anyMatch(method -> method.getName().equals("beforeIoShutdown") && method.getParameterCount() == 0)) {
+					overrides.add(type);
+				}
+			}
+		}
+		assertEquals(Set.of(S3RdmaNicSetDriver.class), overrides);
 	}
 
 	private static boolean isPart(final Request request) {
