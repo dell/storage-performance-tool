@@ -68,6 +68,10 @@ final class S3AwsCloseTest {
 								"the upload executor did not terminate within " + CLOSE_BUDGET);
 			} finally {
 				uploadExecutor.shutdownNow();
+				// An assertion that failed before the close must not leave the driver's clients running.
+				if (!driver.isClosed()) {
+					driver.close();
+				}
 			}
 		}
 	}
