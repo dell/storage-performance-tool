@@ -18,7 +18,7 @@ endpoint, local build records, combined manifests, and compatibility policy.
 - **Comprehensive Metrics**: Detailed performance metrics including latency distributions, throughput, and concurrency
 - **Multiple Storage Protocols**: Supports S3, Swift, Atmos, filesystem, and custom protocols
 - **Flexible Load Patterns**: Create, read, update, delete operations with partial updates and composite operations
-- **Scenario Support**: Complex test scenarios using JavaScript, Python, or Groovy
+- **Scenario Support**: Complex test scenarios in JavaScript, which works out of the box; Groovy or Python scenarios need a JSR-223 script engine jar in `ext/` (see [Other Scripting Languages](core/spt-base/doc/usage/input/scenarios/README.md#32-other-scripting-languages))
 
 ## Prerequisites
 
