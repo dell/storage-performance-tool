@@ -770,16 +770,12 @@ func (v *Verifier) startNodeContainer(host *hostparse.HostInfo, result *NodeResu
 	// Build port mappings for bridge mode
 	var portMappings []command.PortMapping
 	if networkMode == command.NetworkModeBridge {
-		rmiMappings := command.BuildRMIPortMappings(v.config.RMIPortStart, v.config.RMIPortCount)
-		portMappings = make([]command.PortMapping, 0, 2+len(rmiMappings))
-		// Standard ports
-		portMappings = append(portMappings,
-			command.PortMapping{HostPort: v.registryPort(), ContainerPort: v.registryPort()}, // RMI Registry
-			command.PortMapping{HostPort: v.apiPort(), ContainerPort: v.apiPort()},           // REST API
-		)
-
-		// Add RMI object port range
-		portMappings = append(portMappings, rmiMappings...)
+		// The engine exports its RMI services on the registry port, so the registry and API ports
+		// are the only ones it listens on. The --rmi-port-start range is not published.
+		portMappings = []command.PortMapping{
+			{HostPort: v.registryPort(), ContainerPort: v.registryPort()}, // RMI Registry
+			{HostPort: v.apiPort(), ContainerPort: v.apiPort()},           // REST API
+		}
 	}
 
 	config := command.ContainerConfig{
@@ -1181,7 +1177,7 @@ func (v *Verifier) checkForPortConflicts(host *hostparse.HostInfo) Check {
 	// Check for conflicts
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	conflictInfo, err := v.preflight.CheckPorts(ctx, host, v.registryPort(), v.apiPort(), v.config.RMIPortStart, v.config.RMIPortCount)
+	conflictInfo, err := v.preflight.CheckPorts(ctx, host, v.registryPort(), v.apiPort())
 	if err != nil {
 		return Check{
 			Passed:   false,
