@@ -144,6 +144,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private final List<AutoCloseable> itemOutputFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> operationLifecycleAggregators = new ArrayList<>();
 	private NicPathsCollector nicPathsCollector;
+	private BucketVersioningRelay bucketVersioningRelay;
 	private final List<AutoCloseable> integrityLogFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> itemTimingMetricsOutputFileAggregators = new ArrayList<>();
 	private final List<AutoCloseable> opTraceLogFileAggregators = new ArrayList<>();
@@ -278,6 +279,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				throw new IllegalStateException(loadStepId() + ": the file managers do not match the step's nodes");
 			}
 			initDeleteArtifactAggregator(nodeAddrs);
+			// Before any slice starts, so the relay notes where this run's notices begin.
+			initBucketVersioningRelay(nodeAddrs);
 			final var sliceCount = 1 + nodeAddrs.size();
 			// init the base/shared config slices
 			final var configSlices = sliceConfig(
@@ -527,6 +530,37 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		// Every slice writes its event-loop report, so a distributed step always collects.
 		nicPathsCollector = new NicPathsCollector(
 						loadStepId(), fileMgrs, NicPathsCollector.nodeNames(nodeAddrs), nicSetExpected);
+	}
+
+	/** On a distributed step with bucket versioning on, relays the other nodes' first-use notices. */
+	private void initBucketVersioningRelay(final List<String> nodeAddrs) {
+		// A relay left by an earlier start of this client would relay from that run's offsets.
+		bucketVersioningRelay = fileMgrs.size() < 2 || !BucketVersioningRelay.versioningRequested(config, ctxConfigs)
+						? null
+						: new BucketVersioningRelay(loadStepId(), fileMgrs, NicPathsCollector.nodeNames(nodeAddrs));
+	}
+
+	/**
+	 * Relays the other nodes' bucket versioning notices once the slices have stopped and before the
+	 * step publishes its total metrics, after which the CLI may fetch the messages and errors.
+	 */
+	private void relayBucketVersioningNoticesAtStop() {
+		if (bucketVersioningRelay != null) {
+			try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
+				bucketVersioningRelay.relayAtStop();
+			}
+		}
+	}
+
+	/** Relays the nodes' notices written so far when a close fails, keeping the close's failure. */
+	private void relayBucketVersioningNoticesAtClose(final Throwable failure) {
+		if (bucketVersioningRelay != null) {
+			try (final var logCtx = put(KEY_STEP_ID, loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
+				bucketVersioningRelay.close();
+			} catch (final RuntimeException e) {
+				failure.addSuppressed(e);
+			}
+		}
 	}
 
 	private void initDeleteArtifactAggregator(final List<String> nodeAddrs) {
@@ -2590,6 +2624,8 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	protected final void doStop() {
 		if (standaloneDeleteDurationMode()) {
 			if (!durationAdmissionBarrierSatisfied || durationStopFailure != null) {
+				// The relay reads the nodes' files only: it needs neither the failed slice nor its barrier.
+				relayBucketVersioningNoticesAtStop();
 				publishFailedOutcomeBeforeIncompleteDurationMetricsOutput();
 				super.doStop();
 				return;
@@ -2623,6 +2659,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			});
 		}
+		relayBucketVersioningNoticesAtStop();
 		if (null != metricsAggregator) {
 			try {
 				metricsAggregator.stop();
@@ -2684,7 +2721,13 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		stopFailureBudgetMonitor();
 		final boolean durationMode = standaloneDeleteDurationMode();
 		if (durationMode) {
-			closeForStandaloneDeleteMode(true);
+			try {
+				closeForStandaloneDeleteMode(true);
+			} catch (final IOException | RuntimeException | Error e) {
+				// A close that fails keeps the relay for its retry, but relays what the nodes wrote so far.
+				relayBucketVersioningNoticesAtClose(e);
+				throw e;
+			}
 			return;
 		}
 		try {
@@ -2865,6 +2908,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			if (nicPathsCollector != null && (!durationMode || (durationAdmissionBarrierSatisfied && durationSlicesClosed))) {
 				nicPathsCollector.close();
 				nicPathsCollector = null;
+			}
+			if (bucketVersioningRelay != null && (!durationMode || (durationAdmissionBarrierSatisfied && durationSlicesClosed))) {
+				bucketVersioningRelay.close();
+				bucketVersioningRelay = null;
 			}
 			for (final var integrityLogFileAggregator : integrityLogFileAggregators) {
 				try {

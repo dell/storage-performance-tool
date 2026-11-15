@@ -66,6 +66,7 @@ import java.util.NoSuchElementException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -543,7 +544,7 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			LogUtil.exception(Level.WARN, e, "Failed to build the request URI");
 		} catch (final Throwable e) {
 			throwUncheckedIfInterrupted(e);
-			if (completeReconciledDeleteAfterRequestBuildFailure(channel, op, e)) {
+			if (completeAfterRequestBuildFailure(channel, op, e)) {
 				return;
 			}
 			logRequestBuildFailure(e);
@@ -552,18 +553,59 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		channel.flush();
 	}
 
-	private boolean completeReconciledDeleteAfterRequestBuildFailure(
+	/**
+	 * Thrown by {@link #httpRequest} for an operation it can't build as asked, for example a versioned
+	 * request whose {@code dataUriPath} override drops the version. Nothing is sent: the operation
+	 * fails at once with {@link Status#FAIL_UNKNOWN}, and {@link #complete} returns its permit and
+	 * closes its connection, as for any failed operation.
+	 */
+	protected static final class RejectedRequestException extends IllegalStateException {
+
+		private static final long serialVersionUID = 1L;
+
+		public RejectedRequestException(final String message) {
+			super(message);
+		}
+	}
+
+	/**
+	 * Completes the operation at once after its request failed to build, when the failure has a
+	 * terminal outcome: a reconciled standalone DELETE keeps its protocol status, and a {@link
+	 * RejectedRequestException} on a leased channel fails with {@code FAIL_UNKNOWN}. Returns {@code
+	 * false} for any other failure, which is only logged.
+	 */
+	private boolean completeAfterRequestBuildFailure(
 					final Channel channel, final O op, final Throwable requestFailure) {
-		if (!(op instanceof DeleteRequestOperation deleteOperation)
-						|| deleteOperation.deleteResult() == null) {
+		final boolean reconciledDelete = op instanceof DeleteRequestOperation deleteOperation
+						&& deleteOperation.deleteResult() != null;
+		if (!reconciledDelete && !(channel != null && requestFailure instanceof RejectedRequestException)) {
 			return false;
 		}
 		logRequestBuildFailure(requestFailure);
+		if (!reconciledDelete) {
+			op.status(Status.FAIL_UNKNOWN);
+		}
 		try {
 			op.finishRequest();
 		} catch (final IllegalStateException e) {
 			LogUtil.exception(Level.DEBUG, e, "{}: invalid load operation request state", op.toString());
 		}
+		if (!reconciledDelete && !channel.eventLoop().inEventLoop()) {
+			// Completing a failed operation closes its channel. Off the event loop the close is only
+			// queued, and the pool could lease the closing channel to the next operation, as it never
+			// does after a failed response. So complete on the event loop, as a response would.
+			try {
+				channel.eventLoop().execute(() -> completeBuildFailure(channel, op));
+				return true;
+			} catch (final RejectedExecutionException e) {
+				LogUtil.exception(Level.DEBUG, e, "{}: completing on the caller's thread", op.toString());
+			}
+		}
+		completeBuildFailure(channel, op);
+		return true;
+	}
+
+	private void completeBuildFailure(final Channel channel, final O op) {
 		try {
 			complete(channel, op);
 		} catch (final Throwable completionFailure) {
@@ -573,7 +615,6 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			LogUtil.exception(
 							Level.DEBUG, completionFailure, "Load operation result publication failure");
 		}
-		return true;
 	}
 
 	private void logRequestBuildFailure(final Throwable failure) {

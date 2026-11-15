@@ -145,6 +145,16 @@ final class NicSetLoopback implements AutoCloseable {
 	/** Whether the stub never answers a multipart abort: it holds the request until {@link #close()}. */
 	volatile boolean abortsUnanswered;
 	private final CountDownLatch closed = new CountDownLatch(1);
+	/**
+	 * Which multipart completions the stub answers 200 with {@link #completionErrorBody}, as S3 answers
+	 * a completion that failed after its status line: the upload stays open.
+	 */
+	volatile Predicate<Request> failCompletionWithErrorBody = request -> false;
+	/**
+	 * The body of those answers, sent chunked: its leading whitespace, as S3's keep-alive, goes in a
+	 * chunk of its own before the rest.
+	 */
+	volatile String completionErrorBody = "<Error><Code>InternalError</Code></Error>";
 
 	/** The storage configuration of a driver with these endpoints and NICs. */
 	static Config storage(final List<String> endpoints, final List<String> interfaces, final int concurrency) {
@@ -566,6 +576,8 @@ final class NicSetLoopback implements AutoCloseable {
 				uploads.put(uploadId, new ConcurrentSkipListMap<>());
 				respond(exchange, 200, "<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>k</Key><UploadId>"
 								+ uploadId + "</UploadId></InitiateMultipartUploadResult>");
+			} else if (uploads.containsKey(param(query, "uploadId")) && failCompletionWithErrorBody.test(request)) {
+				respondInTwoChunks(exchange, completionErrorBody);
 			} else {
 				final var parts = uploads.remove(param(query, "uploadId"));
 				if (parts == null) {
@@ -650,6 +662,24 @@ final class NicSetLoopback implements AutoCloseable {
 	/** A multipart upload's abort. */
 	static boolean isAbort(final Request request) {
 		return "DELETE".equals(request.method()) && request.query() != null && request.query().contains("uploadId=");
+	}
+
+	/** Answers 200 with a chunked body: its leading whitespace first, flushed, then the rest. */
+	private static void respondInTwoChunks(final HttpExchange exchange, final String xml) throws IOException {
+		final var trimmed = xml.stripLeading();
+		final var whitespace = xml.substring(0, xml.length() - trimmed.length());
+		exchange.sendResponseHeaders(200, 0);
+		final var out = exchange.getResponseBody();
+		if (!whitespace.isEmpty()) {
+			out.write(whitespace.getBytes(StandardCharsets.UTF_8));
+			out.flush();
+			try {
+				Thread.sleep(50);
+			} catch (final InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		}
+		out.write(trimmed.getBytes(StandardCharsets.UTF_8));
 	}
 
 	static String param(final String query, final String name) {
