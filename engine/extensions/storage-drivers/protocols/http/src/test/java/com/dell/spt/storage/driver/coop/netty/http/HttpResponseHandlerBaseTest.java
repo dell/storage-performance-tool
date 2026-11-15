@@ -3,23 +3,31 @@ package com.dell.spt.storage.driver.coop.netty.http;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.PathItem;
 import com.dell.spt.base.item.TokenItem;
+import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.path.PathOperation;
 import com.dell.spt.base.item.op.token.TokenOperation;
+import com.dell.spt.base.storage.Credential;
+import com.github.akurilov.commons.system.SizeInBytes;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
+import io.netty.handler.codec.http.DefaultHttpContent;
+import io.netty.handler.codec.http.DefaultHttpResponse;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.HttpStatusClass;
+import io.netty.handler.codec.http.LastHttpContent;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -27,6 +35,11 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
@@ -228,6 +241,128 @@ class HttpResponseHandlerBaseTest {
 
 		assertEquals(1, chunkCalls.get());
 		assertEquals(1, finishCalls.get());
+	}
+
+	private static final String ERROR_BODY = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>NoSuchKey</Code>"
+					+ "<Message>The specified key does not exist.</Message><Key>k</Key><RequestId>r-1</RequestId></Error>";
+	private static final int LARGE_ITEM = 1024 * 1024;
+	private static final int SMALL_ITEM = 16;
+
+	/** A read's verified outcome: the status it ends with and the bytes it counted. */
+	private record ReadOutcome(Operation.Status status, long countBytesDone) {}
+
+	static Stream<Arguments> refusedVerifiedReads() {
+		final var cases = new ArrayList<Arguments>();
+		for (final var refusal : List.of(
+						Arguments.of(HttpResponseStatus.NOT_FOUND, Operation.Status.RESP_FAIL_NOT_FOUND),
+						Arguments.of(HttpResponseStatus.FORBIDDEN, Operation.Status.RESP_FAIL_AUTH),
+						Arguments.of(HttpResponseStatus.SERVICE_UNAVAILABLE, Operation.Status.RESP_FAIL_SVC))) {
+			// The larger item fails a verified body by its content, the smaller one by its size.
+			for (final int itemSize : new int[]{LARGE_ITEM, SMALL_ITEM
+			}) {
+				for (final int chunks : new int[]{1, 2
+				}) {
+					cases.add(Arguments.of(refusal.get()[0], refusal.get()[1], itemSize, chunks));
+				}
+			}
+		}
+		return cases.stream();
+	}
+
+	/**
+	 * With verification on, a refused READ's error body is not item data: the read keeps the status of
+	 * its status line, not {@code RESP_FAIL_CORRUPT}, as it does without verification. It counts no
+	 * bytes, so a range retry that reuses the count still verifies its body from the start.
+	 */
+	@ParameterizedTest(name = "{0}, item {2} B, {3} chunk(s) → {1}")
+	@MethodSource("refusedVerifiedReads")
+	void aRefusedVerifiedReadKeepsItsHttpStatus(
+					final HttpResponseStatus httpStatus, final Operation.Status expected, final int itemSize, final int chunks)
+					throws Exception {
+		final byte[] body = ERROR_BODY.getBytes(StandardCharsets.UTF_8);
+		assertTrue(body.length > SMALL_ITEM && body.length < LARGE_ITEM);
+
+		final ReadOutcome verified = read(true, itemSize, httpStatus, body, chunks);
+		final ReadOutcome unverified = read(false, itemSize, httpStatus, body, chunks);
+
+		assertEquals(new ReadOutcome(expected, 0), verified);
+		assertEquals(unverified.status(), verified.status(), "verify on and off agree on a refused read's status");
+	}
+
+	@Test
+	void aCorrectVerifiedReadSucceeds() throws Exception {
+		final byte[] body = itemContent(SMALL_ITEM * 256);
+		assertEquals(new ReadOutcome(Operation.Status.SUCC, body.length),
+						read(true, body.length, HttpResponseStatus.OK, body, 2));
+	}
+
+	/** A 2xx body with one byte flipped is corrupt; its later chunks are not verified or counted. */
+	@Test
+	void aVerifiedReadWithOneByteFlippedIsCorrupt() throws Exception {
+		final byte[] body = itemContent(SMALL_ITEM * 256);
+		final int flipped = 100;
+		body[flipped] ^= 1;
+		assertEquals(new ReadOutcome(Operation.Status.RESP_FAIL_CORRUPT, flipped),
+						read(true, body.length, HttpResponseStatus.OK, body, 1));
+		assertEquals(new ReadOutcome(Operation.Status.RESP_FAIL_CORRUPT, flipped),
+						read(true, body.length, HttpResponseStatus.OK, body, 2));
+	}
+
+	@Test
+	void aVerifiedReadRefusedWithoutABodyIsNotFound() throws Exception {
+		assertEquals(new ReadOutcome(Operation.Status.RESP_FAIL_NOT_FOUND, 0),
+						read(true, LARGE_ITEM, HttpResponseStatus.NOT_FOUND, new byte[0], 0));
+	}
+
+	/** Answers a READ of an item of {@code itemSize} bytes through {@link HttpResponseHandlerBase#handle}. */
+	@SuppressWarnings("unchecked")
+	private static ReadOutcome read(
+					final boolean verify, final int itemSize, final HttpResponseStatus status, final byte[] body, final int chunks)
+					throws Exception {
+		try (final var input = dataInput()) {
+			final var item = new DataItemImpl("k", 0, itemSize);
+			item.dataInput(input);
+			final var op = new DataOperationImpl<DataItemImpl>(
+							0, OpType.READ, item, null, "/bucket/", Credential.NONE, null, 0);
+			op.startRequest();
+			op.finishRequest();
+			final HttpStorageDriverBase<DataItemImpl, DataOperation<DataItemImpl>> readDriver = mock(HttpStorageDriverBase.class);
+			final HttpResponseHandlerBase<DataItemImpl, DataOperation<DataItemImpl>> readHandler = new HttpResponseHandlerBase<>(readDriver, verify) {
+				@Override
+				protected void handleResponseHeaders(
+								final Channel channel,
+								final DataOperation<DataItemImpl> operation,
+								final HttpHeaders headers) {}
+			};
+			final Channel channel = mock(Channel.class);
+			readHandler.handle(channel, op, new DefaultHttpResponse(HttpVersion.HTTP_1_1, status));
+			int offset = 0;
+			for (int i = 0; i < chunks; i++) {
+				final int end = i == chunks - 1 ? body.length : body.length * (i + 1) / chunks;
+				readHandler.handle(channel, op, new DefaultHttpContent(Unpooled.wrappedBuffer(body, offset, end - offset)));
+				offset = end;
+			}
+			readHandler.handle(channel, op, LastHttpContent.EMPTY_LAST_CONTENT);
+			verify(readDriver).complete(channel, op);
+			return new ReadOutcome(op.status(), op.countBytesDone());
+		}
+	}
+
+	private static DataInput dataInput() throws IOException {
+		return DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false);
+	}
+
+	/** The bytes a verified read of an item of {@code size} bytes expects. */
+	private static byte[] itemContent(final int size) throws Exception {
+		try (final var input = dataInput()) {
+			final var item = new DataItemImpl("k", 0, size);
+			item.dataInput(input);
+			final ByteBuffer content = ByteBuffer.allocate(size);
+			while (content.hasRemaining()) {
+				item.read(content);
+			}
+			return content.array();
+		}
 	}
 
 }

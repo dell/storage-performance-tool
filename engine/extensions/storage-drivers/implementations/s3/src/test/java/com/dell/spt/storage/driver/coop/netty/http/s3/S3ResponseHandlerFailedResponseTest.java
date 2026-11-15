@@ -207,15 +207,16 @@ final class S3ResponseHandlerFailedResponseTest {
 	}
 
 	/**
-	 * With verification on, a refused read's body is verified as data and its status becomes
-	 * RESP_FAIL_CORRUPT, as before this change; its whole error body is still kept and its code logged.
+	 * With verification on, a refused read's body is not verified as data: the read keeps the status of
+	 * its HTTP status line and counts no bytes, and its whole error body is still kept and its code logged.
 	 */
 	@Test
 	void aRefusedVerifiedReadLogsTheCodeOfABodyInTwoChunks() throws Exception {
 		try (final var errors = new ErrorsLogCapture()) {
 			final var op = smallRead();
 			respondVerified(op, HttpResponseStatus.NOT_FOUND, "<Error><Code>NoSuch", "Key</Code><Message>gone</Message></Error>");
-			assertEquals(Operation.Status.RESP_FAIL_CORRUPT, op.status());
+			assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, op.status());
+			assertEquals(0, bytes(op), "a refused verified read counts no bytes");
 			assertEquals(List.of(op + ": S3 error code NoSuchKey, message: gone"), messages(errors));
 		}
 	}
