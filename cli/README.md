@@ -701,9 +701,9 @@ Use `--force-cleanup` to automatically choose cleanup without prompting.
 
 ### Remote Multi‑Node Networking
 
-**Host networking is the default** for distributed testing. Engines bind their RMI services through the registry's loopback address, so Java RMI no longer refuses them from Docker's bridge gateway as "non-local": a local bridge worker and `spt verify --network-mode bridge` start. Remote multi-node runs use host networking.
+**Host networking is the default** for distributed testing. Engines bind their RMI services through the registry's loopback address, so Java RMI no longer refuses them from Docker's bridge gateway as "non-local": a local bridge worker and `spt verify --network-mode bridge` start. Remote multi-node runs use host networking by default, and remote workers always do.
 
-- Workers and the entry node run with `--network host` (the default since v5.1.0).
+- Remote workers always run with `--network host`. The entry node does too by default (since v5.1.0); with `--network-mode bridge` it runs on a bridge network and publishes its API port.
 - spt detects a routable "advertised" IP per worker (default‑route IP) and sets both:
   - `JAVA_OPTS=-Djava.rmi.server.hostname=<ip>`
   - `JAVA_TOOL_OPTIONS=-Djava.rmi.server.hostname=<ip>`
