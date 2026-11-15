@@ -6,17 +6,20 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.item.Item;
+import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
+import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.logging.Loggers;
@@ -208,6 +211,54 @@ class NettyStorageDriverBaseTest {
 			assertEquals(1, legacyLifecycle.inFlightCount());
 			assertEquals(1, legacyDriver.scheduledOpCount());
 		}
+	}
+
+	/**
+	 * A part of a multipart upload that reaches the shared Netty submit after its upload has ended, as
+	 * the s3 and s3-rdma drivers dispatch it, singly and in a batch. Its claim is refused, it is settled
+	 * as unattempted so the dispatcher drops it, it takes no connection, and its concurrency permit is
+	 * returned: at concurrency 1 the next operation is sent.
+	 */
+	@Test
+	void aPartOfAnEndedUploadIsSettledAndReturnsItsPermit() throws Exception {
+		final var item = new DataItemImpl("ended-upload", 0, 2048);
+		item.dataInput(DataInput.instance(null, TEST_SEED, new SizeInBytes("64KB"), 4, false, 0.0, true));
+		final var upload = new CompositeDataOperationImpl<DataItem>(0, OpType.CREATE, item, null, "/bucket", null, null, 0, 1024);
+		final var uploadOp = (Operation<Item>) (Operation<?>) upload;
+		final var parts = (List<Operation<Item>>) (List<?>) upload.subOperations();
+		assertTrue(lifecycle.driverQueued(uploadOp));
+		assertTrue(lifecycle.dispatched(uploadOp));
+		// Both parts are queued while the upload is live; then its abort is answered.
+		assertTrue(lifecycle.driverQueued(parts.get(0)));
+		assertTrue(lifecycle.driverQueued(parts.get(1)));
+		assertTrue(lifecycle.completionStarted(uploadOp));
+		assertTrue(lifecycle.terminal(uploadOp, Operation.Status.RESP_FAIL_SVC));
+
+		assertFalse(driver.submit(parts.get(0)));
+		assertEquals(0, driver.submit(parts, 1, 2));
+
+		assertEquals(OperationLifecycleState.UNATTEMPTED, lifecycle.stateOf(parts.get(0)));
+		assertEquals(OperationLifecycleState.UNATTEMPTED, lifecycle.stateOf(parts.get(1)));
+		assertEquals(OperationLifecycleState.TERMINAL, lifecycle.stateOf(uploadOp), "the ended upload is not claimed again");
+		verify(connPool, never()).lease();
+		assertEquals(0, driver.sentRequestCount.get());
+
+		final Operation<Item> next = new OperationImpl<>(
+						0, OpType.READ, new DataItemImpl("after-ended-upload", 0, 1), null, "/bucket", null);
+		assertTrue(lifecycle.driverQueued(next));
+		final Channel liveConn = mock(Channel.class);
+		when(liveConn.isActive()).thenReturn(true);
+		final Attribute<Boolean> releasedAttr = mock(Attribute.class);
+		when(liveConn.attr(ATTR_KEY_RELEASED)).thenReturn(releasedAttr);
+		final Attribute opAttr = mock(Attribute.class);
+		when(liveConn.attr(NettyStorageDriverBase.ATTR_KEY_OPERATION)).thenReturn(opAttr);
+		final Attribute<String> nodeAttr = mock(Attribute.class);
+		when(liveConn.attr(ATTR_KEY_NODE)).thenReturn(nodeAttr);
+		when(connPool.lease()).thenReturn(liveConn);
+
+		assertTrue(driver.submit(next), "the refused parts returned the one permit");
+		assertEquals(1, driver.sentRequestCount.get());
+		assertEquals(OperationLifecycleState.DISPATCHED, lifecycle.stateOf(next));
 	}
 
 	@Test

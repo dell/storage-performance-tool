@@ -471,6 +471,18 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				}
 			} else if (parentState != OperationLifecycleState.DISPATCHED
 							&& parentState != OperationLifecycleState.NEW) {
+				if (state == OperationLifecycleState.DRIVER_QUEUED
+								&& (hasEnded(parentState)
+												|| (parentState == OperationLifecycleState.COMPLETING
+																&& isPartOfFinalizedUpload(op, parent)))) {
+					// A part still queued when its upload ended, for example one enqueued while the
+					// upload's abort ran, is never sent. It is settled here, so the dispatcher drops
+					// it instead of offering it again, and the ended upload is not claimed again. An
+					// upload whose finalization or abort is enqueued has ended once that request's
+					// completion runs; the initiation's completion runs before the finalization flag
+					// can be set, so a part of a live upload is only refused there.
+					lifecycle.unattempted(op);
+				}
 				return false;
 			}
 		}
@@ -814,7 +826,25 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return !lifecycle.isEnabled()
 						|| state == OperationLifecycleState.DRIVER_QUEUED
 						|| state == OperationLifecycleState.DISPATCHED
-						|| lifecycle.driverQueued(parentOp);
+						|| (!isPartOfFinalizedUpload(childOp, parentOp) && lifecycle.driverQueued(parentOp));
+	}
+
+	/**
+	 * Whether {@code childOp} is a part of an upload whose last request, its completion or its
+	 * abort, is already enqueued. A sibling that succeeds just before the abort may still enqueue
+	 * the part it fetched; claiming the upload for that part would start a lifecycle the upload
+	 * never ends, so the part is dropped instead.
+	 */
+	private static boolean isPartOfFinalizedUpload(final Operation<?> childOp, final Operation<?> parentOp) {
+		return childOp instanceof PartialOperation
+						&& parentOp instanceof CompositeOperation<?> compositeOp
+						&& compositeOp.get(KEY_FINALIZATION_ENQUEUED) != null;
+	}
+
+	private static boolean hasEnded(final OperationLifecycleState state) {
+		return state == OperationLifecycleState.TERMINAL
+						|| state == OperationLifecycleState.UNATTEMPTED
+						|| state == OperationLifecycleState.UNRESOLVED;
 	}
 
 	private void recoverQueuedCompositeParent(final O childOp, final O permitOwner) {
@@ -923,7 +953,10 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			boolean enqueueFinalization;
 			synchronized (parentOp) {
 				if (op.status() != Operation.Status.SUCC) {
-					if (subOp.retryCount() < MAX_PART_RETRIES) {
+					// A part of an aborted upload is not retried: its retry would take the ended upload's
+					// lifecycle back, and the upload gets no second terminal result, so the step's end
+					// would wait for it. It falls to the exhausted path, which keeps the first failure.
+					if (subOp.retryCount() < MAX_PART_RETRIES && parentOp.get("mpuAbort") == null) {
 						// retry the individual part instead of aborting the whole MPU
 						final var failStatus = op.status();
 						subOp.incrementRetryCount();

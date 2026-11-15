@@ -135,6 +135,16 @@ type autoResultsOutcome struct {
 	AllFailedPhases      []summary.AllFailedPhase
 	SummaryRead          bool
 	StepsWithResults     int
+
+	// LiveCorruptionUnobserved marks a completed verification READ that the live step list never
+	// showed, on a run without --allow-empty-selection: its corruption count is unknown, so only an
+	// empty selection proven by finalization may pass it, and no count is taken from its files.
+	LiveCorruptionUnobserved bool
+	// ProducerRecovered marks a LIST or CREATE step that the live step list never showed and whose
+	// files were fetched because the tracker says it completed. It records the route only: no exit
+	// rule reads it, because every route passes a non-empty selection only when every selected
+	// object verified.
+	ProducerRecovered bool
 }
 
 type postRunBudgets struct {
@@ -665,10 +675,11 @@ func deriveBaseURL(apiPort string, hosts []*hostparse.HostInfo) string {
 }
 
 // startAutoResults kicks off background completion tracking and artifact fetching.
-// After successful fetch, optionally requests /shutdown across all hosts and waits for API linger.
+// After successful fetch, optionally requests /shutdown on shutdownHosts, entry first, and waits
+// for API linger. The caller leaves attached workers out of shutdownHosts.
 // preSummaryHook, if non-nil, runs after shutdown completes but before the run
 // summary is generated — see its call site below for why that ordering matters.
-func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsDir string, expectedStepIDs []string, expectedRunID int64, debug bool, allHosts []*hostparse.HostInfo, apiPort string, shutdownOn bool, lingerSec int, scenarioPath string, metadata *runMetadata, progressOut io.Writer, summaryOut io.Writer, traceFile string, preSummaryHook func(context.Context), integrityOptions ...*integrity.FinalizeOptions) *autoResultsMonitor {
+func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsDir string, expectedStepIDs []string, expectedRunID int64, debug bool, shutdownHosts []*hostparse.HostInfo, apiPort string, shutdownOn bool, lingerSec int, scenarioPath string, metadata *runMetadata, progressOut io.Writer, summaryOut io.Writer, traceFile string, preSummaryHook func(context.Context), integrityOptions ...*integrity.FinalizeOptions) *autoResultsMonitor {
 	if parentCtx == nil {
 		parentCtx = context.Background()
 	}
@@ -735,7 +746,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			shutdownCtx, cancelShutdown := context.WithTimeout(phaseBase, autoResultsPhaseBudgets.Shutdown)
 			defer cancelShutdown()
 			outcome.Lifecycle.Shutdown.Started = true
-			writeProgress("Auto-results: requesting shutdown on all hosts...\n")
+			writeProgress("Auto-results: requesting shutdown...\n")
 			if lingerSec <= 0 {
 				lingerSec = int(constants.APILingerDefault / time.Second)
 			}
@@ -756,7 +767,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			}
 
 			outcome.ShutdownErr = requestShutdownAllFunc(
-				shutdownCtx, allHosts, apiPort, time.Duration(lingerSec)*time.Second, expectedRunID, debug)
+				shutdownCtx, shutdownHosts, apiPort, time.Duration(lingerSec)*time.Second, expectedRunID, debug)
 			if reconciliationDone != nil {
 				reconciled := <-reconciliationDone
 				if reconciled.result != nil {
@@ -780,8 +791,8 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		cleanupOnly := monitor.cleanupOnly.Load()
 		// A launch that failed before POST /run left no workload to stop and no
 		// results to summarize. /shutdown carries no run identity, so posting it
-		// would only be refused by hosts without an engine, or stop prestarted
-		// attach-mode workers. Removal still runs through the pre-summary hook.
+		// would only be refused by hosts without an engine, or stop an engine
+		// spt launched for nothing. Removal still runs through the pre-summary hook.
 		nothingSubmitted := cleanupOnly && monitor.provenNotSubmitted()
 		if cleanupOnly {
 			outcome.TrackerErr = monitorCtx.Err()
@@ -961,13 +972,14 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, logErr)
 				logging.LogError("auto-results", "no step IDs discovered; skipping fetch", logErr)
 				writeProgress("Results fetch could not start; preserving run metadata and continuing shutdown. Output: %s\n", root)
-			} else {
-				writeProgress("Auto-results: fetching %d step(s): %s\n", len(stepIDs), strings.Join(stepIDs, ", "))
 			}
 
 			var observedRuntimeRoles integrity.StepRoles
 			var plannedRoles integrity.StepRoles
 			fetchStepIDs := stepIDs
+			// readUnseen marks a READ the tracker says completed which the live step list never showed,
+			// while it showed another step of the run.
+			readUnseen := false
 			if verificationRun {
 				plan := integrityOptions[0].Plan
 				deferredVerification := plan.Valid() && plan.VerificationDeferred()
@@ -984,8 +996,10 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 						artifactsReady = false
 					} else {
 						observedRuntimeRoles = binding.Roles
-						fetchStepIDs = stepsToFetch(stepIDs, plan, binding.Roles.Read, stepRoleLifecycle(
-							outcome.Tracker, binding.Roles.Read, plannedRoles.Read))
+						fetchStepIDs, outcome.ProducerRecovered = stepsToFetch(
+							stepIDs, plan, binding.Roles, outcome.Tracker)
+						readUnseen = len(runtimeStepIDs) > 0 && binding.Roles.Read == "" &&
+							stepRoleLifecycle(outcome.Tracker, "", plannedRoles.Read) == portcheck.StepLifecycleCompleted
 					}
 				} else {
 					observedRuntimeRoles = integrity.ResolveStepRoles(stepIDs, nil)
@@ -998,7 +1012,12 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 					// Its planned lifecycle remains part of finalization, while runtime
 					// evidence and ActualStepIDs stay exact.
 					if readLifecycle != portcheck.StepLifecycleNotStarted {
-						if runtimeRoles.Read == "" {
+						if readUnseen && !plan.AllowEmpty {
+							outcome.CorruptionMetricsErr = fmt.Errorf(
+								"verification READ step %s completed, but its live corruption count was not observed",
+								plan.Verifier.ID)
+							outcome.LiveCorruptionUnobserved = true
+						} else if runtimeRoles.Read == "" {
 							outcome.CorruptionMetricsErr = fmt.Errorf("verification READ step could not be identified")
 						} else {
 							corrupt, observeErr := integrity.ObserveJSONCorruptCountContext(artifactCtx, baseURL, runtimeRoles.Read)
@@ -1032,6 +1051,7 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			}
 			integrityFinalizationReady := artifactsReady
 			if artifactsReady {
+				writeProgress("Auto-results: fetching %d step(s): %s\n", len(fetchStepIDs), strings.Join(fetchStepIDs, ", "))
 				fetch := newResultsFetcherFunc(baseURL, root)
 				if _, ferr := fetch.FetchArtifactsForSteps(artifactCtx, fetchStepIDs); ferr != nil {
 					outcome.ArtifactErr = errors.Join(outcome.ArtifactErr, ferr)
@@ -1215,22 +1235,49 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 
 // verifierMayBeMissing reports whether a run's READ step can be absent from the live step list. One
 // that never started publishes nothing, and neither does the READ step of an empty selection, which
-// --allow-empty-selection says to expect. Finalization still decides from the counts on file.
+// --allow-empty-selection says to expect. A READ the tracker says completed may also have ended
+// between two polls of the live metrics, with or without the flag. Finalization still decides from
+// the counts on file.
 func verifierMayBeMissing(plan integrityplan.Plan, readLifecycle portcheck.StepLifecycle) bool {
-	return readLifecycle == portcheck.StepLifecycleNotStarted || plan.AllowEmpty
+	return readLifecycle == portcheck.StepLifecycleNotStarted ||
+		readLifecycle == portcheck.StepLifecycleCompleted || plan.AllowEmpty
 }
 
-// stepsToFetch adds the planned READ step when --allow-empty-selection expects it may go unseen and it
-// did complete: with nothing to read it can end between two polls of the live metrics, and its files
-// are still there. A READ that isn't known to have completed is not reported as a step of this run.
+// stepsToFetch adds each planned producer or READ step that the tracker says completed but the live
+// step list never showed: a short step, such as one with nothing to list or read, can end between two
+// polls of the live metrics, and its files are still there. A step that isn't known to have completed
+// is not reported as a step of this run. Each added step goes before the first step with a later
+// ordinal, so the list keeps the plan's order. It also reports whether the producer was added.
 func stepsToFetch(
-	stepIDs []string, plan integrityplan.Plan, observedRead string, readLifecycle portcheck.StepLifecycle,
-) []string {
-	if !plan.AllowEmpty || observedRead != "" || plan.Verifier.ID == "" ||
-		readLifecycle != portcheck.StepLifecycleCompleted || slices.Contains(stepIDs, plan.Verifier.ID) {
-		return stepIDs
+	stepIDs []string, plan integrityplan.Plan, observed integrity.StepRoles, tracker *portcheck.RunResult,
+) (fetch []string, producerAdded bool) {
+	fetch = stepIDs
+	ordinal := func(stepID string) (int, bool) {
+		for _, step := range []*integrityplan.PlannedStep{plan.Producer, &plan.Verifier, plan.Cleanup} {
+			if step != nil && step.ID == stepID {
+				return step.Number, true
+			}
+		}
+		return integrityplan.RuntimeStepNumber(stepID)
 	}
-	return append(slices.Clone(stepIDs), plan.Verifier.ID)
+	add := func(step *integrityplan.PlannedStep, observedID string) bool {
+		if step == nil || step.ID == "" || observedID != "" || slices.Contains(fetch, step.ID) ||
+			stepRoleLifecycle(tracker, "", step.ID) != portcheck.StepLifecycleCompleted {
+			return false
+		}
+		at := len(fetch)
+		for i, stepID := range fetch {
+			if number, ok := ordinal(stepID); ok && number > step.Number {
+				at = i
+				break
+			}
+		}
+		fetch = slices.Insert(slices.Clone(fetch), at, step.ID)
+		return true
+	}
+	producerAdded = add(plan.Producer, observed.Create+observed.List)
+	add(&plan.Verifier, observed.Read)
+	return fetch, producerAdded
 }
 
 // dropLiveCorruptionErrorOfEmptySelection forgives a missing live corruption count when finalization
@@ -1240,6 +1287,7 @@ func dropLiveCorruptionErrorOfEmptySelection(outcome *autoResultsOutcome) {
 	final := outcome.Finalization
 	if outcome.FinalizationErr == nil && final != nil && final.EmptySelection && final.VerificationAttemptedCount == 0 {
 		outcome.CorruptionMetricsErr = nil
+		outcome.LiveCorruptionUnobserved = false
 	}
 }
 
@@ -1336,6 +1384,26 @@ func trackedFailureReason(result *portcheck.RunResult) string {
 	return reason + ": " + message
 }
 
+// unverifiedSelectionReason names the selected objects a complete, non-deferred verification
+// left unverified. An ordinary failed GET counts as attempted but not verified, so a complete
+// finalization can still leave objects unverified; S3_INTEGRITY.md says such a run exits 1.
+// An empty selection keeps its own handling.
+func unverifiedSelectionReason(final *integrity.FinalizeOutcome) string {
+	if final == nil || !final.Complete || final.VerificationDeferred || final.EmptySelection {
+		return ""
+	}
+	unverified := max(final.RemainingCount, final.SelectionCount-final.VerifiedCount)
+	if unverified <= 0 {
+		return ""
+	}
+	verb := "remain"
+	if unverified == 1 {
+		verb = "remains"
+	}
+	return fmt.Sprintf("verification verified %d of %d selected objects; %d %s unverified",
+		final.VerifiedCount, final.SelectionCount, unverified, verb)
+}
+
 func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, received bool, params scenario.Params) error {
 	if !scenario.IsIntegrityWorkload(params) {
 		return resolveOrdinaryRunError(runErr, outcome)
@@ -1344,7 +1412,8 @@ func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, recei
 	if outcome.ObservedCorruptCount != nil {
 		corrupt = *outcome.ObservedCorruptCount
 	}
-	if outcome.Finalization != nil && outcome.Finalization.CorruptCount > corrupt {
+	// The files of a READ whose live count was never observed are not a corruption count.
+	if outcome.Finalization != nil && !outcome.LiveCorruptionUnobserved && outcome.Finalization.CorruptCount > corrupt {
 		corrupt = outcome.Finalization.CorruptCount
 	}
 	primary := ""
@@ -1427,6 +1496,9 @@ func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, recei
 
 		if !outcome.Finalization.Complete {
 			reasons = append(reasons, "integrity result finalization is incomplete")
+		}
+		if reason := unverifiedSelectionReason(outcome.Finalization); reason != "" {
+			reasons = append(reasons, reason)
 		}
 		if outcome.Finalization.EmptySelection && !outcome.Finalization.EmptyAllowed {
 			if params.WorkloadType == workload.ReadVerify {
@@ -1778,6 +1850,18 @@ func copyFileAtomic(srcPath string, destPath string) error {
 		return err
 	}
 	return nil
+}
+
+// shutdownTargetHosts returns the hosts the end-of-run shutdown asks to stop.
+// Attached workers run engines that spt did not start, and they stay running
+// for the next attach run, so in attach mode only the entry node is asked.
+// The entry still ends its own run first, which releases the workers' step
+// services.
+func shutdownTargetHosts(hosts []*hostparse.HostInfo, attachExisting bool) []*hostparse.HostInfo {
+	if attachExisting && len(hosts) > 1 {
+		return hosts[:1:1]
+	}
+	return hosts
 }
 
 // requestShutdownAll stops the entry node first and waits for its owned run to
@@ -2362,7 +2446,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 		)
 		startAutoResultsMonitoring := func() {
 			if resultsOpts.AutoResults && autoMonitor == nil {
-				autoMonitor = startAutoResultsFunc(runContext, baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, params.RunID, resultsOpts.Debug, hostInfos, apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path, finalizeRunSession, integrityOptions)
+				autoMonitor = startAutoResultsFunc(runContext, baseURL, resultsOpts.Label, resultsOpts.ResultsDir, expectedStepIDs, params.RunID, resultsOpts.Debug, shutdownTargetHosts(hostInfos, attachExisting), apiPort, resultsOpts.ShutdownOnComplete, resultsOpts.ShutdownLingerSec, scenarioPath, metadata, progressOut, summaryWriter, traceOpts.Path, finalizeRunSession, integrityOptions)
 				if autoMonitor != nil {
 					autoMonitor.BindSession(runSession)
 					preparedCleanupDelegated = true
@@ -2636,7 +2720,7 @@ func init() {
 	runCmd.Flags().String("label", "", "Optional label used for output directory naming and as the step ID prefix (default: mt)")
 	runCmd.Flags().Bool("auto-results-debug", false, "Enable verbose debug logs for auto-results completion detection")
 	// Phase 5 shutdown controls
-	runCmd.Flags().Bool("shutdown-on-complete", true, "After fetching results, request /shutdown on all Spt hosts")
+	runCmd.Flags().Bool("shutdown-on-complete", true, "After fetching results, request /shutdown on all Spt hosts; with --attach-existing, on the entry node only")
 	runCmd.Flags().Int("shutdown-linger", 5, "Seconds to wait for /status linger after /shutdown")
 
 	// Multi-Host Options
