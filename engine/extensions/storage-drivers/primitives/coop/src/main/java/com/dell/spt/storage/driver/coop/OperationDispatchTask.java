@@ -5,6 +5,7 @@ import com.dell.spt.base.concurrent.ThreadTaskExecutor;
 import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.composite.CompositeOperation;
 import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
@@ -67,6 +68,8 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 	private volatile List<SubmittingOperation<O>> submittingOperations = List.of();
 	private volatile Thread dispatchThread;
 	private volatile int backlog;
+	/** Continuations of dispatched composites the task held, unsent, when it stopped; see {@link #doStop()}. */
+	private final List<O> stoppedContinuations = new ArrayList<>();
 
 	/**
 	 * The {@code dispatchReady} condition is retained in the descriptor for existing extensions
@@ -400,13 +403,34 @@ public final class OperationDispatchTask<I extends Item, O extends Operation<I>>
 		return removed;
 	}
 
+	/** Takes the continuations {@link #doStop()} found unsent, once, for queue recovery. */
+	List<O> takeStoppedContinuations() {
+		synchronized (stoppedContinuations) {
+			if (stoppedContinuations.isEmpty()) {
+				return List.of();
+			}
+			final var taken = List.copyOf(stoppedContinuations);
+			stoppedContinuations.clear();
+			return taken;
+		}
+	}
+
 	@Override
 	protected final void doStop() {
 		// Only the task thread owns these non-thread-safe collections. Queue recovery uses the
 		// lifecycle registry, so cleanup never needs to race a submit implementation which did
 		// not return before the driver's bounded stop wait.
+		final var tracker = storageDriver.operationLifecycle();
 		while (!buff.isEmpty()) {
-			buff.remove(0);
+			final O op = buff.remove(0);
+			// A dispatched composite here is its next pass, a finalization the closed admission
+			// refused. The registry holds only queued work, so queue recovery gets it from here.
+			if (tracker != null && op instanceof CompositeOperation
+							&& tracker.stateOf(op) == OperationLifecycleState.DISPATCHED) {
+				synchronized (stoppedContinuations) {
+					stoppedContinuations.add(op);
+				}
+			}
 		}
 		tempInOps.clear();
 		while (!deferredMpuQueue.isEmpty()) {

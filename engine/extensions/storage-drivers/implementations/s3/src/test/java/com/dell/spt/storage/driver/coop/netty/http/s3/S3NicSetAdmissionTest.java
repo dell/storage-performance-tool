@@ -330,12 +330,13 @@ final class S3NicSetAdmissionTest {
 		assertTrue(stub.objectRequests().stream().noneMatch(request -> "POST".equals(request.method())
 						&& request.query() != null && request.query().startsWith("uploadId=")), "the upload was not completed");
 		assertEquals(0, lifecycle.counters().failed(), "fresh work charges no failure");
-		// As on the default route, the upload stays in flight for the step's bounded drain to settle.
-		assertEquals(OperationLifecycleState.DISPATCHED, lifecycle.stateOf(upload));
-		assertEquals(1, lifecycle.snapshot().unattempted());
-		assertEquals(1, lifecycle.snapshot().inFlight());
-		lifecycle.expireTerminalDeadline();
+		// The upload, open on the stub, can no longer complete: recovery settles it unresolved at once,
+		// as on the default route, so it no longer holds the step's drain until its deadline (nic-04).
 		assertEquals(OperationLifecycleState.UNRESOLVED, lifecycle.stateOf(upload));
+		assertEquals(1, lifecycle.snapshot().unattempted());
+		assertEquals(1, lifecycle.snapshot().unresolved());
+		assertEquals(0, lifecycle.snapshot().inFlight(), () -> "nothing holds the drain: " + lifecycle.snapshot());
+		assertEquals(1, stub.openUploads(), "the upload stays open on the target");
 		assertTrue(lifecycle.counters().reconciled(), lifecycle.counters()::toString);
 		// The first PUT, the initiation and the sent part succeeded; the waiting part was never sent.
 		final var rows = stoppedRows(run.driver(), run.driver());
