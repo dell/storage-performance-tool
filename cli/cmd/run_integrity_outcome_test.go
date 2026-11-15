@@ -71,50 +71,124 @@ func TestResolveVerificationRunErrorCleanEmptyReadRequiresExplicitAllowance(t *t
 	}
 }
 
-func TestVerifierMayBeMissingOnlyWhenNotStartedOrAnEmptySelectionIsAllowed(t *testing.T) {
+func TestVerifierMayBeMissingOnlyWhenNotStartedCompletedOrAnEmptySelectionIsAllowed(t *testing.T) {
 	if !verifierMayBeMissing(integrityplan.Plan{}, portcheck.StepLifecycleNotStarted) {
 		t.Fatal("a READ step that never started has no live evidence")
 	}
-	if !verifierMayBeMissing(integrityplan.Plan{AllowEmpty: true}, portcheck.StepLifecycleCompleted) {
+	if !verifierMayBeMissing(integrityplan.Plan{AllowEmpty: true}, portcheck.StepLifecycleStarted) {
 		t.Fatal("--allow-empty-selection says a READ step may publish nothing")
 	}
-	if verifierMayBeMissing(integrityplan.Plan{}, portcheck.StepLifecycleCompleted) {
-		t.Fatal("without the flag a completed READ step must appear")
+	if !verifierMayBeMissing(integrityplan.Plan{}, portcheck.StepLifecycleCompleted) {
+		t.Fatal("a completed READ step can end between two polls of the live metrics")
+	}
+	for _, lifecycle := range []portcheck.StepLifecycle{
+		portcheck.StepLifecycleStarted, portcheck.StepLifecyclePlanned, portcheck.StepLifecycleFailed, "",
+	} {
+		if verifierMayBeMissing(integrityplan.Plan{}, lifecycle) {
+			t.Fatalf("without the flag a READ step in lifecycle %q must appear", lifecycle)
+		}
 	}
 }
 
-func TestStepsToFetchAddsOnlyAnUnseenReadStepOfAnEmptySelection(t *testing.T) {
+func TestStepsToFetchAddsOnlyUnseenCompletedPlannedSteps(t *testing.T) {
 	list, read := "mt-001-x-list", "mt-002-x-verify"
-	allowed := integrityplan.Plan{AllowEmpty: true, Verifier: integrityplan.PlannedStep{ID: read}}
-	strict := integrityplan.Plan{Verifier: integrityplan.PlannedStep{ID: read}}
+	plan := func(allowEmpty bool) integrityplan.Plan {
+		return integrityplan.Plan{
+			AllowEmpty: allowEmpty,
+			Producer:   &integrityplan.PlannedStep{ID: list, Number: 1, Role: integrityplan.StepRoleList},
+			Verifier:   integrityplan.PlannedStep{ID: read, Number: 2},
+		}
+	}
+	tracker := func(listLifecycle, readLifecycle portcheck.StepLifecycle) *portcheck.RunResult {
+		return &portcheck.RunResult{Steps: map[string]portcheck.StepCompletion{
+			list: {Lifecycle: listLifecycle}, read: {Lifecycle: readLifecycle},
+		}}
+	}
+	completed, started := portcheck.StepLifecycleCompleted, portcheck.StepLifecycleStarted
 	tests := []struct {
-		name      string
-		plan      integrityplan.Plan
-		observed  string
-		lifecycle portcheck.StepLifecycle
-		want      int
+		name     string
+		plan     integrityplan.Plan
+		seen     []string
+		observed integrity.StepRoles
+		tracker  *portcheck.RunResult
+		want     []string
 	}{
-		{"allowed and unseen", allowed, "", portcheck.StepLifecycleCompleted, 2},
-		{"already seen", allowed, read, portcheck.StepLifecycleCompleted, 1},
-		{"never started", allowed, "", portcheck.StepLifecycleNotStarted, 1},
-		{"only planned", allowed, "", portcheck.StepLifecyclePlanned, 1},
-		{"not allowed", strict, "", portcheck.StepLifecycleCompleted, 1},
+		{"allowed and READ unseen", plan(true), []string{list}, integrity.StepRoles{List: list},
+			tracker(completed, completed), []string{list, read}},
+		{"READ unseen", plan(false), []string{list}, integrity.StepRoles{List: list},
+			tracker(completed, completed), []string{list, read}},
+		{"LIST unseen", plan(false), []string{read}, integrity.StepRoles{Read: read},
+			tracker(completed, completed), []string{list, read}},
+		{"both seen", plan(false), []string{list, read}, integrity.StepRoles{List: list, Read: read},
+			tracker(completed, completed), []string{list, read}},
+		{"READ never started", plan(false), []string{list}, integrity.StepRoles{List: list},
+			tracker(completed, portcheck.StepLifecycleNotStarted), []string{list}},
+		{"READ only planned", plan(false), []string{list}, integrity.StepRoles{List: list},
+			tracker(completed, portcheck.StepLifecyclePlanned), []string{list}},
+		{"READ still running", plan(false), []string{list}, integrity.StepRoles{List: list},
+			tracker(completed, started), []string{list}},
+		{"READ failed", plan(false), []string{list}, integrity.StepRoles{List: list},
+			tracker(completed, portcheck.StepLifecycleFailed), []string{list}},
+		{"LIST still running", plan(false), []string{read}, integrity.StepRoles{Read: read},
+			tracker(started, completed), []string{read}},
+		{"no tracker", plan(false), []string{list}, integrity.StepRoles{List: list}, nil, []string{list}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := stepsToFetch([]string{list}, test.plan, test.observed, test.lifecycle)
-			if len(got) != test.want || got[0] != list {
-				t.Fatalf("stepsToFetch() = %v, want %d steps from %q", got, test.want, list)
+			seen := slices.Clone(test.seen)
+			got, producerAdded := stepsToFetch(seen, test.plan, test.observed, test.tracker)
+			if !slices.Equal(got, test.want) {
+				t.Fatalf("stepsToFetch() = %v, want %v", got, test.want)
 			}
-			if test.want == 2 && got[1] != read {
-				t.Fatalf("stepsToFetch() = %v, want the planned READ %q second", got, read)
+			if want := !slices.Contains(test.seen, list) && slices.Contains(test.want, list); producerAdded != want {
+				t.Fatalf("producer added = %t, want %t", producerAdded, want)
+			}
+			if !slices.Equal(seen, test.seen) {
+				t.Fatalf("stepsToFetch() changed its input to %v", seen)
 			}
 		})
 	}
 }
 
-// A READ step with nothing to read can end between two polls, and the run must still fetch its files.
-func TestAutoResultsFetchesAnUnseenReadStepOnlyWhenAnEmptySelectionIsAllowed(t *testing.T) {
+// Missed steps go back in the plan's order, around runtime IDs whose timestamps differ from the plan.
+func TestStepsToFetchKeepsThePlanOrder(t *testing.T) {
+	create, read, cleanup := "mt-001-x-create", "mt-002-x-verify", "mt-003-x-delete"
+	plan := integrityplan.Plan{
+		Producer: &integrityplan.PlannedStep{ID: create, Number: 1, Role: integrityplan.StepRoleCreate},
+		Verifier: integrityplan.PlannedStep{ID: read, Number: 2},
+		Cleanup:  &integrityplan.PlannedStep{ID: cleanup, Number: 3, Role: integrityplan.StepRoleCleanup},
+	}
+	completed := portcheck.StepCompletion{Lifecycle: portcheck.StepLifecycleCompleted}
+	tracker := &portcheck.RunResult{Steps: map[string]portcheck.StepCompletion{
+		create: completed, read: completed, cleanup: completed,
+	}}
+	runtimeCleanup := "mt-003-20261114.100000.001-delete"
+	for _, test := range []struct {
+		seen []string
+		want []string
+	}{
+		{[]string{cleanup}, []string{create, read, cleanup}},
+		{[]string{read, cleanup}, []string{create, read, cleanup}},
+		{[]string{runtimeCleanup}, []string{create, read, runtimeCleanup}},
+		{[]string{create}, []string{create, read}},
+	} {
+		observed := integrity.StepRoles{}
+		if slices.Contains(test.seen, read) {
+			observed.Read = read
+		}
+		if slices.Contains(test.seen, create) {
+			observed.Create = create
+		}
+		got, _ := stepsToFetch(test.seen, plan, observed, tracker)
+		if !slices.Equal(got, test.want) {
+			t.Fatalf("stepsToFetch(%v) = %v, want %v", test.seen, got, test.want)
+		}
+	}
+}
+
+// A READ step with nothing to read can end between two polls, and the run must still fetch its files,
+// with or without --allow-empty-selection.
+func TestAutoResultsFetchesAnUnseenCompletedReadStep(t *testing.T) {
 	const runID = int64(42)
 	list, read := "mt-001-20260823.100000.000-list", "mt-002-20260823.100000.000-verify"
 	for _, allowEmpty := range []bool{true, false} {
@@ -153,11 +227,7 @@ func TestAutoResultsFetchesAnUnseenReadStepOnlyWhenAnEmptySelectionIsAllowed(t *
 			monitor.Arm()
 			<-monitor.done
 
-			// Without the flag a missing READ step fails role binding, so nothing is fetched.
-			var want []string
-			if allowEmpty {
-				want = []string{list, read}
-			}
+			want := []string{list, read}
 			fetcher.mu.Lock()
 			defer fetcher.mu.Unlock()
 			if !slices.Equal(fetcher.stepIDs, want) {
@@ -271,7 +341,7 @@ func TestResolveVerificationRunErrorDeferredWritePolicy(t *testing.T) {
 	params := scenario.Params{WorkloadType: scenario.WorkloadTypeWriteVerify, DeferVerification: true}
 	outcome := autoResultsOutcome{
 		Tracker:      &portcheck.RunResult{FinalState: constants.StateCompleted},
-		Finalization: &integrity.FinalizeOutcome{Complete: true, VerificationDeferred: true},
+		Finalization: &integrity.FinalizeOutcome{Complete: true, VerificationDeferred: true, SelectionCount: 3},
 	}
 	if err := resolveVerificationRunError(nil, outcome, true, params); err != nil {
 		t.Fatalf("nonempty deferred seed should pass: %v", err)

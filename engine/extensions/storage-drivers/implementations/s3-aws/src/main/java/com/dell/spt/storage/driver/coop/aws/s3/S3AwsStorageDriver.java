@@ -1066,8 +1066,44 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			return CompletableFuture.failedFuture(
 							new UnsupportedOperationException("Composite READ must be handled by partial operations"));
 		} else {
-			// For DELETE/UPDATE, delegate to standard path
-			return putObject((O) op);
+			// Only CREATE and READ have a multipart implementation. Any other type runs as one
+			// ordinary request of its own type, as execute() runs it: a DELETE is a delete-object
+			// request, never a put.
+			return executeStandard((O) op);
+		}
+	}
+
+	/**
+	 * The per-type route of {@link #execute} for an operation that is neither composite nor partial,
+	 * used for a composite of a type with no multipart implementation. It repeats execute()'s switch
+	 * so that execute() itself, on every operation, stays as it was; keep the two in step.
+	 */
+	private CompletableFuture<Void> executeStandard(final O op) {
+		switch (op.type()) {
+		case NOOP:
+			return CompletableFuture.completedFuture(null);
+
+		case CREATE:
+		case UPDATE:
+			if (op.srcPath() != null && !op.srcPath().isEmpty()) {
+				return copyObject(op);
+			}
+			return putObject(op);
+
+		case READ:
+			return readObject(op);
+
+		case STAT:
+			return headObject(op);
+
+		case DELETE:
+			return deleteObject(op);
+
+		case LIST:
+			return listObjects(op);
+
+		default:
+			return CompletableFuture.failedFuture(new UnsupportedOperationException(op.type().toString()));
 		}
 	}
 
@@ -1742,6 +1778,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				targetBucket = slash > 0 ? rel.substring(0, slash) : rel;
 			}
 
+			// Listed items are named "/<bucket>/<key>", as the s3 driver names them, so that every
+			// later operation resolves the listed bucket and the whole key.
+			final String bucketPath = "/" + targetBucket;
+
 			int maxKeys = Math.min(Math.max(count, 1), 1000);
 
 			ListObjectsV2Request.Builder reqBuilder = ListObjectsV2Request.builder()
@@ -1758,20 +1798,14 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			} else if (options != null && options.startAfter() != null && !options.startAfter().isEmpty()) {
 				reqBuilder.startAfter(options.startAfter());
 			} else if (lastPrevItem != null) {
-				String startAfter = lastPrevItem.name();
-				if (startAfter.startsWith("/")) {
-					startAfter = startAfter.substring(1);
-				}
-				reqBuilder.startAfter(startAfter);
+				reqBuilder.startAfter(listedKey(lastPrevItem.name(), bucketPath));
 			}
 
 			ListObjectsV2Response resp = s3AsyncClient.listObjectsV2(reqBuilder.build()).join();
 
 			List<I> result = new ArrayList<>(maxKeys);
 			for (S3Object s3obj : resp.contents()) {
-				// Use the S3 object key directly as the item name
-				// The key already contains the full path (e.g., "awstest1m16trmr271")
-				String itemName = "/" + s3obj.key();
+				String itemName = bucketPath + "/" + s3obj.key();
 
 				// Parse offset from object key using idRadix like S3 driver does
 				long offset = 0;
@@ -1811,6 +1845,18 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			}
 			throw new IOException("Failed to list objects", e);
 		}
+	}
+
+	/**
+	 * Returns the key a listed item's name stands for, for the next page's start-after: the name
+	 * without its bucket when it holds the listed bucket, otherwise the name without a leading
+	 * slash, as before.
+	 */
+	static String listedKey(final String itemName, final String bucketPath) {
+		if (ItemNamePaths.holdsPath(itemName, bucketPath)) {
+			return ItemNamePaths.relativeToPath(itemName, bucketPath);
+		}
+		return itemName.startsWith("/") ? itemName.substring(1) : itemName;
 	}
 
 	/**
@@ -2088,7 +2134,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 	/**
 	 * Copy an object from source to destination. See {@link #copySourcePath} for the source; the
-	 * copy keeps the item's key in the destination.
+	 * copy lands at the item's name under the destination path, which for a listed item holds the
+	 * source bucket.
 	 */
 	@SuppressWarnings("unchecked")
 	private CompletableFuture<Void> copyObject(final O op) {
@@ -2115,7 +2162,8 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	 * is a bucket, {@code /src} or {@code /src/}, that is the item in that bucket: the item's name
 	 * when it already holds the path, otherwise the path joined with the name. This is the object
 	 * the {@code s3} driver names in {@code x-amz-copy-source}. This driver lists names as
-	 * {@code "/" + key}, so {@code /src} gives {@code /src/<key>}.
+	 * {@code /<bucket>/<key>}, as the {@code s3} driver does, so a listed item of {@code /src} is
+	 * read as {@code /src/<key>} and lands at {@code <dst>/src/<key>}.
 	 *
 	 * <p>Any other source path is the source itself, as before: {@code /src/key} copies that one
 	 * object to every item. Only a CREATE is a copy; an UPDATE is a PUT (see {@link #execute}).

@@ -499,6 +499,46 @@ public class LoadStepContextImplTest {
 		assertEquals(OperationLifecycleState.TERMINAL, dispatched.lifecycle().state());
 	}
 
+	/**
+	 * A DELETE of an object above the part size (item.data.ranges.threshold), as a cleanup step after
+	 * --part-size builds it, is counted by the step: a composite DELETE has no parts, so put() dropped
+	 * its one result as an unfinished composite and the step never ended.
+	 */
+	@Test
+	public void builderMadeDeletesAboveThePartSizeAreCounted() throws Exception {
+		final MetricsContext<AllMetricsSnapshot> metrics = buildMetricsCtx("partSizeDelete");
+		final LoadStepContextImpl<DataItem, Operation<DataItem>> stepCtx = new LoadStepContextImpl<>(
+						"step-part-size-delete", generator, mockDriver, metrics, testConfig.configVal("load"), false);
+		// threshold before op type, as LoadGeneratorBuilderImpl sets them
+		final var builder = new com.dell.spt.base.item.op.data.DataOperationsBuilderImpl<DataItem, DataOperation<DataItem>>(0)
+						.sizeThreshold(1024)
+						.opType(OpType.DELETE)
+						.inputPath("/bucket");
+		final List<DataOperation<DataItem>> built = new ArrayList<>();
+		builder.buildOps(List.of(
+						new DataItemImpl("d-1", 0, 4096), new DataItemImpl("d-2", 0, 4096), new DataItemImpl("d-3", 0, 4096)),
+						built);
+		for (final var op : built) {
+			op.reset();
+			op.startRequest();
+			op.finishRequest();
+			op.startResponse();
+			((Operation<DataItem>) op).finishResponse();
+			((Operation<DataItem>) op).status(Operation.Status.SUCC);
+		}
+
+		assertTrue(stepCtx.put((Operation<DataItem>) built.get(0)));
+		final List<Operation<DataItem>> batch = new ArrayList<>();
+		batch.add(built.get(1));
+		batch.add(built.get(2));
+		assertEquals(2, stepCtx.put(batch, 0, 2));
+
+		metrics.refreshLastSnapshot();
+		assertEquals(3, metrics.lastSnapshot().successSnapshot().count(), "every DELETE result is counted");
+		assertEquals(0, metrics.lastSnapshot().failsSnapshot().count());
+		metrics.close();
+	}
+
 	@Test
 	public void putSingleOperationSuccessAndMetricsOutput() throws Exception {
 		// enable recycle to populate latestSuccOpResultByItem map
