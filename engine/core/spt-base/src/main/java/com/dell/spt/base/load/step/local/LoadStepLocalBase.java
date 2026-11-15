@@ -938,7 +938,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 						continue;
 					}
 					final OptionalLong exhaustion = schedulingExhaustionNanos(context);
-					final long exhaustedAtNanos;
+					long exhaustedAtNanos;
 					if (exhaustion.isEmpty()) {
 						if (!context.isDone()) {
 							continue;
@@ -946,11 +946,17 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 						exhaustedAtNanos = System.nanoTime();
 						if (durationStopBegun
 										&& DurationTime.timestampBeforeDeadline(exhaustedAtNanos, deadlineNanos)) {
-							// A stop emptied the queue; the slice did not run out. Another context's
-							// recorded exhaustion still wins, and the final counts still decide
-							// exhaustion at validation.
-							stoppedBeforeDeadline = true;
-							continue;
+							// The last request may have dispatched between the read above and isDone:
+							// read the record again, so a real exhaustion is not reported as a stop.
+							final OptionalLong lateExhaustion = schedulingExhaustionNanos(context);
+							if (lateExhaustion.isEmpty()) {
+								// A stop emptied the queue; the slice did not run out. Another
+								// context's recorded exhaustion still wins, and the final counts still
+								// decide exhaustion at validation.
+								stoppedBeforeDeadline = true;
+								continue;
+							}
+							exhaustedAtNanos = lateExhaustion.getAsLong();
 						}
 					} else {
 						exhaustedAtNanos = exhaustion.getAsLong();

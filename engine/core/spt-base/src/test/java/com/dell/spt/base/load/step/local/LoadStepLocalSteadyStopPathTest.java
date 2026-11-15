@@ -18,6 +18,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.load.step.DurationAwaitStatus;
+import com.dell.spt.base.load.step.LoadStep;
+import com.dell.spt.base.load.step.client.LoadStepClientBase;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
@@ -479,9 +481,7 @@ class LoadStepLocalSteadyStopPathTest {
 				awaitCondition(() -> driver.scheduledOpCount() == inventory, "the whole inventory handed to the queue");
 				final var outcome = new java.util.concurrent.atomic.AtomicReference<Object>();
 				final var returnedNanos = new java.util.concurrent.atomic.AtomicLong();
-				final var awaitEntered = new java.util.concurrent.CountDownLatch(1);
 				final Thread awaiter = new Thread(() -> {
-					awaitEntered.countDown();
 					try {
 						outcome.set(step.await(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS));
 					} catch (final Throwable failure) {
@@ -490,9 +490,7 @@ class LoadStepLocalSteadyStopPathTest {
 					returnedNanos.set(System.nanoTime());
 				}, "duration-live-await");
 				awaiter.start();
-				assertTrue(awaitEntered.await(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS));
-				// Let the await reach its poll loop before the stop.
-				Thread.sleep(50);
+				awaitDurationPollLoop(awaiter);
 				final long stopNanos = System.nanoTime();
 				if (how == LiveAwaitStop.ENTRY_NODE_PHASES) {
 					step.closeOperationAdmissionForStepStop();
@@ -517,6 +515,126 @@ class LoadStepLocalSteadyStopPathTest {
 				step.close();
 			}
 		}
+	}
+
+	/**
+	 * Blocks until {@code awaiter} sleeps between two iterations of the duration await's poll loop,
+	 * so a stop that follows lands on a live await and not before it.
+	 */
+	private static void awaitDurationPollLoop(final Thread awaiter) throws InterruptedException {
+		awaitCondition(
+						() -> awaiter.getState() == Thread.State.TIMED_WAITING
+										&& java.util.Arrays.stream(awaiter.getStackTrace())
+														.anyMatch(frame -> frame.getMethodName().equals("awaitDurationContexts")),
+						"the duration await's poll loop");
+	}
+
+	/**
+	 * A real slice joined to a real controller, stopped through the controller while both awaits
+	 * are live: the controller's await ends promptly with the stop as its cause, not exhaustion.
+	 */
+	@Test
+	void aControllerStopDuringTheAwaitOfARealSliceReportsTheStop() throws Exception {
+		final int inventory = 5_000;
+		final LatencyStorageDriver<?, ?> driver = LatencyStorageDriver.standaloneDelete(C, L_MILLIS).inputQueue(100_000);
+		try (final var metricsMgr = new RecordingMetricsManager()) {
+			final var step = new DurationDeleteStep(
+							durationDeleteConfig("duration-controller-stop"), driver, metricsMgr, inventory);
+			final var sliceAwaitEntered = new java.util.concurrent.CountDownLatch(1);
+			final var admissionClosedNanos = new java.util.concurrent.atomic.AtomicLong();
+			final LoadStep slice = observedSlice(step, sliceAwaitEntered, admissionClosedNanos);
+			final var client = new com.dell.spt.base.load.step.client.TestLoadStepClient(
+							durationDeleteConfig("duration-controller-stop-client"),
+							List.<Extension> of(),
+							List.<Config> of(),
+							metricsMgr);
+			addStepSlice(client, slice);
+			final var stopFailure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+			final Thread stopper = new Thread(() -> {
+				try {
+					assertTrue(
+									sliceAwaitEntered.await(WAIT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS),
+									"the controller never awaited the slice");
+					awaitCondition(() -> driver.scheduledOpCount() == inventory, "the whole inventory handed to the queue");
+					client.stop();
+				} catch (final Throwable failure) {
+					stopFailure.set(failure);
+				}
+			}, "duration-controller-stopper");
+			try {
+				step.start();
+				stopper.start();
+				final var failure = assertThrows(
+								IntegrityTerminalException.class,
+								() -> client.await(30, TimeUnit.SECONDS));
+				final long returnedNanos = System.nanoTime();
+				assertTrue(failure.getMessage().contains("stopped before the requested duration"), failure.getMessage());
+				assertFalse(failure.getMessage().contains("exhausted"), failure.getMessage());
+				assertTrue(admissionClosedNanos.get() != 0, "the controller's stop did not close the slice's admission");
+				final long afterAdmissionClosedMillis = TimeUnit.NANOSECONDS.toMillis(returnedNanos - admissionClosedNanos.get());
+				assertTrue(
+								afterAdmissionClosedMillis < 1_000,
+								"the controller's await returned " + afterAdmissionClosedMillis + " ms after admission closed");
+				stopper.join(2 * WAIT_TIMEOUT_MILLIS);
+				assertFalse(stopper.isAlive(), "the controller's stop did not return");
+				assertNull(stopFailure.get());
+			} finally {
+				stopper.interrupt();
+				stopper.join(WAIT_TIMEOUT_MILLIS);
+				try {
+					client.close();
+				} catch (final IntegrityTerminalException closeFailure) {
+					// The stopped slice never reached its deadline, so the run fails; not as exhausted.
+					assertFalse(closeFailure.getMessage().contains("exhausted"), closeFailure.getMessage());
+				} finally {
+					step.close();
+				}
+			}
+		}
+	}
+
+	/**
+	 * {@code step} as the controller sees it, recording when the controller first awaits it and
+	 * when the controller closes its admission.
+	 */
+	private static LoadStep observedSlice(
+					final LoadStep step,
+					final java.util.concurrent.CountDownLatch awaitEntered,
+					final java.util.concurrent.atomic.AtomicLong admissionClosedNanos) {
+		return (LoadStep) java.lang.reflect.Proxy.newProxyInstance(
+						LoadStep.class.getClassLoader(),
+						new Class<?>[]{LoadStep.class
+						},
+						(proxy, method, args) -> {
+							switch (method.getName()) {
+							case "equals" -> {
+								return proxy == args[0];
+							}
+							case "hashCode" -> {
+								return System.identityHashCode(proxy);
+							}
+							case "toString" -> {
+								return "observed " + step;
+							}
+							case "await" -> awaitEntered.countDown();
+							case "closeOperationAdmissionForStepStop" -> admissionClosedNanos.compareAndSet(0, System.nanoTime());
+							default -> {
+								// forwarded unchanged
+							}
+							}
+							try {
+								return method.invoke(step, args);
+							} catch (final java.lang.reflect.InvocationTargetException e) {
+								throw e.getCause();
+							}
+						});
+	}
+
+	@SuppressWarnings("unchecked")
+	private static void addStepSlice(final LoadStepClientBase<?> client, final LoadStep slice) throws Exception {
+		final java.lang.reflect.Field field = LoadStepClientBase.class.getDeclaredField("stepSlices");
+		field.setAccessible(true);
+		((List<LoadStep>) field.get(client)).add(slice);
 	}
 
 	/** A local step with one real context per driver, as a mixed or weighted step builds them. */
