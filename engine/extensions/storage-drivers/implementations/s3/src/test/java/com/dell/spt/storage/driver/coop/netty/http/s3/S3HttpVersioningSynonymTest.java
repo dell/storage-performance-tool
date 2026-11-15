@@ -42,7 +42,8 @@ import org.junit.jupiter.api.io.TempDir;
  * The Mongoose synonym {@code storage.net.http.versioning} on the {@code s3} test classpath, which has the HTTP
  * protocol schema but no Swift jar. Resolved on the step configuration, it gives the Netty S3 driver, and so
  * {@code s3-rdma} and {@code s3-tables} which extend it, the versioned behaviour {@code storage.object.versioning}
- * gives: {@code GET ?versioning} and, when it is off, {@code PUT ?versioning} on first use of a bucket, then
+ * gives: {@code GET ?versioning} and, for a bucket that has never been versioned, {@code PUT ?versioning} on first
+ * use of a bucket, then
  * {@code key~versionId} item names.
  */
 @Timeout(60)

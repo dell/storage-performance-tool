@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.ByteChannel;
 import java.nio.channels.SeekableByteChannel;
+import java.nio.channels.WritableByteChannel;
 import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -99,11 +100,14 @@ public class FileManagerImpl implements FileManager {
 	@Override
 	public final void writeToFile(final String fileName, final byte[] buff) throws IOException {
 		try (final ByteChannel fileChannel = Files.newByteChannel(Paths.get(fileName), FileManager.appendOpenOptions())) {
-			final ByteBuffer bb = ByteBuffer.wrap(buff);
-			int n = 0;
-			while (n < buff.length) {
-				n = fileChannel.write(bb);
-			}
+			writeFully(fileChannel, ByteBuffer.wrap(buff));
+		}
+	}
+
+	/** Writes all that remains of the buffer, however few bytes each write takes. */
+	static void writeFully(final WritableByteChannel channel, final ByteBuffer bb) throws IOException {
+		while (bb.hasRemaining()) {
+			channel.write(bb);
 		}
 	}
 
