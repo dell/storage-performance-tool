@@ -571,7 +571,7 @@ Executes a benchmark test with the specified workload type.
 - `--cleanup`: Best-effort deletion after test completion. For READ with `--items-file`, this deletes objects from the supplied inventory, including objects not created by the current run. Seeded DELETE retries its immutable measured residual in a separate phase; explicit-manifest and existing-prefix DELETE reject it. For `write-verify`, delete only successfully verified objects; unsupported for `read-verify` and deferred verification
 - `--provision-target-bucket`: Create a missing target bucket before the phase that writes the run's objects (default true); `false` still checks that every target bucket exists and is accessible. See [Target Buckets](docs/TARGET_BUCKETS.md)
 - `--create-prefix`: Deprecated; has no effect and will be removed in the next minor release
-- `--output-dir, -O`: Directory to save detailed Spt reports
+- `--output-dir, -O`: Deprecated; has no effect and warns when used. Results always go under `--results-dir` (default `./results`)
 - `--generate-only`: Generate scenario file without executing Docker
 - `--force`: Resolve supported port conflicts without interaction and permit a known engine build mismatch. It does not override invalid build information or collection failures
 - `--api-port`: Spt API port that every engine in the run serves, the entry and every worker (defaults to 9999, legacy: 43234)
