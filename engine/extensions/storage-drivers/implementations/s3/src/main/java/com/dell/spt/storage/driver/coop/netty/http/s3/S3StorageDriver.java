@@ -2748,11 +2748,44 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 							.append(sortedHeader.getValue());
 		}
 		buffCanonical.append('\n');
-		buffCanonical.append(dstUriPath);
+		appendV2CanonicalResource(buffCanonical, dstUriPath);
 		if (Loggers.MSG.isTraceEnabled()) {
 			Loggers.MSG.trace("Canonical representation:\n{}", buffCanonical);
 		}
 		return buffCanonical.toString();
+	}
+
+	private static final String VERSION_ID_PARAM = "versionId=";
+
+	/**
+	 * Appends the V2 canonical resource of {@code dstUriPath}. V2 signs a sub-resource value decoded,
+	 * while the request URI carries it percent-encoded: the {@code versionId} value, which the driver
+	 * encodes, is decoded here. Everything else is appended as before.
+	 */
+	static void appendV2CanonicalResource(final StringBuilder canonical, final String dstUriPath) {
+		final int queryIndex = dstUriPath.indexOf('?');
+		if (queryIndex < 0) {
+			canonical.append(dstUriPath);
+			return;
+		}
+		canonical.append(dstUriPath, 0, queryIndex + 1);
+		final int length = dstUriPath.length();
+		int start = queryIndex + 1;
+		while (true) {
+			final int amp = dstUriPath.indexOf('&', start);
+			final int end = amp < 0 ? length : amp;
+			if (dstUriPath.startsWith(VERSION_ID_PARAM, start)) {
+				canonical.append(VERSION_ID_PARAM)
+								.append(decodeQueryComponent(dstUriPath.substring(start + VERSION_ID_PARAM.length(), end)));
+			} else {
+				canonical.append(dstUriPath, start, end);
+			}
+			if (amp < 0) {
+				return;
+			}
+			canonical.append('&');
+			start = amp + 1;
+		}
 	}
 
 	@Override

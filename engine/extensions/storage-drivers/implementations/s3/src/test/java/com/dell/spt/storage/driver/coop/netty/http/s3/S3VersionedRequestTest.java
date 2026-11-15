@@ -52,7 +52,8 @@ import org.junit.jupiter.api.Timeout;
  * versionId} query, as {@code GetObject} and {@code HeadObject} do; {@code x-amz-version-id} is a
  * response header. DELETE keeps its query and UPDATE its header. The request builder leaves the
  * item its full name, so a request built again for the same operation, as a retry builds it,
- * selects the same version, and a successful response replaces the version suffix.
+ * selects the same version, and a successful response replaces the version suffix. Under V2 the
+ * version is signed decoded.
  */
 @Timeout(60)
 final class S3VersionedRequestTest {
@@ -188,6 +189,82 @@ final class S3VersionedRequestTest {
 		assertEquals(
 						"AWS " + CREDENTIAL.getUid() + ":" + hmacBase64("HmacSHA1", CREDENTIAL.getSecret(), expected),
 						request.headers().get(HttpHeaderNames.AUTHORIZATION));
+	}
+
+	/**
+	 * V2 signs a sub-resource value decoded, while the URI carries it percent-encoded. The anchors are
+	 * botocore 1.37.9 {@code HmacV1Auth} signatures of {@code /b/key?versionId=<encoded>} with only a
+	 * Date header; they check the reference signer the request tests below use.
+	 */
+	@Test
+	void theReferenceV2SignerMatchesBotocore() throws Exception {
+		final var date = "Thu, 01 Jan 2026 00:00:00 GMT";
+		final String[][] anchors = {
+				{"GET", "v1", "iFL/wEe0MWhY1+hWveWUF9hGvP4="
+				},
+				{"HEAD", "v1", "g+3aglVcNhNw0N8xz1qrSOGfEyE="
+				},
+				{"DELETE", "v1", "pI3HdsY4AgvNU0eyks1kQeoVDg8="
+				},
+				{"GET", "v%2B1%3D%3Ax", "MMxXsneSXyqem0+XcCP8uuPPAqE="
+				},
+				{"HEAD", "v%2B1%3D%3Ax", "K4bQ+ph6WcwSLr3g1Nj/Jmtkqk4="
+				},
+				{"DELETE", "v%2B1%3D%3Ax", "I4qFYpab4+lS+VD02D4v7DoZUVg="
+				},
+				{"GET", "v%201%26a%25b", "V2Ad17cFCSdSJeV8oTWcDe7trfk="
+				},
+				{"HEAD", "v%201%26a%25b", "soqt3I4M1HXoT6XzJOs4IjL7p4U="
+				},
+				{"DELETE", "v%201%26a%25b", "ydo9hetriLHeAVCWuOQtIrXGOKM="
+				},
+				{"GET", "%C3%A9%E4%B8%AD", "GXg9L09QAvn7Q6Jwsy+5YygGnWQ="
+				},
+				{"HEAD", "%C3%A9%E4%B8%AD", "OEec+UMa5yw17l4aUzmOmuaJZW8="
+				},
+				{"DELETE", "%C3%A9%E4%B8%AD", "wjAzaTSnv9gBSalNOiXNruWgyi0="
+				},
+		};
+		for (final var anchor : anchors) {
+			final var headers = new DefaultHttpHeaders().set(HttpHeaderNames.DATE, date);
+			final HttpRequest request = new io.netty.handler.codec.http.DefaultHttpRequest(
+							io.netty.handler.codec.http.HttpVersion.HTTP_1_1, HttpMethod.valueOf(anchor[0]),
+							"/b/key?versionId=" + anchor[1], headers);
+			assertEquals(anchor[2], referenceV2Signature(request), () -> anchor[0] + " " + anchor[1]);
+		}
+	}
+
+	@Test
+	void aVersionIdThatNeedsEncodingIsSentEncodedAndSignedDecodedUnderV2() throws Exception {
+		final Map<String, String> encoded = new LinkedHashMap<>();
+		encoded.put("v1", "v1");
+		encoded.put("v+1=:x", "v%2B1%3D%3Ax");
+		encoded.put("v 1&a%b", "v%201%26a%25b");
+		encoded.put("\u00e9\u4e2d", "%C3%A9%E4%B8%AD");
+		final var driver = driver(true, 2, false);
+		final var headDriver = driver(true, 2, true);
+		for (final var entry : encoded.entrySet()) {
+			final var versionId = entry.getKey();
+			final var wire = "/b/key?versionId=" + entry.getValue();
+			final Map<String, HttpRequest> requests = new LinkedHashMap<>();
+			requests.put("READ", driver.httpRequest(op(OpType.READ, "key~" + versionId), HOST));
+			requests.put("STAT", driver.httpRequest(op(OpType.STAT, "key~" + versionId), HOST));
+			requests.put("metadata-only READ", headDriver.httpRequest(op(OpType.READ, "key~" + versionId), HOST));
+			requests.put("DELETE", driver.httpRequest(op(OpType.DELETE, "key~" + versionId), HOST));
+			for (final var type : List.of(OpType.READ, OpType.DELETE)) {
+				final var explicit = op(type, "key");
+				explicit.requestedVersionId(versionId);
+				requests.put("explicit " + type, driver.httpRequest(explicit, HOST));
+			}
+			for (final var request : requests.entrySet()) {
+				final var what = request.getKey() + " of " + versionId;
+				assertEquals(wire, request.getValue().uri(), what);
+				assertEquals(
+								"AWS " + CREDENTIAL.getUid() + ":" + referenceV2Signature(request.getValue()),
+								request.getValue().headers().get(HttpHeaderNames.AUTHORIZATION),
+								what);
+			}
+		}
 	}
 
 	// ---------- building the request again, as a retry does ----------
@@ -344,6 +421,56 @@ final class S3VersionedRequestTest {
 			op.markRandomRanges(1);
 		}
 		return (Operation<Item>) (Operation<?>) op;
+	}
+
+	/**
+	 * An independent V2 (HMAC-SHA1) signature of {@code request}, after the AWS specification and
+	 * botocore: the path as sent, then the sub-resources sorted, each value percent-decoded.
+	 */
+	private static String referenceV2Signature(final HttpRequest request) throws Exception {
+		final var headers = request.headers();
+		final var stringToSign = new StringBuilder(request.method().name()).append('\n');
+		for (final var name : List.of("content-md5", "content-type", "date")) {
+			stringToSign.append(headers.get(name, "")).append('\n');
+		}
+		final var amz = new TreeMap<String, String>();
+		for (final var header : headers) {
+			final var name = header.getKey().toLowerCase(java.util.Locale.ROOT);
+			if (name.startsWith("x-amz-")) {
+				amz.merge(name, header.getValue().trim(), (a, b) -> a + "," + b);
+			}
+		}
+		amz.forEach((name, value) -> stringToSign.append(name).append(':').append(value).append('\n'));
+		final var uri = request.uri();
+		final var queryIndex = uri.indexOf('?');
+		stringToSign.append(queryIndex < 0 ? uri : uri.substring(0, queryIndex));
+		if (queryIndex >= 0) {
+			final var subResources = new TreeMap<String, String>();
+			for (final var pair : uri.substring(queryIndex + 1).split("&")) {
+				final var eq = pair.indexOf('=');
+				subResources.put(
+								eq < 0 ? pair : pair.substring(0, eq), eq < 0 ? null : percentDecode(pair.substring(eq + 1)));
+			}
+			stringToSign.append('?').append(String.join("&", subResources.entrySet().stream()
+							.map(e -> e.getValue() == null ? e.getKey() : e.getKey() + "=" + e.getValue())
+							.toList()));
+		}
+		return hmacBase64("HmacSHA1", CREDENTIAL.getSecret(), stringToSign.toString());
+	}
+
+	/** RFC 3986 percent-decoding to UTF-8; {@code +} is a plus sign. */
+	private static String percentDecode(final String value) {
+		final var bytes = new java.io.ByteArrayOutputStream();
+		for (int i = 0; i < value.length(); i++) {
+			final char c = value.charAt(i);
+			if (c == '%') {
+				bytes.write(Integer.parseInt(value.substring(i + 1, i + 3), 16));
+				i += 2;
+			} else {
+				bytes.writeBytes(String.valueOf(c).getBytes(StandardCharsets.UTF_8));
+			}
+		}
+		return bytes.toString(StandardCharsets.UTF_8);
 	}
 
 	private static List<String> headerNames(final HttpHeaders headers) {
