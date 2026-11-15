@@ -48,13 +48,15 @@ import org.junit.jupiter.params.provider.ValueSource;
  * other test JVMs in parallel; the high side allows for wave
  * quantization, at most one wave of {@code C} completions over a window of tens of waves.
  *
- * <p>The time-limited test uses a lower floor of 0.6: on a pinned, loaded host its ratio fell to
- * 0.75 at the old 200 ms drain hold, and to 0.82 at 500 ms. At 0.6 the floor only guards against gross undercounting:
- * it no longer catches a window that wrongly includes the 600 ms ramp, which reads about 0.66 of
- * {@code C / L}. That test proves the ramp is excluded by the window's start offset, by the count
- * check that the whole slow wave and the drained requests precede or follow the window, by the
- * slow wave in the whole-step p99 and by the whole-step {@code TPAvg} against the steady one; it
- * proves the drain is excluded by the counts and the window maxima.
+ * <p>The time-limited test uses a lower floor of 0.6: on a pinned, loaded host its ratio read
+ * from 0.75 to 0.82 across samples. The window closes before the drain, so the drain hold does not
+ * move it; host load does. At 0.6 the floor only guards against gross undercounting: it no longer
+ * catches a window that wrongly includes the 600 ms ramp, which reads about 0.66 of
+ * {@code C / L}. That test proves the ramp is excluded by the window's start offset, by the
+ * window's maxima and p99, and by the count check that the whole slow wave and the drained
+ * requests precede or follow the window. The whole-step p99 and the whole-step {@code TPAvg}
+ * against the steady one also catch it, but only narrowly. It proves the drain is excluded by the
+ * counts and the window maxima.
  *
  * <p>Timing bounds compare the window with deliberately slow operations. A loaded JVM stalls every
  * thread for up to about 180 ms (pauses measured on a pinned, loaded host), and a stall only
@@ -145,7 +147,9 @@ class LinearLoadStepSteadyLifecycleTest {
 
 				// Slow first wave: in the whole-step p99, not in the window's timings. The held request
 				// lasts about the whole step, so it alone meets the whole-step maxima; a p99 needs more
-				// than 1% of the completions to be slow, which here only the slow wave gives.
+				// than 1% of the completions to be slow. The drained requests read about 505-520 ms, just
+				// under this bound, so a stall at the release could meet the p99 without the slow wave:
+				// the window checks below are the firm ramp proof.
 				final long slowMicros = TimeUnit.MILLISECONDS.toMicros(SLOW_FIRST_MILLIS) * 9 / 10;
 				assertTrue(total.durationSnapshot().max() >= slowMicros, "total max");
 				assertTrue(total.durationSnapshot().percentile(0.99) >= slowMicros, "total p99");
