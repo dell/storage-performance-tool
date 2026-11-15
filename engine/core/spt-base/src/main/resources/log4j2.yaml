@@ -270,6 +270,15 @@ Configuration:
         DirectWriteRolloverStrategy: {}
         PatternLayout:
           pattern: "%m%n"
+      # Names each step's bucket.versioning.log, the file the Entry Node relays. BucketVersioningNotice
+      # appends its lines itself, synchronously, so nothing is written through this appender.
+      - name: bucketVersioningFile
+        filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}bucket.versioning.log"
+        Policies:
+          StepIdTriggeringPolicy: {}
+        DirectWriteRolloverStrategy: {}
+        PatternLayout:
+          pattern: "%p %m%n"
       - name: operationLifecycleFile
         filePattern: "${ctx:home_dir}${sys:file.separator}log${sys:file.separator}$${ctx:step_id}${sys:file.separator}operation.lifecycle.csv"
         Policies:
@@ -484,6 +493,11 @@ Configuration:
         level: INFO
         AppenderRef:
           ref: eventLoopsFile
+        additivity: false
+      - name: com.dell.spt.base.logging.BucketVersioning
+        level: INFO
+        AppenderRef:
+          ref: bucketVersioningFile
         additivity: false
       - name: com.dell.spt.base.logging.OperationLifecycle
         level: INFO

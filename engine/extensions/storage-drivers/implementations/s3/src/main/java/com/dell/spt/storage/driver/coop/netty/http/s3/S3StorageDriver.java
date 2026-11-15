@@ -46,12 +46,14 @@ import com.dell.spt.base.logging.LogUtil;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.base.storage.driver.bucket.AwsS3Region;
+import com.dell.spt.base.storage.driver.bucket.BucketVersioningNotice;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketResponse;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.storage.driver.coop.netty.http.HttpStorageDriverBase;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.confuse.Config;
 import io.netty.buffer.ByteBufInputStream;
+import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
@@ -332,6 +334,9 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		strategiesByToken.put(checksumStrategy.configToken, checksumStrategy);
 	}
 
+	/** The most of an unrecognized status a notice quotes. */
+	private static final int MAX_QUOTED_STATUS = 64;
+
 	protected final boolean fsAccess;
 	protected final boolean taggingEnabled;
 	protected final Input<String> taggingContentInput;
@@ -344,6 +349,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	private final Set<CompletableFuture<Void>> multipartCleanupTasks = ConcurrentHashMap.newKeySet();
 	// One WARN for a multipart abort the kernel route could not connect; the rest go to DEBUG.
 	private final AtomicBoolean kernelRouteAbortWarned = new AtomicBoolean();
+	private final S3ResponseHandler.CompletionErrorCodeLog completionErrorCodeLog = new S3ResponseHandler.CompletionErrorCodeLog();
 	private final KernelRouteAborts<KernelRouteAbort> kernelRouteAborts = new KernelRouteAborts<>();
 	// Host of driver-built helper requests (bucket setup, listing, verification, abort).
 	private String helperAuthority;
@@ -585,40 +591,79 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 		// check the bucket versioning state
 		if (versioning) {
-			final var bucketVersioningReqUri = bucketPath + "?" + S3Api.URL_ARG_VERSIONING;
-			reqHeaders = new DefaultHttpHeaders();
-			reqHeaders.set(HttpHeaderNames.HOST, nodeAddr);
-			reqHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
-			applyDynamicHeaders(reqHeaders);
-			applySharedHeaders(reqHeaders);
-			applyAuthHeaders(reqHeaders, HttpMethod.GET, bucketVersioningReqUri, credential);
-			final FullHttpRequest getBucketVersioningReq = new DefaultFullHttpRequest(
-							HttpVersion.HTTP_1_1,
-							HttpMethod.GET,
-							bucketVersioningReqUri,
-							Unpooled.EMPTY_BUFFER,
-							reqHeaders,
-							EmptyHttpHeaders.INSTANCE);
-			final FullHttpResponse getBucketVersioningResp;
-			try {
-				getBucketVersioningResp = executeHttpRequest(getBucketVersioningReq);
-				if (getBucketVersioningResp == null) {
-					Loggers.ERR.warn("Response timeout");
-				} else {
-					try {
-						handleCheckBucketVersioningResponse(
-										getBucketVersioningResp, nodeAddr, bucketVersioningReqUri);
-					} finally {
-						getBucketVersioningResp.release();
-					}
-				}
-			} catch (final InterruptedException e) {
-				throwUnchecked(e);
-			} catch (final ConnectException e) {
-				LogUtil.exception(Level.WARN, e, "Failed to connect to the storage node");
-			}
+			checkBucketVersioning(nodeAddr, bucketPath, credential);
 		}
 		return path;
+	}
+
+	/**
+	 * The first-use versioning check of a bucket: {@code GET ?versioning}, then {@link
+	 * #handleCheckBucketVersioningResponse(FullHttpResponse, String, String)}, which by default sends
+	 * {@code PUT ?versioning} only for a bucket that has never been versioned. Each outcome of the
+	 * default handling logs one {@link BucketVersioningNotice}; none throws, so the bucket's path is
+	 * cached and never checked again. The check is marked as running until it returns, so the Entry
+	 * Node waits for it at the step's stop.
+	 */
+	private void checkBucketVersioning(final String nodeAddr, final String bucketPath, final Credential credential) {
+		try (final var check = BucketVersioningNotice.check(stepId, bucketLabel(bucketPath))) {
+			checkBucketVersioningOnce(nodeAddr, bucketPath, credential);
+		}
+	}
+
+	private void checkBucketVersioningOnce(final String nodeAddr, final String bucketPath, final Credential credential) {
+		final var bucketVersioningReqUri = bucketPath + "?" + S3Api.URL_ARG_VERSIONING;
+		final FullHttpRequest getBucketVersioningReq = new DefaultFullHttpRequest(
+						HttpVersion.HTTP_1_1,
+						HttpMethod.GET,
+						bucketVersioningReqUri,
+						Unpooled.EMPTY_BUFFER,
+						bucketVersioningHeaders(nodeAddr, HttpMethod.GET, bucketVersioningReqUri, 0, credential),
+						EmptyHttpHeaders.INSTANCE);
+		final FullHttpResponse getBucketVersioningResp;
+		try {
+			getBucketVersioningResp = executeHttpRequest(getBucketVersioningReq);
+		} catch (final InterruptedException e) {
+			throwUnchecked(e);
+			return;
+		} catch (final ConnectException e) {
+			LogUtil.exception(Level.DEBUG, e, "{}: the bucket {} versioning check failed to connect", stepId, bucketPath);
+			BucketVersioningNotice.warn(stepId, versioningCheckFailed(bucketPath, "the connection failed"));
+			return;
+		}
+		if (getBucketVersioningResp == null) {
+			BucketVersioningNotice.warn(
+							stepId, versioningCheckFailed(bucketPath, "GET ?versioning timed out after " + netTimeoutMilliSec + " ms"));
+			return;
+		}
+		try {
+			// The protected hook, so a subclass's override still decides what is done.
+			handleCheckBucketVersioningResponse(getBucketVersioningResp, nodeAddr, bucketVersioningReqUri);
+		} finally {
+			getBucketVersioningResp.release();
+		}
+	}
+
+	/**
+	 * The headers of a versioning request, built as the bucket {@code HEAD} builds its own: the
+	 * dynamic and shared headers, and the bucket's credential. A {@code PUT} also gets a {@code Date}
+	 * when those headers give none; a {@code GET}, like the {@code HEAD}, does not.
+	 */
+	private HttpHeaders bucketVersioningHeaders(
+					final String nodeAddr,
+					final HttpMethod method,
+					final String uri,
+					final int contentLength,
+					final Credential credential) {
+		final HttpHeaders reqHeaders = new DefaultHttpHeaders();
+		reqHeaders.set(HttpHeaderNames.HOST, nodeAddr);
+		reqHeaders.set(HttpHeaderNames.CONTENT_LENGTH, contentLength);
+		applyDynamicHeaders(reqHeaders);
+		applySharedHeaders(reqHeaders);
+		if (HttpMethod.PUT.equals(method) && !reqHeaders.contains(HttpHeaderNames.DATE)) {
+			reqHeaders.set(HttpHeaderNames.DATE, DateUtil.formatNowRfc1123());
+		}
+		applyAuthHeaders(reqHeaders, method, uri, credential);
+		return reqHeaders;
 	}
 
 	/**
@@ -700,52 +745,138 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		return headerValue;
 	}
 
+	/**
+	 * Acts on a bucket's {@code GET ?versioning} response, with versioning on; the first-use check
+	 * calls it for each bucket. A bucket whose {@code Status} is {@code Enabled} is left as it is.
+	 * A {@code VersioningConfiguration} with no or an empty {@code Status}, so a bucket that has
+	 * never been versioned, goes to {@link #enableBucketVersioning(String, String)}. A {@code
+	 * Suspended} or unrecognized status, a body that isn't a readable {@code
+	 * VersioningConfiguration}, and a failed response are left alone with a warning, and the run
+	 * goes on un-versioned.
+	 *
+	 * <p>A subclass that overrides it decides instead, and logs no notice unless it calls this one.
+	 */
 	protected void handleCheckBucketVersioningResponse(
 					final FullHttpResponse getBucketVersioningResp,
 					final String nodeAddr,
 					final String bucketVersioningReqUri) {
-		var versioningEnabled = false;
-		if (!HttpStatusClass.SUCCESS.equals(getBucketVersioningResp.status().codeClass())) {
-			Loggers.ERR.warn(
-							"The bucket versioning checking response is: {}",
-							getBucketVersioningResp.status().toString());
-		} else {
-			final var content = getBucketVersioningResp.content().toString(StandardCharsets.US_ASCII);
-			versioningEnabled = content.contains("Enabled");
+		if (!versioning) {
+			return;
 		}
-		if (versioning && !versioningEnabled) {
-			enableBucketVersioning(nodeAddr, bucketVersioningReqUri);
+		final var bucketPath = bucketPathOf(bucketVersioningReqUri);
+		if (!HttpStatusClass.SUCCESS.equals(getBucketVersioningResp.status().codeClass())) {
+			BucketVersioningNotice.warn(stepId, versioningCheckFailed(
+							bucketPath, "GET ?versioning returned " + getBucketVersioningResp.status()));
+			return;
+		}
+		final var state = versioningState(ByteBufUtil.getBytes(getBucketVersioningResp.content()));
+		switch (state.kind()) {
+		case NEVER -> enableBucketVersioning(nodeAddr, bucketVersioningReqUri);
+		case ENABLED -> BucketVersioningNotice.info(stepId, bucketLabel(bucketPath) + ": versioning is already enabled");
+		case SUSPENDED -> BucketVersioningNotice.warn(stepId, bucketLabel(bucketPath)
+						+ ": versioning is suspended; SPT left it alone, and the run goes on un-versioned");
+		case OTHER -> BucketVersioningNotice.warn(stepId, bucketLabel(bucketPath) + ": the versioning status \""
+						+ quotedStatus(state.status())
+						+ "\" is neither Enabled nor Suspended; SPT left it alone, and the run goes on un-versioned");
+		default -> BucketVersioningNotice.warn(stepId, versioningCheckFailed(
+						bucketPath, "GET ?versioning returned a body that is not a VersioningConfiguration SPT can read"));
 		}
 	}
 
+	/**
+	 * Enables a never-versioned bucket's versioning; {@link
+	 * #handleCheckBucketVersioningResponse(FullHttpResponse, String, String)} calls it. By default it
+	 * sends {@code PUT ?versioning} signed with the bucket's credential from {@link #pathToCredMap},
+	 * the one the first-use check used. A subclass that overrides it decides whether anything is sent,
+	 * and logs no notice unless it calls this one.
+	 */
 	protected void enableBucketVersioning(
 					final String nodeAddr, final String bucketVersioningReqUri) {
-		final HttpHeaders reqHeaders = new DefaultHttpHeaders();
-		reqHeaders.set(HttpHeaderNames.HOST, nodeAddr);
-		reqHeaders.set(HttpHeaderNames.DATE, DateUtil.formatNowRfc1123());
-		reqHeaders.set(HttpHeaderNames.CONTENT_LENGTH, S3Api.VERSIONING_ENABLE_CONTENT.length);
-		applyAuthHeaders(reqHeaders, HttpMethod.PUT, bucketVersioningReqUri, credential);
+		enableBucketVersioning(nodeAddr, bucketVersioningReqUri, bucketCredential(bucketVersioningReqUri));
+	}
+
+	/**
+	 * Sends {@code PUT ?versioning} to enable a bucket's versioning, with the headers and credential
+	 * of the {@code GET ?versioning}, and logs what came of it. A failure, including a timeout, is a
+	 * warning, and the run goes on.
+	 *
+	 * @param credential the bucket's credential, or null for the driver's own
+	 */
+	protected void enableBucketVersioning(
+					final String nodeAddr, final String bucketVersioningReqUri, final Credential credential) {
+		final var bucketPath = bucketPathOf(bucketVersioningReqUri);
 		final var putBucketVersioningReq = (FullHttpRequest) new DefaultFullHttpRequest(
 						HttpVersion.HTTP_1_1,
 						HttpMethod.PUT,
 						bucketVersioningReqUri,
 						Unpooled.wrappedBuffer(S3Api.VERSIONING_ENABLE_CONTENT).retain(),
-						reqHeaders,
+						bucketVersioningHeaders(nodeAddr, HttpMethod.PUT, bucketVersioningReqUri,
+										S3Api.VERSIONING_ENABLE_CONTENT.length, credential),
 						EmptyHttpHeaders.INSTANCE);
 		final FullHttpResponse putBucketVersioningResp;
 		try {
 			putBucketVersioningResp = executeHttpRequest(putBucketVersioningReq);
-			if (!HttpStatusClass.SUCCESS.equals(putBucketVersioningResp.status().codeClass())) {
-				Loggers.ERR.warn(
-								"The bucket versioning setting response is: {}",
-								putBucketVersioningResp.status().toString());
-			}
-			putBucketVersioningResp.release();
 		} catch (final InterruptedException e) {
 			throwUnchecked(e);
+			return;
 		} catch (final ConnectException e) {
-			LogUtil.exception(Level.WARN, e, "Failed to connect to the storage node");
+			LogUtil.exception(Level.DEBUG, e, "{}: enabling the bucket {} versioning failed to connect", stepId, bucketPath);
+			BucketVersioningNotice.warn(stepId, versioningNotEnabled(bucketPath, "the connection failed"));
+			return;
 		}
+		if (putBucketVersioningResp == null) {
+			BucketVersioningNotice.warn(stepId, versioningNotEnabled(
+							bucketPath, "PUT ?versioning timed out after " + netTimeoutMilliSec + " ms"));
+			return;
+		}
+		try {
+			if (HttpStatusClass.SUCCESS.equals(putBucketVersioningResp.status().codeClass())) {
+				// A WARN (owner, 2026-11-15): the run changed the bucket, so it is reported at any level up to WARN.
+				BucketVersioningNotice.warn(stepId, bucketLabel(bucketPath)
+								+ ": versioning enabled by this run (the bucket had never been versioned)");
+			} else {
+				BucketVersioningNotice.warn(stepId, versioningNotEnabled(
+								bucketPath, "PUT ?versioning returned " + putBucketVersioningResp.status()));
+			}
+		} finally {
+			putBucketVersioningResp.release();
+		}
+	}
+
+	/**
+	 * What a {@code GET ?versioning} body says, read by a hardened namespace-aware parser: only a
+	 * {@code VersioningConfiguration} with no or an empty {@code Status} counts as never versioned.
+	 */
+	static VersioningConfigurationXmlHandler.State versioningState(final byte[] body) {
+		return VersioningConfigurationXmlHandler.read(body);
+	}
+
+	/** A status for a notice: on one line, at most {@value #MAX_QUOTED_STATUS} characters. */
+	static String quotedStatus(final String status) {
+		final var line = BucketVersioningNotice.oneLine(status).replaceAll("\\s+", " ");
+		return line.length() <= MAX_QUOTED_STATUS ? line : line.substring(0, MAX_QUOTED_STATUS) + "...";
+	}
+
+	private Credential bucketCredential(final String bucketVersioningReqUri) {
+		return pathToCredMap.getOrDefault(bucketPathOf(bucketVersioningReqUri), credential);
+	}
+
+	private static String bucketPathOf(final String bucketVersioningReqUri) {
+		final var query = bucketVersioningReqUri.indexOf('?');
+		return query < 0 ? bucketVersioningReqUri : bucketVersioningReqUri.substring(0, query);
+	}
+
+	private static String bucketLabel(final String bucketPath) {
+		return "bucket " + (bucketPath.startsWith(SLASH) ? bucketPath.substring(1) : bucketPath);
+	}
+
+	private static String versioningCheckFailed(final String bucketPath, final String cause) {
+		return bucketLabel(bucketPath) + ": could not read the versioning state (" + cause
+						+ "); SPT sent no request to enable it, and the run goes on un-versioned";
+	}
+
+	private static String versioningNotEnabled(final String bucketPath, final String cause) {
+		return bucketLabel(bucketPath) + ": could not enable versioning (" + cause + "); the run goes on un-versioned";
 	}
 
 	@Override
@@ -989,9 +1120,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 		final var target = deleteRequest.targets().get(0);
 		final var objectUri = standaloneObjectUri(deleteRequest.bucket(), target);
-		final var uri = target.versionId() == null
-						? objectUri
-						: objectUri + "?versionId=" + percentEncode(target.versionId());
+		final var encodedVersionId = target.versionId() == null ? null : encodeVersionId(target.versionId());
+		final var uri = encodedVersionId == null ? objectUri : objectUri + VERSION_ID_QUERY + encodedVersionId;
 		final HttpHeaders headers = new DefaultHttpHeaders();
 		if (nodeAddr != null) {
 			headers.set(HttpHeaderNames.HOST, nodeAddr);
@@ -999,7 +1129,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		headers.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 		applyDynamicHeaders(headers);
 		applySharedHeaders(headers);
-		applyAuthHeaders(headers, HttpMethod.DELETE, uri, deleteRequest.credential());
+		applyAuthHeaders(
+						headers,
+						HttpMethod.DELETE,
+						signedUri(uri, objectUri, target.versionId(), encodedVersionId),
+						deleteRequest.credential());
 		return new DefaultHttpRequest(HTTP_1_1, HttpMethod.DELETE, uri, headers);
 	}
 
@@ -1065,9 +1199,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	@Override
 	public Presence presence(final DeleteTarget target) {
 		final String objectUri = standaloneObjectUri(target.bucket(), target);
-		final String uri = target.versionId() == null
-						? objectUri
-						: objectUri + "?versionId=" + percentEncode(target.versionId());
+		final String encodedVersionId = target.versionId() == null ? null : encodeVersionId(target.versionId());
+		final String uri = encodedVersionId == null ? objectUri : objectUri + VERSION_ID_QUERY + encodedVersionId;
 		final HttpHeaders headers = new DefaultHttpHeaders();
 		final String nodeAddr = helperAuthority;
 		headers.set(HttpHeaderNames.HOST, nodeAddr);
@@ -1078,7 +1211,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		applyAuthHeaders(
 						headers,
 						HttpMethod.HEAD,
-						uri,
+						signedUri(uri, objectUri, target.versionId(), encodedVersionId),
 						pathToCredMap.getOrDefault(bucketPath, this.credential));
 		final FullHttpRequest request = new DefaultFullHttpRequest(
 						HTTP_1_1,
@@ -1230,10 +1363,12 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		uriBuilder.append(percentEncode(key)).append('=').append(percentEncode(value));
 	}
 
-	private static String canonicalizeQueryString(final String rawQuery) {
-		if (rawQuery == null || rawQuery.isEmpty()) {
-			return "";
-		}
+	/**
+	 * The V4 canonical form of a non-empty {@code rawQuery}: each pair decoded, encoded again and sorted.
+	 * {@link #getCanonicalV4} appends a query that {@link #isCanonicalSingleParameter} accepts as it is,
+	 * without calling this.
+	 */
+	private static String canonicalizeQueryParameters(final String rawQuery) {
 		final var parts = rawQuery.split("&", 0);
 		final List<String> canonicalComponents = new ArrayList<>(parts.length);
 		for (final var part : parts) {
@@ -1248,6 +1383,28 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 		Collections.sort(canonicalComponents);
 		return String.join("&", canonicalComponents);
+	}
+
+	/**
+	 * Whether {@code rawQuery} from {@code start} to its end is one {@code key=value} pair of unreserved
+	 * characters, such as {@code versionId=<an AWS version ID>}: decoding and encoding it again gives it
+	 * back, and one pair needs no sorting, so it is already canonical. The scan stops at the first other
+	 * character.
+	 */
+	private static boolean isCanonicalSingleParameter(final String rawQuery, final int start) {
+		int equalsIndex = -1;
+		for (int i = start; i < rawQuery.length(); i++) {
+			final char ch = rawQuery.charAt(i);
+			if (ch == '=') {
+				if (equalsIndex != -1) {
+					return false;
+				}
+				equalsIndex = i;
+			} else if (!isUnreserved(ch)) {
+				return false;
+			}
+		}
+		return equalsIndex > start;
 	}
 
 	private static String normalizeHeaderValue(final String value) {
@@ -1298,6 +1455,37 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			Loggers.MSG.debug("Failed to URL-decode component '{}': {}", value, ex.getMessage());
 			return value;
 		}
+	}
+
+	private static final String VERSION_ID_QUERY = "?versionId=";
+
+	/**
+	 * The {@code versionId} query value: {@code versionId} itself when every character is unreserved,
+	 * as in an AWS version ID, so the common case allocates nothing; otherwise its percent-encoding.
+	 */
+	private static String encodeVersionId(final String versionId) {
+		for (int i = 0; i < versionId.length(); i++) {
+			if (!isUnreserved(versionId.charAt(i))) {
+				return percentEncode(versionId);
+			}
+		}
+		return versionId;
+	}
+
+	/**
+	 * The URI to sign for {@code uri}, which is {@code objectUri?versionId=<encodedVersionId>} when
+	 * {@code encodedVersionId} is set. V2 signs a sub-resource value decoded, so it signs the version ID
+	 * itself; V4 and every other request sign {@code uri} as sent. Only these version-selecting
+	 * requests pay for it: no other request's signing changes.
+	 */
+	private String signedUri(
+					final String uri, final String objectUri, final String versionId, final String encodedVersionId) {
+		// Percent-encoding lengthens every character it changes, so an unchanged length means the
+		// version ID needed none, and the URI as sent is also its decoded form.
+		if (authVersion != 2 || encodedVersionId == null || encodedVersionId.length() == versionId.length()) {
+			return uri;
+		}
+		return objectUri + VERSION_ID_QUERY + versionId;
 	}
 
 	private static String percentEncode(final String value) {
@@ -1681,29 +1869,121 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		return httpRequest;
 	}
 
+	/**
+	 * Whether a response to {@code op} names its item {@code key~versionId}: true when {@link
+	 * #httpRequest} sends {@code op} through {@link #objectVersioningRequest} under the legacy
+	 * convention, which reads the version from the item name. The response handler then replaces the
+	 * trailing {@code ~versionId} with the returned one instead of appending a second suffix.
+	 */
+	final boolean namesLegacyVersion(final O op) {
+		return versioning
+						&& !taggingEnabled
+						&& !integrityMetadataEnabled()
+						&& op.requestedVersionId() == null
+						&& !(op instanceof DeleteRequestOperation)
+						&& !(op instanceof CompositeDataOperation)
+						&& !(op instanceof PartialDataOperation)
+						&& !(op instanceof ListOperation);
+	}
+
+	/**
+	 * {@code name} with its trailing {@code ~versionId}, if any, replaced by {@code ~versionId}: the
+	 * split {@link #objectVersioningRequest} makes, so a name never collects two suffixes.
+	 */
+	static String withLegacyVersion(final String name, final String versionId) {
+		final int indexOfVersionStart = name.lastIndexOf('~');
+		if (indexOfVersionStart == -1) {
+			return name + '~' + versionId;
+		}
+		if (name.length() - indexOfVersionStart - 1 == versionId.length() && name.endsWith(versionId)) {
+			// Already key~versionId, as after a versioned READ or STAT of the version the response names.
+			return name;
+		}
+		return name.substring(0, indexOfVersionStart) + '~' + versionId;
+	}
+
 	HttpRequest objectVersioningRequest(final O op, final String nodeAddr) throws URISyntaxException {
-		final var srcPath = op.srcPath();
 		final var item = (I) op.item();
+		if (integrityMetadataEnabled() || op.requestedVersionId() != null) {
+			return objectVersioningRequest(op, item, op.requestedVersionId(), true, nodeAddr);
+		}
+		// The legacy key~version convention, only for ordinary mode. The item is never renamed: the
+		// channel owns the operation while the request is built, so a completion (an idle timeout) or a
+		// retry that reads the item meanwhile sees the name that selects the version. The paths are built
+		// by dataUriPath from the whole name, and the ~versionId it ends with is taken off.
+		final String name = item.name();
+		final int indexOfVersionStart = name.lastIndexOf('~');
+		return objectVersioningRequest(
+						op, item, indexOfVersionStart == -1 ? null : name.substring(indexOfVersionStart + 1), false, nodeAddr);
+	}
+
+	/**
+	 * {@code uriPath}, which {@link #dataUriPath} built from a {@code key~versionId} item name, without
+	 * that trailing {@code ~versionId}: the path of the key, as {@code dataUriPath} gives it for an item
+	 * named {@code key}. The base {@code dataUriPath} puts the name last, so does an override that only
+	 * changes what comes before it. An override whose path does not end with the suffix has rewritten
+	 * the name itself; the key's path can't be known without renaming the item, so the request is not
+	 * built and the operation fails at once with {@code FAIL_UNKNOWN}, rather than acting on another
+	 * object.
+	 */
+	static String withoutVersionSuffix(final String uriPath, final String versionId) {
+		return uriPath.substring(0, versionSuffixStart(uriPath, versionId));
+	}
+
+	/**
+	 * The index of the {@code ~} that starts {@code uriPath}'s trailing {@code ~versionId}, where {@link
+	 * #withoutVersionSuffix} cuts it; it throws the same {@link RejectedRequestException} when there is
+	 * none.
+	 */
+	private static int versionSuffixStart(final String uriPath, final String versionId) {
+		final int keyEnd = uriPath.length() - versionId.length() - 1;
+		if (keyEnd > 0 && uriPath.charAt(keyEnd) == '~' && uriPath.endsWith(versionId)) {
+			return keyEnd;
+		}
+		throw new RejectedRequestException(
+						"dataUriPath gave " + uriPath + ", which does not end with the item's ~" + versionId
+										+ ": the versioned request can't select the version");
+	}
+
+	private HttpRequest objectVersioningRequest(
+					final O op,
+					final I item,
+					final String versionId,
+					final boolean explicitVersionCarrier,
+					final String nodeAddr)
+					throws URISyntaxException {
+		final var srcPath = op.srcPath();
 		final var opType = op.type();
 		final HttpHeaders httpHeaders = new DefaultHttpHeaders();
-		final boolean explicitVersionCarrier = integrityMetadataEnabled() || op.requestedVersionId() != null;
-		String versionId = op.requestedVersionId();
-		if (!explicitVersionCarrier) {
-			// Retain the legacy key~version convention only for ordinary mode.
-			final int indexOfVersionStart = item.name().lastIndexOf('~');
-			if (indexOfVersionStart != -1) {
-				versionId = item.name().substring(indexOfVersionStart + 1);
-				item.name(item.name().substring(0, indexOfVersionStart));
-			}
-		}
 		httpHeaders.set(HttpHeaderNames.HOST, nodeAddr);
 		final var httpMethod = dataHttpMethod(opType);
-		final String objectUri = dataUriPath(item, srcPath, op.dstPath(), op.type());
+		final boolean legacyVersion = !explicitVersionCarrier && versionId != null;
+		final String itemUri = dataUriPath(item, srcPath, op.dstPath(), op.type());
+		final int keyEnd = legacyVersion ? versionSuffixStart(itemUri, versionId) : itemUri.length();
+		// GetObject and HeadObject (a READ, also with read-metadata-only, and a STAT) select a version
+		// with the versionId query; x-amz-version-id is a response header, which S3 ignores on a request.
 		final boolean useVersionQuery = versionId != null
-						&& (explicitVersionCarrier || OpType.DELETE.equals(opType));
-		final String uri = useVersionQuery
-						? objectUri + "?versionId=" + percentEncode(versionId)
-						: objectUri;
+						&& (explicitVersionCarrier
+										|| OpType.DELETE.equals(opType)
+										|| OpType.READ.equals(opType)
+										|| OpType.STAT.equals(opType));
+		final String encodedVersionId = useVersionQuery ? encodeVersionId(versionId) : null;
+		final String uri;
+		final String uriToSign;
+		if (!useVersionQuery) {
+			uri = legacyVersion ? itemUri.substring(0, keyEnd) : itemUri;
+			uriToSign = uri;
+		} else if (legacyVersion && encodedVersionId.length() == versionId.length()) {
+			// itemUri is <the key's path>~<versionId>, and the version ID needs no encoding (encoding
+			// lengthens what it changes), so the URI is itemUri with that ~ replaced by ?versionId=, built in
+			// one copy. Both signers sign it as sent.
+			uri = versionQueryUri(itemUri, keyEnd);
+			uriToSign = uri;
+		} else {
+			final String objectUri = legacyVersion ? itemUri.substring(0, keyEnd) : itemUri;
+			uri = objectUri + VERSION_ID_QUERY + encodedVersionId;
+			uriToSign = signedUri(uri, objectUri, versionId, encodedVersionId);
+		}
 		final var httpRequest = (HttpRequest) new DefaultHttpRequest(
 						HTTP_1_1, httpMethod, uri, httpHeaders);
 		switch (opType) {
@@ -1719,20 +1999,19 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 				}
 			} else {
-				applyCopyHeaders(httpHeaders, dataUriPath(item, srcPath, null, opType));
+				final String copySource = dataUriPath(item, srcPath, null, opType);
+				applyCopyHeaders(httpHeaders, legacyVersion ? withoutVersionSuffix(copySource, versionId) : copySource);
 				httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 			}
 			break;
 		case READ:
-			if (!explicitVersionCarrier && versionId != null) {
-				httpHeaders.set("x-amz-version-id", versionId);
-			}
 			httpHeaders.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 			if (op instanceof DataOperation) {
 				applyRangesHeaders(httpHeaders, (DataOperation) op);
 			}
 			break;
 		case UPDATE:
+			// S3 has no in-place update of a version; the header is kept as it was (out of scope).
 			if (!explicitVersionCarrier && versionId != null) {
 				httpHeaders.set("x-amz-version-id", versionId);
 			}
@@ -1752,8 +2031,24 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		applyMetaDataHeaders(httpHeaders, op);
 		applyDynamicHeaders(httpHeaders);
 		applySharedHeaders(httpHeaders);
-		applyAuthHeaders(httpHeaders, httpRequest.method(), uri, op.credential());
+		applyAuthHeaders(httpHeaders, httpRequest.method(), uriToSign, op.credential());
 		return httpRequest;
+	}
+
+	private static final ThreadLocal<StringBuilder> THR_LOC_VERSION_URI = ThreadLocal.withInitial(StringBuilder::new);
+
+	/**
+	 * {@code itemUri}, which ends with {@code ~versionId} from {@code keyEnd}, with that {@code ~}
+	 * replaced by {@code ?versionId=}: the same string as {@code itemUri.substring(0, keyEnd) +
+	 * VERSION_ID_QUERY + versionId}, without the key's path copied out first.
+	 */
+	private static String versionQueryUri(final String itemUri, final int keyEnd) {
+		final StringBuilder uri = THR_LOC_VERSION_URI.get();
+		uri.setLength(0);
+		return uri.append(itemUri, 0, keyEnd)
+						.append(VERSION_ID_QUERY)
+						.append(itemUri, keyEnd + 1, itemUri.length())
+						.toString();
 	}
 
 	FullHttpRequest objectTaggingRequest(final O op, final String nodeAddr) {
@@ -2074,6 +2369,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	@Override
 	public boolean supportsStandaloneDeleteRequests() {
 		return true;
+	}
+
+	/** The multipart completion error codes this driver's step has logged. */
+	S3ResponseHandler.CompletionErrorCodeLog completionErrorCodeLog() {
+		return completionErrorCodeLog;
 	}
 
 	private void scheduleFailedCompletionAbort(
@@ -2623,8 +2923,14 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 		buffCanonical.append('\n');
 		if (queryIndex != -1) {
-			final String canonicalQuery = canonicalizeQueryString(dstUriPath.substring(queryIndex + 1));
-			buffCanonical.append(canonicalQuery);
+			final int queryStart = queryIndex + 1;
+			if (isCanonicalSingleParameter(dstUriPath, queryStart)) {
+				// Already canonical: appended without copying it out first.
+				buffCanonical.append(dstUriPath, queryStart, dstUriPath.length());
+			} else if (queryStart < dstUriPath.length()) {
+				buffCanonical.append(canonicalizeQueryParameters(dstUriPath.substring(queryStart)));
+			}
+			// An empty query (the URI ends with ?) has an empty canonical form: nothing to append.
 		}
 		buffCanonical.append('\n');
 		for (final var header : S3Api.HEADERS_CANONICAL_V4) {
