@@ -343,6 +343,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	private final Set<CompletableFuture<Void>> multipartCleanupTasks = ConcurrentHashMap.newKeySet();
 	// One WARN for a multipart abort the kernel route could not connect; the rest go to DEBUG.
 	private final AtomicBoolean kernelRouteAbortWarned = new AtomicBoolean();
+	private final S3ResponseHandler.CompletionErrorCodeLog completionErrorCodeLog = new S3ResponseHandler.CompletionErrorCodeLog();
 	private final KernelRouteAborts<KernelRouteAbort> kernelRouteAborts = new KernelRouteAborts<>();
 	// Host of driver-built helper requests (bucket setup, listing, verification, abort).
 	private String helperAuthority;
@@ -2237,6 +2238,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	@Override
 	public boolean supportsStandaloneDeleteRequests() {
 		return true;
+	}
+
+	/** The multipart completion error codes this driver's step has logged. */
+	S3ResponseHandler.CompletionErrorCodeLog completionErrorCodeLog() {
+		return completionErrorCodeLog;
 	}
 
 	private void scheduleFailedCompletionAbort(
