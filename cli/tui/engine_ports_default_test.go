@@ -216,13 +216,14 @@ func defaultEngineCommands(t *testing.T) []string {
 }
 
 // wantDefaultEngineCommands is what 9b60d6dc generated for each engine on the default ports,
-// less the unused RMI object range the local worker published and the port check covered.
+// less the unused RMI object range the local worker published and the port check covered, and
+// with the API port a remote bridge entry publishes, which 9b60d6dc left out.
 var wantDefaultEngineCommands = []string{
 	`remote node host: docker run -d --name spt-node-<time>-worker1-example-com -e SPT_LOG_DIR=/tmp/spt-node-home --label spt.host=worker1.example.com --label spt.managed=true --label spt.role=node --network host ghcr.io/dell/storage-performance-tool --run-node=true --run-port=9999 --storage-driver-type=s3`,
 	`remote node bridge: docker run -d --name spt-node-<time>-worker1-example-com -e SPT_LOG_DIR=/tmp/spt-node-home --label spt.host=worker1.example.com --label spt.managed=true --label spt.role=node -p 9999:9999/tcp ghcr.io/dell/storage-performance-tool --run-node=true --run-port=9999 --storage-driver-type=s3`,
 	`remote worker: docker run -d --name spt-worker-<time>-worker1-example-com -e JAVA_OPTS=-Djava.rmi.server.hostname=10.0.0.10 -e JAVA_TOOL_OPTIONS=-Djava.rmi.server.hostname=10.0.0.10 -e SPT_LOG_DIR=/tmp/spt-node-home --label spt.host=worker1.example.com --label spt.managed=true --label spt.role=worker --network host ghcr.io/dell/storage-performance-tool --run-node=true --run-port=9999 --load-step-node-port=1099 --storage-driver-type=s3`,
 	`remote entry host: docker run -d --name spt-entry-<time>-worker1-example-com -e SPT_LOG_DIR=/tmp/spt-node-home --label spt.host=worker1.example.com --label spt.managed=true --label spt.role=entry --network host ghcr.io/dell/storage-performance-tool --load-step-node-addrs=10.0.0.11:1099,10.0.0.12:1099 --run-node=true --run-port=9999 --storage-driver-type=s3`,
-	`remote entry bridge: docker run -d --name spt-entry-<time>-worker1-example-com -e SPT_LOG_DIR=/tmp/spt-node-home --label spt.host=worker1.example.com --label spt.managed=true --label spt.role=entry ghcr.io/dell/storage-performance-tool --load-step-node-addrs=10.0.0.11:1099,10.0.0.12:1099 --run-node=true --run-port=9999 --storage-driver-type=s3`,
+	`remote entry bridge: docker run -d --name spt-entry-<time>-worker1-example-com -e SPT_LOG_DIR=/tmp/spt-node-home --label spt.host=worker1.example.com --label spt.managed=true --label spt.role=entry -p 9999:9999/tcp ghcr.io/dell/storage-performance-tool --load-step-node-addrs=10.0.0.11:1099,10.0.0.12:1099 --run-node=true --run-port=9999 --storage-driver-type=s3`,
 	`local node host: cmd=["--run-node=true" "--run-port=9999" "--storage-driver-type=s3"] exposed=[] bindings=[] network="host"`,
 	`local node bridge: cmd=["--run-node=true" "--run-port=9999" "--storage-driver-type=s3"] exposed=[9999/tcp] bindings=[9999/tcp->127.0.0.1:9999] network=""`,
 	`local worker: cmd=["--run-node=true" "--run-port=9999" "--storage-driver-type=s3"] exposed=[1099/tcp 9999/tcp] bindings=[1099/tcp->0.0.0.0:1099 9999/tcp->0.0.0.0:9999] network=""`,

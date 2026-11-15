@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/engineinfo"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
@@ -895,17 +896,30 @@ func TestWaitForReplayAutoResultsJoinsCoordinator(t *testing.T) {
 func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 	server := newReplayArchiveServer(t)
 	defer server.Close()
+	// acceptedForCleanup marks POST /run accepted without a trusted identity, so a workload may be
+	// running and the monitor still asks every host to shut down. A launch that fails before
+	// POST /run leaves the session never submitted, and the monitor asks no host.
 	tests := []struct {
-		name     string
-		hosts    string
-		headless bool
-		wantPath string
-		wantErr  error
+		name               string
+		hosts              string
+		headless           bool
+		wantPath           string
+		wantErr            error
+		acceptedForCleanup bool
+		// gateRejects runs the engine identity gate, which rejects a build mismatch before
+		// POST /run and leaves its identity manifest for the summary.
+		gateRejects bool
 	}{
-		{name: "local headless", hosts: "127.0.0.1", headless: true, wantPath: "local-headless", wantErr: errors.New("local headless failed")},
-		{name: "local tui", hosts: "127.0.0.1", wantPath: "local-tui", wantErr: errors.New("local tui failed")},
-		{name: "remote headless cancellation", hosts: "qa-entry.example", headless: true, wantPath: "remote-headless", wantErr: context.Canceled},
-		{name: "remote tui", hosts: "qa-entry.example", wantPath: "remote-tui", wantErr: errors.New("remote tui failed")},
+		{name: "local headless", hosts: "127.0.0.1", headless: true, wantPath: "local-headless", wantErr: errors.New("local headless failed"), acceptedForCleanup: true},
+		{name: "local tui", hosts: "127.0.0.1", wantPath: "local-tui", wantErr: errors.New("local tui failed"), acceptedForCleanup: true},
+		{name: "remote headless cancellation", hosts: "qa-entry.example", headless: true, wantPath: "remote-headless", wantErr: context.Canceled, acceptedForCleanup: true},
+		{name: "remote tui", hosts: "qa-entry.example", wantPath: "remote-tui", wantErr: errors.New("remote tui failed"), acceptedForCleanup: true},
+		{name: "local headless never submitted", hosts: "127.0.0.1", headless: true, wantPath: "local-headless", wantErr: errors.New("local headless failed")},
+		{name: "local tui never submitted", hosts: "127.0.0.1", wantPath: "local-tui", wantErr: errors.New("local tui failed")},
+		{name: "remote headless cancellation never submitted", hosts: "qa-entry.example", headless: true, wantPath: "remote-headless", wantErr: context.Canceled},
+		{name: "remote tui never submitted", hosts: "qa-entry.example", wantPath: "remote-tui", wantErr: errors.New("remote tui failed")},
+		{name: "local headless gate rejects", hosts: "127.0.0.1", headless: true, wantPath: "local-headless", gateRejects: true},
+		{name: "remote tui gate rejects", hosts: "qa-entry.example", wantPath: "remote-tui", gateRejects: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -955,6 +969,37 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 				shutdownRequests = append(shutdownRequests, request)
 				return nil
 			}
+			origEvaluate := evaluateEngineIdentityGate
+			origLocalPlan := replayLocalEnginePlan
+			origDistributedPlan := replayDistributedEnginePlan
+			t.Cleanup(func() {
+				evaluateEngineIdentityGate = origEvaluate
+				replayLocalEnginePlan = origLocalPlan
+				replayDistributedEnginePlan = origDistributedPlan
+			})
+			replayLocalEnginePlan = func(string) ([]engineinfo.ParticipantDescriptor, error) { return nil, nil }
+			replayDistributedEnginePlan = func(*tui.MultiHostOrchestrator, string, bool) ([]engineinfo.ParticipantDescriptor, error) {
+				return nil, nil
+			}
+			evaluateEngineIdentityGate = func(
+				ctx context.Context, _ engineinfo.FleetCollector, descriptors []engineinfo.ParticipantDescriptor, force bool,
+			) (engineinfo.GateOutcome, error) {
+				return engineinfo.EvaluateGate(ctx, fixedFleetCollector{
+					fleet: runGateFleet(engineinfo.ConsistencyMismatch, engineinfo.StatusCollected),
+				}, descriptors, force)
+			}
+			monitorReady := awaitMonitorSetup(t)
+			failLaunch := func(ctx context.Context, hooks tui.LaunchHooks) error {
+				monitorReady()
+				if test.gateRejects {
+					_, err := hooks.RunPreSubmissionCheck(ctx)
+					return err
+				}
+				if test.acceptedForCleanup {
+					hooks.NotifyAcceptedForCleanup()
+				}
+				return test.wantErr
+			}
 			var pathCalls atomic.Int32
 			var sessionManagedCalls atomic.Int32
 			startReplayRemoteHeadless = func(
@@ -969,7 +1014,7 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 						sessionManagedCalls.Add(1)
 					}
 				}
-				return test.wantErr
+				return failLaunch(options.Context, options.LaunchHooks)
 			}
 			startReplayRemoteTUI = func(
 				_ *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params, options tui.RunOptions,
@@ -983,7 +1028,7 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 						sessionManagedCalls.Add(1)
 					}
 				}
-				return test.wantErr
+				return failLaunch(options.Context, options.LaunchHooks)
 			}
 			startReplayLocalHeadless = func(
 				_ string, _ string, _ scenario.Params, options headless.HeadlessOptions, _ []byte, _ []byte,
@@ -997,7 +1042,7 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 						sessionManagedCalls.Add(1)
 					}
 				}
-				return test.wantErr
+				return failLaunch(options.Context, options.LaunchHooks)
 			}
 			startReplayLocalTUI = func(_ string, _ string, _ scenario.Params, options tui.RunOptions) error {
 				if test.wantPath == "local-tui" {
@@ -1009,15 +1054,17 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 						sessionManagedCalls.Add(1)
 					}
 				}
-				return test.wantErr
+				return failLaunch(options.Context, options.LaunchHooks)
 			}
 
 			cmd := newReplayCommandForTest(t)
-			cmd.SetOut(io.Discard)
+			resultsDir := t.TempDir()
+			output := &lockedBuffer{}
+			cmd.SetOut(output)
 			cmd.SetErr(io.Discard)
 			args := []string{
 				"--from", server.URL, "--endpoints", "http://s3.example",
-				"--test-hosts", test.hosts, "--results-dir", t.TempDir(), "--verbose",
+				"--test-hosts", test.hosts, "--results-dir", resultsDir, "--verbose",
 			}
 			if test.headless {
 				args = append(args, "--headless")
@@ -1025,7 +1072,11 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 			cmd.SetArgs(args)
 			started := time.Now()
 			err := cmd.Execute()
-			if !errors.Is(err, test.wantErr) {
+			if test.gateRejects {
+				if err == nil || !strings.Contains(err.Error(), "mismatch rejected") {
+					t.Fatalf("Execute() error = %v, want the gate rejection", err)
+				}
+			} else if !errors.Is(err, test.wantErr) {
 				t.Fatalf("Execute() error = %v, want %v", err, test.wantErr)
 			}
 			if pathCalls.Load() != 1 || time.Since(started) > 2*time.Second {
@@ -1036,6 +1087,17 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 			}
 			shutdownMu.Lock()
 			defer shutdownMu.Unlock()
+			if !test.acceptedForCleanup {
+				if len(shutdownRequests) != 0 {
+					t.Fatalf("shutdown requests = %+v, want none after a launch that was never submitted", shutdownRequests)
+				}
+				if test.gateRejects {
+					assertRejectedRunSummary(t, resultsDir, output.String())
+					return
+				}
+				assertNeverSubmittedCleanupOutput(t, output.String())
+				return
+			}
 			if len(shutdownRequests) != 1 {
 				t.Fatalf("shutdown requests = %+v, want exactly one", shutdownRequests)
 			}
