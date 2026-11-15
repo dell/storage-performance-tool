@@ -67,7 +67,7 @@ public class WeightedLoadStepClient extends LoadStepClientBase<WeightedLoadStepC
 				subConfig = new BasicConfig(config.pathSep(), config.schema(), mergedConfigTree);
 			} catch (final InvalidValueTypeException | InvalidValuePathException e) {
 				LogUtil.exception(Level.FATAL, e, "Scenario syntax error");
-				throw new ScenarioConfigurationException(e);
+				throw new ScenarioConfigurationException(e, config);
 			}
 			final OpType opType = OpType.valueOf(subConfig.stringVal("load-op-type").toUpperCase(Locale.ROOT));
 			final int concurrencyLimit = config.intVal("storage-driver-limit-concurrency");

@@ -20,6 +20,8 @@ import java.util.concurrent.TimeUnit;
 import javax.script.ScriptEngine;
 import javax.script.ScriptEngineManager;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * A node reports a scenario that fails without a typed terminal failure as {@code FAILED}, with a
@@ -66,14 +68,67 @@ class NodeScenarioFailureStatusTest {
 	void aRefusedBooleanIsAConfigurationFailure() {
 		final var status = runOnNode("Load.config({load: {op: {shuffle: \"yes\"}}}).run();");
 		assertFailed(status, Category.CONFIGURATION);
-		assertEquals("load-op-shuffle: \"yes\" is not true or false", status.failureMessage());
+		assertEquals("invalid boolean value for \"load-op-shuffle\"; give true or false", status.failureMessage());
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = {"MARKER", "\\\"MARKER\\\"", "line one\\nMARKER\\nline three", "MARKER\\\"; x: \\\"MARKER"
+	})
+	void aRefusedBooleanValueIsNeverPublished(final String value) {
+		final var status = runOnNode(
+						"Load.config({load: {op: {shuffle: \"" + value.replace("MARKER", MARKER) + "\"}}}).run();");
+		assertFailed(status, Category.CONFIGURATION);
+		assertEquals("invalid boolean value for \"load-op-shuffle\"; give true or false", status.failureMessage());
+		assertNoMarker(status);
 	}
 
 	@Test
-	void anUnknownOptionIsAConfigurationFailure() {
+	void aLongMultilineBooleanValueIsNeverPublished() {
+		// The marker leads, so that the 1024-character cap alone would not hide it
+		final var value = "\\\"" + MARKER + "\\n" + "x".repeat(1500) + "\\n" + MARKER + "\\\"";
+		final var status = runOnNode("Load.append({load: {op: {recycle: {mode: \"" + value + "\"}}}}).run();");
+		assertFailed(status, Category.CONFIGURATION);
+		assertEquals("invalid boolean value for \"load-op-recycle-mode\"; give true or false", status.failureMessage());
+		assertNoMarker(status);
+	}
+
+	@Test
+	void anUnknownOptionIsNamedByItsDefinedPrefix() {
 		final var status = runOnNode("Load.config({load: {op: {noSuchOption: 1}}}).run();");
 		assertFailed(status, Category.CONFIGURATION);
-		assertEquals("invalid configuration option \"load-op-noSuchOption\"", status.failureMessage());
+		assertEquals("invalid configuration option under \"load-op\"", status.failureMessage());
+	}
+
+	@Test
+	void aMalformedOptionIsNamedWithoutItsValue() {
+		final var status = runOnNode("Load.config({load: {op: \"" + MARKER + "\"}}).run();");
+		assertFailed(status, Category.CONFIGURATION);
+		assertEquals("invalid value for configuration option \"load-op\"", status.failureMessage());
+		assertNoMarker(status);
+	}
+
+	@Test
+	void anUnknownKeyUnderARealPrefixIsNeverPublished() {
+		final var status = runOnNode("var o = {}; o[\"" + MARKER + "\"] = 1; Load.config({load: {op: o}}).run();");
+		assertFailed(status, Category.CONFIGURATION);
+		assertEquals("invalid configuration option under \"load-op\"", status.failureMessage());
+		assertNoMarker(status);
+	}
+
+	@Test
+	void anUnknownTopLevelKeyIsNeverPublished() {
+		final var status = runOnNode("var o = {}; o[\"" + MARKER + "\"] = {deeper: 1}; Load.config(o).run();");
+		assertFailed(status, Category.CONFIGURATION);
+		assertEquals("invalid configuration option", status.failureMessage());
+		assertNoMarker(status);
+	}
+
+	@Test
+	void anUnknownKeyWithTheSeparatorIsNeverPublished() {
+		final var status = runOnNode("Load.config({load: {\"op-" + MARKER + "\": 1}}).run();");
+		assertFailed(status, Category.CONFIGURATION);
+		assertEquals("invalid configuration option under \"load-op\"", status.failureMessage());
+		assertNoMarker(status);
 	}
 
 	@Test
@@ -88,7 +143,7 @@ class NodeScenarioFailureStatusTest {
 	void aBadAppendIsAConfigurationFailure() {
 		final var status = runOnNode("Load.append({load: {op: {recycle: {mode: \"yes\"}}}}).run();");
 		assertFailed(status, Category.CONFIGURATION);
-		assertEquals("load-op-recycle-mode: \"yes\" is not true or false", status.failureMessage());
+		assertEquals("invalid boolean value for \"load-op-recycle-mode\"; give true or false", status.failureMessage());
 	}
 
 	@Test

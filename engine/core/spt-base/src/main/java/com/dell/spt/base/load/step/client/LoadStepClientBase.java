@@ -3097,7 +3097,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			EngineBuildInfoProvider.global().projectVersion(configCopy, aliasedArgs.containsKey("run-version"));
 		} catch (final Exception e) {
 			LogUtil.exception(Level.FATAL, e, "Scenario syntax error");
-			throw new ScenarioConfigurationException(e);
+			throw new ScenarioConfigurationException(e, config);
 		}
 		return copyInstance(configCopy, null);
 	}
@@ -3123,7 +3123,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			EngineBuildInfoProvider.global().projectVersion(ctxConfig, aliasedArgs.containsKey("run-version"));
 		} catch (final Exception e) {
 			LogUtil.exception(Level.FATAL, e, "Scenario syntax error");
-			throw new ScenarioConfigurationException(e);
+			throw new ScenarioConfigurationException(e, config);
 		}
 		ctxConfigsCopy.add(ctxConfig);
 		return copyInstance(config, ctxConfigsCopy);

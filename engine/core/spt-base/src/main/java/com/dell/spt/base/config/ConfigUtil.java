@@ -307,6 +307,30 @@ public interface ConfigUtil {
 		return settingType(schema, path, sep) instanceof Class<?> type && List.class.isAssignableFrom(type);
 	}
 
+	/**
+	 * Returns the longest leading part of the path that the schema defines, joined with the separator,
+	 * or {@code null} when not even its first part is defined. The parts returned are the schema's own
+	 * keys, so they never carry text the path's author made up.
+	 */
+	static String definedPrefix(final Map<String, Object> schema, final String path, final String sep) {
+		if (schema == null || path == null || sep == null || sep.isEmpty()) {
+			return null;
+		}
+		Object node = schema;
+		final var prefix = new StringBuilder();
+		for (final var part : path.split(Pattern.quote(sep), -1)) {
+			if (!(node instanceof Map<?, ?> branch) || !branch.containsKey(part)) {
+				break;
+			}
+			if (prefix.length() > 0) {
+				prefix.append(sep);
+			}
+			prefix.append(part);
+			node = branch.get(part);
+		}
+		return prefix.length() == 0 ? null : prefix.toString();
+	}
+
 	/** Returns whether the schema types the setting at the path as a boolean. */
 	static boolean isBooleanSetting(final Map<String, Object> schema, final String path, final String sep) {
 		return isBooleanType(settingType(schema, path, sep));
@@ -390,7 +414,7 @@ public interface ConfigUtil {
 	}
 
 	private static InvalidBooleanValueException notTrueOrFalse(final String path, final String value) {
-		return new InvalidBooleanValueException(path + ": \"" + value + "\" is not true or false");
+		return new InvalidBooleanValueException(path, path + ": \"" + value + "\" is not true or false");
 	}
 
 	/**
