@@ -1835,6 +1835,32 @@ func validatePortFlag(flag string, port int) error {
 	return nil
 }
 
+// normalizeAPIPortFlag checks --api-port and returns it. An unset flag is the Spt standard port.
+// A set value must be plain decimal digits, after trimming, from 1 to 65535: a sign, an inner space
+// or any other character is refused, so a value such as +20041 cannot reach the engine and the API
+// URLs in two different forms. The canonical decimal is written back to the flag, so every later
+// reader (getAPIPort, the port check, each route and the run metadata) sees 9999 for 09999.
+func normalizeAPIPortFlag(cmd *cobra.Command) (int, error) {
+	raw, _ := cmd.Flags().GetString(flagAPIPort)
+	if raw == "" {
+		return constants.DefaultSptAPIPort, nil
+	}
+	value := strings.TrimSpace(raw)
+	if value == "" || strings.TrimLeft(value, "0123456789") != "" {
+		return 0, fmt.Errorf("--%s must be between 1 and 65535, got %q", flagAPIPort, raw)
+	}
+	port, err := strconv.Atoi(value)
+	if err != nil || port < 1 || port > 65535 {
+		return 0, fmt.Errorf("--%s must be between 1 and 65535, got %s", flagAPIPort, value)
+	}
+	if canonical := strconv.Itoa(port); canonical != raw {
+		if err := cmd.Flags().Set(flagAPIPort, canonical); err != nil {
+			return 0, err
+		}
+	}
+	return port, nil
+}
+
 // validateDistinctEnginePorts refuses an API port equal to the RMI registry port. Every engine
 // serves both, so its second bind would fail and the run would end on a readiness timeout.
 func validateDistinctEnginePorts(apiPort, registryPort int) error {
@@ -2825,11 +2851,12 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 		if err := validatePortFlag(flagRMIRegistryPort, registryPort); err != nil {
 			return scenario.Params{}, err
 		}
-		// An API port that is not a number is left to the checks that report it.
-		if apiPort, err := strconv.Atoi(strings.TrimSpace(apiPortFlag(cmd))); err == nil {
-			if err := validateDistinctEnginePorts(apiPort, registryPort); err != nil {
-				return scenario.Params{}, err
-			}
+		apiPort, err := normalizeAPIPortFlag(cmd)
+		if err != nil {
+			return scenario.Params{}, err
+		}
+		if err := validateDistinctEnginePorts(apiPort, registryPort); err != nil {
+			return scenario.Params{}, err
 		}
 		// The default leaves the engine command line unchanged.
 		if registryPort != constants.DefaultRMIRegistryPort {
