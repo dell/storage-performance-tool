@@ -132,6 +132,10 @@ type autoResultsOutcome struct {
 	// showed, on a run without --allow-empty-selection: its corruption count is unknown, so only an
 	// empty selection proven by finalization may pass it, and no count is taken from its files.
 	LiveCorruptionUnobserved bool
+	// ProducerRecovered marks a LIST or CREATE step that the live step list never showed and whose
+	// files were fetched because the tracker says it completed. Such a run passes a non-empty
+	// selection only when every selected object verified.
+	ProducerRecovered bool
 }
 
 type postRunBudgets struct {
@@ -951,7 +955,8 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 						artifactsReady = false
 					} else {
 						observedRuntimeRoles = binding.Roles
-						fetchStepIDs = stepsToFetch(stepIDs, plan, binding.Roles, outcome.Tracker)
+						fetchStepIDs, outcome.ProducerRecovered = stepsToFetch(
+							stepIDs, plan, binding.Roles, outcome.Tracker)
 						readUnseen = len(runtimeStepIDs) > 0 && binding.Roles.Read == "" &&
 							stepRoleLifecycle(outcome.Tracker, "", plannedRoles.Read) == portcheck.StepLifecycleCompleted
 					}
@@ -1191,21 +1196,38 @@ func verifierMayBeMissing(plan integrityplan.Plan, readLifecycle portcheck.StepL
 // stepsToFetch adds each planned producer or READ step that the tracker says completed but the live
 // step list never showed: a short step, such as one with nothing to list or read, can end between two
 // polls of the live metrics, and its files are still there. A step that isn't known to have completed
-// is not reported as a step of this run.
+// is not reported as a step of this run. Each added step goes before the first step with a later
+// ordinal, so the list keeps the plan's order. It also reports whether the producer was added.
 func stepsToFetch(
 	stepIDs []string, plan integrityplan.Plan, observed integrity.StepRoles, tracker *portcheck.RunResult,
-) []string {
-	fetch := stepIDs
-	add := func(step *integrityplan.PlannedStep, observedID string) {
+) (fetch []string, producerAdded bool) {
+	fetch = stepIDs
+	ordinal := func(stepID string) (int, bool) {
+		for _, step := range []*integrityplan.PlannedStep{plan.Producer, &plan.Verifier, plan.Cleanup} {
+			if step != nil && step.ID == stepID {
+				return step.Number, true
+			}
+		}
+		return integrityplan.RuntimeStepNumber(stepID)
+	}
+	add := func(step *integrityplan.PlannedStep, observedID string) bool {
 		if step == nil || step.ID == "" || observedID != "" || slices.Contains(fetch, step.ID) ||
 			stepRoleLifecycle(tracker, "", step.ID) != portcheck.StepLifecycleCompleted {
-			return
+			return false
 		}
-		fetch = append(slices.Clone(fetch), step.ID)
+		at := len(fetch)
+		for i, stepID := range fetch {
+			if number, ok := ordinal(stepID); ok && number > step.Number {
+				at = i
+				break
+			}
+		}
+		fetch = slices.Insert(slices.Clone(fetch), at, step.ID)
+		return true
 	}
-	add(plan.Producer, observed.Create+observed.List)
+	producerAdded = add(plan.Producer, observed.Create+observed.List)
 	add(&plan.Verifier, observed.Read)
-	return fetch
+	return fetch, producerAdded
 }
 
 // dropLiveCorruptionErrorOfEmptySelection forgives a missing live corruption count when finalization
@@ -1404,6 +1426,13 @@ func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, recei
 
 		if !outcome.Finalization.Complete {
 			reasons = append(reasons, "integrity result finalization is incomplete")
+		}
+		if final := outcome.Finalization; outcome.ProducerRecovered && final.Complete &&
+			!final.VerificationDeferred && !final.EmptySelection &&
+			(final.VerifiedCount != final.SelectionCount || final.RemainingCount != 0) {
+			reasons = append(reasons, fmt.Sprintf(
+				"verification verified %d of %d selected objects; %d remain unverified",
+				final.VerifiedCount, final.SelectionCount, final.RemainingCount))
 		}
 		if outcome.Finalization.EmptySelection && !outcome.Finalization.EmptyAllowed {
 			if params.WorkloadType == workload.ReadVerify {

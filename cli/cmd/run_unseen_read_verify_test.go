@@ -55,6 +55,7 @@ type unseenReadRun struct {
 	producerLifecycle portcheck.StepLifecycle // the tracker's LIST or CREATE lifecycle; empty means completed
 	selected          int                     // objects the producer selected
 	corrupt           int                     // corrupt READs recorded in the READ step's files
+	readFailures      int                     // READs that failed with an ordinary error, not corruption
 	liveReadRow       bool                    // live metrics still hold the READ row, with corrupt as its count
 }
 
@@ -239,13 +240,13 @@ func writeUnseenReadStepFiles(root string, stepIDs []string, run unseenReadRun) 
 				}),
 				writeUnseenCSV(filepath.Join(root, step+"."+integrity.IntegrityPerformanceName), [][]string{performanceHeader}))
 		case unseenReadStep, unseenSoleReadStep:
-			verified := run.selected - run.corrupt
+			verified := run.selected - run.corrupt - run.readFailures
 			failures := [][]string{{
 				"timestamp", "node", "step", "driver", "key", "requested_version_id", "returned_version_id",
 				"request_id", "reason", "algorithm", "expected_digest", "actual_digest", "expected_size",
 				"actual_size", "first_mismatch_offset", "attempt",
 			}}
-			for i := verified; i < run.selected; i++ {
+			for i := verified + run.readFailures; i < run.selected; i++ {
 				failures = append(failures, []string{
 					"2026-11-14T10:00:00Z", "n0", step, "s3", fmt.Sprintf("k%03d", i), "", "", "",
 					"digest_mismatch", "sha256", "aa", "bb", "1", "1", "0", "1",
@@ -255,7 +256,7 @@ func writeUnseenReadStepFiles(root string, stepIDs []string, run unseenReadRun) 
 				writeUnseenCommittedPair(root, step, integrity.VerifiedName, unseenManifestRows(verified)),
 				writeUnseenCSV(filepath.Join(root, step+".metrics.total.csv"), [][]string{
 					{"OpType", "CountSucc", "CountFail", "CountCorrupt"},
-					{"READ", fmt.Sprint(verified), fmt.Sprint(run.corrupt), fmt.Sprint(run.corrupt)},
+					{"READ", fmt.Sprint(verified), fmt.Sprint(run.corrupt + run.readFailures), fmt.Sprint(run.corrupt)},
 				}),
 				writeUnseenCSV(filepath.Join(root, step+"."+integrity.IntegrityFailuresName), failures),
 				writeUnseenCSV(filepath.Join(root, step+"."+integrity.IntegrityPerformanceName), [][]string{performanceHeader}))
@@ -398,7 +399,7 @@ func TestReadVerifyUnseenCompletedListOfAnEmptySelectionReportsZeroObjects(t *te
 				readLifecycle: portcheck.StepLifecycleCompleted,
 			})
 
-			if want := []string{unseenReadStep, unseenListStep}; !slices.Equal(got.fetched, want) {
+			if want := []string{unseenListStep, unseenReadStep}; !slices.Equal(got.fetched, want) {
 				t.Fatalf("fetched %v, want %v", got.fetched, want)
 			}
 			if allowEmpty {
@@ -527,14 +528,23 @@ func TestReadVerifyUnseenReadNotKnownToHaveCompletedIsNotReported(t *testing.T) 
 
 // An unseen producer the tracker does not say completed is not fetched either.
 func TestReadVerifyUnseenListNotKnownToHaveCompletedIsNotFetched(t *testing.T) {
-	got := runUnseenRead(t, unseenReadRun{
-		observed: []string{unseenReadStep}, readLifecycle: portcheck.StepLifecycleCompleted,
-		producerLifecycle: portcheck.StepLifecycleStarted,
-	})
-	if want := []string{unseenReadStep}; !slices.Equal(got.fetched, want) {
-		t.Fatalf("fetched %v, want %v", got.fetched, want)
+	for _, lifecycle := range []portcheck.StepLifecycle{
+		portcheck.StepLifecycleStarted, portcheck.StepLifecycleFailed, portcheck.StepLifecyclePlanned,
+	} {
+		t.Run(string(lifecycle), func(t *testing.T) {
+			got := runUnseenRead(t, unseenReadRun{
+				observed: []string{unseenReadStep}, readLifecycle: portcheck.StepLifecycleCompleted,
+				producerLifecycle: lifecycle,
+			})
+			if want := []string{unseenReadStep}; !slices.Equal(got.fetched, want) {
+				t.Fatalf("fetched %v, want %v", got.fetched, want)
+			}
+			requireExitCode(t, got.err, constants.ExitCodeWorkloadFailure)
+			if got.outcome.ProducerRecovered {
+				t.Fatal("a producer not known to have completed was recovered")
+			}
+		})
 	}
-	requireExitCode(t, got.err, constants.ExitCodeWorkloadFailure)
 }
 
 // --allow-empty-selection keeps its handling of an unseen READ.
@@ -561,8 +571,9 @@ func TestReadVerifyUnseenCompletedReadWithAllowEmptySelectionIsUnchanged(t *test
 }
 
 // A missed producer of a non-empty selection whose READ was seen, with its live count, now finalizes
-// from the producer's files: a clean selection passes and a corrupt one exits 20. Without those files
-// the run used to fail with a missing metrics file.
+// from the producer's files. A clean, fully verified selection passes, where the missing producer
+// files used to fail it with exit 1. A corrupt one exits 20, as it already did; only the secondary
+// finalization error about the producer's files goes away.
 func TestVerificationUnseenCompletedProducerOfANonEmptySelectionFinalizes(t *testing.T) {
 	for _, kind := range []unseenPlanKind{unseenReadDiscovered, unseenWriteRead} {
 		for _, corrupt := range []int{0, 1} {
@@ -575,7 +586,7 @@ func TestVerificationUnseenCompletedProducerOfANonEmptySelectionFinalizes(t *tes
 				run.observed = []string{read}
 				got := runUnseenRead(t, run)
 
-				if want := []string{read, producer}; !slices.Equal(got.fetched, want) {
+				if want := []string{producer, read}; !slices.Equal(got.fetched, want) {
 					t.Fatalf("fetched %v, want %v", got.fetched, want)
 				}
 				if corrupt == 0 {
@@ -585,6 +596,35 @@ func TestVerificationUnseenCompletedProducerOfANonEmptySelectionFinalizes(t *tes
 					return
 				}
 				requireExitCode(t, got.err, constants.ExitCodeIntegrityCorruption)
+			})
+		}
+	}
+}
+
+// A recovered producer must not let a selection pass when ordinary READ failures, which are not
+// corruption, left some selected objects unverified.
+func TestVerificationRecoveredProducerRequiresEveryObjectVerified(t *testing.T) {
+	for _, kind := range []unseenPlanKind{unseenReadDiscovered, unseenWriteRead} {
+		for _, verified := range []int{0, 2} {
+			t.Run(fmt.Sprintf("kind=%d/verified=%d", kind, verified), func(t *testing.T) {
+				run := unseenReadRun{
+					kind: kind, readLifecycle: portcheck.StepLifecycleCompleted, selected: 3,
+					readFailures: 3 - verified, liveReadRow: true,
+				}
+				producer, read := run.steps()
+				run.observed = []string{read}
+				got := runUnseenRead(t, run)
+
+				requireExitCode(t, got.err, constants.ExitCodeWorkloadFailure)
+				requireReasons(t, got.err, []string{fmt.Sprintf(
+					"verification verified %d of 3 selected objects; %d remain unverified", verified, 3-verified)},
+					[]string{"corrupt object"})
+				if want := []string{producer, read}; !slices.Equal(got.fetched, want) {
+					t.Fatalf("fetched %v, want %v", got.fetched, want)
+				}
+				if !got.outcome.ProducerRecovered {
+					t.Fatal("the missed producer was not marked recovered")
+				}
 			})
 		}
 	}

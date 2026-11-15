@@ -95,8 +95,8 @@ func TestStepsToFetchAddsOnlyUnseenCompletedPlannedSteps(t *testing.T) {
 	plan := func(allowEmpty bool) integrityplan.Plan {
 		return integrityplan.Plan{
 			AllowEmpty: allowEmpty,
-			Producer:   &integrityplan.PlannedStep{ID: list, Role: integrityplan.StepRoleList},
-			Verifier:   integrityplan.PlannedStep{ID: read},
+			Producer:   &integrityplan.PlannedStep{ID: list, Number: 1, Role: integrityplan.StepRoleList},
+			Verifier:   integrityplan.PlannedStep{ID: read, Number: 2},
 		}
 	}
 	tracker := func(listLifecycle, readLifecycle portcheck.StepLifecycle) *portcheck.RunResult {
@@ -118,7 +118,7 @@ func TestStepsToFetchAddsOnlyUnseenCompletedPlannedSteps(t *testing.T) {
 		{"READ unseen", plan(false), []string{list}, integrity.StepRoles{List: list},
 			tracker(completed, completed), []string{list, read}},
 		{"LIST unseen", plan(false), []string{read}, integrity.StepRoles{Read: read},
-			tracker(completed, completed), []string{read, list}},
+			tracker(completed, completed), []string{list, read}},
 		{"both seen", plan(false), []string{list, read}, integrity.StepRoles{List: list, Read: read},
 			tracker(completed, completed), []string{list, read}},
 		{"READ never started", plan(false), []string{list}, integrity.StepRoles{List: list},
@@ -136,14 +136,53 @@ func TestStepsToFetchAddsOnlyUnseenCompletedPlannedSteps(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			seen := slices.Clone(test.seen)
-			got := stepsToFetch(seen, test.plan, test.observed, test.tracker)
+			got, producerAdded := stepsToFetch(seen, test.plan, test.observed, test.tracker)
 			if !slices.Equal(got, test.want) {
 				t.Fatalf("stepsToFetch() = %v, want %v", got, test.want)
+			}
+			if want := !slices.Contains(test.seen, list) && slices.Contains(test.want, list); producerAdded != want {
+				t.Fatalf("producer added = %t, want %t", producerAdded, want)
 			}
 			if !slices.Equal(seen, test.seen) {
 				t.Fatalf("stepsToFetch() changed its input to %v", seen)
 			}
 		})
+	}
+}
+
+// Missed steps go back in the plan's order, around runtime IDs whose timestamps differ from the plan.
+func TestStepsToFetchKeepsThePlanOrder(t *testing.T) {
+	create, read, cleanup := "mt-001-x-create", "mt-002-x-verify", "mt-003-x-delete"
+	plan := integrityplan.Plan{
+		Producer: &integrityplan.PlannedStep{ID: create, Number: 1, Role: integrityplan.StepRoleCreate},
+		Verifier: integrityplan.PlannedStep{ID: read, Number: 2},
+		Cleanup:  &integrityplan.PlannedStep{ID: cleanup, Number: 3, Role: integrityplan.StepRoleCleanup},
+	}
+	completed := portcheck.StepCompletion{Lifecycle: portcheck.StepLifecycleCompleted}
+	tracker := &portcheck.RunResult{Steps: map[string]portcheck.StepCompletion{
+		create: completed, read: completed, cleanup: completed,
+	}}
+	runtimeCleanup := "mt-003-20261114.100000.001-delete"
+	for _, test := range []struct {
+		seen []string
+		want []string
+	}{
+		{[]string{cleanup}, []string{create, read, cleanup}},
+		{[]string{read, cleanup}, []string{create, read, cleanup}},
+		{[]string{runtimeCleanup}, []string{create, read, runtimeCleanup}},
+		{[]string{create}, []string{create, read}},
+	} {
+		observed := integrity.StepRoles{}
+		if slices.Contains(test.seen, read) {
+			observed.Read = read
+		}
+		if slices.Contains(test.seen, create) {
+			observed.Create = create
+		}
+		got, _ := stepsToFetch(test.seen, plan, observed, tracker)
+		if !slices.Equal(got, test.want) {
+			t.Fatalf("stepsToFetch(%v) = %v, want %v", test.seen, got, test.want)
+		}
 	}
 }
 
