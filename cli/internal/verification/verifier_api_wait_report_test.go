@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -177,6 +178,9 @@ func TestVerifyPortsSuccessReadsNoContainerDetail(t *testing.T) {
 // docker on PATH whose container wrote one line to stdout and two to stderr, as a JVM that
 // rejects an option does.
 func TestVerifyAPIWaitReportKeepsContainerStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake docker is a shell script")
+	}
 	dir := t.TempDir()
 	script := `#!/bin/sh
 case "$1" in
@@ -202,6 +206,43 @@ esac
 	} {
 		if !strings.Contains(report, want) {
 			t.Fatalf("report lacks %q:\n%s", want, report)
+		}
+	}
+}
+
+// TestVerifyAPIWaitReportMasksFailedLogsOutput runs the real command executor against a fake
+// docker whose logs command writes lines holding the S3 secret and endpoint and then fails, as
+// docker logs does on a corrupt log file or a dropped connection.
+func TestVerifyAPIWaitReportMasksFailedLogsOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake docker is a shell script")
+	}
+	const secret = "PROBESECRETVALUE42"
+	const endpoint = "10.9.8.7:9020"
+	t.Setenv(constants.EnvS3SecretKey, secret)
+	t.Setenv(constants.EnvS3Endpoint, "http://"+endpoint)
+	dir := t.TempDir()
+	script := `#!/bin/sh
+case "$1" in
+inspect) echo "running:0:false" ;;
+logs) echo "connecting to http://` + endpoint + ` with key ` + secret + `"; echo "error from daemon in stream: Error grabbing logs" >&2; exit 1 ;;
+*) exit 2 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0o700); err != nil { // #nosec G306 -- test-only fake docker
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	host := &hostparse.HostInfo{Host: "127.0.0.1", Original: "localhost", IsLocal: true}
+	v := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{}, command.NewCommandExecutor(), &MockNetworkChecker{}, &RealTimeProvider{})
+
+	report := v.apiWaitReport(host, mockContainerID)
+	if !strings.Contains(report, "could not read container logs:") || !strings.Contains(report, "Error grabbing logs") {
+		t.Fatalf("report lacks the logs failure:\n%s", report)
+	}
+	for _, leaked := range []string{secret, endpoint} {
+		if strings.Contains(report, leaked) {
+			t.Fatalf("report leaks %q:\n%s", leaked, report)
 		}
 	}
 }

@@ -84,7 +84,8 @@ func isNoSuchContainer(text string) bool {
 // together in the order docker logs writes them. The command's stderr goes to its stdout
 // (2>&1), because the executor keeps stderr only for a failed command; a remote host's
 // shell reads the redirection from the SSH command line, and a local host runs it through
-// sh -c. Only the last maxLines lines are read (--tail).
+// sh -c. Only the last maxLines lines are read (--tail). When docker logs fails, its output
+// is in the error, redacted as APIWaitReport redacts log lines.
 func ContainerLogTail(ctx context.Context, executor CommandExecutor, host *hostparse.HostInfo, containerID string, maxLines int) (string, error) {
 	if !isDockerObjectID(containerID) {
 		return "", fmt.Errorf("unexpected container ID %q", containerID)
@@ -95,12 +96,15 @@ func ContainerLogTail(ctx context.Context, executor CommandExecutor, host *hostp
 	logsCmd := []string{constants.DockerCommand, constants.DockerCmdLogs, constants.DockerFlagTail,
 		strconv.Itoa(maxLines), containerID, "2>&1"}
 	if host == nil || host.IsLocal {
-		logsCmd = []string{"sh", "-c", strings.Join(logsCmd, " ")}
+		// exec, so that a context kill reaches docker itself where sh forks (dash)
+		logsCmd = []string{"sh", "-c", "exec " + strings.Join(logsCmd, " ")}
 	}
 	stdout, stderr, err := executor.ExecuteCommand(ctx, host, logsCmd)
 	output := strings.TrimRight(joinNonEmpty(stdout, stderr), "\n")
 	if err != nil {
 		if detail := strings.TrimSpace(output); detail != "" {
+			// the output can hold log lines written before docker logs failed
+			detail = secretmask.EnvironmentValues(secretmask.Text(detail))
 			return "", fmt.Errorf("%w (output: %s)", err, detail)
 		}
 		return "", err
