@@ -12,7 +12,9 @@ import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl;
 import com.dell.spt.base.storage.Credential;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -301,6 +303,58 @@ final class S3VersionedRequestTest {
 		assertEquals("key~v1", copy.item().name());
 	}
 
+	// ---------- the routes that do not split the name append the version ----------
+
+	@Test
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	void aCompositeResponseAppendsTheVersion() throws Exception {
+		final var driver = driver(true, 4, false);
+		final var handler = new S3ResponseHandler(driver, false, true, null);
+		final var item = new DataItemImpl("key~v1", 0, 16);
+		item.dataInput(dataInput());
+		final Operation upload = new CompositeDataOperationImpl<>(0, OpType.CREATE, item, null, "/b", CREDENTIAL, null, 0, 8);
+
+		handler.handleResponseHeaders(null, upload, versionResponse("v2"));
+
+		assertEquals("key~v1~v2", item.name());
+	}
+
+	@Test
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	void aPartResponseAppendsTheVersion() throws Exception {
+		final var driver = driver(true, 4, false);
+		final var handler = new S3ResponseHandler(driver, false, true, null);
+		final var item = new DataItemImpl("key~v1", 0, 16);
+		item.dataInput(dataInput());
+		final var upload = new CompositeDataOperationImpl<>(0, OpType.CREATE, item, null, "/b", CREDENTIAL, null, 0, 8);
+		final var part = new DataItemImpl("key~v1", 0, 8);
+		part.dataInput(dataInput());
+		final Operation partOp = new PartialDataOperationImpl<>(0, OpType.CREATE, part, null, "/b", CREDENTIAL, 1, upload);
+
+		handler.handleResponseHeaders(null, partOp, versionResponse("v2"));
+
+		assertEquals("key~v1~v2", part.name());
+	}
+
+	@Test
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	void aTaggingResponseAppendsTheVersion() throws Exception {
+		final Config config = S3StorageDriverTest.baseConfig(true, 4, false, null, HOST);
+		config.val("storage-object-tagging-enabled", true);
+		final var driver = new S3StorageDriverTest.TestS3Driver(config);
+		resources.add(driver);
+		final var handler = new S3ResponseHandler(driver, false, true, null);
+		final Operation op = op(OpType.READ, "key~v1");
+		assertEquals("/b/key~v1?tagging", driver.httpRequest(op, HOST).uri(), "the tagging route keeps the whole name");
+
+		handler.handleResponseHeaders(null, op, versionResponse("v2"));
+
+		assertEquals("key~v1~v2", op.item().name());
+	}
+
 	// ---------- building the request again, as a retry does ----------
 
 	@Test
@@ -463,6 +517,10 @@ final class S3VersionedRequestTest {
 		final var item = new DataItemImpl(name, 0, 16);
 		item.dataInput(dataInput());
 		return (Operation<Item>) (Operation<?>) new DataOperationImpl<>(0, type, item, srcPath, dstPath, CREDENTIAL, null, 0);
+	}
+
+	private static HttpHeaders versionResponse(final String versionId) {
+		return new DefaultHttpHeaders().set(VERSION_HEADER, versionId);
 	}
 
 	/**
