@@ -461,6 +461,12 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				}
 			} else if (parentState != OperationLifecycleState.DISPATCHED
 							&& parentState != OperationLifecycleState.NEW) {
+				if (state == OperationLifecycleState.DRIVER_QUEUED && hasEnded(parentState)) {
+					// A part still queued when its upload ended, for example one enqueued while the
+					// upload's abort ran, is never sent. It is settled here, so the dispatcher drops
+					// it instead of offering it again, and the ended upload is not claimed again.
+					lifecycle.unattempted(op);
+				}
 				return false;
 			}
 		}
@@ -804,7 +810,25 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		return !lifecycle.isEnabled()
 						|| state == OperationLifecycleState.DRIVER_QUEUED
 						|| state == OperationLifecycleState.DISPATCHED
-						|| lifecycle.driverQueued(parentOp);
+						|| (!isPartOfFinalizedUpload(childOp, parentOp) && lifecycle.driverQueued(parentOp));
+	}
+
+	/**
+	 * Whether {@code childOp} is a part of an upload whose last request, its completion or its
+	 * abort, is already enqueued. A sibling that succeeds just before the abort may still enqueue
+	 * the part it fetched; claiming the upload for that part would start a lifecycle the upload
+	 * never ends, so the part is dropped instead.
+	 */
+	private static boolean isPartOfFinalizedUpload(final Operation<?> childOp, final Operation<?> parentOp) {
+		return childOp instanceof PartialOperation
+						&& parentOp instanceof CompositeOperation<?> compositeOp
+						&& compositeOp.get(KEY_FINALIZATION_ENQUEUED) != null;
+	}
+
+	private static boolean hasEnded(final OperationLifecycleState state) {
+		return state == OperationLifecycleState.TERMINAL
+						|| state == OperationLifecycleState.UNATTEMPTED
+						|| state == OperationLifecycleState.UNRESOLVED;
 	}
 
 	private void recoverQueuedCompositeParent(final O childOp, final O permitOwner) {

@@ -25,7 +25,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -156,16 +155,10 @@ final class CompositeFailureStatusDriverTest {
 
 	/**
 	 * A part that reaches dispatch after its upload has ended, for example one queued while the upload
-	 * was live: the dispatcher settles it instead of leaving it refused at the head of its buffer, where
-	 * it would hold every operation behind it.
-	 *
-	 * <p>Disabled: it fails today. The part's dispatch claim is refused because its upload is
-	 * {@code TERMINAL}, the part stays {@code DRIVER_QUEUED} at the head of the dispatch task's buffer,
-	 * and the task resubmits it in a busy loop (about four million refused submits a second here), so
-	 * the operation behind it never dispatches. It is outside multipart-abort-sibling-drain and is to be
-	 * fixed and enabled separately.
+	 * was live: the dispatcher settles it as unattempted instead of leaving it refused at the head of its
+	 * buffer, where the dispatch task offered it again in a busy loop and the operation behind it never
+	 * ran. The ended upload is not claimed again.
 	 */
-	@Disabled("a part dispatched after its upload ended is refused and holds the dispatcher; to be fixed separately")
 	@Test
 	void aPartDispatchedAfterItsUploadEndedIsSettled() throws Exception {
 		final var lifecycle = driver.operationLifecycle();
@@ -184,7 +177,8 @@ final class CompositeFailureStatusDriverTest {
 		final var completed = new CountDownLatch(1);
 		final Output<Operation<Item>> out = mock(Output.class);
 		when(out.put(any(Operation.class))).thenAnswer(invocation -> {
-			if ("after".equals(((Operation<?>) invocation.getArgument(0)).item().name())) {
+			// The result's item is named by its path, /bucket/after, so the DELETE is matched by type.
+			if (OpType.DELETE.equals(((Operation<?>) invocation.getArgument(0)).type())) {
 				completed.countDown();
 			}
 			return true;
@@ -196,9 +190,14 @@ final class CompositeFailureStatusDriverTest {
 
 		assertTrue(completed.await(5, TimeUnit.SECONDS), () -> "the operation behind the part completes; the part is "
 						+ lifecycle.stateOf(part) + ", " + lifecycle.snapshot());
-		final var state = lifecycle.stateOf(part);
-		assertTrue(state == OperationLifecycleState.TERMINAL || state == OperationLifecycleState.UNATTEMPTED
-						|| state == OperationLifecycleState.UNRESOLVED, () -> "the part is settled: " + state);
+		// The output accepts the DELETE's result just before its terminal transition.
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		while (lifecycle.hasOutstandingOperations() && System.nanoTime() < deadline) {
+			TimeUnit.MILLISECONDS.sleep(10);
+		}
+		assertEquals(OperationLifecycleState.UNATTEMPTED, lifecycle.stateOf(part), "the part is settled unsent");
+		assertEquals(OperationLifecycleState.TERMINAL, lifecycle.stateOf(uploadOp), "the ended upload is not claimed again");
+		assertFalse(lifecycle.hasOutstandingOperations(), () -> "nothing is outstanding: " + lifecycle.snapshot());
 	}
 
 	/** A part's failed attempt with retries left records nothing, so a later part's failure is the first. */
