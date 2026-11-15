@@ -274,7 +274,9 @@ public final class Main {
 	 *
 	 * <p>Option names are checked by the configuration itself, as it sets each value, so a map option
 	 * such as {@code --storage-net-nodeInterfaces-<key>} takes any key. The values are applied in the
-	 * order the parsed argument map gives, which is not the command-line order.
+	 * order the parsed argument map gives, which is not the command-line order. Once they are applied,
+	 * each argument is logged to {@code cli.args.log} in command-line order, with credential values
+	 * masked ({@link ConfigUtil#maskedArg}); the configuration keeps the real values.
 	 *
 	 * @throws CliArgumentException for the first argument that cannot be applied. The configuration
 	 *         may hold the arguments applied before it; the engine stops without using it.
@@ -301,7 +303,10 @@ public final class Main {
 		EngineBuildInfoProvider.global().projectVersion(config, configArgs.containsKey("run-version"));
 		checkAndSetStepId(config, initialStepId);
 		applyLogLevel(config);
-		Arrays.stream(args).forEach(Loggers.CLI::info);
+		// In command-line order, with credential values masked as the step configuration masks them
+		for (final var arg : args) {
+			Loggers.CLI.info(ConfigUtil.maskedArg(arg, aliasingConfig));
+		}
 		return config;
 	}
 

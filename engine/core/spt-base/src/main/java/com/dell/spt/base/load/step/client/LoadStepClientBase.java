@@ -34,6 +34,7 @@ import com.dell.spt.base.integrity.IntegrityConfig;
 import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
 import com.dell.spt.base.integrity.IntegrityInputProvenance;
 import com.dell.spt.base.integrity.IntegrityManifestCompletion;
+import com.dell.spt.base.config.ScenarioConfigurationException;
 import com.dell.spt.base.control.run.RunTerminalException;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.Item;
@@ -1957,6 +1958,19 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 	}
 
+	private synchronized void attachToFailureBudgetFailure(
+					final IntegrityTerminalException budgetFailure, final Throwable failure) {
+		if (failure == null || failure == budgetFailure) {
+			return;
+		}
+		for (final Throwable attached : budgetFailure.getSuppressed()) {
+			if (attached == failure) {
+				return;
+			}
+		}
+		budgetFailure.addSuppressed(failure);
+	}
+
 	private void coordinateFailureBudgetStop() {
 		if (standaloneDeleteStopCoordinated) {
 			return;
@@ -2366,13 +2380,20 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 									deadlineNanos, probe.observedAtNanos())) {
 						return false;
 					}
+					if (probe.failure() != null || probe.exhausted()) {
+						// The monitor records the budget failure before it closes admission, so a
+						// slice that failed or ran dry because of that stop finds it set here. The
+						// slice's own failure, such as a lost engine, stays on it as evidence.
+						final IntegrityTerminalException budgetFailure = failureBudgetFailure;
+						if (budgetFailure != null) {
+							attachToFailureBudgetFailure(budgetFailure, probe.failure());
+							throw budgetFailure;
+						}
+					}
 					if (probe.failure() != null) {
 						throwUnchecked(probe.failure());
 					}
 					if (probe.exhausted()) {
-						if (failureBudgetFailure != null) {
-							throw failureBudgetFailure;
-						}
 						throw recordDurationValidityFailure(
 										standaloneDeleteEarlyExhaustionFailure());
 					}
@@ -3096,7 +3117,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			EngineBuildInfoProvider.global().projectVersion(configCopy, aliasedArgs.containsKey("run-version"));
 		} catch (final Exception e) {
 			LogUtil.exception(Level.FATAL, e, "Scenario syntax error");
-			throwUnchecked(e);
+			throw new ScenarioConfigurationException(e, config);
 		}
 		return copyInstance(configCopy, null);
 	}
@@ -3122,7 +3143,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			EngineBuildInfoProvider.global().projectVersion(ctxConfig, aliasedArgs.containsKey("run-version"));
 		} catch (final Exception e) {
 			LogUtil.exception(Level.FATAL, e, "Scenario syntax error");
-			throwUnchecked(e);
+			throw new ScenarioConfigurationException(e, config);
 		}
 		ctxConfigsCopy.add(ctxConfig);
 		return copyInstance(config, ctxConfigsCopy);

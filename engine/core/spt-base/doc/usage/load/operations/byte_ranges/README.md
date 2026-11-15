@@ -192,8 +192,11 @@ preflight object or bucket request. A fixed span is sent unchanged even when the
 inventory size is smaller. Responses require strict status, range metadata, body
 length and framing validation; rejected responses close the connection.
 
-READ/WRITE performance qualification remains pending. See the CLI guide below
-for the release-qualification status; functional checks do not establish parity.
+Ordinary READ and WRITE runs, with range mode disabled, are covered by SPT's
+release performance check. The v5.15.2 check against v5.14.2, the last release
+before partial reads, found no regression. That check measures each release as a
+whole; it does not isolate the cost of the partial-read code, and partial-read
+workloads are not part of it. No partial-read performance figures are published.
 
 For CLI examples, aligned selection, full-span requests and mutable datasets, see
 [Partial-object READs](../../../../../../../../cli/docs/PARTIAL_READS.md).

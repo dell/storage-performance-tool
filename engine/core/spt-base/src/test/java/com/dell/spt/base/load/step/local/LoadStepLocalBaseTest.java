@@ -685,6 +685,45 @@ class LoadStepLocalBaseTest {
 		assertDoesNotThrow(loadStep::close);
 	}
 
+	/**
+	 * After a stop began, the last request dispatches between the await's exhaustion read and its
+	 * {@code isDone} check. The inventory ran out, so the await reports exhaustion, not a stop.
+	 */
+	@Test
+	void anExhaustionRecordedAsTheStoppedContextTurnsDoneIsStillExhaustion() throws Exception {
+		final Config config = durationConfig();
+		final LoadStepContext context = mock(LoadStepContext.class);
+		final AtomicLong exhaustedAtNanos = new AtomicLong(Long.MIN_VALUE);
+		when(context.schedulingExhaustedAtNanos()).thenReturn(Long.MAX_VALUE);
+		when(context.schedulingExhaustionNanos()).thenAnswer(invocation -> {
+			final long recorded = exhaustedAtNanos.get();
+			return recorded == Long.MIN_VALUE ? java.util.OptionalLong.empty() : java.util.OptionalLong.of(recorded);
+		});
+		// The last request dispatches here: its exhaustion is recorded, then the context reads done.
+		when(context.isDone()).thenAnswer(invocation -> {
+			exhaustedAtNanos.compareAndSet(Long.MIN_VALUE, System.nanoTime());
+			return true;
+		});
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(
+						config, mockMetricsManager(), context);
+		loadStep.startDurationInterval(TimeUnit.SECONDS.toNanos(30));
+		loadStep.closeOperationAdmissionForStepStop();
+
+		final var failure = assertThrows(
+						IntegrityTerminalException.class,
+						() -> loadStep.awaitContextsForTest(5, TimeUnit.SECONDS));
+
+		assertTrue(failure.getMessage().contains("inventory slice exhausted before the requested duration"), failure.getMessage());
+		assertTrue(failure.getMessage().contains("increase --seed-objects"), failure.getMessage());
+		assertEquals(DurationAwaitStatus.EXHAUSTED_BEFORE_DEADLINE, loadStep.durationAwaitStatus());
+		try {
+			loadStep.stop();
+		} catch (final RuntimeException ignored) {
+			// The stop may report the exhaustion again; the await's cause is what this test checks.
+		}
+		assertDoesNotThrow(loadStep::close);
+	}
+
 	@Test
 	void armedDurationAwaitHonorsEachShortControlPlanePollTimeout() throws Exception {
 		final Config config = durationConfig();

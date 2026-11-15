@@ -4,8 +4,12 @@ Partial-object READs request one fixed-length byte range per logical READ using 
 Netty S3 driver. Ordinary READs are unchanged when range size is omitted.
 AWS S3 and S3-RDMA support are deferred.
 
-**Release qualification:** READ/WRITE performance qualification is still pending.
-Functional tests and manual testing do not establish performance parity.
+**Performance:** Ordinary READ and WRITE runs, with the range options omitted, are
+covered by SPT's release performance check. The v5.15.2 check against v5.14.2, the
+last release before partial reads, found no regression. That check measures each
+release as a whole; it does not isolate the cost of the partial-read code, and
+partial-read workloads are not part of it. No partial-read performance figures are
+published.
 
 ## Choose a range
 

@@ -97,8 +97,8 @@ func registerVerifyFlags(flags *pflag.FlagSet) {
 	flags.String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
 	flags.Int(flagAPIPort, constants.DefaultSptAPIPort, "Spt API port to verify")
 	flags.Int(flagRMIRegistryPort, constants.DefaultRMIRegistryPort, rmiRegistryPortUsage)
-	flags.Int("rmi-port-start", 40000, "Starting port for RMI range")
-	flags.Int("rmi-port-count", 10, "Number of RMI ports to verify")
+	flags.Int("rmi-port-start", 40000, rmiPortStartUsage)
+	flags.Int("rmi-port-count", 10, rmiPortCountUsage)
 	flags.Bool("force-cleanup", false, "Automatically clean up conflicting containers without prompting")
 	flags.Bool("use-rdma", false, "Include RDMA hardware and configuration checks")
 	flags.StringArray(flagHostInterfaces, nil, "Replace --interfaces on one host: <host>=<value>, with <value> auto, a comma-separated list, or none to only list its NICs; repeat for more hosts")
@@ -170,8 +170,8 @@ func runVerify(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("min-hosts (%d) cannot be greater than total hosts (%d)", minHosts, len(hosts))
 	}
 
-	if networkMode != constants.BridgeNetworkMode && networkMode != constants.HostNetworkMode {
-		return fmt.Errorf("network-mode must be '%s' or '%s', got: %s", constants.BridgeNetworkMode, constants.HostNetworkMode, networkMode)
+	if err := validateNetworkMode(networkMode); err != nil {
+		return err
 	}
 
 	hostInterfaces, _, err := readHostInterfaces(cmd)

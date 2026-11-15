@@ -14,9 +14,9 @@ import javax.script.ScriptException;
 import org.junit.jupiter.api.Test;
 
 /**
- * An engine started with a scenario learns of the scenario's failure from
- * {@link RunImpl#runAndReturnFailure()} and exits 1; a node's {@link RunImpl#run()} keeps reporting
- * the failure through the step status.
+ * An engine started with a scenario, and a node, learn of the scenario's failure from
+ * {@link RunImpl#runAndReturnFailure()}: the engine exits 1 and the node reports it in
+ * {@code /status} ({@link NodeScenarioFailureStatusTest}). {@link RunImpl#run()} still swallows it.
  */
 class RunImplFailureTest {
 
@@ -45,7 +45,7 @@ class RunImplFailureTest {
 	}
 
 	@Test
-	void aNodeRunStillSwallowsTheSameFailures() throws Exception {
+	void runStillSwallowsTheSameFailures() throws Exception {
 		final var engine = mock(ScriptEngine.class);
 		when(engine.eval("syntax")).thenThrow(new ScriptException("Expected comma but found )"));
 		when(engine.eval("config")).thenThrow(new InvalidValuePathException("load-step-limit-count"));
