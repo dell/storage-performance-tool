@@ -575,7 +575,7 @@ final class S3RdmaNicSetLaneTest {
 	}
 
 	@Test
-	void anUnsentPartFollowsQueueRecoveryAndItsParentStaysDispatched() throws Exception {
+	void anUnsentPartFollowsQueueRecoveryAndItsParentIsUnresolved() throws Exception {
 		final var run = started(stub.listeners(1), 1, 1);
 		final var entered = new CountDownLatch(1);
 		final var release = hold();
@@ -598,14 +598,19 @@ final class S3RdmaNicSetLaneTest {
 		assertTrue(recovered.get(0) instanceof PartialOperation<?> part && part.parent() == upload);
 		final var lifecycle = run.driver().operationLifecycle();
 		assertEquals(OperationLifecycleState.UNATTEMPTED, lifecycle.stateOf(recovered.get(0)));
-		assertEquals(OperationLifecycleState.DISPATCHED, lifecycle.stateOf(upload), "as on the default route, for the bounded drain");
+		// The upload is open on the stub and can no longer complete: as on the default route, it is
+		// unresolved at once instead of holding the step's drain until its deadline.
+		assertEquals(OperationLifecycleState.UNRESOLVED, lifecycle.stateOf(upload));
+		assertEquals(1, lifecycle.snapshot().unresolved());
+		assertEquals(0, lifecycle.snapshot().inFlight(), () -> "nothing holds the drain: " + lifecycle.snapshot());
+		assertTrue(lifecycle.counters().reconciled(), lifecycle.counters()::toString);
 		assertEquals(0, lifecycle.counters().failed(), "fresh work charges no failure");
 		assertEquals(2, stub.objectRequests().size(), () -> "the initiation and the first part: " + stub.objectRequests());
 		assertBuffersBack(run, 0, 1);
 	}
 
 	@Test
-	void aPartNotYetStartedIsRecoveredWithItsParent() throws Exception {
+	void aPartNotYetStartedIsRecoveredAndItsInitiatedUploadIsUnresolved() throws Exception {
 		final var run = started(stub.listeners(1), 1, 1);
 		final var entered = new CountDownLatch(1);
 		final var release = hold();
@@ -619,8 +624,14 @@ final class S3RdmaNicSetLaneTest {
 		release.countDown();
 
 		run.awaitIdle();
-		assertEquals(2, recovered.size(), recovered::toString);
-		assertTrue(recovered.contains(upload), "no part claimed the parent, so it is fresh work too");
+		assertEquals(1, recovered.size(), recovered::toString);
+		assertTrue(recovered.get(0) instanceof PartialOperation<?> part && part.parent() == upload);
+		// No part claimed the upload, but its initiation opened it on the stub: it is not fresh work, it is
+		// unresolved, so that every upload left open is counted.
+		final var lifecycle = run.driver().operationLifecycle();
+		assertEquals(OperationLifecycleState.UNATTEMPTED, lifecycle.stateOf(recovered.get(0)));
+		assertEquals(OperationLifecycleState.UNRESOLVED, lifecycle.stateOf(upload));
+		assertEquals(0, lifecycle.snapshot().inFlight(), lifecycle.snapshot()::toString);
 		assertEquals(1, stub.objectRequests().size(), () -> "only the initiation was sent: " + stub.objectRequests());
 	}
 

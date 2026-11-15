@@ -2654,7 +2654,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	/**
 	 * Settles every kernel-route abort whose connect is still pending, and starts no more: each
-	 * connection closes, its permit comes back and queue recovery owns its operation. NIC-set
+	 * connection closes, its permit comes back and, after a stop, its upload, which the unsent abort
+	 * leaves open, is unresolved at once. NIC-set
 	 * drivers call it when admission closes and before their I/O shuts down, so no permit waits on
 	 * a connect timeout or on a listener an event loop that terminated would never run.
 	 */
@@ -2664,6 +2665,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				final var connect = abort.connect;
 				// Settled is for good: nothing else gives this permit back.
 				settleKernelRouteChannel(stepId, connect == null ? null : connect.channel(), this::giveBackKernelRoutePermit);
+				settleRefusedDispatch(abort.op);
 			}
 		}
 	}
@@ -2715,7 +2717,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			return;
 		}
 		final var op = abort.op;
-		if (!withDispatchAdmission(() -> claimCapturedDispatch(op, abort.token))) {
+		if (!withDispatchAdmission(() -> claimCapturedDispatch(op, abort.token), op)) {
 			final var unusedClose = channel.close();
 			concurrencyThrottle.release();
 			signalDispatchCapacityAvailable();
@@ -2741,7 +2743,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			return;
 		}
 		final var op = abort.op;
-		final boolean claimed = withDispatchAdmission(() -> claimCapturedDispatch(op, abort.token));
+		final boolean claimed = withDispatchAdmission(() -> claimCapturedDispatch(op, abort.token), op);
 		concurrencyThrottle.release();
 		signalDispatchCapacityAvailable();
 		if (!claimed) {
