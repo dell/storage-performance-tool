@@ -2,6 +2,7 @@ package com.dell.spt.storage.driver.coop.netty.http.s3;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -16,6 +17,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -71,11 +73,22 @@ public class ScenarioExampleConfigTest {
 	private static final Pattern UNDEFINED = Pattern.compile("ReferenceError: \"([^\"]+)\" is not defined");
 
 	/**
+	 * The shape of an environment variable's name. Only such a name is stubbed, so a misspelt
+	 * script variable still fails the check, as it fails in the engine.
+	 */
+	private static final Pattern ENVIRONMENT_NAME = Pattern.compile("[A-Z][A-Z0-9_]*");
+
+	/** How long one example's evaluation may take, so that a loop that never ends fails the check. */
+	private static final Duration EVALUATION_BUDGET = Duration.ofMinutes(2);
+
+	/**
 	 * Every shipped JavaScript example is evaluated with the step types the engine binds, each
 	 * step's configuration going through the real client: an invalid configuration path, a value
 	 * of the wrong type or a syntax error fails it. This proves syntax and configuration paths only,
 	 * not that an example runs. Shell commands are replaced by a stub that runs nothing, and an
-	 * environment variable the script reads is set to a harmless file name.
+	 * environment variable the script reads is set to a harmless file name. The stub replaces the
+	 * text {@code java.lang.ProcessBuilder} only: a script that reaches a process or the file system
+	 * another way would really run it, and no shipped example does.
 	 */
 	@TestFactory
 	Stream<DynamicTest> everyShippedJavaScriptExampleSetsOnlyValidConfiguration() throws Exception {
@@ -85,7 +98,7 @@ public class ScenarioExampleConfigTest {
 		}
 		assertTrue(files.size() >= 33, "found only " + files.size() + " examples under " + EXAMPLES.toAbsolutePath());
 		return files.stream()
-						.map(file -> DynamicTest.dynamicTest(EXAMPLES.relativize(file).toString(), () -> evaluate(file)));
+						.map(file -> DynamicTest.dynamicTest(EXAMPLES.relativize(file).toString(), () -> assertTimeoutPreemptively(EVALUATION_BUDGET, () -> evaluate(file))));
 	}
 
 	@Test
@@ -119,6 +132,12 @@ public class ScenarioExampleConfigTest {
 		final var e = assertThrowsFrom(
 						() -> evaluate("PreconditionLoad.config({\"load\": {\"step\": {\"limit\": {\"count\": 1}}}}).run();", null));
 		assertTrue(String.valueOf(e).contains("load-step-limit-count"), String.valueOf(e));
+	}
+
+	@Test
+	void theExampleCheckFailsOnAMisspeltScriptVariable() {
+		final var e = assertThrowsFrom(() -> evaluate("var limitCount = 5; Load.config({\"load\": {\"op\": {\"limit\": {\"count\": limitCuont}}}}).run();", null));
+		assertTrue(String.valueOf(e).contains("limitCuont"), String.valueOf(e));
 	}
 
 	@Test
@@ -163,8 +182,8 @@ public class ScenarioExampleConfigTest {
 
 	/**
 	 * Evaluates the script as the engine would, with each bound step type replaced by a recorder
-	 * around the engine's own client. A name the script reads but nothing defines is set to "1" and
-	 * the script is evaluated again.
+	 * around the engine's own client. A name shaped like an environment variable that the script
+	 * reads but nothing defines is set to "1", and the script is evaluated again.
 	 */
 	private static void evaluate(final String script, final Set<String> boundNames) throws Exception {
 		final var root = S3StorageDriverTest.baseConfig(false, 4, false, null, "127.0.0.1");
@@ -198,7 +217,10 @@ public class ScenarioExampleConfigTest {
 					return;
 				}
 				final var undefined = UNDEFINED.matcher(String.valueOf(e.getMessage()));
-				if (undefined.find() && !stubbed.contains(undefined.group(1)) && stubbed.size() < 40) {
+				if (undefined.find()
+								&& ENVIRONMENT_NAME.matcher(undefined.group(1)).matches()
+								&& !stubbed.contains(undefined.group(1))
+								&& stubbed.size() < 40) {
 					stubbed.add(undefined.group(1));
 					continue;
 				}
