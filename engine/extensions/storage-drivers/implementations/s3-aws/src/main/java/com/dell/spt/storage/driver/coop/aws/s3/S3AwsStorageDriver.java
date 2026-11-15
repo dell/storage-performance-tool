@@ -128,7 +128,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	private final S3AsyncClient standaloneDeleteS3Client;
 	private final SdkAsyncHttpClient standaloneDeleteHttpClient;
 	private final S3AwsStandaloneDeleteResources.Lazy lazyStandaloneDeleteResources;
-	private final ExecutorService executor; // For read operations
 	private final ExecutorService uploadExecutor; // Dedicated for upload operations
 	private final String bucketName;
 	private final boolean checksumEnabled;
@@ -286,7 +285,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		// Use virtual threads to support high concurrency without OS-level thread explosion
 		// This allows thousands of blocking operations while honoring user's --concurrency limit
-		this.executor = Executors.newVirtualThreadPerTaskExecutor();
 		this.uploadExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
 		this.bucketName = resolveBucketName(config);
@@ -2212,24 +2210,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 
 		try {
-			// Shutdown the executor service to release thread pool resources
-			if (executor != null) {
-				executor.shutdown();
-				// Wait for pending tasks to complete (with timeout)
-				if (!executor.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS)) {
-					LOG.warn("Executor service did not terminate gracefully, forcing shutdown");
-					executor.shutdownNow();
-				}
-				LOG.info("Executor service shutdown successfully");
-			}
-		} catch (InterruptedException e) {
-			LOG.warn("Executor service shutdown interrupted");
-			Thread.currentThread().interrupt();
-		} catch (Exception e) {
-			LOG.warn("Failed to shutdown executor service: {}", e.getMessage());
-		}
-
-		try {
 			// Shutdown the upload executor service to release thread pool resources
 			if (uploadExecutor != null) {
 				uploadExecutor.shutdown();
@@ -2241,7 +2221,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				LOG.info("Upload executor service shutdown successfully");
 			}
 		} catch (InterruptedException e) {
-			LOG.warn("Upload executor service shutdown interrupted");
+			// A close on an interrupted thread stops waiting at once. The clients are already closed and
+			// nothing depends on the wait, so interrupt the tasks still running rather than leave them.
+			uploadExecutor.shutdownNow();
+			LOG.warn("Upload executor service shutdown interrupted, forcing shutdown");
 			Thread.currentThread().interrupt();
 		} catch (Exception e) {
 			LOG.warn("Failed to shutdown upload executor service: {}", e.getMessage());
