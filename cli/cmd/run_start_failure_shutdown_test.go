@@ -10,8 +10,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -96,10 +98,11 @@ func assertRejectedRunSummary(t *testing.T, resultsDir, output string) {
 	}
 }
 
-// awaitMonitorSetup makes a stubbed launch wait, as a real one does while its engine starts,
-// until the auto-results monitor has finished preparing the results root. The monitor's setup
-// and the engine identity gate's rejection record both write the run metadata, and only an
-// instant stub launch can overlap them.
+// awaitMonitorSetup orders a stubbed launch after the auto-results monitor has finished
+// preparing the results root, as a launch that waits for its engine usually is. The monitor's
+// setup and the engine identity gate's rejection record both write the run metadata without a
+// lock, so the tests that reach the gate would race without this ordering. The race itself is
+// .scratch/monitor-metadata-race 01; this helper only keeps it out of these tests.
 func awaitMonitorSetup(t *testing.T) func() {
 	t.Helper()
 	original := archivePreparedRunInputsFunc
@@ -116,6 +119,43 @@ func awaitMonitorSetup(t *testing.T) func() {
 		case <-time.After(5 * time.Second):
 			t.Error("auto-results monitor did not prepare the results root")
 		}
+	}
+}
+
+// A results root whose manifests can't be inspected counts as having evidence, so the summary
+// step runs and reports the problem instead of the monitor claiming no results were produced.
+func TestHasSummarizableEvidence(t *testing.T) {
+	empty := t.TempDir()
+	if hasSummarizableEvidence(empty) {
+		t.Fatal("empty results root reported evidence")
+	}
+	for _, name := range []string{constants.ResultsManifestFileName, constants.EngineInfoManifestName} {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, name), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !hasSummarizableEvidence(root) {
+			t.Fatalf("results root with %s reported no evidence", name)
+		}
+	}
+
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("directory search permission is not enforced here")
+	}
+	parent := filepath.Join(t.TempDir(), "locked")
+	root := filepath.Join(parent, "run")
+	if err := os.MkdirAll(root, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o600); err != nil { // #nosec G302 -- removes search permission on a test directory
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o750) }) // #nosec G302 -- restores the test directory for removal
+	if _, err := os.Stat(filepath.Join(root, constants.ResultsManifestFileName)); err == nil || errors.Is(err, fs.ErrNotExist) {
+		t.Skipf("stat under a directory without search permission returned %v, not a permission error", err)
+	}
+	if !hasSummarizableEvidence(root) {
+		t.Fatal("results root that cannot be inspected reported no evidence")
 	}
 }
 
