@@ -7,6 +7,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	dockerconf "github.com/dell/storage-performance-tool/cli/internal/docker"
@@ -92,5 +93,27 @@ func TestPortCheckResult(t *testing.T) {
 	}
 	if got, err := portCheckResult(info, nil); got != info || err != nil {
 		t.Fatalf("info, nil: got (%v, %v), want the result", got, err)
+	}
+}
+
+func TestConnectHostsReportsAPortCheckWithNoResult(t *testing.T) {
+	o := NewMultiHostOrchestrator([]*hostparse.HostInfo{{Host: "entry.example", Original: "entry.example"}}, 1)
+	o.preflight = fixedPortPreflight{}
+	o.SetNotifier(func(string) {})
+	var cancels []context.CancelFunc
+	o.newDockerManagerForHost = func(ctx context.Context, host *hostparse.HostInfo) (*DockerManager, error) {
+		managerCtx, cancel := context.WithCancel(ctx)
+		cancels = append(cancels, cancel)
+		return &DockerManager{ctx: managerCtx, cancel: cancel, hostInfo: host}, nil
+	}
+	defer func() {
+		for _, cancel := range cancels {
+			cancel()
+		}
+	}()
+
+	err := o.ConnectHosts(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "port check failed: port checker returned no result") {
+		t.Fatalf("ConnectHosts() error = %v, want the failed port check", err)
 	}
 }
