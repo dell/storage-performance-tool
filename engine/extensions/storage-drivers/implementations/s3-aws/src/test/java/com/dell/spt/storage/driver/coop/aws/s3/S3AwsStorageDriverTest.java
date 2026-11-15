@@ -2857,16 +2857,18 @@ public class S3AwsStorageDriverTest {
 			verify(partialOp).finishResponse();
 		}
 
+		/**
+		 * The range is the part's position in the object, from its part number and the threshold,
+		 * not the part item's offset, which is its position in the data ring: the object's nonzero
+		 * offset plus that.
+		 */
 		@SuppressWarnings("unchecked")
-		@Disabled("Mocking complexity - requires ResponseInputStream and AsyncResponseTransformer mocking")
 		@Test
 		void readRange_calculatesCorrectRange() throws Exception {
-			GetObjectResponse mockResponse = GetObjectResponse.builder()
-							.contentLength(1024L)
-							.build();
-
 			when(mockS3Client.getObject(any(GetObjectRequest.class), any(AsyncResponseTransformer.class)))
-							.thenReturn(CompletableFuture.completedFuture(mockResponse));
+							.thenReturn(CompletableFuture.completedFuture(new ResponseInputStream<>(
+											GetObjectResponse.builder().contentLength(1024L).build(),
+											new ByteArrayInputStream(new byte[1024]))));
 
 			// Use real objects like S3 driver does
 			DataItem parentItem = new com.dell.spt.base.item.DataItemImpl("test-key", 12345, 4096);
@@ -2879,11 +2881,16 @@ public class S3AwsStorageDriverTest {
 			PartialDataOperation partialOp = new com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl<>(
 							0, OpType.READ, partItem, "/test-bucket", null, TEST_CRED, 2, parentOp);
 
+			assertEquals(12345 + 2048, partItem.offset(), "the part's offset in the data ring");
+			partialOp.startRequest();
+			partialOp.finishRequest();
+
 			drv.execute((Operation) partialOp).join();
 
 			ArgumentCaptor<GetObjectRequest> cap = ArgumentCaptor.forClass(GetObjectRequest.class);
 			verify(mockS3Client).getObject(cap.capture(), any(AsyncResponseTransformer.class));
 			assertEquals("bytes=2048-3071", cap.getValue().range()); // 2 * 1024 = 2048, 2048 + 1024 - 1 = 3071
+			assertEquals(1024, partialOp.countBytesDone());
 		}
 
 		@SuppressWarnings("unchecked")
