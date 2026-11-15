@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 	"github.com/dell/storage-performance-tool/cli/internal/portcheck"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/dell/storage-performance-tool/cli/tui"
@@ -32,6 +34,39 @@ func wantNetworkModeError(value string) string {
 	return "network-mode must be 'bridge' or 'host', got: " + value
 }
 
+// networkModeSpellings are the accepted spt run and replay --network-mode spellings and the mode
+// each selects.
+var networkModeSpellings = []struct{ value, want string }{
+	{"host", constants.HostNetworkMode},
+	{"Host", constants.HostNetworkMode},
+	{"HOST", constants.HostNetworkMode},
+	{" host", constants.HostNetworkMode},
+	{"host ", constants.HostNetworkMode},
+	{"bridge", constants.BridgeNetworkMode},
+	{"Bridge", constants.BridgeNetworkMode},
+	{" BRIDGE", constants.BridgeNetworkMode},
+}
+
+// refusedNetworkModes are spt run and replay --network-mode values refused before any start. An
+// explicit empty value stays refused, as #313 made it.
+var refusedNetworkModes = []string{"hots", "hostx", "bridge mode", ""}
+
+func TestNormalizeNetworkModeIgnoresCaseAndSurroundingSpaces(t *testing.T) {
+	for _, spelling := range networkModeSpellings {
+		got, err := normalizeNetworkMode(spelling.value)
+		if err != nil || got != spelling.want {
+			t.Fatalf("normalizeNetworkMode(%q) = %q, %v; want %q", spelling.value, got, err, spelling.want)
+		}
+	}
+	for _, value := range refusedNetworkModes {
+		got, err := normalizeNetworkMode(value)
+		if err == nil || err.Error() != wantNetworkModeError(value) || got != "" {
+			t.Fatalf("normalizeNetworkMode(%q) = %q, %v; want %q", value, got, err, wantNetworkModeError(value))
+		}
+	}
+}
+
+// spt verify keeps its exact check: only the run and replay normaliser accepts other spellings.
 func TestValidateNetworkModeAcceptsOnlyHostAndBridge(t *testing.T) {
 	for _, value := range []string{constants.HostNetworkMode, constants.BridgeNetworkMode} {
 		if err := validateNetworkMode(value); err != nil {
@@ -47,8 +82,10 @@ func TestValidateNetworkModeAcceptsOnlyHostAndBridge(t *testing.T) {
 }
 
 // runNetworkModeRouteCalls counts every Docker, port and start call spt run makes on its routes.
+// mode is the network mode the local launch options or the remote orchestrator carried.
 type runNetworkModeRouteCalls struct {
 	port, connect, local, remote int
+	mode                         string
 }
 
 var errNetworkModeRouteReached = errors.New("network mode route reached")
@@ -76,13 +113,15 @@ func stubRunNetworkModeRoutes(t *testing.T) *runNetworkModeRouteCalls {
 	}
 	startLocalHeadlessRunFunc = func(_ string, _ string, _ scenario.Params, options headless.HeadlessOptions) error {
 		calls.local++
+		calls.mode = options.NetworkMode
 		options.LaunchHooks.NotifySubmitted()
 		return errNetworkModeRouteReached
 	}
 	startMultiHostHeadlessRunFunc = func(
-		_ *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params, options headless.HeadlessOptions,
+		orchestrator *tui.MultiHostOrchestrator, _ string, _ string, _ scenario.Params, options headless.HeadlessOptions,
 	) error {
 		calls.remote++
+		calls.mode = orchestrator.NetworkMode()
 		options.LaunchHooks.NotifySubmitted()
 		return errNetworkModeRouteReached
 	}
@@ -95,7 +134,7 @@ func TestRunCmdRefusesAnUnknownNetworkModeBeforeAnyStart(t *testing.T) {
 		{"lone remote", "entry.example", "1"},
 		{"distributed", "entry.example,worker.example", "2"},
 	} {
-		for _, value := range []string{"hots", "Host", ""} {
+		for _, value := range refusedNetworkModes {
 			t.Run(fmt.Sprintf("%s %q", route.name, value), func(t *testing.T) {
 				dir := t.TempDir()
 				t.Chdir(dir)
@@ -134,6 +173,12 @@ func TestRunCmdRefusesAnUnknownNetworkModeBeforeAnyStart(t *testing.T) {
 	}
 }
 
+// acceptedNetworkModes are the unset flag ("") and every accepted spelling, with the mode each must
+// select on every route.
+func acceptedNetworkModes() []struct{ value, want string } {
+	return append([]struct{ value, want string }{{"", constants.HostNetworkMode}}, networkModeSpellings...)
+}
+
 func TestRunCmdAcceptsHostBridgeAndTheDefaultNetworkMode(t *testing.T) {
 	for _, route := range []struct {
 		name, hosts, minHosts string
@@ -145,9 +190,10 @@ func TestRunCmdAcceptsHostBridgeAndTheDefaultNetworkMode(t *testing.T) {
 		{name: "lone remote", hosts: "entry.example", minHosts: "1", wantRemote: 1, wantConnect: 1, bridgeWarns: true},
 		{name: "distributed", hosts: "entry.example,worker.example", minHosts: "2", wantRemote: 1, wantConnect: 1, bridgeWarns: true},
 	} {
-		for _, value := range []string{"", constants.HostNetworkMode, constants.BridgeNetworkMode} {
-			label := value
-			if label == "" {
+		for _, accepted := range acceptedNetworkModes() {
+			value := accepted.value
+			label := fmt.Sprintf("%q", value)
+			if value == "" {
 				label = "unset"
 			}
 			t.Run(route.name+" "+label, func(t *testing.T) {
@@ -167,11 +213,17 @@ func TestRunCmdAcceptsHostBridgeAndTheDefaultNetworkMode(t *testing.T) {
 				if !errors.Is(runErr, errNetworkModeRouteReached) {
 					t.Fatalf("RunE() error = %v, want the route sentinel", runErr)
 				}
-				want := runNetworkModeRouteCalls{port: route.wantPort, connect: route.wantConnect, local: route.wantLocal, remote: route.wantRemote}
+				want := runNetworkModeRouteCalls{
+					port: route.wantPort, connect: route.wantConnect, local: route.wantLocal, remote: route.wantRemote,
+					mode: accepted.want,
+				}
 				if *calls != want {
 					t.Fatalf("route calls = %+v, want %+v", *calls, want)
 				}
-				wantWarning := route.bridgeWarns && value == constants.BridgeNetworkMode
+				if got, _ := runCmd.Flags().GetString("network-mode"); got != accepted.want {
+					t.Fatalf("--network-mode after the run = %q, want the normalised %q", got, accepted.want)
+				}
+				wantWarning := route.bridgeWarns && accepted.want == constants.BridgeNetworkMode
 				if got := strings.Contains(stdout, runBridgeWarning); got != wantWarning {
 					t.Fatalf("bridge warning printed = %t, want %t:\n%s", got, wantWarning, stdout)
 				}
@@ -210,8 +262,11 @@ java -jar ${MONGOOSE_DIR}/mongoose.jar --item-output-path=${BUCKET} --test-scena
 }
 
 // replayNetworkModeCalls counts every port check, orchestrator and connect call spt replay makes.
+// mode is the network mode the remote orchestrator carried when it connected; the local route stops
+// at its port check, so TestReplayCommandPassesTheNormalisedNetworkModeToTheLocalLaunch covers it.
 type replayNetworkModeCalls struct {
 	port, multi, single, connect int
+	mode                         string
 }
 
 var errReplayNetworkModeConnect = errors.New("stop at replay connect")
@@ -241,8 +296,9 @@ func stubReplayNetworkModeRoutes(t *testing.T) *replayNetworkModeCalls {
 		calls.single++
 		return previousSingle(hostInfos, minHosts, rmiConfig)
 	}
-	connectReplayOrchestrator = func(context.Context, *tui.MultiHostOrchestrator) error {
+	connectReplayOrchestrator = func(_ context.Context, orchestrator *tui.MultiHostOrchestrator) error {
 		calls.connect++
+		calls.mode = orchestrator.NetworkMode()
 		return errReplayNetworkModeConnect
 	}
 	return calls
@@ -250,7 +306,7 @@ func stubReplayNetworkModeRoutes(t *testing.T) *replayNetworkModeCalls {
 
 func TestReplayCommandRefusesAnUnknownNetworkModeBeforeAnyFetchOrStart(t *testing.T) {
 	for _, hosts := range []string{"127.0.0.1", "qa-client-01", "qa-entry-01,qa-worker-01"} {
-		for _, value := range []string{"hots", "Host", ""} {
+		for _, value := range refusedNetworkModes {
 			t.Run(fmt.Sprintf("%s %q", hosts, value), func(t *testing.T) {
 				server, requests := newNetworkModeReplayArchive(t)
 				calls := stubReplayNetworkModeRoutes(t)
@@ -305,9 +361,10 @@ func TestReplayCommandAcceptsHostBridgeAndTheDefaultNetworkMode(t *testing.T) {
 		{name: "lone remote", hosts: "qa-client-01", want: replayNetworkModeCalls{single: 1, connect: 1}},
 		{name: "distributed", hosts: "qa-entry-01,qa-worker-01", want: replayNetworkModeCalls{multi: 1, connect: 1}, bridgeWarns: true},
 	} {
-		for _, value := range []string{"", constants.HostNetworkMode, constants.BridgeNetworkMode} {
-			label := value
-			if label == "" {
+		for _, accepted := range acceptedNetworkModes() {
+			value := accepted.value
+			label := fmt.Sprintf("%q", value)
+			if value == "" {
 				label = "unset"
 			}
 			t.Run(route.name+" "+label, func(t *testing.T) {
@@ -333,14 +390,68 @@ func TestReplayCommandAcceptsHostBridgeAndTheDefaultNetworkMode(t *testing.T) {
 				if requests.Load() == 0 {
 					t.Fatal("a valid replay did not fetch its archive")
 				}
-				if *calls != route.want {
-					t.Fatalf("replay calls = %+v, want %+v", *calls, route.want)
+				want := route.want
+				if want.connect > 0 {
+					want.mode = accepted.want
 				}
-				wantWarning := route.bridgeWarns && value == constants.BridgeNetworkMode
+				if *calls != want {
+					t.Fatalf("replay calls = %+v, want %+v", *calls, want)
+				}
+				wantWarning := route.bridgeWarns && accepted.want == constants.BridgeNetworkMode
 				if got := strings.Contains(out.String(), replayBridgeWarning); got != wantWarning {
 					t.Fatalf("bridge warning printed = %t, want %t:\n%s", got, wantWarning, out.String())
 				}
 			})
 		}
+	}
+}
+
+func TestReplayCommandPassesTheNormalisedNetworkModeToTheLocalLaunch(t *testing.T) {
+	for _, accepted := range acceptedNetworkModes() {
+		t.Run(fmt.Sprintf("%q", accepted.value), func(t *testing.T) {
+			server, _ := newNetworkModeReplayArchive(t)
+			t.Cleanup(installReplayEngineInfoSeams(t))
+			resolvePortConflictFunc = func(context.Context, string, bool) (*portcheck.ResolutionResult, error) {
+				return &portcheck.ResolutionResult{Success: true}, nil
+			}
+			shouldReplayRunHeadless = func(*cobra.Command) bool { return true }
+			var launched []string
+			startReplayLocalHeadless = func(
+				_ string, _ string, _ scenario.Params, options headless.HeadlessOptions, _ []byte, _ []byte,
+			) error {
+				launched = append(launched, options.NetworkMode)
+				return errNetworkModeRouteReached
+			}
+			startReplayAutoResultsMonitor = func(
+				context.Context, string, string, string, []string, int64,
+				bool, []*hostparse.HostInfo, string, bool, int, string,
+				*runMetadata, io.Writer, io.Writer, string, func(context.Context),
+				...*integrity.FinalizeOptions,
+			) *autoResultsMonitor {
+				done := make(chan autoResultsOutcome, 1)
+				done <- autoResultsOutcome{}
+				return &autoResultsMonitor{done: done, armed: make(chan struct{})}
+			}
+
+			cmd := newReplayCommandForTest(t)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			args := []string{
+				"--from", server.URL,
+				"--endpoints", "http://10.0.0.1:9020",
+				"--test-hosts", "127.0.0.1",
+				"--results-dir", t.TempDir(),
+			}
+			if accepted.value != "" {
+				args = append(args, "--network-mode", accepted.value)
+			}
+			cmd.SetArgs(args)
+			if err := cmd.Execute(); !errors.Is(err, errNetworkModeRouteReached) {
+				t.Fatalf("Execute() error = %v, want the launch sentinel", err)
+			}
+			if len(launched) != 1 || launched[0] != accepted.want {
+				t.Fatalf("local launch network modes = %q, want [%q]", launched, accepted.want)
+			}
+		})
 	}
 }

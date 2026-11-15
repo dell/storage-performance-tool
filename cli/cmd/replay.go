@@ -65,9 +65,9 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	if strings.TrimSpace(sourceURL) == "" {
 		return fmt.Errorf("--from URL is required")
 	}
-	// Refuse a --network-mode typo before the archive is fetched or any host is contacted.
-	networkModeFlag, _ := cmd.Flags().GetString("network-mode")
-	if err := validateNetworkMode(networkModeFlag); err != nil {
+	// Refuse a --network-mode typo, and normalise an accepted spelling for every route, before the
+	// archive is fetched or any host is contacted.
+	if err := normalizeNetworkModeFlag(cmd); err != nil {
 		return err
 	}
 	registryPort, err := replayRMIRegistryPort(cmd)
