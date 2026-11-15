@@ -5,6 +5,7 @@ import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.composite.CompositeOperation;
+import com.github.akurilov.commons.collection.Range;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -176,5 +177,38 @@ class DataOperationsBuilderImplTest {
 		assertFalse(builder.buildOp(newItem("obj", 1000)) instanceof CompositeOperation);
 		builder.opType(OpType.CREATE);
 		assertTrue(builder.buildOp(newItem("obj", 1000)) instanceof CompositeDataOperation);
+	}
+
+	/** CREATE and READ still build composites above the threshold, so ranges stay refused for them. */
+	@ParameterizedTest
+	@EnumSource(value = OpType.class, names = {"CREATE", "READ"
+	})
+	void multipartTypesStillRejectRangesWithAThreshold(final OpType opType) {
+		for (final boolean thresholdFirst : List.of(true, false)) {
+			final var random = builder(opType, thresholdFirst).randomRangesCount(1);
+			assertThrows(IllegalArgumentException.class, () -> random.buildOp(newItem("obj", 1000)));
+			assertThrows(IllegalArgumentException.class,
+							() -> random.buildOps(List.of(newItem("obj", 1000)), new ArrayList<>()));
+			final var fixed = builder(opType, thresholdFirst).fixedRanges(new ArrayList<>(List.of(new Range(0, 9, -1))));
+			assertThrows(IllegalArgumentException.class, () -> fixed.buildOp(newItem("obj", 1000)));
+			assertThrows(IllegalArgumentException.class,
+							() -> fixed.buildOps(List.of(newItem("obj", 1000)), new ArrayList<>()));
+		}
+	}
+
+	/** An UPDATE with byte ranges and a threshold now runs as a ranged UPDATE, as with no threshold. */
+	@Test
+	void updateWithRangesAndAThresholdBuildsARangedUpdate() throws Exception {
+		for (final boolean thresholdFirst : List.of(true, false)) {
+			final var builder = builder(OpType.UPDATE, thresholdFirst).randomRangesCount(1);
+			final var op = builder.buildOp(newItem("obj", 1000));
+			assertFalse(op instanceof CompositeOperation);
+			assertEquals(OpType.UPDATE, op.type());
+			assertEquals(1, op.randomRangesCount());
+			final List<DataOperation<DataItemImpl>> out = new ArrayList<>();
+			builder.buildOps(List.of(newItem("a", 1000)), out);
+			assertFalse(out.get(0) instanceof CompositeOperation);
+			assertEquals(1, out.get(0).randomRangesCount());
+		}
 	}
 }
