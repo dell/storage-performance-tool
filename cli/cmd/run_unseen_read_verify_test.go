@@ -601,6 +601,16 @@ func TestVerificationUnseenCompletedProducerOfANonEmptySelectionFinalizes(t *tes
 	}
 }
 
+// unverifiedReason is the exit-1 reason for a complete selection that left objects unverified.
+func unverifiedReason(verified, selected int) string {
+	verb := "remain"
+	if selected-verified == 1 {
+		verb = "remains"
+	}
+	return fmt.Sprintf("verification verified %d of %d selected objects; %d %s unverified",
+		verified, selected, selected-verified, verb)
+}
+
 // A recovered producer must not let a selection pass when ordinary READ failures, which are not
 // corruption, left some selected objects unverified.
 func TestVerificationRecoveredProducerRequiresEveryObjectVerified(t *testing.T) {
@@ -616,14 +626,54 @@ func TestVerificationRecoveredProducerRequiresEveryObjectVerified(t *testing.T) 
 				got := runUnseenRead(t, run)
 
 				requireExitCode(t, got.err, constants.ExitCodeWorkloadFailure)
-				requireReasons(t, got.err, []string{fmt.Sprintf(
-					"verification verified %d of 3 selected objects; %d remain unverified", verified, 3-verified)},
-					[]string{"corrupt object"})
+				requireReasons(t, got.err, []string{unverifiedReason(verified, 3)}, []string{"corrupt object"})
 				if want := []string{producer, read}; !slices.Equal(got.fetched, want) {
 					t.Fatalf("fetched %v, want %v", got.fetched, want)
 				}
 				if !got.outcome.ProducerRecovered {
 					t.Fatal("the missed producer was not marked recovered")
+				}
+			})
+		}
+	}
+}
+
+// Every route, not only a recovered producer, exits 1 when ordinary READ failures, which are not
+// corruption, left selected objects unverified: S3_INTEGRITY.md says a verify run exits 1 when its
+// selection was not fully verified. Every step is seen live with a live corruption count of 0. A
+// fully verified selection still passes.
+func TestVerificationEveryStepSeenRequiresEveryObjectVerified(t *testing.T) {
+	for _, kind := range []unseenPlanKind{unseenReadDiscovered, unseenReadExternal, unseenWriteRead} {
+		for _, verified := range []int{0, 2, 3} {
+			t.Run(fmt.Sprintf("kind=%d/verified=%d", kind, verified), func(t *testing.T) {
+				run := unseenReadRun{
+					kind: kind, readLifecycle: portcheck.StepLifecycleCompleted,
+					producerLifecycle: portcheck.StepLifecycleCompleted, selected: 3,
+					readFailures: 3 - verified, liveReadRow: true,
+				}
+				producer, read := run.steps()
+				run.observed = []string{read}
+				if producer != "" {
+					run.observed = []string{producer, read}
+				}
+				got := runUnseenRead(t, run)
+
+				if verified == 3 {
+					if got.err != nil {
+						t.Fatalf("fully verified selection failed: %v", got.err)
+					}
+				} else {
+					requireExitCode(t, got.err, constants.ExitCodeWorkloadFailure)
+					requireReasons(t, got.err, []string{unverifiedReason(verified, 3)}, []string{"corrupt object"})
+				}
+				final := got.outcome.Finalization
+				if final == nil || !final.Complete || final.SelectionCount != 3 ||
+					final.VerifiedCount != int64(verified) || final.CorruptCount != 0 {
+					t.Fatalf("finalization = %+v", final)
+				}
+				if got.outcome.ProducerRecovered || got.outcome.LiveCorruptionUnobserved {
+					t.Fatalf("recovered = %t, unobserved = %t",
+						got.outcome.ProducerRecovered, got.outcome.LiveCorruptionUnobserved)
 				}
 			})
 		}
