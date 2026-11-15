@@ -5,7 +5,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.Request;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
+import com.dell.spt.base.load.step.file.FileManager;
+import com.dell.spt.base.logging.Loggers;
 import io.netty.channel.epoll.Epoll;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -46,16 +51,15 @@ final class S3MultipartStepCountsTest {
 	 */
 	private static final long ENDS_WITHIN_MILLIS = TimeUnit.SECONDS.toMillis(45);
 	/**
-	 * The {@code load-op-wait-limit} of the other steps, above {@link #ENDS_WITHIN_MILLIS} in place of
+	 * The steps' {@code load-op-wait-limit}, above {@link #ENDS_WITHIN_MILLIS} in place of
 	 * the shipped 30 s: a step that ends its count with an operation unresolved waits out this limit, so
 	 * it fails {@link #assertEnded()} instead of ending inside the bound.
 	 */
 	private static final int LONG_WAIT_LIMIT_SECONDS = 60;
-	/** A short {@code load-op-wait-limit}, for the steps whose end waits for an aborted upload's parts. */
-	private static final int WAIT_LIMIT_SECONDS = 2;
 
 	private final NicSetLoopback stub = new NicSetLoopback();
 	private long stepMillis;
+	private String stepId;
 
 	@TempDir
 	Path tempDir;
@@ -182,9 +186,9 @@ final class S3MultipartStepCountsTest {
 
 	/**
 	 * At concurrency 4, two parts of one upload run out of retries while its other parts and other
-	 * uploads are in flight. The step's end waits for the aborted upload's other parts up to
-	 * {@code load-op-wait-limit} (multipart-abort-sibling-drain), set short here; the counts are final
-	 * before it.
+	 * uploads are in flight. Once the upload is aborted, its other failed part is not retried, so the
+	 * step ends when its last operation does, with nothing unresolved, instead of waiting out its
+	 * {@code load-op-wait-limit}.
 	 */
 	@Test
 	void atConcurrency4AnUploadWhoseTwoPartsRunOutOfRetriesIsOneFailure() throws Exception {
@@ -199,7 +203,7 @@ final class S3MultipartStepCountsTest {
 	private void atConcurrency4AnUploadWhoseTwoPartsRunOutOfRetriesIsOneFailure(final boolean retry) throws Exception {
 		stub.failRequest = partsOfOneUpload(Set.of("1", "2"));
 
-		final var outcomes = write(8, 4, retry, null, WAIT_LIMIT_SECONDS);
+		final var outcomes = write(8, 4, retry, null);
 
 		if (retry) {
 			assertEquals(List.of(8L, 0L), outcomes.get("CREATE-4"), outcomes::toString);
@@ -209,6 +213,7 @@ final class S3MultipartStepCountsTest {
 			assertRequests(8, 7, 1);
 		}
 		assertEnded();
+		assertNoneUnresolved();
 	}
 
 	/**
@@ -260,7 +265,7 @@ final class S3MultipartStepCountsTest {
 			return true;
 		};
 
-		final var outcomes = write(4, 4, retry, null, WAIT_LIMIT_SECONDS);
+		final var outcomes = write(4, 4, retry, null);
 
 		if (retry) {
 			assertEquals(List.of(4L, 0L), outcomes.get("CREATE-4"), outcomes::toString);
@@ -270,6 +275,7 @@ final class S3MultipartStepCountsTest {
 			assertRequests(4, 3, 1);
 		}
 		assertEnded();
+		assertNoneUnresolved();
 	}
 
 	private static void sleep(final long millis) {
@@ -301,12 +307,13 @@ final class S3MultipartStepCountsTest {
 	private void atConcurrency4UploadsWhosePartsRunOutOfRetriesAreEachOneFailure(final boolean retry) throws Exception {
 		stub.failParts = true;
 
-		final var outcomes = write(4, 4, retry, null, WAIT_LIMIT_SECONDS);
+		final var outcomes = write(4, 4, retry, null);
 
 		assertEquals(List.of(0L, 4L), outcomes.get("CREATE-4"), outcomes::toString);
 		final var attempts = retry ? 8 : 4;
 		assertRequests(attempts, 0, attempts);
 		assertEnded();
+		assertNoneUnresolved();
 	}
 
 	@Test
@@ -527,11 +534,6 @@ final class S3MultipartStepCountsTest {
 	/** A step of {@code count} 5 KB uploads of five 1 KB parts. */
 	private Map<String, List<Long>> write(final int count, final int concurrency, final boolean retry,
 					final NicSetLoopback.Factory factory) throws Exception {
-		return write(count, concurrency, retry, factory, LONG_WAIT_LIMIT_SECONDS);
-	}
-
-	private Map<String, List<Long>> write(final int count, final int concurrency, final boolean retry,
-					final NicSetLoopback.Factory factory, final int waitLimitSeconds) throws Exception {
 		return timed(factory, """
 						Load.config({
 							"load": {
@@ -541,7 +543,7 @@ final class S3MultipartStepCountsTest {
 							"storage": {"driver": {"limit": {"concurrency": %d}}},
 							"item": {"data": {"size": "5KB", "ranges": {"threshold": "1KB"}}}
 						}).run();
-						""".formatted(TIME_LIMIT, count, retry, waitLimitSeconds, concurrency));
+						""".formatted(TIME_LIMIT, count, retry, LONG_WAIT_LIMIT_SECONDS, concurrency));
 	}
 
 	/** Writes four 5 KB objects whole, then reads each in five 1 KB ranges in a step of its own. */
@@ -565,8 +567,8 @@ final class S3MultipartStepCountsTest {
 
 	private Map<String, List<Long>> timed(final NicSetLoopback.Factory factory, final String scenario) throws Exception {
 		final var started = System.nanoTime();
-		final var outcomes = S3NicSetWorkloadTest.runScenario(stub.listeners(1), factory,
-						"multipart-counts-" + System.nanoTime(), scenario);
+		stepId = "multipart-counts-" + System.nanoTime();
+		final var outcomes = S3NicSetWorkloadTest.runScenario(stub.listeners(1), factory, stepId, scenario);
 		stepMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
 		return outcomes;
 	}
@@ -605,6 +607,18 @@ final class S3MultipartStepCountsTest {
 	private void assertEnded() {
 		assertTrue(stepMillis < ENDS_WITHIN_MILLIS, () -> "the step took " + stepMillis + " ms");
 		assertEquals(0, stub.openUploads(), "no upload stays open");
+	}
+
+	/** The step's {@code operation.lifecycle.csv} reconciles, with no operation left unresolved. */
+	private void assertNoneUnresolved() throws IOException {
+		final var lines = Files.readAllLines(
+						Path.of(FileManager.INSTANCE.logFileName(Loggers.OPERATION_LIFECYCLE.getName(), stepId)));
+		assertEquals(OperationLifecycleArtifact.HEADER, lines.get(0));
+		assertEquals(2, lines.size(), lines::toString);
+		final var header = List.of(lines.get(0).split(",", -1));
+		final var row = lines.get(1).split(",", -1);
+		assertEquals("0", row[header.indexOf("unresolved")], () -> "unresolved operations: " + lines);
+		assertEquals("true", row[header.indexOf("terminal")], () -> "the lifecycle reconciles: " + lines);
 	}
 
 	private static long count(final List<Request> requests, final Predicate<Request> which) {

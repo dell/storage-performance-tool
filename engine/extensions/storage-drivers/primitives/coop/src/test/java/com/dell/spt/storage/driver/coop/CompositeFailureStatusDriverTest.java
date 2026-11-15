@@ -1,6 +1,7 @@
 package com.dell.spt.storage.driver.coop;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -15,6 +16,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperationImpl;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
 import java.util.List;
@@ -86,6 +88,65 @@ final class CompositeFailureStatusDriverTest {
 		runOutOfRetries(upload, parts.get(1), Operation.Status.RESP_FAIL_NOT_FOUND);
 
 		assertEquals(Operation.Status.RESP_FAIL_SVC.name(), upload.get("mpuFailure"));
+		assertEquals(Operation.Status.RESP_FAIL_SVC, CoopStorageDriverBase.abortedUploadStatus(upload));
+	}
+
+	/** {@code op} crosses dispatch from the driver's queue, as the dispatch task submits it. */
+	private void dispatch(final Operation<?> op) {
+		final var queued = (Operation<Item>) op;
+		assertTrue(driver.childOpQueue.remove(queued), () -> op + " was queued");
+		assertTrue(driver.claimDispatchOwnership(queued), () -> op + " crossed dispatch");
+	}
+
+	/** {@code part}'s attempt ends with {@code status} and reaches the driver's completion. */
+	private void complete(
+					final CompositeDataOperationImpl<DataItem> composite,
+					final PartialDataOperationImpl<DataItem> part,
+					final Operation.Status status) {
+		part.status(status);
+		composite.markSubTaskCompleted();
+		assertTrue(driver.handleCompleted((Operation<Item>) (Operation<?>) part));
+	}
+
+	/**
+	 * At concurrency 4, three parts of an upload are in flight. Part 1 runs out of retries on 503, the
+	 * upload is aborted and the abort ends it. Part 2 then fails with retries left, on 404 as S3 answers
+	 * a part of an aborted upload, and part 3 succeeds. Part 2 is not retried: a retry would take the
+	 * ended upload's lifecycle back, and the upload would get no second terminal result, so the step's
+	 * end would wait for it until {@code load-op-wait-limit} and report it unresolved.
+	 */
+	@Test
+	void aPartThatFailsAfterItsUploadWasAbortedIsNotRetried() {
+		final var lifecycle = driver.operationLifecycle();
+		final var upload = composite(OpType.CREATE);
+		// The initiation is answered and the driver queues every part.
+		assertTrue(lifecycle.driverQueued((Operation<Item>) (Operation<?>) upload));
+		assertTrue(driver.claimDispatchOwnership((Operation<Item>) (Operation<?>) upload));
+		upload.status(Operation.Status.SUCC);
+		assertTrue(driver.handleCompleted((Operation<Item>) (Operation<?>) upload));
+		final var parts = (List<PartialDataOperationImpl<DataItem>>) (List<?>) upload.subOperations();
+		assertEquals(3, parts.size());
+		parts.forEach(this::dispatch);
+
+		for (int i = 0; i < CoopStorageDriverBase.MAX_PART_RETRIES; i++) {
+			parts.get(0).incrementRetryCount();
+		}
+		complete(upload, parts.get(0), Operation.Status.RESP_FAIL_SVC);
+		assertEquals("true", upload.get("mpuAbort"));
+		// The abort, the upload's finalization, ends it.
+		dispatch(upload);
+		upload.status(CoopStorageDriverBase.abortedUploadStatus(upload));
+		assertTrue(driver.handleCompleted((Operation<Item>) (Operation<?>) upload));
+		assertEquals(OperationLifecycleState.TERMINAL, lifecycle.stateOf((Operation<Item>) (Operation<?>) upload));
+
+		complete(upload, parts.get(1), Operation.Status.RESP_FAIL_NOT_FOUND);
+		complete(upload, parts.get(2), Operation.Status.SUCC);
+
+		assertEquals(0, parts.get(1).retryCount(), "a part of an aborted upload is not retried");
+		assertTrue(driver.childOpQueue.isEmpty(), () -> "nothing is queued after the abort: " + driver.childOpQueue);
+		assertEquals(OperationLifecycleState.TERMINAL, lifecycle.stateOf((Operation<Item>) (Operation<?>) upload),
+						"the upload's one terminal result stands");
+		assertFalse(lifecycle.hasOutstandingOperations(), () -> "nothing is outstanding: " + lifecycle.snapshot());
 		assertEquals(Operation.Status.RESP_FAIL_SVC, CoopStorageDriverBase.abortedUploadStatus(upload));
 	}
 

@@ -913,7 +913,10 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			boolean enqueueFinalization;
 			synchronized (parentOp) {
 				if (op.status() != Operation.Status.SUCC) {
-					if (subOp.retryCount() < MAX_PART_RETRIES) {
+					// A part of an aborted upload is not retried: its retry would take the ended upload's
+					// lifecycle back, and the upload gets no second terminal result, so the step's end
+					// would wait for it. It falls to the exhausted path, which keeps the first failure.
+					if (subOp.retryCount() < MAX_PART_RETRIES && parentOp.get("mpuAbort") == null) {
 						// retry the individual part instead of aborting the whole MPU
 						final var failStatus = op.status();
 						subOp.incrementRetryCount();
