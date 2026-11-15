@@ -568,8 +568,8 @@ depends on the driver:
   driver, and act on its `Status`:
   * `Enabled`: nothing is sent; the notice says versioning is already enabled.
   * No `Status`, so the bucket has never been versioned: `PUT ?versioning` enables it, signed with the bucket's
-    credential and carrying the configured headers, as the check is. Versioning stays on after the run. The notice
-    says it was enabled by this run, or warns that it could not be enabled, with the status or the timeout.
+    credential and carrying the configured headers, as the check is. Versioning stays on after the run. A warning
+    says it was enabled by this run, or that it could not be enabled, with the status or the timeout.
   * `Suspended`, with or without MFA delete: an administrator chose it, so nothing is sent, and a warning says the
     bucket was left alone.
   * Any other status: SPT doesn't recognize it and leaves it alone, so nothing is sent, and a warning quotes it.
@@ -577,7 +577,8 @@ depends on the driver:
     `VersioningConfiguration` SPT can read: nothing is sent, and a warning names the bucket and the cause.
 
   The body is read by element name, whatever namespace prefix, declarations or attributes it carries. After a warning
-  the run goes on un-versioned. Notices go to the step's `messages.log` and warnings to `errors.log`.
+  the run goes on un-versioned, unless the warning says this run enabled versioning. The notice that versioning is
+  already enabled goes to the step's `messages.log`, and every warning to `errors.log`.
   On a distributed run the entry engine copies each worker's notices into its own two logs, prefixed with the node,
   when the step stops and before it publishes the total metrics. Each read of the workers' notices, when the step
   starts, stops and closes, waits at most 10 seconds, and a worker that doesn't answer in time is left out with a

@@ -79,7 +79,7 @@ class BucketVersioningRelayTest {
 		final var relay = relay(step, managers, List.of("node-b:1099", "node-c:1099", "node-d:1099"), 10_000);
 		Files.createDirectories(file1.getParent());
 		Files.writeString(file1, "CHECK bucket b1\n"
-						+ "INFO bucket b1: versioning enabled by this run (the bucket had never been versioned)\n"
+						+ "INFO bucket b1: versioning is already enabled\n"
 						+ "DONE bucket b1\n"
 						+ "CHECK bucket b2\n"
 						+ "WARN bucket b2: versioning is suspended; SPT left it alone, and the run goes on un-versioned\n"
@@ -89,8 +89,7 @@ class BucketVersioningRelayTest {
 
 		// Each node is read on a thread of its own, so only each node's own records keep their order.
 		assertEquals(List.of(
-						"INFO " + step + ": node 001 (node-b:1099): bucket b1: versioning enabled by this run"
-										+ " (the bucket had never been versioned)",
+						"INFO " + step + ": node 001 (node-b:1099): bucket b1: versioning is already enabled",
 						"WARN " + step + ": node 001 (node-b:1099): bucket b2: versioning is suspended; SPT left it"
 										+ " alone, and the run goes on un-versioned"),
 						relayed.stream().filter(record -> record.contains("node 001")).toList());
@@ -141,7 +140,7 @@ class BucketVersioningRelayTest {
 			} catch (final InterruptedException e) {
 				return;
 			}
-			BucketVersioningNotice.info(step, "bucket b5: versioning enabled by this run");
+			BucketVersioningNotice.info(step, "bucket b5: versioning is already enabled");
 			check.close();
 		});
 
@@ -151,7 +150,7 @@ class BucketVersioningRelayTest {
 		// A check still open would be named now, as it is at the stop.
 		relay.close();
 
-		assertEquals(List.of("INFO " + step + ": node 001 (node-b:1099): bucket b5: versioning enabled by this run"), atStop,
+		assertEquals(List.of("INFO " + step + ": node 001 (node-b:1099): bucket b5: versioning is already enabled"), atStop,
 						"the stop waited for the check: its notice, and no WARN that it had not ended");
 		assertEquals(atStop, relayed, "the check was cleared: the close names no open check");
 	}

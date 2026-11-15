@@ -211,7 +211,7 @@ final class S3FirstUseBucketCheckTest {
 						new Captured("HEAD", "/bench-0", null),
 						new Captured("GET", "/bench-0", "versioning"),
 						new Captured("PUT", "/bench-0", "versioning")), requests);
-		notices.awaitOnly("bench-0", Level.INFO, "versioning enabled by this run");
+		notices.awaitOnly("bench-0", Level.WARN, "versioning enabled by this run");
 	}
 
 	@Test
@@ -234,7 +234,7 @@ final class S3FirstUseBucketCheckTest {
 		assertEquals("/ver-never/p", driver.requestNewPath("/ver-never/p"));
 
 		assertEquals(1, versioningPuts(), requests::toString);
-		notices.awaitOnly("ver-never", Level.INFO, "versioning enabled by this run");
+		notices.awaitOnly("ver-never", Level.WARN, "versioning enabled by this run");
 	}
 
 	@Test
@@ -567,7 +567,7 @@ final class S3FirstUseBucketCheckTest {
 
 		assertEquals(1, driver.enables);
 		assertEquals(1, versioningPuts(), requests::toString);
-		notices.awaitOnly("ver-hook3", Level.INFO, "versioning enabled by this run");
+		notices.awaitOnly("ver-hook3", Level.WARN, "versioning enabled by this run");
 	}
 
 	/** A driver extension that overrides the two protected hooks, as one written for 5.17.0 can. */

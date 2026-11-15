@@ -829,7 +829,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		}
 		try {
 			if (HttpStatusClass.SUCCESS.equals(putBucketVersioningResp.status().codeClass())) {
-				BucketVersioningNotice.info(stepId, bucketLabel(bucketPath)
+				// A WARN (owner, 2026-11-15): the run changed the bucket, so it is reported at any level up to WARN.
+				BucketVersioningNotice.warn(stepId, bucketLabel(bucketPath)
 								+ ": versioning enabled by this run (the bucket had never been versioned)");
 			} else {
 				BucketVersioningNotice.warn(stepId, versioningNotEnabled(

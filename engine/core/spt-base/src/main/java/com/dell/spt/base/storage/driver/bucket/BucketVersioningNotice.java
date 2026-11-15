@@ -49,12 +49,15 @@ public final class BucketVersioningNotice {
 		DONE
 	}
 
-	/** Logs an INFO notice: {@code text} names the bucket and what was found or changed. */
+	/** Logs an INFO notice: {@code text} names the bucket and what was found, with nothing changed. */
 	public static void info(final String stepId, final String text) {
 		log(Kind.INFO, stepId, text);
 	}
 
-	/** Logs a WARN notice: {@code text} names the bucket, what went wrong, and what the run does. */
+	/**
+	 * Logs a WARN notice: {@code text} names the bucket, what went wrong or what the run changed on it, and what
+	 * the run does.
+	 */
 	public static void warn(final String stepId, final String text) {
 		log(Kind.WARN, stepId, text);
 	}

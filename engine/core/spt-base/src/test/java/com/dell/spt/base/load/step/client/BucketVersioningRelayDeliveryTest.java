@@ -124,7 +124,7 @@ class BucketVersioningRelayDeliveryTest {
 			Loggers.TEST.info("block " + step);
 			assertTrue(entered.await(5, TimeUnit.SECONDS));
 
-			BucketVersioningNotice.info(step, "bucket b: versioning enabled by this run");
+			BucketVersioningNotice.info(step, "bucket b: versioning is already enabled");
 			relay.close();
 		} finally {
 			release.countDown();
@@ -132,7 +132,7 @@ class BucketVersioningRelayDeliveryTest {
 			blocker.stop();
 		}
 
-		assertEquals(List.of("INFO " + step + ": node 001 (worker): bucket b: versioning enabled by this run"), relayed);
+		assertEquals(List.of("INFO " + step + ": node 001 (worker): bucket b: versioning is already enabled"), relayed);
 	}
 
 	@Test
@@ -140,7 +140,7 @@ class BucketVersioningRelayDeliveryTest {
 		final var step = "relay-reused-" + System.nanoTime();
 		final var file = noticeFile(step);
 		try (final var ctx = CloseableThreadContext.put(Constants.KEY_STEP_ID, step)) {
-			BucketVersioningNotice.info(step, "bucket old: versioning enabled by this run");
+			BucketVersioningNotice.info(step, "bucket old: versioning is already enabled");
 			awaitText(file, "bucket old");
 
 			final var secondRun = relay(step, node(file, step));
@@ -208,7 +208,7 @@ class BucketVersioningRelayDeliveryTest {
 
 		final var slice = mock(LoadStep.class);
 		doAnswer(inv -> {
-			append(file, "INFO bucket w1: versioning enabled by this run (the bucket had never been versioned)\n");
+			append(file, "INFO bucket w1: versioning is already enabled\n");
 			return null;
 		}).when(slice).stop();
 		slices(client).add(slice);
@@ -230,7 +230,7 @@ class BucketVersioningRelayDeliveryTest {
 		capture.start();
 		msg.addAppender(capture);
 		err.addAppender(capture);
-		final var w1 = "INFO " + step + ": node 001 (worker:1099): bucket w1: versioning enabled by this run";
+		final var w1 = "INFO " + step + ": node 001 (worker:1099): bucket w1: versioning is already enabled";
 		final var w2 = "WARN " + step + ": node 001 (worker:1099): bucket w2: could not enable versioning";
 		final var relayedAtTotals = new AtomicBoolean();
 		doAnswer(inv -> {
