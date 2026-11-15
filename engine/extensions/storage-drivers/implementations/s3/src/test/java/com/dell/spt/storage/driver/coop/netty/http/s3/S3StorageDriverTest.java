@@ -57,6 +57,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.apache.logging.log4j.core.config.Property;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mockito;
@@ -2151,9 +2152,9 @@ public class S3StorageDriverTest {
 	@SuppressWarnings("unchecked")
 	private static Channel mockChannelForComplete(String initUploadId) {
 		Channel channel = Mockito.mock(Channel.class);
-		// For INIT phase: channel.attr(KEY_ATTR_UPLOAD_ID).get()
+		// For INIT phase: channel.attr(KEY_ATTR_UPLOAD_ID).getAndSet(null)
 		Attribute<String> uploadIdAttr = Mockito.mock(Attribute.class);
-		Mockito.when(uploadIdAttr.get()).thenReturn(initUploadId);
+		Mockito.when(uploadIdAttr.getAndSet(null)).thenReturn(initUploadId);
 		Mockito.when(channel.attr(S3Api.KEY_ATTR_UPLOAD_ID)).thenReturn(uploadIdAttr);
 		// For super.complete(): report already released to skip connPool interaction
 		Attribute<Boolean> releasedAttr = Mockito.mock(Attribute.class);
@@ -2671,5 +2672,153 @@ public class S3StorageDriverTest {
 		assertEquals("pre/k", S3StorageDriver.multipartKey("/abc/pre/k", "abc"));
 		assertEquals("k", S3StorageDriver.multipartKey("/abc/k", "abc"));
 		assertEquals("abc/k", S3StorageDriver.multipartKey("/abc/k", ""));
+	}
+
+	// ========== A reused connection must not hand an initiation the previous upload ID ==========
+
+	@Nested
+	class StaleUploadIdOnReusedConnection {
+
+		private static final String PREVIOUS_ID = "previous-upload-id";
+		private static final String SENTINEL_ID = "sentinel-upload-id";
+		private static final String INIT_BODY_PREFIX = "<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>obj</Key>";
+		private static final String INIT_BODY_SUFFIX = "</InitiateMultipartUploadResult>";
+
+		private TestS3Driver drv;
+		private S3ResponseHandler<?, ?> handler;
+
+		@org.junit.jupiter.api.BeforeEach
+		void setUp() throws Exception {
+			drv = new TestS3Driver(baseConfig(false, 4, false, null, "s3.us-east-1.amazonaws.com:443"));
+			setOpResultOut(drv);
+			handler = new S3ResponseHandler<>(drv, false, false, null);
+		}
+
+		private static String initBody(final String uploadId) {
+			return INIT_BODY_PREFIX
+							+ (uploadId == null ? "" : "<UploadId>" + uploadId + "</UploadId>")
+							+ INIT_BODY_SUFFIX;
+		}
+
+		/**
+		 * Drives one initiation answer through the real handler and driver completion.
+		 * A null body sends no content chunk; an empty body sends one empty chunk.
+		 */
+		@SuppressWarnings({"rawtypes", "unchecked"
+		})
+		private com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<DataItem> initiate(
+						final EmbeddedChannel channel, final Operation.Status status, final String body)
+						throws Exception {
+			final var op = newCompositeOp(OpType.CREATE, 4096, 1024);
+			op.status(status);
+			channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.TRUE);
+			final var h = (S3ResponseHandler) handler;
+			if (body != null) {
+				h.handleResponseContentChunk(
+								channel, (Operation) op, Unpooled.wrappedBuffer(body.getBytes(StandardCharsets.UTF_8)));
+			}
+			h.handleResponseContentFinish(channel, (Operation) op);
+			return op;
+		}
+
+		/** A connection whose last initiation was answered with {@link #PREVIOUS_ID}. */
+		private EmbeddedChannel reusedChannel() throws Exception {
+			final var channel = new EmbeddedChannel();
+			final var first = initiate(channel, Operation.Status.SUCC, initBody(PREVIOUS_ID));
+			assertEquals(Operation.Status.SUCC, first.status());
+			assertEquals(PREVIOUS_ID, first.get(S3Api.KEY_UPLOAD_ID));
+			assertTrue(channel.isOpen(), "a successful initiation keeps the connection for reuse");
+			return channel;
+		}
+
+		/**
+		 * Runs the second initiation on a reused connection and returns it, checking that the
+		 * multipart log carries the previous upload's ID only in the first initiation's INIT row. A
+		 * sentinel initiation on a fresh connection follows, so its INIT row marks the end of the
+		 * second one's rows.
+		 */
+		private com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<DataItem> secondInitiation(
+						final Operation.Status status, final String body) throws Exception {
+			final var capture = attachCapture(2);
+			final com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<DataItem> second;
+			try {
+				final var channel = reusedChannel();
+				second = initiate(channel, status, body);
+				initiate(new EmbeddedChannel(), Operation.Status.SUCC, initBody(SENTINEL_ID));
+				final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+				while (System.nanoTime() < deadline) {
+					synchronized (capture.messages) {
+						if (capture.messages.stream().anyMatch(m -> m.contains(SENTINEL_ID))) {
+							break;
+						}
+					}
+					Thread.sleep(5);
+				}
+			} finally {
+				detachCapture(capture);
+			}
+			final List<String> rows;
+			synchronized (capture.messages) {
+				rows = new ArrayList<>(capture.messages);
+			}
+			assertTrue(rows.stream().anyMatch(m -> m.contains(SENTINEL_ID)),
+							"the sentinel initiation's INIT row must be captured: " + rows);
+			assertEquals(1, rows.stream().filter(m -> m.contains(PREVIOUS_ID)).count(),
+							"only the first initiation's INIT row may carry its upload ID: " + rows);
+			return second;
+		}
+
+		@Test
+		void successWithoutUploadIdIsNotFoundAndTakesNoPreviousId() throws Exception {
+			final var op = secondInitiation(Operation.Status.SUCC, initBody(null));
+			assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, op.status());
+			assertNull(op.get(S3Api.KEY_UPLOAD_ID));
+		}
+
+		@Test
+		void failureWithErrorBodyKeepsItsStatusAndTakesNoPreviousId() throws Exception {
+			final var op = secondInitiation(
+							Operation.Status.RESP_FAIL_SVC, "<Error><Code>SlowDown</Code></Error>");
+			assertEquals(Operation.Status.RESP_FAIL_SVC, op.status());
+			assertNull(op.get(S3Api.KEY_UPLOAD_ID));
+		}
+
+		@Test
+		void successWithNoBodyTakesNoPreviousId() throws Exception {
+			final var op = secondInitiation(Operation.Status.SUCC, null);
+			assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, op.status());
+			assertNull(op.get(S3Api.KEY_UPLOAD_ID));
+		}
+
+		@Test
+		void successWithEmptyChunkTakesNoPreviousId() throws Exception {
+			final var op = secondInitiation(Operation.Status.SUCC, "");
+			assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, op.status());
+			assertNull(op.get(S3Api.KEY_UPLOAD_ID));
+		}
+
+		@Test
+		void failureWithNoBodyKeepsItsStatusAndTakesNoPreviousId() throws Exception {
+			final var op = secondInitiation(Operation.Status.RESP_FAIL_SVC, null);
+			assertEquals(Operation.Status.RESP_FAIL_SVC, op.status());
+			assertNull(op.get(S3Api.KEY_UPLOAD_ID));
+		}
+
+		@Test
+		void failureWithEmptyChunkKeepsItsStatusAndTakesNoPreviousId() throws Exception {
+			final var op = secondInitiation(Operation.Status.RESP_FAIL_SVC, "");
+			assertEquals(Operation.Status.RESP_FAIL_SVC, op.status());
+			assertNull(op.get(S3Api.KEY_UPLOAD_ID));
+		}
+
+		@Test
+		void initiationWithItsOwnUploadIdStoresItsOwnId() throws Exception {
+			final var channel = reusedChannel();
+			final var second = initiate(channel, Operation.Status.SUCC, initBody("second-upload-id"));
+			assertEquals(Operation.Status.SUCC, second.status());
+			assertEquals("second-upload-id", second.get(S3Api.KEY_UPLOAD_ID));
+			assertNull(channel.attr(S3Api.KEY_ATTR_UPLOAD_ID).get(),
+							"completion consumes the connection's upload ID");
+		}
 	}
 }
