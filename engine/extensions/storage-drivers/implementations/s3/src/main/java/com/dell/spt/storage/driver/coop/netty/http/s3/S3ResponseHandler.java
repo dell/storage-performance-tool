@@ -34,12 +34,16 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.xml.parsers.ParserConfigurationException;
 import org.xml.sax.SAXException;
+import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 /**
@@ -61,6 +65,21 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	private static final int MAX_DELETE_RESPONSE_BYTES = 16 * 1024 * 1024;
 	private static final AtomicIntegerArray DELETE_RESPONSE_DIAGNOSTICS = new AtomicIntegerArray(DeleteResponseDiagnosticClass.values().length);
 	private static final AtomicInteger ACTIVE_LIST_SPOOLS = new AtomicInteger();
+	/**
+	 * How much of a 2xx completion body is read for an S3 {@code <Error>} root and its {@code <Code>}:
+	 * room for an error document after the keep-alive whitespace of a slow completion.
+	 */
+	static final int COMPLETION_ERROR_SCAN_BYTES = 4 * 1024;
+	/** The S3 error codes of a completion that may succeed if the whole upload is tried again. */
+	static final Set<String> TRANSIENT_COMPLETION_ERROR_CODES = Set.of(
+					"InternalError", "ServiceUnavailable", "SlowDown", "RequestTimeout");
+	private static final String UNREADABLE_ERROR_CODE = "(unreadable)";
+	private static final int MAX_LOGGED_COMPLETION_ERROR_CODES = 16;
+	private static final Map<String, Boolean> LOGGED_COMPLETION_ERROR_CODES = new ConcurrentHashMap<>();
+	private static final byte[] XML_DECLARATION_START = "<?xml".getBytes(US_ASCII);
+	private static final byte[] XML_DECLARATION_END = "?>".getBytes(US_ASCII);
+	private static final byte[] ERROR_ROOT_START = "<Error".getBytes(US_ASCII);
+	private static final byte[] CODE_START = "<Code>".getBytes(US_ASCII);
 	private static final Pattern PATTERN_UPLOAD_ID = Pattern.compile(
 					"<UploadId>([^<]+)</UploadId>", Pattern.MULTILINE);
 
@@ -437,11 +456,144 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 						Loggers.ERR.warn(
 										"Upload id not found in the following response content:\n{}", contentStr);
 					}
+				} else {
+					final Operation.Status failure = completionFailureStatus(mpuOp, content);
+					if (failure != null) {
+						op.status(failure);
+					}
 				}
 				content.clear();
 			}
 		}
 		super.handleResponseContentFinish(channel, op);
+	}
+
+	/**
+	 * The status of a multipart completion that the target answered 2xx with an S3 {@code <Error>}
+	 * document, as S3 may once it has sent the status line, or {@code null} for any other response.
+	 * Only a successful completion's buffered body is read, and only its first {@link
+	 * #COMPLETION_ERROR_SCAN_BYTES} bytes, allocating only an error document's code: leading whitespace
+	 * (S3 sends it to keep a slow completion's connection open), one optional XML declaration, then the
+	 * root element. A
+	 * transient code, or one that cannot be read within the bound, gives {@code RESP_FAIL_SVC}, which
+	 * {@code load-op-retry} retries as a whole upload; any other code gives {@code RESP_FAIL_CLIENT}.
+	 * An empty or whitespace-only body still counts as success: the check is negative.
+	 */
+	static Operation.Status completionFailureStatus(final CompositeDataOperation<?> op, final ByteBuf content) {
+		if (op.status() != Operation.Status.SUCC
+						|| !OpType.CREATE.equals(op.type())
+						|| op.get(S3Api.KEY_MPU_ABORT) != null) {
+			return null;
+		}
+		final int start = content.readerIndex();
+		final int end = Math.min(content.writerIndex(), start + COMPLETION_ERROR_SCAN_BYTES);
+		int i = skipXmlWhitespace(content, start, end);
+		if (startsWith(content, i, end, XML_DECLARATION_START)) {
+			final int declarationEnd = indexOf(content, i + XML_DECLARATION_START.length, end, XML_DECLARATION_END);
+			if (declarationEnd < 0) {
+				return null;
+			}
+			i = skipXmlWhitespace(content, declarationEnd + XML_DECLARATION_END.length, end);
+		}
+		if (!startsWith(content, i, end, ERROR_ROOT_START)) {
+			return null;
+		}
+		final int afterName = i + ERROR_ROOT_START.length;
+		if (afterName >= end) {
+			return null;
+		}
+		final byte next = content.getByte(afterName);
+		if (next != '>' && next != '/' && !isXmlWhitespace(next)) {
+			return null; // another root element whose name starts with "Error"
+		}
+		return completionErrorCodeStatus(op, errorCode(content, afterName, end));
+	}
+
+	/** The text of the first {@code <Code>} element in {@code [from, end)}, or {@code null} if it is not all there. */
+	private static String errorCode(final ByteBuf content, final int from, final int end) {
+		final int codeElement = indexOf(content, from, end, CODE_START);
+		if (codeElement < 0) {
+			return null;
+		}
+		final int valueStart = skipXmlWhitespace(content, codeElement + CODE_START.length, end);
+		final int valueEnd = content.indexOf(valueStart, end, (byte) '<');
+		if (valueEnd < 0) {
+			return null;
+		}
+		int trimmedEnd = valueEnd;
+		while (trimmedEnd > valueStart && isXmlWhitespace(content.getByte(trimmedEnd - 1))) {
+			trimmedEnd--;
+		}
+		return trimmedEnd > valueStart ? content.toString(valueStart, trimmedEnd - valueStart, UTF_8) : null;
+	}
+
+	private static Operation.Status completionErrorCodeStatus(final CompositeDataOperation<?> op, final String code) {
+		final Operation.Status status = code == null || TRANSIENT_COMPLETION_ERROR_CODES.contains(code)
+						? Operation.Status.RESP_FAIL_SVC
+						: Operation.Status.RESP_FAIL_CLIENT;
+		logCompletionErrorCode(op, code == null ? UNREADABLE_ERROR_CODE : code, status);
+		return status;
+	}
+
+	/** Logs each distinct error code once per process, and at most {@link #MAX_LOGGED_COMPLETION_ERROR_CODES} codes. */
+	private static void logCompletionErrorCode(
+					final CompositeDataOperation<?> op, final String code, final Operation.Status status) {
+		if (LOGGED_COMPLETION_ERROR_CODES.size() >= MAX_LOGGED_COMPLETION_ERROR_CODES
+						|| LOGGED_COMPLETION_ERROR_CODES.putIfAbsent(code, Boolean.TRUE) != null) {
+			return;
+		}
+		final boolean last = LOGGED_COMPLETION_ERROR_CODES.size() >= MAX_LOGGED_COMPLETION_ERROR_CODES;
+		Loggers.ERR.warn(
+						"{}: multipart completion answered 2xx with S3 error code {}; the upload counts as {} and is aborted"
+										+ " (logged once per code{})",
+						op.item().name(),
+						code,
+						status,
+						last ? "; further codes are not logged" : "");
+	}
+
+	static void resetCompletionErrorCodeLogForTest() {
+		LOGGED_COMPLETION_ERROR_CODES.clear();
+	}
+
+	private static int skipXmlWhitespace(final ByteBuf content, final int from, final int end) {
+		int i = from;
+		while (i < end && isXmlWhitespace(content.getByte(i))) {
+			i++;
+		}
+		return i;
+	}
+
+	private static boolean isXmlWhitespace(final byte b) {
+		return b == ' ' || b == '\n' || b == '\r' || b == '\t';
+	}
+
+	private static boolean startsWith(final ByteBuf content, final int from, final int end, final byte[] prefix) {
+		if (end - from < prefix.length) {
+			return false;
+		}
+		for (int k = 0; k < prefix.length; k++) {
+			if (content.getByte(from + k) != prefix[k]) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static int indexOf(final ByteBuf content, final int from, final int end, final byte[] needle) {
+		final int lastStart = end - needle.length;
+		int i = from;
+		while (i <= lastStart) {
+			final int candidate = content.indexOf(i, lastStart + 1, needle[0]);
+			if (candidate < 0) {
+				return -1;
+			}
+			if (startsWith(content, candidate, end, needle)) {
+				return candidate;
+			}
+			i = candidate + 1;
+		}
+		return -1;
 	}
 
 	private static void finishDeleteResponse(

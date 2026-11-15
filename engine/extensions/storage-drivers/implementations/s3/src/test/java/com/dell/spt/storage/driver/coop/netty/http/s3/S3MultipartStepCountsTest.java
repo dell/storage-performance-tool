@@ -466,6 +466,54 @@ final class S3MultipartStepCountsTest {
 		assertEnded();
 	}
 
+	/**
+	 * Every completion is answered 200 with an S3 {@code <Error>} body after a declaration and S3's
+	 * keep-alive whitespace, sent in a chunk of its own. Each upload is one failure and is aborted.
+	 */
+	@Test
+	void completionsAnswered200WithAnErrorBodyAreEachOneFailure() throws Exception {
+		stub.completionErrorBody = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\n   \n"
+						+ "<Error><Code>InternalError</Code><Message>We encountered an internal error.</Message></Error>";
+		stub.failCompletionWithErrorBody = request -> true;
+
+		final var outcomes = write(4, 1, false, null);
+
+		assertEquals(List.of(0L, 4L), outcomes.get("CREATE-1"), outcomes::toString);
+		assertRequests(4, 4, 4);
+		assertEnded();
+	}
+
+	/** A transient error code in a 200 completion is retried as a whole upload, from a new initiation. */
+	@Test
+	void aCompletionAnswered200WithATransientErrorIsRetriedAsAWholeUpload() throws Exception {
+		stub.completionErrorBody = "        <Error><Code>SlowDown</Code></Error>";
+		stub.failCompletionWithErrorBody = firstCompletion();
+
+		final var outcomes = write(4, 1, true, null);
+
+		assertEquals(List.of(4L, 0L), outcomes.get("CREATE-1"), outcomes::toString);
+		assertRequests(5, 5, 1);
+		assertEnded();
+	}
+
+	/** A permanent error code in a 200 completion is one failure that {@code load-op-retry} does not retry. */
+	@Test
+	void aCompletionAnswered200WithAPermanentErrorIsNotRetried() throws Exception {
+		stub.completionErrorBody = "<Error xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Code>InvalidPart</Code></Error>";
+		stub.failCompletionWithErrorBody = firstCompletion();
+
+		final var outcomes = write(4, 1, true, null);
+
+		assertEquals(List.of(3L, 1L), outcomes.get("CREATE-1"), outcomes::toString);
+		assertRequests(4, 4, 1);
+		assertEnded();
+	}
+
+	private static Predicate<Request> firstCompletion() {
+		final var completions = new AtomicInteger();
+		return request -> completions.incrementAndGet() == 1;
+	}
+
 	@Test
 	void aRangeThatSucceedsOnItsRetryTakesNoCountSlot() throws Exception {
 		aRangeThatSucceedsOnItsRetryTakesNoCountSlot(false);
