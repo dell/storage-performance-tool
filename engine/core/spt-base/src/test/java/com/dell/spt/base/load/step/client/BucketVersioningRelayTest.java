@@ -301,7 +301,8 @@ class BucketVersioningRelayTest {
 	void aCheckThatOutlivesTheWaitIsNamedOnce() throws Exception {
 		final var step = "relay-stuck-" + System.nanoTime();
 		final var file = Path.of(FileManager.INSTANCE.logFileName(LOGGER, step));
-		final var relay = relay(step, List.of(mock(FileManager.class), node(file, step)), List.of("node-b:1099"), 200);
+		final var relay = relay(step, List.of(mock(FileManager.class), node(file, step)), List.of("node-b:1099"),
+						2_000);
 		BucketVersioningNotice.check(step, "bucket b6");
 
 		relay.relayAtStop();
