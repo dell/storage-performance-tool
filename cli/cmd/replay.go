@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -65,6 +64,11 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	sourceURL, _ := cmd.Flags().GetString("from")
 	if strings.TrimSpace(sourceURL) == "" {
 		return fmt.Errorf("--from URL is required")
+	}
+	// Refuse a --network-mode typo before the archive is fetched or any host is contacted.
+	networkModeFlag, _ := cmd.Flags().GetString("network-mode")
+	if err := validateNetworkMode(networkModeFlag); err != nil {
+		return err
 	}
 	registryPort, err := replayRMIRegistryPort(cmd)
 	if err != nil {
@@ -463,8 +467,9 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	return resolveReplayRunError(err, false, len(replayStepIDs(generated)), outcome)
 }
 
-// replayRMIRegistryPort reads --rmi-registry-port and checks it as spt run does: every engine of
-// the replay serves it and the API port, so it must be a TCP port other than the API port.
+// replayRMIRegistryPort reads --rmi-registry-port and checks it and --api-port as spt run does:
+// every engine of the replay serves both, so each must be a TCP port and they must differ. It also
+// leaves the canonical --api-port in the flag for every later reader.
 func replayRMIRegistryPort(cmd *cobra.Command) (int, error) {
 	registryPort, err := cmd.Flags().GetInt(flagRMIRegistryPort)
 	if err != nil {
@@ -473,11 +478,12 @@ func replayRMIRegistryPort(cmd *cobra.Command) (int, error) {
 	if err := validatePortFlag(flagRMIRegistryPort, registryPort); err != nil {
 		return 0, err
 	}
-	// An API port that is not a number is left to the checks that report it.
-	if apiPort, err := strconv.Atoi(strings.TrimSpace(apiPortFlag(cmd))); err == nil {
-		if err := validateDistinctEnginePorts(apiPort, registryPort); err != nil {
-			return 0, err
-		}
+	apiPort, err := normalizeAPIPortFlag(cmd)
+	if err != nil {
+		return 0, err
+	}
+	if err := validateDistinctEnginePorts(apiPort, registryPort); err != nil {
+		return 0, err
 	}
 	return registryPort, nil
 }
@@ -642,8 +648,8 @@ func init() {
 	replayCmd.Flags().String("network-mode", "host", "Docker network mode: 'host' (default, required for RMI) or 'bridge'")
 	replayCmd.Flags().StringArray(flagHostInterfaces, nil, "Replace --interfaces on one host: <host>=<value>, with <value> auto, a comma-separated list, or none to turn NICs off there; repeat for more hosts")
 	replayCmd.Flags().String(flagInterfaces, "", "Spread each engine's connections over a NIC set: auto, or interface names, IPv4 addresses or RDMA devices (comma-separated; default S3 driver, host networking; env: SPT_INTERFACES); archived NIC sets are ignored")
-	replayCmd.Flags().Int("rmi-port-start", 40000, "Starting port for RMI range")
-	replayCmd.Flags().Int("rmi-port-count", 10, "Number of RMI ports to verify")
+	replayCmd.Flags().Int("rmi-port-start", 40000, rmiPortStartUsage)
+	replayCmd.Flags().Int("rmi-port-count", 10, rmiPortCountUsage)
 	replayCmd.Flags().Int(flagRMIRegistryPort, constants.DefaultRMIRegistryPort, rmiRegistryPortUsage)
 	replayCmd.Flags().Bool(flagSkipImagePull, false, "Use the locally cached Docker image without pulling the latest tag (env: SPT_SKIP_IMAGE_PULL)")
 	replayCmd.Flags().String(flagSptImage, "", "Override the engine image ref (env: SPT_IMAGE)")

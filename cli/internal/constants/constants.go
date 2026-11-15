@@ -37,6 +37,7 @@ const (
 	DockerFlagTimestamps = "--timestamps"
 	DockerFlagSince      = "--since"
 	DockerFlagFollow     = "--follow"
+	DockerFlagTail       = "--tail"
 	DockerFlagRemove     = "--rm"
 	DockerFlagReadOnly   = "--read-only"
 	DockerFlagEntrypoint = "--entrypoint"
@@ -69,6 +70,9 @@ const (
 	// docker as one word both locally and through SSH's remote shell; "@" separates the fields
 	// because CreatedAt holds spaces and Labels holds commas.
 	DockerVerifyCleanupFormat = "{{.ID}}@{{.CreatedAt}}@{{.Labels}}"
+	// DockerContainerStateFormat has no space, comma or pipe, so it passes unchanged through
+	// the remote shell an SSH command runs in.
+	DockerContainerStateFormat = "{{.State.Status}}:{{.State.ExitCode}}:{{.State.OOMKilled}}"
 )
 
 // Port number constants

@@ -34,7 +34,7 @@ ReadLoad
 			"load" : {
 				"op" : {
 					"type" : "read",
-					"recycle" : true
+					"recycle" : {"mode": true}
 				},
 				"step" : {
 					"limit" : {

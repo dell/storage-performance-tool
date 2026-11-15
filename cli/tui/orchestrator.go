@@ -20,10 +20,13 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 	"github.com/dell/storage-performance-tool/cli/internal/scenario"
+	"github.com/dell/storage-performance-tool/cli/internal/secretmask"
 )
 
+// apiReadyTimeout is how long a single-host run waits for its engine API; tests shorten it.
+var apiReadyTimeout = 60 * time.Second
+
 const (
-	apiReadyTimeout     = 60 * time.Second
 	startupLogTailLines = 120
 
 	// Optimized polling intervals
@@ -160,20 +163,38 @@ func (o *TestOrchestrator) SetCallbacks(
 	o.onError = onError
 }
 
-func (o *TestOrchestrator) containerStartupDiagnostics() string {
+// reportedAPIWaitError is the single-host API wait failure after onError has printed it with
+// the container startup diagnostics: its text points there instead of repeating the failure,
+// and it still wraps the wait's error.
+type reportedAPIWaitError struct {
+	err error
+}
+
+func (e reportedAPIWaitError) Error() string {
+	return "engine did not become ready; the failure and container startup diagnostics are above"
+}
+
+func (e reportedAPIWaitError) Unwrap() error { return e.err }
+
+func (o *TestOrchestrator) containerStartupDiagnostics(ctx context.Context) string {
 	if o.dockerManager == nil || o.containerID == "" {
 		return ""
 	}
-	tailer, ok := o.dockerManager.(containerDiagnosticTailer)
-	if !ok {
-		return ""
+	var parts []string
+	if state := containerStateDiagnostic(ctx, o.dockerManager, o.containerID); state != "" {
+		parts = append(parts, state)
 	}
-	diagnostics, err := tailer.ContainerDiagnosticTail(o.containerID, startupLogTailLines)
-	if err != nil {
-		logging.LogDebug("orchestrator", "failed to collect container startup diagnostics", "error", err.Error())
-		return ""
+	if tailer, ok := o.dockerManager.(containerDiagnosticTailer); ok {
+		diagnostics, err := tailer.ContainerDiagnosticTail(o.containerID, startupLogTailLines)
+		if err != nil {
+			logging.LogDebug("orchestrator", "failed to collect container startup diagnostics", "error", err.Error())
+			parts = append(parts, fmt.Sprintf("could not read container logs: %v", err))
+		} else if diagnostics = strings.TrimSpace(diagnostics); diagnostics != "" {
+			// ContainerDiagnosticTail masks credentials by key name; mask bare values too.
+			parts = append(parts, secretmask.EnvironmentValues(diagnostics))
+		}
 	}
-	return strings.TrimSpace(diagnostics)
+	return strings.TrimSpace(strings.Join(parts, "\n\n"))
 }
 
 // StartTest starts a Spt test using the API approach
@@ -297,10 +318,10 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 	if err := o.apiClient.WaitForAPIReadyContext(ctx, apiReadyTimeout); err != nil {
 		// Clean up the started container since API is not ready
 		logging.LogError("orchestrator", "API readiness check failed, cleaning up container", err)
-		diagnostics := o.containerStartupDiagnostics()
+		diagnostics := o.containerStartupDiagnostics(ctx)
 		reportedDiagnostics := false
 		if diagnostics != "" && o.onError != nil {
-			o.onError("Container startup diagnostics:\n" + diagnostics)
+			o.onError(fmt.Sprintf("spt API failed to become ready: %v\n\nContainer startup diagnostics:\n%s", err, diagnostics))
 			reportedDiagnostics = true
 		}
 		cleanupErr := cleanupSingleHostStartFailure(ctx, o.dockerManager)
@@ -310,7 +331,7 @@ func (o *TestOrchestrator) StartTestWithContentAndLaunchHooks(
 		var startupErr error
 		if diagnostics != "" {
 			if reportedDiagnostics {
-				startupErr = fmt.Errorf("spt API failed to become ready: %w; see container startup diagnostics above", err)
+				startupErr = reportedAPIWaitError{err: err}
 			} else {
 				startupErr = fmt.Errorf("spt API failed to become ready: %w\n\nContainer startup diagnostics:\n%s", err, diagnostics)
 			}

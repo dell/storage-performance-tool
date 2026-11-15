@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/containerutil"
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 )
 
@@ -162,7 +163,7 @@ func (r *ConflictResolver) displayConflictInfo(info *ServiceInfo) {
 		fmt.Printf("  Name: %s\n", info.Container.Name)
 		fmt.Printf("  Image: %s\n", info.Container.Image)
 		fmt.Printf("  State: %s\n", info.Container.State)
-		fmt.Printf("  ID: %s\n", info.Container.ID[:12])
+		fmt.Printf("  ID: %s\n", containerutil.ShortID(info.Container.ID))
 	}
 }
 
@@ -333,7 +334,7 @@ func (r *ConflictResolver) executeForceStop(ctx context.Context, info *ServiceIn
 
 	// If we have container info, stop it directly
 	if info.Container != nil {
-		fmt.Printf("Force stopping container: %s (%s)\n", info.Container.Name, info.Container.ID[:12])
+		fmt.Printf("Force stopping container: %s (%s)\n", info.Container.Name, containerutil.ShortID(info.Container.ID))
 
 		err := r.dockerFinder.ForceStopAndRemoveContainer(ctx, info.Container.ID)
 		if err != nil {

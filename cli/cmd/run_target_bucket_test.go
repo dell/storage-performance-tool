@@ -142,6 +142,35 @@ func TestCreatePrefixIsADeprecatedNoOp(t *testing.T) {
 	}
 }
 
+// spt run -O never had an effect; it stays accepted but warns and points at --results-dir.
+func TestRunOutputDirIsADeprecatedNoOp(t *testing.T) {
+	flag := runCmd.Flags().Lookup("output-dir")
+	if flag == nil {
+		t.Fatal("spt run --output-dir must stay accepted")
+	}
+	if flag.Shorthand != "O" {
+		t.Fatalf("spt run must keep -O as the --output-dir shorthand, got %q", flag.Shorthand)
+	}
+	if flag.Deprecated == "" || !flag.Hidden {
+		t.Fatalf("spt run --output-dir must be deprecated and hidden, got deprecated=%q hidden=%v", flag.Deprecated, flag.Hidden)
+	}
+	if !strings.Contains(flag.Deprecated, "--results-dir") {
+		t.Fatalf("deprecation message %q must point at --results-dir", flag.Deprecated)
+	}
+}
+
+// Replay's -O writes replay artifacts and is not part of the spt run deprecation.
+func TestReplayOutputDirIsNotDeprecated(t *testing.T) {
+	flag := replayCmd.Flags().Lookup("output-dir")
+	if flag == nil {
+		t.Fatal("spt replay --output-dir must stay declared")
+	}
+	if flag.Shorthand != "O" || flag.Deprecated != "" || flag.Hidden {
+		t.Fatalf("spt replay --output-dir must stay listed as -O, got shorthand=%q deprecated=%q hidden=%v",
+			flag.Shorthand, flag.Deprecated, flag.Hidden)
+	}
+}
+
 // The defaults bytes the CLI generates reach every topology unchanged, opt-out included.
 func TestRunCmdProvisioningPolicyReachesEveryTopology(t *testing.T) {
 	previousValidate := validateRunWorkloadTypeFunc

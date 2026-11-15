@@ -42,6 +42,25 @@ docker run --network host ghcr.io/dell/storage-performance-tool \
 > * **[CLI arguments](../usage/input/cli)** and **[configuartion options](../usage/input/configuration)**
 > * **[Operation types](../usage/load/operations/types)**
 
+## Simple S3 run
+
+To load a real S3 target, select the `s3` driver, give the endpoint and credentials, and pass the auth version explicitly:
+
+```
+docker run --network host ghcr.io/dell/storage-performance-tool \
+    --storage-driver-type=s3 \
+    --storage-net-node-addrs=your-s3-endpoint.com \
+    --storage-auth-uid=your-access-key \
+    --storage-auth-secret=your-secret-key \
+    --storage-auth-version=4 \
+    --load-op-limit-count=1000
+```
+
+☝️ Pass `--storage-auth-version` on every run with the `s3`, `s3-rdma` or `s3-tables` driver: `4` for SigV4, or `2` for a legacy target that rejects SigV4. Until a later release, the default without it depends on the host, so the same command can sign with V2 on one host and V4 on another.
+
+> 📘 More about:
+> * **[S3 driver options](../../../../extensions/storage-drivers/implementations/s3/README.md#31-s3-specific-options)**
+
 ## Simple scenario
 
 Spt also supports input parameters using 'scenarios' - script files defining a workload.

@@ -50,6 +50,10 @@ type RemoteDockerManager struct {
 	diagnosticsDone     bool
 	diagnosticsRec      *diagnosticsRecord
 	diagnosticsStopDone bool
+	// diagnosticsUnused records that no container has started with
+	// diagnosticsDir bind-mounted, so it holds nothing to collect and cleanup
+	// only removes it. prepareDiagnostics sets it; a started container clears it.
+	diagnosticsUnused bool
 
 	// stagingCommandTimeout bounds each small staging command; tests shorten it.
 	stagingCommandTimeout time.Duration
@@ -158,13 +162,25 @@ func (m *RemoteDockerManager) cleanupStaging(ctx context.Context) error {
 	return nil
 }
 
+// ensureStagingDir creates the remote staging directory once and keeps its
+// path while it may exist. A set path is reused as is, so a caller that needs
+// a fresh directory removes the old one first (SetFileMountsContext does).
+//
+// When the mkdir fails with ctx still live, the failure is definite (for
+// example the path exists as a file) and the path is forgotten. When ctx has
+// ended (deadline or cancel), ssh may have run the mkdir before it was cut
+// off, so the path stays owned (HasManagedResources) and a later cleanup on a
+// live context runs an rm -rf that is harmless if the directory does not
+// exist. A cleanup on the same ended context fails at once and keeps the path.
 func (m *RemoteDockerManager) ensureStagingDir(ctx context.Context) error {
 	if m.stagingDir != "" {
 		return nil
 	}
 	m.stagingDir = fmt.Sprintf("/tmp/spt-items-%d", time.Now().UnixNano())
 	if _, stderr, err := m.exec.ExecuteCommand(ctx, m.host, []string{"mkdir", "-p", m.stagingDir}); err != nil {
-		m.stagingDir = ""
+		if ctx.Err() == nil {
+			m.stagingDir = ""
+		}
 		return fmt.Errorf("create remote staging directory on %s: %w (stderr: %s)", m.host.Original, err, stderr)
 	}
 	return nil
@@ -188,7 +204,8 @@ func (m *RemoteDockerManager) SetFileMounts(mounts []scenario.FileMount) error {
 //     connection only when an SPT command opened it; one opened outside SPT
 //     follows its own keepalive settings.
 //   - Each mkdir, chmod and rm around the copies gets its own
-//     stagingCommandTimeout (30 s).
+//     stagingCommandTimeout (30 s). A mkdir cut off by that timeout or a
+//     cancel keeps the directory owned for the rollback (ensureStagingDir).
 //   - When a copy or chmod fails while ctx is live, the staging directory is
 //     removed on a context derived from ctx and bounded by
 //     remoteCleanupTimeout (10 s), so a later cancel ends the removal at once.
@@ -204,6 +221,9 @@ func (m *RemoteDockerManager) SetFileMountsContext(ctx context.Context, mounts [
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Remove any earlier staging directory first, including a path kept after
+	// a cut-off mkdir, so ensureStagingDir below never reuses a path that may
+	// not exist.
 	if err := m.withStagingCommandTimeout(ctx, m.cleanupStaging); err != nil {
 		return err
 	}
@@ -293,18 +313,28 @@ func (m *RemoteDockerManager) prepareDiagnostics(ctx context.Context, role strin
 		diagnosticsHostComponent(m.host.Host),
 		diagnosticsHostComponent(role),
 	)
-	if _, stderr, err := m.exec.ExecuteCommand(ctx, m.host, []string{"mkdir", "-p", remoteDir}); err != nil {
-		return nil, nil, fmt.Errorf("create remote diagnostics directory on %s: %w (stderr: %s)", m.host.Original, err, stderr)
-	}
-	if _, stderr, err := m.exec.ExecuteCommand(ctx, m.host, []string{remoteChmodCommand, "0777", remoteDir}); err != nil {
-		return nil, nil, fmt.Errorf("chmod remote diagnostics directory on %s: %w (stderr: %s)", m.host.Original, err, stderr)
-	}
-
+	// Own the directory before its mkdir runs, as ensureStagingDir does: a
+	// mkdir cut off by an ended ctx may have run, and a failed chmod follows a
+	// mkdir that did, so either leaves the path owned (HasManagedResources) for
+	// the orchestrator's rollback, whose rm -rf is harmless if it does not
+	// exist. Only a mkdir that fails while ctx is live is definite, and then
+	// the path is forgotten, so cleanup never removes what is not ours.
 	m.diagnosticsDir = remoteDir
 	m.diagnosticsRole = role
 	m.diagnosticsDone = false
 	m.diagnosticsRec = nil
 	m.diagnosticsStopDone = false
+	m.diagnosticsUnused = true
+	if _, stderr, err := m.exec.ExecuteCommand(ctx, m.host, []string{"mkdir", "-p", remoteDir}); err != nil {
+		if ctx.Err() == nil {
+			m.diagnosticsDir = ""
+			m.diagnosticsRole = ""
+		}
+		return nil, nil, fmt.Errorf("create remote diagnostics directory on %s: %w (stderr: %s)", m.host.Original, err, stderr)
+	}
+	if _, stderr, err := m.exec.ExecuteCommand(ctx, m.host, []string{remoteChmodCommand, "0777", remoteDir}); err != nil {
+		return nil, nil, fmt.Errorf("chmod remote diagnostics directory on %s: %w (stderr: %s)", m.host.Original, err, stderr)
+	}
 	return []string{fmt.Sprintf("%s:%s", remoteDir, dockerDiagnosticsMount)}, []string{remoteEnvFile}, nil
 }
 
@@ -322,7 +352,15 @@ func (m *RemoteDockerManager) cleanupRemoteDiagnostics(ctx context.Context) erro
 	m.diagnosticsDone = false
 	m.diagnosticsRec = nil
 	m.diagnosticsStopDone = false
+	m.diagnosticsUnused = false
 	return nil
+}
+
+// setStartedContainer records a container that docker run started. Its
+// diagnostics directory, if any, is now bind-mounted and may hold artifacts.
+func (m *RemoteDockerManager) setStartedContainer(startedID string) {
+	m.containerID = strings.TrimSpace(startedID)
+	m.diagnosticsUnused = false
 }
 
 func (m *RemoteDockerManager) cleanupFailedStart(ctx context.Context, cause error) error {
@@ -394,7 +432,7 @@ func (m *RemoteDockerManager) StartContainerInNodeModeContext(
 	if err != nil {
 		return "", m.cleanupFailedStart(ctx, err)
 	}
-	m.containerID = strings.TrimSpace(id)
+	m.setStartedContainer(id)
 	return m.containerID, nil
 }
 
@@ -472,7 +510,7 @@ func (m *RemoteDockerManager) startWorkerNodeOnPorts(
 	if err != nil {
 		return "", m.cleanupFailedStart(startCtx, err)
 	}
-	m.containerID = strings.TrimSpace(id)
+	m.setStartedContainer(id)
 
 	// Readiness probe against remote host over network
 	if m.proberRun != nil {
@@ -480,7 +518,8 @@ func (m *RemoteDockerManager) startWorkerNodeOnPorts(
 		rctx, rcancel := context.WithTimeout(ctx, constants.APIReadinessTimeout)
 		defer rcancel()
 		if err := m.proberRun(rctx, baseURL, constants.APIPollingTimeout); err != nil {
-			return m.containerID, fmt.Errorf("worker API readiness: %w", err)
+			return m.containerID, withAPIWaitReport(
+				fmt.Errorf("worker API readiness: %w", err), containerAPIWaitReport(ctx, m, m.containerID))
 		}
 	}
 	return m.containerID, nil
@@ -543,13 +582,14 @@ func (m *RemoteDockerManager) startEntryNodeOnPorts(
 	if err != nil {
 		return "", m.cleanupFailedStart(startCtx, err)
 	}
-	m.containerID = strings.TrimSpace(id)
+	m.setStartedContainer(id)
 	if m.proberRun != nil {
 		baseURL := fmt.Sprintf("http://%s:%d", m.host.Host, ports.api)
 		rctx, rcancel := context.WithTimeout(ctx, constants.APIReadinessTimeout)
 		defer rcancel()
 		if err := m.proberRun(rctx, baseURL, constants.APIPollingTimeout); err != nil {
-			return m.containerID, fmt.Errorf("entry API readiness: %w", err)
+			return m.containerID, withAPIWaitReport(
+				fmt.Errorf("entry API readiness: %w", err), containerAPIWaitReport(ctx, m, m.containerID))
 		}
 	}
 	return m.containerID, nil
@@ -577,7 +617,8 @@ func (m *RemoteDockerManager) StreamOutput(containerID string, stdoutCallback fu
 }
 
 func (m *RemoteDockerManager) collectDiagnostics(ctx context.Context) (*diagnosticsRecord, error) {
-	if m.diagnosticsDir == "" {
+	// An unused directory holds nothing to collect; cleanup removes it.
+	if m.diagnosticsDir == "" || m.diagnosticsUnused {
 		return nil, nil
 	}
 	if m.diagnosticsDone && m.diagnosticsRec != nil {
@@ -739,7 +780,14 @@ func (m *RemoteDockerManager) cleanupContext(ctx context.Context, collectDiagnos
 	}
 	var cleanupErrs []error
 	var diagnosticsRecords []diagnosticsRecord
-	if collectDiagnostics && m.diagnosticsDir != "" && !m.diagnosticsDone {
+	if m.diagnosticsDir != "" && m.diagnosticsUnused {
+		// A failed start made this directory, but no container used it, so it
+		// holds nothing to collect: remove it (it may not even exist).
+		if err := m.cleanupRemoteDiagnostics(ctx); err != nil {
+			cleanupErrs = append(cleanupErrs, err)
+		}
+	}
+	if collectDiagnostics && m.diagnosticsDir != "" && !m.diagnosticsUnused && !m.diagnosticsDone {
 		if m.containerID == "" {
 			// A prior attempt already removed the container. The remote
 			// directory is now stable and remains CLI-owned until collection
