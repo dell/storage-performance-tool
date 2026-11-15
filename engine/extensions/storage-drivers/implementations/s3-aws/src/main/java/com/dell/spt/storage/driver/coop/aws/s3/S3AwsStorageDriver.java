@@ -1066,8 +1066,44 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			return CompletableFuture.failedFuture(
 							new UnsupportedOperationException("Composite READ must be handled by partial operations"));
 		} else {
-			// For DELETE/UPDATE, delegate to standard path
-			return putObject((O) op);
+			// Only CREATE and READ have a multipart implementation. Any other type runs as one
+			// ordinary request of its own type, as execute() runs it: a DELETE is a delete-object
+			// request, never a put.
+			return executeStandard((O) op);
+		}
+	}
+
+	/**
+	 * The per-type route of {@link #execute} for an operation that is neither composite nor partial,
+	 * used for a composite of a type with no multipart implementation. It repeats execute()'s switch
+	 * so that execute() itself, on every operation, stays as it was; keep the two in step.
+	 */
+	private CompletableFuture<Void> executeStandard(final O op) {
+		switch (op.type()) {
+		case NOOP:
+			return CompletableFuture.completedFuture(null);
+
+		case CREATE:
+		case UPDATE:
+			if (op.srcPath() != null && !op.srcPath().isEmpty()) {
+				return copyObject(op);
+			}
+			return putObject(op);
+
+		case READ:
+			return readObject(op);
+
+		case STAT:
+			return headObject(op);
+
+		case DELETE:
+			return deleteObject(op);
+
+		case LIST:
+			return listObjects(op);
+
+		default:
+			return CompletableFuture.failedFuture(new UnsupportedOperationException(op.type().toString()));
 		}
 	}
 

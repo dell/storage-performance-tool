@@ -237,6 +237,29 @@ public class S3AwsStorageDriverTest {
 		}
 	}
 
+	@Test
+	@SuppressWarnings("unchecked")
+	void compositeDeleteSendsDeleteObjectAndNoPut() throws Exception {
+		when(mockS3Client.deleteObject(any(DeleteObjectRequest.class)))
+						.thenReturn(CompletableFuture.completedFuture(DeleteObjectResponse.builder().build()));
+		// stubbed so that a regression to the old PUT fallback fails the never() check, not an NPE
+		when(mockS3Client.putObject(any(PutObjectRequest.class), any(AsyncRequestBody.class)))
+						.thenReturn(CompletableFuture.completedFuture(PutObjectResponse.builder().build()));
+		final DataItem item = new DataItemImpl("key", 0, 4096);
+		item.dataInput(DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("4MB"), 1, false));
+		final var op = new com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl<DataItem>(
+						0, OpType.DELETE, item, null, "/bucket", TEST_CRED, null, 0, 1024);
+
+		drv.execute((Operation<Item>) (Operation<?>) op).join();
+
+		final ArgumentCaptor<DeleteObjectRequest> request = ArgumentCaptor.forClass(DeleteObjectRequest.class);
+		verify(mockS3Client).deleteObject(request.capture());
+		assertEquals("bucket", request.getValue().bucket());
+		assertEquals("key", request.getValue().key());
+		verify(mockS3Client, never()).putObject(any(PutObjectRequest.class), any(AsyncRequestBody.class));
+		verify(mockS3Client, never()).createMultipartUpload(any(CreateMultipartUploadRequest.class));
+	}
+
 	@Nested
 	class IntegrityMetadataTest {
 

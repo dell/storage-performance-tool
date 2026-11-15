@@ -225,7 +225,7 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 			} else {
 				sizeThreshold = TypeUtil.typeConvert(sizeThresholdRaw, long.class);
 			}
-			if (sizeThreshold > 0 && batchSize > 1) {
+			if (sizeThreshold > 0 && batchSize > 1 && DataOperationsBuilderImpl.buildsCompositeOperations(opType)) {
 				Loggers.MSG.warn(
 								"Multipart upload threshold is set ({} bytes) but batch size is {}. "
 												+ "Cooperative storage drivers apply MPU scheduling and bounded child-operation "
