@@ -333,18 +333,21 @@ public class RunServlet extends HttpServlet {
 				failure = e;
 				throw e;
 			} finally {
-				// A stop's interruption reaches the scenario as a failure, so a requested stop wins.
-				if (stopRequested.get()) {
-					apiStatus.setStopped();
-				} else {
-					if (failure != null) {
-						apiStatus.setFailed(
-										null, ScenarioFailureStatus.category(failure), ScenarioFailureStatus.message(failure));
+				try {
+					// A stop's interruption reaches the scenario as a failure, so a requested stop wins.
+					if (stopRequested.get()) {
+						apiStatus.setStopped();
+					} else {
+						if (failure != null) {
+							apiStatus.setFailed(
+											null, ScenarioFailureStatus.category(failure), ScenarioFailureStatus.message(failure));
+						}
+						apiStatus.completeIfNotStopped();
 					}
-					apiStatus.completeIfNotStopped();
+				} finally {
+					executionState.set(ExecutionState.FINISHED);
+					completion.countDown();
 				}
-				executionState.set(ExecutionState.FINISHED);
-				completion.countDown();
 			}
 		}
 

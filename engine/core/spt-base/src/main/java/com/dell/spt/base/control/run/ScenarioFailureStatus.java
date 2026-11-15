@@ -15,9 +15,10 @@ import javax.script.ScriptException;
  * The category and the public message a node's {@code /status} gives for a scenario that failed
  * without a typed terminal failure.
  *
- * <p>The message is built here and never copied from the failure: a script engine's message
- * quotes the scenario line, and a refused value is echoed by its parser, so either could carry a
- * credential written in the scenario. The engine log keeps the failure itself.
+ * <p>The message is built here, not copied from the failure: a script engine's message quotes the
+ * scenario line, and a number parser echoes the refused value, so either could carry a credential
+ * written in the scenario. It does quote the path of an unknown or malformed option and, for a
+ * refused boolean, the value the scenario gave. The engine log keeps the failure itself.
  */
 final class ScenarioFailureStatus {
 
@@ -50,7 +51,7 @@ final class ScenarioFailureStatus {
 		}
 		for (final var cause : chain) {
 			if (cause instanceof InvalidBooleanValueException refused) {
-				// Engine-written: it names a boolean setting and the value given to it, never a secret.
+				// Engine-written: it names a boolean setting and quotes the value the scenario gave it.
 				return refused.getMessage();
 			}
 		}

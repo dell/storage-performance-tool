@@ -181,6 +181,14 @@ class NodeScenarioFailureStatusTest {
 	}
 
 	@Test
+	void aStopThatTheScenarioReportsAsAFailureReadsStopped() throws Exception {
+		// The step turns the stop's interruption into a failure the scenario returns, not an interruption
+		assertStopReadsStopped(
+						"Gate.countDown(); var step = Load.start(); step.await(); step.close();",
+						Map.of("Load", new InterruptionToFailureStep()));
+	}
+
+	@Test
 	void aScriptFailureWithoutAPositionOrCauseIsNamedByItsType() {
 		final var noPosition = new javax.script.ScriptException("failed");
 		assertEquals(Category.EXECUTION, ScenarioFailureStatus.category(noPosition));
@@ -266,6 +274,24 @@ class NodeScenarioFailureStatusTest {
 
 		public void await() throws InterruptedException {
 			new CountDownLatch(1).await();
+		}
+
+		public void close() {}
+	}
+
+	/** A step whose await, once the run is stopped, fails with an ordinary exception. */
+	public static final class InterruptionToFailureStep {
+
+		public InterruptionToFailureStep start() {
+			return this;
+		}
+
+		public void await() {
+			try {
+				new CountDownLatch(1).await();
+			} catch (final InterruptedException e) {
+				throw new IllegalStateException("await failed after the stop");
+			}
 		}
 
 		public void close() {}
