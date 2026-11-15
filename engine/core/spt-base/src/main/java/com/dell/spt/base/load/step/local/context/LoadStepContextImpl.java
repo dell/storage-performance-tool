@@ -178,6 +178,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	private boolean driverStartedForAdmission;
 	private final AtomicBoolean objectFailureBudgetAdmissionReleased = new AtomicBoolean(false);
 	private final OperationLifecycleTracker<O> operationLifecycle;
+	// The counted results at the last completion check that found the generator's count limit
+	// drained, or -1. Read and written by the completion checks.
+	private volatile long countLimitDrainedResults = -1;
 	private final boolean standaloneDeleteEnabled;
 	private final boolean standaloneDeleteDurationMode;
 	private final StandaloneDeleteConfig standaloneDeleteConfig;
@@ -600,6 +603,9 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			Loggers.ERR.warn("{}: done due to \"BAD\" state", id);
 			return true;
 		}
+		if (isDoneCountLimitDrained()) {
+			return true;
+		}
 		if (rangeRuntime != null) {
 			return generator.isItemInputFinished() && !operationLifecycle.hasOutstandingOperations()
 							&& !rangeRuntime.hasPendingResults() && counterResults.sum() >= generator.generatedOpCount()
@@ -717,6 +723,30 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * Whether the generator has dispatched its count limit and everything it dispatched has ended,
+	 * on two consecutive checks with the same counted results. Some of those operations can end
+	 * without a counted result, so the count check alone would wait for the time limit, or for good
+	 * without one. The second check lets a result whose operation has left flight finish being
+	 * counted before the step ends.
+	 */
+	private boolean isDoneCountLimitDrained() {
+		if (generator == null || !generator.isCountLimitDrained()) {
+			countLimitDrainedResults = -1;
+			return false;
+		}
+		final long results = counterResults.sum();
+		if (countLimitDrainedResults != results) {
+			countLimitDrainedResults = results;
+			return false;
+		}
+		Loggers.MSG.debug(
+						"{}: done, the generator's count limit was dispatched and every operation ended ({} counted)",
+						id,
+						results);
+		return true;
 	}
 
 	private boolean isDoneSizeLimit() {

@@ -1,5 +1,6 @@
 package com.dell.spt.load.step.mixed;
 
+import com.dell.spt.base.concurrent.ThreadTaskExecutor;
 import com.dell.spt.base.concurrent.VirtualThreadExecutor;
 import com.dell.spt.base.item.DataItemFactoryImpl;
 import com.dell.spt.base.item.DataItemImpl;
@@ -97,6 +98,98 @@ class MixedLoadGeneratorTest {
 						Output.class,
 						int.class,
 						Input.class));
+	}
+
+	@Test
+	void theThreadExecutorConstructorDescriptorRemainsAvailable() throws Exception {
+		assertNotNull(MixedLoadGenerator.class.getConstructor(
+						ThreadTaskExecutor.class,
+						OpSchedule.class,
+						PoolItemInput.class,
+						Map.class,
+						Output.class,
+						int.class,
+						Input.class));
+	}
+
+	@Test
+	@DisplayName("A count-limited generator dispatches its count, then reports the cap drained once all have completed")
+	void aCountLimitedGeneratorDispatchesItsCount() throws Exception {
+		final List<Operation> dispatched = new CopyOnWriteArrayList<>();
+		final MixedLoadGenerator gen = countLimitedGenerator(capturingOutput(dispatched), 5);
+
+		dispatch(gen, 20);
+
+		assertEquals(5, dispatched.size(), "operations handed to the driver");
+		assertEquals(5, gen.generatedOpCount());
+		assertTrue(gen.isItemInputFinished(), "a capped generator has finished its input");
+		assertFalse(gen.isCountLimitDrained(), "its operations are still in flight");
+		for (int i = 0; i < 4; i++) {
+			gen.onOperationCompleted(dispatched.get(i));
+			gen.releasePermit();
+		}
+		assertFalse(gen.isCountLimitDrained(), "one operation is still in flight");
+		gen.onOperationCompleted(dispatched.get(4));
+		gen.releasePermit();
+		assertTrue(gen.isCountLimitDrained(), "every dispatched operation has ended");
+	}
+
+	@Test
+	@DisplayName("A refused operation does not count toward the count limit")
+	void aRefusedOperationDoesNotCountTowardTheLimit() throws Exception {
+		final List<Operation> dispatched = new CopyOnWriteArrayList<>();
+		final Output<Operation> capture = capturingOutput(dispatched);
+		final AtomicInteger calls = new AtomicInteger();
+		final Output<Operation> refusesEveryOther = new AcceptingOutput() {
+			@Override
+			public boolean put(final Operation op) {
+				return calls.getAndIncrement() % 2 == 0 && capture.put(op);
+			}
+		};
+		final MixedLoadGenerator gen = countLimitedGenerator(refusesEveryOther, 3);
+
+		dispatch(gen, 20);
+
+		assertEquals(3, dispatched.size(), "operations the driver accepted");
+		assertEquals(3, gen.generatedOpCount());
+	}
+
+	@Test
+	@DisplayName("Without a count limit the generator dispatches on every call and never reports a drained cap")
+	void anUncappedGeneratorIsNotLimited() throws Exception {
+		final List<Operation> dispatched = new CopyOnWriteArrayList<>();
+		final MixedLoadGenerator gen = countLimitedGenerator(capturingOutput(dispatched), 0);
+
+		dispatch(gen, 50);
+
+		assertEquals(50, dispatched.size());
+		assertFalse(gen.isItemInputFinished());
+		for (final Operation op : dispatched) {
+			gen.onOperationCompleted(op);
+			gen.releasePermit();
+		}
+		assertFalse(gen.isCountLimitDrained(), "no count limit, so no cap to drain");
+	}
+
+	private MixedLoadGenerator countLimitedGenerator(final Output<Operation> driver, final long countLimit) {
+		final Map<OpType, Integer> weights = new EnumMap<>(OpType.class);
+		weights.put(OpType.READ, 50);
+		weights.put(OpType.CREATE, 50);
+		final Map<OpType, OperationsBuilder> builders = new EnumMap<>(OpType.class);
+		builders.put(OpType.READ, testBuilder(OpType.READ, null));
+		builders.put(OpType.CREATE, testBuilder(OpType.CREATE, null));
+		return new MixedLoadGenerator(executor, new OpSchedule(weights), new PoolItemInput<>(makeItems(10)),
+						builders, driver, 10_000, mockNewItemSupplier(), countLimit);
+	}
+
+	private static Output<Operation> capturingOutput(final List<Operation> dispatched) {
+		return new AcceptingOutput() {
+			@Override
+			public boolean put(final Operation op) {
+				dispatched.add(op);
+				return true;
+			}
+		};
 	}
 
 	@BeforeAll

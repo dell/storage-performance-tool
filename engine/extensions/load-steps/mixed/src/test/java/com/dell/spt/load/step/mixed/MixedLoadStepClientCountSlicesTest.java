@@ -6,7 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.dell.spt.base.concurrent.ServiceTaskExecutor;
 import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.config.InitialConfigSchemaProvider;
@@ -17,7 +16,6 @@ import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.load.step.client.LoadStepClientBase;
 import com.dell.spt.base.load.step.service.LoadStepManagerServiceImpl;
 import com.dell.spt.base.load.step.service.file.FileManagerServiceImpl;
-import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.storage.driver.mock.DummyStorageDriverMockExtension;
 import com.dell.spt.base.svc.ServiceUtil;
 import com.github.akurilov.confuse.Config;
@@ -55,8 +53,8 @@ class MixedLoadStepClientCountSlicesTest {
 	private static final Duration RUN_TIMEOUT = Duration.ofSeconds(60);
 	private static final long TERMINAL_RETENTION_MILLIS = TimeUnit.MINUTES.toMillis(10);
 
-	private final MetricsManagerImpl entryMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
-	private final MetricsManagerImpl workerMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+	private final FinalCountsMetricsManager entryMgr = new FinalCountsMetricsManager();
+	private final FinalCountsMetricsManager workerMgr = new FinalCountsMetricsManager();
 	private String originalRmiHostname;
 	private FileManagerServiceImpl fileService;
 	private LoadStepManagerServiceImpl stepManager;
@@ -140,6 +138,20 @@ class MixedLoadStepClientCountSlicesTest {
 						.append(Map.of("load", Map.of("op", Map.of("limit", Map.of("count", 4L)))));
 		assertTimeoutPreemptively(RUN_TIMEOUT, client::run);
 		assertFalse(workerMgr.getTerminalSteps().isEmpty(), "the worker's slice ran");
+	}
+
+	/** Each slice's generator stops at the slice's count, so the slices run the step's count between them. */
+	@Test
+	void theSlicesRunExactlyTheStepsCount() {
+		final String stepId = config.stringVal("load-step-id");
+		config.val("load-op-limit-count", 4_001L);
+		config.val("storage-driver-limit-concurrency", 16);
+		client = new MixedLoadStepClient(config, extensions(), null, entryMgr);
+		assertTimeoutPreemptively(RUN_TIMEOUT, client::run);
+		final long entrySlice = entryMgr.counted(stepId);
+		final long workerSlice = workerMgr.counted(stepId);
+		assertTrue(entrySlice > 0 && workerSlice > 0, "both slices ran: " + entrySlice + " and " + workerSlice);
+		assertEquals(4_001L, entrySlice + workerSlice, "the slices' operations");
 	}
 
 	@Test

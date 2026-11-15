@@ -319,9 +319,12 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		}
 
 		// ── 12. Create MixedLoadGenerator ──────────────────────────────────
+		// The generator dispatches at most the count limit the step context reads, so the step runs
+		// exactly that many operations.
+		final long countLimit = loadConfig.configVal("op").configVal("limit").longVal("count");
 		final MixedLoadGenerator generator = new MixedLoadGenerator(
 						ServiceTaskExecutor.TASK_EXECUTOR, schedule, pool, builders,
-						driver, concurrencyLimit, newItemInput);
+						driver, concurrencyLimit, newItemInput, countLimit);
 		this.mixedGenerator = generator;
 
 		// ── 13. Register metrics ───────────────────────────────────────────

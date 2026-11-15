@@ -40,6 +40,17 @@ public interface LoadGenerator<I extends Item, O extends Operation<I>> extends T
 	boolean isItemInputFinished();
 
 	/**
+	 * Whether this generator caps dispatch at the step's count limit, has reached it, and every
+	 * operation it dispatched has published its last result, whether or not the step counted one.
+	 * The step context then ends the step, which would otherwise wait on its counted results. The
+	 * default is {@code false}: a generator that does not cap dispatch leaves the count limit to
+	 * the step context.
+	 */
+	default boolean isCountLimitDrained() {
+		return false;
+	}
+
+	/**
 	 * Registers a callback run once, on the generator thread, when scheduling ends for the step:
 	 * at the first of exhausted input and a reached operation count limit.
 	 */
