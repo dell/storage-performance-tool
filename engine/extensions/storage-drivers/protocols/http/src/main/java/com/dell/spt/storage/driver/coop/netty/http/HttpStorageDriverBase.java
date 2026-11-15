@@ -65,6 +65,7 @@ import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -544,6 +545,22 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		} catch (final IllegalStateException e) {
 			LogUtil.exception(Level.DEBUG, e, "{}: invalid load operation request state", op.toString());
 		}
+		if (!reconciledDelete && !channel.eventLoop().inEventLoop()) {
+			// Completing a failed operation closes its channel. Off the event loop the close is only
+			// queued, and the pool could lease the closing channel to the next operation, as it never
+			// does after a failed response. So complete on the event loop, as a response would.
+			try {
+				channel.eventLoop().execute(() -> completeBuildFailure(channel, op));
+				return true;
+			} catch (final RejectedExecutionException e) {
+				LogUtil.exception(Level.DEBUG, e, "{}: completing on the caller's thread", op.toString());
+			}
+		}
+		completeBuildFailure(channel, op);
+		return true;
+	}
+
+	private void completeBuildFailure(final Channel channel, final O op) {
 		try {
 			complete(channel, op);
 		} catch (final Throwable completionFailure) {
@@ -553,7 +570,6 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			LogUtil.exception(
 							Level.DEBUG, completionFailure, "Load operation result publication failure");
 		}
-		return true;
 	}
 
 	private void logRequestBuildFailure(final Throwable failure) {

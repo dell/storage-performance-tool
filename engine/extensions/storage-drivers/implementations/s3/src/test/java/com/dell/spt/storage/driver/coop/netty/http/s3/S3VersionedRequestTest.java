@@ -739,8 +739,13 @@ final class S3VersionedRequestTest {
 		final var plainResult = results.poll(10_000);
 		assertNotNull(plainResult, "the next operation never completed");
 		assertEquals(Operation.Status.SUCC, plainResult.status());
-		assertEquals(0, driver.activeOpCount());
+		// A success publishes its result before it releases its permit, so wait for the release.
+		final long deadline = System.nanoTime() + 5_000_000_000L;
+		while (driver.activeOpCount() > 0 && System.nanoTime() < deadline) {
+			Thread.onSpinWait();
+		}
 		assertNull(results.poll(200), "an operation completed twice");
+		assertEquals(0, driver.activeOpCount());
 		assertEquals(List.of("GET /b/obj 200 2000"), target.objectLog());
 	}
 
