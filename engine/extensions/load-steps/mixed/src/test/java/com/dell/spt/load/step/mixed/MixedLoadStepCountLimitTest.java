@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.spy;
 
 import com.dell.spt.base.config.ConfigFormat;
@@ -15,6 +16,8 @@ import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.partial.PartialOperation;
+import com.dell.spt.base.logging.Loggers;
+import com.dell.spt.base.storage.driver.CompositeResults;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.StorageDriverFactory;
 import com.dell.spt.base.storage.driver.mock.DummyStorageDriverMock;
@@ -43,6 +46,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.LockSupport;
+import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -64,6 +68,8 @@ class MixedLoadStepCountLimitTest {
 	/** Far beyond what any of these steps needs, so a step that reaches it has waited for it. */
 	private static final String TIME_LIMIT = "60s";
 	private static final long PROMPT_END_MILLIS = TimeUnit.SECONDS.toMillis(20);
+	/** The start of the INFO line a count-limited step logs on a driver that does not declare. */
+	private static final String UNDECLARED_INFO = "does not declare how it publishes composite results";
 
 	@TempDir
 	Path home;
@@ -125,6 +131,43 @@ class MixedLoadStepCountLimitTest {
 		assertTrue(
 						elapsedMillis < PROMPT_END_MILLIS,
 						"the step ended without waiting for its time limit, after " + elapsedMillis + " ms");
+	}
+
+	/**
+	 * The step above on a driver that does not declare its composite results: the generator is not
+	 * capped, so it dispatches past the count, and the step ends when it has counted its count, as
+	 * before this change, though one result is not counted. A capped generator would stop at the
+	 * count, one short of it, and with the step's own result output nothing would see the
+	 * uncounted result, so the step would wait for its time limit. The step logs once that the
+	 * driver does not declare.
+	 */
+	@Test
+	void anUndeclaredDriverWithAnUncountedResultRunsPastItsCountAsBefore() throws Exception {
+		final String stepId = newStepId("undeclared-uncounted");
+		final Config config = stepConfig(stepId);
+		config.val("load-op-limit-count", 50L);
+		drivers.interruptFirstResult.set(true);
+		drivers.undeclared.set(true);
+
+		final long elapsedMillis;
+		final List<String> infos;
+		try (ErrorLogCapture log = new ErrorLogCapture(Loggers.MSG)) {
+			elapsedMillis = run(config);
+			infos = log.messagesContaining(UNDECLARED_INFO, Level.INFO);
+		}
+
+		assertEquals(1, drivers.interrupted.sum(), "results published as INTERRUPTED");
+		assertTrue(
+						elapsedMillis < PROMPT_END_MILLIS,
+						"the step ended on its count, without waiting for its time limit, after " + elapsedMillis + " ms");
+		assertTrue(counted(stepId) >= 50, "the step counted its count, " + counted(stepId));
+		assertTrue(drivers.accepted.sum() > 50, "the driver accepted past the count, " + drivers.accepted.sum());
+		assertTrue(
+						drivers.resultOutput.get() != null
+										&& !(drivers.resultOutput.get() instanceof UncountedFinalResultOutput),
+						"the step installed its result output without the capped wrapper: " + drivers.resultOutput.get());
+		assertEquals(1, infos.size(), "the step's INFO lines about the undeclared driver: " + infos);
+		assertTrue(infos.get(0).contains("count limit 50"), infos.get(0));
 	}
 
 	@Test
@@ -263,13 +306,17 @@ class MixedLoadStepCountLimitTest {
 	 * route: the step's own result output, with no cap. So an upload's initiation is never taken for
 	 * its final result, and the step does not end before it counts an upload, as it did when the
 	 * undeclared default meant one result per composite. As before this change, the step dispatches
-	 * past its count, counts more than it, and waits for the uploads still running when it stops (on
-	 * 518a0b4c, too, it ends after about 30 s), but not for its time limit.
+	 * past its count, counts more than it, and waits for the uploads still running when it stops,
+	 * up to its {@code load-op-wait-limit} (on 518a0b4c, too, it ends after that wait, about 30 s at
+	 * the default), but not for its time limit.
 	 */
 	@Test
 	void aMultipartUploadOnAnUndeclaredDriverIsCountedAsBefore() throws Exception {
 		final String stepId = newStepId("undeclared-late-parts");
 		final Config config = multipartStepConfig(stepId, 1);
+		// The step stops with uploads still running, and waits for them up to this many seconds,
+		// 30 by default, as before this change.
+		config.val("load-op-wait-limit", 3);
 		nioDrivers.undeclaredDecorator.set(true);
 		nioDrivers.pauseFirstCompletion.set(true);
 
@@ -282,8 +329,8 @@ class MixedLoadStepCountLimitTest {
 						"the step installed its result output without the capped wrapper: " + nioDrivers.resultOutput.get());
 		assertEquals(1, nioDrivers.paused.sum(), "completions paused after their result was published");
 		assertTrue(
-						elapsedMillis < TimeUnit.SECONDS.toMillis(55),
-						"the step ended before its time limit, after " + elapsedMillis + " ms");
+						elapsedMillis < PROMPT_END_MILLIS,
+						"the step ended after its wait for running uploads, after " + elapsedMillis + " ms");
 	}
 
 	@Test
@@ -450,6 +497,8 @@ class MixedLoadStepCountLimitTest {
 		final AtomicReference<Object> resultOutput = new AtomicReference<>();
 		final LongAdder interrupted = new LongAdder();
 		final AtomicBoolean interruptFirstResult = new AtomicBoolean();
+		/** Whether the driver does not declare its composite results, as a decorator might not. */
+		final AtomicBoolean undeclared = new AtomicBoolean();
 
 		@Override
 		public String id() {
@@ -474,6 +523,9 @@ class MixedLoadStepCountLimitTest {
 						final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
 						final int batchSize) {
 			final DummyStorageDriverMock driver = spy(new DummyStorageDriverMock(storageConfig));
+			if (undeclared.get()) {
+				doReturn(CompositeResults.UNDECLARED).when(driver).compositeResults();
+			}
 			doAnswer(call -> {
 				final boolean result = (boolean) call.callRealMethod();
 				if (result) {
@@ -625,6 +677,8 @@ class MixedLoadStepCountLimitTest {
 							StorageDriver.class.getClassLoader(), new Class<?>[]{StorageDriver.class
 							},
 							(proxy, method, args) -> {
+								// completesCompositesInParts is the declaration's name on 55abe355, matched so that
+								// the same test runs against that revision's sources for the fail check.
 								if (undeclared
 												&& ("compositeResults".equals(method.getName())
 																|| "completesCompositesInParts".equals(method.getName()))) {
