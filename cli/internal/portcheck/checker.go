@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"strings"
@@ -270,6 +271,15 @@ func (p *PortChecker) validateSptMetricsResponse(resp *http.Response) bool {
 
 // validateSptFields checks if a JSON object contains Spt-specific fields
 func (p *PortChecker) validateSptFields(metrics map[string]interface{}) bool {
+	// Current engines (metrics_schema 2 and later) answer with the snake_case
+	// metrics contract, which shares almost none of the older camelCase
+	// fields checked below.
+	if isSptMetricsSchemaObject(metrics) {
+		logging.LogDebug("portcheck", "validated Spt metrics schema object",
+			"metrics_schema", metrics["metrics_schema"])
+		return true
+	}
+
 	// Check for Spt-specific fields that should be present in metrics
 	sptFields := []string{
 		"lastUpdateTimeISO", // Spt timestamp format
@@ -314,6 +324,24 @@ func (p *PortChecker) validateSptFields(metrics map[string]interface{}) bool {
 		"total_fields_found", foundFields)
 
 	return isSpt
+}
+
+// isSptMetricsSchemaObject reports whether a JSON object has the shape of the
+// engine's /metrics/json contract (engine doc METRICS.md): an integral, positive
+// metrics_schema version and the always-present string fields scope and
+// op_type. Requiring the companion fields keeps an unrelated service that
+// happens to emit a "metrics_schema" key from being taken for SPT.
+func isSptMetricsSchemaObject(metrics map[string]interface{}) bool {
+	version, ok := metrics["metrics_schema"].(float64)
+	if !ok || version < 1 || version != math.Trunc(version) {
+		return false
+	}
+	for _, field := range []string{"scope", "op_type"} {
+		if _, isString := metrics[field].(string); !isString {
+			return false
+		}
+	}
+	return true
 }
 
 // validateSptRunResponse checks if an HTTP response from /run endpoint contains valid Spt run info
@@ -509,7 +537,8 @@ func (p *PortChecker) isSptBadRequestError(resp *http.Response) bool {
 
 	// Check for Spt-specific error patterns
 	sptErrorPatterns := []string{
-		"Missing header: If-Match",  // Specific Spt error we saw
+		"Missing header: If-Match",  // Spt RunServlet error without an If-Match header
+		"Invalid run ID format",     // Spt RunServlet answer to the probe's If-Match: *
 		"com.dell.spt.base.control", // Spt servlet package name
 		"Powered by Jetty",          // Spt uses Jetty server
 	}

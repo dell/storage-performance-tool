@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/dell/storage-performance-tool/cli/internal/containerutil"
 )
 
 var rePID = regexp.MustCompile(`pid=([0-9]+)|\s([0-9]+)/[A-Za-z0-9._-]+$`)
@@ -59,10 +61,7 @@ func suggestContainerStop(info *VerificationConflictInfo, port int, write func(s
 	for _, c := range info.Containers {
 		for _, m := range c.Ports {
 			if strings.Contains(m, fmt.Sprintf(":%d->", port)) || strings.Contains(m, fmt.Sprintf(":%d/", port)) {
-				id := c.ID
-				if len(id) > 12 {
-					id = id[:12]
-				}
+				id := containerutil.ShortID(c.ID)
 				if info.Host != nil && !info.Host.IsLocal {
 					write(fmt.Sprintf("  - Port %d: ssh %s 'docker stop %s'  # %s", port, info.Host.GetSSHTarget(), id, c.Name))
 				} else {

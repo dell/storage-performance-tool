@@ -848,12 +848,14 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		if (tracePersistFlag) {
 			Loggers.OP_TRACES.info(new OperationTraceCsvLogMessage<>(opResult));
 		}
-		// account the completed composite ops only
+		final Status status = opResult.status();
+		// account the completed composite ops only, and the failed ones: a composite that fails unfinished
+		// (its initiation, or its abort after a part ran out of retries) is counted once as a failure
 		if (opResult instanceof CompositeOperation
-						&& !((CompositeOperation) opResult).allSubOperationsDone()) {
+						&& !((CompositeOperation) opResult).allSubOperationsDone()
+						&& !isFailure(status)) {
 			return true;
 		}
-		final Status status = opResult.status();
 		if (Status.SUCC.equals(status)) {
 			// A terminal success ends this operation's current retry episode - clear the
 			// counter now so a recycled reuse of this object (read-recycle mode) starts its
@@ -934,6 +936,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			// in the metrics in any way
 			outputResults(opResult);
 		} else {
+			if (opResult instanceof PartialOperation) {
+				// a failed part attempt is part accounting only: the driver retries the part or fails its
+				// composite, whose own result is the one counted
+				return true;
+			}
 			if (recycleFlag) {
 				latestSuccOpResultByItem.remove(opResult.item());
 			}
@@ -967,12 +974,13 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		int i;
 		for (i = from; i < to; i++) {
 			opResult = opResults.get(i);
-			// account the completed composite ops only
+			status = opResult.status();
+			// account the completed composite ops only, and the failed ones (see put(O))
 			if (opResult instanceof CompositeOperation
-							&& !((CompositeOperation) opResult).allSubOperationsDone()) {
+							&& !((CompositeOperation) opResult).allSubOperationsDone()
+							&& !isFailure(status)) {
 				continue;
 			}
-			status = opResult.status();
 			reqDuration = opResult.duration();
 			respLatency = opResult.latency();
 			timeToFirstByte = timeToFirstByte(opResult);
@@ -1057,6 +1065,10 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				// in the metrics in any way
 				outputResults(opResult);
 			} else {
+				if (opResult instanceof PartialOperation) {
+					// a failed part attempt is part accounting only (see put(O))
+					continue;
+				}
 				if (recycleFlag) {
 					latestSuccOpResultByItem.remove(opResult.item());
 				}
@@ -1142,6 +1154,10 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					}
 				}
 				opResult.incrementOpRetryCount();
+				if (opResult instanceof CompositeOperation<?> compositeOp) {
+					// retry the whole composite: a new initiation and every part, not the failed attempt's state
+					compositeOp.resetSubOperations();
+				}
 				scheduleRetry(opResult);
 				return;
 			}
@@ -1157,6 +1173,12 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 			reason = "retry limit (" + retryLimit + ") reached";
 		}
 		markOpFailed(opResult, status, reason);
+	}
+
+	/** Whether {@code status} is an outcome that ends an operation as failed, rather than a step on its way. */
+	private static boolean isFailure(final Status status) {
+		return !(Status.SUCC.equals(status) || Status.PENDING.equals(status) || Status.ACTIVE.equals(status)
+						|| Status.INTERRUPTED.equals(status) || Status.OMIT.equals(status));
 	}
 
 	private void markOpFailed(final O opResult, final Status status, final String reason) {
