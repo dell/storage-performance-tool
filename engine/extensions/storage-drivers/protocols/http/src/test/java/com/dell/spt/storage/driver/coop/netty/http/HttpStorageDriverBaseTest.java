@@ -21,18 +21,22 @@ import com.github.akurilov.commons.system.SizeInBytes;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.SchemaProvider;
 import com.github.akurilov.confuse.impl.BasicConfig;
+import io.netty.buffer.ByteBuf;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.buffer.Unpooled;
+import io.netty.handler.codec.TooLongFrameException;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.FullHttpResponse;
+import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
+import java.nio.charset.StandardCharsets;
 import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
@@ -594,5 +598,81 @@ class HttpStorageDriverBaseTest {
 		final StringBuilder sb = new StringBuilder();
 		HttpStorageDriverBase.rangeListToStringBuff(List.of(r1, r2), 1024, sb);
 		assertTrue(sb.toString().contains(","), "Multiple ranges should be comma-separated");
+	}
+
+	/**
+	 * A HEAD response states the object's size in Content-Length but has no body, so the control
+	 * aggregator passes it whatever the size, also under a cap smaller than the size.
+	 */
+	@ParameterizedTest
+	@CsvSource({
+			"2147483647, 2147483647",
+			"2147483648, 2147483647",
+			"3221225472, 2147483647",
+			"5497558138880, 2147483647",
+			"2147483648, 16777216"
+	})
+	void controlAggregatorPassesAHeadResponseOfAnySize(
+					final long contentLength, final int maxContentLength) {
+		final var ch = controlChannel(HttpMethod.HEAD, maxContentLength);
+
+		assertTrue(ch.writeInbound(responseHeaders(contentLength)));
+		final FullHttpResponse response = ch.readInbound();
+		try {
+			assertEquals(HttpResponseStatus.OK, response.status());
+			assertEquals(0, response.content().readableBytes());
+			assertEquals(
+							Long.toString(contentLength),
+							response.headers().get(HttpHeaderNames.CONTENT_LENGTH));
+			assertTrue(ch.isOpen());
+		} finally {
+			response.release();
+			ch.finishAndReleaseAll();
+		}
+	}
+
+	/** Responses to other methods keep the limit: an oversized GET response is refused. */
+	@Test
+	void controlAggregatorRefusesAGetResponseOverTheLimit() {
+		final var ch = controlChannel(HttpMethod.GET, Integer.MAX_VALUE);
+
+		assertThrows(
+						TooLongFrameException.class,
+						() -> ch.writeInbound(responseHeaders(2147483648L)));
+		assertFalse(ch.isOpen());
+		assertNull(ch.readInbound());
+		ch.finishAndReleaseAll();
+	}
+
+	@Test
+	void controlAggregatorAggregatesAGetResponseWithinTheLimit() {
+		final var ch = controlChannel(HttpMethod.GET, Integer.MAX_VALUE);
+
+		final var wire = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+		assertTrue(ch.writeInbound(Unpooled.copiedBuffer(wire, StandardCharsets.US_ASCII)));
+		final FullHttpResponse response = ch.readInbound();
+		try {
+			assertEquals("hello", response.content().toString(StandardCharsets.US_ASCII));
+		} finally {
+			response.release();
+			ch.finishAndReleaseAll();
+		}
+	}
+
+	/** A client codec that has sent the request, so it knows a HEAD response has no body. */
+	private static EmbeddedChannel controlChannel(final HttpMethod method, final int maxContentLength) {
+		final var ch = new EmbeddedChannel(
+						new HttpClientCodec(),
+						HttpStorageDriverBase.controlResponseAggregator(method, maxContentLength));
+		assertTrue(ch.writeOutbound(
+						new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, method, "/bucket/key")));
+		ch.releaseOutbound();
+		return ch;
+	}
+
+	private static ByteBuf responseHeaders(final long contentLength) {
+		return Unpooled.copiedBuffer(
+						"HTTP/1.1 200 OK\r\nContent-Length: " + contentLength + "\r\n\r\n",
+						StandardCharsets.US_ASCII);
 	}
 }
