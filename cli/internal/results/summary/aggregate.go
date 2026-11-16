@@ -223,24 +223,22 @@ type RunTotals struct {
 	// no metrics. A MetricsSuppressed step is never listed.
 	MissingPhases []string
 	// AbsentPhases names the expected steps that are not in the results index at all, in
-	// step ID order. Their kind is unknown, so each counts as missing.
+	// step ID order. An absent step does not always mean a missing phase (a mock pipeline
+	// runs its planned steps as one, runtime step IDs can differ from the planned ones, and a
+	// no-work cleanup can end unseen), so it decides only the case where nothing is counted.
 	AbsentPhases []string
 }
 
-// StepsNotCounted is the number of expected steps left out of the sums.
-func (t RunTotals) StepsNotCounted() int {
-	return len(t.MissingPhases) + len(t.AbsentPhases)
-}
-
-// Unavailable reports that no expected step has metrics, so the sums are not measurements.
+// Unavailable reports that no step was counted while some expected step is missing or
+// absent, so the sums are not measurements.
 func (t RunTotals) Unavailable() bool {
-	return t.StepsNotCounted() > 0 && t.StepsCounted == 0
+	return t.StepsCounted == 0 && len(t.MissingPhases)+len(t.AbsentPhases) > 0
 }
 
-// Partial reports that some expected steps have metrics and others do not, so the sums
-// cover only part of the run.
+// Partial reports that some steps were counted and some indexed steps have no metrics, so
+// the sums cover only part of the run. Absent steps never make the totals partial.
 func (t RunTotals) Partial() bool {
-	return t.StepsNotCounted() > 0 && t.StepsCounted > 0
+	return t.StepsCounted > 0 && len(t.MissingPhases) > 0
 }
 
 const (
@@ -514,8 +512,8 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 	}
 	appendSeededDeleteCleanupPhase(steps, workload)
 	// An expected step absent from the index has no fetched config, so whether it would have
-	// been MetricsSuppressed is unknown. No generated scenario suppresses its totals, so it
-	// counts as missing: the totals then say they are partial rather than claim the run.
+	// been MetricsSuppressed is unknown (a generated read or mixed seed step is suppressed by
+	// the engine's default). Absent steps therefore only make an uncounted run unavailable.
 	for _, stepID := range data.MissingExpectedSteps {
 		totals.AbsentPhases = append(totals.AbsentPhases, nonEmpty(phaseLabelFromStep(stepID), stepID))
 	}

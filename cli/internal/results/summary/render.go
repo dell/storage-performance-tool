@@ -608,9 +608,13 @@ func missingMetricsRow(step StepSummary, columns int) []string {
 	return row
 }
 
-// appendAbsentPhaseRows adds a dash row for each expected step absent from the results index.
-// Such a step has no place in the index's step order, so its rows follow the indexed steps.
+// appendAbsentPhaseRows adds a dash row for each expected step absent from the results index,
+// only when no step was counted: otherwise an absent step need not be a missing phase. Such a
+// step has no place in the index's step order, so its rows follow the indexed steps.
 func appendAbsentPhaseRows(rows [][]string, summary *RunSummary, columns int) [][]string {
+	if !summary.Totals.Unavailable() {
+		return rows
+	}
 	for _, label := range summary.Totals.AbsentPhases {
 		row := notApplicableRow(columns)
 		row[0] = label
@@ -773,7 +777,7 @@ func compactTotalsLine(totals RunTotals) string {
 }
 
 func partialTotalsQualifier(totals RunTotals) string {
-	return fmt.Sprintf("(%d of %d phases)", totals.StepsCounted, totals.StepsCounted+totals.StepsNotCounted())
+	return fmt.Sprintf("(%d of %d phases)", totals.StepsCounted, totals.StepsCounted+len(totals.MissingPhases))
 }
 
 // notCountedPhases names the phases left out of the totals, grouped by why.
@@ -782,7 +786,7 @@ func notCountedPhases(totals RunTotals) string {
 	if len(totals.MissingPhases) > 0 {
 		parts = append(parts, countedLabels(totals.MissingPhases)+" (metrics unavailable)")
 	}
-	if len(totals.AbsentPhases) > 0 {
+	if totals.Unavailable() && len(totals.AbsentPhases) > 0 {
 		parts = append(parts, countedLabels(totals.AbsentPhases)+" (not in results)")
 	}
 	return strings.Join(parts, "; ")
@@ -831,14 +835,20 @@ func (r *Renderer) renderArtifactsAndWarnings(b *strings.Builder, summary *RunSu
 }
 
 // writeIndentedBullet writes a labelled bullet wrapped to the report width, with continuation
-// lines aligned under the value.
+// lines aligned under the value. Below minIndentedValueWidth columns for the value it falls
+// back to plain bullet wrapping.
 func (r *Renderer) writeIndentedBullet(b *strings.Builder, label, value string) {
 	if value == "" {
 		return
 	}
 	prefix := fmt.Sprintf("  • %-18s ", label)
+	valueWidth := r.MaxWidth - textutil.RuneLen(prefix)
+	if valueWidth < minIndentedValueWidth {
+		r.writeWrappedBullet(b, label, value, r.MaxWidth)
+		return
+	}
 	indent := strings.Repeat(" ", textutil.RuneLen(prefix))
-	for i, line := range textutil.WrapWords(value, r.MaxWidth-textutil.RuneLen(prefix)) {
+	for i, line := range textutil.WrapWords(value, valueWidth) {
 		if i == 0 {
 			b.WriteString(prefix)
 		} else {
@@ -848,6 +858,8 @@ func (r *Renderer) writeIndentedBullet(b *strings.Builder, label, value string) 
 		b.WriteByte('\n')
 	}
 }
+
+const minIndentedValueWidth = 20
 
 func (r *Renderer) writeBullet(b *strings.Builder, label, value string) {
 	if value == "" {

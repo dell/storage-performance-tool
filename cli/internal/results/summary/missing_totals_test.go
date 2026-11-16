@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -13,86 +12,6 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/results"
 )
-
-const (
-	missingTotalsSeedStep   = "spt-001-20261115.120000.000-seed"
-	missingTotalsCreateStep = "spt-002-20261115.120000.000-create"
-	missingTotalsReadStep   = "spt-003-20261115.120000.000-read"
-)
-
-// parsedTotalsLine is what tools match to read the run total from the console summary.
-var parsedTotalsLine = regexp.MustCompile(`Totals:\s+duration\s+`)
-
-type missingTotalsStep struct {
-	id         string
-	op         string
-	bytes      int64
-	seconds    float64
-	failures   int64
-	missing    bool
-	suppressed bool
-	// absent leaves an expected step out of the results index altogether.
-	absent bool
-}
-
-// missingTotalsRun builds a synthetic run: a suppressed seed step, then the given steps.
-func missingTotalsRun(t *testing.T, steps ...missingTotalsStep) *RunSummary {
-	t.Helper()
-	runData := &RunData{
-		RunID:        "spt-20261115.120000.000",
-		Steps:        make(map[string]*StepData),
-		Params:       &RunParams{GeneratedAt: time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)},
-		ManifestPath: "index.json",
-		MetadataPath: "params.json",
-	}
-	runData.Params.ScenarioParams.ObjectSize = "1MiB"
-	all := append([]missingTotalsStep{{id: missingTotalsSeedStep, suppressed: true}}, steps...)
-	for _, step := range all {
-		if step.absent {
-			runData.MissingExpectedSteps = append(runData.MissingExpectedSteps, step.id)
-			continue
-		}
-		runData.StepOrder = append(runData.StepOrder, step.id)
-		data := &StepData{StepID: step.id, Status: StepStatusComplete, MetricsSuppressed: step.suppressed}
-		switch {
-		case step.suppressed:
-		case step.missing:
-			data.Status = StepStatusPartial
-			data.MissingRequired = []string{"metrics.total.csv"}
-		default:
-			data.Metrics = &MetricsTotals{StepID: step.id, Rows: []MetricsTotalsRow{{
-				Operation:           step.op,
-				SuccessCount:        100,
-				FailureCount:        step.failures,
-				SizeBytes:           step.bytes,
-				StepDurationSeconds: step.seconds,
-				ThroughputAvgOps:    10,
-				BandwidthAvgMiBps:   100,
-				LatencyAvgMicros:    1000,
-				LatencyP50Micros:    1000,
-				Concurrency:         1,
-				NodeCount:           1,
-			}}}
-		}
-		runData.Steps[step.id] = data
-	}
-	summary, err := Aggregate(runData)
-	if err != nil {
-		t.Fatalf("Aggregate returned error: %v", err)
-	}
-	return summary
-}
-
-func totalsLine(t *testing.T, snippet string) string {
-	t.Helper()
-	for _, line := range strings.Split(snippet, "\n") {
-		if strings.HasPrefix(line, "Totals") {
-			return line
-		}
-	}
-	t.Fatalf("no totals line in:\n%s", snippet)
-	return ""
-}
 
 func TestMissingTotalsNoneMissingKeepsTotalsLines(t *testing.T) {
 	t.Parallel()
@@ -251,50 +170,38 @@ func TestMissingTotalsNoneMissingCompactSnippetUnchanged(t *testing.T) {
 	}
 }
 
-func TestMissingTotalsAbsentExpectedStepCountsAsMissing(t *testing.T) {
+// An absent expected step decides only the case where nothing is counted.
+func TestMissingTotalsAbsentStepsDecideOnlyTheUncountedCase(t *testing.T) {
 	t.Parallel()
 
 	const cleanupStep = "spt-004-20261115.120000.000-cleanup"
 	renderer := NewRenderer(RenderOptions{MaxWidth: 120})
 
-	all := missingTotalsRun(t,
-		missingTotalsStep{id: missingTotalsCreateStep, absent: true},
+	mixed := missingTotalsRun(t,
+		missingTotalsStep{id: missingTotalsCreateStep, missing: true},
 		missingTotalsStep{id: missingTotalsReadStep, absent: true},
 	)
-	if got := totalsLine(t, renderer.CompactSnippet(all)); got != "Totals: unavailable (no phase has metrics)" {
-		t.Fatalf("all absent: compact totals line = %q", got)
+	if got := totalsLine(t, renderer.CompactSnippet(mixed)); got != "Totals: unavailable (no phase has metrics)" {
+		t.Fatalf("missing and absent: compact totals line = %q", got)
 	}
-	report := renderer.FullReport(all)
-	mustContain(t, report, "  • Duration           unavailable\n")
-	mustContain(t, report, "  • Not counted        Create, Read (not in results)\n")
-	table := renderer.performanceTable(all)
-	mustContain(t, table, "│ Create │")
-	mustContain(t, table, "│ Read   │")
+	report := renderer.FullReport(mixed)
+	mustContain(t, report, "  • Not counted        Create (metrics unavailable); Read (not in results)\n")
+	tableRowLine(t, renderer.rateTable(mixed), "Read")
+	tableRowLine(t, renderer.phaseTable(mixed), "Read")
 
 	some := missingTotalsRun(t,
 		missingTotalsStep{id: missingTotalsCreateStep, op: "CREATE", bytes: 1000 * bytesInMiB, seconds: 10},
 		missingTotalsStep{id: missingTotalsReadStep, missing: true},
 		missingTotalsStep{id: cleanupStep, absent: true},
 	)
-	compact := renderer.CompactSnippet(some)
-	if got := totalsLine(t, compact); got != "Totals (1 of 3 phases): duration 10s, data moved 1000.00 MiB" {
-		t.Fatalf("some absent: compact totals line = %q", got)
-	}
-	if parsedTotalsLine.MatchString(compact) {
-		t.Fatalf("partial totals match the parsed totals line:\n%s", compact)
+	if got := totalsLine(t, renderer.CompactSnippet(some)); got != "Totals (1 of 2 phases): duration 10s, data moved 1000.00 MiB" {
+		t.Fatalf("some missing, one absent: compact totals line = %q", got)
 	}
 	report = renderer.FullReport(some)
-	mustContain(t, report, "Run Totals (1 of 3 phases)\n")
-	mustContain(t, report, "  • Failed requests    0 (counted phases only)\n")
-	mustContain(t, report, "  • Not counted        Read (metrics unavailable); Cleanup (not in results)\n")
-	for name, table := range map[string]string{"rate": renderer.rateTable(some), "phase": renderer.phaseTable(some)} {
-		row := tableRowLine(t, table, "Cleanup")
-		for _, cell := range strings.Split(strings.Trim(row, "│"), "│")[1:] {
-			if strings.TrimSpace(cell) != notApplicableCell {
-				t.Fatalf("%s table Cleanup row = %q, want a dash in every value cell", name, row)
-			}
-		}
-	}
+	mustContain(t, report, "Run Totals (1 of 2 phases)\n")
+	mustContain(t, report, "  • Not counted        Read (metrics unavailable)\n")
+	mustContain(t, report, "  • Missing steps      "+cleanupStep+"\n")
+	mustNotContain(t, renderer.performanceTable(some), "Cleanup")
 }
 
 func TestMissingTotalsNotCountedCollapsesRepeatsAndWraps(t *testing.T) {
@@ -335,7 +242,8 @@ func TestMissingTotalsNotCountedCollapsesRepeatsAndWraps(t *testing.T) {
 }
 
 // TestMissingTotalsThroughLoader loads a results directory whose Read totals were not
-// fetched and whose Cleanup step is absent from the index.
+// fetched and whose Cleanup step is absent from the index: the absent step leaves the
+// partial total as the indexed steps make it.
 func TestMissingTotalsThroughLoader(t *testing.T) {
 	t.Parallel()
 
@@ -392,12 +300,33 @@ func TestMissingTotalsThroughLoader(t *testing.T) {
 	}
 	summary := mustAggregate(t, data)
 	compact := renderer.CompactSnippet(summary)
-	if got := totalsLine(t, compact); !strings.HasPrefix(got, "Totals (1 of 3 phases): duration ") {
+	if got := totalsLine(t, compact); !strings.HasPrefix(got, "Totals (1 of 2 phases): duration ") {
 		t.Fatalf("compact totals line = %q", got)
 	}
 	report := renderer.FullReport(summary)
-	mustContain(t, report, "Run Totals (1 of 3 phases)\n")
-	mustContain(t, report, "  • Not counted        Read (metrics unavailable); Cleanup (not in results)\n")
+	mustContain(t, report, "Run Totals (1 of 2 phases)\n")
+	mustContain(t, report, "  • Not counted        Read (metrics unavailable)\n")
 	tableRowLine(t, renderer.phaseTable(summary), "Read")
-	tableRowLine(t, renderer.phaseTable(summary), "Cleanup")
+	mustNotContain(t, renderer.phaseTable(summary), "Cleanup")
+}
+
+// Too narrow for a value column beside the label, the bullet falls back to plain wrapping.
+func TestMissingTotalsNotCountedFallsBackAtNarrowWidth(t *testing.T) {
+	t.Parallel()
+
+	var buf strings.Builder
+	NewRenderer(RenderOptions{MaxWidth: 30}).writeIndentedBullet(&buf, "Not counted", "Create, Read ×2 (metrics unavailable)")
+	out := strings.TrimSuffix(buf.String(), "\n")
+	lines := strings.Split(out, "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected the bullet to wrap at width 30, got %q", out)
+	}
+	for _, line := range lines {
+		if n := len([]rune(line)); n > 30 {
+			t.Errorf("line is %d wide, want <= 30: %q", n, line)
+		}
+	}
+	if got := strings.Join(strings.Fields(out), " "); got != "• Not counted Create, Read ×2 (metrics unavailable)" {
+		t.Fatalf("bullet text = %q", got)
+	}
 }
