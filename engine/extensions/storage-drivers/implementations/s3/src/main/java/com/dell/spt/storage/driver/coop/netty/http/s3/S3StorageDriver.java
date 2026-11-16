@@ -23,6 +23,7 @@ import com.dell.spt.base.config.el.CompositeExpressionInputBuilder;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.DateUtil;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.config.InvalidTextValueException;
 import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
 import com.dell.spt.base.integrity.IntegrityMetadataCodec;
 import com.dell.spt.base.integrity.IntegrityVerificationResult;
@@ -401,6 +402,16 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		this(stepId, itemDataInput, storageConfig, verifyFlag, batchSize, "s3");
 	}
 
+	/**
+	 * A tag's value as the tagging body takes it. A list or map, which a defaults document can give, is
+	 * refused with the tag's name; the {@code s3-aws} driver sends one as text, so the configuration
+	 * keeps it. Any other value is cast as before.
+	 */
+	private static String tagTextOrNull(final String name, final Object value) {
+		InvalidTextValueException.refuseListOrMap("storage-object-tagging-tags-" + name, value);
+		return (String) value;
+	}
+
 	protected S3StorageDriver(
 					final String stepId,
 					final DataInput itemDataInput,
@@ -421,12 +432,12 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		if (taggingEnabled) {
 			Loggers.MSG.info("{}: S3 Object Tagging Mode Enabled", stepId);
 		}
-		final var tags = taggingConfig.<String> mapVal("tags");
+		final var tags = taggingConfig.<Object> mapVal("tags");
 		final StringBuilder exprBuff = new StringBuilder();
 		exprBuff.append(TAGGING_HEADER);
 		for (final var tagEntry : tags.entrySet()) {
 			final var k = tagEntry.getKey();
-			final var v = tagEntry.getValue();
+			final var v = tagTextOrNull(k, tagEntry.getValue());
 			exprBuff
 							.append(TAGGING_ENTRY_START)
 							.append(k)
