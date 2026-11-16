@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
+	"github.com/dell/storage-performance-tool/cli/internal/scenario"
 	"github.com/spf13/cobra"
 )
 
@@ -687,6 +688,36 @@ func TestApplyEnvDefaultsToRunFlags_EngineOverridesFromEnv(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("engine overrides = %v, want %v", got, want)
 		}
+	}
+}
+
+// A URI argument from SPT_ENGINE_OVERRIDES reaches the generated defaults as the text typed, as from
+// --engine-override.
+func TestApplyEnvDefaultsToRunFlags_EngineOverrideUriArgFromEnvIsText(t *testing.T) {
+	cmd := newRunLikeCmd()
+	clearEnvDefaultsTestEnv(t)
+
+	t.Setenv(constants.EnvEngineOverrides, "storage.net.http.uri.args.tid=0012; storage.driver.threads=6")
+	t.Cleanup(func() { os.Unsetenv(constants.EnvEngineOverrides) })
+
+	if err := applyEnvDefaultsToRunFlags(cmd); err != nil {
+		t.Fatalf("applyEnvDefaultsToRunFlags error: %v", err)
+	}
+	overrides, _ := cmd.Flags().GetStringArray(flagEngineOverride)
+	data, err := scenario.GenerateDefaults(scenario.Params{
+		WorkloadType:    "write",
+		Endpoint:        "http://127.0.0.1:9000",
+		AccessKey:       "testkey",
+		SecretKey:       "testsecret",
+		Bucket:          "testbucket",
+		Threads:         4,
+		EngineOverrides: overrides,
+	})
+	if err != nil {
+		t.Fatalf("GenerateDefaults error: %v", err)
+	}
+	if !strings.Contains(string(data), `tid: "0012"`) || !strings.Contains(string(data), "threads: 6") {
+		t.Fatalf("defaults should hold tid as the text 0012 and threads as 6, got:\n%s", data)
 	}
 }
 

@@ -146,22 +146,8 @@ public class PrometheusMetricsExporterImpl extends Collector implements Promethe
 
 	private void collectCompletionPercent(
 					final DistributedAllMetricsSnapshot snapshot, final List<MetricFamilySamples> mfsList) {
-		// Determine limits from metadata
-		final var metadata = metricsContext.metadata();
-		long countLimit = 0L;
-		long timeLimitSec = 0L;
-		if (metadata != null) {
-			final Long countLimitCandidate = toLong(metadata.get(MetricsConstants.METADATA_LIMIT_OP_COUNT),
-							MetricsConstants.METADATA_LIMIT_OP_COUNT);
-			final Long timeLimitCandidate = toLong(metadata.get(MetricsConstants.METADATA_LIMIT_TIME_SEC),
-							MetricsConstants.METADATA_LIMIT_TIME_SEC);
-			if (countLimitCandidate != null && countLimitCandidate > 0L) {
-				countLimit = countLimitCandidate;
-			}
-			if (timeLimitCandidate != null && timeLimitCandidate > 0L) {
-				timeLimitSec = timeLimitCandidate;
-			}
-		}
+		final long countLimit = countLimit();
+		final long timeLimitSec = timeLimitSec();
 
 		// Compute completion fraction using count if available, otherwise time
 		double completion = 0.0;
@@ -185,30 +171,39 @@ public class PrometheusMetricsExporterImpl extends Collector implements Promethe
 														newSample(MetricsConstants.METRIC_NAME_COMPLETION, "value", percent))));
 	}
 
+	/** The context's operation count limit from its metadata, or 0 when it has none. */
+	private long countLimit() {
+		return positiveMetadataLong(MetricsConstants.METADATA_LIMIT_OP_COUNT);
+	}
+
+	/** The context's time limit in seconds from its metadata, or 0 when it has none. */
+	private long timeLimitSec() {
+		return positiveMetadataLong(MetricsConstants.METADATA_LIMIT_TIME_SEC);
+	}
+
+	private long positiveMetadataLong(final String key) {
+		final var metadata = metricsContext.metadata();
+		if (metadata == null) {
+			return 0L;
+		}
+		final Long value = toLong(metadata.get(key), key);
+		return value != null && value > 0L ? value : 0L;
+	}
+
 	private void collectTestState(
 					final DistributedAllMetricsSnapshot snapshot, final List<MetricFamilySamples> mfsList) {
-		// Test state metric for TUI client integration
-		// 0 = no test active/idle, 1 = test running, 2 = test completed with results
-		double testState = 0.0;  // Default: no test active
-
+		// 0 = no snapshot (no step active), 1 = running, 2 = the context's count or time
+		// limit reached. The rule is the JSON endpoints' (TestStateRule). A step with
+		// neither limit reads 1 while its series exists; its end shows as the series ending.
+		int testState = TestStateRule.IDLE;
 		if (snapshot != null) {
-			// We have a snapshot - determine if test is actively running or completed
-			final var successCount = snapshot.successSnapshot().count();
-			final var failsCount = snapshot.failsSnapshot().count();
-			final var totalOps = successCount + failsCount;
-
-			if (totalOps > 0) {
-				// We have completed operations
-				final var concurrency = snapshot.concurrencySnapshot().last();
-				if (concurrency > 0) {
-					testState = 1.0;  // Test is actively running
-				} else {
-					testState = 2.0;  // Test completed with results
-				}
-			} else {
-				// No operations completed yet, but we have a snapshot
-				testState = 1.0;  // Test is starting/running
-			}
+			testState = TestStateRule.activeState(
+							timeLimitSec(),
+							countLimit(),
+							snapshot.elapsedTimeMillis(),
+							snapshot.successSnapshot().count(),
+							snapshot.failsSnapshot().count(),
+							snapshot.concurrencySnapshot().last());
 		}
 
 		mfsList.add(

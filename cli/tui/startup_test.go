@@ -7,6 +7,7 @@ package tui
 import (
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -82,32 +83,57 @@ func TestContainerOutputProcessing(t *testing.T) {
 	model.dockerManager = mockDM
 
 	// Set up mock output with Spt-style data
-	mockDM.SetOutputLines([]string{
+	lines := []string{
 		"Starting Spt benchmark...",
 		"1.000|250630194048|CREATE|         0|0.0       |    22544384|     0|10.008 |100.5 |100.5|         5|          9",
 		"2.000|250630194108|CREATE|         0|0.0       |    73473495|     0|30.029 |150.7 |150.7|         5|         10",
 		"Benchmark complete.",
-	})
+	}
+	mockDM.SetOutputLines(lines)
 	mockDM.SetOutputDelay(1 * time.Millisecond)
 
-	// Collect output lines
+	// Collect output lines. The callbacks run on the mock's stream
+	// goroutine, so mu guards the captured state and each stdout line is
+	// signalled on gotLine.
+	wantLines := len(lines)
+	var mu sync.Mutex
 	var outputLines []string
 	var errorLines []string
+	gotLine := make(chan struct{}, wantLines)
 
 	mockDM.StreamOutput("test-container",
 		func(line string) {
+			mu.Lock()
 			outputLines = append(outputLines, line)
+			mu.Unlock()
+			select {
+			case gotLine <- struct{}{}:
+			default:
+			}
 		},
 		func(line string) {
+			mu.Lock()
+			defer mu.Unlock()
 			errorLines = append(errorLines, line)
 		})
 
 	// Wait for streaming to complete
-	time.Sleep(20 * time.Millisecond)
+	timeout := time.After(5 * time.Second)
+waitLines:
+	for range wantLines {
+		select {
+		case <-gotLine:
+		case <-timeout:
+			break waitLines
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
 
 	// Verify output was received
-	if len(outputLines) != 4 {
-		t.Errorf("Expected 4 output lines, got %d", len(outputLines))
+	if len(outputLines) != wantLines {
+		t.Errorf("Expected %d output lines, got %d", wantLines, len(outputLines))
 	}
 
 	// Verify no errors

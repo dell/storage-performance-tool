@@ -54,6 +54,9 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 
 	private static final AttributeKey<ByteBuf> CONTENT_ATTR_KEY = AttributeKey.newInstance(
 					"content");
+	/** The body of a multipart (composite) operation's response, kept up to {@link #MAX_MULTIPART_RESPONSE_BYTES}. */
+	private static final AttributeKey<ByteBuf> MULTIPART_RESPONSE_ATTR_KEY = AttributeKey.newInstance(
+					"spt-multipart-response");
 	private static final AttributeKey<DeleteResponseBuffer> DELETE_RESPONSE_ATTR_KEY = AttributeKey.newInstance("spt-delete-response");
 	private static final AttributeKey<ListResponseSpool> LIST_CONTENT_ATTR_KEY = AttributeKey.newInstance(
 					"spt-list-content");
@@ -63,6 +66,14 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	private static final AttributeKey<ByteBuf> FAILED_RESPONSE_ATTR_KEY = AttributeKey.newInstance("spt-failed-response");
 	private static final int MIN_CONTENT_SIZE = 0x100;
 	private static final int MAX_CONTENT_SIZE = 0x400;
+	/**
+	 * How much of a multipart initiation, completion or abort response body is read; the rest is
+	 * dropped. An initiation answer is about 1.3 KiB for a 1024-byte key, and about 6.5 KiB when every
+	 * key byte is XML-escaped; a completion's error is looked for in its first {@link
+	 * #COMPLETION_ERROR_SCAN_BYTES} bytes. 64 KiB leaves ample room for both and bounds what a broken
+	 * target can make one connection keep.
+	 */
+	static final int MAX_MULTIPART_RESPONSE_BYTES = 64 * 1024;
 	private static final int DELETE_RESPONSE_INITIAL_BUFFER_BYTES = 4 * 1024;
 	private static final int MAX_DELETE_RESPONSE_BYTES = 16 * 1024 * 1024;
 	private static final AtomicIntegerArray DELETE_RESPONSE_DIAGNOSTICS = new AtomicIntegerArray(DeleteResponseDiagnosticClass.values().length);
@@ -338,7 +349,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		if (op instanceof DeleteRequestOperation deleteOperation) {
 			bufferDeleteResponse(channel, deleteOperation, contentChunk);
 		} else if (op instanceof CompositeDataOperation) {
-			handleInitMultipartUploadResponseContentChunk(channel, contentChunk);
+			bufferMultipartResponseChunk(channel, contentChunk);
 		} else if (op instanceof ListOperation) {
 			final ListOperation<?> listOp = (ListOperation<?>) op;
 			markListDataResponseStart(listOp, contentChunk.readableBytes());
@@ -469,6 +480,38 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		}
 	}
 
+	/**
+	 * Keeps a multipart response's body up to {@link #MAX_MULTIPART_RESPONSE_BYTES}. The buffer is the
+	 * channel's, made on its first multipart response and cleared at each finish; a chunk that does not
+	 * fit is cut to the room left, and once the buffer is full every later chunk is dropped, so the body
+	 * kept is always a prefix of the one sent. The overflow is warned about once per driver.
+	 */
+	private void bufferMultipartResponseChunk(final Channel channel, final ByteBuf contentChunk) {
+		final Attribute<ByteBuf> contentAttr = channel.attr(MULTIPART_RESPONSE_ATTR_KEY);
+		ByteBuf content = contentAttr.get();
+		if (content == null) {
+			// the attribute is only used on the channel's event loop, so no compare-and-set is needed
+			content = Unpooled.buffer(MIN_CONTENT_SIZE, MAX_MULTIPART_RESPONSE_BYTES);
+			contentAttr.set(content);
+		}
+		try {
+			content.writeBytes(contentChunk);
+		} catch (final IndexOutOfBoundsException e) {
+			// the capped buffer refuses a chunk that does not fit whole, before writing any of it
+			final int room = content.maxWritableBytes();
+			if (room > 0) {
+				content.writeBytes(contentChunk, room);
+			}
+			if (s3Driver == null || s3Driver.claimMultipartResponseOverflowWarning()) {
+				Loggers.ERR.warn(
+								"A multipart response body is longer than {} bytes; only its first {} bytes are read"
+												+ " (logged once per step)",
+								MAX_MULTIPART_RESPONSE_BYTES,
+								MAX_MULTIPART_RESPONSE_BYTES);
+			}
+		}
+	}
+
 	private void handleInitMultipartUploadResponseContentChunk(
 					final Channel channel, final ByteBuf contentChunk) {
 		// expect the XML data which is not large (up to 1KB)
@@ -509,7 +552,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 				finishOrdinaryListResponse(channel, (ListOperation<?>) op);
 			}
 		} else {
-			final Attribute<ByteBuf> contentAttr = channel.attr(CONTENT_ATTR_KEY);
+			final Attribute<ByteBuf> contentAttr = channel.attr(MULTIPART_RESPONSE_ATTR_KEY);
 			final ByteBuf content = contentAttr.get();
 			if (content != null && content.readableBytes() > 0 && op instanceof CompositeDataOperation mpuOp) {
 				if (responseFailed) {

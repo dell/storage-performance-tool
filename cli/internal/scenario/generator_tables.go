@@ -7,6 +7,12 @@ import (
 	"time"
 )
 
+// TablesVectorSendsDuration reports whether the scenario for an S3 Tables test vector gives
+// --duration to the engine as a step time limit. The compaction vector runs on counts only.
+func TablesVectorSendsDuration(testVector string) bool {
+	return testVector != tablesTestVectorCompaction
+}
+
 // GenerateTablesScenario generates a JS scenario for an S3 Tables workload.
 func GenerateTablesScenario(params Params) (string, error) {
 	tp := params.Tables

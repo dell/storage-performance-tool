@@ -242,3 +242,20 @@ func TestIngestFileCount(t *testing.T) {
 		}
 	}
 }
+
+// TablesVectorSendsDuration matches the templates: a vector's scenario carries --duration exactly
+// when the predicate says so, so the CLI's pre-launch duration check covers only those vectors.
+func TestTablesVectorSendsDurationMatchesTheTemplates(t *testing.T) {
+	for _, vector := range []string{"", tablesTestVectorTPS, tablesTestVectorCompaction, tablesTestVectorCatalog} {
+		params := baseTablesParams()
+		params.Tables.TestVector = vector
+		params.Duration = "XDURX"
+		out, err := GenerateTablesScenario(params)
+		if err != nil {
+			t.Fatalf("vector %q: %v", vector, err)
+		}
+		if sent, want := strings.Contains(out, "XDURX"), TablesVectorSendsDuration(vector); sent != want {
+			t.Errorf("vector %q: scenario carries the duration = %v, TablesVectorSendsDuration = %v", vector, sent, want)
+		}
+	}
+}

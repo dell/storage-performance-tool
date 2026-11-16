@@ -24,6 +24,7 @@ import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.deletion.DeleteTransportResult;
 import com.dell.spt.base.item.op.deletion.DeleteTransportTargetResult;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationCause;
 import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.list.ListOperation;
@@ -41,6 +42,7 @@ import org.slf4j.LoggerFactory;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.io.IOException;
+import java.net.ConnectException;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.TimeoutException;
@@ -58,6 +60,7 @@ import java.util.regex.Pattern;
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscriber;
 import org.reactivestreams.Subscription;
+import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.core.exception.ApiCallAttemptTimeoutException;
 import software.amazon.awssdk.core.exception.ApiCallTimeoutException;
 import software.amazon.awssdk.core.exception.SdkClientException;
@@ -827,7 +830,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 
 		if (ex instanceof S3Exception) {
 			final int statusCode = ((S3Exception) ex).statusCode();
-			if (statusCode == 401 || statusCode == 403) {
+			if (statusCode >= 200 && statusCode < 300) {
+				return errorBodyStatus((S3Exception) ex);
+			} else if (statusCode == 401 || statusCode == 403) {
 				return Status.RESP_FAIL_AUTH;
 			} else if (statusCode == 404) {
 				return Status.RESP_FAIL_NOT_FOUND;
@@ -849,7 +854,67 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		if (ex instanceof IOException || (ex instanceof SdkClientException && ex.getCause() instanceof IOException)) {
 			return Status.FAIL_IO;
 		}
+		if (ex instanceof SdkClientException && ex.getCause() == null && isCrtServerError(ex.getMessage())) {
+			return Status.RESP_FAIL_SVC;
+		}
 		return Status.FAIL_UNKNOWN;
+	}
+
+	/**
+	 * How the SDK's CRT transfer client reports a request that ended with a CRT error code and no
+	 * response status: this prefix, then {@code CRT.awsErrorString(code)}, then
+	 * {@code " (SDK Attempt Count: n)"}.
+	 */
+	static final String CRT_FAILED_REQUEST_PREFIX = "Failed to send the request: ";
+	/**
+	 * {@code CRT.awsErrorString} of {@code AWS_ERROR_S3_SLOW_DOWN} (14342): the CRT ran out of its own
+	 * retries of a 503 or of an error body coded {@code SlowDown}.
+	 */
+	static final String CRT_SLOW_DOWN_ERROR = "Response code indicates throttling";
+	/**
+	 * {@code CRT.awsErrorString} of {@code AWS_ERROR_S3_INTERNAL_ERROR} (14341): the CRT ran out of
+	 * its own retries of a 500, 502 or 504, or of an error body coded {@code InternalError} or
+	 * {@code ServiceUnavailable}. A 504 cannot be told from a 500 here, so it is a service failure,
+	 * not a timeout.
+	 */
+	static final String CRT_INTERNAL_ERROR = "Response code indicates internal server error";
+	/**
+	 * {@code CRT.awsErrorString} of {@code AWS_ERROR_S3_REQUEST_TIMEOUT} (14369): the CRT ran out of
+	 * its own retries of an error body coded {@code RequestTimeout}, whatever its status. The
+	 * service reports it timed out waiting for the request, and it is transient, so it is a service
+	 * failure, as a completion answered with that code is.
+	 */
+	static final String CRT_REQUEST_TIMEOUT_ERROR = "RequestTimeout error received from S3.";
+	// AWS_ERROR_S3_REQUEST_TIME_TOO_SKEWED (14360), "RequestTimeTooSkewed error received from S3.",
+	// stays FAIL_UNKNOWN on purpose: it is the client's clock, not the service, and the status it
+	// would get from the ordinary SDK client, RESP_FAIL_AUTH, is not retryable, so mapping it would
+	// change which requests load-op-retry retries.
+
+	/** The S3 error codes of a 2xx answer that may succeed if tried again, as the Netty s3 driver's. */
+	private static final Set<String> TRANSIENT_ERROR_BODY_CODES = Set.of(
+					"InternalError", "ServiceUnavailable", "SlowDown", "RequestTimeout");
+
+	private static boolean isCrtServerError(final String message) {
+		if (message == null || !message.startsWith(CRT_FAILED_REQUEST_PREFIX)) {
+			return false;
+		}
+		final int from = CRT_FAILED_REQUEST_PREFIX.length();
+		return message.startsWith(CRT_SLOW_DOWN_ERROR, from) || message.startsWith(CRT_INTERNAL_ERROR, from)
+						|| message.startsWith(CRT_REQUEST_TIMEOUT_ERROR, from);
+	}
+
+	/**
+	 * A 2xx answer the SDK reports as failed carries an S3 error body, as a copy or a multipart
+	 * completion can: a transient or missing error code is a service failure, any other a client
+	 * failure.
+	 */
+	private static Status errorBodyStatus(final S3Exception e) {
+		final var details = e.awsErrorDetails();
+		final String code = details == null ? null : details.errorCode();
+		if (code == null || code.isEmpty() || TRANSIENT_ERROR_BODY_CODES.contains(code)) {
+			return Status.RESP_FAIL_SVC;
+		}
+		return Status.RESP_FAIL_CLIENT;
 	}
 
 	/**
@@ -1340,8 +1405,23 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				throwUncheckedIfInterrupted(interrupted);
 			}
 			LOG.debug("DELETE verification HEAD was unresolved: {}", cause.toString());
+			DeleteVerificationCause.report(unresolvedCause(cause));
 			return Presence.UNRESOLVED;
 		}
+	}
+
+	/** An allowlisted cause for an SDK failure: a numeric status or the failure's class, never its text. */
+	static DeleteVerificationCause unresolvedCause(final Throwable rootCause) {
+		if (rootCause instanceof AwsServiceException service && service.statusCode() > 0) {
+			return DeleteVerificationCause.httpStatus(service.statusCode());
+		}
+		if (rootCause instanceof ConnectException) {
+			return DeleteVerificationCause.connectionFailure(rootCause);
+		}
+		if (rootCause instanceof IOException) {
+			return DeleteVerificationCause.ioError(rootCause);
+		}
+		return DeleteVerificationCause.probeError(rootCause);
 	}
 
 	CompletableFuture<Void> deleteObject(final O op) {

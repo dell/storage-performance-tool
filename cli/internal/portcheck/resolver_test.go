@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -534,6 +535,78 @@ func TestConflictResolver_Integration_SptConflict(t *testing.T) {
 	// Should try graceful stop first
 	if result.Strategy != StrategyGracefulStop && result.Strategy != StrategyForceStop {
 		t.Errorf("Strategy = %v, want graceful or force", result.Strategy)
+	}
+}
+
+// A service that answers an empty body on the metrics paths and a plain Jetty
+// 400 page on /run is not SPT, so a non-interactive resolver must not send it
+// the graceful-stop DELETE /run.
+func TestConflictResolver_EmptyMetricsServiceIsNotSpt(t *testing.T) {
+	for _, body := range []string{"[]", "null"} {
+		t.Run(body, func(t *testing.T) {
+			var mu sync.Mutex
+			deletes := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodDelete:
+					mu.Lock()
+					deletes++
+					mu.Unlock()
+					w.WriteHeader(http.StatusOK)
+				case r.URL.Path == "/metrics/json" || r.URL.Path == "/metrics":
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprint(w, body)
+				case r.URL.Path == "/run":
+					w.WriteHeader(http.StatusBadRequest)
+					fmt.Fprint(w, `<html><body><h2>HTTP ERROR 400 Bad Request</h2><hr/><a href="https://jetty.org/">Powered by Jetty:// 12.1.0</a><hr/></body></html>`)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			_, port, err := net.SplitHostPort(server.Listener.Addr().String())
+			if err != nil {
+				t.Fatalf("Failed to extract port: %v", err)
+			}
+
+			resolver := &ConflictResolver{
+				Port:            port,
+				checker:         NewPortCheckerWithOptions(port, "127.0.0.1", time.Second, 2*time.Second, 1),
+				dockerFinder:    nil,
+				forceMode:       false,
+				interactiveMode: false,
+				clock:           NewFakeClock(),
+			}
+			defer resolver.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			info, err := resolver.checker.CheckService(ctx)
+			if err != nil {
+				t.Fatalf("CheckService() error = %v", err)
+			}
+			if info.IsSpt {
+				t.Errorf("IsSpt = true for a service answering %q, want false", body)
+			}
+
+			result, err := resolver.CheckAndResolveConflicts(ctx)
+			if err != nil {
+				t.Fatalf("CheckAndResolveConflicts() error = %v", err)
+			}
+			if result.Success {
+				t.Errorf("Success = true, want false")
+			}
+			if !strings.Contains(result.Message, "only works for Spt services") {
+				t.Errorf("Message = %q, want the non-SPT graceful-stop refusal", result.Message)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if deletes != 0 {
+				t.Errorf("service got %d DELETE request(s), want none", deletes)
+			}
+		})
 	}
 }
 

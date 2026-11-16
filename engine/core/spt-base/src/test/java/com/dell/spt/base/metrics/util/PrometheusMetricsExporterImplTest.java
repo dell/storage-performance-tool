@@ -91,16 +91,71 @@ class PrometheusMetricsExporterImplTest {
 	}
 
 	@Test
-	void testTestStateMetric_TestCompleted() {
-		// Test state = 2 when test completed (has operations but concurrency = 0)
+	void testTestStateMetric_NoLimitIdleBetweenOperationsReadsRunning() {
+		// No count or time limit: an active step has no limit to tell a gap from the end,
+		// so it reads 1 even with operations done and nothing in flight.
 		setupMockSnapshot(100, 5, 0.0);
 		when(mockMetricsContext.lastSnapshot()).thenReturn(mockSnapshot);
 
-		List<MetricFamilySamples> result = exporter.collect();
+		assertEquals(1.0, testStateValue(exporter.collect()),
+						"An active step with no limit should read 1 at concurrency 0");
+	}
 
-		MetricFamilySamples testStateMetric = findMetricByName(result, METRIC_NAME_TEST_STATE);
-		assertNotNull(testStateMetric, "Test state metric should be present");
-		assertEquals(2.0, testStateMetric.samples.get(0).value, "Test state should be 2 when test is completed");
+	@Test
+	void testTestStateMetric_CountLimitedBelowCountReadsRunning() {
+		setupMockSnapshot(40, 10, 0.0);
+		when(mockMetricsContext.lastSnapshot()).thenReturn(mockSnapshot);
+		when(mockMetricsContext.metadata()).thenReturn(java.util.Map.of(
+						MetricsConstants.METADATA_LIMIT_OP_COUNT, 100L));
+
+		assertEquals(1.0, testStateValue(exporter.collect()),
+						"A count-limited step below its count should read 1 at concurrency 0");
+	}
+
+	@Test
+	void testTestStateMetric_CountLimitedAtCountReadsCompleted() {
+		setupMockSnapshot(90, 10, 0.0);
+		when(mockMetricsContext.lastSnapshot()).thenReturn(mockSnapshot);
+		when(mockMetricsContext.metadata()).thenReturn(java.util.Map.of(
+						MetricsConstants.METADATA_LIMIT_OP_COUNT, 100L));
+
+		assertEquals(2.0, testStateValue(exporter.collect()),
+						"A count-limited step at its count should read 2 at concurrency 0");
+	}
+
+	@Test
+	void testTestStateMetric_TimeLimitedBeforeLimitReadsRunning() {
+		setupMockSnapshot(100, 5, 0.0);
+		when(mockSnapshot.elapsedTimeMillis()).thenReturn(5_000L);
+		when(mockMetricsContext.lastSnapshot()).thenReturn(mockSnapshot);
+		when(mockMetricsContext.metadata()).thenReturn(java.util.Map.of(
+						MetricsConstants.METADATA_LIMIT_TIME_SEC, 10L));
+
+		assertEquals(1.0, testStateValue(exporter.collect()),
+						"A time-limited step before its limit should read 1 at concurrency 0");
+	}
+
+	@Test
+	void testTestStateMetric_TimeLimitedAfterLimitReadsCompleted() {
+		setupMockSnapshot(100, 5, 0.0);
+		when(mockSnapshot.elapsedTimeMillis()).thenReturn(10_500L);
+		when(mockMetricsContext.lastSnapshot()).thenReturn(mockSnapshot);
+		when(mockMetricsContext.metadata()).thenReturn(java.util.Map.of(
+						MetricsConstants.METADATA_LIMIT_TIME_SEC, 10L));
+
+		assertEquals(2.0, testStateValue(exporter.collect()),
+						"A time-limited step after its limit should read 2 at concurrency 0");
+	}
+
+	@Test
+	void testTestStateMetric_NoOperationsReadsRunning() {
+		setupMockSnapshot(0, 0, 0.0);
+		when(mockMetricsContext.lastSnapshot()).thenReturn(mockSnapshot);
+		when(mockMetricsContext.metadata()).thenReturn(java.util.Map.of(
+						MetricsConstants.METADATA_LIMIT_OP_COUNT, 100L));
+
+		assertEquals(1.0, testStateValue(exporter.collect()),
+						"A step with no operations yet should read 1");
 	}
 
 	@Test
@@ -250,6 +305,13 @@ class PrometheusMetricsExporterImplTest {
 		when(mockSnapshot.latencySnapshot()).thenReturn(mockLatencySnapshot);
 		when(mockSnapshot.concurrencySnapshot()).thenReturn(mockConcurrencySnapshot);
 		when(mockSnapshot.elapsedTimeMillis()).thenReturn(5000L);  // long
+	}
+
+	private double testStateValue(List<MetricFamilySamples> metrics) {
+		final MetricFamilySamples testStateMetric = findMetricByName(metrics, METRIC_NAME_TEST_STATE);
+		assertNotNull(testStateMetric, "Test state metric should be present");
+		assertEquals(1, testStateMetric.samples.size());
+		return testStateMetric.samples.get(0).value;
 	}
 
 	private MetricFamilySamples findMetricByName(List<MetricFamilySamples> metrics, String nameSubstring) {

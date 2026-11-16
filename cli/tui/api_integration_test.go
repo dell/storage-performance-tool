@@ -190,21 +190,34 @@ func TestAPIIntegrationFullFlow(t *testing.T) {
 	// Create orchestrator
 	orchestrator := NewTestOrchestrator(mockDM, constants.SptAPIPort, "")
 
-	// Track all interactions
+	// Track all interactions. The callbacks run on the monitor goroutines,
+	// so cbMu guards the captured state; firstMetrics closes on the first
+	// aggregated metrics update.
+	var cbMu sync.Mutex
 	var statusUpdates []string
 	var metricsUpdates []int
 	var outputLines []string
+	firstMetrics := make(chan struct{})
+	var firstMetricsOnce sync.Once
 
 	orchestrator.SetCallbacks(
 		func(status *TestStatus) {
+			cbMu.Lock()
+			defer cbMu.Unlock()
 			statusUpdates = append(statusUpdates, status.State)
 		},
 		func(update *MultiNodeMetricsUpdate) {
-			if update.Aggregated != nil {
-				metricsUpdates = append(metricsUpdates, int(update.Aggregated.SuccessCount))
+			if update.Aggregated == nil {
+				return
 			}
+			cbMu.Lock()
+			metricsUpdates = append(metricsUpdates, int(update.Aggregated.SuccessCount))
+			cbMu.Unlock()
+			firstMetricsOnce.Do(func() { close(firstMetrics) })
 		},
 		func(line string) {
+			cbMu.Lock()
+			defer cbMu.Unlock()
 			outputLines = append(outputLines, line)
 		},
 		nil,
@@ -259,13 +272,29 @@ func TestAPIIntegrationFullFlow(t *testing.T) {
 		t.Fatalf("Failed to start test: %v", err)
 	}
 
-	// Start monitoring
-	go orchestrator.monitorStatus(ctx)
-	go orchestrator.monitorMetrics(ctx)
+	// Start monitoring. The monitors are joined before the test returns so
+	// no callback runs after it.
+	var monitors sync.WaitGroup
+	monitors.Add(2)
+	go func() {
+		defer monitors.Done()
+		orchestrator.monitorStatus(ctx)
+	}()
+	go func() {
+		defer monitors.Done()
+		orchestrator.monitorMetrics(ctx)
+	}()
+	defer func() {
+		cancel()
+		monitors.Wait()
+	}()
 
-	// Let the test run briefly - just enough for monitoring to start
-	// Metrics poll every 500ms, status every 2s, so 1s is enough for metrics
-	time.Sleep(1 * time.Second)
+	// Wait for the first metrics update (metrics poll every 500ms).
+	select {
+	case <-firstMetrics:
+	case <-time.After(5 * time.Second):
+		t.Error("timed out waiting for the first metrics update")
+	}
 
 	// Verify the complete flow
 	mu.Lock()
@@ -290,7 +319,10 @@ func TestAPIIntegrationFullFlow(t *testing.T) {
 	}
 
 	// Verify metrics were collected
-	if len(metricsUpdates) == 0 {
+	cbMu.Lock()
+	gotMetricsUpdates := len(metricsUpdates)
+	cbMu.Unlock()
+	if gotMetricsUpdates == 0 {
 		t.Error("Expected metrics updates")
 	}
 

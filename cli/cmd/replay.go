@@ -186,7 +186,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	skipImagePull, _ := cmd.Flags().GetBool(flagSkipImagePull)
 	if skipImagePull {
 		_ = os.Setenv(constants.EnvSkipImagePull, "true")
-		_, _ = fmt.Fprintln(out, "Skipping Docker image pull; using locally cached image.")
+		_, _ = fmt.Fprintln(out, skipImagePullMessage)
 	} else {
 		_ = os.Unsetenv(constants.EnvSkipImagePull)
 	}
@@ -221,6 +221,9 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	networkMode, _ := cmd.Flags().GetString("network-mode")
 	rmiPortStart, _ := cmd.Flags().GetInt("rmi-port-start")
 	rmiPortCount, _ := cmd.Flags().GetInt("rmi-port-count")
+	// The command context ends on Ctrl-C or SIGTERM. The host connection runs on it, as spt run's
+	// does, so a signal during ssh, preflight, an image pull or --force cleanup cancels the connect.
+	replayContext := commandContext(cmd)
 	var replayOrchestrator *tui.MultiHostOrchestrator
 	if orchestratedReplay {
 		if multiHostReplay {
@@ -253,7 +256,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		replayOrchestrator.SetRMIRegistryPort(params.RMIRegistryPort)
 		forceMode, _ := cmd.Flags().GetBool("force")
 		replayOrchestrator.SetForceCleanup(forceMode)
-		if err := connectReplayOrchestrator(context.Background(), replayOrchestrator); err != nil {
+		if err := connectReplayOrchestrator(replayContext, replayOrchestrator); err != nil {
 			return fmt.Errorf("failed to connect to replay host(s): %w", err)
 		}
 	}
@@ -305,7 +308,6 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	_, _ = fmt.Fprintf(out, "Launching replay against %d configured endpoint(s)...\n", len(params.Endpoints))
 	_, _ = fmt.Fprintf(out, "Container: %s\n", sptImage)
 
-	replayContext := commandContext(cmd)
 	var replayMonitor *autoResultsMonitor
 	var runSession *runcontrol.Session
 	if resultsOpts.AutoResults {
@@ -687,7 +689,7 @@ func init() {
 	replayCmd.Flags().Int("rmi-port-start", 40000, rmiPortStartUsage)
 	replayCmd.Flags().Int("rmi-port-count", 10, rmiPortCountUsage)
 	replayCmd.Flags().Int(flagRMIRegistryPort, constants.DefaultRMIRegistryPort, rmiRegistryPortUsage)
-	replayCmd.Flags().Bool(flagSkipImagePull, false, "Use the locally cached Docker image without pulling the latest tag (env: SPT_SKIP_IMAGE_PULL)")
+	replayCmd.Flags().Bool(flagSkipImagePull, false, skipImagePullFlagHelp)
 	replayCmd.Flags().String(flagSptImage, "", "Override the engine image ref (env: SPT_IMAGE)")
 	replayCmd.Flags().String("trace-file", "", "Save all output to specified trace file")
 	replayCmd.Flags().Bool("trace-append", false, "Append to existing trace file (default: overwrite)")
