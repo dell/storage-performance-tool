@@ -76,7 +76,7 @@ public class DocumentValueTypesTest {
 
 	@ParameterizedTest
 	@ValueSource(strings = {"7", "0012", "007", "+7", "1_000", "0x1F", "1e3", "7.0", "7.5", "12345678901234567890",
-					"true", "True", "yes", "on", "false", "off"
+			"true", "True", "yes", "on", "false", "off"
 	})
 	void aYamlNumberOrBooleanUriArgumentOrHeaderIsItsTextAsWritten(final String value) throws Exception {
 		assertEquals(value, uriArg(yaml(uriArgs(value))));
