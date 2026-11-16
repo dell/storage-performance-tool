@@ -23,12 +23,10 @@ const (
 	stringTrue         = "true"
 )
 
-// verifyCleanupListCommand is the docker ps command line cleanupVerifyContainers runs, as the mock
-// executor keys it.
+// verifyCleanupListCommand is the docker ps command line cleanupVerifyContainers runs to list every
+// verify container, as the mock executor keys it.
 func verifyCleanupListCommand() string {
-	return strings.Join([]string{constants.DockerCommand, constants.DockerCmdPS,
-		constants.DockerFlagFilter, "label=" + constants.DockerLabelVerify + "=" + stringTrue,
-		constants.DockerFlagFormat, constants.DockerVerifyCleanupFormat}, " ")
+	return strings.Join(verifyCleanupListArgs(), " ")
 }
 
 // MockCommandExecutor implements CommandExecutor for testing

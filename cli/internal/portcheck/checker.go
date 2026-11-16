@@ -44,6 +44,9 @@ type PortChecker struct {
 	RetryAttempts  int           // Number of retry attempts
 	httpClient     *http.Client
 	clock          Clock
+	// newFinder creates the Docker finder used for container detection;
+	// nil means NewDockerContainerFinder. Tests supply a fake.
+	newFinder func() (*DockerContainerFinder, error)
 }
 
 // NewPortChecker creates a new port checker with default settings
@@ -482,7 +485,11 @@ func (p *PortChecker) enhanceInfoWithDockerDetection(ctx context.Context, info *
 	logging.LogDebug("portcheck", "attempting Docker container detection", "port", p.Port)
 
 	// Create Docker container finder
-	dockerFinder, err := NewDockerContainerFinder()
+	newFinder := p.newFinder
+	if newFinder == nil {
+		newFinder = NewDockerContainerFinder
+	}
+	dockerFinder, err := newFinder()
 	if err != nil {
 		logging.LogDebug("portcheck", "Docker not available for container detection",
 			"port", p.Port,

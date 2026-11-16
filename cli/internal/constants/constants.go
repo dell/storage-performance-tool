@@ -34,6 +34,7 @@ const (
 	DockerFlagFilter     = "--filter"
 	DockerFlagFormat     = "--format"
 	DockerFlagAll        = "-a"
+	DockerFlagNoTrunc    = "--no-trunc"
 	DockerFlagTimestamps = "--timestamps"
 	DockerFlagSince      = "--since"
 	DockerFlagFollow     = "--follow"
@@ -65,11 +66,12 @@ const (
 	DockerContainerFormat = "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}"
 	DockerIPAddressFormat = "{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}"
 	DockerConflictFormat  = "{{.ID}}\\\\t{{.Names}}\\\\t{{.Image}}\\\\t{{.State}}\\\\t{{.Ports}}\\\\t{{.CreatedAt}}"
-	// DockerVerifyCleanupFormat lists a verify container's ID, creation time and labels in one
-	// docker ps call. Like the formats above it has no spaces or shell metacharacters, so it reaches
-	// docker as one word both locally and through SSH's remote shell; "@" separates the fields
-	// because CreatedAt holds spaces and Labels holds commas.
-	DockerVerifyCleanupFormat = "{{.ID}}@{{.CreatedAt}}@{{.Labels}}"
+	// DockerVerifyCleanupFormat lists a verify container's ID and creation time. Like the formats
+	// above it has no spaces or shell metacharacters, so it reaches docker as one word both locally
+	// and through SSH's remote shell; "@" separates the fields because CreatedAt holds spaces. It
+	// prints no label text: a label value can hold a newline, and a listing that printed it could be
+	// made to show a row for any container.
+	DockerVerifyCleanupFormat = "{{.ID}}@{{.CreatedAt}}"
 	// DockerContainerStateFormat has no space, comma or pipe, so it passes unchanged through
 	// the remote shell an SSH command runs in.
 	DockerContainerStateFormat = "{{.State.Status}}:{{.State.ExitCode}}:{{.State.OOMKilled}}"
