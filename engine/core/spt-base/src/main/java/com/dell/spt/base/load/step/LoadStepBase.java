@@ -205,6 +205,9 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		runFailure = null;
 		completedRunMetricsSnapshots = null;
 		RunTerminalException terminalCause = null;
+		// Set when the flag was set before the close or by its end. An InterruptedException that is
+		// already propagating skips the code after the finally block, so it alone carries the stop.
+		boolean stoppedAtClose = false;
 		try {
 			start();
 			try {
@@ -251,17 +254,11 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 				completedRunMetricsSnapshots = List.of();
 				recordRunFailure(metricsFailure);
 			}
-			// The stop may leave the interrupt set; the close still writes the step's artifacts, and
-			// the caller sees the interrupt afterwards.
+			// The stop may leave the interrupt set; the close runs with it clear so it still writes the
+			// step's artifacts, and the stop ends the run after it (below).
 			final boolean interruptedBeforeClose = Thread.interrupted();
-			final Throwable closeCause;
-			try {
-				closeCause = closeAfterRun();
-			} finally {
-				if (interruptedBeforeClose) {
-					Thread.currentThread().interrupt();
-				}
-			}
+			final Throwable closeCause = closeAfterRun();
+			stoppedAtClose = Thread.interrupted() || interruptedBeforeClose;
 			if (closeCause != null) {
 				throwUncheckedIfInterrupted(closeCause);
 				final var cleanupFailure = lifecycleTerminalFailure(
@@ -283,7 +280,18 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 		}
 		if (terminalCause != null) {
 			recordRunFailure(terminalCause);
+			if (stoppedAtClose) {
+				// The terminal failure is what the run reports; the flag still tells the caller it was stopped.
+				Thread.currentThread().interrupt();
+			}
 			throw terminalCause;
+		}
+		if (stoppedAtClose) {
+			// A stop after the await ended: the step is closed, and the scenario ends here as it would
+			// mid-step. The flag stays clear, as when the await's own InterruptedException ends the run.
+			final var stopped = new InterruptedException(loadStepId() + ": stopped while closing");
+			recordRunFailure(stopped);
+			throwUnchecked(stopped);
 		}
 	}
 

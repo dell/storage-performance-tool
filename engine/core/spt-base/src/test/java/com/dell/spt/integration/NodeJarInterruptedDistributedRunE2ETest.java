@@ -40,10 +40,19 @@ import org.junit.jupiter.params.provider.ValueSource;
 class NodeJarInterruptedDistributedRunE2ETest {
 
 	private static final Duration READY_TIMEOUT = Duration.ofSeconds(60);
-	/** Below the Entry Node's linger, so a close left to its JVM exit misses it. */
-	private static final Duration CLOSE_IN_RUN_TIMEOUT = Duration.ofSeconds(8);
-	private static final int LINGER_SECONDS = 15;
-	private static final Duration EXIT_TIMEOUT = Duration.ofSeconds(40);
+	/** A presence bound, not a latency one: a correct close publishes in well under a second. */
+	private static final Duration CLOSE_IN_RUN_TIMEOUT = Duration.ofSeconds(30);
+	/** Longer than the close bound, so a close left to the Entry Node's JVM exit misses it. */
+	private static final int LINGER_SECONDS = 45;
+	private static final Duration EXIT_TIMEOUT = Duration.ofSeconds(LINGER_SECONDS + 30);
+	private static final List<String> STEP_FILES = List.of(
+					"metrics.total.csv",
+					"metrics.steady.total.csv",
+					"result.xml",
+					"operation.lifecycle.csv",
+					"operation.lifecycle.node-000.csv",
+					"operation.lifecycle.node-001.csv",
+					"event.loops.node-001.json");
 
 	private final List<Process> nodes = new ArrayList<>();
 	private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
@@ -93,26 +102,14 @@ class NodeJarInterruptedDistributedRunE2ETest {
 		final int stopStatus = http.send(stopRequest.build(), HttpResponse.BodyHandlers.discarding()).statusCode();
 		assertEquals("shutdown".equals(stop) ? 202 : 200, stopStatus);
 		// The Entry Node writes its own lifecycle file during the step; only the step's close
-		// fetches the worker's. It must do so in the run, while the Entry Node still lingers, and
-		// not at JVM exit, when a worker shut down meanwhile no longer answers.
-		awaitFile(stepDir.resolve("operation.lifecycle.node-001.csv"), CLOSE_IN_RUN_TIMEOUT, entryDir);
-		assertTrue(entry.isAlive(), "the step must close before the Entry Node exits");
-		// Let the close finish publishing the merged file after the node source.
-		Thread.sleep(2_000);
+		// fetches the worker's files and merges the lifecycle. It must do so in the run, while the
+		// Entry Node still lingers, and not at JVM exit, when a worker shut down meanwhile no longer
+		// answers.
+		awaitClosedStepFiles(stepDir, entry, entryDir);
 		if ("shutdown".equals(stop) && !entry.waitFor(EXIT_TIMEOUT.toSeconds(), TimeUnit.SECONDS)) {
 			fail("the Entry Node did not exit after /shutdown: " + tail(entryDir.resolve("stdout.log")));
 		}
 
-		for (final String name : List.of(
-						"metrics.total.csv",
-						"metrics.steady.total.csv",
-						"result.xml",
-						"operation.lifecycle.csv",
-						"operation.lifecycle.node-000.csv",
-						"operation.lifecycle.node-001.csv",
-						"event.loops.node-001.json")) {
-			assertTrue(Files.isRegularFile(stepDir.resolve(name)), name + " is missing; step files: " + listing(stepDir));
-		}
 		final String entryOutput = read(entryDir.resolve("stdout.log"));
 		assertFalse(entryOutput.contains("failed to close the step service"), entryOutput);
 		assertFalse(entryOutput.contains("no event loops file from node"), entryOutput);
@@ -185,6 +182,55 @@ class NodeJarInterruptedDistributedRunE2ETest {
 			Thread.sleep(250);
 		}
 		fail("node " + base + " was not ready: " + tail(dir.resolve("stdout.log")));
+	}
+
+	/**
+	 * Polls, while the Entry Node is alive, until every file of the closed step is there and the
+	 * merged lifecycle file is complete: its header, then the rows of both node sources.
+	 */
+	private static void awaitClosedStepFiles(final Path stepDir, final Process entry, final Path entryDir)
+					throws Exception {
+		final long deadline = System.nanoTime() + CLOSE_IN_RUN_TIMEOUT.toNanos();
+		while (true) {
+			assertTrue(entry.isAlive(), "the step must close before the Entry Node exits; step files: "
+							+ listing(stepDir) + "; " + tail(entryDir.resolve("stdout.log")));
+			final String state = closedStepState(stepDir);
+			if (state.isEmpty()) {
+				return;
+			}
+			if (System.nanoTime() > deadline) {
+				fail("the step did not close in " + CLOSE_IN_RUN_TIMEOUT + ": " + state + "; step files: "
+								+ listing(stepDir) + "; " + tail(entryDir.resolve("stdout.log")));
+			}
+			Thread.sleep(200);
+		}
+	}
+
+	/** What the closed step still lacks, or an empty string when it has everything. */
+	private static String closedStepState(final Path stepDir) throws IOException {
+		for (final String name : STEP_FILES) {
+			final Path file = stepDir.resolve(name);
+			if (!Files.isRegularFile(file) || Files.size(file) == 0) {
+				return name + " is missing or empty";
+			}
+		}
+		final List<String> merged = lines(stepDir.resolve("operation.lifecycle.csv"));
+		final List<String> entrySource = lines(stepDir.resolve("operation.lifecycle.node-000.csv"));
+		final List<String> workerSource = lines(stepDir.resolve("operation.lifecycle.node-001.csv"));
+		if (entrySource.isEmpty() || workerSource.size() < 2 || !merged.get(0).equals(entrySource.get(0))) {
+			return "the lifecycle node sources are incomplete";
+		}
+		final int expectedRows = entrySource.size() - 1 + workerSource.size() - 1;
+		if (merged.size() - 1 != expectedRows) {
+			return "operation.lifecycle.csv has " + (merged.size() - 1) + " rows, not " + expectedRows;
+		}
+		return "";
+	}
+
+	private static List<String> lines(final Path file) throws IOException {
+		try (Stream<String> lines = Files.lines(file, StandardCharsets.UTF_8)) {
+			return lines.filter(line -> !line.isBlank()).toList();
+		}
 	}
 
 	private static void awaitFile(final Path file, final Duration timeout, final Path nodeDir) throws Exception {

@@ -219,7 +219,8 @@ class LinearLoadStepClientInterruptedAwaitTest {
 		assertTrue(
 						stepManager.getStepService().isClosed(),
 						"the worker's step slice must close in the run, not at JVM exit");
-		assertTrue(interruptedAfter.get(), "the run thread's interrupt flag must survive the step's close");
+		// The InterruptedException carries the stop out of run(), with the flag clear as on 3227d078.
+		assertFalse(interruptedAfter.get(), "run() must throw with the interrupt flag clear");
 		await(() -> {
 			LogUtil.flushAll();
 			return totalRows().size() >= 2;
