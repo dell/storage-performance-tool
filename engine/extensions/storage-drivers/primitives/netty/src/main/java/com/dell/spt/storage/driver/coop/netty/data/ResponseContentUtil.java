@@ -7,6 +7,7 @@ import com.dell.spt.base.data.DataSizeException;
 import com.dell.spt.base.data.DataVerificationException;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperation;
+import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.DataItem;
 import static com.dell.spt.base.item.DataItem.rangeCount;
 import static com.dell.spt.base.item.DataItem.rangeOffset;
@@ -36,7 +37,11 @@ public abstract class ResponseContentUtil {
 				verifyChunkDataAndSize(
 								dataOp, item, countBytesDone, contentChunk, chunkSize, dataOp.markedRangesMaskPair());
 			} else {
-				if (item.isUpdated()) {
+				if (dataOp instanceof PartialDataOperation<?> part && part.parent().item().updatedRangesCount() > 0) {
+					// A part's own cells start at the part's start, but an update's cells are fixed by
+					// offset in the whole item: verify the part against its parent's cells.
+					verifyChunkOfUpdatedItemPart(part, item, countBytesDone, contentChunk, chunkSize);
+				} else if (item.isUpdated()) {
 					verifyChunkUpdatedData(dataOp, item, countBytesDone, contentChunk, chunkSize);
 				} else {
 					if (chunkSize > item.size() - countBytesDone) {
@@ -225,6 +230,47 @@ public abstract class ResponseContentUtil {
 				throw new DataCorruptionException(
 								rangeOffset(dataOp.currRangeIdx()) + e.getOffset(), e.expected, e.actual);
 			}
+		}
+	}
+
+	/**
+	 * Verifies a chunk of a part (one range of a split read) of an item whose ranges were updated.
+	 * Each byte is checked against the cell of the whole item that holds it, at the next layer when
+	 * that cell is updated, so a part is verified exactly as the same bytes of a whole read. Keeps no
+	 * state beyond {@code countBytesDone}: a retried part, whose count starts again from 0, needs
+	 * nothing more. A mismatch is reported at its offset in the part.
+	 */
+	private static void verifyChunkOfUpdatedItemPart(
+					final PartialDataOperation<?> part, final DataItem partItem, final long countBytesDone,
+					final ByteBuf chunkData, final int chunkSize) throws DataCorruptionException, IOException {
+		final long partSize = partItem.size();
+		if (chunkSize > partSize - countBytesDone) {
+			throw new DataSizeException(partSize, countBytesDone + chunkSize);
+		}
+		final DataItem whole = part.parent().item();
+		final long wholeSize = whole.size();
+		// The part's start in the whole item, as the ranged request computes it.
+		final long partStart = (long) part.partNumber() * part.parent().sizeThreshold();
+		long currOffset = partStart + countBytesDone;
+		int chunkOffset = 0;
+		while (chunkOffset < chunkSize) {
+			// the whole item's cell which has (cell's offset <= current offset < cell's end)
+			final int n = rangeCount(currOffset + 1) - 1;
+			final long cellOffset = rangeOffset(n);
+			final long cellEnd = Math.min(wholeSize, rangeOffset(n + 1));
+			final DataItem cell = whole.slice(cellOffset, cellEnd - cellOffset);
+			if (whole.isRangeUpdated(n)) {
+				cell.layer(whole.layer() + 1);
+			}
+			cell.position(currOffset - cellOffset);
+			final int len = (int) Math.min(chunkSize - chunkOffset, cellEnd - currOffset);
+			try {
+				verifyChunkData(cell, chunkData, chunkOffset, len);
+			} catch (final DataCorruptionException e) {
+				throw new DataCorruptionException(countBytesDone + chunkOffset + e.getOffset(), e.expected, e.actual);
+			}
+			chunkOffset += len;
+			currOffset += len;
 		}
 	}
 
