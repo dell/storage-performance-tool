@@ -315,14 +315,18 @@ public class DataOperationImpl<T extends DataItem> extends OperationImpl<T>
 	}
 
 	/**
-	 * Clears the progress of a failed attempt, its byte count and its data-response start, so that a
-	 * retry of the same operation counts only its own bytes and records its own time to first byte.
-	 * Unlike {@link #reset()}, it keeps the range cursor, the range marks and the content size. Only
-	 * the cooperative driver base's part retry calls it, after a part attempt failed.
+	 * Clears the progress of a failed attempt, so that a retry of the same operation counts only its
+	 * own bytes, records its own time to first byte, and verifies its data from the first range: the
+	 * byte count, the data-response start and the range cursor (its index and cached slice) return to
+	 * a fresh operation's values. Unlike {@link #reset()}, it keeps the range marks, the content size
+	 * and the response's version, request ID and integrity result. Only the cooperative driver base's
+	 * part retry calls it, after a part attempt failed.
 	 */
 	public final void resetAttemptProgress() {
 		countBytesDone = 0;
 		respDataTimeStart = 0;
+		currRange = null;
+		currRangeIdx = 0;
 	}
 
 	@Override

@@ -131,29 +131,37 @@ class DataOperationImplTest {
 	}
 
 	@Test
-	void resetAttemptProgressClearsOnlyTheBytesAndTheDataResponseStart() {
-		final var item = newItem("obj", 128);
-		final var op = new DataOperationImpl<>(0, OpType.UPDATE, item, "/src", null, null, null, 0);
-		op.markedRangesMaskPair()[0].set(0);
-		final long markedSize = op.markedRangesSize();
-		op.currRangeIdx(0);
-		final var range = op.currRange();
+	void resetAttemptProgressClearsTheAttemptsProgressAndKeepsItsPlan() throws Exception {
+		// Layer 1, so the verifier walks the cursor's cached range slice, as an updated item's read does.
+		final var item = new DataItemImpl("obj", 0, 4096, 1);
+		final var op = new DataOperationImpl<>(0, OpType.READ, item, "/src", null, null, null, 0);
+		assertTrue(DataItem.rangeCount(item.size()) > 2, "the item has ranges past the first");
+		// The failed attempt's progress: bytes, a data-response start, and a cursor in its second range.
 		op.startRequest();
 		op.finishRequest();
 		op.startDataResponse();
 		op.countBytesDone(17L);
+		op.currRangeIdx(1);
+		final var staleRange = op.currRange();
+		staleRange.position(5);
+		// Its plan: a marked range and a content size that reset() would recompute.
+		op.markedRangesMaskPair()[0].set(2);
+		op.contentSize = 77L;
+		final long reqTimeDone = op.reqTimeDone();
 
 		op.resetAttemptProgress();
 
 		assertEquals(0L, op.countBytesDone());
 		assertEquals(0L, op.respDataTimeStart());
 		assertEquals(0L, op.dataLatency());
-		// The range cursor, the marks and the content size are the attempt's plan, not its progress.
-		assertEquals(0, op.currRangeIdx());
-		assertTrue(op.markedRangesMaskPair()[0].get(0));
-		assertSame(range, op.currRange());
-		assertEquals(markedSize, op.markedRangesSize());
-		assertTrue(op.reqTimeDone() > 0, "the timing is resetTiming()'s, not this method's");
+		assertEquals(0, op.currRangeIdx(), "the cursor is back at the first range");
+		final var range = op.currRange();
+		assertNotSame(staleRange, range, "the failed attempt's cached slice is dropped");
+		assertEquals(0L, range.position(), "the first range is verified from its start");
+		assertEquals(item.rangeSize(0), range.size());
+		assertTrue(op.markedRangesMaskPair()[0].get(2), "the range marks are kept");
+		assertEquals(77L, op.contentSize, "the content size is kept");
+		assertEquals(reqTimeDone, op.reqTimeDone(), "the timing is resetTiming()'s, not this method's");
 	}
 
 	@Test

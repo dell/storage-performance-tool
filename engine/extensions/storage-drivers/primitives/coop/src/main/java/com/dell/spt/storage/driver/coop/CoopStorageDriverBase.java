@@ -1138,7 +1138,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 						}
 						// Child operations skip prepare(), so reset() does not run for the retry: without
 						// this, the failed attempt's bytes (an error body, or a body cut short) would be
-						// added to the retry's, and its data-response start would hide the retry's TTFB.
+						// added to the retry's, its data-response start would hide the retry's TTFB, and
+						// the verifier would resume from the range the failed attempt stopped in.
 						if (op instanceof DataOperationImpl<?> dataOp) {
 							dataOp.resetAttemptProgress();
 						}

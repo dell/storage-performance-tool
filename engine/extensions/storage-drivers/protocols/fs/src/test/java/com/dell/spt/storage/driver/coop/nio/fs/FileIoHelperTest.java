@@ -116,6 +116,41 @@ public class FileIoHelperTest {
 		}
 	}
 
+	/**
+	 * A part of a split write retried after its attempt wrote some bytes: the cooperative driver
+	 * base's part retry rewinds the part item and resets the attempt's progress, and the retry, into
+	 * the file reopened with truncation, writes the whole part, not only what the failed attempt left.
+	 */
+	@Test
+	public void aRetriedPartWritesTheWholePartAfterItsProgressIsReset() throws Exception {
+		final Path dst = Files.createTempFile("fs-part-retry-", ".bin");
+		final long partSize = 1024;
+		final long failedAttemptBytes = 512;
+		final DataItemImpl part = new DataItemImpl("part", 0, partSize);
+		part.dataInput(new SeedDataInput(0xABCDEF, 4096, 1, true));
+		final DataOperationImpl<DataItemImpl> op = new DataOperationImpl<>(0, OpType.CREATE, part, null, null, null, null, 0);
+		// What a failed attempt leaves on the operation.
+		op.startRequest();
+		op.countBytesDone(failedAttemptBytes);
+		part.position(failedAttemptBytes);
+
+		// CoopStorageDriverBase's part retry: the item is rewound and the attempt's progress reset.
+		part.reset();
+		op.resetAttemptProgress();
+		op.startRequest();
+
+		try (final FileChannel dstCh = FileChannel.open(dst, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
+			boolean done = false;
+			int guard = 0;
+			while (!done && guard++ < 8) {
+				done = FileIoHelper.invokeCreate(part, op, dstCh);
+			}
+			assertTrue(done);
+		}
+		assertEquals(partSize, op.countBytesDone());
+		assertEquals(partSize, Files.size(dst), "the retry writes the whole part");
+	}
+
 	@Test
 	public void invokeReadConsumesChannelUntilSizeOrEof() throws IOException {
 		final byte[] data = new byte[]{1, 2, 3, 4, 5

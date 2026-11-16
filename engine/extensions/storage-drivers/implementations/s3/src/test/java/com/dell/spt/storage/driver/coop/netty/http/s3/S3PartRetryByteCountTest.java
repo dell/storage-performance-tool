@@ -37,10 +37,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 /**
- * A retried part starts from no bytes and no data-response start. A range of a split read whose
- * attempt received bytes and failed (an error body, or a body cut short) is retried by the driver's
- * part retry: the retry's success counts only its own bytes, verifies against the item's data, and
- * records its own time to first byte. A retried upload part counts its bytes once, as before.
+ * A retried part starts from no bytes, no data-response start and the first range of its cursor. A
+ * range of a split read whose attempt received bytes and failed (an error body, or a body cut short)
+ * is retried by the driver's part retry: the retry's success counts only its own bytes, verifies
+ * against the item's data from its start, and records its own time to first byte. A retried upload part counts its bytes once, as before.
  */
 @Timeout(120)
 final class S3PartRetryByteCountTest {
@@ -56,14 +56,17 @@ final class S3PartRetryByteCountTest {
 	private enum Fault {
 		/** 503 with an {@code <Error>} body. */
 		REFUSE,
-		/** 206 with half the range's body, then the connection is closed. */
+		/**
+		 * 206 with half the range's body the first time, three quarters of it after that, then the
+		 * connection is closed. A later cut gets past where the first one stopped.
+		 */
 		CUT
 	}
 
 	private final ExecutorService serverThreads = Executors.newCachedThreadPool();
 	private final List<String> requests = new CopyOnWriteArrayList<>();
 	private final AtomicInteger faultsLeft = new AtomicInteger();
-	private final byte[] content = itemContent();
+	private volatile byte[] content;
 	private final List<AutoCloseable> resources = new ArrayList<>();
 	private final NicSetLoopback stub = new NicSetLoopback();
 	private volatile Fault fault;
@@ -107,6 +110,25 @@ final class S3PartRetryByteCountTest {
 		assertRetriedRangeCountsItsOwnBytes(Fault.CUT, 2, true);
 	}
 
+	/**
+	 * An item above layer 0 is verified range by range, through the operation's range cursor: the
+	 * retry verifies its range from the start, not from where the failed attempt stopped.
+	 */
+	@Test
+	void aVerifiedRangeOfALayer1ItemWithNoFaultSucceeds() throws Exception {
+		assertRetriedRangeCountsItsOwnBytes(Fault.CUT, 0, true, 1);
+	}
+
+	@Test
+	void aVerifiedRangeOfALayer1ItemCutMidBodyOnceVerifiesAndSucceeds() throws Exception {
+		assertRetriedRangeCountsItsOwnBytes(Fault.CUT, 1, true, 1);
+	}
+
+	@Test
+	void aVerifiedRangeOfALayer1ItemCutMidBodyTwiceVerifiesAndSucceeds() throws Exception {
+		assertRetriedRangeCountsItsOwnBytes(Fault.CUT, 2, true, 1);
+	}
+
 	@Test
 	void aRangeRefusedOnceWithAnErrorBodyRecordsItsRetrysTimeToFirstByte() throws Exception {
 		final var retried = assertRetriedRangeCountsItsOwnBytes(Fault.REFUSE, 1, false);
@@ -147,17 +169,23 @@ final class S3PartRetryByteCountTest {
 		}
 	}
 
-	/**
-	 * Reads the item in {@link #RANGES} ranges, its first range failing {@code faults} times with
-	 * {@code how}, and checks that the read succeeds and that each successful range counts exactly
-	 * its own bytes. Returns the first range's successful retry.
-	 */
 	private PartialDataOperation<?> assertRetriedRangeCountsItsOwnBytes(final Fault how, final int faults, final boolean verify)
 					throws Exception {
+		return assertRetriedRangeCountsItsOwnBytes(how, faults, verify, 0);
+	}
+
+	/**
+	 * Reads an item at {@code layer} in {@link #RANGES} ranges, its first range failing {@code faults}
+	 * times with {@code how}, and checks that the read succeeds and that each successful range counts
+	 * exactly its own bytes. Returns the first range's successful retry, or its only attempt when
+	 * {@code faults} is 0.
+	 */
+	private PartialDataOperation<?> assertRetriedRangeCountsItsOwnBytes(final Fault how, final int faults, final boolean verify,
+					final int layer) throws Exception {
 		fault = how;
 		faultsLeft.set(faults);
 
-		final List<Operation<?>> results = read(verify);
+		final List<Operation<?>> results = read(verify, layer);
 
 		final var composite = results.get(results.size() - 1);
 		assertTrue(composite instanceof CompositeDataOperation<?>, results::toString);
@@ -172,9 +200,14 @@ final class S3PartRetryByteCountTest {
 			if (range.status() == Operation.Status.SUCC) {
 				assertEquals(ITEM_SIZE, range.countBytesDone(), () -> "range #" + range.partNumber() + " retries "
 								+ range.retryCount() + ": " + ranges);
-				if (range.retryCount() > 0) {
+				if (range.partNumber() == 0) {
 					retried = range;
 				}
+			} else {
+				// Each failed attempt fails by the fault itself: a retry verified from the failed
+				// attempt's place would be reported corrupt, even if a later retry then succeeds.
+				assertEquals(how == Fault.REFUSE ? Operation.Status.RESP_FAIL_SVC : Operation.Status.FAIL_IO, range.status(),
+								() -> "range #" + range.partNumber() + " retries " + range.retryCount() + ": " + ranges);
 			}
 		}
 		assertNotNull(retried, ranges::toString);
@@ -182,10 +215,11 @@ final class S3PartRetryByteCountTest {
 		return retried;
 	}
 
-	/** Every result of a split read of the item, in order, ending with the composite's last result. */
+	/** Every result of a split read of an item at {@code layer}, in order, ending with the composite's last result. */
 	@SuppressWarnings({"rawtypes", "unchecked"
 	})
-	private List<Operation<?>> read(final boolean verify) throws Exception {
+	private List<Operation<?>> read(final boolean verify, final int layer) throws Exception {
+		content = itemContent(layer);
 		server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
 		server.createContext("/", this::handle);
 		server.setExecutor(serverThreads);
@@ -204,7 +238,7 @@ final class S3PartRetryByteCountTest {
 		driver.operationResultOutput(results);
 		driver.start();
 
-		final var item = new DataItemImpl("ranged", 9, (long) RANGES * ITEM_SIZE);
+		final var item = new DataItemImpl("ranged", 9, (long) RANGES * ITEM_SIZE, layer);
 		assertTrue(driver.put(new CompositeDataOperationImpl<DataItem>(
 						0, OpType.READ, item, null, "/bucket", CREDENTIAL, null, 0, ITEM_SIZE)));
 
@@ -252,7 +286,8 @@ final class S3PartRetryByteCountTest {
 				} else {
 					exchange.getResponseHeaders().set("Content-Range", "bytes " + first + "-" + last + "/" + content.length);
 					exchange.sendResponseHeaders(206, length);
-					exchange.getResponseBody().write(content, first, length / 2);
+					final boolean firstCut = requests.stream().filter(request -> request.endsWith("-> " + Fault.CUT)).count() == 1;
+					exchange.getResponseBody().write(content, first, firstCut ? length / 2 : length * 3 / 4);
 					exchange.getResponseBody().flush();
 					// Closing the exchange with its body short closes the connection.
 				}
@@ -297,9 +332,9 @@ final class S3PartRetryByteCountTest {
 						.mapToLong(PartialDataOperation::countBytesDone).sum();
 	}
 
-	/** The bytes a verified read of the item expects. */
-	private static byte[] itemContent() {
-		final var item = new DataItemImpl("ranged", 9, (long) RANGES * ITEM_SIZE);
+	/** The bytes a verified read of the item at {@code layer} expects. */
+	private static byte[] itemContent(final int layer) {
+		final var item = new DataItemImpl("ranged", 9, (long) RANGES * ITEM_SIZE, layer);
 		item.dataInput(new SeedDataInput(1, ITEM_SIZE, 1, true));
 		final ByteBuffer bytes = ByteBuffer.allocate(RANGES * ITEM_SIZE);
 		while (bytes.hasRemaining()) {
