@@ -1130,23 +1130,29 @@ func (v *Verifier) getExternalIP(host *hostparse.HostInfo) string {
 const verifyContainerStaleAge = 15 * time.Minute
 
 // verifyContainerFields is the number of "@"-separated fields in constants.DockerVerifyCleanupFormat.
-const verifyContainerFields = 3
+const verifyContainerFields = 2
+
+// staleVerifyContainer is a verify container that cleanupVerifyContainers may remove.
+type staleVerifyContainer struct {
+	id  string
+	age time.Duration
+}
 
 // cleanupVerifyContainers removes running verify containers on host that earlier spt verify runs
 // left behind. It removes only containers older than verifyContainerStaleAge that do not carry this
 // invocation's run label; a container without the run label (from an older CLI) is judged by age
 // alone. A running verify of another invocation is left alone while it is younger than
 // verifyContainerStaleAge (see there for when one can outlive it).
+//
+// It reads no label text. One docker ps lists the IDs and creation times of the containers
+// labelled spt.verify=true, and only when one of them is old enough a second lists the IDs of this
+// invocation's own containers, matched by docker's label filter. Every field it parses comes from
+// docker, so no label value can add, change or remove a row.
 func (v *Verifier) cleanupVerifyContainers(host *hostparse.HostInfo, dockerOps command.DockerOperations) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	stdout, stderr, err := v.cmdExecutor.ExecuteCommand(ctx, host, []string{
-		constants.DockerCommand,
-		constants.DockerCmdPS,
-		constants.DockerFlagFilter, "label=" + constants.DockerLabelVerify + "=" + stringTrue,
-		constants.DockerFlagFormat, constants.DockerVerifyCleanupFormat,
-	})
+	stdout, stderr, err := v.cmdExecutor.ExecuteCommand(ctx, host, verifyCleanupListArgs())
 	if err != nil {
 		logging.LogWarn("verifier", "failed to list verification containers",
 			"host", host.Host,
@@ -1156,6 +1162,7 @@ func (v *Verifier) cleanupVerifyContainers(host *hostparse.HostInfo, dockerOps c
 	}
 
 	now := v.timeProvider.Now()
+	var stale []staleVerifyContainer
 	for _, line := range strings.Split(stdout, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -1178,25 +1185,89 @@ func (v *Verifier) cleanupVerifyContainers(host *hostparse.HostInfo, dockerOps c
 				"error", err.Error())
 			continue
 		}
-		runID := dockerLabelValue(fields[2], constants.DockerLabelVerifyRun)
 		age := now.Sub(created)
-		if (runID != "" && runID == v.runID) || age < verifyContainerStaleAge {
+		if age < verifyContainerStaleAge {
 			logging.LogDebug("verifier", "left verification container alone: not stale",
 				"host", host.Host,
 				"container", id,
-				"run", runID,
 				"age", age.Round(time.Second).String(),
 				"stale_age", verifyContainerStaleAge.String())
 			continue
 		}
-		v.removeStaleVerifyContainer(host, dockerOps, id, age)
+		stale = append(stale, staleVerifyContainer{id: id, age: age})
+	}
+	if len(stale) == 0 {
+		return
+	}
+
+	own, ok := v.ownVerifyContainers(ctx, host)
+	if !ok {
+		return
+	}
+	for _, c := range stale {
+		if own[c.id] {
+			logging.LogDebug("verifier", "left verification container alone: started by this spt verify",
+				"host", host.Host,
+				"container", c.id,
+				"run", v.runID,
+				"age", c.age.Round(time.Second).String())
+			continue
+		}
+		v.removeStaleVerifyContainer(host, dockerOps, c.id, c.age)
+	}
+}
+
+// ownVerifyContainers returns the IDs of the containers on host that carry this invocation's run
+// label. A verifier without a run id owns none. ok is false when the listing fails; the caller then
+// removes nothing, since it cannot tell its own containers from others.
+func (v *Verifier) ownVerifyContainers(ctx context.Context, host *hostparse.HostInfo) (own map[string]bool, ok bool) {
+	own = make(map[string]bool)
+	if v.runID == "" {
+		return own, true
+	}
+	stdout, stderr, err := v.cmdExecutor.ExecuteCommand(ctx, host, verifyCleanupOwnListArgs(v.runID))
+	if err != nil {
+		logging.LogWarn("verifier", "left verification containers alone: failed to list this run's containers",
+			"host", host.Host,
+			"stderr", stderr,
+			"error", err.Error())
+		return nil, false
+	}
+	for _, id := range strings.Fields(stdout) {
+		own[id] = true
+	}
+	return own, true
+}
+
+// verifyCleanupListArgs is the docker ps command that lists every verify container's ID and
+// creation time. Each word reaches the remote shell unquoted (see command.CommandExecutor), so none
+// holds whitespace or shell metacharacters.
+func verifyCleanupListArgs() []string {
+	return []string{
+		constants.DockerCommand,
+		constants.DockerCmdPS,
+		constants.DockerFlagFilter, "label=" + constants.DockerLabelVerify + "=" + stringTrue,
+		constants.DockerFlagFormat, constants.DockerVerifyCleanupFormat,
+	}
+}
+
+// verifyCleanupOwnListArgs is the docker ps command that lists the IDs of the verify containers
+// carrying runID's run label. runID comes from newVerifyRunID (rand.Text: A-Z and 2-7), so the
+// words stay shell-safe, as verifyCleanupListArgs's do.
+func verifyCleanupOwnListArgs(runID string) []string {
+	return []string{
+		constants.DockerCommand,
+		constants.DockerCmdPS,
+		constants.DockerFlagQuiet,
+		constants.DockerFlagFilter, "label=" + constants.DockerLabelVerify + "=" + stringTrue,
+		constants.DockerFlagFilter, "label=" + constants.DockerLabelVerifyRun + "=" + runID,
 	}
 }
 
 // isDockerContainerID reports whether id looks like a Docker container ID: 12 (short) to 64 (full)
 // lower-case hex characters. A docker ps line whose first field is anything else is left alone, so
-// only a hex ID can reach docker rm. This does not prove that the line is a real row: a label value
-// that holds a newline followed by text shaped like a row is read as one.
+// only a hex ID can reach docker rm. The cleanup listings print no label text, so every line is a
+// row docker wrote; this check is a second guard on what reaches docker rm.
 func isDockerContainerID(id string) bool {
 	if len(id) < 12 || len(id) > 64 {
 		return false
@@ -1236,17 +1307,6 @@ func parseDockerCreatedAt(s string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("want date, time and offset, got %q", s)
 	}
 	return time.Parse("2006-01-02 15:04:05 -0700", strings.Join(parts[:3], " "))
-}
-
-// dockerLabelValue returns the value of label in docker ps's Labels field ("k=v,k=v"), or "" when
-// it is absent.
-func dockerLabelValue(labels, label string) string {
-	for _, kv := range strings.Split(labels, ",") {
-		if value, ok := strings.CutPrefix(kv, label+"="); ok {
-			return value
-		}
-	}
-	return ""
 }
 
 func (v *Verifier) assessNode(result *NodeResult) Check {
