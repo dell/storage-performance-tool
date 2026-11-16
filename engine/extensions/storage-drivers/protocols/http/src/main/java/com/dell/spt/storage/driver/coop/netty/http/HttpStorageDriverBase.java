@@ -12,6 +12,7 @@ import static com.github.akurilov.commons.io.el.ExpressionInput.SYNC_MARKER;
 import static com.github.akurilov.commons.lang.Exceptions.throwUnchecked;
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 
+import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.config.ConstantValueInputImpl;
 import com.dell.spt.base.config.el.CompositeExpressionInputBuilder;
 import com.dell.spt.base.data.DataInput;
@@ -105,7 +106,7 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 	 * configuration keeps them. Any other value is cast as before.
 	 */
 	private static String headerText(final String name, final Object value) {
-		final var path = "storage-net-http-headers-" + name;
+		final var path = ConfigUtil.HEADER_ARG_PATH_PREFIX + name;
 		if (value == null) {
 			throw new InvalidTextValueException(path, path + ": a request header needs a value");
 		}
