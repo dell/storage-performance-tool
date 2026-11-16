@@ -458,6 +458,52 @@ public class LoadStepContextImplTest {
 	}
 
 	@Test
+	public void shutdownSettlesEachRecoveredOperationOnceWhetherOrNotTheDriverSettledIt()
+					throws Exception {
+		testConfig.val("load-op-retry", false);
+		testConfig.val("load-op-wait-finish", true);
+		testConfig.val("load-op-wait-limit", 0);
+		@SuppressWarnings("unchecked")
+		final LoadGenerator<DataItem, Operation<DataItem>> generator = mock(LoadGenerator.class);
+		when(generator.isNothingPendingRetry()).thenReturn(true);
+		@SuppressWarnings("unchecked")
+		final StorageDriver<DataItem, Operation<DataItem>> driver = mock(StorageDriver.class);
+		final var lifecycle = spy(new OperationLifecycleTracker<Operation<DataItem>>());
+		when(driver.operationLifecycle()).thenReturn(lifecycle);
+		doNothing().when(driver).operationResultOutput(any());
+		final var generatorBuffered = baseDataOp("generator-buffered", 1);
+		final var driverSettled = baseDataOp("driver-settled", 1);
+		final var driverUnsettled = baseDataOp("driver-unsettled", 1);
+		lifecycle.generatorBuffered(generatorBuffered);
+		for (final var op : List.of(driverSettled, driverUnsettled)) {
+			lifecycle.generatorBuffered(op);
+			lifecycle.driverQueued(op);
+		}
+		when(generator.recoverBufferedOperations()).thenReturn(List.of(generatorBuffered));
+		// A lifecycle-aware driver settles what it returns; an older one returns its queue as is.
+		when(driver.recoverQueuedOperations()).thenAnswer(call -> {
+			assertTrue(lifecycle.unattempted(driverSettled));
+			return List.of(driverSettled, driverUnsettled);
+		});
+		@SuppressWarnings("unchecked")
+		final MetricsContext<AllMetricsSnapshot> metrics = mock(MetricsContext.class);
+		final var context = new LoadStepContextImpl<>(
+						"settle-once-stop", generator, driver, metrics, testConfig.configVal("load"), false);
+
+		context.doShutdown();
+
+		verify(lifecycle, times(1)).unattempted(generatorBuffered);
+		verify(lifecycle, times(1)).unattempted(driverSettled);
+		verify(lifecycle, times(1)).unattempted(driverUnsettled);
+		final var snapshot = context.operationLifecycle();
+		assertEquals(3, snapshot.unattempted());
+		assertEquals(0, snapshot.driverQueued());
+		for (final var op : List.of(generatorBuffered, driverSettled, driverUnsettled)) {
+			assertEquals(OperationLifecycleState.UNATTEMPTED, op.lifecycle().state());
+		}
+	}
+
+	@Test
 	public void shutdownDrainsActualDispatchWithinConfiguredBound() throws Exception {
 		testConfig.val("load-op-retry", false);
 		testConfig.val("load-op-wait-finish", true);
@@ -1690,13 +1736,14 @@ public class LoadStepContextImplTest {
 		doNothing().when(driverMock).operationResultOutput(any());
 		final OperationLifecycleTracker<Operation<DataItem>> lifecycle = spy(new OperationLifecycleTracker<>());
 		when(driverMock.operationLifecycle()).thenReturn(lifecycle);
-		final Operation<DataItem> alreadyRecovered = baseDataOp("already-recovered", 1);
-		lifecycle.generatorBuffered(alreadyRecovered);
-		lifecycle.driverQueued(alreadyRecovered);
-		lifecycle.unattempted(alreadyRecovered);
+		// Dispatched, so the step asks for the transition and the tracker refuses it without throwing.
+		final Operation<DataItem> dispatchedOp = baseDataOp("dispatched", 1);
+		lifecycle.generatorBuffered(dispatchedOp);
+		lifecycle.driverQueued(dispatchedOp);
+		lifecycle.dispatched(dispatchedOp);
 		clearInvocations(lifecycle);
 		when(driverMock.recoverQueuedOperations())
-						.thenReturn(List.of(alreadyRecovered))
+						.thenReturn(List.of(dispatchedOp))
 						.thenThrow(new IllegalStateException("recovery source invoked more than once"));
 		final MetricsContext metrics = buildMetricsCtx("falseTransitionRecovery");
 		final var ctx = new LoadStepContextImpl<>(
@@ -1709,7 +1756,10 @@ public class LoadStepContextImplTest {
 
 		assertDoesNotThrow(ctx::recoverQueuedOperationsForStepStop);
 		assertDoesNotThrow(ctx::recoverQueuedOperationsForStepStop);
-		verify(lifecycle, times(1)).unattempted(alreadyRecovered);
+		// The refused transition counts as recovered: asked once, then neither retained nor retried.
+		verify(lifecycle, times(1)).unattempted(dispatchedOp);
+		verify(driverMock, times(1)).recoverQueuedOperations();
+		assertEquals(OperationLifecycleState.DISPATCHED, dispatchedOp.lifecycle().state());
 	}
 
 	@Test

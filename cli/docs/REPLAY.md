@@ -244,7 +244,16 @@ spt replay \
 
 `--auto-terminate-seconds` is useful for initial canaries of long archived
 workloads. It stops the run after the specified time even if the archived
-workload duration is much longer.
+workload duration is much longer. The deadline starts after the CLI has
+connected to the hosts and covers engine start-up, launch and the run; in
+headless mode a deadline reached before the workload is submitted ends the
+start with an error that names auto-terminate, and exits 1. With auto-results
+on (the default) the CLI stops the run at the deadline through the engine API,
+collects its results, then shuts the engines down if `--shutdown-on-complete`
+is set; with `--auto-results=false` it ends the run through shutdown and
+container stop. The CLI exits 0 if the replay was healthy up to the deadline
+and the stop is confirmed, and exits 1 if the replay reported no terminal
+state after the stop, since its results may then be partial.
 
 A replay exits 1 when the engine ends its scenario as failed, whichever step
 failed, as `spt run` does, and names that step and the engine's cause. It also

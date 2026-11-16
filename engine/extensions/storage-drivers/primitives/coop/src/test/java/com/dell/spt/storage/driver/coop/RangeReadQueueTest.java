@@ -15,7 +15,9 @@ import com.dell.spt.storage.driver.coop.mock.CoopStorageDriverMock;
 import com.dell.spt.storage.driver.coop.range.RangeReadQueue;
 import com.github.akurilov.confuse.Config;
 import java.io.IOException;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -82,8 +84,11 @@ class RangeReadQueueTest {
 			return ranges.capture(op) != null;
 		}
 
+		final Map<RangeReadOperation<DataItem>, Integer> recoveryVisits = new IdentityHashMap<>();
+
 		@Override
 		protected boolean recoverQueuedOperation(RangeReadOperation<DataItem> op) {
+			recoveryVisits.merge(op, 1, Integer::sum);
 			return ranges.recover(op);
 		}
 
@@ -232,6 +237,44 @@ class RangeReadQueueTest {
 			assertEquals(2, driver.runtime.snapshot().transportAttemptFailures());
 			assertEquals(0, driver.ranges.pendingCount());
 			assertTrue(driver.runtime.snapshot().reconciled());
+		}
+	}
+
+	@Test
+	void queuedRangeInTheInputQueueAndTheRangeQueueIsRecoveredOnce() throws Exception {
+		try (var driver = new Driver(false)) {
+			driver.start();
+			var op = driver.operation("queued-once");
+			assertTrue(driver.runtime.admission().put(op));
+			// Queued in three places at once: the input queue, the range queue and the registry.
+			assertEquals(1, driver.ranges.pendingCount());
+			assertEquals(List.of(op), driver.operationLifecycle().driverQueuedOperations());
+			driver.closeAdmission();
+			assertEquals(List.of(op), driver.recoverQueuedOperations());
+			assertEquals(1, driver.recoveryVisits.get(op), "one recovery visit per queued range");
+			assertEquals(OperationLifecycleState.UNATTEMPTED, op.lifecycle().state());
+			assertEquals(1, driver.operationLifecycle().counters().unattempted());
+			assertEquals(0, driver.ranges.pendingCount());
+		}
+	}
+
+	@Test
+	void queuedRetryWithAKnownFailureIsRecoveredOnce() throws Exception {
+		try (var driver = new Driver(false)) {
+			driver.start();
+			var op = driver.operation("retry-once");
+			assertTrue(driver.runtime.admission().put(op));
+			var first = driver.take();
+			assertTrue(driver.fail(first));
+			// The retry is queued again: input queue and range queue, with its failure retained.
+			assertEquals(1, driver.ranges.pendingCount());
+			driver.closeAdmission();
+			assertTrue(driver.recoverQueuedOperations().isEmpty());
+			assertEquals(1, driver.recoveryVisits.get(op),
+							"a retained result is settled, and so published, from one visit only");
+			assertEquals(1, driver.operationLifecycle().counters().failed());
+			assertEquals(0, driver.operationLifecycle().counters().unattempted());
+			assertEquals(0, driver.ranges.pendingCount());
 		}
 	}
 

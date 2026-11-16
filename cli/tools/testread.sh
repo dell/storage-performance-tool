@@ -110,7 +110,7 @@ Driver:
 
 Docker:
   --image IMAGE            Override SPT Docker image (env: SPT_IMAGE)
-  --skip-image-pull        Use locally cached image, skip pull (env: SPT_SKIP_IMAGE_PULL)
+  --skip-image-pull        Skip the image pull when the image is present locally (env: SPT_SKIP_IMAGE_PULL)
 
 RDMA:
   --use-rdma               Enable RDMA-accelerated S3 driver (default: off)

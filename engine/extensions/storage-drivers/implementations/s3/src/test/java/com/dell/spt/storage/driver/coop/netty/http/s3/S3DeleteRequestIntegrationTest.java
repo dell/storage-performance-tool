@@ -29,6 +29,10 @@ import com.dell.spt.base.item.op.deletion.DeleteFailureClassification;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOutcome;
 import com.dell.spt.base.item.op.deletion.DeleteTargetOutcome;
+import com.dell.spt.base.item.op.deletion.DeleteInventoryVerifier;
+import com.dell.spt.base.item.op.deletion.DeleteTarget;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationCause;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationPhase;
 import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
 import com.dell.spt.base.item.op.deletion.SeededDeleteCleanupFinalizer;
 import com.dell.spt.base.load.step.ScenarioUtil;
@@ -84,6 +88,8 @@ final class S3DeleteRequestIntegrationTest {
 	private volatile String listResponse;
 	private volatile Function<CapturedRequest, String> listResponseFactory;
 	private volatile Function<CapturedRequest, Integer> headResponseStatus = ignored -> 200;
+	/** The Content-Length an object HEAD states (the object's size); null states none. */
+	private volatile Long objectHeadContentLength;
 	private volatile Function<CapturedRequest, Integer> deleteResponseStatus = ignored -> 204;
 	private volatile int multiDeleteStatus = 200;
 	private final AtomicInteger putResponseCount = new AtomicInteger();
@@ -145,16 +151,80 @@ final class S3DeleteRequestIntegrationTest {
 							driver.presence(target("absent", "v+1/=")));
 			assertEquals(DeleteVerificationProbe.Presence.UNRESOLVED,
 							driver.presence(target("unresolved", null)));
+			assertEquals(
+							DeleteVerificationProbe.Observation.unresolved(DeleteVerificationCause.httpStatus(503)),
+							driver.observe(target("unresolved", null)));
 		}
 
 		final List<CapturedRequest> heads = requests.stream()
 						.filter(request -> "HEAD".equals(request.method())).toList();
-		assertEquals(3, heads.size());
+		assertEquals(4, heads.size());
 		assertEquals("/bucket/current%20key", heads.get(0).rawPath());
 		assertNull(heads.get(0).rawQuery());
 		assertEquals("versionId=v%2B1%2F%3D", heads.get(1).rawQuery());
 		assertTrue(heads.stream().allMatch(
 						request -> request.authorization().startsWith(S3Api.AUTH_V4_PREFIX)));
+	}
+
+	/**
+	 * A HEAD response's Content-Length states the object's size; an object of 2 GiB or more is
+	 * present, not unresolved, also when it survives its delete.
+	 */
+	@Test
+	void verificationHeadClassifiesAnObjectOfTwoGibOrMoreAsPresentThroughRealNettyPath()
+					throws Exception {
+		objectHeadContentLength = 3L << 30;
+		try (final var driver = newDriver()) {
+			// The target answers the DELETE but keeps the object: post-verification sees it present.
+			final DeleteRequestOperation result = execute(driver, operation(target("large", null)));
+			assertEquals(DeleteRequestOutcome.FULL_SUCCESS, result.deleteResult().outcome());
+			assertEquals(DeleteVerificationProbe.Presence.PRESENT,
+							driver.presence(target("large", null)));
+			assertEquals(DeleteVerificationProbe.Presence.PRESENT,
+							driver.presence(target("large", "v+1/=")));
+		}
+
+		final List<CapturedRequest> heads = requests.stream()
+						.filter(S3DeleteRequestIntegrationTest::isObjectHead).toList();
+		assertEquals(2, heads.size());
+		assertNull(heads.get(0).rawQuery());
+		assertEquals("versionId=v%2B1%2F%3D", heads.get(1).rawQuery());
+	}
+
+	@Test
+	void verificationUsesASubclassOverrideOfPresence(@TempDir final Path temp) throws Exception {
+		headResponseStatus = ignored -> 404;
+		final Path manifest = temp.resolve("verify-input.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\nbucket,overridden,1,\n");
+		final AtomicInteger overrideCalls = new AtomicInteger();
+		final Config config = S3StorageDriverTest.baseConfig(false, 4, false, null, "127.0.0.1");
+		config.val("storage-driver-limit-concurrency", 1);
+		config.val("storage-driver-limit-queue-input", 8);
+		config.val("storage-net-node-port", server.getAddress().getPort());
+		config.val("storage-net-timeoutMilliSec", 2_000);
+		try (final var driver = new S3StorageDriver<IntegrityManifestDataItem, DeleteRequestOperation>(
+						"delete-presence-override-test",
+						DataInput.instance(
+										null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false, 0.0, true),
+						config.configVal("storage"),
+						false,
+						config.intVal("load-batch-size")) {
+			@Override
+			public Presence presence(final DeleteTarget target) {
+				overrideCalls.incrementAndGet();
+				return Presence.PRESENT;
+			}
+		}) {
+			driver.start();
+			try (final var report = DeleteInventoryVerifier.verify(
+							manifest, 1, DeleteVerificationPhase.PRE_DELETE, java.time.Duration.ofSeconds(1), driver)) {
+				assertEquals(1, overrideCalls.get(), "verification bypassed the presence() override");
+				assertEquals(1, report.present());
+				assertTrue(report.successful());
+			}
+		}
+		assertTrue(requests.stream().noneMatch(request -> "HEAD".equals(request.method())
+						&& request.rawPath().contains("overridden")), () -> "the driver's own HEAD ran: " + requests);
 	}
 
 	@Test
@@ -308,6 +378,32 @@ final class S3DeleteRequestIntegrationTest {
 
 		assertEquals(2, requests.stream().filter(S3DeleteRequestIntegrationTest::isObjectHead).count());
 		assertEquals(0, requests.stream().filter(request -> "DELETE".equals(request.method()) || "POST".equals(request.method())).count());
+	}
+
+	/** Strict pre-validation sees objects of 2 GiB or more as present and the timed delete runs. */
+	@Test
+	void strictPreValidationPassesForObjectsOfTwoGibOrMoreOnTheRealDriver(
+					@TempDir final Path tempDir) throws Exception {
+		final Path manifest = copyContractResource(tempDir, "verify-input.csv");
+		copyContractResource(tempDir, "verify-input.complete.json");
+		final String stepId = tempDir.getFileName() + "-large-pre-validation";
+		final String scenario = contractScenarioText()
+						.replace("/spt-input/items/verify-input.csv", manifest.toString())
+						.replace("mt-001-20260822.120000.000-delete", stepId)
+						.replace("\"standalone\": true,", "\"standalone\": true, \"preValidation\": true, \"verificationTimeoutMillis\": 25,");
+		headResponseStatus = ignored -> 200;
+		objectHeadContentLength = 3L << 30;
+
+		final Config config = scenarioConfig(777L);
+		final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+		final ScriptEngine engine = ScenarioUtil.scriptEngineByDefault(classLoader);
+		try (final var metrics = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR)) {
+			ScenarioUtil.configure(engine, Extension.load(classLoader), config, metrics);
+			new RunImpl("strict pre-validation large-object canary", scenario, engine, 777L).run();
+		}
+
+		assertEquals(2, requests.stream().filter(S3DeleteRequestIntegrationTest::isObjectHead).count());
+		assertEquals(1, requests.stream().filter(request -> "POST".equals(request.method()) && "delete".equals(request.rawQuery())).count());
 	}
 
 	@Test
@@ -1096,6 +1192,11 @@ final class S3DeleteRequestIntegrationTest {
 			exchange.sendResponseHeaders(200, -1);
 		} else if ("HEAD".equals(request.method())) {
 			// Bucket checks (target-bucket provisioning) see an existing bucket; objects follow the test.
+			final Long contentLength = objectHeadContentLength;
+			if (contentLength != null && !isBucketPath(request.rawPath())) {
+				// A HEAD response states the object's size and sends no body (length -1).
+				exchange.getResponseHeaders().set("Content-Length", Long.toString(contentLength));
+			}
 			exchange.sendResponseHeaders(isBucketPath(request.rawPath()) ? 200 : headResponseStatus.apply(request), -1);
 		} else if ("DELETE".equals(request.method())) {
 			exchange.sendResponseHeaders(deleteResponseStatus.apply(request), -1);

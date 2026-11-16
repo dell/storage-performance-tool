@@ -40,7 +40,7 @@ You can use these variables to avoid repeating sensitive or commonly used parame
 - **Hosts:** `HOSTS` (comma-separated list of `[user@]host`)
 - **NICs:** `SPT_INTERFACES` (each engine's NIC set, as `--interfaces`), `SPT_HOST_INTERFACES` (a host's own value, as `--host-interfaces`, with `;` between hosts)
 - **Workload:** `THREADS` (parallel client threads)
-- **Docker:** `SPT_SKIP_IMAGE_PULL` (skip pulling the engine image)
+- **Docker:** `SPT_SKIP_IMAGE_PULL` (skip pulling the engine image when it is present locally; a missing non-dev image is still pulled, as `--skip-image-pull`)
 - **Engine tuning:** `SPT_SERVICE_THREADS` (virtual-thread carrier parallelism)
 - **Multipart upload:** `SPT_PART_SIZE` (part size, e.g. `64MB`)
 - **Checksum:** `SPT_CHECKSUM` (algorithm: `crc32`, `crc32c`, `sha1`, `sha256`, `crc64-nvme`)
@@ -589,12 +589,12 @@ spt run write \
 |------|-------|---------|-------------|
 | `--cleanup` | | `false` | Best-effort deletion of SPT-created objects after the test. Seeded DELETE retries its immutable measured residual in a separate phase; explicit-manifest and existing-prefix DELETE reject it. `write-verify` deletes only successfully verified objects; unsupported for `read-verify` and deferred verification |
 | `--generate-only` | | `false` | Generate the scenario file without running it |
-| `--auto-terminate-seconds` | | `0` | Auto-terminate headless runs after N seconds (0 = unlimited) |
+| `--auto-terminate-seconds` | | `0` | Stop the run N seconds into it (0 = unlimited). The deadline starts after the CLI has connected to the hosts and covers engine start-up, launch and the run; in headless mode a deadline reached before the workload is submitted ends the start with an error that names auto-terminate, and exits 1. With auto-results on (the default) the CLI stops the run at the deadline through the engine API, collects its results, then shuts the engines down if `--shutdown-on-complete` is set; with `--auto-results=false` it ends the run through shutdown and container stop. The CLI exits 0 if the run was healthy up to the deadline and the stop is confirmed. It exits 1 if a step failed or every request failed before the deadline, or if the run reported no terminal state after the stop, since its results may then be partial. A DELETE or verification workload stopped at the deadline exits 1, because it did not complete |
 | `--keep-scenario` | | `false` | Keep the scenario file after test completion |
 | `--force` | | `false` | Resolve port conflicts and permit known engine build mismatches; invalid build information and collection failures remain non-forceable |
 | `--api-port` | | `9999` | SPT engine API port that every engine in the run serves: a local or remote engine, or the entry and every worker of a distributed run. A whole number from 1 to 65535 |
 | `--rmi-registry-port` | | `1099` | Engine RMI registry port that every engine in the run serves, on local, remote and distributed runs; the entry reaches each worker on it. Give each concurrent `spt run` on the same hosts its own value and its own `--api-port`, also when a run has a local worker (this host in `--test-hosts`, after the first): those are the only ports a local worker publishes |
-| `--skip-image-pull` | | `false` | Use locally cached Docker image without pulling |
+| `--skip-image-pull` | | from `SPT_SKIP_IMAGE_PULL` or `false` | Skip the engine image pull when the image is present locally; a missing non-dev image is still pulled, and `spt_dev` images are never pulled |
 | `--output-dir` | `-O` | `""` | Deprecated; has no effect and warns when used. Results always go under `--results-dir` |
 | `--service-threads` | | `0` | Engine virtual-thread carrier parallelism (0 = JVM default `max(2, cpus/4)`) |
 
@@ -803,17 +803,17 @@ environment variables.
 |------|---------|-------------|
 | `--headless` | `false` | Force headless (non-interactive) mode |
 | `--minimal` | `false` | Start TUI with only live stats panel visible |
-| `--auto-terminate-seconds` | `0` | Automatically terminate runs after N seconds (`0` = unlimited) |
+| `--auto-terminate-seconds` | `0` | Stop the replay N seconds into it (`0` = unlimited). The deadline starts after the CLI has connected to the hosts and covers engine start-up, launch and the run; in headless mode a deadline reached before the workload is submitted ends the start with an error that names auto-terminate, and exits 1. With auto-results on (the default) the CLI stops the run at the deadline through the engine API, collects its results, then shuts the engines down if `--shutdown-on-complete` is set; with `--auto-results=false` it ends the run through shutdown and container stop. The CLI exits 0 if the replay was healthy up to the deadline and the stop is confirmed. It exits 1 if a step failed before the deadline, or if the replay reported no terminal state after the stop, since its results may then be partial. The DELETE and verification exit rules of `spt run` (a DELETE or verification workload stopped at the deadline exits 1, because it did not complete) don't apply to a replay |
 | `--force` | `false` | Resolve port conflicts and permit known engine build mismatches; invalid build information and collection failures remain non-forceable |
 | `--api-port` | `9999` | SPT engine API port that every engine in the replay serves, the entry and every worker. A whole number from 1 to 65535 |
 | `--rmi-registry-port` | `1099` | Engine RMI registry port that every engine in the replay serves, a local or remote engine, or the entry and every worker; the entry reaches each worker on it. It must differ from `--api-port`. Give each concurrent replay or `spt run` on the same hosts its own value (and its own `--api-port`) |
 | `--trace-file` | `""` | Save all output to a trace file |
 | `--trace-append` | `false` | Append to an existing trace file |
 | `--verbose` | `false` | Show detailed Docker API calls, debug information, and textual live metrics |
-| `--skip-image-pull` | from `SPT_SKIP_IMAGE_PULL` or `false` | Use locally cached Docker image without pulling |
+| `--skip-image-pull` | from `SPT_SKIP_IMAGE_PULL` or `false` | Skip the engine image pull when the image is present locally; a missing non-dev image is still pulled, and `spt_dev` images are never pulled |
 | `--spt-image` | from `SPT_IMAGE` or release/dev default | Override the engine image ref |
 
-A replay exits 1, as `spt run` does, when the engine ends its scenario FAILED, whichever step failed, and the error names that step and the engine's cause; this holds with `--auto-terminate-seconds` too. A replay that ends on its own with fewer steps with results than its scenario runs also exits 1, for example when the scenario fails after its first step. The check needs results, so it doesn't run with `--auto-results=false`. A JavaScript `.run()` in a branch that isn't taken counts as a step, and so does a step with nothing to do that finishes without results, such as a DELETE whose items file doesn't exist. A loop around one `.run()` counts once but runs several steps, and a `.start()` doesn't count, so their extra steps can hide a step that never ran, and that replay exits 0.
+A replay exits 1, as `spt run` does, when the engine ends its scenario FAILED, whichever step failed, and the error names that step and the engine's cause; this holds with `--auto-terminate-seconds` too. A replay that `--auto-terminate-seconds` stopped while healthy, with the stop confirmed, exits 0, and its missing steps don't count against it. A replay that ends on its own with fewer steps with results than its scenario runs also exits 1, for example when the scenario fails after its first step. The check needs results, so it doesn't run with `--auto-results=false`. A JavaScript `.run()` in a branch that isn't taken counts as a step, and so does a step with nothing to do that finishes without results, such as a DELETE whose items file doesn't exist. A loop around one `.run()` counts once but runs several steps, and a `.start()` doesn't count, so their extra steps can hide a step that never ran, and that replay exits 0.
 
 ### Replay Results Options
 

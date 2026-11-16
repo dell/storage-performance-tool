@@ -144,10 +144,40 @@ func TestDockerContainerFinder_containerUsesPort(t *testing.T) {
 			expected: true,
 		},
 		{
-			name: "container uses private port",
+			name: "container only exposes the port",
 			container: containertypes.Summary{
 				Ports: []containertypes.Port{
 					{PublicPort: 0, PrivatePort: 9999, Type: "tcp"},
+				},
+			},
+			port:     constants.SptAPIPort,
+			expected: false,
+		},
+		{
+			name: "container maps a different host port to the port",
+			container: containertypes.Summary{
+				Ports: []containertypes.Port{
+					{IP: "127.0.0.1", PublicPort: 19514, PrivatePort: 9999, Type: "tcp"},
+				},
+			},
+			port:     constants.SptAPIPort,
+			expected: false,
+		},
+		{
+			name: "container publishes the port over UDP",
+			container: containertypes.Summary{
+				Ports: []containertypes.Port{
+					{PublicPort: 9999, PrivatePort: 9999, Type: "udp"},
+				},
+			},
+			port:     constants.SptAPIPort,
+			expected: false,
+		},
+		{
+			name: "container publishes the port from a different container port",
+			container: containertypes.Summary{
+				Ports: []containertypes.Port{
+					{IP: "0.0.0.0", PublicPort: 9999, PrivatePort: 8080, Type: "tcp"},
 				},
 			},
 			port:     constants.SptAPIPort,
@@ -376,8 +406,8 @@ func TestDockerContainerFinder_EdgeCases(t *testing.T) {
 			},
 		}
 
-		if !finder.containerUsesPort(containerWithZeroPort, constants.SptAPIPort) {
-			t.Errorf("Should match private port 9999 even when public port is 0")
+		if finder.containerUsesPort(containerWithZeroPort, constants.SptAPIPort) {
+			t.Errorf("Should not match an exposed-only private port 9999 when public port is 0")
 		}
 	})
 

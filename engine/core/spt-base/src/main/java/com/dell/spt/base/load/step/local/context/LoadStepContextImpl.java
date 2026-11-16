@@ -51,6 +51,7 @@ import com.dell.spt.base.item.op.path.PathOperation;
 import com.dell.spt.base.load.failure.ObjectFailureBudgetConfig;
 import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleSnapshot;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
 import com.dell.spt.base.load.step.DurationTime;
 import com.dell.spt.base.logging.LogUtil;
@@ -2390,7 +2391,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 				if (generatorRecoveryPending == null) {
 					generatorRecoveryPending = recoveryBatch(generator.recoverBufferedOperations());
 				}
-				recoveryFailure = markPendingUnattempted(generatorRecoveryPending);
+				recoveryFailure = markPendingUnattempted(generatorRecoveryPending, true);
 				if (generatorRecoveryPending.isEmpty()) {
 					generatorRecoveryPending = null;
 					generatorQueueRecovered.set(true);
@@ -2405,7 +2406,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 					driverRecoveryPending = recoveryBatch(driver.recoverQueuedOperations());
 				}
 				recoveryFailure = appendRecoveryFailure(
-								recoveryFailure, markPendingUnattempted(driverRecoveryPending));
+								recoveryFailure, markPendingUnattempted(driverRecoveryPending, false));
 				if (driverRecoveryPending.isEmpty()) {
 					driverRecoveryPending = null;
 					driverQueueRecovered.set(true);
@@ -2533,7 +2534,15 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		return recovered == null ? new ArrayList<>() : new ArrayList<>(recovered);
 	}
 
-	private RuntimeException markPendingUnattempted(final List<O> pending) {
+	/**
+	 * Settles recovered operations as unattempted and releases their range reservations.
+	 *
+	 * @param settleAll false for a driver's recovered list: a lifecycle-aware driver settles what
+	 *        it returns, so only an operation not yet unattempted is settled here, which keeps a
+	 *        driver that returns its queue unsettled correct without a second transition for the
+	 *        others
+	 */
+	private RuntimeException markPendingUnattempted(final List<O> pending, final boolean settleAll) {
 		RuntimeException recoveryFailure = null;
 		int retainedCount = 0;
 		// Compact failures into the prefix, then clear the processed tail once. Removing
@@ -2541,7 +2550,10 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		for (int readIndex = 0; readIndex < pending.size(); readIndex++) {
 			final O operation = pending.get(readIndex);
 			try {
-				operationLifecycle.unattempted(operation);
+				if (settleAll
+								|| operationLifecycle.stateOf(operation) != OperationLifecycleState.UNATTEMPTED) {
+					operationLifecycle.unattempted(operation);
+				}
 				if (rangeRuntime != null)
 					rangeRuntime.releaseRecovered(operation);
 			} catch (final RuntimeException failure) {

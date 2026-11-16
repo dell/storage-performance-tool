@@ -17,8 +17,14 @@ type CPUMonitor struct {
 	interval   time.Duration
 	currentCPU float64
 	mu         sync.RWMutex
-	stopCh     chan struct{}
-	started    bool
+	// stopCh and doneCh belong to the most recently launched monitorLoop:
+	// Stop closes stopCh, and the loop closes doneCh when it has exited.
+	// doneCh is nil until a loop is launched.
+	stopCh  chan struct{}
+	doneCh  chan struct{}
+	started bool
+	// percent samples CPU usage; tests replace it to simulate failures.
+	percent func(interval time.Duration, percpu bool) ([]float64, error)
 }
 
 // NewCPUMonitor creates a new CPU monitor with the specified sampling interval
@@ -30,6 +36,7 @@ func NewCPUMonitor(interval time.Duration) *CPUMonitor {
 	return &CPUMonitor{
 		interval: interval,
 		stopCh:   make(chan struct{}),
+		percent:  cpu.Percent,
 	}
 }
 
@@ -43,7 +50,7 @@ func (c *CPUMonitor) Start() error {
 	}
 
 	// Test if CPU monitoring is available on this platform
-	_, err := cpu.Percent(0, false)
+	_, err := c.percent(0, false)
 	if err != nil {
 		logging.LogError("cpumonitor", "CPU monitoring not available on this platform", err)
 		// Still mark as started but CPU will remain 0%
@@ -52,7 +59,11 @@ func (c *CPUMonitor) Start() error {
 	}
 
 	c.started = true
-	go c.monitorLoop()
+	// Fresh channels per launch, so Start after Stop works; they are passed
+	// to the loop so it never reads fields a later Start rewrites.
+	c.stopCh = make(chan struct{})
+	c.doneCh = make(chan struct{})
+	go c.monitorLoop(c.stopCh, c.doneCh)
 
 	logging.LogInfo("cpumonitor", "CPU monitoring started",
 		"interval", c.interval)
@@ -60,19 +71,31 @@ func (c *CPUMonitor) Start() error {
 	return nil
 }
 
-// Stop stops the CPU monitoring goroutine
+// Stop stops the CPU monitoring goroutine and waits for it to exit, so the
+// reading no longer changes once Stop returns. It is idempotent, safe without
+// Start, and does not block when Start launched no goroutine.
 func (c *CPUMonitor) Stop() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	wasStarted := c.started
+	if c.started {
+		c.started = false
+		if c.stopCh != nil {
+			close(c.stopCh)
+			c.stopCh = nil
+		}
+	}
+	done := c.doneCh
+	// Wait outside c.mu: updateCPU takes c.mu to store a reading, so waiting
+	// under the lock would deadlock with an in-flight update.
+	c.mu.Unlock()
 
-	if !c.started {
-		return
+	if done != nil {
+		<-done
 	}
 
-	close(c.stopCh)
-	c.started = false
-
-	logging.LogInfo("cpumonitor", "CPU monitoring stopped")
+	if wasStarted {
+		logging.LogInfo("cpumonitor", "CPU monitoring stopped")
+	}
 }
 
 // GetCPUPercent returns the current CPU usage percentage (0-100)
@@ -91,17 +114,18 @@ func (c *CPUMonitor) IsStarted() bool {
 }
 
 // monitorLoop runs the CPU monitoring in a background goroutine
-func (c *CPUMonitor) monitorLoop() {
+func (c *CPUMonitor) monitorLoop(stopCh <-chan struct{}, doneCh chan<- struct{}) {
+	defer close(doneCh)
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
 
 	// Initial reading to "prime" the CPU monitoring
 	// The first call to cpu.Percent() may return 0, so we discard it
-	_, _ = cpu.Percent(0, false)
+	_, _ = c.percent(0, false)
 
 	for {
 		select {
-		case <-c.stopCh:
+		case <-stopCh:
 			return
 		case <-ticker.C:
 			c.updateCPU()
@@ -113,7 +137,7 @@ func (c *CPUMonitor) monitorLoop() {
 func (c *CPUMonitor) updateCPU() {
 	// Get CPU percentage averaged across all cores
 	// interval=0 means non-blocking, use cached value from previous call
-	percentages, err := cpu.Percent(0, false)
+	percentages, err := c.percent(0, false)
 	if err != nil {
 		logging.LogError("cpumonitor", "Failed to get CPU percentage", err)
 		return

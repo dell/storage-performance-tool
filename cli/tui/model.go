@@ -1107,6 +1107,9 @@ func startTUIWithScenarioAndParamsWithNetworkModeTrace(runCtx context.Context, i
 
 	// Initialize live view renderer with scenario params
 	model.liveViewRenderer = NewLiveViewRenderer(&params)
+	// Stop the CPU monitor on every return, including the early error
+	// returns before the program runs. Stop is idempotent.
+	defer model.liveViewRenderer.Stop()
 
 	// Create Docker manager
 	dm, err := newTUIDockerManager()
@@ -1271,6 +1274,9 @@ func startTUIWithMultiHostOrchestratorWithTrace(runCtx context.Context, orchestr
 
 	// Initialize live view renderer with scenario params
 	model.liveViewRenderer = NewLiveViewRenderer(&params)
+	// Stop the CPU monitor on every return, including the early error
+	// returns before the program runs. Stop is idempotent.
+	defer model.liveViewRenderer.Stop()
 
 	// For multi-host, we'll use the first ready host's Docker manager for TUI integration
 	// This is primarily for the TUI's internal needs
@@ -1441,6 +1447,9 @@ func startTUIWithScenarioAndParamsNetworkModeTimeoutTrace(runCtx context.Context
 	model.keepScenario = params.KeepScenario
 	model.scenarioParams = &params
 	model.liveViewRenderer = NewLiveViewRenderer(&params)
+	// Stop the CPU monitor on every return, including the early error
+	// returns before the program runs. Stop is idempotent.
+	defer model.liveViewRenderer.Stop()
 
 	dm, err := newTUIDockerManager()
 	if err != nil {
@@ -1509,13 +1518,11 @@ func startTUIWithScenarioAndParamsNetworkModeTimeoutTrace(runCtx context.Context
 	})
 
 	// Auto-terminate timer
-	go func() {
-		time.Sleep(time.Duration(autoTerminateSeconds) * time.Second)
-		p.Send(sptMessageMsg(fmt.Sprintf("Auto-terminate after %d seconds", autoTerminateSeconds)))
-		p.Send(autoTerminateMsg{})
-	}()
+	timerCtx, cancelTimer := context.WithCancel(normalizeContext(runCtx))
+	go runAutoTerminateTimer(timerCtx, autoTerminateSeconds, launchHooks, p.Send)
 
 	finalModel, programErr := p.Run()
+	cancelTimer()
 	cancelLaunch()
 	launchErr := finishTUILaunch(runCtx, programErr, launchResult, launchHooks)
 
@@ -1540,6 +1547,33 @@ func startTUIWithScenarioAndParamsNetworkModeTimeoutTrace(runCtx context.Context
 		}
 	}
 	return errors.Join(launchErr, stopErr, orchestrator.CompletionError())
+}
+
+// runAutoTerminateTimer ends the TUI at the auto-terminate deadline. When a run
+// session tracks the submitted run, the session first stops the run through
+// the engine API and salvages its evidence, and the TUI stays open until the
+// run has stopped; closing only the display would leave the step running.
+// Without a session the caller stops the run after the TUI exits.
+func runAutoTerminateTimer(ctx context.Context, seconds int, hooks LaunchHooks, send func(tea.Msg)) {
+	timer := time.NewTimer(time.Duration(seconds) * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+	}
+	if hooks.SessionManaged() && hooks.NormalEvidencePermitted() {
+		send(sptMessageMsg(fmt.Sprintf("Auto-terminate deadline (%d s) reached; stopping the run", seconds)))
+		if err := hooks.StopWorkloadAndWait(ctx, constants.AutoTerminateStopWaitTimeout); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			send(sptMessageMsg(fmt.Sprintf("Auto-terminate stop is still in progress: %v", err)))
+		}
+	} else {
+		send(sptMessageMsg(fmt.Sprintf("Auto-terminate after %d seconds", seconds)))
+	}
+	send(autoTerminateMsg{})
 }
 
 // StartTUIWithMultiHostOrchestratorTimeout starts the TUI (multi-host) and exits after autoTerminateSeconds (>0).
@@ -1573,6 +1607,9 @@ func startTUIWithMultiHostOrchestratorTimeoutWithTrace(runCtx context.Context, o
 	model.keepScenario = params.KeepScenario
 	model.scenarioParams = &params
 	model.liveViewRenderer = NewLiveViewRenderer(&params)
+	// Stop the CPU monitor on every return, including the early error
+	// returns before the program runs. Stop is idempotent.
+	defer model.liveViewRenderer.Stop()
 
 	readyHosts := orchestrator.GetReadyHosts()
 	if len(readyHosts) == 0 {
@@ -1647,13 +1684,11 @@ func startTUIWithMultiHostOrchestratorTimeoutWithTrace(runCtx context.Context, o
 	})
 
 	// Auto-terminate timer
-	go func() {
-		time.Sleep(time.Duration(autoTerminateSeconds) * time.Second)
-		p.Send(sptMessageMsg(fmt.Sprintf("Auto-terminate after %d seconds", autoTerminateSeconds)))
-		p.Send(autoTerminateMsg{})
-	}()
+	timerCtx, cancelTimer := context.WithCancel(normalizeContext(runCtx))
+	go runAutoTerminateTimer(timerCtx, autoTerminateSeconds, launchHooks, p.Send)
 
 	finalModel, programErr := p.Run()
+	cancelTimer()
 	cancelLaunch()
 	launchErr := finishTUILaunch(runCtx, programErr, launchResult, launchHooks)
 
@@ -1726,6 +1761,9 @@ func StartTUIWithContainer(image string, cmd []string) error {
 	// Initialize live view renderer with empty params (legacy container mode)
 	emptyParams := scenario.ScenarioParams{}
 	model.liveViewRenderer = NewLiveViewRenderer(&emptyParams)
+	// Stop the CPU monitor on every return, including the early error
+	// returns before the program runs. Stop is idempotent.
+	defer model.liveViewRenderer.Stop()
 
 	// Create Docker manager
 	dm, err := NewDockerManager()

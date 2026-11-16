@@ -15,7 +15,7 @@ Runs a mock workload with default parameters.
 Options:
   --headless          Run in headless mode (no TUI)
   --image IMAGE       Override SPT Docker image (env: SPT_IMAGE)
-  --skip-image-pull   Use locally cached image, skip pull (env: SPT_SKIP_IMAGE_PULL)
+  --skip-image-pull   Skip the image pull when the image is present locally (env: SPT_SKIP_IMAGE_PULL)
   -h, --help          Show this help and exit
 EOF
 }

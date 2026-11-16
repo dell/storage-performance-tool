@@ -1425,7 +1425,7 @@ func TestLocalHeadlessSessionDefersCleanupUntilSessionFinalization(t *testing.T)
 	defer func() { _ = runner.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	err = runner.runBenchmark(ctx, "", func(*tui.TestOrchestrator) error {
+	err = runner.runBenchmark(ctx, "", func(context.Context, *tui.TestOrchestrator) error {
 		hooks.NotifySubmitted()
 		cancel()
 		return nil
@@ -1461,7 +1461,7 @@ func TestLocalHeadlessSessionReturnsOnAuthoritativeWorkloadTerminal(t *testing.T
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.runBenchmark(context.Background(), "", func(*tui.TestOrchestrator) error {
+		done <- runner.runBenchmark(context.Background(), "", func(context.Context, *tui.TestOrchestrator) error {
 			hooks.NotifySubmitted()
 			return nil
 		})

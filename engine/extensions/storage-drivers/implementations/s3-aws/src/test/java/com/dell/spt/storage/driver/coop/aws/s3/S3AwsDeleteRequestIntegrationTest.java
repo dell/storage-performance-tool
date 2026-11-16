@@ -26,6 +26,7 @@ import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOutcome;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationCause;
 import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
 import com.dell.spt.base.load.step.ScenarioUtil;
 import com.dell.spt.base.load.step.file.FileManager;
@@ -270,11 +271,14 @@ final class S3AwsDeleteRequestIntegrationTest {
 							driver.presence(target("absent", "v+1/=")));
 			assertEquals(DeleteVerificationProbe.Presence.UNRESOLVED,
 							driver.presence(target("unresolved", null)));
+			final DeleteVerificationProbe.Observation unresolved = driver.observe(target("unresolved", null));
+			assertEquals(DeleteVerificationProbe.Presence.UNRESOLVED, unresolved.presence());
+			assertEquals(DeleteVerificationCause.httpStatus(503), unresolved.unresolvedCause());
 		}
 
 		final List<CapturedRequest> heads = requests.stream()
 						.filter(request -> "HEAD".equals(request.method())).toList();
-		assertTrue(heads.size() >= 3, "the SDK may retry unresolved service responses internally");
+		assertTrue(heads.size() >= 4, "the SDK may retry unresolved service responses internally");
 		assertNull(heads.get(0).rawQuery());
 		assertTrue(heads.stream().anyMatch(
 						request -> "versionId=v%2B1%2F%3D".equals(request.rawQuery())));

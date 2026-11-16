@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 )
 
 func TestRootCommand(t *testing.T) {
+	isolateLoggingGlobals(t)
 	isTesting = true
 	defer func() { isTesting = false }()
 
@@ -32,6 +34,7 @@ func TestRootCommand(t *testing.T) {
 }
 
 func TestLoggingFlags(t *testing.T) {
+	isolateLoggingGlobals(t)
 	isTesting = true
 	defer func() { isTesting = false }()
 
@@ -102,6 +105,7 @@ func TestLoggingFlags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			isolateLoggingGlobals(t)
 			// Reset flags to defaults
 			debug = false
 			logLevel = "info"
@@ -156,7 +160,7 @@ func TestInitializeLogger(t *testing.T) {
 			name:        "Valid info level",
 			setupDebug:  false,
 			setupLevel:  "info",
-			setupFile:   "/tmp/test_spt.log",
+			setupFile:   "test_spt.log",
 			setupAppend: false,
 			expectError: false,
 		},
@@ -164,7 +168,7 @@ func TestInitializeLogger(t *testing.T) {
 			name:        "Valid debug level",
 			setupDebug:  false,
 			setupLevel:  "debug",
-			setupFile:   "/tmp/test_spt.log",
+			setupFile:   "test_spt.log",
 			setupAppend: false,
 			expectError: false,
 		},
@@ -172,7 +176,7 @@ func TestInitializeLogger(t *testing.T) {
 			name:        "Debug flag overrides level",
 			setupDebug:  true,
 			setupLevel:  "error",
-			setupFile:   "/tmp/test_spt.log",
+			setupFile:   "test_spt.log",
 			setupAppend: false,
 			expectError: false,
 		},
@@ -180,7 +184,7 @@ func TestInitializeLogger(t *testing.T) {
 			name:        "Invalid log level",
 			setupDebug:  false,
 			setupLevel:  "invalid",
-			setupFile:   "/tmp/test_spt.log",
+			setupFile:   "test_spt.log",
 			setupAppend: false,
 			expectError: true,
 			errorMsg:    "invalid log level",
@@ -189,7 +193,7 @@ func TestInitializeLogger(t *testing.T) {
 			name:        "Append to existing file",
 			setupDebug:  false,
 			setupLevel:  "info",
-			setupFile:   "/tmp/test_spt_append.log",
+			setupFile:   "test_spt_append.log",
 			setupAppend: true,
 			expectError: false,
 		},
@@ -197,18 +201,14 @@ func TestInitializeLogger(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			isolateLoggingGlobals(t)
 			// Set up test conditions
 			debug = tt.setupDebug
 			logLevel = tt.setupLevel
-			logFile = tt.setupFile
+			// A per-test directory, so concurrent runs on one host don't share the file.
+			setupFile := filepath.Join(t.TempDir(), tt.setupFile)
+			logFile = setupFile
 			logAppend = tt.setupAppend
-
-			// Clean up test file
-			defer func() {
-				if err := os.Remove(tt.setupFile); err != nil && !os.IsNotExist(err) {
-					t.Logf("Failed to remove test file %s: %v", tt.setupFile, err)
-				}
-			}()
 
 			// Initialize logger
 			err := initializeLogger()
@@ -230,8 +230,8 @@ func TestInitializeLogger(t *testing.T) {
 				}
 
 				// Check that log file was created
-				if _, err := os.Stat(tt.setupFile); os.IsNotExist(err) {
-					t.Errorf("Log file was not created: %s", tt.setupFile)
+				if _, err := os.Stat(setupFile); os.IsNotExist(err) {
+					t.Errorf("Log file was not created: %s", setupFile)
 				}
 
 				// If debug flag was set, verify logLevel was changed
