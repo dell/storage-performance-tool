@@ -183,9 +183,7 @@ func installAutoTerminateMonitorSeams(t *testing.T, fake *autoTerminateFake) {
 // auto-terminate result once the session reports the run terminal, or the interrupt.
 func autoTerminateLaunch(t *testing.T, stepFailed bool) func(context.Context, tui.LaunchHooks) error {
 	t.Helper()
-	monitorReady := awaitMonitorSetup(t)
 	return func(ctx context.Context, hooks tui.LaunchHooks) error {
-		monitorReady()
 		hooks.NotifySubmitted()
 		if stepFailed {
 			return nil
