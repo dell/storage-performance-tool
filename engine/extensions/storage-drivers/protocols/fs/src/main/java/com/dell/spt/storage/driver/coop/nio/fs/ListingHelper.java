@@ -62,18 +62,20 @@ public interface ListingHelper {
 				nextFile = new File(nextPath.toString());
 				nextFileName = nextFile.getAbsolutePath();
 				if (lastPrevItemNameFound) {
+					// the offset is encoded in the file name, not in the full path
+					final String leafName = nextFile.getName();
 					try {
 						final long offset;
 						if (prefixLength > 0) {
 							// only items with the prefix are passed so it's safe
-							offset = Long.parseLong(nextFileName.substring(prefixLength), idRadix);
+							offset = Long.parseLong(leafName.substring(prefixLength), idRadix);
 						} else {
-							offset = Long.parseLong(nextFileName, idRadix);
+							offset = Long.parseLong(leafName, idRadix);
 						}
-						nextItem = itemFactory.getItem(nextFile.getAbsolutePath(), offset, nextFile.length());
+						nextItem = itemFactory.getItem(nextFileName, offset, nextFile.length());
 					} catch (final NumberFormatException e) {
 						// try to not use the offset (read verification should be disabled)
-						nextItem = itemFactory.getItem(nextFile.getAbsolutePath(), 0, nextFile.length());
+						nextItem = itemFactory.getItem(nextFileName, 0, nextFile.length());
 					}
 					buff.add(nextItem);
 					if (count == buff.size()) {
