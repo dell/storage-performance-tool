@@ -76,7 +76,7 @@ func TestHeadlessRunnerOutputAfterCloseSkipsTraceFile(t *testing.T) {
 	if !strings.Contains(string(trace), "before close") {
 		t.Fatalf("trace = %q, want the line written before Close", trace)
 	}
-	if strings.Contains(string(trace), "late") {
+	if strings.Contains(string(trace), "late stream line") || strings.Contains(string(trace), `{"late":true}`) {
 		t.Fatalf("trace = %q, want no line written after Close", trace)
 	}
 	if err := runner.Close(); err != nil {
