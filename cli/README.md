@@ -55,7 +55,7 @@ Need to profile how fast an existing namespace can be enumerated? The list workl
   --auto-terminate-seconds 120
 ```
 
-Tip: If you omit both `--object-count` and `--duration`, the list workload will continue until you stop it. Always set `--auto-terminate-seconds` for unattended runs so CI jobs do not hang: at the deadline the CLI stops the run, keeps its results, and exits 0 if the run was healthy up to then. The deadline counts from start-up.
+Tip: If you omit both `--object-count` and `--duration`, the list workload will continue until you stop it. Always set `--auto-terminate-seconds` for unattended runs so CI jobs do not hang: at the deadline the CLI stops the run (through the engine API with auto-results on, the default, or through shutdown and container stop with `--auto-results=false`), keeps its results, and exits 0 if the run was healthy up to then and the stop is confirmed. A DELETE or verification workload stopped at the deadline exits 1, because it did not complete. The deadline starts after the CLI has connected to the hosts and covers engine start-up, launch and the run.
 Authentication defaults to Signature Version 4. Add `--auth-version 2` only when working with a legacy S3 implementation that rejects SigV4.
 
 For read benchmarks, `spt` can seed an item set automatically and optionally widen read randomness within each fetched batch:

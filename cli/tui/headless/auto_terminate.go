@@ -49,11 +49,14 @@ func startAutoTerminateDeadline(
 	}
 	deadline.reached = make(chan struct{})
 	deadline.timer = time.AfterFunc(time.Duration(seconds)*time.Second, func() {
-		if !hooks.PotentiallySubmitted() {
-			deadline.beforeSubmission.Store(true)
+		beforeSubmission := !hooks.PotentiallySubmitted()
+		deadline.beforeSubmission.Store(beforeSubmission)
+		// Mark the deadline reached before cancelling, so a start that ends on
+		// the cancellation always sees it.
+		close(deadline.reached)
+		if beforeSubmission {
 			cancel()
 		}
-		close(deadline.reached)
 	})
 	return launchCtx, deadline, func() {
 		deadline.timer.Stop()
@@ -115,22 +118,27 @@ func channelClosed(ch <-chan struct{}) bool {
 	}
 }
 
+// autoTerminateStopWaitTimeout bounds the wait for the session; tests shorten it.
+var autoTerminateStopWaitTimeout = constants.AutoTerminateStopWaitTimeout
+
 // stopSessionRunAtAutoTerminate asks the run session to stop the workload at
 // the deadline and waits, bounded, until the session reports it terminal, so
 // the caller's log reader and trace file stay open until the run has stopped.
-// It returns ctx.Err() when ctx ends first (an interrupt during the stop); a
-// wait that times out is reported and does not fail the run, since the
-// session still stops the run and finalizes on its own.
+// It returns ctx.Err() when ctx ends first (an interrupt during the stop). A
+// wait that times out fails the run: the stop was not confirmed, and the
+// results may be partial.
 func stopSessionRunAtAutoTerminate(
-	ctx context.Context, hooks tui.LaunchHooks, output func(category, message string),
+	ctx context.Context, seconds int, hooks tui.LaunchHooks, output func(category, message string),
 ) error {
-	err := hooks.StopWorkloadAndWait(ctx, constants.AutoTerminateStopWaitTimeout)
+	err := hooks.StopWorkloadAndWait(ctx, autoTerminateStopWaitTimeout)
 	if err == nil {
 		return nil
 	}
 	if ctx != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
 		return err
 	}
-	output("WARNING", fmt.Sprintf("Auto-terminate stop is still in progress: %v", err))
-	return nil
+	output("ERROR", fmt.Sprintf("Auto-terminate stop was not confirmed: %v", err))
+	return fmt.Errorf(
+		"auto-terminate: the stop at the %d s deadline was not confirmed, so the run may still be running and its results may be partial: %w",
+		seconds, err)
 }

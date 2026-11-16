@@ -22,7 +22,7 @@ import (
 
 const (
 	autoTerminateTestReachedLine = "Auto-terminate deadline (1 s) reached; stopping the run"
-	autoTerminateTestStoppedLine = "Auto-terminate stopped the run; RunSession owns evidence and resource finalization"
+	autoTerminateTestStoppedLine = "Auto-terminate stop request finished; RunSession confirms the stop and owns evidence and resource finalization"
 	autoTerminateTestStartError  = "auto-terminate deadline (1 s) reached during start-up, before the workload was submitted"
 )
 
@@ -202,6 +202,33 @@ func TestAutoTerminateBeforeSubmissionNamesAutoTerminate(t *testing.T) {
 			}
 			if autoTerminated, _ := AutoTerminateState(err); autoTerminated {
 				t.Fatalf("a start that never submitted was reported as a stopped run: %v", err)
+			}
+		})
+	}
+}
+
+// A session that never reports the run terminal after the stop request fails the run with an
+// error that names auto-terminate: the stop was not confirmed. Before, the runner warned and
+// returned the auto-terminate result, which exits 0.
+func TestSessionManagedAutoTerminateUnconfirmedStopFailsTheRun(t *testing.T) {
+	original := autoTerminateStopWaitTimeout
+	autoTerminateStopWaitTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { autoTerminateStopWaitTimeout = original })
+	for _, route := range autoTerminateRoutes {
+		t.Run(route.name, func(t *testing.T) {
+			session := runcontrol.NewSession()
+			hooks := tui.NewSessionLaunchHooks(session, nil)
+			err := route.run(t, context.Background(), hooks, filepath.Join(t.TempDir(), "trace.log"),
+				func(context.Context) error {
+					hooks.NotifySubmitted()
+					return nil
+				})
+			const want = "auto-terminate: the stop at the 1 s deadline was not confirmed"
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("runner error = %v, want it to contain %q", err, want)
+			}
+			if autoTerminated, _ := AutoTerminateState(err); autoTerminated {
+				t.Fatalf("an unconfirmed stop was reported as a stopped run: %v", err)
 			}
 		})
 	}

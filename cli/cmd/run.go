@@ -135,10 +135,11 @@ type autoResultsOutcome struct {
 	AllFailedPhases      []summary.AllFailedPhase
 	SummaryRead          bool
 	StepsWithResults     int
-	// AutoTerminated marks a run that the auto-terminate deadline stopped: the
-	// monitor stopped tracking on the run session's stop request, stopped the
-	// run through the engine API and reconciled its terminal state.
-	AutoTerminated bool
+	// AutoTerminated marks a run that the auto-terminate deadline ended: the
+	// monitor stopped tracking on the run session's stop request and asked the
+	// engine to stop the run. AutoTerminateStop says how that stop ended.
+	AutoTerminated    bool
+	AutoTerminateStop autoTerminateStopResult
 
 	// LiveCorruptionUnobserved marks a completed verification READ that the live step list never
 	// showed, on a run without --allow-empty-selection: its corruption count is unknown, so only an
@@ -242,6 +243,27 @@ func (m *autoResultsMonitor) provenNotSubmitted() bool {
 	session := m.session
 	m.sessionMu.RUnlock()
 	return session != nil && session.SubmissionState() == runcontrol.SubmissionNotSubmitted
+}
+
+// autoTerminateStopResult is how the monitor's auto-terminate stop ended.
+type autoTerminateStopResult int
+
+const (
+	// autoTerminateStopConfirmed: the run reached a terminal state after the
+	// stop. The zero value means the deadline did not stop the run.
+	autoTerminateStopConfirmed autoTerminateStopResult = iota + 1
+	// autoTerminateRunAlreadyEnded: the stop found no active run, and the run
+	// had ended on its own; the normal exit rules apply.
+	autoTerminateRunAlreadyEnded
+	// autoTerminateStopUnconfirmed: the stop failed, or the run reported no
+	// terminal state after it; the results may be partial.
+	autoTerminateStopUnconfirmed
+)
+
+// stoppedAtDeadline reports a run that auto-terminate stopped, with the stop
+// confirmed.
+func (o autoResultsOutcome) stoppedAtDeadline() bool {
+	return o.AutoTerminated && o.AutoTerminateStop == autoTerminateStopConfirmed
 }
 
 // workloadStopRequested returns the bound session's stop-request channel, or
@@ -754,6 +776,9 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		if monitor.armAck != nil {
 			close(monitor.armAck)
 		}
+		// interruptCtx ends on Ctrl-C, unlike monitorCtx, which the
+		// auto-terminate stop also cancels.
+		interruptCtx := parentCtx
 		parentCtx = monitorCtx
 		phaseBase := context.WithoutCancel(parentCtx)
 		verificationRun := len(integrityOptions) > 0 && integrityOptions[0] != nil
@@ -816,27 +841,40 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		// node and reconciles its terminal state. The engines stay up, so the
 		// artifacts are fetched in full and the end-of-run shutdown follows only
 		// when --shutdown-on-complete asks for it. It uses the shutdown budget.
-		stopRunAtAutoTerminate := func() error {
+		// The stop counts only once reconciliation sees a terminal state.
+		stopRunAtAutoTerminate := func() autoTerminateStopResult {
 			stopCtx, cancelStop := context.WithTimeout(phaseBase, autoResultsPhaseBudgets.Shutdown)
 			defer cancelStop()
 			writeProgress("Auto-results: stopping run %d through the engine API...\n", expectedRunID)
 			reconcileCtx, cancelReconcile := context.WithCancel(stopCtx)
 			defer cancelReconcile()
 			reconciliationDone := startTerminalReconciliation(reconcileCtx)
-			stopErr := requestRunStopFunc(stopCtx, baseURL, expectedRunID)
+			stopped, stopErr := requestRunStopFunc(stopCtx, baseURL, expectedRunID)
 			if stopErr != nil {
 				// Without an accepted stop the run may not end within the budget.
 				cancelReconcile()
 			}
-			recordTerminalReconciliation("post-stop", <-reconciliationDone)
-			if stopErr != nil {
+			reconciled := <-reconciliationDone
+			recordTerminalReconciliation("post-stop", reconciled)
+			switch {
+			case stopErr != nil:
 				outcome.TrackerErr = errors.Join(fmt.Errorf("stop run: %w", stopErr), outcome.TrackerErr)
 				logging.LogError("auto-results", "auto-terminate stop request failed", stopErr)
 				writeProgress("Auto-results: the run stop request failed; see logs for details.\n")
-			} else {
+				return autoTerminateStopUnconfirmed
+			case reconciled.err != nil || reconciled.result == nil:
+				if outcome.TrackerErr == nil {
+					outcome.TrackerErr = errors.New("post-stop terminal reconciliation: no terminal state")
+				}
+				writeProgress("Auto-results: the run reported no terminal state after the stop request.\n")
+				return autoTerminateStopUnconfirmed
+			case !stopped && reconciled.result.FinalState != constants.StateStopped:
+				writeProgress("Auto-results: the run had already ended at the auto-terminate deadline.\n")
+				return autoTerminateRunAlreadyEnded
+			default:
 				writeProgress("Auto-results: run stopped.\n")
+				return autoTerminateStopConfirmed
 			}
-			return stopErr
 		}
 		cleanupOnly := monitor.cleanupOnly.Load()
 		// A launch that failed before POST /run left no workload to stop and no
@@ -977,9 +1015,15 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			interruptedTracking := parentCtx.Err() != nil && outcome.TrackerErr != nil
 			outcome.AutoTerminated = interruptedTracking && autoTerminateRequested.Load()
 			if outcome.AutoTerminated {
-				if stopErr := stopRunAtAutoTerminate(); stopErr != nil && shutdownOn {
-					// The interrupt route's shutdown also ends the run.
+				outcome.AutoTerminateStop = stopRunAtAutoTerminate()
+				if outcome.AutoTerminateStop == autoTerminateStopUnconfirmed && shutdownOn {
+					// The interrupt route's shutdown also ends the run; its
+					// reconciliation can still confirm the stop.
 					runShutdown(true)
+					if outcome.TrackerErr == nil {
+						outcome.AutoTerminateStop = autoTerminateStopConfirmed
+						writeProgress("Auto-results: run stopped by the shutdown.\n")
+					}
 				}
 			} else if interruptedTracking && shutdownOn {
 				runShutdown(true)
@@ -993,7 +1037,9 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			artifactBudget := autoResultsPhaseBudgets.Artifacts
 			// A run that auto-terminate stopped cleanly keeps the full artifact
 			// budget: it is a planned end, not an interrupt the user waits on.
-			if outcome.TrackerErr != nil || (parentCtx.Err() != nil && !outcome.AutoTerminated) {
+			// A Ctrl-C during that stop is an interrupt again.
+			if outcome.TrackerErr != nil || (parentCtx.Err() != nil &&
+				(!outcome.AutoTerminated || interruptCtx.Err() != nil)) {
 				artifactBudget = autoResultsPhaseBudgets.CancelSalvage
 			}
 			artifactCtx, cancelArtifacts := context.WithTimeout(phaseBase, artifactBudget)
@@ -1412,13 +1458,37 @@ func stepRoleLifecycle(result *portcheck.RunResult, runtimeStepID, plannedStepID
 func resolveOrdinaryRunError(runErr error, outcome autoResultsOutcome) error {
 	stopped := outcome.Tracker != nil && outcome.Tracker.FinalState == constants.StateStopped
 	failed := outcome.Tracker != nil && outcome.Tracker.FinalState == constants.StateFailed
-	if !stopped && !failed && runErr == nil && outcome.TrackerErr == nil && len(outcome.AllFailedPhases) > 0 {
+	// A run auto-terminate stopped is judged as if it had ended there; a
+	// Ctrl-C still skips the check.
+	if (!stopped || outcome.stoppedAtDeadline()) && !failed && runErr == nil && outcome.TrackerErr == nil &&
+		len(outcome.AllFailedPhases) > 0 {
 		return &ExitCodeError{Code: constants.ExitCodeWorkloadFailure, Msg: allFailedPhasesReason(outcome.AllFailedPhases)}
 	}
 	if failure := trackedFailureError(runErr, outcome.Tracker); failure != nil {
 		return failure
 	}
 	return runErr
+}
+
+// autoTerminateStopError returns the exit-1 error of a run whose
+// auto-terminate stop was not confirmed: the stop request failed, or the run
+// reported no terminal state after it, so it may still be running and its
+// results may be partial. A Ctrl-C during the stop keeps its own result.
+func autoTerminateStopError(runErr error, outcome autoResultsOutcome) error {
+	if !outcome.AutoTerminated || outcome.AutoTerminateStop != autoTerminateStopUnconfirmed ||
+		errors.Is(runErr, context.Canceled) {
+		return nil
+	}
+	message := "auto-terminate: the stop at the deadline was not confirmed, so the run may still be running and its results may be partial"
+	if outcome.TrackerErr != nil {
+		message += ": " + outcome.TrackerErr.Error()
+	}
+	if runErr != nil {
+		message += "; " + runErr.Error()
+	}
+	return &ExitCodeError{
+		Code: constants.ExitCodeWorkloadFailure, Msg: message, Cause: errors.Join(outcome.TrackerErr, runErr),
+	}
 }
 
 // trackedFailureError returns the exit-1 error for a run whose tracker saw the engine's FAILED
@@ -1599,6 +1669,9 @@ func resolveVerificationRunError(runErr error, outcome autoResultsOutcome, recei
 func resolveRunCompletionError(
 	runErr error, outcome autoResultsOutcome, received bool, params scenario.Params,
 ) error {
+	if stopErr := autoTerminateStopError(runErr, outcome); stopErr != nil {
+		return stopErr
+	}
 	if params.WorkloadType == scenario.WorkloadTypeDelete {
 		var reasons []string
 		var causes []error
@@ -1941,7 +2014,8 @@ func shutdownTargetHosts(hosts []*hostparse.HostInfo, attachExisting bool) []*ho
 
 // requestRunStop asks the entry node to stop the owned run, leaving every
 // engine up. The entry owns the distributed step, so one request stops it.
-func requestRunStop(ctx context.Context, baseURL string, expectedRunID int64) error {
+// stopped is false when the entry had no matching active run.
+func requestRunStop(ctx context.Context, baseURL string, expectedRunID int64) (stopped bool, err error) {
 	client := portcheck.NewSptAPIClient(baseURL, portcheck.DefaultHTTPTimeout)
 	return client.StopRun(ctx, expectedRunID)
 }
@@ -2555,14 +2629,13 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			}
 		}
 		// finishRun joins auto-results and resolves the exit status. A run the
-		// auto-terminate deadline stopped while healthy exits 0.
+		// auto-terminate deadline stopped while healthy exits 0, once the stop
+		// is confirmed.
 		finishRun := func(err error, cleaner replayContainerCleaner) error {
 			autoTerminated, normalizedErr := normalizeHeadlessAutoTerminate(err, cleaner, 30*time.Second)
 			waitForAutoResults()
 			finalizeTraceArtifact()
-			if autoTerminated || autoOutcome.AutoTerminated {
-				writeAutoTerminateStopped(os.Stdout, autoTerminate)
-			}
+			writeAutoTerminateClosing(os.Stdout, autoTerminate, autoTerminated, err, autoMonitor != nil, autoOutcome)
 			return resolveRunCompletionError(normalizedErr, autoOutcome, autoOutcomeReceived, params)
 		}
 
@@ -2768,7 +2841,7 @@ func init() {
 	_ = runCmd.Flags().MarkDeprecated(flagOutputDir, outputDirDeprecation)
 	runCmd.Flags().Bool("generate-only", false, "Generate the scenario file without running Docker or Spt")
 	// Headless auto-termination
-	runCmd.Flags().Int("auto-terminate-seconds", 0, "Stop the run N seconds after launch, start-up included; exits 0 if the run was healthy up to then (0 = unlimited)")
+	runCmd.Flags().Int("auto-terminate-seconds", 0, "Stop the run N seconds after the CLI has connected to the hosts, covering engine start-up, launch and the run; exits 0 if the run was healthy up to the deadline and the stop is confirmed, while a DELETE or verification workload stopped there exits 1 because it did not complete (0 = unlimited)")
 	runCmd.Flags().Bool("keep-scenario", false, "Keep the scenario file after the test completes (default: delete on success)")
 	runCmd.Flags().Bool("save-items", false, "Save items.csv to the results directory (write workloads only; can be large for high-throughput runs)")
 	runCmd.Flags().String("items-file", "", "Path to a local items.csv for read/read-verify or explicit-manifest DELETE; mutually exclusive with --delete-existing")

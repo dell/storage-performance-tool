@@ -375,7 +375,7 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 func (r *MultiHostHeadlessRunner) stopSessionRunAtAutoTerminate(
 	ctx context.Context, testOrchestrator *tui.MultiHostTestOrchestrator, completionErr error,
 ) error {
-	stopErr := stopSessionRunAtAutoTerminate(ctx, r.launchHooks, r.output)
+	stopErr := stopSessionRunAtAutoTerminate(ctx, r.autoTerminateSeconds, r.launchHooks, r.output)
 	// Release presentation-only metrics and log polling.
 	if releaseErr := testOrchestrator.StopTest(); releaseErr != nil {
 		r.output("ERROR", fmt.Sprintf("Failed to stop multi-host presentation monitoring: %v", releaseErr))
@@ -386,7 +386,7 @@ func (r *MultiHostHeadlessRunner) stopSessionRunAtAutoTerminate(
 	if completionErr != nil {
 		return completionErr
 	}
-	r.output("SHUTDOWN", "Auto-terminate stopped the run; RunSession owns evidence and resource finalization")
+	r.output("SHUTDOWN", "Auto-terminate stop request finished; RunSession confirms the stop and owns evidence and resource finalization")
 	return &AutoTerminateError{CleanupComplete: true}
 }
 
@@ -728,7 +728,7 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 	}
 	if r.launchHooks.SessionManaged() {
 		if autoTerminated {
-			if err := stopSessionRunAtAutoTerminate(ctx, r.launchHooks, func(category, message string) {
+			if err := stopSessionRunAtAutoTerminate(ctx, r.autoTerminateSeconds, r.launchHooks, func(category, message string) {
 				r.output(category, "%s", message)
 			}); err != nil {
 				return err
@@ -736,7 +736,7 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 			if completionErr != nil {
 				return completionErr
 			}
-			r.output("COMPLETE", "Auto-terminate stopped the run; RunSession owns evidence and resource finalization")
+			r.output("COMPLETE", "Auto-terminate stop request finished; RunSession confirms the stop and owns evidence and resource finalization")
 			return &AutoTerminateError{CleanupComplete: true}
 		}
 		r.output("COMPLETE", "Presentation completed; RunSession owns evidence and resource finalization")

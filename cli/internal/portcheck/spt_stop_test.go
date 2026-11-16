@@ -18,11 +18,12 @@ import (
 // reconciliation.
 func TestStopRunSendsTheOwnedRunID(t *testing.T) {
 	for _, test := range []struct {
-		status  int
-		body    string
-		wantErr string
+		status      int
+		body        string
+		wantStopped bool
+		wantErr     string
 	}{
-		{status: http.StatusOK},
+		{status: http.StatusOK, wantStopped: true},
 		{status: http.StatusNoContent},
 		{status: http.StatusNotFound},
 		{status: http.StatusBadRequest, body: "missing If-Match\n", wantErr: "stop status 400: missing If-Match"},
@@ -37,13 +38,13 @@ func TestStopRunSendsTheOwnedRunID(t *testing.T) {
 			}))
 			defer server.Close()
 
-			err := NewSptAPIClient(server.URL, 5*time.Second).StopRun(context.Background(), 41)
+			stopped, err := NewSptAPIClient(server.URL, 5*time.Second).StopRun(context.Background(), 41)
 			if method != http.MethodDelete || path != "/run" || ifMatch != "41" {
 				t.Fatalf("request = %s %s If-Match %q, want DELETE /run If-Match \"41\"", method, path, ifMatch)
 			}
 			if test.wantErr == "" {
-				if err != nil {
-					t.Fatalf("StopRun() error = %v", err)
+				if err != nil || stopped != test.wantStopped {
+					t.Fatalf("StopRun() = %t, %v, want %t, nil", stopped, err, test.wantStopped)
 				}
 				return
 			}
@@ -59,7 +60,7 @@ func TestStopRunWithoutRunIDSendsNothing(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests++ }))
 	defer server.Close()
-	if err := NewSptAPIClient(server.URL, 5*time.Second).StopRun(context.Background(), 0); err == nil {
+	if _, err := NewSptAPIClient(server.URL, 5*time.Second).StopRun(context.Background(), 0); err == nil {
 		t.Fatal("StopRun(0) returned nil")
 	}
 	if requests != 0 {

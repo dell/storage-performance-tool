@@ -487,35 +487,35 @@ func (c *SptAPIClient) StopTest(ctx context.Context) error {
 // leaving the engine up. The engine matches the If-Match header against its
 // active run: 200 means the stop was requested, 204 that no run is active and
 // 404 that the active run is another one; neither of the last two stops
-// anything, and both return nil so the caller's terminal reconciliation
-// decides how the run ended.
-func (c *SptAPIClient) StopRun(ctx context.Context, runID int64) error {
+// anything, and both return stopped false with a nil error, so the caller's
+// terminal reconciliation decides how the run ended.
+func (c *SptAPIClient) StopRun(ctx context.Context, runID int64) (stopped bool, err error) {
 	if runID <= 0 {
-		return fmt.Errorf("stop run: run ID is unknown")
+		return false, fmt.Errorf("stop run: run ID is unknown")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+"/run", nil)
 	if err != nil {
-		return fmt.Errorf("create stop request: %w", err)
+		return false, fmt.Errorf("create stop request: %w", err)
 	}
 	req.Header.Set("If-Match", strconv.FormatInt(runID, 10))
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("stop request: %w", err)
+		return false, fmt.Errorf("stop request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	switch resp.StatusCode {
 	case http.StatusOK:
-		return nil
+		return true, nil
 	case http.StatusNoContent, http.StatusNotFound:
 		logging.LogInfo("portcheck", "stop request found no matching active run",
 			"run_id", runID, "status", resp.StatusCode)
-		return nil
+		return false, nil
 	default:
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		if len(b) > 0 {
-			return fmt.Errorf("stop status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+			return false, fmt.Errorf("stop status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 		}
-		return fmt.Errorf("stop status %d", resp.StatusCode)
+		return false, fmt.Errorf("stop status %d", resp.StatusCode)
 	}
 }
 
