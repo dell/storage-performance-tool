@@ -7,6 +7,7 @@ package tui
 import (
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -90,24 +91,48 @@ func TestContainerOutputProcessing(t *testing.T) {
 	})
 	mockDM.SetOutputDelay(1 * time.Millisecond)
 
-	// Collect output lines
+	// Collect output lines. The callbacks run on the mock's stream
+	// goroutine, so mu guards the captured state and each stdout line is
+	// signalled on gotLine.
+	const wantLines = 4
+	var mu sync.Mutex
 	var outputLines []string
 	var errorLines []string
+	gotLine := make(chan struct{}, wantLines)
 
 	mockDM.StreamOutput("test-container",
 		func(line string) {
+			mu.Lock()
 			outputLines = append(outputLines, line)
+			mu.Unlock()
+			select {
+			case gotLine <- struct{}{}:
+			default:
+			}
 		},
 		func(line string) {
+			mu.Lock()
+			defer mu.Unlock()
 			errorLines = append(errorLines, line)
 		})
 
 	// Wait for streaming to complete
-	time.Sleep(20 * time.Millisecond)
+	timeout := time.After(5 * time.Second)
+waitLines:
+	for range wantLines {
+		select {
+		case <-gotLine:
+		case <-timeout:
+			break waitLines
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
 
 	// Verify output was received
-	if len(outputLines) != 4 {
-		t.Errorf("Expected 4 output lines, got %d", len(outputLines))
+	if len(outputLines) != wantLines {
+		t.Errorf("Expected %d output lines, got %d", wantLines, len(outputLines))
 	}
 
 	// Verify no errors

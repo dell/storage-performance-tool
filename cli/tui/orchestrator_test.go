@@ -1074,13 +1074,17 @@ func TestOrchestratorMetricsParsing(t *testing.T) {
 	orchestrator := NewTestOrchestrator(nil, constants.SptAPIPort, "")
 	orchestrator.apiClient = NewSptAPIClient(server.URL)
 
-	// Track metrics received
-	var receivedMetric *PerformanceMetric
+	// Track metrics received. The callback runs on the monitor goroutine,
+	// so it hands a copy of the first aggregated metric over a channel.
+	received := make(chan PerformanceMetric, 1)
 	orchestrator.SetCallbacks(
 		nil,
 		func(update *MultiNodeMetricsUpdate) {
 			if update.Aggregated != nil {
-				receivedMetric = update.Aggregated
+				select {
+				case received <- *update.Aggregated:
+				default:
+				}
 			}
 		},
 		nil,
@@ -1091,10 +1095,21 @@ func TestOrchestratorMetricsParsing(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
-	go orchestrator.monitorMetrics(ctx)
+	monitorDone := make(chan struct{})
+	go func() {
+		defer close(monitorDone)
+		orchestrator.monitorMetrics(ctx)
+	}()
 
-	// Wait for metrics to be parsed
-	time.Sleep(700 * time.Millisecond)
+	// Wait for metrics to be parsed, then stop and join the monitor.
+	var receivedMetric *PerformanceMetric
+	select {
+	case m := <-received:
+		receivedMetric = &m
+	case <-ctx.Done():
+	}
+	cancel()
+	<-monitorDone
 
 	// Verify metrics were parsed correctly
 	if receivedMetric == nil {

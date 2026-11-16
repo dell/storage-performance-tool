@@ -43,16 +43,29 @@ func TestMetricsPipelineEndToEnd_JSONOnly(t *testing.T) {
 		"190334.125|250811190344|CREATE|         0|0.0       |    15454937|     0|10.004 |1807670 |1807669|        18|         20",
 	})
 
-	// Simulate Docker streaming (display only)
+	// Simulate Docker streaming (display only). The callback runs on the
+	// mock's stream goroutine and updates model; streamed closes after the
+	// last line, so reading model afterwards is ordered after every write.
+	const wantLines = 4
+	streamed := make(chan struct{})
+	lineCount := 0
 	mockDocker.StreamOutput("test-container",
 		func(line string) {
 			msg := containerOutputMsg(line)
 			updatedModel, _ := model.Update(msg)
 			model = updatedModel.(Model)
+			lineCount++
+			if lineCount == wantLines {
+				close(streamed)
+			}
 		},
 		func(line string) { t.Errorf("Unexpected stderr: %s", line) })
 
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-streamed:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %d streamed lines", wantLines)
+	}
 	if len(model.metricsCollector.GetSamples()) != 0 {
 		t.Errorf("expected 0 metrics from console output stream, got %d", len(model.metricsCollector.GetSamples()))
 	}
