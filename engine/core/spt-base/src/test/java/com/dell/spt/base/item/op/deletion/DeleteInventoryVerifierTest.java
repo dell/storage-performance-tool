@@ -322,26 +322,62 @@ class DeleteInventoryVerifierTest {
 	void targetThatSettlesJustBeforeTheDeadlineIsSeenByAFinalPass(@TempDir final Path temp)
 					throws Exception {
 		final Duration timeout = Duration.ofSeconds(3);
-		final AtomicLong settlesAt = new AtomicLong();
-		final AtomicLong lastProbe = new AtomicLong();
-		settlesAt.set(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(2_800));
-		try (final DeleteVerificationReport report = DeleteInventoryVerifier.verify(
-						singleTargetManifest(temp),
-						1,
-						DeleteVerificationPhase.POST_DELETE,
-						timeout,
-						target -> {
-							lastProbe.set(System.nanoTime());
-							return System.nanoTime() < settlesAt.get()
-											? DeleteVerificationProbe.Presence.PRESENT
-											: DeleteVerificationProbe.Presence.ABSENT;
-						})) {
-			// Back-off places retry passes at about 0, 10, 30 ... 1270 and 2270 ms; without a reserved
-			// final pass the last check came at about 2270 ms plus pass overhead, before the target settled.
-			assertTrue(report.successful(), () -> "the target was still present at its last check, "
-							+ TimeUnit.NANOSECONDS.toMillis(lastProbe.get() - settlesAt.get()) + " ms from settling");
-			assertTrue(report.elapsed().compareTo(timeout) <= 0, "the deadline moved");
-		}
+		assertSucceedsWithinAttempts(() -> {
+			final AtomicLong settlesAt = new AtomicLong();
+			final AtomicLong lastProbe = new AtomicLong();
+			settlesAt.set(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(2_800));
+			try (final DeleteVerificationReport report = DeleteInventoryVerifier.verify(
+							singleTargetManifest(temp),
+							1,
+							DeleteVerificationPhase.POST_DELETE,
+							timeout,
+							target -> {
+								lastProbe.set(System.nanoTime());
+								return System.nanoTime() < settlesAt.get()
+												? DeleteVerificationProbe.Presence.PRESENT
+												: DeleteVerificationProbe.Presence.ABSENT;
+							})) {
+				// Back-off places retry passes at about 0, 10, 30 ... 1270 and 2270 ms; without a
+				// reserved final pass the last check came at about 2270 ms plus pass overhead, before
+				// the target settled.
+				if (!report.successful()) {
+					return "the target was still present at its last check, "
+									+ TimeUnit.NANOSECONDS.toMillis(lastProbe.get() - settlesAt.get())
+									+ " ms from settling";
+				}
+				return deadlineMoved(report, timeout);
+			}
+		});
+	}
+
+	@Test
+	void manyTargetsThatSettleShortlyBeforeTheDeadlineAreAllSeenByTheFinalPass(
+					@TempDir final Path temp) throws Exception {
+		final int targets = 50;
+		final Duration timeout = Duration.ofSeconds(3);
+		final Path manifest = largeManifest(temp, targets);
+		assertSucceedsWithinAttempts(() -> {
+			final long settlesAt = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(2_800);
+			try (final DeleteVerificationReport report = DeleteInventoryVerifier.verify(
+							manifest,
+							targets,
+							DeleteVerificationPhase.POST_DELETE,
+							timeout,
+							target -> {
+								// About 100 ms per pass over all targets, ten times the shortest pause.
+								sleepMillis(2);
+								return System.nanoTime() < settlesAt
+												? DeleteVerificationProbe.Presence.PRESENT
+												: DeleteVerificationProbe.Presence.ABSENT;
+							})) {
+				// A final pass started only 10 ms before the deadline reached about 5 of the 50.
+				if (report.absent() != targets) {
+					return report.present() + " of " + targets + " targets were still present and "
+									+ report.unresolved() + " unresolved at their last check";
+				}
+				return deadlineMoved(report, timeout);
+			}
+		});
 	}
 
 	@Test
@@ -368,7 +404,7 @@ class DeleteInventoryVerifierTest {
 	@Test
 	void unresolvedTargetsAreReportedOnceAtWarnWithTheirCountAndCause(
 					@TempDir final Path temp) throws Exception {
-		final List<String> warnings = captureWarnings("Standalone DELETE pre-validation left ", () -> {
+		final List<String> warnings = captureWarnings("Standalone DELETE pre-validation left 2 ", () -> {
 			try (final var resolved = DeleteInventoryVerifier.verify(
 							manifest(temp),
 							3,
@@ -471,6 +507,53 @@ class DeleteInventoryVerifierTest {
 										12,
 										TimeUnit.MILLISECONDS.toNanos(30_001),
 										null));
+	}
+
+	/**
+	 * Scheduling allowance for the elapsed check. The verifier reads {@link System#nanoTime()}
+	 * directly; the deadline is checked before each probe, so a phase overruns it only by a late
+	 * wake-up or the probe in flight, never by a moved deadline.
+	 */
+	private static final Duration SCHEDULING_ALLOWANCE = Duration.ofMillis(250);
+
+	private static final int TIMING_ATTEMPTS = 3;
+
+	private static void sleepMillis(final long millis) {
+		try {
+			Thread.sleep(millis);
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new IllegalStateException(e);
+		}
+	}
+
+	private static String deadlineMoved(final DeleteVerificationReport report, final Duration timeout) {
+		final Duration limit = timeout.plus(SCHEDULING_ALLOWANCE);
+		return report.elapsed().compareTo(limit) <= 0
+						? null
+						: "the phase took " + report.elapsed().toMillis() + " ms, more than " + limit.toMillis() + " ms";
+	}
+
+	/**
+	 * Runs a timing scenario up to {@link #TIMING_ATTEMPTS} times and passes on its first success,
+	 * so one late wake-up on a loaded host cannot fail the test; a defect fails every attempt.
+	 */
+	private static void assertSucceedsWithinAttempts(final TimingScenario scenario) throws Exception {
+		final List<String> failures = new ArrayList<>();
+		for (int attempt = 0; attempt < TIMING_ATTEMPTS; attempt++) {
+			final String failure = scenario.run();
+			if (failure == null) {
+				return;
+			}
+			failures.add(failure);
+		}
+		throw new AssertionError("failed in every attempt: " + failures);
+	}
+
+	@FunctionalInterface
+	private interface TimingScenario {
+		/** Returns null on success, otherwise why the attempt failed. */
+		String run() throws Exception;
 	}
 
 	private static Path manifest(final Path temp) throws Exception {

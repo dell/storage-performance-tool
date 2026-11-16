@@ -21,7 +21,8 @@ import java.util.concurrent.TimeUnit;
  * Performs one complete inventory pass followed by a bounded settle loop. The first retry pass
  * follows the complete pass at once; later passes back off exponentially, so a probe that fails at
  * once (a closed or refused connection) is not retried at the pause rate for the whole timeout.
- * When the timeout falls inside the next pause, one last pass runs just before it instead.
+ * When the timeout falls inside the next pause, one last pass starts instead, as long before the
+ * timeout as the previous retry pass took (at least the shortest pause).
  */
 public final class DeleteInventoryVerifier {
 	/** The pause after the first retry pass, doubled after each later pass. */
@@ -68,18 +69,23 @@ public final class DeleteInventoryVerifier {
 			int retryPasses = 0;
 			boolean finalPass = false;
 			while (!finalPass && hasRetryable(phase, results, selectedCount) && System.nanoTime() < deadline) {
+				final long passStarted = System.nanoTime();
 				retryPass(selectionManifest, phase, deadline, probe, results, selectedCount, causes);
+				final long passNanos = System.nanoTime() - passStarted;
 				retryPasses++;
 				if (hasRetryable(phase, results, selectedCount)) {
 					final long remainingNanos = deadline - System.nanoTime();
 					if (remainingNanos > 0) {
 						final long pauseNanos = TimeUnit.MILLISECONDS.toNanos(retryPauseMillis(retryPasses));
-						// When the deadline falls inside the next pause, keep one last pass just before it,
-						// as close to it as the shortest pause, and end after that pass.
-						final long reserveNanos = TimeUnit.MILLISECONDS.toNanos(FIRST_RETRY_PAUSE_MILLIS);
+						// When the deadline falls inside the next pause, start one last pass as long before it
+						// as the last pass took, at least the shortest pause, so it can reach every identity
+						// still retryable; the phase ends after that pass.
+						final long reserveNanos = Math.max(
+										TimeUnit.MILLISECONDS.toNanos(FIRST_RETRY_PAUSE_MILLIS), passNanos);
 						finalPass = pauseNanos >= remainingNanos - reserveNanos;
 						sleep(finalPass ? Math.max(0, remainingNanos - reserveNanos) : pauseNanos);
-						if (finalPass && hasRetryable(phase, results, selectedCount)) {
+						if (finalPass) {
+							// Nothing changes in the ledger during the sleep, so the pass is still needed.
 							retryPass(selectionManifest, phase, deadline, probe, results, selectedCount, causes);
 							retryPasses++;
 						}
