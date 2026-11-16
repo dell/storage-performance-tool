@@ -36,6 +36,8 @@ public final class DummyStorageDriverMock<I extends Item, O extends Operation<I>
 				extends AsyncRunnableBase implements StorageDriver<I, O> {
 
 	static final int DEFAULT_CONCURRENCY_LIMIT = 16;
+	/** Reads of the two counters {@link #activeOpCount()} tries before it falls back to a clamp. */
+	static final int STABLE_READ_ATTEMPTS = 8;
 
 	private final int concurrencyLimit;
 	private final LongAdder scheduledOpCount = new LongAdder();
@@ -239,9 +241,33 @@ public final class DummyStorageDriverMock<I extends Item, O extends Operation<I>
 		return concurrencyLimit;
 	}
 
+	/**
+	 * Reads the two counters stably: completed, then scheduled, then completed again. When no
+	 * operation completed between the two completed reads, the difference is the number in flight
+	 * when scheduled was read. Reading the counters one after the other without that check reads
+	 * low by every completion in between, below 0 with fast completions. After
+	 * {@value #STABLE_READ_ATTEMPTS} unstable reads, the last difference is clamped to
+	 * [0, {@link #concurrencyLimit()}], or only at 0 when the limit is unlimited. The per-operation
+	 * counting in {@link #complete(Operation)} is unchanged: this runs once per metrics sample.
+	 */
 	@Override
 	public final int activeOpCount() {
-		return (int) (scheduledOpCount() - completedOpCount());
+		long active = 0;
+		for (int attempt = 0; attempt < STABLE_READ_ATTEMPTS; attempt++) {
+			final long completed = completedOpCount.sum();
+			final long scheduled = scheduledOpCount.sum();
+			active = scheduled - completed;
+			if (completed == completedOpCount.sum()) {
+				// A refused put (at admission close, or when the result output rejects it) takes back
+				// its scheduled count, which can still tear the scheduled sum low.
+				return clampActive(active, Integer.MAX_VALUE);
+			}
+		}
+		return clampActive(active, concurrencyLimit > 0 ? concurrencyLimit : Integer.MAX_VALUE);
+	}
+
+	private static int clampActive(final long active, final int upperBound) {
+		return (int) Math.max(0, Math.min(active, upperBound));
 	}
 
 	@Override
