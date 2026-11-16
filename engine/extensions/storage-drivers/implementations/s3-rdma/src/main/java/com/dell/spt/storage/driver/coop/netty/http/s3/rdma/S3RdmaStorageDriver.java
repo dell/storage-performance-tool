@@ -502,7 +502,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 	 *
 	 * RDMA is used when all of the following are true:
 	 * - RDMA transport is initialized and available
-	 * - The operation is a data operation (CREATE or READ)
+	 * - The operation is a data operation (CREATE or READ), and a CREATE is not a copy
 	 * - The data item size meets or exceeds the configured threshold
 	 */
 	PathSelection selectPath(final O op) {
@@ -529,6 +529,10 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 			// Multipart initiate/complete requests carry no payload; their parts carry the data.
 			return PathSelection.HTTP_UNCOUNTED;
 		}
+		if (opType == OpType.CREATE && isCopy(op)) {
+			// A copy, whole or a part, has no client payload: it is always an HTTP server-side copy.
+			return PathSelection.HTTP_UNCOUNTED;
+		}
 		final var dataOp = (DataOperation) op;
 		if (opType == OpType.READ && (op instanceof PartialOperation || isRangedRead(dataOp))) {
 			// Ranged reads are not proposed for RDMA: the token and buffer describe the whole object.
@@ -553,13 +557,25 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 		}
 	}
 
-	/** Whether the operation is one the data-path summary counts: a CREATE or READ with a payload. */
+	/**
+	 * Whether the operation is one the data-path summary counts: a CREATE or READ with a payload. A
+	 * copy is a CREATE without one.
+	 */
 	static boolean carriesPayload(final Operation<?> op) {
 		if (!(op instanceof DataOperation) || op instanceof CompositeOperation) {
 			return false;
 		}
 		final var opType = op.type();
-		return opType == OpType.CREATE || opType == OpType.READ;
+		return opType == OpType.READ || (opType == OpType.CREATE && !isCopy(op));
+	}
+
+	/**
+	 * Whether a CREATE is a copy: it names a source path, as {@code HttpStorageDriverBase} does when it
+	 * sends the copy headers. Only meaningful for a CREATE; a READ always has a source path.
+	 */
+	private static boolean isCopy(final Operation<?> op) {
+		final var srcPath = op.srcPath();
+		return srcPath != null && !srcPath.isEmpty();
 	}
 
 	private static boolean isRangedRead(final DataOperation dataOp) {
