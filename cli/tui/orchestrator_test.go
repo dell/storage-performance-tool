@@ -1091,8 +1091,9 @@ func TestOrchestratorMetricsParsing(t *testing.T) {
 		nil,
 	)
 
-	// Run metrics monitor briefly
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	// Run the metrics monitor until the first value arrives. The deadline
+	// only bounds a failing run, so it leaves room for a slow first poll.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	monitorDone := make(chan struct{})

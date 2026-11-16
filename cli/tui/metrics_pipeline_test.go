@@ -36,17 +36,18 @@ func TestMetricsPipelineEndToEnd_JSONOnly(t *testing.T) {
 	mockDocker := NewMockDockerManager()
 
 	// Configure mock to output stats lines
-	mockDocker.SetOutputLines([]string{
+	lines := []string{
 		"Starting Spt benchmark...",
 		"190334.125|250811190334|CREATE|         0|0.0       |           0|     0|0.004  |0.0     |0.0    |         0|          0",
 		"Some other log message",
 		"190334.125|250811190344|CREATE|         0|0.0       |    15454937|     0|10.004 |1807670 |1807669|        18|         20",
-	})
+	}
+	mockDocker.SetOutputLines(lines)
 
 	// Simulate Docker streaming (display only). The callback runs on the
 	// mock's stream goroutine and updates model; streamed closes after the
 	// last line, so reading model afterwards is ordered after every write.
-	const wantLines = 4
+	wantLines := len(lines)
 	streamed := make(chan struct{})
 	lineCount := 0
 	mockDocker.StreamOutput("test-container",

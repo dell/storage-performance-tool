@@ -83,18 +83,19 @@ func TestContainerOutputProcessing(t *testing.T) {
 	model.dockerManager = mockDM
 
 	// Set up mock output with Spt-style data
-	mockDM.SetOutputLines([]string{
+	lines := []string{
 		"Starting Spt benchmark...",
 		"1.000|250630194048|CREATE|         0|0.0       |    22544384|     0|10.008 |100.5 |100.5|         5|          9",
 		"2.000|250630194108|CREATE|         0|0.0       |    73473495|     0|30.029 |150.7 |150.7|         5|         10",
 		"Benchmark complete.",
-	})
+	}
+	mockDM.SetOutputLines(lines)
 	mockDM.SetOutputDelay(1 * time.Millisecond)
 
 	// Collect output lines. The callbacks run on the mock's stream
 	// goroutine, so mu guards the captured state and each stdout line is
 	// signalled on gotLine.
-	const wantLines = 4
+	wantLines := len(lines)
 	var mu sync.Mutex
 	var outputLines []string
 	var errorLines []string
