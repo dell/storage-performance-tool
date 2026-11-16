@@ -30,6 +30,10 @@ const (
 
 var integrityNodeSourcePattern = regexp.MustCompile(`^(?:(written|verify-input|verified|integrity\.failures|integrity\.performance|multipart\.lifecycle|operation\.lifecycle|range\.read|nic\.paths|delete\.metrics\.total|delete\.requests|delete\.objects|delete\.verification|items)\.node-[0-9]{3}\.csv|(?:nic\.set|event\.loops)\.node-[0-9]{3}\.json)$`)
 
+// entryNodeSourceSuffixes are the node-000 forms of the per-node sources: the entry engine's own
+// copy, which a single-engine step also lists.
+var entryNodeSourceSuffixes = []string{".node-000.csv", ".node-000.json"}
+
 // ArtifactSpec defines a log endpoint and its output filename suffix.
 type ArtifactSpec struct {
 	Loggers  []string
@@ -77,8 +81,9 @@ var DefaultArtifacts = []ArtifactSpec{
 	{Loggers: []string{"IntegrityFailures"}, Suffix: constants.ResultsArtifactSuffixIntegrityFailures, Required: false},
 	{Loggers: []string{"IntegrityPerformance"}, Suffix: constants.ResultsArtifactSuffixIntegrityPerformance, Required: false},
 	{Loggers: []string{"MultipartLifecycle"}, Suffix: constants.ResultsArtifactSuffixMultipartLifecycle, Required: false},
-	// Multipart per-part timings (name standardized to multipart.csv); try common loggers
-	{Loggers: []string{"PartsUpload", "Parts.Upload", "parts.upload.csv"}, Suffix: constants.ResultsArtifactSuffixMultipart, Required: false},
+	// Multipart phase log (parts.upload.csv), listed under its logger name. Single-engine steps
+	// only: fetchStep skips it for a distributed step, whose entry node holds only its own uploads.
+	{Loggers: []string{"Multipart"}, Suffix: constants.ResultsArtifactSuffixMultipart, Required: false},
 	// S3 Tables metrics (only present on s3-tables runs)
 	{Loggers: []string{"TablesMetrics"}, Suffix: constants.ResultsArtifactSuffixTablesMetrics, Required: false},
 	// Created-object inventory for writes, or the conservative residual for standalone DELETE.
@@ -309,8 +314,16 @@ func (f *Fetcher) fetchStep(ctx context.Context, stepID string) StepManifest {
 		}
 		return sm
 	}
+	distributed := isDistributedStepIndex(indexMap)
 	for _, a := range f.Artifacts {
 		name := fmt.Sprintf("%s.%s", stepID, a.Suffix)
+		// The engine does not yet collect the multipart log from every node, so a distributed
+		// step's entry node holds only its own uploads. Record it missing rather than publish a
+		// partial file under the whole-step name. Drop this once the engine collects the log.
+		if distributed && a.Suffix == constants.ResultsArtifactSuffixMultipart {
+			sm.Files = append(sm.Files, FileStatus{Name: name, Size: 0, Status: fileStatusMissing})
+			continue
+		}
 		// If index is available, prefer the first listed logger that exists
 		selected := ""
 		if len(indexMap) > 0 {
@@ -382,6 +395,24 @@ func (f *Fetcher) fetchStep(ctx context.Context, stepID string) StepManifest {
 }
 
 var errNotFound = errors.New("not found")
+
+// isDistributedStepIndex reports whether a step index lists a per-node source from a node other
+// than the entry node (node-001 or above), which only a distributed step has.
+func isDistributedStepIndex(indexMap map[string]stepIndexItem) bool {
+	for logger := range indexMap {
+		if !integrityNodeSourcePattern.MatchString(logger) {
+			continue
+		}
+		entryCopy := false
+		for _, suffix := range entryNodeSourceSuffixes {
+			entryCopy = entryCopy || strings.HasSuffix(logger, suffix)
+		}
+		if !entryCopy {
+			return true
+		}
+	}
+	return false
+}
 
 func sanitizeConfigArtifact(filePath string) (int64, error) {
 	raw, err := os.ReadFile(filePath) // #nosec G304 -- path constructed internally from results directory

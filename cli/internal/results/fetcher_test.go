@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -75,7 +77,7 @@ func TestFetcher_HappyPath_AllArtifacts(t *testing.T) {
 					{"logger": "Scenario", "href": "/logs/" + step + "/Scenario", "size": 3},
 					{"logger": "metrics.threshold.FileTotal", "href": "/logs/" + step + "/metrics.threshold.FileTotal", "size": 2},
 					{"logger": "OpTraces", "href": "/logs/" + step + "/OpTraces", "size": 5},
-					{"logger": "PartsUpload", "href": "/logs/" + step + "/PartsUpload", "size": 12},
+					{"logger": "Multipart", "href": "/logs/" + step + "/Multipart", "size": 12},
 				},
 			}
 			_ = json.NewEncoder(w).Encode(idx)
@@ -89,8 +91,8 @@ func TestFetcher_HappyPath_AllArtifacts(t *testing.T) {
 		"/logs/" + step + "/Scenario":                    func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("scn")) },
 		"/logs/" + step + "/metrics.threshold.FileTotal": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("th")) },
 		"/logs/" + step + "/OpTraces":                    func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("trace")) },
-		// multipart via one of the aliases
-		"/logs/" + step + "/PartsUpload": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("part,ts\n1,2\n")) },
+		// multipart log under the engine's logger name
+		"/logs/" + step + "/Multipart": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("part,ts\n1,2\n")) },
 	})
 	defer srv.Close()
 
@@ -136,6 +138,154 @@ func TestFetcher_HappyPath_AllArtifacts(t *testing.T) {
 	}
 	if man.BaseURL == "" || man.OutputDir == "" || len(man.Steps) != 1 {
 		t.Fatalf("manifest fields not populated correctly: %#v", man)
+	}
+}
+
+// multipartFetchServer serves a step index that lists the engine's multipart log under its logger
+// name, Multipart, plus any extra index entries, and counts requests for the multipart log.
+func multipartFetchServer(t *testing.T, step string, content []byte, listMultipart bool, extra []string, calls *int32) *httptest.Server {
+	t.Helper()
+	handlers := map[string]http.HandlerFunc{
+		"/logs/" + step + "/index.json": func(w http.ResponseWriter, _ *http.Request) {
+			items := []map[string]any{{"logger": "metrics.FileTotal", "size": 5}}
+			if listMultipart {
+				items = append(items, map[string]any{"logger": "Multipart", "href": "/logs/" + step + "/Multipart", "size": len(content), "content_type": "text/csv"})
+			}
+			for _, name := range extra {
+				items = append(items, map[string]any{"logger": name, "size": 2})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"step_id": step, "items": items})
+		},
+		"/logs/" + step + "/metrics.FileTotal": func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("total")) },
+		"/logs/" + step + "/Multipart": func(w http.ResponseWriter, _ *http.Request) {
+			atomic.AddInt32(calls, 1)
+			_, _ = w.Write(content)
+		},
+	}
+	for _, name := range extra {
+		handlers["/logs/"+step+"/"+name] = func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("{}")) }
+	}
+	return newTestServer(t, handlers)
+}
+
+func multipartStatus(t *testing.T, manifest *Manifest, name string) FileStatus {
+	t.Helper()
+	for _, status := range manifest.Steps[0].Files {
+		if status.Name == name {
+			return status
+		}
+	}
+	t.Fatalf("%s not recorded in manifest: %+v", name, manifest.Steps[0].Files)
+	return FileStatus{}
+}
+
+func TestFetcherSavesMultipartLogListedUnderEngineLoggerName(t *testing.T) {
+	step := "mt-001-20261116.120000.000-create"
+	content := []byte("Phase,ItemPath,UploadId,PartNumber,StartTs,Duration[us],Latency[us],Bytes\n" +
+		"INIT,b/o1,u1,-1,1763290000000,900,800,0\n")
+	var calls int32
+	// A single engine lists only its own node-000 copies of per-node sources.
+	srv := multipartFetchServer(t, step, content, true, []string{"event.loops.node-000.json"}, &calls)
+	defer srv.Close()
+
+	out := t.TempDir()
+	manifest, err := NewFetcher(srv.URL, out).FetchArtifactsForSteps(context.Background(), []string{step})
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := step + "." + constants.ResultsArtifactSuffixMultipart
+	got, err := os.ReadFile(filepath.Join(out, name))
+	if err != nil {
+		t.Fatalf("multipart log not saved: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("multipart log = %q, want %q", got, content)
+	}
+	if st := multipartStatus(t, manifest, name); st.Status != fileStatusOK || st.Size != int64(len(content)) {
+		t.Fatalf("multipart status = %+v, want ok with %d bytes", st, len(content))
+	}
+}
+
+func TestFetcherRecordsMultipartLogMissingForDistributedStep(t *testing.T) {
+	for _, nodeSource := range []string{"event.loops.node-001.json", "operation.lifecycle.node-001.csv", "nic.set.node-012.json"} {
+		t.Run(nodeSource, func(t *testing.T) {
+			step := "mt-001-20261116.120000.000-create"
+			var calls int32
+			srv := multipartFetchServer(t, step, []byte("Phase\nINIT\n"), true, []string{"event.loops.node-000.json", nodeSource}, &calls)
+			defer srv.Close()
+
+			out := t.TempDir()
+			manifest, err := NewFetcher(srv.URL, out).FetchArtifactsForSteps(context.Background(), []string{step})
+			if err != nil {
+				t.Fatal(err)
+			}
+			name := step + "." + constants.ResultsArtifactSuffixMultipart
+			if st := multipartStatus(t, manifest, name); st.Status != fileStatusMissing || st.Error != "" {
+				t.Fatalf("multipart status = %+v, want missing without error", st)
+			}
+			if _, statErr := os.Stat(filepath.Join(out, name)); !os.IsNotExist(statErr) {
+				t.Fatalf("distributed step saved a partial multipart log: %v", statErr)
+			}
+			if n := atomic.LoadInt32(&calls); n != 0 {
+				t.Fatalf("multipart log requested %d times, want none", n)
+			}
+		})
+	}
+}
+
+func TestFetcherRecordsMultipartLogMissingWhenNotListed(t *testing.T) {
+	step := "mt-001-20261116.120000.000-read"
+	var calls int32
+	srv := multipartFetchServer(t, step, nil, false, nil, &calls)
+	defer srv.Close()
+
+	out := t.TempDir()
+	manifest, err := NewFetcher(srv.URL, out).FetchArtifactsForSteps(context.Background(), []string{step})
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := step + "." + constants.ResultsArtifactSuffixMultipart
+	if st := multipartStatus(t, manifest, name); st.Status != fileStatusMissing || st.Error != "" {
+		t.Fatalf("multipart status = %+v, want missing without error", st)
+	}
+	if n := atomic.LoadInt32(&calls); n != 0 {
+		t.Fatalf("multipart log requested %d times, want none", n)
+	}
+}
+
+// TestDefaultArtifactLoggersExistInEngine checks every logger-name alias against Loggers.java, so a
+// fetch row cannot ask for a logger no engine has. Aliases with a file extension name files that
+// the step index lists by file name.
+func TestDefaultArtifactLoggersExistInEngine(t *testing.T) {
+	_, source, _, _ := runtime.Caller(0)
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(source),
+		"../../../engine/core/spt-base/src/main/java/com/dell/spt/base/logging/Loggers.java"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefixes := map[string]string{
+		"BASE": "", "BASE_METRICS": "metrics.", "BASE_METRICS_THRESHOLD": "metrics.threshold.", "BASE_METRICS_STEADY": "metrics.steady.",
+	}
+	engine := map[string]bool{}
+	for _, m := range regexp.MustCompile(`getLogger\((BASE\w*) \+ "([\w.]+)"\)`).FindAllStringSubmatch(string(raw), -1) {
+		prefix, ok := prefixes[m[1]]
+		if !ok {
+			t.Fatalf("unknown logger base %s in Loggers.java", m[1])
+		}
+		engine[prefix+m[2]] = true
+	}
+	if !engine["Multipart"] || !engine["metrics.FileTotal"] {
+		t.Fatalf("Loggers.java parse found too little: %v", engine)
+	}
+	for _, spec := range DefaultArtifacts {
+		for _, alias := range spec.Loggers {
+			if strings.HasSuffix(alias, ".csv") || strings.HasSuffix(alias, ".json") {
+				continue
+			}
+			if !engine[alias] {
+				t.Errorf("%s: logger %q is not in Loggers.java", spec.Suffix, alias)
+			}
+		}
 	}
 }
 
