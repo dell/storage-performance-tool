@@ -186,7 +186,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	skipImagePull, _ := cmd.Flags().GetBool(flagSkipImagePull)
 	if skipImagePull {
 		_ = os.Setenv(constants.EnvSkipImagePull, "true")
-		_, _ = fmt.Fprintln(out, "Skipping Docker image pull; using locally cached image.")
+		_, _ = fmt.Fprintln(out, skipImagePullMessage)
 	} else {
 		_ = os.Unsetenv(constants.EnvSkipImagePull)
 	}
@@ -652,7 +652,7 @@ func init() {
 	replayCmd.Flags().Int("rmi-port-start", 40000, rmiPortStartUsage)
 	replayCmd.Flags().Int("rmi-port-count", 10, rmiPortCountUsage)
 	replayCmd.Flags().Int(flagRMIRegistryPort, constants.DefaultRMIRegistryPort, rmiRegistryPortUsage)
-	replayCmd.Flags().Bool(flagSkipImagePull, false, "Use the locally cached Docker image without pulling the latest tag (env: SPT_SKIP_IMAGE_PULL)")
+	replayCmd.Flags().Bool(flagSkipImagePull, false, skipImagePullFlagHelp)
 	replayCmd.Flags().String(flagSptImage, "", "Override the engine image ref (env: SPT_IMAGE)")
 	replayCmd.Flags().String("trace-file", "", "Save all output to specified trace file")
 	replayCmd.Flags().Bool("trace-append", false, "Append to existing trace file (default: overwrite)")

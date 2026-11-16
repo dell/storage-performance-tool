@@ -48,6 +48,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// skipImagePullMessage is what spt run and spt replay print when --skip-image-pull or
+// SPT_SKIP_IMAGE_PULL is set. The skip only spares the pull of an image that is already present:
+// every engine launch route still pulls a missing non-dev image (cli/README.md, image pull control).
+const skipImagePullMessage = "Skipping the engine image pull when the image is present; a missing engine image is still pulled before the engine starts."
+
+// skipImagePullFlagHelp is the --skip-image-pull help text shared by spt run and spt replay.
+const skipImagePullFlagHelp = "Skip the engine image pull when the image is present locally; a missing non-dev image is still pulled, and spt_dev images are never pulled (env: SPT_SKIP_IMAGE_PULL)"
+
 const (
 	flagSkipImagePull         = "skip-image-pull"
 	flagSptImage              = "spt-image"
@@ -2211,7 +2219,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 		skipImagePull, _ := cmd.Flags().GetBool(flagSkipImagePull)
 		if skipImagePull {
 			_ = os.Setenv(constants.EnvSkipImagePull, "true")
-			fmt.Println("Skipping Docker image pull; using locally cached image.")
+			fmt.Println(skipImagePullMessage)
 		} else {
 			_ = os.Unsetenv(constants.EnvSkipImagePull)
 		}
@@ -2711,7 +2719,7 @@ func init() {
 	runCmd.Flags().Int("service-threads", 0, "Engine virtual-thread carrier parallelism (0 = JVM default, env: SPT_SERVICE_THREADS)")
 	runCmd.Flags().StringArray(flagEngineOverride, []string{}, "Advanced engine defaults override as path=value; repeat for multiple overrides (for example: storage.driver.threads=6, env: SPT_ENGINE_OVERRIDES)")
 	runCmd.Flags().String("api-port", "", "Spt API port for every engine in the run (defaults to 9999, legacy: 43234)")
-	runCmd.Flags().Bool(flagSkipImagePull, false, "Use the locally cached Docker image without pulling the latest tag (env: SPT_SKIP_IMAGE_PULL)")
+	runCmd.Flags().Bool(flagSkipImagePull, false, skipImagePullFlagHelp)
 	runCmd.Flags().String(flagSptImage, "", "Override the engine image ref (default: matches the CLI version, e.g. ...:v5.10.3; dev builds use ...:spt_dev; env: SPT_IMAGE)")
 
 	// Results Retrieval Options (Phase 1: flags + parsing only)
