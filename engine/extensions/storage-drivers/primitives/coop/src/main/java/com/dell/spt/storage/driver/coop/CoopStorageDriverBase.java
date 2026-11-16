@@ -777,33 +777,63 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		if (childOps.isEmpty()) {
 			return true;
 		}
+		final int queued;
 		if (admissionLock == null) {
-			return claimAndEnqueueChildOperations(childOps, permitOwner, failureContext);
-		}
-		admissionLock.lock();
-		try {
-			if (!claimCompositeParentOwnership(childOps.get(0), permitOwner)) {
-				return false;
-			}
-			if (!admissionOpen) {
-				for (final O childOp : childOps) {
-					claimChildQueueOwnership(childOp);
-					operationLifecycle().unattempted(childOp);
+			queued = claimAndQueueChildOperations(childOps, permitOwner);
+		} else {
+			admissionLock.lock();
+			try {
+				if (!claimCompositeParentOwnership(childOps.get(0), permitOwner)) {
+					return false;
 				}
-				settleRefusedCompositeParent(childOps.get(0), permitOwner);
-				safeReleaseMpuObjectPermit(permitOwner);
-				return false;
+				if (!admissionOpen) {
+					for (final O childOp : childOps) {
+						claimChildQueueOwnership(childOp);
+						operationLifecycle().unattempted(childOp);
+					}
+					settleRefusedCompositeParent(childOps.get(0), permitOwner);
+					safeReleaseMpuObjectPermit(permitOwner);
+					return false;
+				}
+				queued = claimAndQueueChildOperations(childOps, permitOwner);
+			} finally {
+				admissionLock.unlock();
 			}
-			return claimAndEnqueueChildOperations(childOps, permitOwner, failureContext);
-		} finally {
-			admissionLock.unlock();
 		}
+		if (queued == childOps.size()) {
+			return true;
+		}
+		// The rest runs off the admission lock, because a composite that cannot go on is published and
+		// result output must not run under that lock. A stop in between recovers the claimed children.
+		if (queued == PARENT_REFUSED) {
+			return false;
+		}
+		if (queued == CHILDREN_UNCLAIMED) {
+			// A child is refused its queue claim at the dispatch deadline, which would refuse an abort's
+			// dispatch too: the composite is published at once instead.
+			final O parentOp = compositeParent(childOps.get(0), permitOwner);
+			if (parentOp != null && childOps.get(0) != parentOp) {
+				publishCompositeEnqueueFailure(parentOp, "could not claim MPU " + failureContext + " for the queue", null);
+			}
+			safeReleaseMpuObjectPermit(permitOwner);
+			return false;
+		}
+		return scheduleChildOpsEnqueue(List.copyOf(childOps.subList(queued, childOps.size())), permitOwner, failureContext);
 	}
 
-	private boolean claimAndEnqueueChildOperations(
-					final List<O> childOps, final O permitOwner, final String failureContext) {
+	/** {@link #claimAndQueueChildOperations}: the composite refused the expansion. */
+	private static final int PARENT_REFUSED = -1;
+	/** {@link #claimAndQueueChildOperations}: a child could not be claimed, and none was queued. */
+	private static final int CHILDREN_UNCLAIMED = -2;
+
+	/**
+	 * Claims the composite and every child, then queues the children in order while the child queue
+	 * has room. Returns how many leading children it queued, all of them on the usual route, or
+	 * {@link #PARENT_REFUSED} or {@link #CHILDREN_UNCLAIMED}, when it queued none.
+	 */
+	private int claimAndQueueChildOperations(final List<O> childOps, final O permitOwner) {
 		if (!claimCompositeParentOwnership(childOps.get(0), permitOwner)) {
-			return false;
+			return PARENT_REFUSED;
 		}
 		final var claimed = new ArrayList<O>(childOps.size());
 		var allClaimed = true;
@@ -818,16 +848,14 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			for (final O claimedChild : claimed) {
 				operationLifecycle().unattempted(claimedChild);
 			}
-			safeReleaseMpuObjectPermit(permitOwner);
-			return false;
+			return CHILDREN_UNCLAIMED;
 		}
 		for (var i = 0; i < claimed.size(); i++) {
 			if (!tryEnqueueChildOp(claimed.get(i))) {
-				return scheduleChildOpsEnqueue(
-								List.copyOf(claimed.subList(i, claimed.size())), permitOwner, failureContext);
+				return i;
 			}
 		}
-		return true;
+		return claimed.size();
 	}
 
 	private boolean scheduleChildOpEnqueue(
@@ -840,24 +868,29 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		try {
 			executeChildEnqueue(() -> {
 				for (var i = 0; i < childOps.size(); i++) {
-					if (!enqueueChildOpWithTimeout(childOps.get(i), permitOwner, failureContext)) {
+					final var outcome = enqueueChildOpWithTimeout(childOps.get(i), permitOwner);
+					if (outcome == ChildEnqueue.QUEUED) {
+						continue;
+					}
+					if (outcome == ChildEnqueue.TIMED_OUT) {
+						// The children after the timed-out one are not queued either: the composite is
+						// settled once for all of them.
+						failChildOpsEnqueue(
+										childOps.subList(i, childOps.size()), permitOwner,
+										"timed out enqueueing MPU " + failureContext + " after "
+														+ childOpEnqueueTimeoutMillis() + " ms",
+										null);
+					} else {
 						for (var j = i + 1; j < childOps.size(); j++) {
 							operationLifecycle().unattempted(childOps.get(j));
 						}
-						return;
 					}
+					return;
 				}
 			});
 			return true;
 		} catch (final RejectedExecutionException e) {
-			Loggers.ERR.error(
-							"{}: Failed to schedule MPU {} enqueue; failing affected MPU",
-							toString(), failureContext, e);
-			for (final O childOp : childOps) {
-				childOp.status(Operation.Status.FAIL_TIMEOUT);
-				operationLifecycle().unattempted(childOp);
-			}
-			safeReleaseMpuObjectPermit(permitOwner);
+			failChildOpsEnqueue(childOps, permitOwner, "failed to schedule MPU " + failureContext + " enqueue", e);
 			return false;
 		}
 	}
@@ -1018,22 +1051,30 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 						&& compositeOp.get(KEY_UPLOAD_ID) != null;
 	}
 
-	private boolean enqueueChildOpWithTimeout(final O childOp, final O permitOwner, final String failureContext) {
+	/** How a deferred child enqueue ended. */
+	private enum ChildEnqueue {
+		QUEUED,
+		/** The closed admission or an interrupt refused it; the refusal settled the child. */
+		REFUSED,
+		/** The queue stayed full until the enqueue timeout; nothing is settled yet. */
+		TIMED_OUT
+	}
+
+	private ChildEnqueue enqueueChildOpWithTimeout(final O childOp, final O permitOwner) {
 		if (admissionLock == null) {
 			try {
 				if (childOpQueue.offer(childOp, childOpEnqueueTimeoutMillis(), TimeUnit.MILLISECONDS)) {
 					operationLifecycle().driverQueued(childOp);
 					signalDispatch();
-					return true;
+					return ChildEnqueue.QUEUED;
 				}
 			} catch (final InterruptedException e) {
 				operationLifecycle().unattempted(childOp);
 				safeReleaseMpuObjectPermit(permitOwner);
 				throwUnchecked(e);
-				return false;
+				return ChildEnqueue.REFUSED;
 			}
-			failChildOpEnqueue(childOp, permitOwner, failureContext);
-			return false;
+			return ChildEnqueue.TIMED_OUT;
 		}
 		final long deadline = System.nanoTime()
 						+ TimeUnit.MILLISECONDS.toNanos(childOpEnqueueTimeoutMillis());
@@ -1044,10 +1085,10 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 					operationLifecycle().unattempted(childOp);
 					settleRefusedCompositeParent(childOp, permitOwner);
 					safeReleaseMpuObjectPermit(permitOwner);
-					return false;
+					return ChildEnqueue.REFUSED;
 				}
 				if (tryEnqueueChildOp(childOp)) {
-					return true;
+					return ChildEnqueue.QUEUED;
 				}
 			} finally {
 				admissionLock.unlock();
@@ -1062,20 +1103,131 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				}
 				safeReleaseMpuObjectPermit(permitOwner);
 				throwUnchecked(e);
-				return false;
+				return ChildEnqueue.REFUSED;
 			}
 		}
-		failChildOpEnqueue(childOp, permitOwner, failureContext);
-		return false;
+		return ChildEnqueue.TIMED_OUT;
 	}
 
-	private void failChildOpEnqueue(final O childOp, final O permitOwner, final String failureContext) {
-		Loggers.ERR.error(
-						"{}: Timed out enqueueing MPU {} after {} ms; failing affected MPU",
-						toString(), failureContext, childOpEnqueueTimeoutMillis());
-		childOp.status(Operation.Status.FAIL_TIMEOUT);
-		operationLifecycle().unattempted(childOp);
-		safeReleaseMpuObjectPermit(permitOwner);
+	/**
+	 * Settles children that could not be queued, which {@code cause} names, and the composite they
+	 * belong to, once for all of them. Runs off the admission lock, while admission may be open.
+	 *
+	 * <ul>
+	 * <li>Parts of an upload: the upload records {@code FAIL_TIMEOUT} as its failure unless a part
+	 * failure came first, and is aborted as when a part runs out of retries. The abort is queued
+	 * once, through {@link #shouldEnqueueFinalization}; its own enqueue can fail the same way.
+	 * <li>Ranges of a composite READ: each is a failure out of retries, as are the ranges not started
+	 * yet, so the read's finalization, after its ranges in flight end, reports {@code FAIL_TIMEOUT}.
+	 * <li>The composite's own finalization or abort: the composite is published as a failure, see
+	 * {@link #publishCompositeEnqueueFailure}.
+	 * </ul>
+	 * Children of no composite are only settled, as before.
+	 */
+	@SuppressWarnings("unchecked")
+	private void failChildOpsEnqueue(
+					final List<O> childOps, final O permitOwner, final String cause, final Throwable error) {
+		final O parentOp = compositeParent(childOps.get(0), permitOwner);
+		for (final O childOp : childOps) {
+			if (childOp != parentOp) {
+				childOp.status(Operation.Status.FAIL_TIMEOUT);
+				operationLifecycle().unattempted(childOp);
+			}
+		}
+		if (parentOp == null) {
+			Loggers.ERR.error("{}: {}; the operation is not sent", toString(), cause, error);
+			safeReleaseMpuObjectPermit(permitOwner);
+			return;
+		}
+		final var compositeOp = (CompositeOperation<?>) parentOp;
+		if (childOps.get(0) == parentOp) {
+			publishCompositeEnqueueFailure(parentOp, cause, error);
+			return;
+		}
+		final boolean rangeRead = OpType.READ.equals(parentOp.type());
+		final boolean enqueueFinalization;
+		synchronized (compositeOp) {
+			if (rangeRead) {
+				// As a range out of retries records its failure (handleCompleted).
+				compositeOp.put("mpuFailure", Operation.Status.FAIL_TIMEOUT.name());
+				for (final O childOp : childOps) {
+					settleRangeAsExhausted(compositeOp, childOp);
+				}
+				// No later range is started: the read has failed, and the queue is full.
+				for (final var notStarted : compositeOp.nextSubOperations(Integer.MAX_VALUE)) {
+					notStarted.status(Operation.Status.FAIL_TIMEOUT);
+					settleRangeAsExhausted(compositeOp, notStarted);
+				}
+			} else {
+				if (compositeOp.get("mpuFailure") == null) {
+					compositeOp.put("mpuFailure", Operation.Status.FAIL_TIMEOUT.name());
+				}
+				compositeOp.put("mpuAbort", "true");
+			}
+			enqueueFinalization = shouldEnqueueFinalization(compositeOp);
+		}
+		if (rangeRead) {
+			Loggers.ERR.error(
+							"{}: {}; failing the composite read once its ranges in flight end", toString(), cause, error);
+		} else if (enqueueFinalization) {
+			Loggers.ERR.error("{}: {}; aborting the upload", toString(), cause, error);
+		} else {
+			Loggers.ERR.error(
+							"{}: {}; failing the upload, whose completion or abort is already queued",
+							toString(), cause, error);
+		}
+		if (enqueueFinalization) {
+			if (OpType.CREATE.equals(parentOp.type()) && timesUploadFinalization()) {
+				parentOp.resetTiming();
+			}
+			enqueueChildOp(parentOp, parentOp, rangeRead ? "completion operation" : "abort operation");
+		}
+	}
+
+	/**
+	 * Under the composite's monitor: {@code childOp}, a range of the composite READ that is not sent,
+	 * ends as a failure out of retries, so {@link #shouldEnqueueFinalization} lets the read finish
+	 * without it. {@link PartialOperation} implementations that do not count retries never run out
+	 * of them, as in {@link #handleCompleted}; the only implementation counts them.
+	 */
+	private static void settleRangeAsExhausted(final CompositeOperation<?> compositeOp, final Operation<?> childOp) {
+		if (childOp instanceof PartialOperation<?> range && range.parent() == compositeOp) {
+			for (var retries = range.retryCount(); retries < MAX_PART_RETRIES; retries++) {
+				range.incrementRetryCount();
+			}
+			// The range never reaches finishResponse(), which settles a sent range.
+			compositeOp.markSubTaskCompleted();
+		}
+	}
+
+	/**
+	 * Publishes {@code parentOp}, whose finalization or abort could not be queued, as a failure: its
+	 * recorded part failure, or {@code FAIL_TIMEOUT}, through the normal completion route, which
+	 * returns its upload permit. Its parts still in flight end without a retry or a next part, and a
+	 * queued part of it is settled at dispatch. Nothing is sent, so an initiated upload may stay
+	 * open on the target. A completion the driver refuses, after a stop, settles it as queue
+	 * recovery does.
+	 */
+	private void publishCompositeEnqueueFailure(final O parentOp, final String cause, final Throwable error) {
+		final var compositeOp = (CompositeOperation<?>) parentOp;
+		synchronized (compositeOp) {
+			if (compositeOp.get("mpuFailure") == null) {
+				compositeOp.put("mpuFailure", Operation.Status.FAIL_TIMEOUT.name());
+			}
+			compositeOp.put("mpuAbort", "true");
+			compositeOp.put(KEY_FINALIZATION_ENQUEUED, Boolean.TRUE.toString());
+		}
+		if (isInitiatedUpload(parentOp)) {
+			Loggers.ERR.error(
+							"{}: {}; failing the upload without sending it, so it may stay open on the target",
+							toString(), cause, error);
+		} else {
+			Loggers.ERR.error("{}: {}; failing the composite operation", toString(), cause, error);
+		}
+		parentOp.status(abortedUploadStatus(compositeOp));
+		if (!handleCompleted(parentOp)) {
+			settleRefusedCompositeParent(parentOp, parentOp);
+		}
 	}
 
 	private static long childOpEnqueueTimeoutMillis() {

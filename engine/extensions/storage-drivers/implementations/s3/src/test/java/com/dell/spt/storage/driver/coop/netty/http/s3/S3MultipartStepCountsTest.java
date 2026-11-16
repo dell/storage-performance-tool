@@ -583,6 +583,55 @@ final class S3MultipartStepCountsTest {
 		assertEquals(List.of("failed_aborted"), multipartStates(), () -> multipartLifecycle().toString());
 	}
 
+	/**
+	 * Queue pressure: a 1-slot driver input queue, batch size 1, a 500 ms child enqueue timeout, and
+	 * parts that take 1.5 s, for 4-part uploads at concurrency 5. A part's enqueue times out, so its
+	 * upload is aborted, or failed without its abort when the abort's own enqueue times out too. A
+	 * count-limited step with no time limit then ends on its count with nothing unresolved, where it
+	 * used to wait for the lost upload until it was stopped.
+	 */
+	@Test
+	@Timeout(120)
+	void aCountLimitedStepWhosePartEnqueueTimesOutEndsOnItsCount() throws Exception {
+		final var property = "spt.mpu.child.enqueue.timeout.millis";
+		final var previous = System.getProperty(property);
+		System.setProperty(property, "500");
+		stub.answerDelayMillis = request -> request.isPart() ? 1_500 : 0;
+		final Map<String, List<Long>> outcomes;
+		final List<ErrorsLogCapture.Line> errors;
+		try (final var capture = new ErrorsLogCapture()) {
+			outcomes = timed(null, """
+							Load.config({
+								"load": {
+									"batch": {"size": 1},
+									"op": {"limit": {"count": 4}, "retry": false, "wait": {"limit": %d}}
+								},
+								"storage": {"driver": {"limit": {"concurrency": 5, "queue": {"input": 1}}}},
+								"item": {"data": {"size": "4KB", "ranges": {"threshold": "1KB"}}}
+							}).run();
+							""".formatted(LONG_WAIT_LIMIT_SECONDS));
+			errors = capture.drained();
+		} finally {
+			if (previous == null) {
+				System.clearProperty(property);
+			} else {
+				System.setProperty(property, previous);
+			}
+		}
+
+		final var counts = outcomes.get("CREATE-5");
+		assertEquals(4L, counts.get(0) + counts.get(1), outcomes::toString);
+		final var timeouts = errors.stream().filter(line -> line.message().contains("timed out enqueueing MPU")).count();
+		assertTrue(timeouts >= 1, () -> "a child enqueue timed out: " + errors);
+		assertTrue(counts.get(1) >= 1, () -> "the upload that lost a part is one failure: " + outcomes);
+		assertTrue(stepMillis < ENDS_WITHIN_MILLIS, () -> "the step took " + stepMillis + " ms");
+		assertNoneUnresolved();
+		// An upload whose abort could not be queued either is failed without it and stays open.
+		final var unsent = errors.stream().filter(line -> line.message().contains("may stay open on the target")).count();
+		assertTrue(stub.openUploads() <= unsent,
+						() -> stub.openUploads() + " uploads stay open, " + unsent + " failed unsent: " + errors);
+	}
+
 	private static Predicate<Request> firstCompletion() {
 		final var completions = new AtomicInteger();
 		return request -> completions.incrementAndGet() == 1;
