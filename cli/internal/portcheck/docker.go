@@ -16,9 +16,18 @@ import (
 	"github.com/docker/docker/client"
 )
 
+// dockerAPI is the part of the Docker client the finder uses; tests supply a fake.
+type dockerAPI interface {
+	ContainerList(ctx context.Context, options containertypes.ListOptions) ([]containertypes.Summary, error)
+	ContainerStop(ctx context.Context, containerID string, options containertypes.StopOptions) error
+	ContainerRemove(ctx context.Context, containerID string, options containertypes.RemoveOptions) error
+	ContainerInspect(ctx context.Context, containerID string) (containertypes.InspectResponse, error)
+	Close() error
+}
+
 // DockerContainerFinder handles Docker container detection and management
 type DockerContainerFinder struct {
-	client *client.Client
+	client dockerAPI
 	clock  Clock
 }
 
@@ -35,18 +44,23 @@ func NewDockerContainerFinder() (*DockerContainerFinder, error) {
 	}, nil
 }
 
-// FindContainerUsingPort finds Docker containers that are using the specified port
+// FindContainerUsingPort finds a running Docker container that publishes the
+// specified host port over TCP. A container that only exposes the port, or maps
+// a different host port to it, does not hold the host port and is not returned.
 func (d *DockerContainerFinder) FindContainerUsingPort(ctx context.Context, port string) (*ContainerInfo, error) {
 	logging.LogDebug("portcheck", "searching for containers using port", "port", port)
 
-	// List all containers (running and stopped)
-	containers, err := d.client.ContainerList(ctx, containertypes.ListOptions{All: true})
+	// Only running (and paused) containers can hold a host port; Docker's
+	// default listing returns exactly those.
+	containers, err := d.client.ContainerList(ctx, containertypes.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list containers: %w", err)
 	}
 
 	for _, c := range containers {
-		// Check if container is using the port
+		if !containerHoldsPorts(c) {
+			continue
+		}
 		if d.containerUsesPort(c, port) {
 			logging.LogInfo("portcheck", "found container using port",
 				"containerID", containerutil.ShortID(c.ID),
@@ -81,14 +95,19 @@ func (d *DockerContainerFinder) FindSptContainers(ctx context.Context) ([]*Conta
 	return sptContainers, nil
 }
 
-// containerUsesPort checks if a container is using the specified port
+// containerHoldsPorts reports whether the container is in a state that can
+// hold a published host port. It guards against a daemon that lists stopped
+// containers, or reports ports for them, despite the default listing options.
+func containerHoldsPorts(c containertypes.Summary) bool {
+	return c.State == containertypes.StateRunning || c.State == containertypes.StatePaused
+}
+
+// containerUsesPort checks if a container publishes the specified host port
+// over TCP. The container-side port (PrivatePort) holds no host port in
+// bridge mode, so it is not compared.
 func (d *DockerContainerFinder) containerUsesPort(c containertypes.Summary, port string) bool {
-	// Check published ports
 	for _, p := range c.Ports {
-		if p.PublicPort != 0 && fmt.Sprintf("%d", p.PublicPort) == port {
-			return true
-		}
-		if p.PrivatePort != 0 && fmt.Sprintf("%d", p.PrivatePort) == port {
+		if p.PublicPort != 0 && p.Type == "tcp" && fmt.Sprintf("%d", p.PublicPort) == port {
 			return true
 		}
 	}
