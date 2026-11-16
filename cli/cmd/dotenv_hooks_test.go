@@ -87,6 +87,7 @@ func TestReadVerifyRejectsUnsupportedDotEnvDefaultsBeforeExecution(t *testing.T)
 }
 
 func Test_TopLevelCommands_InvokeDotEnvLoader(t *testing.T) {
+	isolateLoggingGlobals(t)
 	// Disable root-level loader so we verify subcommands call it themselves.
 	original := rootCmd.PersistentPreRunE
 	rootCmd.PersistentPreRunE = func(*cobra.Command, []string) error { return nil }
@@ -104,6 +105,10 @@ func Test_TopLevelCommands_InvokeDotEnvLoader(t *testing.T) {
 
 		// Iterate all top-level commands
 		for _, c := range rootCmd.Commands() {
+			// Cobra's generated help and completion commands inherit the root's loader.
+			if isCobraGeneratedCommand(c) {
+				continue
+			}
 			// Reset loader counter and env var
 			config.ResetDotEnvLoadedForTests()
 			_ = os.Unsetenv("DOTENV_SENTINEL")
@@ -130,6 +135,7 @@ func Test_TopLevelCommands_InvokeDotEnvLoader(t *testing.T) {
 }
 
 func Test_DotEnvDoesNotOverrideOSEnv(t *testing.T) {
+	isolateLoggingGlobals(t)
 	original := rootCmd.PersistentPreRunE
 	rootCmd.PersistentPreRunE = func(*cobra.Command, []string) error { return nil }
 	defer func() { rootCmd.PersistentPreRunE = original }()
@@ -143,6 +149,9 @@ func Test_DotEnvDoesNotOverrideOSEnv(t *testing.T) {
 		t.Setenv("EXISTING_KEY", "from_os")
 
 		for _, c := range rootCmd.Commands() {
+			if isCobraGeneratedCommand(c) {
+				continue
+			}
 			config.ResetDotEnvLoadedForTests()
 			if c.PersistentPreRunE == nil {
 				t.Fatalf("top-level command %q is missing PersistentPreRunE to load .env", c.Name())

@@ -12,6 +12,7 @@ import (
 )
 
 func TestRootCommand(t *testing.T) {
+	isolateLoggingGlobals(t)
 	isTesting = true
 	defer func() { isTesting = false }()
 
@@ -32,6 +33,7 @@ func TestRootCommand(t *testing.T) {
 }
 
 func TestLoggingFlags(t *testing.T) {
+	isolateLoggingGlobals(t)
 	isTesting = true
 	defer func() { isTesting = false }()
 
@@ -102,6 +104,7 @@ func TestLoggingFlags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			isolateLoggingGlobals(t)
 			// Reset flags to defaults
 			debug = false
 			logLevel = "info"
@@ -197,6 +200,7 @@ func TestInitializeLogger(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			isolateLoggingGlobals(t)
 			// Set up test conditions
 			debug = tt.setupDebug
 			logLevel = tt.setupLevel
