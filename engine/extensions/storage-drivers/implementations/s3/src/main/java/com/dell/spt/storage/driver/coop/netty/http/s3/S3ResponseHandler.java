@@ -564,8 +564,8 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 					final Matcher m = PATTERN_UPLOAD_ID.matcher(contentStr);
 					if (m.find()) {
 						channel.attr(S3Api.KEY_ATTR_UPLOAD_ID).set(m.group(1));
-					} else if (!responseFailed && mpuOp.get(S3Api.KEY_MPU_ABORT) == null) {
-						// a refusal has logged its status and code lines, and an abort is not an initiation
+					} else if (!responseFailed && mpuOp.get(S3Api.KEY_MPU_ABORT) == null && OpType.CREATE.equals(op.type())) {
+						// a refusal has logged its status and code lines, and an abort or a ranged update is not an initiation
 						logUploadIdNotFound(op, content);
 					}
 				} else {
@@ -586,12 +586,12 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	/**
 	 * Logs a 2xx initiation response without an upload ID: the first one of the driver's step at WARN,
 	 * as one line with the operation and an excerpt of the body's first {@link
-	 * #FAILED_RESPONSE_SCAN_BYTES} bytes made safe by {@link #loggableText}; later ones at DEBUG with
+	 * #FAILED_RESPONSE_SCAN_BYTES} bytes after any leading XML whitespace, made safe by {@link #loggableText}; later ones at DEBUG with
 	 * the operation only. Each such operation already fails, so the step's counts name them all.
 	 */
 	private void logUploadIdNotFound(final Operation<?> op, final ByteBuf content) {
 		if (s3Driver == null || s3Driver.claimUploadIdNotFoundWarning()) {
-			final int start = content.readerIndex();
+			final int start = skipXmlWhitespace(content, content.readerIndex(), content.writerIndex());
 			final int end = Math.min(content.writerIndex(), start + FAILED_RESPONSE_SCAN_BYTES);
 			final String excerpt = loggableText(content.toString(start, end - start, UTF_8), end == content.writerIndex());
 			Loggers.ERR.warn(

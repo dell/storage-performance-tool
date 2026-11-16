@@ -190,6 +190,21 @@ final class S3ResponseHandlerBufferTest {
 		}
 	}
 
+	/** Leading whitespace does not use up the excerpt: the text after it is logged. */
+	@Test
+	void anInitiationExcerptSkipsLeadingWhitespace() throws Exception {
+		setOpResultOut(driver);
+		final var op = upload();
+		op.status(Operation.Status.SUCC);
+		channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.TRUE);
+		try (final var errors = new ErrorsLogCapture()) {
+			respond(op, " \r\n\t".repeat(100) + "<html>late</html>");
+			final List<String> warnings = uploadIdWarnings(errors);
+			assertEquals(1, warnings.size(), warnings::toString);
+			assertEquals("<html>late</html>", excerpt(op.toString(), warnings.get(0)));
+		}
+	}
+
 	/** Guard: an initiation with its upload ID stores it on the channel and logs nothing. */
 	@Test
 	void anInitiationWithItsUploadIdLogsNothing() throws Exception {

@@ -16,7 +16,10 @@ import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.apache.logging.log4j.core.config.Property;
 
-/** The WARN and higher lines of the Errors logger, the {@code errors.log} of each step, while attached. */
+/**
+ * The WARN and higher lines, and the DEBUG messages, of the Errors logger (the {@code errors.log} of
+ * each step) while attached.
+ */
 final class ErrorsLogCapture extends AbstractAppender implements AutoCloseable {
 
 	/** One captured line: the step it was logged for ({@code step_id}, or null) and its message. */
