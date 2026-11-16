@@ -5,6 +5,8 @@ import static org.mockito.Mockito.*;
 
 import com.dell.spt.base.concurrent.SingleTaskExecutor;
 import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
+import com.dell.spt.base.config.DocumentValueTypesTest;
+import com.dell.spt.base.config.InvalidTextValueException;
 import com.dell.spt.base.config.TestConfigBuilder;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -118,6 +120,47 @@ class RunServletTest {
 		verify(mockScenarioExecutor, never()).execute(any());
 	}
 
+	/** {@code spt run --engine-override storage.net.http.uri.args.tid=7} on an older CLI posts a number. */
+	@Test
+	void aJsonDefaultsPartSendsNumericUriArgumentsAndHeadersAsWritten() throws Exception {
+		final Part defaults = defaultsPart(
+						"{\"storage\": {\"net\": {\"http\": {\"uri\": {\"args\": {\"tid\": 7, \"r\": 1.50}},"
+										+ " \"headers\": {\"X-Id\": 7, \"X-On\": true}}},"
+										+ " \"object\": {\"tagging\": {\"tags\": {\"k\": 1e3}}}}}",
+						"application/json");
+		final var config = RunServlet.configFromPart(defaults, mockResponse, DocumentValueTypesTest.schema());
+		assertEquals("7", config.mapVal("storage-net-http-uri-args").get("tid"));
+		assertEquals("1.50", config.mapVal("storage-net-http-uri-args").get("r"));
+		assertEquals("7", config.mapVal("storage-net-http-headers").get("X-Id"));
+		assertEquals("true", config.mapVal("storage-net-http-headers").get("X-On"));
+		assertEquals("1000.0", config.mapVal("storage-object-tagging-tags").get("k"));
+	}
+
+	/** A part without a JSON content type is read as YAML first, which reads JSON too. */
+	@Test
+	void aJsonDefaultsPartOfUnknownTypeIsSettledToo() throws Exception {
+		final Part defaults = defaultsPart(
+						"{\"storage\": {\"net\": {\"http\": {\"uri\": {\"args\": {\"tid\": 0.10}}}}}}",
+						"application/octet-stream");
+		final var config = RunServlet.configFromPart(defaults, mockResponse, DocumentValueTypesTest.schema());
+		assertEquals("0.10", config.mapVal("storage-net-http-uri-args").get("tid"));
+	}
+
+	@Test
+	void aRefusedTextValueInPostedDefaultsIsNamedInTheBadRequestBody() throws Exception {
+		final var body = new StringWriter();
+		when(mockResponse.getWriter()).thenReturn(new PrintWriter(body));
+		final var failure = assertThrows(InvalidTextValueException.class, () -> RunServlet.configFromPart(
+						defaultsPart("storage:\n  auth:\n    secret: 12345\n"), mockResponse,
+						DocumentValueTypesTest.schema()));
+
+		RunServlet.setBadRequestResponse(mockResponse, failure);
+
+		verify(mockResponse).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+		verify(mockResponse).setContentType("text/plain; charset=UTF-8");
+		assertEquals("storage-auth-secret: the value is read as a number, not text; quote it", body.toString());
+	}
+
 	@Test
 	void anyOtherBadRequestKeepsItsEmptyBody() throws Exception {
 		RunServlet.setBadRequestResponse(mockResponse, new IllegalStateException("internal detail"));
@@ -127,9 +170,13 @@ class RunServletTest {
 	}
 
 	private static Part defaultsPart(final String content) throws IOException {
+		return defaultsPart(content, "application/yaml");
+	}
+
+	private static Part defaultsPart(final String content, final String contentType) throws IOException {
 		final Part defaultsPart = mock(Part.class);
 		when(defaultsPart.getInputStream()).thenReturn(new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8)));
-		when(defaultsPart.getContentType()).thenReturn("application/yaml");
+		when(defaultsPart.getContentType()).thenReturn(contentType);
 		return defaultsPart;
 	}
 
