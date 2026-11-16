@@ -187,6 +187,7 @@ func TestStartTUIWithMultiHostOrchestrator_ParameterHandling(t *testing.T) {
 
 			// Initialize live view renderer with scenario params
 			model.liveViewRenderer = NewLiveViewRenderer(&tt.params)
+			t.Cleanup(model.liveViewRenderer.Stop)
 
 			// Verify parameters are correctly set
 			if model.scenarioFile != tt.scenarioPath {
