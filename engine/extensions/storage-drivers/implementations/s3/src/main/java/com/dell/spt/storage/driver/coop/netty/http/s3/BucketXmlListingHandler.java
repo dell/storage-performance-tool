@@ -21,6 +21,7 @@ public final class BucketXmlListingHandler<I extends Item>
 	private final String prefix;
 	private final ItemFactory<I> itemFactory;
 	private final int idRadix;
+	private final boolean verifyFlag;
 	private final List<I> pageItems = new ArrayList<>();
 	private final Deque<String> elementStack = new ArrayDeque<>();
 	private final StringBuilder oid = new StringBuilder();
@@ -35,6 +36,8 @@ public final class BucketXmlListingHandler<I extends Item>
 	private boolean itemSizeSeen;
 	private boolean truncateFlagSeen;
 	private boolean isTruncatedFlag;
+	private int nonGeneratedKeyCount;
+	private String firstNonGeneratedKey;
 
 	public BucketXmlListingHandler(
 					final List<I> itemsBuffer, final String path, final ItemFactory<I> itemFactory,
@@ -45,6 +48,16 @@ public final class BucketXmlListingHandler<I extends Item>
 	public BucketXmlListingHandler(
 					final List<I> itemsBuffer, final String path, final String prefix,
 					final ItemFactory<I> itemFactory, final int idRadix) {
+		this(itemsBuffer, path, prefix, itemFactory, idRadix, true);
+	}
+
+	/**
+	 * @param verifyFlag whether {@code item.data.verify} is on: a listed key whose leaf is not a
+	 * generated item id is then refused; otherwise it is kept with offset 0 and counted
+	 */
+	public BucketXmlListingHandler(
+					final List<I> itemsBuffer, final String path, final String prefix,
+					final ItemFactory<I> itemFactory, final int idRadix, final boolean verifyFlag) {
 		this.itemsBuffer = itemsBuffer;
 		this.path = path == null ? "" : (path.endsWith("/") ? path : path + "/");
 		this.prefix = prefix == null || prefix.isEmpty()
@@ -52,6 +65,7 @@ public final class BucketXmlListingHandler<I extends Item>
 						: (prefix.startsWith("/") ? prefix.substring(1) : prefix);
 		this.itemFactory = itemFactory;
 		this.idRadix = idRadix;
+		this.verifyFlag = verifyFlag;
 	}
 
 	@Override
@@ -64,6 +78,8 @@ public final class BucketXmlListingHandler<I extends Item>
 		itemSizeSeen = false;
 		truncateFlagSeen = false;
 		isTruncatedFlag = false;
+		nonGeneratedKeyCount = 0;
+		firstNonGeneratedKey = null;
 		pageItems.clear();
 		elementStack.clear();
 		oid.setLength(0);
@@ -213,12 +229,25 @@ public final class BucketXmlListingHandler<I extends Item>
 		if (size < 0) {
 			throw new SAXException("Negative object size for key \"" + oid + "\"");
 		}
-		final long offset;
+		// Known limit: a foreign leaf made only of id-radix digits, such as "photo" or "readme" in
+		// radix 36, parses to an arbitrary offset and is not recognized here; under verify it then
+		// reads as corrupted data rather than being refused.
+		long offset;
 		try {
 			offset = Long.parseLong(generatedItemId(oid.toString()), idRadix);
 		} catch (final NumberFormatException e) {
-			throw new SAXException(
-							"Failed to parse the generated item id from object key \"" + oid + "\"", e);
+			if (verifyFlag) {
+				throw new SAXException(
+								"Failed to parse the generated item id from object key \"" + oid
+												+ "\": item data verification needs keys that SPT generated",
+								e);
+			}
+			// Not an SPT-generated key, such as a folder marker or a foreign object: keep it with
+			// offset 0. The driver logs one summary per listing, never a line per key.
+			offset = 0;
+			if (nonGeneratedKeyCount++ == 0) {
+				firstNonGeneratedKey = oid.toString();
+			}
 		}
 		pageItems.add(itemFactory.getItem(path + oid, offset, size));
 	}
@@ -268,6 +297,16 @@ public final class BucketXmlListingHandler<I extends Item>
 			throw new SAXException("S3 listing is missing IsTruncated");
 		}
 		itemsBuffer.addAll(pageItems);
+	}
+
+	/** The keys on this page whose leaf is not a generated item id, kept with offset 0. */
+	public int nonGeneratedKeyCount() {
+		return nonGeneratedKeyCount;
+	}
+
+	/** The first such key on this page, or null when there is none. */
+	public String firstNonGeneratedKey() {
+		return firstNonGeneratedKey;
 	}
 
 	@Override
