@@ -988,9 +988,7 @@ func TestReplayCommandFailedLaunchJoinsBoundedAutoResults(t *testing.T) {
 					fleet: runGateFleet(engineinfo.ConsistencyMismatch, engineinfo.StatusCollected),
 				}, descriptors, force)
 			}
-			monitorReady := awaitMonitorSetup(t)
 			failLaunch := func(ctx context.Context, hooks tui.LaunchHooks) error {
-				monitorReady()
 				if test.gateRejects {
 					_, err := hooks.RunPreSubmissionCheck(ctx)
 					return err
