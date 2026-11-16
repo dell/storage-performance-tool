@@ -183,6 +183,7 @@ class ExtResultsXmlLogMessageTest {
 						elapsed, 1L, 1.0, 0L, 1024.0, 1.0, 1L, 1L, 1.0, 1L, 1L);
 
 		final ExtResultsXmlLogMessage msg = new ExtResultsXmlLogMessage(ctx, snap);
+		// The caller's try-with-resources closes the context again; close() tolerates that.
 		ctx.close();
 		assertEquals(-1L, ctx.startTimeStamp(), "close() resets the start time; the message must not read it");
 
@@ -203,7 +204,8 @@ class ExtResultsXmlLogMessageTest {
 	}
 
 	private static void assertContainsAttr(String xml, String attr, String value) {
-		assertTrue(xml.contains(attr + "=\"" + value + "\""),
+		// The leading space keeps "threads" from matching "RequestThreads".
+		assertTrue(xml.contains(" " + attr + "=\"" + value + "\""),
 						"Expected attribute " + attr + "=\"" + value + "\" in: " + xml);
 	}
 
