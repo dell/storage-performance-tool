@@ -307,7 +307,7 @@ class DeleteInventoryVerifierTest {
 
 			assertEquals(3, report.unresolved());
 			assertTrue(report.elapsed().compareTo(timeout.minusMillis(DeleteInventoryVerifier.FIRST_RETRY_PAUSE_MILLIS)) >= 0,
-							"verification ended before its final pass");
+							"verification ended before its deadline");
 			for (final String key : List.of("current", "exact", "uncertain")) {
 				final int probes = calls.get(key).get();
 				// Pauses of 10, 20, 40 ... ms capped at 1 s allow about 12 passes in 5 s; a fixed
@@ -319,7 +319,7 @@ class DeleteInventoryVerifierTest {
 	}
 
 	@Test
-	void targetThatSettlesJustBeforeTheDeadlineIsSeenByAFinalPass(@TempDir final Path temp)
+	void targetThatSettlesJustBeforeTheDeadlineIsSeenByALaterPass(@TempDir final Path temp)
 					throws Exception {
 		final Duration timeout = Duration.ofSeconds(3);
 		assertSucceedsWithinAttempts(() -> {
@@ -338,7 +338,7 @@ class DeleteInventoryVerifierTest {
 												: DeleteVerificationProbe.Presence.ABSENT;
 							})) {
 				// Back-off places retry passes at about 0, 10, 30 ... 1270 and 2270 ms; without a
-				// reserved final pass the last check came at about 2270 ms plus pass overhead, before
+				// pause cut near the deadline the last check came at about 2270 ms plus pass overhead, before
 				// the target settled.
 				if (!report.successful()) {
 					return "the target was still present at its last check, "
@@ -351,7 +351,7 @@ class DeleteInventoryVerifierTest {
 	}
 
 	@Test
-	void manyTargetsThatSettleShortlyBeforeTheDeadlineAreAllSeenByTheFinalPass(
+	void manyTargetsThatSettleShortlyBeforeTheDeadlineAreAllSeenByALaterPass(
 					@TempDir final Path temp) throws Exception {
 		final int targets = 50;
 		final Duration timeout = Duration.ofSeconds(3);
@@ -583,7 +583,7 @@ class DeleteInventoryVerifierTest {
 	/**
 	 * Runs a timing scenario up to {@link #TIMING_ATTEMPTS} times and passes on its first success,
 	 * so one late wake-up on a loaded host is less likely to fail the test. A wall-clock test cannot
-	* promise that a defect fails every attempt, or that a correct verifier passes one.
+	 * promise that a defect fails every attempt, or that a correct verifier passes one.
 	 */
 	private static void assertSucceedsWithinAttempts(final TimingScenario scenario) throws Exception {
 		final List<String> failures = new ArrayList<>();

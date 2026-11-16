@@ -92,7 +92,7 @@ final class S3DeleteVerificationClosedHeadTest {
 							manifest, 2, DeleteVerificationPhase.POST_DELETE, timeout, driver)) {
 				assertEquals(2, report.unresolved());
 				assertTrue(report.elapsed().compareTo(timeout.minusMillis(10)) >= 0,
-								"verification ended before its final pass");
+								"verification ended before its deadline");
 			}
 		}
 		for (final String key : List.of("one", "two")) {
