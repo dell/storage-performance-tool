@@ -45,7 +45,7 @@ import org.junit.jupiter.api.io.TempDir;
  * failure is transient.
  *
  * <p>The CRT client retries a 5xx answer itself, five times with a back-off, and then reports the
- * request as failed, which the driver classifies as {@code FAIL_UNKNOWN}. So one driver attempt of a
+ * request as failed, which the driver classifies as {@code RESP_FAIL_SVC}. So one driver attempt of a
  * part answered 503 is six requests at the target and takes several seconds, and a 403, which the
  * client does not retry, is one request per driver attempt.
  *

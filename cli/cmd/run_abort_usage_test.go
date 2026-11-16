@@ -26,6 +26,10 @@ func TestAbortDoesNotPrintUsage(t *testing.T) {
 	// HOSTS value in the process environment to prove that the explicit local
 	// flag wins and that this test cannot cross the remote launch boundary.
 	t.Chdir(t.TempDir())
+	isolateLoggingGlobals(t)
+	debug = false
+	logLevel = "info"
+	logAppend = false
 	clearEnvDefaultsTestEnv(t)
 	t.Setenv("HOSTS", "test-not-connect.invalid")
 	setGlobalRunFlagForTest(t, "test-hosts", "127.0.0.1")

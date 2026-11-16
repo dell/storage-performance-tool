@@ -5,11 +5,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.dell.spt.storage.driver.coop.netty.http.s3.NicSetLoopback.Request;
+import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
 import com.dell.spt.base.load.step.file.FileManager;
 import com.dell.spt.base.logging.Loggers;
 import io.netty.channel.epoll.Epoll;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -20,6 +22,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -543,8 +546,41 @@ final class S3MultipartStepCountsTest {
 			assertTrue(lines.stream().allMatch(line -> line.message().contains("S3 error code InternalError;")),
 							lines::toString);
 		}
-		// No request or open-upload counts here: a step that ends by count can stop its I/O threads
-		// before its last failed upload's abort is sent (ticketed as s3-step-end-abort-lost 01).
+		assertRequests(4, 4, 4);
+		assertEnded();
+	}
+
+	/**
+	 * A count-1 step whose only upload's completion fails ends right after that upload's result, while
+	 * the stub holds the abort's answer for 300 ms. The step's stop waits for the abort before its I/O
+	 * shuts down, so the abort reaches the target, its answer is read and no upload stays open.
+	 *
+	 * <p>"Confirmed" here is the upload's {@code multipart.lifecycle.csv} record: the step turns on
+	 * integrity metadata for it, and the record says {@code failed_aborted} only when the driver read a
+	 * successful answer to the abort; an abort that was not sent, or whose answer the I/O shutdown cut
+	 * off, is recorded {@code failed_orphaned}.
+	 */
+	@Test
+	void aCountLimitedStepWhoseLastCompletionFailsReadsTheAbortBeforeItEnds() throws Exception {
+		// The only upload's completion: the initiation is request 1 and its five parts 2 to 6.
+		stub.failObjectRequest = n -> n == 7;
+		stub.abortDelayMillis = 300;
+
+		final var outcomes = timed(null, """
+						Load.config({
+							"load": {
+								"step": {"limit": {"time": "%s"}},
+								"op": {"limit": {"count": 1}, "retry": false, "wait": {"limit": %d}}
+							},
+							"storage": {"driver": {"limit": {"concurrency": 1}}, "integrity": {"mode": "metadata"}},
+							"item": {"data": {"size": "5KB", "ranges": {"threshold": "1KB"}}}
+						}).run();
+						""".formatted(TIME_LIMIT, LONG_WAIT_LIMIT_SECONDS));
+
+		assertEquals(List.of(0L, 1L), outcomes.get("CREATE-1"), outcomes::toString);
+		assertRequests(1, 1, 1);
+		assertEnded();
+		assertEquals(List.of("failed_aborted"), multipartStates(), () -> multipartLifecycle().toString());
 	}
 
 	private static Predicate<Request> firstCompletion() {
@@ -698,6 +734,35 @@ final class S3MultipartStepCountsTest {
 		final var row = lines.get(1).split(",", -1);
 		assertEquals("0", row[header.indexOf("unresolved")], () -> "unresolved operations: " + lines);
 		assertEquals("true", row[header.indexOf("terminal")], () -> "the lifecycle reconciles: " + lines);
+	}
+
+	/**
+	 * The states of the step's {@code multipart.lifecycle.csv} records, once there is one: the log writes
+	 * them asynchronously.
+	 */
+	private List<String> multipartStates() throws InterruptedException {
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+		while (multipartLifecycle().isEmpty() && System.nanoTime() < deadline) {
+			Thread.sleep(10);
+		}
+		return multipartLifecycle().stream()
+						.map(record -> Stream.of("failed_aborted", "failed_orphaned", "completed")
+										.filter(state -> record.contains("," + state + ",")).findFirst().orElse(record))
+						.toList();
+	}
+
+	/** The records of the step's {@code multipart.lifecycle.csv}, without its header. */
+	private List<String> multipartLifecycle() {
+		try {
+			final var file = Path.of(FileManager.INSTANCE.logFileName(Loggers.MULTIPART_LIFECYCLE.getName(), stepId));
+			return Files.exists(file)
+							? Files.readAllLines(file).stream()
+											.filter(line -> !line.isBlank() && !IntegrityCsvArtifacts.MULTIPART_LIFECYCLE_HEADER.equals(line))
+											.toList()
+							: List.of();
+		} catch (final IOException e) {
+			throw new UncheckedIOException(e);
+		}
 	}
 
 	private static long count(final List<Request> requests, final Predicate<Request> which) {

@@ -3,6 +3,7 @@ package com.dell.spt.storage.driver.coop.netty.http;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import com.dell.spt.base.config.InvalidTextValueException;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.ItemFactory;
@@ -313,6 +314,44 @@ class HttpStorageDriverBaseTest {
 		assertEquals(
 						"/bucket/base/s0000001/1",
 						drv.exposeDataUriPath(read.item(), read.srcPath(), read.dstPath(), OpType.READ));
+	}
+
+	/**
+	 * A defaults document can give a list or map URI argument or header, or a header with no value;
+	 * the driver refuses them with the setting's name, where it failed with a cast or a null before.
+	 */
+	@Test
+	void aListMapOrMissingHeaderOrUriArgumentIsRefusedWithItsName() {
+		final var cases = List.of(
+						List.of("storage-net-http-uri-args", List.of(1, 2), "storage-net-http-uri-args-tid: the value is a list, not text"),
+						List.of("storage-net-http-uri-args", Map.of("a", 1), "storage-net-http-uri-args-tid: the value is a map, not text"),
+						List.of("storage-net-http-headers", List.of("a"), "storage-net-http-headers-tid: the value is a list, not text"),
+						List.of("storage-net-http-headers", Map.of("a", "b"), "storage-net-http-headers-tid: the value is a map, not text"));
+		for (final var c : cases) {
+			final var cfg = baseConfig();
+			cfg.val((String) c.get(0), Map.of("tid", c.get(1)));
+			final var failure = assertThrows(InvalidTextValueException.class, () -> new TestHttpDriver(cfg));
+			assertEquals(c.get(2), failure.getMessage());
+		}
+		final var cfg = baseConfig();
+		final var headers = new java.util.HashMap<String, Object>();
+		headers.put("X-Id", null);
+		cfg.val("storage-net-http-headers", headers);
+		assertEquals("storage-net-http-headers-X-Id: a request header needs a value",
+						assertThrows(InvalidTextValueException.class, () -> new TestHttpDriver(cfg)).getMessage());
+	}
+
+	/** A URI argument with no value is sent as {@code name=null}, as before. */
+	@Test
+	void aUriArgumentWithNoValueIsSentAsNull() throws Exception {
+		final var cfg = baseConfig();
+		final var args = new java.util.HashMap<String, Object>();
+		args.put("tid", null);
+		cfg.val("storage-net-http-uri-args", args);
+		final var req = new TestHttpDriver(cfg).httpRequest(
+						new DataOperationImpl<>(0, OpType.READ, new DataItemImpl("obj", 0, 0), null, "/bucket", null, null, 0),
+						"127.0.0.1");
+		assertEquals("/bucket/obj?tid=null", req.uri());
 	}
 
 	@Test

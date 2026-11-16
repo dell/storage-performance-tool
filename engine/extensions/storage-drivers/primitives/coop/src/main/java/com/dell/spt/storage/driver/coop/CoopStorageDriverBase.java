@@ -13,6 +13,7 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.CompositeOperation;
+import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
@@ -1135,6 +1136,13 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 						if (op.item() instanceof DataItem dataItem) {
 							dataItem.reset();
 						}
+						// Child operations skip prepare(), so reset() does not run for the retry: without
+						// this, the failed attempt's bytes (an error body, or a body cut short) would be
+						// added to the retry's, its data-response start would hide the retry's TTFB, and
+						// the verifier would resume from the range the failed attempt stopped in.
+						if (op instanceof DataOperationImpl<?> dataOp) {
+							dataOp.resetAttemptProgress();
+						}
 						Loggers.ERR.warn(
 										"{}: part #{} failed ({}), retry {}/{}",
 										toString(), subOp.partNumber(), failStatus,
@@ -1374,10 +1382,78 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	 */
 	protected void onAdmissionClosed() {}
 
+	/**
+	 * Settles every operation still queued before dispatch, once each, and returns those it
+	 * settled as unattempted.
+	 *
+	 * <p>Two passes, so each queued operation is visited once and the registry scan stays small.
+	 * The first drains the queues this driver owns, and an extension's extra queue, into plain
+	 * lists and settles them: each operation is in at most one of this driver's queues. The
+	 * second settles what the registry still holds as driver-queued, which is the dispatch task's
+	 * local buffers and its deferred uploads; settling removes an operation from the registry,
+	 * so the first pass leaves only those for it. An operation the first pass visited but left
+	 * driver-queued, and every extra-queue entry, is skipped there, as is an indeterminate
+	 * submission. An extra-queue entry can also be in the input queue and the registry, a range
+	 * read is in all three, so it is visited only from the extra queue: its hook may publish a
+	 * retained result and must run once. The extra queue itself may list an operation more than
+	 * once; it is still visited once.
+	 */
 	@Override
 	public final List<O> recoverQueuedOperations() {
-		final Set<O> indeterminateSubmissions = Collections.newSetFromMap(new IdentityHashMap<>());
+		final var indeterminateSubmissions = indeterminateSubmissions();
+		final var queued = new ArrayList<O>(childOpQueue.size() + inOpQueue.size());
+		childOpQueue.drainTo(queued);
+		inOpQueue.drainTo(queued);
+		queued.addAll(opDispatchTask.takeStoppedContinuations());
+		final var additional = recoverAdditionalQueuedOperations();
+		final Set<O> visitedElsewhere;
+		final List<O> extraQueued;
+		if (additional.isEmpty() && indeterminateSubmissions.isEmpty()) {
+			visitedElsewhere = Set.of();
+			extraQueued = List.of();
+		} else {
+			visitedElsewhere = Collections.newSetFromMap(new IdentityHashMap<>());
+			visitedElsewhere.addAll(indeterminateSubmissions);
+			// Each extra-queue identity once, and none that is an indeterminate submission.
+			extraQueued = new ArrayList<>(additional.size());
+			for (final O op : additional) {
+				if (visitedElsewhere.add(op)) {
+					extraQueued.add(op);
+				}
+			}
+		}
+		final var unattempted = new ArrayList<O>(queued.size() + extraQueued.size());
+		final Set<O> leftQueued = Collections.newSetFromMap(new IdentityHashMap<>());
+		for (final O op : queued) {
+			if ((visitedElsewhere.isEmpty() || !visitedElsewhere.contains(op))
+							&& !recoverQueuedEntry(op, unattempted)) {
+				leftQueued.add(op);
+			}
+		}
+		for (final O op : extraQueued) {
+			if (!recoverQueuedEntry(op, unattempted)) {
+				leftQueued.add(op);
+			}
+		}
+		for (final O op : operationLifecycle().driverQueuedOperations()) {
+			if ((visitedElsewhere.isEmpty() || !visitedElsewhere.contains(op))
+							&& (leftQueued.isEmpty() || !leftQueued.contains(op))) {
+				recoverQueuedEntry(op, unattempted);
+			}
+		}
+		return Collections.unmodifiableList(unattempted);
+	}
+
+	/**
+	 * Queued submissions the dispatch task did not finish within its stop wait. They may have
+	 * started transport, so they are settled unresolved here and left out of queue recovery.
+	 */
+	private Set<O> indeterminateSubmissions() {
 		final var submittingOperations = opDispatchTask.submittingOperations();
+		if (submittingOperations.isEmpty()) {
+			return Set.of();
+		}
+		final Set<O> indeterminateSubmissions = Collections.newSetFromMap(new IdentityHashMap<>());
 		final boolean explicitDispatchObserved = submittingOperations.stream()
 						.map(OperationDispatchTask.SubmittingOperation::dispatchToken)
 						.anyMatch(operationLifecycle()::hasExplicitDispatchBoundary);
@@ -1389,42 +1465,42 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				indeterminateSubmissions.add(op);
 			}
 		}
-		final Set<O> recovered = Collections.newSetFromMap(new IdentityHashMap<>());
-		// The lifecycle registry is the authoritative handoff. It includes operations in
-		// dispatcher-owned local buffers without racing those non-thread-safe buffers when a
-		// custom submit implementation ignores interruption beyond the bounded stop wait.
-		recovered.addAll(operationLifecycle().driverQueuedOperations());
-		childOpQueue.drainTo(recovered);
-		inOpQueue.drainTo(recovered);
-		recovered.addAll(recoverAdditionalQueuedOperations());
-		recovered.addAll(opDispatchTask.takeStoppedContinuations());
-		recovered.removeAll(indeterminateSubmissions);
-		final var unattempted = new ArrayList<O>(recovered.size());
-		for (final O op : recovered) {
-			if (op instanceof CompositeOperation || op instanceof PartialOperation) {
-				recoverQueuedCompositeWork(op, unattempted);
-			} else if (recoverQueuedOperation(op)) {
-				unattempted.add(op);
+		return indeterminateSubmissions;
+	}
+
+	/**
+	 * Settles one recovered queue entry. Returns false only when the entry is still driver-queued
+	 * afterwards, so the registry pass can skip it rather than visit it a second time.
+	 */
+	private boolean recoverQueuedEntry(final O op, final List<O> unattempted) {
+		if (op instanceof CompositeOperation || op instanceof PartialOperation) {
+			if (recoverQueuedCompositeWork(op, unattempted)) {
+				return true;
 			}
+		} else if (recoverQueuedOperation(op)) {
+			unattempted.add(op);
+			return true;
 		}
-		return List.copyOf(unattempted);
+		return operationLifecycle().stateOf(op) != OperationLifecycleState.DRIVER_QUEUED;
 	}
 
 	/**
 	 * Recovers a queued part, range or composite, then settles its composite: the composite cannot
 	 * finish once queued work of it is taken back (see {@link #settleRefusedCompositeParent}). An
 	 * initiated upload waiting for its first parts is unresolved, not unattempted, because it is open
-	 * on the target; a composite whose queued finalization is taken back is unresolved too.
+	 * on the target; a composite whose queued finalization is taken back is unresolved too. Returns
+	 * whether the entry itself became unattempted.
 	 */
 	@SuppressWarnings("unchecked")
-	private void recoverQueuedCompositeWork(final O op, final List<O> unattempted) {
+	private boolean recoverQueuedCompositeWork(final O op, final List<O> unattempted) {
 		if (op instanceof CompositeOperation
 						&& operationLifecycle().stateOf(op) == OperationLifecycleState.DRIVER_QUEUED
 						&& isInitiatedUpload(op)) {
 			settleRefusedCompositeParent(op, op);
-			return;
+			return false;
 		}
-		if (recoverQueuedOperation(op)) {
+		final boolean settled = recoverQueuedOperation(op);
+		if (settled) {
 			unattempted.add(op);
 		}
 		if (op instanceof PartialOperation<?> partialOp) {
@@ -1432,12 +1508,16 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		} else {
 			settleRefusedCompositeParent(op, op);
 		}
+		return settled;
 	}
 
 	/**
 	 * Settles a recovered queue entry. Return true only when it became unattempted and should
 	 * enter the legacy recovery output. Retained retries instead settle their known failure
-	 * and return false; no result output or transport action may run here.
+	 * and return false; no result output or transport action may run here. Called at most once
+	 * per queued operation in each recovery call, and not for a queued composite that recovery
+	 * settles through one of its recovered parts. An operation this hook leaves queued can be
+	 * visited again by a later recovery call, so the hook must be safe to repeat.
 	 */
 	protected boolean recoverQueuedOperation(final O op) {
 		return operationLifecycle().unattempted(op);

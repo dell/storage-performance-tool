@@ -55,7 +55,7 @@ Need to profile how fast an existing namespace can be enumerated? The list workl
   --auto-terminate-seconds 120
 ```
 
-Tip: If you omit both `--object-count` and `--duration`, the list workload will continue until you stop it. Always set `--auto-terminate-seconds` for unattended runs so CI jobs do not hang.
+Tip: If you omit both `--object-count` and `--duration`, the list workload will continue until you stop it. Always set `--auto-terminate-seconds` for unattended runs so CI jobs do not hang: at the deadline the CLI stops the run (through the engine API with auto-results on, the default, or through shutdown and container stop with `--auto-results=false`), keeps its results, and exits 0 if the run was healthy up to then and the stop is confirmed. A DELETE or verification workload stopped at the deadline exits 1, because it did not complete. The deadline starts after the CLI has connected to the hosts and covers engine start-up, launch and the run.
 Authentication defaults to Signature Version 4. Add `--auth-version 2` only when working with a legacy S3 implementation that rejects SigV4.
 
 For read benchmarks, `spt` can seed an item set automatically and optionally widen read randomness within each fetched batch:
@@ -578,7 +578,7 @@ Executes a benchmark test with the specified workload type.
 - `--api-port`: Spt API port that every engine in the run serves, the entry and every worker (defaults to 9999, legacy: 43234)
 - `--rmi-registry-port`: Engine RMI registry port that every engine in the run serves, on local, remote and distributed runs (default 1099); the entry reaches each worker on it. To run several `spt run` instances on the same hosts at once, give each its own `--api-port` and `--rmi-registry-port`, also when a run has a local worker (this host in `--test-hosts`, after the first): those are the only ports a local worker publishes. With `--attach-existing`, the workers must already serve the run's ports ([Attaching Prestarted Worker Nodes](#attaching-prestarted-worker-nodes))
 - `--spt-image`: Override the engine image ref. By default, release builds use an image tag matching the CLI version (for example, `...:v5.10.3`) and local/dev builds use `...:spt_dev`.
-- `--skip-image-pull`: Use the locally cached Spt image instead of pulling before each run. Dev images such as `spt_dev` automatically skip pulls because they are local-only.
+- `--skip-image-pull`: Skip pulling the Spt image before each run when it is already present locally. A missing non-dev image is still pulled. Dev images such as `spt_dev` are local-only and never pulled, with or without this flag. Same as `SPT_SKIP_IMAGE_PULL` (see image pull control below).
 - `--keep-scenario`: Keep the generated JavaScript scenario file after test completes (useful for debugging)
 
 See [Partial-object READs](docs/PARTIAL_READS.md) for examples, response rules, mutable datasets, and result semantics.

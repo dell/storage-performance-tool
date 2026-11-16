@@ -84,7 +84,7 @@ Environment:
   All --s3-* flags can be set via S3_* env vars or .env file.
   USE_RDMA=true is equivalent to --use-rdma.
   SPT_IMAGE overrides the Docker image (e.g. spt-rdma:dev).
-  SPT_SKIP_IMAGE_PULL=true skips pulling the image from the registry.
+  SPT_SKIP_IMAGE_PULL=true skips the image pull when the image is present locally.
 EOF
       exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;

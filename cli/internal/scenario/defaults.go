@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -579,6 +580,9 @@ func applyEngineOverride(root map[string]any, override string) error {
 	if err != nil {
 		return engineOverrideError(override, "value is not valid YAML")
 	}
+	if isEngineOverrideTextMapEntry(parts) {
+		value = engineOverrideTypedText(rawValue, value)
+	}
 
 	node := root
 	for _, part := range parts[:len(parts)-1] {
@@ -707,6 +711,44 @@ func splitEngineOverridePath(path string) []string {
 		parts = append(parts, part)
 	}
 	return parts
+}
+
+// engineOverrideTextMapPaths are the map settings whose entries the engine sends as text: URI
+// arguments and request headers. An override of one entry, such as
+// storage.net.http.uri.args.tid=0012, writes a value that YAML reads as a number or boolean as the
+// text typed, so the engine sends 0012, not 10. A whole-map override, such as
+// storage.net.http.uri.args={tid: 0012}, keeps its YAML meaning.
+var engineOverrideTextMapPaths = [][]string{
+	{"storage", "net", "http", "uri", "args"},
+	{"storage", "net", "http", "headers"},
+}
+
+// isEngineOverrideTextMapEntry reports whether the override path names one entry of a map in
+// engineOverrideTextMapPaths.
+func isEngineOverrideTextMapEntry(parts []string) bool {
+	for _, mapPath := range engineOverrideTextMapPaths {
+		if len(parts) == len(mapPath)+1 && slices.Equal(parts[:len(mapPath)], mapPath) {
+			return true
+		}
+	}
+	return false
+}
+
+// engineOverrideTypedText returns the text YAML read a number or boolean value from, as typed and
+// without a comment, so the generated defaults write it as a YAML string. Any other value, a string,
+// timestamp or null among them, is returned unchanged.
+func engineOverrideTypedText(raw string, value any) any {
+	switch value.(type) {
+	case int, int64, uint64, float64, bool:
+	default:
+		return value
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(strings.TrimSpace(raw)), &doc); err != nil ||
+		len(doc.Content) != 1 || doc.Content[0].Kind != yaml.ScalarNode {
+		return value
+	}
+	return doc.Content[0].Value
 }
 
 func parseEngineOverrideValue(raw string) (any, error) {
