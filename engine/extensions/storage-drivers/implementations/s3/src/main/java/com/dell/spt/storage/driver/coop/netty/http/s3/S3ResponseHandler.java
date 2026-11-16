@@ -383,9 +383,9 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		} else {
 			if (responseFailed) {
 				bufferFailedResponse(channel, contentChunk);
-			} else if (op.type() == OpType.CREATE && isCopy(op)) {
-				// The type is tested first, so a READ chunk takes one compare more than before.
-				bufferCopyResponse(channel, contentChunk);
+			} else if (op.type() == OpType.CREATE) {
+				// One compare more for a READ chunk; the copy test and buffering stay out of this method.
+				bufferCopyResponse(channel, op, contentChunk);
 			}
 			super.handleResponseContentChunk(channel, op, contentChunk);
 		}
@@ -398,13 +398,13 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * Keeps the first {@link #COMPLETION_ERROR_SCAN_BYTES} bytes of a copy's 2xx response body, for
+	 * Keeps, if {@code op} is a copy, the first {@link #COMPLETION_ERROR_SCAN_BYTES} bytes of its 2xx response body, for
 	 * {@link #copyFailureStatus}, without consuming the chunk; the rest is dropped and the buffer never
 	 * grows past that bound. The buffer is made on the copy's first readable chunk and released when its
 	 * response finishes, or when its channel closes first.
 	 */
-	private static void bufferCopyResponse(final Channel channel, final ByteBuf contentChunk) {
-		if (channel == null || !contentChunk.isReadable()) {
+	private static void bufferCopyResponse(final Channel channel, final Operation<?> op, final ByteBuf contentChunk) {
+		if (!isCopy(op) || channel == null || !contentChunk.isReadable()) {
 			return;
 		}
 		final Attribute<ByteBuf> bodyAttr = channel.attr(COPY_RESPONSE_ATTR_KEY);
@@ -644,7 +644,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 				content.clear();
 			} else if (responseFailed) {
 				finishFailedResponse(channel, op);
-			} else if (op.type() == OpType.CREATE && isCopy(op)) {
+			} else if (op.type() == OpType.CREATE) {
 				finishCopyResponse(channel, op);
 			}
 		}
@@ -652,11 +652,11 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * Fails a copy that the target answered 2xx with an S3 {@code <Error>} document, as {@link
+	 * If {@code op} is a copy, fails it when the target answered 2xx with an S3 {@code <Error>} document, as {@link
 	 * #copyFailureStatus} decides, before the driver completes it; then releases the copy's buffer.
 	 */
 	private void finishCopyResponse(final Channel channel, final O op) {
-		if (!channel.hasAttr(COPY_RESPONSE_ATTR_KEY)) {
+		if (!isCopy(op) || !channel.hasAttr(COPY_RESPONSE_ATTR_KEY)) {
 			return; // no copy on this channel had a body
 		}
 		final ByteBuf body = channel.attr(COPY_RESPONSE_ATTR_KEY).getAndSet(null);
