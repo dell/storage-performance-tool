@@ -901,8 +901,9 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	}
 
 	/**
-	 * A 2xx answer the SDK reports as failed carries an S3 error body, as a copy can: a transient or
-	 * missing error code is a service failure, any other a client failure.
+	 * A 2xx answer the SDK reports as failed carries an S3 error body, as a copy or a multipart
+	 * completion can: a transient or missing error code is a service failure, any other a client
+	 * failure.
 	 */
 	private static Status errorBodyStatus(final S3Exception e) {
 		final var details = e.awsErrorDetails();
