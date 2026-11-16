@@ -14,7 +14,7 @@ import (
 // The skip spares only the pull of a present image: every engine launch route still pulls a
 // missing non-dev image, as cli/README.md documents. The message and the flag help must say so.
 func TestSkipImagePullMessageSaysAMissingImageIsStillPulled(t *testing.T) {
-	const want = "Skipping the engine image pull when the image is present; a missing engine image is still pulled before the engine starts."
+	const want = "Skipping the engine image pull when the image is present; a missing non-dev engine image is still pulled before the engine starts."
 	if skipImagePullMessage != want {
 		t.Fatalf("skipImagePullMessage = %q, want %q", skipImagePullMessage, want)
 	}

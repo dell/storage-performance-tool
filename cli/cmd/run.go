@@ -51,7 +51,7 @@ import (
 // skipImagePullMessage is what spt run and spt replay print when --skip-image-pull or
 // SPT_SKIP_IMAGE_PULL is set. The skip only spares the pull of an image that is already present:
 // every engine launch route still pulls a missing non-dev image (cli/README.md, image pull control).
-const skipImagePullMessage = "Skipping the engine image pull when the image is present; a missing engine image is still pulled before the engine starts."
+const skipImagePullMessage = "Skipping the engine image pull when the image is present; a missing non-dev engine image is still pulled before the engine starts."
 
 // skipImagePullFlagHelp is the --skip-image-pull help text shared by spt run and spt replay.
 const skipImagePullFlagHelp = "Skip the engine image pull when the image is present locally; a missing non-dev image is still pulled, and spt_dev images are never pulled (env: SPT_SKIP_IMAGE_PULL)"
