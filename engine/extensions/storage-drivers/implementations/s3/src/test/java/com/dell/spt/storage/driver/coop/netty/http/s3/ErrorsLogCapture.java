@@ -25,6 +25,7 @@ final class ErrorsLogCapture extends AbstractAppender implements AutoCloseable {
 	private static final String DRAINED = "errors-log-capture-drained";
 
 	private final List<Line> lines = new CopyOnWriteArrayList<>();
+	private final List<String> debugMessages = new CopyOnWriteArrayList<>();
 	private final org.apache.logging.log4j.core.Logger logger;
 	private volatile CountDownLatch drain = new CountDownLatch(1);
 
@@ -36,6 +37,7 @@ final class ErrorsLogCapture extends AbstractAppender implements AutoCloseable {
 		logger.addAppender(this);
 		drained();
 		lines.clear();
+		debugMessages.clear();
 	}
 
 	@Override
@@ -45,6 +47,8 @@ final class ErrorsLogCapture extends AbstractAppender implements AutoCloseable {
 			drain.countDown();
 		} else if (event.getLevel().isMoreSpecificThan(Level.WARN)) {
 			lines.add(new Line(event.getContextData().getValue(Constants.KEY_STEP_ID), message));
+		} else if (event.getLevel() == Level.DEBUG) {
+			debugMessages.add(message);
 		}
 	}
 
@@ -55,6 +59,12 @@ final class ErrorsLogCapture extends AbstractAppender implements AutoCloseable {
 		Loggers.ERR.error(DRAINED);
 		assertTrue(marker.await(30, TimeUnit.SECONDS), "the Errors logger drained");
 		return List.copyOf(lines);
+	}
+
+	/** The messages of every DEBUG line so far, which {@code errors.log} also gets; see {@link #drained}. */
+	List<String> drainedDebugMessages() throws InterruptedException {
+		drained();
+		return List.copyOf(debugMessages);
 	}
 
 	/** The captured lines that report a 2xx completion's error code. */

@@ -178,17 +178,34 @@ final class S3ResponseHandlerFailedResponseTest {
 		}
 	}
 
-	/** A refused initiation logs its status line, the code line, then the existing line with the raw body. */
+	/**
+	 * A refused initiation logs its status line and its code line only. Until 5.17.1 a third line
+	 * dumped the raw body as "Upload id not found"; the code line now says all of it.
+	 */
 	@Test
-	void aRefusedInitiationLogsItsCodeBetweenTheExistingLines() throws Exception {
+	void aRefusedInitiationLogsOnlyItsStatusAndCode() throws Exception {
 		try (final var errors = new ErrorsLogCapture()) {
 			final var op = upload();
 			final var body = "<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>";
 			respond(op, HttpResponseStatus.FORBIDDEN, body);
 			assertEquals(Operation.Status.RESP_FAIL_AUTH, op.status());
 			verify(driver).complete(channel, op);
-			assertEquals(List.of(op + ": 403 Forbidden", op + ": S3 error code AccessDenied, message: Access Denied",
-							"Upload id not found in the following response content:\n" + body),
+			assertEquals(List.of(op + ": 403 Forbidden", op + ": S3 error code AccessDenied, message: Access Denied"),
+							errors.drained().stream().map(ErrorsLogCapture.Line::message).toList());
+		}
+	}
+
+	/** An abort sent before every part is done is not an initiation: refused, it logs no upload-id line. */
+	@Test
+	void aRefusedAbortBeforeItsPartsAreDoneLogsOnlyItsStatusAndCode() throws Exception {
+		try (final var errors = new ErrorsLogCapture()) {
+			final var op = upload();
+			((CompositeDataOperationImpl<DataItemImpl>) op).put(S3Api.KEY_MPU_ABORT, "true");
+			respond(op, HttpResponseStatus.NOT_FOUND,
+							"<Error><Code>NoSuchUpload</Code><Message>The specified upload does not exist.</Message></Error>");
+			assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, op.status());
+			assertEquals(List.of(op + ": 404 Not Found",
+							op + ": S3 error code NoSuchUpload, message: The specified upload does not exist."),
 							errors.drained().stream().map(ErrorsLogCapture.Line::message).toList());
 		}
 	}
