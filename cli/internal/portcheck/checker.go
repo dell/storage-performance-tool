@@ -182,6 +182,11 @@ func (p *PortChecker) probeMetricsJSON(ctx context.Context, baseURL string) *Spt
 	return nil
 }
 
+// probeMetrics checks the Prometheus endpoint. No current engine is
+// identified here: an engine answers /metrics with Prometheus text, or an
+// empty body before its first step, and neither passes
+// validateSptMetricsResponse. The probe stays for older engines and fakes
+// that answer /metrics with JSON metrics.
 func (p *PortChecker) probeMetrics(ctx context.Context, baseURL string) *SptStatus {
 	url := baseURL + endpointMetrics
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -238,25 +243,14 @@ func (p *PortChecker) validateSptMetricsResponse(resp *http.Response) bool {
 	bodyStr := strings.TrimSpace(string(body))
 	logging.LogDebug("portcheck", "received metrics response", "body", bodyStr)
 
-	// Check if response is an empty array (common when no metrics yet)
-	if bodyStr == "[]" {
-		logging.LogDebug("portcheck", "empty array response - valid Spt with no metrics")
-		return true
-	}
-
-	// Try to parse as array first (Spt v5 sometimes returns arrays)
+	// An empty body ([], [ ] or null) is not SPT evidence: no engine since
+	// v5.10.0 sends one on a probed path. /metrics/json always holds at least
+	// an idle node row, and /metrics is Prometheus text or empty. Such a body
+	// falls through to the object parse below, which finds no SPT field in it.
 	var metricsArray []map[string]interface{}
-	if err := json.Unmarshal(body, &metricsArray); err == nil {
-		if len(metricsArray) == 0 {
-			logging.LogDebug("portcheck", "empty metrics array - valid Spt")
-			return true
-		}
-
-		// Check first element for Spt fields
-		if len(metricsArray) > 0 {
-			logging.LogDebug("portcheck", "validating first element of metrics array")
-			return p.validateSptFields(metricsArray[0])
-		}
+	if err := json.Unmarshal(body, &metricsArray); err == nil && len(metricsArray) > 0 {
+		logging.LogDebug("portcheck", "validating first element of metrics array")
+		return p.validateSptFields(metricsArray[0])
 	}
 
 	// Try to parse as object (traditional format)
@@ -540,7 +534,8 @@ func (p *PortChecker) isSptBadRequestError(resp *http.Response) bool {
 		"Missing header: If-Match",  // Spt RunServlet error without an If-Match header
 		"Invalid run ID format",     // Spt RunServlet answer to the probe's If-Match: *
 		"com.dell.spt.base.control", // Spt servlet package name
-		"Powered by Jetty",          // Spt uses Jetty server
+		// No generic Jetty pattern such as "Powered by Jetty": any Jetty
+		// service answers a 400 with that page.
 	}
 
 	for _, pattern := range sptErrorPatterns {
