@@ -432,9 +432,11 @@ final class S3FirstUseBucketCheckTest {
 		assertEquals("0", head.headers().getFirst("Content-Length"));
 		assertEquals("0", get.headers().getFirst("Content-Length"));
 		assertEquals(0, get.body().length);
-		assertArrayEquals(S3Api.VERSIONING_ENABLE_CONTENT, put.body(),
-						() -> new String(put.body(), StandardCharsets.UTF_8));
-		assertEquals(String.valueOf(S3Api.VERSIONING_ENABLE_CONTENT.length), put.headers().getFirst("Content-Length"));
+		// A literal, not the driver's constant, so an edit to the constant's text fails here.
+		final byte[] enableBody = ("<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
+						+ "<Status>Enabled</Status></VersioningConfiguration>").getBytes(StandardCharsets.US_ASCII);
+		assertArrayEquals(enableBody, put.body(), () -> new String(put.body(), StandardCharsets.UTF_8));
+		assertEquals(String.valueOf(enableBody.length), put.headers().getFirst("Content-Length"));
 	}
 
 	private static final long DATE_TOLERANCE_MILLIS = 10_000L;
