@@ -258,7 +258,8 @@ public final class DummyStorageDriverMock<I extends Item, O extends Operation<I>
 			final long scheduled = scheduledOpCount.sum();
 			active = scheduled - completed;
 			if (completed == completedOpCount.sum()) {
-				// A refused put's decrement can still tear the scheduled sum at admission close.
+				// A refused put (at admission close, or when the result output rejects it) takes back
+				// its scheduled count, which can still tear the scheduled sum low.
 				return clampActive(active, Integer.MAX_VALUE);
 			}
 		}

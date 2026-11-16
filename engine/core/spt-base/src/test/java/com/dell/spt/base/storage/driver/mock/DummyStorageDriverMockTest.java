@@ -153,7 +153,8 @@ class DummyStorageDriverMockTest {
 	void theActiveCountStaysWithinZeroAndTheCompletingThreadsUnderFastCompletions() throws Exception {
 		final int threadCount = 4;
 		final int opsPerThread = 20_000;
-		final var driver = DummyStorageDriverMock.<Item, Operation<Item>> create(threadCount);
+		// A limit well above the completing threads, so the fallback clamp cannot hide a high read.
+		final var driver = DummyStorageDriverMock.<Item, Operation<Item>> create(64);
 		driver.operationResultOutput(new AcceptingOutput());
 		driver.start();
 		final var op = stubOnlyOperation();
