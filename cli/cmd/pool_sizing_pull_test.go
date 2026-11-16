@@ -135,6 +135,8 @@ func (h *missingImageHost) ExecuteCommand(_ context.Context, _ *hostparse.HostIn
 // probe pulls the image instead of failing on --pull never.
 func TestAHostMissingAReleaseImageIsSizedUnderTheSkip(t *testing.T) {
 	t.Setenv(constants.EnvSkipImagePull, "true")
+	// An inherited explicit direct-memory limit would make the host "explicit", not sized.
+	t.Setenv(constants.EnvSptJavaOpts, "")
 	params := rdmaRunParams()
 	params.Endpoints = []string{"http://192.0.2.1:9000"}
 	in := poolPlanInput(params, nil, []*hostparse.HostInfo{{Host: "wrk1"}}, poolProbeReleaseImage, false)
