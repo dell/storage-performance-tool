@@ -50,8 +50,9 @@ func NewDockerContainerFinder() (*DockerContainerFinder, error) {
 func (d *DockerContainerFinder) FindContainerUsingPort(ctx context.Context, port string) (*ContainerInfo, error) {
 	logging.LogDebug("portcheck", "searching for containers using port", "port", port)
 
-	// Only running (and paused) containers can hold a host port; Docker's
-	// default listing returns exactly those.
+	// Only running (and paused) containers can hold a host port. Docker's
+	// default listing omits stopped containers; containerHoldsPorts filters
+	// the rest (a restarting container has no published ports).
 	containers, err := d.client.ContainerList(ctx, containertypes.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list containers: %w", err)
