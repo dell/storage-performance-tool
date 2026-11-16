@@ -3528,6 +3528,30 @@ public class S3AwsStorageDriverTest {
 			assertEquals(Map.of("a", "7", "b", "true", "c", "1000.0", "d", "x"), objectTagsField.get(driver));
 		}
 
+		/** A list or map tag from a defaults document is sent as its text, as before. */
+		@Test
+		@SuppressWarnings("unchecked")
+		void listAndMapTagsFromADefaultsDocumentReadAsBefore() throws Exception {
+			final var schema = TreeUtil.addBranches(
+							SchemaProvider.resolve(
+											Constants.APP_NAME, Thread.currentThread().getContextClassLoader())
+											.stream().findFirst().orElseThrow(),
+							Map.<String, Object> of("storage", Map.of("object",
+											Map.of("tagging", Map.of("enabled", boolean.class, "tags", Map.class)))));
+			final var loaded = ConfigUtil.loadConfig(
+							"storage:\n  object:\n    tagging:\n      tags:\n        a: [1, 2]\n        m: {x: 1}\n"
+											+ "        n: [x, 007]\n",
+							ConfigFormat.YAML, schema);
+			final Config config = mockBaseConfig((Map<String, String>) (Map<?, ?>) loaded.mapVal("storage-object-tagging-tags"));
+
+			final S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
+							"step-1", null, config, false, 1, mock(S3AsyncClient.class), 100 * 1024L, 8 * 1024 * 1024L);
+
+			final Field objectTagsField = S3AwsStorageDriver.class.getDeclaredField("objectTags");
+			objectTagsField.setAccessible(true);
+			assertEquals(Map.of("a", "[1, 2]", "m", "{x=1}", "n", "[x, 7]"), objectTagsField.get(driver));
+		}
+
 		@Test
 		void taggingDisabled_whenConfigObjectTaggingDisabled() throws Exception {
 			// Mock config with tagging disabled

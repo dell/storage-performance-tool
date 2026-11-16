@@ -1,10 +1,11 @@
 package com.dell.spt.base.config;
 
 /**
- * A value a YAML or JSON defaults document gives where the setting takes text: a number or boolean
- * for a text setting, a list or map for a URI argument, request header or object tag, or no value
- * for a request header. The configuration would fail with a cast, so the document is refused when it
- * is read. The message names the setting and never quotes the value, which may be a credential.
+ * A value a YAML or JSON defaults document gives where the setting takes text, and that would fail
+ * with a cast: a number or boolean for a text setting every run reads, a list or map for a URI
+ * argument or request header, or no value for a request header, refused when the document is read;
+ * or a list or map object tag, refused by the Netty {@code s3} driver. The message names the setting
+ * and never quotes the value, which may be a credential.
  */
 public final class InvalidTextValueException extends IllegalArgumentException {
 

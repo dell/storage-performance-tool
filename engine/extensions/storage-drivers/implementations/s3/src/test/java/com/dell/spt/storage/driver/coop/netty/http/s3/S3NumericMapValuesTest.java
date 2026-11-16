@@ -1,10 +1,12 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
+import com.dell.spt.base.config.InvalidTextValueException;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
@@ -49,11 +51,15 @@ class S3NumericMapValuesTest {
 					+ "        n: ~\n";
 
 	private static S3StorageDriverTest.TestS3Driver driver(final int authVersion, final boolean tagging) throws Exception {
+		return driver(authVersion, DOCUMENT.formatted(tagging));
+	}
+
+	private static S3StorageDriverTest.TestS3Driver driver(final int authVersion, final String document) throws Exception {
 		final Config base = S3StorageDriverTest.baseConfig(false, authVersion, false, null, "127.0.0.1");
 		// The merge adds the document's entries to the base maps, so they must be mutable.
 		base.val("storage-net-http-uri-args", new HashMap<>());
 		base.val("storage-object-tagging-tags", new HashMap<>());
-		final Config incoming = ConfigUtil.loadConfig(DOCUMENT.formatted(tagging), ConfigFormat.YAML, base.schema());
+		final Config incoming = ConfigUtil.loadConfig(document, ConfigFormat.YAML, base.schema());
 		return new S3StorageDriverTest.TestS3Driver(ConfigUtil.merge(base.pathSep(), List.of(base, incoming)));
 	}
 
@@ -84,5 +90,21 @@ class S3NumericMapValuesTest {
 		assertTrue(content.contains("<Tag><Key>t</Key><Value>true</Value></Tag>"), content);
 		// A tag with no value is sent as the text null, as before.
 		assertTrue(content.contains("<Tag><Key>n</Key><Value>null</Value></Tag>"), content);
+	}
+
+	/**
+	 * The configuration keeps a list or map tag, which {@code s3-aws} sends as text; this driver refuses
+	 * it with the tag's name, with tagging on or off, where it failed with a cast before.
+	 */
+	@Test
+	void aListOrMapTagIsRefusedWithItsName() {
+		for (final var tagging : new boolean[]{false, true
+		}) {
+			final var tags = "storage:\n  object:\n    tagging:\n      enabled: " + tagging + "\n      tags:\n        k: ";
+			assertEquals("storage-object-tagging-tags-k: the value is a list, not text",
+							assertThrows(InvalidTextValueException.class, () -> driver(4, tags + "[1, 2]\n")).getMessage());
+			assertEquals("storage-object-tagging-tags-k: the value is a map, not text",
+							assertThrows(InvalidTextValueException.class, () -> driver(4, tags + "{a: b}\n")).getMessage());
+		}
 	}
 }

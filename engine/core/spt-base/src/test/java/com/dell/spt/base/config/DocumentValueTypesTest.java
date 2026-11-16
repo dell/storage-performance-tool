@@ -12,6 +12,7 @@ import com.github.akurilov.confuse.Config;
 import com.github.akurilov.confuse.SchemaProvider;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -21,8 +22,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * A YAML or JSON defaults document's number or boolean for a URI argument, request header or object
- * tag reaches the driver as text, and one for another text setting is refused with the setting's
- * name. Every other value keeps the type the reader gave it.
+ * tag reaches the driver as text, and one for a text setting every run reads is refused with the
+ * setting's name. Every other value keeps the type the reader gave it, as before.
  */
 public class DocumentValueTypesTest {
 
@@ -162,23 +163,28 @@ public class DocumentValueTypesTest {
 						assertThrows(InvalidTextValueException.class, () -> yaml(uriArgs("{a: 1}"))).getMessage());
 		assertEquals("storage-net-http-headers-X-Id: the value is a list, not text",
 						assertThrows(InvalidTextValueException.class, () -> yaml(headers("[a]"))).getMessage());
-		assertEquals("storage-object-tagging-tags-k: the value is a map, not text",
-						assertThrows(InvalidTextValueException.class, () -> yaml(tags("{a: b}"))).getMessage());
-		assertEquals("storage-object-tagging-tags-k: the value is a list, not text",
-						assertThrows(InvalidTextValueException.class,
-										() -> json("{\"storage\": {\"object\": {\"tagging\": {\"tags\": {\"k\": [7]}}}}}")).getMessage());
+	}
+
+	/** The {@code s3-aws} driver sends a list or map tag as its text, so the configuration keeps it. */
+	@Test
+	void aListOrMapTagIsKept() throws Exception {
+		assertEquals(List.of(1, 2), tag(yaml(tags("[1, 2]"))));
+		assertEquals(Map.of("a", "b"), tag(yaml(tags("{a: b}"))));
+		assertEquals(List.of(7),
+						tag(json("{\"storage\": {\"object\": {\"tagging\": {\"tags\": {\"k\": [7]}}}}}")));
 	}
 
 	@ParameterizedTest
 	@CsvSource({
-			"storage.auth.uid, 12345, number",
-			"storage.auth.secret, 1234567890123456789012, number",
-			"storage.region, 1, number",
-			"item.output.path, 2026, number",
-			"item.naming.prefix, 1.5, number",
 			"load.step.id, 7, number",
-			"storage.auth.uid, yes, boolean",
-			"storage.auth.uid, false, boolean"
+			"load.step.id, 1234567890123456789012, number",
+			"run.comment, 2026, number",
+			"storage.integrity.mode, 1, number",
+			"storage.integrity.algorithm, 256, number",
+			"storage.integrity.input.provenance, 1.5, number",
+			"storage.integrity.input.expectedProducerId, 12345, number",
+			"run.comment, yes, boolean",
+			"storage.integrity.mode, false, boolean"
 	})
 	void aNumberOrBooleanAtATextSettingIsRefusedWithItsName(final String setting, final String value, final String kind) {
 		final var keys = setting.split("\\.");
@@ -196,14 +202,53 @@ public class DocumentValueTypesTest {
 	@Test
 	void aNumberAtATextSettingIsRefusedInJson() {
 		final var failure = assertThrows(InvalidTextValueException.class,
-						() -> json("{\"storage\": {\"auth\": {\"uid\": 12345}}}"));
-		assertEquals("storage-auth-uid: the value is read as a number, not text; quote it", failure.getMessage());
+						() -> json("{\"run\": {\"comment\": 12345}}"));
+		assertEquals("run-comment: the value is read as a number, not text; quote it", failure.getMessage());
 	}
 
 	@Test
 	void aQuotedNumberAtATextSettingIsText() throws Exception {
-		assertEquals("12345", yaml("storage:\n  auth:\n    uid: \"12345\"\n").stringVal("storage-auth-uid"));
-		assertEquals("0012", json("{\"storage\": {\"auth\": {\"uid\": \"0012\"}}}").stringVal("storage-auth-uid"));
+		assertEquals("12345", yaml("load:\n  step:\n    id: \"12345\"\n").stringVal("load-step-id"));
+		assertEquals("0012", json("{\"run\": {\"comment\": \"0012\"}}").stringVal("run-comment"));
+	}
+
+	/**
+	 * A number at any other text setting loads as before: its reader ignores it and falls back, a
+	 * scenario can set the setting for each step, or the driver or step in use does not read it.
+	 */
+	@ParameterizedTest
+	@CsvSource({
+			"run.cluster.id, 123",
+			"log.level, 7",
+			"storage.auth.uid, 12345",
+			"storage.region, 1",
+			"item.output.path, 2026",
+			"item.naming.prefix, 1.5",
+			"load.op.type, 7",
+			"load.op.list.sharding.charset, 1"
+	})
+	void aNumberAtAnotherTextSettingLoadsAsBefore(final String setting, final String value) throws Exception {
+		final var keys = setting.split("\\.");
+		final var document = new StringBuilder();
+		for (int i = 0; i < keys.length; i++) {
+			document.append("  ".repeat(i)).append(keys[i]).append(':').append(i == keys.length - 1 ? " " + value : "").append('\n');
+		}
+		assertTrue(yaml(document.toString()).val(String.join("-", keys)) instanceof Number);
+	}
+
+	/** {@code RunIdentityConfig} ignores a number for the cluster id, so the run goes on without one. */
+	@Test
+	void aNumberClusterIdLoadsAndIsIgnoredAsBefore() throws Exception {
+		assertNull(RunIdentityConfig.clusterId(yaml("run:\n  cluster:\n    id: 123\n")));
+	}
+
+	/** A boolean or a big integer at any other text setting is refused by the schema's own check, as before. */
+	@ParameterizedTest
+	@ValueSource(strings = {"run:\n  cluster:\n    id: true\n", "storage:\n  auth:\n    secret: 1234567890123456789012\n"
+	})
+	void aBooleanOrBigIntegerAtAnotherTextSettingFailsAsBefore(final String document) {
+		final var failure = assertThrows(RuntimeException.class, () -> yaml(document));
+		assertFalse(failure instanceof InvalidTextValueException, failure.toString());
 	}
 
 	/** {@code RangeReadConfig} reads a number for these text settings. */
@@ -235,7 +280,7 @@ public class DocumentValueTypesTest {
 		Files.writeString(jsonFile, "{\"storage\": {\"net\": {\"http\": {\"uri\": {\"args\": {\"tid\": 7.0}}}}}}");
 		assertEquals("7.0", uriArg(ConfigUtil.loadConfig(jsonFile.toFile(), schema())));
 		final var refused = dir.resolve("refused.yaml");
-		Files.writeString(refused, "storage:\n  auth:\n    uid: 12345\n");
+		Files.writeString(refused, "load:\n  step:\n    id: 12345\n");
 		assertThrows(InvalidTextValueException.class, () -> ConfigUtil.loadConfig(refused.toFile(), schema()));
 	}
 

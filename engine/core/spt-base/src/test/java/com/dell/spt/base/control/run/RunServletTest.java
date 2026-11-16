@@ -151,14 +151,14 @@ class RunServletTest {
 		final var body = new StringWriter();
 		when(mockResponse.getWriter()).thenReturn(new PrintWriter(body));
 		final var failure = assertThrows(InvalidTextValueException.class, () -> RunServlet.configFromPart(
-						defaultsPart("storage:\n  auth:\n    secret: 12345\n"), mockResponse,
+						defaultsPart("run:\n  comment: 12345\n"), mockResponse,
 						DocumentValueTypesTest.schema()));
 
 		RunServlet.setBadRequestResponse(mockResponse, failure);
 
 		verify(mockResponse).setStatus(HttpServletResponse.SC_BAD_REQUEST);
 		verify(mockResponse).setContentType("text/plain; charset=UTF-8");
-		assertEquals("storage-auth-secret: the value is read as a number, not text; quote it", body.toString());
+		assertEquals("run-comment: the value is read as a number, not text; quote it", body.toString());
 	}
 
 	@Test

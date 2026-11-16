@@ -19,13 +19,16 @@ import java.util.Set;
  *       document, so {@code tid: 0012} sends {@code 0012}.
  *   <li>A number or boolean object tag becomes {@link String#valueOf}, the text the {@code s3-aws}
  *       driver already sends.
- *   <li>A list or map in one of those three maps, and a request header with no value, are refused. A
- *       URI argument or tag with no value is kept.
- *   <li>A number or boolean at another setting the schema types as a string is refused, with a message
- *       that says to quote it, except at the few text settings whose readers take a number.
+ *   <li>A list or map URI argument or request header, and a request header with no value, are
+ *       refused. A URI argument or tag with no value is kept. A list or map tag is kept: the
+ *       {@code s3-aws} driver sends it as text, and the Netty {@code s3} driver refuses it.
+ *   <li>A number or boolean at one of the {@link #TEXT_SETTINGS_EVERY_RUN_READS} is refused, with a
+ *       message that says to quote it. Each of them fails every run with a cast otherwise.
  * </ul>
  *
- * Values of any other type, and every other setting, are left as the reader gave them.
+ * Values of any other type, and every other setting, are left as the reader gave them, so a text
+ * setting whose reader ignores a number, or that a run reads only with some drivers or steps, behaves
+ * as before.
  */
 final class DocumentValueTypes {
 
@@ -41,11 +44,21 @@ final class DocumentValueTypes {
 
 	static final List<String> TAGS = List.of("storage", "object", "tagging", "tags");
 
-	/** Text settings whose readers take a number as well ({@code RangeReadConfig}). */
-	static final Set<List<String>> NUMBER_TAKING_TEXT_SETTINGS = Set.of(
-					List.of("load", "op", "read", "range", "size"),
-					List.of("load", "op", "read", "range", "offset"),
-					List.of("load", "op", "read", "range", "align"));
+	/**
+	 * The text settings every run reads as a string from the posted configuration, before the scenario
+	 * can set them, so a number or boolean there fails each run with a cast, whatever the driver, the
+	 * step and the scenario: {@code RunServlet} reads the run comment and the step id, and
+	 * {@code LoadStepBase} validates the integrity settings when the scenario's step types are bound.
+	 * Every other text setting is left alone: a scenario can set it for each step, or a driver or step
+	 * may not read it, so a number there can work.
+	 */
+	static final Set<List<String>> TEXT_SETTINGS_EVERY_RUN_READS = Set.of(
+					List.of("load", "step", "id"),
+					List.of("run", "comment"),
+					List.of("storage", "integrity", "algorithm"),
+					List.of("storage", "integrity", "input", "expectedProducerId"),
+					List.of("storage", "integrity", "input", "provenance"),
+					List.of("storage", "integrity", "mode"));
 
 	private DocumentValueTypes() {}
 
@@ -93,14 +106,15 @@ final class DocumentValueTypes {
 		if (tags != null) {
 			for (final var entry : tags.entrySet()) {
 				final var value = entry.getValue();
-				refuseNested(child(TAGS, entry.getKey()), value, sep);
 				if (value instanceof Number || value instanceof Boolean) {
 					entry.setValue(String.valueOf(value));
 				}
 			}
 		}
 		if (schema != null) {
-			refuseTypedText(schema, configTree, new ArrayList<>(), sep);
+			for (final var setting : TEXT_SETTINGS_EVERY_RUN_READS) {
+				refuseTypedText(configTree, setting, sep);
+			}
 		}
 	}
 
@@ -112,21 +126,13 @@ final class DocumentValueTypes {
 		}
 	}
 
-	private static void refuseTypedText(
-					final Map<?, ?> schema, final Map<?, ?> configTree, final List<String> prefix, final String sep) {
-		for (final var node : configTree.entrySet()) {
-			final var type = schema.get(node.getKey());
-			final var value = node.getValue();
-			final var path = child(prefix, node.getKey());
-			if (type instanceof Map<?, ?> branchSchema && value instanceof Map<?, ?> branch) {
-				refuseTypedText(branchSchema, branch, path, sep);
-			} else if (type == String.class
-							&& (value instanceof Number || value instanceof Boolean)
-							&& !NUMBER_TAKING_TEXT_SETTINGS.contains(path)) {
-				final var name = join(path, sep);
-				throw new InvalidTextValueException(name, name + ": the value is read as a "
-								+ (value instanceof Number ? "number" : "boolean") + ", not text; quote it");
-			}
+	private static void refuseTypedText(final Map<String, Object> configTree, final List<String> setting, final String sep) {
+		final var branch = mapAt(configTree, setting.subList(0, setting.size() - 1));
+		final var value = branch == null ? null : branch.get(setting.get(setting.size() - 1));
+		if (value instanceof Number || value instanceof Boolean) {
+			final var name = join(setting, sep);
+			throw new InvalidTextValueException(name, name + ": the value is read as a "
+							+ (value instanceof Number ? "number" : "boolean") + ", not text; quote it");
 		}
 	}
 
