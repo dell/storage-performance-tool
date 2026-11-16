@@ -380,6 +380,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	// One WARN for a multipart abort the kernel route could not connect; the rest go to DEBUG.
 	private final AtomicBoolean kernelRouteAbortWarned = new AtomicBoolean();
 	private final S3ResponseHandler.CompletionErrorCodeLog completionErrorCodeLog = new S3ResponseHandler.CompletionErrorCodeLog();
+	// One WARN for a multipart response body over S3ResponseHandler.MAX_MULTIPART_RESPONSE_BYTES.
+	private final AtomicBoolean multipartResponseOverflowWarned = new AtomicBoolean();
 	private final KernelRouteAborts<KernelRouteAbort> kernelRouteAborts = new KernelRouteAborts<>();
 	// Host of driver-built helper requests (bucket setup, listing, verification, abort).
 	private String helperAuthority;
@@ -2437,6 +2439,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	/** The multipart completion error codes this driver's step has logged. */
 	S3ResponseHandler.CompletionErrorCodeLog completionErrorCodeLog() {
 		return completionErrorCodeLog;
+	}
+
+	/** True only the first time it is called: whether this step should warn of a multipart response's overflow. */
+	boolean claimMultipartResponseOverflowWarning() {
+		return multipartResponseOverflowWarned.compareAndSet(false, true);
 	}
 
 	/**
