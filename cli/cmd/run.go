@@ -48,6 +48,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// skipImagePullMessage is what spt run and spt replay print when --skip-image-pull or
+// SPT_SKIP_IMAGE_PULL is set. The skip only spares the pull of an image that is already present:
+// every engine launch route still pulls a missing non-dev image (cli/README.md, image pull control).
+const skipImagePullMessage = "Skipping the engine image pull when the image is present; a missing non-dev engine image is still pulled before the engine starts."
+
+// skipImagePullFlagHelp is the --skip-image-pull help text shared by spt run and spt replay.
+const skipImagePullFlagHelp = "Skip the engine image pull when the image is present locally; a missing non-dev image is still pulled, and spt_dev images are never pulled (env: SPT_SKIP_IMAGE_PULL)"
+
 const (
 	flagSkipImagePull         = "skip-image-pull"
 	flagSptImage              = "spt-image"
@@ -593,8 +601,11 @@ var (
 	}
 	makeResultsDirFunc           = os.MkdirAll
 	archivePreparedRunInputsFunc = archivePreparedRunInputs
-	generateRunSummaryFunc       = generateRunSummary
-	requestShutdownAllFunc       = requestShutdownAll
+	// autoResultsMonitorStartHook, when set by a test, runs at the start of the monitor
+	// goroutine, before it waits for Arm. Production leaves it nil.
+	autoResultsMonitorStartHook func()
+	generateRunSummaryFunc      = generateRunSummary
+	requestShutdownAllFunc      = requestShutdownAll
 )
 
 var integrityRuntimeGOOS = runtime.GOOS
@@ -688,50 +699,52 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 	monitor := &autoResultsMonitor{
 		done: done, armed: make(chan struct{}), armAck: make(chan struct{}), cancel: cancel,
 	}
+	if progressOut == nil {
+		progressOut = os.Stdout
+	}
+	writeProgress := func(format string, args ...interface{}) {
+		_, _ = fmt.Fprintf(progressOut, format, args...)
+	}
+	// Set up the results root and its staged metadata before the monitor goroutine starts.
+	// Every launch begins after this function returns, so this setup happens before the
+	// launcher's own metadata writes (such as the engine identity gate's rejection record);
+	// everything the goroutine does after it is ordered by monitor.armed.
+	writeProgress("Auto-results: monitoring %s for completion...\n", baseURL)
+	root := ""
+	if metadata != nil && metadata.ResultsRoot != "" {
+		root = metadata.ResultsRoot
+	} else {
+		ts := time.Now().UTC().Format("20060102.150405.000")
+		root = filepath.Join(resultsDir, fmt.Sprintf("%s-%s", label, ts))
+	}
+	writeProgress("Auto-results: will save results under %s\n", root)
+	if metadata != nil {
+		metadata.ResultsRoot = root
+		metadata.BaseURL = baseURL
+	}
+	var setupErr error
+	// ensure results directory exists early so we can stage metadata
+	if err := makeResultsDirFunc(root, 0o750); err != nil {
+		setupErr = errors.Join(fmt.Errorf("create results directory: %w", err))
+		logging.LogError("auto-results", "create results dir", err, "path", root)
+	} else if archiveErr := archivePreparedRunInputsFunc(metadata, scenarioPath, root); archiveErr != nil {
+		setupErr = errors.Join(fmt.Errorf("archive prepared inputs: %w", archiveErr))
+		logging.LogError("auto-results", "archive prepared inputs", archiveErr, "dest", root)
+	}
+	startHook := autoResultsMonitorStartHook
 	go func() {
 		outcome := autoResultsOutcome{
 			Lifecycle: runcontrol.Outcome{
 				Resources: runcontrol.ResourceDispositionUnknown,
 			},
+			ArtifactErr: setupErr,
 		}
 		defer func() {
 			done <- outcome
 			cancel()
 		}()
-		if progressOut == nil {
-			progressOut = os.Stdout
-		}
-		writeProgress := func(format string, args ...interface{}) {
-			if progressOut == nil {
-				return
-			}
-			_, _ = fmt.Fprintf(progressOut, format, args...)
-		}
-		writeProgress("Auto-results: monitoring %s for completion...\n", baseURL)
-		// Precompute output root and announce
-		root := ""
-		if metadata != nil && metadata.ResultsRoot != "" {
-			root = metadata.ResultsRoot
-		} else {
-			ts := time.Now().UTC().Format("20060102.150405.000")
-			root = filepath.Join(resultsDir, fmt.Sprintf("%s-%s", label, ts))
-		}
-		writeProgress("Auto-results: will save results under %s\n", root)
-		if metadata != nil {
-			metadata.ResultsRoot = root
-			metadata.BaseURL = baseURL
-		}
-		// ensure results directory exists early so we can stage metadata
-		if err := makeResultsDirFunc(root, 0o750); err != nil {
-			outcome.ArtifactErr = errors.Join(
-				outcome.ArtifactErr, fmt.Errorf("create results directory: %w", err))
-			logging.LogError("auto-results", "create results dir", err, "path", root)
-		} else {
-			if archiveErr := archivePreparedRunInputsFunc(metadata, scenarioPath, root); archiveErr != nil {
-				outcome.ArtifactErr = errors.Join(
-					outcome.ArtifactErr, fmt.Errorf("archive prepared inputs: %w", archiveErr))
-				logging.LogError("auto-results", "archive prepared inputs", archiveErr, "dest", root)
-			}
+		if startHook != nil {
+			startHook()
 		}
 		<-monitor.armed
 		if monitor.armAck != nil {
@@ -2211,7 +2224,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 		skipImagePull, _ := cmd.Flags().GetBool(flagSkipImagePull)
 		if skipImagePull {
 			_ = os.Setenv(constants.EnvSkipImagePull, "true")
-			fmt.Println("Skipping Docker image pull; using locally cached image.")
+			fmt.Println(skipImagePullMessage)
 		} else {
 			_ = os.Unsetenv(constants.EnvSkipImagePull)
 		}
@@ -2709,9 +2722,9 @@ func init() {
 	runCmd.Flags().String("read-items-file", "", "Items file for mixed workload READ pool (skips seed phase; --cleanup not allowed)")
 	runCmd.Flags().String("delete-items-file", "", "Items file to pre-populate mixed workload DELETE queue (relaxes delete<=put constraint; --cleanup not allowed)")
 	runCmd.Flags().Int("service-threads", 0, "Engine virtual-thread carrier parallelism (0 = JVM default, env: SPT_SERVICE_THREADS)")
-	runCmd.Flags().StringArray(flagEngineOverride, []string{}, "Advanced engine defaults override as path=value; repeat for multiple overrides (for example: storage.driver.threads=6, env: SPT_ENGINE_OVERRIDES)")
+	runCmd.Flags().StringArray(flagEngineOverride, []string{}, "Advanced engine defaults override as path=value; repeat for multiple overrides (for example: storage.driver.threads=6, env: SPT_ENGINE_OVERRIDES). The value is read as YAML; a URI argument or header entry such as storage.net.http.uri.args.tid=0012 is sent as typed, and in a map literal quote the values: storage.net.http.uri.args={tid: \"0012\"}")
 	runCmd.Flags().String("api-port", "", "Spt API port for every engine in the run (defaults to 9999, legacy: 43234)")
-	runCmd.Flags().Bool(flagSkipImagePull, false, "Use the locally cached Docker image without pulling the latest tag (env: SPT_SKIP_IMAGE_PULL)")
+	runCmd.Flags().Bool(flagSkipImagePull, false, skipImagePullFlagHelp)
 	runCmd.Flags().String(flagSptImage, "", "Override the engine image ref (default: matches the CLI version, e.g. ...:v5.10.3; dev builds use ...:spt_dev; env: SPT_IMAGE)")
 
 	// Results Retrieval Options (Phase 1: flags + parsing only)
@@ -2985,6 +2998,10 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	serviceThreads, _ := cmd.Flags().GetInt("service-threads")
 	params.ServiceThreads = serviceThreads
 
+	tablesTestVector, _ := cmd.Flags().GetString("test-vector")
+	if err := validateEngineFormatFlags(params, tablesTestVector); err != nil {
+		return scenario.Params{}, err
+	}
 	if registryPort, err := cmd.Flags().GetInt(flagRMIRegistryPort); err == nil {
 		if err := validatePortFlag(flagRMIRegistryPort, registryPort); err != nil {
 			return scenario.Params{}, err
@@ -3158,7 +3175,7 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	if deleteWorkload {
 		params.SelectionOrder = scenario.SelectionOrderCanonical
 	}
-	seededDelete := deleteWorkload && strings.TrimSpace(params.ItemsFile) == "" && !params.DeleteExisting
+	seededDelete := isSeededDelete(params)
 	if seededDelete {
 		if params.ObjectSize == "" {
 			params.ObjectSize = scenario.DefaultDeleteObjectSize

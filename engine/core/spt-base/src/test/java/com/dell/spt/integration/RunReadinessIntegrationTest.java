@@ -95,6 +95,8 @@ public class RunReadinessIntegrationTest {
 		context.addServlet(new ServletHolder(new FleetMetricsHandler(metricsMgr, config)), "/metrics/fleet/json");
 
 		// Create services but DO NOT start yet
+		// Free RMI port instead of the builder's fixed 9020
+		config.val("load-step-node-port", FreePorts.freePort());
 		final int listenPort = config.intVal("load-step-node-port");
 		try (final Service fileMgrSvc = new FileManagerServiceImpl(listenPort);
 						final LoadStepManagerService scenarioStepSvc = new LoadStepManagerServiceImpl(listenPort, extensions, metricsMgr)) {

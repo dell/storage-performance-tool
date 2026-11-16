@@ -313,7 +313,9 @@ func TestRendererCompactSnippetIncludesTable(t *testing.T) {
 	mustContain(t, snippet, "Totals: duration 9.62s")
 }
 
-func TestRendererPerformanceTableSkipsMissingMetrics(t *testing.T) {
+// A step without metrics that is not marked missing (a MetricsSuppressed step) gets no row;
+// missing_totals_test.go covers the row of a step whose metrics are missing.
+func TestRendererPerformanceTableSkipsSuppressedMetrics(t *testing.T) {
 	t.Parallel()
 
 	renderer := NewRenderer(RenderOptions{MaxWidth: 90})

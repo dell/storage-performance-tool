@@ -13,6 +13,7 @@ import com.dell.spt.base.control.ApiStatus;
 import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.config.InvalidBooleanValueException;
+import com.dell.spt.base.config.InvalidTextValueException;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.load.step.LoadStepManagerService;
 import com.dell.spt.base.load.step.ScenarioUtil;
@@ -148,14 +149,15 @@ public class RunServlet extends HttpServlet {
 	/**
 	 * Answers 400. A boolean value the engine refused is named in the body, as plain text, so the client
 	 * that posted it can say which setting to correct; the message names a boolean setting and its value,
-	 * never a secret. Any other failure keeps the empty body it had.
+	 * never a secret. A defaults value refused where the setting takes text is named the same way; its
+	 * message names the setting only. Any other failure keeps the empty body it had.
 	 */
 	static void setBadRequestResponse(final HttpServletResponse resp, final Throwable failure) throws IOException {
 		resp.setStatus(HttpServletResponse.SC_BAD_REQUEST);
 		for (var cause = failure; cause != null; cause = cause.getCause()) {
-			if (cause instanceof InvalidBooleanValueException refused) {
+			if (cause instanceof InvalidBooleanValueException || cause instanceof InvalidTextValueException) {
 				resp.setContentType("text/plain; charset=UTF-8");
-				resp.getWriter().print(refused.getMessage());
+				resp.getWriter().print(cause.getMessage());
 				return;
 			}
 		}

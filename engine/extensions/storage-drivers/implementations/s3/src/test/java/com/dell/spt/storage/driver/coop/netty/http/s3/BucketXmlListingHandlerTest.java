@@ -1,7 +1,9 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemFactoryImpl;
@@ -58,12 +60,72 @@ final class BucketXmlListingHandlerTest {
 
 	@Test
 	void rejectsObjectOutsideConfiguredPrefix() {
-		assertThrows(SAXException.class, () -> parse("other/1z", "benchmark/", 42));
+		assertThrows(SAXException.class, () -> parse("other/1z", "benchmark/", 42, true));
+	}
+
+	/** Under item data verification only: without it such a key is kept with offset 0. */
+	@Test
+	void rejectsUnparseableLeafInsteadOfFallingBackToOffsetZero() {
+		final var failure = assertThrows(
+						SAXException.class, () -> parse("benchmark/not-an-id", "benchmark/", 42, true));
+		assertTrue(failure.getMessage().contains("\"benchmark/not-an-id\""), failure.getMessage());
+		assertTrue(
+						failure.getMessage().contains("verification needs keys that SPT generated"),
+						failure.getMessage());
 	}
 
 	@Test
-	void rejectsUnparseableLeafInsteadOfFallingBackToOffsetZero() {
-		assertThrows(SAXException.class, () -> parse("benchmark/not-an-id", "benchmark/", 42));
+	void withoutVerifyKeepsKeysWithoutAGeneratedLeafWithOffsetZero() throws Exception {
+		for (final String key : List.of("dir/", "photo.jpg", "abcdefghijklmnopq", "a/b/readme.md")) {
+			final var items = parse(key, null, 42, false);
+			assertEquals(1, items.size(), key);
+			assertEquals(BUCKET_PATH + "/" + key, items.get(0).name(), key);
+			assertEquals(0, items.get(0).offset(), key);
+			assertEquals(42, items.get(0).size(), key);
+		}
+	}
+
+	@Test
+	void withoutVerifyKeepsAKeyUnderANamingPrefixWithoutAGeneratedLeafWithOffsetZero() throws Exception {
+		final var items = parse("pre.jpg", "pre", 42, false);
+		assertEquals(1, items.size());
+		assertEquals("/bucket/pre.jpg", items.get(0).name());
+		assertEquals(0, items.get(0).offset());
+	}
+
+	@Test
+	void withoutVerifyStillParsesGeneratedLeaves() throws Exception {
+		assertEquals(Long.parseLong("1z", RADIX), parse("benchmark/1z", "benchmark/", 42, false).get(0).offset());
+		assertEquals(
+						Long.parseLong("1z", RADIX),
+						parse("benchmark/s000000f/1z", "benchmark/", 42, false).get(0).offset());
+	}
+
+	@Test
+	void withoutVerifyCountsThePagesKeysWithoutAGeneratedLeaf() throws Exception {
+		final var items = new ArrayList<DataItem>();
+		final var handler = new BucketXmlListingHandler<>(
+						items, BUCKET_PATH, null, new DataItemFactoryImpl<>(), RADIX, false);
+		parseXml(
+						"<ListBucketResult><Contents><Key>k0</Key><Size>1</Size></Contents>"
+										+ "<Contents><Key>dir/</Key><Size>0</Size></Contents>"
+										+ "<Contents><Key>k1</Key><Size>1</Size></Contents>"
+										+ "<Contents><Key>photo.jpg</Key><Size>1</Size></Contents>"
+										+ "<IsTruncated>false</IsTruncated></ListBucketResult>",
+						handler);
+		assertEquals(4, items.size());
+		assertEquals(2, handler.nonGeneratedKeyCount());
+		assertEquals("dir/", handler.firstNonGeneratedKey());
+		assertEquals(List.of(Long.parseLong("k0", RADIX), 0L, Long.parseLong("k1", RADIX), 0L),
+						items.stream().map(DataItem::offset).toList());
+
+		items.clear();
+		parseXml(
+						"<ListBucketResult><Contents><Key>k2</Key><Size>1</Size></Contents>"
+										+ "<IsTruncated>false</IsTruncated></ListBucketResult>",
+						handler);
+		assertEquals(0, handler.nonGeneratedKeyCount(), "each page counts its own keys");
+		assertNull(handler.firstNonGeneratedKey());
 	}
 
 	@Test
@@ -122,9 +184,15 @@ final class BucketXmlListingHandlerTest {
 
 	private static List<DataItem> parse(
 					final String key, final String prefix, final long size) throws Exception {
+		return parse(key, prefix, size, true);
+	}
+
+	private static List<DataItem> parse(
+					final String key, final String prefix, final long size, final boolean verify)
+					throws Exception {
 		final var items = new ArrayList<DataItem>();
 		final var handler = new BucketXmlListingHandler<>(
-						items, BUCKET_PATH, prefix, new DataItemFactoryImpl<>(), RADIX);
+						items, BUCKET_PATH, prefix, new DataItemFactoryImpl<>(), RADIX, verify);
 		final var xml = "<ListBucketResult><Contents><Key>" + key + "</Key><Size>" + size
 						+ "</Size></Contents><IsTruncated>false</IsTruncated></ListBucketResult>";
 		parseXml(xml, handler);

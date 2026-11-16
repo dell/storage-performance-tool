@@ -15,7 +15,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
-import java.util.concurrent.ThreadLocalRandom;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -58,7 +57,10 @@ public class NodeJarShutdownE2ETest {
 			assertTrue(Files.exists(jar), "Bundle jar not found after build");
 		}
 
-		final int port = 20000 + ThreadLocalRandom.current().nextInt(10000);
+		// Free ports for both services: the node's RMI registry otherwise binds the default 1099.
+		final int[] ports = FreePorts.freePorts(2);
+		final int port = ports[0];
+		final int rmiPort = ports[1];
 		final var outFile = Files.createTempFile("spt-node-out", ".log");
 		final var errFile = Files.createTempFile("spt-node-err", ".log");
 		final var logDir = Files.createTempDirectory("spt-node-log");
@@ -69,6 +71,7 @@ public class NodeJarShutdownE2ETest {
 						jar.toString(),
 						"--run-node",
 						"--run-port=" + port,
+						"--load-step-node-port=" + rmiPort,
 						"--api-linger-sec=2",
 						"--storage-driver-type=netty-mock");
 		nodePb.environment().put("SPT_LOG_DIR", logDir.toString());
