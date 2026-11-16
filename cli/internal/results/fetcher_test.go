@@ -184,8 +184,10 @@ func TestFetcherSavesMultipartLogListedUnderEngineLoggerName(t *testing.T) {
 	content := []byte("Phase,ItemPath,UploadId,PartNumber,StartTs,Duration[us],Latency[us],Bytes\n" +
 		"INIT,b/o1,u1,-1,1763290000000,900,800,0\n")
 	var calls int32
-	// A single engine lists only its own node-000 copies of per-node sources.
-	srv := multipartFetchServer(t, step, content, true, []string{"event.loops.node-000.json"}, &calls)
+	// What a real single engine lists: its event loops and lifecycle under their logger names, and its
+	// own node-000 lifecycle copy. Only a step of two or more slices lists event.loops.node-NNN.json.
+	srv := multipartFetchServer(t, step, content, true,
+		[]string{"EventLoops", "OperationLifecycle", "operation.lifecycle.node-000.csv"}, &calls)
 	defer srv.Close()
 
 	out := t.TempDir()

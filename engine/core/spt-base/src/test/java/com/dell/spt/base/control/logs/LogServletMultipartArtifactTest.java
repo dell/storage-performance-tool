@@ -63,8 +63,7 @@ class LogServletMultipartArtifactTest {
 		ThreadContext.put(Constants.KEY_STEP_ID, stepId);
 		Loggers.MULTIPART.info("INIT,{},{},{},{},{},{},{}", "bucket/item", "upload-1", -1, 1L, 10L, 5L, 0);
 		ThreadContext.remove(Constants.KEY_STEP_ID);
-		LogUtil.flushAll();
-		assertTrue(Files.exists(logFile), "the Multipart logger wrote " + logFile);
+		awaitWritten(logFile);
 
 		final HttpServletRequest req = mock(HttpServletRequest.class);
 		final HttpServletResponse resp = mock(HttpServletResponse.class);
@@ -87,5 +86,17 @@ class LogServletMultipartArtifactTest {
 		assertEquals("/logs/" + stepId + "/" + CLI_LOGGER_NAME, multipart.get("href").asText());
 		assertEquals(Files.size(logFile), multipart.get("size").asLong());
 		assertFalse(loggers.contains("parts.upload.csv"), "not listed again by file name: " + loggers);
+	}
+
+	/** The logger is asynchronous and a flush does not wait for its thread to take the event, so poll. */
+	private static void awaitWritten(final Path file) throws Exception {
+		for (int attempt = 0; attempt < 250; attempt++) {
+			LogUtil.flushAll();
+			if (Files.exists(file) && Files.size(file) > 0) {
+				return;
+			}
+			Thread.sleep(20);
+		}
+		assertTrue(Files.exists(file) && Files.size(file) > 0, "the Multipart logger wrote " + file);
 	}
 }

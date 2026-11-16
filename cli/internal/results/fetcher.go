@@ -31,7 +31,8 @@ const (
 var integrityNodeSourcePattern = regexp.MustCompile(`^(?:(written|verify-input|verified|integrity\.failures|integrity\.performance|multipart\.lifecycle|operation\.lifecycle|range\.read|nic\.paths|delete\.metrics\.total|delete\.requests|delete\.objects|delete\.verification|items)\.node-[0-9]{3}\.csv|(?:nic\.set|event\.loops)\.node-[0-9]{3}\.json)$`)
 
 // entryNodeSourceSuffixes are the node-000 forms of the per-node sources: the entry engine's own
-// copy, which a single-engine step also lists.
+// copy. A single-engine step lists the .csv form (operation.lifecycle.node-000.csv); the .json form
+// appears only beside node-001 or higher copies.
 var entryNodeSourceSuffixes = []string{".node-000.csv", ".node-000.json"}
 
 // ArtifactSpec defines a log endpoint and its output filename suffix.
