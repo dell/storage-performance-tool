@@ -9,7 +9,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	dockerconf "github.com/dell/storage-performance-tool/cli/internal/docker"
 	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/logging"
 )
 
 // Checker defines preflight validation operations for a host
@@ -107,8 +110,20 @@ func (c *DefaultChecker) EnsureImage(ctx context.Context, host *hostparse.HostIn
 	if constants.IsDevImage(image) {
 		return fmt.Errorf("dev image %s not present on %s; build it with `make docker-local` and distribute it with engine/tools/push-worker-image.sh", image, host.Original)
 	}
+	if skipImagePullRequested() {
+		// The skip spares only the pull of a present image; a missing one is pulled, as on both
+		// engine launch routes. Log it so spt.log explains the pull after the skip message.
+		logging.LogInfo("preflight", "Docker image not found locally; pulling despite skip", "host", host.Original, "image", image)
+	}
 	_, err = ops.PullImage(tctx, image)
 	return err
+}
+
+// skipImagePullRequested reports whether SPT_SKIP_IMAGE_PULL holds a true boolean, the way the
+// engine launch routes read it. It only selects the log line in EnsureImage; it never skips a pull.
+func skipImagePullRequested() bool {
+	skip, err := strconv.ParseBool(strings.TrimSpace(os.Getenv(constants.EnvSkipImagePull)))
+	return err == nil && skip
 }
 
 // CheckPorts verifies that the provided ports are not in use
