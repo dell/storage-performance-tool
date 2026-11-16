@@ -428,8 +428,10 @@ SPT's custom collector is registered for distributed metrics contexts. Therefore
 | `spt_failed_op_*` | corresponding count/rate | Failed operations |
 | `spt_corrupt_op_*` | corresponding count/rate | Integrity failures, when available |
 | `spt_elapsed_time_value` | seconds | Elapsed step time |
-| `spt_test_state_value` | enum gauge | `0` idle, `1` running, `2` completed |
+| `spt_test_state_value` | enum gauge | `0` no snapshot yet, `1` running, `2` limit reached; see below |
 | `spt_completion_percent_value` | percent | Bounded context progress |
+
+`spt_test_state_value` follows the rule of the JSON `test_state` for an active context: `2` needs every limit the context has to be reached (its operation count done, its time limit elapsed) and no operation in flight, and a step with neither limit reads `1` until its series ends. The series exists only on the entry node, one per distributed context, while a step is active, so the end of a step shows as the series ending; there is no retained terminal series. `0` is exported only for a registered context that has no snapshot yet, so it is rarely seen; an idle node has no `spt_test_state_value` series.
 
 Prometheus timing values are seconds; JSON timing distribution values are microseconds. The current Prometheus collector does not export percentile series. Use JSON schema-4 timing distributions or the final metrics artifact when percentiles are required.
 
