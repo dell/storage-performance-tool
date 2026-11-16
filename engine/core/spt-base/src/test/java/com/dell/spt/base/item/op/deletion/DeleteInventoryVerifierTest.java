@@ -24,6 +24,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.core.LogEvent;
@@ -305,14 +306,41 @@ class DeleteInventoryVerifierTest {
 						})) {
 
 			assertEquals(3, report.unresolved());
-			assertTrue(report.elapsed().compareTo(timeout) >= 0, "verification ended before its deadline");
+			assertTrue(report.elapsed().compareTo(timeout.minusMillis(DeleteInventoryVerifier.FIRST_RETRY_PAUSE_MILLIS)) >= 0,
+							"verification ended before its final pass");
 			for (final String key : List.of("current", "exact", "uncertain")) {
 				final int probes = calls.get(key).get();
-				// Pauses of 10, 20, 40 ... ms capped at 1 s allow about 11 passes in 5 s; a fixed
+				// Pauses of 10, 20, 40 ... ms capped at 1 s allow about 12 passes in 5 s; a fixed
 				// 10 ms pause allowed hundreds.
 				assertTrue(probes <= 15, () -> key + " was probed " + probes + " times in " + timeout);
 				assertTrue(probes >= 2, () -> key + " was never retried");
 			}
+		}
+	}
+
+	@Test
+	void targetThatSettlesJustBeforeTheDeadlineIsSeenByAFinalPass(@TempDir final Path temp)
+					throws Exception {
+		final Duration timeout = Duration.ofSeconds(3);
+		final AtomicLong settlesAt = new AtomicLong();
+		final AtomicLong lastProbe = new AtomicLong();
+		settlesAt.set(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(2_800));
+		try (final DeleteVerificationReport report = DeleteInventoryVerifier.verify(
+						singleTargetManifest(temp),
+						1,
+						DeleteVerificationPhase.POST_DELETE,
+						timeout,
+						target -> {
+							lastProbe.set(System.nanoTime());
+							return System.nanoTime() < settlesAt.get()
+											? DeleteVerificationProbe.Presence.PRESENT
+											: DeleteVerificationProbe.Presence.ABSENT;
+						})) {
+			// Back-off places retry passes at about 0, 10, 30 ... 1270 and 2270 ms; without a reserved
+			// final pass the last check came at about 2270 ms plus pass overhead, before the target settled.
+			assertTrue(report.successful(), () -> "the target was still present at its last check, "
+							+ TimeUnit.NANOSECONDS.toMillis(lastProbe.get() - settlesAt.get()) + " ms from settling");
+			assertTrue(report.elapsed().compareTo(timeout) <= 0, "the deadline moved");
 		}
 	}
 
@@ -340,15 +368,7 @@ class DeleteInventoryVerifierTest {
 	@Test
 	void unresolvedTargetsAreReportedOnceAtWarnWithTheirCountAndCause(
 					@TempDir final Path temp) throws Exception {
-		final var appender = new CapturingAppender();
-		appender.start();
-		final var logger = LoggerContext.getContext(false).getLogger(Loggers.MSG.getName());
-		logger.addAppender(appender);
-		try {
-			// Engine loggers are asynchronous: count only what follows a marker logged after attaching.
-			Loggers.MSG.warn(appender.marker);
-			awaitTrue(() -> appender.armed, "the marker was not logged");
-
+		final List<String> warnings = captureWarnings("Standalone DELETE pre-validation left ", () -> {
 			try (final var resolved = DeleteInventoryVerifier.verify(
 							manifest(temp),
 							3,
@@ -365,31 +385,79 @@ class DeleteInventoryVerifierTest {
 							new DeleteVerificationProbe() {
 								@Override
 								public Presence presence(final DeleteTarget target) {
-									throw new AssertionError("verification must observe, not call presence");
+									throw new AssertionError("an observe() override must be used as it is");
 								}
 
 								@Override
 								public Observation observe(final DeleteTarget target) {
 									return "current".equals(target.key())
 													? Observation.of(Presence.PRESENT)
-													: Observation.unresolved("closed before the response");
+													: Observation.unresolved(DeleteVerificationCause.noResponse());
 								}
 							})) {
 				assertEquals(2, unresolved.unresolved());
 			}
+		});
+		assertEquals(1, warnings.size(), warnings::toString);
+		final String message = warnings.get(0);
+		assertTrue(message.startsWith("Standalone DELETE pre-validation left 2 selected identity/identities "
+						+ "unresolved after "), message);
+		assertTrue(message.endsWith(
+						"; last cause: no HEAD response (the connection closed or the response timed out)"), message);
+	}
 
-			awaitTrue(() -> !appender.messages.isEmpty(), "the unresolved WARN was not logged");
-			Thread.sleep(200);
-			assertEquals(1, appender.messages.size(), appender.messages::toString);
-			final String message = appender.messages.get(0);
-			assertTrue(message.startsWith("Standalone DELETE pre-validation left 2 selected identity/identities "
-							+ "unresolved after "), message);
-			assertTrue(message.endsWith("; last cause: closed before the response"), message);
-			assertTrue(appender.warn, "logged at WARN");
-		} finally {
-			logger.removeAppender(appender);
-			appender.stop();
-		}
+	@Test
+	void causeOfATargetThatLaterResolvedIsNotReportedForTheOneStillUnresolved(
+					@TempDir final Path temp) throws Exception {
+		final Path manifest = temp.resolve("stale-cause-input.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\nbucket,stuck,1,\nbucket,transient,1,\n");
+		final AtomicInteger transientCalls = new AtomicInteger();
+		final List<String> warnings = captureWarnings("Standalone DELETE pre-validation left ", () -> {
+			try (final var report = DeleteInventoryVerifier.verify(
+							manifest,
+							2,
+							DeleteVerificationPhase.PRE_DELETE,
+							Duration.ofMillis(300),
+							target -> {
+								if ("stuck".equals(target.key())) {
+									return DeleteVerificationProbe.Presence.UNRESOLVED;
+								}
+								if (transientCalls.incrementAndGet() == 1) {
+									DeleteVerificationCause.report(DeleteVerificationCause.httpStatus(503));
+									return DeleteVerificationProbe.Presence.UNRESOLVED;
+								}
+								return DeleteVerificationProbe.Presence.PRESENT;
+							})) {
+				assertEquals(1, report.unresolved());
+				assertEquals(1, report.present());
+			}
+		});
+		assertEquals(1, warnings.size(), warnings::toString);
+		assertTrue(warnings.get(0).startsWith("Standalone DELETE pre-validation left 1 "), warnings::toString);
+		assertTrue(warnings.get(0).endsWith("; last cause: not reported by the storage driver"), warnings::toString);
+	}
+
+	@Test
+	void exceptionTextFromAProbeNeverReachesTheWarning(@TempDir final Path temp) throws Exception {
+		final String signedUrl = "https://bucket.example.invalid/key?X-Amz-Credential=SYNTHETICKEY"
+						+ "&X-Amz-Signature=0123456789abcdef";
+		final List<String> warnings = captureWarnings("Standalone DELETE post-verification left ", () -> {
+			try (final var report = DeleteInventoryVerifier.verify(
+							singleTargetManifest(temp),
+							1,
+							DeleteVerificationPhase.POST_DELETE,
+							Duration.ofMillis(200),
+							target -> {
+								throw new IllegalStateException("HEAD failed for " + signedUrl + "\nsecond line");
+							})) {
+				assertEquals(1, report.unresolved());
+			}
+		});
+		assertEquals(1, warnings.size(), warnings::toString);
+		final String message = warnings.get(0);
+		assertTrue(message.endsWith("; last cause: probe error (IllegalStateException)"), message);
+		assertFalse(message.contains("example.invalid") || message.contains("X-Amz") || message.contains("\n"),
+						message);
 	}
 
 	@Test
@@ -422,6 +490,34 @@ class DeleteInventoryVerifierTest {
 		return manifest;
 	}
 
+	/**
+	 * Runs {@code body} and returns the messages starting with {@code prefix} logged between two
+	 * markers. Engine loggers are asynchronous, so the end marker drains what the body logged.
+	 */
+	private static List<String> captureWarnings(final String prefix, final ThrowingRunnable body)
+					throws Exception {
+		final var appender = new CapturingAppender(prefix);
+		appender.start();
+		final var logger = LoggerContext.getContext(false).getLogger(Loggers.MSG.getName());
+		logger.addAppender(appender);
+		try {
+			Loggers.MSG.warn(appender.startMarker);
+			awaitTrue(() -> appender.armed, "the start marker was not logged");
+			body.run();
+			Loggers.MSG.warn(appender.endMarker);
+			awaitTrue(() -> appender.drained, "the end marker was not logged");
+			return List.copyOf(appender.messages);
+		} finally {
+			logger.removeAppender(appender);
+			appender.stop();
+		}
+	}
+
+	@FunctionalInterface
+	private interface ThrowingRunnable {
+		void run() throws Exception;
+	}
+
 	private static void awaitTrue(final java.util.function.BooleanSupplier condition, final String message)
 					throws InterruptedException {
 		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
@@ -433,22 +529,26 @@ class DeleteInventoryVerifierTest {
 
 	private static final class CapturingAppender extends AbstractAppender {
 		final List<String> messages = Collections.synchronizedList(new ArrayList<>());
-		final String marker = "DeleteInventoryVerifierTest marker " + System.nanoTime();
+		final String startMarker = "DeleteInventoryVerifierTest start " + System.nanoTime();
+		final String endMarker = "DeleteInventoryVerifierTest end " + System.nanoTime();
+		final String prefix;
 		volatile boolean armed;
-		volatile boolean warn = true;
+		volatile boolean drained;
 
-		CapturingAppender() {
+		CapturingAppender(final String prefix) {
 			super("testDeleteVerificationWarning", null, null, true, Property.EMPTY_ARRAY);
+			this.prefix = prefix;
 		}
 
 		@Override
 		public void append(final LogEvent event) {
 			final String message = event.getMessage().getFormattedMessage();
-			if (message.equals(marker)) {
+			if (message.equals(startMarker)) {
 				armed = true;
-			} else if (armed && message.startsWith("Standalone DELETE ")) {
-				messages.add(message);
-				warn &= Level.WARN.equals(event.getLevel());
+			} else if (message.equals(endMarker)) {
+				drained = true;
+			} else if (armed && !drained && message.startsWith(prefix)) {
+				messages.add(Level.WARN.equals(event.getLevel()) ? message : "not at WARN: " + message);
 			}
 		}
 	}

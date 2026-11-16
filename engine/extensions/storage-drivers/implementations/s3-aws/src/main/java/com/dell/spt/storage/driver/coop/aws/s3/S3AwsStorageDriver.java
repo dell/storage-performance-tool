@@ -24,6 +24,7 @@ import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.deletion.DeleteTransportResult;
 import com.dell.spt.base.item.op.deletion.DeleteTransportTargetResult;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationCause;
 import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.list.ListOperation;
@@ -41,6 +42,7 @@ import org.slf4j.LoggerFactory;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.io.IOException;
+import java.net.ConnectException;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.TimeoutException;
@@ -58,6 +60,7 @@ import java.util.regex.Pattern;
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscriber;
 import org.reactivestreams.Subscription;
+import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.core.exception.ApiCallAttemptTimeoutException;
 import software.amazon.awssdk.core.exception.ApiCallTimeoutException;
 import software.amazon.awssdk.core.exception.SdkClientException;
@@ -1313,12 +1316,6 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	/** Checks the requested current-key or exact-version identity with an SDK HEAD call. */
 	@Override
 	public Presence presence(final DeleteTarget target) {
-		return observe(target).presence();
-	}
-
-	/** Checks {@code target} as {@link #presence} does and names the reason an unresolved result was not classified. */
-	@Override
-	public Observation observe(final DeleteTarget target) {
 		final var request = HeadObjectRequest.builder()
 						.bucket(target.bucket())
 						.key(target.key());
@@ -1327,11 +1324,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 		try {
 			deleteClient(target.versionId() != null).headObject(request.build()).get();
-			return Observation.of(Presence.PRESENT);
+			return Presence.PRESENT;
 		} catch (final InterruptedException interrupted) {
 			Thread.currentThread().interrupt();
 			throwUncheckedIfInterrupted(interrupted);
-			return Observation.of(Presence.UNRESOLVED);
+			return Presence.UNRESOLVED;
 		} catch (final RuntimeException | ExecutionException failure) {
 			Throwable cause = failure;
 			while (cause.getCause() != null && cause != cause.getCause()) {
@@ -1339,15 +1336,30 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			}
 			if (cause instanceof NoSuchKeyException
 							|| cause instanceof S3Exception s3Failure && s3Failure.statusCode() == 404) {
-				return Observation.of(Presence.ABSENT);
+				return Presence.ABSENT;
 			}
 			if (cause instanceof InterruptedException interrupted) {
 				Thread.currentThread().interrupt();
 				throwUncheckedIfInterrupted(interrupted);
 			}
 			LOG.debug("DELETE verification HEAD was unresolved: {}", cause.toString());
-			return Observation.unresolved(cause.toString());
+			DeleteVerificationCause.report(unresolvedCause(cause));
+			return Presence.UNRESOLVED;
 		}
+	}
+
+	/** An allowlisted cause for an SDK failure: a numeric status or the failure's class, never its text. */
+	static DeleteVerificationCause unresolvedCause(final Throwable rootCause) {
+		if (rootCause instanceof AwsServiceException service && service.statusCode() > 0) {
+			return DeleteVerificationCause.httpStatus(service.statusCode());
+		}
+		if (rootCause instanceof ConnectException) {
+			return DeleteVerificationCause.connectionFailure(rootCause);
+		}
+		if (rootCause instanceof IOException) {
+			return DeleteVerificationCause.ioError(rootCause);
+		}
+		return DeleteVerificationCause.probeError(rootCause);
 	}
 
 	CompletableFuture<Void> deleteObject(final O op) {

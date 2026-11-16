@@ -29,6 +29,10 @@ import com.dell.spt.base.item.op.deletion.DeleteFailureClassification;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOutcome;
 import com.dell.spt.base.item.op.deletion.DeleteTargetOutcome;
+import com.dell.spt.base.item.op.deletion.DeleteInventoryVerifier;
+import com.dell.spt.base.item.op.deletion.DeleteTarget;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationCause;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationPhase;
 import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
 import com.dell.spt.base.item.op.deletion.SeededDeleteCleanupFinalizer;
 import com.dell.spt.base.load.step.ScenarioUtil;
@@ -146,7 +150,7 @@ final class S3DeleteRequestIntegrationTest {
 			assertEquals(DeleteVerificationProbe.Presence.UNRESOLVED,
 							driver.presence(target("unresolved", null)));
 			assertEquals(
-							DeleteVerificationProbe.Observation.unresolved("HEAD returned 503 Service Unavailable"),
+							DeleteVerificationProbe.Observation.unresolved(DeleteVerificationCause.httpStatus(503)),
 							driver.observe(target("unresolved", null)));
 		}
 
@@ -158,6 +162,42 @@ final class S3DeleteRequestIntegrationTest {
 		assertEquals("versionId=v%2B1%2F%3D", heads.get(1).rawQuery());
 		assertTrue(heads.stream().allMatch(
 						request -> request.authorization().startsWith(S3Api.AUTH_V4_PREFIX)));
+	}
+
+	@Test
+	void verificationUsesASubclassOverrideOfPresence(@TempDir final Path temp) throws Exception {
+		headResponseStatus = ignored -> 404;
+		final Path manifest = temp.resolve("verify-input.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\nbucket,overridden,1,\n");
+		final AtomicInteger overrideCalls = new AtomicInteger();
+		final Config config = S3StorageDriverTest.baseConfig(false, 4, false, null, "127.0.0.1");
+		config.val("storage-driver-limit-concurrency", 1);
+		config.val("storage-driver-limit-queue-input", 8);
+		config.val("storage-net-node-port", server.getAddress().getPort());
+		config.val("storage-net-timeoutMilliSec", 2_000);
+		try (final var driver = new S3StorageDriver<IntegrityManifestDataItem, DeleteRequestOperation>(
+						"delete-presence-override-test",
+						DataInput.instance(
+										null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false, 0.0, true),
+						config.configVal("storage"),
+						false,
+						config.intVal("load-batch-size")) {
+			@Override
+			public Presence presence(final DeleteTarget target) {
+				overrideCalls.incrementAndGet();
+				return Presence.PRESENT;
+			}
+		}) {
+			driver.start();
+			try (final var report = DeleteInventoryVerifier.verify(
+							manifest, 1, DeleteVerificationPhase.PRE_DELETE, java.time.Duration.ofSeconds(1), driver)) {
+				assertEquals(1, overrideCalls.get(), "verification bypassed the presence() override");
+				assertEquals(1, report.present());
+				assertTrue(report.successful());
+			}
+		}
+		assertTrue(requests.stream().noneMatch(request -> "HEAD".equals(request.method())
+						&& request.rawPath().contains("overridden")), () -> "the driver's own HEAD ran: " + requests);
 	}
 
 	@Test

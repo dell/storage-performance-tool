@@ -21,6 +21,7 @@ import java.util.concurrent.TimeUnit;
  * Performs one complete inventory pass followed by a bounded settle loop. The first retry pass
  * follows the complete pass at once; later passes back off exponentially, so a probe that fails at
  * once (a closed or refused connection) is not retried at the pause rate for the whole timeout.
+ * When the timeout falls inside the next pause, one last pass runs just before it instead.
  */
 public final class DeleteInventoryVerifier {
 	/** The pause after the first retry pass, doubled after each later pass. */
@@ -65,19 +66,22 @@ public final class DeleteInventoryVerifier {
 							? Long.MAX_VALUE
 							: started + retryNanos;
 			int retryPasses = 0;
-			while (hasRetryable(phase, results, selectedCount) && System.nanoTime() < deadline) {
+			boolean finalPass = false;
+			while (!finalPass && hasRetryable(phase, results, selectedCount) && System.nanoTime() < deadline) {
 				retryPass(selectionManifest, phase, deadline, probe, results, selectedCount, causes);
 				retryPasses++;
 				if (hasRetryable(phase, results, selectedCount)) {
 					final long remainingNanos = deadline - System.nanoTime();
 					if (remainingNanos > 0) {
-						try {
-							TimeUnit.NANOSECONDS.sleep(Math.min(
-											remainingNanos,
-											TimeUnit.MILLISECONDS.toNanos(retryPauseMillis(retryPasses))));
-						} catch (final InterruptedException interrupted) {
-							Thread.currentThread().interrupt();
-							throwUnchecked(interrupted);
+						final long pauseNanos = TimeUnit.MILLISECONDS.toNanos(retryPauseMillis(retryPasses));
+						// When the deadline falls inside the next pause, keep one last pass just before it,
+						// as close to it as the shortest pause, and end after that pass.
+						final long reserveNanos = TimeUnit.MILLISECONDS.toNanos(FIRST_RETRY_PAUSE_MILLIS);
+						finalPass = pauseNanos >= remainingNanos - reserveNanos;
+						sleep(finalPass ? Math.max(0, remainingNanos - reserveNanos) : pauseNanos);
+						if (finalPass && hasRetryable(phase, results, selectedCount)) {
+							retryPass(selectionManifest, phase, deadline, probe, results, selectedCount, causes);
+							retryPasses++;
 						}
 					}
 				}
@@ -88,7 +92,7 @@ public final class DeleteInventoryVerifier {
 			final long unresolved = report.unresolved();
 			if (unresolved > 0) {
 				Loggers.MSG.warn(unresolvedWarning(
-								phase, unresolved, retryPasses + 1, report.elapsedNanos(), causes.last));
+								phase, unresolved, retryPasses + 1, report.elapsedNanos(), causes.current(report)));
 			}
 			results = null;
 			return report;
@@ -114,7 +118,7 @@ public final class DeleteInventoryVerifier {
 					throw new IOException("DELETE verification inventory exceeds its frozen count");
 				}
 				final DeleteTarget target = new DeleteTarget(item, index);
-				output.write(DeleteVerificationReport.encode(safePresence(probe, target, causes)));
+				output.write(DeleteVerificationReport.encode(safePresence(probe, target, index, causes)));
 				index++;
 			}
 			if (index != selectedCount) {
@@ -145,7 +149,7 @@ public final class DeleteInventoryVerifier {
 				if (retryable(phase, DeleteVerificationReport.decode(ledger.readByte()))) {
 					final DeleteTarget target = new DeleteTarget(item, index);
 					ledger.seek(index);
-					ledger.write(DeleteVerificationReport.encode(safePresence(probe, target, causes)));
+					ledger.write(DeleteVerificationReport.encode(safePresence(probe, target, index, causes)));
 				}
 				index++;
 			}
@@ -155,17 +159,18 @@ public final class DeleteInventoryVerifier {
 	private static DeleteVerificationProbe.Presence safePresence(
 					final DeleteVerificationProbe probe,
 					final DeleteTarget target,
+					final long index,
 					final UnresolvedCause causes) {
 		try {
 			final var observation = probe.observe(target);
 			final var value = observation == null ? null : observation.presence();
 			if (value == null || value == DeleteVerificationProbe.Presence.UNRESOLVED) {
-				causes.record(observation == null ? null : observation.unresolvedCause());
+				causes.record(index, observation == null ? null : observation.unresolvedCause());
 				return DeleteVerificationProbe.Presence.UNRESOLVED;
 			}
 			return value;
 		} catch (final RuntimeException failure) {
-			causes.record(failure.toString());
+			causes.record(index, DeleteVerificationCause.probeError(failure));
 			return DeleteVerificationProbe.Presence.UNRESOLVED;
 		}
 	}
@@ -185,25 +190,41 @@ public final class DeleteInventoryVerifier {
 					final long unresolved,
 					final int passes,
 					final long elapsedNanos,
-					final String lastCause) {
+					final DeleteVerificationCause lastCause) {
 		return "Standalone DELETE " + phaseName(phase) + " left " + unresolved
 						+ " selected identity/identities unresolved after " + passes + " pass(es) in "
 						+ TimeUnit.NANOSECONDS.toMillis(elapsedNanos) + " ms; last cause: "
-						+ (lastCause == null || lastCause.isBlank() ? "not reported by the storage driver" : lastCause);
+						+ (lastCause == null ? "not reported by the storage driver" : lastCause);
 	}
 
 	private static String phaseName(final DeleteVerificationPhase phase) {
 		return phase == DeleteVerificationPhase.PRE_DELETE ? "pre-validation" : "post-verification";
 	}
 
-	/** The most recent reason a probe left a target unresolved during one verification phase. */
-	private static final class UnresolvedCause {
-		private String last;
+	private static void sleep(final long nanos) {
+		try {
+			TimeUnit.NANOSECONDS.sleep(nanos);
+		} catch (final InterruptedException interrupted) {
+			Thread.currentThread().interrupt();
+			throwUnchecked(interrupted);
+		}
+	}
 
-		void record(final String cause) {
-			if (cause != null && !cause.isBlank()) {
-				last = cause;
-			}
+	/** The latest unresolved observation of one verification phase: its identity and its cause, if any. */
+	private static final class UnresolvedCause {
+		private long index = -1;
+		private DeleteVerificationCause cause;
+
+		void record(final long index, final DeleteVerificationCause cause) {
+			this.index = index;
+			this.cause = cause;
+		}
+
+		/** The cause, only while its identity is still unresolved in {@code report}. */
+		DeleteVerificationCause current(final DeleteVerificationReport report) {
+			return index >= 0 && report.presence(index) == DeleteVerificationProbe.Presence.UNRESOLVED
+							? cause
+							: null;
 		}
 	}
 

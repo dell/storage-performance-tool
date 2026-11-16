@@ -39,6 +39,7 @@ import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.deletion.DeleteTransportResult;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationCause;
 import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.list.ListOperation;
@@ -1224,12 +1225,6 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	/** Uses the ordinary HTTP HEAD path for both Netty S3 and its RDMA transport subclass. */
 	@Override
 	public Presence presence(final DeleteTarget target) {
-		return observe(target).presence();
-	}
-
-	/** Checks {@code target} with an HTTP HEAD and names the reason an unresolved result was not classified. */
-	@Override
-	public Observation observe(final DeleteTarget target) {
 		final String objectUri = standaloneObjectUri(target.bucket(), target);
 		final String encodedVersionId = target.versionId() == null ? null : encodeVersionId(target.versionId());
 		final String uri = encodedVersionId == null ? objectUri : objectUri + VERSION_ID_QUERY + encodedVersionId;
@@ -1256,26 +1251,25 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		try {
 			response = executeHttpRequest(request, false);
 			if (response == null) {
-				final String cause = "the connection closed before the HEAD response";
-				Loggers.MSG.debug("DELETE verification HEAD was unresolved: {}", cause);
-				return Observation.unresolved(cause);
+				DeleteVerificationCause.report(DeleteVerificationCause.noResponse());
+				return Presence.UNRESOLVED;
 			}
 			if (response.status().code() == 404) {
-				return Observation.of(Presence.ABSENT);
+				return Presence.ABSENT;
 			}
 			if (HttpStatusClass.SUCCESS.equals(response.status().codeClass())) {
-				return Observation.of(Presence.PRESENT);
+				return Presence.PRESENT;
 			}
-			final String cause = "HEAD returned " + response.status();
-			Loggers.MSG.debug("DELETE verification HEAD was unresolved: {}", cause);
-			return Observation.unresolved(cause);
+			DeleteVerificationCause.report(DeleteVerificationCause.httpStatus(response.status().code()));
+			return Presence.UNRESOLVED;
 		} catch (final InterruptedException interrupted) {
 			Thread.currentThread().interrupt();
 			throwUnchecked(interrupted);
-			return Observation.of(Presence.UNRESOLVED);
+			return Presence.UNRESOLVED;
 		} catch (final ConnectException failure) {
 			Loggers.MSG.debug("DELETE verification HEAD was unresolved: {}", failure.toString());
-			return Observation.unresolved(failure.toString());
+			DeleteVerificationCause.report(DeleteVerificationCause.connectionFailure(failure));
+			return Presence.UNRESOLVED;
 		} finally {
 			if (response != null) {
 				response.release();

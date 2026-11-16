@@ -24,9 +24,9 @@ public interface DeleteVerificationProbe {
 	 * One probe result and, for an unresolved one, why the target could not be classified.
 	 *
 	 * @param presence the classification; {@code null} counts as {@link Presence#UNRESOLVED}
-	 * @param unresolvedCause a short reason for an unresolved result, or {@code null} when unknown
+	 * @param unresolvedCause why an unresolved result was not classified, or {@code null} when unknown
 	 */
-	record Observation(Presence presence, String unresolvedCause) {
+	record Observation(Presence presence, DeleteVerificationCause unresolvedCause) {
 
 		/** A classified or unresolved result without a reported cause. */
 		public static Observation of(final Presence presence) {
@@ -34,19 +34,25 @@ public interface DeleteVerificationProbe {
 		}
 
 		/** An unresolved result with the reason the target could not be classified. */
-		public static Observation unresolved(final String cause) {
+		public static Observation unresolved(final DeleteVerificationCause cause) {
 			return new Observation(Presence.UNRESOLVED, cause);
 		}
 	}
 
-	/** Checks the exact identity represented by {@code target}. */
+	/**
+	 * Checks the exact identity represented by {@code target}. This remains the method a driver
+	 * implements or overrides; it may report why a result is unresolved with
+	 * {@link DeleteVerificationCause#report}.
+	 */
 	Presence presence(DeleteTarget target);
 
 	/**
-	 * Checks {@code target} as {@link #presence} does and reports why an unresolved result was not
-	 * classified. Verification calls this method; a probe that knows the cause overrides it.
+	 * Checks {@code target} and reports why an unresolved result was not classified. Verification
+	 * calls this method. The default calls {@link #presence} exactly once and collects the cause it
+	 * reported; a probe that overrides this method is used as it is, and must not call it from
+	 * {@link #presence}.
 	 */
 	default Observation observe(final DeleteTarget target) {
-		return Observation.of(presence(target));
+		return DeleteVerificationCause.observeThroughPresence(this, target);
 	}
 }

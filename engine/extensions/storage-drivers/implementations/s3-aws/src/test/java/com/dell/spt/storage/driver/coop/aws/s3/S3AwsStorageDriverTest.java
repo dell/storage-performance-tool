@@ -220,6 +220,78 @@ public class S3AwsStorageDriverTest {
 	}
 
 	@Test
+	void verificationWarningCarriesNoSdkExceptionText(@org.junit.jupiter.api.io.TempDir final java.nio.file.Path temp)
+					throws Exception {
+		final String signedUrl = "https://bucket.example.invalid/key?X-Amz-Credential=SYNTHETICKEY"
+						+ "&X-Amz-Signature=0123456789abcdef";
+		final CompletableFuture<HeadObjectResponse> failed = new CompletableFuture<>();
+		failed.completeExceptionally(software.amazon.awssdk.core.exception.SdkClientException.create(
+						"Unable to execute HTTP request: " + signedUrl + "\nsecond line"));
+		final CompletableFuture<HeadObjectResponse> unavailable = new CompletableFuture<>();
+		unavailable.completeExceptionally(software.amazon.awssdk.services.s3.model.S3Exception.builder()
+						.statusCode(503)
+						.message("Service Unavailable for " + signedUrl)
+						.build());
+		when(mockS3Client.headObject(any(HeadObjectRequest.class))).thenAnswer(invocation -> {
+			final HeadObjectRequest request = invocation.getArgument(0);
+			return "client".equals(request.key()) ? failed : unavailable;
+		});
+		final java.nio.file.Path manifest = temp.resolve("verify-input.csv");
+		java.nio.file.Files.writeString(manifest, "bucket,key,size,version_id\nbucket,client,1,\n");
+		final java.nio.file.Path unavailableManifest = temp.resolve("verify-unavailable.csv");
+		java.nio.file.Files.writeString(unavailableManifest, "bucket,key,size,version_id\nbucket,status,1,\n");
+
+		final List<String> warnings = Collections.synchronizedList(new ArrayList<>());
+		final String endMarker = "S3AwsStorageDriverTest end " + System.nanoTime();
+		final var drained = new AtomicBoolean();
+		final var appender = new org.apache.logging.log4j.core.appender.AbstractAppender(
+						"testAwsVerificationWarning", null, null, true,
+						org.apache.logging.log4j.core.config.Property.EMPTY_ARRAY) {
+			@Override
+			public void append(final org.apache.logging.log4j.core.LogEvent event) {
+				final String message = event.getMessage().getFormattedMessage();
+				if (message.equals(endMarker)) {
+					drained.set(true);
+				} else if (message.startsWith("Standalone DELETE pre-validation left 1 ")) {
+					warnings.add(message);
+				}
+			}
+		};
+		appender.start();
+		final var logger = org.apache.logging.log4j.core.LoggerContext.getContext(false)
+						.getLogger(com.dell.spt.base.logging.Loggers.MSG.getName());
+		logger.addAppender(appender);
+		try {
+			for (final java.nio.file.Path input : List.of(manifest, unavailableManifest)) {
+				try (final var report = com.dell.spt.base.item.op.deletion.DeleteInventoryVerifier.verify(
+								input,
+								1,
+								com.dell.spt.base.item.op.deletion.DeleteVerificationPhase.PRE_DELETE,
+								java.time.Duration.ofMillis(100),
+								drv)) {
+					assertEquals(1, report.unresolved());
+				}
+			}
+			com.dell.spt.base.logging.Loggers.MSG.warn(endMarker);
+			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+			while (!drained.get() && System.nanoTime() < deadline) {
+				Thread.sleep(10);
+			}
+			assertTrue(drained.get(), "the end marker was not logged");
+		} finally {
+			logger.removeAppender(appender);
+			appender.stop();
+		}
+		assertEquals(2, warnings.size(), warnings::toString);
+		assertTrue(warnings.get(0).endsWith("; last cause: probe error (SdkClientException)"), warnings::toString);
+		assertTrue(warnings.get(1).endsWith("; last cause: HTTP 503"), warnings::toString);
+		for (final String warning : warnings) {
+			assertFalse(warning.contains("example.invalid") || warning.contains("X-Amz")
+							|| warning.contains("Unavailable") || warning.contains("\n"), warning);
+		}
+	}
+
+	@Test
 	void verificationPresenceForwardsAsyncInterruption() {
 		final InterruptedException expected = new InterruptedException("external verification interrupt");
 		final CompletableFuture<HeadObjectResponse> interrupted = new CompletableFuture<>();

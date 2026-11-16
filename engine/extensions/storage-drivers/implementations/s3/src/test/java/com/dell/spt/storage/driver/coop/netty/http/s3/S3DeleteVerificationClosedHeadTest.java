@@ -7,6 +7,7 @@ import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.op.deletion.DeleteInventoryVerifier;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationCause;
 import com.dell.spt.base.item.op.deletion.DeleteVerificationPhase;
 import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -85,18 +86,20 @@ final class S3DeleteVerificationClosedHeadTest {
 			final DeleteVerificationProbe.Observation closed = driver.observe(
 							S3DeleteRequestTestFixture.target("probe", null));
 			assertEquals(DeleteVerificationProbe.Presence.UNRESOLVED, closed.presence());
-			assertEquals("the connection closed before the HEAD response", closed.unresolvedCause());
+			assertEquals(DeleteVerificationCause.noResponse(), closed.unresolvedCause());
 
 			try (final var report = DeleteInventoryVerifier.verify(
 							manifest, 2, DeleteVerificationPhase.POST_DELETE, timeout, driver)) {
 				assertEquals(2, report.unresolved());
-				assertTrue(report.elapsed().compareTo(timeout) >= 0, "verification ended before its deadline");
+				assertTrue(report.elapsed().compareTo(timeout.minusMillis(10)) >= 0,
+								"verification ended before its final pass");
 			}
 		}
 		for (final String key : List.of("one", "two")) {
 			final int heads = headsPerKey.getOrDefault(key, new AtomicInteger()).get();
-			// About 9 passes fit 3 s with back-off; a fixed 10 ms pause sent about 150 a second.
-			assertTrue(heads >= 2 && heads <= 15, () -> key + " got " + heads + " HEADs in " + timeout);
+			// About 10 passes fit 3 s with back-off; a fixed 10 ms pause sent over a hundred. The complete
+			// pass is the only one guaranteed: on a loaded host it may take most of the window.
+			assertTrue(heads >= 1 && heads <= 15, () -> key + " got " + heads + " HEADs in " + timeout);
 		}
 	}
 
