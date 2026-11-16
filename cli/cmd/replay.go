@@ -221,6 +221,9 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	networkMode, _ := cmd.Flags().GetString("network-mode")
 	rmiPortStart, _ := cmd.Flags().GetInt("rmi-port-start")
 	rmiPortCount, _ := cmd.Flags().GetInt("rmi-port-count")
+	// The command context ends on Ctrl-C or SIGTERM. The host connection runs on it, as spt run's
+	// does, so a signal during ssh, preflight, an image pull or --force cleanup cancels the connect.
+	replayContext := commandContext(cmd)
 	var replayOrchestrator *tui.MultiHostOrchestrator
 	if orchestratedReplay {
 		if multiHostReplay {
@@ -253,7 +256,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		replayOrchestrator.SetRMIRegistryPort(params.RMIRegistryPort)
 		forceMode, _ := cmd.Flags().GetBool("force")
 		replayOrchestrator.SetForceCleanup(forceMode)
-		if err := connectReplayOrchestrator(context.Background(), replayOrchestrator); err != nil {
+		if err := connectReplayOrchestrator(replayContext, replayOrchestrator); err != nil {
 			return fmt.Errorf("failed to connect to replay host(s): %w", err)
 		}
 	}
@@ -305,7 +308,6 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	_, _ = fmt.Fprintf(out, "Launching replay against %d configured endpoint(s)...\n", len(params.Endpoints))
 	_, _ = fmt.Fprintf(out, "Container: %s\n", sptImage)
 
-	replayContext := commandContext(cmd)
 	var replayMonitor *autoResultsMonitor
 	var runSession *runcontrol.Session
 	if resultsOpts.AutoResults {
