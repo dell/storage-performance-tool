@@ -94,8 +94,11 @@ func TestReplayCommandCancelEndsTheHostConnection(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			go func() {
-				<-connecting
-				cancel()
+				select {
+				case <-connecting:
+					cancel()
+				case <-ctx.Done():
+				}
 			}()
 
 			cmd := newReplayCommandForTest(t)
