@@ -517,18 +517,19 @@ func TestServiceInfo_GetServiceDescription_Integration(t *testing.T) {
 
 // Tests for enhanced detection functionality
 func TestPortChecker_EnhancedDetection(t *testing.T) {
-	t.Run("empty array metrics response", func(t *testing.T) {
+	t.Run("empty metrics bodies are not spt", func(t *testing.T) {
 		checker := NewPortChecker(constants.SptAPIPort)
 
-		// Create response with empty array
-		resp := &http.Response{
-			StatusCode: 200,
-			Body:       io.NopCloser(strings.NewReader("[]")),
-		}
-
-		result := checker.validateSptMetricsResponse(resp)
-		if !result {
-			t.Errorf("validateSptMetricsResponse([]) = false, want true")
+		// No engine since v5.10.0 sends an empty body on a probed metrics
+		// path, so none of these is SPT evidence.
+		for _, body := range []string{"[]", "[ ]", "null", " null\n", "[]\n"} {
+			resp := &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}
+			if checker.validateSptMetricsResponse(resp) {
+				t.Errorf("validateSptMetricsResponse(%q) = true, want false", body)
+			}
 		}
 	})
 
@@ -620,9 +621,9 @@ func TestPortChecker_EnhancedDetection(t *testing.T) {
 				expected: true,
 			},
 			{
-				name:     "jetty powered error",
+				name:     "generic jetty error page",
 				body:     `<html><body><h1>Error</h1><hr/><a href="https://jetty.org/">Powered by Jetty:// 9.4.56.v20240826</a><hr/></body></html>`,
-				expected: true,
+				expected: false,
 			},
 			{
 				name:     "generic 400 error",
