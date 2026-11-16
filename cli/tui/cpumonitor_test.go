@@ -6,6 +6,7 @@ package tui
 
 import (
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -241,4 +242,126 @@ func TestCPUMonitor_Integration(t *testing.T) {
 	if finalReading != postStopReading {
 		t.Error("CPU reading changed after stopping monitor")
 	}
+}
+
+// fakePercent returns a CPU sampler that counts calls and reports value.
+func fakePercent(calls *atomic.Int64, value float64) func(time.Duration, bool) ([]float64, error) {
+	return func(time.Duration, bool) ([]float64, error) {
+		calls.Add(1)
+		return []float64{value}, nil
+	}
+}
+
+// waitFor polls cond until it holds or the deadline passes.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// stopWithin calls Stop and fails the test if it does not return in time.
+func stopWithin(t *testing.T, monitor *CPUMonitor) {
+	t.Helper()
+	returned := make(chan struct{})
+	go func() {
+		monitor.Stop()
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return")
+	}
+}
+
+// TestCPUMonitor_RestartAfterStop checks that Stop joins the loop (no sample
+// after it returns), that Start after Stop runs a live loop again, and that a
+// double Stop is safe.
+func TestCPUMonitor_RestartAfterStop(t *testing.T) {
+	monitor := NewCPUMonitor(5 * time.Millisecond)
+	var calls atomic.Int64
+	monitor.percent = fakePercent(&calls, 25)
+
+	if err := monitor.Start(); err != nil {
+		t.Fatalf("Failed to start monitor: %v", err)
+	}
+	waitFor(t, "first loop to store a reading", func() bool { return monitor.GetCPUPercent() == 25 })
+
+	stopWithin(t, monitor)
+	afterStop := calls.Load()
+	time.Sleep(50 * time.Millisecond) // ten intervals
+	if got := calls.Load(); got != afterStop {
+		t.Fatalf("CPU sampled %d times after Stop returned", got-afterStop)
+	}
+
+	// Restart with a different reading: only a live second loop can store it.
+	var restartCalls atomic.Int64
+	monitor.percent = fakePercent(&restartCalls, 75)
+	if err := monitor.Start(); err != nil {
+		t.Fatalf("Failed to restart monitor: %v", err)
+	}
+	if !monitor.IsStarted() {
+		t.Fatal("Expected monitor to be started after restart")
+	}
+	waitFor(t, "restarted loop to store a reading", func() bool { return monitor.GetCPUPercent() == 75 })
+
+	stopWithin(t, monitor)
+	stopWithin(t, monitor) // double Stop is safe
+	if monitor.IsStarted() {
+		t.Error("Expected monitor to be stopped")
+	}
+	afterStop = restartCalls.Load()
+	time.Sleep(50 * time.Millisecond)
+	if got := restartCalls.Load(); got != afterStop {
+		t.Fatalf("CPU sampled %d times after second Stop returned", got-afterStop)
+	}
+}
+
+// TestCPUMonitor_StopAfterFailedStart checks that Stop does not block when
+// Start launched no goroutine because CPU sampling failed, including after an
+// earlier successful start and stop.
+func TestCPUMonitor_StopAfterFailedStart(t *testing.T) {
+	failing := func(time.Duration, bool) ([]float64, error) {
+		return nil, fmt.Errorf("cpu sampling unavailable")
+	}
+
+	t.Run("fresh monitor", func(t *testing.T) {
+		monitor := NewCPUMonitor(5 * time.Millisecond)
+		monitor.percent = failing
+		if err := monitor.Start(); err != nil {
+			t.Fatalf("Start returned an error: %v", err)
+		}
+		if !monitor.IsStarted() {
+			t.Fatal("Expected monitor to report started after a failed probe")
+		}
+		stopWithin(t, monitor)
+		stopWithin(t, monitor)
+		if monitor.IsStarted() {
+			t.Error("Expected monitor to be stopped")
+		}
+	})
+
+	t.Run("after a successful start and stop", func(t *testing.T) {
+		monitor := NewCPUMonitor(5 * time.Millisecond)
+		var calls atomic.Int64
+		monitor.percent = fakePercent(&calls, 10)
+		if err := monitor.Start(); err != nil {
+			t.Fatalf("Failed to start monitor: %v", err)
+		}
+		stopWithin(t, monitor)
+
+		monitor.percent = failing
+		if err := monitor.Start(); err != nil {
+			t.Fatalf("Start returned an error: %v", err)
+		}
+		stopWithin(t, monitor)
+		if monitor.IsStarted() {
+			t.Error("Expected monitor to be stopped")
+		}
+	})
 }
