@@ -16,6 +16,7 @@ import com.dell.spt.base.config.ConstantValueInputImpl;
 import com.dell.spt.base.config.el.CompositeExpressionInputBuilder;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.config.InvalidTextValueException;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemNamePaths;
@@ -98,6 +99,29 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 	protected final boolean readMetadataOnly;
 	protected final int maxChunkSize;
 
+	/**
+	 * A request header's value. A list or map, or no value, which a defaults document can give, is
+	 * refused with the header's name; a driver that sends no such headers ignores them, so the
+	 * configuration keeps them. Any other value is cast as before.
+	 */
+	private static String headerText(final String name, final Object value) {
+		final var path = "storage-net-http-headers-" + name;
+		if (value == null) {
+			throw new InvalidTextValueException(path, path + ": a request header needs a value");
+		}
+		InvalidTextValueException.refuseListOrMap(path, value);
+		return (String) value;
+	}
+
+	/**
+	 * A URI argument's value. A list or map is refused with the argument's name, as for a header; no
+	 * value is kept and sent as {@code null}, as before.
+	 */
+	private static String uriArgTextOrNull(final String name, final Object value) {
+		InvalidTextValueException.refuseListOrMap("storage-net-http-uri-args-" + name, value);
+		return (String) value;
+	}
+
 	protected HttpStorageDriverBase(
 					final String testStepId,
 					final DataInput itemDataInput,
@@ -107,10 +131,10 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 					throws IllegalConfigurationException, InterruptedException {
 		super(testStepId, itemDataInput, storageConfig, verifyFlag, batchSize);
 		final var httpConfig = storageConfig.configVal("net-http");
-		final var headersMap = httpConfig.<String> mapVal("headers");
+		final var headersMap = httpConfig.<Object> mapVal("headers");
 		for (final var header : headersMap.entrySet()) {
 			final var headerKey = header.getKey();
-			final var headerValue = header.getValue();
+			final var headerValue = headerText(headerKey, header.getValue());
 			if (headerKey.contains(ASYNC_MARKER)
 							|| headerKey.contains(SYNC_MARKER)
 							|| headerKey.contains(INIT_MARKER)
@@ -127,9 +151,9 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			Loggers.MSG.info("Reading metadata only (HEAD requests)");
 		}
 		this.maxChunkSize = httpConfig.intVal("max-chunk-size");
-		final var uriArgs = httpConfig.<String> mapVal("uri-args");
+		final var uriArgs = httpConfig.<Object> mapVal("uri-args");
 		final var uriQueryExpr = uriArgs.entrySet().stream()
-						.map(entry -> entry.getKey() + '=' + entry.getValue())
+						.map(entry -> entry.getKey() + '=' + uriArgTextOrNull(entry.getKey(), entry.getValue()))
 						.collect(Collectors.joining("&"));
 		if (uriQueryExpr.length() > 0) {
 			uriQueryInput = expressionInput('?' + uriQueryExpr);

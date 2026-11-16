@@ -401,11 +401,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	 * keeps it. Any other value is cast as before.
 	 */
 	private static String tagTextOrNull(final String name, final Object value) {
-		if (value instanceof List<?> || value instanceof Map<?, ?>) {
-			final var path = "storage-object-tagging-tags-" + name;
-			throw new InvalidTextValueException(path, path + ": the value is "
-							+ (value instanceof List<?> ? "a list" : "a map") + ", not text");
-		}
+		InvalidTextValueException.refuseListOrMap("storage-object-tagging-tags-" + name, value);
 		return (String) value;
 	}
 

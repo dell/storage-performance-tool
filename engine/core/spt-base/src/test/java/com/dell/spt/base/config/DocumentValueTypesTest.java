@@ -146,23 +146,25 @@ public class DocumentValueTypesTest {
 		assertNull(tags.get("k"));
 	}
 
+	/**
+	 * A header with no value, and a list or map URI argument or header, load as before: {@code s3-aws}
+	 * and {@code fs} do not read these maps, and the Netty HTTP drivers refuse them where they do.
+	 */
 	@ParameterizedTest
 	@ValueSource(strings = {"~", "null", ""
 	})
-	void aHeaderWithNoValueIsRefused(final String value) {
-		final var failure = assertThrows(InvalidTextValueException.class, () -> yaml(headers(value)));
-		assertEquals("storage-net-http-headers-X-Id: a request header needs a value", failure.getMessage());
-		assertEquals("storage-net-http-headers-X-Id", failure.path());
+	void aHeaderWithNoValueIsKept(final String value) throws Exception {
+		final var headers = yaml(headers(value)).mapVal("storage-net-http-headers");
+		assertTrue(headers.containsKey("X-Id"));
+		assertNull(headers.get("X-Id"));
 	}
 
 	@Test
-	void aListOrMapEntryIsRefusedInEachMap() {
-		assertEquals("storage-net-http-uri-args-tid: the value is a list, not text",
-						assertThrows(InvalidTextValueException.class, () -> yaml(uriArgs("[1, 2]"))).getMessage());
-		assertEquals("storage-net-http-uri-args-tid: the value is a map, not text",
-						assertThrows(InvalidTextValueException.class, () -> yaml(uriArgs("{a: 1}"))).getMessage());
-		assertEquals("storage-net-http-headers-X-Id: the value is a list, not text",
-						assertThrows(InvalidTextValueException.class, () -> yaml(headers("[a]"))).getMessage());
+	void aListOrMapUriArgumentOrHeaderIsKept() throws Exception {
+		assertEquals(List.of(1, 2), header(yaml(headers("[1, 2]"))));
+		assertEquals(List.of(1, 2), uriArg(yaml(uriArgs("[1, 2]"))));
+		assertEquals(Map.of("a", 1), uriArg(yaml(uriArgs("{a: 1}"))));
+		assertEquals(List.of(7), uriArg(json("{\"storage\": {\"net\": {\"http\": {\"uri\": {\"args\": {\"tid\": [7]}}}}}}")));
 	}
 
 	/** The {@code s3-aws} driver sends a list or map tag as its text, so the configuration keeps it. */

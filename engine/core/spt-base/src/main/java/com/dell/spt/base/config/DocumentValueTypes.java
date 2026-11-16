@@ -19,9 +19,8 @@ import java.util.Set;
  *       document, so {@code tid: 0012} sends {@code 0012}.
  *   <li>A number or boolean object tag becomes {@link String#valueOf}, the text the {@code s3-aws}
  *       driver already sends.
- *   <li>A list or map URI argument or request header, and a request header with no value, are
- *       refused. A URI argument or tag with no value is kept. A list or map tag is kept: the
- *       {@code s3-aws} driver sends it as text, and the Netty {@code s3} driver refuses it.
+ *   <li>A list, map or missing value in one of those three maps is kept: a driver that does not read
+ *       the map ignores it, and the Netty HTTP drivers refuse it where they read the map.
  *   <li>A number or boolean at one of the {@link #TEXT_SETTINGS_EVERY_RUN_READS} is refused, with a
  *       message that says to quote it. Each of them fails every run with a cast otherwise.
  * </ul>
@@ -88,16 +87,11 @@ final class DocumentValueTypes {
 			}
 			for (final var entry : entries.entrySet()) {
 				final var value = entry.getValue();
-				final var path = child(mapPath, entry.getKey());
-				refuseNested(path, value, sep);
-				if (value == null && mapPath.equals(HEADERS)) {
-					throw new InvalidTextValueException(join(path, sep), join(path, sep) + ": a request header needs a value");
-				}
 				if (value instanceof Number || value instanceof Boolean) {
 					if (asWritten == null) {
 						asWritten = scalarTexts(document);
 					}
-					final var text = asWritten.get(path);
+					final var text = asWritten.get(child(mapPath, entry.getKey()));
 					entry.setValue(text == null ? String.valueOf(value) : text);
 				}
 			}
@@ -115,14 +109,6 @@ final class DocumentValueTypes {
 			for (final var setting : TEXT_SETTINGS_EVERY_RUN_READS) {
 				refuseTypedText(configTree, setting, sep);
 			}
-		}
-	}
-
-	private static void refuseNested(final List<String> path, final Object value, final String sep) {
-		if (value instanceof List<?> || value instanceof Map<?, ?>) {
-			final var name = join(path, sep);
-			throw new InvalidTextValueException(name, name + ": the value is "
-							+ (value instanceof List<?> ? "a list" : "a map") + ", not text");
 		}
 	}
 

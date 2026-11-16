@@ -93,6 +93,24 @@ class S3NumericMapValuesTest {
 	}
 
 	/**
+	 * From a defaults document, a list or map URI argument or header, and a header with no value, load,
+	 * and the driver refuses them with the setting's name, where it failed with a cast or a null before.
+	 */
+	@Test
+	void aListMapOrMissingUriArgumentOrHeaderFromADocumentIsRefusedWithItsName() {
+		final var http = "storage:\n  net:\n    http:\n";
+		assertEquals("storage-net-http-uri-args-tid: the value is a list, not text",
+						assertThrows(InvalidTextValueException.class,
+										() -> driver(4, http + "      uri:\n        args:\n          tid: [1, 2]\n")).getMessage());
+		assertEquals("storage-net-http-headers-X-Id: the value is a map, not text",
+						assertThrows(InvalidTextValueException.class,
+										() -> driver(4, http + "      headers:\n        X-Id: {a: b}\n")).getMessage());
+		assertEquals("storage-net-http-headers-X-Id: a request header needs a value",
+						assertThrows(InvalidTextValueException.class,
+										() -> driver(2, http + "      headers:\n        X-Id: ~\n")).getMessage());
+	}
+
+	/**
 	 * The configuration keeps a list or map tag, which {@code s3-aws} sends as text; this driver refuses
 	 * it with the tag's name, with tagging on or off, where it failed with a cast before.
 	 */
