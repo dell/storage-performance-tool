@@ -917,6 +917,54 @@ public class S3StorageDriverTest {
 		}
 	}
 
+	/**
+	 * A READ built on each page-1 item renames it to "k1" in place. Paging after the live item sent
+	 * start-after=k1, which sorts after every "dir/" key, so the listing ended after page 1.
+	 */
+	@Test
+	void pathItemInputPagesAfterTheListedKeyWhenOperationsRenameItsItems() throws Exception {
+		final List<String> keys = List.of("dir/k0", "dir/k1", "dir/k2", "dir/k3");
+		final List<String> startAfters = new ArrayList<>();
+		final TestS3Driver drv = new TestS3Driver(baseConfig(false, 2, false, null, "127.0.0.1"));
+		drv.respondWith(request -> {
+			if (startAfters.size() >= 10) {
+				throw new AssertionError("more than 10 listing pages for 4 keys");
+			}
+			final String rawStartAfter = rawQueryParam(request.uri(), "start-after");
+			final String startAfter = rawStartAfter == null
+							? ""
+							: java.net.URLDecoder.decode(rawStartAfter, StandardCharsets.UTF_8);
+			startAfters.add(startAfter);
+			final int maxKeys = Integer.parseInt(rawQueryParam(request.uri(), "max-keys"));
+			final List<String> after = keys.stream().filter(key -> key.compareTo(startAfter) > 0).toList();
+			return listPage(after.size() > maxKeys, after.subList(0, Math.min(maxKeys, after.size())));
+		});
+		try (var input = new com.dell.spt.base.item.io.StorageItemInput<Item>(
+						drv, 2, new ItemFactoryImpl<>(), "/pp", null, 36)) {
+			final List<String> listed = new ArrayList<>();
+			try {
+				while (true) {
+					final List<Item> batch = new ArrayList<>();
+					input.get(batch, 2);
+					for (final Item item : batch) {
+						listed.add(item.name());
+						new OperationImpl<>(0, OpType.READ, item, "/pp", null, TEST_CRED);
+						assertFalse(item.name().contains("/"), "the READ renamed the item in place");
+					}
+				}
+			} catch (final Exception e) {
+				// the input ends after the last page with an EOFException, thrown unchecked
+				if (!(e instanceof java.io.EOFException)) {
+					throw e;
+				}
+			}
+			assertEquals(keys.stream().map(key -> "/pp/" + key).toList(), listed);
+			assertEquals(List.of("", "dir/k1"), startAfters, "page 2 is the last, not truncated");
+		} finally {
+			drv.close();
+		}
+	}
+
 	@Test
 	void delimiterProbeAcceptsStandardRootPrefixWithoutTerminalFailure() throws Exception {
 		final var driver = new TestS3Driver(metadataConfig(false));
