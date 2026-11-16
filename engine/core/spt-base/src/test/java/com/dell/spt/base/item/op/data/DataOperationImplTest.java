@@ -131,6 +131,32 @@ class DataOperationImplTest {
 	}
 
 	@Test
+	void resetAttemptProgressClearsOnlyTheBytesAndTheDataResponseStart() {
+		final var item = newItem("obj", 128);
+		final var op = new DataOperationImpl<>(0, OpType.UPDATE, item, "/src", null, null, null, 0);
+		op.markedRangesMaskPair()[0].set(0);
+		final long markedSize = op.markedRangesSize();
+		op.currRangeIdx(0);
+		final var range = op.currRange();
+		op.startRequest();
+		op.finishRequest();
+		op.startDataResponse();
+		op.countBytesDone(17L);
+
+		op.resetAttemptProgress();
+
+		assertEquals(0L, op.countBytesDone());
+		assertEquals(0L, op.respDataTimeStart());
+		assertEquals(0L, op.dataLatency());
+		// The range cursor, the marks and the content size are the attempt's plan, not its progress.
+		assertEquals(0, op.currRangeIdx());
+		assertTrue(op.markedRangesMaskPair()[0].get(0));
+		assertSame(range, op.currRange());
+		assertEquals(markedSize, op.markedRangesSize());
+		assertTrue(op.reqTimeDone() > 0, "the timing is resetTiming()'s, not this method's");
+	}
+
+	@Test
 	void resultBuildsItemPath() {
 		final var item = newItem("name", 10);
 		final var op = new DataOperationImpl<>(0, OpType.READ, item, "/bucket", null, null, null, 0);

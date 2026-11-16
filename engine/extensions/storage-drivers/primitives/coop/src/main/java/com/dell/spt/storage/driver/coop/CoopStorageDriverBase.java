@@ -13,6 +13,7 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.composite.CompositeOperation;
+import com.dell.spt.base.item.op.data.DataOperationImpl;
 import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleTracker;
@@ -1134,6 +1135,12 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 						op.resetTiming();
 						if (op.item() instanceof DataItem dataItem) {
 							dataItem.reset();
+						}
+						// Child operations skip prepare(), so reset() does not run for the retry: without
+						// this, the failed attempt's bytes (an error body, or a body cut short) would be
+						// added to the retry's, and its data-response start would hide the retry's TTFB.
+						if (op instanceof DataOperationImpl<?> dataOp) {
+							dataOp.resetAttemptProgress();
 						}
 						Loggers.ERR.warn(
 										"{}: part #{} failed ({}), retry {}/{}",

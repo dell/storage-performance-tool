@@ -314,6 +314,17 @@ public class DataOperationImpl<T extends DataItem> extends OperationImpl<T>
 		this.countBytesDone = n;
 	}
 
+	/**
+	 * Clears the progress of a failed attempt, its byte count and its data-response start, so that a
+	 * retry of the same operation counts only its own bytes and records its own time to first byte.
+	 * Unlike {@link #reset()}, it keeps the range cursor, the range marks and the content size. Only
+	 * the cooperative driver base's part retry calls it, after a part attempt failed.
+	 */
+	public final void resetAttemptProgress() {
+		countBytesDone = 0;
+		respDataTimeStart = 0;
+	}
+
 	@Override
 	public final long respDataTimeStart() {
 		return respDataTimeStart;
