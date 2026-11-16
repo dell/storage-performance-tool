@@ -185,6 +185,47 @@ class LinearLoadStepClientInterruptedAwaitTest {
 		assertTrue(interruptedAfter.get(), "the waiter's interrupt flag must survive the step's stop");
 	}
 
+	@Test
+	void interruptedRunClosesTheStepAndItsWorkerSlice() throws Exception {
+		client = new LinearLoadStepClient(config, extensions(), List.of(), entryMgr);
+		final AtomicBoolean interruptedAfter = new AtomicBoolean();
+		final AtomicReference<Throwable> runOutcome = new AtomicReference<>();
+		final CompletableFuture<Void> done = new CompletableFuture<>();
+		final Thread thread = Thread.ofPlatform().name("interrupted-run").start(() -> {
+			try {
+				client.run();
+			} catch (final Throwable e) {
+				runOutcome.set(e);
+			} finally {
+				interruptedAfter.set(Thread.currentThread().isInterrupted());
+				done.complete(null);
+			}
+		});
+		await(() -> entryMgr.getDistributedContexts().size() == 1, () -> "fleet context of " + stepId);
+		final DistributedMetricsContext<?> fleet = onlyFleetContext();
+		await(() -> {
+			fleet.refreshLastSnapshot();
+			final var snapshot = fleet.lastSnapshot();
+			return snapshot != null && snapshot.successSnapshot().count() > 0 && snapshot.nodeCount() == 2;
+		}, () -> "fleet progress " + fleet.lastSnapshot());
+		// Let the run thread reach the slices' polling loop before the interrupt lands.
+		Thread.sleep(500);
+		assertFalse(done.isDone(), "the step must still be running: " + runOutcome.get());
+		thread.interrupt();
+		done.get(WAIT_MILLIS, TimeUnit.MILLISECONDS);
+
+		assertTrue(runOutcome.get() instanceof InterruptedException, "run outcome: " + runOutcome.get());
+		assertTrue(client.isClosed(), "the step must close in its run, not at JVM exit: " + client.state());
+		assertTrue(
+						stepManager.getStepService().isClosed(),
+						"the worker's step slice must close in the run, not at JVM exit");
+		assertTrue(interruptedAfter.get(), "the run thread's interrupt flag must survive the step's close");
+		await(() -> {
+			LogUtil.flushAll();
+			return totalRows().size() >= 2;
+		}, () -> "metrics.total.csv rows " + totals.messages());
+	}
+
 	private static String describe(final List<TerminalStepEntry> entries) {
 		return entries.stream()
 						.map(entry -> entry.stepId + (entry.distributed ? " (fleet)" : " (node)") + " successes=" + entry.successCount)

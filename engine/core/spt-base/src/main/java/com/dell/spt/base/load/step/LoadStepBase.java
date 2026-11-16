@@ -251,7 +251,17 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 				completedRunMetricsSnapshots = List.of();
 				recordRunFailure(metricsFailure);
 			}
-			final Throwable closeCause = closeAfterRun();
+			// The stop may leave the interrupt set; the close still writes the step's artifacts, and
+			// the caller sees the interrupt afterwards.
+			final boolean interruptedBeforeClose = Thread.interrupted();
+			final Throwable closeCause;
+			try {
+				closeCause = closeAfterRun();
+			} finally {
+				if (interruptedBeforeClose) {
+					Thread.currentThread().interrupt();
+				}
+			}
 			if (closeCause != null) {
 				throwUncheckedIfInterrupted(closeCause);
 				final var cleanupFailure = lifecycleTerminalFailure(
