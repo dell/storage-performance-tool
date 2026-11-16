@@ -70,6 +70,10 @@ public interface LogUtil {
 		}
 	}
 
+	/**
+	 * Closes the engine's daemons, then stops the Log4j contexts so the queued log events are written,
+	 * waiting for at most the configured {@code shutdownTimeout} in all.
+	 */
 	static void shutdown() {
 		try {
 			DaemonBase.closeAll();
@@ -77,7 +81,14 @@ public interface LogUtil {
 			throwUncheckedIfInterrupted(cause);
 			cause.printStackTrace(System.err);
 		} finally {
-			LogManager.shutdown();
+			// The engine's loggers are asynchronous, and their thread is a daemon: an event still queued
+			// when the JVM halts is lost
+			final var contexts = LogContextShutdown.engineContexts();
+			final long timeoutMillis = LogContextShutdown.timeoutMillis(contexts);
+			if (!LogContextShutdown.stopAll(contexts, timeoutMillis)) {
+				System.err.println(
+								"The log queue did not drain within " + timeoutMillis + " ms at exit; its last lines may be missing");
+			}
 		}
 	}
 

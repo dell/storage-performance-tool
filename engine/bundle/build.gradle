@@ -1326,14 +1326,14 @@ tasks.register('verifyEngineExitStatusCanary') {
 			scenarioFile.setText(text, 'UTF-8')
 			return "--run-scenario=${scenarioFile.absolutePath}"
 		}
-		def engine = { String name, List<String> args ->
+		def engine = { String name, List<String> args, List<String> jvmArgs = [] ->
 			def home = new File(canaryRoot, "${name}/home")
 			def logDir = new File(canaryRoot, "${name}/log")
 			def workDir = new File(canaryRoot, "${name}/cwd")
 			workDir.mkdirs()
 			def stdout = new File(canaryRoot, "${name}/stdout.log")
 			def stderr = new File(canaryRoot, "${name}/stderr.log")
-			def builder = new ProcessBuilder([javaExecutable, '-jar', jarFile.absolutePath] + args.collect { it.toString() })
+			def builder = new ProcessBuilder([javaExecutable] + jvmArgs + ['-jar', jarFile.absolutePath] + args.collect { it.toString() })
 			builder.directory(workDir)
 			builder.environment().put('SPT_HOME', home.absolutePath)
 			builder.environment().put('SPT_LOG_DIR', logDir.absolutePath)
@@ -1365,12 +1365,13 @@ tasks.register('verifyEngineExitStatusCanary') {
 				stderr: engineStderr,
 				output: stdout.getText('UTF-8') + stderr.getText('UTF-8'),
 				written: written,
+				logDir: logDir,
 			]
 		}
-		def expect = { String name, List<String> args, int status, List<String> messages ->
+		def expect = { String name, List<String> args, int status, List<String> messages, List<String> jvmArgs = [] ->
 			drainTarget()
 			def connectionsBefore = targetConnections.get()
-			def result = engine(name, args)
+			def result = engine(name, args, jvmArgs)
 			drainTarget()
 			def missing = messages.findAll { !result.output.contains(it) }
 			if (result.status != status || !missing.isEmpty()) {
@@ -1453,6 +1454,16 @@ tasks.register('verifyEngineExitStatusCanary') {
 				scenario('scenario-syntax-error', 'Load.config({load: {op: {limit: {count: 1}}}}).run(;\n'),
 				'--storage-driver-type=dummy-mock',
 			], 1, ['Scenario failed, line #1'])
+			// The asynchronous logger thread sleeps 300 ms between its checks, so the error is still queued at
+			// exit: the shutdown hook must wait for it to be written.
+			def slowLogThread = [
+				'-Dlog4j2.asyncLoggerWaitStrategy=Sleep',
+				'-Dlog4j2.asyncLoggerSleepTimeNs=300000000',
+			]
+			expect('scenario-syntax-error-slow-log', [
+				scenario('scenario-syntax-error-slow-log', 'Load.config({load: {op: {limit: {count: 1}}}}).run(;\n'),
+				'--storage-driver-type=dummy-mock',
+			], 1, ['Scenario failed, line #1'], slowLogThread)
 			expect('scenario-config-error', [
 				scenario('scenario-config-error', 'Load.config({load: {step: {limit: {count: 1}}}}).run();\n'),
 				'--storage-driver-type=dummy-mock',
@@ -1546,6 +1557,50 @@ tasks.register('verifyEngineExitStatusCanary') {
 				scenario('scenario', 'Load.config({load: {op: {limit: {count: 10}, shuffle: false}}}).run();\n'),
 				'--storage-driver-type=dummy-mock',
 			], 0, [])
+			// A run's last lines, its console summary and its result.xml row, are still queued at exit
+			def slowLogRun = expect('default-scenario-slow-log', ['--storage-driver-type=dummy-mock', '--load-op-limit-count=10'], 0,
+				['# Results ', '- Load Step Id:'], slowLogThread)
+			def resultFiles = []
+			slowLogRun.logDir.eachFileRecurse(groovy.io.FileType.FILES) { if (it.name == 'result.xml') resultFiles << it }
+			if (resultFiles.size() != 1 || !resultFiles[0].getText('UTF-8').contains('<result id=')) {
+				throw new GradleException("Packaged engine 'default-scenario-slow-log' wrote no result.xml row (${resultFiles}):\n${slowLogRun.output}")
+			}
+
+			// The log shutdown stops the context the engine's loggers use. In the packaged jar Log4j cannot
+			// find that context by its caller, so LogManager.shutdown() alone stopped none.
+			def probeDir = new File(canaryRoot, 'log-shutdown-state')
+			new File(probeDir, 'cwd').mkdirs()
+			def probeSource = new File(probeDir, 'LogShutdownStateProbe.java')
+			probeSource.setText('''\
+				public class LogShutdownStateProbe {
+					public static void main(final String[] args) {
+						com.dell.spt.base.logging.LogUtil.init(args[0], "log-shutdown-state");
+						com.dell.spt.base.logging.Loggers.MSG.info("Log shutdown state probe");
+						final var context = ((org.apache.logging.log4j.core.Logger) com.dell.spt.base.logging.Loggers.MSG).getContext();
+						com.dell.spt.base.logging.LogUtil.shutdown();
+						System.out.println("stoppedAfterShutdown=" + context.isStopped());
+					}
+				}
+				'''.stripIndent(), 'UTF-8')
+			def probeOut = new File(probeDir, 'stdout.log')
+			def probe = new ProcessBuilder(javaExecutable, '-cp', jarFile.absolutePath, probeSource.absolutePath,
+					new File(probeDir, 'home').absolutePath)
+				.directory(new File(probeDir, 'cwd'))
+				.redirectErrorStream(true)
+				.redirectOutput(probeOut)
+				.start()
+			try {
+				if (!probe.waitFor(90, java.util.concurrent.TimeUnit.SECONDS)) {
+					throw new GradleException("The log shutdown state probe did not exit within 90 s:\n${probeOut.getText('UTF-8')}")
+				}
+			} finally {
+				if (probe.alive) {
+					probe.destroyForcibly()
+				}
+			}
+			if (probe.exitValue() != 0 || !probeOut.getText('UTF-8').contains('stoppedAfterShutdown=true')) {
+				throw new GradleException("The log shutdown left the engine loggers' context running (exit ${probe.exitValue()}):\n${probeOut.getText('UTF-8')}")
+			}
 		} finally {
 			target.close()
 			acceptor.join(5000)
