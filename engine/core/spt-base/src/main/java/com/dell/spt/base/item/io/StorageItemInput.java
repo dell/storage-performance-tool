@@ -20,6 +20,11 @@ public final class StorageItemInput<I extends Item> extends BufferingInputBase<I
 	private final ListOptions listOptions;
 
 	private boolean poisonedFlag = false;
+	/**
+	 * Name of the last item buffered, as the driver listed it. An operation built on a handed-out
+	 * item renames that item in place, so the next page's cursor must not be read from it.
+	 */
+	private String lastListedName = null;
 
 	public StorageItemInput(
 					final StorageDriver<I, ? extends Operation<I>> storageDriver,
@@ -42,8 +47,11 @@ public final class StorageItemInput<I extends Item> extends BufferingInputBase<I
 		if (poisonedFlag) {
 			return 0;
 		}
+		// The base passes the last buffered item, or null when nothing is buffered; page after that
+		// item's name as listed, whatever consumers have done to the item since.
+		final I cursor = null == lastItem ? null : itemFactory.getItem(lastListedName, 0, 0);
 		final var newItems = storageDriver.list(
-						itemFactory, path, prefix, idRadix, lastItem, capacity, listOptions);
+						itemFactory, path, prefix, idRadix, cursor, capacity, listOptions);
 		final var n = newItems.size();
 		I nextItem;
 		for (var i = 0; i < n; i++) {
@@ -53,6 +61,7 @@ public final class StorageItemInput<I extends Item> extends BufferingInputBase<I
 				return i;
 			} else {
 				items.add(nextItem);
+				lastListedName = nextItem.name();
 			}
 		}
 		return n;
@@ -67,5 +76,7 @@ public final class StorageItemInput<I extends Item> extends BufferingInputBase<I
 	public final void reset() {
 		super.reset();
 		poisonedFlag = false;
+		// lastListedName stays: the base only rewinds its buffer, and the next page still follows
+		// the last buffered item.
 	}
 }
