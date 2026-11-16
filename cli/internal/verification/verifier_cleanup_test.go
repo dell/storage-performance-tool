@@ -327,9 +327,11 @@ func TestCleanupVerifyContainers_RemovesByFullIDNotByName(t *testing.T) {
 func TestCleanupVerifyContainers_KeepsOwnContainerThatStopsBetweenListings(t *testing.T) {
 	// This run's container, verifying on another alias of the same host, is running at the first
 	// listing and exits before the second. It is still this run's and must not be removed.
+	// Full 64-character IDs, so both listings must print untruncated IDs for the match to hold.
+	own, other := fullContainerID("0000000000a1"), fullContainerID("0000000000a2")
 	host := &fakeDockerHost{containers: []fakeContainer{
-		{id: "0000000000a1", created: cleanupNow.Add(-time.Hour), labels: verifyLabels("this-run")},
-		{id: "0000000000a2", created: cleanupNow.Add(-time.Hour), labels: verifyLabels("other-run")},
+		{id: own, created: cleanupNow.Add(-time.Hour), labels: verifyLabels("this-run")},
+		{id: other, created: cleanupNow.Add(-time.Hour), labels: verifyLabels("other-run")},
 	}}
 	host.afterPS = func(f *fakeDockerHost) {
 		f.containers[0].stopped = true
@@ -337,7 +339,7 @@ func TestCleanupVerifyContainers_KeepsOwnContainerThatStopsBetweenListings(t *te
 	}
 	removed, _ := runCleanupOnHost(t, host)
 
-	assertRemoved(t, removed, "0000000000a2")
+	assertRemoved(t, removed, other)
 }
 
 func TestCleanupVerifyContainers_OwnListingHasItsOwnDeadline(t *testing.T) {
@@ -388,11 +390,18 @@ func TestCleanupVerifyContainers_RemovesStaleContainerOfAnotherRun(t *testing.T)
 }
 
 func TestCleanupVerifyContainers_LeavesOwnRunAtAnyAge(t *testing.T) {
+	own, other := fullContainerID("0000000000a1"), fullContainerID("0000000000a2")
 	removed, _ := runCleanupOn(t,
-		fakeContainer{id: "0000000000a1", created: cleanupNow.Add(-2 * verifyContainerStaleAge), labels: verifyLabels("this-run")},
-		fakeContainer{id: "0000000000a2", created: cleanupNow.Add(-2 * verifyContainerStaleAge), labels: verifyLabels("other-run")})
+		fakeContainer{id: own, created: cleanupNow.Add(-2 * verifyContainerStaleAge), labels: verifyLabels("this-run")},
+		fakeContainer{id: other, created: cleanupNow.Add(-2 * verifyContainerStaleAge), labels: verifyLabels("other-run")})
 
-	assertRemoved(t, removed, "0000000000a2")
+	assertRemoved(t, removed, other)
+}
+
+// fullContainerID pads a 12-character short ID to a 64-character full ID, as docker ps
+// --no-trunc prints it.
+func fullContainerID(short string) string {
+	return short + strings.Repeat("f", 64-len(short))
 }
 
 func TestCleanupVerifyContainers_UnlabelledJudgedByAge(t *testing.T) {
