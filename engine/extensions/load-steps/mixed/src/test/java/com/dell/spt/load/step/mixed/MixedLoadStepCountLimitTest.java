@@ -258,13 +258,17 @@ class MixedLoadStepCountLimitTest {
 		final String stepId = newStepId("dummy-split-read");
 		final Config config = multipartStepConfig(stepId, 40);
 		config.val("storage-driver-type", CountingDriverFactory.TYPE);
-		// A mixed step needs two weights: a few creates of new items run with the reads.
+		// A mixed step needs two weights: a few creates of new items run with the reads. A STAT above
+		// the threshold is a plain, counted operation, so the inherited STAT weight is dropped: next to
+		// these weights it would take schedule slots and a STAT would sometimes be dispatched.
 		config.val("load-op-weights-put", 1);
 		config.val("load-op-weights-get", 100);
+		config.val("load-op-weights-stat", 0);
 
 		final long elapsedMillis = run(config);
 
 		assertEquals(40, drivers.accepted.sum(), "operations the driver accepted");
+		assertEquals(0, drivers.accepted(OpType.STAT), "STATs the driver accepted");
 		assertTrue(drivers.accepted(OpType.READ) > 0, "the step ran reads");
 		assertEquals(0, counted(stepId), "composite reads and writes the step counted");
 		assertTrue(elapsedMillis < PROMPT_END_MILLIS, "the step ended on its count, after " + elapsedMillis + " ms");
