@@ -21,8 +21,8 @@ import java.util.concurrent.TimeUnit;
  * Performs one complete inventory pass followed by a bounded settle loop. The first retry pass
  * follows the complete pass at once; later passes back off exponentially, so a probe that fails at
  * once (a closed or refused connection) is not retried at the pause rate for the whole timeout.
- * When the timeout falls inside the next pause, one last pass starts instead, as long before the
- * timeout as the previous retry pass took (at least the shortest pause).
+ * Near the timeout the pause shortens so the next pass starts about one pass duration before it,
+ * and passes continue until every identity resolves or the timeout ends the phase.
  */
 public final class DeleteInventoryVerifier {
 	/** The pause after the first retry pass, doubled after each later pass. */
@@ -67,8 +67,7 @@ public final class DeleteInventoryVerifier {
 							? Long.MAX_VALUE
 							: started + retryNanos;
 			int retryPasses = 0;
-			boolean finalPass = false;
-			while (!finalPass && hasRetryable(phase, results, selectedCount) && System.nanoTime() < deadline) {
+			while (hasRetryable(phase, results, selectedCount) && System.nanoTime() < deadline) {
 				final long passStarted = System.nanoTime();
 				retryPass(selectionManifest, phase, deadline, probe, results, selectedCount, causes);
 				final long passNanos = System.nanoTime() - passStarted;
@@ -76,19 +75,7 @@ public final class DeleteInventoryVerifier {
 				if (hasRetryable(phase, results, selectedCount)) {
 					final long remainingNanos = deadline - System.nanoTime();
 					if (remainingNanos > 0) {
-						final long pauseNanos = TimeUnit.MILLISECONDS.toNanos(retryPauseMillis(retryPasses));
-						// When the deadline falls inside the next pause, start one last pass as long before it
-						// as the last pass took, at least the shortest pause, so it can reach every identity
-						// still retryable; the phase ends after that pass.
-						final long reserveNanos = Math.max(
-										TimeUnit.MILLISECONDS.toNanos(FIRST_RETRY_PAUSE_MILLIS), passNanos);
-						finalPass = pauseNanos >= remainingNanos - reserveNanos;
-						sleep(finalPass ? Math.max(0, remainingNanos - reserveNanos) : pauseNanos);
-						if (finalPass) {
-							// Nothing changes in the ledger during the sleep, so the pass is still needed.
-							retryPass(selectionManifest, phase, deadline, probe, results, selectedCount, causes);
-							retryPasses++;
-						}
+						sleep(retryPauseNanos(retryPasses, passNanos, remainingNanos));
 					}
 				}
 			}
@@ -179,6 +166,19 @@ public final class DeleteInventoryVerifier {
 			causes.record(index, DeleteVerificationCause.probeError(failure));
 			return DeleteVerificationProbe.Presence.UNRESOLVED;
 		}
+	}
+
+	/**
+	 * The pause before the next retry pass: the back-off, cut so the next pass starts one reserve
+	 * before the deadline, and never under the shortest pause or past the deadline. The reserve is
+	 * the last pass's duration plus a quarter, at least the shortest pause, so a pass near the
+	 * deadline still reaches every identity it retries; the loop keeps running to the deadline.
+	 */
+	static long retryPauseNanos(final int retryPasses, final long passNanos, final long remainingNanos) {
+		final long shortestNanos = TimeUnit.MILLISECONDS.toNanos(FIRST_RETRY_PAUSE_MILLIS);
+		final long pauseNanos = TimeUnit.MILLISECONDS.toNanos(retryPauseMillis(retryPasses));
+		final long reserveNanos = Math.max(shortestNanos, passNanos + passNanos / 4);
+		return Math.min(remainingNanos, Math.min(pauseNanos, Math.max(shortestNanos, remainingNanos - reserveNanos)));
 	}
 
 	/**

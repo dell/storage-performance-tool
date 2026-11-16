@@ -370,10 +370,56 @@ class DeleteInventoryVerifierTest {
 												? DeleteVerificationProbe.Presence.PRESENT
 												: DeleteVerificationProbe.Presence.ABSENT;
 							})) {
-				// A final pass started only 10 ms before the deadline reached about 5 of the 50.
+				// A last pass started only 10 ms before the deadline reached about 5 of the 50.
 				if (report.absent() != targets) {
 					return report.present() + " of " + targets + " targets were still present and "
 									+ report.unresolved() + " unresolved at their last check";
+				}
+				return deadlineMoved(report, timeout);
+			}
+		});
+	}
+
+	@Test
+	void retryPauseIsCutToStartTheNextPassOneReserveBeforeTheDeadline() {
+		final long ms = TimeUnit.MILLISECONDS.toNanos(1);
+		// Far from the deadline the back-off applies.
+		assertEquals(640 * ms, DeleteInventoryVerifier.retryPauseNanos(7, 5 * ms, 10_000 * ms));
+		// Near it the pause is cut to leave the last pass's duration plus a quarter.
+		assertEquals(375 * ms, DeleteInventoryVerifier.retryPauseNanos(7, 100 * ms, 500 * ms));
+		// Never under the shortest pause, so a long last pass does not end the phase or spin.
+		assertEquals(10 * ms, DeleteInventoryVerifier.retryPauseNanos(7, 1_000 * ms, 500 * ms));
+		// Never past the deadline.
+		assertEquals(4 * ms, DeleteInventoryVerifier.retryPauseNanos(7, 1_000 * ms, 4 * ms));
+	}
+
+	@Test
+	void slowRetryFollowedByFastFailuresKeepsRetryingUntilTheTargetSettles(@TempDir final Path temp)
+					throws Exception {
+		final Duration timeout = Duration.ofSeconds(3);
+		assertSucceedsWithinAttempts(() -> {
+			final AtomicInteger calls = new AtomicInteger();
+			final long started = System.nanoTime();
+			final long settlesAt = started + TimeUnit.MILLISECONDS.toNanos(2_250);
+			try (final DeleteVerificationReport report = DeleteInventoryVerifier.verify(
+							singleTargetManifest(temp),
+							1,
+							DeleteVerificationPhase.PRE_DELETE,
+							timeout,
+							target -> {
+								// The complete pass fails at once, the first retry waits 1.5 s for a
+								// slow failure, and later probes fail at once until the target settles.
+								if (calls.incrementAndGet() == 2) {
+									sleepMillis(1_500);
+								}
+								return System.nanoTime() < settlesAt
+												? DeleteVerificationProbe.Presence.UNRESOLVED
+												: DeleteVerificationProbe.Presence.PRESENT;
+							})) {
+				// Ending the phase after the pass that followed the slow one gave up at about 1.5 s.
+				if (!report.successful()) {
+					return "the phase ended unresolved after "
+									+ report.elapsed().toMillis() + " ms and " + calls.get() + " probes";
 				}
 				return deadlineMoved(report, timeout);
 			}
@@ -536,7 +582,8 @@ class DeleteInventoryVerifierTest {
 
 	/**
 	 * Runs a timing scenario up to {@link #TIMING_ATTEMPTS} times and passes on its first success,
-	 * so one late wake-up on a loaded host cannot fail the test; a defect fails every attempt.
+	 * so one late wake-up on a loaded host is less likely to fail the test. A wall-clock test cannot
+	* promise that a defect fails every attempt, or that a correct verifier passes one.
 	 */
 	private static void assertSucceedsWithinAttempts(final TimingScenario scenario) throws Exception {
 		final List<String> failures = new ArrayList<>();

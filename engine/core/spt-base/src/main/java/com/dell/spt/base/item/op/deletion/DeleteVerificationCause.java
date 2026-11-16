@@ -51,8 +51,8 @@ public final class DeleteVerificationCause {
 	 * Records {@code cause} for the {@link DeleteVerificationProbe#observe} call running on this
 	 * thread, if any; otherwise does nothing. It works only on the thread running
 	 * {@link DeleteVerificationProbe#presence}: a cause reported from another thread, such as a
-	 * request's completion callback, is dropped, and the observation reads "not reported by the
-	 * storage driver".
+	 * request's completion callback, is dropped: the observation's unresolved cause is null, and the
+	 * phase's WARN reads "not reported by the storage driver".
 	 */
 	public static void report(final DeleteVerificationCause cause) {
 		final Capture capture = CAPTURE.get();
