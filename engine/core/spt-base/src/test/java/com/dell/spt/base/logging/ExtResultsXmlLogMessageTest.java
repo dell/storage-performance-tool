@@ -4,7 +4,9 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.metrics.context.DistributedMetricsContextImpl;
 import com.dell.spt.base.metrics.context.MetricsContext;
+import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.ConcurrencyMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
@@ -12,6 +14,7 @@ import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.github.akurilov.commons.system.SizeInBytes;
 
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class ExtResultsXmlLogMessageTest {
@@ -142,7 +145,56 @@ class ExtResultsXmlLogMessageTest {
 		assertFalse(xml.contains("id=\"step<"), "Raw < should not appear in attribute value");
 	}
 
+	@Test
+	void startTimeSurvivesCloseBeforeFormat() {
+		final var size = new SizeInBytes("1KB");
+		try (final MetricsContext<?> ctx = MetricsContextImpl.builder().loadStepId("closed-local")
+						.runId(1L).opType(OpType.CREATE).actualConcurrencyGauge(() -> 1).concurrencyLimit(4)
+						.concurrencyThreshold(0).itemDataSize(size).outputPeriodSec(0)
+						.stdOutColorFlag(false).build()) {
+			assertStartSurvivesClose(ctx, "closed-local", "CREATE", 4, "1KiB");
+		}
+	}
+
+	@Test
+	void startTimeSurvivesCloseBeforeFormatDistributed() {
+		final var size = new SizeInBytes("4KB");
+		try (final MetricsContext<?> ctx = DistributedMetricsContextImpl.builder()
+						.loadStepId("closed-dist").runId(1L).opType(OpType.READ)
+						.nodeCountSupplier(() -> 1).concurrencyLimit(8).concurrencyThreshold(0)
+						.itemDataSize(size).outputPeriodSec(0).stdOutColorFlag(false)
+						.avgPersistFlag(false).sumPersistFlag(false).timingPersistFlag(false)
+						.snapshotsSupplier(List::of).quantileValues(List.of(0.5))
+						.nodeAddrs(List.of("worker:1099")).build()) {
+			assertStartSurvivesClose(ctx, "closed-dist", "READ", 8, "4KiB");
+		}
+	}
+
 	// --- helpers ---
+
+	/** Builds the message, closes the context as the step's close does, then formats as the log thread would. */
+	private static void assertStartSurvivesClose(final MetricsContext<?> ctx, final String stepId,
+					final String opType, final int concurrency, final String fileSize) {
+		ctx.start();
+		final long start = ctx.startTimeStamp();
+		assertTrue(start > 0, "The started context must have a real start time");
+		final long elapsed = 1_234L;
+		final AllMetricsSnapshot snap = mockSnapshot(
+						elapsed, 1L, 1.0, 0L, 1024.0, 1.0, 1L, 1L, 1.0, 1L, 1L);
+
+		final ExtResultsXmlLogMessage msg = new ExtResultsXmlLogMessage(ctx, snap);
+		ctx.close();
+		assertEquals(-1L, ctx.startTimeStamp(), "close() resets the start time; the message must not read it");
+
+		final String xml = format(msg);
+		assertContainsAttr(xml, "StartTimestamp", Long.toString(start));
+		assertContainsAttr(xml, "EndTimestamp", Long.toString(start + elapsed));
+		assertFalse(xml.contains("1969-12-31"), "No 1969 start date: " + xml);
+		assertContainsAttr(xml, "id", stepId);
+		assertContainsAttr(xml, "operation", opType);
+		assertContainsAttr(xml, "threads", Integer.toString(concurrency));
+		assertContainsAttr(xml, "filesize", fileSize);
+	}
 
 	private static String format(ExtResultsXmlLogMessage msg) {
 		StringBuilder buf = new StringBuilder();
