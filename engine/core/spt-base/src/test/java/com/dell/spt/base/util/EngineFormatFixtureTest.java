@@ -22,10 +22,16 @@ import org.junit.jupiter.api.Test;
  * <p>The fixture lists values the engine accepts. The CLI's pre-launch checks
  * ({@code cli/internal/engineformat}) must accept every one of them, so a CLI grammar can never be
  * narrower than the engine's. Its {@code *.enumerated} sections hold every accepted string of up
- * to {@value #MAX_LENGTH} characters over a fixed alphabet and are regenerated here; its
- * {@code *.listed} sections hold documented forms and edge cases, each of which the engine must
- * accept; its {@code *.refused} sections hold values the engine and the CLI both refuse. A grammar
- * change in the engine or in java-commons fails this test.
+ * to {@value #MAX_LENGTH} characters over a short alphabet of grammar characters, and its
+ * {@code *.ascii} sections every accepted string of up to {@value #ASCII_MAX_LENGTH} printable
+ * ASCII characters; both are regenerated here. Its {@code *.listed} sections hold documented forms
+ * and edge cases, each of which the engine must accept; its {@code *.refused} sections hold values
+ * the engine and the CLI both refuse.
+ *
+ * <p>So this test fails when the engine or java-commons changes its verdict on any string in those
+ * sets: a new unit letter or separator shows in the short ASCII strings, and a change in how
+ * ranges, biases or decimals combine shows in the longer grammar-alphabet strings. A change that
+ * only affects longer strings outside both sets, or non-ASCII input, is not caught.
  *
  * <p>To rewrite the enumerated sections after an intended grammar change, run this test with the
  * environment variable {@value #WRITE_ENV} set to {@code 1}, then review the diff.
@@ -37,6 +43,8 @@ class EngineFormatFixtureTest {
 	static final int MAX_LENGTH = 5;
 	static final String SIZE_ALPHABET = "01.kKiIbBe-, ";
 	static final String DURATION_ALPHABET = "05.sSmhdayou ";
+	static final int ASCII_MAX_LENGTH = 3;
+	static final String PRINTABLE_ASCII = printableAscii();
 
 	static final String SIZE_ENUMERATED = "size.enumerated";
 	static final String SIZE_LISTED = "size.listed";
@@ -44,16 +52,32 @@ class EngineFormatFixtureTest {
 	static final String DURATION_LISTED = "duration.listed";
 	static final String SIZE_REFUSED = "size.refused";
 	static final String DURATION_REFUSED = "duration.refused";
+	static final String SIZE_ASCII = "size.ascii";
+	static final String DURATION_ASCII = "duration.ascii";
 
 	@Test
 	void enumeratedSizesMatchTheEngine() throws IOException {
-		assertEnumerated(SIZE_ENUMERATED, enumerate(SIZE_ALPHABET, EngineFormatFixtureTest::sizeAccepted));
+		assertEnumerated(
+						SIZE_ENUMERATED, enumerate(SIZE_ALPHABET, MAX_LENGTH, EngineFormatFixtureTest::sizeAccepted));
+	}
+
+	@Test
+	void shortAsciiSizesMatchTheEngine() throws IOException {
+		assertEnumerated(
+						SIZE_ASCII, enumerate(PRINTABLE_ASCII, ASCII_MAX_LENGTH, EngineFormatFixtureTest::sizeAccepted));
+	}
+
+	@Test
+	void shortAsciiDurationsMatchTheEngine() throws IOException {
+		assertEnumerated(
+						DURATION_ASCII,
+						enumerate(PRINTABLE_ASCII, ASCII_MAX_LENGTH, EngineFormatFixtureTest::durationAccepted));
 	}
 
 	@Test
 	void enumeratedDurationsMatchTheEngine() throws IOException {
 		assertEnumerated(
-						DURATION_ENUMERATED, enumerate(DURATION_ALPHABET, EngineFormatFixtureTest::durationAccepted));
+						DURATION_ENUMERATED, enumerate(DURATION_ALPHABET, MAX_LENGTH, EngineFormatFixtureTest::durationAccepted));
 	}
 
 	@Test
@@ -125,25 +149,29 @@ class EngineFormatFixtureTest {
 		}
 	}
 
-	/** Every string of up to {@link #MAX_LENGTH} characters over alphabet, in prefix order, that the engine accepts. */
-	static List<String> enumerate(final String alphabet, final Predicate<String> engine) {
+	/** Every string of up to maxLength characters over alphabet, in prefix order, that the engine accepts. */
+	static List<String> enumerate(final String alphabet, final int maxLength, final Predicate<String> engine) {
 		final List<String> accepted = new ArrayList<>();
-		enumerate(alphabet, new StringBuilder(), engine, accepted);
+		enumerate(alphabet, maxLength, new StringBuilder(), engine, accepted);
 		return accepted;
 	}
 
 	private static void enumerate(
-					final String alphabet, final StringBuilder prefix, final Predicate<String> engine, final List<String> out) {
+					final String alphabet,
+					final int maxLength,
+					final StringBuilder prefix,
+					final Predicate<String> engine,
+					final List<String> out) {
 		final String value = prefix.toString();
 		if (engine.test(value)) {
 			out.add(value);
 		}
-		if (prefix.length() == MAX_LENGTH) {
+		if (prefix.length() == maxLength) {
 			return;
 		}
 		for (int i = 0; i < alphabet.length(); i++) {
 			prefix.append(alphabet.charAt(i));
-			enumerate(alphabet, prefix, engine, out);
+			enumerate(alphabet, maxLength, prefix, engine, out);
 			prefix.setLength(prefix.length() - 1);
 		}
 	}
@@ -232,6 +260,14 @@ class EngineFormatFixtureTest {
 			} else {
 				b.append(e);
 			}
+		}
+		return b.toString();
+	}
+
+	private static String printableAscii() {
+		final StringBuilder b = new StringBuilder();
+		for (char c = 0x20; c <= 0x7e; c++) {
+			b.append(c);
 		}
 		return b.toString();
 	}

@@ -67,12 +67,14 @@ func section(t *testing.T, sections map[string][]string, name string, wantAtLeas
 	return rows
 }
 
-// The CLI check accepts every size the engine accepts: the full enumeration of short strings and
+// The CLI check accepts every size the engine accepts: both enumerations of short strings and
 // every documented and edge form. This is the "never narrower" proof.
 func TestCheckSizeAcceptsEverySizeTheEngineAccepts(t *testing.T) {
 	sections := readVerdicts(t)
-	// 1,335 enumerated values when the fixture was made; a much smaller set means a broken file.
-	rows := append(section(t, sections, "size.enumerated", 1000), section(t, sections, "size.listed", 1)...)
+	// 1,335 enumerated and 3,545 short-ASCII values when the fixture was made; a much smaller set
+	// means a broken file.
+	rows := append(section(t, sections, "size.enumerated", 1000), section(t, sections, "size.ascii", 3000)...)
+	rows = append(rows, section(t, sections, "size.listed", 1)...)
 	for _, value := range rows {
 		if err := CheckSize(value); err != nil {
 			t.Errorf("CheckSize(%q) = %v, but the engine accepts it", value, err)
@@ -82,8 +84,9 @@ func TestCheckSizeAcceptsEverySizeTheEngineAccepts(t *testing.T) {
 
 func TestCheckDurationAcceptsEveryDurationTheEngineAccepts(t *testing.T) {
 	sections := readVerdicts(t)
-	// 220 enumerated values when the fixture was made.
-	rows := append(section(t, sections, "duration.enumerated", 200), section(t, sections, "duration.listed", 1)...)
+	// 220 enumerated and 1,999 short-ASCII values when the fixture was made.
+	rows := append(section(t, sections, "duration.enumerated", 200), section(t, sections, "duration.ascii", 1500)...)
+	rows = append(rows, section(t, sections, "duration.listed", 1)...)
 	for _, value := range rows {
 		if err := CheckDuration(value); err != nil {
 			t.Errorf("CheckDuration(%q) = %v, but the engine accepts it", value, err)
