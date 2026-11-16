@@ -149,8 +149,9 @@ type StepSummary struct {
 	NicPaths           *NicPathsEvidence
 	NicSetMissing      []results.NicNodeFile
 	EventLoopsMissing  []results.NicNodeFile
-	// MetricsMissing marks a step that should have totals but has none: its metrics.total.csv
-	// is missing or unreadable. A MetricsSuppressed step is never missing.
+	// MetricsMissing marks a step that is in the results index but has no totals: its
+	// metrics.total.csv was not fetched, or holds no rows. A MetricsSuppressed step is never
+	// missing.
 	MetricsMissing bool
 }
 
@@ -218,20 +219,28 @@ type RunTotals struct {
 	FailureCount    int64
 	// StepsCounted is the number of steps whose metrics are in the sums above.
 	StepsCounted int
-	// MissingPhases names, in step order, the steps that should have counted but have no
-	// metrics. A MetricsSuppressed step is never listed.
+	// MissingPhases names, in step order, the indexed steps that should have counted but have
+	// no metrics. A MetricsSuppressed step is never listed.
 	MissingPhases []string
+	// AbsentPhases names the expected steps that are not in the results index at all, in
+	// step ID order. Their kind is unknown, so each counts as missing.
+	AbsentPhases []string
+}
+
+// StepsNotCounted is the number of expected steps left out of the sums.
+func (t RunTotals) StepsNotCounted() int {
+	return len(t.MissingPhases) + len(t.AbsentPhases)
 }
 
 // Unavailable reports that no expected step has metrics, so the sums are not measurements.
 func (t RunTotals) Unavailable() bool {
-	return len(t.MissingPhases) > 0 && t.StepsCounted == 0
+	return t.StepsNotCounted() > 0 && t.StepsCounted == 0
 }
 
 // Partial reports that some expected steps have metrics and others do not, so the sums
 // cover only part of the run.
 func (t RunTotals) Partial() bool {
-	return len(t.MissingPhases) > 0 && t.StepsCounted > 0
+	return t.StepsNotCounted() > 0 && t.StepsCounted > 0
 }
 
 const (
@@ -504,6 +513,12 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 		steps = append(steps, summary)
 	}
 	appendSeededDeleteCleanupPhase(steps, workload)
+	// An expected step absent from the index has no fetched config, so whether it would have
+	// been MetricsSuppressed is unknown. No generated scenario suppresses its totals, so it
+	// counts as missing: the totals then say they are partial rather than claim the run.
+	for _, stepID := range data.MissingExpectedSteps {
+		totals.AbsentPhases = append(totals.AbsentPhases, nonEmpty(phaseLabelFromStep(stepID), stepID))
+	}
 
 	totals.DurationHuman = formatSeconds(totals.DurationSeconds)
 	totals.DataMiB = bytesToMiB(totals.DataBytes)
