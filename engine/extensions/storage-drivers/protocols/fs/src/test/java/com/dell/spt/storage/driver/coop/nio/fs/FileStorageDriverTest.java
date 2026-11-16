@@ -206,6 +206,63 @@ public class FileStorageDriverTest {
 		}
 	}
 
+	private Operation<DataItemImpl> deleteOnce(final Operation<DataItemImpl> op) throws Exception {
+		try (var drv = newDriver(false)) {
+			CollectingOpOutput<DataItemImpl> out = new CollectingOpOutput<>();
+			drv.operationResultOutput(out);
+			drv.start();
+			assertTrue(drv.put(op));
+			Operation<DataItemImpl> res = out.await(5000);
+			drv.stop();
+			return res;
+		}
+	}
+
+	/**
+	 * A DELETE of a name that already holds its path deletes that file; the name is not joined to the
+	 * path again ({@code <d>/<d>/f}). Such names are an items-file name with an empty segment, such
+	 * as {@code <d>//f}, which the operation keeps whole with the path {@code <d>}, and a retried
+	 * DELETE, whose name {@code result()} joined to the path.
+	 */
+	@Test
+	public void deleteOfANameThatHoldsTheDstPathDeletesThatFile() throws Exception {
+		final Path dir = Files.createDirectories(tempDir.resolve("d"));
+		final Path file = dir.resolve("f");
+		// the path that joining the name to the path again would address
+		final Path joinedAgain = Path.of(dir.toString(), dir + "/f");
+		Files.createDirectories(joinedAgain.getParent());
+
+		// an items-file name kept whole, with an explicit output path and with the path it derives
+		for (final String dstPath : new String[]{dir.toString(), null
+		}) {
+			Files.write(file, new byte[]{1
+			});
+			Files.write(joinedAgain, new byte[]{2
+			});
+			final var op = newOp(OpType.DELETE, dir + "//f", 0, null, dstPath);
+			assertEquals(dir.toString(), op.dstPath());
+			assertEquals(dir + "//f", op.item().name());
+			final Operation<DataItemImpl> res = deleteOnce(op);
+			assertEquals(Operation.Status.SUCC, res.status(), "dstPath " + dstPath);
+			assertFalse(Files.exists(file), "dstPath " + dstPath + " must delete " + file);
+			assertTrue(Files.exists(joinedAgain), "dstPath " + dstPath + " must not delete " + joinedAgain);
+		}
+
+		// a retry: the operation's result, reset and dispatched again
+		Files.write(file, new byte[]{1
+		});
+		Files.write(joinedAgain, new byte[]{2
+		});
+		final var first = newOp(OpType.DELETE, "f", 0, null, dir.toString());
+		final Operation<DataItemImpl> retry = first.result();
+		retry.reset();
+		assertEquals(dir + "/f", retry.item().name());
+		final Operation<DataItemImpl> res = deleteOnce(retry);
+		assertEquals(Operation.Status.SUCC, res.status(), "retry");
+		assertFalse(Files.exists(file), "the retry must delete " + file);
+		assertTrue(Files.exists(joinedAgain), "the retry must not delete " + joinedAgain);
+	}
+
 	@Test
 	public void listReturnsItemsFromDirectory() throws Exception {
 		// Prepare files

@@ -13,6 +13,8 @@ import com.dell.spt.base.storage.Credential;
 /** Created by kurila on 20.10.15. */
 public class OperationImpl<I extends Item> implements Operation<I> {
 
+	private static final char SEPARATOR = '/';
+
 	protected int originIndex;
 	protected OpType opType;
 	protected I item;
@@ -70,8 +72,17 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 			final String itemName = item.name();
 			final int lastSlashIndex = itemName.lastIndexOf(SLASH);
 			if (lastSlashIndex > 0 && lastSlashIndex < itemName.length()) {
-				this.srcPath = itemName.substring(0, lastSlashIndex);
-				item.name(itemName.substring(lastSlashIndex + 1));
+				final int wholeNamePathEnd = itemName.charAt(lastSlashIndex - 1) == SEPARATOR
+								? emptySegmentPathEnd(itemName, lastSlashIndex)
+								: 0;
+				if (wholeNamePathEnd > 0) {
+					// An empty segment before the last one: splitting would leave a path ending in a
+					// slash, which a later join takes for the separator and so loses the segment.
+					this.srcPath = itemName.substring(0, wholeNamePathEnd);
+				} else {
+					this.srcPath = itemName.substring(0, lastSlashIndex);
+					item.name(itemName.substring(lastSlashIndex + 1));
+				}
 			} else {
 				this.srcPath = srcPath;
 			}
@@ -92,6 +103,24 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 		if (item instanceof VersionedItem versionedItem) {
 			this.requestedVersionId = emptyToNull(versionedItem.versionId());
 		}
+	}
+
+	/**
+	 * For a name whose last slash follows another slash, such as {@code /pp//k} or {@code /pp/a//b},
+	 * returns where the path ends when the name is kept whole: the start of that run of slashes, so
+	 * {@code /pp//k} gives the path {@code /pp}. Returns 0 to keep the usual split: when the run
+	 * starts the name ({@code //k}), or when the name ends with a slash (a folder marker, such as
+	 * {@code /pp/d//}, out of scope here).
+	 */
+	private static int emptySegmentPathEnd(final String itemName, final int lastSlashIndex) {
+		if (lastSlashIndex == itemName.length() - 1) {
+			return 0;
+		}
+		int runStart = lastSlashIndex - 1;
+		while (runStart > 0 && itemName.charAt(runStart - 1) == SEPARATOR) {
+			runStart--;
+		}
+		return runStart;
 	}
 
 	protected OperationImpl(final OperationImpl<I> other) {
