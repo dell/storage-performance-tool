@@ -149,6 +149,10 @@ type StepSummary struct {
 	NicPaths           *NicPathsEvidence
 	NicSetMissing      []results.NicNodeFile
 	EventLoopsMissing  []results.NicNodeFile
+	// MetricsMissing marks a step that is in the results index but has no totals: its
+	// metrics.total.csv was not fetched, or holds no rows. A MetricsSuppressed step is never
+	// missing.
+	MetricsMissing bool
 }
 
 // MixedDistribution stores the configured mixed-workload share for each known operation.
@@ -213,6 +217,28 @@ type RunTotals struct {
 	DataMiB         float64
 	DataGiB         float64
 	FailureCount    int64
+	// StepsCounted is the number of steps whose metrics are in the sums above.
+	StepsCounted int
+	// MissingPhases names, in step order, the indexed steps that should have counted but have
+	// no metrics. A MetricsSuppressed step is never listed.
+	MissingPhases []string
+	// AbsentPhases names the expected steps that are not in the results index at all, in
+	// step ID order. An absent step does not always mean a missing phase (a mock pipeline
+	// runs its planned steps as one, runtime step IDs can differ from the planned ones, and a
+	// no-work cleanup can end unseen), so it decides only the case where nothing is counted.
+	AbsentPhases []string
+}
+
+// Unavailable reports that no step was counted while some expected step is missing or
+// absent, so the sums are not measurements.
+func (t RunTotals) Unavailable() bool {
+	return t.StepsCounted == 0 && len(t.MissingPhases)+len(t.AbsentPhases) > 0
+}
+
+// Partial reports that some steps were counted and some indexed steps have no metrics, so
+// the sums cover only part of the run. Absent steps never make the totals partial.
+func (t RunTotals) Partial() bool {
+	return t.StepsCounted > 0 && len(t.MissingPhases) > 0
 }
 
 const (
@@ -463,6 +489,7 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 			totals.DurationSeconds += metrics.DurationSeconds
 			totals.DataBytes += metrics.DataBytes
 			totals.FailureCount += metrics.FailureCount
+			totals.StepsCounted++
 			// A warning wraps in the narrow TUI, which clips the Failed column.
 			if metrics.FailureCount > 0 {
 				warnings = append(warnings, fmt.Sprintf("%s: %s %s failed", summary.PhaseLabel, formatInt(metrics.FailureCount), requestWord(metrics.FailureCount)))
@@ -476,12 +503,20 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 			if label == "" {
 				label = stepData.StepID
 			}
+			summary.MetricsMissing = true
+			totals.MissingPhases = append(totals.MissingPhases, label)
 			warnings = append(warnings, fmt.Sprintf("%s metrics unavailable (status: %s)", label, statusLabel))
 		}
 
 		steps = append(steps, summary)
 	}
 	appendSeededDeleteCleanupPhase(steps, workload)
+	// An expected step absent from the index has no fetched config, so whether it would have
+	// been MetricsSuppressed is unknown (a generated read or mixed seed step is suppressed by
+	// the engine's default). Absent steps therefore only make an uncounted run unavailable.
+	for _, stepID := range data.MissingExpectedSteps {
+		totals.AbsentPhases = append(totals.AbsentPhases, nonEmpty(phaseLabelFromStep(stepID), stepID))
+	}
 
 	totals.DurationHuman = formatSeconds(totals.DurationSeconds)
 	totals.DataMiB = bytesToMiB(totals.DataBytes)
