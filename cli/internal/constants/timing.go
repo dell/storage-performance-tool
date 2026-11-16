@@ -71,6 +71,13 @@ const (
 
 	// Health monitoring
 	MetricsHealthTimeout = 30 * time.Second // Timeout for metrics health monitoring
+
+	// Host connect. HostConnectCancelWait bounds the wait, after a host
+	// connect failed, for a Ctrl-C that reached ssh first to cancel the
+	// caller's context; RemoteDockerPingTimeout bounds the ssh docker version
+	// check that opens a remote host connection.
+	HostConnectCancelWait   = 100 * time.Millisecond
+	RemoteDockerPingTimeout = 10 * time.Second
 )
 
 // AutoResultsTrackerStableConfirmations is the number of unchanged successful

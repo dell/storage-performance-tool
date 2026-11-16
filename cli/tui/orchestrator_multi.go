@@ -119,6 +119,9 @@ type MultiHostOrchestrator struct {
 	rollbackTimeout    time.Duration
 	diagnosticsTimeout time.Duration
 	cleanupTimeout     time.Duration
+	// connectCancelWait bounds how long ConnectHosts waits, after a host
+	// failed, for the caller's context to end (see ConnectHosts).
+	connectCancelWait time.Duration
 
 	runtimeIdentityRecorder  func(DistributedRuntimeIdentityEvidence)
 	runtimeIdentityTier      string
@@ -201,6 +204,7 @@ func NewMultiHostOrchestratorWithRMI(hostInfos []*hostparse.HostInfo, minHosts i
 		rollbackTimeout:         constants.StartupRollbackTimeout,
 		diagnosticsTimeout:      constants.DiagnosticsCollectionTimeout,
 		cleanupTimeout:          constants.ContainerCleanupTimeout,
+		connectCancelWait:       constants.HostConnectCancelWait,
 	}
 	// Default detection uses remoteip via the command executor (SSH or local)
 	o.detectAdvIP = func(ctx context.Context, host *hostparse.HostInfo) (string, error) {
@@ -572,6 +576,23 @@ func (o *MultiHostOrchestrator) ConnectHosts(ctx context.Context) error {
 		if host.GetStatus() == HostStatusReady {
 			successCount++
 		}
+	}
+
+	// A cancel ends host attempts with errors that do not name it (an ssh
+	// killed by the context reads "signal: killed"), so judge the caller's
+	// context before the counts. A terminal Ctrl-C can reach ssh before the
+	// CLI's handler cancels ctx, so give a failed connect a short window for
+	// that cancel to land.
+	if successCount < len(o.hosts) && ctx.Err() == nil {
+		timer := time.NewTimer(o.connectCancelWait)
+		select {
+		case <-ctx.Done():
+		case <-timer.C:
+		}
+		timer.Stop()
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("host connection cancelled: %w", command.ContextEnd(ctx))
 	}
 
 	// Print summary
