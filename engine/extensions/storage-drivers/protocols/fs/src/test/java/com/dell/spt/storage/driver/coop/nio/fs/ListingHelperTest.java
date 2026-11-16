@@ -124,6 +124,25 @@ public class ListingHelperTest {
 	}
 
 	@Test
+	public void listGivesNameShorterThanGlobPrefixOffsetZero(@TempDir final Path dir) throws Exception {
+		// the prefix is a glob, so "[ab]c" matches "ac", which is shorter than the prefix string
+		final File f = dir.resolve("ac").toFile();
+		assertTrue(f.createNewFile());
+		final List<DataItem> listed = listAll(dir, "[ab]c", null);
+		assertEquals(1, listed.size());
+		assertEquals(f.getAbsolutePath(), listed.get(0).name());
+		assertEquals(0, listed.get(0).offset());
+	}
+
+	@Test
+	public void listGivesNameThatParsesNegativeOffsetZero(@TempDir final Path dir) throws Exception {
+		assertTrue(dir.resolve("-abc").toFile().createNewFile());
+		final List<DataItem> listed = listAll(dir, null, null);
+		assertEquals(1, listed.size());
+		assertEquals(0, listed.get(0).offset());
+	}
+
+	@Test
 	public void listParsesForeignNameThatIsValidRadix36(@TempDir final Path dir) throws Exception {
 		// known limit: a foreign name that parses in the id radix gets its parsed value as the offset
 		assertTrue(dir.resolve("readme").toFile().createNewFile());

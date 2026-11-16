@@ -63,20 +63,9 @@ public interface ListingHelper {
 				nextFileName = nextFile.getAbsolutePath();
 				if (lastPrevItemNameFound) {
 					// the offset is encoded in the file name, not in the full path
-					final String leafName = nextFile.getName();
-					try {
-						final long offset;
-						if (prefixLength > 0) {
-							// only items with the prefix are passed so it's safe
-							offset = Long.parseLong(leafName.substring(prefixLength), idRadix);
-						} else {
-							offset = Long.parseLong(leafName, idRadix);
-						}
-						nextItem = itemFactory.getItem(nextFileName, offset, nextFile.length());
-					} catch (final NumberFormatException e) {
-						// try to not use the offset (read verification should be disabled)
-						nextItem = itemFactory.getItem(nextFileName, 0, nextFile.length());
-					}
+					nextItem = itemFactory.getItem(
+									nextFileName, offsetFromFileName(nextFile.getName(), prefixLength, idRadix),
+									nextFile.length());
 					buff.add(nextItem);
 					if (count == buff.size()) {
 						break;
@@ -90,5 +79,22 @@ public interface ListingHelper {
 		}
 
 		return buff;
+	}
+
+	/**
+	 * The offset an SPT-written file name encodes after the naming prefix, or 0 when the name encodes
+	 * none (read verification should then be disabled). The listing filter is a glob, so a matched
+	 * name can be shorter than the prefix string; SPT never writes a negative offset.
+	 */
+	static long offsetFromFileName(final String leafName, final int prefixLength, final int idRadix) {
+		if (leafName.length() <= prefixLength) {
+			return 0;
+		}
+		try {
+			final long offset = Long.parseLong(leafName.substring(prefixLength), idRadix);
+			return offset < 0 ? 0 : offset;
+		} catch (final NumberFormatException e) {
+			return 0;
+		}
 	}
 }
