@@ -68,6 +68,31 @@ final class ResponseContentUtilUpdatedPartTest {
 		assertPartsVerify(3000, 0, new SeedDataInput(1, 1000, 3, true), 3, 10, 11);
 	}
 
+	/**
+	 * The last byte of cell 28 (offset 2^29 - 2) is where a floating-point cell lookup picks cell 29.
+	 * Only cell 29 is updated, so that byte must be checked at the base layer.
+	 */
+	@Test
+	void aChunkStartingOnTheLastByteOfCell28VerifiesAgainstCell28() throws Exception {
+		final var input = ring();
+		final long cell29 = DataItem.rangeOffset(29);
+		final long partSize = 1L << 28;
+		final var item = item(cell29 + 4096, 0, input, 29);
+		final var last28 = item.slice(DataItem.rangeOffset(28), item.rangeSize(28));
+		last28.position(item.rangeSize(28) - 1);
+		final var first29 = item.slice(cell29, item.rangeSize(29));
+		first29.layer(1);
+		final byte[] bytes = {read(last28, 1)[0], read(first29, 1)[0]
+		};
+		final var part1 = new CompositeDataOperationImpl<>(0, OpType.READ, item, null, "/bucket", null, null, 0, partSize)
+						.subOperations()
+						.get(1);
+		final long done = cell29 - 1 - partSize;
+		ResponseContentUtil.verifyChunk(part1, done, Unpooled.wrappedBuffer(bytes), 2);
+		assertNotEquals(Operation.Status.RESP_FAIL_CORRUPT, part1.status());
+		assertEquals(done + 2, part1.countBytesDone());
+	}
+
 	/** The mask says the cell is updated, but the target returned the base layer's bytes. */
 	@Test
 	void aPartWithStaleContentForAnUpdatedCellIsCorruptAtTheCellsOffsetInThePart() throws Exception {

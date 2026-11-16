@@ -255,7 +255,8 @@ public abstract class ResponseContentUtil {
 		int chunkOffset = 0;
 		while (chunkOffset < chunkSize) {
 			// the whole item's cell which has (cell's offset <= current offset < cell's end)
-			final int n = rangeCount(currOffset + 1) - 1;
+			// (integer log2: rangeCount is floating point and is off by one at a few large offsets)
+			final int n = 63 - Long.numberOfLeadingZeros(currOffset + 1);
 			final long cellOffset = rangeOffset(n);
 			final long cellEnd = Math.min(wholeSize, rangeOffset(n + 1));
 			final DataItem cell = whole.slice(cellOffset, cellEnd - cellOffset);
