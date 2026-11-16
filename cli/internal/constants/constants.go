@@ -34,6 +34,7 @@ const (
 	DockerFlagFilter     = "--filter"
 	DockerFlagFormat     = "--format"
 	DockerFlagAll        = "-a"
+	DockerFlagNoTrunc    = "--no-trunc"
 	DockerFlagTimestamps = "--timestamps"
 	DockerFlagSince      = "--since"
 	DockerFlagFollow     = "--follow"

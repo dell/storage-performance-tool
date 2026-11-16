@@ -1144,10 +1144,12 @@ type staleVerifyContainer struct {
 // alone. A running verify of another invocation is left alone while it is younger than
 // verifyContainerStaleAge (see there for when one can outlive it).
 //
-// It reads no label text. One docker ps lists the IDs and creation times of the containers
-// labelled spt.verify=true, and only when one of them is old enough a second lists the IDs of this
-// invocation's own containers, matched by docker's label filter. Every field it parses comes from
-// docker, so no label value can add, change or remove a row.
+// It reads no label text. One docker ps lists the full IDs and creation times of the running
+// containers labelled spt.verify=true, and only when one of them is old enough a second lists the
+// full IDs of this invocation's own containers, running or not, matched by docker's label filter.
+// Every field it parses comes from docker, so no label value can add, change or remove a row. Full
+// IDs go to docker rm, which matches a full ID before a container name, so a container named like
+// a short ID cannot be removed in its place.
 func (v *Verifier) cleanupVerifyContainers(host *hostparse.HostInfo, dockerOps command.DockerOperations) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1200,7 +1202,7 @@ func (v *Verifier) cleanupVerifyContainers(host *hostparse.HostInfo, dockerOps c
 		return
 	}
 
-	own, ok := v.ownVerifyContainers(ctx, host)
+	own, ok := v.ownVerifyContainers(host)
 	if !ok {
 		return
 	}
@@ -1219,12 +1221,15 @@ func (v *Verifier) cleanupVerifyContainers(host *hostparse.HostInfo, dockerOps c
 
 // ownVerifyContainers returns the IDs of the containers on host that carry this invocation's run
 // label. A verifier without a run id owns none. ok is false when the listing fails; the caller then
-// removes nothing, since it cannot tell its own containers from others.
-func (v *Verifier) ownVerifyContainers(ctx context.Context, host *hostparse.HostInfo) (own map[string]bool, ok bool) {
+// removes nothing, since it cannot tell its own containers from others. The listing has its own
+// deadline, so a slow first listing does not leave it too little time.
+func (v *Verifier) ownVerifyContainers(host *hostparse.HostInfo) (own map[string]bool, ok bool) {
 	own = make(map[string]bool)
 	if v.runID == "" {
 		return own, true
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	stdout, stderr, err := v.cmdExecutor.ExecuteCommand(ctx, host, verifyCleanupOwnListArgs(v.runID))
 	if err != nil {
 		logging.LogWarn("verifier", "left verification containers alone: failed to list this run's containers",
@@ -1239,27 +1244,31 @@ func (v *Verifier) ownVerifyContainers(ctx context.Context, host *hostparse.Host
 	return own, true
 }
 
-// verifyCleanupListArgs is the docker ps command that lists every verify container's ID and
-// creation time. Each word reaches the remote shell unquoted (see command.CommandExecutor), so none
+// verifyCleanupListArgs is the docker ps command that lists every running verify container's full
+// ID and creation time. Each word reaches the remote shell unquoted (see command.CommandExecutor), so none
 // holds whitespace or shell metacharacters.
 func verifyCleanupListArgs() []string {
 	return []string{
 		constants.DockerCommand,
 		constants.DockerCmdPS,
+		constants.DockerFlagNoTrunc,
 		constants.DockerFlagFilter, "label=" + constants.DockerLabelVerify + "=" + stringTrue,
 		constants.DockerFlagFormat, constants.DockerVerifyCleanupFormat,
 	}
 }
 
-// verifyCleanupOwnListArgs is the docker ps command that lists the IDs of the verify containers
-// carrying runID's run label. runID comes from newVerifyRunID (rand.Text: A-Z and 2-7), so the
+// verifyCleanupOwnListArgs is the docker ps command that lists the full IDs of the containers
+// carrying runID's run label, stopped ones too, so that one of this run's containers that stops
+// between the two listings is still known as its own. One label filter only: the result is looked
+// up only for IDs the first listing returned. runID comes from newVerifyRunID (rand.Text: A-Z and 2-7), so the
 // words stay shell-safe, as verifyCleanupListArgs's do.
 func verifyCleanupOwnListArgs(runID string) []string {
 	return []string{
 		constants.DockerCommand,
 		constants.DockerCmdPS,
+		constants.DockerFlagAll,
 		constants.DockerFlagQuiet,
-		constants.DockerFlagFilter, "label=" + constants.DockerLabelVerify + "=" + stringTrue,
+		constants.DockerFlagNoTrunc,
 		constants.DockerFlagFilter, "label=" + constants.DockerLabelVerifyRun + "=" + runID,
 	}
 }
