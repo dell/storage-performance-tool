@@ -1,0 +1,145 @@
+### mock pipeline (compact, 72)
+Run spt-20261115.120000.000 (2026-11-15 12:00:00)
+Environment
+• CLI unavailable (legacy result)
+• Engine unavailable (legacy result; engine identity was not recorded)
+
+Performance by Phase
+┌──────────────────────────────┬────────────┬───────────────┬───────────────┬──────────────────┐
+│ Phase                        │   IOPS Avg │   IOPS Steady │ Bandwidth Avg │ Bandwidth Steady │
+├──────────────────────────────┼────────────┼───────────────┼───────────────┼──────────────────┤
+│ Pipeline_20261115.120000.000 │ 10.0 ops/s │ n/a (missing) │     100 MiB/s │    n/a (missing) │
+└──────────────────────────────┴────────────┴───────────────┴───────────────┴──────────────────┘
+┌──────────────────────────────┬─────────────┬─────────┬─────────────┬─────────────┬──────────┬────────┐
+│ Phase                        │ Object Size │ Success │  Data Moved │ Latency P50 │ TTFB P50 │ Failed │
+├──────────────────────────────┼─────────────┼─────────┼─────────────┼─────────────┼──────────┼────────┤
+│ Pipeline_20261115.120000.000 │ 1.00 MiB    │     100 │ 1000.00 MiB │     1.00 ms │        — │      0 │
+└──────────────────────────────┴─────────────┴─────────┴─────────────┴─────────────┴──────────┴────────┘
+Totals: duration 1.2s, data moved 1000.00 MiB
+### mock pipeline (full, 110)
+==========================================================================
+ SPT Run Summary  •  spt-20261115.120000.000  •  2026-11-15 12:00:00 UTC
+==========================================================================
+
+Environment
+  • CLI                unavailable (legacy result)
+  • Engine             unavailable (legacy result; engine identity was not recorded)
+
+Workload Configuration
+  • Workload           Mock
+  • Object size        1.00 MiB
+
+Performance by Phase
+┌──────────────────────────────┬────────────┬───────────────┬───────────────┬──────────────────┐
+│ Phase                        │   IOPS Avg │   IOPS Steady │ Bandwidth Avg │ Bandwidth Steady │
+├──────────────────────────────┼────────────┼───────────────┼───────────────┼──────────────────┤
+│ Pipeline_20261115.120000.000 │ 10.0 ops/s │ n/a (missing) │     100 MiB/s │    n/a (missing) │
+└──────────────────────────────┴────────────┴───────────────┴───────────────┴──────────────────┘
+┌──────────────────────────────┬─────────────┬─────────┬─────────────┬─────────────┬──────────┬────────┐
+│ Phase                        │ Object Size │ Success │  Data Moved │ Latency P50 │ TTFB P50 │ Failed │
+├──────────────────────────────┼─────────────┼─────────┼─────────────┼─────────────┼──────────┼────────┤
+│ Pipeline_20261115.120000.000 │ 1.00 MiB    │     100 │ 1000.00 MiB │     1.00 ms │        — │      0 │
+└──────────────────────────────┴─────────────┴─────────┴─────────────┴─────────────┴──────────┴────────┘
+
+Run Totals
+  • Duration           1.2s
+  • Data moved         1000.00 MiB
+  • Missing steps      mt-001-20261115.120000.000-create, mt-002-20261115.120000.000-delete
+### seeded delete without its cleanup (compact, 72)
+Run spt-20261115.120000.000 (2026-11-15 12:00:00)
+Environment
+• CLI unavailable (legacy result)
+• Engine unavailable (legacy result; engine identity was not recorded)
+
+Performance by Phase
+┌────────┬────────────┬───────────────┬───────────────┬──────────────────┐
+│ Phase  │   IOPS Avg │   IOPS Steady │ Bandwidth Avg │ Bandwidth Steady │
+├────────┼────────────┼───────────────┼───────────────┼──────────────────┤
+│ Seed   │ 10.0 ops/s │ n/a (missing) │     100 MiB/s │    n/a (missing) │
+│ Delete │ 10.0 ops/s │ n/a (missing) │             — │                — │
+└────────┴────────────┴───────────────┴───────────────┴──────────────────┘
+┌────────┬─────────────┬──────────────────────────┬────────────┬─────────────┬──────────┬────────┐
+│ Phase  │ Object Size │                  Success │ Data Moved │ Latency P50 │ TTFB P50 │ Failed │
+├────────┼─────────────┼──────────────────────────┼────────────┼─────────────┼──────────┼────────┤
+│ Seed   │ 1.00 MiB    │                      100 │ 800.00 KiB │     1.00 ms │        — │      0 │
+│ Delete │ —           │ 100 logical API requests │          — │     1.00 ms │        — │      0 │
+└────────┴─────────────┴──────────────────────────┴────────────┴─────────────┴──────────┴────────┘
+Totals: duration 800ms, data moved 800.00 KiB
+### seeded delete without its cleanup (full, 110)
+==========================================================================
+ SPT Run Summary  •  spt-20261115.120000.000  •  2026-11-15 12:00:00 UTC
+==========================================================================
+
+Environment
+  • CLI                unavailable (legacy result)
+  • Engine             unavailable (legacy result; engine identity was not recorded)
+
+Workload Configuration
+  • Workload           Delete
+  • Object size        1.00 MiB
+
+Performance by Phase
+┌────────┬────────────┬───────────────┬───────────────┬──────────────────┐
+│ Phase  │   IOPS Avg │   IOPS Steady │ Bandwidth Avg │ Bandwidth Steady │
+├────────┼────────────┼───────────────┼───────────────┼──────────────────┤
+│ Seed   │ 10.0 ops/s │ n/a (missing) │     100 MiB/s │    n/a (missing) │
+│ Delete │ 10.0 ops/s │ n/a (missing) │             — │                — │
+└────────┴────────────┴───────────────┴───────────────┴──────────────────┘
+┌────────┬─────────────┬──────────────────────────┬────────────┬─────────────┬──────────┬────────┐
+│ Phase  │ Object Size │                  Success │ Data Moved │ Latency P50 │ TTFB P50 │ Failed │
+├────────┼─────────────┼──────────────────────────┼────────────┼─────────────┼──────────┼────────┤
+│ Seed   │ 1.00 MiB    │                      100 │ 800.00 KiB │     1.00 ms │        — │      0 │
+│ Delete │ —           │ 100 logical API requests │          — │     1.00 ms │        — │      0 │
+└────────┴─────────────┴──────────────────────────┴────────────┴─────────────┴──────────┴────────┘
+
+Run Totals
+  • Duration           800ms
+  • Data moved         800.00 KiB
+  • Missing steps      mt-003-20261115.120000.000-cleanup
+### planned and runtime IDs with a suppressed seed (compact, 72)
+Run spt-20261115.120000.000 (2026-11-15 12:00:00)
+Environment
+• CLI unavailable (legacy result)
+• Engine unavailable (legacy result; engine identity was not recorded)
+
+Performance by Phase
+┌───────┬────────────┬───────────────┬───────────────┬──────────────────┐
+│ Phase │   IOPS Avg │   IOPS Steady │ Bandwidth Avg │ Bandwidth Steady │
+├───────┼────────────┼───────────────┼───────────────┼──────────────────┤
+│ Read  │ 10.0 ops/s │ n/a (missing) │     100 MiB/s │    n/a (missing) │
+└───────┴────────────┴───────────────┴───────────────┴──────────────────┘
+┌───────┬─────────────┬─────────┬────────────┬─────────────┬──────────┬────────┐
+│ Phase │ Object Size │ Success │ Data Moved │ Latency P50 │ TTFB P50 │ Failed │
+├───────┼─────────────┼─────────┼────────────┼─────────────┼──────────┼────────┤
+│ Read  │ 1.00 MiB    │     100 │   1.00 MiB │     1.00 ms │        — │      0 │
+└───────┴─────────────┴─────────┴────────────┴─────────────┴──────────┴────────┘
+Totals: duration 1s, data moved 1.00 MiB
+### planned and runtime IDs with a suppressed seed (full, 110)
+==========================================================================
+ SPT Run Summary  •  spt-20261115.120000.000  •  2026-11-15 12:00:00 UTC
+==========================================================================
+
+Environment
+  • CLI                unavailable (legacy result)
+  • Engine             unavailable (legacy result; engine identity was not recorded)
+
+Workload Configuration
+  • Workload           Read
+  • Object size        1.00 MiB
+
+Performance by Phase
+┌───────┬────────────┬───────────────┬───────────────┬──────────────────┐
+│ Phase │   IOPS Avg │   IOPS Steady │ Bandwidth Avg │ Bandwidth Steady │
+├───────┼────────────┼───────────────┼───────────────┼──────────────────┤
+│ Read  │ 10.0 ops/s │ n/a (missing) │     100 MiB/s │    n/a (missing) │
+└───────┴────────────┴───────────────┴───────────────┴──────────────────┘
+┌───────┬─────────────┬─────────┬────────────┬─────────────┬──────────┬────────┐
+│ Phase │ Object Size │ Success │ Data Moved │ Latency P50 │ TTFB P50 │ Failed │
+├───────┼─────────────┼─────────┼────────────┼─────────────┼──────────┼────────┤
+│ Read  │ 1.00 MiB    │     100 │   1.00 MiB │     1.00 ms │        — │      0 │
+└───────┴─────────────┴─────────┴────────────┴─────────────┴──────────┴────────┘
+
+Run Totals
+  • Duration           1s
+  • Data moved         1.00 MiB
+  • Missing steps      mt-001-20261115.120000.000-seed, mt-002-20261115.120000.000-read

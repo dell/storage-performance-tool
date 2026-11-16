@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -36,6 +37,7 @@ type HeadlessRunner struct {
 	dockerManager tui.DockerInterface
 	orchestrator  *tui.TestOrchestrator
 	traceFile     *os.File
+	traceMu       sync.Mutex // guards traceFile: output runs on the log-stream goroutine, Close on the caller's
 	verbose       bool
 	jsonMode      bool
 	metricsOnly   bool
@@ -744,6 +746,8 @@ func (r *HeadlessRunner) output(category, format string, args ...interface{}) {
 	fmt.Println(line)
 
 	// Write to trace file if available
+	r.traceMu.Lock()
+	defer r.traceMu.Unlock()
 	if r.traceFile != nil {
 		if _, err := fmt.Fprintln(r.traceFile, line); err != nil { // #nosec G705 -- writing to local trace file, not HTTP response
 			fmt.Fprintf(os.Stderr, "Failed to write to trace file: %v\n", err)
@@ -852,6 +856,8 @@ func (r *HeadlessRunner) outputJSONLine(encoded []byte) {
 	jsonLine := string(encoded)
 	fmt.Println(jsonLine)
 
+	r.traceMu.Lock()
+	defer r.traceMu.Unlock()
 	if r.traceFile != nil {
 		_, _ = fmt.Fprintln(r.traceFile, jsonLine) //nolint:errcheck
 	}
@@ -877,12 +883,18 @@ func (r *HeadlessRunner) writeTraceHeader(filename string) {
 	_, _ = r.traceFile.WriteString(header) //nolint:errcheck
 }
 
-// Close cleans up resources
+// Close closes the trace file. A line output after Close is printed but not
+// written to the trace file.
 func (r *HeadlessRunner) Close() error {
-	if r.traceFile != nil {
-		if err := r.traceFile.Close(); err != nil {
-			return fmt.Errorf("failed to close trace file: %w", err)
-		}
+	r.traceMu.Lock()
+	defer r.traceMu.Unlock()
+	if r.traceFile == nil {
+		return nil
+	}
+	traceFile := r.traceFile
+	r.traceFile = nil
+	if err := traceFile.Close(); err != nil {
+		return fmt.Errorf("failed to close trace file: %w", err)
 	}
 	return nil
 }
@@ -911,14 +923,15 @@ func startHeadlessModeWithParams(image string, scenarioPath string, params scena
 	if err != nil {
 		return fmt.Errorf("failed to create Docker manager: %w", err)
 	}
-	defer dockerManager.Close()
 
 	// Create headless runner
 	runner, err := NewHeadlessRunner(dockerManager, options)
 	if err != nil {
+		dockerManager.Close()
 		return fmt.Errorf("failed to create headless runner: %w", err)
 	}
-	defer func() { _ = runner.Close() }()
+	// Stop the Docker log stream before the trace file closes.
+	defer func() { dockerManager.Close(); _ = runner.Close() }()
 
 	// Run the benchmark with optional auto-terminate timeout
 	baseCtx := options.Context
