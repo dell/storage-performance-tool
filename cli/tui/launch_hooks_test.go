@@ -239,3 +239,38 @@ func TestSessionLaunchHooksExposeAuthoritativeWorkloadTerminal(t *testing.T) {
 		t.Fatal("launch hooks did not expose session terminal signal")
 	}
 }
+
+func TestStopWorkloadAndWaitFollowsTheSession(t *testing.T) {
+	if err := NewLaunchHooks(nil).StopWorkloadAndWait(context.Background(), time.Second); err != nil {
+		t.Fatalf("self-managed hooks: %v, want nil at once", err)
+	}
+
+	session := runcontrol.NewSession()
+	hooks := NewSessionLaunchHooks(session, nil)
+	done := make(chan error, 1)
+	go func() { done <- hooks.StopWorkloadAndWait(context.Background(), 5*time.Second) }()
+	select {
+	case <-session.WorkloadStopRequested():
+	case <-time.After(time.Second):
+		t.Fatal("stop was not requested from the session")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("returned %v before the workload was terminal", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	session.MarkWorkloadTerminal()
+	if err := <-done; err != nil {
+		t.Fatalf("terminal workload: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := NewSessionLaunchHooks(runcontrol.NewSession(), nil).StopWorkloadAndWait(ctx, time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled wait = %v, want the cancellation", err)
+	}
+	if err := NewSessionLaunchHooks(runcontrol.NewSession(), nil).StopWorkloadAndWait(
+		context.Background(), 10*time.Millisecond); err == nil {
+		t.Fatal("timed-out wait returned nil")
+	}
+}

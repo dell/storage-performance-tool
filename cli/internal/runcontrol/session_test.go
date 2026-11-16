@@ -29,6 +29,33 @@ func TestSessionSubmissionStateNeverRegresses(t *testing.T) {
 	}
 }
 
+func TestSessionWorkloadStopRequestIsIdempotentAndNilSafe(t *testing.T) {
+	session := NewSession()
+	select {
+	case <-session.WorkloadStopRequested():
+		t.Fatal("stop request closed before any request")
+	default:
+	}
+	session.RequestWorkloadStop()
+	session.RequestWorkloadStop()
+	select {
+	case <-session.WorkloadStopRequested():
+	default:
+		t.Fatal("stop request was not broadcast")
+	}
+
+	var nilSession *Session
+	nilSession.RequestWorkloadStop()
+	if nilSession.WorkloadStopRequested() != nil {
+		t.Fatal("nil session returned a stop channel")
+	}
+	zero := &Session{}
+	zero.RequestWorkloadStop()
+	if zero.WorkloadStopRequested() != nil {
+		t.Fatal("zero-value session returned a stop channel")
+	}
+}
+
 func TestSessionWorkloadTerminalBroadcastIsIdempotent(t *testing.T) {
 	session := NewSession()
 	select {

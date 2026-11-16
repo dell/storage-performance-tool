@@ -7,8 +7,10 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/runcontrol"
 )
@@ -218,6 +220,41 @@ func (h LaunchHooks) WorkloadTerminal() <-chan struct{} {
 		return nil
 	}
 	return h.state.session.WorkloadTerminal()
+}
+
+// RequestWorkloadStop asks the run session to stop the submitted workload
+// without waiting. It reports false for self-managed hooks, which have no
+// session to ask.
+func (h LaunchHooks) RequestWorkloadStop() bool {
+	if !h.SessionManaged() {
+		return false
+	}
+	h.state.session.RequestWorkloadStop()
+	return true
+}
+
+// StopWorkloadAndWait asks the run session to stop the submitted workload, as
+// the auto-terminate deadline does, and waits until the session reports the
+// workload terminal. The session's coordinator stops the run through the
+// engine API and salvages its evidence; the caller keeps its presentation
+// (log reader, trace file) open until then. It returns ctx.Err() when ctx ends
+// first, and an error when timeout elapses first; the coordinator still
+// finishes on its own. Self-managed hooks have no session and return at once.
+func (h LaunchHooks) StopWorkloadAndWait(ctx context.Context, timeout time.Duration) error {
+	if !h.RequestWorkloadStop() {
+		return nil
+	}
+	ctx = normalizeContext(ctx)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-h.state.session.WorkloadTerminal():
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return fmt.Errorf("the run did not report a terminal state within %s of the stop request", timeout)
+	}
 }
 
 // RegisterResourceFinalizer binds launcher-owned resources to the session.

@@ -135,6 +135,10 @@ type autoResultsOutcome struct {
 	AllFailedPhases      []summary.AllFailedPhase
 	SummaryRead          bool
 	StepsWithResults     int
+	// AutoTerminated marks a run that the auto-terminate deadline stopped: the
+	// monitor stopped tracking on the run session's stop request, stopped the
+	// run through the engine API and reconciled its terminal state.
+	AutoTerminated bool
 
 	// LiveCorruptionUnobserved marks a completed verification READ that the live step list never
 	// showed, on a run without --allow-empty-selection: its corruption count is unknown, so only an
@@ -238,6 +242,18 @@ func (m *autoResultsMonitor) provenNotSubmitted() bool {
 	session := m.session
 	m.sessionMu.RUnlock()
 	return session != nil && session.SubmissionState() == runcontrol.SubmissionNotSubmitted
+}
+
+// workloadStopRequested returns the bound session's stop-request channel, or
+// nil when no session is bound.
+func (m *autoResultsMonitor) workloadStopRequested() <-chan struct{} {
+	if m == nil {
+		return nil
+	}
+	m.sessionMu.RLock()
+	session := m.session
+	m.sessionMu.RUnlock()
+	return session.WorkloadStopRequested()
 }
 
 func (m *autoResultsMonitor) markWorkloadTerminal() {
@@ -595,6 +611,7 @@ var (
 	archivePreparedRunInputsFunc = archivePreparedRunInputs
 	generateRunSummaryFunc       = generateRunSummary
 	requestShutdownAllFunc       = requestShutdownAll
+	requestRunStopFunc           = requestRunStop
 )
 
 var integrityRuntimeGOOS = runtime.GOOS
@@ -741,6 +758,32 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 		phaseBase := context.WithoutCancel(parentCtx)
 		verificationRun := len(integrityOptions) > 0 && integrityOptions[0] != nil
 		shutdownPerformed := false
+		type reconciliationOutcome struct {
+			result *portcheck.RunResult
+			err    error
+		}
+		// startTerminalReconciliation follows the owned run to its terminal
+		// state while a stop or shutdown request is in flight.
+		startTerminalReconciliation := func(ctx context.Context) <-chan reconciliationOutcome {
+			done := make(chan reconciliationOutcome, 1)
+			go func() {
+				reconciler := newRunTrackerFunc(baseURL)
+				configureAutoResultsTracker(reconciler, expectedRunID, debug, true)
+				result, err := reconciler.WaitForCompletion(ctx, expectedStepIDs)
+				done <- reconciliationOutcome{result: result, err: err}
+			}()
+			return done
+		}
+		recordTerminalReconciliation := func(label string, reconciled reconciliationOutcome) {
+			if reconciled.result != nil {
+				outcome.Tracker = mergeTrackedRunResults(outcome.Tracker, reconciled.result)
+			}
+			if reconciled.err != nil {
+				outcome.TrackerErr = fmt.Errorf("%s terminal reconciliation: %w", label, reconciled.err)
+			} else {
+				outcome.TrackerErr = nil
+			}
+		}
 		runShutdown := func(reconcileTerminal bool) {
 			shutdownPerformed = true
 			shutdownCtx, cancelShutdown := context.WithTimeout(phaseBase, autoResultsPhaseBudgets.Shutdown)
@@ -751,34 +794,15 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				lingerSec = int(constants.APILingerDefault / time.Second)
 			}
 
-			type reconciliationOutcome struct {
-				result *portcheck.RunResult
-				err    error
-			}
-			var reconciliationDone chan reconciliationOutcome
+			var reconciliationDone <-chan reconciliationOutcome
 			if reconcileTerminal {
-				reconciliationDone = make(chan reconciliationOutcome, 1)
-				go func() {
-					reconciler := newRunTrackerFunc(baseURL)
-					configureAutoResultsTracker(reconciler, expectedRunID, debug, true)
-					result, err := reconciler.WaitForCompletion(shutdownCtx, expectedStepIDs)
-					reconciliationDone <- reconciliationOutcome{result: result, err: err}
-				}()
+				reconciliationDone = startTerminalReconciliation(shutdownCtx)
 			}
 
 			outcome.ShutdownErr = requestShutdownAllFunc(
 				shutdownCtx, shutdownHosts, apiPort, time.Duration(lingerSec)*time.Second, expectedRunID, debug)
 			if reconciliationDone != nil {
-				reconciled := <-reconciliationDone
-				if reconciled.result != nil {
-					outcome.Tracker = mergeTrackedRunResults(outcome.Tracker, reconciled.result)
-				}
-				if reconciled.err != nil {
-					outcome.TrackerErr = fmt.Errorf(
-						"post-shutdown terminal reconciliation: %w", reconciled.err)
-				} else {
-					outcome.TrackerErr = nil
-				}
+				recordTerminalReconciliation("post-shutdown", <-reconciliationDone)
 			}
 			outcome.Lifecycle.Shutdown = runcontrol.CompletedPhase(outcome.ShutdownErr)
 			if outcome.ShutdownErr != nil {
@@ -787,6 +811,32 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			} else {
 				writeProgress("Shutdown completed successfully.\n")
 			}
+		}
+		// stopRunAtAutoTerminate stops the step through DELETE /run on the entry
+		// node and reconciles its terminal state. The engines stay up, so the
+		// artifacts are fetched in full and the end-of-run shutdown follows only
+		// when --shutdown-on-complete asks for it. It uses the shutdown budget.
+		stopRunAtAutoTerminate := func() error {
+			stopCtx, cancelStop := context.WithTimeout(phaseBase, autoResultsPhaseBudgets.Shutdown)
+			defer cancelStop()
+			writeProgress("Auto-results: stopping run %d through the engine API...\n", expectedRunID)
+			reconcileCtx, cancelReconcile := context.WithCancel(stopCtx)
+			defer cancelReconcile()
+			reconciliationDone := startTerminalReconciliation(reconcileCtx)
+			stopErr := requestRunStopFunc(stopCtx, baseURL, expectedRunID)
+			if stopErr != nil {
+				// Without an accepted stop the run may not end within the budget.
+				cancelReconcile()
+			}
+			recordTerminalReconciliation("post-stop", <-reconciliationDone)
+			if stopErr != nil {
+				outcome.TrackerErr = errors.Join(fmt.Errorf("stop run: %w", stopErr), outcome.TrackerErr)
+				logging.LogError("auto-results", "auto-terminate stop request failed", stopErr)
+				writeProgress("Auto-results: the run stop request failed; see logs for details.\n")
+			} else {
+				writeProgress("Auto-results: run stopped.\n")
+			}
+			return stopErr
 		}
 		cleanupOnly := monitor.cleanupOnly.Load()
 		// A launch that failed before POST /run left no workload to stop and no
@@ -900,7 +950,23 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				}
 			}()
 			outcome.Lifecycle.Workload.Started = true
+			// The auto-terminate deadline asks the session to stop the run. Ending
+			// tracking takes the interrupted route below, which stops the run and
+			// salvages its evidence.
+			var autoTerminateRequested atomic.Bool
+			trackingDone := make(chan struct{})
+			go func() {
+				select {
+				case <-monitor.workloadStopRequested():
+					autoTerminateRequested.Store(true)
+					writeProgress("Auto-results: auto-terminate deadline reached; stopping the run...\n")
+					cancel()
+				case <-trackingDone:
+				case <-parentCtx.Done():
+				}
+			}()
 			outcome.Tracker, outcome.TrackerErr = tracker.WaitForCompletion(parentCtx, expectedStepIDs)
+			close(trackingDone)
 			close(stopCh)
 			// Wait for the polling goroutine to actually observe stopCh and return
 			// before touching discoverStepIDsFunc/discoverFleetStepIDsFunc below.
@@ -909,7 +975,13 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			// Cancellation can leave the engine RUNNING. Stop and reconcile the
 			// owned run before deciding which artifacts and roles are applicable.
 			interruptedTracking := parentCtx.Err() != nil && outcome.TrackerErr != nil
-			if interruptedTracking && shutdownOn {
+			outcome.AutoTerminated = interruptedTracking && autoTerminateRequested.Load()
+			if outcome.AutoTerminated {
+				if stopErr := stopRunAtAutoTerminate(); stopErr != nil && shutdownOn {
+					// The interrupt route's shutdown also ends the run.
+					runShutdown(true)
+				}
+			} else if interruptedTracking && shutdownOn {
 				runShutdown(true)
 			}
 			outcome.Lifecycle.Workload = runcontrol.CompletedPhase(outcome.TrackerErr)
@@ -919,7 +991,9 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			}
 			outcome.Lifecycle.Artifacts.Started = true
 			artifactBudget := autoResultsPhaseBudgets.Artifacts
-			if parentCtx.Err() != nil || outcome.TrackerErr != nil {
+			// A run that auto-terminate stopped cleanly keeps the full artifact
+			// budget: it is a planned end, not an interrupt the user waits on.
+			if outcome.TrackerErr != nil || (parentCtx.Err() != nil && !outcome.AutoTerminated) {
 				artifactBudget = autoResultsPhaseBudgets.CancelSalvage
 			}
 			artifactCtx, cancelArtifacts := context.WithTimeout(phaseBase, artifactBudget)
@@ -1116,8 +1190,9 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			outcome.Lifecycle.Artifacts.Err = errors.Join(outcome.ArtifactErr, outcome.CorruptionMetricsErr, outcome.FinalizationErr)
 		}
 
-		// Normal terminal runs collect their completed evidence before shutdown.
-		// Interrupted runs already shut down and reconciled before salvage.
+		// Normal terminal runs collect their completed evidence before shutdown,
+		// and so do runs the auto-terminate deadline stopped. Interrupted runs
+		// already shut down and reconciled before salvage.
 		if shutdownOn && !shutdownPerformed && nothingSubmitted {
 			writeProgress("Auto-results: no run was submitted; nothing to shut down.\n")
 		} else if shutdownOn && !shutdownPerformed {
@@ -1864,6 +1939,13 @@ func shutdownTargetHosts(hosts []*hostparse.HostInfo, attachExisting bool) []*ho
 	return hosts
 }
 
+// requestRunStop asks the entry node to stop the owned run, leaving every
+// engine up. The entry owns the distributed step, so one request stops it.
+func requestRunStop(ctx context.Context, baseURL string, expectedRunID int64) error {
+	client := portcheck.NewSptAPIClient(baseURL, portcheck.DefaultHTTPTimeout)
+	return client.StopRun(ctx, expectedRunID)
+}
+
 // requestShutdownAll stops the entry node first and waits for its owned run to
 // become terminal before stopping workers. The entry owns distributed RMI step
 // clients, so worker services must remain available through entry cleanup.
@@ -2472,6 +2554,17 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 					"error", err.Error())
 			}
 		}
+		// finishRun joins auto-results and resolves the exit status. A run the
+		// auto-terminate deadline stopped while healthy exits 0.
+		finishRun := func(err error, cleaner replayContainerCleaner) error {
+			autoTerminated, normalizedErr := normalizeHeadlessAutoTerminate(err, cleaner, 30*time.Second)
+			waitForAutoResults()
+			finalizeTraceArtifact()
+			if autoTerminated || autoOutcome.AutoTerminated {
+				writeAutoTerminateStopped(os.Stdout, autoTerminate)
+			}
+			return resolveRunCompletionError(normalizedErr, autoOutcome, autoOutcomeReceived, params)
+		}
 
 		// Get endpoint for display
 		endpoint, _ := cmd.Flags().GetString("endpoint")
@@ -2542,15 +2635,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 				if err != nil && autoMonitor != nil && !launchHooks.NormalEvidencePermitted() {
 					autoMonitor.Cancel()
 				}
-				autoTerminated, normalizedErr := normalizeHeadlessAutoTerminate(err, orchestrator, 30*time.Second)
-				if autoTerminated {
-					waitForAutoResults()
-					finalizeTraceArtifact()
-					return resolveRunCompletionError(normalizedErr, autoOutcome, autoOutcomeReceived, params)
-				}
-				waitForAutoResults()
-				finalizeTraceArtifact()
-				return resolveRunCompletionError(normalizedErr, autoOutcome, autoOutcomeReceived, params)
+				return finishRun(err, orchestrator)
 			}
 
 			fmt.Printf("Starting multi-host TUI...\n\n")
@@ -2573,9 +2658,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			if err != nil && autoMonitor != nil && !launchHooks.NormalEvidencePermitted() {
 				autoMonitor.Cancel()
 			}
-			waitForAutoResults()
-			finalizeTraceArtifact()
-			return resolveRunCompletionError(err, autoOutcome, autoOutcomeReceived, params)
+			return finishRun(err, nil)
 		}
 
 		// Single host mode (existing logic)
@@ -2600,9 +2683,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			if err != nil && autoMonitor != nil && !launchHooks.NormalEvidencePermitted() {
 				autoMonitor.Cancel()
 			}
-			waitForAutoResults()
-			finalizeTraceArtifact()
-			return resolveRunCompletionError(err, autoOutcome, autoOutcomeReceived, params)
+			return finishRun(err, nil)
 		}
 
 		fmt.Printf("Starting TUI...\n\n")
@@ -2628,9 +2709,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 		if err != nil && autoMonitor != nil && !launchHooks.NormalEvidencePermitted() {
 			autoMonitor.Cancel()
 		}
-		waitForAutoResults()
-		finalizeTraceArtifact()
-		return resolveRunCompletionError(err, autoOutcome, autoOutcomeReceived, params)
+		return finishRun(err, nil)
 	},
 }
 
@@ -2689,7 +2768,7 @@ func init() {
 	_ = runCmd.Flags().MarkDeprecated(flagOutputDir, outputDirDeprecation)
 	runCmd.Flags().Bool("generate-only", false, "Generate the scenario file without running Docker or Spt")
 	// Headless auto-termination
-	runCmd.Flags().Int("auto-terminate-seconds", 0, "Automatically terminate headless runs after N seconds (0 = unlimited)")
+	runCmd.Flags().Int("auto-terminate-seconds", 0, "Stop the run N seconds after launch, start-up included; exits 0 if the run was healthy up to then (0 = unlimited)")
 	runCmd.Flags().Bool("keep-scenario", false, "Keep the scenario file after the test completes (default: delete on success)")
 	runCmd.Flags().Bool("save-items", false, "Save items.csv to the results directory (write workloads only; can be large for high-throughput runs)")
 	runCmd.Flags().String("items-file", "", "Path to a local items.csv for read/read-verify or explicit-manifest DELETE; mutually exclusive with --delete-existing")

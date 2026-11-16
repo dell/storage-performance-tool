@@ -374,6 +374,24 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 				"error", err.Error())
 		}
 	}
+	// finishReplay joins auto-results and resolves the exit status on every
+	// route. A replay the auto-terminate deadline stopped exits 0 unless a
+	// scenario step FAILED.
+	finishReplay := func(err error, cleaner replayContainerCleaner) error {
+		autoTerminated, normalizedErr := normalizeHeadlessAutoTerminate(err, cleaner, 30*time.Second)
+		if autoTerminated && !launchHooks.SessionManaged() {
+			finalizeTraceArtifact()
+			writeAutoTerminateStopped(out, autoTerminate)
+			return normalizedErr
+		}
+		outcome := waitForReplayAutoResults(replayMonitor, normalizedErr, launchHooks)
+		finalizeTraceArtifact()
+		autoTerminated = autoTerminated || outcome.AutoTerminated
+		if autoTerminated {
+			writeAutoTerminateStopped(out, autoTerminate)
+		}
+		return resolveReplayRunError(normalizedErr, autoTerminated, len(replayStepIDs(generated)), outcome)
+	}
 
 	if orchestratedReplay {
 		startReplayAutoResults()
@@ -390,19 +408,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			if launchHooks.SessionManaged() {
 				autoTerminateCleaner = nil
 			}
-			autoTerminated, normalizedErr := normalizeHeadlessAutoTerminate(err, autoTerminateCleaner, 30*time.Second)
-			if autoTerminated && !launchHooks.SessionManaged() {
-				if normalizedErr != nil {
-					finalizeTraceArtifact()
-					return normalizedErr
-				}
-				finalizeTraceArtifact()
-				return nil
-			}
-			err = normalizedErr
-			outcome := waitForReplayAutoResults(replayMonitor, err, launchHooks)
-			finalizeTraceArtifact()
-			return resolveReplayRunError(err, autoTerminated, len(replayStepIDs(generated)), outcome)
+			return finishReplay(err, autoTerminateCleaner)
 		}
 
 		if multiHostReplay {
@@ -424,9 +430,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 				DefaultsContent:      generated.DefaultsYAML,
 				LaunchHooks:          launchHooks,
 			})
-		outcome := waitForReplayAutoResults(replayMonitor, err, launchHooks)
-		finalizeTraceArtifact()
-		return resolveReplayRunError(err, false, len(replayStepIDs(generated)), outcome)
+		return finishReplay(err, nil)
 	}
 
 	startReplayAutoResults()
@@ -440,9 +444,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			_, _ = fmt.Fprintf(out, "Auto-terminate: will stop after %d seconds\n", autoTerminate)
 		}
 		err := startReplayLocalHeadless(sptImage, paths.Scenario, params, options, generated.ScenarioJS, generated.DefaultsYAML)
-		outcome := waitForReplayAutoResults(replayMonitor, err, launchHooks)
-		finalizeTraceArtifact()
-		return resolveReplayRunError(err, false, len(replayStepIDs(generated)), outcome)
+		return finishReplay(err, nil)
 	}
 
 	_, _ = fmt.Fprintln(out, "Starting TUI...")
@@ -463,9 +465,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 			DefaultsContent:      generated.DefaultsYAML,
 			LaunchHooks:          launchHooks,
 		})
-	outcome := waitForReplayAutoResults(replayMonitor, err, launchHooks)
-	finalizeTraceArtifact()
-	return resolveReplayRunError(err, false, len(replayStepIDs(generated)), outcome)
+	return finishReplay(err, nil)
 }
 
 // replayRMIRegistryPort reads --rmi-registry-port and checks it and --api-port as spt run does:
@@ -550,6 +550,12 @@ func normalizeHeadlessAutoTerminate(err error, cleaner replayContainerCleaner, t
 		return true, errors.Join(err, stopErr)
 	}
 	return true, nil
+}
+
+// writeAutoTerminateStopped prints the closing line of a run or replay that
+// the auto-terminate deadline stopped.
+func writeAutoTerminateStopped(out io.Writer, seconds int) {
+	_, _ = fmt.Fprintf(out, "Auto-terminate: the run was stopped at the %d s deadline\n", seconds)
 }
 
 func cleanupReplayContainers(cleaner replayContainerCleaner, timeout time.Duration) error {
@@ -641,7 +647,7 @@ func init() {
 	registerEndpointSelectionFlags(replayCmd.Flags())
 	replayCmd.Flags().Bool("headless", false, "Force headless (non-interactive) mode")
 	replayCmd.Flags().Bool("minimal", false, "Start TUI with only the live stats panel visible")
-	replayCmd.Flags().Int("auto-terminate-seconds", 0, "Automatically terminate runs after N seconds (0 = unlimited)")
+	replayCmd.Flags().Int("auto-terminate-seconds", 0, "Stop the run N seconds after launch, start-up included; exits 0 if the run was healthy up to then (0 = unlimited)")
 	replayCmd.Flags().Bool("force", false, "Resolve port conflicts and permit known engine build mismatches; does not override invalid build information or collection failures")
 	replayCmd.Flags().String("api-port", "", "Spt API port for every engine in the replay (defaults to 9999)")
 	replayCmd.Flags().Int("min-hosts", 0, "Minimum number of replay hosts that must connect (default: all hosts)")
