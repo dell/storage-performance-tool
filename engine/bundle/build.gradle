@@ -1566,6 +1566,47 @@ tasks.register('verifyEngineExitStatusCanary') {
 				throw new GradleException("Packaged engine 'default-scenario-slow-log' wrote no result.xml row (${resultFiles}):\n${slowLogRun.output}")
 			}
 
+			// A reader that stops reading: stdout and stderr share one pipe, which fills while the scenario
+			// prints. On SIGTERM the queued lines can't be written, but the shutdown hook must still return
+			// by its 10 s deadline, so the engine exits.
+			def blockedDir = new File(canaryRoot, 'blocked-output')
+			def blockedCwd = new File(blockedDir, 'cwd')
+			blockedCwd.mkdirs()
+			def blockedBuilder = new ProcessBuilder(javaExecutable, '-jar', jarFile.absolutePath,
+					scenario('blocked-output', 'for (var i = 0; i < 100000000; i++) print("SPT_BLOCKED_OUTPUT_" + i + "_' + ('x' * 64) + '");\n'),
+					'--storage-driver-type=dummy-mock')
+				.directory(blockedCwd)
+				.redirectErrorStream(true)
+			blockedBuilder.environment().put('SPT_HOME', new File(blockedDir, 'home').absolutePath)
+			blockedBuilder.environment().put('SPT_LOG_DIR', new File(blockedDir, 'log').absolutePath)
+			def blocked = blockedBuilder.start()
+			try {
+				def blockedOutput = new BufferedReader(new InputStreamReader(blocked.inputStream, 'UTF-8'))
+				def blockedHead = new StringBuilder()
+				def line
+				while ((line = blockedOutput.readLine()) != null && !line.contains('SPT_BLOCKED_OUTPUT_')) {
+					blockedHead.append(line).append('\n')
+				}
+				if (line == null) {
+					throw new GradleException("Packaged engine 'blocked-output' exited before its scenario printed:\n${blockedHead}")
+				}
+				// Stop reading; the scenario fills the pipe at once. Process.destroy() would also close this end of
+				// the pipe, which unblocks the engine, so the signal is sent through the process handle.
+				Thread.sleep(1000)
+				blocked.toHandle().destroy()
+				if (!blocked.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)) {
+					throw new GradleException("Packaged engine 'blocked-output' did not exit within 30 s of SIGTERM with its output pipe full")
+				}
+				if (blocked.exitValue() != 143) {
+					throw new GradleException("Packaged engine 'blocked-output' exited ${blocked.exitValue()} on SIGTERM, expected 143")
+				}
+			} finally {
+				if (blocked.alive) {
+					blocked.destroyForcibly()
+				}
+				blocked.inputStream.close()
+			}
+
 			// The log shutdown stops the context the engine's loggers use. In the packaged jar Log4j cannot
 			// find that context by its caller, so LogManager.shutdown() alone stopped none.
 			def probeDir = new File(canaryRoot, 'log-shutdown-state')

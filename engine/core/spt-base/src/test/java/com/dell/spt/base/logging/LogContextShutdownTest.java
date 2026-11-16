@@ -9,8 +9,12 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.status.StatusLogger;
 import org.junit.jupiter.api.Test;
 
 final class LogContextShutdownTest {
@@ -50,11 +54,14 @@ final class LogContextShutdownTest {
 		final var release = new CountDownLatch(0);
 		final var first = new SlowContext("first", 0, release);
 		final var second = new SlowContext("second", 0, release);
+		final var firstRun = new CountDownLatch(1);
 		final var lastRun = new CountDownLatch(1);
 		final long start = System.nanoTime();
-		assertTrue(LogContextShutdown.stopAll(List.of(first, second), 10_000, () -> lastRun.countDown()));
+		assertTrue(LogContextShutdown.stopAll(
+						List.of(first, second), 10_000, () -> firstRun.countDown(), () -> lastRun.countDown(), Thread::new));
 		final long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
 		assertTrue(first.stopCalled && second.stopCalled);
+		assertEquals(0, firstRun.getCount());
 		assertEquals(0, lastRun.getCount());
 		assertTrue(first.givenNanos > 0 && second.givenNanos > 0);
 		assertTrue(elapsedMillis < 2_000, "an empty queue took " + elapsedMillis + " ms");
@@ -68,7 +75,7 @@ final class LogContextShutdownTest {
 			final var first = new SlowContext("first", 400, release);
 			final var second = new SlowContext("second", 5_000, release);
 			final long start = System.nanoTime();
-			assertFalse(LogContextShutdown.stopAll(List.of(first, second), 1_000, () -> {}));
+			assertFalse(LogContextShutdown.stopAll(List.of(first, second), 1_000, () -> {}, () -> {}, Thread::new));
 			final long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
 			assertTrue(elapsedMillis >= 900 && elapsedMillis < 3_000, "the stops took " + elapsedMillis + " ms");
 			// The second stop gets only the time the first left
@@ -81,17 +88,64 @@ final class LogContextShutdownTest {
 	}
 
 	@Test
-	void skipsTheContextsLeftAfterTheDeadline() {
+	void skipsTheContextsLeftAfterTheDeadline() throws InterruptedException {
 		final var release = new CountDownLatch(1);
+		final var stopper = new AtomicReference<Thread>();
 		try {
 			final var first = new SlowContext("first", 5_000, release);
 			final var second = new SlowContext("second", 0, release);
-			assertFalse(LogContextShutdown.stopAll(List.of(first, second), 300, () -> {}));
+			final var lastRun = new CountDownLatch(1);
+			final ThreadFactory threads = task -> {
+				final var thread = new Thread(task);
+				stopper.set(thread);
+				return thread;
+			};
+			assertFalse(LogContextShutdown.stopAll(List.of(first, second), 300, () -> {}, lastRun::countDown, threads));
 			release.countDown();
-			// The stopper finds no time left for the second context
+			// The stopper finds no time left for the second context, and ends without its last step
+			stopper.get().join(5_000);
+			assertFalse(stopper.get().isAlive());
 			assertFalse(second.stopCalled);
+			assertEquals(1, lastRun.getCount());
 		} finally {
 			release.countDown();
+		}
+	}
+
+	@Test
+	void writesNothingFromTheCallerWhenTheStopperIsBlocked() {
+		final var release = new CountDownLatch(1);
+		try {
+			// A stopper blocked on a full pipe: the caller returns at the deadline
+			final long start = System.nanoTime();
+			assertFalse(LogContextShutdown.stopAll(List.of(), 300, () -> awaitQuietly(release), () -> {}, Thread::new));
+			final long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+			assertTrue(elapsedMillis >= 250 && elapsedMillis < 2_000, "the caller took " + elapsedMillis + " ms");
+		} finally {
+			release.countDown();
+		}
+	}
+
+	@Test
+	void quietsTheStatusLoggerBelowError() {
+		final var statusLogger = StatusLogger.getLogger();
+		final var level = statusLogger.getFallbackListener().getStatusLevel();
+		try {
+			statusLogger.getFallbackListener().setLevel(Level.INFO);
+			LogContextShutdown.quietStatusLogger();
+			assertEquals(Level.ERROR, statusLogger.getFallbackListener().getStatusLevel());
+			assertFalse(statusLogger.isEnabled(Level.WARN, null));
+			assertTrue(statusLogger.isEnabled(Level.ERROR, null));
+		} finally {
+			statusLogger.getFallbackListener().setLevel(level);
+		}
+	}
+
+	private static void awaitQuietly(final CountDownLatch latch) {
+		try {
+			latch.await(5, TimeUnit.SECONDS);
+		} catch (final InterruptedException e) {
+			Thread.currentThread().interrupt();
 		}
 	}
 

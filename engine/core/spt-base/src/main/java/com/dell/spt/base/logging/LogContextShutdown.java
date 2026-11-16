@@ -8,9 +8,13 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ThreadFactory;
+import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.LoggerContext;
 import org.apache.logging.log4j.core.impl.Log4jContextFactory;
+import org.apache.logging.log4j.status.StatusConsoleListener;
+import org.apache.logging.log4j.status.StatusLogger;
 
 /**
  * Stops the engine's Log4j contexts at exit, so the events still queued for the asynchronous logger
@@ -60,37 +64,64 @@ final class LogContextShutdown {
 	}
 
 	/**
-	 * Stops the contexts in turn, each with the time left, then calls {@link LogManager#shutdown()}, all
-	 * within one deadline. A context's stop waits for its queue to drain; Log4j's own drain wait ignores
-	 * the timeout it is given, so the stops run in a thread of their own and the caller waits for that
-	 * thread only until the deadline. An empty queue returns at once.
-	 *
-	 * @return true when every stop finished before the deadline; false when the events still queued
-	 *         after it may be lost, as the JVM halts once the shutdown hooks return
+	 * Raises the status logger's level to ERROR, so stopping the contexts prints no INFO status lines on
+	 * stderr ({@code Stopping configuration ...}), and an event logged while a context stops prints no
+	 * {@code Ignoring log event after log4j was shut down} warning. Call it after the last context is
+	 * created: each configuration's {@code status} sets the level again when it starts.
 	 */
-	static boolean stopAll(final List<LoggerContext> contexts, final long timeoutMillis) {
-		return stopAll(contexts, timeoutMillis, LogManager::shutdown);
+	static void quietStatusLogger() {
+		final var statusLogger = StatusLogger.getLogger();
+		statusLogger.setLevel(Level.ERROR);
+		for (final var listener : statusLogger.getListeners()) {
+			if (listener instanceof StatusConsoleListener consoleListener) {
+				consoleListener.setLevel(Level.ERROR);
+			}
+		}
 	}
 
-	/** {@link #stopAll(List, long)}, running {@code last} instead of {@link LogManager#shutdown()}. */
-	static boolean stopAll(final List<LoggerContext> contexts, final long timeoutMillis, final Runnable last) {
+	/**
+	 * Stops the contexts in turn, each with the time left, then calls {@link LogManager#shutdown()}, all
+	 * within one deadline. A context's stop waits for its queue to drain; Log4j's own drain wait ignores
+	 * the timeout it is given, so the stops run in a daemon thread of their own and the caller waits for
+	 * that thread only until the deadline. An empty queue returns at once. The caller writes nothing, so
+	 * a full stdout or stderr pipe, which blocks the stops, cannot keep it past the deadline.
+	 *
+	 * @param first run in the stopper thread before the stops, for a write that may block
+	 * @return true when every stop finished before the deadline; false when the stopper was still running
+	 *         at the deadline, or the caller was interrupted, and the events still queued may be lost, as
+	 *         the JVM halts once the shutdown hooks return
+	 */
+	static boolean stopAll(final List<LoggerContext> contexts, final long timeoutMillis, final Runnable first) {
+		return stopAll(contexts, timeoutMillis, first, LogManager::shutdown, Thread::new);
+	}
+
+	/**
+	 * {@link #stopAll(List, long, Runnable)}, running {@code last} instead of {@link LogManager#shutdown()}
+	 * and making the stopper thread with {@code threads}.
+	 */
+	static boolean stopAll(
+					final List<LoggerContext> contexts,
+					final long timeoutMillis,
+					final Runnable first,
+					final Runnable last,
+					final ThreadFactory threads) {
 		final long deadline = System.nanoTime() + MILLISECONDS.toNanos(timeoutMillis);
-		final var stopper = new Thread(
-						() -> {
-							for (final var context : contexts) {
-								final long remaining = deadline - System.nanoTime();
-								if (remaining <= 0) {
-									return;
-								}
-								try {
-									context.stop(remaining, NANOSECONDS);
-								} catch (final RuntimeException e) {
-									e.printStackTrace(System.err);
-								}
-							}
-							last.run();
-						},
-						"logCtxStopper");
+		final var stopper = threads.newThread(() -> {
+			first.run();
+			for (final var context : contexts) {
+				final long remaining = deadline - System.nanoTime();
+				if (remaining <= 0) {
+					return;
+				}
+				try {
+					context.stop(remaining, NANOSECONDS);
+				} catch (final RuntimeException e) {
+					e.printStackTrace(System.err);
+				}
+			}
+			last.run();
+		});
+		stopper.setName("logCtxStopper");
 		stopper.setDaemon(true);
 		stopper.start();
 		try {
