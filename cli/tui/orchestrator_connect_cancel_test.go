@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
 )
 
@@ -194,6 +195,15 @@ func TestConnectHosts_CancelAfterHostsReturnReportsCancel(t *testing.T) {
 
 // TestConnectHosts_AllConnectedDoesNotWait sets a long cancel window: when
 // every host connects, ConnectHosts must not spend any of it.
+// The other tests set their own window, so this pins the production default:
+// without it the Ctrl-C race returns with a green suite.
+func TestNewMultiHostOrchestrator_UsesTheProductionCancelWait(t *testing.T) {
+	o := NewMultiHostOrchestrator([]*hostparse.HostInfo{{Host: "host1", Original: "host1"}}, 1)
+	if o.connectCancelWait != constants.HostConnectCancelWait {
+		t.Fatalf("connectCancelWait = %v, want %v", o.connectCancelWait, constants.HostConnectCancelWait)
+	}
+}
+
 func TestConnectHosts_AllConnectedDoesNotWait(t *testing.T) {
 	f := newConnectCancelFixture(t, 3, func(context.Context, *hostparse.HostInfo) error { return nil })
 	f.orchestrator.connectCancelWait = time.Minute
