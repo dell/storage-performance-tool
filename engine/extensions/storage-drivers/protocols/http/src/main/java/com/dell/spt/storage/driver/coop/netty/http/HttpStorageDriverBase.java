@@ -50,6 +50,7 @@ import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
+import io.netty.handler.codec.http.HttpMessage;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpObject;
 import io.netty.handler.codec.http.HttpObjectAggregator;
@@ -187,7 +188,7 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 							channel.hashCode(),
 							pipeline);
 			pipeline.removeLast(); // remove the API specific handler
-			pipeline.addLast(new HttpObjectAggregator(Integer.MAX_VALUE));
+			pipeline.addLast(controlResponseAggregator(request.method(), Integer.MAX_VALUE));
 			pipeline.addLast(
 							new SimpleChannelInboundHandler<HttpObject>() {
 								@Override
@@ -223,6 +224,32 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 			final var unusedClose = channel.close();
 		}
 		return resp;
+	}
+
+	/**
+	 * Builds the aggregator for one control request's response. A {@code HEAD} response has no body,
+	 * so its {@code Content-Length} header, which states the object's size, is not checked against
+	 * {@code maxContentLength}: an object of 2 GiB or more would otherwise fail the request.
+	 * Responses to other methods keep the limit.
+	 */
+	static HttpObjectAggregator controlResponseAggregator(
+					final HttpMethod method, final int maxContentLength) {
+		return new ControlResponseAggregator(HttpMethod.HEAD.equals(method), maxContentLength);
+	}
+
+	private static final class ControlResponseAggregator extends HttpObjectAggregator {
+
+		private final boolean head;
+
+		ControlResponseAggregator(final boolean head, final int maxContentLength) {
+			super(maxContentLength);
+			this.head = head;
+		}
+
+		@Override
+		protected boolean isContentLengthInvalid(final HttpMessage start, final int maxContentLength) {
+			return !head && super.isContentLengthInvalid(start, maxContentLength);
+		}
 	}
 
 	/**
