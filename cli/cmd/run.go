@@ -2985,6 +2985,9 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	serviceThreads, _ := cmd.Flags().GetInt("service-threads")
 	params.ServiceThreads = serviceThreads
 
+	if err := validateEngineFormatFlags(params); err != nil {
+		return scenario.Params{}, err
+	}
 	if registryPort, err := cmd.Flags().GetInt(flagRMIRegistryPort); err == nil {
 		if err := validatePortFlag(flagRMIRegistryPort, registryPort); err != nil {
 			return scenario.Params{}, err
