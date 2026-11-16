@@ -1146,7 +1146,7 @@ func (dm *DockerManager) StreamOutput(containerID string, stdoutCallback func(st
 
 		out, err := dm.client.ContainerLogs(dm.ctx, containerID, options)
 		if err != nil {
-			stderrCallback(fmt.Sprintf("Error getting container logs: %v", err))
+			reportContainerLogsOpenError(dm.ctx, err, stderrCallback)
 			return
 		}
 		defer func() {
@@ -1155,32 +1155,54 @@ func (dm *DockerManager) StreamOutput(containerID string, stdoutCallback func(st
 			}
 		}()
 
-		// Read and parse the output
-		buffer := make([]byte, 4096)
-		for {
-			n, err := out.Read(buffer)
-			if err != nil {
-				if err != io.EOF {
-					stderrCallback(fmt.Sprintf("Error reading container logs: %v", err))
-				}
-				break
+		dm.readContainerLogs(dm.ctx, out, stdoutCallback, stderrCallback)
+	}()
+}
+
+// streamCancelledByManager reports whether a log-stream error comes from the
+// manager's own context being cancelled (DockerManager.Close), which is a
+// normal end of the stream rather than a failure.
+func streamCancelledByManager(ctx context.Context, err error) bool {
+	return errors.Is(err, context.Canceled) || ctx.Err() != nil
+}
+
+// reportContainerLogsOpenError reports a failure to open the log stream,
+// unless the manager's own cancellation caused it.
+func reportContainerLogsOpenError(ctx context.Context, err error, stderrCallback func(string)) {
+	if streamCancelledByManager(ctx, err) {
+		return
+	}
+	stderrCallback(fmt.Sprintf("Error getting container logs: %v", err))
+}
+
+// readContainerLogs reads Docker's multiplexed log stream until it ends and
+// passes each parsed line to its callback. A read error is reported unless it
+// is io.EOF or the manager's own cancellation.
+func (dm *DockerManager) readContainerLogs(ctx context.Context, out io.Reader, stdoutCallback func(string), stderrCallback func(string)) {
+	buffer := make([]byte, 4096)
+	for {
+		n, err := out.Read(buffer)
+		if err != nil {
+			if err != io.EOF && !streamCancelledByManager(ctx, err) {
+				stderrCallback(fmt.Sprintf("Error reading container logs: %v", err))
+			}
+			return
+		}
+
+		if n > 0 {
+			result := dm.processDockerOutput(buffer[:n])
+
+			// Send stdout lines to stdout callback
+			for _, line := range result.StdoutLines {
+				stdoutCallback(line)
 			}
 
-			if n > 0 {
-				result := dm.processDockerOutput(buffer[:n])
-
-				// Send stdout lines to stdout callback
-				for _, line := range result.StdoutLines {
-					stdoutCallback(line)
-				}
-
-				// Send stderr lines to stderr callback
-				for _, line := range result.StderrLines {
-					stderrCallback(line)
-				}
+			// Send stderr lines to stderr callback
+			for _, line := range result.StderrLines {
+				stderrCallback(line)
 			}
 		}
-	}()
+	}
 }
 
 // DockerStreamResult holds the parsed stdout and stderr lines
