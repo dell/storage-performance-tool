@@ -99,7 +99,7 @@ Output:
 Driver/Docker:
   --s3-driver TYPE         Storage driver: default, aws, rdma (env: SPT_S3_DRIVER, default: $S3_DRIVER)
   --image IMAGE            Override SPT Docker image (env: SPT_IMAGE)
-  --skip-image-pull        Use locally cached image, skip pull (env: SPT_SKIP_IMAGE_PULL)
+  --skip-image-pull        Skip the image pull when the image is present locally (env: SPT_SKIP_IMAGE_PULL)
 
 General:
   --[no-]verbose           Enable verbose output (default: $VERBOSE)

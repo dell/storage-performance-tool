@@ -6,9 +6,13 @@ package verification
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"testing"
+	"text/template"
 	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
@@ -24,8 +28,10 @@ func dockerCreatedAt(t time.Time) string {
 	return t.UTC().Format("2006-01-02 15:04:05 -0700 MST")
 }
 
-func verifyPSLine(id string, created string, labels ...string) string {
-	return id + "@" + created + "@" + strings.Join(labels, ",")
+// verifyCleanupOwnListCommand is the docker ps command line cleanupVerifyContainers runs to list
+// runID's own containers, as the mock executor keys it.
+func verifyCleanupOwnListCommand(runID string) string {
+	return strings.Join(verifyCleanupOwnListArgs(runID), " ")
 }
 
 // captureLogs sends the package logger to a buffer at DEBUG until the test ends.
@@ -38,12 +44,191 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// runCleanup runs cleanupVerifyContainers against a fake executor whose docker ps lists psOut, and
-// returns the IDs it removed.
-func runCleanup(t *testing.T, psOut string) (removed []string, v *Verifier) {
+// fakeContainer is one container on a fakeDockerHost. id is its full ID; stopped containers are
+// listed only by docker ps -a.
+type fakeContainer struct {
+	id      string
+	name    string
+	created time.Time
+	labels  map[string]string
+	stopped bool
+}
+
+// fakeDockerHost answers docker ps and docker rm -f as a Docker daemon would for its containers:
+// docker ps lists running containers unless -a is given, applies every --filter label=k=v (all
+// must match), prints 12-character IDs unless --no-trunc is given, prints IDs for -q and otherwise
+// renders --format with text/template, where {{.Labels}} is the raw comma-joined "k=v,k=v" docker
+// prints. docker rm -f resolves its argument as docker does: a full ID, then a name, then a unique
+// ID prefix; a prefix that matches several containers is refused. afterPS, when set, runs after
+// each docker ps, to change the host between two listings.
+type fakeDockerHost struct {
+	containers []fakeContainer
+	removed    []string
+	commands   [][]string
+	deadlines  []time.Time
+	afterPS    func(f *fakeDockerHost)
+}
+
+// resolve returns the index of the container docker rm would pick for ref, or an error.
+func (f *fakeDockerHost) resolve(ref string) (int, error) {
+	for i, c := range f.containers {
+		if c.id == ref {
+			return i, nil
+		}
+	}
+	for i, c := range f.containers {
+		if c.name != "" && c.name == ref {
+			return i, nil
+		}
+	}
+	found := -1
+	for i, c := range f.containers {
+		if strings.HasPrefix(c.id, ref) {
+			if found >= 0 {
+				return -1, fmt.Errorf("Error response from daemon: multiple IDs found with provided prefix: %s", ref)
+			}
+			found = i
+		}
+	}
+	if found < 0 {
+		return -1, fmt.Errorf("Error response from daemon: No such container: %s", ref)
+	}
+	return found, nil
+}
+
+func (f *fakeDockerHost) ExecuteCommand(ctx context.Context, _ *hostparse.HostInfo, cmd []string) (string, string, error) {
+	f.commands = append(f.commands, cmd)
+	if len(cmd) == 4 && cmd[0] == constants.DockerCommand && cmd[1] == constants.DockerCmdRM && cmd[2] == constants.DockerFlagForce {
+		i, err := f.resolve(cmd[3])
+		if err != nil {
+			return "", err.Error(), err
+		}
+		f.removed = append(f.removed, f.containers[i].id)
+		f.containers = append(f.containers[:i], f.containers[i+1:]...)
+		return cmd[3], "", nil
+	}
+	if len(cmd) < 2 || cmd[0] != constants.DockerCommand || cmd[1] != constants.DockerCmdPS {
+		return "", "", fmt.Errorf("fake docker: unexpected command %q", cmd)
+	}
+	deadline, _ := ctx.Deadline()
+	f.deadlines = append(f.deadlines, deadline)
+	if f.afterPS != nil {
+		defer f.afterPS(f)
+	}
+	var filters [][2]string
+	all, quiet, noTrunc, format := false, false, false, "{{.ID}}"
+	for i := 2; i < len(cmd); i++ {
+		switch cmd[i] {
+		case constants.DockerFlagAll:
+			all = true
+		case constants.DockerFlagQuiet:
+			quiet = true
+		case constants.DockerFlagNoTrunc:
+			noTrunc = true
+		case constants.DockerFlagFilter:
+			i++
+			kv, ok := strings.CutPrefix(cmd[i], "label=")
+			if !ok {
+				return "", "", fmt.Errorf("fake docker: unsupported filter %q", cmd[i])
+			}
+			k, val, _ := strings.Cut(kv, "=")
+			filters = append(filters, [2]string{k, val})
+		case constants.DockerFlagFormat:
+			i++
+			format = cmd[i]
+		default:
+			return "", "", fmt.Errorf("fake docker: unsupported ps argument %q", cmd[i])
+		}
+	}
+	tmpl, err := template.New("ps").Parse(format)
+	if err != nil {
+		return "", err.Error(), err
+	}
+	var out strings.Builder
+	for _, c := range f.containers {
+		match := all || !c.stopped
+		for _, kv := range filters {
+			if got, ok := c.labels[kv[0]]; !ok || got != kv[1] {
+				match = false
+			}
+		}
+		if !match {
+			continue
+		}
+		id := c.id
+		if !noTrunc {
+			id = id[:12]
+		}
+		if quiet {
+			out.WriteString(id + "\n")
+			continue
+		}
+		keys := make([]string, 0, len(c.labels))
+		for k := range c.labels {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		pairs := make([]string, 0, len(keys))
+		for _, k := range keys {
+			pairs = append(pairs, k+"="+c.labels[k])
+		}
+		row := struct{ ID, CreatedAt, Labels string }{id, dockerCreatedAt(c.created), strings.Join(pairs, ",")}
+		if err := tmpl.Execute(&out, row); err != nil {
+			return "", err.Error(), err
+		}
+		out.WriteString("\n")
+	}
+	return out.String(), "", nil
+}
+
+func (f *fakeDockerHost) CopyFile(context.Context, *hostparse.HostInfo, string, string) error {
+	return nil
+}
+
+func (f *fakeDockerHost) CopyFromHost(context.Context, *hostparse.HostInfo, string, string) error {
+	return nil
+}
+
+// verifyLabels returns the labels of a verify container of run (none when run is "").
+func verifyLabels(run string, extra ...string) map[string]string {
+	labels := map[string]string{constants.DockerLabelVerify: stringTrue, constants.DockerLabelVerifyHost: "wrk1"}
+	if run != "" {
+		labels[constants.DockerLabelVerifyRun] = run
+	}
+	for _, kv := range extra {
+		k, val, _ := strings.Cut(kv, "=")
+		labels[k] = val
+	}
+	return labels
+}
+
+// runCleanupOn runs cleanupVerifyContainers with run id "this-run" against a fake Docker host
+// holding containers, and returns the IDs it removed.
+func runCleanupOn(t *testing.T, containers ...fakeContainer) (removed []string, host *fakeDockerHost) {
+	t.Helper()
+	return runCleanupOnHost(t, &fakeDockerHost{containers: containers})
+}
+
+// runCleanupOnHost is runCleanupOn for a fake Docker host the caller set up.
+func runCleanupOnHost(t *testing.T, host *fakeDockerHost) (removed []string, _ *fakeDockerHost) {
+	t.Helper()
+	h := &hostparse.HostInfo{Host: "wrk1", Original: "wrk1"}
+	timeProvider := NewMockTimeProvider(cleanupNow)
+	timeProvider.TimeAdvance = 0
+	v := NewVerifierWithDeps([]*hostparse.HostInfo{h}, Config{}, host, &MockNetworkChecker{}, timeProvider)
+	v.runID = "this-run"
+
+	v.cleanupVerifyContainers(h, command.NewDockerOperations(host, h))
+	return host.removed, host
+}
+
+// runCleanup runs cleanupVerifyContainers against a fake executor whose verify listing prints psOut
+// and whose own-run listing prints nothing, and returns the IDs it removed.
+func runCleanup(t *testing.T, psOut string) []string {
 	t.Helper()
 	exec := &MockCommandExecutor{Commands: map[string]MockCommandResponse{
-		verifyCleanupListCommand(): {Stdout: psOut},
+		verifyCleanupListCommand():              {Stdout: psOut},
+		verifyCleanupOwnListCommand("this-run"): {},
 	}}
 	for _, line := range strings.Split(psOut, "\n") {
 		id, _, _ := strings.Cut(line, "@")
@@ -52,17 +237,18 @@ func runCleanup(t *testing.T, psOut string) (removed []string, v *Verifier) {
 	host := &hostparse.HostInfo{Host: "wrk1", Original: "wrk1"}
 	timeProvider := NewMockTimeProvider(cleanupNow)
 	timeProvider.TimeAdvance = 0
-	v = NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{}, exec, &MockNetworkChecker{}, timeProvider)
+	v := NewVerifierWithDeps([]*hostparse.HostInfo{host}, Config{}, exec, &MockNetworkChecker{}, timeProvider)
 	v.runID = "this-run"
 
 	v.cleanupVerifyContainers(host, command.NewDockerOperations(exec, host))
 
+	var removed []string
 	for _, c := range exec.ExecutedCommands {
 		if len(c.Command) == 4 && c.Command[1] == constants.DockerCmdRM {
 			removed = append(removed, c.Command[3])
 		}
 	}
-	return removed, v
+	return removed
 }
 
 func assertRemoved(t *testing.T, got []string, want ...string) {
@@ -74,21 +260,127 @@ func assertRemoved(t *testing.T, got []string, want ...string) {
 
 func runLabel(id string) string { return constants.DockerLabelVerifyRun + "=" + id }
 
+func TestCleanupVerifyContainers_ListingWordsAreShellSafe(t *testing.T) {
+	// The remote executor appends each word to the ssh arguments unquoted, so the host's shell
+	// splits and interprets them. A word with whitespace or a metacharacter would change the command.
+	const unsafe = " \t\n\r()\"'|&;<>$`\\*?[]~#!"
+	for _, cmd := range [][]string{verifyCleanupListArgs(), verifyCleanupOwnListArgs(newVerifyRunID())} {
+		for _, word := range cmd {
+			if word == "" || strings.ContainsAny(word, unsafe) {
+				t.Errorf("cleanup listing %q has a word unsafe for a remote shell: %q", cmd, word)
+			}
+		}
+	}
+	for _, cmd := range [][]string{verifyCleanupListArgs(), verifyCleanupOwnListArgs(newVerifyRunID())} {
+		if strings.Contains(strings.Join(cmd, " "), "Label") {
+			t.Errorf("cleanup listing %q prints label text", cmd)
+		}
+	}
+}
+
+func TestCleanupVerifyContainers_ForgedLabelRowRemovesNothing(t *testing.T) {
+	// A fresh verify container whose label value holds a newline and a row-shaped text naming an
+	// old container of another run. With the labels printed, that text read as a row and its ID
+	// went to docker rm -f, which resolves a prefix to any container on the host.
+	old := dockerCreatedAt(cleanupNow.Add(-time.Hour))
+	forged := "x\nbbbbbbbbbbbb@" + old + "@spt.verify.run=other\ndddddddddddd@" + old + "@spt.verify.run=other"
+	removed, host := runCleanupOn(t,
+		fakeContainer{id: "f0f0f0f0f0f0", created: cleanupNow.Add(-time.Minute), labels: verifyLabels("other-run", "note="+forged)},
+		fakeContainer{id: "bbbbbbbbbbbb0000", created: cleanupNow.Add(-2 * time.Hour), labels: map[string]string{"app": "victim"}},
+		fakeContainer{id: "dddddddddddd0000", created: cleanupNow.Add(-2 * time.Hour), labels: map[string]string{}, stopped: true},
+	)
+
+	assertRemoved(t, removed)
+	if len(host.containers) != 3 {
+		t.Fatalf("want all three containers left, got %d", len(host.containers))
+	}
+}
+
+func TestCleanupVerifyContainers_ForgedLabelOnStaleContainerRemovesOnlyIt(t *testing.T) {
+	// A stale verify container of another run with a forged multi-line label and an embedded
+	// ",spt.verify.run=this-run": it is removed for its own age, and nothing else is touched.
+	old := dockerCreatedAt(cleanupNow.Add(-time.Hour))
+	forged := "x,spt.verify.run=this-run\ncccccccccccc@" + old + "@spt.verify.run=other"
+	removed, _ := runCleanupOn(t,
+		fakeContainer{id: "5a1e5a1e5a1e", created: cleanupNow.Add(-time.Hour), labels: verifyLabels("other-run", "note="+forged)},
+		fakeContainer{id: "cccccccccccc", created: cleanupNow.Add(-2 * time.Hour), labels: map[string]string{"app": "victim"}},
+	)
+
+	assertRemoved(t, removed, "5a1e5a1e5a1e")
+}
+
+func TestCleanupVerifyContainers_RemovesByFullIDNotByName(t *testing.T) {
+	// docker rm resolves a name before an ID prefix, so a container named like a stale container's
+	// short ID would be removed in its place if cleanup passed short IDs.
+	stale := "5a1e00000001" + strings.Repeat("e", 52)
+	removed, host := runCleanupOn(t,
+		fakeContainer{id: stale, created: cleanupNow.Add(-time.Hour), labels: verifyLabels("other-run")},
+		fakeContainer{id: "7777777777770000", name: stale[:12], created: cleanupNow.Add(-2 * time.Hour), labels: map[string]string{"app": "victim"}},
+	)
+
+	assertRemoved(t, removed, stale)
+	if len(host.containers) != 1 || host.containers[0].name != stale[:12] {
+		t.Fatalf("want only the container named %s left, got %+v", stale[:12], host.containers)
+	}
+}
+
+func TestCleanupVerifyContainers_KeepsOwnContainerThatStopsBetweenListings(t *testing.T) {
+	// This run's container, verifying on another alias of the same host, is running at the first
+	// listing and exits before the second. It is still this run's and must not be removed.
+	// Full 64-character IDs, so both listings must print untruncated IDs for the match to hold.
+	own, other := fullContainerID("0000000000a1"), fullContainerID("0000000000a2")
+	host := &fakeDockerHost{containers: []fakeContainer{
+		{id: own, created: cleanupNow.Add(-time.Hour), labels: verifyLabels("this-run")},
+		{id: other, created: cleanupNow.Add(-time.Hour), labels: verifyLabels("other-run")},
+	}}
+	host.afterPS = func(f *fakeDockerHost) {
+		f.containers[0].stopped = true
+		f.afterPS = nil
+	}
+	removed, _ := runCleanupOnHost(t, host)
+
+	assertRemoved(t, removed, other)
+}
+
+func TestCleanupVerifyContainers_OwnListingHasItsOwnDeadline(t *testing.T) {
+	// A slow first listing must not eat into the second listing's time.
+	const firstListing = 100 * time.Millisecond
+	host := &fakeDockerHost{containers: []fakeContainer{
+		{id: "0000000000b1", created: cleanupNow.Add(-time.Hour), labels: verifyLabels("other-run")},
+	}}
+	host.afterPS = func(f *fakeDockerHost) {
+		time.Sleep(firstListing)
+		f.afterPS = nil
+	}
+	removed, _ := runCleanupOnHost(t, host)
+
+	assertRemoved(t, removed, "0000000000b1")
+	if len(host.deadlines) != 2 {
+		t.Fatalf("want two listings, got %d", len(host.deadlines))
+	}
+	if gap := host.deadlines[1].Sub(host.deadlines[0]); gap < firstListing {
+		t.Fatalf("second listing's deadline is only %v after the first's; want a fresh deadline at least %v later", gap, firstListing)
+	}
+}
+
 func TestCleanupVerifyContainers_LeavesFreshContainerOfAnotherRun(t *testing.T) {
 	logs := captureLogs(t)
-	created := dockerCreatedAt(cleanupNow.Add(-20 * time.Second))
-	removed, _ := runCleanup(t, verifyPSLine("0f0f0f0f0f01", created, "spt.verify=true", runLabel("other-run")))
+	removed, host := runCleanupOn(t,
+		fakeContainer{id: "0f0f0f0f0f01", created: cleanupNow.Add(-20 * time.Second), labels: verifyLabels("other-run")})
 
 	assertRemoved(t, removed)
 	if !strings.Contains(logs.String(), "level=DEBUG") || !strings.Contains(logs.String(), "container=0f0f0f0f0f01") {
 		t.Fatalf("want one DEBUG line naming 0f0f0f0f0f01, got:\n%s", logs.String())
 	}
+	if len(host.commands) != 1 {
+		t.Fatalf("with no stale container, want only the verify listing, ran %q", host.commands)
+	}
 }
 
 func TestCleanupVerifyContainers_RemovesStaleContainerOfAnotherRun(t *testing.T) {
 	logs := captureLogs(t)
-	created := dockerCreatedAt(cleanupNow.Add(-verifyContainerStaleAge - time.Minute))
-	removed, _ := runCleanup(t, verifyPSLine("05a1e0000001", created, runLabel("other-run"), "spt.verify=true"))
+	removed, _ := runCleanupOn(t,
+		fakeContainer{id: "05a1e0000001", created: cleanupNow.Add(-verifyContainerStaleAge - time.Minute), labels: verifyLabels("other-run")})
 
 	assertRemoved(t, removed, "05a1e0000001")
 	out := logs.String()
@@ -98,26 +390,32 @@ func TestCleanupVerifyContainers_RemovesStaleContainerOfAnotherRun(t *testing.T)
 }
 
 func TestCleanupVerifyContainers_LeavesOwnRunAtAnyAge(t *testing.T) {
-	created := dockerCreatedAt(cleanupNow.Add(-2 * verifyContainerStaleAge))
-	removed, _ := runCleanup(t, verifyPSLine("0000000000a1", created, runLabel("this-run")))
+	own, other := fullContainerID("0000000000a1"), fullContainerID("0000000000a2")
+	removed, _ := runCleanupOn(t,
+		fakeContainer{id: own, created: cleanupNow.Add(-2 * verifyContainerStaleAge), labels: verifyLabels("this-run")},
+		fakeContainer{id: other, created: cleanupNow.Add(-2 * verifyContainerStaleAge), labels: verifyLabels("other-run")})
 
-	assertRemoved(t, removed)
+	assertRemoved(t, removed, other)
+}
+
+// fullContainerID pads a 12-character short ID to a 64-character full ID, as docker ps
+// --no-trunc prints it.
+func fullContainerID(short string) string {
+	return short + strings.Repeat("f", 64-len(short))
 }
 
 func TestCleanupVerifyContainers_UnlabelledJudgedByAge(t *testing.T) {
-	oldCreated := dockerCreatedAt(cleanupNow.Add(-time.Hour))
-	freshCreated := dockerCreatedAt(cleanupNow.Add(-time.Minute))
-	removed, _ := runCleanup(t, strings.Join([]string{
-		verifyPSLine("01d000000001", oldCreated, "spt.verify=true", "spt.verify.host=wrk1"),
-		verifyPSLine("0f0000000002", freshCreated, "spt.verify=true", "spt.verify.host=wrk1"),
-	}, "\n"))
+	removed, _ := runCleanupOn(t,
+		fakeContainer{id: "01d000000001", created: cleanupNow.Add(-time.Hour), labels: verifyLabels("")},
+		fakeContainer{id: "0f0000000002", created: cleanupNow.Add(-time.Minute), labels: verifyLabels("")},
+		fakeContainer{id: "0e0000000003", created: cleanupNow.Add(-time.Hour), labels: map[string]string{"app": "other"}})
 
 	assertRemoved(t, removed, "01d000000001")
 }
 
 func TestCleanupVerifyContainers_UnlabelledOldRemovedByVerifierWithoutRunID(t *testing.T) {
 	exec := &MockCommandExecutor{Commands: map[string]MockCommandResponse{
-		verifyCleanupListCommand():  {Stdout: verifyPSLine("01d000000002", dockerCreatedAt(cleanupNow.Add(-time.Hour)), "spt.verify=true")},
+		verifyCleanupListCommand():  {Stdout: "01d000000002@" + dockerCreatedAt(cleanupNow.Add(-time.Hour))},
 		"docker rm -f 01d000000002": {},
 	}}
 	host := &hostparse.HostInfo{Host: "wrk1"}
@@ -128,12 +426,39 @@ func TestCleanupVerifyContainers_UnlabelledOldRemovedByVerifierWithoutRunID(t *t
 	if last := strings.Join(exec.ExecutedCommands[len(exec.ExecutedCommands)-1].Command, " "); last != "docker rm -f 01d000000002" {
 		t.Fatalf("an unlabelled stale container must not match an empty run id; last command %q", last)
 	}
+	for _, c := range exec.ExecutedCommands {
+		if c.Command[1] == constants.DockerCmdPS && strings.Contains(strings.Join(c.Command, " "), constants.DockerLabelVerifyRun) {
+			t.Fatalf("a verifier without a run id must not list by an empty run label: %q", c.Command)
+		}
+	}
+}
+
+func TestCleanupVerifyContainers_OwnListingFailureRemovesNothing(t *testing.T) {
+	logs := captureLogs(t)
+	exec := &MockCommandExecutor{Commands: map[string]MockCommandResponse{
+		verifyCleanupListCommand():              {Stdout: "01d000000003@" + dockerCreatedAt(cleanupNow.Add(-time.Hour))},
+		verifyCleanupOwnListCommand("this-run"): {Stderr: "boom", Error: fmt.Errorf("exit status 1")},
+		"docker rm -f 01d000000003":             {},
+	}}
+	host := &hostparse.HostInfo{Host: "wrk1"}
+	v := &Verifier{cmdExecutor: exec, timeProvider: NewMockTimeProvider(cleanupNow), runID: "this-run"}
+
+	v.cleanupVerifyContainers(host, command.NewDockerOperations(exec, host))
+
+	for _, c := range exec.ExecutedCommands {
+		if c.Command[1] == constants.DockerCmdRM {
+			t.Fatalf("removed %q although this run's containers could not be listed", c.Command)
+		}
+	}
+	if !strings.Contains(logs.String(), "failed to list this run's containers") {
+		t.Fatalf("want a WARN line for the failed own listing, got:\n%s", logs.String())
+	}
 }
 
 func TestCleanupVerifyContainers_LeavesUnparseableTimeAlone(t *testing.T) {
 	logs := captureLogs(t)
-	removed, _ := runCleanup(t, strings.Join([]string{
-		verifyPSLine("0bad00000001", "yesterday-ish", runLabel("other-run")),
+	removed := runCleanup(t, strings.Join([]string{
+		"0bad00000001@yesterday-ish",
 		"garbage-line-without-fields",
 	}, "\n"))
 
@@ -147,43 +472,29 @@ func TestCleanupVerifyContainers_LeavesUnparseableTimeAlone(t *testing.T) {
 func TestCleanupVerifyContainers_ReadsZoneOffset(t *testing.T) {
 	// A Docker host in UTC-5 reports local time. 06:58 -0500 is 11:58 UTC, two minutes old for a
 	// client clock of 12:00 UTC, so it is fresh; read without the offset it would look five hours old.
-	removed, _ := runCleanup(t, verifyPSLine("0e5700000001", "2026-11-14 06:58:00 -0500 EST", runLabel("other-run")))
+	removed := runCleanup(t, "0e5700000001@2026-11-14 06:58:00 -0500 EST")
 
 	assertRemoved(t, removed)
 }
 
 func TestCleanupVerifyContainers_StaleAgeBoundary(t *testing.T) {
-	removed, _ := runCleanup(t, strings.Join([]string{
-		verifyPSLine("0a6e00000001", dockerCreatedAt(cleanupNow.Add(-verifyContainerStaleAge)), runLabel("other-run")),
-		verifyPSLine("0a6e00000002", dockerCreatedAt(cleanupNow.Add(-verifyContainerStaleAge+time.Second)), runLabel("other-run")),
-	}, "\n"))
+	removed, _ := runCleanupOn(t,
+		fakeContainer{id: "0a6e00000001", created: cleanupNow.Add(-verifyContainerStaleAge), labels: verifyLabels("other-run")},
+		fakeContainer{id: "0a6e00000002", created: cleanupNow.Add(-verifyContainerStaleAge + time.Second), labels: verifyLabels("other-run")})
 
 	assertRemoved(t, removed, "0a6e00000001")
 }
 
-func TestCleanupVerifyContainers_ReadsLabelsHoldingAtSignsAndCommas(t *testing.T) {
-	created := dockerCreatedAt(cleanupNow.Add(-time.Minute))
-	removed, _ := runCleanup(t, verifyPSLine("0ab000000001", created,
-		"maintainer=spt-dev@example.com", "org.opencontainers.image.title=a,b", runLabel("this-run"), "spt.verify=true"))
-	assertRemoved(t, removed)
-
-	old := dockerCreatedAt(cleanupNow.Add(-time.Hour))
-	removed, _ = runCleanup(t, verifyPSLine("0ab000000002", old,
-		"maintainer=spt-dev@example.com", runLabel("this-run")))
-	assertRemoved(t, removed)
-}
-
 func TestCleanupVerifyContainers_LeavesLineWithoutContainerIDAlone(t *testing.T) {
-	// A label value holding a newline lets label text start a docker ps line. Its first field must
-	// never reach docker rm, however old the line's creation time reads.
+	// Only a hex ID may reach docker rm, whatever a docker ps line holds.
 	logs := captureLogs(t)
 	old := dockerCreatedAt(cleanupNow.Add(-time.Hour))
-	removed, _ := runCleanup(t, strings.Join([]string{
-		verifyPSLine("$(touch${IFS}x)", old, runLabel("other-run")),
-		verifyPSLine("0123456789AB", old, runLabel("other-run")),
-		verifyPSLine("0123456789a", old, runLabel("other-run")),
-		verifyPSLine(strings.Repeat("a", 65), old, runLabel("other-run")),
-		verifyPSLine(strings.Repeat("a", 64), old, runLabel("other-run")),
+	removed := runCleanup(t, strings.Join([]string{
+		"$(touch${IFS}x)@" + old,
+		"0123456789AB@" + old,
+		"0123456789a@" + old,
+		strings.Repeat("a", 65) + "@" + old,
+		strings.Repeat("a", 64) + "@" + old,
 	}, "\n"))
 
 	assertRemoved(t, removed, strings.Repeat("a", 64))

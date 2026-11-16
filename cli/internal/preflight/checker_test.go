@@ -5,14 +5,17 @@ Copyright © 2025 Dell Technologies
 package preflight
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 	"github.com/dell/storage-performance-tool/cli/internal/docker/command"
 	"github.com/dell/storage-performance-tool/cli/internal/hostparse"
+	"github.com/dell/storage-performance-tool/cli/internal/logging"
 )
 
 func testHost() *hostparse.HostInfo {
@@ -45,6 +48,90 @@ func TestPreflight_EnsureImage_PullsWhenMissing(t *testing.T) {
 	pf := &DefaultChecker{exec: mock}
 	if err := pf.EnsureImage(context.Background(), testHost(), image); err != nil {
 		t.Fatalf("EnsureImage error: %v", err)
+	}
+}
+
+// captureLog points the shared logger at a buffer for one test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var out bytes.Buffer
+	previous := logging.GetLogger()
+	logging.SetLogger(slog.New(slog.NewTextHandler(&out, nil)))
+	t.Cleanup(func() { logging.SetLogger(previous) })
+	return &out
+}
+
+const pullDespiteSkipLine = "Docker image not found locally; pulling despite skip"
+
+func TestPreflight_EnsureImage_LogsThePullOfAMissingImageWhenTheSkipIsSet(t *testing.T) {
+	for _, value := range []string{"true", "1"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv(constants.EnvSkipImagePull, value)
+			logged := captureLog(t)
+			mock := command.NewMockCommandExecutor()
+			image := constants.DefaultSptImage + ":v0.0.0-missing"
+			pull := fmt.Sprintf("%s %s %s", constants.DockerCommand, constants.DockerCmdPull, image)
+			mock.SetCommandSuccess(fmt.Sprintf("%s %s -q %s", constants.DockerCommand, constants.DockerCmdImages, image), "")
+			mock.SetCommandSuccess(pull, "pulled")
+
+			pf := &DefaultChecker{exec: mock}
+			if err := pf.EnsureImage(context.Background(), testHost(), image); err != nil {
+				t.Fatalf("EnsureImage error: %v", err)
+			}
+			if !mock.HasExecutedCommand(pull) {
+				t.Fatal("EnsureImage did not pull the missing image; the skip must not change pull behaviour")
+			}
+			for _, want := range []string{pullDespiteSkipLine, "component=preflight", "host=root@remote.test", "image=" + image} {
+				if !strings.Contains(logged.String(), want) {
+					t.Fatalf("spt.log missing %q\n%s", want, logged.String())
+				}
+			}
+		})
+	}
+}
+
+func TestPreflight_EnsureImage_DoesNotLogThePullWithoutTheSkip(t *testing.T) {
+	for _, value := range []string{"", "false", "not-a-bool"} {
+		t.Run("value="+value, func(t *testing.T) {
+			t.Setenv(constants.EnvSkipImagePull, value)
+			logged := captureLog(t)
+			mock := command.NewMockCommandExecutor()
+			image := constants.DefaultSptImage + ":v0.0.0-missing"
+			pull := fmt.Sprintf("%s %s %s", constants.DockerCommand, constants.DockerCmdPull, image)
+			mock.SetCommandSuccess(fmt.Sprintf("%s %s -q %s", constants.DockerCommand, constants.DockerCmdImages, image), "")
+			mock.SetCommandSuccess(pull, "pulled")
+
+			pf := &DefaultChecker{exec: mock}
+			if err := pf.EnsureImage(context.Background(), testHost(), image); err != nil {
+				t.Fatalf("EnsureImage error: %v", err)
+			}
+			if !mock.HasExecutedCommand(pull) {
+				t.Fatal("EnsureImage did not pull the missing image")
+			}
+			if strings.Contains(logged.String(), pullDespiteSkipLine) {
+				t.Fatalf("spt.log has the skip line without the skip\n%s", logged.String())
+			}
+		})
+	}
+}
+
+func TestPreflight_EnsureImage_PresentImageIsNotPulledOrLoggedWithTheSkip(t *testing.T) {
+	t.Setenv(constants.EnvSkipImagePull, "true")
+	logged := captureLog(t)
+	mock := command.NewMockCommandExecutor()
+	image := constants.DefaultSptImage + ":v0.0.0-present"
+	pull := fmt.Sprintf("%s %s %s", constants.DockerCommand, constants.DockerCmdPull, image)
+	mock.SetCommandSuccess(fmt.Sprintf("%s %s -q %s", constants.DockerCommand, constants.DockerCmdImages, image), "sha256:abc1234")
+
+	pf := &DefaultChecker{exec: mock}
+	if err := pf.EnsureImage(context.Background(), testHost(), image); err != nil {
+		t.Fatalf("EnsureImage error: %v", err)
+	}
+	if mock.HasExecutedCommand(pull) {
+		t.Fatal("EnsureImage pulled a present image")
+	}
+	if strings.Contains(logged.String(), pullDespiteSkipLine) {
+		t.Fatalf("spt.log has the skip line for a present image\n%s", logged.String())
 	}
 }
 

@@ -644,14 +644,14 @@ func TestAutoResultsMonitorArmCancelInterleavings(t *testing.T) {
 			origFleetDiscover := discoverFleetStepIDsFunc
 			origFetcher := newResultsFetcherFunc
 			origSummary := generateRunSummaryFunc
-			origMakeResultsDir := makeResultsDirFunc
+			origStartHook := autoResultsMonitorStartHook
 			t.Cleanup(func() {
 				newRunTrackerFunc = origRunTracker
 				discoverStepIDsFunc = origDiscover
 				discoverFleetStepIDsFunc = origFleetDiscover
 				newResultsFetcherFunc = origFetcher
 				generateRunSummaryFunc = origSummary
-				makeResultsDirFunc = origMakeResultsDir
+				autoResultsMonitorStartHook = origStartHook
 			})
 
 			setupEntered := make(chan struct{})
@@ -661,10 +661,11 @@ func TestAutoResultsMonitorArmCancelInterleavings(t *testing.T) {
 			releaseMonitorSetup := func() {
 				releaseSetupOnce.Do(func() { close(releaseSetup) })
 			}
-			makeResultsDirFunc = func(string, os.FileMode) error {
+			// The results-root setup finishes before startAutoResultsMonitor returns, so the
+			// barrier holds the monitor goroutine before it can acknowledge Arm.
+			autoResultsMonitorStartHook = func() {
 				setupEnteredOnce.Do(func() { close(setupEntered) })
 				<-releaseSetup
-				return nil
 			}
 
 			tracker := &cancelAwareRunTracker{
@@ -737,7 +738,7 @@ func TestAutoResultsMonitorArmCancelInterleavings(t *testing.T) {
 			select {
 			case <-setupEntered:
 			case <-time.After(time.Second):
-				t.Fatal("monitor did not reach the pre-gate setup barrier")
+				t.Fatal("monitor did not reach the pre-arm barrier")
 			}
 
 			armCalling := make(chan struct{})
@@ -748,7 +749,7 @@ func TestAutoResultsMonitorArmCancelInterleavings(t *testing.T) {
 				close(armReturned)
 			}
 			if test.cancelWins {
-				// Resolve the production gate first, while setup still prevents
+				// Resolve the production gate first, while the pre-arm barrier still prevents
 				// the monitor from acknowledging blocked Arm callers.
 				monitor.Cancel()
 				go startArm()
@@ -2204,5 +2205,72 @@ func TestInterruptedVerificationReconcilesStopBeforeSalvageAndPersistsIndex(t *t
 	if manifest.Integrity == nil || manifest.Integrity.Complete ||
 		!strings.Contains(manifest.Integrity.FinalizationError, integrity.WrittenName) {
 		t.Fatalf("persisted partial integrity outcome = %+v", manifest.Integrity)
+	}
+}
+
+// The monitor prepares the results root and its staged metadata before it returns, so a launch
+// started afterwards (such as the engine identity gate writing its rejection record) is ordered
+// after that setup and never races it.
+func TestStartAutoResultsMonitorPreparesMetadataBeforeReturn(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		prepared bool
+	}{
+		{name: "scenario file"},
+		{name: "prepared inputs", prepared: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resultsDir := t.TempDir()
+			scenarioPath := filepath.Join(t.TempDir(), "scenario.js")
+			if err := os.WriteFile(scenarioPath, []byte("// scenario\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			metadata := &runMetadata{}
+			if test.prepared {
+				metadata.preparedInputs = true
+				metadata.preparedScenarioJS = []byte("// prepared scenario\n")
+				metadata.preparedDefaultsYAML = []byte("load: {}\n")
+			}
+			var progress strings.Builder
+			monitor := startAutoResultsMonitor(
+				context.Background(), "http://example", "mt", resultsDir,
+				[]string{"verify"}, 77, false, nil, "", false, 0, scenarioPath, metadata,
+				&progress, io.Discard, "", nil,
+			)
+			t.Cleanup(func() {
+				monitor.Cancel()
+				select {
+				case <-monitor.done:
+				case <-time.After(5 * time.Second):
+					t.Error("monitor did not join")
+				}
+			})
+
+			// Read on the launcher's goroutine with no further synchronization, as a launch does.
+			root := metadata.ResultsRoot
+			if root == "" || filepath.Dir(root) != resultsDir ||
+				!strings.HasPrefix(filepath.Base(root), "mt-") {
+				t.Fatalf("ResultsRoot = %q, want mt-<timestamp> under %q", root, resultsDir)
+			}
+			if metadata.BaseURL != "http://example" {
+				t.Fatalf("BaseURL = %q, want http://example", metadata.BaseURL)
+			}
+			if metadata.ScenarioStoredPath != "scenario.js" {
+				t.Fatalf("ScenarioStoredPath = %q, want scenario.js", metadata.ScenarioStoredPath)
+			}
+			if _, err := os.Stat(filepath.Join(root, metadata.ScenarioStoredPath)); err != nil {
+				t.Fatalf("archived scenario: %v", err)
+			}
+			if test.prepared && (metadata.PreparedDefaultsSHA256 == "" ||
+				metadata.PreparedDefaultsBytes != len("load: {}\n")) {
+				t.Fatalf("prepared defaults digest = %q, bytes = %d",
+					metadata.PreparedDefaultsSHA256, metadata.PreparedDefaultsBytes)
+			}
+			want := "Auto-results: monitoring http://example for completion...\n" +
+				"Auto-results: will save results under " + root + "\n"
+			if got := progress.String(); got != want {
+				t.Fatalf("progress = %q, want %q", got, want)
+			}
+		})
 	}
 }

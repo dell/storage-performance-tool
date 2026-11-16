@@ -216,7 +216,7 @@ func (r *Renderer) CompactSnippet(summary *RunSummary) string {
 	r.renderRangeRead(sb, summary)
 	r.renderNicPaths(sb, summary, wrapWidth)
 	r.renderCompactMixedBreakdowns(sb, summary)
-	fmt.Fprintf(sb, "Totals: duration %s, data moved %s\n", summary.Totals.DurationHuman, formatBytesHuman(summary.Totals.DataBytes))
+	sb.WriteString(compactTotalsLine(summary.Totals))
 	if len(summary.Warnings) > 0 {
 		sb.WriteString("Warnings:\n")
 		sorted := append([]string(nil), summary.Warnings...)
@@ -525,6 +525,9 @@ func (r *Renderer) phaseTable(summary *RunSummary) string {
 	rows := make([][]string, 0, len(summary.Steps))
 	for _, step := range summary.Steps {
 		if step.Metrics == nil {
+			if step.MetricsMissing {
+				rows = append(rows, missingMetricsRow(step, len(headers)))
+			}
 			continue
 		}
 		m := step.Metrics
@@ -546,6 +549,7 @@ func (r *Renderer) phaseTable(summary *RunSummary) string {
 			formatInt(m.FailureCount),
 		})
 	}
+	rows = appendAbsentPhaseRows(rows, summary, len(headers))
 	if len(rows) == 0 {
 		rows = append(rows, notApplicableRow(len(headers)))
 	}
@@ -560,6 +564,9 @@ func (r *Renderer) rateTable(summary *RunSummary) string {
 	rows := make([][]string, 0, len(summary.Steps))
 	for _, step := range summary.Steps {
 		if step.Metrics == nil {
+			if step.MetricsMissing {
+				rows = append(rows, missingMetricsRow(step, len(headers)))
+			}
 			continue
 		}
 		m := step.Metrics
@@ -578,6 +585,7 @@ func (r *Renderer) rateTable(summary *RunSummary) string {
 		}
 		rows = append(rows, []string{step.PhaseLabel, rateCell, steadyRateCell, bandwidthCell, steadyBandwidthCell})
 	}
+	rows = appendAbsentPhaseRows(rows, summary, len(headers))
 	if len(rows) == 0 {
 		rows = append(rows, notApplicableRow(len(headers)))
 	}
@@ -590,6 +598,29 @@ func formatSteadyCell(steady SteadyRates, value float64, unit string) string {
 		return "n/a (" + nonEmpty(steady.Reason, steadyReasonMissing) + ")"
 	}
 	return formatNumber(value, unit)
+}
+
+// missingMetricsRow is the row of a phase whose metrics are missing: its label and a dash in
+// every other column, so the phase is not dropped from the table.
+func missingMetricsRow(step StepSummary, columns int) []string {
+	row := notApplicableRow(columns)
+	row[0] = nonEmpty(step.PhaseLabel, step.StepID)
+	return row
+}
+
+// appendAbsentPhaseRows adds a dash row for each expected step absent from the results index,
+// only when no step was counted: otherwise an absent step need not be a missing phase. Such a
+// step has no place in the index's step order, so its rows follow the indexed steps.
+func appendAbsentPhaseRows(rows [][]string, summary *RunSummary, columns int) [][]string {
+	if !summary.Totals.Unavailable() {
+		return rows
+	}
+	for _, label := range summary.Totals.AbsentPhases {
+		row := notApplicableRow(columns)
+		row[0] = label
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 func notApplicableRow(columns int) []string {
@@ -700,16 +731,83 @@ func (r *Renderer) renderMixedBreakdowns(b *strings.Builder, summary *RunSummary
 
 func (r *Renderer) renderTotals(b *strings.Builder, summary *RunSummary) {
 	totals := summary.Totals
-	fmt.Fprintf(b, "Run Totals\n")
-	r.writeBullet(b, "Duration", totals.DurationHuman)
-	r.writeBullet(b, "Data moved", formatBytesHuman(totals.DataBytes))
-	if totals.FailureCount > 0 {
-		r.writeBullet(b, "Failed requests", formatInt(totals.FailureCount))
+	switch {
+	case totals.Unavailable():
+		fmt.Fprintf(b, "Run Totals\n")
+		r.writeBullet(b, "Duration", totalsUnavailable)
+		r.writeBullet(b, "Data moved", totalsUnavailable)
+		r.writeBullet(b, "Failed requests", totalsUnavailable)
+		r.writeIndentedBullet(b, "Not counted", notCountedPhases(totals))
+	case totals.Partial():
+		fmt.Fprintf(b, "Run Totals %s\n", partialTotalsQualifier(totals))
+		r.writeBullet(b, "Duration", totals.DurationHuman)
+		r.writeBullet(b, "Data moved", formatBytesHuman(totals.DataBytes))
+		// Always shown: leaving it out would read as no failures in the phases not counted.
+		r.writeBullet(b, "Failed requests", formatInt(totals.FailureCount)+" (counted phases only)")
+		r.writeIndentedBullet(b, "Not counted", notCountedPhases(totals))
+	default:
+		fmt.Fprintf(b, "Run Totals\n")
+		r.writeBullet(b, "Duration", totals.DurationHuman)
+		r.writeBullet(b, "Data moved", formatBytesHuman(totals.DataBytes))
+		if totals.FailureCount > 0 {
+			r.writeBullet(b, "Failed requests", formatInt(totals.FailureCount))
+		}
 	}
 	if len(summary.MissingExpected) > 0 {
 		r.writeBullet(b, "Missing steps", strings.Join(summary.MissingExpected, ", "))
 	}
 	b.WriteString("\n")
+}
+
+const totalsUnavailable = "unavailable"
+
+// compactTotalsLine renders the console totals line. A complete run prints the line tools
+// parse ("Totals: duration …"); an unavailable or partial total puts its qualifier before the
+// colon, so no parser can read it as the run total.
+func compactTotalsLine(totals RunTotals) string {
+	switch {
+	case totals.Unavailable():
+		return "Totals: unavailable (no phase has metrics)\n"
+	case totals.Partial():
+		return fmt.Sprintf("Totals %s: duration %s, data moved %s\n",
+			partialTotalsQualifier(totals), totals.DurationHuman, formatBytesHuman(totals.DataBytes))
+	default:
+		return fmt.Sprintf("Totals: duration %s, data moved %s\n", totals.DurationHuman, formatBytesHuman(totals.DataBytes))
+	}
+}
+
+func partialTotalsQualifier(totals RunTotals) string {
+	return fmt.Sprintf("(%d of %d phases)", totals.StepsCounted, totals.StepsCounted+len(totals.MissingPhases))
+}
+
+// notCountedPhases names the phases left out of the totals, grouped by why.
+func notCountedPhases(totals RunTotals) string {
+	parts := make([]string, 0, 2)
+	if len(totals.MissingPhases) > 0 {
+		parts = append(parts, countedLabels(totals.MissingPhases)+" (metrics unavailable)")
+	}
+	if totals.Unavailable() && len(totals.AbsentPhases) > 0 {
+		parts = append(parts, countedLabels(totals.AbsentPhases)+" (not in results)")
+	}
+	return strings.Join(parts, "; ")
+}
+
+// countedLabels joins labels in first-seen order, giving a repeated label once with its count.
+func countedLabels(labels []string) string {
+	counts := make(map[string]int, len(labels))
+	order := make([]string, 0, len(labels))
+	for _, label := range labels {
+		if counts[label] == 0 {
+			order = append(order, label)
+		}
+		counts[label]++
+	}
+	for i, label := range order {
+		if counts[label] > 1 {
+			order[i] = fmt.Sprintf("%s ×%d", label, counts[label])
+		}
+	}
+	return strings.Join(order, ", ")
 }
 
 func (r *Renderer) renderArtifactsAndWarnings(b *strings.Builder, summary *RunSummary) {
@@ -735,6 +833,33 @@ func (r *Renderer) renderArtifactsAndWarnings(b *strings.Builder, summary *RunSu
 		b.WriteString("\n")
 	}
 }
+
+// writeIndentedBullet writes a labelled bullet wrapped to the report width, with continuation
+// lines aligned under the value. Below minIndentedValueWidth columns for the value it falls
+// back to plain bullet wrapping.
+func (r *Renderer) writeIndentedBullet(b *strings.Builder, label, value string) {
+	if value == "" {
+		return
+	}
+	prefix := fmt.Sprintf("  • %-18s ", label)
+	valueWidth := r.MaxWidth - textutil.RuneLen(prefix)
+	if valueWidth < minIndentedValueWidth {
+		r.writeWrappedBullet(b, label, value, r.MaxWidth)
+		return
+	}
+	indent := strings.Repeat(" ", textutil.RuneLen(prefix))
+	for i, line := range textutil.WrapWords(value, valueWidth) {
+		if i == 0 {
+			b.WriteString(prefix)
+		} else {
+			b.WriteString(indent)
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+}
+
+const minIndentedValueWidth = 20
 
 func (r *Renderer) writeBullet(b *strings.Builder, label, value string) {
 	if value == "" {
