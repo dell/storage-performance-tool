@@ -196,11 +196,12 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		ThreadContext.put(KEY_STEP_ID, stepId);
 		ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
 		final FullHttpResponse resp;
-		final var channel = getUnpooledConnection(storageNodeAddrs[0], storageNodePort);
 		// The response, or null once the channel goes inactive without one: a closed channel, the
 		// driver's I/O shutdown among its causes, ends the wait at once instead of after the timeout.
+		// Built before the connection, so a cap the aggregator refuses leaves no channel open.
 		final var control = new ControlResponseHandler(request.method(), maxContentLength);
 		final var fullResp = control.response();
+		final var channel = getUnpooledConnection(storageNodeAddrs[0], storageNodePort);
 		try {
 			final var pipeline = channel.pipeline();
 			Loggers.MSG.debug(

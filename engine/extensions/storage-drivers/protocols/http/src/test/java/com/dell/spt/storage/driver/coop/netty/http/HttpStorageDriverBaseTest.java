@@ -683,7 +683,8 @@ class HttpStorageDriverBaseTest {
 
 	/** A GET answered with a Content-Length over the cap is refused at once: null, one WARN. */
 	@ParameterizedTest
-	@CsvSource({"16777217", "2147483648"})
+	@CsvSource({"16777217", "2147483648"
+	})
 	void aBodyOverTheCapByContentLengthReturnsNullWithOneWarning(final long contentLength)
 					throws Exception {
 		final var control = new HttpStorageDriverBase.ControlResponseHandler(HttpMethod.GET, DEFAULT_CAP);
