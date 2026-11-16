@@ -33,7 +33,7 @@ type Input struct {
 	Steps     []scenario.StepInfo
 	Hosts     []*hostparse.HostInfo
 	Image     string
-	SkipPull  bool
+	NeverPull bool
 	Attached  bool
 	Shortfall string
 	// SptJavaOpts is the user's SPT_JAVA_OPTS.
@@ -265,7 +265,7 @@ func PlanArgs(interfaces, endpoints []string, encoded string) []string {
 func probe(ctx context.Context, in Input, host *hostparse.HostInfo, args []string) (*nicplan.Output, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
-	command := ProbeCommand(in.Image, in.SkipPull, len(args) > 0 && args[0] == "--rdma", args)
+	command := ProbeCommand(in.Image, in.NeverPull, len(args) > 0 && args[0] == "--rdma", args)
 	stdout, stderr, err := in.Executor.ExecuteCommand(ctx, host, command)
 	if err != nil {
 		if nicplan.CommandMissing(stderr) || nicplan.CommandMissing(stdout) {
@@ -276,8 +276,10 @@ func probe(ctx context.Context, in Input, host *hostparse.HostInfo, args []strin
 	return nicplan.Parse([]byte(stdout))
 }
 
-// ProbeCommand is the docker run that asks the image on one host.
-func ProbeCommand(image string, skipPull, rdma bool, args []string) []string {
+// ProbeCommand is the docker run that asks the image on one host. With neverPull (Input.NeverPull,
+// set for a dev image, which only exists where it was built or pushed), a missing image fails the
+// probe; without it, Docker pulls a missing image and uses a present one as it is, as a launch would.
+func ProbeCommand(image string, neverPull, rdma bool, args []string) []string {
 	command := []string{constants.DockerCommand, "run", "--rm", "--network", "host"}
 	if rdma {
 		command = append(command, "--device", constants.RdmaDevicePath, "--cap-add", constants.RdmaCapIpcLock, "--ulimit", constants.RdmaUlimitMemlock)
@@ -287,7 +289,7 @@ func ProbeCommand(image string, skipPull, rdma bool, args []string) []string {
 		command = append(command, "--cgroupns=host")
 	}
 	command = append(command, "--entrypoint", constants.SptNicPlanCommand)
-	if skipPull {
+	if neverPull {
 		command = append(command, "--pull", "never")
 	}
 	command = append(command, image)
