@@ -1507,8 +1507,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	 * Settles a recovered queue entry. Return true only when it became unattempted and should
 	 * enter the legacy recovery output. Retained retries instead settle their known failure
 	 * and return false; no result output or transport action may run here. Called at most once
-	 * per queued operation, and not for a queued composite that recovery settles through one of
-	 * its recovered parts.
+	 * per queued operation in each recovery call, and not for a queued composite that recovery
+	 * settles through one of its recovered parts. An operation this hook leaves queued can be
+	 * visited again by a later recovery call, so the hook must be safe to repeat.
 	 */
 	protected boolean recoverQueuedOperation(final O op) {
 		return operationLifecycle().unattempted(op);

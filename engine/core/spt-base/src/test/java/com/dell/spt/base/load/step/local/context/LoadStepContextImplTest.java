@@ -1737,13 +1737,13 @@ public class LoadStepContextImplTest {
 		final OperationLifecycleTracker<Operation<DataItem>> lifecycle = spy(new OperationLifecycleTracker<>());
 		when(driverMock.operationLifecycle()).thenReturn(lifecycle);
 		// Dispatched, so the step asks for the transition and the tracker refuses it without throwing.
-		final Operation<DataItem> alreadyRecovered = baseDataOp("already-recovered", 1);
-		lifecycle.generatorBuffered(alreadyRecovered);
-		lifecycle.driverQueued(alreadyRecovered);
-		lifecycle.dispatched(alreadyRecovered);
+		final Operation<DataItem> dispatchedOp = baseDataOp("dispatched", 1);
+		lifecycle.generatorBuffered(dispatchedOp);
+		lifecycle.driverQueued(dispatchedOp);
+		lifecycle.dispatched(dispatchedOp);
 		clearInvocations(lifecycle);
 		when(driverMock.recoverQueuedOperations())
-						.thenReturn(List.of(alreadyRecovered))
+						.thenReturn(List.of(dispatchedOp))
 						.thenThrow(new IllegalStateException("recovery source invoked more than once"));
 		final MetricsContext metrics = buildMetricsCtx("falseTransitionRecovery");
 		final var ctx = new LoadStepContextImpl<>(
@@ -1757,9 +1757,9 @@ public class LoadStepContextImplTest {
 		assertDoesNotThrow(ctx::recoverQueuedOperationsForStepStop);
 		assertDoesNotThrow(ctx::recoverQueuedOperationsForStepStop);
 		// The refused transition counts as recovered: asked once, then neither retained nor retried.
-		verify(lifecycle, times(1)).unattempted(alreadyRecovered);
+		verify(lifecycle, times(1)).unattempted(dispatchedOp);
 		verify(driverMock, times(1)).recoverQueuedOperations();
-		assertEquals(OperationLifecycleState.DISPATCHED, alreadyRecovered.lifecycle().state());
+		assertEquals(OperationLifecycleState.DISPATCHED, dispatchedOp.lifecycle().state());
 	}
 
 	@Test
