@@ -24,6 +24,7 @@ import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.deletion.DeleteTransportResult;
 import com.dell.spt.base.item.op.deletion.DeleteTransportTargetResult;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationCause;
 import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.list.ListOperation;
@@ -41,6 +42,7 @@ import org.slf4j.LoggerFactory;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.io.IOException;
+import java.net.ConnectException;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.TimeoutException;
@@ -58,6 +60,7 @@ import java.util.regex.Pattern;
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscriber;
 import org.reactivestreams.Subscription;
+import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.core.exception.ApiCallAttemptTimeoutException;
 import software.amazon.awssdk.core.exception.ApiCallTimeoutException;
 import software.amazon.awssdk.core.exception.SdkClientException;
@@ -1402,8 +1405,23 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 				throwUncheckedIfInterrupted(interrupted);
 			}
 			LOG.debug("DELETE verification HEAD was unresolved: {}", cause.toString());
+			DeleteVerificationCause.report(unresolvedCause(cause));
 			return Presence.UNRESOLVED;
 		}
+	}
+
+	/** An allowlisted cause for an SDK failure: a numeric status or the failure's class, never its text. */
+	static DeleteVerificationCause unresolvedCause(final Throwable rootCause) {
+		if (rootCause instanceof AwsServiceException service && service.statusCode() > 0) {
+			return DeleteVerificationCause.httpStatus(service.statusCode());
+		}
+		if (rootCause instanceof ConnectException) {
+			return DeleteVerificationCause.connectionFailure(rootCause);
+		}
+		if (rootCause instanceof IOException) {
+			return DeleteVerificationCause.ioError(rootCause);
+		}
+		return DeleteVerificationCause.probeError(rootCause);
 	}
 
 	CompletableFuture<Void> deleteObject(final O op) {

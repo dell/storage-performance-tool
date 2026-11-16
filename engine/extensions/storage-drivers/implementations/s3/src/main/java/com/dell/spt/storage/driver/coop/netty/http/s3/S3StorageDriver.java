@@ -40,6 +40,7 @@ import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.item.op.deletion.DeleteRequestOperation;
 import com.dell.spt.base.item.op.deletion.DeleteTarget;
 import com.dell.spt.base.item.op.deletion.DeleteTransportResult;
+import com.dell.spt.base.item.op.deletion.DeleteVerificationCause;
 import com.dell.spt.base.item.op.deletion.DeleteVerificationProbe;
 import com.dell.spt.base.item.op.partial.data.PartialDataOperation;
 import com.dell.spt.base.item.op.list.ListOperation;
@@ -1275,20 +1276,24 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		try {
 			response = executeHttpRequest(request, false);
 			if (response == null) {
+				DeleteVerificationCause.report(DeleteVerificationCause.noResponse());
 				return Presence.UNRESOLVED;
 			}
 			if (response.status().code() == 404) {
 				return Presence.ABSENT;
 			}
-			return HttpStatusClass.SUCCESS.equals(response.status().codeClass())
-							? Presence.PRESENT
-							: Presence.UNRESOLVED;
+			if (HttpStatusClass.SUCCESS.equals(response.status().codeClass())) {
+				return Presence.PRESENT;
+			}
+			DeleteVerificationCause.report(DeleteVerificationCause.httpStatus(response.status().code()));
+			return Presence.UNRESOLVED;
 		} catch (final InterruptedException interrupted) {
 			Thread.currentThread().interrupt();
 			throwUnchecked(interrupted);
 			return Presence.UNRESOLVED;
 		} catch (final ConnectException failure) {
 			Loggers.MSG.debug("DELETE verification HEAD was unresolved: {}", failure.toString());
+			DeleteVerificationCause.report(DeleteVerificationCause.connectionFailure(failure));
 			return Presence.UNRESOLVED;
 		} finally {
 			if (response != null) {
