@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.dell.spt.base.config.HttpVersioningSynonym;
 import com.dell.spt.base.data.SeedDataInput;
+import com.dell.spt.base.env.DateUtil;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
@@ -16,8 +17,12 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.storage.driver.coop.netty.http.s3.VersioningConfigurationXmlHandler.Kind;
 import com.github.akurilov.confuse.Config;
+import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import io.netty.handler.codec.http.DefaultHttpRequest;
+import io.netty.handler.codec.http.HttpMethod;
+import io.netty.handler.codec.http.HttpVersion;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -25,6 +30,7 @@ import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -63,6 +69,9 @@ final class S3FirstUseBucketCheckTest {
 	/** A request with the headers the versioning tests check. */
 	private record Seen(String method, String path, String query, String auth, String probe, int dates) {}
 
+	/** A request as it reached the listener: its headers and its body. */
+	private record Wire(String method, String path, String query, Headers headers, byte[] body) {}
+
 	private static final String ENABLED = "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>";
 	private static final String SUSPENDED = "<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>";
 	private static final String SUSPENDED_MFA = "<VersioningConfiguration><Status>Suspended</Status><MfaDelete>Enabled</MfaDelete></VersioningConfiguration>";
@@ -82,6 +91,7 @@ final class S3FirstUseBucketCheckTest {
 	private volatile long headDelayMillis;
 	private volatile CountDownLatch headArrived = new CountDownLatch(1);
 	private final List<Seen> seen = new CopyOnWriteArrayList<>();
+	private final List<Wire> wire = new CopyOnWriteArrayList<>();
 	private volatile int getVersioningStatus = 200;
 	private volatile String getVersioningBody = "<VersioningConfiguration/>";
 	private volatile int putVersioningStatus = 200;
@@ -389,6 +399,61 @@ final class S3FirstUseBucketCheckTest {
 		final var put = seen.stream().filter(r -> "PUT".equals(r.method()) && "versioning".equals(r.query())).findFirst();
 		assertTrue(put.isPresent(), seen::toString);
 		assertEquals(1, put.get().dates(), seen::toString);
+	}
+
+	@Test
+	void theV2PutSendsTheEnableBodyAndEachRequestIsSignedAndDated() throws Exception {
+		// Ported from S3VersioningTest, which was tagged integration and never ran.
+		final Config config = S3StorageDriverTest.baseConfig(true, 2, false, null, "127.0.0.1");
+		final var endpoint = listener();
+		final var driver = driver(config, endpoint, 5_000);
+		final var bucket = "/ver-body";
+
+		assertEquals(bucket + "/p", driver.requestNewPath(bucket + "/p"));
+
+		final var bucketRequests = wire.stream().filter(r -> bucket.equals(r.path())).toList();
+		assertEquals(List.of("HEAD", "GET", "PUT"), bucketRequests.stream().map(Wire::method).toList(), wire::toString);
+		final var head = bucketRequests.get(0);
+		final var get = bucketRequests.get(1);
+		final var put = bucketRequests.get(2);
+		assertNull(head.query());
+		assertEquals("versioning", get.query());
+		assertEquals("versioning", put.query());
+		for (final var request : bucketRequests) {
+			final var label = request.method() + " " + request.path() + "?" + request.query();
+			assertEquals(endpoint, request.headers().getFirst("Host"), label);
+			assertEquals(1, request.headers().get("Date").size(), label);
+			assertCloseToNow(DateUtil.parseRfc1123(request.headers().getFirst("Date")), label);
+			assertTrue(request.headers().getFirst("Authorization").startsWith("AWS " + SigV2TestSupport.UID + ":"),
+							label + ": " + request.headers().getFirst("Authorization"));
+			SigV2TestSupport.assertSignedOver(asNettyRequest(request),
+							request.query() == null ? bucket : bucket + "?versioning");
+		}
+		assertEquals("0", head.headers().getFirst("Content-Length"));
+		assertEquals("0", get.headers().getFirst("Content-Length"));
+		assertEquals(0, get.body().length);
+		// A literal, not the driver's constant, so an edit to the constant's text fails here.
+		final byte[] enableBody = ("<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
+						+ "<Status>Enabled</Status></VersioningConfiguration>").getBytes(StandardCharsets.US_ASCII);
+		assertArrayEquals(enableBody, put.body(), () -> new String(put.body(), StandardCharsets.UTF_8));
+		assertEquals(String.valueOf(enableBody.length), put.headers().getFirst("Content-Length"));
+	}
+
+	private static final long DATE_TOLERANCE_MILLIS = 10_000L;
+
+	private static void assertCloseToNow(final Instant instant, final String label) {
+		final long now = Instant.now().toEpochMilli();
+		final long actual = instant.toEpochMilli();
+		assertTrue(actual >= now - DATE_TOLERANCE_MILLIS && actual <= now + DATE_TOLERANCE_MILLIS,
+						() -> label + ": expected a Date within " + DATE_TOLERANCE_MILLIS + " ms of " + now + ", got " + actual);
+	}
+
+	/** The captured request as a Netty request, for {@link SigV2TestSupport}. */
+	private static DefaultHttpRequest asNettyRequest(final Wire request) {
+		final var uri = request.query() == null ? request.path() : request.path() + "?" + request.query();
+		final var netty = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.valueOf(request.method()), uri);
+		request.headers().forEach((name, values) -> values.forEach(value -> netty.headers().add(name, value)));
+		return netty;
 	}
 
 	@Test
@@ -749,9 +814,11 @@ final class S3FirstUseBucketCheckTest {
 
 	private void handle(final HttpExchange exchange) throws IOException {
 		try (exchange) {
-			exchange.getRequestBody().readAllBytes();
+			final byte[] requestBody = exchange.getRequestBody().readAllBytes();
 			final var uri = exchange.getRequestURI();
 			final var method = exchange.getRequestMethod();
+			wire.add(new Wire(method, uri.getRawPath(), uri.getRawQuery(), new Headers(exchange.getRequestHeaders()),
+							requestBody));
 			requests.add(new Captured(method, uri.getRawPath(), uri.getRawQuery()));
 			final var headers = exchange.getRequestHeaders();
 			final var dates = headers.get("Date");
