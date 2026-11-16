@@ -48,6 +48,9 @@ type HeadlessRunner struct {
 	networkMode   string
 	resultsRoot   string
 	launchHooks   tui.LaunchHooks
+	// autoTerminateSeconds is the --auto-terminate-seconds deadline; 0 = none.
+	autoTerminateSeconds int
+	autoTerminateWait    time.Duration
 }
 
 // HeadlessOptions holds configuration for headless mode
@@ -66,6 +69,8 @@ type HeadlessOptions struct {
 	ResultsRoot string
 	// KeepScenario removed - this belongs in scenario.Params
 	AutoTerminateSeconds int // 0 = unlimited
+	// ShutdownLingerSec is --shutdown-linger; it bounds the auto-terminate stop wait.
+	ShutdownLingerSec int
 	// In multi-host runs, let auto-results fetch artifacts and request shutdown
 	// after normal completion instead of stopping containers immediately.
 	DelegateNormalShutdown bool
@@ -75,9 +80,10 @@ type HeadlessOptions struct {
 	DefaultsContent        []byte
 }
 
-// AutoTerminateError indicates a headless multi-host run reached the configured
-// auto-terminate deadline. CleanupComplete reports whether the runner already
-// stopped managed containers before returning.
+// AutoTerminateError indicates a headless run reached the configured
+// auto-terminate deadline and was stopped. CleanupComplete reports that no
+// container cleanup is left to the caller: the runner stopped its containers,
+// or the run session owns their finalization.
 type AutoTerminateError struct {
 	CleanupComplete bool
 }
@@ -132,6 +138,8 @@ func NewHeadlessRunner(dockerManager tui.DockerInterface, options HeadlessOption
 		resultsRoot:   options.ResultsRoot,
 		launchHooks:   options.LaunchHooks,
 		// keepScenario will be set when RunWithScenario is called
+		autoTerminateSeconds: options.AutoTerminateSeconds,
+		autoTerminateWait:    autoTerminateStopWait(options.ShutdownLingerSec),
 	}
 
 	// Set up trace file if specified
@@ -167,6 +175,8 @@ type MultiHostHeadlessRunner struct {
 	delegateNormalShutdown bool
 	expectedStepIDs        []string
 	launchHooks            tui.LaunchHooks
+	autoTerminateSeconds   int
+	autoTerminateWait      time.Duration
 }
 
 // NewMultiHostHeadlessRunner creates a new multi-host headless runner
@@ -179,6 +189,8 @@ func NewMultiHostHeadlessRunner(orchestrator *tui.MultiHostOrchestrator, options
 		delegateNormalShutdown: options.DelegateNormalShutdown,
 		expectedStepIDs:        append([]string(nil), options.ExpectedStepIDs...),
 		launchHooks:            options.LaunchHooks,
+		autoTerminateSeconds:   options.AutoTerminateSeconds,
+		autoTerminateWait:      autoTerminateStopWait(options.ShutdownLingerSec),
 	}
 
 	// Set up trace file if specified
@@ -213,6 +225,18 @@ func (r *MultiHostHeadlessRunner) RunWithParams(ctx context.Context, image strin
 // caller-provided scenario/defaults content.
 func (r *MultiHostHeadlessRunner) RunWithScenarioContentAndParams(ctx context.Context, image string, scenarioPath string, params scenario.Params, scenarioContent, defaultsContent []byte) error {
 	return r.runWithParams(ctx, image, scenarioPath, params, scenarioContent, defaultsContent)
+}
+
+// startMultiHostTest starts the distributed run; tests replace it.
+var startMultiHostTest = func(
+	ctx context.Context, testOrchestrator *tui.MultiHostTestOrchestrator, image string,
+	params scenario.Params, scenarioContent, defaultsContent []byte, hooks tui.LaunchHooks,
+) error {
+	if scenarioContent != nil {
+		return testOrchestrator.StartTestWithContentAndLaunchHooks(
+			ctx, image, params, scenarioContent, defaultsContent, hooks)
+	}
+	return testOrchestrator.StartTestWithLaunchHooks(ctx, image, params, hooks)
 }
 
 func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image string, scenarioPath string, params scenario.Params, scenarioContent, defaultsContent []byte) error {
@@ -261,14 +285,16 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 			r.output("spt", msg)
 		}
 	})
-	var err error
-	if scenarioContent != nil {
-		err = testOrchestrator.StartTestWithContentAndLaunchHooks(
-			ctx, image, params, scenarioContent, defaultsContent, r.launchHooks)
-	} else {
-		err = testOrchestrator.StartTestWithLaunchHooks(ctx, image, params, r.launchHooks)
-	}
+	launchCtx, deadline, stopDeadline := startAutoTerminateDeadline(ctx, r.autoTerminateSeconds, r.launchHooks)
+	defer stopDeadline()
+	err := startMultiHostTest(
+		launchCtx, testOrchestrator, image, params, scenarioContent, defaultsContent, r.launchHooks)
 	if err != nil {
+		err = deadline.startError(err)
+		if deadline.reachedNow() {
+			// A submission that raced the deadline is still stopped by the session.
+			r.launchHooks.RequestWorkloadStop()
+		}
 		r.output("ERROR", fmt.Sprintf("Failed to start test: %v", err))
 		if stopErr := stopMultiHostAfterLaunchError(ctx, r.orchestrator, r.launchHooks); stopErr != nil {
 			r.output("ERROR", fmt.Sprintf("Failed to stop containers: %v", stopErr))
@@ -286,8 +312,14 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 		// Simple monitoring loop - in a full implementation this would
 		// collect and display metrics from all hosts
 		select {
-		case <-ctx.Done():
-			done <- ctx.Err()
+		case <-launchCtx.Done():
+			if deadline.reachedNow() && ctx.Err() == nil {
+				done <- errAutoTerminateReached
+				return
+			}
+			done <- launchCtx.Err()
+		case <-deadline.Reached():
+			done <- errAutoTerminateReached
 		case <-testOrchestrator.CompletionCh():
 			done <- nil
 		case <-r.launchHooks.WorkloadTerminal():
@@ -303,7 +335,7 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 	completionErr := testOrchestrator.CompletionError()
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			r.output("SHUTDOWN", "Auto-terminate deadline reached")
+			r.output("SHUTDOWN", autoTerminateReachedMessage(r.autoTerminateSeconds))
 		} else {
 			r.output("SHUTDOWN", fmt.Sprintf("Shutting down due to: %v", err))
 		}
@@ -324,6 +356,9 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 	}
 
 	if r.launchHooks.SessionManaged() {
+		if errors.Is(err, errAutoTerminateReached) {
+			return r.stopSessionRunAtAutoTerminate(ctx, testOrchestrator, completionErr)
+		}
 		return err
 	}
 
@@ -340,6 +375,27 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 	}
 
 	return multiHostShutdownResult(errors.Join(err, completionErr), stopErr)
+}
+
+// stopSessionRunAtAutoTerminate has the run session stop the run at the
+// deadline, keeps presentation monitoring until the run has stopped, then
+// releases it. Evidence and resource finalization stay with the session.
+func (r *MultiHostHeadlessRunner) stopSessionRunAtAutoTerminate(
+	ctx context.Context, testOrchestrator *tui.MultiHostTestOrchestrator, completionErr error,
+) error {
+	stopErr := stopSessionRunAtAutoTerminate(ctx, r.autoTerminateSeconds, r.autoTerminateWait, r.launchHooks, r.output)
+	// Release presentation-only metrics and log polling.
+	if releaseErr := testOrchestrator.StopTest(); releaseErr != nil {
+		r.output("ERROR", fmt.Sprintf("Failed to stop multi-host presentation monitoring: %v", releaseErr))
+	}
+	if stopErr != nil {
+		return stopErr
+	}
+	if completionErr != nil {
+		return completionErr
+	}
+	r.output("SHUTDOWN", "Auto-terminate stop request finished; RunSession confirms the stop and owns evidence and resource finalization")
+	return &AutoTerminateError{CleanupComplete: true}
 }
 
 func multiHostShutdownResult(runErr, stopErr error) error {
@@ -595,19 +651,19 @@ func (r *HeadlessRunner) outputDryRunContentIdentity(label string, content []byt
 
 // runBenchmarkWithParams executes the actual benchmark with scenario parameters
 func (r *HeadlessRunner) runBenchmarkWithParams(ctx context.Context, image string, scenarioPath string, params scenario.Params) error {
-	return r.runBenchmark(ctx, scenarioPath, func(orchestrator *tui.TestOrchestrator) error {
-		return orchestrator.StartTestWithLaunchHooks(ctx, image, params, r.launchHooks)
+	return r.runBenchmark(ctx, scenarioPath, func(launchCtx context.Context, orchestrator *tui.TestOrchestrator) error {
+		return orchestrator.StartTestWithLaunchHooks(launchCtx, image, params, r.launchHooks)
 	})
 }
 
 func (r *HeadlessRunner) runBenchmarkWithContent(ctx context.Context, image string, scenarioPath string, params scenario.Params, scenarioContent, defaultsContent []byte) error {
-	return r.runBenchmark(ctx, scenarioPath, func(orchestrator *tui.TestOrchestrator) error {
+	return r.runBenchmark(ctx, scenarioPath, func(launchCtx context.Context, orchestrator *tui.TestOrchestrator) error {
 		return orchestrator.StartTestWithContentAndLaunchHooks(
-			ctx, image, params, scenarioContent, defaultsContent, r.launchHooks)
+			launchCtx, image, params, scenarioContent, defaultsContent, r.launchHooks)
 	})
 }
 
-func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, startTest func(*tui.TestOrchestrator) error) error {
+func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, startTest func(context.Context, *tui.TestOrchestrator) error) error {
 	// Create the orchestrator for API-based control
 	r.orchestrator = tui.NewTestOrchestrator(r.dockerManager, r.apiPort, r.resultsRoot)
 	r.orchestrator.SetNetworkMode(r.networkMode)
@@ -641,7 +697,14 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 	// Start the test via orchestrator
 	r.output("INIT", "Starting Spt in API mode...")
 
-	if err := startTest(r.orchestrator); err != nil {
+	launchCtx, deadline, stopDeadline := startAutoTerminateDeadline(ctx, r.autoTerminateSeconds, r.launchHooks)
+	defer stopDeadline()
+	if err := startTest(launchCtx, r.orchestrator); err != nil {
+		err = deadline.startError(err)
+		if deadline.reachedNow() {
+			// A submission that raced the deadline is still stopped by the session.
+			r.launchHooks.RequestWorkloadStop()
+		}
 		r.output("ERROR", "Failed to start test: %v", err)
 		// Try to clean up any partially created resources
 		if stopErr := stopLocalAfterLaunchError(r.orchestrator, r.launchHooks); stopErr != nil {
@@ -659,12 +722,31 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 	// full auto-terminate duration even after the engine finished all scenario steps and
 	// monitorStatus detected COMPLETED/FAILED.
 	select {
-	case <-ctx.Done():
+	case <-launchCtx.Done():
+	case <-deadline.Reached():
 	case <-r.orchestrator.CompletionCh():
 	case <-r.launchHooks.WorkloadTerminal():
 	}
 	completionErr := r.orchestrator.CompletionError()
+	// A run that ended on its own as the deadline fired counts as completed.
+	autoTerminated := deadline.reachedNow() && ctx.Err() == nil &&
+		!channelClosed(r.orchestrator.CompletionCh()) && !channelClosed(r.launchHooks.WorkloadTerminal())
+	if autoTerminated {
+		r.output("SHUTDOWN", "%s", autoTerminateReachedMessage(r.autoTerminateSeconds))
+	}
 	if r.launchHooks.SessionManaged() {
+		if autoTerminated {
+			if err := stopSessionRunAtAutoTerminate(ctx, r.autoTerminateSeconds, r.autoTerminateWait, r.launchHooks, func(category, message string) {
+				r.output(category, "%s", message)
+			}); err != nil {
+				return err
+			}
+			if completionErr != nil {
+				return completionErr
+			}
+			r.output("COMPLETE", "Auto-terminate stop request finished; RunSession confirms the stop and owns evidence and resource finalization")
+			return &AutoTerminateError{CleanupComplete: true}
+		}
 		r.output("COMPLETE", "Presentation completed; RunSession owns evidence and resource finalization")
 		if completionErr != nil {
 			return completionErr
@@ -694,6 +776,10 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 	if completionErr != nil {
 		r.output("ERROR", "Benchmark failed: %v", completionErr)
 		return completionErr
+	}
+	if autoTerminated {
+		r.output("COMPLETE", "Auto-terminate stopped the run")
+		return &AutoTerminateError{CleanupComplete: true}
 	}
 	r.output("COMPLETE", "Benchmark completed")
 	return nil
@@ -933,18 +1019,10 @@ func startHeadlessModeWithParams(image string, scenarioPath string, params scena
 	// Stop the Docker log stream before the trace file closes.
 	defer func() { dockerManager.Close(); _ = runner.Close() }()
 
-	// Run the benchmark with optional auto-terminate timeout
+	// Run the benchmark; the runner applies the optional auto-terminate deadline.
 	baseCtx := options.Context
 	if baseCtx == nil {
 		baseCtx = context.Background()
-	}
-	if options.AutoTerminateSeconds > 0 {
-		tctx, cancel := context.WithTimeout(baseCtx, time.Duration(options.AutoTerminateSeconds)*time.Second)
-		defer cancel()
-		if scenarioContent != nil {
-			return runner.RunWithScenarioContentAndParams(tctx, image, scenarioPath, params, scenarioContent, defaultsContent)
-		}
-		return runner.RunWithParams(tctx, image, scenarioPath, params)
 	}
 	if scenarioContent != nil {
 		return runner.RunWithScenarioContentAndParams(baseCtx, image, scenarioPath, params, scenarioContent, defaultsContent)
@@ -972,18 +1050,10 @@ func startHeadlessModeWithOrchestrator(orchestrator *tui.MultiHostOrchestrator, 
 	}
 	defer func() { _ = runner.Close() }()
 
-	// Run the multi-host benchmark with optional auto-terminate timeout
+	// Run the multi-host benchmark; the runner applies the optional auto-terminate deadline.
 	baseCtx := options.Context
 	if baseCtx == nil {
 		baseCtx = context.Background()
-	}
-	if options.AutoTerminateSeconds > 0 {
-		tctx, cancel := context.WithTimeout(baseCtx, time.Duration(options.AutoTerminateSeconds)*time.Second)
-		defer cancel()
-		if scenarioContent != nil {
-			return runner.RunWithScenarioContentAndParams(tctx, image, scenarioPath, params, scenarioContent, defaultsContent)
-		}
-		return runner.RunWithParams(tctx, image, scenarioPath, params)
 	}
 	if scenarioContent != nil {
 		return runner.RunWithScenarioContentAndParams(baseCtx, image, scenarioPath, params, scenarioContent, defaultsContent)

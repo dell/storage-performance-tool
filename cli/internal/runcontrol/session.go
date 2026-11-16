@@ -53,6 +53,8 @@ type Session struct {
 	submission atomic.Uint32
 	terminal   chan struct{}
 	termOnce   sync.Once
+	stopReq    chan struct{}
+	stopOnce   sync.Once
 
 	mu        sync.Mutex
 	finalizer ResourceFinalizer
@@ -61,7 +63,27 @@ type Session struct {
 
 // NewSession creates an unsubmitted session with no registered resources.
 func NewSession() *Session {
-	return &Session{terminal: make(chan struct{})}
+	return &Session{terminal: make(chan struct{}), stopReq: make(chan struct{})}
+}
+
+// RequestWorkloadStop asks the coordinator to stop the submitted workload
+// before it ends on its own, as the auto-terminate deadline does. The
+// coordinator stops the run, salvages its evidence, and then marks the
+// workload terminal. Repeated requests are no-ops.
+func (s *Session) RequestWorkloadStop() {
+	if s == nil || s.stopReq == nil {
+		return
+	}
+	s.stopOnce.Do(func() { close(s.stopReq) })
+}
+
+// WorkloadStopRequested returns the channel closed by RequestWorkloadStop. A
+// nil or zero-value session returns a nil channel.
+func (s *Session) WorkloadStopRequested() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	return s.stopReq
 }
 
 // MarkWorkloadTerminal broadcasts that authoritative completion tracking has
