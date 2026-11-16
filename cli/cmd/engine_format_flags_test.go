@@ -18,46 +18,60 @@ const (
 	durationRefusal   = `--duration must be a time such as 30s, 5m or 1h, got %q`
 )
 
-// --object-size is checked only where the scenario sends it to the engine; --duration everywhere.
+// Each value is checked only where the scenario sends it to the engine.
 func TestValidateEngineFormatFlagsChecksEachValueWhereTheEngineReadsIt(t *testing.T) {
-	sizeSent := []scenario.Params{
-		{WorkloadType: WorkloadTypeMock},
-		{WorkloadType: WorkloadTypeWrite},
-		{WorkloadType: WorkloadTypeRead},
-		{WorkloadType: WorkloadTypeRead, ItemsFile: "items.csv"},
-		{WorkloadType: WorkloadTypeMixed},
-		{WorkloadType: WorkloadTypeWriteVerify},
-		{WorkloadType: WorkloadTypeDelete},
+	type route struct {
+		params scenario.Params
+		vector string
 	}
-	sizeIgnored := []scenario.Params{
-		{WorkloadType: WorkloadTypeList},
-		{WorkloadType: WorkloadTypeTables},
-		{WorkloadType: WorkloadTypeReadVerify},
-		{WorkloadType: WorkloadTypeDelete, ItemsFile: "items.csv"},
-		{WorkloadType: WorkloadTypeDelete, DeleteExisting: true},
+	sizeSent := []route{
+		{scenario.Params{WorkloadType: WorkloadTypeMock}, ""},
+		{scenario.Params{WorkloadType: WorkloadTypeWrite}, ""},
+		{scenario.Params{WorkloadType: WorkloadTypeRead}, ""},
+		{scenario.Params{WorkloadType: WorkloadTypeRead, ItemsFile: "items.csv"}, ""},
+		{scenario.Params{WorkloadType: WorkloadTypeMixed}, ""},
+		{scenario.Params{WorkloadType: WorkloadTypeWriteVerify}, ""},
+		{scenario.Params{WorkloadType: WorkloadTypeDelete}, ""},
 	}
-	for _, params := range sizeSent {
-		params.ObjectSize = "bogus"
-		err := validateEngineFormatFlags(params)
+	sizeIgnored := []route{
+		{scenario.Params{WorkloadType: WorkloadTypeList}, ""},
+		{scenario.Params{WorkloadType: WorkloadTypeTables}, "tps"},
+		{scenario.Params{WorkloadType: WorkloadTypeTables}, "catalog"},
+		{scenario.Params{WorkloadType: WorkloadTypeReadVerify}, ""},
+		{scenario.Params{WorkloadType: WorkloadTypeDelete, ItemsFile: "items.csv"}, ""},
+		{scenario.Params{WorkloadType: WorkloadTypeDelete, DeleteExisting: true}, ""},
+	}
+	// The tables compaction vector sends neither value.
+	compaction := route{scenario.Params{WorkloadType: WorkloadTypeTables}, "compaction"}
+	// read-verify refuses --duration in PreRunE; the helper does not single it out.
+	durationSent := append(append([]route{}, sizeSent...), sizeIgnored...)
+
+	for _, r := range sizeSent {
+		r.params.ObjectSize = "bogus"
+		err := validateEngineFormatFlags(r.params, r.vector)
 		if want := fmt.Sprintf(objectSizeRefusal, "bogus"); err == nil || err.Error() != want {
 			t.Errorf("%s items=%q existing=%v: error = %v, want %q",
-				params.WorkloadType, params.ItemsFile, params.DeleteExisting, err, want)
+				r.params.WorkloadType, r.params.ItemsFile, r.params.DeleteExisting, err, want)
 		}
 	}
-	for _, params := range sizeIgnored {
-		params.ObjectSize = "bogus"
-		if err := validateEngineFormatFlags(params); err != nil {
-			t.Errorf("%s items=%q existing=%v: error = %v, want the ignored size to stay unchecked",
-				params.WorkloadType, params.ItemsFile, params.DeleteExisting, err)
+	for _, r := range append(sizeIgnored, compaction) {
+		r.params.ObjectSize = "bogus"
+		if err := validateEngineFormatFlags(r.params, r.vector); err != nil {
+			t.Errorf("%s vector=%q items=%q existing=%v: error = %v, want the ignored size to stay unchecked",
+				r.params.WorkloadType, r.vector, r.params.ItemsFile, r.params.DeleteExisting, err)
 		}
 	}
-	for _, params := range append(sizeSent, sizeIgnored...) {
-		params.ObjectSize = "1MB"
-		params.Duration = "1h30m"
-		err := validateEngineFormatFlags(params)
+	for _, r := range durationSent {
+		r.params.ObjectSize = "1MB"
+		r.params.Duration = "1h30m"
+		err := validateEngineFormatFlags(r.params, r.vector)
 		if want := fmt.Sprintf(durationRefusal, "1h30m"); err == nil || err.Error() != want {
-			t.Errorf("%s: error = %v, want %q", params.WorkloadType, err, want)
+			t.Errorf("%s vector=%q: error = %v, want %q", r.params.WorkloadType, r.vector, err, want)
 		}
+	}
+	compaction.params.Duration = "1h30m"
+	if err := validateEngineFormatFlags(compaction.params, compaction.vector); err != nil {
+		t.Errorf("tables compaction: error = %v, want the ignored duration to stay unchecked", err)
 	}
 }
 
@@ -66,16 +80,25 @@ func TestValidateEngineFormatFlagsChecksEachValueWhereTheEngineReadsIt(t *testin
 func TestRunCmdRefusesASizeOrDurationTheEngineCannotParse(t *testing.T) {
 	cases := []struct {
 		workload, flag, value, want string
+		extra                       map[string]string
 	}{
-		{WorkloadTypeWrite, "duration", "bogus", fmt.Sprintf(durationRefusal, "bogus")},
-		{WorkloadTypeWrite, "duration", "5mins", fmt.Sprintf(durationRefusal, "5mins")},
-		{WorkloadTypeWrite, "duration", "1h30m", fmt.Sprintf(durationRefusal, "1h30m")},
-		{WorkloadTypeList, "duration", "bogus", fmt.Sprintf(durationRefusal, "bogus")},
-		{WorkloadTypeDelete, "duration", "500ms", fmt.Sprintf(durationRefusal, "500ms")},
-		{WorkloadTypeWrite, "object-size", "bogus", fmt.Sprintf(objectSizeRefusal, "bogus")},
-		{WorkloadTypeWrite, "object-size", "1Ki", fmt.Sprintf(objectSizeRefusal, "1Ki")},
-		{WorkloadTypeRead, "object-size", "1 MB", fmt.Sprintf(objectSizeRefusal, "1 MB")},
-		{WorkloadTypeDelete, "object-size", "bogus", fmt.Sprintf(objectSizeRefusal, "bogus")},
+		{WorkloadTypeWrite, "duration", "bogus", fmt.Sprintf(durationRefusal, "bogus"), nil},
+		{WorkloadTypeWrite, "duration", "5mins", fmt.Sprintf(durationRefusal, "5mins"), nil},
+		{WorkloadTypeWrite, "duration", "1h30m", fmt.Sprintf(durationRefusal, "1h30m"), nil},
+		{WorkloadTypeList, "duration", "bogus", fmt.Sprintf(durationRefusal, "bogus"), nil},
+		{WorkloadTypeDelete, "duration", "500ms", fmt.Sprintf(durationRefusal, "500ms"), nil},
+		{WorkloadTypeMock, "duration", "bogus", fmt.Sprintf(durationRefusal, "bogus"), nil},
+		{WorkloadTypeMixed, "duration", "5mins", fmt.Sprintf(durationRefusal, "5mins"), nil},
+		{WorkloadTypeTables, "duration", "bogus", fmt.Sprintf(durationRefusal, "bogus"), nil},
+		{WorkloadTypeTables, "duration", "1h30m", fmt.Sprintf(durationRefusal, "1h30m"),
+			map[string]string{"test-vector": "catalog"}},
+		{WorkloadTypeWrite, "object-size", "bogus", fmt.Sprintf(objectSizeRefusal, "bogus"), nil},
+		{WorkloadTypeWrite, "object-size", "1Ki", fmt.Sprintf(objectSizeRefusal, "1Ki"), nil},
+		{WorkloadTypeRead, "object-size", "1 MB", fmt.Sprintf(objectSizeRefusal, "1 MB"), nil},
+		{WorkloadTypeDelete, "object-size", "bogus", fmt.Sprintf(objectSizeRefusal, "bogus"), nil},
+		{WorkloadTypeMock, "object-size", "bogus", fmt.Sprintf(objectSizeRefusal, "bogus"), nil},
+		{WorkloadTypeMixed, "object-size", "1Ki", fmt.Sprintf(objectSizeRefusal, "1Ki"),
+			map[string]string{"object-count": "0", "duration": "30s"}},
 	}
 	for _, generateOnly := range []bool{false, true} {
 		for _, tc := range cases {
@@ -92,6 +115,9 @@ func TestRunCmdRefusesASizeOrDurationTheEngineCannotParse(t *testing.T) {
 				}
 				if generateOnly {
 					setGlobalRunFlagForTest(t, "generate-only", "true")
+				}
+				for name, value := range tc.extra {
+					setGlobalRunFlagForTest(t, name, value)
 				}
 				setGlobalRunFlagForTest(t, tc.flag, tc.value)
 				got := stubAPIPortRunRoutes(t)
@@ -124,6 +150,9 @@ func TestRunCmdKeepsAcceptingWhatRunsToday(t *testing.T) {
 	}{
 		{"list ignores the size", WorkloadTypeList, map[string]string{"object-size": "bogus"}},
 		{"tables ignores the size", WorkloadTypeTables, map[string]string{"object-size": "bogus"}},
+		{"tables compaction ignores the duration", WorkloadTypeTables, map[string]string{
+			"object-count": "0", "test-vector": "compaction", "duration": "bogus",
+		}},
 		{"existing-prefix delete ignores the size", WorkloadTypeDelete, map[string]string{
 			"object-size": "bogus", flagDeleteExisting: "true", "prefix": "p/",
 		}},
@@ -132,6 +161,11 @@ func TestRunCmdKeepsAcceptingWhatRunsToday(t *testing.T) {
 		{"day duration", WorkloadTypeWrite, map[string]string{"object-count": "0", "duration": "1d"}},
 		{"TimeUnit duration", WorkloadTypeList, map[string]string{"object-count": "0", "duration": "5.minutes"}},
 		{"padded duration", WorkloadTypeDelete, map[string]string{"object-count": "0", "duration": " 5m"}},
+		{"tables duration", WorkloadTypeTables, map[string]string{"object-count": "0", "duration": "2D"}},
+		{"mock duration", WorkloadTypeMock, map[string]string{"object-count": "0", "duration": "5.minutes"}},
+		{"mixed size and duration", WorkloadTypeMixed, map[string]string{
+			"object-count": "0", "object-size": "1KiB-4MiB", "duration": "30s",
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
