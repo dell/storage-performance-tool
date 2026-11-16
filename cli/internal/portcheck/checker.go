@@ -185,8 +185,8 @@ func (p *PortChecker) probeMetricsJSON(ctx context.Context, baseURL string) *Spt
 // probeMetrics checks the Prometheus endpoint. No current engine is
 // identified here: an engine answers /metrics with Prometheus text, or an
 // empty body before its first step, and neither passes
-// validateSptMetricsResponse. The probe stays for older engines and fakes
-// that answer /metrics with JSON metrics.
+// validateSptMetricsResponse. No released engine answers /metrics with JSON
+// either; the probe is kept for services that do.
 func (p *PortChecker) probeMetrics(ctx context.Context, baseURL string) *SptStatus {
 	url := baseURL + endpointMetrics
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -246,7 +246,8 @@ func (p *PortChecker) validateSptMetricsResponse(resp *http.Response) bool {
 	// An empty body ([], [ ] or null) is not SPT evidence: no engine since
 	// v5.10.0 sends one on a probed path. /metrics/json always holds at least
 	// an idle node row, and /metrics is Prometheus text or empty. Such a body
-	// falls through to the object parse below, which finds no SPT field in it.
+	// falls through to the object parse below: [] and [ ] fail it, and null
+	// parses to a nil map with no SPT field.
 	var metricsArray []map[string]interface{}
 	if err := json.Unmarshal(body, &metricsArray); err == nil && len(metricsArray) > 0 {
 		logging.LogDebug("portcheck", "validating first element of metrics array")
