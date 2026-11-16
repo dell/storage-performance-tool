@@ -149,6 +149,9 @@ type StepSummary struct {
 	NicPaths           *NicPathsEvidence
 	NicSetMissing      []results.NicNodeFile
 	EventLoopsMissing  []results.NicNodeFile
+	// MetricsMissing marks a step that should have totals but has none: its metrics.total.csv
+	// is missing or unreadable. A MetricsSuppressed step is never missing.
+	MetricsMissing bool
 }
 
 // MixedDistribution stores the configured mixed-workload share for each known operation.
@@ -213,6 +216,22 @@ type RunTotals struct {
 	DataMiB         float64
 	DataGiB         float64
 	FailureCount    int64
+	// StepsCounted is the number of steps whose metrics are in the sums above.
+	StepsCounted int
+	// MissingPhases names, in step order, the steps that should have counted but have no
+	// metrics. A MetricsSuppressed step is never listed.
+	MissingPhases []string
+}
+
+// Unavailable reports that no expected step has metrics, so the sums are not measurements.
+func (t RunTotals) Unavailable() bool {
+	return len(t.MissingPhases) > 0 && t.StepsCounted == 0
+}
+
+// Partial reports that some expected steps have metrics and others do not, so the sums
+// cover only part of the run.
+func (t RunTotals) Partial() bool {
+	return len(t.MissingPhases) > 0 && t.StepsCounted > 0
 }
 
 const (
@@ -463,6 +482,7 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 			totals.DurationSeconds += metrics.DurationSeconds
 			totals.DataBytes += metrics.DataBytes
 			totals.FailureCount += metrics.FailureCount
+			totals.StepsCounted++
 			// A warning wraps in the narrow TUI, which clips the Failed column.
 			if metrics.FailureCount > 0 {
 				warnings = append(warnings, fmt.Sprintf("%s: %s %s failed", summary.PhaseLabel, formatInt(metrics.FailureCount), requestWord(metrics.FailureCount)))
@@ -476,6 +496,8 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 			if label == "" {
 				label = stepData.StepID
 			}
+			summary.MetricsMissing = true
+			totals.MissingPhases = append(totals.MissingPhases, label)
 			warnings = append(warnings, fmt.Sprintf("%s metrics unavailable (status: %s)", label, statusLabel))
 		}
 

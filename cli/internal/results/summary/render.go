@@ -216,7 +216,7 @@ func (r *Renderer) CompactSnippet(summary *RunSummary) string {
 	r.renderRangeRead(sb, summary)
 	r.renderNicPaths(sb, summary, wrapWidth)
 	r.renderCompactMixedBreakdowns(sb, summary)
-	fmt.Fprintf(sb, "Totals: duration %s, data moved %s\n", summary.Totals.DurationHuman, formatBytesHuman(summary.Totals.DataBytes))
+	sb.WriteString(compactTotalsLine(summary.Totals))
 	if len(summary.Warnings) > 0 {
 		sb.WriteString("Warnings:\n")
 		sorted := append([]string(nil), summary.Warnings...)
@@ -525,6 +525,9 @@ func (r *Renderer) phaseTable(summary *RunSummary) string {
 	rows := make([][]string, 0, len(summary.Steps))
 	for _, step := range summary.Steps {
 		if step.Metrics == nil {
+			if step.MetricsMissing {
+				rows = append(rows, missingMetricsRow(step, len(headers)))
+			}
 			continue
 		}
 		m := step.Metrics
@@ -560,6 +563,9 @@ func (r *Renderer) rateTable(summary *RunSummary) string {
 	rows := make([][]string, 0, len(summary.Steps))
 	for _, step := range summary.Steps {
 		if step.Metrics == nil {
+			if step.MetricsMissing {
+				rows = append(rows, missingMetricsRow(step, len(headers)))
+			}
 			continue
 		}
 		m := step.Metrics
@@ -590,6 +596,14 @@ func formatSteadyCell(steady SteadyRates, value float64, unit string) string {
 		return "n/a (" + nonEmpty(steady.Reason, steadyReasonMissing) + ")"
 	}
 	return formatNumber(value, unit)
+}
+
+// missingMetricsRow is the row of a phase whose metrics are missing: its label and a dash in
+// every other column, so the phase is not dropped from the table.
+func missingMetricsRow(step StepSummary, columns int) []string {
+	row := notApplicableRow(columns)
+	row[0] = nonEmpty(step.PhaseLabel, step.StepID)
+	return row
 }
 
 func notApplicableRow(columns int) []string {
@@ -700,16 +714,57 @@ func (r *Renderer) renderMixedBreakdowns(b *strings.Builder, summary *RunSummary
 
 func (r *Renderer) renderTotals(b *strings.Builder, summary *RunSummary) {
 	totals := summary.Totals
-	fmt.Fprintf(b, "Run Totals\n")
-	r.writeBullet(b, "Duration", totals.DurationHuman)
-	r.writeBullet(b, "Data moved", formatBytesHuman(totals.DataBytes))
-	if totals.FailureCount > 0 {
-		r.writeBullet(b, "Failed requests", formatInt(totals.FailureCount))
+	switch {
+	case totals.Unavailable():
+		fmt.Fprintf(b, "Run Totals\n")
+		r.writeBullet(b, "Duration", totalsUnavailable)
+		r.writeBullet(b, "Data moved", totalsUnavailable)
+		r.writeBullet(b, "Failed requests", totalsUnavailable)
+		r.writeBullet(b, "Not counted", notCountedPhases(totals))
+	case totals.Partial():
+		fmt.Fprintf(b, "Run Totals %s\n", partialTotalsQualifier(totals))
+		r.writeBullet(b, "Duration", totals.DurationHuman)
+		r.writeBullet(b, "Data moved", formatBytesHuman(totals.DataBytes))
+		// Always shown: leaving it out would read as no failures in the phases not counted.
+		r.writeBullet(b, "Failed requests", formatInt(totals.FailureCount)+" (counted phases only)")
+		r.writeBullet(b, "Not counted", notCountedPhases(totals))
+	default:
+		fmt.Fprintf(b, "Run Totals\n")
+		r.writeBullet(b, "Duration", totals.DurationHuman)
+		r.writeBullet(b, "Data moved", formatBytesHuman(totals.DataBytes))
+		if totals.FailureCount > 0 {
+			r.writeBullet(b, "Failed requests", formatInt(totals.FailureCount))
+		}
 	}
 	if len(summary.MissingExpected) > 0 {
 		r.writeBullet(b, "Missing steps", strings.Join(summary.MissingExpected, ", "))
 	}
 	b.WriteString("\n")
+}
+
+const totalsUnavailable = "unavailable"
+
+// compactTotalsLine renders the console totals line. A complete run prints the line tools
+// parse ("Totals: duration …"); an unavailable or partial total puts its qualifier before the
+// colon, so no parser can read it as the run total.
+func compactTotalsLine(totals RunTotals) string {
+	switch {
+	case totals.Unavailable():
+		return "Totals: unavailable (no phase has metrics)\n"
+	case totals.Partial():
+		return fmt.Sprintf("Totals %s: duration %s, data moved %s\n",
+			partialTotalsQualifier(totals), totals.DurationHuman, formatBytesHuman(totals.DataBytes))
+	default:
+		return fmt.Sprintf("Totals: duration %s, data moved %s\n", totals.DurationHuman, formatBytesHuman(totals.DataBytes))
+	}
+}
+
+func partialTotalsQualifier(totals RunTotals) string {
+	return fmt.Sprintf("(%d of %d phases)", totals.StepsCounted, totals.StepsCounted+len(totals.MissingPhases))
+}
+
+func notCountedPhases(totals RunTotals) string {
+	return strings.Join(totals.MissingPhases, ", ") + " (metrics unavailable)"
 }
 
 func (r *Renderer) renderArtifactsAndWarnings(b *strings.Builder, summary *RunSummary) {
