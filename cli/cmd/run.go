@@ -2998,6 +2998,10 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	serviceThreads, _ := cmd.Flags().GetInt("service-threads")
 	params.ServiceThreads = serviceThreads
 
+	tablesTestVector, _ := cmd.Flags().GetString("test-vector")
+	if err := validateEngineFormatFlags(params, tablesTestVector); err != nil {
+		return scenario.Params{}, err
+	}
 	if registryPort, err := cmd.Flags().GetInt(flagRMIRegistryPort); err == nil {
 		if err := validatePortFlag(flagRMIRegistryPort, registryPort); err != nil {
 			return scenario.Params{}, err
@@ -3171,7 +3175,7 @@ func buildScenarioParams(workloadType string, cmd *cobra.Command) (scenario.Para
 	if deleteWorkload {
 		params.SelectionOrder = scenario.SelectionOrderCanonical
 	}
-	seededDelete := deleteWorkload && strings.TrimSpace(params.ItemsFile) == "" && !params.DeleteExisting
+	seededDelete := isSeededDelete(params)
 	if seededDelete {
 		if params.ObjectSize == "" {
 			params.ObjectSize = scenario.DefaultDeleteObjectSize
