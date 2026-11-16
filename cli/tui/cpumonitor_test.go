@@ -365,3 +365,79 @@ func TestCPUMonitor_StopAfterFailedStart(t *testing.T) {
 		}
 	})
 }
+
+// gatedPercent returns a sampler that, once a token is put in arm, blocks
+// its next call until release is closed, after signalling entered.
+func gatedPercent(calls *atomic.Int64, arm, entered, release chan struct{}) func(time.Duration, bool) ([]float64, error) {
+	return func(time.Duration, bool) ([]float64, error) {
+		calls.Add(1)
+		select {
+		case <-arm:
+			entered <- struct{}{}
+			<-release
+		default:
+		}
+		return []float64{42}, nil
+	}
+}
+
+// TestCPUMonitor_StopWaitsForInFlightUpdate holds one sample open and checks
+// that Stop does not return while it is in flight, does not hold the lock
+// while it waits, and returns once the sample ends.
+func TestCPUMonitor_StopWaitsForInFlightUpdate(t *testing.T) {
+	monitor := NewCPUMonitor(5 * time.Millisecond)
+	var calls atomic.Int64
+	arm := make(chan struct{}, 1)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	monitor.percent = gatedPercent(&calls, arm, entered, release)
+
+	if err := monitor.Start(); err != nil {
+		t.Fatalf("Failed to start monitor: %v", err)
+	}
+	waitFor(t, "a first reading", func() bool { return monitor.GetCPUPercent() == 42 })
+	arm <- struct{}{}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("loop never sampled")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		monitor.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while an update was in flight")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// Readers must not block while Stop waits.
+	read := make(chan bool, 1)
+	go func() {
+		_ = monitor.GetCPUPercent()
+		read <- monitor.IsStarted()
+	}()
+	select {
+	case started := <-read:
+		if started {
+			t.Error("IsStarted is true while Stop waits")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("readers blocked while Stop waits (lock held across the wait)")
+	}
+
+	close(release)
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return after the update finished")
+	}
+	after := calls.Load()
+	time.Sleep(50 * time.Millisecond)
+	if got := calls.Load(); got != after {
+		t.Fatalf("CPU sampled %d times after Stop returned", got-after)
+	}
+}
