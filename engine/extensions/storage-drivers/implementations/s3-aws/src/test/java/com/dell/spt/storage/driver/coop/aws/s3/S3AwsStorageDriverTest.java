@@ -1,5 +1,8 @@
 package com.dell.spt.storage.driver.coop.aws.s3;
 
+import com.dell.spt.base.Constants;
+import com.dell.spt.base.config.ConfigFormat;
+import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.integrity.IntegrityConfig;
 import com.dell.spt.base.integrity.IntegrityInputProvenance;
@@ -29,7 +32,9 @@ import com.dell.spt.base.storage.driver.ListDiscoveryProbe;
 import com.dell.spt.base.storage.driver.ListOptions;
 import com.dell.spt.base.storage.driver.StorageDriverBase;
 import com.github.akurilov.commons.system.SizeInBytes;
+import com.github.akurilov.commons.collection.TreeUtil;
 import com.github.akurilov.confuse.Config;
+import com.github.akurilov.confuse.SchemaProvider;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Disabled;
@@ -2568,6 +2573,86 @@ public class S3AwsStorageDriverTest {
 			CompletionException wrapper = new CompletionException(s3Ex);
 			assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, S3AwsStorageDriver.classifyFailure(wrapper));
 		}
+
+		/** The messages the CRT transfer client reported on loopback after its own retries of a 5xx. */
+		@Test
+		void crtClientRetriesOfA5xxRunOut_returnsRespFailSvc() {
+			for (final String message : List.of(
+							"Failed to send the request: Response code indicates throttling (SDK Attempt Count: 1)",
+							"Failed to send the request: Response code indicates internal server error (SDK Attempt Count: 1)",
+							"Failed to send the request: RequestTimeout error received from S3. (SDK Attempt Count: 1)")) {
+				final var e = software.amazon.awssdk.core.exception.SdkClientException.create(message);
+				assertEquals(Operation.Status.RESP_FAIL_SVC, S3AwsStorageDriver.classifyFailure(e), message);
+				assertEquals(Operation.Status.RESP_FAIL_SVC, S3AwsStorageDriver.classifyFailure(new CompletionException(e)), message);
+			}
+		}
+
+		@Test
+		void crtClientOtherErrors_returnFailUnknown() {
+			for (final String message : List.of(
+							"Failed to send the request: RequestTimeTooSkewed error received from S3. (SDK Attempt Count: 1)",
+							"Failed to send the request: some other native error",
+							"Response code indicates throttling",
+							"Something else. Failed to send the request: Response code indicates throttling")) {
+				assertEquals(Operation.Status.FAIL_UNKNOWN, S3AwsStorageDriver.classifyFailure(
+								software.amazon.awssdk.core.exception.SdkClientException.create(message)), message);
+			}
+		}
+
+		/** A client exception with a cause is not the CRT's own report of a response, whatever its text. */
+		@Test
+		void crtServerErrorTextWithACause_keepsItsStatus() {
+			final String message = "Failed to send the request: Response code indicates throttling (SDK Attempt Count: 1)";
+			assertEquals(Operation.Status.FAIL_UNKNOWN, S3AwsStorageDriver.classifyFailure(
+							software.amazon.awssdk.core.exception.SdkClientException.create(message, new IllegalStateException("x"))));
+			assertEquals(Operation.Status.FAIL_IO, S3AwsStorageDriver.classifyFailure(
+							software.amazon.awssdk.core.exception.SdkClientException.create(message, new IOException("x"))));
+		}
+
+		/** A CRT upgrade that rewords these errors fails here as well as in the loopback test. */
+		@Test
+		void crtErrorTexts_areTheCrtsOwn() {
+			assertEquals(software.amazon.awssdk.crt.CRT.awsErrorString(14342), S3AwsStorageDriver.CRT_SLOW_DOWN_ERROR);
+			assertEquals(software.amazon.awssdk.crt.CRT.awsErrorString(14341), S3AwsStorageDriver.CRT_INTERNAL_ERROR);
+			assertEquals(software.amazon.awssdk.crt.CRT.awsErrorString(14369), S3AwsStorageDriver.CRT_REQUEST_TIMEOUT_ERROR);
+			assertEquals("AWS_ERROR_S3_SLOW_DOWN", software.amazon.awssdk.crt.CRT.awsErrorName(14342));
+			assertEquals("AWS_ERROR_S3_INTERNAL_ERROR", software.amazon.awssdk.crt.CRT.awsErrorName(14341));
+			assertEquals("AWS_ERROR_S3_REQUEST_TIMEOUT", software.amazon.awssdk.crt.CRT.awsErrorName(14369));
+		}
+
+		@Test
+		void s3Exception_2xxWithTransientOrMissingErrorCode_returnsRespFailSvc() {
+			for (final String code : java.util.Arrays.asList(
+							"InternalError", "ServiceUnavailable", "SlowDown", "RequestTimeout", "", null)) {
+				assertEquals(Operation.Status.RESP_FAIL_SVC, S3AwsStorageDriver.classifyFailure(s3Exception(200, code)), code);
+			}
+			assertEquals(Operation.Status.RESP_FAIL_SVC, S3AwsStorageDriver.classifyFailure(
+							S3Exception.builder().statusCode(200).message("no details").build()));
+		}
+
+		@Test
+		void s3Exception_2xxWithOtherErrorCode_returnsRespFailClient() {
+			assertEquals(Operation.Status.RESP_FAIL_CLIENT, S3AwsStorageDriver.classifyFailure(s3Exception(200, "AccessDenied")));
+			assertEquals(Operation.Status.RESP_FAIL_CLIENT,
+							S3AwsStorageDriver.classifyFailure(new CompletionException(s3Exception(200, "NoSuchKey"))));
+		}
+
+		/** The status of a 4xx or 5xx answer is not changed by its error code. */
+		@Test
+		void s3Exception_errorStatusWithCode_keepsStatusMapping() {
+			assertEquals(Operation.Status.RESP_FAIL_AUTH, S3AwsStorageDriver.classifyFailure(s3Exception(403, "InternalError")));
+			assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, S3AwsStorageDriver.classifyFailure(s3Exception(404, "SlowDown")));
+			assertEquals(Operation.Status.FAIL_TIMEOUT, S3AwsStorageDriver.classifyFailure(s3Exception(504, "AccessDenied")));
+		}
+
+		private static S3Exception s3Exception(final int status, final String code) {
+			return (S3Exception) S3Exception.builder()
+							.statusCode(status)
+							.message("scripted")
+							.awsErrorDetails(software.amazon.awssdk.awscore.exception.AwsErrorDetails.builder()
+											.errorCode(code).errorMessage("scripted").build())
+							.build();
+		}
 	}
 
 	// -----------------------------------------------------------------------
@@ -3495,6 +3580,58 @@ public class S3AwsStorageDriverTest {
 			assertEquals("value2", objectTags.get("tag2"));
 		}
 
+		/**
+		 * Tags a YAML defaults document gives as numbers or booleans read as the text s3-aws sent before
+		 * the document's values were settled at load: 007 as 7, True as true, 1e3 as 1000.0; a tag with
+		 * no value is left out.
+		 */
+		@Test
+		@SuppressWarnings("unchecked")
+		void numericTagsFromADefaultsDocumentReadAsBefore() throws Exception {
+			final var schema = TreeUtil.addBranches(
+							SchemaProvider.resolve(
+											Constants.APP_NAME, Thread.currentThread().getContextClassLoader())
+											.stream().findFirst().orElseThrow(),
+							Map.<String, Object> of("storage", Map.of("object",
+											Map.of("tagging", Map.of("enabled", boolean.class, "tags", Map.class)))));
+			final var loaded = ConfigUtil.loadConfig(
+							"storage:\n  object:\n    tagging:\n      tags:\n        a: 007\n        b: True\n"
+											+ "        c: 1e3\n        d: x\n        e: ~\n",
+							ConfigFormat.YAML, schema);
+			final Config config = mockBaseConfig((Map<String, String>) (Map<?, ?>) loaded.mapVal("storage-object-tagging-tags"));
+
+			final S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
+							"step-1", null, config, false, 1, mock(S3AsyncClient.class), 100 * 1024L, 8 * 1024 * 1024L);
+
+			final Field objectTagsField = S3AwsStorageDriver.class.getDeclaredField("objectTags");
+			objectTagsField.setAccessible(true);
+			assertEquals(Map.of("a", "7", "b", "true", "c", "1000.0", "d", "x"), objectTagsField.get(driver));
+		}
+
+		/** A list or map tag from a defaults document is sent as its text, as before. */
+		@Test
+		@SuppressWarnings("unchecked")
+		void listAndMapTagsFromADefaultsDocumentReadAsBefore() throws Exception {
+			final var schema = TreeUtil.addBranches(
+							SchemaProvider.resolve(
+											Constants.APP_NAME, Thread.currentThread().getContextClassLoader())
+											.stream().findFirst().orElseThrow(),
+							Map.<String, Object> of("storage", Map.of("object",
+											Map.of("tagging", Map.of("enabled", boolean.class, "tags", Map.class)))));
+			final var loaded = ConfigUtil.loadConfig(
+							"storage:\n  object:\n    tagging:\n      tags:\n        a: [1, 2]\n        m: {x: 1}\n"
+											+ "        n: [x, 007]\n",
+							ConfigFormat.YAML, schema);
+			final Config config = mockBaseConfig((Map<String, String>) (Map<?, ?>) loaded.mapVal("storage-object-tagging-tags"));
+
+			final S3AwsStorageDriver<Item, Operation<Item>> driver = new S3AwsStorageDriver<>(
+							"step-1", null, config, false, 1, mock(S3AsyncClient.class), 100 * 1024L, 8 * 1024 * 1024L);
+
+			final Field objectTagsField = S3AwsStorageDriver.class.getDeclaredField("objectTags");
+			objectTagsField.setAccessible(true);
+			assertEquals(Map.of("a", "[1, 2]", "m", "{x=1}", "n", "[x, 7]"), objectTagsField.get(driver));
+		}
+
 		@Test
 		void taggingDisabled_whenConfigObjectTaggingDisabled() throws Exception {
 			// Mock config with tagging disabled
@@ -4254,8 +4391,8 @@ public class S3AwsStorageDriverTest {
 			try (final var stream = getClass().getResourceAsStream("/config/defaults.yaml")) {
 				defaults = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
 			}
-			final Config config = com.dell.spt.base.config.ConfigUtil.loadConfig(
-							defaults, com.dell.spt.base.config.ConfigFormat.YAML,
+			final Config config = ConfigUtil.loadConfig(
+							defaults, ConfigFormat.YAML,
 							com.dell.spt.base.config.InitialConfigSchemaProvider.provider().schema());
 			config.val("item-output-path", "/bench");
 			config.val("storage-targetBucket-count", 4);

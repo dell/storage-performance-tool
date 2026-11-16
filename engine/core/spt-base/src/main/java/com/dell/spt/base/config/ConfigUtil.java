@@ -279,21 +279,23 @@ public interface ConfigUtil {
 		} else {
 			format = YAML;
 		}
-		final Map<String, Object> configTree = readConfigMapper(format, schema)
-						.readValue(file, new TypeReference<Map<String, Object>>() {
-							{}
-						});
+		final var mapper = readConfigMapper(format, schema);
+		final Map<String, Object> configTree = mapper.readValue(file, new TypeReference<Map<String, Object>>() {
+			{}
+		});
 		validateBooleanValues(schema, configTree, "-");
+		DocumentValueTypes.settle(schema, configTree, "-", () -> mapper.getFactory().createParser(file));
 		return new BasicConfig("-", schema, configTree);
 	}
 
 	static Config loadConfig(final String content, final ConfigFormat format, final Map<String, Object> schema)
 					throws NoSuchMethodException, IOException {
-		final Map<String, Object> configTree = readConfigMapper(format, schema)
-						.readValue(content, new TypeReference<Map<String, Object>>() {
-							{}
-						});
+		final var mapper = readConfigMapper(format, schema);
+		final Map<String, Object> configTree = mapper.readValue(content, new TypeReference<Map<String, Object>>() {
+			{}
+		});
 		validateBooleanValues(schema, configTree, "-");
+		DocumentValueTypes.settle(schema, configTree, "-", () -> mapper.getFactory().createParser(content));
 		return new BasicConfig("-", schema, configTree);
 	}
 

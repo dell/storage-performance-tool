@@ -103,9 +103,7 @@ func installAttachShutdownSeams(t *testing.T, interrupt bool) (shutdowns func() 
 // cancels the command's context, as Ctrl-C does, and returns the cancellation.
 func attachShutdownLaunch(t *testing.T, interrupt bool, cancel context.CancelFunc) func(context.Context, tui.LaunchHooks) error {
 	t.Helper()
-	monitorReady := awaitMonitorSetup(t)
 	return func(ctx context.Context, hooks tui.LaunchHooks) error {
-		monitorReady()
 		hooks.NotifySubmitted()
 		if !interrupt {
 			return nil

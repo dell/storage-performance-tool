@@ -189,6 +189,18 @@ class NicSetConfigTest {
 						NicSetConfig.nodeInterfaces(config));
 	}
 
+	/** The values of a defaults document's host overrides are not text settings, and read as before. */
+	@Test
+	void hostOverridesFromADefaultsDocumentReadAsBefore() throws Exception {
+		final var base = withNodes("198.51.100.12:1099");
+		final var document = ConfigUtil.loadConfig(
+						"storage:\n  net:\n    nodeInterfaces:\n      entry: none\n      \"198.51.100.12:1099\": [eth0, eth1]\n",
+						ConfigFormat.YAML, base.schema());
+		final var config = ConfigUtil.merge(base.pathSep(), List.of(base, document));
+		assertEquals(Map.of("entry", List.of(), "198.51.100.12:1099", List.of("eth0", "eth1")),
+						NicSetConfig.nodeInterfaces(config));
+	}
+
 	@Test
 	void hostOverrideValuesMayBeLists() throws Exception {
 		final var config = withNodes("198.51.100.12");

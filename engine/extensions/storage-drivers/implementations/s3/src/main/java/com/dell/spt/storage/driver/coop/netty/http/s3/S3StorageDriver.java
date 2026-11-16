@@ -23,6 +23,7 @@ import com.dell.spt.base.config.el.CompositeExpressionInputBuilder;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.DateUtil;
 import com.dell.spt.base.config.IllegalConfigurationException;
+import com.dell.spt.base.config.InvalidTextValueException;
 import com.dell.spt.base.integrity.IntegrityCsvArtifacts;
 import com.dell.spt.base.integrity.IntegrityMetadataCodec;
 import com.dell.spt.base.integrity.IntegrityVerificationResult;
@@ -373,6 +374,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	protected final String sigV4ServiceName;
 	/** The pending aborts that follow failed multipart completions, each with its upload. */
 	private final Map<CompletableFuture<Void>, PendingAbort> multipartCleanupTasks = new ConcurrentHashMap<>();
+	/**
+	 * Per path item input listing, keyed by its path and prefix: the listed keys that are not
+	 * generated item ids, summed over its pages and logged once when the listing ends.
+	 */
+	private final Map<String, NonGeneratedKeys> nonGeneratedKeys = new ConcurrentHashMap<>();
 	/** Set by the close before it takes its snapshot; an abort scheduled after that is not sent. */
 	private volatile boolean multipartCleanupClosing;
 	private volatile long multipartCleanupStopWaitMillis = MULTIPART_CLEANUP_STOP_WAIT_MILLIS;
@@ -380,6 +386,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	// One WARN for a multipart abort the kernel route could not connect; the rest go to DEBUG.
 	private final AtomicBoolean kernelRouteAbortWarned = new AtomicBoolean();
 	private final S3ResponseHandler.CompletionErrorCodeLog completionErrorCodeLog = new S3ResponseHandler.CompletionErrorCodeLog();
+	// One WARN for a multipart response body over S3ResponseHandler.MAX_MULTIPART_RESPONSE_BYTES.
+	private final AtomicBoolean multipartResponseOverflowWarned = new AtomicBoolean();
 	private final KernelRouteAborts<KernelRouteAbort> kernelRouteAborts = new KernelRouteAborts<>();
 	// Host of driver-built helper requests (bucket setup, listing, verification, abort).
 	private String helperAuthority;
@@ -392,6 +400,16 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 					final int batchSize)
 					throws IllegalConfigurationException, InterruptedException {
 		this(stepId, itemDataInput, storageConfig, verifyFlag, batchSize, "s3");
+	}
+
+	/**
+	 * A tag's value as the tagging body takes it. A list or map, which a defaults document can give, is
+	 * refused with the tag's name; the {@code s3-aws} driver sends one as text, so the configuration
+	 * keeps it. Any other value is cast as before.
+	 */
+	private static String tagTextOrNull(final String name, final Object value) {
+		InvalidTextValueException.refuseListOrMap("storage-object-tagging-tags-" + name, value);
+		return (String) value;
 	}
 
 	protected S3StorageDriver(
@@ -414,12 +432,12 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		if (taggingEnabled) {
 			Loggers.MSG.info("{}: S3 Object Tagging Mode Enabled", stepId);
 		}
-		final var tags = taggingConfig.<String> mapVal("tags");
+		final var tags = taggingConfig.<Object> mapVal("tags");
 		final StringBuilder exprBuff = new StringBuilder();
 		exprBuff.append(TAGGING_HEADER);
 		for (final var tagEntry : tags.entrySet()) {
 			final var k = tagEntry.getKey();
-			final var v = tagEntry.getValue();
+			final var v = tagTextOrNull(k, tagEntry.getValue());
 			exprBuff
 							.append(TAGGING_ENTRY_START)
 							.append(k)
@@ -1045,10 +1063,17 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				}
 				final var listRespContent = listResp.content();
 				final var listingHandler = new BucketXmlListingHandler<>(
-								buff, path, canonicalPrefix, itemFactory, idRadix);
+								buff, path, canonicalPrefix, itemFactory, idRadix, verifyFlag);
 				try (final InputStream contentStream = new ByteBufInputStream(listRespContent)) {
 					S3XmlParser.parse(contentStream, listingHandler);
 				}
+				countNonGeneratedKeys(
+								path, canonicalPrefix,
+								lastPrevItem == null && !options.includeVersions()
+												&& isNullOrEmpty(options.continuationToken())
+												&& isNullOrEmpty(options.startAfter()),
+								listingHandler.firstNonGeneratedKey(), listingHandler.nonGeneratedKeyCount(),
+								!listingHandler.isTruncated());
 				if (buff.isEmpty()) {
 					throw new EOFException();
 				}
@@ -1550,6 +1575,55 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 						|| (ch >= 'A' && ch <= 'Z')
 						|| (ch >= 'a' && ch <= 'z')
 						|| ch == '-' || ch == '_' || ch == '.' || ch == '~';
+	}
+
+	/** The listed keys of one path item input listing that are not generated item ids. */
+	private static final class NonGeneratedKeys {
+		private final String label;
+		private final String firstKey;
+		private long count;
+
+		private NonGeneratedKeys(final String label, final String firstKey) {
+			this.label = label;
+			this.firstKey = firstKey;
+		}
+	}
+
+	/**
+	 * Sums one listing page's keys that are not generated item ids into its listing's count, and
+	 * logs the listing's one summary when the listing ends. A first page starts a new listing; the
+	 * summary of one that never reached its last page is logged then, or when the driver closes.
+	 */
+	private void countNonGeneratedKeys(
+					final String path, final String prefix, final boolean firstPage,
+					final String firstKeyOnPage, final int countOnPage, final boolean lastPage) {
+		final String listing = path + '\n' + (prefix == null ? "" : prefix);
+		if (firstPage) {
+			logNonGeneratedKeys(nonGeneratedKeys.remove(listing));
+		}
+		if (countOnPage > 0) {
+			final String label = bucketLabel(path) + (prefix == null ? "" : ", prefix \"" + prefix + "\"");
+			nonGeneratedKeys.computeIfAbsent(listing, key -> new NonGeneratedKeys(label, firstKeyOnPage)).count += countOnPage;
+		}
+		if (lastPage) {
+			logNonGeneratedKeys(nonGeneratedKeys.remove(listing));
+		}
+	}
+
+	private void logNonGeneratedKeys(final NonGeneratedKeys keys) {
+		if (keys != null) {
+			Loggers.MSG.warn(
+							"{}: {}: {} listed {} (first \"{}\"); the path item input uses {} with data offset 0",
+							stepId, keys.label, keys.count,
+							keys.count == 1
+											? "key is not an SPT-generated item id"
+											: "keys are not SPT-generated item ids",
+							keys.firstKey, keys.count == 1 ? "it" : "them");
+		}
+	}
+
+	private static boolean isNullOrEmpty(final String value) {
+		return value == null || value.isEmpty();
 	}
 
 	private IOException deterministicListInputFailure(
@@ -2439,6 +2513,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		return completionErrorCodeLog;
 	}
 
+	/** True only the first time it is called: whether this step should warn of a multipart response's overflow. */
+	boolean claimMultipartResponseOverflowWarning() {
+		return multipartResponseOverflowWarned.compareAndSet(false, true);
+	}
+
 	/**
 	 * An abort after a failed completion, still pending: its upload, the completion's status and when
 	 * the abort was scheduled ({@link System#nanoTime()}).
@@ -2959,6 +3038,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	protected void doClose() throws IOException {
 		try {
 			try (final var ctx = CloseableThreadContext.put(KEY_STEP_ID, stepId)) {
+				// A listing the step stopped before its last page still gets its one summary.
+				nonGeneratedKeys.keySet().forEach(listing -> logNonGeneratedKeys(nonGeneratedKeys.remove(listing)));
 				closeMultipartCleanup();
 			} finally {
 				multipartCleanupTasks.clear();

@@ -4,6 +4,7 @@ import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.integrity.IntegrityMetadata;
 import com.dell.spt.base.integrity.IntegrityMetadataCodec;
 import com.dell.spt.base.item.DataItem;
+import com.dell.spt.base.item.DataItemFactoryImpl;
 import com.dell.spt.base.item.IntegrityManifestDataItem;
 import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemFactory;
@@ -965,6 +966,126 @@ public class S3StorageDriverTest {
 		}
 	}
 
+	/** A responder that pages {@code keys} in byte order, honouring start-after and max-keys, as S3 does. */
+	private static java.util.function.Function<FullHttpRequest, FullHttpResponse> pagedListing(
+					final List<String> keys) {
+		return request -> {
+			final String rawStartAfter = rawQueryParam(request.uri(), "start-after");
+			final String startAfter = rawStartAfter == null
+							? ""
+							: java.net.URLDecoder.decode(rawStartAfter, StandardCharsets.UTF_8);
+			final int maxKeys = Integer.parseInt(rawQueryParam(request.uri(), "max-keys"));
+			final List<String> after = keys.stream().filter(key -> key.compareTo(startAfter) > 0).toList();
+			return listPage(after.size() > maxKeys, after.subList(0, Math.min(maxKeys, after.size())));
+		};
+	}
+
+	/** Data items, as a read, delete or copy path item input lists them. */
+	@SuppressWarnings("unchecked")
+	private static ItemFactory<Item> dataItemFactory() {
+		return (ItemFactory<Item>) (ItemFactory<?>) new DataItemFactoryImpl<DataItem>();
+	}
+
+	/** Reads a path item input of data items to its end, as a load step does, and returns them. */
+	private static List<Item> readPathItemInput(final TestS3Driver drv, final String path, final int batchSize)
+					throws Exception {
+		final var input = new com.dell.spt.base.item.io.StorageItemInput<Item>(
+						drv, batchSize, dataItemFactory(), path, null, 36);
+		final List<Item> listed = new ArrayList<>();
+		final List<Item> buffer = new ArrayList<>();
+		try {
+			while (true) {
+				buffer.clear();
+				input.get(buffer, batchSize);
+				listed.addAll(buffer);
+			}
+		} catch (final Exception e) {
+			// the input ends after the last page with an EOFException, thrown unchecked
+			if (!(e instanceof java.io.EOFException)) {
+				throw e;
+			}
+		}
+		return listed;
+	}
+
+	@Test
+	void pathItemInputWithoutVerifyUsesKeysThatSptDidNotGenerateWithOffsetZeroAndOneSummary()
+					throws Exception {
+		final List<String> keys = List.of("a/b/readme.md", "dir/", "k0", "k1", "photo.jpg");
+		try (final var notices = BucketVersioningNotices.attach()) {
+			final TestS3Driver drv = new TestS3Driver(baseConfig(false, 2, false, null, "127.0.0.1"), false);
+			drv.respondWith(pagedListing(keys));
+			final List<Item> listed;
+			try {
+				listed = readPathItemInput(drv, "/pp", 2);
+				assertEquals(3, drv.log().size(), "three pages of two keys");
+			} finally {
+				drv.close();
+			}
+			assertEquals(keys.stream().map(key -> "/pp/" + key).toList(),
+							listed.stream().map(Item::name).toList());
+			assertEquals(
+							List.of(0L, 0L, Long.parseLong("k0", 36), Long.parseLong("k1", 36), 0L),
+							listed.stream().map(item -> ((DataItem) item).offset()).toList());
+			final var summary = notices.awaitOnly("pp", Level.WARN, "not SPT-generated item ids");
+			assertEquals(
+							"test-s3: bucket pp: 3 listed keys are not SPT-generated item ids (first \"a/b/readme.md\");"
+											+ " the path item input uses them with data offset 0",
+							summary.text());
+		}
+	}
+
+	@Test
+	void pathItemInputOfGeneratedKeysLogsNoSummary() throws Exception {
+		try (final var notices = BucketVersioningNotices.attach()) {
+			final TestS3Driver drv = new TestS3Driver(baseConfig(false, 2, false, null, "127.0.0.1"), false);
+			drv.respondWith(pagedListing(List.of("k0", "k1", "k2")));
+			try {
+				assertEquals(3, readPathItemInput(drv, "/gen", 2).size());
+			} finally {
+				drv.close();
+			}
+			Thread.sleep(200);
+			assertEquals(List.of(), notices.forBucket("gen"));
+		}
+	}
+
+	@Test
+	void pathListingStoppedBeforeItsLastPageLogsItsSummaryAtClose() throws Exception {
+		try (final var notices = BucketVersioningNotices.attach()) {
+			final TestS3Driver drv = new TestS3Driver(baseConfig(false, 2, false, null, "127.0.0.1"), false);
+			drv.respondWith(pagedListing(List.of("dir/", "k0", "k1")));
+			try {
+				final List<Item> firstPage = drv.list(new ItemFactoryImpl<>(), "/early", null, 36, null, 2);
+				assertEquals(2, firstPage.size(), "a truncated page ends without poison");
+				Thread.sleep(200);
+				assertEquals(List.of(), notices.forBucket("early"), "no summary before the listing ends");
+			} finally {
+				drv.close();
+			}
+			assertEquals(
+							"test-s3: bucket early: 1 listed key is not an SPT-generated item id (first \"dir/\");"
+											+ " the path item input uses it with data offset 0",
+							notices.awaitOnly("early", Level.WARN, "SPT-generated").text());
+		}
+	}
+
+	@Test
+	void pathItemInputWithVerifyRefusesAKeyThatSptDidNotGenerate() throws Exception {
+		final TestS3Driver drv = new TestS3Driver(baseConfig(false, 2, false, null, "127.0.0.1"), true);
+		drv.respondWith(pagedListing(List.of("dir/", "k0", "k1")));
+		try {
+			final var failure = assertThrows(
+							TerminalItemInputException.class,
+							() -> drv.list(new ItemFactoryImpl<>(), "/pp", null, 36, null, 10));
+			assertTrue(
+							failure.getCause().getMessage().contains("verification needs keys that SPT generated"),
+							failure.getCause().getMessage());
+		} finally {
+			drv.close();
+		}
+	}
+
 	@Test
 	void delimiterProbeAcceptsStandardRootPrefixWithoutTerminalFailure() throws Exception {
 		final var driver = new TestS3Driver(metadataConfig(false));
@@ -1051,8 +1172,8 @@ public class S3StorageDriverTest {
 							HttpVersion.HTTP_1_1,
 							HttpResponseStatus.OK,
 							Unpooled.copiedBuffer(
-											"<ListBucketResult><Contents><Key>prefix/not-an-id</Key>"
-															+ "<Size>1</Size></Contents><IsTruncated>false</IsTruncated>"
+											"<ListBucketResult><Contents><Key>prefix/1</Key>"
+															+ "</Contents><IsTruncated>false</IsTruncated>"
 															+ "</ListBucketResult>",
 											StandardCharsets.UTF_8)));
 
