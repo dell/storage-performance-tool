@@ -6,6 +6,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -16,6 +17,10 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/logging"
 	"github.com/docker/docker/client"
 )
+
+// remoteDockerPingTimeout bounds the remote connect check; a variable so
+// tests can reach the deadline quickly.
+var remoteDockerPingTimeout = constants.RemoteDockerPingTimeout
 
 // NewDockerManagerForHost creates a Docker client for a specific host
 func NewDockerManagerForHost(ctx context.Context, hostInfo *hostparse.HostInfo) (*DockerManager, error) {
@@ -78,11 +83,18 @@ func NewDockerManagerForHost(ctx context.Context, hostInfo *hostparse.HostInfo) 
 	}
 
 	// Validate remote Docker connectivity quickly via SSH + docker CLI (consistent with verify)
-	pingCtx, pingCancel := context.WithTimeout(childCtx, 10*time.Second)
+	pingCtx, pingCancel := context.WithTimeout(childCtx, remoteDockerPingTimeout)
 	defer pingCancel()
 	exec := command.NewCommandExecutor()
 	if _, stderr, err := exec.ExecuteCommand(pingCtx, hostInfo, []string{constants.DockerCommand, constants.DockerCmdVersion, constants.DockerFlagFormat, constants.DockerVersionFormat}); err != nil {
 		cancel()
+		// A cancel by the caller (Ctrl-C, SIGTERM) kills ssh, which reads
+		// as an SSH failure; report the cancel instead. A deadline, the
+		// ping's own or the caller's, is a slow or unreachable host and
+		// keeps the advice below.
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return nil, fmt.Errorf("connection to Docker on %s stopped: %w (%w)", hostInfo.Original, command.ContextEnd(ctx), err)
+		}
 		return nil, fmt.Errorf("failed to connect to Docker on %s: %w\nEnsure:\n  1. SSH key authentication is configured: ssh %s@%s\n  2. Docker is accessible to user '%s' on the remote host\n  3. The Docker daemon is running on the remote host\n  (stderr: %s)",
 			hostInfo.Original, err, hostInfo.User, hostInfo.Host, hostInfo.User, stderr)
 	}
