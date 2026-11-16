@@ -53,6 +53,7 @@ func TestStatusCommand_SingleHostReady(t *testing.T) {
 	server := newReadyEntryServer(t)
 	port := extractPort(t, server.URL)
 
+	isolateLoggingGlobals(t)
 	logFile = filepath.Join(t.TempDir(), "status.log")
 	logAppend = false
 	logLevel = "info"
@@ -89,6 +90,7 @@ func TestStatusCommand_HostsFromEnvWithInterfacesSet(t *testing.T) {
 	server := newReadyEntryServer(t)
 	port := extractPort(t, server.URL)
 
+	isolateLoggingGlobals(t)
 	logFile = filepath.Join(t.TempDir(), "status.log")
 	logAppend = false
 	logLevel = "info"
@@ -121,6 +123,7 @@ func TestStatusCommand_HostError(t *testing.T) {
 
 	port := extractPort(t, server.URL)
 
+	isolateLoggingGlobals(t)
 	logFile = filepath.Join(t.TempDir(), "status.log")
 	logAppend = false
 	logLevel = "info"

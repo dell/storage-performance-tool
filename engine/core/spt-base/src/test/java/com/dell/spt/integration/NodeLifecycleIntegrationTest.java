@@ -72,6 +72,8 @@ public class NodeLifecycleIntegrationTest {
 		context.addServlet(new ServletHolder(new FleetMetricsHandler(metricsMgr, config)), "/metrics/fleet/json");
 
 		// Services
+		// Free RMI port instead of the builder's fixed 9020
+		config.val("load-step-node-port", FreePorts.freePort());
 		final int listenPort = config.intVal("load-step-node-port");
 		fileMgrSvc = new FileManagerServiceImpl(listenPort);
 		scenarioStepSvc = new LoadStepManagerServiceImpl(listenPort, List.<Extension> of(), metricsMgr);

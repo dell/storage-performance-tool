@@ -65,6 +65,10 @@ public class AppSmokeTest {
 
 	@BeforeEach
 	public void setUp() {
+		// Free API and RMI ports instead of the builder's fixed 9999 and 9020
+		final int[] ports = FreePorts.freePorts(2);
+		config.val("run-port", ports[0]);
+		config.val("load-step-node-port", ports[1]);
 		coreResources.install(appHomePath);
 		final var extDir = Extension.resolveExtDir();
 		final var extDirFile = extDir != null ? extDir : Paths.get(appHomePath.toString(), DIR_EXT).toFile();

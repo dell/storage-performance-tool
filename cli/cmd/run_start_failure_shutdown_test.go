@@ -98,30 +98,6 @@ func assertRejectedRunSummary(t *testing.T, resultsDir, output string) {
 	}
 }
 
-// awaitMonitorSetup orders a stubbed launch after the auto-results monitor has finished
-// preparing the results root, as a launch that waits for its engine usually is. The monitor's
-// setup and the engine identity gate's rejection record both write the run metadata without a
-// lock, so the tests that reach the gate would race without this ordering. The race itself is
-// .scratch/monitor-metadata-race 01; this helper only keeps it out of these tests.
-func awaitMonitorSetup(t *testing.T) func() {
-	t.Helper()
-	original := archivePreparedRunInputsFunc
-	t.Cleanup(func() { archivePreparedRunInputsFunc = original })
-	ready := make(chan struct{})
-	var once sync.Once
-	archivePreparedRunInputsFunc = func(meta *runMetadata, scenarioPath, destDir string) error {
-		defer once.Do(func() { close(ready) })
-		return original(meta, scenarioPath, destDir)
-	}
-	return func() {
-		select {
-		case <-ready:
-		case <-time.After(5 * time.Second):
-			t.Error("auto-results monitor did not prepare the results root")
-		}
-	}
-}
-
 // A results root whose manifests can't be inspected counts as having evidence, so the summary
 // step runs and reports the problem instead of the monitor claiming no results were produced.
 func TestHasSummarizableEvidence(t *testing.T) {
@@ -417,9 +393,7 @@ func TestRunCommandStartFailureBeforeSubmissionSendsNoShutdown(t *testing.T) {
 				startErr = errors.New("failed to start test via API: failed to start test (status 500): refused")
 			}
 			var localCalls, remoteCalls atomic.Int32
-			monitorReady := awaitMonitorSetup(t)
 			fail := func(ctx context.Context, hooks tui.LaunchHooks) error {
-				monitorReady()
 				if test.gate != gateNotRun {
 					if _, err := hooks.RunPreSubmissionCheck(ctx); err != nil {
 						return err
