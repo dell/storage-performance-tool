@@ -5,7 +5,9 @@ import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.data.DataOperation;
 import com.dell.spt.base.storage.driver.CompositeResults;
+import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.CountDownLatch;
@@ -23,6 +25,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 /**
  * Test class demonstrating the simplified usage of DummyStorageDriverMock
@@ -138,6 +141,108 @@ class DummyStorageDriverMockTest {
 		assertFalse(driver.put(operation()));
 		assertEquals(0, driver.activeOpCount());
 		assertEquals(0, driver.scheduledOpCount());
+	}
+
+	/**
+	 * Threads complete operations as fast as the mock allows while a reader samples the gauge.
+	 * Reading the two counters one after the other read below 0 here. Bounded by operation count,
+	 * not time, so a slow runner only takes longer.
+	 */
+	@Test
+	@Timeout(120)
+	void theActiveCountStaysWithinZeroAndTheCompletingThreadsUnderFastCompletions() throws Exception {
+		final int threadCount = 4;
+		final int opsPerThread = 20_000;
+		final var driver = DummyStorageDriverMock.<Item, Operation<Item>> create(threadCount);
+		driver.operationResultOutput(new AcceptingOutput());
+		driver.start();
+		final var op = stubOnlyOperation();
+		final var ready = new CountDownLatch(threadCount + 1);
+		final var completers = new ArrayList<FutureTask<Integer>>();
+		for (int t = 0; t < threadCount; t++) {
+			final var completer = new FutureTask<>(() -> {
+				ready.countDown();
+				ready.await();
+				int done = 0;
+				for (int i = 0; i < opsPerThread; i++) {
+					if (driver.put(op)) {
+						done++;
+					}
+				}
+				return done;
+			});
+			completers.add(completer);
+			new Thread(completer, "mock-driver-completer-" + t).start();
+		}
+
+		int min = Integer.MAX_VALUE;
+		int max = Integer.MIN_VALUE;
+		long samples = 0;
+		ready.countDown();
+		while (!completers.stream().allMatch(FutureTask::isDone)) {
+			final int active = driver.activeOpCount();
+			min = Math.min(min, active);
+			max = Math.max(max, active);
+			samples++;
+		}
+
+		for (final var completer : completers) {
+			assertEquals(opsPerThread, completer.get(10, TimeUnit.SECONDS));
+		}
+		assertTrue(samples > 0);
+		assertTrue(min >= 0, "lowest of " + samples + " samples: " + min);
+		assertTrue(max <= threadCount, "highest of " + samples + " samples: " + max);
+		assertEquals(0, driver.activeOpCount());
+		assertEquals((long) threadCount * opsPerThread, driver.completedOpCount());
+	}
+
+	/** A put refused at admission close takes back its scheduled count, so the gauge reads 0. */
+	@Test
+	void theActiveCountReadsZeroAfterAPutRefusedAtAdmissionClose() throws Exception {
+		final var driver = startedDriver(new AcceptingOutput());
+		for (int i = 0; i < 3; i++) {
+			assertTrue(driver.put(operation()));
+		}
+
+		driver.closeAdmission();
+
+		assertFalse(driver.put(operation()));
+		assertEquals(0, driver.activeOpCount());
+		assertEquals(3, driver.scheduledOpCount());
+		assertEquals(3, driver.completedOpCount());
+	}
+
+	/** Accepts every result at once, without Mockito's per-call cost, so completions are fast. */
+	private static final class AcceptingOutput implements Output<Operation<Item>> {
+
+		@Override
+		public boolean put(final Operation<Item> op) {
+			return true;
+		}
+
+		@Override
+		public int put(final List<Operation<Item>> ops, final int from, final int to) {
+			return to - from;
+		}
+
+		@Override
+		public int put(final List<Operation<Item>> ops) {
+			return ops.size();
+		}
+
+		@Override
+		public Input<Operation<Item>> getInput() {
+			throw new UnsupportedOperationException();
+		}
+
+		@Override
+		public void close() {}
+	}
+
+	/** An operation mock that records no invocations, so one can be completed many times. */
+	@SuppressWarnings("unchecked")
+	private static Operation<Item> stubOnlyOperation() {
+		return mock(Operation.class, withSettings().stubOnly());
 	}
 
 	private static Output<Operation<Item>> acceptingOutput() throws Exception {
