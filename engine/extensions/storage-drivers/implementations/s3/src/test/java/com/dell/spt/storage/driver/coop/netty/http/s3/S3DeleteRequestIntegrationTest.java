@@ -145,11 +145,14 @@ final class S3DeleteRequestIntegrationTest {
 							driver.presence(target("absent", "v+1/=")));
 			assertEquals(DeleteVerificationProbe.Presence.UNRESOLVED,
 							driver.presence(target("unresolved", null)));
+			assertEquals(
+							DeleteVerificationProbe.Observation.unresolved("HEAD returned 503 Service Unavailable"),
+							driver.observe(target("unresolved", null)));
 		}
 
 		final List<CapturedRequest> heads = requests.stream()
 						.filter(request -> "HEAD".equals(request.method())).toList();
-		assertEquals(3, heads.size());
+		assertEquals(4, heads.size());
 		assertEquals("/bucket/current%20key", heads.get(0).rawPath());
 		assertNull(heads.get(0).rawQuery());
 		assertEquals("versionId=v%2B1%2F%3D", heads.get(1).rawQuery());

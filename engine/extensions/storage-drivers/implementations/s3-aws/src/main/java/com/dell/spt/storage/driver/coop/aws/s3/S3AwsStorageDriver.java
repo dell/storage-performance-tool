@@ -1313,6 +1313,12 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 	/** Checks the requested current-key or exact-version identity with an SDK HEAD call. */
 	@Override
 	public Presence presence(final DeleteTarget target) {
+		return observe(target).presence();
+	}
+
+	/** Checks {@code target} as {@link #presence} does and names the reason an unresolved result was not classified. */
+	@Override
+	public Observation observe(final DeleteTarget target) {
 		final var request = HeadObjectRequest.builder()
 						.bucket(target.bucket())
 						.key(target.key());
@@ -1321,11 +1327,11 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 		try {
 			deleteClient(target.versionId() != null).headObject(request.build()).get();
-			return Presence.PRESENT;
+			return Observation.of(Presence.PRESENT);
 		} catch (final InterruptedException interrupted) {
 			Thread.currentThread().interrupt();
 			throwUncheckedIfInterrupted(interrupted);
-			return Presence.UNRESOLVED;
+			return Observation.of(Presence.UNRESOLVED);
 		} catch (final RuntimeException | ExecutionException failure) {
 			Throwable cause = failure;
 			while (cause.getCause() != null && cause != cause.getCause()) {
@@ -1333,14 +1339,14 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			}
 			if (cause instanceof NoSuchKeyException
 							|| cause instanceof S3Exception s3Failure && s3Failure.statusCode() == 404) {
-				return Presence.ABSENT;
+				return Observation.of(Presence.ABSENT);
 			}
 			if (cause instanceof InterruptedException interrupted) {
 				Thread.currentThread().interrupt();
 				throwUncheckedIfInterrupted(interrupted);
 			}
 			LOG.debug("DELETE verification HEAD was unresolved: {}", cause.toString());
-			return Presence.UNRESOLVED;
+			return Observation.unresolved(cause.toString());
 		}
 	}
 

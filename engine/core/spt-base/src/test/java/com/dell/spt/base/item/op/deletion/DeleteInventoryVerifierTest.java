@@ -6,14 +6,18 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.dell.spt.base.logging.Loggers;
 import java.io.BufferedWriter;
 import java.lang.reflect.Modifier;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.CountDownLatch;
@@ -21,6 +25,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -268,6 +277,134 @@ class DeleteInventoryVerifierTest {
 		}
 	}
 
+	@Test
+	void retryPauseStartsAtTenMillisDoublesAndCapsAtOneSecond() {
+		assertEquals(10, DeleteInventoryVerifier.retryPauseMillis(1));
+		assertEquals(20, DeleteInventoryVerifier.retryPauseMillis(2));
+		assertEquals(40, DeleteInventoryVerifier.retryPauseMillis(3));
+		assertEquals(640, DeleteInventoryVerifier.retryPauseMillis(7));
+		assertEquals(1_000, DeleteInventoryVerifier.retryPauseMillis(8));
+		assertEquals(1_000, DeleteInventoryVerifier.retryPauseMillis(64));
+		assertEquals(1_000, DeleteInventoryVerifier.retryPauseMillis(Integer.MAX_VALUE));
+		assertEquals(10, DeleteInventoryVerifier.retryPauseMillis(0));
+	}
+
+	@Test
+	void probeThatFailsAtOnceIsRetriedABoundedNumberOfPassesUntilTheDeadline(
+					@TempDir final Path temp) throws Exception {
+		final Duration timeout = Duration.ofSeconds(5);
+		final Map<String, AtomicInteger> calls = new HashMap<>();
+		try (final DeleteVerificationReport report = DeleteInventoryVerifier.verify(
+						manifest(temp),
+						3,
+						DeleteVerificationPhase.POST_DELETE,
+						timeout,
+						target -> {
+							calls.computeIfAbsent(target.key(), ignored -> new AtomicInteger()).incrementAndGet();
+							throw new IllegalStateException("connection closed at once");
+						})) {
+
+			assertEquals(3, report.unresolved());
+			assertTrue(report.elapsed().compareTo(timeout) >= 0, "verification ended before its deadline");
+			for (final String key : List.of("current", "exact", "uncertain")) {
+				final int probes = calls.get(key).get();
+				// Pauses of 10, 20, 40 ... ms capped at 1 s allow about 11 passes in 5 s; a fixed
+				// 10 ms pause allowed hundreds.
+				assertTrue(probes <= 15, () -> key + " was probed " + probes + " times in " + timeout);
+				assertTrue(probes >= 2, () -> key + " was never retried");
+			}
+		}
+	}
+
+	@Test
+	void probeThatSucceedsOnTheThirdPassResolvesWithoutWaitingForTheDeadline(
+					@TempDir final Path temp) throws Exception {
+		final AtomicInteger calls = new AtomicInteger();
+		final Duration timeout = Duration.ofSeconds(30);
+		try (final DeleteVerificationReport report = DeleteInventoryVerifier.verify(
+						singleTargetManifest(temp),
+						1,
+						DeleteVerificationPhase.POST_DELETE,
+						timeout,
+						target -> calls.incrementAndGet() < 3
+										? DeleteVerificationProbe.Presence.UNRESOLVED
+										: DeleteVerificationProbe.Presence.ABSENT)) {
+
+			assertTrue(report.successful());
+			assertEquals(1, report.absent());
+			assertEquals(3, calls.get());
+			assertTrue(report.elapsed().compareTo(timeout) < 0, "a resolved target waited for the deadline");
+		}
+	}
+
+	@Test
+	void unresolvedTargetsAreReportedOnceAtWarnWithTheirCountAndCause(
+					@TempDir final Path temp) throws Exception {
+		final var appender = new CapturingAppender();
+		appender.start();
+		final var logger = LoggerContext.getContext(false).getLogger(Loggers.MSG.getName());
+		logger.addAppender(appender);
+		try {
+			// Engine loggers are asynchronous: count only what follows a marker logged after attaching.
+			Loggers.MSG.warn(appender.marker);
+			awaitTrue(() -> appender.armed, "the marker was not logged");
+
+			try (final var resolved = DeleteInventoryVerifier.verify(
+							manifest(temp),
+							3,
+							DeleteVerificationPhase.PRE_DELETE,
+							Duration.ofSeconds(1),
+							target -> DeleteVerificationProbe.Presence.PRESENT)) {
+				assertTrue(resolved.successful());
+			}
+			try (final var unresolved = DeleteInventoryVerifier.verify(
+							manifest(temp),
+							3,
+							DeleteVerificationPhase.PRE_DELETE,
+							Duration.ofMillis(300),
+							new DeleteVerificationProbe() {
+								@Override
+								public Presence presence(final DeleteTarget target) {
+									throw new AssertionError("verification must observe, not call presence");
+								}
+
+								@Override
+								public Observation observe(final DeleteTarget target) {
+									return "current".equals(target.key())
+													? Observation.of(Presence.PRESENT)
+													: Observation.unresolved("closed before the response");
+								}
+							})) {
+				assertEquals(2, unresolved.unresolved());
+			}
+
+			awaitTrue(() -> !appender.messages.isEmpty(), "the unresolved WARN was not logged");
+			Thread.sleep(200);
+			assertEquals(1, appender.messages.size(), appender.messages::toString);
+			final String message = appender.messages.get(0);
+			assertTrue(message.startsWith("Standalone DELETE pre-validation left 2 selected identity/identities "
+							+ "unresolved after "), message);
+			assertTrue(message.endsWith("; last cause: closed before the response"), message);
+			assertTrue(appender.warn, "logged at WARN");
+		} finally {
+			logger.removeAppender(appender);
+			appender.stop();
+		}
+	}
+
+	@Test
+	void unresolvedWarningNamesAPhaseWithoutAReportedCause() {
+		assertEquals(
+						"Standalone DELETE post-verification left 4 selected identity/identities unresolved "
+										+ "after 12 pass(es) in 30001 ms; last cause: not reported by the storage driver",
+						DeleteInventoryVerifier.unresolvedWarning(
+										DeleteVerificationPhase.POST_DELETE,
+										4,
+										12,
+										TimeUnit.MILLISECONDS.toNanos(30_001),
+										null));
+	}
+
 	private static Path manifest(final Path temp) throws Exception {
 		final Path manifest = temp.resolve("verify-input.csv");
 		Files.writeString(
@@ -277,6 +414,43 @@ class DeleteInventoryVerifierTest {
 										+ "bucket,exact,1,version-1\n"
 										+ "bucket,uncertain,1,version-2\n");
 		return manifest;
+	}
+
+	private static Path singleTargetManifest(final Path temp) throws Exception {
+		final Path manifest = temp.resolve("single-verify-input.csv");
+		Files.writeString(manifest, "bucket,key,size,version_id\nbucket,settling,1,\n");
+		return manifest;
+	}
+
+	private static void awaitTrue(final java.util.function.BooleanSupplier condition, final String message)
+					throws InterruptedException {
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
+			Thread.sleep(10);
+		}
+		assertTrue(condition.getAsBoolean(), message);
+	}
+
+	private static final class CapturingAppender extends AbstractAppender {
+		final List<String> messages = Collections.synchronizedList(new ArrayList<>());
+		final String marker = "DeleteInventoryVerifierTest marker " + System.nanoTime();
+		volatile boolean armed;
+		volatile boolean warn = true;
+
+		CapturingAppender() {
+			super("testDeleteVerificationWarning", null, null, true, Property.EMPTY_ARRAY);
+		}
+
+		@Override
+		public void append(final LogEvent event) {
+			final String message = event.getMessage().getFormattedMessage();
+			if (message.equals(marker)) {
+				armed = true;
+			} else if (armed && message.startsWith("Standalone DELETE ")) {
+				messages.add(message);
+				warn &= Level.WARN.equals(event.getLevel());
+			}
+		}
 	}
 
 	private static Path largeManifest(final Path temp, final int count) throws Exception {

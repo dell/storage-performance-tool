@@ -1224,6 +1224,12 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	/** Uses the ordinary HTTP HEAD path for both Netty S3 and its RDMA transport subclass. */
 	@Override
 	public Presence presence(final DeleteTarget target) {
+		return observe(target).presence();
+	}
+
+	/** Checks {@code target} with an HTTP HEAD and names the reason an unresolved result was not classified. */
+	@Override
+	public Observation observe(final DeleteTarget target) {
 		final String objectUri = standaloneObjectUri(target.bucket(), target);
 		final String encodedVersionId = target.versionId() == null ? null : encodeVersionId(target.versionId());
 		final String uri = encodedVersionId == null ? objectUri : objectUri + VERSION_ID_QUERY + encodedVersionId;
@@ -1250,21 +1256,26 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		try {
 			response = executeHttpRequest(request, false);
 			if (response == null) {
-				return Presence.UNRESOLVED;
+				final String cause = "the connection closed before the HEAD response";
+				Loggers.MSG.debug("DELETE verification HEAD was unresolved: {}", cause);
+				return Observation.unresolved(cause);
 			}
 			if (response.status().code() == 404) {
-				return Presence.ABSENT;
+				return Observation.of(Presence.ABSENT);
 			}
-			return HttpStatusClass.SUCCESS.equals(response.status().codeClass())
-							? Presence.PRESENT
-							: Presence.UNRESOLVED;
+			if (HttpStatusClass.SUCCESS.equals(response.status().codeClass())) {
+				return Observation.of(Presence.PRESENT);
+			}
+			final String cause = "HEAD returned " + response.status();
+			Loggers.MSG.debug("DELETE verification HEAD was unresolved: {}", cause);
+			return Observation.unresolved(cause);
 		} catch (final InterruptedException interrupted) {
 			Thread.currentThread().interrupt();
 			throwUnchecked(interrupted);
-			return Presence.UNRESOLVED;
+			return Observation.of(Presence.UNRESOLVED);
 		} catch (final ConnectException failure) {
 			Loggers.MSG.debug("DELETE verification HEAD was unresolved: {}", failure.toString());
-			return Presence.UNRESOLVED;
+			return Observation.unresolved(failure.toString());
 		} finally {
 			if (response != null) {
 				response.release();

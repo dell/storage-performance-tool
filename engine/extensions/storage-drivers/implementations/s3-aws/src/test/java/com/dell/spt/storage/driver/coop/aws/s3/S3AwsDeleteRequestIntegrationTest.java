@@ -270,11 +270,14 @@ final class S3AwsDeleteRequestIntegrationTest {
 							driver.presence(target("absent", "v+1/=")));
 			assertEquals(DeleteVerificationProbe.Presence.UNRESOLVED,
 							driver.presence(target("unresolved", null)));
+			final DeleteVerificationProbe.Observation unresolved = driver.observe(target("unresolved", null));
+			assertEquals(DeleteVerificationProbe.Presence.UNRESOLVED, unresolved.presence());
+			assertTrue(unresolved.unresolvedCause().contains("503"), unresolved::unresolvedCause);
 		}
 
 		final List<CapturedRequest> heads = requests.stream()
 						.filter(request -> "HEAD".equals(request.method())).toList();
-		assertTrue(heads.size() >= 3, "the SDK may retry unresolved service responses internally");
+		assertTrue(heads.size() >= 4, "the SDK may retry unresolved service responses internally");
 		assertNull(heads.get(0).rawQuery());
 		assertTrue(heads.stream().anyMatch(
 						request -> "versionId=v%2B1%2F%3D".equals(request.rawQuery())));
