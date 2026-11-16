@@ -89,13 +89,14 @@ class LoadStepLocalSteadyStopPathTest {
 	private static final long WORKER_DEADLINE_MILLIS = 2_000;
 	/**
 	 * The slow first drain lasts at least this long from its admission close, so the cutoff-skew
-	 * bound, half the drain, is at least 500 ms. Without the hold the drain lasts only while the
-	 * other context completes 4 more waves, about 100 ms, and the honest skew on a cold, loaded JVM
-	 * reached 113 ms: the first close's work before the second cut (up to 152 ms measured) and the
-	 * gap between the two contexts' step starts, less one another, plus safepoint pauses of up to
-	 * 189 ms. A second cut that waits for the first drain is still well above the bound.
+	 * bound, half the drain, is at least 1 s. Without the hold the drain lasts only while the other
+	 * context completes 4 more waves, about 100 ms, and an honest skew on a cold, loaded JVM is far
+	 * larger: the gap between the two end cuts reached 401 ms on a CPU-starved host, and the gap
+	 * between the two contexts' step starts 197 ms, with safepoint pauses of up to 457 ms. The hold
+	 * stays well inside the step's 5 s drain limit, and a second cut that waits for the first drain
+	 * is still twice the bound.
 	 */
-	private static final long FIRST_DRAIN_HOLD_MILLIS = 1_000;
+	private static final long FIRST_DRAIN_HOLD_MILLIS = 2_000;
 
 	static {
 		if (WORKER_DEADLINE_MILLIS - STEADY_FLOOR_MILLIS < 250) {
@@ -169,8 +170,8 @@ class LoadStepLocalSteadyStopPathTest {
 				// windows one after another, and each close computes its result before the next cut.
 				// Each window's end offset counts from its own context's step start, so the skew is the
 				// gap between the two end cuts less the gap between the two step starts, which
-				// LoadStepBase.startMetricsContexts sets one context after the other. Both gaps are cold
-				// costs of tens of milliseconds on a loaded JVM, and about 1 ms warm.
+				// LoadStepBase.startMetricsContexts sets one context after the other. Both gaps are about
+				// 1 ms warm, and up to a few hundred milliseconds on a cold, CPU-starved JVM.
 				final double drainMillis = (releasedNanos - drainStartNanos) / 1e6;
 				final double firstEndMillis = windowEndMillis(first);
 				final double secondEndMillis = windowEndMillis(second);
