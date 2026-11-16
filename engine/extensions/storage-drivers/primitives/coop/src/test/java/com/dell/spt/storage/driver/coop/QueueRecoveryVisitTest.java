@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.Semaphore;
@@ -38,6 +39,9 @@ class QueueRecoveryVisitTest {
 	/** Never dispatches: no transport permit, and no multipart permit for an upload. */
 	private static final class HoldingDriver extends CoopStorageDriverMock<DataItem, Operation<DataItem>> {
 		final OperationLifecycleTracker<Operation<DataItem>> tracker;
+		final Map<Operation<DataItem>, Integer> hookVisits = new IdentityHashMap<>();
+		final Set<Operation<DataItem>> hookRefuses = Collections.newSetFromMap(new IdentityHashMap<>());
+		volatile List<Operation<DataItem>> extraQueue = List.of();
 
 		HoldingDriver(final DataInput dataInput) throws Exception {
 			super("queue-recovery-visit", dataInput, config(), false, BATCH_SIZE);
@@ -45,6 +49,26 @@ class QueueRecoveryVisitTest {
 			enableOperationLifecycle(tracker);
 			concurrencyThrottle.drainPermits();
 			mpuObjectThrottle = new Semaphore(0);
+		}
+
+		@Override
+		protected List<Operation<DataItem>> recoverAdditionalQueuedOperations() {
+			return extraQueue;
+		}
+
+		/** Counts visits; a refused operation is left driver-queued, as a hook may leave it. */
+		@Override
+		protected boolean recoverQueuedOperation(final Operation<DataItem> op) {
+			synchronized (hookVisits) {
+				hookVisits.merge(op, 1, Integer::sum);
+			}
+			return !hookRefuses.contains(op) && super.recoverQueuedOperation(op);
+		}
+
+		int visits(final Operation<DataItem> op) {
+			synchronized (hookVisits) {
+				return hookVisits.getOrDefault(op, 0);
+			}
 		}
 
 		void queueChild(final Operation<DataItem> op) {
@@ -98,6 +122,7 @@ class QueueRecoveryVisitTest {
 				assertTrue(distinct.contains(op), () -> op.item().name() + " is recovered");
 				assertEquals(OperationLifecycleState.UNATTEMPTED, op.lifecycle().state());
 				verify(driver.tracker, times(1)).unattempted(op);
+				assertEquals(1, driver.visits(op), () -> op.item().name() + " reaches the hook once");
 			}
 			final var snapshot = driver.operationLifecycle().snapshot();
 			assertEquals(queued.size(), snapshot.unattempted());
@@ -108,6 +133,58 @@ class QueueRecoveryVisitTest {
 				verify(driver.tracker, times(1)).unattempted(op);
 			}
 		} finally {
+			driver.close();
+		}
+	}
+
+	@Test
+	void anExtraQueueListingAnOperationTwiceVisitsItsHookOnce() throws Exception {
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new HoldingDriver(dataInput);
+		try {
+			final var listedTwice = plain("listed-twice");
+			assertTrue(driver.tracker.driverQueued(listedTwice));
+			driver.extraQueue = List.of(listedTwice, listedTwice);
+			driver.closeAdmission();
+
+			assertEquals(List.of(listedTwice), driver.recoverQueuedOperations());
+			assertEquals(1, driver.visits(listedTwice), "one hook visit per identity");
+			assertEquals(OperationLifecycleState.UNATTEMPTED, listedTwice.lifecycle().state());
+			assertEquals(1, driver.operationLifecycle().snapshot().unattempted());
+		} finally {
+			driver.extraQueue = List.of();
+			driver.close();
+		}
+	}
+
+	@Test
+	void anOperationItsHookLeavesQueuedIsNotVisitedAgainFromTheRegistry() throws Exception {
+		final var dataInput = DataInput.instance(
+						null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+		final var driver = new HoldingDriver(dataInput);
+		try {
+			driver.start();
+			final var buffered = plain("buffered");
+			assertTrue(driver.put(buffered));
+			awaitCondition(() -> dispatchBufferSize(driver) == BATCH_SIZE,
+							"the dispatch task holds one operation it cannot submit");
+			final var leftQueued = plain("left-queued");
+			driver.hookRefuses.add(leftQueued);
+			assertTrue(driver.put(leftQueued));
+			assertRegistryHolds(driver, List.of(buffered, leftQueued));
+			driver.closeAdmission();
+
+			// The input queue's entry is visited first and stays driver-queued, so the registry
+			// still lists it when the second pass settles the dispatch task's buffer.
+			assertEquals(List.of(buffered), driver.recoverQueuedOperations());
+			assertEquals(1, driver.visits(leftQueued), "a queued operation reaches the hook once");
+			assertEquals(1, driver.visits(buffered));
+			assertEquals(OperationLifecycleState.DRIVER_QUEUED, leftQueued.lifecycle().state());
+			assertEquals(OperationLifecycleState.UNATTEMPTED, buffered.lifecycle().state());
+			verify(driver.tracker, never()).unattempted(leftQueued);
+		} finally {
+			driver.hookRefuses.clear();
 			driver.close();
 		}
 	}

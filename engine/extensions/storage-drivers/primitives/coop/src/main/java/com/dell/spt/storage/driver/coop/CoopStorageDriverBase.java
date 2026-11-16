@@ -1387,7 +1387,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	 * driver-queued, and every extra-queue entry, is skipped there, as is an indeterminate
 	 * submission. An extra-queue entry can also be in the input queue and the registry, a range
 	 * read is in all three, so it is visited only from the extra queue: its hook may publish a
-	 * retained result and must run once.
+	 * retained result and must run once. The extra queue itself may list an operation more than
+	 * once; it is still visited once.
 	 */
 	@Override
 	public final List<O> recoverQueuedOperations() {
@@ -1398,14 +1399,22 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 		queued.addAll(opDispatchTask.takeStoppedContinuations());
 		final var additional = recoverAdditionalQueuedOperations();
 		final Set<O> visitedElsewhere;
+		final List<O> extraQueued;
 		if (additional.isEmpty() && indeterminateSubmissions.isEmpty()) {
 			visitedElsewhere = Set.of();
+			extraQueued = List.of();
 		} else {
 			visitedElsewhere = Collections.newSetFromMap(new IdentityHashMap<>());
 			visitedElsewhere.addAll(indeterminateSubmissions);
-			visitedElsewhere.addAll(additional);
+			// Each extra-queue identity once, and none that is an indeterminate submission.
+			extraQueued = new ArrayList<>(additional.size());
+			for (final O op : additional) {
+				if (visitedElsewhere.add(op)) {
+					extraQueued.add(op);
+				}
+			}
 		}
-		final var unattempted = new ArrayList<O>(queued.size() + additional.size());
+		final var unattempted = new ArrayList<O>(queued.size() + extraQueued.size());
 		final Set<O> leftQueued = Collections.newSetFromMap(new IdentityHashMap<>());
 		for (final O op : queued) {
 			if ((visitedElsewhere.isEmpty() || !visitedElsewhere.contains(op))
@@ -1413,9 +1422,8 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				leftQueued.add(op);
 			}
 		}
-		for (final O op : additional) {
-			if ((indeterminateSubmissions.isEmpty() || !indeterminateSubmissions.contains(op))
-							&& !recoverQueuedEntry(op, unattempted)) {
+		for (final O op : extraQueued) {
+			if (!recoverQueuedEntry(op, unattempted)) {
 				leftQueued.add(op);
 			}
 		}
@@ -1498,7 +1506,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	/**
 	 * Settles a recovered queue entry. Return true only when it became unattempted and should
 	 * enter the legacy recovery output. Retained retries instead settle their known failure
-	 * and return false; no result output or transport action may run here.
+	 * and return false; no result output or transport action may run here. Called at most once
+	 * per queued operation, and not for a queued composite that recovery settles through one of
+	 * its recovered parts.
 	 */
 	protected boolean recoverQueuedOperation(final O op) {
 		return operationLifecycle().unattempted(op);
