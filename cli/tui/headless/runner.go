@@ -48,6 +48,7 @@ type HeadlessRunner struct {
 	launchHooks   tui.LaunchHooks
 	// autoTerminateSeconds is the --auto-terminate-seconds deadline; 0 = none.
 	autoTerminateSeconds int
+	autoTerminateWait    time.Duration
 }
 
 // HeadlessOptions holds configuration for headless mode
@@ -66,6 +67,8 @@ type HeadlessOptions struct {
 	ResultsRoot string
 	// KeepScenario removed - this belongs in scenario.Params
 	AutoTerminateSeconds int // 0 = unlimited
+	// ShutdownLingerSec is --shutdown-linger; it bounds the auto-terminate stop wait.
+	ShutdownLingerSec int
 	// In multi-host runs, let auto-results fetch artifacts and request shutdown
 	// after normal completion instead of stopping containers immediately.
 	DelegateNormalShutdown bool
@@ -134,6 +137,7 @@ func NewHeadlessRunner(dockerManager tui.DockerInterface, options HeadlessOption
 		launchHooks:   options.LaunchHooks,
 		// keepScenario will be set when RunWithScenario is called
 		autoTerminateSeconds: options.AutoTerminateSeconds,
+		autoTerminateWait:    autoTerminateStopWait(options.ShutdownLingerSec),
 	}
 
 	// Set up trace file if specified
@@ -170,6 +174,7 @@ type MultiHostHeadlessRunner struct {
 	expectedStepIDs        []string
 	launchHooks            tui.LaunchHooks
 	autoTerminateSeconds   int
+	autoTerminateWait      time.Duration
 }
 
 // NewMultiHostHeadlessRunner creates a new multi-host headless runner
@@ -183,6 +188,7 @@ func NewMultiHostHeadlessRunner(orchestrator *tui.MultiHostOrchestrator, options
 		expectedStepIDs:        append([]string(nil), options.ExpectedStepIDs...),
 		launchHooks:            options.LaunchHooks,
 		autoTerminateSeconds:   options.AutoTerminateSeconds,
+		autoTerminateWait:      autoTerminateStopWait(options.ShutdownLingerSec),
 	}
 
 	// Set up trace file if specified
@@ -375,7 +381,7 @@ func (r *MultiHostHeadlessRunner) runWithParams(ctx context.Context, image strin
 func (r *MultiHostHeadlessRunner) stopSessionRunAtAutoTerminate(
 	ctx context.Context, testOrchestrator *tui.MultiHostTestOrchestrator, completionErr error,
 ) error {
-	stopErr := stopSessionRunAtAutoTerminate(ctx, r.autoTerminateSeconds, r.launchHooks, r.output)
+	stopErr := stopSessionRunAtAutoTerminate(ctx, r.autoTerminateSeconds, r.autoTerminateWait, r.launchHooks, r.output)
 	// Release presentation-only metrics and log polling.
 	if releaseErr := testOrchestrator.StopTest(); releaseErr != nil {
 		r.output("ERROR", fmt.Sprintf("Failed to stop multi-host presentation monitoring: %v", releaseErr))
@@ -728,7 +734,7 @@ func (r *HeadlessRunner) runBenchmark(ctx context.Context, scenarioPath string, 
 	}
 	if r.launchHooks.SessionManaged() {
 		if autoTerminated {
-			if err := stopSessionRunAtAutoTerminate(ctx, r.autoTerminateSeconds, r.launchHooks, func(category, message string) {
+			if err := stopSessionRunAtAutoTerminate(ctx, r.autoTerminateSeconds, r.autoTerminateWait, r.launchHooks, func(category, message string) {
 				r.output(category, "%s", message)
 			}); err != nil {
 				return err

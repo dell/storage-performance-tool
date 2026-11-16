@@ -400,6 +400,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		if headlessMode {
 			delegateShutdownToAutoResults := resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete
 			options := buildHeadlessOptions(traceOpts, verbose, apiPort, autoTerminate, delegateShutdownToAutoResults, replayStepIDs(generated))
+			options.ShutdownLingerSec = resultsOpts.ShutdownLingerSec
 			options.Context = replayContext
 			options.LaunchHooks = launchHooks
 			if autoTerminate > 0 {
@@ -438,6 +439,7 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 	startReplayAutoResults()
 	if headlessMode {
 		options := buildHeadlessOptions(traceOpts, verbose, apiPort, autoTerminate, false, replayStepIDs(generated))
+		options.ShutdownLingerSec = resultsOpts.ShutdownLingerSec
 		options.Context = replayContext
 		options.NetworkMode = networkMode
 		options.ResultsRoot = plannedResultsRoot
@@ -576,10 +578,11 @@ func writeAutoTerminateClosing(
 	if !runnerAutoTerminated && (runErr != nil || !outcome.AutoTerminated) {
 		return
 	}
-	switch outcome.AutoTerminateStop {
-	case autoTerminateStopConfirmed:
+	endedOnItsOwn := outcome.Tracker != nil && outcome.Tracker.FinalState != constants.StateStopped
+	switch {
+	case outcome.AutoTerminateStop == autoTerminateStopConfirmed && !endedOnItsOwn:
 		_, _ = fmt.Fprintf(out, "Auto-terminate: the run was stopped at the %d s deadline\n", seconds)
-	case autoTerminateRunAlreadyEnded:
+	case outcome.AutoTerminateStop == autoTerminateStopConfirmed, outcome.AutoTerminateStop == autoTerminateRunAlreadyEnded:
 		_, _ = fmt.Fprintf(out, "Auto-terminate: the run had already ended at the %d s deadline\n", seconds)
 	}
 }

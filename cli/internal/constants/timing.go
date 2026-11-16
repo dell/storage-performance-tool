@@ -37,8 +37,10 @@ const (
 
 	// AutoTerminateStopWaitTimeout bounds how long a presentation waits, after
 	// the auto-terminate deadline, for the run session to stop the run and
-	// reconcile its terminal state. Diagnostics and summary are not included.
-	AutoTerminateStopWaitTimeout = AutoResultsShutdownTimeout + 15*time.Second
+	// reconcile its terminal state: the stop and the shutdown fallback, each
+	// with the shutdown budget, and the default linger. Diagnostics and
+	// summary are not included.
+	AutoTerminateStopWaitTimeout = 2*AutoResultsShutdownTimeout + APILingerDefault
 
 	// Container lifecycle timeouts
 	ContainerShutdownGrace         = 2 * time.Second  // Grace period for container graceful shutdown

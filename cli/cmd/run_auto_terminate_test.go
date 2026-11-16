@@ -7,6 +7,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"slices"
@@ -41,6 +42,10 @@ const (
 	engineAlreadyCompleted
 	// engineStopsOnShutdown: only the /shutdown fallback ends the run.
 	engineStopsOnShutdown
+	// engineFailsDuringStop: the stop is accepted, then the run ends FAILED on its own.
+	engineFailsDuringStop
+	// engineCompletesDuringStop: the stop is accepted, then the run ends COMPLETED on its own.
+	engineCompletesDuringStop
 )
 
 // autoTerminateFake plays the engine for the shipped auto-results monitor: its run tracker, its
@@ -83,8 +88,13 @@ func (f *autoTerminateFake) WaitForCompletion(ctx context.Context, _ []string) (
 	case first, f.engine == engineNeverTerminal:
 		<-ctx.Done()
 		return nil, ctx.Err()
-	case f.engine == engineAlreadyCompleted:
+	case f.engine == engineAlreadyCompleted, f.engine == engineCompletesDuringStop:
 		return &portcheck.RunResult{FinalState: constants.StateCompleted, RunID: 41}, nil
+	case f.engine == engineFailsDuringStop:
+		return &portcheck.RunResult{
+			FinalState: constants.StateFailed, RunID: 41,
+			FailureStepID: "mock-step", FailureCategory: "IO", FailureMessage: "target refused writes",
+		}, nil
 	case f.engine == engineStopsOnShutdown:
 		select {
 		case <-f.shutdown:
@@ -217,6 +227,7 @@ const (
 	autoTerminateClosingStopped = "Auto-terminate: the run was stopped at the 1 s deadline"
 	autoTerminateClosingEnded   = "Auto-terminate: the run had already ended at the 1 s deadline"
 	autoTerminateMonitorStopped = "Auto-results: run stopped."
+	autoTerminateMonitorEnded   = "Auto-results: the run had already ended (%s) at the auto-terminate deadline."
 )
 
 type autoTerminateCommandCase struct {
@@ -232,6 +243,8 @@ type autoTerminateCommandCase struct {
 	wantEvents  []string
 	wantLines   []string
 	wantClosing string // "" when no closing line may be printed
+	// noStoppedLine: the monitor must not say the run stopped.
+	noStoppedLine bool
 }
 
 var autoTerminateCommandCases = []autoTerminateCommandCase{
@@ -279,8 +292,32 @@ var autoTerminateCommandCases = []autoTerminateCommandCase{
 	{
 		name: "run already ended at the deadline", shutdownOn: true, engine: engineAlreadyCompleted,
 		want: autoTerminateWantExit0, wantEvents: []string{"stop", "fetch", "shutdown"},
-		wantLines:   []string{"Auto-results: the run had already ended at the auto-terminate deadline."},
-		wantClosing: autoTerminateClosingEnded,
+		wantLines:   []string{fmt.Sprintf(autoTerminateMonitorEnded, constants.StateCompleted)},
+		wantClosing: autoTerminateClosingEnded, noStoppedLine: true,
+	},
+	{
+		name: "stop accepted but the run failed on its own", shutdownOn: true, stopFound: true,
+		engine: engineFailsDuringStop,
+		want:   autoTerminateWantStepFailure, wantEvents: []string{"stop", "fetch", "shutdown"},
+		wantLines:   []string{fmt.Sprintf(autoTerminateMonitorEnded, constants.StateFailed)},
+		wantClosing: autoTerminateClosingEnded, noStoppedLine: true,
+	},
+	{
+		name: "stop accepted but the run completed on its own", shutdownOn: true, stopFound: true,
+		engine: engineCompletesDuringStop,
+		want:   autoTerminateWantExit0, wantEvents: []string{"stop", "fetch", "shutdown"},
+		wantLines:   []string{fmt.Sprintf(autoTerminateMonitorEnded, constants.StateCompleted)},
+		wantClosing: autoTerminateClosingEnded, noStoppedLine: true,
+	},
+	{
+		name: "stop accepted, never terminal, and shutdown ends the run", shutdownOn: true, stopFound: true,
+		engine: engineStopsOnShutdown,
+		want:   autoTerminateWantExit0, wantEvents: []string{"stop", "shutdown", "fetch"},
+		wantLines: []string{
+			"Auto-results: the run reported no terminal state after the stop request.",
+			"Auto-results: run stopped by the shutdown.",
+		},
+		wantClosing: autoTerminateClosingStopped,
 	},
 	{
 		name: "every request failed", shutdownOn: true, stopFound: true, allFailed: true,
@@ -305,7 +342,6 @@ func autoTerminateCaseForReplay(test autoTerminateCommandCase) autoTerminateComm
 // checkAutoTerminateCommand asserts the exit status, the engine calls and the output.
 func checkAutoTerminateCommand(
 	t *testing.T, test autoTerminateCommandCase, err error, fake *autoTerminateFake, output string,
-	closingCaptured bool,
 ) {
 	t.Helper()
 	switch test.want {
@@ -332,14 +368,18 @@ func checkAutoTerminateCommand(
 			t.Errorf("output lacks %q:\n%s", line, output)
 		}
 	}
-	if closingCaptured {
-		for _, line := range []string{autoTerminateClosingStopped, autoTerminateClosingEnded} {
-			if want := line == test.wantClosing; strings.Contains(output, line) != want {
-				t.Errorf("output has %q = %t, want %t:\n%s", line, !want, want, output)
-			}
+	for _, line := range []string{autoTerminateClosingStopped, autoTerminateClosingEnded} {
+		if want := line == test.wantClosing; strings.Contains(output, line) != want {
+			t.Errorf("output has %q = %t, want %t:\n%s", line, !want, want, output)
 		}
 	}
-	if test.want == autoTerminateWantUnconfirmed && strings.Contains(output, autoTerminateMonitorStopped+"\n") {
+	// A failed stop request is named, without the monitor's own reconciliation cancellation.
+	if test.stopFails && test.want == autoTerminateWantUnconfirmed && err != nil &&
+		(!strings.Contains(err.Error(), "stop run: stop status 500") || strings.Contains(err.Error(), "context canceled")) {
+		t.Errorf("error = %q, want it to name the failed stop and not a cancellation", err)
+	}
+	if (test.noStoppedLine || test.want == autoTerminateWantUnconfirmed) &&
+		strings.Contains(output, autoTerminateMonitorStopped+"\n") {
 		t.Errorf("output claims the run stopped:\n%s", output)
 	}
 	if test.ctrlC {
@@ -415,7 +455,12 @@ func TestRunCommandAutoTerminateStopsTheRun(t *testing.T) {
 				installAutoTerminateMonitorSeams(t, fake)
 				output := &lockedBuffer{}
 				origAuto := startAutoResultsFunc
-				t.Cleanup(func() { startAutoResultsFunc = origAuto })
+				origClosing := runClosingOut
+				t.Cleanup(func() {
+					startAutoResultsFunc = origAuto
+					runClosingOut = origClosing
+				})
+				runClosingOut = output
 				startAutoResultsFunc = func(
 					ctx context.Context, baseURL, label, dir string, steps []string, runID int64, debug bool,
 					hosts []*hostparse.HostInfo, apiPort string, shutdownOn bool, linger int, scenarioPath string,
@@ -454,8 +499,7 @@ func TestRunCommandAutoTerminateStopsTheRun(t *testing.T) {
 					t.Fatalf("launches local=%d multi-host=%d, want %d/%d",
 						localLaunches.Load(), remoteLaunches.Load(), wantLocal, wantRemote)
 				}
-				// spt run prints its closing line on stdout, which the test doesn't capture.
-				checkAutoTerminateCommand(t, test, err, fake, output.String(), false)
+				checkAutoTerminateCommand(t, test, err, fake, output.String())
 			})
 		}
 	}
@@ -529,7 +573,7 @@ func TestReplayCommandAutoTerminateStopsTheRun(t *testing.T) {
 					t.Fatalf("launches local=%d multi-host=%d, want %d/%d",
 						localLaunches.Load(), remoteLaunches.Load(), wantLocal, wantRemote)
 				}
-				checkAutoTerminateCommand(t, test, err, fake, output.String(), true)
+				checkAutoTerminateCommand(t, test, err, fake, output.String())
 			})
 		}
 	}

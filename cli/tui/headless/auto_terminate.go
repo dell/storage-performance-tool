@@ -118,8 +118,20 @@ func channelClosed(ch <-chan struct{}) bool {
 	}
 }
 
-// autoTerminateStopWaitTimeout bounds the wait for the session; tests shorten it.
-var autoTerminateStopWaitTimeout = constants.AutoTerminateStopWaitTimeout
+// autoTerminateStopBudget is the auto-results monitor's budget for each of
+// its stop request and its shutdown fallback; tests shorten it.
+var autoTerminateStopBudget = constants.AutoResultsShutdownTimeout
+
+// autoTerminateStopWait bounds the wait for the session after the stop
+// request. It covers the monitor's stop and its shutdown fallback, each with
+// its own budget, and the configured shutdown linger.
+func autoTerminateStopWait(shutdownLingerSec int) time.Duration {
+	linger := time.Duration(shutdownLingerSec) * time.Second
+	if shutdownLingerSec <= 0 {
+		linger = constants.APILingerDefault
+	}
+	return 2*autoTerminateStopBudget + linger
+}
 
 // stopSessionRunAtAutoTerminate asks the run session to stop the workload at
 // the deadline and waits, bounded, until the session reports it terminal, so
@@ -128,9 +140,10 @@ var autoTerminateStopWaitTimeout = constants.AutoTerminateStopWaitTimeout
 // wait that times out fails the run: the stop was not confirmed, and the
 // results may be partial.
 func stopSessionRunAtAutoTerminate(
-	ctx context.Context, seconds int, hooks tui.LaunchHooks, output func(category, message string),
+	ctx context.Context, seconds int, wait time.Duration, hooks tui.LaunchHooks,
+	output func(category, message string),
 ) error {
-	err := hooks.StopWorkloadAndWait(ctx, autoTerminateStopWaitTimeout)
+	err := hooks.StopWorkloadAndWait(ctx, wait)
 	if err == nil {
 		return nil
 	}

@@ -634,6 +634,8 @@ var (
 	generateRunSummaryFunc       = generateRunSummary
 	requestShutdownAllFunc       = requestShutdownAll
 	requestRunStopFunc           = requestRunStop
+	// runClosingOut receives spt run's closing auto-terminate line; tests capture it.
+	runClosingOut io.Writer = os.Stdout
 )
 
 var integrityRuntimeGOOS = runtime.GOOS
@@ -858,7 +860,8 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 			recordTerminalReconciliation("post-stop", reconciled)
 			switch {
 			case stopErr != nil:
-				outcome.TrackerErr = errors.Join(fmt.Errorf("stop run: %w", stopErr), outcome.TrackerErr)
+				// The reconciliation's error is only its own cancellation above.
+				outcome.TrackerErr = fmt.Errorf("stop run: %w", stopErr)
 				logging.LogError("auto-results", "auto-terminate stop request failed", stopErr)
 				writeProgress("Auto-results: the run stop request failed; see logs for details.\n")
 				return autoTerminateStopUnconfirmed
@@ -869,8 +872,16 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				writeProgress("Auto-results: the run reported no terminal state after the stop request.\n")
 				return autoTerminateStopUnconfirmed
 			case !stopped && reconciled.result.FinalState != constants.StateStopped:
-				writeProgress("Auto-results: the run had already ended at the auto-terminate deadline.\n")
+				writeProgress("Auto-results: the run had already ended (%s) at the auto-terminate deadline.\n",
+					reconciled.result.FinalState)
 				return autoTerminateRunAlreadyEnded
+			case reconciled.result.FinalState != constants.StateStopped:
+				// The run ended on its own while the stop was in flight. The
+				// stop still counts as confirmed, so the exit rules stay those
+				// of a stopped run; only the wording differs.
+				writeProgress("Auto-results: the run had already ended (%s) at the auto-terminate deadline.\n",
+					reconciled.result.FinalState)
+				return autoTerminateStopConfirmed
 			default:
 				writeProgress("Auto-results: run stopped.\n")
 				return autoTerminateStopConfirmed
@@ -1019,10 +1030,13 @@ func startAutoResultsMonitor(parentCtx context.Context, baseURL, label, resultsD
 				if outcome.AutoTerminateStop == autoTerminateStopUnconfirmed && shutdownOn {
 					// The interrupt route's shutdown also ends the run; its
 					// reconciliation can still confirm the stop.
+					stopFailure := outcome.TrackerErr
 					runShutdown(true)
 					if outcome.TrackerErr == nil {
 						outcome.AutoTerminateStop = autoTerminateStopConfirmed
 						writeProgress("Auto-results: run stopped by the shutdown.\n")
+					} else if stopFailure != nil {
+						outcome.TrackerErr = fmt.Errorf("%w; %w", stopFailure, outcome.TrackerErr)
 					}
 				}
 			} else if interruptedTracking && shutdownOn {
@@ -2635,7 +2649,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			autoTerminated, normalizedErr := normalizeHeadlessAutoTerminate(err, cleaner, 30*time.Second)
 			waitForAutoResults()
 			finalizeTraceArtifact()
-			writeAutoTerminateClosing(os.Stdout, autoTerminate, autoTerminated, err, autoMonitor != nil, autoOutcome)
+			writeAutoTerminateClosing(runClosingOut, autoTerminate, autoTerminated, err, autoMonitor != nil, autoOutcome)
 			return resolveRunCompletionError(normalizedErr, autoOutcome, autoOutcomeReceived, params)
 		}
 
@@ -2695,6 +2709,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 
 				delegateShutdownToAutoResults := resultsOpts.AutoResults && resultsOpts.ShutdownOnComplete
 				options := buildHeadlessOptions(traceOpts, verbose, "", autoTerminate, delegateShutdownToAutoResults, expectedStepIDs)
+				options.ShutdownLingerSec = resultsOpts.ShutdownLingerSec
 				options.Context = runContext
 				options.LaunchHooks = launchHooks
 				options.ScenarioContent = prepared.ScenarioJS()
@@ -2741,6 +2756,7 @@ seeded %s objects, batches %d targets per logical request, and does not verify r
 			verbose, _ := cmd.Flags().GetBool("verbose")
 
 			options := buildHeadlessOptions(traceOpts, verbose, apiPort, autoTerminate, false, nil)
+			options.ShutdownLingerSec = resultsOpts.ShutdownLingerSec
 			options.Context = runContext
 			options.NetworkMode = networkMode
 			options.ResultsRoot = plannedResultsRoot

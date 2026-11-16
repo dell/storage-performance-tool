@@ -41,7 +41,7 @@ var autoTerminateRoutes = []autoTerminateRoute{
 			start func(context.Context) error) error {
 			t.Helper()
 			runner, err := NewHeadlessRunner(tui.NewMockDockerManager(), HeadlessOptions{
-				LaunchHooks: hooks, AutoTerminateSeconds: 1, TraceFile: tracePath,
+				LaunchHooks: hooks, AutoTerminateSeconds: 1, TraceFile: tracePath, ShutdownLingerSec: 1,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -70,7 +70,7 @@ var autoTerminateRoutes = []autoTerminateRoute{
 				{Host: "worker.example", Original: "worker.example"},
 			}, 2)
 			runner, err := NewMultiHostHeadlessRunner(orchestrator, HeadlessOptions{
-				LaunchHooks: hooks, AutoTerminateSeconds: 1, TraceFile: tracePath,
+				LaunchHooks: hooks, AutoTerminateSeconds: 1, TraceFile: tracePath, ShutdownLingerSec: 1,
 				DelegateNormalShutdown: true,
 			})
 			if err != nil {
@@ -211,9 +211,9 @@ func TestAutoTerminateBeforeSubmissionNamesAutoTerminate(t *testing.T) {
 // error that names auto-terminate: the stop was not confirmed. Before, the runner warned and
 // returned the auto-terminate result, which exits 0.
 func TestSessionManagedAutoTerminateUnconfirmedStopFailsTheRun(t *testing.T) {
-	original := autoTerminateStopWaitTimeout
-	autoTerminateStopWaitTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { autoTerminateStopWaitTimeout = original })
+	original := autoTerminateStopBudget
+	autoTerminateStopBudget = 50 * time.Millisecond
+	t.Cleanup(func() { autoTerminateStopBudget = original })
 	for _, route := range autoTerminateRoutes {
 		t.Run(route.name, func(t *testing.T) {
 			session := runcontrol.NewSession()
@@ -229,6 +229,36 @@ func TestSessionManagedAutoTerminateUnconfirmedStopFailsTheRun(t *testing.T) {
 			}
 			if autoTerminated, _ := AutoTerminateState(err); autoTerminated {
 				t.Fatalf("an unconfirmed stop was reported as a stopped run: %v", err)
+			}
+		})
+	}
+}
+
+// The runner waits for the monitor's stop and its shutdown fallback, each with its own budget,
+// plus the shutdown linger. A stop the fallback confirms after one and a half budgets, the old
+// wait, still ends as a stopped run. The budgets are scaled down from 30 s to 100 ms; the linger
+// is 1 s.
+func TestSessionManagedAutoTerminateWaitsForTheShutdownFallback(t *testing.T) {
+	original := autoTerminateStopBudget
+	autoTerminateStopBudget = 100 * time.Millisecond
+	t.Cleanup(func() { autoTerminateStopBudget = original })
+	for _, route := range autoTerminateRoutes {
+		t.Run(route.name, func(t *testing.T) {
+			session := runcontrol.NewSession()
+			hooks := tui.NewSessionLaunchHooks(session, nil)
+			go func() {
+				<-session.WorkloadStopRequested()
+				// The stop's budget ran out; the shutdown fallback confirms the stop.
+				time.Sleep(4 * autoTerminateStopBudget)
+				session.MarkWorkloadTerminal()
+			}()
+			err := route.run(t, context.Background(), hooks, filepath.Join(t.TempDir(), "trace.log"),
+				func(context.Context) error {
+					hooks.NotifySubmitted()
+					return nil
+				})
+			if autoTerminated, cleanupComplete := AutoTerminateState(err); !autoTerminated || !cleanupComplete {
+				t.Fatalf("runner error = %v, want the auto-terminate result of a confirmed stop", err)
 			}
 		})
 	}
