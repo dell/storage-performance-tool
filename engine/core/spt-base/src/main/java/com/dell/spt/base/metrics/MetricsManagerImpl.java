@@ -222,8 +222,26 @@ public class MetricsManagerImpl extends TaskBase implements MetricsManager {
 		}
 	}
 
+	/**
+	 * Writes the step's terminal outputs whatever the caller's interrupt status. A stopped
+	 * distributed step reaches here with its interrupt flag still set, and the interrupt-sensitive
+	 * output lock would otherwise throw before the totals, steady totals and {@code result.xml} are
+	 * written. The flag is cleared for the duration of the call and restored on return, so the
+	 * caller still sees the interrupt.
+	 */
 	@Override
 	public void unregister(final MetricsContext metricsCtx) {
+		final boolean interrupted = Thread.interrupted();
+		try {
+			unregisterContext(metricsCtx);
+		} finally {
+			if (interrupted) {
+				Thread.currentThread().interrupt();
+			}
+		}
+	}
+
+	private void unregisterContext(final MetricsContext metricsCtx) {
 		try (final Instance logCtx = put(KEY_STEP_ID, metricsCtx.loadStepId()).put(KEY_CLASS_NAME, getClass().getSimpleName())) {
 			if (allMetrics.remove(metricsCtx)) {
 				boolean lockAcquired = false;
