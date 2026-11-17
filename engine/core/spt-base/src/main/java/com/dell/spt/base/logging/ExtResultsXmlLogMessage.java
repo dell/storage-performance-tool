@@ -4,12 +4,14 @@ import static com.dell.spt.base.Constants.K;
 import static com.dell.spt.base.Constants.MIB;
 import static com.dell.spt.base.Constants.UNIT_MIB_PER_SECOND_XML;
 
+import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.DistributedAllMetricsSnapshot;
 import com.dell.spt.base.metrics.snapshot.RateMetricSnapshot;
 import com.dell.spt.base.metrics.snapshot.TimingMetricSnapshot;
 import com.dell.spt.base.util.BinarySizeFormat;
+import com.github.akurilov.commons.system.SizeInBytes;
 import org.apache.logging.log4j.message.AsynchronouslyFormattable;
 
 import java.time.ZoneOffset;
@@ -31,13 +33,23 @@ public final class ExtResultsXmlLogMessage extends LogMessageBase {
 					.ofPattern("yyyy-MM-dd HH:mm:ss")
 					.withZone(ZoneOffset.UTC);
 
-	private final MetricsContext<?> metricsCtx;
+	// Captured when the message is built: Log4j formats it later on its own thread, and by then
+	// the step may have closed the context, which resets its start time to -1.
+	private final String loadStepId;
+	private final long startTimeMillis;
+	private final OpType opType;
+	private final int concurrencyLimit;
+	private final SizeInBytes itemDataSize;
 	private final AllMetricsSnapshot snapshot;
 
 	public ExtResultsXmlLogMessage(
 					final MetricsContext<?> metricsCtx,
 					final AllMetricsSnapshot snapshot) {
-		this.metricsCtx = metricsCtx;
+		this.loadStepId = metricsCtx.loadStepId();
+		this.startTimeMillis = metricsCtx.startTimeStamp();
+		this.opType = metricsCtx.opType();
+		this.concurrencyLimit = metricsCtx.concurrencyLimit();
+		this.itemDataSize = metricsCtx.itemDataSize();
 		this.snapshot = snapshot;
 	}
 
@@ -49,7 +61,6 @@ public final class ExtResultsXmlLogMessage extends LogMessageBase {
 		final RateMetricSnapshot successSnapshot = snapshot.successSnapshot();
 		final RateMetricSnapshot byteSnapshot = snapshot.byteSnapshot();
 
-		final long startTimeMillis = metricsCtx.startTimeStamp();
 		final long elapsedTimeMillis = snapshot.elapsedTimeMillis();
 		final long endTimeMillis = startTimeMillis + elapsedTimeMillis;
 
@@ -58,7 +69,7 @@ public final class ExtResultsXmlLogMessage extends LogMessageBase {
 						: 1;
 
 		strb.append("<result id=\"")
-						.append(escapeXml(metricsCtx.loadStepId()))
+						.append(escapeXml(loadStepId))
 						.append('"');
 
 		strb.append(" StartDate=\"")
@@ -76,14 +87,14 @@ public final class ExtResultsXmlLogMessage extends LogMessageBase {
 						.append('"');
 
 		strb.append(" operation=\"")
-						.append(metricsCtx.opType().name())
+						.append(opType.name())
 						.append('"');
 
 		strb.append(" threads=\"")
-						.append(metricsCtx.concurrencyLimit())
+						.append(concurrencyLimit)
 						.append('"');
 		strb.append(" RequestThreads=\"")
-						.append(metricsCtx.concurrencyLimit())
+						.append(concurrencyLimit)
 						.append('"');
 		strb.append(" clients=\"")
 						.append(nodeCount)
@@ -98,7 +109,7 @@ public final class ExtResultsXmlLogMessage extends LogMessageBase {
 						.append('"');
 
 		strb.append(" filesize=\"")
-						.append(BinarySizeFormat.formatSize(metricsCtx.itemDataSize()))
+						.append(BinarySizeFormat.formatSize(itemDataSize))
 						.append('"');
 
 		strb.append(" tps=\"")

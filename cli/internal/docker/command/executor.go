@@ -349,15 +349,16 @@ func runCopy(ctx context.Context, cmd *exec.Cmd, host *hostparse.HostInfo, what 
 		detail = ": " + trimmed
 	}
 	if ctx.Err() != nil {
-		return fmt.Errorf("%s stopped: %w (%s: %w%s)", what, contextEnd(ctx), cmd.Args[0], err, detail)
+		return fmt.Errorf("%s stopped: %w (%s: %w%s)", what, ContextEnd(ctx), cmd.Args[0], err, detail)
 	}
 	return fmt.Errorf("%s failed: %w%s", what, err, detail)
 }
 
-// contextEnd returns why ctx ended. A cause that matches ctx.Err(), such as
+// ContextEnd returns why ctx ended. A cause that matches ctx.Err(), such as
 // signal.NotifyContext's "interrupt signal received", is returned as is;
 // another cause follows ctx.Err(). Either way errors.Is matches ctx.Err().
-func contextEnd(ctx context.Context) error {
+// Call it only after ctx has ended.
+func ContextEnd(ctx context.Context) error {
 	err := ctx.Err()
 	cause := context.Cause(ctx)
 	switch {
