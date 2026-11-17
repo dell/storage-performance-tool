@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -471,6 +470,11 @@ func TestConflictResolver_ExecuteResolutionStrategy_UnknownStrategy(t *testing.T
 
 // Integration tests with mock servers
 func TestConflictResolver_Integration_SptConflict(t *testing.T) {
+	// Recorded engine answers (see checker_fingerprint_test.go), so the fake
+	// takes the SPT route.
+	engineRunBadRequest := readFingerprintFixture(t, "jetty94-run-ifmatch-star.html")
+	engineMetricsJSON := readFingerprintFixture(t, "metrics-json-schema5.json")
+
 	// Create a mock Spt server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -601,21 +605,6 @@ func TestConflictResolver_EmptyMetricsServiceIsNotSpt(t *testing.T) {
 			}
 		})
 	}
-}
-
-// Recorded engine answers (see checker_fingerprint_test.go) used by the
-// resolver fakes that must take the SPT route.
-var (
-	engineRunBadRequest = mustReadTestdata("jetty94-run-ifmatch-star.html")
-	engineMetricsJSON   = mustReadTestdata("metrics-json-schema5.json")
-)
-
-func mustReadTestdata(name string) string {
-	data, err := os.ReadFile(filepath.Join("testdata", name))
-	if err != nil {
-		panic(err)
-	}
-	return string(data)
 }
 
 // A service answering a camelCase metrics body, or 200 JSON on GET /run, is

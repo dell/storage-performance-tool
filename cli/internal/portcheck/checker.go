@@ -243,7 +243,7 @@ func (p *PortChecker) validateSptMetricsResponse(resp *http.Response) bool {
 	logging.LogDebug("portcheck", "received metrics response", "body", bodyStr)
 
 	// An empty body ([], [ ] or null) is not SPT evidence: no engine since
-	// v5.10.0 sends one on a probed path. /metrics/json always holds at least
+	// v5.0.1 sends one on a probed path. /metrics/json always holds at least
 	// an idle node row, and /metrics is Prometheus text or empty. Such a body
 	// falls through to the object parse below: [] and [ ] fail it, and null
 	// parses to a nil map with no SPT field.
