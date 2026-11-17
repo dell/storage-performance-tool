@@ -9,6 +9,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ENV_FILE="${REPO_ROOT}/cli/.env"
+# shellcheck source=/dev/null
 [ -f "$ENV_FILE" ] && source "$ENV_FILE"
 
 # Configuration
@@ -31,6 +32,8 @@ if [ -z "${WORKER_HOSTS}" ]; then
 fi
 
 SSH_OPTS=${SSH_OPTS:-"-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"}
+# SSH_OPTS is a whitespace-separated option list; split it into words once.
+read -r -d '' -a SSH_OPT_ARR <<<"$SSH_OPTS" || true
 
 # Parse optional args
 while [ $# -gt 0 ]; do
@@ -73,6 +76,12 @@ echo "Distributing Docker image: ${FULL_IMAGE}"
 echo "To hosts: ${ALL_HOSTS}"
 echo ""
 
+# The save-side check reads the tar's manifest.json with python3.
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "ERROR: python3 is required to check the saved image" >&2
+  exit 1
+fi
+
 # Check if image exists locally
 if ! docker image inspect "${FULL_IMAGE}" >/dev/null 2>&1; then
   echo "ERROR: Image ${FULL_IMAGE} not found locally" >&2
@@ -80,10 +89,58 @@ if ! docker image inspect "${FULL_IMAGE}" >/dev/null 2>&1; then
   exit 1
 fi
 
+# Platform and layer identity of an image, as `docker image inspect` reports it.
+# The same format runs locally and on each worker, so the two can be compared.
+IDENTITY_FORMAT='{{.Os}}/{{.Architecture}} {{json .RootFS.Layers}}'
+
 # Get image size for progress reporting
 IMAGE_SIZE=$(docker image inspect "${FULL_IMAGE}" --format='{{.Size}}' | awk '{print $1/1024/1024 " MiB"}')
+LOCAL_IDENTITY=$(docker image inspect "${FULL_IMAGE}" --format="${IDENTITY_FORMAT}")
 echo "Image size: ${IMAGE_SIZE}"
 echo ""
+
+# check_saved_tar TAR IMAGE: succeed when the tar's manifest.json lists a
+# non-empty Layers list for IMAGE and the tar holds its Config and every layer.
+# A manifest-only save (no config or layer blobs) loads with exit 0 but cannot
+# run, so exit codes alone don't catch it. Prints the reason on failure.
+check_saved_tar() {
+  local tar_file="$1" image="$2" listing manifest_entry
+  if ! listing=$(tar -tf "${tar_file}" 2>&1); then
+    echo "cannot list the tar: ${listing}"
+    return 1
+  fi
+  manifest_entry=$(sed -n '/^\(\.\/\)\{0,1\}manifest\.json$/{p;q;}' <<<"${listing}")
+  if [ -z "${manifest_entry}" ]; then
+    echo "the tar holds no manifest.json"
+    return 1
+  fi
+  tar -xOf "${tar_file}" "${manifest_entry}" 2>/dev/null | python3 -c '
+import json, sys
+
+image = sys.argv[1]
+present = {line[2:] if line.startswith("./") else line for line in sys.argv[2].splitlines()}
+try:
+    manifest = json.load(sys.stdin)
+except ValueError as err:
+    sys.exit("manifest.json is not valid JSON: %s" % err)
+if not isinstance(manifest, list) or not manifest:
+    sys.exit("manifest.json lists no image")
+entries = [e for e in manifest if isinstance(e, dict) and image in (e.get("RepoTags") or [])]
+if not entries:
+    if len(manifest) != 1 or not isinstance(manifest[0], dict):
+        sys.exit("manifest.json lists %d images and none is tagged %s; pass --image IMAGE:TAG"
+                 % (len(manifest), image))
+    entries = manifest
+entry = entries[0]
+layers = entry.get("Layers") or []
+if not layers:
+    sys.exit("manifest.json lists no layers")
+missing = [p for p in [entry.get("Config") or ""] + layers if p not in present]
+if missing:
+    sys.exit("%d of the %d config and layer files manifest.json names are not in the tar (first: %s)"
+             % (len(missing), len(layers) + 1, missing[0] or "<no Config>"))
+' "${image}" "${listing}" 2>&1
+}
 
 # Create temp file for the image tar
 TEMP_DIR=$(mktemp -d)
@@ -93,7 +150,14 @@ IMAGE_TAR="${TEMP_DIR}/spt-image.tar"
 echo "Saving image to tar file..."
 docker save "${FULL_IMAGE}" -o "${IMAGE_TAR}"
 TAR_SIZE=$(du -h "${IMAGE_TAR}" | cut -f1)
-echo "Image tar created: ${TAR_SIZE}"
+if ! tar_problem=$(check_saved_tar "${IMAGE_TAR}" "${FULL_IMAGE}"); then
+  echo "ERROR: The saved image ${FULL_IMAGE} has no layer content: ${tar_problem}" >&2
+  echo "Image tar: ${TAR_SIZE}; local image size: ${IMAGE_SIZE}" >&2
+  echo "The local image store may be missing content shared with the base image." >&2
+  echo "Re-pull the base image or rebuild the image, then run this script again." >&2
+  exit 1
+fi
+echo "Image tar created: ${TAR_SIZE} (local image size: ${IMAGE_SIZE})"
 echo ""
 
 IFS=',' read -r -a HOST_ARR <<<"$ALL_HOSTS"
@@ -106,13 +170,27 @@ for target in "${HOST_ARR[@]}"; do
 
   echo "--- [$target_trimmed] distributing image"
   
-  # Transfer and load the image
-  if cat "${IMAGE_TAR}" | ssh $SSH_OPTS "$target_trimmed" 'docker load -q'; then
-    echo "✓ Successfully loaded image on $target_trimmed"
-    success_count=$((success_count+1))
-  else
+  # Transfer and load the image, then check that the worker's copy has the
+  # local image's platform and layers: a load can exit 0 without them.
+  if ! ssh "${SSH_OPT_ARR[@]}" "$target_trimmed" 'docker load -q' <"${IMAGE_TAR}"; then
     echo "✗ Failed to distribute image to $target_trimmed" >&2
     failed_nodes+=("$target_trimmed")
+    continue
+  fi
+  remote_cmd="docker image inspect --format=$(printf '%q' "${IDENTITY_FORMAT}") $(printf '%q' "${FULL_IMAGE}")"
+  # remote_cmd is built and quoted here on purpose, for the remote shell.
+  # shellcheck disable=SC2029
+  if ! remote_identity=$(ssh "${SSH_OPT_ARR[@]}" "$target_trimmed" "${remote_cmd}" </dev/null); then
+    echo "✗ Loaded image on $target_trimmed but could not inspect it there" >&2
+    failed_nodes+=("$target_trimmed")
+  elif [ "${remote_identity}" != "${LOCAL_IDENTITY}" ]; then
+    echo "✗ Image loaded on $target_trimmed does not match the local image" >&2
+    echo "  local:  ${LOCAL_IDENTITY}" >&2
+    echo "  remote: ${remote_identity}" >&2
+    failed_nodes+=("$target_trimmed")
+  else
+    echo "✓ Successfully loaded image on $target_trimmed"
+    success_count=$((success_count+1))
   fi
 done
 

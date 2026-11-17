@@ -10,6 +10,7 @@ import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.LoadStepFactory;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.PreparationStatus;
+import com.dell.spt.base.load.step.local.LoadStepLocalBase;
 import com.dell.spt.base.item.op.deletion.DeleteObjectLifecycleSnapshot;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
@@ -29,6 +30,7 @@ public final class LoadStepServiceImpl extends ServiceBase implements LoadStepSe
 
 	private final LoadStep localLoadStep;
 	private CompletableFuture<Void> durationDrainTask;
+	private volatile boolean released;
 
 	public LoadStepServiceImpl(
 					final int port,
@@ -83,13 +85,61 @@ public final class LoadStepServiceImpl extends ServiceBase implements LoadStepSe
 		}
 	}
 
+	/**
+	 * A close with no stop before it, as at worker shutdown or after a lost stop call, stops first, as
+	 * every close does. A local slice stops once (see {@code LoadStepLocalBase.doStop}), so after that
+	 * stop fails the close's own stop passes and reaches the release below, which throws the stop's
+	 * failure. A slice whose close will be retried, and a local step of another kind, close as before.
+	 */
+	@Override
+	public final void close() throws IOException {
+		RuntimeException stopFailure = null;
+		if (localLoadStep instanceof LoadStepLocalBase local && !local.awaitsCleanupRetry()) {
+			try {
+				stop();
+			} catch (final RuntimeException e) {
+				stopFailure = e;
+			}
+		}
+		super.close();
+		if (stopFailure != null) {
+			// The release did not throw it again; it must not be lost.
+			throw stopFailure;
+		}
+	}
+
+	/**
+	 * Closes the local step, then unexports and unbinds this service: always after a successful close,
+	 * and after a failed one unless the close will be retried (see {@link #cleanupRetryExpected()}).
+	 * A released service releases nothing again.
+	 */
 	@Override
 	protected final void doClose() throws IOException {
-		try (final Instance logCtx = put(KEY_CLASS_NAME, getClass().getSimpleName()).put(KEY_STEP_ID, localLoadStep.loadStepId())) {
-			localLoadStep.close();
-			super.doStop();
-			Loggers.MSG.info("Step service for \"{}\" is closed", localLoadStep.loadStepId());
+		if (released) {
+			return;
 		}
+		try (final Instance logCtx = put(KEY_CLASS_NAME, getClass().getSimpleName()).put(KEY_STEP_ID, safeLoadStepId())) {
+			var closed = false;
+			try {
+				localLoadStep.close();
+				closed = true;
+			} finally {
+				if (closed || !cleanupRetryExpected()) {
+					released = true;
+					super.doStop();
+				}
+			}
+			Loggers.MSG.info("Step service for \"{}\" is closed", safeLoadStepId());
+		}
+	}
+
+	/**
+	 * A standalone DELETE in duration mode is closed again after a failed close, until its last retry,
+	 * and the retry needs this endpoint. Any other local slice is released at its first close. A local
+	 * step of another kind keeps the endpoint after a failed close, as before.
+	 */
+	private boolean cleanupRetryExpected() {
+		return !(localLoadStep instanceof LoadStepLocalBase local) || local.awaitsCleanupRetry();
 	}
 
 	@Override

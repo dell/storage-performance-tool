@@ -26,6 +26,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import org.eclipse.jetty.server.Server;
+import org.eclipse.jetty.server.ServerConnector;
 import org.eclipse.jetty.servlet.ServletContextHandler;
 import org.eclipse.jetty.servlet.ServletHolder;
 import com.dell.spt.testing.tags.IntegrationTest;
@@ -34,7 +35,6 @@ import com.dell.spt.testing.tags.IntegrationTest;
 @IntegrationTest
 public class ExposedMetricsTest {
 
-	private static final int PORT = 1111;
 	private static final String CONTEXT = "/metrics";
 	private static final int ITERATION_COUNT = 10;
 	private static final int MARK_DUR = 1_100_000; // dur must be more than lat (dur > lat)
@@ -55,7 +55,9 @@ public class ExposedMetricsTest {
 	private final SizeInBytes ITEM_DATA_SIZE = ItemSize.SMALL.getValue();
 	private final int UPDATE_INTERVAL_SEC = (int) TimeUnit.MICROSECONDS.toSeconds(MARK_DUR);
 	private Supplier<List<AllMetricsSnapshot>> snapshotsSupplier;
-	private final Server server = new Server(PORT);
+	// Port 0: the OS picks a free port; the bound port is read after start().
+	private final Server server = new Server(0);
+	private int port;
 	//
 	private DistributedMetricsContext distributedMetricsContext;
 	private MetricsContext metricsContext;
@@ -68,6 +70,7 @@ public class ExposedMetricsTest {
 		server.setHandler(context);
 		context.addServlet(new ServletHolder(new MetricsServlet()), CONTEXT);
 		server.start();
+		port = ((ServerConnector) server.getConnectors()[0]).getLocalPort();
 		//
 		metricsContext = MetricsContextImpl.builder()
 						.loadStepId(STEP_ID)
@@ -114,7 +117,7 @@ public class ExposedMetricsTest {
 			metricsContext.refreshLastSnapshot();
 			TimeUnit.MICROSECONDS.sleep(MARK_DUR);
 		}
-		final var result = resultFromServer("http://localhost:" + PORT + CONTEXT);
+		final var result = resultFromServer("http://localhost:" + port + CONTEXT);
 		System.out.println(result);
 		//
 		testHelpLine(result);

@@ -668,6 +668,182 @@ final class S3VersionedRequestTest {
 		assertFalse(driver.namesLegacyVersion(explicit));
 	}
 
+	// ---------- a ~ in the item's path ----------
+
+	/**
+	 * After {@code result()} the name holds the item's path, so a {@code ~} in that path is not the
+	 * version separator: a retry addresses the key under {@code /b/run~1} and selects no version.
+	 */
+	@Test
+	void aRetryUnderAPathWithATildeAddressesTheKey() throws Exception {
+		final var driver = driver(true, 4, false);
+		final Map<OpType, HttpMethod> methods = new LinkedHashMap<>();
+		methods.put(OpType.CREATE, HttpMethod.PUT);
+		methods.put(OpType.READ, HttpMethod.GET);
+		methods.put(OpType.STAT, HttpMethod.HEAD);
+		methods.put(OpType.DELETE, HttpMethod.DELETE);
+		methods.put(OpType.UPDATE, HttpMethod.PUT);
+		final List<String> expected = new ArrayList<>();
+		final List<String> sent = new ArrayList<>();
+		for (final var entry : methods.entrySet()) {
+			final var type = entry.getKey();
+			final var first = tildePathOp(type, "key");
+			assertEquals("/b/run~1/key", driver.httpRequest(first, HOST).uri(), type::toString);
+
+			final var retried = retry(first);
+			assertEquals("/b/run~1/key", retried.item().name(), type::toString);
+			final var request = driver.httpRequest(retried, HOST);
+
+			expected.add(type + " " + entry.getValue() + " /b/run~1/key null");
+			sent.add(type + " " + request.method() + " " + request.uri() + " " + request.headers().get(VERSION_HEADER));
+		}
+		assertEquals(expected, sent);
+	}
+
+	/**
+	 * The engine recycles {@code op.result()}. A previous response without {@code x-amz-version-id}
+	 * leaves the name with only the path's {@code ~}, which selects no version; one with a version
+	 * appends its suffix to the whole name, which then selects it.
+	 */
+	@Test
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	void aRecycledReadUnderAPathWithATildeAddressesTheKey() throws Exception {
+		final var driver = driver(true, 4, false);
+		final var handler = new S3ResponseHandler(driver, false, true, null);
+
+		final Operation unversioned = tildePathOp(OpType.READ, "key");
+		driver.httpRequest(unversioned, HOST);
+		handler.handleResponseHeaders(null, unversioned, new DefaultHttpHeaders());
+		final var recycled = retry(unversioned);
+		assertEquals("/b/run~1/key", driver.httpRequest(recycled, HOST).uri());
+
+		final Operation versioned = tildePathOp(OpType.READ, "key");
+		driver.httpRequest(versioned, HOST);
+		handler.handleResponseHeaders(null, versioned, versionResponse("v1"));
+		final var recycledVersion = retry(versioned);
+		assertEquals("/b/run~1/key~v1", recycledVersion.item().name());
+		assertEquals("/b/run~1/key?versionId=v1", driver.httpRequest(recycledVersion, HOST).uri());
+	}
+
+	/** A copy names its item by its source path on the first attempt, so that path's {@code ~} stays. */
+	@Test
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	void aCopyFromAPathWithATildeKeepsTheWholeName() throws Exception {
+		final var driver = driver(true, 4, false);
+		final var handler = new S3ResponseHandler(driver, false, true, null);
+		final Operation copy = op(OpType.CREATE, "/src/run~1/k0", "/src", "/dst");
+
+		final var request = driver.httpRequest(copy, HOST);
+		assertEquals(HttpMethod.PUT, request.method());
+		assertEquals("/dst/src/run~1/k0", request.uri());
+		assertEquals("/src/run~1/k0", request.headers().get(S3Api.KEY_X_AMZ_COPY_SOURCE));
+		assertNull(request.headers().get(VERSION_HEADER));
+
+		handler.handleResponseHeaders(null, copy, versionResponse("v9"));
+		assertEquals("/src/run~1/k0~v9", copy.item().name());
+	}
+
+	@Test
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	void aResponseUnderAPathWithATildeAppendsTheVersionToTheWholeName() throws Exception {
+		assertEquals("/b/run~1/key~v2", S3StorageDriver.withLegacyVersion("/b/run~1/key", "v2"));
+		assertEquals("/b/run~1/key~v2", S3StorageDriver.withLegacyVersion("/b/run~1/key~v1", "v2"));
+		assertEquals(-1, S3StorageDriver.legacyVersionStart("/b/run~1/key"));
+		assertEquals("/b/run~1/key".length(), S3StorageDriver.legacyVersionStart("/b/run~1/key~v1"));
+		assertEquals(-1, S3StorageDriver.legacyVersionStart("/b/run~1/"));
+
+		final var driver = driver(true, 4, false);
+		final var handler = new S3ResponseHandler(driver, false, true, null);
+		for (final var type : List.of(OpType.CREATE, OpType.READ, OpType.STAT, OpType.UPDATE, OpType.DELETE)) {
+			final Operation op = retry(tildePathOp(type, "key"));
+			driver.httpRequest(op, HOST);
+			handler.handleResponseHeaders(null, op, versionResponse("v2"));
+			assertEquals("/b/run~1/key~v2", op.item().name(), type::toString);
+		}
+	}
+
+	/**
+	 * The in-segment rule's trade, pinned as it is: a version ID that contains {@code /} is not read
+	 * from the name. A recycled READ then addresses {@code key~a/b} as a key, and each response
+	 * appends another suffix; a first-attempt CREATE of {@code key~a/b} writes that key.
+	 */
+	@Test
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	void aVersionIdWithASlashIsNotReadFromTheName() throws Exception {
+		assertEquals(-1, S3StorageDriver.legacyVersionStart("key~a/b"));
+		assertEquals("key~a/b~v2", S3StorageDriver.withLegacyVersion("key~a/b", "v2"));
+
+		final var driver = driver(true, 4, false);
+		final var handler = new S3ResponseHandler(driver, false, true, null);
+		final List<String> sent = new ArrayList<>();
+		final List<String> names = new ArrayList<>();
+		Operation<Item> recycled = op(OpType.READ, "key");
+		for (int cycle = 0; cycle < 3; cycle++) {
+			final var request = driver.httpRequest(recycled, HOST);
+			sent.add(request.uri() + " " + request.headers().get(VERSION_HEADER));
+			handler.handleResponseHeaders(null, (Operation) recycled, versionResponse("a/b"));
+			names.add(recycled.item().name());
+			recycled = retry(recycled);
+		}
+		assertEquals(List.of("/b/key null", "/b/key~a/b null", "/b/key~a/b~a/b null"), sent);
+		assertEquals(List.of("key~a/b", "/b/key~a/b~a/b", "/b/key~a/b~a/b~a/b"), names);
+
+		final Operation create = op(OpType.CREATE, "key~a/b", null, "/b");
+		final var createRequest = driver.httpRequest(create, HOST);
+		assertEquals(HttpMethod.PUT, createRequest.method());
+		assertEquals("/b/key~a/b", createRequest.uri());
+		assertNull(createRequest.headers().get(VERSION_HEADER));
+		handler.handleResponseHeaders(null, create, versionResponse("v9"));
+		assertEquals("key~a/b~v9", create.item().name());
+	}
+
+	/** A {@code key~v1} item under the same path selects its version, first time and on retry. */
+	@Test
+	void aVersionedItemUnderAPathWithATildeSelectsItsVersion() throws Exception {
+		final var driver = driver(true, 4, false);
+		final Map<OpType, String> uris = new LinkedHashMap<>();
+		uris.put(OpType.READ, "/b/run~1/key?versionId=v1");
+		uris.put(OpType.STAT, "/b/run~1/key?versionId=v1");
+		uris.put(OpType.DELETE, "/b/run~1/key?versionId=v1");
+		uris.put(OpType.UPDATE, "/b/run~1/key");
+		for (final var entry : uris.entrySet()) {
+			final var type = entry.getKey();
+			final var first = tildePathOp(type, "key~v1");
+			final var firstRequest = driver.httpRequest(first, HOST);
+			assertEquals(entry.getValue(), firstRequest.uri(), type::toString);
+			final var retried = retry(first);
+			assertEquals("/b/run~1/key~v1", retried.item().name(), type::toString);
+			final var retriedRequest = driver.httpRequest(retried, HOST);
+			assertEquals(entry.getValue(), retriedRequest.uri(), type::toString);
+			final String header = OpType.UPDATE.equals(type) ? "v1" : null;
+			assertEquals(header, firstRequest.headers().get(VERSION_HEADER), type::toString);
+			assertEquals(header, retriedRequest.headers().get(VERSION_HEADER), type::toString);
+		}
+	}
+
+	/** With versioning off, a {@code ~} anywhere is part of the key, on the first attempt and a retry. */
+	@Test
+	void withVersioningOffAPathWithATildeIsPartOfTheKey() throws Exception {
+		final var driver = driver(false, 4, false);
+		for (final var type : List.of(OpType.CREATE, OpType.READ, OpType.STAT, OpType.DELETE, OpType.UPDATE)) {
+			for (final var name : List.of("key", "key~v1")) {
+				final var first = tildePathOp(type, name);
+				assertEquals("/b/run~1/" + name, driver.httpRequest(first, HOST).uri(), type::toString);
+				final var request = driver.httpRequest(retry(first), HOST);
+				assertEquals("/b/run~1/" + name, request.uri(), type::toString);
+				assertNull(request.headers().get(VERSION_HEADER), type::toString);
+			}
+		}
+		final var copy = op(OpType.CREATE, "/src/run~1/k0", "/src", "/dst");
+		final var copyRequest = driver.httpRequest(copy, HOST);
+		assertEquals("/dst/src/run~1/k0", copyRequest.uri());
+		assertEquals("/src/run~1/k0", copyRequest.headers().get(S3Api.KEY_X_AMZ_COPY_SOURCE));
+	}
+
 	// ---------- a retry through the driver, against a loopback target that keeps versions ----------
 
 	@Test
@@ -816,6 +992,31 @@ final class S3VersionedRequestTest {
 		final var item = new DataItemImpl(name, 0, 16);
 		item.dataInput(dataInput());
 		return (Operation<Item>) (Operation<?>) new DataOperationImpl<>(0, type, item, srcPath, dstPath, CREDENTIAL, null, 0);
+	}
+
+	/**
+	 * An operation on {@code name} under {@code /b/run~1}: a CREATE writes there, every other type
+	 * reads from there.
+	 */
+	private static Operation<Item> tildePathOp(final OpType type, final String name) throws IOException {
+		final var op = OpType.CREATE.equals(type)
+						? op(type, name, null, "/b/run~1")
+						: op(type, name, "/b/run~1", null);
+		if (OpType.UPDATE.equals(type)) {
+			((DataOperationImpl<?>) (Operation<?>) op).markRandomRanges(1);
+		}
+		return op;
+	}
+
+	/** {@code op} as the engine sends it again: its {@code result()}, reset, ranges marked again. */
+	@SuppressWarnings("unchecked")
+	private static Operation<Item> retry(final Operation<Item> op) {
+		final var retried = (Operation<Item>) op.result();
+		retried.reset();
+		if (OpType.UPDATE.equals(retried.type())) {
+			((DataOperationImpl<?>) (Operation<?>) retried).markRandomRanges(1);
+		}
+		return retried;
 	}
 
 	private static HttpHeaders versionResponse(final String versionId) {

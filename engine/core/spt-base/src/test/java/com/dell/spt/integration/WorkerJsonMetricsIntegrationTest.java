@@ -44,11 +44,10 @@ import com.dell.spt.testing.tags.IntegrationTest;
 @IntegrationTest
 public class WorkerJsonMetricsIntegrationTest {
 
-	private static final int JSON_PORT = 2114;
-	private static final String JSON_URL = "http://localhost:" + JSON_PORT + "/metrics/json";
-	private static final String FLEET_URL = "http://localhost:" + JSON_PORT + "/metrics/fleet/json";
-	private static final String CLUSTER_URL = "http://localhost:" + JSON_PORT + "/metrics/cluster/json";
-
+	private int jsonPort;
+	private String jsonUrl;
+	private String fleetUrl;
+	private String clusterUrl;
 	private Server jsonServer;
 	private MetricsManager metricsManager;
 	private MetricsContext metricsContext;
@@ -57,15 +56,19 @@ public class WorkerJsonMetricsIntegrationTest {
 
 	@BeforeEach
 	public void setUp() throws Exception {
+		jsonPort = FreePorts.freePort();
+		jsonUrl = "http://localhost:" + jsonPort + "/metrics/json";
+		fleetUrl = "http://localhost:" + jsonPort + "/metrics/fleet/json";
+		clusterUrl = "http://localhost:" + jsonPort + "/metrics/cluster/json";
 		objectMapper = new ObjectMapper();
 		metricsManager = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 		config = TestConfigBuilder.config();
 		config.val("run-comment", "worker-node");
-		config.val("run-port", JSON_PORT);
+		config.val("run-port", jsonPort);
 		config.val("run-id", 42L);
 
 		// Start JSON servlet bound to this metrics manager
-		jsonServer = new Server(JSON_PORT);
+		jsonServer = new Server(jsonPort);
 		final var jsonContext = new ServletContextHandler();
 		jsonContext.setContextPath("/");
 		jsonServer.setHandler(jsonContext);
@@ -115,7 +118,7 @@ public class WorkerJsonMetricsIntegrationTest {
 
 	@Test
 	public void workerJsonReturnsLocalMetrics() throws Exception {
-		final String json = fetch(JSON_URL);
+		final String json = fetch(jsonUrl);
 		assertNotNull(json);
 		final JsonNode arr = objectMapper.readTree(json);
 		assertTrue(arr.size() > 0, "/metrics/json should return at least one entry on worker");
@@ -134,8 +137,8 @@ public class WorkerJsonMetricsIntegrationTest {
 		assertFalse(first.get("overall_unbounded").asBoolean());
 		assertEquals(10, first.get("completion_percent").asInt());
 		assertEquals(10, first.get("overall_completion_percent").asInt());
-		assertEquals(404, fetchStatus(FLEET_URL), "/metrics/fleet/json should not be available on worker");
-		assertEquals(404, fetchStatus(CLUSTER_URL), "/metrics/cluster/json should not be available on worker");
+		assertEquals(404, fetchStatus(fleetUrl), "/metrics/fleet/json should not be available on worker");
+		assertEquals(404, fetchStatus(clusterUrl), "/metrics/cluster/json should not be available on worker");
 	}
 
 	private static String fetch(String url) throws Exception {

@@ -97,7 +97,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 			if (generator != null) {
 				return generator.inFlightCount(opType);
 			}
-			return stepContexts.get(index).activeOpCount();
+			return stepContextActiveOpCount(index);
 		};
 	}
 
