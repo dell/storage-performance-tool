@@ -22,24 +22,42 @@ import (
 // buildPoolPlanFunc asks each host's image; tests replace it.
 var buildPoolPlanFunc = poolsizing.BuildPlan
 
-// poolPlanInput gathers what the sizing plan reads from the run.
+// poolProbePullDespiteSkipLine is spt.log's line for a probe that may pull a missing image under the skip.
+const poolProbePullDespiteSkipLine = "Pool-sizing probe will pull the image if it is missing, despite skip"
+
+// poolPlanInput gathers what the sizing plan reads from the run. Its callers build the plan right
+// after, so it also logs the pull a probe may make under the skip.
+//
+// The probe follows the documented skip, as the preflight and both launch routes do: a dev image is
+// never pulled, and a missing non-dev image is pulled even under --skip-image-pull or
+// SPT_SKIP_IMAGE_PULL. Sizing runs before any route ensures the image, so a probe that refused to
+// pull would leave that host unsized.
 func poolPlanInput(
 	params scenario.Params, steps []scenario.StepInfo, hosts []*hostparse.HostInfo, image string, attached bool,
 ) poolsizing.Input {
 	shortfall := params.RdmaPoolShortfall
-	skipPull, _ := strconv.ParseBool(strings.TrimSpace(os.Getenv(constants.EnvSkipImagePull)))
-	skipPull = skipPull || constants.IsDevImage(image)
+	neverPull := constants.IsDevImage(image)
+	if !neverPull && skipImagePullSet() {
+		logging.LogInfo("pool-sizing", poolProbePullDespiteSkipLine, "image", image)
+	}
 	return poolsizing.Input{
 		Params:      params,
 		Steps:       steps,
 		Hosts:       hosts,
 		Image:       image,
-		SkipPull:    skipPull,
+		NeverPull:   neverPull,
 		Attached:    attached,
 		Shortfall:   shortfall,
 		SptJavaOpts: os.Getenv(constants.EnvSptJavaOpts),
 		Executor:    command.NewCommandExecutor(),
 	}
+}
+
+// skipImagePullSet reports whether SPT_SKIP_IMAGE_PULL holds a true boolean; --skip-image-pull sets
+// it. It only selects poolPlanInput's log line.
+func skipImagePullSet() bool {
+	skip, err := strconv.ParseBool(strings.TrimSpace(os.Getenv(constants.EnvSkipImagePull)))
+	return err == nil && skip
 }
 
 // planPoolSizing sizes -XX:MaxDirectMemorySize for each engine a run launches (spec item 14b), and
