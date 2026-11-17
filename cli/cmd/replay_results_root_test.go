@@ -29,6 +29,7 @@ func TestReplayCommandGivesTheOrchestratorItsResultsRoot(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			server := newReplayArchiveServer(t)
+			t.Cleanup(server.Close)
 			resultsDir := t.TempDir()
 
 			connectErr := errors.New("stop after replay orchestrator wiring")
