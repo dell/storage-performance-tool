@@ -37,6 +37,8 @@ import com.dell.spt.base.metrics.context.MetricsContextImpl;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshotImpl;
 import com.dell.spt.base.metrics.snapshot.DriverStatsSnapshot;
 import com.dell.spt.base.storage.Credential;
+import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
+import com.dell.spt.storage.driver.coop.OperationDispatchTask;
 import com.github.akurilov.commons.collection.TreeUtil;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
@@ -192,11 +194,13 @@ final class S3RdmaReplyLoopbackTest {
 			transport.setBeforeRegister(() -> preparing.add(Thread.currentThread().getName()));
 			transport.setBeforeToken(() -> preparing.add(Thread.currentThread().getName()));
 
-			assertEquals(Operation.Status.SUCC, executeThenStop(driver, op(OpType.CREATE, SIZE)).status());
+			assertEquals(Operation.Status.SUCC, execute(driver, op(OpType.CREATE, SIZE)).status());
 
 			assertEquals(1, preparing.size(), preparing::toString);
 			assertFalse(preparing.iterator().next().contains("-rdma-lane-"), preparing::toString);
+			// Checked while the driver runs: a stop would end a lane the driver should never have made.
 			assertTrue(Thread.getAllStackTraces().keySet().stream().noneMatch(thread -> thread.getName().startsWith(STEP_ID + "-rdma-lane-")));
+			stopAndAwaitDispatch(driver);
 			assertEquals(1, driver.pathStats().rdmaRequestsSent.sum());
 		}
 	}
@@ -598,8 +602,8 @@ final class S3RdmaReplyLoopbackTest {
 				assertNotNull(result, "operation " + i + " did not complete: " + requests);
 				assertEquals(Operation.Status.SUCC, result.status(), result.type() + ": " + requests);
 			}
-			// The counts are final once the stopped dispatcher has returned from every submission.
-			driver.stop();
+			// The counts are final once the dispatch task has ended.
+			stopAndAwaitDispatch(driver);
 			assertEquals(3, driver.pathStats().httpRdmaUnavailable.sum(),
 							"two PUTs and one GET carry a payload; the DELETE does not");
 		}
@@ -2110,16 +2114,30 @@ final class S3RdmaReplyLoopbackTest {
 	}
 
 	/**
-	 * Runs one operation, then stops the driver. A request is counted as sent once the
-	 * dispatcher's submission of it has returned, which may be after its result was output; the
-	 * stopped driver's dispatcher has returned from every submission, so the counts are final.
+	 * Runs one operation, then stops the driver and waits for its dispatch task to end, so the
+	 * request counters are final. See {@link #stopAndAwaitDispatch}.
 	 */
 	private static Operation<DataItem> executeThenStop(
 					final S3RdmaStorageDriver<DataItem, Operation<DataItem>> driver,
 					final Operation<DataItem> operation) throws Exception {
 		final Operation<DataItem> result = execute(driver, operation);
-		driver.stop();
+		stopAndAwaitDispatch(driver);
 		return result;
+	}
+
+	/**
+	 * Stops the driver, then waits until its dispatch task has ended. A request is counted as sent
+	 * once the dispatcher's submission of it has returned, which may be after its result was
+	 * output. The driver's stop gives up waiting for the task after its stop wait and goes on, so
+	 * this waits for the task itself, within a liveness bound, before a test reads exact counts.
+	 */
+	private static void stopAndAwaitDispatch(final S3RdmaStorageDriver<DataItem, Operation<DataItem>> driver)
+					throws Exception {
+		driver.stop();
+		final Field field = CoopStorageDriverBase.class.getDeclaredField("opDispatchTask");
+		field.setAccessible(true);
+		final var dispatchTask = (OperationDispatchTask<?, ?>) field.get(driver);
+		assertTrue(dispatchTask.await(10, TimeUnit.SECONDS), "the dispatch task did not end");
 	}
 
 	/** Runs operations one after another, so each starts after the previous one completed. */

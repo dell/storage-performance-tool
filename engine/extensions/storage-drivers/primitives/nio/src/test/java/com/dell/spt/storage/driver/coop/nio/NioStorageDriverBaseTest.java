@@ -1110,13 +1110,21 @@ public class NioStorageDriverBaseTest {
 		var buffered = 0;
 		while (true) {
 			buffered = 0;
+			var allRead = true;
 			for (var i = 0; i < buffs.length; i++) {
-				locks[i].lock();
+				// Bounded, so a driver that holds a buffer's lock fails the wait instead of hanging it.
+				if (!locks[i].tryLock(Math.max(0L, deadline - System.nanoTime()), TimeUnit.NANOSECONDS)) {
+					allRead = false;
+					break;
+				}
 				try {
 					buffered += buffs[i].size();
 				} finally {
 					locks[i].unlock();
 				}
+			}
+			if (!allRead) {
+				fail("a worker's buffer lock stayed held for " + LIVENESS_SECONDS + " s");
 			}
 			if (buffered >= count || System.nanoTime() - deadline >= 0) {
 				break;
