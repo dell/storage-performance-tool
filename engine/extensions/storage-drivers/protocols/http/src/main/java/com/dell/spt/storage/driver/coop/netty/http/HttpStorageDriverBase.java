@@ -47,6 +47,7 @@ import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.handler.codec.http.DefaultHttpRequest;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.FullHttpResponse;
+import io.netty.handler.codec.PrematureChannelClosureException;
 import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
@@ -56,6 +57,7 @@ import io.netty.handler.codec.http.HttpObject;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.LastHttpContent;
+import io.netty.handler.codec.http.TooLongHttpContentException;
 import io.netty.handler.stream.ChunkedWriteHandler;
 import java.io.IOException;
 import java.net.ConnectException;
@@ -164,6 +166,13 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		}
 	}
 
+	/**
+	 * The largest response body a control request takes by default: 16 MiB, the metadata-mode LIST
+	 * spool cap. A listing page of 1000 keys is about 6.6 MiB at worst. A {@code HEAD} response's
+	 * {@code Content-Length} is never checked against it.
+	 */
+	protected static final int CONTROL_RESPONSE_MAX_CONTENT_LENGTH = 16 * 1024 * 1024;
+
 	protected FullHttpResponse executeHttpRequest(final FullHttpRequest request)
 					throws InterruptedException, ConnectException {
 		return executeHttpRequest(request, true);
@@ -173,13 +182,27 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 	protected FullHttpResponse executeHttpRequest(
 					final FullHttpRequest request, final boolean warnOnTimeout)
 					throws InterruptedException, ConnectException {
+		return executeHttpRequest(request, warnOnTimeout, CONTROL_RESPONSE_MAX_CONTENT_LENGTH);
+	}
+
+	/**
+	 * Executes a synchronous control request whose response body may be up to {@code
+	 * maxContentLength} bytes, for a caller whose answers can pass {@link
+	 * #CONTROL_RESPONSE_MAX_CONTENT_LENGTH}. A larger body is refused with one warning and the result
+	 * is null, as for any request left without a response.
+	 */
+	protected FullHttpResponse executeHttpRequest(
+					final FullHttpRequest request, final boolean warnOnTimeout, final int maxContentLength)
+					throws InterruptedException, ConnectException {
 		ThreadContext.put(KEY_STEP_ID, stepId);
 		ThreadContext.put(KEY_CLASS_NAME, CLS_NAME);
 		final FullHttpResponse resp;
-		final var channel = getUnpooledConnection(storageNodeAddrs[0], storageNodePort);
 		// The response, or null once the channel goes inactive without one: a closed channel, the
 		// driver's I/O shutdown among its causes, ends the wait at once instead of after the timeout.
-		final var fullResp = new CompletableFuture<FullHttpResponse>();
+		// Built before the connection, so a cap the aggregator refuses leaves no channel open.
+		final var control = new ControlResponseHandler(request.method(), maxContentLength);
+		final var fullResp = control.response();
+		final var channel = getUnpooledConnection(storageNodeAddrs[0], storageNodePort);
 		try {
 			final var pipeline = channel.pipeline();
 			Loggers.MSG.debug(
@@ -188,24 +211,10 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 							channel.hashCode(),
 							pipeline);
 			pipeline.removeLast(); // remove the API specific handler
-			pipeline.addLast(controlResponseAggregator(request.method(), Integer.MAX_VALUE));
-			pipeline.addLast(
-							new SimpleChannelInboundHandler<HttpObject>() {
-								@Override
-								protected final void channelRead0(final ChannelHandlerContext ctx, final HttpObject msg) {
-									if (msg instanceof FullHttpResponse response && !fullResp.complete(response.retain())) {
-										response.release();
-									}
-								}
-
-								@Override
-								public void channelInactive(final ChannelHandlerContext ctx) throws Exception {
-									fullResp.complete(null);
-									super.channelInactive(ctx);
-								}
-							});
+			pipeline.addLast(control.aggregator());
+			pipeline.addLast(control);
 			channel.writeAndFlush(request).sync();
-			resp = awaitResponse(fullResp, request, warnOnTimeout);
+			resp = awaitResponse(control, request, warnOnTimeout);
 		} catch (final NoSuchElementException e) {
 			throw new ConnectException("Channel pipeline is empty: connectivity related failure");
 		} catch (final InterruptedException e) {
@@ -227,28 +236,96 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 	}
 
 	/**
-	 * Builds the aggregator for one control request's response. A {@code HEAD} response has no body,
-	 * so its {@code Content-Length} header, which states the object's size, is not checked against
-	 * {@code maxContentLength}: an object of 2 GiB or more would otherwise fail the request.
-	 * Responses to other methods keep the limit.
+	 * Takes one control request's response: completes {@link #response()} with it, or with null once
+	 * the channel goes inactive without one. Its {@link #aggregator()} refuses a body over the cap and
+	 * marks the response {@link #oversized()}, so the waiter can tell that from a plain close.
 	 */
-	static HttpObjectAggregator controlResponseAggregator(
-					final HttpMethod method, final int maxContentLength) {
-		return new ControlResponseAggregator(HttpMethod.HEAD.equals(method), maxContentLength);
+	static final class ControlResponseHandler extends SimpleChannelInboundHandler<HttpObject> {
+
+		private final CompletableFuture<FullHttpResponse> response = new CompletableFuture<>();
+		private final HttpObjectAggregator aggregator;
+		private final int maxContentLength;
+		private volatile boolean oversized;
+
+		ControlResponseHandler(final HttpMethod method, final int maxContentLength) {
+			this.maxContentLength = maxContentLength;
+			this.aggregator = new ControlResponseAggregator(HttpMethod.HEAD.equals(method), maxContentLength, this);
+		}
+
+		CompletableFuture<FullHttpResponse> response() {
+			return response;
+		}
+
+		/** The aggregator to place before this handler. */
+		HttpObjectAggregator aggregator() {
+			return aggregator;
+		}
+
+		int maxContentLength() {
+			return maxContentLength;
+		}
+
+		/** Whether the response was refused for a body over the cap. */
+		boolean oversized() {
+			return oversized;
+		}
+
+		@Override
+		protected void channelRead0(final ChannelHandlerContext ctx, final HttpObject msg) {
+			if (msg instanceof FullHttpResponse full && !response.complete(full.retain())) {
+				full.release();
+			}
+		}
+
+		@Override
+		public void channelInactive(final ChannelHandlerContext ctx) throws Exception {
+			response.complete(null);
+			super.channelInactive(ctx);
+		}
+
+		@Override
+		public void exceptionCaught(final ChannelHandlerContext ctx, final Throwable cause) throws Exception {
+			if (oversized
+							&& (cause instanceof TooLongHttpContentException
+											|| cause instanceof PrematureChannelClosureException)) {
+				// The aggregator has closed the channel, and the codec then reports the response the
+				// close cut short; the waiter logs the refusal once. Without an oversize, both still
+				// go on as before.
+				response.complete(null);
+			} else {
+				super.exceptionCaught(ctx, cause);
+			}
+		}
 	}
 
+	/**
+	 * A {@code HEAD} response has no body, so its {@code Content-Length} header, which states the
+	 * object's size, is not checked against {@code maxContentLength}: an object larger than the cap
+	 * would otherwise fail the request. Responses to other methods keep the limit.
+	 */
 	private static final class ControlResponseAggregator extends HttpObjectAggregator {
 
 		private final boolean head;
+		private final ControlResponseHandler owner;
 
-		ControlResponseAggregator(final boolean head, final int maxContentLength) {
+		ControlResponseAggregator(
+						final boolean head, final int maxContentLength, final ControlResponseHandler owner) {
 			super(maxContentLength);
 			this.head = head;
+			this.owner = owner;
 		}
 
 		@Override
 		protected boolean isContentLengthInvalid(final HttpMessage start, final int maxContentLength) {
 			return !head && super.isContentLengthInvalid(start, maxContentLength);
+		}
+
+		@Override
+		protected void handleOversizedMessage(final ChannelHandlerContext ctx, final HttpMessage oversized)
+						throws Exception {
+			// Marked before the channel closes, so the waiter woken by the close sees it.
+			owner.oversized = true;
+			super.handleOversizedMessage(ctx, oversized);
 		}
 	}
 
@@ -265,16 +342,25 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 		}
 	}
 
-	private FullHttpResponse awaitResponse(
-					final CompletableFuture<FullHttpResponse> fullResp,
+	FullHttpResponse awaitResponse(
+					final ControlResponseHandler control,
 					final FullHttpRequest request,
 					final boolean warnOnTimeout)
 					throws InterruptedException, ExecutionException {
+		final var fullResp = control.response();
 		FullHttpResponse resp;
 		try {
 			resp = fullResp.get(netTimeoutMilliSec, TimeUnit.MILLISECONDS);
 			if (resp == null) {
-				logUnanswered(warnOnTimeout, "Connection closed before the response", request);
+				if (control.oversized()) {
+					Loggers.MSG.warn(
+									"{}: Response body over the {}-byte cap for control requests, refused: {}",
+									stepId,
+									control.maxContentLength(),
+									timeoutRequestDescription(request));
+				} else {
+					logUnanswered(warnOnTimeout, "Connection closed before the response", request);
+				}
 			}
 		} catch (final TimeoutException e) {
 			// A response that arrived meanwhile is kept; a later one is released by the handler.

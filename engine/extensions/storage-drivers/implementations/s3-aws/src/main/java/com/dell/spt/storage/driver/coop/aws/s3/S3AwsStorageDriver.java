@@ -767,6 +767,17 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 		}
 	}
 
+	/**
+	 * An upload failed without its completion or abort being sent, because that could not be queued,
+	 * is recorded as orphaned: an abort not sent as attempted and failed, as a failed abort is.
+	 */
+	@Override
+	protected void recordUploadLeftOpen(final O uploadOp, final boolean aborting, final String cause) {
+		final var mpuOp = (CompositeDataOperation) uploadOp;
+		emitMultipartLifecycle(mpuOp, "failed_orphaned", aborting, aborting ? Boolean.FALSE : null,
+						(aborting ? mpuFailure(mpuOp) + "; abort " : "") + "not sent: " + cause);
+	}
+
 	@SuppressWarnings("unchecked")
 	private void emitMultipartLifecycle(
 					final CompositeDataOperation op,

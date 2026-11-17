@@ -217,7 +217,7 @@ run-level files:
 | `integrity.failures.csv` | One diagnostic row for each integrity-failed attempt; absent when verification is deferred |
 | `integrity.performance.csv` | Digest work and initial-write-delay telemetry |
 | `multipart.lifecycle.csv` | Completion, abort, and possible-orphan state for initiated MPUs |
-| `<step>.multipart.csv` | Existing engine `parts.upload.csv` timing artifact |
+| `<step>.multipart.csv` | The engine's `parts.upload.csv` multipart phase log, for a single-engine step; a distributed step records it as `missing` (see [Results artifacts](SPT_SYNTAX.md#multipart-upload-write)) |
 | `index.json` | Machine-readable artifact inventory and integrity summary |
 
 The summary and `index.json` report whether verification was deferred, plus

@@ -4314,6 +4314,54 @@ public class S3AwsStorageDriverTest {
 			assertEquals("other/k0", S3AwsStorageDriver.listedKey("/other/k0", "/pp"));
 			assertEquals("k0", S3AwsStorageDriver.listedKey("/pp/k0", "/pp"));
 		}
+
+		// A key with an empty segment right before its last segment, such as /k0 or a//b: the name
+		// /pp//k0 is kept whole, so the request, the items-file name and its read-back keep the segment.
+
+		@Test
+		void readAndDeleteOfListedKeysWithAnEmptySegmentAddressTheWholeKey() throws Exception {
+			final List<String> expected = List.of("pp|/k2", "pp|a//b", "pp|/dir//k3");
+			assertEquals(expected, readRequests("/pp", listed("/pp", null, false, "/k2", "a//b", "/dir//k3")));
+			assertEquals(expected, deleteRequests("/pp", listed("/pp", null, false, "/k2", "a//b", "/dir//k3")));
+		}
+
+		@Test
+		void itemsFileOfAReadOfAListedLeadingSlashKeyDeletesTheSameKey() throws Exception {
+			final Item listedItem = listed("/pp", null, false, "/k0").get(0);
+			final Operation<Item> read = build(OpType.READ, listedItem, "/pp", null);
+			assertArrayEquals(new String[]{"pp", "/k0"
+			}, drv.resolveBucketAndKey(read));
+
+			final var factory = new com.dell.spt.base.item.DataItemFactoryImpl<DataItem>();
+			final java.nio.file.Path file = java.nio.file.Files.createTempFile("listed-items-", ".csv");
+			try {
+				try (var out = new com.dell.spt.base.item.io.CsvFileItemOutput<>(file, factory)) {
+					out.put((DataItem) read.result().item());
+				}
+				final DataItem fromFile;
+				try (var in = new com.dell.spt.base.item.io.CsvFileItemInput<>(file, factory)) {
+					fromFile = in.get();
+				}
+				assertEquals("/pp//k0", fromFile.name());
+				// a later step reads the items file with no item input path
+				assertEquals(List.of("pp|/k0"), deleteRequests(null, List.of((Item) fromFile)));
+			} finally {
+				java.nio.file.Files.deleteIfExists(file);
+			}
+		}
+
+		@Test
+		void retriedReadAndDeleteOfAListedKeyWithAnEmptySegmentAddressTheSameKey() throws Exception {
+			for (final String key : List.of("/k2", "a//b", "k0", "dir/k1")) {
+				for (final OpType type : List.of(OpType.READ, OpType.DELETE)) {
+					final Operation<Item> op = build(type, listed("/pp", null, false, key).get(0), "/pp", null);
+					assertEquals(List.of("pp", key), List.of(drv.resolveBucketAndKey(op)), type + " " + key);
+					final Operation<Item> retry = op.result();
+					retry.reset();
+					assertEquals(List.of("pp", key), List.of(drv.resolveBucketAndKey(retry)), type + " " + key + ": the retry");
+				}
+			}
+		}
 	}
 
 	// -----------------------------------------------------------------------

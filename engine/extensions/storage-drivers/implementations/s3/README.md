@@ -668,7 +668,7 @@ When `storage-checksum-enabled=true`, the selected checksum algorithm is applied
 
 #### 4.4.6. Reporting
 
-Completed multipart uploads are logged to `parts.upload.csv` (in the step's log directory) with columns: `ItemPath`, `UploadId`, `RespLatency[us]`. Aborted uploads are also logged with an `abort` prefix.
+Multipart uploads are logged to `parts.upload.csv` (in the step's log directory) with the header `Phase,ItemPath,UploadId,PartNumber,StartTs,Duration[us],Latency[us],Bytes`: one `INIT` row per initiation, one `PART` row per part (written with the upload's `COMPLETE` row), one `COMPLETE` row per completion answer and one `ABORT` row per abort answer. `spt run` fetches it as `<stepID>.multipart.csv` for a single-engine step.
 
 #### 4.4.7. Example: Scenario File (JAR users)
 

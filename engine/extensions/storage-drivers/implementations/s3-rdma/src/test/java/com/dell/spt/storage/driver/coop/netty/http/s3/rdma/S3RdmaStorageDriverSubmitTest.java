@@ -6,7 +6,9 @@ import com.dell.spt.base.item.ItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import com.dell.spt.base.item.op.OperationImpl;
+import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.item.op.partial.PartialOperation;
 import com.dell.spt.base.storage.Credential;
 import com.dell.spt.storage.driver.coop.netty.http.s3.rdma.S3RdmaStorageDriver.PathSelection;
 import com.github.akurilov.commons.collection.Range;
@@ -231,6 +233,68 @@ public class S3RdmaStorageDriverSubmitTest {
 		assertFalse(getBelowThresholdWarned(driver), "belowThresholdWarned should remain false for above-threshold ops");
 	}
 
+	// ---------- selectPath: a copy is always an HTTP server-side copy ----------
+
+	@Test
+	void testSelectPath_copyAboveThresholdIsHttpUncounted() throws Exception {
+		final var driver = newDriver(enabledConfig(), availableTransport());
+		assertEquals(PathSelection.HTTP_UNCOUNTED, driver.selectPath(copyOp(THRESHOLD)));
+		assertEquals(PathSelection.HTTP_UNCOUNTED, driver.selectPath(copyOp(THRESHOLD * 10)));
+		assertEquals(PathSelection.RDMA, driver.selectPath(dataOp(OpType.CREATE, THRESHOLD)),
+						"a plain CREATE at the threshold still takes RDMA");
+	}
+
+	@Test
+	void testSelectPath_copyBelowThresholdIsHttpUncountedWithoutWarning() throws Exception {
+		final var config = new RdmaConfig(true, THRESHOLD, false, "auto", "", "WARN");
+		final var driver = newDriver(config, availableTransport());
+		assertEquals(PathSelection.HTTP_UNCOUNTED, driver.selectPath(copyOp(THRESHOLD - 1)));
+		assertFalse(getBelowThresholdWarned(driver), "a copy is not a payload below the threshold");
+		assertEquals(PathSelection.HTTP_BELOW_THRESHOLD, driver.selectPath(dataOp(OpType.CREATE, THRESHOLD - 1)));
+		assertTrue(getBelowThresholdWarned(driver));
+	}
+
+	@Test
+	void testSelectPath_copyWithZeroThresholdIsHttpUncounted() throws Exception {
+		final var config = new RdmaConfig(true, 0L, true, "auto", "", "WARN");
+		final var driver = newDriver(config, availableTransport());
+		assertEquals(PathSelection.HTTP_UNCOUNTED, driver.selectPath(copyOp(0)));
+		assertEquals(PathSelection.HTTP_UNCOUNTED, driver.selectPath(copyOp(THRESHOLD)));
+	}
+
+	@Test
+	void testSelectPath_copyWithRdmaUnavailableIsHttpUncounted() throws Exception {
+		final var unavailable = newDriver(enabledConfig(), new RdmaTransport(enabledConfig()));
+		assertEquals(PathSelection.HTTP_UNCOUNTED, unavailable.selectPath(copyOp(THRESHOLD + 1)));
+		assertEquals(PathSelection.HTTP_RDMA_UNAVAILABLE, unavailable.selectPath(dataOp(OpType.CREATE, THRESHOLD + 1)));
+	}
+
+	@Test
+	void testSelectPath_copyPartIsHttpUncounted() throws Exception {
+		final var driver = newDriver(enabledConfig(), availableTransport());
+		final var upload = new CompositeDataOperationImpl<>(
+						0, OpType.CREATE, new DataItemImpl("testItem", 0, THRESHOLD * 4), "/src", "/bucket",
+						TEST_CRED, null, 0, THRESHOLD * 2);
+		final var parts = upload.subOperations();
+		assertEquals(2, parts.size());
+		for (final var part : parts) {
+			assertInstanceOf(PartialOperation.class, part);
+			assertEquals(PathSelection.HTTP_UNCOUNTED, driver.selectPath((Operation<Item>) (Operation<?>) part));
+			assertFalse(S3RdmaStorageDriver.carriesPayload(part));
+		}
+	}
+
+	@Test
+	void testCarriesPayload_falseForCopy() {
+		assertFalse(S3RdmaStorageDriver.carriesPayload(copyOp(THRESHOLD)));
+		assertTrue(S3RdmaStorageDriver.carriesPayload(dataOp(OpType.CREATE, THRESHOLD)));
+		assertTrue(S3RdmaStorageDriver.carriesPayload(dataOp(OpType.READ, THRESHOLD)));
+		final var emptySrc = (Operation<Item>) (Operation<?>) new DataOperationImpl<>(
+						0, OpType.CREATE, new DataItemImpl("testItem", 0, THRESHOLD), "", "/bucket",
+						TEST_CRED, null, 0);
+		assertTrue(S3RdmaStorageDriver.carriesPayload(emptySrc), "an empty source path is not a copy");
+	}
+
 	// ==================== Helpers ====================
 
 	private static RdmaConfig enabledConfig() {
@@ -260,6 +324,13 @@ public class S3RdmaStorageDriverSubmitTest {
 	private static Operation<Item> dataOp(final OpType opType, final long size) {
 		return (Operation<Item>) (Operation<?>) new DataOperationImpl<>(
 						0, opType, new DataItemImpl("testItem", 0, size), null, "/bucket",
+						TEST_CRED, null, 0);
+	}
+
+	/** A copy: a CREATE that names a source path. */
+	private static Operation<Item> copyOp(final long size) {
+		return (Operation<Item>) (Operation<?>) new DataOperationImpl<>(
+						0, OpType.CREATE, new DataItemImpl("testItem", 0, size), "/src", "/bucket",
 						TEST_CRED, null, 0);
 	}
 

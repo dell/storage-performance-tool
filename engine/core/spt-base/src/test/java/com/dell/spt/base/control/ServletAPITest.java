@@ -33,9 +33,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 public class ServletAPITest {
-	private static final int PORT = 9999;
-	private static final String HOST = "http://localhost:" + PORT;
-	private static final Server server = new Server(PORT);
+	private Server server;
+	private String host;
+	private MetricsManager metricsMgr;
 	private Config testConfig;
 
 	private ReadinessGate readinessGate;
@@ -43,8 +43,10 @@ public class ServletAPITest {
 	@BeforeEach
 	public void setUp() throws Exception {
 		testConfig = TestConfigBuilder.config();
+		// Port 0: the OS picks a free port, so the test never collides with an engine on the default API port.
+		server = new Server(0);
 		final ServletContextHandler context = new ServletContextHandler();
-		final MetricsManager metricsMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+		metricsMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 		context.setContextPath("/");
 		server.setHandler(context);
 
@@ -60,6 +62,7 @@ public class ServletAPITest {
 		context.addServlet(new ServletHolder(new NodeMetricsHandler(metricsMgr, testConfig)), "/metrics/json");
 		context.addServlet(new ServletHolder(new FleetMetricsHandler(metricsMgr, testConfig)), "/metrics/fleet/json");
 		server.start();
+		host = "http://127.0.0.1:" + ((ServerConnector) server.getConnectors()[0]).getLocalPort();
 	}
 
 	@Test
@@ -68,7 +71,7 @@ public class ServletAPITest {
 
 		testConfig.val("item-data-input-file", expectedValue);
 
-		final String configString = resultFromServer(HOST + "/config");
+		final String configString = resultFromServer(host + "/config");
 		final ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
 		final JsonNode rootNode = yamlMapper.readTree(configString);
 
@@ -80,7 +83,7 @@ public class ServletAPITest {
 	@Test
 	void getLogServletTest() throws IOException, InterruptedException {
 		final String expectedValue = "Base config";
-		final String logString = resultFromServer(HOST + "/logs");
+		final String logString = resultFromServer(host + "/logs");
 		final ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
 		final JsonNode rootNode = yamlMapper.readTree(logString);
 
@@ -91,13 +94,13 @@ public class ServletAPITest {
 
 	@Test
 	void getMetricsServletTest() throws IOException, InterruptedException {
-		final String metricsString = resultFromServer(HOST + "/metrics");
+		final String metricsString = resultFromServer(host + "/metrics");
 		assertEquals("", metricsString); // if its an empty string, that means we did not get a 404 error, and it exists
 	}
 
 	@Test
 	void getMetricsJsonServletTest() throws IOException, InterruptedException {
-		final String metricsJsonString = resultFromServer(HOST + "/metrics/json");
+		final String metricsJsonString = resultFromServer(host + "/metrics/json");
 		final ObjectMapper mapper = new ObjectMapper();
 		final JsonNode arr = mapper.readTree(metricsJsonString);
 		assertTrue(arr.isArray());
@@ -111,7 +114,7 @@ public class ServletAPITest {
 
 	@Test
 	void getHealthServletTest() throws IOException, InterruptedException {
-		final String body = resultFromServer(HOST + "/health");
+		final String body = resultFromServer(host + "/health");
 		final ObjectMapper mapper = new ObjectMapper();
 		final JsonNode obj = mapper.readTree(body);
 		assertEquals("ok", obj.get("status").asText());
@@ -123,11 +126,11 @@ public class ServletAPITest {
 	@Test
 	void getReadyServletTest_beforeAndAfter() throws IOException, InterruptedException {
 		// Initially not ready
-		var resp = responseFromServer(HOST + "/ready");
+		var resp = responseFromServer(host + "/ready");
 		assertEquals(503, resp.statusCode());
 		// Flip readiness
 		readinessGate.setReady(true);
-		resp = responseFromServer(HOST + "/ready");
+		resp = responseFromServer(host + "/ready");
 		assertEquals(200, resp.statusCode());
 		final ObjectMapper mapper = new ObjectMapper();
 		final JsonNode obj = mapper.readTree(resp.body());
@@ -138,19 +141,19 @@ public class ServletAPITest {
 	void getVersionIsAvailableBeforeAndAfterReadiness() throws IOException, InterruptedException {
 		final String expected = EngineBuildInfoJson.serialize(EngineBuildInfoProvider.global().snapshot());
 
-		var response = responseFromServer(HOST + "/version");
+		var response = responseFromServer(host + "/version");
 		assertEquals(200, response.statusCode());
 		assertEquals(expected, response.body());
 
 		readinessGate.setReady(true);
-		response = responseFromServer(HOST + "/version");
+		response = responseFromServer(host + "/version");
 		assertEquals(200, response.statusCode());
 		assertEquals(expected, response.body());
 	}
 
 	@Test
 	void fleetEndpointAvailableByDefault() throws IOException, InterruptedException {
-		final HttpResponse<String> response = responseFromServer(HOST + "/metrics/fleet/json");
+		final HttpResponse<String> response = responseFromServer(host + "/metrics/fleet/json");
 		assertEquals(404, response.statusCode());
 		assertTrue(response.body().contains("Fleet metrics unavailable"));
 	}
@@ -183,7 +186,11 @@ public class ServletAPITest {
 
 	@AfterEach
 	public void tearDown() throws Exception {
-		server.stop();
+		try {
+			server.stop();
+		} finally {
+			metricsMgr.close();
+		}
 	}
 
 	/* Utility Methods */
