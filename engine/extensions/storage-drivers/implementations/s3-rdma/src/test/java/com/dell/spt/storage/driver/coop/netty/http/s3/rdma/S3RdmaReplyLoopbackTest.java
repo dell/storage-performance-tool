@@ -143,7 +143,8 @@ final class S3RdmaReplyLoopbackTest {
 					String rawQuery,
 					String rdmaToken,
 					String contentLength,
-					int bodyLength) {}
+					int bodyLength,
+					String copySource) {}
 
 	@BeforeEach
 	void startServer() throws IOException {
@@ -1097,6 +1098,24 @@ final class S3RdmaReplyLoopbackTest {
 	}
 
 	@Test
+	void copyAboveTheThresholdIsAPlainHttpServerSideCopy() throws Exception {
+		// Were the token sent, this target would read client memory and report a transfer.
+		try (final NodeStats node = new NodeStats(newDriver(true))) {
+			final Operation<DataItem> copy = node.run(TRANSFERRED, copyOp(SIZE));
+
+			assertEquals(Operation.Status.SUCC, copy.status());
+			final CapturedRequest put = onlyObjectRequest("PUT");
+			assertEquals("/src/obj-copy", put.copySource());
+			assertNull(put.rdmaToken(), "a copy carries no RDMA token");
+			assertEquals("0", put.contentLength());
+			assertNull(serverReadPayload, "the target read no client memory");
+			assertEquals(0, transport.getRegisterCount(), "a copy prepares no RDMA buffer");
+			// No data-path counter counts a copy: it is neither an RDMA request nor a payload over HTTP.
+			node.assertCounted(Map.of());
+		}
+	}
+
+	@Test
 	void refusedHttpSubmissionIsCountedOnlyWhenItsRepeatIsAccepted() throws Exception {
 		try (final NodeStats node = new NodeStats(newDriver(true))) {
 			final List<Operation<DataItem>> overHttp = List.of(
@@ -1887,7 +1906,8 @@ final class S3RdmaReplyLoopbackTest {
 		final String query = exchange.getRequestURI().getRawQuery();
 		requests.add(new CapturedRequest(
 						method, path, query, token,
-						exchange.getRequestHeaders().getFirst("Content-Length"), requestBody.length));
+						exchange.getRequestHeaders().getFirst("Content-Length"), requestBody.length,
+						exchange.getRequestHeaders().getFirst("x-amz-copy-source")));
 		if ("PUT".equals(method) && requestBody.length > 0) {
 			httpPutBody = requestBody;
 		}
@@ -2011,6 +2031,14 @@ final class S3RdmaReplyLoopbackTest {
 						.toList();
 		assertEquals(1, matching.size(), "object requests: " + requests);
 		return matching.get(0);
+	}
+
+	/** A copy of {@code /src/obj-copy}: a CREATE that names a source path. */
+	@SuppressWarnings("unchecked")
+	private static Operation<DataItem> copyOp(final long size) {
+		return (Operation<DataItem>) (Operation<?>) new DataOperationImpl<>(
+						0, OpType.CREATE, new DataItemImpl("obj-copy", 0, size), "/src", "/bucket",
+						CREDENTIAL, null, 0);
 	}
 
 	@SuppressWarnings("unchecked")
