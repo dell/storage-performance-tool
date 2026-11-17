@@ -20,7 +20,6 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufInputStream;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
-import io.netty.channel.ChannelFutureListener;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpResponseStatus;
@@ -70,12 +69,6 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	 * a copy {@code 200 OK} and then report its failure in an {@code <Error>} document.
 	 */
 	private static final AttributeKey<ByteBuf> COPY_RESPONSE_ATTR_KEY = AttributeKey.newInstance("spt-copy-response");
-	/**
-	 * Releases a copy's response buffer if its channel closes before the response finishes. One
-	 * listener object serves every channel; it is added when a copy's buffer is made and removed when
-	 * the copy's response finishes, so a channel's close future holds it at most once.
-	 */
-	private static final ChannelFutureListener RELEASE_COPY_RESPONSE_ON_CLOSE = future -> releaseCopyResponse(future.channel());
 	private static final int MIN_CONTENT_SIZE = 0x100;
 	private static final int MAX_CONTENT_SIZE = 0x400;
 	/**
@@ -404,10 +397,13 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * Keeps, if {@code op} is a copy, the first {@link #COMPLETION_ERROR_SCAN_BYTES} bytes of its 2xx response body, for
-	 * {@link #copyFailureStatus}, without consuming the chunk; the rest is dropped and the buffer never
-	 * grows past that bound. The buffer is made on the copy's first readable chunk and released when its
-	 * response finishes, or when its channel closes first.
+	 * Keeps, if {@code op} is a copy, the first {@link #COMPLETION_ERROR_SCAN_BYTES} bytes of its 2xx response body, for {@link
+	 * #copyFailureStatus}, without consuming the chunk; the rest is dropped and the buffer never grows
+	 * past that bound. The buffer is made on the copy's first readable chunk and released when its
+	 * response finishes. A body ended by the connection's close still finishes: the HTTP codec emits
+	 * its last content when the channel goes inactive, after the close. On an abnormal close with no
+	 * finish, the unpooled heap buffer is left to the garbage collector with the channel, as the failed
+	 * response buffer is.
 	 */
 	private void bufferCopyResponse(final Channel channel, final Operation<?> op, final ByteBuf contentChunk) {
 		if (!isCopy(op) || channel == null || !contentChunk.isReadable()) {
@@ -419,23 +415,11 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 			// the attribute is only used on the channel's event loop, so no compare-and-set is needed
 			body = Unpooled.buffer(Math.min(contentChunk.readableBytes(), COMPLETION_ERROR_SCAN_BYTES), COMPLETION_ERROR_SCAN_BYTES);
 			bodyAttr.set(body);
-			channel.closeFuture().addListener(RELEASE_COPY_RESPONSE_ON_CLOSE);
 			copyResponseKept = true;
 		}
 		final int length = Math.min(body.maxWritableBytes(), contentChunk.readableBytes());
 		if (length > 0) {
 			body.writeBytes(contentChunk, contentChunk.readerIndex(), length);
-		}
-	}
-
-	/** Releases the copy response buffer {@code channel} holds, if any. */
-	private static void releaseCopyResponse(final Channel channel) {
-		if (!channel.hasAttr(COPY_RESPONSE_ATTR_KEY)) {
-			return;
-		}
-		final ByteBuf body = channel.attr(COPY_RESPONSE_ATTR_KEY).getAndSet(null);
-		if (body != null) {
-			body.release();
 		}
 	}
 
@@ -659,10 +643,9 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * Releases the copy response buffer kept on {@code channel}, after failing {@code op}, if it is a
-	 * copy, when the target answered 2xx with an S3 {@code <Error>} document, as {@link
-	 * #copyFailureStatus} decides, before the driver completes it. Runs only after {@link
-	 * #bufferCopyResponse} kept a body; a buffer the close listener already released is skipped.
+	 * Fails the copy {@code op} when the target answered 2xx with an S3 {@code <Error>} document, as
+	 * {@link #copyFailureStatus} decides, before the driver completes it; then releases the copy's
+	 * buffer. Runs only after {@link #bufferCopyResponse} kept a body.
 	 */
 	private void finishCopyResponse(final Channel channel, final O op) {
 		copyResponseKept = false;
@@ -671,10 +654,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 			return;
 		}
 		try {
-			final var unusedRemoved = channel.closeFuture().removeListener(RELEASE_COPY_RESPONSE_ON_CLOSE);
-			final Operation.Status failure = isCopy(op)
-							? copyFailureStatus(op, body, s3Driver == null ? null : s3Driver.copyErrorCodeLog())
-							: null;
+			final Operation.Status failure = copyFailureStatus(op, body, s3Driver == null ? null : s3Driver.copyErrorCodeLog());
 			if (failure != null) {
 				op.status(failure);
 			}

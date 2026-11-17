@@ -30,8 +30,8 @@ import org.junit.jupiter.api.Test;
  * A copy that S3 answers {@code 200 OK} with an {@code <Error>} document failed, with the status a
  * multipart completion answered so gets: its status is set before the driver's {@code complete()}. A
  * {@code <CopyObjectResult>} stays a success, a refused copy keeps the status of its HTTP class, and
- * only a copy's 2xx body is kept, up to the scan bound, until its response finishes or its channel
- * closes.
+ * only a copy's 2xx body is kept, up to the scan bound, until its response finishes, even past its
+ * channel's close.
  */
 final class S3ResponseHandlerCopyTest {
 
@@ -160,7 +160,7 @@ final class S3ResponseHandlerCopyTest {
 		handler.handleResponseContentFinish(channel, op);
 		assertEquals(null, S3ResponseHandler.heldCopyResponse(channel));
 		assertEquals(0, body.refCnt());
-		// Many copies on one channel: the close listener is removed at each finish, so none is left.
+		// Many copies on one channel: each finish releases its own buffer, so none is left.
 		for (int i = 0; i < 100; i++) {
 			assertEquals(Operation.Status.SUCC, copyStatus(COPY_RESULT));
 		}
@@ -168,15 +168,32 @@ final class S3ResponseHandlerCopyTest {
 		assertEquals(null, S3ResponseHandler.heldCopyResponse(channel));
 	}
 
+	/**
+	 * A body ended by the connection's close: the HTTP codec emits its last content when the channel
+	 * goes inactive, after the close, so the close must leave the kept body to the finish.
+	 */
 	@Test
-	void theBufferIsReleasedWhenTheChannelClosesFirst() throws Exception {
+	void aBodyThatEndsAfterTheChannelClosesIsStillScanned() throws Exception {
 		final var op = copy();
 		handler.handleResponseStatus(op, HttpResponseStatus.OK.codeClass(), HttpResponseStatus.OK);
 		handler.handleResponseContentChunk(channel, op, chunk("<Error><Code>Internal"));
 		final ByteBuf body = keptBody();
 		channel.close().sync();
+		assertEquals(1, body.refCnt(), "the close leaves the body to the finish");
+		handler.handleResponseContentChunk(channel, op, chunk("Error</Code></Error>"));
+		handler.handleResponseContentFinish(channel, op);
+		assertEquals(Operation.Status.RESP_FAIL_SVC, op.status());
 		assertEquals(null, S3ResponseHandler.heldCopyResponse(channel));
 		assertEquals(0, body.refCnt());
+	}
+
+	@Test
+	void aCopyResponseOnAClosedChannelIsScanned() throws Exception {
+		channel.close().sync();
+		final var op = copy();
+		respond(op, HttpResponseStatus.OK, "<Error><Code>AccessDenied</Code></Error>");
+		assertEquals(Operation.Status.RESP_FAIL_CLIENT, op.status());
+		assertEquals(null, S3ResponseHandler.heldCopyResponse(channel));
 	}
 
 	@Test
