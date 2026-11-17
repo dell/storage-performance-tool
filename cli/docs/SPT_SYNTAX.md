@@ -935,7 +935,16 @@ When the engine's checksum feature is enabled (`storage-checksum-enabled=true` i
 
 **Results artifacts:**
 
-When multipart uploads are used, the engine produces a `parts.upload.csv` artifact (fetched as `<stepID>.multipart.csv` in the results directory) containing one row per completed upload with columns: `ItemPath`, `UploadId`, `RespLatency[us]`.
+When multipart uploads are used, the engine writes a `parts.upload.csv` log, which `spt run` fetches as `<stepID>.multipart.csv` in the results directory for a single-engine step. A distributed step records it as `missing` in `index.json` until the engine collects every node's log; until then each engine's copy stays in its own log directory. The log is written by the `s3`, `s3-rdma` and `s3-tables` drivers; `s3-aws` writes no such log.
+
+The header is `Phase,ItemPath,UploadId,PartNumber,StartTs,Duration[us],Latency[us],Bytes`, and the rows are:
+
+- `INIT`: one per upload initiated with an upload ID.
+- `PART`: one per part, written with the upload's `COMPLETE` row when all its parts are done.
+- `COMPLETE`: one per completion answer, including a failed one.
+- `ABORT`: one per abort answer.
+
+Failed part attempts, and completions or aborts that were never sent, have no row. `PartNumber` is 1-based on `PART` rows and -1 on the others. `StartTs` is the request start in epoch milliseconds. `Duration[us]` and `Latency[us]` are microseconds. `Bytes` is the part size on `PART` rows and 0 on the others.
 
 **Notes:**
 
@@ -1287,6 +1296,7 @@ Notes:
 - `spt` still launches and manages the entry node; worker containers remain untouched during shutdown. At the end of a run, normal or interrupted, `--shutdown-on-complete` asks only the entry node to shut down, which ends its run, so the attached workers keep running and the next run can attach to them again. Whoever started a worker stops it.
 - The workers' steps end only when the entry ends its run. If the entry dies or can't be reached mid-run, or an interrupted run's entry takes more than 10 seconds to stop its run, a worker's step can keep generating load until its own limit. After a failed or interrupted attach run, check the workers and restart them before the next run.
 - `--items-file` and the other item files are copied only to the entry node, not to the attached workers.
+- `spt` does not check or pull the engine image on attached worker hosts; the engine identity check still compares the build of each attached worker that takes part in the run.
 - The host list must include at least one worker; the tool enforces this when `--attach-existing` is set.
 
 ### Headless CI Mode
