@@ -232,7 +232,7 @@ class NicSetConnectionPoolTest {
 		final var first = acquire(pool).get(5, TimeUnit.SECONDS);
 		final var second = acquire(pool).get(5, TimeUnit.SECONDS);
 		pool.release(first);
-		a.stopListening();
+		a.stopListening(2);
 
 		assertSame(first, acquire(pool).get(5, TimeUnit.SECONDS), "an idle connection serves");
 		final var refused = failure(acquire(pool));
@@ -277,7 +277,7 @@ class NicSetConnectionPoolTest {
 						CONNECT_TIMEOUT_MILLIS, 0);
 		resources.add(pool);
 		final var path = pool.pools().get(0).paths().get(0);
-		a.stopListening();
+		a.stopListening(0);
 		assertFalse(failure(acquire(pool)) instanceof PathBackoffException, "refused");
 		assertTrue(path.inBackoff());
 
@@ -300,7 +300,7 @@ class NicSetConnectionPoolTest {
 		final var nicPool = pool.pools().get(0);
 		assertTrue(nicPool.servesNow(), "a healthy Path");
 		final var held = acquire(nicPool).get(5, TimeUnit.SECONDS);
-		a.stopListening();
+		a.stopListening(1);
 		failure(acquire(nicPool));
 		assertFalse(nicPool.servesNow(), "its only Path backs off");
 
@@ -329,7 +329,7 @@ class NicSetConnectionPoolTest {
 		final var pool = open(1, new OpenNic(nic("lo-a", NIC_A, List.of(path("s3-a.example:9000", a))), group("lo-a")));
 		final var first = acquire(pool).get(5, TimeUnit.SECONDS);
 		final var waiting = acquire(pool);
-		a.stopListening();
+		a.stopListening(1);
 
 		first.close().syncUninterruptibly();
 
@@ -649,11 +649,13 @@ class NicSetConnectionPoolTest {
 		}
 
 		/**
-		 * New connects are refused once this returns; accepted connections stay open. The JDK defers
-		 * closing a listener while a thread is blocked in accept, so this waits until a connect is
-		 * refused.
+		 * New connects are refused once this returns; accepted connections stay open. Closing a
+		 * listener resets the connections still in its accept queue, so this first waits until the
+		 * {@code held} connections the test keeps were accepted. The JDK defers closing a listener
+		 * while a thread is blocked in accept, so this then waits until a connect is refused.
 		 */
-		void stopListening() throws Exception {
+		void stopListening(final int held) throws Exception {
+			waitFor(() -> accepted.size() >= held);
 			server.close();
 			acceptor.join(TimeUnit.SECONDS.toMillis(5));
 			final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
