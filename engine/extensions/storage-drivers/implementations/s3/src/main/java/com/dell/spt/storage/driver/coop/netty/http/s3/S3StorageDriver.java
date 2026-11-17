@@ -2007,11 +2007,23 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
+	 * The index of the {@code ~} that starts {@code name}'s legacy {@code ~versionId} suffix, or -1
+	 * when it has none: the last {@code ~}, only when no {@code /} follows it. Once the name holds the
+	 * item's path (after {@link com.dell.spt.base.item.op.Operation#result()}, so on a retry or a
+	 * recycle, and for a copy), a {@code ~} in that path is part of a directory name, not the
+	 * separator. A {@code ~} in the key's own last segment stays ambiguous.
+	 */
+	static int legacyVersionStart(final String name) {
+		final int tilde = name.lastIndexOf('~');
+		return tilde >= 0 && name.indexOf('/', tilde + 1) >= 0 ? -1 : tilde;
+	}
+
+	/**
 	 * {@code name} with its trailing {@code ~versionId}, if any, replaced by {@code ~versionId}: the
 	 * split {@link #objectVersioningRequest} makes, so a name never collects two suffixes.
 	 */
 	static String withLegacyVersion(final String name, final String versionId) {
-		final int indexOfVersionStart = name.lastIndexOf('~');
+		final int indexOfVersionStart = legacyVersionStart(name);
 		if (indexOfVersionStart == -1) {
 			return name + '~' + versionId;
 		}
@@ -2032,7 +2044,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		// retry that reads the item meanwhile sees the name that selects the version. The paths are built
 		// by dataUriPath from the whole name, and the ~versionId it ends with is taken off.
 		final String name = item.name();
-		final int indexOfVersionStart = name.lastIndexOf('~');
+		final int indexOfVersionStart = legacyVersionStart(name);
 		return objectVersioningRequest(
 						op, item, indexOfVersionStart == -1 ? null : name.substring(indexOfVersionStart + 1), false, nodeAddr);
 	}
@@ -2050,7 +2062,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			return copySource;
 		}
 		final String name = op.item().name();
-		final int indexOfVersionStart = name.lastIndexOf('~');
+		final int indexOfVersionStart = legacyVersionStart(name);
 		return indexOfVersionStart == -1
 						? copySource
 						: withoutVersionSuffix(copySource, name.substring(indexOfVersionStart + 1));

@@ -336,7 +336,9 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 			final Item item = op.item();
 			final String name = item.name();
 			// A name without a suffix appends, as it always did. The request builder never renames a
-			// key~versionId item, so on the route that splits it the suffix is replaced.
+			// key~versionId item, so on the route that splits it the suffix is replaced. The ~ test only
+			// skips that split for a name with no ~ at all: withLegacyVersion appends to a name whose
+			// only ~ is in its path, as the other branch does.
 			item.name(name.indexOf('~') >= 0 && s3Driver != null && s3Driver.namesLegacyVersion(op)
 							? S3StorageDriver.withLegacyVersion(name, versionId)
 							: name + "~" + versionId);
