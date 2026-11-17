@@ -1,15 +1,21 @@
 package com.dell.spt.base.load.step.linear;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.context.MetricsContext;
+import com.dell.spt.base.metrics.steady.SteadyResult;
+import com.dell.spt.base.metrics.steady.SteadyStatus;
 import com.dell.spt.base.storage.driver.mock.DummyStorageDriverMockExtension;
 import com.github.akurilov.confuse.Config;
 import java.lang.reflect.Method;
@@ -60,6 +66,39 @@ class LinearLoadStepLocalSteadyWindowTest {
 		}
 	}
 
+	@Test
+	void aStartThatFailsAfterTheMetricsExistClosesTheWindowsWithoutAMeasurementFailure() throws Exception {
+		final Path itemInput = Files.createTempFile("spt-items-", ".csv");
+		final ProbeStep step = new ProbeStep(stepConfig(itemInput, "nosuch"), List.of(), itemInput);
+		try {
+			assertThrows(RuntimeException.class, step::initForTest, "no extension provides the storage driver");
+			assertFalse(step.contexts().isEmpty(), "the metrics contexts exist before the driver is built");
+			step.shutdownForTest();
+			for (final MetricsContext<?> context : step.contexts()) {
+				final SteadyResult result = context.steadyResult();
+				assertNotNull(result, "shutdown closes every window");
+				assertFalse(result.cause().contains("measurement failed"), "cause: " + result.cause());
+				assertEquals(SteadyStatus.NOT_REACHED, result.status());
+				assertEquals("shutdown", result.cause());
+			}
+		} finally {
+			step.closeQuietly();
+		}
+	}
+
+	@Test
+	void theConcurrencyGaugeOfAStepWithNoStepContextReadsZero() throws Exception {
+		final Path itemInput = Files.createTempFile("spt-items-", ".csv");
+		final ProbeStep step = new ProbeStep(stepConfig(itemInput, null), List.of(), itemInput);
+		try {
+			for (final OpType opType : OpType.values()) {
+				assertEquals(0, assertDoesNotThrow(() -> step.concurrencyGauge(0, opType)), opType.name());
+			}
+		} finally {
+			step.closeQuietly();
+		}
+	}
+
 	private static boolean windowsClosed(final ProbeStep step) {
 		final List<MetricsContext<?>> contexts = step.contexts();
 		assertFalse(contexts.isEmpty());
@@ -67,6 +106,15 @@ class LinearLoadStepLocalSteadyWindowTest {
 	}
 
 	private static ProbeStep probeStep() throws Exception {
+		final Path itemInput = Files.createTempFile("spt-items-", ".csv");
+		final ProbeStep step = new ProbeStep(
+						stepConfig(itemInput, null), List.of(new DummyStorageDriverMockExtension<>()), itemInput);
+		assertDoesNotThrow(step::initForTest);
+		return step;
+	}
+
+	/** A step config reading {@code itemInput}; a non-null {@code driverType} overrides the default. */
+	private static Config stepConfig(final Path itemInput, final String driverType) {
 		final Config config = TestConfigBuilder.config();
 		config.val("load-step-id", "steady-close-" + System.nanoTime());
 		config.val("output-metrics-timing-persist", false);
@@ -74,11 +122,11 @@ class LinearLoadStepLocalSteadyWindowTest {
 		config.val("item-data-dedupable", false);
 		config.val("item-data-verify", false);
 		config.val("item-data-ranges-concat", null);
-		final Path itemInput = Files.createTempFile("spt-items-", ".csv");
 		config.val("item-input-file", itemInput.toString());
-		final ProbeStep step = new ProbeStep(config, List.of(new DummyStorageDriverMockExtension<>()), itemInput);
-		assertDoesNotThrow(step::initForTest);
-		return step;
+		if (driverType != null) {
+			config.val("storage-driver-type", driverType);
+		}
+		return config;
 	}
 
 	private static final class ProbeStep extends LinearLoadStepLocal {
@@ -91,6 +139,10 @@ class LinearLoadStepLocalSteadyWindowTest {
 
 		void initForTest() {
 			init();
+		}
+
+		int concurrencyGauge(final int index, final OpType opType) {
+			return actualConcurrencyGauge(index, opType).getAsInt();
 		}
 
 		void shutdownForTest() {

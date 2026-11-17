@@ -448,6 +448,13 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
+	 * The largest body a data-plane GET takes: 64 MiB. The Iceberg table metadata file it reads grows
+	 * with the snapshot history, so it gets more than the 16 MiB control-request default until its
+	 * real size on a target is measured.
+	 */
+	static final int DATA_PLANE_GET_MAX_CONTENT_LENGTH = 64 * 1024 * 1024;
+
+	/**
 	 * Executes a data-plane S3 GET signed with service="s3".
 	 * Returns the response body bytes, or throws on timeout/non-2xx.
 	 */
@@ -469,7 +476,7 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 						EmptyHttpHeaders.INSTANCE);
 		final FullHttpResponse resp;
 		try {
-			resp = executeHttpRequest(req);
+			resp = executeHttpRequest(req, true, DATA_PLANE_GET_MAX_CONTENT_LENGTH);
 		} catch (final ConnectException e) {
 			throw new Exception("Data-plane GET failed for " + s3Path + ": " + e.getMessage(), e);
 		}
