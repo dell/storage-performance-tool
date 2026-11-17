@@ -56,7 +56,8 @@ import org.apache.logging.log4j.Level;
 
 public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runnable {
 	private static final long DURATION_STOP_PHASE_MIN_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(2);
-	private static final int DURATION_RUN_CLOSE_ATTEMPT_LIMIT = 3;
+	/** How many times a run closes a standalone DELETE in duration mode before it gives up. */
+	protected static final int DURATION_RUN_CLOSE_ATTEMPT_LIMIT = 3;
 
 	protected final Config config;
 	protected final List<Extension> extensions;
@@ -273,7 +274,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 					}
 				} else {
 					recordRunFailure(closeCause);
-					doStop();
+					stopAfterFailedClose();
 					LogUtil.trace(Loggers.ERR, Level.WARN, closeCause, "Failed to close \"{}\"", toString());
 				}
 			}
@@ -372,6 +373,11 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 			closeRetainedDurationPhases();
 		}
 		return firstFailure;
+	}
+
+	/** Stops the step after a failed close outside a terminal failure; a failure it throws ends the run. */
+	protected void stopAfterFailedClose() {
+		doStop();
 	}
 
 	/** Cancels subclass-owned duration resources after the bounded run cleanup is exhausted. */

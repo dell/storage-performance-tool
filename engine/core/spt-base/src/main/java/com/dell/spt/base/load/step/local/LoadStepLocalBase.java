@@ -92,6 +92,13 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private String operationLifecycleWorkerId;
 	private boolean operationLifecyclePublished;
 	private boolean nicPathsPublished;
+	// Outside DELETE duration mode the stop runs once: the stop that close() repeats after a failed one
+	// does nothing, so the close still releases the slice and throws the stop's failure.
+	private boolean stopAttempted;
+	private RuntimeException stopFailure;
+	// Set once the slice has released its contexts, drivers and metrics; a later close releases nothing.
+	private volatile boolean released;
+	private int failedDurationCloses;
 	// Refused at start: an earlier step with the same id left its files here, and this one publishes none.
 	private volatile boolean startRefused;
 	private volatile StepPreparation preparation;
@@ -147,7 +154,8 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	public final DeleteObjectLifecycleSnapshot deleteObjectLifecycle() {
-		if (!standaloneDeleteEnabled()) {
+		// A released slice holds no contexts to report.
+		if (!standaloneDeleteEnabled() || released) {
 			return null;
 		}
 		final List<LoadStepContext> currentContexts = List.copyOf(stepContexts);
@@ -217,6 +225,9 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		operationLifecycleWorkerId = UUID.randomUUID().toString();
 		operationLifecyclePublished = false;
 		nicPathsPublished = false;
+		stopAttempted = false;
+		stopFailure = null;
+		failedDurationCloses = 0;
 		discardEarlierEventLoops();
 		if (standaloneDeleteEnabled()) {
 			expectedDeleteObjectLifecycleContexts = List.copyOf(stepContexts);
@@ -1077,23 +1088,79 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	protected final void doStop() {
-		var contextsStopped = true;
 		if (standaloneDeleteDurationMode()) {
-			contextsStopped = durationAdmissionBarrierSatisfied && durationStopFailure == null;
+			final var contextsStopped = durationAdmissionBarrierSatisfied && durationStopFailure == null;
 			if (contextsStopped) {
 				captureDurationStopFailure(
 								"stop contexts",
 								() -> invokeDurationContextPhase("stop", context -> context.stop()));
+				// Otherwise close stops the contexts and publishes.
+				publishNicPaths();
 			}
-		} else {
-			stepContexts.forEach(LoadStepContext::stop);
+			publishOperationLifecycle();
+			super.doStop();
+			return;
 		}
-		if (contextsStopped) {
-			// Otherwise close stops the contexts and publishes.
-			publishNicPaths();
+		if (stopAttempted) {
+			// The close repeats a stop that failed: its failure was thrown then, and the close throws it again.
+			return;
 		}
-		publishOperationLifecycle();
-		super.doStop();
+		RuntimeException failure = null;
+		for (final var context : List.copyOf(stepContexts)) {
+			if (context == null) {
+				continue;
+			}
+			try {
+				context.stop();
+			} catch (final RuntimeException e) {
+				failure = withFailure(failure, e);
+			}
+		}
+		publishNicPaths();
+		try {
+			publishOperationLifecycle();
+		} catch (final RuntimeException e) {
+			failure = withFailure(failure, e);
+		}
+		try {
+			super.doStop();
+		} catch (final RuntimeException e) {
+			failure = withFailure(failure, e);
+		}
+		// Only now: a stop cut short by anything else, an interrupt for one, runs again when repeated.
+		stopAttempted = true;
+		if (failure != null) {
+			stopFailure = failure;
+			throw failure;
+		}
+	}
+
+	/** A failed stop ends a standalone run with its own failure: the stop runs once (see doStop). */
+	@Override
+	protected final void stopAfterFailedClose() {
+		final RuntimeException failure = stopFailure;
+		if (failure != null && !standaloneDeleteDurationMode()) {
+			throw failure;
+		}
+		doStop();
+	}
+
+	/**
+	 * Whether this slice keeps its resources after a failed close because the close will be retried:
+	 * a standalone DELETE in duration mode until its last retry. Its step service then stays exported.
+	 */
+	public final boolean awaitsCleanupRetry() {
+		return standaloneDeleteDurationMode() && !released;
+	}
+
+	private static <T extends Throwable> T withFailure(final T first, final T next) {
+		if (first == null) {
+			return next;
+		}
+		if (next != first) {
+			first.addSuppressed(next);
+		}
+		return first;
 	}
 
 	/**
@@ -1208,6 +1275,8 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			OperationLifecycleArtifact.publish(runId(), loadStepId(),
 							operationLifecycleWorkerId, counters, expectedOperationLifecycleContexts.equals(stepContexts));
 		}
+		// Published: a failed range-read file below must not have it published again.
+		operationLifecyclePublished = true;
 		final var ranges = new ArrayList<RangeReadSnapshot>();
 		boolean complete = expectedOperationLifecycleContexts.equals(stepContexts);
 		for (final var context : expectedOperationLifecycleContexts) {
@@ -1219,7 +1288,6 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 				RangeReadArtifact.publish(runId(), loadStepId(), operationLifecycleWorkerId, ranges, complete);
 			}
 		}
-		operationLifecyclePublished = true;
 	}
 
 	private void prepareDurationStop() {
@@ -1593,22 +1661,44 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		return TimeUnit.SECONDS.toNanos(Math.max(0, config.intVal("load-op-wait-limit")));
 	}
 
+	/**
+	 * Releases the slice: its metrics, contexts and drivers, whatever its stop or any part of the close
+	 * throws, and throws the stop's failure first and the close's after it, suppressed. A standalone
+	 * DELETE in duration mode keeps them after a failed close until its last retry. A released slice
+	 * releases nothing again.
+	 */
 	@Override
 	protected final void doClose() throws IOException {
+		if (released) {
+			return;
+		}
 		releaseBucketMetrics();
 		if (standaloneDeleteDurationMode()) {
 			try {
 				closeDurationContexts();
+			} catch (final RuntimeException failure) {
+				if (++failedDurationCloses >= DURATION_RUN_CLOSE_ATTEMPT_LIMIT) {
+					releaseAfterLastFailedDurationClose(failure);
+				}
+				throw failure;
 			} finally {
 				publishNicPaths();
 			}
+			releaseContextCopies();
+			released = true;
 			return;
 		}
-		super.doClose();
-		stepContexts
+		// The stop, which always runs before the close, has unregistered the metrics.
+		Exception failure = stopFailure;
+		try {
+			super.doClose();
+		} catch (final IOException | RuntimeException e) {
+			failure = withFailure(failure, e);
+		}
+		final List<RuntimeException> contextFailures = stepContexts
 						.parallelStream()
 						.filter(Objects::nonNull)
-						.forEach(
+						.map(
 										stepCtx -> {
 											try {
 												stepCtx.close();
@@ -1618,24 +1708,57 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 																e,
 																"Failed to close the load step context \"{}\"",
 																stepCtx.toString());
+											} catch (final RuntimeException e) {
+												return e;
 											}
-										});
+											return null;
+										})
+						.filter(Objects::nonNull)
+						.toList();
+		for (final RuntimeException e : contextFailures) {
+			failure = withFailure(failure, e);
+		}
 		publishNicPaths();
-		RuntimeException terminalFailure = null;
 		for (final var stepContext : stepContexts) {
 			try {
 				stepContext.validateTerminalState();
-			} catch (final RuntimeException failure) {
-				if (terminalFailure == null) {
-					terminalFailure = failure;
-				} else {
-					terminalFailure.addSuppressed(failure);
-				}
+			} catch (final RuntimeException e) {
+				failure = withFailure(failure, e);
 			}
 		}
 		stepContexts.clear();
-		if (terminalFailure != null) {
-			throw terminalFailure;
+		releaseContextCopies();
+		released = true;
+		if (failure instanceof IOException e) {
+			throw e;
+		}
+		if (failure instanceof RuntimeException e) {
+			throw e;
+		}
+	}
+
+	/** The publishes' copies of the contexts would keep their queues and drivers reachable. */
+	private void releaseContextCopies() {
+		expectedOperationLifecycleContexts = List.of();
+		expectedDeleteObjectLifecycleContexts = List.of();
+	}
+
+	/**
+	 * After the last close a standalone DELETE in duration mode is retried for, nothing closes the
+	 * slice again. As a standalone run does after its retries, cancel its lifecycle work and leave its
+	 * contexts as they are. Its stop has unregistered its metrics, and its step service then unexports it.
+	 */
+	private void releaseAfterLastFailedDurationClose(final RuntimeException failure) {
+		released = true;
+		try {
+			cancelDurationRunCleanupResourcesAfterExhaustion();
+		} catch (final RuntimeException e) {
+			withFailure(failure, e);
+		}
+		try {
+			closeRetainedDurationPhases();
+		} catch (final RuntimeException e) {
+			withFailure(failure, e);
 		}
 	}
 

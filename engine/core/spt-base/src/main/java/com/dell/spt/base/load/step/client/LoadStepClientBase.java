@@ -83,6 +83,7 @@ import java.nio.file.Path;
 import java.nio.file.Files;
 import java.io.InputStream;
 import java.rmi.ConnectException;
+import java.rmi.NoSuchObjectException;
 import java.rmi.RemoteException;
 import java.rmi.UnknownHostException;
 import java.util.ArrayList;
@@ -2734,6 +2735,47 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			closeForStandaloneDeleteMode(false);
 		} finally {
 			closeRetainedDurationPhases();
+		}
+	}
+
+	/**
+	 * The run has given up its bounded cleanup, often before it reached the slice close. Each worker
+	 * slice counts its own failed closes to the same limit before it releases itself and unexports, so
+	 * deliver those closes now: up to the limit, each within the stop phase deadline. A slice that
+	 * closes or is already released ({@link NoSuchObjectException}) gets no further close. A close
+	 * still running on the worker at the deadline is not sent again, so a slice whose admission close
+	 * stays blocked can miss its last close and stay exported, as before. A subclass that overrides this
+	 * hook calls it through {@code super}.
+	 */
+	@Override
+	protected void cancelDurationRunCleanupResourcesAfterExhaustion() {
+		final List<LoadStep> slices = stepSlices.stream().filter(Objects::nonNull).toList();
+		DurationPhaseAttempt result = null;
+		for (var attempt = 0; attempt < DURATION_RUN_CLOSE_ATTEMPT_LIMIT; attempt++) {
+			result = invokeStepSlicePhase(
+							slices,
+							stepSlice -> {
+								try {
+									stepSlice.close();
+								} catch (final NoSuchObjectException released) {
+									// The worker released the slice and unexported it.
+								}
+							},
+							durationStopPhaseDeadlineNanos(),
+							"spt-delete-step-release-");
+			if (result.interrupted()) {
+				Thread.currentThread().interrupt();
+				break;
+			}
+			if (result.succeeded()) {
+				return;
+			}
+		}
+		if (result != null && !result.succeeded()) {
+			Loggers.ERR.warn(
+							"{}: {} step slice close failure(s) after the cleanup retries; a worker releases a slice after its last failed close, and a slice whose close is still running may stay on its worker",
+							loadStepId(),
+							result.failures().size());
 		}
 	}
 

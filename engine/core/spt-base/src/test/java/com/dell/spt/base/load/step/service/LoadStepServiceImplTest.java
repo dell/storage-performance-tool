@@ -9,6 +9,14 @@ import com.dell.spt.base.load.step.DurationAwaitStatus;
 import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.load.step.LoadStepFactory;
 import com.dell.spt.base.metrics.MetricsManager;
+import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
+import com.dell.spt.base.load.step.local.LoadStepLocalBase;
+import com.dell.spt.base.load.step.local.context.LoadStepContext;
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
+import java.rmi.registry.LocateRegistry;
+import java.util.UUID;
 import com.dell.spt.base.svc.Service;
 import com.dell.spt.base.svc.ServiceUtil;
 import com.github.akurilov.confuse.Config;
@@ -225,6 +233,176 @@ public class LoadStepServiceImplTest {
 			} else {
 				System.setProperty("java.rmi.server.hostname", originalHost);
 			}
+		}
+	}
+
+	@Test
+	@DisplayName("A slice whose stop and close fail ends closed and unexported, once")
+	void sliceWhoseStopAndCloseFailIsClosedAndUnexported() throws Exception {
+		final LoadStepContext context = mock(LoadStepContext.class);
+		final FailingSlice local = new FailingSlice(sliceConfig("create"), context);
+		final IllegalStateException publishFailure = new IllegalStateException("injected lifecycle publish failure");
+		final String originalHost = System.getProperty("java.rmi.server.hostname");
+		System.setProperty("java.rmi.server.hostname", "127.0.0.1");
+		final PrintStream originalErr = System.err;
+		try (MockedStatic<OperationLifecycleArtifact> artifact = mockStatic(OperationLifecycleArtifact.class)) {
+			artifact.when(() -> OperationLifecycleArtifact.publish(anyLong(), anyString(), anyString(), anyList(), anyBoolean()))
+							.thenThrow(publishFailure);
+			final int port = freePort();
+			final LoadStepServiceImpl service = newServiceWith(local, port);
+			final LoadStepService remote = ServiceUtil.resolve(
+							"127.0.0.1", port, service.name(), LoadStepService.class);
+			service.start();
+			assertEquals(local.loadStepId(), remote.loadStepId());
+
+			assertSame(publishFailure, assertThrows(IllegalStateException.class, service::stop));
+			assertSame(publishFailure, assertThrows(IllegalStateException.class, service::close));
+
+			assertThrows(RemoteException.class, remote::loadStepId);
+			assertFalse(List.of(LocateRegistry.getRegistry("127.0.0.1", port).list()).contains(service.name()));
+			verify(context).close();
+			artifact.verify(
+							() -> OperationLifecycleArtifact.publish(anyLong(), anyString(), anyString(), anyList(), anyBoolean()),
+							times(1));
+
+			// The worker's shutdown and the JVM exit close it again: nothing is released twice.
+			final ByteArrayOutputStream err = new ByteArrayOutputStream();
+			System.setErr(new PrintStream(err, true, StandardCharsets.UTF_8));
+			assertDoesNotThrow(service::close);
+			assertDoesNotThrow(local::close);
+			System.setErr(originalErr);
+			assertTrue(service.isClosed());
+			assertTrue(local.isClosed());
+			assertFalse(err.toString(StandardCharsets.UTF_8).contains("Failed to remove the service"), err.toString(StandardCharsets.UTF_8));
+			verify(context, times(1)).close();
+		} finally {
+			System.setErr(originalErr);
+			ServiceUtil.shutdown();
+			restoreHost(originalHost);
+		}
+	}
+
+	@Test
+	@DisplayName("A first close with no stop before it releases a slice whose stop fails")
+	void firstCloseWithoutStopReleasesSliceWhoseStopFails() throws Exception {
+		final LoadStepContext context = mock(LoadStepContext.class);
+		final FailingSlice local = new FailingSlice(sliceConfig("create"), context);
+		final IllegalStateException publishFailure = new IllegalStateException("injected lifecycle publish failure");
+		final String originalHost = System.getProperty("java.rmi.server.hostname");
+		System.setProperty("java.rmi.server.hostname", "127.0.0.1");
+		try (MockedStatic<OperationLifecycleArtifact> artifact = mockStatic(OperationLifecycleArtifact.class)) {
+			artifact.when(() -> OperationLifecycleArtifact.publish(anyLong(), anyString(), anyString(), anyList(), anyBoolean()))
+							.thenThrow(publishFailure);
+			final int port = freePort();
+			final LoadStepServiceImpl service = newServiceWith(local, port);
+			final LoadStepService remote = ServiceUtil.resolve(
+							"127.0.0.1", port, service.name(), LoadStepService.class);
+			service.start();
+			assertEquals(local.loadStepId(), remote.loadStepId());
+
+			// As at worker shutdown (the step manager closes its child), the close comes first.
+			assertSame(publishFailure, assertThrows(IllegalStateException.class, service::close));
+
+			assertThrows(RemoteException.class, remote::loadStepId);
+			assertFalse(List.of(LocateRegistry.getRegistry("127.0.0.1", port).list()).contains(service.name()));
+			verify(context).stop();
+			verify(context).close();
+			artifact.verify(
+							() -> OperationLifecycleArtifact.publish(anyLong(), anyString(), anyString(), anyList(), anyBoolean()),
+							times(1));
+			// Released: closing again releases nothing and throws nothing.
+			assertDoesNotThrow(service::close);
+			assertDoesNotThrow(local::close);
+			assertTrue(service.isClosed());
+			assertTrue(local.isClosed());
+			verify(context, times(1)).close();
+		} finally {
+			ServiceUtil.shutdown();
+			restoreHost(originalHost);
+		}
+	}
+
+	@Test
+	@DisplayName("A DELETE duration slice stays exported after a failed close until its last retry")
+	void durationDeleteSliceStaysExportedUntilItsLastFailedClose() throws Exception {
+		final LoadStepContext context = mock(LoadStepContext.class);
+		doThrow(new IllegalStateException("injected admission close failure"))
+						.when(context).closeOperationAdmissionForStepStop();
+		final Config config = sliceConfig("delete");
+		config.val("load-op-delete-standalone", true);
+		config.val("load-op-delete-duration", true);
+		config.val("load-step-limit-time", "60s");
+		config.val("load-op-wait-limit", 1);
+		final FailingSlice local = new FailingSlice(config, context);
+		final String originalHost = System.getProperty("java.rmi.server.hostname");
+		System.setProperty("java.rmi.server.hostname", "127.0.0.1");
+		try {
+			final int port = freePort();
+			final LoadStepServiceImpl service = newServiceWith(local, port);
+			final LoadStepService remote = ServiceUtil.resolve(
+							"127.0.0.1", port, service.name(), LoadStepService.class);
+			assertDoesNotThrow(service::stop);
+			final int limit = FailingSlice.closeAttemptLimit();
+			for (var attempt = 1; attempt < limit; attempt++) {
+				assertThrows(RuntimeException.class, service::close, "close attempt " + attempt);
+				assertEquals(local.loadStepId(), remote.loadStepId(), "exported for the retry after attempt " + attempt);
+			}
+			assertThrows(RuntimeException.class, service::close, "the last close attempt");
+			assertThrows(RemoteException.class, remote::loadStepId);
+			assertFalse(List.of(LocateRegistry.getRegistry("127.0.0.1", port).list()).contains(service.name()));
+			assertDoesNotThrow(service::close);
+			assertTrue(service.isClosed());
+		} finally {
+			ServiceUtil.shutdown();
+			restoreHost(originalHost);
+		}
+	}
+
+	private static Config sliceConfig(final String opType) {
+		final Config config = TestConfigBuilder.config();
+		config.val("load-step-id", "svc-release-" + opType + "-" + UUID.randomUUID());
+		config.val("load-op-type", opType);
+		return config;
+	}
+
+	private static int freePort() throws IOException {
+		try (ServerSocket socket = new ServerSocket(0)) {
+			socket.setReuseAddress(true);
+			return socket.getLocalPort();
+		}
+	}
+
+	private static void restoreHost(final String originalHost) {
+		if (originalHost == null) {
+			System.clearProperty("java.rmi.server.hostname");
+		} else {
+			System.setProperty("java.rmi.server.hostname", originalHost);
+		}
+	}
+
+	/** A real local slice over mocked contexts, as a worker's step service holds one. */
+	private static final class FailingSlice extends LoadStepLocalBase {
+		private final List<LoadStepContext> contexts;
+
+		FailingSlice(final Config config, final LoadStepContext... contexts) {
+			super(config, List.<Extension> of(), List.<Config> of(), mock(MetricsManager.class));
+			this.contexts = List.of(contexts);
+			stepContexts.addAll(this.contexts);
+		}
+
+		static int closeAttemptLimit() {
+			return DURATION_RUN_CLOSE_ATTEMPT_LIMIT;
+		}
+
+		@Override
+		public String getTypeName() {
+			return "release-test";
+		}
+
+		@Override
+		protected void init() {
+			stepContexts.clear();
+			stepContexts.addAll(contexts);
 		}
 	}
 
