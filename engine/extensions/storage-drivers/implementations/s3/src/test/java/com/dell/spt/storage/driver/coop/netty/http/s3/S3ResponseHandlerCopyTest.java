@@ -2,6 +2,7 @@ package com.dell.spt.storage.driver.coop.netty.http.s3;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
@@ -130,6 +131,27 @@ final class S3ResponseHandlerCopyTest {
 		respond(read, HttpResponseStatus.OK, "<Error><Code>InternalError</Code></Error>");
 		assertEquals(Operation.Status.SUCC, read.status());
 		assertFalse(S3ResponseHandler.keptCopyResponse(channel), "only a copy keeps its body");
+	}
+
+	@Test
+	void theNextResponseOnTheChannelIsNotTakenForACopy() throws Exception {
+		final var error = "<Error><Code>InternalError</Code></Error>";
+		final var first = copy();
+		respond(first, HttpResponseStatus.OK, error);
+		assertEquals(Operation.Status.RESP_FAIL_SVC, first.status());
+		final var create = flat(OpType.CREATE, null);
+		handler.handleResponseStatus(create, HttpResponseStatus.OK.codeClass(), HttpResponseStatus.OK);
+		handler.handleResponseContentChunk(channel, create, chunk(error));
+		assertNull(S3ResponseHandler.heldCopyResponse(channel), "a plain create after a copy keeps no body");
+		handler.handleResponseContentFinish(channel, create);
+		assertEquals(Operation.Status.SUCC, create.status());
+		respond(copy(), HttpResponseStatus.OK, error);
+		final var read = flat(OpType.READ, "/src");
+		handler.handleResponseStatus(read, HttpResponseStatus.OK.codeClass(), HttpResponseStatus.OK);
+		handler.handleResponseContentChunk(channel, read, chunk(error));
+		assertNull(S3ResponseHandler.heldCopyResponse(channel), "a read after a copy keeps no body");
+		handler.handleResponseContentFinish(channel, read);
+		assertEquals(Operation.Status.SUCC, read.status());
 	}
 
 	@Test
