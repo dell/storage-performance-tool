@@ -47,6 +47,7 @@ import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.handler.codec.http.DefaultHttpRequest;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.FullHttpResponse;
+import io.netty.handler.codec.PrematureChannelClosureException;
 import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
@@ -284,8 +285,12 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 
 		@Override
 		public void exceptionCaught(final ChannelHandlerContext ctx, final Throwable cause) throws Exception {
-			if (oversized && cause instanceof TooLongHttpContentException) {
-				// The aggregator has closed the channel; the waiter logs the refusal once.
+			if (oversized
+							&& (cause instanceof TooLongHttpContentException
+											|| cause instanceof PrematureChannelClosureException)) {
+				// The aggregator has closed the channel, and the codec then reports the response the
+				// close cut short; the waiter logs the refusal once. Without an oversize, both still
+				// go on as before.
 				response.complete(null);
 			} else {
 				super.exceptionCaught(ctx, cause);
