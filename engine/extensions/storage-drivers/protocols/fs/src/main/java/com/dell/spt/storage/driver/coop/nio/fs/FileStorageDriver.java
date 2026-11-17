@@ -317,9 +317,12 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 	private boolean invokeDelete(final O op)
 					throws IOException {
 		final String dstPath = op.dstPath();
-		final I fileItem = op.item();
+		final String fileItemName = op.item().name();
+		// As on the read and write routes: a name that already holds the path is the whole path.
 		FsConstants.FS_PROVIDER.delete(
-						dstPath == null ? Paths.get(fileItem.name()) : Paths.get(dstPath, fileItem.name()));
+						dstPath == null || ItemNamePaths.startsWithPath(fileItemName, dstPath)
+										? Paths.get(fileItemName)
+										: Paths.get(dstPath, fileItemName));
 		return true;
 	}
 
