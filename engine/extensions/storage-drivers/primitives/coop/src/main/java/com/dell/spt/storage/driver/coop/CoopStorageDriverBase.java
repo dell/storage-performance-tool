@@ -1210,7 +1210,9 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 	 */
 	private void publishCompositeEnqueueFailure(final O parentOp, final String cause, final Throwable error) {
 		final var compositeOp = (CompositeOperation<?>) parentOp;
+		final boolean aborting;
 		synchronized (compositeOp) {
+			aborting = compositeOp.get("mpuAbort") != null;
 			if (compositeOp.get("mpuFailure") == null) {
 				compositeOp.put("mpuFailure", Operation.Status.FAIL_TIMEOUT.name());
 			}
@@ -1221,6 +1223,12 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			Loggers.ERR.error(
 							"{}: {}; failing the upload without sending it, so it may stay open on the target",
 							toString(), cause, error);
+			// The record goes to this step's files from the thread that gave up on the queue.
+			try (final var logCtx = CloseableThreadContext.put(KEY_STEP_ID, stepId)) {
+				recordUploadLeftOpen(parentOp, aborting, cause);
+			} catch (final RuntimeException e) {
+				Loggers.ERR.warn("{}: failed to record an upload left open", toString(), e);
+			}
 		} else {
 			Loggers.ERR.error("{}: {}; failing the composite operation", toString(), cause, error);
 		}
@@ -1229,6 +1237,16 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 			settleRefusedCompositeParent(parentOp, parentOp);
 		}
 	}
+
+	/**
+	 * {@code uploadOp}, an initiated upload, is about to be published as a failure without its
+	 * completion or abort ({@code aborting}) being sent, because that could not be queued
+	 * ({@code cause}): the upload stays open on the target. A driver that records its multipart
+	 * uploads records this one here as orphaned, through its one-record-per-upload writer. It runs
+	 * before the upload's result is published, with the step's id in the log context, holding neither
+	 * the admission lock nor the upload's monitor. The default records nothing.
+	 */
+	protected void recordUploadLeftOpen(final O uploadOp, final boolean aborting, final String cause) {}
 
 	private static long childOpEnqueueTimeoutMillis() {
 		return Long.getLong(CHILD_OP_ENQUEUE_TIMEOUT_MILLIS_PROPERTY, DEFAULT_CHILD_OP_ENQUEUE_TIMEOUT_MILLIS);

@@ -288,8 +288,15 @@ final class ChildEnqueueFailureTest {
 		final var ranges = (List<PartialDataOperationImpl<DataItem>>) (List<?>) read.subOperations();
 
 		initiate(read);
-		await(() -> ranges.get(2).lifecycle().state() == OperationLifecycleState.UNATTEMPTED, "ranges 2 and 3 time out");
-		assertEquals(Operation.Status.FAIL_TIMEOUT.name(), read.get("mpuFailure"));
+		// The failure is recorded under the read's monitor after the ranges are marked unattempted.
+		await(() -> {
+			synchronized (read) {
+				return ranges.get(2).lifecycle().state() == OperationLifecycleState.UNATTEMPTED
+								&& Operation.Status.FAIL_TIMEOUT.name().equals(read.get("mpuFailure"))
+								&& ranges.get(1).retryCount() >= CoopStorageDriverBase.MAX_PART_RETRIES
+								&& ranges.get(2).retryCount() >= CoopStorageDriverBase.MAX_PART_RETRIES;
+			}
+		}, "ranges 2 and 3 time out and fail the read");
 		assertNull(read.get("mpuAbort"), "a read has nothing to abort");
 		assertFalse(driver.childOpQueue.contains(op(read)), "range 1 is still to run");
 
@@ -339,11 +346,12 @@ final class ChildEnqueueFailureTest {
 		assertTrue(driver.childOpQueue.offer(filler("filler")));
 
 		complete(upload, part, Operation.Status.SUCC);
-		await(() -> upload.lifecycle().state() == OperationLifecycleState.TERMINAL, "the upload is published");
+		// The tracker's in-flight count drops after the upload's state change.
+		await(() -> upload.lifecycle().state() == OperationLifecycleState.TERMINAL
+						&& driver.operationLifecycle().counters().inFlight() == 0, "the upload is published");
 
 		assertEquals(List.of(Operation.Status.FAIL_TIMEOUT), countedResults(upload));
 		assertEquals(1, driver.childOpQueue.size(), "only the filler is queued");
-		assertEquals(0, driver.operationLifecycle().counters().inFlight());
 		assertEquals(OperationLifecycleState.TERMINAL, part.lifecycle().state());
 	}
 
@@ -406,6 +414,66 @@ final class ChildEnqueueFailureTest {
 		assertEquals(List.of(Operation.Status.FAIL_TIMEOUT), countedResults(upload));
 		assertTrue(driver.childOpQueue.isEmpty());
 		assertEquals(0, driver.scheduled.get(), "nothing is deferred");
+		assertNothingOutstanding();
+	}
+
+	/**
+	 * As {@link #aPartRefusedItsClaimPublishesTheUpload}, with a second part still in flight when the
+	 * next part is refused its claim: that part's later success neither queues the upload's
+	 * finalization again nor publishes a second result.
+	 */
+	@Test
+	void aPartRefusedItsClaimWithASiblingInFlightPublishesTheUploadOnce() throws Exception {
+		driver(4);
+		final var upload = composite(OpType.CREATE, 3);
+		final var maxParts = CoopStorageDriverBase.class.getDeclaredField("mpuMaxParts");
+		maxParts.setAccessible(true);
+		maxParts.setInt(driver, 2);
+		initiate(upload);
+		final var parts = (List<PartialDataOperationImpl<DataItem>>) (List<?>) upload.subOperations();
+		dispatch(parts.get(0));
+		dispatch(parts.get(1));
+		driver.operationLifecycle().enforceDispatchDeadline(System.nanoTime() - 1);
+
+		complete(upload, parts.get(0), Operation.Status.SUCC);
+		assertEquals(OperationLifecycleState.TERMINAL, upload.lifecycle().state());
+		assertEquals(List.of(Operation.Status.FAIL_TIMEOUT), countedResults(upload));
+
+		complete(upload, parts.get(1), Operation.Status.SUCC);
+
+		assertEquals(List.of(Operation.Status.FAIL_TIMEOUT), countedResults(upload), "no second result");
+		assertTrue(driver.childOpQueue.isEmpty(), () -> "nothing is queued: " + driver.childOpQueue);
+		assertEquals(0, driver.scheduled.get(), "nothing is deferred");
+		assertNothingOutstanding();
+	}
+
+	/**
+	 * A read windowed by {@code mpuMaxParts} to 2 ranges, with a 1-slot queue: range 1 is queued and
+	 * range 2 times out, so range 4, not started yet, is settled with it and range 3 is never sent.
+	 * Range 1's success then finalizes the read, counted once with {@code FAIL_TIMEOUT}.
+	 */
+	@Test
+	void aWindowedRangeReadWhoseRangeTimesOutSettlesTheRangesNotStarted() throws Exception {
+		driver(1);
+		final var maxParts = CoopStorageDriverBase.class.getDeclaredField("mpuMaxParts");
+		maxParts.setAccessible(true);
+		maxParts.setInt(driver, 2);
+		final var read = composite(OpType.READ, 4);
+		final var ranges = (List<PartialDataOperationImpl<DataItem>>) (List<?>) read.subOperations();
+		initiate(read);
+		await(() -> {
+			synchronized (read) {
+				return ranges.get(1).lifecycle().state() == OperationLifecycleState.UNATTEMPTED
+								&& ranges.get(3).retryCount() >= CoopStorageDriverBase.MAX_PART_RETRIES;
+			}
+		}, "range 2 timed out");
+		assertEquals(OperationLifecycleState.NEW, ranges.get(2).lifecycle().state());
+		dispatch(ranges.get(0));
+		complete(read, ranges.get(0), Operation.Status.SUCC);
+		assertTrue(read.allSubOperationsDone());
+		assertSame(op(read), driver.childOpQueue.peek());
+		finalize(read, Operation.Status.valueOf(read.get("mpuFailure")));
+		assertEquals(List.of(Operation.Status.FAIL_TIMEOUT), countedResults(read));
 		assertNothingOutstanding();
 	}
 }
