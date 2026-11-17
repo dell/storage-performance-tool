@@ -140,7 +140,8 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 
 	@Override
 	public final DeleteObjectLifecycleSnapshot deleteObjectLifecycle() {
-		if (!standaloneDeleteEnabled()) {
+		// A released slice holds no contexts to report.
+		if (!standaloneDeleteEnabled() || released) {
 			return null;
 		}
 		final List<LoadStepContext> currentContexts = List.copyOf(stepContexts);
@@ -1669,6 +1670,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			} finally {
 				publishNicPaths();
 			}
+			releaseContextCopies();
 			released = true;
 			return;
 		}
@@ -1711,8 +1713,7 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 			}
 		}
 		stepContexts.clear();
-		// The lifecycle publish's copy of the contexts would keep their queues and drivers reachable.
-		expectedOperationLifecycleContexts = List.of();
+		releaseContextCopies();
 		released = true;
 		if (failure instanceof IOException e) {
 			throw e;
@@ -1720,6 +1721,12 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		if (failure instanceof RuntimeException e) {
 			throw e;
 		}
+	}
+
+	/** The publishes' copies of the contexts would keep their queues and drivers reachable. */
+	private void releaseContextCopies() {
+		expectedOperationLifecycleContexts = List.of();
+		expectedDeleteObjectLifecycleContexts = List.of();
 	}
 
 	/**
