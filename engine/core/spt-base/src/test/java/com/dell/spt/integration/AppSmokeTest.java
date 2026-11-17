@@ -1,15 +1,13 @@
 package com.dell.spt.integration;
 
-import static com.dell.spt.base.Constants.APP_NAME;
 import static com.dell.spt.base.Constants.DIR_EXT;
 import static com.dell.spt.base.Constants.MIB;
-import static com.dell.spt.base.Constants.PATH_DEFAULTS;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
+import com.dell.spt.base.Main;
 import com.dell.spt.base.concurrent.ServiceTaskExecutor;
-import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.control.AddCorsHeadersRule;
 import com.dell.spt.base.control.ConfigServlet;
 import com.dell.spt.base.control.FleetMetricsHandler;
@@ -20,6 +18,7 @@ import com.dell.spt.base.control.run.RunImpl;
 import com.dell.spt.base.control.run.RunServlet;
 import com.dell.spt.base.env.CoreResourcesToInstall;
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.step.LoadStepManagerService;
 import com.dell.spt.base.load.step.ScenarioUtil;
 import com.dell.spt.base.load.step.service.LoadStepManagerServiceImpl;
@@ -31,19 +30,19 @@ import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.TerminalStepEntry;
 import com.dell.spt.base.svc.Service;
 import com.github.akurilov.confuse.Config;
-import com.github.akurilov.confuse.SchemaProvider;
 
 import io.prometheus.client.exporter.MetricsServlet;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
-import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import javax.script.ScriptEngine;
@@ -52,6 +51,7 @@ import javax.servlet.MultipartConfigElement;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import com.dell.spt.testing.tags.IntegrationTest;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Level;
@@ -92,6 +92,7 @@ public class AppSmokeTest {
 
 	/* Run the default.js scenario on the shipped default driver; a step must run and complete every operation */
 	@Test
+	@Timeout(value = 60, unit = TimeUnit.SECONDS)
 	public void runBareScenarioTest() throws Exception {
 		final long opCount = 10;
 		// The shipped defaults have no count or time limit
@@ -101,12 +102,14 @@ public class AppSmokeTest {
 		// The metrics manager is this test's own, so every step it retains is one this scenario ran.
 		// The step generates its own id from the auto-generated initial one.
 		final List<TerminalStepEntry> steps = metricsMgr.getTerminalSteps();
-		assertEquals(
-						1, steps.stream().map(step -> step.stepId).distinct().count(), "one step ran: " + steps);
+		final List<String> stepIds = steps.stream().map(entry -> entry.stepId).distinct().collect(Collectors.toList());
+		assertEquals(1, stepIds.size(), "one step ran: " + stepIds);
 		final TerminalStepEntry step = steps.stream()
 						.filter(entry -> entry.distributed)
 						.findFirst()
 						.orElseThrow(() -> new AssertionError("no step total in " + steps));
+		// The shipped default operation type
+		assertEquals(OpType.CREATE, step.opType);
 		assertEquals(opCount, step.successCount);
 		assertEquals(0, step.failedCount);
 	}
@@ -127,22 +130,19 @@ public class AppSmokeTest {
 	}
 
 	/* Utility Methods */
+	// Main's own defaults loading, so a change there reaches this test
 	private static Config loadDefaultConfig(final Path appHomePath) throws Exception {
-		final var mainConfigSchema = SchemaProvider.resolve(APP_NAME, Thread.currentThread().getContextClassLoader()).stream()
-						.findFirst()
-						.orElseThrow(IllegalStateException::new);
-		return ConfigUtil.loadConfig(Paths.get(appHomePath.toString(), PATH_DEFAULTS).toFile(), mainConfigSchema);
+		final Method method = Main.class.getDeclaredMethod("loadDefaultConfig", Path.class);
+		method.setAccessible(true);
+		return (Config) method.invoke(null, appHomePath);
 	}
 
 	private static Config collectDefaults(
 					final List<Extension> extensions, final Config mainDefaults, final Path appHomePath)
 					throws Exception {
-		final List<Config> allDefaults = extensions.stream()
-						.map(ext -> ext.defaults(appHomePath))
-						.filter(Objects::nonNull)
-						.collect(Collectors.toList());
-		allDefaults.add(mainDefaults);
-		return ConfigUtil.merge(mainDefaults.pathSep(), allDefaults);
+		final Method method = Main.class.getDeclaredMethod("collectDefaults", List.class, Config.class, Path.class);
+		method.setAccessible(true);
+		return (Config) method.invoke(null, extensions, mainDefaults, appHomePath);
 	}
 
 	/** Runs the scenario; returns its failure, or null when it ran to its end. */
