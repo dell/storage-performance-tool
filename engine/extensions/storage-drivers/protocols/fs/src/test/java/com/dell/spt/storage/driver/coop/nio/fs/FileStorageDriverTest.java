@@ -249,22 +249,31 @@ public class FileStorageDriverTest {
 
 	@Test
 	public void updateOfMissingFileFailsIoAndCreatesNoDirectories() throws Exception {
-		final String name = tempDir.resolve("upd-src").resolve("missing").toString();
-		final Path dstDir = tempDir.resolve("upd-dst");
-		final Path expectedParent = underOutputPath(dstDir, name).getParent();
+		final Path dstDir = Files.createDirectories(tempDir.resolve("upd-dst"));
+		final String name = "f";
+		Files.write(dstDir.resolve(name), new byte[1024]);
 
 		try (var drv = newDriver(false)) {
 			CollectingOpOutput<DataItemImpl> out = new CollectingOpOutput<>();
 			drv.operationResultOutput(out);
 			drv.start();
-			var op = newOp(OpType.UPDATE, name, 1024, null, dstDir.toString());
-			assertTrue(drv.put(op));
+			// the first UPDATE succeeds, so the driver has opened the file in this directory
+			assertTrue(drv.put(newOp(OpType.UPDATE, name, 1024, null, dstDir.toString())));
 			Operation<DataItemImpl> res = out.await(5000);
+			assertNotNull(res);
+			assertEquals(Operation.Status.SUCC, res.status());
+
+			Files.delete(dstDir.resolve(name));
+			Files.delete(dstDir);
+
+			// with the file and its directory gone, an UPDATE fails and does not recreate the directory
+			assertTrue(drv.put(newOp(OpType.UPDATE, name, 1024, null, dstDir.toString())));
+			res = out.await(5000);
 			assertNotNull(res);
 			assertEquals(Operation.Status.FAIL_IO, res.status());
 			drv.stop();
 		}
-		assertFalse(Files.exists(expectedParent));
+		assertFalse(Files.exists(dstDir));
 	}
 
 	@Test
