@@ -98,20 +98,40 @@ public final class ItemInfoFileOutput<O extends Operation> implements Output<O> 
 	}
 
 	/**
-	 * A CREATE writes the key under the operation's output path; any other operation addresses the
-	 * key in the manifest's own bucket, whatever output path the step sets. A CREATE with no output
-	 * path keeps the bare key. Known limits of this legacy format: it has no version ID column, so a
-	 * versioned row reads back as the latest version, and it cannot escape a comma in a key.
+	 * Returns the path the request addressed, by the rule of {@code HttpStorageDriverBase.dataUriPath}:
+	 * the operation's output path for a CREATE, the manifest's bucket for any other operation, whatever
+	 * output path the step sets. A key that already holds that path is the path, rooted; otherwise the
+	 * key goes under the rooted path with one slash between them. A CREATE with no output path keeps
+	 * the bare key.
+	 *
+	 * <p>Known limits of this legacy format: it has no version ID column, so whether a row keeps its
+	 * version depends on the driver and its versioning mode (Netty {@code s3} with versioning on
+	 * renames the item {@code key~versionId}, so the row carries it; {@code s3-aws} never renames). It
+	 * cannot hold a key with a comma or a line break, and a key with an empty segment ({@code a//b})
+	 * reads back as another path, as a plain item's does.
 	 */
 	private static String manifestItemPath(
 					final Operation<?> ioResult, final IntegrityManifestDataItem manifestItem) {
 		final String key = manifestItem.name();
+		final String path;
 		if (OpType.CREATE.equals(ioResult.type())) {
-			final String dstPath = ioResult.dstPath();
-			return dstPath == null || dstPath.isEmpty() ? key : ItemNamePaths.join(dstPath, key);
+			path = ioResult.dstPath();
+			if (path == null || path.isEmpty()) {
+				return key;
+			}
+		} else {
+			// rooted as the operation's source path is, which the request then uses
+			path = rooted(manifestItem.bucket());
 		}
-		final String bucket = manifestItem.bucket();
-		return (bucket.startsWith("/") ? bucket : "/" + bucket) + "/" + key;
+		// the path as written, as the driver tests it: a relative path holds only a relative key
+		if (ItemNamePaths.holdsPath(key, path)) {
+			return rooted(key);
+		}
+		return ItemNamePaths.join(rooted(path), key);
+	}
+
+	private static String rooted(final String path) {
+		return path.startsWith(Operation.SLASH) ? path : Operation.SLASH + path;
 	}
 
 	@Override
