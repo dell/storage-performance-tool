@@ -56,12 +56,6 @@ import com.sun.net.httpserver.HttpServer;
 @IntegrationTest
 public class JsonMetricsIntegrationTest {
 
-	private static final int METRICS_PORT = 2112;
-	private static final int JSON_PORT = 2113;
-	private static final String NODE_JSON_URL = "http://localhost:" + JSON_PORT + "/metrics/json";
-	private static final String FLEET_JSON_URL = "http://localhost:" + JSON_PORT + "/metrics/fleet/json";
-	private static final String CLUSTER_JSON_URL = "http://localhost:" + JSON_PORT + "/metrics/cluster/json";
-
 	private static final String STEP_ID = "integration-test-step";
 	private static final int RUN_ID = 12345;
 	private static final OpType OP_TYPE = OpType.CREATE;
@@ -74,6 +68,10 @@ public class JsonMetricsIntegrationTest {
 	private static final int CONCURRENCY_LIMIT = 10;
 	private static final SizeInBytes ITEM_DATA_SIZE = ItemSize.SMALL.getValue();
 
+	private int jsonPort;
+	private String nodeJsonUrl;
+	private String fleetJsonUrl;
+	private String clusterJsonUrl;
 	private Server prometheusServer;
 	private Server jsonServer;
 	private MetricsManager metricsManager;
@@ -85,16 +83,20 @@ public class JsonMetricsIntegrationTest {
 
 	@BeforeEach
 	public void setUp() throws Exception {
+		jsonPort = FreePorts.freePort();
+		nodeJsonUrl = "http://localhost:" + jsonPort + "/metrics/json";
+		fleetJsonUrl = "http://localhost:" + jsonPort + "/metrics/fleet/json";
+		clusterJsonUrl = "http://localhost:" + jsonPort + "/metrics/cluster/json";
 		objectMapper = new ObjectMapper();
 		metricsManager = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 		jsonConfig = TestConfigBuilder.config();
 		jsonConfig.val("run-comment", "integration-entry");
-		jsonConfig.val("run-port", JSON_PORT);
+		jsonConfig.val("run-port", jsonPort);
 		jsonConfig.val("run-id", RUN_ID);
 		jsonConfig.val("run-node", true);
 
 		// Setup Prometheus metrics server
-		prometheusServer = new Server(METRICS_PORT);
+		prometheusServer = new Server(0);
 		final var prometheusContext = new ServletContextHandler();
 		prometheusContext.setContextPath("/");
 		prometheusServer.setHandler(prometheusContext);
@@ -102,7 +104,7 @@ public class JsonMetricsIntegrationTest {
 		prometheusServer.start();
 
 		// Setup JSON metrics server
-		jsonServer = new Server(JSON_PORT);
+		jsonServer = new Server(jsonPort);
 		final var jsonContext = new ServletContextHandler();
 		jsonContext.setContextPath("/");
 		jsonServer.setHandler(jsonContext);
@@ -239,7 +241,7 @@ public class JsonMetricsIntegrationTest {
 
 		metricsManager.unregister(localCtx);
 
-		String nodeVerboseResponse = fetchFromUrl(NODE_JSON_URL + "?verbose=true");
+		String nodeVerboseResponse = fetchFromUrl(nodeJsonUrl + "?verbose=true");
 		JsonNode nodeArray = objectMapper.readTree(nodeVerboseResponse);
 		assertTrue(nodeArray.isArray());
 		JsonNode terminalEntry = null;
@@ -261,7 +263,7 @@ public class JsonMetricsIntegrationTest {
 
 	@Test
 	public void testClusterEndpointMatchesFleet() throws Exception {
-		final ArrayNode cluster = (ArrayNode) objectMapper.readTree(fetchFromUrl(CLUSTER_JSON_URL));
+		final ArrayNode cluster = (ArrayNode) objectMapper.readTree(fetchFromUrl(clusterJsonUrl));
 		final ArrayNode fleet = (ArrayNode) objectMapper.readTree(fetchJsonMetrics());
 		stripVolatileFields(cluster);
 		stripVolatileFields(fleet);
@@ -270,7 +272,7 @@ public class JsonMetricsIntegrationTest {
 
 	@Test
 	public void testNodeEndpointIdleSampleWhenOnlyDistributedContextsPresent() throws Exception {
-		JsonNode arr = objectMapper.readTree(fetchFromUrl(NODE_JSON_URL));
+		JsonNode arr = objectMapper.readTree(fetchFromUrl(nodeJsonUrl));
 		assertEquals(1, arr.size(), "/metrics/json should emit a single idle sample when no local contexts are active");
 		JsonNode obj = arr.get(0);
 		assertEquals(5, obj.get("metrics_schema").asInt());
@@ -321,7 +323,7 @@ public class JsonMetricsIntegrationTest {
 
 	@Test
 	public void testJsonEndpointCorsHeaders() throws Exception {
-		URL url = new URL(FLEET_JSON_URL);
+		URL url = new URL(fleetJsonUrl);
 		HttpURLConnection connection = (HttpURLConnection) url.openConnection();
 		connection.setRequestMethod("GET");
 		connection.connect();
@@ -400,7 +402,7 @@ public class JsonMetricsIntegrationTest {
 	 * Fetch JSON metrics via HTTP
 	 */
 	private String fetchJsonMetrics() throws Exception {
-		return fetchFromUrl(FLEET_JSON_URL);
+		return fetchFromUrl(fleetJsonUrl);
 	}
 
 	private String fetchFromUrl(final String urlString) throws Exception {
