@@ -757,12 +757,48 @@ final class S3VersionedRequestTest {
 
 		final var driver = driver(true, 4, false);
 		final var handler = new S3ResponseHandler(driver, false, true, null);
-		for (final var type : List.of(OpType.CREATE, OpType.READ, OpType.STAT, OpType.UPDATE)) {
+		for (final var type : List.of(OpType.CREATE, OpType.READ, OpType.STAT, OpType.UPDATE, OpType.DELETE)) {
 			final Operation op = retry(tildePathOp(type, "key"));
 			driver.httpRequest(op, HOST);
 			handler.handleResponseHeaders(null, op, versionResponse("v2"));
 			assertEquals("/b/run~1/key~v2", op.item().name(), type::toString);
 		}
+	}
+
+	/**
+	 * The in-segment rule's trade, pinned as it is: a version ID that contains {@code /} is not read
+	 * from the name. A recycled READ then addresses {@code key~a/b} as a key, and each response
+	 * appends another suffix; a first-attempt CREATE of {@code key~a/b} writes that key.
+	 */
+	@Test
+	@SuppressWarnings({"rawtypes", "unchecked"
+	})
+	void aVersionIdWithASlashIsNotReadFromTheName() throws Exception {
+		assertEquals(-1, S3StorageDriver.legacyVersionStart("key~a/b"));
+		assertEquals("key~a/b~v2", S3StorageDriver.withLegacyVersion("key~a/b", "v2"));
+
+		final var driver = driver(true, 4, false);
+		final var handler = new S3ResponseHandler(driver, false, true, null);
+		final List<String> sent = new ArrayList<>();
+		final List<String> names = new ArrayList<>();
+		Operation<Item> recycled = op(OpType.READ, "key");
+		for (int cycle = 0; cycle < 3; cycle++) {
+			final var request = driver.httpRequest(recycled, HOST);
+			sent.add(request.uri() + " " + request.headers().get(VERSION_HEADER));
+			handler.handleResponseHeaders(null, (Operation) recycled, versionResponse("a/b"));
+			names.add(recycled.item().name());
+			recycled = retry(recycled);
+		}
+		assertEquals(List.of("/b/key null", "/b/key~a/b null", "/b/key~a/b~a/b null"), sent);
+		assertEquals(List.of("key~a/b", "/b/key~a/b~a/b", "/b/key~a/b~a/b~a/b"), names);
+
+		final Operation create = op(OpType.CREATE, "key~a/b", null, "/b");
+		final var createRequest = driver.httpRequest(create, HOST);
+		assertEquals(HttpMethod.PUT, createRequest.method());
+		assertEquals("/b/key~a/b", createRequest.uri());
+		assertNull(createRequest.headers().get(VERSION_HEADER));
+		handler.handleResponseHeaders(null, create, versionResponse("v9"));
+		assertEquals("key~a/b~v9", create.item().name());
 	}
 
 	/** A {@code key~v1} item under the same path selects its version, first time and on retry. */
