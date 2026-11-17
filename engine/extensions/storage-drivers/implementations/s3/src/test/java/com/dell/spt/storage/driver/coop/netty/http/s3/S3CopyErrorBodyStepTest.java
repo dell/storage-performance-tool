@@ -73,6 +73,23 @@ final class S3CopyErrorBodyStepTest {
 	}
 
 	@Test
+	void aTransientErrorCodeFailsTheCopyAndRetrySendsItAgain() throws Exception {
+		stub.copyErrorBody = "<Error><Code>InternalError</Code><Message>m</Message></Error>";
+		final var answered = new AtomicInteger();
+		stub.failCopyWithErrorBody = request -> answered.incrementAndGet() == 1;
+
+		final var outcomes = copyStep(true);
+
+		assertEquals(List.of((long) COUNT, 0L), outcomes.get("CREATE-1"), outcomes::toString);
+		assertEquals(COUNT * SIZE, bytes.get("CREATE-1"), bytes::toString);
+		assertEquals(COUNT + 1, copies().size(), () -> "copies: " + stub.objectRequests());
+		assertEquals(COUNT, copies().stream().map(Request::path).distinct().count(), () -> "copies: " + stub.objectRequests());
+		for (final var copy : copies()) {
+			assertNotNull(stub.object(copy.path()), () -> "the retried copy exists: " + copy);
+		}
+	}
+
+	@Test
 	void normalCopiesAreUnchanged() throws Exception {
 		final var outcomes = copyStep();
 
