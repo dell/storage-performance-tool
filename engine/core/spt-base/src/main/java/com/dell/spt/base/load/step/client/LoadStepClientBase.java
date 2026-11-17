@@ -2742,10 +2742,13 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	 * The run has given up its bounded cleanup, often before it reached the slice close. Each worker
 	 * slice counts its own failed closes to the same limit before it releases itself and unexports, so
 	 * deliver those closes now: up to the limit, each within the stop phase deadline. A slice that
-	 * closes or is already released ({@link NoSuchObjectException}) gets no further close.
+	 * closes or is already released ({@link NoSuchObjectException}) gets no further close. A close
+	 * still running on the worker at the deadline is not sent again, so a slice whose admission close
+	 * stays blocked can miss its last close and stay exported, as before. A subclass that overrides this
+	 * hook calls it through {@code super}.
 	 */
 	@Override
-	protected final void cancelDurationRunCleanupResourcesAfterExhaustion() {
+	protected void cancelDurationRunCleanupResourcesAfterExhaustion() {
 		final List<LoadStep> slices = stepSlices.stream().filter(Objects::nonNull).toList();
 		DurationPhaseAttempt result = null;
 		for (var attempt = 0; attempt < DURATION_RUN_CLOSE_ATTEMPT_LIMIT; attempt++) {
@@ -2770,7 +2773,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		}
 		if (result != null && !result.succeeded()) {
 			Loggers.ERR.warn(
-							"{}: {} step slice close failure(s) after the cleanup retries; a worker releases a slice after its last one",
+							"{}: {} step slice close failure(s) after the cleanup retries; a worker releases a slice after its last failed close, and a slice whose close is still running may stay on its worker",
 							loadStepId(),
 							result.failures().size());
 		}

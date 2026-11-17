@@ -96,6 +96,30 @@ class DurationCleanupExhaustionReleaseTest {
 		verify(slice, org.mockito.Mockito.times(1)).close();
 	}
 
+	@Test
+	void aClientSubclassCanStillOverrideTheExhaustionHook() throws Exception {
+		final Config config = durationConfig();
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.toString()).thenReturn("overridden-hook-slice");
+		final boolean[] subclassCleanupRan = {false
+		};
+		// The hook is protected and was overridable before this fix; an extension's own override
+		// must still compile and load, and reach the slice release through super.
+		final TestLoadStepClient client = new TestLoadStepClient(config, List.of(), List.of(), mock(MetricsManager.class)) {
+			@Override
+			protected void cancelDurationRunCleanupResourcesAfterExhaustion() {
+				subclassCleanupRan[0] = true;
+				super.cancelDurationRunCleanupResourcesAfterExhaustion();
+			}
+		};
+		addSlice(client, slice);
+
+		client.cancelDurationRunCleanupResourcesAfterExhaustion();
+
+		assertTrue(subclassCleanupRan[0]);
+		verify(slice, org.mockito.Mockito.times(1)).close();
+	}
+
 	private static Throwable closeAfterRun(final LoadStepBase step) throws ReflectiveOperationException {
 		final Method closeAfterRun = LoadStepBase.class.getDeclaredMethod("closeAfterRun");
 		closeAfterRun.setAccessible(true);
