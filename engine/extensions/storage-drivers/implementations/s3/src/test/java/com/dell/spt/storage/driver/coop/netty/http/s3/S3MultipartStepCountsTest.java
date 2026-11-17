@@ -22,6 +22,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
+import java.util.regex.MatchResult;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -53,6 +55,8 @@ final class S3MultipartStepCountsTest {
 	 * three busy threads per CPU, and CI runs the engine modules' tests in parallel.
 	 */
 	private static final long ENDS_WITHIN_MILLIS = TimeUnit.SECONDS.toMillis(45);
+	/** A loopback upload id, as {@link NicSetLoopback} hands them out. */
+	private static final Pattern UPLOAD_ID = Pattern.compile("\\bupload-\\d+\\b");
 	/**
 	 * The steps' {@code load-op-wait-limit}, above {@link #ENDS_WITHIN_MILLIS} in place of
 	 * the shipped 30 s: a step that ends its count with an operation unresolved waits out this limit, so
@@ -581,6 +585,89 @@ final class S3MultipartStepCountsTest {
 		assertRequests(1, 1, 1);
 		assertEnded();
 		assertEquals(List.of("failed_aborted"), multipartStates(), () -> multipartLifecycle().toString());
+	}
+
+	/**
+	 * Queue pressure: a 1-slot driver input queue, batch size 1, a 500 ms child enqueue timeout, and
+	 * parts that take 1.5 s, for 4-part uploads at concurrency 5. A part's enqueue times out, so its
+	 * upload is aborted, or failed without its abort when the abort's own enqueue times out too. A
+	 * count-limited step with no time limit then ends on its count with nothing unresolved, where it
+	 * used to wait for the lost upload until it was stopped. With integrity metadata on, every
+	 * initiated upload has exactly one terminal {@code multipart.lifecycle.csv} record, an upload failed
+	 * without its abort {@code failed_orphaned}.
+	 */
+	@Test
+	@Timeout(120)
+	void aCountLimitedStepWhosePartEnqueueTimesOutEndsOnItsCount() throws Exception {
+		final var property = "spt.mpu.child.enqueue.timeout.millis";
+		final var previous = System.getProperty(property);
+		System.setProperty(property, "500");
+		stub.answerDelayMillis = request -> request.isPart() ? 1_500 : 0;
+		final Map<String, List<Long>> outcomes;
+		final List<ErrorsLogCapture.Line> errors;
+		try (final var capture = new ErrorsLogCapture()) {
+			outcomes = timed(null, """
+							Load.config({
+								"load": {
+									"batch": {"size": 1},
+									"op": {"limit": {"count": 4}, "retry": false, "wait": {"limit": %d}}
+								},
+								"storage": {
+									"driver": {"limit": {"concurrency": 5, "queue": {"input": 1}}},
+									"integrity": {"mode": "metadata"}
+								},
+								"item": {"data": {"size": "4KB", "ranges": {"threshold": "1KB"}}}
+							}).run();
+							""".formatted(LONG_WAIT_LIMIT_SECONDS));
+			errors = capture.drained();
+		} finally {
+			if (previous == null) {
+				System.clearProperty(property);
+			} else {
+				System.setProperty(property, previous);
+			}
+		}
+
+		final var counts = outcomes.get("CREATE-5");
+		assertEquals(4L, counts.get(0) + counts.get(1), outcomes::toString);
+		final var timeouts = errors.stream().filter(line -> line.message().contains("timed out enqueueing MPU")).count();
+		assertTrue(timeouts >= 1, () -> "a child enqueue timed out: " + errors);
+		assertTrue(counts.get(1) >= 1, () -> "the upload that lost a part is one failure: " + outcomes);
+		assertTrue(stepMillis < ENDS_WITHIN_MILLIS, () -> "the step took " + stepMillis + " ms");
+		assertNoneUnresolved();
+		// An upload whose abort could not be queued either is failed without it and stays open.
+		final var unsent = errors.stream().filter(line -> line.message().contains("may stay open on the target")).count();
+		assertTrue(stub.openUploads() <= unsent,
+						() -> stub.openUploads() + " uploads stay open, " + unsent + " failed unsent: " + errors);
+		final var initiated = count(stub.requests(), request -> "POST".equals(request.method())
+						&& request.query() != null && request.query().contains("uploads"));
+		final var records = multipartLifecycle(initiated);
+		assertEquals(initiated, records.size(), () -> initiated + " uploads initiated, records: " + records);
+		final var uploadIds = records.stream()
+						.map(record -> UPLOAD_ID.matcher(record).results().map(MatchResult::group).findFirst().orElse(record))
+						.distinct().count();
+		assertEquals(initiated, uploadIds, () -> "one record per upload: " + records);
+		final var states = records.stream()
+						.map(record -> Stream.of("failed_aborted", "failed_orphaned", "completed")
+										.filter(state -> record.contains("," + state + ",")).findFirst().orElse(record))
+						.toList();
+		assertTrue(states.stream().allMatch(state -> !state.contains(",")), () -> "terminal records: " + records);
+		assertTrue(unsent == 0 || states.contains("failed_orphaned"),
+						() -> unsent + " uploads failed unsent, records: " + records);
+	}
+
+	/**
+	 * The step's {@code multipart.lifecycle.csv} records, once there are {@code expected}: the log
+	 * writes them asynchronously.
+	 */
+	private List<String> multipartLifecycle(final long expected) throws InterruptedException {
+		final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+		while (multipartLifecycle().size() < expected && System.nanoTime() < deadline) {
+			Thread.sleep(10);
+		}
+		// A little longer, so a second record for one upload would show.
+		Thread.sleep(200);
+		return multipartLifecycle();
 	}
 
 	private static Predicate<Request> firstCompletion() {

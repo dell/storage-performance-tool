@@ -108,6 +108,10 @@ jobs:
             cli/coverage.txt
           if-no-files-found: error
 
+      - name: Run Go tests with race detector
+        working-directory: cli
+        run: make test-race
+
       - name: Run gosec
         uses: dell/common-github-actions/gosec-runner@main
         with:

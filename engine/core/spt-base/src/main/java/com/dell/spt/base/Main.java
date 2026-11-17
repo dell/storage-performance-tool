@@ -124,7 +124,8 @@ public final class Main {
 		final int status = start(args);
 		if (status != EXIT_SUCCESS) {
 			// A run started directly has only its exit status to tell its caller that it failed. The log
-			// shutdown hook flushes the asynchronous loggers, so the error is printed before the exit.
+			// shutdown hook (LogUtil.shutdown) waits for the asynchronous loggers to write their queued
+			// events, for at most the configured shutdown timeout, so the error is printed before the exit.
 			System.exit(status);
 		}
 	}
