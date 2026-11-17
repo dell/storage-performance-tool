@@ -28,6 +28,7 @@ import io.netty.util.AttributeKey;
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -49,6 +50,7 @@ final class S3ResponseHandlerBufferTest {
 	private static final int CHUNK = 8 * 1024;
 	private static final String DECLARATION = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
 	private static final String OVERFLOW_WARNING = "multipart response body is longer than";
+	private static final String UPLOAD_ID_NOT_FOUND = "Upload id not found";
 
 	private S3StorageDriverTest.TestS3Driver driver;
 	private S3ResponseHandler<Item, Operation<Item>> handler;
@@ -134,6 +136,105 @@ final class S3ResponseHandlerBufferTest {
 			assertEquals(1, warnings.size(), warnings::toString);
 			assertTrue(warnings.get(0).contains(Integer.toString(S3ResponseHandler.MAX_MULTIPART_RESPONSE_BYTES)), warnings::toString);
 		}
+	}
+
+	/**
+	 * Two initiations answered 200 with 64 KiB of HTML and no upload ID, through one driver, fail
+	 * not-found; the first is warned about in one line with a short excerpt, the second only at DEBUG.
+	 */
+	@Test
+	void initiationsWithoutAnUploadIdAreWarnedAboutOncePerDriver() throws Exception {
+		setOpResultOut(driver);
+		final var html = "<html><body>" + "gateway says no ".repeat(64 * 1024 / 16);
+		final var body = html.substring(0, S3ResponseHandler.MAX_MULTIPART_RESPONSE_BYTES);
+		final var ops = new ArrayList<String>();
+		try (final var errors = new ErrorsLogCapture()) {
+			for (int i = 0; i < 2; i++) {
+				final var op = upload();
+				op.status(Operation.Status.SUCC);
+				channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.TRUE); // no connection pool here
+				respond(op, body);
+				assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, op.status());
+				assertNull(channel.attr(S3Api.KEY_ATTR_UPLOAD_ID).get());
+				ops.add(op.toString());
+			}
+			final List<String> warnings = uploadIdWarnings(errors);
+			assertEquals(1, warnings.size(), warnings::toString);
+			final String excerpt = excerpt(ops.get(0), warnings.get(0));
+			assertTrue(excerpt.startsWith("<html><body>gateway says no"), excerpt);
+			assertTrue(excerpt.endsWith(S3ResponseHandler.CUT_MARK), excerpt);
+			assertTrue(excerpt.length() <= S3ResponseHandler.MAX_LOGGED_ERROR_MESSAGE_LENGTH + S3ResponseHandler.CUT_MARK.length(),
+							() -> excerpt.length() + " characters");
+			final List<String> debug = errors.drainedDebugMessages().stream()
+							.filter(message -> message.contains(UPLOAD_ID_NOT_FOUND)).toList();
+			assertEquals(List.of(ops.get(1) + ": " + UPLOAD_ID_NOT_FOUND + " in the multipart initiation response"), debug);
+		}
+	}
+
+	/** The target's text in an initiation response cannot break or forge a log line, or reach the console raw. */
+	@Test
+	void anInitiationResponseWithoutAnUploadIdCannotBreakTheLine() throws Exception {
+		setOpResultOut(driver);
+		final var op = upload();
+		op.status(Operation.Status.SUCC);
+		channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.TRUE);
+		try (final var errors = new ErrorsLogCapture()) {
+			respond(op, "<html>first\r\n2026-11-16 12:00:00 | ERROR | forged\n\u001B[31mred\u001B[0m\u2028\u202Eend</html>");
+			assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, op.status());
+			final List<String> warnings = uploadIdWarnings(errors);
+			assertEquals(1, warnings.size(), warnings::toString);
+			final String line = warnings.get(0);
+			assertTrue(line.chars().noneMatch(c -> Character.isISOControl(c) || c == '\u2028' || c == '\u2029'
+							|| Character.getType(c) == Character.FORMAT), line);
+			assertEquals("<html>first  2026-11-16 12:00:00 | ERROR | forged  [31mred [0m  end</html>", excerpt(op.toString(), line));
+		}
+	}
+
+	/** Leading whitespace does not use up the excerpt: the text after it is logged. */
+	@Test
+	void anInitiationExcerptSkipsLeadingWhitespace() throws Exception {
+		setOpResultOut(driver);
+		final var op = upload();
+		op.status(Operation.Status.SUCC);
+		channel.attr(NettyStorageDriver.ATTR_KEY_RELEASED).set(Boolean.TRUE);
+		try (final var errors = new ErrorsLogCapture()) {
+			respond(op, " \r\n\t".repeat(100) + "<html>late</html>");
+			final List<String> warnings = uploadIdWarnings(errors);
+			assertEquals(1, warnings.size(), warnings::toString);
+			assertEquals("<html>late</html>", excerpt(op.toString(), warnings.get(0)));
+		}
+	}
+
+	/** Guard: an initiation with its upload ID stores it on the channel and logs nothing. */
+	@Test
+	void anInitiationWithItsUploadIdLogsNothing() throws Exception {
+		driver.suppressCompletionForResponseTest();
+		final var op = upload();
+		op.status(Operation.Status.SUCC);
+		try (final var errors = new ErrorsLogCapture()) {
+			respond(op, DECLARATION + "<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>obj</Key>"
+							+ "<UploadId>u-1</UploadId></InitiateMultipartUploadResult>");
+			assertEquals(Operation.Status.SUCC, op.status());
+			assertEquals("u-1", channel.attr(S3Api.KEY_ATTR_UPLOAD_ID).get());
+			assertEquals(List.of(), errors.drained());
+			assertEquals(List.of(), errors.drainedDebugMessages().stream()
+							.filter(message -> message.contains(UPLOAD_ID_NOT_FOUND)).toList());
+		}
+	}
+
+	private static List<String> uploadIdWarnings(final ErrorsLogCapture errors) throws InterruptedException {
+		return errors.drained().stream()
+						.map(ErrorsLogCapture.Line::message)
+						.filter(message -> message.contains(UPLOAD_ID_NOT_FOUND))
+						.toList();
+	}
+
+	/** The body excerpt of the once-per-driver upload-id warning for {@code op}; fails if the line has another shape. */
+	private static String excerpt(final String op, final String warning) {
+		final String prefix = op + ": " + UPLOAD_ID_NOT_FOUND + " in the multipart initiation response, which starts: ";
+		final String suffix = " (logged once per step)";
+		assertTrue(warning.startsWith(prefix) && warning.endsWith(suffix), warning);
+		return warning.substring(prefix.length(), warning.length() - suffix.length());
 	}
 
 	/** A later chunk smaller than the room left is not spliced onto a body whose middle was dropped. */

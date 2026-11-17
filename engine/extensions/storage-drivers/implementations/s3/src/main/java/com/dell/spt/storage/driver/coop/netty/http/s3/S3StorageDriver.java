@@ -389,6 +389,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	private final S3ResponseHandler.CompletionErrorCodeLog completionErrorCodeLog = new S3ResponseHandler.CompletionErrorCodeLog();
 	// One WARN for a multipart response body over S3ResponseHandler.MAX_MULTIPART_RESPONSE_BYTES.
 	private final AtomicBoolean multipartResponseOverflowWarned = new AtomicBoolean();
+	// One WARN for a 2xx multipart initiation response without an upload ID; the rest go to DEBUG.
+	private final AtomicBoolean uploadIdNotFoundWarned = new AtomicBoolean();
 	private final KernelRouteAborts<KernelRouteAbort> kernelRouteAborts = new KernelRouteAborts<>();
 	// Host of driver-built helper requests (bucket setup, listing, verification, abort).
 	private String helperAuthority;
@@ -2521,6 +2523,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	/** True only the first time it is called: whether this step should warn of a multipart response's overflow. */
 	boolean claimMultipartResponseOverflowWarning() {
 		return multipartResponseOverflowWarned.compareAndSet(false, true);
+	}
+
+	/** True only the first time it is called: whether this step should warn of an initiation response without an upload ID. */
+	boolean claimUploadIdNotFoundWarning() {
+		return uploadIdNotFoundWarned.compareAndSet(false, true);
 	}
 
 	/**
