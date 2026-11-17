@@ -33,6 +33,8 @@ func (d *DebugLayoutRenderer) RenderLayoutToString(withSampleData bool) string {
 
 	// Create a sample model with test data
 	model := d.createSampleModel(withSampleData)
+	// The sample model's renderer starts a CPU monitor; stop it once rendered.
+	defer model.liveViewRenderer.Stop()
 
 	result.WriteString("=== TUI LAYOUT DEBUG ===\n")
 	fmt.Fprintf(&result, "Terminal Size: %dx%d\n", d.width, d.height)

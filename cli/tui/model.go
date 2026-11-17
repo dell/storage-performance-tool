@@ -1107,6 +1107,9 @@ func startTUIWithScenarioAndParamsWithNetworkModeTrace(runCtx context.Context, i
 
 	// Initialize live view renderer with scenario params
 	model.liveViewRenderer = NewLiveViewRenderer(&params)
+	// Stop the CPU monitor on every return, including the early error
+	// returns before the program runs. Stop is idempotent.
+	defer model.liveViewRenderer.Stop()
 
 	// Create Docker manager
 	dm, err := newTUIDockerManager()
@@ -1271,6 +1274,9 @@ func startTUIWithMultiHostOrchestratorWithTrace(runCtx context.Context, orchestr
 
 	// Initialize live view renderer with scenario params
 	model.liveViewRenderer = NewLiveViewRenderer(&params)
+	// Stop the CPU monitor on every return, including the early error
+	// returns before the program runs. Stop is idempotent.
+	defer model.liveViewRenderer.Stop()
 
 	// For multi-host, we'll use the first ready host's Docker manager for TUI integration
 	// This is primarily for the TUI's internal needs
@@ -1441,6 +1447,9 @@ func startTUIWithScenarioAndParamsNetworkModeTimeoutTrace(runCtx context.Context
 	model.keepScenario = params.KeepScenario
 	model.scenarioParams = &params
 	model.liveViewRenderer = NewLiveViewRenderer(&params)
+	// Stop the CPU monitor on every return, including the early error
+	// returns before the program runs. Stop is idempotent.
+	defer model.liveViewRenderer.Stop()
 
 	dm, err := newTUIDockerManager()
 	if err != nil {
@@ -1598,6 +1607,9 @@ func startTUIWithMultiHostOrchestratorTimeoutWithTrace(runCtx context.Context, o
 	model.keepScenario = params.KeepScenario
 	model.scenarioParams = &params
 	model.liveViewRenderer = NewLiveViewRenderer(&params)
+	// Stop the CPU monitor on every return, including the early error
+	// returns before the program runs. Stop is idempotent.
+	defer model.liveViewRenderer.Stop()
 
 	readyHosts := orchestrator.GetReadyHosts()
 	if len(readyHosts) == 0 {
@@ -1749,6 +1761,9 @@ func StartTUIWithContainer(image string, cmd []string) error {
 	// Initialize live view renderer with empty params (legacy container mode)
 	emptyParams := scenario.ScenarioParams{}
 	model.liveViewRenderer = NewLiveViewRenderer(&emptyParams)
+	// Stop the CPU monitor on every return, including the early error
+	// returns before the program runs. Stop is idempotent.
+	defer model.liveViewRenderer.Stop()
 
 	// Create Docker manager
 	dm, err := NewDockerManager()

@@ -4,24 +4,27 @@ package logging
 import (
 	"io"
 	"log/slog"
+	"sync/atomic"
 )
 
-// logger holds the application-wide logger instance
-var logger *slog.Logger
+// logger holds the application-wide logger instance. It is atomic so that
+// SetLogger may run while other goroutines log (tests swap it often).
+var logger atomic.Pointer[slog.Logger]
 
-// SetLogger sets the global logger instance
+// SetLogger sets the global logger instance. A nil logger restores the
+// no-op default.
 func SetLogger(l *slog.Logger) {
-	logger = l
+	logger.Store(l)
 }
 
 // GetLogger returns the configured logger instance.
 // If the logger hasn't been initialized, it returns a no-op logger.
 func GetLogger() *slog.Logger {
-	if logger == nil {
-		// Return a no-op logger (discard output) if not initialized
-		return slog.New(slog.NewTextHandler(io.Discard, nil))
+	if l := logger.Load(); l != nil {
+		return l
 	}
-	return logger
+	// Return a no-op logger (discard output) if not initialized
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 // WithComponent adds a component field to the logger for context.
