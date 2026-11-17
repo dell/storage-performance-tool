@@ -108,15 +108,14 @@ public final class Main {
 		// Check for version flag early
 		for (String arg : args) {
 			if ("--version".equals(arg) || "-v".equals(arg)) {
+				useSimpleLogging();
 				handleVersionRequest();
 				return;
 			}
 		}
 		for (final String arg : args) {
 			if (HELP_ARGS.contains(arg)) {
-				// An extension's static logger would load the log configuration, whose file appenders create
-				// their directories under the working directory; the help request writes nothing.
-				System.setProperty(LOG4J_CONTEXT_FACTORY_PROPERTY, LOG4J_SIMPLE_CONTEXT_FACTORY);
+				useSimpleLogging();
 				handleHelpRequest();
 				return;
 			}
@@ -129,6 +128,16 @@ public final class Main {
 			// events, for at most the configured shutdown timeout, so the error is printed before the exit.
 			System.exit(status);
 		}
+	}
+
+	/**
+	 * Gives the version and help requests, which write nothing, the simple Log4j context: they load the
+	 * extensions, and an extension's static logger would otherwise load the log configuration, whose file
+	 * appenders create {@code ${ctx:home_dir}/log/${ctx:step_id}} in the working directory from the
+	 * unresolved lookups. Errors an extension logs then go to stderr; lower levels are dropped.
+	 */
+	private static void useSimpleLogging() {
+		System.setProperty(LOG4J_CONTEXT_FACTORY_PROPERTY, LOG4J_SIMPLE_CONTEXT_FACTORY);
 	}
 
 	/** Starts the node or the scenario the arguments configure; returns the exit status. */

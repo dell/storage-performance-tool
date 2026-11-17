@@ -1405,8 +1405,18 @@ tasks.register('verifyEngineExitStatusCanary') {
 						"Packaged engine '${name}' printed no clean usage (missing ${missing}, ${result.written} files written):\n${result.output}")
 				}
 			}
+			// A version request loads the extensions, and with them an extension's static logger, as a help
+			// request does; it writes nothing either, wherever the flag stands
+			['version': s3Args + ['--version'], 'version-short': ['-v'] + s3Args].each { name, args ->
+				def result = expect(name, args, 0, [])
+				def missing = ['Engine version: ', 'Available extensions:'].findAll { !result.stdout.contains(it) }
+				if (!missing.isEmpty() || result.written != 0 || !result.stderr.isEmpty()) {
+					throw new GradleException(
+						"Packaged engine '${name}' printed no clean version (missing ${missing}, ${result.written} files written):\n${result.output}")
+				}
+			}
 			if (targetConnections.get() != 0) {
-				throw new GradleException('A help request connected to the target')
+				throw new GradleException('A help or version request connected to the target')
 			}
 
 			def remote = 'The argument "storage-driver-remote" is not supported: SPT has no remote driver services.'
