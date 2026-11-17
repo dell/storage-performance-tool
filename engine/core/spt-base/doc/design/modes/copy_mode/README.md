@@ -27,15 +27,20 @@ sent while copying the objects so these requests may be significantly faster tha
 
 Copy mode is enabled if:
 * `--load-op-type` option is set to `create` (this is by default) ***and***
-* one of the item inputs is configured:
-    * `--item-input-path` is set to existing bucket/container/directory ***or***
-    * `--item-input-file` is set to existing items list file
+* `--item-input-path` is set to existing bucket/container/directory
+
+`--item-input-file` may name the items to copy, but it does not enable copy mode by itself: without
+`--item-input-path`, a `create` step writes new data for the listed items.
 
 ### 2.2. Filesystem Storage Case
 
 In case of copying the filesystem directories there's a size may be
 calculated, so there's a size and bandwidth (MiB/sec) metrics
 are available.
+
+A listed item, or an item from an items file written by an `fs` step, is named by the source file's full path,
+so it lands under the output path with that full path, as for `s3`: `/src/dir/f0` is copied to
+`/dst/src/dir/f0`. Missing directories under the output path are created.
 
 ### 2.3. HTTP Storage Case
 
