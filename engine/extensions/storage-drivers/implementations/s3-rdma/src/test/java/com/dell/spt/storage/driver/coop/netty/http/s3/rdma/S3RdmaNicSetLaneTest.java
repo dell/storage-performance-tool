@@ -52,6 +52,7 @@ import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
@@ -997,11 +998,23 @@ final class S3RdmaNicSetLaneTest {
 		return channel;
 	}
 
-	/** The formatted messages of the driver's message log while it is open. */
+	/**
+	 * The formatted messages of the driver's message log while it is open.
+	 *
+	 * <p>The logger is asynchronous: its thread hands a record to the appenders there are when it
+	 * gets to the record, so a record logged before this log opened, such as an earlier test's
+	 * close summary, can still arrive after it opened. Opening sends a start marker through the
+	 * logger, and only what arrives after it is kept. A read sends a marker of its own and waits
+	 * for it, so it sees every record logged before the read.
+	 */
 	private static final class MessageLog extends AbstractAppender implements AutoCloseable {
 
 		private static final String MARKER = "s3-rdma-lane-test-marker";
+		private static final AtomicLong MARKERS = new AtomicLong();
+		private final String startMarker = nextMarker();
 		private final List<String> captured = Collections.synchronizedList(new ArrayList<>());
+		/** Whether the start marker arrived; set on the logger's thread. */
+		private volatile boolean opened;
 		private final org.apache.logging.log4j.core.Logger logger = LoggerContext.getContext(false).getLogger(Loggers.MSG.getName());
 		private final Level previousLevel = logger.getLevel();
 
@@ -1014,16 +1027,23 @@ final class S3RdmaNicSetLaneTest {
 			start();
 			logger.addAppender(this);
 			logger.setLevel(level);
+			Loggers.MSG.warn(startMarker);
 		}
 
 		@Override
 		public void append(final LogEvent event) {
-			captured.add(event.getMessage().getFormattedMessage());
+			final String message = event.getMessage().getFormattedMessage();
+			if (opened) {
+				captured.add(message);
+			} else if (startMarker.equals(message)) {
+				opened = true;
+			}
 		}
 
 		List<String> matching(final String text) throws InterruptedException {
-			Loggers.MSG.warn(MARKER);
-			waitFor(() -> captured.contains(MARKER), "the log marker arrived");
+			final String marker = nextMarker();
+			Loggers.MSG.warn(marker);
+			waitFor(() -> captured.contains(marker), "the log marker arrived");
 			synchronized (captured) {
 				return captured.stream().filter(message -> message.contains(text)).collect(Collectors.toList());
 			}
@@ -1041,6 +1061,10 @@ final class S3RdmaNicSetLaneTest {
 			logger.removeAppender(this);
 			logger.setLevel(previousLevel);
 			stop();
+		}
+
+		private static String nextMarker() {
+			return MARKER + "-" + MARKERS.incrementAndGet();
 		}
 	}
 }

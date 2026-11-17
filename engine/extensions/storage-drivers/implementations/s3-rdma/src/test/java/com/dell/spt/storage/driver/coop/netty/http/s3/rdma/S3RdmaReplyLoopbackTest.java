@@ -71,6 +71,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -191,7 +192,7 @@ final class S3RdmaReplyLoopbackTest {
 			transport.setBeforeRegister(() -> preparing.add(Thread.currentThread().getName()));
 			transport.setBeforeToken(() -> preparing.add(Thread.currentThread().getName()));
 
-			assertEquals(Operation.Status.SUCC, execute(driver, op(OpType.CREATE, SIZE)).status());
+			assertEquals(Operation.Status.SUCC, executeThenStop(driver, op(OpType.CREATE, SIZE)).status());
 
 			assertEquals(1, preparing.size(), preparing::toString);
 			assertFalse(preparing.iterator().next().contains("-rdma-lane-"), preparing::toString);
@@ -438,7 +439,7 @@ final class S3RdmaReplyLoopbackTest {
 			driver.directAllocator = size -> {
 				throw new OutOfMemoryError("Cannot reserve " + size + " bytes of direct buffer memory");
 			};
-			final var result = execute(driver, op(OpType.CREATE, SIZE));
+			final var result = executeThenStop(driver, op(OpType.CREATE, SIZE));
 
 			assertEquals(Operation.Status.SUCC, result.status());
 			assertNull(onlyObjectRequest("PUT").rdmaToken());
@@ -451,7 +452,7 @@ final class S3RdmaReplyLoopbackTest {
 		reply = new Reply(200, null, null, null, false);
 		try (final var driver = newDriver(true)) {
 			transport.setFailAfterNRegistrations(0);
-			final var result = execute(driver, op(OpType.CREATE, SIZE));
+			final var result = executeThenStop(driver, op(OpType.CREATE, SIZE));
 
 			assertEquals(Operation.Status.SUCC, result.status());
 			final CapturedRequest put = onlyObjectRequest("PUT");
@@ -465,7 +466,7 @@ final class S3RdmaReplyLoopbackTest {
 	void belowThresholdUsesHttpAndIsCounted() throws Exception {
 		reply = new Reply(200, null, null, null, false);
 		try (final var driver = newDriver(true)) {
-			final var result = execute(driver, op(OpType.CREATE, THRESHOLD - 1));
+			final var result = executeThenStop(driver, op(OpType.CREATE, THRESHOLD - 1));
 
 			assertEquals(Operation.Status.SUCC, result.status());
 			final CapturedRequest put = onlyObjectRequest("PUT");
@@ -482,7 +483,7 @@ final class S3RdmaReplyLoopbackTest {
 		reply = new Reply(200, null, null, null, false);
 		try (final var driver = newDriver(true)) {
 			transport.setFailTokenGeneration(true);
-			final var result = execute(driver, op(OpType.CREATE, PAYLOAD_SIZE));
+			final var result = executeThenStop(driver, op(OpType.CREATE, PAYLOAD_SIZE));
 
 			assertEquals(Operation.Status.SUCC, result.status());
 			assertEquals(PAYLOAD_SIZE, ((DataOperation<?>) result).countBytesDone());
@@ -498,7 +499,7 @@ final class S3RdmaReplyLoopbackTest {
 		final byte[] payload = payloadSentOverRdma(PAYLOAD_SIZE);
 		reply = new Reply(200, null, null, null, false);
 		try (final var driver = newDriver(true)) {
-			final var result = execute(driver, putFailingAfterPartialCopy(PAYLOAD_SIZE));
+			final var result = executeThenStop(driver, putFailingAfterPartialCopy(PAYLOAD_SIZE));
 
 			assertEquals(Operation.Status.SUCC, result.status());
 			assertEquals(PAYLOAD_SIZE, ((DataOperation<?>) result).countBytesDone());
@@ -561,7 +562,7 @@ final class S3RdmaReplyLoopbackTest {
 		rdmaInitFails = true;
 		for (final OpType opType : List.of(OpType.CREATE, OpType.READ)) {
 			try (final var driver = newDriver(true)) {
-				final var result = execute(driver, op(opType, SIZE));
+				final var result = executeThenStop(driver, op(opType, SIZE));
 
 				assertEquals(Operation.Status.SUCC, result.status(), opType.toString());
 				assertEquals(SIZE, ((DataOperation<?>) result).countBytesDone(), opType.toString());
@@ -597,6 +598,8 @@ final class S3RdmaReplyLoopbackTest {
 				assertNotNull(result, "operation " + i + " did not complete: " + requests);
 				assertEquals(Operation.Status.SUCC, result.status(), result.type() + ": " + requests);
 			}
+			// The counts are final once the stopped dispatcher has returned from every submission.
+			driver.stop();
 			assertEquals(3, driver.pathStats().httpRdmaUnavailable.sum(),
 							"two PUTs and one GET carry a payload; the DELETE does not");
 		}
@@ -610,7 +613,7 @@ final class S3RdmaReplyLoopbackTest {
 			final Operation<DataItem> ranged = (Operation<DataItem>) (Operation<?>) new DataOperationImpl<>(
 							0, OpType.READ, new DataItemImpl("obj-range", 0, SIZE), null, "/bucket", CREDENTIAL,
 							List.of(new Range(0L, SIZE / 2 - 1, -1L)), 0);
-			final var result = execute(driver, ranged);
+			final var result = executeThenStop(driver, ranged);
 
 			assertEquals(Operation.Status.SUCC, result.status());
 			assertEquals(SIZE / 2, ((DataOperation<?>) result).countBytesDone());
@@ -1386,13 +1389,22 @@ final class S3RdmaReplyLoopbackTest {
 	}
 
 	/**
-	 * Collects the records of the engine's message logger. The logger is asynchronous, so a read
-	 * first sends a marker through it and waits for the marker.
+	 * Collects the records of the engine's message logger while it is open.
+	 *
+	 * <p>The logger is asynchronous: its thread hands a record to the appenders there are when it
+	 * gets to the record, so a record logged before this log opened, such as an earlier test's
+	 * close summary, can still arrive after it opened. Opening sends a start marker through the
+	 * logger, and only what arrives after it is kept. A read sends a marker of its own and waits
+	 * for it, so it sees every record logged before the read.
 	 */
 	private static final class MessageLog extends AbstractAppender implements AutoCloseable {
 
 		private static final String MARKER = "s3-rdma-loopback-test-marker";
+		private static final AtomicLong MARKERS = new AtomicLong();
+		private final String startMarker = nextMarker();
 		private final List<String> captured = Collections.synchronizedList(new ArrayList<>());
+		/** Whether the start marker arrived; set on the logger's thread. */
+		private volatile boolean opened;
 		private final org.apache.logging.log4j.core.Logger logger = LoggerContext.getContext(false).getLogger(Loggers.MSG.getName());
 		private final Level previousLevel = logger.getLevel();
 
@@ -1401,18 +1413,25 @@ final class S3RdmaReplyLoopbackTest {
 			start();
 			logger.addAppender(this);
 			logger.setLevel(Level.INFO);
+			Loggers.MSG.warn(startMarker);
 		}
 
 		@Override
 		public void append(final LogEvent event) {
-			captured.add(event.getMessage().getFormattedMessage());
+			final String message = event.getMessage().getFormattedMessage();
+			if (opened) {
+				captured.add(message);
+			} else if (startMarker.equals(message)) {
+				opened = true;
+			}
 		}
 
 		/** The one record that contains the text. */
 		String only(final String text) throws InterruptedException {
-			Loggers.MSG.warn(MARKER);
+			final String marker = nextMarker();
+			Loggers.MSG.warn(marker);
 			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(RESULT_TIMEOUT_SECONDS);
-			while (!captured.contains(MARKER)) {
+			while (!captured.contains(marker)) {
 				assertFalse(System.nanoTime() > deadline, "log marker did not arrive: " + captured);
 				Thread.sleep(5);
 			}
@@ -1429,6 +1448,10 @@ final class S3RdmaReplyLoopbackTest {
 			logger.removeAppender(this);
 			logger.setLevel(previousLevel);
 			stop();
+		}
+
+		private static String nextMarker() {
+			return MARKER + "-" + MARKERS.incrementAndGet();
 		}
 	}
 
@@ -1602,7 +1625,7 @@ final class S3RdmaReplyLoopbackTest {
 		final byte[] payload = payloadSentOverRdma(size);
 		reply = new Reply(200, null, null, null, false);
 		try (final var driver = newDriver(true, config -> config.val("storage-rdma-copyThreads", 2))) {
-			final var result = execute(
+			final var result = executeThenStop(
 							driver, putWithReadHook(size, S3RdmaReplyLoopbackTest::outOfMemoryOnACopyThread));
 
 			assertEquals(Operation.Status.SUCC, result.status());
@@ -2083,6 +2106,19 @@ final class S3RdmaReplyLoopbackTest {
 		assertTrue(driver.put(operation));
 		final Operation<DataItem> result = output.await();
 		assertNotNull(result, "operation did not complete");
+		return result;
+	}
+
+	/**
+	 * Runs one operation, then stops the driver. A request is counted as sent once the
+	 * dispatcher's submission of it has returned, which may be after its result was output; the
+	 * stopped driver's dispatcher has returned from every submission, so the counts are final.
+	 */
+	private static Operation<DataItem> executeThenStop(
+					final S3RdmaStorageDriver<DataItem, Operation<DataItem>> driver,
+					final Operation<DataItem> operation) throws Exception {
+		final Operation<DataItem> result = execute(driver, operation);
+		driver.stop();
 		return result;
 	}
 
