@@ -45,6 +45,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.LongSupplier;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
@@ -619,8 +620,11 @@ final class S3RdmaNicSetDriverTest {
 		for (var i = 0; i < 18; i++) {
 			assertEquals(Operation.Status.SUCC, run.results().await().status());
 		}
-		assertEquals(2, stub.objectRequests().stream().filter(request -> request.sourceNic() == slow).count(),
-						"the slow NIC holds its share and takes no more");
+		// The stub records a request when its handler thread reads it, which may be after the fast
+		// NIC finished: wait for the share to arrive, then check that it is all the NIC took.
+		final LongSupplier sentOnSlow = () -> stub.objectRequests().stream().filter(request -> request.sourceNic() == slow).count();
+		waitFor(() -> sentOnSlow.getAsLong() >= 2, "the slow NIC's share reached the stub");
+		assertEquals(2, sentOnSlow.getAsLong(), "the slow NIC holds its share and takes no more");
 		assertEquals(2, run.pool().admission().count(slow));
 		stub.release();
 		for (var i = 0; i < 2; i++) {

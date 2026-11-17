@@ -2270,8 +2270,14 @@ class LoadStepClientBaseTest {
 				releaseThread.interrupt();
 				releaseThread.join(TimeUnit.SECONDS.toMillis(2));
 			}
-			firstCloseThread.interrupt();
-			firstCloseThread.join(TimeUnit.SECONDS.toMillis(2));
+			// The released probe's flight admits the next run before the first close has read its
+			// result, so let the first close finish; an interrupt now would fail its collection.
+			firstCloseThread.join(TimeUnit.SECONDS.toMillis(10));
+			if (firstCloseThread.isAlive()) {
+				firstCloseThread.interrupt();
+				firstCloseThread.join(TimeUnit.SECONDS.toMillis(2));
+				firstCloseFailure.compareAndSet(null, new AssertionError("the first close did not finish"));
+			}
 		}
 		assertNull(firstCloseFailure.get());
 		awaitFailureBudgetSnapshotProbeCount(0);
