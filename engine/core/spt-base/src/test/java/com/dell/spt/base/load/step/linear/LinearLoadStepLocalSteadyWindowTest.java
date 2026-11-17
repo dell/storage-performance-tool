@@ -15,6 +15,7 @@ import com.dell.spt.base.load.step.LoadStep;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.steady.SteadyResult;
+import com.dell.spt.base.metrics.steady.SteadyStatus;
 import com.dell.spt.base.storage.driver.mock.DummyStorageDriverMockExtension;
 import com.github.akurilov.confuse.Config;
 import java.lang.reflect.Method;
@@ -77,6 +78,8 @@ class LinearLoadStepLocalSteadyWindowTest {
 				final SteadyResult result = context.steadyResult();
 				assertNotNull(result, "shutdown closes every window");
 				assertFalse(result.cause().contains("measurement failed"), "cause: " + result.cause());
+				assertEquals(SteadyStatus.NOT_REACHED, result.status());
+				assertEquals("shutdown", result.cause());
 			}
 		} finally {
 			step.closeQuietly();
