@@ -12,26 +12,9 @@ import java.io.StringWriter;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.servlet.ServletContextHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 public class LogServletTest {
-	private static final int PORT = 9999;
-	private static final Server server = new Server(PORT);
-
-	@BeforeEach
-	public void setUp() throws Exception {
-		final ServletContextHandler context = new ServletContextHandler();
-		context.setContextPath("/");
-		server.setHandler(context);
-
-		context.addServlet(new ServletHolder(new LogServlet()), "/logs/*");
-		server.start();
-	}
 
 	/* This had to be removed from servletAPITest due to LogServlet being located in /logs directory, meaning we could not call protected methods */
 	@Test
@@ -97,11 +80,4 @@ public class LogServletTest {
 		final String body = sw.toString();
 		assertTrue(body.contains("\"items\""));
 	}
-
-	@AfterEach
-	public void tearDown() throws Exception {
-		server.stop();
-	}
-
-	/* Utility Methods */
 }

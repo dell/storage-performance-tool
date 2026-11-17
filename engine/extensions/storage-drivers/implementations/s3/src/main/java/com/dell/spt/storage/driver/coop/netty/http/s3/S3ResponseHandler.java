@@ -64,6 +64,11 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	private static final AttributeKey<Boolean> OUT_OF_BAND_READ_ATTR_KEY = AttributeKey.newInstance("spt-integrity-out-of-band-read");
 	/** The start of a failed flat response's body, kept only once its status has failed. */
 	private static final AttributeKey<ByteBuf> FAILED_RESPONSE_ATTR_KEY = AttributeKey.newInstance("spt-failed-response");
+	/**
+	 * The start of a copy's 2xx response body, up to {@link #COMPLETION_ERROR_SCAN_BYTES}: S3 may answer
+	 * a copy {@code 200 OK} and then report its failure in an {@code <Error>} document.
+	 */
+	private static final AttributeKey<ByteBuf> COPY_RESPONSE_ATTR_KEY = AttributeKey.newInstance("spt-copy-response");
 	private static final int MIN_CONTENT_SIZE = 0x100;
 	private static final int MAX_CONTENT_SIZE = 0x400;
 	/**
@@ -86,9 +91,9 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	/** The S3 error codes of a completion that may succeed if the whole upload is tried again. */
 	static final Set<String> TRANSIENT_COMPLETION_ERROR_CODES = Set.of(
 					"InternalError", "ServiceUnavailable", "SlowDown", "RequestTimeout");
-	/** How a missing, empty or truncated completion error code is logged; it maps to RESP_FAIL_SVC. */
+	/** How a missing, empty or truncated completion or copy error code is logged; it maps to RESP_FAIL_SVC. */
 	static final String MISSING_ERROR_CODE = "(missing)";
-	/** How a completion error code that is too long or not a plain S3 code name is logged; it maps to RESP_FAIL_CLIENT. */
+	/** How a completion or copy error code that is too long or not a plain S3 code name is logged; it maps to RESP_FAIL_CLIENT. */
 	static final String UNREADABLE_ERROR_CODE = "(unreadable)";
 	/** The longest completion error code logged as it is; S3 code names are far shorter. */
 	static final int MAX_LOGGED_ERROR_CODE_LENGTH = 64;
@@ -232,6 +237,16 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		return channel.hasAttr(FAILED_RESPONSE_ATTR_KEY);
 	}
 
+	/** Whether {@code channel} has ever kept a copy's response body; tests check that other operations keep none. */
+	static boolean keptCopyResponse(final Channel channel) {
+		return channel.hasAttr(COPY_RESPONSE_ATTR_KEY);
+	}
+
+	/** The copy response buffer {@code channel} holds now, or {@code null}; tests check that it is released. */
+	static ByteBuf heldCopyResponse(final Channel channel) {
+		return channel.hasAttr(COPY_RESPONSE_ATTR_KEY) ? channel.attr(COPY_RESPONSE_ATTR_KEY).get() : null;
+	}
+
 	static void resetDeleteResponseDiagnosticsForTest() {
 		for (int index = 0; index < DELETE_RESPONSE_DIAGNOSTICS.length(); index++) {
 			DELETE_RESPONSE_DIAGNOSTICS.set(index, 0);
@@ -248,6 +263,12 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	 * success path free of the operation's {@code volatile} status.
 	 */
 	private boolean responseFailed;
+	/**
+	 * Whether the channel's current response answers a copy, decided once by {@link
+	 * #handleResponseStatus} at the start of every response. A plain field for the reason above: each
+	 * chunk and the finish of every other response then test one field, with no operation-type test.
+	 */
+	private boolean copyResponse;
 
 	public S3ResponseHandler(final S3StorageDriver<I, O> driver, final boolean verifyFlag,
 					final boolean versioningEnabled, final String checksumHeader) {
@@ -265,6 +286,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		if (!(op instanceof DeleteRequestOperation)) {
 			final boolean succeeded = super.handleResponseStatus(op, statusClass, responseStatus);
 			responseFailed = !succeeded;
+			copyResponse = op.type() == OpType.CREATE && isCopy(op);
 			return succeeded;
 		}
 		// Dedicated DELETE artifacts carry the actionable result. Avoid the inherited per-request
@@ -273,6 +295,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		op.status(status);
 		final boolean succeeded = Operation.Status.SUCC.equals(status);
 		responseFailed = !succeeded;
+		copyResponse = false;
 		return succeeded;
 	}
 
@@ -313,7 +336,9 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 			final Item item = op.item();
 			final String name = item.name();
 			// A name without a suffix appends, as it always did. The request builder never renames a
-			// key~versionId item, so on the route that splits it the suffix is replaced.
+			// key~versionId item, so on the route that splits it the suffix is replaced. The ~ test only
+			// skips that split for a name with no ~ at all: withLegacyVersion appends to a name whose
+			// only ~ is in its path, as the other branch does.
 			item.name(name.indexOf('~') >= 0 && s3Driver != null && s3Driver.namesLegacyVersion(op)
 							? S3StorageDriver.withLegacyVersion(name, versionId)
 							: name + "~" + versionId);
@@ -361,8 +386,42 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		} else {
 			if (responseFailed) {
 				bufferFailedResponse(channel, contentChunk);
+			} else if (copyResponse) {
+				bufferCopyResponse(channel, contentChunk);
 			}
 			super.handleResponseContentChunk(channel, op, contentChunk);
+		}
+	}
+
+	/** Whether a CREATE is a copy: it has a source path, as the request builder decides. */
+	private static boolean isCopy(final Operation<?> op) {
+		final String srcPath = op.srcPath();
+		return srcPath != null && !srcPath.isEmpty();
+	}
+
+	/**
+	 * Keeps the first {@link #COMPLETION_ERROR_SCAN_BYTES} bytes of a copy's 2xx response body, for {@link
+	 * #copyFailureStatus}, without consuming the chunk; the rest is dropped and the buffer never grows
+	 * past that bound. The buffer is made on the copy's first readable chunk and released when its
+	 * response finishes. A body ended by the connection's close still finishes: the HTTP codec emits
+	 * its last content when the channel goes inactive, after the close. On an abnormal close with no
+	 * finish, the unpooled heap buffer is left to the garbage collector with the channel, as the failed
+	 * response buffer is.
+	 */
+	private static void bufferCopyResponse(final Channel channel, final ByteBuf contentChunk) {
+		if (channel == null || !contentChunk.isReadable()) {
+			return;
+		}
+		final Attribute<ByteBuf> bodyAttr = channel.attr(COPY_RESPONSE_ATTR_KEY);
+		ByteBuf body = bodyAttr.get();
+		if (body == null) {
+			// the attribute is only used on the channel's event loop, so no compare-and-set is needed
+			body = Unpooled.buffer(Math.min(contentChunk.readableBytes(), COMPLETION_ERROR_SCAN_BYTES), COMPLETION_ERROR_SCAN_BYTES);
+			bodyAttr.set(body);
+		}
+		final int length = Math.min(body.maxWritableBytes(), contentChunk.readableBytes());
+		if (length > 0) {
+			body.writeBytes(contentChunk, contentChunk.readerIndex(), length);
 		}
 	}
 
@@ -564,9 +623,9 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 					final Matcher m = PATTERN_UPLOAD_ID.matcher(contentStr);
 					if (m.find()) {
 						channel.attr(S3Api.KEY_ATTR_UPLOAD_ID).set(m.group(1));
-					} else {
-						Loggers.ERR.warn(
-										"Upload id not found in the following response content:\n{}", contentStr);
+					} else if (!responseFailed && mpuOp.get(S3Api.KEY_MPU_ABORT) == null && OpType.CREATE.equals(op.type())) {
+						// a refusal has logged its status and code lines, and an abort or a ranged update is not an initiation
+						logUploadIdNotFound(op, content);
 					}
 				} else {
 					final Operation.Status failure = completionFailureStatus(
@@ -578,9 +637,54 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 				content.clear();
 			} else if (responseFailed) {
 				finishFailedResponse(channel, op);
+			} else if (copyResponse) {
+				finishCopyResponse(channel, op);
 			}
 		}
 		super.handleResponseContentFinish(channel, op);
+	}
+
+	/**
+	 * Fails the copy {@code op} when the target answered 2xx with an S3 {@code <Error>} document, as
+	 * {@link #copyFailureStatus} decides, before the driver completes it; then releases the copy's
+	 * buffer. A copy answered with no body kept none.
+	 */
+	private void finishCopyResponse(final Channel channel, final O op) {
+		if (!channel.hasAttr(COPY_RESPONSE_ATTR_KEY)) {
+			return; // no copy on this channel had a body
+		}
+		final ByteBuf body = channel.attr(COPY_RESPONSE_ATTR_KEY).getAndSet(null);
+		if (body == null) {
+			return;
+		}
+		try {
+			final Operation.Status failure = copyFailureStatus(op, body, s3Driver == null ? null : s3Driver.copyErrorCodeLog());
+			if (failure != null) {
+				op.status(failure);
+			}
+		} finally {
+			body.release();
+		}
+	}
+
+	/**
+	 * Logs a 2xx initiation response without an upload ID: the first one of the driver's step at WARN,
+	 * as one line with the operation and an excerpt of the body's first {@link
+	 * #FAILED_RESPONSE_SCAN_BYTES} bytes after any leading XML whitespace, made safe by {@link #loggableText}; later ones at DEBUG with
+	 * the operation only. Each such operation already fails, so the step's counts name them all.
+	 */
+	private void logUploadIdNotFound(final Operation<?> op, final ByteBuf content) {
+		if (s3Driver == null || s3Driver.claimUploadIdNotFoundWarning()) {
+			final int start = skipXmlWhitespace(content, content.readerIndex(), content.writerIndex());
+			final int end = Math.min(content.writerIndex(), start + FAILED_RESPONSE_SCAN_BYTES);
+			final String excerpt = loggableText(content.toString(start, end - start, UTF_8), end == content.writerIndex());
+			Loggers.ERR.warn(
+							"{}: Upload id not found in the multipart initiation response, which starts: {} (logged once per step)",
+							op.toString(),
+							excerpt.isEmpty() ? MISSING_ERROR_CODE : excerpt);
+		} else {
+			Loggers.ERR.debug("{}: Upload id not found in the multipart initiation response", op.toString());
+		}
 	}
 
 	private static void finishFailedResponse(final Channel channel, final Operation<?> op) {
@@ -628,7 +732,18 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		final int valueStart = skipXmlWhitespace(content, element + MESSAGE_START.length, end);
 		final int valueEnd = content.indexOf(valueStart, end, (byte) '<');
 		final boolean complete = valueEnd >= 0;
-		final String raw = content.toString(valueStart, (complete ? valueEnd : end) - valueStart, UTF_8);
+		final String message = loggableText(
+						content.toString(valueStart, (complete ? valueEnd : end) - valueStart, UTF_8), complete);
+		return message.isEmpty() ? MISSING_ERROR_CODE : message;
+	}
+
+	/**
+	 * Target-sent {@code raw} text made safe for one log line: cut to {@link
+	 * #MAX_LOGGED_ERROR_MESSAGE_LENGTH} characters, every control, line separator and format character
+	 * made a space, and stripped. It ends with {@value #CUT_MARK} when it was cut or {@code raw} is not
+	 * {@code complete}, and is empty when nothing but spaces is left.
+	 */
+	private static String loggableText(final String raw, final boolean complete) {
 		final var text = new StringBuilder(Math.min(raw.length(), MAX_LOGGED_ERROR_MESSAGE_LENGTH) + CUT_MARK.length());
 		for (int i = 0; i < raw.length() && text.length() < MAX_LOGGED_ERROR_MESSAGE_LENGTH; i++) {
 			final char c = raw.charAt(i);
@@ -640,10 +755,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 			text.setLength(text.length() - 1); // the cut split a surrogate pair
 		}
 		final String message = text.toString().strip();
-		if (message.isEmpty()) {
-			return MISSING_ERROR_CODE;
-		}
-		return cut ? message + CUT_MARK : message;
+		return cut && !message.isEmpty() ? message + CUT_MARK : message;
 	}
 
 	/**
@@ -665,6 +777,30 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 						|| op.get(S3Api.KEY_MPU_ABORT) != null) {
 			return null;
 		}
+		return errorDocumentStatus(op, content, log);
+	}
+
+	/**
+	 * The status of a copy that the target answered 2xx with an S3 {@code <Error>} document, as S3 may
+	 * once it has sent the status line, or {@code null} for any other response: the scan, statuses and
+	 * once-per-code log of {@link #completionFailureStatus}, on the first {@link
+	 * #COMPLETION_ERROR_SCAN_BYTES} bytes of a successful copy's body. A {@code <CopyObjectResult>} body,
+	 * or an empty one, stays a success.
+	 */
+	static Operation.Status copyFailureStatus(
+					final Operation<?> op, final ByteBuf content, final CompletionErrorCodeLog log) {
+		if (op.status() != Operation.Status.SUCC || !OpType.CREATE.equals(op.type()) || !isCopy(op)) {
+			return null;
+		}
+		return errorDocumentStatus(op, content, log);
+	}
+
+	/**
+	 * The status a 2xx body that begins with an S3 {@code <Error>} root calls for, or {@code null} for
+	 * any other body; see {@link #completionFailureStatus}.
+	 */
+	private static Operation.Status errorDocumentStatus(
+					final Operation<?> op, final ByteBuf content, final CompletionErrorCodeLog log) {
 		final int start = content.readerIndex();
 		final int end = Math.min(content.writerIndex(), start + COMPLETION_ERROR_SCAN_BYTES);
 		int i = skipXmlWhitespace(content, start, end);
@@ -708,7 +844,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	}
 
 	private static Operation.Status completionErrorCodeStatus(
-					final CompositeDataOperation<?> op, final String code, final CompletionErrorCodeLog log) {
+					final Operation<?> op, final String code, final CompletionErrorCodeLog log) {
 		final Operation.Status status = code == null || TRANSIENT_COMPLETION_ERROR_CODES.contains(code)
 						? Operation.Status.RESP_FAIL_SVC
 						: Operation.Status.RESP_FAIL_CLIENT;
@@ -743,26 +879,39 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * The completion error codes one driver has logged: each code once, and at most {@link
-	 * #MAX_LOGGED_COMPLETION_ERROR_CODES} codes. A driver serves one step, and each step has its own
-	 * {@code errors.log}, so every step's log names the codes its uploads failed with.
+	 * The completion error codes, or with {@link #forCopies()} the copy error codes, one driver has
+	 * logged: each code once, and at most {@link #MAX_LOGGED_COMPLETION_ERROR_CODES} codes. A driver
+	 * serves one step, and each step has its own {@code errors.log}, so every step's log names the codes
+	 * its uploads, or its copies, failed with.
 	 */
 	static final class CompletionErrorCodeLog {
 
-		private final Map<String, Boolean> codes = new ConcurrentHashMap<>();
+		private static final String COMPLETION_FORMAT = "{}: multipart completion answered 2xx with S3 error code {}; the upload counts as {} and is aborted"
+						+ " (logged once per code{})";
+		private static final String COPY_FORMAT = "{}: copy answered 2xx with S3 error code {}; the copy counts as {} (logged once per code{})";
 
-		void log(final CompositeDataOperation<?> op, final String code, final Operation.Status status) {
+		private final Map<String, Boolean> codes = new ConcurrentHashMap<>();
+		private final String format;
+
+		CompletionErrorCodeLog() {
+			this(COMPLETION_FORMAT);
+		}
+
+		private CompletionErrorCodeLog(final String format) {
+			this.format = format;
+		}
+
+		/** A log of the codes of copies answered 2xx with an S3 error document. */
+		static CompletionErrorCodeLog forCopies() {
+			return new CompletionErrorCodeLog(COPY_FORMAT);
+		}
+
+		void log(final Operation<?> op, final String code, final Operation.Status status) {
 			if (codes.size() >= MAX_LOGGED_COMPLETION_ERROR_CODES || codes.putIfAbsent(code, Boolean.TRUE) != null) {
 				return;
 			}
 			final boolean last = codes.size() >= MAX_LOGGED_COMPLETION_ERROR_CODES;
-			Loggers.ERR.warn(
-							"{}: multipart completion answered 2xx with S3 error code {}; the upload counts as {} and is aborted"
-											+ " (logged once per code{})",
-							op.item().name(),
-							code,
-							status,
-							last ? "; further codes are not logged" : "");
+			Loggers.ERR.warn(format, op.item().name(), code, status, last ? "; further codes are not logged" : "");
 		}
 	}
 

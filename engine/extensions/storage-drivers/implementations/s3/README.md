@@ -458,6 +458,15 @@ With versioning on, the `s3` and `s3-rdma` drivers read the version from a `key~
 * A copy (a CREATE with `--item-input-path`) and an item above the multipart threshold (`item-data-ranges-threshold`,
   see [4.4](#44-multipart-upload)) don't select a version: they act on the current version, or on an object literally
   named `key~versionId`.
+* Only the last `~` in the name's last path segment starts the version: a `~` with a `/` after it belongs to a
+  path. A retried or recycled operation, or a copy, names its item by its whole path, so under
+  `--item-output-path=/bucket/run~1` the retry of item `key` sends `/bucket/run~1/key`, and a response with a
+  version renames it `/bucket/run~1/key~<versionId>`. A version ID that contains a `/` is not read from the name,
+  so in recycle mode ([4.3.1.1](#4311-recycle-mode)) each cycle addresses `key~<versionId>` as a key and appends
+  another suffix to it.
+* A `~` in the key's own last segment, such as a naming prefix `run~1-` or a key `a~b` with no version, is
+  ambiguous under this convention: the driver reads the text after it as a version ID. Avoid `~` in key names
+  when versioning is on.
 
 #### 4.3.1. PUT versions
 
@@ -659,7 +668,7 @@ When `storage-checksum-enabled=true`, the selected checksum algorithm is applied
 
 #### 4.4.6. Reporting
 
-Completed multipart uploads are logged to `parts.upload.csv` (in the step's log directory) with columns: `ItemPath`, `UploadId`, `RespLatency[us]`. Aborted uploads are also logged with an `abort` prefix.
+Multipart uploads are logged to `parts.upload.csv` (in the step's log directory) with the header `Phase,ItemPath,UploadId,PartNumber,StartTs,Duration[us],Latency[us],Bytes`: one `INIT` row per initiation, one `PART` row per part (written with the upload's `COMPLETE` row), one `COMPLETE` row per completion answer and one `ABORT` row per abort answer. `spt run` fetches it as `<stepID>.multipart.csv` for a single-engine step.
 
 #### 4.4.7. Example: Scenario File (JAR users)
 

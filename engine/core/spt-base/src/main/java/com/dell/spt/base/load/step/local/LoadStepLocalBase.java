@@ -127,7 +127,21 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	private volatile CompletableFuture<Void> deletePostVerificationTask;
 
 	protected IntSupplier actualConcurrencyGauge(final int index, final OpType opType) {
-		return () -> stepContexts.get(index).activeOpCount();
+		return () -> stepContextActiveOpCount(index);
+	}
+
+	/**
+	 * The in-flight count of the step context at {@code index}, or 0 when it does not exist.
+	 *
+	 * <p>The metrics contexts, and so this gauge, exist before {@code init()} adds the step
+	 * contexts. A slice that fails in {@code init()} leaves {@link #stepContexts} empty, and the
+	 * shutdown that follows still reads the gauge to close the steady-state windows. In a working
+	 * run the step context exists for the metrics context's whole life, so the 0 branch is never
+	 * taken there.
+	 */
+	protected final int stepContextActiveOpCount(final int index) {
+		final List<LoadStepContext> contexts = stepContexts;
+		return index < contexts.size() ? contexts.get(index).activeOpCount() : 0;
 	}
 
 	protected LoadStepLocalBase(

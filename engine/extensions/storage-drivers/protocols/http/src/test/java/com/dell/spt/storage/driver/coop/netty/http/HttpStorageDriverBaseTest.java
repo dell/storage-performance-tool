@@ -25,7 +25,6 @@ import com.github.akurilov.confuse.impl.BasicConfig;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.buffer.Unpooled;
-import io.netty.handler.codec.TooLongFrameException;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
@@ -639,70 +638,372 @@ class HttpStorageDriverBaseTest {
 		assertTrue(sb.toString().contains(","), "Multiple ranges should be comma-separated");
 	}
 
+	private static final int DEFAULT_CAP = HttpStorageDriverBase.CONTROL_RESPONSE_MAX_CONTENT_LENGTH;
+
+	@Test
+	void theDefaultControlResponseCapIs16MiB() {
+		assertEquals(16 * 1024 * 1024, DEFAULT_CAP);
+	}
+
 	/**
 	 * A HEAD response states the object's size in Content-Length but has no body, so the control
-	 * aggregator passes it whatever the size, also under a cap smaller than the size.
+	 * handler returns it whatever the size, also under the default cap.
 	 */
 	@ParameterizedTest
 	@CsvSource({
-			"2147483647, 2147483647",
-			"2147483648, 2147483647",
-			"3221225472, 2147483647",
-			"5497558138880, 2147483647",
-			"2147483648, 16777216"
+			"16777217, 16777216",
+			"2147483647, 16777216",
+			"2147483648, 16777216",
+			"3221225472, 16777216",
+			"5497558138880, 16777216",
+			"2147483648, 2147483647"
 	})
-	void controlAggregatorPassesAHeadResponseOfAnySize(
-					final long contentLength, final int maxContentLength) {
-		final var ch = controlChannel(HttpMethod.HEAD, maxContentLength);
+	void aHeadResponseOfAnySizeIsReturned(final long contentLength, final int maxContentLength) {
+		final var control = new HttpStorageDriverBase.ControlResponseHandler(HttpMethod.HEAD, maxContentLength);
+		final var ch = controlChannel(HttpMethod.HEAD, control);
 
-		assertTrue(ch.writeInbound(responseHeaders(contentLength)));
-		final FullHttpResponse response = ch.readInbound();
+		ch.writeInbound(responseHeaders(contentLength));
+		final FullHttpResponse response = control.response().getNow(null);
 		try {
+			assertNotNull(response);
 			assertEquals(HttpResponseStatus.OK, response.status());
 			assertEquals(0, response.content().readableBytes());
 			assertEquals(
 							Long.toString(contentLength),
 							response.headers().get(HttpHeaderNames.CONTENT_LENGTH));
+			assertFalse(control.oversized());
 			assertTrue(ch.isOpen());
 		} finally {
-			response.release();
+			if (response != null) {
+				response.release();
+			}
 			ch.finishAndReleaseAll();
 		}
 	}
 
-	/** Responses to other methods keep the limit: an oversized GET response is refused. */
-	@Test
-	void controlAggregatorRefusesAGetResponseOverTheLimit() {
-		final var ch = controlChannel(HttpMethod.GET, Integer.MAX_VALUE);
+	/** A GET answered with a Content-Length over the cap is refused at once: null, one WARN. */
+	@ParameterizedTest
+	@CsvSource({"16777217", "2147483648"
+	})
+	void aBodyOverTheCapByContentLengthReturnsNullWithOneWarning(final long contentLength)
+					throws Exception {
+		final var control = new HttpStorageDriverBase.ControlResponseHandler(HttpMethod.GET, DEFAULT_CAP);
+		final var ch = controlChannel(HttpMethod.GET, control);
 
-		assertThrows(
-						TooLongFrameException.class,
-						() -> ch.writeInbound(responseHeaders(2147483648L)));
+		ch.writeInbound(responseHeaders(contentLength));
+
 		assertFalse(ch.isOpen());
-		assertNull(ch.readInbound());
+		assertTrue(control.oversized());
+		assertOversizeWarnedOnce(control, HttpMethod.GET, "/bucket/key");
 		ch.finishAndReleaseAll();
 	}
 
+	/** A chunked body that grows past the cap, as an endless one would, is refused when it passes it. */
 	@Test
-	void controlAggregatorAggregatesAGetResponseWithinTheLimit() {
-		final var ch = controlChannel(HttpMethod.GET, Integer.MAX_VALUE);
+	void aChunkedBodyGrowingOverTheCapReturnsNullWithOneWarning() throws Exception {
+		final var control = new HttpStorageDriverBase.ControlResponseHandler(HttpMethod.GET, 4096);
+		final var ch = controlChannel(HttpMethod.GET, control);
 
-		final var wire = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
-		assertTrue(ch.writeInbound(Unpooled.copiedBuffer(wire, StandardCharsets.US_ASCII)));
-		final FullHttpResponse response = ch.readInbound();
+		ch.writeInbound(Unpooled.copiedBuffer(
+						"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", StandardCharsets.US_ASCII));
+		final var chunk = "1000\r\n" + "x".repeat(4096) + "\r\n";
+		ch.writeInbound(Unpooled.copiedBuffer(chunk, StandardCharsets.US_ASCII));
+		assertTrue(ch.isOpen(), "a body at the cap is still taken");
+		ch.writeInbound(Unpooled.copiedBuffer(chunk, StandardCharsets.US_ASCII));
+
+		assertFalse(ch.isOpen());
+		assertTrue(control.oversized());
+		assertOversizeWarnedOnce(control, HttpMethod.GET, "/bucket/key");
+		ch.finishAndReleaseAll();
+	}
+
+	/** A response ended by the connection close, with no Content-Length and not chunked, is returned. */
+	@Test
+	void aCloseDelimitedResponseIsReturned() throws Exception {
+		final var control = new HttpStorageDriverBase.ControlResponseHandler(HttpMethod.GET, DEFAULT_CAP);
+		final var ch = controlChannel(HttpMethod.GET, control);
+
+		ch.writeInbound(Unpooled.copiedBuffer(
+						"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n<ListBucketResult/>",
+						StandardCharsets.US_ASCII));
+		assertFalse(control.response().isDone(), "the body ends only at the close");
+		ch.close().sync();
+		ch.runPendingTasks();
+
+		final FullHttpResponse response = control.response().getNow(null);
 		try {
-			assertEquals("hello", response.content().toString(StandardCharsets.US_ASCII));
+			assertNotNull(response);
+			assertEquals("<ListBucketResult/>", response.content().toString(StandardCharsets.US_ASCII));
+			assertFalse(control.oversized());
 		} finally {
-			response.release();
+			if (response != null) {
+				response.release();
+			}
 			ch.finishAndReleaseAll();
 		}
 	}
 
-	/** A client codec that has sent the request, so it knows a HEAD response has no body. */
-	private static EmbeddedChannel controlChannel(final HttpMethod method, final int maxContentLength) {
+	/** A response under the cap is returned as sent, and the waiter takes it without a warning. */
+	@Test
+	void aResponseUnderTheCapIsReturnedUnchanged() throws Exception {
+		final var control = new HttpStorageDriverBase.ControlResponseHandler(HttpMethod.GET, DEFAULT_CAP);
+		final var ch = controlChannel(HttpMethod.GET, control);
+
+		final var wire = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nx-amz-request-id: r1\r\n\r\nhello";
+		ch.writeInbound(Unpooled.copiedBuffer(wire, StandardCharsets.US_ASCII));
+		final var request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/bucket/key");
+		final FullHttpResponse response = new TestHttpDriver(baseConfig()).awaitResponse(control, request, true);
+		try {
+			assertNotNull(response);
+			assertEquals(HttpResponseStatus.OK, response.status());
+			assertEquals("r1", response.headers().get("x-amz-request-id"));
+			assertEquals("hello", response.content().toString(StandardCharsets.US_ASCII));
+			assertFalse(control.oversized());
+			assertTrue(ch.isOpen());
+		} finally {
+			if (response != null) {
+				response.release();
+			}
+			ch.finishAndReleaseAll();
+		}
+	}
+
+	/** A caller's larger cap, through the overload, admits a body the default refuses. */
+	@Test
+	void aLargerCapAdmitsABodyTheDefaultRefuses() throws Exception {
+		final int size = DEFAULT_CAP + 1024 * 1024;
+		final var body = new byte[size];
+		java.util.Arrays.fill(body, (byte) 'm');
+
+		final var refused = new HttpStorageDriverBase.ControlResponseHandler(HttpMethod.GET, DEFAULT_CAP);
+		final var refusedCh = controlChannel(HttpMethod.GET, refused);
+		refusedCh.writeInbound(responseHeaders(size), Unpooled.wrappedBuffer(body));
+		assertNull(refused.response().getNow(null));
+		assertTrue(refused.oversized());
+		refusedCh.finishAndReleaseAll();
+
+		final var admitted = new HttpStorageDriverBase.ControlResponseHandler(HttpMethod.GET, 64 * 1024 * 1024);
+		final var admittedCh = controlChannel(HttpMethod.GET, admitted);
+		admittedCh.writeInbound(responseHeaders(size), Unpooled.wrappedBuffer(body));
+		final FullHttpResponse response = admitted.response().getNow(null);
+		try {
+			assertNotNull(response);
+			assertEquals(size, response.content().readableBytes());
+			assertFalse(admitted.oversized());
+		} finally {
+			if (response != null) {
+				response.release();
+			}
+			admittedCh.finishAndReleaseAll();
+		}
+	}
+
+	/** A plain close before any response is still reported as one, not as an oversize. */
+	@Test
+	void aCloseBeforeTheResponseIsNotReportedAsOversize() throws Exception {
+		final var control = new HttpStorageDriverBase.ControlResponseHandler(HttpMethod.GET, DEFAULT_CAP);
+		final var ch = controlChannel(HttpMethod.GET, control);
+
+		ch.close().sync();
+		ch.runPendingTasks();
+
+		assertNull(control.response().getNow(null));
+		assertFalse(control.oversized());
+		final var request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/bucket/key");
+		final var lines = captureMessages(() -> assertNull(
+						new TestHttpDriver(baseConfig()).awaitResponse(control, request, true)));
+		assertEquals(0, lines.stream().filter(line -> line.contains("cap for control requests")).count());
+		assertEquals(1, lines.stream().filter(line -> line.contains("Connection closed before the response")).count());
+		ch.finishAndReleaseAll();
+	}
+
+	/**
+	 * After a refusal, the driver's codec ({@code failOnMissingResponse}) reports the response the
+	 * close cut short; that is swallowed with the refusal, so nothing reaches the pipeline tail,
+	 * where Netty would log a warning with a stack trace.
+	 */
+	@Test
+	void aRefusalLeavesNoExceptionForThePipelineTail() throws Exception {
+		final var control = new HttpStorageDriverBase.ControlResponseHandler(HttpMethod.GET, DEFAULT_CAP);
+		final var ch = driverCodecChannel(HttpMethod.GET, control);
+
+		ch.writeInbound(responseHeaders(DEFAULT_CAP + 1L));
+		ch.runPendingTasks();
+
+		assertFalse(ch.isOpen());
+		assertTrue(control.oversized());
+		ch.checkException();
+		ch.finishAndReleaseAll();
+	}
+
+	/** A plain close with the response missing still reports it, as before. */
+	@Test
+	void aPlainCloseStillReportsTheMissingResponse() {
+		final var control = new HttpStorageDriverBase.ControlResponseHandler(HttpMethod.GET, DEFAULT_CAP);
+		final var ch = driverCodecChannel(HttpMethod.GET, control);
+
+		assertThrows(io.netty.handler.codec.PrematureChannelClosureException.class, () -> {
+			ch.close().sync();
+			ch.runPendingTasks();
+			ch.checkException();
+		});
+		assertFalse(control.oversized());
+		assertNull(control.response().getNow(null));
+		ch.finishAndReleaseAll();
+	}
+
+	/** The client codec as the driver builds it, which fails a response the close cuts short. */
+	private static EmbeddedChannel driverCodecChannel(
+					final HttpMethod method, final HttpStorageDriverBase.ControlResponseHandler control) {
 		final var ch = new EmbeddedChannel(
-						new HttpClientCodec(),
-						HttpStorageDriverBase.controlResponseAggregator(method, maxContentLength));
+						new HttpClientCodec(HttpStorageDriver.REQ_LINE_LEN, HttpStorageDriver.HEADERS_LEN, 65536, true),
+						control.aggregator(),
+						control);
+		assertTrue(ch.writeOutbound(
+						new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, method, "/bucket/key")));
+		ch.releaseOutbound();
+		return ch;
+	}
+
+	/**
+	 * The real {@code executeHttpRequest} methods against a loopback target that answers every
+	 * request with a body of 16 MiB + 1: the one- and two-argument methods refuse it with the default
+	 * cap, and the overload with a larger cap admits it.
+	 */
+	@Test
+	@org.junit.jupiter.api.Timeout(60)
+	void executeHttpRequestAppliesTheDefaultCapAndTheOverloadsCap() throws Exception {
+		final int size = DEFAULT_CAP + 1;
+		try (final var server = new java.net.ServerSocket(0, 50, java.net.InetAddress.getLoopbackAddress())) {
+			final var acceptor = Thread.ofPlatform().daemon().name("control-cap-target").start(() -> {
+				while (!server.isClosed()) {
+					try {
+						final var connection = server.accept();
+						Thread.ofVirtual().start(() -> answerWithBody(connection, size));
+					} catch (final java.io.IOException closed) {
+						// The test closed the server.
+					}
+				}
+			});
+			final Config cfg = baseConfig();
+			cfg.val("storage-net-node-addrs", List.of(server.getInetAddress().getHostAddress()));
+			cfg.val("storage-net-node-port", server.getLocalPort());
+			cfg.val("storage-net-timeoutMilliSec", 10_000);
+			final var driver = new TestHttpDriver(cfg);
+			try {
+				assertNull(driver.executeHttpRequest(controlGet()), "one-argument method, default cap");
+				assertNull(driver.executeHttpRequest(controlGet(), false), "two-argument method, default cap");
+				final FullHttpResponse admitted = driver.executeHttpRequest(controlGet(), true, 64 * 1024 * 1024);
+				try {
+					assertNotNull(admitted, "the overload's 64 MiB cap admits the body");
+					assertEquals(HttpResponseStatus.OK, admitted.status());
+					assertEquals(size, admitted.content().readableBytes());
+				} finally {
+					if (admitted != null) {
+						admitted.release();
+					}
+				}
+			} finally {
+				driver.close();
+				server.close();
+				acceptor.join(5_000);
+			}
+		}
+	}
+
+	private static io.netty.handler.codec.http.FullHttpRequest controlGet() {
+		final var request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/bucket?list-type=2");
+		request.headers().set(HttpHeaderNames.CONTENT_LENGTH, 0);
+		return request;
+	}
+
+	/** Reads one request head and answers 200 with {@code size} bytes of body, or stops when the client goes. */
+	private static void answerWithBody(final java.net.Socket connection, final int size) {
+		try (connection) {
+			final var in = connection.getInputStream();
+			final var head = new StringBuilder();
+			int value;
+			while ((value = in.read()) >= 0) {
+				head.append((char) value);
+				if (head.length() >= 4 && head.lastIndexOf("\r\n\r\n") == head.length() - 4) {
+					break;
+				}
+			}
+			final var out = connection.getOutputStream();
+			out.write(("HTTP/1.1 200 OK\r\nContent-Length: " + size + "\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+			final var chunk = new byte[1 << 20];
+			java.util.Arrays.fill(chunk, (byte) 'b');
+			for (int sent = 0; sent < size;) {
+				final int n = Math.min(chunk.length, size - sent);
+				out.write(chunk, 0, n);
+				sent += n;
+			}
+			out.flush();
+			// Hold the connection until the client closes it, as a keep-alive target does.
+			while (in.read() >= 0) {
+				// Discard.
+			}
+		} catch (final java.io.IOException closed) {
+			// The client refused the body and closed the connection.
+		}
+	}
+
+	private static void assertOversizeWarnedOnce(
+					final HttpStorageDriverBase.ControlResponseHandler control,
+					final HttpMethod method,
+					final String uri)
+					throws Exception {
+		final var request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, method, uri);
+		final var driver = new TestHttpDriver(baseConfig());
+		final var lines = captureMessages(() -> assertNull(driver.awaitResponse(control, request, true)));
+		final var expected = "test-http: Response body over the " + control.maxContentLength()
+						+ "-byte cap for control requests, refused: method=" + method + ", uri=" + uri;
+		assertEquals(List.of(expected), lines.stream().filter(line -> line.contains("cap for control requests")).toList());
+		assertEquals(0, lines.stream().filter(line -> line.contains("Connection closed before the response")).count());
+	}
+
+	@FunctionalInterface
+	private interface Action {
+		void run() throws Exception;
+	}
+
+	/** The WARN and higher messages of the Messages logger while {@code action} runs. */
+	private static List<String> captureMessages(final Action action) throws Exception {
+		final var marker = "control-response-capture-done:" + System.nanoTime();
+		final var lines = new java.util.concurrent.CopyOnWriteArrayList<String>();
+		final var done = new java.util.concurrent.CountDownLatch(1);
+		final var appender = new org.apache.logging.log4j.core.appender.AbstractAppender(
+						"control-response-capture", null, null, true,
+						org.apache.logging.log4j.core.config.Property.EMPTY_ARRAY) {
+			@Override
+			public void append(final org.apache.logging.log4j.core.LogEvent event) {
+				final var message = event.getMessage().getFormattedMessage();
+				if (marker.equals(message)) {
+					done.countDown();
+				} else if (event.getLevel().isMoreSpecificThan(org.apache.logging.log4j.Level.WARN)) {
+					lines.add(message);
+				}
+			}
+		};
+		appender.start();
+		final var logger = org.apache.logging.log4j.core.LoggerContext.getContext(false)
+						.getLogger(com.dell.spt.base.logging.Loggers.MSG.getName());
+		logger.addAppender(appender);
+		try {
+			action.run();
+			com.dell.spt.base.logging.Loggers.MSG.error(marker);
+			assertTrue(done.await(30, java.util.concurrent.TimeUnit.SECONDS), "the Messages logger drained");
+		} finally {
+			logger.removeAppender(appender);
+			appender.stop();
+		}
+		return List.copyOf(lines);
+	}
+
+	/** A client codec that has sent the request, so it knows a HEAD response has no body. */
+	private static EmbeddedChannel controlChannel(
+					final HttpMethod method, final HttpStorageDriverBase.ControlResponseHandler control) {
+		final var ch = new EmbeddedChannel(new HttpClientCodec(), control.aggregator(), control);
 		assertTrue(ch.writeOutbound(
 						new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, method, "/bucket/key")));
 		ch.releaseOutbound();
