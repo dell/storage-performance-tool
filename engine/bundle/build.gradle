@@ -1407,6 +1407,16 @@ tasks.register('verifyEngineExitStatusCanary') {
 			if (targetConnections.get() != 0) {
 				throw new GradleException('A help request connected to the target')
 			}
+			// A version request loads the extensions, and with them an extension's static logger, as a help
+			// request does; it writes nothing either
+			['version': ['--version'], 'version-short': ['-v']].each { name, args ->
+				def result = expect(name, args, 0, [])
+				def missing = ['Engine version: ', 'Available extensions:'].findAll { !result.stdout.contains(it) }
+				if (!missing.isEmpty() || result.written != 0 || !result.stderr.isEmpty()) {
+					throw new GradleException(
+						"Packaged engine '${name}' printed no clean version (missing ${missing}, ${result.written} files written):\n${result.output}")
+				}
+			}
 
 			def remote = 'The argument "storage-driver-remote" is not supported: SPT has no remote driver services.'
 			expect('unknown-option', ['--bogus'], 2, ['Invalid configuration option: "bogus"'])
