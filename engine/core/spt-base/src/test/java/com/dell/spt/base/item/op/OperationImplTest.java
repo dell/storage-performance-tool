@@ -8,6 +8,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 class OperationImplTest {
 
@@ -173,4 +175,60 @@ class OperationImplTest {
 						"latency must not be epoch-scale in normal lifecycle");
 	}
 
+	/**
+	 * A name with an empty segment right before its last segment is kept whole, with the path up to
+	 * that run of slashes, so neither the request nor the items-file name loses the segment. Every
+	 * other name keeps the split at the last slash. The result name is what an items file gets.
+	 */
+	@ParameterizedTest(name = "{0} -> srcPath {1}, name {2}, result {3}")
+	@CsvSource(delimiter = '|', emptyValue = "", value = {
+			// an empty segment before the last one: kept whole
+			"/pp//k     | /pp      | /pp//k     | /pp//k",
+			"/pp/a//b   | /pp/a    | /pp/a//b   | /pp/a//b",
+			"/pp//d//k  | /pp//d   | /pp//d//k  | /pp//d//k",
+			"/pp///k    | /pp      | /pp///k    | /pp///k",
+			"pp//k      | pp       | pp//k      | pp//k",
+			// the run of slashes starts the name: split as before
+			"//k        | /        | k          | /k",
+			// a name ending with a slash (a folder marker) is out of scope: split as before
+			"/pp/d//    | /pp/d/   | ''         | /pp/d/",
+			// ordinary names: split as before
+			"/pp/k      | /pp      | k          | /pp/k",
+			"/pp/d/k    | /pp/d    | k          | /pp/d/k",
+			"/pp/k/     | /pp/k    | ''         | /pp/k/",
+			"pp/k       | pp       | k          | pp/k",
+	})
+	void nonCreate_keepsANameWithAnEmptySegmentBeforeTheLastWhole(
+					final String name, final String srcPath, final String opName, final String resultName) {
+		for (final OpType opType : java.util.List.of(OpType.READ, OpType.UPDATE, OpType.DELETE, OpType.STAT)) {
+			final var item = new ItemImpl(name);
+			final var op = new OperationImpl<>(0, opType, item, null, null, null);
+			assertEquals(srcPath, op.srcPath(), opType + " srcPath");
+			assertEquals(srcPath, op.dstPath(), opType + " dstPath");
+			assertEquals(opName, item.name(), opType + " name");
+			final var result = op.result();
+			assertEquals(resultName, result.item().name(), opType + " result name");
+			// a retry is the result reset and dispatched again: it keeps the same name and paths
+			result.reset();
+			assertEquals(srcPath, result.dstPath(), opType + " retry dstPath");
+			assertEquals(resultName, result.result().item().name(), opType + " retry result name");
+		}
+	}
+
+	@Test
+	void list_keepsTheOldSplitForANameWithAnEmptySegment() {
+		final var item = new ItemImpl("/pp//k");
+		final var op = new OperationImpl<>(0, OpType.LIST, item, null, null, null);
+		assertEquals("/pp/", op.srcPath());
+		assertEquals("k", item.name());
+	}
+
+	@Test
+	void create_keepsANameWithAnEmptySegmentAndNoSrcPath() {
+		final var item = new ItemImpl("/pp//k");
+		final var op = new OperationImpl<>(0, OpType.CREATE, item, null, "/dst", null);
+		assertNull(op.srcPath());
+		assertEquals("/pp//k", item.name());
+		assertEquals("/dst/pp//k", op.result().item().name());
+	}
 }

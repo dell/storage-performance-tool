@@ -390,6 +390,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	private final S3ResponseHandler.CompletionErrorCodeLog copyErrorCodeLog = S3ResponseHandler.CompletionErrorCodeLog.forCopies();
 	// One WARN for a multipart response body over S3ResponseHandler.MAX_MULTIPART_RESPONSE_BYTES.
 	private final AtomicBoolean multipartResponseOverflowWarned = new AtomicBoolean();
+	// One WARN for a 2xx multipart initiation response without an upload ID; the rest go to DEBUG.
+	private final AtomicBoolean uploadIdNotFoundWarned = new AtomicBoolean();
 	private final KernelRouteAborts<KernelRouteAbort> kernelRouteAborts = new KernelRouteAborts<>();
 	// Host of driver-built helper requests (bucket setup, listing, verification, abort).
 	private String helperAuthority;
@@ -2529,6 +2531,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		return multipartResponseOverflowWarned.compareAndSet(false, true);
 	}
 
+	/** True only the first time it is called: whether this step should warn of an initiation response without an upload ID. */
+	boolean claimUploadIdNotFoundWarning() {
+		return uploadIdNotFoundWarned.compareAndSet(false, true);
+	}
+
 	/**
 	 * An abort after a failed completion, still pending: its upload, the completion's status and when
 	 * the abort was scheduled ({@link System#nanoTime()}).
@@ -2561,6 +2568,18 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				multipartCleanupTasks.remove(cleanupTask);
 			}
 		});
+	}
+
+	/**
+	 * An upload failed without its completion or abort being sent, because that could not be queued,
+	 * is recorded as orphaned: an abort not sent as attempted and failed, as an abort that failed
+	 * before it had a connection is.
+	 */
+	@Override
+	protected void recordUploadLeftOpen(final O uploadOp, final boolean aborting, final String cause) {
+		final var compositeOp = (CompositeDataOperation) uploadOp;
+		emitMultipartLifecycle(compositeOp, "failed_orphaned", aborting, aborting ? Boolean.FALSE : null,
+						(aborting ? mpuFailure(compositeOp) + "; abort " : "") + "not sent: " + cause);
 	}
 
 	/** Records an upload whose abort was not sent, or not answered by the close, as orphaned. */

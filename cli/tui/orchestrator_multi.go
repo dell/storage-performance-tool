@@ -464,11 +464,16 @@ func (o *MultiHostOrchestrator) ConnectHosts(ctx context.Context) error {
 				} else { //nolint:revive // keep else for clarity here
 					logging.LogInfo("docker-multi", "docker available", "host", h.Info.Original, "version", ver)
 				}
-				// 2) Ensure image if known
+				// 2) Ensure image if known. An attached worker runs from whatever image its
+				// operator started it with and spt starts nothing there, so it needs no image;
+				// the engine identity check still compares its build when it takes part in the run.
 				o.mu.Lock()
 				img := o.image
 				o.mu.Unlock()
-				if img != "" {
+				if img != "" && attachWorkers && !isEntry {
+					logging.LogInfo("docker-multi", "attach mode: image check skipped on attached worker; the engine identity check compares the build of each engine that takes part in the run",
+						"host", h.Info.Original, "image", img)
+				} else if img != "" {
 					if ierr := o.preflight.EnsureImage(ctx, h.Info, img); ierr != nil {
 						h.SetError(fmt.Errorf("image preflight failed: %w", ierr))
 						connectErrorsMu.Lock()

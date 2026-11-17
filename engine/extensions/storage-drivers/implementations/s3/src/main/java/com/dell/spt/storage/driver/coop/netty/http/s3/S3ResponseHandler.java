@@ -621,9 +621,9 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 					final Matcher m = PATTERN_UPLOAD_ID.matcher(contentStr);
 					if (m.find()) {
 						channel.attr(S3Api.KEY_ATTR_UPLOAD_ID).set(m.group(1));
-					} else {
-						Loggers.ERR.warn(
-										"Upload id not found in the following response content:\n{}", contentStr);
+					} else if (!responseFailed && mpuOp.get(S3Api.KEY_MPU_ABORT) == null && OpType.CREATE.equals(op.type())) {
+						// a refusal has logged its status and code lines, and an abort or a ranged update is not an initiation
+						logUploadIdNotFound(op, content);
 					}
 				} else {
 					final Operation.Status failure = completionFailureStatus(
@@ -662,6 +662,26 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 			}
 		} finally {
 			body.release();
+		}
+	}
+
+	/**
+	 * Logs a 2xx initiation response without an upload ID: the first one of the driver's step at WARN,
+	 * as one line with the operation and an excerpt of the body's first {@link
+	 * #FAILED_RESPONSE_SCAN_BYTES} bytes after any leading XML whitespace, made safe by {@link #loggableText}; later ones at DEBUG with
+	 * the operation only. Each such operation already fails, so the step's counts name them all.
+	 */
+	private void logUploadIdNotFound(final Operation<?> op, final ByteBuf content) {
+		if (s3Driver == null || s3Driver.claimUploadIdNotFoundWarning()) {
+			final int start = skipXmlWhitespace(content, content.readerIndex(), content.writerIndex());
+			final int end = Math.min(content.writerIndex(), start + FAILED_RESPONSE_SCAN_BYTES);
+			final String excerpt = loggableText(content.toString(start, end - start, UTF_8), end == content.writerIndex());
+			Loggers.ERR.warn(
+							"{}: Upload id not found in the multipart initiation response, which starts: {} (logged once per step)",
+							op.toString(),
+							excerpt.isEmpty() ? MISSING_ERROR_CODE : excerpt);
+		} else {
+			Loggers.ERR.debug("{}: Upload id not found in the multipart initiation response", op.toString());
 		}
 	}
 
@@ -710,7 +730,18 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 		final int valueStart = skipXmlWhitespace(content, element + MESSAGE_START.length, end);
 		final int valueEnd = content.indexOf(valueStart, end, (byte) '<');
 		final boolean complete = valueEnd >= 0;
-		final String raw = content.toString(valueStart, (complete ? valueEnd : end) - valueStart, UTF_8);
+		final String message = loggableText(
+						content.toString(valueStart, (complete ? valueEnd : end) - valueStart, UTF_8), complete);
+		return message.isEmpty() ? MISSING_ERROR_CODE : message;
+	}
+
+	/**
+	 * Target-sent {@code raw} text made safe for one log line: cut to {@link
+	 * #MAX_LOGGED_ERROR_MESSAGE_LENGTH} characters, every control, line separator and format character
+	 * made a space, and stripped. It ends with {@value #CUT_MARK} when it was cut or {@code raw} is not
+	 * {@code complete}, and is empty when nothing but spaces is left.
+	 */
+	private static String loggableText(final String raw, final boolean complete) {
 		final var text = new StringBuilder(Math.min(raw.length(), MAX_LOGGED_ERROR_MESSAGE_LENGTH) + CUT_MARK.length());
 		for (int i = 0; i < raw.length() && text.length() < MAX_LOGGED_ERROR_MESSAGE_LENGTH; i++) {
 			final char c = raw.charAt(i);
@@ -722,10 +753,7 @@ public final class S3ResponseHandler<I extends Item, O extends Operation<I>>
 			text.setLength(text.length() - 1); // the cut split a surrogate pair
 		}
 		final String message = text.toString().strip();
-		if (message.isEmpty()) {
-			return MISSING_ERROR_CODE;
-		}
-		return cut ? message + CUT_MARK : message;
+		return cut && !message.isEmpty() ? message + CUT_MARK : message;
 	}
 
 	/**
