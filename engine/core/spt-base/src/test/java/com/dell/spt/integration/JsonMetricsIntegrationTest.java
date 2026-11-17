@@ -83,6 +83,14 @@ public class JsonMetricsIntegrationTest {
 
 	@BeforeEach
 	public void setUp() throws Exception {
+		// Start the port-0 server first, so it can't take the port FreePorts just released.
+		prometheusServer = new Server(0);
+		final var prometheusContext = new ServletContextHandler();
+		prometheusContext.setContextPath("/");
+		prometheusServer.setHandler(prometheusContext);
+		prometheusContext.addServlet(new ServletHolder(new MetricsServlet()), "/metrics");
+		prometheusServer.start();
+
 		jsonPort = FreePorts.freePort();
 		nodeJsonUrl = "http://localhost:" + jsonPort + "/metrics/json";
 		fleetJsonUrl = "http://localhost:" + jsonPort + "/metrics/fleet/json";
@@ -94,14 +102,6 @@ public class JsonMetricsIntegrationTest {
 		jsonConfig.val("run-port", jsonPort);
 		jsonConfig.val("run-id", RUN_ID);
 		jsonConfig.val("run-node", true);
-
-		// Setup Prometheus metrics server
-		prometheusServer = new Server(0);
-		final var prometheusContext = new ServletContextHandler();
-		prometheusContext.setContextPath("/");
-		prometheusServer.setHandler(prometheusContext);
-		prometheusContext.addServlet(new ServletHolder(new MetricsServlet()), "/metrics");
-		prometheusServer.start();
 
 		// Setup JSON metrics server
 		jsonServer = new Server(jsonPort);
