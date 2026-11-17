@@ -31,6 +31,7 @@ import java.nio.channels.ClosedChannelException;
 import java.nio.channels.spi.AbstractInterruptibleChannel;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.FileSystemException;
+import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -71,32 +72,55 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 				itemPath = FsConstants.FS.getPath(dstPath, fileItemName);
 			}
 			if (OpType.CREATE.equals(opType)) {
-				return FsConstants.FS_PROVIDER.newFileChannel(itemPath, FsConstants.CREATE_OPEN_OPT);
+				try {
+					return FsConstants.FS_PROVIDER.newFileChannel(itemPath, FsConstants.CREATE_OPEN_OPT);
+				} catch (final NoSuchFileException e) {
+					// Failure route only: an item named by a path (a listed or items-file item) lands under
+					// the output path with its full name, so its parent may not exist yet. Create it and
+					// reopen once; a failure of either goes to the handlers below.
+					final var itemParentPath = itemPath.getParent();
+					if (itemParentPath == null) {
+						throw e;
+					}
+					Files.createDirectories(itemParentPath);
+					return FsConstants.FS_PROVIDER.newFileChannel(itemPath, FsConstants.CREATE_OPEN_OPT);
+				}
 			} else {
 				return FsConstants.FS_PROVIDER.newFileChannel(itemPath, FsConstants.WRITE_OPEN_OPT);
 			}
 		} catch (final AccessDeniedException e) {
 			dataOp.status(Operation.Status.RESP_FAIL_AUTH);
-			LogUtil.exception(Level.DEBUG, e, "Access denied to open the output channel for the path \"{}\"", dstPath);
+			LogUtil.exception(
+							Level.DEBUG, e, "Access denied to open the output channel for the item \"{}\" in the path \"{}\"",
+							fileItemName, dstPath);
 		} catch (final NoSuchFileException e) {
 			dataOp.status(Operation.Status.FAIL_IO);
-			LogUtil.exception(Level.DEBUG, e, "Failed to open the output channel for the path \"{}\"", dstPath);
+			LogUtil.exception(
+							Level.DEBUG, e, "Failed to open the output channel for the item \"{}\" in the path \"{}\"",
+							fileItemName, dstPath);
 		} catch (final FileSystemException e) {
 			final var freeSpace = (new File(e.getFile())).getFreeSpace();
 			if (freeSpace > 0) {
 				dataOp.status(Operation.Status.FAIL_IO);
-				LogUtil.exception(Level.DEBUG, e, "Failed to open the output channel for the path \"{}\"", dstPath);
+				LogUtil.exception(
+								Level.DEBUG, e, "Failed to open the output channel for the item \"{}\" in the path \"{}\"",
+								fileItemName, dstPath);
 			} else {
 				dataOp.status(Operation.Status.RESP_FAIL_SPACE);
-				LogUtil.exception(Level.DEBUG, e, "No free space for the path \"{}\"", dstPath);
+				LogUtil.exception(
+								Level.DEBUG, e, "No free space for the item \"{}\" in the path \"{}\"", fileItemName, dstPath);
 			}
 		} catch (final IOException e) {
 			dataOp.status(Operation.Status.FAIL_IO);
-			LogUtil.exception(Level.DEBUG, e, "Failed to open the output channel for the path \"{}\"", dstPath);
+			LogUtil.exception(
+							Level.DEBUG, e, "Failed to open the output channel for the item \"{}\" in the path \"{}\"",
+							fileItemName, dstPath);
 		} catch (final Throwable cause) {
 			throwUncheckedIfInterrupted(cause);
 			dataOp.status(Operation.Status.FAIL_UNKNOWN);
-			LogUtil.exception(Level.WARN, cause, "Failed to open the output channel for the path \"{}\"", dstPath);
+			LogUtil.exception(
+							Level.WARN, cause, "Failed to open the output channel for the item \"{}\" in the path \"{}\"",
+							fileItemName, dstPath);
 		}
 		return null;
 	}
