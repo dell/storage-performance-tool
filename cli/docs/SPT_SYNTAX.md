@@ -935,7 +935,16 @@ When the engine's checksum feature is enabled (`storage-checksum-enabled=true` i
 
 **Results artifacts:**
 
-When multipart uploads are used, the engine produces a `parts.upload.csv` artifact (fetched as `<stepID>.multipart.csv` in the results directory) containing one row per completed upload with columns: `ItemPath`, `UploadId`, `RespLatency[us]`.
+When multipart uploads are used, the engine writes a `parts.upload.csv` log, which `spt run` fetches as `<stepID>.multipart.csv` in the results directory for a single-engine step. A distributed step records it as `missing` in `index.json` until the engine collects every node's log; until then each engine's copy stays in its own log directory. The log is written by the `s3`, `s3-rdma` and `s3-tables` drivers; `s3-aws` writes no such log.
+
+The header is `Phase,ItemPath,UploadId,PartNumber,StartTs,Duration[us],Latency[us],Bytes`, and the rows are:
+
+- `INIT`: one per upload initiated with an upload ID.
+- `PART`: one per part, written with the upload's `COMPLETE` row when all its parts are done.
+- `COMPLETE`: one per completion answer, including a failed one.
+- `ABORT`: one per abort answer.
+
+Failed part attempts, and completions or aborts that were never sent, have no row. `PartNumber` is 1-based on `PART` rows and -1 on the others. `StartTs` is the request start in epoch milliseconds. `Duration[us]` and `Latency[us]` are microseconds. `Bytes` is the part size on `PART` rows and 0 on the others.
 
 **Notes:**
 
