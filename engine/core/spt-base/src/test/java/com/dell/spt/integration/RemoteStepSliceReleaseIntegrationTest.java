@@ -61,7 +61,8 @@ import org.junit.jupiter.api.Test;
  *
  * <p>The fault is the one a worker met on 5.17.0: an old {@code operation.lifecycle.csv} in the step's
  * folder, written here after the slice starts so the start check lets it run. The slice's stop then
- * refuses to publish, and so does the stop its close repeats. The steps' operations are a ballast
+ * refuses to publish; the stop its close repeats does nothing, and the close releases the slice and
+ * throws that refusal. The steps' operations are a ballast
  * of {@link DataOperationImpl}, as a driver's input queue holds them, reachable only through the
  * slice's context.
  */

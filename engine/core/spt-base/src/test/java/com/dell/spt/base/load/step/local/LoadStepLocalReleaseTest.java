@@ -1,7 +1,6 @@
 package com.dell.spt.base.load.step.local;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -79,7 +78,9 @@ class LoadStepLocalReleaseTest {
 			verify(second).stop();
 			verify(first).close();
 			verify(second).close();
-			assertEquals(limitBeforeStop - 10, step.timeLimitSec(), "the elapsed time is accounted once");
+			// Whole seconds: the clock can tick once between the test's read and the stop's.
+			final long accounted = limitBeforeStop - step.timeLimitSec();
+			assertTrue(accounted == 10 || accounted == 11, "the elapsed time is accounted once, not " + accounted);
 			assertFalse(step.awaitsCleanupRetry());
 
 			// Released: closing again releases nothing and throws nothing.
