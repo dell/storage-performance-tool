@@ -74,6 +74,19 @@ class ItemInfoFileOutputTest {
 		assertEquals(List.of("/dst/k1,0,1024,0/0", "/dst/dir/k2,0,1024,0/0"), rows);
 	}
 
+	/** As a plain item's row does, so the filesystem driver reads back the file it made under it. */
+	@Test
+	void manifestCreateRowsKeepARelativeOutputPathAsWritten() throws Exception {
+		final var rows = putEach(List.of(
+						op(OpType.CREATE, manifestItem("src", "k1"), "dst"),
+						op(OpType.CREATE, manifestItem("src", "dst/k2"), "dst"),
+						op(OpType.CREATE, manifestItem("src", "dir/k3"), "dst/"),
+						op(OpType.CREATE, manifestItem("src", "/dst/k4"), "dst")));
+		assertEquals(
+						List.of("dst/k1,0,1024,0/0", "dst/k2,0,1024,0/0", "dst/dir/k3,0,1024,0/0", "/dst/k4,0,1024,0/0"),
+						rows);
+	}
+
 	@Test
 	void manifestCreateWithoutAnOutputPathKeepsTheBareKey() throws Exception {
 		final var rows = putEach(List.of(op(OpType.CREATE, manifestItem("src", "k1"), null)));
