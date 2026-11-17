@@ -276,6 +276,13 @@ func (o *MultiHostOrchestrator) SetResultsRoot(resultsRoot string) {
 	o.resultsRoot = strings.TrimSpace(resultsRoot)
 }
 
+// ResultsRoot reports the run results directory set by SetResultsRoot.
+func (o *MultiHostOrchestrator) ResultsRoot() string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.resultsRoot
+}
+
 // SetAPIPort overrides the Spt API port used for node startup and polling.
 func (o *MultiHostOrchestrator) SetAPIPort(apiPort string) {
 	apiPort = strings.TrimSpace(apiPort)
