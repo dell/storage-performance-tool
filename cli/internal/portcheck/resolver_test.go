@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -125,12 +126,7 @@ func TestConflictResolver_ForceResolution(t *testing.T) {
 			}
 		case "/metrics/json", "/metrics":
 			w.WriteHeader(http.StatusOK)
-			sptJSON := `{
-				"lastUpdateTimeISO": "2025-08-14T15:30:00.000Z",
-				"opType": "create",
-				"opsPerSec": 150.5,
-				"meanLatencyMicros": 25.7
-			}`
+			sptJSON := `[{"metrics_schema":5,"scope":"node","role":"entry","node_id":"n0","op_type":"none"}]`
 			if _, err := fmt.Fprintln(w, sptJSON); err != nil {
 				t.Fatalf("write failed: %v", err)
 			}
@@ -480,27 +476,16 @@ func TestConflictResolver_Integration_SptConflict(t *testing.T) {
 		switch r.URL.Path {
 		case "/run":
 			if r.Method == "GET" {
-				// Return running test info
-				runResponse := `{
-					"runId": "integration-test-123",
-					"status": "RUNNING",
-					"startTimeISO": "2025-08-14T15:30:00Z"
-				}`
-				fmt.Fprintln(w, runResponse)
+				// The engine rejects the probe's If-Match: * with 400.
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprint(w, engineRunBadRequest)
 			} else if r.Method == "DELETE" {
 				// Stop command
 				w.WriteHeader(http.StatusOK)
 			}
-		case "/metrics/json", "/metrics":
-			// Return Spt-like metrics
-			metricsResponse := `{
-				"lastUpdateTimeISO": "2025-08-14T15:35:00Z",
-				"opType": "create",
-				"opsPerSec": 200.5,
-				"meanLatencyMicros": 15.3,
-				"concurrency": 8.0
-			}`
-			fmt.Fprintln(w, metricsResponse)
+		case "/metrics/json":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, engineMetricsJSON)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -521,6 +506,14 @@ func TestConflictResolver_Integration_SptConflict(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	info, err := resolver.checker.CheckService(ctx)
+	if err != nil {
+		t.Fatalf("CheckService() error = %v", err)
+	}
+	if !info.IsSpt {
+		t.Fatalf("IsSpt = false for a fake serving the engine's answers, want true")
+	}
 
 	result, err := resolver.CheckAndResolveConflicts(ctx)
 
@@ -607,6 +600,108 @@ func TestConflictResolver_EmptyMetricsServiceIsNotSpt(t *testing.T) {
 				t.Errorf("service got %d DELETE request(s), want none", deletes)
 			}
 		})
+	}
+}
+
+// Recorded engine answers (see checker_fingerprint_test.go) used by the
+// resolver fakes that must take the SPT route.
+var (
+	engineRunBadRequest = mustReadTestdata("jetty94-run-ifmatch-star.html")
+	engineMetricsJSON   = mustReadTestdata("metrics-json-schema5.json")
+)
+
+func mustReadTestdata(name string) string {
+	data, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		panic(err)
+	}
+	return string(data)
+}
+
+// A service answering a camelCase metrics body, or 200 JSON on GET /run, is
+// not SPT: no engine has sent either shape. A non-interactive resolver must
+// not send it DELETE /run, with or without force.
+func TestConflictResolver_LegacyJSONServiceIsNotSpt(t *testing.T) {
+	tests := []struct {
+		name        string
+		metricsPath string
+		metricsBody string
+		runStatus   int
+		runBody     string
+	}{
+		{"camelCase metrics on /metrics/json", "/metrics/json", `{"successCount":1,"failCount":0}`, http.StatusNotFound, ""},
+		{"camelCase metrics on /metrics", "/metrics", `{"opType":"x","opsPerSec":1}`, http.StatusNotFound, ""},
+		{"run 200 status and startTime", "", "", http.StatusOK, `{"status":"ok","startTime":1}`},
+		{"run 200 runId and status", "", "", http.StatusOK, `{"runId":"a","status":"RUNNING"}`},
+	}
+	for _, tt := range tests {
+		for _, force := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/force=%v", tt.name, force), func(t *testing.T) {
+				var mu sync.Mutex
+				deletes := 0
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodDelete:
+						mu.Lock()
+						deletes++
+						mu.Unlock()
+						w.WriteHeader(http.StatusOK)
+					case tt.metricsPath != "" && r.URL.Path == tt.metricsPath:
+						w.Header().Set("Content-Type", "application/json")
+						fmt.Fprint(w, tt.metricsBody)
+					case r.URL.Path == "/run":
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(tt.runStatus)
+						fmt.Fprint(w, tt.runBody)
+					default:
+						w.WriteHeader(http.StatusNotFound)
+					}
+				}))
+				defer server.Close()
+
+				_, port, err := net.SplitHostPort(server.Listener.Addr().String())
+				if err != nil {
+					t.Fatalf("Failed to extract port: %v", err)
+				}
+
+				resolver := &ConflictResolver{
+					Port:            port,
+					checker:         NewPortCheckerWithOptions(port, "127.0.0.1", time.Second, 2*time.Second, 1),
+					dockerFinder:    nil,
+					forceMode:       force,
+					interactiveMode: false,
+					clock:           NewFakeClock(),
+				}
+				defer resolver.Close()
+
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+
+				info, err := resolver.checker.CheckService(ctx)
+				if err != nil {
+					t.Fatalf("CheckService() error = %v", err)
+				}
+				if info.IsSpt {
+					t.Errorf("IsSpt = true, want false")
+				}
+
+				result, err := resolver.CheckAndResolveConflicts(ctx)
+				if err != nil {
+					t.Fatalf("CheckAndResolveConflicts() error = %v", err)
+				}
+				if result.Success {
+					t.Errorf("Success = true, want false")
+				}
+				if !force && !strings.Contains(result.Message, "only works for Spt services") {
+					t.Errorf("Message = %q, want the non-SPT graceful-stop refusal", result.Message)
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if deletes != 0 {
+					t.Errorf("service got %d DELETE request(s), want none", deletes)
+				}
+			})
+		}
 	}
 }
 

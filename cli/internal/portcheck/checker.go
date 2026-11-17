@@ -185,11 +185,11 @@ func (p *PortChecker) probeMetricsJSON(ctx context.Context, baseURL string) *Spt
 	return nil
 }
 
-// probeMetrics checks the Prometheus endpoint. No current engine is
-// identified here: an engine answers /metrics with Prometheus text, or an
-// empty body before its first step, and neither passes
-// validateSptMetricsResponse. No released engine answers /metrics with JSON
-// either; the probe is kept for services that do.
+// probeMetrics checks the Prometheus endpoint. No engine is identified here:
+// an engine answers /metrics with Prometheus text, or an empty body before its
+// first step, and neither passes validateSptMetricsResponse, which accepts only
+// a /metrics/json schema row. The probe is kept for a service that serves
+// that row on /metrics.
 func (p *PortChecker) probeMetrics(ctx context.Context, baseURL string) *SptStatus {
 	url := baseURL + endpointMetrics
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -219,16 +219,12 @@ func (p *PortChecker) probeRun(ctx context.Context, baseURL string) *SptStatus {
 		return nil
 	}
 	defer func() { _ = resp.Body.Close() }()
-	switch resp.StatusCode {
-	case http.StatusOK:
-		if p.validateSptRunResponse(resp) {
-			return p.getSptStatus(ctx, baseURL)
-		}
-	case http.StatusBadRequest:
-		if p.isSptBadRequestError(resp) {
-			return p.getSptStatus(ctx, baseURL)
-		}
-		return nil
+	// Only the 400 answer identifies an engine: RunServlet rejects the
+	// probe's If-Match: * with "Invalid run ID format". It answers a matching
+	// run ID with 200 and no body, which this probe never sends, so a 200 is
+	// not SPT evidence.
+	if resp.StatusCode == http.StatusBadRequest && p.isSptBadRequestError(resp) {
+		return p.getSptStatus(ctx, baseURL)
 	}
 	return nil
 }
@@ -267,61 +263,18 @@ func (p *PortChecker) validateSptMetricsResponse(resp *http.Response) bool {
 	return p.validateSptFields(metrics)
 }
 
-// validateSptFields checks if a JSON object contains Spt-specific fields
+// validateSptFields reports whether a JSON object is an engine metrics row.
+// Every engine from v5.0.1 on writes the snake_case /metrics/json contract
+// (see isSptMetricsSchemaObject). No engine has written camelCase fields such
+// as successCount or opType, so they are not SPT evidence.
 func (p *PortChecker) validateSptFields(metrics map[string]interface{}) bool {
-	// Current engines (metrics_schema 2 and later) answer with the snake_case
-	// metrics contract, which shares almost none of the older camelCase
-	// fields checked below.
 	if isSptMetricsSchemaObject(metrics) {
 		logging.LogDebug("portcheck", "validated Spt metrics schema object",
 			"metrics_schema", metrics["metrics_schema"])
 		return true
 	}
-
-	// Check for Spt-specific fields that should be present in metrics
-	sptFields := []string{
-		"lastUpdateTimeISO", // Spt timestamp format
-		"opType",            // Operation type (create, read, etc.)
-		"opsPerSec",         // Operations per second
-		"meanLatencyMicros", // Mean latency in microseconds
-	}
-
-	foundFields := 0
-	for _, field := range sptFields {
-		if _, exists := metrics[field]; exists {
-			foundFields++
-		}
-	}
-
-	// Require at least 2 Spt-specific fields to be confident
-	if foundFields >= 2 {
-		logging.LogDebug("portcheck", "validated Spt metrics fields",
-			"found_fields", foundFields,
-			"required_fields", 2)
-		return true
-	}
-
-	// Also check for alternative field names or structures that might indicate Spt
-	alternativeIndicators := []string{
-		"concurrency",  // Spt concurrency metric
-		"successCount", // Success count
-		"failCount",    // Failure count
-		"bytesCount",   // Bytes transferred
-	}
-
-	for _, field := range alternativeIndicators {
-		if _, exists := metrics[field]; exists {
-			foundFields++
-		}
-	}
-
-	// With alternative fields, still require at least 2 total
-	isSpt := foundFields >= 2
-	logging.LogDebug("portcheck", "Spt metrics validation result",
-		"is_spt", isSpt,
-		"total_fields_found", foundFields)
-
-	return isSpt
+	logging.LogDebug("portcheck", "metrics object is not an Spt metrics row")
+	return false
 }
 
 // isSptMetricsSchemaObject reports whether a JSON object has the shape of the
@@ -340,50 +293,6 @@ func isSptMetricsSchemaObject(metrics map[string]interface{}) bool {
 		}
 	}
 	return true
-}
-
-// validateSptRunResponse checks if an HTTP response from /run endpoint contains valid Spt run info
-func (p *PortChecker) validateSptRunResponse(resp *http.Response) bool {
-	// Read the response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		logging.LogDebug("portcheck", "failed to read /run response body", "error", err.Error())
-		return false
-	}
-
-	// Try to parse as JSON
-	var runInfo map[string]interface{}
-	if err := json.Unmarshal(body, &runInfo); err != nil {
-		logging.LogDebug("portcheck", "/run response is not valid JSON", "error", err.Error())
-		return false
-	}
-
-	// Check for Spt-specific fields in run response
-	sptRunFields := []string{
-		"runId",        // Spt run identifier
-		"status",       // Test status
-		"startTimeISO", // Spt timestamp format
-	}
-
-	foundFields := 0
-	for _, field := range sptRunFields {
-		if _, exists := runInfo[field]; exists {
-			foundFields++
-		}
-	}
-
-	// Alternative field names
-	if _, exists := runInfo["startTime"]; exists {
-		foundFields++
-	}
-
-	// Require at least 2 Spt-specific fields for run info
-	isSptRun := foundFields >= 2
-	logging.LogDebug("portcheck", "Spt /run validation result",
-		"is_spt_run", isSptRun,
-		"fields_found", foundFields)
-
-	return isSptRun
 }
 
 // isSptResponse checks if an HTTP response indicates Spt
@@ -539,7 +448,10 @@ func (p *PortChecker) isSptBadRequestError(resp *http.Response) bool {
 
 	// Check for Spt-specific error patterns
 	sptErrorPatterns := []string{
-		"Missing header: If-Match",  // Spt RunServlet error without an If-Match header
+		// RunServlet's error without an If-Match header. probeRun always sends
+		// If-Match: *, so this cannot match from that probe; it stays because
+		// the text is SPT-specific.
+		"Missing header: If-Match",
 		"Invalid run ID format",     // Spt RunServlet answer to the probe's If-Match: *
 		"com.dell.spt.base.control", // Spt servlet package name
 		// No generic Jetty pattern such as "Powered by Jetty": any Jetty
