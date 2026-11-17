@@ -75,6 +75,11 @@ final class ErrorsLogCapture extends AbstractAppender implements AutoCloseable {
 		return drained().stream().filter(line -> line.message().contains("multipart completion answered 2xx")).toList();
 	}
 
+	/** The captured lines that report a copy's 2xx error code. */
+	List<Line> copyErrorLines() throws InterruptedException {
+		return drained().stream().filter(line -> line.message().contains(": copy answered 2xx")).toList();
+	}
+
 	/** The captured lines that report the S3 error code and message of a failed response. */
 	List<Line> failedResponseLines() throws InterruptedException {
 		return drained().stream().filter(line -> line.message().contains(": S3 error code ")
