@@ -42,6 +42,10 @@ A listed item, or an item from an items file written by an `fs` step, is named b
 so it lands under the output path with that full path, as for `s3`: `/src/dir/f0` is copied to
 `/dst/src/dir/f0`. Missing directories under the output path are created.
 
+A listed path covers one directory level: its subdirectories are not copied. A subdirectory entry fails and leaves
+an empty file in its place under the output path, so a later copy of that subdirectory to the same output path
+fails. Copy nested directories deepest first, or to separate output paths.
+
 ### 2.3. HTTP Storage Case
 
 > Note:
@@ -75,8 +79,9 @@ The source object URI is specified with `X-Copy-From` header.
 In order to perform a copy load step it's necessary:
 
 * Use `create` load type.
-* Specify `--item-input-path` (the source container/bucket/directory, contains the items to copy) or `--item-input-file`
-  to a proper value.
+* Specify `--item-input-path` (the source container/bucket/directory, contains the items to copy) to a proper value.
+  `--item-input-file` may also be given to name the items to copy; without `--item-input-path` it writes generated
+  data instead of copying (see [2.1](#21-general)).
 * Specify `--item-output-path` (the target container/bucket/directory) to a proper value.
 
 For details, see the example scenario located at:
