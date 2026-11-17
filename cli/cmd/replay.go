@@ -254,6 +254,10 @@ func runReplay(cmd *cobra.Command, _ []string) error {
 		replayOrchestrator.SetImage(sptImage)
 		replayOrchestrator.SetAPIPort(apiPort)
 		replayOrchestrator.SetRMIRegistryPort(params.RMIRegistryPort)
+		// Every orchestrated route (remote entry, distributed workers, a lone remote engine and
+		// attach mode) collects Docker diagnostics into the replay's results directory, as spt
+		// run's orchestrator does. The local route passes the same root through its run options.
+		replayOrchestrator.SetResultsRoot(plannedResultsRoot)
 		forceMode, _ := cmd.Flags().GetBool("force")
 		replayOrchestrator.SetForceCleanup(forceMode)
 		if err := connectReplayOrchestrator(replayContext, replayOrchestrator); err != nil {
