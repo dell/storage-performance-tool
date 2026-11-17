@@ -146,6 +146,42 @@ func TestLocalTUIRunOptionsApplyVerboseToMessagesModel(t *testing.T) {
 	}
 }
 
+// TestLocalTUIEarlyErrorStopsLiveViewCPUMonitor checks that a launch which
+// fails before the program runs still stops the live view's CPU monitor, so
+// no monitor goroutine outlives the call.
+func TestLocalTUIEarlyErrorStopsLiveViewCPUMonitor(t *testing.T) {
+	wantErr := errors.New("stop after model capture")
+	originalDockerFactory := newTUIDockerManager
+	originalProgramFactory := newTUIProgramWithTrace
+	newTUIDockerManager = func() (DockerInterface, error) { return NewMockDockerManager(), nil }
+	var captured Model
+	newTUIProgramWithTrace = func(model Model, _ string, _ bool) (*tea.Program, *os.File, error) {
+		captured = model
+		if !model.liveViewRenderer.cpuMonitor.IsStarted() {
+			t.Error("CPU monitor not running when the program is built")
+		}
+		return nil, nil, wantErr
+	}
+	t.Cleanup(func() {
+		newTUIDockerManager = originalDockerFactory
+		newTUIProgramWithTrace = originalProgramFactory
+	})
+
+	err := StartTUIWithScenarioRunOptions(
+		"image", "scenario.js", scenario.ScenarioParams{}, RunOptions{},
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("StartTUIWithScenarioRunOptions() error = %v, want %v", err, wantErr)
+	}
+	if captured.liveViewRenderer == nil {
+		t.Fatal("program factory was not reached")
+	}
+	if captured.liveViewRenderer.cpuMonitor.IsStarted() {
+		captured.liveViewRenderer.Stop()
+		t.Fatal("CPU monitor still running after an early launch error")
+	}
+}
+
 func TestLocalTUIPropagatesRealPostFailureAndCleansContainer(t *testing.T) {
 	installNonInteractiveTUIProgram(t)
 	mockDocker := NewMockDockerManager()
