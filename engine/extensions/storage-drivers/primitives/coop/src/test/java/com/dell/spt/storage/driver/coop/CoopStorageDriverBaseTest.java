@@ -1873,8 +1873,13 @@ class CoopStorageDriverBaseTest {
 						"terminal result publication remains accepted even when child scheduling fails");
 
 		final var children = parent.subOperations();
-		assertEquals(OperationLifecycleState.DRIVER_QUEUED, parent.lifecycle().state(),
-						"the parent must own the incomplete composite phase");
+		// Its parts cannot be queued and its abort cannot be scheduled either, so it is published as one
+		// failure instead of staying driver-queued with nothing that would end it.
+		assertEquals(OperationLifecycleState.TERMINAL, parent.lifecycle().state(),
+						"the parent settles as a failure");
+		assertEquals(Operation.Status.FAIL_TIMEOUT, parent.status());
+		assertEquals(1, driver.operationLifecycle().counters().failed(), "the parent's failure is its one result");
+		// The queued part is settled at dispatch, as a part of an ended upload.
 		assertEquals(OperationLifecycleState.DRIVER_QUEUED, children.get(0).lifecycle().state());
 		assertEquals(OperationLifecycleState.UNATTEMPTED, children.get(1).lifecycle().state());
 		assertEquals(OperationLifecycleState.UNATTEMPTED, children.get(2).lifecycle().state(),
