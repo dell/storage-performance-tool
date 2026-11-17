@@ -32,8 +32,8 @@ if [ -z "${WORKER_HOSTS}" ]; then
 fi
 
 SSH_OPTS=${SSH_OPTS:-"-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"}
-# SSH_OPTS is a space-separated option list; split it into words once.
-read -r -a SSH_OPT_ARR <<<"$SSH_OPTS"
+# SSH_OPTS is a whitespace-separated option list; split it into words once.
+read -r -d '' -a SSH_OPT_ARR <<<"$SSH_OPTS" || true
 
 # Parse optional args
 while [ $# -gt 0 ]; do
@@ -104,16 +104,17 @@ echo ""
 # A manifest-only save (no config or layer blobs) loads with exit 0 but cannot
 # run, so exit codes alone don't catch it. Prints the reason on failure.
 check_saved_tar() {
-  local tar_file="$1" image="$2" listing
+  local tar_file="$1" image="$2" listing manifest_entry
   if ! listing=$(tar -tf "${tar_file}" 2>&1); then
     echo "cannot list the tar: ${listing}"
     return 1
   fi
-  if ! printf '%s\n' "${listing}" | sed 's|^\./||' | grep -qx 'manifest.json'; then
+  manifest_entry=$(sed -n '/^\(\.\/\)\{0,1\}manifest\.json$/{p;q;}' <<<"${listing}")
+  if [ -z "${manifest_entry}" ]; then
     echo "the tar holds no manifest.json"
     return 1
   fi
-  tar -xOf "${tar_file}" manifest.json 2>/dev/null | python3 -c '
+  tar -xOf "${tar_file}" "${manifest_entry}" 2>/dev/null | python3 -c '
 import json, sys
 
 image = sys.argv[1]
@@ -127,7 +128,8 @@ if not isinstance(manifest, list) or not manifest:
 entries = [e for e in manifest if isinstance(e, dict) and image in (e.get("RepoTags") or [])]
 if not entries:
     if len(manifest) != 1 or not isinstance(manifest[0], dict):
-        sys.exit("manifest.json has no entry for %s" % image)
+        sys.exit("manifest.json lists %d images and none is tagged %s; pass --image IMAGE:TAG"
+                 % (len(manifest), image))
     entries = manifest
 entry = entries[0]
 layers = entry.get("Layers") or []
