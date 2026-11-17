@@ -283,6 +283,46 @@ public class LoadStepServiceImplTest {
 	}
 
 	@Test
+	@DisplayName("A first close with no stop before it releases a slice whose stop fails")
+	void firstCloseWithoutStopReleasesSliceWhoseStopFails() throws Exception {
+		final LoadStepContext context = mock(LoadStepContext.class);
+		final FailingSlice local = new FailingSlice(sliceConfig("create"), context);
+		final IllegalStateException publishFailure = new IllegalStateException("injected lifecycle publish failure");
+		final String originalHost = System.getProperty("java.rmi.server.hostname");
+		System.setProperty("java.rmi.server.hostname", "127.0.0.1");
+		try (MockedStatic<OperationLifecycleArtifact> artifact = mockStatic(OperationLifecycleArtifact.class)) {
+			artifact.when(() -> OperationLifecycleArtifact.publish(anyLong(), anyString(), anyString(), anyList(), anyBoolean()))
+							.thenThrow(publishFailure);
+			final int port = freePort();
+			final LoadStepServiceImpl service = newServiceWith(local, port);
+			final LoadStepService remote = ServiceUtil.resolve(
+							"127.0.0.1", port, service.name(), LoadStepService.class);
+			service.start();
+			assertEquals(local.loadStepId(), remote.loadStepId());
+
+			// As at worker shutdown (the step manager closes its child), the close comes first.
+			assertSame(publishFailure, assertThrows(IllegalStateException.class, service::close));
+
+			assertThrows(RemoteException.class, remote::loadStepId);
+			assertFalse(List.of(LocateRegistry.getRegistry("127.0.0.1", port).list()).contains(service.name()));
+			verify(context).stop();
+			verify(context).close();
+			artifact.verify(
+							() -> OperationLifecycleArtifact.publish(anyLong(), anyString(), anyString(), anyList(), anyBoolean()),
+							times(1));
+			// Released: closing again releases nothing and throws nothing.
+			assertDoesNotThrow(service::close);
+			assertDoesNotThrow(local::close);
+			assertTrue(service.isClosed());
+			assertTrue(local.isClosed());
+			verify(context, times(1)).close();
+		} finally {
+			ServiceUtil.shutdown();
+			restoreHost(originalHost);
+		}
+	}
+
+	@Test
 	@DisplayName("A DELETE duration slice stays exported after a failed close until its last retry")
 	void durationDeleteSliceStaysExportedUntilItsLastFailedClose() throws Exception {
 		final LoadStepContext context = mock(LoadStepContext.class);

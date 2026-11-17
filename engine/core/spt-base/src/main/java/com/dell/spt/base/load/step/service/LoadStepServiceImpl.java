@@ -86,6 +86,29 @@ public final class LoadStepServiceImpl extends ServiceBase implements LoadStepSe
 	}
 
 	/**
+	 * A close with no stop before it, as at worker shutdown or after a lost stop call, stops first, as
+	 * every close does. A local slice stops once (see {@code LoadStepLocalBase.doStop}), so after that
+	 * stop fails the close's own stop passes and reaches the release below, which throws the stop's
+	 * failure. A slice whose close will be retried, and a local step of another kind, close as before.
+	 */
+	@Override
+	public final void close() throws IOException {
+		RuntimeException stopFailure = null;
+		if (localLoadStep instanceof LoadStepLocalBase local && !local.awaitsCleanupRetry()) {
+			try {
+				stop();
+			} catch (final RuntimeException e) {
+				stopFailure = e;
+			}
+		}
+		super.close();
+		if (stopFailure != null) {
+			// The release did not throw it again; it must not be lost.
+			throw stopFailure;
+		}
+	}
+
+	/**
 	 * Closes the local step, then unexports and unbinds this service: always after a successful close,
 	 * and after a failed one unless the close will be retried (see {@link #cleanupRetryExpected()}).
 	 * A released service releases nothing again.
