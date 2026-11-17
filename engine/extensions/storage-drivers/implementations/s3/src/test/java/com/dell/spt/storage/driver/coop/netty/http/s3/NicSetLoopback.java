@@ -160,6 +160,13 @@ final class NicSetLoopback implements AutoCloseable {
 	volatile String completionErrorBody = "<Error><Code>InternalError</Code></Error>";
 	/** How long the stub waits before it answers each object request, chosen by the request itself; none by default. */
 	volatile ToLongFunction<Request> answerDelayMillis = request -> 0;
+	/**
+	 * Which copies (a PUT with {@code x-amz-copy-source}) the stub answers 200 with {@link
+	 * #copyErrorBody}, as S3 may answer a copy that fails after its status line; such a copy writes
+	 * nothing. Every other copy copies its source and is answered with a {@code <CopyObjectResult>}.
+	 */
+	volatile Predicate<Request> failCopyWithErrorBody = request -> false;
+	volatile String copyErrorBody = "<Error><Code>InternalError</Code></Error>";
 
 	/** The storage configuration of a driver with these endpoints and NICs. */
 	static Config storage(final List<String> endpoints, final List<String> interfaces, final int concurrency) {
@@ -601,6 +608,19 @@ final class NicSetLoopback implements AutoCloseable {
 					return;
 				}
 				parts.put(Integer.parseInt(param(query, "partNumber")), body);
+			} else if (exchange.getRequestHeaders().containsKey("x-amz-copy-source")) {
+				if (failCopyWithErrorBody.test(request)) {
+					respondInTwoChunks(exchange, copyErrorBody);
+					return;
+				}
+				final var source = objects.get(exchange.getRequestHeaders().getFirst("x-amz-copy-source"));
+				if (source == null) {
+					respond(exchange, 404, "<Error><Code>NoSuchKey</Code></Error>");
+					return;
+				}
+				objects.put(path, source);
+				respond(exchange, 200, "<CopyObjectResult><ETag>\"copied\"</ETag></CopyObjectResult>");
+				return;
 			} else {
 				objects.put(path, body);
 			}

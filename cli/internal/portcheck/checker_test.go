@@ -6,6 +6,7 @@ package portcheck
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -191,50 +192,84 @@ func TestPortChecker_CheckService(t *testing.T) {
 	})
 }
 
-func TestPortChecker_detectSptService(t *testing.T) {
-	t.Run("spt-like responses", func(t *testing.T) {
-		// Create a test server that mimics actual Spt responses
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch r.URL.Path {
-			case "/metrics/json", "/metrics":
-				w.WriteHeader(http.StatusOK)
-				// Provide a realistic Spt metrics JSON response
-				sptJSON := `{
-					"lastUpdateTimeISO": "2025-08-14T15:30:00.000Z",
-					"opType": "create",
-					"opsPerSec": 150.5,
-					"meanLatencyMicros": 25.7,
-					"concurrency": 8.0,
-					"successCount": 1000,
-					"failCount": 2,
-					"bytesCount": 1048576
-				}`
-				if _, err := fmt.Fprintln(w, sptJSON); err != nil {
-					t.Fatalf("write failed: %v", err)
-				}
-			case "/run":
-				w.WriteHeader(http.StatusNotFound) // No test running
-			default:
-				w.WriteHeader(http.StatusNotFound)
+// legacyMetricsBodies are camelCase metrics shapes that no engine has ever
+// written. They used to count as SPT evidence.
+var legacyMetricsBodies = []string{
+	`{"successCount":1,"failCount":0}`,
+	`{"concurrency":4,"bytesCount":10}`,
+	`{"opType":"x","opsPerSec":1}`,
+	`{"lastUpdateTimeISO":"2025-08-14T15:30:00.000Z","opType":"create","opsPerSec":150.5,"meanLatencyMicros":25.7,"concurrency":8.0,"successCount":1000,"failCount":2,"bytesCount":1048576}`,
+}
+
+// legacyRunBodies are 200 JSON answers to GET /run. The engine answers the
+// probe's If-Match: * with 400, and a matching run ID with 200 and no body, so
+// neither is SPT evidence.
+var legacyRunBodies = []string{
+	`{"status":"ok","startTime":1}`,
+	`{"runId":"a","status":"RUNNING"}`,
+	`{"runId":"test-run-123","status":"RUNNING","startTimeISO":"2025-08-14T15:30:00Z"}`,
+}
+
+// detectOn serves body with status on each of paths, 404 elsewhere, and runs
+// detectSptService against it.
+func detectOn(t *testing.T, paths []string, status int, body string) (*SptStatus, error) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, path := range paths {
+			if r.URL.Path == path {
+				w.WriteHeader(status)
+				_, _ = fmt.Fprint(w, body)
+				return
 			}
-		}))
-		defer server.Close()
-
-		_, port, err := net.SplitHostPort(server.Listener.Addr().String())
-		if err != nil {
-			t.Fatalf("Failed to extract port: %v", err)
 		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(server.Close)
 
-		checker := NewPortCheckerWithOptions(port, "127.0.0.1", 100*time.Millisecond, 150*time.Millisecond, 1)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
+	_, port, err := net.SplitHostPort(server.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("Failed to extract port: %v", err)
+	}
+	checker := NewPortCheckerWithOptions(port, "127.0.0.1", 100*time.Millisecond, 500*time.Millisecond, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return checker.detectSptService(ctx)
+}
 
-		status, err := checker.detectSptService(ctx)
-		if err != nil {
-			t.Errorf("detectSptService() error = %v, want nil", err)
+func TestPortChecker_detectSptService(t *testing.T) {
+	t.Run("recorded engine metrics row", func(t *testing.T) {
+		body := readFingerprintFixture(t, "metrics-json-schema5.json")
+		status, err := detectOn(t, []string{endpointMetricsJSON}, http.StatusOK, body)
+		if err != nil || status == nil {
+			t.Errorf("detectSptService() = %v, %v; want a status and no error", status, err)
 		}
-		if status == nil {
-			t.Errorf("detectSptService() status = nil, want non-nil")
+	})
+
+	t.Run("recorded engine 400 on /run", func(t *testing.T) {
+		body := readFingerprintFixture(t, "jetty94-run-ifmatch-star.html")
+		status, err := detectOn(t, []string{endpointRun}, http.StatusBadRequest, body)
+		if err != nil || status == nil {
+			t.Errorf("detectSptService() = %v, %v; want a status and no error", status, err)
+		}
+	})
+
+	t.Run("legacy camelCase metrics are not spt", func(t *testing.T) {
+		for _, path := range []string{endpointMetricsJSON, endpointMetrics} {
+			for _, body := range legacyMetricsBodies {
+				status, err := detectOn(t, []string{path}, http.StatusOK, body)
+				if err == nil || status != nil {
+					t.Errorf("detectSptService() with %s on %s = %v, %v; want nil and an error", body, path, status, err)
+				}
+			}
+		}
+	})
+
+	t.Run("200 JSON on /run is not spt", func(t *testing.T) {
+		for _, body := range legacyRunBodies {
+			status, err := detectOn(t, []string{endpointRun}, http.StatusOK, body)
+			if err == nil || status != nil {
+				t.Errorf("detectSptService() with GET /run 200 %s = %v, %v; want nil and an error", body, status, err)
+			}
 		}
 	})
 
@@ -273,7 +308,12 @@ func TestPortChecker_validateSptMetricsResponse(t *testing.T) {
 		expected bool
 	}{
 		{
-			name: "valid spt metrics JSON",
+			name:     "engine metrics schema row",
+			jsonBody: `[{"metrics_schema":5,"scope":"node","role":"entry","node_id":"n0","op_type":"none"}]`,
+			expected: true,
+		},
+		{
+			name: "legacy camelCase metrics JSON",
 			jsonBody: `{
 				"lastUpdateTimeISO": "2025-08-14T15:30:00.000Z",
 				"opType": "create",
@@ -281,25 +321,30 @@ func TestPortChecker_validateSptMetricsResponse(t *testing.T) {
 				"meanLatencyMicros": 25.7,
 				"concurrency": 8.0
 			}`,
-			expected: true,
+			expected: false,
 		},
 		{
-			name: "spt metrics with alternative fields",
+			name: "legacy camelCase counters",
 			jsonBody: `{
 				"successCount": 1000,
 				"failCount": 2,
 				"concurrency": 8.0,
 				"bytesCount": 1048576
 			}`,
-			expected: true,
+			expected: false,
 		},
 		{
-			name: "minimal spt metrics (just enough fields)",
+			name: "two legacy camelCase fields",
 			jsonBody: `{
 				"opType": "create",
 				"opsPerSec": 150.5
 			}`,
-			expected: true,
+			expected: false,
+		},
+		{
+			name:     "legacy camelCase array",
+			jsonBody: `[{"successCount":1,"failCount":0}]`,
+			expected: false,
 		},
 		{
 			name: "not enough spt fields",
@@ -340,68 +385,6 @@ func TestPortChecker_validateSptMetricsResponse(t *testing.T) {
 			result := checker.validateSptMetricsResponse(resp)
 			if result != tt.expected {
 				t.Errorf("validateSptMetricsResponse() = %v, want %v for JSON: %s", result, tt.expected, tt.jsonBody)
-			}
-		})
-	}
-}
-
-func TestPortChecker_validateSptRunResponse(t *testing.T) {
-	checker := NewPortChecker(constants.SptAPIPort)
-
-	tests := []struct {
-		name     string
-		jsonBody string
-		expected bool
-	}{
-		{
-			name: "valid spt run response",
-			jsonBody: `{
-				"runId": "test-run-123",
-				"status": "RUNNING",
-				"startTimeISO": "2025-08-14T15:30:00Z"
-			}`,
-			expected: true,
-		},
-		{
-			name: "spt run with alternative fields",
-			jsonBody: `{
-				"runId": "test-456", 
-				"startTime": "2025-08-14T15:30:00Z"
-			}`,
-			expected: true,
-		},
-		{
-			name: "incomplete spt run info",
-			jsonBody: `{
-				"runId": "test-789"
-			}`,
-			expected: false,
-		},
-		{
-			name: "generic JSON response",
-			jsonBody: `{
-				"message": "Hello World",
-				"status": "ok"
-			}`,
-			expected: false,
-		},
-		{
-			name:     "invalid JSON",
-			jsonBody: `{"invalid": response}`,
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			resp := &http.Response{
-				StatusCode: 200,
-				Body:       io.NopCloser(strings.NewReader(tt.jsonBody)),
-			}
-
-			result := checker.validateSptRunResponse(resp)
-			if result != tt.expected {
-				t.Errorf("validateSptRunResponse() = %v, want %v for JSON: %s", result, tt.expected, tt.jsonBody)
 			}
 		})
 	}
@@ -536,22 +519,14 @@ func TestPortChecker_EnhancedDetection(t *testing.T) {
 	t.Run("non-empty array metrics response", func(t *testing.T) {
 		checker := NewPortChecker(constants.SptAPIPort)
 
-		// Create response with array containing Spt fields
-		metricsArray := `[{
-			"lastUpdateTimeISO": "2025-08-14T15:30:00.000Z",
-			"opType": "create",
-			"opsPerSec": 150.5,
-			"meanLatencyMicros": 25.7
-		}]`
-
+		metricsArray := strings.TrimSpace(readFingerprintFixture(t, "metrics-json-schema5.json"))
 		resp := &http.Response{
 			StatusCode: 200,
 			Body:       io.NopCloser(strings.NewReader(metricsArray)),
 		}
 
-		result := checker.validateSptMetricsResponse(resp)
-		if !result {
-			t.Errorf("validateSptMetricsResponse(spt array) = false, want true")
+		if !checker.validateSptMetricsResponse(resp) {
+			t.Errorf("validateSptMetricsResponse(recorded engine array) = false, want true")
 		}
 	})
 
@@ -564,29 +539,38 @@ func TestPortChecker_EnhancedDetection(t *testing.T) {
 			expected bool
 		}{
 			{
-				name: "sufficient spt fields",
+				name: "engine metrics schema row",
+				fields: map[string]interface{}{
+					"metrics_schema": 5.0,
+					"scope":          "node",
+					"op_type":        "none",
+				},
+				expected: true,
+			},
+			{
+				name: "legacy camelCase fields",
 				fields: map[string]interface{}{
 					"opType":            "create",
 					"opsPerSec":         150.5,
 					"meanLatencyMicros": 25.7,
 				},
-				expected: true,
+				expected: false,
 			},
 			{
-				name: "insufficient spt fields",
+				name: "single legacy field",
 				fields: map[string]interface{}{
 					"opType": "create",
 				},
 				expected: false,
 			},
 			{
-				name: "alternative indicators sufficient",
+				name: "legacy camelCase counters",
 				fields: map[string]interface{}{
 					"concurrency":  8.0,
 					"successCount": 1000,
 					"failCount":    2,
 				},
-				expected: true,
+				expected: false,
 			},
 		}
 
@@ -597,6 +581,19 @@ func TestPortChecker_EnhancedDetection(t *testing.T) {
 					t.Errorf("validateSptFields() = %v, want %v", result, tt.expected)
 				}
 			})
+		}
+	})
+
+	t.Run("legacy metrics bodies are not spt fields", func(t *testing.T) {
+		checker := NewPortChecker(constants.SptAPIPort)
+		for _, body := range legacyMetricsBodies {
+			var fields map[string]interface{}
+			if err := json.Unmarshal([]byte(body), &fields); err != nil {
+				t.Fatalf("unmarshal %s: %v", body, err)
+			}
+			if checker.validateSptFields(fields) {
+				t.Errorf("validateSptFields(%s) = true, want false", body)
+			}
 		}
 	})
 

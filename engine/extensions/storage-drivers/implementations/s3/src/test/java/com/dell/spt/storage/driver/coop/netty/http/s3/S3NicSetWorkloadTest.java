@@ -848,7 +848,7 @@ final class S3NicSetWorkloadTest {
 								"storage": {"driver": {"type": "s3", "limit": {"concurrency": 2}}}
 							})
 							.run();
-						""");
+						""", null);
 
 		final var setFile = nicSetFile(stepId);
 		final var report = MAPPER.readTree(setFile.toFile());
@@ -1295,7 +1295,16 @@ final class S3NicSetWorkloadTest {
 	/** As above with step id {@code stepId}; without a {@code factory}, on the shipped {@code s3} driver and no NIC set. */
 	static Map<String, List<Long>> runScenario(final List<String> endpoints, final NicSetLoopback.Factory factory,
 					final String stepId, final String scenario) throws Exception {
-		return runScenario(endpoints, factory, factory == null ? List.of() : nics(2), stepId, scenario);
+		return runScenario(endpoints, factory, factory == null ? List.of() : nics(2), stepId, scenario, null);
+	}
+
+	/**
+	 * As above on the shipped {@code s3} driver with no NIC set; each step context's succeeded bytes,
+	 * by the same key as its counts, go to {@code bytes}.
+	 */
+	static Map<String, List<Long>> runScenario(final List<String> endpoints, final String stepId, final String scenario,
+					final Map<String, Long> bytes) throws Exception {
+		return runScenario(endpoints, null, List.of(), stepId, scenario, bytes);
 	}
 
 	/**
@@ -1304,12 +1313,13 @@ final class S3NicSetWorkloadTest {
 	 */
 	static Map<String, List<Long>> runScenarioReplacing(final List<String> endpoints, final Extension replacement,
 					final String stepId, final String scenario) throws Exception {
-		return runScenario(endpoints, replacement, List.of(), stepId, scenario);
+		return runScenario(endpoints, replacement, List.of(), stepId, scenario, null);
 	}
 
 	/** As above with {@code interfaces} as the base config's NIC set, which a sub-load's own value replaces. */
 	private static Map<String, List<Long>> runScenario(final List<String> endpoints, final Extension factory,
-					final List<String> interfaces, final String stepId, final String scenario) throws Exception {
+					final List<String> interfaces, final String stepId, final String scenario, final Map<String, Long> bytes)
+					throws Exception {
 		final var root = NicSetLoopback.root(endpoints, interfaces, 1);
 		final Config config = ConfigUtil.merge("-", List.of(new BundledDefaultsProvider().config("-", root.schema()), root));
 		config.val("run-id", 778L);
@@ -1338,6 +1348,9 @@ final class S3NicSetWorkloadTest {
 					final var snapshot = metricsCtx.lastSnapshot();
 					outcomes.put(metricsCtx.opType() + "-" + metricsCtx.concurrencyLimit(),
 									List.of(snapshot.successSnapshot().count(), snapshot.failsSnapshot().count()));
+					if (bytes != null) {
+						bytes.put(metricsCtx.opType() + "-" + metricsCtx.concurrencyLimit(), snapshot.byteSnapshot().count());
+					}
 				}
 			}
 		}) {
