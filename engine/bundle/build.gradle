@@ -1580,6 +1580,16 @@ tasks.register('verifyEngineExitStatusCanary') {
 			blockedBuilder.environment().put('SPT_HOME', new File(blockedDir, 'home').absolutePath)
 			blockedBuilder.environment().put('SPT_LOG_DIR', new File(blockedDir, 'log').absolutePath)
 			def blocked = blockedBuilder.start()
+			// Bound the wait for the first marker as the other cases bound theirs: a child that stalls before
+			// printing would otherwise keep readLine() waiting forever.
+			def blockedMarkerSeen = new java.util.concurrent.CountDownLatch(1)
+			def blockedStartTimedOut = new java.util.concurrent.atomic.AtomicBoolean()
+			Thread.startDaemon('blocked-output-start-watchdog') {
+				if (!blockedMarkerSeen.await(90, java.util.concurrent.TimeUnit.SECONDS)) {
+					blockedStartTimedOut.set(true)
+					blocked.destroyForcibly()
+				}
+			}
 			try {
 				def blockedOutput = new BufferedReader(new InputStreamReader(blocked.inputStream, 'UTF-8'))
 				def blockedHead = new StringBuilder()
@@ -1587,8 +1597,10 @@ tasks.register('verifyEngineExitStatusCanary') {
 				while ((line = blockedOutput.readLine()) != null && !line.contains('SPT_BLOCKED_OUTPUT_')) {
 					blockedHead.append(line).append('\n')
 				}
+				blockedMarkerSeen.countDown()
 				if (line == null) {
-					throw new GradleException("Packaged engine 'blocked-output' exited before its scenario printed:\n${blockedHead}")
+					def why = blockedStartTimedOut.get() ? 'printed nothing from its scenario within 90 s' : 'exited before its scenario printed'
+					throw new GradleException("Packaged engine 'blocked-output' ${why}:\n${blockedHead}")
 				}
 				// Stop reading; the scenario fills the pipe at once. Process.destroy() would also close this end of
 				// the pipe, which unblocks the engine, so the signal is sent through the process handle.
