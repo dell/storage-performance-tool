@@ -12,6 +12,7 @@ import com.dell.spt.base.load.lifecycle.OperationLifecycleState;
 import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.storage.driver.coop.CoopStorageDriverBase;
 import com.dell.spt.storage.driver.coop.nio.mock.NioStorageDriverMock;
+import com.github.akurilov.commons.collection.CircularBuffer;
 import com.github.akurilov.commons.io.Input;
 import com.github.akurilov.commons.io.Output;
 import com.github.akurilov.commons.system.SizeInBytes;
@@ -36,6 +37,8 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.Lock;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.LogEvent;
@@ -50,6 +53,9 @@ import static org.junit.jupiter.api.Assertions.*;
  * the submit → signal → worker wake → invokeNio → complete pipeline.
  */
 public class NioStorageDriverBaseTest {
+
+	/** How long a test waits for something that must happen, however loaded the host. */
+	private static final long LIVENESS_SECONDS = 10;
 
 	private Config storageConfig;
 	private DataInput dataInput;
@@ -754,14 +760,18 @@ public class NioStorageDriverBaseTest {
 		final var drv = newBlockingDriver(config);
 		try {
 			drv.start();
-			assertTrue(drv.submit(newCreateOp("blocking-0", 256)));
-			assertTrue(drv.awaitInvokeEntered(2_000), "First blocking invoke should start");
+			assertTrue(submitWithin(drv, newCreateOp("blocking-0", 256), LIVENESS_SECONDS),
+							"the first operation was never accepted");
+			assertTrue(drv.awaitInvokeEntered(TimeUnit.SECONDS.toMillis(LIVENESS_SECONDS)),
+							"First blocking invoke should start");
+			// The worker is in its request and does not hold its buffer lock, so this submit has
+			// no reason to refuse.
 			final int submitted = drv.submit(List.of(newCreateOp("blocking-1", 256)), 0, 1);
 			assertEquals(1, submitted,
 							"Batch submit should make progress while another op is in blocking invoke");
 			drv.releaseInvokes();
-			assertNotNull(results.await(2_000));
-			assertNotNull(results.await(2_000));
+			assertNotNull(results.await(TimeUnit.SECONDS.toMillis(LIVENESS_SECONDS)));
+			assertNotNull(results.await(TimeUnit.SECONDS.toMillis(LIVENESS_SECONDS)));
 		} finally {
 			drv.releaseInvokes();
 			if (drv.isStarted()) {
@@ -966,6 +976,10 @@ public class NioStorageDriverBaseTest {
 	 * permit, so the operation that takes the permit is handed to an idle worker. Before, the worker
 	 * counted as busy until it had published the result, and the operation could be queued behind a
 	 * worker blocked in a request, where it waited for that request although its permit was free.
+	 *
+	 * <p>The fast operations are held in their requests until every one of them has a worker, so
+	 * none is handed to a worker that the test already holds in the output. The round robin then
+	 * starts at the blocked worker, so a placement that does not skip it always lands on it.
 	 */
 	@Test
 	void anOperationThatTakesAReleasedPermitNeverWaitsBehindAWorkerBlockedInARequest() throws Exception {
@@ -980,6 +994,8 @@ public class NioStorageDriverBaseTest {
 	private void replacementsRunWhileAWorkerIsBlocked(final int replacements) throws Exception {
 		final var stuckEntered = new CountDownLatch(1);
 		final var unstick = new CountDownLatch(1);
+		final var fastEntered = new CountDownLatch(replacements);
+		final var finishFast = new CountDownLatch(1);
 		final var publishing = new CountDownLatch(replacements);
 		final var publish = new CountDownLatch(1);
 		final var replaced = new CountDownLatch(replacements);
@@ -988,6 +1004,13 @@ public class NioStorageDriverBaseTest {
 			@Override
 			protected void invokeNio(final Operation<DataItemImpl> op) {
 				if (op.item().name().equals("stuck") && !awaitUnlessInterrupted(stuckEntered, unstick)) {
+					op.status(Operation.Status.INTERRUPTED);
+					return;
+				}
+				// A fast operation that finished before the next one is placed would leave its worker
+				// held in the output, idle to the driver: the next one could be handed to it and
+				// never reach the output.
+				if (op.item().name().startsWith("fast-") && !awaitUnlessInterrupted(fastEntered, finishFast)) {
 					op.status(Operation.Status.INTERRUPTED);
 					return;
 				}
@@ -1020,13 +1043,20 @@ public class NioStorageDriverBaseTest {
 		try {
 			drv.start();
 			assertTrue(drv.put(newCreateOp("stuck", 256)));
-			assertTrue(stuckEntered.await(5, TimeUnit.SECONDS), "the first operation never reached its worker");
+			assertTrue(stuckEntered.await(LIVENESS_SECONDS, TimeUnit.SECONDS),
+							"the first operation never reached its worker");
+			final var stuckWorker = theOnlyReservedWorker(drv);
 			for (var i = 0; i < replacements; i++) {
 				assertTrue(drv.put(newCreateOp("fast-" + i, 256)));
 			}
-			assertTrue(publishing.await(5, TimeUnit.SECONDS), "the fast operations never reached the output");
+			assertTrue(fastEntered.await(LIVENESS_SECONDS, TimeUnit.SECONDS),
+							"the fast operations never reached their workers");
+			finishFast.countDown();
+			assertTrue(publishing.await(LIVENESS_SECONDS, TimeUnit.SECONDS),
+							"the fast operations never reached the output");
 			// Their permits are free while their workers are still publishing, and one worker is
 			// blocked in its request.
+			startRoundRobinAt(drv, stuckWorker);
 			final var batch = new ArrayList<Operation<DataItemImpl>>();
 			for (var i = 0; i < replacements; i++) {
 				batch.add(newCreateOp("replacement-" + i, 256));
@@ -1036,14 +1066,89 @@ public class NioStorageDriverBaseTest {
 			} else {
 				assertEquals(replacements, drv.put(batch, 0, replacements));
 			}
+			// Every worker is still blocked, so the replacements wait in the buffers they were handed
+			// to. Released before that, a worker that finished publishing would show idle again.
+			awaitOperationsInWorkerBuffers(drv, replacements);
 			publish.countDown();
-			assertTrue(replaced.await(2, TimeUnit.SECONDS),
+			// The blocked worker is released only below, so a replacement handed to it never runs.
+			assertTrue(replaced.await(LIVENESS_SECONDS, TimeUnit.SECONDS),
 							"a replacement waited behind the worker blocked in its request");
 		} finally {
+			finishFast.countDown();
 			publish.countDown();
 			unstick.countDown();
 			drv.close();
 		}
+	}
+
+	/** The worker that holds a reservation; fails unless exactly one does. */
+	private static int theOnlyReservedWorker(final NioStorageDriverBase<?, ?> driver) throws Exception {
+		final var field = NioStorageDriverBase.class.getDeclaredField("opBuffReserved");
+		field.setAccessible(true);
+		final var reserved = (int[]) field.get(driver);
+		var worker = -1;
+		for (var i = 0; i < reserved.length; i++) {
+			if (reserved[i] > 0) {
+				assertEquals(-1, worker, "more than one worker holds a reservation");
+				worker = i;
+			}
+		}
+		assertTrue(worker >= 0, "no worker holds a reservation");
+		return worker;
+	}
+
+	/** Waits until the workers' buffers hold {@code count} operations in all. */
+	private static void awaitOperationsInWorkerBuffers(final NioStorageDriverBase<?, ?> driver, final int count)
+					throws Exception {
+		final var buffsField = NioStorageDriverBase.class.getDeclaredField("opBuffs");
+		buffsField.setAccessible(true);
+		final var locksField = NioStorageDriverBase.class.getDeclaredField("opBuffLocks");
+		locksField.setAccessible(true);
+		final var buffs = (CircularBuffer<?>[]) buffsField.get(driver);
+		final var locks = (Lock[]) locksField.get(driver);
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(LIVENESS_SECONDS);
+		var buffered = 0;
+		while (true) {
+			buffered = 0;
+			for (var i = 0; i < buffs.length; i++) {
+				locks[i].lock();
+				try {
+					buffered += buffs[i].size();
+				} finally {
+					locks[i].unlock();
+				}
+			}
+			if (buffered >= count || System.nanoTime() - deadline >= 0) {
+				break;
+			}
+			Thread.sleep(1);
+		}
+		assertEquals(count, buffered, "operations in the workers' buffers");
+	}
+
+	/** Makes the next submission start its round robin at the given worker. */
+	private static void startRoundRobinAt(final NioStorageDriverBase<?, ?> driver, final int worker) throws Exception {
+		final var field = NioStorageDriverBase.class.getDeclaredField("rrc");
+		field.setAccessible(true);
+		((AtomicLong) field.get(driver)).set(worker);
+	}
+
+	/**
+	 * Submits {@code op} until the driver accepts it. A worker that does not serve its own permit
+	 * holds its buffer lock each time it looks for work, and a submit that finds every worker's
+	 * lock taken refuses the operation; the dispatch task retries such a refusal, and so does this.
+	 */
+	private static boolean submitWithin(
+					final NioStorageDriverBase<DataItemImpl, Operation<DataItemImpl>> driver,
+					final Operation<DataItemImpl> op, final long timeoutSeconds) throws InterruptedException {
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
+		while (!driver.submit(op)) {
+			if (System.nanoTime() - deadline >= 0) {
+				return false;
+			}
+			Thread.sleep(1);
+		}
+		return true;
 	}
 
 	/** Counts the first latch down, if given, then waits for the second; false when interrupted. */
