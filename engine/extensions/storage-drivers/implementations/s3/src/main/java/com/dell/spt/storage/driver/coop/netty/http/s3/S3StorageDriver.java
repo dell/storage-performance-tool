@@ -387,8 +387,11 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	// One WARN for a multipart abort the kernel route could not connect; the rest go to DEBUG.
 	private final AtomicBoolean kernelRouteAbortWarned = new AtomicBoolean();
 	private final S3ResponseHandler.CompletionErrorCodeLog completionErrorCodeLog = new S3ResponseHandler.CompletionErrorCodeLog();
+	private final S3ResponseHandler.CompletionErrorCodeLog copyErrorCodeLog = S3ResponseHandler.CompletionErrorCodeLog.forCopies();
 	// One WARN for a multipart response body over S3ResponseHandler.MAX_MULTIPART_RESPONSE_BYTES.
 	private final AtomicBoolean multipartResponseOverflowWarned = new AtomicBoolean();
+	// One WARN for a 2xx multipart initiation response without an upload ID; the rest go to DEBUG.
+	private final AtomicBoolean uploadIdNotFoundWarned = new AtomicBoolean();
 	private final KernelRouteAborts<KernelRouteAbort> kernelRouteAborts = new KernelRouteAborts<>();
 	// Host of driver-built helper requests (bucket setup, listing, verification, abort).
 	private String helperAuthority;
@@ -2004,11 +2007,23 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
+	 * The index of the {@code ~} that starts {@code name}'s legacy {@code ~versionId} suffix, or -1
+	 * when it has none: the last {@code ~}, only when no {@code /} follows it. Once the name holds the
+	 * item's path (after {@link com.dell.spt.base.item.op.Operation#result()}, so on a retry or a
+	 * recycle, and for a copy), a {@code ~} in that path is part of a directory name, not the
+	 * separator. A {@code ~} in the key's own last segment stays ambiguous.
+	 */
+	static int legacyVersionStart(final String name) {
+		final int tilde = name.lastIndexOf('~');
+		return tilde >= 0 && name.indexOf('/', tilde + 1) >= 0 ? -1 : tilde;
+	}
+
+	/**
 	 * {@code name} with its trailing {@code ~versionId}, if any, replaced by {@code ~versionId}: the
 	 * split {@link #objectVersioningRequest} makes, so a name never collects two suffixes.
 	 */
 	static String withLegacyVersion(final String name, final String versionId) {
-		final int indexOfVersionStart = name.lastIndexOf('~');
+		final int indexOfVersionStart = legacyVersionStart(name);
 		if (indexOfVersionStart == -1) {
 			return name + '~' + versionId;
 		}
@@ -2029,7 +2044,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		// retry that reads the item meanwhile sees the name that selects the version. The paths are built
 		// by dataUriPath from the whole name, and the ~versionId it ends with is taken off.
 		final String name = item.name();
-		final int indexOfVersionStart = name.lastIndexOf('~');
+		final int indexOfVersionStart = legacyVersionStart(name);
 		return objectVersioningRequest(
 						op, item, indexOfVersionStart == -1 ? null : name.substring(indexOfVersionStart + 1), false, nodeAddr);
 	}
@@ -2047,7 +2062,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 			return copySource;
 		}
 		final String name = op.item().name();
-		final int indexOfVersionStart = name.lastIndexOf('~');
+		final int indexOfVersionStart = legacyVersionStart(name);
 		return indexOfVersionStart == -1
 						? copySource
 						: withoutVersionSuffix(copySource, name.substring(indexOfVersionStart + 1));
@@ -2518,9 +2533,19 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		return completionErrorCodeLog;
 	}
 
+	/** The copy error codes this driver's step has logged. */
+	S3ResponseHandler.CompletionErrorCodeLog copyErrorCodeLog() {
+		return copyErrorCodeLog;
+	}
+
 	/** True only the first time it is called: whether this step should warn of a multipart response's overflow. */
 	boolean claimMultipartResponseOverflowWarning() {
 		return multipartResponseOverflowWarned.compareAndSet(false, true);
+	}
+
+	/** True only the first time it is called: whether this step should warn of an initiation response without an upload ID. */
+	boolean claimUploadIdNotFoundWarning() {
+		return uploadIdNotFoundWarned.compareAndSet(false, true);
 	}
 
 	/**
@@ -2555,6 +2580,18 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				multipartCleanupTasks.remove(cleanupTask);
 			}
 		});
+	}
+
+	/**
+	 * An upload failed without its completion or abort being sent, because that could not be queued,
+	 * is recorded as orphaned: an abort not sent as attempted and failed, as an abort that failed
+	 * before it had a connection is.
+	 */
+	@Override
+	protected void recordUploadLeftOpen(final O uploadOp, final boolean aborting, final String cause) {
+		final var compositeOp = (CompositeDataOperation) uploadOp;
+		emitMultipartLifecycle(compositeOp, "failed_orphaned", aborting, aborting ? Boolean.FALSE : null,
+						(aborting ? mpuFailure(compositeOp) + "; abort " : "") + "not sent: " + cause);
 	}
 
 	/** Records an upload whose abort was not sent, or not answered by the close, as orphaned. */

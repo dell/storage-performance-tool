@@ -49,15 +49,14 @@ import com.dell.spt.testing.tags.IntegrationTest;
 @IntegrationTest
 public class EntryWorkerJsonMetricsIntegrationTest {
 
-	private static final int WORKER_JSON_PORT = 2115;
-	private static final int ENTRY_JSON_PORT = 2116;
-	private static final String WORKER_JSON_URL = "http://localhost:" + WORKER_JSON_PORT + "/metrics/json";
-	private static final String ENTRY_JSON_URL = "http://localhost:" + ENTRY_JSON_PORT + "/metrics/json";
-	private static final String ENTRY_FLEET_URL = "http://localhost:" + ENTRY_JSON_PORT + "/metrics/fleet/json";
-	private static final String WORKER_FLEET_URL = "http://localhost:" + WORKER_JSON_PORT + "/metrics/fleet/json";
-	private static final String ENTRY_CLUSTER_URL = "http://localhost:" + ENTRY_JSON_PORT + "/metrics/cluster/json";
-	private static final String WORKER_CLUSTER_URL = "http://localhost:" + WORKER_JSON_PORT + "/metrics/cluster/json";
-
+	private int workerJsonPort;
+	private int entryJsonPort;
+	private String workerJsonUrl;
+	private String entryJsonUrl;
+	private String entryFleetUrl;
+	private String workerFleetUrl;
+	private String entryClusterUrl;
+	private String workerClusterUrl;
 	private Server workerJsonServer;
 	private Server entryJsonServer;
 	private MetricsManager workerMgr;
@@ -72,24 +71,33 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 
 	@BeforeEach
 	public void setUp() throws Exception {
+		final int[] ports = FreePorts.freePorts(2);
+		workerJsonPort = ports[0];
+		entryJsonPort = ports[1];
+		workerJsonUrl = "http://localhost:" + workerJsonPort + "/metrics/json";
+		entryJsonUrl = "http://localhost:" + entryJsonPort + "/metrics/json";
+		entryFleetUrl = "http://localhost:" + entryJsonPort + "/metrics/fleet/json";
+		workerFleetUrl = "http://localhost:" + workerJsonPort + "/metrics/fleet/json";
+		entryClusterUrl = "http://localhost:" + entryJsonPort + "/metrics/cluster/json";
+		workerClusterUrl = "http://localhost:" + workerJsonPort + "/metrics/cluster/json";
 		om = new ObjectMapper();
 		workerMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 		entryMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
 		workerConfig = TestConfigBuilder.config();
 		workerConfig.val("run-comment", "worker-node");
-		workerConfig.val("run-port", WORKER_JSON_PORT);
+		workerConfig.val("run-port", workerJsonPort);
 		workerConfig.val("run-id", 77L);
 		workerConfig.val("server-metrics-expose_fleet", true);
 		entryConfig = TestConfigBuilder.config();
 		entryConfig.val("run-comment", "entry-node");
-		entryConfig.val("run-port", ENTRY_JSON_PORT);
+		entryConfig.val("run-port", entryJsonPort);
 		entryConfig.val("run-id", 77L);
 		entryConfig.val("run-cluster-id", "spt-run-77");
 		entryConfig.val("run-node", true);
 		entryConfig.val("server-metrics-expose_fleet", true);
 
 		// Worker server
-		workerJsonServer = new Server(WORKER_JSON_PORT);
+		workerJsonServer = new Server(workerJsonPort);
 		final var workerContext = new ServletContextHandler();
 		workerContext.setContextPath("/");
 		workerJsonServer.setHandler(workerContext);
@@ -100,7 +108,7 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		workerJsonServer.start();
 
 		// Deliver the run configuration only after the worker API has started.
-		assertFalse(om.readTree(fetch(WORKER_JSON_URL)).get(0).has("cluster_id"));
+		assertFalse(om.readTree(fetch(workerJsonUrl)).get(0).has("cluster_id"));
 		final Config sliceConfig = new BasicConfig(workerConfig.pathSep(), workerConfig.schema(),
 						Config.deepToMap(workerConfig));
 		sliceConfig.val("run-cluster-id", "spt-run-77");
@@ -116,7 +124,7 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		workerLocalCtx.refreshLastSnapshot();
 
 		// Entry server
-		entryJsonServer = new Server(ENTRY_JSON_PORT);
+		entryJsonServer = new Server(entryJsonPort);
 		final var entryContext = new ServletContextHandler();
 		entryContext.setContextPath("/");
 		entryJsonServer.setHandler(entryContext);
@@ -175,10 +183,10 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 
 	@Test
 	public void entryAndWorkerJsonNonEmpty() throws Exception {
-		final JsonNode arrWorker = om.readTree(fetch(WORKER_JSON_URL));
-		final JsonNode arrEntry = om.readTree(fetch(ENTRY_JSON_URL));
-		final JsonNode arrCluster = om.readTree(fetch(ENTRY_CLUSTER_URL));
-		final JsonNode arrFleet = om.readTree(fetch(ENTRY_FLEET_URL));
+		final JsonNode arrWorker = om.readTree(fetch(workerJsonUrl));
+		final JsonNode arrEntry = om.readTree(fetch(entryJsonUrl));
+		final JsonNode arrCluster = om.readTree(fetch(entryClusterUrl));
+		final JsonNode arrFleet = om.readTree(fetch(entryFleetUrl));
 		assertTrue(arrWorker.size() > 0, "Worker /metrics/json should be non-empty");
 		final JsonNode workerObj = arrWorker.get(0);
 		assertEquals(5, workerObj.get("metrics_schema").asInt());
@@ -205,14 +213,14 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		assertTrue(clusterObj.hasNonNull("sample_ts"));
 		assertTrue(arrFleet.size() > 0, "Legacy /metrics/fleet/json should remain available");
 		assertEquals(arrCluster.size(), arrFleet.size(), "Cluster and fleet endpoints should return same number of samples");
-		assertEquals(404, fetchStatus(WORKER_CLUSTER_URL), "Worker /metrics/cluster/json should return 404");
-		assertEquals(404, fetchStatus(WORKER_FLEET_URL), "Worker /metrics/fleet/json should return 404");
+		assertEquals(404, fetchStatus(workerClusterUrl), "Worker /metrics/cluster/json should return 404");
+		assertEquals(404, fetchStatus(workerFleetUrl), "Worker /metrics/fleet/json should return 404");
 	}
 
 	@Test
 	public void workerTerminalRowsRetainIdentityFromReceivedSlice() throws Exception {
 		workerStep.stop();
-		final JsonNode row = om.readTree(fetch(WORKER_JSON_URL)).get(0);
+		final JsonNode row = om.readTree(fetch(workerJsonUrl)).get(0);
 		assertTrue(row.path("terminal").asBoolean());
 		assertEquals("77", row.path("run_id").asText());
 		assertEquals("spt-run-77", row.path("cluster_id").asText());
@@ -243,7 +251,7 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		}
 		entryLocalCtx.refreshLastSnapshot();
 
-		final JsonNode arrEntry = om.readTree(fetch(ENTRY_JSON_URL));
+		final JsonNode arrEntry = om.readTree(fetch(entryJsonUrl));
 		assertEquals(1, arrEntry.size(), "Entry /metrics/json should expose local context once registered");
 		final JsonNode nodeObj = arrEntry.get(0);
 		assertEquals("node", nodeObj.get("scope").asText());
@@ -256,7 +264,7 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		assertEquals(10, nodeObj.get("completion_percent").asInt());
 		assertEquals(10, nodeObj.get("overall_completion_percent").asInt());
 
-		final JsonNode verboseObj = om.readTree(fetch(ENTRY_JSON_URL + "?verbose=1")).get(0);
+		final JsonNode verboseObj = om.readTree(fetch(entryJsonUrl + "?verbose=1")).get(0);
 		assertEquals(1, verboseObj.get("diag_distributed_contexts").asInt());
 		assertEquals(1, verboseObj.get("diag_local_contexts").asInt());
 	}
@@ -267,13 +275,13 @@ public class EntryWorkerJsonMetricsIntegrationTest {
 		entryDistCtx.close();
 		entryDistCtx = null;
 
-		final JsonNode arrEntry = om.readTree(fetch(ENTRY_JSON_URL));
+		final JsonNode arrEntry = om.readTree(fetch(entryJsonUrl));
 		assertEquals(1, arrEntry.size(), "Entry /metrics/json should fall back to idle sample");
 		final JsonNode nodeObj = arrEntry.get(0);
 		assertEquals("entry", nodeObj.get("role").asText(), "Entry node should keep entry role after distributed teardown");
 		assertEquals(0L, nodeObj.get("operations").get("success_count").asLong(), "Node metrics should not expose fleet totals");
 
-		final JsonNode arrCluster = om.readTree(fetch(ENTRY_CLUSTER_URL));
+		final JsonNode arrCluster = om.readTree(fetch(entryClusterUrl));
 		assertTrue(arrCluster.size() > 0, "Cluster endpoint should retain terminal aggregate");
 		final JsonNode clusterObj = arrCluster.get(0);
 		assertEquals("aggregate", clusterObj.get("role").asText());

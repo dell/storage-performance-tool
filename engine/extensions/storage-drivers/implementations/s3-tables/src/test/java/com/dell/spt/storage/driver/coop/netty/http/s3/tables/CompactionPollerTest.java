@@ -322,6 +322,14 @@ public class CompactionPollerTest {
 			stubResponses.add(resp);
 		}
 
+		/** A request with its own body cap, the data-plane GET, goes to the same stub. */
+		@Override
+		protected FullHttpResponse executeHttpRequest(
+						final FullHttpRequest req, final boolean warnOnTimeout, final int maxContentLength)
+						throws InterruptedException, java.net.ConnectException {
+			return executeHttpRequest(req);
+		}
+
 		@Override
 		protected FullHttpResponse executeHttpRequest(final FullHttpRequest req) {
 			final FullHttpResponse next = stubResponses.poll();

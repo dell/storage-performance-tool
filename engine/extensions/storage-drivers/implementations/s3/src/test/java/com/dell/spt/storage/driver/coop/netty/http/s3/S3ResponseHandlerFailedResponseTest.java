@@ -178,18 +178,64 @@ final class S3ResponseHandlerFailedResponseTest {
 		}
 	}
 
-	/** A refused initiation logs its status line, the code line, then the existing line with the raw body. */
+	/**
+	 * A refused initiation logs its status line and its code line only. A further line used to dump
+	 * the raw body as "Upload id not found"; the code line now says all of it. The driver would grant
+	 * the once-per-step warning, so a wrongly taken upload-ID branch shows at WARN.
+	 */
 	@Test
-	void aRefusedInitiationLogsItsCodeBetweenTheExistingLines() throws Exception {
+	void aRefusedInitiationLogsOnlyItsStatusAndCode() throws Exception {
+		when(driver.claimUploadIdNotFoundWarning()).thenReturn(true);
 		try (final var errors = new ErrorsLogCapture()) {
 			final var op = upload();
 			final var body = "<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>";
 			respond(op, HttpResponseStatus.FORBIDDEN, body);
 			assertEquals(Operation.Status.RESP_FAIL_AUTH, op.status());
 			verify(driver).complete(channel, op);
-			assertEquals(List.of(op + ": 403 Forbidden", op + ": S3 error code AccessDenied, message: Access Denied",
-							"Upload id not found in the following response content:\n" + body),
+			assertEquals(List.of(op + ": 403 Forbidden", op + ": S3 error code AccessDenied, message: Access Denied"),
 							errors.drained().stream().map(ErrorsLogCapture.Line::message).toList());
+		}
+	}
+
+	/** An abort sent before every part is done is not an initiation: refused, it logs no upload-id line. */
+	@Test
+	void aRefusedAbortBeforeItsPartsAreDoneLogsOnlyItsStatusAndCode() throws Exception {
+		when(driver.claimUploadIdNotFoundWarning()).thenReturn(true);
+		try (final var errors = new ErrorsLogCapture()) {
+			final var op = upload();
+			((CompositeDataOperationImpl<DataItemImpl>) op).put(S3Api.KEY_MPU_ABORT, "true");
+			respond(op, HttpResponseStatus.NOT_FOUND,
+							"<Error><Code>NoSuchUpload</Code><Message>The specified upload does not exist.</Message></Error>");
+			assertEquals(Operation.Status.RESP_FAIL_NOT_FOUND, op.status());
+			assertEquals(List.of(op + ": 404 Not Found",
+							op + ": S3 error code NoSuchUpload, message: The specified upload does not exist."),
+							errors.drained().stream().map(ErrorsLogCapture.Line::message).toList());
+		}
+	}
+
+	/** An abort answered 2xx with a body before every part is done is not an initiation: no upload-ID line. */
+	@Test
+	void aSuccessfulAbortWithABodyBeforeItsPartsAreDoneLogsNoUploadIdLine() throws Exception {
+		when(driver.claimUploadIdNotFoundWarning()).thenReturn(true);
+		try (final var errors = new ErrorsLogCapture()) {
+			final var op = upload();
+			((CompositeDataOperationImpl<DataItemImpl>) op).put(S3Api.KEY_MPU_ABORT, "true");
+			respond(op, HttpResponseStatus.OK, "<html>ok</html>");
+			assertEquals(List.of(), uploadIdLines(errors));
+		}
+	}
+
+	/** A ranged update of a large item is a composite operation too, but never an initiation: no upload-ID line. */
+	@Test
+	void aSuccessfulCompositeUpdateWithABodyLogsNoUploadIdLine() throws Exception {
+		when(driver.claimUploadIdNotFoundWarning()).thenReturn(true);
+		try (final var errors = new ErrorsLogCapture()) {
+			final var op = new CompositeDataOperationImpl<DataItemImpl>(
+							0, OpType.UPDATE, new DataItemImpl(0L, 4 * PART_SIZE), null, "/bucket/", Credential.NONE,
+							null, 0, PART_SIZE);
+			op.subOperations();
+			respond(op, HttpResponseStatus.OK, "<html>ok</html>");
+			assertEquals(List.of(), uploadIdLines(errors));
 		}
 	}
 
@@ -328,6 +374,14 @@ final class S3ResponseHandlerFailedResponseTest {
 	private static Operation<DataItemImpl> smallRead() {
 		return new DataOperationImpl<DataItemImpl>(
 						0, OpType.READ, new DataItemImpl("k-small", 0L, 4), null, "/bucket/", Credential.NONE, null, 0);
+	}
+
+	/** Every upload-ID line, at WARN or at DEBUG. */
+	private static List<String> uploadIdLines(final ErrorsLogCapture errors) throws InterruptedException {
+		final var lines = new java.util.ArrayList<String>();
+		errors.drained().stream().map(ErrorsLogCapture.Line::message).forEach(lines::add);
+		lines.addAll(errors.drainedDebugMessages());
+		return lines.stream().filter(message -> message.contains("Upload id not found")).toList();
 	}
 
 	private static List<String> messages(final ErrorsLogCapture errors) throws InterruptedException {

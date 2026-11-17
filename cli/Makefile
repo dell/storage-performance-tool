@@ -51,6 +51,7 @@ help:
 	@echo "  test         - Run all tests with summary"
 	@echo "  test-verbose - Run all tests with detailed output"
 	@echo "  test-quick   - Run tests without verbose output"
+	@echo "  test-race    - Run all tests with the race detector (as CI does)"
 	@echo "  test-summary - Parse existing test results and show summary"
 	@echo "  testclean    - Clean test cache (forces tests to run fresh)"
 	@echo "  test-coverage- Run tests with coverage report (generates coverage.html)"
@@ -98,6 +99,11 @@ test-verbose:
 test-quick:
 	@echo "Running quick tests..."
 	$(GOTEST) ./...
+
+# Run all tests with the race detector; CI's Go Quality Suite calls this target
+test-race:
+	@echo "Running tests with the race detector..."
+	$(GOTEST) -race -count=1 ./...
 
 # Parse existing test results
 test-summary:
@@ -230,7 +236,7 @@ test-deadcode:
 	@./$(DEADFINDER_BIN) -root . -cover coverage.out > $(DEADFINDER_DIR)/report.json
 	@echo "Report generated: $(DEADFINDER_DIR)/report.json"
 
-.PHONY: help all build install test test-verbose test-quick test-summary testclean test-coverage fmt vet lint clean distclean deps tidy run build-all build-linux build-darwin build-windows dev ci ci-local test-deadcode
+.PHONY: help all build install test test-verbose test-quick test-race test-summary testclean test-coverage fmt vet lint clean distclean deps tidy run build-all build-linux build-darwin build-windows dev ci ci-local test-deadcode
 
 # Install repo git hooks (pre-commit)
 install-hooks:
