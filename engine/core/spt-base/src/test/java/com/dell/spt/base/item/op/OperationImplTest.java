@@ -216,6 +216,14 @@ class OperationImplTest {
 	}
 
 	@Test
+	void list_keepsTheOldSplitForANameWithAnEmptySegment() {
+		final var item = new ItemImpl("/pp//k");
+		final var op = new OperationImpl<>(0, OpType.LIST, item, null, null, null);
+		assertEquals("/pp/", op.srcPath());
+		assertEquals("k", item.name());
+	}
+
+	@Test
 	void create_keepsANameWithAnEmptySegmentAndNoSrcPath() {
 		final var item = new ItemImpl("/pp//k");
 		final var op = new OperationImpl<>(0, OpType.CREATE, item, null, "/dst", null);

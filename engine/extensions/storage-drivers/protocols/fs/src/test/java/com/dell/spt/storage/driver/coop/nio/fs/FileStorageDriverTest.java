@@ -243,6 +243,7 @@ public class FileStorageDriverTest {
 			assertEquals(dir.toString(), op.dstPath());
 			assertEquals(dir + "//f", op.item().name());
 			final Operation<DataItemImpl> res = deleteOnce(op);
+			assertNotNull(res, "dstPath " + dstPath + ": no completed DELETE");
 			assertEquals(Operation.Status.SUCC, res.status(), "dstPath " + dstPath);
 			assertFalse(Files.exists(file), "dstPath " + dstPath + " must delete " + file);
 			assertTrue(Files.exists(joinedAgain), "dstPath " + dstPath + " must not delete " + joinedAgain);
@@ -258,6 +259,7 @@ public class FileStorageDriverTest {
 		retry.reset();
 		assertEquals(dir + "/f", retry.item().name());
 		final Operation<DataItemImpl> res = deleteOnce(retry);
+		assertNotNull(res, "retry: no completed DELETE");
 		assertEquals(Operation.Status.SUCC, res.status(), "retry");
 		assertFalse(Files.exists(file), "the retry must delete " + file);
 		assertTrue(Files.exists(joinedAgain), "the retry must not delete " + joinedAgain);

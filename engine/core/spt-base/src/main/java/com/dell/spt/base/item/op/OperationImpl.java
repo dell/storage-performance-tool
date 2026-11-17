@@ -72,9 +72,12 @@ public class OperationImpl<I extends Item> implements Operation<I> {
 			final String itemName = item.name();
 			final int lastSlashIndex = itemName.lastIndexOf(SLASH);
 			if (lastSlashIndex > 0 && lastSlashIndex < itemName.length()) {
+				// LIST keeps the old split: its builder restores the prefix, and the LIST workload is
+				// left as it is until its refactor.
 				final int wholeNamePathEnd = itemName.charAt(lastSlashIndex - 1) == SEPARATOR
-								? emptySegmentPathEnd(itemName, lastSlashIndex)
-								: 0;
+								&& !OpType.LIST.equals(opType)
+												? emptySegmentPathEnd(itemName, lastSlashIndex)
+												: 0;
 				if (wholeNamePathEnd > 0) {
 					// An empty segment before the last one: splitting would leave a path ending in a
 					// slash, which a later join takes for the separator and so loses the segment.
