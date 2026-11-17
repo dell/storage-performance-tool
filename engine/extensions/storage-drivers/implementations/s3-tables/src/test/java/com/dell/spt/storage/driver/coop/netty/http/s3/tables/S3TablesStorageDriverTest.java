@@ -177,6 +177,18 @@ public class S3TablesStorageDriverTest {
 			return requests;
 		}
 
+		/** The body cap of each request sent through the cap overload, in order. */
+		final java.util.List<Integer> maxContentLengths = new java.util.ArrayList<>();
+
+		/** A request with its own body cap goes to the same stub. */
+		@Override
+		protected FullHttpResponse executeHttpRequest(
+						final FullHttpRequest httpRequest, final boolean warnOnTimeout, final int maxContentLength)
+						throws InterruptedException, java.net.ConnectException {
+			maxContentLengths.add(maxContentLength);
+			return executeHttpRequest(httpRequest);
+		}
+
 		@Override
 		protected FullHttpResponse executeHttpRequest(final FullHttpRequest httpRequest) {
 			requests.add(httpRequest);
@@ -698,6 +710,22 @@ public class S3TablesStorageDriverTest {
 
 		assertEquals(Operation.Status.FAIL_IO, op.status(),
 						"op should be FAIL_IO when PutTableMaintenanceConfiguration fails");
+	}
+
+	/**
+	 * The data-plane GET of a table's metadata file takes up to 64 MiB through the cap overload; the
+	 * control-plane requests keep the 16 MiB default.
+	 */
+	@Test
+	void dataPlaneGet_usesThe64MiBCap() throws Exception {
+		final TestDriver drv = new TestDriver(baseConfig("tableCompactionPoll", "127.0.0.1"));
+		drv.enqueueResponse(okJson("{\"current-snapshot-id\":1}"));
+
+		final byte[] body = drv.executeDataPlaneGet("/test-bucket/meta/v1.json");
+
+		assertEquals("{\"current-snapshot-id\":1}", new String(body, StandardCharsets.UTF_8));
+		assertEquals(List.of(64 * 1024 * 1024), drv.maxContentLengths);
+		assertEquals(64 * 1024 * 1024, S3TablesStorageDriver.DATA_PLANE_GET_MAX_CONTENT_LENGTH);
 	}
 
 	private static FullHttpResponse okJson(final String body) {
