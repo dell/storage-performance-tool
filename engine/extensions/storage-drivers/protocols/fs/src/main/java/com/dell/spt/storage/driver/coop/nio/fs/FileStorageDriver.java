@@ -39,6 +39,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
 
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 
@@ -53,6 +54,8 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 	private final Map<String, File> dstParentDirs = new ConcurrentHashMap<>();
 	private final Map<DataOperation, FileChannel> dstOpenFiles = new ConcurrentHashMap<>();
 	private final AtomicBoolean ownSourceCopyWarned = new AtomicBoolean();
+	// Held in a field: every pass of a plain CREATE looks it up, and must not allocate a new one.
+	private final Function<DataOperation, FileChannel> copySrcFileOpener = this::openCopySrcFile;
 
 	public FileStorageDriver(
 					final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
@@ -92,19 +95,22 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 		return true;
 	}
 
+	/** The source of a CREATE: null for a plain CREATE, or for a copy that failed here. */
+	private <F extends DataItem, D extends DataOperation<F>> FileChannel openCopySrcFile(final D op) {
+		final var srcPath = op.srcPath();
+		if (srcPath == null || srcPath.isEmpty()) {
+			return null;
+		}
+		final Path srcFilePath = FileIoHelper.srcFilePath(op.item().name(), srcPath);
+		return failedAsOwnSourceCopy(op, srcFilePath) ? null : FileIoHelper.openSrcFile(op, srcFilePath);
+	}
+
 	private <F extends DataItem, D extends DataOperation<F>> FileChannel openDstFile(final D dataOp) {
 		final var fileItemName = dataOp.item().name();
 		final var opType = dataOp.type();
 		final var dstPath = dataOp.dstPath();
 		final Path itemPath;
 		try {
-			if (OpType.CREATE.equals(opType)) {
-				final var srcPath = dataOp.srcPath();
-				if (srcPath != null && !srcPath.isEmpty()
-								&& failedAsOwnSourceCopy(dataOp, FileIoHelper.srcFilePath(fileItemName, srcPath))) {
-					return null;
-				}
-			}
 			if (nameIsDstFile(fileItemName, dstPath)) {
 				itemPath = FsConstants.FS.getPath(fileItemName);
 			} else {
@@ -217,18 +223,22 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 				break;
 
 			case CREATE:
+				// The source first: opening the destination creates or truncates it, so a copy whose
+				// source can't be opened must fail before that.
+				srcChannel = srcOpenFiles.computeIfAbsent(op, copySrcFileOpener);
+				if (srcChannel == null) {
+					final var srcPath = op.srcPath();
+					if (srcPath != null && !srcPath.isEmpty()) {
+						break; // a copy that failed: never fall through to writing generated data
+					}
+				}
 				dstChannel = dstOpenFiles.computeIfAbsent(op, this::openDstFile);
 				if (dstChannel == null) {
 					break;
 				}
-				srcChannel = srcOpenFiles.computeIfAbsent(op, FileIoHelper::openSrcFile);
 				if (srcChannel == null) {
-					if (op.status().equals(Operation.Status.FAIL_IO)) {
-						break;
-					} else {
-						if (FileIoHelper.invokeCreate(item, op, dstChannel)) {
-							finishOperation((O) op);
-						}
+					if (FileIoHelper.invokeCreate(item, op, dstChannel)) {
+						finishOperation((O) op);
 					}
 				} else { // copy the data from the src channel to the dst channel
 					if (FileIoHelper.invokeCopy(item, op, srcChannel, dstChannel)) {

@@ -500,7 +500,11 @@ public interface FileIoHelper {
 		if (srcPath == null || srcPath.isEmpty()) {
 			return null;
 		}
-		final Path srcFilePath = srcFilePath(op.item().name(), srcPath);
+		return openSrcFile(op, srcFilePath(op.item().name(), srcPath));
+	}
+
+	static <I extends DataItem, O extends DataOperation<I>> FileChannel openSrcFile(
+					final O op, final Path srcFilePath) {
 		try {
 			return FS_PROVIDER.newFileChannel(srcFilePath, READ_OPEN_OPT);
 		} catch (final IOException e) {

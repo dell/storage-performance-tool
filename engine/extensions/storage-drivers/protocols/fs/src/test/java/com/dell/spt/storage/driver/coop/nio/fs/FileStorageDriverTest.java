@@ -24,12 +24,14 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 public class FileStorageDriverTest {
 
@@ -327,6 +329,92 @@ public class FileStorageDriverTest {
 		});
 		assertEquals(1, warnings.size(), warnings.toString());
 		assertTrue(warnings.get(0).contains(srcDir.resolve("f0").toString()), warnings.get(0));
+	}
+
+	@Test
+	public void aCopyOfAMissingSourceFailsAndCreatesNoDestination() throws Exception {
+		final Path srcDir = Files.createDirectories(tempDir.resolve("src"));
+		final Path dstDir = tempDir.resolve("dst");
+		final Operation<DataItemImpl> res = copyOnce("gone", 1000, srcDir.toString(), dstDir.toString());
+		assertEquals(Operation.Status.FAIL_IO, res.status());
+		// the driver base prepares the output path itself before the operation runs
+		try (var entries = Files.list(dstDir)) {
+			assertEquals(0, entries.count(), "a failed source must add nothing under the output path");
+		}
+	}
+
+	@Test
+	public void aCopyOfAnUnreadableSourceFailsAndCreatesNoDestination() throws Exception {
+		assumeFalse("root".equals(System.getProperty("user.name")), "root reads a mode 000 file");
+		final Path srcDir = Files.createDirectories(tempDir.resolve("src"));
+		final Path dstDir = Files.createDirectories(tempDir.resolve("dst"));
+		final Path source = srcDir.resolve("f0");
+		Files.write(source, sourceBytes(1000, 9));
+		Files.setPosixFilePermissions(source, PosixFilePermissions.fromString("---------"));
+		final Operation<DataItemImpl> res = copyOnce("f0", 1000, srcDir.toString(), dstDir.toString());
+		assertEquals(Operation.Status.FAIL_IO, res.status());
+		assertFalse(Files.exists(dstDir.resolve("f0")));
+	}
+
+	@Test
+	public void aCopyOfAMissingSourceKeepsAnEarlierCopy() throws Exception {
+		final Path srcDir = Files.createDirectories(tempDir.resolve("src"));
+		final Path dstDir = Files.createDirectories(tempDir.resolve("dst"));
+		final byte[] earlier = sourceBytes(3000, 10);
+		Files.write(dstDir.resolve("f0"), earlier);
+		final Operation<DataItemImpl> res = copyOnce("f0", 3000, srcDir.toString(), dstDir.toString());
+		assertEquals(Operation.Status.FAIL_IO, res.status());
+		assertArrayEquals(earlier, Files.readAllBytes(dstDir.resolve("f0")));
+	}
+
+	@Test
+	public void aRerunFromTheCopysOwnItemsOutputKeepsTheEarlierCopies() throws Exception {
+		final Path srcDir = Files.createDirectories(tempDir.resolve("src"));
+		final Path dstDir = Files.createDirectories(tempDir.resolve("dst"));
+		final byte[] data = sourceBytes(3000, 11);
+		Files.write(srcDir.resolve("f0"), data);
+		final Path copy = dstDir.resolve("f0");
+		Files.write(copy, data);
+		// the items output records the destination name, which is not a file under the input path
+		final Operation<DataItemImpl> res = copyOnce(copy.toString(), 3000, srcDir.toString(), dstDir.toString());
+		assertEquals(Operation.Status.FAIL_IO, res.status());
+		assertArrayEquals(data, Files.readAllBytes(copy));
+	}
+
+	@Test
+	public void everyRetryOfAMissingSourceFailsAndCreatesNoDestination() throws Exception {
+		final Path srcDir = Files.createDirectories(tempDir.resolve("src"));
+		final Path dstDir = Files.createDirectories(tempDir.resolve("dst"));
+		try (var drv = newDriver(false)) {
+			CollectingOpOutput<DataItemImpl> out = new CollectingOpOutput<>();
+			drv.operationResultOutput(out);
+			drv.start();
+			Operation<DataItemImpl> op = newOp(OpType.CREATE, "gone", 1000, srcDir.toString(), dstDir.toString());
+			for (int attempt = 0; attempt < 3; attempt++) {
+				assertTrue(drv.put(op));
+				final Operation<DataItemImpl> res = out.await(5000);
+				assertNotNull(res, "attempt " + attempt);
+				assertEquals(Operation.Status.FAIL_IO, res.status(), "attempt " + attempt);
+				assertTrue(OperationRetryPolicy.isRetryableStatus(res.status()));
+				assertFalse(Files.exists(dstDir.resolve("gone")), "attempt " + attempt);
+				res.reset();
+				res.startNextLifecycle();
+				op = res;
+			}
+			drv.stop();
+		}
+	}
+
+	@Test
+	public void aMissingSourceNamedByAbsolutePathAddsNoDirectoriesUnderTheOutputPath() throws Exception {
+		final Path srcDir = Files.createDirectories(tempDir.resolve("src"));
+		final Path dstDir = Files.createDirectories(tempDir.resolve("dst"));
+		final String name = srcDir.resolve("deep").resolve("gone").toString();
+		final Operation<DataItemImpl> res = copyOnce(name, 1000, srcDir.toString(), dstDir.toString());
+		assertEquals(Operation.Status.FAIL_IO, res.status());
+		try (var entries = Files.list(dstDir)) {
+			assertEquals(0, entries.count(), "nothing may be added under the output path");
+		}
 	}
 
 	@FunctionalInterface
