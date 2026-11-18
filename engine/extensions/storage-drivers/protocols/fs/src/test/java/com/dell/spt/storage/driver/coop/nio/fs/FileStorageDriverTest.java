@@ -453,6 +453,145 @@ public class FileStorageDriverTest {
 		assertEquals(Operation.Status.RESP_FAIL_CORRUPT, res.status());
 	}
 
+	/** Puts the operation, waits for its result and makes it ready to be sent again. */
+	private static Operation<DataItemImpl> attempt(
+					final FileStorageDriver<DataItemImpl, Operation<DataItemImpl>> drv,
+					final CollectingOpOutput<DataItemImpl> out, final Operation<DataItemImpl> op,
+					final Operation.Status expected, final String label) throws Exception {
+		assertTrue(drv.put(op), label);
+		final Operation<DataItemImpl> res = out.await(5000);
+		assertNotNull(res, label);
+		assertEquals(expected, res.status(), label);
+		res.reset();
+		res.startNextLifecycle();
+		return res;
+	}
+
+	private void assertEveryAttemptCopies(final String name, final Path source, final Path copy,
+					final Path srcDir, final Path dstDir) throws Exception {
+		final byte[] data = sourceBytes(3000, 15);
+		Files.createDirectories(source.getParent());
+		Files.write(source, data);
+		try (var drv = newDriver(false)) {
+			CollectingOpOutput<DataItemImpl> out = new CollectingOpOutput<>();
+			drv.operationResultOutput(out);
+			drv.start();
+			Operation<DataItemImpl> op = newOp(OpType.CREATE, name, data.length, srcDir.toString(), dstDir.toString());
+			for (int i = 0; i < 3; i++) {
+				op = attempt(drv, out, op, Operation.Status.SUCC, name + " attempt " + i);
+				assertArrayEquals(data, Files.readAllBytes(copy), name + " attempt " + i);
+				assertArrayEquals(data, Files.readAllBytes(source), name + " attempt " + i);
+			}
+			drv.stop();
+		}
+	}
+
+	@Test
+	public void aCopySentAgainReadsTheSourceOfItsFirstAttempt() throws Exception {
+		final Path srcDir = tempDir.resolve("src");
+		final Path dstDir = tempDir.resolve("dst");
+		final Path source = srcDir.resolve("f0");
+		assertEveryAttemptCopies("f0", source, dstDir.resolve("f0"), srcDir, dstDir);
+	}
+
+	@Test
+	public void aCopyOfAnAbsoluteNameSentAgainReadsTheSourceOfItsFirstAttempt() throws Exception {
+		final Path srcDir = tempDir.resolve("src");
+		final Path dstDir = tempDir.resolve("dst");
+		final Path source = srcDir.resolve("f0");
+		assertEveryAttemptCopies(
+						source.toString(), source, underOutputPath(dstDir, source.toString()), srcDir, dstDir);
+	}
+
+	@Test
+	public void aCopyRetriedAfterItsSourceAppearsReadsThatSource() throws Exception {
+		final Path srcDir = Files.createDirectories(tempDir.resolve("src"));
+		final Path dstDir = Files.createDirectories(tempDir.resolve("dst"));
+		final byte[] data = sourceBytes(2222, 16);
+		try (var drv = newDriver(false)) {
+			CollectingOpOutput<DataItemImpl> out = new CollectingOpOutput<>();
+			drv.operationResultOutput(out);
+			drv.start();
+			Operation<DataItemImpl> op = newOp(OpType.CREATE, "late", data.length, srcDir.toString(), dstDir.toString());
+			op = attempt(drv, out, op, Operation.Status.FAIL_IO, "source missing");
+			assertFalse(Files.exists(dstDir.resolve("late")));
+			Files.write(srcDir.resolve("late"), data);
+			attempt(drv, out, op, Operation.Status.SUCC, "source present");
+			drv.stop();
+		}
+		assertArrayEquals(data, Files.readAllBytes(dstDir.resolve("late")));
+	}
+
+	@Test
+	public void recycledCopiesWithTheOutputPathUnderTheInputPathAreNotTakenForOwnSourceCopies() throws Exception {
+		final Path srcDir = Files.createDirectories(tempDir.resolve("src"));
+		final Path dstDir = Files.createDirectories(srcDir.resolve("out"));
+		final byte[] data0 = sourceBytes(3000, 17);
+		final byte[] data1 = sourceBytes(1000, 18);
+		Files.write(srcDir.resolve("f0"), data0);
+		Files.write(srcDir.resolve("f1"), data1);
+		final List<String> warnings = captureOwnSourceWarnings(() -> {
+			try (var drv = newDriver(false)) {
+				CollectingOpOutput<DataItemImpl> out = new CollectingOpOutput<>();
+				drv.operationResultOutput(out);
+				drv.start();
+				Operation<DataItemImpl> op0 = newOp(OpType.CREATE, "f0", data0.length, srcDir.toString(), dstDir.toString());
+				Operation<DataItemImpl> op1 = newOp(OpType.CREATE, "f1", data1.length, srcDir.toString(), dstDir.toString());
+				for (int i = 0; i < 3; i++) {
+					op0 = attempt(drv, out, op0, Operation.Status.SUCC, "f0 cycle " + i);
+					op1 = attempt(drv, out, op1, Operation.Status.SUCC, "f1 cycle " + i);
+				}
+				drv.stop();
+			}
+		});
+		assertEquals(List.of(), warnings);
+		assertArrayEquals(data0, Files.readAllBytes(dstDir.resolve("f0")));
+		assertArrayEquals(data1, Files.readAllBytes(dstDir.resolve("f1")));
+		assertArrayEquals(data0, Files.readAllBytes(srcDir.resolve("f0")));
+		assertArrayEquals(data1, Files.readAllBytes(srcDir.resolve("f1")));
+	}
+
+	@Test
+	public void everyRetryWithTheOutputPathUnderTheInputPathLooksForTheFirstSource() throws Exception {
+		final Path srcDir = Files.createDirectories(tempDir.resolve("src"));
+		final Path dstDir = Files.createDirectories(srcDir.resolve("out"));
+		final byte[] data = sourceBytes(1000, 19);
+		try (var drv = newDriver(false)) {
+			CollectingOpOutput<DataItemImpl> out = new CollectingOpOutput<>();
+			drv.operationResultOutput(out);
+			drv.start();
+			Operation<DataItemImpl> op = newOp(OpType.CREATE, "gone", data.length, srcDir.toString(), dstDir.toString());
+			for (int i = 0; i < 3; i++) {
+				op = attempt(drv, out, op, Operation.Status.FAIL_IO, "attempt " + i);
+				assertEquals("gone", op.copySource(), "attempt " + i);
+				assertFalse(Files.exists(dstDir.resolve("gone")), "attempt " + i);
+			}
+			// the source the retries were looking for is <input>/gone
+			Files.write(srcDir.resolve("gone"), data);
+			attempt(drv, out, op, Operation.Status.SUCC, "source present");
+			drv.stop();
+		}
+		assertArrayEquals(data, Files.readAllBytes(dstDir.resolve("gone")));
+	}
+
+	@Test
+	public void anOwnSourceCopySentAgainStillFails() throws Exception {
+		final Path srcDir = Files.createDirectories(tempDir.resolve("src"));
+		final byte[] data = sourceBytes(1000, 20);
+		Files.write(srcDir.resolve("f0"), data);
+		try (var drv = newDriver(false)) {
+			CollectingOpOutput<DataItemImpl> out = new CollectingOpOutput<>();
+			drv.operationResultOutput(out);
+			drv.start();
+			Operation<DataItemImpl> op = newOp(OpType.CREATE, "f0", data.length, srcDir.toString(), srcDir.toString());
+			for (int i = 0; i < 2; i++) {
+				op = attempt(drv, out, op, Operation.Status.RESP_FAIL_CLIENT, "attempt " + i);
+			}
+			drv.stop();
+		}
+		assertArrayEquals(data, Files.readAllBytes(srcDir.resolve("f0")));
+	}
+
 	@FunctionalInterface
 	private interface ThrowingRunnable {
 		void run() throws Exception;

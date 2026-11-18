@@ -102,7 +102,7 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 		if (srcPath == null || srcPath.isEmpty()) {
 			return null;
 		}
-		final Path srcFilePath = FileIoHelper.srcFilePath(op.item().name(), srcPath);
+		final Path srcFilePath = FileIoHelper.copySrcFilePath(op, srcPath);
 		return failedAsOwnSourceCopy(op, srcFilePath) ? null : FileIoHelper.openSrcFile(op, srcFilePath);
 	}
 

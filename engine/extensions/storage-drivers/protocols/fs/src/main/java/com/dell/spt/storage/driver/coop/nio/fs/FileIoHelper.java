@@ -503,6 +503,17 @@ public interface FileIoHelper {
 						: FS.getPath(srcPath, fileItemName);
 	}
 
+	/**
+	 * The source file of a copy, for a non-empty input path. A copy sent again has an item renamed
+	 * under the output path, so it resolves the name its first attempt kept
+	 * ({@link Operation#copySource()}); the first attempt has none yet and uses the item's name.
+	 */
+	static <I extends DataItem, O extends DataOperation<I>> Path copySrcFilePath(
+					final O op, final String srcPath) {
+		final String keptSource = op.copySource();
+		return srcFilePath(keptSource != null ? keptSource : op.item().name(), srcPath);
+	}
+
 	static <I extends DataItem, O extends DataOperation<I>> FileChannel openSrcFile(final O op) {
 		final String srcPath = op.srcPath();
 		if (srcPath == null || srcPath.isEmpty()) {
