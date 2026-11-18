@@ -2262,12 +2262,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 				if (!beginDispatch(op)) {
 					return false;
 				}
-				// Finalization pass: all range-GETs ended. The parent is SUCC unless a range ran
-				// out of retries, then propagate to the metrics/output pipeline. Duration will be
-				// measured from the initial startRequest() to this finishResponse().
-				final String rangeFailure = compositeReadOp.get("mpuFailure");
-				op.status(rangeFailure == null ? Operation.Status.SUCC : Operation.Status.valueOf(rangeFailure));
-				complete(null, op);
+				completeCompositeRead(op);
 				return true;
 			}
 			// Initial pass: no HTTP request needed (range-GETs are stateless, unlike
@@ -2329,6 +2324,26 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	private boolean isCompositeRead(final O op) {
 		return op instanceof CompositeDataOperation && OpType.READ.equals(op.type());
+	}
+
+	@Override
+	protected boolean finishCompositeRead(final O compositeRead) {
+		if (!isCompositeRead(compositeRead)) {
+			return false;
+		}
+		completeCompositeRead(compositeRead);
+		return true;
+	}
+
+	/**
+	 * Finalization of a composite read: all range-GETs ended. The parent is SUCC unless a range ran
+	 * out of retries, then propagate to the metrics/output pipeline. Duration is measured from the
+	 * initial startRequest() to the finishResponse() of this completion.
+	 */
+	private void completeCompositeRead(final O op) {
+		final String rangeFailure = ((CompositeDataOperation<?>) op).get("mpuFailure");
+		op.status(rangeFailure == null ? Operation.Status.SUCC : Operation.Status.valueOf(rangeFailure));
+		complete(null, op);
 	}
 
 	@Override

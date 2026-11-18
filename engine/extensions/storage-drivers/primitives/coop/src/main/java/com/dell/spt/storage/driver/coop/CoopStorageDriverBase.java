@@ -1348,17 +1348,37 @@ public abstract class CoopStorageDriverBase<I extends Item, O extends Operation<
 				// completing the multipart upload. The finalization gate prevents
 				// concurrent part completions from enqueueing the same parent twice.
 				// See timesUploadFinalization(). A composite READ's finalization sends no request, and
-				// its duration runs from its initial pass, so its timing is kept.
+				// its duration runs from its initial pass, so its timing is kept. A driver may end
+				// such a read here, see finishCompositeRead(); otherwise it is queued like the rest.
 				if (OpType.CREATE.equals(parentOp.type()) && timesUploadFinalization()) {
 					parentOp.resetTiming();
 				}
-				enqueueChildOp((O) parentOp, op, "completion operation");
+				if (!OpType.READ.equals(parentOp.type()) || !finishCompositeRead((O) parentOp)) {
+					enqueueChildOp((O) parentOp, op, "completion operation");
+				}
 			}
 		}
 		if (wakeDispatcher) {
 			signalDispatch();
 		}
 		return true;
+	}
+
+	/**
+	 * Ends {@code compositeRead}, whose ranges have all ended, on the thread that completed the last
+	 * of them, if this driver's finalization of a read sends no request. Queued, that finalization
+	 * would wait behind the ranges of every read admitted meanwhile, so the read would be counted
+	 * late, and a stop would refuse it and leave the read unresolved with all its bytes transferred.
+	 *
+	 * <p>The read already owns its dispatched attempt, so an implementation neither takes a permit
+	 * nor crosses {@link #beginDispatch}, which refuses once admission closes. It sets the read's
+	 * status from the failure its ranges recorded, if any, and completes it. It is called at most
+	 * once per attempt, holding neither the read's monitor nor the admission lock.
+	 *
+	 * @return whether the read was ended; by default {@code false}, and the finalization is queued
+	 */
+	protected boolean finishCompositeRead(final O compositeRead) {
+		return false;
 	}
 
 	/**

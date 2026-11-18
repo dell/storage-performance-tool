@@ -1307,6 +1307,12 @@ final class S3NicSetWorkloadTest {
 		return runScenario(endpoints, null, List.of(), stepId, scenario, bytes);
 	}
 
+	/** As above on {@code factory}'s drivers and two NICs; each step context's succeeded bytes go to {@code bytes}. */
+	static Map<String, List<Long>> runScenario(final List<String> endpoints, final NicSetLoopback.Factory factory,
+					final String stepId, final String scenario, final Map<String, Long> bytes) throws Exception {
+		return runScenario(endpoints, factory, nics(2), stepId, scenario, bytes);
+	}
+
 	/**
 	 * As above with no NIC set, and {@code replacement} in place of the loaded extension of its id, as
 	 * the driver type: a test factory that wraps a shipped one, for example.

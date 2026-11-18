@@ -87,8 +87,9 @@ parts are read in parallel. The read sends no request of its own. It counts once
 part ends, with the object's size in bytes and a duration from its start to its last part's end;
 each part also records its own duration sample. A failed part is retried up to 3 times; if it still
 fails, the other parts finish and the read fails with that part's status. The bytes of the parts
-that succeeded still count toward the byte total, of a read that fails and of a read that is
-retried whole. A split read ignores a requested version ID, as on `s3`: each part reads the current
+that succeeded still count toward the byte total, of a read that fails, of a read that is retried
+whole, and of a read left `unresolved` because a time limit stopped it with a part unsent. A split
+read ignores a requested version ID, as on `s3`: each part reads the current
 object. Through 5.17.0 the driver failed such a read without a request.
 
 ### UPDATE
