@@ -16,7 +16,9 @@ sent while copying the objects so these requests may be significantly faster tha
 
 ## 1. Limitations
 
-1. Works only if the input path is different from the output one
+1. Works only if the input path is different from the output one. On the `fs` driver, an output path equal to or above
+   the input path used to truncate the source files and never finish. Now each copy whose destination resolves to its
+   own source file fails with a client error and leaves the source as it was.
 2. Copying the containers (Swift) is not supported
 3. Copying the buckets (S3) is not supported
 4. Copying the objects (Atmos) while using /rest/object interface is not supported yet

@@ -38,6 +38,7 @@ import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 
@@ -51,6 +52,7 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 	private final Map<DataOperation, FileChannel> srcOpenFiles = new ConcurrentHashMap<>();
 	private final Map<String, File> dstParentDirs = new ConcurrentHashMap<>();
 	private final Map<DataOperation, FileChannel> dstOpenFiles = new ConcurrentHashMap<>();
+	private final AtomicBoolean ownSourceCopyWarned = new AtomicBoolean();
 
 	public FileStorageDriver(
 					final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
@@ -59,13 +61,51 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 		requestAuthTokenFunc = null; // do not use
 	}
 
+	private static boolean nameIsDstFile(final String fileItemName, final String dstPath) {
+		return dstPath == null || dstPath.isEmpty() || ItemNamePaths.startsWithPath(fileItemName, dstPath);
+	}
+
+	/**
+	 * Fails a copy whose destination is its own source file, which opening the destination would
+	 * truncate. Failed as a client error, which {@code load.op.retry} does not retry. Compares the
+	 * paths as text after normalising them, so a destination that reaches its source through a
+	 * symbolic or hard link is not detected.
+	 */
+	private <F extends DataItem, D extends DataOperation<F>> boolean failedAsOwnSourceCopy(
+					final D op, final Path srcFilePath) {
+		final var fileItemName = op.item().name();
+		final var dstPath = op.dstPath();
+		final Path dstFilePath = nameIsDstFile(fileItemName, dstPath)
+						? FsConstants.FS.getPath(fileItemName)
+						: FsConstants.FS.getPath(dstPath, fileItemName);
+		final Path ownSource = srcFilePath.toAbsolutePath().normalize();
+		if (!ownSource.equals(dstFilePath.toAbsolutePath().normalize())) {
+			return false;
+		}
+		op.status(Operation.Status.RESP_FAIL_CLIENT);
+		if (ownSourceCopyWarned.compareAndSet(false, true)) {
+			Loggers.ERR.warn(
+							"The copy destination \"{}\" is its own source: such copies fail and the file is left as it is",
+							ownSource);
+		}
+		Loggers.MSG.debug("{}: the copy destination \"{}\" is its own source", fileItemName, ownSource);
+		return true;
+	}
+
 	private <F extends DataItem, D extends DataOperation<F>> FileChannel openDstFile(final D dataOp) {
 		final var fileItemName = dataOp.item().name();
 		final var opType = dataOp.type();
 		final var dstPath = dataOp.dstPath();
 		final Path itemPath;
 		try {
-			if (dstPath == null || dstPath.isEmpty() || ItemNamePaths.startsWithPath(fileItemName, dstPath)) {
+			if (OpType.CREATE.equals(opType)) {
+				final var srcPath = dataOp.srcPath();
+				if (srcPath != null && !srcPath.isEmpty()
+								&& failedAsOwnSourceCopy(dataOp, FileIoHelper.srcFilePath(fileItemName, srcPath))) {
+					return null;
+				}
+			}
+			if (nameIsDstFile(fileItemName, dstPath)) {
 				itemPath = FsConstants.FS.getPath(fileItemName);
 			} else {
 				dstParentDirs.computeIfAbsent(dstPath, DirIoHelper::createParentDir);
@@ -178,10 +218,10 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 
 			case CREATE:
 				dstChannel = dstOpenFiles.computeIfAbsent(op, this::openDstFile);
-				srcChannel = srcOpenFiles.computeIfAbsent(op, FileIoHelper::openSrcFile);
 				if (dstChannel == null) {
 					break;
 				}
+				srcChannel = srcOpenFiles.computeIfAbsent(op, FileIoHelper::openSrcFile);
 				if (srcChannel == null) {
 					if (op.status().equals(Operation.Status.FAIL_IO)) {
 						break;

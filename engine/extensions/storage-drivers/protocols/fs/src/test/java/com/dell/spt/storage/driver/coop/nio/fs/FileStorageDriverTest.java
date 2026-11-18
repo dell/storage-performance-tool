@@ -7,9 +7,16 @@ import com.dell.spt.base.item.DataItemFactoryImpl;
 import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.OperationRetryPolicy;
 import com.dell.spt.base.item.op.data.DataOperationImpl;
+import com.dell.spt.base.logging.Loggers;
 import com.github.akurilov.confuse.Config;
 import com.github.akurilov.commons.system.SizeInBytes;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -17,7 +24,10 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -225,6 +235,157 @@ public class FileStorageDriverTest {
 		final Path srcAbs = srcDir.toAbsolutePath();
 		assertArrayEquals(dataA, Files.readAllBytes(underOutputPath(dstDir, srcAbs.resolve("a").toString())));
 		assertArrayEquals(dataB, Files.readAllBytes(underOutputPath(dstDir, srcAbs.resolve("b").toString())));
+	}
+
+	/** Runs one copy to its end and returns the completed operation. */
+	private Operation<DataItemImpl> copyOnce(final String name, final long size, final String srcPath,
+					final String dstPath) throws Exception {
+		try (var drv = newDriver(false)) {
+			CollectingOpOutput<DataItemImpl> out = new CollectingOpOutput<>();
+			drv.operationResultOutput(out);
+			drv.start();
+			assertTrue(drv.put(newOp(OpType.CREATE, name, size, srcPath, dstPath)));
+			Operation<DataItemImpl> res = out.await(5000);
+			assertNotNull(res, "no completed copy of " + name);
+			drv.stop();
+			return res;
+		}
+	}
+
+	private void assertCopyFailsAsOwnSource(final Path source, final String name, final String srcPath,
+					final String dstPath) throws Exception {
+		final byte[] data = sourceBytes(3000, 5);
+		Files.createDirectories(source.getParent());
+		Files.write(source, data);
+		final Operation<DataItemImpl> res = copyOnce(name, data.length, srcPath, dstPath);
+		assertEquals(Operation.Status.RESP_FAIL_CLIENT, res.status(), srcPath + " to " + dstPath);
+		assertFalse(OperationRetryPolicy.isRetryableStatus(res.status()), "load.op.retry must attempt it once");
+		assertArrayEquals(data, Files.readAllBytes(source), "the source must stay as it was");
+	}
+
+	@Test
+	public void aCopyOfAListedItemOntoItselfFailsAndKeepsTheSource() throws Exception {
+		final Path srcDir = tempDir.resolve("src");
+		final Path source = srcDir.resolve("f0");
+		// equal paths, then an output path above the input path
+		assertCopyFailsAsOwnSource(source, source.toString(), srcDir.toString(), srcDir.toString());
+		assertCopyFailsAsOwnSource(source, source.toString(), srcDir.toString(), tempDir.toString());
+	}
+
+	@Test
+	public void aCopyOfAnItemNamedUnderBothPathsFailsAndKeepsTheSource() throws Exception {
+		final Path srcDir = tempDir.resolve("src");
+		final Path dstDir = srcDir.resolve("out");
+		final Path source = dstDir.resolve("f0");
+		assertCopyFailsAsOwnSource(source, source.toString(), srcDir.toString(), dstDir.toString());
+	}
+
+	@Test
+	public void aCopyOfARelativeNameOntoItselfFailsAndKeepsTheSource() throws Exception {
+		final Path srcDir = tempDir.resolve("src");
+		final Path source = srcDir.resolve("f0");
+		assertCopyFailsAsOwnSource(source, "f0", srcDir.toString(), srcDir.toString());
+		assertCopyFailsAsOwnSource(source, "f0", srcDir.toString(), tempDir + "/./src");
+	}
+
+	@Test
+	public void anOutputPathThatOnlyLooksLikeTheInputPathStillCopies() throws Exception {
+		final Path srcDir = tempDir.resolve("pp");
+		final Path source = srcDir.resolve("f0");
+		final byte[] data = sourceBytes(3000, 6);
+		Files.createDirectories(srcDir);
+		Files.write(source, data);
+		// a sibling sharing a string prefix, then the input's parent written with ".."
+		for (final String dstPath : new String[]{tempDir + "/ppx", srcDir + "/.."
+		}) {
+			final Operation<DataItemImpl> res = copyOnce(source.toString(), data.length, srcDir.toString(), dstPath);
+			assertEquals(Operation.Status.SUCC, res.status(), dstPath);
+			assertArrayEquals(data, Files.readAllBytes(Path.of(dstPath, source.toString())), dstPath);
+			assertArrayEquals(data, Files.readAllBytes(source), dstPath);
+		}
+	}
+
+	@Test
+	public void ownSourceCopiesWarnOncePerDriver() throws Exception {
+		final Path srcDir = Files.createDirectories(tempDir.resolve("src"));
+		Files.write(srcDir.resolve("f0"), sourceBytes(100, 7));
+		Files.write(srcDir.resolve("f1"), sourceBytes(100, 8));
+		final List<String> warnings = captureOwnSourceWarnings(() -> {
+			try (var drv = newDriver(false)) {
+				CollectingOpOutput<DataItemImpl> out = new CollectingOpOutput<>();
+				drv.operationResultOutput(out);
+				drv.start();
+				for (final String name : new String[]{"f0", "f1"
+				}) {
+					assertTrue(drv.put(newOp(OpType.CREATE, name, 100, srcDir.toString(), srcDir.toString())));
+					Operation<DataItemImpl> res = out.await(5000);
+					assertNotNull(res, name);
+					assertEquals(Operation.Status.RESP_FAIL_CLIENT, res.status(), name);
+				}
+				drv.stop();
+			}
+		});
+		assertEquals(1, warnings.size(), warnings.toString());
+		assertTrue(warnings.get(0).contains(srcDir.resolve("f0").toString()), warnings.get(0));
+	}
+
+	@FunctionalInterface
+	private interface ThrowingRunnable {
+		void run() throws Exception;
+	}
+
+	/**
+	 * Runs {@code body} and returns the own-source warnings logged meanwhile. Engine loggers may be
+	 * asynchronous, so a marker logged before and after bounds what the body logged.
+	 */
+	private static List<String> captureOwnSourceWarnings(final ThrowingRunnable body) throws Exception {
+		final var appender = new OwnSourceWarningAppender();
+		appender.start();
+		final var logger = LoggerContext.getContext(false).getLogger(Loggers.ERR.getName());
+		logger.addAppender(appender);
+		try {
+			Loggers.ERR.warn(appender.startMarker);
+			awaitTrue(() -> appender.armed, "the start marker was not logged");
+			body.run();
+			Loggers.ERR.warn(appender.endMarker);
+			awaitTrue(() -> appender.drained, "the end marker was not logged");
+			return List.copyOf(appender.messages);
+		} finally {
+			logger.removeAppender(appender);
+			appender.stop();
+		}
+	}
+
+	private static void awaitTrue(final BooleanSupplier condition, final String message) throws Exception {
+		final long deadline = System.nanoTime() + 5_000_000_000L;
+		while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
+			Thread.sleep(10);
+		}
+		assertTrue(condition.getAsBoolean(), message);
+	}
+
+	private static final class OwnSourceWarningAppender extends AbstractAppender {
+		final List<String> messages = Collections.synchronizedList(new ArrayList<>());
+		final String startMarker = "FileStorageDriverTest start " + System.nanoTime();
+		final String endMarker = "FileStorageDriverTest end " + System.nanoTime();
+		volatile boolean armed;
+		volatile boolean drained;
+
+		OwnSourceWarningAppender() {
+			super("testOwnSourceWarning", null, null, true, Property.EMPTY_ARRAY);
+		}
+
+		@Override
+		public void append(final LogEvent event) {
+			final String message = event.getMessage().getFormattedMessage();
+			if (message.equals(startMarker)) {
+				armed = true;
+			} else if (message.equals(endMarker)) {
+				drained = true;
+			} else if (armed && !drained && Level.WARN.equals(event.getLevel()) && message.contains("its own source")) {
+				messages.add(message);
+			}
+		}
 	}
 
 	@Test

@@ -488,15 +488,19 @@ public interface FileIoHelper {
 		return countBytesDone >= fileSize;
 	}
 
+	/** The source file of an item: its name alone when the name already holds the input path. */
+	static Path srcFilePath(final String fileItemName, final String srcPath) {
+		return ItemNamePaths.startsWithPath(fileItemName, srcPath)
+						? FS.getPath(fileItemName)
+						: FS.getPath(srcPath, fileItemName);
+	}
+
 	static <I extends DataItem, O extends DataOperation<I>> FileChannel openSrcFile(final O op) {
 		final String srcPath = op.srcPath();
 		if (srcPath == null || srcPath.isEmpty()) {
 			return null;
 		}
-		final String fileItemName = op.item().name();
-		final Path srcFilePath = ItemNamePaths.startsWithPath(fileItemName, srcPath)
-						? FS.getPath(fileItemName)
-						: FS.getPath(srcPath, fileItemName);
+		final Path srcFilePath = srcFilePath(op.item().name(), srcPath);
 		try {
 			return FS_PROVIDER.newFileChannel(srcFilePath, READ_OPEN_OPT);
 		} catch (final IOException e) {
