@@ -72,7 +72,8 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 	 * Fails a copy whose destination is its own source file, which opening the destination would
 	 * truncate. Failed as a client error, which {@code load.op.retry} does not retry. Compares the
 	 * paths as text after normalising them, so a destination that reaches its source through a
-	 * symbolic or hard link is not detected.
+	 * symbolic or hard link is not detected: that copy still truncates the source, and then fails
+	 * at the end of the emptied file instead of running forever.
 	 */
 	private <F extends DataItem, D extends DataOperation<F>> boolean failedAsOwnSourceCopy(
 					final D op, final Path srcFilePath) {

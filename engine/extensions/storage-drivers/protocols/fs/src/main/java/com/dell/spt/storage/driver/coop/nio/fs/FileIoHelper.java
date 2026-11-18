@@ -45,9 +45,17 @@ public interface FileIoHelper {
 		long countBytesDone = op.countBytesDone();
 		final long contentSize = fileItem.size();
 		if (countBytesDone < contentSize && Operation.Status.ACTIVE.equals(op.status())) {
-			countBytesDone += srcChannel.transferTo(
-							countBytesDone, contentSize - countBytesDone, dstChannel);
+			final long n = srcChannel.transferTo(countBytesDone, contentSize - countBytesDone, dstChannel);
+			countBytesDone += n;
 			op.countBytesDone(countBytesDone);
+			// Only a pass that ended short of the item's size gets here. At the end of the source
+			// transferTo returns 0, never -1, so without this test the copy would be invoked forever.
+			if (countBytesDone < contentSize && n == 0 && srcChannel.size() <= countBytesDone) {
+				op.status(Operation.Status.RESP_FAIL_CORRUPT);
+				Loggers.MSG.debug(
+								"{}: content size mismatch, expected: {}, actual: {}", fileItem.name(), contentSize,
+								countBytesDone);
+			}
 		}
 		return countBytesDone >= contentSize;
 	}

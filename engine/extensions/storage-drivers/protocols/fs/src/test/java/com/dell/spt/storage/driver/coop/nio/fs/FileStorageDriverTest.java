@@ -26,6 +26,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.function.BooleanSupplier;
@@ -415,6 +416,41 @@ public class FileStorageDriverTest {
 		try (var entries = Files.list(dstDir)) {
 			assertEquals(0, entries.count(), "nothing may be added under the output path");
 		}
+	}
+
+	@Test
+	public void aCopyOfASourceShorterThanItsItemFailsAsCorrupt() throws Exception {
+		final Path srcDir = Files.createDirectories(tempDir.resolve("src"));
+		final Path dstDir = Files.createDirectories(tempDir.resolve("dst"));
+		final byte[] data = sourceBytes(3000, 12);
+		Files.write(srcDir.resolve("f0"), data);
+		final Operation<DataItemImpl> res = copyOnce("f0", 9000, srcDir.toString(), dstDir.toString());
+		assertEquals(Operation.Status.RESP_FAIL_CORRUPT, res.status());
+		assertFalse(OperationRetryPolicy.isRetryableStatus(res.status()), "load.op.retry must attempt it once");
+		assertEquals(3000, ((DataOperationImpl<DataItemImpl>) res).countBytesDone());
+		assertEquals(9000, res.item().size());
+		assertArrayEquals(data, Files.readAllBytes(dstDir.resolve("f0")));
+	}
+
+	@Test
+	public void aCopyOfASourceLongerThanItsItemCopiesTheItemsSize() throws Exception {
+		final Path srcDir = Files.createDirectories(tempDir.resolve("src"));
+		final Path dstDir = Files.createDirectories(tempDir.resolve("dst"));
+		final byte[] data = sourceBytes(3000, 13);
+		Files.write(srcDir.resolve("f0"), data);
+		final Operation<DataItemImpl> res = copyOnce("f0", 1000, srcDir.toString(), dstDir.toString());
+		assertEquals(Operation.Status.SUCC, res.status());
+		assertArrayEquals(Arrays.copyOf(data, 1000), Files.readAllBytes(dstDir.resolve("f0")));
+	}
+
+	@Test
+	public void aCopyOntoItsSourceThroughALinkFailsInsteadOfRunningForever() throws Exception {
+		final Path srcDir = Files.createDirectories(tempDir.resolve("src"));
+		final Path link = Files.createSymbolicLink(tempDir.resolve("link"), srcDir);
+		Files.write(srcDir.resolve("f0"), sourceBytes(3000, 14));
+		// the guard compares paths and does not see the link, so this source is lost (documented)
+		final Operation<DataItemImpl> res = copyOnce("f0", 3000, srcDir.toString(), link.toString());
+		assertEquals(Operation.Status.RESP_FAIL_CORRUPT, res.status());
 	}
 
 	@FunctionalInterface
