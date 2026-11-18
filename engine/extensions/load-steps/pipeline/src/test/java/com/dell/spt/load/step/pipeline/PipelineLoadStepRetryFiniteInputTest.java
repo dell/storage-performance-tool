@@ -54,7 +54,7 @@ import org.junit.jupiter.api.io.TempDir;
 class PipelineLoadStepRetryFiniteInputTest {
 
 	private static final int ITEMS = 20;
-	private static final long RESULT_DELAY_MILLIS = 300;
+	private static final long RESULT_DELAY_MILLIS = 600;
 	private static final String DRIVER_ID = "delayed-results-mock";
 
 	private final ScheduledExecutorService results = Executors.newSingleThreadScheduledExecutor(
