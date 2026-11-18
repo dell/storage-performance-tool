@@ -513,6 +513,15 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 					// will pick this up and stop the generator on the very next check
 					// below, so a yield here would rarely even execute - only bothering
 					// for the retry case keeps the common path branch-free.
+					// A finite input whose end is read after the last handoff has no later
+					// handoff to report it, and isFinished() stays false here, so scheduling
+					// ends on this pass. The generator keeps running for retries.
+					if (!recycleFlag
+									&& itemInputFinishFlag
+									&& schedulingExhaustion.get() == null
+									&& finiteSchedulingExhausted()) {
+						recordSchedulingExhaustion();
+					}
 					yieldThread();
 				}
 			} else if (!retryFlag) { // operations count limit is reached
