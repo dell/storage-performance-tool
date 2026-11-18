@@ -20,7 +20,8 @@ sent while copying the objects so these requests may be significantly faster tha
    the input path used to truncate the source files and never finish. Now each copy whose destination resolves to its
    own source file fails with a client error and leaves the source as it was. A destination that reaches its source
    through a symbolic or hard link is not detected: the source is still truncated, and the copy now fails instead of
-   running forever.
+   running forever. Because those copies now end, the step goes on to the next item, so every source reached that way
+   is emptied, not only one per concurrency slot.
 2. Copying the containers (Swift) is not supported
 3. Copying the buckets (S3) is not supported
 4. Copying the objects (Atmos) while using /rest/object interface is not supported yet

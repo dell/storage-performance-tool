@@ -39,7 +39,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.Function;
 
 import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 
@@ -54,8 +53,6 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 	private final Map<String, File> dstParentDirs = new ConcurrentHashMap<>();
 	private final Map<DataOperation, FileChannel> dstOpenFiles = new ConcurrentHashMap<>();
 	private final AtomicBoolean ownSourceCopyWarned = new AtomicBoolean();
-	// Held in a field: every pass of a plain CREATE looks it up, and must not allocate a new one.
-	private final Function<DataOperation, FileChannel> copySrcFileOpener = this::openCopySrcFile;
 
 	public FileStorageDriver(
 					final String stepId, final DataInput dataInput, final Config storageConfig, final boolean verifyFlag,
@@ -76,12 +73,7 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 	 * at the end of the emptied file instead of running forever.
 	 */
 	private <F extends DataItem, D extends DataOperation<F>> boolean failedAsOwnSourceCopy(
-					final D op, final Path srcFilePath) {
-		final var fileItemName = op.item().name();
-		final var dstPath = op.dstPath();
-		final Path dstFilePath = nameIsDstFile(fileItemName, dstPath)
-						? FsConstants.FS.getPath(fileItemName)
-						: FsConstants.FS.getPath(dstPath, fileItemName);
+					final D op, final Path srcFilePath, final Path dstFilePath) {
 		final Path ownSource = srcFilePath.toAbsolutePath().normalize();
 		if (!ownSource.equals(dstFilePath.toAbsolutePath().normalize())) {
 			return false;
@@ -92,32 +84,32 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 							"The copy destination \"{}\" is its own source: such copies fail and the file is left as it is",
 							ownSource);
 		}
-		Loggers.MSG.debug("{}: the copy destination \"{}\" is its own source", fileItemName, ownSource);
+		Loggers.MSG.debug("{}: the copy destination \"{}\" is its own source", op.item().name(), ownSource);
 		return true;
 	}
 
-	/** The source of a CREATE: null for a plain CREATE, or for a copy that failed here. */
-	private <F extends DataItem, D extends DataOperation<F>> FileChannel openCopySrcFile(final D op) {
-		final var srcPath = op.srcPath();
-		if (srcPath == null || srcPath.isEmpty()) {
-			return null;
-		}
-		final Path srcFilePath = FileIoHelper.copySrcFilePath(op, srcPath);
-		return failedAsOwnSourceCopy(op, srcFilePath) ? null : FileIoHelper.openSrcFile(op, srcFilePath);
+	private static Path dstFilePath(final String fileItemName, final String dstPath) {
+		return nameIsDstFile(fileItemName, dstPath)
+						? FsConstants.FS.getPath(fileItemName)
+						: FsConstants.FS.getPath(dstPath, fileItemName);
 	}
 
 	private <F extends DataItem, D extends DataOperation<F>> FileChannel openDstFile(final D dataOp) {
+		return openDstFile(dataOp, null);
+	}
+
+	/** @param resolvedPath the destination file if the caller has resolved it already, or null */
+	private <F extends DataItem, D extends DataOperation<F>> FileChannel openDstFile(
+					final D dataOp, final Path resolvedPath) {
 		final var fileItemName = dataOp.item().name();
 		final var opType = dataOp.type();
 		final var dstPath = dataOp.dstPath();
 		final Path itemPath;
 		try {
-			if (nameIsDstFile(fileItemName, dstPath)) {
-				itemPath = FsConstants.FS.getPath(fileItemName);
-			} else {
+			if (!nameIsDstFile(fileItemName, dstPath)) {
 				dstParentDirs.computeIfAbsent(dstPath, DirIoHelper::createParentDir);
-				itemPath = FsConstants.FS.getPath(dstPath, fileItemName);
 			}
+			itemPath = resolvedPath != null ? resolvedPath : dstFilePath(fileItemName, dstPath);
 			if (OpType.CREATE.equals(opType)) {
 				try {
 					return FsConstants.FS_PROVIDER.newFileChannel(itemPath, FsConstants.CREATE_OPEN_OPT);
@@ -224,27 +216,40 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 				break;
 
 			case CREATE:
-				// The source first: opening the destination creates or truncates it, so a copy whose
-				// source can't be opened must fail before that.
-				srcChannel = srcOpenFiles.computeIfAbsent(op, copySrcFileOpener);
-				if (srcChannel == null) {
-					final var srcPath = op.srcPath();
-					if (srcPath != null && !srcPath.isEmpty()) {
-						break; // a copy that failed: never fall through to writing generated data
+				final var copySrcPath = op.srcPath();
+				if (copySrcPath == null || copySrcPath.isEmpty()) {
+					dstChannel = dstOpenFiles.computeIfAbsent(op, this::openDstFile);
+					if (dstChannel != null && FileIoHelper.invokeCreate(item, op, dstChannel)) {
+						finishOperation((O) op);
 					}
-				}
-				dstChannel = dstOpenFiles.computeIfAbsent(op, this::openDstFile);
-				if (dstChannel == null) {
 					break;
 				}
-				if (srcChannel == null) {
-					if (FileIoHelper.invokeCreate(item, op, dstChannel)) {
-						finishOperation((O) op);
+				srcChannel = srcOpenFiles.get(op);
+				dstChannel = dstOpenFiles.get(op);
+				if (srcChannel == null || dstChannel == null) {
+					// Both paths are resolved once, here, for the guard and for the opens. The source is
+					// opened first: opening the destination creates or truncates it, so a copy whose source
+					// can't be opened must fail before that.
+					final Path dstFilePath = dstFilePath(item.name(), op.dstPath());
+					if (srcChannel == null) {
+						final Path srcFilePath = FileIoHelper.copySrcFilePath(op, copySrcPath);
+						if (failedAsOwnSourceCopy(op, srcFilePath, dstFilePath)) {
+							break;
+						}
+						srcChannel = FileIoHelper.openSrcFile(op, srcFilePath);
+						if (srcChannel == null) {
+							break;
+						}
+						srcOpenFiles.put(op, srcChannel);
 					}
-				} else { // copy the data from the src channel to the dst channel
-					if (FileIoHelper.invokeCopy(item, op, srcChannel, dstChannel)) {
-						finishOperation((O) op);
+					dstChannel = openDstFile(op, dstFilePath);
+					if (dstChannel == null) {
+						break;
 					}
+					dstOpenFiles.put(op, dstChannel);
+				}
+				if (FileIoHelper.invokeCopy(item, op, srcChannel, dstChannel)) {
+					finishOperation((O) op);
 				}
 				break;
 
