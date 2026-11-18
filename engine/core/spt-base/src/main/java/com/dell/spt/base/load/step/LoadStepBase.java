@@ -14,6 +14,7 @@ import com.dell.spt.base.config.NicSetConfig;
 import com.dell.spt.base.config.RangeReadConfig;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.concurrent.DaemonBase;
+import com.dell.spt.base.concurrent.JvmExit;
 import com.dell.spt.base.buildinfo.EngineBuildInfoPublisher;
 import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
 import com.dell.spt.base.config.ConfigFormat;
@@ -386,6 +387,11 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	@Override
 	protected void doStart() throws IllegalStateException {
 
+		// The shutdown hook ends the running step without stopping the scenario, which reaches its next
+		// step here. Ending as a stop, this step touches neither the target nor a result directory.
+		if (JvmExit.begun()) {
+			throwUnchecked(new InterruptedException(loadStepId() + ": not started, the engine is exiting"));
+		}
 		validateRangeConfiguration();
 		validateNicSetConfiguration();
 		// A configured id is tested on this node before the target is touched, so a refused step leaves
