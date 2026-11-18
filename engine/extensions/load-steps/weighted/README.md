@@ -26,9 +26,8 @@ Internally, the weighted load step contains several
 [load generator](../../../doc/design/architecture/README.md#22-load-generator)s
 (for each configuration element supplied) and single
 [load step context](../../../doc/design/architecture/README.md#23-load-step-context).
-The load step context contains the
-[weight throttle](https://github.com/akurilov/java-commons/blob/master/src/main/java/com/github/akurilov/commons/concurrent/throttle/SequentialWeightsThrottle.java)
-shared among the load generators configured.
+The load step context contains the weight throttle shared among the load
+generators configured.
 
 ## Configuration
 
@@ -67,6 +66,14 @@ var weightedReadConfig = {
 **Notes**
 > * Full example may be found in the `example/scenario/js/types/weighted.js` scenario file.
 > * Weight throttle will never permit the operations if the corresponding weight is 0
+
+### When a sub-load finishes first
+
+A sub-load finishes scheduling when it reaches its count limit or its item
+input runs out. The other sub-loads then carry on to their own limits and
+share the cycle by their weights, so the configured ratio no longer applies
+to the finished sub-load. A retry of one of its operations still runs, outside
+the cycle.
 
 ## Limitations
 

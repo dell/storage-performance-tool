@@ -18,6 +18,8 @@ import com.dell.spt.base.load.step.service.LoadStepManagerServiceImpl;
 import com.dell.spt.base.load.step.service.file.FileManagerServiceImpl;
 import com.dell.spt.base.metrics.MetricsManagerImpl;
 import com.dell.spt.base.metrics.TerminalStepEntry;
+import com.dell.spt.base.metrics.context.DistributedMetricsContext;
+import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.storage.driver.mock.DummyStorageDriverMockExtension;
 import com.dell.spt.base.svc.ServiceUtil;
 import com.github.akurilov.confuse.Config;
@@ -31,6 +33,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.ThreadContext;
 import org.junit.jupiter.api.AfterEach;
@@ -57,8 +60,8 @@ class WeightedLoadStepClientCountSlicesTest {
 	// Longer than any run here may take, so a step's final entries are still kept when it is read.
 	private static final long TERMINAL_RETENTION_MILLIS = TimeUnit.MINUTES.toMillis(10);
 
-	private final MetricsManagerImpl entryMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
-	private final MetricsManagerImpl workerMgr = new MetricsManagerImpl(ServiceTaskExecutor.VT_EXECUTOR);
+	private final ContextRecordingMetrics entryMgr = new ContextRecordingMetrics();
+	private final ContextRecordingMetrics workerMgr = new ContextRecordingMetrics();
 	private String originalRmiHostname;
 	private FileManagerServiceImpl fileService;
 	private LoadStepManagerServiceImpl stepManager;
@@ -191,6 +194,18 @@ class WeightedLoadStepClientCountSlicesTest {
 		assertEquals(List.of(), workerMgr.getTerminalSteps(), "the worker's slice never started");
 	}
 
+	/** Each engine has its own weight cycle, and a finished sub-load must leave each of them. */
+	@Test
+	void aSubLoadThatFinishesFirstLeavesTheOtherToItsCountOnEveryEngine() {
+		client = new WeightedLoadStepClient(config, extensions(), null, entryMgr)
+						.append(Map.of("load", Map.of("op", Map.of("weight", 50, "limit", Map.of("count", 4L)))))
+						.append(Map.of("load", Map.of("op", Map.of("weight", 50, "limit", Map.of("count", 40L)))));
+		assertTimeoutPreemptively(RUN_TIMEOUT, client::run);
+
+		assertEquals(List.of(2L, 20L), entryMgr.successCounts());
+		assertEquals(List.of(2L, 20L), workerMgr.successCounts());
+	}
+
 	@Test
 	void everyContextAndNotTheBaseControlsTheOperations() {
 		final var weighted = new WeightedLoadStepClient(config, extensions(), null, entryMgr);
@@ -209,6 +224,30 @@ class WeightedLoadStepClientCountSlicesTest {
 
 	private static List<Extension> extensions() {
 		return List.of(new WeightedLoadStepExtension(), new DummyStorageDriverMockExtension<>());
+	}
+
+	/** Keeps each local context, since the manager's terminal entries hold one per step. */
+	private static final class ContextRecordingMetrics extends MetricsManagerImpl {
+		private final List<MetricsContext<?>> contexts = new CopyOnWriteArrayList<>();
+
+		ContextRecordingMetrics() {
+			super(ServiceTaskExecutor.VT_EXECUTOR);
+		}
+
+		@Override
+		public void unregister(final MetricsContext metricsCtx) {
+			super.unregister(metricsCtx);
+			if (!(metricsCtx instanceof DistributedMetricsContext)) {
+				contexts.add(metricsCtx);
+			}
+		}
+
+		List<Long> successCounts() {
+			return contexts.stream()
+							.map(context -> context.lastSnapshot().successSnapshot().count())
+							.sorted()
+							.toList();
+		}
 	}
 
 	/** The one entry a metrics manager kept for the step: its fleet's or its node's. */

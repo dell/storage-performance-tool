@@ -95,6 +95,8 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 	private final OperationAssembler<I, O> opAssembler;
 	private final int originIndex;
 	private final Object[] throttles;
+	// The weight cycle this generator shares with others; null outside a weighted step.
+	private final RetiringWeightsThrottle weightCycle;
 	private final Output<O> opOutput;
 	private final Lock inputLock = new ReentrantLock();
 	private final int batchSize;
@@ -265,6 +267,7 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		}
 		this.originIndex = opAssembler.originIndex();
 		this.throttles = throttles.toArray(new Object[]{});
+		this.weightCycle = weightCycle(this.throttles);
 		this.opOutput = opOutput;
 		this.batchSize = batchSize;
 		this.countLimit = countLimit > 0 ? countLimit : Long.MAX_VALUE;
@@ -282,6 +285,15 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		threadLocalOpBuff = ThreadLocal.withInitial(() -> new CircularArrayBuffer<>(batchSize));
 		threadLocalAssemblyBuff = ThreadLocal.withInitial(() -> new ArrayList<>(batchSize));
 		this.items = new ArrayList<>(batchSize); // prepare the items buffer
+	}
+
+	private static RetiringWeightsThrottle weightCycle(final Object[] throttles) {
+		for (final Object throttle : throttles) {
+			if (throttle instanceof RetiringWeightsThrottle cycle) {
+				return cycle;
+			}
+		}
+		return null;
 	}
 
 	@Override
@@ -609,8 +621,15 @@ public class LoadGeneratorImpl<I extends Item, O extends Operation<I>> extends T
 		}
 	}
 
-	/** Runs the listener once, at the first of exhausted input and a reached count limit. */
+	/**
+	 * Leaves the weight cycle, so that the share left unused no longer holds back the other
+	 * generators, and runs the listener once, at the first of exhausted input and a reached count
+	 * limit.
+	 */
 	private void notifySchedulingEnd() {
+		if (weightCycle != null) {
+			weightCycle.retire(originIndex);
+		}
 		final Runnable listener = schedulingExhaustionListener;
 		if (listener != null && schedulingEndNotified.compareAndSet(false, true)) {
 			try {
