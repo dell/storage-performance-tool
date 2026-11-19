@@ -136,9 +136,12 @@ class LoadStepLocalBaseTest {
 						loadStep.deleteObjectLifecycle());
 	}
 
-	/** A pause can use the whole budget before the loop reaches a context that is already done. */
+	/**
+	 * A pause can use the whole budget before the loop reaches a context. The context after the running
+	 * one still has its failure checked, but it is not completed: in a pipeline it may still have input.
+	 */
 	@Test
-	void aDoneContextIsSettledWhenTheTimeRunsOutBeforeTheLoopReachesIt() throws Exception {
+	void aPausedPollChecksTheContextItDidNotReachWithoutCompletingIt() throws Exception {
 		final LoadStepContext slow = mockContext();
 		final LoadStepContext done = mockContext();
 		when(slow.isDone()).thenAnswer(invocation -> {
@@ -153,8 +156,78 @@ class LoadStepLocalBaseTest {
 
 		assertFalse(loadStep.awaitContextsForTest(1, TimeUnit.MILLISECONDS));
 
-		assertEquals(List.of(done), loadStep.doneContexts);
+		assertEquals(List.of(), loadStep.doneContexts);
+		verify(done).checkTerminalFailure();
 		verify(done, never()).await(anyLong(), any(TimeUnit.class));
+	}
+
+	/** A pipeline stage that reached its own limit keeps reading while the stage before it still writes. */
+	@Test
+	void theSweepDoesNotCompleteALaterContextWhileAnEarlierOneRuns() throws Exception {
+		final LoadStepContext writer = mockContext();
+		final LoadStepContext reader = mockContext();
+		when(writer.isDone()).thenReturn(false);
+		when(reader.isDone()).thenReturn(true);
+		final Config config = baseConfig();
+		config.val("load-step-id", "await-keeps-pipeline-order");
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(config, mockMetricsManager(), writer, reader);
+
+		// A budget under 1 ms is spent before the loop looks at any context.
+		assertFalse(loadStep.awaitContextsForTest(1, TimeUnit.NANOSECONDS));
+
+		assertEquals(List.of(), loadStep.doneContexts);
+		verify(writer).isDone();
+		verify(reader, never()).isDone();
+		verify(reader).checkTerminalFailure();
+	}
+
+	@Test
+	void theSweepReportsTheFailureOfAContextAfterARunningOne() throws Exception {
+		final LoadStepContext running = mockContext();
+		final LoadStepContext failed = mockContext();
+		final IntegrityTerminalException failure = new IntegrityTerminalException(
+						IntegrityTerminalException.Category.EXECUTION, "driver failed");
+		when(running.isDone()).thenReturn(false);
+		doThrow(failure).when(failed).checkTerminalFailure();
+		final Config config = baseConfig();
+		config.val("load-step-id", "await-reports-later-failure");
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(config, mockMetricsManager(), running, failed);
+
+		assertSame(failure, assertThrows(
+						IntegrityTerminalException.class,
+						() -> loadStep.awaitContextsForTest(1, TimeUnit.NANOSECONDS)));
+	}
+
+	@Test
+	void theSweepReportsTheFailureOfTheFirstContextItReaches() throws Exception {
+		final LoadStepContext failed = mockContext();
+		final IntegrityTerminalException failure = new IntegrityTerminalException(
+						IntegrityTerminalException.Category.EXECUTION, "generator failed");
+		when(failed.isDone()).thenThrow(failure);
+		final Config config = baseConfig();
+		config.val("load-step-id", "await-reports-first-failure");
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(config, mockMetricsManager(), failed);
+
+		assertSame(failure, assertThrows(
+						IntegrityTerminalException.class,
+						() -> loadStep.awaitContextsForTest(1, TimeUnit.NANOSECONDS)));
+	}
+
+	@Test
+	void theSweepCompletesDoneContextsInOrderAndReportsTheStepDone() throws Exception {
+		final LoadStepContext first = mockContext();
+		final LoadStepContext second = mockContext();
+		when(first.isDone()).thenReturn(true);
+		when(second.isDone()).thenReturn(true);
+		final Config config = baseConfig();
+		config.val("load-step-id", "await-sweep-settles-all");
+		final TestLoadStepLocalBase loadStep = new TestLoadStepLocalBase(config, mockMetricsManager(), first, second);
+
+		assertTrue(loadStep.awaitContextsForTest(1, TimeUnit.NANOSECONDS));
+
+		assertEquals(List.of(first, second), loadStep.doneContexts);
+		verify(first, never()).await(anyLong(), any(TimeUnit.class));
+		verify(second, never()).await(anyLong(), any(TimeUnit.class));
 	}
 
 	@Test

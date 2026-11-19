@@ -575,7 +575,7 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 	}
 
 	@Override
-	public boolean isDone() {
+	public void checkTerminalFailure() {
 		if (rangeRuntime != null && rangeRuntime.failure() != null)
 			throw rangeRuntime.failure();
 		final var generatorFailure = generator.terminalFailure();
@@ -586,6 +586,11 @@ public class LoadStepContextImpl<I extends Item, O extends Operation<I>> extends
 		if (driverFailure != null) {
 			throw driverFailure;
 		}
+	}
+
+	@Override
+	public boolean isDone() {
+		checkTerminalFailure();
 		if (!STARTED.equals(state()) && !SHUTDOWN.equals(state())) {
 			Loggers.MSG.debug("{}: done due to {} state", id, state());
 			return true;
