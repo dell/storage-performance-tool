@@ -24,6 +24,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -86,7 +87,7 @@ class FileStorageDriverCompositeRefusalTest {
 						IllegalConfigurationException.class, () -> builder(stepConfig(opType, "1MB")).build());
 		assertEquals(
 						"The storage driver type \"fs\" does not support composite (multipart) operations, but"
-										+ " item.data.ranges.threshold=1048576 would make composite " + opType.toUpperCase()
+										+ " item.data.ranges.threshold=1048576 would make composite " + opType.toUpperCase(Locale.ROOT)
 										+ " operations; set item.data.ranges.threshold to 0 for this driver",
 						failure.getMessage());
 	}

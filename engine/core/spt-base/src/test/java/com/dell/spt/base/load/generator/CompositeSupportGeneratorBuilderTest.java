@@ -20,6 +20,7 @@ import com.github.akurilov.commons.io.collection.ListInput;
 import com.github.akurilov.confuse.Config;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -42,7 +43,7 @@ class CompositeSupportGeneratorBuilderTest {
 								IllegalConfigurationException.class, () -> builder(config).build(), opType + " " + threshold);
 				assertTrue(failure.getMessage().contains("\"fs\""), failure.getMessage());
 				assertTrue(failure.getMessage().contains("item.data.ranges.threshold=1048576"), failure.getMessage());
-				assertTrue(failure.getMessage().contains("composite " + opType.toUpperCase()), failure.getMessage());
+				assertTrue(failure.getMessage().contains("composite " + opType.toUpperCase(Locale.ROOT)), failure.getMessage());
 			}
 		}
 		verify(driver, never()).put(any(DataOperation.class));

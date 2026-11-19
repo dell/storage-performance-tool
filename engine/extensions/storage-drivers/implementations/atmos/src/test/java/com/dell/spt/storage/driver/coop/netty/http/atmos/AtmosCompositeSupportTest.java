@@ -29,6 +29,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
@@ -93,7 +94,7 @@ class AtmosCompositeSupportTest {
 								IllegalConfigurationException.class, () -> builder(drv, stepConfig(opType, "1MB")).build(), opType);
 				assertEquals(
 								"The storage driver type \"atmos\" does not support composite (multipart) operations, but"
-												+ " item.data.ranges.threshold=1048576 would make composite " + opType.toUpperCase()
+												+ " item.data.ranges.threshold=1048576 would make composite " + opType.toUpperCase(Locale.ROOT)
 												+ " operations; set item.data.ranges.threshold to 0 for this driver",
 								failure.getMessage());
 			}

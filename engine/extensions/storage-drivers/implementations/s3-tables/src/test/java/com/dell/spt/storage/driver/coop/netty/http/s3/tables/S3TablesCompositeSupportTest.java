@@ -29,6 +29,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -83,7 +84,7 @@ class S3TablesCompositeSupportTest {
 								IllegalConfigurationException.class, () -> builder(drv, stepConfig(opType, "1MB")).build(), opType);
 				assertEquals(
 								"The storage driver type \"" + drv.driverType() + "\" does not support composite (multipart) operations,"
-												+ " but item.data.ranges.threshold=1048576 would make composite " + opType.toUpperCase()
+												+ " but item.data.ranges.threshold=1048576 would make composite " + opType.toUpperCase(Locale.ROOT)
 												+ " operations; set item.data.ranges.threshold to 0 for this driver",
 								failure.getMessage());
 			}
