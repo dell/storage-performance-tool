@@ -823,6 +823,12 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	private void addFileClients(
 					final Config config, final List<Config> configSlices, final boolean suppliesItems,
 					final boolean controlsOperations) {
+		// Before the input path is listed into the engines' items files, while it is still a path. A
+		// mixed step keeps the default create type, but its listed items are only the GET and STAT
+		// pool, and its PUTs name new items, so it never copies a listed item.
+		if (suppliesItems && !mixesOperations()) {
+			CopyIntoItsSource.check(loadStepId(), config);
+		}
 		final var loadConfig = config.configVal("load");
 		final var batchSize = loadConfig.intVal("batch-size");
 		final var storageConfig = config.configVal("storage");
