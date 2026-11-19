@@ -20,8 +20,8 @@ sent while copying the objects so these requests may be significantly faster tha
    listed name whenever that name already lies under the output path, so an overlapping output path can make a
    destination equal to its source. The engine checks a constant output path against a listed `--item-input-path`
    when the step starts; it can't check an output path expression, an items file (`--item-input-file`), or a
-   pipeline sub-step after the first, which copies the results of the sub-step before it. A mixed step is not a
-   copy and is not checked: its listed input is only its GET, STAT and DELETE pool, and its PUTs name new objects.
+   pipeline sub-step after the first, which copies the results of the sub-step before it. A mixed step is not
+   checked: its listed input is only its GET and STAT pool, and its PUTs name new objects, never a listed one.
    Target-bucket setup runs before the check, as it always did, so a refused S3 step still sends one `HEAD` for the
    output bucket and creates it if it is missing, and a weighted step lists its base configuration's input path
    once before its contexts are checked; no object is written.

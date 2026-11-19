@@ -710,7 +710,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	private void addFileClients(final Config config, final List<Config> configSlices, final boolean suppliesItems) {
 		// Before the input path is listed into the engines' items files, while it is still a path. A
-		// mixed step keeps the default create type, but its items are only the GET, STAT and DELETE
+		// mixed step keeps the default create type, but its listed items are only the GET and STAT
 		// pool, and its PUTs name new items, so it never copies a listed item.
 		if (suppliesItems && !mixesOperations()) {
 			CopyIntoItsSource.check(loadStepId(), config);

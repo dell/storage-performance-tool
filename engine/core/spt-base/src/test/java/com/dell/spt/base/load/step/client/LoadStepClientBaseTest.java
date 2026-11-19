@@ -163,7 +163,7 @@ class LoadStepClientBaseTest {
 
 	/** The step types that keep {@code create} as the type of a configuration whose input they list. */
 	private enum StepShape {
-		/** Operations mixed by weight, as the mixed step: the input is only the GET, STAT and DELETE pool. */
+		/** Operations mixed by weight, as the mixed step: the input is only the GET and STAT pool. */
 		MIXED,
 		/** Each context runs its own sub-load, as the weighted step; the base is unused. */
 		WEIGHTED,
