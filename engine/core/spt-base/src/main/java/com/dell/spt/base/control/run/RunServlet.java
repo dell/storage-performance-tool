@@ -6,6 +6,7 @@ import static org.eclipse.jetty.http.MimeTypes.Type.APPLICATION_JSON;
 import static org.eclipse.jetty.http.MimeTypes.Type.MULTIPART_FORM_DATA;
 import static org.eclipse.jetty.http.MimeTypes.Type.TEXT_JSON;
 
+import com.dell.spt.base.concurrent.JvmExit;
 import com.dell.spt.base.concurrent.SingleTaskExecutor;
 import com.dell.spt.base.concurrent.SingleTaskExecutorImpl;
 import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
@@ -358,8 +359,9 @@ public class RunServlet extends HttpServlet {
 
 	/**
 	 * Wrapper around a Run that publishes terminal status only after the
-	 * delegate's cleanup has returned: {@code STOPPED} after a requested stop, {@code FAILED} with
-	 * a category and an engine-built message after a scenario failure, else {@code COMPLETED}.
+	 * delegate's cleanup has returned: {@code STOPPED} after a requested stop or once the JVM has begun
+	 * to exit, {@code FAILED} with a category and an engine-built message after a scenario failure,
+	 * else {@code COMPLETED}.
 	 */
 	static final class StatusAwareRun implements Run {
 
@@ -403,10 +405,16 @@ public class RunServlet extends HttpServlet {
 				// A Java error from a call the scenario makes passes the script engine as it is
 				failure = e;
 				throw e;
+			} catch (final Exception e) {
+				// A step refused at JVM exit ends the scenario with this: a stop, not an uncaught failure.
+				if (!(e instanceof InterruptedException && JvmExit.begun())) {
+					throw e;
+				}
 			} finally {
 				try {
-					// A stop's interruption reaches the scenario as a failure, so a requested stop wins.
-					if (stopRequested.get()) {
+					// A stop's interruption reaches the scenario as a failure, so a requested stop wins. The
+					// shutdown hook stops the run with no request, and the scenario may then end normally.
+					if (stopRequested.get() || JvmExit.begun()) {
 						apiStatus.setStopped();
 					} else {
 						if (failure != null) {
