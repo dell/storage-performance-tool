@@ -15,6 +15,7 @@ import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemImpl;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
+import com.dell.spt.base.item.op.OperationImpl;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperation;
 import com.dell.spt.base.item.op.composite.data.CompositeDataOperationImpl;
 import com.dell.spt.base.item.op.data.range.RangeReadPolicy;
@@ -28,7 +29,9 @@ import io.netty.channel.epoll.Epoll;
 import java.io.IOException;
 import java.lang.reflect.Modifier;
 import java.net.ConnectException;
+import java.net.HttpURLConnection;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -39,10 +42,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntPredicate;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.LogEvent;
@@ -437,6 +442,181 @@ final class S3MultipartCleanupWaitTest {
 		assertEquals(1, stub.openUploads());
 	}
 
+	// ---- an upload whose completion or abort could not be queued ----
+
+	/**
+	 * A 1-slot child queue held full by another operation: the upload's completion cannot be queued
+	 * within the enqueue timeout, so the upload is published as a {@code FAIL_TIMEOUT} failure and the
+	 * driver aborts it outside the queue. The abort reaches the target, the upload is recorded {@code
+	 * failed_aborted} once, and the stop has nothing left to wait for. The driver is not started: the
+	 * test crosses dispatch and completes the requests itself, as the coop base's tests do.
+	 */
+	@Test
+	void anUploadWhoseCompletionCannotBeQueuedIsAbortedOutsideTheQueue() throws Exception {
+		final var previous = System.getProperty(ENQUEUE_TIMEOUT_PROPERTY);
+		System.setProperty(ENQUEUE_TIMEOUT_PROPERTY, "100");
+		try {
+			final var driver = unstartedProbe(1);
+			final var key = key("completion-not-queued");
+			final var upload = new CompositeDataOperationImpl<DataItem>(0, OpType.CREATE, new DataItemImpl(key, 7, ITEM_SIZE),
+							null, "/bucket", CREDENTIAL, null, 0, ITEM_SIZE);
+			final var uploadId = initiateOnTheStub(key);
+			upload.put(S3Api.KEY_UPLOAD_ID, uploadId);
+			assertEquals(1, stub.openUploads());
+
+			// The initiation is answered and the only part is queued, then dispatched.
+			assertTrue(driver.operationLifecycle().driverQueued(op(upload)));
+			assertTrue(driver.claimDispatch(op(upload)));
+			upload.status(Operation.Status.SUCC);
+			assertTrue(driver.completed(op(upload)));
+			final var part = upload.subOperations().get(0);
+			assertTrue(driver.childQueue().remove(op(part)), () -> "the part was queued: " + driver.childQueue());
+			assertTrue(driver.claimDispatch(op(part)));
+			// Another operation takes the queue's only slot, so the completion finds no room.
+			assertTrue(driver.childQueue().offer(new OperationImpl<>(0, OpType.CREATE, new DataItemImpl("filler", 0, 1),
+							null, "/bucket", CREDENTIAL)));
+
+			part.status(Operation.Status.SUCC);
+			upload.markSubTaskCompleted();
+			assertTrue(driver.completed(op(part)));
+
+			final var result = awaitFailedUpload(results, key);
+			assertEquals(Operation.Status.FAIL_TIMEOUT, result.status());
+			waitFor(() -> stub.openUploads() == 0, "the target aborted the upload");
+			assertEquals(List.of("failed_aborted"), states(key), () -> lifecycle(key).toString());
+			assertTrue(lifecycle(key).get(0).contains(
+							"completion not queued: timed out enqueueing MPU completion operation after 100 ms"),
+							() -> lifecycle(key).toString());
+			final var aborts = stub.requests().stream().filter(NicSetLoopback::isAbort).toList();
+			assertEquals(1, aborts.size(), () -> "requests: " + stub.requests());
+			assertEquals(uploadId, NicSetLoopback.param(aborts.get(0).query(), "uploadId"));
+			waitFor(() -> driver.pendingMultipartCleanupTasks() == 0, "the abort task ended");
+			assertTrue(stub.objectRequests().stream().noneMatch(S3MultipartCleanupWaitTest::isCompletion),
+							"the completion was not sent");
+		} finally {
+			if (previous == null) {
+				System.clearProperty(ENQUEUE_TIMEOUT_PROPERTY);
+			} else {
+				System.setProperty(ENQUEUE_TIMEOUT_PROPERTY, previous);
+			}
+		}
+	}
+
+	/**
+	 * An upload whose abort could not be queued is aborted outside the queue: its record keeps the
+	 * part's failure and says why the abort was not queued.
+	 */
+	@Test
+	void anUploadWhoseAbortCannotBeQueuedIsAbortedOutsideTheQueue() throws Exception {
+		final var driver = probe(NET_TIMEOUT_MILLIS);
+		final var key = key("abort-not-queued");
+		final var upload = initiatedUpload(key);
+		upload.put("mpuFailure", Operation.Status.FAIL_TIMEOUT.name());
+
+		driver.recordUploadLeftOpen(op(upload), true, "timed out enqueueing MPU abort operation after 500 ms");
+		driver.stop();
+
+		assertEquals(0, driver.pendingMultipartCleanupTasks(), "the stop waited for the abort");
+		assertEquals(0, stub.openUploads(), "the target aborted the upload");
+		assertEquals(List.of("failed_aborted"), states(key), () -> lifecycle(key).toString());
+		assertTrue(lifecycle(key).get(0).contains("multipart part failed: FAIL_TIMEOUT; abort not queued: "
+						+ "timed out enqueueing MPU abort operation after 500 ms"), () -> lifecycle(key).toString());
+		assertEquals(1, stub.requests().stream().filter(NicSetLoopback::isAbort).count(), () -> "requests: " + stub.requests());
+	}
+
+	/** The target refuses the abort: the upload is recorded orphaned, with the reason and the failure. */
+	@Test
+	void anAbortOutsideTheQueueThatTheTargetRefusesRecordsTheUploadOrphaned() throws Exception {
+		stub.failRequest = NicSetLoopback::isAbort;
+		final var driver = probe(NET_TIMEOUT_MILLIS);
+		final var key = key("abort-refused");
+		final var upload = initiatedUpload(key);
+
+		driver.recordUploadLeftOpen(op(upload), false, "timed out enqueueing MPU completion operation after 500 ms");
+		driver.stop();
+
+		assertEquals(List.of("failed_orphaned"), states(key), () -> lifecycle(key).toString());
+		assertTrue(lifecycle(key).get(0).contains("completion not queued: timed out enqueueing MPU completion operation "
+						+ "after 500 ms; abort failed"), () -> lifecycle(key).toString());
+		assertEquals(1, stub.openUploads());
+	}
+
+	/**
+	 * An abort outside the queue still pending when the close's bound runs out is recorded orphaned,
+	 * "pending at close", and the late record of the abort is dropped as a second one.
+	 */
+	@Test
+	void anAbortOutsideTheQueuePendingAtCloseRecordsTheUploadOrphaned() throws Exception {
+		final var driver = probe(0);
+		driver.multipartCleanupStopWaitMillis(0);
+		driver.multipartCleanupCloseCapMillis(300);
+		final var started = new CountDownLatch(1);
+		final var ended = new CountDownLatch(1);
+		driver.uploadAbort = (op, reason) -> {
+			started.countDown();
+			awaitReleased();
+			driver.recordLateUploadAbort(op, reason);
+			ended.countDown();
+		};
+		final var key = key("off-queue-pending");
+		final var upload = initiatedUpload(key);
+
+		driver.recordUploadLeftOpen(op(upload), true, "timed out enqueueing MPU abort operation after 500 ms");
+		assertTrue(started.await(RESULT_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+		driver.close();
+
+		assertEquals(List.of("failed_orphaned"), states(key), () -> lifecycle(key).toString());
+		assertTrue(lifecycle(key).get(0).contains("abort not queued: timed out enqueueing MPU abort operation after 500 ms; "
+						+ "abort pending at close"), () -> lifecycle(key).toString());
+		released.countDown();
+		assertTrue(ended.await(RESULT_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+		Thread.sleep(200);
+		assertEquals(1, lifecycle(key).size(), () -> "the late record was dropped: " + lifecycle(key));
+	}
+
+	/** Once the close has marked the driver closing, the upload is recorded orphaned without an abort. */
+	@Test
+	void anUploadLeftOpenOnceTheDriverIsClosingIsRecordedWithoutAnAbort() throws Exception {
+		final var driver = probe(NET_TIMEOUT_MILLIS);
+		final var key = key("off-queue-closing");
+		final var upload = initiatedUpload(key);
+		final var pendingAfter = new AtomicInteger(-1);
+		driver.afterClosing = () -> {
+			driver.recordUploadLeftOpen(op(upload), false, "timed out enqueueing MPU completion operation after 500 ms");
+			pendingAfter.set(driver.pendingMultipartCleanupTasks());
+		};
+
+		driver.close();
+
+		assertEquals(0, pendingAfter.get(), "nothing left to wait on");
+		assertEquals(List.of("failed_orphaned"), states(key), () -> lifecycle(key).toString());
+		assertTrue(lifecycle(key).get(0).contains("completion not queued: timed out enqueueing MPU completion operation "
+						+ "after 500 ms; abort not sent: the driver is closing"), () -> lifecycle(key).toString());
+		assertTrue(stub.requests().stream().noneMatch(NicSetLoopback::isAbort), () -> "requests: " + stub.requests());
+	}
+
+	/**
+	 * The executor refuses the abort's task: the hook does not throw, nothing is left for the stop to
+	 * wait out, and the upload is recorded orphaned.
+	 */
+	@Test
+	void anAbortTaskTheExecutorRefusesRecordsTheUploadOrphaned() throws Exception {
+		final var driver = probe(NET_TIMEOUT_MILLIS);
+		driver.rejectCleanup = true;
+		final var key = key("off-queue-rejected");
+		final var upload = initiatedUpload(key);
+
+		driver.recordUploadLeftOpen(op(upload), true, "timed out enqueueing MPU abort operation after 500 ms");
+
+		assertEquals(0, driver.pendingMultipartCleanupTasks(), "nothing left to wait on");
+		assertEquals(List.of("failed_orphaned"), states(key), () -> lifecycle(key).toString());
+		assertTrue(lifecycle(key).get(0).contains("abort not queued: timed out enqueueing MPU abort operation after 500 ms; "
+						+ "abort not sent: RejectedExecutionException"), () -> lifecycle(key).toString());
+		final var closeMillis = closeMillis(driver);
+		assertTrue(closeMillis < SLACK_MILLIS, () -> "close took " + closeMillis + " ms");
+		assertTrue(stub.requests().stream().noneMatch(NicSetLoopback::isAbort), () -> "requests: " + stub.requests());
+	}
+
 	// ---- the stop hook in subclasses ----
 
 	/** On a NIC set, as on the default route, the stop reads a delayed abort before the I/O shuts down. */
@@ -526,7 +706,14 @@ final class S3MultipartCleanupWaitTest {
 			void run(CompositeDataOperation<?> op, Operation.Status status) throws Exception;
 		}
 
+		interface UploadAbort {
+			void run(CompositeDataOperation<?> op, String reason) throws Exception;
+		}
+
 		volatile Abort abort;
+		/** Replaces every abort sent outside the queue, after a failed completion or not. */
+		volatile UploadAbort uploadAbort;
+		volatile boolean rejectCleanup;
 		volatile Runnable afterClosing = () -> {};
 		volatile IntPredicate failLease = lease -> false;
 		volatile Supplier<Throwable> leaseFailure = () -> new IllegalStateException("lease failure");
@@ -553,8 +740,49 @@ final class S3MultipartCleanupWaitTest {
 		}
 
 		@Override
+		void abortUpload(final CompositeDataOperation op, final String reason) {
+			final var override = uploadAbort;
+			if (override == null) {
+				super.abortUpload(op, reason);
+				return;
+			}
+			try {
+				override.run(op, reason);
+			} catch (final RuntimeException e) {
+				throw e;
+			} catch (final Exception e) {
+				throw new IllegalStateException(e);
+			}
+		}
+
+		@Override
+		void executeMultipartCleanup(final Runnable task) {
+			if (rejectCleanup) {
+				throw new RejectedExecutionException("the test refuses the task");
+			}
+			super.executeMultipartCleanup(task);
+		}
+
+		@Override
 		void afterMultipartCleanupClosing() {
 			afterClosing.run();
+		}
+
+		/** Writes the record an abort outside the queue answered after the close's bound would write. */
+		void recordLateUploadAbort(final CompositeDataOperation<?> op, final String reason) {
+			super.abortUpload(op, reason);
+		}
+
+		boolean claimDispatch(final Operation<DataItem> op) {
+			return claimDispatchOwnership(op);
+		}
+
+		boolean completed(final Operation<DataItem> op) {
+			return handleCompleted(op);
+		}
+
+		java.util.concurrent.BlockingQueue<Operation<DataItem>> childQueue() {
+			return childOpQueue;
 		}
 
 		/** Writes the record an abort answered after the close's bound would write. */
@@ -614,14 +842,65 @@ final class S3MultipartCleanupWaitTest {
 	private final String stepId = "multipart-cleanup-" + System.nanoTime();
 
 	private Probe probe(final int netTimeoutMillis) throws Exception {
-		final var root = NicSetLoopback.root(stub.listeners(1), List.of(), 1);
+		final var driver = unstarted(netTimeoutMillis, null);
+		driver.start();
+		return driver;
+	}
+
+	/** A driver that is not started, with a child queue of {@code queueCapacity}. */
+	private Probe unstartedProbe(final int queueCapacity) throws Exception {
+		return unstarted(NET_TIMEOUT_MILLIS, queueCapacity);
+	}
+
+	private Probe unstarted(final int netTimeoutMillis, final Integer queueCapacity) throws Exception {
+		final var endpoints = stub.listeners(1);
+		endpoint = endpoints.get(0);
+		final var root = NicSetLoopback.root(endpoints, List.of(), 1);
 		root.val("storage-net-timeoutMilliSec", netTimeoutMillis);
 		root.val("storage-integrity-mode", "metadata");
+		if (queueCapacity != null) {
+			root.val("storage-driver-limit-queue-input", queueCapacity);
+		}
 		final var driver = new Probe(stepId, root.configVal("storage"));
 		resources.add(driver);
 		driver.operationResultOutput(results);
-		driver.start();
 		return driver;
+	}
+
+	/** The stub listener of the test's driver. */
+	private String endpoint;
+
+	private static final String ENQUEUE_TIMEOUT_PROPERTY = "spt.mpu.child.enqueue.timeout.millis";
+	private static final Pattern STUB_UPLOAD_ID = Pattern.compile("<UploadId>([^<]+)</UploadId>");
+
+	/** Initiates an upload of {@code key} on the stub, as the driver's initiation would, and returns its id. */
+	private String initiateOnTheStub(final String key) throws IOException {
+		final var connection = (HttpURLConnection) URI.create("http://" + endpoint + "/bucket/" + key + "?uploads")
+						.toURL().openConnection();
+		try {
+			connection.setRequestMethod("POST");
+			try (final var in = connection.getInputStream()) {
+				final var matcher = STUB_UPLOAD_ID.matcher(new String(in.readAllBytes(), StandardCharsets.UTF_8));
+				assertTrue(matcher.find(), "the stub answered with an upload id");
+				return matcher.group(1);
+			}
+		} finally {
+			connection.disconnect();
+		}
+	}
+
+	/** An upload of {@code key} the stub has initiated, as the base hands it to the driver's hook. */
+	private CompositeDataOperationImpl<DataItem> initiatedUpload(final String key) throws IOException {
+		final var upload = new CompositeDataOperationImpl<DataItem>(0, OpType.CREATE, new DataItemImpl(key, 7, (long) PARTS * ITEM_SIZE),
+						null, "/bucket", CREDENTIAL, null, 0, ITEM_SIZE);
+		upload.put(S3Api.KEY_UPLOAD_ID, initiateOnTheStub(key));
+		assertTrue(stub.openUploads() > 0);
+		return upload;
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Operation<DataItem> op(final Operation<?> op) {
+		return (Operation<DataItem>) op;
 	}
 
 	private final EndpointSelectionTestSupport.Results results = new EndpointSelectionTestSupport.Results();
