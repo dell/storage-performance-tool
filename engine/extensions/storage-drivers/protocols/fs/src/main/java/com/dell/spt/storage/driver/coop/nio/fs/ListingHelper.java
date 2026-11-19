@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.nio.file.DirectoryIteratorException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.PathMatcher;
 import java.nio.file.Paths;
@@ -52,9 +53,11 @@ public interface ListingHelper {
 
 	/**
 	 * Lists the regular files among the directory entries, following symbolic links: directories, other
-	 * non-regular entries, dangling links, entries removed since the directory was read and entries whose
+	 * non-regular entries, broken links, entries removed since the directory was read and entries whose
 	 * attributes cannot be read are skipped and do not count toward {@code count}. One attribute read per
-	 * examined entry gives both the type and the size.
+	 * examined entry gives both the type and the size. Entries that could not be read are logged as a
+	 * warning. The skipped non-regular entries are logged once per page, except on a page after the
+	 * last item: the page before it may already have counted them.
 	 */
 	static <I extends Item> List<I> listEntries(
 					final ItemFactory<I> itemFactory, final Iterable<Path> entries, final String path,
@@ -71,6 +74,8 @@ public interface ListingHelper {
 			lastPrevItemNameFound = false;
 		}
 		int skipped = 0;
+		int unreadable = 0;
+		IOException firstUnreadable = null;
 
 		for (final Path nextPath : entries) {
 			final File nextFile = new File(nextPath.toString());
@@ -79,10 +84,20 @@ public interface ListingHelper {
 				final BasicFileAttributes attrs;
 				try {
 					attrs = Files.readAttributes(nextPath, BasicFileAttributes.class);
-				} catch (final IOException e) {
-					// NoSuchFileException: removed since the directory was read, or a dangling symbolic link;
-					// others, such as a symbolic link loop, are skipped too, as File.length() let the listing go on
+				} catch (final NoSuchFileException e) {
+					// removed since the directory was read, or a dangling symbolic link
 					skipped++;
+					continue;
+				} catch (final IOException e) {
+					if (Files.isSymbolicLink(nextPath)) {
+						skipped++; // a broken link, such as a loop
+					} else {
+						// skipped, not thrown: File.length() let the listing go on, so one entry must not end it
+						unreadable++;
+						if (firstUnreadable == null) {
+							firstUnreadable = e;
+						}
+					}
 					continue;
 				}
 				if (!attrs.isRegularFile()) {
@@ -101,7 +116,12 @@ public interface ListingHelper {
 			}
 		}
 
-		if (skipped > 0) {
+		if (unreadable > 0) {
+			Loggers.ERR.warn(
+							"Listing \"{}\" skipped entries whose attributes could not be read: {}. The first: {}",
+							path, unreadable, firstUnreadable.toString());
+		}
+		if (skipped > 0 && (lastPrevItem == null || !buff.isEmpty())) {
 			Loggers.MSG.info(
 							"Listing \"{}\" skipped entries that are not regular files, such as subdirectories: {}. "
 											+ "A listing covers the regular files of one directory level",

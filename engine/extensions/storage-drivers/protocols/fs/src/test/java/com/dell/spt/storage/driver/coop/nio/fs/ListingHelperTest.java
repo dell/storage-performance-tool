@@ -14,9 +14,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -320,7 +323,78 @@ public class ListingHelperTest {
 		assertEquals(List.of(expectedLine, expectedLine), lines);
 	}
 
+	@Test
+	public void listCountsSkippedEntriesAfterTheCursorAndNotOnThePageAfterTheLastItem(@TempDir final Path dir)
+					throws Exception {
+		final Path d0 = Files.createDirectory(dir.resolve("d0"));
+		final Path f0 = writeFile(dir, "f0", 1);
+		final Path d1 = Files.createDirectory(dir.resolve("d1"));
+		final Path f1 = writeFile(dir, "f1", 1);
+		final Path d2 = Files.createDirectory(dir.resolve("d2"));
+		final List<Path> entries = List.of(d0, f0, d1, f1, d2);
+		final DataItemFactoryImpl<DataItem> factory = new DataItemFactoryImpl<>();
+
+		final List<String> lines = captureSkipLines(() -> {
+			final List<DataItem> first = ListingHelper.listEntries(factory, entries, dir.toString(), 0, RADIX, null, 1);
+			final List<DataItem> second = ListingHelper.listEntries(
+							factory, entries, dir.toString(), 0, RADIX, first.get(0), 1);
+			// the page after the last item finds only d2, which a listing ending at the directory's end has counted
+			assertTrue(ListingHelper.listEntries(factory, entries, dir.toString(), 0, RADIX, second.get(0), 1).isEmpty());
+			return null;
+		});
+		final String expectedLine = "Listing \"" + dir + "\" skipped entries that are not regular files, such as "
+						+ "subdirectories: 1. A listing covers the regular files of one directory level";
+		assertEquals(List.of(expectedLine, expectedLine), lines);
+	}
+
+	@Test
+	public void listWarnsOfEntriesWhoseAttributesItCannotRead(@TempDir final Path dir) throws Exception {
+		final Path locked = Files.createDirectory(dir.resolve("locked"));
+		final Path hidden = writeFile(locked, "hidden", 1);
+		final Path f0 = writeFile(dir, "f0", 1);
+		Files.setPosixFilePermissions(locked, PosixFilePermissions.fromString("rw-------"));
+		try {
+			Assumptions.assumeTrue(cannotReadAttributes(hidden), "this user can read any file's attributes");
+			final List<DataItem> listed = new ArrayList<>();
+			final List<String> warnings = captureLines(Loggers.ERR.getName(), "Listing \"", () -> {
+				try {
+					final List<String> skipLines = captureSkipLines(() -> {
+						listed.addAll(ListingHelper.listEntries(
+										new DataItemFactoryImpl<>(), List.of(hidden, f0), dir.toString(), 0, RADIX, null, 2));
+						return null;
+					});
+					assertEquals(List.of(), skipLines, "an unreadable entry is not reported as a non-regular one");
+				} catch (final Exception e) {
+					throw new AssertionError(e);
+				}
+				return null;
+			});
+			assertEquals(List.of(f0.toFile().getAbsolutePath()), listed.stream().map(Item::name).toList());
+			assertEquals(1, warnings.size(), warnings::toString);
+			assertTrue(warnings.get(0).startsWith("Listing \"" + dir + "\" skipped entries whose attributes could not be "
+							+ "read: 1. The first: java.nio.file.AccessDeniedException"), warnings.get(0));
+		} finally {
+			Files.setPosixFilePermissions(locked, PosixFilePermissions.fromString("rwx------"));
+		}
+	}
+
+	private static boolean cannotReadAttributes(final Path path) {
+		try {
+			Files.readAttributes(path, BasicFileAttributes.class);
+			return false;
+		} catch (final IOException e) {
+			return true;
+		}
+	}
+
 	private static List<String> captureSkipLines(final Supplier<Void> action) throws Exception {
+		return captureLines(Loggers.MSG.getName(), SKIP_LOG_START, action).stream()
+						.filter(line -> line.contains("not regular files"))
+						.toList();
+	}
+
+	private static List<String> captureLines(final String loggerName, final String start, final Supplier<Void> action)
+					throws Exception {
 		final List<String> lines = Collections.synchronizedList(new ArrayList<>());
 		final String endMarker = "ListingHelperTest end " + System.nanoTime();
 		final AtomicBoolean drained = new AtomicBoolean();
@@ -331,17 +405,17 @@ public class ListingHelperTest {
 				final String message = event.getMessage().getFormattedMessage();
 				if (message.equals(endMarker)) {
 					drained.set(true);
-				} else if (message.startsWith(SKIP_LOG_START)) {
+				} else if (message.startsWith(start)) {
 					lines.add(message);
 				}
 			}
 		};
 		appender.start();
-		final org.apache.logging.log4j.core.Logger logger = LoggerContext.getContext(false).getLogger(Loggers.MSG.getName());
+		final org.apache.logging.log4j.core.Logger logger = LoggerContext.getContext(false).getLogger(loggerName);
 		logger.addAppender(appender);
 		try {
 			action.get();
-			Loggers.MSG.info(endMarker);
+			logger.info(endMarker);
 			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
 			while (!drained.get() && System.nanoTime() < deadline) {
 				Thread.sleep(10);
