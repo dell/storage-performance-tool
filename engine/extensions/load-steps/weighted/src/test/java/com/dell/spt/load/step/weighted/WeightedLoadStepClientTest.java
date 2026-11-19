@@ -334,6 +334,21 @@ class WeightedLoadStepClientTest {
 			return this;
 		}
 
+		/** As a caller of the public constructor may build its contexts: inheriting all of load.step. */
+		@SuppressWarnings("unchecked")
+		InitProbe withoutContextStepSections() {
+			ctxConfigs.replaceAll(ctx -> {
+				final Map<String, Object> tree = Config.deepToMap(ctx);
+				((Map<String, Object>) tree.get("load")).remove("step");
+				try {
+					return new BasicConfig(ctx.pathSep(), ctx.schema(), tree);
+				} catch (final Exception e) {
+					throw new AssertionError(e);
+				}
+			});
+			return this;
+		}
+
 		List<String> contextIds() {
 			return ctxConfigs.stream().map(ctx -> ctx.stringVal("load-step-id")).toList();
 		}
@@ -448,5 +463,15 @@ class WeightedLoadStepClientTest {
 		assertDoesNotThrow(step::init);
 
 		assertEquals(List.of("wctxhand"), step.contextIds());
+	}
+
+	@Test
+	@DisplayName("a context without a load.step section runs under the step's id")
+	void aContextWithoutAStepSectionRunsUnderTheStepId() throws Exception {
+		final InitProbe step = runConfigStep("wbase").withContext(null).withoutContextStepSections();
+
+		assertDoesNotThrow(step::init);
+
+		assertEquals(List.of("wbase"), step.metricsIds());
 	}
 }
