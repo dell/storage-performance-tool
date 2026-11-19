@@ -2643,7 +2643,8 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	/**
 	 * The stop waits here, after any subclass's stop work and before the I/O shuts down, for the aborts
-	 * that follow failed multipart completions, each up to {@link #MULTIPART_CLEANUP_STOP_WAIT_MILLIS}
+	 * sent outside the queue (after a failed multipart completion, or for an upload whose completion or
+	 * abort could not be queued), each up to {@link #MULTIPART_CLEANUP_STOP_WAIT_MILLIS}
 	 * after it was scheduled or after the stop began, whichever is earlier. A
 	 * subclass that overrides this calls {@code super.beforeIoShutdown()} last: its own stop work can
 	 * schedule such an abort.
@@ -2719,7 +2720,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		multipartCleanupCloseCapMillis = millis;
 	}
 
-	/** The aborts after failed completions not yet done. */
+	/** The aborts sent outside the queue not yet done. */
 	final int pendingMultipartCleanupTasks() {
 		return (int) pendingCleanupCount();
 	}
