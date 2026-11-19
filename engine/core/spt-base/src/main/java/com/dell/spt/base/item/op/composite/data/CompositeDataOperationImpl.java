@@ -56,6 +56,13 @@ public class CompositeDataOperationImpl<I extends DataItem> extends DataOperatio
 		requestless = false;
 	}
 
+	/** Also clears the {@link #requestless()} mark, which belongs to the attempt it was set in. */
+	@Override
+	public final void resetAttemptProgress() {
+		super.resetAttemptProgress();
+		requestless = false;
+	}
+
 	@Override
 	public final boolean requestless() {
 		return requestless;

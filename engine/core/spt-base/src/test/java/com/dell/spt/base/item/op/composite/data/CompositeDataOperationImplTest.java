@@ -306,4 +306,27 @@ class CompositeDataOperationImplTest {
 			executor.awaitTermination(5, TimeUnit.SECONDS);
 		}
 	}
+
+	// ---------- requestless mark ----------
+
+	@Test
+	void aRequestlessMarkLastsOnlyForItsAttempt() throws Exception {
+		final var op = newCompositeOp(OpType.READ, 4096, 1024);
+		assertFalse(op.requestless(), "a new read");
+		op.markRequestless();
+		assertTrue(op.requestless());
+		assertTrue(op.result().requestless(), "the attempt's result keeps its mark");
+		op.reset();
+		assertFalse(op.requestless(), "after reset(), which admission's prepare() calls");
+		op.markRequestless();
+		op.resetSubOperations();
+		assertFalse(op.requestless(), "after a whole retry clears the sub-operations");
+		op.markRequestless();
+		op.resetAttemptProgress();
+		assertFalse(op.requestless(), "after an attempt's progress is cleared");
+		op.markRequestless();
+		final var recycled = op.result();
+		recycled.reset();
+		assertFalse(recycled.requestless(), "a recycled copy, once admitted again");
+	}
 }

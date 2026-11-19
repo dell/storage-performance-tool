@@ -45,8 +45,8 @@ public interface CompositeOperation<I extends Item> extends Operation<I> {
 	/**
 	 * Whether the driver ran this attempt as its sub-operations alone: it sent no request and did no I/O
 	 * for the operation's own passes, so its sub-operations' timings are the only request timings it has.
-	 * The driver says so with {@link #markRequestless()}; a reset of the operation, or of its
-	 * sub-operations, clears it.
+	 * The driver says so with {@link #markRequestless()}; a reset of the operation, of its
+	 * sub-operations or of its attempt's progress clears it.
 	 */
 	default boolean requestless() {
 		return false;
