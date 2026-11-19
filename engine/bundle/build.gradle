@@ -1643,6 +1643,7 @@ tasks.register('verifyEngineExitStatusCanary') {
 			}
 			def stepAttempt = 'signal-next-step: starting a step'
 			def stepRunning = 'signal-next-step: step running'
+			// The catches keep a step ended by the signal from failing the scenario before its next start.
 			def signalledScenario = "var step = Load.config({load: {step: {limit: {time: \"30s\"}}}});\n" +
 				"print('${stepAttempt}');\nstep.start();\nprint('${stepRunning}');\n" +
 				"try { step.await(); } catch (e) {}\ntry { step.close(); } catch (e) {}\n"

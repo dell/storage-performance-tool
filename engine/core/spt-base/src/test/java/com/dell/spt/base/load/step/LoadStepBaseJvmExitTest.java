@@ -120,7 +120,7 @@ class LoadStepBaseJvmExitTest {
 
 	@Test
 	void aSliceRefusedOnAWorkerPublishesNothingWhenClosed() throws Exception {
-		// A slice's files go where the logging configuration puts them, not under the test's log home.
+		// A slice's files go where the logging configuration puts them, which depends on the test order.
 		final Path lifecycle = Path.of(FileManager.INSTANCE.logFileName(Loggers.OPERATION_LIFECYCLE.getName(), STEP_ID));
 		final Path eventLoops = lifecycle.resolveSibling(EventLoopsArtifact.FILE_NAME);
 		Files.deleteIfExists(lifecycle);
