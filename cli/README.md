@@ -606,9 +606,9 @@ any such row before anything starts, with exit 1, and explain this when a saved 
 saved. Both checks split rows as the engine's CSV parser does, so a quote inside an object path or a
 bare-CR line end, alone, mixed with LF, after earlier bare-CR rows or ending the file, does not hide
 a saved row. Not judged: a size in non-ASCII digits; a key, size or version ID over 1 MiB (an object
-path cut at 1 MiB is still judged); and, on the first two flags, a saved row that ends 1 MiB or more
-past a row the CLI cannot parse, or, on a named pipe or other stream, one not yet read into the
-CLI's buffer. The first two flags then stop with exit 1 and the CLI's own error for the file; the
+path cut at 1 MiB is still judged); and, on the first two flags, a saved row whose end the CLI does
+not see within 1 MiB after it stops reading a row it cannot parse, or, on a named pipe or other
+stream, one whose line end is not yet in the CLI's buffer. The first two flags then stop with exit 1 and the CLI's own error for the file; the
 other three run. A real object with such a key and version ID would be refused too; no S3 server
 tried issues such an ID.
 

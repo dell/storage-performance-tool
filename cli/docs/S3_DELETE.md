@@ -75,9 +75,10 @@ hexadecimal digits or none (so `0/` counts); either number may carry a sign. It 
 engine's CSV parser does, so a quote inside an object path or a bare-CR line end, alone, mixed with
 LF, after earlier bare-CR rows or ending the file, does not hide such a row. Not judged, so the run
 stops with exit 1 and the CLI's own error for the file instead: a size in non-ASCII digits; a key,
-size or version ID over 1 MiB (an object path cut at 1 MiB is still judged); a saved row that ends 1
-MiB or more past a row the CLI cannot parse; and, on a named pipe or other stream, which the CLI
-reads once and never waits on for this check, a saved row not yet read into its buffer. The refusal
+size or version ID over 1 MiB (an object path cut at 1 MiB is still judged); a saved row whose end
+the CLI does not see within 1 MiB after it stops reading a row it cannot parse; and, on a named pipe
+or other stream, which the CLI reads once and never waits on for this check, a saved row whose line
+end is not yet in its buffer. The refusal
 comes before anything starts, with exit 1 and no request sent. Write each object as
 `<bucket>,<key>,<size>,<version_id or empty>`. A real object with such a key and version ID would be
 refused too; no S3 server tried issues such an ID.

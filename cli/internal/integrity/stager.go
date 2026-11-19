@@ -295,8 +295,10 @@ func stageInputManifestWithPolicyAndOperations(
 
 // stagingRescanTailBytes bounds what a refusal reads from a regular file past the bytes the
 // canonical reader read: enough for the rest of the record that holds the byte the canonical reader
-// refused and for the records after it. A record that reaches the bound, including one whose last
-// byte is the last byte within it, is not judged.
+// refused and for the records after it. The bound counts from the byte after the canonical reader
+// stopped, which can be inside the refused record. A record whose line end is the bound's last byte
+// is judged; one whose end is not seen within the bound, such as a last record without a line end
+// that reaches it, is not.
 const stagingRescanTailBytes = maxCanonicalCSVRecordBytes
 
 // stagingEngineCheck judges the stager's input by the engine's CSV rules where they part from the
@@ -355,7 +357,8 @@ func (check *stagingEngineCheck) refusal(reader *canonicalCSVReader, canonicalRe
 		rest, cut = tail, func() bool { return tail.capped }
 	} else {
 		// Unless the canonical reader met the end, whether the stream goes on is unknown without
-		// another read: treat it as cut.
+		// another read: treat it as cut. So a record is judged here only when its line end is
+		// already buffered: a last record without one is not, even after the writer closed.
 		rest, cut = bytes.NewReader(reader.Buffered()), func() bool { return !reader.done }
 	}
 	verdict := scanAsEngineReads(io.MultiReader(bytes.NewReader(read), rest), engineScan{
