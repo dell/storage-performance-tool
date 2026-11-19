@@ -96,7 +96,9 @@ public abstract class DaemonBase extends AsyncRunnableBase implements Daemon {
 			try {
 				LOG.log(Level.WARNING, "Failed to release a daemon whose construction failed", cause);
 			} catch (final Throwable logFailure) {
-				cause.addSuppressed(logFailure);
+				if (logFailure != cause) {
+					cause.addSuppressed(logFailure);
+				}
 			}
 		}
 	}

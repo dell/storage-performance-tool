@@ -252,6 +252,41 @@ class DaemonBaseTest {
 	}
 
 	@Test
+	void aLogHandlerThatRethrowsTheReleaseFailureDoesNotStopTheRelease() {
+		final List<ReleaseRecordingDaemon> released = new ArrayList<>();
+		final Handler rethrowingHandler = new Handler() {
+			@Override
+			public void publish(final LogRecord record) {
+				if (record.getThrown() instanceof RuntimeException failure) {
+					throw failure;
+				}
+			}
+
+			@Override
+			public void flush() {}
+
+			@Override
+			public void close() {}
+		};
+		final Logger logger = Logger.getLogger(DaemonBase.class.getSimpleName());
+		logger.addHandler(rethrowingHandler);
+		final ReleaseRecordingDaemon earlier;
+		final ReleaseRecordingDaemon throwing;
+		try {
+			try (final var scope = DaemonBase.openConstructionScope()) {
+				earlier = new ReleaseRecordingDaemon(released, false);
+				throwing = new ReleaseRecordingDaemon(released, true);
+			}
+		} finally {
+			logger.removeHandler(rethrowingHandler);
+		}
+
+		assertEquals(List.of(throwing, earlier), released);
+		assertFalse(registered(throwing));
+		assertFalse(registered(earlier));
+	}
+
+	@Test
 	void aDaemonBuiltAfterTheScopeClosedIsNotRecorded() throws IOException {
 		final List<ReleaseRecordingDaemon> released = new ArrayList<>();
 		DaemonBase.openConstructionScope().close();
