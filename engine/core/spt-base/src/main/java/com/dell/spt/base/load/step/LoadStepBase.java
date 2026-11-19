@@ -53,6 +53,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 import org.apache.logging.log4j.Level;
 
 public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runnable {
@@ -65,6 +66,7 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	protected final List<Config> ctxConfigs;
 	protected final MetricsManager metricsMgr;
 	protected final List<MetricsContext<? extends AllMetricsSnapshot>> metricsContexts = new ArrayList<>();
+	private final ReentrantLock metricsUnregisterLock = new ReentrantLock();
 
 	private final AtomicLong timeLimitSec = new AtomicLong(Long.MAX_VALUE);
 	private final boolean integrityModeEnabled;
@@ -550,7 +552,14 @@ public abstract class LoadStepBase extends DaemonBase implements LoadStep, Runna
 	@Override
 	protected void doStop() {
 
-		metricsContexts.forEach(metricsMgr::unregister);
+		// A signal runs this on the shutdown hook while the scenario thread runs it from await: one
+		// caller at a time, so every context's terminal output is written before either goes on to close.
+		metricsUnregisterLock.lock();
+		try {
+			metricsContexts.forEach(metricsMgr::unregister);
+		} finally {
+			metricsUnregisterLock.unlock();
+		}
 
 		// A step fenced before its deferred Load Interval has no elapsed time to account.
 		if (startTimeSec < 0) {
