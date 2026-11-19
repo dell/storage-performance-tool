@@ -150,6 +150,10 @@ func stageInputManifestWithPolicyAndOperations(
 		return "", "", "", fmt.Errorf("read canonical header: %w", err)
 	}
 	if !equalFields(header, canonicalHeader) {
+		if isSavedItemRow(header, 1) {
+			return "", "", "", fmt.Errorf(
+				"items file must use exact header %q: %w", canonicalHeader, savedItemRowError(1))
+		}
 		return "", "", "", fmt.Errorf("items file must use exact header %q", canonicalHeader)
 	}
 
@@ -177,6 +181,11 @@ func stageInputManifestWithPolicyAndOperations(
 		if parseErr != nil {
 			writeErr = parseErr
 			break
+		}
+		if IsSavedItemFields(record.key, record.version) {
+			// Returned directly: the message is for the user, without the staging prefix below.
+			_ = raw.Close()
+			return "", "", "", savedItemRowError(sourceCount + 1)
 		}
 		if policy.expectedBucket != "" && record.bucket != policy.expectedBucket {
 			writeErr = fmt.Errorf(

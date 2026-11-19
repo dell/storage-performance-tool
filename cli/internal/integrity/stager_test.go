@@ -16,6 +16,169 @@ import (
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 )
 
+// stageThroughEveryRoute runs content through the DELETE and read-verify stagers, with TMPDIR
+// private to the subtest so that check can see what each leaves behind.
+func stageThroughEveryRoute(
+	t *testing.T, content string, check func(t *testing.T, tempDir, manifest string, err error),
+) {
+	t.Helper()
+	routes := map[string]func(source string) (dir, manifest string, err error){
+		"delete": func(source string) (string, string, error) {
+			staged, err := StageDeleteInputManifest(source, 324, 0, "")
+			return staged.StagingDir, staged.ManifestPath, err
+		},
+		"read-verify": func(source string) (string, string, error) {
+			dir, manifest, _, err := StageInputManifest(source, 324)
+			return dir, manifest, err
+		},
+	}
+	for name, stage := range routes {
+		t.Run(name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			t.Setenv("TMPDIR", tempDir)
+			source := filepath.Join(t.TempDir(), "input.csv")
+			if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, manifest, err := stage(source)
+			check(t, tempDir, manifest, err)
+		})
+	}
+}
+
+func TestStageRefusesSavedEngineItemRowsUnderCanonicalHeader(t *testing.T) {
+	const header = "bucket,key,size,version_id\n"
+	const path = "/dd2/s0000000/4ahd2fq98vuo"
+	tests := []struct {
+		name   string
+		rows   string
+		record string
+	}{
+		{"layer and mask zero", path + ",2a0f5ed8eab22f7e,1024,0/0\n", "2"},
+		{"layer above zero", path + ",2a0f5ed8eab22f7e,1024,1/0\n", "2"},
+		{"with a mask", path + ",2a0f5ed8eab22f7e,1024,0/0f\n", "2"},
+		{"large layer and mask", path + ",2a0f5ed8eab22f7e,1024,ff/0102030405060708\n", "2"},
+		{"negative offset", path + ",-7f0f5ed8eab22f7e,1024,0/0\n", "2"},
+		{"offset zero", path + ",0,1024,0/0\n", "2"},
+		{"name with a version", path + "~66984584-e910-4588-9d70-2fa1fbce3908,2a0f,1024,0/0\n", "2"},
+		{"name without a leading slash", "s0000000/4ahd2fq98vuo,2a0f,1024,0/0\n", "2"},
+		{"flat name", "4ahd2fq98vuo,2a0f,1024,0/0\n", "2"},
+		{"upper-case digits", path + ",2A0F,1024,F/0A\n", "2"},
+		{"empty mask", path + ",2a0f,1024,0/\n", "2"},
+		{"several engine rows", path + "1,2a0f,1024,0/0\n" + path + "2,2a10,1024,0/0\n", "2"},
+		{"canonical rows then an engine row", "b,s0/a,1024,\nb,s1/b,1024,\n" + path + ",2a0f,1024,0/0\n", "4"},
+		{"an engine row then canonical rows", path + ",2a0f,1024,0/0\nb,s0/a,1024,\n", "2"},
+		{"accepted false positive: plain bucket", "b,2a0f,1024,0/0\n", "2"},
+		{"accepted false positive: hex key and hex/hex version", "b,abcd,16,ab/cd\n", "2"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stageThroughEveryRoute(t, header+test.rows, func(t *testing.T, tempDir, _ string, err error) {
+				if err == nil || err.Error() != savedItemRowMessage(test.record) {
+					t.Fatalf("error = %v, want %q", err, savedItemRowMessage(test.record))
+				}
+				requireEmptyDir(t, tempDir)
+			})
+		})
+	}
+}
+
+func TestStageDeleteChecksSavedItemRowsBeforeBucketAssertion(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "input.csv")
+	if err := os.WriteFile(source, []byte(
+		"bucket,key,size,version_id\n/b/s0/name,2a0f,1024,0/0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := StageDeleteInputManifest(source, 325, 0, "asserted")
+	if err == nil || err.Error() != savedItemRowMessage("2") {
+		t.Fatalf("StageDeleteInputManifest() error = %v, want %q", err, savedItemRowMessage("2"))
+	}
+}
+
+func TestStageHeaderRefusalExplainsSavedItemsFile(t *testing.T) {
+	const headerMessage = `items file must use exact header ["bucket" "key" "size" "version_id"]`
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "saved items file",
+			content: "/b/s0/name,2a0f,1024,0/0\n/b/s0/other,2a10,1024,0/0\n",
+			want:    headerMessage + ": " + savedItemRowMessage("1"),
+		},
+		{name: "canonical rows", content: "b,k,1024,\n", want: headerMessage},
+		{name: "canonical row with hex key", content: "b,2a0f,1024,\n", want: headerMessage},
+		{name: "plain item list", content: "obj-1\n", want: headerMessage},
+		{name: "invalid size", content: "/b/s0/name,2a0f,big,0/0\n", want: headerMessage},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stageThroughEveryRoute(t, test.content, func(t *testing.T, tempDir, _ string, err error) {
+				if err == nil || err.Error() != test.want {
+					t.Fatalf("error = %v, want %q", err, test.want)
+				}
+				requireEmptyDir(t, tempDir)
+			})
+		})
+	}
+}
+
+func TestStageKeepsCanonicalRowsThatResembleSavedItems(t *testing.T) {
+	tests := []struct {
+		name string
+		row  string
+	}{
+		{"plain bucket", "b,k,1024,"},
+		{"bucket with a trailing slash", "b/,k,1024,"},
+		{"bucket with a path", "b/sub,k,1024,"},
+		{"bucket with a leading slash", "/b,k,1024,"},
+		{"hex key, empty version", "b,2a0f5ed8eab22f7e,1024,"},
+		{"hex key, MinIO version", "b,deadbeef,1024,66984584-e910-4588-9d70-2fa1fbce3908"},
+		{"hex key, SeaweedFS version", "b,deadbeef,1024,6716d849a893dc5559d8890a16e47536"},
+		{"hex key, null version", "b,deadbeef,1024,null"},
+		{"null version", "b,k,1024,null"},
+		{"MinIO version", "b,k,1024,66984584-e910-4588-9d70-2fa1fbce3908"},
+		{"SeaweedFS version", "b,k,1024,6716d849a893dc5559d8890a16e47536"},
+		{"LocalStack version", "b,k,1024,AaHu54M4EdA0yylw6terbA3iAG4qC2oY"},
+		{"LocalStack version with dot and underscore", "b,k,1024,Aa.Hu_54M4EdA0yylw6terbA3iAG4qC2o"},
+		{"VersityGW version", "b,k,1024,01M7QAQDDZ0RM492SH55DZPR5X"},
+		{"CloudServer version", "b,k,1024,3938323034393934343036373234393939393939756e646566696e31"},
+		{"AWS example version", "b,k,1024,3sL4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY+MTRCxf3vjVBH40Nr8X8gdRQBpUMLUo"},
+		{"AWS-style version with a slash", "b,deadbeef,1024,3/L4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY+MTRCxf3vjVBH40Nr8X8gdRQBpUMLUo"},
+		{"hex/hex version with a non-hex key", "b,s0000000/abc,1024,0/0"},
+		{"hex/hex version with an ordinary key", "b,k0,1024,ab/cd"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			content := "bucket,key,size,version_id\n" + test.row + "\n"
+			stageThroughEveryRoute(t, content, func(t *testing.T, _, manifest string, err error) {
+				if err != nil {
+					t.Fatalf("error = %v, want the row accepted", err)
+				}
+				staged, readErr := os.ReadFile(manifest)
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if string(staged) != content {
+					t.Fatalf("staged bytes = %q, want %q", staged, content)
+				}
+			})
+		})
+	}
+}
+
+func requireEmptyDir(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("refused staging left %d entries in %s, first %q", len(entries), dir, entries[0].Name())
+	}
+}
+
 func TestStageInputManifestCanonicalizesAndCommits(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "input.csv")
 	content := "bucket,key,size,version_id\r\n" +

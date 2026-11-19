@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dell/storage-performance-tool/cli/internal/integrity"
 )
 
 // Completion reasons, as the engine's ItemSizeSummary names them.
@@ -245,24 +247,12 @@ func itemLineSize(line string) (int64, error) {
 	if len(fields) != 4 {
 		return 0, fmt.Errorf("an item line has four fields: %q", line)
 	}
-	if _, err := strconv.ParseInt(fields[1], 16, 64); err != nil {
-		return 0, err
-	}
 	size, err := strconv.ParseInt(fields[2], 10, 64)
 	if err != nil {
 		return 0, err
 	}
-	layer, mask, found := strings.Cut(fields[3], "/")
-	if !found {
-		return 0, fmt.Errorf("an item line has a layer and a mask: %q", line)
-	}
-	if _, err := strconv.ParseInt(layer, 16, 32); err != nil {
-		return 0, err
-	}
-	for _, digit := range mask {
-		if !strings.ContainsRune("0123456789abcdefABCDEF", digit) {
-			return 0, fmt.Errorf("an item line's mask is hexadecimal: %q", line)
-		}
+	if !integrity.IsSavedItemFields(fields[1], fields[3]) {
+		return 0, fmt.Errorf("an item line has a hex offset and a hex layer/mask: %q", line)
 	}
 	return size, nil
 }

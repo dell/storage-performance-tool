@@ -595,6 +595,14 @@ SHA-256. Canonical selection order is deterministic but can differ from another 
 Duration mode uses the complete frozen selection without recycling and rejects early inventory
 exhaustion. This slice rejects `--prefix` and `--cleanup`; failed staging is removed.
 
+A saved `items.csv` (`--save-items` output) is a different format, and adding the header does not
+convert it. `delete --items-file` and `read-verify --items-file` refuse any row whose `key` is a hex
+number and whose `version_id` is `<hex>/<hex>`, before anything starts, with exit 1. They also
+explain this when a saved file has no header. `read --items-file`, `mixed --read-items-file` and
+`mixed --delete-items-file` still take a saved `items.csv` as it is; given the header, they refuse
+the file when its first data row has that shape. A real object with a hex key and a `<hex>/<hex>`
+version ID would be refused too; no S3 server tried issues such an ID.
+
 Existing-prefix mode is mutually exclusive with `--items-file`. It requires
 `--delete-existing --bucket <exact-bucket> --prefix <exact-prefix>`; the prefix must be nonempty
 unless the command also supplies `--allow-empty-prefix`. A whole-bucket scope is never inferred,
