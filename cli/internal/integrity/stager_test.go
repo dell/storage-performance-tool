@@ -77,6 +77,8 @@ func TestStageRefusesSavedEngineItemRowsUnderCanonicalHeader(t *testing.T) {
 		{"bare-CR line ends", path + ",2a0f,1024,0/0\r" + path + "2,2a10,1024,0/0\r", "2"},
 		{"bare-CR line ends after canonical rows", "b,k,1024,\rb,k2,1024,\r" + path + ",2a0f,1024,0/0\r", "4"},
 		{"accepted false positive: hex key and hex/hex version", "b,abcd,16,ab/cd\n", "2"},
+		{"refused row, then a saved row past the read buffer", `b,dir/k"1,1024,` + "\n" +
+			strings.Repeat("b,k,1024,\n", 1000) + path + ",2a0f,1024,0/0\n", "1003"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -177,7 +179,14 @@ func TestStageKeepsTheCanonicalReadersErrorWhenNoSavedRowIsFound(t *testing.T) {
 		{
 			// The bound cuts "/b/s0/name,2a0f,1024,0/0z" after "0/0": the cut row is not judged.
 			name:    "row cut by the rescan bound",
-			content: rowCutByTheRescanBound(),
+			content: rowCutByTheRescanBound("z\n"),
+			want:    "stage canonical input: parse canonical record 2: unexpected quote in unquoted field",
+		},
+		{
+			// A final saved row whose last byte is the last byte within the bound is not judged
+			// either: the end of the file is not known without another read.
+			name:    "final saved row ending at the rescan bound",
+			content: rowCutByTheRescanBound(""),
 			want:    "stage canonical input: parse canonical record 2: unexpected quote in unquoted field",
 		},
 	}
@@ -325,6 +334,12 @@ func TestStageReadsANamedPipeOnce(t *testing.T) {
 		{"unterminated quote", `"unterminated`, "read canonical header: unterminated quoted field"},
 		{"quote inside a saved object path", "bucket,key,size,version_id\n" + `/b/pre"fix/item,2a0f,1024,0/0` + "\n",
 			savedItemRowMessage("2")},
+		{
+			// The canonical reader met the end of the stream, so the last row is complete.
+			name:    "final saved row without a line end after a bare CR",
+			content: "bucket,key,size,version_id\nb,k,1024,\r/b/s0/one,2a0f,1024,0/0",
+			want:    savedItemRowMessage("3"),
+		},
 	}
 	routes := map[string]func(source string) error{
 		"delete": func(source string) error {
@@ -369,29 +384,173 @@ func TestStageReadsANamedPipeOnce(t *testing.T) {
 	}
 }
 
-// A refusal reads at most stagingRescanTailBytes past what the canonical reader read.
-func TestStagingRefusalReadsABoundedPartOfTheInput(t *testing.T) {
-	input := &endlessRows{prefix: "bucket,key,size,version_id\n" + `b,dir/k"1,1024,` + "\n"}
-	reader := newStagingCSVReader(input)
-	var check stagingEngineCheck
-	if _, err := reader.Read(); err != nil {
-		t.Fatal(err)
+// The engine reads the stager's copy, not the source: a saved row ended by a bare CR is refused
+// whatever the engine made of an earlier row, and refusals give the engine's record number.
+func TestStageJudgesEveryBareCRRecordAndCountsAsTheEngine(t *testing.T) {
+	const header = "bucket,key,size,version_id\n"
+	const saved = "/sample/s0/item,2a0f,1024,0/0"
+	var hundredRows strings.Builder
+	for row := range 100 {
+		fmt.Fprintf(&hundredRows, "b,k%d,1024,\r\r\n", row)
 	}
-	if _, err := reader.Read(); err == nil {
-		t.Fatal("Read() error = nil, want the quote refused")
+	tests := []struct {
+		name   string
+		rows   string
+		record string
+	}{
+		{"bare CR inside an earlier key", "sample,key\rwithcr,1024,\n" + saved + "\r", "4"},
+		{"earlier row ending CR CRLF", "b,k,1024,v1\r\r\n" + saved + "\r\r\n", "4"},
+		{"earlier row ending CR CRLF, then a final bare CR", "b,k,1024,v1\r\r\n" + saved + "\r", "4"},
+		{"100 rows ending CR CRLF, then an LF row", hundredRows.String() + saved + "\n", "202"},
+		{"100 rows ending CR CRLF, then a final bare CR", hundredRows.String() + saved + "\r", "202"},
+		{"earlier row ending CR CRLF, then a refused row", "b,k,1024,v1\r\r\n" + `/b/pre"fix/item,2a0f,1024,0/0` + "\n", "4"},
 	}
-	before := input.read
-	if err := check.refusal(reader, 2); err != nil {
-		t.Fatalf("refusal() = %v, want nil", err)
-	}
-	if extra := input.read - before; extra > maxCanonicalCSVRecordBytes {
-		t.Fatalf("refusal read %d more bytes, want at most %d", extra, maxCanonicalCSVRecordBytes)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stageThroughEveryRoute(t, header+test.rows, func(t *testing.T, tempDir, _ string, err error) {
+				if err == nil || err.Error() != savedItemRowMessage(test.record) {
+					t.Fatalf("error = %v, want %q", err, savedItemRowMessage(test.record))
+				}
+				requireEmptyDir(t, tempDir)
+			})
+		})
 	}
 }
 
-// rowCutByTheRescanBound returns a file whose refusal rescan ends inside a row, at a point where
-// the row's start alone would read as a saved row.
-func rowCutByTheRescanBound() string {
+// The controls for the test above: each earlier row is accepted on its own.
+func TestStageKeepsEarlierBareCRRowsOnTheirOwn(t *testing.T) {
+	tests := []struct {
+		name   string
+		rows   string
+		staged string
+	}{
+		{"bare CR inside a key", "sample,key\rwithcr,1024,\n", "sample,\"key\rwithcr\",1024,\n"},
+		{"row ending CR CRLF", "b,k,1024,v1\r\r\n", "b,k,1024,\"v1\r\"\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			const header = "bucket,key,size,version_id\n"
+			stageThroughEveryRoute(t, header+test.rows, func(t *testing.T, _, manifest string, err error) {
+				if err != nil {
+					t.Fatalf("error = %v, want the row accepted", err)
+				}
+				staged, readErr := os.ReadFile(manifest)
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if string(staged) != header+test.staged {
+					t.Fatalf("staged bytes = %q, want %q", staged, header+test.staged)
+				}
+			})
+		})
+	}
+}
+
+// A refusal on a named pipe or a pipe whose writer stays open does not wait for more input: it
+// judges only what is already buffered, and otherwise keeps the canonical reader's error.
+func TestStageRefusalDoesNotWaitOnAnOpenWriter(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"quote inside a canonical key", "bucket,key,size,version_id\n" + `sample,key"x,1024,` + "\n",
+			"stage canonical input: parse canonical record 2: unexpected quote in unquoted field"},
+		{"buffered saved row with a quote inside its path", "bucket,key,size,version_id\n" + `/b/pre"fix/item,2a0f,1024,0/0` + "\n",
+			savedItemRowMessage("2")},
+	}
+	sources := map[string]func(t *testing.T) (path string, writer *os.File){
+		"named pipe": func(t *testing.T) (string, *os.File) {
+			path := filepath.Join(t.TempDir(), "input.csv")
+			if err := syscall.Mkfifo(path, 0o600); err != nil {
+				t.Skipf("mkfifo: %v", err)
+			}
+			// Read-write, so that the open does not wait for a reader and the pipe stays open.
+			writer, err := os.OpenFile(path, os.O_RDWR, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return path, writer
+		},
+		"pipe": func(t *testing.T) (string, *os.File) {
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = reader.Close() })
+			return fmt.Sprintf("/proc/self/fd/%d", reader.Fd()), writer
+		},
+	}
+	routes := map[string]func(source string) error{
+		"delete": func(source string) error {
+			_, err := StageDeleteInputManifest(source, 327, 0, "")
+			return err
+		},
+		"read-verify": func(source string) error {
+			_, _, _, err := StageInputManifest(source, 327)
+			return err
+		},
+	}
+	for _, test := range tests {
+		for sourceName, makeSource := range sources {
+			for routeName, stage := range routes {
+				t.Run(test.name+"/"+sourceName+"/"+routeName, func(t *testing.T) {
+					tempDir := t.TempDir()
+					t.Setenv("TMPDIR", tempDir)
+					source, writer := makeSource(t)
+					t.Cleanup(func() { _ = writer.Close() })
+					if _, err := writer.WriteString(test.content); err != nil {
+						t.Fatal(err)
+					}
+					done := make(chan error, 1)
+					go func() { done <- stage(source) }()
+					select {
+					case err := <-done:
+						if err == nil || err.Error() != test.want {
+							t.Fatalf("error = %v, want %q", err, test.want)
+						}
+					case <-time.After(10 * time.Second):
+						_ = writer.Close() // lets the stager finish
+						t.Fatal("a refusal waited for a writer that stays open")
+					}
+					requireEmptyDir(t, tempDir)
+				})
+			}
+		}
+	}
+}
+
+// On a regular file, a refusal reads at most stagingRescanTailBytes past what the canonical reader
+// read; on any other input, nothing more.
+func TestStagingRefusalReadsABoundedPartOfTheInput(t *testing.T) {
+	for _, test := range []struct {
+		regularFile bool
+		maxExtra    int
+	}{{true, maxCanonicalCSVRecordBytes}, {false, 0}} {
+		t.Run(fmt.Sprintf("regular file %t", test.regularFile), func(t *testing.T) {
+			input := &endlessRows{prefix: "bucket,key,size,version_id\n" + `b,dir/k"1,1024,` + "\n"}
+			reader := newStagingCSVReader(input)
+			check := stagingEngineCheck{regularFile: test.regularFile}
+			if _, err := reader.Read(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reader.Read(); err == nil {
+				t.Fatal("Read() error = nil, want the quote refused")
+			}
+			before := input.read
+			if err := check.refusal(reader, 2); err != nil {
+				t.Fatalf("refusal() = %v, want nil", err)
+			}
+			if extra := input.read - before; extra > test.maxExtra {
+				t.Fatalf("refusal read %d more bytes, want at most %d", extra, test.maxExtra)
+			}
+		})
+	}
+}
+
+// rowCutByTheRescanBound returns a file whose refusal rescan ends where a saved row's text ends,
+// followed by suffix.
+func rowCutByTheRescanBound(suffix string) string {
 	const refused = "bucket,key,size,version_id\n" + `b,dir/k"`
 	const looksSaved = "/b/s0/name,2a0f,1024,0/0"
 	tail := "1,1024,\n"
@@ -399,7 +558,7 @@ func rowCutByTheRescanBound() string {
 	rows := strings.Repeat("b,k,1024,\n", fill/10-1)
 	last := fill - len(rows) - len("b,k,1,\n")
 	tail += rows + "b,k" + strings.Repeat("0", last) + ",1,\n"
-	return refused + tail + looksSaved + "z\n"
+	return refused + tail + looksSaved + suffix
 }
 
 // endlessRows yields prefix and then canonical rows, up to 64 MiB so that an unbounded read ends,

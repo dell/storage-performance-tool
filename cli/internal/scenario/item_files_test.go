@@ -225,3 +225,37 @@ func TestPrepareExternalItemFilesRefusesSavedItemsOnStagedRoutes(t *testing.T) {
 		})
 	}
 }
+
+// A row the engine splits at a bare CR before a saved row ended the same way: the saved row is
+// still refused on the staged routes, before DELETE's multi-bucket hint.
+func TestPrepareExternalItemFilesRefusesSavedItemsAfterAnEarlierBareCRRow(t *testing.T) {
+	content := canonicalItemsHeader + "b,k,1024,v1\r\r\n/sample/s0000000/item,2a0f,1024,0/0\r\r\n"
+	tests := []struct {
+		name   string
+		params Params
+	}{
+		{"delete at the default batch size", Params{WorkloadType: WorkloadTypeDelete, RunID: 42, DeleteBatchSize: DefaultDeleteBatchSize}},
+		{"delete at batch size 1", Params{WorkloadType: WorkloadTypeDelete, RunID: 42, DeleteBatchSize: 1}},
+		{"read-verify", Params{WorkloadType: WorkloadTypeReadVerify, RunID: 42}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			t.Setenv("TMPDIR", tempDir)
+			params := test.params
+			params.ItemsFile = writeItemFile(t, content)
+			_, err := PrepareExternalItemFiles(params)
+			want := "--items-file: " + strings.Replace(savedItemRowRefusal, "record 2 ", "record 4 ", 1)
+			if err == nil || err.Error() != want {
+				t.Fatalf("PrepareExternalItemFiles() error = %v, want %q", err, want)
+			}
+			entries, readErr := os.ReadDir(tempDir)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("refused run left staging behind: %v", entries)
+			}
+		})
+	}
+}

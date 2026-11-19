@@ -73,12 +73,14 @@ any row whose `key` is a hexadecimal offset that fits a signed 64-bit integer an
 is `<layer>/<mask>`, the layer a hexadecimal number that fits a signed 32-bit integer and the mask
 hexadecimal digits or none (so `0/` counts); either number may carry a sign. It splits rows as the
 engine's CSV parser does, so a quote inside an object path or a bare-CR line end, alone, mixed with
-LF or ending the file, does not hide such a row; a size in non-ASCII digits, a field over 1 MiB, or
-a saved row more than 1 MiB past a row the CLI cannot parse is not judged, and the run stops with
-that row's own error instead. The file is read once, so a named pipe works too. The
-refusal comes before anything starts, with exit 1 and no request sent. Write each object as
-`<bucket>,<key>,<size>,<version_id or empty>`. A real object with such a key and version ID would
-be refused too; no S3 server tried issues such an ID.
+LF, after earlier bare-CR rows or ending the file, does not hide such a row. Not judged, so the run
+stops with exit 1 and the CLI's own error for the file instead: a size in non-ASCII digits; a key,
+size or version ID over 1 MiB (an object path cut at 1 MiB is still judged); a saved row that ends 1
+MiB or more past a row the CLI cannot parse; and, on a named pipe or other stream, which the CLI
+reads once and never waits on for this check, a saved row not yet read into its buffer. The refusal
+comes before anything starts, with exit 1 and no request sent. Write each object as
+`<bucket>,<key>,<size>,<version_id or empty>`. A real object with such a key and version ID would be
+refused too; no S3 server tried issues such an ID.
 
 ```bash
 spt run delete \

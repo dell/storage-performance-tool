@@ -122,7 +122,7 @@ func TestRefuseSavedItemsUnderHeader(t *testing.T) {
 
 func statFile(t *testing.T, path string) os.FileInfo {
 	t.Helper()
-	info, err := os.Stat(path)
+	info, err := StatItemsFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}

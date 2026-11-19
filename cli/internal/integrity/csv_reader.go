@@ -54,6 +54,13 @@ func (reader *canonicalCSVReader) Raw() []byte { return reader.raw }
 // Rest returns the rest of the input, from the first byte after Raw.
 func (reader *canonicalCSVReader) Rest() io.Reader { return reader.input }
 
+// Buffered returns the input already read past Raw and held in the buffer, without reading more.
+// The slice is valid until the next read.
+func (reader *canonicalCSVReader) Buffered() []byte {
+	buffered, _ := reader.input.Peek(reader.input.Buffered())
+	return buffered
+}
+
 // RecordHasBareCR reports whether an unquoted field of the last record read kept a CR that does
 // not start a CRLF. The engine's Commons CSV parser ends a record there.
 func (reader *canonicalCSVReader) RecordHasBareCR() bool { return reader.bareCR }

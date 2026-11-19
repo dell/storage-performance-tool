@@ -97,7 +97,7 @@ func prepareItemFileMount(hostPath, containerName string, mounts []FileMount) (s
 	if err != nil {
 		return "", nil, fmt.Errorf("resolve path %q: %w", hostPath, err)
 	}
-	info, err := os.Stat(absPath)
+	info, err := integrity.StatItemsFile(absPath)
 	if err != nil {
 		return "", nil, fmt.Errorf("stat %q: %w", hostPath, err)
 	}

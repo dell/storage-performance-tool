@@ -47,9 +47,9 @@ func savedItemRowError(recordNumber int) error {
 }
 
 // RefuseSavedItemsUnderHeader returns an error when the engine would read path as a canonical
-// manifest whose first data row is a saved engine items row. info is the caller's os.Stat of path;
-// the check reads only that regular file, opened without waiting for a writer and confirmed to be
-// the same file, and leaves anything else to the engine. It reads the file by the engine's own CSV
+// manifest whose first data row is a saved engine items row. info is the caller's StatItemsFile of
+// path; the check reads only that regular file, opened without waiting for a writer and confirmed
+// to be the same file, and leaves anything else to the engine. It reads the file by the engine's own CSV
 // rules (engineCSVReader), no further than that row, so a row the canonical reader refuses, such
 // as one with a quote inside its object path or with bare-CR line ends, is still judged. A file
 // from which the engine itself takes no object is left to the engine (see scanAsEngineReads).

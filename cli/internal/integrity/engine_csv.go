@@ -281,25 +281,28 @@ type engineScan struct {
 	// cut reports whether the input was cut short of the file's end: a record that runs to the end
 	// of a cut input may be incomplete, so it is not judged.
 	cut func() bool
+	// everyRecord tests every record for a saved row and counts them all, without the engine's
+	// row check: for bytes the stager will publish whatever the engine makes of its source.
+	everyRecord bool
 }
 
 // engineVerdict is a scan's result. records is the number of whole records read. found is true
 // with record the number of the first saved engine items row, underHeader true when it lies under
-// the canonical header. refused is true when the engine takes no object from the file because of
-// what the scan read: a byte sequence that is not UTF-8, a record Commons CSV refuses, or a data
-// record the engine's row check refuses, at or before any saved row.
+// the canonical header. found is false when the scan ends first: at the end of the input, at a
+// limit in the scan, or (except with everyRecord) where the engine would take no object from the
+// file: a byte sequence that is not UTF-8, a record Commons CSV refuses, or a data record the
+// engine's row check refuses.
 type engineVerdict struct {
 	records     int
 	record      int
 	underHeader bool
 	found       bool
-	refused     bool
 }
 
 // scanAsEngineReads reads input as the engine does and finds a saved engine items row. At the
 // file's start, a first record that is not the canonical header is tested as record 1 and ends
 // the scan; otherwise data records are tested in order until one is a saved row, one fails the
-// engine's row check, the input ends, or a limit in scan is reached.
+// engine's row check (unless scan.everyRecord), the input ends, or a limit in scan is reached.
 func scanAsEngineReads(input io.Reader, scan engineScan) engineVerdict {
 	reader := newEngineCSVReader(input)
 	verdict := engineVerdict{underHeader: !scan.fileStart}
@@ -312,7 +315,6 @@ func scanAsEngineReads(input io.Reader, scan engineScan) engineVerdict {
 			return verdict // the record, or the error, may come from the cut: undecided
 		}
 		if err != nil {
-			verdict.refused = true
 			return verdict
 		}
 		verdict.records++
@@ -322,8 +324,7 @@ func scanAsEngineReads(input io.Reader, scan engineScan) engineVerdict {
 			return verdict
 		case scan.fileStart && recordNumber == 1:
 			verdict.underHeader = true
-		case !next.passesEngineRowCheck(recordNumber):
-			verdict.refused = true
+		case !scan.everyRecord && !next.passesEngineRowCheck(recordNumber):
 			return verdict
 		case next.isSavedItemRow(recordNumber):
 			verdict.record, verdict.found = recordNumber, true

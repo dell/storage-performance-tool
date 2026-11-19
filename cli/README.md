@@ -603,12 +603,14 @@ and digits may be upper or lower case. `delete --items-file` and `read-verify --
 any such row before anything starts, with exit 1, and explain this when a saved file has no header.
 `read --items-file`, `mixed --read-items-file` and `mixed --delete-items-file` still take a saved
 `items.csv` as it is; given the header, they refuse a local regular file whose first data row is
-saved. Both checks split rows as the engine's CSV parser does, so a quote inside an object path or
-a bare-CR line end, alone, mixed with LF or ending the file, does not hide a saved row. Not judged:
-a size in non-ASCII digits, a field over 1 MiB and, on the first two flags, a saved row more than
-1 MiB past a row the CLI cannot parse; the first two flags then stop with that row's own error, the
-other three run. A real object with such a key and version ID would be refused
-too; no S3 server tried issues such an ID.
+saved. Both checks split rows as the engine's CSV parser does, so a quote inside an object path or a
+bare-CR line end, alone, mixed with LF, after earlier bare-CR rows or ending the file, does not hide
+a saved row. Not judged: a size in non-ASCII digits; a key, size or version ID over 1 MiB (an object
+path cut at 1 MiB is still judged); and, on the first two flags, a saved row that ends 1 MiB or more
+past a row the CLI cannot parse, or, on a named pipe or other stream, one not yet read into the
+CLI's buffer. The first two flags then stop with exit 1 and the CLI's own error for the file; the
+other three run. A real object with such a key and version ID would be refused too; no S3 server
+tried issues such an ID.
 
 Existing-prefix mode is mutually exclusive with `--items-file`. It requires
 `--delete-existing --bucket <exact-bucket> --prefix <exact-prefix>`; the prefix must be nonempty
