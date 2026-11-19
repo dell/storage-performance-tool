@@ -26,6 +26,23 @@ class ApiStatusAcceptedRunTest {
 	}
 
 	@Test
+	void forgetsARunTheExecutorRefusedUnlessItWasAcceptedBefore() {
+		final ApiStatus status = new ApiStatus();
+		status.setRunning("s1", 5L);
+
+		final boolean sevenBefore = status.acceptedRun(7L);
+		status.setRunning("s2", 7L);
+		status.forgetRefusedRun(7L, sevenBefore);
+		assertFalse(status.acceptedRun(7L), "a refused run is not remembered");
+		assertTrue(status.acceptedRun(5L));
+
+		final boolean fiveBefore = status.acceptedRun(5L);
+		status.setRunning("s3", 5L);
+		status.forgetRefusedRun(5L, fiveBefore);
+		assertTrue(status.acceptedRun(5L), "a refused request with an accepted run's id keeps that run's role");
+	}
+
+	@Test
 	void keepsTheLatestRunsOnly() {
 		final ApiStatus status = new ApiStatus();
 		for (long runId = 1L; runId <= ApiStatus.ACCEPTED_RUN_IDS + 1; runId++) {

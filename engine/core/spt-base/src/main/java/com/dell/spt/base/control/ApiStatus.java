@@ -95,6 +95,25 @@ public final class ApiStatus {
 		}
 	}
 
+	/**
+	 * Forgets a run id that {@code POST /run} recorded for a run the scenario executor then refused, so the
+	 * refused request does not relabel the node's rows. {@code acceptedBefore} is {@link #acceptedRun(long)}
+	 * for the id, read before {@link #setRunning(String, long)}: when it is {@code true}, the node had already
+	 * accepted a run with that id, and its rows stay labelled {@code entry}.
+	 */
+	public void forgetRefusedRun(final long runId, final boolean acceptedBefore) {
+		if (runId == 0L || acceptedBefore) {
+			return;
+		}
+		synchronized (acceptedRunIds) {
+			for (int i = 0; i < acceptedRunIds.length; i++) {
+				if (acceptedRunIds[i] == runId) {
+					acceptedRunIds[i] = 0L;
+				}
+			}
+		}
+	}
+
 	private void rememberAcceptedRun(final long runId) {
 		if (runId == 0L) {
 			return;

@@ -76,7 +76,7 @@ Schema 5 is additive over schema 4: it adds the optional `steady` object ([Stead
 |:--|:--|:--|:--|
 | `metrics_schema` | integer | Always | Metrics contract version; this guide describes `4` |
 | `scope` | string | Always | `node` for local metrics or `fleet` for a cluster aggregate |
-| `role` | string | Always | `aggregate` on fleet rows. On node rows, `entry` when this node accepted the row's run through `POST /run` and `worker` for a slice an entry started here, constant for the row's lifetime; the idle sample is `entry` while a distributed context is live or a distributed terminal entry is retained, otherwise `worker` |
+| `role` | string | Always | `aggregate` on fleet rows. On node rows, `entry` when this node accepted the row's run through `POST /run` and `worker` for a slice an entry started here, constant for the row's lifetime while the run is among the 16 latest the node accepted; the idle sample is `entry` while a distributed context is live or a distributed terminal entry is retained, otherwise `worker` |
 | `cluster_id` | string | When configured | Cluster identity shared by distributed participants |
 | `node_id` | string | Always | Identity of the HTTP server producing the sample |
 | `run_id` | string | Always | Run identity; empty in a pre-run idle sample |

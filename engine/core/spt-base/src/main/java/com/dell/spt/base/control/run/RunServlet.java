@@ -130,6 +130,7 @@ public class RunServlet extends HttpServlet {
 			final var run = (Run) new RunImpl(config.stringVal("run-comment"), scenario, scriptEngine, config.longVal("run-id"));
 			final var stepId = config.stringVal("load-step-id");
 			final var runId = config.longVal("run-id");
+			final boolean acceptedBefore = apiStatus.acceptedRun(runId);
 			// Update status before executing
 			apiStatus.setRunning(stepId, runId);
 			final var statusAwareRun = new StatusAwareRun(run, apiStatus);
@@ -138,6 +139,7 @@ public class RunServlet extends HttpServlet {
 				resp.setStatus(HttpServletResponse.SC_ACCEPTED);
 				setRunTimestampHeader(statusAwareRun, resp);
 			} catch (final RejectedExecutionException e) {
+				apiStatus.forgetRefusedRun(runId, acceptedBefore);
 				resp.setStatus(HttpServletResponse.SC_CONFLICT);
 			}
 		} catch (final NoSuchMethodException | RuntimeException e) {
