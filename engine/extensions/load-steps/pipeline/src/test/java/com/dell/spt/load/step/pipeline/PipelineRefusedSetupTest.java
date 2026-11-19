@@ -46,9 +46,46 @@ class PipelineRefusedSetupTest {
 
 	private final List<StorageDriver> created = Collections.synchronizedList(new ArrayList<>());
 	private final Set<StorageDriver> closed = Collections.synchronizedSet(Collections.newSetFromMap(new IdentityHashMap<>()));
+	/** Thrown by the close of the second driver built, the refused context's, when set. */
+	private volatile Error closeError;
 
 	@Test
 	void aRefusalInTheSecondContextClosesBothContextsDrivers() throws Exception {
+		final var step = refusedStep();
+		try {
+			final var failure = assertThrows(IllegalStateException.class, step::init);
+			assertInstanceOf(IllegalConfigurationException.class, failure.getCause());
+			assertTrue(failure.getCause().getMessage().contains("composite CREATE"), failure.getCause().getMessage());
+			assertEquals(2, created.size(), "one driver per context");
+			assertTrue(closed.contains(created.get(0)), "the first context's driver is closed before the step is");
+			assertTrue(closed.contains(created.get(1)), "the refused context's driver is closed before the step is");
+		} finally {
+			assertDoesNotThrow(step::close);
+		}
+	}
+
+	/**
+	 * An {@code Error} from the refused context's driver close neither replaces the refusal nor stops
+	 * the close of the first context: it is kept as suppressed.
+	 */
+	@Test
+	void anErrorFromADriversCloseKeepsTheRefusalAndClosesTheFirstContext() throws Exception {
+		closeError = new AssertionError("close failed");
+		final var step = refusedStep();
+		try {
+			final var failure = assertThrows(IllegalStateException.class, step::init);
+			assertInstanceOf(IllegalConfigurationException.class, failure.getCause());
+			assertTrue(List.of(failure.getSuppressed()).contains(closeError), "the close's Error is suppressed");
+			assertEquals(2, created.size());
+			assertTrue(closed.contains(created.get(1)), "the refused context's driver close was called");
+			assertTrue(closed.contains(created.get(0)), "the first context's driver is closed after that Error");
+		} finally {
+			closeError = null;
+			step.close();
+		}
+	}
+
+	private PipelineLoadStepLocal refusedStep() throws Exception {
 		final var baseSchema = SchemaProvider.resolveAndReduce(Constants.APP_NAME, getClass().getClassLoader());
 		final var schema = TreeUtil.reduceForest(List.of(baseSchema, new PipelineLoadStepExtension().schemaProvider().schema()));
 		final Config baseConfig;
@@ -70,17 +107,7 @@ class PipelineRefusedSetupTest {
 		when(factory.id()).thenReturn("dummy-mock");
 		when(factory.create(anyString(), any(), any(), anyBoolean(), anyInt()))
 						.thenAnswer(invocation -> closeCounting(new DummyStorageDriverMock(invocation.getArgument(2))));
-		final var step = new PipelineLoadStepLocal(baseConfig, List.of(factory), List.of(first, second), mock(MetricsManager.class));
-		try {
-			final var failure = assertThrows(IllegalStateException.class, step::init);
-			assertInstanceOf(IllegalConfigurationException.class, failure.getCause());
-			assertTrue(failure.getCause().getMessage().contains("composite CREATE"), failure.getCause().getMessage());
-			assertEquals(2, created.size(), "one driver per context");
-			assertTrue(closed.contains(created.get(0)), "the first context's driver is closed before the step is");
-			assertTrue(closed.contains(created.get(1)), "the refused context's driver is closed before the step is");
-		} finally {
-			assertDoesNotThrow(step::close);
-		}
+		return new PipelineLoadStepLocal(baseConfig, List.of(factory), List.of(first, second), mock(MetricsManager.class));
 	}
 
 	/** A driver without composite support whose {@code close} is recorded. */
@@ -92,6 +119,13 @@ class PipelineRefusedSetupTest {
 						(proxy, method, args) -> {
 							if ("close".equals(method.getName()) && method.getParameterCount() == 0) {
 								closed.add((StorageDriver) proxy);
+								if (closeError != null && created.size() > 1 && created.get(1) == proxy) {
+									try {
+										method.invoke(target, args);
+									} finally {
+										throw closeError;
+									}
+								}
 							}
 							try {
 								return method.invoke(target, args);

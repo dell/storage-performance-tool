@@ -18,6 +18,7 @@ import static org.mockito.Mockito.withSettings;
 import com.dell.spt.base.config.IllegalConfigurationException;
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.control.run.RunTerminalException;
+import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.step.LoadStep;
@@ -32,6 +33,7 @@ import com.github.akurilov.confuse.Config;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
@@ -51,6 +53,8 @@ class CompositeRefusalAtClientTest {
 	private final AtomicInteger listings = new AtomicInteger();
 	private final AtomicInteger created = new AtomicInteger();
 	private final AtomicInteger closed = new AtomicInteger();
+	private boolean marked = true;
+	private List<Extension> extensions;
 
 	@Test
 	void aRefusedReadFromAStoragePathListsNothingAndFailsWithTheRefusal() throws Exception {
@@ -74,6 +78,80 @@ class CompositeRefusalAtClientTest {
 		final var client = client(0, stepFactory(slice));
 		assertThrows(RunTerminalException.class, client::run);
 		assertTrue(listings.get() > 0, "the probe sees the listing a refused READ must not send");
+	}
+
+	/**
+	 * A malformed threshold on a driver without composite support is left to the step slice, whose
+	 * own parse fails the run, as in 5.17.0. The entry's driver is closed all the same.
+	 */
+	@Test
+	void aMalformedThresholdIsLeftToTheSliceAndTheEntryClosesItsDriver() throws Exception {
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.start()).thenThrow(new IllegalStateException("Invalid size: bogus"));
+		final var client = client("bogus", stepFactory(slice));
+		final var failure = assertThrows(RunTerminalException.class, client::run);
+		assertEquals(IntegrityTerminalException.Category.EXECUTION, failure.category());
+		assertEquals("engine 1 of 1 did not start; see the engine log", failure.getMessage());
+		assertEquals(1, created.get());
+		assertEquals(1, closed.get(), "the entry's item input driver is closed");
+	}
+
+	/** A PATH LIST never reads the DATA threshold, so a malformed one changes nothing, as in 5.17.0. */
+	@Test
+	void aListWithAMalformedThresholdOnADriverWithSupportClosesItsDriver() throws Exception {
+		final LoadStep slice = mock(LoadStep.class);
+		when(slice.start()).thenThrow(new IllegalStateException("stop after the entry's setup"));
+		marked = false;
+		final var config = config("bogus", stepFactory(slice));
+		config.val("item-type", "path");
+		config.val("load-op-type", "list");
+		final var client = new TestLoadStepClient(config, extensions, List.of(), mock(MetricsManager.class));
+		final var failure = assertThrows(RunTerminalException.class, client::run);
+		assertEquals("engine 1 of 1 did not start; see the engine log", failure.getMessage());
+		assertEquals(1, created.get());
+		assertEquals(1, closed.get(), "the entry's driver is closed");
+	}
+
+	/**
+	 * A client built outside the engine may already declare a method of the hook's name, private or
+	 * public. It compiles as before, and the entry never calls it: the READ is still refused.
+	 */
+	@Test
+	void aClientsOwnMethodOfTheHooksNameIsNeitherACollisionNorTheHook() throws Exception {
+		final LoadStep slice = mock(LoadStep.class);
+		final var config = config("1MB", stepFactory(slice));
+		for (final TestLoadStepClient client : List.of(
+						new PrivateHookClient(config, extensions), new PublicHookClient(config, extensions))) {
+			final var failure = assertThrows(RunTerminalException.class, client::run);
+			assertEquals(IntegrityTerminalException.Category.CONFIGURATION, failure.category());
+			assertEquals(REFUSAL.replace("dummy-mock", "DummyStorageDriverMock"), failure.getMessage());
+		}
+		assertEquals(0, listings.get());
+	}
+
+	/** The shape of an external client with a private method of the hook's name. */
+	static final class PrivateHookClient extends TestLoadStepClient {
+
+		PrivateHookClient(final Config config, final List<Extension> extensions) {
+			super(config, extensions, List.of(), mock(MetricsManager.class));
+		}
+
+		@SuppressWarnings("UnusedMethod")
+		private int compositeCheckedOpTypes(final Config config) {
+			return 0;
+		}
+	}
+
+	/** An external client with a public method of the hook's name and signature, which checks nothing. */
+	static final class PublicHookClient extends TestLoadStepClient {
+
+		PublicHookClient(final Config config, final List<Extension> extensions) {
+			super(config, extensions, List.of(), mock(MetricsManager.class));
+		}
+
+		public Set<OpType> compositeCheckedOpTypes(final Config config) {
+			return Set.of();
+		}
 	}
 
 	@Test
@@ -112,6 +190,11 @@ class CompositeRefusalAtClientTest {
 
 	private TestLoadStepClient client(final Object threshold, final LoadStepFactory<LoadStep, ?> stepFactory)
 					throws Exception {
+		return new TestLoadStepClient(config(threshold, stepFactory), extensions, List.of(), mock(MetricsManager.class));
+	}
+
+	/** A READ from {@code /bucket} at {@code threshold}, and the {@link #extensions} that run it. */
+	private Config config(final Object threshold, final LoadStepFactory<LoadStep, ?> stepFactory) throws Exception {
 		final Config config = TestConfigBuilder.config();
 		config.val("load-op-type", "read");
 		config.val("item-input-path", "/bucket");
@@ -124,7 +207,8 @@ class CompositeRefusalAtClientTest {
 		when(driverFactory.id()).thenReturn(config.stringVal("storage-driver-type"));
 		when(driverFactory.create(anyString(), any(), any(), anyBoolean(), anyInt()))
 						.thenAnswer(invocation -> probe(new DummyStorageDriverMock(invocation.getArgument(2))));
-		return new TestLoadStepClient(config, List.of(stepFactory, driverFactory), List.of(), mock(MetricsManager.class));
+		extensions = List.of(stepFactory, driverFactory);
+		return config;
 	}
 
 	private static LoadStepFactory<LoadStep, ?> stepFactory(final LoadStep slice) {
@@ -134,13 +218,14 @@ class CompositeRefusalAtClientTest {
 		return factory;
 	}
 
-	/** A driver without composite support that records each listing and each close. */
+	/** A driver without composite support, unless {@link #marked} is off, that records each listing and close. */
 	private StorageDriver probe(final StorageDriver target) {
 		created.incrementAndGet();
 		return (StorageDriver) Proxy.newProxyInstance(
 						StorageDriver.class.getClassLoader(),
-						new Class<?>[]{StorageDriver.class, CompositeOperationsUnsupported.class
-						},
+						marked
+										? new Class<?>[]{StorageDriver.class, CompositeOperationsUnsupported.class}
+										: new Class<?>[]{StorageDriver.class},
 						(proxy, method, args) -> {
 							if ("list".equals(method.getName())) {
 								listings.incrementAndGet();

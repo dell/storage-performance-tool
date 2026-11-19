@@ -1,11 +1,11 @@
 package com.dell.spt.storage.driver.coop.nio.fs;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.dell.spt.base.storage.driver.CompositeOperationsUnsupported;
+import com.dell.spt.base.storage.driver.CompositeOperationSupport;
 import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.config.IllegalConfigurationException;
@@ -61,7 +61,7 @@ class FileStorageDriverCompositeRefusalTest {
 
 	@Test
 	void theDriverHasNoCompositeSupport() {
-		assertInstanceOf(CompositeOperationsUnsupported.class, driver);
+		assertTrue(CompositeOperationSupport.declaresNoCompositeSupport(driver));
 	}
 
 	@Test

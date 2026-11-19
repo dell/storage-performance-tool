@@ -1,11 +1,13 @@
 package com.dell.spt.storage.driver.coop.netty.http.atmos;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.dell.spt.base.storage.driver.CompositeOperationsUnsupported;
+import com.dell.spt.base.storage.driver.CompositeOperationSupport;
 import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.config.IllegalConfigurationException;
@@ -87,9 +89,11 @@ class AtmosCompositeSupportTest {
 
 	@Test
 	void createAndReadStepsWithAThresholdFailAtStart() throws Exception {
-		final var drv = new AtmosUriArgsSigningTest.TestAtmosDriver(AtmosUriArgsSigningTest.config(Map.of()));
+		final var cfg = AtmosUriArgsSigningTest.config(Map.of());
+		final var drv = new AtmosStorageDriver<DataItem, DataOperation<DataItem>>(
+						"test-atmos", dataInput(), cfg.configVal("storage"), false, cfg.intVal("load-batch-size"));
 		try {
-			assertInstanceOf(CompositeOperationsUnsupported.class, drv);
+			assertTrue(CompositeOperationSupport.declaresNoCompositeSupport(drv));
 			for (final String opType : List.of("create", "read")) {
 				final var failure = assertThrows(
 								IllegalConfigurationException.class, () -> builder(drv, stepConfig(opType, "1MB")).build(), opType);
@@ -104,6 +108,42 @@ class AtmosCompositeSupportTest {
 		}
 	}
 
+	/**
+	 * A driver built outside the engine on the Atmos driver, which may bring its own composite
+	 * handling, does not inherit the refusal: it starts with a threshold, as it did before the marker.
+	 */
+	@Test
+	void aSubclassBuiltOutsideTheEngineStartsWithAThresholdAsBefore() throws Exception {
+		final var cfg = AtmosUriArgsSigningTest.config(Map.of());
+		final var drv = new ExternalAtmos(cfg);
+		try {
+			assertFalse(CompositeOperationSupport.declaresNoCompositeSupport(drv));
+			for (final String opType : List.of("create", "read")) {
+				try (var generator = builder(drv, stepConfig(opType, "1MB")).build()) {
+					assertNotNull(generator, opType);
+				}
+			}
+		} finally {
+			drv.close();
+		}
+	}
+
+	/** The shape of an external driver compiled against the Atmos driver before the marker. */
+	static final class ExternalAtmos extends AtmosStorageDriver<DataItem, DataOperation<DataItem>> {
+
+		ExternalAtmos(final Config cfg) throws Exception {
+			super("external-atmos", dataInput(), cfg.configVal("storage"), false, cfg.intVal("load-batch-size"));
+		}
+
+		public boolean supportsCompositeOperations() {
+			return true;
+		}
+	}
+
+	private static DataInput dataInput() throws Exception {
+		return DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 4, false, 0.0, true);
+	}
+
 	@SuppressWarnings("unchecked")
 	private static CompositeDataOperationImpl<DataItem> composite(final OpType opType) throws Exception {
 		final DataItem item = new DataItemImpl("obj1", 0, SIZE);
@@ -115,7 +155,7 @@ class AtmosCompositeSupportTest {
 	@SuppressWarnings({"rawtypes", "unchecked"
 	})
 	private static LoadGeneratorBuilderImpl<DataItem, DataOperation<DataItem>, LoadGeneratorImpl<DataItem, DataOperation<DataItem>>> builder(
-					final AtmosUriArgsSigningTest.TestAtmosDriver drv, final Config config) {
+					final AtmosStorageDriver<?, ?> drv, final Config config) {
 		return new LoadGeneratorBuilderImpl<DataItem, DataOperation<DataItem>, LoadGeneratorImpl<DataItem, DataOperation<DataItem>>>()
 						.itemConfig(config.configVal("item"))
 						.loadConfig(config.configVal("load"))

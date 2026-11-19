@@ -1,14 +1,13 @@
 package com.dell.spt.storage.driver.coop.netty.http.s3.tables;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.dell.spt.base.storage.driver.CompositeOperationsUnsupported;
+import com.dell.spt.base.storage.driver.CompositeOperationSupport;
 import com.dell.spt.base.config.ConfigFormat;
 import com.dell.spt.base.config.ConfigUtil;
 import com.dell.spt.base.config.IllegalConfigurationException;
@@ -17,6 +16,7 @@ import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.item.DataItem;
 import com.dell.spt.base.item.DataItemFactoryImpl;
 import com.dell.spt.base.item.DataItemImpl;
+import com.dell.spt.base.item.Item;
 import com.dell.spt.base.item.ItemType;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
@@ -86,9 +86,11 @@ class S3TablesCompositeSupportTest {
 	void createAndReadStepsWithAThresholdFailAtStart() throws Exception {
 		final Config driverConfig = S3TablesStorageDriverTest.baseConfig("tableWrite", "127.0.0.1");
 		driverConfig.val("storage-driver-type", "s3-tables");
-		final var drv = new S3TablesStorageDriverTest.TestDriver(driverConfig);
+		final var drv = new S3TablesStorageDriver<Item, Operation<Item>>(
+						"test-s3tables", dataInput(), driverConfig.configVal("storage"), false,
+						driverConfig.intVal("load-batch-size"));
 		try {
-			assertInstanceOf(CompositeOperationsUnsupported.class, drv);
+			assertTrue(CompositeOperationSupport.declaresNoCompositeSupport(drv));
 			for (final String opType : List.of("create", "read")) {
 				final var failure = assertThrows(
 								IllegalConfigurationException.class, () -> builder(drv, stepConfig(opType, "1MB")).build(), opType);
@@ -103,6 +105,43 @@ class S3TablesCompositeSupportTest {
 		}
 	}
 
+	/**
+	 * A driver built outside the engine on the S3 Tables driver, which may route composites itself,
+	 * does not inherit the refusal: it starts with a threshold, as it did before the marker.
+	 */
+	@Test
+	void aSubclassBuiltOutsideTheEngineStartsWithAThresholdAsBefore() throws Exception {
+		final Config driverConfig = S3TablesStorageDriverTest.baseConfig("tableWrite", "127.0.0.1");
+		driverConfig.val("storage-driver-type", "s3-tables");
+		final var drv = new ExternalS3Tables(driverConfig);
+		try {
+			assertFalse(CompositeOperationSupport.declaresNoCompositeSupport(drv));
+			for (final String opType : List.of("create", "read")) {
+				try (var generator = builder(drv, stepConfig(opType, "1MB")).build()) {
+					assertNotNull(generator, opType);
+				}
+			}
+		} finally {
+			drv.close();
+		}
+	}
+
+	/** The shape of an external driver compiled against the S3 Tables driver before the marker. */
+	static final class ExternalS3Tables extends S3TablesStorageDriver<Item, Operation<Item>> {
+
+		ExternalS3Tables(final Config cfg) throws Exception {
+			super("external-s3tables", dataInput(), cfg.configVal("storage"), false, cfg.intVal("load-batch-size"));
+		}
+
+		public boolean supportsCompositeOperations() {
+			return true;
+		}
+	}
+
+	private static DataInput dataInput() throws Exception {
+		return DataInput.instance(null, "7a42d9c483244167", new SizeInBytes("64KB"), 16, false);
+	}
+
 	private static List<String> uris(final S3TablesStorageDriverTest.TestDriver drv) {
 		final List<String> uris = new ArrayList<>();
 		for (final FullHttpRequest request : drv.log()) {
@@ -113,7 +152,7 @@ class S3TablesCompositeSupportTest {
 
 	@SuppressWarnings({"rawtypes", "unchecked"
 	})
-	private static com.dell.spt.base.load.generator.LoadGeneratorBuilderImpl builder(final S3TablesStorageDriverTest.TestDriver drv, final Config config) {
+	private static com.dell.spt.base.load.generator.LoadGeneratorBuilderImpl builder(final S3TablesStorageDriver<?, ?> drv, final Config config) {
 		return new com.dell.spt.base.load.generator.LoadGeneratorBuilderImpl()
 						.itemConfig(config.configVal("item"))
 						.loadConfig(config.configVal("load"))

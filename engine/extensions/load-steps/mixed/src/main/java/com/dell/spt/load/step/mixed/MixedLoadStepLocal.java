@@ -551,7 +551,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		} catch (final IllegalConfigurationException e) {
 			try {
 				driver.close();
-			} catch (final IOException | RuntimeException closeFailure) {
+			} catch (final Throwable closeFailure) {
 				e.addSuppressed(closeFailure);
 			}
 			throw new IllegalStateException("Failed to initialize storage driver", e);

@@ -17,10 +17,13 @@ Storage-side concatenation (further - ***SSC***).
 5. The `fs`, `atmos` and `s3-tables` storage drivers have no composite support, and refuse an
  `item-data-ranges-threshold` (`--part-size`) above 0 for a "Create" or a "Read" at step start,
  whatever the object sizes: the step fails with a configuration error naming the driver, the
- operation type and the threshold, before the items are listed or any operation is sent. Set the
- threshold to 0 for these drivers. Every other driver accepts the setting, for example `s3`,
- `s3-aws`, `s3-rdma`, `swift` and the `dummy-mock` test driver, and so does a driver built outside
- the engine.
+ operation type and the threshold. The entry engine checks every context of the step before it
+ lists any items, so nothing is listed, and when every engine runs the same driver no operation is
+ sent. A worker whose driver refuses while the entry engine's does not refuses only as its slice
+ starts, after the entry has listed the items and started its own slice, which can send
+ operations. Set the threshold to 0 for these drivers. Every other driver accepts the setting, for
+ example `s3`, `s3-aws`, `s3-rdma`, `swift` and the `dummy-mock` test driver, and so does a driver
+ built outside the engine, a subclass of `atmos` or `s3-tables` among them.
 
 ### 1.2. Approach
 

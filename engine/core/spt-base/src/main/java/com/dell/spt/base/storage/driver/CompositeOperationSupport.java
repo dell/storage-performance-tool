@@ -12,7 +12,8 @@ import java.util.Set;
 
 /**
  * The step-start check that refuses a composite (multipart) configuration on a storage driver
- * without composite support: one that implements {@link CompositeOperationsUnsupported}.
+ * without composite support: one whose runtime class declares {@link CompositeOperationsUnsupported}
+ * itself (see {@link #declaresNoCompositeSupport}).
  */
 public final class CompositeOperationSupport {
 
@@ -33,13 +34,27 @@ public final class CompositeOperationSupport {
 					throws IllegalConfigurationException {
 		if (sizeThreshold > 0
 						&& DataOperationsBuilderImpl.buildsCompositeOperations(opType)
-						&& driver instanceof CompositeOperationsUnsupported) {
+						&& declaresNoCompositeSupport(driver)) {
 			throw new Refusal(
 							"The storage driver type \"" + driver.driverType()
 											+ "\" does not support composite (multipart) operations, but item.data.ranges.threshold="
 											+ sizeThreshold + " would make composite " + opType
 											+ " operations; set item.data.ranges.threshold to 0 for this driver");
 		}
+	}
+
+	/**
+	 * Whether {@code driver}'s runtime class names {@link CompositeOperationsUnsupported} in its own
+	 * {@code implements} clause. A marker inherited from a superclass or a superinterface does not
+	 * count, so a subclass of a refusing driver runs as it did before the marker existed.
+	 */
+	public static boolean declaresNoCompositeSupport(final StorageDriver<?, ?> driver) {
+		for (final Class<?> declared : driver.getClass().getInterfaces()) {
+			if (declared == CompositeOperationsUnsupported.class) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**

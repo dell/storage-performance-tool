@@ -16,6 +16,7 @@ import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.item.op.Operation;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.lang.reflect.Proxy;
 import java.util.Arrays;
 import org.junit.jupiter.api.Test;
 
@@ -92,6 +93,44 @@ class CompositeOperationSupportTest {
 						.getDeclaringClass());
 		assertFalse(unrelatedDefault.supportsCompositeOperations());
 	}
+
+	/**
+	 * Only the runtime class's own {@code implements} clause counts: a driver built outside the
+	 * engine on a refusing driver, or through an interface that extends the marker, runs as before.
+	 */
+	@Test
+	void onlyAMarkerTheDriversOwnClassDeclaresIsRefused() {
+		final StorageDriver<?, ?> declared = proxy(StorageDriver.class, CompositeOperationsUnsupported.class);
+		assertTrue(CompositeOperationSupport.declaresNoCompositeSupport(declared));
+		assertThrows(
+						IllegalConfigurationException.class,
+						() -> CompositeOperationSupport.requireSupport(declared, OpType.CREATE, 1048576));
+
+		final StorageDriver<?, ?> subclass = mock(MarkedDriver.class, CALLS_REAL_METHODS);
+		assertTrue(subclass instanceof CompositeOperationsUnsupported, "the marker is inherited");
+		assertFalse(CompositeOperationSupport.declaresNoCompositeSupport(subclass));
+		assertDoesNotThrow(() -> CompositeOperationSupport.requireSupport(subclass, OpType.CREATE, 1048576));
+		assertDoesNotThrow(() -> CompositeOperationSupport.requireSupport(subclass, OpType.READ, 1048576));
+
+		final StorageDriver<?, ?> viaInterface = proxy(MarkedDriverInterface.class);
+		assertTrue(viaInterface instanceof CompositeOperationsUnsupported);
+		assertFalse(CompositeOperationSupport.declaresNoCompositeSupport(viaInterface));
+		assertDoesNotThrow(() -> CompositeOperationSupport.requireSupport(viaInterface, OpType.READ, 1048576));
+	}
+
+	private static StorageDriver<?, ?> proxy(final Class<?>... interfaces) {
+		return (StorageDriver<?, ?>) Proxy.newProxyInstance(
+						CompositeOperationSupportTest.class.getClassLoader(),
+						interfaces,
+						(proxy, method, args) -> "driverType".equals(method.getName()) ? "proxy" : null);
+	}
+
+	/** A driver class that declares the marker, as a shipped refusing driver does. */
+	abstract static class MarkedDriver<I extends Item, O extends Operation<I>>
+					implements StorageDriver<I, O>, CompositeOperationsUnsupported {}
+
+	/** An interface that extends the marker. */
+	interface MarkedDriverInterface extends StorageDriver<Item, Operation<Item>>, CompositeOperationsUnsupported {}
 
 	private static StorageDriver<?, ?> driver(final boolean supported) {
 		final StorageDriver<?, ?> driver = supported

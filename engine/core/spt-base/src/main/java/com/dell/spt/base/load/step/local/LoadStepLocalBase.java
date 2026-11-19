@@ -149,8 +149,10 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	 * failure came before {@code init()} added the context it was building ({@code contextPending}),
 	 * it closes {@code unowned}, that context's driver and generator, which no context owns yet, and
 	 * every context added before it, and empties {@link #stepContexts}. Otherwise the step's close
-	 * owns them all and nothing is closed here. A close failure is added to {@code failure} as
-	 * suppressed.
+	 * owns them all and nothing is closed here. Any {@code Throwable} a close throws, an {@code Error}
+	 * as well, is added to {@code failure} as suppressed, and the remaining resources are still
+	 * closed. An earlier context's close logs an {@code IOException} from its own driver's close
+	 * itself and does not throw it, so that failure is in the log only, not among the suppressed.
 	 */
 	protected final <T extends Throwable> T closeAfterInitFailure(
 					final T failure, final boolean contextPending, final AutoCloseable... unowned) {
@@ -168,7 +170,8 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		for (final AutoCloseable resource : resources) {
 			try {
 				resource.close();
-			} catch (final Exception closeFailure) {
+			} catch (final Throwable closeFailure) {
+				// An Error from a close is kept as well, so the original failure and the later closes win.
 				if (closeFailure instanceof InterruptedException) {
 					Thread.currentThread().interrupt();
 				}
