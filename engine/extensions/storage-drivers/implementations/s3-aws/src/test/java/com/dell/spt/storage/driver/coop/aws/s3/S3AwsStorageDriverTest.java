@@ -4325,6 +4325,70 @@ public class S3AwsStorageDriverTest {
 			assertEquals(expected, deleteRequests("/pp", listed("/pp", null, false, "/k2", "a//b", "/dir//k3")));
 		}
 
+		// A path or manifest bucket ending in a slash: the key is joined to it with exactly one slash.
+
+		private String resolved(final Operation<Item> op) {
+			return String.join("|", drv.resolveBucketAndKey(op));
+		}
+
+		private static Item manifestItem(final String bucket, final String key) {
+			return new IntegrityManifestDataItem(bucket, key, 1, null);
+		}
+
+		@Test
+		void manifestBucketEndingInASlashAddressesTheKeyWithOneSlash() throws Exception {
+			assertEquals(List.of("bucket-a|key"), readRequests(null, List.of(manifestItem("bucket-a/", "key"))));
+			assertEquals("bucket-a|key", resolved(build(OpType.READ, manifestItem("/bucket-a/", "/key"), null, null)));
+			assertEquals(
+							List.of("bucket-a|key"), deleteRequests(null, List.of(manifestItem("bucket-a/", "/key"))));
+			assertEquals("kb|k1", resolved(build(OpType.STAT, manifestItem("kb/", "k1"), null, null)));
+		}
+
+		@Test
+		void createToAnOutputPathEndingInASlashAddressesTheKeyWithOneSlash() throws Exception {
+			final Item fromManifest = manifestItem("source-bucket", "key");
+			assertEquals(
+							"destination-bucket|key",
+							resolved(build(OpType.CREATE, fromManifest, null, "/destination-bucket/")));
+			assertEquals(
+							"destination-bucket|out/key",
+							resolved(build(OpType.CREATE, fromManifest, null, "/destination-bucket/out/")));
+			final Item generated = new DataItemImpl("s0000000/name", 0, 1);
+			assertEquals("foo|s0000000/name", resolved(build(OpType.CREATE, generated, null, "/foo/")));
+		}
+
+		@Test
+		void updateFromASourcePathEndingInASlashAddressesTheKeyWithOneSlash() throws Exception {
+			assertEquals("tb4|k0000", resolved(build(OpType.UPDATE, new DataItemImpl("k0000", 0, 1), "/tb4/", null)));
+			assertEquals("tb4|k0000", resolved(build(OpType.UPDATE, new DataItemImpl("/k0000", 0, 1), "/tb4/", null)));
+		}
+
+		@Test
+		void aRecycledNameHoldingAPathEndingInASlashResolvesTheSameKey() throws Exception {
+			final Map<String, String> expected = Map.of("/foo/", "foo|k0", "/foo/out/", "foo|out/k0");
+			for (final var path : expected.entrySet()) {
+				final Operation<Item> first = build(OpType.CREATE, new DataItemImpl("k0", 0, 1), null, path.getKey());
+				assertEquals(path.getValue(), resolved(first), path.getKey());
+				final Operation<Item> recycled = first.result();
+				assertEquals(path.getKey() + "k0", recycled.item().name());
+				assertEquals(path.getValue(), resolved(recycled), path.getKey() + ": recycled");
+			}
+		}
+
+		@Test
+		void listedKeysWithAnEmptySegmentStayWholeUnderAPathEndingInASlash() throws Exception {
+			assertEquals(
+							List.of("pp|/k2", "pp|a//b"),
+							readRequests("/pp/", listed("/pp/", null, false, "/k2", "a//b")));
+		}
+
+		@Test
+		void pathsWithoutATrailingSlashResolveAsBefore() throws Exception {
+			assertEquals("foo|k0", resolved(build(OpType.CREATE, new DataItemImpl("k0", 0, 1), null, "/foo")));
+			assertEquals("foo|out/k0", resolved(build(OpType.CREATE, new DataItemImpl("k0", 0, 1), null, "/foo/out")));
+			assertEquals("foo|k0", resolved(build(OpType.READ, manifestItem("foo", "k0"), null, null)));
+		}
+
 		@Test
 		void itemsFileOfAReadOfAListedLeadingSlashKeyDeletesTheSameKey() throws Exception {
 			final Item listedItem = listed("/pp", null, false, "/k0").get(0);

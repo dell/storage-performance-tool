@@ -1216,7 +1216,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		} finally {
 			xml.setLength(0);
 		}
-		final var uri = SLASH + deleteRequest.bucket() + '?' + DELETE_QUERY;
+		final var uri = SLASH + manifestBucketName(deleteRequest.bucket()) + '?' + DELETE_QUERY;
 		final HttpHeaders headers = new DefaultHttpHeaders();
 		if (nodeAddr != null) {
 			headers.set(HttpHeaderNames.HOST, nodeAddr);
@@ -1242,12 +1242,21 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		final var uri = THREAD_LOCAL_STRB.get();
 		uri.setLength(0);
 		try {
-			uri.append(SLASH).append(bucket).append(SLASH);
+			uri.append(SLASH).append(manifestBucketName(bucket)).append(SLASH);
 			appendPercentEncodedPath(uri, target.key());
 			return uri.toString();
 		} finally {
 			uri.setLength(0);
 		}
+	}
+
+	/**
+	 * Returns a manifest bucket without the one trailing slash it may be written with, so that
+	 * {@code b/} and key {@code k} address {@code /b/k}, as an ordinary request for that row does.
+	 */
+	private static String manifestBucketName(final String bucket) {
+		final int last = bucket.length() - 1;
+		return last > 0 && bucket.charAt(last) == '/' ? bucket.substring(0, last) : bucket;
 	}
 
 	/** Uses the ordinary HTTP HEAD path for both Netty S3 and its RDMA transport subclass. */
@@ -1262,7 +1271,7 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 		headers.set(HttpHeaderNames.CONTENT_LENGTH, 0);
 		applyDynamicHeaders(headers);
 		applySharedHeaders(headers);
-		final String bucketPath = SLASH + target.bucket();
+		final String bucketPath = SLASH + manifestBucketName(target.bucket());
 		applyAuthHeaders(
 						headers,
 						HttpMethod.HEAD,

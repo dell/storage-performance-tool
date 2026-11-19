@@ -993,7 +993,10 @@ public class S3AwsStorageDriver<I extends Item, O extends Operation<I>> extends 
 			if (slashPos > 0) {
 				final var bucket = rel.substring(0, slashPos);
 				final var prefix = rel.substring(slashPos + 1);
-				return new String[]{bucket, prefix + "/" + key
+				// A path ending in a slash already holds the separator, and an empty prefix ("/bucket/")
+				// is such a path. The key stays whole either way: "/k" under "a" is the key "a//k".
+				final var objectKey = rel.charAt(rel.length() - 1) == '/' ? prefix + key : prefix + "/" + key;
+				return new String[]{bucket, objectKey
 				};
 			}
 			return new String[]{rel, key
