@@ -7,6 +7,7 @@ import static com.dell.spt.base.Exceptions.throwUncheckedIfInterrupted;
 import static com.dell.spt.base.env.DateUtil.TZ_UTC;
 
 import com.dell.spt.base.concurrent.DaemonBase;
+import com.dell.spt.base.concurrent.JvmExit;
 import java.util.Calendar;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
@@ -51,6 +52,8 @@ public interface LogUtil {
 											new Thread("logCtxShutDownHook") {
 												@Override
 												public final void run() {
+													// Before the running step closes: the scenario goes on when it does
+													JvmExit.markBegun();
 													shutdown();
 												}
 											});

@@ -23,6 +23,7 @@ import static org.apache.logging.log4j.CloseableThreadContext.put;
 
 import com.github.akurilov.commons.collection.TreeUtil;
 import com.dell.spt.base.buildinfo.EngineBuildInfoProvider;
+import com.dell.spt.base.concurrent.JvmExit;
 import com.dell.spt.base.config.AliasingUtil;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
@@ -259,11 +260,12 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 
 	/**
 	 * Refuses a stopped step before anything of a new start happens: a restart would run the whole
-	 * step again beside its stopped slices. Local slices keep their restart.
+	 * step again beside its stopped slices. Local slices keep their restart. While the JVM exits, the
+	 * base class refuses the start as a stop instead.
 	 */
 	@Override
 	protected void doStart() throws IllegalStateException {
-		if (isStopped()) {
+		if (isStopped() && !JvmExit.begun()) {
 			throw new RunTerminalException(
 							IntegrityTerminalException.Category.EXECUTION,
 							loadStepId(),
