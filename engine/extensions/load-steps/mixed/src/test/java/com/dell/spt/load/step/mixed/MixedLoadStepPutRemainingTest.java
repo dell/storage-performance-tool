@@ -199,6 +199,42 @@ class MixedLoadStepPutRemainingTest {
 	}
 
 	@Test
+	void aCopyOfAnInitializedStepChoosesItsOwnItemOutputFile() throws Exception {
+		final var client = new MixedLoadStepClient(stepConfig(), List.of(), null, mock(MetricsManager.class));
+		client.init();
+
+		final MixedLoadStepClient configCopy = client.config(Map.of());
+		final MixedLoadStepClient appendCopy = client.append(Map.of());
+
+		assertEquals(putRemainingFile().toString(), configOf(client).stringVal("item-output-file"));
+		assertNull(configOf(configCopy).stringVal("item-output-file"));
+		assertNull(configOf(appendCopy).stringVal("item-output-file"));
+		assertNull(ctxConfigsOf(appendCopy).get(0).stringVal("item-output-file"));
+	}
+
+	@Test
+	void aCopyKeepsAnItemOutputFileItIsGiven() throws Exception {
+		final var client = new MixedLoadStepClient(stepConfig(), List.of(), null, mock(MetricsManager.class));
+		client.init();
+		final String given = home.resolve("copy.csv").toString();
+
+		assertEquals(given, configOf(client.config(Map.of("item-output-file", given))).stringVal("item-output-file"));
+		assertEquals(given, ctxConfigsOf(client.append(Map.of("item-output-file", given))).get(0)
+						.stringVal("item-output-file"));
+	}
+
+	@Test
+	void aCopyOfAStepGivenAnItemOutputFileKeepsIt() throws Exception {
+		final Config config = stepConfig();
+		final String given = home.resolve("created.csv").toString();
+		config.val("item-output-file", given);
+		final var client = new MixedLoadStepClient(config, List.of(), null, mock(MetricsManager.class));
+		client.init();
+
+		assertEquals(given, configOf(client.config(Map.of())).stringVal("item-output-file"));
+	}
+
+	@Test
 	void aListMissingCreatedItemsIsReportedAsAnError() throws Exception {
 		final Path listed = home.resolve("listed.csv");
 		Files.writeString(listed, "a\nb\n");
@@ -229,9 +265,20 @@ class MixedLoadStepPutRemainingTest {
 	private static Config initializedConfig(final Config config) throws ReflectiveOperationException {
 		final var client = new MixedLoadStepClient(config, List.of(), null, mock(MetricsManager.class));
 		client.init();
+		return configOf(client);
+	}
+
+	private static Config configOf(final MixedLoadStepClient client) throws ReflectiveOperationException {
 		final Field field = LoadStepBase.class.getDeclaredField("config");
 		field.setAccessible(true);
 		return (Config) field.get(client);
+	}
+
+	@SuppressWarnings("unchecked")
+	private static List<Config> ctxConfigsOf(final MixedLoadStepClient client) throws ReflectiveOperationException {
+		final Field field = LoadStepBase.class.getDeclaredField("ctxConfigs");
+		field.setAccessible(true);
+		return (List<Config>) field.get(client);
 	}
 
 	private Path putRemainingFile() {
