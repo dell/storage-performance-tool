@@ -2308,7 +2308,7 @@ public class S3AwsStorageDriverTest {
 
 			drv.invokeNio((Operation) dataOp);
 
-			// invokeNio calls countBytesDone(dataItem.size()) for non-READ DataItem ops
+			// invokeNio calls countBytesDone(dataItem.size()) for a plain CREATE or UPDATE of a DataItem
 			verify(dataOp).countBytesDone(2048L);
 		}
 	}
