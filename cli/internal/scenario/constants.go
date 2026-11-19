@@ -113,6 +113,8 @@ const (
 )
 
 const (
+	// DefaultObjectSize is the item.data.size a generated scenario sends when --object-size is omitted.
+	DefaultObjectSize = "1MB"
 	// MinDeleteBatchSize is the smallest valid standalone DELETE request size.
 	MinDeleteBatchSize = 1
 	// DefaultDeleteObjectSize is the explicit payload size for seeded DELETE inventories.

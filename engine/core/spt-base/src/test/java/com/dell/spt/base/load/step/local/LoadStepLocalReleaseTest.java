@@ -20,6 +20,7 @@ import static org.mockito.Mockito.when;
 
 import com.dell.spt.base.config.TestConfigBuilder;
 import com.dell.spt.base.env.Extension;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.lifecycle.OperationLifecycleArtifact;
 import com.dell.spt.base.load.step.LoadStepBase;
@@ -116,6 +117,36 @@ class LoadStepLocalReleaseTest {
 	}
 
 	@Test
+	void aContextWhoseShutdownKeepsFailingDoesNotKeepTheSliceUnreleased() throws Exception {
+		final LoadStepContext failing = mock(LoadStepContext.class);
+		final LoadStepContext other = mock(LoadStepContext.class);
+		final IntegrityTerminalException shutdownFailure = new IntegrityTerminalException(
+						IntegrityTerminalException.Category.EXECUTION,
+						"Standalone DELETE post-verification could not complete its full inventory pass");
+		when(failing.shutdown()).thenThrow(shutdownFailure);
+		final MetricsManager metricsMgr = mock(MetricsManager.class);
+		final Step step = new Step(standaloneDeleteConfig(), metricsMgr, failing, other);
+		step.start();
+		final MetricsContext<?> metricsCtx = step.metricsContext();
+
+		// Thrown once by the shutdown that failed, then by the stop and the close that repeat it.
+		assertSame(shutdownFailure, assertThrows(IntegrityTerminalException.class, step::shutdown));
+		verify(other).shutdown();
+		assertSame(shutdownFailure, assertThrows(IntegrityTerminalException.class, step::stop));
+		verify(failing).stop();
+		verify(other).stop();
+		verify(metricsMgr).unregister(metricsCtx);
+		assertSame(shutdownFailure, assertThrows(IntegrityTerminalException.class, step::close));
+
+		verify(failing, times(1)).shutdown();
+		verify(failing).close();
+		verify(other).close();
+		assertFalse(step.awaitsCleanupRetry());
+		assertDoesNotThrow(step::close);
+		verify(failing, times(1)).close();
+	}
+
+	@Test
 	void aFailedRangeReadPublishDoesNotPublishTheLifecycleFileAgain() throws Exception {
 		final LoadStepContext context = mock(LoadStepContext.class);
 		when(context.rangeReadSnapshot()).thenReturn(mock(RangeReadSnapshot.class));
@@ -185,11 +216,23 @@ class LoadStepLocalReleaseTest {
 		assertFalse(step.awaitsCleanupRetry());
 		verify(metricsMgr, times(1)).unregister(metricsCtx);
 
-		// Released: a later close attempts no cleanup again. As after a standalone run's last retry,
-		// the contexts are left as they are.
+		// Its contexts are closed without retrying their stops again.
+		verify(context, times(1)).releaseAfterFailedStop();
+
+		// Released: a later close attempts no cleanup again.
 		assertDoesNotThrow(step::close);
 		verify(context, times(admissionAttempts)).closeOperationAdmissionForStepStop();
+		verify(context, times(1)).releaseAfterFailedStop();
 		verify(context, never()).close();
+	}
+
+	/** A standalone DELETE outside duration mode: it shuts down once. */
+	private static Config standaloneDeleteConfig() {
+		final Config config = config("delete");
+		config.val("load-op-delete-standalone", true);
+		config.val("load-op-delete-duration", false);
+		config.val("load-step-limit-time", "0s");
+		return config;
 	}
 
 	private static Config config(final String opType) {

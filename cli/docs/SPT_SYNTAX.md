@@ -115,7 +115,7 @@ objects have been removed; those entries therefore no longer refer to readable o
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
 | `--threads` | `-t` | `1` | Number of parallel client threads |
-| `--object-size` | `-o` | `""` | Size of each generated object (e.g., `1MiB`, `256KiB`, `4GiB`; legacy `MB`, `KB`, and `GB` remain accepted as 1024-based aliases). Seeded DELETE resolves an omitted value explicitly to `1KiB`; ignored for `list` and manifest DELETE |
+| `--object-size` | `-o` | `""` | Size of each generated object (e.g., `1MiB`, `256KiB`, `4GiB`; legacy `MB`, `KB`, and `GB` remain accepted as 1024-based aliases). Seeded DELETE resolves an omitted value explicitly to `1KiB`; ignored for `list` and manifest DELETE. `read --items-file` takes each object's size from the file: with this flag omitted, the summary shows the measured average, such as `64.00 KiB avg`, or `—` for a partial READ (`--range-size`) or a READ with no successes, and with it, the summary shows the given value |
 | `--part-size` | | `""` | Enable multipart upload with the given part size (e.g., `5MiB`, `64MiB`, `256MiB`; legacy `MB` remains accepted as a 1024-based alias). Applies to `write`, the CREATE phase of `write-verify`, and both phases of a seeded `read`, whose read phase splits each larger object into parallel range GETs ([notes](#multipart-upload-write)) |
 | `--mpu-concurrent-objects` | | `0` | Max concurrent multipart objects in flight (`0` = unlimited). Requires `--part-size` |
 | `--mpu-concurrent-parts` | | `0` | Max concurrent parts in flight per multipart object (`0` = unlimited). Requires `--part-size` |
@@ -635,7 +635,7 @@ Available driver values:
 |-------|---------------|-------------|
 | `default` | `s3` (Netty) | The standard REST/Netty-based S3 driver. Default for all workloads |
 | `netty` | `s3` (Netty) | Alias for `default` |
-| `aws` | `s3-aws` | AWS SDK v2 synchronous client. Useful for compatibility testing or environments where the Netty driver is not suitable |
+| `aws` | `s3-aws` | AWS SDK v2 asynchronous client (CRT). Useful for compatibility testing or environments where the Netty driver is not suitable. Its client adds requests SPT does not count, such as a HEAD before each whole-object GET and copy (see [Requests the Client Adds](../../engine/extensions/storage-drivers/implementations/s3-aws/README.md#requests-the-client-adds)) |
 | `rdma` | `s3-rdma` | RDMA-accelerated S3 driver. Equivalent to `--use-rdma` |
 
 **Flag interaction with `--use-rdma`:**
@@ -1294,7 +1294,7 @@ spt run write \
 Notes:
 - Workers must already serve the run's API port (`--api-port`, default 9999) and RMI registry port (`--rmi-registry-port`, default 1099). `spt` starts no worker, so a worker on other ports fails the run's readiness wait; start one for other ports with the engine options `--run-port=<api-port>` and `--load-step-node-port=<rmi-registry-port>`.
 - `spt` still launches and manages the entry node; worker containers remain untouched during shutdown. At the end of a run, normal or interrupted, `--shutdown-on-complete` asks only the entry node to shut down, which ends its run, so the attached workers keep running and the next run can attach to them again. Whoever started a worker stops it.
-- The workers' steps end only when the entry ends its run. If the entry dies or can't be reached mid-run, or an interrupted run's entry takes more than 10 seconds to stop its run, a worker's step can keep generating load until its own limit. After a failed or interrupted attach run, check the workers and restart them before the next run.
+- The workers' steps end only when the entry ends its run. If the entry dies or can't be reached mid-run, or an interrupted run's entry takes more than 10 seconds to stop its run, a worker's step keeps running: only a count limit ends its load on the worker. With a time limit, a size limit or no limit it generates load until the worker is stopped (`POST /shutdown` or the process) or `DELETE /run` on the worker names that run. After a failed or interrupted attach run, check the workers and restart them before the next run.
 - `--items-file` and the other item files are copied only to the entry node, not to the attached workers.
 - `spt` does not check or pull the engine image on attached worker hosts; the engine identity check still compares the build of each attached worker that takes part in the run.
 - The host list must include at least one worker; the tool enforces this when `--attach-existing` is set.
@@ -1511,16 +1511,17 @@ spt status [--test-hosts <hosts>] [--api-port <port>]
 ### Example
 
 ```bash
-$ spt status --test-hosts entry,worker1,worker2
+$ spt status --test-hosts entry,worker1
 Node status (port 9999)
-- [entry] entry: READY (http 200, status=ready, node=entry-0)
-  run: state=RUNNING, run=run-123, progress=78.5%, message="Active test"
-  metrics: state=RUNNING, completion=78%, ops=1540/s, throughput=7.3MiB/s
-- [worker] worker1: READY (http 200, status=ready, node=worker-01)
-  metrics: state=RUNNING, completion=76%, ops=1520/s
-- [worker] worker2: NOT READY (http 503, status=starting, node=worker-02)
-  warn: metrics probe failed: metrics/json status 503
+✅ [entry] entry: READY (http 200, status=ready, node=entry:9999)
+  run: state=RUNNING, run=1795061536976
+  metrics: state=RUNNING, completion=26%, overall=7%, sample=2026-11-19T04:12:18Z (31.819964ms ago)
+✅ [worker] worker1: READY (http 200, status=ready, node=worker1:9999)
+  run: state=IDLE
+  metrics: state=RUNNING, completion=12%, sample=2026-11-19T04:12:19Z (7.37238ms ago)
 ```
+
+The `[entry]`/`[worker]` label is the node's current `/ready` role, so between runs every node, the last entry included, shows `[worker]`. The entry's `run=` is the run id it accepted, shown while the run is active and after it ends; a worker's `/status` stays `IDLE`, so its line has no run id.
 
 ### When to Use
 
