@@ -657,6 +657,7 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 			// For PUT: copy data into the registered buffer
 			if (opType == OpType.CREATE) {
+				// The copy starts at the item's current position: see the comment at route.sendRdma below.
 				payloadStart = ((DataItem) item).position();
 				try {
 					nic.copier.copy((DataItem) item, buf, size);
@@ -695,6 +696,9 @@ public class S3RdmaStorageDriver<I extends Item, O extends Operation<I>>
 
 			Loggers.MSG.debug("{}: RDMA submit: type={} size={} token={}", stepId, opType, size, token);
 
+			// A PUT refused here after its copy (a refused default-route submit, a cancelled NIC lane) is
+			// not rewound: its item keeps the advanced position, and only the operation's reset() resets
+			// it. A route that could prepare it again must reset the position first (none found so far).
 			return route.sendRdma(op, ctx);
 
 		} catch (final RdmaPayloadCopier.StoppedException e) {
