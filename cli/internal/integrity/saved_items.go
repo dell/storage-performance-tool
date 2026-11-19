@@ -2,6 +2,7 @@ package integrity
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -46,16 +47,28 @@ func savedItemRowError(recordNumber int) error {
 }
 
 // RefuseSavedItemsUnderHeader returns an error when the engine would read path as a canonical
-// manifest whose first data row is a saved engine items row. It reads the file by the engine's own
-// CSV rules (engineCSVReader), no further than that row, so a row the canonical reader refuses,
-// such as one with a quote inside its object path or with bare-CR line ends, is still judged. A
-// file from which the engine itself takes no object is left to the engine (see
-// findSavedItemRowAsEngineReads).
-func RefuseSavedItemsUnderHeader(path string) error {
-	const firstDataRecordOnly = 1
-	record, underHeader, found := findSavedItemRowAsEngineReads(path, firstDataRecordOnly)
-	if !found || !underHeader {
+// manifest whose first data row is a saved engine items row. info is the caller's os.Stat of path;
+// the check reads only that regular file, opened without waiting for a writer and confirmed to be
+// the same file, and leaves anything else to the engine. It reads the file by the engine's own CSV
+// rules (engineCSVReader), no further than that row, so a row the canonical reader refuses, such
+// as one with a quote inside its object path or with bare-CR line ends, is still judged. A file
+// from which the engine itself takes no object is left to the engine (see scanAsEngineReads).
+func RefuseSavedItemsUnderHeader(path string, info os.FileInfo) error {
+	if info == nil || !info.Mode().IsRegular() {
 		return nil
 	}
-	return savedItemRowError(record)
+	in, err := openWithoutWaiting(path)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = in.Close() }()
+	opened, err := in.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+		return nil
+	}
+	verdict := scanAsEngineReads(in, engineScan{firstRecord: 1, fileStart: true, maxDataRecords: 1})
+	if !verdict.found || !verdict.underHeader {
+		return nil
+	}
+	return savedItemRowError(verdict.record)
 }

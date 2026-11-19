@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"unicode"
 	"unicode/utf8"
 )
@@ -273,34 +272,86 @@ func (record engineCSVRecord) passesEngineRowCheck(recordNumber int) bool {
 	return err == nil
 }
 
-// findSavedItemRowAsEngineReads reads path as the engine does and finds a saved engine items row.
-// With the canonical header first, it tests data records in order, at most maxDataRecords of them
-// (0 for all), and returns the number of the first saved row with underHeader true. Without the
-// header, it tests record 1 only. found is false when there is no saved row, and also when the
-// engine itself takes no object from the file: it cannot be opened, is not UTF-8, has a record
-// Commons CSV refuses, or has a data record the engine's row check refuses, at or before the row.
-func findSavedItemRowAsEngineReads(path string, maxDataRecords int) (record int, underHeader, found bool) {
-	in, err := os.Open(path) // #nosec G304 -- explicit user-selected local input file
-	if err != nil {
-		return 0, false, false
-	}
-	defer func() { _ = in.Close() }()
-	reader := newEngineCSVReader(in)
-	first, err := reader.Read()
-	if err != nil {
-		return 0, false, false
-	}
-	if !first.isCanonicalHeader() {
-		return 1, false, first.isSavedItemRow(1)
-	}
-	for recordNumber := 2; maxDataRecords == 0 || recordNumber <= maxDataRecords+1; recordNumber++ {
-		next, readErr := reader.Read()
-		if readErr != nil || !next.passesEngineRowCheck(recordNumber) {
-			return 0, true, false
+// engineScan says where a scan's input sits in the file it judges.
+type engineScan struct {
+	firstRecord int  // the engine's number for the input's first record
+	fileStart   bool // the input starts the file, so its first record is the header or record 1
+	// maxDataRecords stops after that many data records (0: no limit).
+	maxDataRecords int
+	// cut reports whether the input was cut short of the file's end: a record that runs to the end
+	// of a cut input may be incomplete, so it is not judged.
+	cut func() bool
+}
+
+// engineVerdict is a scan's result. records is the number of whole records read. found is true
+// with record the number of the first saved engine items row, underHeader true when it lies under
+// the canonical header. refused is true when the engine takes no object from the file because of
+// what the scan read: a byte sequence that is not UTF-8, a record Commons CSV refuses, or a data
+// record the engine's row check refuses, at or before any saved row.
+type engineVerdict struct {
+	records     int
+	record      int
+	underHeader bool
+	found       bool
+	refused     bool
+}
+
+// scanAsEngineReads reads input as the engine does and finds a saved engine items row. At the
+// file's start, a first record that is not the canonical header is tested as record 1 and ends
+// the scan; otherwise data records are tested in order until one is a saved row, one fails the
+// engine's row check, the input ends, or a limit in scan is reached.
+func scanAsEngineReads(input io.Reader, scan engineScan) engineVerdict {
+	reader := newEngineCSVReader(input)
+	verdict := engineVerdict{underHeader: !scan.fileStart}
+	for recordNumber := scan.firstRecord; ; recordNumber++ {
+		next, err := reader.Read()
+		if errors.Is(err, io.EOF) {
+			return verdict
 		}
-		if next.isSavedItemRow(recordNumber) {
-			return recordNumber, true, true
+		if reader.lastChar == engineEndOfInput && scan.cut != nil && scan.cut() {
+			return verdict // the record, or the error, may come from the cut: undecided
+		}
+		if err != nil {
+			verdict.refused = true
+			return verdict
+		}
+		verdict.records++
+		switch {
+		case scan.fileStart && recordNumber == 1 && !next.isCanonicalHeader():
+			verdict.record, verdict.found = 1, next.isSavedItemRow(1)
+			return verdict
+		case scan.fileStart && recordNumber == 1:
+			verdict.underHeader = true
+		case !next.passesEngineRowCheck(recordNumber):
+			verdict.refused = true
+			return verdict
+		case next.isSavedItemRow(recordNumber):
+			verdict.record, verdict.found = recordNumber, true
+			return verdict
+		}
+		dataRecords := recordNumber - 1
+		if scan.maxDataRecords > 0 && dataRecords >= scan.maxDataRecords {
+			return verdict
 		}
 	}
-	return 0, true, false
+}
+
+// cappedReader reads at most left bytes from input and records whether it stopped at that cap.
+type cappedReader struct {
+	input  io.Reader
+	left   int64
+	capped bool
+}
+
+func (r *cappedReader) Read(buffer []byte) (int, error) {
+	if r.left <= 0 {
+		r.capped = true
+		return 0, io.EOF
+	}
+	if int64(len(buffer)) > r.left {
+		buffer = buffer[:r.left]
+	}
+	n, err := r.input.Read(buffer)
+	r.left -= int64(n)
+	return n, err
 }

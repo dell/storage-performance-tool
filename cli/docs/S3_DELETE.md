@@ -71,8 +71,11 @@ A saved `items.csv` (`--save-items` output) is not a manifest, and putting this 
 not convert it: its rows hold an object path, a hex offset, a size and a layer/mask. The CLI refuses
 any row whose `key` is a hexadecimal offset that fits a signed 64-bit integer and whose `version_id`
 is `<layer>/<mask>`, the layer a hexadecimal number that fits a signed 32-bit integer and the mask
-hexadecimal digits or none (so `0/` counts); either number may carry a sign. It reads the file as
-the engine does, so a quote inside an object path or bare-CR line ends do not hide such a row. The
+hexadecimal digits or none (so `0/` counts); either number may carry a sign. It splits rows as the
+engine's CSV parser does, so a quote inside an object path or a bare-CR line end, alone, mixed with
+LF or ending the file, does not hide such a row; a size in non-ASCII digits, a field over 1 MiB, or
+a saved row more than 1 MiB past a row the CLI cannot parse is not judged, and the run stops with
+that row's own error instead. The file is read once, so a named pipe works too. The
 refusal comes before anything starts, with exit 1 and no request sent. Write each object as
 `<bucket>,<key>,<size>,<version_id or empty>`. A real object with such a key and version ID would
 be refused too; no S3 server tried issues such an ID.

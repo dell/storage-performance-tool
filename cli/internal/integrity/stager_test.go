@@ -7,11 +7,14 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/dell/storage-performance-tool/cli/internal/constants"
 )
@@ -159,6 +162,24 @@ func TestStageKeepsTheCanonicalReadersErrorWhenNoSavedRowIsFound(t *testing.T) {
 			content: "bucket,key,size,version_id\n/b/s0/name,2a0f,1024,0/0,x\n",
 			want:    "stage canonical input: canonical record 2 has 5 fields, want 4",
 		},
+		{
+			// The engine refuses the file at record 2, so the saved row after it is not judged.
+			name:    "five fields before a saved row",
+			content: "bucket,key,size,version_id\n/b/s0/name,2a0f,1024,0/0,x\n/b/s0/other,2a10,1024,0/0\n",
+			want:    "stage canonical input: canonical record 2 has 5 fields, want 4",
+		},
+		{
+			name: "saved row past the rescan bound",
+			content: "bucket,key,size,version_id\n" + `b,dir/k"1,1024,` + "\n" +
+				strings.Repeat("b,k,1024,\n", maxCanonicalCSVRecordBytes/10+1) + "/b/s0/name,2a0f,1024,0/0\n",
+			want: "stage canonical input: parse canonical record 2: unexpected quote in unquoted field",
+		},
+		{
+			// The bound cuts "/b/s0/name,2a0f,1024,0/0z" after "0/0": the cut row is not judged.
+			name:    "row cut by the rescan bound",
+			content: rowCutByTheRescanBound(),
+			want:    "stage canonical input: parse canonical record 2: unexpected quote in unquoted field",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -214,6 +235,196 @@ func TestStageKeepsCanonicalRowsThatResembleSavedItems(t *testing.T) {
 			})
 		})
 	}
+}
+
+// The engine ends a record at a bare CR, which the canonical reader keeps in a field: a saved row
+// so ended is refused whatever the other line ends, also when the canonical reader accepts the
+// record.
+func TestStageRefusesSavedRowsEndedByABareCR(t *testing.T) {
+	const header = "bucket,key,size,version_id\n"
+	const saved = "/sample/s0000000/item,2a0f,1024,0/0"
+	tests := []struct {
+		name   string
+		rows   string
+		record string
+	}{
+		{"single row with a final bare CR", saved + "\r", "2"},
+		{"single row with a bare CR before CRLF", saved + "\r\r\n", "2"},
+		{"canonical row then a final bare CR", "b,k,1024,\n" + saved + "\r", "3"},
+		{"bare CR then an LF row", saved + "\rb,k,1024,\n", "2"},
+		{"LF row ended by a bare CR before the saved row", "b,k,1024,\r" + saved + "\n", "3"},
+		{"mixed LF and CR", "b,k,1024,\nb,k2,1024,\r" + saved + "\rb,k3,1024,\n", "4"},
+		{"CRLF rows then a final bare CR", "b,k,1024,\r\n" + saved + "\r", "3"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stageThroughEveryRoute(t, header+test.rows, func(t *testing.T, tempDir, _ string, err error) {
+				if err == nil || err.Error() != savedItemRowMessage(test.record) {
+					t.Fatalf("error = %v, want %q", err, savedItemRowMessage(test.record))
+				}
+				requireEmptyDir(t, tempDir)
+			})
+		})
+	}
+}
+
+func TestStageKeepsCanonicalFilesWithCRLFAndQuotedCR(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		staged  string
+	}{
+		{
+			name:    "CRLF line ends",
+			content: "bucket,key,size,version_id\r\nb,k,1024,\r\nb,2a0f,1024,v\r\n",
+			staged:  "bucket,key,size,version_id\nb,2a0f,1024,v\nb,k,1024,\n",
+		},
+		{
+			name:    "CRLF without a final line end",
+			content: "bucket,key,size,version_id\r\nb,k,1024,",
+			staged:  "bucket,key,size,version_id\nb,k,1024,\n",
+		},
+		{
+			name:    "quoted CR in a key",
+			content: "bucket,key,size,version_id\nb,\"k\r1\",1024,\nb,\"2a0f\r\",1024,0/0\n",
+			staged:  "bucket,key,size,version_id\nb,\"2a0f\r\",1024,0/0\nb,\"k\r1\",1024,\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stageThroughEveryRoute(t, test.content, func(t *testing.T, _, manifest string, err error) {
+				if err != nil {
+					t.Fatalf("error = %v, want the file accepted", err)
+				}
+				staged, readErr := os.ReadFile(manifest)
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if string(staged) != test.staged {
+					t.Fatalf("staged bytes = %q, want %q", staged, test.staged)
+				}
+			})
+		})
+	}
+}
+
+// A named pipe is read once: a refusal reads the bytes already read and what is left of the same
+// open input, and never opens the path again, which would wait for a writer that has gone.
+func TestStageReadsANamedPipeOnce(t *testing.T) {
+	const headerMessage = `items file must use exact header ["bucket" "key" "size" "version_id"]`
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"wrong header", "wrong,header\nb,k,1024,\n", headerMessage},
+		{"quote inside a canonical key", "bucket,key,size,version_id\n" + `b,dir/k"1,1024,` + "\n",
+			"stage canonical input: parse canonical record 2: unexpected quote in unquoted field"},
+		{"blank line after the header", "bucket,key,size,version_id\n\nb,k,1024,\n",
+			"stage canonical input: canonical record 2 has 1 fields, want 4"},
+		{"unterminated quote", `"unterminated`, "read canonical header: unterminated quoted field"},
+		{"quote inside a saved object path", "bucket,key,size,version_id\n" + `/b/pre"fix/item,2a0f,1024,0/0` + "\n",
+			savedItemRowMessage("2")},
+	}
+	routes := map[string]func(source string) error{
+		"delete": func(source string) error {
+			_, err := StageDeleteInputManifest(source, 326, 0, "")
+			return err
+		},
+		"read-verify": func(source string) error {
+			_, _, _, err := StageInputManifest(source, 326)
+			return err
+		},
+	}
+	for _, test := range tests {
+		for name, stage := range routes {
+			t.Run(test.name+"/"+name, func(t *testing.T) {
+				tempDir := t.TempDir()
+				t.Setenv("TMPDIR", tempDir)
+				source := filepath.Join(t.TempDir(), "input.csv")
+				if err := syscall.Mkfifo(source, 0o600); err != nil {
+					t.Skipf("mkfifo: %v", err)
+				}
+				go func() {
+					writer, err := os.OpenFile(source, os.O_WRONLY, 0)
+					if err != nil {
+						return
+					}
+					_, _ = writer.WriteString(test.content)
+					_ = writer.Close()
+				}()
+				done := make(chan error, 1)
+				go func() { done <- stage(source) }()
+				select {
+				case err := <-done:
+					if err == nil || err.Error() != test.want {
+						t.Fatalf("error = %v, want %q", err, test.want)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("staging a named pipe blocked")
+				}
+				requireEmptyDir(t, tempDir)
+			})
+		}
+	}
+}
+
+// A refusal reads at most stagingRescanTailBytes past what the canonical reader read.
+func TestStagingRefusalReadsABoundedPartOfTheInput(t *testing.T) {
+	input := &endlessRows{prefix: "bucket,key,size,version_id\n" + `b,dir/k"1,1024,` + "\n"}
+	reader := newStagingCSVReader(input)
+	var check stagingEngineCheck
+	if _, err := reader.Read(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Read(); err == nil {
+		t.Fatal("Read() error = nil, want the quote refused")
+	}
+	before := input.read
+	if err := check.refusal(reader, 2); err != nil {
+		t.Fatalf("refusal() = %v, want nil", err)
+	}
+	if extra := input.read - before; extra > maxCanonicalCSVRecordBytes {
+		t.Fatalf("refusal read %d more bytes, want at most %d", extra, maxCanonicalCSVRecordBytes)
+	}
+}
+
+// rowCutByTheRescanBound returns a file whose refusal rescan ends inside a row, at a point where
+// the row's start alone would read as a saved row.
+func rowCutByTheRescanBound() string {
+	const refused = "bucket,key,size,version_id\n" + `b,dir/k"`
+	const looksSaved = "/b/s0/name,2a0f,1024,0/0"
+	tail := "1,1024,\n"
+	fill := stagingRescanTailBytes - len(tail) - len(looksSaved)
+	rows := strings.Repeat("b,k,1024,\n", fill/10-1)
+	last := fill - len(rows) - len("b,k,1,\n")
+	tail += rows + "b,k" + strings.Repeat("0", last) + ",1,\n"
+	return refused + tail + looksSaved + "z\n"
+}
+
+// endlessRows yields prefix and then canonical rows, up to 64 MiB so that an unbounded read ends,
+// counting the bytes read.
+type endlessRows struct {
+	prefix string
+	read   int
+}
+
+func (r *endlessRows) Read(buffer []byte) (int, error) {
+	const end = 64 << 20
+	if r.read >= end {
+		return 0, io.EOF
+	}
+	buffer = buffer[:min(len(buffer), end-r.read)]
+	for n := range buffer {
+		position := r.read + n
+		if position < len(r.prefix) {
+			buffer[n] = r.prefix[position]
+		} else {
+			buffer[n] = "b,k,1024,\n"[(position-len(r.prefix))%10]
+		}
+	}
+	r.read += len(buffer)
+	return len(buffer), nil
 }
 
 func requireEmptyDir(t *testing.T, dir string) {

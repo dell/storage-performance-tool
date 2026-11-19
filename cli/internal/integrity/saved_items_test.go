@@ -106,7 +106,7 @@ func TestRefuseSavedItemsUnderHeader(t *testing.T) {
 			if err := os.WriteFile(path, []byte(test.content), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			err := RefuseSavedItemsUnderHeader(path)
+			err := RefuseSavedItemsUnderHeader(path, statFile(t, path))
 			if !test.refused {
 				if err != nil {
 					t.Fatalf("RefuseSavedItemsUnderHeader() error = %v, want nil", err)
@@ -120,8 +120,48 @@ func TestRefuseSavedItemsUnderHeader(t *testing.T) {
 	}
 }
 
+func statFile(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info
+}
+
 func TestRefuseSavedItemsUnderHeaderLeavesAnUnreadableFileToTheEngine(t *testing.T) {
-	if err := RefuseSavedItemsUnderHeader(filepath.Join(t.TempDir(), "missing.csv")); err != nil {
+	path := filepath.Join(t.TempDir(), "items.csv")
+	if err := os.WriteFile(path, []byte("bucket,key,size,version_id\n/b/s0/one,2a0f,1024,0/0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info := statFile(t, path)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := RefuseSavedItemsUnderHeader(path, info); err != nil {
 		t.Fatalf("RefuseSavedItemsUnderHeader() error = %v, want nil", err)
+	}
+}
+
+// The check judges only the file the caller examined: a path replaced since is left to the engine.
+func TestRefuseSavedItemsUnderHeaderReadsOnlyTheFileTheCallerExamined(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "items.csv")
+	if err := os.WriteFile(path, []byte("bucket,key,size,version_id\nb,k,1024,\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info := statFile(t, path)
+	replacement := filepath.Join(dir, "replacement.csv")
+	if err := os.WriteFile(replacement, []byte("bucket,key,size,version_id\n/b/s0/one,2a0f,1024,0/0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RefuseSavedItemsUnderHeader(replacement, statFile(t, replacement)); err == nil {
+		t.Fatal("RefuseSavedItemsUnderHeader(replacement) error = nil, want the saved-row refusal")
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := RefuseSavedItemsUnderHeader(path, info); err != nil {
+		t.Fatalf("RefuseSavedItemsUnderHeader() on a replaced path error = %v, want nil", err)
 	}
 }

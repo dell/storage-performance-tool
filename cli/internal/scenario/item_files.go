@@ -106,7 +106,7 @@ func prepareItemFileMount(hostPath, containerName string, mounts []FileMount) (s
 	}
 	// Only a regular file: opening a named pipe here would wait for a writer.
 	if info.Mode().IsRegular() {
-		if err := integrity.RefuseSavedItemsUnderHeader(absPath); err != nil {
+		if err := integrity.RefuseSavedItemsUnderHeader(absPath, info); err != nil {
 			return "", nil, err
 		}
 	}

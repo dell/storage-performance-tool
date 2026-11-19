@@ -2,6 +2,7 @@
 package integrity
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -144,10 +145,11 @@ func stageInputManifestWithPolicyAndOperations(
 		return "", "", "", fmt.Errorf("open input manifest: %w", err)
 	}
 	defer func() { _ = in.Close() }()
-	reader := newIdentityCSVReader(in)
+	reader := newStagingCSVReader(in)
+	var engineCheck stagingEngineCheck
 	header, err := reader.Read()
 	if err != nil || !equalFields(header, canonicalHeader) {
-		if savedErr := savedItemRowRefusal(source); savedErr != nil {
+		if savedErr := engineCheck.refusal(reader, 1); savedErr != nil {
 			return "", "", "", savedErr
 		}
 		if err != nil {
@@ -173,7 +175,7 @@ func stageInputManifestWithPolicyAndOperations(
 		}
 		if readErr != nil {
 			writeErr = fmt.Errorf("parse canonical record %d: %w", sourceCount+2, readErr)
-			if savedErr := savedItemRowRefusal(source); savedErr != nil {
+			if savedErr := engineCheck.refusal(reader, sourceCount+2); savedErr != nil {
 				_ = raw.Close()
 				return "", "", "", savedErr
 			}
@@ -183,16 +185,20 @@ func stageInputManifestWithPolicyAndOperations(
 		record, parseErr := parseManifestRecord(fields, sourceCount+1)
 		if parseErr != nil {
 			writeErr = parseErr
-			if savedErr := savedItemRowRefusal(source); savedErr != nil {
+			if savedErr := engineCheck.refusal(reader, sourceCount+1); savedErr != nil {
 				_ = raw.Close()
 				return "", "", "", savedErr
 			}
 			break
 		}
+		// Returned directly: the message is for the user, without the staging prefix below.
 		if IsSavedItemFields(record.key, record.version) {
-			// Returned directly: the message is for the user, without the staging prefix below.
 			_ = raw.Close()
-			return "", "", "", savedItemRowError(sourceCount + 1)
+			return "", "", "", savedItemRowError(engineCheck.engineRecord(sourceCount + 1))
+		}
+		if savedErr := engineCheck.accepted(reader, sourceCount+1); savedErr != nil {
+			_ = raw.Close()
+			return "", "", "", savedErr
 		}
 		if policy.expectedBucket != "" && record.bucket != policy.expectedBucket {
 			writeErr = fmt.Errorf(
@@ -284,19 +290,69 @@ func stageInputManifestWithPolicyAndOperations(
 	return stagingDir, manifestPath, completionPath, nil
 }
 
-// savedItemRowRefusal explains a file the canonical reader refused when the engine's CSV rules
-// find a saved engine items row in it: under the canonical header, the saved-row refusal with the
-// engine's record number; without the header, the header refusal with the saved-row explanation.
-// It returns nil when they find none, and the caller keeps its own error.
-func savedItemRowRefusal(source string) error {
-	record, underHeader, found := findSavedItemRowAsEngineReads(source, 0)
-	switch {
-	case !found:
+// stagingRescanTailBytes bounds what a refusal reads from the open input past the bytes the
+// canonical reader read: enough for the rest of the record that holds the byte the canonical reader
+// refused and for the records after it, up to one more canonical record's worth.
+const stagingRescanTailBytes = maxCanonicalCSVRecordBytes
+
+// stagingEngineCheck judges the stager's input by the engine's CSV rules where they part from the
+// canonical reader's, without opening the source again: it reads the bytes of the record the
+// canonical reader just read (Raw) and, after a refusal, a bounded part of the same open input.
+// The two readers end records at the same LF or CRLF outside quotes; the engine also ends one at a
+// bare CR, which the canonical reader keeps in a field. extra counts the records the engine has
+// read beyond the canonical reader's so far, and refused is set once the engine would take no
+// object from the file, after which nothing more is judged.
+type stagingEngineCheck struct {
+	extra   int
+	refused bool
+}
+
+// engineRecord returns the engine's number for the canonical reader's record number.
+func (check *stagingEngineCheck) engineRecord(canonicalRecord int) int {
+	return canonicalRecord + check.extra
+}
+
+// accepted judges a record the canonical reader read and parsed. Only a record with a bare CR in an
+// unquoted field reads differently for the engine, as more than one record; when one of them is a
+// saved engine items row, it returns the saved-row refusal.
+func (check *stagingEngineCheck) accepted(reader *canonicalCSVReader, canonicalRecord int) error {
+	if check.refused || !reader.RecordHasBareCR() {
 		return nil
-	case underHeader:
-		return savedItemRowError(record)
+	}
+	verdict := scanAsEngineReads(bytes.NewReader(reader.Raw()), engineScan{
+		firstRecord: check.engineRecord(canonicalRecord),
+	})
+	check.extra += verdict.records - 1
+	check.refused = verdict.refused
+	if verdict.found {
+		return savedItemRowError(verdict.record)
+	}
+	return nil
+}
+
+// refusal explains a record the canonical reader refused, when the engine's CSV rules find a saved
+// engine items row from that record's start to at most stagingRescanTailBytes past the refused
+// byte: under the canonical header, the saved-row refusal with the engine's record number; without
+// the header, the header refusal with the saved-row explanation. It returns nil when they find
+// none, and the caller keeps its own error.
+func (check *stagingEngineCheck) refusal(reader *canonicalCSVReader, canonicalRecord int) error {
+	read := reader.Raw()
+	if check.refused || len(read) == 0 {
+		return nil
+	}
+	tail := &cappedReader{input: reader.Rest(), left: stagingRescanTailBytes}
+	verdict := scanAsEngineReads(io.MultiReader(bytes.NewReader(read), tail), engineScan{
+		firstRecord: check.engineRecord(canonicalRecord),
+		fileStart:   canonicalRecord == 1,
+		cut:         func() bool { return tail.capped },
+	})
+	switch {
+	case !verdict.found:
+		return nil
+	case verdict.underHeader:
+		return savedItemRowError(verdict.record)
 	default:
-		return fmt.Errorf("items file must use exact header %q: %w", canonicalHeader, savedItemRowError(record))
+		return fmt.Errorf("items file must use exact header %q: %w", canonicalHeader, savedItemRowError(verdict.record))
 	}
 }
 

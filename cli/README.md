@@ -603,8 +603,11 @@ and digits may be upper or lower case. `delete --items-file` and `read-verify --
 any such row before anything starts, with exit 1, and explain this when a saved file has no header.
 `read --items-file`, `mixed --read-items-file` and `mixed --delete-items-file` still take a saved
 `items.csv` as it is; given the header, they refuse a local regular file whose first data row is
-saved. Both checks read the file as the engine does, so a quote inside an object path or bare-CR
-line ends do not hide a saved row. A real object with such a key and version ID would be refused
+saved. Both checks split rows as the engine's CSV parser does, so a quote inside an object path or
+a bare-CR line end, alone, mixed with LF or ending the file, does not hide a saved row. Not judged:
+a size in non-ASCII digits, a field over 1 MiB and, on the first two flags, a saved row more than
+1 MiB past a row the CLI cannot parse; the first two flags then stop with that row's own error, the
+other three run. A real object with such a key and version ID would be refused
 too; no S3 server tried issues such an ID.
 
 Existing-prefix mode is mutually exclusive with `--items-file`. It requires
