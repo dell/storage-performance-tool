@@ -106,10 +106,17 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 		final var dstPath = dataOp.dstPath();
 		final Path itemPath;
 		try {
-			if (!nameIsDstFile(fileItemName, dstPath)) {
+			final boolean nameIsDstFile = nameIsDstFile(fileItemName, dstPath);
+			if (!nameIsDstFile) {
 				dstParentDirs.computeIfAbsent(dstPath, DirIoHelper::createParentDir);
 			}
-			itemPath = resolvedPath != null ? resolvedPath : dstFilePath(fileItemName, dstPath);
+			if (resolvedPath != null) {
+				itemPath = resolvedPath;
+			} else {
+				itemPath = nameIsDstFile
+								? FsConstants.FS.getPath(fileItemName)
+								: FsConstants.FS.getPath(dstPath, fileItemName);
+			}
 			if (OpType.CREATE.equals(opType)) {
 				try {
 					return FsConstants.FS_PROVIDER.newFileChannel(itemPath, FsConstants.CREATE_OPEN_OPT);
