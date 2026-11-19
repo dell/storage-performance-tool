@@ -58,7 +58,10 @@ import java.util.function.Function;
  *   <li>a stop probe evaluated when the first stop-path action reaches the driver;
  *   <li>a hook on the step's await loop, which polls {@link #terminalFailure()}, to hold it or
  *       throw from it;
- *   <li>a failure thrown once from {@link #shutdown()}.
+ *   <li>a failure thrown once from {@link #shutdown()};
+ *   <li>a slow tail: operations from a given dispatch on take a longer latency, and the first
+ *       completions among them can fail with a retryable status;
+ *   <li>a listing of generated items, for a step that reads a listed path.
  * </ul>
  *
  * <p>Ordinary data operations complete without lifecycle tracking, like the dummy mock driver.
@@ -103,6 +106,10 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 	private volatile long admissionClosedNanos;
 	private volatile Runnable awaitLoopHook = () -> {};
 	private volatile RuntimeException shutdownFailure;
+	private volatile long tailFromDispatch = Long.MAX_VALUE;
+	private volatile long tailLatencyNanos;
+	private final AtomicInteger tailFailuresLeft = new AtomicInteger();
+	private volatile int listedItemCount;
 
 	private LatencyStorageDriver(
 					final int concurrency, final long latencyNanos, final boolean standaloneDelete) {
@@ -191,6 +198,23 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 	/** Thrown once from the driver's shutdown, after the window has closed. */
 	LatencyStorageDriver<I, O> failShutdownOnce(final RuntimeException failure) {
 		shutdownFailure = failure;
+		return this;
+	}
+
+	/**
+	 * Dispatches numbered {@code fromDispatch} and later, retries included, take {@code latencyMillis},
+	 * and the first {@code failures} of them complete with a retryable failure.
+	 */
+	LatencyStorageDriver<I, O> slowTail(final long fromDispatch, final long latencyMillis, final int failures) {
+		tailLatencyNanos = TimeUnit.MILLISECONDS.toNanos(latencyMillis);
+		tailFailuresLeft.set(failures);
+		tailFromDispatch = fromDispatch;
+		return this;
+	}
+
+	/** Lists this many generated items, in pages, under any path. */
+	LatencyStorageDriver<I, O> listing(final int itemCount) {
+		listedItemCount = itemCount;
 		return this;
 	}
 
@@ -349,7 +373,9 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 			deleteOp.markRequestFirstByteSent();
 		}
 		op.finishRequest();
-		if (index < slowFirstCount) {
+		if (index >= tailFromDispatch) {
+			final var unused = completer.schedule(() -> completeTail(op), tailLatencyNanos, TimeUnit.NANOSECONDS);
+		} else if (index < slowFirstCount) {
 			final List<O> wave;
 			synchronized (slowWave) {
 				slowWave.add(op);
@@ -386,6 +412,13 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 		dispatchQueued();
 	}
 
+	private void completeTail(final O op) {
+		final boolean fail = tailFailuresLeft.getAndUpdate(left -> Math.max(0, left - 1)) > 0;
+		publish(op, fail ? Operation.Status.RESP_FAIL_SVC : Operation.Status.SUCC);
+		inFlight.decrementAndGet();
+		dispatchQueued();
+	}
+
 	private boolean hold(final O op) {
 		synchronized (holdLock) {
 			if (holdingStopped || !holdWhen.getAsBoolean()) {
@@ -398,6 +431,10 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 	}
 
 	private void publish(final O op) {
+		publish(op, completionStatus.apply(op));
+	}
+
+	private void publish(final O op, final Operation.Status status) {
 		if (op instanceof DeleteRequestOperation deleteOp) {
 			deleteOp.markResponseFirstByteReceived();
 			op.finishResponse();
@@ -425,7 +462,6 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 			dataOp.startDataResponse();
 		}
 		op.finishResponse();
-		final Operation.Status status = completionStatus.apply(op);
 		op.status(status);
 		if (trackData) {
 			if (lifecycle.completionStarted(op)) {
@@ -505,8 +541,20 @@ final class LatencyStorageDriver<I extends Item, O extends Operation<I>> extends
 					final String prefix,
 					final int idRadix,
 					final I lastPrevItem,
-					final int count) {
-		return List.of();
+					final int count)
+					throws IOException {
+		if (listedItemCount == 0) {
+			return List.of();
+		}
+		final int first = lastPrevItem == null
+						? 0
+						: Integer.parseInt(lastPrevItem.name().substring(lastPrevItem.name().lastIndexOf('-') + 1)) + 1;
+		final int end = Math.min(listedItemCount, first + count);
+		final List<I> page = new ArrayList<>();
+		for (int i = first; i < end; i++) {
+			page.add(itemFactory.getItem(path + "/listed-" + i, i, 1024));
+		}
+		return page;
 	}
 
 	@Override
