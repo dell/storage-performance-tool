@@ -52,6 +52,29 @@ public class CompositeExpressionInputBuilderImpl
 	@Override
 	public final CompositeStringInput build() {
 		final var segments = (List) new ArrayList();
+		try {
+			return build(segments);
+		} catch (final RuntimeException | Error e) {
+			closeStarted(segments, e);
+			throw e;
+		}
+	}
+
+	/** Stops the asynchronous segments a failed build had started, which nothing else would close. */
+	private static void closeStarted(final List<?> segments, final Throwable failure) {
+		for (final var segment : segments) {
+			if (segment instanceof AsyncExpressionInputImpl<?> asyncSegment) {
+				try {
+					asyncSegment.close();
+				} catch (final Exception e) {
+					failure.addSuppressed(e);
+				}
+			}
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private CompositeStringInput build(final List segments) {
 		final var matcher = EXPRESSION_PATTERN.matcher(expr);
 		final var constSegmentBuilder = new StringBuilder();
 		var start = 0;

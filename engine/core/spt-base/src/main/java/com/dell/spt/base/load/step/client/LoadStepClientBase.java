@@ -193,10 +193,16 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 					final Config config, final List<Extension> extensions, final List<Config> ctxConfigs,
 					final MetricsManager metricsMgr) {
 		super(config, extensions, ctxConfigs, metricsMgr);
-		this.failureBudgetController = standaloneDeleteEnabled()
-						? new ObjectFailureBudgetController(
-										ObjectFailureBudgetConfig.from(this.config.configVal("load")))
-						: null;
+		try {
+			this.failureBudgetController = standaloneDeleteEnabled()
+							? new ObjectFailureBudgetController(
+											ObjectFailureBudgetConfig.from(this.config.configVal("load")))
+							: null;
+		} catch (final RuntimeException | Error e) {
+			// The base constructor finished, so this object is registered; a subclass's fields are not set.
+			abandonRegistration();
+			throw e;
+		}
 	}
 
 	private static <K, V> Map<K, V> synchronizedIdentityMap() {
@@ -682,6 +688,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		for (final var nodeAddr : nodeAddrs) {
 			final var fileMgr = resolveFileManager(nodeAddr);
 			if (null == fileMgr) {
+				if (Thread.currentThread().isInterrupted()) {
+					// A stop ended the retries, and the node may yet have been reachable.
+					throwUnchecked(new InterruptedException(loadStepId() + ": stopped while resolving the file manager service @ " + nodeAddr));
+				}
 				throw new IllegalStateException(
 								"Failed to resolve the file manager service @ " + nodeAddr
 												+ ". Ensure the remote node is running with --run-node");
@@ -696,20 +706,55 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	private static FileManagerService resolveFileManagerWithRetries(final String nodeAddrWithPort, final int maxRetries) {
+		return resolveFileManagerWithRetries(nodeAddrWithPort, maxRetries, FileManagerClient::resolve, Thread::sleep);
+	}
+
+	/** One try to resolve a node's file manager service; tests supply their own. */
+	@FunctionalInterface
+	interface FileManagerResolver {
+		FileManagerService resolve(String nodeAddrWithPort) throws Exception;
+	}
+
+	/** The sleep between two tries; it throws on interrupt as {@link Thread#sleep(long)} does. */
+	@FunctionalInterface
+	interface RetrySleeper {
+		void sleep(long millis) throws InterruptedException;
+	}
+
+	/**
+	 * Tries {@code maxRetries} times to resolve the file manager service of {@code nodeAddrWithPort}.
+	 * Only a {@link ConnectException} (connect refused or timed out) is retried, after a sleep of
+	 * {@code min(2^n s, 2 min)} following try {@code n}; there is no sleep after the last try.
+	 *
+	 * @return the service, or null when every try failed, a failure is not retried, or the thread is
+	 *     interrupted (the interrupt flag is then left set)
+	 */
+	static FileManagerService resolveFileManagerWithRetries(
+					final String nodeAddrWithPort, final int maxRetries, final FileManagerResolver resolver,
+					final RetrySleeper sleeper) {
+		final long startNanos = System.nanoTime();
 		FileManagerService fms = null;
 		int retryCount = 0;
 		while (null == fms && retryCount < maxRetries && !Thread.currentThread().isInterrupted()) {
 			try {
 				retryCount++;
-				fms = FileManagerClient.resolve(nodeAddrWithPort);
+				fms = resolver.resolve(nodeAddrWithPort);
 			} catch (final ConnectException e) {
+				if (retryCount >= maxRetries) {
+					LogUtil.exception(
+									Level.ERROR, e, "Failed to resolve the file manager service @ {}. Giving up after {} "
+													+ "tries in {} s",
+									nodeAddrWithPort, retryCount,
+									TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - startNanos));
+					break;
+				}
 				LogUtil.exception(
 								Level.ERROR, e, "Failed to resolve the file manager service @ {}. Will try to " +
 												"reconnect. {} retry out of {}",
 								nodeAddrWithPort, retryCount, maxRetries);
 				try {
 					final int sleepTime = 1000 * (int) Math.pow(2, retryCount);
-					Thread.sleep(Math.min(sleepTime, MAX_SLEEP_TIME_MILLIS));
+					sleeper.sleep(Math.min(sleepTime, MAX_SLEEP_TIME_MILLIS));
 				} catch (final InterruptedException ie) {
 					Thread.currentThread().interrupt();
 					break;
@@ -1983,15 +2028,20 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			try {
+				// One start time for all slices: a slice queued for a free poller must not restart the limit.
+				// Compared by subtraction, since toMillis saturates for a step without a time limit.
+				final var invokeTimeMillis = System.currentTimeMillis();
+				final var timeOutMillis = timeUnit.toMillis(timeout);
 				return stepSlices.stream().filter(s -> s != null).parallel().map(stepSlice -> {
 					try {
-						final var invokeTimeMillis = System.currentTimeMillis();
-						final var timeOutMillis = timeUnit.toMillis(timeout);
 						var awaitResult = false;
-						while (timeOutMillis > System.currentTimeMillis() - invokeTimeMillis) {
+						// A slice still queued at the limit gets one poll: only a poll reports its terminal failure.
+						var polled = timeOutMillis <= 0;
+						while (!polled || timeOutMillis > System.currentTimeMillis() - invokeTimeMillis) {
 							if (Thread.currentThread().isInterrupted()) {
 								throwUnchecked(new InterruptedException());
 							}
+							polled = true;
 							awaitResult = stepSlice.await(1, TimeUnit.MILLISECONDS);
 							if (awaitResult) { // awaitResult = (0 == countDown)
 								break;
@@ -3362,6 +3412,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			final var aliasedArgs = AliasingUtil.apply(argValPairs, aliasingConfig);
 			validateBooleanValues(ctxConfig, aliasedArgs);
 			aliasedArgs.forEach(ctxConfig::val); // merge
+			if (marksSetContextStepIds() && aliasedArgs.get("load-step-id") != null) {
+				// after the merge: a map that sets an id has its id set, whatever flag it also gives
+				ctxConfig.val("load-step-idAutoGenerated", false);
+			}
 			EngineBuildInfoProvider.global().projectVersion(ctxConfig, aliasedArgs.containsKey("run-version"));
 		} catch (final Exception e) {
 			LogUtil.exception(Level.FATAL, e, "Scenario syntax error");
@@ -3382,6 +3436,19 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		final var baseConfig = (Config) new BasicConfig(config);
 		baseConfig.val("load-step-idAutoGenerated", true);
 		return baseConfig;
+	}
+
+	/**
+	 * Whether {@link #append} marks a context whose map sets {@code load.step.id} as having its id set,
+	 * with {@code load-step-idAutoGenerated} false, so the step can tell it from an id the context only
+	 * copied from the base. The default, since 5.17.1, is {@code true}: the weighted step reads the flag
+	 * per context, and the linear and pipeline steps never read a context's flag. A step type that reads
+	 * the flag from the merge of its contexts, as the mixed step does, returns {@code false}: append
+	 * then merges the map as before 5.17.1, so a context's flag is the one it copied from the base, or
+	 * the one its map sets, and the step id the step resolves does not change.
+	 */
+	protected boolean marksSetContextStepIds() {
+		return true;
 	}
 
 	/** Whether this step's one driver mixes operations by weight, which only the mixed step type does. */

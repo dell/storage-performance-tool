@@ -103,8 +103,30 @@ class DeleteArtifactRecorderTest {
 		} finally {
 			recorder.close();
 		}
-		assertEquals(privateStagingBefore, privateStagingCount(artifactDirectory));
+		// The failed finish's staging is recovery evidence: the close keeps it.
+		assertEquals(privateStagingBefore + 2, privateStagingCount(artifactDirectory));
 		cleanup(stepId);
+		deletePrivateStaging(artifactDirectory);
+	}
+
+	@Test
+	void closeWithoutFinishKeepsRecordedStagingAndDeletesEmptyStaging(
+					@TempDir final Path temp) throws Exception {
+		final String recordedId = "delete-recorder-unfinished-" + System.nanoTime();
+		final Path recordedDirectory = path(Loggers.DELETE_OBJECTS, recordedId).getParent();
+		final long recordedBefore = privateStagingCount(recordedDirectory);
+		final DeleteArtifactRecorder recorded = new DeleteArtifactRecorder(recordedId, selection(temp), 1);
+		recorded.recordTerminal(successfulOperation(true));
+		recorded.close();
+		assertEquals(recordedBefore + 2, privateStagingCount(recordedDirectory));
+		deletePrivateStaging(recordedDirectory);
+
+		final String emptyId = "delete-recorder-empty-" + System.nanoTime();
+		final Path emptyDirectory = path(Loggers.DELETE_OBJECTS, emptyId).getParent();
+		final long emptyBefore = privateStagingCount(emptyDirectory);
+		final DeleteArtifactRecorder empty = new DeleteArtifactRecorder(emptyId, selection(temp), 1);
+		empty.close();
+		assertEquals(emptyBefore, privateStagingCount(emptyDirectory));
 	}
 
 	@Test
@@ -150,7 +172,9 @@ class DeleteArtifactRecorderTest {
 		}
 
 		assertFalse(writerThreadAlive(stepId));
-		assertEquals(privateStagingBefore, privateStagingCount(artifactDirectory));
+		// The finish was attempted and failed: its staging stays, as evidence.
+		assertEquals(privateStagingBefore + 2, privateStagingCount(artifactDirectory));
+		deletePrivateStaging(artifactDirectory);
 	}
 
 	@Test
@@ -312,6 +336,15 @@ class DeleteArtifactRecorderTest {
 		}
 		try (final var paths = Files.list(directory)) {
 			return paths.filter(path -> path.getFileName().toString().endsWith(".recording")).count();
+		}
+	}
+
+	private static void deletePrivateStaging(final Path directory) throws IOException {
+		try (final var paths = Files.list(directory)) {
+			for (final Path path : paths.filter(
+							candidate -> candidate.getFileName().toString().endsWith(".recording")).toList()) {
+				Files.delete(path);
+			}
 		}
 	}
 

@@ -161,6 +161,12 @@ public interface LoadStepContext<I extends Item, O extends Operation<I>> extends
 
 	boolean isDone();
 
+	/**
+	 * Throws this context's terminal failure, the one {@link #isDone()} would throw, and otherwise does
+	 * nothing: it reads no limits, writes no log and changes no state. Does nothing by default.
+	 */
+	default void checkTerminalFailure() {}
+
 	@Override
 	default Input<O> getInput() {
 		throw new AssertionError("Shouldn't be invoked");
@@ -171,4 +177,14 @@ public interface LoadStepContext<I extends Item, O extends Operation<I>> extends
 
 	@Override
 	void close() throws IOException;
+
+	/**
+	 * Closes a context whose stop the slice no longer retries, as a standalone DELETE in duration mode
+	 * does after its last failed close: the stop that the close repeats no longer runs again, so the
+	 * context's generator and driver are closed. Throws the stop's failure, if it runs and fails, after
+	 * the close.
+	 */
+	default void releaseAfterFailedStop() throws IOException {
+		close();
+	}
 }

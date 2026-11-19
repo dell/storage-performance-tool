@@ -156,6 +156,7 @@ public class RunServlet extends HttpServlet {
 			final var run = (Run) new RunImpl(config.stringVal("run-comment"), scenario, scriptEngine, config.longVal("run-id"));
 			final var stepId = config.stringVal("load-step-id");
 			final var runId = config.longVal("run-id");
+			final boolean acceptedBefore = apiStatus.acceptedRun(runId);
 			// Update status before executing
 			apiStatus.setRunning(stepId, runId);
 			final var statusAwareRun = new StatusAwareRun(run, apiStatus);
@@ -167,6 +168,7 @@ public class RunServlet extends HttpServlet {
 			} catch (final RejectedExecutionException e) {
 				// Only this method starts a task and it found the slot free, so this should not happen
 				Loggers.ERR.warn("The scenario executor refused run {} on a node found idle", runId);
+				apiStatus.forgetRefusedRun(runId, acceptedBefore);
 				resp.setStatus(HttpServletResponse.SC_CONFLICT);
 			}
 		} finally {

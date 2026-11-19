@@ -4,7 +4,7 @@
 1.1. [JSR-223 Compliance](#11-jsr-223-compliance)<br/>
 1.2. [New Version Changes](#12-new-version-changes)<br/>
 2. [DSL](#2-dsl)<br/>
-2.1. [Step](#21-step)<br/>
+2.1. [Load Step](#21-load-step)<br/>
 2.1.1. [Methods](#211-methods)<br/>
 2.1.2. [Types](#212-types)<br/>
 2.1.2.1. [Basic](#2121-basic)<br/>
@@ -16,7 +16,7 @@
 3. [Examples](#3-examples)<br/>
 3.1. [Javascript](#31-javascript)<br/>
 3.1.1. [External Command](#311-external-command)<br/>
-3.1.2. [Load](#312-load)<br/>
+3.1.2. [Linear Load](#312-linear-load)<br/>
 3.1.3. [Weighted Load](#313-weighted-load)<br/>
 3.1.4. [Pipeline Load](#314-pipeline-load)<br/>
 3.1.5. [S3 persisted-data integrity](#315-s3-persisted-data-integrity)<br/>
@@ -370,40 +370,80 @@ type so the call may be included into the call chain.
 
 See also the [weighted load spec](https://github.com/dell/storage-performance-tool/tree/main/engine/extensions/load-steps/weighted)
 
+A `load.step.id` set in an appended context decides where that context's results go, and the last
+context's id also names the step: see [Step ids](../../../../../../extensions/load-steps/weighted/README.md#step-ids).
+
 Example:
 
 ```javascript
+var itemsFile = "weighted_load_example.csv";
+
+// create the items for the read sub-step and list them in the items file
+PreconditionLoad
+    .config(
+        {
+            "item" : {
+                "output" : {
+                    "file" : itemsFile
+                }
+            },
+            "load" : {
+                "op" : {
+                    "limit" : {
+                        "count" : 1000
+                    }
+                }
+            }
+        }
+    )
+    .run();
+
 WeightedLoad
-    .append(
+    .config(
         {
             "load" : {
-                "generator" : {
-                    "weight" : 20
-                },
                 "step" : {
                     "limit" : {
                         "time" : "5m"
                     }
                 }
-                "type" : "create"
             }
         }
     )
     .append(
         {
             "load" : {
-                "generator" : {
+                "op" : {
+                    "type" : "create",
+                    "weight" : 20
+                }
+            }
+        }
+    )
+    .append(
+        {
+            "item" : {
+                "input" : {
+                    "file" : itemsFile
+                }
+            },
+            "load" : {
+                "op" : {
                     "recycle" : {
-                        "enabled" : true
+                        "mode" : true
                     },
+                    "type" : "read",
                     "weight" : 80
-                },
-                "type" : "read"
+                }
             }
         }
     )
     .run();
 ```
+
+The step reads its time limit from its own configuration, so set it with the ```config``` method.
+Each ```append``` map applies to one sub-step only. The weights limit
+what each sub-step may offer; see the weighted load spec for when the achieved mix follows them.
 
 The ```config``` method appends the configuration structure element to the step.
 An argument should be a dictionary/map with a structure equivalent to the configuration structure

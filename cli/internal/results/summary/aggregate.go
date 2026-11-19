@@ -370,6 +370,7 @@ func buildEngineIdentitySummary(manifest *engineinfo.Manifest, unavailableReason
 
 const (
 	workloadTypeList        = workloadreg.List
+	workloadTypeRead        = workloadreg.Read
 	workloadTypeReadVerify  = workloadreg.ReadVerify
 	objectSizeAverageSuffix = " avg"
 )
@@ -401,8 +402,12 @@ func buildWorkloadSummary(data *RunData) (WorkloadSummary, []string) {
 	}
 	isList := strings.EqualFold(workloadType, workloadreg.List)
 	objectSizeHuman := ""
-	if strings.TrimSpace(params.ObjectSize) != "" {
+	if trimmedSize := strings.TrimSpace(params.ObjectSize); trimmedSize != "" {
 		objectSizeHuman = formatBytes(sizeBytes)
+		if sizeWarn != nil {
+			// A size range such as 16KiB-256KiB is not one size: show it as given, not as 0 B.
+			objectSizeHuman = trimmedSize
+		}
 	}
 	summary := WorkloadSummary{
 		Type:              workloadType,
@@ -944,7 +949,8 @@ func deriveMetrics(stepData *StepData, objectSizeBytes int64) *PhaseMetrics {
 		metrics.ObjectSizeMiB = bytesToMiB(objectSizeBytes)
 		metrics.ObjectSizeGiB = bytesToGiB(objectSizeBytes)
 		metrics.ObjectSizeHuman = formatBytes(objectSizeBytes)
-	} else if strings.EqualFold(row.Operation, reportOperationRead) && row.SuccessCount > 0 && row.SizeBytes > 0 {
+	} else if strings.EqualFold(row.Operation, reportOperationRead) && row.SuccessCount > 0 && row.SizeBytes > 0 &&
+		stepData.RangeRead == nil && !stepData.RangeReadExpected { // A partial READ averages its ranges, not its objects.
 		averageSizeBytes := int64(math.Round(float64(row.SizeBytes) / float64(row.SuccessCount)))
 		metrics.ObjectSizeBytes = averageSizeBytes
 		metrics.ObjectSizeMiB = bytesToMiB(averageSizeBytes)

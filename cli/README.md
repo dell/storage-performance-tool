@@ -595,6 +595,23 @@ SHA-256. Canonical selection order is deterministic but can differ from another 
 Duration mode uses the complete frozen selection without recycling and rejects early inventory
 exhaustion. This slice rejects `--prefix` and `--cleanup`; failed staging is removed.
 
+A saved `items.csv` (`--save-items` output) is a different format, and adding the header does not
+convert it. A row counts as saved when its `key` is a hexadecimal offset that fits a signed 64-bit
+integer and its `version_id` is `<layer>/<mask>`: the layer a hexadecimal number that fits a signed
+32-bit integer, the mask hexadecimal digits or none, so `0/` counts. Either number may carry a sign,
+and digits may be upper or lower case. `delete --items-file` and `read-verify --items-file` refuse
+any such row before anything starts, with exit 1, and explain this when a saved file has no header.
+`read --items-file`, `mixed --read-items-file` and `mixed --delete-items-file` still take a saved
+`items.csv` as it is; given the header, they refuse a local regular file whose first data row is
+saved. Both checks split rows as the engine's CSV parser does, so a quote inside an object path or a
+bare-CR line end, alone, mixed with LF, after earlier bare-CR rows or ending the file, does not hide
+a saved row. Not judged: a size in non-ASCII digits; a key, size or version ID over 1 MiB (an object
+path cut at 1 MiB is still judged); and, on the first two flags, a saved row whose end the CLI does
+not see within 1 MiB after it stops reading a row it cannot parse, or, on a named pipe or other
+stream, one whose line end is not yet in the CLI's buffer. The first two flags then stop with exit 1 and the CLI's own error for the file; the
+other three run. A real object with such a key and version ID would be refused too; no S3 server
+tried issues such an ID.
+
 Existing-prefix mode is mutually exclusive with `--items-file`. It requires
 `--delete-existing --bucket <exact-bucket> --prefix <exact-prefix>`; the prefix must be nonempty
 unless the command also supplies `--allow-empty-prefix`. A whole-bucket scope is never inferred,
