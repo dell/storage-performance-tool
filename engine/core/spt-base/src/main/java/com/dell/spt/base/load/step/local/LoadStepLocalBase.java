@@ -147,6 +147,38 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 		return index < contexts.size() ? contexts.get(index).activeOpCount() : 0;
 	}
 
+	/**
+	 * Closes what a failed {@code init()} opened before the context it was building, and returns
+	 * {@code failure} to rethrow. That context's own driver and generator are closed by its
+	 * {@link ContextInitResources}. When the failure came before {@code init()} added that context
+	 * ({@code contextPending}), this closes every context added before it and empties
+	 * {@link #stepContexts}. Otherwise the step's close owns them all and nothing is closed here. Any
+	 * {@code Throwable} a close throws, an {@code Error} as well, is added to {@code failure} as
+	 * suppressed, and the remaining contexts are still closed. An earlier context's close logs an
+	 * {@code IOException} from its own driver's close itself and does not throw it, so that failure is
+	 * in the log only, not among the suppressed.
+	 */
+	protected final <T extends Throwable> T closeAfterInitFailure(
+					final T failure, final boolean contextPending) {
+		if (!contextPending) {
+			return failure;
+		}
+		final List<AutoCloseable> resources = new ArrayList<>(stepContexts);
+		stepContexts.clear();
+		for (final AutoCloseable resource : resources) {
+			try {
+				resource.close();
+			} catch (final Throwable closeFailure) {
+				// An Error from a close is kept as well, so the original failure and the later closes win.
+				if (closeFailure instanceof InterruptedException) {
+					Thread.currentThread().interrupt();
+				}
+				failure.addSuppressed(closeFailure);
+			}
+		}
+		return failure;
+	}
+
 	protected LoadStepLocalBase(
 					final Config baseConfig,
 					final List<Extension> extensions,

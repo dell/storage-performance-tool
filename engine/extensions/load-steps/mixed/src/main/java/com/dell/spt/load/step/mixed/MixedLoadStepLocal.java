@@ -30,6 +30,7 @@ import com.dell.spt.base.logging.Loggers;
 import com.dell.spt.base.metrics.MetricsManager;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.storage.Credential;
+import com.dell.spt.base.storage.driver.CompositeOperationSupport;
 import com.dell.spt.base.storage.driver.CompositeResults;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.util.BinarySizeFormat;
@@ -294,6 +295,7 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 		} else {
 			sizeThreshold = TypeUtil.typeConvert(sizeThresholdRaw, long.class);
 		}
+		requireCompositeSupport(driver, getWeight > 0, putWeight > 0, sizeThreshold);
 
 		final Map<OpType, OperationsBuilder> builders = new EnumMap<>(OpType.class);
 		int originIdx = 0;
@@ -543,6 +545,25 @@ public final class MixedLoadStepLocal extends LoadStepLocalBase {
 							ItemNameInputFactory.shardCount(itemConfig.configVal("naming")));
 		}
 		return builder;
+	}
+
+	/**
+	 * Refuses, at step start, a ranges threshold that would make composite READ or CREATE operations
+	 * on a driver without composite support. The caller's {@link ContextInitResources} closes that
+	 * driver, which no step context owns yet.
+	 */
+	static void requireCompositeSupport(
+					final StorageDriver driver, final boolean reads, final boolean creates, final long sizeThreshold) {
+		try {
+			if (reads) {
+				CompositeOperationSupport.requireSupport(driver, OpType.READ, sizeThreshold);
+			}
+			if (creates) {
+				CompositeOperationSupport.requireSupport(driver, OpType.CREATE, sizeThreshold);
+			}
+		} catch (final IllegalConfigurationException e) {
+			throw new IllegalStateException("Failed to initialize storage driver", e);
+		}
 	}
 
 	/** Creates an {@link OperationsBuilder} for the given op type. */

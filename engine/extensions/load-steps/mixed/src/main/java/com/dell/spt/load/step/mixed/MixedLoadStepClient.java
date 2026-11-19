@@ -7,6 +7,7 @@ import com.dell.spt.base.item.ItemFactory;
 import com.dell.spt.base.item.ItemType;
 import com.dell.spt.base.item.io.ItemInputFactory;
 import com.dell.spt.base.item.op.OpType;
+import com.dell.spt.base.load.step.client.CompositeCheckedOperations;
 import com.dell.spt.base.load.step.client.ItemInputFileSlicer;
 import com.dell.spt.base.load.step.client.LoadStepClientBase;
 import com.dell.spt.base.load.step.file.FileManager;
@@ -25,9 +26,11 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -38,7 +41,8 @@ import java.util.stream.Stream;
  */
 @SuppressWarnings({"unchecked", "rawtypes"
 })
-public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepClient> {
+public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepClient>
+				implements CompositeCheckedOperations {
 
 	/** The item output file {@link #init()} chose because none was given; {@code null} until then. */
 	private volatile String defaultItemOutputFile;
@@ -81,6 +85,19 @@ public final class MixedLoadStepClient extends LoadStepClientBase<MixedLoadStepC
 	@Override
 	protected boolean controlsOperations(final int contextIndex) {
 		return contextIndex == (ctxConfigs == null || ctxConfigs.isEmpty() ? BASE_CONFIG : ctxConfigs.size() - 1);
+	}
+
+	/** A mixed step makes READ operations for a GET weight and CREATE operations for a PUT weight. */
+	@Override
+	public Set<OpType> compositeCheckedOpTypes(final Config config) {
+		final Set<OpType> opTypes = EnumSet.noneOf(OpType.class);
+		if (config.intVal("load-op-weights-get") > 0) {
+			opTypes.add(OpType.READ);
+		}
+		if (config.intVal("load-op-weights-put") > 0) {
+			opTypes.add(OpType.CREATE);
+		}
+		return opTypes;
 	}
 
 	@Override

@@ -67,6 +67,9 @@ import com.dell.spt.base.metrics.context.DistributedMetricsContext;
 import com.dell.spt.base.metrics.context.DistributedMetricsContextImpl;
 import com.dell.spt.base.metrics.context.MetricsContext;
 import com.dell.spt.base.metrics.snapshot.AllMetricsSnapshot;
+import com.dell.spt.base.storage.driver.CompositeOperationSupport;
+import com.dell.spt.base.storage.driver.CompositeOperationsUnsupported;
+import com.dell.spt.base.item.op.data.DataOperationsBuilderImpl;
 import com.dell.spt.base.storage.driver.StorageDriver;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketProvisioning;
 import com.dell.spt.base.storage.driver.bucket.TargetBucketStep;
@@ -91,6 +94,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -335,10 +339,12 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 				}
 			}
 			final var nicSetExpected = nicSetExpected(configSlices, ctxConfigsSlices);
+			// Before the base or any context lists an item input.
+			refuseCompositeInAppendedContexts();
 			final Runnable distribution = () -> {
-				addFileClients(config, configSlices, suppliesItems(BASE_CONFIG));
+				addFileClients(config, configSlices, suppliesItems(BASE_CONFIG), controlsOperations(BASE_CONFIG));
 				for (var i = 0; i < slicesByCtxConfig.size(); i++) {
-					addFileClients(ctxConfigs.get(i), slicesByCtxConfig.get(i), suppliesItems(i));
+					addFileClients(ctxConfigs.get(i), slicesByCtxConfig.get(i), suppliesItems(i), controlsOperations(i));
 				}
 			};
 			// The barrier's deadline starts before the items are distributed (D54-R2).
@@ -775,7 +781,48 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		return fms;
 	}
 
-	private void addFileClients(final Config config, final List<Config> configSlices, final boolean suppliesItems) {
+	/** The data input the entry's driver for {@code config} reads its data from. */
+	private static DataInput entryDataInput(final Config config) throws IOException {
+		return entryDataInput(config, entryDataLayerSize(config));
+	}
+
+	/**
+	 * The data input layer size of {@code config}. The entry parses it before it builds its driver, so
+	 * a malformed size fails the step before any slice starts, as in 5.17.0.
+	 */
+	private static SizeInBytes entryDataLayerSize(final Config config) {
+		final var itemDataInputLayerSizeRaw = config.configVal("item").configVal("data").configVal("input").configVal("layer").val("size");
+		if (itemDataInputLayerSizeRaw instanceof String) {
+			return BinarySizeFormat.parseSize((String) itemDataInputLayerSizeRaw);
+		}
+		return new SizeInBytes(TypeUtil.typeConvert(itemDataInputLayerSizeRaw, int.class));
+	}
+
+	/** The data input the entry's driver for {@code config} reads its data from, at {@code itemDataLayerSize}. */
+	private static DataInput entryDataInput(final Config config, final SizeInBytes itemDataLayerSize)
+					throws IOException {
+		final var itemDataConfig = config.configVal("item").configVal("data");
+		final var itemDataInputConfig = itemDataConfig.configVal("input");
+		final var itemDataInputLayerConfig = itemDataInputConfig.configVal("layer");
+		return DataInput.instance(
+						itemDataInputConfig.stringVal("file"),
+						itemDataInputConfig.stringVal("seed"),
+						itemDataLayerSize,
+						itemDataInputLayerConfig.intVal("cache"),
+						itemDataInputLayerConfig.boolVal("heap"),
+						itemDataInputConfig.doubleVal("compressibility"),
+						itemDataConfig.boolVal("dedupable"));
+	}
+
+	/** The verify flag the entry's driver for {@code config} is built with, without its warning. */
+	private static boolean entryVerifyFlag(final Config config) {
+		final var itemDataConfig = config.configVal("item").configVal("data");
+		return itemDataConfig.boolVal("verify") && itemDataConfig.boolVal("dedupable");
+	}
+
+	private void addFileClients(
+					final Config config, final List<Config> configSlices, final boolean suppliesItems,
+					final boolean controlsOperations) {
 		final var loadConfig = config.configVal("load");
 		final var batchSize = loadConfig.intVal("batch-size");
 		final var storageConfig = config.configVal("storage");
@@ -783,19 +830,7 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		final var itemDataConfig = itemConfig.configVal("data");
 		final var verifyFlag = itemDataConfig.boolVal("verify");
 		final var itemDataInputConfig = itemDataConfig.configVal("input");
-		final var itemDataInputLayerConfig = itemDataInputConfig.configVal("layer");
-		final var itemDataInputLayerSizeRaw = itemDataInputLayerConfig.val("size");
-		final SizeInBytes itemDataLayerSize;
-		if (itemDataInputLayerSizeRaw instanceof String) {
-			itemDataLayerSize = BinarySizeFormat.parseSize((String) itemDataInputLayerSizeRaw);
-		} else {
-			itemDataLayerSize = new SizeInBytes(TypeUtil.typeConvert(itemDataInputLayerSizeRaw, int.class));
-		}
 		final var itemDataInputFile = itemDataInputConfig.stringVal("file");
-		final var itemDataInputSeed = itemDataInputConfig.stringVal("seed");
-		final var itemDataInputLayerCacheSize = itemDataInputLayerConfig.intVal("cache");
-		final var isInHeapMem = itemDataInputLayerConfig.boolVal("heap");
-		final var itemDataCompressibility = itemDataInputConfig.doubleVal("compressibility");
 		final var isDedupable = itemDataConfig.boolVal("dedupable");
 		final var effectiveVerifyFlag = effectiveVerifyFlag(verifyFlag, isDedupable, loadStepId());
 		final var opConfig = loadConfig.configVal("op");
@@ -851,35 +886,37 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 			Loggers.MSG.info("{}: skipping item input scatter for LIST workload", loadStepId());
 		}
 
+		final var itemDataLayerSize = entryDataLayerSize(config);
 		try (
-						final var dataInput = DataInput.instance(
-										itemDataInputFile, itemDataInputSeed, itemDataLayerSize, itemDataInputLayerCacheSize, isInHeapMem,
-										itemDataCompressibility, isDedupable);
+						final var dataInput = entryDataInput(config, itemDataLayerSize);
 						final var storageDriver = StorageDriver.instance(
-										extensions, storageConfig, dataInput, effectiveVerifyFlag, batchSize, loadStepId());
-						final var itemInput = skipScatter
-										? null
-										: ItemInputFactory.createItemInput(itemConfig, batchSize, storageDriver)) {
-			if (null != itemDataInputFile && !itemDataInputFile.isEmpty()) {
-				itemDataInputFileSlicers.add(
-								new ItemDataInputFileSlicer(loadStepId(), fileMgrs, configSlices, itemDataInputFile, batchSize));
-				Loggers.MSG.debug("{}: item data input file slicer initialized", loadStepId());
+										extensions, storageConfig, dataInput, effectiveVerifyFlag, batchSize, loadStepId())) {
+			// The driver is owned from here, so a refusal or any other failure below closes it.
+			if (controlsOperations) {
+				refuseCompositeWithoutSupport(storageDriver, config);
 			}
-			if (!skipScatter && itemInput != null) {
-				final var slicer = new ItemInputFileSlicer(
-								loadStepId(), fileMgrs, configSlices, itemInput, batchSize, integrityConfig.enabled(), itemSizeRecording);
-				itemInputFileSlicers.add(slicer);
-				Loggers.MSG.debug("{}: item input file slicer initialized", loadStepId());
-				if (!integrityConfig.enabled() && slicer.distributedItems() == 0) {
-					requireAnItemFromAFile(itemConfig, opType);
+			try (final var itemInput = skipScatter ? null : ItemInputFactory.createItemInput(itemConfig, batchSize, storageDriver)) {
+				if (null != itemDataInputFile && !itemDataInputFile.isEmpty()) {
+					itemDataInputFileSlicers.add(
+									new ItemDataInputFileSlicer(loadStepId(), fileMgrs, configSlices, itemDataInputFile, batchSize));
+					Loggers.MSG.debug("{}: item data input file slicer initialized", loadStepId());
 				}
-				if (suppliesItems) {
-					requireAnItemPerEngine(config, slicer.distributedItems(), configSlices.size());
+				if (!skipScatter && itemInput != null) {
+					final var slicer = new ItemInputFileSlicer(
+									loadStepId(), fileMgrs, configSlices, itemInput, batchSize, integrityConfig.enabled(), itemSizeRecording);
+					itemInputFileSlicers.add(slicer);
+					Loggers.MSG.debug("{}: item input file slicer initialized", loadStepId());
+					if (!integrityConfig.enabled() && slicer.distributedItems() == 0) {
+						requireAnItemFromAFile(itemConfig, opType);
+					}
+					if (suppliesItems) {
+						requireAnItemPerEngine(config, slicer.distributedItems(), configSlices.size());
+					}
+				} else if (!skipScatter && !integrityConfig.enabled()) {
+					distributeNoItemsIfNothingToDelete(itemConfig, opType, itemType, configSlices, batchSize);
 				}
-			} else if (!skipScatter && !integrityConfig.enabled()) {
-				distributeNoItemsIfNothingToDelete(itemConfig, opType, itemType, configSlices, batchSize);
+				itemInputFileSlicers.addAll(sliceOwnItemFiles(config, fileMgrs, configSlices, batchSize));
 			}
-			itemInputFileSlicers.addAll(sliceOwnItemFiles(config, fileMgrs, configSlices, batchSize));
 		} catch (final RunTerminalException e) {
 			if (integrityConfig.enabled()) {
 				// This message is already public, and names what's wrong with the input.
@@ -1105,10 +1142,129 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 		return file == null || file.isEmpty() ? null : file;
 	}
 
-	/** This message is public, so it counts the engine and leaves its address and the cause to the log. */
+	/**
+	 * The op types with a composite implementation (CREATE or READ) that {@code config} makes: its
+	 * {@code load-op-type} for a DATA item, else none, or what a {@link CompositeCheckedOperations}
+	 * client returns.
+	 */
+	private Set<OpType> compositeCheckedOpTypes(final Config config) {
+		final Set<OpType> opTypes;
+		if (this instanceof CompositeCheckedOperations client) {
+			opTypes = client.compositeCheckedOpTypes(config);
+		} else if (ItemType.DATA.equals(ItemType.valueOf(config.stringVal("item-type").toUpperCase(Locale.ROOT)))) {
+			opTypes = Set.of(OpType.valueOf(config.stringVal("load-op-type").toUpperCase(Locale.ROOT)));
+		} else {
+			opTypes = Set.of();
+		}
+		final Set<OpType> composite = EnumSet.noneOf(OpType.class);
+		for (final OpType opType : opTypes) {
+			if (DataOperationsBuilderImpl.buildsCompositeOperations(opType)) {
+				composite.add(opType);
+			}
+		}
+		return composite;
+	}
+
+	/**
+	 * Refuses, on this engine and before the item input is created, a composite configuration of
+	 * {@code config} on {@code driver} when its class declares {@link CompositeOperationsUnsupported}:
+	 * the input of a READ from a storage path lists that path. The same check runs again in each step
+	 * slice. The caller owns and closes the driver, and the refusal ends the run with its own message.
+	 *
+	 * <p>The threshold is read only for a CREATE or READ on such a driver. A threshold that does not
+	 * parse is left to the step slice, whose own parse fails the run as it did before this check.
+	 */
+	private void refuseCompositeWithoutSupport(final StorageDriver<?, ?> driver, final Config config) {
+		final var opTypes = compositeCheckedOpTypes(config);
+		if (opTypes.isEmpty() || !CompositeOperationSupport.declaresNoCompositeSupport(driver)) {
+			return;
+		}
+		final long sizeThreshold;
+		try {
+			sizeThreshold = CompositeOperationSupport.sizeThreshold(config.configVal("item-data-ranges"));
+		} catch (final RuntimeException malformed) {
+			return;
+		}
+		try {
+			for (final OpType opType : opTypes) {
+				CompositeOperationSupport.requireSupport(driver, opType, sizeThreshold);
+			}
+		} catch (final IllegalConfigurationException refusal) {
+			LogUtil.exception(Level.ERROR, refusal, "{}: refused at step start", loadStepId());
+			throw new RunTerminalException(
+							IntegrityTerminalException.Category.CONFIGURATION, loadStepId(), refusal.getMessage(), refusal);
+		}
+	}
+
+	/**
+	 * Refuses, before the entry builds or lists any item input, a composite configuration of any
+	 * appended context that controls the operations. The entry distributes the base first and each
+	 * context after it, so the check on a context's own driver would come after the base's input was
+	 * read. The base needs no check here: it is distributed first, and its own driver is checked
+	 * before its input is created.
+	 *
+	 * <p>Whether a driver declares {@link CompositeOperationsUnsupported} is known only from the class
+	 * its factory builds, so this builds the context's driver once, checks it and closes it. It does so
+	 * only for a context that makes CREATE or READ operations with a threshold above 0. A scenario's
+	 * threshold arrives as text, so it is parsed first; one that does not parse is left to the step
+	 * slice. A driver that fails to build here is left to the distribution, which reports it as before.
+	 */
+	private void refuseCompositeInAppendedContexts() {
+		if (ctxConfigs == null) {
+			return;
+		}
+		for (var ctxIndex = 0; ctxIndex < ctxConfigs.size(); ctxIndex++) {
+			final var ctxConfig = ctxConfigs.get(ctxIndex);
+			if (!controlsOperations(ctxIndex) || compositeCheckedOpTypes(ctxConfig).isEmpty()) {
+				continue;
+			}
+			final long threshold;
+			try {
+				threshold = CompositeOperationSupport.sizeThreshold(ctxConfig.configVal("item-data-ranges"));
+			} catch (final RuntimeException malformed) {
+				// Left to the step slice, whose own parse fails the run, as in 5.17.0.
+				continue;
+			}
+			if (threshold <= 0) {
+				continue;
+			}
+			try (
+							final var dataInput = entryDataInput(ctxConfig);
+							final var driver = StorageDriver.instance(
+											extensions,
+											ctxConfig.configVal("storage"),
+											dataInput,
+											entryVerifyFlag(ctxConfig),
+											ctxConfig.intVal("load-batch-size"),
+											loadStepId())) {
+				refuseCompositeWithoutSupport(driver, ctxConfig);
+			} catch (final RunTerminalException refusal) {
+				throw refusal;
+			} catch (final InterruptedException e) {
+				throwUnchecked(e);
+			} catch (final Exception e) {
+				LogUtil.exception(
+								Level.DEBUG, e, "{}: no composite-support check before the distribution", loadStepId());
+			}
+		}
+	}
+
+	/**
+	 * This message is public, so it counts the engine and leaves its address and the cause to the
+	 * log. A refused composite configuration is the exception: its message names only the driver
+	 * type, the op type and the setting, and is kept.
+	 */
 	RunTerminalException sliceStartFailure(final Exception cause, final int slice, final int sliceCount) {
 		final var engine = "engine " + (slice + 1) + " of " + sliceCount;
 		final var typed = RunTerminalException.find(cause);
+		final var refusal = typed == null ? CompositeOperationSupport.find(cause) : null;
+		if (refusal != null) {
+			return new RunTerminalException(
+							IntegrityTerminalException.Category.CONFIGURATION,
+							loadStepId(),
+							engine + " did not start: " + refusal.getMessage(),
+							cause);
+		}
 		if (typed == null) {
 			return new RunTerminalException(
 							IntegrityTerminalException.Category.EXECUTION,
@@ -1137,6 +1293,14 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	/** A slice that didn't start under the admission barrier: its engine named, and the category of a cause that has one, such as a bad items line. */
 	RunTerminalException barrierStartFailure(final Exception cause, final String engine) {
 		final var typed = RunTerminalException.find(cause);
+		final var refusal = typed == null ? CompositeOperationSupport.find(cause) : null;
+		if (refusal != null) {
+			return new RunTerminalException(
+							IntegrityTerminalException.Category.CONFIGURATION,
+							loadStepId(),
+							"Step " + loadStepId() + " did not start: " + engine + ": " + refusal.getMessage(),
+							cause);
+		}
 		return new RunTerminalException(
 						typed != null ? typed.category() : IntegrityTerminalException.Category.EXECUTION,
 						loadStepId(),
