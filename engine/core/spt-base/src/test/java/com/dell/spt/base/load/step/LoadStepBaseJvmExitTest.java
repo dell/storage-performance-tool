@@ -12,6 +12,8 @@ import com.dell.spt.base.buildinfo.EngineBuildInfoPublisher;
 import com.dell.spt.base.concurrent.JvmExit;
 import com.dell.spt.base.concurrent.JvmExitTestSupport;
 import com.dell.spt.base.config.TestConfigBuilder;
+import com.dell.spt.base.control.run.RunTerminalException;
+import com.dell.spt.base.integrity.IntegrityTerminalException;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.item.op.OpType;
 import com.dell.spt.base.load.step.file.FileManager;
@@ -29,8 +31,15 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
+import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.ThreadContext;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.Logger;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -40,6 +49,8 @@ import org.junit.jupiter.api.io.TempDir;
 class LoadStepBaseJvmExitTest {
 
 	private static final String STEP_ID = "jvm-exit-step";
+	private static final String STOPPED_LINE = STEP_ID + ": step start stopped, the engine is exiting";
+	private static final String END_OF_LOG = "jvm-exit-test: end of the log";
 
 	@TempDir
 	Path logHome;
@@ -134,6 +145,134 @@ class LoadStepBaseJvmExitTest {
 		assertFalse(Files.exists(eventLoops), "the refused slice wrote its event loops file");
 	}
 
+	@Test
+	void aStartStoppedByTheExitEndsAsAStopWithOneInfoLine() throws Exception {
+		final var step = new RecordingStep(config());
+		step.duringInit = () -> {
+			JvmExit.markBegun();
+			Thread.currentThread().interrupt();
+			throw new IllegalStateException("cut short by the interrupt");
+		};
+
+		final List<LoggedLine> lines = logOf(() -> assertStoppedRun(step));
+
+		assertEquals(1, lines.stream().filter(line -> line.message.equals(STOPPED_LINE) && line.level == Level.INFO).count(), lines::toString);
+		assertNoStartFailureLine(lines);
+	}
+
+	@Test
+	void aStartStoppedByTheNodeApiEndsAsAStopWithoutTheExitLine() throws Exception {
+		final var step = new RecordingStep(config());
+		step.duringInit = () -> {
+			Thread.currentThread().interrupt();
+			throw new IllegalStateException("cut short by the interrupt");
+		};
+
+		final List<LoggedLine> lines = logOf(() -> assertStoppedRun(step));
+
+		assertTrue(lines.stream().noneMatch(line -> line.message.equals(STOPPED_LINE)), lines::toString);
+		assertNoStartFailureLine(lines);
+	}
+
+	@Test
+	void anInterruptedFailureInsideTheWrappedStartLogsNoWarning() throws Exception {
+		final var step = new RecordingStep(config());
+		step.duringStart = () -> {
+			Thread.currentThread().interrupt();
+			throw new IllegalStateException("cut short by the interrupt");
+		};
+
+		final List<LoggedLine> lines = logOf(() -> assertStoppedRun(step));
+
+		assertNoStartFailureLine(lines);
+	}
+
+	@Test
+	void aTypedFailureOfAnInterruptedStartStaysAFailure() {
+		final var step = new RecordingStep(config());
+		step.duringInit = () -> {
+			Thread.currentThread().interrupt();
+			throw new RunTerminalException(IntegrityTerminalException.Category.EXECUTION, "the target refused", null);
+		};
+		try {
+			assertThrows(RunTerminalException.class, step::run);
+		} finally {
+			Thread.interrupted();
+		}
+	}
+
+	@Test
+	void aFailedStartThatNoStopInterruptedStaysAFailure() throws Exception {
+		final var step = new RecordingStep(config());
+		step.duringStart = () -> {
+			JvmExit.markBegun();
+			throw new IllegalStateException("a real failure during the exit");
+		};
+
+		final List<LoggedLine> lines = logOf(() -> assertInstanceOf(RunTerminalException.class, assertThrows(Throwable.class, step::run)));
+
+		assertTrue(lines.stream().noneMatch(line -> line.message.equals(STOPPED_LINE)), lines::toString);
+		assertTrue(lines.stream().anyMatch(line -> line.message.contains("step failed to start")), lines::toString);
+	}
+
+	private static void assertStoppedRun(final RecordingStep step) {
+		try {
+			assertInstanceOf(InterruptedException.class, assertThrows(Throwable.class, step::run));
+			assertInstanceOf(InterruptedException.class, step.runFailure());
+			assertTrue(step.isClosed());
+		} finally {
+			Thread.interrupted();
+		}
+	}
+
+	private static void assertNoStartFailureLine(final List<LoggedLine> lines) {
+		assertTrue(
+						lines.stream().noneMatch(line -> line.message.toLowerCase(java.util.Locale.ROOT).contains("failed to start")),
+						lines::toString);
+	}
+
+	/** What the message and error loggers received while {@code action} ran, up to a closing marker. */
+	private static List<LoggedLine> logOf(final Runnable action) throws InterruptedException {
+		final var context = LoggerContext.getContext(false);
+		final Logger messages = context.getLogger(Loggers.MSG.getName());
+		final Logger errors = context.getLogger(Loggers.ERR.getName());
+		final var capture = new LogCapture();
+		capture.start();
+		messages.addAppender(capture);
+		errors.addAppender(capture);
+		try {
+			action.run();
+			// The loggers may be asynchronous: this line comes after everything the action logged.
+			Loggers.ERR.error(END_OF_LOG);
+			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+			while (capture.lines.stream().noneMatch(line -> line.message.equals(END_OF_LOG))) {
+				assertTrue(System.nanoTime() < deadline, "the log did not reach its end: " + capture.lines);
+				Thread.sleep(10);
+			}
+			return List.copyOf(capture.lines);
+		} finally {
+			messages.removeAppender(capture);
+			errors.removeAppender(capture);
+			capture.stop();
+		}
+	}
+
+	private record LoggedLine(Level level, String message) {}
+
+	private static final class LogCapture extends AbstractAppender {
+
+		private final List<LoggedLine> lines = new CopyOnWriteArrayList<>();
+
+		private LogCapture() {
+			super("jvmExitTestCapture", null, null, true, Property.EMPTY_ARRAY);
+		}
+
+		@Override
+		public void append(final LogEvent event) {
+			lines.add(new LoggedLine(event.getLevel(), event.getMessage().getFormattedMessage()));
+		}
+	}
+
 	private void assertNoStepDirectory() {
 		assertFalse(Files.exists(buildRecord().getParent()), "the refused step wrote its directory");
 	}
@@ -153,6 +292,8 @@ class LoadStepBaseJvmExitTest {
 	private static final class RecordingStep extends LoadStepBase {
 
 		private final List<String> calls = new ArrayList<>();
+		private Runnable duringInit = () -> {};
+		private Runnable duringStart = () -> {};
 
 		private RecordingStep(final Config config) {
 			super(config, Collections.emptyList(), Collections.emptyList(), mock(MetricsManager.class));
@@ -166,11 +307,13 @@ class LoadStepBaseJvmExitTest {
 		@Override
 		protected void init() {
 			calls.add("init");
+			duringInit.run();
 		}
 
 		@Override
 		protected void doStartWrapped() {
 			calls.add("start");
+			duringStart.run();
 		}
 
 		@Override
