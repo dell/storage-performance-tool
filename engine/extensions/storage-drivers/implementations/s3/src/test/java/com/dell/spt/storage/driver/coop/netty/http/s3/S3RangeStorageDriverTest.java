@@ -183,6 +183,17 @@ class S3RangeStorageDriverTest {
 		}
 	}
 
+	/** A key with ?, # or a space reaches the target encoded, so the range read names that key. */
+	@Test
+	void aRangeReadOfAKeyWithQueryCharactersSendsTheEncodedPath() throws Exception {
+		try (var f = new Fixture(new RangeReadPolicy(3, 2L, 1), false, n -> new Response(206, "echo/10", "abc"))) {
+			var op = f.read("a?b c#d", 10);
+			assertEquals(Operation.Status.SUCC, f.outcome());
+			assertEquals("/bucket/a%3Fb%20c%23d", f.requests.poll().path());
+			assertEquals("/bucket/a?b c#d", op.item().name(), "the item keeps the literal key");
+		}
+	}
+
 	@Test
 	void exactSignedGetPreservesWholeObjectMetadataAndSendsFixedOutOfBoundsUnchanged() throws Exception {
 		var policy = new RangeReadPolicy(3, 2L, 1);
