@@ -59,6 +59,15 @@ public final class FileStorageDriver<I extends Item, O extends Operation<I>>
 		requestAuthTokenFunc = null; // do not use
 	}
 
+	/**
+	 * No: a composite's parts and its finalization each reopen the file with truncate and write at
+	 * offset 0, and a range read counts its bytes twice, so a step refuses a ranges threshold here.
+	 */
+	@Override
+	public boolean supportsCompositeOperations() {
+		return false;
+	}
+
 	private <F extends DataItem, D extends DataOperation<F>> FileChannel openDstFile(final D dataOp) {
 		final var fileItemName = dataOp.item().name();
 		final var opType = dataOp.type();

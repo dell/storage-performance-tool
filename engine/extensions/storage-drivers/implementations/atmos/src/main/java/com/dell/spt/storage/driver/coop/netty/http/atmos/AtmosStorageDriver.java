@@ -96,6 +96,15 @@ public class AtmosStorageDriver<I extends Item, O extends Operation<I>>
 		requestNewPathFunc = null; // do not use
 	}
 
+	/**
+	 * No: Atmos sends a composite and each of its parts as an ordinary request (a CREATE part as a
+	 * new object, a READ part without a range), so a step refuses a ranges threshold here.
+	 */
+	@Override
+	public boolean supportsCompositeOperations() {
+		return false;
+	}
+
 	@Override
 	protected final String requestNewPath(final String path) {
 		throw new AssertionError("Should not be invoked");

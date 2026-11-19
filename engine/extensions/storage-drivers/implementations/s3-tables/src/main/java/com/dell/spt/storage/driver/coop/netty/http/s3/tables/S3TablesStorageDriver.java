@@ -134,6 +134,15 @@ public class S3TablesStorageDriver<I extends Item, O extends Operation<I>>
 		return false;
 	}
 
+	/**
+	 * No: every operation runs through the configured opMode, never the inherited S3 multipart
+	 * route, so a step refuses a ranges threshold here.
+	 */
+	@Override
+	public boolean supportsCompositeOperations() {
+		return false;
+	}
+
 	@Override
 	protected String requestNewPath(final String path) {
 		return path;

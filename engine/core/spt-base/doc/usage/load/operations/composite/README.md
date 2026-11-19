@@ -14,6 +14,10 @@ Storage-side concatenation (further - ***SSC***).
 4. Cooperative storage drivers derive composite operation scheduling limits and apply bounded
  child-operation backpressure. Setting `load-batch-size=1` remains a conservative troubleshooting
  option, but it is no longer required to prevent dropped child operations.
+5. Only a storage driver with composite support (`s3`, `s3-aws`, `s3-rdma` and `swift`) accepts an
+ `item-data-ranges-threshold` (`--part-size`) above 0 for a "Create" or a "Read". Any other driver,
+ such as `fs`, `atmos` or `s3-tables`, refuses it at step start with a configuration error naming
+ the driver, and the step fails. Set the threshold to 0 for such a driver.
 
 ### 1.2. Approach
 
@@ -79,4 +83,5 @@ failed part is retried up to 3 times; if it still fails, the other parts finish 
 as failed, with that part's status. The read counts once, with the object's size in bytes; the
 bytes of the parts that succeeded also count when the read fails or is retried whole. A split read
 ignores a requested version ID: each part reads the current object. The `s3-rdma` driver sends these range GETs over HTTP. Through 5.17.0 the `s3-aws` driver did not split
-reads: it failed such a read without a request.
+reads: it failed such a read without a request. Any other storage driver refuses a threshold
+above 0 for a "Read" at step start, as for a "Create" (see §1.1).

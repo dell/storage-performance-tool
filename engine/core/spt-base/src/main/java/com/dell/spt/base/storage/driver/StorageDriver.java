@@ -109,6 +109,19 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 		return CompositeResults.UNDECLARED;
 	}
 
+	/**
+	 * Whether this driver runs composite (multipart) operations, the CREATE and READ operations an
+	 * {@code item-data-ranges-threshold} above 0 makes for items larger than it. A load step reads it
+	 * once, at start, and refuses such a configuration on a driver that returns {@code false}: see
+	 * {@link CompositeOperationSupport#requireSupport}. The default is {@code true}, so a driver
+	 * built outside the engine keeps the behaviour it had before drivers could say. A driver without
+	 * composite handling of its own returns {@code false}; a driver that wraps another returns the
+	 * wrapped driver's value.
+	 */
+	default boolean supportsCompositeOperations() {
+		return true;
+	}
+
 	/** Returns a terminal asynchronous driver failure for the load-step thread to rethrow. */
 	default IntegrityTerminalException terminalFailure() {
 		return null;

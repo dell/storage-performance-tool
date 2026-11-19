@@ -42,7 +42,7 @@ public class S3TablesStorageDriverTest {
 
 	private static final Credential TEST_CRED = Credential.getInstance("testuser", "u5QtPuQx+W5nrrQQEg7nArBqSgC8qLiDt2RhQthb");
 
-	private static Config baseConfig(final String opMode, final String host) {
+	static Config baseConfig(final String opMode, final String host) {
 		try {
 			final List<Map<String, Object>> configSchemas = Extension.load(Thread.currentThread().getContextClassLoader())
 							.stream()
@@ -130,7 +130,7 @@ public class S3TablesStorageDriverTest {
 		}
 	}
 
-	private static class TestDriver extends S3TablesStorageDriver<Item, Operation<Item>> {
+	static class TestDriver extends S3TablesStorageDriver<Item, Operation<Item>> {
 		private final Queue<FullHttpRequest> requests = new ArrayDeque<>();
 		private final ArrayDeque<FullHttpResponse> stubResponses = new ArrayDeque<>();
 

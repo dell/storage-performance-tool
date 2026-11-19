@@ -35,6 +35,7 @@ import com.dell.spt.base.item.op.OperationsBuilder;
 import com.dell.spt.base.item.op.data.DataOperationsBuilder;
 import com.dell.spt.base.item.op.data.DataOperationsBuilderImpl;
 import com.dell.spt.base.item.op.data.range.RangeReadOperationsBuilder;
+import com.dell.spt.base.storage.driver.CompositeOperationSupport;
 import com.dell.spt.base.storage.driver.range.RangeReadDriverSupport;
 import com.dell.spt.base.item.op.deletion.DeleteRequestAssembler;
 import com.dell.spt.base.item.op.deletion.StandaloneDeleteConfig;
@@ -224,6 +225,9 @@ public class LoadGeneratorBuilderImpl<I extends Item, O extends Operation<I>, T 
 				sizeThreshold = BinarySizeFormat.parseFixedSize((String) sizeThresholdRaw);
 			} else {
 				sizeThreshold = TypeUtil.typeConvert(sizeThresholdRaw, long.class);
+			}
+			if (opOutput instanceof StorageDriver<?, ?> driver) {
+				CompositeOperationSupport.requireSupport(driver, opType, sizeThreshold);
 			}
 			if (sizeThreshold > 0 && batchSize > 1 && DataOperationsBuilderImpl.buildsCompositeOperations(opType)) {
 				Loggers.MSG.warn(
