@@ -500,8 +500,9 @@ public abstract class HttpStorageDriverBase<I extends Item, O extends Operation<
 	 * The request path sent and signed for {@code path}, a path such as {@link #dataUriPath} gives,
 	 * which keeps the item's key as it is. The default is {@code path} itself, so a driver that does
 	 * not override this sends its paths as before. A driver whose target decodes the request path
-	 * returns the path with the characters it must not send raw percent-encoded, and returns the same
-	 * {@code String} when there are none. {@link #httpRequest} and the drivers' own request builders
+	 * returns the path with the characters it must not send raw percent-encoded, and returns
+	 * {@code path} itself when there are none, so that the common case allocates nothing. This runs for
+	 * every request, so an override must stay cheap. {@link #httpRequest} and the drivers' own request builders
 	 * apply it to the path before they add a query; the path itself stays as it was for records, such
 	 * as the operation trace, that name the item's key.
 	 *

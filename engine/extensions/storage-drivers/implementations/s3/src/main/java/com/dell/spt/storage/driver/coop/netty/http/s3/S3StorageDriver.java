@@ -1332,17 +1332,21 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 	}
 
 	/**
-	 * {@link #requestPath}'s encoding. One scan over {@code path}; when no character needs encoding,
-	 * as in every generated name, it returns {@code path} itself and allocates nothing.
+	 * {@link #requestPath}'s encoding. When no character needs encoding, as in every generated name,
+	 * it returns {@code path} itself and allocates nothing. The search uses {@link String#indexOf(int)},
+	 * which the JIT compiles to a vectorized scan, instead of a loop over the characters.
 	 */
 	static String encodeKeyQueryChars(final String path) {
-		final int length = path.length();
-		for (int i = 0; i < length; i++) {
-			if (isKeyQueryChar(path.charAt(i))) {
-				return encodeKeyQueryChars(path, i);
-			}
+		final int first = firstOf(firstOf(path.indexOf('?'), path.indexOf('#')), path.indexOf(' '));
+		return first < 0 ? path : encodeKeyQueryChars(path, first);
+	}
+
+	/** The lower of two {@link String#indexOf(int)} results, or -1 when both are -1. */
+	private static int firstOf(final int a, final int b) {
+		if (a < 0) {
+			return b;
 		}
-		return path;
+		return b < 0 ? a : Math.min(a, b);
 	}
 
 	private static String encodeKeyQueryChars(final String path, final int first) {
@@ -2165,11 +2169,12 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 										|| OpType.STAT.equals(opType));
 		final String encodedVersionId = useVersionQuery ? encodeVersionId(versionId) : null;
 		final String uri;
-		if (requestPath(itemUri).length() != itemUri.length()) {
-			// The path holds a character it must not carry raw (encoding lengthens what it changes): the
-			// key's path is encoded on its own, after the ~versionId is cut off the name, so the cut does
-			// not depend on the encoding.
-			final String keyPath = requestPath(legacyVersion ? itemUri.substring(0, keyEnd) : itemUri);
+		final String encodedItemUri = requestPath(itemUri);
+		if (!encodedItemUri.equals(itemUri)) {
+			// The path holds a character it must not carry raw (requestPath returns itemUri itself when it
+			// changes nothing, so the test is a reference comparison then): the key's path is encoded on its
+			// own, after the ~versionId is cut off the name, so the cut does not depend on the encoding.
+			final String keyPath = legacyVersion ? requestPath(itemUri.substring(0, keyEnd)) : encodedItemUri;
 			uri = useVersionQuery ? keyPath + VERSION_ID_QUERY + encodedVersionId : keyPath;
 		} else if (!useVersionQuery) {
 			uri = legacyVersion ? itemUri.substring(0, keyEnd) : itemUri;

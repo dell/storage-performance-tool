@@ -307,8 +307,8 @@ final class S3VersionedRequestTest {
 	/**
 	 * The V2 canonical resource of requests that select no version: the path, then only the
 	 * sub-resources, sorted, with a {@code versionId} value decoded. An unversioned name that itself
-	 * holds {@code ?x=1&versionId=a%2Bb} sends that query, so it signs {@code versionId=a+b} without
-	 * {@code x}, as a strict target computes it; the multipart and tagging requests sign their URI as
+	 * holds {@code ?x=1&versionId=a%2Bb} sends no query: its {@code ?} is encoded, so it is sent and
+	 * signed as the path {@code /b/k%3Fx=1&versionId=a%2Bb}; the multipart and tagging requests sign their URI as
 	 * sent, and the listing signs the bucket path.
 	 */
 	@Test
