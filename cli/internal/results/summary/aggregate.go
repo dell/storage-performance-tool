@@ -437,6 +437,7 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 	totals := RunTotals{}
 	warnings := make([]string, 0)
 	steadyAbsent := steadyAbsentReason(data.EngineInfo)
+	unresolvedLabels := make(map[string]bool)
 
 	for idx, stepID := range data.StepOrder {
 		stepData := data.Steps[stepID]
@@ -507,7 +508,14 @@ func buildStepSummaries(data *RunData, workload WorkloadSummary, integrity *resu
 			totals.MissingPhases = append(totals.MissingPhases, label)
 			warnings = append(warnings, fmt.Sprintf("%s metrics unavailable (status: %s)", label, statusLabel))
 		}
-		if warning := unresolvedOperationsWarning(nonEmpty(summary.PhaseLabel, stepData.StepID), stepData); warning != "" {
+		unresolvedLabel := nonEmpty(summary.PhaseLabel, stepData.StepID)
+		label := unresolvedLabel
+		if unresolvedLabels[unresolvedLabel] {
+			// Identical warnings are merged later, and two steps of one phase must both show.
+			label = fmt.Sprintf("%s (%s)", unresolvedLabel, stepData.StepID)
+		}
+		if warning := unresolvedOperationsWarning(label, stepData); warning != "" {
+			unresolvedLabels[unresolvedLabel] = true
 			warnings = append(warnings, warning)
 		}
 

@@ -36,14 +36,15 @@ func lifecycleCSV(unresolved ...string) string {
 }
 
 // lifecycleArtifact is a file of the fake run. An empty status leaves it out of the manifest, and
-// fileStatusMissing lists it with no file. absent lists it as ok with nothing on disk, and directory
-// puts a directory in its place.
+// fileStatusMissing lists it with no file. absent lists it as ok with nothing on disk, directory
+// puts a directory in its place, and outsideLink a symlink to a file outside the run directory.
 type lifecycleArtifact struct {
-	name      string
-	content   string
-	status    string
-	absent    bool
-	directory bool
+	name        string
+	content     string
+	status      string
+	absent      bool
+	directory   bool
+	outsideLink bool
 }
 
 func okLifecycle(content string) lifecycleArtifact {
@@ -66,6 +67,14 @@ func loadLifecycleRun(t *testing.T, dir, metricsRow string, artifacts ...lifecyc
 		switch {
 		case artifact.directory:
 			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		case artifact.outsideLink:
+			outside := filepath.Join(t.TempDir(), "outside.csv")
+			if err := os.WriteFile(outside, []byte(artifact.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, path); err != nil {
 				t.Fatal(err)
 			}
 		case !artifact.absent && artifact.status != fileStatusMissing:
@@ -175,6 +184,9 @@ func TestUnresolvedOperationsUnusableLifecycleFileChangesNothing(t *testing.T) {
 		{"value beyond int64", okLifecycle(lifecycleCSV("9223372036854775808"))},
 		{"sum beyond int64", okLifecycle(lifecycleCSV("9223372036854775807", "1"))},
 		{"short row", okLifecycle(lifecycleHeader + "\n1,42\n")},
+		{"short row after a good one", okLifecycle(lifecycleCSV("7") + "1,42\n")},
+		{"listed as failed", lifecycleArtifact{name: lifecycleFile, content: lifecycleCSV("9"), status: "error"}},
+		{"a link out of the run directory", lifecycleArtifact{name: lifecycleFile, content: lifecycleCSV("9"), status: fileStatusOK, outsideLink: true}},
 		{"unterminated quote", okLifecycle("unresolved\n\"5\n")},
 		{"listed as missing", lifecycleArtifact{name: lifecycleFile, status: fileStatusMissing}},
 		{"listed but gone", lifecycleArtifact{name: lifecycleFile, status: fileStatusOK, absent: true}},
@@ -264,6 +276,47 @@ func TestUnresolvedOperationsWarningWithoutMetricsOrLabel(t *testing.T) {
 	data.Steps[lifecycleStep].Metrics = nil
 	data.Steps[lifecycleStep].MetricsSuppressed = true
 	if lines := unresolvedWarnings(aggregateLifecycleRun(t, data)); len(lines) != 1 {
+		t.Fatalf("warnings = %q", lines)
+	}
+}
+
+// Steps of one phase share a label, and equal counts would otherwise merge into one line.
+func TestUnresolvedOperationsOfStepsWithOneLabelStaySeparate(t *testing.T) {
+	t.Parallel()
+	const tail = ": 5 operations unresolved at the stop, in neither Success nor Failed; Data Moved can include their bytes (operation.lifecycle.csv)"
+	data, err := loadLifecycleRun(t, t.TempDir(), lifecycleOKRow, okLifecycle(lifecycleCSV("5")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const second = "spt-004-20261115.120000.000-read"
+	step := *data.Steps[lifecycleStep]
+	step.StepID = second
+	data.Steps[second] = &step
+	data.StepOrder = append(data.StepOrder, second)
+	got := unresolvedWarnings(aggregateLifecycleRun(t, data))
+	want := []string{"Read (" + second + ")" + tail, "Read" + tail}
+	if !slices.Equal(got, want) {
+		t.Fatalf("warnings = %q, want %q", got, want)
+	}
+}
+
+// A step whose ID gives no phase label is named by its ID.
+func TestUnresolvedOperationsNameAStepWithoutALabel(t *testing.T) {
+	t.Parallel()
+	data, err := loadLifecycleRun(t, t.TempDir(), lifecycleOKRow, okLifecycle(lifecycleCSV("2")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const unlabelled = "-"
+	if label := phaseLabelFromStep(unlabelled); label != "" {
+		t.Fatalf("phase label of %q = %q", unlabelled, label)
+	}
+	step := data.Steps[lifecycleStep]
+	step.StepID = unlabelled
+	data.Steps = map[string]*StepData{unlabelled: step}
+	data.StepOrder = []string{unlabelled}
+	lines := unresolvedWarnings(aggregateLifecycleRun(t, data))
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], unlabelled+": 2 operations unresolved") {
 		t.Fatalf("warnings = %q", lines)
 	}
 }

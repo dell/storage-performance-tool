@@ -28,6 +28,11 @@ func loadUnresolvedOperations(runDir string, step *results.StepManifest) int64 {
 		return 0
 	}
 	defer func() { _ = root.Close() }()
+	// Only a regular file: opening a named pipe here would hold up the summary.
+	info, err := root.Stat(entry.Name)
+	if err != nil || !info.Mode().IsRegular() {
+		return 0
+	}
 	file, err := root.Open(entry.Name)
 	if err != nil {
 		return 0
