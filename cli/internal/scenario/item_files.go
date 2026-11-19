@@ -97,12 +97,18 @@ func prepareItemFileMount(hostPath, containerName string, mounts []FileMount) (s
 	if err != nil {
 		return "", nil, fmt.Errorf("resolve path %q: %w", hostPath, err)
 	}
-	info, err := os.Stat(absPath)
+	info, err := integrity.StatItemsFile(absPath)
 	if err != nil {
 		return "", nil, fmt.Errorf("stat %q: %w", hostPath, err)
 	}
 	if info.IsDir() {
 		return "", nil, fmt.Errorf("%q is a directory, expected an items CSV file", hostPath)
+	}
+	// Only a regular file: opening a named pipe here would wait for a writer.
+	if info.Mode().IsRegular() {
+		if err := integrity.RefuseSavedItemsUnderHeader(absPath, info); err != nil {
+			return "", nil, err
+		}
 	}
 	containerPath := containerItemFilesDir + "/" + containerName
 	mounts = append(mounts, FileMount{HostPath: absPath, ContainerPath: containerPath})
