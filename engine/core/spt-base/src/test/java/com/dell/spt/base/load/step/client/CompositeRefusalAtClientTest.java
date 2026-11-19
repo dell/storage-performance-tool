@@ -136,7 +136,8 @@ class CompositeRefusalAtClientTest {
 			super(config, extensions, List.of(), mock(MetricsManager.class));
 		}
 
-		@SuppressWarnings("UnusedMethod")
+		@SuppressWarnings({"UnusedMethod", "UnusedVariable"
+		})
 		private int compositeCheckedOpTypes(final Config config) {
 			return 0;
 		}
@@ -224,8 +225,10 @@ class CompositeRefusalAtClientTest {
 		return (StorageDriver) Proxy.newProxyInstance(
 						StorageDriver.class.getClassLoader(),
 						marked
-										? new Class<?>[]{StorageDriver.class, CompositeOperationsUnsupported.class}
-										: new Class<?>[]{StorageDriver.class},
+										? new Class<?>[]{StorageDriver.class, CompositeOperationsUnsupported.class
+										}
+										: new Class<?>[]{StorageDriver.class
+										},
 						(proxy, method, args) -> {
 							if ("list".equals(method.getName())) {
 								listings.incrementAndGet();
