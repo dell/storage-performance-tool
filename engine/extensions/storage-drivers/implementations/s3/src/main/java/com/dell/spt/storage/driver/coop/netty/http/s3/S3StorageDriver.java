@@ -1259,12 +1259,17 @@ public class S3StorageDriver<I extends Item, O extends Operation<I>>
 
 	/**
 	 * Appends a manifest bucket's name without the one trailing slash it may be written with, so that
-	 * {@code b/} and key {@code k} address {@code /b/k}, as an ordinary request for that row does. A
-	 * name without the slash is appended whole, as before: appending a span of a string is slower.
+	 * {@code b/} and key {@code k} address {@code /b/k}, as an ordinary request for that row does. The
+	 * name is always appended whole, as before, and the slash then dropped: appending a span of a
+	 * string is slower than appending it whole and shortening the builder.
 	 */
 	private static StringBuilder appendManifestBucket(final StringBuilder sb, final String bucket) {
+		sb.append(bucket);
 		final int last = bucket.length() - 1;
-		return last > 0 && bucket.charAt(last) == '/' ? sb.append(bucket, 0, last) : sb.append(bucket);
+		if (last > 0 && bucket.charAt(last) == '/') {
+			sb.setLength(sb.length() - 1);
+		}
+		return sb;
 	}
 
 	/** Uses the ordinary HTTP HEAD path for both Netty S3 and its RDMA transport subclass. */
