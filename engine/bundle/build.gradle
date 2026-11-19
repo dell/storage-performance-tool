@@ -1277,6 +1277,11 @@ tasks.register('verifyEngineExitStatusCanary') {
 
 	doLast {
 		def canaryRoot = canaryRootProvider.get().asFile
+		// A run stopped inside the read-only home case leaves that directory read-only; restore it first.
+		def leftoverReadOnly = new File(canaryRoot, 'stale-home-read-only/home/config')
+		if (leftoverReadOnly.isDirectory()) {
+			leftoverReadOnly.setWritable(true, true)
+		}
 		delete canaryRoot
 		canaryRoot.mkdirs()
 		def javaExecutable = new File(
@@ -1489,6 +1494,27 @@ tasks.register('verifyEngineExitStatusCanary') {
 				'--run-scenario=' + groovyScenario.absolutePath,
 				'--storage-driver-type=dummy-mock',
 			], 1, ['The Groovy script engine is not installed'])
+			// A home holding a defaults file from another build in a directory the engine cannot write: the
+			// start stops and names the file, rather than running on the stale defaults. Root writes anyway.
+			if (System.getProperty('user.name') != 'root'
+							&& java.nio.file.FileSystems.default.supportedFileAttributeViews().contains('posix')) {
+				def staleConfigDir = new File(canaryRoot, 'stale-home-read-only/home/config')
+				staleConfigDir.mkdirs()
+				def staleDefaults = new File(staleConfigDir, 'defaults.yaml')
+				staleDefaults.setText('# defaults from another build\n', 'UTF-8')
+				staleConfigDir.setWritable(false, false)
+				try {
+					def stale = expect('stale-home-read-only', s3Args, 1, [
+						"holds \"${staleDefaults.absolutePath}\" from another build, and the engine cannot replace it",
+						"Make \"${staleConfigDir.absolutePath}\" writable by the engine's user, or unset SPT_HOME.",
+					])
+					if (stale.output.contains('Unexpected failure') || staleDefaults.getText('UTF-8') != '# defaults from another build\n') {
+						throw new GradleException("Packaged engine 'stale-home-read-only' did not refuse plainly:\n${stale.output}")
+					}
+				} finally {
+					staleConfigDir.setWritable(true, true)
+				}
+			}
 			def busyPort = new java.net.ServerSocket(0)
 			try {
 				def servicePort = new java.net.ServerSocket(0)

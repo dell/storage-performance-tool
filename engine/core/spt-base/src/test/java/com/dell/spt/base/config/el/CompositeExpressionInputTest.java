@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.github.akurilov.commons.io.el.ExpressionInputImpl;
 
@@ -15,6 +16,7 @@ import com.dell.spt.base.env.DateUtil;
 import com.github.akurilov.commons.io.collection.CompositeStringInput;
 
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 
 public class CompositeExpressionInputTest {
@@ -37,6 +39,37 @@ public class CompositeExpressionInputTest {
 						.build();
 		final var id = itemNameInput.get();
 		assertTrue(length >= id.length());
+	}
+
+	/** Live threads running an asynchronous segment, the highest of a few samples. */
+	static long asyncSegmentWorkers() throws InterruptedException {
+		long max = 0;
+		for (int i = 0; i < 5; i++) {
+			final long count = Thread.getAllStackTraces().entrySet().stream()
+							.filter(entry -> entry.getKey().isAlive() && Arrays.stream(entry.getValue())
+											.anyMatch(frame -> frame.getClassName().equals(AsyncExpressionInputImpl.class.getName())))
+							.count();
+			max = Math.max(max, count);
+			Thread.sleep(5);
+		}
+		return max;
+	}
+
+	@Test
+	public void aBuildThatFailsStopsTheAsynchronousSegmentsItStarted() throws Exception {
+		final long before = asyncSegmentWorkers();
+		for (int i = 0; i < 3; i++) {
+			assertThrows(RuntimeException.class, () -> CompositeExpressionInputBuilder.newInstance()
+							.expression("#{this.expr()}-${noSuchPrefix:noSuchFunction()}")
+							.build());
+		}
+		final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+		long after = asyncSegmentWorkers();
+		while (after > before && System.nanoTime() < deadline) {
+			Thread.sleep(20);
+			after = asyncSegmentWorkers();
+		}
+		assertEquals(before, after, "asynchronous segment workers left running");
 	}
 
 	@Test
