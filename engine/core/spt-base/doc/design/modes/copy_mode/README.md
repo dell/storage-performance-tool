@@ -16,7 +16,22 @@ sent while copying the objects so these requests may be significantly faster tha
 
 ## 1. Limitations
 
-1. Works only if the input path is different from the output one
+1. Works only if the input path is different from the output one. A copy names an object's destination by its
+   listed name whenever that name already lies under the output path, so an overlapping output path can make a
+   destination equal to its source. The engine checks a constant output path against a listed `--item-input-path`
+   when the step starts; it can't check an output path expression or an items file (`--item-input-file`).
+   * Storage drivers other than `fs` compare the two paths without their leading and trailing slashes (`/src`,
+     `src` and `/src/` are the same path).
+     * An output path equal to the input path copies every object onto itself, so the step fails at start (exit 1).
+     * An output path under the input path, such as `/src` to `/src/dir`, works on a first run into an empty prefix.
+       But the listing also returns the keys already under the output path, such as an earlier run's copies, and
+       those are copied onto themselves and counted as successes. The step logs one warning at start and runs.
+   * On `fs` the paths compare as written: a path without a leading slash is relative to the working directory,
+     and `.` and `..` segments name other directories. An output path equal to the input path, or one of its parent
+     directories, such as `/data/src` to `/data` or `/data/src/`, used to open each listed source file as its own
+     destination, empty it, and never finish. The engine now refuses it at start (exit 1). An output path under the
+     input path is fine on `fs`, because a listing does not descend into subdirectories. A relative input path is
+     not checked at start.
 2. Copying the containers (Swift) is not supported
 3. Copying the buckets (S3) is not supported
 4. Copying the objects (Atmos) while using /rest/object interface is not supported yet

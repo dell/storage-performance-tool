@@ -709,6 +709,10 @@ public abstract class LoadStepClientBase<T extends LoadStepClient<T>>
 	}
 
 	private void addFileClients(final Config config, final List<Config> configSlices, final boolean suppliesItems) {
+		if (suppliesItems) {
+			// before the input path is listed into the engines' items files, while it is still a path
+			CopyIntoItsSource.check(loadStepId(), config);
+		}
 		final var loadConfig = config.configVal("load");
 		final var batchSize = loadConfig.intVal("batch-size");
 		final var storageConfig = config.configVal("storage");

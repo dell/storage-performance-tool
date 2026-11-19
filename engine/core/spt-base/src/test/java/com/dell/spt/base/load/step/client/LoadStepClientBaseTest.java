@@ -141,6 +141,26 @@ class LoadStepClientBaseTest {
 		assertEquals("items file line 7 is blank", failure.getMessage());
 	}
 
+	// The client lists an input path into the engines' items files before any engine builds its load
+	// generator, so the copy layout check runs here, on the step's own configuration.
+	@Test
+	void aCopyOntoItsOwnSourceFailsTheRunBeforeAnyEngineStarts() throws Exception {
+		final LoadStep slice = mock(LoadStep.class);
+		testConfig.val("storage-driver-type", "fs");
+		testConfig.val("load-op-type", "create");
+		testConfig.val("item-input-file", null);
+		testConfig.val("item-input-path", tempDir.resolve("src").toString());
+		testConfig.val("item-output-path", tempDir.toString());
+		final var client = clientWithLocalSlice(slice);
+
+		final var failure = assertThrows(RunTerminalException.class, client::run);
+
+		assertEquals(IntegrityTerminalException.Category.CONFIGURATION, failure.category());
+		assertTrue(failure.getMessage().startsWith("The copy output path \"" + tempDir + "\" is the item input path"),
+						failure.getMessage());
+		verify(slice, never()).start();
+	}
+
 	@Test
 	void aFailureOnOneEngineOfSeveralSaysWhichEngine() throws Exception {
 		final var client = new TestLoadStepClient(testConfig, extensions, ctxConfigs, mockMetricsManager);
