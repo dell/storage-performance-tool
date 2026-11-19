@@ -134,7 +134,8 @@ func (e *fakeEngine) resolver(force, interactive bool) *ConflictResolver {
 		checker:         NewPortCheckerWithOptions(e.port(), "127.0.0.1", time.Second, 2*time.Second, 1),
 		forceMode:       force,
 		interactiveMode: interactive,
-		clock:           NewFakeClock(),
+		// Advances on every wait, so a wait that should not happen hits its deadline.
+		clock: &pollClock{},
 	}
 }
 
