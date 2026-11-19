@@ -145,27 +145,22 @@ public abstract class LoadStepLocalBase extends LoadStepBase {
 	}
 
 	/**
-	 * Closes what a failed {@code init()} opened, and returns {@code failure} to rethrow. When the
-	 * failure came before {@code init()} added the context it was building ({@code contextPending}),
-	 * it closes {@code unowned}, that context's driver and generator, which no context owns yet, and
-	 * every context added before it, and empties {@link #stepContexts}. Otherwise the step's close
-	 * owns them all and nothing is closed here. Any {@code Throwable} a close throws, an {@code Error}
-	 * as well, is added to {@code failure} as suppressed, and the remaining resources are still
-	 * closed. An earlier context's close logs an {@code IOException} from its own driver's close
-	 * itself and does not throw it, so that failure is in the log only, not among the suppressed.
+	 * Closes what a failed {@code init()} opened before the context it was building, and returns
+	 * {@code failure} to rethrow. That context's own driver and generator are closed by its
+	 * {@link ContextInitResources}. When the failure came before {@code init()} added that context
+	 * ({@code contextPending}), this closes every context added before it and empties
+	 * {@link #stepContexts}. Otherwise the step's close owns them all and nothing is closed here. Any
+	 * {@code Throwable} a close throws, an {@code Error} as well, is added to {@code failure} as
+	 * suppressed, and the remaining contexts are still closed. An earlier context's close logs an
+	 * {@code IOException} from its own driver's close itself and does not throw it, so that failure is
+	 * in the log only, not among the suppressed.
 	 */
 	protected final <T extends Throwable> T closeAfterInitFailure(
-					final T failure, final boolean contextPending, final AutoCloseable... unowned) {
+					final T failure, final boolean contextPending) {
 		if (!contextPending) {
 			return failure;
 		}
-		final List<AutoCloseable> resources = new ArrayList<>();
-		for (final AutoCloseable resource : unowned) {
-			if (resource != null) {
-				resources.add(resource);
-			}
-		}
-		resources.addAll(stepContexts);
+		final List<AutoCloseable> resources = new ArrayList<>(stepContexts);
 		stepContexts.clear();
 		for (final AutoCloseable resource : resources) {
 			try {

@@ -8,6 +8,7 @@ import static com.dell.spt.base.Constants.KEY_CLASS_NAME;
 import static com.dell.spt.base.Constants.KEY_STEP_ID;
 
 import com.dell.spt.base.concurrent.Daemon;
+import com.dell.spt.base.concurrent.DaemonBase;
 import com.dell.spt.base.data.DataInput;
 import com.dell.spt.base.env.Extension;
 import com.dell.spt.base.config.EndpointSelectionConfig;
@@ -245,10 +246,16 @@ public interface StorageDriver<I extends Item, O extends Operation<I>>
 					throw new IllegalConfigurationException(
 									"load.op.read.range requires an opt-in Netty s3 factory without verification");
 				}
-				return ((RangeReadDriverFactory<I, O, ?>) selectedFactory)
-								.createRangeRead(stepId, dataInput, storageConfig, batchSize, rangePolicy);
 			}
-			return selectedFactory.create(stepId, dataInput, storageConfig, verifyFlag, batchSize);
+			// A constructor that throws leaves no reference here: the scope releases what it acquired.
+			try (final var construction = DaemonBase.openConstructionScope()) {
+				final StorageDriver<I, O> driver = rangePolicy != null
+								? ((RangeReadDriverFactory<I, O, ?>) selectedFactory)
+												.createRangeRead(stepId, dataInput, storageConfig, batchSize, rangePolicy)
+								: selectedFactory.create(stepId, dataInput, storageConfig, verifyFlag, batchSize);
+				construction.succeeded();
+				return driver;
+			}
 		}
 	}
 }

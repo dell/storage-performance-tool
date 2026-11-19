@@ -18,6 +18,7 @@ import com.dell.spt.base.load.generator.LoadGenerator;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilder;
 import com.dell.spt.base.load.generator.LoadGeneratorBuilderImpl;
 import com.dell.spt.base.load.generator.PacedRateThrottle;
+import com.dell.spt.base.load.step.local.ContextInitResources;
 import com.dell.spt.base.load.step.local.LoadStepLocalBase;
 import com.dell.spt.base.load.step.local.context.LoadStepContext;
 import com.dell.spt.base.load.step.local.context.LoadStepContextImpl;
@@ -110,18 +111,16 @@ public class LinearLoadStepLocal
 
 			final int batchSize = loadConfig.intVal("batch-size");
 
-			// What this context opened before a context owns it, closed if init() fails first.
-			StorageDriver unownedDriver = null;
-			LoadGenerator unownedGenerator = null;
+			// Set while the context being built is not in stepContexts: a failure then also closes the earlier contexts.
 			boolean contextPending = true;
-			try {
+			try (final var pending = new ContextInitResources()) {
 
 				NicSetConfig.requireSupportedWorkload(
 								storageConfig, opType, itemConfig.configVal("input").stringVal("path"));
 				final StorageDriver driver = StorageDriver.instance(
 								extensions, storageConfig, dataInput, effectiveVerifyFlag, batchSize, testStepId,
 								com.dell.spt.base.config.RangeReadConfig.fromLoad(loadConfig));
-				unownedDriver = driver;
+				pending.hold(driver);
 
 				final ItemType itemType = ItemType.valueOf(itemConfig.stringVal("type").toUpperCase(Locale.ROOT));
 				final ItemFactory<? extends Item> itemFactory = ItemType.getItemFactory(itemType);
@@ -142,7 +141,7 @@ public class LinearLoadStepLocal
 						generatorBuilder.addThrottle(new PacedRateThrottle(rateLimit));
 					}
 					final LoadGenerator generator = generatorBuilder.build();
-					unownedGenerator = generator;
+					pending.hold(generator);
 					final var shardMetrics = generatorBuilder.listShardMetricsRecorder();
 					final boolean metadataMode = IntegrityConfig.fromStorage(storageConfig).enabled();
 					final String immutableListRootPrefix = metadataMode && OpType.LIST.equals(opType)
@@ -159,9 +158,11 @@ public class LinearLoadStepLocal
 									shardMetrics,
 									immutableListRootPrefix,
 									itemConfig);
+					pending.ownedBy(stepCtx, generator, driver);
 					((LoadStepContextImpl<?, ?>) stepCtx).bucketRecorder(
 									initBucketMetrics(config, metricsContexts.get(0), null));
 					stepContexts.add(stepCtx);
+					pending.handedOver();
 					contextPending = false;
 
 					final String itemOutputFile = itemConfig.stringVal("output-file");
@@ -217,14 +218,13 @@ public class LinearLoadStepLocal
 				}
 			} catch (final IllegalConfigurationException e) {
 				throw closeAfterInitFailure(
-								new IllegalStateException("Failed to initialize the storage driver", e), contextPending,
-								unownedGenerator, unownedDriver);
+								new IllegalStateException("Failed to initialize the storage driver", e), contextPending);
 			} catch (final InterruptedException e) {
-				throwUnchecked(closeAfterInitFailure(e, contextPending, unownedGenerator, unownedDriver));
+				throwUnchecked(closeAfterInitFailure(e, contextPending));
 			} catch (final RuntimeException e) {
-				throw closeAfterInitFailure(e, contextPending, unownedGenerator, unownedDriver);
+				throw closeAfterInitFailure(e, contextPending);
 			} catch (final Error e) {
-				throw closeAfterInitFailure(e, contextPending, unownedGenerator, unownedDriver);
+				throw closeAfterInitFailure(e, contextPending);
 			}
 		} catch (final IOException e) {
 			throw new IllegalStateException("Failed to initialize the data input", e);

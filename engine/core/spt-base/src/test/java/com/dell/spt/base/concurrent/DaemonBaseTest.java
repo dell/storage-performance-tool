@@ -4,6 +4,11 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.dell.spt.base.concurrent.AsyncRunnable.State;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -259,5 +264,170 @@ class DaemonBaseTest {
 			assertTrue(entered.await(WAIT_SECONDS, TimeUnit.SECONDS), "the start did not begin");
 			return starter;
 		}
+	}
+
+	private static final class ReleaseRecordingDaemon extends DaemonBase {
+		private final List<ReleaseRecordingDaemon> released;
+		private final boolean releaseThrows;
+
+		ReleaseRecordingDaemon(final List<ReleaseRecordingDaemon> released, final boolean releaseThrows) {
+			this.released = released;
+			this.releaseThrows = releaseThrows;
+		}
+
+		@Override
+		protected void releaseAfterFailedConstruction() {
+			released.add(this);
+			if (releaseThrows) {
+				throw new IllegalStateException("simulated release failure");
+			}
+		}
+	}
+
+	private static boolean registered(final Daemon daemon) {
+		return DaemonBase.isRegistered(candidate -> candidate == daemon);
+	}
+
+	@Test
+	void aFailedConstructionScopeReleasesItsDaemonsLatestFirstAndUnregistersThem() {
+		final List<ReleaseRecordingDaemon> released = new ArrayList<>();
+		final ReleaseRecordingDaemon first;
+		final ReleaseRecordingDaemon second;
+		try (final var scope = DaemonBase.openConstructionScope()) {
+			first = new ReleaseRecordingDaemon(released, false);
+			second = new ReleaseRecordingDaemon(released, false);
+			assertTrue(registered(first));
+		}
+
+		assertEquals(List.of(second, first), released);
+		assertFalse(registered(first));
+		assertFalse(registered(second));
+	}
+
+	@Test
+	void aSucceededConstructionScopeLeavesItsDaemonsRegisteredAndUnreleased() throws IOException {
+		final List<ReleaseRecordingDaemon> released = new ArrayList<>();
+		final ReleaseRecordingDaemon daemon;
+		try (final var scope = DaemonBase.openConstructionScope()) {
+			daemon = new ReleaseRecordingDaemon(released, false);
+			scope.succeeded();
+		}
+
+		assertEquals(List.of(), released);
+		assertTrue(registered(daemon));
+		daemon.close();
+	}
+
+	@Test
+	void anEnclosingScopeThatFailsReleasesWhatAnInnerScopeBuilt() {
+		final List<ReleaseRecordingDaemon> released = new ArrayList<>();
+		final ReleaseRecordingDaemon inner;
+		try (final var outer = DaemonBase.openConstructionScope()) {
+			try (final var scope = DaemonBase.openConstructionScope()) {
+				inner = new ReleaseRecordingDaemon(released, false);
+				scope.succeeded();
+			}
+			assertEquals(List.of(), released);
+		}
+
+		assertEquals(List.of(inner), released);
+		assertFalse(registered(inner));
+	}
+
+	@Test
+	void aReleaseThatThrowsDoesNotStopTheOthersAndAClosedDaemonIsNotReleased() throws IOException {
+		final List<ReleaseRecordingDaemon> released = new ArrayList<>();
+		final ReleaseRecordingDaemon survivor;
+		final ReleaseRecordingDaemon throwing;
+		final ReleaseRecordingDaemon closed;
+		try (final var scope = DaemonBase.openConstructionScope()) {
+			survivor = new ReleaseRecordingDaemon(released, false);
+			throwing = new ReleaseRecordingDaemon(released, true);
+			closed = new ReleaseRecordingDaemon(released, false);
+			closed.close();
+		}
+
+		assertEquals(List.of(throwing, survivor), released);
+		assertFalse(registered(throwing));
+		assertFalse(registered(survivor));
+	}
+
+	@Test
+	void aLogHandlerThatThrowsDoesNotStopTheRelease() {
+		final List<ReleaseRecordingDaemon> released = new ArrayList<>();
+		final Handler throwingHandler = new Handler() {
+			@Override
+			public void publish(final LogRecord record) {
+				throw new IllegalStateException("simulated log handler failure");
+			}
+
+			@Override
+			public void flush() {}
+
+			@Override
+			public void close() {}
+		};
+		final Logger logger = Logger.getLogger(DaemonBase.class.getSimpleName());
+		logger.addHandler(throwingHandler);
+		final ReleaseRecordingDaemon earlier;
+		final ReleaseRecordingDaemon throwing;
+		try {
+			try (final var scope = DaemonBase.openConstructionScope()) {
+				earlier = new ReleaseRecordingDaemon(released, false);
+				throwing = new ReleaseRecordingDaemon(released, true);
+			}
+		} finally {
+			logger.removeHandler(throwingHandler);
+		}
+
+		assertEquals(List.of(throwing, earlier), released);
+		assertFalse(registered(throwing));
+		assertFalse(registered(earlier));
+	}
+
+	@Test
+	void aLogHandlerThatRethrowsTheReleaseFailureDoesNotStopTheRelease() {
+		final List<ReleaseRecordingDaemon> released = new ArrayList<>();
+		final Handler rethrowingHandler = new Handler() {
+			@Override
+			public void publish(final LogRecord record) {
+				if (record.getThrown() instanceof RuntimeException failure) {
+					throw failure;
+				}
+			}
+
+			@Override
+			public void flush() {}
+
+			@Override
+			public void close() {}
+		};
+		final Logger logger = Logger.getLogger(DaemonBase.class.getSimpleName());
+		logger.addHandler(rethrowingHandler);
+		final ReleaseRecordingDaemon earlier;
+		final ReleaseRecordingDaemon throwing;
+		try {
+			try (final var scope = DaemonBase.openConstructionScope()) {
+				earlier = new ReleaseRecordingDaemon(released, false);
+				throwing = new ReleaseRecordingDaemon(released, true);
+			}
+		} finally {
+			logger.removeHandler(rethrowingHandler);
+		}
+
+		assertEquals(List.of(throwing, earlier), released);
+		assertFalse(registered(throwing));
+		assertFalse(registered(earlier));
+	}
+
+	@Test
+	void aDaemonBuiltAfterTheScopeClosedIsNotRecorded() throws IOException {
+		final List<ReleaseRecordingDaemon> released = new ArrayList<>();
+		DaemonBase.openConstructionScope().close();
+
+		try (final var later = new ReleaseRecordingDaemon(released, false)) {
+			assertTrue(registered(later));
+		}
+		assertEquals(List.of(), released);
 	}
 }

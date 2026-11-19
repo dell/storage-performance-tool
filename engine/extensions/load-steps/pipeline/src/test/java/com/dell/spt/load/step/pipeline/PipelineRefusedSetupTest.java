@@ -2,6 +2,7 @@ package com.dell.spt.load.step.pipeline;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -66,7 +67,7 @@ class PipelineRefusedSetupTest {
 
 	/**
 	 * An {@code Error} from the refused context's driver close neither replaces the refusal nor stops
-	 * the close of the first context: it is kept as suppressed.
+	 * the close of the first context: {@code ContextInitResources} logs it.
 	 */
 	@Test
 	void anErrorFromADriversCloseKeepsTheRefusalAndClosesTheFirstContext() throws Exception {
@@ -75,7 +76,7 @@ class PipelineRefusedSetupTest {
 		try {
 			final var failure = assertThrows(IllegalStateException.class, step::init);
 			assertInstanceOf(IllegalConfigurationException.class, failure.getCause());
-			assertTrue(List.of(failure.getSuppressed()).contains(closeError), "the close's Error is suppressed");
+			assertFalse(List.of(failure.getSuppressed()).contains(closeError), "the close's Error is logged, not suppressed");
 			assertEquals(2, created.size());
 			assertTrue(closed.contains(created.get(1)), "the refused context's driver close was called");
 			assertTrue(closed.contains(created.get(0)), "the first context's driver is closed after that Error");

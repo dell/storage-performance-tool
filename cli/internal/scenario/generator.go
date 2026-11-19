@@ -160,9 +160,15 @@ func GenerateReadScenario(params Params) (string, error) {
 		readPhasePauseSeconds = DefaultReadPhasePauseSeconds
 	}
 
+	// A read from an items file has no size of its own, but its scenario still sends item.data.size.
+	itemSize := params.ObjectSize
+	if params.ItemsFile != "" && itemSize == "" {
+		itemSize = DefaultObjectSize
+	}
+
 	data := map[string]interface{}{
 		templateKeyConcurrency:          params.Threads,
-		templateKeyItemSize:             fmt.Sprintf(`"%s"`, escapeJSONString(params.ObjectSize)),
+		templateKeyItemSize:             fmt.Sprintf(`"%s"`, escapeJSONString(itemSize)),
 		templateKeyItemCount:            params.ObjectCount,
 		templateKeyOutputPath:           fmt.Sprintf(`"%s"`, escapeJSONString(bucketPath)),
 		templateKeyDuration:             fmt.Sprintf(`"%s"`, escapeJSONString(params.Duration)),
