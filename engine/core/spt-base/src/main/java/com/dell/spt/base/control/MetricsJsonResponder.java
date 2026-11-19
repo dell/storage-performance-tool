@@ -1193,7 +1193,8 @@ final class MetricsJsonResponder {
 	 * A node row, live or terminal, is {@code entry} when this node runs the row's run as its entry, that is
 	 * when it accepted the run through {@code POST /run}; every row of a slice an entry started here is
 	 * {@code worker}. The run id is recorded before the run's first step starts, so the role does not change
-	 * between a row's first appearance and its expiry.
+	 * between a row's first appearance and its expiry, unless the node accepts {@link ApiStatus#ACCEPTED_RUN_IDS}
+	 * later runs first.
 	 */
 	private String nodeRowRole(final long runId) {
 		return apiStatus.acceptedRun(runId) ? ROLE_ENTRY : ROLE_WORKER;

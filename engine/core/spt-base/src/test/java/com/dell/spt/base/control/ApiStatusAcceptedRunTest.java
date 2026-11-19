@@ -43,6 +43,26 @@ class ApiStatusAcceptedRunTest {
 	}
 
 	@Test
+	void refusedRunsPushNoAcceptedRunOut() {
+		final ApiStatus status = new ApiStatus();
+		for (long runId = 1L; runId <= ApiStatus.ACCEPTED_RUN_IDS; runId++) {
+			status.setRunning("s", runId);
+		}
+		for (long refused = 100L; refused < 100L + 2 * ApiStatus.ACCEPTED_RUN_IDS; refused++) {
+			final boolean acceptedBefore = status.acceptedRun(refused);
+			status.setRunning("s", refused);
+			status.forgetRefusedRun(refused, acceptedBefore);
+			assertFalse(status.acceptedRun(refused), "refused run " + refused);
+		}
+		for (long runId = 1L; runId <= ApiStatus.ACCEPTED_RUN_IDS; runId++) {
+			assertTrue(status.acceptedRun(runId), "run " + runId);
+		}
+		status.setRunning("s", 200L);
+		assertFalse(status.acceptedRun(1L), "the next accepted run pushes out the oldest, as before");
+		assertTrue(status.acceptedRun(200L));
+	}
+
+	@Test
 	void keepsTheLatestRunsOnly() {
 		final ApiStatus status = new ApiStatus();
 		for (long runId = 1L; runId <= ApiStatus.ACCEPTED_RUN_IDS + 1; runId++) {

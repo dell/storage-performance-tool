@@ -33,6 +33,8 @@ public final class ApiStatus {
 
 	private final long[] acceptedRunIds = new long[ACCEPTED_RUN_IDS];
 	private int nextAcceptedRunId;
+	/** The id the latest remembered run pushed out, so a refusal of that run can put it back. */
+	private long displacedRunId;
 
 	public void setIdle() {
 		snapshotRef.set(new Snapshot(State.IDLE, System.currentTimeMillis(), 0L, null, null, null));
@@ -83,7 +85,8 @@ public final class ApiStatus {
 	/**
 	 * Whether this node accepted a run with this id through {@code POST /run}, as that run's entry. The id is
 	 * recorded before the run's first step starts and kept after the run ends, so a node's metrics rows for
-	 * the run read the same role from their first appearance to their expiry. A slice an entry starts on this
+	 * the run read the same role from their first appearance to their expiry, while the run is among the
+	 * {@value #ACCEPTED_RUN_IDS} latest this node accepted. A slice an entry starts on this
 	 * node over RMI never reaches here. Zero is never a run id.
 	 */
 	public boolean acceptedRun(final long runId) {
@@ -106,6 +109,14 @@ public final class ApiStatus {
 			return;
 		}
 		synchronized (acceptedRunIds) {
+			final int latest = (nextAcceptedRunId + acceptedRunIds.length - 1) % acceptedRunIds.length;
+			if (acceptedRunIds[latest] == runId) {
+				// put back the run this one pushed out, so a refusal leaves the remembered runs as they were
+				acceptedRunIds[latest] = displacedRunId;
+				displacedRunId = 0L;
+				nextAcceptedRunId = latest;
+				return;
+			}
 			for (int i = 0; i < acceptedRunIds.length; i++) {
 				if (acceptedRunIds[i] == runId) {
 					acceptedRunIds[i] = 0L;
@@ -120,6 +131,7 @@ public final class ApiStatus {
 		}
 		synchronized (acceptedRunIds) {
 			if (!holdsAcceptedRun(runId)) {
+				displacedRunId = acceptedRunIds[nextAcceptedRunId];
 				acceptedRunIds[nextAcceptedRunId] = runId;
 				nextAcceptedRunId = (nextAcceptedRunId + 1) % acceptedRunIds.length;
 			}
