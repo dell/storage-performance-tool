@@ -23,10 +23,21 @@ import com.github.akurilov.confuse.Config;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.rmi.RemoteException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import com.dell.spt.base.logging.Loggers;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
@@ -442,6 +453,401 @@ public class LoadStepServiceImplTest {
 		} finally {
 			ServiceUtil.shutdown();
 			restoreHost(originalHost);
+		}
+	}
+
+	private static final long ENTRY_SILENCE_NANOS = TimeUnit.SECONDS.toNanos(120);
+	private static final long NO_CHECK_NANOS = TimeUnit.HOURS.toNanos(1);
+	private static final String ENTRY_SILENCE_WARNING = "No call from the entry node";
+
+	/** A step service on a real RMI port whose clock the test moves, with its checker parked unless asked. */
+	private static final class WatchedSlice implements AutoCloseable {
+		final AtomicLong clock = new AtomicLong(1_000);
+		final List<LoadStepServiceImpl> releases = new CopyOnWriteArrayList<>();
+		final LoadStepServiceImpl service;
+		final String threadName;
+		private final String stepId;
+		private final String originalHost = System.getProperty("java.rmi.server.hostname");
+		private final WarningCapture warnings = new WarningCapture();
+		private final org.apache.logging.log4j.core.Logger errors = LoggerContext.getContext(false).getLogger(Loggers.ERR.getName());
+		private final Level errorsLevel = errors.getLevel();
+
+		WatchedSlice(final LoadStep local, final long checkPeriodNanos) throws Exception {
+			System.setProperty("java.rmi.server.hostname", "127.0.0.1");
+			warnings.start();
+			errors.addAppender(warnings);
+			errors.setLevel(Level.WARN);
+			stepId = local.loadStepId();
+			threadName = "spt-entry-watchdog-" + stepId;
+			final Config config = TestConfigBuilder.config();
+			config.val("load-step-id", stepId);
+			@SuppressWarnings("unchecked")
+			final LoadStepFactory<LoadStep, ?> factory = mock(LoadStepFactory.class);
+			when(factory.id()).thenReturn(STEP_TYPE);
+			when(factory.createLocal(any(), anyList(), anyList(), any())).thenReturn(local);
+			service = new LoadStepServiceImpl(
+							freePort(), List.of(factory), STEP_TYPE, config, Collections.emptyList(), mock(MetricsManager.class),
+							releases::add, ENTRY_SILENCE_NANOS, checkPeriodNanos, clock::get);
+		}
+
+		void pass(final long nanos) {
+			clock.addAndGet(nanos);
+		}
+
+		/** This slice's only: a line of an earlier slice can still be on its way through the async logger. */
+		long silenceWarnings() {
+			return warnings.messages.stream()
+							.filter(message -> message.contains(ENTRY_SILENCE_WARNING) && message.contains(stepId))
+							.count();
+		}
+
+		/** The engine's loggers are asynchronous. */
+		void awaitWarning(final String... parts) throws InterruptedException {
+			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+			while (warnings.messages.stream().noneMatch(message -> List.of(parts).stream().allMatch(message::contains))) {
+				assertTrue(System.nanoTime() < deadline, "no warning with " + List.of(parts) + " in " + warnings.messages);
+				Thread.sleep(5);
+			}
+		}
+
+		@Override
+		public void close() throws Exception {
+			try {
+				service.close();
+			} finally {
+				errors.removeAppender(warnings);
+				errors.setLevel(errorsLevel);
+				warnings.stop();
+				ServiceUtil.shutdown();
+				restoreHost(originalHost);
+			}
+		}
+	}
+
+	private static final class WarningCapture extends AbstractAppender {
+		final List<String> messages = new CopyOnWriteArrayList<>();
+
+		WarningCapture() {
+			super("entryWatchdogWarnings", null, null, true, Property.EMPTY_ARRAY);
+		}
+
+		@Override
+		public void append(final LogEvent event) {
+			if (Level.WARN.equals(event.getLevel())) {
+				messages.add(event.getMessage().getFormattedMessage());
+			}
+		}
+	}
+
+	private static LoadStep localStep(final String stepId) throws RemoteException {
+		final LoadStep local = mock(LoadStep.class);
+		when(local.loadStepId()).thenReturn(stepId);
+		return local;
+	}
+
+	@Test
+	@DisplayName("A started slice called once and then silent for the limit is stopped and closed, with one warning")
+	void aSliceSilentForTheLimitIsStoppedAndClosedOnce() throws Exception {
+		final LoadStep local = localStep("svc-silent");
+		try (WatchedSlice slice = new WatchedSlice(local, NO_CHECK_NANOS)) {
+			slice.service.start();
+			slice.service.metricsSnapshots();
+
+			slice.pass(ENTRY_SILENCE_NANOS);
+			assertFalse(slice.service.stopIfEntryIsSilent(), "exactly the limit is not past it");
+			verify(local, never()).stop();
+
+			slice.pass(1);
+			assertTrue(slice.service.stopIfEntryIsSilent());
+			assertFalse(slice.service.stopIfEntryIsSilent(), "it gives up once");
+
+			verify(local).stop();
+			verify(local).close();
+			assertTrue(slice.service.isClosed());
+			assertFalse(slice.service.isRunning());
+			assertEquals(List.of(slice.service), slice.releases);
+			slice.awaitWarning(ENTRY_SILENCE_WARNING, "120 s", "svc-silent");
+			assertEquals(1, slice.silenceWarnings());
+			assertNoLiveThread(slice.threadName);
+		}
+	}
+
+	@Test
+	@DisplayName("The checker finds a silent slice by itself and then ends")
+	void theCheckerFindsASilentSliceByItself() throws Exception {
+		final LoadStep local = localStep("svc-checker");
+		try (WatchedSlice slice = new WatchedSlice(local, TimeUnit.MILLISECONDS.toNanos(5))) {
+			slice.service.start();
+			slice.service.runId();
+			slice.pass(ENTRY_SILENCE_NANOS + 1);
+			final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+			while (!slice.service.isClosed() && System.nanoTime() < deadline) {
+				Thread.sleep(5);
+			}
+			assertTrue(slice.service.isClosed());
+			assertNoLiveThread(slice.threadName);
+			slice.awaitWarning(ENTRY_SILENCE_WARNING);
+			assertEquals(1, slice.silenceWarnings());
+		}
+	}
+
+	@Test
+	@DisplayName("Every kind of call from the entry keeps a slice open")
+	void callsFromTheEntryKeepASliceOpen() throws Throwable {
+		final LoadStep local = localStep("svc-called");
+		when(local.await(anyLong(), any())).thenReturn(false);
+		try (WatchedSlice slice = new WatchedSlice(local, NO_CHECK_NANOS)) {
+			slice.service.start();
+			final List<org.junit.jupiter.api.function.Executable> calls = List.of(
+							slice.service::metricsSnapshots,
+							() -> slice.service.await(1, TimeUnit.MILLISECONDS),
+							() -> slice.service.preparationStatus(1L),
+							slice.service::isDeleteInventoryPreValidationComplete,
+							slice.service::isDispatchedOperationsDrainCompleteForStepStop,
+							slice.service::durationAwaitStatus,
+							slice.service::loadStepId,
+							slice.service::runId);
+			for (final var call : calls) {
+				call.execute();
+				slice.pass(ENTRY_SILENCE_NANOS);
+				assertFalse(slice.service.stopIfEntryIsSilent());
+			}
+			verify(local, never()).stop();
+			assertTrue(slice.service.isRunning());
+			assertEquals(0, slice.silenceWarnings());
+		}
+	}
+
+	@Test
+	@DisplayName("A long call in flight counts as contact until it ends")
+	void aLongCallInFlightCountsAsContact() throws Exception {
+		final LoadStep local = localStep("svc-long-call");
+		final CountDownLatch entered = new CountDownLatch(1);
+		final CountDownLatch release = new CountDownLatch(1);
+		doAnswer(invocation -> {
+			entered.countDown();
+			assertTrue(release.await(30, TimeUnit.SECONDS));
+			return null;
+		}).when(local).drainDispatchedOperationsForStepStop(anyLong());
+		final var pool = Executors.newSingleThreadExecutor();
+		try (WatchedSlice slice = new WatchedSlice(local, NO_CHECK_NANOS)) {
+			slice.service.start();
+			final Future<?> drain = pool.submit(() -> {
+				slice.service.drainDispatchedOperationsForStepStop(1L);
+				return null;
+			});
+			assertTrue(entered.await(10, TimeUnit.SECONDS));
+			slice.pass(3 * ENTRY_SILENCE_NANOS);
+			assertFalse(slice.service.stopIfEntryIsSilent(), "the call is running");
+
+			release.countDown();
+			drain.get(10, TimeUnit.SECONDS);
+			assertFalse(slice.service.stopIfEntryIsSilent(), "the silence starts when the call ends");
+			slice.pass(ENTRY_SILENCE_NANOS + 1);
+			assertTrue(slice.service.stopIfEntryIsSilent());
+		} finally {
+			release.countDown();
+			pool.shutdownNow();
+		}
+	}
+
+	@Test
+	@DisplayName("A slice with no call since its start is left alone: the entry may still be starting others")
+	void aSliceWithNoCallSinceItsStartIsLeftAlone() throws Exception {
+		final LoadStep local = localStep("svc-start-phase");
+		try (WatchedSlice slice = new WatchedSlice(local, NO_CHECK_NANOS)) {
+			slice.service.loadStepId();
+			slice.service.start();
+			slice.pass(5 * ENTRY_SILENCE_NANOS);
+			assertFalse(slice.service.stopIfEntryIsSilent());
+			verify(local, never()).stop();
+			assertTrue(slice.service.isRunning());
+		}
+	}
+
+	@Test
+	@DisplayName("A slice never started is left alone and has no checker")
+	void aSliceNeverStartedIsLeftAlone() throws Exception {
+		final LoadStep local = localStep("svc-unstarted");
+		try (WatchedSlice slice = new WatchedSlice(local, NO_CHECK_NANOS)) {
+			slice.service.metricsSnapshots();
+			slice.pass(5 * ENTRY_SILENCE_NANOS);
+			assertFalse(slice.service.stopIfEntryIsSilent());
+			verify(local, never()).close();
+			assertNoLiveThread(slice.threadName);
+		}
+	}
+
+	@Test
+	@DisplayName("A stopped slice is left alone and stays open")
+	void aStoppedSliceIsLeftAlone() throws Exception {
+		final LoadStep local = localStep("svc-stopped");
+		try (WatchedSlice slice = new WatchedSlice(local, NO_CHECK_NANOS)) {
+			slice.service.start();
+			slice.service.metricsSnapshots();
+			slice.service.stop();
+			slice.pass(5 * ENTRY_SILENCE_NANOS);
+			assertFalse(slice.service.stopIfEntryIsSilent());
+			verify(local, never()).close();
+			assertFalse(slice.service.isClosed());
+			assertEquals(0, slice.silenceWarnings());
+		}
+	}
+
+	@Test
+	@DisplayName("A restarted slice is watched again only after a call since the new start")
+	void aRestartedSliceWaitsForACallAfterTheNewStart() throws Exception {
+		final LoadStep local = localStep("svc-restart");
+		try (WatchedSlice slice = new WatchedSlice(local, NO_CHECK_NANOS)) {
+			slice.service.start();
+			slice.service.metricsSnapshots();
+			slice.service.stop();
+			slice.service.start();
+			slice.pass(2 * ENTRY_SILENCE_NANOS);
+			assertFalse(slice.service.stopIfEntryIsSilent());
+			slice.service.metricsSnapshots();
+			slice.pass(ENTRY_SILENCE_NANOS + 1);
+			assertTrue(slice.service.stopIfEntryIsSilent());
+		}
+	}
+
+	@Test
+	@DisplayName("The worker's own reads neither arm the checker nor count as contact")
+	void theWorkersOwnReadsAreNotContact() throws Exception {
+		final LoadStep local = localStep("svc-own-reads");
+		try (WatchedSlice slice = new WatchedSlice(local, NO_CHECK_NANOS)) {
+			slice.service.start();
+			slice.service.sliceRunId();
+			slice.service.sliceStepId();
+			slice.service.isRunning();
+			slice.pass(2 * ENTRY_SILENCE_NANOS);
+			assertFalse(slice.service.stopIfEntryIsSilent(), "not armed by the worker's reads");
+
+			slice.service.metricsSnapshots();
+			slice.pass(ENTRY_SILENCE_NANOS);
+			slice.service.sliceRunId();
+			slice.service.sliceStepId();
+			slice.service.isRunning();
+			slice.pass(1);
+			assertTrue(slice.service.stopIfEntryIsSilent(), "the silence is not reset by them");
+		}
+	}
+
+	@Test
+	@DisplayName("A failed stop and a failed close are logged and the checker survives them")
+	void aFailedStopAndCloseAreLogged() throws Exception {
+		final LoadStep local = localStep("svc-failing");
+		doThrow(new IllegalStateException("stop failed")).doReturn(local).when(local).stop();
+		doThrow(new IOException("close failed")).doNothing().when(local).close();
+		try (WatchedSlice slice = new WatchedSlice(local, NO_CHECK_NANOS)) {
+			slice.service.start();
+			slice.service.metricsSnapshots();
+			slice.pass(ENTRY_SILENCE_NANOS + 1);
+			assertDoesNotThrow(() -> assertTrue(slice.service.stopIfEntryIsSilent()));
+			slice.awaitWarning(ENTRY_SILENCE_WARNING);
+			slice.awaitWarning("Failed to stop step");
+			slice.awaitWarning("Failed to close step");
+			assertEquals(1, slice.silenceWarnings());
+		}
+	}
+
+	@Test
+	@DisplayName("A DELETE duration slice whose close will be retried stays exported after the checker gave up")
+	void aSliceAwaitingACloseRetryStaysExportedAfterTheCheckerGaveUp() throws Exception {
+		final LoadStepContext context = mock(LoadStepContext.class);
+		doThrow(new IllegalStateException("injected admission close failure"))
+						.when(context).closeOperationAdmissionForStepStop();
+		final Config config = sliceConfig("delete");
+		config.val("load-op-delete-standalone", true);
+		config.val("load-op-delete-duration", true);
+		config.val("load-step-limit-time", "60s");
+		config.val("load-op-wait-limit", 1);
+		final FailingSlice local = new FailingSlice(config, context);
+		try (WatchedSlice slice = new WatchedSlice(local, NO_CHECK_NANOS)) {
+			slice.service.start();
+			slice.service.metricsSnapshots();
+			slice.pass(ENTRY_SILENCE_NANOS + 1);
+
+			assertTrue(slice.service.stopIfEntryIsSilent());
+
+			assertEquals(List.of(), slice.releases, "still open for the close the worker's shutdown retries");
+			assertFalse(slice.service.isRunning());
+			for (var attempt = 2; attempt < FailingSlice.closeAttemptLimit(); attempt++) {
+				assertThrows(RuntimeException.class, slice.service::close, "close attempt " + attempt);
+			}
+			assertThrows(RuntimeException.class, slice.service::close, "the last close attempt");
+			assertEquals(List.of(slice.service), slice.releases);
+			assertNoLiveThread(slice.threadName);
+		}
+	}
+
+	@Test
+	@DisplayName("Giving up on the entry racing a late stop and close stops and closes the slice once")
+	void givingUpRacingLateControllerCallsStopsAndClosesOnce() throws Exception {
+		final var pool = Executors.newFixedThreadPool(4);
+		try {
+			for (var round = 0; round < 40; round++) {
+				final LoadStep local = localStep("svc-race-" + round);
+				try (WatchedSlice slice = new WatchedSlice(local, NO_CHECK_NANOS)) {
+					slice.service.start();
+					slice.service.metricsSnapshots();
+					slice.pass(ENTRY_SILENCE_NANOS + 1);
+					final var go = new CountDownLatch(1);
+					final List<Future<?>> racers = new ArrayList<>();
+					racers.add(pool.submit(() -> {
+						go.await();
+						return slice.service.stopIfEntryIsSilent();
+					}));
+					racers.add(pool.submit(() -> {
+						go.await();
+						return slice.service.stop();
+					}));
+					racers.add(pool.submit(() -> {
+						go.await();
+						slice.service.close();
+						return null;
+					}));
+					racers.add(pool.submit(() -> {
+						go.await();
+						slice.service.close();
+						return null;
+					}));
+					go.countDown();
+					for (final Future<?> racer : racers) {
+						racer.get(30, TimeUnit.SECONDS);
+					}
+					verify(local, times(1)).stop();
+					verify(local, times(1)).close();
+					assertEquals(List.of(slice.service), slice.releases);
+					assertTrue(slice.silenceWarnings() <= 1);
+					assertNoLiveThread(slice.threadName);
+				}
+			}
+		} finally {
+			pool.shutdownNow();
+		}
+	}
+
+	@Test
+	@DisplayName("The silence limit is 120 s unless the test property holds a positive number")
+	void theSilenceLimitIs120SecondsUnlessTheTestPropertyIsValid() {
+		final String property = LoadStepServiceImpl.ENTRY_SILENCE_TIMEOUT_PROPERTY;
+		final String original = System.getProperty(property);
+		try {
+			System.clearProperty(property);
+			assertEquals(120_000L, LoadStepServiceImpl.entrySilenceTimeoutMillis());
+			for (final String invalid : List.of("soon", "", "0", "-5")) {
+				System.setProperty(property, invalid);
+				assertEquals(120_000L, LoadStepServiceImpl.entrySilenceTimeoutMillis(), invalid);
+			}
+			System.setProperty(property, "1500");
+			assertEquals(1500L, LoadStepServiceImpl.entrySilenceTimeoutMillis());
+		} finally {
+			if (original == null) {
+				System.clearProperty(property);
+			} else {
+				System.setProperty(property, original);
+			}
 		}
 	}
 
