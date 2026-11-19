@@ -147,8 +147,15 @@ class ServiceUtilConnectTimeoutTest {
 		return ServiceUtilTestAccess.resolveWithConnectTimeout(addr, name, TestServiceContract.class, TIMEOUT_MILLIS);
 	}
 
+	/** {@code ::1}, built from its bytes so that no host name is looked up. */
+	private static InetAddress ipv6Loopback() throws IOException {
+		final byte[] addr = new byte[16];
+		addr[15] = 1;
+		return InetAddress.getByAddress(addr);
+	}
+
 	private static boolean ipv6LoopbackWorks() {
-		try (ServerSocket socket = new ServerSocket(0, 1, InetAddress.getByName("::1"))) {
+		try (ServerSocket socket = new ServerSocket(0, 1, ipv6Loopback())) {
 			return socket.getInetAddress() instanceof Inet6Address;
 		} catch (final IOException e) {
 			return false;
