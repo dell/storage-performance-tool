@@ -54,6 +54,14 @@ import java.util.Locale;
 import java.util.Map;
 
 public class WeightedLoadStepLocal extends LoadStepLocalBase {
+
+	/**
+	 * The fewest permits one cycle of the weight throttle gives out. A generator refused by the
+	 * throttle parks before it asks again, so a short cycle limits the step's throughput however fast
+	 * the target is.
+	 */
+	static final int MIN_WEIGHT_CYCLE = 100;
+
 	public WeightedLoadStepLocal(
 					final Config baseConfig, final List<Extension> extensions, final List<Config> contextConfigs,
 					final MetricsManager metricsManager) {
@@ -103,7 +111,7 @@ public class WeightedLoadStepLocal extends LoadStepLocalBase {
 			weights[originIndex] = weight;
 		}
 
-		final IndexThrottle weightThrottle = new RetiringWeightsThrottle(weights);
+		final IndexThrottle weightThrottle = new RetiringWeightsThrottle(withMinimumCycle(weights));
 
 		// 2nd pass: initialize the sub steps
 		for (int originIndex = 0; originIndex < subStepCount; originIndex++) {
@@ -238,5 +246,31 @@ public class WeightedLoadStepLocal extends LoadStepLocalBase {
 				throw new IllegalStateException("Failed to initialize the data input", e);
 			}
 		}
+	}
+
+	/**
+	 * Lengthens a cycle shorter than {@link #MIN_WEIGHT_CYCLE}, keeping the ratio: when the positive
+	 * weights sum above 0 and below the minimum, each is multiplied by the smallest integer that brings
+	 * the sum to it. Any other array comes back as it is. A weight of 0 or below never gets a permit,
+	 * so it stays as written.
+	 */
+	static int[] withMinimumCycle(final int[] weights) {
+		long sum = 0;
+		for (final int weight : weights) {
+			if (weight > 0) {
+				sum += weight;
+			}
+		}
+		if (sum == 0 || sum >= MIN_WEIGHT_CYCLE) {
+			return weights;
+		}
+		final int factor = (int) ((MIN_WEIGHT_CYCLE + sum - 1) / sum);
+		final int[] scaled = weights.clone();
+		for (int i = 0; i < scaled.length; i++) {
+			if (scaled[i] > 0) {
+				scaled[i] *= factor;
+			}
+		}
+		return scaled;
 	}
 }

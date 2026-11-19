@@ -34,7 +34,9 @@ generators configured.
 The configuration option `load-generator-weight` should be used to set
 the relative operations weight for the given load generator. The actual
 weight is calculated as the specified weight value divided by the
-weights sum.
+weights sum. Weights summing below 100, including the default of 1, are
+multiplied at step start by the smallest integer that brings the sum to
+at least 100, so they keep their ratio and do not limit throughput.
 
 ```javascript
 var weightedWriteConfig = {
