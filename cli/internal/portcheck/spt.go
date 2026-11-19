@@ -625,7 +625,7 @@ func (c *SptAPIClient) stopReportedRun(ctx context.Context, execution RunExecuti
 	// The engine found no matching run: it ended, or another one took over.
 	currentID, active, err := c.activeRunID(ctx)
 	if err != nil {
-		return RunExecution{}, fmt.Errorf("re-read the active run after stopping run %d: %w", runID, err)
+		return RunExecution{}, identityRefusal("the engine found no run %d to stop, and its active run could not be read again (%v)", runID, err)
 	}
 	if !active {
 		return RunExecution{}, nil

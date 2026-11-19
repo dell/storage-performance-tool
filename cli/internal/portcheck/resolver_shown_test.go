@@ -169,6 +169,10 @@ func TestForceRemovesNothingAfterAnIdentityRefusal(t *testing.T) {
 			e.runID = 42
 			w.WriteHeader(http.StatusOK)
 		}, "run 42 is active on the engine"},
+		{"stop finds another run, then the active run is unreadable", func(e *fakeEngine, w http.ResponseWriter) {
+			e.headStatus = http.StatusInternalServerError
+			w.WriteHeader(http.StatusNotFound)
+		}, "found no run 41 to stop"},
 		{"active run unreadable after the stop", func(e *fakeEngine, w http.ResponseWriter) {
 			e.headStatus = http.StatusInternalServerError
 			w.WriteHeader(http.StatusOK)
